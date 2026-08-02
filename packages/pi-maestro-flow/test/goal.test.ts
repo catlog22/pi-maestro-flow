@@ -1,12 +1,21 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { ModelCircuitBreaker } from "pi-maestro-teammate/v1/retry";
 import { GoalToolParams } from "../src/extension/schemas.ts";
+import {
+  getProjectModelFailoverPath,
+  registerModelFailover,
+} from "../src/providers/model-failover.ts";
 import {
   addGoal,
   buildCanonicalEvidence,
   canonicalCompletionBlockers,
   collectVerifierEvidence,
+  currentGoalPhase,
   executeGoal,
   executeGoalCommand,
   getActiveGoal,
@@ -18,6 +27,7 @@ import {
   initGoal,
   isRetryableGoalFailure,
   onAgentEnd,
+  onAgentSettled,
   onBeforeAgentStart,
   onBeforeCompact,
   onCompactionCancelled,
@@ -59,6 +69,62 @@ function createContext(overrides: Partial<GoalContext> = {}): GoalContext {
     },
     ...overrides,
   } as GoalContext;
+}
+
+async function settleGoalAttempt(
+  event: Parameters<typeof onAgentEnd>[0],
+  ctx: GoalContext,
+): Promise<void> {
+  await onAgentEnd(event, ctx);
+  await onAgentSettled(ctx);
+}
+
+type FailoverHandler = (event: Record<string, unknown>, ctx: GoalContext) => unknown;
+
+function createGoalFailoverRuntime(cwd: string) {
+  const handlers = new Map<string, FailoverHandler[]>();
+  const messages: Array<{ customType: string; content: string }> = [];
+  const models = [
+    { provider: "provider", id: "primary", input: ["text"] },
+    { provider: "provider", id: "backup", input: ["text"] },
+  ];
+  const ctx = createContext({
+    cwd,
+    isIdle: () => false,
+    hasPendingMessages: () => false,
+  }) as GoalContext & { model: (typeof models)[number]; modelRegistry: { getAvailable: () => typeof models } };
+  ctx.model = models[0]!;
+  ctx.modelRegistry = { getAvailable: () => models };
+  const pi = {
+    registerCommand() {},
+    on(event: string, handler: FailoverHandler) {
+      const registered = handlers.get(event) ?? [];
+      registered.push(handler);
+      handlers.set(event, registered);
+    },
+    async setModel(model: (typeof models)[number]) {
+      ctx.model = model;
+      return true;
+    },
+    sendMessage(message: { customType: string; content: string }) {
+      messages.push(message);
+    },
+  } as never;
+  registerModelFailover(pi, {
+    breaker: new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 }),
+    homeDir: path.join(cwd, "home"),
+    visionAgentDir: path.join(cwd, "home", ".pi", "agent"),
+  });
+  initGoal(pi);
+  return {
+    ctx,
+    messages,
+    async emit(event: string, payload: Record<string, unknown> = {}) {
+      for (const handler of handlers.get(event) ?? []) {
+        await handler({ type: event, ...payload }, ctx);
+      }
+    },
+  };
 }
 
 test("Goal shares teammate retry classification for transient provider failures", () => {
@@ -509,7 +575,7 @@ test("Goal state is session-scoped and ordinary inputs do not acquire Goal loop 
       onSessionStart(fresh, { reason });
       assert.equal(getActiveGoal(), undefined, `${reason} session must not inherit Goal entries`);
       onInput({ source: "user", text: "An unrelated ordinary prompt" });
-      await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, fresh);
+      await settleGoalAttempt({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, fresh);
       assert.equal(verifierCalls, 0, "ordinary input without Goal ownership must not run the verifier");
       onSessionShutdown(fresh);
     }
@@ -529,8 +595,8 @@ test("Goal state is session-scoped and ordinary inputs do not acquire Goal loop 
     assert.equal(getActiveGoal()?.text, "Goal owned by session A", "same-session resume should restore its Goal");
     assert.equal(getActiveGoal()?.status, "active", "same-session resume should reactivate a paused Goal");
 
-    await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, resumedA);
-    assert.equal(verifierCalls, 0, "agent_end must continue a restored Goal without requesting completion");
+    await settleGoalAttempt({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, resumedA);
+    assert.equal(verifierCalls, 0, "settlement must continue a restored Goal without requesting completion");
     await executeGoalCommand({ action: "clear" }, resumedA);
     onSessionShutdown(resumedA);
   } finally {
@@ -611,7 +677,7 @@ test("Goal continuation remains queued once across compaction cancel", async () 
     await executeGoal({ action: "create", objective: "Keep continuation transactional" }, ctx);
     assert.equal(sent.length, 1);
     onBeforeAgentStart({ prompt: sent[0]! });
-    await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
+    await settleGoalAttempt({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
     assert.equal(sent.length, 2);
     const continuation = sent[1]!;
     assert.match(continuation, /maestro-goal-continuation/);
@@ -1365,7 +1431,7 @@ test("agent_end continues without verification and an explicit valid fail keeps 
 
   try {
     await executeGoal({ action: "create", objective: "Exercise four lifecycle requirements" }, ctx);
-    await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
+    await settleGoalAttempt({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
     assert.equal(sent.length, 1);
     assert.match(sent[0] ?? "", /^Continue the active goal/);
     assert.equal(verifierCalls, 0);
@@ -2303,7 +2369,7 @@ test("goal create is exclusive and user stop/resume controls the active agent lo
     assert.equal(getActiveGoal()?.status, "active");
     assert.deepEqual(sent, []);
 
-    await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
+    await settleGoalAttempt({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
     assert.equal(sent.length, 1);
     assert.match(sent[0]?.message.content ?? "", /^Continue the active goal/);
     assert.equal(sent[0]?.message.customType, "maestro-goal-internal");
@@ -2354,7 +2420,7 @@ test("Workflow continuation and fence side effects require the current Goal bind
 
     reconcileWorkflowGoal(snapshot, ctx);
     await executeGoalCommand({ action: "resume" }, ctx);
-    await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
+    await settleGoalAttempt({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
     assert.equal(markers, 1);
     assert.equal(sent, 0);
     assert.equal(getActiveGoal()?.status, "paused");
@@ -2390,7 +2456,7 @@ test("continuation delivery failure pauses the Goal instead of leaving it waitin
 
   try {
     await executeGoal({ action: "create", objective: "Recover failed continuation delivery" }, ctx);
-    await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
+    await settleGoalAttempt({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
     assert.equal(getActiveGoal()?.status, "paused");
     assert.equal(getActiveGoal()?.pauseReason, undefined);
     assert.match(notifications.join("\n"), /Goal prompt failed: delivery unavailable/);
@@ -2430,7 +2496,7 @@ test("goal update replaces a paused objective and resumes its agent loop", async
     assert.equal(getActiveGoal()?.text, "Updated objective");
     assert.equal(getActiveGoal()?.status, "active");
 
-    await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
+    await settleGoalAttempt({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
     assert.equal(sent.length, 1);
     assert.match(sent[0] ?? "", /^Continue the active goal/);
   } finally {
@@ -2447,7 +2513,7 @@ test("agent errors pause a Goal without creating an error lifecycle state", asyn
 
   try {
     await executeGoal({ action: "create", objective: "Recover from a provider failure" }, ctx);
-    await onAgentEnd({
+    await settleGoalAttempt({
       messages: [{ role: "assistant", stopReason: "error", errorMessage: "invalid API key", content: [] }],
     }, ctx);
 
@@ -2468,7 +2534,136 @@ test("agent errors pause a Goal without creating an error lifecycle state", asyn
   }
 });
 
-test("transient Goal provider failures share the bounded retry status projection", async () => {
+test("native retry success overwrites the intermediate failure and settles once", async () => {
+  const sent: string[] = [];
+  initGoal({
+    appendEntry() {},
+    sendMessage(message: { content: string }) { sent.push(message.content); },
+  } as never);
+  const statuses: string[] = [];
+  const ctx = createContext({
+    isIdle: () => false,
+    hasPendingMessages: () => false,
+    ui: {
+      notify() {},
+      setStatus(_key, value) { if (value) statuses.push(value); },
+    },
+  });
+  onSessionStart(ctx);
+
+  try {
+    await executeGoal({ action: "create", objective: "Survive a native provider retry" }, ctx);
+    await onAgentEnd({
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "fetch failed: ECONNRESET", content: [] }],
+    }, ctx);
+    assert.ok(statuses.includes("retrying (Pi-owned)"));
+    assert.equal(getActiveGoal()?.iteration, 0);
+    assert.equal(sent.length, 0);
+
+    await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
+    await onCompact({}, ctx);
+    assert.equal(sent.length, 0, "compaction must not continue an attempt before settlement");
+
+    await onAgentSettled(ctx);
+    await onAgentSettled(ctx);
+    assert.equal(getActiveGoal()?.status, "active");
+    assert.equal(getActiveGoal()?.iteration, 1);
+    assert.equal(sent.length, 1, "authoritative success must enqueue at most one Goal continuation");
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
+test("a queued continuation retains Goal ownership without adding another continuation", async () => {
+  const sent: string[] = [];
+  let pending = true;
+  initGoal({
+    appendEntry() {},
+    sendMessage(message: { content: string }) { sent.push(message.content); },
+  } as never);
+  const ctx = createContext({
+    isIdle: () => false,
+    hasPendingMessages: () => pending,
+  });
+  onSessionStart(ctx);
+
+  try {
+    await executeGoal({ action: "create", objective: "Keep queued continuation ownership" }, ctx);
+    await settleGoalAttempt({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
+    assert.equal(getActiveGoal()?.iteration, 1);
+    assert.equal(sent.length, 0);
+
+    pending = false;
+    await settleGoalAttempt({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
+    assert.equal(getActiveGoal()?.iteration, 2, "the queued turn remains owned by the Goal");
+    assert.equal(sent.length, 1);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
+test("fallback settlement retains Goal ownership and defers to the failover handoff", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-goal-failover-"));
+  const configPath = getProjectModelFailoverPath(cwd);
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, JSON.stringify({
+    enabled: true,
+    fallbackModels: { "provider/primary": ["provider/backup"] },
+  }));
+  const runtime = createGoalFailoverRuntime(cwd);
+  onSessionStart(runtime.ctx, { reason: "new" });
+
+  try {
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "start Goal work" });
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await executeGoal({ action: "create", objective: "Continue across model fallback" }, runtime.ctx);
+
+    const failure = {
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "Provider overloaded: 503", content: [] }],
+    };
+    await runtime.emit("agent_end", failure);
+    await onAgentEnd(failure, runtime.ctx);
+    await runtime.emit("agent_settled");
+    await onAgentSettled(runtime.ctx);
+
+    assert.equal(getActiveGoal()?.status, "active");
+    assert.equal(getActiveGoal()?.iteration, 0);
+    assert.equal(runtime.messages.length, 0, "Goal must not race the scheduled fallback handoff");
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assert.equal(runtime.messages.length, 1);
+    const fallbackPrompt = runtime.messages[0]?.content ?? "";
+    await runtime.emit("before_agent_start", { prompt: fallbackPrompt });
+    await runtime.emit("turn_start", { turnIndex: 1 });
+
+    const success = {
+      messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "recovered" }] }],
+    };
+    await runtime.emit("agent_end", success);
+    await onAgentEnd(success, runtime.ctx);
+    await runtime.emit("agent_settled");
+    await onAgentSettled(runtime.ctx);
+    await onAgentSettled(runtime.ctx);
+
+    assert.equal(getActiveGoal()?.status, "active");
+    assert.equal(getActiveGoal()?.iteration, 1);
+    assert.equal(
+      runtime.messages.filter((message) => message.customType === "maestro-goal-internal").length,
+      1,
+      "fallback success must produce one Goal continuation",
+    );
+  } finally {
+    await executeGoalCommand({ action: "clear" }, runtime.ctx);
+    onSessionShutdown(runtime.ctx);
+    await runtime.emit("session_shutdown");
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("transient Goal provider failures show Pi-owned recovery until authoritative settlement", async () => {
   initGoal({ appendEntry() {} } as never);
   const statuses: string[] = [];
   const ctx = createContext({
@@ -2487,14 +2682,25 @@ test("transient Goal provider failures share the bounded retry status projection
     }, ctx);
 
     assert.equal(getActiveGoal()?.status, "active");
-    assert.ok(statuses.includes("retrying 1/10"));
+    assert.equal(getActiveGoal()?.iteration, 0, "agent_end must not charge an intermediate native retry");
+    assert.equal(currentGoalPhase(), "waiting", "compatibility recovery must not fabricate widget retry counts");
+    assert.ok(statuses.includes("retrying (Pi-owned)"));
+    let detail = getGoalPanelEntries().find((entry) => entry.id === getActiveGoal()?.id);
+    assert.equal(detail?.retryAttempt, undefined);
+    assert.equal(detail?.retryMaxRetries, undefined);
+
+    await onAgentSettled(ctx);
+    assert.equal(getActiveGoal()?.status, "paused", "an exhausted or disabled Pi retry must finalize");
+    detail = getGoalPanelEntries().find((entry) => entry.id === getActiveGoal()?.id);
+    assert.equal(detail?.retryAttempt, undefined);
+    assert.equal(detail?.retryMaxRetries, undefined);
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);
   }
 });
 
-test("Goal compaction retries project retrying state with the compaction breaker budget", async () => {
+test("Goal compaction retries use the nonnumeric Pi-owned compatibility phase", async () => {
   initGoal({ appendEntry() {} } as never);
   const statuses: string[] = [];
   const ctx = createContext({
@@ -2518,10 +2724,11 @@ test("Goal compaction retries project retrying state with the compaction breaker
     }, ctx);
 
     assert.equal(getActiveGoal()?.status, "active");
-    assert.ok(statuses.includes("retrying 1/3"));
+    assert.equal(currentGoalPhase(), "waiting");
+    assert.ok(statuses.includes("retrying (Pi-owned)"));
     const detail = getGoalPanelEntries().find((entry) => entry.id === getActiveGoal()?.id);
-    assert.equal(detail?.retryAttempt, 1);
-    assert.equal(detail?.retryMaxRetries, 3);
+    assert.equal(detail?.retryAttempt, undefined);
+    assert.equal(detail?.retryMaxRetries, undefined);
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);

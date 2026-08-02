@@ -1225,7 +1225,7 @@ export function clampThinkingForModel(
   return thinking;
 }
 
-export const MODEL_SPECIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:-]*)?$/;
+export const MODEL_SPECIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:-]*)*$/;
 export const MAX_MODEL_SPECIFIER_BYTES = 256;
 
 export function validateModelSpecifier(model: string): string {

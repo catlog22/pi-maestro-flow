@@ -758,7 +758,7 @@ export function resolveTargetToken(value: string): ChannelTarget | undefined {
 
 export function usageError(): Error {
   return new Error(
-    "用法：/api-manager list | retry [show|on [1-10]|off] | show|set|delete|enable|disable|logout|reset [openai|qwen|anthropic|<Provider ID>|new]",
+    `用法：/api-manager list | retry [show|on [1-${API_RETRY_MAX_RETRIES}]|off] | show|set|delete|enable|disable|logout|reset [openai|qwen|anthropic|<Provider ID>|new]`,
   );
 }
 

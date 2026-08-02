@@ -1,5 +1,5 @@
 export declare const NETWORK_RETRY_POLICY: Readonly<{
-    maxRetries: 10;
+    maxRetries: 5;
     initialDelayMs: 1000;
     maxDelayMs: 16000;
 }>;

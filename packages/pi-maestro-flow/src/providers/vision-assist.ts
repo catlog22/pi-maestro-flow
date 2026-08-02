@@ -11,9 +11,8 @@ import { clampThinkingLevel, complete } from "@earendil-works/pi-ai/compat";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   isRetryableProviderError,
-  sharedModelCircuitBreaker,
+  ModelCircuitBreaker,
   type AcquiredModelCandidate,
-  type ModelCircuitBreaker,
 } from "pi-maestro-teammate/v1/retry";
 import { Type } from "typebox";
 import { loadSsrfConfig, validateRemoteUrl } from "../tools/web-access/ssrf-protection.ts";
@@ -22,6 +21,8 @@ export const DESCRIBE_IMAGE_TOOL_NAME = "describe_image";
 export const VISION_DELEGATION_CONFIG_FILE = "vision-delegation.json";
 export const DEFAULT_VISION_ANALYSIS_PROMPT =
   "Describe this image concisely, focusing on visible content, text, diagrams, UI elements, and layout.";
+/** Vision health is intentionally isolated from the main-agent breaker domain. */
+export const sharedVisionModelCircuitBreaker = new ModelCircuitBreaker();
 
 const MAX_RETRY_BACKOFF_MS = 8_000;
 const SUPPORTED_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
@@ -43,8 +44,8 @@ export type VisionManagerContext = Pick<ExtensionContext, "ui" | "model" | "mode
 export interface VisionDelegationOptions {
   agentDir?: string;
   completeFn?: typeof complete;
-  /** Circuit breaker for model health; defaults to the shared instance so vision
-   *  failures feed the same health view as the main model chain. */
+  /** Circuit breaker for delegated vision health; defaults to a vision-only
+   *  process instance so helper failures cannot open the main model circuit. */
   breaker?: ModelCircuitBreaker;
   /** Optional structured telemetry sink for delegation lifecycle events. */
   telemetry?: VisionTelemetry;
@@ -237,13 +238,13 @@ export async function analyzeAttachedImage(
   if (!config.enabled) throw new Error("Vision delegation is disabled");
   const image = normalizeAttachedImage(input, config.maxImageBytes);
   const cache = visionCacheFor(agentDir, config.cache.maxEntries);
-  return delegateImage(ctx, image, options.prompt?.trim() || DEFAULT_VISION_ANALYSIS_PROMPT, config, cache, options.signal, options.completeFn ?? complete, options.breaker ?? sharedModelCircuitBreaker, options.telemetry ?? noopVisionTelemetry());
+  return delegateImage(ctx, image, options.prompt?.trim() || DEFAULT_VISION_ANALYSIS_PROMPT, config, cache, options.signal, options.completeFn ?? complete, options.breaker ?? sharedVisionModelCircuitBreaker, options.telemetry ?? noopVisionTelemetry());
 }
 
 export function registerVisionDelegation(pi: ExtensionAPI, options: VisionDelegationOptions = {}): void {
   const agentDir = options.agentDir ?? getAgentDir();
   const completeFn = options.completeFn ?? complete;
-  const breaker = options.breaker ?? sharedModelCircuitBreaker;
+  const breaker = options.breaker ?? sharedVisionModelCircuitBreaker;
   const telemetry = options.telemetry ?? noopVisionTelemetry();
   let config = loadVisionDelegationConfig(agentDir);
   const cache = visionCacheFor(agentDir, config.cache.maxEntries);
@@ -553,7 +554,7 @@ async function delegateImage(
   cache: VisionCache,
   signal: AbortSignal | undefined,
   completeFn: typeof complete,
-  breaker: ModelCircuitBreaker = sharedModelCircuitBreaker,
+  breaker: ModelCircuitBreaker = sharedVisionModelCircuitBreaker,
   telemetry: VisionTelemetry = noopVisionTelemetry(),
 ): Promise<VisionAnalysisResult> {
   const references = candidateReferences(ctx, config);
@@ -585,7 +586,7 @@ async function callCandidates(
   config: VisionDelegationConfig,
   signal: AbortSignal | undefined,
   completeFn: typeof complete,
-  breaker: ModelCircuitBreaker = sharedModelCircuitBreaker,
+  breaker: ModelCircuitBreaker = sharedVisionModelCircuitBreaker,
   telemetry: VisionTelemetry = noopVisionTelemetry(),
 ): Promise<CachedResult> {
   const failures: string[] = [];
@@ -597,48 +598,69 @@ async function callCandidates(
       telemetry.emit({ type: "candidate_rejected", model: reference, reason: `circuit ${acquisition.state}` });
       continue;
     }
-    const [provider, id] = splitReference(reference);
-    const model = ctx.modelRegistry.find(provider, id);
-    if (!model || !isMultimodalModel(model)) {
-      breaker.releaseCandidate(acquisition);
-      failures.push(`${reference}: unavailable or text-only`);
-      continue;
-    }
-    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-    if (!auth.ok) {
-      breaker.releaseCandidate(acquisition);
-      failures.push(`${reference}: authentication unavailable (${auth.error})`);
-      continue;
-    }
-    const reasoningEffort = visionReasoningEffort(model, ctx.thinkingLevel);
-    for (let attempt = 0; attempt <= config.maxRetries; attempt += 1) {
-      telemetry.emit({ type: "attempt", model: reference, attempt, timeoutMs: config.timeoutMs });
-      const guard = completionGuard(signal, config.timeoutMs);
-      try {
-        const running = Promise.resolve().then(() => completeFn(model, {
-          systemPrompt: config.customPrompt,
-          messages: [{ role: "user", content: [
-            { type: "image", data: image.data, mimeType: image.mimeType },
-            { type: "text", text: prompt },
-          ], timestamp: Date.now() }],
-        }, { apiKey: auth.apiKey, headers: auth.headers, maxTokens: Math.min(model.maxTokens, 8_192), reasoningEffort, signal: guard.signal }));
-        void running.catch(() => undefined);
-        const response = await Promise.race([running, guard.deadline]);
-        breaker.recordSuccess(acquisition);
-        return { text: assistantText(response), model: reference };
-      } catch (error) {
-        if (signal?.aborted) {
-          breaker.releaseCandidate(acquisition);
-          throw aborted();
-        }
-        const retryable = error instanceof VisionTimeoutError || isRetryableProviderError(message(error));
-        if (!retryable || attempt === config.maxRetries) {
-          breaker.recordRetryableFailure(acquisition);
-          failures.push(`${reference}: ${message(error)}`);
-          break;
-        }
-        await delay(Math.min(config.retryBackoffMs * 2 ** attempt, MAX_RETRY_BACKOFF_MS), signal);
-      } finally { guard.dispose(); }
+    let settled = false;
+    const settle = (outcome: "release" | "success" | "retryable-failure"): void => {
+      if (settled) throw new Error(`Vision candidate ${reference} was settled more than once`);
+      settled = true;
+      if (outcome === "success") breaker.recordSuccess(acquisition);
+      else if (outcome === "retryable-failure") breaker.recordRetryableFailure(acquisition);
+      else breaker.releaseCandidate(acquisition);
+    };
+
+    try {
+      const [provider, id] = splitReference(reference);
+      const model = ctx.modelRegistry.find(provider, id);
+      if (!model || !isMultimodalModel(model)) {
+        settle("release");
+        failures.push(`${reference}: unavailable or text-only`);
+        continue;
+      }
+      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+      if (!auth.ok) {
+        settle("release");
+        failures.push(`${reference}: authentication unavailable (${auth.error})`);
+        continue;
+      }
+      const reasoningEffort = visionReasoningEffort(model, ctx.thinkingLevel);
+      for (let attempt = 0; attempt <= config.maxRetries; attempt += 1) {
+        telemetry.emit({ type: "attempt", model: reference, attempt, timeoutMs: config.timeoutMs });
+        const guard = completionGuard(signal, config.timeoutMs);
+        try {
+          const running = Promise.resolve().then(() => completeFn(model, {
+            systemPrompt: config.customPrompt,
+            messages: [{ role: "user", content: [
+              { type: "image", data: image.data, mimeType: image.mimeType },
+              { type: "text", text: prompt },
+            ], timestamp: Date.now() }],
+          }, { apiKey: auth.apiKey, headers: auth.headers, maxTokens: Math.min(model.maxTokens, 8_192), reasoningEffort, signal: guard.signal }));
+          void running.catch(() => undefined);
+          const response = await Promise.race([running, guard.deadline]);
+          const text = assistantText(response);
+          settle("success");
+          return { text, model: reference };
+        } catch (error) {
+          if (signal?.aborted) {
+            settle("release");
+            throw aborted();
+          }
+          const retryable = error instanceof VisionTimeoutError || isRetryableProviderError(message(error));
+          if (!retryable) {
+            settle("release");
+            failures.push(`${reference}: ${message(error)}`);
+            break;
+          }
+          if (attempt === config.maxRetries) {
+            settle("retryable-failure");
+            failures.push(`${reference}: ${message(error)}`);
+            break;
+          }
+          await delay(Math.min(config.retryBackoffMs * 2 ** attempt, MAX_RETRY_BACKOFF_MS), signal);
+        } finally { guard.dispose(); }
+      }
+    } finally {
+      // Auth lookup, telemetry, retry backoff, and other boundary exceptions
+      // must not strand an acquired HALF_OPEN trial.
+      if (!settled) settle("release");
     }
   }
   throw new Error(`no vision model succeeded (${failures.join("; ")})`);

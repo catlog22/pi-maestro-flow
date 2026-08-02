@@ -41,10 +41,37 @@ type RegisteredTool = {
   ): Promise<ToolResult>;
 };
 
+type SpawnChildProcess = NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+function confirmFakeKills(spawnChildProcess: SpawnChildProcess): SpawnChildProcess {
+  return ((...args: Parameters<SpawnChildProcess>) => {
+    const child = spawnChildProcess(...args);
+    const kill = child.kill.bind(child);
+    child.kill = ((...killArgs: Parameters<ChildProcess["kill"]>) => {
+      const killed = kill(...killArgs);
+      if (killed && child.exitCode === null) {
+        setImmediate(() => {
+          if (child.exitCode !== null) return;
+          child.emit("exit", 0, null);
+          child.emit("close", 0, null);
+        });
+      }
+      return killed;
+    }) as ChildProcess["kill"];
+    return child;
+  }) as SpawnChildProcess;
+}
+
 function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
   delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
     Symbol.for("pi-maestro-teammate.root-registry")
   ];
+  if (runtimeOptions.spawnChildProcess) {
+    runtimeOptions = {
+      ...runtimeOptions,
+      spawnChildProcess: confirmFakeKills(runtimeOptions.spawnChildProcess),
+    };
+  }
   let teammate: RegisteredTool | undefined;
   let teammateSend: RegisteredTool | undefined;
   const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
@@ -345,6 +372,7 @@ test("warm wake publishes every subsequent turn completion", async () => {
     ctx,
   );
   assert.equal(sent.isError, false);
+  stdout!.write(`${JSON.stringify({ type: "turn_start" })}\n`);
   stdout!.write(`${JSON.stringify(resultReadyTurn("second turn"))}\n`);
   stdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
   await delay(40);
@@ -622,7 +650,7 @@ test("proxy single emits complete only after result-ready lifecycle confirmation
     [],
     undefined,
     undefined,
-    { spawnChildProcess, resultReadyGraceMs: 500 },
+    { spawnChildProcess: confirmFakeKills(spawnChildProcess), resultReadyGraceMs: 500 },
   );
 
   assert.equal(replies.length, 1);
@@ -682,7 +710,7 @@ test("proxy graph waits for every terminal task and preserves physical lifecycle
     [],
     undefined,
     undefined,
-    { spawnChildProcess, resultReadyGraceMs: 500 },
+    { spawnChildProcess: confirmFakeKills(spawnChildProcess), resultReadyGraceMs: 500 },
   );
 
   await delay(30);
@@ -739,7 +767,7 @@ test("nested omitted background uses the normalized foreground default", async (
     [],
     undefined,
     undefined,
-    { spawnChildProcess, foregroundMaxRunMs: 500 },
+    { spawnChildProcess: confirmFakeKills(spawnChildProcess), foregroundMaxRunMs: 500 },
   );
 
   assert.equal(replies.length, 1);
@@ -782,7 +810,9 @@ test("mixed nested graph settlement preserves successful sibling wakeability", a
       ],
       background: false,
     } },
-    () => {}, undefined, [], undefined, undefined, { spawnChildProcess },
+    () => {}, undefined, [], undefined, undefined, {
+      spawnChildProcess: confirmFakeKills(spawnChildProcess),
+    },
   );
 
   const successful = [...state.activeRuns.values()].find((agent) => agent.name === "nested-success");
@@ -793,7 +823,7 @@ test("mixed nested graph settlement preserves successful sibling wakeability", a
   while (successful?.status !== "sleeping" && Date.now() < deadline) await delay(10);
   assert.equal(successful?.status, "sleeping");
   assert.equal(successful?.abortController.signal.aborted, false);
-  assert.equal(failed?.status, "sleeping");
+  assert.equal(failed?.status, "failed");
   assert.equal(failed?.lastOutcome?.status, "failed");
   assert.equal(failed?.abortController.signal.aborted, false);
 });
@@ -822,7 +852,7 @@ test("cancelling a nested background dispatch fences late completion publication
       tasks: [{ agent: "general", name: "late", prompt: "finish later" }], background: true,
     } },
     () => {}, undefined, [], undefined, undefined,
-    { spawnChildProcess, resultReadyGraceMs: 500 },
+    { spawnChildProcess: confirmFakeKills(spawnChildProcess), resultReadyGraceMs: 500 },
   );
 
   await delay(30);
@@ -836,15 +866,16 @@ test("cancelling a nested background dispatch fences late completion publication
   assert.equal(state.cancelledProxyDispatches?.has(requestId) ?? false, false);
 });
 
-test("root retry cancellation records terminated state and a cancelled complete event", async () => {
+test("root cancellation after authoritative failure records terminated state and a cancelled complete event", async () => {
   const controller = new AbortController();
   let spawns = 0;
   const spawnChildProcess = (() => {
     spawns += 1;
     const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
     Object.assign(child, {
       stdin: new PassThrough(),
-      stdout: new PassThrough(),
+      stdout,
       stderr: new PassThrough(),
       connected: false,
       exitCode: null,
@@ -852,18 +883,18 @@ test("root retry cancellation records terminated state and a cancelled complete 
       pid: undefined,
       kill() { return true; },
     });
-    queueMicrotask(() => child.emit("error", new Error("fetch failed: ECONNRESET")));
+    queueMicrotask(() => {
+      stdout.write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", stopReason: "error", errorMessage: "fetch failed: ECONNRESET" },
+      })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end", willRetry: false })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
+      controller.abort();
+    });
     return child;
   }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
-  const { teammate, emitted } = createHarness({
-    spawnChildProcess,
-    onRunOptionsCreated(options) {
-      options.waitForRetry = async () => {
-        controller.abort();
-        return false;
-      };
-    },
-  });
+  const { teammate, emitted } = createHarness({ spawnChildProcess });
 
   const result = await teammate.execute(
     "retry-abort",
@@ -885,13 +916,14 @@ test("root retry cancellation records terminated state and a cancelled complete 
   assert.equal([...state.recentlySettled?.values() ?? []].find((entry) => entry.name === "retrying")?.status, "terminated");
 });
 
-test("root graph retry cancellation keeps aggregate event and registry terminal status aligned", async () => {
+test("root graph cancellation after authoritative failure keeps aggregate event and registry terminal status aligned", async () => {
   const controller = new AbortController();
   const spawnChildProcess = (() => {
     const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
     Object.assign(child, {
       stdin: new PassThrough(),
-      stdout: new PassThrough(),
+      stdout,
       stderr: new PassThrough(),
       connected: false,
       exitCode: null,
@@ -899,18 +931,18 @@ test("root graph retry cancellation keeps aggregate event and registry terminal 
       pid: undefined,
       kill() { return true; },
     });
-    queueMicrotask(() => child.emit("error", new Error("fetch failed: ECONNRESET")));
+    queueMicrotask(() => {
+      stdout.write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", stopReason: "error", errorMessage: "fetch failed: ECONNRESET" },
+      })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end", willRetry: false })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
+      controller.abort();
+    });
     return child;
   }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
-  const { teammate, emitted } = createHarness({
-    spawnChildProcess,
-    onRunOptionsCreated(options) {
-      options.waitForRetry = async () => {
-        controller.abort();
-        return false;
-      };
-    },
-  });
+  const { teammate, emitted } = createHarness({ spawnChildProcess });
 
   const result = await teammate.execute(
     "graph-retry-abort",
@@ -1020,7 +1052,7 @@ test("result-ready survives a throttled settling update until a new turn or term
     });
     return child;
   }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
-  const { teammate } = createHarness({
+  const { teammate, hooks } = createHarness({
     spawnChildProcess,
     onRunOptionsCreated(created) { options = created; },
   });
@@ -1052,6 +1084,7 @@ test("result-ready survives a throttled settling update until a new turn or term
   options!.onProgress?.({ ...base, phase: "result-ready", resultReadyAt: readyAt });
   options!.onProgress?.({ ...base, phase: "settling", resultReadyAt: undefined });
   assert.equal(agent.resultReadyAt, readyAt);
+  await hooks.get("session_shutdown")?.[0]?.();
 });
 
 test("stale child requests cannot admit work after the parent session generation changes", async () => {
@@ -1072,7 +1105,7 @@ test("stale child requests cannot admit work after the parent session generation
     });
     return child;
   }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
-  const { teammate } = createHarness({
+  const { teammate, hooks } = createHarness({
     spawnChildProcess,
     onRunOptionsCreated(created) { options = created; },
   });
@@ -1097,9 +1130,10 @@ test("stale child requests cannot admit work after the parent session generation
 
   assert.equal(spawns, 1);
   assert.match(JSON.stringify(reply), /stale child request rejected/);
+  await hooks.get("session_shutdown")?.[0]?.();
 });
 
-test("session shutdown fences delayed root completion from the replacement session", async () => {
+test("session shutdown fences terminal publication after an already-notified root result", async () => {
   let stdout: PassThrough | undefined;
   const spawnChildProcess = (() => {
     const child = new EventEmitter() as ChildProcess;
@@ -1130,6 +1164,8 @@ test("session shutdown fences delayed root completion from the replacement sessi
   );
   assert.match(acknowledgement.content[0].text, /running in background/);
   await delay(30);
+  assert.equal(emitted.filter(({ event }) => event === "teammate:complete").length, 1);
+  assert.equal(messages.filter((message) => message.customType === "teammate-complete").length, 1);
 
   const shutdown = hooks.get("session_shutdown")?.[0];
   assert.ok(shutdown);
@@ -1138,8 +1174,8 @@ test("session shutdown fences delayed root completion from the replacement sessi
   stdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
   await delay(40);
 
-  assert.equal(emitted.some(({ event }) => event === "teammate:complete"), false);
-  assert.equal(messages.some((message) => message.customType === "teammate-complete"), false);
+  assert.equal(emitted.filter(({ event }) => event === "teammate:complete").length, 1);
+  assert.equal(messages.filter((message) => message.customType === "teammate-complete").length, 1);
 });
 
 test("session shutdown fences delayed nested completion from the replacement session", async () => {
@@ -1185,7 +1221,7 @@ test("session shutdown fences delayed nested completion from the replacement ses
     [],
     undefined,
     undefined,
-    { spawnChildProcess, resultReadyGraceMs: 500 },
+    { spawnChildProcess: confirmFakeKills(spawnChildProcess), resultReadyGraceMs: 500 },
   );
   await delay(30);
   assert.match(String((replies[0].result as { content: Array<{ text: string }> }).content[0].text), /running in background/);

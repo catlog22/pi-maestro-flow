@@ -216,6 +216,28 @@ test("renderAgents exposes cache, fallback model, and provider diagnostics", () 
 	assert.match(line, /cache 1.2kr\/10w/);
 });
 
+test("renderAgents treats provider/model formatting differences as the same model", () => {
+	const qualifiedRequest = renderAgents([agent({
+		requestedModel: "maestro-openai/gpt-5.6-sol",
+		resolvedModel: "gpt-5.6-sol",
+	})], "list", 180, theme, utils, opts)[0];
+	assert.match(qualifiedRequest, /model maestro-openai\/gpt-5\.6-sol/);
+	assert.doesNotMatch(qualifiedRequest, /→/);
+
+	const bareRequest = renderAgents([agent({
+		requestedModel: "gpt-5.6-sol",
+		resolvedModel: "maestro-openai/gpt-5.6-sol",
+	})], "list", 180, theme, utils, opts)[0];
+	assert.match(bareRequest, /model maestro-openai\/gpt-5\.6-sol/);
+	assert.doesNotMatch(bareRequest, /→/);
+
+	const realFallback = renderAgents([agent({
+		requestedModel: "maestro-openai/gpt-5.6-sol",
+		resolvedModel: "maestro-qwen/qwen3.8-max-preview",
+	})], "list", 180, theme, utils, opts)[0];
+	assert.match(realFallback, /model maestro-openai\/gpt-5\.6-sol→maestro-qwen\/qwen3\.8-max-preview/);
+});
+
 test("renderAgents list caps at 6 visible + overflow", () => {
 	const agents = Array.from({ length: 9 }, (_, i) => agent({ correlationId: `id${i}xxx`, task: `task ${i}` }));
 	const lines = renderAgents(agents, "list", 120, theme, utils, opts);

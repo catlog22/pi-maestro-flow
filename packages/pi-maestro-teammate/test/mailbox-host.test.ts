@@ -11,7 +11,12 @@ const temporaryDirectories: string[] = [];
 let baseDir: string;
 
 afterEach(async () => {
-  await Promise.all(temporaryDirectories.splice(0).map((p) => rm(p, { recursive: true, force: true })));
+  await Promise.all(temporaryDirectories.splice(0).map((p) => rm(p, {
+    recursive: true,
+    force: true,
+    maxRetries: 10,
+    retryDelay: 25,
+  })));
 });
 
 beforeEach(async () => {

@@ -69,7 +69,9 @@ export class HistoryEditor extends CustomEditor {
     const lines = super.render(width);
     const total = this.params.getEntries().length;
     if (!this.browsing() || total === 0) return lines;
-    return [historyBanner(this.index + 1, total, width, this.getPaddingX(), this.borderColor), ...lines];
+    // Below the box, not above it: the box already draws a top border, so a banner
+    // on top would render as a second horizontal line.
+    return [...lines, historyBanner(this.index + 1, total, width, this.getPaddingX(), this.borderColor)];
   }
 
   private browsing(): boolean {

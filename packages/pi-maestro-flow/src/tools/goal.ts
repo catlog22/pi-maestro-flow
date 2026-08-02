@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { NETWORK_RETRY_POLICY } from "pi-maestro-teammate/v1/retry";
-import { MAX_CONSECUTIVE_COMPACTION_FAILURES } from "../compaction/pressure-telemetry.ts";
+import {
+  consumeModelFailoverSettlement,
+  snapshotModelFailoverSettlement,
+} from "../providers/model-failover.ts";
 import type { WorkflowCoordinator } from "../session/coordinator.ts";
 import { activeWorkflowRun, type WorkflowSession, type WorkflowSnapshot } from "../session/types.ts";
 import {
@@ -144,6 +146,11 @@ let goalRecovery: {
   kind: "compaction_retry" | "provider_retry";
   attempt?: number;
   maxRetries?: number;
+} | undefined;
+let latestGoalAttempt: {
+  goalId: string;
+  epoch: number;
+  assistant?: AssistantMessageLike;
 } | undefined;
 let completionTimer: ReturnType<typeof setTimeout> | undefined;
 let verificationInFlight: { goalId: string; updatedAt: number; epoch: number } | undefined;
@@ -389,6 +396,7 @@ export async function onSessionStart(
   goalLifecycleEpoch++;
   verificationInFlight = undefined;
   goalLoopOwner = undefined;
+  latestGoalAttempt = undefined;
   clearCompletionTimer();
   clearElapsedTimer();
   clearContinuation();
@@ -417,6 +425,7 @@ export function onSessionShutdown(ctx: GoalContext) {
   if (activeGoal) persistGoal(activeGoal);
   activeGoal = undefined;
   goalLoopOwner = undefined;
+  latestGoalAttempt = undefined;
   goalSessionId = undefined;
   clearContinuation();
   clearRecovery();
@@ -461,7 +470,8 @@ export async function onCompact(event: unknown, ctx: GoalContext) {
   updateStatusLine(ctx, activeGoal);
 
   const wasPiRetry = isPiRetry(event, activeGoal.id);
-  if (!wasPiRetry) clearRecoveryFor(activeGoal.id);
+  const attemptAwaitingSettlement = hasUnsettledAttempt(activeGoal.id);
+  if (!wasPiRetry && !attemptAwaitingSettlement) clearRecoveryFor(activeGoal.id);
   const coordinator = workflowCoordinator;
   const workflowSnapshot = coordinator?.status();
   if (
@@ -480,7 +490,7 @@ export async function onCompact(event: unknown, ctx: GoalContext) {
       return;
     }
   }
-  if (wasPiRetry || hasPending(ctx)) return;
+  if (wasPiRetry || attemptAwaitingSettlement || hasPending(ctx)) return;
   await sendContinuation(ctx, activeGoal);
 }
 
@@ -501,29 +511,82 @@ export async function onAgentEnd(event: { messages: unknown[] }, ctx: GoalContex
   if (goalLoopOwner?.goalId !== activeGoal.id || goalLoopOwner.epoch !== goalLifecycleEpoch) return;
 
   const goalId = activeGoal.id;
-  goalLoopOwner = undefined;
-  const hadPending = continuationPending?.goalId === goalId;
   const finalMsg = findFinalAssistant(event.messages);
+  latestGoalAttempt = {
+    goalId,
+    epoch: goalLifecycleEpoch,
+    ...(finalMsg ? { assistant: finalMsg } : {}),
+  };
 
-  if (!hadPending) activeGoal = increment(activeGoal);
-  updateUsage(activeGoal, ctx);
-
-  if (finalMsg?.stopReason === "aborted" || finalMsg?.stopReason === "error") {
-    if (isRetryable(finalMsg)) {
-      markGoalRecovery(goalId, isOverflow(finalMsg) ? "compaction_retry" : "provider_retry");
-      cancelContinuation();
-      persistGoal(activeGoal);
-      updateStatusLine(ctx, activeGoal);
-      return;
-    }
+  if (finalMsg && (finalMsg.stopReason === "aborted" || finalMsg.stopReason === "error") && isRetryable(finalMsg)) {
+    markGoalRecovery(goalId, isOverflow(finalMsg) ? "compaction_retry" : "provider_retry");
+  } else {
     clearRecoveryFor(goalId);
-    pauseAfterEnd(ctx, activeGoal, finalMsg);
+  }
+  updateStatusLine(ctx, activeGoal);
+}
+
+export async function onAgentSettled(ctx: GoalContext) {
+  if (!activeGoal || activeGoal.status !== "active") return;
+  if (goalLoopOwner?.goalId !== activeGoal.id || goalLoopOwner.epoch !== goalLifecycleEpoch) return;
+
+  const goalId = activeGoal.id;
+  const arbitrationSnapshot = snapshotModelFailoverSettlement();
+  const arbitration = arbitrationSnapshot
+    ? consumeModelFailoverSettlement(arbitrationSnapshot.recoveryId)
+    : undefined;
+  if (arbitrationSnapshot && !arbitration) return;
+
+  const capturedObservation = latestGoalAttempt;
+  const observationMissing = !capturedObservation
+    || capturedObservation.goalId !== goalId
+    || capturedObservation.epoch !== goalLifecycleEpoch;
+  if (observationMissing && !arbitration) return;
+  latestGoalAttempt = undefined;
+
+  if (arbitration?.outcome === "fallback-scheduled") {
+    markGoalRecovery(goalId, "provider_retry");
+    updateStatusLine(ctx, activeGoal);
+    return;
+  }
+
+  const observation = observationMissing
+    ? {
+        goalId,
+        epoch: goalLifecycleEpoch,
+        assistant: {
+          role: "assistant" as const,
+          stopReason: arbitration?.outcome === "cancelled" ? "aborted" : "error",
+          errorMessage: arbitration?.failure ?? "Agent settled without a Goal attempt observation",
+        },
+      }
+    : capturedObservation;
+  const observedFailure = observation.assistant?.stopReason === "aborted"
+    || observation.assistant?.stopReason === "error";
+  const outcome = observationMissing ? "failed" : arbitration?.outcome ?? (observedFailure ? "failed" : "success");
+  if (outcome !== "success") {
+    clearRecoveryFor(goalId);
+    goalLoopOwner = undefined;
+    const cancelled = outcome === "cancelled" || observation.assistant?.stopReason === "aborted";
+    pauseAfterEnd(ctx, activeGoal, cancelled
+      ? { role: "assistant", stopReason: "aborted" }
+      : {
+          role: "assistant",
+          stopReason: "error",
+          errorMessage: arbitration?.failure
+            ?? (outcome === "replay-blocked" ? arbitration?.replayFence.blockedReason : undefined)
+            ?? observation.assistant?.errorMessage,
+        });
     return;
   }
 
   clearRecoveryFor(goalId);
+  const hadPending = continuationPending?.goalId === goalId;
+  if (!hadPending) activeGoal = increment(activeGoal);
+  updateUsage(activeGoal, ctx);
 
   if (activeGoal.tokenBudget !== undefined && activeGoal.tokensUsed >= activeGoal.tokenBudget) {
+    goalLoopOwner = undefined;
     cancelContinuation();
     activeGoal = pauseGoal(activeGoal, "budget");
     persistGoal(activeGoal);
@@ -548,6 +611,7 @@ export async function onAgentEnd(event: { messages: unknown[] }, ctx: GoalContex
     ? (activeGoal.lowProgressCount ?? 0) + 1
     : 0;
   if (lowProgressCount >= MAX_LOW_PROGRESS_CONTINUATIONS) {
+    goalLoopOwner = undefined;
     cancelContinuation();
     activeGoal = pauseGoal(activeGoal, "stalled");
     persistGoal(activeGoal);
@@ -680,6 +744,7 @@ async function handleStop(ctx: GoalContext): Promise<{ text: string; isError: bo
 
   updateUsage(activeGoal, ctx);
   goalLoopOwner = undefined;
+  latestGoalAttempt = undefined;
   cancelContinuation();
   await fenceWorkflowContinuation();
   activeGoal = pauseGoal(activeGoal, "user");
@@ -874,6 +939,7 @@ function fenceGoalLifecycle(): void {
   goalLifecycleEpoch++;
   verificationInFlight = undefined;
   goalLoopOwner = undefined;
+  latestGoalAttempt = undefined;
   clearCompletionTimer();
   cancelContinuation();
   clearRecovery();
@@ -910,6 +976,7 @@ function clearActive(ctx: GoalContext, keepInRegistry = false) {
   }
   activeGoal = undefined;
   goalLoopOwner = undefined;
+  latestGoalAttempt = undefined;
   clearElapsedTimer();
   clearPersistedGoal();
   clearGoalDisplay(ctx);
@@ -1200,6 +1267,8 @@ function markerComment(marker: string): string { return `<!-- ${CONTINUATION_MAR
 // ---------------------------------------------------------------------------
 
 function pauseAfterEnd(ctx: GoalContext, goal: ActiveGoal, assistant: AssistantMessageLike) {
+  goalLoopOwner = undefined;
+  latestGoalAttempt = undefined;
   cancelContinuation();
   abortTurn(ctx);
   activeGoal = pauseGoal(goal);
@@ -1222,18 +1291,11 @@ function isPiRetry(event: unknown, goalId: string): boolean {
 }
 
 function markGoalRecovery(goalId: string, kind: "compaction_retry" | "provider_retry"): void {
-  const maxRetries = kind === "compaction_retry"
-    ? MAX_CONSECUTIVE_COMPACTION_FAILURES
-    : NETWORK_RETRY_POLICY.maxRetries;
-  const previousAttempt = goalRecovery?.goalId === goalId && goalRecovery.kind === kind
-    ? goalRecovery.attempt ?? 0
-    : 0;
-  goalRecovery = {
-    goalId,
-    kind,
-    attempt: Math.min(previousAttempt + 1, maxRetries),
-    maxRetries,
-  };
+  goalRecovery = { goalId, kind };
+}
+
+function hasUnsettledAttempt(goalId: string): boolean {
+  return latestGoalAttempt?.goalId === goalId && latestGoalAttempt.epoch === goalLifecycleEpoch;
 }
 
 function clearRecovery() { goalRecovery = undefined; }
@@ -1277,7 +1339,11 @@ export function currentGoalPhase(): GoalWidgetPhase {
   const goal = activeGoal;
   if (!goal) return "normal";
   if (goal.status === "active" && verificationInFlight?.goalId === goal.id) return "verifying";
-  if (goalRecovery?.goalId === goal.id) return "retrying";
+  if (goalRecovery?.goalId === goal.id) {
+    return goalRecovery.attempt !== undefined && goalRecovery.maxRetries !== undefined
+      ? "retrying"
+      : "waiting";
+  }
   if (goal.status === "active"
     && (goalLoopOwner?.goalId !== goal.id || goalLoopOwner.epoch !== goalLifecycleEpoch)) return "waiting";
   return "normal";
@@ -1288,13 +1354,15 @@ function updateStatusLine(ctx: GoalContext, goal: ActiveGoal) {
   if (goal.status === "active") ensureElapsedTimer(ctx, goal.id);
   else clearElapsedTimer();
   const phase = currentGoalPhase();
-  const retry = phase === "retrying" ? goalRecovery : undefined;
+  const retry = goalRecovery?.goalId === goal.id ? goalRecovery : undefined;
   ctx.ui.setStatus(
     STATUS_KEY,
     phase === "verifying"
       ? "verifying"
       : retry
-        ? `retrying ${retry.attempt}/${retry.maxRetries}`
+        ? retry.attempt !== undefined && retry.maxRetries !== undefined
+          ? `retrying ${retry.attempt}/${retry.maxRetries}`
+          : "retrying (Pi-owned)"
         : phase === "waiting"
           ? "waiting"
           : fmtStatusLine(goal),

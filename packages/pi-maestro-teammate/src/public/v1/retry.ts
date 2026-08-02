@@ -21,3 +21,5 @@ export {
   retryDelayMs,
 } from "../../runs/retry.ts";
 export type { RetryErrorKind } from "../../runs/retry.ts";
+
+export * from "../../runs/recovery-protocol.ts";

@@ -3,12 +3,14 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { ModelCircuitBreaker, sharedModelCircuitBreaker } from "pi-maestro-teammate/v1/retry";
 import {
   DESCRIBE_IMAGE_TOOL_NAME,
   analyzeAttachedImage,
   loadVisionDelegationConfig,
   registerVisionDelegation,
   saveVisionDelegationConfig,
+  sharedVisionModelCircuitBreaker,
 } from "../src/providers/vision-assist.ts";
 
 function model(provider: string, id: string, multimodal: boolean): any {
@@ -18,7 +20,29 @@ function model(provider: string, id: string, multimodal: boolean): any {
 }
 function assistant(text: string): any { return { role: "assistant", content: [{ type: "text", text }], stopReason: "stop", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, timestamp: Date.now() }; }
 function registry(models: any[]) { return { getAvailable: () => models, find: (p: string, id: string) => models.find((m) => m.provider === p && m.id === id), async getApiKeyAndHeaders() { return { ok: true, apiKey: "secret", headers: {} }; } }; }
-function harness(agentDir: string, completeFn: any) {
+
+type TrackedSettlement = { kind: "release" | "success" | "retryable-failure"; model: string; state: string };
+
+class TrackingModelCircuitBreaker extends ModelCircuitBreaker {
+  readonly settlements: TrackedSettlement[] = [];
+
+  override releaseCandidate(acquisition: Parameters<ModelCircuitBreaker["releaseCandidate"]>[0]): void {
+    this.settlements.push({ kind: "release", model: acquisition.model, state: acquisition.state });
+    super.releaseCandidate(acquisition);
+  }
+
+  override recordSuccess(acquisition: Parameters<ModelCircuitBreaker["recordSuccess"]>[0]): void {
+    this.settlements.push({ kind: "success", model: acquisition.model, state: acquisition.state });
+    super.recordSuccess(acquisition);
+  }
+
+  override recordRetryableFailure(acquisition: Parameters<ModelCircuitBreaker["recordRetryableFailure"]>[0]): void {
+    this.settlements.push({ kind: "retryable-failure", model: acquisition.model, state: acquisition.state });
+    super.recordRetryableFailure(acquisition);
+  }
+}
+
+function harness(agentDir: string, completeFn: any, breaker?: ModelCircuitBreaker) {
   const handlers = new Map<string, (...args: any[]) => any>();
   const tools = new Map<string, any>();
   const commands = new Map<string, any>();
@@ -30,7 +54,7 @@ function harness(agentDir: string, completeFn: any) {
     getActiveTools() { return [...active]; },
     setActiveTools(next: string[]) { active = [...next]; },
   } as any;
-  registerVisionDelegation(pi, { agentDir, completeFn });
+  registerVisionDelegation(pi, { agentDir, completeFn, ...(breaker ? { breaker } : {}) });
   return { handlers, tools, commands, get active() { return active; }, setActive(next: string[]) { active = [...next]; } };
 }
 
@@ -220,6 +244,150 @@ test("caller cancellation is reported as aborted", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("every acquired vision candidate has one terminal settlement", async (t) => {
+  const cases: Array<{
+    name: string;
+    models: any[];
+    completeFn: () => Promise<any>;
+    expected: TrackedSettlement["kind"];
+  }> = [
+    {
+      name: "unavailable",
+      models: [],
+      completeFn: async () => assistant("unused"),
+      expected: "release",
+    },
+    {
+      name: "nonretryable",
+      models: [model("p", "candidate", true)],
+      completeFn: async () => { throw new Error("Unauthorized: invalid API key"); },
+      expected: "release",
+    },
+    {
+      name: "provider abort",
+      models: [model("p", "candidate", true)],
+      completeFn: async () => ({ ...assistant(""), content: [], stopReason: "aborted", errorMessage: "provider aborted" }),
+      expected: "release",
+    },
+    {
+      name: "retry exhaustion",
+      models: [model("p", "candidate", true)],
+      completeFn: async () => { throw new Error("Provider overloaded: 503"); },
+      expected: "retryable-failure",
+    },
+    {
+      name: "success",
+      models: [model("p", "candidate", true)],
+      completeFn: async () => assistant("analysis"),
+      expected: "success",
+    },
+  ];
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const dir = mkdtempSync(join(tmpdir(), `vision-settlement-${scenario.name.replace(/\s+/g, "-")}-`));
+      try {
+        const file = join(dir, "image.png");
+        writeFileSync(file, Buffer.from("fake"));
+        const config = loadVisionDelegationConfig(dir);
+        saveVisionDelegationConfig({
+          ...config,
+          visionModel: "p/candidate",
+          maxRetries: 0,
+          cache: { enabled: false, maxEntries: 10 },
+        }, dir);
+        const breaker = new TrackingModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
+        const runtime = harness(dir, scenario.completeFn, breaker);
+        await runtime.tools.get(DESCRIBE_IMAGE_TOOL_NAME).execute("1", { image_path: file }, undefined, undefined, {
+          cwd: dir,
+          model: model("p", "text", false),
+          modelRegistry: registry(scenario.models),
+        });
+
+        assert.deepEqual(breaker.settlements, [{ kind: scenario.expected, model: "p/candidate", state: "CLOSED" }]);
+      } finally { rmSync(dir, { recursive: true, force: true }); }
+    });
+  }
+});
+
+test("auth lookup throws release an acquired HALF_OPEN vision trial exactly once", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "vision-auth-throw-half-open-"));
+  try {
+    const file = join(dir, "image.png");
+    writeFileSync(file, Buffer.from("fake"));
+    const config = loadVisionDelegationConfig(dir);
+    saveVisionDelegationConfig({ ...config, visionModel: "p/candidate", maxRetries: 0, cache: { enabled: false, maxEntries: 10 } }, dir);
+    let now = 0;
+    const breaker = new TrackingModelCircuitBreaker({ threshold: 1, cooldownMs: 10, now: () => now });
+    const initial = breaker.acquireCandidate("p/candidate");
+    assert.equal(initial.allowed, true);
+    if (initial.allowed) breaker.recordRetryableFailure(initial);
+    now = 10;
+    breaker.settlements.length = 0;
+
+    const vision = model("p", "candidate", true);
+    const runtime = harness(dir, async () => assistant("unused"), breaker);
+    const result = await runtime.tools.get(DESCRIBE_IMAGE_TOOL_NAME).execute("1", { image_path: file }, undefined, undefined, {
+      cwd: dir,
+      model: model("p", "text", false),
+      modelRegistry: {
+        getAvailable: () => [vision],
+        find: () => vision,
+        async getApiKeyAndHeaders() { throw new Error("auth lookup crashed"); },
+      },
+    });
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0]?.text ?? "", /auth lookup crashed/);
+    assert.deepEqual(breaker.settlements, [{ kind: "release", model: "p/candidate", state: "HALF_OPEN" }]);
+    assert.equal(breaker.snapshot()[0]?.state, "OPEN");
+    assert.equal(breaker.snapshot()[0]?.halfOpenTrialInProgress, false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("backoff cancellation releases an acquired HALF_OPEN vision trial exactly once", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "vision-backoff-abort-half-open-"));
+  try {
+    const file = join(dir, "image.png");
+    writeFileSync(file, Buffer.from("fake"));
+    const config = loadVisionDelegationConfig(dir);
+    saveVisionDelegationConfig({
+      ...config,
+      visionModel: "p/candidate",
+      maxRetries: 1,
+      retryBackoffMs: 1_000,
+      cache: { enabled: false, maxEntries: 10 },
+    }, dir);
+    let now = 0;
+    const breaker = new TrackingModelCircuitBreaker({ threshold: 1, cooldownMs: 10, now: () => now });
+    const initial = breaker.acquireCandidate("p/candidate");
+    assert.equal(initial.allowed, true);
+    if (initial.allowed) breaker.recordRetryableFailure(initial);
+    now = 10;
+    breaker.settlements.length = 0;
+
+    const controller = new AbortController();
+    let calls = 0;
+    const runtime = harness(dir, async () => {
+      calls += 1;
+      setTimeout(() => controller.abort(), 0);
+      throw new Error("Provider overloaded: 503");
+    }, breaker);
+    const vision = model("p", "candidate", true);
+    const result = await runtime.tools.get(DESCRIBE_IMAGE_TOOL_NAME).execute("1", { image_path: file }, controller.signal, undefined, {
+      cwd: dir,
+      model: model("p", "text", false),
+      modelRegistry: registry([vision]),
+    });
+
+    assert.equal(result.details.error, "aborted");
+    assert.equal(calls, 1);
+    assert.deepEqual(breaker.settlements, [{ kind: "release", model: "p/candidate", state: "HALF_OPEN" }]);
+    assert.equal(breaker.snapshot()[0]?.state, "OPEN");
+    assert.equal(breaker.snapshot()[0]?.halfOpenTrialInProgress, false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("attached image analysis is available to failover integration", async () => {
   const dir = mkdtempSync(join(tmpdir(), "vision-attached-"));
   try {
@@ -232,21 +400,46 @@ test("attached image analysis is available to failover integration", async () =>
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("vision delegation integrates the shared circuit breaker on repeated failures", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "vision-breaker-"));
+test("vision default breaker health is isolated from main model failover", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "vision-breaker-isolation-"));
   try {
     const file = join(dir, "image.png"); writeFileSync(file, Buffer.from("fake"));
     const config = loadVisionDelegationConfig(dir);
-    saveVisionDelegationConfig({ ...config, visionModel: "p/stuck", maxRetries: 0, cache: { enabled: false, maxEntries: 10 } }, dir);
+    saveVisionDelegationConfig({ ...config, visionModel: "isolated/retryable", maxRetries: 0, cache: { enabled: false, maxEntries: 10 } }, dir);
     const runtime = harness(dir, async () => { throw new Error("Provider overloaded: 503"); });
-    const vision = model("p", "stuck", true);
-    const breaker = new (await import("pi-maestro-teammate/v1/retry")).ModelCircuitBreaker({ threshold: 2, cooldownMs: 60_000 });
+    const vision = model("isolated", "retryable", true);
     const tool = runtime.tools.get(DESCRIBE_IMAGE_TOOL_NAME);
-    const result = await tool.execute("1", { image_path: file }, undefined, undefined, { cwd: dir, model: model("p", "text", false), modelRegistry: registry([vision]) });
+    const result = await tool.execute("1", { image_path: file }, undefined, undefined, {
+      cwd: dir,
+      model: model("p", "text", false),
+      modelRegistry: registry([vision]),
+    });
+
     assert.equal(result.isError, true);
-    // The shared breaker used by registerVisionDelegation is the process-wide instance,
-    // so a fresh breaker here cannot observe it; verify failure path surfaces an error.
-    assert.match(result.content[0]?.text ?? "", /no vision model succeeded/);
+    assert.equal(sharedVisionModelCircuitBreaker.snapshot().find((entry) => entry.model === "isolated/retryable")?.consecutiveFailures, 1);
+    assert.equal(sharedModelCircuitBreaker.snapshot().find((entry) => entry.model === "isolated/retryable"), undefined);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("vision releases non-retryable candidate failures", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "vision-breaker-release-"));
+  try {
+    const file = join(dir, "image.png"); writeFileSync(file, Buffer.from("fake"));
+    const config = loadVisionDelegationConfig(dir);
+    saveVisionDelegationConfig({ ...config, visionModel: "p/auth", maxRetries: 0, cache: { enabled: false, maxEntries: 10 } }, dir);
+    const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
+    const runtime = harness(dir, async () => { throw new Error("Unauthorized: invalid API key"); }, breaker);
+    const vision = model("p", "auth", true);
+    const result = await runtime.tools.get(DESCRIBE_IMAGE_TOOL_NAME).execute("1", { image_path: file }, undefined, undefined, {
+      cwd: dir,
+      model: model("p", "text", false),
+      modelRegistry: registry([vision]),
+    });
+
+    assert.equal(result.isError, true);
+    const health = breaker.snapshot().find((entry) => entry.model === "p/auth");
+    assert.equal(health?.state, "CLOSED");
+    assert.equal(health?.consecutiveFailures, 0);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

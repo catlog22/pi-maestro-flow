@@ -43,3 +43,14 @@ test("provider and quota classes keep their existing routing", () => {
   assert.equal(isRetryableProviderError("402 insufficient_quota"), false);
   assert.equal(isFallbackProviderError("402 insufficient_quota"), true);
 });
+
+test("HTTP 408 and Python-style transport names classify as retryable", () => {
+  assert.equal(classifyRetryError("HTTP 408 Request Timeout"), "network");
+  assert.equal(classifyRetryError("Provider error: 408"), "provider");
+  assert.equal(classifyRetryError("requests.exceptions.ConnectionError: Max retries exceeded"), "network");
+  assert.equal(classifyRetryError("ConnectionResetError: connection reset by peer"), "network");
+  assert.equal(classifyRetryError("urllib3 ConnectionRefusedError"), "network");
+  assert.equal(classifyRetryError("BrokenPipeError: [Errno 32]"), "network");
+  assert.equal(classifyRetryError("TimeoutError: Read timed out"), "network");
+  assert.equal(isRetryableProviderError("ConnectionResetError"), true);
+});

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -11,10 +12,14 @@ import {
   type AttachedImageInput,
 } from "./vision-assist.ts";
 import {
-  isRetryableProviderError,
+  classifyRetryError,
+  RECOVERY_PROTOCOL_VERSION,
   sharedModelCircuitBreaker,
   type AcquiredModelCandidate,
   type ModelCircuitBreaker,
+  type RecoveryFallbackModelIntent,
+  type ReplayFence,
+  type RetryErrorKind,
 } from "pi-maestro-teammate/v1/retry";
 
 export interface ModelFailoverConfig {
@@ -37,6 +42,46 @@ interface ActiveModelRun {
   originalModel?: string;
 }
 
+interface AgentEndObservation {
+  outcome: "success" | "failed" | "cancelled";
+  failure?: string;
+  failureKind?: RetryErrorKind;
+  completedTools: readonly string[];
+  unknownEffect: boolean;
+}
+
+export type ModelFailoverSettlementOutcome =
+  | "success"
+  | "failed"
+  | "cancelled"
+  | "fallback-scheduled"
+  | "replay-blocked";
+
+export interface ModelFailoverSettlementSnapshot {
+  protocolVersion: typeof RECOVERY_PROTOCOL_VERSION;
+  recoveryId: string;
+  outcome: ModelFailoverSettlementOutcome;
+  model: string;
+  failure?: string;
+  fallbackModel?: string;
+  replayFence: ReplayFence;
+}
+
+let settlementArbitration: Readonly<ModelFailoverSettlementSnapshot> | undefined;
+
+/** Observe the latest main-agent settlement without consuming Goal's one-shot arbitration claim. */
+export function snapshotModelFailoverSettlement(): Readonly<ModelFailoverSettlementSnapshot> | undefined {
+  return settlementArbitration;
+}
+
+/** Consume the latest settlement once. A recovery id prevents a stale observer from clearing a newer result. */
+export function consumeModelFailoverSettlement(recoveryId?: string): Readonly<ModelFailoverSettlementSnapshot> | undefined {
+  if (!settlementArbitration || (recoveryId !== undefined && settlementArbitration.recoveryId !== recoveryId)) return undefined;
+  const consumed = settlementArbitration;
+  settlementArbitration = undefined;
+  return consumed;
+}
+
 export interface ModelFailoverOptions {
   breaker?: ModelCircuitBreaker;
   homeDir?: string;
@@ -47,13 +92,12 @@ export interface ModelFailoverOptions {
 const CONFIG_FILE = "model-failover.json";
 /** Upper bound on attached images auto-analyzed in one turn; prevents linear cost blowup. */
 const MAX_ATTACHED_IMAGES_PER_TURN = 5;
-/**
- * Injected as a follow-up user message after a fallback switch so Pi re-runs
- * the failed turn on the new model. agent_end is terminal: without this the
- * switch would only apply to the next manual prompt. Continuations are bounded
- * by chain length because each failure advances the candidate index.
- */
-const FAILOVER_RETRY_PROMPT = "The previous model failed with a transient network or provider error, and the session just switched to a fallback model. Retry the original user request from the beginning and complete it. Do not wait for another user request.";
+const FAILOVER_RETRY_PROMPT = "The previous model exhausted its native retries with a transient network, provider, or quota error. Retry the original user request from the beginning on the selected fallback model and complete it.";
+const FAILOVER_RECOVERY_MARKER = "maestro-model-failover";
+
+function recoveryPrompt(recoveryId: string): string {
+  return `${FAILOVER_RETRY_PROMPT}\n\n[${FAILOVER_RECOVERY_MARKER}:${recoveryId}]`;
+}
 
 function emptyConfig(): ModelFailoverConfig {
   return { enabled: false, fallbackModels: {} };
@@ -142,17 +186,58 @@ function modelKey(model: { provider: string; id: string } | undefined): string |
   return model ? `${model.provider}/${model.id}` : undefined;
 }
 
-function assistantFailure(messages: readonly AgentMessage[]): string | undefined {
+function observeAgentEnd(
+  messages: readonly AgentMessage[],
+  fallbackFailure: string | undefined,
+  completedTools: readonly string[],
+  unknownEffect: boolean,
+): AgentEndObservation {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index] as unknown as {
-      role?: string;
-      stopReason?: string;
-      errorMessage?: string;
-    };
+    const message = messages[index] as unknown as { role?: string; stopReason?: string; errorMessage?: string };
     if (message.role !== "assistant") continue;
-    return message.stopReason === "error" ? message.errorMessage || "Provider returned error" : undefined;
+    if (message.stopReason === "aborted") {
+      return { outcome: "cancelled", completedTools: [...completedTools], unknownEffect };
+    }
+    if (message.stopReason === "error") {
+      const failure = message.errorMessage || fallbackFailure || "Provider returned error";
+      return {
+        outcome: "failed",
+        failure,
+        failureKind: classifyRetryError(failure),
+        completedTools: [...completedTools],
+        unknownEffect,
+      };
+    }
+    return { outcome: "success", completedTools: [...completedTools], unknownEffect };
   }
-  return undefined;
+  if (fallbackFailure) {
+    return {
+      outcome: "failed",
+      failure: fallbackFailure,
+      failureKind: classifyRetryError(fallbackFailure),
+      completedTools: [...completedTools],
+      unknownEffect,
+    };
+  }
+  return { outcome: "success", completedTools: [...completedTools], unknownEffect };
+}
+
+function replayFence(observation: AgentEndObservation): ReplayFence {
+  const completedTools = Object.freeze([...observation.completedTools]);
+  if (completedTools.length > 0 || observation.unknownEffect) {
+    const evidence = [
+      completedTools.length > 0 ? `completed tools: ${completedTools.join(", ")}` : undefined,
+      observation.unknownEffect ? "one or more tool effects could not be confirmed" : undefined,
+    ].filter(Boolean).join("; ");
+    return Object.freeze({ completedTools, blocked: true, blockedReason: `Fresh replay blocked after ${evidence}.` });
+  }
+  return Object.freeze({ completedTools, blocked: false });
+}
+
+function publishSettlement(snapshot: ModelFailoverSettlementSnapshot): Readonly<ModelFailoverSettlementSnapshot> {
+  const frozen = Object.freeze({ ...snapshot, replayFence: Object.freeze({ ...snapshot.replayFence }) });
+  settlementArbitration = frozen;
+  return frozen;
 }
 
 function availableModels(ctx: ExtensionContext): Map<string, ReturnType<ExtensionContext["modelRegistry"]["getAvailable"]>[number]> {
@@ -197,7 +282,17 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
   const breaker = options.breaker ?? sharedModelCircuitBreaker;
   const visionAnalyzer = options.visionAnalyzer ?? analyzeAttachedImage;
   let active: ActiveModelRun | undefined;
+  let finalObservation: AgentEndObservation | undefined;
+  let pendingRecoveryId: string | undefined;
+  const completedTools: string[] = [];
+  const startedTools = new Map<string, string>();
   let config = emptyConfig();
+
+  const resetRunEvidence = (): void => {
+    finalObservation = undefined;
+    completedTools.length = 0;
+    startedTools.clear();
+  };
 
   pi.registerCommand("model-failover", {
     description: "Configure main-agent model circuit breaking and ordered fallback chains",
@@ -261,16 +356,33 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     // external-edit visibility boundary. Loading at session start was always
     // overwritten before use.
     active = undefined;
+    pendingRecoveryId = undefined;
+    resetRunEvidence();
+    settlementArbitration = undefined;
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
     config = loadModelFailoverConfig(ctx.cwd, options.homeDir);
+    const recoveryId = pendingRecoveryId;
+    if (active && recoveryId && event.prompt.includes(`[${FAILOVER_RECOVERY_MARKER}:${recoveryId}]`)) {
+      // The fallback acquisition was made after the previous logical run
+      // settled. Consume its handoff exactly once and retain that acquisition.
+      pendingRecoveryId = undefined;
+      active.used = false;
+      active.lastError = undefined;
+      active.lastHttpStatus = undefined;
+      resetRunEvidence();
+      return;
+    }
+    pendingRecoveryId = undefined;
     if (active && !active.failureRecorded) breaker.releaseCandidate(active.acquisition);
     active = undefined;
+    resetRunEvidence();
 
     const current = modelKey(ctx.model);
     if (!current) return;
-    const baseChain = [...new Set([current, ...(config.fallbackModels[current] ?? [])])];
+    const configuredFallbacks = config.fallbackModels[current] ?? [];
+    const baseChain = [...new Set([current, ...configuredFallbacks])];
     const images = attachedImages(event);
     // Attached-image handling is gated by the vision delegation config, not by
     // model-failover.enabled: the feature must work even when failover is off.
@@ -279,10 +391,10 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
 
     if (images.length > 0 && !isMultimodalModel(ctx.model) && visionEnabled) {
       const models = availableModels(ctx);
-      const visionChain = prioritizeMultimodalChain(baseChain, models);
-      if (visionChain.some((reference) => isMultimodalModel(models.get(reference)))) {
+      const visionChain = baseChain.filter((reference) => isMultimodalModel(models.get(reference)));
+      if (visionChain.length > 0) {
         const preferred = await selectCandidate(ctx, visionChain, 0);
-        if (preferred && isMultimodalModel(models.get(preferred.model))) {
+        if (preferred) {
           preferred.imageTriggered = true;
           preferred.originalModel = current;
           active = preferred;
@@ -320,7 +432,13 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
 
     if (!config.enabled) return injectedMessage;
 
-    const chain = images.length > 0 ? prioritizeMultimodalChain(baseChain, availableModels(ctx)) : baseChain;
+    // Without an explicit fallback chain every other authenticated model is an
+    // implicit ordered fallback, mirroring teammate's implicit candidate sweep
+    // so a default install can still auto-recover from network/quota failures.
+    const fallbackChain = configuredFallbacks.length === 0
+      ? [...new Set([...baseChain, ...availableModels(ctx).keys()])]
+      : baseChain;
+    const chain = images.length > 0 ? prioritizeMultimodalChain(fallbackChain, availableModels(ctx)) : fallbackChain;
     const currentIndex = chain.indexOf(current);
     const acquisition = breaker.acquireCandidate(current);
     if (acquisition.allowed) {
@@ -346,10 +464,21 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     if (active) active.used = true;
   });
 
+  pi.on("tool_execution_start", (event) => {
+    if (!active) return;
+    startedTools.set(event.toolCallId, event.toolName);
+  });
+
+  pi.on("tool_execution_end", (event) => {
+    if (!active) return;
+    startedTools.delete(event.toolCallId);
+    completedTools.push(event.toolName);
+  });
+
   pi.on("after_provider_response", (event) => {
     if (!active) return;
     active.lastHttpStatus = event.status;
-    if (event.status >= 400) active.lastError = `Provider returned error: HTTP ${event.status}`;
+    active.lastError = event.status >= 400 ? `Provider returned error: HTTP ${event.status}` : undefined;
   });
 
   pi.on("message_end", (event) => {
@@ -358,71 +487,165 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     active.lastError = message.stopReason === "error" ? message.errorMessage : undefined;
   });
 
-  pi.on("agent_end", async (event, ctx) => {
+  pi.on("agent_end", (event) => {
     if (!active || !config.enabled) return;
-    const failure = assistantFailure(event.messages as AgentMessage[])
-      ?? (active.lastHttpStatus && active.lastHttpStatus >= 400 ? active.lastError : undefined);
-    if (!isRetryableProviderError(failure)) return;
-
-    if (active.used && !active.failureRecorded) {
-      breaker.recordRetryableFailure(active.acquisition);
-      active.failureRecorded = true;
-    }
-
-    const failedModel = active.model;
-    const previous = active;
-    const fallback = await selectCandidate(ctx, active.chain, active.index + 1);
-    // Release the old acquisition if it was never settled (e.g. used===false
-    // skipped recordRetryableFailure above).  Without this, a HALF_OPEN trial
-    // would leak and the circuit could stay stuck.
-    if (!previous.failureRecorded) breaker.releaseCandidate(previous.acquisition);
-    previous.failureRecorded = true;
-    // Guard: agent_settled may have fired during the await and cleared active.
-    if (active !== previous) {
-      // Release the fallback acquisition that selectCandidate already took;
-      // without this a HALF_OPEN trial on the fallback model would leak.
-      if (fallback && !fallback.failureRecorded) breaker.releaseCandidate(fallback.acquisition);
-      return;
-    }
-    if (!fallback) return;
-    active = fallback;
-    // Queued messages already continue the run and will pick up the switched
-    // model; an aborted run must not be resurrected by the failover handler.
-    if (ctx.signal?.aborted || ctx.hasPendingMessages()) {
-      ctx.ui.notify(`Model ${failedModel} failed; switched to ${fallback.model} for the next turn.`, "warning");
-      return;
-    }
-    try {
-      pi.sendUserMessage(FAILOVER_RETRY_PROMPT, { deliverAs: "followUp" });
-      ctx.ui.notify(`Model ${failedModel} failed; continuing the turn with ${fallback.model}.`, "warning");
-    } catch {
-      ctx.ui.notify(`Model ${failedModel} failed; switched to ${fallback.model} for the next turn.`, "warning");
-    }
+    const fallbackFailure = active.lastHttpStatus && active.lastHttpStatus >= 400 ? active.lastError : undefined;
+    // Pi's extension event omits willRetry. This observation may be replaced by
+    // a later native retry/compaction/queue-drain result before agent_settled.
+    finalObservation = observeAgentEnd(
+      event.messages as AgentMessage[],
+      fallbackFailure,
+      completedTools,
+      startedTools.size > 0,
+    );
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
+    // A fallback selected by this same handler belongs to the next logical run;
+    // duplicate settlement delivery for the old run must not settle it early.
+    if (pendingRecoveryId) return;
     const activeRun = active;
-    if (activeRun?.used && !activeRun.failureRecorded && !activeRun.lastError) {
-      breaker.recordSuccess(activeRun.acquisition);
-    } else if (activeRun && !activeRun.failureRecorded) {
-      breaker.releaseCandidate(activeRun.acquisition);
-    }
+    if (!activeRun) return;
     active = undefined;
-    // Restore the pre-image model after an image-triggered switch settles so
-    // later text-only turns do not keep paying multimodal cost/behavior.
-    if (activeRun?.imageTriggered && activeRun.originalModel) {
-      const original = availableModels(ctx).get(activeRun.originalModel);
-      if (original) {
-        const restored = await pi.setModel(original);
-        if (restored) {
-          ctx.ui.notify(`Restored text-only model ${activeRun.originalModel} after image analysis.`, "info");
+
+    const recoveryId = randomUUID();
+    const observation: AgentEndObservation = ctx.signal?.aborted
+      ? {
+          outcome: "cancelled",
+          completedTools: [...(finalObservation?.completedTools ?? completedTools)],
+          unknownEffect: finalObservation?.unknownEffect ?? startedTools.size > 0,
         }
-      }
+      : finalObservation ?? {
+          outcome: "failed",
+          failure: "Agent settled without a final agent_end observation",
+          failureKind: "non-retryable",
+          completedTools: [...completedTools],
+          unknownEffect: startedTools.size > 0,
+        };
+    const fence = replayFence(observation);
+    const baseSnapshot = {
+      protocolVersion: RECOVERY_PROTOCOL_VERSION,
+      recoveryId,
+      model: activeRun.model,
+      ...(observation.failure ? { failure: observation.failure } : {}),
+      replayFence: fence,
+    };
+
+    const restoreImageModel = async (): Promise<void> => {
+      if (!activeRun.imageTriggered || !activeRun.originalModel) return;
+      const original = availableModels(ctx).get(activeRun.originalModel);
+      if (!original) return;
+      const restored = await pi.setModel(original);
+      if (restored) ctx.ui.notify(`Restored text-only model ${activeRun.originalModel} after image analysis.`, "info");
+    };
+
+    if (observation.outcome === "cancelled") {
+      if (!activeRun.failureRecorded) breaker.releaseCandidate(activeRun.acquisition);
+      activeRun.failureRecorded = true;
+      publishSettlement({ ...baseSnapshot, outcome: "cancelled" });
+      await restoreImageModel();
+      return;
     }
+
+    if (observation.outcome === "success") {
+      if (!activeRun.failureRecorded) {
+        if (activeRun.used) breaker.recordSuccess(activeRun.acquisition);
+        else breaker.releaseCandidate(activeRun.acquisition);
+      }
+      activeRun.failureRecorded = true;
+      publishSettlement({ ...baseSnapshot, outcome: "success" });
+      await restoreImageModel();
+      return;
+    }
+
+    // Authentication, invalid-model, context, and other terminal failures do
+    // not poison provider health and never initiate a fresh logical replay.
+    if (!config.enabled || observation.failureKind === "non-retryable") {
+      if (!activeRun.failureRecorded) breaker.releaseCandidate(activeRun.acquisition);
+      activeRun.failureRecorded = true;
+      publishSettlement({ ...baseSnapshot, outcome: "failed" });
+      await restoreImageModel();
+      return;
+    }
+
+    // Native retries are now exhausted. Charge this candidate once, and only
+    // now, before considering one fallback logical run.
+    if (!activeRun.failureRecorded) breaker.recordRetryableFailure(activeRun.acquisition);
+    activeRun.failureRecorded = true;
+
+    if (fence.blocked) {
+      publishSettlement({ ...baseSnapshot, outcome: "replay-blocked" });
+      ctx.ui.notify(
+        `Model ${activeRun.model} exhausted its retries, but automatic restart was blocked because tool effects were observed.`,
+        "warning",
+      );
+      await restoreImageModel();
+      return;
+    }
+
+    const fallback = await selectCandidate(ctx, activeRun.chain, activeRun.index + 1);
+    if (!fallback) {
+      publishSettlement({ ...baseSnapshot, outcome: "failed" });
+      ctx.ui.notify(
+        `Model ${activeRun.model} exhausted its retries and no further fallback is available.`,
+        "warning",
+      );
+      await restoreImageModel();
+      return;
+    }
+
+    const intent: RecoveryFallbackModelIntent = {
+      intentId: `${recoveryId}:fallback`,
+      kind: "fallback_model",
+      fromModel: activeRun.model,
+      toModel: fallback.model,
+      mode: "restart",
+      replayFence: fence,
+    };
+    active = fallback;
+    pendingRecoveryId = recoveryId;
+    publishSettlement({ ...baseSnapshot, outcome: "fallback-scheduled", fallbackModel: fallback.model });
+    setTimeout(() => {
+      if (pendingRecoveryId !== recoveryId
+        || active !== fallback
+        || active.acquisition !== fallback.acquisition
+        || fallback.failureRecorded) return;
+      // sendCustomMessage({ triggerTurn: true }) starts a hidden custom turn
+      // directly and does not emit before_agent_start. Transfer ownership to
+      // the fallback run before starting it so its agent_settled can arbitrate.
+      pendingRecoveryId = undefined;
+      fallback.used = false;
+      fallback.lastError = undefined;
+      fallback.lastHttpStatus = undefined;
+      resetRunEvidence();
+      try {
+        pi.sendMessage({
+          customType: FAILOVER_RECOVERY_MARKER,
+          content: recoveryPrompt(recoveryId),
+          display: false,
+          details: { protocolVersion: RECOVERY_PROTOCOL_VERSION, recoveryId, intent },
+        }, { triggerTurn: true });
+        ctx.ui.notify(`Model ${activeRun.model} exhausted its retries; starting one fallback run with ${fallback.model}.`, "warning");
+      } catch (error) {
+        if (!fallback.failureRecorded) breaker.releaseCandidate(fallback.acquisition);
+        fallback.failureRecorded = true;
+        if (active === fallback) active = undefined;
+        if (pendingRecoveryId === recoveryId) pendingRecoveryId = undefined;
+        publishSettlement({
+          ...baseSnapshot,
+          outcome: "failed",
+          failure: `Fallback handoff failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        ctx.ui.notify(`Model fallback could not start on ${fallback.model}.`, "warning");
+      }
+    }, 0);
   });
 
   pi.on("session_shutdown", () => {
     if (active && !active.failureRecorded) breaker.releaseCandidate(active.acquisition);
     active = undefined;
+    pendingRecoveryId = undefined;
+    resetRunEvidence();
+    settlementArbitration = undefined;
   });
 }

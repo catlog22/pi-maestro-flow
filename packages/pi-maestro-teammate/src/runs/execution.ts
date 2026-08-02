@@ -40,10 +40,7 @@ import {
   type TeammateThinkingLevel,
 } from "../shared/thinking.ts";
 import {
-  NETWORK_RETRY_POLICY,
   isFallbackProviderError,
-  isRetryableProviderError,
-  retryDelayMs,
 } from "./retry.ts";
 
 export * from "./execution-infra.ts";
@@ -77,7 +74,6 @@ import {
   getTeammateDepth,
   getTeammateSessionRoot,
   hasCycle,
-  isFallbackModelError,
   isPiResultReadyTurn,
   normalizeTeammateParams,
   readRegularTextFile,
@@ -92,7 +88,6 @@ import {
   truncateUtf8Tail,
   validateStructuredOutputValue,
   validateTaskReferences,
-  waitForRetryDelay,
   writeSchemaFile,
   writeSystemPromptFile,
 } from "./execution-infra.ts";
@@ -106,9 +101,19 @@ import type {
   TaskOutput,
 } from "./execution-infra.ts";
 
-// Failed attempt processes must be physically reclaimed before the outer retry
-// policy reuses their correlation identity for a replacement child.
+// Failed candidate processes must be physically reclaimed before a fallback
+// reuses their correlation identity for a replacement child.
 const attemptReclamations = new WeakMap<SingleResult, Promise<unknown>>();
+
+type AttemptSettlementCapability = "agent_settled" | "legacy" | "unknown";
+
+interface AttemptRecoveryFacts {
+  settlementCapability: AttemptSettlementCapability;
+  completedToolCount: number;
+  inFlightToolCount: number;
+}
+
+const attemptRecoveryFacts = new WeakMap<SingleResult, AttemptRecoveryFacts>();
 const INTERRUPTING_STEER_TIMEOUT_MS = 10_000;
 
 // ---------------------------------------------------------------------------
@@ -221,8 +226,14 @@ export async function runSingleTeammate(
     ? candidates
     : [undefined, ...implicitFallbacks];
   const attemptedModels: string[] = [];
+  const attemptedModelSet = new Set<string>();
+  const recordAttemptedModel = (model: string): void => {
+    if (attemptedModelSet.has(model)) return;
+    attemptedModelSet.add(model);
+    attemptedModels.push(model);
+  };
+  let resolvedDefaultModel: string | undefined;
   let lastResult: SingleResult | undefined;
-  let totalRetryCount = 0;
 
   const cancelAtBoundary = (phase: string): SingleResult => {
     const previousMessages = lastResult?.messages ?? [];
@@ -242,180 +253,147 @@ export async function runSingleTeammate(
 
   for (const modelToUse of modelCandidates) {
     if (options.signal?.aborted) return cancelAtBoundary("before model candidate launch");
+    if (modelToUse && modelToUse === resolvedDefaultModel) continue;
     const acquisition = modelToUse ? breaker.acquireCandidate(modelToUse) : undefined;
     if (acquisition && !acquisition.allowed) continue;
+    if (modelToUse) recordAttemptedModel(modelToUse);
 
     let settled = false;
-    try {
-      const maxRetries = acquisition?.state === "HALF_OPEN"
-        ? 0
-        : Math.max(0, NETWORK_RETRY_POLICY.maxRetries - totalRetryCount);
-      let retryCount = 0;
-      let candidateResult: SingleResult | undefined;
-
-      while (!options.signal?.aborted) {
-        if (modelToUse && !attemptedModels.includes(modelToUse)) attemptedModels.push(modelToUse);
-
-        // A failed candidate is not terminal while retry or fallback remains.
-        // Buffer lifecycle completion until the outer policy selects the
-        // authoritative attempt; successful wakeable children then stay open
-        // for later turn-complete callbacks.
-        let completionState: "buffering" | "forwarding" | "discarded" = "buffering";
-        const pendingCompletions: Array<{
-          result: SingleResult;
-          terminalStatus?: AgentTerminalStatus;
-        }> = [];
-        const attemptOptions: RunTeammateOptions = options.onTurnComplete
-          ? {
-              ...options,
-              onTurnComplete(result, terminalStatus) {
-                const effectiveStatus = terminalStatus
-                  ?? (options.signal?.aborted ? "terminated" : undefined);
-                if (completionState === "forwarding") publishTurnComplete(result, effectiveStatus);
-                else if (completionState === "buffering") {
-                  pendingCompletions.push({ result, terminalStatus: effectiveStatus });
-                }
-              },
+    let completionState: "buffering" | "forwarding" | "discarded" = "buffering";
+    const pendingCompletions: Array<{
+      result: SingleResult;
+      terminalStatus?: AgentTerminalStatus;
+    }> = [];
+    const attemptOptions: RunTeammateOptions = options.onTurnComplete
+      ? {
+          ...options,
+          onTurnComplete(result, terminalStatus) {
+            const effectiveStatus = terminalStatus
+              ?? (options.signal?.aborted ? "terminated" : undefined);
+            if (completionState === "forwarding") publishTurnComplete(result, effectiveStatus);
+            else if (completionState === "buffering") {
+              pendingCompletions.push({ result, terminalStatus: effectiveStatus });
             }
-          : options;
-        const commitCompletion = (): void => {
-          completionState = "forwarding";
-          for (const completion of pendingCompletions.splice(0)) {
-            publishTurnComplete(completion.result, completion.terminalStatus);
-          }
-        };
-        const discardCompletion = (): void => {
-          completionState = "discarded";
-          pendingCompletions.length = 0;
-        };
+          },
+        }
+      : options;
+    const commitCompletion = (): void => {
+      completionState = "forwarding";
+      for (const completion of pendingCompletions.splice(0)) {
+        publishTurnComplete(completion.result, completion.terminalStatus);
+      }
+    };
+    const discardCompletion = (): void => {
+      completionState = "discarded";
+      pendingCompletions.length = 0;
+    };
 
-        try {
-          candidateResult = await runSingleAttempt(
-            params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, attemptOptions,
-          );
-        } catch (error) {
-          discardCompletion();
-          throw error;
-        }
-        lastResult = candidateResult;
-        if (candidateResult.lifecyclePending !== true) {
-          candidateResult.terminalStatus ??= candidateResult.exitCode === 0 ? "completed" : "failed";
-        }
-        const error = resultFailureMessage(candidateResult.messages);
-        const toolCount = candidateResult.toolCount ?? 0;
-        const restartIsSafe = toolCount === 0;
-        const retryableFailure = candidateResult.exitCode !== 0 && isRetryableProviderError(error);
-        const fallbackFailure = candidateResult.exitCode !== 0 && isFallbackProviderError(error);
-        // Same-model restart retry requires a clean slate (no tool calls);
-        // Pi core handles in-process provider retry for the general case.
-        // Model fallback is always allowed: a different model restarting
-        // from the original prompt is safer than certain failure.
-        let retryable = retryableFailure && restartIsSafe;
-        let fallbackEligible = fallbackFailure;
-        if (fallbackEligible && !restartIsSafe) {
-          candidateResult.messages.push({
-            role: "system",
-            content:
-              `Model fallback after ${toolCount} child tool `
-              + `call${toolCount === 1 ? "" : "s"}; the next model candidate restarts from the original prompt.`,
-          });
-        }
-
-        if (candidateResult.exitCode === 0) {
-          if (acquisition?.allowed) { breaker.recordSuccess(acquisition); settled = true; }
-          candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
-          commitCompletion();
-          return candidateResult;
-        }
-
-        if (retryable || fallbackEligible) {
-          const reclamation = await attemptReclamations.get(candidateResult);
-          if (
-            reclamation
-            && typeof reclamation === "object"
-            && (reclamation as { status?: string }).status === "unreaped"
-          ) {
-            candidateResult.messages.push({
-              role: "system",
-              content:
-                `Teammate did not confirm reclamation of the failed child; `
-                + `retry/fallback was stopped to fence stale callbacks for correlationId=${correlationId}.`,
-            });
-            retryable = false;
-            fallbackEligible = false;
-          }
-        }
-        if (!retryable || retryCount >= maxRetries) {
-          if (fallbackEligible && acquisition?.allowed) { breaker.recordRetryableFailure(acquisition); settled = true; }
-          if (!fallbackEligible) {
-            if (acquisition?.allowed) { breaker.releaseCandidate(acquisition); settled = true; }
-            candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
-            commitCompletion();
-            return candidateResult;
-          }
-          discardCompletion();
-          break;
-        }
-
+    try {
+      let candidateResult: SingleResult;
+      try {
+        candidateResult = await runSingleAttempt(
+          params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, attemptOptions,
+        );
+      } catch (error) {
         discardCompletion();
-        retryCount += 1;
-        totalRetryCount += 1;
-        const delayMs = retryDelayMs(totalRetryCount);
-        options.onRetry?.({
-          correlationId,
-          attempt: totalRetryCount,
-          maxRetries: NETWORK_RETRY_POLICY.maxRetries,
-          delayMs,
-          nextRetryAt: Date.now() + delayMs,
-          error,
-        });
-        const ready = await (options.waitForRetry?.(delayMs, options.signal) ?? waitForRetryDelay(delayMs, options.signal));
-        if (!ready) {
-          if (options.signal?.aborted) {
-            if (acquisition?.allowed) { breaker.releaseCandidate(acquisition); settled = true; }
-            // Return a cancellation result, not the preceding provider failure:
-            // the run was stopped by an explicit abort during backoff, so the
-            // caller must not read the stale ECONNRESET as the cause. exitCode
-            // stays non-zero (the run did not complete), and the terminal
-            // status is "terminated" so lifecycle/event/cancel semantics are
-            // preserved. The cancellation line leads the transcript (that is
-            // what displayMessageForResult shows first); the original provider
-            // diagnostics stay behind it for detail, not as the headline.
-            const cancelledResult: SingleResult = {
-              ...candidateResult,
-              exitCode: 1,
-              messages: [
-                { role: "system", content: "Teammate run cancelled during retry backoff." },
-                ...candidateResult.messages,
-              ],
-              attemptedModels: attemptedModels.length > 1 ? attemptedModels : undefined,
-              terminalStatus: "terminated",
-            };
-            publishTurnComplete(cancelledResult, "terminated");
-            return cancelledResult;
-          }
-          break;
+        throw error;
+      }
+      lastResult = candidateResult;
+      if (modelToUse === undefined) {
+        try {
+          resolvedDefaultModel = resolveModelSpecifier(candidateResult.model, options.modelCapabilities);
+          recordAttemptedModel(resolvedDefaultModel);
+        } catch {
+          // Runtime-reported models outside the authenticated catalog cannot match an implicit candidate.
         }
+      }
+      if (candidateResult.lifecyclePending !== true) {
+        candidateResult.terminalStatus ??= candidateResult.exitCode === 0 ? "completed" : "failed";
+      }
+
+      if (candidateResult.exitCode === 0) {
+        if (acquisition?.allowed) {
+          breaker.recordSuccess(acquisition);
+          settled = true;
+        }
+        candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
+        commitCompletion();
+        return candidateResult;
       }
 
       if (options.signal?.aborted) {
-        if (acquisition?.allowed) { breaker.releaseCandidate(acquisition); settled = true; }
+        if (acquisition?.allowed) {
+          breaker.releaseCandidate(acquisition);
+          settled = true;
+        }
+        discardCompletion();
         return cancelAtBoundary("during model fallback handoff");
       }
-      if (!candidateResult) {
-        if (acquisition?.allowed) { breaker.releaseCandidate(acquisition); settled = true; }
+
+      const error = resultFailureMessage(candidateResult.messages);
+      const fallbackFailure = isFallbackProviderError(error);
+      const recoveryFacts = attemptRecoveryFacts.get(candidateResult);
+      const authoritativeFailure = recoveryFacts?.settlementCapability === "agent_settled";
+      const replayFenceClear = recoveryFacts !== undefined
+        && recoveryFacts.completedToolCount === 0
+        && recoveryFacts.inFlightToolCount === 0;
+      let fallbackEligible = fallbackFailure && authoritativeFailure && replayFenceClear;
+
+      if (fallbackFailure && !authoritativeFailure) {
+        candidateResult.messages.push({
+          role: "system",
+          content:
+            `Model fallback blocked because the child did not provide an authoritative agent_settled failure `
+            + `(capability=${recoveryFacts?.settlementCapability ?? "unknown"}). `
+            + `Legacy or interrupted child streams have degraded recovery capability and cannot be fresh-replayed safely.`,
+        });
+      } else if (fallbackFailure && !replayFenceClear) {
+        const completedTools = recoveryFacts?.completedToolCount ?? 0;
+        const inFlightTools = recoveryFacts?.inFlightToolCount ?? 0;
+        candidateResult.messages.push({
+          role: "system",
+          content:
+            `Model fallback blocked by the side-effect replay fence `
+            + `(completedTools=${completedTools}, inFlightTools=${inFlightTools}). `
+            + `A fresh model process could repeat a completed tool or a tool whose effect is unknown.`,
+        });
+      }
+
+      if (fallbackEligible) {
+        const reclamation = await attemptReclamations.get(candidateResult);
+        if (
+          reclamation
+          && typeof reclamation === "object"
+          && (reclamation as { status?: string }).status === "unreaped"
+        ) {
+          candidateResult.messages.push({
+            role: "system",
+            content:
+              `Teammate did not confirm reclamation of the failed child; `
+              + `model fallback was stopped to fence stale callbacks for correlationId=${correlationId}.`,
+          });
+          fallbackEligible = false;
+        }
+      }
+
+      if (fallbackEligible) {
+        if (acquisition?.allowed) {
+          breaker.recordRetryableFailure(acquisition);
+          settled = true;
+        }
+        discardCompletion();
         continue;
       }
-      if (!isFallbackModelError(candidateResult.messages)) {
-        if (acquisition?.allowed) { breaker.releaseCandidate(acquisition); settled = true; }
-        candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
-        publishTurnComplete(candidateResult);
-        return candidateResult;
+
+      if (acquisition?.allowed) {
+        breaker.releaseCandidate(acquisition);
+        settled = true;
       }
+      candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
+      commitCompletion();
+      return candidateResult;
     } finally {
-      // Safety net: if a HALF_OPEN trial was acquired but never settled
-      // (e.g. runSingleAttempt threw, or error-classification diverged),
-      // release it so the circuit does not stay stuck in HALF_OPEN forever.
+      // A HALF_OPEN acquisition must always be settled exactly once.
       if (!settled && acquisition?.allowed && acquisition.state === "HALF_OPEN") {
         breaker.releaseCandidate(acquisition);
       }
@@ -521,6 +499,10 @@ interface AttemptState {
   /** One-way latches; never reset. */
   receivedFirstActivity: boolean;
   initialResultPublished: boolean;
+  /** Recovery evidence used to fence any fresh-process model fallback. */
+  settlementCapability: AttemptSettlementCapability;
+  completedToolCount: number;
+  inFlightToolCount: number;
   /** Absorbing state: once terminal, queued child lines must not reopen a turn. */
   terminal: boolean;
 }
@@ -675,12 +657,24 @@ async function runSingleAttempt(
     completedCacheWriteTokens: 0,
     receivedFirstActivity: false,
     initialResultPublished: false,
+    settlementCapability: "unknown",
+    completedToolCount: 0,
+    inFlightToolCount: 0,
     terminal: false,
   };
 
   // AC8: Rich progress tracking
   const progress = createProgress(params.agent, startTime);
   progress.requestedModel = modelOverride ?? params.model ?? agentConfig.model;
+
+  const recordAttemptRecovery = (result: SingleResult): SingleResult => {
+    attemptRecoveryFacts.set(result, {
+      settlementCapability: state.settlementCapability,
+      completedToolCount: state.completedToolCount,
+      inFlightToolCount: state.inFlightToolCount,
+    });
+    return result;
+  };
 
   const updateProgressUsage = (): void => {
     const inputTokens = state.completedInputTokens + usage.inputTokens + pendingMessageUsage.inputTokens;
@@ -734,6 +728,7 @@ async function runSingleAttempt(
         correlationId,
         durationMs: Date.now() - startTime,
       };
+      recordAttemptRecovery(result);
       state.initialResultPublished = true;
       state.turnLifecycleSettled = true;
       resolve(result);
@@ -937,6 +932,7 @@ async function runSingleAttempt(
         attemptedModels: undefined,
         terminalStatus,
       };
+      recordAttemptRecovery(turnResult);
       if (terminateChild) attemptReclamations.set(turnResult, termination.outcome);
       if (!state.initialResultPublished) {
         state.initialResultPublished = true;
@@ -979,7 +975,7 @@ async function runSingleAttempt(
       clearAllTimers();
       progress.phase = "result-ready";
       state.initialResultPublished = true;
-      resolve({
+      const result = recordAttemptRecovery({
         agent: params.agent,
         name: params.name,
         task: params.task ?? "",
@@ -993,6 +989,7 @@ async function runSingleAttempt(
         wakeable,
         lifecyclePending: true,
       });
+      resolve(result);
     }
 
     /**
@@ -1169,6 +1166,33 @@ async function runSingleAttempt(
       }
     }
 
+    function recordResolvedModel(event: JsonLineEvent, msg: Record<string, unknown> | undefined): void {
+      const modelId = typeof msg?.model === "string" ? msg.model : event.model;
+      const provider = typeof msg?.provider === "string" ? msg.provider : event.provider;
+      const capabilities = options.modelCapabilities ?? [];
+      let reference = modelId;
+      if (typeof modelId === "string" && typeof provider === "string") {
+        const qualified = `${provider}/${modelId}`;
+        reference = capabilities.some((candidate) => candidate.id === qualified)
+          || !capabilities.some((candidate) => candidate.id === modelId)
+          ? qualified
+          : modelId;
+      }
+      // Runtime events usually report a bare model id without a provider. Upgrade
+      // it to the canonical provider/model id when exactly one capability matches,
+      // so status comparisons are not fooled by id formatting. Ambiguous or
+      // unknown ids are left untouched (this never throws).
+      if (typeof reference === "string" && !reference.includes("/")) {
+        const matches = capabilities
+          .map((candidate) => candidate.id)
+          .filter((candidate) => candidate.endsWith(`/${reference}`));
+        if (matches.length === 1) reference = matches[0];
+      }
+      if (!reference) return;
+      state.resolvedModel = reference;
+      progress.resolvedModel = reference;
+    }
+
     /** A completed assistant message: transcript, usage and resolved model. */
     function onAssistantMessage(event: JsonLineEvent): void {
       const msg = event.message as Record<string, unknown> | undefined;
@@ -1188,11 +1212,7 @@ async function runSingleAttempt(
         usage.turns += 1;
         updateProgressUsage();
       }
-      const messageModel = typeof msg?.model === "string" ? msg.model : event.model;
-      if (messageModel) {
-        state.resolvedModel = messageModel;
-        progress.resolvedModel = messageModel;
-      }
+      recordResolvedModel(event, msg);
       recordRuntimeEventError(event, event.type);
       options.onProgress?.(progress);
     }
@@ -1236,6 +1256,7 @@ async function runSingleAttempt(
         EXECUTION_BUFFER_LIMITS.toolNameBytes,
       );
       progress.recentTools.push({ name: toolName, status: "running" });
+      state.inFlightToolCount += 1;
       progress.phase = "tool-execution";
       if (progress.recentTools.length > EXECUTION_BUFFER_LIMITS.toolItems) {
         progress.recentTools.splice(
@@ -1256,6 +1277,8 @@ async function runSingleAttempt(
       }
       progress.toolCount += 1;
       state.turnToolCount += 1;
+      state.completedToolCount += 1;
+      state.inFlightToolCount = Math.max(0, state.inFlightToolCount - 1);
       const lastTool = progress.recentTools[progress.recentTools.length - 1];
       if (lastTool && lastTool.status === "running") {
         lastTool.status = "completed";
@@ -1325,11 +1348,7 @@ async function runSingleAttempt(
           progress.lastMessage = text;
         }
       }
-      const messageModel = typeof msg?.model === "string" ? msg.model : event.model;
-      if (messageModel) {
-        state.resolvedModel = messageModel;
-        progress.resolvedModel = messageModel;
-      }
+      recordResolvedModel(event, msg);
       recordRuntimeEventError(event, "turn_end");
       if (isPiResultReadyTurn(event)) {
         progress.resultReadyAt = Date.now();
@@ -1397,11 +1416,15 @@ async function runSingleAttempt(
       }
       progress.phase = "settling";
       options.onProgress?.(progress);
-      if (typeof event.willRetry !== "boolean") settleAgentSession();
+      if (typeof event.willRetry !== "boolean") {
+        state.settlementCapability = "legacy";
+        settleAgentSession();
+      }
     }
 
     /** Pi's authoritative AgentSession idle boundary. */
     function onAgentSettled(): void {
+      state.settlementCapability = "agent_settled";
       if (pendingInterruptingSteer) {
         progress.status = "running";
         progress.phase = "continuing";
@@ -1674,6 +1697,7 @@ async function runSingleAttempt(
           wakeable: false,
           structuredOutput,
         };
+        recordAttemptRecovery(result);
         state.initialResultPublished = true;
         state.turnLifecycleSettled = true;
         state.terminal = true;
@@ -1729,6 +1753,7 @@ async function runSingleAttempt(
           toolCount: progress.toolCount,
           wakeable: false,
         };
+        recordAttemptRecovery(result);
         state.initialResultPublished = true;
         state.turnLifecycleSettled = true;
         state.terminal = true;

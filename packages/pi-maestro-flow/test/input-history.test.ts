@@ -242,6 +242,47 @@ test("an editor another extension already owns is left alone", async () => {
   }
 });
 
+test("pi restoring the default editor on session switch lets the next session reinstall", async () => {
+  const { cwd, rootDir, cleanup } = await workspace();
+  try {
+    const history = createInputHistory({ rootDir, debounceMs: 0 });
+    const host = context(cwd);
+    await history.onSessionStart(host.ctx);
+    host.build()?.addToHistory("typed before the switch");
+
+    // pi 在 /new、/resume、/fork 时会先发 session_shutdown（flush），再通过
+    // resetExtensionUI 把自定义编辑器还原成默认编辑器（setEditorComponent(undefined)）。
+    await history.onSessionShutdown();
+    host.ctx.ui.setEditorComponent(undefined);
+
+    // 新 session 的 session_start 必须把 HistoryEditor 重新装回来，而不是永远丢给默认编辑器。
+    await history.onSessionStart(host.ctx);
+    const reinstalled = host.build();
+    assert.ok(reinstalled);
+    reinstalled.handleInput(UP);
+    assert.equal(reinstalled.getText(), "typed before the switch");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("an editor we installed stays ours across session starts", async () => {
+  const { cwd, rootDir, cleanup } = await workspace();
+  try {
+    const history = createInputHistory({ rootDir, debounceMs: 0 });
+    const host = context(cwd);
+    await history.onSessionStart(host.ctx);
+    const first = host.ctx.ui.getEditorComponent();
+    assert.ok(first);
+
+    // /new 到另一个 cwd，但 pi 没有重置编辑器：不得重复替换同一个槽位。
+    await history.onSessionStart({ ...host.ctx, cwd: join(cwd, "nested") });
+    assert.equal(host.ctx.ui.getEditorComponent(), first);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("a second session in another workspace swaps the store behind the same editor", async () => {
   const { cwd, rootDir, cleanup } = await workspace();
   try {
@@ -415,25 +456,24 @@ test("browsing from a half-typed prompt gives it back on the way down", () => {
 
 test("the banner shows only while browsing", () => {
   const { editor: instance } = editor(["newest", "older"]);
-  assert.equal(instance.render(40).length, instance.render(40).length);
-  assert.ok(!instance.render(40)[0]?.includes("History"));
+  assert.ok(!instance.render(40).at(-1)?.includes("History"));
 
   instance.handleInput(UP);
-  assert.match(instance.render(40)[0] ?? "", /── History 1\/2 ─+$/);
+  assert.match(instance.render(40).at(-1) ?? "", /── History 1\/2 ─+$/);
   instance.handleInput(UP);
-  assert.match(instance.render(40)[0] ?? "", /── History 2\/2 ─+$/);
+  assert.match(instance.render(40).at(-1) ?? "", /── History 2\/2 ─+$/);
 
   // Typing leaves history behind, so the banner goes with it.
   instance.handleInput("x");
-  assert.ok(!instance.render(40)[0]?.includes("History"));
+  assert.ok(!instance.render(40).at(-1)?.includes("History"));
 });
 
 test("setText from outside the editor ends browsing", () => {
   const { editor: instance } = editor(["newest"]);
   instance.handleInput(UP);
-  assert.ok(instance.render(40)[0]?.includes("History"));
+  assert.ok(instance.render(40).at(-1)?.includes("History"));
   instance.setText("injected by another extension");
-  assert.ok(!instance.render(40)[0]?.includes("History"));
+  assert.ok(!instance.render(40).at(-1)?.includes("History"));
 });
 
 test("the banner fills the editor width and degrades on narrow terminals", () => {

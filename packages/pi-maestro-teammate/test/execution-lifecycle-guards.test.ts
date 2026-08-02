@@ -475,7 +475,7 @@ test("agent_settled waits through retry and compaction phases", async () => {
   assert.equal(completions[0].exitCode, 0);
 });
 
-test("outer retry reclaims a failed fresh RPC child before reusing its correlation identity", async () => {
+test("modern fallback reclaims a settled failed child before reusing its correlation identity", async () => {
   let spawns = 0;
   let alive = 0;
   let maxAlive = 0;
@@ -502,7 +502,7 @@ test("outer retry reclaims a failed fresh RPC child before reusing its correlati
       exitCode: null,
       signalCode: null,
       pid: undefined,
-      kill() { queueMicrotask(close); return true; },
+      kill() { close(); return true; },
     });
     queueMicrotask(() => {
       if (attempt === 0) {
@@ -513,21 +513,33 @@ test("outer retry reclaims a failed fresh RPC child before reusing its correlati
         stdout.write(line({ type: "agent_end", willRetry: false }));
         stdout.write(line({ type: "agent_settled" }));
       } else {
-        stdout.write(line(resultReadyTurnEnd("retry succeeded")));
-        stdout.write(line({ type: "agent_end" }));
+        stdout.write(line(resultReadyTurnEnd("fallback succeeded")));
+        stdout.write(line({ type: "agent_end", willRetry: false }));
+        stdout.write(line({ type: "agent_settled" }));
       }
     });
     return child;
   }) as unknown as SpawnSeam;
 
   const result = await runSingleTeammate(
-    { agent: "general", task: "retry safely", context: "fresh" },
-    { baseCwd: process.cwd(), spawnChildProcess, waitForRetry: async () => true },
+    {
+      agent: "general",
+      task: "fallback safely",
+      model: "provider/primary",
+      fallbackModels: ["provider/backup"],
+      context: "fresh",
+    },
+    {
+      baseCwd: process.cwd(),
+      modelCapabilities: [{ id: "provider/primary" }, { id: "provider/backup" }],
+      spawnChildProcess,
+    },
   );
 
   assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.attemptedModels, ["provider/primary", "provider/backup"]);
   assert.equal(spawns, 2);
-  assert.equal(maxAlive, 1, "replacement must wait for physical reclamation of the failed child");
+  assert.equal(maxAlive, 1, "fallback must wait for physical reclamation of the failed child");
 });
 
 test("output-limit: length agent_end is not accepted as a successful teammate result", async () => {
@@ -727,6 +739,69 @@ test("OBS-7: a clean exit is never annotated as an abnormal termination", async 
 
   assert.equal(result.exitCode, 0);
   assert.equal(result.messages.some((m) => /exited abnormally/.test(m.content)), false);
+});
+
+test("a bare runtime model id is normalized to its canonical provider/model id", async () => {
+  const spawnChildProcess = (() => {
+    const handle = createFakeChild();
+    queueMicrotask(() => {
+      handle.stdout.write(line({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          model: "gpt-5.6-sol", // runtime events report a bare id without provider
+          content: [{ type: "text", text: "resolved" }],
+        },
+      }));
+      setTimeout(() => handle.close(0, null), 10);
+    });
+    return handle.child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "report model", context: "fresh", timeoutMs: 5_000 },
+    {
+      baseCwd: process.cwd(),
+      spawnChildProcess,
+      modelCapabilities: [{ id: "maestro-openai/gpt-5.6-sol" }],
+    },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.model, "maestro-openai/gpt-5.6-sol");
+});
+
+test("an ambiguous bare model id stays bare instead of guessing a provider", async () => {
+  const spawnChildProcess = (() => {
+    const handle = createFakeChild();
+    queueMicrotask(() => {
+      handle.stdout.write(line({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          model: "gpt-5.6-sol",
+          content: [{ type: "text", text: "resolved" }],
+        },
+      }));
+      setTimeout(() => handle.close(0, null), 10);
+    });
+    return handle.child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "report model", context: "fresh", timeoutMs: 5_000 },
+    {
+      baseCwd: process.cwd(),
+      spawnChildProcess,
+      modelCapabilities: [
+        { id: "maestro-openai/gpt-5.6-sol" },
+        { id: "maestro-qwen/gpt-5.6-sol" },
+      ],
+    },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.model, "gpt-5.6-sol");
 });
 
 test("OBS-7: stderr-only failures are reported once, not duplicated", async () => {

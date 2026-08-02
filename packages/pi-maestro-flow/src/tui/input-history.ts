@@ -148,6 +148,8 @@ export type InputHistoryContext = Pick<ExtensionContext, "cwd" | "hasUI"> & {
   ui: Pick<ExtensionContext["ui"], "notify" | "getEditorComponent" | "setEditorComponent">;
 };
 
+type EditorFactory = Parameters<InputHistoryContext["ui"]["setEditorComponent"]>[0];
+
 export interface InputHistory {
   onSessionStart(ctx: InputHistoryContext): Promise<void>;
   onSessionShutdown(): Promise<void>;
@@ -159,11 +161,11 @@ export interface InputHistory {
  */
 export function createInputHistory(storeOptions: InputHistoryStoreOptions = {}): InputHistory {
   let store: InputHistoryStore | undefined;
-  let installed = false;
+  let ourFactory: EditorFactory | undefined;
   let errorReported = false;
 
   return {
-    /** Load this workspace's history, and claim the editor slot on the first interactive session. */
+    /** Load this workspace's history, and claim the editor slot whenever it is free. */
     async onSessionStart(ctx: InputHistoryContext): Promise<void> {
       if (!ctx.hasUI) return;
       const next = new InputHistoryStore(ctx.cwd, {
@@ -177,19 +179,23 @@ export function createInputHistory(storeOptions: InputHistoryStoreOptions = {}):
       await next.load();
       // A later session in another cwd gets its own store behind the same editor.
       store = next;
-      if (installed) return;
-      // Another extension already owns the editor; replacing it would drop its behaviour.
-      if (ctx.ui.getEditorComponent()) return;
-      ctx.ui.setEditorComponent((tui, theme, keybindings) =>
+      // pi restores the default editor on every session switch (/new, /resume, /fork,
+      // quit-rebind) via resetExtensionUI in teardownCurrent, so a one-shot latch would
+      // silently lose the persistent editor after the first switch. Compare the slot
+      // identity instead: keep an editor we installed, defer to a foreign one, and
+      // re-claim when pi reset the slot to undefined.
+      const owner = ctx.ui.getEditorComponent();
+      if (ourFactory !== undefined && owner === ourFactory) return;
+      if (owner !== undefined) return;
+      ourFactory = (tui, theme, keybindings) =>
         new HistoryEditor(tui, theme, keybindings, {
           getEntries: () => store?.list() ?? [],
           record: (text) => store?.record(text),
-        }),
-      );
-      installed = true;
+        });
+      ctx.ui.setEditorComponent(ourFactory);
     },
 
-    /** The editor stays installed across `/new`; only the pending write has to land. */
+    /** Only the pending write has to land; the editor re-claims itself next session start. */
     async onSessionShutdown(): Promise<void> {
       await store?.flush();
     },

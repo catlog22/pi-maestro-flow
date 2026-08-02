@@ -6,24 +6,45 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ModelCircuitBreaker } from "pi-maestro-teammate/v1/retry";
 import {
+  consumeModelFailoverSettlement,
   getGlobalModelFailoverPath,
   getProjectModelFailoverPath,
   loadModelFailoverConfig,
   registerModelFailover,
+  snapshotModelFailoverSettlement,
 } from "../src/providers/model-failover.ts";
 
 type Handler = (event: any, ctx: ExtensionContext) => unknown;
 
+class TrackingModelCircuitBreaker extends ModelCircuitBreaker {
+  readonly acquiredModels: string[] = [];
+
+  override acquireCandidate(model: string) {
+    this.acquiredModels.push(model);
+    return super.acquireCandidate(model);
+  }
+}
+
 function harness(
   cwd: string,
   breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 }),
-  options: { multimodal?: string[]; visionAnalyzer?: any; hasPendingMessages?: boolean } = {},
+  options: {
+    multimodal?: string[];
+    visionAnalyzer?: any;
+    hasPendingMessages?: boolean;
+    signal?: AbortSignal;
+    sendMessageError?: Error;
+  } = {},
 ) {
   const handlers = new Map<string, Handler[]>();
   const commands: string[] = [];
   const selected: string[] = [];
   const notifications: string[] = [];
   const sentMessages: Array<{ content: string; options?: { deliverAs?: string } }> = [];
+  const handoffs: Array<{
+    message: { customType: string; content: string; display: boolean; details?: unknown };
+    options?: { triggerTurn?: boolean; deliverAs?: string };
+  }> = [];
   const multimodal = new Set(options.multimodal ?? []);
   const models = [
     { provider: "provider", id: "primary", input: multimodal.has("provider/primary") ? ["text", "image"] : ["text"] },
@@ -37,6 +58,7 @@ function harness(
       getAvailable: () => models,
     },
     hasPendingMessages: () => options.hasPendingMessages ?? false,
+    signal: options.signal,
     ui: {
       notify(message: string) { notifications.push(message); },
     },
@@ -56,6 +78,13 @@ function harness(
     sendUserMessage(content: string, messageOptions?: { deliverAs?: string }) {
       sentMessages.push({ content, options: messageOptions });
     },
+    sendMessage(
+      message: { customType: string; content: string; display: boolean; details?: unknown },
+      messageOptions?: { triggerTurn?: boolean; deliverAs?: string },
+    ) {
+      if (options.sendMessageError) throw options.sendMessageError;
+      handoffs.push({ message, options: messageOptions });
+    },
   } as unknown as ExtensionAPI;
 
   registerModelFailover(pi, {
@@ -69,7 +98,10 @@ function harness(
     for (const handler of handlers.get(event) ?? []) result = await handler({ type: event, ...payload }, ctx);
     return result;
   };
-  return { breaker, commands, ctx, emit, notifications, selected, sentMessages };
+  const flushScheduledHandoff = async (): Promise<void> => {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  };
+  return { breaker, commands, ctx, emit, flushScheduledHandoff, handoffs, notifications, selected, sentMessages };
 }
 
 function writeProjectConfig(cwd: string, value: unknown): void {
@@ -143,6 +175,44 @@ test("attached images prefer a healthy multimodal fallback", async () => {
   } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
 });
 
+test("blocked multimodal attached-image candidates delegate without touching healthy text fallbacks", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-vision-blocked-"));
+  try {
+    writeProjectConfig(cwd, {
+      enabled: false,
+      fallbackModels: { "provider/primary": ["provider/backup", "provider/last"] },
+    });
+    const breaker = new TrackingModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
+    const blocked = breaker.acquireCandidate("provider/last");
+    assert.equal(blocked.allowed, true);
+    if (blocked.allowed) breaker.recordRetryableFailure(blocked);
+    breaker.acquiredModels.length = 0;
+
+    let delegated = 0;
+    const runtime = harness(cwd, breaker, {
+      multimodal: ["provider/last"],
+      visionAnalyzer: async () => {
+        delegated += 1;
+        return { text: "Delegated image context.", model: "helper/vision", cached: false };
+      },
+    });
+    await runtime.emit("session_start");
+    const result = await runtime.emit("before_agent_start", {
+      prompt: "inspect",
+      images: [{ type: "image", data: Buffer.from("image").toString("base64"), mimeType: "image/png" }],
+    }) as { message?: { content?: string } };
+
+    assert.equal(delegated, 1);
+    assert.match(result.message?.content ?? "", /Delegated image context/);
+    assert.deepEqual(breaker.acquiredModels, ["provider/last"]);
+    assert.deepEqual(runtime.selected, []);
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/primary"), undefined);
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/backup"), undefined);
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/last")?.halfOpenTrialInProgress, false);
+    await runtime.emit("session_shutdown");
+  } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+});
+
 test("attached images inject delegated analysis when the configured chain is text-only", async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-helper-"));
   try {
@@ -165,7 +235,7 @@ test("attached images inject delegated analysis when the configured chain is tex
   } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
 });
 
-test("retryable agent failure switches model before Pi performs its own continuation", async () => {
+test("agent_end is observational and retry exhaustion falls back only after settlement", async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
   try {
     writeProjectConfig(cwd, {
@@ -183,13 +253,36 @@ test("retryable agent failure switches model before Pi performs its own continua
       messages: [{ role: "assistant", stopReason: "error", errorMessage: "Provider overloaded: 503" }],
     });
 
+    assert.deepEqual(runtime.selected, []);
+    assert.equal(runtime.handoffs.length, 0);
+    assert.equal(runtime.sentMessages.length, 0);
+    assert.equal(runtime.breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "CLOSED");
+
+    await runtime.emit("agent_settled");
     assert.deepEqual(runtime.selected, ["provider/backup"]);
-    assert.match(runtime.notifications[0] ?? "", /continuing the turn with provider\/backup/);
-    assert.equal(runtime.sentMessages.length, 1);
-    assert.equal(runtime.sentMessages[0]?.options?.deliverAs, "followUp");
-    assert.match(runtime.sentMessages[0]?.content ?? "", /Retry the original user request/);
+    assert.equal(runtime.sentMessages.length, 0);
+    assert.equal(runtime.handoffs.length, 0);
     assert.equal(runtime.breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "OPEN");
 
+    const arbitration = snapshotModelFailoverSettlement();
+    assert.equal(arbitration?.outcome, "fallback-scheduled");
+    assert.equal(arbitration?.fallbackModel, "provider/backup");
+
+    // A duplicate old-run settlement cannot enqueue another fallback handoff
+    // while the post-settlement macrotask owns the pending recovery.
+    await runtime.emit("agent_settled");
+    assert.equal(runtime.handoffs.length, 0);
+
+    await runtime.flushScheduledHandoff();
+    assert.equal(runtime.handoffs.length, 1);
+    assert.deepEqual(runtime.handoffs[0]?.options, { triggerTurn: true });
+    assert.match(runtime.handoffs[0]?.message.content ?? "", /Retry the original user request/);
+    assert.equal(consumeModelFailoverSettlement("stale-id"), undefined);
+    assert.equal(consumeModelFailoverSettlement(arbitration?.recoveryId)?.outcome, "fallback-scheduled");
+    assert.equal(snapshotModelFailoverSettlement(), undefined);
+
+    // Hidden custom triggerTurn does not emit before_agent_start; the handoff
+    // macrotask already transferred the fallback acquisition to this run.
     await runtime.emit("turn_start", { turnIndex: 1 });
     await runtime.emit("message_end", {
       message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] },
@@ -199,12 +292,78 @@ test("retryable agent failure switches model before Pi performs its own continua
     });
     await runtime.emit("agent_settled");
     assert.equal(runtime.breaker.snapshot().find((entry) => entry.model === "provider/backup")?.state, "CLOSED");
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "success");
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
 });
 
-test("a bare terminated transport error switches model and continues the turn", async () => {
+test("fallback-only quota exhaustion advances the chain at settlement", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
+  try {
+    writeProjectConfig(cwd, {
+      enabled: true,
+      fallbackModels: { "provider/primary": ["provider/backup"] },
+    });
+    const runtime = harness(cwd);
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "402: Insufficient Balance" }],
+    });
+
+    assert.deepEqual(runtime.selected, []);
+    assert.equal(runtime.handoffs.length, 0);
+    await runtime.emit("agent_settled");
+    assert.deepEqual(runtime.selected, ["provider/backup"]);
+    assert.equal(runtime.sentMessages.length, 0);
+    assert.equal(runtime.handoffs.length, 0);
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "fallback-scheduled");
+    await runtime.flushScheduledHandoff();
+    assert.equal(runtime.handoffs.length, 1);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("no fallback chain configured: implicit candidates advance one settled run at a time", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
+  try {
+    writeProjectConfig(cwd, { enabled: true, fallbackModels: {} });
+    const runtime = harness(cwd);
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "Provider returned error: 500" }],
+    });
+
+    assert.deepEqual(runtime.selected, []);
+    await runtime.emit("agent_settled");
+    assert.deepEqual(runtime.selected, ["provider/backup"]);
+    assert.equal(runtime.handoffs.length, 0);
+    await runtime.flushScheduledHandoff();
+    assert.equal(runtime.handoffs.length, 1);
+
+    // Hidden custom triggerTurn starts the selected fallback without a
+    // before_agent_start event.
+    await runtime.emit("turn_start", { turnIndex: 1 });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "Provider returned error: 500" }],
+    });
+    assert.deepEqual(runtime.selected, ["provider/backup"]);
+    await runtime.emit("agent_settled");
+    assert.deepEqual(runtime.selected, ["provider/backup", "provider/last"]);
+    assert.equal(runtime.handoffs.length, 1);
+    await runtime.flushScheduledHandoff();
+    assert.equal(runtime.handoffs.length, 2);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a bare terminated transport error schedules fallback only after settlement", async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
   try {
     writeProjectConfig(cwd, {
@@ -219,32 +378,101 @@ test("a bare terminated transport error switches model and continues the turn", 
       messages: [{ role: "assistant", stopReason: "error", errorMessage: "Error: terminated" }],
     });
 
+    assert.deepEqual(runtime.selected, []);
+    await runtime.emit("agent_settled");
     assert.deepEqual(runtime.selected, ["provider/backup"]);
-    assert.equal(runtime.sentMessages.length, 1);
-    assert.match(runtime.notifications[0] ?? "", /continuing the turn with provider\/backup/);
+    assert.equal(runtime.sentMessages.length, 0);
+    assert.equal(runtime.handoffs.length, 0);
+    await runtime.flushScheduledHandoff();
+    assert.equal(runtime.handoffs.length, 1);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
 });
 
-test("queued messages suppress the failover continuation because Pi already continues", async () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
+test("scheduled fallback handoff is inert after shutdown or supersession", async () => {
+  for (const invalidate of ["shutdown", "supersede"] as const) {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `pi-model-failover-${invalidate}-`));
+    try {
+      writeProjectConfig(cwd, {
+        enabled: true,
+        fallbackModels: { "provider/primary": ["provider/backup"] },
+      });
+      const runtime = harness(cwd);
+      await runtime.emit("session_start");
+      await runtime.emit("before_agent_start", { prompt: "work" });
+      await runtime.emit("turn_start", { turnIndex: 0 });
+      await runtime.emit("agent_end", {
+        messages: [{ role: "assistant", stopReason: "error", errorMessage: "fetch failed" }],
+      });
+      await runtime.emit("agent_settled");
+      assert.equal(runtime.handoffs.length, 0);
+
+      if (invalidate === "shutdown") await runtime.emit("session_shutdown");
+      else await runtime.emit("before_agent_start", { prompt: "new user request" });
+      await runtime.flushScheduledHandoff();
+
+      assert.equal(runtime.handoffs.length, 0);
+      if (invalidate === "supersede") await runtime.emit("session_shutdown");
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  }
+});
+
+test("synchronous scheduled handoff failure releases fallback and publishes failed arbitration", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-send-failure-"));
   try {
     writeProjectConfig(cwd, {
       enabled: true,
       fallbackModels: { "provider/primary": ["provider/backup"] },
     });
-    const runtime = harness(cwd, undefined, { hasPendingMessages: true });
+    const runtime = harness(cwd, undefined, { sendMessageError: new Error("send failed") });
     await runtime.emit("session_start");
     await runtime.emit("before_agent_start", { prompt: "work" });
     await runtime.emit("turn_start", { turnIndex: 0 });
     await runtime.emit("agent_end", {
       messages: [{ role: "assistant", stopReason: "error", errorMessage: "fetch failed" }],
     });
+    await runtime.emit("agent_settled");
 
-    assert.deepEqual(runtime.selected, ["provider/backup"]);
+    assert.equal(runtime.handoffs.length, 0);
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "fallback-scheduled");
+    await runtime.flushScheduledHandoff();
+    assert.equal(runtime.handoffs.length, 0);
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "failed");
+    assert.match(snapshotModelFailoverSettlement()?.failure ?? "", /send failed/);
+    assert.equal(runtime.breaker.snapshot().find((entry) => entry.model === "provider/backup")?.state, "CLOSED");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a successful native retry supersedes an earlier agent_end failure", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
+  try {
+    writeProjectConfig(cwd, {
+      enabled: true,
+      fallbackModels: { "provider/primary": ["provider/backup"] },
+    });
+    const runtime = harness(cwd);
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "fetch failed" }],
+    });
+    await runtime.emit("after_provider_response", { status: 200, headers: {} });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] }],
+    });
+    await runtime.emit("agent_settled");
+
+    assert.deepEqual(runtime.selected, []);
+    assert.equal(runtime.handoffs.length, 0);
     assert.equal(runtime.sentMessages.length, 0);
-    assert.match(runtime.notifications[0] ?? "", /switched to provider\/backup for the next turn/);
+    assert.equal(runtime.breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "CLOSED");
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "success");
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
@@ -291,7 +519,9 @@ test("non-retryable authentication failures do not switch or poison model health
 
     assert.deepEqual(runtime.selected, []);
     assert.equal(runtime.sentMessages.length, 0);
+    assert.equal(runtime.handoffs.length, 0);
     assert.equal(runtime.breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "CLOSED");
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "failed");
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
@@ -346,28 +576,83 @@ test("open circuit with no healthy fallback emits a warning notification", async
   }
 });
 
-test("agent_end releases the old acquisition when replacing active with a fallback", async () => {
+test("completed tool effects block a fresh fallback replay after settlement", async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
   try {
     writeProjectConfig(cwd, {
       enabled: true,
       fallbackModels: { "provider/primary": ["provider/backup"] },
     });
-    const breaker = new ModelCircuitBreaker({ threshold: 2, cooldownMs: 60_000 });
-    const runtime = harness(cwd, breaker);
+    const runtime = harness(cwd);
     await runtime.emit("session_start");
     await runtime.emit("before_agent_start", { prompt: "work" });
-    // Do NOT emit turn_start — active.used stays false.
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await runtime.emit("tool_execution_start", { toolCallId: "tool-1", toolName: "write", args: {} });
+    await runtime.emit("tool_execution_end", { toolCallId: "tool-1", toolName: "write", result: {}, isError: false });
     await runtime.emit("agent_end", {
       messages: [{ role: "assistant", stopReason: "error", errorMessage: "Provider overloaded: 503" }],
     });
 
-    // The old primary acquisition should have been released (not leaked).
-    // With threshold=2 and only a release (not a failure record), the primary
-    // circuit must still be CLOSED.
-    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "CLOSED");
-    // The fallback should have been selected.
-    assert.deepEqual(runtime.selected, ["provider/backup"]);
+    assert.deepEqual(runtime.selected, []);
+    await runtime.emit("agent_settled");
+    assert.deepEqual(runtime.selected, []);
+    assert.equal(runtime.handoffs.length, 0);
+    assert.equal(runtime.breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "OPEN");
+    assert.deepEqual(snapshotModelFailoverSettlement()?.replayFence.completedTools, ["write"]);
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "replay-blocked");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("unknown tool effects block fallback replay", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
+  try {
+    writeProjectConfig(cwd, {
+      enabled: true,
+      fallbackModels: { "provider/primary": ["provider/backup"] },
+    });
+    const runtime = harness(cwd);
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await runtime.emit("tool_execution_start", { toolCallId: "tool-unknown", toolName: "bash", args: {} });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "fetch failed" }],
+    });
+    await runtime.emit("agent_settled");
+
+    assert.deepEqual(runtime.selected, []);
+    assert.equal(runtime.handoffs.length, 0);
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "replay-blocked");
+    assert.match(snapshotModelFailoverSettlement()?.replayFence.blockedReason ?? "", /could not be confirmed/);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("cancellation wins settlement arbitration without charging or falling back", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
+  try {
+    writeProjectConfig(cwd, {
+      enabled: true,
+      fallbackModels: { "provider/primary": ["provider/backup"] },
+    });
+    const controller = new AbortController();
+    const runtime = harness(cwd, undefined, { signal: controller.signal });
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "fetch failed" }],
+    });
+    controller.abort();
+    await runtime.emit("agent_settled");
+
+    assert.deepEqual(runtime.selected, []);
+    assert.equal(runtime.handoffs.length, 0);
+    assert.equal(runtime.breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "CLOSED");
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "cancelled");
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
@@ -388,6 +673,9 @@ test("image-triggered multimodal switch restores the original model on settle", 
     });
     assert.deepEqual(runtime.selected, ["provider/last"]);
     await runtime.emit("turn_start", { turnIndex: 0 });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] }],
+    });
     await runtime.emit("agent_settled");
     // The multimodal switch must be undone after the turn settles.
     assert.deepEqual(runtime.selected, ["provider/last", "provider/primary"]);

@@ -26,7 +26,12 @@ function fakeChild(): ChildProcess {
     exitCode: null,
     signalCode: null,
     pid: undefined,
-    kill() { return true; },
+    kill() {
+      Object.assign(child, { exitCode: 0 });
+      child.emit("exit", 0, null);
+      child.emit("close", 0, null);
+      return true;
+    },
   });
   return child;
 }
@@ -70,8 +75,9 @@ test("dependency-skipped DAG tasks publish a synthetic terminal completion", asy
   assert.equal(completions.find(({ result }) => result.correlationId === "dependent-cid")?.status, "failed");
 });
 
-test("cancelling retry backoff preserves terminated terminal classification", async () => {
+test("child process failures do not enter an outer retry backoff", async () => {
   let spawns = 0;
+  let retryCallbacks = 0;
   const controller = new AbortController();
   const completions: Array<{ result: SingleResult; status?: AgentTerminalStatus }> = [];
   const spawnChildProcess = (() => {
@@ -82,22 +88,22 @@ test("cancelling retry backoff preserves terminated terminal classification", as
   }) as unknown as SpawnSeam;
 
   const result = await runSingleTeammate(
-    { agent: "general", task: "retry then cancel", context: "fresh" },
+    { agent: "general", task: "let Pi own retry", context: "fresh" },
     {
       baseCwd: process.cwd(),
       signal: controller.signal,
       spawnChildProcess,
-      onRetry() { controller.abort(); },
-      async waitForRetry() { return false; },
+      onRetry() { retryCallbacks += 1; },
       onTurnComplete(entry, status) { completions.push({ result: entry, status }); },
     },
   );
 
   assert.equal(spawns, 1);
+  assert.equal(retryCallbacks, 0);
+  assert.equal(controller.signal.aborted, false);
   assert.equal(result.exitCode, 1);
   assert.equal(completions.length, 1);
-  assert.equal(completions[0].status, "terminated");
-  assert.equal(completions[0].result.correlationId, result.correlationId);
+  assert.equal(completions[0].status, "failed");
 });
 
 async function assertTerminalScenario(
@@ -198,9 +204,9 @@ test("all pre-execution graph rejections publish synthetic terminal completions"
   }
 });
 
-test("P3: cancelling retry backoff returns a cancellation result, not the provider error", async () => {
+test("provider failure returns directly without an outer retry cancellation phase", async () => {
   let spawns = 0;
-  const controller = new AbortController();
+  let retryCallbacks = 0;
   const spawnChildProcess = (() => {
     spawns += 1;
     const child = fakeChild();
@@ -209,25 +215,19 @@ test("P3: cancelling retry backoff returns a cancellation result, not the provid
   }) as unknown as SpawnSeam;
 
   const result = await runSingleTeammate(
-    { agent: "general", task: "retry then cancel", context: "fresh" },
+    { agent: "general", task: "single process failure", context: "fresh" },
     {
       baseCwd: process.cwd(),
-      signal: controller.signal,
       spawnChildProcess,
-      onRetry() { controller.abort(); },
-      async waitForRetry() { return false; },
+      onRetry() { retryCallbacks += 1; },
     },
   );
 
   assert.equal(spawns, 1);
+  assert.equal(retryCallbacks, 0);
   assert.equal(result.exitCode, 1);
-  assert.match(result.messages[0].content, /cancelled during retry backoff/);
-  // The cancellation leads the transcript; the provider diagnostics stay
-  // behind it so the caller still has the root cause for detail.
-  assert.ok(
-    result.messages.some((m) => /ECONNRESET/.test(m.content)),
-    "the original provider failure must remain in the transcript for detail",
-  );
+  assert.match(result.messages[0].content, /ECONNRESET/);
+  assert.doesNotMatch(result.messages.map((message) => message.content).join("\n"), /retry backoff/i);
 });
 
 test("cancelling between fallback candidates returns terminated cancellation", async () => {
@@ -248,7 +248,8 @@ test("cancelling between fallback candidates returns terminated cancellation", a
         type: "message_end",
         message: { role: "assistant", stopReason: "error", errorMessage: "402: Insufficient Balance" },
       })}\n`);
-      (child.stdout as PassThrough).write(`${JSON.stringify({ type: "agent_end" })}\n`);
+      (child.stdout as PassThrough).write(`${JSON.stringify({ type: "agent_end", willRetry: false })}\n`);
+      (child.stdout as PassThrough).write(`${JSON.stringify({ type: "agent_settled" })}\n`);
     });
     return child;
   }) as unknown as SpawnSeam;
@@ -265,7 +266,10 @@ test("cancelling between fallback candidates returns terminated cancellation", a
   });
 
   assert.deepEqual(launchedModels, ["provider/primary"]);
-  assert.match(result.messages[0].content, /cancelled during model fallback handoff/i);
+  assert.match(
+    result.messages[0].content,
+    /cancelled (?:before model candidate launch|during model fallback handoff)/i,
+  );
   assert.equal(completions.length, 1);
   assert.equal(completions[0].status, "terminated");
 });

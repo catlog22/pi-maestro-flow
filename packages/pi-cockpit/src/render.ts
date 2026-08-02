@@ -307,9 +307,17 @@ export function renderAgents(
 		if (r.tail) segs.push({ text: theme.fg("dim", r.tail), priority: 40, minWidth: 8 });
 		const model = r.resolvedModel ?? r.requestedModel;
 		if (model) {
-			const fallback = r.requestedModel && r.resolvedModel && r.requestedModel !== r.resolvedModel;
+			const resolved = r.resolvedModel ?? "";
+			const requested = r.requestedModel ?? "";
+			const baseName = (id: string): string => id.slice(id.lastIndexOf("/") + 1);
+			const both = requested !== "" && resolved !== "" && requested !== resolved;
+			// Same underlying model written in two id formats (e.g. provider/model vs
+			// bare model) is not a fallback; only differing base names are.
+			const formatOnly = both && baseName(requested) === baseName(resolved);
+			const fallback = both && !formatOnly;
+			const displayModel = formatOnly ? (resolved.includes("/") ? resolved : requested) : model;
 			segs.push({
-				text: theme.fg(fallback ? "warning" : "muted", fallback ? `model ${r.requestedModel}→${r.resolvedModel}` : `model ${model}`),
+				text: theme.fg(fallback ? "warning" : "muted", fallback ? `model ${requested}→${resolved}` : `model ${displayModel}`),
 				priority: 25,
 				minWidth: 8,
 			});
