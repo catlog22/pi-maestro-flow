@@ -4049,6 +4049,84 @@ test("relevance survives the cache gate: qualified low-signal prefix still prune
   assert.ok(!relevanceGated.reasons.includes("cache-veto"));
 });
 
+test("cross-turn dedup folds a repeated read and protects its reference", () => {
+  const extractText = (message: unknown): string => {
+    const content = (message as { content?: unknown }).content;
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
+    return content
+      .filter((block): block is { text?: string } => !!block && typeof block === "object")
+      .map((block) => (typeof block.text === "string" ? block.text : ""))
+      .join("");
+  };
+  const bigBlock = Array.from({ length: 30 }, (_, i) => `line-${i} ${`payload-${i}`.padEnd(30, "x")}`).join("\n");
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call-a", name: "read", arguments: {} }],
+    usage: {
+      input: 160_000,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 160_000,
+      cost: { total: 0 },
+    },
+  }, {
+    role: "toolResult",
+    toolCallId: "call-a",
+    toolName: "read",
+    content: [{ type: "text", text: bigBlock }],
+    isError: false,
+  }, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call-b", name: "read", arguments: {} }],
+  }, {
+    role: "toolResult",
+    toolCallId: "call-b",
+    toolName: "read",
+    content: [{ type: "text", text: bigBlock }],
+    isError: false,
+  }, {
+    role: "user",
+    content: [{ type: "text", text: "continue" }],
+  }, {
+    role: "assistant",
+    content: [{ type: "text", text: "ok" }],
+  }] as never;
+  const base = { enabled: true, reserveTokens: 100, keepRecentTokens: 10 };
+
+  // Default off: no pointer, no dedup entry.
+  const offManifest = new Map();
+  applyContextPressurePolicy(messages, 200_000, {
+    ...base,
+    soft: {
+      ...DEFAULT_SOFT_COMPACTION,
+      lossless: { enabled: false },
+      cache: { enabled: false },
+    },
+  }, offManifest);
+  for (const entry of offManifest.values()) assert.notEqual(entry.level, "dedup");
+
+  const manifest = new Map();
+  const result = applyContextPressurePolicy(messages, 200_000, {
+    ...base,
+    soft: {
+      ...DEFAULT_SOFT_COMPACTION,
+      lossless: { enabled: false },
+      cache: { enabled: false },
+      crossTurnDedup: { enabled: true, minLines: 3, minChars: 40 },
+    },
+  }, manifest);
+  const dedupEntry = manifest.get("call-b");
+  assert.ok(dedupEntry, "the later repeated output is folded");
+  assert.equal(dedupEntry.level, "dedup");
+  assert.equal(dedupEntry.refCallId, "call-a");
+  assert.match(extractText(result.messages[3]), /same as msg call-a/);
+  // The reference target stays verbatim in context.
+  assert.equal(extractText(result.messages[1]), bigBlock);
+  assert.ok(!manifest.has("call-a"), "the referenced original is never pruned");
+});
+
 test("cache gate still prunes when the run pays for itself", () => {
   // A dense tool loop reclaims ~0.66 tokens per invalidated token — well past
   // the floor — so gating must not suppress it.

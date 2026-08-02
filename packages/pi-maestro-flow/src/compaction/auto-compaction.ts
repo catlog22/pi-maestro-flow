@@ -51,6 +51,7 @@ import {
   type LosslessKind,
 } from "./lossless.ts";
 import { scoreRelevanceBatch, type RelevanceMode } from "./relevance.ts";
+import { dedupBlocks, type DedupBlock } from "./dedup.ts";
 
 const PROTECTED_THRESHOLD_CHARS = 500;
 const REPLAYABLE_TOOL_NAMES = new Set(["read", "grep", "glob", "search", "find"]);
@@ -108,9 +109,11 @@ export interface PruneManifestEntry {
   level?: PruneLevel;
   contentDigest?: string;
   writerId?: string;
+  /** For level "dedup": the referenced tool result that stays in context. */
+  refCallId?: string;
 }
 
-export type PruneLevel = "pruned" | "spill" | "minimal" | "lossless";
+export type PruneLevel = "pruned" | "spill" | "minimal" | "lossless" | "dedup";
 
 interface PersistedPruneEntry {
   callId: string;
@@ -119,6 +122,7 @@ interface PersistedPruneEntry {
   introducedAtUsageEpoch?: string;
   contentDigest?: string;
   writerId?: string;
+  refCallId?: string;
 }
 
 /**
@@ -1299,6 +1303,14 @@ export function applyContextPressurePolicy(
       )
       : undefined;
 
+    // Reference targets of recorded cross-turn dedup pointers must stay in
+    // context (the pointer's original is recovered from them). Lossy passes
+    // therefore skip them.
+    const dedupProtected = new Set<string>();
+    for (const entry of planningManifest.values()) {
+      if (entry.level === "dedup" && entry.refCallId) dedupProtected.add(entry.refCallId);
+    }
+
     // Tier 0 — lossless folding first (reversible, no information loss): it
     // shrinks output without a decision, and whatever it saves lowers the
     // pressure so later lossy passes may not even need to run.
@@ -1320,6 +1332,24 @@ export function applyContextPressurePolicy(
       planPrunedToolResults += lossless.prunedToolResults;
       effectiveForLossy = lossless.effectiveTokens;
     }
+    // Tier 0.5 — cross-turn verbatim de-duplication (default off). Replaces
+    // later spans that already appeared verbatim in an earlier tool output
+    // with an in-context pointer; reference targets are protected above.
+    if (soft.crossTurnDedup?.enabled === true) {
+      const dedup = runDedupPass({
+        transformed: planningMessages,
+        pruneManifest: planningManifest,
+        frontierStart,
+        effectiveTokens: effectiveForLossy,
+        minLines: soft.crossTurnDedup.minLines,
+        minChars: soft.crossTurnDedup.minChars,
+        dedupProtected,
+      });
+      plannedCandidates.push(...dedup.candidates);
+      planSavedTokens += dedup.savedTokens;
+      planPrunedToolResults += dedup.prunedToolResults;
+      effectiveForLossy = dedup.effectiveTokens;
+    }
     // Graduated eviction, cheapest/most-reversible first: pass 1 strips replayable
     // tools (re-runnable); pass 2 strips bulk data tools (bash/edit/write) only if
     // pressure persists. Control tools (e.g. todo) are in neither set and survive.
@@ -1332,6 +1362,7 @@ export function applyContextPressurePolicy(
       usageEpoch,
       selector: replaceableToolResult,
       rankCandidates,
+      protectedCallIds: dedupProtected,
     });
     plannedCandidates.push(...replayable.candidates);
     planSavedTokens += replayable.savedTokens;
@@ -1345,6 +1376,7 @@ export function applyContextPressurePolicy(
       usageEpoch,
       selector: evictableBulkToolResult,
       rankCandidates,
+      protectedCallIds: dedupProtected,
     });
     plannedCandidates.push(...bulk.candidates);
     planSavedTokens += bulk.savedTokens;
@@ -1426,6 +1458,7 @@ function persistedEntryOf(callId: string, entry: PruneManifestEntry | undefined)
     ...(entry?.introducedAtUsageEpoch !== undefined ? { introducedAtUsageEpoch: entry.introducedAtUsageEpoch } : {}),
     ...(entry?.contentDigest !== undefined ? { contentDigest: entry.contentDigest } : {}),
     ...(entry?.writerId !== undefined ? { writerId: entry.writerId } : {}),
+    ...(entry?.refCallId !== undefined ? { refCallId: entry.refCallId } : {}),
   };
 }
 
@@ -1467,7 +1500,7 @@ function getRecordedPrune(manifest: PruneManifest, callId: string): PruneManifes
 }
 
 function isPruneLevel(value: unknown): value is PruneLevel {
-  return value === "pruned" || value === "spill" || value === "minimal" || value === "lossless";
+  return value === "pruned" || value === "spill" || value === "minimal" || value === "lossless" || value === "dedup";
 }
 
 /**
@@ -1485,6 +1518,14 @@ function recordPrune(manifest: PruneManifest, callId: string, entry: PruneManife
 
 function restorePruneReplacement(message: AgentMessage, persisted: PersistedPruneEntry): AgentMessage | undefined {
   if (persisted.level === "pruned") return pruneToolResult(message);
+  if (persisted.level === "dedup") {
+    // A dedup pointer is context-dependent (it names an earlier output), so it
+    // cannot be rebuilt from a single message. The referenced original is
+    // still physically in context — reference targets are protected from
+    // pruning — so degrading to the plain placeholder loses no information,
+    // only the pointer's brevity. The next in-process pass may fold again.
+    return pruneToolResult(message);
+  }
   if (persisted.level === "lossless") {
     // Folding is a deterministic pure function of the content: recompute is
     // recovery. If the message changed (digest mismatch is checked upstream)
@@ -1589,6 +1630,7 @@ async function hydrateRestoredPrunes(
       contentDigest: item.persisted.contentDigest,
       writerId: item.persisted.writerId,
       level: item.persisted.level,
+      refCallId: item.persisted.refCallId,
     });
   }
   for (const item of resolved) state.restoredPrunes.delete(item.callId);
@@ -1700,6 +1742,7 @@ function loadPersistedPrunes(
         ...(typeof record.introducedAtUsageEpoch === "string" ? { introducedAtUsageEpoch: record.introducedAtUsageEpoch } : {}),
         ...(typeof record.contentDigest === "string" ? { contentDigest: record.contentDigest } : {}),
         ...(typeof record.writerId === "string" ? { writerId: record.writerId } : {}),
+        ...(typeof record.refCallId === "string" ? { refCallId: record.refCallId } : {}),
       });
     }
     return restored;
@@ -1938,6 +1981,8 @@ interface PrunePassInput {
   usageEpoch: string | undefined;
   selector: (message: AgentMessage) => AgentMessage | undefined;
   rankCandidates?: (candidates: PruneCandidate[]) => PruneCandidate[];
+  /** Call IDs that must not be lossy-pruned (dedup pointer targets). */
+  protectedCallIds?: ReadonlySet<string>;
   /** Manifest level recorded for candidates this pass applies. */
   level?: PruneLevel;
 }
@@ -1951,6 +1996,7 @@ interface PruneCandidate {
   level: PruneLevel;
   toolName: string;
   relevanceText: string;
+  refCallId?: string;
 }
 
 interface PrunePassResult {
@@ -2079,6 +2125,7 @@ function applyPruneCandidates(
       introducedAtUsageEpoch: usageEpoch,
       contentDigest: candidate.contentDigest,
       level: candidate.level,
+      ...(candidate.refCallId !== undefined ? { refCallId: candidate.refCallId } : {}),
     });
     savedTokens += candidate.saved;
     prunedToolResults++;
@@ -2166,6 +2213,7 @@ function runPrunePass(input: PrunePassInput): PrunePassResult {
     if (after >= before) continue;
     const saved = before - after;
     const record = original as MessageRecord;
+    if (input.protectedCallIds?.has(callId)) continue;
     const relevanceText = collectWholeTier
       ? sampleRelevanceText(extractTextContent(original), RELEVANCE_DOCUMENT_SAMPLE_CHARS)
       : "";
@@ -2211,6 +2259,85 @@ function runPrunePass(input: PrunePassInput): PrunePassResult {
     effectiveTokens,
     usageEpoch,
   );
+}
+
+/**
+ * Tier 0.5 — cross-turn verbatim de-duplication (default off). Builds a
+ * prefix-ordered list of eligible tool outputs and folds later spans that
+ * already appeared verbatim in an earlier output into an in-context pointer
+ * (ported from headroom cross_turn_dedup). Folds are recorded in the manifest
+ * at level "dedup" with their reference target, and every target is added to
+ * `dedupProtected` so lossy passes keep the pointer's original in context.
+ */
+function runDedupPass(input: {
+  transformed: AgentMessage[];
+  pruneManifest: PruneManifest;
+  frontierStart: number;
+  effectiveTokens: number;
+  minLines: number;
+  minChars: number;
+  dedupProtected: Set<string>;
+}): PrunePassResult {
+  const { transformed, pruneManifest, frontierStart, minLines, minChars } = input;
+  const claimed = new Set(pruneManifest.keys());
+  const blocks: DedupBlock[] = [];
+  const indexByCallId = new Map<string, number>();
+  for (let index = 0; index < frontierStart; index++) {
+    const original = transformed[index];
+    const record = original as MessageRecord;
+    if (record.role !== "toolResult") continue;
+    const callId = toolResultCallId(original);
+    if (!callId || claimed.has(callId)) continue;
+    if (record.isError === true) continue;
+    const text = extractTextContent(original);
+    if (text.length < 8) continue;
+    blocks.push({ text, callId });
+    indexByCallId.set(callId, index);
+  }
+  if (blocks.length < 2) {
+    return { savedTokens: 0, prunedToolResults: 0, effectiveTokens: input.effectiveTokens, candidates: [] };
+  }
+
+  const folded = dedupBlocks(blocks, { minLines, minChars });
+  const candidates: PruneCandidate[] = [];
+  let effectiveTokens = input.effectiveTokens;
+  let savedTokens = 0;
+  for (let position = 0; position < blocks.length; position++) {
+    const original = blocks[position];
+    const foldedText = folded.blocks[position]?.text;
+    if (foldedText === undefined || foldedText === original.text) continue;
+    const index = indexByCallId.get(original.callId);
+    if (index === undefined) continue;
+    const before = estimateMessageTokens(transformed[index]);
+    const replacement = {
+      ...transformed[index],
+      content: [{ type: "text", text: foldedText }],
+    } as AgentMessage;
+    const after = estimateMessageTokens(replacement);
+    if (after >= before) continue;
+    const record = transformed[index] as MessageRecord;
+    const refCallId = folded.refs.get(original.callId);
+    candidates.push({
+      index,
+      callId: original.callId,
+      replacement,
+      saved: before - after,
+      contentDigest: toolResultDigest(transformed[index]),
+      level: "dedup",
+      toolName: typeof record.toolName === "string" ? record.toolName : "tool",
+      relevanceText: original.text,
+      ...(refCallId !== undefined ? { refCallId } : {}),
+    });
+    savedTokens += before - after;
+    effectiveTokens -= before - after;
+    if (refCallId !== undefined) input.dedupProtected.add(refCallId);
+  }
+  if (candidates.length > 0) {
+    // Record folds in the planning manifest so later lossy passes skip them
+    // (recordPrune refuses overwrites) and apply them to the plan's messages.
+    applyPruneCandidates(transformed, pruneManifest, candidates, candidates.length, effectiveTokens, undefined);
+  }
+  return { savedTokens, prunedToolResults: candidates.length, effectiveTokens, candidates };
 }
 
 function isProtectedToolResult(message: AgentMessage): boolean {

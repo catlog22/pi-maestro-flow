@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { effectiveReserveTokens } from "./compaction-threshold.ts";
 import type { RelevanceMode } from "./relevance.ts";
+import { DEFAULT_DEDUP_MIN_CHARS, DEFAULT_DEDUP_MIN_LINES } from "./dedup.ts";
 
 export const DEFAULT_RESERVE_TOKENS = 16_384;
 export const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
@@ -70,6 +71,23 @@ export interface RelevanceCompactionSettings {
   mode: RelevanceMode;
 }
 
+export interface CrossTurnDedupConfigPatch {
+  enabled?: boolean;
+  minLines?: number;
+  minChars?: number;
+}
+
+/**
+ * Cross-turn verbatim de-duplication (mirrors headroom cross_turn_dedup).
+ * Replaces later spans that already appeared verbatim in an earlier tool output
+ * with an in-context pointer; the referenced output is protected from pruning.
+ */
+export interface CrossTurnDedupSettings {
+  enabled: boolean;
+  minLines: number;
+  minChars: number;
+}
+
 export interface LosslessCompactionConfigPatch {
   enabled?: boolean;
 }
@@ -96,6 +114,7 @@ export interface SoftCompactionConfigPatch {
   cache?: CacheCompactionConfigPatch;
   timeBased?: TimeBasedCompactionConfigPatch;
   relevance?: RelevanceCompactionConfigPatch;
+  crossTurnDedup?: CrossTurnDedupConfigPatch;
   lossless?: LosslessCompactionConfigPatch;
 }
 
@@ -110,6 +129,8 @@ export interface SoftCompactionSettings {
   timeBased?: TimeBasedCompactionSettings;
   /** Optional for source compatibility; resolved defaults provide this group. */
   relevance?: RelevanceCompactionSettings;
+  /** Optional for source compatibility; resolved defaults provide this group. */
+  crossTurnDedup?: CrossTurnDedupSettings;
   lossless: LosslessCompactionSettings;
 }
 
@@ -140,6 +161,11 @@ export function createDefaultSoftCompaction(): SoftCompactionSettings {
     cache: { enabled: true, minRatioRange: [0.1, 0.5] },
     timeBased: { enabled: false, gapThresholdMinutes: 60 },
     relevance: { enabled: false, mode: "bm25" },
+    crossTurnDedup: {
+      enabled: false,
+      minLines: DEFAULT_DEDUP_MIN_LINES,
+      minChars: DEFAULT_DEDUP_MIN_CHARS,
+    },
     lossless: { enabled: true },
   };
 }
@@ -234,6 +260,8 @@ function readRawSoft(value: unknown): SoftCompactionConfigPatch | undefined {
   if (timeBased) soft.timeBased = timeBased;
   const relevance = readRawRelevance(value.relevance);
   if (relevance) soft.relevance = relevance;
+  const crossTurnDedup = readRawCrossTurnDedup(value.crossTurnDedup);
+  if (crossTurnDedup) soft.crossTurnDedup = crossTurnDedup;
   const lossless = readRawLossless(value.lossless);
   if (lossless) soft.lossless = lossless;
   return Object.keys(soft).length > 0 ? soft : undefined;
@@ -279,6 +307,17 @@ function readRawRelevance(value: unknown): RelevanceCompactionConfigPatch | unde
   if (typeof value.enabled === "boolean") relevance.enabled = value.enabled;
   if (value.mode === "bm25" || value.mode === "keyword") relevance.mode = value.mode;
   return Object.keys(relevance).length > 0 ? relevance : undefined;
+}
+
+function readRawCrossTurnDedup(value: unknown): CrossTurnDedupConfigPatch | undefined {
+  if (!isRecord(value)) return undefined;
+  const crossTurnDedup: CrossTurnDedupConfigPatch = {};
+  if (typeof value.enabled === "boolean") crossTurnDedup.enabled = value.enabled;
+  const minLines = positiveInt(value.minLines);
+  if (minLines !== undefined) crossTurnDedup.minLines = minLines;
+  const minChars = positiveInt(value.minChars);
+  if (minChars !== undefined) crossTurnDedup.minChars = minChars;
+  return Object.keys(crossTurnDedup).length > 0 ? crossTurnDedup : undefined;
 }
 
 function readRawLossless(value: unknown): LosslessCompactionConfigPatch | undefined {
@@ -357,6 +396,16 @@ export function resolveEffectiveCompactionSettings(
         const relevance = soft.relevance ?? (soft.relevance = { enabled: false, mode: "bm25" });
         if (patch.soft.relevance.enabled !== undefined) relevance.enabled = patch.soft.relevance.enabled;
         if (patch.soft.relevance.mode !== undefined) relevance.mode = patch.soft.relevance.mode;
+      }
+      if (patch.soft.crossTurnDedup !== undefined) {
+        const crossTurnDedup = soft.crossTurnDedup ?? (soft.crossTurnDedup = {
+          enabled: false,
+          minLines: DEFAULT_DEDUP_MIN_LINES,
+          minChars: DEFAULT_DEDUP_MIN_CHARS,
+        });
+        if (patch.soft.crossTurnDedup.enabled !== undefined) crossTurnDedup.enabled = patch.soft.crossTurnDedup.enabled;
+        if (patch.soft.crossTurnDedup.minLines !== undefined) crossTurnDedup.minLines = patch.soft.crossTurnDedup.minLines;
+        if (patch.soft.crossTurnDedup.minChars !== undefined) crossTurnDedup.minChars = patch.soft.crossTurnDedup.minChars;
       }
       if (patch.soft.lossless !== undefined) {
         if (patch.soft.lossless.enabled !== undefined) soft.lossless.enabled = patch.soft.lossless.enabled;
@@ -443,6 +492,12 @@ export function validateCompactionPatch(
       && soft.relevance.mode !== "bm25" && soft.relevance.mode !== "keyword") {
       errors.push(`soft.relevance.mode must be "bm25" or "keyword"`);
     }
+    if (soft.crossTurnDedup?.minLines !== undefined && !positiveInt(soft.crossTurnDedup.minLines)) {
+      errors.push(`soft.crossTurnDedup.minLines must be a positive safe integer`);
+    }
+    if (soft.crossTurnDedup?.minChars !== undefined && !positiveInt(soft.crossTurnDedup.minChars)) {
+      errors.push(`soft.crossTurnDedup.minChars must be a positive safe integer`);
+    }
   }
 
   if (contextWindow === undefined) {
@@ -489,6 +544,12 @@ export function validateEffectiveCompactionSettings(settings: EffectiveCompactio
   if (soft.relevance?.mode !== undefined
     && soft.relevance.mode !== "bm25" && soft.relevance.mode !== "keyword") {
     errors.push(`soft.relevance.mode must be "bm25" or "keyword"`);
+  }
+  if (soft.crossTurnDedup?.minLines !== undefined && !positiveInt(soft.crossTurnDedup.minLines)) {
+    errors.push(`soft.crossTurnDedup.minLines must be a positive safe integer`);
+  }
+  if (soft.crossTurnDedup?.minChars !== undefined && !positiveInt(soft.crossTurnDedup.minChars)) {
+    errors.push(`soft.crossTurnDedup.minChars must be a positive safe integer`);
   }
   if (!Number.isSafeInteger(settings.reserveTokens) || settings.reserveTokens <= 0) {
     errors.push(`reserveTokens must be a positive safe integer`);
@@ -683,6 +744,10 @@ async function atomicWriteJson(path: string, value: unknown): Promise<void> {
 
 function positiveNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function positiveInt(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 /**
