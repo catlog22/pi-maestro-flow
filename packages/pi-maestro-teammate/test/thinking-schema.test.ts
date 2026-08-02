@@ -79,6 +79,10 @@ test("teammate auxiliary schemas reject unknown fields and publish wait defaults
   assert.equal(Check(TeammateSendParams, { to: "worker", message: "continue", extra: true }), false);
   assert.equal(Check(TeammateWatchParams, { name: "worker", extra: true }), false);
   assert.equal(Check(TeammateWaitParams, { name: "worker", extra: true }), false);
+  // Execution contract: at least one of name / waitMs is required.
+  assert.equal(Check(TeammateWaitParams, {}), false, "neither name nor waitMs must be rejected");
+  assert.equal(Check(TeammateWaitParams, { name: "worker" }), true);
+  assert.equal(Check(TeammateWaitParams, { waitMs: 500 }), true);
   assert.equal((TeammateWaitParams.properties.timeoutMs as { default?: number }).default, 600_000);
   assert.match(
     (TeammateWaitParams.properties.waitMs as { description?: string }).description ?? "",

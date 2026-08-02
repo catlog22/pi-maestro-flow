@@ -303,6 +303,13 @@ export const TeammateWaitParams = Type.Object({
   ),
 }, {
   additionalProperties: false,
+  // Enforce the execution contract: at least one of name (agent wait) or
+  // waitMs (fixed delay) must be provided. The runtime rejects requests with
+  // neither ("Provide an agent name or waitMs.").
+  anyOf: [
+    { required: ["name"] },
+    { required: ["waitMs"] },
+  ],
   description: "Provide name for an agent wait or waitMs for a fixed delay.",
 });
 
