@@ -1,6 +1,6 @@
 {
   "name": "pi-cockpit",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Responsive Maestro operations sidebar, fallback status widgets, and footer for Pi.",
   "type": "module",
   "keywords": [
@@ -18,7 +18,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --test --experimental-transform-types tests/config.test.ts tests/public-events.test.ts tests/maestro-store.test.ts tests/split-pane.test.ts tests/sidebar-render.test.ts tests/sidebar-controller.test.ts tests/viewport-stability.test.ts tests/quiet-tools.test.ts tests/agents-store.test.ts tests/bash-bg-store.test.ts tests/bash-bg-widget.test.ts tests/bash-bg-overlay.test.ts tests/todo-store.test.ts tests/render.test.ts tests/footer.test.ts tests/extension-status.test.ts tests/integration-contract.test.ts tests/stack-widget.test.ts tests/settings-view.test.ts tests/thinking-fold.test.ts tests/thinking-timer.test.ts tests/tick-policy.test.ts tests/ambient.test.ts tests/viewport.test.ts tests/theme-picker.test.ts",
+    "test": "node --test --experimental-transform-types tests/config.test.ts tests/public-events.test.ts tests/maestro-store.test.ts tests/split-pane.test.ts tests/sidebar-render.test.ts tests/sidebar-controller.test.ts tests/viewport-stability.test.ts tests/quiet-tools.test.ts tests/agents-store.test.ts tests/bash-bg-store.test.ts tests/bash-bg-widget.test.ts tests/bash-bg-overlay.test.ts tests/todo-store.test.ts tests/render.test.ts tests/footer.test.ts tests/extension-status.test.ts tests/integration-contract.test.ts tests/stack-widget.test.ts tests/settings-view.test.ts tests/thinking-fold.test.ts tests/thinking-timer.test.ts tests/tick-policy.test.ts tests/ambient.test.ts tests/viewport.test.ts tests/theme-picker.test.ts tests/title-gen.test.ts tests/title-llm.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "pi": {
@@ -54,10 +54,10 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.82.1",
-    "@earendil-works/pi-ai": "0.82.1",
-    "@earendil-works/pi-coding-agent": "0.82.1",
-    "@earendil-works/pi-tui": "0.82.1",
+    "@earendil-works/pi-agent-core": "0.83.0",
+    "@earendil-works/pi-ai": "0.83.0",
+    "@earendil-works/pi-coding-agent": "0.83.0",
+    "@earendil-works/pi-tui": "0.83.0",
     "@types/node": "^22.0.0",
     "pi-maestro-teammate": "1.5.0",
     "typescript": "^5.5.0"

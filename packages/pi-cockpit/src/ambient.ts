@@ -21,6 +21,22 @@ export interface AmbientState {
 	hideLiveDuration?: boolean;
 	/** Separator glyph between label and elapsed time (e.g. " · "). */
 	separator?: string;
+	/** Session summary — the session_info name, else a short session id. */
+	session?: string;
+	/** Active model short id. */
+	model?: string;
+	/** Active thinking level (omitted while off). */
+	thinking?: string;
+	/** Git branch name, or "detached". */
+	gitBranch?: string;
+	/** Maestro workflow status (run status when a run is active). */
+	maestro?: string;
+	/**
+	 * Leading title glyph: spinner frames while a turn runs, a static marker
+	 * when idle (Claude Code's `✳` / braille frames). Failure keeps its own
+	 * mark and ignores this. Absent when the caller opts out.
+	 */
+	frame?: string;
 }
 
 function liveAgents(agents: readonly AgentRow[]): AgentRow[] {
@@ -51,24 +67,56 @@ export function workingMessage(state: AmbientState, now = Date.now()): string | 
 	return `\x1b[3m${text}\x1b[23m`;
 }
 
+/** Composition options for titleFor. */
+export interface TitleOptions {
+	/** Hard cap on the composed title. The middle is ellided, keeping head + state tail. */
+	maxLength?: number;
+}
+
 /**
  * The terminal tab title.
  *
  * A developer with several tabs open cannot otherwise tell which run finished and
  * which one needs them. Failure outranks progress, because that is the state that
- * actually requires a human.
+ * actually requires a human. The session summary (when present) sits right after
+ * "pi"; model / thinking / git / maestro tags follow the working state. Fields
+ * are only appended when present, so callers decide what to expose per config.
  */
-export function titleFor(state: AmbientState, marks: { ok: string; fail: string }, sep = " - "): string {
-	const base = state.cwd ? `pi${sep}${state.cwd}` : "pi";
+export function titleFor(
+	state: AmbientState,
+	marks: { ok: string; fail: string },
+	sep = " - ",
+	opts?: TitleOptions,
+): string {
+	const head = ["pi"];
+	if (state.session) head.push(state.session);
+	if (state.cwd) head.push(state.cwd);
+	const base = head.join(sep);
 	const broken = failedAgents(state.agents).length + failedJobs(state.jobs).length;
-	if (broken > 0) return `${marks.fail} ${base}${sep}${broken} failed`;
-	if (state.running) {
+	const prefix = state.frame ? `${state.frame} ` : "";
+	let title: string;
+	if (broken > 0) {
+		title = `${marks.fail} ${base}${sep}${broken} failed`;
+	} else if (state.running) {
 		const live = liveAgents(state.agents).length;
-		return live > 0 ? `${base}${sep}${live} agents` : `${base}${sep}working`;
+		title = live > 0 ? `${prefix}${base}${sep}${live} agents` : `${prefix}${base}${sep}working`;
+	} else {
+		const jobs = state.jobs.filter((job) => job.status === "running").length;
+		title = jobs > 0 ? `${prefix}${base}${sep}${jobs} bg` : `${prefix}${base}`;
 	}
-	const jobs = state.jobs.filter((job) => job.status === "running").length;
-	if (jobs > 0) return `${base}${sep}${jobs} bg`;
-	return base;
+	const tags: string[] = [];
+	if (state.model) tags.push(`m:${state.model}`);
+	if (state.thinking) tags.push(`t:${state.thinking}`);
+	if (state.gitBranch) tags.push(`git:${state.gitBranch}`);
+	if (state.maestro) tags.push(`wf:${state.maestro}`);
+	if (tags.length > 0) title = `${title}${sep}${tags.join(sep)}`;
+	if (opts?.maxLength !== undefined && title.length > opts.maxLength) {
+		const cap = opts.maxLength;
+		const headLen = Math.max(8, Math.floor(cap * 0.4));
+		const tailLen = Math.max(8, Math.floor(cap * 0.5));
+		title = `${title.slice(0, headLen)}…${title.slice(-tailLen)}`;
+	}
+	return title;
 }
 
 /**

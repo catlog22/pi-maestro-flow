@@ -134,6 +134,38 @@ export interface SidebarConfig {
 	density: SidebarDensity;
 }
 
+/**
+ * Terminal tab title surface. Fed from the same AmbientState snapshots as the
+ * widgets, so the title can never disagree with them. By default the title is
+ * deliberately short — session summary + working state — because a wall of
+ * tags in the tab strip is unreadable; every extra dimension is opt-in.
+ */
+export interface TitleConfig {
+	/** Master switch for the terminal tab title surface. */
+	enabled: boolean;
+	/** Include the session summary (or short id) right after "pi". */
+	showSession: boolean;
+	/** Include the working directory after the session. Off by default. */
+	showCwd: boolean;
+	/** Include the active model tag (e.g. `m:gpt-5.6-sol`). Off by default. */
+	showModel: boolean;
+	/** Include the thinking level tag, skipped while off (e.g. `t:high`). Off by default. */
+	showThinking: boolean;
+	/** Include the git branch tag (e.g. `git:main`, `git:detached`). Off by default. */
+	showGit: boolean;
+	/** Include the Maestro workflow status tag (e.g. `wf:running`). Off by default. */
+	showMaestro: boolean;
+	/**
+	 * Model used to generate the session title after the first turn, as
+	 * "provider/model" (e.g. "maestro-qwen/qwen3.8-max-preview"). Resolved
+	 * through pi's ModelRegistry — the same providers /api-manager manages.
+	 * Empty (default) falls back to the offline rule-based suggestTitle().
+	 */
+	generationModel?: string;
+	/** Hard cap on the composed title; the middle is ellided to keep head + state tail. */
+	maxLength: number;
+}
+
 export interface CockpitConfig {
 	enabled: boolean;
 	/**
@@ -168,6 +200,8 @@ export interface CockpitConfig {
 	hideNativeAgents: boolean;
 	icons: { mode: IconMode };
 	sidebar: SidebarConfig;
+	/** Terminal tab title surface (session summary + working state + optional tags). */
+	title: TitleConfig;
 	/**
 	 * Theme to apply at session start. Empty means "leave whatever pi is using",
 	 * so cockpit never overrides a theme the user picked elsewhere.
@@ -187,5 +221,16 @@ export const DEFAULT_CONFIG: CockpitConfig = {
 	hideNativeAgents: true,
 	icons: { mode: "auto" },
 	sidebar: { mode: "off", width: 40, density: "comfortable" },
+	title: {
+		enabled: true,
+		showSession: true,
+		showCwd: false,
+		showModel: false,
+		showThinking: false,
+		showGit: false,
+		showMaestro: false,
+		generationModel: "",
+		maxLength: 80,
+	},
 	theme: "",
 };

@@ -30,6 +30,13 @@ export function mergeConfig(base: CockpitConfig, over: unknown): CockpitConfig {
 	const sidebarWidth = sidebarRaw && typeof sidebarRaw.width === "number" && Number.isFinite(sidebarRaw.width)
 		? Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(sidebarRaw.width)))
 		: base.sidebar.width;
+	const titleRaw = o.title && typeof o.title === "object" && !Array.isArray(o.title)
+		? (o.title as Record<string, unknown>)
+		: undefined;
+	const isBool = (v: unknown): v is boolean => typeof v === "boolean";
+	const titleMaxLength = titleRaw && typeof titleRaw.maxLength === "number" && Number.isFinite(titleRaw.maxLength)
+		? Math.min(200, Math.max(20, Math.round(titleRaw.maxLength)))
+		: base.title.maxLength;
 	return {
 		enabled: typeof o.enabled === "boolean" ? o.enabled : base.enabled,
 		staticMode: typeof o.staticMode === "boolean" ? o.staticMode : base.staticMode,
@@ -45,6 +52,19 @@ export function mergeConfig(base: CockpitConfig, over: unknown): CockpitConfig {
 			mode: sidebarRaw && isSidebarMode(sidebarRaw.mode) ? sidebarRaw.mode : base.sidebar.mode,
 			width: sidebarWidth,
 			density: sidebarRaw && isSidebarDensity(sidebarRaw.density) ? sidebarRaw.density : base.sidebar.density,
+		},
+		title: {
+			enabled: isBool(titleRaw?.enabled) ? titleRaw!.enabled : base.title.enabled,
+			showSession: isBool(titleRaw?.showSession) ? titleRaw!.showSession : base.title.showSession,
+			showCwd: isBool(titleRaw?.showCwd) ? titleRaw!.showCwd : base.title.showCwd,
+			showModel: isBool(titleRaw?.showModel) ? titleRaw!.showModel : base.title.showModel,
+			showThinking: isBool(titleRaw?.showThinking) ? titleRaw!.showThinking : base.title.showThinking,
+			showGit: isBool(titleRaw?.showGit) ? titleRaw!.showGit : base.title.showGit,
+			showMaestro: isBool(titleRaw?.showMaestro) ? titleRaw!.showMaestro : base.title.showMaestro,
+			generationModel: titleRaw && typeof titleRaw.generationModel === "string"
+				? titleRaw.generationModel
+				: base.title.generationModel,
+			maxLength: titleMaxLength,
 		},
 		theme: typeof o.theme === "string" ? o.theme : base.theme,
 	};

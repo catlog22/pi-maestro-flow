@@ -105,3 +105,74 @@ test("statusText only occupies the slot when there is a real problem", () => {
 	assert.equal(statusText(undefined, "!"), undefined);
 	assert.equal(statusText("config unreadable", "!"), "! cockpit: config unreadable");
 });
+
+test("session summary sits right after pi when present", () => {
+	assert.equal(titleFor(state({ session: "标题分析" }), MARKS), "pi - 标题分析");
+	assert.equal(titleFor(state({ session: "标题分析", cwd: "~/w" }), MARKS), "pi - 标题分析 - ~/w");
+});
+
+test("optional tags follow the working state in order", () => {
+	const t = titleFor(state({
+		cwd: "~/w",
+		running: true,
+		model: "gpt-5.6-sol",
+		thinking: "high",
+		gitBranch: "main",
+		maestro: "done",
+	}), MARKS);
+	assert.equal(t, "pi - ~/w - working - m:gpt-5.6-sol - t:high - git:main - wf:done");
+});
+
+test("failure still outranks progress and carries the tags", () => {
+	const t = titleFor(state({
+		cwd: "~/w",
+		running: true,
+		agents: [agent({ agent: "b", status: "failed" })],
+		model: "gpt-5.6-sol",
+		gitBranch: "detached",
+	}), MARKS);
+	assert.equal(t, "✗ pi - ~/w - 1 failed - m:gpt-5.6-sol - git:detached");
+});
+
+test("idle titles append tags without inventing a working state", () => {
+	const t = titleFor(state({ cwd: "~/w", gitBranch: "main", maestro: "blocked" }), MARKS);
+	assert.equal(t, "pi - ~/w - git:main - wf:blocked");
+});
+
+test("maxLength ellides the middle, keeping the head and the state tail", () => {
+	const t = titleFor(state({
+		session: "a-very-long-session-summary-topic",
+		cwd: "~/deeply/nested/project/folder",
+		running: true,
+		model: "gpt-5.6-sol",
+	}), MARKS, " - ", { maxLength: 32 });
+	assert.ok(t.length <= 32, `got length ${t.length}: ${t}`);
+	assert.ok(t.startsWith("pi"), t);
+	assert.ok(t.includes("…"), t);
+	assert.ok(t.endsWith("m:gpt-5.6-sol"), t);
+});
+
+test("a short title is never clipped", () => {
+	assert.equal(
+		titleFor(state({ cwd: "~/w", running: true, model: "gpt-5.6-sol" }), MARKS, " - ", { maxLength: 80 }),
+		"pi - ~/w - working - m:gpt-5.6-sol",
+	);
+});
+
+test("frame glyph leads the title while idle and while working", () => {
+	assert.equal(titleFor(state({ frame: "✳", cwd: "~/w" }), MARKS), "✳ pi - ~/w");
+	assert.equal(
+		titleFor(state({ frame: "⠂", cwd: "~/w", running: true }), MARKS),
+		"⠂ pi - ~/w - working",
+	);
+});
+
+test("failure outranks the frame glyph, keeping its own ✗", () => {
+	const t = titleFor(state({
+		frame: "⠂",
+		cwd: "~/w",
+		running: true,
+		agents: [agent({ agent: "b", status: "failed" })],
+	}), MARKS);
+	assert.equal(t, "✗ pi - ~/w - 1 failed");
+});

@@ -139,3 +139,26 @@ test("a committed theme shows up on the row, so the round trip is visible", () =
 	const rows = buildRows({ ...DEFAULT_CONFIG, theme: "nord" });
 	assert.equal(rows.find((r) => r.key === "theme")!.value, "nord");
 });
+
+test("title rows cycle every dimension and are reachable by accel", () => {
+	const rows = buildRows(DEFAULT_CONFIG);
+	const titleRows = rows.filter((r) => r.key.startsWith("title"));
+	assert.deepEqual(titleRows.map((r) => r.key), [
+		"titleEnabled",
+		"titleSession",
+		"titleCwd",
+		"titleModel",
+		"titleThinking",
+		"titleGit",
+		"titleMaestro",
+	]);
+	assert.equal(applyRow(DEFAULT_CONFIG, "titleEnabled").title.enabled, false);
+	assert.equal(applyRow(DEFAULT_CONFIG, "titleSession").title.showSession, false);
+	assert.equal(applyRow(DEFAULT_CONFIG, "titleCwd").title.showCwd, true);
+	assert.equal(applyRow(DEFAULT_CONFIG, "titleModel").title.showModel, true);
+	assert.equal(applyRow(DEFAULT_CONFIG, "titleThinking").title.showThinking, true);
+	assert.equal(applyRow(DEFAULT_CONFIG, "titleGit").title.showGit, true);
+	assert.equal(applyRow(DEFAULT_CONFIG, "titleMaestro").title.showMaestro, true);
+	// Round trip back on.
+	assert.equal(applyRow(applyRow(DEFAULT_CONFIG, "titleEnabled"), "titleEnabled").title.enabled, true);
+});

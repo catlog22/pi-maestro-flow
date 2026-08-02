@@ -1,9 +1,12 @@
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { readFileSync, statSync } from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AgentsStore, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
 import { statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
+import { generateTitleWithModel } from "./title-llm.ts";
+import { suggestTitle } from "./title-gen.ts";
 import { BashBgStore } from "./bash-bg-store.ts";
 import { MaestroStore } from "./maestro-store.ts";
 import { createSidebarController, type SidebarController } from "./sidebar-controller.ts";
@@ -47,6 +50,10 @@ const FOOTER_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth 
 const BASH_BG_OVERLAY_KEY = "alt+j";
 const SIDEBAR_RESIZE_KEY = "ctrl+shift+r";
 const COCKPIT_STATUS_KEY = "cockpit";
+// Claude Code title chrome: a static marker when idle, two braille frames while
+// a turn runs (screens/REPL.tsx TITLE_STATIC_PREFIX / TITLE_ANIMATION_FRAMES).
+const TITLE_STATIC = "✳";
+const TITLE_FRAMES = ["⠂", "⠐"];
 const WIDTH_POLL_INTERVAL_MS = 250;
 // Static mode keeps token totals fresh enough without recomputing on every message.
 const USAGE_REFRESH_THROTTLE_MS = 10_000;
@@ -81,6 +88,82 @@ function formatCwd(cwd: string): string {
 	const insideHome = rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 	if (!insideHome) return cwd;
 	return rel === "" ? "~" : `~${sep}${rel}`;
+}
+
+/**
+ * Cheap synchronous git branch read straight from .git/HEAD — no process spawn,
+ * so it is safe on every title refresh. Returns the branch name, "detached" for
+ * a raw HEAD hash, or null outside a repo (including linked worktrees).
+ */
+function readGitBranch(cwd: string): string | null {
+	let headPath: string | undefined;
+	try {
+		const gitDir = join(cwd, ".git");
+		const st = statSync(gitDir);
+		if (st.isDirectory()) {
+			headPath = join(gitDir, "HEAD");
+		} else if (st.isFile()) {
+			const link = readFileSync(gitDir, "utf8").trim();
+			if (link.startsWith("gitdir:")) {
+				headPath = join(resolve(cwd, link.slice("gitdir:".length).trim()), "HEAD");
+			}
+		}
+		if (!headPath) return null;
+		const head = readFileSync(headPath, "utf8").trim();
+		const branch = /^ref:\s*refs\/heads\/(.+)$/.exec(head);
+		return branch ? branch[1] : "detached";
+	} catch {
+		return null;
+	}
+}
+
+/** Session summary for the title: the session_info name, else the generated
+ * title, else the short id — the Claude Code chain of sessionTitle ?? haikuTitle. */
+function sessionTag(sm: { getSessionName(): string | undefined; getSessionId(): string }, generated: string | undefined): string | undefined {
+	const name = sm.getSessionName();
+	if (name) return name;
+	if (generated) return generated;
+	const id = sm.getSessionId();
+	return id ? id.slice(0, 8) : undefined;
+}
+
+/** Active model short id (drops any "provider/" prefix). */
+function modelTag(model: { id: string } | undefined): string | undefined {
+	if (!model) return undefined;
+	const last = model.id.split("/").at(-1);
+	return last || undefined;
+}
+
+/** Thinking level tag; "off" and unknown values add no noise. */
+function thinkingTag(level: string | undefined): string | undefined {
+	return level === undefined || level === "off" ? undefined : level;
+}
+
+/** Maestro workflow tag: run status when a run is active, else session status. */
+function maestroWorkflowTag(
+	workflow: { run: { status: string } | null; session: { status: string } } | null | undefined,
+): string | undefined {
+	if (!workflow) return undefined;
+	return workflow.run ? workflow.run.status : workflow.session.status;
+}
+
+/** Extract plain text from an agent message (string content or text blocks). */
+function messageText(message: unknown): string | undefined {
+	if (!message || typeof message !== "object") return undefined;
+	const content = (message as { content?: unknown }).content;
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return undefined;
+	const parts: string[] = [];
+	for (const block of content) {
+		if (
+			block && typeof block === "object"
+			&& (block as { type?: unknown }).type === "text"
+			&& typeof (block as { text?: unknown }).text === "string"
+		) {
+			parts.push((block as { text: string }).text);
+		}
+	}
+	return parts.length > 0 ? parts.join("\n") : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -123,6 +206,12 @@ export default function (pi: ExtensionAPI): void {
 	let surfaceState: CockpitSurfaceState = "disabled";
 	let running = false;
 	let runningStartedAt: number | undefined;
+	// Auto-generated session title from the first turn (the rule-based / LLM
+	// stand-in for Claude Code's Haiku title). Cleared per session.
+	let aiTitle: string | undefined;
+	let firstUserText: string | undefined;
+	let titleRequested = false;
+	let titleFrameIndex = 0;
 	const activeTools = new Map<string, { name: string; startedAt: number }>();
 	let tick: ReturnType<typeof setInterval> | undefined;
 	// Persisted rather than toasted: a config that failed to load silently downgrades
@@ -176,6 +265,15 @@ export default function (pi: ExtensionAPI): void {
 
 	// The streaming line, the tab title and the footer status slot are all fed from
 	// the same snapshots the widgets read, so they can never disagree with them.
+	// Leading title glyph: spinner frames while a turn runs (advanced by the
+	// tick), a static marker when idle; static mode freezes it. Failure keeps
+	// its own ✗ and ignores the frame entirely.
+	const titleFrame = (isRunning: boolean): string | undefined => {
+		if (isRunning && !config.staticMode) {
+			return TITLE_FRAMES[titleFrameIndex % TITLE_FRAMES.length];
+		}
+		return TITLE_STATIC;
+	};
 	const refreshAmbient = (): void => {
 		const ctx = lastCtx;
 		if (!ctx || !isTuiContext(ctx)) return;
@@ -187,19 +285,28 @@ export default function (pi: ExtensionAPI): void {
 				return;
 			}
 			const activeTool = [...activeTools.values()].at(-1);
+			const title = config.title;
 			const state: AmbientState = {
 				todos: todos.snapshot(),
 				agents: agents.snapshot(),
 				jobs: bashBg.snapshot(),
 				running,
-				cwd: formatCwd(ctx.sessionManager.getCwd()),
+				cwd: title.showCwd ? formatCwd(ctx.sessionManager.getCwd()) : undefined,
 				activeTool: activeTool?.name,
 				workingStartedAt: activeTool?.startedAt ?? runningStartedAt,
 				hideLiveDuration: config.staticMode,
 				separator: ` ${g.separator} `,
 			};
 			ctx.ui.setWorkingMessage(workingMessage(state));
-			ctx.ui.setTitle(titleFor(state, { ok: g.check, fail: g.cross }, g.separator));
+			if (title.enabled) {
+				state.session = title.showSession ? sessionTag(ctx.sessionManager, aiTitle) : undefined;
+				state.model = title.showModel ? modelTag(ctx.model) : undefined;
+				state.thinking = title.showThinking ? thinkingTag(ctx.thinkingLevel) : undefined;
+				state.gitBranch = title.showGit ? (readGitBranch(ctx.cwd) ?? undefined) : undefined;
+				state.maestro = title.showMaestro ? maestroWorkflowTag(maestro.snapshot()?.workflow) : undefined;
+				state.frame = titleFrame(running);
+				ctx.ui.setTitle(titleFor(state, { ok: g.check, fail: g.cross }, g.separator, { maxLength: title.maxLength }));
+			}
 			ctx.ui.setStatus(COCKPIT_STATUS_KEY, statusText(configProblem, g.blocked));
 		} catch {
 			// ambient surfaces are best-effort; never let them break a render
@@ -243,6 +350,7 @@ export default function (pi: ExtensionAPI): void {
 					agents.snapshot();
 					if (agents.size !== before) req();
 				} else {
+					titleFrameIndex += 1;
 					req();
 				}
 			} else {
@@ -521,6 +629,59 @@ export default function (pi: ExtensionAPI): void {
 	};
 
 	// --- teammate lifecycle (custom event bus; subscribed once for the extension lifetime) ---
+	// Session-title generation: after the first turn settles, ask the configured
+	// model (api-manager provider) with the user message + assistant reply, else
+	// fall back to the offline rule-based suggestTitle. A model ref that cannot
+	// be resolved or fails is never fatal — the title just stays rule-based.
+	const generateTitleWithConfiguredModel = async (
+		ctx: ExtensionContext,
+		modelRef: string,
+		text: string,
+	): Promise<string | null> => {
+		const slash = modelRef.indexOf("/");
+		if (slash <= 0 || slash === modelRef.length - 1) return null;
+		const model = ctx.modelRegistry.find(modelRef.slice(0, slash), modelRef.slice(slash + 1));
+		if (!model) return null;
+		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+		if (!auth.ok) return null;
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), 10_000);
+		try {
+			return await generateTitleWithModel(
+				{ baseUrl: model.baseUrl, modelId: model.id, apiKey: auth.apiKey, headers: auth.headers },
+				text,
+				controller.signal,
+			);
+		} finally {
+			clearTimeout(timer);
+		}
+	};
+	const generateSessionTitle = async (
+		ctx: ExtensionContext,
+		userText: string,
+		assistantMessage: unknown,
+		refresh: () => void,
+	): Promise<void> => {
+		const fallback = suggestTitle(userText);
+		const assistantText = messageText(assistantMessage);
+		const llmInput = assistantText
+			? `${userText}\n\nAssistant:\n${assistantText.slice(0, 500)}`
+			: userText;
+		const modelRef = config.title.generationModel;
+		const title = modelRef
+			? await generateTitleWithConfiguredModel(ctx, modelRef, llmInput)
+			: null;
+		if (title) {
+			aiTitle = title;
+		} else if (fallback) {
+			aiTitle = fallback;
+		} else {
+			titleRequested = false; // nothing usable; a later turn may retry
+			return;
+		}
+		refresh();
+	};
+
 	pi.events.on(TEAMMATE_STARTED_EVENT, (payload) => {
 		if (!isStartedPayload(payload)) return;
 		agents.applyStarted(payload);
@@ -576,6 +737,10 @@ export default function (pi: ExtensionAPI): void {
 		activeTools.clear();
 		thinkingTimer.reset();
 		maestro.clear();
+		aiTitle = undefined;
+		firstUserText = undefined;
+		titleRequested = false;
+		titleFrameIndex = 0;
 		ensureConfigExists();
 		config = loadConfig((m, l) => {
 			try {
@@ -622,7 +787,18 @@ export default function (pi: ExtensionAPI): void {
 		req();
 	});
 
-	pi.on("session_shutdown", (_e, ctx) => {
+	pi.on("session_shutdown", (e, ctx) => {
+		// Claude Code clears the terminal title on exit (CLEAR_TERMINAL_TITLE) so
+		// the tab does not keep a stale title after the process dies. Only on
+		// quit: reload/new/resume/fork are immediately followed by a new session
+		// that sets its own title, and clearing would flash the tab.
+		if (e.reason === "quit" && lastCtx && isTuiContext(lastCtx) && config.title.enabled) {
+			try {
+				lastCtx.ui.setTitle("");
+			} catch {
+				// mid-teardown: best-effort
+			}
+		}
 		if (lastCtx) uninstallUi(lastCtx);
 		const released: CockpitUiOwnershipV1 = {
 			todo: false,
@@ -680,6 +856,31 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("session_compact", (_e, ctx) => {
 		invalidateUsageCache();
 		if (isTuiContext(ctx)) req();
+	});
+	pi.on("session_info_changed", (_e, ctx) => {
+		// A session rename (or the /session name set at startup) changes the
+		// session summary the tab title leads with.
+		if (isTuiContext(ctx)) req();
+	});
+	pi.on("thinking_level_select", (_e, ctx) => {
+		if (isTuiContext(ctx)) req();
+	});
+	pi.on("input", (e) => {
+		// Remember the first real user message; the title is generated after the
+		// first turn completes, so it can reflect the whole exchange. Slash
+		// commands and bash-mode inputs are synthetic, not the user's topic.
+		if (!firstUserText && e.source === "interactive" && e.text) {
+			const isSynthetic = e.text.startsWith("/") || e.text.startsWith("!");
+			if (!isSynthetic) firstUserText = e.text;
+		}
+	});
+	pi.on("turn_end", (e, ctx) => {
+		// Claude Code generates its title from the first user message; we wait
+		// for the first turn to settle so the title can reflect what the model
+		// actually did, then ask the configured model (or the rule fallback).
+		if (titleRequested || !firstUserText || !isTuiContext(ctx)) return;
+		titleRequested = true;
+		void generateSessionTitle(ctx, firstUserText, e.message, () => req());
 	});
 
 	const openBashBgOverlay = async (ctx: ExtensionContext): Promise<void> => {

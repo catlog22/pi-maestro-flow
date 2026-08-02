@@ -172,6 +172,58 @@ export function buildRows(config: CockpitConfig, live?: LiveRowState): SettingsR
 			// is the usual terminal signal for "this one opens a dialog".
 			next: "picker…",
 		},
+		// Terminal tab title surface. The session row is the summary the title
+		// leads with; the rest are tags appended after the working state. maxLength
+		// is a numeric field, so it stays in cockpit.json rather than the panel.
+		{
+			key: "titleEnabled",
+			accel: "c",
+			label: "title",
+			value: config.title.enabled ? "on" : "off",
+			next: config.title.enabled ? "off" : "on",
+		},
+		{
+			key: "titleSession",
+			accel: "u",
+			label: "title session",
+			value: config.title.showSession ? "on" : "off",
+			next: config.title.showSession ? "off" : "on",
+		},
+		{
+			key: "titleCwd",
+			accel: "r",
+			label: "title cwd",
+			value: config.title.showCwd ? "on" : "off",
+			next: config.title.showCwd ? "off" : "on",
+		},
+		{
+			key: "titleModel",
+			accel: "o",
+			label: "title model",
+			value: config.title.showModel ? "on" : "off",
+			next: config.title.showModel ? "off" : "on",
+		},
+		{
+			key: "titleThinking",
+			accel: "y",
+			label: "title thinking",
+			value: config.title.showThinking ? "on" : "off",
+			next: config.title.showThinking ? "off" : "on",
+		},
+		{
+			key: "titleGit",
+			accel: "g",
+			label: "title git",
+			value: config.title.showGit ? "on" : "off",
+			next: config.title.showGit ? "off" : "on",
+		},
+		{
+			key: "titleMaestro",
+			accel: "w",
+			label: "title maestro",
+			value: config.title.showMaestro ? "on" : "off",
+			next: config.title.showMaestro ? "off" : "on",
+		},
 	];
 }
 
@@ -208,6 +260,20 @@ export function applyRow(config: CockpitConfig, key: string): CockpitConfig {
 			};
 		case "icons":
 			return { ...config, icons: { mode: cycle(ICON_MODES, config.icons.mode) } };
+		case "titleEnabled":
+			return { ...config, title: { ...config.title, enabled: !config.title.enabled } };
+		case "titleSession":
+			return { ...config, title: { ...config.title, showSession: !config.title.showSession } };
+		case "titleCwd":
+			return { ...config, title: { ...config.title, showCwd: !config.title.showCwd } };
+		case "titleModel":
+			return { ...config, title: { ...config.title, showModel: !config.title.showModel } };
+		case "titleThinking":
+			return { ...config, title: { ...config.title, showThinking: !config.title.showThinking } };
+		case "titleGit":
+			return { ...config, title: { ...config.title, showGit: !config.title.showGit } };
+		case "titleMaestro":
+			return { ...config, title: { ...config.title, showMaestro: !config.title.showMaestro } };
 		// "theme" is intentionally absent: the row hands off to the /theme picker,
 		// which owns both the preview and the write-through to pi's settings.
 		// "thinkingFold" is absent for the same reason: pi owns hideThinkingBlock,

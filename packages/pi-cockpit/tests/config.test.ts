@@ -77,3 +77,23 @@ test("invalid or partial sidebar fields fall back independently", () => {
 	);
 	assert.deepEqual(mergeConfig(base, { sidebar: null }).sidebar, base.sidebar);
 });
+
+test("title merges supported fields and clamps maxLength to sane bounds", () => {
+	assert.deepEqual(
+		mergeConfig(DEFAULT_CONFIG, { title: { enabled: false, showSession: false, maxLength: 120 } }).title,
+		{ ...DEFAULT_CONFIG.title, enabled: false, showSession: false, maxLength: 120 },
+	);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { title: { maxLength: 3 } }).title.maxLength, 20);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { title: { maxLength: 900 } }).title.maxLength, 200);
+});
+
+test("invalid or partial title fields fall back independently", () => {
+	const merged = mergeConfig(DEFAULT_CONFIG, {
+		title: { enabled: "yes", showModel: true, showThinking: null, maxLength: Number.NaN },
+	});
+	assert.equal(merged.title.enabled, true);
+	assert.equal(merged.title.showModel, true);
+	assert.equal(merged.title.showThinking, DEFAULT_CONFIG.title.showThinking);
+	assert.equal(merged.title.maxLength, DEFAULT_CONFIG.title.maxLength);
+	assert.deepEqual(mergeConfig(DEFAULT_CONFIG, { title: null }).title, DEFAULT_CONFIG.title);
+});
