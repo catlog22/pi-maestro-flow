@@ -1,5 +1,9 @@
 import { Type } from "typebox";
-import type { WorkflowCoordinator } from "../session/coordinator.ts";
+import {
+  publicWorkflowErrorMessage,
+  type WorkflowCoordinator,
+  type WorkflowLeaseOwnership,
+} from "../session/coordinator.ts";
 
 /** Read-only across both the native run-control tool and Maestro CLI aliases. */
 export const RUN_CONTROL_READ_ACTIONS: ReadonlySet<string> = new Set([
@@ -114,35 +118,50 @@ export interface RunControlResult {
   details?: unknown;
 }
 
+export interface RunControlExecutionContext {
+  hostSessionId: string;
+}
+
 export async function executeRunControl(
   input: RunControlInput,
   coordinator: WorkflowCoordinator,
+  context?: RunControlExecutionContext,
 ): Promise<RunControlResult> {
   try {
+    const hostSessionId = context?.hostSessionId?.trim();
     switch (input.action) {
       case "status": {
         const snapshot = coordinator.status();
-        return snapshot
-          ? success(input.action, `${snapshot.source} snapshot ${snapshot.revision.fingerprint.slice(0, 12)}`, snapshot)
-          : failure(input.action, "Coordinator is not attached; attach during session_start first");
+        if (!snapshot) return failure(input.action, "Coordinator is not attached; attach during session_start first");
+        const ownership = hostSessionId ? await coordinator.ownership(hostSessionId) : undefined;
+        return success(
+          input.action,
+          statusMessage(`${snapshot.source} snapshot ${snapshot.revision.fingerprint.slice(0, 12)}`, ownership),
+          attributed(snapshot, ownership),
+        );
       }
       case "brief": {
         const result = await coordinator.brief(input.runId);
-        return success(input.action, result.stdout, result);
+        const ownership = hostSessionId ? await coordinator.ownership(hostSessionId) : undefined;
+        return success(input.action, readMessage(result.stdout, ownership), attributed(result, ownership));
       }
       case "prepare": {
         const result = await coordinator.prepare(required(input.step, "step"));
-        return success(input.action, result.stdout, result);
+        const ownership = hostSessionId ? await coordinator.ownership(hostSessionId) : undefined;
+        return success(input.action, readMessage(result.stdout, ownership), attributed(result, ownership));
       }
       case "check": {
         const result = await coordinator.check(input.runId);
-        return success(input.action, result.stdout, result);
+        const ownership = hostSessionId ? await coordinator.ownership(hostSessionId) : undefined;
+        return success(input.action, readMessage(result.stdout, ownership), attributed(result, ownership));
       }
       case "next": {
-        const result = await coordinator.next(input.pick);
+        const currentHostSessionId = required(hostSessionId, "hostSessionId");
+        const result = await coordinator.next(input.pick, { hostSessionId: currentHostSessionId });
         return success(input.action, result.command.stdout, result);
       }
       case "done": {
+        const currentHostSessionId = required(hostSessionId, "hostSessionId");
         const result = await coordinator.done(required(input.runId, "runId"), {
           verdict: input.verdict,
           summary: input.summary,
@@ -151,10 +170,11 @@ export async function executeRunControl(
           decisions: input.decisions,
           evidence: input.evidence,
           artifacts: input.artifacts,
-        });
+        }, { hostSessionId: currentHostSessionId });
         return success(input.action, result.command.stdout, result);
       }
       case "edit": {
+        const currentHostSessionId = required(hostSessionId, "hostSessionId");
         const result = await coordinator.edit(input.commands ?? [], {
           after: input.after,
           replace: input.replace,
@@ -163,12 +183,12 @@ export async function executeRunControl(
           stage: input.stage,
           goalRef: input.goalRef,
           insertedBy: input.insertedBy,
-        });
+        }, { hostSessionId: currentHostSessionId });
         return success(input.action, result.command.stdout, result);
       }
     }
   } catch (error) {
-    return failure(input.action, error instanceof Error ? error.message : String(error));
+    return failure(input.action, publicWorkflowErrorMessage(error));
   }
 }
 
@@ -176,6 +196,48 @@ function required(value: string | undefined, field: string): string {
   const normalized = value?.trim();
   if (!normalized) throw new Error(`${field} is required for this action`);
   return normalized;
+}
+
+function attributed<T extends object>(
+  details: T,
+  ownership: WorkflowLeaseOwnership | undefined,
+): T & { ownership?: WorkflowLeaseOwnership } {
+  return ownership ? { ...details, ownership } : details;
+}
+
+function statusMessage(message: string, ownership: WorkflowLeaseOwnership | undefined): string {
+  return ownership ? `${message}; ${ownershipSummary(ownership)}` : message;
+}
+
+function readMessage(message: string, ownership: WorkflowLeaseOwnership | undefined): string {
+  const notice = ownership ? readOwnershipNotice(ownership) : undefined;
+  return notice ? `${notice}\n${message}` : message;
+}
+
+function ownershipSummary(ownership: WorkflowLeaseOwnership): string {
+  if (ownership.state === "unowned") return "workflow mutation lease is unowned";
+  const owner = ownership.ownerHostSessionId ?? "unknown";
+  const freshness = ownership.state === "stale" ? "stale" : "active";
+  const relation = ownership.isOwner
+    ? ownership.isAttached ? "this Pi session owns" : "this Pi session is recorded as owner of"
+    : `Pi session ${owner} owns`;
+  return `${relation} the ${freshness} mutation lease `
+    + `(epoch ${ownership.epoch}, heartbeat ${ownership.heartbeatAt})`;
+}
+
+function readOwnershipNotice(ownership: WorkflowLeaseOwnership): string | undefined {
+  if (ownership.state === "owned" && ownership.isOwner && ownership.isAttached) return undefined;
+  if (ownership.state === "unowned") {
+    return `Read-only view: Workflow Session ${ownership.sessionId} has no mutation lease owner.`;
+  }
+  if (ownership.isOwner) {
+    return `Read-only view: Pi session ${ownership.currentHostSessionId} is recorded as the `
+      + `${ownership.state} lease owner, but this coordinator is not attached.`;
+  }
+  const freshness = ownership.state === "stale" ? "stale" : "active";
+  const article = freshness === "active" ? "an" : "a";
+  return `Read-only view: Workflow Session ${ownership.sessionId} has ${article} ${freshness} mutation lease `
+    + `owned by Pi session ${ownership.ownerHostSessionId}.`;
 }
 
 function success(action: RunControlAction, message: string, details?: unknown): RunControlResult {

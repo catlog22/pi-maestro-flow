@@ -107,7 +107,7 @@ import { WorkflowBridge, buildTodoMirrorSpecs } from "../session/bridge.ts";
 import { guiEnabled, startGuiSubsystem, registerGuiTool, isGuiToolAllowed, getGuiTool, createGuiEventForwarder, GUI_EVENTS, type GuiServerHandle, type GuiPermissionGateway } from "../gui/index.ts";
 import { loadLatestTeamSwarmProjection, type TeamSwarmProjection } from "../swarm/projection.ts";
 import { RunCliAdapter } from "../session/cli-adapter.ts";
-import { WorkflowCoordinator } from "../session/coordinator.ts";
+import { publicWorkflowErrorMessage, WorkflowCoordinator } from "../session/coordinator.ts";
 import { activeWorkflowRun, type WorkflowSnapshot } from "../session/types.ts";
 import { deriveWorkflowViewModel, workflowStatusLabel, type WorkflowSnapshotLike, type WorkflowViewModel } from "../session/view-model.ts";
 import { createRunEventComponent, type RunEventDetails } from "../session/run-event.ts";
@@ -582,6 +582,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   let workflowBridge: WorkflowBridge | undefined;
   let workflowCoordinator: WorkflowCoordinator | undefined;
   let attachedWorkflowSessionId: string | undefined;
+  let attachedWorkflowHostSessionId: string | undefined;
   let lastRunStates = new Map<string, string>();
   let workflowSessionOptedIn = true;
   let approvalMode: PermissionMode = DEFAULT_PERMISSION_MODE;
@@ -976,7 +977,8 @@ Actions:
 - next: allocate the next chain Run with optional pick; if a Run is already active, return its brief instead.
 - done: seal a Run with a verdict; requires runId, defaults verdict to done, and delegates to the stable complete protocol.
 - edit: modify future chain steps with commands/after/replace/remove and optional metadata.
-Mutating actions next/done/edit require an attached canonical Session and the Flow host mutation lease.
+Mutating actions next/done/edit require an attached canonical Session, the Flow host mutation lease, and ownership by the current Pi session.
+Read results report mutation-lease ownership so a Pi session can distinguish its Run from another session's workspace-wide Run.
 
 When to use:
 - Inside an active Maestro Workflow Session: status/brief/check to inspect (read-only), next/done/edit to drive the chain (mutating).
@@ -996,15 +998,23 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
         };
       }
       const actionOptsIn = !isRunControlReadAction(params.action);
-      if (actionOptsIn && !workflowSessionOptedIn) {
+      const hostSessionId = workflowHostSessionId(ctx);
+      if (actionOptsIn && hostSessionId) {
+        await ensureWorkflowHostIdentity(ctx, hostSessionId);
         const snapshot = workflowBridge?.getSnapshot() ?? await refreshWorkflow(ctx);
-        if (snapshot && shouldAttachWorkflowSession(snapshot) && await attachWorkflowSession(ctx, snapshot)) {
-          workflowSessionOptedIn = true;
+        if (snapshot && shouldAttachWorkflowSession(snapshot)
+          && (attachedWorkflowSessionId !== snapshot.session?.sessionId
+            || attachedWorkflowHostSessionId !== hostSessionId)) {
+          if (await attachWorkflowSession(ctx, snapshot, hostSessionId)) workflowSessionOptedIn = true;
         }
       }
-      const result = await executeRunControl(params as RunControlInput, workflowCoordinator);
+      const result = await executeRunControl(
+        params as RunControlInput,
+        workflowCoordinator,
+        hostSessionId ? { hostSessionId } : undefined,
+      );
       if (result.ok) {
-        await refreshWorkflow(ctx, true, actionOptsIn);
+        await refreshWorkflow(ctx, actionOptsIn, actionOptsIn, actionOptsIn);
       }
       return {
         content: [{ type: "text", text: result.message }],
@@ -1170,6 +1180,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     ctx: ExtensionContext,
     emitEvents = false,
     allowOptIn = false,
+    allowLeaseMutation = false,
   ): Promise<WorkflowSnapshot | undefined> {
     if (!workflowBridge) return undefined;
     const next = await workflowBridge.refresh();
@@ -1180,12 +1191,15 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     const activateWorkflowSession = shouldActivateWorkflowSession(next, workflowSessionOptedIn);
     const nextSession = activateWorkflowSession ? next.session : undefined;
     const nextAttachSessionId = nextSession?.sessionId;
-    if (attachedWorkflowSessionId && attachedWorkflowSessionId !== nextAttachSessionId) {
+    if (allowLeaseMutation
+      && attachedWorkflowSessionId
+      && attachedWorkflowSessionId !== nextAttachSessionId) {
       try { await workflowCoordinator?.fenceContinuation(); } catch { /* a lost lease is already fail-closed */ }
       await workflowCoordinator?.release();
       attachedWorkflowSessionId = undefined;
+      attachedWorkflowHostSessionId = undefined;
     }
-    if (emitEvents && nextSession
+    if (allowLeaseMutation && emitEvents && nextSession
       && attachedWorkflowSessionId !== nextSession.sessionId) {
       await attachWorkflowSession(ctx, next);
     }
@@ -1202,19 +1216,61 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     return next;
   }
 
-  async function attachWorkflowSession(ctx: ExtensionContext, snapshot: WorkflowSnapshot): Promise<boolean> {
+  async function withPublicWorkflowErrors<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      throw new Error(publicWorkflowErrorMessage(error));
+    }
+  }
+
+  function workflowHostSessionId(ctx: ExtensionContext): string | undefined {
+    const value = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.();
+    const normalized = value?.trim();
+    return normalized || undefined;
+  }
+
+  async function ensureWorkflowHostIdentity(
+    ctx: ExtensionContext,
+    hostSessionId: string,
+  ): Promise<void> {
+    if (!attachedWorkflowSessionId || attachedWorkflowHostSessionId === hostSessionId) return;
+    await workflowCoordinator?.release();
+    attachedWorkflowSessionId = undefined;
+    attachedWorkflowHostSessionId = undefined;
+    const snapshot = workflowBridge?.getSnapshot() ?? await workflowBridge?.refresh();
+    if (snapshot && workflowSessionOptedIn && shouldAttachWorkflowSession(snapshot)) {
+      await attachWorkflowSession(ctx, snapshot, hostSessionId);
+    }
+  }
+
+  async function attachWorkflowSession(
+    ctx: ExtensionContext,
+    snapshot: WorkflowSnapshot,
+    hostSessionId = workflowHostSessionId(ctx),
+  ): Promise<boolean> {
     if (!workflowCoordinator || !shouldAttachWorkflowSession(snapshot)) return false;
+    if (!hostSessionId) {
+      ctx.ui.notify(
+        "Workflow Session remains read-only because this Pi host does not expose a stable session id.",
+        "warning",
+      );
+      return false;
+    }
     const sessionId = snapshot.session!.sessionId;
-    if (attachedWorkflowSessionId === sessionId) return true;
-    const hostSessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.()
-      ?? `pi-${process.pid}`;
+    if (attachedWorkflowSessionId === sessionId && attachedWorkflowHostSessionId === hostSessionId) return true;
     try {
       await workflowCoordinator.attach(hostSessionId, sessionId);
       attachedWorkflowSessionId = sessionId;
+      attachedWorkflowHostSessionId = hostSessionId;
       return true;
     } catch (error) {
       attachedWorkflowSessionId = undefined;
-      ctx.ui.notify(`Workflow Session attach is read-only because continuation ownership was unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      attachedWorkflowHostSessionId = undefined;
+      ctx.ui.notify(
+        `Workflow Session attach is read-only because continuation ownership was unavailable: ${publicWorkflowErrorMessage(error)}`,
+        "warning",
+      );
       return false;
     }
   }
@@ -1289,18 +1345,28 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
             const planBlock = onToolCallPlan({ toolName: "run-control", input: { action } }, approvalMode === "bypassPermissions");
             if (planBlock) throw new Error(planBlock.reason);
           }
+          const hostSessionId = workflowHostSessionId(ctx);
+          const mutatesOwnership = ["pause", "resume", "next", "done"].includes(action);
+          if (mutatesOwnership) {
+            if (!hostSessionId) {
+              throw new Error("Current Pi host does not expose a stable session id; Workflow mutation is refused");
+            }
+            await ensureWorkflowHostIdentity(ctx, hostSessionId);
+          }
           if (action === "pause" || action === "resume") {
             if (action === "resume" && !workflowSessionOptedIn) {
               workflowSessionOptedIn = true;
               const snapshot = workflowBridge?.getSnapshot();
-              if (snapshot && await attachWorkflowSession(ctx, snapshot)) {
+              if (snapshot && await attachWorkflowSession(ctx, snapshot, hostSessionId)) {
                 reconcileWorkflowGoal(snapshot, ctx);
               }
             }
             const goal = getActiveGoal();
             if ((action === "pause" && goal?.status === "active")
               || (action === "resume" && (goal?.status === "paused" || goal?.status === "active"))) {
-              if (action === "pause") await workflowCoordinator!.fenceContinuation();
+              if (action === "pause") {
+                await withPublicWorkflowErrors(() => workflowCoordinator!.fenceContinuation());
+              }
               const result = await executeGoalCommand({ action: action === "pause" ? "stop" : "resume" }, ctx);
               if (result.isError) throw new Error(result.text);
             }
@@ -1309,14 +1375,16 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
           } else if (action === "check") {
             await workflowCoordinator!.check(runId);
           } else if (action === "next") {
-            await workflowCoordinator!.next();
+            await withPublicWorkflowErrors(() =>
+              workflowCoordinator!.next(undefined, { hostSessionId: hostSessionId! }));
           } else if (action === "done") {
             if (!runId) throw new Error("No Run selected");
-            await workflowCoordinator!.done(runId, { verdict: "done" });
+            await withPublicWorkflowErrors(() =>
+              workflowCoordinator!.done(runId, { verdict: "done" }, { hostSessionId: hostSessionId! }));
           } else {
             ctx.ui.notify("Resolve the decision through AskUserQuestion; the overlay is a recovery fallback only.", "info");
           }
-          await refreshWorkflow(ctx, true);
+          await refreshWorkflow(ctx, mutatesOwnership, mutatesOwnership, mutatesOwnership);
           const updated = deriveWorkflowViewModel(workflowSnapshotForUi());
           if (updated) overlay.update(await withKnowledge(updated));
         },
@@ -1649,7 +1717,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     if (workflowSessionOptedIn && snapshot) reconcileWorkflowGoal(snapshot, ctx);
     if (snapshot && shouldActivateWorkflowSession(snapshot, workflowSessionOptedIn)) {
       if (await attachWorkflowSession(ctx, snapshot)) {
-        await refreshWorkflow(ctx, true);
+        await refreshWorkflow(ctx, true, false, true);
         const recovery = workflowRecoveryIdentity();
         if (recovery) {
           pi.sendMessage({
@@ -1738,6 +1806,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     todoSessionShutdown(ctx);
     await workflowCoordinator?.release();
     attachedWorkflowSessionId = undefined;
+    attachedWorkflowHostSessionId = undefined;
     workflowCoordinator = undefined;
     workflowBridge = undefined;
     workflowSessionOptedIn = true;
@@ -1932,7 +2001,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       const allowOptIn = event.toolName === "run-control"
         ? Boolean(runControlAction && !isRunControlReadAction(runControlAction))
         : isWorkflowOptInCommand(command);
-      await refreshWorkflow(ctx, true, allowOptIn);
+      await refreshWorkflow(ctx, true, allowOptIn, allowOptIn);
     }
   });
 

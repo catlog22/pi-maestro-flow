@@ -14,6 +14,7 @@ import {
   type RunEditOptions,
 } from "../src/session/cli-adapter.ts";
 import {
+  publicWorkflowErrorMessage,
   WorkflowCoordinator,
   WorkflowLeaseBusyError,
   WorkflowLeaseStore,
@@ -26,6 +27,17 @@ import { executeRunControl, RunControlParams } from "../src/tools/run-control.ts
 test("run-control schema rejects unknown fields", () => {
   assert.equal(Check(RunControlParams, { action: "status" }), true);
   assert.equal(Check(RunControlParams, { action: "status", typo: true }), false);
+  assert.equal(Check(RunControlParams, { action: "status", hostSessionId: "spoofed" }), false);
+});
+
+test("public workflow errors redact lease-path fencing tokens", () => {
+  const token = "123e4567-e89b-42d3-a456-426614174000";
+  const message = publicWorkflowErrorMessage(new Error(
+    `EPERM: D:/workspace/.workflow/tmp/hook/session-1.lease/3.${token}.state.json`,
+  ));
+  assert.doesNotMatch(message, new RegExp(token));
+  assert.match(message, /<redacted>/);
+  assert.equal(publicWorkflowErrorMessage(new Error("ordinary workflow failure")), "ordinary workflow failure");
 });
 
 test("coordinator attaches brief-first and fences old continuation markers across done and next", async () => {
@@ -56,6 +68,7 @@ test("coordinator attaches brief-first and fences old continuation markers acros
   const coordinator = new WorkflowCoordinator(bridge, adapter, new WorkflowLeaseStore(root));
   try {
     const attached = await coordinator.attach("host-1");
+    assert.equal("token" in attached.lease, false, "attach results must not expose the fencing token");
     assert.equal(attached.brief?.stdout, "brief run-1");
     assert.deepEqual(calls[0], ["brief", "run-1", "session-1"]);
 
@@ -66,12 +79,12 @@ test("coordinator attaches brief-first and fences old continuation markers acros
     await coordinator.fenceContinuation();
     assert.equal(coordinator.acceptsContinuation(fencedMarker), false);
     const doneMarker = coordinator.continuationMarker(4);
-    const completed = await coordinator.done("run-1", { verdict: "needs-retry" });
+    const completed = await coordinator.done("run-1", { verdict: "needs-retry" }, { hostSessionId: "host-1" });
     assert.equal(completed.command.stdout, "done run-1");
     assert.equal(coordinator.acceptsContinuation(doneMarker), false);
     assert.deepEqual(calls.at(-1), ["done", "run-1", "session-1", "needs-retry"]);
 
-    const next = await coordinator.next();
+    const next = await coordinator.next(undefined, { hostSessionId: "host-1" });
     assert.equal(next.command.stdout, "next session-1");
     assert.deepEqual(calls.at(-1), ["next", "session-1", ""]);
     assert.equal(next.snapshot.session!.activeRunId, "run-2");
@@ -97,6 +110,7 @@ test("session lease is atomic under first-acquire concurrency and stale takeover
     assert.equal(fulfilled.length, 1);
     assert.equal(rejected.length, 1);
     assert.ok(rejected[0]!.reason instanceof WorkflowLeaseBusyError);
+    assert.equal("token" in rejected[0]!.reason.owner, false, "busy errors must not expose the fencing token");
     const firstWon = contenders[0]!.status === "fulfilled";
     const winner = firstWon ? first : second;
     const loser = firstWon ? second : first;
@@ -109,6 +123,48 @@ test("session lease is atomic under first-acquire concurrency and stale takeover
   } finally {
     await first.release();
     await second.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("lease ownership reports Pi session attribution without exposing the fencing token", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-lease-owner-"));
+  let now = new Date("2026-07-15T00:00:00.000Z");
+  const owner = new WorkflowLeaseStore(root, 1_000, () => now);
+  const observer = new WorkflowLeaseStore(root, 1_000, () => now);
+  try {
+    const lease = await owner.acquire("session-1", "pi-owner");
+    const ownerView = await owner.ownership("session-1", "pi-owner");
+    assert.deepEqual(ownerView, {
+      sessionId: "session-1",
+      currentHostSessionId: "pi-owner",
+      state: "owned",
+      ownerHostSessionId: "pi-owner",
+      epoch: lease.epoch,
+      heartbeatAt: lease.heartbeatAt,
+      isOwner: true,
+      isAttached: true,
+    });
+    assert.equal("token" in ownerView, false, "public ownership must not reveal the fencing token");
+
+    const observerView = await observer.ownership("session-1", "pi-reader");
+    assert.equal(observerView.ownerHostSessionId, "pi-owner");
+    assert.equal(observerView.isOwner, false);
+    assert.equal(observerView.isAttached, false);
+
+    now = new Date("2026-07-15T00:00:02.000Z");
+    assert.equal((await observer.ownership("session-1", "pi-reader")).state, "stale");
+    await owner.release();
+    assert.deepEqual(await observer.ownership("session-1", "pi-reader"), {
+      sessionId: "session-1",
+      currentHostSessionId: "pi-reader",
+      state: "unowned",
+      isOwner: false,
+      isAttached: false,
+    });
+  } finally {
+    await owner.release();
+    await observer.release();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -235,11 +291,53 @@ test("heartbeat publication failure clears ownership and blocks continuation and
     assert.equal(store.current(), undefined);
     assert.equal(coordinator.acceptsContinuation(marker), false);
     assert.throws(() => coordinator.continuationMarker(2), /lease is not held/);
-    await assert.rejects(coordinator.done("run-1"), /lease is not held/);
+    await assert.rejects(
+      coordinator.done("run-1", {}, { hostSessionId: "host-1" }),
+      /lease is not held/,
+    );
     assert.equal(calls.some(([operation]) => operation === "done"), false);
   } finally {
     await coordinator.release();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("every run-control mutation rejects a different Pi session before fencing or CLI", async () => {
+  const scenarios: Array<{
+    name: string;
+    mutate: (coordinator: WorkflowCoordinator) => Promise<unknown>;
+  }> = [
+    { name: "next", mutate: (coordinator) => coordinator.next(undefined, { hostSessionId: "pi-reader" }) },
+    { name: "done", mutate: (coordinator) => coordinator.done("run-1", {}, { hostSessionId: "pi-reader" }) },
+    { name: "done-invalid", mutate: (coordinator) => coordinator.done("run-missing", {}, { hostSessionId: "pi-reader" }) },
+    { name: "edit", mutate: (coordinator) => coordinator.edit(["review"], {}, { hostSessionId: "pi-reader" }) },
+  ];
+
+  for (const scenario of scenarios) {
+    const root = await mkdtemp(join(tmpdir(), `pi-workflow-host-${scenario.name}-`));
+    const calls: string[][] = [];
+    const store = new WorkflowLeaseStore(root);
+    const coordinator = new WorkflowCoordinator(
+      fakeBridge(workflowSnapshot("running")),
+      fakeAdapter(calls),
+      store,
+    );
+    try {
+      await coordinator.attach("pi-owner");
+      const callCountAfterAttach = calls.length;
+      const leaseBefore = store.current();
+      await assert.rejects(
+        scenario.mutate(coordinator),
+        /lease belongs to Pi session pi-owner, but this run-control call came from Pi session pi-reader/,
+        scenario.name,
+      );
+      assert.equal(store.current()?.token, leaseBefore?.token, `${scenario.name} must not fence the owner lease`);
+      assert.equal(store.current()?.epoch, leaseBefore?.epoch, `${scenario.name} must preserve the owner epoch`);
+      assert.equal(calls.length, callCountAfterAttach, `${scenario.name} must not reach brief or a mutating CLI call`);
+    } finally {
+      await coordinator.release();
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -249,9 +347,9 @@ test("every coordinator mutation rejects a canonical Session switch after attach
     status: "running" | "failed" | "completed";
     mutate: (coordinator: WorkflowCoordinator) => Promise<unknown>;
   }> = [
-    { name: "next", status: "completed", mutate: (coordinator) => coordinator.next() },
-    { name: "done", status: "running", mutate: (coordinator) => coordinator.done("run-1") },
-    { name: "edit", status: "running", mutate: (coordinator) => coordinator.edit(["review"]) },
+    { name: "next", status: "completed", mutate: (coordinator) => coordinator.next(undefined, { hostSessionId: "host-1" }) },
+    { name: "done", status: "running", mutate: (coordinator) => coordinator.done("run-1", {}, { hostSessionId: "host-1" }) },
+    { name: "edit", status: "running", mutate: (coordinator) => coordinator.edit(["review"], {}, { hostSessionId: "host-1" }) },
     { name: "fenceContinuation", status: "running", mutate: (coordinator) => coordinator.fenceContinuation() },
   ];
 
@@ -321,8 +419,36 @@ test("coordinator mutation fails closed when the canonical Session disappears af
   );
   try {
     await coordinator.attach("host-1");
-    await assert.rejects(coordinator.done("run-1"), /No active canonical Workflow Session/);
+    await assert.rejects(
+      coordinator.done("run-1", {}, { hostSessionId: "host-1" }),
+      /No active canonical Workflow Session/,
+    );
     assert.equal(calls.some(([operation]) => operation === "done"), false);
+  } finally {
+    await coordinator.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reattaching the same Workflow Session under a new Pi session rotates ownership", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-host-reattach-"));
+  const snapshot = workflowSnapshot("running");
+  const coordinator = new WorkflowCoordinator(
+    fakeBridge(snapshot),
+    fakeAdapter([]),
+    new WorkflowLeaseStore(root),
+  );
+  try {
+    const first = await coordinator.attach("pi-before");
+    const marker = coordinator.continuationMarker(1);
+    const second = await coordinator.attach("pi-after");
+    const ownership = await coordinator.ownership("pi-after");
+
+    assert.ok(second.lease.epoch > first.lease.epoch);
+    assert.equal(second.lease.hostSessionId, "pi-after");
+    assert.equal(ownership?.isOwner, true);
+    assert.equal(ownership?.isAttached, true);
+    assert.equal(coordinator.acceptsContinuation(marker), false, "host identity rotation must invalidate continuation");
   } finally {
     await coordinator.release();
     await rm(root, { recursive: true, force: true });
@@ -388,7 +514,7 @@ test("continuation rejects failed and blocked gates at issue and consume boundar
     assert.equal(coordinator.acceptsContinuation(marker), false);
     snapshot.session!.runs[0]!.gates = [];
     const doneMarker = coordinator.continuationMarker(3);
-    await coordinator.done("run-1", { verdict: "blocked" });
+    await coordinator.done("run-1", { verdict: "blocked" }, { hostSessionId: "host-1" });
     assert.equal(coordinator.acceptsContinuation(doneMarker), false, "done must fence pending continuation");
   } finally {
     await coordinator.release();
@@ -458,39 +584,105 @@ test("CLI adapter uses session next/done when the session subcommand is detected
   ]);
 });
 
+test("run-control read results expose owner and non-owner Pi session attribution", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-run-control-ownership-"));
+  const snapshot = workflowSnapshot("running");
+  const owner = new WorkflowCoordinator(
+    fakeBridge(snapshot),
+    fakeAdapter([]),
+    new WorkflowLeaseStore(root),
+  );
+  const reader = new WorkflowCoordinator(
+    fakeBridge(snapshot),
+    fakeAdapter([]),
+    new WorkflowLeaseStore(root),
+  );
+  try {
+    await owner.attach("pi-owner");
+    const ownerStatus = await executeRunControl(
+      { action: "status" },
+      owner,
+      { hostSessionId: "pi-owner" },
+    );
+    assert.equal(ownerStatus.ok, true);
+    assert.match(ownerStatus.message, /this Pi session owns the active mutation lease/);
+    const ownerDetails = ownerStatus.details as { ownership: Record<string, unknown> };
+    assert.equal(ownerDetails.ownership.isOwner, true);
+    assert.equal(ownerDetails.ownership.isAttached, true);
+    assert.equal("token" in ownerDetails.ownership, false);
+
+    const readerStatus = await executeRunControl(
+      { action: "status" },
+      reader,
+      { hostSessionId: "pi-reader" },
+    );
+    assert.equal(readerStatus.ok, true);
+    assert.match(readerStatus.message, /Pi session pi-owner owns the active mutation lease/);
+    const readerDetails = readerStatus.details as { ownership: Record<string, unknown> };
+    assert.equal(readerDetails.ownership.currentHostSessionId, "pi-reader");
+    assert.equal(readerDetails.ownership.ownerHostSessionId, "pi-owner");
+    assert.equal(readerDetails.ownership.isOwner, false);
+    assert.equal(readerDetails.ownership.isAttached, false);
+
+    const brief = await executeRunControl(
+      { action: "brief" },
+      reader,
+      { hostSessionId: "pi-reader" },
+    );
+    assert.equal(brief.ok, true);
+    assert.match(brief.message, /^Read-only view: Workflow Session session-1 has an active mutation lease owned by Pi session pi-owner\./);
+  } finally {
+    await owner.release();
+    await reader.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("run-control forwards canonical lifecycle inputs without legacy action aliases", async () => {
   const calls: Array<[string, ...unknown[]]> = [];
   const command = result([], "ok");
   const transition = { command, snapshot: workflowSnapshot("running") };
   const coordinator = {
     async check(runId?: string) { calls.push(["check", runId]); return command; },
-    async next(pick?: string) { calls.push(["next", pick]); return transition; },
-    async done(runId: string, options: RunDoneOptions) { calls.push(["done", runId, options]); return transition; },
-    async edit(commands: readonly string[], options: Omit<RunEditOptions, "sessionId">) {
-      calls.push(["edit", commands, options]);
+    async ownership() { return undefined; },
+    async next(pick?: string, context?: { hostSessionId: string }) {
+      calls.push(["next", context?.hostSessionId, pick]);
+      return transition;
+    },
+    async done(runId: string, options: RunDoneOptions, context?: { hostSessionId: string }) {
+      calls.push(["done", runId, context?.hostSessionId, options]);
+      return transition;
+    },
+    async edit(
+      commands: readonly string[],
+      options: Omit<RunEditOptions, "sessionId">,
+      context?: { hostSessionId: string },
+    ) {
+      calls.push(["edit", commands, context?.hostSessionId, options]);
       return transition;
     },
   } as unknown as WorkflowCoordinator;
+  const context = { hostSessionId: "pi-session-1" };
 
-  assert.equal((await executeRunControl({ action: "check", runId: "run-1" }, coordinator)).ok, true);
-  assert.equal((await executeRunControl({ action: "next", pick: "step-2" }, coordinator)).ok, true);
+  assert.equal((await executeRunControl({ action: "check", runId: "run-1" }, coordinator, context)).ok, true);
+  assert.equal((await executeRunControl({ action: "next", pick: "step-2" }, coordinator, context)).ok, true);
   assert.equal((await executeRunControl({
     action: "done",
     runId: "run-1",
     verdict: "done-with-concerns",
     notes: ["note"],
-  }, coordinator)).ok, true);
+  }, coordinator, context)).ok, true);
   assert.equal((await executeRunControl({
     action: "edit",
     commands: ["review"],
     after: "latest",
     args: "--scope core",
-  }, coordinator)).ok, true);
+  }, coordinator, context)).ok, true);
 
   assert.deepEqual(calls, [
     ["check", "run-1"],
-    ["next", "step-2"],
-    ["done", "run-1", {
+    ["next", "pi-session-1", "step-2"],
+    ["done", "run-1", "pi-session-1", {
       verdict: "done-with-concerns",
       summary: undefined,
       reason: undefined,
@@ -499,7 +691,7 @@ test("run-control forwards canonical lifecycle inputs without legacy action alia
       evidence: undefined,
       artifacts: undefined,
     }],
-    ["edit", ["review"], {
+    ["edit", ["review"], "pi-session-1", {
       after: "latest",
       replace: undefined,
       remove: undefined,
@@ -509,6 +701,47 @@ test("run-control forwards canonical lifecycle inputs without legacy action alia
       insertedBy: undefined,
     }],
   ]);
+});
+
+test("legacy direct callers keep read compatibility but mutations fail closed without host identity", async () => {
+  const snapshot = workflowSnapshot("running");
+  let nextCalls = 0;
+  const coordinator = {
+    status() { return snapshot; },
+    async next() {
+      nextCalls++;
+      return { command: result([], "ok"), snapshot };
+    },
+  } as unknown as WorkflowCoordinator;
+
+  const status = await executeRunControl({ action: "status" }, coordinator);
+  assert.equal(status.ok, true);
+  assert.equal((status.details as WorkflowSnapshot).session?.sessionId, "session-1");
+
+  const next = await executeRunControl({ action: "next" }, coordinator);
+  assert.equal(next.ok, false);
+  assert.match(next.message, /hostSessionId is required/);
+  assert.equal(nextCalls, 0);
+});
+
+test("run-control does not turn a completed mutation into a failure when attribution is unavailable", async () => {
+  const transition = { command: result([], "ok"), snapshot: workflowSnapshot("running") };
+  let ownershipCalls = 0;
+  const coordinator = {
+    async next() { return transition; },
+    async ownership() {
+      ownershipCalls++;
+      throw new Error("ownership unavailable");
+    },
+  } as unknown as WorkflowCoordinator;
+
+  const resultValue = await executeRunControl(
+    { action: "next" },
+    coordinator,
+    { hostSessionId: "pi-session-1" },
+  );
+  assert.equal(resultValue.ok, true);
+  assert.equal(ownershipCalls, 0);
 });
 
 test("default CLI runner times out and terminates a hung process", async () => {

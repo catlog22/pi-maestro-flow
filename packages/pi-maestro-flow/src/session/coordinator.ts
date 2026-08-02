@@ -24,7 +24,7 @@ export interface WorkflowRunAdapter {
   edit(commands: readonly string[], options: RunEditOptions): Promise<RunCliResult>;
 }
 
-export interface WorkflowLease {
+interface WorkflowLease {
   sessionId: string;
   hostSessionId: string;
   epoch: number;
@@ -32,10 +32,30 @@ export interface WorkflowLease {
   token: string;
 }
 
+export type WorkflowLeaseMetadata = Omit<WorkflowLease, "token">;
+
+export type WorkflowLeaseOwnershipState = "unowned" | "owned" | "stale";
+
+/** Public lease metadata for attribution. The fencing token is intentionally excluded. */
+export interface WorkflowLeaseOwnership {
+  sessionId: string;
+  currentHostSessionId: string;
+  state: WorkflowLeaseOwnershipState;
+  ownerHostSessionId?: string;
+  epoch?: number;
+  heartbeatAt?: string;
+  isOwner: boolean;
+  isAttached: boolean;
+}
+
+export interface WorkflowHostContext {
+  hostSessionId: string;
+}
+
 export interface WorkflowAttachResult {
   snapshot: WorkflowSnapshot;
   brief?: RunCliResult;
-  lease: WorkflowLease;
+  lease: WorkflowLeaseMetadata;
 }
 
 export interface WorkflowTransitionResult {
@@ -44,9 +64,15 @@ export interface WorkflowTransitionResult {
 }
 
 export class WorkflowLeaseBusyError extends Error {
-  constructor(readonly owner: WorkflowLease) {
-    super(`Workflow Session ${owner.sessionId} is leased by host ${owner.hostSessionId}`);
+  readonly owner: WorkflowLeaseMetadata;
+
+  constructor(owner: WorkflowLease) {
+    super(
+      `Workflow Session ${owner.sessionId} is leased by Pi session ${owner.hostSessionId} `
+      + `(epoch ${owner.epoch}, heartbeat ${owner.heartbeatAt})`,
+    );
     this.name = "WorkflowLeaseBusyError";
+    this.owner = leaseMetadata(owner);
   }
 }
 
@@ -170,6 +196,34 @@ export class WorkflowLeaseStore {
 
   current(): WorkflowLease | undefined {
     return this.held ? { ...this.held } : undefined;
+  }
+
+  async ownership(sessionId: string, currentHostSessionId: string): Promise<WorkflowLeaseOwnership> {
+    const current = await this.readCurrent(this.directoryFor(sessionId), sessionId);
+    if (!current || current.released) {
+      return {
+        sessionId,
+        currentHostSessionId,
+        state: "unowned",
+        isOwner: false,
+        isAttached: false,
+      };
+    }
+    const lease = current.lease;
+    return {
+      sessionId,
+      currentHostSessionId,
+      state: this.isStale(lease) ? "stale" : "owned",
+      ownerHostSessionId: lease.hostSessionId,
+      epoch: lease.epoch,
+      heartbeatAt: lease.heartbeatAt,
+      isOwner: lease.hostSessionId === currentHostSessionId,
+      isAttached: Boolean(
+        lease.hostSessionId === currentHostSessionId
+        && this.held
+        && sameLease(this.held, lease),
+      ),
+    };
   }
 
   async release(): Promise<void> {
@@ -382,7 +436,7 @@ export class WorkflowCoordinator {
     try {
       const run = activeWorkflowRun(snapshot);
       const brief = run ? await this.adapter.brief(run.runId, session.sessionId) : undefined;
-      return { snapshot, ...(brief ? { brief } : {}), lease };
+      return { snapshot, ...(brief ? { brief } : {}), lease: leaseMetadata(lease) };
     } catch (error) {
       await this.stopHeartbeat();
       await this.leases.release();
@@ -392,6 +446,13 @@ export class WorkflowCoordinator {
 
   status(): WorkflowSnapshot | undefined {
     return this.bridge.getSnapshot();
+  }
+
+  async ownership(currentHostSessionId: string): Promise<WorkflowLeaseOwnership | undefined> {
+    const session = this.bridge.getSnapshot()?.session;
+    return session
+      ? this.leases.ownership(session.sessionId, requireHostSessionId(currentHostSessionId))
+      : undefined;
   }
 
   async prepare(step: string): Promise<RunCliResult> {
@@ -415,31 +476,44 @@ export class WorkflowCoordinator {
     return this.adapter.check(target, session.sessionId);
   }
 
-  async next(pick?: string): Promise<WorkflowTransitionResult> {
+  async next(pick?: string, context?: WorkflowHostContext): Promise<WorkflowTransitionResult> {
+    const currentHostSessionId = requireHostSessionId(context?.hostSessionId);
     const snapshot = await this.bridge.refresh();
     const session = requireSession(snapshot);
+    await this.requireMutationLease(session.sessionId, currentHostSessionId);
     const active = activeWorkflowRun(snapshot);
     if (active && ["created", "running", "blocked"].includes(active.status)) {
       return { command: await this.adapter.brief(active.runId, session.sessionId), snapshot };
     }
-    await this.fenceLease(session.sessionId);
+    await this.fenceLease(session.sessionId, currentHostSessionId);
     const result = await this.adapter.next(session.sessionId, pick);
     return { command: result, snapshot: await this.bridge.refresh() };
   }
 
-  async done(runId: string, options: RunDoneOptions = {}): Promise<WorkflowTransitionResult> {
+  async done(
+    runId: string,
+    options: RunDoneOptions = {},
+    context?: WorkflowHostContext,
+  ): Promise<WorkflowTransitionResult> {
+    const currentHostSessionId = requireHostSessionId(context?.hostSessionId);
     const snapshot = await this.bridge.refresh();
     const session = requireSession(snapshot);
+    await this.requireMutationLease(session.sessionId, currentHostSessionId);
     requireRun(session.runs, runId);
-    await this.fenceLease(session.sessionId);
+    await this.fenceLease(session.sessionId, currentHostSessionId);
     const result = await this.adapter.done(runId, session.sessionId, options);
     return { command: result, snapshot: await this.bridge.refresh() };
   }
 
-  async edit(commands: readonly string[], options: Omit<RunEditOptions, "sessionId"> = {}): Promise<WorkflowTransitionResult> {
+  async edit(
+    commands: readonly string[],
+    options: Omit<RunEditOptions, "sessionId"> = {},
+    context?: WorkflowHostContext,
+  ): Promise<WorkflowTransitionResult> {
+    const currentHostSessionId = requireHostSessionId(context?.hostSessionId);
     const snapshot = await this.bridge.refresh();
     const session = requireSession(snapshot);
-    await this.fenceLease(session.sessionId);
+    await this.fenceLease(session.sessionId, currentHostSessionId);
     const result = await this.adapter.edit(commands, { ...options, sessionId: session.sessionId });
     return { command: result, snapshot: await this.bridge.refresh() };
   }
@@ -500,23 +574,53 @@ export class WorkflowCoordinator {
   async release(): Promise<void> {
     this.pendingContinuation = undefined;
     await this.stopHeartbeat();
-    await this.leases.release();
+    try {
+      await this.leases.release();
+    } catch (error) {
+      throw new Error(publicWorkflowErrorMessage(error));
+    }
   }
 
-  private async fenceLease(sessionId: string): Promise<void> {
-    this.requireMutationLease(sessionId);
+  private async fenceLease(sessionId: string, currentHostSessionId?: string): Promise<void> {
+    await this.requireMutationLease(sessionId, currentHostSessionId);
     this.pendingContinuation = undefined;
     await this.stopHeartbeat();
     const lease = await this.leases.fence();
     this.startHeartbeat(lease);
   }
 
-  private requireMutationLease(sessionId: string): WorkflowLease {
+  private async requireMutationLease(
+    sessionId: string,
+    currentHostSessionId?: string,
+  ): Promise<WorkflowLease> {
+    const hostSessionId = currentHostSessionId === undefined
+      ? undefined
+      : requireHostSessionId(currentHostSessionId);
     const lease = this.leases.current();
-    if (!lease) throw new Error("Workflow mutation lease is not held");
+    if (!lease) {
+      if (!hostSessionId) throw new Error("Workflow mutation lease is not held");
+      const ownership = await this.leases.ownership(sessionId, hostSessionId);
+      if (ownership.ownerHostSessionId) {
+        const freshness = ownership.state === "stale" ? "stale" : "active";
+        throw new Error(
+          `Workflow mutation lease is not held by Pi session ${hostSessionId}; `
+          + `Workflow Session ${sessionId} has a ${freshness} lease owned by Pi session `
+          + `${ownership.ownerHostSessionId} (epoch ${ownership.epoch}, heartbeat ${ownership.heartbeatAt})`,
+        );
+      }
+      throw new Error(
+        `Workflow mutation lease is not held by Pi session ${hostSessionId}; attach Workflow Session ${sessionId} first`,
+      );
+    }
     if (lease.sessionId !== sessionId) {
       throw new Error(
         `Workflow mutation lease belongs to ${lease.sessionId}, but the active canonical Session is ${sessionId}`,
+      );
+    }
+    if (hostSessionId && lease.hostSessionId !== hostSessionId) {
+      throw new Error(
+        `Workflow mutation lease belongs to Pi session ${lease.hostSessionId}, `
+        + `but this run-control call came from Pi session ${hostSessionId}`,
       );
     }
     return lease;
@@ -575,6 +679,24 @@ function sameMarker(left: ContinuationMarker, right: ContinuationMarker): boolea
     && left.nonce === right.nonce;
 }
 
+const LEASE_PATH_UUID_PATTERN = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi;
+
+export function publicWorkflowErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes(".workflow") && message.includes(".lease")
+    ? message.replace(LEASE_PATH_UUID_PATTERN, "<redacted>")
+    : message;
+}
+
+function leaseMetadata(lease: WorkflowLease): WorkflowLeaseMetadata {
+  return {
+    sessionId: lease.sessionId,
+    hostSessionId: lease.hostSessionId,
+    epoch: lease.epoch,
+    heartbeatAt: lease.heartbeatAt,
+  };
+}
+
 function sameLease(left: WorkflowLease, right: WorkflowLease): boolean {
   return left.sessionId === right.sessionId
     && left.hostSessionId === right.hostSessionId
@@ -585,6 +707,12 @@ function sameLease(left: WorkflowLease, right: WorkflowLease): boolean {
 function requireSession(snapshot: WorkflowSnapshot) {
   if (!snapshot.session) throw new Error("No active canonical Workflow Session");
   return snapshot.session;
+}
+
+function requireHostSessionId(value: string | undefined): string {
+  const normalized = value?.trim();
+  if (!normalized) throw new Error("Current Pi host does not expose a stable session id; Workflow mutation is refused");
+  return normalized;
 }
 
 function requireRun(runs: WorkflowRun[], runId: string): WorkflowRun {
