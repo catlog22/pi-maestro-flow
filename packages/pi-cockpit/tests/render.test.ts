@@ -48,6 +48,19 @@ test("renderAgents list includes connector, role, task and tail", () => {
 	assert.ok(line.includes("⠋")); // running spinner
 });
 
+test("renderAgents shows phase and failed outcome without replacing sleeping activity", () => {
+	const line = renderAgents([agent({
+		status: "sleeping",
+		phase: undefined,
+		lastOutcome: { status: "failed", message: "provider exhausted", settledAt: 1 },
+	})], "list", 160, theme, utils, opts)[0];
+	assert.match(line, /sleeping/);
+	assert.match(line, /last failed: provider exhausted/);
+
+	const running = renderAgents([agent({ phase: "compacting" })], "list", 120, theme, utils, opts)[0];
+	assert.match(running, /compacting/);
+});
+
 test("renderAgents hideLiveDuration drops the live elapsed but keeps frozen durations", () => {
 	const rows = [
 		agent({ correlationId: "live", task: "live task", status: "running", startedAt: 1_000 }),

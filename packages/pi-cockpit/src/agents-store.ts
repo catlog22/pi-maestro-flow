@@ -114,6 +114,13 @@ export function mapAgentStatus(status: unknown): AgentStatus {
 	}
 }
 
+function activityFromProgressStatus(status: unknown): "running" | "sleeping" | undefined {
+	if (typeof status !== "string") return undefined;
+	return status === "sleeping" || status === "completed" || status === "failed" || status === "terminated"
+		? "sleeping"
+		: "running";
+}
+
 export const AGENT_STALL_TIMEOUT_MS = 30_000;
 export type AgentDisplayStatus = AgentStatus | "result-ready" | "stalled";
 
@@ -138,9 +145,10 @@ function terminalTime(
 	now: number,
 ): number {
 	const completedAt = normalizeStartedAt(payload.completedAt, Number.NaN);
-	if (Number.isFinite(completedAt)) return Math.max(row.startedAt, completedAt);
+	const turnStartedAt = row.turnStartedAt ?? row.startedAt;
+	if (Number.isFinite(completedAt)) return Math.max(turnStartedAt, completedAt);
 	if (typeof payload.durationMs === "number" && Number.isFinite(payload.durationMs)) {
-		return row.startedAt + Math.max(0, payload.durationMs);
+		return turnStartedAt + Math.max(0, payload.durationMs);
 	}
 	return row.finishedAt ?? now;
 }
@@ -198,6 +206,14 @@ export class AgentsStore {
 			role: deriveRole(p.agent, p.name),
 			task: prev?.task ?? clean(p.name),
 			status: p.status === undefined ? prev?.status ?? "running" : mapAgentStatus(p.status),
+			phase: typeof p.phase === "string" ? clean(p.phase) : prev?.phase,
+			lastOutcome: p.lastOutcome
+				? {
+					status: p.lastOutcome.status,
+					...(p.lastOutcome.message ? { message: truncateTail(p.lastOutcome.message) } : {}),
+					settledAt: p.lastOutcome.settledAt,
+				}
+				: prev?.lastOutcome,
 			tail: prev?.tail ?? "",
 			startedAt: prev?.startedAt ?? normalizeStartedAt(p.startedAt, now),
 			lastActivityAt: normalizeStartedAt(p.lastActivityAt, now),
@@ -207,7 +223,15 @@ export class AgentsStore {
 					? { parentCorrelationId: prev.parentCorrelationId }
 					: {}),
 		};
-		if (row.status !== "done" && row.status !== "failed" && row.status !== "terminated") delete row.finishedAt;
+		if (row.status === "running") {
+			row.turnStartedAt = now;
+			delete row.finishedAt;
+			delete row.failedAt;
+		} else if (row.status === "sleeping") {
+			row.finishedAt = row.lastOutcome?.settledAt ?? prev?.finishedAt ?? now;
+		} else if (row.status !== "done" && row.status !== "failed" && row.status !== "terminated") {
+			delete row.finishedAt;
+		}
 		this.roster.set(id, row);
 	}
 
@@ -239,7 +263,7 @@ export class AgentsStore {
 				correlationId: targetId,
 				agent: p.agent ?? "",
 				name: p.name,
-				status: p.status,
+				status: activityFromProgressStatus(p.status),
 				lastActivityAt: p.lastActivityAt,
 				...(p.taskCorrelationId && p.taskCorrelationId !== p.correlationId
 					? { spawnedBy: p.correlationId }
@@ -278,6 +302,8 @@ export class AgentsStore {
 				delete row.finishedAt;
 			}
 		}
+		if (typeof p.phase === "string") row.phase = clean(p.phase);
+		else if (row.status === "sleeping") delete row.phase;
 		if (typeof p.taskIndex === "number") row.taskIndex = p.taskIndex;
 		if (Array.isArray(p.dependencies)) row.dependencies = [...p.dependencies];
 	}
@@ -307,21 +333,36 @@ export class AgentsStore {
 				row.status = "terminated";
 				row.taskStatus = "terminated";
 				row.finishedAt = terminalTime(row, id === p.correlationId ? p : {}, now);
+				row.lastOutcome = { status: "terminated", settledAt: row.finishedAt };
 				row.lastActivityAt = now;
 				delete row.activeTool;
 				delete row.failedAt;
+			} else if (row && id === p.correlationId && p.wakeable) {
+				// A recoverable logical agent is sleeping regardless of the previous
+				// run outcome. Failure remains visible as orthogonal outcome metadata.
+				row.status = "sleeping";
+				row.taskStatus = "sleeping";
+				row.phase = undefined;
+				row.finishedAt = terminalTime(row, p, now);
+				row.lastActivityAt = now;
+				row.lastOutcome = {
+					status: failedByExitCode ? "failed" : "completed",
+					...(failedByExitCode && row.error ? { message: row.error } : {}),
+					settledAt: row.finishedAt,
+				};
+				if (failedByExitCode) row.failedAt = now;
+				else delete row.failedAt;
+				delete row.activeTool;
 			} else if (row && (row.status === "failed" || failedByExitCode)) {
 				row.status = "failed";
 				row.taskStatus = "failed";
 				row.finishedAt = terminalTime(row, id === p.correlationId ? p : {}, now);
+				row.lastOutcome = {
+					status: "failed",
+					...(row.error ? { message: row.error } : {}),
+					settledAt: row.finishedAt,
+				};
 				row.failedAt = now;
-				row.lastActivityAt = now;
-				delete row.activeTool;
-			} else if (row && id === p.correlationId && p.wakeable && p.exitCode === 0) {
-				// A wakeable agent enters sleeping state after completion.
-				// Keep the row visible so the user can see it is idle but recallable.
-				row.status = "sleeping";
-				row.finishedAt = terminalTime(row, id === p.correlationId ? p : {}, now);
 				row.lastActivityAt = now;
 				delete row.activeTool;
 			} else {
@@ -375,7 +416,7 @@ export class AgentsStore {
 				correlationId: p.correlationId,
 				agent: p.agent,
 				name: p.name,
-				status: p.status,
+				status: activityFromProgressStatus(p.status),
 				startedAt: p.startedAt,
 				lastActivityAt: p.lastActivityAt,
 				...(parentCorrelationId !== p.correlationId
@@ -403,6 +444,8 @@ export class AgentsStore {
 				delete row.finishedAt;
 			}
 		}
+		if (typeof p.phase === "string") row.phase = clean(p.phase);
+		else if (row.status === "sleeping") delete row.phase;
 		row.resultReadyAt = p.resultReadyAt === undefined
 			? undefined
 			: normalizeStartedAt(p.resultReadyAt, now);

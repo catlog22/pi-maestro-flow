@@ -129,6 +129,8 @@ test("Cockpit teammate event names and payload ingestion stay aligned with the p
 		"utf8",
 	);
 	assert.match(storeSource, /TeammateProgressMessageEvent[\s\S]*AgentProgressSnapshot/);
+	assert.match(storeSource, /p\.phase/);
+	assert.match(storeSource, /p\.lastOutcome/);
 	assert.match(teammateEventsSource, /TeammateProgressMessageEvent extends Omit<AgentProgressSnapshot/);
 	assert.match(cockpitSource, /value\.isSend !== true[\s\S]*value\.isInteraction !== true/);
 	assert.doesNotMatch(cockpitSource, /agents\.apply(?:Started|Message|Complete)\([^\n]* as /);

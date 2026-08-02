@@ -189,9 +189,13 @@ function agentRows(
 		const elapsed = hideLiveDuration && live ? "" : formatDuration((row.finishedAt ?? now) - row.startedAt);
 		const action = row.error
 			? `error ${clean(row.error)}`
-			: row.activeTool
-				? `tool ${clean(row.activeTool)}`
-				: clean(row.tail);
+			: row.phase
+				? clean(row.phase)
+				: row.activeTool
+					? `tool ${clean(row.activeTool)}`
+					: row.lastOutcome?.status === "failed"
+						? `last failed${row.lastOutcome.message ? ` ${clean(row.lastOutcome.message)}` : ""}`
+						: clean(row.tail);
 		const telemetry = [
 			row.dependencies?.length ? `${row.dependencies.length} deps` : "",
 			row.toolCount !== undefined ? `${row.toolCount} tools` : "",

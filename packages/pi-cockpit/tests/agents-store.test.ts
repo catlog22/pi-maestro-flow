@@ -22,12 +22,13 @@ test("started preserves parent, source status and source start time", () => {
 		agent: "executor",
 		name: "implement",
 		spawnedBy: "parent",
-		status: "pending",
+		status: "running",
+		phase: "starting",
 		startedAt: "2026-07-26T00:00:00.000Z",
 	}, 999);
 	const row = s.snapshot()[0];
 	assert.equal(row.parentCorrelationId, "parent");
-	assert.equal(row.status, "pending");
+	assert.equal(row.status, "running");
 	assert.equal(row.startedAt, Date.parse("2026-07-26T00:00:00.000Z"));
 });
 
@@ -75,7 +76,7 @@ test("progress message projects teammate tools, tokens, status and last message"
 
 test("graph progress updates the task row instead of flattening child state onto parent", () => {
 	const s = new AgentsStore();
-	s.applyStarted({ correlationId: "child", agent: "executor", name: "implement", spawnedBy: "root", status: "pending" }, 2);
+	s.applyStarted({ correlationId: "child", agent: "executor", name: "implement", spawnedBy: "root", status: "running", phase: "starting" }, 2);
 	s.applyStarted({ correlationId: "root", agent: "graph(1)", name: "plan" }, 1);
 	s.applyMessage({
 		correlationId: "root",
@@ -342,6 +343,36 @@ test("re-start preserves previously projected metrics", () => {
 	assert.equal(row.tail, "working");
 });
 
+test("started ingests running phase and previous outcome", () => {
+	const s = new AgentsStore();
+	s.applyStarted({
+		correlationId: "c1",
+		agent: "executor",
+		status: "running",
+		phase: "tool-execution",
+		lastOutcome: { status: "failed", message: "timeout\nsecond line", settledAt: 900 },
+	}, 1_000);
+	const row = s.snapshot()[0];
+	assert.equal(row.phase, "tool-execution");
+	assert.equal(row.lastOutcome?.status, "failed");
+	assert.equal(row.lastOutcome?.message, "timeout second line");
+});
+
+test("restart preserves outcome when the next started event only changes phase", () => {
+	const s = new AgentsStore();
+	s.applyStarted({
+		correlationId: "c1",
+		agent: "executor",
+		status: "sleeping",
+		lastOutcome: { status: "failed", settledAt: 1 },
+	}, 1);
+	s.applyStarted({ correlationId: "c1", agent: "executor", status: "running", phase: "restoring" }, 2);
+	const row = s.snapshot()[0];
+	assert.equal(row.status, "running");
+	assert.equal(row.phase, "restoring");
+	assert.equal(row.lastOutcome?.status, "failed");
+});
+
 test("mapAgentStatus covers teammate lifecycle states", () => {
 	assert.equal(mapAgentStatus("pending"), "pending");
 	assert.equal(mapAgentStatus("retrying"), "retrying");
@@ -565,6 +596,45 @@ test("a wakeable completion keeps the row as sleeping instead of deleting it", (
 	assert.equal(row?.status, "sleeping", "wakeable agent must stay visible as sleeping");
 	assert.equal(row?.finishedAt, 1_000);
 	assert.equal(s.size, 1);
+});
+
+test("a wakeable failed completion sleeps and retains the failed outcome", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor", name: "worker" }, 1);
+	s.applyComplete({ correlationId: "c1", exitCode: 1, wakeable: true }, 1_000);
+	const row = s.snapshot(1_000)[0];
+	assert.equal(row?.status, "sleeping");
+	assert.equal(row?.lastOutcome?.status, "failed");
+	assert.equal(row?.failedAt, 1_000, "failed outcome keeps the readable failure linger");
+	assert.equal(s.size, 1);
+});
+
+test("a second wakeable turn freezes at the second turn instead of the logical lifetime start", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor", status: "running" }, 1_000);
+	s.applyComplete({ correlationId: "c1", exitCode: 0, wakeable: true, durationMs: 100 }, 1_100);
+	s.applyStarted({ correlationId: "c1", agent: "executor", status: "running", phase: "restoring" }, 120_000);
+	s.applyComplete({ correlationId: "c1", exitCode: 1, wakeable: true, durationMs: 250 }, 120_250);
+	const row = s.snapshot(120_250)[0];
+	assert.equal(row.status, "sleeping");
+	assert.equal(row.finishedAt, 120_250);
+	assert.equal(row.lastOutcome?.status, "failed");
+	assert.equal(s.size, 1, "the fresh second completion must not be pruned using the first turn timestamp");
+});
+
+test("a sleeping started replay seeds a bounded completion time", () => {
+	const s = new AgentsStore();
+	s.applyStarted({
+		correlationId: "c1",
+		agent: "executor",
+		status: "sleeping",
+		lastOutcome: { status: "completed", settledAt: 5_000 },
+	}, 10_000);
+	const row = s.snapshot(10_000)[0];
+	assert.equal(row.finishedAt, 5_000);
+	assert.equal(s.hasLingering(), true);
+	s.snapshot(5_000 + SLEEPING_LINGER_MS);
+	assert.equal(s.size, 0);
 });
 
 test("a non-wakeable completion still deletes the row", () => {

@@ -285,6 +285,14 @@ export function renderAgents(
 			{ text: theme.fg(status.color, status.glyph), priority: 99, clippable: false },
 		];
 		if (status.label) segs.push({ text: theme.fg(status.color, status.label), priority: 95, clippable: false });
+		if (r.phase) segs.push({ text: theme.fg("dim", r.phase), priority: 92, minWidth: 6 });
+		if (r.lastOutcome?.status === "failed") {
+			segs.push({
+				text: theme.fg("error", r.lastOutcome.message ? `last failed: ${r.lastOutcome.message}` : "last failed"),
+				priority: 91,
+				minWidth: 8,
+			});
+		}
 		segs.push({ text: theme.fg(rc, r.role), priority: 90 });
 		if (r.task) segs.push({ text: r.task, priority: 80, minWidth: 6 });
 		const live = r.status === "running" || r.status === "retrying";

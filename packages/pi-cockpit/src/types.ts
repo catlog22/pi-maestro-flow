@@ -22,6 +22,12 @@ export const TODO_STATE_ENTRY_TYPE = "todo-state";
 
 export type AgentStatus = "pending" | "running" | "retrying" | "sleeping" | "done" | "failed" | "terminated";
 
+export interface AgentLastOutcome {
+	status: "completed" | "failed" | "terminated";
+	message?: string;
+	settledAt: number;
+}
+
 export interface AgentRow {
 	correlationId: string;
 	parentCorrelationId?: string;
@@ -30,8 +36,12 @@ export interface AgentRow {
 	role: string;
 	task: string;
 	status: AgentStatus;
+	phase?: string;
+	lastOutcome?: AgentLastOutcome;
 	tail: string;
 	startedAt: number;
+	/** Start of the current wake/run cycle; unlike startedAt this resets on every started upsert. */
+	turnStartedAt?: number;
 	/** Terminal wall-clock used to freeze elapsed time for completed/failed rows. */
 	finishedAt?: number;
 	lastActivityAt: number;
