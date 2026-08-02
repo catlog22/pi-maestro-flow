@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
@@ -431,11 +431,11 @@ function isOptionalPackageMissing(error: unknown): boolean {
 
 function terminateProcessTree(child: { pid?: number; kill(): boolean }): void {
   if (process.platform === "win32" && child.pid) {
-    const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+    // spawnSync: 与 bash-bg/hooks-runner 一致，异步 taskkill 在 pi 的 jiti loader 下会静默失败。
+    spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
       windowsHide: true,
       stdio: "ignore",
     });
-    killer.once("error", () => { child.kill(); });
     return;
   }
   child.kill();
