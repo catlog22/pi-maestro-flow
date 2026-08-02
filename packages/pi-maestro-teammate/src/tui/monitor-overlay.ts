@@ -27,6 +27,8 @@ export interface MonitorSessionRow {
   bound: boolean;
   /** Row kind: "agent" (live sub-agent) or "window" (peer window). */
   kind?: "agent" | "window";
+  /** Whether this row can be selected as a monitor target (windows only). */
+  bindable?: boolean;
   /** Owner (window) key this row belongs to; groups rows into window trees. */
   ownerId?: string;
   /** Dispatch depth; 0 = direct child of the window. */
@@ -255,8 +257,10 @@ export class MonitorOverlay {
       case " ": // Space — toggle selection
         if (this.treeRows.length > 0) {
           const s = this.treeRows[this.cursor]!.row;
-          if (s.kind === "window") {
-            this.statusText = "Window rows are not monitor targets — select an agent";
+          if (s.bindable === false) {
+            this.statusText = s.kind === "window"
+              ? "The current window is where you are — monitor remote windows"
+              : "Sub-agents are supervised by their window's main session";
           } else if (this.selected.has(s.correlationId)) {
             this.selected.delete(s.correlationId);
           } else {
@@ -280,8 +284,10 @@ export class MonitorOverlay {
           if (idx < this.treeRows.length) {
             this.cursor = idx;
             const s = this.treeRows[idx]!.row;
-            if (s.kind === "window") {
-              this.statusText = "Window rows are not monitor targets — select an agent";
+            if (s.bindable === false) {
+              this.statusText = s.kind === "window"
+                ? "The current window is where you are — monitor remote windows"
+                : "Sub-agents are supervised by their window's main session";
             } else if (this.selected.has(s.correlationId)) this.selected.delete(s.correlationId);
             else this.selected.add(s.correlationId);
           }

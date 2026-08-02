@@ -133,6 +133,8 @@ export interface EngineAgentInfo {
     objective: string;
     /** Whether the agent has pending interactions (waiting on user). */
     hasPendingInteractions: boolean;
+    /** "agent" for sub-agents, "window" for peer windows. */
+    kind?: "agent" | "window";
 }
 /** Callbacks injected from index.ts for engine operations. */
 export interface EngineCallbacks {

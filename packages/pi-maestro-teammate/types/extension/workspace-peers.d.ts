@@ -1,4 +1,9 @@
 export declare const WORKSPACE_PEER_PROTOCOL_VERSION: 1;
+/**
+ * Reserved targetCorrelationId for commands addressed to a window's main
+ * session (window-level monitor interventions) instead of a sub-agent.
+ */
+export declare const WORKSPACE_MAIN_SESSION_MARKER: "window-main-session";
 export declare const DEFAULT_PEER_STALE_MS = 20000;
 export declare const DEFAULT_PEER_HEARTBEAT_MS = 5000;
 export declare const DEFAULT_PEER_PUBLISH_THROTTLE_MS = 200;

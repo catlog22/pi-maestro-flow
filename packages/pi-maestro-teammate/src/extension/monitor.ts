@@ -355,6 +355,8 @@ export interface EngineAgentInfo {
   objective: string;
   /** Whether the agent has pending interactions (waiting on user). */
   hasPendingInteractions: boolean;
+  /** "agent" for sub-agents, "window" for peer windows. */
+  kind?: "agent" | "window";
 }
 
 /** Callbacks injected from index.ts for engine operations. */
@@ -463,13 +465,16 @@ export interface HeuristicResult {
 }
 
 export function heuristicCheck(info: EngineAgentInfo): HeuristicResult {
+  const windowKind = info.kind === "window";
   // Failed agent
   if (info.status === "failed") {
     return {
       needsIntervention: false,
       reason: "failed",
       notifyOnly: true,
-      message: `Agent @${info.name} has failed.`,
+      message: windowKind
+        ? `Window @${info.name} has failing agents.`
+        : `Agent @${info.name} has failed.`,
     };
   }
 
@@ -479,7 +484,9 @@ export function heuristicCheck(info: EngineAgentInfo): HeuristicResult {
       needsIntervention: false,
       reason: "interaction-needed",
       notifyOnly: true,
-      message: `Agent @${info.name} is waiting for user input.`,
+      message: windowKind
+        ? `Window @${info.name} has agents waiting for user input.`
+        : `Agent @${info.name} is waiting for user input.`,
     };
   }
 
@@ -488,7 +495,9 @@ export function heuristicCheck(info: EngineAgentInfo): HeuristicResult {
     return {
       needsIntervention: true,
       reason: "stalled",
-      message: `You appear to be stalled (idle ${info.idleSeconds}s). Please continue working on your task or report what is blocking you.`,
+      message: windowKind
+        ? `Window @${info.name}'s agents appear stalled (idle ${info.idleSeconds}s). Review and steer them.`
+        : `You appear to be stalled (idle ${info.idleSeconds}s). Please continue working on your task or report what is blocking you.`,
     };
   }
 

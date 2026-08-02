@@ -63,8 +63,8 @@ import {
   createWorkspacePeerCommandConsumer,
   createWorkspacePeerRuntime,
   discoverWorkspacePeers,
-  resolveWorkspaceTarget,
   sendWorkspacePeerCommand,
+  WORKSPACE_MAIN_SESSION_MARKER,
   type WorkspaceAgentSnapshot,
   type WorkspaceOwnerSnapshot,
   type WorkspaceOwnerState,
@@ -766,10 +766,6 @@ export default function registerTeammateExtension(
     return workspacePeerRefresh;
   };
 
-  const workspaceBindingKey = (target: WorkspaceResolvedTarget): string => target.scope === "local"
-    ? target.agent.correlationId
-    : `${target.ownerId}:${target.agent.correlationId}`;
-
   const targetForWorkspaceBinding = (bindingKey: string): WorkspaceResolvedTarget | undefined => {
     const publisher = workspacePeerPublisher;
     if (!publisher) return undefined;
@@ -802,19 +798,24 @@ export default function registerTeammateExtension(
     };
   };
 
-  const resolveWorkspaceMonitorTarget = (query: string): WorkspaceResolvedTarget | undefined => {
-    const publisher = workspacePeerPublisher;
-    if (!publisher) return undefined;
-    try {
-      return resolveWorkspaceTarget(
-        query,
-        publisher.identity,
-        buildWorkspaceOwnerState(state, workspacePeerSessionName),
-        workspacePeerOwners,
-      );
-    } catch {
-      return undefined;
+  /** Resolve a monitor target to a peer window (owner), not a sub-agent. */
+  const resolveWorkspaceMonitorTarget = (query: string): WorkspaceOwnerSnapshot | undefined => {
+    const requested = query.startsWith("@") ? query.slice(1) : query;
+    if (!requested) return undefined;
+    const owners = workspacePeerOwners;
+    if (requested.startsWith("owner:")) {
+      const ownerId = requested.slice("owner:".length);
+      return owners.find((candidate) => candidate.ownerId === ownerId);
     }
+    const byName = owners.filter((candidate) => candidate.sessionName === requested);
+    if (byName.length === 1) return byName[0]!;
+    if (requested.startsWith("window:")) {
+      const prefix = requested.slice("window:".length);
+      const matches = owners.filter((candidate) => candidate.ownerId.startsWith(prefix));
+      return matches.length === 1 ? matches[0] : undefined;
+    }
+    const byPrefix = owners.filter((candidate) => candidate.ownerId.startsWith(requested));
+    return byPrefix.length === 1 ? byPrefix[0] : undefined;
   };
 
   const injectLocalAgentMessage = (
@@ -1008,6 +1009,15 @@ export default function registerTeammateExtension(
         await publisher.start();
         workspacePeerPublisher = publisher;
         const consumer = createWorkspacePeerCommandConsumer(publisher.identity, (command) => {
+          if (command.targetCorrelationId === WORKSPACE_MAIN_SESSION_MARKER) {
+            safeSendMessage(pi, {
+              customType: "teammate-message",
+              content: `[monitor] ${command.message}`,
+              display: true,
+              details: { source: "monitor", fromOwnerId: command.fromOwnerId },
+            }, { triggerTurn: true });
+            return { status: "accepted" as const, message: "delivered to main session" };
+          }
           const target = state.activeRuns.get(command.targetCorrelationId);
           if (!target) return { status: "rejected" as const, message: "target agent is not owned by this session" };
           const delivered = deliverLocalAgentMessage(
@@ -2630,6 +2640,24 @@ export default function registerTeammateExtension(
 
   /** Build EngineAgentInfo from a local agent or a cached remote snapshot. */
   function buildEngineAgentInfo(bindingKey: string): EngineAgentInfo | undefined {
+    // Window-level binding: aggregate the peer owner snapshot.
+    if (bindingKey.startsWith("owner:")) {
+      const ownerId = bindingKey.slice("owner:".length);
+      const owner = workspacePeerOwners.find((candidate) => candidate.ownerId === ownerId);
+      if (!owner) return undefined;
+      const active = owner.agents;
+      const lastActivityAt = active.reduce((max, agent) => Math.max(max, agent.lastActivityAt), owner.publishedAt);
+      return {
+        correlationId: bindingKey,
+        name: owner.sessionName ?? `window:${ownerId.slice(0, 6)}`,
+        status: windowRowStatus(active.map((agent) => agent.status)),
+        idleSeconds: Math.round((Date.now() - lastActivityAt) / 1000),
+        outputTail: active.slice(-3).map((agent) => `${agent.name ?? agent.correlationId.slice(0, 8)}: ${agent.summary ?? agent.status}`),
+        objective: `${active.length} agents · window ${owner.sessionName ?? ownerId.slice(0, 6)}`,
+        hasPendingInteractions: active.some((agent) => (agent.pendingInteractions ?? 0) > 0),
+        kind: "window",
+      };
+    }
     const localAgent = state.activeRuns.get(bindingKey);
     if (localAgent) {
       const label = localAgent.name ?? bindingKey.slice(0, 8);
@@ -2670,6 +2698,28 @@ export default function registerTeammateExtension(
     startEngine(monitorEngine, {
       getAgentInfo: buildEngineAgentInfo,
       sendIntervention: async (bindingKey, message, mode) => {
+        // Window-level binding: route the intervention to the window's main session.
+        if (bindingKey.startsWith("owner:")) {
+          const ownerId = bindingKey.slice("owner:".length);
+          const owner = workspacePeerOwners.find((candidate) => candidate.ownerId === ownerId);
+          const publisher = workspacePeerPublisher;
+          if (!owner || !publisher) return false;
+          const target: WorkspaceResolvedTarget = {
+            scope: "remote",
+            ownerId: owner.ownerId,
+            ownerNonce: owner.ownerNonce,
+            state: "active",
+            agent: {
+              correlationId: WORKSPACE_MAIN_SESSION_MARKER,
+              agent: "window",
+              status: "running",
+              startedAt: owner.publishedAt,
+              lastActivityAt: owner.publishedAt,
+            },
+          };
+          const result = await sendWorkspacePeerCommand(publisher.identity, target, mode, message);
+          return result.response?.status === "accepted";
+        }
         const target = targetForWorkspaceBinding(bindingKey);
         if (!target || target.state !== "active") return false;
         if (target.scope === "local") {
@@ -3658,6 +3708,7 @@ export default function registerTeammateExtension(
       source: "local",
       kind: "agent",
       ownerId: "local",
+      bindable: false,
       depth: agent.depth,
       ...(agent.spawnedBy ? { parentCorrelationId: agent.spawnedBy } : {}),
     }));
@@ -3672,6 +3723,7 @@ export default function registerTeammateExtension(
         source: owner.sessionName ?? `remote:${owner.ownerId.slice(0, 6)}`,
         kind: "window",
         ownerId: owner.ownerId,
+        bindable: true,
       };
       const agentRows: MonitorSessionRow[] = owner.agents.map((agent) => {
         const key = `${owner.ownerId}:${agent.correlationId}`;
@@ -3685,6 +3737,7 @@ export default function registerTeammateExtension(
           source: owner.sessionName ?? `remote:${owner.ownerId.slice(0, 6)}`,
           kind: "agent",
           ownerId: owner.ownerId,
+          bindable: false,
           ...(agent.depth === undefined ? {} : { depth: agent.depth }),
           ...(agent.parentCorrelationId ? { parentCorrelationId: agent.parentCorrelationId } : {}),
         } satisfies MonitorSessionRow;
@@ -3701,6 +3754,7 @@ export default function registerTeammateExtension(
       source: "local",
       kind: "window",
       ownerId: "local",
+      bindable: false,
     };
     return [localWindowRow, ...localAgents, ...remoteRows];
   }
@@ -3710,7 +3764,7 @@ export default function registerTeammateExtension(
     getArgumentCompletions(prefix: string) {
       void refreshWorkspacePeerOwners();
       const agents = monitorSessionRows()
-        .filter((row) => row.kind !== "window")
+        .filter((row) => row.bindable === true)
         .map((agent) => ({
           value: agent.displayName,
           label: agent.displayName,
@@ -3741,15 +3795,13 @@ export default function registerTeammateExtension(
 
         if (!result) return; // cancelled
 
-        // Apply selections
+        // Apply selections — window-level bindings only.
         let bound = 0;
         for (const bindingKey of result.selected) {
-          const target = targetForWorkspaceBinding(bindingKey);
-          if (!target || target.state !== "active") continue;
-          const owner = target.scope === "remote"
-            ? workspacePeerOwners.find((candidate) => candidate.ownerId === target.ownerId)
-            : undefined;
-          const displayName = `${target.agent.name ?? target.agent.correlationId.slice(0, 8)}${owner ? ` [${owner.sessionName ?? "remote"}]` : ""}`;
+          const ownerId = bindingKey.startsWith("owner:") ? bindingKey.slice("owner:".length) : undefined;
+          const owner = ownerId ? workspacePeerOwners.find((candidate) => candidate.ownerId === ownerId) : undefined;
+          if (!owner) continue;
+          const displayName = owner.sessionName ?? `window:${owner.ownerId.slice(0, 6)}`;
           const res = addBinding(monitorEngine, bindingKey, displayName, result.mode, result.customPrompt);
           if (res.ok) bound++;
         }
@@ -3816,21 +3868,18 @@ export default function registerTeammateExtension(
         return;
       }
 
-      // Resolve targets across the current workspace and create bindings.
+      // Resolve targets to peer windows and create bindings.
       await refreshWorkspacePeerOwners();
       let bound = 0;
       const errors: string[] = [];
       for (const name of targets) {
-        const target = resolveWorkspaceMonitorTarget(name);
-        if (!target || target.state !== "active") {
-          errors.push(`${name}: not found or settled`);
+        const owner = resolveWorkspaceMonitorTarget(name);
+        if (!owner) {
+          errors.push(`${name}: window not found`);
           continue;
         }
-        const bindingKey = workspaceBindingKey(target);
-        const owner = target.scope === "remote"
-          ? workspacePeerOwners.find((candidate) => candidate.ownerId === target.ownerId)
-          : undefined;
-        const displayName = `${target.agent.name ?? target.agent.correlationId.slice(0, 8)}${owner ? ` [${owner.sessionName ?? "remote"}]` : ""}`;
+        const bindingKey = `owner:${owner.ownerId}`;
+        const displayName = owner.sessionName ?? `window:${owner.ownerId.slice(0, 6)}`;
         const result = addBinding(monitorEngine, bindingKey, displayName, mode, customPrompt);
         if (result.ok) bound++;
         else errors.push(result.error ?? `${name}: unknown error`);

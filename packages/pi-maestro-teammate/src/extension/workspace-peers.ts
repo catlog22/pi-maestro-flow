@@ -13,6 +13,11 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export const WORKSPACE_PEER_PROTOCOL_VERSION = 1 as const;
+/**
+ * Reserved targetCorrelationId for commands addressed to a window's main
+ * session (window-level monitor interventions) instead of a sub-agent.
+ */
+export const WORKSPACE_MAIN_SESSION_MARKER = "window-main-session" as const;
 export const DEFAULT_PEER_STALE_MS = 20_000;
 export const DEFAULT_PEER_HEARTBEAT_MS = 5_000;
 export const DEFAULT_PEER_PUBLISH_THROTTLE_MS = 200;

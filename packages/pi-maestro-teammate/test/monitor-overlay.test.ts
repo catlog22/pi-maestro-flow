@@ -14,6 +14,7 @@ function agentRow(overrides: Partial<MonitorSessionRow> = {}): MonitorSessionRow
     source: "local",
     kind: "agent",
     ownerId: "local",
+    bindable: false,
     depth: 0,
     ...overrides,
   };
@@ -30,6 +31,7 @@ function nestedAgentRow(overrides: Partial<MonitorSessionRow> = {}): MonitorSess
     source: "local",
     kind: "agent",
     ownerId: "local",
+    bindable: false,
     depth: 1,
     parentCorrelationId: "local-cid-1",
     ...overrides,
@@ -47,6 +49,7 @@ function localWindowRow(agentCount: number): MonitorSessionRow {
     source: "local",
     kind: "window",
     ownerId: "local",
+    bindable: false,
   };
 }
 
@@ -61,6 +64,7 @@ function idleWindowRow(overrides: Partial<MonitorSessionRow> = {}): MonitorSessi
     source: "remote:aaaaaa",
     kind: "window",
     ownerId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    bindable: true,
     ...overrides,
   };
 }
@@ -98,24 +102,30 @@ test("monitor overlay renders a window → agent → sub-agent tree", () => {
   assert.match(view, /idle/);
 });
 
-test("monitor overlay rejects selection of window rows but selects agent rows", () => {
+test("monitor overlay selects window rows but refuses agent rows", () => {
   const { overlay, lastResult } = makeOverlay([
     localWindowRow(1),
     agentRow(),
     idleWindowRow(),
   ]);
 
-  // Row order: 0=local window, 1=worker-1, 2=idle remote window.
+  // Row order: 0=local window (display-only), 1=worker-1 (agent, refused),
+  // 2=remote idle window (selectable).
   overlay.handleInput("\x1b[B"); // → worker-1
-  overlay.handleInput(" "); // select agent
-  overlay.handleInput("\x1b[B"); // → idle window
-  overlay.handleInput(" "); // must be refused
-  assert.match(stripAnsi(overlay.render(100).join("\n")), /Window rows are not monitor targets — select an agent/);
+  overlay.handleInput(" "); // agent must be refused
+  assert.match(stripAnsi(overlay.render(100).join("\n")), /Sub-agents are supervised by their window's main session/);
 
+  overlay.handleInput("\x1b[A"); // → local window (display-only)
+  overlay.handleInput(" "); // local window must be refused
+  assert.match(stripAnsi(overlay.render(100).join("\n")), /The current window is where you are — monitor remote windows/);
+
+  overlay.handleInput("\x1b[B"); // → worker-1
+  overlay.handleInput("\x1b[B"); // → remote window
+  overlay.handleInput(" "); // select the window
   overlay.handleInput("\r");
   const result = lastResult() as { selected: string[]; mode: string } | null;
   assert.ok(result, "confirm() should close with a result");
-  assert.deepEqual(result.selected, ["local-cid-1"]);
+  assert.deepEqual(result.selected, ["owner:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
   assert.equal(result.mode, "auto");
 });
 

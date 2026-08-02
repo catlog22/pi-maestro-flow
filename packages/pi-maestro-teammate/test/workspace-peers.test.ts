@@ -6,6 +6,7 @@ import test, { afterEach } from "node:test";
 import {
   MAX_OWNER_AGENTS,
   MAX_OWNER_FILE_BYTES,
+  WORKSPACE_MAIN_SESSION_MARKER,
   WorkspaceTargetResolutionError,
   buildWorkspaceOwnerSnapshot,
   commandMailboxPath,
@@ -296,6 +297,62 @@ test("remote commands receive an acknowledgement and expose only the action whit
     createdAt: 1,
     expiresAt: 2,
   }), undefined);
+});
+
+test("window-level monitor commands target the main session marker and reach the receiver", async () => {
+  const { cwd, rootDir } = await temporaryWorkspace();
+  const sender = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const receiver = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_B, ownerNonce: NONCE_B });
+
+  // Receiver side mirrors the extension consumer: marker → main session.
+  const mainSessionMessages: string[] = [];
+  const agentMessages: string[] = [];
+  const consumer = createWorkspacePeerCommandConsumer(receiver, (command) => {
+    if (command.targetCorrelationId === WORKSPACE_MAIN_SESSION_MARKER) {
+      mainSessionMessages.push(command.message);
+      return { status: "accepted", message: "delivered to main session" };
+    }
+    agentMessages.push(`${command.action}:${command.message}`);
+    return { status: "accepted", message: "queued" };
+  }, { pollMs: 5 });
+  consumer.start();
+  try {
+    // Sender side mirrors the monitor's sendIntervention: synthetic window target.
+    const windowTarget: WorkspaceResolvedTarget = {
+      scope: "remote",
+      ownerId: receiver.ownerId,
+      ownerNonce: receiver.ownerNonce,
+      state: "active",
+      agent: {
+        correlationId: WORKSPACE_MAIN_SESSION_MARKER,
+        agent: "window",
+        status: "running",
+        startedAt: Date.now(),
+        lastActivityAt: Date.now(),
+      },
+    };
+    const result = await sendWorkspacePeerCommand(sender, windowTarget, "steer", "window: your agents look stalled", {
+      timeoutMs: 1_000,
+      pollMs: 5,
+    });
+    assert.equal(result.timedOut, false);
+    assert.equal(result.response?.status, "accepted");
+    assert.equal(result.response?.message, "delivered to main session");
+    assert.deepEqual(mainSessionMessages, ["window: your agents look stalled"]);
+    assert.deepEqual(agentMessages, []);
+
+    // A regular agent command still routes to the agent branch.
+    const agentResult = await sendWorkspacePeerCommand(sender, remoteTarget(receiver), "steer", "agent work", {
+      timeoutMs: 1_000,
+      pollMs: 5,
+    });
+    assert.equal(agentResult.timedOut, false);
+    assert.equal(agentResult.response?.status, "accepted");
+    assert.deepEqual(mainSessionMessages, ["window: your agents look stalled"]);
+    assert.deepEqual(agentMessages, ["steer:agent work"]);
+  } finally {
+    await consumer.stop();
+  }
 });
 
 test("owner nonce changes return an explicit rejection instead of timing out", async () => {
