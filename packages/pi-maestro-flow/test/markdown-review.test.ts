@@ -322,15 +322,37 @@ test("exportReviewDocument routes pdf through pandoc with pdf engine", async () 
   }
 });
 
-test("exportReviewDocument tolerates stdin EPIPE without crashing", async () => {
+test("exportReviewDocument rejects when stdin write fails even on close(0)", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-review-epipe-"));
   try {
     const target = join(root, "out.docx");
     const child = new EventEmitter() as unknown as ChildProcess;
     (child as unknown as { stdin: unknown }).stdin = {
       on: (_event: string, handler: () => void) => {
-        setTimeout(() => handler(), 2); // 模拟 stdin 写失败 → 触发已挂接的 error handler
+        setTimeout(() => handler(), 2); // stdin 写失败（EPIPE 等）→ 记录失败
       },
+      end: () => {},
+    };
+    (child as unknown as { stdout: unknown }).stdout = new EventEmitter();
+    (child as unknown as { stderr: unknown }).stderr = new EventEmitter();
+    const fakeSpawn = (() => child) as unknown as typeof import("node:child_process").spawn;
+    setTimeout(() => child.emit("close", 0), 5);
+    await assert.rejects(
+      exportReviewDocument("# Review", "docx", target, { spawnFn: fakeSpawn }),
+      /stdin 写入失败/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("exportReviewDocument tolerates stdin EPIPE without crashing and rejects truncation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-review-epipe-safe-"));
+  try {
+    const target = join(root, "out.docx");
+    const child = new EventEmitter() as unknown as ChildProcess;
+    (child as unknown as { stdin: unknown }).stdin = {
+      on: () => {},
       end: () => {},
     };
     (child as unknown as { stdout: unknown }).stdout = new EventEmitter();
@@ -343,13 +365,14 @@ test("exportReviewDocument tolerates stdin EPIPE without crashing", async () => 
   }
 });
 
-test("exportReviewDocument rejects on timeout and terminates the child", async () => {
+test("exportReviewDocument rejects on timeout", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-review-timeout-"));
   const keepAlive = setInterval(() => {}, 1000); // unref 的定时器需要事件循环存活才会触发
   try {
     const target = join(root, "out.pdf");
-    const child = new EventEmitter() as unknown as ChildProcess & { pid: number };
-    (child as unknown as { pid: number }).pid = 4242;
+    const child = new EventEmitter() as unknown as ChildProcess;
+    // 不设 pid：避免测试中的真实 taskkill/进程组 kill 波及无关进程；
+    // 进程树终止使用仓库已验证的 taskkill /T /F（cli-adapter/bash-bg 同款）模式。
     (child as unknown as { stdin: unknown }).stdin = { on: () => {}, end: () => {} };
     (child as unknown as { stdout: unknown }).stdout = new EventEmitter();
     (child as unknown as { stderr: unknown }).stderr = new EventEmitter();
@@ -508,6 +531,18 @@ test("exportReviewDocument creates parent directories for markdown", async () =>
     assert.ok(info.size > 0);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("overlay honors the overlay height budget on short terminals", () => {
+  const fixture = overlayFixture(overlayTurns);
+  const originalRows = process.stdout.rows;
+  (process.stdout as { rows: number }).rows = 10;
+  try {
+    const rendered = fixture.overlay.render(120);
+    assert.ok(rendered.length <= 10, `expected <=10 rows, got ${rendered.length}`);
+  } finally {
+    (process.stdout as { rows: number }).rows = originalRows;
   }
 });
 

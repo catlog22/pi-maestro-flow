@@ -80,6 +80,8 @@ export class MarkdownReviewOverlay implements Component, Focusable {
   private previewScroll = 0;
   private previewMode = false;
   private status = "";
+  /** handleInput 使用最近一次 render 的宽/窄状态，避免与终端列宽来源不一致。 */
+  private lastWide = true;
   private readonly turns: MarkdownReviewTurnItem[];
 
   constructor(private readonly params: MarkdownReviewOverlayParams) {
@@ -98,10 +100,16 @@ export class MarkdownReviewOverlay implements Component, Focusable {
     const safeWidth = Math.max(1, Math.min(width, 140));
     const inner = safeWidth - 2;
     const wide = safeWidth >= WIDE_THRESHOLD;
+    this.lastWide = wide;
+
+    // 总行数预算：overlay maxHeight 90%，含边框/头部/规则/页脚/滚动指示/状态。
     const terminalRows = process.stdout?.rows ?? 30;
-    const chrome = 4; // header + rule + rule + footer
-    const maxVisible = Math.max(3, terminalRows - chrome);
-    const visibleCount = Math.min(MAX_LIST_VISIBLE, maxVisible);
+    const overlayMax = Math.max(8, Math.floor(terminalRows * 0.9));
+    const scrollInfo = !wide && !this.previewMode && this.turns.length > MAX_LIST_VISIBLE;
+    const fixedChrome = 2 + 2 + 1 + 1 + (scrollInfo ? 1 : 0) + (this.status ? 1 : 0); // 边框2 + 头部+首规则2 + 次规则+页脚2
+    const contentBudget = Math.max(1, overlayMax - fixedChrome);
+    const visibleCount = Math.max(1, Math.min(MAX_LIST_VISIBLE, contentBudget));
+
     const listWidth = wide ? Math.min(36, Math.floor(inner * 0.4)) : inner;
     const previewWidth = wide ? Math.max(1, inner - listWidth - 1) : inner;
 
@@ -126,7 +134,7 @@ export class MarkdownReviewOverlay implements Component, Focusable {
     if (entries.length === 0) {
       rows.push(this.params.theme.fg("warning", fitLine("没有可 Review 的 turn", inner)));
     } else if (wide) {
-      const previewRows = this.renderPreviewPane(entries[this.selected]!, previewWidth, maxVisible);
+      const previewRows = this.renderPreviewPane(entries[this.selected]!, previewWidth, contentBudget);
       const count = Math.max(listRows.length, previewRows.length);
       for (let index = 0; index < count; index++) {
         const left = padToWidth(fitLine(listRows[index] ?? "", listWidth), listWidth);
@@ -134,10 +142,10 @@ export class MarkdownReviewOverlay implements Component, Focusable {
         rows.push(right ? `${left} ${right}` : left);
       }
     } else if (this.previewMode) {
-      rows.push(...this.renderPreviewPane(entries[this.selected]!, previewWidth, maxVisible));
+      rows.push(...this.renderPreviewPane(entries[this.selected]!, previewWidth, contentBudget));
     } else {
       rows.push(...listRows);
-      if (entries.length > visibleCount) {
+      if (scrollInfo) {
         rows.push(this.params.theme.fg("dim", fitLine(`↑↓ 滚动 · 显示 ${start + 1}-${Math.min(entries.length, start + visibleCount)}/${entries.length}`, inner)));
       }
     }
@@ -157,9 +165,9 @@ export class MarkdownReviewOverlay implements Component, Focusable {
     return frame(rows, safeWidth, this.params.theme);
   }
 
-  private renderPreviewPane(turn: MarkdownReviewTurnItem, width: number, maxVisible: number): string[] {
+  private renderPreviewPane(turn: MarkdownReviewTurnItem, width: number, contentBudget: number): string[] {
     const inner = Math.max(1, width);
-    const visible = Math.max(3, Math.min(PREVIEW_VISIBLE, maxVisible - 2));
+    const visible = Math.max(1, Math.min(PREVIEW_VISIBLE, contentBudget - 2));
     const header = fitLine(`${this.params.theme.bold(`预览 · Turn ${turn.index} ${turn.role === "user" ? "User" : "Assistant"}`)}`, inner);
     const markdown = new Markdown(turn.text, 0, 0, reviewMarkdownTheme(this.params.theme));
     const rendered = markdown.render(inner);
@@ -181,9 +189,8 @@ export class MarkdownReviewOverlay implements Component, Focusable {
       return;
     }
     this.status = "";
-    const wide = windowWidth() >= WIDE_THRESHOLD;
 
-    if (this.previewMode && !wide) {
+    if (this.previewMode && !this.lastWide) {
       if (matchesKey(data, Key.escape)) {
         this.previewMode = false;
         this.previewScroll = 0;
@@ -213,7 +220,7 @@ export class MarkdownReviewOverlay implements Component, Focusable {
       this.previewScroll = Math.max(0, this.previewScroll - PREVIEW_VISIBLE);
     } else if (matchesKey(data, Key.pageDown)) {
       this.previewScroll += PREVIEW_VISIBLE;
-    } else if (matchesKey(data, Key.enter) && !wide) {
+    } else if (matchesKey(data, Key.enter) && !this.lastWide) {
       this.previewMode = true;
       this.previewScroll = 0;
     } else if (data === " " || data === "\u0020") {
@@ -252,11 +259,7 @@ export class MarkdownReviewOverlay implements Component, Focusable {
   }
 }
 
-/** handleInput 中可用的当前宽度（render 会传入，但键盘事件不一定携带；用 stdout 近似）。 */
-function windowWidth(): number {
-  return process.stdout?.columns ?? 80;
-}
-
+/** handleInput 依据 render 记录的 lastWide，不再读取 process.stdout 列宽。 */
 function visibleStart(selected: number, length: number, maxVisible: number): number {
   if (length <= maxVisible) return 0;
   return Math.min(Math.max(0, selected - maxVisible + 1), length - maxVisible);

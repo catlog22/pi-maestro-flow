@@ -357,15 +357,16 @@ function buildPandocArgs(format: ReviewExportFormat, outputPath: string, env: No
   throw new Error(`Unsupported export format: ${format}`);
 }
 
-/** Windows 用 taskkill /T /F 终止整棵进程树；POSIX 用负 pid 进程组。 */
+/** Windows 用 taskkill /T /F 终止整棵进程树；POSIX 用负 pid 进程组（需 detached 子进程）。 */
 function terminateProcessTree(child: ChildProcess): void {
   if (!child.pid) return;
   try {
     if (process.platform === "win32") {
-      spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+      const result = spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
         stdio: "ignore",
         windowsHide: true,
       });
+      if (result.error) throw result.error;
     } else {
       process.kill(-child.pid, "SIGTERM");
     }
@@ -390,12 +391,15 @@ function runPandoc(
     let child: ChildProcess;
     try {
       // stdout 使用 -o 时无输出，直接 ignore；stderr 保留有界尾部。
-      child = spawnFn(command, args, { stdio: ["pipe", "ignore", "pipe"], env });
+      // POSIX 下 detached 使子进程成为独立进程组组长，超时才能用 -pid 整组终止。
+      const detached = process.platform !== "win32";
+      child = spawnFn(command, args, { stdio: ["pipe", "ignore", "pipe"], env, detached });
     } catch (error) {
       reject(error instanceof Error ? error : new Error(String(error)));
       return;
     }
     let stderrTail = "";
+    let stdinFailed = false;
     let settled = false;
     const timeout = setTimeout(() => {
       if (settled) return;
@@ -408,8 +412,11 @@ function runPandoc(
     child.stderr?.on("data", (chunk: Buffer | string) => {
       stderrTail = (stderrTail + (typeof chunk === "string" ? chunk : chunk.toString("utf8"))).slice(-MAX_STDERR_TAIL);
     });
-    // stdin 可能在转换器提前退出时收到 EPIPE — 挂接有界处理器，避免未处理 error 终止进程。
-    child.stdin?.on("error", () => {});
+    // stdin 写失败（如转换器提前退出）会被记下；close(0) 但 stdin 失败仍视为导出失败，
+    // 避免把截断的输入当成成功。
+    child.stdin?.on("error", () => {
+      stdinFailed = true;
+    });
 
     child.once("error", (error) => {
       if (settled) return;
@@ -427,11 +434,12 @@ function runPandoc(
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      if (code === 0) {
+      if (code === 0 && !stdinFailed) {
         resolvePromise();
         return;
       }
-      reject(new Error(`pandoc 导出失败（exit ${code}）${stderrTail ? `: ${stderrTail.slice(-500)}` : ""}`));
+      const reason = stdinFailed ? "stdin 写入失败（输入可能被截断）" : "";
+      reject(new Error(`pandoc 导出失败（exit ${code ?? "?"}）${reason}${stderrTail ? `: ${stderrTail.slice(-500)}` : ""}`));
     });
 
     child.stdin?.end(markdown);
