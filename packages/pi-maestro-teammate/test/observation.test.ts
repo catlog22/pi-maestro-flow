@@ -284,3 +284,75 @@ test("provider disposal cannot remove a newer replacement", () => {
   disposeSecond();
   assert.equal(getObservationProvider("test-replace"), undefined);
 });
+
+// --- watch: persistent observation returns the transition timeline ---
+
+test("watch polls targets and returns status transitions until deadline", async () => {
+  let calls = 0;
+  const dispose = registerObservationProvider({
+    kind: "test-watch",
+    capabilities: { inspect: true, wait: true },
+    snapshot: (id) => {
+      calls += 1;
+      // First call: running; later calls: completed (transition recorded once)
+      return snapshot("test-watch", id, calls === 1 ? "running" : "completed");
+    },
+    wait: async (id) => snapshot("test-watch", id, "completed"),
+  });
+  try {
+    const result = await observeTargets({
+      action: "watch",
+      targets: [{ kind: "test-watch", id: "job" }],
+      timeoutMs: 250,
+    });
+    assert.equal(result.action, "watch");
+    // Initial running snapshot + transition to completed
+    assert.ok(result.observations.length >= 2, `expected >= 2 transitions, got ${result.observations.length}`);
+    assert.equal(result.observations[0]?.nativeStatus, "running");
+    assert.ok(result.observations.some((o) => o.nativeStatus === "completed"));
+  } finally {
+    dispose();
+  }
+});
+
+test("watch respects abort signal", async () => {
+  const dispose = registerObservationProvider(provider("test-watch-abort", async (id) => snapshot("test-watch-abort", id, "running")));
+  try {
+    const controller = new AbortController();
+    controller.abort();
+    const result = await observeTargets({
+      action: "watch",
+      targets: [{ kind: "test-watch-abort", id: "job" }],
+      timeoutMs: 10_000,
+    }, controller.signal);
+    assert.equal(result.reason, "aborted");
+  } finally {
+    dispose();
+  }
+});
+
+// --- until: wait for terminal completion ---
+
+test("until option is forwarded to providers", async () => {
+  let receivedUntil: string | undefined;
+  const dispose = registerObservationProvider({
+    kind: "test-until",
+    capabilities: { inspect: true, wait: true },
+    snapshot: (id) => snapshot("test-until", id, "running"),
+    wait: async (_id, options) => {
+      receivedUntil = options.until;
+      return snapshot("test-until", "job", "completed");
+    },
+  });
+  try {
+    await observeTargets({
+      action: "wait",
+      until: "completed",
+      targets: [{ kind: "test-until", id: "job" }],
+      timeoutMs: 1_000,
+    });
+    assert.equal(receivedUntil, "completed");
+  } finally {
+    dispose();
+  }
+});

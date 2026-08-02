@@ -670,6 +670,8 @@ export interface TeammateWaitResult {
 
 export interface PendingTeammateWaiter {
   resolve: (result: TeammateWaitResult) => void;
+  /** When to settle: "result-ready" (default) resolves on first consumable result; "completed" only on a terminal lifecycle. */
+  until?: "result-ready" | "completed";
   timer?: ReturnType<typeof setTimeout>;
   signal?: AbortSignal;
   abortHandler?: () => void;
@@ -704,10 +706,24 @@ export function settleTeammateWaiters(
   const byAgent = teammateWaiters.get(state);
   const waiters = byAgent?.get(correlationId);
   if (!waiters) return;
-  byAgent?.delete(correlationId);
+  const terminal = status === "completed" || status === "failed" || status === "terminated";
+  const remaining: PendingTeammateWaiter[] = [];
   for (const waiter of [...waiters]) {
+    // A waiter asking for "completed" must not settle on a mere result-ready;
+    // it keeps waiting until the agent reaches a terminal lifecycle state.
+    if (!terminal && waiter.until === "completed") {
+      remaining.push(waiter);
+      continue;
+    }
     clearWaiter(waiters, waiter);
     waiter.resolve({ status, output: waitOutput(status, correlationId) });
+  }
+  if (remaining.length > 0) {
+    // Keep the map alive for waiters that still want the terminal state.
+    waiters.clear();
+    for (const waiter of remaining) waiters.add(waiter);
+  } else {
+    byAgent?.delete(correlationId);
   }
 }
 
@@ -776,9 +792,13 @@ export function waitDelayForWatchTarget(
   target: WatchTarget,
   timeoutAt: number | undefined,
   state?: TeammateState,
+  until: "result-ready" | "completed" = "result-ready",
 ): number {
   const resultReadyAt = target.kind === "agent" ? target.agent.resultReadyAt : target.progress.resultReadyAt;
-  const stalledAt = resultReadyAt === undefined
+  // A completed-waiter keeps polling after result-ready (the agent is still
+  // running); only the default result-ready waiter parks on the edge.
+  const parkedAtEdge = resultReadyAt === undefined || until === "completed";
+  const stalledAt = parkedAtEdge
     ? watchTargetStalledAt(target, state)
     : Number.POSITIVE_INFINITY;
   const nextAt = Math.min(stalledAt, timeoutAt ?? Number.POSITIVE_INFINITY);
@@ -789,7 +809,7 @@ export function waitDelayForWatchTarget(
 
 export function waitForTeammate(
   state: TeammateState,
-  params: { name?: string; timeoutMs?: number; waitMs?: number },
+  params: { name?: string; timeoutMs?: number; waitMs?: number; until?: "result-ready" | "completed" },
   signal?: AbortSignal,
 ): Promise<TeammateWaitResult> {
   if (!params.name) {
@@ -847,8 +867,9 @@ export function waitForTeammate(
   teammateWaiters.set(state, byAgent);
   const waiters = byAgent.get(correlationId) ?? new Set<PendingTeammateWaiter>();
   byAgent.set(correlationId, waiters);
+  const until = params.until ?? "result-ready";
   return new Promise((resolve) => {
-    const waiter: PendingTeammateWaiter = { resolve };
+    const waiter: PendingTeammateWaiter = { resolve, until };
     const finish = (status: "completed" | "failed" | "terminated" | "result-ready" | "stalled" | "timeout" | "aborted") => {
       clearWaiter(waiters, waiter);
       if (waiters.size === 0) byAgent.delete(correlationId);
@@ -867,9 +888,15 @@ export function waitForTeammate(
     const timeoutAt = Date.now() + (params.timeoutMs || TEAMMATE_WAIT_DEFAULT_TIMEOUT_MS);
     const check = () => {
       const currentStatus = statusForWatchTarget(resolved.match!, Date.now(), state);
-      if (currentStatus) return finish(currentStatus);
+      // A waiter that must reach the terminal lifecycle does not settle on
+      // result-ready; keep polling until the agent completes/fails/terminates.
+      if (currentStatus === "result-ready" && until === "completed") {
+        // fall through to timeout handling — do not finish here
+      } else if (currentStatus) {
+        return finish(currentStatus);
+      }
       if (timeoutAt !== undefined && Date.now() >= timeoutAt) return finish("timeout");
-      waiter.timer = setTimeout(check, waitDelayForWatchTarget(resolved.match!, timeoutAt, state));
+      waiter.timer = setTimeout(check, waitDelayForWatchTarget(resolved.match!, timeoutAt, state, until));
     };
     if (signal) {
       waiter.signal = signal;

@@ -2841,6 +2841,7 @@ export default function registerTeammateExtension(
     wait: async (id, options) => teammateWaitObservation(id, await waitForTeammate(state, {
       name: id,
       timeoutMs: Math.max(1, options.deadline - Date.now()),
+      until: options.until,
     }, options.signal)),
   };
   registerObservationProvider(teammateObservationProvider);

@@ -1,4 +1,4 @@
-export type ObservationAction = "status" | "wait";
+export type ObservationAction = "status" | "wait" | "watch";
 export type ObservationDetail = "summary" | "tail" | "full";
 export type ObservationWaitMode = "all" | "any" | "count";
 export type ObservationPhase = "pending" | "active" | "settled" | "unknown";
@@ -48,6 +48,8 @@ export interface ObservationReadOptions {
 export interface ObservationWaitOptions extends ObservationReadOptions {
   deadline: number;
   signal: AbortSignal;
+  /** When the wait settles: "result-ready" (default) or "completed" (terminal lifecycle). */
+  until?: "result-ready" | "completed";
 }
 
 export interface ObservationProvider {
@@ -65,11 +67,13 @@ export interface ObserveParams {
   waitMode?: ObservationWaitMode;
   waitCount?: number;
   timeoutMs?: number;
+  /** Block until "result-ready" (default) or "completed" (terminal lifecycle). */
+  until?: "result-ready" | "completed";
 }
 
 export interface ObserveResult {
   action: ObservationAction;
-  reason: "snapshot" | "all" | "any" | "count" | "timeout" | "aborted";
+  reason: "snapshot" | "all" | "any" | "count" | "timeout" | "aborted" | "watch";
   observations: ObservationSnapshot[];
   durationMs: number;
 }
@@ -132,13 +136,14 @@ function pendingObservation(target: ObservationTarget, waitStatus?: "timeout" | 
   };
 }
 
-function normalizedParams(params: ObserveParams): Required<Pick<ObserveParams, "detail" | "lines" | "waitMode" | "waitCount" | "timeoutMs">> {
+function normalizedParams(params: ObserveParams): Required<Pick<ObserveParams, "detail" | "lines" | "waitMode" | "waitCount" | "timeoutMs" | "until">> {
   return {
     detail: params.detail ?? "summary",
     lines: params.lines ?? 20,
     waitMode: params.waitMode ?? "all",
     waitCount: params.waitCount ?? 1,
     timeoutMs: params.timeoutMs ?? 10 * 60_000,
+    until: params.until ?? "result-ready",
   };
 }
 
@@ -176,6 +181,14 @@ export async function observeTargets(params: ObserveParams, signal?: AbortSignal
       }
     }));
     return { action: "status", reason: "snapshot", observations, durationMs: Date.now() - startedAt };
+  }
+
+  if (params.action === "watch") {
+    // Persistent observation: poll every target until the deadline, recording
+    // every status transition. Returns the full transition timeline (initial
+    // snapshot plus each change), which is richer than a one-shot status and
+    // does not require a barrier condition like wait.
+    return watchTargets(params, options, startedAt, signal);
   }
 
   const controller = new AbortController();
@@ -223,6 +236,7 @@ export async function observeTargets(params: ObserveParams, signal?: AbortSignal
               detail: options.detail,
               lines: options.lines,
               deadline,
+              until: options.until,
               signal: controller.signal,
             });
           }).catch((error) => failedObservation(target, error))
@@ -237,6 +251,65 @@ export async function observeTargets(params: ObserveParams, signal?: AbortSignal
       });
     });
   });
+}
+
+/**
+ * Persistent observation: poll every target until the deadline, recording each
+ * status transition. Returns the initial snapshot plus every change as a
+ * timeline. Unlike wait, no barrier condition is required — the caller sees the
+ * full progression until timeoutMs elapses (or until aborted).
+ */
+async function watchTargets(
+  params: ObserveParams,
+  options: ReturnType<typeof normalizedParams>,
+  startedAt: number,
+  signal?: AbortSignal,
+): Promise<ObserveResult> {
+  const pollMs = Math.min(1_000, Math.max(100, Math.round(options.timeoutMs / 10)));
+  const deadline = startedAt + options.timeoutMs;
+  const providers = params.targets.map((target) => getObservationProvider(target.kind));
+  const lastSeen = new Map<number, string>();
+  const transitions: ObservationSnapshot[] = [];
+
+  const snapshotAll = async (): Promise<void> => {
+    await Promise.all(params.targets.map(async (target, index) => {
+      const provider = providers[index];
+      if (!provider) {
+        if (!lastSeen.has(index)) {
+          transitions.push(unavailable(target, "not-found", `No observation provider for kind \"${target.kind}\".`));
+          lastSeen.set(index, "not-found");
+        }
+        return;
+      }
+      try {
+        const observation = await provider.snapshot(target.id, { detail: options.detail, lines: options.lines });
+        const key = `${observation.nativeStatus}|${observation.phase}`;
+        if (lastSeen.get(index) !== key) {
+          transitions.push(observation);
+          lastSeen.set(index, key);
+        }
+      } catch (error) {
+        if (!lastSeen.has(index)) {
+          transitions.push(failedObservation(target, error));
+          lastSeen.set(index, "error");
+        }
+      }
+    }));
+  };
+
+  await snapshotAll();
+  while (Date.now() < deadline) {
+    if (signal?.aborted) break;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    await snapshotAll();
+  }
+
+  return {
+    action: "watch",
+    reason: signal?.aborted ? "aborted" : "watch",
+    observations: transitions,
+    durationMs: Date.now() - startedAt,
+  };
 }
 
 export function formatObserveResult(result: ObserveResult, verbose = false): string[] {

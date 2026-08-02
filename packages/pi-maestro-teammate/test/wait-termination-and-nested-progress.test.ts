@@ -159,3 +159,33 @@ test("waiting on a settled agent short-circuits without scheduling a timer", asy
   assert.equal(result.status, "completed");
   assert.equal(scheduled, 0);
 });
+
+test("until=completed does not settle on result-ready, only on terminal state", async () => {
+  const state = makeState();
+  const now = Date.now();
+  addAgent(state, "worker-c", "running", 100, {
+    resultReadyAt: now, // result is ready but agent keeps running
+  });
+
+  // result-ready present: default waiter settles immediately
+  const defaultResult = await waitForTeammate(state, { name: "worker-c", timeoutMs: 60 });
+  assert.equal(defaultResult.status, "result-ready");
+
+  // until=completed must NOT settle on result-ready; it times out instead
+  const completedWait = waitForTeammate(state, { name: "worker-c", timeoutMs: 80, until: "completed" });
+  // Transition the agent to sleeping (terminal) mid-wait
+  setTimeout(() => {
+    const agent = [...state.activeRuns.values()].find((a) => a.name === "worker-c");
+    if (agent) agent.status = "sleeping";
+  }, 20);
+  const completedResult = await completedWait;
+  assert.equal(completedResult.status, "completed");
+});
+
+test("until=completed on an already-settled agent returns its terminal status", async () => {
+  const state = makeState();
+  addAgent(state, "worker-done", "sleeping", 1_000);
+
+  const result = await waitForTeammate(state, { name: "worker-done", until: "completed" });
+  assert.equal(result.status, "completed");
+});

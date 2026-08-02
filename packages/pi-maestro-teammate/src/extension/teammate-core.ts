@@ -359,10 +359,11 @@ export const TEAMMATE_WAIT_GUIDELINES = [
   "Treat result-ready as a usable teammate result; do not continue waiting only for agent_end lifecycle confirmation.",
 ];
 
-export const OBSERVE_DESCRIPTION = `Observe mixed teammate and background Bash targets through one status/wait interface.
+export const OBSERVE_DESCRIPTION = `Observe mixed teammate and background Bash targets through one status/wait/watch interface.
 
 - "status": one-shot snapshot of every target
-- "wait": block on an all/any/count barrier with one request-level timeout
+- "wait": block on an all/any/count barrier with one request-level timeout; set until="completed" to block until agents fully terminate instead of first result
+- "watch": poll every target until timeoutMs, returning the full status-transition timeline (richer than status, no barrier required)
 
 Targets use { kind, id }, where kind is currently "teammate" or "bash_bg". Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.`;
 export const OBSERVE_SNIPPET = "Observe or wait for mixed teammate and background Bash targets.";

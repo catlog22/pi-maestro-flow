@@ -318,10 +318,11 @@ export const TeammateWaitParams = Type.Object({
 // ---------------------------------------------------------------------------
 
 export const ObserveParams = Type.Object({
-  action: Type.Unsafe<"status" | "wait">({
+  action: Type.Unsafe<"status" | "wait" | "watch">({
     type: "string",
-    enum: ["status", "wait"],
-    description: '"status" takes a one-shot snapshot; "wait" blocks on a multi-target barrier.',
+    enum: ["status", "wait", "watch"],
+    description:
+      '"status" takes a one-shot snapshot; "wait" blocks on a multi-target barrier; "watch" polls until timeoutMs and returns the full status-transition timeline.',
   }),
   targets: Type.Array(
     Type.Object({
@@ -344,6 +345,13 @@ export const ObserveParams = Type.Object({
     description: "Barrier mode for wait.",
   })),
   waitCount: Type.Optional(Type.Integer({ minimum: 1, description: "Targets required when waitMode is count." })),
+  until: Type.Optional(Type.Unsafe<"result-ready" | "completed">({
+    type: "string",
+    enum: ["result-ready", "completed"],
+    default: "result-ready",
+    description:
+      "Block until the target reaches a result (\"result-ready\", default) or until it fully completes (\"completed\": terminal lifecycle — completed/failed/terminated).",
+  })),
   timeoutMs: Type.Optional(Type.Integer({ minimum: 1, default: 600_000, description: "Request-level wait timeout in milliseconds." })),
 }, { additionalProperties: false });
 
