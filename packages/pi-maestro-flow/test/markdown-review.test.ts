@@ -236,6 +236,7 @@ interface FakeSpawnCall {
   args: string[];
   env: NodeJS.ProcessEnv | undefined;
   stdinContent: string;
+  detached: boolean | undefined;
 }
 
 interface FakeSpawnBehavior {
@@ -244,8 +245,8 @@ interface FakeSpawnBehavior {
 }
 
 function makeFakeSpawn(calls: FakeSpawnCall[], behavior: FakeSpawnBehavior = {}) {
-  return ((command: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => {
-    const record: FakeSpawnCall = { command, args, env: options.env, stdinContent: "" };
+  return ((command: string, args: string[], options: { env?: NodeJS.ProcessEnv; detached?: boolean }) => {
+    const record: FakeSpawnCall = { command, args, env: options.env, stdinContent: "", detached: options.detached };
     calls.push(record);
     const child = new EventEmitter() as unknown as ChildProcess;
     (child as unknown as { stdin: unknown }).stdin = {
@@ -323,31 +324,34 @@ test("exportReviewDocument routes pdf through pandoc with pdf engine", async () 
 });
 
 test("exportReviewDocument rejects when stdin write fails even on close(0)", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-review-epipe-"));
-  try {
-    const target = join(root, "out.docx");
-    const child = new EventEmitter() as unknown as ChildProcess;
-    (child as unknown as { stdin: unknown }).stdin = {
-      on: (_event: string, handler: () => void) => {
-        setTimeout(() => handler(), 2); // stdin 写失败（EPIPE 等）→ 记录失败
-      },
-      end: () => {},
-    };
-    (child as unknown as { stdout: unknown }).stdout = new EventEmitter();
-    (child as unknown as { stderr: unknown }).stderr = new EventEmitter();
-    const fakeSpawn = (() => child) as unknown as typeof import("node:child_process").spawn;
-    setTimeout(() => child.emit("close", 0), 5);
-    await assert.rejects(
-      exportReviewDocument("# Review", "docx", target, { spawnFn: fakeSpawn }),
-      /stdin 写入失败/,
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
+  for (const code of ["EPIPE", "EACCES"]) {
+    const root = await mkdtemp(join(tmpdir(), "pi-review-stdin-"));
+    try {
+      const target = join(root, "out.docx");
+      const child = new EventEmitter() as unknown as ChildProcess;
+      (child as unknown as { stdin: unknown }).stdin = {
+        on: (_event: string, handler: (error: Error) => void) => {
+          setTimeout(() => handler(Object.assign(new Error(code), { code })), 2);
+        },
+        end: () => {},
+      };
+      (child as unknown as { stdout: unknown }).stdout = new EventEmitter();
+      (child as unknown as { stderr: unknown }).stderr = new EventEmitter();
+      const fakeSpawn = (() => child) as unknown as typeof import("node:child_process").spawn;
+      setTimeout(() => child.emit("close", 0), 5);
+      await assert.rejects(
+        exportReviewDocument("# Review", "docx", target, { spawnFn: fakeSpawn }),
+        /stdin 写入失败/,
+        `expected rejection for stdin error code ${code}`,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });
 
-test("exportReviewDocument tolerates stdin EPIPE without crashing and rejects truncation", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-review-epipe-safe-"));
+test("exportReviewDocument happy path resolves on clean close(0)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-review-stdin-ok-"));
   try {
     const target = join(root, "out.docx");
     const child = new EventEmitter() as unknown as ChildProcess;
@@ -362,6 +366,32 @@ test("exportReviewDocument tolerates stdin EPIPE without crashing and rejects tr
     await exportReviewDocument("# Review", "docx", target, { spawnFn: fakeSpawn });
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("exportReviewDocument spawns detached on POSIX only", async () => {
+  const calls: FakeSpawnCall[] = [];
+  const root = await mkdtemp(join(tmpdir(), "pi-review-detached-"));
+  try {
+    const target = join(root, "out.docx");
+    await exportReviewDocument("# Review", "docx", target, { spawnFn: makeFakeSpawn(calls) });
+    assert.equal(calls[0]!.detached, process.platform !== "win32");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("overlay handleInput follows render width, not stdout.columns", () => {
+  const fixture = overlayFixture(overlayTurns);
+  const originalColumns = process.stdout.columns;
+  (process.stdout as { columns: number }).columns = 120; // 终端宽，但最近一次 render 是窄的
+  try {
+    fixture.overlay.render(40); // 记录 lastWide=false
+    fixture.overlay.handleInput("\r");
+    const preview = fixture.overlay.render(40);
+    assert.ok(preview.join("\n").includes("预览 · Turn"));
+  } finally {
+    (process.stdout as { columns: number }).columns = originalColumns;
   }
 });
 
@@ -539,8 +569,16 @@ test("overlay honors the overlay height budget on short terminals", () => {
   const originalRows = process.stdout.rows;
   (process.stdout as { rows: number }).rows = 10;
   try {
+    const budget = Math.max(1, Math.floor(10 * 0.9));
     const rendered = fixture.overlay.render(120);
-    assert.ok(rendered.length <= 10, `expected <=10 rows, got ${rendered.length}`);
+    assert.ok(rendered.length <= budget, `expected <=${budget} rows, got ${rendered.length}`);
+
+    // 状态行场景：清空选择后请求导出，status 行出现在渲染中。
+    fixture.overlay.handleInput("n");
+    fixture.overlay.handleInput("e");
+    const withStatus = fixture.overlay.render(120);
+    assert.ok(withStatus.join("\n").includes("未选择任何 turn"));
+    assert.ok(withStatus.length <= budget, `expected <=${budget} rows with status, got ${withStatus.length}`);
   } finally {
     (process.stdout as { rows: number }).rows = originalRows;
   }

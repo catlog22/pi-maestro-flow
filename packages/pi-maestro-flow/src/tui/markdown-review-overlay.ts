@@ -167,15 +167,19 @@ export class MarkdownReviewOverlay implements Component, Focusable {
 
   private renderPreviewPane(turn: MarkdownReviewTurnItem, width: number, contentBudget: number): string[] {
     const inner = Math.max(1, width);
-    const visible = Math.max(1, Math.min(PREVIEW_VISIBLE, contentBudget - 2));
-    const header = fitLine(`${this.params.theme.bold(`预览 · Turn ${turn.index} ${turn.role === "user" ? "User" : "Assistant"}`)}`, inner);
     const markdown = new Markdown(turn.text, 0, 0, reviewMarkdownTheme(this.params.theme));
     const rendered = markdown.render(inner);
+    if (contentBudget < 3) {
+      // 预算不足：省略头部/页脚，只显示正文行。
+      return rendered.slice(0, contentBudget).map((line) => fitLine(line, inner));
+    }
+    const visible = Math.max(1, Math.min(PREVIEW_VISIBLE, contentBudget - 2));
     const maxScroll = Math.max(0, rendered.length - visible);
     this.previewScroll = Math.min(Math.max(0, this.previewScroll), maxScroll);
     const end = Math.min(rendered.length, this.previewScroll + visible);
     const body = rendered.slice(this.previewScroll, end).map((line) => fitLine(line, inner));
     while (body.length < visible) body.push("");
+    const header = fitLine(`${this.params.theme.bold(`预览 · Turn ${turn.index} ${turn.role === "user" ? "User" : "Assistant"}`)}`, inner);
     const footer = rendered.length > visible
       ? this.params.theme.fg("dim", fitLine(`行 ${this.previewScroll + 1}-${end}/${rendered.length} · PgUp/PgDn 滚动`, inner))
       : this.params.theme.fg("dim", fitLine(`${rendered.length} 行`, inner));
