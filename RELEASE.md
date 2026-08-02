@@ -1,118 +1,99 @@
-# v0.13.0 — Workspace Peers, Observe Barrier, Vision Delegation, Memory Bounds
+# v0.14.0 — Unified Settings Platform, Lossless Compaction, Mailbox Queue
 
 ## Overview
 
-This release adds the teammate workspace-peers registry and the mixed-target
-`observe` status/wait barrier, multimodal vision delegation with provider
-strategy hardening, the `loop` tool for recurring work, a broad lifecycle and
-relay hardening pass (compaction lease, MCP reconnect backoff, typed teammate
-relay results), cockpit rendering stability (static mode, tick policy, viewport
-stability), and bounded memory footprints across caches and background jobs.
-The external core engine pin moves to `maestro-flow@0.5.60`.
+This release introduces the **unified Maestro settings platform** across all
+plugins backed by the new `pi-maestro-settings-core` package (versioned
+settings + i18n contracts with atomic commit/rollback), a **lossless
+compaction overhaul** (tier-0 folding, cross-turn verbatim dedup, lexical
+relevance pruning, adaptive cache pruning, soft mechanism toggles),
+**workflow-backed Plan execution**, teammate **mailbox message queue** and
+**window-tree monitoring**, a new **general-executor** agent role, and a
+broad lifecycle/atomicity hardening pass. The external core engine pin stays
+at `maestro-flow@0.5.60` (verified in sync with npm latest).
 
 ## Package Versions
 
-| Package | Version |
-|---------|---------|
-| pi-maestro-flow | 0.13.0 |
-| pi-maestro-teammate | 1.5.0 |
-| pi-cockpit | 0.7.0 |
+| Package | v0.13.0 | v0.14.0 |
+|---------|---------|---------|
+| pi-maestro-flow | 0.13.0 | **0.14.0** |
+| pi-maestro-teammate | 1.5.0 | **1.6.0** |
+| pi-cockpit | 0.7.0 | **0.8.0** |
+| pi-maestro-settings-core | — | **0.1.0** (new) |
 
 ## Highlights
 
-### Workspace Peers Registry (`pi-maestro-teammate`)
-- New workspace peers registry: heartbeat, ownership tracking, and a command
-  bridge across sibling sessions (`1f82059`)
-- Peers wired into the extension lifecycle and monitor surface (`78468e1`)
+### Unified Maestro Settings Platform (`pi-maestro-settings-core` 0.1.0, new)
+- New `pi-maestro-settings-core` package: versioned settings schemas, provider
+  contracts, and i18n contracts shared by all Pi Maestro plugins (`b4871ebf`)
+- Flow settings provider with plugin-owned actions and discovery
+  (`packages/pi-maestro-flow/src/settings/flow-settings-provider.ts`),
+  API-manager settings provider, and resource-lock hardening
+- Cockpit settings shell: providers, coordinator, registry, i18n, locale
+  state, and a full settings view (`packages/pi-cockpit/src/settings/*`)
+- Teammate settings provider with commit/rollback atomicity hardened across
+  providers plus fault-injection regression coverage (`73672d1c`, `0d9ba7ab`)
 
-### Observe Tool (`pi-maestro-teammate`)
-- New `observe` tool: single typed status/wait interface over mixed teammate
-  and background-bash targets with `all`/`any`/`count` barriers (`319256a`)
-- `bash_bg` observe provider, child-surface registration, and permission
-  policy on the Flow side (`39a1c94`)
+### Lossless Compaction Overhaul (`pi-maestro-flow`)
+- Tier-0 lossless folding ported into the prune pipeline (`afe03474`)
+- Content-aware lossless kind routing (`c98aeedf`)
+- Cross-turn verbatim dedup with reference protection, hardened against image
+  blocks and multi-ref restore fidelity (`d79d34cc`, `30c0d229`)
+- Rank prune candidates by lexical relevance with bounded ranking work
+  (`98139c8b`, `856c6e66`)
+- Adaptive cache pruning driven by hit ratio and age (`82eaf424`)
+- Summary-reserve thresholds and capacity-aware summary requests (`caadde39`)
+- Soft mechanism toggles exposed in the `maestro-compaction` TUI with deep
+  cross-mechanism tests (`bcc8c9dd`, `fd78b152`)
 
-### Monitor Mode & Model Routing v3 (`pi-maestro-teammate`)
-- Monitor mode with model routing v3 profiles and quiet auxiliary fallbacks
-  (`dac81fe`)
-- `maxNestingDepth` guard and cockpit agent-state visibility (`dc13120`)
-- Terminated lifecycle status propagation and hardened cancellation
-  boundaries (`a851abf`)
+### Plan Workflow Execution (`pi-maestro-flow`)
+- Workflow-backed Plan execution with canonical publish binding
+  (`77961e45`, `packages/pi-maestro-flow/src/tools/plan-workflow.ts`)
 
-### Multimodal Vision Delegation (`pi-maestro-flow`)
-- Vision delegation for image-capable models (`268762b`)
-- Vision settings integrated into the API manager (`44e90c7`)
-- Closed 11 vision multimodal strategy gaps from swarm audit (`4c0c807`)
+### Teammate Mailbox & Monitoring (`pi-maestro-teammate`)
+- Persistent mailbox message queue with workspace-scoped isolation, cold
+  resume sync, Windows rename retry, and orphan-state GC (`80070431`,
+  `57dcc5fc`, `04222a0c`, `9c372a53`)
+- Window-tree monitor view with agent hierarchy and idle peers; monitor
+  targets windows via their main session (`0c690c09`, `740204a1`)
+- `observe` watch action and `until=completed` blocking wait (`b0a92eae`,
+  `9ba09b63`); wait schema requires `name` or `waitMs` (`5569d8e1`)
+- New `general-executor` agent role with report schema; enriched builtin
+  agents from community conventions (`a93a7b91`)
+- Wake the caller when a background agent stalls (`a2d48ce7`)
+- Reject self-referencing dependencies (`2584b77e`)
 
-### Loop Tool (`pi-maestro-flow`)
-- New `loop` tool: session-scoped recurring prompts or shell commands with
-  fixed delays, overlap protection, and max-run bounds (`d7b437a`)
+### Pi Cockpit (`pi-cockpit` 0.7.0 → 0.8.0)
+- Claude Code-style terminal title with optional LLM generation (`66e6a88d`)
+- agents-store state ownership and render refinements (`4031ff36`)
+- Settings platform shell and settings view (`settings-shell.ts`,
+  `cockpit-provider.ts`, `settings-view.ts`)
 
-### Provider Configuration (`pi-maestro-flow`)
-- Provider config hardening: `api-provider-config` and `explore-config-manager`
-  modules (`bade151`)
-- Provider enable/disable and compat/headers editing without losing
-  configuration (`03122b4`)
-
-### Lifecycle & Relay Hardening (`pi-maestro-flow`)
-- Compaction arbiter: bounded lease deadline armed only after the matching
-  request starts — stale observations can no longer shorten a legitimate
-  lease (`9d1715a`)
-- MCP lifecycle: exponential reconnect backoff (30s base, 5m cap), failure
-  tracking with user notification after 3 consecutive failures, generation
-  fencing for stale health checks, in-flight health-check dedup (`9d1715a`)
-- Teammate relay: `requestTeammateInteraction` returns typed results
-  (`unavailable`/`timeout`/`send-failed`) instead of silent `undefined`;
-  permission and questionnaire failures surface explicit reasons (`9d1715a`)
-- Goal recovery: `compaction_retry` tracked with its own max-retries; widget
-  shows retry state for all recovery kinds (`9d1715a`)
-- Teammate lifecycle settlement and session fencing hardened (`481966b`);
-  graph slots and DAG dependents released at result publication (`effe292`)
-- Network retry: 6 error-classification gaps closed in the retry regex;
-  Pi in-process retry enabled and model fallback ungated from tool count
-  (`16bedc2`, `6ddadf8`)
-
-### Compaction Tuning (`pi-maestro-flow`)
-- Reserve-token threshold and cancel callback (`a369fd9`)
-- Output-clamp-aware soft bands and deferred-intent escalation (`820c30c`)
-- Pressure notifications deduped on stable threshold keys (`115669d`)
-- Cross-flow coordination gaps closed (`4fd218c`)
-
-### Memory Bounds (`pi-maestro-flow`)
-- Bounded GitHub clone cache, research artifact cache, MCP UI message
-  retention, and background job resources; verifier deadline enforced;
-  evicted job logs reclaimed (`aac9dfb`, `7bd2c13`, `2819886`, `febde5c`,
-  `b2edeec`, `b2fdf7c`)
-
-### Architecture Template Library (`pi-maestro-flow`)
-- `arch-kb` template lookup integrated into the system prompt and planner
-  role (`8cbd48a`)
-
-### Pi Cockpit (`pi-cockpit`)
-- Static mode, tick policy, and usage-refresh throttle (`f89a8b3`)
-- Live working duration and simplified in-progress glyph (`4f49b80`)
-- Viewport stability, layout priority, quiet tool palettes (`3ec9f81`)
-- Teammate status display gaps closed, including terminated-state rendering
-  (`fab96cf`)
+### Flow Stability & Ops (`pi-maestro-flow`)
+- run-control bound to the Pi session ownership that invoked it (`2d8701b0`)
+- Compaction lease hardening, api-provider ops, vision delegation, and
+  effort display (`e39bf4db`)
+- Bridge model failover retry gaps closed — terminated/timeout classification
+  and turn continuation (`2857e95c`)
+- Memory bounds: GUI event replay bytes and MCP connection identity leases
+  (`d4ce62f0`, `5927d5c3`)
 
 ### Other Changes
-- Chinese response mode persisted globally across workspaces (`b6fc1f6`)
-- TUI filter inputs ignore navigation keys (`6905870`)
-- Skill/agent doc paths migrated from `~/.pi/agent` to `~/.maestro`
-  (`0768a89`, `5ed1f6e`)
-- External core engine pin bumped to `maestro-flow@0.5.60` (`7b09c97`)
-- Refactors: teammate module extraction (`teammate-core`, helpers/proxy
-  split), `api-provider-config` split into config + ops, oversized source
-  files split into focused modules (`3125ba6`, `19587c3`, `523ba6a`,
-  `9d9c5f8`, `a1207e2`, `24fd04c`)
+- Docs: Maestro CLI prerequisite removed — the knowledge system installs with
+  the plugin (`10a1d08f`); update notes and new-features usage guide
+  (`123add04`)
 
 ## Statistics
 
-- 50 commits since v0.12.0
-- 458 files changed
-- +37,813 / −15,004 lines
+- 41 commits since v0.13.0
+- 238 files changed, +38,922 / −10,718 lines
+- pi-maestro-teammate: 99 files (+12,214 / −617)
+- pi-maestro-flow: 67 files (+9,695 / −1,296)
+- pi-cockpit: 37 files (+5,501 / −50)
+- pi-maestro-settings-core: 12 files (+869, new)
 
 ## Install / Upgrade
 
 ```bash
-npm install pi-maestro-flow@0.13.0
+npm install pi-maestro-flow@0.14.0
 ```
