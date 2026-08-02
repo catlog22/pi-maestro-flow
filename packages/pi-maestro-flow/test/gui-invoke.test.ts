@@ -36,14 +36,39 @@ async function postInvoke(
   token: string,
   name: string,
   args: unknown,
+  options: { invokeId?: string; timeoutMs?: number } = {},
 ): Promise<{ status: number; body: any }> {
   const res = await fetch(`http://127.0.0.1:${port}/tools/${name}`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ args }),
+    body: JSON.stringify({ args, ...options }),
   });
   const text = await res.text();
   return { status: res.status, body: text ? JSON.parse(text) : null };
+}
+
+async function postCancel(port: number, token: string, invokeId: string): Promise<{ status: number; body: any }> {
+  const res = await fetch(`http://127.0.0.1:${port}/cancel`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ invokeId }),
+  });
+  const text = await res.text();
+  return { status: res.status, body: text ? JSON.parse(text) : null };
+}
+
+function deferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 function collectSse(port: number, token: string, eventName: string, timeoutMs = 2000): Promise<any[]> {
@@ -175,6 +200,324 @@ test("POST /tools/:name handles unknown tool, missing ctx, and execute errors", 
     assert.equal(resp.body.code, "no_context");
   } finally {
     server2.close("done");
+    clearGuiTools();
+  }
+});
+
+test("POST /tools/:name rejects args outside the registered canonical schema", async () => {
+  clearGuiTools();
+  const cwd = await mkdtemp(join(tmpdir(), "gui-schema-"));
+  const server = await startGuiServer({ sessionId: "s", cwd, writeDiscovery: false });
+  let authorizeCalls = 0;
+  let executeCalls = 0;
+  let invalidateDuringAuthorization = false;
+  try {
+    registerGuiTool(
+      {
+        ...tool("todo", async () => {
+          executeCalls += 1;
+          return { content: [], details: {} };
+        }),
+        parameters: {
+          type: "object",
+          properties: { action: { type: "string", enum: ["list"] } },
+          required: ["action"],
+          additionalProperties: false,
+        },
+      } as unknown as ToolDefinition,
+      "pi-maestro-flow",
+    );
+    registerToolRoutes(server, {
+      listAllTools: () => [],
+      gateway: {
+        mode: () => "default",
+        authorize: async (_name, input) => {
+          authorizeCalls += 1;
+          if (invalidateDuringAuthorization) input.action = 7;
+          return undefined;
+        },
+      },
+      getCtx: () => fakeCtx,
+    });
+
+    for (const args of [{ action: 7 }, { action: "list", extra: true }, null]) {
+      const invalid = await postInvoke(server.port, server.token, "todo", args);
+      assert.equal(invalid.status, 400);
+      assert.equal(invalid.body.code, "invalid_args");
+      assert.equal(invalid.body.error, "Invalid tool arguments");
+    }
+    assert.equal(authorizeCalls, 0, "invalid args must fail before authorization");
+    assert.equal(executeCalls, 0);
+
+    invalidateDuringAuthorization = true;
+    const mutated = await postInvoke(server.port, server.token, "todo", { action: "list" });
+    assert.equal(mutated.status, 400);
+    assert.equal(mutated.body.code, "invalid_args");
+    assert.equal(executeCalls, 0, "authorization mutations must be revalidated before execute");
+
+    invalidateDuringAuthorization = false;
+    const valid = await postInvoke(server.port, server.token, "todo", { action: "list" });
+    assert.equal(valid.status, 200);
+    assert.equal(authorizeCalls, 2);
+    assert.equal(executeCalls, 1);
+  } finally {
+    server.close("done");
+    clearGuiTools();
+  }
+});
+
+test("POST /tools/:name reserves admission while authorization is pending", async () => {
+  clearGuiTools();
+  const cwd = await mkdtemp(join(tmpdir(), "gui-admission-"));
+  const server = await startGuiServer({ sessionId: "s", cwd, writeDiscovery: false });
+  const authorizationStarted = deferred();
+  const releaseAuthorization = deferred();
+  let authorizeCalls = 0;
+  try {
+    registerGuiTool(tool("todo", async () => ({ content: [], details: {} })), "pi-maestro-flow");
+    registerToolRoutes(server, {
+      listAllTools: () => [],
+      gateway: {
+        mode: () => "default",
+        authorize: async () => {
+          authorizeCalls += 1;
+          authorizationStarted.resolve();
+          await releaseAuthorization.promise;
+          return undefined;
+        },
+      },
+      getCtx: () => fakeCtx,
+      maxConcurrentInvokes: 1,
+    });
+
+    const first = postInvoke(server.port, server.token, "todo", {}, { invokeId: "auth-pending" });
+    await authorizationStarted.promise;
+    const second = await postInvoke(server.port, server.token, "todo", {}, { invokeId: "must-not-authorize" });
+    assert.equal(second.status, 429);
+    assert.equal(second.body.code, "rate_limited");
+    assert.equal(authorizeCalls, 1, "the bounded slot must be reserved before awaiting authorization");
+
+    releaseAuthorization.resolve();
+    assert.equal((await first).status, 200);
+  } finally {
+    releaseAuthorization.resolve();
+    server.close("done");
+    clearGuiTools();
+  }
+});
+
+test("POST /tools/:name rejects a context replaced during authorization", async () => {
+  clearGuiTools();
+  const cwd = await mkdtemp(join(tmpdir(), "gui-stale-ctx-"));
+  const server = await startGuiServer({ sessionId: "s", cwd, writeDiscovery: false });
+  const authorizationStarted = deferred();
+  const releaseAuthorization = deferred();
+  let currentCtx = fakeCtx;
+  let executed = false;
+  try {
+    registerGuiTool(
+      tool("todo", async () => {
+        executed = true;
+        return { content: [], details: {} };
+      }),
+      "pi-maestro-flow",
+    );
+    registerToolRoutes(server, {
+      listAllTools: () => [],
+      gateway: {
+        mode: () => "default",
+        authorize: async () => {
+          authorizationStarted.resolve();
+          await releaseAuthorization.promise;
+          return undefined;
+        },
+      },
+      getCtx: () => currentCtx,
+    });
+
+    const pending = postInvoke(server.port, server.token, "todo", {});
+    await authorizationStarted.promise;
+    currentCtx = {} as ExtensionContext;
+    releaseAuthorization.resolve();
+
+    const response = await pending;
+    assert.equal(response.status, 409);
+    assert.equal(response.body.code, "stale_context");
+    assert.equal(executed, false);
+  } finally {
+    releaseAuthorization.resolve();
+    server.close("done");
+    clearGuiTools();
+  }
+});
+
+test("POST /tools/:name rejects a registry entry replaced during authorization", async () => {
+  clearGuiTools();
+  const cwd = await mkdtemp(join(tmpdir(), "gui-stale-tool-"));
+  const server = await startGuiServer({ sessionId: "s", cwd, writeDiscovery: false });
+  const authorizationStarted = deferred();
+  const releaseAuthorization = deferred();
+  let originalExecuted = false;
+  let replacementExecuted = false;
+  try {
+    registerGuiTool(
+      tool("todo", async () => {
+        originalExecuted = true;
+        return { content: [], details: {} };
+      }),
+      "pi-maestro-flow",
+    );
+    registerToolRoutes(server, {
+      listAllTools: () => [],
+      gateway: {
+        mode: () => "default",
+        authorize: async () => {
+          authorizationStarted.resolve();
+          await releaseAuthorization.promise;
+          return undefined;
+        },
+      },
+      getCtx: () => fakeCtx,
+    });
+
+    const pending = postInvoke(server.port, server.token, "todo", {});
+    await authorizationStarted.promise;
+    registerGuiTool(
+      tool("todo", async () => {
+        replacementExecuted = true;
+        return { content: [], details: {} };
+      }),
+      "pi-maestro-flow",
+    );
+    releaseAuthorization.resolve();
+
+    const response = await pending;
+    assert.equal(response.status, 409);
+    assert.equal(response.body.code, "stale_tool");
+    assert.equal(originalExecuted, false);
+    assert.equal(replacementExecuted, false);
+  } finally {
+    releaseAuthorization.resolve();
+    server.close("done");
+    clearGuiTools();
+  }
+});
+
+test("POST /tools/:name rejects duplicate invokeId without losing the original owner", async () => {
+  clearGuiTools();
+  const cwd = await mkdtemp(join(tmpdir(), "gui-collision-"));
+  const server = await startGuiServer({ sessionId: "s", cwd, writeDiscovery: false });
+  const firstStarted = deferred();
+  let calls = 0;
+  try {
+    registerGuiTool(
+      tool("todo", async (_id, _params, signal) => {
+        calls += 1;
+        if (calls > 1) return { content: [], details: { calls } };
+        firstStarted.resolve();
+        return await new Promise<never>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        });
+      }),
+      "pi-maestro-flow",
+    );
+    registerToolRoutes(server, { listAllTools: () => [], gateway: allowGateway, getCtx: () => fakeCtx });
+
+    const first = postInvoke(server.port, server.token, "todo", {}, { invokeId: "same-id" });
+    await firstStarted.promise;
+    const collision = await postInvoke(server.port, server.token, "todo", {}, { invokeId: "same-id" });
+    assert.equal(collision.status, 409);
+    assert.equal(collision.body.code, "invoke_conflict");
+
+    const cancelled = await postCancel(server.port, server.token, "same-id");
+    assert.equal(cancelled.status, 200, "the duplicate must not replace the original controller");
+    assert.equal((await first).status, 499);
+
+    const reused = await postInvoke(server.port, server.token, "todo", {}, { invokeId: "same-id" });
+    assert.equal(reused.status, 200, "identity-checked cleanup must release the original id");
+    assert.equal(calls, 2);
+  } finally {
+    server.close("done");
+    clearGuiTools();
+  }
+});
+
+test("aborted invoke suppresses late progress and successful completion", async () => {
+  clearGuiTools();
+  const cwd = await mkdtemp(join(tmpdir(), "gui-late-abort-"));
+  const server = await startGuiServer({ sessionId: "s", cwd, writeDiscovery: false });
+  const executeStarted = deferred();
+  const releaseExecute = deferred();
+  let lateUpdate: (() => void) | undefined;
+  try {
+    registerGuiTool(
+      tool("maestro", async (_id, _params, _signal, onUpdate) => {
+        lateUpdate = () => onUpdate?.({ content: [], details: { late: true } });
+        executeStarted.resolve();
+        await releaseExecute.promise;
+        return { content: [], details: { completed: true } };
+      }),
+      "pi-maestro-flow",
+    );
+    registerToolRoutes(server, { listAllTools: () => [], gateway: allowGateway, getCtx: () => fakeCtx });
+
+    const progressEvents = collectSse(server.port, server.token, "tool.progress", 500);
+    const invokedEvents = collectSse(server.port, server.token, "tool.invoked", 500);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const pending = postInvoke(server.port, server.token, "maestro", {}, { invokeId: "late-abort" });
+    await executeStarted.promise;
+    assert.equal((await postCancel(server.port, server.token, "late-abort")).status, 200);
+    lateUpdate?.();
+    releaseExecute.resolve();
+
+    const response = await pending;
+    assert.equal(response.status, 499);
+    assert.equal(response.body.code, "cancelled");
+    const [progress, invoked] = await Promise.all([progressEvents, invokedEvents]);
+    assert.deepEqual(progress, [], "progress emitted after abort must be suppressed");
+    assert.equal(invoked.length, 1);
+    assert.equal(invoked[0].ok, false);
+    assert.equal(invoked[0].cancelled, true);
+  } finally {
+    releaseExecute.resolve();
+    server.close("done");
+    clearGuiTools();
+  }
+});
+
+test("GUI server close aborts every route-owned invocation", async () => {
+  clearGuiTools();
+  const cwd = await mkdtemp(join(tmpdir(), "gui-shutdown-"));
+  const server = await startGuiServer({ sessionId: "s", cwd, writeDiscovery: false });
+  const bothStarted = deferred();
+  let started = 0;
+  let aborted = 0;
+  try {
+    registerGuiTool(
+      tool("todo", async (_id, _params, signal) => {
+        started += 1;
+        if (started === 2) bothStarted.resolve();
+        return await new Promise<never>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => {
+            aborted += 1;
+            reject(new Error("shutdown"));
+          }, { once: true });
+        });
+      }),
+      "pi-maestro-flow",
+    );
+    registerToolRoutes(server, { listAllTools: () => [], gateway: allowGateway, getCtx: () => fakeCtx });
+
+    const first = postInvoke(server.port, server.token, "todo", {}, { invokeId: "shutdown-1" });
+    const second = postInvoke(server.port, server.token, "todo", {}, { invokeId: "shutdown-2" });
+    await bothStarted.promise;
+    server.close("session-shutdown");
+
+    const responses = await Promise.all([first, second]);
+    assert.deepEqual(responses.map((response) => response.status), [499, 499]);
+    assert.equal(aborted, 2);
+  } finally {
+    server.close("done");
     clearGuiTools();
   }
 });

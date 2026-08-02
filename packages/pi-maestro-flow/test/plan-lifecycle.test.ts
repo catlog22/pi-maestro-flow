@@ -9,6 +9,7 @@ import {
   consumePlanCleanContextCompaction,
   getMode,
   getPlanHandoffStatus,
+  getPlanText,
   initPlan,
   onAgentEndPlan,
   onBeforeAgentStartPlan,
@@ -75,6 +76,10 @@ function createHarness(
       approved: LoadedPlan,
       execution: PlanExecutionChoice,
     ) => Promise<PlanWorkflowPublicationResult>;
+    storeFactory?: (
+      cwd: string,
+      session: { id: string; file?: string; name?: string },
+    ) => PlanStore;
   } = {},
 ) {
   let active = ["Read", "Write", "Bash", "todo", "custom-tool"];
@@ -186,7 +191,7 @@ function createHarness(
   let storeCalls = 0;
 
   initPlan(pi, {
-    storeFactory: (cwd, session) => {
+    storeFactory: runtime.storeFactory ?? ((cwd, session) => {
       const call = storeCalls++;
       if (failFirstLoad && call === 0) return new FailingLoadStore(cwd, { rootDir: join(root, "global"), session });
       if (replacementFailure === "approval" && session.id.endsWith("-replacement")) {
@@ -206,7 +211,7 @@ function createHarness(
         ? { approvalCommitHook: async () => { throw new Error("approval storage failed"); } }
         : {}),
       });
-    },
+    }),
     hasExecutableTodo: (handoffKey) => handoff.todoKeys.includes(handoffKey),
     compactionArbiter: runtime.arbiter,
     ...(runtime.workflowConfirmation
@@ -1144,6 +1149,385 @@ test("Session restart delivers a bound Workflow handoff that was interrupted bef
     assert.equal(recovered.manifest.workflowBinding?.deliveryStatus, "delivered");
     assert.equal(harness.messages.length, 1);
     assert.match(harness.messages[0] ?? "", /BOUND WORKFLOW RUN BRIEF/);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reverse-order shutdown/start ignores a stale Plan load from the prior lifecycle", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-reverse-load-"));
+  const sessionId = "reverse-load-chat";
+  const store = new PlanStore(join(root, "workspace"), {
+    rootDir: join(root, "global"),
+    session: { id: sessionId },
+  });
+  await store.saveDraft("# Older draft", 0);
+
+  let releaseLoad!: () => void;
+  let markLoadCaptured!: () => void;
+  const loadGate = new Promise<void>((resolve) => { releaseLoad = resolve; });
+  const loadCaptured = new Promise<void>((resolve) => { markLoadCaptured = resolve; });
+  let stores = 0;
+  class DeferredLoadStore extends PlanStore {
+    override async load(): Promise<LoadedPlan> {
+      const loaded = await super.load();
+      markLoadCaptured();
+      await loadGate;
+      return loaded;
+    }
+  }
+  const harness = createHarness(
+    root, false, false, false, false, sessionId, undefined, false, { todoKeys: [] }, undefined,
+    {
+      storeFactory(cwd, session) {
+        if (stores++ === 0) return new DeferredLoadStore(cwd, { rootDir: join(root, "global"), session });
+        return new PlanStore(cwd, { rootDir: join(root, "global"), session });
+      },
+    },
+  );
+
+  try {
+    const staleStart = onSessionStartPlan(harness.ctx);
+    await loadCaptured;
+    await store.saveDraft("# Newer draft", 1);
+
+    onSessionShutdownPlan(harness.ctx);
+    await onSessionStartPlan(harness.ctx);
+    assert.equal(getPlanText(), "# Newer draft");
+
+    releaseLoad();
+    await staleStart;
+    assert.equal(getPlanText(), "# Newer draft", "the old load must not overwrite the restarted lifecycle");
+    assert.doesNotMatch(harness.notifications.join("\n"), /Plan draft unavailable/);
+  } finally {
+    releaseLoad();
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reverse-order shutdown/start fences stale Workflow recovery publication results", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-reverse-recovery-"));
+  const sessionId = "reverse-recovery-chat";
+  const store = new PlanStore(join(root, "workspace"), {
+    rootDir: join(root, "global"),
+    session: { id: sessionId },
+  });
+  const draft = await store.saveDraft("# Recover once", 0);
+  const approved = await store.approve(draft.markdown, draft.manifest.revision, {
+    execution: { backend: "workflow", context: "current", workflowTarget: "current" },
+  });
+  await store.updateWorkflowBinding(approved.manifest.handoffKey!, {
+    status: "failed",
+    handoffKey: approved.manifest.handoffKey!,
+    sourceChecksum: approved.manifest.approvedChecksum!,
+    error: "retry",
+    updatedAt: "2026-08-03T00:00:00.000Z",
+  });
+
+  let releaseFirstPublication!: () => void;
+  let markFirstPublication!: () => void;
+  const firstPublicationGate = new Promise<void>((resolve) => { releaseFirstPublication = resolve; });
+  const firstPublicationStarted = new Promise<void>((resolve) => { markFirstPublication = resolve; });
+  let publications = 0;
+  const binding = (requestId: string): PlanWorkflowBinding => ({
+    status: "bound",
+    handoffKey: approved.manifest.handoffKey!,
+    sourceChecksum: approved.manifest.approvedChecksum!,
+    workflowSessionId: `workflow-${requestId}`,
+    artifactId: "ART-001-001",
+    producerRunId: "run-publish",
+    executionRunId: "run-execute",
+    requestId,
+    updatedAt: "2026-08-03T00:01:00.000Z",
+  });
+  const harness = createHarness(
+    root, false, false, false, false, sessionId, undefined, false, { todoKeys: [] }, undefined,
+    {
+      async publishWorkflowPlan() {
+        publications++;
+        if (publications === 1) {
+          markFirstPublication();
+          await firstPublicationGate;
+          return { binding: binding("stale"), executionMessage: "STALE RUN BRIEF" };
+        }
+        return { binding: binding("current"), executionMessage: "CURRENT RUN BRIEF" };
+      },
+    },
+  );
+
+  try {
+    const staleStart = onSessionStartPlan(harness.ctx);
+    await firstPublicationStarted;
+    onSessionShutdownPlan(harness.ctx);
+    await onSessionStartPlan(harness.ctx);
+
+    releaseFirstPublication();
+    await staleStart;
+    const recovered = await store.load();
+    assert.equal(publications, 2);
+    assert.equal(recovered.manifest.workflowBinding?.requestId, "current");
+    assert.equal(recovered.manifest.workflowBinding?.deliveryStatus, "delivered");
+    assert.equal(harness.messages.length, 1);
+    assert.match(harness.messages[0] ?? "", /CURRENT RUN BRIEF/);
+    assert.doesNotMatch(harness.messages.join("\n"), /STALE RUN BRIEF/);
+    assert.equal(
+      harness.notifications.filter((message) => /Recovered approved Plan binding/.test(message)).length,
+      1,
+    );
+  } finally {
+    releaseFirstPublication();
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reverse-order plan-enter keeps the newer loaded draft", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-reverse-enter-"));
+  const sessionId = "reverse-enter-chat";
+  const store = new PlanStore(join(root, "workspace"), {
+    rootDir: join(root, "global"),
+    session: { id: sessionId },
+  });
+  await store.saveDraft("# Older enter draft", 0);
+
+  let releaseFirstLoad!: () => void;
+  let markFirstLoad!: () => void;
+  const firstLoadGate = new Promise<void>((resolve) => { releaseFirstLoad = resolve; });
+  const firstLoadCaptured = new Promise<void>((resolve) => { markFirstLoad = resolve; });
+  let quickLoads = 0;
+  class DeferredQuickLoadStore extends PlanStore {
+    override async loadQuick(): Promise<LoadedPlan> {
+      const loaded = await super.loadQuick();
+      if (quickLoads++ === 0) {
+        markFirstLoad();
+        await firstLoadGate;
+      }
+      return loaded;
+    }
+  }
+  const harness = createHarness(
+    root, false, false, false, false, sessionId, undefined, false, { todoKeys: [] }, undefined,
+    {
+      storeFactory: (cwd, session) => new DeferredQuickLoadStore(cwd, { rootDir: join(root, "global"), session }),
+    },
+  );
+
+  try {
+    await onSessionStartPlan(harness.ctx);
+    const staleEnter = execute(harness, "plan-enter");
+    await firstLoadCaptured;
+    await store.saveDraft("# Newer enter draft", 1);
+
+    const currentEnter = await execute(harness, "plan-enter");
+    assert.equal(currentEnter.details.error, undefined);
+    assert.equal(getPlanText(), "# Newer enter draft");
+
+    releaseFirstLoad();
+    const staleResult = await staleEnter;
+    assert.equal(staleResult.details.error, "E_PLAN_OPERATION_SUPERSEDED");
+    assert.equal(getPlanText(), "# Newer enter draft");
+    assert.equal(getMode(), "plan");
+  } finally {
+    releaseFirstLoad();
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reverse-order plan-update keeps the newer save result", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-reverse-update-"));
+  const sessionId = "reverse-update-chat";
+  const store = new PlanStore(join(root, "workspace"), {
+    rootDir: join(root, "global"),
+    session: { id: sessionId },
+  });
+  await store.saveDraft("# Initial draft", 0);
+
+  let releaseFirstSave!: () => void;
+  let markFirstSave!: () => void;
+  const firstSaveGate = new Promise<void>((resolve) => { releaseFirstSave = resolve; });
+  const firstSaveCaptured = new Promise<void>((resolve) => { markFirstSave = resolve; });
+  let saves = 0;
+  class DeferredSaveStore extends PlanStore {
+    override async saveDraft(markdown: string, expectedRevision?: number): Promise<LoadedPlan> {
+      const saved = await super.saveDraft(markdown, expectedRevision);
+      if (saves++ === 0) {
+        markFirstSave();
+        await firstSaveGate;
+      }
+      return saved;
+    }
+  }
+  const harness = createHarness(
+    root, false, false, false, false, sessionId, undefined, false, { todoKeys: [] }, undefined,
+    {
+      storeFactory: (cwd, session) => new DeferredSaveStore(cwd, { rootDir: join(root, "global"), session }),
+    },
+  );
+
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    const staleUpdate = execute(harness, "plan-update", { markdown: "# Stale save" });
+    await firstSaveCaptured;
+
+    const currentUpdate = await execute(harness, "plan-update", {
+      markdown: "# Newer save",
+      expectedRevision: 2,
+    });
+    assert.equal(currentUpdate.details.revision, 3);
+    assert.equal(getPlanText(), "# Newer save");
+
+    releaseFirstSave();
+    const staleResult = await staleUpdate;
+    assert.equal(staleResult.details.error, "E_PLAN_OPERATION_SUPERSEDED");
+    assert.equal(getPlanText(), "# Newer save");
+    assert.equal((await store.load()).markdown, "# Newer save");
+  } finally {
+    releaseFirstSave();
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reverse-order approval cannot restore stale approved state or deliver execution", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-reverse-approval-"));
+  const sessionId = "reverse-approval-chat";
+  let releaseApproval!: () => void;
+  let markApproval!: () => void;
+  const approvalGate = new Promise<void>((resolve) => { releaseApproval = resolve; });
+  const approvalCaptured = new Promise<void>((resolve) => { markApproval = resolve; });
+  let capturedApproval: LoadedPlan | undefined;
+  class DeferredApprovalStore extends PlanStore {
+    override async approve(...args: Parameters<PlanStore["approve"]>): Promise<LoadedPlan> {
+      capturedApproval = await super.approve(...args);
+      markApproval();
+      await approvalGate;
+      return capturedApproval;
+    }
+  }
+  const harness = createHarness(
+    root, true, false, false, false, sessionId, undefined, false, { todoKeys: [] }, undefined,
+    {
+      storeFactory: (cwd, session) => new DeferredApprovalStore(cwd, { rootDir: join(root, "global"), session }),
+    },
+  );
+
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Approval candidate" });
+    const staleApproval = execute(harness, "plan-confirm");
+    await approvalCaptured;
+    assert.ok(capturedApproval);
+
+    await execute(harness, "plan-update", {
+      markdown: "# Newer post-approval draft",
+      expectedRevision: capturedApproval.manifest.revision,
+    });
+    releaseApproval();
+
+    const staleResult = await staleApproval;
+    assert.equal(staleResult.details.error, "E_PLAN_OPERATION_SUPERSEDED");
+    assert.equal(getMode(), "plan");
+    assert.equal(getPlanText(), "# Newer post-approval draft");
+    assert.equal(harness.messages.length, 0);
+  } finally {
+    releaseApproval();
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reverse-order Workflow publication cannot bind or deliver after a newer Plan operation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-reverse-publication-"));
+  const sessionId = "reverse-publication-chat";
+  let releasePublication!: () => void;
+  let markPublication!: () => void;
+  const publicationGate = new Promise<void>((resolve) => { releasePublication = resolve; });
+  const publicationStarted = new Promise<void>((resolve) => { markPublication = resolve; });
+  const harness = createHarness(
+    root, false, false, false, false, sessionId, WORKFLOW_CURRENT_EXECUTION_INPUTS,
+    false, { todoKeys: [] }, undefined,
+    {
+      workflowConfirmation: () => ({
+        current: { sessionId: "workflow-current", intent: "execute", available: true },
+        allowNew: false,
+      }),
+      async publishWorkflowPlan(approved) {
+        markPublication();
+        await publicationGate;
+        return {
+          binding: {
+            status: "bound",
+            handoffKey: approved.manifest.handoffKey!,
+            sourceChecksum: approved.manifest.approvedChecksum!,
+            workflowSessionId: "workflow-stale",
+            artifactId: "ART-001-001",
+            producerRunId: "run-publish",
+            executionRunId: "run-execute",
+            requestId: "request-stale",
+            updatedAt: "2026-08-03T01:00:00.000Z",
+          },
+          executionMessage: "STALE NORMAL RUN BRIEF",
+        };
+      },
+    },
+  );
+
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Workflow publication candidate" });
+    const stalePublication = execute(harness, "plan-confirm");
+    await publicationStarted;
+
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Newer draft after publication" });
+    releasePublication();
+
+    const staleResult = await stalePublication;
+    assert.equal(staleResult.details.error, "E_PLAN_OPERATION_SUPERSEDED");
+    assert.equal(getPlanText(), "# Newer draft after publication");
+    assert.equal(harness.messages.length, 0);
+    assert.doesNotMatch(harness.notifications.join("\n"), /workflow-stale/);
+    const persisted = await new PlanStore(harness.ctx.cwd, {
+      rootDir: join(root, "global"),
+      session: { id: sessionId },
+    }).load();
+    assert.equal(persisted.manifest.workflowBinding, undefined);
+  } finally {
+    releasePublication();
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("newer Plan operation fences a delayed compact delivery callback", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-reverse-delivery-"));
+  const harness = createHarness(
+    root, false, false, false, false, "reverse-delivery-chat", COMPACT_EXECUTION_INPUTS,
+    false, { todoKeys: [] }, undefined,
+    { arbiter: new CompactionArbiter(), deferCompactionComplete: true },
+  );
+
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Compact delivery candidate" });
+    const approved = await execute(harness, "plan-confirm");
+    assert.equal(approved.details.approved, true);
+    assert.equal(harness.compactions.length, 1);
+
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Newer draft before delivery" });
+    harness.compactions[0]?.onComplete?.({});
+
+    assert.equal(harness.messages.length, 0);
+    assert.equal(getMode(), "plan");
+    assert.equal(getPlanText(), "# Newer draft before delivery");
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });

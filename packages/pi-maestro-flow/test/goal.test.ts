@@ -36,8 +36,10 @@ import {
   parseVerifierOutput,
   parseGoalCommand,
   reconcileWorkflowGoal,
+  recoverPendingGoalTodoDetachesAfterTodoStart,
   setAcceptanceRunnerForTest,
   setGoalPanelOwnership,
+  setGoalStateChangeListener,
   setGoalVerifierRunnerForTest,
   setWorkflowCoordinator,
   switchCurrentGoal,
@@ -54,6 +56,15 @@ test("goal acceptance schema documents create/update and deterministic verificat
   assert.doesNotMatch(description, /create only/);
 });
 import { buildTodoMirrorSpecs } from "../src/session/bridge.ts";
+import {
+  executeTodo,
+  getVisibleTasks,
+  initTodo,
+  onSessionShutdown as todoOnSessionShutdown,
+  onSessionStart as todoOnSessionStart,
+  setTodoStateChangeListener,
+  type TodoContext,
+} from "../src/tools/todo.ts";
 import type { WorkflowSnapshot } from "../src/session/types.ts";
 import { renderGoalWidget, renderGoalPanel, type GoalWidgetModel, type GoalPanelEntry } from "../src/tui/goal-widget.ts";
 
@@ -153,6 +164,230 @@ test("Goal creation persists the approved Plan handoff binding", async () => {
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);
   }
+});
+
+test("Goal create, update, and clear publish nothing when appendEntry fails", async () => {
+  const ctx = createContext({ isIdle: () => false });
+  let listenerCalls = 0;
+  let observedDuringAppend: ReturnType<typeof getActiveGoal>;
+  let observedListDuringAppend: ReturnType<typeof getGoalList>;
+  const useSuccessfulPersistence = () => initGoal({ appendEntry() {} } as never);
+  const useFailingPersistence = () => initGoal({
+    appendEntry() {
+      observedDuringAppend = getActiveGoal();
+      observedListDuringAppend = getGoalList();
+      throw new Error("goal append failed");
+    },
+  } as never);
+
+  setGoalStateChangeListener(() => { listenerCalls++; });
+  useFailingPersistence();
+  onSessionStart(ctx, { reason: "new" });
+  try {
+    await assert.rejects(
+      executeGoal({ action: "create", objective: "Must not publish" }, ctx),
+      /goal append failed/,
+    );
+    assert.equal(observedDuringAppend, undefined);
+    assert.deepEqual(observedListDuringAppend, []);
+    assert.equal(getActiveGoal(), undefined);
+    assert.deepEqual(getGoalList(), []);
+    assert.equal(listenerCalls, 0);
+
+    useSuccessfulPersistence();
+    const created = await executeGoal({ action: "create", objective: "Original objective" }, ctx);
+    assert.equal(created.isError, false);
+    const original = getActiveGoal();
+    assert.ok(original);
+    const callsAfterCreate = listenerCalls;
+
+    useFailingPersistence();
+    await assert.rejects(
+      executeGoal({ action: "update", objective: "Leaked update" }, ctx),
+      /goal append failed/,
+    );
+    assert.equal(observedDuringAppend?.text, "Original objective");
+    assert.deepEqual(observedListDuringAppend, [original]);
+    assert.deepEqual(getActiveGoal(), original);
+    assert.deepEqual(getGoalList(), [original]);
+    assert.equal(listenerCalls, callsAfterCreate);
+
+    await assert.rejects(executeGoalCommand({ action: "clear" }, ctx), /goal append failed/);
+    assert.equal(observedDuringAppend?.id, original.id);
+    assert.deepEqual(observedListDuringAppend, [original]);
+    assert.deepEqual(getActiveGoal(), original);
+    assert.deepEqual(getGoalList(), [original]);
+    assert.equal(listenerCalls, callsAfterCreate);
+  } finally {
+    useSuccessfulPersistence();
+    if (getActiveGoal()) await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setGoalStateChangeListener(undefined);
+  }
+});
+
+test("Goal clear recovers Todo detachment after its durable tombstone", async () => {
+  const goalEntries: Array<{ type: string; data: unknown }> = [];
+  let failGoalAppend = false;
+  initGoal({
+    appendEntry(type: string, data: unknown) {
+      if (failGoalAppend) throw new Error("goal cleanup append failed");
+      goalEntries.push({ type, data });
+    },
+  } as never);
+  const goalCtx = createContext({ isIdle: () => false });
+  onSessionStart(goalCtx, { reason: "new" });
+
+  const todoCtx = {
+    cwd: goalCtx.cwd,
+    sessionManager: { getEntries: () => [] },
+    ui: { setStatus() {} },
+  } as unknown as TodoContext;
+  const todoExtensionCtx = {
+    cwd: goalCtx.cwd,
+    ui: { notify() {}, setStatus() {} },
+  } as never;
+  const useSuccessfulTodoPersistence = () => initTodo({ appendEntry() {} } as never);
+  const useFailingTodoPersistence = () => initTodo({
+    appendEntry() { throw new Error("todo append failed"); },
+  } as never);
+  useSuccessfulTodoPersistence();
+  todoOnSessionStart(todoCtx);
+
+  try {
+    const goal = addGoal("Durable quality gate", goalCtx);
+    await executeTodo({ action: "create", subject: "Bound task", goalId: goal.id }, todoExtensionCtx);
+    assert.equal(getVisibleTasks()[0]?.goalId, goal.id);
+
+    useFailingTodoPersistence();
+    await assert.rejects(executeGoalCommand({ action: "clear" }, goalCtx), /todo append failed/);
+    assert.equal(getActiveGoal(), undefined, "the Goal tombstone commits before Todo detachment");
+    assert.deepEqual(getGoalList(), []);
+    assert.equal(getVisibleTasks()[0]?.goalId, goal.id, "failed Todo persistence must not publish a detach");
+    const pending = goalEntries.at(-1)?.data as { pendingTodoDetachGoalIds?: string[] } | undefined;
+    assert.deepEqual(pending?.pendingTodoDetachGoalIds, [goal.id]);
+
+    useSuccessfulTodoPersistence();
+    failGoalAppend = true;
+    await assert.rejects(executeGoalCommand({ action: "clear" }, goalCtx), /goal cleanup append failed/);
+    assert.equal(getVisibleTasks()[0]?.goalId, undefined, "Todo detach publishes only after its own append succeeds");
+    const stillPending = goalEntries.at(-1)?.data as { pendingTodoDetachGoalIds?: string[] } | undefined;
+    assert.deepEqual(stillPending?.pendingTodoDetachGoalIds, [goal.id]);
+
+    failGoalAppend = false;
+    const recovered = await executeGoalCommand({ action: "clear" }, goalCtx);
+    assert.equal(recovered.isError, false);
+    assert.equal(getVisibleTasks()[0]?.goalId, undefined);
+    const settled = goalEntries.at(-1)?.data as { pendingTodoDetachGoalIds?: string[] } | undefined;
+    assert.equal(settled?.pendingTodoDetachGoalIds, undefined);
+  } finally {
+    useSuccessfulTodoPersistence();
+    todoOnSessionShutdown(todoCtx);
+    onSessionShutdown(goalCtx);
+  }
+});
+
+test("pending Goal Todo detach recovery waits for Todo reload and persists before clearing its marker", async () => {
+  type SessionEntry = { type: "custom"; customType: string; data: unknown };
+  const entries: SessionEntry[] = [];
+  const sessionId = "goal-todo-restart";
+  const appendEntry = (customType: string, data: unknown) => {
+    entries.push({ type: "custom", customType, data });
+  };
+  const sessionManager = { getSessionId: () => sessionId, getEntries: () => entries };
+  const firstGoalCtx = createContext({ isIdle: () => false, sessionManager });
+  const firstTodoCtx = {
+    cwd: firstGoalCtx.cwd,
+    sessionManager,
+    ui: { setStatus() {} },
+  } as unknown as TodoContext;
+  const todoToolCtx = { cwd: firstGoalCtx.cwd, ui: { notify() {}, setStatus() {} } } as never;
+
+  initGoal({ appendEntry } as never);
+  initTodo({ appendEntry } as never);
+  await onSessionStart(firstGoalCtx, { reason: "new" });
+  todoOnSessionStart(firstTodoCtx);
+
+  let secondGoalCtx: GoalContext | undefined;
+  let secondTodoCtx: TodoContext | undefined;
+  try {
+    const goal = addGoal("Restart recovery gate", firstGoalCtx);
+    await executeTodo({ action: "create", subject: "Still bound on disk", goalId: goal.id }, todoToolCtx);
+    const taskId = getVisibleTasks()[0]!.id;
+
+    initTodo({ appendEntry() { throw new Error("simulated Todo persistence interruption"); } } as never);
+    await assert.rejects(
+      executeGoalCommand({ action: "clear" }, firstGoalCtx),
+      /simulated Todo persistence interruption/,
+    );
+    const pendingBeforeRestart = entries.filter((entry) => entry.customType === "goal-state").at(-1)?.data as {
+      pendingTodoDetachGoalIds?: string[];
+    };
+    assert.deepEqual(pendingBeforeRestart.pendingTodoDetachGoalIds, [goal.id]);
+    const durableTodoBeforeRestart = entries.filter((entry) => entry.customType === "todo-state").at(-1)?.data as {
+      tasks?: Record<string, { goalId?: string }>;
+    };
+    assert.equal(durableTodoBeforeRestart.tasks?.[taskId]?.goalId, goal.id);
+
+    onSessionShutdown(firstGoalCtx);
+    todoOnSessionShutdown(firstTodoCtx);
+
+    initGoal({ appendEntry } as never);
+    initTodo({ appendEntry } as never);
+    secondGoalCtx = createContext({ sessionManager });
+    secondTodoCtx = {
+      cwd: secondGoalCtx.cwd,
+      sessionManager,
+      ui: { setStatus() {} },
+    } as unknown as TodoContext;
+    let todoPublications = 0;
+    setTodoStateChangeListener(() => { todoPublications++; });
+
+    await onSessionStart(secondGoalCtx, { reason: "startup" });
+    assert.throws(
+      () => recoverPendingGoalTodoDetachesAfterTodoStart(secondGoalCtx!),
+      /Todo state must be loaded/,
+    );
+    const stillPending = entries.filter((entry) => entry.customType === "goal-state").at(-1)?.data as {
+      pendingTodoDetachGoalIds?: string[];
+    };
+    assert.deepEqual(stillPending.pendingTodoDetachGoalIds, [goal.id]);
+
+    const entriesBeforeTodoLoad = entries.length;
+    todoOnSessionStart(secondTodoCtx);
+    assert.equal(entries.length, entriesBeforeTodoLoad, "Todo load must not append or publish by itself");
+    assert.equal(getVisibleTasks()[0]?.id, taskId, "the durable Todo task must load before recovery");
+
+    recoverPendingGoalTodoDetachesAfterTodoStart(secondGoalCtx);
+
+    assert.deepEqual(
+      entries.slice(entriesBeforeTodoLoad).map((entry) => entry.customType),
+      ["todo-state", "goal-state"],
+      "the detached Todo state must persist before the Goal recovery marker clears",
+    );
+    assert.equal(todoPublications, 1);
+    assert.equal(getVisibleTasks()[0]?.goalId, undefined);
+    const persistedTodoAfterRecovery = entries.filter((entry) => entry.customType === "todo-state").at(-1)?.data as {
+      tasks?: Record<string, { goalId?: string }>;
+    };
+    assert.equal(persistedTodoAfterRecovery.tasks?.[taskId]?.goalId, undefined);
+    const clearedMarker = entries.filter((entry) => entry.customType === "goal-state").at(-1)?.data as {
+      pendingTodoDetachGoalIds?: string[];
+    };
+    assert.equal(clearedMarker.pendingTodoDetachGoalIds, undefined);
+  } finally {
+    setTodoStateChangeListener(undefined);
+    if (secondGoalCtx) onSessionShutdown(secondGoalCtx);
+    if (secondTodoCtx) todoOnSessionShutdown(secondTodoCtx);
+  }
+});
+
+test("extension recovers pending Goal Todo detaches after Todo session startup", () => {
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  assert.match(
+    source,
+    /await goalSessionStart\(ctx, event\)[\s\S]*?todoSessionStart\(ctx\)[\s\S]*?recoverPendingGoalTodoDetachesAfterTodoStart\(ctx\)/,
+  );
 });
 
 test("Goal compaction snapshot preserves detached recovery state", () => {

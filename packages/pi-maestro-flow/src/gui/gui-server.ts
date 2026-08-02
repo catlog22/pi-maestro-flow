@@ -41,6 +41,7 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
   const eventLogMaxBytes = Math.max(1, options.eventLogMaxBytes ?? MAX_EVENT_LOG_BYTES);
 
   const sseClients = new Set<ServerResponse>();
+  const closeHandlers = new Set<(reason: string) => void>();
   const routes: RouteEntry[] = [];
   const eventLog: EventLogEntry[] = [];
   let eventLogBytes = 0;
@@ -235,12 +236,30 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
     }
   };
 
+  const onClose = (handler: (reason: string) => void): (() => void) => {
+    if (closed) {
+      handler("closed");
+      return () => {};
+    }
+    closeHandlers.add(handler);
+    return () => closeHandlers.delete(handler);
+  };
+
   const close = (reason?: string): void => {
     if (closed) return;
-    log.debug("Closing GUI server", { reason: reason ?? "closed" });
+    const closeReason = reason ?? "closed";
+    log.debug("Closing GUI server", { reason: closeReason });
     stopHeartbeat();
+    for (const handler of closeHandlers) {
+      try {
+        handler(closeReason);
+      } catch (error) {
+        log.debug("GUI close handler failed", { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    closeHandlers.clear();
     // Emit the final event before flipping `closed`, otherwise pushEvent suppresses it.
-    pushEvent("server-close", { reason: reason ?? "closed" });
+    pushEvent("server-close", { reason: closeReason });
     closed = true;
     closeSse();
     try {
@@ -308,6 +327,7 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
         sessionId,
         discoveryPath,
         close,
+        onClose,
         pushEvent,
         registerRoute,
         sseClientCount: () => sseClients.size,

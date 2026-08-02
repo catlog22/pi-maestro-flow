@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -16,6 +16,7 @@ import {
   resolveUserSettingsPath,
   saveCompactionPatch,
   saveCompactionScope,
+  setCompactionSettingsFileOperationsForTesting,
   unsetCompactionField,
   validateCompactionPatch,
   validateEffectiveCompactionSettings,
@@ -200,6 +201,101 @@ test("compaction writes are atomic and serialized per settings path", async () =
     if (process.platform !== "win32") {
       assert.equal((await stat(settingsPath)).mode & 0o777, 0o600);
     }
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("compaction settings replace safely after the initial rename conflicts", async () => {
+  const fixture = await createFixture();
+  try {
+    const settingsPath = resolveProjectSettingsPath(fixture.projectDir);
+    await writeSettings(join(fixture.projectDir, ".pi"), {
+      theme: "night",
+      compaction: { enabled: false },
+    });
+    let renameCalls = 0;
+    const restore = setCompactionSettingsFileOperationsForTesting({
+      async rename(source, destination) {
+        renameCalls += 1;
+        if (renameCalls === 1) throw renameFailure("initial rename failed");
+        await rename(source, destination);
+      },
+    });
+    try {
+      await saveCompactionPatch("project", fixture.projectDir, { enabled: true });
+    } finally {
+      restore();
+    }
+
+    assert.equal(renameCalls, 3);
+    assert.deepEqual(await readJson(settingsPath), {
+      theme: "night",
+      compaction: { enabled: true },
+    });
+    assert.deepEqual(await readdir(join(fixture.projectDir, ".pi")), ["settings.json"]);
+  } finally {
+    setCompactionSettingsFileOperationsForTesting(null);
+    await fixture.dispose();
+  }
+});
+
+test("compaction settings restore the authoritative file when the replacement rename also fails", async () => {
+  const fixture = await createFixture();
+  try {
+    const settingsPath = resolveProjectSettingsPath(fixture.projectDir);
+    const original = `${JSON.stringify({ theme: "night", compaction: { enabled: false } }, null, 2)}\n`;
+    await mkdir(join(fixture.projectDir, ".pi"), { recursive: true });
+    await writeFile(settingsPath, original, "utf8");
+    let renameCalls = 0;
+    const restore = setCompactionSettingsFileOperationsForTesting({
+      async rename(source, destination) {
+        renameCalls += 1;
+        if (renameCalls === 1) throw renameFailure("initial rename failed");
+        if (renameCalls === 3) throw renameFailure("replacement rename failed");
+        await rename(source, destination);
+      },
+    });
+    try {
+      await assert.rejects(
+        saveCompactionPatch("project", fixture.projectDir, { enabled: true }),
+        /replacement rename failed/,
+      );
+    } finally {
+      restore();
+    }
+
+    assert.equal(renameCalls, 4, "the fourth rename restores the preserved settings");
+    assert.equal(await readFile(settingsPath, "utf8"), original);
+    assert.deepEqual(await readdir(join(fixture.projectDir, ".pi")), ["settings.json"]);
+  } finally {
+    setCompactionSettingsFileOperationsForTesting(null);
+    await fixture.dispose();
+  }
+});
+
+test("compaction settings recover an interrupted backup before the next read", async () => {
+  const fixture = await createFixture();
+  try {
+    const settingsPath = resolveProjectSettingsPath(fixture.projectDir);
+    const backupPath = `${settingsPath}.backup`;
+    await writeSettings(join(fixture.projectDir, ".pi"), {
+      theme: "night",
+      compaction: { enabled: false },
+    });
+    await rename(settingsPath, backupPath);
+
+    await saveCompactionPatch("project", fixture.projectDir, { reserveTokens: 9_000 });
+
+    assert.deepEqual(await readJson(settingsPath), {
+      theme: "night",
+      compaction: {
+        enabled: false,
+        reserveTokens: 9_000,
+        hard: { reserveTokens: 9_000 },
+      },
+    });
+    assert.deepEqual(await readdir(join(fixture.projectDir, ".pi")), ["settings.json"]);
   } finally {
     await fixture.dispose();
   }
@@ -577,6 +673,10 @@ async function createFixture() {
       await rm(root, { recursive: true, force: true });
     },
   };
+}
+
+function renameFailure(message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code: "EPERM" });
 }
 
 async function writeSettings(directory: string, value: unknown): Promise<void> {

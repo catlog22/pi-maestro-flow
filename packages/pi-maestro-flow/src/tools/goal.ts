@@ -24,7 +24,11 @@ import {
   type AgentStopReason,
   type AssistantMessageLike,
 } from "./goal-verification.ts";
-import { detachTasksFromGoal, getVisibleTasks } from "./todo.ts";
+import {
+  detachTasksFromGoal,
+  getVisibleTasks,
+  persistLoadedTodoStateForGoalDetachRecovery,
+} from "./todo.ts";
 
 export {
   buildCanonicalEvidence,
@@ -133,7 +137,9 @@ const MAX_LOW_PROGRESS_CONTINUATIONS = 3;
 // ---------------------------------------------------------------------------
 
 let activeGoal: ActiveGoal | undefined;
+let stagedActiveGoal: ActiveGoal | undefined;
 let goalRegistry: ActiveGoal[] = [];
+let pendingTodoDetachGoalIds: string[] = [];
 let extensionApi: ExtensionAPI | undefined;
 let onGoalStateChanged: (() => void) | undefined;
 let goalPanelOwnedExternally = false;
@@ -166,8 +172,8 @@ configureGoalVerification({
   get baseCwd() { return baseCwd; },
   get extensionApi() { return extensionApi; },
   get goalLifecycleEpoch() { return goalLifecycleEpoch; },
-  get activeGoal() { return activeGoal; },
-  set activeGoal(value) { activeGoal = value; },
+  get activeGoal() { return stagedActiveGoal ?? activeGoal; },
+  set activeGoal(value) { stagedActiveGoal = value; },
   get verificationInFlight() { return verificationInFlight; },
   set verificationInFlight(value) { verificationInFlight = value; },
   getWorkflowSnapshot() { return workflowCoordinator?.status(); },
@@ -337,18 +343,18 @@ export function reconcileWorkflowGoal(snapshot: WorkflowSnapshot, ctx: GoalConte
   if (snapshot.canonicalClaim?.status === "invalid") {
     if (activeGoal?.workflowSessionId && activeGoal.status === "active") {
       fenceGoalLifecycle();
-      activeGoal = pauseGoal(activeGoal, "gate");
-      persistGoal(activeGoal);
-      updateStatusLine(ctx, activeGoal);
+      const paused = pauseGoal(activeGoal, "gate");
+      persistGoal(paused);
+      updateStatusLine(ctx, paused);
     }
     return activeGoal;
   }
   if (!session) {
     if (activeGoal?.workflowSessionId && activeGoal.status === "active") {
       fenceGoalLifecycle();
-      activeGoal = pauseGoal(activeGoal, "gate");
-      persistGoal(activeGoal);
-      updateStatusLine(ctx, activeGoal);
+      const paused = pauseGoal(activeGoal, "gate");
+      persistGoal(paused);
+      updateStatusLine(ctx, paused);
     }
     return activeGoal;
   }
@@ -359,32 +365,32 @@ export function reconcileWorkflowGoal(snapshot: WorkflowSnapshot, ctx: GoalConte
     || currentGoal.workflowSessionGeneration !== snapshot.sessionGeneration
   )) {
     fenceGoalLifecycle();
-    activeGoal = pauseGoal(currentGoal, "gate");
-    persistGoal(activeGoal);
+    const paused = pauseGoal(currentGoal, "gate");
+    persistGoal(paused);
     if (session.status === "sealed" || session.status === "archived") {
-      updateStatusLine(ctx, activeGoal);
-      return activeGoal;
+      updateStatusLine(ctx, paused);
+      return paused;
     }
-    activeGoal = createWorkflowGoal(session, ctx, snapshot.sessionGeneration);
-    persistGoal(activeGoal);
-    updateStatusLine(ctx, activeGoal);
-    return activeGoal;
+    const replacement = createWorkflowGoal(session, ctx, snapshot.sessionGeneration);
+    persistGoal(replacement);
+    updateStatusLine(ctx, replacement);
+    return replacement;
   }
 
   if (session.status === "sealed" || session.status === "archived") return activeGoal;
   const failedGate = [...session.gates, ...session.runs.flatMap((run) => run.gates)]
     .some((gate) => gate.blocking && ["failed", "blocked"].includes(gate.status));
   if (!activeGoal) {
-    activeGoal = createWorkflowGoal(session, ctx, snapshot.sessionGeneration, failedGate);
-    persistGoal(activeGoal);
-    updateStatusLine(ctx, activeGoal);
-    return activeGoal;
+    const created = createWorkflowGoal(session, ctx, snapshot.sessionGeneration, failedGate);
+    persistGoal(created);
+    updateStatusLine(ctx, created);
+    return created;
   }
   if (activeGoal.workflowSessionId === session.sessionId && failedGate && activeGoal.status === "active") {
     cancelContinuation();
-    activeGoal = pauseGoal(activeGoal, "gate");
-    persistGoal(activeGoal);
-    updateStatusLine(ctx, activeGoal);
+    const paused = pauseGoal(activeGoal, "gate");
+    persistGoal(paused);
+    updateStatusLine(ctx, paused);
   }
   return activeGoal;
 }
@@ -406,9 +412,12 @@ export async function onSessionStart(
   goalSessionId = currentSessionId(ctx);
   if (event.reason === "new" || event.reason === "fork") {
     goalRegistry = [];
+    pendingTodoDetachGoalIds = [];
     activeGoal = undefined;
+    stagedActiveGoal = undefined;
   } else {
     activeGoal = loadGoalFromSession(ctx, goalSessionId);
+    stagedActiveGoal = undefined;
   }
   if (!activeGoal) {
     clearGoalDisplay(ctx);
@@ -419,11 +428,17 @@ export async function onSessionStart(
   if (event.reason === "resume") await handleResume(undefined, ctx);
 }
 
+/** Complete pending Goal-to-Todo cleanup only after Todo restored its durable session state. */
+export function recoverPendingGoalTodoDetachesAfterTodoStart(ctx: GoalContext): number {
+  return recoverPendingGoalTodoDetaches(ctx, true);
+}
+
 export function onSessionShutdown(ctx: GoalContext) {
   goalLifecycleEpoch++;
   verificationInFlight = undefined;
   if (activeGoal) persistGoal(activeGoal);
   activeGoal = undefined;
+  stagedActiveGoal = undefined;
   goalLoopOwner = undefined;
   latestGoalAttempt = undefined;
   goalSessionId = undefined;
@@ -437,10 +452,11 @@ export function onSessionShutdown(ctx: GoalContext) {
 
 export function onBeforeCompact(ctx: GoalContext) {
   if (!activeGoal || activeGoal.status !== "active") return;
-  updateUsage(activeGoal, ctx);
+  const compactingGoal = { ...activeGoal };
+  updateUsage(compactingGoal, ctx);
   suspendedContinuation = continuationPending ? { ...continuationPending } : undefined;
-  persistGoal(activeGoal);
-  updateStatusLine(ctx, activeGoal);
+  persistGoal(compactingGoal);
+  updateStatusLine(ctx, compactingGoal);
 }
 
 export function onCompactionCancelled(ctx?: GoalContext) {
@@ -464,10 +480,10 @@ export async function onCompact(event: unknown, ctx: GoalContext) {
     return;
   }
   const restored = loadGoalFromSession(ctx, goalSessionId);
-  if (restored?.id === activeGoal.id) activeGoal = restored;
-  updateUsage(activeGoal, ctx);
-  persistGoal(activeGoal);
-  updateStatusLine(ctx, activeGoal);
+  const compactedGoal = restored?.id === activeGoal.id ? { ...restored } : { ...activeGoal };
+  updateUsage(compactedGoal, ctx);
+  persistGoal(compactedGoal);
+  updateStatusLine(ctx, compactedGoal);
 
   const wasPiRetry = isPiRetry(event, activeGoal.id);
   const attemptAwaitingSettlement = hasUnsettledAttempt(activeGoal.id);
@@ -483,9 +499,9 @@ export async function onCompact(event: unknown, ctx: GoalContext) {
     try {
       await coordinator.brief();
     } catch (error) {
-      activeGoal = pauseGoal(activeGoal, "gate");
-      persistGoal(activeGoal);
-      updateStatusLine(ctx, activeGoal);
+      const paused = pauseGoal(activeGoal, "gate");
+      persistGoal(paused);
+      updateStatusLine(ctx, paused);
       ctx.ui.notify(`Goal paused because active Run brief recovery failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
       return;
     }
@@ -582,21 +598,21 @@ export async function onAgentSettled(ctx: GoalContext) {
 
   clearRecoveryFor(goalId);
   const hadPending = continuationPending?.goalId === goalId;
-  if (!hadPending) activeGoal = increment(activeGoal);
-  updateUsage(activeGoal, ctx);
+  const settledGoal = hadPending ? { ...activeGoal } : increment(activeGoal);
+  updateUsage(settledGoal, ctx);
 
-  if (activeGoal.tokenBudget !== undefined && activeGoal.tokensUsed >= activeGoal.tokenBudget) {
+  if (settledGoal.tokenBudget !== undefined && settledGoal.tokensUsed >= settledGoal.tokenBudget) {
     goalLoopOwner = undefined;
     cancelContinuation();
-    activeGoal = pauseGoal(activeGoal, "budget");
-    persistGoal(activeGoal);
-    updateStatusLine(ctx, activeGoal);
-    ctx.ui.notify(`Goal token budget reached: ${fmtBudget(activeGoal)}`, "warning");
+    const paused = pauseGoal(settledGoal, "budget");
+    persistGoal(paused);
+    updateStatusLine(ctx, paused);
+    ctx.ui.notify(`Goal token budget reached: ${fmtBudget(paused)}`, "warning");
     return;
   }
 
-  persistGoal(activeGoal);
-  updateStatusLine(ctx, activeGoal);
+  persistGoal(settledGoal);
+  updateStatusLine(ctx, settledGoal);
 
   if (hadPending) {
     if (hasPending(ctx)) return;
@@ -613,16 +629,16 @@ export async function onAgentSettled(ctx: GoalContext) {
   if (lowProgressCount >= MAX_LOW_PROGRESS_CONTINUATIONS) {
     goalLoopOwner = undefined;
     cancelContinuation();
-    activeGoal = pauseGoal(activeGoal, "stalled");
-    persistGoal(activeGoal);
-    updateStatusLine(ctx, activeGoal);
+    const paused = pauseGoal(activeGoal, "stalled");
+    persistGoal(paused);
+    updateStatusLine(ctx, paused);
     ctx.ui.notify(`Goal paused: ${MAX_LOW_PROGRESS_CONTINUATIONS} consecutive continuations with minimal progress (<${LOW_PROGRESS_TOKEN_DELTA} tokens each). Use /goal resume to retry.`, "warning");
     return;
   }
-  activeGoal = { ...activeGoal, prevTokensUsed: activeGoal.tokensUsed, lowProgressCount };
-  persistGoal(activeGoal);
+  const continuationGoal = { ...activeGoal, prevTokensUsed: activeGoal.tokensUsed, lowProgressCount };
+  persistGoal(continuationGoal);
 
-  await sendContinuation(ctx, activeGoal);
+  await sendContinuation(ctx, continuationGoal);
 }
 
 export function getActiveGoal(): ActiveGoal | undefined {
@@ -634,7 +650,6 @@ export function getCurrentGoal(): ActiveGoal | undefined {
 }
 
 export function getGoalList(): ActiveGoal[] {
-  if (activeGoal) upsertGoalRegistry(activeGoal);
   return [...goalRegistry]
     .sort((a, b) => a.startedAt - b.startedAt)
     .map((goal) => ({ ...goal }));
@@ -651,15 +666,14 @@ export function switchCurrentGoal(
   ctx?: GoalContext,
   opts: { resume?: boolean } = {},
 ): ActiveGoal | undefined {
-  if (activeGoal) upsertGoalRegistry(activeGoal);
   const target = goalRegistry.find((goal) => goal.id === goalId);
   if (!target) return undefined;
-  activeGoal = opts.resume && target.status === "paused"
-    ? { ...target, status: "active", pauseReason: undefined, verificationFailures: 0, infraErrorStreak: 0, updatedAt: Date.now() }
+  const nextGoal = opts.resume && target.status === "paused"
+    ? { ...target, status: "active" as const, pauseReason: undefined, verificationFailures: 0, infraErrorStreak: 0, updatedAt: Date.now() }
     : target;
-  persistGoal(activeGoal);
-  if (ctx) updateStatusLine(ctx, activeGoal);
-  return { ...activeGoal };
+  persistGoal(nextGoal);
+  if (ctx) updateStatusLine(ctx, nextGoal);
+  return { ...nextGoal };
 }
 
 export function addGoal(
@@ -668,10 +682,8 @@ export function addGoal(
   opts: { tokenBudget?: number; planHandoffKey?: string; acceptance?: string[] } = {},
 ): ActiveGoal {
   const goal = createGoal(objective, opts.tokenBudget, currentTokenTotal(ctx) ?? 0, opts.planHandoffKey, normalizeAcceptance(opts.acceptance));
-  upsertGoalRegistry(goal);
-  activeGoal = goal;
-  persistGoal(activeGoal);
-  updateStatusLine(ctx, activeGoal);
+  persistGoal(goal);
+  updateStatusLine(ctx, goal);
   return { ...goal };
 }
 
@@ -699,16 +711,16 @@ async function handleCreate(
     };
   }
 
+  const goal = createGoal(objective, tokenBudget, currentTokenTotal(ctx) ?? 0, planHandoffKey, normalizeAcceptance(acceptance));
+  persistGoal(goal);
   cancelContinuation();
   clearRecovery();
-  activeGoal = createGoal(objective, tokenBudget, currentTokenTotal(ctx) ?? 0, planHandoffKey, normalizeAcceptance(acceptance));
-  if (ctx.isIdle?.() !== true) armGoalLoop(activeGoal);
-  persistGoal(activeGoal);
-  updateStatusLine(ctx, activeGoal);
+  if (ctx.isIdle?.() !== true) armGoalLoop(goal);
+  updateStatusLine(ctx, goal);
   ctx.ui.notify(`Goal started: ${objective}`, "info");
-  await sendGoalPrompt(ctx, activeGoal);
-  updateStatusLine(ctx, activeGoal);
-  return { text: `Goal started (id: ${activeGoal.id}): ${objective}`, isError: false };
+  await sendGoalPrompt(ctx, goal);
+  updateStatusLine(ctx, goal);
+  return { text: `Goal started (id: ${goal.id}): ${objective}`, isError: false };
 }
 
 async function handleUpdate(
@@ -720,15 +732,13 @@ async function handleUpdate(
   const err = validateObjective(objective);
   if (err) return { text: err, isError: true };
 
-  updateUsage(activeGoal, ctx);
-  activeGoal = {
-    ...activeGoal,
-    text: objective.trim(),
-    updatedAt: Date.now(),
-    ...(acceptance !== undefined ? { acceptance: normalizeAcceptance(acceptance) } : {}),
-  };
-  persistGoal(activeGoal);
-  updateStatusLine(ctx, activeGoal);
+  const nextGoal = { ...activeGoal };
+  updateUsage(nextGoal, ctx);
+  nextGoal.text = objective.trim();
+  nextGoal.updatedAt = Date.now();
+  if (acceptance !== undefined) nextGoal.acceptance = normalizeAcceptance(acceptance);
+  persistGoal(nextGoal);
+  updateStatusLine(ctx, nextGoal);
 
   const resumed = await handleResume(undefined, ctx);
   if (resumed.isError) {
@@ -742,17 +752,18 @@ async function handleStop(ctx: GoalContext): Promise<{ text: string; isError: bo
   if (activeGoal.status === "paused") return { text: `Goal is already stopped: ${activeGoal.text}`, isError: false };
   if (activeGoal.status !== "active") return { text: `Goal is ${activeGoal.status}.`, isError: true };
 
-  updateUsage(activeGoal, ctx);
+  const stoppedGoal = { ...activeGoal };
+  updateUsage(stoppedGoal, ctx);
   goalLoopOwner = undefined;
   latestGoalAttempt = undefined;
   cancelContinuation();
   await fenceWorkflowContinuation();
-  activeGoal = pauseGoal(activeGoal, "user");
-  persistGoal(activeGoal);
-  updateStatusLine(ctx, activeGoal);
-  ctx.ui.notify(`Goal stopped by user: ${activeGoal.text}`, "info");
+  const paused = pauseGoal(stoppedGoal, "user");
+  persistGoal(paused);
+  updateStatusLine(ctx, paused);
+  ctx.ui.notify(`Goal stopped by user: ${paused.text}`, "info");
   abortTurn(ctx);
-  return { text: `Goal stopped: ${activeGoal.text}`, isError: false };
+  return { text: `Goal stopped: ${paused.text}`, isError: false };
 }
 
 async function handleClear(ctx: GoalContext): Promise<{ text: string; isError: boolean }> {
@@ -760,7 +771,9 @@ async function handleClear(ctx: GoalContext): Promise<{ text: string; isError: b
   if (!activeGoal) {
     cancelContinuation();
     clearRecovery();
-    clearPersistedGoal();
+    const hadPendingDetaches = pendingTodoDetachGoalIds.length > 0;
+    recoverPendingGoalTodoDetaches(ctx);
+    if (!hadPendingDetaches) clearPersistedGoal();
     clearGoalDisplay(ctx);
     return { text: "No active goal.", isError: false };
   }
@@ -790,38 +803,40 @@ async function handleResume(
   }
   if (activeGoal.status !== "paused") return { text: `Goal is ${activeGoal.status}.`, isError: true };
 
-  updateUsage(activeGoal, ctx);
+  const resumedGoal = { ...activeGoal };
+  updateUsage(resumedGoal, ctx);
   if (budget) {
     const tokenBudget = parseTokenBudget(budget);
     if (tokenBudget === undefined) return { text: `Invalid token budget: ${budget}`, isError: true };
-    activeGoal = { ...activeGoal, tokenBudget, updatedAt: Date.now() };
+    resumedGoal.tokenBudget = tokenBudget;
+    resumedGoal.updatedAt = Date.now();
   }
 
-  if (activeGoal.tokenBudget !== undefined && activeGoal.tokensUsed >= activeGoal.tokenBudget) {
-    persistGoal(activeGoal);
-    updateStatusLine(ctx, activeGoal);
-    ctx.ui.notify(`Token budget still reached: ${fmtBudget(activeGoal)}`, "warning");
-    return { text: `Token budget still reached: ${fmtBudget(activeGoal)}`, isError: true };
+  if (resumedGoal.tokenBudget !== undefined && resumedGoal.tokensUsed >= resumedGoal.tokenBudget) {
+    persistGoal(resumedGoal);
+    updateStatusLine(ctx, resumedGoal);
+    ctx.ui.notify(`Token budget still reached: ${fmtBudget(resumedGoal)}`, "warning");
+    return { text: `Token budget still reached: ${fmtBudget(resumedGoal)}`, isError: true };
   }
 
   clearRecovery();
-  activeGoal = {
-    ...activeGoal,
-    status: "active",
+  const activated = {
+    ...resumedGoal,
+    status: "active" as const,
     pauseReason: undefined,
     verificationFailures: 0,
     infraErrorStreak: 0,
     lowProgressCount: 0,
-    prevTokensUsed: activeGoal.tokensUsed,
+    prevTokensUsed: resumedGoal.tokensUsed,
     updatedAt: Date.now(),
   };
-  persistGoal(activeGoal);
-  updateStatusLine(ctx, activeGoal);
-  ctx.ui.notify(`Goal resumed: ${activeGoal.text}`, "info");
-  const sent = await sendResumePrompt(ctx, activeGoal);
-  if (!sent && ctx.isIdle?.() !== true) armGoalLoop(activeGoal);
-  updateStatusLine(ctx, activeGoal);
-  return { text: `Goal resumed: ${activeGoal.text}`, isError: false };
+  persistGoal(activated);
+  updateStatusLine(ctx, activated);
+  ctx.ui.notify(`Goal resumed: ${activated.text}`, "info");
+  const sent = await sendResumePrompt(ctx, activated);
+  if (!sent && ctx.isIdle?.() !== true) armGoalLoop(activated);
+  updateStatusLine(ctx, activated);
+  return { text: `Goal resumed: ${activated.text}`, isError: false };
 }
 
 function showStatus(ctx: GoalContext): { text: string; isError: boolean } {
@@ -829,10 +844,11 @@ function showStatus(ctx: GoalContext): { text: string; isError: boolean } {
     clearGoalDisplay(ctx);
     return { text: "No goal set.", isError: false };
   }
-  updateUsage(activeGoal, ctx);
-  persistGoal(activeGoal);
-  updateStatusLine(ctx, activeGoal);
-  return { text: goalSummary(activeGoal), isError: false };
+  const refreshed = { ...activeGoal };
+  updateUsage(refreshed, ctx);
+  persistGoal(refreshed);
+  updateStatusLine(ctx, refreshed);
+  return { text: goalSummary(refreshed), isError: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -961,24 +977,24 @@ function updateUsage(goal: ActiveGoal, ctx: GoalContext) {
 function clearActive(ctx: GoalContext, keepInRegistry = false) {
   cancelContinuation();
   clearRecovery();
-  if (activeGoal && !keepInRegistry) {
-    removeFromGoalRegistry(activeGoal.id);
-    // The Goal is gone for good, so the Todo completion gate would reject every task still
-    // bound to it ("was not found; cannot verify completion") with no automatic way back.
-    // Completion takes the keepInRegistry branch instead, so bindings survive there.
-    const detached = detachTasksFromGoal(activeGoal.id);
+  const clearedGoal = activeGoal;
+  if (clearedGoal && !keepInRegistry) {
+    const nextRegistry = goalRegistry.filter((entry) => entry.id !== clearedGoal.id);
+    const nextPending = [...new Set([...pendingTodoDetachGoalIds, clearedGoal.id])];
+    persistGoalSelection(undefined, nextRegistry, nextPending);
+    const detached = recoverPendingGoalTodoDetaches(ctx);
     if (detached > 0) {
       ctx.ui.notify(
         `Goal cleared; unbound ${detached} task${detached === 1 ? "" : "s"} from its quality gate.`,
         "info",
       );
     }
+  } else {
+    persistGoalSelection(undefined, goalRegistry, pendingTodoDetachGoalIds);
   }
-  activeGoal = undefined;
   goalLoopOwner = undefined;
   latestGoalAttempt = undefined;
   clearElapsedTimer();
-  clearPersistedGoal();
   clearGoalDisplay(ctx);
 }
 
@@ -986,29 +1002,67 @@ function clearActive(ctx: GoalContext, keepInRegistry = false) {
 // Persistence
 // ---------------------------------------------------------------------------
 
-function upsertGoalRegistry(goal: ActiveGoal): void {
-  const index = goalRegistry.findIndex((entry) => entry.id === goal.id);
-  if (index >= 0) goalRegistry[index] = goal;
-  else goalRegistry.push(goal);
+function registryWithGoal(goal: ActiveGoal): ActiveGoal[] {
+  const next = [...goalRegistry];
+  const index = next.findIndex((entry) => entry.id === goal.id);
+  if (index >= 0) next[index] = goal;
+  else next.push(goal);
+  return next;
 }
 
-function removeFromGoalRegistry(id: string): void {
-  goalRegistry = goalRegistry.filter((entry) => entry.id !== id);
-}
-
-function persistGoal(goal: ActiveGoal) {
-  upsertGoalRegistry(goal);
-  extensionApi?.appendEntry?.(GOAL_STATE_ENTRY_TYPE, {
-    version: GOAL_STATE_VERSION, sessionId: goalSessionId, goal, goals: goalRegistry, currentGoalId: goal.id,
-  });
+function persistGoal(goal: ActiveGoal): void {
+  const nextRegistry = registryWithGoal(goal);
+  try {
+    appendGoalState(goal, nextRegistry, pendingTodoDetachGoalIds);
+  } catch (error) {
+    if (stagedActiveGoal === goal) stagedActiveGoal = undefined;
+    throw error;
+  }
+  goalRegistry = nextRegistry;
+  activeGoal = goal;
+  stagedActiveGoal = undefined;
   onGoalStateChanged?.();
 }
 
-function clearPersistedGoal() {
-  extensionApi?.appendEntry?.(GOAL_STATE_ENTRY_TYPE, {
-    version: GOAL_STATE_VERSION, sessionId: goalSessionId, goal: null, goals: goalRegistry, currentGoalId: undefined,
-  });
+function clearPersistedGoal(): void {
+  persistGoalSelection(undefined, goalRegistry, pendingTodoDetachGoalIds);
+}
+
+function persistGoalSelection(
+  currentGoal: ActiveGoal | undefined,
+  nextRegistry: ActiveGoal[],
+  nextPendingTodoDetachGoalIds: string[],
+): void {
+  appendGoalState(currentGoal, nextRegistry, nextPendingTodoDetachGoalIds);
+  goalRegistry = nextRegistry;
+  activeGoal = currentGoal;
+  stagedActiveGoal = undefined;
+  pendingTodoDetachGoalIds = nextPendingTodoDetachGoalIds;
   onGoalStateChanged?.();
+}
+
+function appendGoalState(
+  currentGoal: ActiveGoal | undefined,
+  goals: ActiveGoal[],
+  pendingDetaches: string[],
+): void {
+  extensionApi?.appendEntry?.(GOAL_STATE_ENTRY_TYPE, {
+    version: GOAL_STATE_VERSION,
+    sessionId: goalSessionId,
+    goal: currentGoal ?? null,
+    goals,
+    currentGoalId: currentGoal?.id,
+    ...(pendingDetaches.length > 0 ? { pendingTodoDetachGoalIds: pendingDetaches } : {}),
+  });
+}
+
+function recoverPendingGoalTodoDetaches(ctx: GoalContext, todoStateJustLoaded = false): number {
+  if (pendingTodoDetachGoalIds.length === 0) return 0;
+  let detached = 0;
+  for (const goalId of pendingTodoDetachGoalIds) detached += detachTasksFromGoal(goalId);
+  if (detached === 0 && todoStateJustLoaded) persistLoadedTodoStateForGoalDetachRecovery();
+  persistGoalSelection(activeGoal, goalRegistry, []);
+  return detached;
 }
 
 /** Bind the root UI/UCL to durable Goal state changes. */
@@ -1028,11 +1082,16 @@ function loadGoalFromSession(ctx: GoalContext, sessionId: string | undefined): A
     goal?: ActiveGoal | null;
     goals?: unknown;
     currentGoalId?: string;
+    pendingTodoDetachGoalIds?: unknown;
   } | undefined;
   if (data?.sessionId && sessionId && data.sessionId !== sessionId) {
     goalRegistry = [];
+    pendingTodoDetachGoalIds = [];
     return undefined;
   }
+  pendingTodoDetachGoalIds = Array.isArray(data?.pendingTodoDetachGoalIds)
+    ? data.pendingTodoDetachGoalIds.filter((id): id is string => typeof id === "string" && id.length > 0)
+    : [];
   if (Array.isArray(data?.goals)) {
     goalRegistry = data.goals.filter(isGoal).map(normalizeLoadedGoal);
     const current = goalRegistry.find((goal) => goal.id === data.currentGoalId);
@@ -1158,9 +1217,9 @@ async function sendContinuation(ctx: GoalContext, goal: ActiveGoal) {
       marker = coordinator.continuationMarker(goal.iteration);
       genericMarker = false;
     } catch (error) {
-      activeGoal = pauseGoal(goal, "gate");
-      persistGoal(activeGoal);
-      updateStatusLine(ctx, activeGoal);
+      const paused = pauseGoal(goal, "gate");
+      persistGoal(paused);
+      updateStatusLine(ctx, paused);
       ctx.ui.notify(`Goal paused by Workflow Coordinator: ${error instanceof Error ? error.message : String(error)}`, "warning");
       return false;
     }
@@ -1169,9 +1228,9 @@ async function sendContinuation(ctx: GoalContext, goal: ActiveGoal) {
   continuationPending = { goalId: goal.id, iteration: goal.iteration, marker };
   if (!genericMarker && (!workflowCoordinator || !workflowCoordinator.acceptsContinuation(marker))) {
     if (continuationPending?.marker === marker) continuationPending = undefined;
-    activeGoal = pauseGoal(goal, "gate");
-    persistGoal(activeGoal);
-    updateStatusLine(ctx, activeGoal);
+    const paused = pauseGoal(goal, "gate");
+    persistGoal(paused);
+    updateStatusLine(ctx, paused);
     ctx.ui.notify("Goal continuation was fenced by the Workflow Coordinator.", "warning");
     return false;
   }
@@ -1181,9 +1240,9 @@ async function sendContinuation(ctx: GoalContext, goal: ActiveGoal) {
     disarmGoalLoop(goal.id);
     issuedGoalMarkers.delete(marker);
     if (continuationPending?.marker === marker) continuationPending = undefined;
-    activeGoal = pauseGoal(goal);
-    persistGoal(activeGoal);
-    updateStatusLine(ctx, activeGoal);
+    const paused = pauseGoal(goal);
+    persistGoal(paused);
+    updateStatusLine(ctx, paused);
   }
   if (activeGoal?.id === goal.id && activeGoal.status === "active") updateStatusLine(ctx, activeGoal);
   return sent;
@@ -1271,9 +1330,9 @@ function pauseAfterEnd(ctx: GoalContext, goal: ActiveGoal, assistant: AssistantM
   latestGoalAttempt = undefined;
   cancelContinuation();
   abortTurn(ctx);
-  activeGoal = pauseGoal(goal);
-  persistGoal(activeGoal);
-  updateStatusLine(ctx, activeGoal);
+  const paused = pauseGoal(goal);
+  persistGoal(paused);
+  updateStatusLine(ctx, paused);
   const reason = assistant.stopReason === "aborted" ? "interruption" : "agent error";
   const details = assistant.errorMessage ? ` (${assistant.errorMessage.slice(0, 157)})` : "";
   ctx.ui.notify(`Goal paused after ${reason}${details}. Use /goal resume to continue.`, "warning");

@@ -1008,8 +1008,14 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       return guarded;
     },
     async onAgentEnd(ctx) {
+      const generation = state.generation;
+      const sessionId = sessionIdOf(ctx);
+      const isCurrentLifecycle = () => generation === state.generation
+        && (sessionId === undefined || state.sessionId === undefined || sessionId === state.sessionId);
+      if (!isCurrentLifecycle()) return;
       state.turnCount += 1;
       const outputLimitPending = await settlePendingOutputLimit(ctx);
+      if (!isCurrentLifecycle()) return;
       if (!state.running && !outputLimitPending) {
         const pending = state.pendingIntent;
         const needsContinuation = pending?.contextExhausted || Boolean(ctx.hasPendingMessages?.());
@@ -1037,6 +1043,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           await settlePendingCompaction(ctx);
         }
       }
+      if (!isCurrentLifecycle()) return;
       if (!state.running && !state.pendingIntent && !state.pendingOutputLimitIntent) {
         state.settingsSnapshot = undefined;
         publishIdleStatus(ctx, settingsFor(ctx).enabled);
@@ -1044,6 +1051,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       }
     },
     async onOutputLimit(messages, ctx) {
+      const generation = state.generation;
       const settings = settingsFor(ctx);
       const finalStopReason = finalAssistantStopReason(messages);
       if (!settings.enabled || !ctx.model || finalStopReason !== "length") {
@@ -1057,6 +1065,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       try {
         linkedGate = await linkedThresholdFor(ctx, settings);
       } catch (error) {
+        if (generation !== state.generation) return;
         state.pendingOutputLimitIntent = undefined;
         ctx.ui.notify(
           `Output-limit compaction threshold resolution failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -1064,6 +1073,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         );
         return;
       }
+      if (generation !== state.generation) return;
       const gateTokens = linkedGate.usable
         ? linkedGate.soft?.pruneTokens
           ?? Math.floor(linkedGate.contextWindow * DEFAULT_OUTPUT_LIMIT_RATIO)
@@ -1096,7 +1106,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         return;
       }
       state.pendingOutputLimitIntent = {
-        generation: state.generation,
+        generation,
         settings,
         usage: { ...usage },
         threshold,

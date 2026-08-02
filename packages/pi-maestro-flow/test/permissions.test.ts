@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createPermissionController } from "../src/permissions/controller.ts";
 import { evaluatePermission, matchesPermissionRule, suggestedAllowRule } from "../src/permissions/policy.ts";
@@ -434,6 +437,82 @@ test("concurrent permission mutations preserve every update and clean up private
     if (process.platform !== "win32") {
       assert.equal((await stat(settingsPath)).mode & 0o777, 0o600);
     }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("plan-model and permissions preserve both sections across concurrent processes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-shared-settings-process-lock-"));
+  const settingsDirectory = join(root, ".pi");
+  const settingsPath = join(settingsDirectory, "settings.local.json");
+  const workerPath = join(root, "settings-worker.mjs");
+  const planModulePath = fileURLToPath(new URL("../src/tools/plan-model.ts", import.meta.url));
+  const permissionModulePath = fileURLToPath(new URL("../src/permissions/settings.ts", import.meta.url));
+  await mkdir(settingsDirectory, { recursive: true });
+  await writeFile(settingsPath, JSON.stringify({ marker: "preserve" }));
+  await writeFile(workerPath, [
+    'import { existsSync, writeFileSync } from "node:fs";',
+    'import { join } from "node:path";',
+    'import { pathToFileURL } from "node:url";',
+    'const [role, cwd, planModulePath, permissionModulePath, barrierDirectory] = process.argv.slice(2);',
+    'const modulePath = role === "plan" ? planModulePath : permissionModulePath;',
+    'const settings = await import(pathToFileURL(modulePath).href);',
+    'writeFileSync(join(barrierDirectory, `ready-${role}`), "");',
+    'while (!existsSync(join(barrierDirectory, "go"))) await new Promise((resolve) => setTimeout(resolve, 5));',
+    'if (role === "plan") {',
+    '  for (let index = 0; index < 40; index += 1) settings.saveLocalPlanModelSetting(cwd, `provider/plan-${index}`);',
+    '} else {',
+    '  const filePath = join(cwd, ".pi", "settings.local.json");',
+    '  for (let index = 0; index < 40; index += 1) await settings.addPermissionRule(filePath, "allow", `Bash(command-${index})`);',
+    '}',
+  ].join("\n"));
+
+  const startWorker = (role: "plan" | "permissions") => {
+    const child = spawn(process.execPath, [
+      "--experimental-transform-types",
+      workerPath,
+      role,
+      root,
+      planModulePath,
+      permissionModulePath,
+      root,
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    child.stdout.on("data", (chunk) => { output += String(chunk); });
+    child.stderr.on("data", (chunk) => { output += String(chunk); });
+    return new Promise<void>((resolveChild, rejectChild) => {
+      child.on("error", rejectChild);
+      child.on("close", (code) => code === 0
+        ? resolveChild()
+        : rejectChild(new Error(`${role} worker exited ${code}: ${output}`)));
+    });
+  };
+
+  try {
+    const planWorker = startWorker("plan");
+    const permissionsWorker = startWorker("permissions");
+    const deadline = Date.now() + 10_000;
+    while ((!existsSync(join(root, "ready-plan")) || !existsSync(join(root, "ready-permissions"))) && Date.now() < deadline) {
+      await new Promise((resolveReady) => setTimeout(resolveReady, 10));
+    }
+    const planReady = existsSync(join(root, "ready-plan"));
+    const permissionsReady = existsSync(join(root, "ready-permissions"));
+    await writeFile(join(root, "go"), "");
+    assert.ok(planReady, "plan worker did not reach the mutation barrier");
+    assert.ok(permissionsReady, "permissions worker did not reach the mutation barrier");
+    await Promise.all([planWorker, permissionsWorker]);
+
+    const persisted = JSON.parse(await readFile(settingsPath, "utf8"));
+    assert.equal(persisted.marker, "preserve");
+    assert.equal(persisted.plan.model, "provider/plan-39");
+    assert.deepEqual(
+      persisted.permissions.allow,
+      Array.from({ length: 40 }, (_, index) => `Bash(command-${index})`),
+    );
+    const residue = (await readdir(settingsDirectory)).filter((entry) => entry.endsWith(".tmp") || entry.endsWith(".lock"));
+    assert.deepEqual(residue, []);
+    if (process.platform !== "win32") assert.equal((await stat(settingsPath)).mode & 0o777, 0o600);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

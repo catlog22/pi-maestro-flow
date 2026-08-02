@@ -29,7 +29,7 @@ import {
   type CompactionConfigPatch,
   type SoftCompactionConfigPatch,
 } from "../compaction/compaction-settings.ts";
-import { lockSettingsResource } from "./resource-lock.ts";
+import { lockSettingsResource, lockSettingsResourceSync } from "./resource-lock.ts";
 import {
   getGlobalModelFailoverPath,
   getProjectModelFailoverPath,
@@ -53,6 +53,11 @@ export interface FlowSettingsProvider extends SettingsProviderV1 {
   readonly instanceId: string;
 }
 
+export interface FlowSettingsReplacementOperations {
+  platform: NodeJS.Platform;
+  renameSync(source: string, destination: string): void;
+}
+
 export interface FlowSettingsProviderOptions {
   getGlobalSettingsPath?: () => string;
   getProjectSettingsPath?: (cwd: string) => string;
@@ -60,6 +65,7 @@ export interface FlowSettingsProviderOptions {
   getProjectFailoverPath?: (cwd: string) => string;
   actions?: Readonly<Record<string, FlowSettingsAction>>;
   getAgentResponseLanguage?: () => "default" | "zh-CN";
+  replacementOperations?: Partial<FlowSettingsReplacementOperations>;
 }
 
 interface JsonDocument {
@@ -89,6 +95,12 @@ interface PreparedFlowChange {
   transactionId: string;
   changedKeys: readonly string[];
   staged: StagedResource[];
+}
+
+interface ReplacementJournal {
+  version: 1;
+  destination: string;
+  backup: string;
 }
 
 interface ParsedKey {
@@ -189,14 +201,22 @@ export function createFlowSettingsProvider(options: FlowSettingsProviderOptions 
   const getProjectSettingsPath = options.getProjectSettingsPath ?? resolveProjectSettingsPath;
   const getGlobalFailoverPath = options.getGlobalFailoverPath ?? getGlobalModelFailoverPath;
   const getProjectFailoverPath = options.getProjectFailoverPath ?? getProjectModelFailoverPath;
+  const replacementOperations: FlowSettingsReplacementOperations = {
+    platform: options.replacementOperations?.platform ?? process.platform,
+    renameSync: options.replacementOperations?.renameSync ?? fs.renameSync,
+  };
   const prepared = new Map<string, PreparedFlowChange>();
 
-  const readAllResources = (cwd: string): ResourceState[] => [
-    readResource("compaction", "global", getGlobalSettingsPath()),
-    readResource("compaction", "project", getProjectSettingsPath(cwd)),
-    readResource("failover", "global", getGlobalFailoverPath()),
-    readResource("failover", "project", getProjectFailoverPath(cwd)),
-  ];
+  const readAllResources = (cwd: string): ResourceState[] => {
+    const read = (kind: ResourceKind, scope: WritableScope, filePath: string): ResourceState =>
+      readResourceLocked(kind, scope, filePath, replacementOperations);
+    return [
+      read("compaction", "global", getGlobalSettingsPath()),
+      read("compaction", "project", getProjectSettingsPath(cwd)),
+      read("failover", "global", getGlobalFailoverPath()),
+      read("failover", "project", getProjectFailoverPath(cwd)),
+    ];
+  };
 
   return {
     providerId: PROVIDER_ID,
@@ -223,7 +243,7 @@ export function createFlowSettingsProvider(options: FlowSettingsProviderOptions 
       try {
         for (const resource of touched) {
           const release = await lockSettingsResource(resource.path);
-          const current = readResource(resource.kind, resource.scope, resource.path);
+          const current = readResourceUnlocked(resource.kind, resource.scope, resource.path, replacementOperations);
           const changes = request.changes.filter((change) => change.scope === resource.scope && parseSettingKey(change.key)?.kind === resource.kind);
           const validation = validateRequest(changes, request.expectedRevisions, [current]);
           if (!validation.valid) {
@@ -253,25 +273,35 @@ export function createFlowSettingsProvider(options: FlowSettingsProviderOptions 
     },
     commit: async (request) => {
       const state = requirePrepared(prepared, request.prepareToken, request.transactionId);
-      const renamed: StagedResource[] = [];
+      const replacementStarted: StagedResource[] = [];
       try {
         for (const staged of state.staged) {
-          const current = readResource(staged.resource.kind, staged.resource.scope, staged.resource.path);
+          const current = readResourceUnlocked(staged.resource.kind, staged.resource.scope, staged.resource.path, replacementOperations);
           if (current.revision.etag !== staged.resource.revision.etag) {
             throw new Error(`Flow settings resource changed after prepare: ${staged.resource.revision.resource.id}`);
           }
         }
         for (const staged of state.staged) {
-          replaceFile(staged.temporaryPath, staged.resource.path);
+          replacementStarted.push(staged);
+          replaceFile(staged.temporaryPath, staged.resource.path, replacementOperations);
           staged.committedRevision = revision(staged.resource.kind, staged.resource.scope, staged.resource.path, staged.nextContent);
-          renamed.push(staged);
         }
       } catch (error) {
-        for (const staged of [...renamed].reverse()) restoreResource(staged.resource);
+        const rollbackErrors: unknown[] = [];
+        for (const staged of [...replacementStarted].reverse()) {
+          try {
+            restoreResource(staged.resource, replacementOperations);
+          } catch (rollbackError) {
+            rollbackErrors.push(rollbackError);
+          }
+        }
         for (const staged of state.staged) {
           try { fs.rmSync(staged.temporaryPath, { force: true }); } catch { /* best effort */ }
         }
         prepared.delete(request.prepareToken);
+        if (rollbackErrors.length) {
+          throw new AggregateError([error, ...rollbackErrors], "Flow settings commit failed and rollback was incomplete");
+        }
         throw error;
       } finally {
         await Promise.all(state.staged.map((entry) => entry.release().catch(() => undefined)));
@@ -301,13 +331,15 @@ export function createFlowSettingsProvider(options: FlowSettingsProviderOptions 
         for (const staged of [...state.staged].sort((left, right) => left.resource.path.localeCompare(right.resource.path))) {
           const release = await lockSettingsResource(staged.resource.path);
           locked.push({ staged, release });
-          const current = readResource(staged.resource.kind, staged.resource.scope, staged.resource.path);
+          const current = readResourceUnlocked(staged.resource.kind, staged.resource.scope, staged.resource.path, replacementOperations);
           if (staged.committedRevision && current.revision.etag !== staged.committedRevision.etag) {
             return { rolledBack: false, conflicts: [resourceConflict(current.revision, staged.committedRevision.etag)] };
           }
         }
-        for (const { staged } of locked) restoreResource(staged.resource);
+        for (const { staged } of locked) restoreResource(staged.resource, replacementOperations);
         prepared.delete(request.prepareToken);
+        await Promise.all(locked.map((entry) => entry.release()));
+        locked.length = 0;
         const resources = readAllResources(request.context.cwd);
         return { rolledBack: true, snapshot: snapshot(resources, instanceId, options) };
       } finally {
@@ -547,9 +579,29 @@ function validValue(key: string, value: JsonValue): boolean {
   return false;
 }
 
-function readResource(kind: ResourceKind, scope: WritableScope, filePath: string): ResourceState {
+function readResourceUnlocked(
+  kind: ResourceKind,
+  scope: WritableScope,
+  filePath: string,
+  operations: FlowSettingsReplacementOperations,
+): ResourceState {
+  if (operations.platform === "win32") recoverInterruptedReplacement(filePath, operations);
   const document = readJsonDocument(filePath);
   return { kind, scope, path: filePath, document, revision: revision(kind, scope, filePath, document.content) };
+}
+
+function readResourceLocked(
+  kind: ResourceKind,
+  scope: WritableScope,
+  filePath: string,
+  operations: FlowSettingsReplacementOperations,
+): ResourceState {
+  const release = lockSettingsResourceSync(filePath);
+  try {
+    return readResourceUnlocked(kind, scope, filePath, operations);
+  } finally {
+    release();
+  }
 }
 
 function readJsonDocument(filePath: string): JsonDocument {
@@ -694,28 +746,115 @@ function writeSyncedFile(filePath: string, content: string): void {
   }
 }
 
-function restoreResource(resource: ResourceState): void {
+function restoreResource(resource: ResourceState, operations: FlowSettingsReplacementOperations): void {
   if (resource.document.content === "") {
     fs.rmSync(resource.path, { force: true });
     return;
   }
   const temporaryPath = `${resource.path}.${process.pid}.${randomUUID()}.rollback`;
-  writeSyncedFile(temporaryPath, resource.document.content);
-  replaceFile(temporaryPath, resource.path);
+  try {
+    writeSyncedFile(temporaryPath, resource.document.content);
+    replaceFile(temporaryPath, resource.path, operations);
+  } finally {
+    try { fs.rmSync(temporaryPath, { force: true }); } catch { /* best effort */ }
+  }
 }
 
-function replaceFile(source: string, destination: string): void {
+function replaceFile(
+  source: string,
+  destination: string,
+  operations: FlowSettingsReplacementOperations,
+): void {
+  if (operations.platform === "win32") recoverInterruptedReplacement(destination, operations);
   try {
-    fs.renameSync(source, destination);
+    operations.renameSync(source, destination);
   } catch (error) {
     const code = isRecord(error) && typeof error.code === "string" ? error.code : "";
-    if (process.platform === "win32" && ["EEXIST", "EPERM", "ENOTEMPTY"].includes(code)) {
-      fs.rmSync(destination, { force: true });
-      fs.renameSync(source, destination);
+    if (operations.platform === "win32" && ["EEXIST", "EPERM", "ENOTEMPTY"].includes(code)) {
+      replaceFileOnWindows(source, destination, operations);
       return;
     }
     throw error;
   }
+}
+
+function replaceFileOnWindows(
+  source: string,
+  destination: string,
+  operations: FlowSettingsReplacementOperations,
+): void {
+  const journalPath = replacementJournalPath(destination);
+  const backupPath = `${destination}.${process.pid}.${randomUUID()}.backup`;
+  const journal: ReplacementJournal = { version: 1, destination, backup: backupPath };
+  writeSyncedFile(journalPath, `${JSON.stringify(journal)}\n`);
+  let backupCreated = false;
+  try {
+    operations.renameSync(destination, backupPath);
+    backupCreated = true;
+    try {
+      operations.renameSync(source, destination);
+    } catch (installError) {
+      try {
+        operations.renameSync(backupPath, destination);
+        backupCreated = false;
+        fs.rmSync(journalPath, { force: true });
+      } catch (restoreError) {
+        throw new AggregateError(
+          [installError, restoreError],
+          `Could not install or restore Flow settings resource ${destination}`,
+        );
+      }
+      throw installError;
+    }
+    fs.rmSync(backupPath, { force: true });
+    backupCreated = false;
+    fs.rmSync(journalPath, { force: true });
+  } catch (error) {
+    if (!backupCreated) {
+      try { fs.rmSync(journalPath, { force: true }); } catch { /* best effort */ }
+    }
+    throw error;
+  }
+}
+
+function recoverInterruptedReplacement(
+  destination: string,
+  operations: FlowSettingsReplacementOperations,
+): void {
+  const journalPath = replacementJournalPath(destination);
+  if (!fs.existsSync(journalPath)) return;
+  const journal = readReplacementJournal(journalPath, destination);
+  if (fs.existsSync(destination)) {
+    fs.rmSync(journal.backup, { force: true });
+  } else if (fs.existsSync(journal.backup)) {
+    operations.renameSync(journal.backup, destination);
+  } else {
+    throw new Error(`Cannot recover interrupted Flow settings replacement for ${destination}`);
+  }
+  fs.rmSync(journalPath, { force: true });
+}
+
+function readReplacementJournal(journalPath: string, destination: string): ReplacementJournal {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(journalPath, "utf8"));
+  } catch (error) {
+    throw new Error(`Invalid Flow settings replacement journal ${journalPath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!isRecord(parsed)
+    || parsed.version !== 1
+    || parsed.destination !== destination
+    || typeof parsed.backup !== "string"
+    || path.dirname(parsed.backup) !== path.dirname(destination)
+    || !path.basename(parsed.backup).startsWith(`${path.basename(destination)}.`)
+    || !parsed.backup.endsWith(".backup")) {
+    throw new Error(`Invalid Flow settings replacement journal ${journalPath}`);
+  }
+  return parsed as unknown as ReplacementJournal;
+}
+
+function replacementJournalPath(destination: string): string {
+  return `${destination}.replace-journal`;
 }
 
 async function releaseStaged(staged: readonly StagedResource[]): Promise<void> {

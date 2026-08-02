@@ -13,31 +13,43 @@ import {
 import {
   createFlowSettingsProvider,
   registerFlowSettingsProvider,
+  type FlowSettingsProviderOptions,
 } from "../src/settings/flow-settings-provider.ts";
 import {
   createApiManagerSettingsProvider,
   registerApiManagerSettingsProvider,
 } from "../src/settings/api-manager-settings-provider.ts";
 
-function fixture() {
+function fixture(options: Pick<FlowSettingsProviderOptions, "replacementOperations"> = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "flow-settings-provider-"));
   const globalSettings = path.join(root, "home", "settings.json");
   const projectSettings = path.join(root, "project", ".pi", "settings.json");
   const globalFailover = path.join(root, "home", "model-failover.json");
   const projectFailover = path.join(root, "project", ".pi", "model-failover.json");
   const context: SettingsContextV1 = { cwd: path.join(root, "project"), locale: "en" };
-  const provider = createFlowSettingsProvider({
+  const createProvider = () => createFlowSettingsProvider({
     getGlobalSettingsPath: () => globalSettings,
     getProjectSettingsPath: () => projectSettings,
     getGlobalFailoverPath: () => globalFailover,
     getProjectFailoverPath: () => projectFailover,
+    ...options,
   });
-  return { root, globalSettings, projectSettings, globalFailover, projectFailover, context, provider };
+  const provider = createProvider();
+  return { root, globalSettings, projectSettings, globalFailover, projectFailover, context, provider, createProvider };
 }
 
 function writeJson(filePath: string, value: unknown): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function synthesizeInterruptedReplacement(destination: string, content: string): { backup: string; journal: string } {
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  const backup = `${destination}.restart.backup`;
+  const journal = `${destination}.replace-journal`;
+  fs.writeFileSync(backup, content, "utf8");
+  fs.writeFileSync(journal, `${JSON.stringify({ version: 1, destination, backup })}\n`, "utf8");
+  return { backup, journal };
 }
 
 test("Flow provider describes editable settings, complex actions and bilingual catalogs", async () => {
@@ -249,6 +261,149 @@ test("Flow provider rechecks revisions at commit and preserves a post-prepare ex
   );
   assert.equal(fs.readFileSync(globalSettings, "utf8"), external);
   await provider.abort!({ context, transactionId: "late-conflict", prepareToken: prepared.prepareToken! });
+});
+
+test("Flow provider restores a Windows replacement when the second rename fails", async () => {
+  let installAttempts = 0;
+  let journalObserved = false;
+  let backupObserved = false;
+  const { provider, context, globalSettings } = fixture({
+    replacementOperations: {
+      platform: "win32",
+      renameSync(source, destination) {
+        if (source.endsWith(".tmp") && destination === globalSettings) {
+          installAttempts += 1;
+          if (installAttempts === 1) {
+            throw Object.assign(new Error("injected replacement conflict"), { code: "EPERM" });
+          }
+          if (installAttempts === 2) {
+            const entries = fs.readdirSync(path.dirname(destination));
+            journalObserved = entries.includes(`${path.basename(destination)}.replace-journal`);
+            backupObserved = entries.some((entry) => entry.startsWith(`${path.basename(destination)}.`) && entry.endsWith(".backup"));
+            throw Object.assign(new Error("injected install failure"), { code: "EIO" });
+          }
+        }
+        fs.renameSync(source, destination);
+      },
+    },
+  });
+  const original = '{"owner":"original","compaction":{"enabled":false}}\n';
+  fs.mkdirSync(path.dirname(globalSettings), { recursive: true });
+  fs.writeFileSync(globalSettings, original, "utf8");
+  const baseline = await provider.read({ context });
+  const prepared = await provider.prepare!({
+    context,
+    transactionId: "windows-second-rename-failure",
+    expectedRevisions: baseline.configured.resources,
+    changes: [{ operation: "set", key: "compaction.enabled", scope: "global", value: true }],
+  });
+
+  await assert.rejects(
+    provider.commit!({
+      context,
+      transactionId: "windows-second-rename-failure",
+      prepareToken: prepared.prepareToken!,
+    }),
+    /injected install failure/,
+  );
+
+  assert.equal(installAttempts, 2);
+  assert.equal(journalObserved, true);
+  assert.equal(backupObserved, true);
+  assert.equal(fs.readFileSync(globalSettings, "utf8"), original);
+  assert.deepEqual(fs.readdirSync(path.dirname(globalSettings)), [path.basename(globalSettings)]);
+});
+
+test("Flow provider recovers a journaled backup when immediate restoration faults", async () => {
+  let installAttempts = 0;
+  let backupRestoreAttempts = 0;
+  const { provider, context, globalSettings } = fixture({
+    replacementOperations: {
+      platform: "win32",
+      renameSync(source, destination) {
+        if (source.endsWith(".tmp") && destination === globalSettings) {
+          installAttempts += 1;
+          throw Object.assign(
+            new Error(installAttempts === 1 ? "injected replacement conflict" : "injected install failure"),
+            { code: installAttempts === 1 ? "EPERM" : "EIO" },
+          );
+        }
+        if (source.endsWith(".backup") && destination === globalSettings && backupRestoreAttempts++ === 0) {
+          throw Object.assign(new Error("injected restore failure"), { code: "EBUSY" });
+        }
+        fs.renameSync(source, destination);
+      },
+    },
+  });
+  const original = '{"owner":"recoverable","compaction":{"enabled":false}}\n';
+  fs.mkdirSync(path.dirname(globalSettings), { recursive: true });
+  fs.writeFileSync(globalSettings, original, "utf8");
+  const baseline = await provider.read({ context });
+  const prepared = await provider.prepare!({
+    context,
+    transactionId: "windows-journal-recovery",
+    expectedRevisions: baseline.configured.resources,
+    changes: [{ operation: "set", key: "compaction.enabled", scope: "global", value: true }],
+  });
+
+  await assert.rejects(
+    provider.commit!({
+      context,
+      transactionId: "windows-journal-recovery",
+      prepareToken: prepared.prepareToken!,
+    }),
+    /Could not install or restore/,
+  );
+
+  assert.equal(installAttempts, 2);
+  assert.ok(backupRestoreAttempts >= 2);
+  assert.equal(fs.readFileSync(globalSettings, "utf8"), original);
+  assert.deepEqual(fs.readdirSync(path.dirname(globalSettings)), [path.basename(globalSettings)]);
+});
+
+test("Flow provider recovers a destination-missing Windows replacement before restart reads and prepare", async () => {
+  const readCase = fixture({ replacementOperations: { platform: "win32" } });
+  const readBytes = '{"owner":"read-restart","compaction":{"enabled":false,"sibling":{"keep":1}},"rootSibling":true}\r\n';
+  const readArtifacts = synthesizeInterruptedReplacement(readCase.globalSettings, readBytes);
+  const readProvider = readCase.createProvider();
+
+  const recoveredSnapshot = await readProvider.read({ context: readCase.context });
+
+  assert.equal(fs.readFileSync(readCase.globalSettings, "utf8"), readBytes);
+  assert.equal(
+    recoveredSnapshot.configured.values.find((entry) => entry.key === "compaction.enabled" && entry.scope === "global")?.value,
+    false,
+  );
+  assert.equal(fs.existsSync(readArtifacts.backup), false);
+  assert.equal(fs.existsSync(readArtifacts.journal), false);
+
+  const prepareCase = fixture({ replacementOperations: { platform: "win32" } });
+  const prepareBytes = '{"owner":"prepare-restart","compaction":{"enabled":false,"sibling":{"keep":2}},"rootSibling":{"keep":3}}\r\n';
+  const prepareArtifacts = synthesizeInterruptedReplacement(prepareCase.globalSettings, prepareBytes);
+  const prepareProvider = prepareCase.createProvider();
+
+  const prepared = await prepareProvider.prepare!({
+    context: prepareCase.context,
+    transactionId: "windows-restart-prepare",
+    changes: [{ operation: "set", key: "compaction.enabled", scope: "global", value: true }],
+  });
+
+  assert.equal(prepared.prepared, true);
+  assert.equal(fs.readFileSync(prepareCase.globalSettings, "utf8"), prepareBytes);
+  assert.equal(fs.existsSync(prepareArtifacts.backup), false);
+  assert.equal(fs.existsSync(prepareArtifacts.journal), false);
+
+  await prepareProvider.commit!({
+    context: prepareCase.context,
+    transactionId: "windows-restart-prepare",
+    prepareToken: prepared.prepareToken!,
+  });
+  const committed = JSON.parse(fs.readFileSync(prepareCase.globalSettings, "utf8"));
+  assert.equal(committed.owner, "prepare-restart");
+  assert.equal(committed.compaction.enabled, true);
+  assert.deepEqual(committed.compaction.sibling, { keep: 2 });
+  assert.deepEqual(committed.rootSibling, { keep: 3 });
+  assert.deepEqual(fs.readdirSync(path.dirname(prepareCase.globalSettings)), [path.basename(prepareCase.globalSettings)]);
 });
 
 test("Flow provider rollback after a failed commit does not overwrite the external write", async () => {

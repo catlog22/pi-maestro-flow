@@ -9,7 +9,12 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { ConsentManager } from "./consent-manager.ts";
 import { ServerError, wrapError } from "./errors.ts";
-import { buildHostHtmlTemplate, buildCspMetaContent, applyCspMeta } from "./host-html-template.ts";
+import {
+  applyCspMeta,
+  buildCspMetaContent,
+  buildHostHtmlTemplate,
+  OUTER_HOST_CSP,
+} from "./host-html-template.ts";
 import { logger } from "./logger.ts";
 import type { McpServerManager } from "./server-manager.ts";
 import {
@@ -337,6 +342,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
         res.writeHead(200, {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store",
+          "Content-Security-Policy": OUTER_HOST_CSP,
         });
         res.end(html);
         return;

@@ -165,6 +165,14 @@ interface PlanHandoffRequestIdentity {
   requestId: number;
 }
 
+interface PlanOperationIdentity {
+  lifecycleGeneration: number;
+  operationId: number;
+  sessionId: string;
+  storeKey: string;
+  store?: PlanStore;
+}
+
 interface PlanContextReplacement {
   lifecycleGeneration: number;
   replacement: AgentMessage;
@@ -173,6 +181,8 @@ interface PlanContextReplacement {
 
 let planLifecycleGeneration = 0;
 let nextPlanHandoffRequestId = 0;
+let nextPlanOperationId = 0;
+let activePlanOperation: PlanOperationIdentity | undefined;
 let activePlanHandoffRequest: PlanHandoffRequestIdentity | undefined;
 let pendingCleanContextCompaction: PlanCleanContextCompactionRequest | undefined;
 let planContextReplacement: PlanContextReplacement | undefined;
@@ -273,9 +283,12 @@ function activatePlanToolSurface(): void {}
 
 function restoreActToolSurface(): void {}
 
-async function enterPlanMode(ctx: PlanContext): Promise<void> {
+async function enterPlanMode(ctx: PlanContext, operation: PlanOperationIdentity): Promise<boolean> {
   const store = await ensureStore(ctx);
-  applyLoadedPlan(await store.loadQuick());
+  if (!bindPlanOperation(ctx, operation, store)) return false;
+  const loaded = await store.loadQuick();
+  if (!isCurrentPlanOperation(ctx, operation)) return false;
+  applyLoadedPlan(loaded);
   pendingPlanExitReminder = undefined;
   pendingPlanEnterNote = buildPlanEnterNote();
   mode = "plan";
@@ -283,6 +296,7 @@ async function enterPlanMode(ctx: PlanContext): Promise<void> {
   syncModeStatus(ctx);
   onPlanModeChanged?.(ctx);
   ctx.ui.notify(`Plan mode · ${store.currentPath}`, "info");
+  return true;
 }
 
 function exitPlanMode(ctx: PlanContext): void {
@@ -293,7 +307,8 @@ function exitPlanMode(ctx: PlanContext): void {
 }
 
 /** Leave Plan mode without approving or discarding the current draft. */
-export function exitMode(ctx: PlanContext): Mode {
+export function exitMode(ctx: PlanContext, operation = beginPlanOperation(ctx)): Mode {
+  if (!isCurrentPlanOperation(ctx, operation, false)) return mode;
   if (mode === "plan") {
     exitPlanMode(ctx);
     ctx.ui.notify("Act mode · draft preserved", "info");
@@ -303,18 +318,20 @@ export function exitMode(ctx: PlanContext): Mode {
   return mode;
 }
 
-export async function toggleMode(ctx: PlanContext): Promise<Mode> {
+export async function toggleMode(ctx: PlanContext, operation = beginPlanOperation(ctx)): Promise<Mode> {
   if (mode === "act") {
-    await enterPlanMode(ctx);
+    await enterPlanMode(ctx, operation);
+    if (!isCurrentPlanOperation(ctx, operation)) return mode;
     return mode;
   }
   if (hasPlan() && ctx.hasUI !== false) {
-    const outcome = await reviewPlan(ctx, true);
+    const outcome = await reviewPlan(ctx, true, "message", operation);
+    if (!isCurrentPlanOperation(ctx, operation)) return mode;
     if (!outcome.approved && !outcome.exited) ctx.ui.notify("Staying in Plan mode", "info");
     onPlanModeChanged?.(ctx);
     return mode;
   }
-  return exitMode(ctx);
+  return exitMode(ctx, operation);
 }
 
 /** Bind the root UI/UCL to Plan/Act mode transitions. */
@@ -325,20 +342,25 @@ export function setPlanModeChangeListener(listener: ((ctx: PlanContext) => void)
 export async function onSessionStartPlan(ctx: PlanContext): Promise<void> {
   restoreActToolSurface();
   resetRuntimeState();
+  const operation = beginPlanOperation(ctx);
   ensureActToolSurface();
   syncModeStatus(ctx);
   prewarmProcessIdentity();
   try {
     const store = await ensureStore(ctx);
+    if (!bindPlanOperation(ctx, operation, store)) return;
     const loaded = await store.load();
+    if (!isCurrentPlanOperation(ctx, operation)) return;
     applyLoadedPlan(loaded);
     if (loaded.manifest.status === "approved"
       && loaded.manifest.execution?.backend === "workflow"
       && (loaded.manifest.workflowBinding?.status !== "bound"
         || loaded.manifest.workflowBinding.deliveryStatus === "pending")) {
-      await recoverWorkflowBinding(ctx, store, loaded);
+      await recoverWorkflowBinding(ctx, store, loaded, operation);
+      if (!isCurrentPlanOperation(ctx, operation)) return;
     }
   } catch (error) {
+    if (!isCurrentPlanOperation(ctx, operation)) return;
     currentStore = undefined;
     currentStoreKey = "";
     clearPlan();
@@ -352,16 +374,59 @@ export function onSessionShutdownPlan(ctx: PlanContext): void {
   ctx.ui.setStatus(STATUS_KEY, undefined);
 }
 
+function beginPlanOperation(ctx: PlanContext): PlanOperationIdentity {
+  const session = currentPlanSession(ctx);
+  const storeKey = `${ctx.cwd}\0${session.id}`;
+  const operation: PlanOperationIdentity = {
+    lifecycleGeneration: planLifecycleGeneration,
+    operationId: ++nextPlanOperationId,
+    sessionId: session.id,
+    storeKey,
+    ...(currentStore && currentStoreKey === storeKey ? { store: currentStore } : {}),
+  };
+  activePlanOperation = operation;
+  return operation;
+}
+
+function bindPlanOperation(
+  ctx: PlanContext,
+  operation: PlanOperationIdentity,
+  store: PlanStore,
+): boolean {
+  if (!isCurrentPlanOperation(ctx, operation, false)) return false;
+  operation.store = store;
+  return isCurrentPlanOperation(ctx, operation);
+}
+
+function isCurrentPlanOperation(
+  ctx: PlanContext,
+  operation: PlanOperationIdentity,
+  requireStore = true,
+): boolean {
+  const session = currentPlanSession(ctx);
+  return activePlanOperation === operation
+    && planLifecycleGeneration === operation.lifecycleGeneration
+    && session.id === operation.sessionId
+    && `${ctx.cwd}\0${session.id}` === operation.storeKey
+    && (!requireStore || (
+      operation.store !== undefined
+      && currentStore === operation.store
+      && currentStoreKey === operation.storeKey
+    ));
+}
+
 async function recoverWorkflowBinding(
   ctx: PlanContext,
   store: PlanStore,
   approved: LoadedPlan,
+  operation: PlanOperationIdentity,
 ): Promise<void> {
   const execution = approved.manifest.execution;
   const handoffKey = approved.manifest.handoffKey;
   const sourceChecksum = approved.manifest.approvedChecksum;
   const approvedPath = approved.manifest.approvedPath;
   if (!execution || execution.backend !== "workflow" || !handoffKey || !sourceChecksum || !approvedPath) return;
+  if (!isCurrentPlanOperation(ctx, operation)) return;
   const priorBinding = approved.manifest.workflowBinding;
   let publicationInput = approved;
   try {
@@ -372,18 +437,23 @@ async function recoverWorkflowBinding(
         sourceChecksum,
         updatedAt: new Date().toISOString(),
       });
+      if (!isCurrentPlanOperation(ctx, operation)) return;
       applyLoadedPlan(publicationInput);
     }
+    if (!isCurrentPlanOperation(ctx, operation)) return;
     const published = await publishWorkflowPlan(ctx, publicationInput, execution);
+    if (!isCurrentPlanOperation(ctx, operation)) return;
     if (published.binding.status !== "bound") {
       throw new Error("Workflow publisher did not return a bound result");
     }
     const pendingDelivery = withPendingWorkflowDelivery(published.binding);
     const bound = await store.updateWorkflowBinding(handoffKey, pendingDelivery);
+    if (!isCurrentPlanOperation(ctx, operation)) return;
     applyLoadedPlan(bound);
     ctx.ui.notify(`Recovered approved Plan binding to Workflow Session ${published.binding.workflowSessionId}.`, "info");
     const planPath = join(bound.plansDir, approvedPath);
     const executionMessage = `${published.executionMessage}\n\n${buildPlanExecutionContract(planPath, handoffKey)}`;
+    if (!isCurrentPlanOperation(ctx, operation)) return;
     await deliverImplementation(
       ctx,
       planPath,
@@ -391,9 +461,12 @@ async function recoverWorkflowBinding(
       execution.context,
       executionMessage,
       "message",
-      () => acknowledgeWorkflowDelivery(ctx, store, handoffKey, pendingDelivery),
+      operation,
+      () => acknowledgeWorkflowDelivery(ctx, store, handoffKey, pendingDelivery, operation),
     );
+    if (!isCurrentPlanOperation(ctx, operation)) return;
   } catch (error) {
+    if (!isCurrentPlanOperation(ctx, operation)) return;
     if (priorBinding?.status !== "bound") {
       try {
         const failed = await store.updateWorkflowBinding(handoffKey, {
@@ -403,8 +476,10 @@ async function recoverWorkflowBinding(
           error: errorMessage(error),
           updatedAt: new Date().toISOString(),
         });
+        if (!isCurrentPlanOperation(ctx, operation)) return;
         applyLoadedPlan(failed);
       } catch (persistError) {
+        if (!isCurrentPlanOperation(ctx, operation)) return;
         ctx.ui.notify(
           `Approved Plan Workflow binding retry failed and its failure state could not be persisted: ${errorMessage(persistError)}.`,
           "warning",
@@ -412,6 +487,7 @@ async function recoverWorkflowBinding(
         return;
       }
     }
+    if (!isCurrentPlanOperation(ctx, operation)) return;
     ctx.ui.notify(
       priorBinding?.status === "bound"
         ? `Approved Plan Workflow delivery retry failed: ${errorMessage(error)}. The canonical binding is preserved.`
@@ -436,23 +512,29 @@ async function acknowledgeWorkflowDelivery(
   store: PlanStore,
   handoffKey: string,
   binding: PlanWorkflowBinding,
+  operation: PlanOperationIdentity,
 ): Promise<void> {
   if (binding.status !== "bound" || binding.deliveryStatus !== "pending") return;
+  if (!isCurrentPlanOperation(ctx, operation)) return;
   const deliveredAt = new Date().toISOString();
   try {
-    applyLoadedPlan(await store.updateWorkflowBinding(handoffKey, {
+    const delivered = await store.updateWorkflowBinding(handoffKey, {
       ...binding,
       deliveryStatus: "delivered",
       deliveredAt,
       updatedAt: deliveredAt,
-    }));
+    });
+    if (!isCurrentPlanOperation(ctx, operation)) return;
+    applyLoadedPlan(delivered);
   } catch (error) {
+    if (!isCurrentPlanOperation(ctx, operation)) return;
     ctx.ui.notify(`Workflow execution handoff was delivered but could not be acknowledged: ${errorMessage(error)}`, "warning");
   }
 }
 
 function resetRuntimeState(): void {
   planLifecycleGeneration++;
+  activePlanOperation = undefined;
   activePlanHandoffRequest = undefined;
   mode = "act";
   currentStore = undefined;
@@ -639,20 +721,31 @@ export async function onAgentEndPlan(event: { messages: unknown[] }, ctx: PlanCo
   if (mode !== "plan" || latestStatus === "approved") return;
   const proposedPlan = extractProposedPlan(latestAssistantText(event.messages));
   if (!proposedPlan) return;
+  const operation = beginPlanOperation(ctx);
   try {
     const store = await ensureStore(ctx);
+    if (!bindPlanOperation(ctx, operation, store)) return;
     const saved = await store.saveDraft(proposedPlan, latestRevision);
+    if (!isCurrentPlanOperation(ctx, operation)) return;
     applyLoadedPlan(saved);
     syncModeStatus(ctx);
     ctx.ui.notify("Compatibility plan captured to current.md. Use plan-review or plan-confirm.", "info");
   } catch (error) {
+    if (!isCurrentPlanOperation(ctx, operation, operation.store !== undefined)) return;
     ctx.ui.notify(`Plan compatibility capture failed: ${errorMessage(error)}`, "warning");
   }
 }
 
-async function savePlan(ctx: PlanContext, markdown: string, expectedRevision = latestRevision): Promise<LoadedPlan> {
+async function savePlan(
+  ctx: PlanContext,
+  markdown: string,
+  expectedRevision: number,
+  operation: PlanOperationIdentity,
+): Promise<LoadedPlan | undefined> {
   const store = await ensureStore(ctx);
+  if (!bindPlanOperation(ctx, operation, store)) return undefined;
   const saved = await store.saveDraft(markdown, expectedRevision);
+  if (!isCurrentPlanOperation(ctx, operation)) return undefined;
   applyLoadedPlan(saved);
   syncModeStatus(ctx);
   return saved;
@@ -661,31 +754,43 @@ async function savePlan(ctx: PlanContext, markdown: string, expectedRevision = l
 async function reviewPlan(
   ctx: PlanContext,
   allowConfirm: boolean,
-  handoffDelivery: PlanHandoffDelivery = "message",
+  handoffDelivery: PlanHandoffDelivery,
+  operation: PlanOperationIdentity,
 ): Promise<PlanReviewOutcome> {
   if (!ctx.hasUI) {
-    ctx.ui.notify("Plan review requires an interactive UI.", "warning");
+    if (isCurrentPlanOperation(ctx, operation, false)) {
+      ctx.ui.notify("Plan review requires an interactive UI.", "warning");
+    }
     return { approved: false, exited: false };
   }
   const store = await ensureStore(ctx);
-  if (mode !== "plan") await enterPlanMode(ctx);
+  if (!bindPlanOperation(ctx, operation, store)) return { approved: false, exited: false };
+  if (mode !== "plan") {
+    await enterPlanMode(ctx, operation);
+    if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
+  }
   if (!allowConfirm) {
-    await editPlan(ctx, store.currentPath);
+    await editPlan(ctx, store.currentPath, operation);
+    if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
     return { approved: false, exited: false };
   }
 
-  while (true) {
+  while (isCurrentPlanOperation(ctx, operation)) {
+    const workflow = await workflowConfirmation(ctx);
+    if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
     const decision = await openPlanConfirmation(ctx, {
       markdown: latestPlan ?? "",
       pathLabel: store.currentPath,
       canCompactContext: true,
       contextPercent: ctx.getContextUsage?.()?.percent ?? undefined,
       defaultExecution: latestExecution,
-      workflow: await workflowConfirmation(ctx),
+      workflow,
     });
+    if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
     const action = decision.action;
     if (action === "modify") {
-      await editPlan(ctx, store.currentPath);
+      await editPlan(ctx, store.currentPath, operation);
+      if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
       continue;
     }
     if (action === "continue") {
@@ -693,6 +798,7 @@ async function reviewPlan(
         "Continue discussing the Plan",
         "Enter feedback or a question",
       );
+      if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
       if (!discussion?.trim()) continue;
       queuePlanDiscussion(ctx, discussion.trim());
       return { approved: false, exited: false };
@@ -702,7 +808,7 @@ async function reviewPlan(
       return { approved: false, exited: false };
     }
     if (action === "exit-plan") {
-      exitMode(ctx);
+      exitMode(ctx, operation);
       return { approved: false, exited: true };
     }
 
@@ -711,12 +817,13 @@ async function reviewPlan(
     let approved: LoadedPlan;
     try {
       approved = await store.approve(markdown, latestRevision, { execution: executionChoice });
+      if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
       applyLoadedPlan(approved);
     } catch (error) {
-      applyLoadedPlan(await store.load());
-      // PlanApprovalError carries whether the draft survived the failed commit, and this
-      // was the only consumer that threw that away. A bare "approval failed" reads as
-      // "your plan is gone" — the user retypes work that is sitting safely on disk.
+      if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
+      const loaded = await store.load();
+      if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
+      applyLoadedPlan(loaded);
       const draftNote = error instanceof PlanApprovalError && error.draftPersisted
         ? ` Your draft is intact at revision ${error.revision}; retry the approval.`
         : "";
@@ -727,12 +834,16 @@ async function reviewPlan(
     const executionMode = executionChoice.context;
     const executionMessage = await startImplementation(
       ctx,
+      store,
       approved,
       executionChoice,
       handoffDelivery,
+      operation,
     );
+    if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
     return { approved: true, exited: true, executionMode, executionChoice, executionMessage };
   }
+  return { approved: false, exited: false };
 }
 
 function queuePlanDiscussion(ctx: PlanContext, discussion: string): void {
@@ -766,18 +877,25 @@ function abortPlanTurn(ctx: PlanContext): void {
   }
 }
 
-async function editPlan(ctx: PlanContext, pathLabel: string): Promise<void> {
+async function editPlan(
+  ctx: PlanContext,
+  pathLabel: string,
+  operation: PlanOperationIdentity,
+): Promise<void> {
   await openPlanEditor(ctx, {
     markdown: latestPlan ?? "",
     revision: latestRevision,
     allowConfirm: false,
     pathLabel,
     async onSave(markdown, expectedRevision) {
-      const saved = await savePlan(ctx, markdown, expectedRevision);
+      if (!isCurrentPlanOperation(ctx, operation)) throw new Error("Plan operation was superseded");
+      const saved = await savePlan(ctx, markdown, expectedRevision, operation);
+      if (!isCurrentPlanOperation(ctx, operation) || !saved) throw new Error("Plan operation was superseded");
       return saved.manifest.revision;
     },
     async onConfirm() {},
   });
+  if (!isCurrentPlanOperation(ctx, operation)) return;
 }
 
 export function consumePlanCleanContextCompaction(): PlanCleanContextCompactionRequest | undefined {
@@ -858,10 +976,13 @@ function canReplaceContextAfterCompactionFailure(error: unknown): boolean {
 
 async function startImplementation(
   ctx: PlanContext,
+  store: PlanStore,
   approved: LoadedPlan,
   executionChoice: PlanExecutionChoice,
   handoffDelivery: PlanHandoffDelivery,
+  operation: PlanOperationIdentity,
 ): Promise<string | undefined> {
+  if (!isCurrentPlanOperation(ctx, operation)) return undefined;
   const markdown = approved.markdown;
   const planPath = approved.manifest.approvedPath
     ? join(approved.plansDir, approved.manifest.approvedPath)
@@ -873,20 +994,20 @@ async function startImplementation(
   ctx.ui.notify("Plan approved · Act mode active", "info");
   const executionContract = buildPlanExecutionContract(planPath, latestHandoffKey);
   let executionMessage = executionContract;
-  let workflowDelivery: { store: PlanStore; handoffKey: string; binding: PlanWorkflowBinding } | undefined;
+  let workflowDelivery: { handoffKey: string; binding: PlanWorkflowBinding } | undefined;
 
   if (executionChoice.backend === "workflow") {
     try {
       const publication = await publishWorkflowPlan(ctx, approved, executionChoice);
+      if (!isCurrentPlanOperation(ctx, operation)) return undefined;
       if (publication.binding.status !== "bound") {
         throw new Error("Workflow publisher returned a non-bound result");
       }
-      const store = await ensureStore(ctx);
       const pendingDelivery = withPendingWorkflowDelivery(publication.binding);
       const bound = await store.updateWorkflowBinding(publication.binding.handoffKey, pendingDelivery);
+      if (!isCurrentPlanOperation(ctx, operation)) return undefined;
       applyLoadedPlan(bound);
       workflowDelivery = {
-        store,
         handoffKey: publication.binding.handoffKey,
         binding: bound.manifest.workflowBinding!,
       };
@@ -896,6 +1017,7 @@ async function startImplementation(
         "info",
       );
     } catch (error) {
+      if (!isCurrentPlanOperation(ctx, operation)) return undefined;
       const message = errorMessage(error);
       const handoffKey = approved.manifest.handoffKey;
       const checksum = approved.manifest.approvedChecksum;
@@ -908,33 +1030,40 @@ async function startImplementation(
           updatedAt: new Date().toISOString(),
         };
         try {
-          applyLoadedPlan(await (await ensureStore(ctx)).updateWorkflowBinding(handoffKey, failed));
+          const failedPlan = await store.updateWorkflowBinding(handoffKey, failed);
+          if (!isCurrentPlanOperation(ctx, operation)) return undefined;
+          applyLoadedPlan(failedPlan);
         } catch (bindingError) {
+          if (!isCurrentPlanOperation(ctx, operation)) return undefined;
           ctx.ui.notify(`Workflow binding state could not be persisted: ${errorMessage(bindingError)}`, "error");
         }
       }
+      if (!isCurrentPlanOperation(ctx, operation)) return undefined;
       const failureMessage = `Plan approved, but Workflow binding failed; execution was not started: ${message}`;
       ctx.ui.notify(failureMessage, "error");
       return failureMessage;
     }
   }
 
-  return deliverImplementation(
+  const delivered = await deliverImplementation(
     ctx,
     planPath,
     markdown,
     executionMode,
     executionMessage,
     handoffDelivery,
+    operation,
     workflowDelivery
       ? () => acknowledgeWorkflowDelivery(
           ctx,
-          workflowDelivery!.store,
+          store,
           workflowDelivery!.handoffKey,
           workflowDelivery!.binding,
+          operation,
         )
       : undefined,
   );
+  return isCurrentPlanOperation(ctx, operation) ? delivered : undefined;
 }
 
 function buildPlanExecutionContract(planPath: string, handoffKey?: string): string {
@@ -960,8 +1089,10 @@ async function deliverImplementation(
   executionMode: PlanExecutionChoice["context"],
   executionMessage: string,
   handoffDelivery: PlanHandoffDelivery,
+  operation: PlanOperationIdentity,
   onDelivered?: () => Promise<void>,
 ): Promise<string | undefined> {
+  if (!isCurrentPlanOperation(ctx, operation)) return undefined;
   if (executionMode === "compact") {
     const lease = compactionArbiter?.request("plan-handoff", {
       owner: "plan-handoff",
@@ -971,6 +1102,7 @@ async function deliverImplementation(
       ctx.ui.notify("Compaction is already in progress; executing with the current context.", "warning");
       sendImplementationMessage(ctx, executionMessage);
       await onDelivered?.();
+      if (!isCurrentPlanOperation(ctx, operation)) return undefined;
       return;
     }
     const handoffRequest = beginPlanHandoff();
@@ -979,7 +1111,9 @@ async function deliverImplementation(
       if (delivered) return false;
       delivered = true;
       lease?.release();
-      if (!finishPlanHandoff(handoffRequest)) return false;
+      const currentOperation = isCurrentPlanOperation(ctx, operation);
+      const currentHandoff = finishPlanHandoff(handoffRequest);
+      if (!currentOperation || !currentHandoff) return false;
       sendImplementationMessage(ctx, executionMessage);
       void onDelivered?.();
       return true;
@@ -998,14 +1132,14 @@ async function deliverImplementation(
           deliver();
         },
         onError(error) {
-          if (isCurrentPlanHandoff(handoffRequest)) {
+          if (isCurrentPlanOperation(ctx, operation) && isCurrentPlanHandoff(handoffRequest)) {
             ctx.ui.notify(`Compaction failed; executing with the current context: ${error.message}`, "warning");
           }
           deliver();
         },
       });
     } catch (error) {
-      if (isCurrentPlanHandoff(handoffRequest)) {
+      if (isCurrentPlanOperation(ctx, operation) && isCurrentPlanHandoff(handoffRequest)) {
         ctx.ui.notify(`Compaction failed; executing with the current context: ${errorMessage(error)}`, "warning");
       }
       deliver();
@@ -1015,10 +1149,12 @@ async function deliverImplementation(
 
   if (handoffDelivery === "tool-result") {
     await onDelivered?.();
+    if (!isCurrentPlanOperation(ctx, operation)) return undefined;
     return executionMessage;
   }
   sendImplementationMessage(ctx, executionMessage);
   await onDelivered?.();
+  if (!isCurrentPlanOperation(ctx, operation)) return undefined;
 }
 
 function sendImplementationMessage(ctx: PlanContext, message: string): void {
@@ -1089,6 +1225,13 @@ function requirePlanMode(action: PlanToolDetails["action"]): AgentToolResult<Pla
   }, true);
 }
 
+function supersededResult(action: PlanToolDetails["action"]): AgentToolResult<PlanToolDetails> {
+  return result("Plan operation was superseded by a newer Plan operation.", {
+    ...currentDetails(action),
+    error: "E_PLAN_OPERATION_SUPERSEDED",
+  }, true);
+}
+
 export function registerPlanTools(pi: ExtensionAPI): void {
   const enterTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: PLAN_ENTER_TOOL,
@@ -1097,7 +1240,9 @@ export function registerPlanTools(pi: ExtensionAPI): void {
     promptSnippet: "Use plan-enter before producing or editing an implementation Plan.",
     parameters: EmptyPlanParams,
     async execute(_id, _params, _signal, _onUpdate, ctx) {
-      if (mode !== "plan") await enterPlanMode(ctx);
+      const operation = beginPlanOperation(ctx);
+      if (mode !== "plan") await enterPlanMode(ctx, operation);
+      if (!isCurrentPlanOperation(ctx, operation)) return supersededResult("enter");
       return result(`Plan mode active. Draft: ${currentStore?.currentPath ?? ""}`, currentDetails("enter"));
     },
     renderShell: "self",
@@ -1120,12 +1265,16 @@ export function registerPlanTools(pi: ExtensionAPI): void {
     promptSnippet: "Use plan-update to persist the decision-complete, execution-ready Markdown Plan before review.",
     parameters: PlanUpdateParams,
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      const operation = beginPlanOperation(ctx);
       const blocked = requirePlanMode("update");
       if (blocked) return blocked;
+      const expectedRevision = params.expectedRevision ?? latestRevision;
       try {
-        const saved = await savePlan(ctx, params.markdown, params.expectedRevision ?? latestRevision);
+        const saved = await savePlan(ctx, params.markdown, expectedRevision, operation);
+        if (!isCurrentPlanOperation(ctx, operation) || !saved) return supersededResult("update");
         return result(`Plan draft saved at revision ${saved.manifest.revision}.`, currentDetails("update"));
       } catch (error) {
+        if (!isCurrentPlanOperation(ctx, operation, operation.store !== undefined)) return supersededResult("update");
         return result(errorMessage(error), { ...currentDetails("update"), error: errorMessage(error) }, true);
       }
     },
@@ -1149,9 +1298,11 @@ export function registerPlanTools(pi: ExtensionAPI): void {
     description: "Open the full-screen editable Markdown draft in an interactive UI. Save or cancel without entering Act mode.",
     parameters: EmptyPlanParams,
     async execute(_id, _params, _signal, _onUpdate, ctx) {
+      const operation = beginPlanOperation(ctx);
       const blocked = requirePlanMode("review");
       if (blocked) return blocked;
-      await reviewPlan(ctx, false);
+      await reviewPlan(ctx, false, "message", operation);
+      if (!isCurrentPlanOperation(ctx, operation)) return supersededResult("review");
       return result("Plan review closed; Plan mode remains active.", currentDetails("review"));
     },
     renderShell: "self",
@@ -1175,9 +1326,11 @@ export function registerPlanTools(pi: ExtensionAPI): void {
     promptSnippet: "Standard presentation step after plan-update. Renders the plan and gives the user full control over next steps.",
     parameters: EmptyPlanParams,
     async execute(_id, _params, _signal, _onUpdate, ctx) {
+      const operation = beginPlanOperation(ctx);
       const blocked = requirePlanMode("confirm");
       if (blocked) return blocked;
-      const outcome = await reviewPlan(ctx, true, "tool-result");
+      const outcome = await reviewPlan(ctx, true, "tool-result", operation);
+      if (!isCurrentPlanOperation(ctx, operation)) return supersededResult("confirm");
       onPlanModeChanged?.(ctx);
       const summary = outcome.approved
         ? outcome.executionChoice?.backend === "workflow" && latestWorkflowBinding?.status === "failed"
@@ -1214,9 +1367,10 @@ export function registerPlanTools(pi: ExtensionAPI): void {
     description: "Exit Plan mode without deleting the persisted draft and return to Act mode.",
     parameters: EmptyPlanParams,
     async execute(_id, _params, _signal, _onUpdate, ctx) {
+      const operation = beginPlanOperation(ctx);
       const blocked = requirePlanMode("exit");
       if (blocked) return blocked;
-      exitMode(ctx);
+      exitMode(ctx, operation);
       return result(buildPlanExitMessage(), currentDetails("exit"));
     },
     renderShell: "self",
@@ -1238,7 +1392,8 @@ export function registerPlanTools(pi: ExtensionAPI): void {
     label: "Plan Status",
     description: "Return the draft path, revision, approval status, and handoff state while Plan mode is active.",
     parameters: EmptyPlanParams,
-    async execute() {
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      beginPlanOperation(ctx);
       const blocked = requirePlanMode("status");
       if (blocked) return blocked;
       const details = currentDetails("status");
@@ -1353,43 +1508,61 @@ export function registerPlanCommand(pi: ExtensionAPI): void {
       return lower ? options.filter((option) => option.value.startsWith(lower)) : options;
     },
     async handler(args: string, ctx: PlanContext) {
+      const operation = beginPlanOperation(ctx);
       const trimmed = args.trim();
       const command = trimmed.toLowerCase();
       if (command === "exit" || command === "off") {
         if (isPlanMode()) {
-          exitMode(ctx);
-        } else {
+          exitMode(ctx, operation);
+        } else if (isCurrentPlanOperation(ctx, operation, false)) {
           ctx.ui.notify("Act mode · draft preserved", "info");
         }
         return;
       }
       if (command === "show") {
-        if (!isPlanMode()) await enterPlanMode(ctx);
-        await reviewPlan(ctx, false);
+        if (!isPlanMode()) {
+          await enterPlanMode(ctx, operation);
+          if (!isCurrentPlanOperation(ctx, operation)) return;
+        }
+        await reviewPlan(ctx, false, "message", operation);
+        if (!isCurrentPlanOperation(ctx, operation)) return;
         return;
       }
       if (command === "approve") {
-        if (!isPlanMode()) await enterPlanMode(ctx);
+        if (!isPlanMode()) {
+          await enterPlanMode(ctx, operation);
+          if (!isCurrentPlanOperation(ctx, operation)) return;
+        }
         if (!hasPlan()) {
           ctx.ui.notify("No Plan draft to approve.", "warning");
           return;
         }
-        await reviewPlan(ctx, true);
+        await reviewPlan(ctx, true, "message", operation);
+        if (!isCurrentPlanOperation(ctx, operation)) return;
         onPlanModeChanged?.(ctx);
         return;
       }
       if (command === "clear") {
-        if (!isPlanMode()) await enterPlanMode(ctx);
-        await savePlan(ctx, "", latestRevision);
+        if (!isPlanMode()) {
+          await enterPlanMode(ctx, operation);
+          if (!isCurrentPlanOperation(ctx, operation)) return;
+        }
+        const saved = await savePlan(ctx, "", latestRevision, operation);
+        if (!isCurrentPlanOperation(ctx, operation) || !saved) return;
         ctx.ui.notify("Plan draft cleared.", "info");
         return;
       }
       if (command === "tools") {
-        ctx.ui.notify(isPlanMode() ? PLAN_MODE_TOOL_NAMES.join(", ") : PLAN_ENTER_TOOL, "info");
+        if (isCurrentPlanOperation(ctx, operation, operation.store !== undefined)) {
+          ctx.ui.notify(isPlanMode() ? PLAN_MODE_TOOL_NAMES.join(", ") : PLAN_ENTER_TOOL, "info");
+        }
         return;
       }
       if (trimmed) {
-        if (!isPlanMode()) await enterPlanMode(ctx);
+        if (!isPlanMode()) {
+          await enterPlanMode(ctx, operation);
+          if (!isCurrentPlanOperation(ctx, operation)) return;
+        }
         if (ctx.isIdle?.() === false) {
           ctx.ui.notify("Plan mode active. Planning prompt was not queued because the agent is still busy.", "warning");
           return;
@@ -1397,7 +1570,8 @@ export function registerPlanCommand(pi: ExtensionAPI): void {
         extensionApi?.sendUserMessage(trimmed);
         return;
       }
-      await toggleMode(ctx);
+      await toggleMode(ctx, operation);
+      if (!isCurrentPlanOperation(ctx, operation, operation.store !== undefined)) return;
     },
   });
 }

@@ -19,12 +19,16 @@ const OPTIONS: LockOptions = {
   realpath: false,
   stale: 10_000,
   update: 2_000,
-  retries: { retries: 4, factor: 1.5, minTimeout: 25, maxTimeout: 250 },
+  retries: { retries: 8, factor: 2, minTimeout: 25, maxTimeout: 500 },
 };
 
+const SYNC_RETRY_DELAYS_MS = [25, 50, 100, 200, 400, 800, 1_000] as const;
+const SYNC_SLEEP = new Int32Array(new SharedArrayBuffer(4));
+
 function lockTarget(filePath: string): string {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  return filePath;
+  const canonicalPath = path.resolve(filePath);
+  fs.mkdirSync(path.dirname(canonicalPath), { recursive: true });
+  return canonicalPath;
 }
 
 export function lockSettingsResource(filePath: string): Promise<() => Promise<void>> {
@@ -33,5 +37,17 @@ export function lockSettingsResource(filePath: string): Promise<() => Promise<vo
 
 export function lockSettingsResourceSync(filePath: string): () => void {
   const { retries: _retries, ...syncOptions } = OPTIONS;
-  return properLockfile.lockSync(lockTarget(filePath), syncOptions);
+  const target = lockTarget(filePath);
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return properLockfile.lockSync(target, syncOptions);
+    } catch (error) {
+      if (!isLockContention(error) || attempt >= SYNC_RETRY_DELAYS_MS.length) throw error;
+      Atomics.wait(SYNC_SLEEP, 0, 0, SYNC_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+}
+
+function isLockContention(error: unknown): error is NodeJS.ErrnoException {
+  return typeof error === "object" && error !== null && (error as NodeJS.ErrnoException).code === "ELOCKED";
 }

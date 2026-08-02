@@ -1,7 +1,19 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { lockSettingsResourceSync } from "../settings/resource-lock.ts";
 import { isPlanMode } from "./plan.ts";
 
 interface PlanModelPatch {
@@ -51,27 +63,40 @@ export function loadPlanModelSetting(cwd: string, projectTrusted = true): string
 
 export function saveLocalPlanModelSetting(cwd: string, model: string | null): void {
   const filePath = join(cwd, ".pi", "settings.local.json");
-  let root: Record<string, unknown> = {};
-  if (existsSync(filePath)) {
-    const parsed = JSON.parse(readFileSync(filePath, "utf8")) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error("settings.local.json must contain a JSON object");
-    }
-    root = parsed as Record<string, unknown>;
-  }
-  const plan = root.plan && typeof root.plan === "object" && !Array.isArray(root.plan)
-    ? { ...(root.plan as Record<string, unknown>) }
-    : {};
-  plan.model = model;
-  root.plan = plan;
-  mkdirSync(dirname(filePath), { recursive: true });
-  const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  const release = lockSettingsResourceSync(filePath);
+  let temporary: string | undefined;
+  let descriptor: number | undefined;
   try {
-    writeFileSync(temporary, `${JSON.stringify(root, null, 2)}\n`, "utf8");
+    let root: Record<string, unknown> = {};
+    if (existsSync(filePath)) {
+      const parsed = JSON.parse(readFileSync(filePath, "utf8")) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("settings.local.json must contain a JSON object");
+      }
+      root = parsed as Record<string, unknown>;
+    }
+    const plan = root.plan && typeof root.plan === "object" && !Array.isArray(root.plan)
+      ? { ...(root.plan as Record<string, unknown>) }
+      : {};
+    plan.model = model;
+    root.plan = plan;
+    mkdirSync(dirname(filePath), { recursive: true });
+    temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+    descriptor = openSync(temporary, "wx", 0o600);
+    writeFileSync(descriptor, `${JSON.stringify(root, null, 2)}\n`, "utf8");
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
     renameSync(temporary, filePath);
-  } catch (error) {
-    try { rmSync(temporary, { force: true }); } catch { /* best effort */ }
-    throw error;
+    temporary = undefined;
+  } finally {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch { /* best effort */ }
+    }
+    if (temporary !== undefined) {
+      try { rmSync(temporary, { force: true }); } catch { /* best effort */ }
+    }
+    release();
   }
 }
 

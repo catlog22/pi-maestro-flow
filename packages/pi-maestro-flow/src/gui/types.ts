@@ -69,6 +69,8 @@ export interface GuiServerHandle {
   /** Absolute path of the discovery file, when written. */
   discoveryPath?: string;
   close: (reason?: string) => void;
+  /** Register lifecycle cleanup that runs synchronously when the server closes. */
+  onClose: (handler: (reason: string) => void) => () => void;
   /** Broadcast an SSE event to all connected clients. */
   pushEvent: (name: string, payload: unknown) => void;
   /** Register a route; may be called before or after listen. */

@@ -12,6 +12,8 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 export interface GuiToolEntry {
   name: string;
   execute: ToolDefinition["execute"];
+  /** Canonical TypeBox parameter schema captured with the executable definition. */
+  parameters?: ToolDefinition["parameters"];
   executionMode?: "sequential" | "parallel";
   /** Advisory hint for the GUI; the permission gateway gates invocation regardless. */
   mutating: boolean;
@@ -64,6 +66,7 @@ export function registerGuiTool(def: ToolDefinition, owner: string): void {
   getRegistry().tools.set(def.name, {
     name: def.name,
     execute: def.execute,
+    parameters: def.parameters,
     executionMode: def.executionMode,
     mutating: !READ_ONLY_TOOLS.has(def.name),
     owner,

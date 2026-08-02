@@ -61,6 +61,66 @@ interface PendingConnect {
 
 type UiStreamListener = (serverName: string, notification: ServerStreamResultPatchNotification["params"]) => void;
 
+const MCP_DISCOVERY_MAX_PAGES = 100;
+const MCP_DISCOVERY_MAX_ITEMS = 10_000;
+const MCP_DISCOVERY_MAX_METADATA_BYTES = 8 * 1024 * 1024;
+
+class McpDiscoveryPaginationError extends Error {}
+
+interface McpDiscoveryPage<T> {
+  items: T[];
+  nextCursor?: string;
+}
+
+async function collectPaginatedMcpItems<T>(
+  kind: "tools" | "resources",
+  fetchPage: (cursor: string | undefined) => Promise<McpDiscoveryPage<T>>,
+  signal?: AbortSignal,
+): Promise<T[]> {
+  const items: T[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  let pageCount = 0;
+  let metadataBytes = 0;
+
+  while (true) {
+    throwIfAborted(signal);
+    if (pageCount >= MCP_DISCOVERY_MAX_PAGES) {
+      throw new McpDiscoveryPaginationError(
+        `MCP ${kind} discovery exceeded page limit of ${MCP_DISCOVERY_MAX_PAGES}.`,
+      );
+    }
+
+    const page = await fetchPage(cursor);
+    throwIfAborted(signal);
+    pageCount += 1;
+
+    if (items.length + page.items.length > MCP_DISCOVERY_MAX_ITEMS) {
+      throw new McpDiscoveryPaginationError(
+        `MCP ${kind} discovery exceeded item limit of ${MCP_DISCOVERY_MAX_ITEMS}.`,
+      );
+    }
+
+    metadataBytes += Buffer.byteLength(JSON.stringify(page.items), "utf8");
+    if (metadataBytes > MCP_DISCOVERY_MAX_METADATA_BYTES) {
+      throw new McpDiscoveryPaginationError(
+        `MCP ${kind} discovery exceeded metadata limit of ${MCP_DISCOVERY_MAX_METADATA_BYTES} bytes.`,
+      );
+    }
+    items.push(...page.items);
+
+    const nextCursor = page.nextCursor;
+    if (!nextCursor) return items;
+    if (seenCursors.has(nextCursor)) {
+      throw new McpDiscoveryPaginationError(
+        `MCP ${kind} discovery received a repeated pagination cursor.`,
+      );
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+}
+
 async function closeResource(
   resource: { close(): Promise<void> },
   description: string,
@@ -419,33 +479,32 @@ export class McpServerManager {
   }
 
   private async fetchAllTools(client: Client, requestOptions?: RequestOptions): Promise<McpTool[]> {
-    const allTools: McpTool[] = [];
-    let cursor: string | undefined;
-
-    do {
-      const result = await client.listTools(cursor ? { cursor } : undefined, requestOptions);
-      allTools.push(...(result.tools ?? []));
-      cursor = result.nextCursor;
-    } while (cursor);
-
-    return allTools;
+    return collectPaginatedMcpItems(
+      "tools",
+      async (cursor) => {
+        const result = await client.listTools(cursor ? { cursor } : undefined, requestOptions);
+        return { items: result.tools ?? [], nextCursor: result.nextCursor };
+      },
+      requestOptions?.signal,
+    );
   }
 
   private async fetchAllResources(client: Client, requestOptions?: RequestOptions): Promise<McpResource[]> {
     try {
-      const allResources: McpResource[] = [];
-      let cursor: string | undefined;
-
-      do {
-        const result = await client.listResources(cursor ? { cursor } : undefined, requestOptions);
-        allResources.push(...(result.resources ?? []));
-        cursor = result.nextCursor;
-      } while (cursor);
-
-      return allResources;
-    } catch {
+      return await collectPaginatedMcpItems(
+        "resources",
+        async (cursor) => {
+          const result = await client.listResources(cursor ? { cursor } : undefined, requestOptions);
+          return { items: result.resources ?? [], nextCursor: result.nextCursor };
+        },
+        requestOptions?.signal,
+      );
+    } catch (error) {
       if (requestOptions?.signal?.aborted) {
         throwIfAborted(requestOptions.signal);
+      }
+      if (error instanceof McpDiscoveryPaginationError) {
+        throw error;
       }
       // Server may not support resources
       return [];

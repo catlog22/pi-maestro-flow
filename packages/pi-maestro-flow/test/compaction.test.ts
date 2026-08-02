@@ -1471,6 +1471,104 @@ test("session switch fences output-limit settlement awaiting internals", async (
   assert.equal(oldCompactions, 0);
 });
 
+test("reverse session interleaving preserves the fresh mid-turn intent", async () => {
+  let resolveInternals!: (value: { prepareCompaction(): unknown }) => void;
+  const internals = new Promise<{ prepareCompaction(): unknown }>((resolve) => { resolveInternals = resolve; });
+  let oldCompactions = 0;
+  let newCompactions = 0;
+  let newAborts = 0;
+  const oldStatuses: Array<string | undefined> = [];
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: () => internals,
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const oldCtx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    getContextUsage: () => ({ tokens: 950, contextWindow: 1_000, percent: 95 }),
+    hasPendingMessages: () => false,
+    compact() { oldCompactions += 1; },
+    sessionManager: { getSessionId: () => "old-output", getBranch: () => [{ type: "message" }] },
+    ui: {
+      setStatus(_key: string, value: string | undefined) { oldStatuses.push(value); },
+      notify() {},
+    },
+  } as never;
+  const newCtx = {
+    ...oldCtx,
+    model: { contextWindow: 1_000 },
+    abort() { newAborts += 1; },
+    compact() { newCompactions += 1; },
+    sessionManager: { getSessionId: () => "new-output", getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  guard.onSessionStart(oldCtx);
+  await guard.onOutputLimit(lengthTruncatedBatch(), oldCtx);
+  const staleSettlement = guard.onAgentEnd(oldCtx);
+  guard.onSessionStart(newCtx);
+  await guard.evaluate(highUsageToolBatch(1_100), newCtx);
+  const oldStatusCount = oldStatuses.length;
+  resolveInternals({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) });
+  await staleSettlement;
+
+  assert.equal(oldCompactions, 0, "old continuation must not settle the new session's intent");
+  assert.equal(oldStatuses.length, oldStatusCount, "old continuation must not publish UI after the switch");
+  assert.equal(newAborts, 1, "the new exhausted intent was captured");
+  await guard.onAgentEnd(newCtx);
+  assert.equal(newCompactions, 1, "the fresh intent remains available to its owning session");
+});
+
+test("reverse session interleaving keeps the fresh output-limit capture", async () => {
+  let resolveOldAuth!: (value: { ok: true; apiKey: string }) => void;
+  const oldAuth = new Promise<{ ok: true; apiKey: string }>((resolve) => { resolveOldAuth = resolve; });
+  const summaryModel = { provider: "summary", id: "small", contextWindow: 1_000, maxTokens: 100 };
+  let newCompactions = 0;
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: (cwd) => ({
+      enabled: true,
+      reserveTokens: cwd.includes("old") ? 100 : 200,
+      keepRecentTokens: 100,
+      model: "summary/small",
+    }),
+  });
+  const oldCtx = {
+    cwd: "D:\\old",
+    model: { provider: "session", id: "old", contextWindow: 1_000, maxTokens: 100 },
+    modelRegistry: {
+      find() { return summaryModel; },
+      getApiKeyAndHeaders() { return oldAuth; },
+    },
+    getContextUsage: () => ({ tokens: 950, contextWindow: 1_000, percent: 95 }),
+    hasPendingMessages: () => false,
+    compact() {},
+    sessionManager: { getSessionId: () => "old-output", getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  const newCtx = {
+    ...oldCtx,
+    cwd: "D:\\new",
+    model: { provider: "session", id: "new", contextWindow: 1_000, maxTokens: 100 },
+    modelRegistry: {
+      find() { return summaryModel; },
+      async getApiKeyAndHeaders() { return { ok: true, apiKey: "new-key" }; },
+    },
+    compact() { newCompactions += 1; },
+    sessionManager: { getSessionId: () => "new-output", getBranch: () => [{ type: "message" }] },
+  } as never;
+
+  guard.onSessionStart(oldCtx);
+  const staleCapture = guard.onOutputLimit(lengthTruncatedBatch(), oldCtx);
+  guard.onSessionStart(newCtx);
+  await guard.onOutputLimit(lengthTruncatedBatch(), newCtx);
+  resolveOldAuth({ ok: true, apiKey: "old-key" });
+  await staleCapture;
+  await guard.onAgentEnd(newCtx);
+
+  assert.equal(newCompactions, 1, "late old-session analysis must not overwrite the fresh intent");
+});
+
 test("pressure policy honors large reserve thresholds below the auto-prune ratio", () => {
   const messages = [{
     role: "assistant",

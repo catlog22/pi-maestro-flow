@@ -579,12 +579,49 @@ function isPositiveFiniteNumber(value: unknown): value is number {
 
 const writeQueues = new Map<string, Promise<void>>();
 
+type CompactionSettingsFileOperations = {
+  rename(source: string, destination: string): Promise<void>;
+  unlink(path: string): Promise<void>;
+};
+
+const defaultFileOperations: CompactionSettingsFileOperations = { rename, unlink };
+let fileOperations = defaultFileOperations;
+
+/** Test only: inject filesystem failures into the atomic replacement protocol. */
+export function setCompactionSettingsFileOperationsForTesting(
+  overrides: Partial<CompactionSettingsFileOperations> | null,
+): () => void {
+  const previous = fileOperations;
+  fileOperations = overrides ? { ...defaultFileOperations, ...overrides } : defaultFileOperations;
+  return () => { fileOperations = previous; };
+}
+
+function replacementBackupPath(path: string): string {
+  return `${path}.backup`;
+}
+
+async function recoverSettingsReplacement(path: string): Promise<void> {
+  const backupPath = replacementBackupPath(path);
+  if (!existsSync(backupPath)) return;
+  if (existsSync(path)) {
+    await fileOperations.unlink(backupPath);
+    return;
+  }
+  try {
+    await fileOperations.rename(backupPath, path);
+  } catch (error) {
+    throw new Error(`Cannot recover interrupted settings replacement for ${path}`, { cause: error });
+  }
+}
+
 function enqueueWrite(path: string, fn: () => Promise<void>): Promise<void> {
   const prev = writeQueues.get(path) ?? Promise.resolve();
   const next = prev.catch(() => undefined).then(async () => {
     const release = await lockSettingsResource(path);
-    try { await fn(); }
-    finally { await release(); }
+    try {
+      await recoverSettingsReplacement(path);
+      await fn();
+    } finally { await release(); }
   });
   const settled = next.catch(() => undefined);
   writeQueues.set(path, settled);
@@ -732,19 +769,46 @@ function readJsonRoot(path: string): Record<string, unknown> {
 async function atomicWriteJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporaryPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const backupPath = replacementBackupPath(path);
   await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
   try {
-    await rename(temporaryPath, path);
+    await fileOperations.rename(temporaryPath, path);
+    return;
   } catch (error) {
     const code = isRecord(error) && typeof error.code === "string" ? error.code : "";
-    if (process.platform === "win32" && ["EEXIST", "EPERM", "ENOTEMPTY"].includes(code)) {
-      await unlink(path).catch(() => undefined);
-      await rename(temporaryPath, path);
-      return;
+    if (!["EEXIST", "EPERM", "ENOTEMPTY"].includes(code)) {
+      await fileOperations.unlink(temporaryPath).catch(() => undefined);
+      throw error;
     }
-    await unlink(temporaryPath).catch(() => undefined);
-    throw error;
   }
+
+  try {
+    await fileOperations.rename(path, backupPath);
+  } catch (error) {
+    await fileOperations.unlink(temporaryPath).catch(() => undefined);
+    throw new Error(`Cannot preserve existing settings before replacing ${path}`, { cause: error });
+  }
+
+  try {
+    await fileOperations.rename(temporaryPath, path);
+  } catch (replacementError) {
+    let recoveryError: unknown;
+    try {
+      await fileOperations.rename(backupPath, path);
+    } catch (error) {
+      recoveryError = error;
+    }
+    await fileOperations.unlink(temporaryPath).catch(() => undefined);
+    if (recoveryError) {
+      throw new AggregateError(
+        [replacementError, recoveryError],
+        `Settings replacement failed and the previous settings remain recoverable at ${backupPath}`,
+      );
+    }
+    throw replacementError;
+  }
+
+  await fileOperations.unlink(backupPath);
 }
 
 function positiveNumber(value: unknown): number | undefined {

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { lockSettingsResource } from "../settings/resource-lock.ts";
 import {
   DEFAULT_PERMISSION_MODE,
   PERMISSION_MODES,
@@ -69,8 +70,7 @@ export async function updatePermissionRules(
   operation: "add" | "replace" | "remove",
   rules: string[],
 ): Promise<void> {
-  await serializeMutation(filePath, async () => {
-    const root = await readSettingsRoot(filePath);
+  await mutateSettings(filePath, async (root) => {
     const rawPermissions = isRecord(root.permissions) ? root.permissions : {};
     const existing = Array.isArray(rawPermissions[behavior])
       ? rawPermissions[behavior].filter((entry): entry is string => typeof entry === "string")
@@ -87,8 +87,7 @@ export async function updatePermissionRules(
 }
 
 export async function setPermissionDefaultMode(filePath: string, mode: PermissionMode): Promise<void> {
-  await serializeMutation(filePath, async () => {
-    const root = await readSettingsRoot(filePath);
+  await mutateSettings(filePath, async (root) => {
     const rawPermissions = isRecord(root.permissions) ? root.permissions : {};
     rawPermissions.defaultMode = mode;
     root.permissions = rawPermissions;
@@ -212,10 +211,21 @@ async function atomicWriteJson(filePath: string, value: Record<string, unknown>)
   }
 }
 
-async function serializeMutation(filePath: string, mutate: () => Promise<void>): Promise<void> {
+async function mutateSettings(
+  filePath: string,
+  mutate: (root: Record<string, unknown>) => Promise<void>,
+): Promise<void> {
   const key = canonicalFilePath(filePath);
   const previous = mutationQueues.get(key) ?? Promise.resolve();
-  const mutation = previous.catch(() => undefined).then(mutate);
+  const mutation = previous.catch(() => undefined).then(async () => {
+    const release = await lockSettingsResource(filePath);
+    try {
+      const root = await readSettingsRoot(filePath);
+      await mutate(root);
+    } finally {
+      await release();
+    }
+  });
   const settled = mutation.then(() => undefined, () => undefined);
   mutationQueues.set(key, settled);
   try {

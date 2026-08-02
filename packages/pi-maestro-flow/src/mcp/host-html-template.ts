@@ -2,6 +2,35 @@ import type { UiHostContext, UiResourceContent, UiResourceCsp } from "./types.ts
 
 // Use locally bundled AppBridge to avoid CDN Zod bundling issues
 const DEFAULT_APP_BRIDGE_MODULE_URL = "/app-bridge.bundle.js";
+const HOST_SANDBOX_CSP = [
+  "default-src 'none'",
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  "img-src data: blob:",
+  "font-src data:",
+  "media-src data: blob:",
+  "connect-src 'none'",
+  "form-action 'none'",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "frame-src 'none'",
+  "child-src 'none'",
+  "worker-src 'none'",
+  "manifest-src 'none'",
+  "navigate-to 'none'",
+].join("; ");
+
+export const OUTER_HOST_CSP = [
+  "default-src 'none'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  "connect-src 'self'",
+  "frame-src 'self'",
+  "form-action 'none'",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+].join("; ");
 
 export interface HostHtmlTemplateInput {
   sessionToken: string;
@@ -18,7 +47,7 @@ export interface HostHtmlTemplateInput {
 
 export function buildHostHtmlTemplate(input: HostHtmlTemplateInput): string {
   const cspContent = buildCspMetaContent(input.resource.meta.csp);
-  const resourceHtml = applyCspMeta(input.resource.html, cspContent);
+  const resourceHtml = applyHostSandboxCsp(applyCspMeta(input.resource.html, cspContent));
   const hostContext = input.hostContext ?? {};
 
   const sessionToken = safeInlineJSON(input.sessionToken);
@@ -101,7 +130,7 @@ export function buildHostHtmlTemplate(input: HostHtmlTemplateInput): string {
     </div>
   </header>
   <main>
-    <iframe id="mcp-app" referrerpolicy="no-referrer"></iframe>
+    <iframe id="mcp-app" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe>
   </main>
   <div class="overlay" id="error-overlay">
     <div class="panel">
@@ -116,12 +145,16 @@ export function buildHostHtmlTemplate(input: HostHtmlTemplateInput): string {
     const SERVER_NAME = ${serverName};
     const TOOL_NAME = ${toolName};
     const TOOL_ARGS = ${toolArgs};
+    const UI_HTML = ${uiHtml};
     const HOST_CONTEXT = ${hostContextJson};
     const ALLOW_ATTRIBUTE = ${allowAttribute};
     const REQUIRE_TOOL_CONSENT = ${requireToolConsent};
     const CACHE_TOOL_CONSENT = ${cacheToolConsent};
     const STREAM_CONTEXT_KEY = "pi-mcp-adapter/stream";
     const STREAM_PATCH_METHOD = "notifications/pi-mcp-adapter/ui-result-patch";
+
+    // Keep the session credential out of the sandbox's referrer and inherited base URL.
+    history.replaceState(null, "", location.pathname);
 
     const iframe = document.getElementById("mcp-app");
     const statusNode = document.getElementById("status");
@@ -204,7 +237,10 @@ export function buildHostHtmlTemplate(input: HostHtmlTemplateInput): string {
 
     // Also listen for raw postMessage events with custom types (notify, prompt, intent, etc.)
     // These bypass the AppBridge protocol but are used by some MCP UI implementations
+    let bridgeInvalidated = false;
+    let eventSource = null;
     window.addEventListener("message", async (event) => {
+      if (bridgeInvalidated || event.source !== iframe.contentWindow) return;
       const data = event.data;
       if (!data || typeof data !== "object") return;
 
@@ -275,20 +311,40 @@ export function buildHostHtmlTemplate(input: HostHtmlTemplateInput): string {
 
     // Connect bridge BEFORE loading iframe to ensure we're listening when the app sends ui/initialize
     try {
-      const transport = new PostMessageTransport(iframe.contentWindow, null);
+      const transport = new PostMessageTransport(iframe.contentWindow, iframe.contentWindow);
       await bridge.connect(transport);
     } catch (error) {
       console.error("[host] Bridge connection failed:", error);
       showError("Failed to initialize AppBridge: " + String(error));
     }
 
+    const invalidateBridge = async () => {
+      if (bridgeInvalidated) return;
+      bridgeInvalidated = true;
+      eventSource?.close();
+      try {
+        await bridge.close();
+      } catch (error) {
+        console.debug("Failed to close navigated AppBridge", error);
+      }
+      showError("MCP app navigation invalidated the AppBridge.");
+    };
+
+    let initialIframeLoadAccepted = false;
     const iframeLoaded = new Promise((resolve) => {
-      iframe.onload = resolve;
+      iframe.addEventListener("load", () => {
+        if (!initialIframeLoadAccepted) {
+          initialIframeLoadAccepted = true;
+          resolve();
+          return;
+        }
+        void invalidateBridge();
+      });
     });
-    iframe.src = "/ui-app?session=" + encodeURIComponent(SESSION_TOKEN);
+    iframe.srcdoc = UI_HTML;
     await iframeLoaded;
 
-    const eventSource = new EventSource("/events?session=" + encodeURIComponent(SESSION_TOKEN));
+    eventSource = new EventSource("/events?session=" + encodeURIComponent(SESSION_TOKEN));
     eventSource.addEventListener("tool-input", (event) => {
       try {
         bridge.sendToolInput(JSON.parse(event.data));
@@ -410,9 +466,16 @@ function toDirective(name: string, domains: string[] | undefined): string | null
   return `${name} ${domains.join(" ")}`;
 }
 
+export function applyHostSandboxCsp(html: string): string {
+  const metaTag = `<meta http-equiv="Content-Security-Policy" content="${escapeHtmlAttribute(HOST_SANDBOX_CSP)}">`;
+  if (/<head[^>]*>/i.test(html)) {
+    return html.replace(/<head[^>]*>/i, (match) => `${match}\n${metaTag}`);
+  }
+  return `${metaTag}\n${html}`;
+}
+
 export function applyCspMeta(html: string, cspContent: string | undefined): string {
   if (!cspContent) return html;
-  if (/http-equiv=["']Content-Security-Policy["']/i.test(html)) return html;
   const metaTag = `<meta http-equiv="Content-Security-Policy" content="${escapeHtmlAttribute(cspContent)}">`;
   if (/<head[^>]*>/i.test(html)) {
     return html.replace(/<head[^>]*>/i, (match) => `${match}\n${metaTag}`);

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
+import { Check } from "typebox/value";
 import type { GuiPermissionGateway, GuiServerHandle } from "./types.ts";
 import { getGuiTool, listGuiTools } from "./gui-registry.ts";
 
@@ -54,7 +55,7 @@ export function registerToolRoutes(server: GuiServerHandle, deps: ToolRouteDeps)
       return {
         name: tool.name,
         description: tool.description,
-        parameters: tool.parameters,
+        parameters: entry?.parameters ?? tool.parameters,
         sourceInfo: tool.sourceInfo,
         guiCallable: entry !== undefined,
         mutating: entry?.mutating ?? true,
@@ -69,7 +70,7 @@ export function registerToolRoutes(server: GuiServerHandle, deps: ToolRouteDeps)
       views.push({
         name: entry.name,
         description: entry.description ?? "",
-        parameters: undefined,
+        parameters: entry.parameters,
         sourceInfo: undefined,
         guiCallable: true,
         mutating: entry.mutating,
@@ -85,6 +86,10 @@ export function registerToolRoutes(server: GuiServerHandle, deps: ToolRouteDeps)
   const maxConcurrent = deps.maxConcurrentInvokes ?? 16;
   let activeInvokes = 0;
   const inflight = new Map<string, AbortController>();
+
+  server.onClose(() => {
+    for (const controller of inflight.values()) controller.abort();
+  });
 
   server.registerRoute("POST", "/cancel", (req) => {
     const invokeId = typeof req.body?.invokeId === "string" && req.body.invokeId ? req.body.invokeId : undefined;
@@ -106,36 +111,66 @@ export function registerToolRoutes(server: GuiServerHandle, deps: ToolRouteDeps)
       return { status: 503, error: "No active session context", code: "no_context" };
     }
 
-    const args = (req.body?.args ?? {}) as Record<string, unknown>;
-
-    // Mandatory permission gateway — no execute without authorization.
-    const block = await gateway.authorize(name, args);
-    if (block) {
-      return { status: 403, error: block.reason, code: "permission_denied" };
+    const parameters = entry.parameters ?? deps.listAllTools().find((tool) => tool.name === name)?.parameters;
+    if (!parameters) {
+      return { status: 503, error: `No parameter schema for GUI tool: ${name}`, code: "schema_unavailable" };
     }
-
-    if (activeInvokes >= maxConcurrent) {
-      return { status: 429, error: "Too many concurrent invokes", code: "rate_limited" };
+    const rawArgs = req.body && Object.hasOwn(req.body, "args") ? req.body.args : {};
+    if (!Check(parameters, rawArgs)) {
+      return { status: 400, error: "Invalid tool arguments", code: "invalid_args" };
     }
+    const args = rawArgs as Record<string, unknown>;
 
     const toolCallId = randomUUID();
     const invokeId =
       typeof req.body?.invokeId === "string" && req.body.invokeId ? req.body.invokeId : toolCallId;
+    if (inflight.has(invokeId)) {
+      return { status: 409, error: `Invoke id is already in flight: ${invokeId}`, code: "invoke_conflict" };
+    }
+    if (activeInvokes >= maxConcurrent) {
+      return { status: 429, error: "Too many concurrent invokes", code: "rate_limited" };
+    }
+
     const controller = new AbortController();
-    // Client disconnect cancels the in-flight tool execution.
     const onClose = () => controller.abort();
     req.raw.on("close", onClose);
     const timeoutMs = typeof req.body?.timeoutMs === "number" && req.body.timeoutMs > 0 ? req.body.timeoutMs : 0;
     const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
     activeInvokes += 1;
     inflight.set(invokeId, controller);
+
+    let executionStarted = false;
     let invokeOk = false;
     try {
+      const block = await gateway.authorize(name, args);
+      if (controller.signal.aborted) {
+        return { status: 499, error: "Invocation cancelled", code: "cancelled" };
+      }
+      if (block) {
+        return { status: 403, error: block.reason, code: "permission_denied" };
+      }
+
+      const currentCtx = deps.getCtx?.();
+      if (!currentCtx) {
+        return { status: 503, error: "No active session context", code: "no_context" };
+      }
+      if (currentCtx !== ctx) {
+        return { status: 409, error: "Session context changed during authorization", code: "stale_context" };
+      }
+      if (getGuiTool(name) !== entry) {
+        return { status: 409, error: `Tool registration changed during authorization: ${name}`, code: "stale_tool" };
+      }
+      if (!Check(parameters, args)) {
+        return { status: 400, error: "Invalid tool arguments", code: "invalid_args" };
+      }
+
+      executionStarted = true;
       const result = await entry.execute(
         toolCallId,
         args as never,
         controller.signal,
         (partial) => {
+          if (controller.signal.aborted) return;
           server.pushEvent("tool.progress", {
             toolCallId,
             invokeId,
@@ -143,8 +178,11 @@ export function registerToolRoutes(server: GuiServerHandle, deps: ToolRouteDeps)
             partial: serializeToolResult(partial as AgentToolResult<unknown>),
           });
         },
-        ctx,
+        currentCtx,
       );
+      if (controller.signal.aborted) {
+        return { status: 499, error: "Invocation cancelled", code: "cancelled" };
+      }
       invokeOk = true;
       return { result: { toolCallId, invokeId, ...serializeToolResult(result as AgentToolResult<unknown>) } };
     } catch (error) {
@@ -152,14 +190,22 @@ export function registerToolRoutes(server: GuiServerHandle, deps: ToolRouteDeps)
       return {
         status: cancelled ? 499 : 500,
         error: error instanceof Error ? error.message : String(error),
-        code: cancelled ? "cancelled" : "tool_error",
+        code: cancelled ? "cancelled" : executionStarted ? "tool_error" : "authorization_error",
       };
     } finally {
       activeInvokes -= 1;
-      inflight.delete(invokeId);
+      if (inflight.get(invokeId) === controller) inflight.delete(invokeId);
       if (timer) clearTimeout(timer);
       req.raw.off("close", onClose);
-      server.pushEvent("tool.invoked", { toolCallId, invokeId, name, ok: invokeOk });
+      if (executionStarted) {
+        server.pushEvent("tool.invoked", {
+          toolCallId,
+          invokeId,
+          name,
+          ok: invokeOk,
+          cancelled: controller.signal.aborted,
+        });
+      }
     }
   });
 }

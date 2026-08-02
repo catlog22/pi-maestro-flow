@@ -76,6 +76,7 @@ import {
   currentGoalPhase,
   switchCurrentGoal,
   reconcileWorkflowGoal,
+  recoverPendingGoalTodoDetachesAfterTodoStart,
   setWorkflowCoordinator,
   setGoalStateChangeListener,
   setGoalPanelOwnership,
@@ -1940,6 +1941,11 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     const restoredGoal = getActiveGoal();
     workflowSessionOptedIn = false;
     todoSessionStart(ctx);
+    try {
+      recoverPendingGoalTodoDetachesAfterTodoStart(ctx);
+    } catch (error) {
+      ctx.ui.notify(`Goal cleanup recovery remains pending: ${error instanceof Error ? error.message : String(error)}`, "warning");
+    }
     workflowBridge = new WorkflowBridge(ctx.cwd);
     workflowCoordinator = WorkflowCoordinator.create(
       workflowBridge,

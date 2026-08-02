@@ -39,6 +39,10 @@ test("gui-registry: registers, looks up, lists, and classifies tools", () => {
     assert.equal(todo.owner, "pi-maestro-flow");
     assert.equal(todo.mutating, true);
     assert.equal(typeof todo.execute, "function");
+    assert.deepEqual(todo.parameters, {
+      type: "object",
+      properties: { action: { type: "string" } },
+    });
 
     const list = getGuiTool("teammate-list");
     assert.ok(list);

@@ -276,3 +276,112 @@ test("MCP closeAll fences pending startups that are not yet in the registry", as
   assert.equal(manager.getConnection("A"), undefined);
   assert.equal(manager.startupSignals[0]?.aborted, true);
 });
+
+type DiscoveryMethods = {
+  fetchAllTools(client: unknown, requestOptions?: { signal?: AbortSignal }): Promise<unknown[]>;
+  fetchAllResources(client: unknown, requestOptions?: { signal?: AbortSignal }): Promise<unknown[]>;
+};
+
+function discoveryMethods(manager = new McpServerManager()): DiscoveryMethods {
+  return manager as unknown as DiscoveryMethods;
+}
+
+test("MCP tool discovery rejects repeated pagination cursors", async () => {
+  let calls = 0;
+  const client = {
+    async listTools() {
+      calls += 1;
+      return { tools: [], nextCursor: "loop" };
+    },
+  };
+
+  await assert.rejects(
+    discoveryMethods().fetchAllTools(client),
+    /MCP tools discovery received a repeated pagination cursor/,
+  );
+  assert.equal(calls, 2);
+});
+
+test("MCP resource discovery rejects cursor cycles instead of treating them as unsupported", async () => {
+  const cursors = ["cursor-a", "cursor-b", "cursor-a"];
+  let calls = 0;
+  const client = {
+    async listResources() {
+      return { resources: [], nextCursor: cursors[calls++] };
+    },
+  };
+
+  await assert.rejects(
+    discoveryMethods().fetchAllResources(client),
+    /MCP resources discovery received a repeated pagination cursor/,
+  );
+  assert.equal(calls, 3);
+});
+
+test("MCP discovery caps page count before issuing an unbounded request", async () => {
+  let calls = 0;
+  const client = {
+    async listTools() {
+      calls += 1;
+      return { tools: [], nextCursor: `cursor-${calls}` };
+    },
+  };
+
+  await assert.rejects(
+    discoveryMethods().fetchAllTools(client),
+    /MCP tools discovery exceeded page limit of 100/,
+  );
+  assert.equal(calls, 100);
+});
+
+test("MCP discovery caps cumulative item count", async () => {
+  const tools = Array.from({ length: 10_001 }, (_, index) => ({ name: `tool-${index}` }));
+  const client = {
+    async listTools() {
+      return { tools };
+    },
+  };
+
+  await assert.rejects(
+    discoveryMethods().fetchAllTools(client),
+    /MCP tools discovery exceeded item limit of 10000/,
+  );
+});
+
+test("MCP discovery caps cumulative metadata bytes", async () => {
+  const client = {
+    async listResources() {
+      return {
+        resources: [{ uri: "test://large", name: "large", description: "x".repeat(8 * 1024 * 1024) }],
+      };
+    },
+  };
+
+  await assert.rejects(
+    discoveryMethods().fetchAllResources(client),
+    /MCP resources discovery exceeded metadata limit of 8388608 bytes/,
+  );
+});
+
+test("MCP resource discovery preserves aborts while optional capability errors remain empty", async () => {
+  const controller = new AbortController();
+  const abortReason = new Error("caller cancelled discovery");
+  const abortingClient = {
+    async listResources() {
+      controller.abort(abortReason);
+      throw new Error("transport stopped");
+    },
+  };
+
+  await assert.rejects(
+    discoveryMethods().fetchAllResources(abortingClient, { signal: controller.signal }),
+    (error) => error === abortReason,
+  );
+
+  const unsupportedClient = {
+    async listResources() {
+      throw new Error("Method not found");
+    },
+  };
+  assert.deepEqual(await discoveryMethods().fetchAllResources(unsupportedClient), []);
+});

@@ -181,6 +181,7 @@ let activeSkillSnapshots: Map<string, SkillActivation> = new Map();
 let runSkillInjection: RunSkillInjection | undefined;
 let todoRevision = 0;
 let todoGeneration = 0;
+let todoSessionLoaded = false;
 let todoMutationQueue: Promise<void> = Promise.resolve();
 
 configureTodoSerialization({
@@ -208,6 +209,7 @@ export function initTodo(pi: ExtensionAPI): void {
 
 export function onSessionStart(ctx: TodoContext): void {
   todoGeneration++;
+  todoSessionLoaded = false;
   todoMutationQueue = Promise.resolve();
   skillLoader = ctx.skillLoader ?? new TodoSkillLoader({ cwd: ctx.cwd });
   skillRuntime = new SkillRuntime(skillLoader);
@@ -220,12 +222,14 @@ export function onSessionStart(ctx: TodoContext): void {
     rememberActor(task.createdBy);
     rememberActor(task.assignee);
   }
+  todoSessionLoaded = true;
   markTodoChanged();
   ctx.ui.setStatus("todo", undefined);
 }
 
 export function onSessionShutdown(ctx: TodoContext): void {
   todoGeneration++;
+  todoSessionLoaded = false;
   todoMutationQueue = Promise.resolve();
   tasks.clear();
   nextTaskId = 0;
@@ -1200,6 +1204,12 @@ export function detachTasksFromGoal(goalId: string): number {
   if (detached === 0) return 0;
   commitTodoState(next);
   return detached;
+}
+
+/** Persist and publish the state restored by Todo startup before a Goal recovery marker clears. */
+export function persistLoadedTodoStateForGoalDetachRecovery(): void {
+  if (!todoSessionLoaded) throw new Error("Todo state must be loaded before Goal cleanup recovery.");
+  commitTodoState(new Map(tasks));
 }
 
 // ---------------------------------------------------------------------------

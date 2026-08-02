@@ -1,6 +1,9 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import { existsSync, readFileSync } from "node:fs";
-import net from "node:net";
+import { request as httpRequest, type IncomingMessage } from "node:http";
+import { request as httpsRequest } from "node:https";
+import net, { type LookupFunction } from "node:net";
+import { Readable } from "node:stream";
 import { getWebSearchConfigPath } from "./utils.ts";
 
 const DEFAULT_MAX_REDIRECTS = 5;
@@ -152,8 +155,15 @@ interface ParsedCidr {
 }
 
 interface FetchRemoteOptions extends ValidationOptions {
+	/** Test seam; production requests use the pinned built-in HTTP(S) transport. */
 	fetch?: Fetch;
 	maxRedirects?: number;
+}
+
+interface ValidatedRemoteTarget {
+	url: URL;
+	/** Null only when an explicitly trusted proxy is responsible for DNS. */
+	addresses: LookupAddress[] | null;
 }
 
 async function defaultLookup(hostname: string): Promise<LookupAddress[]> {
@@ -161,6 +171,10 @@ async function defaultLookup(hostname: string): Promise<LookupAddress[]> {
 }
 
 export async function validateRemoteUrl(rawUrl: string | URL, options: ValidationOptions = {}): Promise<URL> {
+	return (await resolveRemoteTarget(rawUrl, options)).url;
+}
+
+async function resolveRemoteTarget(rawUrl: string | URL, options: ValidationOptions): Promise<ValidatedRemoteTarget> {
 	const url = rawUrl instanceof URL ? rawUrl : new URL(rawUrl);
 	if (url.protocol !== "http:" && url.protocol !== "https:") {
 		throw new Error("Only HTTP and HTTPS URLs can be fetched remotely");
@@ -175,26 +189,28 @@ export async function validateRemoteUrl(rawUrl: string | URL, options: Validatio
 	const allowRanges = parseAllowRanges(options.allowRanges);
 	assertDomainPolicy(hostname, options.domainPolicy);
 
-	if (net.isIP(hostname)) {
+	const literalFamily = net.isIP(hostname);
+	if (literalFamily) {
 		assertPublicAddress(hostname, hostname, allowRanges);
-		return url;
+		return { url, addresses: [{ address: hostname, family: literalFamily }] };
 	}
 
-	if (shouldTrustEnvProxy(url, options.trustEnvProxy === true)) return url;
+	if (shouldTrustEnvProxy(url, options.trustEnvProxy === true)) return { url, addresses: null };
 
-	let addresses: LookupAddress[];
+	let resolved: LookupAddress[];
 	try {
-		addresses = await (options.lookup ?? defaultLookup)(hostname);
+		resolved = await (options.lookup ?? defaultLookup)(hostname);
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		throw new Error(`Failed to resolve ${hostname}: ${message}`);
 	}
 
-	if (addresses.length === 0) throw new Error(`Failed to resolve ${hostname}: no addresses returned`);
-	for (const { address } of addresses) {
+	if (resolved.length === 0) throw new Error(`Failed to resolve ${hostname}: no addresses returned`);
+	const addresses = resolved.map(({ address }) => {
 		assertPublicAddress(address, hostname, allowRanges);
-	}
-	return url;
+		return { address: normalizeHostname(address), family: net.isIP(normalizeHostname(address)) };
+	});
+	return { url, addresses };
 }
 
 export async function fetchRemoteUrl(
@@ -202,27 +218,73 @@ export async function fetchRemoteUrl(
 	init: RequestInit = {},
 	options: FetchRemoteOptions = {},
 ): Promise<Response> {
-	const fetchImpl = options.fetch ?? fetch;
 	const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
-	let current = await validateRemoteUrl(url, options);
+	let target = await resolveRemoteTarget(url, options);
 	let requestInit = init;
 
 	for (let redirects = 0; redirects <= maxRedirects; redirects++) {
-		const response = await fetchImpl(current, { ...requestInit, redirect: "manual" });
+		const response = options.fetch
+			? await options.fetch(target.url, { ...requestInit, redirect: "manual" })
+			: target.addresses === null
+				? await fetch(target.url, { ...requestInit, redirect: "manual" })
+				: await fetchPinned(target.url, requestInit, target.addresses[0]);
 		if (!REDIRECT_STATUSES.has(response.status)) return response;
 
 		const location = response.headers.get("location");
 		if (!location) return response;
-		if (redirects === maxRedirects) throw new Error(`Too many redirects fetching ${current.toString()}`);
+		if (redirects === maxRedirects) throw new Error(`Too many redirects fetching ${target.url.toString()}`);
 
-		current = await validateRemoteUrl(new URL(location, current), options);
+		await response.body?.cancel();
+		target = await resolveRemoteTarget(new URL(location, target.url), options);
 		if (response.status === 303 || ((response.status === 301 || response.status === 302) && requestInit.method?.toUpperCase() === "POST")) {
 			const { body: _body, ...nextInit } = requestInit;
 			requestInit = { ...nextInit, method: "GET" };
 		}
 	}
 
-	throw new Error(`Too many redirects fetching ${current.toString()}`);
+	throw new Error(`Too many redirects fetching ${target.url.toString()}`);
+}
+
+async function fetchPinned(url: URL, init: RequestInit, address: LookupAddress): Promise<Response> {
+	const request = new Request(url, { ...init, redirect: "manual" });
+	const body = request.body ? Buffer.from(await request.arrayBuffer()) : undefined;
+	const headers = Object.fromEntries(request.headers.entries());
+	headers.host = url.host;
+
+	const pinnedLookup: LookupFunction = (_hostname, lookupOptions, callback) => {
+		if (lookupOptions.all) callback(null, [address]);
+		else callback(null, address.address, address.family);
+	};
+
+	return new Promise<Response>((resolve, reject) => {
+		const transport = url.protocol === "https:" ? httpsRequest : httpRequest;
+		const nodeRequest = transport({
+			protocol: url.protocol,
+			hostname: normalizeHostname(url.hostname),
+			port: url.port ? Number(url.port) : undefined,
+			method: request.method,
+			path: `${url.pathname}${url.search}`,
+			headers,
+			signal: request.signal,
+			agent: false,
+			lookup: pinnedLookup,
+			...(url.protocol === "https:" ? { servername: normalizeHostname(url.hostname) } : {}),
+		}, (incoming) => resolve(toFetchResponse(incoming, request.method)));
+		nodeRequest.once("error", reject);
+		if (body) nodeRequest.end(body);
+		else nodeRequest.end();
+	});
+}
+
+function toFetchResponse(incoming: IncomingMessage, requestMethod: string): Response {
+	const headers = new Headers();
+	for (let index = 0; index < incoming.rawHeaders.length; index += 2) {
+		headers.append(incoming.rawHeaders[index], incoming.rawHeaders[index + 1]);
+	}
+	const status = incoming.statusCode ?? 0;
+	const hasBody = requestMethod !== "HEAD" && status !== 101 && status !== 204 && status !== 205 && status !== 304;
+	const body = hasBody ? Readable.toWeb(incoming) as ReadableStream<Uint8Array> : null;
+	return new Response(body, { status, statusText: incoming.statusMessage, headers });
 }
 
 function normalizeHostname(hostname: string): string {
