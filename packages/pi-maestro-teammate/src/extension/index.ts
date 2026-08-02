@@ -923,9 +923,12 @@ export default function registerTeammateExtension(
     requestedMode: "steer" | "follow_up",
   ): { delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean } => {
     // Durable mailbox authoritative path: enqueue and let the consumer inject.
+    // Only for live agents with a writable stdin; sleeping agents needing
+    // cold-resume (restart) keep the synchronous direct path so restart fires
+    // before teammate-send returns (lifecycle contract).
     const host = mailboxHost;
-    if (host && host.mode === "authoritative" && requestedMode !== "steer") {
-      const agent = state.activeRuns.get(correlationId);
+    const agent = state.activeRuns.get(correlationId);
+    if (host && host.mode === "authoritative" && requestedMode !== "steer" && agent?.stdin?.writable) {
       void host.rollout.deliver({
         senderId: "caller",
         recipientId: agent?.name ?? targetLabel,

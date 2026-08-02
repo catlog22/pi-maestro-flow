@@ -2132,7 +2132,9 @@ export async function handleProxyRequest(
         return;
       }
       // Durable mailbox authoritative path: enqueue and let the consumer inject.
-      if (mailboxDeliver && requestedMode !== "abort" && requestedMode !== "steer") {
+      // Only for live agents with a writable stdin; sleeping agents needing
+      // cold-resume keep the synchronous direct path (lifecycle contract).
+      if (mailboxDeliver && requestedMode !== "abort" && requestedMode !== "steer" && agent?.stdin?.writable) {
         void mailboxDeliver({
           senderId: parentCid ?? "caller",
           recipientId: to,
