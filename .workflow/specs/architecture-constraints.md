@@ -98,7 +98,7 @@ API Manager MUST 以 provider/modelId 为键持久化每模型 defaultThinkingLe
 
 </spec-entry>
 
-<spec-entry category="arch" keywords="effort thinking-level provider model-defaults atomic" date="2026-07-22" sid="S-20260722-hxna" title="统一 /effort 的模型级思考强度边界" description="锁定 /effort 的统一 Provider 覆盖、canonical level 与原子提交语义" source="analyze:20260722-001-analyze">
+<spec-entry category="arch" keywords="effort thinking-level provider model-defaults atomic" date="2026-07-22" sid="S-20260722-hxna" title="统一 /effort 的模型级思考强度边界" description="锁定 /effort 的统一 Provider 覆盖、canonical level 与原子提交语义" source="analyze:20260722-001-analyze" status="deprecated" superseded-by="S-20260802-kxvv">
 
 ### 统一 /effort 的模型级思考强度边界
 
@@ -303,5 +303,13 @@ Theme 类有 name 字段，createTheme 从 themeJson.name 赋值，内置 dark.j
 ### Graph task 自然结算不得取消共享 cohort
 
 graph task 与 graph 容器共享 AbortController 时，task 的自然成功、non-wakeable 结算或失败状态收敛不得 abort 共享 controller；cohort cancellation 只能由 graph 容器结算或显式 killAgentTree 发起。root execute 与 handleProxyRequest 两条调度路径必须同步遵守，并以能响应 abort 的公开路径行为测试覆盖依赖 task。
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="effort,thinking-level,max,canonical,modeldefaults" date="2026-08-02" sid="S-20260802-kxvv" title="统一 /effort 的模型级思考强度边界（含 max canonical level）" description="锁定 /effort 的统一 Provider 覆盖、canonical level（含 max）与原子提交语义" source="master@d4ce62f0" supersedes="S-20260722-hxna">
+
+### 统一 /effort 的模型级思考强度边界（含 max canonical level）
+
+单一 /effort 命令 MUST 以当前 ctx.model 的 provider/modelId 为键复用 modelDefaults，覆盖 API Manager 与 Pi 系统原生 provider；UI MUST 只展示当前模型支持的 Pi canonical levels（off/minimal/low/medium/high/xhigh/max）。max 仅在模型 thinkingLevelMap 声明 max wire（xhigh→"max" 或 max→"max"）时展示，并作为正式 level 持久化与传给 setThinkingLevel；不支持 max 的模型由 Pi runtime clamp 到 xhigh。thinkingLevelMap 内的 Provider wire value 仍只作映射，不得与 canonical level 混淆。选择提交 MUST 先原子持久化再应用 runtime，取消或失败不得改变当前状态。
 
 </spec-entry>

@@ -1,5 +1,8 @@
 {
   "skills": [
     "../packages/pi-maestro-flow/.pi/skills"
-  ]
+  ],
+  "compaction": {
+    "model": "maestro-qwen--deepseek-v4-flash/deepseek-v4-flash"
+  }
 }
