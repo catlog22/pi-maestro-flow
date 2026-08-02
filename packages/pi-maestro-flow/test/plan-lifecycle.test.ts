@@ -7,14 +7,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { CompactionArbiter } from "../src/compaction/compaction-arbiter.ts";
 import {
   consumePlanCleanContextCompaction,
-  PLAN_CLEAN_CONTEXT_COMPACTION_MARKER,
   getMode,
   getPlanHandoffStatus,
   initPlan,
-  applyPlanContextToCompaction,
   onAgentEndPlan,
   onBeforeAgentStartPlan,
-  onCompactPlan,
   onContextPlan,
   onSessionShutdownPlan,
   onSessionStartPlan,
@@ -22,8 +19,14 @@ import {
   registerPlanCommand,
   registerPlanTools,
   setPlanModeChangeListener,
+  type PlanWorkflowPublicationResult,
 } from "../src/tools/plan.ts";
-import { PlanStore } from "../src/tools/plan-store.ts";
+import {
+  PlanStore,
+  type LoadedPlan,
+  type PlanExecutionChoice,
+  type PlanWorkflowBinding,
+} from "../src/tools/plan-store.ts";
 import {
   addGoal,
   executeGoal,
@@ -44,6 +47,9 @@ interface CommandLike {
   handler(args: string, ctx: ExtensionContext): Promise<void> | void;
 }
 
+const COMPACT_EXECUTION_INPUTS = ["\x1b[B", "\x1b[C", "\x1b[13;5u"];
+const WORKFLOW_CURRENT_EXECUTION_INPUTS = ["\x1b[C", "\x1b[13;5u"];
+
 function createHarness(
   root: string,
   autoConfirm = false,
@@ -61,6 +67,14 @@ function createHarness(
     idle?: boolean;
     arbiter?: CompactionArbiter;
     deferCompactionComplete?: boolean;
+    workflowConfirmation?: () => {
+      current?: { sessionId: string; intent: string; available: boolean; reason?: string };
+      allowNew: boolean;
+    };
+    publishWorkflowPlan?: (
+      approved: LoadedPlan,
+      execution: PlanExecutionChoice,
+    ) => Promise<PlanWorkflowPublicationResult>;
   } = {},
 ) {
   let active = ["Read", "Write", "Bash", "todo", "custom-tool"];
@@ -195,6 +209,12 @@ function createHarness(
     },
     hasExecutableTodo: (handoffKey) => handoff.todoKeys.includes(handoffKey),
     compactionArbiter: runtime.arbiter,
+    ...(runtime.workflowConfirmation
+      ? { workflowConfirmation: () => runtime.workflowConfirmation!() }
+      : {}),
+    ...(runtime.publishWorkflowPlan
+      ? { publishWorkflowPlan: (_ctx, approved, execution) => runtime.publishWorkflowPlan!(approved, execution) }
+      : {}),
   });
   registerPlanTools(pi);
   registerPlanCommand(pi);
@@ -262,11 +282,10 @@ test("Plan lifecycle leaves the tool surface untouched across every transition",
     await execute(harness, "plan-enter");
     assert.equal(getMode(), "plan");
     assert.equal(harness.statuses.at(-1), "PLAN");
-    // 2e7c19b2 made Plan mode prompt-only: swapping the surface here would
-    // invalidate the cached prompt prefix, so Write stays callable and the
-    // editing constraint is carried by the mode note instead of by a block.
+    // The tool surface stays stable for prompt-cache reuse, while the tool-call hook
+    // enforces the read-only boundary until approval.
     assert.deepEqual(harness.active, actSnapshot);
-    assert.equal(onToolCallPlan({ toolName: "Write", input: {} }), undefined);
+    assert.match(onToolCallPlan({ toolName: "Write", input: {} })?.reason ?? "", /read-only before approval/);
 
     const updated = await execute(harness, "plan-update", { markdown: "# Durable plan" });
     assert.equal(updated.details.revision, 1);
@@ -354,10 +373,8 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     assert.ok(loaded.manifest.approvedPath);
     assert.equal(await readFile(join(store.plansDir, loaded.manifest.approvedPath!), "utf8"), "# Approved\n\nImplement safely");
 
-    // The handoff gate reports readiness, it no longer enforces it: a5b0d8b7 made
-    // Plan mode advisory and onToolCallPlan blocks nothing. What survives is the
-    // discrimination itself — only a todo carrying this approval's handoff key
-    // satisfies the gate, and an unrelated one must not.
+    // Approval returns to Act mode, so the pre-approval read-only hook is inactive.
+    // The handoff gate remains advisory and is satisfied only by the matching Todo key.
     assert.equal(onToolCallPlan({ toolName: "Write", input: {} }), undefined);
     assert.equal(getPlanHandoffStatus(), "todo-required");
     harness.handoff.todoKeys.push("unrelated-handoff");
@@ -472,7 +489,7 @@ test("/plan approve compacts with an explicit approved-Plan link before executio
     false,
     false,
     "compact-chat",
-    ["2"],
+    COMPACT_EXECUTION_INPUTS,
     false,
     { todoKeys: [] },
     undefined,
@@ -486,7 +503,8 @@ test("/plan approve compacts with an explicit approved-Plan link before executio
     assert.equal(harness.compactions.length, 1);
     assert.match(harness.compactions[0].customInstructions ?? "", /authoritative execution contract/);
     assert.match(harness.compactions[0].customInstructions ?? "", /# Compact Plan/);
-    assert.match(harness.compactions[0].customInstructions ?? "", /current\.md/);
+    assert.match(harness.compactions[0].customInstructions ?? "", /approvals[\\/].*\.md/);
+    assert.doesNotMatch(harness.compactions[0].customInstructions ?? "", /current\.md/);
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(harness.messages.length, 1);
     assert.doesNotMatch(harness.messages.at(-1) ?? "", /# Compact Plan/);
@@ -497,9 +515,17 @@ test("/plan approve compacts with an explicit approved-Plan link before executio
   }
 });
 
-test("plan-confirm tool resets context without command session APIs", async () => {
+test("plan-confirm tool compacts the current Pi session without replacing it", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-tool-compact-"));
-  const harness = createHarness(root, false, false, false, false, "compact-tool-chat", ["2"]);
+  const harness = createHarness(
+    root,
+    false,
+    false,
+    false,
+    false,
+    "compact-tool-chat",
+    COMPACT_EXECUTION_INPUTS,
+  );
   harness.ctx.isIdle = () => false;
   try {
     await onSessionStartPlan(harness.ctx);
@@ -508,7 +534,8 @@ test("plan-confirm tool resets context without command session APIs", async () =
     const confirmed = await execute(harness, "plan-confirm");
     assert.equal(confirmed.details.approved, true);
     assert.equal(harness.compactions.length, 1);
-    assert.match(harness.compactions[0]?.customInstructions ?? "", /maestro-plan-clean-context/);
+    assert.match(harness.compactions[0]?.customInstructions ?? "", /authoritative execution contract/);
+    assert.doesNotMatch(harness.compactions[0]?.customInstructions ?? "", /maestro-plan-clean-context/);
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(harness.messages.length, 1);
     assert.equal(getMode(), "act");
@@ -519,79 +546,130 @@ test("plan-confirm tool resets context without command session APIs", async () =
   }
 });
 
-test("Plan confirmation can execute in a new session from command-capable context", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-clear-"));
-  const harness = createHarness(root, false, false, false, false, "clear-chat", ["2"], true);
+test("Plan approval never creates a new Pi session even when the host exposes newSession", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-no-new-session-"));
+  const harness = createHarness(root, true, false, false, false, "same-session-chat", undefined, true);
   try {
     await onSessionStartPlan(harness.ctx);
     await execute(harness, "plan-enter");
-    await execute(harness, "plan-update", { markdown: "# Clean Context Plan" });
-    await executeCommand(harness, "plan", "approve");
-    assert.equal(harness.newSessions, 1);
-    assert.equal(harness.messages.length, 1);
-    assert.match(harness.messages.at(-1) ?? "", /# Clean Context Plan/);
-    assert.equal(getPlanHandoffStatus(), "todo-required");
-    const replacementStore = new PlanStore(harness.ctx.cwd, {
+    await execute(harness, "plan-update", { markdown: "# Same Pi Session Plan" });
+    const confirmed = await execute(harness, "plan-confirm");
+    assert.equal(confirmed.details.approved, true);
+    assert.equal(harness.newSessions, 0);
+    assert.equal(getMode(), "act");
+    const store = new PlanStore(harness.ctx.cwd, {
       rootDir: join(root, "global"),
-      session: { id: "clear-chat-replacement" },
+      session: { id: "same-session-chat" },
     });
-    const replacement = await replacementStore.load();
-    assert.equal(replacement.manifest.status, "approved");
-    assert.ok(replacement.manifest.handoffKey);
-    const sourceStore = new PlanStore(harness.ctx.cwd, {
-      rootDir: join(root, "global"),
-      session: { id: "clear-chat" },
-    });
-    const sourceHandoffKey = (await sourceStore.load()).manifest.handoffKey;
-    assert.equal(replacement.manifest.handoffKey, sourceHandoffKey);
-    await rm(replacementStore.manifestPath, { force: true });
-    assert.equal((await replacementStore.load()).manifest.handoffKey, sourceHandoffKey);
+    const loaded = await store.load();
+    assert.equal(loaded.manifest.status, "approved");
+    assert.deepEqual(loaded.manifest.execution, { backend: "standalone", context: "current" });
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
   }
 });
 
-for (const failure of ["approval", "send"] as const) {
-  test(`Plan execute-clear fails closed inside the replacement session when ${failure} fails`, async () => {
-    const root = await mkdtemp(join(tmpdir(), `pi-plan-confirm-clear-${failure}-`));
-    const harness = createHarness(
-      root,
-      false,
-      false,
-      false,
-      false,
-      `clear-${failure}-chat`,
-      ["2"],
-      true,
-      { todoKeys: [] },
-      failure,
-    );
-    try {
-      await onSessionStartPlan(harness.ctx);
-      await execute(harness, "plan-enter");
-      await execute(harness, "plan-update", { markdown: `# Replacement ${failure} failure` });
-      const confirmed = await execute(harness, "plan-confirm");
-      assert.equal(confirmed.details.approved, true);
-      assert.equal(harness.newSessions, 1);
-      // "Fails closed" no longer means a Write block — a5b0d8b7 removed those. For
-      // an approval failure it means the replacement lands back in Plan mode with no
-      // handoff key; for a send failure the approval stands but the gate cannot be
-      // satisfied, because no todo ever received the key the undelivered prompt carried.
-      assert.notEqual(getPlanHandoffStatus(), "ready");
-      assert.equal(getMode(), failure === "approval" ? "plan" : "act");
-      assert.match(
-        harness.notifications.join("\n"),
-        failure === "approval"
-          ? /failed closed in Plan mode/
-          : /holds the approved Plan.*prompt could not be delivered/,
-      );
-    } finally {
-      onSessionShutdownPlan(harness.ctx);
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-}
+test("Workflow-backed approval persists a bound result before delivering the Run brief", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-workflow-bound-"));
+  let publications = 0;
+  const harness = createHarness(
+    root,
+    false,
+    false,
+    false,
+    false,
+    "workflow-bound-chat",
+    WORKFLOW_CURRENT_EXECUTION_INPUTS,
+    false,
+    { todoKeys: [] },
+    undefined,
+    {
+      workflowConfirmation: () => ({
+        current: { sessionId: "workflow-1", intent: "Execute approved Plan", available: true },
+        allowNew: true,
+      }),
+      async publishWorkflowPlan(approved, execution) {
+        publications++;
+        assert.deepEqual(execution, { backend: "workflow", context: "current", workflowTarget: "current" });
+        assert.equal(approved.manifest.workflowBinding?.status, "pending");
+        return {
+          binding: {
+            status: "bound",
+            handoffKey: approved.manifest.handoffKey!,
+            sourceChecksum: approved.manifest.approvedChecksum!,
+            workflowSessionId: "workflow-1",
+            workflowSessionGeneration: "canonical:valid:workflow-1:2",
+            artifactId: "ART-001-001",
+            producerRunId: "run-plan-publish",
+            executionRunId: "run-execute",
+            requestId: "req-plan-publish",
+            updatedAt: "2026-08-02T12:00:00.000Z",
+          },
+          executionMessage: "WORKFLOW RUN BRIEF",
+        };
+      },
+    },
+  );
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Workflow Bound Plan" });
+    const confirmed = await execute(harness, "plan-confirm");
+    const text = confirmed.content[0]?.text ?? "";
+    assert.equal(publications, 1);
+    assert.equal(confirmed.details.approved, true);
+    assert.equal(confirmed.details.workflowBinding?.status, "bound");
+    assert.equal(confirmed.details.workflowBinding?.deliveryStatus, "delivered");
+    assert.match(text, /WORKFLOW RUN BRIEF/);
+    assert.match(text, /workflow/);
+    assert.equal(harness.messages.length, 0, "tool-result delivery must not enqueue a duplicate implementation prompt");
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Workflow publication failure preserves approval and never falls back to standalone execution", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-workflow-failed-"));
+  const harness = createHarness(
+    root,
+    false,
+    false,
+    false,
+    false,
+    "workflow-failed-chat",
+    WORKFLOW_CURRENT_EXECUTION_INPUTS,
+    false,
+    { todoKeys: [] },
+    undefined,
+    {
+      workflowConfirmation: () => ({
+        current: { sessionId: "workflow-1", intent: "Execute approved Plan", available: true },
+        allowNew: false,
+      }),
+      async publishWorkflowPlan() {
+        throw new Error("publisher unavailable");
+      },
+    },
+  );
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Workflow Failure Plan" });
+    const confirmed = await execute(harness, "plan-confirm");
+    const text = confirmed.content[0]?.text ?? "";
+    assert.equal(confirmed.details.approved, true);
+    assert.equal(confirmed.details.workflowBinding?.status, "failed");
+    assert.match(text, /binding failed/i);
+    assert.match(text, /execution was not started/i);
+    assert.equal(harness.messages.length, 0);
+    assert.match(harness.notifications.join("\n"), /publisher unavailable/);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("Esc closes Plan confirmation, interrupts the turn, and preserves Plan mode", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-cancel-"));
@@ -628,7 +706,7 @@ test("plan handoff yields to an in-flight native or mid-turn compaction", async 
     false,
     false,
     "compact-race-chat",
-    ["2"],
+    COMPACT_EXECUTION_INPUTS,
     false,
     { todoKeys: [] },
     undefined,
@@ -658,7 +736,7 @@ test("Plan confirmation exits intentionally and injects the Act transition once 
     false,
     false,
     "exit-chat",
-    ["5"],
+    ["4"],
     false,
     { todoKeys: [] },
     undefined,
@@ -709,7 +787,7 @@ test("Continue discussion opens text input, queues the response, and interrupts 
     false,
     false,
     "discuss-chat",
-    ["4"],
+    ["3"],
     false,
     { todoKeys: [] },
     undefined,
@@ -759,7 +837,7 @@ test("Approval failure leaves Plan mode and Plan tools active", async () => {
   }
 });
 
-test("Plan hooks keep compatibility capture and gate nothing at the tool-call layer", async () => {
+test("Plan hooks preserve read-only discovery and block mutations before approval", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-hooks-"));
   const harness = createHarness(root);
   try {
@@ -787,16 +865,36 @@ test("Plan hooks keep compatibility capture and gate nothing at the tool-call la
     assert.match(planPrompt, /Ask 2-4 related questions per call/);
     assert.match(planPrompt, /scope, boundaries, non-goals/);
     assert.match(planPrompt, /quality gates to key Todos/);
-    // a5b0d8b7 removed every hard block: the editing constraint now lives only in
-    // the prompt above. The hook stays wired so the extension keeps a seam, but it
-    // must pass everything through — including the tools it used to reject, since a
-    // partial block would be worse than none (the model would learn the wrong rule).
-    for (const toolName of ["Write", "Edit", "NotebookEdit", "custom-tool", "bash", "Bash", "browser"]) {
+    for (const toolName of ["Read", "ffgrep", "fffind", "smart_search"]) {
       assert.equal(onToolCallPlan({ toolName, input: {} }), undefined, toolName);
     }
-    for (const action of ["status", "next", "done", "edit", "pause", "resume"]) {
-      assert.equal(onToolCallPlan({ toolName: "run-control", input: { action } }), undefined, action);
+    assert.match(onToolCallPlan({ toolName: "custom-tool", input: {} })?.reason ?? "", /blocked/);
+    for (const toolName of ["Write", "Edit", "NotebookEdit"]) {
+      assert.match(onToolCallPlan({ toolName, input: {} })?.reason ?? "", /read-only before approval/);
     }
+    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "rg -n Plan src" } }), undefined);
+    for (const command of [
+      "rm -rf src",
+      "sed -i 's/a/b/' src/app.ts",
+      "git diff --output=review.patch",
+      "git show --ext-diff HEAD",
+      "rg --pre 'touch modified.txt' Plan src",
+    ]) {
+      assert.match(onToolCallPlan({ toolName: "bash", input: { command } })?.reason ?? "", /blocked/, command);
+    }
+    assert.equal(onToolCallPlan({ toolName: "run-control", input: { action: "status" } }), undefined);
+    assert.equal(onToolCallPlan({ toolName: "run-control", input: { action: "brief" } }), undefined);
+    for (const action of ["next", "done", "edit"]) {
+      assert.match(onToolCallPlan({ toolName: "run-control", input: { action } })?.reason ?? "", /blocked/, action);
+    }
+    assert.equal(onToolCallPlan({ toolName: "todo", input: { action: "list" } }), undefined);
+    assert.match(onToolCallPlan({ toolName: "todo", input: { action: "create" } })?.reason ?? "", /blocked/);
+    assert.equal(onToolCallPlan({ toolName: "goal", input: { action: "get" } }), undefined);
+    assert.match(onToolCallPlan({ toolName: "goal", input: { action: "create" } })?.reason ?? "", /blocked/);
+    assert.match(onToolCallPlan({
+      toolName: "teammate",
+      input: { tasks: [{ prompt: "write", mode: "write" }] },
+    })?.reason ?? "", /blocked/);
 
     await onAgentEndPlan({
       messages: [{ role: "assistant", content: "<proposed_plan>\n# Legacy plan\n</proposed_plan>" }],
@@ -926,6 +1024,132 @@ test("Compatibility capture errors are isolated inside the Plan hook", async () 
   }
 });
 
+test("Session restart idempotently recovers a pending Workflow binding and resumes the Run brief", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-workflow-recovery-"));
+  const sessionId = "workflow-recovery-chat";
+  const store = new PlanStore(join(root, "workspace"), {
+    rootDir: join(root, "global"),
+    session: { id: sessionId },
+  });
+  const initial = await store.load();
+  const draft = await store.saveDraft("# Recover Workflow Binding", initial.manifest.revision);
+  const approved = await store.approve(draft.markdown, draft.manifest.revision, {
+    execution: { backend: "workflow", context: "current", workflowTarget: "current" },
+  });
+  await store.updateWorkflowBinding(approved.manifest.handoffKey!, {
+    status: "failed",
+    handoffKey: approved.manifest.handoffKey!,
+    sourceChecksum: approved.manifest.approvedChecksum!,
+    error: "interrupted before binding commit",
+    updatedAt: "2026-08-02T12:00:00.000Z",
+  });
+
+  let publications = 0;
+  const harness = createHarness(
+    root,
+    false,
+    false,
+    false,
+    false,
+    sessionId,
+    undefined,
+    false,
+    { todoKeys: [] },
+    undefined,
+    {
+      async publishWorkflowPlan(loaded, execution) {
+        publications++;
+        assert.equal(loaded.manifest.workflowBinding?.status, "pending");
+        assert.equal(loaded.manifest.handoffKey, approved.manifest.handoffKey);
+        assert.equal(loaded.manifest.approvedChecksum, approved.manifest.approvedChecksum);
+        assert.deepEqual(execution, { backend: "workflow", context: "current", workflowTarget: "current" });
+        return {
+          binding: {
+            status: "bound",
+            handoffKey: approved.manifest.handoffKey!,
+            sourceChecksum: approved.manifest.approvedChecksum!,
+            workflowSessionId: "workflow-recovered",
+            artifactId: "ART-001-001",
+            producerRunId: "run-plan-publish",
+            executionRunId: "run-execute",
+            requestId: "req-replayed",
+            updatedAt: "2026-08-02T12:01:00.000Z",
+          },
+          executionMessage: "RECOVERED WORKFLOW RUN BRIEF",
+        };
+      },
+    },
+  );
+  try {
+    await onSessionStartPlan(harness.ctx);
+    const recovered = await store.load();
+    assert.equal(publications, 1);
+    assert.equal(recovered.manifest.status, "approved");
+    assert.equal(recovered.manifest.workflowBinding?.status, "bound");
+    assert.equal(recovered.manifest.workflowBinding?.deliveryStatus, "delivered");
+    assert.equal(harness.messages.length, 1);
+    assert.match(harness.messages[0] ?? "", /RECOVERED WORKFLOW RUN BRIEF/);
+    assert.match(harness.notifications.join("\n"), /Recovered approved Plan binding/);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Session restart delivers a bound Workflow handoff that was interrupted before prompt enqueue", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-workflow-delivery-recovery-"));
+  const sessionId = "workflow-delivery-recovery-chat";
+  const store = new PlanStore(join(root, "workspace"), {
+    rootDir: join(root, "global"),
+    session: { id: sessionId },
+  });
+  const draft = await store.saveDraft("# Recover Bound Delivery", 0);
+  const approved = await store.approve(draft.markdown, draft.manifest.revision, {
+    execution: { backend: "workflow", context: "current", workflowTarget: "current" },
+  });
+  const coreBinding: PlanWorkflowBinding = {
+    status: "bound",
+    handoffKey: approved.manifest.handoffKey!,
+    sourceChecksum: approved.manifest.approvedChecksum!,
+    workflowSessionId: "workflow-bound",
+    artifactId: "ART-001-001",
+    producerRunId: "run-plan-publish",
+    executionRunId: "run-execute",
+    requestId: "req-bound-delivery",
+    updatedAt: "2026-08-02T12:00:00.000Z",
+  };
+  await store.updateWorkflowBinding(coreBinding.handoffKey, {
+    ...coreBinding,
+    deliveryId: "req-bound-delivery:implementation",
+    deliveryStatus: "pending",
+  });
+
+  let replays = 0;
+  const harness = createHarness(
+    root, false, false, false, false, sessionId, undefined, false, { todoKeys: [] }, undefined,
+    {
+      async publishWorkflowPlan(loaded) {
+        replays++;
+        assert.equal(loaded.manifest.workflowBinding?.status, "bound");
+        assert.equal(loaded.manifest.workflowBinding?.deliveryStatus, "pending");
+        return { binding: coreBinding, executionMessage: "BOUND WORKFLOW RUN BRIEF" };
+      },
+    },
+  );
+  try {
+    await onSessionStartPlan(harness.ctx);
+    const recovered = await store.load();
+    assert.equal(replays, 1);
+    assert.equal(recovered.manifest.workflowBinding?.status, "bound");
+    assert.equal(recovered.manifest.workflowBinding?.deliveryStatus, "delivered");
+    assert.equal(harness.messages.length, 1);
+    assert.match(harness.messages[0] ?? "", /BOUND WORKFLOW RUN BRIEF/);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Session restart stays in Act and resumes the persisted draft only after plan-enter", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-restart-"));
   const first = createHarness(root);
@@ -1024,17 +1248,17 @@ test("Reinitializing Plan restores a leaked tool snapshot and resets module stat
   }
 });
 
-test("Plan tool path resets provider context without command-context session APIs", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-plan-clean-context-"));
+test("Plan compact execution keeps the current Pi session and creates no clean-context replacement", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-compact-current-session-"));
   const harness = createHarness(
     root,
     false,
     false,
     false,
     false,
-    "clean-context-chat",
-    ["2"],
-    false,
+    "compact-current-chat",
+    COMPACT_EXECUTION_INPUTS,
+    true,
     { todoKeys: [] },
     undefined,
     { arbiter: new CompactionArbiter(), deferCompactionComplete: true },
@@ -1042,32 +1266,26 @@ test("Plan tool path resets provider context without command-context session API
   try {
     await onSessionStartPlan(harness.ctx);
     await execute(harness, "plan-enter");
-    await execute(harness, "plan-update", { markdown: "# Clean Provider Context Plan" });
+    await execute(harness, "plan-update", { markdown: "# Compact Current Session Plan" });
     const confirmed = await execute(harness, "plan-confirm");
 
     assert.equal(confirmed.details.approved, true);
     assert.equal(harness.newSessions, 0);
     assert.equal(harness.compactions.length, 1);
     assert.match(harness.compactions[0]?.customInstructions ?? "", /maestro-compaction-owner:plan-handoff/);
-    assert.match(harness.compactions[0]?.customInstructions ?? "", new RegExp(PLAN_CLEAN_CONTEXT_COMPACTION_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-
-    const request = consumePlanCleanContextCompaction();
-    assert.ok(request);
-    assert.match(request.summary, /# Clean Provider Context Plan/);
-    assert.match(request.summary, /prior conversation was intentionally cleared/);
-    assert.match(request.firstKeptEntryId, /^maestro-plan-clean-/);
+    assert.match(harness.compactions[0]?.customInstructions ?? "", /authoritative execution contract/);
+    assert.equal(consumePlanCleanContextCompaction(), undefined);
 
     harness.compactions[0]?.onComplete?.({});
     assert.equal(harness.messages.length, 1);
     assert.match(harness.messages[0] ?? "", /approved Plan/i);
-    assert.equal(getPlanHandoffStatus(), "todo-required");
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("Nothing to compact falls back to a stable Plan-only provider context", async () => {
+test("Nothing to compact falls back to execution in the current Pi context", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-small-context-"));
   const harness = createHarness(
     root,
@@ -1076,7 +1294,7 @@ test("Nothing to compact falls back to a stable Plan-only provider context", asy
     false,
     false,
     "small-context-chat",
-    ["2"],
+    COMPACT_EXECUTION_INPUTS,
     false,
     { todoKeys: [] },
     undefined,
@@ -1090,157 +1308,12 @@ test("Nothing to compact falls back to a stable Plan-only provider context", asy
     harness.compactions[0]?.onError?.(new Error("Nothing to compact (session too small)"));
 
     assert.equal(harness.messages.length, 1);
-    assert.match(harness.notifications.join("\n"), /using a clean Plan context/);
-    assert.doesNotMatch(harness.notifications.join("\n"), /executing with the current context/);
-
-    const oldMessages = [
-      { role: "user", content: [{ type: "text", text: "OLD HISTORY" }], timestamp: 1 },
-      { role: "assistant", content: [{ type: "text", text: "OLD ANSWER" }], timestamp: 2 },
-    ] as never;
-    const first = onContextPlan(oldMessages);
-    assert.ok(first);
-    assert.equal(first.messages.length, 1);
-    assert.match(JSON.stringify(first.messages), /# Small Session Plan/);
-    assert.doesNotMatch(JSON.stringify(first.messages), /OLD HISTORY|OLD ANSWER/);
-
-    const appended = [
-      ...oldMessages,
-      { role: "assistant", content: [{ type: "text", text: "NEW EXECUTION RESULT" }], timestamp: 3 },
-    ] as never;
-    const second = onContextPlan(appended);
-    assert.ok(second);
-    assert.equal(second.messages.length, 2);
-    assert.deepEqual(second.messages[0], first.messages[0], "replacement must remain byte-stable across turns");
-    assert.match(JSON.stringify(second.messages), /NEW EXECUTION RESULT/);
-    assert.doesNotMatch(JSON.stringify(second.messages), /OLD HISTORY|OLD ANSWER/);
-
-    const branched = [
-      { role: "user", content: [{ type: "text", text: "REWRITTEN OLD HISTORY" }], timestamp: 1 },
-      oldMessages[1],
-      { role: "user", content: [{ type: "text", text: "NEW BRANCH REQUEST" }], timestamp: 4 },
-    ] as never;
-    const branchResult = onContextPlan(branched);
-    assert.ok(branchResult);
-    assert.match(JSON.stringify(branchResult.messages), /NEW BRANCH REQUEST/);
-    assert.doesNotMatch(JSON.stringify(branchResult.messages), /REWRITTEN OLD HISTORY|OLD ANSWER/);
-
-    const branchWithResult = [
-      ...branched,
-      { role: "assistant", content: [{ type: "text", text: "BRANCH RESULT" }], timestamp: 5 },
-    ] as never;
-    const preparation = {
-      messagesToSummarize: oldMessages,
-      turnPrefixMessages: oldMessages,
-      firstKeptEntryId: "old-kept-entry",
-      previousSummary: "OLD SUMMARY MUST DISAPPEAR",
-    };
-    assert.equal(applyPlanContextToCompaction(preparation, branchWithResult), true);
-    assert.match(preparation.firstKeptEntryId, /^maestro-plan-replacement-/);
-    assert.equal(preparation.previousSummary, undefined);
-    assert.deepEqual(preparation.turnPrefixMessages, []);
-    assert.match(JSON.stringify(preparation.messagesToSummarize), /# Small Session Plan/);
-    assert.match(JSON.stringify(preparation.messagesToSummarize), /NEW BRANCH REQUEST|BRANCH RESULT/);
-    assert.doesNotMatch(
-      JSON.stringify(preparation.messagesToSummarize),
-      /REWRITTEN OLD HISTORY|OLD ANSWER|OLD SUMMARY MUST DISAPPEAR/,
-    );
-
-    onCompactPlan(harness.ctx);
-    assert.equal(onContextPlan(appended), undefined, "a real compaction starts a new replacement epoch");
-  } finally {
-    onSessionShutdownPlan(harness.ctx);
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("session reset clears the small-session Plan context replacement", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-plan-small-context-reset-"));
-  const harness = createHarness(
-    root,
-    false,
-    false,
-    false,
-    false,
-    "small-context-reset-chat",
-    ["2"],
-    false,
-    { todoKeys: [] },
-    undefined,
-    { arbiter: new CompactionArbiter(), deferCompactionComplete: true },
-  );
-  try {
-    await onSessionStartPlan(harness.ctx);
-    await execute(harness, "plan-enter");
-    await execute(harness, "plan-update", { markdown: "# Reset Plan" });
-    await execute(harness, "plan-confirm");
-    harness.compactions[0]?.onError?.(new Error("Nothing to compact (session too small)"));
-    assert.ok(onContextPlan([{ role: "user", content: "old", timestamp: 1 }] as never));
-
-    onSessionShutdownPlan(harness.ctx);
+    assert.match(harness.notifications.join("\n"), /executing with the current context/);
     assert.equal(onContextPlan([{ role: "user", content: "old", timestamp: 1 }] as never), undefined);
+    assert.equal(consumePlanCleanContextCompaction(), undefined);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("stale clean-context callback cannot erase or execute a newer session Plan", async () => {
-  const firstRoot = await mkdtemp(join(tmpdir(), "pi-plan-clean-stale-first-"));
-  const secondRoot = await mkdtemp(join(tmpdir(), "pi-plan-clean-stale-second-"));
-  const first = createHarness(
-    firstRoot,
-    false,
-    false,
-    false,
-    false,
-    "clean-stale-first",
-    ["2"],
-    false,
-    { todoKeys: [] },
-    undefined,
-    { arbiter: new CompactionArbiter(), deferCompactionComplete: true },
-  );
-  let second: ReturnType<typeof createHarness> | undefined;
-  try {
-    await onSessionStartPlan(first.ctx);
-    await execute(first, "plan-enter");
-    await execute(first, "plan-update", { markdown: "# Old Session Plan" });
-    await execute(first, "plan-confirm");
-    assert.equal(first.compactions.length, 1);
-
-    onSessionShutdownPlan(first.ctx);
-    second = createHarness(
-      secondRoot,
-      false,
-      false,
-      false,
-      false,
-      "clean-stale-second",
-      ["2"],
-      false,
-      { todoKeys: [] },
-      undefined,
-      { arbiter: new CompactionArbiter(), deferCompactionComplete: true },
-    );
-    await onSessionStartPlan(second.ctx);
-    await execute(second, "plan-enter");
-    await execute(second, "plan-update", { markdown: "# New Session Plan" });
-    await execute(second, "plan-confirm");
-
-    first.compactions[0]?.onComplete?.({});
-    assert.equal(second.messages.length, 0, "stale callback must not inject the old Plan into the new session");
-    const secondRequest = consumePlanCleanContextCompaction();
-    assert.ok(secondRequest, "stale callback must not clear the newer request");
-    assert.match(secondRequest.summary, /# New Session Plan/);
-    assert.doesNotMatch(secondRequest.summary, /# Old Session Plan/);
-
-    second.compactions[0]?.onComplete?.({});
-    assert.equal(second.messages.length, 1);
-    assert.match(second.messages[0] ?? "", /approved Plan/i);
-  } finally {
-    if (second) onSessionShutdownPlan(second.ctx);
-    await rm(firstRoot, { recursive: true, force: true });
-    await rm(secondRoot, { recursive: true, force: true });
   }
 });
 
@@ -1254,7 +1327,7 @@ test("stale compact-before-execute callback cannot inject into a replacement ses
     false,
     false,
     "compact-stale-first",
-    ["2"],
+    COMPACT_EXECUTION_INPUTS,
     false,
     { todoKeys: [] },
     undefined,

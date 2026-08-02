@@ -109,6 +109,96 @@ test("PlanStore approval archives the exact draft and commits manifest last", as
   }
 });
 
+test("PlanStore persists execution choice and reconciles Workflow binding without revising the Plan", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-workflow-binding-"));
+  const now = new Date("2026-07-11T10:15:30.000Z");
+  try {
+    const store = new PlanStore(join(root, "workspace"), { rootDir: join(root, "global"), now: () => now });
+    const markdown = "# Workflow approved Plan";
+    const approved = await store.approve(markdown, 0, {
+      execution: { backend: "workflow", context: "compact", workflowTarget: "new" },
+    });
+    const handoffKey = approved.manifest.handoffKey!;
+    const checksum = checksumText(markdown);
+    assert.deepEqual(approved.manifest.execution, {
+      backend: "workflow",
+      context: "compact",
+      workflowTarget: "new",
+    });
+    assert.deepEqual(approved.manifest.workflowBinding, {
+      status: "pending",
+      handoffKey,
+      sourceChecksum: checksum,
+      updatedAt: now.toISOString(),
+    });
+
+    const boundAt = "2026-07-11T10:16:00.000Z";
+    const bound = await store.updateWorkflowBinding(handoffKey, {
+      status: "bound",
+      handoffKey,
+      sourceChecksum: checksum,
+      workflowSessionId: "workflow-1",
+      workflowSessionGeneration: "canonical:valid:workflow-1:2",
+      artifactId: "ART-001-001",
+      producerRunId: "run-plan-publish",
+      executionRunId: "run-execute",
+      requestId: `plan-pub-${handoffKey}`,
+      updatedAt: boundAt,
+    });
+    assert.equal(bound.manifest.revision, approved.manifest.revision);
+    assert.equal(bound.manifest.approvedChecksum, checksum);
+    assert.equal(bound.manifest.workflowBinding?.status, "bound");
+    assert.equal((await store.load()).manifest.workflowBinding?.artifactId, "ART-001-001");
+
+    const pendingDelivery = await store.updateWorkflowBinding(handoffKey, {
+      ...bound.manifest.workflowBinding!,
+      deliveryId: `delivery-${handoffKey}`,
+      deliveryStatus: "pending",
+      updatedAt: "2026-07-11T10:16:30.000Z",
+    });
+    const delivered = await store.updateWorkflowBinding(handoffKey, {
+      ...pendingDelivery.manifest.workflowBinding!,
+      deliveryStatus: "delivered",
+      deliveredAt: "2026-07-11T10:17:00.000Z",
+      updatedAt: "2026-07-11T10:17:00.000Z",
+    });
+    await assert.rejects(
+      store.updateWorkflowBinding(handoffKey, {
+        status: "failed",
+        handoffKey,
+        sourceChecksum: checksum,
+        error: "stale retry",
+        updatedAt: "2026-07-11T10:18:00.000Z",
+      }),
+      /terminal and cannot be downgraded/,
+    );
+    assert.equal((await store.load()).manifest.workflowBinding?.deliveryStatus, "delivered");
+
+    const draft = await store.saveDraft("# Revised Plan", delivered.manifest.revision);
+    assert.equal(draft.manifest.status, "draft");
+    assert.equal(draft.manifest.execution, undefined);
+    assert.equal(draft.manifest.workflowBinding, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("PlanStore rejects Workflow binding updates that do not match the approved handoff", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-workflow-binding-fence-"));
+  try {
+    const store = new PlanStore(join(root, "workspace"), { rootDir: join(root, "global") });
+    const approved = await store.approve("# Workflow Plan", 0, {
+      execution: { backend: "workflow", context: "current", workflowTarget: "current" },
+    });
+    await assert.rejects(
+      store.updateWorkflowBinding("f".repeat(64), approved.manifest.workflowBinding!),
+      /handoff changed/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("PlanStore uses private files and directories and tightens existing POSIX permissions", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-private-mode-"));
   let commitStarted!: () => void;

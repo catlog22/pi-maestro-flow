@@ -82,185 +82,176 @@ test("Plan editor saves without closing and confirms the exact edited buffer", a
   assert.deepEqual(confirmations, [{ markdown: "draft updated", revision: 5 }]);
 });
 
-test("Plan confirmation renders Markdown and selects new-session execution by default", async () => {
+test("Plan confirmation renders execution controls without a New Pi session option", async () => {
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, {
     markdown: "# Approved Plan\n\n- Preserve boundaries",
     pathLabel: "current.md",
-    canClearContext: true,
-    preferNewSession: true,
+    canCompactContext: true,
     contextPercent: 75,
   });
   assert.ok(harness.component);
   for (const width of [20, 40, 80, 120]) {
     const lines = harness.component.render(width);
-    assert.match(lines.join("\n"), /Plan confirm|Plan confirmation/);
+    const rendered = lines.join("\n");
+    assert.match(rendered, /Plan confirm|Plan confirmation/);
+    assert.doesNotMatch(rendered, /new Pi session|new session/i);
     if (width >= 40) {
       assert.match(lines[0], /╭/);
       assert.match(lines.at(-1) ?? "", /╰/);
-      assert.match(lines.join("\n"), /1\. Execute/);
-      assert.match(lines.join("\n"), /2\. Execute in new session/);
-      assert.match(lines.join("\n"), /3\. View \/ modify Plan/);
-      assert.match(lines.join("\n"), /4\. Continue discussion/);
-      assert.match(lines.join("\n"), /5\. Exit Plan mode/);
+      assert.match(rendered, /Execution\s+\[Standalone\]/);
+      assert.match(rendered, /Context\s+\[Current\]/);
+      assert.match(rendered, /1\. Execute/);
+      assert.match(rendered, /2\. View \/ modify Plan/);
+      assert.match(rendered, /3\. Continue discussion/);
+      assert.match(rendered, /4\. Exit Plan mode/);
       assert.ok(lines.length <= 28);
     }
     for (const line of lines) assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
   }
-  harness.component.handleInput("2");
-  assert.equal(await pending, "execute-clear");
+  harness.component.handleInput("1");
+  assert.deepEqual(await pending, {
+    action: "execute",
+    execution: { backend: "standalone", context: "current" },
+  });
 });
 
-test("Plan confirmation offers a same-session clean context for tool callers", async () => {
+test("Plan confirmation selects compact execution in the current Pi session", async () => {
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, {
     markdown: "# Approved Plan",
-    canClearContext: true,
-    clearContextMode: "compaction",
+    canCompactContext: true,
   });
   assert.ok(harness.component);
-  const rendered = harness.component.render(100).join("\n");
-  assert.match(rendered, /2\. Reset context then execute/);
-  assert.match(rendered, /Keep this session and replace model context/);
-  harness.component.handleInput("2");
-  assert.equal(await pending, "execute-clear");
+  harness.component.render(100);
+  harness.component.handleInput("\x1b[B");
+  harness.component.handleInput("\x1b[C");
+  assert.match(harness.component.render(100).join("\n"), /Context\s+\[Compact current\]/);
+  harness.component.handleInput("\x1b[27;5;13~");
+  assert.deepEqual(await pending, {
+    action: "execute",
+    execution: { backend: "standalone", context: "compact" },
+  });
 });
 
-test("same-model approval keeps the original compact execution option", async () => {
+test("Plan confirmation selects current or new Workflow Session independently from Pi context", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: "# Workflow Plan",
+    canCompactContext: true,
+    workflow: {
+      current: { sessionId: "workflow-1", intent: "Implement workflow plan", available: true },
+      allowNew: true,
+    },
+  });
+  assert.ok(harness.component);
+  harness.component.render(120);
+  harness.component.handleInput("\x1b[C");
+  assert.match(harness.component.render(120).join("\n"), /Execution\s+\[Workflow\]/);
+  assert.match(harness.component.render(120).join("\n"), /Workflow target\s+\[Current: workflow-1\]/);
+  harness.component.handleInput("\x1b[B");
+  harness.component.handleInput("\x1b[C");
+  assert.match(harness.component.render(120).join("\n"), /Workflow target\s+\[Create new Session\]/);
+  harness.component.handleInput("\x1b[27;5;13~");
+  assert.deepEqual(await pending, {
+    action: "execute",
+    execution: { backend: "workflow", context: "current", workflowTarget: "new" },
+  });
+});
+
+test("Plan confirmation keeps Workflow execution unavailable without a writable target", async () => {
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, {
     markdown: "# Plan",
-    canClearContext: true,
-    contextPercent: 75,
-    preferNewSession: false,
+    workflow: {
+      current: { sessionId: "workflow-1", intent: "Other work", available: false, reason: "Owned by another Pi session" },
+      allowNew: false,
+    },
   });
   assert.ok(harness.component);
-  assert.match(harness.component.render(100).join("\n"), /2\. Compact then execute/);
-  harness.component.handleInput("2");
-  assert.equal(await pending, "execute-compact");
-});
-
-test("Plan confirmation keeps clear-context execution unavailable outside command context", async () => {
-  const harness = createHarness();
-  const pending = openPlanConfirmation(harness.ctx, {
-    markdown: "# Plan",
-    canClearContext: false,
+  harness.component.render(100);
+  harness.component.handleInput("\x1b[C");
+  assert.match(harness.component.render(100).join("\n"), /Owned by another Pi session/);
+  harness.component.handleInput("\x1b[27;5;13~");
+  assert.deepEqual(await pending, {
+    action: "execute",
+    execution: { backend: "standalone", context: "current" },
   });
-  assert.ok(harness.component);
-  harness.component.handleInput("2");
-  assert.equal(harness.doneValue, undefined);
-  assert.match(harness.component.render(100).join("\n"), /Use \/plan approve/);
-  harness.component.handleInput("\x1b");
-  assert.equal(await pending, "close");
-});
-
-test("Plan confirmation falls back to unavailable new-session execution when compact is unavailable", async () => {
-  const harness = createHarness();
-  const pending = openPlanConfirmation(harness.ctx, {
-    markdown: "# Plan",
-    canClearContext: false,
-    canCompactContext: false,
-    contextPercent: 75,
-  });
-  assert.ok(harness.component);
-  harness.component.handleInput("2");
-  assert.equal(harness.doneValue, undefined);
-  assert.match(harness.component.render(100).join("\n"), /Use \/plan approve to start execution in a new session/);
-  harness.component.handleInput("\x1b");
-  assert.equal(await pending, "close");
 });
 
 test("Plan confirmation accepts Ctrl+Enter across modifyOtherKeys encoding", async () => {
   const harness = createHarness();
-  const pending = openPlanConfirmation(harness.ctx, {
-    markdown: "# Plan",
-    canClearContext: true,
-    preferNewSession: true,
-  });
+  const pending = openPlanConfirmation(harness.ctx, { markdown: "# Plan" });
   assert.ok(harness.component);
   harness.component.handleInput("\x1b[27;5;13~");
-  assert.equal(await pending, "execute-clear");
+  assert.deepEqual(await pending, {
+    action: "execute",
+    execution: { backend: "standalone", context: "current" },
+  });
 });
 
 test("Plan confirmation number keys match the numbered actions", async () => {
   const harness = createHarness();
-  const pending = openPlanConfirmation(harness.ctx, {
-    markdown: "# Plan",
-    canClearContext: true,
-  });
+  const pending = openPlanConfirmation(harness.ctx, { markdown: "# Plan" });
   assert.ok(harness.component);
-  harness.component.handleInput("3");
-  assert.equal(await pending, "modify");
+  harness.component.handleInput("2");
+  assert.deepEqual(await pending, { action: "modify" });
 });
 
 test("Plan confirmation uses arrow keys to select actions after the Plan reaches the bottom", async () => {
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, {
     markdown: Array.from({ length: 40 }, (_, index) => `Plan line ${index + 1}`).join("\n\n"),
-    canClearContext: true,
   });
   assert.ok(harness.component);
   harness.component.render(80);
-  for (let index = 0; index < 20; index++) {
-    harness.component.handleInput("\x1b[6~");
-  }
+  for (let index = 0; index < 20; index++) harness.component.handleInput("\x1b[6~");
   harness.component.handleInput("\x1b[B");
   harness.component.handleInput("\x1b[B");
-  harness.component.handleInput("\x1b[A");
   harness.component.handleInput("\r");
-  assert.equal(await pending, "execute-clear");
+  assert.deepEqual(await pending, {
+    action: "execute",
+    execution: { backend: "standalone", context: "current" },
+  });
 });
 
-test("Plan confirmation returns to Plan scrolling when Up leaves the first action", async () => {
+test("Plan confirmation returns to Plan scrolling when Up leaves the first control", async () => {
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, {
     markdown: Array.from({ length: 40 }, (_, index) => `Plan line ${index + 1}`).join("\n\n"),
-    canClearContext: true,
   });
   assert.ok(harness.component);
   harness.component.render(80);
-  for (let index = 0; index < 20; index++) {
-    harness.component.handleInput("\x1b[6~");
-  }
+  for (let index = 0; index < 20; index++) harness.component.handleInput("\x1b[6~");
   harness.component.handleInput("\x1b[B");
-  harness.component.handleInput("\x1b[A");
   harness.component.handleInput("\x1b[A");
   harness.component.handleInput("\x1b[A");
   const range = harness.component.render(80).join("\n").match(/Plan \d+-(\d+)\/(\d+)/);
   assert.ok(range);
   assert.ok(Number(range[1]) < Number(range[2]));
   harness.component.handleInput("\x1b");
-  assert.equal(await pending, "close");
+  assert.deepEqual(await pending, { action: "close" });
 });
 
-test("Plan confirmation exposes continue discussion as the fourth action", async () => {
+test("Plan confirmation exposes continue discussion as the third action", async () => {
   const harness = createHarness();
-  const pending = openPlanConfirmation(harness.ctx, {
-    markdown: "# Plan",
-    canClearContext: true,
-  });
+  const pending = openPlanConfirmation(harness.ctx, { markdown: "# Plan" });
+  assert.ok(harness.component);
+  harness.component.handleInput("3");
+  assert.deepEqual(await pending, { action: "continue" });
+});
+
+test("Plan confirmation exposes exiting Plan mode as the fourth action", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, { markdown: "# Plan" });
   assert.ok(harness.component);
   harness.component.handleInput("4");
-  assert.equal(await pending, "continue");
-});
-
-test("Plan confirmation exposes exiting Plan mode as the fifth action", async () => {
-  const harness = createHarness();
-  const pending = openPlanConfirmation(harness.ctx, {
-    markdown: "# Plan",
-    canClearContext: true,
-  });
-  assert.ok(harness.component);
-  harness.component.handleInput("5");
-  assert.equal(await pending, "exit-plan");
+  assert.deepEqual(await pending, { action: "exit-plan" });
 });
 
 test("Plan confirmation blocks invisible actions below 20 columns", async () => {
   const harness = createHarness();
-  const pending = openPlanConfirmation(harness.ctx, {
-    markdown: "# Plan",
-    canClearContext: true,
-  });
+  const pending = openPlanConfirmation(harness.ctx, { markdown: "# Plan" });
   assert.ok(harness.component);
   harness.component.render(12);
   harness.component.handleInput("1");
@@ -268,7 +259,7 @@ test("Plan confirmation blocks invisible actions below 20 columns", async () => 
   harness.component.handleInput("\x1b[27;5;13~");
   assert.equal(harness.doneValue, undefined);
   harness.component.handleInput("\x1b");
-  assert.equal(await pending, "close");
+  assert.deepEqual(await pending, { action: "close" });
 });
 
 test("Plan editor blocks invisible editing below the minimum width", async () => {

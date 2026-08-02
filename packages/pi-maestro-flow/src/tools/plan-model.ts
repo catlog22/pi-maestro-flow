@@ -75,12 +75,6 @@ export function saveLocalPlanModelSetting(cwd: string, model: string | null): vo
   }
 }
 
-let planModelOverrideActive = false;
-
-export function shouldStartPlanExecutionInNewSession(): boolean {
-  return planModelOverrideActive;
-}
-
 function modelKey(model: { provider: string; id: string } | undefined): string | undefined {
   return model ? `${model.provider}/${model.id}` : undefined;
 }
@@ -97,7 +91,6 @@ export function registerPlanModelSelection(
 ): void {
   const planModeActive = options.isPlanMode ?? isPlanMode;
   const configuredModel = options.loadModel ?? loadPlanModelSetting;
-  planModelOverrideActive = false;
   let restoreModel: NonNullable<ExtensionContext["model"]> | undefined;
   const warnedMessages = new Set<string>();
 
@@ -148,7 +141,6 @@ export function registerPlanModelSelection(
     if (!restoreModel) return true;
     if (modelKey(ctx.model) === modelKey(restoreModel)) {
       restoreModel = undefined;
-      planModelOverrideActive = false;
       return true;
     }
     try {
@@ -157,7 +149,6 @@ export function registerPlanModelSelection(
         return false;
       }
       restoreModel = undefined;
-      planModelOverrideActive = false;
       warnedMessages.clear();
       return true;
     } catch (error) {
@@ -201,7 +192,6 @@ export function registerPlanModelSelection(
         return;
       }
       if (!restoreModel && previous) restoreModel = previous;
-      planModelOverrideActive = Boolean(restoreModel);
       warnedMessages.clear();
     } catch (error) {
       await restore(ctx);

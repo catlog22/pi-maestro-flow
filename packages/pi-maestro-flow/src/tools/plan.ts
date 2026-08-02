@@ -6,9 +6,9 @@
  * persisted by workspace and chat session; approval must commit before Act tools are restored.
  */
 
+import { join } from "node:path";
 import type {
   ExtensionAPI,
-  ExtensionCommandContext,
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
@@ -17,27 +17,40 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { altKey } from "../key-labels.ts";
 import { toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts";
-import { openPlanConfirmation, type PlanConfirmationAction } from "./plan-confirm.ts";
+import { isRunControlReadAction } from "./run-control.ts";
+import {
+  openPlanConfirmation,
+  type PlanWorkflowConfirmationOptions,
+} from "./plan-confirm.ts";
 import { openPlanEditor } from "./plan-editor.ts";
-import { PlanApprovalError, PlanStore, prewarmProcessIdentity, type LoadedPlan, type PlanSessionIdentity } from "./plan-store.ts";
+import {
+  PlanApprovalError,
+  PlanStore,
+  prewarmProcessIdentity,
+  type LoadedPlan,
+  type PlanExecutionChoice,
+  type PlanExecutionContextMode,
+  type PlanSessionIdentity,
+  type PlanWorkflowBinding,
+} from "./plan-store.ts";
 import { getVisibleTasks } from "./todo.ts";
 import {
   type CompactionArbiter,
 } from "../compaction/compaction-arbiter.ts";
 
 type Mode = "act" | "plan";
-type PlanExecutionMode = "current" | "clear" | "compact";
+type PlanExecutionMode = PlanExecutionContextMode;
 export type PlanHandoffStatus = "none" | "todo-required" | "ready";
 export type PlanContext = Pick<
   ExtensionContext,
   "cwd" | "hasUI" | "ui" | "isIdle" | "sessionManager" | "compact" | "model" | "modelRegistry" | "isProjectTrusted"
-> & Partial<Pick<ExtensionContext, "abort" | "getContextUsage">>
-  & Partial<Pick<ExtensionCommandContext, "newSession">>;
+> & Partial<Pick<ExtensionContext, "abort" | "getContextUsage">>;
 
 interface PlanReviewOutcome {
   approved: boolean;
   exited: boolean;
   executionMode?: PlanExecutionMode;
+  executionChoice?: PlanExecutionChoice;
   executionMessage?: string;
 }
 
@@ -52,6 +65,8 @@ export interface PlanToolDetails {
   status: "empty" | "draft" | "approved";
   handoffStatus: PlanHandoffStatus;
   handoffKey?: string;
+  execution?: PlanExecutionChoice;
+  workflowBinding?: PlanWorkflowBinding;
   approved?: boolean;
   error?: string;
 }
@@ -69,7 +84,19 @@ interface PlanRuntimeOptions {
   storeFactory?: (cwd: string, session: PlanSessionIdentity) => PlanStore;
   hasExecutableTodo?: (handoffKey: string) => boolean;
   compactionArbiter?: CompactionArbiter;
-  preferNewSession?: (ctx: PlanContext) => boolean;
+  workflowConfirmation?: (
+    ctx: PlanContext,
+  ) => PlanWorkflowConfirmationOptions | Promise<PlanWorkflowConfirmationOptions>;
+  publishWorkflowPlan?: (
+    ctx: PlanContext,
+    approved: LoadedPlan,
+    execution: PlanExecutionChoice,
+  ) => Promise<PlanWorkflowPublicationResult>;
+}
+
+export interface PlanWorkflowPublicationResult {
+  binding: PlanWorkflowBinding;
+  executionMessage: string;
 }
 
 const STATUS_KEY = "mode";
@@ -109,11 +136,20 @@ let latestPlan: string | undefined;
 let latestRevision = 0;
 let latestStatus: PlanToolDetails["status"] = "empty";
 let latestHandoffKey: string | undefined;
+let latestExecution: PlanExecutionChoice | undefined;
+let latestWorkflowBinding: PlanWorkflowBinding | undefined;
 let awaitingAction = false;
 let pendingPlanExitReminder: string | undefined;
 let pendingPlanEnterNote: string | undefined;
 let compactionArbiter: CompactionArbiter | undefined;
-let preferNewSession = (_ctx: PlanContext): boolean => false;
+let workflowConfirmation = async (_ctx: PlanContext): Promise<PlanWorkflowConfirmationOptions> => ({ allowNew: false });
+let publishWorkflowPlan: (
+  ctx: PlanContext,
+  approved: LoadedPlan,
+  execution: PlanExecutionChoice,
+) => Promise<PlanWorkflowPublicationResult> = async () => {
+  throw new Error("Workflow-backed Plan execution is unavailable");
+};
 
 export const PLAN_CLEAN_CONTEXT_COMPACTION_MARKER = "[maestro-plan-clean-context]";
 
@@ -162,7 +198,10 @@ export function initPlan(pi: ExtensionAPI, options: PlanRuntimeOptions = {}): vo
     && task.blockedBy.length === 0
   ));
   compactionArbiter = options.compactionArbiter;
-  preferNewSession = options.preferNewSession ?? (() => false);
+  workflowConfirmation = async (ctx) => options.workflowConfirmation?.(ctx) ?? { allowNew: false };
+  publishWorkflowPlan = options.publishWorkflowPlan ?? (async () => {
+    throw new Error("Workflow-backed Plan execution is unavailable");
+  });
 }
 
 export function isPlanMode(): boolean {
@@ -186,6 +225,8 @@ export function clearPlan(): void {
   latestRevision = 0;
   latestStatus = "empty";
   latestHandoffKey = undefined;
+  latestExecution = undefined;
+  latestWorkflowBinding = undefined;
   awaitingAction = false;
 }
 
@@ -216,6 +257,8 @@ function applyLoadedPlan(loaded: LoadedPlan): void {
     ? loaded.manifest.status
     : "empty";
   latestHandoffKey = loaded.manifest.handoffKey;
+  latestExecution = loaded.manifest.execution;
+  latestWorkflowBinding = loaded.manifest.workflowBinding;
   awaitingAction = loaded.manifest.status === "approved" && Boolean(loaded.markdown.trim());
 }
 
@@ -287,7 +330,14 @@ export async function onSessionStartPlan(ctx: PlanContext): Promise<void> {
   prewarmProcessIdentity();
   try {
     const store = await ensureStore(ctx);
-    applyLoadedPlan(await store.load());
+    const loaded = await store.load();
+    applyLoadedPlan(loaded);
+    if (loaded.manifest.status === "approved"
+      && loaded.manifest.execution?.backend === "workflow"
+      && (loaded.manifest.workflowBinding?.status !== "bound"
+        || loaded.manifest.workflowBinding.deliveryStatus === "pending")) {
+      await recoverWorkflowBinding(ctx, store, loaded);
+    }
   } catch (error) {
     currentStore = undefined;
     currentStoreKey = "";
@@ -302,6 +352,105 @@ export function onSessionShutdownPlan(ctx: PlanContext): void {
   ctx.ui.setStatus(STATUS_KEY, undefined);
 }
 
+async function recoverWorkflowBinding(
+  ctx: PlanContext,
+  store: PlanStore,
+  approved: LoadedPlan,
+): Promise<void> {
+  const execution = approved.manifest.execution;
+  const handoffKey = approved.manifest.handoffKey;
+  const sourceChecksum = approved.manifest.approvedChecksum;
+  const approvedPath = approved.manifest.approvedPath;
+  if (!execution || execution.backend !== "workflow" || !handoffKey || !sourceChecksum || !approvedPath) return;
+  const priorBinding = approved.manifest.workflowBinding;
+  let publicationInput = approved;
+  try {
+    if (priorBinding?.status !== "bound") {
+      publicationInput = await store.updateWorkflowBinding(handoffKey, {
+        status: "pending",
+        handoffKey,
+        sourceChecksum,
+        updatedAt: new Date().toISOString(),
+      });
+      applyLoadedPlan(publicationInput);
+    }
+    const published = await publishWorkflowPlan(ctx, publicationInput, execution);
+    if (published.binding.status !== "bound") {
+      throw new Error("Workflow publisher did not return a bound result");
+    }
+    const pendingDelivery = withPendingWorkflowDelivery(published.binding);
+    const bound = await store.updateWorkflowBinding(handoffKey, pendingDelivery);
+    applyLoadedPlan(bound);
+    ctx.ui.notify(`Recovered approved Plan binding to Workflow Session ${published.binding.workflowSessionId}.`, "info");
+    const planPath = join(bound.plansDir, approvedPath);
+    const executionMessage = `${published.executionMessage}\n\n${buildPlanExecutionContract(planPath, handoffKey)}`;
+    await deliverImplementation(
+      ctx,
+      planPath,
+      bound.markdown,
+      execution.context,
+      executionMessage,
+      "message",
+      () => acknowledgeWorkflowDelivery(ctx, store, handoffKey, pendingDelivery),
+    );
+  } catch (error) {
+    if (priorBinding?.status !== "bound") {
+      try {
+        const failed = await store.updateWorkflowBinding(handoffKey, {
+          status: "failed",
+          handoffKey,
+          sourceChecksum,
+          error: errorMessage(error),
+          updatedAt: new Date().toISOString(),
+        });
+        applyLoadedPlan(failed);
+      } catch (persistError) {
+        ctx.ui.notify(
+          `Approved Plan Workflow binding retry failed and its failure state could not be persisted: ${errorMessage(persistError)}.`,
+          "warning",
+        );
+        return;
+      }
+    }
+    ctx.ui.notify(
+      priorBinding?.status === "bound"
+        ? `Approved Plan Workflow delivery retry failed: ${errorMessage(error)}. The canonical binding is preserved.`
+        : `Approved Plan Workflow binding retry failed: ${errorMessage(error)}. Approval is preserved; execution was not started.`,
+      "warning",
+    );
+  }
+}
+
+function withPendingWorkflowDelivery(binding: PlanWorkflowBinding): PlanWorkflowBinding {
+  if (binding.status !== "bound" || !binding.requestId) return binding;
+  return {
+    ...binding,
+    deliveryId: binding.deliveryId ?? `${binding.requestId}:implementation`,
+    deliveryStatus: "pending",
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function acknowledgeWorkflowDelivery(
+  ctx: PlanContext,
+  store: PlanStore,
+  handoffKey: string,
+  binding: PlanWorkflowBinding,
+): Promise<void> {
+  if (binding.status !== "bound" || binding.deliveryStatus !== "pending") return;
+  const deliveredAt = new Date().toISOString();
+  try {
+    applyLoadedPlan(await store.updateWorkflowBinding(handoffKey, {
+      ...binding,
+      deliveryStatus: "delivered",
+      deliveredAt,
+      updatedAt: deliveredAt,
+    }));
+  } catch (error) {
+    ctx.ui.notify(`Workflow execution handoff was delivered but could not be acknowledged: ${errorMessage(error)}`, "warning");
+  }
+}
+
 function resetRuntimeState(): void {
   planLifecycleGeneration++;
   activePlanHandoffRequest = undefined;
@@ -312,6 +461,8 @@ function resetRuntimeState(): void {
   latestRevision = 0;
   latestStatus = "empty";
   latestHandoffKey = undefined;
+  latestExecution = undefined;
+  latestWorkflowBinding = undefined;
   awaitingAction = false;
   pendingPlanExitReminder = undefined;
   pendingPlanEnterNote = undefined;
@@ -390,7 +541,97 @@ export function onToolCallPlan(event: {
   toolName: string;
   input: Record<string, unknown>;
 }, _bypassHandoff = false): { block: true; reason: string } | undefined {
-  return undefined;
+  if (mode !== "plan") return undefined;
+  const toolName = event.toolName.toLowerCase();
+  const action = typeof event.input.action === "string" ? event.input.action : "";
+  if (toolName === "run-control") {
+    return isRunControlReadAction(action)
+      ? undefined
+      : planMutationBlock(`run-control ${action || "mutation"}`);
+  }
+  if (toolName === "todo") {
+    return ["get", "list"].includes(action) ? undefined : planMutationBlock(`todo ${action || "mutation"}`);
+  }
+  if (toolName === "goal") {
+    return action === "get" ? undefined : planMutationBlock(`goal ${action || "mutation"}`);
+  }
+  if (["edit", "write", "notebookedit", "notebook_edit"].includes(toolName)) {
+    return planMutationBlock(event.toolName);
+  }
+  if (toolName === "bash" || toolName === "bash_bg") {
+    if (toolName === "bash_bg" && ["status", "wait", "list"].includes(action)) return undefined;
+    const command = typeof event.input.command === "string"
+      ? event.input.command
+      : typeof event.input.task === "string" ? event.input.task : "";
+    return isReadOnlyPlanShell(command) ? undefined : planMutationBlock(event.toolName);
+  }
+  if (toolName === "browser") {
+    return action === "open" || action === "close" ? undefined : planMutationBlock(`browser ${action || "run"}`);
+  }
+  if (toolName === "lsp") {
+    const readActions = [
+      "diagnostics", "definition", "references", "hover", "symbols", "type_definition",
+      "implementation", "status", "capabilities", "request",
+    ];
+    if (readActions.includes(action)) return undefined;
+    if (["rename", "rename_file", "code_actions"].includes(action) && event.input.apply !== true) return undefined;
+    return planMutationBlock(`lsp ${action || "mutation"}`);
+  }
+  if (toolName === "teammate") {
+    const readOnlyAgents = new Set(["analyst", "research", "explorer", "planner"]);
+    const topLevelAgent = typeof event.input.agent === "string" ? event.input.agent : "general";
+    const tasks = Array.isArray(event.input.tasks) ? event.input.tasks : [];
+    const agents = tasks.length > 0
+      ? tasks.map((task) => task && typeof task === "object"
+        && typeof (task as Record<string, unknown>).agent === "string"
+        ? (task as Record<string, unknown>).agent as string
+        : topLevelAgent)
+      : [topLevelAgent];
+    return agents.every((agent) => readOnlyAgents.has(agent))
+      ? undefined
+      : planMutationBlock(`teammate ${agents.join(", ")}`);
+  }
+  if (toolName === "teammate-send") return planMutationBlock("teammate-send");
+  if (new Set([
+    "read", "grep", "glob", "ls", "find", "ffgrep", "fffind", "ask-user-question",
+    "teammate-list", "teammate-watch", "observe", "search_tool_bm25", "smart_search", "source_check",
+    "plan-enter", "plan-update", "plan-review", "plan-confirm", "plan-exit", "plan-status",
+  ]).has(toolName)) return undefined;
+  return planMutationBlock(event.toolName);
+}
+
+function planMutationBlock(operation: string): { block: true; reason: string } {
+  return {
+    block: true,
+    reason: `Plan mode is read-only before approval; ${operation} is blocked. Approve or exit the Plan first.`,
+  };
+}
+
+function isReadOnlyPlanShell(command: string): boolean {
+  const normalized = command.trim();
+  const shellOperators = normalized.replaceAll("&&", "");
+  if (!normalized || /[;`|&<>]|\$\(/.test(shellOperators)) return false;
+  const segments = normalized.split(/\s*&&\s*/);
+  if (segments[0]?.startsWith("cd ")) segments.shift();
+  if (segments.length !== 1) return false;
+  const executable = segments[0]!.match(/^([\w./-]+)/)?.[1]?.toLowerCase();
+  if (!executable) return false;
+  if (["grep", "ls", "pwd", "cat", "head", "tail", "wc"].includes(executable)) return true;
+  if (executable === "rg") {
+    return !/(?:^|\s)--pre(?:=|\s|$)/i.test(segments[0]!);
+  }
+  if (executable === "git") {
+    return /^git\s+(status|diff|log|show)(?:\s|$)/i.test(segments[0]!)
+      && !/(?:^|\s)(?:--output(?:=|\s)|--ext-diff(?:\s|$)|--textconv(?:\s|$))/i.test(segments[0]!);
+  }
+  if (executable === "maestro") {
+    return /^maestro\s+(search|load)(?:\s|$)/i.test(segments[0]!)
+      || /^maestro\s+wiki\s+(backlinks|forward)(?:\s|$)/i.test(segments[0]!)
+      || /^maestro\s+spec\s+history(?:\s|$)/i.test(segments[0]!)
+      || /^maestro\s+run\s+(status|brief|check|prepare)(?:\s|$)/i.test(segments[0]!)
+      || /^maestro\s+session\s+status(?:\s|$)/i.test(segments[0]!);
+  }
+  return false;
 }
 
 
@@ -434,17 +675,15 @@ async function reviewPlan(
   }
 
   while (true) {
-    const action = await openPlanConfirmation(ctx, {
+    const decision = await openPlanConfirmation(ctx, {
       markdown: latestPlan ?? "",
       pathLabel: store.currentPath,
-      canClearContext: true,
-      clearContextMode: typeof ctx.newSession === "function" ? "new-session" : "compaction",
-      canCompactContext: handoffDelivery !== "tool-result",
-      // ContextUsage.percent is number | null; the overlay treats "unknown" as
-      // absent, so collapse null into undefined rather than widening its type.
+      canCompactContext: true,
       contextPercent: ctx.getContextUsage?.()?.percent ?? undefined,
-      preferNewSession: preferNewSession(ctx),
+      defaultExecution: latestExecution,
+      workflow: await workflowConfirmation(ctx),
     });
+    const action = decision.action;
     if (action === "modify") {
       await editPlan(ctx, store.currentPath);
       continue;
@@ -468,8 +707,10 @@ async function reviewPlan(
     }
 
     const markdown = latestPlan ?? "";
+    const executionChoice = decision.execution ?? { backend: "standalone", context: "current" };
+    let approved: LoadedPlan;
     try {
-      const approved = await store.approve(markdown, latestRevision);
+      approved = await store.approve(markdown, latestRevision, { execution: executionChoice });
       applyLoadedPlan(approved);
     } catch (error) {
       applyLoadedPlan(await store.load());
@@ -483,15 +724,14 @@ async function reviewPlan(
       return { approved: false, exited: false };
     }
 
-    const executionMode = executionModeFor(action);
+    const executionMode = executionChoice.context;
     const executionMessage = await startImplementation(
       ctx,
-      markdown,
-      store.currentPath,
-      executionMode,
+      approved,
+      executionChoice,
       handoffDelivery,
     );
-    return { approved: true, exited: true, executionMode, executionMessage };
+    return { approved: true, exited: true, executionMode, executionChoice, executionMessage };
   }
 }
 
@@ -538,73 +778,6 @@ async function editPlan(ctx: PlanContext, pathLabel: string): Promise<void> {
     },
     async onConfirm() {},
   });
-}
-
-function executionModeFor(action: PlanConfirmationAction): PlanExecutionMode {
-  if (action === "execute-clear") return "clear";
-  if (action === "execute-compact") return "compact";
-  return "current";
-}
-
-async function executeNewSessionHandoff(
-  newSessionFn: NonNullable<ExtensionCommandContext["newSession"]>,
-  ctx: PlanContext,
-  markdown: string,
-  planPath: string,
-  handoffKey: string | undefined,
-  portableMessage: string,
-): Promise<void> {
-  let switchedToReplacement = false;
-  try {
-    const replacement = await newSessionFn({
-      async withSession(newCtx) {
-        switchedToReplacement = true;
-        const replacementCtx = newCtx as PlanContext;
-        try {
-          if (!handoffKey) throw new Error("approved Plan is missing its handoff key");
-          const replacementStore = await ensureStore(replacementCtx);
-          applyLoadedPlan(await replacementStore.approve(markdown, undefined, handoffKey));
-        } catch (error) {
-          try {
-            await enterPlanMode(replacementCtx);
-          } catch {
-            mode = "plan";
-            latestPlan = markdown;
-            latestRevision = 0;
-            latestStatus = "draft";
-            latestHandoffKey = undefined;
-            awaitingAction = false;
-            activatePlanToolSurface();
-            syncModeStatus(replacementCtx);
-          }
-          replacementCtx.ui.notify(
-            `Replacement session Plan handoff failed closed in Plan mode: ${errorMessage(error)}`,
-            "error",
-          );
-          return;
-        }
-        try {
-          await (newCtx as { sendUserMessage(msg: string): Promise<void> }).sendUserMessage(portableMessage);
-        } catch (error) {
-          replacementCtx.ui.notify(
-            `Replacement session holds the approved Plan, but its execution prompt could not be delivered: ${errorMessage(error)}`,
-            "error",
-          );
-        }
-      },
-    });
-    if (!replacement.cancelled || switchedToReplacement) return;
-    applyLoadedPlan(await (await ensureStore(ctx)).load());
-    ctx.ui.notify("New session was cancelled; executing in the current context.", "warning");
-  } catch (error) {
-    if (switchedToReplacement) return;
-    try {
-      applyLoadedPlan(await (await ensureStore(ctx)).load());
-    } catch {
-      // Preserve the original replacement failure; the still-persisted source approval reloads on restart.
-    }
-    ctx.ui.notify(`New session failed; executing in the current context: ${errorMessage(error)}`, "warning");
-  }
 }
 
 export function consumePlanCleanContextCompaction(): PlanCleanContextCompactionRequest | undefined {
@@ -685,113 +858,110 @@ function canReplaceContextAfterCompactionFailure(error: unknown): boolean {
 
 async function startImplementation(
   ctx: PlanContext,
-  markdown: string,
-  planPath: string,
-  executionMode: PlanExecutionMode,
+  approved: LoadedPlan,
+  executionChoice: PlanExecutionChoice,
   handoffDelivery: PlanHandoffDelivery,
 ): Promise<string | undefined> {
+  const markdown = approved.markdown;
+  const planPath = approved.manifest.approvedPath
+    ? join(approved.plansDir, approved.manifest.approvedPath)
+    : approved.currentPath;
+  const executionMode = executionChoice.context;
   exitPlanMode(ctx);
   latestPlan = markdown;
   latestStatus = "approved";
   ctx.ui.notify("Plan approved · Act mode active", "info");
-  const executionMessage = [
+  const executionContract = buildPlanExecutionContract(planPath, latestHandoffKey);
+  let executionMessage = executionContract;
+  let workflowDelivery: { store: PlanStore; handoffKey: string; binding: PlanWorkflowBinding } | undefined;
+
+  if (executionChoice.backend === "workflow") {
+    try {
+      const publication = await publishWorkflowPlan(ctx, approved, executionChoice);
+      if (publication.binding.status !== "bound") {
+        throw new Error("Workflow publisher returned a non-bound result");
+      }
+      const store = await ensureStore(ctx);
+      const pendingDelivery = withPendingWorkflowDelivery(publication.binding);
+      const bound = await store.updateWorkflowBinding(publication.binding.handoffKey, pendingDelivery);
+      applyLoadedPlan(bound);
+      workflowDelivery = {
+        store,
+        handoffKey: publication.binding.handoffKey,
+        binding: bound.manifest.workflowBinding!,
+      };
+      executionMessage = `${publication.executionMessage}\n\n${executionContract}`;
+      ctx.ui.notify(
+        `Approved Plan bound to Workflow Session ${publication.binding.workflowSessionId}`,
+        "info",
+      );
+    } catch (error) {
+      const message = errorMessage(error);
+      const handoffKey = approved.manifest.handoffKey;
+      const checksum = approved.manifest.approvedChecksum;
+      if (handoffKey && checksum) {
+        const failed: PlanWorkflowBinding = {
+          status: "failed",
+          handoffKey,
+          sourceChecksum: checksum,
+          error: message.slice(0, 2000),
+          updatedAt: new Date().toISOString(),
+        };
+        try {
+          applyLoadedPlan(await (await ensureStore(ctx)).updateWorkflowBinding(handoffKey, failed));
+        } catch (bindingError) {
+          ctx.ui.notify(`Workflow binding state could not be persisted: ${errorMessage(bindingError)}`, "error");
+        }
+      }
+      const failureMessage = `Plan approved, but Workflow binding failed; execution was not started: ${message}`;
+      ctx.ui.notify(failureMessage, "error");
+      return failureMessage;
+    }
+  }
+
+  return deliverImplementation(
+    ctx,
+    planPath,
+    markdown,
+    executionMode,
+    executionMessage,
+    handoffDelivery,
+    workflowDelivery
+      ? () => acknowledgeWorkflowDelivery(
+          ctx,
+          workflowDelivery!.store,
+          workflowDelivery!.handoffKey,
+          workflowDelivery!.binding,
+        )
+      : undefined,
+  );
+}
+
+function buildPlanExecutionContract(planPath: string, handoffKey?: string): string {
+  return [
     "The approved Plan is already in the current context.",
     `Plan source: ${planPath}`,
     "Before modifying the project:",
     "1. Reconcile the Plan with every user requirement; do not shrink or reinterpret the approved scope.",
     "2. Decompose the Plan into an ordered Todo dependency graph before implementation.",
-    // The handoff key only ever arrives through the model: nothing injects it into the
-    // todo/goal tool inputs. Telling the model the key here is what makes
-    // getPlanHandoffStatus report on real work instead of sitting at "todo-required"
-    // forever.
-    ...(latestHandoffKey
-      ? [`   Pass planHandoffKey: "${latestHandoffKey}" on those todo create calls so they are bound to this approval.`]
+    ...(handoffKey
+      ? [`   Pass planHandoffKey: "${handoffKey}" on those todo create calls so they are bound to this approval.`]
       : []),
     "3. Attach a Goal as the quality gate only to key Todos that carry verifiable acceptance criteria; do NOT create a Goal for every Todo. Goals are flat and time-ordered — put the overall acceptance Goal on the last Todo when an overall sign-off is needed.",
     "4. Prefer the teammate tool to delegate independent Todo work; use direct execution only when delegation would not help.",
     "5. Execute the Todo sequence; activating a Todo auto-switches to its quality-gate Goal, and a Todo completes only after its Goal verifies.",
   ].join("\n");
-  const portableMessage = [
-    "Execute this approved Plan in the new session:",
-    `Plan source: ${planPath}`,
-    "",
-    markdown,
-    "",
-    executionMessage,
-  ].join("\n");
+}
 
-  if (executionMode === "clear") {
-    if (ctx.newSession) {
-      await executeNewSessionHandoff(ctx.newSession, ctx, markdown, planPath, latestHandoffKey, portableMessage);
-      return;
-    }
-
-    const lease = compactionArbiter?.request("plan-handoff", {
-      owner: "plan-handoff",
-      reason: "clean-context",
-    });
-    if (compactionArbiter && !lease) {
-      ctx.ui.notify("Compaction is already in progress; executing with the current context.", "warning");
-      if (handoffDelivery === "tool-result") return executionMessage;
-      sendImplementationMessage(ctx, executionMessage);
-      return;
-    }
-
-    const cleanContextSummary = [
-      "# Approved Plan Execution Context",
-      "",
-      "The prior conversation was intentionally cleared after explicit user approval.",
-      "Only this approved Plan and its execution contract remain authoritative.",
-      `Plan source: ${planPath}`,
-      "",
-      markdown,
-      "",
-      executionMessage,
-    ].join("\n");
-    const handoffRequest = beginPlanHandoff();
-    pendingCleanContextCompaction = {
-      summary: cleanContextSummary,
-      firstKeptEntryId: `maestro-plan-clean-${latestHandoffKey ?? "approved"}`,
-      ...handoffRequest,
-    };
-
-    let settled = false;
-    const settleCurrentRequest = (): boolean => {
-      if (settled) return false;
-      settled = true;
-      lease?.release();
-      return finishPlanHandoff(handoffRequest);
-    };
-    const handleResetFailure = (error: unknown) => {
-      if (!settleCurrentRequest()) return;
-      if (canReplaceContextAfterCompactionFailure(error)) {
-        activatePlanContextReplacement(cleanContextSummary);
-        ctx.ui.notify("Native compaction was unavailable; using a clean Plan context in this session.", "info");
-        sendImplementationMessage(ctx, executionMessage);
-        return;
-      }
-      ctx.ui.notify(`Context reset failed; executing with the current context: ${errorMessage(error)}`, "warning");
-      sendImplementationMessage(ctx, executionMessage);
-    };
-    ctx.ui.notify("Resetting context with the approved Plan preserved…", "info");
-    try {
-      ctx.compact({
-        customInstructions: lease?.tagInstructions(PLAN_CLEAN_CONTEXT_COMPACTION_MARKER)
-          ?? PLAN_CLEAN_CONTEXT_COMPACTION_MARKER,
-        onComplete() {
-          if (!settleCurrentRequest()) return;
-          sendImplementationMessage(ctx, executionMessage);
-        },
-        onError(error) {
-          handleResetFailure(error);
-        },
-      });
-    } catch (error) {
-      handleResetFailure(error);
-    }
-    return;
-  }
-
+async function deliverImplementation(
+  ctx: PlanContext,
+  planPath: string,
+  markdown: string,
+  executionMode: PlanExecutionChoice["context"],
+  executionMessage: string,
+  handoffDelivery: PlanHandoffDelivery,
+  onDelivered?: () => Promise<void>,
+): Promise<string | undefined> {
   if (executionMode === "compact") {
     const lease = compactionArbiter?.request("plan-handoff", {
       owner: "plan-handoff",
@@ -800,6 +970,7 @@ async function startImplementation(
     if (compactionArbiter && !lease) {
       ctx.ui.notify("Compaction is already in progress; executing with the current context.", "warning");
       sendImplementationMessage(ctx, executionMessage);
+      await onDelivered?.();
       return;
     }
     const handoffRequest = beginPlanHandoff();
@@ -810,6 +981,7 @@ async function startImplementation(
       lease?.release();
       if (!finishPlanHandoff(handoffRequest)) return false;
       sendImplementationMessage(ctx, executionMessage);
+      void onDelivered?.();
       return true;
     };
     const compactionInstructions = [
@@ -841,8 +1013,12 @@ async function startImplementation(
     return;
   }
 
-  if (handoffDelivery === "tool-result") return executionMessage;
+  if (handoffDelivery === "tool-result") {
+    await onDelivered?.();
+    return executionMessage;
+  }
   sendImplementationMessage(ctx, executionMessage);
+  await onDelivered?.();
 }
 
 function sendImplementationMessage(ctx: PlanContext, message: string): void {
@@ -860,6 +1036,8 @@ function currentDetails(action: PlanToolDetails["action"]): PlanToolDetails {
     status: latestStatus,
     handoffStatus: getPlanHandoffStatus(),
     ...(latestHandoffKey ? { handoffKey: latestHandoffKey } : {}),
+    ...(latestExecution ? { execution: latestExecution } : {}),
+    ...(latestWorkflowBinding ? { workflowBinding: latestWorkflowBinding } : {}),
   };
 }
 
@@ -1002,7 +1180,9 @@ export function registerPlanTools(pi: ExtensionAPI): void {
       const outcome = await reviewPlan(ctx, true, "tool-result");
       onPlanModeChanged?.(ctx);
       const summary = outcome.approved
-        ? `Plan approved; Act mode restored (${outcome.executionMode ?? "current"} context).`
+        ? outcome.executionChoice?.backend === "workflow" && latestWorkflowBinding?.status === "failed"
+          ? "Plan approved; Workflow binding failed and execution was not started."
+          : `Plan approved; Act mode restored (${outcome.executionMode ?? "current"} context, ${outcome.executionChoice?.backend ?? "standalone"}).`
         : outcome.exited
           ? buildPlanExitMessage()
         : "Plan not approved; Plan mode remains active.";
@@ -1112,11 +1292,10 @@ function buildPlanEnterNote(): string {
   return [
     "<system-reminder>",
     "## Plan Mode Just Activated",
-    "Plan mode was activated (via user toggle or plan-enter). The tool surface is UNCHANGED —",
-    "mutating it mid-session would invalidate the cached prompt prefix, so plan mode is advisory:",
-    "- Do NOT edit files. Edit, Write, and NotebookEdit are still callable but are off-limits until",
-    "  the plan is approved — treat a call to any of them as a mistake, not as permission.",
-    "- Read, search, and exploration tools are the intended tools for this mode.",
+    "Plan mode was activated (via user toggle or plan-enter). The tool surface is UNCHANGED for prompt-cache stability,",
+    "but the tool-call hook enforces a read-only boundary until approval:",
+    "- Project edits, Workflow/Todo/Goal mutations, write teammates, and mutating shell/browser calls are blocked.",
+    "- Read, search, exploration, and canonical Workflow read actions remain available.",
     "- Plan tools: plan-update, plan-review, plan-confirm, plan-exit, plan-status.",
     "",
     "Workflow: research → plan-update (persist draft) → plan-confirm (present to user) in the same turn.",

@@ -6,6 +6,7 @@ import type {
   RunCliResult,
   RunDoneOptions,
   RunEditOptions,
+  RunPlanPublishOptions,
 } from "./cli-adapter.ts";
 import type { WorkflowBridge } from "./bridge.ts";
 import { activeWorkflowRun, type WorkflowRun, type WorkflowSnapshot } from "./types.ts";
@@ -22,6 +23,8 @@ export interface WorkflowRunAdapter {
   next(sessionId: string, pick?: string): Promise<RunCliResult>;
   done(runId: string, sessionId: string, options?: RunDoneOptions): Promise<RunCliResult>;
   edit(commands: readonly string[], options: RunEditOptions): Promise<RunCliResult>;
+  supportsPlanPublish(): Promise<boolean>;
+  publishPlan(options: RunPlanPublishOptions): Promise<RunCliResult>;
 }
 
 interface WorkflowLease {
@@ -453,6 +456,62 @@ export class WorkflowCoordinator {
     return session
       ? this.leases.ownership(session.sessionId, requireHostSessionId(currentHostSessionId))
       : undefined;
+  }
+
+  async supportsPlanPublish(): Promise<boolean> {
+    return this.adapter.supportsPlanPublish();
+  }
+
+  async publishPlan(
+    options: RunPlanPublishOptions,
+    context: WorkflowHostContext,
+  ): Promise<WorkflowTransitionResult> {
+    const currentHostSessionId = requireHostSessionId(context.hostSessionId);
+    let publishOptions = options;
+    if (options.sessionId) {
+      const snapshot = await this.bridge.refresh();
+      const session = requireSession(snapshot);
+      if (session.sessionId !== options.sessionId) {
+        throw new Error(
+          `Approved Plan targets Workflow Session ${options.sessionId}, but the active canonical Session is ${session.sessionId}`,
+        );
+      }
+      await this.fenceLease(session.sessionId, currentHostSessionId);
+      const fenced = requireSession(await this.bridge.refresh());
+      if (fenced.sessionId !== session.sessionId) {
+        throw new Error(
+          `Canonical Workflow Session switched from ${session.sessionId} to ${fenced.sessionId} while fencing Plan publication`,
+        );
+      }
+      publishOptions = {
+        ...options,
+        expectedIdentityRevision: fenced.identityRevision ?? fenced.revision,
+        expectedActivityRevision: fenced.activityRevision ?? fenced.revision,
+      };
+    } else {
+      if (this.leases.current()) {
+        throw new Error("Release the current Workflow Session before publishing into a new Session");
+      }
+      const snapshot = await this.bridge.refresh();
+      const session = snapshot.session;
+      if (session) {
+        if (session.activeRunId) {
+          throw new Error(
+            `Workflow Session ${session.sessionId} has active Run ${session.activeRunId}; finish it before creating a new Session`,
+          );
+        }
+        const ownership = await this.leases.ownership(session.sessionId, currentHostSessionId);
+        if (ownership.state === "owned") {
+          throw new Error(
+            ownership.ownerHostSessionId === currentHostSessionId
+              ? `Workflow Session ${session.sessionId} still has an attached lease; release it before creating a new Session`
+              : `Workflow Session ${session.sessionId} is owned by Pi session ${ownership.ownerHostSessionId ?? "another host"}`,
+          );
+        }
+      }
+    }
+    const command = await this.adapter.publishPlan(publishOptions);
+    return { command, snapshot: await this.bridge.refresh() };
   }
 
   async prepare(step: string): Promise<RunCliResult> {

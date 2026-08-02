@@ -12,6 +12,7 @@ import {
   type RunCliResult,
   type RunDoneOptions,
   type RunEditOptions,
+  type RunPlanPublishOptions,
 } from "../src/session/cli-adapter.ts";
 import {
   publicWorkflowErrorMessage,
@@ -23,6 +24,10 @@ import {
 } from "../src/session/coordinator.ts";
 import type { WorkflowSnapshot } from "../src/session/types.ts";
 import { executeRunControl, RunControlParams } from "../src/tools/run-control.ts";
+import {
+  assertPublishedPlanSnapshot,
+  requirePublishedExecutionRun,
+} from "../src/tools/plan-workflow.ts";
 
 test("run-control schema rejects unknown fields", () => {
   assert.equal(Check(RunControlParams, { action: "status" }), true);
@@ -522,6 +527,141 @@ test("continuation rejects failed and blocked gates at issue and consume boundar
   }
 });
 
+test("published Plan correlation rejects Session switches and unrelated active Runs", () => {
+  const snapshot = workflowSnapshot("running");
+  snapshot.canonicalClaim = { status: "valid", activeSessionId: "session-1" };
+  snapshot.session!.aliases["current-plan"] = "ART-PLAN";
+  snapshot.session!.artifacts.push({
+    artifactId: "ART-PLAN",
+    kind: "plan",
+    role: "primary",
+    runId: "run-plan-publish",
+    path: "outputs/plan.json",
+    hash: "sha256:plan",
+    status: "sealed",
+    replaces: null,
+  });
+  snapshot.session!.runs.unshift({
+    runId: "run-plan-publish",
+    parentRunId: null,
+    command: "plan-publish",
+    status: "sealed",
+    goal: "publish",
+    args: [],
+    gates: [],
+    primaryArtifactId: "ART-PLAN",
+    handoff: null,
+    startedAt: "2026-07-14T23:58:00.000Z",
+    endedAt: "2026-07-14T23:59:00.000Z",
+  });
+  const published = { session_id: "session-1", run_id: "run-plan-publish", artifact_id: "ART-PLAN" };
+  assert.doesNotThrow(() => assertPublishedPlanSnapshot(snapshot, published, "session-1"));
+  assert.equal(requirePublishedExecutionRun(snapshot, published).runId, "run-1");
+
+  const switched = structuredClone(snapshot);
+  switched.canonicalClaim!.activeSessionId = "session-2";
+  assert.throws(() => assertPublishedPlanSnapshot(switched, published), /does not match/);
+
+  const unrelated = structuredClone(snapshot);
+  unrelated.session!.runs.find((run) => run.runId === "run-1")!.command = "review";
+  assert.throws(() => requirePublishedExecutionRun(unrelated, published), /not correlated/);
+});
+
+test("Workflow Plan publication is host-fenced for current Sessions and requires release for new Sessions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-plan-publish-"));
+  const calls: string[][] = [];
+  const store = new WorkflowLeaseStore(root);
+  const snapshot = workflowSnapshot("running");
+  let currentPublish: RunPlanPublishOptions | undefined;
+  const coordinator = new WorkflowCoordinator(
+    fakeBridge(snapshot),
+    fakeAdapter(calls, { onPublish: (options) => { currentPublish = options; } }),
+    store,
+  );
+  const base = {
+    sourcePath: "C:/plans/approved.md",
+    sourceRoot: "C:/plans",
+    handoffKey: "a".repeat(64),
+    sourcePiSession: "pi-owner",
+    planRevision: 1,
+    approvedAt: "2026-08-02T12:00:00.000Z",
+  };
+  try {
+    await coordinator.attach("pi-owner");
+    const callsAfterAttach = calls.length;
+    await assert.rejects(
+      coordinator.publishPlan({ ...base, sessionId: "session-1" }, { hostSessionId: "pi-reader" }),
+      /lease belongs to Pi session pi-owner/,
+    );
+    assert.equal(calls.length, callsAfterAttach);
+
+    const before = store.current();
+    await coordinator.publishPlan({ ...base, sessionId: "session-1" }, { hostSessionId: "pi-owner" });
+    assert.equal(calls.at(-1)?.[0], "plan-publish");
+    assert.equal(currentPublish?.expectedIdentityRevision, 1);
+    assert.equal(currentPublish?.expectedActivityRevision, 1);
+    assert.ok((store.current()?.epoch ?? 0) > (before?.epoch ?? 0));
+
+    await assert.rejects(
+      coordinator.publishPlan(base, { hostSessionId: "pi-owner" }),
+      /Release the current Workflow Session/,
+    );
+    const contenderCalls: string[][] = [];
+    const contenderSnapshot = workflowSnapshot("running");
+    contenderSnapshot.session!.activeRunId = null;
+    const contender = new WorkflowCoordinator(
+      fakeBridge(contenderSnapshot),
+      fakeAdapter(contenderCalls),
+      new WorkflowLeaseStore(root),
+    );
+    await assert.rejects(
+      contender.publishPlan(base, { hostSessionId: "pi-reader" }),
+      /owned by Pi session pi-owner/,
+    );
+    assert.equal(contenderCalls.length, 0);
+    snapshot.session!.activeRunId = null;
+    await coordinator.release();
+    await coordinator.publishPlan(base, { hostSessionId: "pi-owner" });
+    assert.deepEqual(calls.at(-1), ["plan-publish", "new", "a".repeat(64)]);
+  } finally {
+    await coordinator.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("CLI adapter capability-detects and publishes an approved Plan", async () => {
+  const calls: string[][] = [];
+  const adapter = new RunCliAdapter("D:/workspace", async (args) => {
+    calls.push([...args]);
+    const command = args.join(" ");
+    if (command === "run --help") return result(args, "Commands:\n  brief\n  next\n  complete\n");
+    if (command === "session --help") return result(args, "Commands:\n  next\n  done\n");
+    if (command === "plan --help") return result(args, "Commands:\n  publish <path>\n");
+    return result(args, '{"ok":true}');
+  });
+
+  assert.equal(await adapter.supportsPlanPublish(), true);
+  await adapter.publishPlan({
+    sourcePath: "C:/plans/approvals/plan.md",
+    sourceRoot: "C:/plans",
+    sessionId: "session-1",
+    handoffKey: "a".repeat(64),
+    sourcePiSession: "pi-session-1",
+    planRevision: 3,
+    approvedAt: "2026-08-02T12:00:00.000Z",
+  });
+  assert.deepEqual(calls.at(-1), [
+    "plan", "publish", "C:/plans/approvals/plan.md",
+    "--source-root", "C:/plans",
+    "--session", "session-1",
+    "--handoff-key", "a".repeat(64),
+    "--source-pi-session", "pi-session-1",
+    "--plan-revision", "3",
+    "--approved-at", "2026-08-02T12:00:00.000Z",
+    "--json", "--workflow-root", "D:/workspace",
+  ]);
+});
+
 test("CLI adapter maps canonical check, next, done, and edit commands", async () => {
   const calls: string[][] = [];
   const adapter = new RunCliAdapter("D:/workspace", async (args) => {
@@ -826,6 +966,7 @@ function fakeAdapter(
     onNext?: (sessionId: string, pick?: string) => void;
     onDone?: (runId: string, sessionId: string, options: RunDoneOptions) => void;
     onEdit?: (commands: readonly string[], options: RunEditOptions) => void;
+    onPublish?: (options: RunPlanPublishOptions) => void;
   } = {},
 ): WorkflowRunAdapter {
   return {
@@ -846,6 +987,12 @@ function fakeAdapter(
       calls.push(["edit", ...commands, options.sessionId]);
       hooks.onEdit?.(commands, options);
       return result([], `edit ${commands.join(" ")}`);
+    },
+    async supportsPlanPublish() { return true; },
+    async publishPlan(options) {
+      calls.push(["plan-publish", options.sessionId ?? "new", options.handoffKey]);
+      hooks.onPublish?.(options);
+      return result([], JSON.stringify({ ok: true, result: { session_id: options.sessionId ?? "new-session" } }));
     },
   };
 }

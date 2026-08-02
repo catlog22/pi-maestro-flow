@@ -16,6 +16,22 @@ export interface RunCliCapabilities {
   commands: ReadonlySet<string>;
   /** Commands parsed from `session --help`; empty when the CLI has no session subcommand. */
   sessionCommands: ReadonlySet<string>;
+  /** Commands parsed from `plan --help`; used for approved Plan publication capability detection. */
+  planCommands: ReadonlySet<string>;
+}
+
+export interface RunPlanPublishOptions {
+  sourcePath: string;
+  sourceRoot: string;
+  sessionId?: string;
+  intent?: string;
+  topic?: string;
+  handoffKey: string;
+  sourcePiSession: string;
+  planRevision: number;
+  approvedAt: string;
+  expectedIdentityRevision?: number;
+  expectedActivityRevision?: number;
 }
 
 export type RunCompletionVerdict = "done" | "done-with-concerns" | "needs-retry" | "blocked";
@@ -77,8 +93,44 @@ export class RunCliAdapter {
     } catch {
       // No session subcommand on this CLI — next/done route via the run family
     }
-    this.detected = { commands, sessionCommands };
+    const planCommands = new Set<string>();
+    try {
+      const planHelp = await this.invoke(["plan", "--help"]);
+      for (const match of planHelp.stdout.matchAll(/^\s{2}([a-z][a-z-]*)\b/gm)) {
+        planCommands.add(match[1]);
+      }
+    } catch {
+      // Older CLIs have no approved Plan publisher; the confirmation UI disables Workflow execution.
+    }
+    this.detected = { commands, sessionCommands, planCommands };
     return this.detected;
+  }
+
+  async supportsPlanPublish(): Promise<boolean> {
+    return (await this.capabilities()).planCommands.has("publish");
+  }
+
+  async publishPlan(options: RunPlanPublishOptions): Promise<RunCliResult> {
+    if (!await this.supportsPlanPublish()) throw new UnsupportedRunCapabilityError("plan publish");
+    return this.invoke([
+      "plan", "publish", required(options.sourcePath, "sourcePath"),
+      "--source-root", required(options.sourceRoot, "sourceRoot"),
+      ...(options.sessionId ? ["--session", options.sessionId] : []),
+      ...(options.intent ? ["--intent", options.intent] : []),
+      ...(options.topic ? ["--topic", options.topic] : []),
+      "--handoff-key", required(options.handoffKey, "handoffKey"),
+      "--source-pi-session", required(options.sourcePiSession, "sourcePiSession"),
+      "--plan-revision", String(options.planRevision),
+      "--approved-at", required(options.approvedAt, "approvedAt"),
+      ...(options.expectedIdentityRevision !== undefined
+        ? ["--expected-identity-revision", String(options.expectedIdentityRevision)]
+        : []),
+      ...(options.expectedActivityRevision !== undefined
+        ? ["--expected-activity-revision", String(options.expectedActivityRevision)]
+        : []),
+      "--json",
+      "--workflow-root", this.workflowRoot,
+    ]);
   }
 
   async prepare(step: string): Promise<RunCliResult> {

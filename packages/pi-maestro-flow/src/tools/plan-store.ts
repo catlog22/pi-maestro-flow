@@ -15,6 +15,33 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
+export type PlanExecutionBackend = "standalone" | "workflow";
+export type PlanExecutionContextMode = "current" | "compact";
+export type PlanWorkflowTarget = "current" | "new";
+
+export interface PlanExecutionChoice {
+  backend: PlanExecutionBackend;
+  context: PlanExecutionContextMode;
+  workflowTarget?: PlanWorkflowTarget;
+}
+
+export interface PlanWorkflowBinding {
+  status: "pending" | "bound" | "failed";
+  handoffKey: string;
+  sourceChecksum: string;
+  workflowSessionId?: string;
+  workflowSessionGeneration?: string;
+  artifactId?: string;
+  producerRunId?: string;
+  executionRunId?: string;
+  requestId?: string;
+  deliveryId?: string;
+  deliveryStatus?: "pending" | "delivered";
+  deliveredAt?: string;
+  error?: string;
+  updatedAt: string;
+}
+
 export interface PlanManifest {
   version: 1;
   workspaceId: string;
@@ -30,6 +57,8 @@ export interface PlanManifest {
   approvedPath?: string;
   approvedChecksum?: string;
   handoffKey?: string;
+  execution?: PlanExecutionChoice;
+  workflowBinding?: PlanWorkflowBinding;
   approvals: string[];
 }
 
@@ -39,6 +68,11 @@ export interface LoadedPlan {
   currentPath: string;
   manifestPath: string;
   plansDir: string;
+}
+
+export interface PlanApprovalOptions {
+  inheritedHandoffKey?: string;
+  execution?: PlanExecutionChoice;
 }
 
 export interface PlanStoreOptions {
@@ -190,7 +224,11 @@ export class PlanStore {
     return this.withWorkspaceLock((token) => this.saveDraftUnlocked(markdown, expectedRevision, token));
   }
 
-  async approve(markdown: string, expectedRevision?: number, inheritedHandoffKey?: string): Promise<LoadedPlan> {
+  async approve(
+    markdown: string,
+    expectedRevision?: number,
+    options: PlanApprovalOptions = {},
+  ): Promise<LoadedPlan> {
     return this.withWorkspaceLock(async (ownerToken) => {
       const draft = await this.saveDraftUnlocked(markdown, expectedRevision, ownerToken);
       let archivePath: string | undefined;
@@ -199,7 +237,7 @@ export class PlanStore {
       try {
         const approvedAt = this.now().toISOString();
         const checksum = checksumText(markdown);
-        const handoffKey = inheritedHandoffKey
+        const handoffKey = options.inheritedHandoffKey
           ?? approvalHandoffKey(this.workspaceId, this.sessionId, draft.manifest.revision, checksum);
         const archiveName = `${archiveTimestamp(approvedAt)}-r${String(draft.manifest.revision).padStart(4, "0")}-${checksum.slice(0, 8)}-h${handoffKey}.md`;
         archivePath = join(this.approvalsDir, archiveName);
@@ -225,6 +263,17 @@ export class PlanStore {
           approvedPath,
           approvedChecksum: checksum,
           handoffKey,
+          ...(options.execution ? { execution: normalizeExecutionChoice(options.execution) } : {}),
+          ...(options.execution?.backend === "workflow"
+            ? {
+                workflowBinding: {
+                  status: "pending",
+                  handoffKey,
+                  sourceChecksum: checksum,
+                  updatedAt: approvedAt,
+                } satisfies PlanWorkflowBinding,
+              }
+            : {}),
           approvals: [...draft.manifest.approvals, approvedPath],
           updatedAt: approvedAt,
         };
@@ -242,6 +291,31 @@ export class PlanStore {
       await this.approvalCleanupHook?.().catch(() => {});
       if (pendingToken) await this.removePendingIfOwned(pendingToken).catch(() => {});
       return committed!;
+    });
+  }
+
+  async updateWorkflowBinding(
+    handoffKey: string,
+    binding: PlanWorkflowBinding,
+  ): Promise<LoadedPlan> {
+    return this.withWorkspaceLock(async (ownerToken) => {
+      const current = await this.loadUnlocked(ownerToken);
+      if (current.manifest.status !== "approved" || current.manifest.handoffKey !== handoffKey) {
+        throw new Error("Approved Plan handoff changed before Workflow binding update");
+      }
+      if (current.manifest.execution?.backend !== "workflow") {
+        throw new Error("Approved Plan is not configured for Workflow execution");
+      }
+      const normalized = normalizeWorkflowBinding(binding, current.manifest);
+      assertWorkflowBindingTransition(current.manifest.workflowBinding, normalized);
+      const manifest: PlanManifest = {
+        ...current.manifest,
+        workflowBinding: normalized,
+        updatedAt: normalized.updatedAt,
+      };
+      await this.assertLockOwnership(ownerToken);
+      await atomicWriteJson(this.manifestPath, manifest);
+      return { ...current, manifest };
     });
   }
 
@@ -299,6 +373,8 @@ export class PlanStore {
       delete manifest.approvedPath;
       delete manifest.approvedChecksum;
       delete manifest.handoffKey;
+      delete manifest.execution;
+      delete manifest.workflowBinding;
       await this.assertLockOwnership(ownerToken);
       await atomicWriteJson(this.manifestPath, manifest);
     }
@@ -801,6 +877,116 @@ function assertRevision(expected: number | undefined, actual: number): void {
   }
 }
 
+function normalizeExecutionChoice(choice: PlanExecutionChoice): PlanExecutionChoice {
+  const normalized = validateExecutionChoice(choice);
+  if (!normalized) throw new Error("Invalid Plan execution choice");
+  return normalized;
+}
+
+function validateExecutionChoice(raw: unknown): PlanExecutionChoice | null {
+  if (!isRecord(raw)
+    || (raw.backend !== "standalone" && raw.backend !== "workflow")
+    || (raw.context !== "current" && raw.context !== "compact")) return null;
+  if (raw.backend === "standalone") {
+    return raw.workflowTarget === undefined
+      ? { backend: "standalone", context: raw.context }
+      : null;
+  }
+  if (raw.workflowTarget !== "current" && raw.workflowTarget !== "new") return null;
+  return { backend: "workflow", context: raw.context, workflowTarget: raw.workflowTarget };
+}
+
+function normalizeWorkflowBinding(
+  binding: PlanWorkflowBinding,
+  manifest: Pick<PlanManifest, "handoffKey" | "approvedChecksum">,
+): PlanWorkflowBinding {
+  const normalized = validateWorkflowBinding(binding, manifest.handoffKey, manifest.approvedChecksum);
+  if (!normalized) throw new Error("Invalid Plan Workflow binding");
+  return normalized;
+}
+
+function assertWorkflowBindingTransition(
+  previous: PlanWorkflowBinding | undefined,
+  next: PlanWorkflowBinding,
+): void {
+  if (!previous || previous.status !== "bound") return;
+  if (next.status !== "bound") {
+    throw new Error("Bound Plan Workflow binding is terminal and cannot be downgraded");
+  }
+  const identityFields = [
+    "handoffKey", "sourceChecksum", "workflowSessionId", "workflowSessionGeneration",
+    "artifactId", "producerRunId", "executionRunId", "requestId",
+  ] as const;
+  if (identityFields.some((field) => previous[field] !== next[field])) {
+    throw new Error("Bound Plan Workflow identity cannot be replaced");
+  }
+  if (previous.deliveryStatus === "delivered" && next.deliveryStatus !== "delivered") {
+    throw new Error("Delivered Plan Workflow handoff cannot return to pending");
+  }
+  if (previous.deliveryId !== undefined && previous.deliveryId !== next.deliveryId) {
+    throw new Error("Plan Workflow delivery identity cannot be replaced");
+  }
+}
+
+function validateWorkflowBinding(
+  raw: unknown,
+  handoffKey: string | undefined,
+  approvedChecksum: string | undefined,
+): PlanWorkflowBinding | null {
+  if (!isRecord(raw)
+    || (raw.status !== "pending" && raw.status !== "bound" && raw.status !== "failed")
+    || !isChecksum(raw.handoffKey)
+    || !isChecksum(raw.sourceChecksum)
+    || raw.handoffKey !== handoffKey
+    || raw.sourceChecksum !== approvedChecksum
+    || !isIsoDate(raw.updatedAt)) return null;
+  for (const field of [
+    "workflowSessionId",
+    "workflowSessionGeneration",
+    "artifactId",
+    "producerRunId",
+    "executionRunId",
+    "requestId",
+    "deliveryId",
+    "error",
+  ] as const) {
+    const value = raw[field];
+    if (value !== undefined && (typeof value !== "string" || !value.trim())) return null;
+  }
+  if (raw.status === "bound"
+    && (typeof raw.workflowSessionId !== "string"
+      || typeof raw.artifactId !== "string"
+      || typeof raw.producerRunId !== "string"
+      || typeof raw.requestId !== "string")) return null;
+  if (raw.deliveryStatus !== undefined
+    && raw.deliveryStatus !== "pending"
+    && raw.deliveryStatus !== "delivered") return null;
+  if (raw.deliveryStatus !== undefined
+    && (raw.status !== "bound" || typeof raw.deliveryId !== "string")) return null;
+  if (raw.deliveryId !== undefined && raw.deliveryStatus === undefined) return null;
+  if (raw.deliveryStatus === "delivered" && !isIsoDate(raw.deliveredAt)) return null;
+  if (raw.deliveryStatus !== "delivered" && raw.deliveredAt !== undefined) return null;
+  if (raw.status === "failed" && typeof raw.error !== "string") return null;
+  return {
+    status: raw.status,
+    handoffKey: raw.handoffKey as string,
+    sourceChecksum: raw.sourceChecksum as string,
+    ...(typeof raw.workflowSessionId === "string" ? { workflowSessionId: raw.workflowSessionId } : {}),
+    ...(typeof raw.workflowSessionGeneration === "string" ? { workflowSessionGeneration: raw.workflowSessionGeneration } : {}),
+    ...(typeof raw.artifactId === "string" ? { artifactId: raw.artifactId } : {}),
+    ...(typeof raw.producerRunId === "string" ? { producerRunId: raw.producerRunId } : {}),
+    ...(typeof raw.executionRunId === "string" ? { executionRunId: raw.executionRunId } : {}),
+    ...(typeof raw.requestId === "string" ? { requestId: raw.requestId } : {}),
+    ...(typeof raw.deliveryId === "string" ? { deliveryId: raw.deliveryId } : {}),
+    ...(raw.deliveryStatus === "pending" || raw.deliveryStatus === "delivered"
+      ? { deliveryStatus: raw.deliveryStatus }
+      : {}),
+    ...(typeof raw.deliveredAt === "string" ? { deliveredAt: raw.deliveredAt } : {}),
+    ...(typeof raw.error === "string" ? { error: raw.error } : {}),
+    updatedAt: raw.updatedAt as string,
+  };
+}
+
 function validateManifest(
   raw: unknown,
   workspaceId: string,
@@ -833,12 +1019,21 @@ function validateManifest(
     previousRevision = parsed.revision;
   }
 
+  const execution = raw.execution === undefined ? undefined : validateExecutionChoice(raw.execution);
+  if (raw.execution !== undefined && !execution) invalidManifest();
+  const workflowBinding = raw.workflowBinding === undefined
+    ? undefined
+    : validateWorkflowBinding(raw.workflowBinding, raw.handoffKey as string | undefined, raw.approvedChecksum as string | undefined);
+  if (raw.workflowBinding !== undefined && !workflowBinding) invalidManifest();
+
   if (raw.status === "approved") {
     if (!isIsoDate(raw.approvedAt)
       || typeof raw.approvedPath !== "string"
       || !isChecksum(raw.approvedChecksum)
       || (raw.handoffKey !== undefined && !isChecksum(raw.handoffKey))
       || approvals.at(-1) !== raw.approvedPath) invalidManifest();
+    if (execution?.backend === "workflow" && !workflowBinding) invalidManifest();
+    if (execution?.backend !== "workflow" && workflowBinding) invalidManifest();
     const approvedArchive = parseArchivePath(raw.approvedPath as string);
     if (!approvedArchive
       || approvedArchive.revision !== raw.revision
@@ -849,6 +1044,8 @@ function validateManifest(
     || raw.approvedPath !== undefined
     || raw.approvedChecksum !== undefined
     || raw.handoffKey !== undefined
+    || raw.execution !== undefined
+    || raw.workflowBinding !== undefined
   ) {
     invalidManifest();
   }
@@ -870,6 +1067,8 @@ function validateManifest(
           approvedPath: raw.approvedPath as string,
           approvedChecksum: raw.approvedChecksum as string,
           ...(typeof raw.handoffKey === "string" ? { handoffKey: raw.handoffKey } : {}),
+          ...(execution ? { execution } : {}),
+          ...(workflowBinding ? { workflowBinding } : {}),
         }
       : {}),
     approvals,

@@ -69,6 +69,7 @@ import {
   onInput as goalInput,
   onBeforeAgentStart as goalBeforeAgentStart,
   onAgentEnd as goalAgentEnd,
+  onAgentSettled as goalAgentSettled,
   getActiveGoal,
   getGoalPanelEntries,
   currentGoalPhase,
@@ -126,6 +127,10 @@ import {
   RunControlParams,
   type RunControlInput,
 } from "../tools/run-control.ts";
+import {
+  assertPublishedPlanSnapshot,
+  requirePublishedExecutionRun,
+} from "../tools/plan-workflow.ts";
 import { SessionOverlay, type SessionOverlayAction } from "../tui/session-overlay.ts";
 import { TodoOverlay } from "../tui/todo-overlay.ts";
 import { GoalOverlay, type GoalOverlayAction } from "../tui/goal-overlay.ts";
@@ -160,8 +165,12 @@ import {
   getPlanText,
   getPlanHandoffStatus,
   setPlanModeChangeListener,
+  type PlanContext,
+  type PlanWorkflowPublicationResult,
 } from "../tools/plan.ts";
-import { registerPlanModelSelection, shouldStartPlanExecutionInNewSession } from "../tools/plan-model.ts";
+import type { PlanWorkflowConfirmationOptions } from "../tools/plan-confirm.ts";
+import type { LoadedPlan, PlanExecutionChoice, PlanWorkflowBinding } from "../tools/plan-store.ts";
+import { registerPlanModelSelection } from "../tools/plan-model.ts";
 import { installStatusline } from "../statusline/statusline.ts";
 import { registerCodexHookAdapter } from "../hooks/pi-adapter.ts";
 import { createPermissionController } from "../permissions/controller.ts";
@@ -1044,7 +1053,11 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   });
 
   // === Plan Mode ===
-  initPlan(pi, { compactionArbiter, preferNewSession: shouldStartPlanExecutionInNewSession });
+  initPlan(pi, {
+    compactionArbiter,
+    workflowConfirmation: planWorkflowConfirmation,
+    publishWorkflowPlan: publishApprovedPlanToWorkflow,
+  });
   registerPlanTools(pi);
   registerPlanCommand(pi);
   registerSwarmDisplay(pi, {
@@ -1214,6 +1227,199 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     updateTodoWidget();
     publishMaestroUi();
     return next;
+  }
+
+  async function planWorkflowConfirmation(ctx: PlanContext): Promise<PlanWorkflowConfirmationOptions> {
+    const hostSessionId = workflowHostSessionId(ctx as ExtensionContext);
+    if (!workflowCoordinator || !workflowBridge || !hostSessionId) {
+      return { allowNew: false };
+    }
+    try {
+      if (!await workflowCoordinator.supportsPlanPublish()) {
+        return { allowNew: false };
+      }
+      const snapshot = await workflowBridge.refresh();
+      const session = snapshot.session;
+      if (!session) return { allowNew: true };
+      const active = activeWorkflowRun(snapshot);
+      const ownership = await workflowCoordinator.ownership(hostSessionId);
+      const ownedHere = ownership?.state === "unowned"
+        || (ownership?.isOwner === true && ownership.isAttached === true);
+      const firstPendingStep = session.chain.find((step) => step.status === "pending");
+      let reason: string | undefined;
+      if (session.status !== "running") reason = `Workflow Session is ${session.status}`;
+      else if (active) reason = `Workflow Session has active Run ${active.runId}`;
+      else if (!firstPendingStep) reason = "Workflow Session has no pending execution step";
+      else if (firstPendingStep.command !== "execute") {
+        reason = `Next Workflow step is ${firstPendingStep.command}, not execute`;
+      }
+      else if (!ownedHere) {
+        reason = ownership?.ownerHostSessionId
+          ? `Workflow Session is owned by Pi session ${ownership.ownerHostSessionId}`
+          : "Workflow Session mutation lease is unavailable";
+      }
+      return {
+        current: {
+          sessionId: session.sessionId,
+          intent: session.intent,
+          available: reason === undefined,
+          ...(reason ? { reason } : {}),
+        },
+        allowNew: !active && (ownership?.state === "unowned" || ownedHere),
+      };
+    } catch (error) {
+      return {
+        current: {
+          sessionId: "unavailable",
+          intent: "Workflow capability check failed",
+          available: false,
+          reason: publicWorkflowErrorMessage(error),
+        },
+        allowNew: false,
+      };
+    }
+  }
+
+  async function publishApprovedPlanToWorkflow(
+    ctx: PlanContext,
+    approved: LoadedPlan,
+    execution: PlanExecutionChoice,
+  ): Promise<PlanWorkflowPublicationResult> {
+    if (execution.backend !== "workflow" || !execution.workflowTarget) {
+      throw new Error("Workflow publication requires an explicit Workflow target");
+    }
+    if (!workflowCoordinator || !workflowBridge) throw new Error("Workflow Coordinator is not attached");
+    const hostSessionId = workflowHostSessionId(ctx as ExtensionContext);
+    if (!hostSessionId) {
+      throw new Error("Current Pi host does not expose a stable session id; Workflow publication is refused");
+    }
+    if (!await workflowCoordinator.supportsPlanPublish()) {
+      throw new Error("Installed Maestro CLI does not support `maestro plan publish`");
+    }
+    const handoffKey = approved.manifest.handoffKey;
+    const approvedChecksum = approved.manifest.approvedChecksum;
+    const approvedAt = approved.manifest.approvedAt;
+    const approvedPath = approved.manifest.approvedPath;
+    if (!handoffKey || !approvedChecksum || !approvedAt || !approvedPath) {
+      throw new Error("Approved Plan is missing canonical approval identity");
+    }
+
+    let targetSessionId: string | undefined;
+    if (execution.workflowTarget === "current") {
+      const snapshot = await workflowBridge.refresh();
+      const session = snapshot.session;
+      if (!session || session.status !== "running") throw new Error("No running canonical Workflow Session to bind");
+      const active = activeWorkflowRun(snapshot);
+      const firstPendingStep = session.chain.find((step) => step.status === "pending");
+      if (!active && firstPendingStep?.command !== "execute") {
+        throw new Error(firstPendingStep
+          ? `Next Workflow step is ${firstPendingStep.command}, not execute`
+          : "Current Workflow Session has no pending execute step");
+      }
+      workflowSessionOptedIn = true;
+      if (!await attachWorkflowSession(ctx as ExtensionContext, snapshot, hostSessionId)) {
+        throw new Error(`Could not acquire Workflow Session ${session.sessionId}`);
+      }
+      targetSessionId = session.sessionId;
+    } else {
+      await workflowCoordinator.release();
+      attachedWorkflowSessionId = undefined;
+      attachedWorkflowHostSessionId = undefined;
+    }
+
+    const sourcePath = join(approved.plansDir, approvedPath);
+    const publication = await workflowCoordinator.publishPlan({
+      sourcePath,
+      sourceRoot: approved.plansDir,
+      ...(targetSessionId ? { sessionId: targetSessionId } : {}),
+      intent: planIntent(approved.markdown, handoffKey),
+      topic: planIntent(approved.markdown, handoffKey),
+      handoffKey,
+      sourcePiSession: hostSessionId,
+      planRevision: approved.manifest.revision,
+      approvedAt,
+    }, { hostSessionId });
+    const published = parsePlanPublishResult(publication.command.stdout);
+    if (published.source_checksum !== `sha256:${approvedChecksum}`) {
+      throw new Error("Published Plan source checksum does not match the approved revision");
+    }
+    assertPublishedPlanSnapshot(publication.snapshot, published, targetSessionId);
+
+    workflowSessionOptedIn = true;
+    if (!await attachWorkflowSession(ctx as ExtensionContext, publication.snapshot, hostSessionId)) {
+      throw new Error(`Published Workflow Session ${published.session_id} could not be attached`);
+    }
+    const existingExecution = activeWorkflowRun(publication.snapshot);
+    if (existingExecution) {
+      requirePublishedExecutionRun(publication.snapshot, published);
+    }
+    const executionRun = existingExecution
+      ? {
+          command: await workflowCoordinator.brief(existingExecution.runId),
+          snapshot: await workflowBridge.refresh(),
+        }
+      : await workflowCoordinator.next(undefined, { hostSessionId });
+    assertPublishedPlanSnapshot(executionRun.snapshot, published, published.session_id);
+    const active = requirePublishedExecutionRun(executionRun.snapshot, published);
+    await refreshWorkflow(ctx as ExtensionContext, true, true, true);
+
+    const binding: PlanWorkflowBinding = {
+      status: "bound",
+      handoffKey,
+      sourceChecksum: approvedChecksum,
+      workflowSessionId: published.session_id,
+      ...(executionRun.snapshot.sessionGeneration
+        ? { workflowSessionGeneration: executionRun.snapshot.sessionGeneration }
+        : {}),
+      artifactId: published.artifact_id,
+      producerRunId: published.run_id,
+      executionRunId: active.runId,
+      requestId: published.request_id,
+      updatedAt: new Date().toISOString(),
+    };
+    const executionMessage = executionRun.command.stdout.trim()
+      || `Continue Workflow Run ${active.runId} in Session ${published.session_id}.`;
+    return { binding, executionMessage };
+  }
+
+  function planIntent(markdown: string, handoffKey: string): string {
+    const heading = markdown.match(/^#\s+(.+)$/m)?.[1]?.trim();
+    const firstLine = markdown.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+    return (heading || firstLine || `Approved Plan ${handoffKey.slice(0, 12)}`).slice(0, 240);
+  }
+
+  function parsePlanPublishResult(stdout: string): {
+    session_id: string;
+    run_id: string;
+    artifact_id: string;
+    source_checksum: string;
+    request_id: string;
+  } {
+    let envelope: unknown;
+    try {
+      envelope = JSON.parse(stdout.trim());
+    } catch {
+      throw new Error("Maestro plan publisher returned invalid JSON");
+    }
+    if (!envelope || typeof envelope !== "object") throw new Error("Maestro plan publisher returned an invalid envelope");
+    const record = envelope as Record<string, unknown>;
+    const payload = record.result;
+    if (record.ok !== true || !payload || typeof payload !== "object") {
+      throw new Error("Maestro plan publisher did not return a successful result");
+    }
+    const result = payload as Record<string, unknown>;
+    for (const field of ["session_id", "run_id", "artifact_id", "source_checksum", "request_id"] as const) {
+      if (typeof result[field] !== "string" || !(result[field] as string).trim()) {
+        throw new Error(`Maestro plan publisher result is missing ${field}`);
+      }
+    }
+    return result as {
+      session_id: string;
+      run_id: string;
+      artifact_id: string;
+      source_checksum: string;
+      request_id: string;
+    };
   }
 
   async function withPublicWorkflowErrors<T>(operation: () => Promise<T>): Promise<T> {
@@ -1911,8 +2117,8 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     return goalInput(event);
   });
 
-  // Plan mode is advisory (a5b0d8b7): onToolCallPlan blocks nothing, the editing constraint
-  // is carried by the plan-enter prompt, and the permission chain below still applies in full.
+  // Keep the tool panel stable for prompt-cache reuse; this hook enforces the hard
+  // read-only boundary until Plan approval, before the interactive permission chain.
   pi.on("tool_call", (event) => onToolCallPlan(event, approvalMode === "bypassPermissions"));
 
   pi.on("before_agent_start", async (event) => {
@@ -1963,9 +2169,9 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     };
     await step("Plan", () => onAgentEndPlan(event, ctx));
     await step("Workflow refresh", () => refreshWorkflow(ctx, true));
+    await step("Goal attempt", () => goalAgentEnd(event, ctx));
     await step("Output-limit compaction", () =>
       midTurnAutoCompaction.onOutputLimit(event.messages as AgentMessage[], ctx));
-    await step("Goal", () => goalAgentEnd(event, ctx));
     await step("Goal change event", () => emitGoalChanged());
     await step("Todo", () => onAgentEndTodo());
     preserveCompletedTurnFromNativeThreshold = shouldPreserveCompletedTurn(
@@ -1975,7 +2181,26 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     await step("Todo widget", () => updateTodoWidget());
   });
 
+  // Model failover registered its agent_settled arbiter before this consolidated
+  // root handler. Goal therefore consumes the authoritative settlement first,
+  // then compaction can safely act on the resulting continuation state.
   pi.on("agent_settled", async (_event, ctx) => {
+    try {
+      await goalAgentSettled(ctx);
+    } catch (error) {
+      ctx.ui.notify(
+        `Goal settlement failed: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    }
+    try {
+      emitGoalChanged();
+    } catch (error) {
+      ctx.ui.notify(
+        `Goal change event failed after settlement: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    }
     try {
       await midTurnAutoCompaction.onAgentEnd(ctx);
     } catch (error) {

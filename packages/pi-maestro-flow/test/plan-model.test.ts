@@ -7,7 +7,6 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import {
   loadPlanModelSetting,
   registerPlanModelSelection,
-  shouldStartPlanExecutionInNewSession,
 } from "../src/tools/plan-model.ts";
 
 type Hook = (event: unknown, ctx: ExtensionContext) => Promise<unknown> | unknown;
@@ -122,18 +121,16 @@ test("/plan-model rejects project-local writes in untrusted workspaces", async (
   assert.match(harness.notifications.join("\n"), /Trust this workspace/);
 });
 
-test("Plan turns select the configured model once and Act restores the prior model", async () => {
+test("Plan turns select the configured model once and Act restores it in the same Pi session", async () => {
   const harness = createHarness(() => "provider/plan");
   await harness.fire("session_start");
   harness.setPlanMode(true);
   await harness.fire("before_agent_start");
-  assert.equal(shouldStartPlanExecutionInNewSession(), true);
   await harness.fire("before_agent_start");
   assert.deepEqual(harness.selected, ["provider/plan"]);
 
   harness.setPlanMode(false);
   await harness.fire("before_agent_start");
-  assert.equal(shouldStartPlanExecutionInNewSession(), false);
   assert.deepEqual(harness.selected, ["provider/plan", "provider/act"]);
 });
 

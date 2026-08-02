@@ -87,9 +87,8 @@ test("permission modes each enforce their own behavior", () => {
   assert.equal(evaluatePermission(edit, "acceptEdits", empty).behavior, "allow");
   assert.equal(evaluatePermission(custom, "dontAsk", empty).behavior, "deny");
   assert.equal(evaluatePermission(custom, "bypassPermissions", empty).behavior, "allow");
-  // Plan mode is advisory at the tool_call layer, so the permission layer must still ask.
-  // This asserted "allow" while a Plan hard boundary pre-screened the call; that boundary was
-  // removed in a5b0d8b7 and the stale allow left Plan strictly weaker than default.
+  // Plan mode also has a hard read-only tool-call boundary; the permission layer
+  // independently stays at least as strict as default for unknown tools.
   assert.equal(evaluatePermission(custom, "plan", empty).behavior, "ask");
   assert.equal(evaluatePermission(read, "dontAsk", empty).behavior, "allow");
   assert.equal(evaluatePermission({ toolName: "ls", input: { path: "." } }, "dontAsk", empty).behavior, "allow");

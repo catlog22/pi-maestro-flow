@@ -20,7 +20,6 @@ import {
   initPlan,
   onSessionShutdownPlan,
   onSessionStartPlan,
-  onToolCallPlan,
   registerPlanCommand,
   registerPlanTools,
 } from "../src/tools/plan.ts";
@@ -257,16 +256,12 @@ test("a blocked Todo does not satisfy the Plan handoff until its dependency clea
   }
 });
 
-test("Plan mode constrains mutating tools through the permission layer, not the tool_call hook", () => {
+test("Plan permission mode remains at least as strict as default", () => {
   const empty = { allow: [], ask: [], deny: [] };
   const write = { toolName: "write", input: { path: "src/app.ts" } };
 
-  // Plan is advisory at the tool_call layer by design (a5b0d8b7): blocking there would
-  // rewrite the tool panel and invalidate the cached prompt prefix.
-  assert.equal(onToolCallPlan({ toolName: "Write", input: {} }), undefined);
-
-  // Which is exactly why the permission layer must not wave it through either — Plan
-  // has to be at least as strict as default, never looser.
+  // The hard Plan tool-call boundary is covered by plan-lifecycle; the permission
+  // layer must independently remain at least as strict as default.
   assert.equal(evaluatePermission(write, "default", empty).behavior, "ask");
   assert.equal(evaluatePermission(write, "plan", empty).behavior, "ask");
   assert.equal(

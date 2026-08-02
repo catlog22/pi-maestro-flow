@@ -7,32 +7,57 @@ import {
   truncateToWidth,
   visibleWidth,
 } from "@earendil-works/pi-tui";
+import type {
+  PlanExecutionBackend,
+  PlanExecutionChoice,
+  PlanExecutionContextMode,
+  PlanWorkflowTarget,
+} from "./plan-store.ts";
 
 export type PlanConfirmationAction =
   | "execute"
-  | "execute-clear"
-  | "execute-compact"
   | "modify"
   | "continue"
   | "exit-plan"
   | "close";
 
+export interface PlanConfirmationDecision {
+  action: PlanConfirmationAction;
+  execution?: PlanExecutionChoice;
+}
+
+export interface PlanWorkflowConfirmationTarget {
+  sessionId: string;
+  intent: string;
+  available: boolean;
+  reason?: string;
+}
+
+export interface PlanWorkflowConfirmationOptions {
+  current?: PlanWorkflowConfirmationTarget;
+  allowNew: boolean;
+}
+
 export interface PlanConfirmationOptions {
   markdown: string;
   pathLabel?: string;
-  canClearContext: boolean;
   canCompactContext?: boolean;
   contextPercent?: number;
-  preferNewSession?: boolean;
-  clearContextMode?: "new-session" | "compaction";
+  defaultExecution?: PlanExecutionChoice;
+  workflow?: PlanWorkflowConfirmationOptions;
 }
 
-interface ConfirmationItem {
-  action: PlanConfirmationAction;
+interface ActionItem {
+  action: Exclude<PlanConfirmationAction, "close">;
   label: string;
   description: string;
-  enabled: boolean;
 }
+
+type SelectionRow =
+  | { kind: "backend" }
+  | { kind: "target" }
+  | { kind: "context" }
+  | { kind: "action"; item: ActionItem };
 
 const CTRL_ENTER_SEQUENCES = new Set([
   "\x1b[13;5u",
@@ -43,25 +68,40 @@ const CTRL_ENTER_SEQUENCES = new Set([
 export async function openPlanConfirmation(
   ctx: Pick<ExtensionContext, "hasUI" | "ui">,
   options: PlanConfirmationOptions,
-): Promise<PlanConfirmationAction> {
-  if (!ctx.hasUI) return "close";
+): Promise<PlanConfirmationDecision> {
+  if (!ctx.hasUI) return { action: "close" };
 
-  const result = await ctx.ui.custom<PlanConfirmationAction>(
+  const result = await ctx.ui.custom<PlanConfirmationDecision>(
     (tui, theme, _keybindings, done) => {
-      const contextItem = contextExecutionItem(options);
-      const items: ConfirmationItem[] = [
-        { action: "execute", label: "Execute", description: "Keep the current context", enabled: true },
-        contextItem,
-        { action: "modify", label: "View / modify Plan", description: "Open the full-screen Markdown editor", enabled: true },
-        { action: "continue", label: "Continue discussion", description: "Enter feedback or a question", enabled: true },
-        { action: "exit-plan", label: "Exit Plan mode", description: "Keep the draft and return to Act mode without approval", enabled: true },
+      const currentTargetAvailable = options.workflow?.current?.available === true;
+      const workflowAvailable = currentTargetAvailable || options.workflow?.allowNew === true;
+      let backend: PlanExecutionBackend = options.defaultExecution?.backend === "workflow" && workflowAvailable
+        ? "workflow"
+        : "standalone";
+      let workflowTarget: PlanWorkflowTarget = preferredWorkflowTarget(options, currentTargetAvailable);
+      let contextMode: PlanExecutionContextMode = options.defaultExecution?.context === "compact"
+        && options.canCompactContext !== false
+        ? "compact"
+        : "current";
+      const actions: ActionItem[] = [
+        { action: "execute", label: "Execute", description: "Approve with the selected execution settings" },
+        { action: "modify", label: "View / modify Plan", description: "Open the full-screen Markdown editor" },
+        { action: "continue", label: "Continue discussion", description: "Enter feedback or a question" },
+        { action: "exit-plan", label: "Exit Plan mode", description: "Keep the draft without approval" },
       ];
       const markdown = new Markdown(options.markdown, 0, 0, markdownTheme(theme));
-      let selected = options.preferNewSession && contextItem.enabled ? 1 : 0;
+      let selected = 0;
       let previewOffset = 0;
       let previewMaxOffset = 0;
       let status = "";
       let lastWidth = 80;
+
+      const rows = (): SelectionRow[] => [
+        { kind: "backend" },
+        ...(backend === "workflow" ? [{ kind: "target" } as const] : []),
+        { kind: "context" },
+        ...actions.map((item): SelectionRow => ({ kind: "action", item })),
+      ];
 
       function actionFooter(width: number, segments: string[]): string {
         let value = "";
@@ -72,32 +112,76 @@ export async function openPlanConfirmation(
         return value || segments[0] || "";
       }
 
-      function choose(action = items[selected]?.action): void {
-        const item = items.find((candidate) => candidate.action === action);
-        if (!item) return;
-        if (!item.enabled) {
-          status = unavailableMessage(item);
-          tui.requestRender();
+      function executionChoice(): PlanExecutionChoice {
+        return backend === "workflow"
+          ? { backend, context: contextMode, workflowTarget }
+          : { backend, context: contextMode };
+      }
+
+      function complete(action: PlanConfirmationAction): void {
+        done(action === "execute"
+          ? { action, execution: executionChoice() }
+          : { action });
+      }
+
+      function changeControl(row: SelectionRow, direction: -1 | 1): void {
+        status = "";
+        if (row.kind === "backend") {
+          if (!workflowAvailable && backend === "standalone") {
+            status = workflowUnavailableMessage(options);
+            return;
+          }
+          backend = backend === "standalone" ? "workflow" : "standalone";
           return;
         }
-        done(item.action);
+        if (row.kind === "target") {
+          const available = availableWorkflowTargets(options);
+          if (available.length < 2) {
+            status = available[0] === "current"
+              ? "Only the current Workflow Session is available."
+              : "Only creating a new Workflow Session is available.";
+            return;
+          }
+          const index = available.indexOf(workflowTarget);
+          workflowTarget = available[(index + direction + available.length) % available.length] ?? available[0]!;
+          return;
+        }
+        if (row.kind === "context") {
+          if (options.canCompactContext === false) {
+            status = "Context compaction is unavailable for this confirmation path.";
+            return;
+          }
+          contextMode = contextMode === "current" ? "compact" : "current";
+        }
+      }
+
+      function choose(row = rows()[selected]): void {
+        if (!row) return;
+        if (row.kind === "action") {
+          complete(row.item.action);
+          return;
+        }
+        changeControl(row, 1);
+        tui.requestRender();
       }
 
       return {
         render(width: number): string[] {
           const safeWidth = Math.max(1, width);
           lastWidth = safeWidth;
-          const selectedItem = items[selected] ?? items[0];
+          const selectionRows = rows();
+          selected = Math.min(selected, selectionRows.length - 1);
+          const selectedRow = selectionRows[selected] ?? selectionRows[0]!;
           if (safeWidth < 24) {
             return [
-              truncateToWidth(`Plan confirm · ${selected + 1}/${items.length} ${selectedItem.label}`, safeWidth, "…"),
-              truncateToWidth(actionFooter(safeWidth, ["Esc exit", "Enter choose", "↑↓ scroll"]), safeWidth, "…"),
+              truncateToWidth(`Plan confirm · ${selected + 1}/${selectionRows.length} ${rowLabel(selectedRow, options, backend, workflowTarget, contextMode)}`, safeWidth, "…"),
+              truncateToWidth(actionFooter(safeWidth, ["Esc exit", "Enter choose", "↑↓ navigate"]), safeWidth, "…"),
             ];
           }
 
           const innerWidth = Math.max(1, safeWidth - 2);
           const terminalRows = process.stdout?.rows ?? 30;
-          const previewHeight = Math.max(4, Math.min(16, terminalRows - 10));
+          const previewHeight = Math.max(4, Math.min(14, terminalRows - 13));
           const renderedPlan = markdown.render(Math.max(1, innerWidth - 2));
           const maxOffset = Math.max(0, renderedPlan.length - previewHeight);
           previewMaxOffset = maxOffset;
@@ -109,70 +193,68 @@ export async function openPlanConfirmation(
           const footer = status || actionFooter(innerWidth, [
             "Esc close",
             "Enter choose",
-            "1-5 choose",
-            "↑↓ plan / options at end",
+            "←→ change mode",
+            "↑↓ navigate",
             "Ctrl+Enter execute",
             "PgUp/PgDn plan",
           ]);
-          const rows = [
+          const rendered = [
             `${theme.bold("Plan confirmation")}  ${theme.fg("dim", options.pathLabel ?? "current.md")}`,
             theme.fg("dim", "─".repeat(innerWidth)),
             ...preview.map((line) => ` ${line}`),
           ];
-          while (rows.length < previewHeight + 2) rows.push("");
-          rows.push(theme.fg("dim", `Plan ${range}`));
-          rows.push(theme.fg("dim", "─".repeat(innerWidth)));
-          for (let index = 0; index < items.length; index++) {
-            const item = items[index];
+          while (rendered.length < previewHeight + 2) rendered.push("");
+          rendered.push(theme.fg("dim", `Plan ${range}`));
+          rendered.push(theme.fg("dim", "─".repeat(innerWidth)));
+          for (let index = 0; index < selectionRows.length; index++) {
+            const row = selectionRows[index]!;
             const marker = index === selected ? "›" : " ";
-            const label = item.enabled ? item.label : `${item.label} (unavailable)`;
-            const description = innerWidth >= 68 ? `  ${theme.fg("dim", `— ${item.description}`)}` : "";
-            const line = `${marker} ${index + 1}. ${label}${description}`;
-            rows.push(index === selected
-              ? theme.fg(item.enabled ? "accent" : "warning", theme.bold(line))
-              : theme.fg(item.enabled ? "text" : "dim", line));
+            const label = rowLabel(row, options, backend, workflowTarget, contextMode);
+            const description = innerWidth >= 76 ? `  ${theme.fg("dim", `— ${rowDescription(row, options)}`)}` : "";
+            const line = `${marker} ${label}${description}`;
+            rendered.push(index === selected
+              ? theme.fg("accent", theme.bold(line))
+              : theme.fg("text", line));
           }
-          rows.push(theme.fg(status ? "warning" : "dim", footer));
-          return renderFrame(rows, safeWidth, theme);
+          rendered.push(theme.fg(status ? "warning" : "dim", footer));
+          return renderFrame(rendered, safeWidth, theme);
         },
 
         handleInput(data: string): void {
           if (lastWidth < 20) {
-            if (matchesKey(data, Key.escape)) done("close");
+            if (matchesKey(data, Key.escape)) complete("close");
             return;
           }
+          const selectionRows = rows();
           if (matchesKey(data, Key.up)) {
             if (previewOffset >= previewMaxOffset) {
-              if (selected > 0) {
-                selected -= 1;
-              } else {
-                previewOffset = Math.max(0, previewMaxOffset - 1);
-              }
-            } else {
-              previewOffset = Math.max(0, previewOffset - 1);
-            }
+              if (selected > 0) selected -= 1;
+              else previewOffset = Math.max(0, previewOffset - 1);
+            } else previewOffset = Math.max(0, previewOffset - 1);
           } else if (matchesKey(data, Key.down)) {
-            if (previewOffset >= previewMaxOffset) {
-              selected = Math.min(items.length - 1, selected + 1);
-            } else {
-              previewOffset = Math.min(previewMaxOffset, previewOffset + 1);
-            }
+            if (previewOffset >= previewMaxOffset) selected = Math.min(selectionRows.length - 1, selected + 1);
+            else previewOffset = Math.min(previewMaxOffset, previewOffset + 1);
+          } else if (matchesKey(data, Key.left)) {
+            const row = selectionRows[selected];
+            if (row && row.kind !== "action") changeControl(row, -1);
+          } else if (matchesKey(data, Key.right)) {
+            const row = selectionRows[selected];
+            if (row && row.kind !== "action") changeControl(row, 1);
           } else if (matchesKey(data, Key.pageUp)) {
             previewOffset = Math.max(0, previewOffset - 5);
           } else if (matchesKey(data, Key.pageDown)) {
             previewOffset = Math.min(previewMaxOffset, previewOffset + 5);
-          } else if (/^[1-5]$/.test(data)) {
-            selected = Number(data) - 1;
-            choose();
+          } else if (/^[1-4]$/.test(data)) {
+            complete(actions[Number(data) - 1]!.action);
             return;
           } else if (matchesKey(data, Key.enter)) {
             choose();
             return;
           } else if (matchesKey(data, Key.ctrl("enter")) || CTRL_ENTER_SEQUENCES.has(data)) {
-            choose(options.preferNewSession && contextItem.enabled ? contextItem.action : "execute");
+            complete("execute");
             return;
           } else if (matchesKey(data, Key.escape)) {
-            done("close");
+            complete("close");
             return;
           }
           tui.requestRender();
@@ -196,44 +278,57 @@ export async function openPlanConfirmation(
     },
   );
 
-  return result ?? "close";
+  return result ?? { action: "close" };
 }
 
-function unavailableMessage(item: ConfirmationItem): string {
-  if (item.action === "execute-clear") return "Use /plan approve to start execution in a new session.";
-  if (item.action === "execute-compact") return "Use /plan approve to compact before execution.";
-  return item.description;
+function availableWorkflowTargets(options: PlanConfirmationOptions): PlanWorkflowTarget[] {
+  return [
+    ...(options.workflow?.current?.available ? ["current" as const] : []),
+    ...(options.workflow?.allowNew ? ["new" as const] : []),
+  ];
 }
 
-function contextExecutionItem(options: PlanConfirmationOptions): ConfirmationItem {
-  const resetWithCompaction = options.clearContextMode === "compaction";
-  const label = resetWithCompaction ? "Reset context then execute" : "Execute in new session";
-  const description = resetWithCompaction
-    ? "Keep this session and replace model context with the approved Plan"
-    : "Start with a clean context and inject the approved Plan";
-  if (options.preferNewSession && options.canClearContext) {
-    return {
-      action: "execute-clear",
-      label,
-      description,
-      enabled: true,
-    };
+function preferredWorkflowTarget(
+  options: PlanConfirmationOptions,
+  currentAvailable: boolean,
+): PlanWorkflowTarget {
+  const preferred = options.defaultExecution?.workflowTarget;
+  if (preferred === "current" && currentAvailable) return preferred;
+  if (preferred === "new" && options.workflow?.allowNew) return preferred;
+  return currentAvailable ? "current" : "new";
+}
+
+function workflowUnavailableMessage(options: PlanConfirmationOptions): string {
+  return options.workflow?.current?.reason
+    ?? "Workflow execution is unavailable because no writable Workflow Session target exists.";
+}
+
+function rowLabel(
+  row: SelectionRow,
+  options: PlanConfirmationOptions,
+  backend: PlanExecutionBackend,
+  target: PlanWorkflowTarget,
+  context: PlanExecutionContextMode,
+): string {
+  if (row.kind === "backend") return `Execution  [${backend === "standalone" ? "Standalone" : "Workflow"}]`;
+  if (row.kind === "target") {
+    if (target === "new") return "Workflow target  [Create new Session]";
+    const id = options.workflow?.current?.sessionId ?? "current";
+    return `Workflow target  [Current: ${id}]`;
   }
-  const contextPercent = options.contextPercent ?? 0;
-  if (contextPercent > 50 && options.canCompactContext !== false) {
-    return {
-      action: "execute-compact",
-      label: "Compact then execute",
-      description: `Context ${Math.round(contextPercent)}% · preserve this Plan in the checkpoint`,
-      enabled: true,
-    };
+  if (row.kind === "context") return `Context  [${context === "compact" ? "Compact current" : "Current"}]`;
+  return `${row.item.action === "execute" ? "1" : row.item.action === "modify" ? "2" : row.item.action === "continue" ? "3" : "4"}. ${row.item.label}`;
+}
+
+function rowDescription(row: SelectionRow, options: PlanConfirmationOptions): string {
+  if (row.kind === "backend") return "Choose local Todo/Goal execution or canonical Workflow Session/Run execution";
+  if (row.kind === "target") {
+    return options.workflow?.current?.intent
+      ? `Current intent: ${options.workflow.current.intent}`
+      : "Select the canonical Workflow Session target";
   }
-  return {
-    action: "execute-clear",
-    label,
-    description: options.canClearContext ? description : "Available from /plan approve",
-    enabled: options.canClearContext,
-  };
+  if (row.kind === "context") return "Keep this Pi session; compaction only replaces model context";
+  return row.item.description;
 }
 
 function renderFrame(

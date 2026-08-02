@@ -96,11 +96,9 @@ export function evaluatePermission(
   if (mode === "dontAsk") {
     return { behavior: "deny", reason: `${toolName} is not pre-approved in dontAsk mode.` };
   }
-  // Plan mode deliberately carries no tool-level block (a5b0d8b7 made it advisory so the
-  // cached prompt prefix stays valid), so it must fall through to the same `ask` every other
-  // interactive mode gets. It previously returned `allow` on the premise that a Plan hard
-  // boundary had already screened the call; that boundary is gone, and the stale `allow` made
-  // Plan strictly weaker than `default`.
+  // The Plan tool-call hook enforces the hard read-only boundary before this
+  // layer. Unknown tools still fall through to the normal interactive ask so
+  // this policy remains independently at least as strict as default.
   return { behavior: "ask", reason: `${toolName} requires user approval in ${mode} mode.` };
 }
 
