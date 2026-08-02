@@ -206,6 +206,7 @@ import { registerFff } from "../tools/fff.ts";
 import { registerBashBg } from "../tools/bash-bg.ts";
 import { registerLoop } from "../tools/loop.ts";
 import { registerModelAvailability } from "../tools/model-availability.ts";
+import { registerMarkdownReviewCommand } from "../tools/markdown-review-command.ts";
 import {
   proxyTeammateChildTool,
   registerTeammateChildExtension,
@@ -1101,6 +1102,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   registerLoop(pi);
   registerModelAvailability(pi);
   registerKeybindingsCommand(pi);
+  registerMarkdownReviewCommand(pi);
 
   pi.registerShortcut(PLAN_TOGGLE_KEY, {
     description: `Toggle Plan/Act mode (${PLAN_TOGGLE_LABEL})`,
