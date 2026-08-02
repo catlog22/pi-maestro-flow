@@ -251,6 +251,29 @@ test("Flow provider rechecks revisions at commit and preserves a post-prepare ex
   await provider.abort!({ context, transactionId: "late-conflict", prepareToken: prepared.prepareToken! });
 });
 
+test("Flow provider rollback after a failed commit does not overwrite the external write", async () => {
+  const { provider, context, globalSettings } = fixture();
+  writeJson(globalSettings, { compaction: { enabled: false }, owner: "baseline" });
+  const baseline = await provider.read({ context });
+  const prepared = await provider.prepare!({
+    context,
+    transactionId: "rollback-after-fail",
+    expectedRevisions: baseline.configured.resources,
+    changes: [{ operation: "set", key: "compaction.enabled", scope: "global", value: true }],
+  });
+  const external = `${JSON.stringify({ compaction: { enabled: false }, owner: "external-write" }, null, 2)}\n`;
+  fs.writeFileSync(globalSettings, external, "utf8");
+  await assert.rejects(
+    provider.commit!({ context, transactionId: "rollback-after-fail", prepareToken: prepared.prepareToken! }),
+    /changed after prepare/,
+  );
+  // The host follows the protocol and asks for a rollback; it must refuse to restore
+  // prepare-time bytes because the transaction never committed (no committedRevision).
+  const rollback = await provider.rollback!({ context, transactionId: "rollback-after-fail", prepareToken: prepared.prepareToken! });
+  assert.equal(rollback.rolledBack, false);
+  assert.equal(fs.readFileSync(globalSettings, "utf8"), external);
+});
+
 test("Flow provider rollback restores exact original bytes", async () => {
   const { provider, context, projectSettings, projectFailover } = fixture();
   const settingsBytes = '{"unknown":1,"compaction":{"enabled":false}}\n';

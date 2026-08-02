@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import test from "node:test";
 import {
 	SETTINGS_ANNOUNCE_EVENT,
@@ -211,5 +212,51 @@ test("actions and provider discovery stay owned by Cockpit", async () => {
 		const announcements = bus.emitted.filter((entry) => entry.event === SETTINGS_ANNOUNCE_EVENT);
 		assert.equal(announcements.length, 2);
 		assert.equal((announcements[1]?.payload as SettingsAnnounceEventV1).providerId, "pi-cockpit");
+	} finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("commit restores the previous bytes when the post-rename read fails", async () => {
+	const { directory, path } = tempConfig();
+	try {
+		const beforeBytes = `${JSON.stringify({ ...DEFAULT_CONFIG, staticMode: false }, null, 2)}\n`;
+		writeFileSync(path, beforeBytes);
+		const state = providerAt(path);
+		const before = await state.provider.read({ context });
+		const prepared = await state.provider.prepare!({
+			context,
+			transactionId: "read-fail",
+			changes: [{ operation: "set", key: "staticMode", scope: "global", value: true }],
+			expectedRevisions: before.configured.resources,
+		});
+		assert.equal(prepared.prepared, true);
+
+		// Fail the read that follows the rename: the commit must restore the previous
+		// bytes while still holding the lock instead of leaving a half-applied config.
+		const { createRequire, syncBuiltinESMExports } = await import("node:module");
+		const mutableFs = createRequire(import.meta.url)("node:fs") as typeof fs;
+		const originalRead = mutableFs.readFileSync;
+		let injected = false;
+		mutableFs.readFileSync = ((filePath: fs.PathLike, options?: unknown) => {
+			if (!injected && resolvePath(String(filePath)) === resolvePath(path)) {
+				injected = true;
+				throw Object.assign(new Error("injected post-rename config read failure"), { code: "EIO" });
+			}
+			return originalRead(filePath, options as BufferEncoding | undefined);
+		}) as typeof fs.readFileSync;
+		syncBuiltinESMExports();
+		try {
+			await assert.rejects(
+				async () => await state.provider.commit!({ context, transactionId: "read-fail", prepareToken: prepared.prepareToken! }),
+				/injected post-rename config read failure/,
+			);
+		} finally {
+			mutableFs.readFileSync = originalRead;
+			syncBuiltinESMExports();
+		}
+		// The rename already happened, so the config must have been restored to the
+		// pre-commit bytes (staticMode stays false).
+		const restored = JSON.parse(readFileSync(path, "utf8")) as { staticMode?: boolean };
+		assert.equal(restored.staticMode, false);
+		assert.equal(readFileSync(path, "utf8"), beforeBytes);
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });

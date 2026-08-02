@@ -277,6 +277,63 @@ test("committed global and project changes roll back to exact previous bytes", a
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("single-scope commit restores the previous bytes when the durability sync fails after publish", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teammate-settings-provider-"));
+  try {
+    const configPaths = paths(root);
+    fs.mkdirSync(path.dirname(configPaths.project(root)), { recursive: true });
+    const projectBefore = `${JSON.stringify({
+      version: 3,
+      activeProfile: "default",
+      applyOverrides: true,
+      overrides: { mappings: { analysis: "old-model" }, thinkingLevels: {} },
+    }, null, 2)}\n`;
+    fs.writeFileSync(configPaths.project(root), projectBefore);
+    const provider = providerAt(root);
+    const before = await provider.read({ context: context(root) });
+    const changes = [{ operation: "set" as const, key: "routing.analysis.model", scope: "project" as const, value: "new-model" }];
+    const prepared = await provider.prepare!({ context: context(root), transactionId: "single", changes, expectedRevisions: before.configured.resources });
+
+    // Inject a failure for the post-rename fsync of the project store: the rename has
+    // already published the new bytes, so the write path must restore the previous value.
+    const { createRequire, syncBuiltinESMExports } = await import("node:module");
+    const mutableFs = createRequire(import.meta.url)("node:fs") as typeof fs;
+    const originalFsync = mutableFs.fsyncSync;
+    const originalOpen = mutableFs.openSync;
+    let injected = false;
+    let destinationHandle: number | undefined;
+    const replacementOpen = ((filePath: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      const handle = originalOpen(filePath, flags, mode);
+      if (path.resolve(String(filePath)) === path.resolve(configPaths.project(root)) && flags === "r+") {
+        destinationHandle = handle as number;
+      }
+      return handle;
+    }) as typeof fs.openSync;
+    const replacementFsync: typeof fs.fsyncSync = (handle) => {
+      if (!injected && handle === destinationHandle) {
+        injected = true;
+        throw Object.assign(new Error("injected post-rename project fsync failure"), { code: "EIO" });
+      }
+      return originalFsync(handle);
+    };
+    Reflect.set(mutableFs, "openSync", replacementOpen);
+    Reflect.set(mutableFs, "fsyncSync", replacementFsync);
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(
+        async () => await provider.commit!({ context: context(root), transactionId: "single", prepareToken: prepared.prepareToken! }),
+        /published/,
+      );
+    } finally {
+      Reflect.set(mutableFs, "fsyncSync", originalFsync);
+      Reflect.set(mutableFs, "openSync", originalOpen);
+      syncBuiltinESMExports();
+    }
+    // The published bytes must have been restored to the pre-commit value.
+    assert.equal(fs.readFileSync(configPaths.project(root), "utf8"), projectBefore);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("legacy action and synchronous discovery stay provider-owned", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "teammate-settings-provider-"));
   try {
