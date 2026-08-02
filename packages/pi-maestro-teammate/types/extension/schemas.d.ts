@@ -73,7 +73,7 @@ export declare const TeammateWaitParams: Type.TObject<{
     waitMs: Type.TOptional<Type.TInteger>;
 }>;
 export declare const ObserveParams: Type.TObject<{
-    action: Type.TUnsafe<"status" | "wait">;
+    action: Type.TUnsafe<"status" | "wait" | "watch">;
     targets: Type.TArray<Type.TObject<{
         kind: Type.TString;
         id: Type.TString;
@@ -82,6 +82,7 @@ export declare const ObserveParams: Type.TObject<{
     lines: Type.TOptional<Type.TInteger>;
     waitMode: Type.TOptional<Type.TUnsafe<"count" | "all" | "any">>;
     waitCount: Type.TOptional<Type.TInteger>;
+    until: Type.TOptional<Type.TUnsafe<"completed" | "result-ready">>;
     timeoutMs: Type.TOptional<Type.TInteger>;
 }>;
 export declare const TeammateMonitorParams: Type.TObject<{

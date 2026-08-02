@@ -80,6 +80,8 @@ export interface TeammateWaitResult {
 }
 export interface PendingTeammateWaiter {
     resolve: (result: TeammateWaitResult) => void;
+    /** When to settle: "result-ready" (default) resolves on first consumable result; "completed" only on a terminal lifecycle. */
+    until?: "result-ready" | "completed";
     timer?: ReturnType<typeof setTimeout>;
     signal?: AbortSignal;
     abortHandler?: () => void;
@@ -99,11 +101,12 @@ export declare function settleTeammateWaiters(state: TeammateState, correlationI
 export declare function claimResultReadyNotice(state: TeammateState | undefined, correlationId: string): boolean;
 export declare function watchTargetStalledAt(target: WatchTarget, state?: TeammateState): number;
 export declare function statusForWatchTarget(target: WatchTarget, now?: number, state?: TeammateState): Extract<TeammateWaitStatus, "completed" | "failed" | "terminated" | "result-ready" | "stalled"> | undefined;
-export declare function waitDelayForWatchTarget(target: WatchTarget, timeoutAt: number | undefined, state?: TeammateState): number;
+export declare function waitDelayForWatchTarget(target: WatchTarget, timeoutAt: number | undefined, state?: TeammateState, until?: "result-ready" | "completed"): number;
 export declare function waitForTeammate(state: TeammateState, params: {
     name?: string;
     timeoutMs?: number;
     waitMs?: number;
+    until?: "result-ready" | "completed";
 }, signal?: AbortSignal): Promise<TeammateWaitResult>;
 export declare function emitComplete(pi: ExtensionAPI, id: string | undefined, agent: string, correlationId: string, exitCode: number, durationMs: number, wakeable?: boolean, cancelled?: boolean): void;
 /**

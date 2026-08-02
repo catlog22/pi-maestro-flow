@@ -1,4 +1,4 @@
-export type ObservationAction = "status" | "wait";
+export type ObservationAction = "status" | "wait" | "watch";
 export type ObservationDetail = "summary" | "tail" | "full";
 export type ObservationWaitMode = "all" | "any" | "count";
 export type ObservationPhase = "pending" | "active" | "settled" | "unknown";
@@ -35,6 +35,8 @@ export interface ObservationReadOptions {
 export interface ObservationWaitOptions extends ObservationReadOptions {
     deadline: number;
     signal: AbortSignal;
+    /** When the wait settles: "result-ready" (default) or "completed" (terminal lifecycle). */
+    until?: "result-ready" | "completed";
 }
 export interface ObservationProvider {
     kind: string;
@@ -50,10 +52,12 @@ export interface ObserveParams {
     waitMode?: ObservationWaitMode;
     waitCount?: number;
     timeoutMs?: number;
+    /** Block until "result-ready" (default) or "completed" (terminal lifecycle). */
+    until?: "result-ready" | "completed";
 }
 export interface ObserveResult {
     action: ObservationAction;
-    reason: "snapshot" | "all" | "any" | "count" | "timeout" | "aborted";
+    reason: "snapshot" | "all" | "any" | "count" | "timeout" | "aborted" | "watch";
     observations: ObservationSnapshot[];
     durationMs: number;
 }
