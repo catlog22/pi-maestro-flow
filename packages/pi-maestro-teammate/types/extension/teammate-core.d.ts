@@ -43,7 +43,7 @@ export declare const TEAMMATE_WAIT_DESCRIPTION = "Wait once for a teammate resul
 export declare const TEAMMATE_WAIT_SNIPPET = "Wait once for a teammate result or for a bounded delay.";
 export declare const TEAMMATE_WAIT_GUIDELINES: string[];
 export declare const OBSERVE_DESCRIPTION = "Observe mixed teammate and background Bash targets through one status/wait/watch interface.\n\n- \"status\": one-shot snapshot of every target\n- \"wait\": block on an all/any/count barrier with one request-level timeout; set until=\"completed\" to block until agents fully terminate instead of first result\n- \"watch\": poll every target until timeoutMs, returning the full status-transition timeline (richer than status, no barrier required)\n\nTargets use { kind, id }, where kind is currently \"teammate\" or \"bash_bg\". Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.";
-export declare const OBSERVE_SNIPPET = "Observe or wait for mixed teammate and background Bash targets.";
+export declare const OBSERVE_SNIPPET = "Observe, wait for, or watch mixed teammate and background Bash targets.";
 export declare const OBSERVE_GUIDELINES: string[];
 export declare const TEAMMATE_MONITOR_DESCRIPTION = "Observe multiple teammate targets or block on a multi-agent barrier. Persistent supervision is entered/exited separately via /monitor.\n\n- \"status\": one-shot compact snapshot of targets \u2014 non-blocking\n- \"wait\": block until barrier condition (all/any/count targets settle)\n\nOutput is compact by default (one line per target). Use verbose for detail.";
 export declare const TEAMMATE_MONITOR_SNIPPET = "Query monitor snapshot or block on a multi-agent barrier.";
