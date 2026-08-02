@@ -832,15 +832,20 @@ export async function executeCall(
     }
   }
 
+  const lease = state.manager.acquireConnection(serverName, signal);
+  if (!lease) {
+    return {
+      content: [{ type: "text" as const, text: `Server "${serverName}" closed before the tool call started.` }],
+      details: { mode: "call", error: "server_not_connected", server: serverName },
+    };
+  }
+  connection = lease.connection;
   let uiSession: UiSessionRuntime | null = null;
-  const requestOptions = state.manager.getRequestOptions?.(serverName, signal) ?? (signal ? { signal } : undefined);
+  const requestOptions = lease.requestOptions;
 
   const outputGuardOptions = resolveMcpOutputGuardOptions(state.config.settings);
 
   try {
-    state.manager.touch(serverName);
-    state.manager.incrementInFlight(serverName);
-
     if (toolMeta.resourceUri) {
       const result = await connection.client.readResource({ uri: toolMeta.resourceUri }, requestOptions);
       const content = (result.contents ?? []).map(c => ({
@@ -945,7 +950,6 @@ export async function executeCall(
     if (uiSession?.reused) {
       uiSession.close();
     }
-    state.manager.decrementInFlight(serverName);
-    state.manager.touch(serverName);
+    lease.release();
   }
 }

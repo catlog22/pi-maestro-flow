@@ -417,26 +417,24 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
           return;
         }
 
-        const connection = options.manager.getConnection(options.serverName);
-        if (!connection || connection.status !== "connected") {
+        const lease = options.manager.acquireConnection(options.serverName);
+        if (!lease) {
           sendJson(res, 503, { ok: false, error: `Server "${options.serverName}" is not connected` });
           return;
         }
+        const connection = lease.connection;
 
         try {
-          options.manager.touch(options.serverName);
-          options.manager.incrementInFlight(options.serverName);
           const result = await connection.client.callTool({
             name: callParams.name,
             arguments:
               callParams.arguments && typeof callParams.arguments === "object" && !Array.isArray(callParams.arguments)
                 ? callParams.arguments
                 : {},
-          }, undefined, options.manager.getRequestOptions?.(options.serverName));
+          }, undefined, lease.requestOptions);
           sendJson(res, 200, { ok: true, result });
         } finally {
-          options.manager.decrementInFlight(options.serverName);
-          options.manager.touch(options.serverName);
+          lease.release();
         }
         return;
       }

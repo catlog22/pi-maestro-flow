@@ -338,23 +338,21 @@ export function createDirectToolExecutor(
       };
     }
 
-    const connection = state.manager.getConnection(spec.serverName);
-    if (!connection || connection.status !== "connected") {
+    const lease = state.manager.acquireConnection(spec.serverName, signal);
+    if (!lease) {
       return {
         content: [{ type: "text" as const, text: `MCP server "${spec.serverName}" not connected` }],
         details: { error: "not_connected", server: spec.serverName },
       };
     }
+    const connection = lease.connection;
 
     let uiSession: UiSessionRuntime | null = null;
-    const requestOptions = state.manager.getRequestOptions?.(spec.serverName, signal) ?? (signal ? { signal } : undefined);
+    const requestOptions = lease.requestOptions;
 
     const outputGuardOptions = resolveMcpOutputGuardOptions(state.config.settings);
 
     try {
-      state.manager.touch(spec.serverName);
-      state.manager.incrementInFlight(spec.serverName);
-
       if (spec.resourceUri) {
         const result = await connection.client.readResource({ uri: spec.resourceUri }, requestOptions);
         const content = (result.contents ?? []).map(c => ({
@@ -442,8 +440,7 @@ export function createDirectToolExecutor(
       if (uiSession?.reused) {
         uiSession.close();
       }
-      state.manager.decrementInFlight(spec.serverName);
-      state.manager.touch(spec.serverName);
+      lease.release();
     }
   };
 }

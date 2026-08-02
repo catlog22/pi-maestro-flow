@@ -30,7 +30,7 @@ import {
 import { interpolateEnvRecord, resolveBearerToken, resolveConfigPath } from "./utils.ts";
 import { abortable, throwIfAborted } from "./abort.ts";
 
-interface ServerConnection {
+export interface ServerConnection {
   client: Client;
   transport: Transport;
   definition: ServerDefinition;
@@ -39,6 +39,13 @@ interface ServerConnection {
   lastUsedAt: number;
   inFlight: number;
   status: "connected" | "closed" | "needs-auth";
+  lifecycle?: AbortController;
+}
+
+export interface ServerConnectionLease {
+  connection: ServerConnection;
+  requestOptions: RequestOptions | undefined;
+  release(): void;
 }
 
 /**
@@ -74,6 +81,8 @@ export class McpServerManager {
   private samplingConfig: ServerSamplingConfig | undefined;
   private elicitationConfig: ServerElicitationConfig | undefined;
   private acceptedUrlElicitations = new Map<string, Set<string>>();
+  private connectionDrainWaiters = new WeakMap<ServerConnection, Set<() => void>>();
+  private connectionLeaseCounts = new WeakMap<ServerConnection, number>();
   private defaultRequestTimeoutMs: number | undefined;
 
   /** Default cwd for stdio servers without an explicit config `cwd`. */
@@ -93,7 +102,19 @@ export class McpServerManager {
 
   getRequestOptions(name: string, signal?: AbortSignal): RequestOptions | undefined {
     const connection = this.connections.get(name);
-    return this.buildRequestOptions(connection?.definition, signal);
+    return this.requestOptionsForConnection(connection, signal);
+  }
+
+  private requestOptionsForConnection(
+    connection: ServerConnection | undefined,
+    signal?: AbortSignal,
+  ): RequestOptions | undefined {
+    if (!connection) return this.buildRequestOptions(undefined, signal);
+    const lifecycle = connection.lifecycle ??= new AbortController();
+    const combinedSignal = signal
+      ? AbortSignal.any([signal, lifecycle.signal])
+      : lifecycle.signal;
+    return this.buildRequestOptions(connection.definition, combinedSignal);
   }
 
   private getResolvedRequestTimeoutMs(definition?: ServerDefinition): number | undefined {
@@ -140,14 +161,17 @@ export class McpServerManager {
     // caller's signal. close() aborts this controller to fence the startup.
     const controller = new AbortController();
     const startup = this.createConnection(name, definition, controller.signal).then(
-      (connection) => {
+      async (connection) => {
         if (this.connectPromises.get(name)?.controller !== controller) {
           // Fenced by close(): reclaim the late resource and fail waiters rather
           // than inserting into or overwriting a newer generation's registry.
-          void closeResource(connection.client, `${name} client`);
-          void closeResource(connection.transport, `${name} transport`);
+          await Promise.all([
+            closeResource(connection.client, `${name} client`),
+            closeResource(connection.transport, `${name} transport`),
+          ]);
           throw new Error(`Server "${name}" was closed during startup.`);
         }
+        connection.lifecycle ??= new AbortController();
         this.connections.set(name, connection);
         this.connectPromises.delete(name);
         return connection;
@@ -223,6 +247,7 @@ export class McpServerManager {
         lastUsedAt: Date.now(),
         inFlight: 0,
         status: "connected",
+        lifecycle: new AbortController(),
       };
     } catch (error) {
       // Check for UnauthorizedError - server requires OAuth
@@ -240,6 +265,7 @@ export class McpServerManager {
           lastUsedAt: Date.now(),
           inFlight: 0,
           status: "needs-auth",
+          lifecycle: new AbortController(),
         };
       }
 
@@ -449,18 +475,15 @@ export class McpServerManager {
   }
 
   async readResource(name: string, uri: string, signal?: AbortSignal): Promise<ReadResourceResult> {
-    const connection = this.connections.get(name);
-    if (!connection || connection.status !== "connected") {
+    const lease = this.acquireConnection(name, signal);
+    if (!lease) {
       throw new Error(`Server "${name}" is not connected`);
     }
 
     try {
-      this.touch(name);
-      this.incrementInFlight(name);
-      return await connection.client.readResource({ uri }, this.getRequestOptions(name, signal));
+      return await lease.connection.client.readResource({ uri }, lease.requestOptions);
     } finally {
-      this.decrementInFlight(name);
-      this.touch(name);
+      lease.release();
     }
   }
 
@@ -486,6 +509,9 @@ export class McpServerManager {
     }
 
     if (!connection) return;
+    connection.lifecycle ??= new AbortController();
+    connection.lifecycle.abort(new Error(`Server "${name}" is closing.`));
+    await this.waitForConnectionDrain(connection);
     await closeResource(connection.client, `${name} client`);
     await closeResource(connection.transport, `${name} transport`);
   }
@@ -510,6 +536,43 @@ export class McpServerManager {
     }
   }
 
+  acquireConnection(name: string, signal?: AbortSignal): ServerConnectionLease | undefined {
+    const connection = this.connections.get(name);
+    if (!connection || connection.status !== "connected") return undefined;
+    connection.inFlight += 1;
+    this.connectionLeaseCounts.set(connection, (this.connectionLeaseCounts.get(connection) ?? 0) + 1);
+    connection.lastUsedAt = Date.now();
+    let released = false;
+    return {
+      connection,
+      requestOptions: this.requestOptionsForConnection(connection, signal),
+      release: () => {
+        if (released) return;
+        released = true;
+        connection.inFlight = Math.max(0, connection.inFlight - 1);
+        const remainingLeases = Math.max(0, (this.connectionLeaseCounts.get(connection) ?? 1) - 1);
+        if (remainingLeases === 0) this.connectionLeaseCounts.delete(connection);
+        else this.connectionLeaseCounts.set(connection, remainingLeases);
+        connection.lastUsedAt = Date.now();
+        if (remainingLeases !== 0) return;
+        const waiters = this.connectionDrainWaiters.get(connection);
+        if (!waiters) return;
+        this.connectionDrainWaiters.delete(connection);
+        for (const settle of waiters) settle();
+      },
+    };
+  }
+
+  private waitForConnectionDrain(connection: ServerConnection): Promise<void> {
+    if ((this.connectionLeaseCounts.get(connection) ?? 0) <= 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      const waiters = this.connectionDrainWaiters.get(connection) ?? new Set<() => void>();
+      waiters.add(resolve);
+      this.connectionDrainWaiters.set(connection, waiters);
+    });
+  }
+
+  /** @deprecated Use acquireConnection() so release targets the same identity. */
   incrementInFlight(name: string): void {
     const connection = this.connections.get(name);
     if (connection) {
@@ -517,6 +580,7 @@ export class McpServerManager {
     }
   }
 
+  /** @deprecated Use the lease release() so reconnect cannot retarget cleanup. */
   decrementInFlight(name: string): void {
     const connection = this.connections.get(name);
     if (connection && connection.inFlight) {
