@@ -6,23 +6,32 @@ export type RelevanceMode = "bm25" | "keyword";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RAW_TOKEN_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\b\d{4,}\b|[a-z0-9_]+|\p{Script=Han}+/giu;
 const HAN_RUN_PATTERN = /^\p{Script=Han}+$/u;
+export const RELEVANCE_MAX_QUERY_TOKENS = 512;
+export const RELEVANCE_MAX_DOCUMENT_TOKENS = 8_192;
 
-export function tokenizeRelevance(text: string): string[] {
-  if (!text) return [];
+export function tokenizeRelevance(
+  text: string,
+  maxTokens: number = Number.POSITIVE_INFINITY,
+): string[] {
+  if (!text || maxTokens <= 0) return [];
   const tokens: string[] = [];
-  for (const raw of text.toLowerCase().match(RAW_TOKEN_PATTERN) ?? []) {
+  for (const match of text.toLowerCase().matchAll(RAW_TOKEN_PATTERN)) {
+    const raw = match[0];
     if (!HAN_RUN_PATTERN.test(raw)) {
       tokens.push(raw);
+      if (tokens.length >= maxTokens) break;
       continue;
     }
     const chars = [...raw];
     if (chars.length === 1) {
       tokens.push(chars[0]);
+      if (tokens.length >= maxTokens) break;
       continue;
     }
-    for (let index = 0; index < chars.length - 1; index++) {
+    for (let index = 0; index < chars.length - 1 && tokens.length < maxTokens; index++) {
       tokens.push(`${chars[index]}${chars[index + 1]}`);
     }
+    if (tokens.length >= maxTokens) break;
   }
   return tokens;
 }
@@ -32,10 +41,11 @@ export function scoreRelevanceBatch(
   query: string,
   mode: RelevanceMode = "bm25",
 ): number[] {
-  const queryTokens = tokenizeRelevance(query);
+  const queryTokens = tokenizeRelevance(query, RELEVANCE_MAX_QUERY_TOKENS);
   if (documents.length === 0) return [];
   if (queryTokens.length === 0) return documents.map(() => 0);
-  const documentTokens = documents.map(tokenizeRelevance);
+  const documentTokens = documents.map((document) =>
+    tokenizeRelevance(document, RELEVANCE_MAX_DOCUMENT_TOKENS));
   return mode === "keyword"
     ? keywordScores(documentTokens, queryTokens)
     : bm25Scores(documentTokens, queryTokens);

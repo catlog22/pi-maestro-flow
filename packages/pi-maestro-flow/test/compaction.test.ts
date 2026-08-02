@@ -4011,6 +4011,42 @@ test("relevance ranking prunes low-signal candidates before a matching result", 
   assert.ok(relevanceManifest.has("newest"));
   assert.ok(relevanceManifest.has("old"));
   assert.ok(!relevanceManifest.has("important"), "query-matching output stays verbatim");
+
+  const keywordManifest = new Map();
+  applyContextPressurePolicy(messages, 120_000, {
+    ...base,
+    soft: {
+      ...DEFAULT_SOFT_COMPACTION,
+      pruneTargetRatio: 0.79,
+      cache: { enabled: false },
+      lossless: { enabled: false },
+      relevance: { enabled: true, mode: "keyword" },
+    },
+  }, keywordManifest);
+  assert.ok(keywordManifest.has("newest"));
+  assert.ok(keywordManifest.has("old"));
+  assert.ok(!keywordManifest.has("important"), "keyword mode also spares the matching output");
+});
+
+test("relevance survives the cache gate: qualified low-signal prefix still prunes", () => {
+  // A dense loop under an active cache gate: relevance must not break the
+  // cumulative economics decision that the planner already makes. The trailing
+  // user message gives the ranker a nonempty query.
+  const messages = [
+    ...toolLoopTranscript(60, 12_000),
+    { role: "user", content: [{ type: "text", text: "continue current work" }] },
+  ] as never;
+  const base = { enabled: true, reserveTokens: 20_000, keepRecentTokens: 20_000 };
+  const relevanceGated = applyContextPressurePolicy(messages, 200_000, {
+    ...base,
+    soft: {
+      ...softWithCache(true),
+      lossless: { enabled: false },
+      relevance: { enabled: true, mode: "bm25" },
+    },
+  }, new Map());
+  assert.ok(relevanceGated.prunedToolResults > 0, "gate still accepts a profitable relevance-ranked run");
+  assert.ok(!relevanceGated.reasons.includes("cache-veto"));
 });
 
 test("cache gate still prunes when the run pays for itself", () => {

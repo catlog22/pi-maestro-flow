@@ -66,7 +66,10 @@ const PROTECTED_TOOL_NAMES = new Set(["todo", "goal", "run-control", "ask-user-q
 const TOKEN_RATIO_CODE = 3.5;
 const TOKEN_RATIO_WHITESPACE_HEAVY = 6;
 const TOKEN_RATIO_DEFAULT = 4;
-const RELEVANCE_SAMPLE_CHARS = 32_000;
+const RELEVANCE_DOCUMENT_SAMPLE_CHARS = 32_000;
+const RELEVANCE_QUERY_SAMPLE_CHARS = 8_000;
+const RELEVANCE_MAX_CANDIDATES = 64;
+const RELEVANCE_TOTAL_SAMPLE_CHARS = 512_000;
 /** Fixed token estimate per image content block, matching Pi's ESTIMATED_IMAGE_CHARS / 4. */
 const ESTIMATED_IMAGE_TOKENS = 1200;
 const CONTINUE_PROMPT = "Continue the interrupted task from the compacted session checkpoint. Do not wait for another user request.";
@@ -2091,7 +2094,7 @@ function rankPruneCandidates(
 ): PruneCandidate[] {
   if (candidates.length < 2 || !query.trim()) return candidates;
   const documents = candidates.map((candidate) =>
-    `${candidate.toolName}\n${sampleRelevanceText(candidate.relevanceText)}`);
+    `${candidate.toolName}\n${candidate.relevanceText}`);
   const scores = scoreRelevanceBatch(documents, query, mode);
   return candidates
     .map((candidate, position) => ({ candidate, position, score: scores[position] ?? 0 }))
@@ -2102,9 +2105,9 @@ function rankPruneCandidates(
     .map((item) => item.candidate);
 }
 
-function sampleRelevanceText(text: string): string {
-  if (text.length <= RELEVANCE_SAMPLE_CHARS) return text;
-  const half = RELEVANCE_SAMPLE_CHARS / 2;
+function sampleRelevanceText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const half = Math.floor(maxChars / 2);
   return `${text.slice(0, half)}\n${text.slice(-half)}`;
 }
 
@@ -2117,7 +2120,11 @@ function latestRelevanceQuery(messages: AgentMessage[]): string {
     }
   }
   if (userIndex < 0) return "";
-  const parts = [extractTextContent(messages[userIndex]).trim()];
+  const userText = sampleRelevanceText(
+    extractTextContent(messages[userIndex]).trim(),
+    RELEVANCE_QUERY_SAMPLE_CHARS,
+  );
+  const parts = [userText];
   const toolNames = new Set<string>();
   for (let index = userIndex + 1; index < messages.length; index++) {
     const content = (messages[index] as MessageRecord).content;
@@ -2144,6 +2151,7 @@ function runPrunePass(input: PrunePassInput): PrunePassResult {
   const candidates: PruneCandidate[] = [];
   const claimedCallIds = new Set(pruneManifest.keys());
   let projectedTokens = effectiveTokens;
+  let relevanceSampleChars = 0;
   const collectWholeTier = input.rankCandidates !== undefined && projectedTokens > pruneTarget;
   for (let index = frontierStart - 1;
     index >= 0 && (collectWholeTier || projectedTokens > pruneTarget);
@@ -2158,6 +2166,13 @@ function runPrunePass(input: PrunePassInput): PrunePassResult {
     if (after >= before) continue;
     const saved = before - after;
     const record = original as MessageRecord;
+    const relevanceText = collectWholeTier
+      ? sampleRelevanceText(extractTextContent(original), RELEVANCE_DOCUMENT_SAMPLE_CHARS)
+      : "";
+    if (collectWholeTier && (candidates.length >= RELEVANCE_MAX_CANDIDATES
+      || relevanceSampleChars + relevanceText.length > RELEVANCE_TOTAL_SAMPLE_CHARS)) {
+      break;
+    }
     candidates.push({
       index,
       callId,
@@ -2166,9 +2181,10 @@ function runPrunePass(input: PrunePassInput): PrunePassResult {
       contentDigest: toolResultDigest(original),
       level: input.level ?? "pruned",
       toolName: typeof record.toolName === "string" ? record.toolName : "tool",
-      relevanceText: extractTextContent(original),
+      relevanceText,
     });
     claimedCallIds.add(callId);
+    relevanceSampleChars += relevanceText.length;
     if (!collectWholeTier) projectedTokens -= saved;
   }
 

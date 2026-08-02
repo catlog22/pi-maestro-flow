@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { scoreRelevanceBatch, tokenizeRelevance } from "../src/compaction/relevance.ts";
+import {
+  RELEVANCE_MAX_QUERY_TOKENS,
+  scoreRelevanceBatch,
+  tokenizeRelevance,
+} from "../src/compaction/relevance.ts";
 
 test("BM25 ranks an exact UUID match above unrelated output", () => {
   const uuid = "550e8400-e29b-41d4-a716-446655440000";
@@ -38,6 +42,18 @@ test("CJK bigrams make Chinese prompts lexically rankable", () => {
     "构建产物已完成",
   ], "检查缓存命中", "bm25");
   assert.ok(scores[0] > scores[1]);
+});
+
+test("relevance token budgets stop high-cardinality query work", () => {
+  const noisyTerms = Array.from(
+    { length: RELEVANCE_MAX_QUERY_TOKENS * 4 },
+    (_, index) => `noise_${index}`,
+  );
+  const query = ["needle", ...noisyTerms, "needle", "needle"].join(" ");
+  assert.equal(tokenizeRelevance(query, 64).length, 64);
+  const baseline = scoreRelevanceBatch(["needle"], "needle", "bm25")[0];
+  const bounded = scoreRelevanceBatch(["needle"], query, "bm25")[0];
+  assert.equal(bounded, baseline, "query terms beyond the budget cannot amplify work or score");
 });
 
 test("empty query preserves an all-zero stable tie", () => {
