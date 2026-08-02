@@ -214,6 +214,31 @@ test("compaction TUI toggles the soft-compression switch independently and saves
   });
 });
 
+test("compaction TUI toggles soft mechanism switches and saves the soft group", async () => {
+  const saves: Array<{ scope: CompactionScope; values: Record<string, unknown> }> = [];
+  const overlay = createOverlay({
+    async saveScope(scope, values) { saves.push({ scope, values }); },
+  });
+  for (let index = 0; index < 3; index++) overlay.handleInput("\x1b[B"); // -> softEnabled
+  for (let index = 0; index < 4; index++) overlay.handleInput("\x1b[B"); // -> softRelevance
+  assert.match(overlay.render(80).join("\n"), /相关性排序 · 已关闭 · 继承自默认值/);
+  overlay.handleInput(" ");
+  assert.match(overlay.render(80).join("\n"), /相关性排序 · 已开启 · 项目/);
+  overlay.handleInput("\x1b[B"); // -> softDedup
+  overlay.handleInput(" ");
+  assert.match(overlay.render(80).join("\n"), /跨轮去重 · 已开启 · 项目/);
+  overlay.handleInput("u"); // inherit dedup again
+  assert.match(overlay.render(80).join("\n"), /跨轮去重 · 已关闭 · 继承自项目/);
+  overlay.handleInput("\x13");
+  await flushAsync();
+  const projectSave = saves.find((save) => save.scope === "project");
+  assert.deepEqual(projectSave?.values, {
+    reserveTokens: 10_000,
+    keepRecentTokens: 12_000,
+    soft: { relevance: { enabled: true } },
+  });
+});
+
 test("compaction TUI pressure preview derives from the effective soft ratios", () => {
   const overlay = createOverlay({
     snapshot: {
@@ -243,7 +268,7 @@ test("compaction TUI selects a compaction model from the catalog and saves it", 
   const overlay = createOverlay({
     async saveScope(scope, values) { saves.push({ scope, values }); },
   });
-  for (let index = 0; index < 4; index++) overlay.handleInput("\x1b[B"); // -> compactModel
+  for (let index = 0; index < 9; index++) overlay.handleInput("\x1b[B"); // -> compactModel
   assert.match(overlay.render(80).join("\n"), /压缩模型 · 跟随会话模型/);
   overlay.handleInput("\r"); // open picker
   assert.match(overlay.render(80).join("\n"), /选择压缩模型/);
@@ -266,7 +291,7 @@ test("compaction TUI model picker inherit entry clears the configured model", ()
       effective: {} as never,
     },
   });
-  for (let index = 0; index < 4; index++) overlay.handleInput("\x1b[B");
+  for (let index = 0; index < 9; index++) overlay.handleInput("\x1b[B");
   assert.match(overlay.render(80).join("\n"), /压缩模型 · maestro-qwen\/qwen3\.8-max-preview/);
   overlay.handleInput("\r"); // cursor starts on the matching entry
   overlay.handleInput("\x1b[A");

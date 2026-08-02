@@ -34,7 +34,9 @@ import {
 
 type CompactionField = typeof COMPACTION_FIELDS[number];
 type EditableCompactionField = Exclude<CompactionField, "enabled">;
-type MenuItem = "threshold" | "enabled" | "keepRecentTokens" | "softEnabled" | "compactModel";
+type SoftMechanismItem = "softLossless" | "softCacheGate" | "softTimeBased" | "softRelevance" | "softDedup";
+type MenuItem = "threshold" | "enabled" | "keepRecentTokens" | "softEnabled" | SoftMechanismItem | "compactModel";
+type ConfigFieldItem = Exclude<MenuItem, "softEnabled" | SoftMechanismItem>;
 type SaveState = "clean" | "dirty" | "saving" | "failed";
 
 interface CompactionTheme {
@@ -77,13 +79,34 @@ export interface CompactionSettingsOverlayParams {
   saveScope?: (scope: CompactionScope, values: CompactionConfigPatch) => Promise<void>;
 }
 
-const MENU_ITEMS: readonly MenuItem[] = ["threshold", "enabled", "keepRecentTokens", "softEnabled", "compactModel"];
+const SOFT_MECHANISM_KEYS: Record<SoftMechanismItem, "lossless" | "cache" | "timeBased" | "relevance" | "crossTurnDedup"> = {
+  softLossless: "lossless",
+  softCacheGate: "cache",
+  softTimeBased: "timeBased",
+  softRelevance: "relevance",
+  softDedup: "crossTurnDedup",
+};
+
+const MENU_ITEMS: readonly MenuItem[] = [
+  "threshold", "enabled", "keepRecentTokens", "softEnabled",
+  "softLossless", "softCacheGate", "softTimeBased", "softRelevance", "softDedup",
+  "compactModel",
+];
+
+function isSoftMechanismItem(item: MenuItem): item is SoftMechanismItem {
+  return item in SOFT_MECHANISM_KEYS;
+}
 
 const ITEM_LABELS: Record<MenuItem, string> = {
   threshold: "实际硬压缩阈值",
   enabled: "自动压缩",
   keepRecentTokens: "保留最近上下文",
   softEnabled: "软压缩开关",
+  softLossless: "无损折叠",
+  softCacheGate: "缓存经济门槛",
+  softTimeBased: "时间基冷检测",
+  softRelevance: "相关性排序",
+  softDedup: "跨轮去重",
   compactModel: "压缩模型",
 };
 
@@ -92,6 +115,11 @@ const ITEM_DETAILS: Record<MenuItem, string> = {
   enabled: "同时控制 Pi 原生自动压缩与 Maestro 执行中压缩。",
   keepRecentTokens: "清理旧工具结果时，优先保留最近的上下文。",
   softEnabled: "开启后在硬压缩前裁剪陈旧工具结果；若硬阈值更早，界面会标记软阶段不可达。",
+  softLossless: "以可逆格式折叠工具输出（重复行、grep 表头、diff 索引），不丢信息；默认开启。",
+  softCacheGate: "裁剪前核算作废缓存前缀的代价，收益不足以支付时不裁剪；默认开启（只拒绝、不触发）。",
+  softTimeBased: "距最后一条助手消息超过阈值时缓存必然过期，跳过缓存经济门槛直接裁剪；默认关闭。",
+  softRelevance: "按最近用户指令的词法相关性（BM25/关键词）优先裁剪低相关输出；默认关闭。",
+  softDedup: "把与更早工具输出逐字重复的片段替换为上下文指针，被引用输出受保护；默认关闭。",
   compactModel: "用于生成文本压缩摘要的模型；默认跟随当前会话模型，解析失败运行时自动回退。",
 };
 
@@ -207,6 +235,15 @@ export class CompactionSettingsOverlay implements Component, Focusable {
           delete soft.enabled;
           if (Object.keys(soft).length === 0) delete this.drafts[this.scope].soft;
         }
+      } else if (isSoftMechanismItem(item)) {
+        const key = SOFT_MECHANISM_KEYS[item];
+        const soft = this.drafts[this.scope].soft;
+        if (soft?.[key]) {
+          const group = { ...soft[key] };
+          delete group.enabled;
+          if (Object.keys(group).length === 0) delete soft[key];
+          else soft[key] = group;
+        }
       } else {
         delete this.drafts[this.scope][configFieldForItem(item)];
       }
@@ -258,6 +295,12 @@ export class CompactionSettingsOverlay implements Component, Focusable {
   private draftSource(item: MenuItem): string {
     if (item === "softEnabled") {
       return this.drafts[this.scope].soft?.enabled === undefined
+        ? `继承自${sourceLabel(this.effective().source.soft)}`
+        : sourceLabel(this.scope);
+    }
+    if (isSoftMechanismItem(item)) {
+      const key = SOFT_MECHANISM_KEYS[item];
+      return this.drafts[this.scope].soft?.[key]?.enabled === undefined
         ? `继承自${sourceLabel(this.effective().source.soft)}`
         : sourceLabel(this.scope);
     }
@@ -495,6 +538,9 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     const effective = this.effective();
     if (item === "enabled") return effective.enabled ? "已开启" : "已关闭";
     if (item === "softEnabled") return effective.soft.enabled ? "已开启" : "已关闭";
+    if (isSoftMechanismItem(item)) {
+      return effective.soft[SOFT_MECHANISM_KEYS[item]]?.enabled === true ? "已开启" : "已关闭";
+    }
     if (item === "compactModel") return effective.model ?? "跟随会话模型";
     if (item === "threshold") {
       const model = this.linkedThreshold();
@@ -516,6 +562,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
       return String(effective.reserveTokens);
     }
     if (item === "softEnabled") return "";
+    if (isSoftMechanismItem(item)) return "";
     return String(effective[configFieldForItem(item)]);
   }
 
@@ -595,18 +642,24 @@ export class CompactionSettingsOverlay implements Component, Focusable {
 
   private selectedConfigField(): EditableCompactionField | undefined {
     const item = this.selectedItem();
-    if (item === "enabled" || item === "softEnabled") return undefined;
+    if (item === "enabled" || item === "softEnabled" || isSoftMechanismItem(item)) return undefined;
     return configFieldForItem(item) as EditableCompactionField;
   }
 
   private isToggleItem(item: MenuItem): boolean {
-    return item === "enabled" || item === "softEnabled";
+    return item === "enabled" || item === "softEnabled" || isSoftMechanismItem(item);
   }
 
   private toggleSelectedItem(item: MenuItem): void {
     if (item === "softEnabled") {
       const current = this.drafts[this.scope].soft ?? {};
       this.drafts[this.scope].soft = { ...current, enabled: !this.effective().soft.enabled };
+    } else if (isSoftMechanismItem(item)) {
+      const key = SOFT_MECHANISM_KEYS[item];
+      const current = this.drafts[this.scope].soft ?? {};
+      const group = { ...(current[key] ?? {}) };
+      group.enabled = !(this.effective().soft[key]?.enabled === true);
+      this.drafts[this.scope].soft = { ...current, [key]: group };
     } else {
       this.drafts[this.scope].enabled = !this.effective().enabled;
     }
@@ -820,10 +873,17 @@ function draftEqual(left: ScopeDraft, right: ScopeDraft): boolean {
 function softDraftEqual(left?: SoftCompactionConfigPatch, right?: SoftCompactionConfigPatch): boolean {
   const l = left ?? {};
   const r = right ?? {};
-  return l.enabled === r.enabled
-    && l.nudgeRatio === r.nudgeRatio
-    && l.pruneRatio === r.pruneRatio
-    && l.pruneTargetRatio === r.pruneTargetRatio;
+  if (l.enabled !== r.enabled) return false;
+  if (l.nudgeRatio !== r.nudgeRatio) return false;
+  if (l.pruneRatio !== r.pruneRatio) return false;
+  if (l.pruneTargetRatio !== r.pruneTargetRatio) return false;
+  for (const key of ["lossless", "cache", "timeBased", "relevance", "crossTurnDedup"] as const) {
+    if (l[key]?.enabled !== r[key]?.enabled) return false;
+    const leftMode = (l[key] as { mode?: string } | undefined)?.mode;
+    const rightMode = (r[key] as { mode?: string } | undefined)?.mode;
+    if (leftMode !== rightMode) return false;
+  }
+  return true;
 }
 
 function actualThresholdLabel(model: CompactionThresholdDerivation): string {
@@ -860,6 +920,13 @@ function shortLabel(item: MenuItem): string {
   if (item === "threshold") return "阈值";
   if (item === "enabled") return "自动";
   if (item === "softEnabled") return "软压缩";
+  if (isSoftMechanismItem(item)) {
+    return item === "softLossless" ? "无损"
+      : item === "softCacheGate" ? "缓存"
+      : item === "softTimeBased" ? "时间"
+      : item === "softRelevance" ? "相关"
+      : "去重";
+  }
   if (item === "compactModel") return "模型";
   return "保留";
 }
@@ -869,7 +936,7 @@ function visibleStart(selected: number, length: number, maxVisible: number): num
   return Math.max(0, Math.min(Math.max(0, length - maxVisible), selected - Math.floor(maxVisible / 2)));
 }
 
-function configFieldForItem(item: Exclude<MenuItem, "softEnabled">): CompactionField {
+function configFieldForItem(item: ConfigFieldItem): CompactionField {
   if (item === "threshold") return "reserveTokens";
   if (item === "compactModel") return "model";
   return item;
