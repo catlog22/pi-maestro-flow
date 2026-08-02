@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { ChildProcess } from "node:child_process";
@@ -46,7 +46,8 @@ function sampleEntries(): unknown[] {
 }
 
 test("messageContentText handles string, text blocks, and garbage", () => {
-  assert.equal(messageContentText("  hello  "), "hello");
+  assert.equal(messageContentText("  hello  "), "  hello  ");
+  assert.equal(messageContentText("   "), "");
   assert.equal(
     messageContentText([
       { type: "text", text: "a" },
@@ -57,6 +58,14 @@ test("messageContentText handles string, text blocks, and garbage", () => {
   );
   assert.equal(messageContentText(42), "");
   assert.equal(messageContentText([{ type: "text", text: "  " }]), "");
+});
+
+test("messageContentText preserves leading Markdown indentation", () => {
+  assert.equal(messageContentText("    const x = 1;\n    return x;"), "    const x = 1;\n    return x;");
+  assert.equal(
+    messageContentText([{ type: "text", text: "    code block\n    second line" }]),
+    "    code block\n    second line",
+  );
 });
 
 test("collectReviewTurns assembles user/assistant turns in order", () => {
@@ -148,6 +157,23 @@ test("parseReviewArgs: positional output and errors", () => {
   assert.equal(conflict.kind, "error");
 });
 
+test("parseReviewArgs: quote-aware tokenization", () => {
+  const quoted = parseReviewArgs('--turn 1 --format pdf --output "my review.pdf"');
+  assert.equal(quoted.kind, "cli");
+  if (quoted.kind === "cli") assert.equal(quoted.output, "my review.pdf");
+
+  const single = parseReviewArgs("--turn all --format docx --output 'dir with space/out.docx");
+  assert.equal(single.kind, "error");
+
+  const okSingle = parseReviewArgs("--turn all --format docx --output 'dir with space/out.docx'");
+  assert.equal(okSingle.kind, "cli");
+  if (okSingle.kind === "cli") assert.equal(okSingle.output, "dir with space/out.docx");
+
+  const unclosed = parseReviewArgs('--output "unclosed');
+  assert.equal(unclosed.kind, "error");
+  assert.match(unclosed.kind === "error" ? unclosed.message : "", /引号/);
+});
+
 test("resolveSelectedTurns filters by 1-based index", () => {
   const turns: ReviewTurn[] = [
     { index: 1, role: "user", text: "a" },
@@ -184,6 +210,27 @@ test("defaultReviewOutputName and resolveReviewOutputPath", async () => {
   }
 });
 
+test("resolveReviewOutputPath expands tilde and detects directories", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-review-tilde-"));
+  const sub = join(root, "existing-dir");
+  await mkdir(sub, { recursive: true });
+  try {
+    const tilde = await resolveReviewOutputPath("pdf", root, "~/x.pdf");
+    assert.ok(tilde.startsWith(homedir()));
+    assert.match(tilde, /\.pdf$/);
+
+    const dirTarget = await resolveReviewOutputPath("markdown", root, sub);
+    assert.ok(dirTarget.startsWith(sub));
+    assert.match(dirTarget, /\.md$/);
+
+    const dotTarget = await resolveReviewOutputPath("markdown", root, ".");
+    assert.ok(dotTarget.startsWith(root));
+    assert.match(dotTarget, /\.md$/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 interface FakeSpawnCall {
   command: string;
   args: string[];
@@ -202,6 +249,7 @@ function makeFakeSpawn(calls: FakeSpawnCall[], behavior: FakeSpawnBehavior = {})
     calls.push(record);
     const child = new EventEmitter() as unknown as ChildProcess;
     (child as unknown as { stdin: unknown }).stdin = {
+      on: () => {},
       end: (input: string) => {
         record.stdinContent = input ?? "";
       },
@@ -243,10 +291,7 @@ test("exportReviewDocument routes docx through pandoc with stdin content", async
     assert.equal(calls.length, 1);
     const call = calls[0]!;
     assert.equal(call.command, "pandoc");
-    assert.ok(call.args.includes("-t"));
-    assert.ok(call.args.includes("docx"));
-    assert.ok(call.args.includes("-o"));
-    assert.ok(call.args.includes(target));
+    assert.deepEqual(call.args, ["-f", "markdown", "-t", "docx", "-o", target]);
     assert.match(call.stdinContent, /# Review/);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -263,11 +308,68 @@ test("exportReviewDocument routes pdf through pandoc with pdf engine", async () 
       env: { ...process.env, PANDOC_PDF_ENGINE: "lualatex" },
     });
     assert.equal(calls.length, 1);
-    assert.ok(calls[0]!.args.includes("--pdf-engine=lualatex"));
-    assert.ok(calls[0]!.args.includes(target));
+    assert.deepEqual(calls[0]!.args, [
+      "-f", "markdown",
+      "-o", target,
+      "--pdf-engine=lualatex",
+      "-V", "geometry:margin=2cm",
+      "-V", "fontsize=11pt",
+      "-V", "urlcolor=blue",
+      "-V", "linkcolor=blue",
+    ]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("exportReviewDocument tolerates stdin EPIPE without crashing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-review-epipe-"));
+  try {
+    const target = join(root, "out.docx");
+    const child = new EventEmitter() as unknown as ChildProcess;
+    (child as unknown as { stdin: unknown }).stdin = {
+      on: (_event: string, handler: () => void) => {
+        setTimeout(() => handler(), 2); // 模拟 stdin 写失败 → 触发已挂接的 error handler
+      },
+      end: () => {},
+    };
+    (child as unknown as { stdout: unknown }).stdout = new EventEmitter();
+    (child as unknown as { stderr: unknown }).stderr = new EventEmitter();
+    const fakeSpawn = (() => child) as unknown as typeof import("node:child_process").spawn;
+    setTimeout(() => child.emit("close", 0), 5);
+    await exportReviewDocument("# Review", "docx", target, { spawnFn: fakeSpawn });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("exportReviewDocument rejects on timeout and terminates the child", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-review-timeout-"));
+  const keepAlive = setInterval(() => {}, 1000); // unref 的定时器需要事件循环存活才会触发
+  try {
+    const target = join(root, "out.pdf");
+    const child = new EventEmitter() as unknown as ChildProcess & { pid: number };
+    (child as unknown as { pid: number }).pid = 4242;
+    (child as unknown as { stdin: unknown }).stdin = { on: () => {}, end: () => {} };
+    (child as unknown as { stdout: unknown }).stdout = new EventEmitter();
+    (child as unknown as { stderr: unknown }).stderr = new EventEmitter();
+    const fakeSpawn = (() => child) as unknown as typeof import("node:child_process").spawn;
+    await assert.rejects(
+      exportReviewDocument("# Review", "pdf", target, { spawnFn: fakeSpawn, timeoutMs: 60 }),
+      /timed out/,
+    );
+  } finally {
+    clearInterval(keepAlive);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("REVIEW_USAGE documents flags and formats", () => {
+  assert.match(REVIEW_USAGE, /--turn/);
+  assert.match(REVIEW_USAGE, /--format/);
+  assert.match(REVIEW_USAGE, /--output/);
+  assert.match(REVIEW_USAGE, /pdf/);
+  assert.match(REVIEW_USAGE, /docx/);
 });
 
 test("exportReviewDocument surfaces pandoc ENOENT and failures", async () => {
@@ -289,14 +391,6 @@ test("exportReviewDocument surfaces pandoc ENOENT and failures", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-});
-
-test("REVIEW_USAGE documents flags and formats", () => {
-  assert.match(REVIEW_USAGE, /--turn/);
-  assert.match(REVIEW_USAGE, /--format/);
-  assert.match(REVIEW_USAGE, /--output/);
-  assert.match(REVIEW_USAGE, /pdf/);
-  assert.match(REVIEW_USAGE, /docx/);
 });
 
 function overlayFixture(items: MarkdownReviewTurnItem[]) {
@@ -346,14 +440,18 @@ test("overlay space toggles, a selects all, n clears, escape closes", () => {
   all.overlay.handleInput("e");
   assert.deepEqual(all.action(), { kind: "export", turnIndexes: [1, 2, 3] });
 
-  const empty = overlayFixture(overlayTurns);
-  empty.overlay.handleInput("n");
-  empty.overlay.handleInput("e");
-  assert.deepEqual(empty.action(), { kind: "export", turnIndexes: [1] });
-
   const closed = overlayFixture(overlayTurns);
   closed.overlay.handleInput("\x1b");
   assert.deepEqual(closed.action(), { kind: "close" });
+});
+
+test("overlay export is disabled with status when nothing selected", () => {
+  const fixture = overlayFixture(overlayTurns);
+  fixture.overlay.handleInput("n");
+  fixture.overlay.handleInput("e");
+  assert.equal(fixture.action(), undefined); // 不导出
+  const rendered = fixture.overlay.render(120);
+  assert.ok(rendered.join("\n").includes("未选择任何 turn"));
 });
 
 test("overlay navigation and render smoke", () => {
@@ -363,7 +461,7 @@ test("overlay navigation and render smoke", () => {
   assert.ok(rendered.join("\n").includes("Markdown Review"));
   fixture.overlay.handleInput("\x1b[B"); // down
   fixture.overlay.handleInput("\x1b[B"); // down
-  fixture.overlay.handleInput("\r"); // enter — preview already visible; no-op safe
+  fixture.overlay.handleInput("\r"); // wide 模式 Enter 不切换预览 — 无副作用
   assert.ok(fixture.renders() > 0);
   const narrow = fixture.overlay.render(40);
   assert.ok(narrow.length > 0);
@@ -371,12 +469,34 @@ test("overlay navigation and render smoke", () => {
   assert.ok(previewLines.some((line) => line.includes("预览")));
 });
 
-test("overlay exports highlighted when nothing selected", () => {
+test("overlay narrow terminal: Enter opens full-width preview, Esc returns", () => {
   const fixture = overlayFixture(overlayTurns);
-  fixture.overlay.handleInput("n");
-  fixture.overlay.handleInput("\x1b[B"); // move to turn 2
-  fixture.overlay.handleInput("e");
-  assert.deepEqual(fixture.action(), { kind: "export", turnIndexes: [2] });
+  const originalColumns = process.stdout.columns;
+  (process.stdout as { columns: number }).columns = 40;
+  try {
+    const list = fixture.overlay.render(40);
+    assert.ok(list.join("\n").includes("e 导出"));
+    assert.ok(!list.join("\n").includes("预览 · Turn"));
+    fixture.overlay.handleInput("\r");
+    const preview = fixture.overlay.render(40);
+    assert.ok(preview.join("\n").includes("预览 · Turn"));
+    assert.ok(preview.join("\n").includes("Esc 返回"));
+    fixture.overlay.handleInput("\x1b");
+    const back = fixture.overlay.render(40);
+    assert.ok(back.join("\n").includes("e 导出"));
+  } finally {
+    (process.stdout as { columns: number }).columns = originalColumns;
+  }
+});
+
+test("overlay sanitizes terminal control sequences in session text", () => {
+  const malicious: MarkdownReviewTurnItem[] = [
+    { index: 1, role: "user", preview: "evil\r\x1b[2Jclear", text: "line1\r\x1b[2Jline2\x1b]0;title\x07" },
+  ];
+  const fixture = overlayFixture(malicious);
+  const rendered = fixture.overlay.render(120).join("\n");
+  assert.doesNotMatch(rendered, /[\r\x1b]/);
+  assert.ok(rendered.includes("line1line2"));
 });
 
 test("exportReviewDocument creates parent directories for markdown", async () => {

@@ -35,6 +35,7 @@ export interface MarkdownReviewOverlayParams {
 
 const MAX_LIST_VISIBLE = 10;
 const PREVIEW_VISIBLE = 14;
+const WIDE_THRESHOLD = 76;
 
 /** 与 plan-confirm 的 markdownTheme 同构，避免依赖未导出的内部函数。 */
 export function reviewMarkdownTheme(theme: MarkdownReviewOverlayParams["theme"]): MarkdownTheme {
@@ -57,17 +58,37 @@ export function reviewMarkdownTheme(theme: MarkdownReviewOverlayParams["theme"])
 }
 
 /**
- * 多选 turn 列表 + 右侧 Markdown 预览。所有 turn 默认全选；
- * Space 勾选/取消，a 全选，n 清空，e 导出，Esc 关闭。
+ * 清除终端控制序列与危险控制字符（保留 \n \t），防止会话内容篡改终端渲染。
+ */
+export function sanitizeTerminalText(value: string): string {
+  return value
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "") // OSC 序列
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "") // CSI 序列
+    .replace(/\x1b[()][0-9A-Za-z]/g, "") // 其他单字符转义
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "") // C0 控制（保留 \t\n）
+    .replace(/\r/g, "");
+}
+
+/**
+ * 多选 turn 列表 + 预览。宽屏（≥76）列表与预览并排；窄屏 Enter 切换全宽预览。
+ * 所有 turn 默认全选；Space 勾选/取消，a 全选，n 清空，e 导出，Esc 关闭/返回。
  */
 export class MarkdownReviewOverlay implements Component, Focusable {
   focused = false;
   private selected = 0;
   private selectedIndexes = new Set<number>();
   private previewScroll = 0;
+  private previewMode = false;
+  private status = "";
+  private readonly turns: MarkdownReviewTurnItem[];
 
   constructor(private readonly params: MarkdownReviewOverlayParams) {
-    for (const turn of params.turns) this.selectedIndexes.add(turn.index);
+    this.turns = params.turns.map((turn) => ({
+      ...turn,
+      preview: sanitizeTerminalText(turn.preview),
+      text: sanitizeTerminalText(turn.text),
+    }));
+    for (const turn of this.turns) this.selectedIndexes.add(turn.index);
   }
 
   invalidate(): void {}
@@ -76,13 +97,17 @@ export class MarkdownReviewOverlay implements Component, Focusable {
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.min(width, 140));
     const inner = safeWidth - 2;
-    const hasPreview = safeWidth >= 76;
-    const listWidth = hasPreview ? Math.min(38, Math.floor(inner * 0.4)) : inner;
-    const previewWidth = hasPreview ? inner - listWidth - 1 : 0;
+    const wide = safeWidth >= WIDE_THRESHOLD;
+    const terminalRows = process.stdout?.rows ?? 30;
+    const chrome = 4; // header + rule + rule + footer
+    const maxVisible = Math.max(3, terminalRows - chrome);
+    const visibleCount = Math.min(MAX_LIST_VISIBLE, maxVisible);
+    const listWidth = wide ? Math.min(36, Math.floor(inner * 0.4)) : inner;
+    const previewWidth = wide ? Math.max(1, inner - listWidth - 1) : inner;
 
-    const entries = this.params.turns;
-    const start = visibleStart(this.selected, entries.length, MAX_LIST_VISIBLE);
-    const listRows = entries.slice(start, start + MAX_LIST_VISIBLE).map((turn, offset) => {
+    const entries = this.turns;
+    const start = visibleStart(this.selected, entries.length, visibleCount);
+    const listRows = entries.slice(start, start + visibleCount).map((turn, offset) => {
       const isSelectedRow = start + offset === this.selected;
       const cursor = isSelectedRow ? this.params.theme.fg("accent", "›") : " ";
       const checked = this.selectedIndexes.has(turn.index) ? "✓" : " ";
@@ -90,7 +115,7 @@ export class MarkdownReviewOverlay implements Component, Focusable {
       const label = isSelectedRow
         ? this.params.theme.bold(`#${turn.index} ${role} ${turn.preview}`)
         : `#${turn.index} ${role} ${turn.preview}`;
-      return fitLine(`${cursor} [${checked}] ${label}`, listWidth);
+      return `${cursor} [${checked}] ${label}`;
     });
 
     const rows: string[] = [
@@ -100,50 +125,84 @@ export class MarkdownReviewOverlay implements Component, Focusable {
 
     if (entries.length === 0) {
       rows.push(this.params.theme.fg("warning", fitLine("没有可 Review 的 turn", inner)));
+    } else if (wide) {
+      const previewRows = this.renderPreviewPane(entries[this.selected]!, previewWidth, maxVisible);
+      const count = Math.max(listRows.length, previewRows.length);
+      for (let index = 0; index < count; index++) {
+        const left = padToWidth(fitLine(listRows[index] ?? "", listWidth), listWidth);
+        const right = previewRows[index] ?? "";
+        rows.push(right ? `${left} ${right}` : left);
+      }
+    } else if (this.previewMode) {
+      rows.push(...this.renderPreviewPane(entries[this.selected]!, previewWidth, maxVisible));
     } else {
-      if (hasPreview) {
-        rows.push(...listRows);
-      } else {
-        rows.push(...listRows);
+      rows.push(...listRows);
+      if (entries.length > visibleCount) {
+        rows.push(this.params.theme.fg("dim", fitLine(`↑↓ 滚动 · 显示 ${start + 1}-${Math.min(entries.length, start + visibleCount)}/${entries.length}`, inner)));
       }
-      if (entries.length > MAX_LIST_VISIBLE) {
-        rows.push(this.params.theme.fg("dim", fitLine(`↑↓ 滚动 · 显示 ${start + 1}-${Math.min(entries.length, start + MAX_LIST_VISIBLE)}/${entries.length}`, inner)));
-      }
-    }
-
-    if (hasPreview && entries.length > 0) {
-      const previewTurn = entries[this.selected];
-      rows.push(rule(inner));
-      rows.push(...this.renderPreviewPane(previewTurn!, previewWidth));
     }
 
     rows.push(rule(inner));
-    rows.push(fitLine("Space 勾选 · a 全选 · n 清空 · e 导出 · ↑↓ 选择 · Esc 关闭", inner));
+    if (this.status) {
+      rows.push(this.params.theme.fg("warning", fitLine(this.status, inner)));
+    }
+    const keys = wide
+      ? "Space 勾选 · a 全选 · n 清空 · e 导出 · ↑↓ 选择 · Esc 关闭"
+      : this.previewMode
+        ? "Esc 返回 · ↑↓/PgUp/PgDn 滚动"
+        : inner >= 46
+          ? "Space 勾选 · a 全选 · n 清空 · Enter 预览 · e 导出 · Esc"
+          : "Space 勾选 · a 全选 · n 清空 · e 导出 · Esc";
+    rows.push(fitLine(keys, inner));
     return frame(rows, safeWidth, this.params.theme);
   }
 
-  private renderPreviewPane(turn: MarkdownReviewTurnItem, width: number): string[] {
+  private renderPreviewPane(turn: MarkdownReviewTurnItem, width: number, maxVisible: number): string[] {
     const inner = Math.max(1, width);
+    const visible = Math.max(3, Math.min(PREVIEW_VISIBLE, maxVisible - 2));
     const header = fitLine(`${this.params.theme.bold(`预览 · Turn ${turn.index} ${turn.role === "user" ? "User" : "Assistant"}`)}`, inner);
     const markdown = new Markdown(turn.text, 0, 0, reviewMarkdownTheme(this.params.theme));
     const rendered = markdown.render(inner);
-    const maxScroll = Math.max(0, rendered.length - PREVIEW_VISIBLE);
+    const maxScroll = Math.max(0, rendered.length - visible);
     this.previewScroll = Math.min(Math.max(0, this.previewScroll), maxScroll);
-    const end = Math.min(rendered.length, this.previewScroll + PREVIEW_VISIBLE);
+    const end = Math.min(rendered.length, this.previewScroll + visible);
     const body = rendered.slice(this.previewScroll, end).map((line) => fitLine(line, inner));
-    while (body.length < PREVIEW_VISIBLE) body.push("");
-    const footer = rendered.length > PREVIEW_VISIBLE
+    while (body.length < visible) body.push("");
+    const footer = rendered.length > visible
       ? this.params.theme.fg("dim", fitLine(`行 ${this.previewScroll + 1}-${end}/${rendered.length} · PgUp/PgDn 滚动`, inner))
       : this.params.theme.fg("dim", fitLine(`${rendered.length} 行`, inner));
     return [header, ...body, footer];
   }
 
   handleInput(data: string): void {
-    const entries = this.params.turns;
+    const entries = this.turns;
     if (entries.length === 0) {
       if (matchesKey(data, Key.escape)) this.finishClose();
       return;
     }
+    this.status = "";
+    const wide = windowWidth() >= WIDE_THRESHOLD;
+
+    if (this.previewMode && !wide) {
+      if (matchesKey(data, Key.escape)) {
+        this.previewMode = false;
+        this.previewScroll = 0;
+        this.params.requestRender();
+        return;
+      }
+      if (matchesKey(data, Key.up)) {
+        this.previewScroll = Math.max(0, this.previewScroll - 1);
+      } else if (matchesKey(data, Key.down)) {
+        this.previewScroll += 1;
+      } else if (matchesKey(data, Key.pageUp)) {
+        this.previewScroll = Math.max(0, this.previewScroll - PREVIEW_VISIBLE);
+      } else if (matchesKey(data, Key.pageDown)) {
+        this.previewScroll += PREVIEW_VISIBLE;
+      }
+      this.params.requestRender();
+      return;
+    }
+
     if (matchesKey(data, Key.up)) {
       this.selected = wrapIndex(this.selected - 1, entries.length);
       this.previewScroll = 0;
@@ -154,6 +213,9 @@ export class MarkdownReviewOverlay implements Component, Focusable {
       this.previewScroll = Math.max(0, this.previewScroll - PREVIEW_VISIBLE);
     } else if (matchesKey(data, Key.pageDown)) {
       this.previewScroll += PREVIEW_VISIBLE;
+    } else if (matchesKey(data, Key.enter) && !wide) {
+      this.previewMode = true;
+      this.previewScroll = 0;
     } else if (data === " " || data === "\u0020") {
       this.toggleSelected(entries[this.selected]!.index);
     } else if (data === "a" || data === "A") {
@@ -176,16 +238,23 @@ export class MarkdownReviewOverlay implements Component, Focusable {
   }
 
   private finishExport(): void {
-    const indexes = [...this.selectedIndexes].sort((a, b) => a - b);
-    const turnIndexes = indexes.length > 0
-      ? indexes
-      : [this.params.turns[this.selected]?.index].filter((index): index is number => index !== undefined);
+    if (this.selectedIndexes.size === 0) {
+      this.status = "未选择任何 turn · 按 a 全选或 Space 勾选后再导出";
+      this.params.requestRender();
+      return;
+    }
+    const turnIndexes = [...this.selectedIndexes].sort((a, b) => a - b);
     this.params.done({ kind: "export", turnIndexes });
   }
 
   private finishClose(): void {
     this.params.done({ kind: "close" });
   }
+}
+
+/** handleInput 中可用的当前宽度（render 会传入，但键盘事件不一定携带；用 stdout 近似）。 */
+function windowWidth(): number {
+  return process.stdout?.columns ?? 80;
 }
 
 function visibleStart(selected: number, length: number, maxVisible: number): number {
@@ -196,6 +265,11 @@ function visibleStart(selected: number, length: number, maxVisible: number): num
 function wrapIndex(index: number, length: number): number {
   if (length === 0) return 0;
   return (index % length + length) % length;
+}
+
+function padToWidth(value: string, width: number): string {
+  const current = visibleWidth(value);
+  return current >= width ? value : `${value}${" ".repeat(width - current)}`;
 }
 
 function fitLine(value: string, width: number): string {
@@ -215,6 +289,6 @@ function frame(rows: readonly string[], width: number, theme: MarkdownReviewOver
       const fitted = fitLine(row, inner);
       return `${theme.fg("dim", "│")}${fitted}${" ".repeat(Math.max(0, inner - visibleWidth(fitted)))}${theme.fg("dim", "│")}`;
     }),
-    theme.fg("dim", `└${'─'.repeat(inner)}┘`),
+    theme.fg("dim", `└${"─".repeat(inner)}┘`),
   ];
 }

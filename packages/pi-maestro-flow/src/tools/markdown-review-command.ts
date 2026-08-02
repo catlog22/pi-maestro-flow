@@ -118,6 +118,9 @@ export async function executeMarkdownReviewCommand(
     return;
   }
 
+  // 生成进行中时 branch 可能缺少最后一条 in-flight 消息 — 先等 idle 再收集。
+  await ctx.waitForIdle?.();
+
   const turns = collectTurnsFromSession(ctx);
   if (turns.length === 0) {
     ctx.ui.notify("当前会话没有 user/assistant 消息可供 Review。", "warning");
@@ -125,7 +128,6 @@ export async function executeMarkdownReviewCommand(
   }
 
   if (parsed.kind === "interactive") {
-    await ctx.waitForIdle?.();
     const indexes = await pickTurnsInteractive(ctx, turns);
     if (!indexes || indexes.length === 0) return;
     const format = await pickExportFormat(ctx);

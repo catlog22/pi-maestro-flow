@@ -1,5 +1,6 @@
-import { spawn as defaultSpawn, type ChildProcess } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { spawn as defaultSpawn, spawnSync, type ChildProcess } from "node:child_process";
+import { mkdir, stat, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, extname, isAbsolute, join, resolve } from "node:path";
 
 /**
@@ -32,17 +33,20 @@ export const REVIEW_EXPORT_FORMAT_LABELS: Record<ReviewExportFormat, string> = {
   pdf: "PDF (.pdf)",
 };
 
-/** 从 message content 提取非空文本块，字符串与 {type:"text"} 数组均支持。 */
+/**
+ * 从 message content 提取文本块，字符串与 {type:"text"} 数组均支持。
+ * 只做空判定，保留原始文本（Markdown 前导缩进有语义，不能被 trim 改变）。
+ */
 export function messageContentText(content: unknown): string {
-  if (typeof content === "string") return content.trim();
+  if (typeof content === "string") return content.trim() ? content : "";
   if (!Array.isArray(content)) return "";
   const parts: string[] = [];
   for (const block of content) {
     if (!block || typeof block !== "object") continue;
     const record = block as { type?: unknown; text?: unknown };
     if (record.type !== "text") continue;
-    const text = typeof record.text === "string" ? record.text.trim() : "";
-    if (text) parts.push(text);
+    const text = typeof record.text === "string" ? record.text : "";
+    if (text.trim()) parts.push(text);
   }
   return parts.join("\n\n");
 }
@@ -115,8 +119,46 @@ const FORMAT_ALIASES: Record<string, ReviewExportFormat> = {
   pdf: "pdf",
 };
 
-function tokenizeArgs(args: string): string[] {
-  return args.trim().split(/\s+/).filter(Boolean);
+/**
+ * 引号感知的分词：支持双引号/单引号包裹含空格的路径。
+ * 未闭合引号抛错（由 parseReviewArgs 转成 error 结果）。
+ */
+export function tokenizeArgs(args: string): string[] {
+  const tokens: string[] = [];
+  const input = args.trim();
+  let current = "";
+  let inToken = false;
+  let quote: '"' | "'" | undefined;
+  for (let index = 0; index < input.length; index++) {
+    const ch = input[index]!;
+    if (quote) {
+      if (ch === quote) {
+        quote = undefined;
+        inToken = true;
+      } else {
+        current += ch;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      inToken = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (inToken) {
+        tokens.push(current);
+        current = "";
+        inToken = false;
+      }
+      continue;
+    }
+    current += ch;
+    inToken = true;
+  }
+  if (quote) throw new Error("未闭合的引号");
+  if (inToken) tokens.push(current);
+  return tokens;
 }
 
 function parseTurnList(value: string): number[] | "all" | undefined {
@@ -133,7 +175,12 @@ function parseTurnList(value: string): number[] | "all" | undefined {
  * 交互模式；`--format` 单独出现时默认导出全部 turns。
  */
 export function parseReviewArgs(args: string): ReviewCliParse {
-  const tokens = tokenizeArgs(args);
+  let tokens: string[];
+  try {
+    tokens = tokenizeArgs(args);
+  } catch {
+    return { kind: "error", message: "参数中存在未闭合的引号。" };
+  }
   if (tokens.length === 0) return { kind: "interactive" };
   if (tokens.includes("--help") || tokens.includes("-h") || tokens.includes("help")) {
     return { kind: "help" };
@@ -226,15 +273,31 @@ export function defaultReviewOutputName(format: ReviewExportFormat, now: Date = 
   return `session-review-${stamp}.${REVIEW_EXPORT_EXTENSION[format]}`;
 }
 
-/** 解析用户输出路径：相对 cwd、目录或显式文件。 */
+/**
+ * 解析用户输出路径：
+ * - `~` / `~/...` 展开为 homedir；
+ * - 已存在目录 → 生成默认文件名放入该目录；
+ * - 无对应扩展名 → 追加 `.md/.docx/.pdf`。
+ */
 export async function resolveReviewOutputPath(
   format: ReviewExportFormat,
   cwd: string,
   output?: string,
 ): Promise<string> {
   if (!output?.trim()) return join(cwd, defaultReviewOutputName(format));
-  const trimmed = output.trim();
+  let trimmed = output.trim();
+  if (trimmed === "~") {
+    trimmed = homedir();
+  } else if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+    trimmed = join(homedir(), trimmed.slice(2));
+  }
   const resolved = isAbsolute(trimmed) ? trimmed : resolve(cwd, trimmed);
+  try {
+    const info = await stat(resolved);
+    if (info.isDirectory()) return join(resolved, defaultReviewOutputName(format));
+  } catch {
+    // 目标不存在 — 按文件路径处理
+  }
   const hasKnownExtension = extname(resolved).toLowerCase() === `.${REVIEW_EXPORT_EXTENSION[format]}`;
   if (hasKnownExtension) return resolved;
   return `${resolved}.${REVIEW_EXPORT_EXTENSION[format]}`;
@@ -250,6 +313,8 @@ export interface ReviewExportOptions {
 }
 
 const DEFAULT_EXPORT_TIMEOUT_MS = 120_000;
+/** stderr 只保留有界尾部，避免嘈杂转换器无界累积内存。 */
+const MAX_STDERR_TAIL = 8_000;
 
 /** 将已组装的 Markdown 写入 .md 文件。 */
 export async function writeMarkdownFile(markdown: string, outputPath: string): Promise<void> {
@@ -292,6 +357,27 @@ function buildPandocArgs(format: ReviewExportFormat, outputPath: string, env: No
   throw new Error(`Unsupported export format: ${format}`);
 }
 
+/** Windows 用 taskkill /T /F 终止整棵进程树；POSIX 用负 pid 进程组。 */
+function terminateProcessTree(child: ChildProcess): void {
+  if (!child.pid) return;
+  try {
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } else {
+      process.kill(-child.pid, "SIGTERM");
+    }
+  } catch {
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // 已退出或无权终止 — 忽略
+    }
+  }
+}
+
 function runPandoc(
   spawnFn: typeof defaultSpawn,
   command: string,
@@ -303,24 +389,27 @@ function runPandoc(
   return new Promise<void>((resolvePromise, reject) => {
     let child: ChildProcess;
     try {
-      child = spawnFn(command, args, { stdio: ["pipe", "pipe", "pipe"], env });
+      // stdout 使用 -o 时无输出，直接 ignore；stderr 保留有界尾部。
+      child = spawnFn(command, args, { stdio: ["pipe", "ignore", "pipe"], env });
     } catch (error) {
       reject(error instanceof Error ? error : new Error(String(error)));
       return;
     }
-    const stderrChunks: Buffer[] = [];
+    let stderrTail = "";
     let settled = false;
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
-      child.kill("SIGTERM");
+      terminateProcessTree(child);
       reject(new Error(`pandoc export timed out after ${Math.round(timeoutMs / 1000)}s.`));
     }, timeoutMs);
     timeout.unref?.();
 
     child.stderr?.on("data", (chunk: Buffer | string) => {
-      stderrChunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+      stderrTail = (stderrTail + (typeof chunk === "string" ? chunk : chunk.toString("utf8"))).slice(-MAX_STDERR_TAIL);
     });
+    // stdin 可能在转换器提前退出时收到 EPIPE — 挂接有界处理器，避免未处理 error 终止进程。
+    child.stdin?.on("error", () => {});
 
     child.once("error", (error) => {
       if (settled) return;
@@ -342,8 +431,7 @@ function runPandoc(
         resolvePromise();
         return;
       }
-      const stderr = Buffer.concat(stderrChunks).toString("utf-8").trim();
-      reject(new Error(`pandoc 导出失败（exit ${code}）${stderr ? `: ${stderr.slice(-500)}` : ""}`));
+      reject(new Error(`pandoc 导出失败（exit ${code}）${stderrTail ? `: ${stderrTail.slice(-500)}` : ""}`));
     });
 
     child.stdin?.end(markdown);
@@ -375,7 +463,7 @@ export async function exportReviewDocument(
 export const REVIEW_USAGE = `用法：/markdown-review [--turn <N|all>] [--format <md|docx|pdf>] [--output <path>] [--help]
 
 无参数时进入交互模式：
-  ↑↓ 选择 · Space 勾选 turn · a 全选 · n 清空 · Enter 预览 · e 导出 · Esc 关闭
+  ↑↓ 选择 · Space 勾选 turn · a 全选 · n 清空 · Enter 预览（窄屏）· e 导出 · Esc 关闭
 
 示例：
   /markdown-review
