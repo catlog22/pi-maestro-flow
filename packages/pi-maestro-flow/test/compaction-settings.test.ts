@@ -19,6 +19,7 @@ import {
   unsetCompactionField,
   validateCompactionPatch,
   validateEffectiveCompactionSettings,
+  type SoftCompactionSettings,
 } from "../src/compaction/compaction-settings.ts";
 
 test("compaction settings use the Pi default user path when the agent directory is unset", () => {
@@ -91,6 +92,10 @@ test("compaction settings ignore malformed files and invalid optional fields", a
         enabled: "yes",
         reserveTokens: -1,
         keepRecentTokens: Number.NaN,
+        soft: {
+          cache: { minRatioRange: [0.8, 0.2] },
+          timeBased: { gapThresholdMinutes: -1 },
+        },
       },
     });
 
@@ -311,7 +316,13 @@ test("compaction settings read nested hard and soft groups with soft sourced per
     await writeSettings(join(fixture.projectDir, ".pi"), {
       compaction: {
         hard: { reserveTokens: 22_000, keepRecentTokens: 17_000 },
-        soft: { nudgeRatio: 0.6, pruneRatio: 0.75, pruneTargetRatio: 0.55 },
+        soft: {
+          nudgeRatio: 0.6,
+          pruneRatio: 0.75,
+          pruneTargetRatio: 0.55,
+          cache: { minRatioRange: [0.2, 0.45] },
+          timeBased: { enabled: true, gapThresholdMinutes: 30 },
+        },
       },
     });
     const effective = readEffectiveCompactionSettings(fixture.projectDir);
@@ -322,6 +333,8 @@ test("compaction settings read nested hard and soft groups with soft sourced per
       nudgeRatio: 0.6,
       pruneRatio: 0.75,
       pruneTargetRatio: 0.55,
+      cache: { enabled: true, minRatioRange: [0.2, 0.45] },
+      timeBased: { enabled: true, gapThresholdMinutes: 30 },
     });
     assert.equal(effective.source.soft, "project");
   } finally {
@@ -386,12 +399,13 @@ test("cache defaults on because it can only decline prunes, never trigger them",
   // the cache gate only skips prune runs whose savings cannot pay for the
   // cached prefix they invalidate (risk of a slightly fuller context).
   const effective = resolveEffectiveCompactionSettings({}, {});
-  assert.deepEqual(effective.soft.cache, { enabled: true });
+  assert.deepEqual(effective.soft.cache, { enabled: true, minRatioRange: [0.1, 0.5] });
+  assert.deepEqual(effective.soft.timeBased, { enabled: false, gapThresholdMinutes: 60 });
 });
 
 test("cache gate remains explicitly disablable", () => {
   const effective = resolveEffectiveCompactionSettings({}, { soft: { cache: { enabled: false } } });
-  assert.deepEqual(effective.soft.cache, { enabled: false });
+  assert.deepEqual(effective.soft.cache, { enabled: false, minRatioRange: [0.1, 0.5] });
 });
 
 test("soft signal criteria deep-merge across user and project scopes field by field", () => {
@@ -401,7 +415,21 @@ test("soft signal criteria deep-merge across user and project scopes field by fi
   );
   // project minFullness must not clobber user-level enabled
   assert.deepEqual(effective.soft.velocity, { enabled: true, epochsToCritical: 3, minFullness: 0.5 });
-  assert.deepEqual(effective.soft.cache, { enabled: true });
+  assert.deepEqual(effective.soft.cache, { enabled: true, minRatioRange: [0.1, 0.5] });
+});
+
+test("legacy full soft settings shape remains source compatible", () => {
+  const legacy: SoftCompactionSettings = {
+    enabled: true,
+    nudgeRatio: 0.7,
+    pruneRatio: 0.8,
+    pruneTargetRatio: 0.7,
+    velocity: { enabled: false, epochsToCritical: 3, minFullness: 0.7 },
+    cache: { enabled: true },
+    lossless: { enabled: true },
+  };
+  assert.equal(legacy.timeBased, undefined);
+  assert.equal(legacy.cache.minRatioRange, undefined);
 });
 
 test("createDefaultSoftCompaction returns independent nested objects", () => {
@@ -409,11 +437,16 @@ test("createDefaultSoftCompaction returns independent nested objects", () => {
   a.velocity.enabled = true;
   a.velocity.minFullness = 0.99;
   a.cache.enabled = false;
+  a.cache.minRatioRange![0] = 0.3;
+  if (a.timeBased) a.timeBased.enabled = true;
   const b = createDefaultSoftCompaction();
   assert.equal(b.velocity.enabled, false);
   assert.equal(b.velocity.minFullness, 0.7);
   assert.equal(b.cache.enabled, true);
+  assert.deepEqual(b.cache.minRatioRange, [0.1, 0.5]);
+  assert.equal(b.timeBased?.enabled, false);
   assert.equal(DEFAULT_SOFT_COMPACTION.velocity.enabled, false);
+  assert.deepEqual(DEFAULT_SOFT_COMPACTION.cache.minRatioRange, [0.1, 0.5]);
 });
 
 test("validateEffectiveCompactionSettings accepts defaults and rejects invalid merged invariants", () => {
@@ -437,6 +470,25 @@ test("compaction validation rejects invalid velocity signal fields", () => {
 
   const valid = validateCompactionPatch({
     soft: { velocity: { enabled: true, epochsToCritical: 3, minFullness: 0.7 } },
+  });
+  assert.equal(valid.errors.length, 0);
+});
+
+test("compaction validation covers cache ratio and time-based thresholds", () => {
+  const invalid = validateCompactionPatch({
+    soft: {
+      cache: { minRatioRange: [0.8, 0.2] },
+      timeBased: { gapThresholdMinutes: 0 },
+    },
+  });
+  assert.ok(invalid.errors.includes("soft.cache.minRatioRange must be [lo, hi] with 0 <= lo < hi <= 1"));
+  assert.ok(invalid.errors.includes("soft.timeBased.gapThresholdMinutes must be a positive finite number"));
+
+  const valid = validateCompactionPatch({
+    soft: {
+      cache: { minRatioRange: [0.1, 0.5] },
+      timeBased: { enabled: true, gapThresholdMinutes: 30 },
+    },
   });
   assert.equal(valid.errors.length, 0);
 });

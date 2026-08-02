@@ -32,10 +32,31 @@ export interface VelocityCompactionSettings {
 
 export interface CacheCompactionConfigPatch {
   enabled?: boolean;
+  /** Dynamic prune-savings gate range (fraction of invalidated suffix). */
+  minRatioRange?: [number, number];
 }
 
 export interface CacheCompactionSettings {
   enabled: boolean;
+  /** Optional for source compatibility; resolved defaults provide [0.1, 0.5]. */
+  minRatioRange?: [number, number];
+}
+
+export interface TimeBasedCompactionConfigPatch {
+  enabled?: boolean;
+  gapThresholdMinutes?: number;
+}
+
+/**
+ * Time-based cache-cold detection (mirrors Claude Code's time-based
+ * microcompact). When the gap since the last main-loop assistant message
+ * exceeds `gapThresholdMinutes`, the provider's prompt cache has almost
+ * certainly expired, so the full prefix will be rewritten anyway — pruning
+ * then costs nothing extra and the cache gate is bypassed.
+ */
+export interface TimeBasedCompactionSettings {
+  enabled: boolean;
+  gapThresholdMinutes: number;
 }
 
 export interface LosslessCompactionConfigPatch {
@@ -62,6 +83,7 @@ export interface SoftCompactionConfigPatch {
   pruneTargetRatio?: number;
   velocity?: VelocityCompactionConfigPatch;
   cache?: CacheCompactionConfigPatch;
+  timeBased?: TimeBasedCompactionConfigPatch;
   lossless?: LosslessCompactionConfigPatch;
 }
 
@@ -72,6 +94,8 @@ export interface SoftCompactionSettings {
   pruneTargetRatio: number;
   velocity: VelocityCompactionSettings;
   cache: CacheCompactionSettings;
+  /** Optional for source compatibility; resolved defaults provide this group. */
+  timeBased?: TimeBasedCompactionSettings;
   lossless: LosslessCompactionSettings;
 }
 
@@ -86,6 +110,9 @@ export interface SoftCompactionSettings {
  * the ungated path was 2.2K tokens saved against 81K invalidated.
  *
  * `lossless` defaults ON: zero-risk format folding (see LosslessCompactionSettings).
+ * `timeBased` defaults OFF: cache-cold detection only declines the gate when
+ * enabled — an unresolved setting must not compact earlier than historical
+ * token-ratio-only behavior.
  */
 export function createDefaultSoftCompaction(): SoftCompactionSettings {
   return {
@@ -94,7 +121,8 @@ export function createDefaultSoftCompaction(): SoftCompactionSettings {
     pruneRatio: 0.8,
     pruneTargetRatio: 0.7,
     velocity: { enabled: false, epochsToCritical: 3, minFullness: 0.7 },
-    cache: { enabled: true },
+    cache: { enabled: true, minRatioRange: [0.1, 0.5] },
+    timeBased: { enabled: false, gapThresholdMinutes: 60 },
     lossless: { enabled: true },
   };
 }
@@ -185,6 +213,8 @@ function readRawSoft(value: unknown): SoftCompactionConfigPatch | undefined {
   if (velocity) soft.velocity = velocity;
   const cache = readRawCache(value.cache);
   if (cache) soft.cache = cache;
+  const timeBased = readRawTimeBased(value.timeBased);
+  if (timeBased) soft.timeBased = timeBased;
   const lossless = readRawLossless(value.lossless);
   if (lossless) soft.lossless = lossless;
   return Object.keys(soft).length > 0 ? soft : undefined;
@@ -206,7 +236,22 @@ function readRawCache(value: unknown): CacheCompactionConfigPatch | undefined {
   if (!isRecord(value)) return undefined;
   const cache: CacheCompactionConfigPatch = {};
   if (typeof value.enabled === "boolean") cache.enabled = value.enabled;
+  if (Array.isArray(value.minRatioRange)
+    && value.minRatioRange.length === 2
+    && value.minRatioRange.every((v) => typeof v === "number" && Number.isFinite(v))) {
+    const [lo, hi] = value.minRatioRange as [number, number];
+    if (lo >= 0 && hi <= 1 && lo < hi) cache.minRatioRange = [lo, hi];
+  }
   return Object.keys(cache).length > 0 ? cache : undefined;
+}
+
+function readRawTimeBased(value: unknown): TimeBasedCompactionConfigPatch | undefined {
+  if (!isRecord(value)) return undefined;
+  const timeBased: TimeBasedCompactionConfigPatch = {};
+  if (typeof value.enabled === "boolean") timeBased.enabled = value.enabled;
+  const minutes = positiveNumber(value.gapThresholdMinutes);
+  if (minutes !== undefined) timeBased.gapThresholdMinutes = minutes;
+  return Object.keys(timeBased).length > 0 ? timeBased : undefined;
 }
 
 function readRawLossless(value: unknown): LosslessCompactionConfigPatch | undefined {
@@ -274,6 +319,12 @@ export function resolveEffectiveCompactionSettings(
       }
       if (patch.soft.cache !== undefined) {
         if (patch.soft.cache.enabled !== undefined) soft.cache.enabled = patch.soft.cache.enabled;
+        if (patch.soft.cache.minRatioRange !== undefined) soft.cache.minRatioRange = patch.soft.cache.minRatioRange;
+      }
+      if (patch.soft.timeBased !== undefined) {
+        const timeBased = soft.timeBased ?? (soft.timeBased = { enabled: false, gapThresholdMinutes: 60 });
+        if (patch.soft.timeBased.enabled !== undefined) timeBased.enabled = patch.soft.timeBased.enabled;
+        if (patch.soft.timeBased.gapThresholdMinutes !== undefined) timeBased.gapThresholdMinutes = patch.soft.timeBased.gapThresholdMinutes;
       }
       if (patch.soft.lossless !== undefined) {
         if (patch.soft.lossless.enabled !== undefined) soft.lossless.enabled = patch.soft.lossless.enabled;
@@ -349,6 +400,13 @@ export function validateCompactionPatch(
         errors.push(`soft.velocity.minFullness must be a number in (0, 1)`);
       }
     }
+    if (soft.cache?.minRatioRange !== undefined && !isValidMinRatioRange(soft.cache.minRatioRange)) {
+      errors.push(`soft.cache.minRatioRange must be [lo, hi] with 0 <= lo < hi <= 1`);
+    }
+    if (soft.timeBased?.gapThresholdMinutes !== undefined
+      && !isPositiveFiniteNumber(soft.timeBased.gapThresholdMinutes)) {
+      errors.push(`soft.timeBased.gapThresholdMinutes must be a positive finite number`);
+    }
   }
 
   if (contextWindow === undefined) {
@@ -385,6 +443,13 @@ export function validateEffectiveCompactionSettings(settings: EffectiveCompactio
     || soft.velocity.minFullness <= 0 || soft.velocity.minFullness >= 1) {
     errors.push(`soft.velocity.minFullness must be a number in (0, 1)`);
   }
+  if (soft.cache.minRatioRange !== undefined && !isValidMinRatioRange(soft.cache.minRatioRange)) {
+    errors.push(`soft.cache.minRatioRange must be [lo, hi] with 0 <= lo < hi <= 1`);
+  }
+  if (soft.timeBased?.gapThresholdMinutes !== undefined
+    && !isPositiveFiniteNumber(soft.timeBased.gapThresholdMinutes)) {
+    errors.push(`soft.timeBased.gapThresholdMinutes must be a positive finite number`);
+  }
   if (!Number.isSafeInteger(settings.reserveTokens) || settings.reserveTokens <= 0) {
     errors.push(`reserveTokens must be a positive safe integer`);
   }
@@ -395,6 +460,19 @@ export function validateEffectiveCompactionSettings(settings: EffectiveCompactio
     errors.push(`model must be a "provider/id" reference`);
   }
   return { errors, warnings: [] };
+}
+
+function isValidMinRatioRange(value: unknown): value is [number, number] {
+  return Array.isArray(value)
+    && value.length === 2
+    && value.every((part) => typeof part === "number" && Number.isFinite(part))
+    && value[0] >= 0
+    && value[0] < value[1]
+    && value[1] <= 1;
+}
+
+function isPositiveFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
 const writeQueues = new Map<string, Promise<void>>();

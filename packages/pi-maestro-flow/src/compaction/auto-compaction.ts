@@ -1250,58 +1250,106 @@ export function applyContextPressurePolicy(
     const frontierStart = protectedFrontierStart(transformed, settings.keepRecentTokens);
     const pruneTarget = Math.min(thresholdTokens, softBands?.pruneTargetTokens ?? Math.floor(contextWindow * soft.pruneTargetRatio));
     const usageEpoch = latestProviderUsageEpoch(messages);
+    const cacheHitRatioValue = latestCacheHitRatio(messages);
+    // Time-based cache-cold detection: when the gap since the last main-loop
+    // assistant message exceeds the threshold, the provider's prompt cache has
+    // almost certainly expired and the whole prefix will be rewritten anyway —
+    // pruning then costs nothing extra, so the cache gate is bypassed.
+    const cacheCold = soft.timeBased?.enabled === true
+      && isCacheColdByTime(messages, soft.timeBased.gapThresholdMinutes);
     // Cache gate: a prune kills the provider's cached prefix from its index to
     // the end, so below the critical band a prune run must reclaim enough tokens
     // to pay for the prefix it invalidates. Past critical, relieving pressure
     // dominates — a full compaction would invalidate everything anyway plus cost
     // an LLM call — so the gate is bypassed and every candidate is applied.
     cacheGateActive = soft.cache.enabled && !initiallyCritical && !compactionPending
-      && latestCacheHitRatio(messages) !== undefined;
+      && !cacheCold
+      && cacheHitRatioValue !== undefined;
     const suffixTokens = cacheGateActive ? suffixTokenSums(transformed) : undefined;
+    // Dynamic savings gate: a hot cache (high hit ratio) makes every mutation
+    // more expensive, so the minimum savings required to pay for an
+    // invalidated prefix rises with the observed hit ratio; a cold cache
+    // lowers it. The fixed 25% baseline is kept as the mid-point.
+    const minPruneRatio = cacheGateActive && cacheHitRatioValue !== undefined
+      ? dynamicPruneMinRatio(cacheHitRatioValue, soft.cache.minRatioRange)
+      : CACHE_PRUNE_MIN_SAVINGS_RATIO;
+
+    // Build the exact ungated transform plan first. When the gate is active the
+    // plan runs on copies, then one cumulative economics decision is applied to
+    // the real messages/manifest. This lets savings combine across lossless,
+    // replayable, and bulk tiers without publishing a partial prefix first.
+    const planningMessages = cacheGateActive ? [...transformed] : transformed;
+    const planningManifest = cacheGateActive ? new Map(pruneManifest) : pruneManifest;
+    const plannedCandidates: PruneCandidate[] = [];
+    let planSavedTokens = 0;
+    let planPrunedToolResults = 0;
+
     // Tier 0 — lossless folding first (reversible, no information loss): it
     // shrinks output without a decision, and whatever it saves lowers the
-    // pressure so later lossy passes may not even need to run. Shares the same
-    // cache gate: folding a message invalidates the provider prefix from its
-    // index on, exactly like a prune does.
+    // pressure so later lossy passes may not even need to run.
     let effectiveForLossy = initial;
     if (soft.lossless?.enabled ?? true) {
       const lossless = runPrunePass({
-        transformed,
-        pruneManifest,
+        transformed: planningMessages,
+        pruneManifest: planningManifest,
         frontierStart,
         pruneTarget,
         effectiveTokens: initial,
         usageEpoch,
         selector: tryLosslessFold,
-        suffixTokens,
         level: "lossless",
       });
-      newlySavedTokens += lossless.savedTokens;
-      savedTokens += lossless.savedTokens;
-      prunedToolResults += lossless.prunedToolResults;
+      plannedCandidates.push(...lossless.candidates);
+      planSavedTokens += lossless.savedTokens;
+      planPrunedToolResults += lossless.prunedToolResults;
       effectiveForLossy = lossless.effectiveTokens;
     }
     // Graduated eviction, cheapest/most-reversible first: pass 1 strips replayable
     // tools (re-runnable); pass 2 strips bulk data tools (bash/edit/write) only if
     // pressure persists. Control tools (e.g. todo) are in neither set and survive.
-    const replayable = runPrunePass({ transformed, pruneManifest, frontierStart, pruneTarget, effectiveTokens: effectiveForLossy, usageEpoch, selector: replaceableToolResult, suffixTokens });
-    newlySavedTokens += replayable.savedTokens;
-    savedTokens += replayable.savedTokens;
-    prunedToolResults += replayable.prunedToolResults;
+    const replayable = runPrunePass({
+      transformed: planningMessages,
+      pruneManifest: planningManifest,
+      frontierStart,
+      pruneTarget,
+      effectiveTokens: effectiveForLossy,
+      usageEpoch,
+      selector: replaceableToolResult,
+    });
+    plannedCandidates.push(...replayable.candidates);
+    planSavedTokens += replayable.savedTokens;
+    planPrunedToolResults += replayable.prunedToolResults;
     const bulk = runPrunePass({
-      transformed,
-      pruneManifest,
+      transformed: planningMessages,
+      pruneManifest: planningManifest,
       frontierStart,
       pruneTarget,
       effectiveTokens: replayable.effectiveTokens,
       usageEpoch,
       selector: evictableBulkToolResult,
-      suffixTokens,
-      priorSavings: replayable.savedTokens,
     });
-    newlySavedTokens += bulk.savedTokens;
-    savedTokens += bulk.savedTokens;
-    prunedToolResults += bulk.prunedToolResults;
+    plannedCandidates.push(...bulk.candidates);
+    planSavedTokens += bulk.savedTokens;
+    planPrunedToolResults += bulk.prunedToolResults;
+
+    if (cacheGateActive && suffixTokens) {
+      const depth = cacheWorthwhileDepth(plannedCandidates, suffixTokens, minPruneRatio);
+      const appliedPlan = applyPruneCandidates(
+        transformed,
+        pruneManifest,
+        plannedCandidates,
+        depth,
+        initial,
+        usageEpoch,
+      );
+      newlySavedTokens += appliedPlan.savedTokens;
+      savedTokens += appliedPlan.savedTokens;
+      prunedToolResults += appliedPlan.prunedToolResults;
+    } else {
+      newlySavedTokens += planSavedTokens;
+      savedTokens += planSavedTokens;
+      prunedToolResults += planPrunedToolResults;
+    }
   }
   const estimatedTokens = Math.max(0, initial - newlySavedTokens);
   const ratio = estimatedTokens / contextWindow;
@@ -1871,10 +1919,6 @@ interface PrunePassInput {
   effectiveTokens: number;
   usageEpoch: string | undefined;
   selector: (message: AgentMessage) => AgentMessage | undefined;
-  /** Savings already committed by an earlier pass in the same plan. */
-  priorSavings?: number;
-  /** Suffix token sums of the pre-prune array; index i holds tokens[i..end]. */
-  suffixTokens?: number[];
   /** Manifest level recorded for candidates this pass applies. */
   level?: PruneLevel;
 }
@@ -1885,6 +1929,14 @@ interface PruneCandidate {
   replacement: AgentMessage;
   saved: number;
   contentDigest: string;
+  level: PruneLevel;
+}
+
+interface PrunePassResult {
+  savedTokens: number;
+  prunedToolResults: number;
+  effectiveTokens: number;
+  candidates: PruneCandidate[];
 }
 
 /**
@@ -1902,15 +1954,70 @@ export function suffixTokenSums(messages: AgentMessage[]): number[] {
 }
 
 /**
+ * Dynamic prune-savings gate: the minimum fraction of the invalidated suffix
+ * a prune run must reclaim rises with the observed cache hit ratio (a hot
+ * cache makes every mutation more expensive). Baseline is the fixed 25%; the
+ * observed ratio pivots it within `range` (default [0.1, 0.5]).
+ */
+export function dynamicPruneMinRatio(
+  hitRatio: number,
+  range: [number, number] = [0.1, 0.5],
+): number {
+  const [lo, hi] = range;
+  const clampedHit = Math.min(1, Math.max(0, hitRatio));
+  // pivot: hit 0.5 -> baseline 0.25; hit 1.0 -> 0.375; hit 0.0 -> 0.125
+  const pivoted = CACHE_PRUNE_MIN_SAVINGS_RATIO * (1 + (clampedHit - 0.5));
+  return Math.min(hi, Math.max(lo, pivoted));
+}
+
+/** Milliseconds-since-epoch of the latest assistant message, if trustworthy. */
+function lastAssistantTimestamp(messages: AgentMessage[]): number | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const record = messages[index] as MessageRecord & { timestamp?: unknown };
+    if (record.role !== "assistant") continue;
+    const ts = record.timestamp;
+    if (typeof ts === "number" && Number.isFinite(ts)) return ts;
+    if (typeof ts === "string" && ts.length > 0) {
+      const parsed = Date.parse(ts);
+      if (!Number.isNaN(parsed)) return parsed;
+    }
+    // The latest assistant message owns cache freshness. Falling back to an
+    // older timestamp could mark a recently active cache as cold.
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * True when the gap since the last assistant message exceeds
+ * `gapThresholdMinutes` (cache-cold heuristic). Missing/parsable-false
+ * timestamps conservatively return false so pruning never runs un-gated on
+ * unknown age.
+ */
+export function isCacheColdByTime(
+  messages: AgentMessage[],
+  gapThresholdMinutes: number,
+  now: number = Date.now(),
+): boolean {
+  if (!Number.isFinite(gapThresholdMinutes) || gapThresholdMinutes <= 0) return false;
+  const lastTs = lastAssistantTimestamp(messages);
+  if (lastTs === undefined) return false;
+  const gapMinutes = (now - lastTs) / 60_000;
+  return Number.isFinite(gapMinutes) && gapMinutes > gapThresholdMinutes;
+}
+
+/**
  * Deepest prune depth whose CUMULATIVE savings still justify the cached prefix
  * it invalidates, or 0 to prune nothing.
  *
  * Selection must look at the whole candidate run, not each candidate in
- * isolation: candidates are visited newest-first, and the first one always looks
- * worst because it already pays for the entire suffix while contributing only
- * its own savings. Measured on a uniform tool-loop transcript the ratio climbs
- * 0.12 -> 0.66 across 15 candidates, so a greedy per-candidate test would reject
- * the whole (profitable) run on its first element.
+ * isolation: within a tier candidates are visited newest-first, and the first
+ * one always looks worst because it already pays for the entire suffix while
+ * contributing only its own savings. A complete plan may concatenate tiers,
+ * so the invalidation boundary is the earliest index seen in the prefix rather
+ * than the current candidate's index. Measured on a uniform tool-loop transcript
+ * the ratio climbs 0.12 -> 0.66 across 15 candidates, so a greedy per-candidate
+ * test would reject the whole (profitable) run on its first element.
  */
 export function cacheWorthwhileDepth(
   candidates: Array<{ index: number; saved: number }>,
@@ -1919,23 +2026,52 @@ export function cacheWorthwhileDepth(
   initialSavings: number = 0,
 ): number {
   let cumulative = initialSavings;
+  let earliestIndex = Number.POSITIVE_INFINITY;
   let depth = 0;
   for (let position = 0; position < candidates.length; position++) {
-    cumulative += candidates[position].saved;
-    const invalidated = suffixTokens[candidates[position].index] ?? 0;
+    const candidate = candidates[position];
+    cumulative += candidate.saved;
+    earliestIndex = Math.min(earliestIndex, candidate.index);
+    const invalidated = suffixTokens[earliestIndex] ?? 0;
     if (invalidated <= 0) continue;
     if (cumulative >= invalidated * minRatio) depth = position + 1;
   }
   return depth;
 }
 
-function runPrunePass(input: PrunePassInput): { savedTokens: number; prunedToolResults: number; effectiveTokens: number } {
-  const { transformed, pruneManifest, frontierStart, pruneTarget, usageEpoch, selector, suffixTokens, priorSavings = 0 } = input;
+function applyPruneCandidates(
+  transformed: AgentMessage[],
+  pruneManifest: PruneManifest,
+  candidates: PruneCandidate[],
+  depth: number,
+  effectiveTokens: number,
+  usageEpoch: string | undefined,
+): PrunePassResult {
+  let savedTokens = 0;
+  let prunedToolResults = 0;
+  const appliedCandidates = candidates.slice(0, depth);
+  for (const candidate of appliedCandidates) {
+    transformed[candidate.index] = candidate.replacement;
+    recordPrune(pruneManifest, candidate.callId, {
+      replacement: candidate.replacement,
+      savedTokens: candidate.saved,
+      introducedAtUsageEpoch: usageEpoch,
+      contentDigest: candidate.contentDigest,
+      level: candidate.level,
+    });
+    savedTokens += candidate.saved;
+    prunedToolResults++;
+    effectiveTokens -= candidate.saved;
+  }
+  return { savedTokens, prunedToolResults, effectiveTokens, candidates: appliedCandidates };
+}
+
+function runPrunePass(input: PrunePassInput): PrunePassResult {
+  const { transformed, pruneManifest, frontierStart, pruneTarget, usageEpoch, selector } = input;
   let effectiveTokens = input.effectiveTokens;
 
-  // Phase 1 — collect candidates newest-first without mutating anything. The
-  // walk order is unchanged from the ungated path, so the candidate sequence is
-  // identical; only how many of them get applied can differ.
+  // Collect candidates newest-first without mutating the source plan. The walk
+  // order is unchanged from the historical ungated path.
   const candidates: PruneCandidate[] = [];
   const claimedCallIds = new Set(pruneManifest.keys());
   let projectedTokens = effectiveTokens;
@@ -1948,35 +2084,29 @@ function runPrunePass(input: PrunePassInput): { savedTokens: number; prunedToolR
     const after = estimateMessageTokens(replacement);
     if (after >= before) continue;
     const saved = before - after;
-    candidates.push({ index, callId, replacement, saved, contentDigest: toolResultDigest(transformed[index]) });
+    candidates.push({
+      index,
+      callId,
+      replacement,
+      saved,
+      contentDigest: toolResultDigest(transformed[index]),
+      level: input.level ?? "pruned",
+    });
     claimedCallIds.add(callId);
     projectedTokens -= saved;
   }
 
-  // Phase 2 — when the cache gate is active, trim the run to the deepest depth
-  // that still pays for the prefix it invalidates. Without suffixTokens every
-  // candidate is applied, which is byte-for-byte the historical behavior.
-  const depth = suffixTokens
-    ? cacheWorthwhileDepth(candidates, suffixTokens, CACHE_PRUNE_MIN_SAVINGS_RATIO, priorSavings)
-    : candidates.length;
-
-  let savedTokens = 0;
-  let prunedToolResults = 0;
-  for (let position = 0; position < depth; position++) {
-    const candidate = candidates[position];
-    transformed[candidate.index] = candidate.replacement;
-    recordPrune(pruneManifest, candidate.callId, {
-      replacement: candidate.replacement,
-      savedTokens: candidate.saved,
-      introducedAtUsageEpoch: usageEpoch,
-      contentDigest: candidate.contentDigest,
-      level: input.level ?? "pruned",
-    });
-    savedTokens += candidate.saved;
-    prunedToolResults++;
-    effectiveTokens -= candidate.saved;
-  }
-  return { savedTokens, prunedToolResults, effectiveTokens };
+  // A pass always applies its complete ungated candidate run. When cache
+  // economics are active, callers execute passes against a copy and apply one
+  // cumulatively qualified prefix to the real context afterward.
+  return applyPruneCandidates(
+    transformed,
+    pruneManifest,
+    candidates,
+    candidates.length,
+    effectiveTokens,
+    usageEpoch,
+  );
 }
 
 function isProtectedToolResult(message: AgentMessage): boolean {

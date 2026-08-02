@@ -3860,6 +3860,79 @@ test("cache gate declines a prune run that cannot pay for the prefix it invalida
   assert.ok(ungated.prunedToolResults > 0, "without the gate this prunes");
   assert.equal(gated.prunedToolResults, 0, "the gate declines a ~0.03 payoff");
   assert.equal(firstDivergence(messages, gated.messages), -1, "cached prefix left intact");
+
+  const latestAssistant = [...messages].reverse().find(
+    (message) => (message as { role?: string }).role === "assistant",
+  ) as { timestamp?: number } | undefined;
+  assert.ok(latestAssistant);
+  latestAssistant.timestamp = Date.now() - 2 * 60 * 60_000;
+  const cold = applyContextPressurePolicy(
+    messages as never,
+    100_000,
+    {
+      ...base,
+      soft: {
+        ...softWithCache(true),
+        timeBased: { enabled: true, gapThresholdMinutes: 60 },
+      },
+    },
+    new Map(),
+  );
+  assert.ok(cold.prunedToolResults > 0, "expired cache bypasses the otherwise-vetoing gate");
+  assert.ok(!cold.reasons.includes("cache-veto"));
+});
+
+test("cache economics accumulate across replayable and bulk tiers", () => {
+  // Each ~14K result saves too little to pay for the cached suffix alone. The
+  // complete read+bash plan crosses the 25% floor and must be accepted once.
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "read-old", name: "read", arguments: {} }],
+    usage: {
+      input: 35_000,
+      output: 0,
+      cacheRead: 35_000,
+      cacheWrite: 0,
+      totalTokens: 70_000,
+      cost: { total: 0 },
+    },
+  }, {
+    role: "toolResult",
+    toolCallId: "read-old",
+    toolName: "read",
+    content: [{ type: "text", text: "r".repeat(14_000) }],
+    isError: false,
+  }, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "bash-old", name: "bash", arguments: {} }],
+  }, {
+    role: "toolResult",
+    toolCallId: "bash-old",
+    toolName: "bash",
+    content: [{ type: "text", text: "b".repeat(14_000) }],
+    isError: false,
+  }, {
+    role: "user",
+    content: [{ type: "text", text: "u".repeat(40_000) }],
+  }, {
+    role: "assistant",
+    content: [{ type: "text", text: "a".repeat(40_000) }],
+  }] as never;
+  const manifest = new Map();
+  const result = applyContextPressurePolicy(
+    messages,
+    120_000,
+    {
+      enabled: true,
+      reserveTokens: 10_000,
+      keepRecentTokens: 8_000,
+      soft: { ...softWithCache(true), lossless: { enabled: false } },
+    },
+    manifest,
+  );
+  assert.equal(result.prunedToolResults, 2);
+  assert.ok(manifest.has("read-old"));
+  assert.ok(manifest.has("bash-old"));
 });
 
 test("cache gate still prunes when the run pays for itself", () => {
