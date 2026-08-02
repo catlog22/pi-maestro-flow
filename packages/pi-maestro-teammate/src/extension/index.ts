@@ -3626,8 +3626,14 @@ export default function registerTeammateExtension(
   // /monitor — user-only monitor mode lifecycle
   // ---------------------------------------------------------------------------
 
+  function windowRowStatus(statuses: readonly string[]): string {
+    if (statuses.length === 0) return "idle";
+    if (statuses.some((status) => status === "running" || status === "retrying")) return "running";
+    return "sleeping";
+  }
+
   function monitorSessionRows(): MonitorSessionRow[] {
-    const localRows: MonitorSessionRow[] = [...state.activeRuns.values()].map((agent) => ({
+    const localAgents: MonitorSessionRow[] = [...state.activeRuns.values()].map((agent) => ({
       correlationId: agent.correlationId,
       displayName: agent.name ?? agent.correlationId.slice(0, 8),
       agentRole: agent.agent,
@@ -3635,31 +3641,66 @@ export default function registerTeammateExtension(
       idleSeconds: Math.round((Date.now() - agent.lastActivityAt) / 1000),
       bound: monitorEngine.bindings.has(agent.correlationId),
       source: "local",
+      kind: "agent",
+      ownerId: "local",
+      depth: agent.depth,
+      ...(agent.spawnedBy ? { parentCorrelationId: agent.spawnedBy } : {}),
     }));
-    const remoteRows = workspacePeerOwners.flatMap((owner) => owner.agents.map((agent) => {
-      const key = `${owner.ownerId}:${agent.correlationId}`;
-      return {
-        correlationId: key,
-        displayName: agent.name ?? agent.correlationId.slice(0, 8),
-        agentRole: agent.agent,
-        status: agent.status,
-        idleSeconds: Math.round((Date.now() - agent.lastActivityAt) / 1000),
-        bound: monitorEngine.bindings.has(key),
+    const remoteRows = workspacePeerOwners.flatMap((owner): MonitorSessionRow[] => {
+      const windowRow: MonitorSessionRow = {
+        correlationId: `owner:${owner.ownerId}`,
+        displayName: owner.sessionName ?? `window:${owner.ownerId.slice(0, 6)}`,
+        agentRole: `window · ${owner.agents.length} agents`,
+        status: windowRowStatus(owner.agents.map((agent) => agent.status)),
+        idleSeconds: 0,
+        bound: false,
         source: owner.sessionName ?? `remote:${owner.ownerId.slice(0, 6)}`,
-      } satisfies MonitorSessionRow;
-    }));
-    return [...localRows, ...remoteRows];
+        kind: "window",
+        ownerId: owner.ownerId,
+      };
+      const agentRows: MonitorSessionRow[] = owner.agents.map((agent) => {
+        const key = `${owner.ownerId}:${agent.correlationId}`;
+        return {
+          correlationId: key,
+          displayName: agent.name ?? agent.correlationId.slice(0, 8),
+          agentRole: agent.agent,
+          status: agent.status,
+          idleSeconds: Math.round((Date.now() - agent.lastActivityAt) / 1000),
+          bound: monitorEngine.bindings.has(key),
+          source: owner.sessionName ?? `remote:${owner.ownerId.slice(0, 6)}`,
+          kind: "agent",
+          ownerId: owner.ownerId,
+          ...(agent.depth === undefined ? {} : { depth: agent.depth }),
+          ...(agent.parentCorrelationId ? { parentCorrelationId: agent.parentCorrelationId } : {}),
+        } satisfies MonitorSessionRow;
+      });
+      return [windowRow, ...agentRows];
+    });
+    const localWindowRow: MonitorSessionRow = {
+      correlationId: "local",
+      displayName: workspacePeerSessionName ?? "本窗口",
+      agentRole: `window · ${localAgents.length} agents`,
+      status: windowRowStatus(localAgents.map((agent) => agent.status)),
+      idleSeconds: 0,
+      bound: false,
+      source: "local",
+      kind: "window",
+      ownerId: "local",
+    };
+    return [localWindowRow, ...localAgents, ...remoteRows];
   }
 
   pi.registerCommand("monitor", {
     description: "Monitor: /monitor <targets...> [auto|custom:<prompt>] | /monitor exit | /monitor [status]",
     getArgumentCompletions(prefix: string) {
       void refreshWorkspacePeerOwners();
-      const agents = monitorSessionRows().map((agent) => ({
-        value: agent.displayName,
-        label: agent.displayName,
-        description: `${agent.agentRole} · ${agent.status}${agent.source === "local" ? "" : ` · ${agent.source}`}`,
-      }));
+      const agents = monitorSessionRows()
+        .filter((row) => row.kind !== "window")
+        .map((agent) => ({
+          value: agent.displayName,
+          label: agent.displayName,
+          description: `${agent.agentRole} · ${agent.status}${agent.source === "local" ? "" : ` · ${agent.source}`}`,
+        }));
       const commands = [
         { value: "exit", label: "exit", description: "Stop monitoring and clear bindings" },
         { value: "status", label: "status", description: "Show bindings and snapshot" },

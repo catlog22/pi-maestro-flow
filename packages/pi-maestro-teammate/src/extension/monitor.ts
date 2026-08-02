@@ -69,6 +69,7 @@ const STATUS_ICONS: Record<string, string> = {
   sleeping: "◉",
   completed: "✓",
   failed: "✗",
+  idle: "▢",
 };
 
 export function statusIcon(status?: string): string {

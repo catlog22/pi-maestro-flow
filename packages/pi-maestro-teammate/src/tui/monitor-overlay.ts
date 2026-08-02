@@ -25,6 +25,14 @@ export interface MonitorSessionRow {
   source?: string;
   /** Whether this session already has a monitor binding. */
   bound: boolean;
+  /** Row kind: "agent" (live sub-agent) or "window" (peer window). */
+  kind?: "agent" | "window";
+  /** Owner (window) key this row belongs to; groups rows into window trees. */
+  ownerId?: string;
+  /** Dispatch depth; 0 = direct child of the window. */
+  depth?: number;
+  /** Correlation id of the parent agent within the same window, if nested. */
+  parentCorrelationId?: string;
 }
 
 export interface MonitorOverlayResult {
@@ -39,12 +47,77 @@ interface OverlayCallbacks {
   close: (result: MonitorOverlayResult | null) => void;
 }
 
+interface TreeNode {
+  row: MonitorSessionRow;
+  children: TreeNode[];
+}
+
+interface FlatTreeNode {
+  row: MonitorSessionRow;
+  depth: number;
+  branch: string;
+}
+
+/** Nest agents under their parent agent (same owner) and return tree roots. */
+function buildAgentTree(ownerKey: string, agents: MonitorSessionRow[]): TreeNode[] {
+  const nodeById = new Map<string, TreeNode>();
+  for (const agent of agents) nodeById.set(agent.correlationId, { row: agent, children: [] });
+  const roots: TreeNode[] = [];
+  for (const agent of agents) {
+    const node = nodeById.get(agent.correlationId)!;
+    const parentKey = agent.parentCorrelationId
+      ? (ownerKey === "local" ? agent.parentCorrelationId : `${ownerKey}:${agent.parentCorrelationId}`)
+      : undefined;
+    const parent = parentKey ? nodeById.get(parentKey) : undefined;
+    if (parent) parent.children.push(node);
+    else roots.push(node);
+  }
+  return roots;
+}
+
+/** Depth-first flatten with branch glyphs (├─/└─/│) per level. */
+function flattenTree(root: TreeNode, depth: number, isLast: boolean, continuation: string): FlatTreeNode[] {
+  const branch = depth === 0 ? "" : `${continuation}${isLast ? "└─ " : "├─ "}`;
+  const childContinuation = depth === 0 ? "" : `${continuation}${isLast ? "   " : "│  "}`;
+  const nodes: FlatTreeNode[] = [{ row: root.row, depth, branch }];
+  root.children.forEach((child, index) => {
+    nodes.push(...flattenTree(child, depth + 1, index === root.children.length - 1, childContinuation));
+  });
+  return nodes;
+}
+
+/** Build a display tree: window roots → agents → nested sub-agents. */
+function buildTreeRows(sessions: MonitorSessionRow[]): FlatTreeNode[] {
+  const windowRoots = sessions.filter((row) => row.kind === "window");
+  const agentsByOwner = new Map<string, MonitorSessionRow[]>();
+  for (const row of sessions) {
+    if (row.kind === "window") continue;
+    const ownerKey = row.ownerId ?? "local";
+    let bucket = agentsByOwner.get(ownerKey);
+    if (!bucket) {
+      bucket = [];
+      agentsByOwner.set(ownerKey, bucket);
+    }
+    bucket.push(row);
+  }
+  const nodes: FlatTreeNode[] = [];
+  for (const root of windowRoots) {
+    const ownerKey = root.ownerId ?? "local";
+    const treeRoot: TreeNode = { row: root, children: buildAgentTree(ownerKey, agentsByOwner.get(ownerKey) ?? []) };
+    nodes.push(...flattenTree(treeRoot, 0, true, ""));
+  }
+  // Standalone agents without a matching window root are NOT monitor targets
+  // (no owner window to route interventions through) — drop them.
+  return nodes;
+}
+
 // ---------------------------------------------------------------------------
 // Overlay component
 // ---------------------------------------------------------------------------
 
 export class MonitorOverlay {
   private sessions: MonitorSessionRow[] = [];
+  private treeRows: FlatTreeNode[] = [];
   private cursor = 0;
   private selected: Set<string> = new Set();
   private mode: MonitorSupervisionMode = "auto";
@@ -55,6 +128,7 @@ export class MonitorOverlay {
 
   constructor(private readonly cb: OverlayCallbacks) {
     this.sessions = cb.getSessions();
+    this.treeRows = buildTreeRows(this.sessions);
     // Pre-select already-bound sessions
     for (const s of this.sessions) {
       if (s.bound) this.selected.add(s.correlationId);
@@ -79,27 +153,28 @@ export class MonitorOverlay {
     lines.push(dim(`╭${"─".repeat(inner)}╮`));
     lines.push(this.frameLine(bold(" Monitor — Select Sessions"), inner, dim));
 
-    // Session list
-    const maxVisible = Math.min(this.sessions.length, 10);
-    const scrollStart = Math.max(0, Math.min(this.cursor - 4, this.sessions.length - maxVisible));
+    // Session list (window → agent → sub-agent tree)
+    const maxVisible = Math.min(this.treeRows.length, 10);
+    const scrollStart = Math.max(0, Math.min(this.cursor - 4, this.treeRows.length - maxVisible));
 
-    for (let i = scrollStart; i < scrollStart + maxVisible && i < this.sessions.length; i++) {
-      const s = this.sessions[i];
+    for (let i = scrollStart; i < scrollStart + maxVisible && i < this.treeRows.length; i++) {
+      const { row: s, branch } = this.treeRows[i]!;
       const isCursor = i === this.cursor;
       const isSelected = this.selected.has(s.correlationId);
 
       const pointer = isCursor ? accent("▸") : " ";
       const check = isSelected ? green("✓") : dim("○");
       const icon = statusIcon(s.status);
-      const idle = s.status === "running" ? `${s.idleSeconds}s` : "—";
+      const idle = s.kind === "window" || s.status !== "running" ? "—" : `${s.idleSeconds}s`;
       const boundTag = s.bound ? dim(" [MON]") : "";
       const sourceTag = s.source && s.source !== "local" ? dim(` [${s.source}]`) : "";
+      const kindTag = s.kind === "window" ? dim("[窗口]") : dim("[代理]");
 
-      const row = ` ${pointer} ${check} ${icon} ${s.displayName}  ${dim(s.status)}  ${dim(idle)}  ${dim(s.agentRole)}${sourceTag}${boundTag}`;
+      const row = ` ${pointer} ${check} ${branch}${icon} ${kindTag} ${s.displayName}  ${dim(s.status)}  ${dim(idle)}  ${dim(s.agentRole)}${sourceTag}${boundTag}`;
       lines.push(this.frameLine(isCursor ? accent(row) : row, inner, dim));
     }
 
-    if (this.sessions.length === 0) {
+    if (this.treeRows.length === 0) {
       lines.push(this.frameLine(dim("  No active sessions"), inner, dim));
     }
 
@@ -178,9 +253,11 @@ export class MonitorOverlay {
         break;
 
       case " ": // Space — toggle selection
-        if (this.sessions.length > 0) {
-          const s = this.sessions[this.cursor];
-          if (this.selected.has(s.correlationId)) {
+        if (this.treeRows.length > 0) {
+          const s = this.treeRows[this.cursor]!.row;
+          if (s.kind === "window") {
+            this.statusText = "Window rows are not monitor targets — select an agent";
+          } else if (this.selected.has(s.correlationId)) {
             this.selected.delete(s.correlationId);
           } else {
             this.selected.add(s.correlationId);
@@ -193,17 +270,19 @@ export class MonitorOverlay {
         break;
 
       case "\x1b[B": case "j": // Down
-        this.cursor = Math.min(this.sessions.length - 1, this.cursor + 1);
+        this.cursor = Math.min(this.treeRows.length - 1, this.cursor + 1);
         break;
 
       default:
         // Number keys for quick select
         if (/^[1-9]$/.test(data)) {
           const idx = Number(data) - 1;
-          if (idx < this.sessions.length) {
+          if (idx < this.treeRows.length) {
             this.cursor = idx;
-            const s = this.sessions[idx];
-            if (this.selected.has(s.correlationId)) this.selected.delete(s.correlationId);
+            const s = this.treeRows[idx]!.row;
+            if (s.kind === "window") {
+              this.statusText = "Window rows are not monitor targets — select an agent";
+            } else if (this.selected.has(s.correlationId)) this.selected.delete(s.correlationId);
             else this.selected.add(s.correlationId);
           }
         }
