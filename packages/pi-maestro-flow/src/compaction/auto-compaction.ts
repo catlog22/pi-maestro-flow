@@ -123,6 +123,8 @@ interface PersistedPruneEntry {
   contentDigest?: string;
   writerId?: string;
   refCallId?: string;
+  /** Exact replacement text for context-dependent levels (dedup). */
+  replacementText?: string;
 }
 
 /**
@@ -1459,6 +1461,9 @@ function persistedEntryOf(callId: string, entry: PruneManifestEntry | undefined)
     ...(entry?.contentDigest !== undefined ? { contentDigest: entry.contentDigest } : {}),
     ...(entry?.writerId !== undefined ? { writerId: entry.writerId } : {}),
     ...(entry?.refCallId !== undefined ? { refCallId: entry.refCallId } : {}),
+    ...(entry?.level === "dedup" && entry.replacement !== undefined
+      ? { replacementText: extractTextContent(entry.replacement) }
+      : {}),
   };
 }
 
@@ -1519,11 +1524,13 @@ function recordPrune(manifest: PruneManifest, callId: string, entry: PruneManife
 function restorePruneReplacement(message: AgentMessage, persisted: PersistedPruneEntry): AgentMessage | undefined {
   if (persisted.level === "pruned") return pruneToolResult(message);
   if (persisted.level === "dedup") {
-    // A dedup pointer is context-dependent (it names an earlier output), so it
-    // cannot be rebuilt from a single message. The referenced original is
-    // still physically in context — reference targets are protected from
-    // pruning — so degrading to the plain placeholder loses no information,
-    // only the pointer's brevity. The next in-process pass may fold again.
+    // The frozen pointer text is persisted alongside the entry so a resumed
+    // request replays byte-identical bytes. Only when it is missing (an older
+    // build) do we degrade: the referenced original is still in context, so
+    // the plain placeholder loses no information, only brevity.
+    if (persisted.replacementText) {
+      return { ...message, content: [{ type: "text", text: persisted.replacementText }] } as AgentMessage;
+    }
     return pruneToolResult(message);
   }
   if (persisted.level === "lossless") {
@@ -1743,6 +1750,7 @@ function loadPersistedPrunes(
         ...(typeof record.contentDigest === "string" ? { contentDigest: record.contentDigest } : {}),
         ...(typeof record.writerId === "string" ? { writerId: record.writerId } : {}),
         ...(typeof record.refCallId === "string" ? { refCallId: record.refCallId } : {}),
+        ...(typeof record.replacementText === "string" ? { replacementText: record.replacementText } : {}),
       });
     }
     return restored;
@@ -1784,6 +1792,8 @@ function pruneKey(entries: Iterable<PersistedPruneEntry>): string {
       entry.introducedAtUsageEpoch ?? null,
       entry.contentDigest ?? null,
       entry.writerId ?? null,
+      entry.refCallId ?? null,
+      entry.replacementText ?? null,
     ])
     .sort(([a], [b]) => String(a).localeCompare(String(b))));
 }
@@ -2291,6 +2301,9 @@ function runDedupPass(input: {
     if (record.isError === true) continue;
     const text = extractTextContent(original);
     if (text.length < 8) continue;
+    // Dedup only rewrites pure text outputs. A result carrying image or other
+    // non-text blocks is skipped so those blocks can never be dropped.
+    if (!isTextOnlyContent(original)) continue;
     blocks.push({ text, callId });
     indexByCallId.set(callId, index);
   }
@@ -2316,7 +2329,10 @@ function runDedupPass(input: {
     const after = estimateMessageTokens(replacement);
     if (after >= before) continue;
     const record = transformed[index] as MessageRecord;
-    const refCallId = folded.refs.get(original.callId);
+    const targets = folded.refs.get(original.callId);
+    const refCallId = targets !== undefined && targets.size > 0
+      ? [...targets][0]
+      : undefined;
     candidates.push({
       index,
       callId: original.callId,
@@ -2330,7 +2346,9 @@ function runDedupPass(input: {
     });
     savedTokens += before - after;
     effectiveTokens -= before - after;
-    if (refCallId !== undefined) input.dedupProtected.add(refCallId);
+    if (targets !== undefined) {
+      for (const target of targets) input.dedupProtected.add(target);
+    }
   }
   if (candidates.length > 0) {
     // Record folds in the planning manifest so later lossy passes skip them
@@ -2338,6 +2356,14 @@ function runDedupPass(input: {
     applyPruneCandidates(transformed, pruneManifest, candidates, candidates.length, effectiveTokens, undefined);
   }
   return { savedTokens, prunedToolResults: candidates.length, effectiveTokens, candidates };
+}
+
+/** True when every content block of a message is a text block. */
+function isTextOnlyContent(message: AgentMessage): boolean {
+  const content = (message as MessageRecord).content;
+  if (typeof content === "string") return true;
+  if (!Array.isArray(content)) return false;
+  return content.every((block) => !!block && typeof block === "object" && block.type === "text");
 }
 
 function isProtectedToolResult(message: AgentMessage): boolean {
@@ -2513,8 +2539,10 @@ async function upgradeNewPrunesWithSpill(
     if (!entry || entry.spillPath !== undefined) continue;
     // Lossless folds carry no recoverability need — the folded text IS the
     // full content, reversibly so. Spilling it would replace a complete
-    // (folded) payload with a 1.5K preview for no gain.
-    if ((entry.level ?? "pruned") === "lossless") continue;
+    // (folded) payload with a 1.5K preview for no gain. Dedup pointers name an
+    // in-context original; spilling would replace the pointer with a preview
+    // after the cache gate already approved pointer economics.
+    if ((entry.level ?? "pruned") === "lossless" || (entry.level ?? "pruned") === "dedup") continue;
     const original = originalsByCallId.get(callId);
     if (!original) continue;
     const text = extractTextContent(original);

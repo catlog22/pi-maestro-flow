@@ -4127,6 +4127,70 @@ test("cross-turn dedup folds a repeated read and protects its reference", () => 
   assert.ok(!manifest.has("call-a"), "the referenced original is never pruned");
 });
 
+test("cross-turn dedup skips mixed image/text outputs", () => {
+  const extractText = (message: unknown): string => {
+    const content = (message as { content?: unknown }).content;
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
+    return content
+      .filter((block): block is { text?: string } => !!block && typeof block === "object")
+      .map((block) => (typeof block.text === "string" ? block.text : ""))
+      .join("");
+  };
+  const bigBlock = Array.from({ length: 30 }, (_, i) => `line-${i} ${`payload-${i}`.padEnd(30, "x")}`).join("\n");
+  const mixed = {
+    role: "toolResult",
+    toolCallId: "call-b",
+    toolName: "read",
+    content: [
+      { type: "text", text: bigBlock },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "AAA" } },
+    ],
+    isError: false,
+  };
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call-a", name: "read", arguments: {} }],
+    usage: {
+      input: 160_000,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 160_000,
+      cost: { total: 0 },
+    },
+  }, {
+    role: "toolResult",
+    toolCallId: "call-a",
+    toolName: "read",
+    content: [{ type: "text", text: bigBlock }],
+    isError: false,
+  }, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call-b", name: "read", arguments: {} }],
+  }, mixed, {
+    role: "user",
+    content: [{ type: "text", text: "continue" }],
+  }, {
+    role: "assistant",
+    content: [{ type: "text", text: "ok" }],
+  }] as never;
+  const manifest = new Map();
+  applyContextPressurePolicy(messages, 200_000, {
+    enabled: true,
+    reserveTokens: 100,
+    keepRecentTokens: 10,
+    soft: {
+      ...DEFAULT_SOFT_COMPACTION,
+      lossless: { enabled: false },
+      cache: { enabled: false },
+      crossTurnDedup: { enabled: true, minLines: 3, minChars: 40 },
+    },
+  }, manifest);
+  assert.ok(!manifest.has("call-b"), "mixed image/text output is never dedup-folded");
+  assert.equal((mixed.content as Array<{ type: string }>)[1].type, "image", "image block untouched");
+});
+
 test("cache gate still prunes when the run pays for itself", () => {
   // A dense tool loop reclaims ~0.66 tokens per invalidated token — well past
   // the floor — so gating must not suppress it.

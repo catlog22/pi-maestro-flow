@@ -28,8 +28,8 @@ export interface DedupBlock {
 
 export interface DedupResult {
   blocks: DedupBlock[];
-  /** folded callId -> referenced callId (the in-context original). */
-  refs: Map<string, string>;
+  /** folded callId -> referenced callIds (each target stays in context). */
+  refs: Map<string, Set<string>>;
   stats: { spansFolded: number; linesRemoved: number; charsRemoved: number };
 }
 
@@ -39,7 +39,12 @@ const LINENO_PATTERN = /^([1-9]\d*)(:|\t)(.*)$/;
 function numAndKey(line: string): [number | null, string, string] {
   const m = LINENO_PATTERN.exec(line);
   if (m === null) return [null, line, line];
-  return [Number(m[1]), m[2] + m[3], m[3]];
+  // JavaScript Number cannot represent all integers upstream Python handles.
+  // An unsafe prefix is treated as ordinary text: it can only fold on an exact
+  // match (delta 0), never under a computed offset that could mis-reconstruct.
+  const numeric = Number(m[1]);
+  if (!Number.isSafeInteger(numeric)) return [null, line, line];
+  return [numeric, m[2] + m[3], m[3]];
 }
 
 function isTrivial(line: string): boolean {
@@ -139,7 +144,7 @@ export function dedupBlocks(
     const corpus: Array<Array<string | null>> = [];
     const anchorIndex = new Map<string, Array<[number, number]>>();
     const outBlocks: DedupBlock[] = [];
-    const refs = new Map<string, string>();
+    const refs = new Map<string, Set<string>>();
 
     for (const block of blocks) {
       const lines = block.text.split("\n");
@@ -162,13 +167,24 @@ export function dedupBlocks(
           const spanText = span.join("\n");
           if (spanText.length >= minChars) {
             const refCallId = blocks[m.blockPos].callId;
+            // A folded block must reference exactly one target: protecting a
+            // single callId keeps every pointer's original in context. A span
+            // that would introduce a second target is left verbatim instead.
+            const targets = refs.get(block.callId);
+            if (targets !== undefined && !targets.has(refCallId)) {
+              out.push(lines[i]);
+              verbatim.push(lines[i]);
+              i++;
+              continue;
+            }
             const ptr = pointerText(span, refCallId, m.delta);
             out.push(ptr);
             for (let n = 0; n < m.length; n++) verbatim.push(null);
             stats.spansFolded++;
             stats.linesRemoved += m.length;
             stats.charsRemoved += spanText.length - ptr.length;
-            refs.set(block.callId, refCallId);
+            if (targets === undefined) refs.set(block.callId, new Set([refCallId]));
+            else targets.add(refCallId);
             i += m.length;
             continue;
           }
