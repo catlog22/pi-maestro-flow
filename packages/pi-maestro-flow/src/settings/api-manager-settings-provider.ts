@@ -148,7 +148,7 @@ function action(
     merge: "provider-defined",
     activation: "live",
     sensitivity: "private",
-    reversibility: "full",
+    reversibility: "none",
     editor: { kind: "action", actionId: key },
   };
 }

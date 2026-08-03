@@ -532,3 +532,54 @@ test("Flow provider invokes plugin-owned actions and participates in discovery",
   assert.equal(announcements.length, 1);
   assert.equal((announcements[0] as { requestId: string }).requestId, "request");
 });
+
+test("Flow provider round-trips the registered soft compaction fields", async () => {
+  const { provider, context, globalSettings } = fixture();
+  const baseline = await provider.read({ context });
+  const changes = [
+    { operation: "set" as const, key: "compaction.soft.cache.minRatioRange", scope: "global" as const, value: [0.2, 0.6] },
+    { operation: "set" as const, key: "compaction.soft.timeBased.enabled", scope: "global" as const, value: true },
+    { operation: "set" as const, key: "compaction.soft.timeBased.gapThresholdMinutes", scope: "global" as const, value: 90 },
+    { operation: "set" as const, key: "compaction.soft.relevance.enabled", scope: "global" as const, value: true },
+    { operation: "set" as const, key: "compaction.soft.relevance.mode", scope: "global" as const, value: "keyword" },
+    { operation: "set" as const, key: "compaction.soft.crossTurnDedup.minLines", scope: "global" as const, value: 5 },
+    { operation: "set" as const, key: "compaction.soft.lossless.enabled", scope: "global" as const, value: false },
+  ];
+  const prepared = await provider.prepare!({ context, transactionId: "soft", changes, expectedRevisions: baseline.configured.resources });
+  assert.equal(prepared.prepared, true);
+  await provider.commit!({ context, transactionId: "soft", prepareToken: prepared.prepareToken! });
+
+  const settings = JSON.parse(fs.readFileSync(globalSettings, "utf8"));
+  assert.deepEqual(settings.compaction.soft.cache.minRatioRange, [0.2, 0.6]);
+  assert.equal(settings.compaction.soft.timeBased.enabled, true);
+  assert.equal(settings.compaction.soft.timeBased.gapThresholdMinutes, 90);
+  assert.equal(settings.compaction.soft.relevance.mode, "keyword");
+  assert.equal(settings.compaction.soft.crossTurnDedup.minLines, 5);
+  assert.equal(settings.compaction.soft.lossless.enabled, false);
+
+  const snapshot = await provider.read({ context });
+  const effective = snapshot.effective.values;
+  assert.deepEqual(effective.find((entry) => entry.key === "compaction.soft.cache.minRatioRange")?.value, [0.2, 0.6]);
+  assert.equal(effective.find((entry) => entry.key === "compaction.soft.timeBased.enabled")?.value, true);
+  assert.equal(effective.find((entry) => entry.key === "compaction.soft.timeBased.gapThresholdMinutes")?.value, 90);
+  assert.equal(effective.find((entry) => entry.key === "compaction.soft.relevance.mode")?.value, "keyword");
+  assert.equal(effective.find((entry) => entry.key === "compaction.soft.lossless.enabled")?.value, false);
+  const configured = snapshot.configured.values.filter((entry) => entry.key === "compaction.soft.timeBased.enabled");
+  assert.equal(configured[0]?.state, "set");
+  assert.equal(configured[0]?.scope, "global");
+});
+
+test("Flow provider rejects invalid values for registered compaction fields", async () => {
+  const { provider, context } = fixture();
+  const baseline = await provider.read({ context });
+  const invalidChanges = [
+    { operation: "set" as const, key: "compaction.soft.cache.minRatioRange", scope: "global" as const, value: [0.6, 0.2] },
+    { operation: "set" as const, key: "compaction.model", scope: "global" as const, value: "   " },
+    { operation: "set" as const, key: "compaction.reserveTokens", scope: "global" as const, value: 1.5 },
+    { operation: "set" as const, key: "compaction.soft.crossTurnDedup.minLines", scope: "global" as const, value: 0 },
+    { operation: "set" as const, key: "compaction.soft.relevance.mode", scope: "global" as const, value: "tfidf" },
+  ];
+  const prepared = await provider.prepare!({ context, transactionId: "invalid", changes: invalidChanges, expectedRevisions: baseline.configured.resources });
+  assert.equal(prepared.prepared, false);
+  assert.ok(prepared.validation.issues.length >= invalidChanges.length);
+});

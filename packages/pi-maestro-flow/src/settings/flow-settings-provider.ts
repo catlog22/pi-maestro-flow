@@ -29,7 +29,9 @@ import {
   type CompactionConfigPatch,
   type SoftCompactionConfigPatch,
 } from "../compaction/compaction-settings.ts";
+import { DEFAULT_DEDUP_MIN_CHARS, DEFAULT_DEDUP_MIN_LINES } from "../compaction/dedup.ts";
 import { lockSettingsResource, lockSettingsResourceSync } from "./resource-lock.ts";
+import { fsyncDirectorySync } from "./durable-write.ts";
 import {
   getGlobalModelFailoverPath,
   getProjectModelFailoverPath,
@@ -141,6 +143,17 @@ const BASE_CATALOGS = {
     "flow.compaction.soft.velocity.epochsToCritical": "Epochs to critical",
     "flow.compaction.soft.velocity.minFullness": "Velocity minimum fullness",
     "flow.compaction.soft.cache.enabled": "Protect cached prefixes",
+    "flow.compaction.soft.cache.minRatioRange": "Cache savings gate range",
+    "flow.compaction.soft.timeBased.enabled": "Enable time-based gate bypass",
+    "flow.compaction.soft.timeBased.gapThresholdMinutes": "Cache-cold gap threshold (minutes)",
+    "flow.compaction.soft.relevance.enabled": "Enable relevance ordering",
+    "flow.compaction.soft.relevance.mode": "Relevance mode",
+    "flow.compaction.soft.crossTurnDedup.enabled": "Enable cross-turn deduplication",
+    "flow.compaction.soft.crossTurnDedup.minLines": "Dedup minimum lines",
+    "flow.compaction.soft.crossTurnDedup.minChars": "Dedup minimum characters",
+    "flow.compaction.soft.lossless.enabled": "Enable lossless folding",
+    "flow.option.relevanceMode.bm25": "BM25 lexical ranking",
+    "flow.option.relevanceMode.keyword": "Keyword scoring",
     "flow.failover.enabled": "Enable automatic model failover",
     "flow.failover.fallbackModels": "Fallback chains",
     "flow.action.compaction": "Open compaction control center",
@@ -178,6 +191,17 @@ const BASE_CATALOGS = {
     "flow.compaction.soft.velocity.epochsToCritical": "达到临界的轮数",
     "flow.compaction.soft.velocity.minFullness": "速度检测最小充满度",
     "flow.compaction.soft.cache.enabled": "保护缓存前缀",
+    "flow.compaction.soft.cache.minRatioRange": "缓存节省门限区间",
+    "flow.compaction.soft.timeBased.enabled": "启用基于时间的门限绕过",
+    "flow.compaction.soft.timeBased.gapThresholdMinutes": "缓存冷门限（分钟）",
+    "flow.compaction.soft.relevance.enabled": "启用相关性排序",
+    "flow.compaction.soft.relevance.mode": "相关性模式",
+    "flow.compaction.soft.crossTurnDedup.enabled": "启用跨轮去重",
+    "flow.compaction.soft.crossTurnDedup.minLines": "去重最小行数",
+    "flow.compaction.soft.crossTurnDedup.minChars": "去重最小字符数",
+    "flow.compaction.soft.lossless.enabled": "启用无损折叠",
+    "flow.option.relevanceMode.bm25": "BM25 词法排序",
+    "flow.option.relevanceMode.keyword": "关键词评分",
     "flow.failover.enabled": "启用模型自动故障转移",
     "flow.failover.fallbackModels": "回退链",
     "flow.action.compaction": "打开压缩控制中心",
@@ -424,6 +448,18 @@ function definitions(): SettingDefinition[] {
     setting("compaction.soft.velocity.epochsToCritical", "flow.group.compactionSoft", "flow.compaction.soft.velocity.epochsToCritical", "integer", 3, "next-turn", { min: 1, step: 1 }),
     setting("compaction.soft.velocity.minFullness", "flow.group.compactionSoft", "flow.compaction.soft.velocity.minFullness", "number", 0.7, "next-turn", { min: 0.01, max: 0.99, step: 0.01 }),
     setting("compaction.soft.cache.enabled", "flow.group.compactionSoft", "flow.compaction.soft.cache.enabled", "boolean", true, "next-turn"),
+    setting("compaction.soft.cache.minRatioRange", "flow.group.compactionSoft", "flow.compaction.soft.cache.minRatioRange", "json", [0.1, 0.5], "next-turn", { multiline: true }),
+    setting("compaction.soft.timeBased.enabled", "flow.group.compactionSoft", "flow.compaction.soft.timeBased.enabled", "boolean", false, "next-turn"),
+    setting("compaction.soft.timeBased.gapThresholdMinutes", "flow.group.compactionSoft", "flow.compaction.soft.timeBased.gapThresholdMinutes", "integer", 60, "next-turn", { min: 1, step: 1 }),
+    setting("compaction.soft.relevance.enabled", "flow.group.compactionSoft", "flow.compaction.soft.relevance.enabled", "boolean", false, "next-turn"),
+    setting("compaction.soft.relevance.mode", "flow.group.compactionSoft", "flow.compaction.soft.relevance.mode", "enum", "bm25", "next-turn", { options: [
+      { value: "bm25", labelKey: "flow.option.relevanceMode.bm25" },
+      { value: "keyword", labelKey: "flow.option.relevanceMode.keyword" },
+    ] }),
+    setting("compaction.soft.crossTurnDedup.enabled", "flow.group.compactionSoft", "flow.compaction.soft.crossTurnDedup.enabled", "boolean", false, "next-turn"),
+    setting("compaction.soft.crossTurnDedup.minLines", "flow.group.compactionSoft", "flow.compaction.soft.crossTurnDedup.minLines", "integer", DEFAULT_DEDUP_MIN_LINES, "next-turn", { min: 1, step: 1 }),
+    setting("compaction.soft.crossTurnDedup.minChars", "flow.group.compactionSoft", "flow.compaction.soft.crossTurnDedup.minChars", "integer", DEFAULT_DEDUP_MIN_CHARS, "next-turn", { min: 1, step: 1 }),
+    setting("compaction.soft.lossless.enabled", "flow.group.compactionSoft", "flow.compaction.soft.lossless.enabled", "boolean", true, "next-turn"),
     setting("failover.enabled", "flow.group.failover", "flow.failover.enabled", "boolean", false, "next-invocation"),
     setting("failover.fallbackModels", "flow.group.failover", "flow.failover.fallbackModels", "json", {}, "next-invocation", { multiline: true }, "deep-merge"),
   ];
@@ -437,7 +473,7 @@ function definitions(): SettingDefinition[] {
     merge: "provider-defined",
     activation: "live",
     sensitivity: "private",
-    reversibility: "full",
+    reversibility: "none",
     editor: {
       kind: "action",
       actionId: key,
@@ -455,7 +491,7 @@ function setting(
   key: string,
   group: string,
   labelKey: string,
-  kind: "boolean" | "integer" | "number" | "model" | "json",
+  kind: SettingDefinition["editor"]["kind"],
   defaultValue: JsonValue,
   activation: SettingsActivation,
   editor: Omit<SettingDefinition["editor"], "kind"> = {},
@@ -601,8 +637,15 @@ function validValue(key: string, value: JsonValue): boolean {
     return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= MAX_RESERVE_TOKENS;
   }
   if (key.endsWith("epochsToCritical")) return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
-  if (key === "compaction.model") return value === null || (typeof value === "string" && (value.trim() === "" || value.includes("/")));
+  if (key === "compaction.model") return value === null || (typeof value === "string" && value.trim() !== "" && value.includes("/"));
   if (key.endsWith("Ratio") || key.endsWith("minFullness")) return typeof value === "number" && Number.isFinite(value) && value > 0 && value < 1;
+  if (key === "compaction.soft.cache.minRatioRange") return isRatioRange(value);
+  if (key === "compaction.soft.timeBased.gapThresholdMinutes"
+    || key === "compaction.soft.crossTurnDedup.minLines"
+    || key === "compaction.soft.crossTurnDedup.minChars") {
+    return positiveInt(value) !== undefined;
+  }
+  if (key === "compaction.soft.relevance.mode") return value === "bm25" || value === "keyword";
   if (key === "failover.fallbackModels") return isFallbackMap(value);
   return false;
 }
@@ -672,9 +715,9 @@ function readCompactionPatch(root: Record<string, unknown>): CompactionConfigPat
   const cacheRaw = isRecord(softRaw.cache) ? softRaw.cache : {};
   const patch: CompactionConfigPatch = {};
   if (typeof raw.enabled === "boolean") patch.enabled = raw.enabled;
-  const reserve = positiveNumber(hard.reserveTokens) ?? positiveNumber(raw.reserveTokens);
+  const reserve = positiveInt(hard.reserveTokens) ?? positiveInt(raw.reserveTokens);
   if (reserve !== undefined && reserve <= MAX_RESERVE_TOKENS) patch.reserveTokens = reserve;
-  const keepRecent = positiveNumber(hard.keepRecentTokens) ?? positiveNumber(raw.keepRecentTokens);
+  const keepRecent = positiveInt(hard.keepRecentTokens) ?? positiveInt(raw.keepRecentTokens);
   if (keepRecent !== undefined) patch.keepRecentTokens = keepRecent;
   if (typeof raw.model === "string" && raw.model.trim()) patch.model = raw.model.trim();
   const soft: SoftCompactionConfigPatch = {};
@@ -687,7 +730,31 @@ function readCompactionPatch(root: Record<string, unknown>): CompactionConfigPat
   if (Number.isSafeInteger(velocityRaw.epochsToCritical) && (velocityRaw.epochsToCritical as number) > 0) velocity.epochsToCritical = velocityRaw.epochsToCritical as number;
   if (ratio(velocityRaw.minFullness) !== undefined) velocity.minFullness = velocityRaw.minFullness as number;
   if (Object.keys(velocity).length) soft.velocity = velocity;
-  if (typeof cacheRaw.enabled === "boolean") soft.cache = { enabled: cacheRaw.enabled };
+  const cache: NonNullable<SoftCompactionConfigPatch["cache"]> = {};
+  if (typeof cacheRaw.enabled === "boolean") cache.enabled = cacheRaw.enabled;
+  if (isRatioRange(cacheRaw.minRatioRange)) cache.minRatioRange = cacheRaw.minRatioRange as [number, number];
+  if (Object.keys(cache).length) soft.cache = cache;
+  const timeBasedRaw = isRecord(softRaw.timeBased) ? softRaw.timeBased : {};
+  const timeBased: NonNullable<SoftCompactionConfigPatch["timeBased"]> = {};
+  if (typeof timeBasedRaw.enabled === "boolean") timeBased.enabled = timeBasedRaw.enabled;
+  const gapThresholdMinutes = positiveInt(timeBasedRaw.gapThresholdMinutes);
+  if (gapThresholdMinutes !== undefined) timeBased.gapThresholdMinutes = gapThresholdMinutes;
+  if (Object.keys(timeBased).length) soft.timeBased = timeBased;
+  const relevanceRaw = isRecord(softRaw.relevance) ? softRaw.relevance : {};
+  const relevance: NonNullable<SoftCompactionConfigPatch["relevance"]> = {};
+  if (typeof relevanceRaw.enabled === "boolean") relevance.enabled = relevanceRaw.enabled;
+  if (relevanceRaw.mode === "bm25" || relevanceRaw.mode === "keyword") relevance.mode = relevanceRaw.mode;
+  if (Object.keys(relevance).length) soft.relevance = relevance;
+  const dedupRaw = isRecord(softRaw.crossTurnDedup) ? softRaw.crossTurnDedup : {};
+  const dedup: NonNullable<SoftCompactionConfigPatch["crossTurnDedup"]> = {};
+  if (typeof dedupRaw.enabled === "boolean") dedup.enabled = dedupRaw.enabled;
+  const dedupMinLines = positiveInt(dedupRaw.minLines);
+  if (dedupMinLines !== undefined) dedup.minLines = dedupMinLines;
+  const dedupMinChars = positiveInt(dedupRaw.minChars);
+  if (dedupMinChars !== undefined) dedup.minChars = dedupMinChars;
+  if (Object.keys(dedup).length) soft.crossTurnDedup = dedup;
+  const losslessRaw = isRecord(softRaw.lossless) ? softRaw.lossless : {};
+  if (typeof losslessRaw.enabled === "boolean") soft.lossless = { enabled: losslessRaw.enabled };
   if (Object.keys(soft).length) patch.soft = soft;
   return patch;
 }
@@ -796,6 +863,7 @@ function replaceFile(
   if (operations.platform === "win32") recoverInterruptedReplacement(destination, operations);
   try {
     operations.renameSync(source, destination);
+    fsyncDirectorySync(path.dirname(destination));
   } catch (error) {
     const code = isRecord(error) && typeof error.code === "string" ? error.code : "";
     if (operations.platform === "win32" && ["EEXIST", "EPERM", "ENOTEMPTY"].includes(code)) {
@@ -837,6 +905,7 @@ function replaceFileOnWindows(
     fs.rmSync(backupPath, { force: true });
     backupCreated = false;
     fs.rmSync(journalPath, { force: true });
+    fsyncDirectorySync(path.dirname(destination));
   } catch (error) {
     if (!backupCreated) {
       try { fs.rmSync(journalPath, { force: true }); } catch { /* best effort */ }
@@ -928,6 +997,19 @@ function toJsonValue(value: unknown): JsonValue {
 
 function positiveNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function positiveInt(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function isRatioRange(value: unknown): boolean {
+  return Array.isArray(value)
+    && value.length === 2
+    && value.every((part) => typeof part === "number" && Number.isFinite(part))
+    && (value[0] as number) >= 0
+    && (value[0] as number) < (value[1] as number)
+    && (value[1] as number) <= 1;
 }
 
 function ratio(value: unknown): number | undefined {

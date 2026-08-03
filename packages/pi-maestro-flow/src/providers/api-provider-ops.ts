@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { fsyncDirectory } from "../settings/durable-write.ts";
 import {
   getAgentDir,
   SettingsManager,
@@ -482,9 +483,11 @@ export async function writeModelsRoot(
   try {
     handle = await open(temporaryPath, "wx", 0o600);
     await handle.writeFile(`${JSON.stringify(root, null, 2)}\n`, "utf8");
+    await handle.sync();
     await handle.close();
     handle = undefined;
     await rename(temporaryPath, modelsPath);
+    await fsyncDirectory(dirname(modelsPath));
   } finally {
     await handle?.close();
     try {

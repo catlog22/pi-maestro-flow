@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { lockSettingsResourceSync } from "../settings/resource-lock.ts";
+import { writeFileDurableSync } from "../settings/durable-write.ts";
 import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
 import {
   analyzeAttachedImage,
@@ -176,14 +177,7 @@ export function saveProjectModelFailoverConfig(cwd: string, config: ModelFailove
       fallbackModels,
     };
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-    try {
-      fs.writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, "utf8");
-      fs.renameSync(temporary, filePath);
-    } catch (error) {
-      try { fs.rmSync(temporary, { force: true }); } catch { /* best effort */ }
-      throw error;
-    }
+    writeFileDurableSync(filePath, `${JSON.stringify(next, null, 2)}\n`);
   } finally {
     release();
   }

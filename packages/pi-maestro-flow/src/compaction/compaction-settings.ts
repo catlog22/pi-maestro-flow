@@ -1,8 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { lockSettingsResource } from "../settings/resource-lock.ts";
+import { fsyncDirectory } from "../settings/durable-write.ts";
 import { effectiveReserveTokens } from "./compaction-threshold.ts";
 import type { RelevanceMode } from "./relevance.ts";
 import { DEFAULT_DEDUP_MIN_CHARS, DEFAULT_DEDUP_MIN_LINES } from "./dedup.ts";
@@ -232,7 +233,7 @@ function readRawCompaction(path: string): CompactionConfigPatch {
     const hard = isRecord(c.hard) ? c.hard : undefined;
     const rt = boundedReserveTokens(hard?.reserveTokens) ?? boundedReserveTokens(c.reserveTokens);
     if (rt !== undefined) patch.reserveTokens = rt;
-    const kr = positiveNumber(hard?.keepRecentTokens) ?? positiveNumber(c.keepRecentTokens);
+    const kr = positiveInt(hard?.keepRecentTokens) ?? positiveInt(c.keepRecentTokens);
     if (kr !== undefined) patch.keepRecentTokens = kr;
     if (typeof c.model === "string" && c.model.trim().length > 0) patch.model = c.model.trim();
     const soft = readRawSoft(c.soft);
@@ -770,9 +771,16 @@ async function atomicWriteJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporaryPath = `${path}.${process.pid}.${Date.now()}.tmp`;
   const backupPath = replacementBackupPath(path);
-  await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  const temporaryHandle = await open(temporaryPath, "wx", 0o600);
+  try {
+    await temporaryHandle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await temporaryHandle.sync();
+  } finally {
+    await temporaryHandle.close();
+  }
   try {
     await fileOperations.rename(temporaryPath, path);
+    await fsyncDirectory(dirname(path));
     return;
   } catch (error) {
     const code = isRecord(error) && typeof error.code === "string" ? error.code : "";
@@ -809,6 +817,7 @@ async function atomicWriteJson(path: string, value: unknown): Promise<void> {
   }
 
   await fileOperations.unlink(backupPath);
+  await fsyncDirectory(dirname(path));
 }
 
 function positiveNumber(value: unknown): number | undefined {
@@ -825,7 +834,7 @@ function positiveInt(value: unknown): number | undefined {
  * silently disabling compaction on every model.
  */
 function boundedReserveTokens(value: unknown): number | undefined {
-  const rt = positiveNumber(value);
+  const rt = positiveInt(value);
   return rt !== undefined && rt <= MAX_RESERVE_TOKENS ? rt : undefined;
 }
 

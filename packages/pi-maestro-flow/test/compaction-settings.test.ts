@@ -687,3 +687,20 @@ async function writeSettings(directory: string, value: unknown): Promise<void> {
 async function readJson(path: string): Promise<unknown> {
   return JSON.parse(await readFile(path, "utf8"));
 }
+
+test("fractional token budgets are treated as absent and fall back to defaults", async () => {
+  const fixture = await createFixture();
+  try {
+    await writeSettings(join(fixture.projectDir, ".pi"), {
+      compaction: { hard: { reserveTokens: 1.5 }, keepRecentTokens: 1000.5 },
+    });
+    const scoped = readScopeCompaction("project", fixture.projectDir);
+    assert.equal(scoped.reserveTokens, undefined);
+    assert.equal(scoped.keepRecentTokens, undefined);
+    const effective = resolveEffectiveCompactionSettings({}, scoped);
+    assert.equal(effective.reserveTokens, DEFAULT_RESERVE_TOKENS);
+    assert.equal(effective.keepRecentTokens, DEFAULT_KEEP_RECENT_TOKENS);
+  } finally {
+    await fixture.dispose();
+  }
+});
