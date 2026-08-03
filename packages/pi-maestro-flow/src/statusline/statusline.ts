@@ -544,7 +544,10 @@ export function installStatusline(
 		if (ctx.model?.id) rs.model = ctx.model.id;
 
 		const usage = ctx.getContextUsage?.();
-		if (usage?.percent != null) rs.contextPercent = usage.percent;
+		// A null percent (no usable usage since the last compaction) means the
+		// size is genuinely unknown — clear the stale bar instead of showing a
+		// pre-compaction value that reads as "compression never happened".
+		if (usage) rs.contextPercent = usage.percent ?? null;
 
 		// Session resume/switch may start with an existing branch.
 		rebuildTokenUsage(ctx);
@@ -610,17 +613,13 @@ export function installStatusline(
 
 	pi.on("turn_end", (_event, ctx) => {
 		const usage = ctx.getContextUsage?.();
-		if (usage?.percent != null) {
-			rs.contextPercent = usage.percent;
-		}
+		if (usage) rs.contextPercent = usage.percent ?? null;
 		invalidate();
 	});
 
 	pi.on("tool_execution_end", (_event, ctx) => {
 		const usage = ctx.getContextUsage?.();
-		if (usage?.percent != null) {
-			rs.contextPercent = usage.percent;
-		}
+		if (usage) rs.contextPercent = usage.percent ?? null;
 		// Debounced git refresh after tool completes (may have edited files)
 		scheduleGitRefresh(footerGeneration);
 		invalidate();
@@ -632,9 +631,7 @@ export function installStatusline(
 		addTokenUsage(event.message as MessageWithUsage | undefined);
 
 		const usage = ctx.getContextUsage?.();
-		if (usage?.percent != null) {
-			rs.contextPercent = usage.percent;
-		}
+		if (usage) rs.contextPercent = usage.percent ?? null;
 		invalidate();
 	});
 }

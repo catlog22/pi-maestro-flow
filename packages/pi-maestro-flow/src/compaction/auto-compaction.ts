@@ -13,6 +13,7 @@ import {
   type SoftCompactionSettings,
 } from "./compaction-settings.ts";
 import {
+  COMPACTION_LEASE_TIMEOUT_MS,
   type CompactionArbiter,
   type CompactionLease,
   type CompactionOwner,
@@ -243,7 +244,8 @@ export interface AutoCompactionState {
   pendingIntent?: PendingCompactionIntent;
   pendingOutputLimitIntent?: PendingOutputLimitIntent;
   lastTriggerKey?: string;
-  internalsWarningShown: boolean;
+  /** Turn at which the last internals-resolution warning was shown; undefined re-arms it. */
+  internalsWarningTurn?: number;
   lastNoCompactableKey?: string;
   pruneManifest: Map<string, PruneManifestEntry>;
   restoredPrunes: Map<string, PersistedPruneEntry>;
@@ -328,7 +330,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     running: false,
     generation: 0,
     nextOwner: 0,
-    internalsWarningShown: false,
+    internalsWarningTurn: undefined,
     pruneManifest: new Map(),
     restoredPrunes: new Map(),
     persistedPrunes: new Map(),
@@ -421,7 +423,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     state.lastNoCompactableKey = undefined;
     state.highPressureDroppedTurns = 0;
     state.notifiedPressureKeys.clear();
-    state.internalsWarningShown = false;
+    state.internalsWarningTurn = undefined;
   }
   function resetCycleState(): void {
     state.velocityTracker = EMPTY_VELOCITY_TRACKER;
@@ -570,12 +572,15 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       if (pressure.action !== "compact") {
         state.lastNoCompactableKey = undefined;
         state.lastTriggerKey = undefined;
-        state.highPressureDroppedTurns = 0;
         // Escalation: pruning ran (or found nothing) yet the estimate still sits
         // within 3% of the hard trigger. Queue the intent now instead of letting
         // the next request run against a clamped output budget — the prune band
         // is already pulled down to the truncation point when the output ceiling
         // binds, so reaching this window means pruning cannot relieve pressure.
+        // The deferral counter must survive this path: an escalated intent is
+        // still a live intent, so zeroing the counter on every evaluation here
+        // would defer compaction forever — the 2-turn threshold on agent settle
+        // could never be reached.
         const escalate = pressure.action === "prune"
           && pressure.estimatedTokens >= pressure.thresholdTokens
             - Math.floor(capacityWindow * OUTPUT_CLAMP_BAND_MARGIN_RATIO);
@@ -607,6 +612,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         } else {
           state.pendingIntent = undefined;
           persistPendingIntent(pi, state);
+          // Pressure is genuinely relieved (intent dropped): reset the
+          // consecutive-defer counter so a later fresh spike starts clean.
+          state.highPressureDroppedTurns = 0;
         }
         return pressure.prunedToolResults > 0 ? pressure.messages : undefined;
       }
@@ -673,11 +681,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       return;
     }
 
-    const recoverBeforeSubmission = (error: unknown, message: string) => {
+    const recoverBeforeSubmission = (error: unknown, message: string, options: { notify: boolean } = { notify: true }) => {
       if (intent.generation !== state.generation) return;
       state.breaker = recordCompactionFailure(state.breaker, state.turnCount);
       clearPressureStatus(ctx);
-      ctx.ui.notify(`${message}: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      if (options.notify) ctx.ui.notify(`${message}: ${error instanceof Error ? error.message : String(error)}`, "warning");
       clearPending();
       if (!intent.contextExhausted || state.breaker.trippedAtTurn !== undefined || ctx.hasPendingMessages?.()) return;
       try {
@@ -690,9 +698,16 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     let internals: PiCompactionInternals;
     try {
       internals = await loadInternals();
+      state.internalsWarningTurn = undefined;
     } catch (error) {
-      if (!state.internalsWarningShown) state.internalsWarningShown = true;
-      recoverBeforeSubmission(error, "Mid-turn compaction disabled");
+      // Retry-able and rate-limited: the loader cache clears on failure so a
+      // transient resolution error heals on a later settle, and the warning
+      // re-arms after the breaker cooldown instead of going permanently silent
+      // after a single one-shot notice.
+      const shouldWarn = state.internalsWarningTurn === undefined
+        || state.turnCount - state.internalsWarningTurn >= COMPACTION_BREAKER_COOLDOWN_TURNS;
+      if (shouldWarn) state.internalsWarningTurn = state.turnCount;
+      recoverBeforeSubmission(error, "Mid-turn compaction disabled", { notify: shouldWarn });
       return;
     }
     if (intent.generation !== state.generation || state.running) return;
@@ -750,7 +765,44 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     state.activeLease = lease;
     const owner = ++state.nextOwner;
     state.activeOwner = owner;
+    let watchdog: NodeJS.Timeout | undefined;
+    const disarmWatchdog = () => {
+      if (watchdog) {
+        clearTimeout(watchdog);
+        watchdog = undefined;
+      }
+    };
+    const armWatchdog = () => {
+      // The arbiter lease expires on its own, but `running` is independent of
+      // it: if the host's compact() never settles (swallowed call, hung
+      // summarization) neither onComplete nor onError fires and the lock sticks,
+      // silently disabling compaction AND pruning for the rest of the session.
+      // Mirror the lease timeout so a legitimately long summarization cannot trip.
+      watchdog = setTimeout(() => {
+        if (state.activeOwner !== owner) return;
+        state.breaker = recordCompactionFailure(state.breaker, state.turnCount);
+        state.running = false;
+        state.activeOwner = undefined;
+        state.activeRequestOwner = undefined;
+        state.lastTriggerKey = undefined;
+        state.activeLease?.release();
+        state.activeLease = undefined;
+        clearPressureStatus(ctx);
+        ctx.ui.notify(
+          "Mid-turn compaction timed out; it will retry at the next pressure evaluation.",
+          "warning",
+        );
+        if (!intent.contextExhausted || state.breaker.trippedAtTurn !== undefined || ctx.hasPendingMessages?.()) return;
+        try {
+          pi.sendUserMessage(COMPACTION_RETRY_PROMPT, { deliverAs: "followUp" });
+        } catch (recoveryError) {
+          ctx.ui.notify(`Mid-turn compaction recovery failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`, "error");
+        }
+      }, COMPACTION_LEASE_TIMEOUT_MS);
+      watchdog.unref?.();
+    };
     const failCompaction = (error: unknown) => {
+      disarmWatchdog();
       if (intent.generation !== state.generation || state.activeOwner !== owner) return;
       state.breaker = recordCompactionFailure(state.breaker, state.turnCount);
       state.running = false;
@@ -792,6 +844,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       ctx.compact({
         customInstructions: state.activeLease?.tagInstructions(instructions) ?? instructions,
         onComplete: () => {
+          disarmWatchdog();
           if (state.activeOwner !== owner) return;
           state.breaker = resetCompactionBreaker();
           state.breakerNotified = false;
@@ -811,6 +864,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         },
         onError: failCompaction,
       });
+      armWatchdog();
     } catch (error) {
       failCompaction(error);
     }
@@ -888,8 +942,16 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     state.activeLease = lease;
     const owner = ++state.nextOwner;
     state.activeOwner = owner;
+    let watchdog: NodeJS.Timeout | undefined;
+    const disarmWatchdog = () => {
+      if (watchdog) {
+        clearTimeout(watchdog);
+        watchdog = undefined;
+      }
+    };
     const instructions = buildOutputLimitInstructions(intent.usage, instructionReserve);
     const failOutputLimit = (error: unknown) => {
+      disarmWatchdog();
       if (state.activeOwner !== owner) return;
       state.running = false;
       state.activeOwner = undefined;
@@ -910,6 +972,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       ctx.compact({
         customInstructions: lease?.tagInstructions(instructions) ?? instructions,
         onComplete: () => {
+          disarmWatchdog();
           if (state.activeOwner !== owner) return;
           state.running = false;
           state.activeOwner = undefined;
@@ -925,6 +988,21 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         },
         onError: failOutputLimit,
       });
+      // Same stuck-lock guard as the mid-turn path: release `running` if the
+      // host never settles, so a future output-limit event can re-arm.
+      watchdog = setTimeout(() => {
+        if (state.activeOwner !== owner) return;
+        state.running = false;
+        state.activeOwner = undefined;
+        state.activeRequestOwner = undefined;
+        state.activeLease?.release();
+        state.activeLease = undefined;
+        ctx.ui.notify(
+          "Output-limit compaction timed out; it will retry on the next truncated response.",
+          "warning",
+        );
+      }, COMPACTION_LEASE_TIMEOUT_MS);
+      watchdog.unref?.();
     } catch (error) {
       failOutputLimit(error);
     }

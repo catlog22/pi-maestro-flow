@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { SessionManager, convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
 import {
   buildMaestroCompactionPrompt,
@@ -63,6 +63,7 @@ import {
   toolResultPatternKey,
 } from "../src/compaction/auto-compaction.ts";
 import {
+  COMPACTION_LEASE_TIMEOUT_MS,
   CompactionArbiter,
   compactionRequestFromInstructions,
   runObservedCompaction,
@@ -761,6 +762,140 @@ test("mid-turn guard compacts at the second completed turn above the threshold",
   assert.equal(compacted, 1, "the second consecutive completed turn above the threshold compacts");
   assert.equal(notifications.length, 1, "the compaction turn does not re-warn");
   assert.equal(aborted, 0, "below the full window no abort is needed");
+});
+
+test("escalation zone keeps the defer counter so compaction runs on the second completed turn", async () => {
+  let compacted = 0;
+  const notifications: string[] = [];
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({
+      enabled: true,
+      reserveTokens: 100,
+      keepRecentTokens: 100,
+      // Cache gate off so an ~89% estimate lands in the escalate zone (auto-prune
+      // within 3% of the 900-token threshold) instead of a cache veto.
+      soft: { ...DEFAULT_SOFT_COMPACTION, cache: { enabled: false } },
+    }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() {},
+    compact() { compacted++; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: {
+      setStatus() {},
+      notify(message: string) { notifications.push(message); },
+    },
+  } as never;
+  // A tool batch whose estimate sits below the hard trigger (820 = 1000 − 100
+  // reserve − 80 summary-reserve from the compaction-model derivation) but
+  // above the 80% prune band and inside the 3% escalation band. The tool name
+  // is not in any evictable set, so pruning reclaims nothing and the estimate
+  // stays put (~813 tokens).
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call", name: "unprunable_tool", arguments: {} }],
+    usage: { input: 780, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "call",
+    toolName: "unprunable_tool",
+    content: [{ type: "text", text: "small" }],
+    isError: false,
+  }] as never;
+  await guard.evaluate(messages, ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(compacted, 0, "the first completed turn in the escalation zone defers once");
+  assert.equal(
+    notifications.filter((message) => /after the next completed turn/.test(message)).length,
+    1,
+    "the defer warning fires on the first completed turn (besides the escalation notice)",
+  );
+  await guard.evaluate(messages, ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(compacted, 1, "the escalated intent must survive evaluations so the second completed turn compacts");
+});
+
+test("mid-turn compaction watchdog releases the run lock when the host never settles", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    let compacted = 0;
+    const notifications: string[] = [];
+    const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+      loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+      readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+    });
+    const ctx = {
+      cwd: "D:\\repo",
+      model: { contextWindow: 1_000 },
+      abort() {},
+      compact() { compacted++; },
+      hasPendingMessages: () => false,
+      sessionManager: { getBranch: () => [{ type: "message" }] },
+      ui: {
+        setStatus() {},
+        notify(message: string) { notifications.push(message); },
+      },
+    } as never;
+    const messages = highUsageToolBatch(950);
+    await guard.evaluate(messages, ctx);
+    await guard.onAgentEnd(ctx);
+    await guard.evaluate(messages, ctx);
+    await guard.onAgentEnd(ctx);
+    assert.equal(compacted, 1, "the second completed turn submits the compaction");
+    // The fake host never calls onComplete/onError: the run lock is stuck.
+    const before = await guard.evaluate(messages, ctx);
+    assert.equal(before, undefined, "a stuck run lock disables pressure evaluation");
+    // The watchdog mirrors the lease timeout and releases the lock.
+    mock.timers.tick(COMPACTION_LEASE_TIMEOUT_MS + 1);
+    const after = await guard.evaluate(messages, ctx);
+    assert.ok(after, "pressure evaluation resumes after the watchdog releases the lock");
+    assert.equal(
+      notifications.filter((message) => /timed out/.test(message)).length,
+      1,
+      "the watchdog announces the timeout once",
+    );
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("internals load failure warns once per cooldown and keeps retrying", async () => {
+  let loads = 0;
+  const notifications: string[] = [];
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => {
+      loads++;
+      throw new Error("resolve failed");
+    },
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() {},
+    compact() {},
+    hasPendingMessages: () => false,
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: {
+      setStatus() {},
+      notify(message: string) { notifications.push(message); },
+    },
+  } as never;
+  // Exhausted estimates settle every turn, so each allowed turn retries the loader.
+  const messages = highUsageToolBatch(1_050);
+  for (let turn = 0; turn < 8; turn++) {
+    await guard.evaluate(messages, ctx);
+    await guard.onAgentEnd(ctx);
+  }
+  assert.equal(loads, 4, "the loader is retried after the breaker cooldown (turns 1-3, then 8)");
+  assert.equal(
+    notifications.filter((message) => /Mid-turn compaction disabled/.test(message)).length,
+    2,
+    "the warning re-arms after the cooldown instead of going silent forever",
+  );
 });
 
 test("applyContextPressurePolicy honors output-clamp derived soft bands", () => {
