@@ -15,6 +15,8 @@ export interface TickPolicyState {
 	staticMode: boolean;
 	/** A foreground agent turn is in flight. */
 	running: boolean;
+	/** At least one agent (foreground or background) is still running. */
+	agentActive: boolean;
 	/** At least one background bash job is active. */
 	bashActive: boolean;
 	/** Failed or sleeping rows are still counting down to expiry. */
@@ -32,7 +34,7 @@ export interface TickPolicyState {
  */
 export function shouldRunTick(p: TickPolicyState): boolean {
 	if (p.staticMode) return p.lingering;
-	return p.running || p.bashActive || p.lingering;
+	return p.running || p.agentActive || p.bashActive || p.lingering;
 }
 
 /**
@@ -41,7 +43,7 @@ export function shouldRunTick(p: TickPolicyState): boolean {
  * or a frozen mid-cycle frame would read as a hung UI.
  */
 export function shouldAnimateFrames(p: TickPolicyState): boolean {
-	return !p.staticMode && p.ticking && (p.running || p.bashActive);
+	return !p.staticMode && p.ticking && (p.running || p.agentActive || p.bashActive);
 }
 
 /**
@@ -50,5 +52,5 @@ export function shouldAnimateFrames(p: TickPolicyState): boolean {
  * static-mode gate is identical.
  */
 export function shouldAnimateSidebar(p: TickPolicyState): boolean {
-	return !p.staticMode && (p.running || p.bashActive || p.lingering);
+	return !p.staticMode && (p.running || p.agentActive || p.bashActive || p.lingering);
 }

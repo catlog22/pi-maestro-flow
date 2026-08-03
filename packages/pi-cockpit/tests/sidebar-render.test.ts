@@ -239,3 +239,24 @@ test("empty inputs omit all section headers while retaining the dock divider", (
 	assert.ok(lines.every((line) => line.trim() === "│"));
 	assert.doesNotMatch(lines.join("\n"), /Workflow|Goal|Tasks|Agents|Jobs|Swarm/);
 });
+
+test("SB-2: hidden rows after priority composition report a truthful \"N more\" count", () => {
+	// 6 agents x ~2 rows each far exceed a 6-row dock; the hidden counter must
+	// reflect what the composer dropped, not just what the loop printed.
+	const manyAgents: AgentRow[] = Array.from({ length: 6 }, (_, i) => ({
+		...agents[0]!,
+		correlationId: `agent-${i}`,
+		name: `agent-${i}`,
+	}));
+	const lines = render({
+		agents: manyAgents,
+		todos: [],
+		jobs: [],
+		height: 6,
+	});
+	const text = lines.join("\n");
+	assert.match(text, /more/, "a dock too short for its content must surface the overflow");
+	const match = /(\d+) more/.exec(text);
+	assert.ok(match, "the hidden counter must carry an actual number");
+	assert.ok(Number(match[1]!) > 0, `expected a positive hidden count, got ${match[1]}`);
+});

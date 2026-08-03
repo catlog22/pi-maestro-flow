@@ -5,7 +5,6 @@ export const TEAMMATE_STARTED_EVENT = "teammate:started";
 export const TEAMMATE_MESSAGE_EVENT = "teammate:message";
 export const TEAMMATE_COMPLETE_EVENT = "teammate:complete";
 export const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
-export const COCKPIT_TODO_TOGGLE_EVENT = "cockpit:toggle-todo";
 export const BASH_BG_UPDATE_EVENT = "bash-bg:update";
 export const BASH_BG_QUERY_EVENT = "bash-bg:query";
 export const WORKFLOW_STATUS_KEY = "maestro-workflow";

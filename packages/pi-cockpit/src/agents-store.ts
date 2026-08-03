@@ -405,6 +405,14 @@ export class AgentsStore {
 		return false;
 	}
 
+	/** True while any agent (foreground or background) is still running, so elapsed/stall repaints keep the loop alive. */
+	hasActive(): boolean {
+		for (const row of this.roster.values()) {
+			if (row.status === "running") return true;
+		}
+		return false;
+	}
+
 	private applyProgress(parentCorrelationId: string, p: ProgressPayload, now: number): void {
 		if (!this.roster.has(p.correlationId)
 			&& this.canMaterialize(p.correlationId, parentCorrelationId, now)) {

@@ -4,6 +4,24 @@ export const COCKPIT_MAESTRO_QUERY_EVENT = "cockpit:maestro-query";
 export const MAESTRO_UI_SNAPSHOT_EVENT = "maestro:ui-snapshot";
 export const MAESTRO_UI_SNAPSHOT_VERSION = 1 as const;
 
+/**
+ * Cross-extension input ownership: emitted before any extension opens a
+ * capturing overlay, so the Cockpit split-pane resize listener (a global
+ * terminal input hook) yields before the overlay grabs focus. Fire-and-forget;
+ * producers never await a reply.
+ */
+export const COCKPIT_PREEMPT_RESIZE_EVENT = "cockpit:preempt-resize";
+
+/**
+ * Todo panel toggle. Emitted by pi-maestro-flow's Alt+T handler while Cockpit
+ * owns the Todo surface; Cockpit applies `expanded` as a boolean and treats an
+ * absent/non-boolean value as a toggle. The payload is optional by design.
+ */
+export const COCKPIT_TODO_TOGGLE_EVENT = "cockpit:toggle-todo";
+export interface CockpitTodoToggleV1 {
+	expanded?: unknown;
+}
+
 export type MaestroJsonPrimitiveV1 = string | number | boolean | null;
 export type MaestroJsonValueV1 = MaestroJsonPrimitiveV1 | MaestroJsonValueV1[] | MaestroJsonObjectV1;
 export interface MaestroJsonObjectV1 {
@@ -133,4 +151,6 @@ export interface MaestroEventMapV1 {
 	"cockpit:maestro-query": MaestroQueryV1;
 	"maestro:ui-snapshot": MaestroUiSnapshotV1;
 	"cockpit:ui-ownership": CockpitUiOwnershipV1;
+	"cockpit:preempt-resize": undefined;
+	"cockpit:toggle-todo": CockpitTodoToggleV1 | undefined;
 }

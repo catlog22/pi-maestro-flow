@@ -19,6 +19,8 @@ export interface SidebarRenderInput {
 	theme: Theme;
 	now: number;
 	resizing?: boolean;
+	/** Browse-window offset (content rows skipped) while the sidebar has keyboard focus. */
+	scrollStart?: number;
 }
 
 type SidebarSectionTitle = "Workflow" | "Goal" | "Tasks" | "Agents" | "Jobs" | "Swarm";
@@ -204,8 +206,11 @@ function agentRows(
 				: row.tokens !== undefined ? `${formatAgentMetric(row.tokens)} tok` : "",
 		].filter(Boolean).join(glyphs.separator);
 		let line = `${paintedStatus(displayStatus, theme, glyphs)}${glyphs.separator}${theme.fg("syntaxFunction", label)}`
-			+ (task ? `${glyphs.separator}${task}` : "")
+			// Action before task: on a narrow dock the whole row is truncated, and a
+			// long task must not squeeze out the error/phase/tool a user needs to
+			// respond to (SB-5).
 			+ (action ? `${glyphs.separator}${action}` : "")
+			+ (task ? `${glyphs.separator}${task}` : "")
 			+ (telemetry ? theme.fg("muted", `${glyphs.separator}${telemetry}`) : "");
 		if (elapsed !== "") line += theme.fg("dim", `${glyphs.separator}${elapsed}`);
 		return line;
@@ -320,33 +325,78 @@ function sectionAwareCost(groups: readonly PriorityGroup[]): number {
 }
 
 /** Render surviving groups with section headers inserted on section boundaries. */
+/**
+ * Browse-mode renderer: skips the first `scrollStart` content rows and renders
+ * the following window (section headers included). One row is reserved for a
+ * "▼ N more" hint when content remains below; an "▲" hint marks content above.
+ */
+function renderScrolled(
+	groups: readonly SidebarGroup[],
+	scrollStart: number,
+	theme: Theme,
+	glyphs: IconGlyphs,
+	contentWidth: number,
+	height: number,
+	totalBudget: number,
+): string[] {
+	const totalContentRows = groups.reduce((sum, g) => sum + g.rows.length, 0);
+	const above = Math.min(scrollStart, totalContentRows);
+	const hintRows = (above > 0 ? 1 : 0) + (scrollStart + 1 <= totalContentRows ? 1 : 0);
+	const budget = Math.max(0, height - hintRows);
+	const output: string[] = [];
+	let contentIndex = 0;
+	for (const group of groups) {
+		if (output.length >= budget) break;
+		let drewTitle = false;
+		for (const row of group.rows) {
+			if (output.length >= budget) break;
+			const index = contentIndex;
+			contentIndex += 1;
+			if (index < scrollStart) continue;
+			if (!drewTitle) {
+				if (output.length >= budget) break;
+				output.push(sectionTitle(group.section, theme, contentWidth));
+				drewTitle = true;
+			}
+			output.push(fit(row, contentWidth));
+		}
+	}
+	if (above > 0) output.push(fit(theme.fg("dim", `${glyphs.ellipsis} ${above} above`), contentWidth));
+	const below = totalContentRows - contentIndex;
+	if (below > 0 && output.length < height) {
+		output.push(fit(theme.fg("dim", `${glyphs.ellipsis} ${below} more`), contentWidth));
+	}
+	return output;
+}
+
 function renderGroups(
 	groups: readonly SidebarGroup[],
 	theme: Theme,
 	glyphs: IconGlyphs,
 	contentWidth: number,
 	height: number,
+	totalBudget: number = groups.reduce((sum, g) => sum + 1 + g.rows.length, 0),
 ): string[] {
 	const output: string[] = [];
 	let lastSection: SidebarSectionTitle | undefined;
+	// Reserve one row for the overflow hint whenever content cannot fit: a full
+	// dock must still say how much is hidden (SB-2).
+	const hasOverflow = totalBudget > height;
+	const budget = hasOverflow ? Math.max(0, height - 1) : height;
 	for (const group of groups) {
-		if (output.length >= height) break;
+		if (output.length >= budget) break;
 		if (group.section !== lastSection) {
 			output.push(sectionTitle(group.section, theme, contentWidth));
 			lastSection = group.section;
 		}
 		for (const row of group.rows) {
-			if (output.length >= height) break;
+			if (output.length >= budget) break;
 			output.push(fit(row, contentWidth));
 		}
 	}
-	// Append a "more" indicator if groups were dropped.
-	const totalContentRows = groups.reduce((sum, g) => sum + g.rows.length, 0);
-	if (output.length < totalContentRows + new Set(groups.map((g) => g.section)).size) {
-		const hidden = totalContentRows + new Set(groups.map((g) => g.section)).size - output.length;
-		if (hidden > 0 && output.length < height) {
-			output.push(fit(theme.fg("dim", `${glyphs.ellipsis} ${hidden} more`), contentWidth));
-		}
+	if (hasOverflow && totalBudget > output.length) {
+		const hidden = totalBudget - output.length;
+		output.push(fit(theme.fg("dim", `${glyphs.ellipsis} ${hidden} more`), contentWidth));
 	}
 	return output;
 }
@@ -357,10 +407,20 @@ function layoutSections(
 	theme: Theme,
 	glyphs: IconGlyphs,
 	contentWidth: number,
+	scrollStart = 0,
 ): string[] {
 	const groups = sectionsToGroups(sections);
+	// Pre-composition cost (one section-title row per group plus its rows) is the
+	// truthful "what should have been shown" baseline for the hidden counter.
+	const totalBudget = groups.reduce((sum, g) => sum + 1 + g.rows.length, 0);
+	if (scrollStart > 0) {
+		// Browse mode (sidebar keyboard focus): render a window starting at
+		// scrollStart content rows so rows the composer would drop are still
+		// reachable (SB-1). Section headers re-appear at the window top.
+		return renderScrolled(groups, scrollStart, theme, glyphs, contentWidth, height, totalBudget);
+	}
 	const composed = composeByPriority(groups, height, sectionAwareCost) as SidebarGroup[];
-	return renderGroups(composed, theme, glyphs, contentWidth, height);
+	return renderGroups(composed, theme, glyphs, contentWidth, height, totalBudget);
 }
 
 function dockRows(rows: readonly string[], width: number, height: number, theme: Theme, resizing: boolean, glyphs: IconGlyphs): string[] {
@@ -395,7 +455,14 @@ export function renderSidebar(input: SidebarRenderInput): string[] {
 		{ title: "Swarm", rows: swarmRows(input.maestro, compact, theme, glyphs) },
 	];
 	const sections = candidates.filter((section) => section.rows.length > 0);
-	const content = layoutSections(sections, height, theme, glyphs, Math.max(0, width - 2));
+	const content = layoutSections(
+		sections,
+		height,
+		theme,
+		glyphs,
+		Math.max(0, width - 2),
+		Number.isFinite(input.scrollStart) && (input.scrollStart ?? 0) > 0 ? Math.trunc(input.scrollStart ?? 0) : 0,
+	);
 	return dockRows(content, width, height, theme, input.resizing === true, glyphs);
 }
 

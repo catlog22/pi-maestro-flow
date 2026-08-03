@@ -1,5 +1,5 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, type Component, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
+import { Key, matchesKey, truncateToWidth, type Component, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
 import type { MaestroUiStateSnapshotV1 } from "./public/v1/events.ts";
 import { renderSidebar, renderSidebarError } from "./sidebar-render.ts";
 import {
@@ -17,6 +17,8 @@ export interface SidebarComponentOptions {
 	getConfig(): CockpitConfig;
 	getHeight(): number;
 	isResizing(): boolean;
+	/** Browse-window offset (content rows skipped) while the sidebar has keyboard focus. */
+	getScrollStart(): number;
 	theme: Theme;
 	onRenderError?(error: unknown): void;
 	now?(): number;
@@ -49,6 +51,7 @@ export function createSidebarComponent(options: SidebarComponentOptions): Compon
 					theme: options.theme,
 					now: options.now?.() ?? Date.now(),
 					resizing,
+					scrollStart: options.getScrollStart(),
 				});
 			} catch (error) {
 				reportRenderError(error);
@@ -69,7 +72,12 @@ export interface SidebarController {
 	toggle(): void;
 	isVisible(): boolean;
 	beginResize(): boolean;
+	cancelResize(): void;
 	isResizing(): boolean;
+	/** Enter sidebar keyboard-focus (browse) mode; returns false when there is nothing to navigate. */
+	beginFocus(): boolean;
+	endFocus(): void;
+	isFocused(): boolean;
 	getWidth(): number;
 	setWidth(width: number): void;
 	requestRender(): void;
@@ -84,6 +92,8 @@ export interface SidebarControllerOptions {
 	getJobs(): readonly BashBgJob[];
 	getConfig(): CockpitConfig;
 	now?(): number;
+	/** Terminal rows used to size the browse window; defaults to 12. */
+	getHeight?(): number;
 	/** When true the sidebar runs its own periodic redraw (duration ticks, spinners). */
 	shouldAnimate?(): boolean;
 	/** Interval for the sidebar's own animation timer. Defaults to 1000ms. */
@@ -105,6 +115,13 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 	let splitRequestRender: (() => void) | undefined;
 	let overlayHandle: OverlayHandle | undefined;
 	let animationTimer: ReturnType<typeof setInterval> | undefined;
+	// Sidebar keyboard-focus (browse) mode: a global terminal-input hook like
+	// resize, entered explicitly via shortcut so it never steals keys by default.
+	let focused = false;
+	let focusScroll = 0;
+	let focusSelectedId: string | undefined;
+	let navRows: Array<{ id: string }> = [];
+	let unsubscribeFocusInput: (() => void) | undefined;
 	const animationIntervalMs = Math.max(1, Math.trunc(options.animationIntervalMs ?? 1_000));
 	const schedule = options.schedule ?? queueMicrotask;
 
@@ -184,6 +201,117 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 		overlayHandle = undefined;
 	};
 
+	// --- Sidebar browse (focus) mode ---
+	const rebuildNav = (): void => {
+		try {
+			const todoIds = options.getTodos().map((item) => `task:${item.id}`);
+			const agentIds = options.getAgents().map((row) => `agent:${row.correlationId}`);
+			const jobIds = options.getJobs().map((job) => `job:${job.id}`);
+			navRows = [...todoIds, ...agentIds, ...jobIds].map((id) => ({ id }));
+		} catch {
+			navRows = [];
+		}
+	};
+	const focusVisibleRows = (): number => Math.max(1, Math.trunc((options.getHeight?.() ?? 12) - 4));
+	const reconcileFocus = (): void => {
+		rebuildNav();
+		if (navRows.length === 0) {
+			focusScroll = 0;
+			return;
+		}
+		const visible = focusVisibleRows();
+		// Stable-id anchor: when a selected entity survives a store reorder, keep
+		// its window position; when it disappears, fall back to clamping (SB-3).
+		if (focusSelectedId) {
+			const index = navRows.findIndex((row) => row.id === focusSelectedId);
+			if (index >= 0) {
+				if (index < focusScroll) focusScroll = index;
+				else if (index >= focusScroll + visible) focusScroll = index - visible + 1;
+			} else {
+				focusSelectedId = undefined;
+			}
+		}
+		focusScroll = Math.max(0, Math.min(focusScroll, Math.max(0, navRows.length - visible)));
+	};
+	const moveFocus = (delta: number): void => {
+		rebuildNav();
+		if (navRows.length === 0) return;
+		const current = focusSelectedId ? navRows.findIndex((row) => row.id === focusSelectedId) : -1;
+		const next = current < 0 ? 0 : Math.max(0, Math.min(navRows.length - 1, current + delta));
+		focusSelectedId = navRows[next]?.id;
+		reconcileFocus();
+		requestOverlayRender?.();
+	};
+	const handleFocusInput = (data: string): { consume?: boolean; data?: string } | undefined => {
+		if (!focused) return undefined;
+		if (matchesKey(data, Key.escape)) {
+			endFocus();
+			return { consume: true };
+		}
+		if (matchesKey(data, Key.up) || data === "k") {
+			moveFocus(-1);
+			return { consume: true };
+		}
+		if (matchesKey(data, Key.down) || data === "j") {
+			moveFocus(1);
+			return { consume: true };
+		}
+		if (matchesKey(data, Key.pageUp)) {
+			moveFocus(-focusVisibleRows());
+			return { consume: true };
+		}
+		if (matchesKey(data, Key.pageDown)) {
+			moveFocus(focusVisibleRows());
+			return { consume: true };
+		}
+		if (matchesKey(data, Key.home)) {
+			focusSelectedId = navRows[0]?.id;
+			reconcileFocus();
+			requestOverlayRender?.();
+			return { consume: true };
+		}
+		if (matchesKey(data, Key.end)) {
+			focusSelectedId = navRows[navRows.length - 1]?.id;
+			reconcileFocus();
+			requestOverlayRender?.();
+			return { consume: true };
+		}
+		return undefined;
+	};
+	const beginFocus = (): boolean => {
+		if (focused) return true;
+		if (!enabled) {
+			if (options.onWarning) safely(() => options.onWarning?.("Cockpit sidebar is not visible"));
+			else safely(() => options.ctx.ui.notify("Cockpit sidebar is not visible", "warning"));
+			return false;
+		}
+		rebuildNav();
+		if (navRows.length === 0) {
+			safely(() => options.ctx.ui.notify("Nothing to browse in the Cockpit sidebar", "warning"));
+			return false;
+		}
+		// The browse hook mirrors the resize listener pattern; it must yield to
+		// any capturing overlay, so a preempt event cancels it too.
+		focused = true;
+		try {
+			unsubscribeFocusInput = options.ctx.ui.onTerminalInput(handleFocusInput);
+		} catch (error) {
+			focused = false;
+			reportError(error);
+			return false;
+		}
+		requestOverlayRender?.();
+		return true;
+	};
+	const endFocus = (): void => {
+		if (!focused && !unsubscribeFocusInput) return;
+		focused = false;
+		const unsubscribe = unsubscribeFocusInput;
+		unsubscribeFocusInput = undefined;
+		if (unsubscribe) safely(unsubscribe);
+		requestOverlayRender?.();
+	};
+
 	const hide = (): void => {
 		if (!enabled && !split.isEnabled()) return;
 		enabled = false;
@@ -238,6 +366,7 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 						getConfig: options.getConfig,
 						getHeight: () => tui.terminal.rows,
 						isResizing: split.isResizing,
+						getScrollStart: () => (focused ? focusScroll : 0),
 						theme,
 						...(options.now ? { now: options.now } : {}),
 						onRenderError: (error) => {
@@ -297,8 +426,17 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 			else show();
 		},
 		isVisible: () => enabled,
-		beginResize: split.beginResize,
+		beginResize: () => {
+			// Resize and browse are mutually exclusive modal hooks on the same
+			// terminal-input channel; entering one must leave the other.
+			endFocus();
+			return split.beginResize();
+		},
+		cancelResize: split.cancelResize,
 		isResizing: split.isResizing,
+		beginFocus,
+		endFocus,
+		isFocused: () => focused,
 		getWidth: split.getSidebarWidth,
 		setWidth: split.setSidebarWidth,
 		requestRender() {
@@ -309,6 +447,7 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 		dispose() {
 			if (disposed) return;
 			hide();
+			endFocus();
 			disposed = true;
 			stopAnimation();
 			safely(() => overlayHandle?.hide());

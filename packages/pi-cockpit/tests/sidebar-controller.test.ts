@@ -173,6 +173,7 @@ test("component fallback contains errors from height, resize, and error callback
 		...base,
 		getHeight: () => { throw new Error("height unavailable"); },
 		isResizing: () => false,
+		getScrollStart: () => 0,
 		onRenderError: () => { throw new Error("report failed"); },
 	});
 	assert.doesNotThrow(() => heightFailure.render(40));
@@ -182,6 +183,7 @@ test("component fallback contains errors from height, resize, and error callback
 		...base,
 		getHeight: () => 4,
 		isResizing: () => { throw new Error("resize unavailable"); },
+		getScrollStart: () => 0,
 	});
 	assert.doesNotThrow(() => resizeFailure.render(40));
 	assert.match(resizeFailure.render(40).join("\n"), /resize unavailable/);
@@ -252,4 +254,50 @@ test("dispose is idempotent, removes only its overlay handle, and restores the e
 	assert.equal(h.tui.render, h.baseRender);
 	assert.equal(h.sessions[0].handleHides(), 1);
 	assert.equal(h.doneCalls(), 0, "host custom done() would close an unrelated topmost overlay");
+});
+
+test("browse focus mode consumes keys, scrolls by stable id, and yields to resize", async () => {
+	const h = harness();
+	const agents = Array.from({ length: 8 }, (_, i) => ({
+		correlationId: `agent-${i}`,
+		agent: "general",
+		name: `agent-${i}`,
+		role: "general",
+		status: "running" as const,
+		startedAt: 0,
+		lastActivityAt: 0,
+		task: `task-${i}`,
+		tail: "",
+	}));
+	let currentAgents = agents;
+	const controller = createSidebarController({
+		...baseOptions(h.ctx),
+		getAgents: () => currentAgents,
+	});
+	controller.show();
+	await flushPromises();
+	h.deliverHandles();
+
+	assert.equal(controller.isFocused(), false);
+	assert.equal(controller.beginFocus(), true);
+	assert.equal(controller.isFocused(), true);
+
+	// Esc exits focus mode.
+	assert.deepEqual(h.input("\x1b"), { consume: true });
+	assert.equal(controller.isFocused(), false);
+
+	// Enter again and navigate: down keys move the selection.
+	controller.beginFocus();
+	h.input("\x1b[B"); // down
+	h.input("\x1b[B"); // down
+	h.input("j"); // down
+	h.input("k"); // up
+	// Reordering the roster must not lose the anchored selection window (SB-3):
+	// move far down, then drop most rows, then move again — all stays clamped.
+	for (let i = 0; i < 12; i++) h.input("\x1b[B");
+	assert.equal(controller.isFocused(), true);
+	// A resize attempt must leave browse mode first.
+	controller.beginResize();
+	assert.equal(controller.isFocused(), false);
+	h.input("\x1b");
 });

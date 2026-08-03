@@ -6,6 +6,7 @@ function state(over: Partial<TickPolicyState> = {}): TickPolicyState {
 	return {
 		staticMode: false,
 		running: false,
+		agentActive: false,
 		bashActive: false,
 		lingering: false,
 		ticking: false,
@@ -44,4 +45,13 @@ test("shouldAnimateSidebar mirrors the static gate and includes lingering", () =
 	assert.equal(shouldAnimateSidebar(state({ staticMode: true, running: true })), false);
 	assert.equal(shouldAnimateSidebar(state({ staticMode: true, lingering: true })), false);
 	assert.equal(shouldAnimateSidebar(state({})), false);
+});
+
+test("SB-4: background-only agent activity keeps the loop and spinners alive", () => {
+	assert.equal(shouldRunTick(state({ agentActive: true })), true, "a background agent alone must tick");
+	assert.equal(shouldAnimateFrames(state({ ticking: true, agentActive: true })), true);
+	assert.equal(shouldAnimateSidebar(state({ agentActive: true })), true);
+	// Static mode still drops animation for background agents.
+	assert.equal(shouldRunTick(state({ staticMode: true, agentActive: true })), false);
+	assert.equal(shouldAnimateFrames(state({ staticMode: true, ticking: true, agentActive: true })), false);
 });

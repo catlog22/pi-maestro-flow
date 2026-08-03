@@ -539,7 +539,7 @@ export const WAKEABLE_AGENT_BUDGET = Object.freeze({
 });
 
 export const AGENT_WIDGET_IDLE_HIDE_MS = 60_000;
-export const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
+export { COCKPIT_UI_OWNERSHIP_EVENT } from "../shared/cockpit-events.ts";
 
 /**
  * Appends one marker-prefixed activity line to an agent's log. Shared so the

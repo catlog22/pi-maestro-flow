@@ -254,6 +254,7 @@ import {
   renderAgentStatusWidget,
   COCKPIT_UI_OWNERSHIP_EVENT,
 } from "./teammate-core.ts";
+import { COCKPIT_PREEMPT_RESIZE_EVENT } from "../shared/cockpit-events.ts";
 import type { TeammateRuntimeOptions, ProgressFlushGate, AgentWidgetTheme, AgentWidgetRow, AgentSelectorRow, PendingChildProxyRequest, ChildProxyPendingRequests, IpcSender } from "./teammate-core.ts";
 import { MailboxHost, mailboxModeFromEnv, MAILBOX_ENV_VAR } from "./mailbox/host.ts";
 
@@ -335,6 +336,30 @@ export default function registerTeammateExtension(
     const next = createModelCatalogSnapshot(ctx.modelRegistry?.getAvailable?.() ?? []);
     if (next.signature !== modelCatalog.signature) modelCatalog = next;
     return modelCatalog;
+  };
+
+  /**
+   * The host's getAvailable() reads a synchronous snapshot that is only
+   * rebuilt by refresh(). Await a coalesced refresh before dispatch so a
+   * model deleted from config/auth is dropped from the catalog, routing and
+   * modelCapabilities validation instead of being spawned one last time.
+   */
+  let modelRegistryRefreshInFlight: Promise<void> | undefined;
+  const refreshModelRegistry = async (ctx: ExtensionContext): Promise<void> => {
+    if (!ctx.modelRegistry?.refresh) return;
+    modelRegistryRefreshInFlight ??= ctx.modelRegistry
+      .refresh()
+      .catch((error) => {
+        // A failed registry refresh must not block dispatch; the previous
+        // snapshot stays authoritative until the next successful refresh.
+        console.error(
+          `[pi-maestro-teammate] model registry refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      })
+      .finally(() => {
+        modelRegistryRefreshInFlight = undefined;
+      });
+    await modelRegistryRefreshInFlight;
   };
 
   const injectTeammateContext = (
@@ -944,6 +969,9 @@ export default function registerTeammateExtension(
           // Surface the failure — never silently fall back to direct stdin.
           const reason = "message" in enqueued.result ? (enqueued.result as { message?: string }).message : "unknown error";
           console.error(`[pi-maestro-teammate] mailbox delivery failed for ${targetLabel}: ${reason}`);
+          // Send-shaped failure: isSend must be true so progress consumers (e.g.
+          // Cockpit's agent store) treat it as a send variant and ignore it
+          // instead of mis-rendering it as agent progress (CS-1).
           pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
             correlationId,
             from: "caller",
@@ -951,7 +979,7 @@ export default function registerTeammateExtension(
             mode: "follow_up",
             message,
             lastActivityAt: Date.now(),
-            isSend: false,
+            isSend: true,
           });
           return;
         }
@@ -1081,6 +1109,7 @@ export default function registerTeammateExtension(
         (state.sessionGeneration ?? 0) === dispatchGeneration;
 
       const baseCwd = (params.cwd ?? state.baseCwd) || ctx.cwd;
+      await refreshModelRegistry(ctx);
       params = applyModelRouting(
         params,
         baseCwd,
@@ -1846,20 +1875,23 @@ export default function registerTeammateExtension(
             cancelProxyDispatch(state, event.requestId);
             return;
           }
-          handleProxyRequest(
-            pi,
-            state,
-            event,
-            reply,
-            correlationId,
-            refreshModelCatalog(ctx).models,
-            (request, respond, childId) => enqueueChildInteraction(request, respond, ctx, childId),
-            publishChildCallStatus,
-            runtimeOptions,
-            mailboxHost && mailboxHost.mode === "authoritative"
-              ? (request) => mailboxHost.rollout.deliver(request).then((r) => ({ path: r.path, result: r.result }))
-              : undefined,
-          );
+          void (async () => {
+            await refreshModelRegistry(ctx);
+            await handleProxyRequest(
+              pi,
+              state,
+              event,
+              reply,
+              correlationId,
+              refreshModelCatalog(ctx).models,
+              (request, respond, childId) => enqueueChildInteraction(request, respond, ctx, childId),
+              publishChildCallStatus,
+              runtimeOptions,
+              mailboxHost && mailboxHost.mode === "authoritative"
+                ? (request) => mailboxHost.rollout.deliver(request).then((r) => ({ path: r.path, result: r.result }))
+                : undefined,
+            );
+          })();
           },
         };
         if (runtimeOptions.spawnChildProcess) options.spawnChildProcess = runtimeOptions.spawnChildProcess;
@@ -3135,6 +3167,10 @@ export default function registerTeammateExtension(
   }
 
   async function showAttachOverlay(correlationId: string, ctx: ExtensionContext): Promise<void> {
+    // A capturing overlay must preempt any active Cockpit split-pane resize:
+    // the resize listener is a global terminal-input hook that would otherwise
+    // swallow this overlay's first arrow/Enter/Esc.
+    preemptCockpitResize();
     const agent = state.activeRuns.get(correlationId);
     if (!agent) {
       ctx.ui.notify("Agent is no longer active.", "error");
@@ -3668,6 +3704,16 @@ export default function registerTeammateExtension(
       pi.registerTool(tool);
     },
   });
+  // Cockpit split-pane resize runs as a global terminal-input hook; a capturing
+  // overlay opened here must preempt it so the overlay's own keys win focus.
+  const preemptCockpitResize = (): void => {
+    try {
+      pi.events.emit(COCKPIT_PREEMPT_RESIZE_EVENT, undefined);
+    } catch {
+      // Best effort: emitting must never block opening the overlay.
+    }
+  };
+
   registerTeammateSettingsProvider({
     on: (event, handler) => pi.events.on(event, handler),
     emit: (event, payload) => pi.events.emit(event, payload),
@@ -3683,6 +3729,7 @@ export default function registerTeammateExtension(
   pi.registerCommand("teammate-models", {
     description: "Open teammate roles, collaboration status, and model routing",
     async handler(_args, ctx) {
+      preemptCockpitResize();
       await showTeammateControlCenter(ctx);
       tool.description = buildTeammateToolDescription(ctx.cwd);
       pi.registerTool(tool);
@@ -3788,6 +3835,7 @@ export default function registerTeammateExtension(
 
       // /monitor (no args) — open TUI overlay
       if (trimmed === "" || trimmed === "ui") {
+        preemptCockpitResize();
         await refreshWorkspacePeerOwners();
         const sessions = monitorSessionRows();
 
@@ -3911,6 +3959,7 @@ export default function registerTeammateExtension(
   pi.registerShortcut("alt+r", {
     description: "Open the teammate agent view",
     async handler(ctx) {
+      preemptCockpitResize();
       await showAgentSelector(ctx);
     },
   });
@@ -3918,6 +3967,7 @@ export default function registerTeammateExtension(
   pi.registerShortcut("alt+m", {
     description: "Open the teammate control center",
     async handler(ctx) {
+      preemptCockpitResize();
       await showTeammateControlCenter(ctx);
       tool.description = buildTeammateToolDescription(ctx.cwd);
       pi.registerTool(tool);
@@ -4068,6 +4118,7 @@ export default function registerTeammateExtension(
     widgetCtx = ctx;
     state.baseCwd = ctx.cwd;
     refreshModelCatalog(ctx);
+    void refreshModelRegistry(ctx);
     tool.description = buildTeammateToolDescription(ctx.cwd);
     pi.registerTool(tool);
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;

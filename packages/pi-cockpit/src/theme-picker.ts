@@ -16,7 +16,7 @@
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { sanitizeExtensionStatusText } from "./extension-status.ts";
 import type { IconGlyphs } from "./icons.ts";
 import { fitLineByPriority, visibleStart, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
@@ -160,11 +160,11 @@ export class ThemePicker implements Component {
 	}
 
 	handleInput(data: string): void {
-		if (data === "\x1b") {
+		if (matchesKey(data, Key.escape)) {
 			this.cancel();
 			return;
 		}
-		if (data === "\r" || data === "\n") {
+		if (matchesKey(data, Key.enter)) {
 			this.commit();
 			return;
 		}
@@ -173,12 +173,12 @@ export class ThemePicker implements Component {
 		// Arrows only. Plain letters stay inert here, per the terminal rule that
 		// reserves them until an explicit filter mode is entered; `/theme <name>`
 		// already covers the "I know what I want" path.
-		if (data === "\x1b[A") this.move(-1);
-		else if (data === "\x1b[B") this.move(1);
-		else if (data === "\x1b[5~") this.move(-this.pageSize());
-		else if (data === "\x1b[6~") this.move(this.pageSize());
-		else if (data === "\x1b[H") this.jump(0);
-		else if (data === "\x1b[F") this.jump(count - 1);
+		if (matchesKey(data, Key.up)) this.move(-1);
+		else if (matchesKey(data, Key.down)) this.move(1);
+		else if (matchesKey(data, Key.pageUp)) this.move(-this.pageSize());
+		else if (matchesKey(data, Key.pageDown)) this.move(this.pageSize());
+		else if (matchesKey(data, Key.home)) this.jump(0);
+		else if (matchesKey(data, Key.end)) this.jump(count - 1);
 	}
 
 	private move(delta: number): void {

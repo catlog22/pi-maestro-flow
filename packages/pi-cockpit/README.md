@@ -112,6 +112,8 @@ The tab title is `frame + pi - <session> - <working state>`. The session part fo
 ## Commands
 
 - `/cockpit` — opens the settings overlay.
+- `/maestro-settings` — opens the unified settings shell (Cockpit, Flow, Teammate and integrations).
+- `Alt+J` — opens the background Bash jobs overlay (live status, command, cwd, duration, output tail).
 - `/cockpit sidebar` — reports the current sidebar mode, width, and density.
 - `/cockpit sidebar auto|on|off` — selects dock behavior.
 - `/cockpit sidebar resize` or `Ctrl+Shift+R` — enters temporary Resize mode. Left/Right adjusts one column, Shift+Left/Shift+Right adjusts four, Enter accepts, and Escape rolls back. Mouse reporting is active only during Resize mode.

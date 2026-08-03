@@ -9,6 +9,7 @@ import {
 	type Focusable,
 	type TUI,
 } from "@earendil-works/pi-tui";
+import { acquireMouseReporting, flushMouseReportingWrites } from "../mouse-reporting.ts";
 import {
 	createSettingsTranslator,
 	mergeTranslationCatalogs,
@@ -89,8 +90,6 @@ const SETTINGS_OVERLAY_WIDTH = 112;
 const SETTINGS_OVERLAY_MAX_HEIGHT = 0.92;
 const SETTINGS_OVERLAY_MAX_HEIGHT_VALUE = "92%" as const;
 const SETTINGS_OVERLAY_MARGIN = 1;
-const ENABLE_MOUSE_HOVER = "\u001b[?1003h\u001b[?1006h";
-const DISABLE_MOUSE_HOVER = "\u001b[?1006l\u001b[?1003l";
 
 export class MaestroSettingsShell implements Component, Focusable {
 	focused = false;
@@ -133,6 +132,10 @@ export class MaestroSettingsShell implements Component, Focusable {
 
 	render(width: number): string[] {
 		const safeWidth = Math.max(1, Math.min(150, Math.trunc(width)));
+		// A width/wide-narrow switch invalidates hover coordinates even when the
+		// target ids are the same: the highlight must not linger at a stale spot
+		// until the mouse moves again (SK-7).
+		if (safeWidth !== this.lastRenderedWidth) this.hoveredTargetId = undefined;
 		this.mouseTargets = [];
 		if (safeWidth < 20) {
 			const rendered = [truncateToWidth(`${this.t("settings.title")} · Esc`, safeWidth, "…")];
@@ -154,8 +157,11 @@ export class MaestroSettingsShell implements Component, Focusable {
 			const failure = this.failures[0]!;
 			footerRows.push(this.params.theme.fg("warning", fit(`${failure.providerId} · ${failure.message}`, inner)));
 		}
+		const dirty = this.params.coordinator.modifiedProviderIds().length > 0;
 		footerRows.push(this.params.theme.fg("dim", fit(
-			safeWidth < 70 ? this.t("settings.helpNarrow") : this.t("settings.help"),
+			safeWidth < 70
+				? dirty ? this.t("settings.helpNarrowDirty") : this.t("settings.helpNarrow")
+				: dirty ? this.t("settings.helpDirty") : this.t("settings.help"),
 			inner,
 		)));
 		const targetHeight = this.overlayHeightTarget();
@@ -191,7 +197,12 @@ export class MaestroSettingsShell implements Component, Focusable {
 			void this.toggleLocale();
 			return;
 		}
-		if (data === "\x1b[15~") {
+		if (matchesKey(data, Key.f5)) {
+			if (this.params.coordinator.modifiedProviderIds().length > 0 && !this.discardArmed) {
+				this.discardArmed = true;
+				this.setNotice(this.t("settings.discardConfirm"), "warning");
+				return;
+			}
 			void this.reload();
 			return;
 		}
@@ -205,7 +216,8 @@ export class MaestroSettingsShell implements Component, Focusable {
 			this.params.close();
 			return;
 		}
-		if (data === "/") {
+		const printable = decodeKittyPrintable(data);
+		if (printable === "/" || data === "/") {
 			this.searching = true;
 			this.discardArmed = false;
 			this.requestRender();
@@ -219,7 +231,7 @@ export class MaestroSettingsShell implements Component, Focusable {
 			this.moveScope(matchesKey(data, Key.shift("tab")) ? -1 : 1);
 			return;
 		}
-		if (data === "u" || data === "U") {
+		if (printable === "u" || data === "u" || data === "U") {
 			const selected = this.selectedSetting();
 			const provider = this.selectedProvider();
 			if (selected && provider && selected.scopes.includes(this.scope)) {
@@ -419,6 +431,8 @@ export class MaestroSettingsShell implements Component, Focusable {
 			value: editableValue(this.currentValue(provider.providerId, definition)),
 			replaceOnType: true,
 		};
+		// Entering a modal editor disarms the pending Esc-discard confirmation.
+		this.discardArmed = false;
 		this.requestRender();
 	}
 
@@ -439,6 +453,7 @@ export class MaestroSettingsShell implements Component, Focusable {
 		if (!editing) return;
 		if (matchesKey(data, Key.escape)) {
 			this.editing = undefined;
+			this.discardArmed = false;
 			this.requestRender();
 			return;
 		}
@@ -482,6 +497,8 @@ export class MaestroSettingsShell implements Component, Focusable {
 		definition: SettingDefinition,
 		options: OptionEditingState["options"],
 	): void {
+		// Entering a modal editor disarms the pending Esc-discard confirmation.
+		this.discardArmed = false;
 		const current = this.currentValue(providerId, definition);
 		const currentIndex = options.findIndex((option) => Object.is(option.value, current) && !option.disabled);
 		const firstEnabled = options.findIndex((option) => !option.disabled);
@@ -500,6 +517,7 @@ export class MaestroSettingsShell implements Component, Focusable {
 		if (!editing) return;
 		if (matchesKey(data, Key.escape)) {
 			this.optionEditing = undefined;
+			this.discardArmed = false;
 			this.requestRender();
 			return;
 		}
@@ -610,10 +628,17 @@ export class MaestroSettingsShell implements Component, Focusable {
 		if (this.params.coordinator.modifiedProviderIds().length === 0) return;
 		this.applying = true;
 		this.conflicts = [];
-		this.setNotice("…", "dim");
+		this.setNotice(this.t("settings.applying"), "dim");
 		try {
 			const result = await this.params.coordinator.apply(this.context);
 			this.showApplyResult(result);
+		} catch (error) {
+			// A non-provider failure must surface instead of leaving the busy
+			// ellipsis up forever (SK-3).
+			this.setNotice(
+				this.t("settings.applyFailed", { message: error instanceof Error ? error.message : String(error) }),
+				"error",
+			);
 		} finally {
 			this.applying = false;
 			this.requestRender();
@@ -647,13 +672,12 @@ export class MaestroSettingsShell implements Component, Focusable {
 		this.context = { ...this.context, locale: next };
 		this.translator.setLocale(next);
 		this.setNotice(this.t("settings.localeSaved"), "success");
-		await this.reload(true);
+		await this.reload(true, false);
 	}
 
-	private async reload(preserveNotice = false): Promise<void> {
+	private async reload(preserveNotice = false, discardDrafts = true): Promise<void> {
 		this.applying = true;
 		try {
-			this.params.coordinator.discard();
 			const loaded = await this.params.reload();
 			this.context = loaded.context;
 			this.providers = loaded.providers;
@@ -661,11 +685,15 @@ export class MaestroSettingsShell implements Component, Focusable {
 			this.translator = this.createTranslator();
 			this.conflicts = [];
 			this.syncSelection();
+			// Discard drafts only after the reload succeeded: a failed reload must
+			// not destroy unsaved changes (SK-2).
+			if (discardDrafts) this.params.coordinator.discard();
 			if (!preserveNotice) this.notice = "";
 		} catch (error) {
 			this.setNotice(error instanceof Error ? error.message : String(error), "error");
 		} finally {
 			this.applying = false;
+			this.discardArmed = false;
 			this.requestRender();
 		}
 	}
@@ -751,11 +779,11 @@ export class MaestroSettingsShell implements Component, Focusable {
 		}
 		if (mouse.release) return true;
 		if (mouse.button === 64) {
-			this.moveSetting(-1);
+			this.moveSettingByWheel(-1);
 			return true;
 		}
 		if (mouse.button === 65) {
-			this.moveSetting(1);
+			this.moveSettingByWheel(1);
 			return true;
 		}
 		if ((mouse.button & 3) !== 0 || !target) return true;
@@ -882,6 +910,22 @@ export class MaestroSettingsShell implements Component, Focusable {
 		this.settingIndex = 0;
 		this.syncSelection();
 		this.afterNavigation();
+	}
+
+	private moveSettingByWheel(delta: number): void {
+		// Wheel must not bypass the modal input guards: while applying, navigation
+		// is frozen; inside the option editor the wheel moves the option list;
+		// while editing text the wheel must not yank the current row away from
+		// the editor that still owns the keystrokes.
+		if (this.applying) return;
+		if (this.optionEditing) {
+			const editing = this.optionEditing;
+			if (delta !== 0) editing.selected = nextEnabledOption(editing.options, editing.selected, delta > 0 ? 1 : -1);
+			this.requestRender();
+			return;
+		}
+		if (this.editing) return;
+		this.moveSetting(delta);
 	}
 
 	private moveSetting(delta: number): void {
@@ -1117,21 +1161,12 @@ function terminalColumns(tui: TUI): number | undefined {
 }
 
 function enableSettingsMouseReporting(tui: TUI): () => void {
-	let enabled = false;
-	try {
-		tui.terminal?.write(ENABLE_MOUSE_HOVER);
-		enabled = true;
-	} catch {
-		return () => undefined;
-	}
+	// Hover reporting is ref-counted with the split-pane drag mode through the
+	// shared 1006 SGR extension (CS-4). Release is idempotent.
+	const lease = acquireMouseReporting(tui, "hover");
 	return () => {
-		if (!enabled) return;
-		enabled = false;
-		try {
-			tui.terminal?.write(DISABLE_MOUSE_HOVER);
-		} catch {
-			// The terminal may already be disposed while Pi is shutting down.
-		}
+		lease.release();
+		flushMouseReportingWrites(tui);
 	};
 }
 

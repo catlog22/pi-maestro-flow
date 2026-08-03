@@ -2,7 +2,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readFileSync, statSync } from "node:fs";
 import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
-import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Key, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AgentsStore, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
 import { statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
 import { generateTitleWithModel } from "./title-llm.ts";
@@ -38,6 +38,8 @@ import { SettingsProviderRegistry } from "./settings/registry.ts";
 import { showMaestroSettingsShell } from "./settings/settings-shell.ts";
 import {
 	COCKPIT_MAESTRO_QUERY_EVENT,
+	COCKPIT_PREEMPT_RESIZE_EVENT,
+	COCKPIT_TODO_TOGGLE_EVENT,
 	MAESTRO_UI_SNAPSHOT_EVENT,
 	MAESTRO_UI_SNAPSHOT_VERSION,
 	type CockpitUiOwnershipV1,
@@ -46,7 +48,6 @@ import {
 	AGENT_WIDGET_KEY,
 	BASH_BG_QUERY_EVENT,
 	BASH_BG_UPDATE_EVENT,
-	COCKPIT_TODO_TOGGLE_EVENT,
 	COCKPIT_UI_OWNERSHIP_EVENT,
 	DEFAULT_CONFIG,
 	STACK_WIDGET_KEY,
@@ -61,6 +62,7 @@ import {
 const FOOTER_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 const BASH_BG_OVERLAY_KEY = "alt+j";
 const SIDEBAR_RESIZE_KEY = "ctrl+shift+r";
+const SIDEBAR_FOCUS_KEY = "alt+shift+l";
 const COCKPIT_STATUS_KEY = "cockpit";
 // Claude Code title chrome: a static marker when idle, two braille frames while
 // a turn runs (screens/REPL.tsx TITLE_STATIC_PREFIX / TITLE_ANIMATION_FRAMES).
@@ -214,12 +216,31 @@ export default function (pi: ExtensionAPI): void {
 		on: (event, handler) => pi.events.on(event, handler),
 		emit: (event, payload) => pi.events.emit(event, payload),
 	});
-	settingsRegistry.start();
+	// Registry and provider announcements are re-established at session_start and
+	// torn down at session_shutdown (start/dispose are idempotent), so a host
+	// reload cannot accumulate stale shared-bus listeners from old instances.
+	let settingsProviderDisposer: (() => void) | undefined;
+	const registerSettingsProvider = (): void => {
+		if (settingsProviderDisposer) return;
+		settingsProviderDisposer = registerCockpitSettingsProvider({
+			on: (event, handler) => pi.events.on(event, handler),
+			emit: (event, payload) => pi.events.emit(event, payload),
+		}, cockpitSettingsProvider);
+	};
 	const settingsLocale = new SettingsLocaleState(getMaestroUiPreferencesPath(getAgentDir()), settingsRegistry);
 	let config: CockpitConfig = structuredClone(DEFAULT_CONFIG);
 	let lastCtx: ExtensionContext | undefined;
 	let settingsCommandCtx: ExtensionCommandContext | undefined;
 	let capturedTui: TUI | undefined;
+	// True while Cockpit owns a capturing overlay (bash jobs, theme picker,
+	// settings panel). Split-pane resize must yield to the overlay's focus and
+	// refuse to start while one is open; otherwise the resize listener — a
+	// global terminal-input hook — swallows the overlay's first arrow/Enter/Esc.
+	let capturingOverlayActive = false;
+	// Finalizer for the currently open legacy settings overlay, so a session
+	// boundary can tear it down even when the host hides it without calling
+	// component.dispose() (MW-2).
+	let activeSettingsOverlay: { finalize(): void } | undefined;
 	let sidebarController: SidebarController | undefined;
 	let editorBottomController: EditorBottomController | undefined;
 	let dockEffectiveVisible = false;
@@ -232,6 +253,10 @@ export default function (pi: ExtensionAPI): void {
 	let firstUserText: string | undefined;
 	let titleRequested = false;
 	let titleFrameIndex = 0;
+	// Session fence for async title generation: bumped on session start/shutdown
+	// so a stale request can never write into a newer session (MW-3).
+	let titleGeneration = 0;
+	let titleAbort: AbortController | undefined;
 	const activeTools = new Map<string, { name: string; startedAt: number }>();
 	let tick: ReturnType<typeof setInterval> | undefined;
 	// Persisted rather than toasted: a config that failed to load silently downgrades
@@ -333,18 +358,28 @@ export default function (pi: ExtensionAPI): void {
 		}
 	};
 
+	// One microtask dirty latch: a burst of store events in the same tick (a
+	// message with many progress rows, a snapshot, a todo hydrate) coalesces into
+	// a single ambient refresh and a single render request per host surface (SB-6).
+	let renderScheduled = false;
 	const req = (): void => {
-		refreshAmbient();
-		try {
-			capturedTui?.requestRender();
-			sidebarController?.requestRender();
-		} catch {
-			// tui may be gone between sessions
-		}
+		if (renderScheduled) return;
+		renderScheduled = true;
+		queueMicrotask(() => {
+			renderScheduled = false;
+			refreshAmbient();
+			try {
+				capturedTui?.requestRender();
+				sidebarController?.requestRender();
+			} catch {
+				// tui may be gone between sessions
+			}
+		});
 	};
 	const policy = (): TickPolicyState => ({
 		staticMode: config.staticMode,
 		running,
+		agentActive: agents.hasActive(),
 		bashActive: bashBg.hasActive(),
 		lingering: agents.hasLingering(),
 		ticking: tick !== undefined,
@@ -536,6 +571,7 @@ export default function (pi: ExtensionAPI): void {
 			getAgents: () => agents.snapshot(),
 			getJobs: () => bashBg.snapshot(),
 			getConfig: () => config,
+			getHeight: () => capturedTui?.terminal.rows ?? 12,
 			shouldAnimate: () => shouldAnimateSidebar(policy()),
 			onVisibilityChange: (visible) => {
 				dockEffectiveVisible = visible;
@@ -705,6 +741,7 @@ export default function (pi: ExtensionAPI): void {
 		ctx: ExtensionContext,
 		modelRef: string,
 		text: string,
+		signal: AbortSignal,
 	): Promise<string | null> => {
 		const slash = modelRef.indexOf("/");
 		if (slash <= 0 || slash === modelRef.length - 1) return null;
@@ -712,17 +749,11 @@ export default function (pi: ExtensionAPI): void {
 		if (!model) return null;
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 		if (!auth.ok) return null;
-		const controller = new AbortController();
-		const timer = setTimeout(() => controller.abort(), 10_000);
-		try {
-			return await generateTitleWithModel(
-				{ baseUrl: model.baseUrl, modelId: model.id, apiKey: auth.apiKey, headers: auth.headers },
-				text,
-				controller.signal,
-			);
-		} finally {
-			clearTimeout(timer);
-		}
+		return generateTitleWithModel(
+			{ baseUrl: model.baseUrl, modelId: model.id, apiKey: auth.apiKey, headers: auth.headers },
+			text,
+			signal,
+		);
 	};
 	const generateSessionTitle = async (
 		ctx: ExtensionContext,
@@ -730,15 +761,32 @@ export default function (pi: ExtensionAPI): void {
 		assistantMessage: unknown,
 		refresh: () => void,
 	): Promise<void> => {
+		const generation = titleGeneration;
 		const fallback = suggestTitle(userText);
 		const assistantText = messageText(assistantMessage);
 		const llmInput = assistantText
 			? `${userText}\n\nAssistant:\n${assistantText.slice(0, 500)}`
 			: userText;
 		const modelRef = config.title.generationModel;
-		const title = modelRef
-			? await generateTitleWithConfiguredModel(ctx, modelRef, llmInput)
-			: null;
+		const controller = new AbortController();
+		titleAbort = controller;
+		const timer = setTimeout(() => controller.abort(), 10_000);
+		let title: string | null = null;
+		try {
+			title = modelRef
+				? await generateTitleWithConfiguredModel(ctx, modelRef, llmInput, controller.signal)
+				: null;
+		} catch {
+			// Model failures degrade to the rule fallback; never reject the
+			// fire-and-forget caller.
+			title = null;
+		} finally {
+			clearTimeout(timer);
+			if (titleAbort === controller) titleAbort = undefined;
+		}
+		// A session boundary while the request was in flight must discard the
+		// result: the title slot now belongs to the newer session (MW-3).
+		if (generation !== titleGeneration || lastCtx !== ctx) return;
 		if (title) {
 			aiTitle = title;
 		} else if (fallback) {
@@ -750,40 +798,77 @@ export default function (pi: ExtensionAPI): void {
 		refresh();
 	};
 
-	pi.events.on(TEAMMATE_STARTED_EVENT, (payload) => {
-		if (!isStartedPayload(payload)) return;
-		agents.applyStarted(payload);
-		req();
-	});
-	pi.events.on(TEAMMATE_MESSAGE_EVENT, (payload) => {
-		if (!isProgressPayload(payload)) return;
-		agents.applyMessage(payload);
-		req();
-	});
-	pi.events.on(TEAMMATE_COMPLETE_EVENT, (payload) => {
-		if (!isCompletePayload(payload)) return;
-		agents.applyComplete(payload);
-		// A failure that arrives after the session went idle still needs a loop to
-		// expire it, so the tick is re-evaluated rather than assumed to be running.
-		syncTick();
-		req();
-	});
-	pi.events.on(BASH_BG_UPDATE_EVENT, (payload) => {
-		if (!bashBg.applySnapshot(payload)) return;
-		syncTick();
-		req();
-	});
-	pi.events.on(MAESTRO_UI_SNAPSHOT_EVENT, (payload) => {
-		if (!maestro.applySnapshot(payload)) return;
-		req();
-	});
-	pi.events.on(COCKPIT_TODO_TOGGLE_EVENT, (payload) => {
-		if (!config.enabled) return;
-		const requested = payload && typeof payload === "object"
-			? (payload as { expanded?: unknown }).expanded
-			: undefined;
-		setTodoExpanded(typeof requested === "boolean" ? requested : !config.todoExpanded);
-	});
+	// Shared-bus subscriptions are session-scoped so a host /reload does not
+	// accumulate a second generation of listeners on the same bus: the old
+	// extension instance's disposers run at session_shutdown and session_start
+	// re-registers them. pi.on(...) handlers are extension-owned by the loader
+	// and need no manual cleanup.
+	const busDisposers: Array<() => void> = [];
+	const subscribeBusEvents = (): void => {
+		if (busDisposers.length > 0) return;
+		busDisposers.push(
+			pi.events.on(TEAMMATE_STARTED_EVENT, (payload) => {
+				if (!isStartedPayload(payload)) return;
+				agents.applyStarted(payload);
+				// A background agent needs the loop to keep its elapsed/stall repaints
+				// alive even after the foreground turn ended (SB-4).
+				syncTick();
+				req();
+			}),
+			pi.events.on(TEAMMATE_MESSAGE_EVENT, (payload) => {
+				if (!isProgressPayload(payload)) return;
+				agents.applyMessage(payload);
+				syncTick();
+				req();
+			}),
+			pi.events.on(TEAMMATE_COMPLETE_EVENT, (payload) => {
+				if (!isCompletePayload(payload)) return;
+				agents.applyComplete(payload);
+				// A failure that arrives after the session went idle still needs a loop to
+				// expire it, so the tick is re-evaluated rather than assumed to be running.
+				syncTick();
+				req();
+			}),
+			pi.events.on(BASH_BG_UPDATE_EVENT, (payload) => {
+				if (!bashBg.applySnapshot(payload)) return;
+				syncTick();
+				req();
+			}),
+			pi.events.on(MAESTRO_UI_SNAPSHOT_EVENT, (payload) => {
+				if (!maestro.applySnapshot(payload)) return;
+				req();
+			}),
+			pi.events.on(COCKPIT_TODO_TOGGLE_EVENT, (payload) => {
+				if (!config.enabled) return;
+				const requested = payload && typeof payload === "object"
+					? (payload as { expanded?: unknown }).expanded
+					: undefined;
+				setTodoExpanded(typeof requested === "boolean" ? requested : !config.todoExpanded);
+			}),
+			pi.events.on(COCKPIT_PREEMPT_RESIZE_EVENT, () => {
+				// A capturing overlay opened by another extension (teammate attach,
+				// control center, model mapping) must preempt an active sidebar resize
+				// or browse mode: both are global terminal-input hooks that would
+				// otherwise swallow the overlay's first arrow/Enter/Esc.
+				try {
+					sidebarController?.cancelResize();
+					sidebarController?.endFocus();
+			} catch {
+				// best effort
+			}
+			}),
+		);
+	};
+	const unsubscribeBusEvents = (): void => {
+		for (const off of busDisposers) {
+			try {
+				off();
+			} catch {
+				// best effort
+			}
+		}
+		busDisposers.length = 0;
+	};
 
 	// --- foreground tool label + todo changes ---
 	pi.on("tool_execution_start", (e) => {
@@ -801,6 +886,9 @@ export default function (pi: ExtensionAPI): void {
 	// --- session + agent lifecycle ---
 	pi.on("session_start", (_e, ctx) => {
 		lastCtx = ctx;
+		subscribeBusEvents();
+		settingsRegistry.start();
+		registerSettingsProvider();
 		configProblem = undefined;
 		activeTools.clear();
 		thinkingTimer.reset();
@@ -809,6 +897,7 @@ export default function (pi: ExtensionAPI): void {
 		firstUserText = undefined;
 		titleRequested = false;
 		titleFrameIndex = 0;
+		titleGeneration += 1;
 		ensureConfigExists();
 		config = loadConfig((m, l) => {
 			try {
@@ -870,6 +959,14 @@ export default function (pi: ExtensionAPI): void {
 			}
 		}
 		if (lastCtx) uninstallUi(lastCtx);
+		// A session boundary must tear down an overlay the host hid without
+		// dispose (theme revert, deferred enable, promise settle) (MW-2).
+		try {
+			activeSettingsOverlay?.finalize();
+		} catch {
+			// best effort
+		}
+		activeSettingsOverlay = undefined;
 		const released: CockpitUiOwnershipV1 = {
 			todo: false,
 			agents: false,
@@ -880,7 +977,23 @@ export default function (pi: ExtensionAPI): void {
 			quiet: false,
 			quietSymbols: config.quietSymbols,
 		};
+		// A session boundary must invalidate any in-flight title request: abort it
+		// and bump the generation so its result is discarded (MW-3).
+		titleAbort?.abort();
+		titleAbort = undefined;
+		titleGeneration += 1;
 		pi.events.emit(COCKPIT_UI_OWNERSHIP_EVENT, released);
+		// Tear down shared-bus subscriptions so a host reload does not leave this
+		// extension instance's listeners accumulating on the same bus. session_start
+		// re-registers them (subscribeBusEvents / registry.start / provider).
+		unsubscribeBusEvents();
+		settingsRegistry.dispose();
+		try {
+			settingsProviderDisposer?.();
+		} catch {
+			// best effort
+		}
+		settingsProviderDisposer = undefined;
 		lastCtx = undefined;
 		running = false;
 		runningStartedAt = undefined;
@@ -953,22 +1066,39 @@ export default function (pi: ExtensionAPI): void {
 		void generateSessionTitle(ctx, firstUserText, e.message, () => req());
 	});
 
+	const enterCapturingOverlay = (): void => {
+		capturingOverlayActive = true;
+		try {
+			sidebarController?.cancelResize();
+		} catch {
+			// Resize cancellation is best effort; the overlay must still open.
+		}
+	};
+	const exitCapturingOverlay = (): void => {
+		capturingOverlayActive = false;
+	};
+
 	const openBashBgOverlay = async (ctx: ExtensionContext): Promise<void> => {
 		if (!ctx.hasUI) return;
-		await ctx.ui.custom<void>((tui, theme, _kb, done) =>
-			new BashBgOverlay({
-				getJobs: () => bashBg.snapshot(),
-				requestRender: () => tui.requestRender(),
-				requestRefresh: () => pi.events.emit(BASH_BG_QUERY_EVENT, undefined),
-				close: () => done(undefined),
-				theme,
-				glyphs: resolveGlyphs(config.icons.mode),
-				hideLiveDuration: config.staticMode,
-				getTerminalRows: () => terminalRows(tui),
-			}), {
-			overlay: true,
-			overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%" },
-		});
+		enterCapturingOverlay();
+		try {
+			await ctx.ui.custom<void>((tui, theme, _kb, done) =>
+				new BashBgOverlay({
+					getJobs: () => bashBg.snapshot(),
+					requestRender: () => tui.requestRender(),
+					requestRefresh: () => pi.events.emit(BASH_BG_QUERY_EVENT, undefined),
+					close: () => done(undefined),
+					theme,
+					glyphs: resolveGlyphs(config.icons.mode),
+					hideLiveDuration: config.staticMode,
+					getTerminalRows: () => terminalRows(tui),
+				}), {
+				overlay: true,
+				overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%" },
+			});
+		} finally {
+			exitCapturingOverlay();
+		}
 	};
 
 	// --- /theme: pi ships no command for this; themes live under /settings ---
@@ -1011,11 +1141,16 @@ export default function (pi: ExtensionAPI): void {
 
 	const openThemePicker = async (ctx: ExtensionContext): Promise<void> => {
 		if (!ctx.hasUI) return;
-		await ctx.ui.custom<void>((tui, theme, _kb, done) =>
-			makeThemePicker(ctx, tui, theme, () => done(undefined)), {
-			overlay: true,
-			overlayOptions: { anchor: "center", width: "60%", maxHeight: "90%" },
-		});
+		enterCapturingOverlay();
+		try {
+			await ctx.ui.custom<void>((tui, theme, _kb, done) =>
+				makeThemePicker(ctx, tui, theme, () => done(undefined)), {
+				overlay: true,
+				overlayOptions: { anchor: "center", width: "60%", maxHeight: "90%" },
+			});
+		} finally {
+			exitCapturingOverlay();
+		}
 	};
 
 	// pi has no /theme command — the built-in picker is a submenu of /settings.
@@ -1129,10 +1264,8 @@ export default function (pi: ExtensionAPI): void {
 			ensureThinkingFolded(capturedTui, lastCtx.cwd, !readHideThinkingBlock(lastCtx.cwd));
 		},
 	});
-	registerCockpitSettingsProvider({
-		on: (event, handler) => pi.events.on(event, handler),
-		emit: (event, payload) => pi.events.emit(event, payload),
-	}, cockpitSettingsProvider);
+	// The settings provider registers on the first session (registerSettingsProvider
+	// in session_start); its disposer is stored for teardown at session_shutdown.
 
 	pi.registerShortcut(BASH_BG_OVERLAY_KEY, {
 		description: "Open background Bash jobs — live status, command, cwd, duration and output tail",
@@ -1148,7 +1281,26 @@ export default function (pi: ExtensionAPI): void {
 				ctx.ui.notify("Cockpit is disabled", "warning");
 				return;
 			}
+			if (capturingOverlayActive) {
+				ctx.ui.notify("Close the open Cockpit overlay before resizing the sidebar", "warning");
+				return;
+			}
 			sidebarController?.beginResize();
+		},
+	});
+
+	pi.registerShortcut(SIDEBAR_FOCUS_KEY, {
+		description: "Browse the Cockpit sidebar with the keyboard (↑↓/j/k/PageUp/PageDown/Home/End, Esc to leave)",
+		handler(ctx) {
+			if (!config.enabled) {
+				ctx.ui.notify("Cockpit is disabled", "warning");
+				return;
+			}
+			if (capturingOverlayActive) {
+				ctx.ui.notify("Close the open Cockpit overlay before browsing the sidebar", "warning");
+				return;
+			}
+			sidebarController?.beginFocus();
 		},
 	});
 
@@ -1257,11 +1409,14 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
-	const openSettings = async (ctx: ExtensionCommandContext): Promise<void> =>
-		ctx.ui.custom<void>((tui, theme, _kb, done) => {
-			let settingsCursor = 0;
+	const openSettings = async (ctx: ExtensionCommandContext): Promise<void> => {
+		enterCapturingOverlay();
+		try {
+			await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+				let settingsCursor = 0;
 			let saveState: SaveState = { kind: "idle" };
 			let enableAfterClose = false;
+			let settled = false;
 			// Non-null while a text row is being edited: keystrokes build the draft,
 			// Enter commits it through apply(), Esc reverts — the same cancel
 			// contract the theme picker offers, scoped to the single row.
@@ -1346,6 +1501,30 @@ export default function (pi: ExtensionAPI): void {
 				}
 				req();
 			};
+			// Idempotent teardown shared by component.dispose() and session shutdown:
+			// the host hides a stale overlay via hideOverlay() without calling
+			// component.dispose(), which would strand a previewed theme, skip the
+			// deferred UI re-install, and leave the custom() promise unsettled (MW-2).
+			const finalize = (): void => {
+				if (settled) return;
+				settled = true;
+				try {
+					sub?.handleInput("\x1b");
+				} catch {
+					// best effort
+				}
+				sub?.dispose();
+				if (enableAfterClose && config.enabled) {
+					queueMicrotask(() => {
+						if (lastCtx !== ctx || !config.enabled) return;
+						publishUiOwnership();
+						applyUi(ctx);
+						req();
+					});
+				}
+				done(undefined);
+			};
+			activeSettingsOverlay = { finalize };
 			const ui = {
 				render(width: number): string[] {
 					// The sub-view takes the whole card. It carries its own title and
@@ -1433,10 +1612,10 @@ export default function (pi: ExtensionAPI): void {
 						done(undefined);
 						return;
 					}
-					if (data === "\x1b[A" || data === "\x1b[B") {
-						const delta = data === "\x1b[A" ? -1 : 1;
+					if (matchesKey(data, Key.up) || matchesKey(data, Key.down)) {
+						const delta = matchesKey(data, Key.up) ? -1 : 1;
 						settingsCursor = (settingsCursor + delta + rows.length) % rows.length;
-					} else if (data === "\r" || data === "\n" || data === " ") {
+					} else if (matchesKey(data, Key.enter) || data === " " || decodeKittyPrintable(data) === " ") {
 						const row = rows[settingsCursor];
 						if (row.kind === "text") {
 							// Enter on a text row opens the editor with the stored value
@@ -1463,18 +1642,14 @@ export default function (pi: ExtensionAPI): void {
 				dispose(): void {
 					// Closing the panel while expanded must not strand a previewed theme
 					// with no way back, so route through the picker's own cancel path.
-					sub?.handleInput("\x1b");
-					sub?.dispose();
-					if (enableAfterClose && config.enabled) {
-						queueMicrotask(() => {
-							if (lastCtx !== ctx || !config.enabled) return;
-							publishUiOwnership();
-							applyUi(ctx);
-							req();
-						});
-					}
+					finalize();
 				},
 			};
-			return ui;
-		}, { overlay: true });
+				return ui;
+			}, { overlay: true });
+		} finally {
+			exitCapturingOverlay();
+			activeSettingsOverlay = undefined;
+		}
+	};
 }

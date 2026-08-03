@@ -9,7 +9,6 @@ import {
 import {
 	BASH_BG_QUERY_EVENT,
 	BASH_BG_UPDATE_EVENT,
-	COCKPIT_TODO_TOGGLE_EVENT,
 	COCKPIT_UI_OWNERSHIP_EVENT,
 	DEFAULT_CONFIG,
 	TEAMMATE_COMPLETE_EVENT,
@@ -18,6 +17,7 @@ import {
 } from "../src/types.ts";
 import {
 	COCKPIT_MAESTRO_QUERY_EVENT,
+	COCKPIT_TODO_TOGGLE_EVENT,
 	MAESTRO_UI_SNAPSHOT_EVENT,
 	MAESTRO_UI_SNAPSHOT_VERSION,
 } from "../src/public/v1/events.ts";
@@ -200,4 +200,17 @@ test("Cockpit working label follows the foreground tool lifecycle", () => {
 	assert.match(source, /hideLiveDuration: config\.staticMode/);
 	assert.match(source, /setWorkingIndicator\(\{ frames: \[\] \}\)/);
 	assert.match(source, /setWorkingIndicator\(\)/);
+});
+
+test("Teammate's literal cockpit event constants match the public contract (CS-6)", async () => {
+	const teammateEvents = await import(
+		"../../pi-maestro-teammate/src/shared/cockpit-events.ts"
+	);
+	const cockpitEvents = await import("../src/public/v1/events.ts");
+	assert.equal(teammateEvents.COCKPIT_UI_OWNERSHIP_EVENT, "cockpit:ui-ownership");
+	assert.equal(teammateEvents.COCKPIT_PREEMPT_RESIZE_EVENT, cockpitEvents.COCKPIT_PREEMPT_RESIZE_EVENT);
+	assert.equal(
+		teammateEvents.COCKPIT_UI_OWNERSHIP_EVENT,
+		"cockpit:ui-ownership",
+	);
 });

@@ -139,6 +139,8 @@ export interface TeammateInteractionMessageEvent {
   action: unknown;
   isInteraction: true;
   isSend?: undefined;
+  /** Epoch milliseconds of the last agent activity; emitted alongside the interaction. */
+  lastActivityAt?: number;
 }
 
 /**

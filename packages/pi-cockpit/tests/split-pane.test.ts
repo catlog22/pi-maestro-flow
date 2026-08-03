@@ -193,3 +193,92 @@ test("the global marker prevents duplicate Cockpit wrappers and exact restore pr
 	first.dispose();
 	assert.equal(harness.tui.render, replacement, "dispose must not overwrite a later renderer");
 });
+
+test("SP-2: only the initiating button's release commits a drag, and off-divider clicks do not start one", () => {
+	const harness = tuiHarness();
+	let handler: ((data: string) => { consume?: boolean } | undefined) | undefined;
+	const commits: number[] = [];
+	const controller = createSplitPaneController({
+		subscribeInput: (next) => {
+			handler = next;
+			return () => undefined;
+		},
+		onResizeCommit: (width) => { commits.push(width); },
+	});
+	controller.attach(harness.tui);
+	controller.show();
+	controller.beginResize();
+	// Button 1 (middle) release with no drag in flight must not commit anything.
+	handler?.("\x1b[<1;81;5m");
+	assert.deepEqual(commits, []);
+	// Left-button drag, then a different button's release must not commit.
+	handler?.("\x1b[<0;81;5M");
+	handler?.("\x1b[<32;76;5M");
+	handler?.("\x1b[<1;76;5m");
+	assert.deepEqual(commits, [], "a non-initiating release must not commit the drag");
+	// The initiating button's own release commits.
+	handler?.("\x1b[<0;76;5m");
+	assert.deepEqual(commits, [45]);
+});
+
+test("SP-3: keyboard nudges end an in-flight mouse drag so motion cannot overwrite them", () => {
+	const harness = tuiHarness();
+	let handler: ((data: string) => { consume?: boolean } | undefined) | undefined;
+	const commits: number[] = [];
+	const controller = createSplitPaneController({
+		subscribeInput: (next) => {
+			handler = next;
+			return () => undefined;
+		},
+		onResizeCommit: (width) => { commits.push(width); },
+	});
+	controller.attach(harness.tui);
+	controller.show();
+	controller.beginResize();
+	handler?.("\x1b[<0;81;5M");
+	handler?.("\x1b[<32;76;5M");
+	assert.equal(controller.getSidebarWidth(), 45);
+	// Keyboard nudge ends the drag; a subsequent motion must not move the width.
+	handler?.("\x1b[C"); // right arrow = one column narrower
+	assert.equal(controller.getSidebarWidth(), 44);
+	handler?.("\x1b[<32;100;5M");
+	assert.equal(controller.getSidebarWidth(), 44, "motion after a keyboard nudge must not overwrite it");
+	// The drag ended with the nudge; the mouse release must not commit a width.
+	handler?.("\x1b[<0;100;5m");
+	assert.deepEqual(commits, [], "release after a keyboard nudge must not commit");
+	// Enter still commits the keyboard-adjusted width.
+	handler?.("\r");
+	assert.deepEqual(commits, [44], "Enter commits the keyboard-adjusted width");
+});
+
+test("SP-4: keyboard nudges clamp to the effective maximum on a narrow terminal", () => {
+	const harness = tuiHarness(104); // effective max = min(56, 104-72) = 32
+	let handler: ((data: string) => { consume?: boolean } | undefined) | undefined;
+	const controller = createSplitPaneController({
+		subscribeInput: (next) => {
+			handler = next;
+			return () => undefined;
+		},
+	});
+	controller.attach(harness.tui);
+	controller.show();
+	controller.beginResize();
+	for (let i = 0; i < 40; i++) handler?.("\x1b[C"); // right = narrower
+	// Start from the effective width; nudging wider must stop at 32.
+	for (let i = 0; i < 40; i++) handler?.("\x1b[D"); // left = wider
+	assert.equal(controller.getSidebarWidth(), 32, "narrow-terminal nudge must not exceed the effective maximum");
+});
+
+test("SP-5: a second split controller is rejected even when the render chain is wrapped", () => {
+	const harness = tuiHarness();
+	const first = createSplitPaneController();
+	first.attach(harness.tui);
+	// Another renderer wraps the split wrapper (as editor-bottom does in prod).
+	const wrapped = ((width: number) => [`wrapped:${width}`]) as TUI["render"];
+	harness.tui.render = wrapped;
+	// The instance-level owner guard must still reject a second controller.
+	const second = createSplitPaneController();
+	assert.throws(() => second.attach(harness.tui), /already attached/);
+	first.dispose();
+	assert.equal(harness.tui.render, wrapped, "dispose restores the wrapper that replaced us");
+});

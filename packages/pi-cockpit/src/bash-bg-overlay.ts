@@ -1,7 +1,9 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import {
+	Key,
 	type Component,
 	type Focusable,
+	matchesKey,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
@@ -56,7 +58,7 @@ export class BashBgOverlay implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
-		if (data === "\x1b") {
+		if (matchesKey(data, Key.escape)) {
 			if (this.mode === "detail") this.mode = "list";
 			else this.params.close();
 			this.params.requestRender();
@@ -64,20 +66,20 @@ export class BashBgOverlay implements Component, Focusable {
 		}
 		// Plain letters stay reserved for future filter/command modes, so navigation
 		// and refresh use arrows and a non-letter key only.
-		if (data === "\x1b[A") {
+		if (matchesKey(data, Key.up)) {
 			this.move(-1);
 			return;
 		}
-		if (data === "\x1b[B") {
+		if (matchesKey(data, Key.down)) {
 			this.move(1);
 			return;
 		}
-		if (data === "\r" || data === "\n") {
+		if (matchesKey(data, Key.enter)) {
 			if (this.selectedJob()) this.mode = this.mode === "detail" ? "list" : "detail";
 			this.params.requestRender();
 			return;
 		}
-		if (data === "\x12" || data === "\x1b[15~") {
+		if (data === "\x12" || matchesKey(data, Key.f5)) {
 			// Ctrl+R / F5 — refresh is acknowledged immediately even though the
 			// authoritative snapshot only arrives later. Schedule the ack's own
 			// expiry so it disappears even without any follow-up repaint.

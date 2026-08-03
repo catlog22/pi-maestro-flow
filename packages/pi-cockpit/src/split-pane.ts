@@ -5,9 +5,8 @@
 import { matchesKey } from "@earendil-works/pi-tui";
 import type { OverlayOptions, TUI } from "@earendil-works/pi-tui";
 import { attachViewportStability, type ViewportStabilityPatch } from "./viewport-stability.ts";
+import { acquireMouseReporting, flushMouseReportingWrites, type MouseReportingLease } from "./mouse-reporting.ts";
 
-const ENABLE_MOUSE = "\u001b[?1002h\u001b[?1006h";
-const DISABLE_MOUSE = "\u001b[?1006l\u001b[?1002l";
 const SGR_MOUSE = /^\u001b\[<(\d+);(\d+);(\d+)([Mm])$/;
 
 export const DEFAULT_SIDEBAR_WIDTH = 40;
@@ -16,6 +15,9 @@ export const MAX_SIDEBAR_WIDTH = 56;
 export const MIN_MAIN_WIDTH = 72;
 export const MIN_SPLIT_TERMINAL_WIDTH = MIN_MAIN_WIDTH + MIN_SIDEBAR_WIDTH;
 export const COCKPIT_SPLIT_PANE_MARKER = Symbol.for("pi-cockpit.split-pane-render");
+/** TUI-instance ownership, robust against the render chain being wrapped by another renderer. */
+const COCKPIT_SPLIT_PANE_OWNER = Symbol.for("pi-cockpit.split-pane-tui-owner");
+type TuiWithOwner = TUI & Record<symbol, unknown>;
 
 export interface SgrMouseEvent {
 	button: number;
@@ -114,6 +116,8 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 	let resizing = false;
 	let resizeStartWidth = sidebarWidth;
 	let dragging = false;
+	let dragButton: number | undefined;
+	let mouseLease: MouseReportingLease | undefined;
 	let unsubscribeInput: (() => void) | undefined;
 	let mouseReportingEnabled = false;
 	let lastPublishedVisible: boolean | undefined;
@@ -181,18 +185,35 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 		safely(() => tui?.requestRender());
 	};
 
+	const sidebarNudge = (tui: TUI | undefined, delta: number): void => {
+		// Keyboard wins over an in-flight mouse drag: end the drag so the next
+		// motion cannot overwrite the keyboard result (SP-3).
+		dragging = false;
+		dragButton = undefined;
+		// Clamp to the current effective maximum, not the global one, so a narrow
+		// terminal cannot store a width its visible overlay can never show (SP-4).
+		const columns = tui?.terminal.columns;
+		const effectiveMax = columns !== undefined && Number.isFinite(columns)
+			? Math.min(maximumSidebar, columns - minimumMain)
+			: maximumSidebar;
+		controller.setSidebarWidth(clamp(sidebarWidth + delta, minimumSidebar, Math.max(minimumSidebar, effectiveMax)));
+	};
+
 	const stopResize = (restore: boolean, commit: boolean): void => {
 		const wasResizing = resizing;
 		if (!wasResizing && !mouseReportingEnabled && !unsubscribeInput) return;
 		if (restore) sidebarWidth = resizeStartWidth;
 		const effectiveWidth = syncOverlayWidth();
-		const shouldDisableMouse = mouseReportingEnabled;
+		const lease = mouseLease;
 		const unsubscribe = unsubscribeInput;
 		dragging = false;
 		resizing = false;
 		mouseReportingEnabled = false;
 		unsubscribeInput = undefined;
-		if (shouldDisableMouse) safely(() => tui?.terminal.write(DISABLE_MOUSE));
+		if (lease) {
+			lease.release();
+			mouseLease = undefined;
+		}
 		if (unsubscribe) safely(unsubscribe);
 		if (wasResizing) safely(() => options.onResizeChange?.(false));
 		if (commit && wasResizing) safely(() => options.onResizeCommit?.(sidebarWidth));
@@ -217,6 +238,14 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 		const existing = renderMarker(nextTui.render);
 		if (existing?.owner === owner) return;
 		if (existing) throw new Error("Cockpit split pane is already attached to this TUI");
+		// Instance-level guard: when another renderer (e.g. editor-bottom) wraps
+		// our render wrapper, the marker symbol is no longer the outermost and a
+		// second split controller would otherwise attach again (SP-5).
+		const instanceOwner = (nextTui as TuiWithOwner)[COCKPIT_SPLIT_PANE_OWNER];
+		if (instanceOwner !== undefined && instanceOwner !== owner) {
+			throw new Error("Cockpit split pane is already attached to this TUI");
+		}
+		(nextTui as TuiWithOwner)[COCKPIT_SPLIT_PANE_OWNER] = owner;
 
 		tui = nextTui;
 		viewportStability = attachViewportStability(nextTui);
@@ -251,15 +280,24 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 		const mouse = parseSgrMouseEvent(data);
 		if (mouse) {
 			if (mouse.release) {
-				if (dragging) stopResize(false, true);
+				// Only the button that started the drag may commit it; any other
+				// release must not submit a width the user never chose (SP-2).
+				if (dragging && dragButton === mouse.button) stopResize(false, true);
 				return { consume: true };
 			}
 			if (!mouse.motion && (mouse.button & 3) === 0 && (mouse.button & 64) === 0) {
-				const dividerX = (tui?.terminal.columns ?? 0) - sidebarWidth + 1;
-				if (Math.abs(mouse.x - dividerX) <= 1) dragging = true;
+				const columns = tui?.terminal.columns ?? 0;
+				const dividerX = columns - effectiveSidebarWidth(columns) + 1;
+				if (Math.abs(mouse.x - dividerX) <= 1) {
+					dragging = true;
+					dragButton = mouse.button;
+				}
 				return { consume: true };
 			}
 			if (mouse.motion && dragging && tui) {
+				// Only motion of the initiating button keeps the drag alive (SGR sets
+				// the 32 motion bit on top of the button value, so compare low bits).
+				if (dragButton === undefined || (mouse.button & 31) !== dragButton) return { consume: true };
 				const proposed = tui.terminal.columns - mouse.x + 1;
 				const effectiveMax = Math.min(maximumSidebar, tui.terminal.columns - minimumMain);
 				sidebarWidth = clamp(proposed, minimumSidebar, Math.max(minimumSidebar, effectiveMax));
@@ -270,19 +308,19 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 			return { consume: true };
 		}
 		if (matchesKey(data, "shift+left")) {
-			controller.setSidebarWidth(sidebarWidth + 4);
+			sidebarNudge(tui, 4);
 			return { consume: true };
 		}
 		if (matchesKey(data, "shift+right")) {
-			controller.setSidebarWidth(sidebarWidth - 4);
+			sidebarNudge(tui, -4);
 			return { consume: true };
 		}
 		if (matchesKey(data, "left")) {
-			controller.setSidebarWidth(sidebarWidth + 1);
+			sidebarNudge(tui, 1);
 			return { consume: true };
 		}
 		if (matchesKey(data, "right")) {
-			controller.setSidebarWidth(sidebarWidth - 1);
+			sidebarNudge(tui, -1);
 			return { consume: true };
 		}
 		if (matchesKey(data, "enter")) {
@@ -347,7 +385,7 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 			try {
 				unsubscribeInput = options.subscribeInput(handleResizeInput);
 				mouseReportingEnabled = true;
-				tui.terminal.write(ENABLE_MOUSE);
+				mouseLease = acquireMouseReporting(tui, "button");
 				options.onResizeChange?.(true);
 				requestRender();
 				return true;
@@ -370,8 +408,13 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 			disposed = true;
 			enabled = false;
 			if (tui && originalRender && tui.render === wrappedRender) tui.render = originalRender;
+			if (tui) {
+				const instanceOwner = (tui as TuiWithOwner)[COCKPIT_SPLIT_PANE_OWNER];
+				if (instanceOwner === owner) delete (tui as TuiWithOwner)[COCKPIT_SPLIT_PANE_OWNER];
+			}
 			viewportStability?.detach();
 			viewportStability = undefined;
+			if (tui) flushMouseReportingWrites(tui);
 			requestRender();
 			tui = undefined;
 			originalRender = undefined;
