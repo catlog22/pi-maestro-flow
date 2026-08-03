@@ -30,6 +30,8 @@ export interface SettingsRow {
 	value: string;
 	/** What pressing Enter/Space/accel switches to — shown so the cycle is visible. */
 	next: string;
+	/** "cycle" (default) toggles on Enter; "text" opens an edit field instead. */
+	kind?: "text";
 }
 
 const VIEW_MODES: ViewMode[] = ["list", "compact"];
@@ -231,11 +233,26 @@ export function buildRows(config: CockpitConfig, live?: LiveRowState): SettingsR
 			value: config.title.showMaestro ? "on" : "off",
 			next: config.title.showMaestro ? "off" : "on",
 		},
+		// Free text, not a cycle: Enter opens an edit field, Esc/Enter commits,
+		// empty clears back to the offline rule-based extractor. "(rule-based)"
+		// is a display value — the stored config stays "" so title-llm keeps
+		// its empty-means-offline contract.
+		{
+			key: "titleGenerationModel",
+			accel: "z",
+			label: "title gen model",
+			value: config.title.generationModel || "(rule-based)",
+			next: "type…",
+			kind: "text",
+		},
 	];
 }
 
-/** Apply the row's cycle to the config, returning a new config object. */
-export function applyRow(config: CockpitConfig, key: string): CockpitConfig {
+/**
+ * Apply the row to the config, returning a new config object.
+ * Cycle rows ignore `textValue`; text rows commit it (empty clears).
+ */
+export function applyRow(config: CockpitConfig, key: string, textValue?: string): CockpitConfig {
 	switch (key) {
 		case "enabled":
 			return { ...config, enabled: !config.enabled };
@@ -283,6 +300,8 @@ export function applyRow(config: CockpitConfig, key: string): CockpitConfig {
 			return { ...config, title: { ...config.title, showGit: !config.title.showGit } };
 		case "titleMaestro":
 			return { ...config, title: { ...config.title, showMaestro: !config.title.showMaestro } };
+		case "titleGenerationModel":
+			return { ...config, title: { ...config.title, generationModel: (textValue ?? "").trim() } };
 		// "theme" is intentionally absent: the row hands off to the /theme picker,
 		// which owns both the preview and the write-through to pi's settings.
 		// "thinkingFold" is absent for the same reason: pi owns hideThinkingBlock,

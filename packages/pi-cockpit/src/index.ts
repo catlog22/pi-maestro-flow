@@ -1262,6 +1262,11 @@ export default function (pi: ExtensionAPI): void {
 			let settingsCursor = 0;
 			let saveState: SaveState = { kind: "idle" };
 			let enableAfterClose = false;
+			// Non-null while a text row is being edited: keystrokes build the draft,
+			// Enter commits it through apply(), Esc reverts — the same cancel
+			// contract the theme picker offers, scoped to the single row.
+			let editingText: string | null = null;
+			let textDraft = "";
 			// Mirror of pi's hideThinkingBlock, read when the panel opens. The
 			// overlay captures input, so Ctrl+T cannot flip it while this is open
 			// and the mirror stays exact until the panel closes.
@@ -1276,7 +1281,7 @@ export default function (pi: ExtensionAPI): void {
 				sub = undefined;
 				tui.requestRender();
 			};
-			const apply = (key: string): void => {
+			const apply = (key: string, textValue?: string): void => {
 				const wasEnabled = config.enabled;
 				const wasQuiet = config.quietMode;
 				const wasStatic = config.staticMode;
@@ -1301,7 +1306,7 @@ export default function (pi: ExtensionAPI): void {
 						: { kind: "failed", message: "editor unreachable" };
 					return;
 				}
-				config = applyRow(config, key);
+				config = applyRow(config, key, textValue);
 				saveState = { kind: "saving" };
 				const result = saveConfig(config);
 				// The panel now reports what actually happened instead of showing
@@ -1358,13 +1363,21 @@ export default function (pi: ExtensionAPI): void {
 					];
 					rows.forEach((row, index) => {
 						const selected = index === settingsCursor;
-						const marker = selected ? paint.fg("accent", "›") : " ";
+						const editing = editingText === row.key;
+						const marker = editing ? paint.fg("accent", "›") : selected ? paint.fg("accent", "›") : " ";
 						const pad = " ".repeat(Math.max(0, labelWidth - visibleWidth(row.label)));
 						const label = paint.fg(selected ? "text" : "muted", row.label) + pad;
-						const value = paint.fg("accent", row.value);
-						// Showing the next value makes the cycle visible instead of
-						// something the user has to discover by pressing and watching.
-						const hint = selected ? paint.fg("dim", ` → ${row.next}`) : "";
+						// Text rows show the live draft plus a block cursor while editing;
+						// the stored value is only committed on Enter, so Esc reverts cleanly.
+						const shownValue = editing ? textDraft : row.value;
+						const value = paint.fg("accent", shownValue + (editing ? "▏" : ""));
+						// Cycle rows advertise their next value; the text row shows its edit
+						// affordance, and while editing the commit keys replace the hints.
+						const hint = editing
+							? paint.fg("dim", " → Enter save · Esc cancel")
+							: selected
+								? paint.fg("dim", ` → ${row.next}`)
+								: "";
 						lines.push(`${marker} ${paint.fg("dim", row.accel)} ${label}  ${value}${hint}`);
 					});
 					lines.push("");
@@ -1381,7 +1394,11 @@ export default function (pi: ExtensionAPI): void {
 					// Thinking fold is pi's setting too (Ctrl+T), mirrored live here.
 					lines.push(paint.fg("dim", "theme & thinking are stored by pi"));
 					lines.push(paint.fg("dim", "/settings pairs light+dark"));
-					lines.push(paint.fg("dim", "↑↓ move · Enter change · letter jumps · Esc close"));
+					lines.push(
+						editingText
+							? paint.fg("dim", "type · Enter save · Esc cancel")
+							: paint.fg("dim", "↑↓ move · Enter change · letter jumps · Esc close"),
+					);
 					return lines.map((line) => truncateToWidth(line, width, "…"));
 				},
 				invalidate(): void {},
@@ -1394,6 +1411,24 @@ export default function (pi: ExtensionAPI): void {
 						return;
 					}
 					const rows = buildRows(config, { thinkingHidden });
+					// Text edit mode: every key types into the draft except the
+					// commit/cancel trio. Multi-byte sequences (arrows, alt chords)
+					// are dropped so escape bytes cannot enter a model ref.
+					if (editingText !== null) {
+						if (matchesKey(data, Key.escape)) {
+							editingText = null;
+						} else if (data === "\r" || data === "\n") {
+							const key = editingText;
+							editingText = null;
+							apply(key, textDraft);
+						} else if (data === "\x7f" || data === "\x08") {
+							textDraft = textDraft.slice(0, -1);
+						} else if (data.length === 1 && data >= " ") {
+							textDraft += data;
+						}
+						tui.requestRender();
+						return;
+					}
 					if (matchesKey(data, Key.escape)) {
 						done(undefined);
 						return;
@@ -1402,12 +1437,26 @@ export default function (pi: ExtensionAPI): void {
 						const delta = data === "\x1b[A" ? -1 : 1;
 						settingsCursor = (settingsCursor + delta + rows.length) % rows.length;
 					} else if (data === "\r" || data === "\n" || data === " ") {
-						apply(rows[settingsCursor].key);
+						const row = rows[settingsCursor];
+						if (row.kind === "text") {
+							// Enter on a text row opens the editor with the stored value
+							// (not the "(rule-based)" display string) as the draft.
+							editingText = row.key;
+							textDraft = config.title.generationModel ?? "";
+						} else {
+							apply(row.key);
+						}
 					} else {
 						const key = rowKeyForAccel(rows, data);
 						if (!key) return;
 						settingsCursor = rows.findIndex((row) => row.key === key);
-						apply(key);
+						const row = rows[settingsCursor];
+						if (row.kind === "text") {
+							editingText = row.key;
+							textDraft = config.title.generationModel ?? "";
+						} else {
+							apply(key);
+						}
 					}
 					tui.requestRender();
 				},
