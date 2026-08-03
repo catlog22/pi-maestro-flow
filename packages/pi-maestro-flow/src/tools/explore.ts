@@ -83,7 +83,7 @@ export async function executeExplore(
           background: false,
           reply_to: "caller",
         },
-        createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
+        await createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
       );
       if (!result) throw new Error("Explore returned no teammate result");
 

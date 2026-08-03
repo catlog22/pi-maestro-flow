@@ -25,7 +25,7 @@ test("direct teammate options install the parent-authoritative request bridge", 
   });
 
   try {
-    const options = createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal });
+    const options = await createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal });
     assert.equal(options.baseCwd, ctx.cwd);
     assert.equal(options.signal, signal);
     assert.equal(options.modelCapabilities?.[0]?.id, "provider/model");

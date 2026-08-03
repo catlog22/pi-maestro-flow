@@ -1410,6 +1410,35 @@ export function applyModelRouting(
   };
 }
 
+export interface ModelRegistryRefreshContext {
+  modelRegistry?: { refresh?: () => Promise<unknown> } | undefined;
+}
+
+let modelRegistryRefreshInFlight: Promise<void> | undefined;
+
+/**
+ * Await a coalesced refresh of the host model registry before reading its
+ * getAvailable() snapshot. The sync snapshot is only rebuilt by refresh();
+ * without it, models deleted from config/auth stay visible to catalog,
+ * routing and modelCapabilities validation until unrelated code refreshes.
+ */
+export async function refreshModelRegistry(ctx: ModelRegistryRefreshContext): Promise<void> {
+  const refresh = ctx.modelRegistry?.refresh;
+  if (!refresh) return;
+  modelRegistryRefreshInFlight ??= refresh()
+    .then(() => undefined, (error) => {
+      // A failed registry refresh must not block dispatch; the previous
+      // snapshot stays authoritative until the next successful refresh.
+      console.error(
+        `[pi-maestro-teammate] model registry refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    })
+    .finally(() => {
+      modelRegistryRefreshInFlight = undefined;
+    });
+  await modelRegistryRefreshInFlight;
+}
+
 export function formatModelRoutingConfig(
   cwd: string,
   agents: readonly { taskType?: TeammateTaskType }[] = [],

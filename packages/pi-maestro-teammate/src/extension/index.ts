@@ -186,6 +186,7 @@ import {
   applyModelRouting,
   formatModelRoutingConfig,
   parseTeammateTaskType,
+  refreshModelRegistry,
   type TeammateTaskType,
 } from "../models/model-routing.ts";
 import type { TeammateThinkingInput } from "../shared/thinking.ts";
@@ -336,30 +337,6 @@ export default function registerTeammateExtension(
     const next = createModelCatalogSnapshot(ctx.modelRegistry?.getAvailable?.() ?? []);
     if (next.signature !== modelCatalog.signature) modelCatalog = next;
     return modelCatalog;
-  };
-
-  /**
-   * The host's getAvailable() reads a synchronous snapshot that is only
-   * rebuilt by refresh(). Await a coalesced refresh before dispatch so a
-   * model deleted from config/auth is dropped from the catalog, routing and
-   * modelCapabilities validation instead of being spawned one last time.
-   */
-  let modelRegistryRefreshInFlight: Promise<void> | undefined;
-  const refreshModelRegistry = async (ctx: ExtensionContext): Promise<void> => {
-    if (!ctx.modelRegistry?.refresh) return;
-    modelRegistryRefreshInFlight ??= ctx.modelRegistry
-      .refresh()
-      .catch((error) => {
-        // A failed registry refresh must not block dispatch; the previous
-        // snapshot stays authoritative until the next successful refresh.
-        console.error(
-          `[pi-maestro-teammate] model registry refresh failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      })
-      .finally(() => {
-        modelRegistryRefreshInFlight = undefined;
-      });
-    await modelRegistryRefreshInFlight;
   };
 
   const injectTeammateContext = (

@@ -231,7 +231,7 @@ async function runVerifier(
       evidence: [],
     };
   }
-  const options: RunTeammateOptions = createDirectTeammateRunOptions(
+  const options: RunTeammateOptions = await createDirectTeammateRunOptions(
     bridge.extensionApi,
     ctx as ExtensionContext,
     { baseCwd: bridge.baseCwd || ctx.cwd },

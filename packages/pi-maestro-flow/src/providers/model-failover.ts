@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { lockSettingsResourceSync } from "../settings/resource-lock.ts";
+import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
 import {
   analyzeAttachedImage,
   isMultimodalModel,
@@ -327,6 +328,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     chain: string[],
     startIndex: number,
   ): Promise<ActiveModelRun | undefined> => {
+    await refreshModelRegistry(ctx);
     const models = availableModels(ctx);
     for (let index = startIndex; index < chain.length; index += 1) {
       const candidate = chain[index];

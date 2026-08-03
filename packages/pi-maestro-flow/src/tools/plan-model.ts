@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { lockSettingsResource } from "../settings/resource-lock.ts";
 import { isPlanMode } from "./plan.ts";
+import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
 
 interface PlanModelPatch {
   present: boolean;
@@ -120,6 +121,7 @@ export function registerPlanModelSelection(
         ctx.ui.notify("Trust this workspace before saving a project-local Plan model.", "warning");
         return;
       }
+      await refreshModelRegistry(ctx);
       const available = ctx.modelRegistry.getAvailable();
       const references = available.map((model) => modelKey(model)!).sort();
       const requested = args.trim();

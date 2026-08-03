@@ -9,6 +9,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { clampThinkingLevel, complete } from "@earendil-works/pi-ai/compat";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
 import {
   isRetryableProviderError,
   ModelCircuitBreaker,
@@ -557,6 +558,7 @@ async function delegateImage(
   breaker: ModelCircuitBreaker = sharedVisionModelCircuitBreaker,
   telemetry: VisionTelemetry = noopVisionTelemetry(),
 ): Promise<VisionAnalysisResult> {
+  await refreshModelRegistry(ctx);
   const references = candidateReferences(ctx, config);
   if (references.length === 0) throw new Error("no multimodal model is available");
   telemetry.emit({ type: "delegation_start", prompt });

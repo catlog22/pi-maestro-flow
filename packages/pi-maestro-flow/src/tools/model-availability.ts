@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import { getEnabledTools, loadCliToolsConfig } from "../providers/cli-tools-loader.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { toolCallLine, toolResultLine } from "../quiet-render.ts";
+import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
 
 export const ModelAvailabilityParams = Type.Object({
   filter: Type.Optional(Type.String({ description: "Optional substring to filter model/tool names" })),
@@ -109,6 +110,7 @@ Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\
 
       steps.push("Enumerating pi teammate models (modelRegistry.getAvailable)…");
       emit({});
+      await refreshModelRegistry(ctx);
       const teammateModels = listTeammateModels(ctx);
       steps.push(`Found ${teammateModels.length} authenticated teammate model(s).`);
       emit({ teammate_models: teammateModels });

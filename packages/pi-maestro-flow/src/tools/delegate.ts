@@ -68,7 +68,7 @@ export async function executeDelegate(
         background: false,
         reply_to: "caller",
       },
-      createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
+      await createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
     );
     if (!result) throw new Error("Delegate returned no teammate result");
 

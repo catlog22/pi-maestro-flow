@@ -11,6 +11,7 @@ import type { FlowToolResult } from "./tool-result.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { runTeammate } from "pi-maestro-teammate/v1/execution";
 import type { SingleResult } from "pi-maestro-teammate/v1/types";
+import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
 import { createDirectTeammateRunOptions } from "./direct-teammate.ts";
 
 export interface MoaParams {
@@ -29,17 +30,20 @@ interface ReferenceOutput {
 }
 
 /**
- * Get available models from registered providers.
- * Falls back to a default set if provider registry is not available.
+ * Get currently available models from the refreshed provider registry.
+ * MOA reference fan-out is intentionally small and prefers distinct providers
+ * so references span independent endpoints.
  */
-function getAvailableModels(preset?: string): string[] {
-  // Default models for MOA — the provider registry will override these
-  // when fully connected. For now, use a reasonable default set.
-  return [
-    "anthropic/claude-sonnet-4",
-    "google/gemini-2.5-pro",
-    "openai/gpt-4.1",
-  ];
+async function getAvailableModels(ctx: ExtensionContext): Promise<string[]> {
+  await refreshModelRegistry(ctx);
+  const ids = ctx.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`);
+  const byProvider = new Map<string, string>();
+  for (const id of ids) {
+    const slash = id.indexOf("/");
+    const provider = slash >= 0 ? id.slice(0, slash) : id;
+    if (!byProvider.has(provider)) byProvider.set(provider, id);
+  }
+  return [...byProvider.values()].slice(0, 3);
 }
 
 /**
@@ -64,7 +68,14 @@ export async function executeMoa(
     };
   }
 
-  const models = getAvailableModels(params.preset);
+  const models = await getAvailableModels(ctx);
+  if (models.length === 0) {
+    return {
+      content: [{ type: "text", text: "No teammate models are available for MOA; configure provider authentication first." }],
+      isError: true,
+      details: {},
+    };
+  }
 
   // Phase 1: Spawn parallel reference agents across different models
   const referenceOutputs: ReferenceOutput[] = [];
@@ -88,7 +99,7 @@ export async function executeMoa(
             background: false,
             reply_to: "caller",
           },
-          createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
+          await createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
         );
         if (!result) throw new Error("MOA reference returned no teammate result");
 
@@ -160,7 +171,7 @@ export async function executeMoa(
         background: false,
         reply_to: "caller",
       },
-      createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
+      await createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
     );
     if (!aggregatorResult) throw new Error("MOA aggregator returned no teammate result");
 

@@ -83,6 +83,18 @@ export declare function promoteProjectModelRoutingOverrides(cwd: string, name: s
 export declare function deleteGlobalModelRoutingProfile(cwd: string, profileId: string, globalFilePath?: string): ModelRoutingState;
 export declare function inferTaskType(input: TaskTypeInput): TeammateTaskType | undefined;
 export declare function applyModelRouting(params: RunTeammateParams, cwd: string, availableModels?: readonly string[], globalFilePath?: string): RunTeammateParams;
+export interface ModelRegistryRefreshContext {
+    modelRegistry?: {
+        refresh?: () => Promise<unknown>;
+    } | undefined;
+}
+/**
+ * Await a coalesced refresh of the host model registry before reading its
+ * getAvailable() snapshot. The sync snapshot is only rebuilt by refresh();
+ * without it, models deleted from config/auth stay visible to catalog,
+ * routing and modelCapabilities validation until unrelated code refreshes.
+ */
+export declare function refreshModelRegistry(ctx: ModelRegistryRefreshContext): Promise<void>;
 export declare function formatModelRoutingConfig(cwd: string, agents?: readonly {
     taskType?: TeammateTaskType;
 }[]): string;
