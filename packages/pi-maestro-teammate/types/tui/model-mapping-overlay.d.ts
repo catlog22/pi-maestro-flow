@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type Component, type Focusable } from "@earendil-works/pi-tui";
 import type { AgentConfig } from "../agents/agents.ts";
+import type { ModelCircuitSnapshot } from "../models/model-circuit-breaker.ts";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
 import { type ModelRoutingRules, type ModelRoutingState, type TeammateTaskType } from "../models/model-routing.ts";
 import { type TeammateThinkingLevel } from "../shared/thinking.ts";
@@ -34,6 +35,7 @@ export type ControlCenterAction = {
 export interface TeammateControlCenterOptions {
     agents?: readonly AgentConfig[];
     activeAgents?: readonly ControlCenterActiveAgent[];
+    modelHealth?: readonly ModelCircuitSnapshot[];
     onOpenAgent?: (correlationId: string) => Promise<void>;
     globalFilePath?: string;
 }
@@ -63,6 +65,8 @@ interface TeammateControlCenterParams {
     close: (action: ControlCenterAction | null) => void;
     saveMapping?: (taskType: TeammateTaskType, model: string | null) => void;
     saveThinking?: (taskType: TeammateTaskType, thinking: TeammateThinkingLevel | null) => void;
+    saveFallbacks?: (taskType: TeammateTaskType, models: string[] | null) => void;
+    modelHealth?: readonly ModelCircuitSnapshot[];
 }
 export declare class TeammateControlCenter implements Component, Focusable {
     private readonly params;
@@ -86,6 +90,8 @@ export declare class TeammateControlCenter implements Component, Focusable {
     private readonly profileIds;
     private readonly models;
     private readonly modelCapabilities;
+    private readonly health;
+    private fallbackDraft;
     private readonly agents;
     private readonly taskTypes;
     private readonly activeAgents;
@@ -100,7 +106,16 @@ export declare class TeammateControlCenter implements Component, Focusable {
     private moveSelection;
     private activateSelection;
     private activateThinkingSelection;
+    private activateFallbackSelection;
     private handleModelInput;
+    private handleFallbackInput;
+    private fallbackItems;
+    private fallbackItemDetail;
+    private circuitNote;
+    private editorLabel;
+    private toggleFallbackItem;
+    private reorderFallback;
+    private commitFallback;
     private taskTypeMeta;
     private filteredProfileIds;
     private filteredTaskTypes;

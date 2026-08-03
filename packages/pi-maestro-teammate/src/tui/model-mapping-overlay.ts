@@ -11,6 +11,7 @@ import {
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { AgentConfig, AgentSource } from "../agents/agents.ts";
+import type { ModelCircuitSnapshot } from "../models/model-circuit-breaker.ts";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
 import {
   TEAMMATE_TASK_TYPE_META,
@@ -23,6 +24,7 @@ import {
   renameGlobalModelRoutingProfile,
   saveGlobalProfileModelMapping,
   saveGlobalProfileThinkingLevel,
+  saveProjectFallbackMapping,
   setDefaultGlobalModelRoutingProfile,
   setProjectActiveModelRoutingProfile,
   setProjectModelRoutingOverridesEnabled,
@@ -65,6 +67,7 @@ export type ControlCenterAction =
 export interface TeammateControlCenterOptions {
   agents?: readonly AgentConfig[];
   activeAgents?: readonly ControlCenterActiveAgent[];
+  modelHealth?: readonly ModelCircuitSnapshot[];
   onOpenAgent?: (correlationId: string) => Promise<void>;
   globalFilePath?: string;
 }
@@ -96,6 +99,8 @@ interface TeammateControlCenterParams {
   close: (action: ControlCenterAction | null) => void;
   saveMapping?: (taskType: TeammateTaskType, model: string | null) => void;
   saveThinking?: (taskType: TeammateTaskType, thinking: TeammateThinkingLevel | null) => void;
+  saveFallbacks?: (taskType: TeammateTaskType, models: string[] | null) => void;
+  modelHealth?: readonly ModelCircuitSnapshot[];
 }
 
 const SOURCE_ORDER: Record<AgentSource, number> = { project: 0, user: 1, builtin: 2 };
@@ -192,7 +197,7 @@ export class TeammateControlCenter implements Component, Focusable {
   focused = false;
   private tab: ControlCenterTab;
   private modelTaskType: TeammateTaskType | null = null;
-  private editorKind: "model" | "thinking" = "model";
+  private editorKind: "model" | "thinking" | "fallback" = "model";
   private readonly queries: Record<ControlCenterTab, string> = { profiles: "", routing: "", roles: "", active: "" };
   private modelQuery = "";
   private readonly selected: Record<ControlCenterTab, number> = { profiles: 0, routing: 0, roles: 0, active: 0 };
@@ -209,6 +214,8 @@ export class TeammateControlCenter implements Component, Focusable {
   private readonly profileIds: string[];
   private readonly models: string[];
   private readonly modelCapabilities: Map<string, TeammateModelCapability>;
+  private readonly health = new Map<string, ModelCircuitSnapshot>();
+  private fallbackDraft: string[] = [];
   private readonly agents: AgentConfig[];
   private readonly taskTypes: TeammateTaskType[];
   private readonly activeAgents: ControlCenterActiveAgent[];
@@ -236,6 +243,7 @@ export class TeammateControlCenter implements Component, Focusable {
     const focusedProfileIndex = this.filteredProfileIds().indexOf(focusedProfileId);
     if (focusedProfileIndex >= 0) this.selected.profiles = focusedProfileIndex;
     this.modelCapabilities = new Map(params.availableModels.map((model) => [model.id, model]));
+    for (const entry of params.modelHealth ?? []) this.health.set(entry.model, entry);
     this.models = [...this.modelCapabilities.keys()].sort((left, right) => left.localeCompare(right));
     this.agents = [...params.agents].sort((left, right) =>
       SOURCE_ORDER[left.source] - SOURCE_ORDER[right.source] || left.name.localeCompare(right.name)
@@ -344,6 +352,10 @@ export class TeammateControlCenter implements Component, Focusable {
       this.activateThinkingSelection();
       return;
     }
+    if (matchesKey(data, Key.ctrl("f")) && this.tab === "routing") {
+      this.activateFallbackSelection();
+      return;
+    }
     const input = printableInput(data);
     if (input) {
       this.queries[this.tab] += input;
@@ -424,8 +436,28 @@ export class TeammateControlCenter implements Component, Focusable {
     this.params.requestRender();
   }
 
+  private activateFallbackSelection(): void {
+    if (this.params.readOnly) {
+      this.params.close({ kind: "reload", tab: this.tab });
+      return;
+    }
+    const item = this.filteredTaskTypes()[this.selected.routing];
+    if (!item) return;
+    this.modelTaskType = item;
+    this.editorKind = "fallback";
+    this.fallbackDraft = [...(this.config.fallbackMappings?.[item] ?? [])];
+    this.modelQuery = "";
+    this.modelSelected = 0;
+    this.statusText = "";
+    this.params.requestRender();
+  }
+
   private handleModelInput(data: string): void {
     if (this.saving) return;
+    if (this.editorKind === "fallback") {
+      this.handleFallbackInput(data);
+      return;
+    }
     if (matchesKey(data, Key.escape) || matchesKey(data, Key.left)) {
       this.modelTaskType = null;
       this.modelQuery = "";
@@ -509,6 +541,174 @@ export class TeammateControlCenter implements Component, Focusable {
       this.modelSelected = 0;
       this.params.requestRender();
     }
+  }
+
+  private handleFallbackInput(data: string): void {
+    if (this.saving) return;
+    if (matchesKey(data, Key.escape) || matchesKey(data, Key.left)) {
+      this.modelTaskType = null;
+      this.fallbackDraft = [];
+      this.modelQuery = "";
+      this.statusText = "";
+      this.params.requestRender();
+      return;
+    }
+    const items = this.filteredEditorItems();
+    if (matchesKey(data, Key.up) || (matchesKey(data, "k") && !this.modelQuery)) {
+      this.modelSelected = clampIndex(this.modelSelected - 1, items.length);
+      this.params.requestRender();
+      return;
+    }
+    if (matchesKey(data, Key.down) || (matchesKey(data, "j") && !this.modelQuery)) {
+      this.modelSelected = clampIndex(this.modelSelected + 1, items.length);
+      this.params.requestRender();
+      return;
+    }
+    if (matchesKey(data, Key.ctrl("up"))) {
+      this.reorderFallback(-1);
+      return;
+    }
+    if (matchesKey(data, Key.ctrl("down"))) {
+      this.reorderFallback(1);
+      return;
+    }
+    if (matchesKey(data, Key.space) || data === " ") {
+      this.toggleFallbackItem();
+      return;
+    }
+    if (matchesKey(data, Key.enter)) {
+      this.commitFallback();
+      return;
+    }
+    if (matchesKey(data, Key.backspace)) {
+      if (this.modelQuery) {
+        this.modelQuery = removeLastGrapheme(this.modelQuery);
+        this.modelSelected = 0;
+        this.params.requestRender();
+      }
+      return;
+    }
+    const input = printableInput(data);
+    if (input) {
+      this.modelQuery += input;
+      this.modelSelected = 0;
+      this.params.requestRender();
+    }
+  }
+
+  private fallbackItems(taskType: TeammateTaskType): Array<{
+    value: string;
+    label: string;
+    detail: string;
+    active: boolean;
+    unavailable: boolean;
+  }> {
+    const chain = this.fallbackDraft;
+    const items: Array<{
+      value: string;
+      label: string;
+      detail: string;
+      active: boolean;
+      unavailable: boolean;
+    }> = [];
+    for (const model of chain) {
+      const authenticated = this.models.includes(model);
+      items.push({
+        value: model,
+        label: model,
+        detail: authenticated
+          ? this.fallbackItemDetail(model, chain.indexOf(model) + 1)
+          : "Not authenticated in this session",
+        active: true,
+        unavailable: !authenticated,
+      });
+    }
+    for (const model of this.models.filter((candidate) => !chain.includes(candidate))) {
+      items.push({
+        value: model,
+        label: model,
+        detail: this.fallbackItemDetail(model, -1),
+        active: false,
+        unavailable: false,
+      });
+    }
+    return items;
+  }
+
+  private fallbackItemDetail(model: string, priority: number): string {
+    const circuit = this.circuitNote(model);
+    if (priority < 0) return ["Not in fallback chain", circuit].filter(Boolean).join(" · ");
+    return ["Fallback priority " + String(priority), circuit].filter(Boolean).join(" · ");
+  }
+
+  private circuitNote(model: string): string {
+    const health = this.health.get(model);
+    if (!health || health.state === "CLOSED") return "";
+    const detail = health.state === "OPEN" ? "circuit open · skipped" : "circuit half-open · probing";
+    return health.consecutiveFailures > 0 ? `${detail} (${health.consecutiveFailures} failures)` : detail;
+  }
+
+  private editorLabel(): string {
+    if (this.editorKind === "fallback") return "Fallback";
+    if (this.editorKind === "thinking") return "Thinking";
+    return "Model";
+  }
+
+  private toggleFallbackItem(): void {
+    const taskType = this.modelTaskType;
+    const item = this.filteredEditorItems()[this.modelSelected];
+    if (!taskType || !item) return;
+    const index = this.fallbackDraft.indexOf(item.value);
+    if (index >= 0) this.fallbackDraft.splice(index, 1);
+    else this.fallbackDraft.push(item.value);
+    this.modelSelected = this.fallbackItems(taskType).findIndex((entry) => entry.value === item.value);
+    if (this.modelSelected < 0) this.modelSelected = 0;
+    this.statusText = "";
+    this.params.requestRender();
+  }
+
+  private reorderFallback(direction: -1 | 1): void {
+    const taskType = this.modelTaskType;
+    const item = this.filteredEditorItems()[this.modelSelected];
+    if (!taskType || !item) return;
+    const index = this.fallbackDraft.indexOf(item.value);
+    if (index < 0) return;
+    const target = index + direction;
+    if (target < 0 || target >= this.fallbackDraft.length) return;
+    [this.fallbackDraft[index], this.fallbackDraft[target]] = [this.fallbackDraft[target], this.fallbackDraft[index]];
+    this.modelSelected = this.fallbackItems(taskType).findIndex((entry) => entry.value === item.value);
+    if (this.modelSelected < 0) this.modelSelected = 0;
+    this.params.requestRender();
+  }
+
+  private commitFallback(): void {
+    const taskType = this.modelTaskType;
+    if (!taskType) return;
+    this.saving = true;
+    this.statusTone = "dim";
+    this.statusText = `Saving ${this.taskTypeMeta(taskType).label} fallbacks…`;
+    this.params.requestRender();
+    this.persistenceTimer = setTimeout(() => {
+      this.persistenceTimer = undefined;
+      try {
+        const models = this.fallbackDraft.length > 0 ? [...this.fallbackDraft] : null;
+        if (this.params.saveFallbacks) this.params.saveFallbacks(taskType, models);
+        else saveProjectFallbackMapping(this.params.cwd, taskType, models, this.params.globalFilePath);
+        this.config.fallbackMappings = { ...(this.config.fallbackMappings ?? {}), [taskType]: models };
+        this.saving = false;
+        this.statusTone = "success";
+        this.statusText = models ? `Saved fallbacks · ${models.join(", ")}` : "Saved fallbacks · none";
+        this.modelTaskType = null;
+        this.fallbackDraft = [];
+        this.modelQuery = "";
+        this.params.requestRender();
+      } catch (error) {
+        this.saving = false;
+        this.statusTone = "error";
+        this.statusText = `Save failed · ${error instanceof Error ? error.message : String(error)}`;
+        this.params.requestRender();
+      }
+    }, 16);
   }
 
   private taskTypeMeta(taskType: TeammateTaskType): { label: string; roles: string; description: string } {
@@ -598,7 +798,10 @@ export class TeammateControlCenter implements Component, Focusable {
       items.push({
         value: model,
         label: model,
-        detail: model === configured ? `Current ${taskType} mapping` : "Authenticated in this session",
+        detail: [
+          model === configured ? `Current ${taskType} mapping` : "Authenticated in this session",
+          this.circuitNote(model),
+        ].filter(Boolean).join(" · "),
         active: model === configured,
         unavailable: false,
       });
@@ -647,7 +850,9 @@ export class TeammateControlCenter implements Component, Focusable {
     if (!this.modelTaskType) return [];
     const items = this.editorKind === "thinking"
       ? this.thinkingItems(this.modelTaskType)
-      : this.modelItems(this.modelTaskType);
+      : this.editorKind === "fallback"
+        ? this.fallbackItems(this.modelTaskType)
+        : this.modelItems(this.modelTaskType);
     const query = this.modelQuery.toLowerCase();
     return query ? items.filter((item) => `${item.label} ${item.detail}`.toLowerCase().includes(query)) : items;
   }
@@ -696,7 +901,7 @@ export class TeammateControlCenter implements Component, Focusable {
     const meta = this.taskTypeMeta(taskType);
     const rows: string[] = [
       truncateToWidth(
-        `${this.params.theme.fg("accent", this.params.theme.bold("Teammate Control Center"))} ${this.params.theme.fg("dim", "›")} ${this.params.theme.bold(displayText(meta.label))} ${this.params.theme.fg("dim", `› ${this.editorKind === "thinking" ? "Thinking" : "Model"} (${displayText(meta.roles)})`)}`,
+        `${this.params.theme.fg("accent", this.params.theme.bold("Teammate Control Center"))} ${this.params.theme.fg("dim", "›")} ${this.params.theme.bold(displayText(meta.label))} ${this.params.theme.fg("dim", `› ${this.editorLabel()} (${displayText(meta.roles)})`)}`,
         inner,
         "…",
       ),
@@ -726,10 +931,12 @@ export class TeammateControlCenter implements Component, Focusable {
     }
     if (this.statusText) rows.push(this.statusLine(inner));
       rows.push(truncateToWidth(
-      `${this.params.theme.fg("dim", "Esc/←")} back ${this.params.theme.fg("dim", "· Enter")} save ${this.params.theme.fg("dim", "· ↑↓")} select ${this.params.theme.fg("dim", "· type")} filter`,
-      inner,
-      "…",
-    ));
+        this.editorKind === "fallback"
+          ? `${this.params.theme.fg("dim", "Esc/←")} back ${this.params.theme.fg("dim", "· Space")} toggle ${this.params.theme.fg("dim", "· Ctrl+↑↓")} order ${this.params.theme.fg("dim", "· Enter")} save ${this.params.theme.fg("dim", "· type")} filter`
+          : `${this.params.theme.fg("dim", "Esc/←")} back ${this.params.theme.fg("dim", "· Enter")} save ${this.params.theme.fg("dim", "· ↑↓")} select ${this.params.theme.fg("dim", "· type")} filter`,
+        inner,
+        "…",
+      ));
     return this.frame(rows, width);
   }
 
@@ -812,6 +1019,13 @@ export class TeammateControlCenter implements Component, Focusable {
       lines.push(...wrapTextWithAnsi(displayText(meta.description), Math.max(1, width)).slice(0, 3));
       lines.push(this.params.theme.fg("dim", `Model · ${displayText(mapping)}`));
       lines.push(this.params.theme.fg("dim", `Fallbacks · ${this.config.fallbackMappings?.[taskType]?.map(displayText).join(", ") || "none"}`));
+      const unhealthy = (this.config.fallbackMappings?.[taskType] ?? [])
+        .map((model) => ({ model, health: this.health.get(model) }))
+        .filter((entry): entry is { model: string; health: ModelCircuitSnapshot } =>
+          !!entry.health && entry.health.state !== "CLOSED");
+      if (unhealthy.length > 0) {
+        lines.push(this.params.theme.fg("warning", `Circuit · ${unhealthy.map((entry) => `${displayText(entry.model)} ${entry.health.state}`).join(", ")}`));
+      }
       lines.push(this.params.theme.fg("dim", `Thinking · ${displayText(this.config.thinkingLevels[taskType] ?? "inherit / Pi default")}`));
       lines.push(this.params.theme.fg("dim", `Profile · ${displayText(this.config.profileName)} · global`));
       if (this.state.project.applyOverrides) lines.push(this.params.theme.fg("warning", "Project overrides are active at runtime"));
@@ -889,7 +1103,7 @@ export class TeammateControlCenter implements Component, Focusable {
     const action = this.tab === "profiles"
       ? "Enter manage"
       : this.tab === "routing"
-        ? "Enter model + thinking · Ctrl+→ thinking"
+        ? "Enter model + thinking · Ctrl+→ thinking · Ctrl+F fallback"
         : this.tab === "active"
           ? "Enter open"
           : "";
@@ -970,6 +1184,7 @@ async function showProfilePersistenceStatus(
       initialStatusText: `Saving · ${savingText}`,
       initialStatusTone: "dim",
       initialSaving: true,
+      modelHealth: options.modelHealth,
       globalFilePath: options.globalFilePath,
       requestRender: () => tui.requestRender(),
       close: () => finish(null),
@@ -1047,6 +1262,7 @@ export async function showModelMappingOverlay(
         initialStatusText,
         initialStatusTone,
         readOnly: usingFallback,
+        modelHealth: options.modelHealth,
         globalFilePath: options.globalFilePath,
         requestRender: () => tui.requestRender(),
         close: done,

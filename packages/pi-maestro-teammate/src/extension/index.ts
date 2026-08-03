@@ -136,6 +136,7 @@ import {
   type DecodedInputToken,
 } from "../tui/input-text.ts";
 import { showModelMappingOverlay } from "../tui/model-mapping-overlay.ts";
+import { sharedModelCircuitBreaker } from "../public/v1/retry.ts";
 import { showMonitorOverlay, type MonitorSessionRow } from "../tui/monitor-overlay.ts";
 import { createTeammateSettingsProvider, registerTeammateSettingsProvider } from "../settings/teammate-settings-provider.ts";
 import type {
@@ -3653,6 +3654,7 @@ export default function registerTeammateExtension(
     await showModelMappingOverlay(ctx, refreshModelCatalog(ctx).models, {
       agents: discoverAgents(ctx.cwd),
       activeAgents,
+      modelHealth: sharedModelCircuitBreaker.snapshot(),
       onOpenAgent: async (correlationId) => showAttachOverlay(correlationId, ctx),
     });
   }
