@@ -1,8 +1,42 @@
 # pi-maestro-flow
 
-> Maestro workflow orchestration for [Pi](https://github.com/earendil-works/pi) — tools, workflows, and templates
+<p align="center">
+  <strong>🎼 All-in-One Multi-Agent Orchestration for [Pi Coding Agent](https://github.com/earendil-works/pi)</strong><br />
+  <em>One install. The complete engineering team — orchestration, execution, visualization, and knowledge.</em>
+</p>
 
-Pi extension providing Maestro's workflow tools — the top-level entry of the three-plugin suite. Built on [pi-maestro-teammate](../pi-maestro-teammate/) for the execution engine and paired with [pi-cockpit](../pi-cockpit/) for the status UI (both are dependencies and are auto-registered on postinstall). Skills and agents live in project-level `.pi/` directory (see root README).
+<p align="center">
+  <a href="https://www.npmjs.com/package/pi-maestro-flow"><img alt="npm" src="https://img.shields.io/npm/v/pi-maestro-flow?color=cb3837&logo=npm&logoColor=white" /></a>
+  <a href="https://www.npmjs.com/package/pi-maestro-teammate"><img alt="npm" src="https://img.shields.io/npm/v/pi-maestro-teammate?color=cb3837&logo=npm&logoColor=white&label=teammate" /></a>
+  <a href="https://www.npmjs.com/package/pi-cockpit"><img alt="npm" src="https://img.shields.io/npm/v/pi-cockpit?color=cb3837&logo=npm&logoColor=white&label=cockpit" /></a>
+  <a href="https://github.com/catlog22/pi-maestro-flow"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-repo-blue?logo=github" /></a>
+  <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg" /></a>
+</p>
+
+---
+
+**pi-maestro-flow** is the **all-in-one** entry point of the three-plugin suite. A single `pi install npm:pi-maestro-flow` upgrades the [Pi coding agent](https://github.com/earendil-works/pi) into a coordinated engineering team:
+
+| Layer | Package | What you get |
+|-------|---------|--------------|
+| 🎼 **Orchestration & knowledge** | **pi-maestro-flow** (this) | `maestro` · `goal` · `todo` · `run-control` · `plan-*` · persistent knowledge system (search / spec / knowhow) |
+| 🚀 **Parallel execution engine** | [pi-maestro-teammate](../pi-maestro-teammate/) | subprocess agents · DAG dependency graphs · model routing · structured output |
+| 🖥️ **Visual status cockpit** | [pi-cockpit](../pi-cockpit/) | live status stack above the editor · Starship-style footer |
+
+The companion plugins are dependencies and **auto-register on postinstall** — no manual setup required.
+
+## Core Features
+
+- 🔀 **Parallel multi-agent dispatch** — spawn multiple subprocess agents at once, with DAG dependency graphs and structured output
+- 🎯 **Autonomous Goals** — token-budgeted long-running loops, audited by an independent verifier
+- 📝 **Durable Plan mode** — read-only Markdown draft, approve-before-act, dedicated Plan model
+- 🧠 **Persistent knowledge system** — semantic search · specs · knowhow, survives across sessions
+- 🔌 **Full protocol connectivity** — MCP (OAuth auto-auth) · LSP · Browser (CDP) · Smart Search · source verification
+- 🛰️ **Live cockpit visualization** — running teammates & todo plan in real time, 9 built-in themes
+- ⏱️ **Adaptive shell** — `bash_bg` auto-backgrounds long commands and notifies on completion
+- 🔒 **Permission control** — 5 modes (YOLO enabled by default) · fine-grained allow/ask/deny
+- 🪝 **Codex-compatible Hooks** — project hook system with a built-in installer and trust review
+- 📦 **63 skills · 32 agent roles · 87 workflow docs · 23 templates** bundled
 
 ## Contents
 

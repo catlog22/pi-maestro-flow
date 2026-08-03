@@ -1,7 +1,7 @@
 {
   "name": "pi-maestro-flow",
   "version": "0.14.0",
-  "description": "Pi extension for Maestro knowledge and workflow orchestration with teammate dispatch",
+  "description": "All-in-one multi-agent orchestration for the Pi coding agent — parallel teammate dispatch, goals, plans, knowledge system, MCP/LSP/browser, and cockpit visualization in a single install",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
@@ -48,7 +48,11 @@
     "swarm",
     "aco",
     "visualization",
-    "skills"
+    "skills",
+    "all-in-one",
+    "multi-agent",
+    "goal",
+    "plan"
   ],
   "files": [
     "src/**/*.ts",

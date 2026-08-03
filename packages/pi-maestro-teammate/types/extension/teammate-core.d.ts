@@ -126,7 +126,7 @@ export declare const WAKEABLE_AGENT_BUDGET: Readonly<{
     namedTtlMs: number;
 }>;
 export declare const AGENT_WIDGET_IDLE_HIDE_MS = 60000;
-export declare const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
+export { COCKPIT_UI_OWNERSHIP_EVENT } from "../shared/cockpit-events.ts";
 /**
  * Appends one marker-prefixed activity line to an agent's log. Shared so the
  * single-task and graph proxy paths record the same shape; the single-task path
