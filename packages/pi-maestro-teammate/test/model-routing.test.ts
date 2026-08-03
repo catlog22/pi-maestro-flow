@@ -20,9 +20,11 @@ import {
   renameGlobalModelRoutingProfile,
   saveGlobalProfileFallbackMapping,
   saveGlobalProfileModelMapping,
+  saveGlobalProfileRoleMapping,
   saveGlobalProfileThinkingLevel,
   saveProjectFallbackMapping,
   saveProjectModelMapping,
+  saveProjectRoleMapping,
   saveProjectThinkingLevel,
   setDefaultGlobalModelRoutingProfile,
   setProjectActiveModelRoutingProfile,
@@ -142,6 +144,44 @@ test("project model mappings persist and route single tasks", () => {
   }
 });
 
+test("custom role mappings persist independently from task-type routing", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-role-mapping-"));
+  const globalPath = path.join(root, "home", ".pi", "agent", "teammate-models.json");
+  const cwd = path.join(root, "project");
+  fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, ".pi", "agents", "security-specialist.md"), `---
+name: security-specialist
+description: Security role
+taskType: analysis
+---
+Review security.
+`);
+  try {
+    saveGlobalProfileRoleMapping(cwd, "default", "security-specialist", {
+      model: "provider/role",
+      fallbackModels: ["provider/role-backup"],
+      thinking: "high",
+    }, globalPath);
+    assert.equal(loadModelRoutingConfig(cwd, globalPath).roleMappings?.["security-specialist"]?.model, "provider/role");
+
+    const routed = applyModelRouting({
+      tasks: [{ agent: "security-specialist", prompt: "Review the module" }],
+    }, cwd, ["provider/role", "provider/role-backup"], globalPath);
+    assert.equal(routed.tasks[0].model, "provider/role");
+    assert.deepEqual(routed.tasks[0].fallbackModels, ["provider/role-backup"]);
+    assert.equal(routed.tasks[0].thinking, "high");
+
+    saveProjectRoleMapping(cwd, "security-specialist", { model: "provider/project-role" }, globalPath);
+    const projectRouted = applyModelRouting({
+      tasks: [{ agent: "security-specialist", prompt: "Review the module" }],
+    }, cwd, ["provider/project-role"], globalPath);
+    assert.equal(projectRouted.tasks[0].model, "provider/project-role");
+    const persisted = JSON.parse(fs.readFileSync(getProjectModelRoutingPath(cwd), "utf8"));
+    assert.equal(persisted.overrides.roleMappings["security-specialist"].model, "provider/project-role");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 test("role frontmatter taskType routes models below explicit task types", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-role-routing-"));
   const agentsDir = path.join(cwd, ".pi", "agents");

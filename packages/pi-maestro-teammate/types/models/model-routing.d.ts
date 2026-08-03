@@ -8,10 +8,16 @@ export declare const TEAMMATE_TASK_TYPE_META: Record<string, {
     roles: string;
     description: string;
 }>;
+export interface ModelRoutingRoleRules {
+    model?: string | null;
+    fallbackModels?: string[] | null;
+    thinking?: TeammateThinkingLevel | null;
+}
 export interface ModelRoutingRules {
     mappings: Partial<Record<TeammateTaskType, string | null>>;
     fallbackMappings?: Partial<Record<TeammateTaskType, string[] | null>>;
     thinkingLevels: Partial<Record<TeammateTaskType, TeammateThinkingLevel | null>>;
+    roleMappings?: Record<string, ModelRoutingRoleRules | null>;
 }
 export interface ModelRoutingProfile extends ModelRoutingRules {
     name: string;
@@ -69,9 +75,11 @@ export declare function discoverRoutingTaskTypes(cwd: string, agents?: readonly 
 export declare function saveProjectThinkingLevel(cwd: string, taskType: TeammateTaskType, thinking: TeammateThinkingLevel | null, globalFilePath?: string): ModelRoutingConfig;
 export declare function saveProjectModelMapping(cwd: string, taskType: TeammateTaskType, model: string | null, globalFilePath?: string): ModelRoutingConfig;
 export declare function saveProjectFallbackMapping(cwd: string, taskType: TeammateTaskType, models: string[] | null, globalFilePath?: string): ModelRoutingConfig;
+export declare function saveProjectRoleMapping(cwd: string, role: string, rules: ModelRoutingRoleRules | null, globalFilePath?: string): ModelRoutingConfig;
 export declare function saveGlobalProfileModelMapping(cwd: string, profileId: string, taskType: TeammateTaskType, model: string | null, globalFilePath?: string): ModelRoutingState;
 export declare function saveGlobalProfileThinkingLevel(cwd: string, profileId: string, taskType: TeammateTaskType, thinking: TeammateThinkingLevel | null, globalFilePath?: string): ModelRoutingState;
 export declare function saveGlobalProfileFallbackMapping(cwd: string, profileId: string, taskType: TeammateTaskType, models: string[] | null, globalFilePath?: string): ModelRoutingState;
+export declare function saveGlobalProfileRoleMapping(cwd: string, profileId: string, role: string, rules: ModelRoutingRoleRules | null, globalFilePath?: string): ModelRoutingState;
 export declare function createGlobalModelRoutingProfile(cwd: string, name: string, sourceProfileId?: string, globalFilePath?: string): ModelRoutingState;
 export declare function createAndActivateGlobalModelRoutingProfile(cwd: string, name: string, sourceProfileId?: string, globalFilePath?: string): ModelRoutingState;
 export declare function renameGlobalModelRoutingProfile(cwd: string, profileId: string, name: string, globalFilePath?: string): ModelRoutingState;

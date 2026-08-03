@@ -189,6 +189,8 @@ project .pi/agents > project .agents > ~/.agents > legacy user directory > bundl
 
 Configure task-type defaults with `Alt+M` or `/teammate-models`. The Control Center's **Profiles** tab manages named routing Profiles shared by every project. Its **Routing** tab edits the active global Profile and combines built-in task types, discovered agent types, and types already present in that Profile.
 
+The **Roles** tab lists discovered roles and their effective durable route. Role-scoped settings can be edited through the unified Settings surface as `role.<role-name>.model`, `role.<role-name>.fallbacks`, and `role.<role-name>.thinking`. These settings are stored in the same global Profile or project override file; package updates never rewrite role definitions or user routing data.
+
 Global Profiles are stored in `~/.pi/agent/teammate-models.json`:
 
 ```json
@@ -208,6 +210,13 @@ Global Profiles are stored in `~/.pi/agent/teammate-models.json`:
       "thinkingLevels": {
         "explore": "low",
         "analysis": "high"
+      },
+      "roleMappings": {
+        "security-specialist": {
+          "model": "provider/security-model",
+          "fallbackModels": ["provider/security-backup"],
+          "thinking": "high"
+        }
       }
     }
   }
@@ -223,7 +232,8 @@ Each project persists its active Profile and optional compatibility overrides in
   "applyOverrides": false,
   "overrides": {
     "mappings": {},
-    "thinkingLevels": {}
+    "thinkingLevels": {},
+    "roleMappings": {}
   }
 }
 ```
@@ -239,13 +249,13 @@ project overrides (when enabled) > active global Profile > global default Profil
 Model precedence:
 
 ```text
-task.model > top-level model > taskType mapping > role model > parent Pi model
+task.model > top-level model > taskType mapping > role mapping > role frontmatter model > parent Pi model
 ```
 
 Thinking precedence:
 
 ```text
-task.thinking > top-level thinking > taskType mapping > role thinking > Pi default
+task.thinking > top-level thinking > taskType mapping > role mapping > role frontmatter thinking > Pi default
 ```
 
 Role `fallbackModels` follow the selected primary model. Model identifiers must use exact authenticated `provider/model` values.

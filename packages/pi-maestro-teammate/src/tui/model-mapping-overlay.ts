@@ -1034,7 +1034,10 @@ export class TeammateControlCenter implements Component, Focusable {
       if (!agent) return [this.emptyState()];
       lines.push(`@${this.params.theme.bold(displayText(agent.name))} ${this.params.theme.fg("dim", `[${displayText(agent.source)}]`)}`);
       lines.push(...wrapTextWithAnsi(normalizedText(displayText(agent.description)), Math.max(1, width)).slice(0, 3));
-      lines.push(this.params.theme.fg("dim", `Model · ${displayText(agent.model ?? "auto / routed")}`));
+      const roleRules = this.config.roleMappings?.[agent.name];
+      lines.push(this.params.theme.fg("dim", `Model · ${displayText(roleRules?.model ?? agent.model ?? "auto / routed")}`));
+      lines.push(this.params.theme.fg("dim", `Fallbacks · ${displayText(roleRules?.fallbackModels?.join(", ") ?? "inherit / none")}`));
+      lines.push(this.params.theme.fg("dim", `Thinking · ${displayText(roleRules?.thinking ?? agent.thinking ?? "inherit / Pi default")}`));
       lines.push(this.params.theme.fg("dim", `Context · ${displayText(agent.defaultContext ?? "fresh")} · prompt ${displayText(agent.systemPromptMode)}`));
       lines.push(this.params.theme.fg("dim", `Tools · ${agent.tools?.map(displayText).join(", ") ?? "default"}`));
     } else {

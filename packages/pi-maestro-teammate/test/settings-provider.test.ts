@@ -73,6 +73,34 @@ test("Teammate provider exposes model, fallback and thinking routing per task ty
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("custom roles get durable role-scoped settings", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "teammate-role-settings-provider-"));
+  try {
+    const provider = createTeammateSettingsProvider({
+      getGlobalPath: () => paths(root).global,
+      getProjectPath: paths(root).project,
+      discoverTaskTypes: () => ["analysis"],
+      discoverRoles: () => ["security-specialist"],
+    });
+    const description = await provider.describe({ context: context(root) });
+    assert.ok(description.settings.some((setting) => setting.key === "role.security-specialist.model"));
+    assert.ok(description.catalogs?.en?.["role.security-specialist"]);
+
+    const before = await provider.read({ context: context(root) });
+    const changes = [
+      { operation: "set" as const, key: "role.security-specialist.model", scope: "global" as const, value: "provider/role" },
+      { operation: "set" as const, key: "role.security-specialist.fallbacks", scope: "project" as const, value: ["provider/backup"] },
+      { operation: "set" as const, key: "role.security-specialist.thinking", scope: "project" as const, value: "high" },
+    ];
+    const prepared = await provider.prepare!({ context: context(root), transactionId: "role-tx", changes, expectedRevisions: before.configured.resources });
+    assert.equal(prepared.prepared, true);
+    const committed = await provider.commit!({ context: context(root), transactionId: "role-tx", prepareToken: prepared.prepareToken! });
+    assert.equal(committed.snapshot.configured.values.find((value) => value.key === "role.security-specialist.model" && value.scope === "global")?.value, "provider/role");
+    assert.deepEqual(committed.snapshot.effective.values.find((value) => value.key === "role.security-specialist.fallbacks")?.value, ["provider/backup"]);
+    const projectRaw = JSON.parse(fs.readFileSync(paths(root).project(root), "utf8"));
+    assert.equal(projectRaw.overrides.roleMappings["security-specialist"].thinking, "high");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
 test("configured values preserve global/project scopes and project overrides effective routing", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "teammate-settings-provider-"));
   try {

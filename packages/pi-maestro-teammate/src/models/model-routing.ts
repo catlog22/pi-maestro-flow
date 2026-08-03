@@ -28,10 +28,17 @@ export const TEAMMATE_TASK_TYPE_META: Record<
   testing: { label: "Testing", roles: "general / analyst", description: "Tests, coverage, and regression validation" },
 };
 
+export interface ModelRoutingRoleRules {
+  model?: string | null;
+  fallbackModels?: string[] | null;
+  thinking?: TeammateThinkingLevel | null;
+}
+
 export interface ModelRoutingRules {
   mappings: Partial<Record<TeammateTaskType, string | null>>;
   fallbackMappings?: Partial<Record<TeammateTaskType, string[] | null>>;
   thinkingLevels: Partial<Record<TeammateTaskType, TeammateThinkingLevel | null>>;
+  roleMappings?: Record<string, ModelRoutingRoleRules | null>;
 }
 
 export interface ModelRoutingProfile extends ModelRoutingRules {
@@ -103,6 +110,20 @@ function emptyRules(): ModelRoutingRules {
   return { mappings: {}, thinkingLevels: {} };
 }
 
+function cloneRoleMappings(roleMappings: ModelRoutingRules["roleMappings"]): ModelRoutingRules["roleMappings"] {
+  if (!roleMappings) return undefined;
+  return Object.fromEntries(Object.entries(roleMappings).map(([role, rules]) => [
+    role,
+    rules === null ? null : {
+      ...(hasOwn(rules, "model") ? { model: rules.model } : {}),
+      ...(hasOwn(rules, "fallbackModels")
+        ? { fallbackModels: rules.fallbackModels === null ? null : [...(rules.fallbackModels ?? [])] }
+        : {}),
+      ...(hasOwn(rules, "thinking") ? { thinking: rules.thinking } : {}),
+    },
+  ]));
+}
+
 function cloneRules(rules: ModelRoutingRules): ModelRoutingRules {
   const fallbackMappings = rules.fallbackMappings
     ? Object.fromEntries(Object.entries(rules.fallbackMappings).map(([taskType, models]) => [
@@ -110,10 +131,12 @@ function cloneRules(rules: ModelRoutingRules): ModelRoutingRules {
       Array.isArray(models) ? [...models] : models,
     ]))
     : undefined;
+  const roleMappings = cloneRoleMappings(rules.roleMappings);
   return {
     mappings: { ...rules.mappings },
     ...(fallbackMappings && Object.keys(fallbackMappings).length > 0 ? { fallbackMappings } : {}),
     thinkingLevels: { ...rules.thinkingLevels },
+    ...(roleMappings && Object.keys(roleMappings).length > 0 ? { roleMappings } : {}),
   };
 }
 
@@ -143,8 +166,39 @@ function assertKnownKeys(value: Record<string, unknown>, allowed: readonly strin
   if (unknown) throw new Error(`Unknown ${label} field: ${unknown}`);
 }
 
+function assertRoleName(role: string): void {
+  if (!/^[a-z][a-z0-9._-]{0,63}$/.test(role)) {
+    throw new Error(`Invalid teammate role mapping: ${role}`);
+  }
+}
+
+function validateRoleMappings(value: unknown, label: string): void {
+  if (value === undefined) return;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Invalid ${label} roleMappings`);
+  for (const [role, rawRules] of Object.entries(value as Record<string, unknown>)) {
+    assertRoleName(role);
+    if (rawRules === null) continue;
+    if (!rawRules || typeof rawRules !== "object" || Array.isArray(rawRules)) {
+      throw new Error(`Invalid ${label} role mapping: ${role}`);
+    }
+    const rules = rawRules as Record<string, unknown>;
+    assertKnownKeys(rules, ["model", "fallbackModels", "thinking"], `Role ${role}`);
+    if (rules.model !== undefined && rules.model !== null && (typeof rules.model !== "string" || !rules.model.trim())) {
+      throw new Error(`Invalid ${label} role model: ${role}`);
+    }
+    if (rules.fallbackModels !== undefined && rules.fallbackModels !== null
+      && (!Array.isArray(rules.fallbackModels)
+        || rules.fallbackModels.some((model) => typeof model !== "string" || !model.trim()))) {
+      throw new Error(`Invalid ${label} role fallback mapping: ${role}`);
+    }
+    if (rules.thinking !== undefined && rules.thinking !== null && !parseTeammateThinkingLevel(rules.thinking)) {
+      throw new Error(`Invalid ${label} role thinking level: ${role}`);
+    }
+  }
+}
+
 function validateV3Rules(value: Record<string, unknown>, label: string): void {
-  assertKnownKeys(value, ["mappings", "fallbackMappings", "thinkingLevels"], label);
+  assertKnownKeys(value, ["mappings", "fallbackMappings", "thinkingLevels", "roleMappings"], label);
   if (!value.mappings || typeof value.mappings !== "object" || Array.isArray(value.mappings)
     || !value.thinkingLevels || typeof value.thinkingLevels !== "object" || Array.isArray(value.thinkingLevels)
     || (value.fallbackMappings !== undefined
@@ -170,6 +224,7 @@ function validateV3Rules(value: Record<string, unknown>, label: string): void {
       throw new Error(`Invalid ${label} thinking level: ${taskType}`);
     }
   }
+  validateRoleMappings(value.roleMappings, label);
 }
 
 function normalizeRules(value: unknown): ModelRoutingRules {
@@ -179,6 +234,7 @@ function normalizeRules(value: unknown): ModelRoutingRules {
   const mappings: Partial<Record<TeammateTaskType, string | null>> = {};
   const fallbackMappings: Partial<Record<TeammateTaskType, string[] | null>> = {};
   const thinkingLevels: Partial<Record<TeammateTaskType, TeammateThinkingLevel | null>> = {};
+  const roleMappings: Record<string, ModelRoutingRoleRules | null> = {};
   const rawMappings = parsed.mappings && typeof parsed.mappings === "object" && !Array.isArray(parsed.mappings)
     ? parsed.mappings as Record<string, unknown>
     : {};
@@ -187,6 +243,9 @@ function normalizeRules(value: unknown): ModelRoutingRules {
     : {};
   const rawThinking = parsed.thinkingLevels && typeof parsed.thinkingLevels === "object" && !Array.isArray(parsed.thinkingLevels)
     ? parsed.thinkingLevels as Record<string, unknown>
+    : {};
+  const rawRoleMappings = parsed.roleMappings && typeof parsed.roleMappings === "object" && !Array.isArray(parsed.roleMappings)
+    ? parsed.roleMappings as Record<string, unknown>
     : {};
   const taskTypes = new Set([...Object.keys(rawMappings), ...Object.keys(rawFallbacks), ...Object.keys(rawThinking)]);
   for (const rawTaskType of taskTypes) {
@@ -210,26 +269,71 @@ function normalizeRules(value: unknown): ModelRoutingRules {
       if (normalizedThinking) thinkingLevels[taskType] = normalizedThinking;
     }
   }
+  for (const [role, rawRoleRules] of Object.entries(rawRoleMappings)) {
+    if (!/^[a-z][a-z0-9._-]{0,63}$/.test(role)) continue;
+    if (rawRoleRules === null) {
+      roleMappings[role] = null;
+      continue;
+    }
+    if (!rawRoleRules || typeof rawRoleRules !== "object" || Array.isArray(rawRoleRules)) continue;
+    const rules = rawRoleRules as Record<string, unknown>;
+    const normalized: ModelRoutingRoleRules = {};
+    if (typeof rules.model === "string" && rules.model.trim()) normalized.model = rules.model.trim();
+    else if (rules.model === null) normalized.model = null;
+    if (rules.fallbackModels === null) normalized.fallbackModels = null;
+    else if (Array.isArray(rules.fallbackModels)) {
+      normalized.fallbackModels = [...new Set(rules.fallbackModels
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim())
+        .filter(Boolean))];
+    }
+    if (rules.thinking === null) normalized.thinking = null;
+    else {
+      const normalizedThinking = parseTeammateThinkingLevel(rules.thinking);
+      if (normalizedThinking) normalized.thinking = normalizedThinking;
+    }
+    roleMappings[role] = normalized;
+  }
   return {
     mappings,
     ...(Object.keys(fallbackMappings).length > 0 ? { fallbackMappings } : {}),
     thinkingLevels,
+    ...(Object.keys(roleMappings).length > 0 ? { roleMappings } : {}),
   };
 }
 
 function mergeRules(base: ModelRoutingRules, overrides: ModelRoutingRules): ModelRoutingRules {
   const fallbackMappings = { ...base.fallbackMappings, ...overrides.fallbackMappings };
+  const roleMappings: Record<string, ModelRoutingRoleRules | null> = {
+    ...(base.roleMappings ?? {}),
+  };
+  for (const [role, override] of Object.entries(overrides.roleMappings ?? {})) {
+    if (override === null) {
+      roleMappings[role] = null;
+      continue;
+    }
+    const inherited = roleMappings[role];
+    roleMappings[role] = {
+      ...(inherited && inherited !== null ? inherited : {}),
+      ...override,
+      ...(override.fallbackModels !== undefined
+        ? { fallbackModels: override.fallbackModels === null ? null : [...override.fallbackModels] }
+        : {}),
+    };
+  }
   return {
     mappings: { ...base.mappings, ...overrides.mappings },
     ...(Object.keys(fallbackMappings).length > 0 ? { fallbackMappings } : {}),
     thinkingLevels: { ...base.thinkingLevels, ...overrides.thinkingLevels },
+    ...(Object.keys(roleMappings).length > 0 ? { roleMappings } : {}),
   };
 }
 
 function hasRules(rules: ModelRoutingRules): boolean {
   return Object.keys(rules.mappings).length > 0
     || Object.keys(rules.fallbackMappings ?? {}).length > 0
-    || Object.keys(rules.thinkingLevels).length > 0;
+    || Object.keys(rules.thinkingLevels).length > 0
+    || Object.keys(rules.roleMappings ?? {}).length > 0;
 }
 
 function normalizeProfileName(value: unknown, fallback: string): string {
@@ -286,12 +390,13 @@ function normalizeGlobalStore(parsed: Record<string, unknown> | undefined): Glob
         return invalidGlobalStore();
       }
       const profile = rawProfile as Record<string, unknown>;
-      assertKnownKeys(profile, ["name", "mappings", "fallbackMappings", "thinkingLevels"], `Profile ${profileId}`);
+      assertKnownKeys(profile, ["name", "mappings", "fallbackMappings", "thinkingLevels", "roleMappings"], `Profile ${profileId}`);
       if (typeof profile.name !== "string" || !normalizeProfileName(profile.name, "")) return invalidGlobalStore();
       validateV3Rules({
         mappings: profile.mappings,
         ...(hasOwn(profile, "fallbackMappings") ? { fallbackMappings: profile.fallbackMappings } : {}),
         thinkingLevels: profile.thinkingLevels,
+        ...(hasOwn(profile, "roleMappings") ? { roleMappings: profile.roleMappings } : {}),
       }, `Profile ${profileId}`);
       profiles[profileId] = {
         name: normalizeProfileName(profile.name, profileId),
@@ -1078,6 +1183,37 @@ export function saveProjectFallbackMapping(
   }, globalFilePath);
 }
 
+function normalizeRoleRulesInput(rules: ModelRoutingRoleRules | null): ModelRoutingRoleRules | null {
+  if (rules === null) return null;
+  const normalized: ModelRoutingRoleRules = {};
+  if (rules.model !== undefined) {
+    if (rules.model === null) normalized.model = null;
+    else if (rules.model.trim()) normalized.model = rules.model.trim();
+    else throw new Error("Role model must not be empty");
+  }
+  if (rules.fallbackModels !== undefined) {
+    normalized.fallbackModels = rules.fallbackModels === null
+      ? null
+      : [...new Set(rules.fallbackModels.map((model) => model.trim()).filter(Boolean))];
+  }
+  if (rules.thinking !== undefined) normalized.thinking = rules.thinking;
+  return normalized;
+}
+
+export function saveProjectRoleMapping(
+  cwd: string,
+  role: string,
+  rules: ModelRoutingRoleRules | null,
+  globalFilePath = getGlobalModelRoutingPath(),
+): ModelRoutingConfig {
+  assertRoleName(role);
+  const normalized = normalizeRoleRulesInput(rules);
+  return saveProjectOverride(cwd, (routing) => {
+    routing.roleMappings ??= {};
+    routing.roleMappings[role] = normalized;
+  }, globalFilePath);
+}
+
 function requireProfile(store: GlobalModelRoutingStore, profileId: string): ModelRoutingProfile {
   if (!hasOwn(store.profiles, profileId)) throw new Error(`Unknown teammate model profile: ${profileId}`);
   return store.profiles[profileId];
@@ -1139,6 +1275,21 @@ export function saveGlobalProfileFallbackMapping(
     profile.fallbackMappings[normalizedTaskType] = models === null
       ? null
       : [...new Set(models.map((model) => model.trim()).filter(Boolean))];
+  }, globalFilePath);
+}
+
+export function saveGlobalProfileRoleMapping(
+  cwd: string,
+  profileId: string,
+  role: string,
+  rules: ModelRoutingRoleRules | null,
+  globalFilePath = getGlobalModelRoutingPath(),
+): ModelRoutingState {
+  assertRoleName(role);
+  const normalized = normalizeRoleRulesInput(rules);
+  return saveGlobalProfile(cwd, profileId, (profile) => {
+    profile.roleMappings ??= {};
+    profile.roleMappings[role] = normalized;
   }, globalFilePath);
 }
 
@@ -1330,14 +1481,26 @@ export function inferTaskType(input: TaskTypeInput): TeammateTaskType | undefine
   return undefined;
 }
 
+function roleRules(config: ModelRoutingConfig, input: TaskTypeInput): ModelRoutingRoleRules | undefined {
+  const role = input.agent?.trim();
+  if (!role) return undefined;
+  const configured = config.roleMappings?.[role];
+  return configured && configured !== null ? configured : undefined;
+}
+
 function mappedModel(
   config: ModelRoutingConfig,
   input: TaskTypeInput,
   availableModels: readonly string[],
 ): string | undefined {
   const taskType = inferTaskType(input);
-  if (!taskType) return undefined;
-  const configured = config.mappings[taskType];
+  if (taskType) {
+    const configured = config.mappings[taskType];
+    if (configured) {
+      if (availableModels.length === 0 || availableModels.includes(configured)) return configured;
+    }
+  }
+  const configured = roleRules(config, input)?.model;
   if (!configured) return undefined;
   if (availableModels.length > 0 && !availableModels.includes(configured)) return undefined;
   return configured;
@@ -1349,19 +1512,28 @@ function mappedFallbackModels(
   availableModels: readonly string[],
 ): string[] | undefined {
   const taskType = inferTaskType(input);
-  if (!taskType) return undefined;
-  const configured = config.fallbackMappings?.[taskType];
-  if (!configured) return undefined;
+  const configured = taskType ? config.fallbackMappings?.[taskType] : undefined;
+  if (configured) {
+    const filtered = availableModels.length > 0
+      ? configured.filter((model) => availableModels.includes(model))
+      : configured;
+    if (filtered.length > 0) return [...new Set(filtered)];
+  }
+  const roleFallbacks = roleRules(config, input)?.fallbackModels;
+  if (!roleFallbacks) return undefined;
   const filtered = availableModels.length > 0
-    ? configured.filter((model) => availableModels.includes(model))
-    : configured;
+    ? roleFallbacks.filter((model) => availableModels.includes(model))
+    : roleFallbacks;
   return filtered.length > 0 ? [...new Set(filtered)] : undefined;
 }
 
 function mappedThinking(config: ModelRoutingConfig, input: TaskTypeInput): TeammateThinkingLevel | undefined {
   const taskType = inferTaskType(input);
-  if (!taskType) return undefined;
-  return config.thinkingLevels[taskType] ?? undefined;
+  if (taskType) {
+    const configured = config.thinkingLevels[taskType];
+    if (configured) return configured;
+  }
+  return roleRules(config, input)?.thinking ?? undefined;
 }
 
 export function applyModelRouting(
