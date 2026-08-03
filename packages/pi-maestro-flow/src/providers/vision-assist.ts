@@ -27,6 +27,17 @@ export const sharedVisionModelCircuitBreaker = new ModelCircuitBreaker();
 
 const MAX_RETRY_BACKOFF_MS = 8_000;
 const SUPPORTED_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+/**
+ * Image description is a bounded perceptual task: capping the delegated
+ * reasoning effort keeps single attempts fast, so a slow "high" reasoning
+ * pass cannot repeatedly blow the per-attempt deadline (the 60s hang seen
+ * with gpt-5.6-sol). qwen-family providers stay callable because any
+ * non-off effort still enables thinking.
+ */
+const VISION_REASONING_CAP = "low" as const;
+const EXTENDED_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+/** Host registry refresh fetches remote catalogs without a timeout of its own. */
+const REGISTRY_REFRESH_TIMEOUT_MS = 10_000;
 
 export interface VisionDelegationConfig {
   enabled: boolean;
@@ -105,9 +116,12 @@ export const DEFAULT_VISION_DELEGATION_CONFIG: Readonly<VisionDelegationConfig> 
   enabled: true,
   cache: { enabled: true, maxEntries: 50 },
   fallbackModels: [],
-  maxRetries: 2,
+  // Retrying re-sends the whole image+prompt from scratch: a slow-but-working
+  // model then appears stuck for maxRetries+1 deadlines with zero progress.
+  // Give one attempt a generous deadline instead; fail over on timeout.
+  maxRetries: 0,
   retryBackoffMs: 500,
-  timeoutMs: 30_000,
+  timeoutMs: 60_000,
   maxImageBytes: 20 * 1024 * 1024,
 };
 
@@ -558,7 +572,7 @@ async function delegateImage(
   breaker: ModelCircuitBreaker = sharedVisionModelCircuitBreaker,
   telemetry: VisionTelemetry = noopVisionTelemetry(),
 ): Promise<VisionAnalysisResult> {
-  await refreshModelRegistry(ctx);
+  await refreshModelRegistryBestEffort(ctx);
   const references = candidateReferences(ctx, config);
   if (references.length === 0) throw new Error("no multimodal model is available");
   telemetry.emit({ type: "delegation_start", prompt });
@@ -624,11 +638,15 @@ async function callCandidates(
         continue;
       }
       const reasoningEffort = visionReasoningEffort(model, ctx.thinkingLevel);
+      // pi-ai post-processing calls calculateCost(model, usage); a composed
+      // model without a cost field crashes with "reading 'tiers'" and turns
+      // a successful vision response into a delegation error.
+      const safeModel = model.cost ? model : { ...model, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
       for (let attempt = 0; attempt <= config.maxRetries; attempt += 1) {
         telemetry.emit({ type: "attempt", model: reference, attempt, timeoutMs: config.timeoutMs });
         const guard = completionGuard(signal, config.timeoutMs);
         try {
-          const running = Promise.resolve().then(() => completeFn(model, {
+          const running = Promise.resolve().then(() => completeFn(safeModel, {
             systemPrompt: config.customPrompt,
             messages: [{ role: "user", content: [
               { type: "image", data: image.data, mimeType: image.mimeType },
@@ -818,7 +836,7 @@ function toolError(text: string, code: string): VisionToolResult {
 }
 
 function defaultConfig(): VisionDelegationConfig {
-  return { enabled: true, cache: { enabled: true, maxEntries: 50 }, fallbackModels: [], maxRetries: 2, retryBackoffMs: 500, timeoutMs: 30_000, maxImageBytes: 20 * 1024 * 1024 };
+  return { enabled: true, cache: { enabled: true, maxEntries: 50 }, fallbackModels: [], maxRetries: 0, retryBackoffMs: 500, timeoutMs: 60_000, maxImageBytes: 20 * 1024 * 1024 };
 }
 
 function normalizeConfig(config: VisionDelegationConfig): VisionDelegationConfig {
@@ -848,8 +866,29 @@ function splitReference(value: string): [string, string] { const slash = value.i
 function visionReasoningEffort(model: Model<Api> | undefined, sessionLevel: ModelThinkingLevel | undefined): string | undefined {
   if (!model?.reasoning) return undefined;
   const requested: ModelThinkingLevel = sessionLevel && sessionLevel !== "off" ? sessionLevel : "high";
-  const clamped = clampThinkingLevel(model, requested);
+  const capped = capVisionReasoningLevel(requested);
+  const clamped = clampThinkingLevel(model, capped);
   return clamped === "off" ? undefined : clamped;
+}
+
+function capVisionReasoningLevel(level: ModelThinkingLevel): ModelThinkingLevel {
+  const levelIndex = EXTENDED_THINKING_LEVELS.indexOf(level);
+  const capIndex = EXTENDED_THINKING_LEVELS.indexOf(VISION_REASONING_CAP);
+  return levelIndex >= 0 && levelIndex <= capIndex ? level : VISION_REASONING_CAP;
+}
+
+/**
+ * The host registry refresh fetches per-provider remote catalogs with no
+ * timeout and no abort signal of its own; never let that stall delegation.
+ * On timeout the previous snapshot stays authoritative and the in-flight
+ * refresh keeps running in the background (refreshModelRegistry swallows its
+ * own failures).
+ */
+async function refreshModelRegistryBestEffort(ctx: ExtensionContext): Promise<void> {
+  await Promise.race([
+    refreshModelRegistry(ctx),
+    new Promise<void>((resolve) => setTimeout(resolve, REGISTRY_REFRESH_TIMEOUT_MS)),
+  ]);
 }
 function integer(value: unknown, fallback: number, min: number, max: number): number { return typeof value === "number" && Number.isInteger(value) ? Math.min(max, Math.max(min, value)) : fallback; }
 function normalizeMime(value: string | undefined): string | undefined { if (!value) return undefined; const lower = value.toLowerCase(); return lower === "image/jpg" ? "image/jpeg" : lower; }

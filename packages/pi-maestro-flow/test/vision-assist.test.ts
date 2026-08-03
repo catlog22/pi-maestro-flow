@@ -205,7 +205,7 @@ test("non-cooperative provider times out and falls back", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("vision delegation forwards the session thinking level as reasoningEffort", async () => {
+test("vision delegation forwards a capped reasoningEffort", async () => {
   const dir = mkdtempSync(join(tmpdir(), "vision-thinking-"));
   try {
     const file = join(dir, "image.png"); writeFileSync(file, Buffer.from("fake"));
@@ -217,13 +217,14 @@ test("vision delegation forwards the session thinking level as reasoningEffort",
     const text = model("p", "text", false);
     const tool = runtime.tools.get(DESCRIBE_IMAGE_TOOL_NAME);
     // qwen-family providers derive enable_thinking from reasoningEffort: a
-    // session thinking level must reach the delegated request.
+    // non-off effort must reach the delegated request, but image description
+    // caps the effort so a slow high-reasoning pass cannot blow the deadline.
     await tool.execute("1", { image_path: file }, undefined, undefined, { cwd: dir, model: text, modelRegistry: registry([vision]), thinkingLevel: "high" });
-    assert.equal(captured.reasoningEffort, "high");
+    assert.equal(captured.reasoningEffort, "low");
     // A thinking-off session still delegates with a non-off default so qwen
     // (which rejects enable_thinking=false) remains callable.
     await tool.execute("2", { image_path: file }, undefined, undefined, { cwd: dir, model: text, modelRegistry: registry([vision]), thinkingLevel: "off" });
-    assert.equal(captured.reasoningEffort, "high");
+    assert.equal(captured.reasoningEffort, "low");
     // Text-only helper models receive no reasoning option.
     const plain = model("p", "vision", true);
     await tool.execute("3", { image_path: file }, undefined, undefined, { cwd: dir, model: text, modelRegistry: registry([plain]) });
