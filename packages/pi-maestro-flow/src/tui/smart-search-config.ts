@@ -154,12 +154,14 @@ export class WebAccessConfigSync implements WebAccessConfigSyncLike {
   }
 }
 
-const SYNC_STATUS_SYMBOL: Record<SyncStatus, string> = {
-  synced: "✓",
-  conflict: "⚠",
-  "smart-only": "→",
-  "web-only": "←",
-  unmapped: " ",
+// 同步状态标签：glyph + 文本（规范 ui-conventions-004：状态 MUST 同时使用稳定
+// glyph 与文本，颜色只能增强语义）。不用裸 ✓/⚠，避免被误认成可勾选的复选框。
+const SYNC_STATUS_LABEL: Record<SyncStatus, string> = {
+  synced: "✓ synced",
+  conflict: "⚠ conflict",
+  "smart-only": "→ smart-only",
+  "web-only": "← web-only",
+  unmapped: "",
 };
 
 const SYNC_STATUS_TONE: Record<SyncStatus, string> = {
@@ -284,7 +286,7 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
         const value = this.configSource === "web-access" && this.sync
           ? displaySmartSearchConfigValue(itemKey, this.sync.webValueForKey(itemKey))
           : displaySmartSearchConfigValue(itemKey, this.config[itemKey]);
-        const line = `${marker}${syncTag} [${group?.label ?? "Custom"}] ${itemKey} = ${value}`;
+        const line = `${marker} [${group?.label ?? "Custom"}] ${itemKey} = ${value}${syncTag}`;
         rows.push(truncateToWidth(
           start + offset === this.selected ? this.params.theme.fg("accent", line) : line,
           inner,
@@ -477,10 +479,12 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
   }
 
   private renderSyncTag(key: string): string {
-    if (!this.sync) return " ";
+    if (!this.sync) return "";
     const status = this.sync.syncStatusForKey(key, this.config[key]);
-    if (status === "unmapped") return " ";
-    return ` ${SYNC_STATUS_SYMBOL[status]}`;
+    if (status === "unmapped") return "";
+    const label = SYNC_STATUS_LABEL[status];
+    const tone = SYNC_STATUS_TONE[status];
+    return ` ${this.params.theme.fg(tone, label)}`;
   }
 
   private performSync(): void {

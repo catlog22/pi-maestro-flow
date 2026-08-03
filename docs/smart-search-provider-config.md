@@ -219,11 +219,13 @@ SSRF_ALLOW_RANGES        →  ssrf.allowRanges
 ...                      →  (共 31 条映射)
 ```
 
-同步状态在 TUI 中显示：
-- `✓` 两源一致
-- `⚠` 两源冲突
-- `→` 仅 Smart Search 有值
-- `←` 仅 web-search.json 有值
+同步状态在 TUI 中显示（glyph + 文本标注在配置行末尾，未映射的键不加标注）：
+- `✓ synced` 两源一致
+- `⚠ conflict` 两源冲突
+- `→ smart-only` 仅 Smart Search 有值
+- `← web-only` 仅 web-search.json 有值
+
+> 这些是同步状态标注，**不是可勾选的复选框**（空格不会切换，仅展示）。
 
 ---
 
