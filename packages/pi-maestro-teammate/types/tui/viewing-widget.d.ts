@@ -1,33 +1,12 @@
 /**
- * Main-TUI viewing mode for a teammate session (claude-code style).
+ * Main-TUI viewing mode — input-routing decisions.
  *
- * Pure rendering + input-routing decisions, no extension context — kept
- * dependency-free so the widget and the input hook share one testable core.
- * The extension wires these into a belowEditor widget and a pi.on("input")
- * hook; switching only touches UI state, never the agent's task, so a running
- * agent (main loop or sub-process) is unaffected by entering/leaving the view.
+ * Rendering moved to `viewing-entry.ts` (conversation-embedded streaming
+ * entry); this module keeps only the pure input-routing core shared by the
+ * `pi.on("input")` hook. Switching only touches UI state, never the agent's
+ * task, so a running agent (main loop or sub-process) is unaffected by
+ * entering/leaving the view.
  */
-import type { TranscriptRow } from "../shared/transcript.ts";
-export interface ViewingSwitch {
-    /** Display label, e.g. @explorer. */
-    label: string;
-    active: boolean;
-}
-export interface ViewingWidgetState {
-    agentName?: string;
-    agentRole: string;
-    status: string;
-    rows: TranscriptRow[];
-    canSend: boolean;
-    transcriptSource: "session" | "memory";
-    /** Switchable agents — rendered as a highlightable row navigated with ←/→. */
-    switches?: ViewingSwitch[];
-}
-/** How many message rows the belowEditor widget shows (tail-following). */
-export declare const VIEWING_MAX_MESSAGE_LINES = 8;
-export declare function renderViewingWidget(state: ViewingWidgetState, width: number): string[];
-/** One transcript row → display lines (shares the attach-overlay row style). */
-export declare function renderViewingRow(row: TranscriptRow, width: number): string[];
 /**
  * Where a submitted main-editor line goes while viewing a teammate.
  *

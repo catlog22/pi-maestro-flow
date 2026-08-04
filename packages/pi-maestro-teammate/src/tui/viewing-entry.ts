@@ -2,9 +2,9 @@
  * Main-TUI viewing mode for a teammate session — conversation-embedded
  * streaming entry.
  *
- * `/teammate-session` no longer renders a below-editor widget: it appends a
- * custom entry into the main conversation, and the entry renderer streams the
- * viewed agent's working status live, conversation-style. The body uses the
+ * Viewing a teammate session now lives in the cockpit: the persistent session
+ * bar below the input box switches agents, and the viewed agent's session
+ * streams in the main conversation as a live custom entry. The body uses the
  * exact same Markdown component + theme as Pi's built-in assistant message
  * renderer, so sub-agent output is presented identically to the main agent's
  * messages. Custom entries never participate in LLM context, so streaming

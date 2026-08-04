@@ -3995,21 +3995,6 @@ export default function registerTeammateExtension(
     });
   }
 
-  async function handleViewingSession(ctx: ExtensionCommandContext): Promise<void> {
-    if (viewingTarget) {
-      exitViewing();
-      ctx.ui.notify("Returned to the main conversation.", "info");
-      return;
-    }
-    const targets = buildViewingTargets();
-    if (targets.length === 0) {
-      ctx.ui.notify("No teammate sessions to view.", "warning");
-      return;
-    }
-    // Enter the first target directly — ←/→ moves through the whole list.
-    enterViewingList(targets, 0, ctx);
-  }
-
   async function showTeammateControlCenter(ctx: ExtensionContext): Promise<void> {
     const activeAgents = Array.from(state.activeRuns.values())
       .filter((agent) => agent.status !== "completed")
@@ -4064,13 +4049,6 @@ export default function registerTeammateExtension(
     teammateSettingsDisposer?.();
     teammateSettingsDisposer = undefined;
   };
-
-  pi.registerCommand("teammate-session", {
-    description: "Stream a teammate session in the main conversation (view + message, agent keeps running) or return to main",
-    async handler(_args, ctx) {
-      await handleViewingSession(ctx);
-    },
-  });
 
   pi.registerCommand("teammate-models", {
     description: "Open teammate roles, collaboration status, and model routing",
