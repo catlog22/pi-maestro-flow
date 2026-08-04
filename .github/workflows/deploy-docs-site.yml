@@ -1,0 +1,59 @@
+name: Deploy Docs Site to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'docs-site/**'
+      - '.github/workflows/deploy-docs-site.yml'
+  workflow_dispatch:
+
+# Pages 部署所需的权限
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时间只允许一个 Pages 部署在跑，新的会取消旧的
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
+
+      - name: Install and build
+        working-directory: docs-site
+        env:
+          # 项目页路径：https://catlog22.github.io/pi-maestro-flow/
+          VITE_BASE_URL: /pi-maestro-flow/
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs-site/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
