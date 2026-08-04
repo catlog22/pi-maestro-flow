@@ -30,8 +30,8 @@ export interface SettingsRow {
 	value: string;
 	/** What pressing Enter/Space/accel switches to — shown so the cycle is visible. */
 	next: string;
-	/** "cycle" (default) toggles on Enter; "text" opens an edit field instead. */
-	kind?: "text";
+	/** "cycle" (default) toggles on Enter; "text" opens an edit field; "select" opens a picker sub-view. */
+	kind?: "text" | "select";
 }
 
 const VIEW_MODES: ViewMode[] = ["list", "compact"];
@@ -233,17 +233,18 @@ export function buildRows(config: CockpitConfig, live?: LiveRowState): SettingsR
 			value: config.title.showMaestro ? "on" : "off",
 			next: config.title.showMaestro ? "off" : "on",
 		},
-		// Free text, not a cycle: Enter opens an edit field, Esc/Enter commits,
-		// empty clears back to the offline rule-based extractor. "(rule-based)"
-		// is a display value — the stored config stays "" so title-llm keeps
-		// its empty-means-offline contract.
+		// Not a cycle: Enter opens the model picker over the /api-manager
+		// providers, with a trailing "custom ref…" entry that drops into the
+		// free-text editor for refs not on the list yet. "(rule-based)" is a
+		// display value — the stored config stays "" so title-llm keeps its
+		// empty-means-offline contract.
 		{
 			key: "titleGenerationModel",
 			accel: "z",
 			label: "title gen model",
 			value: config.title.generationModel || "(rule-based)",
-			next: "type…",
-			kind: "text",
+			next: "picker…",
+			kind: "select",
 		},
 	];
 }

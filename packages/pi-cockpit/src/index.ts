@@ -28,6 +28,7 @@ import { shouldAnimateFrames, shouldAnimateSidebar, shouldRunTick, type TickPoli
 import { TodoStore } from "./todo-store.ts";
 import { makeTodoWidget, makeAgentWidget, terminalRows } from "./stack-widget.ts";
 import { activeThemeName, ThemePicker } from "./theme-picker.ts";
+import { ModelPicker, type ModelPickerEntry } from "./model-picker.ts";
 import { getUsageTotals, invalidateUsageCache, renderFooter, setUsageThrottle, type PaintTheme, type WidthUtils } from "./footer.ts";
 import { collectExtensionStatuses } from "./extension-status.ts";
 import { ANIMATION_PERIOD_MS, resolveGlyphs, spinFrame } from "./icons.ts";
@@ -1450,37 +1451,22 @@ export default function (pi: ExtensionAPI): void {
 			// a second overlay: pi's `theme` is a live Proxy, so both surfaces repaint
 			// in the previewed colours, and Esc lands back on the row it was invoked
 			// from instead of on a panel that looks freshly opened.
-			let sub: ThemePicker | undefined;
+			let sub: ThemePicker | ModelPicker | undefined;
 			const closeSub = (): void => {
 				sub?.dispose();
 				sub = undefined;
 				tui.requestRender();
 			};
-			const apply = (key: string, textValue?: string): void => {
+			// Persisting apply shared by cycle rows and the model picker: commits the
+			// row to config, saves it, and runs the live side effects (quiet mode,
+			// sidebar, enable-after-close). apply() routes row-specific hand-offs
+			// first and only falls through here for rows the panel itself owns.
+			const persist = (key: string, textValue?: string): void => {
 				const wasEnabled = config.enabled;
 				const wasQuiet = config.quietMode;
 				const wasStatic = config.staticMode;
 				const wasPinEditorBottom = config.pinEditorBottom;
 				const wasSidebarMode = config.sidebar.mode;
-				if (key === "theme") {
-					// Delegate: the picker previews live and reverts on Esc, neither of
-					// which a blind one-key cycle through the name list can do.
-					sub = makeThemePicker(ctx, tui, theme, closeSub);
-					tui.requestRender();
-					return;
-				}
-				if (key === "thinkingFold") {
-					// Pass-through row: pi owns hideThinkingBlock, so bring it to the
-					// wanted state through the native toggle instead of saving config.
-					// pi persists the flip synchronously through its settingsManager.
-					const target = !thinkingHidden;
-					const ok = ensureThinkingFolded(tui, ctx.cwd, target);
-					if (ok) thinkingHidden = target;
-					saveState = ok
-						? { kind: "saved" }
-						: { kind: "failed", message: "editor unreachable" };
-					return;
-				}
 				config = applyRow(config, key, textValue);
 				saveState = { kind: "saving" };
 				const result = saveConfig(config);
@@ -1520,6 +1506,69 @@ export default function (pi: ExtensionAPI): void {
 					thinkingTimer.syncMode();
 				}
 				req();
+			};
+			// The model row expands like the theme row: the picker owns the whole
+			// card, Enter saves through persist(), Esc lands back on the panel. The
+			// entries are the /api-manager providers, so what is offered here is
+			// exactly what title-llm can resolve at generation time.
+			const makeModelPicker = (): ModelPicker => {
+				const entries: ModelPickerEntry[] = [
+					{ kind: "model", ref: "", label: "(rule-based)" },
+					...ctx.modelRegistry.getAvailable().map((m) => ({
+						kind: "model" as const,
+						ref: `${m.provider}/${m.id}`,
+						label: `${m.provider}/${m.id}`,
+					})),
+					{ kind: "custom", label: "custom ref…" },
+				];
+				return new ModelPicker({
+					entries,
+					initial: config.title.generationModel ?? "",
+					commit: (ref) => {
+						persist("titleGenerationModel", ref);
+					},
+					requestCustom: () => {
+						// Hand off to the existing free-text editor so a ref that is not
+						// on the list (yet) can still be typed; resolution against the
+						// registry still happens at generation time. The picker closes
+						// itself after this callback, so the panel repaints into
+						// text-edit mode.
+						editingText = "titleGenerationModel";
+						textDraft = config.title.generationModel ?? "";
+					},
+					close: closeSub,
+					requestRender: () => tui.requestRender(),
+					getTerminalRows: () => terminalRows(tui),
+					theme,
+					glyphs: resolveGlyphs(config.icons.mode),
+				});
+			};
+			const apply = (key: string, textValue?: string): void => {
+				if (key === "theme") {
+					// Delegate: the picker previews live and reverts on Esc, neither of
+					// which a blind one-key cycle through the name list can do.
+					sub = makeThemePicker(ctx, tui, theme, closeSub);
+					tui.requestRender();
+					return;
+				}
+				if (key === "thinkingFold") {
+					// Pass-through row: pi owns hideThinkingBlock, so bring it to the
+					// wanted state through the native toggle instead of saving config.
+					// pi persists the flip synchronously through its settingsManager.
+					const target = !thinkingHidden;
+					const ok = ensureThinkingFolded(tui, ctx.cwd, target);
+					if (ok) thinkingHidden = target;
+					saveState = ok
+						? { kind: "saved" }
+						: { kind: "failed", message: "editor unreachable" };
+					return;
+				}
+				if (key === "titleGenerationModel") {
+					sub = makeModelPicker();
+					tui.requestRender();
+					return;
+				}
+				persist(key, textValue);
 			};
 			// Idempotent teardown shared by component.dispose() and session shutdown:
 			// the host hides a stale overlay via hideOverlay() without calling

@@ -4,9 +4,9 @@ import { applyRow, buildRows, rowKeyForAccel } from "../src/settings-view.ts";
 import { DEFAULT_CONFIG } from "../src/types.ts";
 
 // The theme row is a hand-off to the /theme picker, thinkingFold is a
-// pass-through to pi's native toggle, and titleGenerationModel is a free-text
-// row: none of them is a config cycle, so applyRow has no toggle semantics for
-// them and the "next advertises applyRow" invariant cannot hold.
+// pass-through to pi's native toggle, and titleGenerationModel opens the model
+// picker: none of them is a config cycle, so applyRow has no toggle semantics
+// for them and the "next advertises applyRow" invariant cannot hold.
 const CYCLING_ROWS = (key: string): boolean =>
 	key !== "theme" && key !== "thinkingFold" && key !== "titleGenerationModel";
 
@@ -171,26 +171,26 @@ test("title rows cycle every dimension and are reachable by accel", () => {
 	assert.equal(applyRow(applyRow(DEFAULT_CONFIG, "titleEnabled"), "titleEnabled").title.enabled, true);
 });
 
-test("title generation model is a text row that commits its draft and clears on empty", () => {
+test("title generation model is a picker row that commits its ref and clears on empty", () => {
 	const empty = buildRows(DEFAULT_CONFIG).find((r) => r.key === "titleGenerationModel")!;
 	assert.deepEqual(
 		{ value: empty.value, next: empty.next, accel: empty.accel, kind: empty.kind },
-		{ value: "(rule-based)", next: "type…", accel: "z", kind: "text" },
+		{ value: "(rule-based)", next: "picker…", accel: "z", kind: "select" },
 	);
-	// A committed draft lands in the config and shows up on the row.
+	// A picked ref lands in the config and shows up on the row.
 	const committed = applyRow(DEFAULT_CONFIG, "titleGenerationModel", "maestro-qwen/qwen3.8-max-preview");
 	assert.equal(committed.title.generationModel, "maestro-qwen/qwen3.8-max-preview");
 	assert.equal(
 		buildRows(committed).find((r) => r.key === "titleGenerationModel")!.value,
 		"maestro-qwen/qwen3.8-max-preview",
 	);
-	// Empty draft restores the offline rule-based extractor.
+	// Empty pick clears back to the offline rule-based extractor.
 	assert.equal(applyRow(committed, "titleGenerationModel", "").title.generationModel, "");
 	assert.equal(applyRow(committed, "titleGenerationModel", "   ").title.generationModel, "");
 });
 
-test("title generation model row does not cycle when applyRow gets no draft", () => {
-	// Guards the empty-vs-applyRow contract: a blind Enter without a draft
+test("title generation model row does not cycle when applyRow gets no ref", () => {
+	// Guards the empty-vs-applyRow contract: a blind Enter without a ref
 	// must clear the model back to rule-based, never keep a stale value.
 	const configured = { ...DEFAULT_CONFIG, title: { ...DEFAULT_CONFIG.title, generationModel: "p/m" } };
 	assert.equal(applyRow(configured, "titleGenerationModel").title.generationModel, "");
