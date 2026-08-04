@@ -2571,7 +2571,9 @@ test("Alt+R opens the native agent view without injecting a slash command", asyn
   });
 
   registerTeammateExtension(pi as unknown as ExtensionAPI);
-  assert.ok(commands.has("teammate-session"));
+  // /teammate-session was removed: the session view is now driven by the
+  // cockpit session bar (TEAMMATE_OPEN_AGENT_EVENT), not a slash command.
+  assert.ok(!commands.has("teammate-session"));
   assert.ok(commands.has("teammate-models"));
   assert.ok(shortcut);
   assert.ok(modelShortcut);

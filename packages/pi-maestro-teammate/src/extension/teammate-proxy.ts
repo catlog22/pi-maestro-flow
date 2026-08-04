@@ -1544,6 +1544,7 @@ export async function handleProxyRequest(
           const target = state.activeRuns.get(result.correlationId) ?? activeAgent;
           target.resolvedModel = target.resolvedModel ?? result.model;
           if (result.attemptedModels) target.attemptedModels = [...result.attemptedModels];
+          if (result.structuredOutput !== undefined) target.structuredOutput = result.structuredOutput;
           const lastMessage = displayMessageForResult(result);
           const settle = normalizedTasks ? settleGraphTaskAgent : settleAgent;
           settle(

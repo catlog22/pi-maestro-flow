@@ -609,6 +609,15 @@ export function buildWatchOutput(target: WatchTarget, lineCount: number): string
     } else if (agent.status === "running" && log.length === 0) {
       output.push("Waiting for model capacity or first activity…");
     }
+    if (agent.structuredOutput !== undefined) {
+      let text: string;
+      try {
+        text = JSON.stringify(agent.structuredOutput, null, 2);
+      } catch {
+        text = "(not JSON-serializable)";
+      }
+      output.push("--- structured output ---", ...text.split("\n").slice(-lineCount));
+    }
     if (agent.status === "sleeping") {
       output.push("", "[sleeping — messages remain visible; use teammate-send to wake]");
     }

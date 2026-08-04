@@ -246,12 +246,50 @@ export function aggregateTerminalStatuses(
   return sawTerminated ? "terminated" : "completed";
 }
 
+const STRUCTURED_OUTPUT_DISPLAY_BYTES = 4096;
+const STRUCTURED_OUTPUT_CONFIRMATION = "Structured output saved.";
+
+function truncateUtf8Head(value: string, maxBytes: number): string {
+  if (value.length * 3 <= maxBytes) return value;
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  const encoded = Buffer.from(value, "utf8");
+  let end = maxBytes;
+  while (end > 0 && (encoded[end] & 0xc0) === 0x80) end -= 1;
+  return encoded.subarray(0, end).toString("utf8");
+}
+
+function formatStructuredOutputForDisplay(result: SingleResult): string | undefined {
+  if (result.structuredOutput === undefined) return undefined;
+  let text: string;
+  try {
+    text = JSON.stringify(result.structuredOutput, null, 2);
+  } catch {
+    return "[structured_output] (value is not JSON-serializable)";
+  }
+  if (Buffer.byteLength(text, "utf8") <= STRUCTURED_OUTPUT_DISPLAY_BYTES) {
+    return `[structured_output] ${text}`;
+  }
+  const truncated = truncateUtf8Head(text, STRUCTURED_OUTPUT_DISPLAY_BYTES);
+  return `[structured_output] ${truncated}… [truncated; read the full value via agent://${result.correlationId}]`;
+}
+
+function isStructuredOutputConfirmation(text: string): boolean {
+  return text === STRUCTURED_OUTPUT_CONFIRMATION || text === "(no output)";
+}
+
 export function displayMessageForResult(result: SingleResult): string {
-  const lastMessage = result.messages.at(-1)?.content
-    ?? (result.structuredOutput !== undefined
-      ? `[structured_output] ${truncateUtf8Tail(JSON.stringify(result.structuredOutput), 512)}`
-      : "(no output)");
-  if (result.exitCode === 0) return lastMessage;
+  const structured = formatStructuredOutputForDisplay(result);
+  const lastMessage = result.messages.at(-1)?.content ?? structured ?? "(no output)";
+  // A structured_output completion ends with the tool's generic confirmation,
+  // not the answer. When the transcript tail is only that confirmation (or
+  // nothing), surface the value itself; otherwise keep the prose answer and
+  // append the value so callers see both.
+  const effective = structured !== undefined && lastMessage !== structured
+    ? isStructuredOutputConfirmation(lastMessage)
+      ? structured
+      : `${lastMessage}\n\n${structured}`
+    : lastMessage;
+  if (result.exitCode === 0) return effective;
 
   const schemaDiagnostic = result.messages
     .filter((message) => isStructuredOutputSettlementDiagnostic(message.content))
@@ -266,7 +304,7 @@ export function displayMessageForResult(result: SingleResult): string {
   if (primaryDiagnostic && schemaDiagnostic && primaryDiagnostic !== schemaDiagnostic) {
     return `${primaryDiagnostic}\n\nStructured output: ${schemaDiagnostic}`;
   }
-  return primaryDiagnostic ?? schemaDiagnostic ?? lastMessage;
+  return primaryDiagnostic ?? schemaDiagnostic ?? effective;
 }
 
 export function summarizeGraphResults(results: readonly SingleResult[], tasks: readonly NormalizedTask[]): string {
@@ -316,6 +354,10 @@ Use an exact role name from the Available Teammate Agents section in the active 
 
 Background: the foreground wait window is bounded — the smallest per-task timeoutMs, or 10 minutes by default; when it elapses the call returns a background acknowledgement and the work continues, completing via one automatic teammate-complete notification that triggers a new turn. Do not poll observe or teammate-list; if the current turn must wait, call observe once with action="wait" and target { kind: "teammate", id: "<name-or-correlation-id>" }. Nested background dispatches: the work executes in the root process, and on completion the same teammate-complete envelope is delivered automatically to the dispatching child agent as a new turn in its session while that agent is still live, with the root caller additionally receiving the notification. If the dispatching agent has already ended, delivery is skipped and the result is settled and only inspectable via observe.
 
+## Structured output (outputSchema)
+
+When a task (or the top-level call) sets outputSchema, the child must submit its final answer through a \`structured_output\` tool that validates the value against that JSON Schema. On completion the value is returned directly in the result content (prefixed \`[structured_output]\`) and is persisted for later reads via \`agent://<correlationId>\` (resource tool). Schema-invalid submissions fail validation and the child retries automatically; a run that ends without a valid value fails with a diagnostic naming the offending field.
+
 ## Observation
 
 Use observe for teammate and background Bash status, barrier waits, or transition watching:
@@ -323,6 +365,8 @@ Use observe for teammate and background Bash status, barrier waits, or transitio
 - { action: "wait", targets: [{ kind: "teammate", id: "reviewer" }, { kind: "bash_bg", id: "bg-id" }], waitMode: "all" } — mixed barrier wait
 - { action: "wait", until: "completed", targets: [{ kind: "teammate", id: "reviewer" }] } — block until the agent fully terminates (not just first result)
 - { action: "watch", targets: [{ kind: "teammate", id: "reviewer" }], timeoutMs: 30000 } — follow status transitions until timeout
+
+Set detail=full (or tail) to include a settled agent's captured result — including the structured_output value for schema tasks.
 
 When neither the top-level model nor a task-level model is set, teammates inherit the main session's current model by default. Configured task-type/role mappings take precedence when present; with no mapping and no session model, the agent's default model is used.
 
@@ -353,7 +397,7 @@ export const TEAMMATE_LIST_GUIDELINES = [
 ];
 
 export const TEAMMATE_WATCH_DESCRIPTION =
-  "Perform a one-shot inspection of a running or sleeping teammate agent's recent output, tool activity, inbox messages, and last result. This is not a completion-wait tool.";
+  "Perform a one-shot inspection of a running or sleeping teammate agent's recent output, tool activity, inbox messages, and last result — including the structured_output value for schema tasks. This is not a completion-wait tool.";
 export const TEAMMATE_WATCH_SNIPPET = "Inspect a specific teammate agent's recent activity and output.";
 export const TEAMMATE_WATCH_GUIDELINES = [
   "Use teammate-watch only for a one-off live inspection after selecting an agent name, displayed selector, or correlation ID; never call it repeatedly to wait for completion.",
@@ -373,12 +417,12 @@ export const OBSERVE_DESCRIPTION = `Observe mixed teammate and background Bash t
 - "wait": block on an all/any/count barrier with one request-level timeout; set until="completed" to block until agents fully terminate instead of first result
 - "watch": poll every target until timeoutMs, returning the full status-transition timeline (richer than status, no barrier required)
 
-Targets use { kind, id }, where kind is currently "teammate" or "bash_bg". Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.`;
+Targets use { kind, id }, where kind is currently "teammate" or "bash_bg". Use detail=full (or tail) to include a settled teammate's captured result — including the structured_output value for schema tasks. Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.`;
 export const OBSERVE_SNIPPET = "Observe, wait for, or watch mixed teammate and background Bash targets.";
 export const OBSERVE_GUIDELINES = [
   "Use observe for mixed or multi-target status and waits; use one bounded wait instead of polling status.",
   "Use action=watch to follow status transitions over time; use action=wait until=completed to block until agents fully terminate.",
-  "Use detail=full only when recent output is required; summary is the compact default.",
+  "Use detail=full only when recent output is required; summary is the compact default. detail=full includes a settled agent's captured result and structured_output value.",
 ];
 
 export const TEAMMATE_MONITOR_DESCRIPTION = `Observe multiple teammate targets or block on a multi-agent barrier. Persistent supervision is entered/exited separately via /monitor.

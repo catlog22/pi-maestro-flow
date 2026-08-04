@@ -244,6 +244,8 @@ export interface ActiveAgent {
   /** Pi emitted a final no-tool assistant turn; agent_end has not necessarily arrived yet. */
   resultReadyAt?: number;
   lastResult?: string;
+  /** Schema-valid structured output of the settled run, kept for observe inspection. */
+  structuredOutput?: unknown;
   /**
    * This dispatch runs in background/detached mode and will send a
    * `teammate-complete` notification on terminal settle. If it goes silent
