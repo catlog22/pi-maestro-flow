@@ -67,10 +67,10 @@ test("renderSessionDetail: running agent without tail shows a working hint", () 
 	assert.ok(lines.some((line) => line.includes("working")));
 });
 
-test("renderSessionDetail: quiet mode drops streaming tail but keeps actionable state", () => {
+test("renderSessionDetail: explicit session view keeps content and actionable state", () => {
 	const rows = [agent({
 		status: "running",
-		tail: "streaming model prose that should be hidden",
+		tail: "streaming model prose that belongs in the selected session",
 		activeTool: "read",
 		error: "provider warning",
 	})];
@@ -81,16 +81,14 @@ test("renderSessionDetail: quiet mode drops streaming tail but keeps actionable 
 		theme as Theme,
 		8,
 		{ offset: 0, following: true },
-		true,
 	);
 	const text = lines.join("\n");
-	assert.doesNotMatch(text, /streaming model prose/);
-	assert.doesNotMatch(text, /working/);
+	assert.match(text, /streaming model prose/);
 	assert.match(text, /read/);
 	assert.match(text, /provider warning/);
+	assert.match(lines[0], /Alt\+Shift\+↑↓ scroll/);
 	assert.match(lines[0], /Alt\+Shift\+R hide/);
-	assert.doesNotMatch(lines[0], /scroll/);
-	assert.equal(sessionDetailBodyLength(rows, "c1", 120, true), 2);
+	assert.equal(sessionDetailBodyLength(rows, "c1", 120), 3);
 });
 
 test("renderSessionDetail: active tool and error lines render", () => {

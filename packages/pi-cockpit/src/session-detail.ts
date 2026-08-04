@@ -47,7 +47,6 @@ export interface SessionDetailDeps {
 	getAgents: () => AgentRow[];
 	getViewingId: () => string | undefined;
 	getVisible: () => boolean;
-	getQuietMode?: () => boolean;
 	getScroll?: () => SessionDetailScrollState;
 }
 
@@ -61,13 +60,12 @@ export function sessionDetailBodyLength(
 	rows: readonly AgentRow[],
 	viewingId: string | undefined,
 	width: number,
-	quietMode = false,
 ): number {
 	const row = rows.find((candidate) => candidate.correlationId === viewingId);
 	if (!row) return 0;
-	let total = !quietMode && row.tail?.trim()
+	let total = row.tail?.trim()
 		? wrapTextWithAnsi(row.tail.trim(), Math.max(1, width - 2)).length
-		: !quietMode && (row.status === "running" || row.status === "retrying") ? 1 : 0;
+		: row.status === "running" || row.status === "retrying" ? 1 : 0;
 	if (row.activeTool) total += 1;
 	if (row.error) total += 1;
 	return total;
@@ -81,7 +79,6 @@ export function renderSessionDetail(
 	theme: Theme,
 	maxRows = SESSION_DETAIL_TAIL_LINES + 1,
 	scroll: SessionDetailScrollState = { offset: 0, following: true },
-	quietMode = false,
 ): string[] {
 	const row = rows.find((candidate) => candidate.correlationId === viewingId);
 	if (!row) return [];
@@ -106,7 +103,7 @@ export function renderSessionDetail(
 		theme.fg("dim", duration),
 		meta ? theme.fg("dim", meta) : "",
 	].filter(Boolean).join(" · ");
-	const hint = theme.fg("dim", quietMode ? "Alt+Shift+R hide" : "Alt+Shift+↑↓ scroll · Alt+Shift+R hide");
+	const hint = theme.fg("dim", "Alt+Shift+↑↓ scroll · Alt+Shift+R hide");
 	const hintWidth = visibleWidth(hint);
 	const header = hintWidth + 12 <= w
 		? (() => {
@@ -118,11 +115,11 @@ export function renderSessionDetail(
 
 	const body: string[] = [];
 	const tail = row.tail?.trim();
-	if (!quietMode && tail) {
+	if (tail) {
 		for (const line of wrapTextWithAnsi(tail, Math.max(1, w - 2))) {
 			body.push(theme.fg("dim", `  ${line}`));
 		}
-	} else if (!quietMode && (status === "running" || status === "retrying")) {
+	} else if (status === "running" || status === "retrying") {
 		body.push(theme.fg("dim", "  working…"));
 	}
 	if (row.activeTool) {
@@ -163,7 +160,6 @@ export function makeSessionDetailWidget(deps: SessionDetailDeps) {
 				theme,
 				maxRows,
 				deps.getScroll?.(),
-				deps.getQuietMode?.() ?? false,
 			);
 		},
 		invalidate(): void {},

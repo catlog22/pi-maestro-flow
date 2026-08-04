@@ -864,7 +864,6 @@ export default function (pi: ExtensionAPI): void {
 					getAgents: () => agents.snapshot(),
 					getViewingId: () => agents.getViewingAgent(),
 					getVisible: () => sessionDetailVisible,
-					getQuietMode: () => config.quietMode,
 					getScroll: () => sessionDetailScroll,
 				})(tui, theme);
 			},
@@ -916,7 +915,7 @@ export default function (pi: ExtensionAPI): void {
 			if (!sessionDetailVisible || !viewingId) return undefined;
 			const width = capturedTui?.terminal?.columns ?? 80;
 			const rows = capturedTui?.terminal?.rows;
-			const total = sessionDetailBodyLength(agents.snapshot(), viewingId, width, config.quietMode);
+			const total = sessionDetailBodyLength(agents.snapshot(), viewingId, width);
 			const maxRows = panelRows(rows) ?? DEFAULT_SESSION_DETAIL_ROWS;
 			const budget = sessionDetailWindowRows(total, maxRows);
 			const next = scrollBy(sessionDetailScroll, up ? -1 : 1, total, Math.max(1, budget));

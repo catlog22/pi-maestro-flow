@@ -73,7 +73,7 @@ function context(cwd: string, overrides: { hasUI?: boolean; existing?: EditorFac
       setEditorComponent: (next: EditorFactory) => {
         factory = next;
       },
-      theme: { fg: (color: string, text: string) => `[${color}]${text}[/${color}]` } as never,
+      theme: { fg: (_color: string, text: string) => `\x1b[33m${text}\x1b[39m` } as never,
     },
   };
   return {
@@ -196,15 +196,25 @@ test("route target renders as an immutable prefix inside the editor", async () =
     const instance = host.build();
     assert.ok(instance);
     instance.setText("run focused tests");
+    const cursorBefore = instance.getCursor();
+    const baseLines = instance.render(60);
     history.setRouteTarget({ label: "builder", color: "warning" });
     const lines = instance.render(60);
-    assert.ok(lines.some((line) => line.includes("@builder:")));
-    assert.ok(lines.some((line) => line.includes("[warning]")));
+    const routeLine = lines.find((line) => line.includes("@builder:"));
+    assert.ok(routeLine);
+    assert.ok(routeLine.includes("run focused tests"), "route target stays inline with editable text");
+    assert.equal(lines.length, baseLines.length, "route target does not add an editor row");
+    assert.match(routeLine, /\x1b\[33m@builder:\x1b\[39m/);
+    assert.deepEqual(instance.getCursor(), cursorBefore, "render restores the editable cursor");
     assert.equal(instance.getText(), "run focused tests", "prefix is not editor text");
     instance.focused = true;
-    for (const line of instance.render(20)) {
+    const narrowLines = instance.render(20);
+    const narrowRouteLine = narrowLines.find((line) => line.includes("@builder:"));
+    assert.ok(narrowRouteLine?.includes("run"), "narrow editor keeps the route target and body on one line");
+    for (const line of narrowLines) {
       assert.ok(visibleWidth(line) <= 20, `route editor line exceeded width: ${visibleWidth(line)}`);
     }
+    assert.deepEqual(instance.getCursor(), cursorBefore, "narrow render also restores the editable cursor");
     assert.equal(instance.getText(), "run focused tests", "narrow rendering and cursor marker do not alter text");
     instance.addToHistory("run focused tests");
     await history.onSessionShutdown();

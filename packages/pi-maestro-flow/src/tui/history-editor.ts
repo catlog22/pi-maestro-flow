@@ -30,6 +30,16 @@ export interface HistoryEditorParams {
   getRouteTarget?: () => HistoryEditorRouteTarget | undefined;
 }
 
+interface EditorRenderState {
+  lines: string[];
+  cursorLine: number;
+  cursorCol: number;
+}
+
+interface EditorWithRenderState {
+  state: EditorRenderState;
+}
+
 export class HistoryEditor extends CustomEditor {
   private index = NOT_BROWSING;
   /** What the user had typed before browsing started, restored on the way back down. */
@@ -93,21 +103,40 @@ export class HistoryEditor extends CustomEditor {
   }
 
   override render(width: number): string[] {
-    const lines = super.render(width);
     const target = this.params.getRouteTarget?.();
-    if (target && lines.length >= 2) {
-      const paddingX = this.getPaddingX();
-      const prefix = target.paint(`@${target.label}:`);
-      const content = truncateToWidth(`${" ".repeat(paddingX)}${prefix}`, Math.max(1, width), "…");
-      const routeLine = content + " ".repeat(Math.max(0, width - visibleWidth(content)));
-      // Insert after the top border. The route is inside the input box but is
-      // not part of editor text, cursor coordinates, undo, or prompt history.
-      lines.splice(1, 0, routeLine);
-    }
+    const lines = target ? this.renderWithRouteTarget(width, target) : super.render(width);
     const total = this.params.getEntries().length;
     if (!this.browsing() || total === 0) return lines;
     // Put the compact position label below the editor so it does not compete with its border.
     return [...lines, historyBanner(this.index + 1, total, width, this.getPaddingX(), this.borderColor)];
+  }
+
+  private renderWithRouteTarget(width: number, target: HistoryEditorRouteTarget): string[] {
+    const paddingX = Math.min(this.getPaddingX(), Math.max(0, Math.floor((width - 1) / 2)));
+    const contentWidth = Math.max(1, width - paddingX * 2);
+    const layoutWidth = Math.max(1, contentWidth - (paddingX ? 0 : 1));
+    const token = truncateToWidth(`@${target.label}:`, Math.max(1, layoutWidth - 1), "…");
+    const injected = `${token}${visibleWidth(token) < layoutWidth ? " " : ""}`;
+
+    // Editor has no render-prefix API. Temporarily project the immutable target
+    // into its layout state so native wrapping and cursor placement stay correct,
+    // then restore the real editable state before returning.
+    const state = (this as unknown as EditorWithRenderState).state;
+    const originalLines = state.lines;
+    const originalCursorCol = state.cursorCol;
+    state.lines = [`${injected}${originalLines[0] ?? ""}`, ...originalLines.slice(1)];
+    if (state.cursorLine === 0) state.cursorCol += injected.length;
+    try {
+      const rendered = super.render(width);
+      const routeLine = rendered.findIndex((line) => line.includes(token));
+      if (routeLine >= 0) {
+        rendered[routeLine] = rendered[routeLine]!.replace(token, target.paint(token));
+      }
+      return rendered;
+    } finally {
+      state.lines = originalLines;
+      state.cursorCol = originalCursorCol;
+    }
   }
 
   private browsing(): boolean {
