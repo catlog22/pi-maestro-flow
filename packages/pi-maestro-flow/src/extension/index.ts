@@ -80,6 +80,7 @@ import {
   setWorkflowCoordinator,
   setGoalStateChangeListener,
   setGoalPanelOwnership,
+  setGoalStaticMode,
   type GoalParams as GoalActionParams,
 } from "../tools/goal.ts";
 import {
@@ -1899,6 +1900,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     const ownership = payload as Partial<CockpitUiOwnershipV1>;
     cockpitOwnsTodo = ownership.todo === true;
     setGoalPanelOwnership(ownership.goal === true, widgetCtx);
+    setGoalStaticMode(ownership.static === true);
     setQuietMode(ownership.quiet === true, ownership.quietSymbols);
     if (typeof ownership.todoExpanded === "boolean") {
       panelMode = ownership.todoExpanded ? "expanded" : "collapsed";

@@ -170,6 +170,10 @@ let goalSessionId: string | undefined;
 let goalLoopOwner: { goalId: string; epoch: number } | undefined;
 let workflowCoordinator: WorkflowCoordinator | undefined;
 let elapsedTimer: ReturnType<typeof setInterval> | undefined;
+// Cockpit static mode mirror: while on, the per-second elapsed tick freezes
+// and the panel hides the live duration — same contract as every other
+// cockpit surface (agent rows, sidebar, thinking label).
+let goalStaticMode = false;
 const issuedGoalMarkers = new Set<string>();
 
 configureGoalVerification({
@@ -328,6 +332,22 @@ export function initGoal(pi: ExtensionAPI) {
 
 export function setWorkflowCoordinator(coordinator: WorkflowCoordinator | undefined): void {
   workflowCoordinator = coordinator;
+}
+
+/**
+ * Cockpit static-mode mirror. While on, the per-second elapsed tick freezes
+ * and the panel hides the live duration (event-driven state changes still
+ * update normally). Turning it back off resumes the tick immediately.
+ */
+export function setGoalStaticMode(staticMode: boolean): void {
+  if (goalStaticMode === staticMode) return;
+  goalStaticMode = staticMode;
+  const ctx = goalDisplayContext;
+  const goal = activeGoal;
+  if (!ctx || !goal || goal.status !== "active") return;
+  // Repaint now so the panel hides (or restores) the elapsed immediately
+  // instead of waiting for the next state change or per-second tick.
+  updateStatusLine(ctx, goal);
 }
 
 /** Cooperatively withdraw or restore Flow's below-editor Goal panel. */
@@ -1568,7 +1588,7 @@ export function currentGoalPhase(): GoalWidgetPhase {
   return "normal";
 }
 
-function updateStatusLine(ctx: GoalContext, goal: ActiveGoal) {
+function updateStatusLine(ctx: GoalContext, goal: ActiveGoal, refreshOnly = false) {
   clearCompletionTimer();
   if (goal.status === "active") ensureElapsedTimer(ctx, goal.id);
   else clearElapsedTimer();
@@ -1586,6 +1606,7 @@ function updateStatusLine(ctx: GoalContext, goal: ActiveGoal) {
           ? "waiting"
           : fmtStatusLine(goal),
   );
+  if (refreshOnly) return;
   updateGoalWidget(ctx, goal, phase);
 }
 
@@ -1616,7 +1637,7 @@ function updateGoalWidget(ctx: GoalContext, goal: ActiveGoal, phase: GoalWidgetP
       if (!entries.some((entry) => entry.id === currentGoalId)) {
         entries.push(toDetailEntry(goal, undefined));
       }
-      return renderGoalPanel(entries, currentGoalId, phase, width, theme);
+      return renderGoalPanel(entries, currentGoalId, phase, width, theme, { hideLiveDuration: goalStaticMode });
     },
     invalidate() {},
   }), { placement: "belowEditor" });
@@ -1696,18 +1717,31 @@ function clearGoalDisplay(ctx: GoalContext): void {
 function clearCompletionTimer() { if (completionTimer) { clearTimeout(completionTimer); completionTimer = undefined; } }
 function clearElapsedTimer() { if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = undefined; } }
 
+/**
+ * One per-second goal tick: advance the live counter and refresh the status
+ * line. The below-editor widget is deliberately NOT re-set here — its render
+ * closure reads getGoalPanelEntries() live and the status update already
+ * triggers a frame render, so rebuilding the widget would only churn the
+ * widget container once per second.
+ */
+export function tickGoalElapsed(ctx: GoalContext, goalId: string, now = Date.now()): boolean {
+  const goal = activeGoal;
+  if (!goal || goal.id !== goalId || goal.status !== "active") {
+    clearElapsedTimer();
+    return false;
+  }
+  if (goalStaticMode) return false;
+  const elapsed = Math.max(0, Math.floor((now - goal.startedAt) / 1000));
+  if (elapsed === goal.timeUsedSeconds) return false;
+  goal.timeUsedSeconds = elapsed;
+  updateStatusLine(ctx, goal, true);
+  return true;
+}
+
 function ensureElapsedTimer(ctx: GoalContext, goalId: string): void {
   if (elapsedTimer) return;
   elapsedTimer = setInterval(() => {
-    const goal = activeGoal;
-    if (!goal || goal.id !== goalId || goal.status !== "active") {
-      clearElapsedTimer();
-      return;
-    }
-    const elapsed = Math.max(0, Math.floor((Date.now() - goal.startedAt) / 1000));
-    if (elapsed === goal.timeUsedSeconds) return;
-    goal.timeUsedSeconds = elapsed;
-    updateStatusLine(ctx, goal);
+    tickGoalElapsed(ctx, goalId);
   }, 1_000);
 }
 

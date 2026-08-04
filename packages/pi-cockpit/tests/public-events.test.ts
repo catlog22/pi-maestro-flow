@@ -19,6 +19,7 @@ const ownership: CockpitUiOwnershipV1 = {
 	todoExpanded: false,
 	quiet: false,
 	quietSymbols: "check",
+	static: false,
 };
 const clear: MaestroUiClearSnapshotV1 = {
 	version: MAESTRO_UI_SNAPSHOT_VERSION,

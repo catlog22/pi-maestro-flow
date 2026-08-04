@@ -11,6 +11,7 @@ import { BashBgStore } from "./bash-bg-store.ts";
 import { MaestroStore } from "./maestro-store.ts";
 import { createSidebarController, type SidebarController } from "./sidebar-controller.ts";
 import { COCKPIT_SPLIT_PANE_MARKER } from "./split-pane.ts";
+import { attachViewportStability } from "./viewport-stability.ts";
 import {
 	COCKPIT_EDITOR_BOTTOM_MARKER,
 	EDITOR_BOTTOM_WIDGET_KEY,
@@ -232,6 +233,10 @@ export default function (pi: ExtensionAPI): void {
 	let lastCtx: ExtensionContext | undefined;
 	let settingsCommandCtx: ExtensionCommandContext | undefined;
 	let capturedTui: TUI | undefined;
+	// TUI the unconditional viewport-stability hook is currently installed on.
+	// Independent of the split-pane attach: the sidebar can be off while the
+	// thinking label / teammate tree still stream above the visible viewport.
+	let stabilityTui: TUI | undefined;
 	// True while Cockpit owns a capturing overlay (bash jobs, theme picker,
 	// settings panel). Split-pane resize must yield to the overlay's focus and
 	// refuse to start while one is open; otherwise the resize listener — a
@@ -438,6 +443,7 @@ export default function (pi: ExtensionAPI): void {
 			todoExpanded: config.todoExpanded,
 			quiet: config.enabled && config.quietMode,
 			quietSymbols: config.quietSymbols,
+			static: config.staticMode,
 		};
 		pi.events.emit(COCKPIT_UI_OWNERSHIP_EVENT, ownership);
 	};
@@ -489,6 +495,12 @@ export default function (pi: ExtensionAPI): void {
 	};
 
 
+	const ensureViewportStability = (tui: TUI): void => {
+		if (stabilityTui === tui) return;
+		stabilityTui = tui;
+		attachViewportStability(tui);
+	};
+
 	const clearWidgets = (ctx: ExtensionContext): void => {
 		ctx.ui.setWidget(STACK_WIDGET_KEY, undefined);
 		ctx.ui.setWidget(AGENT_WIDGET_KEY, undefined);
@@ -511,6 +523,7 @@ export default function (pi: ExtensionAPI): void {
 			EDITOR_BOTTOM_WIDGET_KEY,
 			(tui) => {
 				capturedTui = tui;
+				ensureViewportStability(tui);
 				controller.attach(tui);
 				controller.show();
 				return createEditorBottomSentinel();
@@ -529,6 +542,7 @@ export default function (pi: ExtensionAPI): void {
 			STACK_WIDGET_KEY,
 			(tui, theme) => {
 				capturedTui = tui;
+				ensureViewportStability(tui);
 				return makeTodoWidget({
 					getTodos: () => todos.snapshot(),
 					getConfig: () => config,
@@ -541,6 +555,7 @@ export default function (pi: ExtensionAPI): void {
 			AGENT_WIDGET_KEY,
 			(tui, theme) => {
 				capturedTui = tui;
+				ensureViewportStability(tui);
 				return makeAgentWidget({
 					getAgents: () => agents.snapshot(),
 					getConfig: () => config,
@@ -656,6 +671,7 @@ export default function (pi: ExtensionAPI): void {
 		else clearEditorBottom(ctx);
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			capturedTui = tui;
+			ensureViewportStability(tui);
 			let observedWidth = tui.terminal.columns;
 			const widthTimer = setInterval(() => {
 				try {
@@ -976,6 +992,7 @@ export default function (pi: ExtensionAPI): void {
 			todoExpanded: config.todoExpanded,
 			quiet: false,
 			quietSymbols: config.quietSymbols,
+			static: config.staticMode,
 		};
 		// A session boundary must invalidate any in-flight title request: abort it
 		// and bump the generation so its result is discarded (MW-3).
@@ -1218,6 +1235,9 @@ export default function (pi: ExtensionAPI): void {
 		// must kill a running tick, turning it off must revive one mid-run.
 		syncTick();
 		thinkingTimer.syncMode();
+		// Broadcast so cross-extension surfaces (e.g. pi-maestro-flow's Goal
+		// panel) freeze their per-second elapsed ticks along with the cockpit.
+		publishUiOwnership();
 		req();
 		return result.ok;
 	};

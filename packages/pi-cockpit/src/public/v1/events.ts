@@ -145,6 +145,8 @@ export interface CockpitUiOwnershipV1 {
 	todoExpanded: boolean;
 	quiet: boolean;
 	quietSymbols: "check" | "dot";
+	/** Static mode: per-second churn (elapsed ticks, spinners) is suppressed. */
+	static: boolean;
 }
 
 export interface MaestroEventMapV1 {
