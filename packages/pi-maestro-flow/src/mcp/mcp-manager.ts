@@ -3,9 +3,18 @@ import {
   type Component,
   type Focusable,
   matchesKey,
-  truncateToWidth,
   visibleWidth,
 } from "@earendil-works/pi-tui";
+import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
+import {
+  fit,
+  frame,
+  headerLine,
+  helpLine,
+  pad,
+  rule,
+  type FrameTheme,
+} from "pi-cockpit/src/settings/ui-primitives.ts";
 import type { McpManagedServer } from "./mcp-manager-store.ts";
 
 export type McpManagerStatus = "connected" | "idle" | "needs-auth" | "failed" | "disabled";
@@ -36,24 +45,179 @@ export interface McpManagerAction {
   uiState: McpManagerUiState;
 }
 
-interface McpManagerTheme {
-  fg(role: string, text: string): string;
-  bold(text: string): string;
-}
+interface McpManagerTheme extends FrameTheme {}
 
 export interface McpManagerParams {
   servers: readonly McpManagerServerView[];
   theme: McpManagerTheme;
   notice?: string;
   initialState?: Partial<McpManagerUiState>;
+  /** UI language; defaults to zh-CN when the host exposes no locale signal. */
+  locale?: SupportedSettingsLocale;
   requestRender: () => void;
   done: (action: McpManagerAction) => void;
 }
+
+const CATALOGS = {
+  en: {
+    "compact.manage": "Manage services",
+    "compact.edit": "Edit config",
+    "compact.noMatch": "no matching services",
+    "menu.item.manage": "Manage services",
+    "menu.item.manage.desc": "View service status, enable, disable, or delete.",
+    "menu.item.edit": "Edit configuration",
+    "menu.item.edit.desc": "Paste or edit the full MCP JSON configuration.",
+    "footer.close": "Esc close",
+    "footer.select": "Up/Down select",
+    "footer.open": "Enter open",
+    "footer.quick": "1/2 quick enter",
+    "footer.backMenu": "Esc menu",
+    "footer.detail": "Enter details",
+    "footer.filter": "/ filter",
+    "footer.toggle": "Space toggle",
+    "footer.auth": "A auth",
+    "footer.delete": "D delete",
+    "footer.navigate": "Up/Down service",
+    "footer.backDetail": "Esc back",
+    "header.title": "MCP Manager",
+    "header.count": "{count} services",
+    "empty.list": "○ No matching services · back to menu to edit config",
+    "transport.local": "local",
+    "tools.count": "{count} tools",
+    "status.connected": "connected",
+    "status.needsAuth": "needs auth",
+    "status.failed": "connection failed",
+    "status.disabled": "disabled",
+    "status.idle": "idle",
+    "scope.user": "user",
+    "scope.project": "project",
+    "scope.import": "import",
+    "detail.toggle": "toggle",
+    "detail.transport": "transport",
+    "detail.source": "source",
+    "detail.lifecycle": "lifecycle",
+    "detail.url": "URL",
+    "detail.auth": "auth",
+    "detail.headers": "headers",
+    "detail.command": "command",
+    "detail.args": "args",
+    "detail.cwd": "cwd",
+    "detail.env": "environment",
+    "detail.directTools": "direct tools",
+    "detail.resources": "resources",
+    "detail.timeout": "timeout",
+    "detail.tools": "tools",
+    "detail.config": "config",
+    "detail.hint": "hint",
+    "detail.noServer": "no server selected",
+    "detail.authHint": "press A for OAuth auth",
+    "value.enabled": "enabled",
+    "value.disabled": "disabled",
+    "value.readonly": "read-only",
+    "value.unset": "unset",
+    "value.exposed": "exposed",
+    "value.hidden": "hidden",
+    "value.default": "default",
+    "auth.none": "not enabled",
+    "auth.bearerEnv": "Bearer · env:{env}",
+    "auth.bearer": "Bearer",
+    "auth.oauth": "OAuth",
+    "auth.headers": "headers",
+    "auth.auto": "auto",
+    "tools.all": "all",
+    "tools.selected": "{count} selected",
+    "tools.none": "none",
+    "tools.proxy": "proxy only",
+    "filter.prompt": "Filter: press / to search",
+    "filter.active": "filter",
+    "filter.placeholder": "type a server name",
+    "filter.escCancel": "Esc cancel",
+    "filter.count": "showing {count}",
+  },
+  "zh-CN": {
+    "compact.manage": "管理服务",
+    "compact.edit": "编辑配置",
+    "compact.noMatch": "没有匹配的服务",
+    "menu.item.manage": "管理服务",
+    "menu.item.manage.desc": "查看服务状态，并启用、停用或删除。",
+    "menu.item.edit": "编辑配置",
+    "menu.item.edit.desc": "粘贴或修改完整 MCP JSON 配置。",
+    "footer.close": "Esc 关闭",
+    "footer.select": "↑↓ 选择",
+    "footer.open": "Enter 打开",
+    "footer.quick": "1/2 快速进入",
+    "footer.backMenu": "Esc 菜单",
+    "footer.detail": "Enter 详情",
+    "footer.filter": "/ 筛选",
+    "footer.toggle": "空格 开关",
+    "footer.auth": "A 认证",
+    "footer.delete": "D 删除",
+    "footer.navigate": "↑↓ 服务",
+    "footer.backDetail": "Esc 返回",
+    "header.title": "MCP 管理",
+    "header.count": "{count} 个服务",
+    "empty.list": "○ 没有匹配的服务 · 返回菜单后编辑配置",
+    "transport.local": "本地",
+    "tools.count": "{count} 个工具",
+    "status.connected": "已连接",
+    "status.needsAuth": "需要认证",
+    "status.failed": "连接失败",
+    "status.disabled": "已停用",
+    "status.idle": "未连接",
+    "scope.user": "用户",
+    "scope.project": "项目",
+    "scope.import": "导入",
+    "detail.toggle": "开关",
+    "detail.transport": "传输",
+    "detail.source": "来源",
+    "detail.lifecycle": "连接策略",
+    "detail.url": "URL",
+    "detail.auth": "认证",
+    "detail.headers": "请求头",
+    "detail.command": "命令",
+    "detail.args": "参数",
+    "detail.cwd": "目录",
+    "detail.env": "环境变量",
+    "detail.directTools": "直连工具",
+    "detail.resources": "资源",
+    "detail.timeout": "超时",
+    "detail.tools": "工具",
+    "detail.config": "配置",
+    "detail.hint": "提示",
+    "detail.noServer": "未选择服务",
+    "detail.authHint": "按 A 进行 OAuth 认证",
+    "value.enabled": "已启用",
+    "value.disabled": "已停用",
+    "value.readonly": "只读",
+    "value.unset": "未配置",
+    "value.exposed": "已公开",
+    "value.hidden": "已隐藏",
+    "value.default": "默认",
+    "auth.none": "未启用",
+    "auth.bearerEnv": "Bearer · 环境变量:{env}",
+    "auth.bearer": "Bearer",
+    "auth.oauth": "OAuth",
+    "auth.headers": "请求头",
+    "auth.auto": "自动",
+    "tools.all": "全部",
+    "tools.selected": "{count} 个已选",
+    "tools.none": "无",
+    "tools.proxy": "仅代理",
+    "filter.prompt": "筛选：按 / 输入服务名",
+    "filter.active": "筛选",
+    "filter.placeholder": "输入服务名",
+    "filter.escCancel": "Esc 取消",
+    "filter.count": "显示 {count} 个",
+  },
+} as const;
+
+type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
 
 const MAX_VISIBLE = 10;
 
 export class McpManagerOverlay implements Component, Focusable {
   focused = false;
+  private readonly locale: SupportedSettingsLocale;
   private query: string;
   private selected = 0;
   private detail: boolean;
@@ -63,6 +227,7 @@ export class McpManagerOverlay implements Component, Focusable {
   private lastWidth = 80;
 
   constructor(private readonly params: McpManagerParams) {
+    this.locale = params.locale ?? "zh-CN";
     this.query = params.initialState?.query ?? "";
     this.detail = params.initialState?.detail ?? false;
     this.screen = params.initialState?.screen ?? "menu";
@@ -75,6 +240,16 @@ export class McpManagerOverlay implements Component, Focusable {
 
   invalidate(): void {}
   dispose(): void {}
+
+  /** Translate a catalog key with optional {var} substitution. */
+  private t(key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
+    const catalog = CATALOGS[this.locale] ?? CATALOGS["zh-CN"];
+    const template: unknown = catalog[key];
+    const text = typeof template === "string" ? template : CATALOGS["zh-CN"][key] as string;
+    if (!vars) return text;
+    return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
+      vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
+  }
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.min(width, 140));
@@ -201,33 +376,33 @@ export class McpManagerOverlay implements Component, Focusable {
 
   private renderCompact(width: number): string {
     if (this.screen === "menu") {
-      const action = this.menuSelected === 0 ? "管理服务" : "编辑配置";
-      return truncateToWidth(`Esc · MCP · ${action}`, width, "…");
+      const action = this.t(this.menuSelected === 0 ? "menu.item.manage" : "menu.item.edit");
+      return fit(`Esc · MCP · ${action}`, width);
     }
     const server = this.selectedServer() ?? this.filteredServers()[0];
     const value = server
-      ? `Esc · MCP · ${statusText(server.status)} · ${server.name}`
-      : "Esc · MCP · 没有匹配的服务";
-    return truncateToWidth(value, width, "…");
+      ? `Esc · MCP · ${this.statusText(server.status)} · ${server.name}`
+      : `Esc · MCP · ${this.t("compact.noMatch")}`;
+    return fit(value, width);
   }
 
   private renderMenu(width: number): string[] {
     const inner = width - 2;
     const items = [
-      ["管理服务", "查看服务状态，并启用、停用或删除。"],
-      ["编辑配置", "粘贴或修改完整 MCP JSON 配置。"],
+      [this.t("menu.item.manage"), this.t("menu.item.manage.desc")],
+      [this.t("menu.item.edit"), this.t("menu.item.edit.desc")],
     ] as const;
-    const rows = [fitLine(this.params.theme.bold("MCP"), inner), rule(inner)];
+    const rows = [headerLine(this.params.theme, "MCP", [], inner), rule(inner)];
     for (let index = 0; index < items.length; index++) {
       const [label, description] = items[index];
       const selected = index === this.menuSelected;
       const prefix = selected ? this.params.theme.fg("accent", "›") : " ";
       const name = selected ? this.params.theme.bold(this.params.theme.fg("accent", `${index + 1}. ${label}`)) : `${index + 1}. ${label}`;
-      rows.push(fitLine(`${prefix} ${name}`, inner));
-      rows.push(this.params.theme.fg("dim", fitLine(`    ${description}`, inner)));
+      rows.push(fit(`${prefix} ${name}`, inner));
+      rows.push(helpLine(this.params.theme, `    ${description}`, inner));
     }
     if (this.params.notice) rows.push(this.styledNotice(this.params.notice, inner));
-    rows.push(fitSegments(inner, ["Esc 关闭", "↑↓ 选择", "Enter 打开", "1/2 快速进入"]));
+    rows.push(fitSegments(inner, [this.t("footer.close"), this.t("footer.select"), this.t("footer.open"), this.t("footer.quick")]));
     return frame(rows, width, this.params.theme);
   }
 
@@ -238,7 +413,7 @@ export class McpManagerOverlay implements Component, Focusable {
     rows.push(...this.listRows(servers, inner));
     rows.push(this.filterLine(inner, servers.length));
     if (this.params.notice) rows.push(this.styledNotice(this.params.notice, inner));
-    rows.push(fitSegments(inner, this.hintSegments(["Esc 菜单", "Enter 详情", "/ 筛选", "空格 开关", "A 认证", "D 删除"])));
+    rows.push(fitSegments(inner, this.hintSegments(["footer.backMenu", "footer.detail", "footer.filter", "footer.toggle", "footer.auth", "footer.delete"])));
     return frame(rows, width, this.params.theme);
   }
 
@@ -256,7 +431,7 @@ export class McpManagerOverlay implements Component, Focusable {
     }
     rows.push(this.filterLine(inner, servers.length));
     if (this.params.notice) rows.push(this.styledNotice(this.params.notice, inner));
-    rows.push(fitSegments(inner, this.hintSegments(["Esc 菜单", "↑↓ 服务", "/ 筛选", "空格 开关", "A 认证", "D 删除"])));
+    rows.push(fitSegments(inner, this.hintSegments(["footer.backMenu", "footer.navigate", "footer.filter", "footer.toggle", "footer.auth", "footer.delete"])));
     return frame(rows, width, this.params.theme);
   }
 
@@ -264,79 +439,94 @@ export class McpManagerOverlay implements Component, Focusable {
     const inner = width - 2;
     const rows = [this.header(inner), rule(inner), ...this.detailLines(this.selectedServer(), inner)];
     if (this.params.notice) rows.push(this.styledNotice(this.params.notice, inner));
-    rows.push(fitSegments(inner, this.hintSegments(["Esc 返回", "↑↓ 服务", "/ 筛选", "空格 开关", "A 认证", "D 删除"])));
+    rows.push(fitSegments(inner, this.hintSegments(["footer.backDetail", "footer.navigate", "footer.filter", "footer.toggle", "footer.auth", "footer.delete"])));
     return frame(rows, width, this.params.theme);
   }
 
   private header(width: number): string {
-    return fitLine(`${this.params.theme.bold("MCP 管理")} · ${this.params.servers.length} 个服务`, width);
+    return headerLine(this.params.theme, this.t("header.title"), [
+      this.t("header.count", { count: this.params.servers.length }),
+      this.filterActive ? `${this.t("filter.active")}: ${this.query || this.t("filter.placeholder")}` : "",
+    ], width);
   }
 
   private listRows(servers: readonly McpManagerServerView[], width: number): string[] {
     if (servers.length === 0) {
-      return [this.params.theme.fg("warning", fitLine("○ 没有匹配的服务 · 返回菜单后编辑配置", width))];
+      return [this.params.theme.fg("warning", fit(this.t("empty.list"), width))];
     }
     const start = visibleStart(this.selected, servers.length, MAX_VISIBLE);
     return servers.slice(start, start + MAX_VISIBLE).map((server, offset) => {
       const selected = start + offset === this.selected;
-      const transport = server.entry.url ? "HTTP" : "本地";
-      const scope = scopeLabel(server.scope);
-      const tools = `${server.toolNames.length} 个工具`;
+      const transport = server.entry.url ? "HTTP" : this.t("transport.local");
+      const scope = this.scopeLabel(server.scope);
+      const tools = this.t("tools.count", { count: server.toolNames.length });
       const prefix = selected ? this.params.theme.fg("accent", "›") : " ";
       const name = selected ? this.params.theme.bold(this.params.theme.fg("accent", server.name)) : server.name;
-      return fitLine(`${prefix} ${this.styledStatus(server.status)} ${name} · ${transport} · ${scope} · ${tools}`, width);
+      return fit(`${prefix} ${this.styledStatus(server.status)} ${name} · ${transport} · ${scope} · ${tools}`, width);
     });
   }
 
   private detailLines(server: McpManagerServerView | undefined, width: number): string[] {
-    if (!server) return [this.params.theme.fg("warning", fitLine("未选择服务", width))];
+    if (!server) return [this.params.theme.fg("warning", fit(this.t("detail.noServer"), width))];
     const entry = server.entry;
+    const label = (key: CatalogKey, value: string): string => fit(`${this.detailLabel(this.t(key))}${value}`, width);
     const lines = [
-      fitLine(`${this.params.theme.bold(this.params.theme.fg("accent", server.name))}  ${this.styledStatus(server.status)}`, width),
-      fitLine(`开关      ${entry.enabled === false ? "已停用" : "已启用"}`, width),
-      fitLine(`传输      ${entry.url ? "HTTP" : "本地"}`, width),
-      fitLine(`来源      ${scopeLabel(server.scope)}${server.readOnly ? " · 只读" : ""}`, width),
-      fitLine(`连接策略  ${entry.lifecycle ?? "lazy"}`, width),
+      fit(`${this.params.theme.bold(this.params.theme.fg("accent", server.name))}  ${this.styledStatus(server.status)}`, width),
+      label("detail.toggle", entry.enabled === false ? this.t("value.disabled") : this.t("value.enabled")),
+      label("detail.transport", entry.url ? "HTTP" : this.t("transport.local")),
+      label("detail.source", `${this.scopeLabel(server.scope)}${server.readOnly ? ` · ${this.t("value.readonly")}` : ""}`),
+      label("detail.lifecycle", entry.lifecycle ?? "lazy"),
     ];
     if (entry.url) {
-      lines.push(fitLine(`URL       ${entry.url}`, width));
-      lines.push(fitLine(`认证      ${authLabel(entry)}`, width));
-      if (entry.headers) lines.push(fitLine(`请求头    ${displayRecord(entry.headers)}`, width));
+      lines.push(label("detail.url", entry.url));
+      lines.push(label("detail.auth", this.authLabel(entry)));
+      if (entry.headers) lines.push(label("detail.headers", this.displayRecord(entry.headers)));
     } else {
-      lines.push(fitLine(`命令      ${entry.command ?? "未配置"}`, width));
-      if (entry.args?.length) lines.push(fitLine(`参数      ${entry.args.join(" ")}`, width));
-      if (entry.cwd) lines.push(fitLine(`目录      ${entry.cwd}`, width));
-      if (entry.env) lines.push(fitLine(`环境变量  ${displayRecord(entry.env)}`, width));
+      lines.push(label("detail.command", entry.command ?? this.t("value.unset")));
+      if (entry.args?.length) lines.push(label("detail.args", entry.args.join(" ")));
+      if (entry.cwd) lines.push(label("detail.cwd", entry.cwd));
+      if (entry.env) lines.push(label("detail.env", this.displayRecord(entry.env)));
     }
-    lines.push(fitLine(`直连工具  ${directToolsLabel(entry.directTools)}`, width));
-    lines.push(fitLine(`资源      ${entry.exposeResources ? "已公开" : "已隐藏"}`, width));
-    lines.push(fitLine(`超时      ${entry.requestTimeoutMs ? `${entry.requestTimeoutMs} ms` : "默认"}`, width));
+    lines.push(label("detail.directTools", this.directToolsLabel(entry.directTools)));
+    lines.push(label("detail.resources", entry.exposeResources ? this.t("value.exposed") : this.t("value.hidden")));
+    lines.push(label("detail.timeout", entry.requestTimeoutMs ? `${entry.requestTimeoutMs} ms` : this.t("value.default")));
     if (server.toolNames.length) {
-      lines.push(this.params.theme.fg("dim", fitLine(`工具      ${server.toolNames.slice(0, 4).join(", ")}${server.toolNames.length > 4 ? ` +${server.toolNames.length - 4}` : ""}`, width)));
+      lines.push(helpLine(this.params.theme, fit(
+        `${this.detailLabel(this.t("detail.tools"))}${server.toolNames.slice(0, 4).join(", ")}${server.toolNames.length > 4 ? ` +${server.toolNames.length - 4}` : ""}`,
+        width,
+      ), width));
     }
     if (server.status === "needs-auth" && server.canAuthenticate) {
-      lines.push(this.params.theme.fg("warning", fitLine("提示      按 A 进行 OAuth 认证", width)));
+      lines.push(this.params.theme.fg("warning", fit(
+        `${this.detailLabel(this.t("detail.hint"))}${this.t("detail.authHint")}`,
+        width,
+      )));
     }
-    lines.push(this.params.theme.fg("dim", fitLine(`配置      ${server.path}`, width)));
+    lines.push(helpLine(this.params.theme, fit(`${this.detailLabel(this.t("detail.config"))}${server.path}`, width), width));
     return lines;
   }
 
   private filterLine(width: number, count: number): string {
     const prompt = this.filterActive
-      ? `筛选中：${this.query || "输入服务名"} · Esc 取消`
-      : "筛选：按 / 输入服务名";
-    return this.params.theme.fg("dim", fitLine(`${prompt} · 显示 ${count} 个`, width));
+      ? `${this.t("filter.active")}: ${this.query || this.t("filter.placeholder")} · ${this.t("filter.escCancel")}`
+      : this.t("filter.prompt");
+    return helpLine(this.params.theme, `${prompt} · ${this.t("filter.count", { count })}`, width);
+  }
+
+  private detailLabel(label: string): string {
+    const column = this.locale === "zh-CN" ? 10 : 12;
+    return `${label}${" ".repeat(Math.max(1, column - visibleWidth(label)))}`;
   }
 
   private styledNotice(notice: string, width: number): string {
     const role = /(失败|错误|failed|error)/i.test(notice) ? "error"
       : /^(已保存|已删除|已更新|Saved|Deleted)/.test(notice) ? "success"
       : /^(无法|Cannot)/.test(notice) ? "warning" : "dim";
-    return this.params.theme.fg(role, fitLine(notice, width));
+    return this.params.theme.fg(role, fit(notice, width));
   }
 
   private styledStatus(status: McpManagerStatus): string {
-    const label = `${statusGlyph(status)} ${statusText(status)}`;
+    const label = `${statusGlyph(status)} ${this.statusText(status)}`;
     if (status === "connected") return this.params.theme.fg("success", label);
     if (status === "needs-auth") return this.params.theme.fg("warning", label);
     if (status === "failed") return this.params.theme.fg("error", label);
@@ -373,12 +563,12 @@ export class McpManagerOverlay implements Component, Focusable {
     return this.filteredServers()[this.selected];
   }
 
-  private hintSegments(segments: string[]): string[] {
+  private hintSegments(keys: readonly CatalogKey[]): string[] {
     const server = this.selectedServer();
     if (!server?.canAuthenticate) {
-      return segments.filter((s) => s !== "A 认证");
+      return keys.filter((key) => key !== "footer.auth").map((key) => this.t(key));
     }
-    return segments;
+    return keys.map((key) => this.t(key));
   }
 
   private finish(kind: McpManagerActionKind): void {
@@ -394,6 +584,39 @@ export class McpManagerOverlay implements Component, Focusable {
       },
     });
   }
+
+  private statusText(status: McpManagerStatus): string {
+    if (status === "connected") return this.t("status.connected");
+    if (status === "needs-auth") return this.t("status.needsAuth");
+    if (status === "failed") return this.t("status.failed");
+    if (status === "disabled") return this.t("status.disabled");
+    return this.t("status.idle");
+  }
+
+  private scopeLabel(scope: McpManagedServer["scope"]): string {
+    if (scope === "user") return this.t("scope.user");
+    if (scope === "project") return this.t("scope.project");
+    return this.t("scope.import");
+  }
+
+  private authLabel(entry: McpManagedServer["entry"]): string {
+    if (entry.auth === false) return this.t("auth.none");
+    if (entry.auth === "bearer") return entry.bearerTokenEnv ? this.t("auth.bearerEnv", { env: entry.bearerTokenEnv }) : this.t("auth.bearer");
+    if (entry.auth === "oauth") return this.t("auth.oauth");
+    return entry.headers ? this.t("auth.headers") : this.t("auth.auto");
+  }
+
+  private directToolsLabel(value: McpManagedServer["entry"]["directTools"]): string {
+    if (value === true) return this.t("tools.all");
+    if (Array.isArray(value)) return value.length ? this.t("tools.selected", { count: value.length }) : this.t("tools.none");
+    return this.t("tools.proxy");
+  }
+
+  private displayRecord(value: Record<string, string>): string {
+    const entries = Object.entries(value);
+    return entries.slice(0, 3).map(([key, raw]) => `${key}=${isSecretKey(key) ? "********" : raw}`).join(" · ")
+      + (entries.length > 3 ? ` · +${entries.length - 3}` : "");
+  }
 }
 
 export function statusGlyph(status: McpManagerStatus): string {
@@ -402,39 +625,6 @@ export function statusGlyph(status: McpManagerStatus): string {
   if (status === "failed") return "×";
   if (status === "disabled") return "○";
   return "○";
-}
-
-function statusText(status: McpManagerStatus): string {
-  if (status === "connected") return "已连接";
-  if (status === "needs-auth") return "需要认证";
-  if (status === "failed") return "连接失败";
-  if (status === "disabled") return "已停用";
-  return "未连接";
-}
-
-function scopeLabel(scope: McpManagedServer["scope"]): string {
-  if (scope === "user") return "用户";
-  if (scope === "project") return "项目";
-  return "导入";
-}
-
-function authLabel(entry: McpManagedServer["entry"]): string {
-  if (entry.auth === false) return "未启用";
-  if (entry.auth === "bearer") return entry.bearerTokenEnv ? `Bearer · 环境变量:${entry.bearerTokenEnv}` : "Bearer";
-  if (entry.auth === "oauth") return "OAuth";
-  return entry.headers ? "请求头" : "自动";
-}
-
-function directToolsLabel(value: McpManagedServer["entry"]["directTools"]): string {
-  if (value === true) return "全部";
-  if (Array.isArray(value)) return value.length ? `${value.length} 个已选` : "无";
-  return "仅代理";
-}
-
-function displayRecord(value: Record<string, string>): string {
-  const entries = Object.entries(value);
-  return entries.slice(0, 3).map(([key, raw]) => `${key}=${isSecretKey(key) ? "********" : raw}`).join(" · ")
-    + (entries.length > 3 ? ` · +${entries.length - 3}` : "");
 }
 
 function isSecretKey(value: string): boolean {
@@ -469,10 +659,6 @@ function clampIndex(index: number, length: number): number {
   return length === 0 ? 0 : Math.max(0, Math.min(index, length - 1));
 }
 
-function fitLine(value: string, width: number): string {
-  return truncateToWidth(value, Math.max(1, width), "…");
-}
-
 function fitSegments(width: number, segments: readonly string[]): string {
   const kept: string[] = [];
   for (const segment of segments) {
@@ -480,25 +666,5 @@ function fitSegments(width: number, segments: readonly string[]): string {
     if (visibleWidth(candidate) > width) break;
     kept.push(segment);
   }
-  return kept.length ? kept.join(" · ") : fitLine(segments[0] ?? "", width);
-}
-
-function pad(value: string, width: number): string {
-  const fitted = fitLine(value, width);
-  return `${fitted}${" ".repeat(Math.max(0, width - visibleWidth(fitted)))}`;
-}
-
-function rule(width: number): string {
-  return "─".repeat(Math.max(1, width));
-}
-
-function frame(rows: readonly string[], width: number, theme: McpManagerTheme): string[] {
-  if (width < 3) return rows.map((row) => fitLine(row, width));
-  const inner = width - 2;
-  const border = (value: string) => theme.fg("dim", value);
-  return [
-    border(`╭${"─".repeat(inner)}╮`),
-    ...rows.map((row) => `${border("│")}${pad(row, inner)}${border("│")}`),
-    border(`╰${"─".repeat(inner)}╯`),
-  ];
+  return kept.length ? kept.join(" · ") : fit(segments[0] ?? "", width);
 }

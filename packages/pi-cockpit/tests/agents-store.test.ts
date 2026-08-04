@@ -780,3 +780,20 @@ test("resultReadyAt is ingested from progress and cleared when the snapshot drop
 	assert.equal(row.resultReadyAt, undefined, "a snapshot without resultReadyAt clears it");
 	assert.equal(row.status, "done");
 });
+
+test("setViewingAgent marks the viewed row and clears on exit", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "explorer", name: "scan" }, 1);
+	s.applyStarted({ correlationId: "c2", agent: "builder", name: "build" }, 2);
+
+	s.setViewingAgent("c1");
+	const rows = s.snapshot(10);
+	const viewed = rows.find((row) => row.correlationId === "c1");
+	const other = rows.find((row) => row.correlationId === "c2");
+	assert.equal(viewed?.viewing, true, "the viewed agent is flagged");
+	assert.equal(other?.viewing, undefined, "others are not flagged");
+
+	s.setViewingAgent(undefined);
+	const cleared = s.snapshot(10).find((row) => row.correlationId === "c1");
+	assert.equal(cleared?.viewing, undefined, "exit clears the flag");
+});

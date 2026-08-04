@@ -201,9 +201,9 @@ test("compaction TUI toggles the soft-compression switch independently and saves
   overlay.handleInput("\x1b[B"); // -> enabled
   overlay.handleInput("\x1b[B"); // -> keepRecentTokens
   overlay.handleInput("\x1b[B"); // -> softEnabled
-  assert.match(overlay.render(80).join("\n"), /软压缩开关 · 已开启/);
+  assert.match(overlay.render(80).join("\n"), /软压缩开关 · ● 已开启/);
   overlay.handleInput(" ");
-  assert.match(overlay.render(80).join("\n"), /软压缩开关 · 已关闭/);
+  assert.match(overlay.render(80).join("\n"), /软压缩开关 · ○ 已关闭/);
   overlay.handleInput("\x13");
   await flushAsync();
   const projectSave = saves.find((save) => save.scope === "project");
@@ -221,14 +221,14 @@ test("compaction TUI toggles soft mechanism switches and saves the soft group", 
   });
   for (let index = 0; index < 3; index++) overlay.handleInput("\x1b[B"); // -> softEnabled
   for (let index = 0; index < 4; index++) overlay.handleInput("\x1b[B"); // -> softRelevance
-  assert.match(overlay.render(80).join("\n"), /相关性排序 · 已关闭 · 继承自默认值/);
+  assert.match(overlay.render(80).join("\n"), /相关性排序 · ○ 已关闭 · 继承自默认值/);
   overlay.handleInput(" ");
-  assert.match(overlay.render(80).join("\n"), /相关性排序 · 已开启 · 项目/);
+  assert.match(overlay.render(80).join("\n"), /相关性排序 · ● 已开启 · 项目/);
   overlay.handleInput("\x1b[B"); // -> softDedup
   overlay.handleInput(" ");
-  assert.match(overlay.render(80).join("\n"), /跨轮去重 · 已开启 · 项目/);
+  assert.match(overlay.render(80).join("\n"), /跨轮去重 · ● 已开启 · 项目/);
   overlay.handleInput("u"); // inherit dedup again
-  assert.match(overlay.render(80).join("\n"), /跨轮去重 · 已关闭 · 继承自项目/);
+  assert.match(overlay.render(80).join("\n"), /跨轮去重 · ○ 已关闭 · 继承自项目/);
   overlay.handleInput("\x13");
   await flushAsync();
   const projectSave = saves.find((save) => save.scope === "project");
@@ -247,7 +247,7 @@ test("compaction TUI toggles soft mechanisms on the user scope and saves there",
   overlay.handleInput("\t"); // -> user
   for (let index = 0; index < 7; index++) overlay.handleInput("\x1b[B"); // -> softRelevance
   overlay.handleInput(" ");
-  assert.match(overlay.render(80).join("\n"), /相关性排序 · 已开启 · 用户/);
+  assert.match(overlay.render(80).join("\n"), /相关性排序 · ● 已开启 · 用户/);
   overlay.handleInput("\x13");
   await flushAsync();
   const userSave = saves.find((save) => save.scope === "user");
@@ -292,7 +292,7 @@ test("compaction TUI keeps a mechanism toggle draft after a failed save", async 
   overlay.handleInput("\x13");
   await flushAsync();
   const rendered = overlay.render(80).join("\n");
-  assert.match(rendered, /相关性排序 · 已开启 · 项目/);
+  assert.match(rendered, /相关性排序 · ● 已开启 · 项目/);
   assert.match(rendered, /保存失败 · disk full/);
 });
 
@@ -316,9 +316,9 @@ test("compaction TUI 'u' on the only mechanism toggle clears the whole soft grou
   });
   for (let index = 0; index < 8; index++) overlay.handleInput("\x1b[B"); // -> softDedup
   overlay.handleInput(" ");
-  assert.match(overlay.render(80).join("\n"), /跨轮去重 · 已开启 · 项目/);
+  assert.match(overlay.render(80).join("\n"), /跨轮去重 · ● 已开启 · 项目/);
   overlay.handleInput("u");
-  assert.match(overlay.render(80).join("\n"), /跨轮去重 · 已关闭 · 继承自默认值/);
+  assert.match(overlay.render(80).join("\n"), /跨轮去重 · ○ 已关闭 · 继承自默认值/);
   overlay.handleInput("\x13");
   await flushAsync();
   assert.equal(saves.length, 0, "fully reverting a mechanism toggle is clean, nothing to save");
@@ -341,7 +341,7 @@ test("compaction TUI mechanism toggles stay on the user scope for a readonly pro
   assert.match(overlay.render(80).join("\n"), /Maestro 压缩设置 · 项目\s+\[用户\]/);
   for (let index = 0; index < 7; index++) overlay.handleInput("\x1b[B"); // -> softRelevance
   overlay.handleInput(" ");
-  assert.match(overlay.render(80).join("\n"), /相关性排序 · 已开启 · 用户/);
+  assert.match(overlay.render(80).join("\n"), /相关性排序 · ● 已开启 · 用户/);
   overlay.handleInput("\x13");
   await flushAsync();
   const userSave = saves.find((save) => save.scope === "user");

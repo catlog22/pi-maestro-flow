@@ -649,8 +649,8 @@ class McpPanel {
     const emptyRow = () => fg(t.border, "│") + " ".repeat(innerW) + fg(t.border, "│");
     const divider = () => fg(t.border, "├" + "─".repeat(innerW) + "┤");
 
-    const titleText = this.authOnly ? " MCP OAuth " : " MCP Servers ";
-    const borderLen = innerW - visibleWidth(titleText);
+    const titleText = truncateToWidth(this.authOnly ? " MCP OAuth " : " MCP Servers ", innerW, "…", true);
+    const borderLen = Math.max(0, innerW - visibleWidth(titleText));
     const leftB = Math.floor(borderLen / 2);
     const rightB = borderLen - leftB;
     lines.push(fg(t.border, "╭" + "─".repeat(leftB)) + fg(t.title, titleText) + fg(t.border, "─".repeat(rightB) + "╮"));

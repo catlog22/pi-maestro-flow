@@ -169,7 +169,7 @@ test("rollback: switching from authoritative to disabled preserves v2 files", as
   await new Promise((resolve) => setTimeout(resolve, 100));
 
   // Rollback to disabled
-  rollout.setMode("disabled");
+  await rollout.setMode("disabled");
   assert.equal(rollout.mode, "disabled");
   assert.equal(rollout.advertisedCapability(), "v1");
 
@@ -197,7 +197,7 @@ test("rollback: switching from shadow to disabled stops v2 admission", async () 
   assert.ok(liveBefore > 0);
 
   // Rollback
-  rollout.setMode("disabled");
+  await rollout.setMode("disabled");
 
   // New message goes v1 only
   DELIVERED_V1.length = 0;
@@ -241,18 +241,18 @@ test("disk error in authoritative mode is surfaced, not silently falling back", 
 
 // --- Capability Advertisement ---
 
-test("advertisedCapability reflects mode", () => {
+test("advertisedCapability reflects mode", async () => {
   const service = makeService();
   const rollout = makeRollout(service, { mode: "disabled" });
   assert.equal(rollout.advertisedCapability(), "v1");
 
-  rollout.setMode("shadow");
+  await rollout.setMode("shadow");
   assert.equal(rollout.advertisedCapability(), "v2");
 
-  rollout.setMode("authoritative");
+  await rollout.setMode("authoritative");
   assert.equal(rollout.advertisedCapability(), "v2");
 
-  rollout.setMode("disabled");
+  await rollout.setMode("disabled");
   assert.equal(rollout.advertisedCapability(), "v1");
 });
 
@@ -270,12 +270,12 @@ test("mixed v1/v2: disabled peer uses v1, v2 peer uses mailbox", async () => {
 
   // v1 delivery (simulating a v1 peer interaction)
   DELIVERED_V1.length = 0;
-  rollout.setMode("disabled");
+  await rollout.setMode("disabled");
   await rollout.deliver({ ...BASE_REQUEST, payload: "v1 message" });
   assert.equal(DELIVERED_V1[0], "v1 message");
 
   // Switch back to authoritative and deliver
-  rollout.setMode("authoritative");
+  await rollout.setMode("authoritative");
   await rollout.deliver({ ...BASE_REQUEST, payload: "v2 message" });
   await new Promise((resolve) => setTimeout(resolve, 200));
   await service.stop();

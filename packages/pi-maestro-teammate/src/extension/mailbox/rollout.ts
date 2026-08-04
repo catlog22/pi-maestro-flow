@@ -69,16 +69,16 @@ export class MailboxRollout {
   }
 
   /** Switch rollout mode. Preserves v2 files on downgrade. */
-  setMode(mode: RolloutMode): void {
+  async setMode(mode: RolloutMode): Promise<void> {
     const previous = this.#config.mode;
+    // Stop consuming BEFORE republishing the mode: an in-flight poll must no
+    // longer claim/dispatch after the flip (stop barrier, ISS-20260803-003).
+    if (mode !== "authoritative" && previous === "authoritative") {
+      await this.#service.stopConsumer();
+    }
     this.#config.mode = mode;
-
     if (mode === "authoritative" && previous !== "authoritative") {
-      // Start consuming
-      this.#service.consumer.start();
-    } else if (mode !== "authoritative" && previous === "authoritative") {
-      // Stop consuming but preserve files for drain
-      void this.#service.consumer.stop();
+      await this.#service.startConsumer();
     }
 
     if (mode === "disabled") {

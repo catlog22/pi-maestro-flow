@@ -1003,9 +1003,10 @@ export class TeammateControlCenter implements Component, Focusable {
       lines.push(this.params.theme.fg("dim", "Config · ~/.pi/agent/teammate-models.json"));
       if (unavailable.length > 0) lines.push(this.params.theme.fg("warning", `Unavailable · ${unavailable.map(displayText).join(", ")}`));
       if (hasRoutingRules(this.state.project.overrides)) {
+        const applied = this.state.project.applyOverrides;
         lines.push(this.params.theme.fg(
-          this.state.project.applyOverrides ? "warning" : "dim",
-          `Project overrides · ${this.state.project.applyOverrides ? "enabled" : "preserved / disabled"}`,
+          applied ? "warning" : "dim",
+          `Project overrides · ${applied ? "● enabled" : "○ preserved / disabled"}`,
         ));
       }
       if (this.state.missingProfile) lines.push(this.params.theme.fg("warning", `Missing selection · ${displayText(this.state.missingProfile)}`));

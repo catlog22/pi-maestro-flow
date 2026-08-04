@@ -495,7 +495,7 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
     if (data === CTRL_U) {
       this.draft = "";
       this.unsetDraft = true;
-      this.status = this.t("notice.unsetOnSave", { key: this.currentKey() });
+      this.status = this.t("notice.unsetOnSave", { key: this.currentKey() ?? "" });
       this.statusTone = "dim";
       return;
     }
@@ -758,11 +758,4 @@ function partialMarkerSuffix(value: string, marker: string): string {
     if (marker.startsWith(suffix)) return suffix;
   }
   return "";
-}
-
-function credentialSourceHint(value: string): string | undefined {
-  if (!value) return undefined;
-  if (/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(value)) return "(env var)";
-  if (value.startsWith("!")) return "(shell command)";
-  return undefined;
 }

@@ -42,10 +42,18 @@ export declare class MailboxService extends EventEmitter {
     readonly quota: QuotaAdmission;
     readonly capability: MailboxCapability;
     constructor(options: MailboxServiceOptions);
-    /** Initialize directories and start the consumer. */
-    start(): Promise<void>;
+    /**
+     * Initialize directories and start the consumer.
+     * startConsumer=false (shadow mode) initializes directories only — the
+     * shadow contract is "enqueue + validate but NEVER consume/inject".
+     */
+    start(startConsumer?: boolean): Promise<void>;
+    /** Start just the consumer (rollout upgrade to authoritative). */
+    startConsumer(): Promise<void>;
     /** Stop the consumer. */
     stop(): Promise<void>;
+    /** Stop just the consumer (rollout downgrade away from authoritative). */
+    stopConsumer(): Promise<void>;
     /**
      * Enqueue a message for delivery.
      * This is the primary entry point replacing direct stdin delivery.

@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { afterEach, beforeEach } from "node:test";
-import { createMailboxPaths, ensureMailboxDirectories } from "../src/extension/mailbox/file-store.ts";
+import { computeEnvelopeHash, createMailboxPaths, ensureMailboxDirectories } from "../src/extension/mailbox/file-store.ts";
 import { QuotaAdmission } from "../src/extension/mailbox/gc.ts";
 import { MailboxConsumer } from "../src/extension/mailbox/consumer.ts";
 import { MailboxService } from "../src/extension/mailbox/service.ts";
@@ -224,7 +224,7 @@ test("claim locks live inside the workspace tree", async () => {
 // --- helpers ---
 
 function makeEnvelope(id: string, overrides: Partial<MailboxEnvelope> = {}): MailboxEnvelope {
-  return {
+  const base: Omit<MailboxEnvelope, "hash"> = {
     messageId: id,
     schemaVersion: MAILBOX_SCHEMA_VERSION,
     workspaceId: WS_A,
@@ -243,7 +243,7 @@ function makeEnvelope(id: string, overrides: Partial<MailboxEnvelope> = {}): Mai
     leaseEpoch: 1,
     leaseNonce: "nonce-abc",
     payload: "test",
-    hash: "dummy",
     ...overrides,
   };
+  return { ...base, hash: computeEnvelopeHash(base) };
 }

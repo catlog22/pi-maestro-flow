@@ -19,7 +19,7 @@
  *     `handleChildInteractionRequest` -> {@link TeammateMessageEvent}
  */
 import type { AgentActivity, AgentProgressSnapshot, AgentRunOutcome, AgentStatus } from "../../shared/types.ts";
-export { TEAMMATE_COMPLETE_EVENT, TEAMMATE_MESSAGE_EVENT, TEAMMATE_STARTED_EVENT, } from "../../shared/types.ts";
+export { TEAMMATE_COMPLETE_EVENT, TEAMMATE_MESSAGE_EVENT, TEAMMATE_OPEN_AGENT_EVENT, TEAMMATE_STARTED_EVENT, TEAMMATE_VIEWING_EVENT, } from "../../shared/types.ts";
 /** Tool identity of one child tool call, as reported inside a progress payload. */
 export interface TeammateEventTool {
     name: string;
@@ -130,9 +130,23 @@ export interface TeammateInteractionMessageEvent {
  * a payload with neither flag is the progress variant.
  */
 export type TeammateMessageEvent = TeammateProgressMessageEvent | TeammateSendMessageEvent | TeammateInteractionMessageEvent;
+/** Viewing-mode state change, broadcast so cockpit can highlight the viewed agent. */
+export interface TeammateViewingEvent {
+    correlationId: string;
+    agent: string;
+    name?: string;
+    status: string;
+    action: "enter" | "switch" | "exit";
+}
+/** Cockpit → teammate: open (or jump to) an agent's viewing view. */
+export interface TeammateOpenAgentEvent {
+    correlationId: string;
+}
 /** Event name -> payload, for typing a subscription helper. */
 export interface TeammateEventMap {
     "teammate:started": TeammateStartedEvent;
     "teammate:message": TeammateMessageEvent;
     "teammate:complete": TeammateCompleteEvent;
+    "teammate:viewing": TeammateViewingEvent;
+    "teammate:open-agent": TeammateOpenAgentEvent;
 }

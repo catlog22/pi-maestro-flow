@@ -191,7 +191,7 @@ test("MailboxHost authoritative mode enqueues and consumer injects", async () =>
   assert.equal(injected[0], "authoritative message");
 });
 
-test("MailboxHost authoritative consumer dispatch is acknowledged", async () => {
+test("MailboxHost authoritative consumer dispatch auto-applies", async () => {
   const state = makeState();
   const host = new MailboxHost({
     rootDir: join(baseDir, "mb"),
@@ -215,19 +215,17 @@ test("MailboxHost authoritative consumer dispatch is acknowledged", async () => 
   });
   assert.ok(result.result.ok);
 
-  // Wait for consumer dispatch → accepted (poll until it appears or timeout)
+  // Wait for consumer dispatch → applied (poll until it appears or timeout)
   const messageId = (result.result as { messageId: string }).messageId;
   const deadline = Date.now() + 5000;
-  let accepted = await host.service.store.readEnvelope("accepted", messageId);
-  while (!accepted && Date.now() < deadline) {
+  let applied = await host.service.store.readEnvelope("applied", messageId);
+  while (!applied && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 25));
-    accepted = await host.service.store.readEnvelope("accepted", messageId);
+    applied = await host.service.store.readEnvelope("applied", messageId);
   }
-  assert.ok(accepted, "message should be in accepted state after dispatch");
-
-  // Simulate IPC ack
-  const acked = await host.service.acknowledge((result.result as { messageId: string }).messageId);
-  assert.equal(acked, true);
+  assert.ok(applied, "message should be in applied state after dispatch");
+  // Auto-ack means the message no longer lingers in accepted (quota leak fix).
+  assert.equal(await host.service.store.readEnvelope("accepted", messageId), undefined);
 
   await host.stop();
 });

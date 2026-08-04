@@ -1155,23 +1155,47 @@ export async function handleProxyRequest(
           : terminalStatus === "failed" ? "failed" : "completed");
         emitNestedComplete(exitCode, wakeable, terminalStatus);
         if (nestedCompletionNotificationRequested) {
+          const envelope = {
+            customType: "teammate-complete",
+            content: nestedPublication.summary,
+            display: true,
+            details: {
+              mode: nestedPublication.mode,
+              results: nestedPublication.results,
+              ...(nestedPublication.progress ? { progress: nestedPublication.progress } : {}),
+              ...(nestedChildCalls.size > 0 ? { childCalls: [...nestedChildCalls.values()] } : {}),
+            },
+          };
           const delivered = safeSendMessage(
             pi,
-            {
-              customType: "teammate-complete",
-              content: nestedPublication.summary,
-              display: true,
-              details: {
-                mode: nestedPublication.mode,
-                results: nestedPublication.results,
-                ...(nestedPublication.progress ? { progress: nestedPublication.progress } : {}),
-                ...(nestedChildCalls.size > 0 ? { childCalls: [...nestedChildCalls.values()] } : {}),
-              },
-            },
+            envelope,
             { triggerTurn: true },
           );
           if (!delivered) {
             markSettledResultInspectable(state, cid);
+          }
+          // Passive completion delivery to the dispatching child agent. Nested
+          // dispatches execute in the root process, so the child that issued
+          // this background dispatch only ever saw the immediate ack. Forward
+          // the same teammate-complete envelope over the root->child IPC
+          // channel (agent.sendControl) and let the child inject it into its
+          // own session, where it wakes the agent for a new turn. Root-owned
+          // dispatches have no parentCid and are covered by the root delivery
+          // above. Fenced: the parent must still be live (non-terminal) and
+          // own an open child channel.
+          if (parentCid) {
+            const parentAgent = state.activeRuns.get(parentCid);
+            if (parentAgent?.sendControl
+              && parentAgent.status !== "completed"
+              && parentAgent.status !== "failed"
+              && parentAgent.status !== "terminated") {
+              parentAgent.sendControl({
+                type: "teammate_complete_delivery",
+                correlationId: parentCid,
+                generation: state.sessionGeneration ?? 0,
+                envelope,
+              });
+            }
           }
         }
         finishProxyDispatchTracking();

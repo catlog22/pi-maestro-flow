@@ -22,7 +22,17 @@ import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { loadTranscript, scanWorkspaceSessionDirs, type WorkspaceSessionScan } from "../transcript/session-transcript.ts";
-import { decideViewingInput, renderViewingWidget } from "../tui/viewing-widget.ts";
+import { decideViewingInput } from "../tui/viewing-widget.ts";
+import {
+  buildViewingRenderState,
+  createViewingEntryComponent,
+  TEAMMATE_VIEW_CUSTOM_TYPE,
+  type ViewingEntryContext,
+  type ViewingEntryData,
+  type ViewingEntryLive,
+  type ViewingToolLine,
+} from "../tui/viewing-entry.ts";
+import type { ProgressPalette } from "../tui/progress-tree.ts";
 import type { TranscriptLoad } from "../shared/transcript.ts";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams } from "./schemas.ts";
 import {
@@ -497,6 +507,20 @@ export default function registerTeammateExtension(
         const m = msg as Record<string, unknown>;
         if (m?.type === "teammate_proxy_result") {
           resolveChildProxyRequest(pendingRequests, m.requestId as string, m.result);
+        } else if (m?.type === "teammate_complete_delivery") {
+          // Passive completion delivery from the root: a background nested
+          // dispatch ran in the root process and finished. Inject the same
+          // teammate-complete envelope into this child's own session so the
+          // agent wakes for a new turn with the result — send stays explicit
+          // (teammate-send), complete is delivered automatically on completion.
+          // CorrelationId scoping keeps the delivery with the child process it
+          // belongs to; a missing bridge.ctx (session inactive) drops it.
+          if (!bridge.ctx) return;
+          if (m.correlationId !== process.env.PI_TEAMMATE_CORRELATION_ID) return;
+          const envelope = m.envelope as Record<string, unknown> | undefined;
+          if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)
+            || typeof envelope.customType !== "string") return;
+          safeSendMessage(pi, envelope as never, { triggerTurn: true });
         } else if (m?.type === "teammate_handoff_request") {
           bridge.parking = true;
           bridge.nonce = m.nonce as string;
@@ -948,18 +972,26 @@ export default function registerTeammateExtension(
     return { delivered: true, mode, wasSleeping };
   };
 
-  // Durable mailbox host — inert unless PI_TEAMMATE_MAILBOX is set.
-  // Root host only; child processes keep the legacy stdin path.
+  // Durable mailbox host — bound per session so the workspace id derives from
+  // the real session cwd (baseCwd is empty until session_start). Root host only;
+  // child processes keep the legacy stdin path.
   const mailboxMode = mailboxModeFromEnv();
   let mailboxHost: MailboxHost | undefined;
-  const rootCorrelationId = state.activeRuns.values().next().value?.correlationId;
-  if (!isChild && mailboxMode !== "disabled") {
-    mailboxHost = new MailboxHost({
+  let mailboxWorkspaceId: string | undefined;
+
+  const workspaceIdForCwd = (cwd: string | undefined): string =>
+    cwd ? createHash("sha256").update(cwd, "utf8").digest("hex") : "0".repeat(64);
+
+  const createMailboxHost = (): MailboxHost | undefined => {
+    const rootCorrelationId = state.activeRuns.values().next().value?.correlationId;
+    const workspaceId = workspaceIdForCwd(state.baseCwd);
+    mailboxWorkspaceId = workspaceId;
+    return new MailboxHost({
       rootDir: join(homedir(), ".pi", "teammate", "mailbox"),
       state,
       rootCorrelationId,
       ownerId: `host-${process.pid}`,
-      workspaceId: state.baseCwd ? createHash("sha256").update(state.baseCwd, "utf8").digest("hex") : "0".repeat(64),
+      workspaceId,
       teamId: rootCorrelationId ?? "team-root",
       inject: async (envelope) => {
         // Re-route the enqueued envelope back into the actual child stdin.
@@ -970,17 +1002,30 @@ export default function registerTeammateExtension(
       },
       mode: mailboxMode,
     });
-    if (mailboxMode === "authoritative") {
-      console.info(`[pi-maestro-teammate] mailbox authoritative mode enabled (PI_TEAMMATE_MAILBOX=${mailboxMode})`);
-    }
-  }
+  };
 
-  const deliverLocalAgentMessage = (
+  /** Rebind the mailbox host when the workspace (derived from cwd) changes. */
+  const rebindMailboxHostForSession = (): void => {
+    if (isChild || mailboxMode === "disabled") return;
+    const workspaceId = workspaceIdForCwd(state.baseCwd);
+    if (mailboxHost && workspaceId === mailboxWorkspaceId) return;
+    const previous = mailboxHost;
+    mailboxHost = createMailboxHost();
+    mailboxWorkspaceId = workspaceId;
+    void previous?.stop().catch((error) => {
+      console.error(`[pi-maestro-teammate] mailbox host stop failed:`, error);
+    });
+    if (mailboxHost && mailboxMode === "authoritative") {
+      console.info(`[pi-maestro-teammate] mailbox authoritative mode enabled (PI_TEAMMATE_MAILBOX=${mailboxMode}, workspace=${workspaceId.slice(0, 12)})`);
+    }
+  };
+
+  const deliverLocalAgentMessage = async (
     correlationId: string,
     targetLabel: string,
     message: string,
     requestedMode: "steer" | "follow_up",
-  ): { delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean } => {
+  ): Promise<{ delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean }> => {
     // Durable mailbox authoritative path: enqueue and let the consumer inject.
     // Only for live agents with a writable stdin; sleeping agents needing
     // cold-resume (restart) keep the synchronous direct path so restart fires
@@ -988,14 +1033,15 @@ export default function registerTeammateExtension(
     const host = mailboxHost;
     const agent = state.activeRuns.get(correlationId);
     if (host && host.mode === "authoritative" && requestedMode !== "steer" && agent?.stdin?.writable) {
-      void host.rollout.deliver({
-        senderId: "caller",
-        recipientId: agent?.name ?? targetLabel,
-        recipientCorrelationId: correlationId,
-        kind: "follow_up",
-        mode: "follow_up",
-        payload: message,
-      }).then((enqueued) => {
+      try {
+        const enqueued = await host.rollout.deliver({
+          senderId: "caller",
+          recipientId: agent?.name ?? targetLabel,
+          recipientCorrelationId: correlationId,
+          kind: "follow_up",
+          mode: "follow_up",
+          payload: message,
+        });
         if (enqueued.result && !enqueued.result.ok) {
           // Surface the failure — never silently fall back to direct stdin.
           const reason = "message" in enqueued.result ? (enqueued.result as { message?: string }).message : "unknown error";
@@ -1012,36 +1058,15 @@ export default function registerTeammateExtension(
             lastActivityAt: Date.now(),
             isSend: true,
           });
-          return;
+          return { delivered: false, error: reason, mode: "follow_up" };
         }
-        const now = Date.now();
-        agent?.inbox.push({
-          id: randomUUID(),
-          from: "caller",
-          to: targetLabel,
-          kind: "task",
-          payload: message,
-          timestamp: now,
-        });
-        if (agent) {
-          agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ mailbox-follow-up: ${message.slice(0, 100)}`);
-          trimAgentBuffers(agent);
-          agent.lastActivityAt = now;
-        }
-        pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
-          correlationId,
-          from: "caller",
-          to: targetLabel,
-          mode: "follow_up",
-          message,
-          lastActivityAt: now,
-          isSend: true,
-        });
-        markWorkspacePeerDirty();
-      }).catch((error) => {
+        // Success accounting (inbox/outputLog/event) happens exactly once, in
+        // injectLocalAgentMessage when the consumer actually injects.
+        return { delivered: true, mode: "follow_up" };
+      } catch (error) {
         console.error(`[pi-maestro-teammate] mailbox delivery failed for ${targetLabel}:`, error);
-      });
-      return { delivered: true, mode: "follow_up" };
+        return { delivered: false, error: error instanceof Error ? error.message : String(error), mode: "follow_up" };
+      }
     }
     return injectLocalAgentMessage(correlationId, targetLabel, message, requestedMode);
   };
@@ -1068,7 +1093,7 @@ export default function registerTeammateExtension(
         });
         await publisher.start();
         workspacePeerPublisher = publisher;
-        const consumer = createWorkspacePeerCommandConsumer(publisher.identity, (command) => {
+        const consumer = createWorkspacePeerCommandConsumer(publisher.identity, async (command) => {
           if (command.targetCorrelationId === WORKSPACE_MAIN_SESSION_MARKER) {
             safeSendMessage(pi, {
               customType: "teammate-message",
@@ -1080,7 +1105,7 @@ export default function registerTeammateExtension(
           }
           const target = state.activeRuns.get(command.targetCorrelationId);
           if (!target) return { status: "rejected" as const, message: "target agent is not owned by this session" };
-          const delivered = deliverLocalAgentMessage(
+          const delivered = await deliverLocalAgentMessage(
             command.targetCorrelationId,
             target.name ?? command.targetCorrelationId.slice(0, 8),
             command.message,
@@ -1920,9 +1945,12 @@ export default function registerTeammateExtension(
               (request, respond, childId) => enqueueChildInteraction(request, respond, ctx, childId),
               publishChildCallStatus,
               runtimeOptions,
-              mailboxHost && mailboxHost.mode === "authoritative"
-                ? (request) => mailboxHost.rollout.deliver(request).then((r) => ({ path: r.path, result: r.result }))
-                : undefined,
+              (() => {
+                const activeMailboxHost = mailboxHost && mailboxHost.mode === "authoritative" ? mailboxHost : undefined;
+                return activeMailboxHost
+                  ? (request) => activeMailboxHost.rollout.deliver(request).then((r) => ({ path: r.path, result: r.result }))
+                  : undefined;
+              })(),
             );
           })();
           },
@@ -2462,7 +2490,7 @@ export default function registerTeammateExtension(
           details: { delivered: true },
         };
       }
-      const delivery = deliverLocalAgentMessage(
+      const delivery = await deliverLocalAgentMessage(
         cid,
         params.to,
         message,
@@ -2793,12 +2821,12 @@ export default function registerTeammateExtension(
           const target = targetForWorkspaceBinding(bindingKey);
           if (!target || target.state !== "active") return false;
           if (target.scope === "local") {
-            delivered = deliverLocalAgentMessage(
+            delivered = (await deliverLocalAgentMessage(
               target.agent.correlationId,
               target.agent.name ?? target.agent.correlationId.slice(0, 8),
               message,
               mode,
-            ).delivered;
+            )).delivered;
           } else {
             const publisher = workspacePeerPublisher;
             if (!publisher) return false;
@@ -3612,9 +3640,11 @@ export default function registerTeammateExtension(
   }
 
   // =========================================================================
-  // Main-TUI viewing mode (claude-code style): switching views a teammate
-  // session in the main UI and routes input to the agent. Never touches the
-  // agent's task — a running agent (main loop or sub-process) is unaffected.
+  // Main-TUI viewing mode: switching streams the teammate session into the
+  // main conversation as a live custom entry (body rendered with the same
+  // Markdown theme as main-agent messages), and routes input to the agent.
+  // Never touches the agent's task — a running agent (main loop or
+  // sub-process) is unaffected by entering/leaving the view.
   // =========================================================================
 
   interface ViewingTarget {
@@ -3630,32 +3660,165 @@ export default function registerTeammateExtension(
 
   let viewingTarget: ViewingTarget | undefined;
   let viewingTranscript: TranscriptLoad | undefined;
+  /** Correlation id the loaded transcript belongs to (async race guard). */
+  let viewingTranscriptCid: string | undefined;
   let viewingRefreshTimer: ReturnType<typeof setInterval> | null = null;
   let viewingEscHookInstalled = false;
+  let viewingMessageHookInstalled = false;
   /** All switchable targets (live agents + history) — ↑/↓ moves through these. */
   let viewingList: ViewingTarget[] = [];
   let viewingIndex = 0;
+  /** Live per-agent buffers fed by TEAMMATE_MESSAGE_EVENT while viewing. */
+  const viewingLive = new Map<string, ViewingLiveBuffer>();
+  /** Frozen snapshots captured on exit; override persisted entry data. */
+  const viewingSnapshots = new Map<string, ViewingEntryData>();
+  /** One conversation entry per agent per process — re-entering revives it. */
+  const viewingAppended = new Set<string>();
 
-  function updateViewingWidget(): void {
-    if (!widgetCtx || !viewingTarget) return;
-    const target = viewingTarget;
-    widgetCtx.ui.setWidget("teammate-view", (_tui, theme) => ({
-      render(width: number): string[] {
-        return renderViewingWidget({
-          agentName: target.name,
-          agentRole: target.agent,
-          status: target.status,
-          rows: viewingTranscript?.rows ?? [],
-          canSend: target.canSend,
-          transcriptSource: viewingTranscript?.source ?? "memory",
-          switches: viewingList.map((entry, i) => ({
-            label: `@${entry.name ?? entry.agent}`,
-            active: i === viewingIndex,
-          })),
-        }, width);
-      },
-      invalidate() {},
-    }), { placement: "belowEditor" });
+  interface ViewingLiveBuffer {
+    streamingText: string;
+    tools: ViewingToolLine[];
+    toolNames: Set<string>;
+    progress: AgentProgressSnapshot[];
+    lastActivityAt: number;
+  }
+
+  /** `setStatus` unconditionally requestRenders the host TUI; use it to poke. */
+  function pokeViewingRender(): void {
+    widgetCtx?.ui.setStatus("teammate-viewing", undefined);
+  }
+
+  function viewingPalette(theme: ExtensionContext["ui"]["theme"]): ProgressPalette {
+    return {
+      dim: (text) => theme.fg("dim", text),
+      accent: (text) => theme.fg("accent", text),
+      running: (text) => theme.fg("warning", text),
+      success: (text) => theme.fg("success", text),
+      error: (text) => theme.fg("error", text),
+      bold: (text) => theme.bold(text),
+    };
+  }
+
+  function tokenTotals(progress: AgentProgressSnapshot[] | undefined): { input: number; output: number } {
+    if (!progress) return { input: 0, output: 0 };
+    let input = 0;
+    let output = 0;
+    for (const entry of progress) {
+      input += entry.inputTokens ?? 0;
+      output += entry.outputTokens ?? 0;
+    }
+    return { input, output };
+  }
+
+  /** Last assistant text from the transcript, only when loaded for `cid`. */
+  function lastAssistantText(cid: string): string {
+    if (viewingTranscriptCid !== cid) return "";
+    const rows = viewingTranscript?.rows ?? [];
+    for (let index = rows.length - 1; index >= 0; index--) {
+      const row = rows[index];
+      if (row.kind === "assistant" && row.text.trim()) return row.text.trim();
+    }
+    return "";
+  }
+
+  /** Live data for the entry renderer while viewing `target`. */
+  function viewingLiveState(target: ViewingTarget): ViewingEntryLive {
+    const agent = state.activeRuns.get(target.correlationId);
+    const live = viewingLive.get(target.correlationId);
+    const progress = live?.progress ?? agent?.progress;
+    const tokens = tokenTotals(progress);
+    return {
+      status: agent?.status ?? target.status,
+      resultReadyAt: agent?.resultReadyAt,
+      lastActivityAt: agent?.lastActivityAt ?? live?.lastActivityAt,
+      startedAt: agent?.startedAt,
+      streamingText: live?.streamingText ?? lastAssistantText(target.correlationId),
+      toolLines: live?.tools,
+      toolCount: live?.toolNames.size || undefined,
+      inputTokens: tokens.input || undefined,
+      outputTokens: tokens.output || undefined,
+      switches: viewingList.map((entry) => `@${entry.name ?? entry.agent}`),
+      activeIndex: viewingIndex,
+      canSend: target.canSend,
+    };
+  }
+
+  /** Snapshot the agent's current view state (append-time or exit-time). */
+  function buildViewingSnapshot(target: ViewingTarget): ViewingEntryData {
+    const agent = state.activeRuns.get(target.correlationId);
+    const live = viewingLive.get(target.correlationId);
+    const progress = live?.progress ?? agent?.progress;
+    const tokens = tokenTotals(progress);
+    return {
+      correlationId: target.correlationId,
+      agent: target.agent,
+      ...(target.name ? { name: target.name } : {}),
+      status: agent?.status ?? target.status,
+      streamingText: live?.streamingText ?? target.lastResult ?? lastAssistantText(target.correlationId),
+      toolLines: live?.tools,
+      toolCount: live?.toolNames.size || undefined,
+      inputTokens: tokens.input || undefined,
+      outputTokens: tokens.output || undefined,
+      durationMs: agent?.startedAt ? Math.max(0, Date.now() - agent.startedAt) : undefined,
+    };
+  }
+
+  /** Append the conversation entry once per agent; re-entering revives it. */
+  function appendViewingEntry(target: ViewingTarget): void {
+    if (viewingAppended.has(target.correlationId)) return;
+    viewingAppended.add(target.correlationId);
+    pi.appendEntry(TEAMMATE_VIEW_CUSTOM_TYPE, buildViewingSnapshot(target));
+  }
+
+  /** Entry-renderer context: live state while viewed, snapshot otherwise. */
+  function viewingEntryContext(data: unknown): ViewingEntryContext {
+    const entryData = data as ViewingEntryData | undefined;
+    if (!entryData?.correlationId) {
+      return { data: { correlationId: "", agent: "teammate", status: "completed" } };
+    }
+    if (viewingTarget?.correlationId !== entryData.correlationId) {
+      return { data: viewingSnapshots.get(entryData.correlationId) ?? entryData };
+    }
+    return { data: entryData, live: viewingLiveState(viewingTarget) };
+  }
+
+  /** The viewing block streams live in the conversation; register its renderer. */
+  pi.registerEntryRenderer(TEAMMATE_VIEW_CUSTOM_TYPE, (entry, _options, theme) =>
+    createViewingEntryComponent(
+      () => buildViewingRenderState(viewingEntryContext(entry.data)),
+      viewingPalette(theme),
+    ),
+  );
+
+  /** Feed per-agent live buffers from child progress events (installed once). */
+  function installViewingMessageHook(): void {
+    if (viewingMessageHookInstalled) return;
+    viewingMessageHookInstalled = true;
+    pi.events.on(TEAMMATE_MESSAGE_EVENT, (data) => {
+      const evt = data as Record<string, unknown>;
+      const cid = evt.correlationId as string | undefined;
+      if (!cid || evt.isSend || evt.isInteraction) return;
+      const buffer = viewingLive.get(cid)
+        ?? { streamingText: "", tools: [], toolNames: new Set<string>(), progress: [], lastActivityAt: 0 };
+      if (typeof evt.lastMessage === "string") buffer.streamingText = evt.lastMessage;
+      const tools = evt.recentTools as Array<{ name: string; status: string }> | undefined;
+      if (Array.isArray(tools)) {
+        const byName = new Map<string, ViewingToolLine>();
+        for (const tool of tools) {
+          if (typeof tool?.name !== "string" || !tool.name) continue;
+          byName.set(tool.name, {
+            name: tool.name,
+            status: tool.status === "failed" ? "failed" : tool.status === "completed" ? "completed" : "running",
+          });
+          buffer.toolNames.add(tool.name);
+        }
+        buffer.tools = [...byName.values()];
+      }
+      if (Array.isArray(evt.progress)) buffer.progress = evt.progress as AgentProgressSnapshot[];
+      buffer.lastActivityAt = Date.now();
+      viewingLive.set(cid, buffer);
+      if (viewingTarget?.correlationId === cid) pokeViewingRender();
+    });
   }
 
   async function refreshViewingTranscript(): Promise<void> {
@@ -3668,7 +3831,8 @@ export default function registerTeammateExtension(
       lastResult: target.lastResult,
       outputLog: target.outputLog,
     });
-    updateViewingWidget();
+    viewingTranscriptCid = target.correlationId;
+    pokeViewingRender();
   }
 
   function enterViewingList(
@@ -3681,16 +3845,18 @@ export default function registerTeammateExtension(
     viewingIndex = Math.max(0, Math.min(index, targets.length - 1));
     viewingTarget = targets[viewingIndex] ?? undefined;
     viewingTranscript = undefined;
+    viewingTranscriptCid = undefined;
+    if (viewingTarget) appendViewingEntry(viewingTarget);
     void refreshViewingTranscript();
     if (viewingRefreshTimer) clearInterval(viewingRefreshTimer);
     viewingRefreshTimer = setInterval(() => {
       void refreshViewingTranscript();
     }, 1000);
     viewingRefreshTimer.unref?.();
-    updateViewingWidget();
+    pokeViewingRender();
     const target = viewingTarget;
     ctx.ui.notify(
-      `Viewing @${target?.name ?? target?.agent} — ←/→ switch agent · Esc main (agent keeps running)`,
+      `Viewing @${target?.name ?? target?.agent} — ↑/↓ ←/→ switch agent · Esc main (agent keeps running)`,
       "info",
     );
     emitViewingEvent("enter");
@@ -3701,11 +3867,15 @@ export default function registerTeammateExtension(
     if (viewingList.length <= 1) return;
     const next = (viewingIndex + delta + viewingList.length) % viewingList.length;
     if (next === viewingIndex) return;
+    const previous = viewingTarget;
+    if (previous) viewingSnapshots.set(previous.correlationId, buildViewingSnapshot(previous));
     viewingIndex = next;
     viewingTarget = viewingList[next];
     viewingTranscript = undefined;
+    viewingTranscriptCid = undefined;
+    if (viewingTarget) appendViewingEntry(viewingTarget);
     void refreshViewingTranscript();
-    updateViewingWidget();
+    pokeViewingRender();
     emitViewingEvent("switch");
   }
 
@@ -3714,10 +3884,15 @@ export default function registerTeammateExtension(
       clearInterval(viewingRefreshTimer);
       viewingRefreshTimer = null;
     }
-    if (viewingTarget) emitViewingEvent("exit");
+    const target = viewingTarget;
+    if (target) {
+      viewingSnapshots.set(target.correlationId, buildViewingSnapshot(target));
+      emitViewingEvent("exit");
+    }
     viewingTarget = undefined;
     viewingTranscript = undefined;
-    widgetCtx?.ui.setWidget("teammate-view", undefined);
+    viewingTranscriptCid = undefined;
+    pokeViewingRender();
     if (restoreWidget) updateAgentWidget();
   }
 
@@ -3759,12 +3934,11 @@ export default function registerTeammateExtension(
         exitViewing();
         return { consume: true };
       }
-      if (data === "\x1b[D") {
-        switchViewingTarget(-1);
-        return { consume: true };
-      }
-      if (data === "\x1b[C") {
-        switchViewingTarget(1);
+      // ↑/↓ and ←/→ both switch the viewed agent. The hook lives on the
+      // terminal-input layer, so while viewing these keys are consumed here
+      // and never reach the composer's input-history navigation.
+      if (data === "\x1b[A" || data === "\x1b[B" || data === "\x1b[D" || data === "\x1b[C") {
+        switchViewingTarget(data === "\x1b[A" || data === "\x1b[D" ? -1 : 1);
         return { consume: true };
       }
       return undefined;
@@ -3883,7 +4057,7 @@ export default function registerTeammateExtension(
   };
 
   pi.registerCommand("teammate-session", {
-    description: "View a teammate session in the main UI (view + message, agent keeps running) or return to main",
+    description: "Stream a teammate session in the main conversation (view + message, agent keeps running) or return to main",
     async handler(_args, ctx) {
       await handleViewingSession(ctx);
     },
@@ -4120,6 +4294,7 @@ export default function registerTeammateExtension(
   // =========================================================================
 
   installViewingInputHook();
+  installViewingMessageHook();
 
   // Cockpit → teammate: open (or jump to) an agent's viewing view.
   pi.events.on(TEAMMATE_OPEN_AGENT_EVENT, (payload) => {
@@ -4133,7 +4308,7 @@ export default function registerTeammateExtension(
       viewingTarget = targets[index];
       viewingTranscript = undefined;
       void refreshViewingTranscript();
-      updateViewingWidget();
+      pokeViewingRender();
       emitViewingEvent("switch");
     } else {
       enterViewingList(targets, index, widgetCtx);
@@ -4302,6 +4477,8 @@ export default function registerTeammateExtension(
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     widgetCtx = ctx;
     state.baseCwd = ctx.cwd;
+    // Mailbox is bound to the real session cwd (workspace isolation).
+    rebindMailboxHostForSession();
     refreshModelCatalog(ctx);
     void refreshModelRegistry(ctx);
     tool.description = buildTeammateToolDescription(ctx.cwd);
@@ -4320,6 +4497,8 @@ export default function registerTeammateExtension(
   pi.on("session_compact", (_event, ctx) => {
     widgetCtx = ctx;
     state.baseCwd = ctx.cwd;
+    // Rebind if compaction moved to a different workspace.
+    rebindMailboxHostForSession();
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
     workspacePeerSessionName = ctx.sessionManager?.getSessionName?.() ?? undefined;
     markWorkspacePeerDirty();
@@ -4334,6 +4513,14 @@ export default function registerTeammateExtension(
     monitorPeerRefreshTimer = undefined;
     stopEngine(monitorEngine);
     workspacePeerLifecycle = workspacePeerLifecycle.then(stopWorkspacePeers);
+    // Stop the mailbox consumer BEFORE killing agents so no in-flight poll can
+    // inject into a dying session (previously never stopped at all).
+    const stoppedMailbox = mailboxHost;
+    mailboxHost = undefined;
+    mailboxWorkspaceId = undefined;
+    void stoppedMailbox?.stop().catch((error) => {
+      console.error(`[pi-maestro-teammate] mailbox host stop failed:`, error);
+    });
     teardownRootSession();
   });
 } // end if (!isChild)

@@ -57,6 +57,7 @@ import {
 	STACK_WIDGET_KEY,
 	TEAMMATE_COMPLETE_EVENT,
 	TEAMMATE_MESSAGE_EVENT,
+	TEAMMATE_OPEN_AGENT_EVENT,
 	TEAMMATE_STARTED_EVENT,
 	TEAMMATE_VIEWING_EVENT,
 	TODO_TOOL_NAME,
@@ -614,6 +615,15 @@ export default function (pi: ExtensionAPI): void {
 			onError: (error) => {
 				ctx.ui.notify(`Cockpit sidebar unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
 			},
+			onActivateRow: (id) => {
+				// Enter on an agent row opens that agent in teammate's viewing view
+				// (main-TUI widget), leaving the agent running untouched.
+				if (!id.startsWith("agent:")) return;
+				pi.events.emit(TEAMMATE_OPEN_AGENT_EVENT, {
+					correlationId: id.slice("agent:".length),
+				});
+			},
+			getNavWidth: () => capturedTui?.terminal.columns ?? 80,
 		});
 		return sidebarController;
 	};

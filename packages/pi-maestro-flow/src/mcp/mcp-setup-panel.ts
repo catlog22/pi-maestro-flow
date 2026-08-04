@@ -343,7 +343,7 @@ export class McpSetupPanel {
   }
 
   render(width: number): string[] {
-    const innerW = Math.max(40, width - 2);
+    const innerW = Math.max(1, width - 2);
     const lines: string[] = [];
     const border = fg(this.t.border, "─".repeat(innerW));
     lines.push(`┌${border}┐`);

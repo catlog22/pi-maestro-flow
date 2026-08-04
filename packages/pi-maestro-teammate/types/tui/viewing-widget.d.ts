@@ -8,6 +8,11 @@
  * agent (main loop or sub-process) is unaffected by entering/leaving the view.
  */
 import type { TranscriptRow } from "../shared/transcript.ts";
+export interface ViewingSwitch {
+    /** Display label, e.g. @explorer. */
+    label: string;
+    active: boolean;
+}
 export interface ViewingWidgetState {
     agentName?: string;
     agentRole: string;
@@ -15,6 +20,8 @@ export interface ViewingWidgetState {
     rows: TranscriptRow[];
     canSend: boolean;
     transcriptSource: "session" | "memory";
+    /** Switchable agents — rendered as a highlightable row navigated with ←/→. */
+    switches?: ViewingSwitch[];
 }
 /** How many message rows the belowEditor widget shows (tail-following). */
 export declare const VIEWING_MAX_MESSAGE_LINES = 8;

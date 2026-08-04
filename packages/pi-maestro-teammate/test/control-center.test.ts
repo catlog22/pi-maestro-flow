@@ -375,7 +375,7 @@ test("profiles tab exposes global state and returns a reversible management acti
   assert.match(view, /Balanced/);
   assert.match(view, /default/);
   assert.match(view, /Enter manage/);
-  assert.match(view, /Project overrides · preserved \/ disabled/);
+  assert.match(view, /Project overrides · ○ preserved \/ disabled/);
   for (let width = 1; width <= 120; width++) {
     assert.ok(center.render(width).every((line) => visibleWidth(line) <= width));
   }

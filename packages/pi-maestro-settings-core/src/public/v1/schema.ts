@@ -8,6 +8,12 @@ export type JsonValue =
 export const SETTINGS_SCOPES = ["global", "project", "local", "session"] as const;
 export type SettingsScope = (typeof SETTINGS_SCOPES)[number];
 
+/**
+ * Masked placeholder providers return for a set secret value. The shell renders
+ * this as "set" and never echoes the provider's actual value back.
+ */
+export const SETTINGS_SECRET_SET_PLACEHOLDER = "__set__";
+
 export const SETTINGS_ACTIVATIONS = [
   "live",
   "next-invocation",
@@ -43,6 +49,8 @@ export const SETTINGS_EDITOR_KINDS = [
   "resource",
   "action",
   "custom",
+  "list-crud",
+  "overview",
 ] as const;
 export type SettingsEditorKind = (typeof SETTINGS_EDITOR_KINDS)[number];
 
@@ -59,12 +67,44 @@ export interface SettingsEditor {
   placeholderKey?: string;
   options?: readonly SettingsSelectOption[];
   optionsSource?: string;
+  /**
+   * `action`/`custom`/`resource` editors delegate to the provider's
+   * `invokeAction` and close the shell first (Pi custom UI sessions are not
+   * re-entrant). `custom` is a forward-compatible alias of `action` for
+   * external surfaces; set `surfaceId` when the action id differs from the
+   * setting key. In-shell structured editing is provided by `list-crud` and
+   * read-only diagnostics by `overview` instead of embedding components.
+   */
   actionId?: string;
   surfaceId?: string;
   min?: number;
   max?: number;
   step?: number;
   multiline?: boolean;
+  /** secret: allow entering a new value (input is masked; value is written once on commit). */
+  writeOnly?: boolean;
+  /** list-crud: per-item field definitions rendered as a sub-form for the selected item. */
+  itemFields?: readonly SettingDefinition[];
+  /** list-crud: catalog key for the add-item affordance label. */
+  addLabelKey?: string;
+  /** list-crud: catalog key used to display each item (defaults to the item's first text field). */
+  itemLabelKey?: string;
+}
+
+export const SETTINGS_OVERVIEW_STATUSES = ["ok", "warn", "error", "dim"] as const;
+export type SettingsOverviewStatus = (typeof SETTINGS_OVERVIEW_STATUSES)[number];
+
+/**
+ * Read-only diagnostic row rendered by an `overview` editor. Providers return an
+ * array of these as the setting's effective value.
+ */
+export interface SettingsOverviewRow {
+  /** Catalog key for the row label; falls back to `label` when absent. */
+  labelKey?: string;
+  /** Literal row label used when `labelKey` is absent. */
+  label?: string;
+  value: string;
+  status?: SettingsOverviewStatus;
 }
 
 export interface SettingDefinition {

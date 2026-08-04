@@ -1247,3 +1247,221 @@ test("session shutdown fences delayed nested completion from the replacement ses
   assert.equal(messages.some((message) => message.customType === "teammate-complete"), false);
   assert.equal(state.proxyDispatchByRequest?.has("old-session-request") ?? false, false);
 });
+
+test("nested background completion passively delivers teammate_complete_delivery to the parent child agent", async () => {
+  const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const sentMessages: Array<Record<string, unknown>> = [];
+  const controlMessages: Record<string, unknown>[] = [];
+  const state = createProxyState();
+  const parentCid = "parent-agent";
+  const now = Date.now();
+  const parent: ActiveAgent = {
+    agent: "general",
+    correlationId: parentCid,
+    startedAt: now,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now,
+    depth: 0,
+    status: "running",
+    sleepMs: 0,
+    sendControl(message) {
+      controlMessages.push(message);
+      return true;
+    },
+  };
+  state.activeRuns.set(parentCid, parent);
+
+  let stdout: PassThrough | undefined;
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => stdout!.write(`${JSON.stringify(resultReadyTurn("nested done"))}\n`));
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+  const replies: unknown[] = [];
+  await handleProxyRequest(
+    createProxyPi(emitted, sentMessages),
+    state,
+    {
+      type: "teammate_proxy_request",
+      tool: "teammate",
+      requestId: "nested-background",
+      parentCid,
+      params: { tasks: [{ agent: "general", prompt: "answer" }], background: true },
+    },
+    (message) => replies.push(message),
+    undefined,
+    [],
+    undefined,
+    undefined,
+    { spawnChildProcess: confirmFakeKills(spawnChildProcess), resultReadyGraceMs: 500 },
+  );
+
+  assert.equal(replies.length, 1);
+  assert.match(
+    String((replies[0] as { result: { content: Array<{ text: string }> } }).result.content[0].text),
+    /running in background/,
+  );
+
+  for (let attempt = 0; attempt < 40 && controlMessages.length === 0; attempt += 1) {
+    await delay(25);
+  }
+  assert.equal(controlMessages.length, 1);
+  assert.equal(controlMessages[0].type, "teammate_complete_delivery");
+  assert.equal(controlMessages[0].correlationId, parentCid);
+  const envelope = controlMessages[0].envelope as Record<string, unknown>;
+  assert.equal(envelope.customType, "teammate-complete");
+  const results = (envelope.details as { results: Array<{ messages: Array<{ role: string; content: string }> }> }).results;
+  assert.equal(results.length, 1);
+  assert.equal(results[0].messages.some((message) => message.content.includes("nested done")), true);
+  // The root session still receives the same envelope (backward compatible).
+  assert.equal(sentMessages.filter((message) => message.customType === "teammate-complete").length, 1);
+});
+
+test("foreground nested completion does not double-deliver teammate_complete_delivery", async () => {
+  const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const sentMessages: Array<Record<string, unknown>> = [];
+  const controlMessages: Record<string, unknown>[] = [];
+  const state = createProxyState();
+  const parentCid = "parent-agent";
+  const now = Date.now();
+  const parent: ActiveAgent = {
+    agent: "general",
+    correlationId: parentCid,
+    startedAt: now,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now,
+    depth: 0,
+    status: "running",
+    sleepMs: 0,
+    sendControl(message) {
+      controlMessages.push(message);
+      return true;
+    },
+  };
+  state.activeRuns.set(parentCid, parent);
+
+  let stdout: PassThrough | undefined;
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => stdout!.write(`${JSON.stringify(resultReadyTurn("foreground done"))}\n`));
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+  const replies: unknown[] = [];
+  await handleProxyRequest(
+    createProxyPi(emitted, sentMessages),
+    state,
+    {
+      type: "teammate_proxy_request",
+      tool: "teammate",
+      requestId: "nested-foreground",
+      parentCid,
+      params: { tasks: [{ agent: "general", prompt: "answer" }], background: false },
+    },
+    (message) => replies.push(message),
+    undefined,
+    [],
+    undefined,
+    undefined,
+    { spawnChildProcess: confirmFakeKills(spawnChildProcess), resultReadyGraceMs: 500 },
+  );
+
+  assert.equal(replies.length, 1);
+  assert.equal((replies[0] as { result: { isError?: boolean } }).result.isError, false);
+  await delay(60);
+  // In-window completion returns the result in the reply; no passive delivery.
+  assert.equal(controlMessages.length, 0);
+  assert.equal(sentMessages.some((message) => message.customType === "teammate-complete"), false);
+});
+
+test("nested background completion skips delivery when the parent is no longer live", async () => {
+  const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const sentMessages: Array<Record<string, unknown>> = [];
+  const controlMessages: Record<string, unknown>[] = [];
+  const state = createProxyState();
+  const parentCid = "parent-agent";
+  const now = Date.now();
+  const parent: ActiveAgent = {
+    agent: "general",
+    correlationId: parentCid,
+    startedAt: now,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now,
+    depth: 0,
+    status: "running",
+    sleepMs: 0,
+    sendControl(message) {
+      controlMessages.push(message);
+      return true;
+    },
+  };
+  state.activeRuns.set(parentCid, parent);
+
+  let stdout: PassThrough | undefined;
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    setTimeout(() => stdout!.write(`${JSON.stringify(resultReadyTurn("late done"))}\n`), 80);
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+  const replies: unknown[] = [];
+  await handleProxyRequest(
+    createProxyPi(emitted, sentMessages),
+    state,
+    {
+      type: "teammate_proxy_request",
+      tool: "teammate",
+      requestId: "nested-late-parent",
+      parentCid,
+      params: { tasks: [{ agent: "general", prompt: "answer" }], background: true },
+    },
+    (message) => replies.push(message),
+    undefined,
+    [],
+    undefined,
+    undefined,
+    { spawnChildProcess: confirmFakeKills(spawnChildProcess), resultReadyGraceMs: 500 },
+  );
+
+  assert.match(
+    String((replies[0] as { result: { content: Array<{ text: string }> } }).result.content[0].text),
+    /running in background/,
+  );
+  // Parent settles (removed from activeRuns) before the nested dispatch finishes.
+  settleAgent(state, parentCid, 0, "parent done", false);
+  await delay(200);
+  assert.equal(controlMessages.length, 0);
+});
+
+test("child bridge consumes teammate_complete_delivery and injects it locally", () => {
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  assert.match(source, /type === "teammate_complete_delivery"/);
+  assert.match(source, /m\.correlationId !== process\.env\.PI_TEAMMATE_CORRELATION_ID/);
+  assert.match(source, /safeSendMessage\(pi, envelope as never, \{ triggerTurn: true \}\)/);
+  assert.match(source, /type: "teammate_complete_delivery"/);
+});

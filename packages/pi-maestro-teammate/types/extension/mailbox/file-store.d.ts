@@ -51,10 +51,17 @@ export declare class MailboxFileStore {
     removeClaimLock(messageId: string): Promise<void>;
     /** True if a claim lock is currently held for the message. */
     hasClaimLock(messageId: string): Promise<boolean>;
-    /** Check if a messageId has been seen (deduplication). */
-    isSeen(messageId: string): Promise<boolean>;
-    /** Mark a messageId as seen for durable deduplication. */
-    markSeen(messageId: string): Promise<void>;
+    /** Check if a dedup key has been seen (durable deduplication). */
+    isSeen(key: string): Promise<boolean>;
+    /** Mark a dedup key as seen for durable deduplication. */
+    markSeen(key: string): Promise<void>;
+    /** List all seen markers (filename + seenAt) for GC retention sweeping. */
+    listSeen(): Promise<Array<{
+        file: string;
+        seenAt: number;
+    }>>;
+    /** Remove a seen marker file by its listed name (GC). */
+    removeSeen(file: string): Promise<void>;
     /** Remove a message envelope and its state record from a state directory. */
     remove(state: MailboxState, messageId: string): Promise<void>;
     /** Count messages in a specific state. */

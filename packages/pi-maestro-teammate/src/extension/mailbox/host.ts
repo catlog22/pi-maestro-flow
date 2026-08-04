@@ -42,7 +42,7 @@ export interface MailboxHostContext {
 /**
  * Builds a MailboxAuthority from the live TeammateState.
  * Revalidates route via canProxySendTo, generation via state.sessionGeneration,
- * and lease via the recipient agent's current lease token.
+ * and lease via the recipient agent's current SessionLease epoch/nonce.
  */
 export function createMailboxAuthority(context: MailboxHostContext): MailboxAuthority {
   return {
@@ -55,11 +55,17 @@ export function createMailboxAuthority(context: MailboxHostContext): MailboxAuth
     currentGeneration() {
       return context.state.sessionGeneration ?? 0;
     },
-    currentLeaseEpoch() {
-      return 1;
+    currentLeaseEpoch(recipientCorrelationId) {
+      // Bind to the recipient's real SessionLease: when a lease advances
+      // (handoff advances epoch + nonce), envelopes stamped with the old
+      // lease fail revalidation and are dead-lettered. Agents without a lease
+      // fall back to epoch 1 (no binding) so the queue stays usable.
+      const agent = recipientCorrelationId ? context.state.activeRuns.get(recipientCorrelationId) : undefined;
+      return agent?.lease?.epoch ?? 1;
     },
-    currentLeaseNonce() {
-      return context.ownerId;
+    currentLeaseNonce(recipientCorrelationId) {
+      const agent = recipientCorrelationId ? context.state.activeRuns.get(recipientCorrelationId) : undefined;
+      return agent?.lease?.nonce ?? context.ownerId;
     },
     isFenced(recipientCorrelationId) {
       const agent = context.state.activeRuns.get(recipientCorrelationId);
@@ -89,17 +95,25 @@ export interface MailboxHostOptions {
   inject: (envelope: { recipientCorrelationId: string; payload: string; mode: string }) => Promise<void>;
   mode?: RolloutMode;
   pollMs?: number;
+  /** GC sweep interval (default 10 minutes). */
+  gcIntervalMs?: number;
   now?: () => number;
 }
+
+const DEFAULT_GC_INTERVAL_MS = 10 * 60_000;
 
 export class MailboxHost {
   readonly service: MailboxService;
   readonly rollout: MailboxRollout;
-  readonly mode: RolloutMode;
+  /** Live mode — proxies the rollout controller so runtime setMode stays the single source of truth. */
+  get mode(): RolloutMode {
+    return this.rollout.mode;
+  }
+  readonly #startPromise: Promise<void>;
+  #gcTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(options: MailboxHostOptions) {
     const mode = options.mode ?? mailboxModeFromEnv();
-    this.mode = mode;
 
     const authority = createMailboxAuthority({
       state: options.state,
@@ -133,15 +147,32 @@ export class MailboxHost {
       now: options.now,
     });
 
-    // Start consumer only in authoritative mode.
-    if (mode === "authoritative") {
-      void this.service.start().then(() => this.rollout.setMode("authoritative"));
-    } else if (mode === "shadow") {
-      void this.service.start();
-    }
+    // Authoritative: init dirs + start consumer. Shadow: init dirs only — the
+    // shadow contract is "enqueue + validate but NEVER consume/inject". The
+    // start promise is retained so stop() can barrier on it; a late start
+    // continuation can never republish a consumer after stop (ISS-20260803-003).
+    this.#startPromise = this.service.start(mode === "authoritative");
+    void this.#startPromise.catch((error) => {
+      // Surface — never silently fall back to direct stdin.
+      console.error(`[pi-maestro-teammate] mailbox startup failed:`, error);
+    });
+
+    // Periodic GC keeps applied/dead/expired receipts from accumulating.
+    this.#gcTimer = setInterval(() => {
+      void this.service.runGC().catch((error) => {
+        console.error(`[pi-maestro-teammate] mailbox GC failed:`, error);
+      });
+    }, options.gcIntervalMs ?? DEFAULT_GC_INTERVAL_MS);
+    this.#gcTimer.unref?.();
   }
 
   async stop(): Promise<void> {
+    if (this.#gcTimer) {
+      clearInterval(this.#gcTimer);
+      this.#gcTimer = undefined;
+    }
+    // Barrier on the in-flight start before stopping the consumer.
+    await this.#startPromise.catch(() => undefined);
     await this.service.stop();
   }
 }

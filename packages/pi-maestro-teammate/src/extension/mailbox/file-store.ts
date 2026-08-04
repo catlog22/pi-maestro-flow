@@ -5,6 +5,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import {
+  lstat,
   mkdir,
   open,
   readFile,
@@ -72,8 +73,11 @@ function claimLockPath(paths: MailboxPaths, messageId: string): string {
   return join(paths.claimedDir, `${messageId}.claim.lock`);
 }
 
-function seenPath(paths: MailboxPaths, messageId: string): string {
-  return join(paths.seenDir, `${messageId}.seen`);
+function seenPath(paths: MailboxPaths, key: string): string {
+  // Hash the key so arbitrary request/correlation ids can never escape the
+  // seen directory (a key containing separators must not become a path).
+  const digest = createHash("sha256").update(key, "utf8").digest("hex");
+  return join(paths.seenDir, `${digest}.seen`);
 }
 
 // --- Fsync Helpers ---
@@ -174,6 +178,23 @@ export function computeEnvelopeHash(envelope: Omit<MailboxEnvelope, "hash">): st
 export function verifyEnvelopeHash(envelope: MailboxEnvelope): boolean {
   const { hash, ...rest } = envelope;
   return computeEnvelopeHash(rest) === hash;
+}
+
+/**
+ * Reject symlinks, non-regular files, and oversized files before reading.
+ * Guards against a same-user process planting a symlink to a device file
+ * (readFile hang/OOM) or to arbitrary JSON that would otherwise be parsed as
+ * an envelope. Matches the lstat pre-check pattern used by workspace-peers.
+ */
+async function isSafeRegularFile(path: string, maxBytes: number): Promise<boolean> {
+  try {
+    const stat = await lstat(path);
+    if (!stat.isFile() || stat.isSymbolicLink()) return false;
+    if (stat.size > maxBytes) return false;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // --- Public API ---
@@ -337,10 +358,15 @@ export class MailboxFileStore {
 
   /** Read an envelope from a specific state directory. */
   async readEnvelope(state: MailboxState, messageId: string): Promise<MailboxEnvelope | undefined> {
+    const path = envelopePath(this.paths, state, messageId);
+    if (!(await isSafeRegularFile(path, MAX_ENVELOPE_BYTES))) return undefined;
     try {
-      const bytes = await readFile(envelopePath(this.paths, state, messageId));
+      const bytes = await readFile(path);
       if (bytes.byteLength > MAX_ENVELOPE_BYTES) return undefined;
-      return JSON.parse(bytes.toString("utf8")) as MailboxEnvelope;
+      const envelope = JSON.parse(bytes.toString("utf8")) as MailboxEnvelope;
+      // Envelopes are untrusted until their integrity hash checks out.
+      if (typeof envelope !== "object" || envelope === null || !verifyEnvelopeHash(envelope)) return undefined;
+      return envelope;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       if (error instanceof SyntaxError) return undefined;
@@ -350,8 +376,10 @@ export class MailboxFileStore {
 
   /** Read the state record for a message in a specific state directory. */
   async readStateRecord(state: MailboxState, messageId: string): Promise<MailboxStateRecord | undefined> {
+    const path = stateRecordPath(this.paths, state, messageId);
+    if (!(await isSafeRegularFile(path, 4096))) return undefined;
     try {
-      const bytes = await readFile(stateRecordPath(this.paths, state, messageId));
+      const bytes = await readFile(path);
       return JSON.parse(bytes.toString("utf8")) as MailboxStateRecord;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
@@ -418,20 +446,50 @@ export class MailboxFileStore {
     }
   }
 
-  /** Check if a messageId has been seen (deduplication). */
-  async isSeen(messageId: string): Promise<boolean> {
+  /** Check if a dedup key has been seen (durable deduplication). */
+  async isSeen(key: string): Promise<boolean> {
     try {
-      await readFile(seenPath(this.paths, messageId));
+      await readFile(seenPath(this.paths, key));
       return true;
     } catch {
       return false;
     }
   }
 
-  /** Mark a messageId as seen for durable deduplication. */
-  async markSeen(messageId: string): Promise<void> {
-    const path = seenPath(this.paths, messageId);
-    await writeJsonAtomic(path, { messageId, seenAt: this.#now() }, 512);
+  /** Mark a dedup key as seen for durable deduplication. */
+  async markSeen(key: string): Promise<void> {
+    const path = seenPath(this.paths, key);
+    await writeJsonAtomic(path, { key, seenAt: this.#now() }, 512);
+  }
+
+  /** List all seen markers (filename + seenAt) for GC retention sweeping. */
+  async listSeen(): Promise<Array<{ file: string; seenAt: number }>> {
+    try {
+      const files = await readdir(this.paths.seenDir);
+      const records: Array<{ file: string; seenAt: number }> = [];
+      for (const file of files) {
+        if (!file.endsWith(".seen")) continue;
+        const path = join(this.paths.seenDir, file);
+        if (!(await isSafeRegularFile(path, 512))) continue;
+        try {
+          const parsed = JSON.parse((await readFile(path)).toString("utf8")) as { seenAt?: unknown };
+          if (parsed && typeof parsed.seenAt === "number") {
+            records.push({ file, seenAt: parsed.seenAt });
+          }
+        } catch {
+          // Unreadable marker: leave it; it is bounded in size and swept by TTL below.
+        }
+      }
+      return records;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+  }
+
+  /** Remove a seen marker file by its listed name (GC). */
+  async removeSeen(file: string): Promise<void> {
+    await rm(join(this.paths.seenDir, file), { force: true }).catch(() => undefined);
   }
 
   /** Remove a message envelope and its state record from a state directory. */

@@ -229,6 +229,18 @@ import {
   createApiManagerSettingsProvider,
   registerApiManagerSettingsProvider,
 } from "../settings/api-manager-settings-provider.ts";
+import {
+  createMcpSettingsProvider,
+  registerMcpSettingsProvider,
+} from "../settings/mcp-settings-provider.ts";
+import {
+  createSkillsSettingsProvider,
+  registerSkillsSettingsProvider,
+} from "../settings/skills-settings-provider.ts";
+import {
+  createSmartSearchSettingsProvider,
+  registerSmartSearchSettingsProvider,
+} from "../settings/smart-search-settings-provider.ts";
 
 interface MaestroState {
   baseCwd: string;
@@ -2396,40 +2408,43 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     else if (!ctx.hasUI) ctx.ui.notify(`${surface} requires interactive TUI mode.`, "warning");
     return ctx?.hasUI ? ctx : undefined;
   };
+  /** Run an action with a unified status-line lifecycle (set before, clear after). */
+  const withActionStatus = async (status: string, run: (ctx: ExtensionContext) => Promise<void> | void): Promise<void> => {
+    const ctx = requireFlowSettingsContext(status);
+    if (!ctx) return;
+    ctx.ui.setStatus("maestro-settings", status);
+    try {
+      await run(ctx);
+    } finally {
+      ctx.ui.setStatus("maestro-settings", undefined);
+    }
+  };
   const flowSettingsProvider = createFlowSettingsProvider({
     getAgentResponseLanguage: () => chineseResponseMode.isEnabled() ? "zh-CN" : "default",
     actions: {
-      "compaction.manage": async () => {
-        const ctx = requireFlowSettingsContext("Compaction settings");
-        if (ctx) await showCompactionSettingsOverlay(ctx as ExtensionCommandContext);
-      },
-      "failover.manage": async () => {
-        const ctx = requireFlowSettingsContext("Model failover settings");
-        if (ctx) await showModelFailoverOverlay(ctx, sharedModelCircuitBreaker);
-      },
-      "responseLanguage.manage": () => {
-        const ctx = requireFlowSettingsContext("Agent response language");
-        if (ctx) chineseResponseMode.toggle(ctx);
-      },
-      "permissions.manage": () => {
-        const ctx = requireFlowSettingsContext("Permissions");
-        if (ctx) ctx.ui.notify(permissionController.summary(effectivePermissionMode(approvalMode)), "info");
-      },
-      "skills.manage": async () => {
-        const ctx = requireFlowSettingsContext("Skill manager");
-        if (!ctx) return;
+      "compaction.manage": () => withActionStatus("打开压缩设置…", async (ctx) => {
+        await showCompactionSettingsOverlay(ctx as ExtensionCommandContext);
+      }),
+      "failover.manage": () => withActionStatus("打开模型故障转移设置…", async (ctx) => {
+        await showModelFailoverOverlay(ctx, sharedModelCircuitBreaker);
+      }),
+      "responseLanguage.manage": () => withActionStatus("切换 Agent 回复语言…", async (ctx) => {
+        chineseResponseMode.toggle(ctx);
+      }),
+      "permissions.manage": () => withActionStatus("查看权限概览…", async (ctx) => {
+        ctx.ui.notify(permissionController.summary(effectivePermissionMode(approvalMode)), "info");
+      }),
+      "skills.manage": () => withActionStatus("打开 Skill 管理器…", async (ctx) => {
         const result = await runSkillManager(ctx, new SkillManagerStore(ctx.cwd));
         if (result.configChanged) ctx.ui.notify("Skill changes will apply after the extension reloads.", "info");
-      },
-      "mcp.manage": async () => {
-        const ctx = requireFlowSettingsContext("MCP manager");
-        if (ctx && mcpAdapterHandle) await mcpAdapterHandle.openManager(ctx);
-        else if (ctx) ctx.ui.notify("MCP adapter is unavailable.", "warning");
-      },
-      "hooks.manage": async () => {
-        const ctx = requireFlowSettingsContext("Hooks manager");
-        if (ctx) await hookAdapter.openSettings(ctx);
-      },
+      }),
+      "mcp.manage": () => withActionStatus("打开 MCP 管理器…", async (ctx) => {
+        if (mcpAdapterHandle) await mcpAdapterHandle.openManager(ctx);
+        else ctx.ui.notify("MCP adapter is unavailable.", "warning");
+      }),
+      "hooks.manage": () => withActionStatus("打开 Hooks 管理器…", async (ctx) => {
+        await hookAdapter.openSettings(ctx);
+      }),
     },
   });
   // Settings providers re-register at each session boundary so a host reload
@@ -2446,8 +2461,17 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   };
   const openApiManager = async (args: string, surface: string): Promise<void> => {
     const ctx = requireFlowSettingsContext(surface);
-    if (ctx && apiProviderHandle) await apiProviderHandle.openManager(ctx as ExtensionCommandContext, args);
-    else if (ctx) ctx.ui.notify("API provider manager is unavailable.", "warning");
+    if (!ctx) return;
+    if (!apiProviderHandle) {
+      ctx.ui.notify("API provider manager is unavailable.", "warning");
+      return;
+    }
+    ctx.ui.setStatus("maestro-settings", `正在打开 ${surface}…`);
+    try {
+      await apiProviderHandle.openManager(ctx as ExtensionCommandContext, args);
+    } finally {
+      ctx.ui.setStatus("maestro-settings", undefined);
+    }
   };
   const apiManagerSettingsProvider = createApiManagerSettingsProvider({
     actions: {
@@ -2466,15 +2490,53 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     apiManagerSettingsDisposer?.();
     apiManagerSettingsDisposer = undefined;
   };
+  // Provider-only registrations: mcp/skills/smart-search expose their managed
+  // state through the settings shell without a legacy action surface.
+  const mcpSettingsProvider = createMcpSettingsProvider({});
+  let mcpSettingsDisposer: (() => void) | undefined;
+  const registerMcpSettings = (): void => {
+    if (mcpSettingsDisposer) return;
+    mcpSettingsDisposer = registerMcpSettingsProvider(pi.events, mcpSettingsProvider);
+  };
+  const disposeMcpSettings = (): void => {
+    mcpSettingsDisposer?.();
+    mcpSettingsDisposer = undefined;
+  };
+  const skillsSettingsProvider = createSkillsSettingsProvider({});
+  let skillsSettingsDisposer: (() => void) | undefined;
+  const registerSkillsSettings = (): void => {
+    if (skillsSettingsDisposer) return;
+    skillsSettingsDisposer = registerSkillsSettingsProvider(pi.events, skillsSettingsProvider);
+  };
+  const disposeSkillsSettings = (): void => {
+    skillsSettingsDisposer?.();
+    skillsSettingsDisposer = undefined;
+  };
+  const smartSearchSettingsProvider = createSmartSearchSettingsProvider({});
+  let smartSearchSettingsDisposer: (() => void) | undefined;
+  const registerSmartSearchSettings = (): void => {
+    if (smartSearchSettingsDisposer) return;
+    smartSearchSettingsDisposer = registerSmartSearchSettingsProvider(pi.events, smartSearchSettingsProvider);
+  };
+  const disposeSmartSearchSettings = (): void => {
+    smartSearchSettingsDisposer?.();
+    smartSearchSettingsDisposer = undefined;
+  };
   pi.on("session_start", (_event, ctx) => {
     flowSettingsContext = ctx;
     registerFlowSettings();
     registerApiManagerSettings();
+    registerMcpSettings();
+    registerSkillsSettings();
+    registerSmartSearchSettings();
   });
   pi.on("session_shutdown", (_event, ctx) => {
     if (flowSettingsContext === ctx) flowSettingsContext = undefined;
     disposeFlowSettings();
     disposeApiManagerSettings();
+    disposeMcpSettings();
+    disposeSkillsSettings();
+    disposeSmartSearchSettings();
   });
 
   const teammatePermissionBroker: TeammatePermissionBroker = async (call, ctx) => {

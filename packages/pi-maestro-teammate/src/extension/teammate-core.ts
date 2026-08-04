@@ -202,6 +202,8 @@ export const TEAMMATE_PROMPT_GUIDELINES = [
   "Use teammate tasks for parallel or DAG work; {name} and {name.field} references create dependencies between named tasks, and dependsOn declares ordering without injecting output.",
   "Give every multi-task teammate item a stable unique name so nested work remains traceable and addressable; a {ref} that matches no task name is passed through as literal text.",
   "Set teammate concurrency explicitly for provider-safe fan-out; background defaults to false, so the call waits for results until completion or its foreground timeoutMs window, then moves unfinished work to background without terminating it.",
+  "maxNestingDepth is evaluated at the root dispatch: 0 disables nested teammate calls for the spawned agents, and only 0 and 1 are effective (2 is capped to 1 by the global 2-level ceiling; above 2 is rejected). Nested dispatches cannot extend that depth — at most they may pass maxNestingDepth: 0 as an explicit no-further-nesting marker.",
+  "After a nested (child-level) background dispatch, the completion is delivered automatically as a new turn in this agent's session — the root forwards the teammate-complete envelope over IPC while this agent is still live — so ending the turn to await the notification is correct; the root caller additionally sees the same notification. If this agent has ended, delivery is skipped and the result is only inspectable via observe.",
   'Use teammate with context: "fork" only when the child needs the current conversation history; fresh context is the default, and in multi-task mode prefer per-task fork over a top-level default.',
   "After teammate returns a background acknowledgement (explicit background, manual detach, or elapsed foreground window), normally end the current turn and wait for the automatic teammate-complete notification, which will trigger a new turn with the result.",
   "Do not poll observe or teammate-list after starting background work; use observe action=status only for a one-off inspection explicitly needed for debugging or requested by the user.",
@@ -308,11 +310,11 @@ Call form:
 Every dispatch uses a non-empty tasks array. Task-level values override top-level defaults. Tasks that omit agent inherit the top-level agent, then default to "general".
 Use {name} or {name.field} in a dependent task's prompt, or dependsOn: ["name"] for ordering without output injection.
 
-Nesting control: pass maxNestingDepth to limit how many levels of nested teammate dispatch the spawned agents may perform below themselves. maxNestingDepth: 0 forbids nested calls entirely — the assigned agents cannot dispatch teammates.
+Nesting control: pass maxNestingDepth on the root dispatch to limit how many levels of nested teammate dispatch the spawned agents may perform below themselves. 0 forbids nested calls entirely — the assigned agents cannot dispatch teammates. Values above 1 behave like 1: the tree is globally hard-capped at 2 agent levels, and deeper nesting is rejected with an error. Inside a spawned agent, maxNestingDepth can only tighten the parent's budget — pass 0 to forbid further nesting below that call; it can never extend depth beyond what the parent allowed.
 
 Use an exact role name from the Available Teammate Agents section in the active system prompt. Unknown names are rejected.
 
-For background work, wait for the automatic teammate-complete notification. Do not poll observe or teammate-list; if the current turn must wait, call observe once with action="wait" and target { kind: "teammate", id: "<name-or-correlation-id>" }.
+Background: the foreground wait window is bounded — the smallest per-task timeoutMs, or 10 minutes by default; when it elapses the call returns a background acknowledgement and the work continues, completing via one automatic teammate-complete notification that triggers a new turn. Do not poll observe or teammate-list; if the current turn must wait, call observe once with action="wait" and target { kind: "teammate", id: "<name-or-correlation-id>" }. Nested background dispatches: the work executes in the root process, and on completion the same teammate-complete envelope is delivered automatically to the dispatching child agent as a new turn in its session while that agent is still live, with the root caller additionally receiving the notification. If the dispatching agent has already ended, delivery is skipped and the result is settled and only inspectable via observe.
 
 ## Observation
 
@@ -431,7 +433,7 @@ export function appendTeammateDepthContext(
 }
 
 export function backgroundWaitGuidance(correlationId: string): string {
-  return `correlationId=${correlationId}. Automatic teammate-complete notification will trigger a new turn with the result. Do not poll observe or teammate-list. If this turn must consume the result, call observe exactly once with { action: "wait", targets: [{ kind: "teammate", id: "${correlationId}" }], timeoutMs: 600000 }; otherwise end the turn now.`;
+  return `correlationId=${correlationId}. The teammate-complete notification is delivered automatically when the work finishes: for a root dispatch it arrives as a new turn in this session; for a nested dispatch the work runs in the root process and the root forwards the completion over IPC, so it also arrives as a new turn in this agent's session while this agent is still live (the root caller additionally sees it). If this agent has already ended, delivery is skipped and the result is settled and inspectable via observe. Do not poll observe or teammate-list. If this turn must consume the result, call observe exactly once with { action: "wait", targets: [{ kind: "teammate", id: "${correlationId}" }], timeoutMs: 600000 }; otherwise end the turn now.`;
 }
 
 export function foregroundWaitWindowMs(

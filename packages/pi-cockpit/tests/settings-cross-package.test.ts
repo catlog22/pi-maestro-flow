@@ -243,7 +243,7 @@ test("API Manager has a dedicated Settings page with direct management actions",
 		const rendered = shell.render(120).join("\n");
 		assert.match(rendered, /API Manager/);
 		assert.match(rendered, /— Providers and models —/);
-		assert.match(rendered, /Open full API Manager/);
+		assert.match(rendered, /Open API Manager/);
 		assert.match(rendered, /Add or edit a provider model/);
 		assert.match(rendered, /— Retry policy —/);
 		assert.match(rendered, /Configure API retries/);

@@ -36,7 +36,7 @@ export declare class MailboxRollout {
     get mode(): RolloutMode;
     get config(): Readonly<RolloutConfig>;
     /** Switch rollout mode. Preserves v2 files on downgrade. */
-    setMode(mode: RolloutMode): void;
+    setMode(mode: RolloutMode): Promise<void>;
     /** Get the capability to advertise to peers based on current mode. */
     advertisedCapability(): MailboxCapability;
     /**

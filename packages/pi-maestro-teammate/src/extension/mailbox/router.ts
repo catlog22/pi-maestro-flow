@@ -12,9 +12,11 @@ import {
   type MailboxEnqueueResult,
   type MailboxMessageKind,
   type MailboxPriority,
+  CORRELATION_ID_PATTERN,
   MAILBOX_SCHEMA_VERSION,
   MAX_PAYLOAD_BYTES,
   priorityForKind,
+  SAFE_ID_PATTERN,
   TTL_NORMAL_MS,
   TTL_STEER_MS,
 } from "./types.ts";
@@ -27,10 +29,10 @@ export interface MailboxAuthority {
   canRoute(senderId: string, recipientCorrelationId: string, mode: MailboxDeliveryMode): { allowed: boolean; reason?: string };
   /** Current session generation for revalidation. */
   currentGeneration(): number;
-  /** Current lease epoch. */
-  currentLeaseEpoch(): number;
-  /** Current lease nonce. */
-  currentLeaseNonce(): string;
+  /** Current lease epoch for the recipient (unbound when no recipient). */
+  currentLeaseEpoch(recipientCorrelationId?: string): number;
+  /** Current lease nonce for the recipient (unbound when no recipient). */
+  currentLeaseNonce(recipientCorrelationId?: string): string;
   /** Whether the recipient agent is fenced (queued but not dispatched). */
   isFenced(recipientCorrelationId: string): boolean;
   /** Whether the recipient agent is stale/unauthorized (should dead-letter). */
@@ -103,6 +105,20 @@ export class MailboxRouter {
       return { ok: false, code: "route_invalid", message: "workspace mismatch: message from another workspace" };
     }
 
+    // 0.5 Validate identifiers before any routing or path construction. senderId
+    // and workspaceId are joined into file paths and authority decisions, so
+    // reject anything unsafe (traversal, separators, empty). "caller" (the root
+    // tool identity) already matches SAFE_ID_PATTERN.
+    if (!SAFE_ID_PATTERN.test(request.senderId)) {
+      return { ok: false, code: "route_invalid", message: "invalid senderId" };
+    }
+    if (!SAFE_ID_PATTERN.test(request.workspaceId)) {
+      return { ok: false, code: "route_invalid", message: "invalid workspaceId" };
+    }
+    if (!CORRELATION_ID_PATTERN.test(request.recipientCorrelationId)) {
+      return { ok: false, code: "route_invalid", message: "invalid recipientCorrelationId" };
+    }
+
     // 1. Validate route
     const route = this.#authority.canRoute(request.senderId, request.recipientCorrelationId, request.mode);
     if (!route.allowed) {
@@ -141,8 +157,8 @@ export class MailboxRouter {
       expiresAt: now + ttlMs,
       ttlMs,
       sessionGeneration: this.#authority.currentGeneration(),
-      leaseEpoch: this.#authority.currentLeaseEpoch(),
-      leaseNonce: this.#authority.currentLeaseNonce(),
+      leaseEpoch: this.#authority.currentLeaseEpoch(request.recipientCorrelationId),
+      leaseNonce: this.#authority.currentLeaseNonce(request.recipientCorrelationId),
       payload: request.payload,
       ...(request.requestId ? { requestId: request.requestId } : {}),
       ...(request.correlationId ? { correlationId: request.correlationId } : {}),
@@ -153,9 +169,16 @@ export class MailboxRouter {
     const hash = computeEnvelopeHash(envelopeBase);
     const envelope: MailboxEnvelope = { ...envelopeBase, hash };
 
-    // 5. Deduplication check
-    if (await this.#store.isSeen(messageId)) {
-      return { ok: false, code: "duplicate", message: `message ${messageId} already processed` };
+    // 5. Deduplication check — keyed on the caller-provided request id so a
+    // retried logical message (e.g. taskId via the v1 registry) is not
+    // injected twice. Without a request id there is nothing meaningful to
+    // deduplicate against, so no marker is written (the messageId is a fresh
+    // UUID every time and would make the seen-set both unbounded and useless).
+    const dedupKey = request.requestId ?? request.correlationId;
+    if (dedupKey) {
+      if (await this.#store.isSeen(dedupKey)) {
+        return { ok: false, code: "duplicate", message: `message ${dedupKey} already processed` };
+      }
     }
 
     // 6. Write to staging
@@ -178,8 +201,10 @@ export class MailboxRouter {
       return { ok: false, code: "route_invalid", message: "failed to promote staging to ready" };
     }
 
-    // 8. Mark as seen for deduplication
-    await this.#store.markSeen(messageId);
+    // 8. Mark the dedup key as seen (only when one was provided)
+    if (dedupKey) {
+      await this.#store.markSeen(dedupKey);
+    }
 
     return { ok: true, messageId, state: "ready" };
   }
@@ -201,9 +226,9 @@ export class MailboxRouter {
       return { allowed: false, action: "dead", reason: `generation mismatch (envelope: ${envelope.sessionGeneration}, current: ${currentGen})` };
     }
 
-    // Check lease epoch + nonce
-    const currentEpoch = this.#authority.currentLeaseEpoch();
-    const currentNonce = this.#authority.currentLeaseNonce();
+    // Check lease epoch + nonce (bound to the recipient's current SessionLease)
+    const currentEpoch = this.#authority.currentLeaseEpoch(envelope.recipientCorrelationId);
+    const currentNonce = this.#authority.currentLeaseNonce(envelope.recipientCorrelationId);
     if (envelope.leaseEpoch !== currentEpoch || envelope.leaseNonce !== currentNonce) {
       return { allowed: false, action: "dead", reason: "lease epoch/nonce mismatch" };
     }

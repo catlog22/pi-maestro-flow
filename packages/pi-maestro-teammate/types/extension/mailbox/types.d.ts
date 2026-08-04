@@ -17,6 +17,8 @@ export declare const CLAIM_HEARTBEAT_MS = 5000;
 export declare const CLAIM_STALE_MS = 20000;
 /** Cross-process poll interval. */
 export declare const POLL_INTERVAL_MS = 50;
+/** Maximum consecutive dispatch failures before a message is dead-lettered. */
+export declare const MAX_DISPATCH_RETRIES = 5;
 /** Maximum consecutive high-priority messages before servicing one normal. */
 export declare const STARVATION_BOUND = 8;
 /** Hard total live message limit. */
@@ -147,3 +149,10 @@ export declare const MESSAGE_ID_PATTERN: RegExp;
 export declare const OWNER_ID_PATTERN: RegExp;
 export declare const WORKSPACE_ID_PATTERN: RegExp;
 export declare const CORRELATION_ID_PATTERN: RegExp;
+/**
+ * Path-safe identifier pattern applied to workspace/owner ids before they are
+ * joined into filesystem paths. Rejects empty strings, path separators, and
+ * traversal sequences while staying compatible with test fixtures ("a") and
+ * production values ("caller", sha256 hex, workspace-peer owner ids).
+ */
+export declare const SAFE_ID_PATTERN: RegExp;

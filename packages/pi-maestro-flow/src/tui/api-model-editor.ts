@@ -369,8 +369,8 @@ export class ApiModelEditorOverlay implements Component, Focusable {
   private renderFieldValue(field: ApiModelFormField): string {
     if (field.kind === "secret") return field.value ? maskSecret(String(field.value)) : this.params.theme.fg("warning", this.t("value.unconfigured"));
     if (field.kind === "toggle") return field.value
-      ? this.params.theme.fg("success", this.t("value.on"))
-      : this.params.theme.fg("dim", this.t("value.off"));
+      ? this.params.theme.fg("success", `● ${this.t("value.on")}`)
+      : this.params.theme.fg("dim", `○ ${this.t("value.off")}`);
     if (field.kind === "choice") {
       return field.choices?.find((choice) => choice.value === field.value)?.label ?? String(field.value);
     }
@@ -419,29 +419,4 @@ function maskSecret(value: string): string {
   if (!value) return "未配置";
   if (value.length <= 8) return "*".repeat(value.length);
   return `${value.slice(0, 3)}${"*".repeat(Math.min(12, value.length - 7))}${value.slice(-4)}`;
-}
-
-function fit(value: string, width: number): string {
-  return truncateToWidth(value, Math.max(0, width), "…");
-}
-
-function pad(value: string, width: number): string {
-  return `${value}${" ".repeat(Math.max(0, width - visibleWidth(value)))}`;
-}
-
-function rule(width: number): string {
-  return "─".repeat(Math.max(0, width));
-}
-
-function frame(rows: string[], width: number, theme: ApiModelEditorTheme): string[] {
-  const inner = Math.max(0, width - 2);
-  const border = (value: string) => theme.fg("dim", value);
-  return [
-    border(`╭${"─".repeat(inner)}╮`),
-    ...rows.map((row) => {
-      const content = truncateToWidth(row, inner, "…");
-      return `${border("│")}${content}${" ".repeat(Math.max(0, inner - visibleWidth(content)))}${border("│")}`;
-    }),
-    border(`╰${"─".repeat(inner)}╯`),
-  ];
 }
