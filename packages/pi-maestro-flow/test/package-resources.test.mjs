@@ -19,6 +19,7 @@ const piCoreSdkNames = [
   "@earendil-works/pi-coding-agent",
   "@earendil-works/pi-tui",
 ];
+const piSdkDevBaseline = "0.83.0";
 const teammatePublicExports = {
   ".": ["./types/index.d.ts", "./src/index.ts"],
   "./v1": ["./types/public/v1/index.d.ts", "./src/public/v1/index.ts"],
@@ -39,6 +40,7 @@ after(() => cleanPackagedSkills());
 test("package manifest publishes the extension and canonical Pi skills", () => {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const teammatePkg = JSON.parse(readFileSync(join(teammateRoot, "package.json"), "utf8"));
+  const cockpitPkg = JSON.parse(readFileSync(join(cockpitRoot, "package.json"), "utf8"));
   assert.match(pkg.version, exactSemver);
   assert.equal(pkg.files.includes(".pi/"), true);
   assert.equal(pkg.files.includes("workflows/"), false);
@@ -52,6 +54,7 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   assert.ok(pkg.files.includes("!.pi/scratch/**"));
   assert.match(pkg.dependencies["maestro-flow"], exactSemver);
   assert.equal(pkg.dependencies["pi-maestro-teammate"], teammatePkg.version);
+  assert.equal(pkg.dependencies["pi-cockpit"], cockpitPkg.version);
   assert.equal(pkg.dependencies["@konbakuyomu/smart-search"], undefined);
   assert.match(pkg.optionalDependencies["@konbakuyomu/smart-search"], exactSemver);
   assert.equal(pkg.dependencies["puppeteer-core"], "24.31.0");
@@ -128,7 +131,7 @@ test("Pi extension manifests keep host SDKs as optional wildcard peers", () => {
         true,
         `${pkg.name} must make the ${sdkName} peer optional`,
       );
-      assert.equal(pkg.devDependencies?.[sdkName], "0.82.1", `${pkg.name} must develop against ${sdkName}@0.82.1`);
+      assert.equal(pkg.devDependencies?.[sdkName], piSdkDevBaseline, `${pkg.name} must develop against ${sdkName}@${piSdkDevBaseline}`);
     }
   }
 });

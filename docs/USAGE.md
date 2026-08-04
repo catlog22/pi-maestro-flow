@@ -59,13 +59,14 @@
 ### 安装
 
 ```bash
-# 安装（pi-maestro-teammate 作为依赖自动安装）
-pi install npm:pi-maestro-flow
+# 安装或升级（pi-maestro-teammate 作为依赖自动安装）
+pi install npm:pi-maestro-flow@0.14.2
 
-# 验证
+# 验证 Flow、Teammate 和 Cockpit 均已列出，然后重启 Pi 或 reload extensions
 pi list
-# 预期输出: pi-maestro-flow@0.4.x, pi-maestro-teammate@0.4.x
 ```
+
+升级会迁移由 Flow 管理的 companion 注册；同名本地开发覆盖会被保留并在启动日志中提示，需显式升级或移除。
 
 ### 插件注册的工具总览
 
@@ -1109,7 +1110,7 @@ teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: 读�
 
 ```bash
 # ─── 安装 ───
-pi install npm:pi-maestro-flow
+pi install npm:pi-maestro-flow@0.14.2
 
 # ─── 知识 ───
 maestro search "查询" --code

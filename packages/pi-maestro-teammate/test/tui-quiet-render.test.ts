@@ -341,6 +341,17 @@ test("auxiliary teammate renderers make call and result phases mutually exclusiv
   assert.equal((source.match(/if \(options\.isPartial\) return new Text\("", 0, 0\);/g) ?? []).length, 5);
 });
 
+test("auxiliary teammate tools use a self render shell in root and nested registrations", () => {
+  const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  for (const name of ["teammate-send", "teammate-watch", "teammate-wait", "observe", "teammate-monitor"]) {
+    assert.equal(
+      (source.match(new RegExp(`name: \"${name}\",\\r?\\n\\s+label: \"[^\"]*\",\\r?\\n\\s+renderShell: \"self\",`, "g")) ?? []).length,
+      2,
+      `${name} should declare renderShell: "self" in both root and nested registrations`,
+    );
+  }
+});
+
 test("root and nested self-rendered teammate tools share renderers", () => {
   const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   assert.equal((source.match(/return renderTeammateCall\(/g) ?? []).length, 2);

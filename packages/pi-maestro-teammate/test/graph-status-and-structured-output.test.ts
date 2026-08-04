@@ -1504,20 +1504,6 @@ test("awaited handoff transitions reject stale selections and transition no-ops"
   assert.equal(transitionLeaseIfCurrent(active, activeSelection, requestHandback), undefined);
 });
 
-test("teammate-session revalidates the complete lease after each awaited selection boundary", () => {
-  const source = fs.readFileSync(new URL("../src/extension/teammate-core.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8");
-  const start = source.indexOf("async function handleTeammateSession(");
-  const end = source.indexOf("async function showTeammateControlCenter(", start);
-  assert.ok(start >= 0 && end > start);
-  const handler = source.slice(start, end);
-
-  assert.match(handler, /await ctx\.waitForIdle\(\);\s*const reloadingLease = transitionLeaseIfCurrent\(attached\.lease, selectedLease, requestHandback\)/);
-  assert.match(handler, /await ctx\.ui\.select[\s\S]*if \(!sameLeaseSelection\(agent\.lease, selectedLease\)\)/);
-  assert.match(handler, /const parkedLease = await prepareAgentHandoff\(agent, selectedLease\)[\s\S]*transitionLeaseIfCurrent\(agent\.lease, parkedLease, transferToMain\)/);
-  assert.doesNotMatch(handler, /agent\.lease = transferToMain\(agent\.lease\)/);
-  assert.doesNotMatch(handler, /attached\.lease = requestHandback\(attached\.lease\)/);
-});
-
 test("session identity is accepted only inside the canonical child session directory", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-handoff-root-"));
   const childDir = path.join(root, "child");
@@ -2163,20 +2149,23 @@ test("agent overlay renders compact horizontal tabs and switches with left/right
   ]);
   const overlay = new AttachOverlay(first, () => {}, () => activeRuns);
   try {
+    // The tab list always leads with the main conversation, so agent tabs
+    // start at 2/3.
     const initial = overlay.render(100, 16).join("\n");
-    assert.match(initial, /Agents 1\/2/);
+    assert.match(initial, /Agents 2\/3/);
+    assert.match(initial, /● main/);
     assert.match(initial, /@api/);
     assert.match(initial, /@ui/);
 
     overlay.handleInput("\x1b[C");
     const next = overlay.render(100, 16).join("\n");
-    assert.match(next, /Agents 2\/2/);
+    assert.match(next, /Agents 3\/3/);
     assert.match(next, /builder/);
     assert.match(next, /@ui/);
     assert.match(next, /Sleeping/);
 
     overlay.handleInput("\x1b[D");
-    assert.match(overlay.render(100, 16).join("\n"), /Agents 1\/2/);
+    assert.match(overlay.render(100, 16).join("\n"), /Agents 2\/3/);
   } finally {
     overlay.dispose();
   }

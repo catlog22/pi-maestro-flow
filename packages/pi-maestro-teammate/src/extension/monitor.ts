@@ -11,6 +11,8 @@
  * registration in index.ts injects the watch/wait callbacks.
  */
 
+import { DeliveryGate } from "../supervision/delivery.ts";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -341,6 +343,8 @@ export interface MonitorBinding {
   driftDetected: boolean;
   /** Last notified reason for dedup (avoid spamming main session). */
   lastNotifiedReason?: string;
+  /** Per-binding intervention delivery gate (cooldown + dedup + window limit). */
+  deliveryGate: DeliveryGate;
 }
 
 /** Agent info snapshot provided by the host (index.ts) to the engine. */
@@ -367,8 +371,8 @@ export interface EngineCallbacks {
   sendIntervention: (correlationId: string, message: string, mode: "steer" | "follow_up") => boolean | Promise<boolean>;
   /** Update the status bar text. */
   onStatusUpdate: (statusText: string | undefined) => void;
-  /** Notify the main session (e.g., interaction needed). */
-  notifyMain: (message: string) => void;
+  /** Notify the main session (e.g., interaction needed). `target` is the binding key. */
+  notifyMain: (message: string, target?: string) => void;
   /** LLM analysis (Phase C). Returns undefined if not available or failed. */
   analyze?: (binding: MonitorBinding, info: EngineAgentInfo) => Promise<AnalysisResult | undefined>;
 }
@@ -380,6 +384,22 @@ export interface AnalysisResult {
   action?: "none" | "send";
   message?: string;
 }
+
+/**
+ * JSON schema for structured LLM analysis output — shared with the
+ * supervision evaluator (structured first, text fallback via
+ * parseAnalysisResult).
+ */
+export const ANALYSIS_RESULT_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    status: { enum: ["on-track", "drift"] },
+    reason: { type: "string" },
+    action: { enum: ["none", "send"] },
+    message: { type: "string" },
+  },
+  required: ["status"],
+};
 
 // ---------------------------------------------------------------------------
 // Engine constants
@@ -441,6 +461,11 @@ export function addBinding(
     interventions: [],
     driftDetected: false,
     lastNotifiedReason: undefined,
+    deliveryGate: new DeliveryGate({
+      cooldownMs: INTERVENTION_COOLDOWN_MS,
+      dedup: { scope: "target" },
+      perWindowLimit: 1,
+    }),
   });
   return { ok: true };
 }
@@ -543,6 +568,10 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
   const now = Date.now();
   let interventionCount = 0;
   try {
+    // Fresh delivery window for every binding's gate (perWindowLimit resets).
+    for (const binding of engine.bindings.values()) {
+      binding.deliveryGate.beginWindow();
+    }
 
   for (const [cid, binding] of engine.bindings) {
     const info = cb.getAgentInfo(cid);
@@ -561,7 +590,7 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
       // Dedup: only notify on state transition, not every tick
       if (binding.lastNotifiedReason !== heuristic.reason) {
         binding.lastNotifiedReason = heuristic.reason;
-        cb.notifyMain(heuristic.message);
+        cb.notifyMain(heuristic.message, cid);
       }
       continue;
     }
@@ -571,6 +600,9 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
     }
 
     if (heuristic.needsIntervention && heuristic.message && canIntervene(binding, now)) {
+      if (binding.deliveryGate.gate(cid, heuristic.message, "interrupt") === undefined) {
+        continue;
+      }
       const sent = await cb.sendIntervention(cid, heuristic.message, "steer");
       if (sent) {
         recordIntervention(binding, heuristic.reason!, heuristic.message, "steer");
@@ -585,6 +617,9 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
       if (result) {
         binding.driftDetected = result.status === "drift";
         if (result.status === "drift" && result.action === "send" && result.message && canIntervene(binding, now)) {
+          if (binding.deliveryGate.gate(cid, result.message, "interrupt") === undefined) {
+            continue;
+          }
           const sent = await cb.sendIntervention(cid, result.message, "steer");
           if (sent) {
             recordIntervention(binding, binding.mode === "custom" ? "custom" : "drift", result.message, "steer");

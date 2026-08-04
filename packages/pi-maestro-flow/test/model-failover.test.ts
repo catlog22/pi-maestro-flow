@@ -7,6 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { ModelCircuitBreaker } from "pi-maestro-teammate/v1/retry";
 import {
   consumeModelFailoverSettlement,
+  FAILOVER_TERMINAL_EVENT,
   getGlobalModelFailoverPath,
   getProjectModelFailoverPath,
   loadModelFailoverConfig,
@@ -45,6 +46,8 @@ function harness(
     message: { customType: string; content: string; display: boolean; details?: unknown };
     options?: { triggerTurn?: boolean; deliverAs?: string };
   }> = [];
+  const eventSubscribers = new Map<string, Array<(data: unknown) => void>>();
+  const emittedEvents: Array<{ channel: string; data: unknown }> = [];
   const multimodal = new Set(options.multimodal ?? []);
   const models = [
     { provider: "provider", id: "primary", input: multimodal.has("provider/primary") ? ["text", "image"] : ["text"] },
@@ -69,6 +72,20 @@ function harness(
       const list = handlers.get(event) ?? [];
       list.push(handler);
       handlers.set(event, list);
+    },
+    events: {
+      on(channel: string, handler: (data: unknown) => void) {
+        const list = eventSubscribers.get(channel) ?? [];
+        list.push(handler);
+        eventSubscribers.set(channel, list);
+        return () => {
+          eventSubscribers.set(channel, (eventSubscribers.get(channel) ?? []).filter((candidate) => candidate !== handler));
+        };
+      },
+      emit(channel: string, data: unknown) {
+        emittedEvents.push({ channel, data });
+        for (const handler of eventSubscribers.get(channel) ?? []) handler(data);
+      },
     },
     async setModel(model: { provider: string; id: string }) {
       selected.push(`${model.provider}/${model.id}`);
@@ -101,7 +118,7 @@ function harness(
   const flushScheduledHandoff = async (): Promise<void> => {
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
   };
-  return { breaker, commands, ctx, emit, flushScheduledHandoff, handoffs, notifications, selected, sentMessages };
+  return { breaker, commands, ctx, emit, emittedEvents, flushScheduledHandoff, handoffs, notifications, selected, sentMessages };
 }
 
 function writeProjectConfig(cwd: string, value: unknown): void {
@@ -799,4 +816,186 @@ test("attached images with vision delegation disabled do not auto-analyze", asyn
     assert.deepEqual(result.message?.details?.routes, [{ imageIndex: 1, route: "unread", reason: "vision_disabled" }]);
     await runtime.emit("session_shutdown");
   } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("blocked replay fence schedules a force_restart fallback intent", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
+  try {
+    writeProjectConfig(cwd, {
+      enabled: true,
+      fallbackModels: { "provider/primary": ["provider/backup"] },
+    });
+    const runtime = harness(cwd);
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await runtime.emit("tool_execution_start", { toolCallId: "tool-1", toolName: "write", args: {} });
+    await runtime.emit("tool_execution_end", { toolCallId: "tool-1", toolName: "write", result: {}, isError: false });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "Provider overloaded: 503" }],
+    });
+    await runtime.emit("agent_settled");
+    await runtime.flushScheduledHandoff();
+
+    const details = runtime.handoffs[0]?.message.details as { intent?: { mode?: string } } | undefined;
+    assert.equal(details?.intent?.mode, "force_restart");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("clean failure schedules a restart fallback intent", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
+  try {
+    writeProjectConfig(cwd, {
+      enabled: true,
+      fallbackModels: { "provider/primary": ["provider/backup"] },
+    });
+    const runtime = harness(cwd);
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "Provider overloaded: 503" }],
+    });
+    await runtime.emit("agent_settled");
+    await runtime.flushScheduledHandoff();
+
+    const details = runtime.handoffs[0]?.message.details as { intent?: { mode?: string } } | undefined;
+    assert.equal(details?.intent?.mode, "restart");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("duplicate old-run settlement after handoff transfer cannot settle the fallback early", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
+  try {
+    writeProjectConfig(cwd, {
+      enabled: true,
+      fallbackModels: { "provider/primary": ["provider/backup"] },
+    });
+    const runtime = harness(cwd);
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "fetch failed" }],
+    });
+    await runtime.emit("agent_settled");
+    await runtime.flushScheduledHandoff();
+    assert.equal(runtime.handoffs.length, 1);
+
+    // The old run's settlement arrives again after the transfer but before the
+    // fallback turn starts: it must be absorbed, not settle the fallback early.
+    await runtime.emit("agent_settled");
+    assert.equal(runtime.handoffs.length, 1);
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "fallback-scheduled");
+    assert.equal(runtime.breaker.snapshot().find((entry) => entry.model === "provider/backup")?.state, "CLOSED");
+
+    // The fallback turn then proceeds and settles normally.
+    await runtime.emit("turn_start", { turnIndex: 1 });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] }],
+    });
+    await runtime.emit("agent_settled");
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "success");
+    assert.equal(runtime.breaker.snapshot().find((entry) => entry.model === "provider/backup")?.state, "CLOSED");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("scheduled handoff failure publishes terminal event", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-send-failure-"));
+  try {
+    writeProjectConfig(cwd, {
+      enabled: true,
+      fallbackModels: { "provider/primary": ["provider/backup"] },
+    });
+    const runtime = harness(cwd, undefined, { sendMessageError: new Error("send failed") });
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "fetch failed" }],
+    });
+    await runtime.emit("agent_settled");
+    await runtime.flushScheduledHandoff();
+
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "failed");
+    assert.equal(runtime.emittedEvents.length, 1);
+    assert.equal(runtime.emittedEvents[0]?.channel, FAILOVER_TERMINAL_EVENT);
+    assert.match(
+      String((runtime.emittedEvents[0]?.data as { failure?: string } | undefined)?.failure ?? ""),
+      /send failed/,
+    );
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("image-triggered multimodal success settles as success even when failover is disabled", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-vision-disabled-"));
+  try {
+    writeProjectConfig(cwd, {
+      enabled: false,
+      fallbackModels: { "provider/primary": ["provider/last"] },
+    });
+    const runtime = harness(cwd, undefined, { multimodal: ["provider/last"] });
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", {
+      prompt: "inspect",
+      images: [{ type: "image", data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString("base64"), mimeType: "image/png" }],
+    });
+    assert.deepEqual(runtime.selected, ["provider/last"]);
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] }],
+    });
+    await runtime.emit("agent_settled");
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "success");
+    assert.deepEqual(runtime.selected, ["provider/last", "provider/primary"], "original text-only model restored");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("image-triggered fallback preserves provenance and restores the original model", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-vision-fallback-"));
+  try {
+    writeProjectConfig(cwd, {
+      enabled: true,
+      fallbackModels: { "provider/primary": ["provider/last", "provider/backup"] },
+    });
+    const runtime = harness(cwd, undefined, { multimodal: ["provider/last", "provider/backup"] });
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", {
+      prompt: "inspect",
+      images: [{ type: "image", data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString("base64"), mimeType: "image/png" }],
+    });
+    // The first multimodal candidate fails retryably; the fallback advances to
+    // the second multimodal candidate.
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "Provider overloaded: 503" }],
+    });
+    await runtime.emit("agent_settled");
+    assert.deepEqual(runtime.selected, ["provider/last", "provider/backup"]);
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "fallback-scheduled");
+    await runtime.flushScheduledHandoff();
+    assert.equal(runtime.handoffs.length, 1);
+
+    // The fallback multimodal candidate succeeds; the original text-only model
+    // must be restored on settle.
+    await runtime.emit("turn_start", { turnIndex: 1 });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] }],
+    });
+    await runtime.emit("agent_settled");
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "success");
+    assert.deepEqual(runtime.selected, ["provider/last", "provider/backup", "provider/primary"], "original text-only model restored after image fallback");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
 });

@@ -339,3 +339,5 @@ export interface SettledAgentRecord {
 export const TEAMMATE_COMPLETE_EVENT = "teammate:complete";
 export const TEAMMATE_STARTED_EVENT = "teammate:started";
 export const TEAMMATE_MESSAGE_EVENT = "teammate:message";
+export const TEAMMATE_VIEWING_EVENT = "teammate:viewing";
+export const TEAMMATE_OPEN_AGENT_EVENT = "teammate:open-agent";

@@ -13,9 +13,11 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { createHash } from "node:crypto";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
+import type { WorkspaceSessionScan } from "../transcript/session-transcript.ts";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams } from "./schemas.ts";
 import {
@@ -1044,6 +1046,45 @@ export function buildAgentSelectorRows(agents: ActiveAgent[]): AgentSelectorRow[
   return rows;
 }
 
+/**
+ * Rows for completed teammate sessions recovered from disk after a restart.
+ * The selector merges these below the live-agent rows; selecting one opens the
+ * attach overlay in transcript mode (read-only).
+ */
+export function buildHistoryRows(
+  scans: WorkspaceSessionScan[],
+): AgentSelectorRow[] {
+  return scans.map((scan) => ({
+    correlationId: historyRowKey(scan),
+    agent: "teammate",
+    label: historyLabel(scan),
+    status: "completed",
+    startedAt: scan.startedAt ?? 0,
+    depth: 0,
+    treePrefix: "",
+    recentTools: [],
+    ...(scan.firstMessage ? { lastMessage: scan.firstMessage } : {}),
+  }));
+}
+
+/**
+ * Stable selector key for a history row, derived from the session file path —
+ * position-based keys would drift when the scan order changes across rebuilds.
+ */
+export function historyRowKey(scan: WorkspaceSessionScan): string {
+  const digest = createHash("sha256")
+    .update(scan.sessionFile)
+    .digest("hex")
+    .slice(0, 8);
+  return `hist-${digest}`;
+}
+
+export function historyLabel(scan: WorkspaceSessionScan): string {
+  const id = scan.sessionId?.slice(0, 8) ?? "session";
+  const count = scan.messageCount > 0 ? ` · ${scan.messageCount} msgs` : "";
+  return `history ${id}${count}`;
+}
+
 export function renderAgentSelectorPanel(
   rows: AgentSelectorRow[],
   cursor: number,
@@ -1063,6 +1104,10 @@ export function renderAgentSelectorPanel(
     if (row.status === "failed") return { icon: red("◉"), text: red("Sleeping · last run failed") };
     if (row.status === "pending") return { icon: dim("■"), text: dim("Running · starting") };
     if (row.status === "retrying") return { icon: yellow("■"), text: yellow("Running · retrying") };
+    // History rows are completed sessions — never render as runnable.
+    if (row.status === "completed" || row.status === "terminated") {
+      return { icon: dim("✓"), text: dim("Done") };
+    }
     return { icon: green("■"), text: green("Running") };
   };
 
@@ -1080,7 +1125,7 @@ export function renderAgentSelectorPanel(
   const out: string[] = [];
   const frameLine = (content: string) =>
     dim("│") + truncateToWidth(` ${content}`, inner, "…", true) + dim("│");
-  const maxVisible = 5;
+  const maxVisible = 8;
   const start = Math.max(0, Math.min(
     Math.max(0, rows.length - maxVisible),
     selectedIndex - Math.floor(maxVisible / 2),
@@ -1130,8 +1175,8 @@ export function renderAgentSelectorPanel(
 
   out.push(dim("╰" + "─".repeat(inner) + "╯"));
   const footer = w < 46
-    ? " Esc cancel · Enter attach · ↑↓ select"
-    : " Esc cancel · Enter attach · ↑↓ select · type to filter";
+    ? " Esc cancel · Enter view · ↑↓ select"
+    : " Esc cancel · Enter view · ↑↓ select · PgUp/PgDn page · type to filter";
   out.push(truncateToWidth(dim(footer), w, "…"));
   return out;
 }

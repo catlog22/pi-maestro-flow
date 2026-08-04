@@ -4,7 +4,6 @@ import {
 	decodeKittyPrintable,
 	matchesKey,
 	truncateToWidth,
-	visibleWidth,
 	type Component,
 	type Focusable,
 	type TUI,
@@ -30,6 +29,7 @@ import { SettingsCoordinator, type SettingsApplyOutcome, type SettingsProviderFa
 import { SETTINGS_SHELL_CATALOGS } from "./i18n.ts";
 import type { SettingsLocaleState } from "./locale-state.ts";
 import type { DescribedSettingsProvider, SettingsProviderRegistry } from "./registry.ts";
+import { fit, frame, pad, rule, type FrameTheme } from "./ui-primitives.ts";
 
 export interface SettingsShellLoadResult {
 	context: SettingsContextV1;
@@ -1138,19 +1138,6 @@ function clampIndex(index: number, length: number): number {
 	return length <= 0 ? 0 : Math.max(0, Math.min(index, length - 1));
 }
 
-function fit(value: string, width: number): string {
-	return truncateToWidth(value, Math.max(0, width), "…");
-}
-
-function pad(value: string, width: number): string {
-	const fitted = fit(value, width);
-	return `${fitted}${" ".repeat(Math.max(0, width - visibleWidth(fitted)))}`;
-}
-
-function rule(width: number): string {
-	return "─".repeat(Math.max(0, width));
-}
-
 function terminalColumns(tui: TUI): number | undefined {
 	try {
 		const columns = tui.terminal?.columns;
@@ -1170,13 +1157,4 @@ function enableSettingsMouseReporting(tui: TUI): () => void {
 	};
 }
 
-function frame(rows: readonly string[], width: number, theme: Theme): string[] {
-	if (width < 2) return rows.map((row) => fit(row, width));
-	const inner = width - 2;
-	const background = (value: string): string => theme.bg?.("customMessageBg", value) ?? value;
-	return [
-		background(theme.fg("dim", `┌${"─".repeat(inner)}┐`)),
-		...rows.map((row) => background(`${theme.fg("dim", "│")}${pad(row, inner)}${theme.fg("dim", "│")}`)),
-		background(theme.fg("dim", `└${"─".repeat(inner)}┘`)),
-	];
-}
+

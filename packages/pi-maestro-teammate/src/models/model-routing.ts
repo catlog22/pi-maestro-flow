@@ -577,6 +577,10 @@ function currentProcessStartObservation(): ProcessStartObservation | undefined {
 }
 
 function lockOwnerIsLive(lockPath: string, owner: ConfigLockOwner): boolean {
+  // A process start that was explicitly observed cannot be the Unix epoch for
+  // a live Pi process. Treat contradictory owner metadata as stale instead of
+  // letting a recycled PID hold the lock when process inspection is unavailable.
+  if (owner.startObserved && owner.startedAtMs <= 0) return false;
   try {
     process.kill(owner.pid, 0);
   } catch (error) {
@@ -1596,7 +1600,7 @@ export interface ModelRegistryRefreshContext {
   modelRegistry?: { refresh?: () => Promise<unknown> } | undefined;
 }
 
-let modelRegistryRefreshInFlight: Promise<void> | undefined;
+const modelRegistryRefreshInFlight = new WeakMap<object, Promise<void>>();
 
 /**
  * Await a coalesced refresh of the host model registry before reading its
@@ -1610,19 +1614,27 @@ export async function refreshModelRegistry(ctx: ModelRegistryRefreshContext): Pr
   // Call through the registry object: the host's refresh() is a class method
   // that reads `this.runtime`. A detached call would throw
   // "Cannot read properties of undefined (reading 'runtime')" and leave the
-  // synchronous getAvailable() snapshot stale.
-  modelRegistryRefreshInFlight ??= registry.refresh()
-    .then(() => undefined, (error) => {
-      // A failed registry refresh must not block dispatch; the previous
-      // snapshot stays authoritative until the next successful refresh.
-      console.error(
-        `[pi-maestro-teammate] model registry refresh failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    })
-    .finally(() => {
-      modelRegistryRefreshInFlight = undefined;
-    });
-  await modelRegistryRefreshInFlight;
+  // synchronous getAvailable() snapshot stale. Coalesce only calls against the
+  // same registry: separate extension runtimes must each refresh their snapshot.
+  let refresh = modelRegistryRefreshInFlight.get(registry);
+  if (!refresh) {
+    refresh = Promise.resolve()
+      .then(() => registry.refresh!())
+      .then(() => undefined, (error) => {
+        // A failed registry refresh must not block dispatch; the previous
+        // snapshot stays authoritative until the next successful refresh.
+        console.error(
+          `[pi-maestro-teammate] model registry refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      })
+      .finally(() => {
+        if (modelRegistryRefreshInFlight.get(registry) === refresh) {
+          modelRegistryRefreshInFlight.delete(registry);
+        }
+      });
+    modelRegistryRefreshInFlight.set(registry, refresh);
+  }
+  await refresh;
 }
 
 export function formatModelRoutingConfig(

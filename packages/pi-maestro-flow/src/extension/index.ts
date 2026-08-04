@@ -71,6 +71,7 @@ import {
   onBeforeAgentStart as goalBeforeAgentStart,
   onAgentEnd as goalAgentEnd,
   onAgentSettled as goalAgentSettled,
+  onProviderPressureSettled as goalProviderPressureSettled,
   getActiveGoal,
   getGoalPanelEntries,
   currentGoalPhase,
@@ -198,6 +199,7 @@ import {
   CompactionArbiter,
   compactionRequestFromInstructions,
   isNativeFallbackCompactionInstructions,
+  isProviderPressureCompactionTrigger,
   runObservedCompaction,
 } from "../compaction/compaction-arbiter.ts";
 import { registerCompactionSettingsCommand, showCompactionSettingsOverlay } from "../tui/compaction-settings.ts";
@@ -209,6 +211,9 @@ import { registerFff } from "../tools/fff.ts";
 import { registerBashBg } from "../tools/bash-bg.ts";
 import { registerLoop } from "../tools/loop.ts";
 import { registerModelAvailability } from "../tools/model-availability.ts";
+import { registerResourceTool } from "../tools/resource.ts";
+import { registerConflictTool } from "../tools/conflict.ts";
+import { persistAgentOutput } from "../teammate/agent-output-store.ts";
 import { registerMarkdownReviewCommand } from "../tools/markdown-review-command.ts";
 import {
   proxyTeammateChildTool,
@@ -385,6 +390,18 @@ const CHINESE_RESPONSE_STATE_ENTRY = "maestro-chinese-response-mode";
 const CHINESE_GLOBAL_STATE_FILE = "maestro-chinese-response-mode.json";
 const CHINESE_RESPONSE_PROMPT_MARKER = "<chinese_response_mode>";
 
+// Disambiguate the resource tool contract: the built-in read tool handles only
+// local files; protocol resources (pr:// issue:// skill:// rule://) go through resource.
+const RESOURCE_TOOL_GUIDANCE = [
+  "Protocol resources are read via the resource tool, not read:",
+  "  - pr://owner/repo/N[/diff|/files] or pr://N — GitHub pull requests (requires gh CLI)",
+  "  - issue://owner/repo/N or issue://N — GitHub issues (requires gh CLI)",
+  "  - skill://name — installed skill's SKILL.md",
+  "  - rule://name — project rule files (agents/rules/cursor/cline)",
+  "  - agent://<id>[/json/path] — structured output of a completed teammate subagent",
+  "The built-in read tool handles only local files and ordinary URLs.",
+].join("\n");
+
 export function chineseGlobalStatePath(homeDir: string): string {
   return join(homeDir, ".pi", CHINESE_GLOBAL_STATE_FILE);
 }
@@ -535,7 +552,17 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   // pi install's SettingsManager overwrites postinstall's settings.json writes
   // with its stale in-memory cache. Re-register companion packages at load time
   // so the next pi startup picks them up.
-  try { registerCompanionPackages(); } catch { /* best-effort */ }
+  try {
+    const companionRegistration = registerCompanionPackages();
+    for (const entry of companionRegistration.preservedUnowned) {
+      console.warn(`[pi-maestro-flow] Preserved local companion override for ${entry.name}: ${entry.source}`);
+    }
+    for (const entry of companionRegistration.versionMismatch) {
+      console.warn(`[pi-maestro-flow] ${entry.name} resolved ${entry.actual ?? "unknown"}, but Flow requires ${entry.expected}; reinstall the versioned Flow package.`);
+    }
+  } catch (error) {
+    console.warn(`[pi-maestro-flow] Companion package registration skipped: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   // UCL: capture only the locked extension-tool surface. pi.getAllTools() exposes
   // schemas but not execute(), so the registry is the invocation source for the
@@ -1104,6 +1131,8 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   registerBashBg(pi);
   registerLoop(pi);
   registerModelAvailability(pi);
+  registerResourceTool(pi);
+  registerConflictTool(pi);
   registerKeybindingsCommand(pi);
   registerMarkdownReviewCommand(pi);
 
@@ -2102,6 +2131,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       event.signal,
     );
     if (!observed.allowed) return { cancel: true };
+    const providerPressureRecovery = isProviderPressureCompactionTrigger(observed.trigger);
     try {
       const result = await runObservedCompaction(observed, async () => {
         goalBeforeCompact(ctx);
@@ -2137,21 +2167,66 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
             getWorkflowIdentity: () => workflowRecoveryIdentity(),
             trigger: observed.trigger,
             summaryInputTokens: projected.estimatedInputTokens,
+            failClosed: providerPressureRecovery,
           }), observed);
       });
       if (result?.cancel) {
         observed.finalize("cancel");
-        goalCompactionCancelled(ctx);
+        if (providerPressureRecovery) {
+          try { goalCompactionCancelled(ctx); } catch { /* cancellation remains authoritative */ }
+        } else {
+          goalCompactionCancelled(ctx);
+        }
       }
       return result;
     } catch (error) {
       observed.finalize("error");
+      if (providerPressureRecovery) {
+        try { goalCompactionCancelled(ctx); } catch { /* cancellation remains authoritative */ }
+        try {
+          ctx.ui.notify(
+            `Provider-pressure compaction failed; native fallback was blocked: ${error instanceof Error ? error.message : String(error)}`,
+            "error",
+          );
+        } catch { /* cancellation remains authoritative */ }
+        return { cancel: true };
+      }
       goalCompactionCancelled(ctx);
       ctx.ui.notify(
         `Compaction failed; falling back to Pi native compaction: ${error instanceof Error ? error.message : String(error)}`,
         "warning",
       );
       return undefined;
+    }
+  });
+
+  // agent:// data source: capture teammate structured outputs when the tool
+  // result arrives, before the child's temp output file is cleaned up.
+  pi.on("tool_result", (event, ctx) => {
+    if ((event as { toolName?: unknown }).toolName !== "teammate") return;
+    try {
+      const details = (event as { details?: unknown }).details as
+        | { results?: unknown }
+        | undefined;
+      const results = details?.results;
+      if (!Array.isArray(results) || results.length === 0) return;
+      for (const raw of results) {
+        if (raw === null || typeof raw !== "object") continue;
+        const result = raw as { correlationId?: unknown; name?: unknown; agent?: unknown; structuredOutput?: unknown };
+        const correlationId = typeof result.correlationId === "string" ? result.correlationId : "";
+        if (!correlationId || result.structuredOutput === undefined) continue;
+        persistAgentOutput(
+          correlationId,
+          typeof result.name === "string" ? result.name : undefined,
+          typeof result.agent === "string" ? result.agent : undefined,
+          result.structuredOutput,
+          ctx.cwd,
+        ).catch((err) => {
+          console.warn(`[pi-maestro-flow] agent output capture failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      }
+    } catch (err) {
+      console.warn(`[pi-maestro-flow] agent output capture failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   });
 
@@ -2170,7 +2245,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
         "warning",
       );
     }
-    await goalCompact(event, ctx);
+    await goalCompact(event, ctx, { deferContinuation: true });
   });
 
   pi.on("input", (event) => {
@@ -2190,7 +2265,8 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     const todoResult = await onBeforeAgentStartTodo({
       systemPrompt: planResult?.systemPrompt ?? event.systemPrompt,
     });
-    return todoResult ?? planResult;
+    const base = todoResult?.systemPrompt ?? planResult?.systemPrompt ?? event.systemPrompt;
+    return { systemPrompt: `${base}\n\n${RESOURCE_TOOL_GUIDANCE}` };
   });
 
   pi.on("context", async (event, ctx) => {
@@ -2227,6 +2303,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   // Todo widget stale and mid-turn compaction bookkeeping unrun, with no clue which
   // subsystem broke. Isolate each step and name it in the warning instead.
   pi.on("agent_end", async (event, ctx) => {
+    const providerPressureRecovery = midTurnAutoCompaction.isProviderPressureRecoveryActive();
     const step = async (label: string, run: () => unknown) => {
       try {
         await run();
@@ -2239,7 +2316,9 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     };
     await step("Plan", () => onAgentEndPlan(event, ctx));
     await step("Workflow refresh", () => refreshWorkflow(ctx, true));
-    await step("Goal attempt", () => goalAgentEnd(event, ctx));
+    if (!providerPressureRecovery) {
+      await step("Goal attempt", () => goalAgentEnd(event, ctx));
+    }
     await step("Output-limit compaction", () =>
       midTurnAutoCompaction.onOutputLimit(event.messages as AgentMessage[], ctx));
     await step("Goal change event", () => emitGoalChanged());
@@ -2255,8 +2334,10 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   // root handler. Goal therefore consumes the authoritative settlement first,
   // then compaction can safely act on the resulting continuation state.
   pi.on("agent_settled", async (_event, ctx) => {
+    const providerPressureRecovery = midTurnAutoCompaction.isProviderPressureRecoveryActive();
     try {
-      await goalAgentSettled(ctx);
+      if (providerPressureRecovery) goalProviderPressureSettled(ctx);
+      else await goalAgentSettled(ctx);
     } catch (error) {
       ctx.ui.notify(
         `Goal settlement failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -2556,6 +2637,7 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
     }
     const observed = compactionArbiter.observeStart(request, event.signal);
     if (!observed.allowed) return { cancel: true };
+    const providerPressureRecovery = isProviderPressureCompactionTrigger(observed.trigger);
     try {
       const projected = await autoCompaction.projectCompactionInput(event, ctx);
       commitProjectedCompactionInput(event, projected);
@@ -2563,11 +2645,21 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
         createMaestroCompaction(event, ctx, {
           trigger: observed.trigger,
           summaryInputTokens: projected.estimatedInputTokens,
+          failClosed: providerPressureRecovery,
         }));
       if (result?.cancel) observed.finalize("cancel");
       return result;
     } catch (error) {
       observed.finalize("error");
+      if (providerPressureRecovery) {
+        try {
+          ctx.ui.notify(
+            `Child provider-pressure compaction failed; native fallback was blocked: ${error instanceof Error ? error.message : String(error)}`,
+            "error",
+          );
+        } catch { /* cancellation remains authoritative */ }
+        return { cancel: true };
+      }
       ctx.ui.notify(
         `Child compaction failed; falling back to Pi native compaction: ${error instanceof Error ? error.message : String(error)}`,
         "warning",

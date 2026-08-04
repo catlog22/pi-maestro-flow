@@ -1,13 +1,22 @@
 import {
   Key,
   matchesKey,
-  truncateToWidth,
   visibleWidth,
   type Component,
   type Focusable,
   type KeyId,
 } from "@earendil-works/pi-tui";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
+import {
+  fit,
+  frame,
+  headerLine,
+  helpLine,
+  pad,
+  rule,
+  type FrameTheme,
+} from "pi-cockpit/src/settings/ui-primitives.ts";
 import {
   BracketedPasteDecoder,
   removeLastGrapheme,
@@ -37,19 +46,55 @@ export interface ApiModelEditorResult {
   values: ApiModelFormValues;
 }
 
-interface ApiModelEditorTheme {
-  fg(role: string, text: string): string;
-  bold(text: string): string;
-}
+interface ApiModelEditorTheme extends FrameTheme {}
 
 export interface ApiModelEditorOverlayParams {
   title: string;
   fields: readonly ApiModelFormField[];
+  /** UI language; defaults to zh-CN when the host exposes no locale signal. */
+  locale?: SupportedSettingsLocale;
   theme: ApiModelEditorTheme;
   requestRender: () => void;
   done: (result: ApiModelEditorResult | undefined) => void;
   validate?: (values: ApiModelFormValues) => string[];
 }
+
+const CATALOGS = {
+  en: {
+    "tiny.title": "API model form",
+    "notice.error": "×",
+    "notice.secretClear": "Clear the sensitive field after confirming",
+    "notice.secretKeep": "Leave empty and confirm to keep the current value",
+    "notice.discardConfirm": "Unsaved changes · press Esc again to discard",
+    "secret.clearConfirm": "Clear after confirm",
+    "secret.keepPlaceholder": "Leave empty to keep the current value",
+    "value.empty": "empty",
+    "value.unconfigured": "Not configured",
+    "value.on": "On",
+    "value.off": "Off",
+    "value.unset": "Not set",
+    "footer.edit": "Enter confirm · Esc back · Ctrl+U clear · Backspace delete",
+    "footer.normal": "Up/Down/Tab select · Enter edit · ←→/Space toggle · Ctrl+S continue · Esc cancel",
+  },
+  "zh-CN": {
+    "tiny.title": "API model form",
+    "notice.error": "×",
+    "notice.secretClear": "确认后清空该敏感字段",
+    "notice.secretKeep": "留空并确认可保留当前值",
+    "notice.discardConfirm": "有未保存修改，再按 Esc 放弃",
+    "secret.clearConfirm": "确认后清空",
+    "secret.keepPlaceholder": "留空保留当前值",
+    "value.empty": "空",
+    "value.unconfigured": "未配置",
+    "value.on": "开启",
+    "value.off": "关闭",
+    "value.unset": "未设置",
+    "footer.edit": "Enter 确认 · Esc 返回 · Ctrl+U 清空 · Backspace 删除",
+    "footer.normal": "↑↓/Tab 选择 · Enter 编辑 · ←→/Space 切换 · Ctrl+S 继续 · Esc 取消",
+  },
+} as const;
+
+type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
 
 const MAX_VISIBLE_FIELDS = 12;
 const CTRL_S = "\x13";
@@ -67,6 +112,7 @@ const IGNORED_EDIT_KEYS: readonly KeyId[] = [
 
 export class ApiModelEditorOverlay implements Component, Focusable {
   focused = false;
+  private readonly locale: SupportedSettingsLocale;
   private selected = 0;
   private editing = false;
   private editValue = "";
@@ -80,6 +126,7 @@ export class ApiModelEditorOverlay implements Component, Focusable {
   private readonly originalValues: ApiModelFormValues;
 
   constructor(private readonly params: ApiModelEditorOverlayParams) {
+    this.locale = params.locale ?? "zh-CN";
     this.fields = params.fields.map((field) => ({
       ...field,
       choices: field.choices ? [...field.choices] : undefined,
@@ -95,13 +142,23 @@ export class ApiModelEditorOverlay implements Component, Focusable {
     if (this.pasteFlushTimer) clearTimeout(this.pasteFlushTimer);
   }
 
+  /** Translate a catalog key with optional {var} substitution. */
+  private t(key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
+    const catalog = CATALOGS[this.locale] ?? CATALOGS["zh-CN"];
+    const template: unknown = catalog[key];
+    const text = typeof template === "string" ? template : CATALOGS["zh-CN"][key] as string;
+    if (!vars) return text;
+    return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
+      vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
+  }
+
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.min(width, 140));
     this.lastWidth = safeWidth;
-    if (safeWidth < 20) return [truncateToWidth(`API model form · ${this.selected + 1}/${this.fields.length}`, safeWidth, "…")];
+    if (safeWidth < 20) return [fit(`${this.t("tiny.title")} · ${this.selected + 1}/${this.fields.length}`, safeWidth)];
     const inner = safeWidth - 2;
     const rows: string[] = [
-      fit(this.params.theme.bold(this.params.title), inner),
+      headerLine(this.params.theme, this.params.title, [], inner),
       rule(inner),
     ];
     const start = visibleStart(this.selected, this.fields.length);
@@ -124,8 +181,11 @@ export class ApiModelEditorOverlay implements Component, Focusable {
       rows.push(fit(active ? this.params.theme.bold(line) : line, inner));
     }
     const current = this.fields[this.selected];
-    if (current?.help) rows.push(rule(inner), fit(this.params.theme.fg("dim", current.help), inner));
-    if (this.notice) rows.push(fit(this.params.theme.fg(this.notice.startsWith("×") ? "error" : "warning", this.notice), inner));
+    if (current?.help) rows.push(rule(inner), helpLine(this.params.theme, current.help, inner));
+    if (this.notice) rows.push(fit(this.params.theme.fg(
+      this.notice.startsWith(this.t("notice.error")) ? "error" : "warning",
+      this.notice,
+    ), inner));
     rows.push(rule(inner), fit(this.footer(), inner));
     return frame(rows, safeWidth, this.params.theme);
   }
@@ -208,7 +268,7 @@ export class ApiModelEditorOverlay implements Component, Focusable {
     if (data === CTRL_U) {
       this.editValue = "";
       this.secretClearOnCommit = field.kind === "secret";
-      this.notice = field.kind === "secret" ? "确认后清空该敏感字段" : "";
+      this.notice = field.kind === "secret" ? this.t("notice.secretClear") : "";
       return;
     }
     if (matchesKey(data, Key.backspace) || data === "\b" || data === "\x7f") {
@@ -237,7 +297,7 @@ export class ApiModelEditorOverlay implements Component, Focusable {
     this.editing = true;
     this.editValue = field.kind === "secret" ? "" : String(field.value);
     this.secretClearOnCommit = false;
-    this.notice = field.kind === "secret" && field.value ? "留空并确认可保留当前值" : "";
+    this.notice = field.kind === "secret" && field.value ? this.t("notice.secretKeep") : "";
   }
 
   private changeChoice(direction: number): void {
@@ -270,7 +330,7 @@ export class ApiModelEditorOverlay implements Component, Focusable {
     const values = this.values();
     const errors = this.params.validate?.(values) ?? [];
     if (errors.length > 0) {
-      this.notice = `× ${errors[0]}`;
+      this.notice = `${this.t("notice.error")} ${errors[0]}`;
       return;
     }
     this.params.done({ values });
@@ -279,7 +339,7 @@ export class ApiModelEditorOverlay implements Component, Focusable {
   private cancel(): void {
     if (this.isDirty() && !this.discardArmed) {
       this.discardArmed = true;
-      this.notice = "有未保存修改，再按 Esc 放弃";
+      this.notice = this.t("notice.discardConfirm");
       return;
     }
     this.params.done(undefined);
@@ -300,21 +360,21 @@ export class ApiModelEditorOverlay implements Component, Focusable {
 
   private renderEditValue(field: ApiModelFormField): string {
     if (field.kind === "secret") {
-      if (this.secretClearOnCommit) return this.params.theme.fg("warning", "确认后清空");
-      return this.editValue ? maskSecret(this.editValue) : this.params.theme.fg("dim", "留空保留当前值");
+      if (this.secretClearOnCommit) return this.params.theme.fg("warning", this.t("secret.clearConfirm"));
+      return this.editValue ? maskSecret(this.editValue) : this.params.theme.fg("dim", this.t("secret.keepPlaceholder"));
     }
-    return this.editValue || this.params.theme.fg("dim", "空");
+    return this.editValue || this.params.theme.fg("dim", this.t("value.empty"));
   }
 
   private renderFieldValue(field: ApiModelFormField): string {
-    if (field.kind === "secret") return field.value ? maskSecret(String(field.value)) : this.params.theme.fg("warning", "未配置");
+    if (field.kind === "secret") return field.value ? maskSecret(String(field.value)) : this.params.theme.fg("warning", this.t("value.unconfigured"));
     if (field.kind === "toggle") return field.value
-      ? this.params.theme.fg("success", "开启")
-      : this.params.theme.fg("dim", "关闭");
+      ? this.params.theme.fg("success", this.t("value.on"))
+      : this.params.theme.fg("dim", this.t("value.off"));
     if (field.kind === "choice") {
       return field.choices?.find((choice) => choice.value === field.value)?.label ?? String(field.value);
     }
-    return String(field.value) || this.params.theme.fg("dim", "未设置");
+    return String(field.value) || this.params.theme.fg("dim", this.t("value.unset"));
   }
 
   private values(): ApiModelFormValues {
@@ -329,8 +389,8 @@ export class ApiModelEditorOverlay implements Component, Focusable {
   }
 
   private footer(): string {
-    if (this.editing) return "Enter 确认 · Esc 返回 · Ctrl+U 清空 · Backspace 删除";
-    return "↑↓/Tab 选择 · Enter 编辑 · ←→/Space 切换 · Ctrl+S 继续 · Esc 取消";
+    if (this.editing) return this.t("footer.edit");
+    return this.t("footer.normal");
   }
 }
 

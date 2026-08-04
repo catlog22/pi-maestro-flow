@@ -406,6 +406,8 @@ interface CreateCompactionDependencies {
   summaryOverride?: string;
   /** Override the recent-history boundary. A non-matching id keeps no old entries. */
   firstKeptEntryIdOverride?: string;
+  /** Return cancel instead of falling through to Pi native summarization. */
+  failClosed?: boolean;
 }
 
 interface PersistCompactionDependencies {
@@ -593,7 +595,22 @@ export async function createMaestroCompaction(
   dependencies: CreateCompactionDependencies = {},
 ): Promise<SessionBeforeCompactResult | undefined> {
   const model = ctx.model;
-  if (!model) return undefined;
+  const failClosed = dependencies.failClosed === true;
+  const summaryFailure = (reason: string): SessionBeforeCompactResult | undefined => {
+    try {
+      ctx.ui.notify(
+        failClosed
+          ? `Maestro compaction summary failed; native fallback was blocked for provider-pressure recovery: ${reason}`
+          : `Maestro compaction summary failed; falling back to Pi native compaction: ${reason}`,
+        failClosed ? "error" : "warning",
+      );
+    } catch {
+      // The fail-closed return value is authoritative; UI failure must never
+      // erase cancellation and re-enable Pi native summarization.
+    }
+    return failClosed ? { cancel: true } : undefined;
+  };
+  if (!model) return summaryFailure("No model selected");
 
   const now = dependencies.now?.() ?? new Date();
   const checkpointId = dependencies.checkpointId?.() ?? randomUUID();
@@ -672,11 +689,7 @@ export async function createMaestroCompaction(
       ? await dependencies.completeSummary(prompt, event, ctx)
       : await completeWithCurrentModel({ messages, buildPrompt: buildPromptFor }, event, ctx, dependencies.summaryInputTokens);
     if (response.stopReason === "error") {
-      ctx.ui.notify(
-        `Maestro compaction summary failed; falling back to Pi native compaction: ${response.errorMessage || "Unknown provider error"}`,
-        "warning",
-      );
-      return undefined;
+      return summaryFailure(response.errorMessage || "Unknown provider error");
     }
     const summary = response.content
       .filter((part) => part.type === "text" && typeof part.text === "string")
@@ -684,11 +697,7 @@ export async function createMaestroCompaction(
       .join("\n")
       .trim();
     if (!summary) {
-      ctx.ui.notify(
-        "Maestro compaction summary was empty; falling back to Pi native compaction.",
-        "warning",
-      );
-      return undefined;
+      return summaryFailure("The summary was empty");
     }
 
     return {
@@ -700,11 +709,7 @@ export async function createMaestroCompaction(
       },
     };
   } catch (error) {
-    ctx.ui.notify(
-      `Maestro compaction summary failed; falling back to Pi native compaction: ${error instanceof Error ? error.message : String(error)}`,
-      "warning",
-    );
-    return undefined;
+    return summaryFailure(error instanceof Error ? error.message : String(error));
   }
 }
 

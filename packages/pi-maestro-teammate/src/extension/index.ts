@@ -21,6 +21,9 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { loadTranscript, scanWorkspaceSessionDirs, type WorkspaceSessionScan } from "../transcript/session-transcript.ts";
+import { decideViewingInput, renderViewingWidget } from "../tui/viewing-widget.ts";
+import type { TranscriptLoad } from "../shared/transcript.ts";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams } from "./schemas.ts";
 import {
   formatObserveResult,
@@ -51,6 +54,7 @@ import {
   buildAutoAnalysisPrompt,
   buildCustomAnalysisPrompt,
   parseAnalysisResult,
+  ANALYSIS_RESULT_SCHEMA,
   ENGINE_TICK_MS,
   type MonitorTargetSnapshot,
   type MonitorParams,
@@ -59,6 +63,8 @@ import {
   type EngineAgentInfo,
   type AnalysisResult,
 } from "./monitor.ts";
+import { runSupervisedEvaluation } from "../supervision/evaluator.ts";
+import { SUPERVISION_EVENT, createSupervisionEvent } from "../supervision/types.ts";
 import {
   createWorkspacePeerCommandConsumer,
   createWorkspacePeerRuntime,
@@ -167,6 +173,8 @@ import {
   TEAMMATE_COMPLETE_EVENT,
   TEAMMATE_STARTED_EVENT,
   TEAMMATE_MESSAGE_EVENT,
+  TEAMMATE_VIEWING_EVENT,
+  TEAMMATE_OPEN_AGENT_EVENT,
 } from "../shared/types.ts";
 import {
   appendAgentCatalog,
@@ -257,6 +265,7 @@ import {
 } from "./teammate-core.ts";
 import { COCKPIT_PREEMPT_RESIZE_EVENT } from "../shared/cockpit-events.ts";
 import type { TeammateRuntimeOptions, ProgressFlushGate, AgentWidgetTheme, AgentWidgetRow, AgentSelectorRow, PendingChildProxyRequest, ChildProxyPendingRequests, IpcSender } from "./teammate-core.ts";
+import { buildHistoryRows, historyRowKey } from "./teammate-core.ts";
 import { MailboxHost, mailboxModeFromEnv, MAILBOX_ENV_VAR } from "./mailbox/host.ts";
 
 
@@ -638,6 +647,7 @@ export default function registerTeammateExtension(
     pi.registerTool({
       name: "teammate-send",
       label: "Teammate Send",
+      renderShell: "self",
       description: TEAMMATE_SEND_DESCRIPTION,
       promptSnippet: TEAMMATE_SEND_SNIPPET,
       promptGuidelines: TEAMMATE_SEND_GUIDELINES,
@@ -670,6 +680,7 @@ export default function registerTeammateExtension(
       pi.registerTool({
         name: "teammate-watch",
         label: "Teammate Watch",
+        renderShell: "self",
         description: TEAMMATE_WATCH_DESCRIPTION,
         promptSnippet: TEAMMATE_WATCH_SNIPPET,
         promptGuidelines: TEAMMATE_WATCH_GUIDELINES,
@@ -682,6 +693,7 @@ export default function registerTeammateExtension(
       pi.registerTool({
         name: "teammate-wait",
         label: "Teammate Wait",
+        renderShell: "self",
         description: TEAMMATE_WAIT_DESCRIPTION,
         promptSnippet: TEAMMATE_WAIT_SNIPPET,
         promptGuidelines: TEAMMATE_WAIT_GUIDELINES,
@@ -695,6 +707,7 @@ export default function registerTeammateExtension(
     pi.registerTool({
       name: "observe",
       label: "Observe",
+      renderShell: "self",
       description: OBSERVE_DESCRIPTION,
       promptSnippet: OBSERVE_SNIPPET,
       promptGuidelines: OBSERVE_GUIDELINES,
@@ -717,6 +730,7 @@ export default function registerTeammateExtension(
       pi.registerTool({
         name: "teammate-monitor",
         label: "Teammate Monitor",
+        renderShell: "self",
         description: TEAMMATE_MONITOR_DESCRIPTION,
         promptSnippet: TEAMMATE_MONITOR_SNIPPET,
         promptGuidelines: TEAMMATE_MONITOR_GUIDELINES,
@@ -748,6 +762,38 @@ export default function registerTeammateExtension(
   const foregroundToolRuns = new Set<string>();
   state.cancelInteractions = (correlationId, reason) =>
     void interactionQueue.cancelForAgent(correlationId, reason);
+
+  /** Completed teammate sessions recovered from disk (post-restart history). */
+  let historyScans: WorkspaceSessionScan[] = [];
+  const historyByKey = new Map<string, WorkspaceSessionScan>();
+
+  function rebuildHistory(ctx: ExtensionContext): void {
+    const sessionFile = ctx.sessionManager?.getSessionFile?.();
+    historyByKey.clear();
+    historyScans = sessionFile ? scanWorkspaceSessionDirs(sessionFile) : [];
+    historyScans.forEach((scan) =>
+      historyByKey.set(historyRowKey(scan), scan),
+    );
+  }
+
+  /** Read-only view target for a completed session recovered from disk. */
+  function historyVirtualAgent(
+    scan: WorkspaceSessionScan,
+  ): ActiveAgent {
+    return {
+      agent: "teammate",
+      correlationId: historyRowKey(scan),
+      startedAt: scan.startedAt ?? Date.now(),
+      abortController: new AbortController(),
+      inbox: [],
+      outputLog: [],
+      lastActivityAt: scan.startedAt ?? Date.now(),
+      status: "completed",
+      depth: 0,
+      sleepMs: 0,
+      sessionFile: scan.sessionFile,
+    };
+  }
 
   let workspacePeerPublisher: WorkspacePeerPublisher | undefined;
   let workspacePeerConsumer: WorkspacePeerCommandConsumer | undefined;
@@ -2350,6 +2396,7 @@ export default function registerTeammateExtension(
   const sendTool: ToolDefinition<typeof TeammateSendParams, { delivered: boolean }> = {
     name: "teammate-send",
     label: "Teammate Send",
+    renderShell: "self",
     description: TEAMMATE_SEND_DESCRIPTION,
     promptSnippet: TEAMMATE_SEND_SNIPPET,
     promptGuidelines: TEAMMATE_SEND_GUIDELINES,
@@ -2556,6 +2603,7 @@ export default function registerTeammateExtension(
   const watchTool: ToolDefinition<typeof TeammateWatchParams, { output: string[] }> = {
     name: "teammate-watch",
     label: "Teammate Watch",
+    renderShell: "self",
     description: TEAMMATE_WATCH_DESCRIPTION,
     promptSnippet: TEAMMATE_WATCH_SNIPPET,
     promptGuidelines: TEAMMATE_WATCH_GUIDELINES,
@@ -2599,6 +2647,7 @@ export default function registerTeammateExtension(
   const waitTool: ToolDefinition<typeof TeammateWaitParams, { status: TeammateWaitStatus; output: string[] }> = {
     name: "teammate-wait",
     label: "Teammate Wait",
+    renderShell: "self",
     description: TEAMMATE_WAIT_DESCRIPTION,
     promptSnippet: TEAMMATE_WAIT_SNIPPET,
     promptGuidelines: TEAMMATE_WAIT_GUIDELINES,
@@ -2718,6 +2767,7 @@ export default function registerTeammateExtension(
     startEngine(monitorEngine, {
       getAgentInfo: buildEngineAgentInfo,
       sendIntervention: async (bindingKey, message, mode) => {
+        let delivered = false;
         // Window-level binding: route the intervention to the window's main session.
         if (bindingKey.startsWith("owner:")) {
           const ownerId = bindingKey.slice("owner:".length);
@@ -2738,46 +2788,60 @@ export default function registerTeammateExtension(
             },
           };
           const result = await sendWorkspacePeerCommand(publisher.identity, target, mode, message);
-          return result.response?.status === "accepted";
+          delivered = result.response?.status === "accepted";
+        } else {
+          const target = targetForWorkspaceBinding(bindingKey);
+          if (!target || target.state !== "active") return false;
+          if (target.scope === "local") {
+            delivered = deliverLocalAgentMessage(
+              target.agent.correlationId,
+              target.agent.name ?? target.agent.correlationId.slice(0, 8),
+              message,
+              mode,
+            ).delivered;
+          } else {
+            const publisher = workspacePeerPublisher;
+            if (!publisher) return false;
+            const result = await sendWorkspacePeerCommand(publisher.identity, target, mode, message);
+            delivered = result.response?.status === "accepted";
+          }
         }
-        const target = targetForWorkspaceBinding(bindingKey);
-        if (!target || target.state !== "active") return false;
-        if (target.scope === "local") {
-          return deliverLocalAgentMessage(
-            target.agent.correlationId,
-            target.agent.name ?? target.agent.correlationId.slice(0, 8),
-            message,
-            mode,
-          ).delivered;
+        if (delivered) {
+          pi.events.emit(SUPERVISION_EVENT, createSupervisionEvent("monitor", "intervention", "concern", { target: bindingKey, message }));
         }
-        const publisher = workspacePeerPublisher;
-        if (!publisher) return false;
-        const result = await sendWorkspacePeerCommand(publisher.identity, target, mode, message);
-        return result.response?.status === "accepted";
+        return delivered;
       },
       onStatusUpdate: (text) => ctx.ui.setStatus(MONITOR_STATUS_KEY, text),
-      notifyMain: (message) => {
+      notifyMain: (message, target) => {
         safeSendMessage(pi, {
           customType: "teammate-message",
           content: `[monitor] ${message}`,
           display: true,
           details: { source: "monitor" },
         }, { triggerTurn: false });
+        pi.events.emit(SUPERVISION_EVENT, createSupervisionEvent("monitor", "notification", "info", { target, message }));
       },
       analyze: async (binding, info) => {
         const prompt = binding.mode === "custom" && binding.customPrompt
           ? buildCustomAnalysisPrompt(binding.customPrompt, info.objective, info.outputTail)
           : buildAutoAnalysisPrompt(info.objective, info.outputTail);
-        try {
-          const result = await runSingleTeammate(
-            { agent: "analyst", task: prompt, thinking: "low", timeoutMs: 30_000 },
-            { baseCwd: state.baseCwd || process.cwd(), depth: 0 },
-          );
-          const text = result.messages[result.messages.length - 1]?.content ?? "";
-          return parseAnalysisResult(text);
-        } catch {
-          return undefined; // Analysis failure never blocks the monitor
-        }
+        const evaluation = await runSupervisedEvaluation<AnalysisResult>(
+          ({ task, signal, timeoutMs, outputSchema }) =>
+            runSingleTeammate(
+              { agent: "analyst", task, thinking: "low", timeoutMs, outputSchema },
+              { baseCwd: state.baseCwd || process.cwd(), depth: 0, signal },
+            ),
+          {
+            task: prompt,
+            timeoutMs: 30_000,
+            outputSchema: ANALYSIS_RESULT_SCHEMA,
+            fallbackTextParser: parseAnalysisResult,
+            signal: monitorEngine.abortController?.signal,
+          },
+        );
+        // ok:false or unparseable verdict ≡ legacy parseAnalysisResult undefined
+        // (no intervention, no blocking).
+        return evaluation.ok && evaluation.verdict ? evaluation.verdict : undefined;
       },
     });
     ctx.ui.setStatus(MONITOR_STATUS_KEY, formatEngineStatusBar(monitorEngine));
@@ -2937,6 +3001,7 @@ export default function registerTeammateExtension(
   const observeTool: ToolDefinition<typeof ObserveParams, { output: string[]; result: ObserveResult }> = {
     name: "observe",
     label: "Observe",
+    renderShell: "self",
     description: OBSERVE_DESCRIPTION,
     promptSnippet: OBSERVE_SNIPPET,
     promptGuidelines: OBSERVE_GUIDELINES,
@@ -2984,6 +3049,7 @@ export default function registerTeammateExtension(
   const monitorTool: ToolDefinition<typeof TeammateMonitorParams, { output: string[] }> = {
     name: "teammate-monitor",
     label: "Teammate Monitor",
+    renderShell: "self",
     description: TEAMMATE_MONITOR_DESCRIPTION,
     promptSnippet: TEAMMATE_MONITOR_SNIPPET,
     promptGuidelines: TEAMMATE_MONITOR_GUIDELINES,
@@ -3153,12 +3219,73 @@ export default function registerTeammateExtension(
     });
   }
 
-  async function showAttachOverlay(correlationId: string, ctx: ExtensionContext): Promise<void> {
+  /**
+   * Shared "send a user line to an agent" path used by the attach overlay's
+   * composer and by the main-TUI viewing mode. Running agents get a follow-up
+   * (queued, never interrupting the current turn); sleeping agents get a
+   * prompt that cold-restarts their persisted session. Lease-guarded.
+   */
+  function sendToAgent(
+    target: ActiveAgent,
+    message: string,
+  ): { ok: boolean; message: string } {
+    if (!target.stdin?.writable) {
+      return { ok: false, message: "Agent is no longer writable" };
+    }
+    const writableLease = target.lease;
+    if (!writableLease || !canChildWrite(writableLease)) {
+      const ownership = writableLease
+        ? `${writableLease.owner} (${writableLease.state})`
+        : "an unavailable lease";
+      return { ok: false, message: `Session owned by ${ownership}` };
+    }
+    const sendMode: RpcMessageMode = target.status === "sleeping" ? "prompt" : "follow_up";
+    const sent = sendRpcMessage(
+      target.stdin,
+      message,
+      sendMode,
+      target.lease ? leaseToken(target.lease) : undefined,
+    );
+    if (!sent) return { ok: false, message: "Send failed" };
+    if (sendMode === "prompt") target.promptSeq = (target.promptSeq ?? 0) + 1;
+
+    const now = Date.now();
+    wakeSleepingAgent(pi, target, now);
+    const label = target.name ?? target.correlationId.slice(0, 8);
+    target.inbox.push({
+      id: randomUUID(),
+      from: "caller",
+      to: label,
+      kind: "task",
+      payload: message,
+      timestamp: now,
+    });
+    target.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ follow_up: ${message.slice(0, 100)}`);
+    trimAgentBuffers(target);
+    target.lastActivityAt = now;
+    pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+      correlationId: target.correlationId,
+      from: "caller",
+      to: label,
+      mode: sendMode,
+      message,
+      lastActivityAt: now,
+      isSend: true,
+    });
+    return { ok: true, message: `Queued for ${label}` };
+  }
+
+  async function showAttachOverlay(
+    target: ActiveAgent | string,
+    ctx: ExtensionContext,
+    initialTranscript = false,
+    opts: { readOnly?: boolean } = {},
+  ): Promise<void> {
     // A capturing overlay must preempt any active Cockpit split-pane resize:
     // the resize listener is a global terminal-input hook that would otherwise
     // swallow this overlay's first arrow/Enter/Esc.
     preemptCockpitResize();
-    const agent = state.activeRuns.get(correlationId);
+    const agent = typeof target === "string" ? state.activeRuns.get(target) : target;
     if (!agent) {
       ctx.ui.notify("Agent is no longer active.", "error");
       return;
@@ -3172,49 +3299,23 @@ export default function registerTeammateExtension(
         const overlay = new AttachOverlay(
           agent,
           () => done(undefined),
-          () => state.activeRuns,
-          async (cid, message) => {
+          opts.readOnly ? () => new Map<string, ActiveAgent>() : () => state.activeRuns,
+          opts.readOnly ? undefined : async (cid, message) => {
             const target = state.activeRuns.get(cid);
-            if (!target?.stdin?.writable) {
-              return { ok: false, message: "Agent is no longer writable" };
+            if (!target) {
+              return { ok: false, message: "Agent is no longer active" };
             }
-            const writableLease = target.lease;
-            if (!writableLease || !canChildWrite(writableLease)) {
-              const ownership = writableLease
-                ? `${writableLease.owner} (${writableLease.state})`
-                : "an unavailable lease";
-              return { ok: false, message: `Session owned by ${ownership}` };
-            }
-            const sendMode: RpcMessageMode = target.status === "sleeping" ? "prompt" : "follow_up";
-            const sent = sendRpcMessage(target.stdin, message, sendMode, target.lease ? leaseToken(target.lease) : undefined);
-            if (!sent) return { ok: false, message: "Send failed" };
-            if (sendMode === "prompt") target.promptSeq = (target.promptSeq ?? 0) + 1;
-
-            const now = Date.now();
-            wakeSleepingAgent(pi, target, now);
-            const label = target.name ?? target.correlationId.slice(0, 8);
-            target.inbox.push({
-              id: randomUUID(),
-              from: "caller",
-              to: label,
-              kind: "task",
-              payload: message,
-              timestamp: now,
-            });
-            target.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ follow_up: ${message.slice(0, 100)}`);
-            trimAgentBuffers(target);
-            target.lastActivityAt = now;
-            pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
-              correlationId: cid,
-              from: "caller",
-              to: label,
-              mode: sendMode,
-              message,
-              lastActivityAt: now,
-              isSend: true,
-            });
-            return { ok: true, message: `Queued for ${label}` };
+            return sendToAgent(target, message);
           },
+          (targetAgent) =>
+            loadTranscript({
+              correlationId: targetAgent.correlationId,
+              sessionFile: targetAgent.sessionFile,
+              parentSessionFile: ctx.sessionManager?.getSessionFile?.(),
+              lastResult: targetAgent.lastResult,
+              outputLog: targetAgent.outputLog,
+            }),
+          initialTranscript,
         );
         overlay.setRequestRender(() => tui.requestRender());
 
@@ -3275,12 +3376,14 @@ export default function registerTeammateExtension(
             ...(lastMsg ? { streamingText: lastMsg } : {}),
             ...(lines.length ? { lines } : {}),
           });
+          overlay.noteLiveEvent(cid);
         };
         const completeHandler = (data: unknown) => {
           const evt = data as Record<string, unknown>;
           const cid = evt.correlationId as string;
           if (!cid) return;
           overlay.appendLog(cid, `COMPLETED exitCode=${evt.exitCode} ${evt.durationMs}ms`, "system");
+          overlay.noteLiveEvent(cid);
         };
         const unsubscribeMessage = pi.events.on(TEAMMATE_MESSAGE_EVENT, msgHandler);
         const unsubscribeComplete = pi.events.on(TEAMMATE_COMPLETE_EVENT, completeHandler);
@@ -3316,14 +3419,32 @@ export default function registerTeammateExtension(
     }
   }
 
+  /**
+   * Route a selector selection: history rows open a read-only transcript;
+   * everything else attaches to a live/sleeping agent.
+   */
+  async function openSelectedAgent(
+    selection: string | null,
+    ctx: ExtensionContext,
+  ): Promise<void> {
+    if (!selection) return;
+    const scan = historyByKey.get(selection);
+    if (scan) {
+      await showAttachOverlay(historyVirtualAgent(scan), ctx, true, { readOnly: true });
+      return;
+    }
+    await showAttachOverlay(selection, ctx);
+  }
+
   async function showAgentSelector(ctx: ExtensionContext): Promise<void> {
-    if (buildAgentSelectorRows(Array.from(state.activeRuns.values())).length === 0) {
+    const activeRows = buildAgentSelectorRows(Array.from(state.activeRuns.values()));
+    const allRows = [...activeRows, ...buildHistoryRows(historyScans)];
+    if (allRows.length === 0) {
       ctx.ui.notify("No active teammates. Start one with the teammate tool.", "warning");
       return;
     }
-    const initialRows = buildAgentSelectorRows(Array.from(state.activeRuns.values()));
-    if (initialRows.length === 1) {
-      await showAttachOverlay(initialRows[0].correlationId, ctx);
+    if (allRows.length === 1) {
+      await openSelectedAgent(allRows[0]?.correlationId ?? null, ctx);
       return;
     }
 
@@ -3359,7 +3480,17 @@ export default function registerTeammateExtension(
         refreshTimer.unref?.();
 
         function filtered(): AgentSelectorRow[] {
-          const rows = buildAgentSelectorRows(Array.from(state.activeRuns.values()));
+          const activeRows = buildAgentSelectorRows(Array.from(state.activeRuns.values()));
+          const historyRows = buildHistoryRows(historyScans);
+          // Without a query, only live/sleeping agents are arrow-navigable —
+          // history rows would otherwise capture ↑/↓ navigation. History is
+          // reachable by typing (labels carry the session id) and is the
+          // fallback list when no agents exist.
+          const rows = query.trim()
+            ? [...activeRows, ...historyRows]
+            : activeRows.length > 0
+              ? activeRows
+              : historyRows;
           const matches = !query ? rows : rows
             .map((row, index) => ({ row, index, score: matchScore(row, query) }))
             .filter((item): item is { row: AgentSelectorRow; index: number; score: number } => item.score !== undefined)
@@ -3380,6 +3511,20 @@ export default function registerTeammateExtension(
             requestRender();
           } else if (data === "\x1b[B" || (data === "j" && !query)) {
             cursor = Math.min(Math.max(0, matches.length - 1), cursor + 1);
+            requestRender();
+          } else if (data === "\x1b[5~" || data === "\x1b[5;5~") {
+            // PageUp — jump up a page of the selection list.
+            cursor = Math.max(0, cursor - 8);
+            requestRender();
+          } else if (data === "\x1b[6~" || data === "\x1b[6;5~") {
+            // PageDown.
+            cursor = Math.min(Math.max(0, matches.length - 1), cursor + 8);
+            requestRender();
+          } else if (data === "\x1b[H") {
+            cursor = 0;
+            requestRender();
+          } else if (data === "\x1b[F") {
+            cursor = Math.max(0, matches.length - 1);
             requestRender();
           } else if (data === "\x7f" || data === "\b") {
             if (query.length > 0) { query = removeLastGrapheme(query); cursor = 0; requestRender(); }
@@ -3438,55 +3583,8 @@ export default function registerTeammateExtension(
     );
 
     if (selected) {
-      await showAttachOverlay(selected, ctx);
+      await openSelectedAgent(selected, ctx);
     }
-  }
-
-  async function prepareAgentHandoff(
-    agent: ActiveAgent,
-    selectedLease: LeaseSelection,
-    timeoutMs = 15_000,
-  ): Promise<LeaseSelection | undefined> {
-    if (!agent.sendControl) return undefined;
-    const parkingLease = transitionLeaseIfCurrent(agent.lease, selectedLease, requestPark);
-    if (!parkingLease) return undefined;
-    agent.lease = parkingLease;
-    const parkingSelection = leaseSelection(parkingLease);
-    const nonce = agent.lease.nonce;
-    const ready = new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => {
-        if (agent.pendingHandoff?.nonce !== nonce) return;
-        agent.pendingHandoff = undefined;
-        if (!sameLeaseSelection(agent.lease, parkingSelection)) {
-          resolve(false);
-          return;
-        }
-        agent.lease = fenceLease(agent.lease!);
-        if (agent.lease) agent.pendingCancel = { nonce, fencedEpoch: agent.lease.epoch };
-        agent.sendControl?.({ type: "teammate_handoff_cancel", nonce });
-        resolve(false);
-      }, timeoutMs);
-      agent.pendingHandoff = { nonce, resolve, timer };
-    });
-    if (!agent.sendControl({
-      type: "teammate_handoff_request",
-      nonce,
-      requiredPromptSeq: agent.promptSeq ?? 0,
-    })) {
-      if (agent.pendingHandoff) clearTimeout(agent.pendingHandoff.timer);
-      agent.pendingHandoff = undefined;
-      const activeLease = transitionLeaseIfCurrent(agent.lease, parkingSelection, cancelPark);
-      if (activeLease) agent.lease = activeLease;
-      return undefined;
-    }
-    if (!await ready || !agent.lease) return undefined;
-    const parkedSelection = leaseSelection(agent.lease);
-    if (parkedSelection.owner !== "child"
-      || parkedSelection.state !== "parked"
-      || !sameLeaseToken(parkingSelection, parkedSelection)) {
-      return undefined;
-    }
-    return parkedSelection;
   }
 
   function teardownRootSession(): void {
@@ -3513,153 +3611,220 @@ export default function registerTeammateExtension(
     widgetCtx = null;
   }
 
-  let activeHandoff: { shutdownObserved: boolean } | undefined;
+  // =========================================================================
+  // Main-TUI viewing mode (claude-code style): switching views a teammate
+  // session in the main UI and routes input to the agent. Never touches the
+  // agent's task — a running agent (main loop or sub-process) is unaffected.
+  // =========================================================================
 
-  async function handleTeammateSession(ctx: ExtensionCommandContext): Promise<void> {
-      const currentFile = ctx.sessionManager.getSessionFile();
-      const attached = Array.from(state.activeRuns.values()).find((agent) =>
-        agent.sessionFile === currentFile
-          && agent.lease?.owner === "main"
-          && agent.lease.state === "main_active"
-      );
-      if (attached) {
-        if (!state.mainSessionFile) {
-          ctx.ui.notify("Main session path is unavailable.", "error");
-          return;
-        }
-        const selectedLease = leaseSelection(attached.lease!);
-        await ctx.waitForIdle();
-        const reloadingLease = transitionLeaseIfCurrent(attached.lease, selectedLease, requestHandback);
-        if (!reloadingLease) {
-          ctx.ui.notify("Session lease changed while waiting; retry handback.", "warning");
-          return;
-        }
-        attached.lease = reloadingLease;
-        {
-          const token = leaseToken(reloadingLease);
-          attached.pendingHandback = {
-            nonce: token.nonce,
-            epoch: token.epoch,
-            sessionId: attached.sessionId,
-            sessionFile: attached.sessionFile,
-          };
-          attached.sendControl?.({ type: "teammate_lease_update", token });
-        }
-        const handoff = { shutdownObserved: false };
-        activeHandoff = handoff;
-        state.handoffSwitching = true;
-        try {
-          await switchConversationSession(ctx, state.mainSessionFile, async () => {
-              if (activeHandoff === handoff) activeHandoff = undefined;
-              state.handoffSwitching = false;
-              if (!attached.stdin || !attached.sessionFile) return;
-              const reloadSent = sendRpcMessage(attached.stdin, `/teammate-handoff-reload ${encodeURIComponent(attached.sessionFile)}`, "prompt");
-              if (!reloadSent && attached.lease) {
-                const cancelNonce = attached.pendingHandback?.nonce;
-                attached.lease = fenceLease(attached.lease);
-                attached.pendingHandback = undefined;
-                if (cancelNonce) attached.pendingCancel = { nonce: cancelNonce, fencedEpoch: attached.lease.epoch };
-                for (const message of buildFenceRecoveryMessages(attached.lease, cancelNonce)) {
-                  attached.sendControl?.(message);
-                }
-                return;
-              }
-              setTimeout(() => {
-                if (attached.lease?.state === "reloading") {
-                  const cancelNonce = attached.pendingHandback?.nonce;
-                  attached.lease = fenceLease(attached.lease);
-                  attached.pendingHandback = undefined;
-                  if (cancelNonce) {
-                    attached.pendingCancel = { nonce: cancelNonce, fencedEpoch: attached.lease.epoch };
-                  }
-                  for (const message of buildFenceRecoveryMessages(attached.lease, cancelNonce)) {
-                    attached.sendControl?.(message);
-                  }
-                  attached.status = "sleeping";
-                }
-              }, 15_000);
-          });
-        } catch (error) {
-          state.handoffSwitching = false;
-          if (activeHandoff === handoff) activeHandoff = undefined;
-          if (handoff.shutdownObserved) {
-            teardownRootSession();
-          } else {
-            const restoredToken = restoreMainOwnershipIfHandbackPending(attached);
-            if (restoredToken) {
-              attached.sendControl?.({ type: "teammate_lease_update", token: restoredToken });
-            }
-          }
-          throw error;
-        }
-        return;
-      }
+  interface ViewingTarget {
+    correlationId: string;
+    name?: string;
+    agent: string;
+    status: string;
+    sessionFile?: string;
+    canSend: boolean;
+    lastResult?: string;
+    outputLog?: string[];
+  }
 
-      const candidates = Array.from(state.activeRuns.values())
-        .filter((agent) => Boolean(
-          agent.sessionDir
-            && agent.sessionFile
-            && agent.sendControl
-            && agent.lease?.owner === "child"
-            && agent.lease.state === "active",
-        ))
-        .map((agent) => ({ agent, selectedLease: leaseSelection(agent.lease!) }));
-      if (candidates.length === 0) {
-        ctx.ui.notify("No attachable teammate sessions.", "warning");
-        return;
-      }
-      const labels = candidates.map(({ agent }) => `${agent.name ?? agent.correlationId.slice(0, 8)} · ${agent.agent} · ${agent.status}`);
-      const selected = await ctx.ui.select("Switch to teammate session", labels);
-      const index = selected ? labels.indexOf(selected) : -1;
-      if (index < 0) return;
-      const { agent, selectedLease } = candidates[index];
-      if (!sameLeaseSelection(agent.lease, selectedLease)) {
-        ctx.ui.notify("Session lease changed while selecting; retry handoff.", "warning");
-        return;
-      }
-      ctx.ui.notify(`Waiting for ${agent.name ?? agent.agent} to finish its current loop…`, "info");
-      const parkedLease = await prepareAgentHandoff(agent, selectedLease);
-      if (!parkedLease) {
-        ctx.ui.notify("Session handoff timed out and was fenced.", "error");
-        return;
-      }
-      if (!agent.sessionFile || !agent.lease) return;
-      const mainLease = transitionLeaseIfCurrent(agent.lease, parkedLease, transferToMain);
-      if (!mainLease) {
-        ctx.ui.notify("Session lease changed before transfer; retry handoff.", "warning");
-        return;
-      }
-      agent.lease = mainLease;
-      agent.sendControl?.({ type: "teammate_lease_update", token: leaseToken(agent.lease) });
-      const handoff = { shutdownObserved: false };
-      activeHandoff = handoff;
-      state.handoffSwitching = true;
-      try {
-        await switchConversationSession(ctx, agent.sessionFile, async (sessionCtx) => {
-            (sessionCtx.sessionManager as unknown as {
-              appendCustomEntry(customType: string, data: unknown): string;
-            }).appendCustomEntry("maestro-teammate-attach", {
-              version: 1,
-              correlationId: agent.correlationId,
-              attachedAt: Date.now(),
-            });
-            if (activeHandoff === handoff) activeHandoff = undefined;
-            state.handoffSwitching = false;
-        });
-      } catch (error) {
-        state.handoffSwitching = false;
-        if (activeHandoff === handoff) activeHandoff = undefined;
-        if (handoff.shutdownObserved) {
-          teardownRootSession();
-        } else {
-          agent.lease = recoverChild(fenceLease(agent.lease));
-          for (const message of buildFenceRecoveryMessages(agent.lease, agent.lastParkNonce)) {
-            agent.sendControl?.(message);
-          }
-          agent.lastParkNonce = undefined;
+  let viewingTarget: ViewingTarget | undefined;
+  let viewingTranscript: TranscriptLoad | undefined;
+  let viewingRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  let viewingEscHookInstalled = false;
+  /** All switchable targets (live agents + history) — ↑/↓ moves through these. */
+  let viewingList: ViewingTarget[] = [];
+  let viewingIndex = 0;
+
+  function updateViewingWidget(): void {
+    if (!widgetCtx || !viewingTarget) return;
+    const target = viewingTarget;
+    widgetCtx.ui.setWidget("teammate-view", (_tui, theme) => ({
+      render(width: number): string[] {
+        return renderViewingWidget({
+          agentName: target.name,
+          agentRole: target.agent,
+          status: target.status,
+          rows: viewingTranscript?.rows ?? [],
+          canSend: target.canSend,
+          transcriptSource: viewingTranscript?.source ?? "memory",
+          switches: viewingList.map((entry, i) => ({
+            label: `@${entry.name ?? entry.agent}`,
+            active: i === viewingIndex,
+          })),
+        }, width);
+      },
+      invalidate() {},
+    }), { placement: "belowEditor" });
+  }
+
+  async function refreshViewingTranscript(): Promise<void> {
+    const target = viewingTarget;
+    if (!target) return;
+    viewingTranscript = await loadTranscript({
+      correlationId: target.correlationId,
+      sessionFile: target.sessionFile,
+      parentSessionFile: widgetCtx?.sessionManager?.getSessionFile?.(),
+      lastResult: target.lastResult,
+      outputLog: target.outputLog,
+    });
+    updateViewingWidget();
+  }
+
+  function enterViewingList(
+    targets: ViewingTarget[],
+    index: number,
+    ctx: ExtensionContext,
+  ): void {
+    exitViewingInternal(false);
+    viewingList = targets;
+    viewingIndex = Math.max(0, Math.min(index, targets.length - 1));
+    viewingTarget = targets[viewingIndex] ?? undefined;
+    viewingTranscript = undefined;
+    void refreshViewingTranscript();
+    if (viewingRefreshTimer) clearInterval(viewingRefreshTimer);
+    viewingRefreshTimer = setInterval(() => {
+      void refreshViewingTranscript();
+    }, 1000);
+    viewingRefreshTimer.unref?.();
+    updateViewingWidget();
+    const target = viewingTarget;
+    ctx.ui.notify(
+      `Viewing @${target?.name ?? target?.agent} — ←/→ switch agent · Esc main (agent keeps running)`,
+      "info",
+    );
+    emitViewingEvent("enter");
+  }
+
+  /** Move the viewing target through the switchable list. */
+  function switchViewingTarget(delta: 1 | -1): void {
+    if (viewingList.length <= 1) return;
+    const next = (viewingIndex + delta + viewingList.length) % viewingList.length;
+    if (next === viewingIndex) return;
+    viewingIndex = next;
+    viewingTarget = viewingList[next];
+    viewingTranscript = undefined;
+    void refreshViewingTranscript();
+    updateViewingWidget();
+    emitViewingEvent("switch");
+  }
+
+  function exitViewingInternal(restoreWidget: boolean): void {
+    if (viewingRefreshTimer) {
+      clearInterval(viewingRefreshTimer);
+      viewingRefreshTimer = null;
+    }
+    if (viewingTarget) emitViewingEvent("exit");
+    viewingTarget = undefined;
+    viewingTranscript = undefined;
+    widgetCtx?.ui.setWidget("teammate-view", undefined);
+    if (restoreWidget) updateAgentWidget();
+  }
+
+  function exitViewing(): void {
+    exitViewingInternal(true);
+  }
+
+  /** Route a submitted main-editor line while viewing (installed once). */
+  function installViewingInputHook(): void {
+    pi.on("input", (event) => {
+      const target = viewingTarget;
+      if (!target) return { action: "continue" };
+      const decision = decideViewingInput(event.text, {
+        viewing: true,
+        canSend: target.canSend,
+      });
+      if (decision.action === "forward" && target.canSend) {
+        const agent = state.activeRuns.get(target.correlationId);
+        if (agent) {
+          const result = sendToAgent(agent, decision.text);
+          if (!result.ok) widgetCtx?.ui.notify(result.message, "warning");
         }
-        throw error;
       }
+      return decision.action === "continue"
+        ? { action: "continue" }
+        : { action: "handled" };
+    });
+  }
+
+  /** Esc leaves viewing mode; ↑/↓ switch the viewed agent (installed once). */
+  function installViewingNavHook(ctx: ExtensionContext): void {
+    if (viewingEscHookInstalled) return;
+    // Test harnesses may provide a context without a terminal-input hook.
+    if (!ctx.ui || typeof ctx.ui.onTerminalInput !== "function") return;
+    viewingEscHookInstalled = true;
+    ctx.ui.onTerminalInput((data) => {
+      if (!viewingTarget) return undefined;
+      if (data === "\x1b") {
+        exitViewing();
+        return { consume: true };
+      }
+      if (data === "\x1b[D") {
+        switchViewingTarget(-1);
+        return { consume: true };
+      }
+      if (data === "\x1b[C") {
+        switchViewingTarget(1);
+        return { consume: true };
+      }
+      return undefined;
+    });
+  }
+
+  /** All switchable targets: live agents with a session file, then history. */
+  function buildViewingTargets(): ViewingTarget[] {
+    const live: ViewingTarget[] = Array.from(state.activeRuns.values())
+      .filter((agent) => agent.sessionFile)
+      .map((agent) => ({
+        correlationId: agent.correlationId,
+        name: agent.name,
+        agent: agent.agent,
+        status: agent.status,
+        sessionFile: agent.sessionFile,
+        canSend: Boolean(agent.stdin?.writable),
+        lastResult: agent.lastResult,
+        outputLog: agent.outputLog,
+      }));
+    const liveFiles = new Set(live.map((entry) => entry.sessionFile));
+    const history: ViewingTarget[] = historyScans
+      .filter((scan) => !liveFiles.has(scan.sessionFile))
+      .map((scan) => ({
+        correlationId: historyRowKey(scan),
+        agent: "teammate",
+        status: "completed",
+        sessionFile: scan.sessionFile,
+        canSend: false,
+      }));
+    return [...live, ...history];
+  }
+
+  function emitViewingEvent(
+    action: "enter" | "switch" | "exit",
+  ): void {
+    const target = viewingTarget;
+    if (!target) return;
+    pi.events.emit(TEAMMATE_VIEWING_EVENT, {
+      correlationId: target.correlationId,
+      agent: target.agent,
+      ...(target.name ? { name: target.name } : {}),
+      status: target.status,
+      action,
+    });
+  }
+
+  async function handleViewingSession(ctx: ExtensionCommandContext): Promise<void> {
+    if (viewingTarget) {
+      exitViewing();
+      ctx.ui.notify("Returned to the main conversation.", "info");
+      return;
+    }
+    const targets = buildViewingTargets();
+    if (targets.length === 0) {
+      ctx.ui.notify("No teammate sessions to view.", "warning");
+      return;
+    }
+    // Enter the first target directly — ←/→ moves through the whole list.
+    enterViewingList(targets, 0, ctx);
   }
 
   async function showTeammateControlCenter(ctx: ExtensionContext): Promise<void> {
@@ -3718,9 +3883,9 @@ export default function registerTeammateExtension(
   };
 
   pi.registerCommand("teammate-session", {
-    description: "Switch the main Pi conversation to a teammate session or return to main",
+    description: "View a teammate session in the main UI (view + message, agent keeps running) or return to main",
     async handler(_args, ctx) {
-      await handleTeammateSession(ctx);
+      await handleViewingSession(ctx);
     },
   });
 
@@ -3954,6 +4119,27 @@ export default function registerTeammateExtension(
   // TUI — only in parent mode (child processes have no terminal)
   // =========================================================================
 
+  installViewingInputHook();
+
+  // Cockpit → teammate: open (or jump to) an agent's viewing view.
+  pi.events.on(TEAMMATE_OPEN_AGENT_EVENT, (payload) => {
+    const correlationId = (payload as { correlationId?: string }).correlationId;
+    if (!correlationId || !widgetCtx) return;
+    const targets = viewingList.length > 0 ? viewingList : buildViewingTargets();
+    const index = targets.findIndex((target) => target.correlationId === correlationId);
+    if (index < 0) return;
+    if (viewingTarget) {
+      viewingIndex = index;
+      viewingTarget = targets[index];
+      viewingTranscript = undefined;
+      void refreshViewingTranscript();
+      updateViewingWidget();
+      emitViewingEvent("switch");
+    } else {
+      enterViewingList(targets, index, widgetCtx);
+    }
+  });
+
   pi.registerShortcut("alt+r", {
     description: "Open the teammate agent view",
     async handler(ctx) {
@@ -4125,6 +4311,8 @@ export default function registerTeammateExtension(
     const isAgentSession = Array.from(state.activeRuns.values()).some((agent) => agent.sessionFile === sessionFile);
     if (sessionFile && !isAgentSession) state.mainSessionFile = sessionFile;
     startWorkspacePeers(ctx);
+    rebuildHistory(ctx);
+    installViewingNavHook(ctx);
   });
 
   pi.on("before_agent_start", injectTeammateContext);
@@ -4145,12 +4333,6 @@ export default function registerTeammateExtension(
     if (monitorPeerRefreshTimer) clearInterval(monitorPeerRefreshTimer);
     monitorPeerRefreshTimer = undefined;
     stopEngine(monitorEngine);
-    if (state.handoffSwitching && activeHandoff) {
-      activeHandoff.shutdownObserved = true;
-      widgetCtx = null;
-      state.currentSessionId = null;
-      return;
-    }
     workspacePeerLifecycle = workspacePeerLifecycle.then(stopWorkspacePeers);
     teardownRootSession();
   });

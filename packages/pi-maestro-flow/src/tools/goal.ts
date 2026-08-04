@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   consumeModelFailoverSettlement,
+  FAILOVER_TERMINAL_EVENT,
   snapshotModelFailoverSettlement,
+  type ModelFailoverSettlementSnapshot,
 } from "../providers/model-failover.ts";
 import type { WorkflowCoordinator } from "../session/coordinator.ts";
 import { activeWorkflowRun, type WorkflowSession, type WorkflowSnapshot } from "../session/types.ts";
@@ -174,6 +176,7 @@ let elapsedTimer: ReturnType<typeof setInterval> | undefined;
 // and the panel hides the live duration — same contract as every other
 // cockpit surface (agent rows, sidebar, thinking label).
 let goalStaticMode = false;
+let disposeFailoverTerminal: (() => void) | undefined;
 const issuedGoalMarkers = new Set<string>();
 
 configureGoalVerification({
@@ -328,6 +331,8 @@ export function goalArgumentCompletions(prefix: string) {
 
 export function initGoal(pi: ExtensionAPI) {
   extensionApi = pi;
+  disposeFailoverTerminal?.();
+  disposeFailoverTerminal = pi.events?.on?.(FAILOVER_TERMINAL_EVENT, onFailoverTerminal);
 }
 
 export function setWorkflowCoordinator(coordinator: WorkflowCoordinator | undefined): void {
@@ -498,7 +503,11 @@ export function onCompactionCancelled(ctx?: GoalContext) {
   }
 }
 
-export async function onCompact(event: unknown, ctx: GoalContext) {
+export async function onCompact(
+  event: unknown,
+  ctx: GoalContext,
+  options: { deferContinuation?: boolean } = {},
+) {
   suspendedContinuation = undefined;
   if (!activeGoal || activeGoal.status !== "active") {
     clearRecovery();
@@ -531,7 +540,7 @@ export async function onCompact(event: unknown, ctx: GoalContext) {
       return;
     }
   }
-  if (wasPiRetry || attemptAwaitingSettlement || hasPending(ctx)) return;
+  if (wasPiRetry || attemptAwaitingSettlement || hasPending(ctx) || options.deferContinuation) return;
   await sendContinuation(ctx, activeGoal);
 }
 
@@ -567,22 +576,35 @@ export async function onAgentEnd(event: { messages: unknown[] }, ctx: GoalContex
   updateStatusLine(ctx, activeGoal);
 }
 
+export function onProviderPressureSettled(ctx: GoalContext) {
+  const arbitrationSnapshot = snapshotModelFailoverSettlement();
+  if (arbitrationSnapshot) consumeModelFailoverSettlement(arbitrationSnapshot.recoveryId);
+  latestGoalAttempt = undefined;
+  if (!activeGoal || activeGoal.status !== "active") return;
+  clearRecoveryFor(activeGoal.id);
+  updateStatusLine(ctx, activeGoal);
+}
+
 export async function onAgentSettled(ctx: GoalContext) {
   if (!activeGoal || activeGoal.status !== "active") return;
   if (goalLoopOwner?.goalId !== activeGoal.id || goalLoopOwner.epoch !== goalLifecycleEpoch) return;
 
   const goalId = activeGoal.id;
   const arbitrationSnapshot = snapshotModelFailoverSettlement();
-  const arbitration = arbitrationSnapshot
-    ? consumeModelFailoverSettlement(arbitrationSnapshot.recoveryId)
-    : undefined;
-  if (arbitrationSnapshot && !arbitration) return;
-
   const capturedObservation = latestGoalAttempt;
   const observationMissing = !capturedObservation
     || capturedObservation.goalId !== goalId
     || capturedObservation.epoch !== goalLifecycleEpoch;
-  if (observationMissing && !arbitration) return;
+  const arbitration = arbitrationSnapshot
+    ? consumeModelFailoverSettlement(arbitrationSnapshot.recoveryId)
+    : undefined;
+  if (arbitrationSnapshot && !arbitration) return;
+  if (observationMissing) {
+    // A stale arbitration snapshot (for example failover fired during a
+    // non-Goal turn) was consumed above. It has no attempt correlation, so it
+    // must never drive this Goal's outcome; ignore it and keep the Goal as-is.
+    return;
+  }
   latestGoalAttempt = undefined;
 
   if (arbitration?.outcome === "fallback-scheduled") {
@@ -1531,6 +1553,26 @@ function isPiRetry(event: unknown, goalId: string): boolean {
 
 function markGoalRecovery(goalId: string, kind: "compaction_retry" | "provider_retry"): void {
   goalRecovery = { goalId, kind };
+}
+
+/**
+ * Terminal failover handoff failure delivered asynchronously after the
+ * settlement that marked the Goal as provider-retrying. Pauses the Goal with
+ * the real failure so it does not remain in a retry state indefinitely.
+ */
+function onFailoverTerminal(data: unknown): void {
+  const ctx = goalDisplayContext;
+  if (!activeGoal || activeGoal.status !== "active" || !ctx) return;
+  const snapshot = data as ModelFailoverSettlementSnapshot | undefined;
+  const failure = snapshot?.failure ?? "Model fallback could not start.";
+  clearRecoveryFor(activeGoal.id);
+  goalLoopOwner = undefined;
+  latestGoalAttempt = undefined;
+  cancelContinuation();
+  const paused = pauseGoal(activeGoal);
+  persistGoal(paused);
+  updateStatusLine(ctx, paused);
+  ctx.ui.notify(`Goal paused: ${failure}`, "warning");
 }
 
 function hasUnsettledAttempt(goalId: string): boolean {

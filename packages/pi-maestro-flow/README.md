@@ -15,7 +15,7 @@
 
 ---
 
-**pi-maestro-flow** is the **all-in-one** entry point of the three-plugin suite. A single `pi install npm:pi-maestro-flow` upgrades the [Pi coding agent](https://github.com/earendil-works/pi) into a coordinated engineering team:
+**pi-maestro-flow** is the **all-in-one** entry point of the three-plugin suite. A single `pi install npm:pi-maestro-flow@0.14.2` upgrades the [Pi coding agent](https://github.com/earendil-works/pi) into a coordinated engineering team:
 
 | Layer | Package | What you get |
 |-------|---------|--------------|
@@ -33,6 +33,8 @@ The companion plugins are dependencies and **auto-register on postinstall** — 
 - 🧠 **Persistent knowledge system** — semantic search · specs · knowhow, survives across sessions
 - 🔌 **Full protocol connectivity** — MCP (OAuth auto-auth) · LSP · Browser (CDP) · Smart Search · source verification
 - 🛰️ **Live cockpit visualization** — running teammates & todo plan in real time, 9 built-in themes
+- 🧐 **Turn-level Advisor** — optional second-model quality reviewer (`/advisor on`); raises `concern`/`blocker` notes into the session, throttled by the shared supervision gate
+- 👁️ **Unified supervision telemetry** — goal/monitor/advisor events on one bus; cockpit `SUP` footer segment + `/supervision` command
 - ⏱️ **Adaptive shell** — `bash_bg` auto-backgrounds long commands and notifies on completion
 - 🔒 **Permission control** — 5 modes (YOLO enabled by default) · fine-grained allow/ask/deny
 - 🪝 **Codex-compatible Hooks** — project hook system with a built-in installer and trust review
@@ -66,8 +68,8 @@ Skills (63, maintained by [Maestro Flow](https://github.com/catlog22/maestro-flo
 ## Install
 
 ```bash
-# From npm
-pi install npm:pi-maestro-flow
+# From npm, including upgrades
+pi install npm:pi-maestro-flow@0.14.2
 
 # Or from local path (development)
 pi install ./packages/pi-maestro-flow
@@ -80,9 +82,9 @@ After installation:
 - LSP navigation/refactoring, named-tab browser control, BM25 tool discovery, smart search, and source verification are available through `lsp`, `browser`, `search_tool_bm25`, `smart_search`, and `source_check`
 - Compaction capacity management, API retry settings, and model failover are configured through `/maestro-compaction`, `/api-manager`, and `/model-failover`
 - Vision delegation is active when the primary model is text-only: `describe_image` is auto-activated and routes image analysis to a multimodal model; configure with `/vision`
-- MCP OAuth auto-authentication is managed through `/mcp-auth`
+- MCP OAuth auto-authentication is managed through `/mcp auth`
 - Session export is available through `/export-session-info`
-- Companion extensions `pi-maestro-teammate` and `pi-cockpit` are pulled as dependencies and auto-registered into `settings.packages` on postinstall (best-effort; a failure only warns)
+- Companion extensions `pi-maestro-teammate` and `pi-cockpit` are pulled as dependencies and auto-registered into `settings.packages` on postinstall. Flow records the companion sources it manages so upgrades can replace those paths safely; an unowned same-name local registration is retained and logged rather than overwritten.
 - Maestro workflow docs installed at `~/.maestro/workflows/`
 
 ## Commands
@@ -443,7 +445,7 @@ Skills are authored and maintained by the [Maestro Flow](https://github.com/catl
 the bundled `.pi/skills/` directory. In this repository the source set lives under
 `packages/pi-maestro-flow/.pi/skills`, while the root `.pi/settings.json` references
 that same directory for local development. Install the package through
-`pi install npm:pi-maestro-flow` (or register a local package path) and Pi discovers
+`pi install npm:pi-maestro-flow@0.14.2` (or register a local package path) and Pi discovers
 the bundled skills through its standard package resource loader.
 
 The package also publishes its Pi-only `AGENTS.md`. The extension reads that bundled
@@ -451,7 +453,7 @@ file from the installed package and appends it to Pi's system prompt through the
 `before_agent_start` event. This keeps the instructions available after npm installation
 without requiring a repository-root `AGENTS.md`, which other coding agents may discover.
 
-`pi-maestro-flow` pins `maestro-flow@0.5.58` as an associated workflow resource package.
+`pi-maestro-flow` pins `maestro-flow@0.5.61` as an associated workflow resource package.
 During postinstall it calls Maestro's workflows-only installer from the prepared registry
 artifact, which includes the complete runtime `dist` tree and canonical workflow documents.
 The installer writes to `~/.maestro/workflows`. The active Maestro CLI remains an environment

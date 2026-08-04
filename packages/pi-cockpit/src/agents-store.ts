@@ -175,6 +175,8 @@ export class AgentsStore {
 	private readonly roster = new Map<string, AgentRow>();
 	/** correlationId -> completion time; suppresses post-complete self-healing. */
 	private readonly completedAt = new Map<string, number>();
+	/** correlationId of the agent currently shown in teammate's viewing view. */
+	private viewingId: string | undefined;
 
 	private isTombstoned(id: string | undefined, now: number): boolean {
 		if (id === undefined) return false;
@@ -491,7 +493,14 @@ export class AgentsStore {
 		return [...this.roster.values()].sort((a, b) => {
 			const activity = b.lastActivityAt - a.lastActivityAt;
 			return activity || a.correlationId.localeCompare(b.correlationId);
-		});
+		}).map((row) =>
+			row.correlationId === this.viewingId ? { ...row, viewing: true } : row,
+		);
+	}
+
+	/** Mark which agent the teammate viewing view currently shows. */
+	setViewingAgent(correlationId: string | undefined): void {
+		this.viewingId = correlationId;
 	}
 
 	get size(): number {

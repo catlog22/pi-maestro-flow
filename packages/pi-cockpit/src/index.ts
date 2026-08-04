@@ -8,6 +8,7 @@ import { statusText, titleFor, workingMessage, type AmbientState } from "./ambie
 import { generateTitleWithModel } from "./title-llm.ts";
 import { suggestTitle } from "./title-gen.ts";
 import { BashBgStore } from "./bash-bg-store.ts";
+import { SupervisionStore } from "./supervision-store.ts";
 import { MaestroStore } from "./maestro-store.ts";
 import { createSidebarController, type SidebarController } from "./sidebar-controller.ts";
 import { COCKPIT_SPLIT_PANE_MARKER } from "./split-pane.ts";
@@ -44,6 +45,7 @@ import {
 	COCKPIT_TODO_TOGGLE_EVENT,
 	MAESTRO_UI_SNAPSHOT_EVENT,
 	MAESTRO_UI_SNAPSHOT_VERSION,
+	SUPERVISION_EVENT,
 	type CockpitUiOwnershipV1,
 } from "./public/v1/events.ts";
 import {
@@ -56,6 +58,7 @@ import {
 	TEAMMATE_COMPLETE_EVENT,
 	TEAMMATE_MESSAGE_EVENT,
 	TEAMMATE_STARTED_EVENT,
+	TEAMMATE_VIEWING_EVENT,
 	TODO_TOOL_NAME,
 	WORKFLOW_STATUS_KEY,
 	type CockpitConfig,
@@ -214,6 +217,7 @@ export default function (pi: ExtensionAPI): void {
 	const bashBg = new BashBgStore();
 	const todos = new TodoStore();
 	const maestro = new MaestroStore();
+	const supervision = new SupervisionStore();
 	const settingsRegistry = new SettingsProviderRegistry({
 		on: (event, handler) => pi.events.on(event, handler),
 		emit: (event, payload) => pi.events.emit(event, payload),
@@ -846,6 +850,16 @@ export default function (pi: ExtensionAPI): void {
 				syncTick();
 				req();
 			}),
+			pi.events.on(TEAMMATE_VIEWING_EVENT, (payload) => {
+				const event = payload as { correlationId?: string; action?: string } | undefined;
+				if (!event) return;
+				// exit clears the highlight; enter/switch moves it to the viewed agent.
+				agents.setViewingAgent(
+					event.action === "exit" ? undefined : event.correlationId,
+				);
+				syncTick();
+				req();
+			}),
 			pi.events.on(BASH_BG_UPDATE_EVENT, (payload) => {
 				if (!bashBg.applySnapshot(payload)) return;
 				syncTick();
@@ -853,6 +867,10 @@ export default function (pi: ExtensionAPI): void {
 			}),
 			pi.events.on(MAESTRO_UI_SNAPSHOT_EVENT, (payload) => {
 				if (!maestro.applySnapshot(payload)) return;
+				req();
+			}),
+			pi.events.on(SUPERVISION_EVENT, (payload) => {
+				if (!supervision.applyEvent(payload)) return;
 				req();
 			}),
 			pi.events.on(COCKPIT_TODO_TOGGLE_EVENT, (payload) => {
@@ -1427,6 +1445,38 @@ export default function (pi: ExtensionAPI): void {
 				return;
 			}
 			await openSettings(ctx);
+		},
+	});
+
+	pi.registerCommand("supervision", {
+		description: "Supervision: /supervision [events] — unified goal/monitor/advisor telemetry",
+		handler: async (args, ctx) => {
+			const totals = supervision.getTotals();
+			const wantEvents = args.trim().toLowerCase() === "events";
+			if (!wantEvents) {
+				const status = supervision.footerStatus();
+				ctx.ui.notify(
+					[
+						`SUPERVISION ${status ?? "idle (no events)"}`,
+						`  interventions: ${totals.interventions} · notifications: ${totals.notifications} · verdicts: ${totals.verdicts}`,
+						"  /supervision events — list recent events",
+					].join("\n"),
+					"info",
+				);
+				return;
+			}
+			const recent = supervision.recentEvents(10);
+			if (recent.length === 0) {
+				ctx.ui.notify("No supervision events observed yet.", "info");
+				return;
+			}
+			const lines = recent.map((event) => {
+				const time = new Date(event.timestamp).toLocaleTimeString();
+				const marker = event.severity === "blocker" ? "▲" : event.severity === "concern" ? "△" : "·";
+				const message = (event.message ?? event.kind).slice(0, 100);
+				return `${marker} [${event.source}] ${event.kind} ${time} — ${message}`;
+			});
+			ctx.ui.notify([`SUPERVISION recent ${recent.length}`, ...lines].join("\n"), "info");
 		},
 	});
 

@@ -5,6 +5,12 @@ export const MAESTRO_UI_SNAPSHOT_EVENT = "maestro:ui-snapshot";
 export const MAESTRO_UI_SNAPSHOT_VERSION = 1 as const;
 
 /**
+ * Unified supervision telemetry emitted by the shared supervision layer
+ * (pi-maestro-teammate/v1/supervision) for goal/monitor/advisor producers.
+ */
+export const SUPERVISION_EVENT = "supervision:event";
+
+/**
  * Cross-extension input ownership: emitted before any extension opens a
  * capturing overlay, so the Cockpit split-pane resize listener (a global
  * terminal input hook) yields before the overlay grabs focus. Fire-and-forget;

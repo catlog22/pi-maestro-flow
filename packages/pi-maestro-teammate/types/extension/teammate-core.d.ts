@@ -6,6 +6,7 @@
  * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { WorkspaceSessionScan } from "../transcript/session-transcript.ts";
 import { type WorkspaceOwnerState } from "./workspace-peers.ts";
 import { type LeaseToken } from "../runs/session-handoff.ts";
 import type { RunTeammateOptions, RpcMessageMode, NormalizedTask } from "../runs/execution.ts";
@@ -247,6 +248,18 @@ export declare function emitTeammateStarted(pi: ExtensionAPI, agent: ActiveAgent
 /** Reactivate a wakeable child and republish it to lifecycle-only consumers. */
 export declare function wakeSleepingAgent(pi: ExtensionAPI, agent: ActiveAgent, now?: number): boolean;
 export declare function buildAgentSelectorRows(agents: ActiveAgent[]): AgentSelectorRow[];
+/**
+ * Rows for completed teammate sessions recovered from disk after a restart.
+ * The selector merges these below the live-agent rows; selecting one opens the
+ * attach overlay in transcript mode (read-only).
+ */
+export declare function buildHistoryRows(scans: WorkspaceSessionScan[]): AgentSelectorRow[];
+/**
+ * Stable selector key for a history row, derived from the session file path —
+ * position-based keys would drift when the scan order changes across rebuilds.
+ */
+export declare function historyRowKey(scan: WorkspaceSessionScan): string;
+export declare function historyLabel(scan: WorkspaceSessionScan): string;
 export declare function renderAgentSelectorPanel(rows: AgentSelectorRow[], cursor: number, query: string, width: number): string[];
 export declare function compactMetric(value: number): string;
 export declare function toolAction(name: string): string;

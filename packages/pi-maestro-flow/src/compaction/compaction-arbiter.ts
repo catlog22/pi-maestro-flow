@@ -11,6 +11,8 @@ export type CompactionOwner = CompactionRequestOwner | "native";
  */
 export interface MidTurnCompactionTrigger {
   owner: "mid-turn";
+  /** Recovery requests are fail-closed and must never enter Pi native summarization. */
+  recovery?: "provider-pressure";
   estimatedTokens: number;
   contextWindow: number;
   /** Effective trigger threshold: contextWindow - effectiveReserve. */
@@ -40,6 +42,12 @@ export type CompactionTrigger =
   | MidTurnCompactionTrigger
   | OutputLimitCompactionTrigger
   | PlanHandoffCompactionTrigger;
+
+export function isProviderPressureCompactionTrigger(
+  trigger: CompactionTrigger | undefined,
+): trigger is MidTurnCompactionTrigger & { recovery: "provider-pressure" } {
+  return trigger?.owner === "mid-turn" && trigger.recovery === "provider-pressure";
+}
 
 export type CompactionOutcome = "success" | "cancel" | "error" | "timeout";
 

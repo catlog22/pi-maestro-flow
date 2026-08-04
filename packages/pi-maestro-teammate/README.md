@@ -6,7 +6,7 @@ Pi extension for dispatching one or more role-based teammate tasks through a sin
 
 ## Breaking Changes In 1.0
 
-> Current version: **1.5.0**. The 1.0 breaking changes below remain in effect; versions 1.1–1.5 added circuit breaker, retry resilience, quiet state, duration tracking, observe `watch`/`until=completed`, per-workspace mailbox isolation, and lifecycle hardening without breaking the public API.
+> Current version: **1.7.1**. The 1.0 breaking changes below remain in effect; later releases added circuit breaker, retry resilience, quiet state, duration tracking, observe `watch`/`until=completed`, per-workspace mailbox isolation, lifecycle hardening, and receiver-safe model-registry refresh without breaking the public API.
 
 - Every public `teammate` call requires a non-empty `tasks` array.
 - Single-agent work is represented by `tasks` with one item.

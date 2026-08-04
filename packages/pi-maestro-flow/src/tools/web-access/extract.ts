@@ -6,6 +6,7 @@ import { activityMonitor } from "./activity.ts";
 import { extractRSCContent } from "./rsc-extract.ts";
 import { extractPDFToMarkdown, isPDF } from "./pdf-extract.ts";
 import { extractGitHub } from "./github-extract.ts";
+import { extractSiteContent } from "./site-extract.ts";
 import { isYouTubeURL, isYouTubeEnabled, extractYouTube, extractYouTubeFrame, extractYouTubeFrames, getYouTubeStreamInfo } from "./youtube-extract.ts";
 import { CredentialResolutionError } from "./credential-source.ts";
 import { extractWithUrlContext, extractWithGeminiWeb } from "./gemini-url-context.ts";
@@ -432,6 +433,12 @@ export async function extractContent(
 			return { url, title: "", content: "", error: message };
 		}
 	}
+
+	// Site-specific structured extractors (arXiv/SO/NVD/OSV/CISA) run before the
+	// generic HTTP pipeline; a miss or failure falls through to extractViaHttp.
+	const siteResult = await extractSiteContent(url, signal, options);
+	if (signal?.aborted) return abortedResult(url);
+	if (siteResult) return siteResult;
 
 	const ytInfo = isYouTubeURL(url);
 	let youtubeEnabled = false;

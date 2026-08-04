@@ -206,24 +206,26 @@ const TOOL_PALETTES: Record<ToolPaletteMode, Record<string, string>> = {
 		edit: "syntaxVariable",
 		write: "syntaxVariable",
 	},
-	// inspect = blue, mutate = pink, execute = green.
+	// inspect = blue, mutate = soft blue, execute = green. Mutate is never pink:
+	// syntaxKeyword renders pink in every cockpit theme, identical to the error
+	// mark, so a successful edit would read as an error.
 	family: {
 		read: "syntaxType",
 		ls: "syntaxType",
 		grep: "syntaxType",
 		find: "syntaxType",
-		edit: "syntaxKeyword",
-		write: "syntaxKeyword",
+		edit: "syntaxVariable",
+		write: "syntaxVariable",
 		bash: "syntaxString",
 	},
-	// cool reads vs warm writes; bash set apart in soft blue.
+	// cool reads vs soft-blue writes; bash set apart from the inspect group.
 	readwrite: {
 		read: "syntaxType",
 		ls: "syntaxType",
 		grep: "syntaxType",
 		find: "syntaxType",
-		edit: "syntaxKeyword",
-		write: "syntaxKeyword",
+		edit: "syntaxVariable",
+		write: "syntaxVariable",
 		bash: "syntaxVariable",
 	},
 	// view (read/ls) vs search (grep/find) split for discovery-heavy work.
@@ -232,8 +234,8 @@ const TOOL_PALETTES: Record<ToolPaletteMode, Record<string, string>> = {
 		ls: "syntaxType",
 		grep: "syntaxString",
 		find: "syntaxString",
-		edit: "syntaxKeyword",
-		write: "syntaxKeyword",
+		edit: "syntaxVariable",
+		write: "syntaxVariable",
 		bash: "syntaxVariable",
 	},
 	// single hue ramped by lightness: colourblind-safe, quietest look. State is

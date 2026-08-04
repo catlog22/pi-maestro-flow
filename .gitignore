@@ -21,6 +21,7 @@ Thumbs.db
 .history/
 .pi/settings.local.json
 .pi/scratch/
+.pi/agents/
 .workflow/*.pid
 .workflow/.backups/
 .workflow/.csv-wave/

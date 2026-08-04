@@ -211,7 +211,9 @@ function agentRows(
 			// respond to (SB-5).
 			+ (action ? `${glyphs.separator}${action}` : "")
 			+ (task ? `${glyphs.separator}${task}` : "")
-			+ (telemetry ? theme.fg("muted", `${glyphs.separator}${telemetry}`) : "");
+			+ (telemetry ? theme.fg("muted", `${glyphs.separator}${telemetry}`) : "")
+			// Viewing marker: this agent is the one shown in teammate's viewing view.
+			+ (row.viewing ? theme.fg("dim", `${glyphs.separator}viewing`) : "");
 		if (elapsed !== "") line += theme.fg("dim", `${glyphs.separator}${elapsed}`);
 		return line;
 	})];

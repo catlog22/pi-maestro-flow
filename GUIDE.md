@@ -45,13 +45,14 @@ export ANTHROPIC_API_KEY=sk-ant-...
 ### Install pi-maestro-flow
 
 ```bash
-# Install both packages (teammate auto-installed as dependency)
-pi install npm:pi-maestro-flow
+# Install or upgrade the suite (teammate auto-installs as a dependency)
+pi install npm:pi-maestro-flow@0.14.2
 
-# Verify
+# Verify that the suite components are listed, then restart Pi or reload extensions.
 pi list
-# Expected: pi-maestro-flow@0.4.1, pi-maestro-teammate@0.4.1
 ```
+
+A Flow-managed companion registration is migrated during upgrade. A same-name local development registration is intentionally preserved and reported in the startup log; update or remove that override explicitly.
 
 ### First Run
 
@@ -806,7 +807,7 @@ teammate({ agent: "delegate", context: "fresh", task: "PURPOSE: Read state and c
 
 ```bash
 # ─── Installation ───
-pi install npm:pi-maestro-flow
+pi install npm:pi-maestro-flow@0.14.2
 pi list
 
 # ─── Knowledge ───

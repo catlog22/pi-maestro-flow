@@ -90,7 +90,7 @@ export declare function clearProjectModelRoutingOverrides(cwd: string, globalFil
 export declare function promoteProjectModelRoutingOverrides(cwd: string, name: string, globalFilePath?: string): ModelRoutingState;
 export declare function deleteGlobalModelRoutingProfile(cwd: string, profileId: string, globalFilePath?: string): ModelRoutingState;
 export declare function inferTaskType(input: TaskTypeInput): TeammateTaskType | undefined;
-export declare function applyModelRouting(params: RunTeammateParams, cwd: string, availableModels?: readonly string[], globalFilePath?: string): RunTeammateParams;
+export declare function applyModelRouting(params: RunTeammateParams, cwd: string, availableModels?: readonly string[], globalFilePath?: string, inheritModel?: string): RunTeammateParams;
 export interface ModelRegistryRefreshContext {
     modelRegistry?: {
         refresh?: () => Promise<unknown>;

@@ -188,12 +188,20 @@ import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
 const specifiers = ${JSON.stringify(teammatePublicSpecifiers)};
 const loaded = [${teammatePublicSpecifiers.map((_, index) => `publicApi${index}`).join(", ")}]
   .map((publicApi) => Object.keys(publicApi).length);
+const refreshProbe = {
+  runtime: { refreshed: 0 },
+  async refresh() {
+    this.runtime.refreshed++;
+  },
+};
 export default function register(pi) {
-  pi.on("session_start", () => {
+  pi.on("session_start", async () => {
+    await refreshModelRegistry({ modelRegistry: refreshProbe });
     writeFileSync(${JSON.stringify(runtimeProbePath)}, JSON.stringify({
       specifiers,
       loaded,
       refreshModelRegistry: typeof refreshModelRegistry,
+      refreshCalls: refreshProbe.runtime.refreshed,
     }));
   });
 }
@@ -214,6 +222,7 @@ export default function register(pi) {
     assert.deepEqual(runtimeProbe.specifiers, teammatePublicSpecifiers);
     assert.equal(runtimeProbe.loaded.length, teammatePublicSpecifiers.length);
     assert.equal(runtimeProbe.refreshModelRegistry, "function");
+    assert.equal(runtimeProbe.refreshCalls, 1);
     assert.match(
       run(
         [process.execPath],
@@ -234,7 +243,8 @@ export default function register(pi) {
       `${teammatePublicSpecifiers
         .map((specifier, index) => `import * as publicApi${index} from ${JSON.stringify(specifier)};`)
         .join("\n")}
-void [${teammatePublicSpecifiers.map((_, index) => `publicApi${index}`).join(", ")}];
+import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
+void [${teammatePublicSpecifiers.map((_, index) => `publicApi${index}`).join(", ")}, refreshModelRegistry];
 `,
     );
     writeFileSync(

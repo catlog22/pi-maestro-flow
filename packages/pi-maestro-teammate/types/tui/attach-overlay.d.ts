@@ -4,6 +4,11 @@
  */
 import { type Component, type Focusable } from "@earendil-works/pi-tui";
 import type { ActiveAgent, AgentProgressSnapshot, MessageEnvelope } from "../shared/types.ts";
+import type { TranscriptLoad, TranscriptRow } from "../shared/transcript.ts";
+/** Loader injected by the extension; reads the agent's session file. */
+export type TranscriptLoader = (agent: ActiveAgent) => Promise<TranscriptLoad>;
+/** Tab identity for the main conversation — a switching target, not a log. */
+export declare const MAIN_TAB = "__main__";
 export interface ToolEntry {
     name: string;
     status: "running" | "completed" | "failed";
@@ -40,6 +45,18 @@ interface AgentLog {
     progress: AgentProgressSnapshot[];
     selectedTaskIndex?: number;
     logCache?: LogRenderCache;
+    /** Full conversation view state (t/v keys). */
+    transcript?: TranscriptLoad;
+    transcriptLoading?: boolean;
+    transcriptMode: boolean;
+    transcriptError?: string;
+    transcriptRefreshTimer?: ReturnType<typeof setTimeout>;
+    transcriptCache?: {
+        width: number;
+        rows: TranscriptRow[];
+        loading: boolean;
+        rendered: string[];
+    };
 }
 export declare class AttachOverlay implements Component, Focusable {
     focused: boolean;
@@ -50,6 +67,7 @@ export declare class AttachOverlay implements Component, Focusable {
     private order;
     private readonly onDone;
     private readonly getActiveRuns;
+    private readonly loadTranscript?;
     private requestRender;
     private frame;
     private timer;
@@ -65,7 +83,7 @@ export declare class AttachOverlay implements Component, Focusable {
     constructor(initial: ActiveAgent, onDone: () => void, getActiveRuns?: () => Map<string, ActiveAgent>, onSend?: (correlationId: string, message: string) => Promise<{
         ok: boolean;
         message: string;
-    }>);
+    }>, loadTranscript?: TranscriptLoader, initialTranscript?: boolean);
     setRequestRender(fn: () => void): void;
     /**
      * The overlay only ever draws the active tab, but progress events arrive for
@@ -86,6 +104,8 @@ export declare class AttachOverlay implements Component, Focusable {
     handleInput(data: string): void;
     private dispatchDecodedToken;
     private handleDecodedInput;
+    /** Composer key handling shared by wide and narrow render paths. */
+    private handleComposerKey;
     private insertDraft;
     invalidate(): void;
     render(width: number, height?: number): string[];
@@ -94,6 +114,27 @@ export declare class AttachOverlay implements Component, Focusable {
     private renderProgressTree;
     private renderSelectedTools;
     private buildSelectedLog;
+    /**
+     * First load of an agent's conversation from its session file. Tolerant of
+     * failures — the live activity log remains the fallback view.
+     */
+    private ensureTranscript;
+    /**
+     * Live IPC arrived for a running agent whose transcript tab is open —
+     * debounce a disk refresh so new session entries appear without a manual
+     * reload. The loader is cheap (incremental read of an append-only file).
+     */
+    noteLiveEvent(cid: string): void;
+    private refreshTranscript;
+    /** Rows beyond this cap are hidden behind a dim marker (scroll not affected). */
+    private static readonly TRANSCRIPT_MAX_ROWS;
+    private buildTranscript;
+    private renderTranscriptRow;
+    /** Prefix a multi-line text block, indenting continuation lines. */
+    private prefixedLines;
+    /** First maxLines text lines, each truncated to width, with a … marker. */
+    private limitText;
+    private renderMainTab;
     private renderCompact;
     private renderFrame;
     private renderTabs;

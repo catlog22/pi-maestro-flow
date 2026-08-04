@@ -56,6 +56,7 @@ const ALWAYS_ALLOWED_TOOLS = new Set([
   "plan-exit",
   "plan-status",
   "search_tool_bm25",
+  "resource",
 ]);
 
 const EDIT_TOOLS = new Set(["Edit", "Write", "NotebookEdit"]);
@@ -89,6 +90,15 @@ export function evaluatePermission(
   }
   if (ALWAYS_ALLOWED_TOOLS.has(toolName)) {
     return { behavior: "allow", reason: `${toolName} is an internal or read-only tool.` };
+  }
+  if (toolName === "conflict") {
+    const conflictAction = typeof call.input.action === "string" ? call.input.action : "";
+    if (conflictAction === "list" || conflictAction === "diff") {
+      return { behavior: "allow", reason: "conflict list/diff is read-only." };
+    }
+    if (mode === "acceptEdits") {
+      return { behavior: "allow", reason: "acceptEdits mode allows conflict resolution writes." };
+    }
   }
   if (mode === "acceptEdits" && EDIT_TOOLS.has(toolName)) {
     return { behavior: "allow", reason: "acceptEdits mode allows file edit tools." };

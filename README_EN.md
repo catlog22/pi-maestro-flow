@@ -71,12 +71,11 @@ pi-maestro-flow is a **Pi plugin** — install it with `pi install` (not a regul
 
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # host runtime
-pi install npm:pi-maestro-flow                                     # install the plugin
-pi list                                                            # verify
-# Expected: pi-maestro-flow@0.10.0, pi-maestro-teammate@1.2.0, pi-cockpit@0.4.0
+pi install npm:pi-maestro-flow@0.14.2                              # install or upgrade the plugin
+pi list                                                            # confirm Flow, Teammate, and Cockpit are listed
 ```
 
-Installing `pi-maestro-flow` automatically pulls and registers `pi-maestro-teammate` and `pi-cockpit` — no manual setup required.
+Installing `pi-maestro-flow` automatically pulls and registers `pi-maestro-teammate` and `pi-cockpit`. Upgrades migrate Flow-managed companion paths; a same-name local development override is preserved and reported in the startup log, so update or remove that override explicitly. Restart Pi or reload extensions before retrying model-sensitive work.
 
 ## Quick Start
 

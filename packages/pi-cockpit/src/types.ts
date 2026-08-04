@@ -4,9 +4,13 @@
 export const TEAMMATE_STARTED_EVENT = "teammate:started";
 export const TEAMMATE_MESSAGE_EVENT = "teammate:message";
 export const TEAMMATE_COMPLETE_EVENT = "teammate:complete";
+export const TEAMMATE_VIEWING_EVENT = "teammate:viewing";
+export const TEAMMATE_OPEN_AGENT_EVENT = "teammate:open-agent";
 export const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
 export const BASH_BG_UPDATE_EVENT = "bash-bg:update";
 export const BASH_BG_QUERY_EVENT = "bash-bg:query";
+// Unified supervision telemetry from the shared layer (pi-maestro-teammate/v1/supervision).
+export const SUPERVISION_EVENT = "supervision:event";
 export const WORKFLOW_STATUS_KEY = "maestro-workflow";
 
 // Widget keys owned by pi-cockpit. Native Flow/teammate widgets yield through
@@ -46,6 +50,8 @@ export interface AgentRow {
 	lastActivityAt: number;
 	/** When the agent published its final result while lifecycle is still confirming (running). */
 	resultReadyAt?: number;
+	/** True when this agent is the one currently shown in the teammate viewing view. */
+	viewing?: boolean;
 	toolCount?: number;
 	tokens?: number;
 	inputTokens?: number;

@@ -513,10 +513,12 @@ export function buildMidTurnTrigger(input: {
   estimatedTokens: number;
   threshold: CompactionThresholdDerivation;
   configuredReserveTokens: number;
+  recovery?: "provider-pressure";
 }): CompactionTrigger {
   const derivation = input.threshold;
   return {
     owner: "mid-turn",
+    ...(input.recovery ? { recovery: input.recovery } : {}),
     estimatedTokens: input.estimatedTokens,
     contextWindow: derivation.contextWindow,
     effectiveThresholdTokens: derivation.thresholdTokens,

@@ -1,6 +1,6 @@
 {
   "name": "pi-maestro-flow",
-  "version": "0.14.1",
+  "version": "0.14.2",
   "description": "All-in-one multi-agent orchestration for the Pi coding agent — parallel teammate dispatch, goals, plans, knowledge system, MCP/LSP/browser, and cockpit visualization in a single install",
   "type": "module",
   "engines": {
@@ -80,7 +80,8 @@
   },
   "pi": {
     "extensions": [
-      "./src/extension/index.ts"
+      "./src/extension/index.ts",
+      "./src/advisor/extension.ts"
     ],
     "skills": [
       "./.pi/skills"
@@ -97,9 +98,9 @@
     "maestro-flow": "0.5.61",
     "open": "10.2.0",
     "p-limit": "^7.3.1",
-    "pi-cockpit": "0.9.0",
+    "pi-cockpit": "0.9.1",
     "pi-maestro-settings-core": "0.1.0",
-    "pi-maestro-teammate": "1.7.0",
+    "pi-maestro-teammate": "1.7.1",
     "promise.try": "^2.0.1",
     "proper-lockfile": "4.1.2",
     "puppeteer-core": "24.31.0",
@@ -133,10 +134,10 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.82.1",
-    "@earendil-works/pi-ai": "0.82.1",
-    "@earendil-works/pi-coding-agent": "0.82.1",
-    "@earendil-works/pi-tui": "0.82.1",
+    "@earendil-works/pi-agent-core": "0.83.0",
+    "@earendil-works/pi-ai": "0.83.0",
+    "@earendil-works/pi-coding-agent": "0.83.0",
+    "@earendil-works/pi-tui": "0.83.0",
     "@types/cross-spawn": "6.0.6",
     "typescript": "5.7.3",
     "vitest": "^4.1.10"

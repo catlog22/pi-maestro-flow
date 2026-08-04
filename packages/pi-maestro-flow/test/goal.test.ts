@@ -29,6 +29,7 @@ import {
   isRetryableGoalFailure,
   onAgentEnd,
   onAgentSettled,
+  onProviderPressureSettled,
   onBeforeAgentStart,
   onBeforeCompact,
   onCompactionCancelled,
@@ -50,6 +51,41 @@ import {
   onSessionStart,
   type GoalContext,
 } from "../src/tools/goal.ts";
+
+test("provider-pressure settlement keeps an active Goal owned without consuming an iteration", () => {
+  initGoal({ appendEntry() {} } as never);
+  const ctx = createContext();
+  onSessionStart(ctx, { reason: "new" });
+  try {
+    const goal = addGoal("Continue after reactive compaction", ctx);
+    onProviderPressureSettled(ctx);
+    const active = getActiveGoal();
+    assert.equal(active?.id, goal.id);
+    assert.equal(active?.status, "active");
+    assert.equal(active?.iteration, 0);
+  } finally {
+    onSessionShutdown(ctx);
+  }
+});
+
+test("session_compact projection defers Goal continuation until the host reconnects", async () => {
+  const sent: string[] = [];
+  initGoal({
+    appendEntry() {},
+    sendMessage(message: { content?: string }) { sent.push(message.content ?? ""); },
+  } as never);
+  const ctx = createContext({ hasPendingMessages: () => false });
+  onSessionStart(ctx, { reason: "new" });
+  try {
+    addGoal("Continue only after reconnect", ctx);
+    await onCompact({}, ctx, { deferContinuation: true });
+    assert.deepEqual(sent, []);
+    await onCompact({}, ctx);
+    assert.equal(sent.length, 1, "the post-reconnect owner may deliver exactly one continuation");
+  } finally {
+    onSessionShutdown(ctx);
+  }
+});
 
 test("goal acceptance schema documents create/update, deterministic verification, and the command length boundary", () => {
   const acceptanceSchema = GoalToolParams.properties.acceptance;

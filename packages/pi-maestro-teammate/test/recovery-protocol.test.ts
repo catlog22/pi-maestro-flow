@@ -234,6 +234,18 @@ test("blocked replay fences cannot authorize fallback restarts", () => {
   assert.equal(reduceRecoveryEvent(ended, decision(1, "attempt-1", fallbackModel)).phase, "active");
 });
 
+test("force_restart explicitly authorizes a blocked replay fence", () => {
+  const ended = reduceRecoveryEvent(createRecoveryProtocolState(recoveryId), attemptEnded(0, "attempt-1"));
+  const forcedRestart = structuredClone(fallbackModel);
+  forcedRestart.mode = "force_restart";
+
+  const decided = reduceRecoveryEvent(ended, decision(1, "attempt-1", forcedRestart));
+  assert.equal(decided.phase, "active");
+  assert.equal(decided.attempts[0]?.decision?.intent.kind, "fallback_model");
+  assert.equal(decided.attempts[0]?.decision?.intent.mode, "force_restart");
+  assert.equal(decided.attempts[0]?.decision?.intent.replayFence.blocked, true);
+});
+
 test("settlement must match the settle intent outcome and reason", () => {
   const ended = reduceRecoveryEvent(createRecoveryProtocolState(recoveryId), attemptEnded(0, "attempt-1"));
   const settleFailure: RecoveryIntent = {

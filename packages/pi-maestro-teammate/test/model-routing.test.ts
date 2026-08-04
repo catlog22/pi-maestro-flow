@@ -1109,6 +1109,38 @@ test("refreshModelRegistry calls refresh on the registry receiver and coalesces"
   assert.equal(registry.runtime.refreshed, 1);
 });
 
+test("refreshModelRegistry coalesces only calls for the same registry", async () => {
+  let callsA = 0;
+  let callsB = 0;
+  let releaseA: (() => void) | undefined;
+  const gateA = new Promise<void>((resolve) => { releaseA = resolve; });
+  const registryA = {
+    runtime: { refreshed: 0 },
+    async refresh(): Promise<void> {
+      this.runtime.refreshed++;
+      callsA++;
+      await gateA;
+    },
+  };
+  const registryB = {
+    runtime: { refreshed: 0 },
+    async refresh(): Promise<void> {
+      this.runtime.refreshed++;
+      callsB++;
+    },
+  };
+
+  const pendingA = refreshModelRegistry({ modelRegistry: registryA as never });
+  const pendingB = refreshModelRegistry({ modelRegistry: registryB as never });
+  releaseA?.();
+  await Promise.all([pendingA, pendingB]);
+
+  assert.equal(callsA, 1);
+  assert.equal(callsB, 1, "a separate registry must not reuse another registry's refresh");
+  assert.equal(registryA.runtime.refreshed, 1);
+  assert.equal(registryB.runtime.refreshed, 1);
+});
+
 test("refreshModelRegistry without a refresh-capable registry is a no-op", async () => {
   await refreshModelRegistry({});
   await refreshModelRegistry({ modelRegistry: undefined });

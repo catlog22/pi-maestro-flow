@@ -33,6 +33,8 @@ const GUI_FLOW_TOOL_NAMES = new Set([
   "todo",
   "run-control",
   "ask-user-question",
+  "resource",
+  "conflict",
 ]);
 
 /** Locked UCL surface: Flow tools, Plan tools, and dynamically registered MCP tools. */

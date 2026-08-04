@@ -2,7 +2,7 @@
 
 A responsive **agent cockpit** for [Pi](https://pi.dev): wide terminals get a docked Maestro operations sidebar, narrow terminals automatically fall back to the existing Todo and Agent widgets, and every layout keeps the Starship-style footer.
 
-It is the third plugin of the `pi-maestro-flow` project (alongside `pi-maestro-flow` and `pi-maestro-teammate`). It is installed and registered with `pi-maestro-flow`, but it also runs standalone. Current version: **0.8.0**.
+It is the third plugin of the `pi-maestro-flow` project (alongside `pi-maestro-flow` and `pi-maestro-teammate`). It is installed and registered with `pi-maestro-flow`, but it also runs standalone. Current version: **0.9.1**.
 
 The dock is a non-capturing top-right overlay. Cockpit reserves its columns by wrapping the active TUI renderer at runtime, so the Pi workspace reflows instead of rendering underneath it. No Pi source files are modified.
 
@@ -25,7 +25,7 @@ The dock is a non-capturing top-right overlay. Cockpit reserves its columns by w
 `pi-cockpit` comes automatically with the orchestration layer — installing `pi-maestro-flow` pulls `pi-cockpit` and registers it into `settings.packages` on postinstall, no manual setup required. To use it on its own:
 
 ```bash
-pi install npm:pi-cockpit     # standalone from npm
+pi install npm:pi-cockpit@0.9.1     # standalone from npm
 # or, for one run:
 pi -e ./packages/pi-cockpit
 ```
@@ -122,7 +122,7 @@ The tab title is `frame + pi - <session> - <working state>`. The session part fo
 
 ## Sidebar compatibility
 
-The split-pane wrapper depends on Pi's current TUI renderer shape and is verified against Pi `0.82.1`. A render integration failure disables the split and retries the original renderer at full width.
+The split-pane wrapper depends on Pi's current TUI renderer shape and is verified against Pi `0.83.0`. A render integration failure disables the split and retries the original renderer at full width.
 
 Do not enable `pi-cockpit`'s dock and `pi-atelier@0.7.0`'s sidebar together. Both reserve columns by wrapping the same renderer, and `pi-atelier@0.7.0` does not participate in Cockpit's split-owner marker protocol. Use `"sidebar": { "mode": "off" }` when running Atelier.
 

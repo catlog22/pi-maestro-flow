@@ -28,6 +28,10 @@ import {
   toneText,
   type ProgressPalette,
 } from "./progress-tree.ts";
+import type { TranscriptLoad, TranscriptRow } from "../shared/transcript.ts";
+
+/** Loader injected by the extension; reads the agent's session file. */
+export type TranscriptLoader = (agent: ActiveAgent) => Promise<TranscriptLoad>;
 import {
   BracketedPasteDecoder,
   nextGraphemeBoundary,
@@ -44,6 +48,9 @@ const INBOX_PREVIEW_LINES = 4;
 const GRAPH_LIST_MAX_ROWS = 7;
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPINNER_MS = 120;
+
+/** Tab identity for the main conversation — a switching target, not a log. */
+export const MAIN_TAB = "__main__";
 
 export interface ToolEntry {
   name: string;
@@ -78,6 +85,18 @@ interface AgentLog {
   progress: AgentProgressSnapshot[];
   selectedTaskIndex?: number;
   logCache?: LogRenderCache;
+  /** Full conversation view state (t/v keys). */
+  transcript?: TranscriptLoad;
+  transcriptLoading?: boolean;
+  transcriptMode: boolean;
+  transcriptError?: string;
+  transcriptRefreshTimer?: ReturnType<typeof setTimeout>;
+  transcriptCache?: {
+    width: number;
+    rows: TranscriptRow[];
+    loading: boolean;
+    rendered: string[];
+  };
 }
 
 const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
@@ -169,6 +188,7 @@ export class AttachOverlay implements Component, Focusable {
   private order: string[] = [];
   private readonly onDone: () => void;
   private readonly getActiveRuns: () => Map<string, ActiveAgent>;
+  private readonly loadTranscript?: TranscriptLoader;
   private requestRender: (() => void) | null = null;
   private frame = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -187,12 +207,23 @@ export class AttachOverlay implements Component, Focusable {
     onDone: () => void,
     getActiveRuns?: () => Map<string, ActiveAgent>,
     onSend?: (correlationId: string, message: string) => Promise<{ ok: boolean; message: string }>,
+    loadTranscript?: TranscriptLoader,
+    initialTranscript = false,
   ) {
     this.onDone = onDone;
     this.getActiveRuns = getActiveRuns ?? (() => new Map());
     this.onSend = onSend;
+    this.loadTranscript = loadTranscript;
     this.activeId = initial.correlationId;
+    this.order.push(MAIN_TAB);
     this.addAgent(initial);
+    if (initialTranscript) {
+      const log = this.agents.get(this.activeId);
+      if (log && this.loadTranscript) {
+        log.transcriptMode = true;
+        this.ensureTranscript(log);
+      }
+    }
 
     this.timer = setInterval(() => {
       this.frame = (this.frame + 1) % SPINNER.length;
@@ -233,6 +264,7 @@ export class AttachOverlay implements Component, Focusable {
       streamingText: "",
       activeTools: [],
       progress: agent.progress ?? [],
+      transcriptMode: false,
     });
     this.order.push(agent.correlationId);
   }
@@ -336,11 +368,30 @@ export class AttachOverlay implements Component, Focusable {
     const index = Math.max(0, this.order.indexOf(this.activeId));
     this.activeId = this.order[(index + direction + this.order.length) % this.order.length];
     this.dirtyAgents.delete(this.activeId);
+    const log = this.agents.get(this.activeId);
+    if (log && log.transcriptMode && !log.transcript && this.loadTranscript) {
+      this.ensureTranscript(log);
+    }
     this.requestRender?.();
   }
 
   handleInput(data: string): void {
     if (this.lastWidth < 20) {
+      // Ultra-narrow mode deliberately blocks composing (the composer is not
+      // visible — blind sends must not be possible). The one exception: if
+      // composing started wide and the terminal shrank, Esc cancels the draft
+      // instead of closing the overlay, matching renderCompact's hint.
+      if (this.composing) {
+        if (matchesKey(data, Key.escape)) {
+          this.composing = false;
+          this.sendStatus = "Message cancelled";
+        }
+        return;
+      }
+      if (this.activeId === MAIN_TAB && matchesKey(data, Key.enter)) {
+        this.onDone();
+        return;
+      }
       if (matchesKey(data, Key.escape) || data === "q") this.onDone();
       else if (matchesKey(data, Key.left) || matchesKey(data, Key.shift("tab"))) this.switchAgent(-1);
       else if (matchesKey(data, Key.right) || matchesKey(data, Key.tab)) this.switchAgent(1);
@@ -369,62 +420,18 @@ export class AttachOverlay implements Component, Focusable {
 
   private handleDecodedInput(data: string): void {
     if (this.composing) {
-      if (this.sending) return;
-      if (matchesKey(data, Key.escape)) {
-        this.composing = false;
-        this.sendStatus = "Message cancelled";
-      } else if (matchesKey(data, Key.enter)) {
-        const message = this.draft.trim();
-        if (!message || !this.onSend) {
-          this.sendStatus = message ? "Message cannot be sent" : "Message is empty";
-          this.requestRender?.();
-          return;
-        }
-        this.sending = true;
-        this.sendStatus = "Sending…";
-        void Promise.resolve(this.onSend(this.activeId, message)).then((result) => {
-          this.sending = false;
-          if (result.ok) {
-            this.composing = false;
-            this.draft = "";
-            this.cursor = 0;
-            this.sendStatus = result.message;
-          } else {
-            this.composing = true;
-            this.sendStatus = `${result.message} · Enter retry · Esc cancel`;
-          }
-          this.requestRender?.();
-        }).catch((error: unknown) => {
-          this.sending = false;
-          this.composing = true;
-          this.sendStatus = `Send failed · ${error instanceof Error ? error.message : String(error)} · Enter retry · Esc cancel`;
-          this.requestRender?.();
-        });
-      } else if (matchesKey(data, Key.backspace)) {
-        if (this.cursor > 0) {
-          const previous = previousGraphemeBoundary(this.draft, this.cursor);
-          this.draft = this.draft.slice(0, previous) + this.draft.slice(this.cursor);
-          this.cursor = previous;
-        }
-      } else if (matchesKey(data, Key.left)) {
-        this.cursor = previousGraphemeBoundary(this.draft, this.cursor);
-      } else if (matchesKey(data, Key.right)) {
-        this.cursor = nextGraphemeBoundary(this.draft, this.cursor);
-      } else if (matchesKey(data, Key.up) || matchesKey(data, Key.down)
-        || matchesKey(data, Key.home) || matchesKey(data, Key.end)
-        || matchesKey(data, Key.pageUp) || matchesKey(data, Key.pageDown)
-        || matchesKey(data, Key.delete)) {
-        // 忽略导航/功能键，避免转义序列残渣（如 `[A`）混入文本。
-      } else if (data.startsWith("\x1b")) {
-        // 兜底：丢弃以 ESC 开头的未识别序列（拆分到达的 CSI/SS3 残渣）。
-      } else {
-        this.insertDraft(sanitizeSingleLineInput(data));
-      }
+      this.handleComposerKey(data);
       this.requestRender?.();
       return;
     }
     if (matchesKey(data, Key.escape) || data === "q") {
       this.onDone();
+      return;
+    }
+    if (this.activeId === MAIN_TAB) {
+      // The main tab is a switching target, not a log: Enter returns to the
+      // main conversation. Navigation keys are handled above.
+      if (matchesKey(data, Key.enter)) this.onDone();
       return;
     }
     if (matchesKey(data, Key.enter) && this.onSend) {
@@ -452,6 +459,15 @@ export class AttachOverlay implements Component, Focusable {
 
     const log = this.agents.get(this.activeId);
     if (!log) return;
+    if (data === "t" || data === "v") {
+      if (!this.loadTranscript) return;
+      const enter = data === "v" || !log.transcriptMode;
+      if (enter && !log.transcript) this.ensureTranscript(log);
+      log.transcriptMode = enter;
+      if (enter) log.followTail = true;
+      this.requestRender?.();
+      return;
+    }
     if (data === "0" && log.progress.length > 0) {
       log.selectedTaskIndex = undefined;
       log.followTail = true;
@@ -486,6 +502,60 @@ export class AttachOverlay implements Component, Focusable {
     this.requestRender?.();
   }
 
+  /** Composer key handling shared by wide and narrow render paths. */
+  private handleComposerKey(data: string): void {
+    if (this.sending) return;
+    if (matchesKey(data, Key.escape)) {
+      this.composing = false;
+      this.sendStatus = "Message cancelled";
+    } else if (matchesKey(data, Key.enter)) {
+      const message = this.draft.trim();
+      if (!message || !this.onSend) {
+        this.sendStatus = message ? "Message cannot be sent" : "Message is empty";
+        return;
+      }
+      this.sending = true;
+      this.sendStatus = "Sending…";
+      void Promise.resolve(this.onSend(this.activeId, message)).then((result) => {
+        this.sending = false;
+        if (result.ok) {
+          this.composing = false;
+          this.draft = "";
+          this.cursor = 0;
+          this.sendStatus = result.message;
+        } else {
+          this.composing = true;
+          this.sendStatus = `${result.message} · Enter retry · Esc cancel`;
+        }
+        this.requestRender?.();
+      }).catch((error: unknown) => {
+        this.sending = false;
+        this.composing = true;
+        this.sendStatus = `Send failed · ${error instanceof Error ? error.message : String(error)} · Enter retry · Esc cancel`;
+        this.requestRender?.();
+      });
+    } else if (matchesKey(data, Key.backspace)) {
+      if (this.cursor > 0) {
+        const previous = previousGraphemeBoundary(this.draft, this.cursor);
+        this.draft = this.draft.slice(0, previous) + this.draft.slice(this.cursor);
+        this.cursor = previous;
+      }
+    } else if (matchesKey(data, Key.left)) {
+      this.cursor = previousGraphemeBoundary(this.draft, this.cursor);
+    } else if (matchesKey(data, Key.right)) {
+      this.cursor = nextGraphemeBoundary(this.draft, this.cursor);
+    } else if (matchesKey(data, Key.up) || matchesKey(data, Key.down)
+      || matchesKey(data, Key.home) || matchesKey(data, Key.end)
+      || matchesKey(data, Key.pageUp) || matchesKey(data, Key.pageDown)
+      || matchesKey(data, Key.delete)) {
+      // 忽略导航/功能键，避免转义序列残渣（如 `[A`）混入文本。
+    } else if (data.startsWith("\x1b")) {
+      // 兜底：丢弃以 ESC 开头的未识别序列（拆分到达的 CSI/SS3 残渣）。
+    } else {
+      this.insertDraft(sanitizeSingleLineInput(data));
+    }
+  }
+
   private insertDraft(input: string): void {
     if (!input) return;
     this.draft = this.draft.slice(0, this.cursor) + input + this.draft.slice(this.cursor);
@@ -505,6 +575,10 @@ export class AttachOverlay implements Component, Focusable {
     if (targetHeight <= 12) return this.renderDocked(log, w, targetHeight);
     const inner = w - 2;
     const rows: string[] = [this.renderTabs(inner), frameRule(inner)];
+
+    if (this.activeId === MAIN_TAB) {
+      return this.renderMainTab(rows, inner, w);
+    }
 
     if (!log) {
       rows.push(dim("No agent selected"));
@@ -548,7 +622,9 @@ export class AttachOverlay implements Component, Focusable {
 
     const logLines = selected
       ? this.buildSelectedLog(selected, Math.max(1, inner - 2))
-      : this.buildLog(log, Math.max(1, inner - 2));
+      : log.transcriptMode
+        ? this.buildTranscript(log, Math.max(1, inner - 2))
+        : this.buildLog(log, Math.max(1, inner - 2));
     const tailRows: string[] = [];
     if (agent.status === "sleeping") {
       tailRows.push(frameRule(inner));
@@ -581,11 +657,15 @@ export class AttachOverlay implements Component, Focusable {
     const agentHint = log.progress.length > 1
       ? `  ${dim("0")} overview  ${dim(`1-${Math.min(9, log.progress.length)}`)} view`
       : "";
+    const transcriptHint = this.loadTranscript
+      ? log.transcriptMode ? "t activity" : "t transcript"
+      : "";
     out.push(dim(fitFooter(w, [
       "Esc back",
       this.onSend ? "Enter message" : "",
       `←→ switch(${this.order.length})`,
       agentHint.trim(),
+      transcriptHint,
       `↑↓ scroll${range}`,
     ])));
     return out;
@@ -612,6 +692,13 @@ export class AttachOverlay implements Component, Focusable {
   }
 
   private renderDocked(log: AgentLog | undefined, width: number, height: number): string[] {
+    if (this.activeId === MAIN_TAB) {
+      return [
+        this.renderTabs(width),
+        truncateToWidth(dim("● main conversation · Enter return"), width, "…"),
+        dim(fitFooter(width, ["Esc back", "←→ switch", "Enter return"])),
+      ];
+    }
     if (!log) {
       return [
         truncateToWidth(dim("Agents · no active session"), width, "…"),
@@ -637,6 +724,7 @@ export class AttachOverlay implements Component, Focusable {
       this.onSend ? "Enter message" : "",
       "←→ switch",
       log.progress.length > 1 ? `0 overview · 1-${Math.min(9, log.progress.length)} view` : "",
+      this.loadTranscript ? (log.transcriptMode ? "t activity" : "t transcript") : "",
       "↑↓ scroll",
     ]));
     const tailRows: string[] = [];
@@ -667,10 +755,12 @@ export class AttachOverlay implements Component, Focusable {
 
     const streamLines = selected
       ? this.buildSelectedLog(selected, width)
-      : [
-          ...this.buildLog(log, width),
-          ...log.streamingText.split("\n").filter((line) => line.trim()).slice(-STREAMING_MAX_LINES),
-        ];
+      : log.transcriptMode
+        ? this.buildTranscript(log, width)
+        : [
+            ...this.buildLog(log, width),
+            ...log.streamingText.split("\n").filter((line) => line.trim()).slice(-STREAMING_MAX_LINES),
+          ];
     if (streamLines.length === 0) streamLines.push(dim("Waiting for output…"));
 
     const contentHeight = Math.max(0, height - lines.length - tailRows.length);
@@ -730,10 +820,193 @@ export class AttachOverlay implements Component, Focusable {
     return lines;
   }
 
+  /**
+   * First load of an agent's conversation from its session file. Tolerant of
+   * failures — the live activity log remains the fallback view.
+   */
+  private ensureTranscript(log: AgentLog): void {
+    if (!this.loadTranscript || log.transcriptLoading) return;
+    log.transcriptLoading = true;
+    log.transcriptError = undefined;
+    this.requestRender?.();
+    void this.loadTranscript(log.agent).then((transcript) => {
+      const live = this.agents.get(log.agent.correlationId);
+      if (!live) return;
+      live.transcript = transcript;
+      live.transcriptLoading = false;
+      this.requestRender?.();
+    }).catch((error: unknown) => {
+      const live = this.agents.get(log.agent.correlationId);
+      if (!live) return;
+      live.transcriptLoading = false;
+      live.transcriptError = error instanceof Error ? error.message : String(error);
+      this.requestRender?.();
+    });
+  }
+
+  /**
+   * Live IPC arrived for a running agent whose transcript tab is open —
+   * debounce a disk refresh so new session entries appear without a manual
+   * reload. The loader is cheap (incremental read of an append-only file).
+   */
+  noteLiveEvent(cid: string): void {
+    const log = this.agents.get(cid);
+    if (!log || !log.transcriptMode || !this.loadTranscript) return;
+    if (log.transcriptRefreshTimer) clearTimeout(log.transcriptRefreshTimer);
+    log.transcriptRefreshTimer = setTimeout(() => {
+      log.transcriptRefreshTimer = undefined;
+      if (!log.transcriptLoading) this.refreshTranscript(log);
+    }, 300);
+  }
+
+  private refreshTranscript(log: AgentLog): void {
+    if (!this.loadTranscript) return;
+    log.transcriptLoading = true;
+    this.requestRender?.();
+    void this.loadTranscript(log.agent).then((next) => {
+      const live = this.agents.get(log.agent.correlationId);
+      if (!live) return;
+      live.transcript = next;
+      live.transcriptLoading = false;
+      this.requestRender?.();
+    }).catch(() => {
+      const live = this.agents.get(log.agent.correlationId);
+      if (!live) return;
+      live.transcriptLoading = false;
+      this.requestRender?.();
+    });
+  }
+
+  /** Rows beyond this cap are hidden behind a dim marker (scroll not affected). */
+  private static readonly TRANSCRIPT_MAX_ROWS = 2000;
+
+  private buildTranscript(log: AgentLog, width: number): string[] {
+    const transcript = log.transcript;
+    if (!transcript) {
+      return [dim(log.transcriptLoading ? "Loading transcript…" : "No transcript available")];
+    }
+    if (transcript.rows.length === 0) {
+      return [dim("Transcript is empty")];
+    }
+    const cache = log.transcriptCache;
+    if (
+      cache
+      && cache.width === width
+      && cache.rows === transcript.rows
+      && cache.loading === log.transcriptLoading
+    ) {
+      return cache.rendered;
+    }
+    const start = transcript.rows.length > AttachOverlay.TRANSCRIPT_MAX_ROWS
+      ? transcript.rows.length - AttachOverlay.TRANSCRIPT_MAX_ROWS
+      : 0;
+    const out: string[] = [];
+    if (start > 0) out.push(dim(`… ${start} older messages hidden`));
+    for (let i = start; i < transcript.rows.length; i++) {
+      out.push(...this.renderTranscriptRow(transcript.rows[i]!, width));
+    }
+    if (log.transcriptLoading) out.push(dim("Refreshing…"));
+    if (transcript.source === "memory") {
+      out.push(dim("Live activity — no persisted session"));
+    }
+    log.transcriptCache = {
+      width,
+      rows: transcript.rows,
+      loading: log.transcriptLoading ?? false,
+      rendered: out,
+    };
+    return out;
+  }
+
+  private renderTranscriptRow(row: TranscriptRow, width: number): string[] {
+    const contentWidth = Math.max(1, width - 2);
+    switch (row.kind) {
+      case "user":
+        return this.prefixedLines(
+          `${progressPalette.accent("❯")} `,
+          row.text,
+          contentWidth,
+          3,
+        );
+      case "assistant":
+        return this.prefixedLines(
+          `${progressPalette.dim("·")} `,
+          row.text,
+          contentWidth,
+          3,
+        );
+      case "tool": {
+        const name = row.toolName ?? "tool";
+        const head = `${progressPalette.dim("▸")} ${progressPalette.accent(name)} `;
+        const lines = this.limitText(row.text, contentWidth - visibleWidth(head), 1);
+        if (lines.length === 0) return [head.trimEnd()];
+        return lines.map((line, i) => i === 0 ? `${head}${line}` : line);
+      }
+      case "tool_result": {
+        const mark = row.isError ? progressPalette.error("✗") : progressPalette.dim("·");
+        return this.prefixedLines(`${mark} `, row.text, contentWidth, 3);
+      }
+      case "thinking": {
+        const lines = row.text.trim().split("\n").filter((line) => line.trim() !== "");
+        const preview = lines[0] ?? "";
+        const suffix = lines.length > 1 ? progressPalette.dim(` (${lines.length} lines)`) : "";
+        // Truncate the preview against the width left after the suffix, so the
+        // line-count hint is never cut by the outer frame truncation.
+        const available = Math.max(1, contentWidth - visibleWidth(suffix));
+        return [`${progressPalette.dim("…")} ${progressPalette.dim(truncateToWidth(preview, available, "…"))}${suffix}`];
+      }
+      case "meta":
+        return [progressPalette.dim(`─ ${truncateToWidth(row.text, contentWidth, "…")}`)];
+      case "system":
+      default:
+        return this.prefixedLines(progressPalette.dim("»") + " ", row.text, contentWidth, 3);
+    }
+  }
+
+  /** Prefix a multi-line text block, indenting continuation lines. */
+  private prefixedLines(
+    prefix: string,
+    text: string,
+    width: number,
+    maxLines: number,
+  ): string[] {
+    const lines = this.limitText(text, Math.max(1, width - visibleWidth(prefix)), maxLines);
+    if (lines.length === 0) return [prefix.trimEnd()];
+    const indent = " ".repeat(visibleWidth(prefix));
+    return lines.map((line, i) => (i === 0 ? `${prefix}${line}` : `${indent}${line}`));
+  }
+
+  /** First maxLines text lines, each truncated to width, with a … marker. */
+  private limitText(text: string, width: number, maxLines: number): string[] {
+    const trimmed = text.trim();
+    if (!trimmed) return [];
+    const raw = trimmed.split("\n").map((line) => line.trimEnd());
+    const shown = raw.slice(0, maxLines).map((line) => truncateToWidth(line, width, "…"));
+    if (raw.length > maxLines) shown.push(progressPalette.dim("…"));
+    return shown;
+  }
+
+  private renderMainTab(rows: string[], inner: number, w: number): string[] {
+    rows.push(frameRule(inner));
+    rows.push(dim("● main conversation"));
+    rows.push(dim("   Enter or Esc to return to the main agent"));
+    rows.push(frameRule(inner));
+    const out = this.renderFrame(rows, w);
+    out.push(dim(fitFooter(w, [
+      "Esc back",
+      `←→ switch(${this.order.length})`,
+      "Enter return",
+    ])));
+    return out;
+  }
+
   private renderCompact(log: AgentLog | undefined, width: number): string {
     if (this.composing) {
       const content = this.sendStatus || this.draft || "Type message";
       return truncateToWidth(`Esc cancel · ${content}`, width, "…");
+    }
+    if (this.activeId === MAIN_TAB) {
+      return truncateToWidth(dim("● main · Enter return"), width, "…");
     }
     if (!log) return truncateToWidth(`${dim("□")} Agents`, width, "…");
     const selected = log.selectedTaskIndex === undefined
@@ -765,6 +1038,9 @@ export class AttachOverlay implements Component, Focusable {
     if (this.order.length === 0) return dim("Agents");
     const activeIndex = Math.max(0, this.order.indexOf(this.activeId));
     const labels = this.order.map((cid) => {
+      if (cid === MAIN_TAB) {
+        return cid === this.activeId ? `${green("▸")} ${bold(green("● main"))}` : "● main";
+      }
       const log = this.agents.get(cid);
       if (!log) return dim(cid.slice(0, 6));
       const agent = log.agent;
@@ -876,6 +1152,9 @@ export class AttachOverlay implements Component, Focusable {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
+    }
+    for (const log of this.agents.values()) {
+      if (log.transcriptRefreshTimer) clearTimeout(log.transcriptRefreshTimer);
     }
     this.agents.clear();
     this.order.length = 0;
