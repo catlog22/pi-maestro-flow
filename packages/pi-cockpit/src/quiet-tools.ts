@@ -22,6 +22,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	ReadToolDetails,
+	ThemeColor,
 } from "@earendil-works/pi-coding-agent";
 import {
 	createBashTool,
@@ -34,7 +35,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
-import type { CockpitConfig, ToolPaletteMode } from "./types.ts";
+import type { CockpitConfig } from "./types.ts";
 import { resolveGlyphs, type IconGlyphs } from "./icons.ts";
 import {
 	executeGuardedEdit,
@@ -198,69 +199,6 @@ const SPECS: ToolSpec[] = [
 
 // ---------- rendering ----------
 
-// Per-palette tool-name colour slots. Every value is an existing theme slot, so
-// a palette needs no new colour definitions and stays correct across themes.
-// Grouping is by operation family, not by borrowed syntax-highlighting slots:
-// the classic map is kept verbatim so long-time users can switch back to it.
-const TOOL_PALETTES: Record<ToolPaletteMode, Record<string, string>> = {
-	classic: {
-		bash: "syntaxFunction",
-		read: "syntaxType",
-		ls: "syntaxType",
-		grep: "syntaxKeyword",
-		find: "syntaxKeyword",
-		edit: "syntaxVariable",
-		write: "syntaxVariable",
-	},
-	// inspect = blue, mutate = soft blue, execute = green. Mutate is never pink:
-	// syntaxKeyword renders pink in every cockpit theme, identical to the error
-	// mark, so a successful edit would read as an error.
-	family: {
-		read: "syntaxType",
-		ls: "syntaxType",
-		grep: "syntaxType",
-		find: "syntaxType",
-		edit: "syntaxVariable",
-		write: "syntaxVariable",
-		bash: "syntaxString",
-	},
-	// cool reads vs soft-blue writes; bash set apart from the inspect group.
-	readwrite: {
-		read: "syntaxType",
-		ls: "syntaxType",
-		grep: "syntaxType",
-		find: "syntaxType",
-		edit: "syntaxVariable",
-		write: "syntaxVariable",
-		bash: "syntaxVariable",
-	},
-	// view (read/ls) vs search (grep/find) split for discovery-heavy work.
-	search: {
-		read: "syntaxType",
-		ls: "syntaxType",
-		grep: "syntaxString",
-		find: "syntaxString",
-		edit: "syntaxVariable",
-		write: "syntaxVariable",
-		bash: "syntaxVariable",
-	},
-	// single hue ramped by lightness: colourblind-safe, quietest look. State is
-	// still carried by the success/error mark, never by the name colour alone.
-	mono: {
-		read: "syntaxComment",
-		ls: "syntaxComment",
-		grep: "syntaxComment",
-		find: "syntaxComment",
-		edit: "toolOutput",
-		write: "toolOutput",
-		bash: "text",
-	},
-};
-
-function toolPaletteFor(mode: ToolPaletteMode): Record<string, string> {
-	return TOOL_PALETTES[mode] ?? TOOL_PALETTES.classic;
-}
-
 function quietMark(
 	mode: CockpitConfig["quietSymbols"],
 	state: "running" | "success" | "failure",
@@ -276,8 +214,8 @@ function quietMark(
 	return glyphs.cross;
 }
 
-function toolName(spec: ToolSpec, theme: any, palette: Record<string, string>): string {
-	return theme.fg(palette[spec.name] ?? "toolTitle", theme.bold(spec.name));
+function toolName(spec: ToolSpec, theme: any, color: ThemeColor): string {
+	return theme.fg(color, theme.bold(spec.name));
 }
 
 function renderCallLine(
@@ -286,12 +224,11 @@ function renderCallLine(
 	theme: any,
 	glyphs: IconGlyphs,
 	mode: CockpitConfig["quietSymbols"],
-	palette: Record<string, string>,
 ): string {
 	const mark = quietMark(mode, "running", glyphs);
 	const argCap = Math.max(10, termWidth() - (spec.name.length + mark.length + 5));
 	const argText = truncate(spec.arg(args), argCap);
-	return `  ${theme.fg("warning", mark)} ${toolName(spec, theme, palette)}${argText ? ` ${theme.fg("accent", argText)}` : ""}`;
+	return `  ${theme.fg("warning", mark)} ${toolName(spec, theme, "warning")}${argText ? ` ${theme.fg("accent", argText)}` : ""}`;
 }
 
 function renderResultLine(
@@ -303,11 +240,11 @@ function renderResultLine(
 	expanded: boolean,
 	glyphs: IconGlyphs,
 	mode: CockpitConfig["quietSymbols"],
-	palette: Record<string, string>,
 ): string {
 	const isOk = spec.ok ? spec.ok(result, ctx) : !ctx.isError;
+	const stateColor: ThemeColor = isOk ? "success" : "error";
 	const rawMark = quietMark(mode, isOk ? "success" : "failure", glyphs);
-	const mark = theme.fg(isOk ? "success" : "error", rawMark);
+	const mark = theme.fg(stateColor, rawMark);
 
 	const overhead = 7 + spec.name.length + rawMark.length;
 	const budget = Math.max(20, termWidth() - overhead);
@@ -316,7 +253,7 @@ function renderResultLine(
 	const argCap = Math.max(10, budget - sumRaw.length);
 	const argText = truncate(spec.arg(args), argCap);
 
-	let t = `  ${mark} ${toolName(spec, theme, palette)}${argText ? ` ${theme.fg("accent", argText)}` : ""}`;
+	let t = `  ${mark} ${toolName(spec, theme, stateColor)}${argText ? ` ${theme.fg("accent", argText)}` : ""}`;
 	if (sumRaw) t += ` ${theme.fg("dim", `· ${sumRaw}`)}`;
 
 	if (expanded) {
@@ -359,8 +296,7 @@ export function registerQuietTools(pi: ExtensionAPI, getConfig: () => CockpitCon
 				if (!ctx.isPartial) return new Text("", 0, 0);
 				const config = getConfig();
 				const glyphs = resolveGlyphs(config.icons.mode);
-				const palette = toolPaletteFor(config.toolPalette);
-				return new Text(renderCallLine(spec, args, theme, glyphs, config.quietSymbols, palette), 0, 0);
+				return new Text(renderCallLine(spec, args, theme, glyphs, config.quietSymbols), 0, 0);
 			},
 
 			renderResult(result: any, { expanded, isPartial }: any, theme: any, ctx: any) {
@@ -368,9 +304,8 @@ export function registerQuietTools(pi: ExtensionAPI, getConfig: () => CockpitCon
 				if (isPartial) return new Text("", 0, 0);
 				const config = getConfig();
 				const glyphs = resolveGlyphs(config.icons.mode);
-				const palette = toolPaletteFor(config.toolPalette);
 				return new Text(
-					renderResultLine(spec, ctx.args, result, ctx, theme, expanded, glyphs, config.quietSymbols, palette),
+					renderResultLine(spec, ctx.args, result, ctx, theme, expanded, glyphs, config.quietSymbols),
 					0,
 					0,
 				);

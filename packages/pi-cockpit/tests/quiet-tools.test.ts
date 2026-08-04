@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { registerQuietTools } from "../src/quiet-tools.ts";
 import { DEFAULT_CONFIG, type CockpitConfig } from "../src/types.ts";
@@ -22,8 +23,8 @@ function line(component: { render(width: number): string[] }): string {
 	return component.render(200)[0].trimEnd();
 }
 
-function renderCall(tool: any, args: Record<string, unknown>): string {
-	return line(tool.renderCall(args, theme, { args, isPartial: true }));
+function renderCall(tool: any, args: Record<string, unknown>, paint: any = theme): string {
+	return line(tool.renderCall(args, paint, { args, isPartial: true }));
 }
 
 function renderResult(
@@ -31,11 +32,12 @@ function renderResult(
 	args: Record<string, unknown>,
 	text: string,
 	isError = false,
+	paint: any = theme,
 ): string {
 	return line(tool.renderResult(
 		{ content: [{ type: "text", text }], isError },
 		{ expanded: false, isPartial: false },
-		theme,
+		paint,
 		{ args, isError },
 	));
 }
@@ -72,59 +74,66 @@ test("both symbol modes have an ASCII fallback", () => {
 	assert.match(renderResult(bash, { command: "pwd" }, "exit code: 1"), /^  ! bash/);
 });
 
-test("tool palette re-maps tool name colours by operation family", () => {
-	// bold wraps the name in a sentinel so fg can tell the tool name apart from
-	// the mark/arg/summary and record which colour slot it was painted with.
+test("every tool name uses theme lifecycle colors", () => {
+	// Bold wraps the name in a sentinel so fg can distinguish it from the
+	// lifecycle glyph, arguments, and summary.
 	const colorTheme = {
 		bold: (text: string) => `\x01${text}\x01`,
 		fg: (name: string, text: string) =>
 			text.startsWith("\x01") ? `${name}:${text.replaceAll("\x01", "")}` : text,
 	};
-	const args = { command: "x", pattern: "x", path: "." };
-	const cases: Array<[CockpitConfig["toolPalette"], string, string]> = [
-		["classic", "bash", "syntaxFunction"],
-		["classic", "grep", "syntaxKeyword"],
-		["family", "grep", "syntaxType"],
-		["family", "edit", "syntaxVariable"],
-		["family", "write", "syntaxVariable"],
-		["family", "bash", "syntaxString"],
-		["readwrite", "bash", "syntaxVariable"],
-		["search", "grep", "syntaxString"],
-		["search", "read", "syntaxType"],
-		["mono", "read", "syntaxComment"],
-		["mono", "edit", "toolOutput"],
-		["mono", "bash", "text"],
-	];
-	for (const [palette, tool, slot] of cases) {
-		const tools = install(() => ({
-			...DEFAULT_CONFIG,
-			quietSymbols: "check",
-			icons: { mode: "nerd" },
-			toolPalette: palette,
-		}));
-		const rendered = line(tools.get(tool).renderCall(args, colorTheme, { args, isPartial: true }));
-		assert.ok(
-			rendered.includes(`${slot}:${tool}`),
-			`${palette}/${tool} expected slot ${slot}, rendered: ${rendered}`,
-		);
-	}
-});
-
-test("an unknown palette falls back to the classic colour map", () => {
-	const colorTheme = {
-		bold: (text: string) => `\x01${text}\x01`,
-		fg: (name: string, text: string) =>
-			text.startsWith("\x01") ? `${name}:${text.replaceAll("\x01", "")}` : text,
-	};
-	const args = { command: "x" };
 	const tools = install(() => ({
 		...DEFAULT_CONFIG,
 		quietSymbols: "check",
 		icons: { mode: "nerd" },
-		toolPalette: "nope" as CockpitConfig["toolPalette"],
 	}));
-	const rendered = line(tools.get("bash").renderCall(args, colorTheme, { args, isPartial: true }));
-	assert.ok(rendered.includes("syntaxFunction:bash"), rendered);
+	const argsByTool: Record<string, Record<string, unknown>> = {
+		read: { path: "file.ts" },
+		bash: { command: "echo ok" },
+		edit: { path: "file.ts" },
+		write: { path: "file.ts", content: "ok" },
+		find: { pattern: "*.ts", path: "." },
+		grep: { pattern: "ok", path: "." },
+		ls: { path: "." },
+	};
+
+	for (const [name, args] of Object.entries(argsByTool)) {
+		const tool = tools.get(name);
+		assert.match(renderCall(tool, args, colorTheme), new RegExp(`warning:${name}`));
+		assert.match(renderResult(tool, args, "exit code: 0\nok", false, colorTheme), new RegExp(`success:${name}`));
+		assert.match(renderResult(tool, args, "failed", true, colorTheme), new RegExp(`error:${name}`));
+	}
+});
+
+test("legacy tool palette selection no longer changes lifecycle colors", () => {
+	const colorTheme = {
+		bold: (text: string) => `\x01${text}\x01`,
+		fg: (name: string, text: string) =>
+			text.startsWith("\x01") ? `${name}:${text.replaceAll("\x01", "")}` : text,
+	};
+	for (const toolPalette of ["classic", "family", "readwrite", "search", "mono"] as const) {
+		const tools = install(() => ({ ...DEFAULT_CONFIG, toolPalette, icons: { mode: "nerd" } }));
+		assert.match(renderCall(tools.get("bash"), { command: "x" }, colorTheme), /warning:bash/);
+	}
+});
+
+test("bundled themes define distinct lifecycle color combinations", () => {
+	const themesDir = new URL("../themes/", import.meta.url);
+	const files = readdirSync(themesDir).filter((file) => file.endsWith(".json"));
+	const combinations = new Set<string>();
+	for (const file of files) {
+		const themeDoc = JSON.parse(readFileSync(new URL(file, themesDir), "utf8")) as {
+			vars: Record<string, string>;
+			colors: Record<string, string>;
+		};
+		const colors = ["warning", "success", "error"].map((slot) => {
+			const value = themeDoc.colors[slot];
+			return themeDoc.vars[value] ?? value;
+		});
+		assert.equal(new Set(colors).size, 3, `${file} must distinguish calling, success, and failure`);
+		combinations.add(colors.join("|"));
+	}
+	assert.equal(combinations.size, files.length, "each bundled theme must provide its own lifecycle color combination");
 });
 
 test("search and file summaries use compact units", () => {

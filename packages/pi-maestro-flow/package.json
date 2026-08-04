@@ -11,7 +11,7 @@
     "prepack": "node scripts/prepare-package-skills.mjs",
     "postpack": "node scripts/prepare-package-skills.mjs --clean",
     "test:install": "node --test test/configure-keybindings.test.mjs test/install-workflows.test.mjs test/register-companion-packages.test.mjs",
-    "test:package": "node scripts/verify-maestro-run-capabilities.mjs && node --experimental-transform-types --test test/prepare-package-skills.test.mjs test/package-resources.test.mjs test/package-resources-runtime.test.ts",
+    "test:package": "node scripts/verify-maestro-run-capabilities.mjs && node --experimental-transform-types --test test/prepare-package-skills.test.mjs test/package-resources.test.mjs test/package-resources-runtime.test.ts && node --test test/sdk-resolution-contract.test.mjs",
     "test:conversion": "node --experimental-transform-types --test test/convert-pi.test.mjs test/maestro-run-capabilities.test.mjs test/skill-contract-lint.test.ts",
     "check:maestro-run-cli": "node scripts/verify-maestro-run-capabilities.mjs",
     "test:todo": "node --experimental-transform-types --test test/skill-loader.test.ts test/skill-manager.test.ts test/todo.test.ts test/todo-overlay.test.ts test/todo-cross-tool.test.ts test/cockpit-ownership.test.ts",
@@ -106,18 +106,18 @@
     "puppeteer-core": "24.31.0",
     "recheck": "4.5.0",
     "turndown": "^7.2.4",
-    "typebox": "1.1.24",
     "unpdf": "^1.8.0",
     "zod": "3.25.76"
   },
   "optionalDependencies": {
-    "@konbakuyomu/smart-search": "0.1.14"
+    "@konbakuyomu/smart-search": "https://github.com/konbakuyomu/smartsearch/archive/667c465d0f6ea16a423f03c434f94e21505d3595.tar.gz"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-agent-core": {
@@ -131,6 +131,9 @@
     },
     "@earendil-works/pi-tui": {
       "optional": true
+    },
+    "typebox": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -139,6 +142,7 @@
     "@earendil-works/pi-coding-agent": "0.83.0",
     "@earendil-works/pi-tui": "0.83.0",
     "@types/cross-spawn": "6.0.6",
+    "typebox": "1.3.7",
     "typescript": "5.7.3",
     "vitest": "^4.1.10"
   },

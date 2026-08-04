@@ -155,6 +155,8 @@ test("selected Cockpit sessions publish editor targets and route input through t
 	assert.equal(COCKPIT_INPUT_TARGET_EVENT, "cockpit:input-target");
 	assert.match(source, /pi\.events\.emit\(COCKPIT_INPUT_TARGET_EVENT, payload\)/);
 	assert.match(source, /MAILBOX_REGISTRY_KEY[\s\S]*?routeAgentInput\(/);
+	assert.match(source, /Symbol\.for\("pi-maestro-teammate\.mailbox-registry"\)/);
+	assert.doesNotMatch(source, /import\s*\{\s*MAILBOX_REGISTRY_KEY/);
 	assert.match(source, /if \(action === "handled"\) return \{ action: "handled" as const \}/);
 });
 

@@ -71,7 +71,9 @@ import {
 	type AgentRow,
 	type CockpitConfig,
 } from "./types.ts";
-import { MAILBOX_REGISTRY_KEY, type MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
+import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
+
+const MAILBOX_REGISTRY_KEY = Symbol.for("pi-maestro-teammate.mailbox-registry");
 
 const FOOTER_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 const BASH_BG_OVERLAY_KEY = "alt+j";

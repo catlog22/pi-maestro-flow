@@ -12,7 +12,7 @@ pi-maestro-flow 是 **Pi 插件**，用 `pi install` 安装（不是普通 npm �
 | 组件 | 版本要求 | 说明 |
 |------|---------|------|
 | Node.js | ≥ 22.19.0 | 插件运行时 |
-| [Pi Coding Agent](https://github.com/earendil-works/pi) | ≥ 0.74.0 | 宿主运行时（必装） |
+| [Pi Coding Agent](https://github.com/earendil-works/pi) | 0.83.0 | 本版本验证的宿主运行时基线；核心包由 Pi 提供 |
 
 > [Maestro Flow](https://github.com/catlog22/maestro-flow)（知识系统 CLI）作为依赖随插件自动安装，无需单独前置安装。
 
@@ -31,7 +31,7 @@ pi list
 
 安装 `pi-maestro-flow` 会自动拉取并注册 `pi-maestro-teammate` 与 `pi-cockpit`。
 
-> ⚠️ 安装或升级后**重启 Pi 或 reload extensions** 再进行模型相关操作，确保工具注册生效。
+> 安装或升级前请先关闭正在运行的 Pi。完成安装后重新启动 Pi，再进行模型、Teammate 或 Cockpit 操作，确保 companion 注册与内存设置均从磁盘重新加载。
 
 ## 升级与迁移
 

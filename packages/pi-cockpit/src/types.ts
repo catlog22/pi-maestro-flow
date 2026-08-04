@@ -116,14 +116,8 @@ export type ViewMode = "list" | "compact";
 export type QuietSymbolMode = "check" | "dot";
 
 /**
- * Colour grouping for compact Quiet tool rows. Each mode re-maps the seven
- * built-in tools onto existing theme slots, so it works across every theme
- * without new colour definitions and is orthogonal to the theme accent.
- * - classic: the original syntax-slot mapping (bash/read/ls share one hue).
- * - family: three operation families — inspect / mutate / execute.
- * - readwrite: cool reads vs warm writes, bash set apart.
- * - search: splits discovery into view (read/ls) vs search (grep/find).
- * - mono: single hue ramped by lightness; colourblind-safe, quietest look.
+ * Legacy quiet-tool palette values retained while existing cockpit.json files
+ * migrate. Tool names now use theme-owned lifecycle colors instead.
  */
 export type ToolPaletteMode = "classic" | "family" | "readwrite" | "search" | "mono";
 
@@ -197,7 +191,7 @@ export interface CockpitConfig {
 	quietMode: boolean;
 	/** Lifecycle glyph set used by compact Quiet tool rows. */
 	quietSymbols: QuietSymbolMode;
-	/** Colour grouping applied to compact Quiet tool names. */
+	/** Legacy persisted value; tool-name colors are derived from lifecycle state. */
 	toolPalette: ToolPaletteMode;
 	agentsMode: ViewMode;
 	todoMode: ViewMode;

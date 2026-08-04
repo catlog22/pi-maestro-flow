@@ -40,7 +40,7 @@ test("static mode row cycles on/off and is reachable by accel", () => {
 	assert.equal(applyRow(applyRow(DEFAULT_CONFIG, "staticMode"), "staticMode").staticMode, false);
 });
 
-test("pin editor bottom uses the layout accelerator without shadowing tool palette", () => {
+test("pin editor bottom uses the layout accelerator", () => {
 	const row = buildRows(DEFAULT_CONFIG).find((candidate) => candidate.key === "pinEditorBottom");
 	assert.equal(row?.accel, "l");
 	assert.equal(rowKeyForAccel(buildRows(DEFAULT_CONFIG), "l"), "pinEditorBottom");
@@ -63,22 +63,10 @@ test("quiet symbols cycle between check and dot modes", () => {
 	assert.equal(applyRow(dotted, "quietSymbols").quietSymbols, "check");
 });
 
-test("tool palette cycles through every grouping and is reachable by accel", () => {
-	const row = buildRows(DEFAULT_CONFIG).find((candidate) => candidate.key === "toolPalette");
-	assert.equal(row?.accel, "p");
-	assert.equal(row?.value, "family");
-	let config = DEFAULT_CONFIG;
-	const seen = new Set<string>();
-	for (let i = 0; i < 5; i++) {
-		config = applyRow(config, "toolPalette");
-		seen.add(config.toolPalette);
-	}
-	assert.deepEqual([...seen].sort(), ["classic", "family", "mono", "readwrite", "search"]);
-});
-
-test("tool palette sits right after the quiet trio it belongs with", () => {
-	const keys = buildRows(DEFAULT_CONFIG).map((row) => row.key);
-	assert.equal(keys[keys.indexOf("thinkingFold") + 1], "toolPalette");
+test("tool palette is hidden because tool names now follow lifecycle colors", () => {
+	const rows = buildRows(DEFAULT_CONFIG);
+	assert.equal(rows.some((row) => row.key === "toolPalette"), false);
+	assert.equal(applyRow(DEFAULT_CONFIG, "toolPalette"), DEFAULT_CONFIG);
 });
 
 test("thinking fold is a pass-through: applyRow leaves config untouched", () => {
