@@ -571,14 +571,25 @@ test("teammate child registers interaction, local Bash, and parent-permission su
     "tool_call",
   ]);
   assert.equal(handlers.has("before_agent_start"), false, "child must not own parent Goal/Todo/Workflow startup");
+  let providerAborts = 0;
+  const providerCtx = {
+    cwd: "D:/workspace",
+    model: { provider: "test", id: "child", contextWindow: 10_000, maxTokens: 4_000 },
+    abort() { providerAborts++; },
+    sessionManager: { getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as ExtensionContext;
+  await handlers.get("context")?.[0]?.({
+    type: "context",
+    messages: [{ role: "user", content: [{ type: "text", text: "continue" }] }],
+  }, providerCtx);
   const guardedPayload = await handlers.get("before_provider_request")?.[0]?.({
     type: "before_provider_request",
     payload: { max_tokens: 1, thinking: { type: "enabled", budget_tokens: 1024 } },
-  }, { ui: { notify() {} } } as ExtensionContext);
-  assert.deepEqual(guardedPayload, {
-    max_tokens: 1,
-    thinking: { type: "disabled" },
-  });
+  }, providerCtx);
+  assert.equal(guardedPayload, undefined, "child aborts invalid thinking instead of degrading it");
+  assert.equal(providerAborts, 1);
+  await handlers.get("session_start")?.[0]?.({ reason: "new" }, providerCtx);
   const structuredOutputDecision = await handlers.get("tool_call")?.[0]?.({
     type: "tool_call",
     toolName: "structured_output",

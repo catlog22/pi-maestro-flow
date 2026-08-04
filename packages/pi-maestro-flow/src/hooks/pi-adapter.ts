@@ -63,6 +63,7 @@ interface AdapterOptions {
   trustFilePath?: string;
   isTeammateChild?: () => boolean;
   onCompactionCancelled?: () => void;
+  shouldSkipStopHook?: () => boolean;
 }
 
 interface HookState {
@@ -462,7 +463,7 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
   });
 
   pi.on("agent_end", async (event, ctx) => {
-    if (!state.active) return;
+    if (!state.active || options.shouldSkipStopHook?.()) return;
     const outputs = await execute("Stop", [], {
       ...turnInput("Stop", ctx, state, getPermissionMode()),
       stop_hook_active: state.stopHookActive,

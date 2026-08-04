@@ -1048,27 +1048,180 @@ test("provider payload guard disables only invalid Anthropic budget thinking", (
   assert.equal(disableInvalidBudgetThinking(openAi), openAi);
 });
 
-test("provider request hook returns the guarded payload and explains the degradation", () => {
+test("provider request hook aborts invalid thinking, compacts once, and resumes without downgrade", async () => {
+  let aborted = 0;
+  let compacted = 0;
+  let compactOptions: { onComplete(): void } | undefined;
+  const sent: string[] = [];
   const notifications: Array<{ message: string; level: string | undefined }> = [];
-  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never);
-  const payload = {
-    max_tokens: 1,
-    thinking: { type: "enabled", budget_tokens: 1_024 },
-  };
-  const result = guard.beforeProviderRequest(payload, {
+  const guard = createMidTurnAutoCompaction({
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 10_000, maxTokens: 4_000 },
+    abort() { aborted++; },
+    compact(options: { onComplete(): void }) {
+      compacted++;
+      compactOptions = options;
+    },
+    hasPendingMessages: () => false,
+    sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: {
+      setStatus() {},
       notify(message: string, level: string | undefined) { notifications.push({ message, level }); },
     },
-  } as never);
+  } as never;
+  const messages = [{ role: "user", content: [{ type: "text", text: "finish the task" }] }] as never;
+  const payload = { max_tokens: 1, thinking: { type: "enabled", budget_tokens: 1_024 } };
 
-  assert.deepEqual(result, {
-    max_tokens: 1,
-    thinking: { type: "disabled" },
+  await guard.evaluate(messages, ctx);
+  assert.equal(await guard.beforeProviderRequest(payload, ctx), undefined, "invalid payload is never replaced with disabled thinking");
+  assert.equal(aborted, 1, "the provider request is cancelled before HTTP");
+  assert.equal(guard.shouldSkipStopHook(), true);
+  assert.match(notifications[0]?.message ?? "", /request paused/i);
+  await guard.onAgentEnd(ctx);
+  assert.equal(compacted, 1, "the blocked request compacts immediately at settlement");
+  compactOptions?.onComplete();
+  assert.equal(sent.length, 1);
+  assert.match(sent[0] ?? "", /Continue the interrupted task/);
+
+  await guard.evaluate(messages, ctx);
+  assert.equal(await guard.beforeProviderRequest(payload, ctx), undefined);
+  assert.equal(aborted, 2, "an invalid replay is stopped instead of degraded");
+  assert.equal(compacted, 1, "reactive compaction is one-shot for the recovery cycle");
+  assert.match(notifications.at(-1)?.message ?? "", /stopped after reactive compaction/i);
+  await guard.onAgentEnd(ctx);
+  assert.equal(guard.shouldSkipStopHook(), false, "terminal settlement re-arms a later user request");
+});
+
+test("provider request hook fails closed when no compactable history exists", async () => {
+  let aborted = 0;
+  let compacted = 0;
+  const sent: string[] = [];
+  const notifications: Array<{ message: string; level: string | undefined }> = [];
+  const guard = createMidTurnAutoCompaction({
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => undefined }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
   });
-  assert.deepEqual(notifications, [{
-    message: "Extended thinking was disabled for this request because context pressure left too little output room for a valid thinking budget.",
-    level: "warning",
-  }]);
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 10_000, maxTokens: 4_000 },
+    abort() { aborted++; },
+    compact() { compacted++; },
+    hasPendingMessages: () => false,
+    sessionManager: { getBranch: () => [] },
+    ui: {
+      setStatus() {},
+      notify(message: string, level: string | undefined) { notifications.push({ message, level }); },
+    },
+  } as never;
+  const messages = [{ role: "user", content: [{ type: "text", text: "finish" }] }] as never;
+
+  await guard.evaluate(messages, ctx);
+  await guard.beforeProviderRequest({
+    max_tokens: 1,
+    thinking: { type: "enabled", budget_tokens: 1_024 },
+  }, ctx);
+  await guard.onAgentEnd(ctx);
+
+  assert.equal(aborted, 1);
+  assert.equal(compacted, 0);
+  assert.deepEqual(sent, []);
+  assert.equal(notifications.at(-1)?.level, "error");
+  assert.match(notifications.at(-1)?.message ?? "", /no compactable history/i);
+  assert.equal(guard.shouldSkipStopHook(), false);
+});
+
+test("provider-pressure intents are dropped on shutdown and cannot hijack a resumed task", async () => {
+  const journal: Array<{ type: string; data: unknown }> = [];
+  let branch: Array<{ type?: string; customType?: string; data?: unknown }> = [];
+  let compacted = 0;
+  const sent: string[] = [];
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: unknown) { journal.push({ type, data }); },
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 10_000, maxTokens: 4_000 },
+    abort() {},
+    compact() { compacted++; },
+    hasPendingMessages: () => false,
+    sessionManager: {
+      getSessionId: () => "provider-pressure-resume",
+      getBranch: () => branch,
+    },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  const messages = [{ role: "user", content: [{ type: "text", text: "old task" }] }] as never;
+
+  guard.onSessionStart(ctx);
+  await guard.evaluate(messages, ctx);
+  await guard.beforeProviderRequest({
+    max_tokens: 1,
+    thinking: { type: "enabled", budget_tokens: 1_024 },
+  }, ctx);
+  guard.onSessionShutdown(ctx);
+
+  branch = journal.map((entry) => ({ type: "custom", customType: entry.type, data: entry.data }));
+  guard.onSessionStart(ctx, { reason: "resume" });
+  await guard.onAgentEnd(ctx);
+  assert.equal(compacted, 0);
+  assert.deepEqual(sent, []);
+  assert.equal(guard.shouldSkipStopHook(), false);
+});
+
+test("crash-restored provider-pressure intents are tombstoned before a new task can settle them", async () => {
+  const journal: Array<{ type: string; data: unknown }> = [];
+  let branch: Array<{ type?: string; customType?: string; data?: unknown }> = [];
+  const pi = {
+    appendEntry(type: string, data: unknown) { journal.push({ type, data }); },
+    sendUserMessage() {},
+  } as never;
+  const dependencies = {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  };
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 10_000, maxTokens: 4_000 },
+    abort() {},
+    compact() { assert.fail("a restored blocked request must not compact"); },
+    hasPendingMessages: () => false,
+    sessionManager: {
+      getSessionId: () => "provider-pressure-crash-resume",
+      getBranch: () => branch,
+    },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  const crashed = createMidTurnAutoCompaction(pi, dependencies);
+  crashed.onSessionStart(ctx);
+  await crashed.evaluate(
+    [{ role: "user", content: [{ type: "text", text: "interrupted task" }] }] as never,
+    ctx,
+  );
+  await crashed.beforeProviderRequest({
+    max_tokens: 1,
+    thinking: { type: "enabled", budget_tokens: 1_024 },
+  }, ctx);
+
+  branch = journal.map((entry) => ({ type: "custom", customType: entry.type, data: entry.data }));
+  const resumed = createMidTurnAutoCompaction(pi, dependencies);
+  resumed.onSessionStart(ctx, { reason: "resume" });
+  await resumed.onAgentEnd(ctx);
+
+  const lastIntent = journal.filter((entry) => entry.type === "maestro-auto-compaction-intent").at(-1)?.data as { pending?: unknown } | undefined;
+  assert.equal(lastIntent?.pending, null, "resume appends a tombstone for the stale blocked intent");
+  assert.equal(resumed.shouldSkipStopHook(), false);
 });
 
 test("direct compaction completion applies the final payload guard", async () => {

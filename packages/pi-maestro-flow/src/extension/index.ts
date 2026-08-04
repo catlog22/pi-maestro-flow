@@ -2303,6 +2303,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   // Hook denial runs after Plan's advisory tool_call pass and before the interactive prompt.
   const hookAdapter = registerCodexHookAdapter(pi, {
     getPermissionMode: () => effectivePermissionMode(approvalMode),
+    shouldSkipStopHook: () => midTurnAutoCompaction.shouldSkipStopHook(),
     onCompactionCancelled: () => {
       compactionArbiter.complete("cancel");
       goalCompactionCancelled();
