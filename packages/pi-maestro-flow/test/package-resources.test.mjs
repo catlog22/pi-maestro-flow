@@ -12,6 +12,7 @@ import {
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const teammateRoot = join(root, "..", "pi-maestro-teammate");
 const cockpitRoot = join(root, "..", "pi-cockpit");
+const settingsCoreRoot = join(root, "..", "pi-maestro-settings-core");
 const exactSemver = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const piCorePeerBaselines = {
   "@earendil-works/pi-agent-core": "0.83.0",
@@ -42,6 +43,7 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const teammatePkg = JSON.parse(readFileSync(join(teammateRoot, "package.json"), "utf8"));
   const cockpitPkg = JSON.parse(readFileSync(join(cockpitRoot, "package.json"), "utf8"));
+  const settingsCorePkg = JSON.parse(readFileSync(join(settingsCoreRoot, "package.json"), "utf8"));
   assert.match(pkg.version, exactSemver);
   assert.equal(pkg.files.includes(".pi/"), true);
   assert.equal(pkg.files.includes("workflows/"), false);
@@ -54,6 +56,9 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   assert.ok(pkg.files.includes("!.pi/model-failover.json"));
   assert.ok(pkg.files.includes("!.pi/scratch/**"));
   assert.match(pkg.dependencies["maestro-flow"], exactSemver);
+  assert.equal(pkg.dependencies["pi-maestro-settings-core"], settingsCorePkg.version);
+  assert.equal(teammatePkg.dependencies["pi-maestro-settings-core"], settingsCorePkg.version);
+  assert.equal(cockpitPkg.dependencies["pi-maestro-settings-core"], settingsCorePkg.version);
   assert.equal(pkg.dependencies["pi-maestro-teammate"], teammatePkg.version);
   assert.equal(pkg.dependencies["pi-cockpit"], cockpitPkg.version);
   assert.equal(pkg.dependencies["@konbakuyomu/smart-search"], undefined);
