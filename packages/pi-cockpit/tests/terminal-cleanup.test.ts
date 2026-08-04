@@ -6,10 +6,13 @@ import {
 	TERMINAL_RESTORE_SEQUENCE,
 } from "../src/terminal-cleanup.ts";
 
-test("restore sequence leaves alternate screen and drops mouse modes", () => {
+test("restore sequence leaves alternate screen, drops modes, and shows the cursor", () => {
 	assert.ok(TERMINAL_RESTORE_SEQUENCE.includes("\x1b[?1049l"), "leaves alternate screen");
 	assert.ok(TERMINAL_RESTORE_SEQUENCE.includes("\x1b[?1002l"), "drops button mouse mode");
 	assert.ok(TERMINAL_RESTORE_SEQUENCE.includes("\x1b[?1006l"), "drops SGR mouse mode");
+	assert.ok(TERMINAL_RESTORE_SEQUENCE.includes("\x1b[?2004l"), "drops bracketed paste");
+	assert.ok(TERMINAL_RESTORE_SEQUENCE.includes("\x1b[?25h"), "shows the cursor");
+	assert.ok(TERMINAL_RESTORE_SEQUENCE.includes("\x1b[0m"), "resets styles");
 });
 
 test("handlers install on first registration and uninstall when the last consumer releases", () => {
