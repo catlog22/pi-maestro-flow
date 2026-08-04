@@ -184,12 +184,17 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
         .map((specifier, index) => `import * as publicApi${index} from ${JSON.stringify(specifier)};`)
         .join("\n")}
 import { writeFileSync } from "node:fs";
+import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
 const specifiers = ${JSON.stringify(teammatePublicSpecifiers)};
 const loaded = [${teammatePublicSpecifiers.map((_, index) => `publicApi${index}`).join(", ")}]
   .map((publicApi) => Object.keys(publicApi).length);
 export default function register(pi) {
   pi.on("session_start", () => {
-    writeFileSync(${JSON.stringify(runtimeProbePath)}, JSON.stringify({ specifiers, loaded }));
+    writeFileSync(${JSON.stringify(runtimeProbePath)}, JSON.stringify({
+      specifiers,
+      loaded,
+      refreshModelRegistry: typeof refreshModelRegistry,
+    }));
   });
 }
 `,
@@ -208,6 +213,7 @@ export default function register(pi) {
     const runtimeProbe = JSON.parse(readFileSync(runtimeProbePath, "utf8"));
     assert.deepEqual(runtimeProbe.specifiers, teammatePublicSpecifiers);
     assert.equal(runtimeProbe.loaded.length, teammatePublicSpecifiers.length);
+    assert.equal(runtimeProbe.refreshModelRegistry, "function");
     assert.match(
       run(
         [process.execPath],

@@ -15,6 +15,12 @@ export interface SpillResult {
   preview: string;
   originalChars: number;
   hasMore: boolean;
+  /** SHA-256 of the full persisted text, used to verify it before restoration. */
+  contentDigest?: string;
+}
+
+export function spillContentDigest(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
 }
 
 export function spillDir(sessionId: string, writerId?: string): string {
@@ -39,7 +45,15 @@ export async function spillToolResult(
   const ownerRoot = writerId ? dirname(dir) : root;
   const path = spillPath(sessionId, callId, writerId);
   const { preview, hasMore } = generatePreview(content, SPILL_PREVIEW_CHARS);
-  const failure: SpillResult = { ok: false, path: "", preview, originalChars: content.length, hasMore };
+  const contentDigest = spillContentDigest(content);
+  const failure: SpillResult = {
+    ok: false,
+    path: "",
+    preview,
+    originalChars: content.length,
+    hasMore,
+    contentDigest,
+  };
 
   // Defense in depth: even though both segments are sanitized, refuse to write
   // outside the session's spill directory.
@@ -69,7 +83,7 @@ export async function spillToolResult(
     return failure;
   }
 
-  return { ok: true, path, preview, originalChars: content.length, hasMore };
+  return { ok: true, path, preview, originalChars: content.length, hasMore, contentDigest };
 }
 
 /**
@@ -81,7 +95,12 @@ export async function spillToolResult(
  * all fail so hydration can downgrade to the plain placeholder instead of
  * pointing the model at a dead or attacker-controlled file.
  */
-export async function validateSpillPath(sessionId: string, path: string, writerId?: string): Promise<boolean> {
+export async function validateSpillPath(
+  sessionId: string,
+  path: string,
+  writerId?: string,
+  expectedContentDigest?: string,
+): Promise<boolean> {
   const root = join(tmpdir(), spillRootName(sessionId));
   const dir = spillDir(sessionId, writerId);
   if (!isInside(dir, path)) return false;
@@ -92,7 +111,11 @@ export async function validateSpillPath(sessionId: string, path: string, writerI
     const realRoot = await realpath(root);
     const realDir = await realpath(dir);
     const realTarget = await realpath(path);
-    return isInside(realTmp, realRoot) && isInside(realRoot, realDir) && isInside(realDir, realTarget);
+    if (!isInside(realTmp, realRoot) || !isInside(realRoot, realDir) || !isInside(realDir, realTarget)) {
+      return false;
+    }
+    if (expectedContentDigest === undefined) return true;
+    return spillContentDigest(await readFile(path, "utf8")) === expectedContentDigest;
   } catch {
     return false;
   }

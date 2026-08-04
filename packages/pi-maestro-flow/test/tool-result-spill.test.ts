@@ -8,6 +8,7 @@ import {
   cleanupSpillDir,
   generatePreview,
   spillDir,
+  spillContentDigest,
   spillPath,
   spillToolResult,
   validateSpillPath,
@@ -45,6 +46,7 @@ test("spillToolResult writes file and returns preview", async () => {
     assert.equal(result.originalChars, content.length);
     assert.equal(result.hasMore, true);
     assert.ok(result.preview.length <= SPILL_PREVIEW_CHARS);
+    assert.equal(result.contentDigest, spillContentDigest(content));
     const written = await readFile(result.path, "utf8");
     assert.equal(written, content);
   } finally {
@@ -269,6 +271,29 @@ test("validateSpillPath accepts a live spill file and rejects dead or foreign pa
   } finally {
     await cleanupSpillDir(sessionId);
     await cleanupSpillDir(otherSessionId);
+  }
+});
+
+test("validateSpillPath verifies an expected content digest", async () => {
+  const sessionId = `test-validate-digest-${Date.now()}`;
+  const content = "d".repeat(SPILL_THRESHOLD_CHARS);
+  try {
+    const result = await spillToolResult(sessionId, "call-digest", content);
+    assert.equal(result.ok, true);
+    assert.ok(result.contentDigest);
+    assert.equal(
+      await validateSpillPath(sessionId, result.path, undefined, result.contentDigest),
+      true,
+      "the original spill file matches its persisted digest",
+    );
+    await writeFile(result.path, `${content}tampered`, "utf8");
+    assert.equal(
+      await validateSpillPath(sessionId, result.path, undefined, result.contentDigest),
+      false,
+      "a replaced spill payload is not trusted during restoration",
+    );
+  } finally {
+    await cleanupSpillDir(sessionId);
   }
 });
 

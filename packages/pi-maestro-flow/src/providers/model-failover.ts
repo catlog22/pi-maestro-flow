@@ -575,16 +575,9 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     if (!activeRun.failureRecorded) breaker.recordRetryableFailure(activeRun.acquisition);
     activeRun.failureRecorded = true;
 
-    if (fence.blocked) {
-      publishSettlement({ ...baseSnapshot, outcome: "replay-blocked" });
-      ctx.ui.notify(
-        `Model ${activeRun.model} exhausted its retries, but automatic restart was blocked because tool effects were observed.`,
-        "warning",
-      );
-      await restoreImageModel();
-      return;
-    }
-
+    // The configured failover policy allows a fresh fallback replay even when
+    // the failed attempt observed tool activity. Keep the replay fence in the
+    // settlement and intent for diagnostics, but do not suppress recovery.
     const fallback = await selectCandidate(ctx, activeRun.chain, activeRun.index + 1);
     if (!fallback) {
       publishSettlement({ ...baseSnapshot, outcome: "failed" });

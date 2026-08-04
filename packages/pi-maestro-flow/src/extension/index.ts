@@ -2200,7 +2200,17 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     const planResult = onContextPlan(event.messages);
     const todoResult = await onContextTodo(planResult?.messages ?? event.messages);
     const messages = todoResult?.messages ?? planResult?.messages ?? event.messages;
-    const pressureMessages = await midTurnAutoCompaction.evaluate(messages, ctx);
+    let pressureMessages: AgentMessage[] | undefined;
+    try {
+      pressureMessages = await midTurnAutoCompaction.evaluate(messages, ctx);
+    } catch (error) {
+      // The context transform must never take down the request: fall back to
+      // the plain messages and surface the failure instead of throwing.
+      ctx.ui.notify(
+        `Mid-turn pressure evaluation failed; continuing without pruning: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    }
     if (pressureMessages) return { messages: pressureMessages };
     return todoResult ?? planResult;
   });
@@ -2228,6 +2238,12 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     await step("Goal attempt", () => goalAgentEnd(event, ctx));
     await step("Output-limit compaction", () =>
       midTurnAutoCompaction.onOutputLimit(event.messages as AgentMessage[], ctx));
+    // Tool-loop-end fast path: settle a live critical intent as soon as the
+    // turn's tool loop completes instead of waiting for agent_settled's
+    // two-completed-turn defer. Without this, a long multi-tool turn that
+    // crossed the hard threshold stays above it (pruning-only) until a second
+    // completed turn arrives — the "tool call ends but no compaction" gap.
+    await step("Tool-loop compaction", () => midTurnAutoCompaction.onToolLoopEnd(ctx));
     await step("Goal change event", () => emitGoalChanged());
     await step("Todo", () => onAgentEndTodo());
     preserveCompletedTurnFromNativeThreshold = shouldPreserveCompletedTurn(
@@ -2461,13 +2477,22 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
     autoCompaction.onSessionStart(ctx, event);
   });
   pi.on("context", async (event, ctx) => {
-    const messages = await autoCompaction.evaluate(event.messages, ctx);
-    return messages ? { messages } : undefined;
+    try {
+      const messages = await autoCompaction.evaluate(event.messages, ctx);
+      return messages ? { messages } : undefined;
+    } catch (error) {
+      ctx.ui.notify(
+        `Mid-turn pressure evaluation failed; continuing without pruning: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+      return undefined;
+    }
   });
   pi.on("before_provider_request", (event, ctx) =>
     autoCompaction.beforeProviderRequest(event.payload, ctx));
   pi.on("agent_end", async (event, ctx) => {
     await autoCompaction.onOutputLimit(event.messages as AgentMessage[], ctx);
+    await autoCompaction.onToolLoopEnd(ctx);
   });
   pi.on("agent_settled", async (_event, ctx) => {
     await autoCompaction.onAgentEnd(ctx);

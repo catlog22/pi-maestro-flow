@@ -116,6 +116,8 @@ export interface PruneManifestEntry {
   savedTokens: number;
   introducedAtUsageEpoch?: string;
   spillPath?: string;
+  /** SHA-256 of the persisted spill file; distinct from the source message digest. */
+  spillContentDigest?: string;
   level?: PruneLevel;
   contentDigest?: string;
   writerId?: string;
@@ -131,6 +133,8 @@ interface PersistedPruneEntry {
   callId: string;
   level: PruneLevel;
   spillPath?: string;
+  /** SHA-256 of the persisted spill file; required before a restored path is advertised. */
+  spillContentDigest?: string;
   introducedAtUsageEpoch?: string;
   contentDigest?: string;
   writerId?: string;
@@ -276,6 +280,8 @@ export interface AutoCompactionState {
   turnCount: number;
   /** Consecutive completed turns whose threshold intent was deferred instead of run. */
   highPressureDroppedTurns: number;
+  /** Consecutive evaluations sitting below the escalate band while an intent is live. */
+  belowEscalateStreak: number;
   /** Pressure notifications already emitted in the current compaction cycle. */
   notifiedPressureKeys: Set<string>;
   outputLimitCompactions: number;
@@ -289,7 +295,7 @@ export interface AutoCompactionState {
   cacheDelta?: number;
 }
 
-interface AutoCompactionDependencies {
+export interface AutoCompactionDependencies {
   loadInternals?: () => Promise<PiCompactionInternals>;
   readSettings?: (projectRoot: string) => CompactionSettings;
   arbiter?: CompactionArbiter;
@@ -325,6 +331,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   projectCompactionInput(event: SessionBeforeCompactEvent, ctx: ExtensionContext): Promise<ProjectedCompactionInput>;
   beforeProviderRequest(payload: unknown, ctx: ExtensionContext): unknown | undefined;
   onAgentEnd(ctx: ExtensionContext): Promise<void>;
+  /** Tool-loop-end fast path: settle a live critical intent without waiting for the next agent_settled defer cycle. */
+  onToolLoopEnd(ctx: ExtensionContext): Promise<void>;
   onOutputLimit(messages: AgentMessage[], ctx: ExtensionContext): Promise<void>;
   onCompact(completedOwner?: CompactionOwner, ctx?: ExtensionContext): void;
   onSessionShutdown(ctx?: ExtensionContext): void;
@@ -350,6 +358,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     breakerNotified: false,
     turnCount: 0,
     highPressureDroppedTurns: 0,
+    belowEscalateStreak: 0,
     notifiedPressureKeys: new Set(),
     outputLimitCompactions: 0,
     outputLimitBreakerNotified: false,
@@ -590,10 +599,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           && pressure.estimatedTokens >= pressure.thresholdTokens
             - Math.floor(capacityWindow * OUTPUT_CLAMP_BAND_MARGIN_RATIO);
         if (escalate) {
+          state.belowEscalateStreak = 0;
           const estimate = { ...estimateContextTokens(pressure.messages), tokens: pressure.estimatedTokens };
           const triggerKey = `${estimate.tokens}:${pressure.thresholdTokens}:${messages.length}`;
           if (state.pendingIntent?.triggerKey !== triggerKey) {
-            const contextExhausted = estimate.tokens >= ctx.model.contextWindow;
+            const contextExhausted = estimate.tokens >= (ctx.model?.contextWindow ?? Number.POSITIVE_INFINITY);
             state.pendingIntent = {
               generation,
               triggerKey,
@@ -614,12 +624,30 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
               `Context remains near the compaction threshold after pruning (${estimate.tokens.toLocaleString("en-US")}/${pressure.thresholdTokens.toLocaleString("en-US")} tokens). Compaction will run after this turn; responses may be truncated until then.`,
             );
           }
+        } else if (pressure.band === "critical" || pressure.band === "auto-prune") {
+          // Still inside the prune/critical band but below the escalate window:
+          // pruning relieved some pressure, yet the intent must survive a
+          // single-band bounce. Zeroing the counter on every evaluation here
+          // let an estimate oscillating around the escalate boundary defer
+          // compaction forever — the 2-turn threshold on agent settle could
+          // never be reached. Only drop the intent after two consecutive
+          // below-escalate evaluations genuinely clear the band.
+          state.belowEscalateStreak += 1;
+          if (state.belowEscalateStreak >= 2) {
+            state.pendingIntent = undefined;
+            state.lastTriggerKey = undefined;
+            persistPendingIntent(pi, state);
+            state.highPressureDroppedTurns = 0;
+            state.belowEscalateStreak = 0;
+          }
         } else {
           state.pendingIntent = undefined;
+          state.lastTriggerKey = undefined;
           persistPendingIntent(pi, state);
           // Pressure is genuinely relieved (intent dropped): reset the
           // consecutive-defer counter so a later fresh spike starts clean.
           state.highPressureDroppedTurns = 0;
+          state.belowEscalateStreak = 0;
         }
         return pressure.prunedToolResults > 0 ? pressure.messages : undefined;
       }
@@ -627,12 +655,25 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       const thresholdTokens = pressure.thresholdTokens;
 
       const triggerKey = `${estimate.tokens}:${thresholdTokens}:${messages.length}`;
-      if (state.pendingIntent?.triggerKey === triggerKey) return pressure.messages;
+      // Early-exit on an identical trigger key keeps the same epoch from
+      // re-queuing the intent on every evaluation. Re-derive contextExhausted
+      // anyway: a mid-session model/context-window switch (which does not bump
+      // generation) can make the stored flag stale, and an actually overflowing
+      // request must not fall through to the provider while waiting for the
+      // settled-phase compaction owner.
+      if (state.pendingIntent?.triggerKey === triggerKey) {
+        const stillExhausted = estimate.tokens >= (ctx.model?.contextWindow ?? Number.POSITIVE_INFINITY);
+        if (stillExhausted) ctx.abort();
+        return pressure.messages;
+      }
 
       // The context transform owns pruning only. Full compaction is submitted
       // after the agent settles, where it can re-read the branch and arbitrate
       // with Pi's native compaction without a context-hook TOCTOU race.
-      const contextExhausted = estimate.tokens >= ctx.model.contextWindow;
+      // ctx.model may have been replaced across the awaits above; treat a
+      // missing window as fully exhausted so an unbounded request never slips
+      // through to the provider.
+      const contextExhausted = estimate.tokens >= (ctx.model?.contextWindow ?? Number.POSITIVE_INFINITY);
       state.pendingIntent = {
         generation,
         triggerKey,
@@ -650,6 +691,48 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         ctx.abort();
       }
       return pressure.messages;
+  }
+
+  function fallbackToNativeCompaction(
+    ctx: ExtensionContext,
+    intent: PendingCompactionIntent,
+  ): void {
+    if (!intent.contextExhausted || ctx.hasPendingMessages?.()) return;
+    ctx.ui.notify(
+      "Mid-turn compaction repeatedly failed; falling back to Pi native compaction to recover the interrupted request.",
+      "warning",
+    );
+    try {
+      // Deliberately omit customInstructions. The session_before_compact
+      // arbiter treats this as a native request, allowing Pi's fallback path
+      // rather than re-entering the tripped mid-turn owner.
+      ctx.compact({
+        onComplete: () => {
+          state.breaker = resetCompactionBreaker();
+          state.breakerNotified = false;
+          if (ctx.hasPendingMessages?.()) return;
+          try {
+            pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
+          } catch (error) {
+            ctx.ui.notify(
+              `Native fallback continuation failed: ${error instanceof Error ? error.message : String(error)}`,
+              "error",
+            );
+          }
+        },
+        onError: (error) => {
+          ctx.ui.notify(
+            `Native fallback compaction failed: ${error instanceof Error ? error.message : String(error)}`,
+            "error",
+          );
+        },
+      });
+    } catch (error) {
+      ctx.ui.notify(
+        `Native fallback compaction could not start: ${error instanceof Error ? error.message : String(error)}`,
+        "error",
+      );
+    }
   }
 
   async function settlePendingCompaction(ctx: ExtensionContext): Promise<void> {
@@ -691,8 +774,14 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.breaker = recordCompactionFailure(state.breaker, state.turnCount);
       clearPressureStatus(ctx);
       if (options.notify) ctx.ui.notify(`${message}: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      const breakerTripped = state.breaker.trippedAtTurn !== undefined;
       clearPending();
-      if (!intent.contextExhausted || state.breaker.trippedAtTurn !== undefined || ctx.hasPendingMessages?.()) return;
+      if (!intent.contextExhausted || ctx.hasPendingMessages?.()) return;
+      if (breakerTripped) {
+        notifyBreakerPaused();
+        fallbackToNativeCompaction(ctx, intent);
+        return;
+      }
       try {
         pi.sendUserMessage(COMPACTION_RETRY_PROMPT, { deliverAs: "followUp" });
       } catch (recoveryError) {
@@ -793,11 +882,15 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         state.activeLease?.release();
         state.activeLease = undefined;
         clearPressureStatus(ctx);
+        const breakerTripped = state.breaker.trippedAtTurn !== undefined;
         ctx.ui.notify(
-          "Mid-turn compaction timed out; it will retry at the next pressure evaluation.",
+          breakerTripped
+            ? "Mid-turn compaction timed out; native fallback was not started because the host operation may still be active. Retry manually after it settles."
+            : "Mid-turn compaction timed out; it will retry at the next pressure evaluation.",
           "warning",
         );
-        if (!intent.contextExhausted || state.breaker.trippedAtTurn !== undefined || ctx.hasPendingMessages?.()) return;
+        if (breakerTripped) notifyBreakerPaused();
+        if (!intent.contextExhausted || breakerTripped || ctx.hasPendingMessages?.()) return;
         try {
           pi.sendUserMessage(COMPACTION_RETRY_PROMPT, { deliverAs: "followUp" });
         } catch (recoveryError) {
@@ -821,6 +914,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       if (!intent.contextExhausted) return;
       if (state.breaker.trippedAtTurn !== undefined) {
         notifyBreakerPaused();
+        fallbackToNativeCompaction(ctx, intent);
         return;
       }
       if (ctx.hasPendingMessages?.()) return;
@@ -1165,6 +1259,31 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         publishIdleStatus(ctx, settingsFor(ctx).enabled);
         if (!state.lastNoCompactableKey) clearPressureStatus(ctx);
       }
+    },
+    async onToolLoopEnd(ctx) {
+      const generation = state.generation;
+      const sessionId = sessionIdOf(ctx);
+      const isCurrentLifecycle = () => generation === state.generation
+        && (sessionId === undefined || state.sessionId === undefined || sessionId === state.sessionId);
+      if (!isCurrentLifecycle()) return;
+      const pending = state.pendingIntent;
+      // agent_end fires when the tool loop of a turn completes, before the
+      // next agent_settled. A live critical intent must settle here: the
+      // settled-phase defer keeps the first completed turn uncompressed on
+      // purpose, but when the user's turn is a long tool loop that already
+      // overflowed the trigger, waiting for a SECOND completed turn leaves the
+      // session above the hard threshold with no hard compaction — the exact
+      // 'tool call ends but no compaction' symptom. hasPendingMessages
+      // distinguishes a loop that will continue (next tool iteration) from one
+      // that actually ended: only the ended case settles here, so an in-flight
+      // multi-tool loop is not interrupted mid-iteration.
+      if (!pending || state.running || ctx.hasPendingMessages?.()) return;
+      if (pending.generation !== generation) return;
+      // Output-limit and mid-turn intents both target the same arbiter; let
+      // the settled-phase output-limit path win when both are live.
+      if (state.pendingOutputLimitIntent) return;
+      state.highPressureDroppedTurns = 0;
+      await settlePendingCompaction(ctx);
     },
     async onOutputLimit(messages, ctx) {
       const generation = state.generation;
@@ -1592,6 +1711,7 @@ function persistedEntryOf(callId: string, entry: PruneManifestEntry | undefined)
     callId,
     level: entry?.level ?? (entry?.spillPath !== undefined ? "spill" : "pruned"),
     ...(entry?.spillPath !== undefined ? { spillPath: entry.spillPath } : {}),
+    ...(entry?.spillContentDigest !== undefined ? { spillContentDigest: entry.spillContentDigest } : {}),
     ...(entry?.introducedAtUsageEpoch !== undefined ? { introducedAtUsageEpoch: entry.introducedAtUsageEpoch } : {}),
     ...(entry?.contentDigest !== undefined ? { contentDigest: entry.contentDigest } : {}),
     ...(entry?.writerId !== undefined ? { writerId: entry.writerId } : {}),
@@ -1738,7 +1858,13 @@ async function hydrateRestoredPrunes(
     await Promise.all(visible.map(async (item) => {
       if (!item.persisted.spillPath) return item;
       const live = state.sessionId !== undefined
-        && await validateSpillPath(state.sessionId, item.persisted.spillPath, item.persisted.writerId);
+        && typeof item.persisted.spillContentDigest === "string"
+        && await validateSpillPath(
+          state.sessionId,
+          item.persisted.spillPath,
+          item.persisted.writerId,
+          item.persisted.spillContentDigest,
+        );
       if (live) return item;
       return {
         ...item,
@@ -1775,6 +1901,7 @@ async function hydrateRestoredPrunes(
       savedTokens,
       introducedAtUsageEpoch: item.persisted.introducedAtUsageEpoch,
       spillPath: item.persisted.spillPath,
+      spillContentDigest: item.persisted.spillContentDigest,
       contentDigest: item.persisted.contentDigest,
       writerId: item.persisted.writerId,
       level: item.persisted.level,
@@ -2026,6 +2153,7 @@ function applyPersistedPruneRecords(
       ...(version >= 4 && record.hasSpill === true && typeof record.writerId === "string"
         ? { spillPath: resolveSpillPath(sessionId, record.callId, record.writerId) }
         : typeof record.spillPath === "string" ? { spillPath: record.spillPath } : {}),
+      ...(typeof record.spillContentDigest === "string" ? { spillContentDigest: record.spillContentDigest } : {}),
       ...(typeof record.introducedAtUsageEpoch === "string" ? { introducedAtUsageEpoch: record.introducedAtUsageEpoch } : {}),
       ...(typeof record.contentDigest === "string" ? { contentDigest: record.contentDigest } : {}),
       ...(typeof record.writerId === "string" ? { writerId: record.writerId } : {}),
@@ -2209,6 +2337,7 @@ function pruneKey(entries: Iterable<PersistedPruneEntry>): string {
       entry.callId,
       entry.level,
       entry.spillPath ?? null,
+      entry.spillContentDigest ?? null,
       entry.introducedAtUsageEpoch ?? null,
       entry.contentDigest ?? null,
       entry.writerId ?? null,
@@ -2954,25 +3083,49 @@ function compactNewSpilledPrunes(
   return { tokenDelta };
 }
 
+// Tool-result messages are immutable in the compaction pipeline: every prune
+// replaces an array element with a new object. Cache the full-content digest by
+// object identity so applyRecordedPrunes does not re-hash every retained large
+// output on every context hook; a replayed or branch-replaced message naturally
+// gets a new identity and is verified again.
+const toolResultDigestMemo = new WeakMap<object, string>();
+
 function toolResultDigest(message: AgentMessage): string {
+  const key = message as unknown as object;
+  const memoized = toolResultDigestMemo.get(key);
+  if (memoized !== undefined) return memoized;
   const record = message as MessageRecord;
-  return createHash("sha256").update(JSON.stringify({
+  const digest = createHash("sha256").update(JSON.stringify({
     toolCallId: record.toolCallId,
     toolName: record.toolName,
     isError: record.isError === true,
     content: record.content,
   })).digest("hex");
+  toolResultDigestMemo.set(key, digest);
+  return digest;
 }
 
+// Tool-result messages are immutable in the compaction pipeline, so text
+// extraction can share the same object-identity cache discipline as token and
+// digest estimation. Replacements use new objects and automatically miss.
+const extractedTextMemo = new WeakMap<object, string>();
+
 function extractTextContent(message: AgentMessage): string {
+  const key = message as unknown as object;
+  const memoized = extractedTextMemo.get(key);
+  if (memoized !== undefined) return memoized;
+
   const content = (message as MessageRecord).content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
   let text = "";
-  for (const block of content) {
-    const blockText = (block as { text?: unknown } | null)?.text;
-    if (typeof blockText === "string") text += blockText;
+  if (typeof content === "string") {
+    text = content;
+  } else if (Array.isArray(content)) {
+    for (const block of content) {
+      const blockText = (block as { text?: unknown } | null)?.text;
+      if (typeof blockText === "string") text += blockText;
+    }
   }
+  extractedTextMemo.set(key, text);
   return text;
 }
 
@@ -3031,6 +3184,7 @@ async function upgradeNewPrunesWithSpill(
     transformedMessages[index] = upgraded;
     entry.replacement = upgraded;
     entry.spillPath = spill.path;
+    entry.spillContentDigest = spill.contentDigest;
     entry.writerId = writerId;
     entry.savedTokens = estimateMessageTokens(original) - estimateMessageTokens(upgraded);
     entry.level = "spill";

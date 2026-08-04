@@ -1168,8 +1168,9 @@ test("mid-turn guard clears its trigger key after compaction failure", async () 
   assert.equal(abortCalls, 0);
 });
 
-test("mid-turn guard retries exhausted compaction failures until the breaker trips", async () => {
+test("mid-turn guard falls back to native compaction after exhausted failures trip the breaker", async () => {
   const callbacks: Array<{ onError(error: Error): void }> = [];
+  const nativeFallbacks: Array<{ onComplete?: () => void; onError?: (error: Error) => void }> = [];
   const sent: Array<{ message: string; options: unknown }> = [];
   const notifications: Array<{ message: string; level: string | undefined }> = [];
   let aborted = 0;
@@ -1188,7 +1189,10 @@ test("mid-turn guard retries exhausted compaction failures until the breaker tri
     model: { contextWindow: 1_000 },
     abort() { aborted++; },
     hasPendingMessages: () => pending,
-    compact(options: { onError(error: Error): void }) { callbacks.push(options); },
+    compact(options: { customInstructions?: string; onError?(error: Error): void; onComplete?(): void }) {
+      if (options.customInstructions) callbacks.push(options as { onError(error: Error): void });
+      else nativeFallbacks.push(options);
+    },
     sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: {
       setStatus() {},
@@ -1205,9 +1209,13 @@ test("mid-turn guard retries exhausted compaction failures until the breaker tri
 
   assert.equal(aborted, MAX_CONSECUTIVE_COMPACTION_FAILURES);
   assert.equal(callbacks.length, MAX_CONSECUTIVE_COMPACTION_FAILURES);
-  assert.equal(sent.length, MAX_CONSECUTIVE_COMPACTION_FAILURES - 1, "the tripping failure must not queue another retry");
+  assert.equal(sent.length, MAX_CONSECUTIVE_COMPACTION_FAILURES - 1, "the tripping failure uses native fallback instead of another retry turn");
   assert.ok(sent.every(({ message }) => /compaction failed.*context was exhausted/i.test(message)));
   assert.ok(sent.every(({ options }) => JSON.stringify(options) === JSON.stringify({ deliverAs: "followUp" })));
+  assert.equal(nativeFallbacks.length, 1, "a breaker trip triggers exactly one untagged native fallback");
+  nativeFallbacks[0]?.onComplete?.();
+  assert.equal(sent.length, MAX_CONSECUTIVE_COMPACTION_FAILURES, "native success resumes the interrupted task");
+  assert.match(sent.at(-1)?.message ?? "", /Continue the interrupted task from the compacted session checkpoint/);
   const paused = notifications.filter(({ message }) => /compaction paused/.test(message));
   assert.equal(paused.length, 1);
   assert.equal(paused[0]?.level, "warning");
@@ -1239,6 +1247,35 @@ test("mid-turn guard does not duplicate exhausted-failure recovery when a messag
 
   assert.equal(aborted, 1);
   assert.deepEqual(sent, []);
+});
+
+test("breaker trip does not start native fallback while the agent still has queued messages", async () => {
+  const callbacks: Array<{ onError(error: Error): void }> = [];
+  let nativeFallbacks = 0;
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() {},
+    hasPendingMessages: () => true,
+    compact(options: { customInstructions?: string; onError?(error: Error): void }) {
+      if (options.customInstructions) callbacks.push(options as { onError(error: Error): void });
+      else nativeFallbacks++;
+    },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  for (let attempt = 0; attempt < MAX_CONSECUTIVE_COMPACTION_FAILURES; attempt++) {
+    await guard.evaluate(highUsageToolBatch(1_100), ctx);
+    await guard.onAgentEnd(ctx);
+    callbacks.at(-1)?.onError(new Error(`failure ${attempt + 1}`));
+  }
+
+  assert.equal(nativeFallbacks, 0, "queued work remains the current owner until it drains");
 });
 
 test("mid-turn guard settles state when compact throws synchronously", async () => {
@@ -3846,6 +3883,11 @@ test("L2 spill replacement is byte-identical after a session-state restore", asy
   assert.match(firstReplacement, /<persisted-output>/);
   const persisted = appended.at(-1);
   assert.equal((persisted?.data as { version?: number }).version, 6);
+  const persistedPrunes = (persisted?.data as {
+    prunes?: Array<{ callId?: string; writerId?: string; spillContentDigest?: string }>;
+  }).prunes ?? [];
+  const persistedSpill = persistedPrunes.find((entry) => entry.callId === "old-spill");
+  assert.equal(typeof persistedSpill?.spillContentDigest, "string", "new spill journals carry a content digest");
 
   const resumedGuard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage() {} } as never, {
     readSettings: () => settings,
@@ -3864,8 +3906,31 @@ test("L2 spill replacement is byte-identical after a session-state restore", asy
   ] as never, resumedCtx);
   assert.equal(JSON.stringify(resumed?.[1]), firstReplacement);
 
+  // A spill file may persist across a crashed/resumed session. Its journal
+  // digest must be checked before the path is published back into context.
+  await writeFile(
+    spillPath("stable-spill-session", "old-spill", persistedSpill?.writerId),
+    "tampered spill payload",
+    "utf8",
+  );
+  const tamperedGuard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage() {} } as never, {
+    readSettings: () => settings,
+  });
+  tamperedGuard.onSessionStart(resumedCtx);
+  const tampered = await tamperedGuard.evaluate([
+    ...messages,
+    { role: "user", content: [{ type: "text", text: "resume-tampered" }] },
+  ] as never, resumedCtx);
+  assert.doesNotMatch(
+    JSON.stringify(tampered?.[1]),
+    /<persisted-output>/,
+    "a digest mismatch downgrades the restored spill to a plain prune",
+  );
+
   firstGuard.reset(baseCtx);
   resumedGuard.reset(resumedCtx);
+  tamperedGuard.reset(resumedCtx);
+  await cleanupSpillDir("stable-spill-session");
 });
 
 test("L2 token growth is re-accounted before choosing the critical L4 replacement", async () => {
@@ -5474,4 +5539,186 @@ test("cache stability: canonical serialized equality across growing frames in on
     guard.reset(ctx);
     await cleanupSpillDir(sessionId);
   }
+});
+
+test("tool-loop-end fast path settles a live critical intent without the second-turn defer", async () => {
+  let compacted = 0;
+  const notifications: string[] = [];
+  const compactionModel = {
+    provider: "maestro-qwen",
+    id: "summary-small",
+    contextWindow: 400_000,
+    maxTokens: 128_000,
+  };
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({
+      enabled: true,
+      reserveTokens: 16_384,
+      keepRecentTokens: 20_000,
+      model: "maestro-qwen/summary-small",
+    }),
+  });
+  const ctx = {
+    cwd: "D:\repo",
+    model: {
+      provider: "maestro-openai",
+      id: "session-large",
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+    },
+    modelRegistry: {
+      find(provider: string, id: string) {
+        return provider === compactionModel.provider && id === compactionModel.id
+          ? compactionModel
+          : undefined;
+      },
+      async getApiKeyAndHeaders() {
+        return { ok: true, apiKey: "sk-test" };
+      },
+    },
+    abort() {},
+    compact() { compacted++; },
+    hasPendingMessages: () => false,
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: {
+      setStatus() {},
+      notify(message: string) { notifications.push(message); },
+    },
+  } as never;
+
+  // A long tool loop crossed the hard threshold (390K > 384K summary-model
+  // trigger): the context hook queues the intent (no submission), then
+  // agent_end fires at tool-loop completion.
+  await guard.evaluate(highUsageToolBatch(390_000), ctx);
+  assert.equal(compacted, 0, "context hook only queues the intent");
+  await guard.onToolLoopEnd(ctx);
+  assert.equal(compacted, 1, "agent_end settles the critical intent immediately");
+  assert.equal(notifications.length, 0, "no defer warning on the fast path");
+});
+
+test("tool-loop-end fast path skips an in-flight multi-tool loop that will continue", async () => {
+  let compacted = 0;
+  const compactionModel = {
+    provider: "maestro-qwen",
+    id: "summary-small",
+    contextWindow: 400_000,
+    maxTokens: 128_000,
+  };
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({
+      enabled: true,
+      reserveTokens: 16_384,
+      keepRecentTokens: 20_000,
+      model: "maestro-qwen/summary-small",
+    }),
+  });
+  const ctx = {
+    cwd: "D:\repo",
+    model: {
+      provider: "maestro-openai",
+      id: "session-large",
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+    },
+    modelRegistry: {
+      find(provider: string, id: string) {
+        return provider === compactionModel.provider && id === compactionModel.id
+          ? compactionModel
+          : undefined;
+      },
+      async getApiKeyAndHeaders() {
+        return { ok: true, apiKey: "sk-test" };
+      },
+    },
+    abort() {},
+    compact() { compacted++; },
+    hasPendingMessages: () => true,
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  await guard.evaluate(highUsageToolBatch(390_000), ctx);
+  assert.equal(compacted, 0, "intent queued");
+  await guard.onToolLoopEnd(ctx);
+  assert.equal(compacted, 0, "a continuing loop is not interrupted mid-iteration");
+});
+
+test("tool-loop-end fast path does not settle when no intent is pending", async () => {
+  let compacted = 0;
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\repo",
+    model: { contextWindow: 1_000 },
+    abort() {},
+    compact() { compacted++; },
+    hasPendingMessages: () => false,
+    sessionManager: { getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  await guard.onToolLoopEnd(ctx);
+  assert.equal(compacted, 0, "nothing to settle");
+});
+
+test("below-escalate streak hysteresis keeps the deferred intent alive across a band bounce", async () => {
+  let compacted = 0;
+  const notifications: string[] = [];
+  const compactionModel = {
+    provider: "maestro-qwen",
+    id: "summary-small",
+    contextWindow: 400_000,
+    maxTokens: 128_000,
+  };
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({
+      enabled: true,
+      reserveTokens: 16_384,
+      keepRecentTokens: 20_000,
+      model: "maestro-qwen/summary-small",
+    }),
+  });
+  const ctx = {
+    cwd: "D:\repo",
+    model: {
+      provider: "maestro-openai",
+      id: "session-large",
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+    },
+    modelRegistry: {
+      find(provider: string, id: string) {
+        return provider === compactionModel.provider && id === compactionModel.id
+          ? compactionModel
+          : undefined;
+      },
+      async getApiKeyAndHeaders() {
+        return { ok: true, apiKey: "sk-test" };
+      },
+    },
+    abort() {},
+    compact() { compacted++; },
+    hasPendingMessages: () => false,
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: {
+      setStatus() {},
+      notify(message: string) { notifications.push(message); },
+    },
+  } as never;
+
+  // First evaluation queues the escalated intent (390K > 384K trigger).
+  await guard.evaluate(highUsageToolBatch(390_000), ctx);
+  assert.equal(compacted, 0, "intent queued");
+  // A single below-escalate bounce (estimate dips under the escalate band but
+  // stays inside the prune band) must NOT drop the intent — otherwise the
+  // defer counter is zeroed and the 2-turn settle never fires.
+  await guard.evaluate(highUsageToolBatch(386_000), ctx);
+  // The second completed turn still settles because the intent survived.
+  await guard.onAgentEnd(ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(compacted, 1, "intent survived the bounce and settled on turn 2");
 });

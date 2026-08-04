@@ -78,7 +78,11 @@ interface ActiveCompaction {
  * Session-local arbitration for extension-triggered compaction.
  *
  * Pi's native automatic and built-in manual compaction enter through
- * session_before_compact. They are observed, never replaced or cancelled.
+ * session_before_compact and participate in the same arbitration. The extension
+ * may replace their summary through its session_before_compact handler, while
+ * the completed-turn threshold policy may cancel a native threshold request to
+ * preserve an active transcript. Native starts still win an in-flight race with
+ * an extension request.
  */
 export class CompactionArbiter {
   private nextId = 0;

@@ -576,7 +576,7 @@ test("open circuit with no healthy fallback emits a warning notification", async
   }
 });
 
-test("completed tool effects block a fresh fallback replay after settlement", async () => {
+test("completed tool effects still allow a fresh fallback replay after settlement", async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
   try {
     writeProjectConfig(cwd, {
@@ -595,17 +595,21 @@ test("completed tool effects block a fresh fallback replay after settlement", as
 
     assert.deepEqual(runtime.selected, []);
     await runtime.emit("agent_settled");
-    assert.deepEqual(runtime.selected, []);
+    assert.deepEqual(runtime.selected, ["provider/backup"]);
     assert.equal(runtime.handoffs.length, 0);
     assert.equal(runtime.breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "OPEN");
     assert.deepEqual(snapshotModelFailoverSettlement()?.replayFence.completedTools, ["write"]);
-    assert.equal(snapshotModelFailoverSettlement()?.outcome, "replay-blocked");
+    assert.equal(snapshotModelFailoverSettlement()?.replayFence.blocked, true);
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "fallback-scheduled");
+
+    await runtime.flushScheduledHandoff();
+    assert.equal(runtime.handoffs.length, 1);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
 });
 
-test("unknown tool effects block fallback replay", async () => {
+test("unknown tool effects still allow a fresh fallback replay", async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
   try {
     writeProjectConfig(cwd, {
@@ -622,10 +626,14 @@ test("unknown tool effects block fallback replay", async () => {
     });
     await runtime.emit("agent_settled");
 
-    assert.deepEqual(runtime.selected, []);
+    assert.deepEqual(runtime.selected, ["provider/backup"]);
     assert.equal(runtime.handoffs.length, 0);
-    assert.equal(snapshotModelFailoverSettlement()?.outcome, "replay-blocked");
+    assert.equal(snapshotModelFailoverSettlement()?.outcome, "fallback-scheduled");
+    assert.equal(snapshotModelFailoverSettlement()?.replayFence.blocked, true);
     assert.match(snapshotModelFailoverSettlement()?.replayFence.blockedReason ?? "", /could not be confirmed/);
+
+    await runtime.flushScheduledHandoff();
+    assert.equal(runtime.handoffs.length, 1);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
