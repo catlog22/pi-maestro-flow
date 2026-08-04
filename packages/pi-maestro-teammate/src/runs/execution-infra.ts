@@ -40,10 +40,7 @@ import {
   type TeammateThinkingLevel,
 } from "../shared/thinking.ts";
 import {
-  NETWORK_RETRY_POLICY,
   isFallbackProviderError,
-  isRetryableProviderError,
-  retryDelayMs,
 } from "./retry.ts";
 
 // ---------------------------------------------------------------------------
@@ -110,6 +107,13 @@ export interface RunTeammateOptions {
   baseCwd: string;
   modelCapabilities?: readonly TeammateModelCapability[];
   modelCircuitBreaker?: ModelCircuitBreaker;
+  /**
+   * When false, the model-candidate sweep switches candidates without any
+   * inter-attempt backoff. Defaults to true: transient network/provider
+   * failures wait a bounded exponential delay before the next candidate,
+   * while quota/auth/permanent failures switch immediately.
+   */
+  enableRetryBackoff?: boolean;
   /**
    * Main-session model id (e.g. `provider/model`) to inherit when a dispatch
    * sets no explicit task- or top-level model. Configured task-type mappings

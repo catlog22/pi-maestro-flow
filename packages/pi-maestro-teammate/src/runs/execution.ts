@@ -40,7 +40,10 @@ import {
   type TeammateThinkingLevel,
 } from "../shared/thinking.ts";
 import {
+  classifyRetryError,
+  extractRetryAfterMs,
   isFallbackProviderError,
+  retryDelayMs,
 } from "./retry.ts";
 
 export * from "./execution-infra.ts";
@@ -88,6 +91,7 @@ import {
   truncateUtf8Tail,
   validateStructuredOutputValue,
   validateTaskReferences,
+  waitForRetryDelay,
   writeSchemaFile,
   writeSystemPromptFile,
 } from "./execution-infra.ts";
@@ -115,6 +119,12 @@ interface AttemptRecoveryFacts {
 
 const attemptRecoveryFacts = new WeakMap<SingleResult, AttemptRecoveryFacts>();
 const INTERRUPTING_STEER_TIMEOUT_MS = 10_000;
+
+/** Provider identity of a `provider/model` selector, or undefined when unparsable. */
+function providerOf(model: string): string | undefined {
+  const slash = model.indexOf("/");
+  return slash > 0 ? model.slice(0, slash) : undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Core: run a single teammate agent
@@ -251,9 +261,19 @@ export async function runSingleTeammate(
     return result;
   };
 
+  const waitForRetry = options.waitForRetry ?? waitForRetryDelay;
+  let candidateIndex = 0;
+  let failedCandidateCount = 0;
+  // Providers whose credential just failed auth: their remaining candidates
+  // are doomed launches and are skipped (D1-A).
+  const authSkippedProviders = new Set<string>();
+
   for (const modelToUse of modelCandidates) {
     if (options.signal?.aborted) return cancelAtBoundary("before model candidate launch");
     if (modelToUse && modelToUse === resolvedDefaultModel) continue;
+    const candidateProvider = modelToUse ? providerOf(modelToUse) : undefined;
+    if (candidateProvider !== undefined && authSkippedProviders.has(candidateProvider)) continue;
+    candidateIndex += 1;
     const acquisition = modelToUse ? breaker.acquireCandidate(modelToUse) : undefined;
     if (acquisition && !acquisition.allowed) continue;
     if (modelToUse) recordAttemptedModel(modelToUse);
@@ -382,6 +402,24 @@ export async function runSingleTeammate(
           settled = true;
         }
         discardCompletion();
+        const kind = classifyRetryError(error);
+        // D1-A: an auth failure marks this provider's credential as bad —
+        // remaining same-provider candidates will fail identically, so skip
+        // them instead of launching doomed subprocesses.
+        if (kind === "auth" && modelToUse !== undefined) {
+          const failedProvider = providerOf(modelToUse);
+          if (failedProvider !== undefined) authSkippedProviders.add(failedProvider);
+        }
+        // D2: bounded kind-aware backoff before the next candidate. Only
+        // transient network/provider failures wait (a degraded provider gets
+        // a beat instead of consecutive hammering); quota, auth, and
+        // permanent failures switch immediately. The final candidate never
+        // sleeps — the loop exits to the terminal failure path.
+        failedCandidateCount += 1;
+        const delayMs = retryDelayMs(failedCandidateCount, kind, extractRetryAfterMs(error));
+        if (delayMs > 0 && options.enableRetryBackoff !== false && candidateIndex < modelCandidates.length) {
+          await waitForRetry(delayMs, options.signal);
+        }
         continue;
       }
 

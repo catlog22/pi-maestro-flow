@@ -35,6 +35,8 @@ interface ActiveModelRun {
   index: number;
   model: string;
   acquisition: AcquiredModelCandidate;
+  /** Monotonic run generation; isolates late events from older logical runs. */
+  generation: number;
   used: boolean;
   failureRecorded: boolean;
   lastError?: string;
@@ -120,6 +122,8 @@ type InjectedImageMessage = {
 };
 const FAILOVER_RETRY_PROMPT = "The previous model exhausted its native retries with a transient network, provider, or quota error. Retry the original user request from the beginning on the selected fallback model and complete it.";
 const FAILOVER_RECOVERY_MARKER = "maestro-model-failover";
+/** Published on the pi event bus when a scheduled fallback handoff fails terminally. */
+export const FAILOVER_TERMINAL_EVENT = "maestro-failover-terminal";
 
 function imageRouteMessage(
   customType: string,
@@ -361,6 +365,8 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
   const visionAnalyzer = options.visionAnalyzer ?? analyzeAttachedImage;
   let active: ActiveModelRun | undefined;
   let finalObservation: AgentEndObservation | undefined;
+  let observedGeneration: number | undefined;
+  let runGeneration = 0;
   let pendingRecoveryId: string | undefined;
   const completedTools: string[] = [];
   const startedTools = new Map<string, string>();
@@ -368,6 +374,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
 
   const resetRunEvidence = (): void => {
     finalObservation = undefined;
+    observedGeneration = undefined;
     completedTools.length = 0;
     startedTools.clear();
   };
@@ -420,6 +427,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
         index,
         model: candidate,
         acquisition,
+        generation: ++runGeneration,
         used: false,
         failureRecorded: false,
       };
@@ -440,6 +448,10 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
 
   pi.on("before_agent_start", async (event, ctx) => {
     config = loadModelFailoverConfig(ctx.cwd, options.homeDir);
+    // Any arbitration snapshot surviving into a new turn is stale: it was
+    // either consumed by the previous settlement dispatch or never claimed.
+    // Clearing here prevents a later Goal settlement from misattributing it.
+    settlementArbitration = undefined;
     const recoveryId = pendingRecoveryId;
     if (active && recoveryId && event.prompt.includes(`[${FAILOVER_RECOVERY_MARKER}:${recoveryId}]`)) {
       // The fallback acquisition was made after the previous logical run
@@ -533,7 +545,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     const currentIndex = chain.indexOf(current);
     const acquisition = breaker.acquireCandidate(current);
     if (acquisition.allowed) {
-      active = { chain, index: currentIndex >= 0 ? currentIndex : 0, model: current, acquisition, used: false, failureRecorded: false };
+      active = { chain, index: currentIndex >= 0 ? currentIndex : 0, model: current, acquisition, generation: ++runGeneration, used: false, failureRecorded: false };
       return injectedMessage ?? (images.length > 0
         ? directImageRouteMessage(images, current, isMultimodalModel(ctx.model), visionEnabled ? "analysis_unavailable" : "vision_disabled")
         : undefined);
@@ -566,7 +578,13 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
   });
 
   pi.on("turn_start", () => {
-    if (active) active.used = true;
+    if (!active) return;
+    active.used = true;
+    // The fallback turn acknowledges the handoff; from here its own
+    // settlement may arbitrate. Keeping pendingRecoveryId set until this
+    // point prevents a stale duplicate old-run settlement from settling the
+    // not-yet-started fallback run.
+    pendingRecoveryId = undefined;
   });
 
   pi.on("tool_execution_start", (event) => {
@@ -593,10 +611,13 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
   });
 
   pi.on("agent_end", (event) => {
-    if (!active || !config.enabled) return;
+    // Image-triggered switches are observed even when automatic failover is
+    // disabled; only genuine failover runs are gated by config.enabled.
+    if (!active || (!config.enabled && !active.imageTriggered)) return;
     const fallbackFailure = active.lastHttpStatus && active.lastHttpStatus >= 400 ? active.lastError : undefined;
     // Pi's extension event omits willRetry. This observation may be replaced by
     // a later native retry/compaction/queue-drain result before agent_settled.
+    observedGeneration = active.generation;
     finalObservation = observeAgentEnd(
       event.messages as AgentMessage[],
       fallbackFailure,
@@ -620,13 +641,15 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
           completedTools: [...(finalObservation?.completedTools ?? completedTools)],
           unknownEffect: finalObservation?.unknownEffect ?? startedTools.size > 0,
         }
-      : finalObservation ?? {
-          outcome: "failed",
-          failure: "Agent settled without a final agent_end observation",
-          failureKind: "non-retryable",
-          completedTools: [...completedTools],
-          unknownEffect: startedTools.size > 0,
-        };
+      : finalObservation && observedGeneration === activeRun.generation
+        ? finalObservation
+        : {
+            outcome: "failed",
+            failure: "Agent settled without a final agent_end observation",
+            failureKind: "non-retryable",
+            completedTools: [...completedTools],
+            unknownEffect: startedTools.size > 0,
+          };
     const fence = replayFence(observation);
     const baseSnapshot = {
       protocolVersion: RECOVERY_PROTOCOL_VERSION,
@@ -665,7 +688,15 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
 
     // Authentication, invalid-model, context, and other terminal failures do
     // not poison provider health and never initiate a fresh logical replay.
-    if (!config.enabled || observation.failureKind === "non-retryable") {
+    // Image-triggered runs settle independently of the failover switch.
+    // `auth` is terminal here even though the teammate candidate sweep treats
+    // it as fallback-eligible: a broken credential will not heal by replaying
+    // the same logical run, so it must not trigger a fresh replay.
+    if (
+      (!config.enabled && !activeRun.imageTriggered)
+      || observation.failureKind === "non-retryable"
+      || observation.failureKind === "auth"
+    ) {
       if (!activeRun.failureRecorded) breaker.releaseCandidate(activeRun.acquisition);
       activeRun.failureRecorded = true;
       publishSettlement({ ...baseSnapshot, outcome: "failed" });
@@ -691,13 +722,19 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
       await restoreImageModel();
       return;
     }
+    // Preserve image-switch provenance so the terminal settlement restores the
+    // original text-only model even when the first multimodal candidate failed.
+    if (activeRun.imageTriggered) {
+      fallback.imageTriggered = true;
+      fallback.originalModel = activeRun.originalModel;
+    }
 
     const intent: RecoveryFallbackModelIntent = {
       intentId: `${recoveryId}:fallback`,
       kind: "fallback_model",
       fromModel: activeRun.model,
       toModel: fallback.model,
-      mode: "restart",
+      mode: fence.blocked ? "force_restart" : "restart",
       replayFence: fence,
     };
     active = fallback;
@@ -711,7 +748,8 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
       // sendCustomMessage({ triggerTurn: true }) starts a hidden custom turn
       // directly and does not emit before_agent_start. Transfer ownership to
       // the fallback run before starting it so its agent_settled can arbitrate.
-      pendingRecoveryId = undefined;
+      // pendingRecoveryId stays set until the fallback turn's turn_start
+      // acknowledges the handoff.
       fallback.used = false;
       fallback.lastError = undefined;
       fallback.lastHttpStatus = undefined;
@@ -729,11 +767,12 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
         fallback.failureRecorded = true;
         if (active === fallback) active = undefined;
         if (pendingRecoveryId === recoveryId) pendingRecoveryId = undefined;
-        publishSettlement({
+        const failedSnapshot = publishSettlement({
           ...baseSnapshot,
           outcome: "failed",
           failure: `Fallback handoff failed: ${error instanceof Error ? error.message : String(error)}`,
         });
+        pi.events?.emit?.(FAILOVER_TERMINAL_EVENT, failedSnapshot);
         ctx.ui.notify(`Model fallback could not start on ${fallback.model}.`, "warning");
       }
     }, 0);

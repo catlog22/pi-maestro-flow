@@ -73,6 +73,19 @@ export interface RunTeammateOptions {
     baseCwd: string;
     modelCapabilities?: readonly TeammateModelCapability[];
     modelCircuitBreaker?: ModelCircuitBreaker;
+    /**
+     * When false, the model-candidate sweep switches candidates without any
+     * inter-attempt backoff. Defaults to true: transient network/provider
+     * failures wait a bounded exponential delay before the next candidate,
+     * while quota/auth/permanent failures switch immediately.
+     */
+    enableRetryBackoff?: boolean;
+    /**
+     * Main-session model id (e.g. `provider/model`) to inherit when a dispatch
+     * sets no explicit task- or top-level model. Configured task-type mappings
+     * still win; this is the default fallback below them.
+     */
+    inheritModel?: string;
     correlationId?: string;
     taskCorrelationIds?: string[];
     /** Task-local cancellation signals for graph members; `signal` remains graph-wide. */

@@ -592,8 +592,8 @@ test("network retry policy is bounded, progressive, and rejects permanent failur
     classifyRetryError("Teammate runtime error (phase=message_end): 402: Insufficient Balance"),
     "fallback-only",
   );
-  assert.equal(classifyRetryError("Invalid API key"), "non-retryable");
-  assert.equal(classifyRetryError("Authentication failed: token expired"), "non-retryable");
+  assert.equal(classifyRetryError("Invalid API key"), "auth");
+  assert.equal(classifyRetryError("Authentication failed: token expired"), "auth");
   assert.equal(classifyRetryError("context length exceeded"), "non-retryable");
   assert.equal(
     classifyRetryError("Timed out waiting for the first child agent event (agent=general, model=qwen, correlationId=abc, phase=first-activity); the child process started but did not report model activity."),

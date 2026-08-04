@@ -17,6 +17,8 @@ export type {
 export {
   NETWORK_RETRY_POLICY,
   classifyRetryError,
+  extractRetryAfterMs,
+  isAuthError,
   isRetryableProviderError,
   retryDelayMs,
 } from "../../runs/retry.ts";
