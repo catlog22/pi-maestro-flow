@@ -1,36 +1,51 @@
 /**
  * Ref-counted process-level terminal cleanup owner.
  *
- * Guarantees the alternate screen, mouse modes, bracketed paste, cursor and raw
- * mode are restored on BOTH graceful and forced (catchable) exit — pi's own
- * terminal restore only runs on its graceful shutdown, so a SIGINT (or any exit
- * where pi's stop() is skipped) would otherwise leave the terminal in raw mode,
- * making arrow keys / combos echo as literal characters.
+ * Guarantees the terminal is fully restored on BOTH graceful and forced
+ * (catchable) exit — pi's own restore only runs on its graceful shutdown, so a
+ * SIGINT (or any exit where pi's stop() is skipped) would otherwise leave the
+ * TTY in raw mode / with keyboard protocols on, making arrow keys and combos
+ * echo as literal characters. The restore sequence is deliberately broad (alt
+ * screen, all mouse modes, bracketed paste, DECCKM, kitty protocol, cursor,
+ * style reset) so it also covers modes a terminal may have kept from pi or the
+ * host; unknown modes are ignored by terminals.
  *
  * Exactly one owner registers the handlers; they are removed when the last
- * consumer unregisters. SIGKILL / power loss cannot run any code — the documented
- * recovery for that physical case is `reset` / `stty sane`.
+ * consumer unregisters. SIGKILL / power loss cannot run any code — the
+ * documented recovery for that physical case is `reset` / `stty sane`.
  */
 
 type WriteFn = (sequence: string) => void;
 
-/** Best-effort restore: leave the alternate screen, drop mouse modes, disable
- * bracketed paste, show the cursor, and reset styles. */
-export const TERMINAL_RESTORE_SEQUENCE = "\x1b[?1049l\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[0m";
+import { execSync } from "node:child_process";
+
+/** Broad, idempotent restore: leave alt screen, drop every mouse mode, disable
+ * bracketed paste, DECCKM and the kitty keyboard protocol, show the cursor,
+ * and reset styles. Unknown modes are ignored by terminals. */
+export const TERMINAL_RESTORE_SEQUENCE =
+	"\x1b[?1049l\x1b[?1l" +
+	"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" +
+	"\x1b[?2004l" +
+	"\x1b[?2027l\x1b[?2028l\x1b[?2029l\x1b[<u" +
+	"\x1b[?25h\x1b[0m";
 
 const writers = new Set<WriteFn>();
 let handlersInstalled = false;
 
-/** Restore raw mode (cooked) only if it is currently raw — idempotent and safe
- * when pi already restored it on its graceful path. */
+/** Restore raw mode to cooked, unconditionally. Primary path is Node's stream
+ * API; `stty sane` is a best-effort fallback for platforms where the console
+ * state is not fully reflected by setRawMode (e.g. Windows). */
 function restoreRawMode(): void {
 	try {
-		const stdin = process.stdin;
-		if (stdin && (stdin as { isRaw?: boolean }).isRaw) {
-			(stdin as { setRawMode(mode: boolean): unknown }).setRawMode(false);
-		}
+		process.stdin.setRawMode(false);
+		return;
 	} catch {
-		// Best effort: the stream may already be closed.
+		// fall through to stty
+	}
+	try {
+		execSync("stty sane", { stdio: "ignore", timeout: 1000 });
+	} catch {
+		// Best effort: no stty on this platform.
 	}
 }
 
