@@ -48,27 +48,66 @@ export const MAX_PROMPT_TOO_LONG_RETRIES = 2;
 const PROMPT_TOO_LONG_RETRY_FRACTION = 0.2;
 const SUMMARY_INPUT_TRUNCATION_MARKER = "[Earlier conversation omitted to fit the compaction model. Use previousSummary and runtimeState as the authoritative earlier checkpoint.]";
 const IMAGE_PLACEHOLDER = "[image]";
+const IMAGE_ROUTE_DETAILS_KIND = "maestro-image-routing";
+const IMAGE_ROUTE_DETAILS_VERSION = 1;
+type ImageRoute = "native" | "vision" | "vision+native" | "unread";
 const DOCUMENT_PLACEHOLDER = "[document]";
+
+function routedImagePlaceholders(messages: AgentMessage[]): Map<number, Map<number, ImageRoute>> {
+  const routesByMessage = new Map<number, Map<number, ImageRoute>>();
+  const pendingImageMessages: number[] = [];
+
+  for (const [messageIndex, message] of messages.entries()) {
+    const record = message as unknown as { role?: unknown; content?: unknown; details?: unknown };
+    if (record.role === "user" && Array.isArray(record.content) && record.content.some((block) =>
+      typeof block === "object" && block !== null && (block as { type?: unknown }).type === "image")) {
+      pendingImageMessages.push(messageIndex);
+    }
+
+    const details = record.details;
+    if (typeof details !== "object" || details === null || Array.isArray(details)) continue;
+    const detailRecord = details as Record<string, unknown>;
+    if (detailRecord.kind !== IMAGE_ROUTE_DETAILS_KIND || detailRecord.schemaVersion !== IMAGE_ROUTE_DETAILS_VERSION) continue;
+    if (!Array.isArray(detailRecord.routes)) continue;
+    const routes = new Map<number, ImageRoute>();
+    for (const entry of detailRecord.routes) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+      const routeRecord = entry as { imageIndex?: unknown; route?: unknown };
+      if (!Number.isSafeInteger(routeRecord.imageIndex) || (routeRecord.imageIndex as number) < 1) continue;
+      const route = routeRecord.route;
+      if (route !== "native" && route !== "vision" && route !== "vision+native" && route !== "unread") continue;
+      routes.set((routeRecord.imageIndex as number) - 1, route);
+    }
+    const targetMessage = pendingImageMessages.pop();
+    if (targetMessage !== undefined && routes.size > 0) routesByMessage.set(targetMessage, routes);
+  }
+
+  return routesByMessage;
+}
 
 /**
  * Replace image/document content blocks with text placeholders before the
  * summary prompt is serialized. The compaction model never receives image
  * pixels (zero-upload principle); the placeholder preserves position semantics
- * so the checkpoint keeps "a visual block existed here". Mirrors Claude Code's
- * stripImagesFromMessages. Applies to every message whose content is an array
- * (user messages and toolResult messages both carry media blocks at the top
- * level of their content); string content passes through unchanged.
+ * so the checkpoint keeps "a visual block existed here". New image turns carry
+ * a persisted route sidecar and become `[image:native|vision|unread]`; legacy
+ * turns without provenance remain `[image]`. Applies to every message whose
+ * content is an array; string content passes through unchanged.
  */
 export function stripImagesFromMessagesForSummary(messages: AgentMessage[]): AgentMessage[] {
-  return messages.map((message) => {
+  const routesByMessage = routedImagePlaceholders(messages);
+  return messages.map((message, messageIndex) => {
     const record = message as unknown as { content?: unknown };
     if (!Array.isArray(record.content)) return message;
     const blocks = record.content as Array<Record<string, unknown>>;
+    const routes = routesByMessage.get(messageIndex);
+    let imageIndex = 0;
     let hasMedia = false;
     const content = blocks.map((block) => {
       if (block?.type === "image") {
         hasMedia = true;
-        return { type: "text", text: IMAGE_PLACEHOLDER };
+        const route = routes?.get(imageIndex++);
+        return { type: "text", text: route ? `[image:${route}]` : IMAGE_PLACEHOLDER };
       }
       if (block?.type === "document") {
         hasMedia = true;

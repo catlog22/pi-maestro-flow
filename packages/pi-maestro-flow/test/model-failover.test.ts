@@ -166,8 +166,9 @@ test("attached images prefer a healthy multimodal fallback", async () => {
     const result = await runtime.emit("before_agent_start", {
       prompt: "inspect",
       images: [{ type: "image", data: Buffer.from("image").toString("base64"), mimeType: "image/png" }],
-    });
-    assert.equal(result, undefined);
+    }) as { message?: { content?: string; details?: { routes?: Array<{ route?: string; model?: string }> } } };
+    assert.match(result.message?.content ?? "", /\[image:native\]/);
+    assert.deepEqual(result.message?.details?.routes, [{ imageIndex: 1, route: "native", model: "provider/last" }]);
     assert.deepEqual(runtime.selected, ["provider/last"]);
     assert.equal(delegated, 0);
     assert.match(runtime.notifications[0] ?? "", /multimodal provider\/last/);
@@ -225,14 +226,101 @@ test("attached images inject delegated analysis when the configured chain is tex
     const result = await runtime.emit("before_agent_start", {
       prompt: "inspect",
       images: [{ type: "image", data: Buffer.from("image").toString("base64"), mimeType: "image/png" }],
-    }) as { message?: { customType?: string; content?: string; display?: boolean } };
+    }) as {
+      message?: {
+        customType?: string;
+        content?: string;
+        display?: boolean;
+        details?: { kind?: string; routes?: Array<{ imageIndex?: number; route?: string; model?: string }> };
+      };
+    };
     assert.equal(delegated, 1);
     assert.equal(result.message?.customType, "maestro-vision-analysis");
     assert.equal(result.message?.display, false);
+    assert.match(result.message?.content ?? "", /\[image:vision\]/);
     assert.match(result.message?.content ?? "", /disabled checkbox/);
+    assert.equal(result.message?.details?.kind, "maestro-image-routing");
+    assert.deepEqual(result.message?.details?.routes, [{ imageIndex: 1, route: "vision", model: "helper/vision" }]);
     assert.deepEqual(runtime.selected, []);
     await runtime.emit("session_shutdown");
   } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("attached image delegation records partial failures and the per-turn limit as unread", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-image-routes-"));
+  try {
+    writeProjectConfig(cwd, { enabled: true, fallbackModels: { "provider/primary": ["provider/backup"] } });
+    let delegated = 0;
+    const runtime = harness(cwd, undefined, {
+      visionAnalyzer: async () => {
+        delegated += 1;
+        if (delegated === 2) throw new Error("provider unavailable");
+        return { text: `analysis ${delegated}`, model: "helper/vision", cached: false };
+      },
+    });
+    const images = Array.from({ length: 6 }, (_value, index) => ({
+      type: "image",
+      data: Buffer.from(`image-${index}`).toString("base64"),
+      mimeType: "image/png",
+    }));
+
+    const result = await runtime.emit("before_agent_start", { prompt: "inspect", images }) as {
+      message?: { content?: string; details?: { routes?: Array<{ route?: string; reason?: string }> } };
+    };
+
+    assert.equal(delegated, 5);
+    assert.deepEqual(result.message?.details?.routes?.map((route) => route.route), [
+      "vision", "unread", "vision", "vision", "vision", "unread",
+    ]);
+    assert.equal(result.message?.details?.routes?.[1]?.reason, "analysis_failed");
+    assert.equal(result.message?.details?.routes?.[5]?.reason, "analysis_limit");
+    assert.match(result.message?.content ?? "", /Attached image 2 \[image:unread\]/);
+    assert.match(result.message?.content ?? "", /Attached image 6 \[image:unread\]/);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("implicit multimodal failover upgrades Vision provenance to vision+native", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-hybrid-image-route-"));
+  try {
+    writeProjectConfig(cwd, { enabled: true, fallbackModels: {} });
+    const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
+    const primary = breaker.acquireCandidate("provider/primary");
+    assert.equal(primary.allowed, true);
+    if (primary.allowed) breaker.recordRetryableFailure(primary);
+    let delegated = 0;
+    const runtime = harness(cwd, breaker, {
+      multimodal: ["provider/last"],
+      visionAnalyzer: async () => {
+        delegated += 1;
+        if (delegated === 2) throw new Error("vision unavailable");
+        return { text: "delegated context", model: "helper/vision", cached: false };
+      },
+    });
+    const images = [0, 1].map((index) => ({
+      type: "image",
+      data: Buffer.from(`image-${index}`).toString("base64"),
+      mimeType: "image/png",
+    }));
+
+    const result = await runtime.emit("before_agent_start", { prompt: "inspect", images }) as {
+      message?: {
+        content?: string;
+        details?: { routes?: Array<{ route?: string; model?: string; nativeModel?: string }> };
+      };
+    };
+
+    assert.deepEqual(runtime.selected, ["provider/last"]);
+    assert.deepEqual(result.message?.details?.routes, [
+      { imageIndex: 1, route: "vision+native", model: "helper/vision", nativeModel: "provider/last" },
+      { imageIndex: 2, route: "native", model: "provider/last" },
+    ]);
+    assert.match(result.message?.content ?? "", /\[image:vision\+native\]/);
+    assert.match(result.message?.content ?? "", /Attached image 2 \[image:native\]/);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("agent_end is observational and retry exhaustion falls back only after settlement", async () => {
@@ -705,9 +793,10 @@ test("attached images with vision delegation disabled do not auto-analyze", asyn
     const result = await runtime.emit("before_agent_start", {
       prompt: "inspect",
       images: [{ type: "image", data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString("base64"), mimeType: "image/png" }],
-    });
+    }) as { message?: { content?: string; details?: { routes?: Array<{ route?: string; reason?: string }> } } };
     assert.equal(delegated, 0);
-    assert.equal(result, undefined);
+    assert.match(result.message?.content ?? "", /\[image:unread\]/);
+    assert.deepEqual(result.message?.details?.routes, [{ imageIndex: 1, route: "unread", reason: "vision_disabled" }]);
     await runtime.emit("session_shutdown");
   } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
 });

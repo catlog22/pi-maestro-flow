@@ -95,8 +95,85 @@ export interface ModelFailoverOptions {
 const CONFIG_FILE = "model-failover.json";
 /** Upper bound on attached images auto-analyzed in one turn; prevents linear cost blowup. */
 const MAX_ATTACHED_IMAGES_PER_TURN = 5;
+const IMAGE_ROUTE_DETAILS_KIND = "maestro-image-routing";
+const IMAGE_ROUTE_DETAILS_VERSION = 1;
+type ImageRoute = "native" | "vision" | "vision+native" | "unread";
+interface ImageRouteRecord {
+  imageIndex: number;
+  route: ImageRoute;
+  model?: string;
+  nativeModel?: string;
+  reason?: string;
+}
+interface ImageRouteDetails {
+  kind: typeof IMAGE_ROUTE_DETAILS_KIND;
+  schemaVersion: typeof IMAGE_ROUTE_DETAILS_VERSION;
+  routes: ImageRouteRecord[];
+}
+type InjectedImageMessage = {
+  message: {
+    customType: string;
+    content: string;
+    display: false;
+    details: ImageRouteDetails;
+  };
+};
 const FAILOVER_RETRY_PROMPT = "The previous model exhausted its native retries with a transient network, provider, or quota error. Retry the original user request from the beginning on the selected fallback model and complete it.";
 const FAILOVER_RECOVERY_MARKER = "maestro-model-failover";
+
+function imageRouteMessage(
+  customType: string,
+  routes: ImageRouteRecord[],
+  content: string,
+): InjectedImageMessage {
+  return {
+    message: {
+      customType,
+      content,
+      display: false,
+      details: {
+        kind: IMAGE_ROUTE_DETAILS_KIND,
+        schemaVersion: IMAGE_ROUTE_DETAILS_VERSION,
+        routes,
+      },
+    },
+  };
+}
+
+function directImageRouteMessage(
+  images: AttachedImageInput[],
+  model: string,
+  native: boolean,
+  unreadReason = "vision_disabled",
+): InjectedImageMessage {
+  const route: ImageRoute = native ? "native" : "unread";
+  const routes = images.map((_image, index): ImageRouteRecord => ({
+    imageIndex: index + 1,
+    route,
+    ...(native ? { model } : { reason: unreadReason }),
+  }));
+  const markers = routes.map((entry) => `[image:${entry.route}]`).join(" ");
+  const explanation = native
+    ? `Attached images are read natively by ${model}.`
+    : "Attached images were not read because the text-only primary model has no active Vision delegation.";
+  return imageRouteMessage("maestro-image-routing", routes, `${markers}\n${explanation}`);
+}
+
+function addNativeImageRoute(message: InjectedImageMessage, model: string): InjectedImageMessage {
+  const routes = message.message.details.routes.map((entry): ImageRouteRecord => {
+    if (entry.route === "vision") {
+      return { ...entry, route: "vision+native", nativeModel: model };
+    }
+    return { imageIndex: entry.imageIndex, route: "native", model };
+  });
+  return imageRouteMessage(
+    message.message.customType,
+    routes,
+    message.message.content
+      .replaceAll("[image:vision]", "[image:vision+native]")
+      .replaceAll("[image:unread]", "[image:native]"),
+  );
+}
 
 function recoveryPrompt(recoveryId: string): string {
   return `${FAILOVER_RETRY_PROMPT}\n\n[${FAILOVER_RECOVERY_MARKER}:${recoveryId}]`;
@@ -389,7 +466,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     // Attached-image handling is gated by the vision delegation config, not by
     // model-failover.enabled: the feature must work even when failover is off.
     const visionEnabled = loadVisionDelegationConfig(options.visionAgentDir ?? getAgentDir()).enabled;
-    let injectedMessage: { message: { customType: string; content: string; display: boolean } } | undefined;
+    let injectedMessage: InjectedImageMessage | undefined;
 
     if (images.length > 0 && !isMultimodalModel(ctx.model) && visionEnabled) {
       const models = availableModels(ctx);
@@ -401,38 +478,52 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
           preferred.originalModel = current;
           active = preferred;
           ctx.ui.notify(`Attached image detected; switched from text-only ${current} to multimodal ${preferred.model}.`, "info");
-          return;
+          return directImageRouteMessage(images, preferred.model, true);
         }
       }
 
       // No healthy multimodal candidate: delegate analysis (bounded + cancellable).
-      const analyses: string[] = [];
+      const sections: string[] = [];
+      const routes: ImageRouteRecord[] = [];
       const signal = ctx.signal;
-      for (const [index, image] of images.slice(0, MAX_ATTACHED_IMAGES_PER_TURN).entries()) {
-        if (signal?.aborted) break;
+      for (const [index, image] of images.entries()) {
+        if (index >= MAX_ATTACHED_IMAGES_PER_TURN) {
+          routes.push({ imageIndex: index + 1, route: "unread", reason: "analysis_limit" });
+          sections.push(`### Attached image ${index + 1} [image:unread]\nNot analyzed: the per-turn Vision limit is ${MAX_ATTACHED_IMAGES_PER_TURN} images.`);
+          continue;
+        }
+        if (signal?.aborted) {
+          routes.push({ imageIndex: index + 1, route: "unread", reason: "cancelled" });
+          sections.push(`### Attached image ${index + 1} [image:unread]\nNot analyzed: the turn was cancelled.`);
+          continue;
+        }
         try {
           const result = await visionAnalyzer(ctx, image, {
             agentDir: options.visionAgentDir,
             signal,
             prompt: `Analyze attached image ${index + 1} for the primary coding agent. Extract visible text, structure, UI state, diagrams, and details relevant to the user's request.`,
           });
-          analyses.push(`### Attached image ${index + 1} (${result.model})\n${result.text}`);
+          routes.push({ imageIndex: index + 1, route: "vision", model: result.model });
+          sections.push(`### Attached image ${index + 1} [image:vision] (${result.model})\n${result.text}`);
         } catch (error) {
-          ctx.ui.notify(`Automatic vision analysis failed for attached image ${index + 1}: ${error instanceof Error ? error.message : String(error)}`, "warning");
+          const failure = error instanceof Error ? error.message : String(error);
+          routes.push({ imageIndex: index + 1, route: "unread", reason: "analysis_failed" });
+          sections.push(`### Attached image ${index + 1} [image:unread]\nVision analysis failed: ${failure}`);
+          ctx.ui.notify(`Automatic vision analysis failed for attached image ${index + 1}: ${failure}`, "warning");
         }
       }
-      if (analyses.length > 0) {
-        injectedMessage = {
-          message: {
-            customType: "maestro-vision-analysis",
-            content: ["Automatic multimodal analysis for the text-only primary model:", ...analyses].join("\n\n"),
-            display: false,
-          },
-        };
-      }
+      injectedMessage = imageRouteMessage(
+        "maestro-vision-analysis",
+        routes,
+        ["Automatic image handling for the text-only primary model:", ...sections].join("\n\n"),
+      );
     }
 
-    if (!config.enabled) return injectedMessage;
+    if (!config.enabled) {
+      return injectedMessage ?? (images.length > 0
+        ? directImageRouteMessage(images, current, isMultimodalModel(ctx.model))
+        : undefined);
+    }
 
     // Without an explicit fallback chain every other authenticated model is an
     // implicit ordered fallback, mirroring teammate's implicit candidate sweep
@@ -445,7 +536,9 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     const acquisition = breaker.acquireCandidate(current);
     if (acquisition.allowed) {
       active = { chain, index: currentIndex >= 0 ? currentIndex : 0, model: current, acquisition, used: false, failureRecorded: false };
-      return injectedMessage;
+      return injectedMessage ?? (images.length > 0
+        ? directImageRouteMessage(images, current, isMultimodalModel(ctx.model), visionEnabled ? "analysis_unavailable" : "vision_disabled")
+        : undefined);
     }
 
     const fallback = await selectCandidate(ctx, chain, 0);
@@ -459,7 +552,19 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
         "warning",
       );
     }
-    return injectedMessage;
+    const effectiveModel = fallback?.model ?? current;
+    if (images.length === 0) return injectedMessage;
+    if (isMultimodalModel(ctx.model)) {
+      return injectedMessage
+        ? addNativeImageRoute(injectedMessage, effectiveModel)
+        : directImageRouteMessage(images, effectiveModel, true);
+    }
+    return injectedMessage ?? directImageRouteMessage(
+      images,
+      effectiveModel,
+      false,
+      visionEnabled ? "analysis_unavailable" : "vision_disabled",
+    );
   });
 
   pi.on("turn_start", () => {

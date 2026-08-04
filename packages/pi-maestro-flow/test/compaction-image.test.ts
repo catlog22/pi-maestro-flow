@@ -26,6 +26,78 @@ test("stripImagesFromMessagesForSummary replaces top-level image blocks with [im
   assert.equal(content[1].text, "[image]");
 });
 
+test("stripImagesFromMessagesForSummary uses persisted image route sidecars", () => {
+  const messages = [
+    {
+      role: "user",
+      content: [imageBlock("native"), imageBlock("vision"), imageBlock("unread")],
+      timestamp: 1,
+    },
+    {
+      role: "custom",
+      customType: "maestro-image-routing",
+      content: "image routing",
+      display: false,
+      details: {
+        kind: "maestro-image-routing",
+        schemaVersion: 1,
+        routes: [
+          { imageIndex: 1, route: "native", model: "provider/native" },
+          { imageIndex: 2, route: "vision", model: "provider/vision" },
+          { imageIndex: 3, route: "unread", reason: "analysis_failed" },
+        ],
+      },
+      timestamp: 2,
+    },
+  ] as never;
+
+  const stripped = stripImagesFromMessagesForSummary(messages);
+  const content = (stripped[0] as { content: Array<{ type: string; text?: string }> }).content;
+  assert.deepEqual(content.map((block) => block.text), [
+    "[image:native]",
+    "[image:vision]",
+    "[image:unread]",
+  ]);
+});
+
+test("stripImagesFromMessagesForSummary honors sparse indices and ignores intervening non-user media", () => {
+  const messages = [
+    {
+      role: "user",
+      content: [imageBlock("one"), imageBlock("two"), imageBlock("three")],
+      timestamp: 1,
+    },
+    {
+      role: "custom",
+      customType: "preview",
+      content: [imageBlock("preview")],
+      display: false,
+      timestamp: 2,
+    },
+    {
+      role: "custom",
+      customType: "maestro-image-routing",
+      content: "image routing",
+      display: false,
+      details: {
+        kind: "maestro-image-routing",
+        schemaVersion: 1,
+        routes: [
+          { imageIndex: 3, route: "vision" },
+          { imageIndex: 1, route: "native" },
+        ],
+      },
+      timestamp: 3,
+    },
+  ] as never;
+
+  const stripped = stripImagesFromMessagesForSummary(messages);
+  const userContent = (stripped[0] as { content: Array<{ text?: string }> }).content;
+  const customContent = (stripped[1] as { content: Array<{ text?: string }> }).content;
+  assert.deepEqual(userContent.map((block) => block.text), ["[image:native]", "[image]", "[image:vision]"]);
+  assert.deepEqual(customContent.map((block) => block.text), ["[image]"]);
+});
+
 test("stripImagesFromMessagesForSummary replaces nested toolResult image blocks", () => {
   const messages = [{
     role: "toolResult",
