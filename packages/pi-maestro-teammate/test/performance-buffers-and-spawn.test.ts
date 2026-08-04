@@ -1757,6 +1757,312 @@ test("legacy child failure reports degraded capability and does not fresh-replay
   assert.match(result.messages.at(-1)?.content ?? "", /degraded recovery capability/);
 });
 
+test("silent pre-activity abnormal close advances to a configured fallback", async () => {
+  const launchedModels: string[] = [];
+  const releasedModels: string[] = [];
+  const chargedModels: string[] = [];
+  const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
+  const releaseCandidate = breaker.releaseCandidate.bind(breaker);
+  const recordRetryableFailure = breaker.recordRetryableFailure.bind(breaker);
+  breaker.releaseCandidate = (acquisition) => {
+    releasedModels.push(acquisition.model);
+    releaseCandidate(acquisition);
+  };
+  breaker.recordRetryableFailure = (acquisition) => {
+    chargedModels.push(acquisition.model);
+    recordRetryableFailure(acquisition);
+  };
+  const spawnChildProcess = adaptFakeSpawn((_command, args) => {
+    const model = args[args.indexOf("--model") + 1];
+    launchedModels.push(model);
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return reclaimFakeProcess(child); },
+    });
+    queueMicrotask(() => {
+      if (model === "provider/primary") {
+        child.emit("close", 1, null);
+        return;
+      }
+      stdout.write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "fallback recovered" }] },
+      })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    });
+    return child;
+  });
+
+  const result = await runSingleTeammate({
+    agent: "general",
+    task: "Recover a child that exited before startup",
+    model: "provider/primary",
+    fallbackModels: ["provider/backup"],
+    context: "fork",
+  }, {
+    baseCwd: process.cwd(),
+    modelCapabilities: [{ id: "provider/primary" }, { id: "provider/backup" }],
+    modelCircuitBreaker: breaker,
+    spawnChildProcess,
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.messages.at(-1)?.content, "fallback recovered");
+  assert.deepEqual(launchedModels, ["provider/primary", "provider/backup"]);
+  assert.deepEqual(result.attemptedModels, ["provider/primary", "provider/backup"]);
+  assert.deepEqual(releasedModels, ["provider/primary"]);
+  assert.deepEqual(chargedModels, []);
+});
+
+test("stderr-bearing pre-activity failure does not replay a fallback", async () => {
+  const launchedModels: string[] = [];
+  const spawnChildProcess = adaptFakeSpawn((_command, args) => {
+    launchedModels.push(args[args.indexOf("--model") + 1]);
+    const child = createFakeProcess();
+    const stderr = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr, connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return reclaimFakeProcess(child); },
+    });
+    queueMicrotask(() => {
+      stderr.write("failed to load child extension");
+      child.emit("close", 1, null);
+    });
+    return child;
+  });
+
+  const result = await runSingleTeammate({
+    agent: "general",
+    task: "Do not hide a deterministic startup error",
+    model: "provider/primary",
+    fallbackModels: ["provider/backup"],
+    context: "fork",
+  }, {
+    baseCwd: process.cwd(),
+    modelCapabilities: [{ id: "provider/primary" }, { id: "provider/backup" }],
+    spawnChildProcess,
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(launchedModels, ["provider/primary"]);
+  assert.match(result.messages.map((message) => message.content).join("\n"), /failed to load child extension/);
+});
+
+test("non-JSON stdout startup diagnostics do not replay a fallback", async () => {
+  const launchedModels: string[] = [];
+  const spawnChildProcess = adaptFakeSpawn((_command, args) => {
+    launchedModels.push(args[args.indexOf("--model") + 1]);
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return reclaimFakeProcess(child); },
+    });
+    queueMicrotask(() => {
+      stdout.write("failed to initialize child runtime\n");
+      child.emit("close", 1, null);
+    });
+    return child;
+  });
+
+  const result = await runSingleTeammate({
+    agent: "general",
+    task: "Preserve stdout startup diagnostics",
+    model: "provider/primary",
+    fallbackModels: ["provider/backup"],
+    context: "fork",
+  }, {
+    baseCwd: process.cwd(),
+    modelCapabilities: [{ id: "provider/primary" }, { id: "provider/backup" }],
+    spawnChildProcess,
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(launchedModels, ["provider/primary"]);
+  assert.match(result.messages.map((message) => message.content).join("\n"), /failed to initialize child runtime/);
+});
+
+test("whitespace stdout and signal termination do not qualify as silent nonzero exits", async () => {
+  for (const scenario of ["whitespace", "signal"] as const) {
+    const launchedModels: string[] = [];
+    const spawnChildProcess = adaptFakeSpawn((_command, args) => {
+      launchedModels.push(args[args.indexOf("--model") + 1]);
+      const child = createFakeProcess();
+      const stdout = new PassThrough();
+      Object.assign(child, {
+        stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+        exitCode: null, signalCode: null, pid: undefined,
+        kill() { return reclaimFakeProcess(child); },
+      });
+      queueMicrotask(() => {
+        if (scenario === "whitespace") {
+          stdout.write("\n");
+          child.emit("close", 1, null);
+        } else {
+          child.emit("close", null, "SIGTERM");
+        }
+      });
+      return child;
+    });
+
+    const result = await runSingleTeammate({
+      agent: "general",
+      task: `Fence ${scenario} startup exit`,
+      model: "provider/primary",
+      fallbackModels: ["provider/backup"],
+      context: "fork",
+    }, {
+      baseCwd: process.cwd(),
+      modelCapabilities: [{ id: "provider/primary" }, { id: "provider/backup" }],
+      modelCircuitBreaker: new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 }),
+      spawnChildProcess,
+    });
+
+    assert.equal(result.exitCode, 1, scenario);
+    assert.deepEqual(launchedModels, ["provider/primary"], scenario);
+  }
+});
+
+test("child IPC activity fences a silent abnormal close from fallback replay", async () => {
+  const launchedModels: string[] = [];
+  let childRequests = 0;
+  const spawnChildProcess = adaptFakeSpawn((_command, args) => {
+    launchedModels.push(args[args.indexOf("--model") + 1]);
+    const child = createFakeProcess();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return reclaimFakeProcess(child); },
+    });
+    queueMicrotask(() => {
+      child.emit("message", {
+        type: "teammate_proxy_request",
+        requestId: "already-dispatched",
+        tool: "teammate",
+        params: {},
+      });
+      child.emit("close", 1, null);
+    });
+    return child;
+  });
+
+  const result = await runSingleTeammate({
+    agent: "general",
+    task: "Do not replay dispatched child work",
+    model: "provider/primary",
+    fallbackModels: ["provider/backup"],
+    context: "fork",
+  }, {
+    baseCwd: process.cwd(),
+    modelCapabilities: [{ id: "provider/primary" }, { id: "provider/backup" }],
+    spawnChildProcess,
+    onChildRequest() { childRequests += 1; },
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(childRequests, 1);
+  assert.deepEqual(launchedModels, ["provider/primary"]);
+});
+
+test("authoritative settlement cannot bypass child IPC replay risk", async () => {
+  const launchedModels: string[] = [];
+  let childRequests = 0;
+  const spawnChildProcess = adaptFakeSpawn((_command, args) => {
+    launchedModels.push(args[args.indexOf("--model") + 1]);
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return reclaimFakeProcess(child); },
+    });
+    queueMicrotask(() => {
+      child.emit("message", {
+        type: "teammate_proxy_request",
+        requestId: "already-dispatched-authoritative",
+        tool: "teammate",
+        params: {},
+      });
+      stdout.write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", stopReason: "error", errorMessage: "Provider returned error: 503 unavailable" },
+      })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end", willRetry: false })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
+    });
+    return child;
+  });
+
+  const result = await runSingleTeammate({
+    agent: "general",
+    task: "Do not replay dispatched child work after settlement",
+    model: "provider/primary",
+    fallbackModels: ["provider/backup"],
+    context: "fork",
+  }, {
+    baseCwd: process.cwd(),
+    modelCapabilities: [{ id: "provider/primary" }, { id: "provider/backup" }],
+    modelCircuitBreaker: new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 }),
+    spawnChildProcess,
+    onChildRequest() { childRequests += 1; },
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(childRequests, 1);
+  assert.deepEqual(launchedModels, ["provider/primary"]);
+  assert.match(result.messages.at(-1)?.content ?? "", /externalReplayRisk=true/);
+});
+
+test("runtime diagnostic channels fence authoritative fallback replay", async () => {
+  for (const diagnosticChannel of ["stdout", "stderr"] as const) {
+    const launchedModels: string[] = [];
+    const spawnChildProcess = adaptFakeSpawn((_command, args) => {
+      launchedModels.push(args[args.indexOf("--model") + 1]);
+      const child = createFakeProcess();
+      const stdout = new PassThrough();
+      const stderr = new PassThrough();
+      Object.assign(child, {
+        stdin: new PassThrough(), stdout, stderr, connected: false,
+        exitCode: null, signalCode: null, pid: undefined,
+        kill() { return reclaimFakeProcess(child); },
+      });
+      queueMicrotask(() => {
+        if (diagnosticChannel === "stdout") stdout.write("runtime diagnostic before settlement\n");
+        else stderr.write("runtime diagnostic before settlement\n");
+        stdout.write(`${JSON.stringify({
+          type: "message_end",
+          message: { role: "assistant", stopReason: "error", errorMessage: "Provider returned error: 503 unavailable" },
+        })}\n`);
+        stdout.write(`${JSON.stringify({ type: "agent_end", willRetry: false })}\n`);
+        stdout.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
+      });
+      return child;
+    });
+
+    const result = await runSingleTeammate({
+      agent: "general",
+      task: `Preserve ${diagnosticChannel} replay risk`,
+      model: "provider/primary",
+      fallbackModels: ["provider/backup"],
+      context: "fork",
+    }, {
+      baseCwd: process.cwd(),
+      modelCapabilities: [{ id: "provider/primary" }, { id: "provider/backup" }],
+      modelCircuitBreaker: new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 }),
+      spawnChildProcess,
+    });
+
+    assert.equal(result.exitCode, 1, diagnosticChannel);
+    assert.deepEqual(launchedModels, ["provider/primary"], diagnosticChannel);
+    assert.match(result.messages.at(-1)?.content ?? "", /externalReplayRisk=true/, diagnosticChannel);
+  }
+});
+
 test("abnormal child exit cannot fresh-replay fallback without authoritative settlement", async () => {
   let attempts = 0;
   const retryErrors: string[] = [];
