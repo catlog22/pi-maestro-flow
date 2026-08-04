@@ -1356,7 +1356,9 @@ export default function (pi: ExtensionAPI): void {
 				applyQuietMode(ctx, previous.quietMode, nextConfig.quietMode);
 			}
 			if (previous.pinEditorBottom !== nextConfig.pinEditorBottom) {
-				if (nextConfig.pinEditorBottom) installEditorBottom(ctx);
+				// pinEditorBottom is ignored inside fullscreen (fullscreen owns the fixed
+				// editor); the gate also covers a live toggle while fullscreen is active.
+				if (nextConfig.pinEditorBottom && !nextConfig.fullscreenInput) installEditorBottom(ctx);
 				else clearEditorBottom(ctx);
 			}
 			if (changedKeys.some((key) => key.startsWith("sidebar."))) syncSidebarMode(ctx);
@@ -1593,7 +1595,8 @@ export default function (pi: ExtensionAPI): void {
 					}
 				} else {
 					if (config.enabled && wasPinEditorBottom !== config.pinEditorBottom) {
-						if (config.pinEditorBottom) installEditorBottom(ctx);
+						// Fullscreen owns the fixed editor; the legacy pin stays inert there.
+						if (config.pinEditorBottom && !config.fullscreenInput) installEditorBottom(ctx);
 						else clearEditorBottom(ctx);
 					} else if (config.enabled && wasSidebarMode !== config.sidebar.mode) {
 						syncSidebarMode(ctx);
