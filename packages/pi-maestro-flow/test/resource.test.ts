@@ -155,11 +155,17 @@ test("resolveResource reads agent:// output by correlationId and json path", asy
   assert.equal(byPath.content.trim(), "high");
 });
 
-test("resolveResource agent:// path miss reports a precise reason", async () => {
+test("resolveResource agent:// path miss reports a precise reason and a usage tip", async () => {
   await persistAgentOutput("run-agent-2", "scanner", "explorer", { findings: [{ path: "a.ts" }] }, root);
   await assert.rejects(
     () => resolveResource("agent://run-agent-2/findings/9/path", root),
     (err: unknown) => err instanceof Error && err.message.includes("path miss") && err.message.includes("out of bounds"),
+  );
+  await assert.rejects(
+    () => resolveResource("agent://run-agent-2/json", root),
+    (err: unknown) => err instanceof Error
+      && err.message.includes("key \"json\" not found")
+      && err.message.includes("Tip: agent://run-agent-2 (no path) returns the whole output"),
   );
 });
 
