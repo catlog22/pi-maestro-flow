@@ -14,7 +14,7 @@
     "test:package": "node scripts/verify-maestro-run-capabilities.mjs && node --experimental-transform-types --test test/prepare-package-skills.test.mjs test/package-resources.test.mjs test/package-resources-runtime.test.ts",
     "test:conversion": "node --experimental-transform-types --test test/convert-pi.test.mjs test/maestro-run-capabilities.test.mjs test/skill-contract-lint.test.ts",
     "check:maestro-run-cli": "node scripts/verify-maestro-run-capabilities.mjs",
-    "test:todo": "node --experimental-transform-types --test test/skill-loader.test.ts test/skill-manager.test.ts test/todo.test.ts test/todo-overlay.test.ts test/cockpit-ownership.test.ts",
+    "test:todo": "node --experimental-transform-types --test test/skill-loader.test.ts test/skill-manager.test.ts test/todo.test.ts test/todo-overlay.test.ts test/todo-cross-tool.test.ts test/cockpit-ownership.test.ts",
     "test:compaction": "node --experimental-transform-types --test test/compaction.test.ts test/compaction-image.test.ts test/compaction-settings.test.ts test/compaction-tui.test.ts test/tool-result-spill.test.ts test/lossless.test.ts test/cache-gate.test.ts test/relevance.test.ts test/dedup.test.ts test/content-detector.test.ts",
     "test:settings": "node --experimental-transform-types --test test/settings-provider.test.ts test/api-manager-settings-provider.test.ts test/mcp-settings-provider.test.ts test/skills-settings-provider.test.ts test/smart-search-settings-provider.test.ts test/settings-catalogs.test.ts",
     "test:gui": "node --experimental-transform-types --test test/gui-server.test.ts test/gui-state.test.ts test/gui-events.test.ts test/gui-tools.test.ts test/gui-invoke.test.ts test/gui-e2e.test.ts",

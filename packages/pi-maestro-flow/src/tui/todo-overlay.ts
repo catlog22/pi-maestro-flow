@@ -185,7 +185,7 @@ export class TodoOverlay implements Component, Focusable {
     if (status === "blocked") return theme.fg("error", "! blocked");
     if (status === "completed") return theme.fg("success", "✓ completed");
     if (status === "deleted") return theme.fg("dim", "⊘ deleted");
-    return theme.fg("dim", "○ pending");
+    return theme.fg("dim", "□ pending");
   }
 
   private separator(width: number): string {
