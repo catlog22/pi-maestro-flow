@@ -75,6 +75,11 @@ const RELEVANCE_MAX_CANDIDATES = 64;
 const RELEVANCE_TOTAL_SAMPLE_CHARS = 512_000;
 /** Fixed token estimate per image content block, matching Pi's ESTIMATED_IMAGE_CHARS / 4. */
 const ESTIMATED_IMAGE_TOKENS = 1200;
+/** Fixed token estimate per document block. A base64 PDF in source.data must
+ * not reach the JSON text estimator — a 1MB PDF is ~1.33M base64 chars →
+ * ~325k estimated tokens, vs the ~2000 the API actually charges. Same order as
+ * Claude Code's IMAGE_MAX_TOKEN_SIZE semantics. */
+const ESTIMATED_DOCUMENT_TOKENS = 2000;
 const CONTINUE_PROMPT = "Continue the interrupted task from the compacted session checkpoint. Do not wait for another user request.";
 const COMPACTION_RETRY_PROMPT = "Automatic compaction failed after the request was stopped because the context was exhausted. Retry compaction, then continue the interrupted task. Do not restart or wait for another user request.";
 const OUTPUT_LIMIT_RETRY_PROMPT = "Automatic compaction failed after the previous response was cut off at the model output token limit. Retry compaction, then continue exactly where the interrupted response stopped. Do not restart or wait for another user request.";
@@ -2331,25 +2336,38 @@ export function estimateMessageTokens(message: AgentMessage): number {
 
   const content = (message as MessageRecord).content;
   let imageCount = 0;
+  let documentCount = 0;
   if (Array.isArray(content)) {
     for (const block of content) {
-      if (block && typeof block === "object" && (block as { type?: unknown }).type === "image") imageCount++;
+      if (block && typeof block === "object") {
+        const type = (block as { type?: unknown }).type;
+        if (type === "image") imageCount++;
+        else if (type === "document") documentCount++;
+      }
     }
   }
 
   let tokens: number;
-  if (imageCount > 0) {
+  if (imageCount > 0 || documentCount > 0) {
     // Base64 image data must not be counted as text — Pi estimates ~1200 tokens
-    // per image regardless of resolution.  Build a lightweight copy with empty
+    // per image regardless of resolution. Build a lightweight copy with empty
     // data fields so the ratio-based estimator only sees the textual payload.
+    // Document blocks (e.g. base64 PDFs) are collapsed to a bare type marker
+    // for the same reason and charged a fixed per-document cost.
     const lightweight = {
       ...message,
       content: (content as Array<Record<string, unknown>>).map((block) =>
-        block?.type === "image" ? { type: "image", mimeType: block.mimeType, data: "" } : block,
+        block?.type === "image"
+          ? { type: "image", mimeType: block.mimeType, data: "" }
+          : block?.type === "document"
+            ? { type: "document" }
+            : block,
       ),
     };
     const serialized = JSON.stringify(lightweight);
-    tokens = Math.ceil(serialized.length / tokenCharsPerToken(serialized)) + imageCount * ESTIMATED_IMAGE_TOKENS;
+    tokens = Math.ceil(serialized.length / tokenCharsPerToken(serialized))
+      + imageCount * ESTIMATED_IMAGE_TOKENS
+      + documentCount * ESTIMATED_DOCUMENT_TOKENS;
   } else {
     const serialized = JSON.stringify(message);
     tokens = Math.ceil(serialized.length / tokenCharsPerToken(serialized));

@@ -47,6 +47,42 @@ export const SUMMARY_REQUEST_PROTOCOL_TOKENS = 64;
 export const MAX_PROMPT_TOO_LONG_RETRIES = 2;
 const PROMPT_TOO_LONG_RETRY_FRACTION = 0.2;
 const SUMMARY_INPUT_TRUNCATION_MARKER = "[Earlier conversation omitted to fit the compaction model. Use previousSummary and runtimeState as the authoritative earlier checkpoint.]";
+const IMAGE_PLACEHOLDER = "[image]";
+const DOCUMENT_PLACEHOLDER = "[document]";
+/** Fixed token estimate per image block for summary request budgeting. Kept in
+ * sync with auto-compaction.ts ESTIMATED_IMAGE_TOKENS so trigger and summary
+ * capacity use the same per-image cost. */
+const SUMMARY_IMAGE_TOKENS = 1200;
+
+/**
+ * Replace image/document content blocks with text placeholders before the
+ * summary prompt is serialized. The compaction model never receives image
+ * pixels (zero-upload principle); the placeholder preserves position semantics
+ * so the checkpoint keeps "a visual block existed here". Mirrors Claude Code's
+ * stripImagesFromMessages. Only array content is touched; string content and
+ * non-user messages pass through unchanged.
+ */
+export function stripImagesFromMessagesForSummary(messages: AgentMessage[]): AgentMessage[] {
+  return messages.map((message) => {
+    const record = message as unknown as { content?: unknown };
+    if (!Array.isArray(record.content)) return message;
+    const blocks = record.content as Array<Record<string, unknown>>;
+    let hasMedia = false;
+    const content = blocks.map((block) => {
+      if (block?.type === "image") {
+        hasMedia = true;
+        return { type: "text", text: IMAGE_PLACEHOLDER };
+      }
+      if (block?.type === "document") {
+        hasMedia = true;
+        return { type: "text", text: DOCUMENT_PLACEHOLDER };
+      }
+      return block;
+    });
+    if (!hasMedia) return message;
+    return { ...message, content } as unknown as AgentMessage;
+  });
+}
 
 /**
  * Enforce the final Anthropic budget-thinking invariants after Pi has clamped
@@ -159,6 +195,38 @@ export interface SummaryPromptSource {
 }
 
 /**
+ * Count image content blocks across messages (top-level and nested inside
+ * toolResult content arrays). String content never holds images.
+ */
+export function countImageBlocks(messages: AgentMessage[]): number {
+  let count = 0;
+  for (const message of messages) {
+    const record = message as unknown as { content?: unknown };
+    if (!Array.isArray(record.content)) continue;
+    for (const block of record.content as Array<{ type?: unknown }>) {
+      if (block?.type === "image") count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * Estimate summary request tokens including per-image cost. The serialized
+ * prompt carries only placeholders after stripImagesFromMessagesForSummary, so
+ * image pixels would be invisible to the text estimator; add them back so a
+ * media-dense session cannot silently overflow the compaction model window.
+ * Keeps 027 semantics: estimatedRequestTokens stays authoritative, tokensBefore
+ * remains a fallback only.
+ */
+export function estimateSummaryInputTokensWithImages(
+  messages: AgentMessage[],
+  systemPrompt: string,
+  prompt: string,
+): number {
+  return estimateSummaryRequestTokens(systemPrompt, prompt) + countImageBlocks(messages) * SUMMARY_IMAGE_TOKENS;
+}
+
+/**
  * Group serialized-summary input by API round. The leading user/preamble forms
  * group 0; each later assistant message starts the next group and owns its
  * following tool results/user continuation until the next assistant message.
@@ -202,7 +270,11 @@ export function fitSummaryInputToWindow(input: {
     const messages = groups.length > 0 ? groups.slice(dropCount).flat() : [];
     const droppedRounds = (input.droppedRoundsBase ?? 0) + dropCount;
     const prompt = input.source.buildPrompt(messages, droppedRounds);
-    const estimatedRequestTokens = estimateSummaryRequestTokens(MAESTRO_COMPACTION_SYSTEM_PROMPT, prompt);
+    const estimatedRequestTokens = estimateSummaryInputTokensWithImages(
+      messages,
+      MAESTRO_COMPACTION_SYSTEM_PROMPT,
+      prompt,
+    );
     try {
       const maxTokens = fitSummaryOutputBudget({
         tokensBefore: input.tokensBefore,
@@ -560,6 +632,11 @@ export async function createMaestroCompaction(
   if (dependencies.summaryOverride !== undefined) {
     const summary = dependencies.summaryOverride.trim();
     if (!summary) return undefined;
+    // P2-1 (appended recent images): intentionally not implemented on this path.
+    // Host appendCompaction() accepts only a summary string; without a
+    // patch-package mechanism, appending image blocks post-compact would break
+    // the firstKeptEntryId boundary and cache-stable prune manifest. Recent
+    // images inside the keep-recent window already survive compaction verbatim.
     return {
       compaction: {
         summary,
@@ -572,7 +649,8 @@ export async function createMaestroCompaction(
 
   const messages = [...event.preparation.messagesToSummarize, ...event.preparation.turnPrefixMessages];
   const buildPromptFor = (sourceMessages: AgentMessage[], droppedRounds: number): string => {
-    let conversationText = serializeConversation(convertToLlm(sourceMessages));
+    const stripped = stripImagesFromMessagesForSummary(sourceMessages);
+    let conversationText = serializeConversation(convertToLlm(stripped));
     if (droppedRounds > 0) {
       conversationText = `${SUMMARY_INPUT_TRUNCATION_MARKER}\n\n${conversationText}`;
     }
