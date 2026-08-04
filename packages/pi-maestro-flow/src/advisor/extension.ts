@@ -25,8 +25,11 @@ import {
   DEFAULT_ADVISOR_CONFIG,
   deliverySeverityFor,
   formatAdvisory,
+  normalizeAdvisorConfig,
   normalizeAdvisorVerdict,
   parseAdvisorVerdictText,
+  resolveAdvisorModel,
+  serializeToolCheckpoint,
   serializeTranscriptTail,
   ADVISOR_OUTPUT_SCHEMA,
   verdictDeliveryMode,
@@ -53,6 +56,8 @@ interface SingleResultLike {
   correlationId?: string;
   structuredOutput?: unknown;
   attemptedModels?: string[];
+  terminalStatus?: string;
+  lifecyclePending?: boolean;
 }
 
 interface RunTeammateParamsLike {
@@ -60,6 +65,8 @@ interface RunTeammateParamsLike {
     agent?: string;
     prompt: string;
     taskType?: string;
+    model?: string;
+    fallbackModels?: string[];
     thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
     timeoutMs?: number;
     outputSchema?: Record<string, unknown>;
@@ -95,6 +102,7 @@ interface SupervisionApi {
       deadlineMs?: number;
       outputSchema?: Record<string, unknown>;
       fallbackTextParser?: (text: string) => unknown;
+      beforeVerdict?: (result: SingleResultLike) => string | undefined;
       maxFailures?: number;
       signal?: AbortSignal;
     },
@@ -112,6 +120,15 @@ interface SupervisionApi {
 let _supervisionApi: SupervisionApi | undefined;
 let _runTeammateFn: RunTeammateFn | undefined;
 let _teammateResolved = false;
+
+/** @internal Test seam for the Advisor's direct teammate runtime. */
+export function setAdvisorTeammateRuntimeForTest(
+  runtime: { supervision: SupervisionApi; runTeammate: RunTeammateFn } | undefined,
+): void {
+  _supervisionApi = runtime?.supervision;
+  _runTeammateFn = runtime?.runTeammate;
+  _teammateResolved = runtime !== undefined;
+}
 
 async function loadTeammate(): Promise<{ supervision: SupervisionApi; runTeammate: RunTeammateFn } | undefined> {
   if (_teammateResolved) {
@@ -142,37 +159,35 @@ function isModuleNotFound(error: unknown): boolean {
     || /Cannot find module|Cannot find package/i.test(error.message);
 }
 
+function waitForDispatchOrAbort<T>(dispatch: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return dispatch;
+  if (signal.aborted) {
+    return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error("Advisor evaluation aborted"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(signal.reason instanceof Error ? signal.reason : new Error("Advisor evaluation aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    dispatch.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Config persistence
 // ---------------------------------------------------------------------------
 
-function mergeConfig(raw: Partial<AdvisorConfig> | undefined): AdvisorConfig {
-  return {
-    enabled: typeof raw?.enabled === "boolean" ? raw.enabled : DEFAULT_ADVISOR_CONFIG.enabled,
-    guide: typeof raw?.guide === "string" ? raw.guide : DEFAULT_ADVISOR_CONFIG.guide,
-    cooldownMs: typeof raw?.cooldownMs === "number" && raw.cooldownMs >= 0
-      ? raw.cooldownMs
-      : DEFAULT_ADVISOR_CONFIG.cooldownMs,
-    maxTailMessages: typeof raw?.maxTailMessages === "number" && raw.maxTailMessages > 0
-      ? raw.maxTailMessages
-      : DEFAULT_ADVISOR_CONFIG.maxTailMessages,
-    maxTailChars: typeof raw?.maxTailChars === "number" && raw.maxTailChars > 0
-      ? raw.maxTailChars
-      : DEFAULT_ADVISOR_CONFIG.maxTailChars,
-  };
-}
-
-async function loadConfig(): Promise<AdvisorConfig> {
+async function loadConfig(cwd: string): Promise<AdvisorConfig> {
   try {
-    const raw = JSON.parse(await readFile(advisorConfigPath(), "utf8")) as Partial<AdvisorConfig> | undefined;
-    return mergeConfig(raw);
+    const raw = JSON.parse(await readFile(advisorConfigPath(cwd), "utf8")) as Partial<AdvisorConfig> | undefined;
+    return normalizeAdvisorConfig(raw);
   } catch {
     return { ...DEFAULT_ADVISOR_CONFIG };
   }
 }
 
-async function saveConfig(config: AdvisorConfig): Promise<void> {
-  const path = advisorConfigPath();
+async function saveConfig(config: AdvisorConfig, cwd: string): Promise<void> {
+  const path = advisorConfigPath(cwd);
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 }
@@ -187,11 +202,14 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
   let gate: DeliveryGateLike | undefined;
   let evaluationInFlight = false;
   let unavailableNotified = false;
-
-  void loadConfig().then((loaded) => {
-    config = loaded;
-    if (config.enabled) pi.events?.emit?.("advisor:enabled", { enabled: true });
-  });
+  let lifecycleController = new AbortController();
+  let configCwd: string | undefined;
+  let configGeneration = 0;
+  let configLoadPromise: Promise<void> | undefined;
+  let toolResultsSinceEvaluation = 0;
+  let toolCheckpoints: string[] = [];
+  type EvaluationSource = "tool_result" | "agent_end";
+  let pendingEvaluation: { tail: string; ctx: ExtensionContext; source: EvaluationSource } | undefined;
 
   function notifyUnavailable(ctx: ExtensionContext, reason: string): void {
     if (unavailableNotified) return;
@@ -199,15 +217,56 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
     ctx.ui.notify(`Advisor unavailable: ${reason}`, "warning");
   }
 
-  /** Evaluate the current turn tail and deliver an advisory when warranted. */
-  async function runAdvisorTurn(event: { messages: AgentMessage[] }, ctx: ExtensionContext): Promise<void> {
-    if (!config.enabled || evaluationInFlight) return;
-    evaluationInFlight = true;
+  function resetAdvisorLifecycle(): void {
+    lifecycleController.abort();
+    lifecycleController = new AbortController();
+    pendingEvaluation = undefined;
+    toolResultsSinceEvaluation = 0;
+    toolCheckpoints = [];
+    gate?.reset();
+    gate = undefined;
+  }
+
+  function loadWorkspaceConfig(ctx: ExtensionContext): void {
+    resetAdvisorLifecycle();
+    const generation = ++configGeneration;
+    configCwd = ctx.cwd;
+    config = { ...DEFAULT_ADVISOR_CONFIG };
+    const load = loadConfig(ctx.cwd).then((loaded) => {
+      if (generation !== configGeneration || configCwd !== ctx.cwd) return;
+      config = loaded;
+      if (config.enabled) pi.events?.emit?.("advisor:enabled", { enabled: true });
+    }).finally(() => {
+      if (configLoadPromise === load) configLoadPromise = undefined;
+    });
+    configLoadPromise = load;
+  }
+
+  async function ensureWorkspaceConfig(ctx: ExtensionContext): Promise<void> {
+    if (configCwd !== ctx.cwd) loadWorkspaceConfig(ctx);
+    await configLoadPromise;
+  }
+
+  function recordEvaluationFailure(reason: string): void {
+    state.failures++;
+    state.lastStatus = "failed";
+    state.lastError = reason;
+  }
+
+  /** Evaluate one queued snapshot and inject only after a valid background result arrives. */
+  async function runAdvisorEvaluation(
+    item: { tail: string; ctx: ExtensionContext; source: EvaluationSource },
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (!config.enabled || signal.aborted) return;
+    state.evaluations++;
     gate?.beginWindow();
     try {
       const loaded = await loadTeammate();
       if (!loaded) {
-        notifyUnavailable(ctx, "pi-maestro-teammate is not installed");
+        state.lastEvaluatedAt = Date.now();
+        recordEvaluationFailure("pi-maestro-teammate is not installed");
+        notifyUnavailable(item.ctx, "pi-maestro-teammate is not installed");
         return;
       }
       const { supervision, runTeammate } = loaded;
@@ -220,49 +279,77 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
         });
       }
 
-      const tail = serializeTranscriptTail(event.messages, config.maxTailMessages, config.maxTailChars);
-      const prompt = buildAdvisorPrompt(config, tail);
-      const options = await createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd });
+      const prompt = buildAdvisorPrompt(config, item.tail);
+      const selectedModel = resolveAdvisorModel(config, item.ctx.model);
+      const options = await createDirectTeammateRunOptions(pi, item.ctx, { baseCwd: item.ctx.cwd });
+      const availableModels = item.ctx.modelRegistry.getAvailable()
+        .map((model) => `${model.provider}/${model.id}`);
+      if (!selectedModel || !availableModels.includes(selectedModel)) {
+        state.lastEvaluatedAt = Date.now();
+        recordEvaluationFailure(`Advisor model is unavailable: ${selectedModel ?? "main-session model"}`);
+        return;
+      }
 
       const evaluation = await supervision.runSupervisedEvaluation<AdvisorVerdict>(
         async (dispatchContext) => {
-          const results = await runTeammate(
+          const results = await waitForDispatchOrAbort(runTeammate(
             {
               tasks: [{
                 agent: "analyst",
                 prompt: dispatchContext.task,
+                taskType: "analysis",
+                model: selectedModel,
+                fallbackModels: [],
                 thinking: "low",
                 timeoutMs: dispatchContext.timeoutMs ?? EVALUATION_TIMEOUT_MS,
                 outputSchema: dispatchContext.outputSchema,
               }],
             },
             { ...options, signal: dispatchContext.signal },
-          );
+          ), dispatchContext.signal);
           const single = Array.isArray(results) ? results[0] : results;
           if (!single) throw new Error("Advisor evaluation returned no teammate result");
           return single;
-        },        {
+        }, {
           task: prompt,
           timeoutMs: EVALUATION_TIMEOUT_MS,
           deadlineMs: EVALUATION_DEADLINE_MS,
           outputSchema: ADVISOR_OUTPUT_SCHEMA,
           fallbackTextParser: parseAdvisorVerdictText,
+          beforeVerdict: (result) => {
+            if (result.exitCode !== 0) return `Advisor model exited with code ${result.exitCode}.`;
+            if (result.terminalStatus === "failed" || result.terminalStatus === "terminated") {
+              return `Advisor model ended with status ${result.terminalStatus}.`;
+            }
+            if (result.lifecyclePending === true) return "Advisor model lifecycle is still pending.";
+            return undefined;
+          },
           maxFailures: 1,
-          signal: ctx.signal,
+          signal,
         },
       );
 
-      const verdict = evaluation.ok ? normalizeAdvisorVerdict(evaluation.verdict) : undefined;
+      if (signal.aborted || !config.enabled) return;
       state.lastEvaluatedAt = Date.now();
-      if (!verdict || verdict.status === "on-track") {
-        state.uneventful++;
-        state.lastStatus = verdict?.status;
+      state.lastModel = evaluation.raw?.model ?? selectedModel;
+      if (!evaluation.ok) {
+        recordEvaluationFailure(evaluation.reason ?? "evaluation returned no usable verdict");
         return;
       }
+      const verdict = normalizeAdvisorVerdict(evaluation.verdict);
+      if (!verdict) {
+        recordEvaluationFailure("evaluation returned an invalid advisor verdict");
+        return;
+      }
+      state.lastError = undefined;
       state.lastStatus = verdict.status;
+      if (verdict.status === "on-track") {
+        state.uneventful++;
+        return;
+      }
 
       const requested = verdictDeliveryMode(verdict);
-      if (!requested || !gate) return;
+      if (!requested || !gate || signal.aborted || !config.enabled) return;
       const message = verdict.message?.trim() || verdict.reason?.trim();
       if (!message) return;
 
@@ -281,7 +368,7 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
           customType: ADVISOR_CUSTOM_TYPE,
           content: advisory,
           display: true,
-          details: { source: "advisor", severity, status: verdict.status },
+          details: { source: "advisor", checkpoint: item.source, severity, status: verdict.status },
         },
         {
           triggerTurn: interrupting && blocker,
@@ -296,50 +383,142 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
           supervision.createSupervisionEvent("advisor", "intervention", severity, {
             target: ADVISOR_TARGET,
             message,
-            meta: { status: verdict.status, delivery: mode },
+            meta: { status: verdict.status, delivery: mode, checkpoint: item.source },
           }),
         );
       } catch { /* best effort — supervision telemetry must never break the turn */ }
     } catch (error) {
-      if (!unavailableNotified) {
+      if (signal.aborted || !config.enabled) return;
+      state.lastEvaluatedAt = Date.now();
+      const reason = error instanceof Error ? error.message : String(error);
+      recordEvaluationFailure(reason);
+      if (!unavailableNotified && !signal.aborted) {
         unavailableNotified = true;
-        ctx.ui.notify(
-          `Advisor evaluation failed: ${error instanceof Error ? error.message : String(error)}`,
-          "warning",
-        );
+        item.ctx.ui.notify(`Advisor evaluation failed: ${reason}`, "warning");
       }
-    } finally {
-      evaluationInFlight = false;
     }
   }
 
+  async function drainEvaluationQueue(): Promise<void> {
+    if (evaluationInFlight) return;
+    evaluationInFlight = true;
+    const signal = lifecycleController.signal;
+    try {
+      while (config.enabled && !signal.aborted && pendingEvaluation) {
+        const item = pendingEvaluation;
+        pendingEvaluation = undefined;
+        await runAdvisorEvaluation(item, signal);
+      }
+    } finally {
+      evaluationInFlight = false;
+      if (config.enabled && !lifecycleController.signal.aborted && pendingEvaluation) {
+        void drainEvaluationQueue();
+      }
+    }
+  }
+
+  function enqueueEvaluation(tail: string, ctx: ExtensionContext, source: EvaluationSource): void {
+    if (!config.enabled || configCwd !== ctx.cwd || !tail.trim()) return;
+    pendingEvaluation = { tail, ctx, source };
+    void drainEvaluationQueue();
+  }
+
+  pi.on("tool_result", (event, ctx) => {
+    if (!config.enabled) return;
+    toolResultsSinceEvaluation++;
+    toolCheckpoints.push(serializeToolCheckpoint({
+      toolName: event.toolName,
+      input: event.input,
+      content: event.content,
+      isError: event.isError,
+    }, config.maxTailChars));
+    const thresholdReached = toolResultsSinceEvaluation >= config.reviewEveryToolResults;
+    if (!event.isError && !thresholdReached) return;
+    const tail = toolCheckpoints.join("\n\n").slice(-config.maxTailChars);
+    toolResultsSinceEvaluation = 0;
+    toolCheckpoints = [];
+    enqueueEvaluation(tail, ctx, "tool_result");
+  });
+
   pi.on("agent_end", (event, ctx) => {
-    void runAdvisorTurn(event as { messages: AgentMessage[] }, ctx);
+    toolResultsSinceEvaluation = 0;
+    toolCheckpoints = [];
+    const tail = serializeTranscriptTail(
+      (event as { messages: AgentMessage[] }).messages,
+      config.maxTailMessages,
+      config.maxTailChars,
+    );
+    enqueueEvaluation(tail, ctx, "agent_end");
+  });
+
+  pi.on("session_start", (_event, ctx) => loadWorkspaceConfig(ctx));
+  pi.on("session_compact", () => resetAdvisorLifecycle());
+  pi.on("session_shutdown", () => {
+    lifecycleController.abort();
+    pendingEvaluation = undefined;
   });
 
   pi.registerCommand("advisor", {
-    description: "Advisor: /advisor [status|on|off] — turn-level quality supervision",
+    description: "Advisor: /advisor [status|on|off|model <provider/model|inherit>]",
     async handler(args: string, ctx) {
-      const trimmed = args.trim().toLowerCase();
+      await ensureWorkspaceConfig(ctx);
+      const rawArgs = args.trim();
+      const trimmed = rawArgs.toLowerCase();
       if (trimmed === "on") {
         config = { ...config, enabled: true };
-        await saveConfig(config);
-        ctx.ui.notify("Advisor enabled. It will review each turn end and raise concerns.", "info");
+        resetAdvisorLifecycle();
+        await saveConfig(config, ctx.cwd);
+        ctx.ui.notify("Advisor enabled. Evaluations run in the background and inject results when ready.", "info");
         return;
       }
       if (trimmed === "off") {
         config = { ...config, enabled: false };
-        await saveConfig(config);
+        resetAdvisorLifecycle();
+        await saveConfig(config, ctx.cwd);
         ctx.ui.notify("Advisor disabled.", "info");
         return;
       }
+      if (trimmed === "model") {
+        ctx.ui.notify("Usage: /advisor model <provider/model|inherit>", "info");
+        return;
+      }
+      if (trimmed.startsWith("model ")) {
+        const requested = rawArgs.slice(rawArgs.indexOf(" ") + 1).trim();
+        if (["inherit", "main", "default", "auto"].includes(requested.toLowerCase())) {
+          const { model: _ignored, ...rest } = config;
+          config = rest;
+          resetAdvisorLifecycle();
+          await saveConfig(config, ctx.cwd);
+          ctx.ui.notify("Advisor model now inherits the active main-session model.", "info");
+          return;
+        }
+        await ctx.modelRegistry.refresh();
+        const available = ctx.modelRegistry.getAvailable()
+          .map((model) => `${model.provider}/${model.id}`);
+        if (!available.includes(requested)) {
+          ctx.ui.notify(`Advisor model is unavailable: ${requested}`, "warning");
+          return;
+        }
+        config = { ...config, model: requested };
+        resetAdvisorLifecycle();
+        await saveConfig(config, ctx.cwd);
+        ctx.ui.notify(`Advisor dedicated model: ${requested}`, "info");
+        return;
+      }
       // status (default)
+      const activeModel = resolveAdvisorModel(config, ctx.model);
       const lines = [
         `ADVISOR ${config.enabled ? "on" : "off"}`,
+        `  model: ${activeModel ?? "unavailable"}${config.model ? " (dedicated)" : " (main session)"}`,
+        `  cadence: every ${config.reviewEveryToolResults} tool results + agent end`,
+        `  background: ${evaluationInFlight ? "running" : "idle"}${pendingEvaluation ? " · pending latest checkpoint" : ""}`,
         `  cooldown: ${config.cooldownMs}ms · tail: ${config.maxTailMessages} msgs / ${config.maxTailChars} chars`,
         config.guide ? `  guide: ${config.guide.slice(0, 120)}${config.guide.length > 120 ? "…" : ""}` : "  guide: (none)",
         `  last: ${state.lastStatus ?? "never"}${state.lastEvaluatedAt ? ` · ${new Date(state.lastEvaluatedAt).toLocaleTimeString()}` : ""}`,
-        `  deliveries: ${state.deliveries} · suppressed: ${state.suppressed} · uneventful: ${state.uneventful}`,
+        `  evaluations: ${state.evaluations} · failures: ${state.failures} · uneventful: ${state.uneventful}`,
+        `  deliveries: ${state.deliveries} · suppressed: ${state.suppressed}`,
+        state.lastModel ? `  resolved model: ${state.lastModel}` : "  resolved model: (none yet)",
+        state.lastError ? `  last error: ${state.lastError.slice(0, 200)}` : "  last error: (none)",
       ];
       ctx.ui.notify(lines.join("\n"), "info");
     },

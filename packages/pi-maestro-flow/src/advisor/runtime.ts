@@ -22,6 +22,8 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 export interface AdvisorConfig {
   /** Master switch; the advisor only evaluates while enabled. */
   enabled: boolean;
+  /** Dedicated `provider/model` for advisor evaluations; unset inherits the main session model. */
+  model?: string;
   /** Project-specific review priorities appended to the evaluation prompt. */
   guide: string;
   /** Cooldown between interrupting deliveries (ms). Default 300_000 (5 min). */
@@ -30,6 +32,8 @@ export interface AdvisorConfig {
   maxTailMessages: number;
   /** Max serialized transcript tail characters. Default 4_000. */
   maxTailChars: number;
+  /** Evaluate during execution after this many tool results. Default 3. */
+  reviewEveryToolResults: number;
 }
 
 export const DEFAULT_ADVISOR_CONFIG: AdvisorConfig = {
@@ -38,6 +42,7 @@ export const DEFAULT_ADVISOR_CONFIG: AdvisorConfig = {
   cooldownMs: 300_000,
   maxTailMessages: 8,
   maxTailChars: 4_000,
+  reviewEveryToolResults: 3,
 };
 
 export type AdvisorVerdictStatus = "on-track" | "concern" | "blocker";
@@ -51,18 +56,60 @@ export interface AdvisorVerdict {
 export interface AdvisorRuntimeState {
   /** Last evaluation time (ms epoch) or undefined before the first run. */
   lastEvaluatedAt?: number;
-  /** Last verdict status. */
-  lastStatus?: AdvisorVerdictStatus;
+  /** Last valid verdict, or failed when the evaluator produced no usable verdict. */
+  lastStatus?: AdvisorVerdictStatus | "failed";
+  /** Model reported by the most recent successful teammate result. */
+  lastModel?: string;
+  /** Total completed evaluation attempts. */
+  evaluations: number;
+  /** Evaluations that failed or returned no valid verdict. */
+  failures: number;
+  /** Most recent evaluation failure reason. */
+  lastError?: string;
   /** Number of deliveries actually sent. */
   deliveries: number;
   /** Number of deliveries suppressed by the gate (cooldown/dedupe/downgrade). */
   suppressed: number;
-  /** Number of evaluations that produced no actionable verdict. */
+  /** Number of valid on-track verdicts that produced no advisory. */
   uneventful: number;
 }
 
 export function createAdvisorRuntimeState(): AdvisorRuntimeState {
-  return { deliveries: 0, suppressed: 0, uneventful: 0 };
+  return { evaluations: 0, failures: 0, deliveries: 0, suppressed: 0, uneventful: 0 };
+}
+
+/** Merge persisted settings while preserving defaults and legacy files. */
+export function normalizeAdvisorConfig(raw: Partial<AdvisorConfig> | undefined): AdvisorConfig {
+  const model = typeof raw?.model === "string" && raw.model.trim()
+    ? raw.model.trim()
+    : undefined;
+  return {
+    enabled: typeof raw?.enabled === "boolean" ? raw.enabled : DEFAULT_ADVISOR_CONFIG.enabled,
+    ...(model ? { model } : {}),
+    guide: typeof raw?.guide === "string" ? raw.guide : DEFAULT_ADVISOR_CONFIG.guide,
+    cooldownMs: typeof raw?.cooldownMs === "number" && raw.cooldownMs >= 0
+      ? raw.cooldownMs
+      : DEFAULT_ADVISOR_CONFIG.cooldownMs,
+    maxTailMessages: typeof raw?.maxTailMessages === "number" && raw.maxTailMessages > 0
+      ? raw.maxTailMessages
+      : DEFAULT_ADVISOR_CONFIG.maxTailMessages,
+    maxTailChars: typeof raw?.maxTailChars === "number" && raw.maxTailChars > 0
+      ? raw.maxTailChars
+      : DEFAULT_ADVISOR_CONFIG.maxTailChars,
+    reviewEveryToolResults: typeof raw?.reviewEveryToolResults === "number"
+      && Number.isInteger(raw.reviewEveryToolResults)
+      && raw.reviewEveryToolResults > 0
+      ? raw.reviewEveryToolResults
+      : DEFAULT_ADVISOR_CONFIG.reviewEveryToolResults,
+  };
+}
+
+/** Resolve the explicit teammate model, defaulting to the active main-session model. */
+export function resolveAdvisorModel(
+  config: AdvisorConfig,
+  currentModel?: { provider: string; id: string },
+): string | undefined {
+  return config.model ?? (currentModel ? `${currentModel.provider}/${currentModel.id}` : undefined);
 }
 
 /** Project-scoped config path (`.pi/advisor.json`), matching the hooks layout. */
@@ -102,6 +149,41 @@ function truncate(text: string, max: number): string {
   return `${text.slice(0, Math.max(0, max - 1))}…`;
 }
 
+/** Redact common credentials before transcript data can cross a model/provider boundary. */
+export function redactAdvisorText(text: string): string {
+  return text
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]")
+    .replace(
+      /-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z0-9]+)* PRIVATE KEY-----/gi,
+      "[REDACTED]",
+    )
+    .replace(
+      /-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----[\s\S]*$/gi,
+      "[REDACTED]",
+    )
+    .replace(
+      /(^|[\s{,;:])(["']?authorization["']?\s*[:=]\s*["']?)(?:basic|bearer)\s+[^\s"',;}]+["']?/gim,
+      "$1$2[REDACTED]",
+    )
+    .replace(
+      /(^|[\s{,;:])(["']?(?:set[-_ ]?cookie|cookie)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\r\n}]*)/gim,
+      "$1$2[REDACTED]",
+    )
+    .replace(
+      /(^|[\s{,;:])(["']?(?:(?:[a-z0-9]+[-_ ])*(?:api[-_ ]?key|password|passwd|pwd|secret|secret[-_ ]?access[-_ ]?key|private[-_ ]?key|client[-_ ]?secret|access[-_ ]?token|refresh[-_ ]?token|token|jwt|connection[-_ ]?string)|authorization|cookie|set[-_ ]?cookie)["']?\s*[:=]\s*)(?!["']?\[REDACTED\]["']?)(?:"[^"]*"|'[^']*'|[^\s,;}\]]+)/gim,
+      "$1$2[REDACTED]",
+    )
+    .replace(
+      /\b([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^@/\s]+@/gi,
+      "$1[REDACTED]@",
+    )
+    .replace(
+      /\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|sk-(?:proj-)?[A-Za-z0-9_-]{16,}|(?:sk|rk)_live_[A-Za-z0-9]{12,}|npm_[A-Za-z0-9]{16,}|xox[baprs]-[A-Za-z0-9-]{16,}|AKIA[A-Z0-9]{16})\b/g,
+      "[REDACTED]",
+    )
+    .replace(/\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b/g, "[REDACTED]");
+}
+
 /**
  * Compact one-line-per-message serialization of the transcript tail, bounded
  * by message count and total characters. Tool results collapse to a tool
@@ -126,7 +208,7 @@ export function serializeTranscriptTail(
       line = `USER: ${text}`;
     } else if (role === "assistant") {
       line = `ASSISTANT: ${text}`;
-    } else if (role === "tool") {
+    } else if (role === "tool" || role === "toolResult") {
       const name = record.name ?? record.toolName ?? "tool";
       line = `TOOL ${name}: ${text}`;
     } else if (record.customType) {
@@ -134,7 +216,7 @@ export function serializeTranscriptTail(
     } else {
       line = `${role || "MESSAGE"}: ${text}`;
     }
-    const normalized = line.replace(/\s*\n+/g, "\n").trim();
+    const normalized = redactAdvisorText(line.replace(/\s*\n+/g, "\n").trim());
     if (!normalized) continue;
     const truncated = truncate(normalized, budget);
     lines.push(truncated);
@@ -144,6 +226,37 @@ export function serializeTranscriptTail(
   }
 
   return lines.join("\n");
+}
+
+export interface AdvisorToolCheckpoint {
+  toolName: string;
+  input?: unknown;
+  content?: unknown;
+  isError?: boolean;
+}
+
+function serializeCheckpointValue(value: unknown): string {
+  if (typeof value === "string") return redactAdvisorText(value);
+  const text = messageText({ content: value });
+  if (text) return redactAdvisorText(text);
+  try {
+    return redactAdvisorText(JSON.stringify(value) ?? "");
+  } catch {
+    return redactAdvisorText(String(value ?? ""));
+  }
+}
+
+/** Serialize a bounded mid-execution checkpoint for background impact review. */
+export function serializeToolCheckpoint(
+  checkpoint: AdvisorToolCheckpoint,
+  maxChars = DEFAULT_ADVISOR_CONFIG.maxTailChars,
+): string {
+  const lines = [
+    `TOOL CHECKPOINT ${checkpoint.toolName} (${checkpoint.isError ? "error" : "ok"})`,
+    `INPUT: ${serializeCheckpointValue(checkpoint.input)}`,
+    `RESULT: ${serializeCheckpointValue(checkpoint.content)}`,
+  ];
+  return truncate(lines.join("\n").trim(), maxChars);
 }
 
 // ---------------------------------------------------------------------------
