@@ -29,11 +29,12 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
+  ThemeColor,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { buildSessionContext, copyToClipboard } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { COCKPIT_TODO_TOGGLE_EVENT, type CockpitUiOwnershipV1 } from "pi-cockpit/v1/events";
+import { COCKPIT_INPUT_TARGET_EVENT, COCKPIT_TODO_TOGGLE_EVENT, type CockpitInputTargetV1, type CockpitUiOwnershipV1 } from "pi-cockpit/v1/events";
 import type { FlowToolResult } from "../tools/tool-result.ts";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
@@ -144,6 +145,7 @@ import { buildKnowledgeCenterView, type KnowledgeCenterView } from "../knowledge
 import {
   onSessionStart as inputHistorySessionStart,
   onSessionShutdown as inputHistorySessionShutdown,
+  setInputRouteTarget,
 } from "../tui/input-history.ts";
 import {
   initPlan,
@@ -288,6 +290,9 @@ export function effectivePermissionMode(approvalMode: PermissionMode): Permissio
 const TODO_TOGGLE_KEY = "alt+t";
 const TODO_TOGGLE_LABEL = altKey("T");
 const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
+const INPUT_TARGET_COLORS = new Set<ThemeColor>([
+  "accent", "warning", "success", "mdLink", "thinkingLow", "thinkingMedium", "thinkingHigh", "muted", "error",
+]);
 const TEAMMATE_ATTACH_ENTRY = "maestro-teammate-attach";
 const GOAL_OVERLAY_KEY = "alt+g";
 const GOAL_OVERLAY_LABEL = altKey("G");
@@ -1958,6 +1963,20 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       panelMode = ownership.todoExpanded ? "expanded" : "collapsed";
     }
     updateTodoWidget();
+  });
+
+  pi.events.on(COCKPIT_INPUT_TARGET_EVENT, (payload) => {
+    if (!payload || typeof payload !== "object") {
+      setInputRouteTarget(undefined);
+      return;
+    }
+    const target = payload as Partial<CockpitInputTargetV1>;
+    if (target.version !== 1 || typeof target.label !== "string" || !target.label.trim()
+      || typeof target.color !== "string" || !INPUT_TARGET_COLORS.has(target.color as ThemeColor)) {
+      setInputRouteTarget(undefined);
+      return;
+    }
+    setInputRouteTarget({ label: target.label.trim(), color: target.color as ThemeColor });
   });
 
   pi.registerShortcut(TODO_TOGGLE_KEY, {

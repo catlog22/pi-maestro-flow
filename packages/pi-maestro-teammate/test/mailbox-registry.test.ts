@@ -1,16 +1,17 @@
 /**
  * Contract tests for the public v1 mailbox registry (pi-maestro-teammate/v1/mailbox).
  * These are the external-consumer surface the Flow host integrates through:
- * enqueueTaskNotification → durable dispatch, pendingCount, negotiate, and
- * taskId-based dedup.
+ * enqueueTaskNotification → durable dispatch, deliverAgentMessage → live/cold
+ * agent input, pendingCount, negotiate, and taskId-based dedup.
  */
 
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { afterEach, beforeEach } from "node:test";
-import { createMailboxHostRegistry } from "../src/public/v1/mailbox.ts";
+import { createDirectAgentHostRegistry, createMailboxHostRegistry } from "../src/public/v1/mailbox.ts";
 import { type MailboxAuthority } from "../src/extension/mailbox/router.ts";
 import { MailboxService } from "../src/extension/mailbox/service.ts";
 
@@ -71,6 +72,60 @@ test("registry enqueueTaskNotification dispatches durably to the agent", async (
   await new Promise((resolve) => setTimeout(resolve, 150));
   assert.deepEqual(dispatched, ["task from flow host"]);
   await service.stop();
+});
+
+test("registry deliverAgentMessage forwards the versioned request and result", async () => {
+  const service = makeService(() => {});
+  const seen: unknown[] = [];
+  const registry = createMailboxHostRegistry(service, "v2", async (request) => {
+    seen.push(request);
+    return { delivered: true, mode: "prompt", wasSleeping: true };
+  });
+  const result = await registry.deliverAgentMessage({
+    recipientCorrelationId: "corr-child-1",
+    recipientLabel: "builder",
+    message: "continue with tests",
+    mode: "follow_up",
+  });
+  assert.deepEqual(seen, [{
+    recipientCorrelationId: "corr-child-1",
+    recipientLabel: "builder",
+    message: "continue with tests",
+    mode: "follow_up",
+  }]);
+  assert.deepEqual(result, { delivered: true, mode: "prompt", wasSleeping: true });
+});
+
+test("registry deliverAgentMessage fails explicitly when no runtime delivery is bound", async () => {
+  const service = makeService(() => {});
+  const registry = createMailboxHostRegistry(service, "v2");
+  assert.deepEqual(
+    await registry.deliverAgentMessage({ recipientCorrelationId: "missing", message: "hello" }),
+    { delivered: false, error: "Agent message delivery is unavailable." },
+  );
+});
+
+test("direct registry keeps agent delivery available when durable mailbox is disabled", async () => {
+  const registry = createDirectAgentHostRegistry(async () => ({ delivered: true, mode: "follow_up" }));
+  assert.deepEqual(
+    await registry.deliverAgentMessage({ recipientCorrelationId: "c1", message: "hello" }),
+    { delivered: true, mode: "follow_up" },
+  );
+  assert.deepEqual(
+    await registry.enqueueTaskNotification({
+      senderId: "flow", recipientId: "child", recipientCorrelationId: "c1", payload: "task",
+    }),
+    { ok: false, code: "route_invalid", message: "Durable mailbox is disabled." },
+  );
+  assert.equal(await registry.pendingCount("c1"), 0);
+  assert.equal(registry.negotiate("v2"), "v1");
+});
+
+test("authoritative consumer rejects missing targets and failed stdin injection", () => {
+  const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  assert.match(source, /if \(!target\) throw new Error/);
+  assert.match(source, /if \(!delivery\.delivered\) throw new Error/);
+  assert.match(source, /createMailboxHostRegistry\([\s\S]*?injectLocalAgentMessage/);
 });
 
 test("registry pendingCount reflects undelivered notifications per recipient", async () => {

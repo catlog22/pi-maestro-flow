@@ -1,6 +1,6 @@
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readFileSync, statSync } from "node:fs";
-import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { Key, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AgentsStore, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
@@ -29,7 +29,11 @@ import { ThinkingFoldTimer } from "./thinking-timer.ts";
 import { shouldAnimateFrames, shouldAnimateSidebar, shouldRunTick, type TickPolicyState } from "./tick-policy.ts";
 import { TodoStore } from "./todo-store.ts";
 import { makeTodoWidget, makeAgentWidget, terminalRows, visibleAgentRows } from "./stack-widget.ts";
-import { makeSessionBarWidget, SESSION_BAR_WIDGET_KEY } from "./session-bar.ts";
+import { agentListWindowRows, scrollBy, type AgentScrollState } from "./agent-scroll.ts";
+import { agentSessionColor, makeSessionBarWidget, SESSION_BAR_WIDGET_KEY, MAIN_SESSION_LABEL } from "./session-bar.ts";
+import { makeSessionDetailWidget, SESSION_DETAIL_WIDGET_KEY, DEFAULT_SESSION_DETAIL_ROWS, sessionDetailBodyLength, sessionDetailWindowRows, type SessionDetailScrollState } from "./session-detail.ts";
+import { panelRows } from "./viewport.ts";
+import { routeAgentInput } from "./input-routing.ts";
 import { activeThemeName, ThemePicker } from "./theme-picker.ts";
 import { ModelPicker, type ModelPickerEntry } from "./model-picker.ts";
 import { getUsageTotals, invalidateUsageCache, renderFooter, setUsageThrottle, type PaintTheme, type WidthUtils } from "./footer.ts";
@@ -42,12 +46,14 @@ import { SettingsLocaleState, getMaestroUiPreferencesPath } from "./settings/loc
 import { SettingsProviderRegistry } from "./settings/registry.ts";
 import { showMaestroSettingsShell } from "./settings/settings-shell.ts";
 import {
+	COCKPIT_INPUT_TARGET_EVENT,
 	COCKPIT_MAESTRO_QUERY_EVENT,
 	COCKPIT_PREEMPT_RESIZE_EVENT,
 	COCKPIT_TODO_TOGGLE_EVENT,
 	MAESTRO_UI_SNAPSHOT_EVENT,
 	MAESTRO_UI_SNAPSHOT_VERSION,
 	SUPERVISION_EVENT,
+	type CockpitInputTargetV1,
 	type CockpitUiOwnershipV1,
 } from "./public/v1/events.ts";
 import {
@@ -59,18 +65,19 @@ import {
 	STACK_WIDGET_KEY,
 	TEAMMATE_COMPLETE_EVENT,
 	TEAMMATE_MESSAGE_EVENT,
-	TEAMMATE_OPEN_AGENT_EVENT,
 	TEAMMATE_STARTED_EVENT,
-	TEAMMATE_VIEWING_EVENT,
 	TODO_TOOL_NAME,
 	WORKFLOW_STATUS_KEY,
+	type AgentRow,
 	type CockpitConfig,
 } from "./types.ts";
+import { MAILBOX_REGISTRY_KEY, type MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
 
 const FOOTER_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 const BASH_BG_OVERLAY_KEY = "alt+j";
 const SIDEBAR_RESIZE_KEY = "ctrl+shift+r";
 const SIDEBAR_FOCUS_KEY = "alt+shift+l";
+const SESSION_DETAIL_TOGGLE_KEY = "alt+shift+r";
 const COCKPIT_STATUS_KEY = "cockpit";
 // Claude Code title chrome: a static marker when idle, two braille frames while
 // a turn runs (screens/REPL.tsx TITLE_STATIC_PREFIX / TITLE_ANIMATION_FRAMES).
@@ -258,6 +265,16 @@ export default function (pi: ExtensionAPI): void {
 	let editorBottomController: EditorBottomController | undefined;
 	/** Disposer for the session-bar ←/→ navigation hook (per applyUi). */
 	let sessionBarNavDisposer: (() => void) | undefined;
+	/** Disposer for the selected-session Alt+Shift+↑/↓ scroll hook. */
+	let sessionDetailScrollDisposer: (() => void) | undefined;
+	/** Disposer for the agent-list Shift+↑/↓ scroll hook (per applyUi). */
+	let agentScrollDisposer: (() => void) | undefined;
+	/** Scroll window over the below-input agent roster (tail-following default). */
+	let agentListScroll: AgentScrollState = { offset: 0, following: true };
+	/** Explicit progressive-disclosure state for the selected agent session. */
+	let sessionDetailVisible = true;
+	let sessionDetailScroll: SessionDetailScrollState = { offset: 0, following: true };
+	let lastPublishedInputTarget: string | undefined;
 	let dockEffectiveVisible = false;
 	let surfaceState: CockpitSurfaceState = "disabled";
 	let running = false;
@@ -385,6 +402,7 @@ export default function (pi: ExtensionAPI): void {
 		renderScheduled = true;
 		queueMicrotask(() => {
 			renderScheduled = false;
+			publishInputTarget();
 			refreshAmbient();
 			try {
 				capturedTui?.requestRender();
@@ -519,6 +537,36 @@ export default function (pi: ExtensionAPI): void {
 		ctx.ui.setWidget(AGENT_WIDGET_KEY, undefined);
 	};
 
+	const selectedAgentTarget = (): { row: AgentRow; label: string; color: ThemeColor } | undefined => {
+		const viewingId = agents.getViewingAgent();
+		if (!viewingId) return undefined;
+		const row = visibleAgentRows(agents.snapshot()).find((candidate) => candidate.correlationId === viewingId);
+		if (!row) return undefined;
+		return {
+			row,
+			label: row.name || row.role || row.agent || "agent",
+			color: agentSessionColor(row),
+		};
+	};
+
+	const publishInputTarget = (force = false): void => {
+		const target = selectedAgentTarget();
+		const fingerprint = target ? `${target.row.correlationId}:${target.label}:${target.color}` : "@main";
+		if (!force && fingerprint === lastPublishedInputTarget) return;
+		lastPublishedInputTarget = fingerprint;
+		const payload: CockpitInputTargetV1 = target
+			? { version: 1, label: target.label, color: target.color }
+			: { version: 1 };
+		pi.events.emit(COCKPIT_INPUT_TARGET_EVENT, payload);
+	};
+
+	/** Live state for the session bar's right-edge session indicator. */
+	const inputStatusState = (): { label: string; color: ThemeColor } => {
+		const target = selectedAgentTarget();
+		if (target) return { label: target.label, color: target.color };
+		return { label: MAIN_SESSION_LABEL, color: running ? "warning" : "muted" };
+	};
+
 	const ensureEditorBottomController = (ctx: ExtensionContext): EditorBottomController => {
 		if (editorBottomController) return editorBottomController;
 		editorBottomController = createEditorBottomController({
@@ -550,6 +598,22 @@ export default function (pi: ExtensionAPI): void {
 		editorBottomController?.hide();
 	};
 
+	const installSessionBar = (ctx: ExtensionContext): void => {
+		ctx.ui.setWidget(
+			SESSION_BAR_WIDGET_KEY,
+			(tui, theme) => {
+				capturedTui = tui;
+				ensureViewportStability(tui);
+				return makeSessionBarWidget({
+					getAgents: () => agents.snapshot(),
+					isMainRunning: () => running,
+					getCurrentSession: inputStatusState,
+				})(tui, theme);
+			},
+			{ placement: "aboveEditor" },
+		);
+	};
+
 	const installWidgets = (ctx: ExtensionContext): void => {
 		ctx.ui.setWidget(
 			STACK_WIDGET_KEY,
@@ -574,6 +638,11 @@ export default function (pi: ExtensionAPI): void {
 					getConfig: () => config,
 					isRunning: () => running,
 					isAnimating,
+					getScroll: () => agentListScroll,
+					setScroll: (next) => {
+						agentListScroll = next;
+						req();
+					},
 				})(tui, theme);
 			},
 			{ placement: "belowEditor" },
@@ -584,7 +653,14 @@ export default function (pi: ExtensionAPI): void {
 		const next = resolveCockpitSurfaceState(config.enabled, config.sidebar.mode, dockEffectiveVisible);
 		if (next === surfaceState) return;
 		if (next === "dock" || next === "disabled") clearWidgets(ctx);
-		else installWidgets(ctx);
+		else {
+			installWidgets(ctx);
+			// Host widget maps preserve insertion order when an existing key is set.
+			// Todo was just re-added after a dock period, so remove/re-add the bar to
+			// keep the invariant: detail → Todo → session bar → editor.
+			ctx.ui.setWidget(SESSION_BAR_WIDGET_KEY, undefined);
+			installSessionBar(ctx);
+		}
 		surfaceState = next;
 		publishUiOwnership();
 		req();
@@ -623,12 +699,14 @@ export default function (pi: ExtensionAPI): void {
 				ctx.ui.notify(`Cockpit sidebar unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
 			},
 			onActivateRow: (id) => {
-				// Enter on an agent row opens that agent in teammate's viewing view
-				// (main-TUI widget), leaving the agent running untouched.
+				// Enter on an agent row selects it as the shown session (toggle).
+				// The cockpit session bar mirrors the highlight; nothing is written
+				// into the main conversation, so the main agent keeps working.
 				if (!id.startsWith("agent:")) return;
-				pi.events.emit(TEAMMATE_OPEN_AGENT_EVENT, {
-					correlationId: id.slice("agent:".length),
-				});
+				const cid = id.slice("agent:".length);
+				agents.setViewingAgent(agents.getViewingAgent() === cid ? undefined : cid);
+				sessionDetailScroll = { offset: 0, following: true };
+				req();
 			},
 			getNavWidth: () => capturedTui?.terminal.columns ?? 80,
 		});
@@ -668,8 +746,13 @@ export default function (pi: ExtensionAPI): void {
 		disposeLayoutControllers();
 		clearWidgets(ctx);
 		ctx.ui.setWidget(SESSION_BAR_WIDGET_KEY, undefined);
+		ctx.ui.setWidget(SESSION_DETAIL_WIDGET_KEY, undefined);
 		sessionBarNavDisposer?.();
 		sessionBarNavDisposer = undefined;
+		sessionDetailScrollDisposer?.();
+		sessionDetailScrollDisposer = undefined;
+		agentScrollDisposer?.();
+		agentScrollDisposer = undefined;
 		ctx.ui.setFooter(undefined);
 		surfaceState = "disabled";
 		try {
@@ -682,6 +765,8 @@ export default function (pi: ExtensionAPI): void {
 			// ambient surfaces are best-effort
 		}
 		stopTick();
+		lastPublishedInputTarget = "@main";
+		pi.events.emit(COCKPIT_INPUT_TARGET_EVENT, { version: 1 } satisfies CockpitInputTargetV1);
 		capturedTui = undefined;
 	};
 
@@ -768,37 +853,92 @@ export default function (pi: ExtensionAPI): void {
 			};
 			return component;
 		});
+		// Install first in aboveEditor order so this fixed session region sits
+		// above Todo; Todo and the session bar are mounted closer to the editor.
+		ctx.ui.setWidget(
+			SESSION_DETAIL_WIDGET_KEY,
+			(tui, theme) => {
+				capturedTui = tui;
+				ensureViewportStability(tui);
+				return makeSessionDetailWidget({
+					getAgents: () => agents.snapshot(),
+					getViewingId: () => agents.getViewingAgent(),
+					getVisible: () => sessionDetailVisible,
+					getQuietMode: () => config.quietMode,
+					getScroll: () => sessionDetailScroll,
+				})(tui, theme);
+			},
+			{ placement: "aboveEditor" },
+		);
 		syncSidebarMode(ctx);
 		// Re-enabling mid-run must restart live spinner and elapsed updates.
 		syncTick();
 
-		// Session bar: the persistent teammate-session switcher below the input
-		// box. Installed on every surface (dock and widgets) — it is the
-		// always-visible entry point for the viewing session.
-		ctx.ui.setWidget(
-			SESSION_BAR_WIDGET_KEY,
-			(tui, theme) => {
-				capturedTui = tui;
-				ensureViewportStability(tui);
-				return makeSessionBarWidget({
-					getAgents: () => agents.snapshot(),
-				})(tui, theme);
-			},
-			{ placement: "belowEditor" },
-		);
-		// ←/→ (empty composer, no active viewing state) enters the viewing
-		// session with the adjacent agent. While viewing, teammate's own hook
-		// consumes the arrows; while composing, they keep moving the cursor.
+		// Session bar: the session switcher pinned directly above the input box.
+		// One line — color-coded chips (@main + every agent) on the left, the
+		// currently shown session's status (● @session, the input box's top-right
+		// corner) at the right edge. Installed on every surface (dock and
+		// widgets), inserted last so it sits closest to the editor.
+		installSessionBar(ctx);
+		// ←/→ (empty composer) cycles the session bar through [main, ...agents]
+		// and selects the highlighted session. While composing, the arrows keep
+		// moving the text cursor.
 		sessionBarNavDisposer?.();
 		sessionBarNavDisposer = ctx.ui.onTerminalInput((data) => {
 			if (data !== "\x1b[D" && data !== "\x1b[C") return undefined;
-			if (agents.snapshot().some((row) => row.viewing)) return undefined;
 			const text = ctx.ui.getEditorText();
 			if (text.trim() !== "") return undefined;
 			const roster = visibleAgentRows(agents.snapshot());
-			if (roster.length === 0) return undefined;
-			const target = data === "\x1b[C" ? roster[0] : roster[roster.length - 1];
-			pi.events.emit(TEAMMATE_OPEN_AGENT_EVENT, { correlationId: target.correlationId });
+			const viewingId = agents.getViewingAgent();
+			const delta = data === "\x1b[C" ? 1 : -1;
+			const total = roster.length + 1; // [main, ...agents]
+			const current = viewingId
+				? Math.max(0, roster.findIndex((row) => row.correlationId === viewingId)) + 1
+				: 0;
+			const next = (current + delta + total) % total;
+			agents.setViewingAgent(next === 0 ? undefined : roster[next - 1].correlationId);
+			sessionDetailScroll = { offset: 0, following: true };
+			req();
+			return { consume: true };
+		});
+		// Alt+Shift+↑/↓ scroll the selected agent's fixed session content.
+		// Scrolling down to the bottom resumes automatic following as output grows.
+		const detailUp = "\x1b[1;4A";
+		const detailDown = "\x1b[1;4B";
+		const legacyDetailUp = "\x1b\x1b[1;2A";
+		const legacyDetailDown = "\x1b\x1b[1;2B";
+		sessionDetailScrollDisposer?.();
+		sessionDetailScrollDisposer = ctx.ui.onTerminalInput((data) => {
+			const up = data === detailUp || data === legacyDetailUp;
+			const down = data === detailDown || data === legacyDetailDown;
+			if (!up && !down) return undefined;
+			const viewingId = agents.getViewingAgent();
+			if (!sessionDetailVisible || !viewingId) return undefined;
+			const width = capturedTui?.terminal?.columns ?? 80;
+			const rows = capturedTui?.terminal?.rows;
+			const total = sessionDetailBodyLength(agents.snapshot(), viewingId, width, config.quietMode);
+			const maxRows = panelRows(rows) ?? DEFAULT_SESSION_DETAIL_ROWS;
+			const budget = sessionDetailWindowRows(total, maxRows);
+			const next = scrollBy(sessionDetailScroll, up ? -1 : 1, total, Math.max(1, budget));
+			if (next.offset !== sessionDetailScroll.offset || next.following !== sessionDetailScroll.following) {
+				sessionDetailScroll = next;
+				req();
+			}
+			return { consume: true };
+		});
+		// Shift+↑/↓ scroll the below-input agent roster (plain ↑/↓ stay with the
+		// composer's input-history navigation). Scrolling up pauses the tail
+		// follow; reaching the bottom resumes it.
+		agentScrollDisposer?.();
+		agentScrollDisposer = ctx.ui.onTerminalInput((data) => {
+			if (data !== "\x1b[1;2A" && data !== "\x1b[1;2B") return undefined;
+			const roster = visibleAgentRows(agents.snapshot());
+			const budget = agentListWindowRows(capturedTui?.terminal?.columns, capturedTui?.terminal?.rows, roster.length);
+			const next = scrollBy(agentListScroll, data === "\x1b[1;2A" ? -1 : 1, roster.length, budget);
+			if (next.offset !== agentListScroll.offset || next.following !== agentListScroll.following) {
+				agentListScroll = next;
+				req();
+			}
 			return { consume: true };
 		});
 	};
@@ -900,16 +1040,6 @@ export default function (pi: ExtensionAPI): void {
 				syncTick();
 				req();
 			}),
-			pi.events.on(TEAMMATE_VIEWING_EVENT, (payload) => {
-				const event = payload as { correlationId?: string; action?: string } | undefined;
-				if (!event) return;
-				// exit clears the highlight; enter/switch moves it to the viewed agent.
-				agents.setViewingAgent(
-					event.action === "exit" ? undefined : event.correlationId,
-				);
-				syncTick();
-				req();
-			}),
 			pi.events.on(BASH_BG_UPDATE_EVENT, (payload) => {
 				if (!bashBg.applySnapshot(payload)) return;
 				syncTick();
@@ -971,6 +1101,7 @@ export default function (pi: ExtensionAPI): void {
 	// --- session + agent lifecycle ---
 	pi.on("session_start", (_e, ctx) => {
 		lastCtx = ctx;
+		lastPublishedInputTarget = undefined;
 		subscribeBusEvents();
 		settingsRegistry.start();
 		registerSettingsProvider();
@@ -1134,14 +1265,24 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("thinking_level_select", (_e, ctx) => {
 		if (isTuiContext(ctx)) req();
 	});
-	pi.on("input", (e) => {
-		// Remember the first real user message; the title is generated after the
-		// first turn completes, so it can reflect the whole exchange. Slash
-		// commands and bash-mode inputs are synthetic, not the user's topic.
-		if (!firstUserText && e.source === "interactive" && e.text) {
-			const isSynthetic = e.text.startsWith("/") || e.text.startsWith("!");
-			if (!isSynthetic) firstUserText = e.text;
-		}
+	pi.on("input", async (e, ctx) => {
+		const target = selectedAgentTarget();
+		const globals = globalThis as typeof globalThis & Record<symbol, unknown>;
+		const registry = globals[MAILBOX_REGISTRY_KEY] as MailboxHostRegistry | undefined;
+		const action = await routeAgentInput(
+			e,
+			target ? { correlationId: target.row.correlationId, label: target.label } : undefined,
+			registry,
+			ctx.ui,
+		);
+		if (action === "handled") return { action: "handled" as const };
+
+		const interactiveText = e.source === "interactive" && e.text.trim().length > 0;
+		const isSynthetic = e.text.startsWith("/") || e.text.startsWith("!");
+		// Remember the first real main-session user message; child-directed input
+		// is handled above and must not influence the main session title.
+		if (!firstUserText && interactiveText && !isSynthetic) firstUserText = e.text;
+		return { action: "continue" as const };
 	});
 	pi.on("turn_end", (e, ctx) => {
 		// Claude Code generates its title from the first user message; we wait
@@ -1375,6 +1516,20 @@ export default function (pi: ExtensionAPI): void {
 				return;
 			}
 			sidebarController?.beginResize();
+		},
+	});
+
+	pi.registerShortcut(SESSION_DETAIL_TOGGLE_KEY, {
+		description: "Show or hide the selected teammate session above Todo",
+		handler(ctx) {
+			if (!config.enabled) {
+				ctx.ui.notify("Cockpit is disabled", "warning");
+				return;
+			}
+			sessionDetailVisible = !sessionDetailVisible;
+			if (sessionDetailVisible) sessionDetailScroll = { offset: 0, following: true };
+			ctx.ui.notify(`Agent session detail ${sessionDetailVisible ? "shown" : "hidden"}`, "info");
+			req();
 		},
 	});
 

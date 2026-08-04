@@ -21,6 +21,9 @@ export const MAESTRO_GLOBAL_SHORTCUTS = [
   { key: "alt+t", owner: "Maestro Todo panel" },
   { key: "alt+g", owner: "Maestro Goal center" },
   { key: "alt+r", owner: "Teammate agent view" },
+  { key: "alt+shift+r", owner: "Cockpit agent session detail" },
+  { key: "alt+shift+up", owner: "Cockpit agent session scroll" },
+  { key: "alt+shift+down", owner: "Cockpit agent session scroll" },
   { key: "alt+m", owner: "Teammate control center" },
   { key: "alt+j", owner: "Cockpit background jobs" },
 ] as const;

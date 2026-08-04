@@ -7,6 +7,7 @@ import { fitLineByPriority, type PrioritizedSegment } from "./layout.ts";
 import { resolveGlyphs } from "./icons.ts";
 import { panelRows } from "./viewport.ts";
 import type { AgentRow, CockpitConfig, TodoItem } from "./types.ts";
+import { agentListWindowRows, scrollWindowStart, type AgentScrollState } from "./agent-scroll.ts";
 
 export interface TodoWidgetDeps {
 	getTodos: () => TodoItem[];
@@ -20,6 +21,9 @@ export interface AgentWidgetDeps {
 	getConfig: () => CockpitConfig;
 	isRunning: () => boolean;
 	isAnimating?: () => boolean;
+	/** Scroll window over the roster; absent → tail-following, non-scrollable. */
+	getScroll?: () => AgentScrollState;
+	setScroll?: (next: AgentScrollState) => void;
 }
 
 const UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
@@ -105,11 +109,23 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 				const spin = g.dotRunning;
 				const running = deps.isRunning();
 
-				// The panel budget covers the roster header and its rows.
+				// The panel budget covers the roster header and its rows. The roster
+				// is activity-ordered (newest first); the scroll window slices it so
+				// the panel follows the tail by default and can be scrolled up with
+				// Shift+↑ (see the cockpit terminal-input hook).
 				const panel = panelRows(terminalRows(tui));
 				const rosterRows = panel === undefined
 					? undefined
 					: Math.max(1, panel - 1);
+				const ordered = [...agents].sort(
+					(a, b) => b.lastActivityAt - a.lastActivityAt || a.correlationId.localeCompare(b.correlationId),
+				);
+				const windowRows = agentListWindowRows(tui.terminal?.columns, terminalRows(tui), ordered.length);
+				const scroll = deps.getScroll?.() ?? { offset: 0, following: true };
+				const start = scrollWindowStart(ordered.length, windowRows, scroll);
+				const visible = ordered.slice(start, start + windowRows);
+				const above = start;
+				const below = Math.max(0, ordered.length - start - windowRows);
 				const opts = { glyphs: g, spin, now, maxRows: rosterRows, hideLiveDuration: cfg.staticMode };
 				const dot = theme.fg(running ? "success" : "muted", running ? g.dotRunning : g.dotIdle);
 				const displayStatuses = agents.map((agent) => effectiveAgentStatus(agent, now));
@@ -136,7 +152,16 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 				const lines: string[] = [];
 				// Was the one line in the package pushed without any width clipping.
 				lines.push(fitLineByPriority(headerSegs, width, UTILS, theme.fg("dim", g.separator), g.ellipsis));
-				lines.push(...renderAgents(agents, cfg.agentsMode, width, paint, UTILS, { ...opts, withHead: false }));
+				const marker = above > 0 || below > 0
+					? truncateToWidth(
+						theme.fg("dim", [above > 0 ? `↑ ${above} more` : "", below > 0 ? `↓ ${below} more` : ""].filter(Boolean).join(` ${g.separator} `)),
+						width,
+						g.ellipsis,
+					)
+					: undefined;
+				if (marker && above > 0) lines.push(marker);
+				lines.push(...renderAgents(visible, cfg.agentsMode, width, paint, UTILS, { ...opts, withHead: false, maxRows: windowRows + 1 }));
+				if (marker && above === 0) lines.push(marker);
 				return lines;
 			},
 			invalidate(): void {},

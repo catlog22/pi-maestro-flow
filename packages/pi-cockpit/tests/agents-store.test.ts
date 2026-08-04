@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AgentsStore, COMPLETED_TOMBSTONE_MS, FAILED_LINGER_MS, SLEEPING_LINGER_MS, TERMINATED_LINGER_MS, mapAgentStatus } from "../src/agents-store.ts";
+import { AgentsStore, AGENT_LINGER_MS, COMPLETED_TOMBSTONE_MS, FAILED_LINGER_MS, SESSION_CONTENT_MAX, SLEEPING_LINGER_MS, TERMINATED_LINGER_MS, effectiveAgentStatus, mapAgentStatus } from "../src/agents-store.ts";
 
 test("started adds a running row with derived role and label", () => {
 	const s = new AgentsStore();
@@ -32,12 +32,12 @@ test("started preserves parent, source status and source start time", () => {
 	assert.equal(row.startedAt, Date.parse("2026-07-26T00:00:00.000Z"));
 });
 
-test("message updates tail of a known row, truncated to bound", () => {
+test("message keeps a bounded session-content tail", () => {
 	const s = new AgentsStore();
 	s.applyStarted({ correlationId: "c1", agent: "explorer" }, 1);
-	s.applyMessage({ correlationId: "c1", message: "x".repeat(80) });
+	s.applyMessage({ correlationId: "c1", message: "x".repeat(SESSION_CONTENT_MAX + 100) });
 	const tail = s.snapshot()[0].tail;
-	assert.ok(tail.length <= 48, `tail too long: ${tail.length}`);
+	assert.ok(tail.length <= SESSION_CONTENT_MAX, `tail too long: ${tail.length}`);
 	assert.ok(tail.endsWith("…"));
 });
 
@@ -231,7 +231,7 @@ test("missing graph child self-heals its own row and never flattens onto the par
 		status: "failed",
 		lastMessage: "child failed",
 	}, 500);
-	const byId = new Map(s.snapshot().map((r) => [r.correlationId, r]));
+	const byId = new Map(s.snapshot(500).map((r) => [r.correlationId, r]));
 	// The child materializes as its own failed row...
 	const child = byId.get("missing-child");
 	assert.ok(child);
@@ -245,27 +245,34 @@ test("missing graph child self-heals its own row and never flattens onto the par
 	assert.equal(parent.tail, "");
 });
 
-test("complete still removes a self-healed row", () => {
+test("complete retains a self-healed row as done for one minute", () => {
 	const s = new AgentsStore();
 	s.applyMessage({ correlationId: "c1", agent: "explorer", message: "hi" }, 500);
 	assert.equal(s.size, 1);
 	s.applyComplete({ correlationId: "c1", exitCode: 0 }, 600);
+	assert.equal(s.snapshot(600)[0]?.status, "done");
+	assert.equal(s.size, 1);
+	s.snapshot(600 + AGENT_LINGER_MS);
 	assert.equal(s.size, 0);
 });
 
-test("complete removes the row", () => {
+test("complete retains the row as done", () => {
 	const s = new AgentsStore();
 	s.applyStarted({ correlationId: "c1", agent: "explorer" }, 1);
-	s.applyComplete({ correlationId: "c1", exitCode: 0 });
-	assert.equal(s.size, 0);
+	s.applyComplete({ correlationId: "c1", exitCode: 0 }, 1_000);
+	assert.equal(s.snapshot(1_000)[0]?.status, "done");
+	assert.equal(s.size, 1);
 });
 
-test("complete removes the full descendant tree", () => {
+test("complete retains the full descendant tree as done", () => {
 	const s = new AgentsStore();
 	s.applyStarted({ correlationId: "grandchild", agent: "reviewer", spawnedBy: "child" }, 3);
 	s.applyStarted({ correlationId: "child", agent: "executor", spawnedBy: "root" }, 2);
 	s.applyStarted({ correlationId: "root", agent: "planner" }, 1);
-	s.applyComplete({ correlationId: "root", exitCode: 0 });
+	s.applyComplete({ correlationId: "root", exitCode: 0 }, 1_000);
+	assert.equal(s.size, 3);
+	assert.ok(s.snapshot(1_000).every((row) => row.status === "done"));
+	s.snapshot(1_000 + AGENT_LINGER_MS);
 	assert.equal(s.size, 0);
 });
 
@@ -401,11 +408,12 @@ test("teammate strings are stripped of control characters on ingest", () => {
 	assert.equal(row.task, "build auth");
 });
 
-test("a successful wake lifecycle recreates a row removed at completion", () => {
+test("a successful wake lifecycle reuses a retained completed row", () => {
 	const s = new AgentsStore();
 	s.applyStarted({ correlationId: "c1", agent: "executor", name: "worker" }, 1);
 	s.applyComplete({ correlationId: "c1", exitCode: 0 }, 100);
-	assert.equal(s.size, 0);
+	assert.equal(s.snapshot(100)[0]?.status, "done");
+	assert.equal(s.size, 1);
 
 	s.applyStarted({
 		correlationId: "c1",
@@ -498,14 +506,16 @@ test("a nonzero complete exit code preserves a running row as failed", () => {
 // (flush gate re-arms, a graph task stays status:"running" until its lifecycle
 // confirms, IPC reorders). These used to self-heal a ghost row that no second
 // `complete` ever removed, so the panel showed an agent running forever.
-test("a late running message after complete does not resurrect a ghost row", () => {
+test("a late running message after complete cannot regress the retained done row", () => {
 	const s = new AgentsStore();
 	s.applyStarted({ correlationId: "c1", agent: "explorer" }, 1);
 	s.applyComplete({ correlationId: "c1", exitCode: 0 }, 1_000);
-	assert.equal(s.size, 0);
+	assert.equal(s.snapshot(1_000)[0]?.status, "done");
 	// The tool result was already returned; this delta is a stale in-flight one.
 	s.applyMessage({ correlationId: "c1", agent: "explorer", status: "running", lastMessage: "stale" }, 1_500);
-	assert.equal(s.size, 0, "ghost row must not be self-healed after complete");
+	const row = s.snapshot(1_500)[0];
+	assert.equal(row?.status, "done");
+	assert.notEqual(row?.tail, "stale");
 });
 
 test("a late graph progress snapshot after complete does not resurrect child rows", () => {
@@ -520,9 +530,10 @@ test("a late graph progress snapshot after complete does not resurrect child row
 	}, 500);
 	assert.equal(s.size, 3);
 	s.applyComplete({ correlationId: "root", exitCode: 0 }, 1_000);
-	assert.equal(s.size, 0);
+	assert.equal(s.size, 3);
+	assert.ok(s.snapshot(1_000).every((row) => row.status === "done"));
 	// A result-ready task publishes status:"running" again once its lifecycle
-	// confirms; the whole snapshot is post-complete and must stay deleted.
+	// confirms; retained terminal rows must not regress.
 	s.applyMessage({
 		correlationId: "root",
 		progress: [
@@ -530,7 +541,8 @@ test("a late graph progress snapshot after complete does not resurrect child row
 			{ correlationId: "child-2", agent: "executor", name: "b", taskIndex: 1, status: "running" },
 		],
 	}, 1_500);
-	assert.equal(s.size, 0, "graph children must not be self-healed after the root completed");
+	assert.equal(s.size, 3, "retained graph rows remain present during the linger window");
+	assert.ok(s.snapshot(1_500).every((row) => row.status === "done"));
 });
 
 test("an explicitly restarted graph can recreate child rows from its new progress", () => {
@@ -543,7 +555,8 @@ test("an explicitly restarted graph can recreate child rows from its new progres
 		],
 	}, 500);
 	s.applyComplete({ correlationId: "root", exitCode: 0 }, 1_000);
-	assert.equal(s.size, 0);
+	assert.equal(s.size, 2);
+	assert.ok(s.snapshot(1_000).every((row) => row.status === "done"));
 
 	// A wake reuses the graph correlationId and explicitly republishes started.
 	s.applyStarted({ correlationId: "root", agent: "graph(1)", status: "running" }, 2_000);
@@ -567,16 +580,41 @@ test("complete that beats the first delta still suppresses the self-heal that fo
 	assert.equal(s.size, 0);
 });
 
-test("an explicit started clears the tombstone so a woken agent reappears", () => {
+test("an explicit started clears the tombstone on a retained row", () => {
 	const s = new AgentsStore();
 	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
 	s.applyComplete({ correlationId: "c1", exitCode: 0 }, 1_000);
-	assert.equal(s.size, 0);
+	assert.equal(s.snapshot(1_000)[0]?.status, "done");
+	assert.equal(s.size, 1);
 	// Waking a sleeping agent reuses its correlationId and re-emits `started`.
 	s.applyStarted({ correlationId: "c1", agent: "executor", status: "running" }, 2_000);
 	assert.equal(s.size, 1);
 	s.applyMessage({ correlationId: "c1", status: "running", lastMessage: "awake" }, 2_500);
 	assert.equal(s.snapshot(2_500)[0].tail, "awake");
+});
+
+test("an explicit started without status restarts a retained completed row", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
+	s.applyComplete({ correlationId: "c1", exitCode: 0 }, 1_000);
+	assert.equal(s.snapshot(1_000)[0]?.status, "done");
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 2_000);
+	assert.equal(s.snapshot(2_000)[0]?.status, "running");
+});
+
+test("restart clears the previous lifecycle's result-ready marker", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
+	s.applyMessage({
+		correlationId: "c1",
+		progress: [{ correlationId: "c1", agent: "executor", taskIndex: 0, status: "running", resultReadyAt: 400 }],
+	}, 400);
+	assert.equal(effectiveAgentStatus(s.snapshot(400)[0], 400), "result-ready");
+	s.applyComplete({ correlationId: "c1", exitCode: 0 }, 500);
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 600);
+	const row = s.snapshot(600)[0];
+	assert.equal(row.resultReadyAt, undefined);
+	assert.equal(effectiveAgentStatus(row, 600), "running");
 });
 
 test("a tombstone expires so a genuinely fresh agent is not suppressed forever", () => {
@@ -637,11 +675,16 @@ test("a sleeping started replay seeds a bounded completion time", () => {
 	assert.equal(s.size, 0);
 });
 
-test("a non-wakeable completion still deletes the row", () => {
+test("a non-wakeable completion retains done for the shared window", () => {
 	const s = new AgentsStore();
 	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
 	s.applyComplete({ correlationId: "c1", exitCode: 0 }, 1_000);
-	assert.equal(s.size, 0, "non-wakeable success must be removed");
+	assert.equal(s.snapshot(1_000)[0]?.status, "done");
+	assert.equal(s.size, 1);
+	s.snapshot(1_000 + AGENT_LINGER_MS - 1);
+	assert.equal(s.size, 1);
+	s.snapshot(1_000 + AGENT_LINGER_MS);
+	assert.equal(s.size, 0);
 });
 
 test("a sleeping row expires after the linger window", () => {
@@ -677,13 +720,13 @@ test("send variants do not overwrite the agent progress tail", () => {
 	assert.equal(s.snapshot(200)[0].lastActivityAt, 100, "send receipts are not progress activity");
 });
 
-test("wakeable graph completion only sleeps the owning container", () => {
+test("wakeable graph completion sleeps the owner and retains descendants as done", () => {
 	const s = new AgentsStore();
 	s.applyStarted({ correlationId: "root", agent: "graph(1)" }, 1);
 	s.applyStarted({ correlationId: "child", agent: "executor", spawnedBy: "root" }, 2);
 	s.applyComplete({ correlationId: "root", exitCode: 0, wakeable: true }, 1_000);
 	assert.equal(s.snapshot(1_000).find((row) => row.correlationId === "root")?.status, "sleeping");
-	assert.equal(s.has("child"), false, "container wakeability must not turn completed descendants into sleepers");
+	assert.equal(s.snapshot(1_000).find((row) => row.correlationId === "child")?.status, "done");
 });
 
 test("full progress snapshots project and clear diagnostic telemetry", () => {
@@ -779,6 +822,23 @@ test("resultReadyAt is ingested from progress and cleared when the snapshot drop
 	const row = s.snapshot(500)[0];
 	assert.equal(row.resultReadyAt, undefined, "a snapshot without resultReadyAt clears it");
 	assert.equal(row.status, "done");
+});
+
+test("all terminal states share the one-minute session-bar and roster linger", () => {
+	assert.equal(AGENT_LINGER_MS, 60_000);
+	assert.equal(FAILED_LINGER_MS, AGENT_LINGER_MS);
+	assert.equal(SLEEPING_LINGER_MS, AGENT_LINGER_MS);
+	assert.equal(TERMINATED_LINGER_MS, AGENT_LINGER_MS);
+});
+
+test("expired selected session returns to main", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
+	s.setViewingAgent("c1");
+	s.applyComplete({ correlationId: "c1", exitCode: 0 }, 1_000);
+	assert.equal(s.getViewingAgent(), "c1");
+	s.snapshot(1_000 + AGENT_LINGER_MS);
+	assert.equal(s.getViewingAgent(), undefined);
 });
 
 test("setViewingAgent marks the viewed row and clears on exit", () => {

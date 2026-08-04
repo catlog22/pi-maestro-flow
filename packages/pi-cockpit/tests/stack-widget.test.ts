@@ -3,9 +3,10 @@ import test from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { makeAgentWidget, makeTodoWidget } from "../src/stack-widget.ts";
+import { makeSessionDetailWidget } from "../src/session-detail.ts";
 import { DEFAULT_CONFIG, type AgentRow, type TodoItem } from "../src/types.ts";
 
-const theme = { fg: (_color: string, text: string) => text } as Theme;
+const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as Theme;
 const tui = {} as TUI;
 const ACTIVE_AT = Date.now();
 const todos: TodoItem[] = [
@@ -157,6 +158,59 @@ test("quiet mode keeps the roster expanded but drops the live streaming tail", (
 	assert.doesNotMatch(quiet[1], /reading tokens\.ts/, "quiet strips the streaming tail");
 	// Header summary is tail-independent, so it is identical in both modes.
 	assert.equal(quiet[0], noisy[0]);
+});
+
+test("short terminal budgets keep expanded Todo and selected agent detail in separate bounded regions", () => {
+	const shortTui = { terminal: { rows: 24, columns: 80 } } as TUI;
+	const todoLines = makeTodoWidget({
+		getTodos: () => Array.from({ length: 12 }, (_, i) => ({
+			id: String(i), subject: `task ${i}`, status: i === 0 ? "in_progress" as const : "pending" as const, blockedBy: [], skills: [],
+		})),
+		getConfig: () => ({ ...DEFAULT_CONFIG, todoExpanded: true }),
+	})(shortTui, theme).render(80);
+	const selected: AgentRow = {
+		correlationId: "worker",
+		agent: "explorer",
+		name: "worker",
+		role: "explorer",
+		task: "inspect",
+		status: "running",
+		tail: Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n"),
+		startedAt: 1,
+		lastActivityAt: ACTIVE_AT,
+	};
+	const detailLines = makeSessionDetailWidget({
+		getAgents: () => [selected],
+		getViewingId: () => "worker",
+		getVisible: () => true,
+	})(shortTui, theme).render(80);
+	assert.ok(todoLines.length <= 3);
+	assert.ok(detailLines.length <= 3);
+	assert.ok(todoLines.length + detailLines.length <= 6, "stacked panels stay within their separate 15% budgets");
+});
+
+test("agent roster overflow markers stay inside the panel budget", () => {
+	const shortTui = { terminal: { rows: 24, columns: 80 } } as TUI;
+	const rows: AgentRow[] = Array.from({ length: 8 }, (_, i) => ({
+		correlationId: `worker-${i}`,
+		agent: "explorer",
+		name: `worker-${i}`,
+		role: "explorer",
+		task: `task ${i}`,
+		status: "running",
+		tail: "",
+		startedAt: 1,
+		lastActivityAt: ACTIVE_AT + i,
+	}));
+	const component = makeAgentWidget({
+		getAgents: () => rows,
+		getConfig: () => DEFAULT_CONFIG,
+		isRunning: () => true,
+		getScroll: () => ({ offset: 3, following: false }),
+	})(shortTui, theme);
+	const lines = component.render(80);
+	assert.ok(lines.length <= 3, `roster exceeded budget: ${lines.length}`);
+	assert.ok(lines.some((line) => line.includes("task ")), "overflow navigation preserves a real agent row");
 });
 
 test("agent-area widget bridges nested graph descendants to the nearest visible parent", () => {

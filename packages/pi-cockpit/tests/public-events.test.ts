@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+	COCKPIT_INPUT_TARGET_EVENT,
 	COCKPIT_MAESTRO_QUERY_EVENT,
 	MAESTRO_UI_SNAPSHOT_EVENT,
 	MAESTRO_UI_SNAPSHOT_VERSION,
+	type CockpitInputTargetV1,
 	type CockpitUiOwnershipV1,
 	type MaestroQueryV1,
 	type MaestroUiClearSnapshotV1,
@@ -21,6 +23,7 @@ const ownership: CockpitUiOwnershipV1 = {
 	quietSymbols: "check",
 	static: false,
 };
+const inputTarget: CockpitInputTargetV1 = { version: 1, label: "builder", color: "warning" };
 const clear: MaestroUiClearSnapshotV1 = {
 	version: MAESTRO_UI_SNAPSHOT_VERSION,
 	sessionGeneration: "generation-a",
@@ -32,6 +35,8 @@ const clear: MaestroUiClearSnapshotV1 = {
 test("public v1 event subpath resolves constants and tombstone types", () => {
 	assert.equal(COCKPIT_MAESTRO_QUERY_EVENT, "cockpit:maestro-query");
 	assert.equal(MAESTRO_UI_SNAPSHOT_EVENT, "maestro:ui-snapshot");
+	assert.equal(COCKPIT_INPUT_TARGET_EVENT, "cockpit:input-target");
+	assert.deepEqual(inputTarget, { version: 1, label: "builder", color: "warning" });
 	assert.deepEqual(query, { version: 1 });
 	assert.equal(ownership.sidebar, true);
 	assert.equal(ownership.goal, true);

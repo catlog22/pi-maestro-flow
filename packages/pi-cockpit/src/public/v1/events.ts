@@ -24,8 +24,17 @@ export const COCKPIT_PREEMPT_RESIZE_EVENT = "cockpit:preempt-resize";
  * absent/non-boolean value as a toggle. The payload is optional by design.
  */
 export const COCKPIT_TODO_TOGGLE_EVENT = "cockpit:toggle-todo";
+export const COCKPIT_INPUT_TARGET_EVENT = "cockpit:input-target";
 export interface CockpitTodoToggleV1 {
 	expanded?: unknown;
+}
+
+export interface CockpitInputTargetV1 {
+	version: 1;
+	/** Missing/empty label restores the main session input target. */
+	label?: string;
+	/** Semantic Pi theme slot used for the immutable editor prefix. */
+	color?: import("@earendil-works/pi-coding-agent").ThemeColor;
 }
 
 export type MaestroJsonPrimitiveV1 = string | number | boolean | null;
@@ -161,4 +170,5 @@ export interface MaestroEventMapV1 {
 	"cockpit:ui-ownership": CockpitUiOwnershipV1;
 	"cockpit:preempt-resize": undefined;
 	"cockpit:toggle-todo": CockpitTodoToggleV1 | undefined;
+	"cockpit:input-target": CockpitInputTargetV1;
 }

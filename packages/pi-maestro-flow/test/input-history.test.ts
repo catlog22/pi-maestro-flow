@@ -8,6 +8,7 @@ import {
   KeybindingsManager,
   TUI,
   TUI_KEYBINDINGS,
+  visibleWidth,
   type EditorTheme,
   type Terminal,
 } from "@earendil-works/pi-tui";
@@ -72,6 +73,7 @@ function context(cwd: string, overrides: { hasUI?: boolean; existing?: EditorFac
       setEditorComponent: (next: EditorFactory) => {
         factory = next;
       },
+      theme: { fg: (color: string, text: string) => `[${color}]${text}[/${color}]` } as never,
     },
   };
   return {
@@ -180,6 +182,35 @@ test("the history label and recalled prompt survive pi's real render pipeline", 
     assert.ok(second.includes("older prompt"));
 
     tui.stop();
+  } finally {
+    await cleanup();
+  }
+});
+
+test("route target renders as an immutable prefix inside the editor", async () => {
+  const { cwd, rootDir, cleanup } = await workspace();
+  try {
+    const history = createInputHistory({ rootDir, debounceMs: 0 });
+    const host = context(cwd);
+    await history.onSessionStart(host.ctx);
+    const instance = host.build();
+    assert.ok(instance);
+    instance.setText("run focused tests");
+    history.setRouteTarget({ label: "builder", color: "warning" });
+    const lines = instance.render(60);
+    assert.ok(lines.some((line) => line.includes("@builder:")));
+    assert.ok(lines.some((line) => line.includes("[warning]")));
+    assert.equal(instance.getText(), "run focused tests", "prefix is not editor text");
+    instance.focused = true;
+    for (const line of instance.render(20)) {
+      assert.ok(visibleWidth(line) <= 20, `route editor line exceeded width: ${visibleWidth(line)}`);
+    }
+    assert.equal(instance.getText(), "run focused tests", "narrow rendering and cursor marker do not alter text");
+    instance.addToHistory("run focused tests");
+    await history.onSessionShutdown();
+    const persisted = JSON.parse(await readFile(join(rootDir, workspaceStorageId(cwd), "input-history.json"), "utf8")) as { entries: string[] };
+    assert.deepEqual(persisted.entries, ["run focused tests"], "history stores only the editable body");
+    assert.ok(instance.render(60).every((line) => !line.includes("@builder:")));
   } finally {
     await cleanup();
   }

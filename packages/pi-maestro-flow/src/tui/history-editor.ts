@@ -9,18 +9,25 @@
  */
 
 import { CustomEditor, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
-import { Key, type EditorTheme, type TUI, getKeybindings, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { Key, type EditorTheme, type TUI, getKeybindings, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 /** Cursor state when the user is typing rather than browsing history. */
 const NOT_BROWSING = -1;
 /** Keep custom double-Esc behavior consistent with Pi's native session-tree shortcut. */
 const DOUBLE_ESCAPE_WINDOW_MS = 500;
 
+export interface HistoryEditorRouteTarget {
+  label: string;
+  paint: (text: string) => string;
+}
+
 export interface HistoryEditorParams {
   /** Newest first. Read on every keystroke so the store stays the single source of truth. */
   getEntries: () => readonly string[];
   /** Called for every submitted prompt, including slash commands and `!` bash lines. */
   record: (text: string) => void;
+  /** Immutable route prefix painted inside the editor, never included in text. */
+  getRouteTarget?: () => HistoryEditorRouteTarget | undefined;
 }
 
 export class HistoryEditor extends CustomEditor {
@@ -29,6 +36,11 @@ export class HistoryEditor extends CustomEditor {
   private draft = "";
   /** First Esc while a draft is present; empty-editor Esc stays owned by Pi. */
   private lastNonEmptyEscapeAt = 0;
+
+  /** Repaint after a cross-extension input-target change. */
+  refreshRouteTarget(): void {
+    this.tui.requestRender();
+  }
 
   constructor(
     tui: TUI,
@@ -82,6 +94,16 @@ export class HistoryEditor extends CustomEditor {
 
   override render(width: number): string[] {
     const lines = super.render(width);
+    const target = this.params.getRouteTarget?.();
+    if (target && lines.length >= 2) {
+      const paddingX = this.getPaddingX();
+      const prefix = target.paint(`@${target.label}:`);
+      const content = truncateToWidth(`${" ".repeat(paddingX)}${prefix}`, Math.max(1, width), "…");
+      const routeLine = content + " ".repeat(Math.max(0, width - visibleWidth(content)));
+      // Insert after the top border. The route is inside the input box but is
+      // not part of editor text, cursor coordinates, undo, or prompt history.
+      lines.splice(1, 0, routeLine);
+    }
     const total = this.params.getEntries().length;
     if (!this.browsing() || total === 0) return lines;
     // Put the compact position label below the editor so it does not compete with its border.
