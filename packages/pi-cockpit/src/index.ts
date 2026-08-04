@@ -19,6 +19,12 @@ import {
 	type EditorBottomController,
 } from "./editor-bottom.ts";
 import { createCockpitClaudeEditorFactory } from "./claude-editor.ts";
+import {
+	COCKPIT_FULLSCREEN_MARKER,
+	COCKPIT_FULLSCREEN_WIDGET_KEY,
+	createFullscreenController,
+	type FullscreenController,
+} from "./fullscreen-controller.ts";
 import { BashBgOverlay } from "./bash-bg-overlay.ts";
 import { renderBashBgSummary } from "./bash-bg-widget.ts";
 import { registerQuietTools } from "./quiet-tools.ts";
@@ -248,6 +254,8 @@ export default function (pi: ExtensionAPI): void {
 	// Tracks ownership so teardown restores the default editor only when ours.
 	let claudeEditorInstalled = false;
 	let claudeEditorForeignWarned = false;
+	// Fullscreen (alternate-screen fixed editor) controller, reload-gated.
+	let fullscreenController: FullscreenController | undefined;
 	let dockEffectiveVisible = false;
 	let surfaceState: CockpitSurfaceState = "disabled";
 	let running = false;
@@ -568,6 +576,55 @@ export default function (pi: ExtensionAPI): void {
 		claudeEditorInstalled = false;
 	};
 
+	// Re-register the agents widget at the placement that fits the current mode:
+	// fullscreen scrolls it with the transcript (aboveEditor); normal mode keeps
+	// it fixed below the editor. Idempotent; safe to call from install/clear.
+	const syncAgentWidgetPlacement = (ctx: ExtensionContext, placement: "aboveEditor" | "belowEditor"): void => {
+		ctx.ui.setWidget(AGENT_WIDGET_KEY, (tui, theme) => {
+			capturedTui = tui;
+			return makeAgentWidget({
+				getAgents: () => agents.snapshot(),
+				getConfig: () => config,
+				isRunning: () => running,
+				isAnimating,
+			})(tui, theme);
+		}, { placement });
+	};
+
+	const installFullscreen = (ctx: ExtensionContext): void => {
+		if (fullscreenController || !config.fullscreenInput) return;
+		// Markers are emitted by the Cockpit custom editor; without it fullscreen
+		// cannot split the screen, so it stays inert (fail closed like the editor).
+		if (!claudeEditorInstalled) return;
+		const controller = createFullscreenController({
+			subscribeInput: (handler) => ctx.ui.onTerminalInput(handler),
+			isCopyOnSelect: () => config.copyOnSelect,
+			onError: (error) => ctx.ui.notify(
+				`Cockpit fullscreen input disabled: ${error instanceof Error ? error.message : String(error)}`,
+				"warning",
+			),
+		});
+		ctx.ui.setWidget(
+			COCKPIT_FULLSCREEN_WIDGET_KEY,
+			(tui) => {
+				capturedTui = tui;
+				controller.attach(tui);
+				return { render: () => [] as string[], invalidate() {} };
+			},
+			{ placement: "aboveEditor" },
+		);
+		syncAgentWidgetPlacement(ctx, "aboveEditor");
+		fullscreenController = controller;
+	};
+
+	const clearFullscreen = (ctx: ExtensionContext): void => {
+		ctx.ui.setWidget(COCKPIT_FULLSCREEN_WIDGET_KEY, undefined);
+		const controller = fullscreenController;
+		fullscreenController = undefined;
+		controller?.dispose();
+		if (config.enabled) syncAgentWidgetPlacement(ctx, "belowEditor");
+	};
+
 	const installWidgets = (ctx: ExtensionContext): void => {
 		ctx.ui.setWidget(
 			STACK_WIDGET_KEY,
@@ -581,19 +638,7 @@ export default function (pi: ExtensionAPI): void {
 			},
 			{ placement: "aboveEditor" },
 		);
-		ctx.ui.setWidget(
-			AGENT_WIDGET_KEY,
-			(tui, theme) => {
-				capturedTui = tui;
-				return makeAgentWidget({
-					getAgents: () => agents.snapshot(),
-					getConfig: () => config,
-					isRunning: () => running,
-					isAnimating,
-				})(tui, theme);
-			},
-			{ placement: "belowEditor" },
-		);
+		syncAgentWidgetPlacement(ctx, config.fullscreenInput ? "aboveEditor" : "belowEditor");
 	};
 
 	const reconcileSurface = (ctx: ExtensionContext): void => {
@@ -656,9 +701,17 @@ export default function (pi: ExtensionAPI): void {
 
 	const disposeLayoutControllers = (): void => {
 		const render = capturedTui?.render as (TUI["render"] & Record<symbol, unknown>) | undefined;
+		const fullscreenIsTop = Boolean(render?.[COCKPIT_FULLSCREEN_MARKER]);
 		const editorBottomIsTop = Boolean(render?.[COCKPIT_EDITOR_BOTTOM_MARKER]);
 		const splitPaneIsTop = Boolean(render?.[COCKPIT_SPLIT_PANE_MARKER]);
-		if (editorBottomIsTop && !splitPaneIsTop) {
+		// Disposal must unwrap in reverse install order (outermost first): the
+		// fullscreen renderer is the outermost Cockpit wrapper, then editor-bottom
+		// (when on top), then split-pane.
+		if (fullscreenIsTop) {
+			fullscreenController?.dispose();
+			editorBottomController?.dispose();
+			sidebarController?.dispose();
+		} else if (editorBottomIsTop && !splitPaneIsTop) {
 			editorBottomController?.dispose();
 			sidebarController?.dispose();
 		} else {
@@ -667,11 +720,13 @@ export default function (pi: ExtensionAPI): void {
 		}
 		sidebarController = undefined;
 		editorBottomController = undefined;
+		fullscreenController = undefined;
 	};
 
 	const uninstallUi = (ctx: ExtensionContext): void => {
 		dockEffectiveVisible = false;
 		clearClaudeEditor(ctx);
+		clearFullscreen(ctx);
 		clearEditorBottom(ctx);
 		disposeLayoutControllers();
 		clearWidgets(ctx);
@@ -697,9 +752,10 @@ export default function (pi: ExtensionAPI): void {
 			return;
 		}
 		ctx.ui.setWorkingIndicator({ frames: [] });
-		if (config.pinEditorBottom) installEditorBottom(ctx);
+		if (config.pinEditorBottom && !config.fullscreenInput) installEditorBottom(ctx);
 		else clearEditorBottom(ctx);
 		installClaudeEditor(ctx);
+		installFullscreen(ctx);
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			capturedTui = tui;
 			let observedWidth = tui.terminal.columns;
