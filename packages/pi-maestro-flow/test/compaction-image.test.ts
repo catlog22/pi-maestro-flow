@@ -2,9 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
 import {
-  countImageBlocks,
-  estimateSummaryInputTokensWithImages,
   estimateSummaryRequestTokens,
+  fitSummaryInputToWindow,
   MAESTRO_COMPACTION_SYSTEM_PROMPT,
   stripImagesFromMessagesForSummary,
 } from "../src/compaction/maestro-compaction.ts";
@@ -74,29 +73,21 @@ test("stripped summary serialization keeps placeholders and drops image pixels",
   assert.ok(!serialized.includes("BBBB"), "image pixels must not reach the summary prompt");
 });
 
-// --- P0-2: summary capacity estimation includes image cost ---
+// --- P0-2: summary capacity stays text-only (027: eliminate image-inflated estimates) ---
 
-test("countImageBlocks counts top-level and nested images, ignores text/string content", () => {
-  const messages = [
-    { role: "user", content: [{ type: "text", text: "a" }, imageBlock()], timestamp: 1 },
-    { role: "toolResult", toolCallId: "t", toolName: "read", content: [imageBlock(), imageBlock()], isError: false, timestamp: 2 },
-    { role: "user", content: "no blocks", timestamp: 3 },
-  ] as never;
-  assert.equal(countImageBlocks(messages), 3);
-});
-
-test("estimateSummaryInputTokensWithImages adds per-image cost over the text estimate", () => {
+// The compaction API request is pure text (image pixels never reach it), so the
+// capacity estimate must not add per-image cost — otherwise media-dense
+// sessions get over-pruned. Image-inclusive tokensBefore remains fallback only.
+test("summary capacity estimate ignores image blocks (027 semantics)", () => {
   const textPrompt = "hello world";
-  const textTokens = estimateSummaryRequestTokens(MAESTRO_COMPACTION_SYSTEM_PROMPT, textPrompt);
-  const messages = [
-    { role: "user", content: [{ type: "text", text: "a" }, imageBlock()], timestamp: 1 },
-    { role: "user", content: [imageBlock(), imageBlock()], timestamp: 2 },
-  ] as never;
-  const withImages = estimateSummaryInputTokensWithImages(messages, MAESTRO_COMPACTION_SYSTEM_PROMPT, textPrompt);
-  // 3 images × 1200 fixed cost + unchanged text estimate
-  assert.equal(withImages, textTokens + 3 * 1200);
-  const noImages = estimateSummaryInputTokensWithImages([], MAESTRO_COMPACTION_SYSTEM_PROMPT, textPrompt);
-  assert.equal(noImages, textTokens, "no-image input must be unchanged");
+  const base = estimateSummaryRequestTokens(MAESTRO_COMPACTION_SYSTEM_PROMPT, textPrompt);
+  // The serialized prompt carries placeholders, not pixels; the estimate input
+  // is the same text regardless of how many images were in the history.
+  const withPlaceholders = estimateSummaryRequestTokens(
+    MAESTRO_COMPACTION_SYSTEM_PROMPT,
+    `${textPrompt} [image] [image] [image]`,
+  );
+  assert.ok(withPlaceholders < base + 200, "placeholders are tiny text, not per-image token cost");
 });
 
 // --- P1-1: document blocks charged fixed tokens, not base64 text ---
@@ -164,4 +155,51 @@ test("image + vision description pair: placeholder marks position, description k
   const serialized = serializeConversation(convertToLlm(stripImagesFromMessagesForSummary(messages)));
   assert.match(serialized, /\[image\]/, "placeholder keeps position semantics");
   assert.match(serialized, /red error dialog/, "description text is independently preserved");
+});
+
+// --- Integration: media-dense input does not inflate summary capacity ---
+
+test("fitSummaryInputToWindow drops the same rounds with or without images in history", () => {
+  const textRound = (index: number) => ([
+    { role: "assistant", content: [{ type: "toolCall", id: `call-${index}`, name: "read", arguments: {} }] },
+    { role: "toolResult", toolCallId: `call-${index}`, toolName: "read", content: [{ type: "text", text: "x".repeat(1_000) }], isError: false },
+  ]);
+  const imageRound = (index: number) => ([
+    { role: "assistant", content: [{ type: "toolCall", id: `call-${index}`, name: "read", arguments: {} }] },
+    { role: "toolResult", toolCallId: `call-${index}`, toolName: "read", content: [{ type: "text", text: "x".repeat(1_000) }, imageBlock()], isError: false },
+  ]);
+  const mk = (rounds: Array<Array<unknown>>) => rounds.flat();
+  const manyRounds: Array<Array<unknown>> = [];
+  for (let index = 0; index < 120; index++) manyRounds.push(textRound(index));
+  const withImages: Array<Array<unknown>> = [];
+  for (let index = 0; index < 120; index++) withImages.push(imageRound(index));
+
+  const buildPrompt = (messages: unknown[]) => JSON.stringify({
+    conversationText: serializeConversation(convertToLlm(messages as never)),
+    previousSummary: null,
+    runtimeState: {},
+    operatorFocus: null,
+  }, null, 2);
+
+  // Same conversation shape with images added must NOT require more dropped
+  // rounds: the summary request is pure text (pixels stripped), so per-image
+  // cost must not shrink the retained window (027 semantics).
+  const baseFit = fitSummaryInputToWindow({
+    source: { messages: mk(manyRounds) as never, buildPrompt },
+    tokensBefore: 400_000,
+    reserveTokens: 16_384,
+    contextWindow: 200_000,
+    modelMaxTokens: 32_768,
+  });
+  const imageFit = fitSummaryInputToWindow({
+    source: { messages: mk(withImages) as never, buildPrompt },
+    tokensBefore: 400_000,
+    reserveTokens: 16_384,
+    contextWindow: 200_000,
+    modelMaxTokens: 32_768,
+  });
+  assert.equal(imageFit.droppedRounds, baseFit.droppedRounds,
+    `images must not inflate summary capacity: base ${baseFit.droppedRounds} vs images ${imageFit.droppedRounds}`);
+  assert.equal(imageFit.maxTokens, baseFit.maxTokens,
+    `output budget must not shrink for media-dense history: base ${baseFit.maxTokens} vs images ${imageFit.maxTokens}`);
 });
