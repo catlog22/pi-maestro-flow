@@ -17,6 +17,7 @@ import {
   loadModelRoutingConfig,
   loadModelRoutingState,
   promoteProjectModelRoutingOverrides,
+  refreshModelRegistry,
   renameGlobalModelRoutingProfile,
   saveGlobalProfileFallbackMapping,
   saveGlobalProfileModelMapping,
@@ -277,6 +278,75 @@ test("fallback mappings persist, filter unavailable models, and follow explicit 
       tasks: [{ prompt: "Trace the request", fallbackModels: ["provider/task"] }],
     }, cwd, ["provider/top", "provider/task"]);
     assert.deepEqual(perTask.tasks[0].fallbackModels, ["provider/task"]);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("dispatch inherits the main session model when no explicit model is set", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-inherit-"));
+  try {
+    const routed = applyModelRouting({
+      agent: "general",
+      tasks: [{ prompt: "Inspect the module" }],
+    }, cwd, ["maestro/main-session", "other/model"], undefined, "maestro/main-session");
+    assert.equal(routed.tasks[0].model, "maestro/main-session");
+
+    const emptyCatalog = applyModelRouting({
+      tasks: [{ prompt: "Inspect the module" }],
+    }, cwd, [], undefined, "maestro/main-session");
+    assert.equal(emptyCatalog.tasks[0].model, "maestro/main-session");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("task-level and top-level models beat the inherited main session model", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-inherit-explicit-"));
+  try {
+    const topLevel = applyModelRouting({
+      model: "provider/top",
+      tasks: [{ prompt: "Inspect the module" }],
+    }, cwd, ["provider/top", "maestro/main-session"], undefined, "maestro/main-session");
+    assert.equal(topLevel.tasks[0].model, "provider/top");
+
+    const perTask = applyModelRouting({
+      tasks: [{ prompt: "Inspect the module", model: "provider/task" }],
+    }, cwd, ["provider/task", "maestro/main-session"], undefined, "maestro/main-session");
+    assert.equal(perTask.tasks[0].model, "provider/task");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("configured task-type mappings beat the inherited main session model", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-inherit-mapping-"));
+  try {
+    saveProjectModelMapping(cwd, "analysis", "provider/analysis");
+    const routed = applyModelRouting({
+      taskType: "analysis",
+      tasks: [{ prompt: "Trace the request" }],
+    }, cwd, ["provider/analysis", "maestro/main-session"], undefined, "maestro/main-session");
+    assert.equal(routed.tasks[0].model, "provider/analysis");
+
+    // A configured mapping that is not authenticated falls through to inheritance.
+    const filtered = applyModelRouting({
+      taskType: "analysis",
+      tasks: [{ prompt: "Trace the request" }],
+    }, cwd, ["maestro/main-session"], undefined, "maestro/main-session");
+    assert.equal(filtered.tasks[0].model, "maestro/main-session");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("an inherited model absent from the catalog is skipped", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-inherit-stale-"));
+  try {
+    const routed = applyModelRouting({
+      tasks: [{ prompt: "Inspect the module" }],
+    }, cwd, ["other/model"], undefined, "stale/session-model");
+    assert.equal(routed.tasks[0].model, undefined);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
@@ -1010,6 +1080,39 @@ test("legacy project routing migrates as preserved overrides and can be promoted
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("refreshModelRegistry calls refresh on the registry receiver and coalesces", async () => {
+  let calls = 0;
+  const registry = {
+    runtime: { refreshed: 0 },
+    // Mirrors the host ModelRegistry class method: reads `this.runtime`.
+    async refresh(): Promise<void> {
+      this.runtime.refreshed++;
+      calls++;
+    },
+  };
+  await refreshModelRegistry({ modelRegistry: registry as never });
+  await refreshModelRegistry({ modelRegistry: registry as never });
+  assert.equal(calls, 2, "each awaited call must run the host refresh");
+  assert.equal(registry.runtime.refreshed, 2);
+
+  // Concurrent calls coalesce onto one in-flight refresh.
+  calls = 0;
+  registry.runtime.refreshed = 0;
+  await Promise.all([
+    refreshModelRegistry({ modelRegistry: registry as never }),
+    refreshModelRegistry({ modelRegistry: registry as never }),
+    refreshModelRegistry({ modelRegistry: registry as never }),
+  ]);
+  assert.equal(calls, 1, "concurrent calls must share one in-flight refresh");
+  assert.equal(registry.runtime.refreshed, 1);
+});
+
+test("refreshModelRegistry without a refresh-capable registry is a no-op", async () => {
+  await refreshModelRegistry({});
+  await refreshModelRegistry({ modelRegistry: undefined });
+  await refreshModelRegistry({ modelRegistry: { getAvailable: () => [] } as never });
 });
 
 test("missing project profile falls back to the global default with diagnostics", () => {

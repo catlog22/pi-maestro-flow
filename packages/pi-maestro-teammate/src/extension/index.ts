@@ -339,6 +339,14 @@ export default function registerTeammateExtension(
     return modelCatalog;
   };
 
+  /** Catalog id of the main session's current model, when one is active. */
+  const sessionModelId = (ctx: ExtensionContext): string | undefined => {
+    const model = ctx.model;
+    if (!model) return undefined;
+    const id = `${model.provider}/${model.id}`;
+    return id.trim() ? id : undefined;
+  };
+
   const injectTeammateContext = (
     event: { systemPrompt: string },
     ctx: ExtensionContext,
@@ -1091,6 +1099,8 @@ export default function registerTeammateExtension(
         params,
         baseCwd,
         refreshModelCatalog(ctx).modelIds,
+        undefined,
+        sessionModelId(ctx),
       );
 
       // --- Normalize to task list (shared with the child proxy path) ---

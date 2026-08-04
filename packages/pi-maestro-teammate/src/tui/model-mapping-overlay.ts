@@ -521,7 +521,7 @@ export class TeammateControlCenter implements Component, Focusable {
             if (this.modelSelected < 0) this.modelSelected = 0;
             this.statusText = `Saved model · choose thinking depth for ${value}`;
           } else {
-            this.statusText = `Saved · ${taskType} ${editorKind} → ${value ?? (editorKind === "thinking" ? "inherit / Pi default" : "auto / agent default")}`;
+            this.statusText = `Saved · ${taskType} ${editorKind} → ${value ?? (editorKind === "thinking" ? "inherit / Pi default" : "auto / inherit main session model")}`;
             this.modelTaskType = null;
           }
           this.modelQuery = "";
@@ -789,8 +789,8 @@ export class TeammateControlCenter implements Component, Focusable {
     const configured = this.config.mappings[taskType];
     const items = [{
       value: "__auto__",
-      label: "auto / agent default",
-      detail: "Use explicit task model, configured routing, or the agent default",
+      label: "auto / inherit main session model",
+      detail: "Use the task/top-level model, an explicitly configured mapping, or inherit the main session's model",
       active: !configured,
       unavailable: false,
     }];
@@ -1013,7 +1013,7 @@ export class TeammateControlCenter implements Component, Focusable {
       const taskType = this.filteredTaskTypes()[this.selected.routing];
       if (!taskType) return [this.emptyState()];
       const meta = this.taskTypeMeta(taskType);
-      const mapping = this.config.mappings[taskType] ?? "auto / agent default";
+      const mapping = this.config.mappings[taskType] ?? "auto / inherit main session model";
       lines.push(this.params.theme.bold(displayText(meta.label)));
       lines.push(this.params.theme.fg("muted", `Roles · ${displayText(meta.roles)}`));
       lines.push(...wrapTextWithAnsi(displayText(meta.description), Math.max(1, width)).slice(0, 3));

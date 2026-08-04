@@ -110,6 +110,12 @@ export interface RunTeammateOptions {
   baseCwd: string;
   modelCapabilities?: readonly TeammateModelCapability[];
   modelCircuitBreaker?: ModelCircuitBreaker;
+  /**
+   * Main-session model id (e.g. `provider/model`) to inherit when a dispatch
+   * sets no explicit task- or top-level model. Configured task-type mappings
+   * still win; this is the default fallback below them.
+   */
+  inheritModel?: string;
   correlationId?: string;
   taskCorrelationIds?: string[];
   /** Task-local cancellation signals for graph members; `signal` remains graph-wide. */

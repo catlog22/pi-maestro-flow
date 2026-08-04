@@ -892,10 +892,16 @@ export async function handleProxyRequest(
       // can only tighten it (0 forbids any further nesting below this call).
       const childMaxDispatchDepth = nestedChildMaxDispatchDepth(parentBudget, dispatchDepth, p.maxNestingDepth);
 
+      const parentModel = (() => {
+        const parent = parentCid ? state.activeRuns.get(parentCid) : undefined;
+        return parent?.resolvedModel ?? parent?.requestedModel;
+      })();
       const routedParams = applyModelRouting(
         p,
         state.baseCwd || process.cwd(),
         modelCapabilities.map((model) => model.id),
+        undefined,
+        parentModel,
       );
 
       // Normalize (shared with the root tool execute path). The root process is

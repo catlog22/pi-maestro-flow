@@ -1,14 +1,6 @@
 {
   "version": 2,
-  "mappings": {
-    "explore": "maestro-qwen/qwen3.8-max-preview",
-    "analysis": "maestro-openai/gpt-5.6-sol",
-    "review": "maestro-openai/gpt-5.6-sol",
-    "debug": "maestro-openai/gpt-5.6-sol",
-    "development": "maestro-openai/gpt-5.6-sol",
-    "testing": "maestro-openai/gpt-5.6-sol",
-    "planning": "maestro-openai/gpt-5.6-sol"
-  },
+  "mappings": {},
   "fallbackMappings": {
     "explore": [
       "maestro-openai/gpt-5.6-sol"

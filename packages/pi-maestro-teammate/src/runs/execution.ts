@@ -2106,6 +2106,8 @@ export async function runTeammate(
     params,
     options.baseCwd,
     options.modelCapabilities?.map((capability) => capability.id) ?? [],
+    undefined,
+    options.inheritModel,
   );
   const normalized = normalizeTeammateParams(routed);
   if (normalized.error) throw new Error(normalized.error);

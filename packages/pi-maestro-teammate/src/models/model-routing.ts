@@ -1541,9 +1541,19 @@ export function applyModelRouting(
   cwd: string,
   availableModels: readonly string[] = [],
   globalFilePath = getGlobalModelRoutingPath(),
+  inheritModel?: string,
 ): RunTeammateParams {
   const topLevelModel = params.model;
   const topLevelThinking = parseTeammateThinkingLevel(params.thinking);
+  // Default resolution: when neither the task nor the top level pins a model,
+  // configured task-type/role mappings still win, otherwise the dispatch
+  // inherits the main session's model (or the parent agent's resolved model for
+  // nested dispatches). An inherited model absent from the teammate catalog is
+  // skipped so a stale session model cannot force an invalid child spawn.
+  const resolvedInheritModel = inheritModel
+    && (availableModels.length === 0 || availableModels.includes(inheritModel))
+    ? inheritModel
+    : undefined;
 
   const tasks = params.tasks.map((task) => {
     const routingCwd = path.resolve(cwd, task.cwd ?? params.cwd ?? ".");
@@ -1561,7 +1571,7 @@ export function applyModelRouting(
         taskType,
         agent,
         task: task.prompt,
-      }, availableModels),
+      }, availableModels) ?? resolvedInheritModel,
       fallbackModels: task.fallbackModels ?? params.fallbackModels ?? mappedFallbackModels(config, {
         taskType,
         agent,
@@ -1595,9 +1605,13 @@ let modelRegistryRefreshInFlight: Promise<void> | undefined;
  * routing and modelCapabilities validation until unrelated code refreshes.
  */
 export async function refreshModelRegistry(ctx: ModelRegistryRefreshContext): Promise<void> {
-  const refresh = ctx.modelRegistry?.refresh;
-  if (!refresh) return;
-  modelRegistryRefreshInFlight ??= refresh()
+  const registry = ctx.modelRegistry;
+  if (!registry?.refresh) return;
+  // Call through the registry object: the host's refresh() is a class method
+  // that reads `this.runtime`. A detached call would throw
+  // "Cannot read properties of undefined (reading 'runtime')" and leave the
+  // synchronous getAvailable() snapshot stale.
+  modelRegistryRefreshInFlight ??= registry.refresh()
     .then(() => undefined, (error) => {
       // A failed registry refresh must not block dispatch; the previous
       // snapshot stays authoritative until the next successful refresh.
@@ -1619,7 +1633,7 @@ export function formatModelRoutingConfig(
   return discoverRoutingTaskTypes(cwd, agents, config)
     .map((taskType) => {
       const fallbacks = config.fallbackMappings?.[taskType]?.join(",") || "none";
-      return `- ${taskType}: model=${config.mappings[taskType] ?? "auto/default"}, fallbacks=${fallbacks}, thinking=${config.thinkingLevels[taskType] ?? "inherit/default"}`;
+      return `- ${taskType}: model=${config.mappings[taskType] ?? "auto/inherit main session"}, fallbacks=${fallbacks}, thinking=${config.thinkingLevels[taskType] ?? "inherit/default"}`;
     })
     .join("\n");
 }
