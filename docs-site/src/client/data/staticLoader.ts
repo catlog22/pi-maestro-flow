@@ -167,6 +167,16 @@ export const guideRegistry: Array<{
     category: 'orchestration',
   },
   {
+    slug: 'advisor',
+    file: 'advisor.md',
+    title: 'Advisor Turn-Level Supervision',
+    description: 'Background second-model review for turn quality, constraints, and corrective guidance',
+    title_zh: 'Advisor 逐轮监督',
+    description_zh: '后台第二模型检查主会话质量、约束遵循与方向风险',
+    icon: 'shield-check',
+    category: 'orchestration',
+  },
+  {
     slug: 'permissions',
     file: 'permissions.md',
     title: 'Permission System',
