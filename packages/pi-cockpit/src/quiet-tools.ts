@@ -36,6 +36,12 @@ import { Text } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
 import type { CockpitConfig, ToolPaletteMode } from "./types.ts";
 import { resolveGlyphs, type IconGlyphs } from "./icons.ts";
+import {
+	executeGuardedEdit,
+	GUARDED_EDIT_DESCRIPTION,
+	GUARDED_EDIT_PARAMETERS,
+	prepareGuardedEditArguments,
+} from "./edit-guard.ts";
 
 // ---------- helpers ----------
 
@@ -332,14 +338,19 @@ function renderResultLine(
 export function registerQuietTools(pi: ExtensionAPI, getConfig: () => CockpitConfig): void {
 	for (const spec of SPECS) {
 		const original = (getBuiltInTools(process.cwd()) as any)[spec.name];
+		const guardedEdit = spec.name === "edit";
 		pi.registerTool({
 			name: spec.name,
 			label: spec.name,
-			description: original.description,
-			parameters: original.parameters,
+			description: guardedEdit ? GUARDED_EDIT_DESCRIPTION : original.description,
+			parameters: guardedEdit ? GUARDED_EDIT_PARAMETERS : original.parameters,
+			prepareArguments: guardedEdit ? prepareGuardedEditArguments : original.prepareArguments,
 			renderShell: "self",
 
 			async execute(toolCallId: string, params: any, signal: any, onUpdate: any, ctx: ExtensionContext) {
+				if (guardedEdit) {
+					return executeGuardedEdit(toolCallId, params, signal, onUpdate, ctx);
+				}
 				return (getBuiltInTools(ctx.cwd) as any)[spec.name].execute(toolCallId, params, signal, onUpdate);
 			},
 

@@ -23,6 +23,7 @@ import {
 import { BashBgOverlay } from "./bash-bg-overlay.ts";
 import { renderBashBgSummary } from "./bash-bg-widget.ts";
 import { registerQuietTools } from "./quiet-tools.ts";
+import { registerGuardedEditTool } from "./edit-guard.ts";
 import { ensureThinkingFolded, readHideThinkingBlock } from "./thinking-fold.ts";
 import { ThinkingFoldTimer } from "./thinking-timer.ts";
 import { shouldAnimateFrames, shouldAnimateSidebar, shouldRunTick, type TickPolicyState } from "./tick-policy.ts";
@@ -288,6 +289,9 @@ export default function (pi: ExtensionAPI): void {
 	// AgentSession construction — before renderInitialMessages runs.
 	ensureConfigExists();
 	config = loadConfig();
+	// Guarded edit replaces the built-in edit (same name, same execution, plus a
+	// UTF-8 gate): editing a non-UTF-8 file would otherwise corrupt its bytes.
+	registerGuardedEditTool(pi);
 	// Reads config live, so toggling static mode re-throttles without re-registering.
 	setUsageThrottle(() => (config.staticMode ? USAGE_REFRESH_THROTTLE_MS : 0));
 	if (config.quietMode) {
