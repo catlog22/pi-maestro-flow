@@ -47,7 +47,8 @@ export interface FullscreenController {
 	getScrollOffset(): number;
 	scrollBy(delta: number): void;
 	jumpToBottom(): void;
-	requestRender(): void;
+	/** force=true resets the TUI diff state for a clean full redraw (surface switch). */
+	requestRender(force?: boolean): void;
 	dispose(): void;
 }
 
@@ -93,9 +94,9 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 		}
 	};
 
-	const requestRender = (): void => {
+	const requestRender = (force = false): void => {
 		try {
-			tui?.requestRender();
+			tui?.requestRender(force);
 		} catch {
 			// The TUI may already be shutting down.
 		}
@@ -267,7 +268,12 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 		scrollOffset = 0;
 		pendingLines = 0;
 		lastTranscriptLength = -1;
-		requestRender();
+		// Force a full redraw: the alternate screen is a fresh (blank) surface, so
+		// a differential render against the main-screen previousLines would skip
+		// "unchanged" rows that were never painted here, hiding the editor and the
+		// fixed dock. requestRender(true) resets previousLines/width/height so the
+		// next frame clears and writes the composed rows exactly once.
+		requestRender(true);
 	};
 
 	return {
@@ -296,7 +302,10 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 			cleanupTerminal?.();
 			cleanupTerminal = undefined;
 			selection.clear();
-			requestRender();
+			// Leaving the alternate screen returns to the main screen; force a full
+			// redraw so the main-screen document is repainted instead of diffed
+			// against the stale alt-screen frame.
+			requestRender(true);
 			tui = undefined;
 			originalRender = undefined;
 			wrappedRender = undefined;

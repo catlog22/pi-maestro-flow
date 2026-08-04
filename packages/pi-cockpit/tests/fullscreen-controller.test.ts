@@ -14,6 +14,7 @@ interface FakeHarness {
 	render(): string[];
 	setRows(rows: number): void;
 	attachInput(handler: ((data: string) => unknown) | undefined): void;
+	wasForceRendered(): boolean;
 }
 
 function makeHarness(build: () => string[], rows = 20): FakeHarness {
@@ -22,6 +23,7 @@ function makeHarness(build: () => string[], rows = 20): FakeHarness {
 	let currentRows = rows;
 	let inputHandler: ((data: string) => unknown) | undefined;
 	let renders = 0;
+	let lastForce = false;
 	const tui = {
 		terminal: {
 			rows: currentRows,
@@ -30,8 +32,9 @@ function makeHarness(build: () => string[], rows = 20): FakeHarness {
 				writes.push(seq);
 			},
 		},
-		requestRender() {
+		requestRender(force?: boolean) {
 			renders++;
+			lastForce = force === true;
 		},
 		render(width: number) {
 			return currentBuild();
@@ -51,6 +54,9 @@ function makeHarness(build: () => string[], rows = 20): FakeHarness {
 		},
 		get inputHandler() {
 			return inputHandler;
+		},
+		wasForceRendered() {
+			return lastForce;
 		},
 	};
 }
@@ -232,6 +238,15 @@ test("mouse lease pairs with an existing split-pane lease (ref-counted)", () => 
 	assert.equal(harness.writes.includes("\x1b[?1002l"), false, "shared mode not disabled while another lease is held");
 	other.release();
 	assert.ok(harness.writes.includes("\x1b[?1002l"), "disabled once the last lease releases");
+});
+
+test("enter and exit force a full redraw so the alternate screen is painted cleanly", () => {
+	const harness = makeHarness(() => buildLines([], EDITOR_BLOCK, CHROME), 20);
+	const controller = createFullscreenController({});
+	controller.attach(harness.tui);
+	assert.equal(harness.wasForceRendered(), true, "attach forces a full redraw into the alternate screen");
+	controller.dispose();
+	assert.equal(harness.wasForceRendered(), true, "dispose forces a full redraw back on the main screen");
 });
 
 test("compose strips the editor markers from the output", () => {
