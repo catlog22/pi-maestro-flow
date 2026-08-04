@@ -142,14 +142,18 @@ test("clipboard failure warns and keeps the selection", async () => {
 	assert.equal(harness.controller.isSelecting(), true, "selection retained after failure");
 });
 
-test("copy disabled ignores drags entirely", async () => {
+test("copy disabled still allows drag selection (highlight), just no copy", async () => {
 	const harness = makeSelection();
-	harness.setLines(["alpha", "beta"]);
+	harness.setLines(["alpha", "beta", "gamma"]);
 	harness.setEnabled(false);
-	const attempted = await drag(harness, [1, 1], [6, 2]);
-	assert.equal(attempted, false);
+	harness.controller.press(1, 1);
+	harness.controller.motion(6, 2);
+	assert.equal(harness.controller.isSelecting(), true, "selection still active without copy");
+	assert.ok(harness.controller.highlight("alpha", 0).includes("\x1b[7m"), "highlight still applies");
+	const attempted = await harness.controller.release(6, 2);
+	assert.equal(attempted, false, "no copy when disabled");
 	assert.equal(harness.copied, null);
-	assert.equal(harness.controller.isSelecting(), false);
+	assert.equal(harness.controller.isSelecting(), false, "selection cleared after release");
 });
 
 test("highlight marks selected rows with reverse video and leaves others alone", () => {

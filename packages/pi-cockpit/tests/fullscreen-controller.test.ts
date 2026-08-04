@@ -305,7 +305,7 @@ test("copy-on-select drag copies transcript text and wheel still scrolls", async
 	controller.dispose();
 });
 
-test("copy-on-select disabled: drags are ignored but wheel scrolling works", async () => {
+test("copy-on-select disabled: drags still select (highlight) but do not copy; wheel works", async () => {
 	const transcript = Array.from({ length: 15 }, (_, i) => `r${i}`);
 	const harness = makeHarness(() => buildLines(transcript, EDITOR_BLOCK, CHROME), 20);
 	const copied: string[] = [];
@@ -321,6 +321,9 @@ test("copy-on-select disabled: drags are ignored but wheel scrolling works", asy
 	harness.render();
 	harness.inputHandler?.("\x1b[<0;1;1M");
 	harness.inputHandler?.("\x1b[<32;3;2M");
+	// The highlight is composited into the rendered frame while dragging.
+	const dragging = harness.render();
+	assert.ok(dragging[0].includes("\x1b[7m"), "drag still highlights without copy-on-select");
 	harness.inputHandler?.("\x1b[<0;3;2m");
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	assert.deepEqual(copied, [], "no copy when copy-on-select is off");

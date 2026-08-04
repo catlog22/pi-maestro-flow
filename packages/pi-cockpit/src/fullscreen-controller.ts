@@ -222,8 +222,11 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 			jumpToBottom();
 			return { consume: true };
 		}
-		// Drag selection (copy-on-select) inside the transcript viewport.
-		if ((options.isCopyOnSelect?.() ?? false) && mouse.y <= transcriptHeight) {
+		// Drag selection is a basic fullscreen capability: native terminal selection
+		// is disabled while mouse reporting is on, so press/drag/release always
+		// routes to the selection controller (highlight works regardless of
+		// copyOnSelect); only the auto-copy on release is gated by that setting.
+		if (mouse.y <= transcriptHeight) {
 			if (!mouse.release && !mouse.motion && (mouse.button & 3) === 0) {
 				selection.press(mouse.x, mouse.y);
 				requestRender();

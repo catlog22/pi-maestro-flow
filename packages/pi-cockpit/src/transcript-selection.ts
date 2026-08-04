@@ -136,21 +136,19 @@ export function createTranscriptSelectionController(options: TranscriptSelection
 	return {
 		isSelecting: () => anchor !== null && focus !== null,
 		press(x, y) {
-			if (!options.isEnabled()) return;
 			const height = options.getTranscriptHeight();
 			if (height <= 0 || y > height) return; // never select in editor/chrome
 			anchor = { row: y - 1, col: Math.max(0, x - 1) };
 			focus = { ...anchor };
 		},
 		motion(x, y) {
-			if (!anchor || !options.isEnabled()) return;
+			if (!anchor) return;
 			const clamped = clampY(y);
 			if (clamped > options.getTranscriptHeight()) return;
 			focus = { row: clamped - 1, col: Math.max(0, x - 1) };
 		},
 		async release(x, y) {
-			if (!anchor || !options.isEnabled()) {
-				anchor = null;
+			if (!anchor) {
 				focus = null;
 				return false;
 			}
@@ -163,7 +161,15 @@ export function createTranscriptSelectionController(options: TranscriptSelection
 			focus = { row: clamped - 1, col: Math.max(0, x - 1) };
 			const region = rect();
 			if (!region || region.singleCell) {
-				// A plain click (no drag) does not copy.
+				// A plain click (no drag) does not select or copy.
+				anchor = null;
+				focus = null;
+				return false;
+			}
+			// Drag selection is a basic fullscreen capability (native terminal
+			// selection is disabled by mouse reporting), so the highlight always
+			// works. Only the auto-copy on release is gated by copyOnSelect.
+			if (!options.isEnabled()) {
 				anchor = null;
 				focus = null;
 				return false;
