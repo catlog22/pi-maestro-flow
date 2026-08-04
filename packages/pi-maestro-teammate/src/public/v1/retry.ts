@@ -3,6 +3,7 @@ export {
   sharedModelCircuitBreaker,
   DEFAULT_MODEL_CIRCUIT_BREAKER_THRESHOLD,
   DEFAULT_MODEL_CIRCUIT_BREAKER_COOLDOWN_MS,
+  rankModelsByHealth,
 } from "../../models/model-circuit-breaker.ts";
 export type {
   AcquiredModelCandidate,

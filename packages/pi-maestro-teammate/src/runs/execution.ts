@@ -30,6 +30,7 @@ import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
 import { applyModelRouting, type TeammateTaskType } from "../models/model-routing.ts";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
 import {
+  rankModelsByHealth,
   sharedModelCircuitBreaker,
   type ModelCircuitBreaker,
 } from "../models/model-circuit-breaker.ts";
@@ -45,6 +46,7 @@ import {
   isFallbackProviderError,
   retryDelayMs,
 } from "./retry.ts";
+import { buildReplayFence } from "./recovery-protocol.ts";
 
 export * from "./execution-infra.ts";
 import {
@@ -232,9 +234,21 @@ export async function runSingleTeammate(
   const implicitFallbacks = candidates.length === 0
     ? (options.modelCapabilities ?? []).map((capability) => capability.id)
     : [];
-  const modelCandidates: Array<string | undefined> = candidates.length > 0
+  const baseCandidates: Array<string | undefined> = candidates.length > 0
     ? candidates
     : [undefined, ...implicitFallbacks];
+  // ④ Health-order the fallback tail (the primary stays first — it is the
+  // user's explicit choice). Healthy/never-tried fallbacks float up, while
+  // recovering (HALF_OPEN) trials and OPEN candidates sink.
+  const modelCandidates: Array<string | undefined> = baseCandidates.length > 1
+    ? [
+        baseCandidates[0],
+        ...rankModelsByHealth(
+          baseCandidates.slice(1).filter((model): model is string => model !== undefined),
+          breaker,
+        ),
+      ]
+    : baseCandidates;
   const attemptedModels: string[] = [];
   const attemptedModelSet = new Set<string>();
   const recordAttemptedModel = (model: string): void => {
@@ -354,9 +368,15 @@ export async function runSingleTeammate(
       const fallbackFailure = isFallbackProviderError(error);
       const recoveryFacts = attemptRecoveryFacts.get(candidateResult);
       const authoritativeFailure = recoveryFacts?.settlementCapability === "agent_settled";
+      // ⑤ Shared replay-fence semantics: blocked when any tool completed or
+      // its effect is unknown. The executor tracks counts (not names), so the
+      // reason string carries the counts explicitly.
       const replayFenceClear = recoveryFacts !== undefined
-        && recoveryFacts.completedToolCount === 0
-        && recoveryFacts.inFlightToolCount === 0;
+        && !buildReplayFence({
+          completedToolCount: recoveryFacts.completedToolCount,
+          unknownEffect: recoveryFacts.inFlightToolCount > 0,
+          blockedReason: `Fresh replay blocked after completedTools=${recoveryFacts.completedToolCount}, inFlightTools=${recoveryFacts.inFlightToolCount}.`,
+        }).blocked;
       let fallbackEligible = fallbackFailure && authoritativeFailure && replayFenceClear;
 
       if (fallbackFailure && !authoritativeFailure) {

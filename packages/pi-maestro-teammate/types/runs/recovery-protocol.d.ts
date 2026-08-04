@@ -26,6 +26,24 @@ export type ReplayFence = {
     blocked: true;
     blockedReason: string;
 };
+export interface ReplayFenceInput {
+    /** Completed tool names; implies blocked when non-empty. */
+    completedTools?: readonly string[];
+    /** Completed tool count when names are unknown; implies blocked when > 0. */
+    completedToolCount?: number;
+    /** True when a tool started but its effect is unknown. */
+    unknownEffect: boolean;
+    /** Override for blockedReason; default derives from the evidence. */
+    blockedReason?: string;
+}
+/**
+ * Build a replay fence from tool-activity evidence. Blocked when any tool
+ * completed or its effect is unknown — a fresh replay would risk repeating
+ * side effects. Callers with tool names use {@link ReplayFenceInput.completedTools}
+ * (the derived reason names them); callers that only track counts use
+ * {@link ReplayFenceInput.completedToolCount} with an explicit blockedReason.
+ */
+export declare function buildReplayFence(input: ReplayFenceInput): ReplayFence;
 interface RecoveryIntentBase {
     intentId: string;
 }
@@ -39,7 +57,7 @@ export interface RecoveryFallbackModelIntent extends RecoveryIntentBase {
     kind: "fallback_model";
     fromModel: string;
     toModel: string;
-    mode: "continue_context" | "restart";
+    mode: "continue_context" | "restart" | "force_restart";
     replayFence: ReplayFence;
 }
 export interface RecoveryCompactContextIntent extends RecoveryIntentBase {

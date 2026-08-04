@@ -6,6 +6,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { lockSettingsResourceSync } from "../settings/resource-lock.ts";
 import { writeFileDurableSync } from "../settings/durable-write.ts";
+import { appendModelFailoverSettlement, listModelFailoverEvents } from "./model-failover-events.ts";
 import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
 import {
   analyzeAttachedImage,
@@ -15,7 +16,9 @@ import {
   type AttachedImageInput,
 } from "./vision-assist.ts";
 import {
+  buildReplayFence,
   classifyRetryError,
+  rankModelsByHealth,
   RECOVERY_PROTOCOL_VERSION,
   sharedModelCircuitBreaker,
   type AcquiredModelCandidate,
@@ -304,18 +307,6 @@ function observeAgentEnd(
   return { outcome: "success", completedTools: [...completedTools], unknownEffect };
 }
 
-function replayFence(observation: AgentEndObservation): ReplayFence {
-  const completedTools = Object.freeze([...observation.completedTools]);
-  if (completedTools.length > 0 || observation.unknownEffect) {
-    const evidence = [
-      completedTools.length > 0 ? `completed tools: ${completedTools.join(", ")}` : undefined,
-      observation.unknownEffect ? "one or more tool effects could not be confirmed" : undefined,
-    ].filter(Boolean).join("; ");
-    return Object.freeze({ completedTools, blocked: true, blockedReason: `Fresh replay blocked after ${evidence}.` });
-  }
-  return Object.freeze({ completedTools, blocked: false });
-}
-
 function publishSettlement(snapshot: ModelFailoverSettlementSnapshot): Readonly<ModelFailoverSettlementSnapshot> {
   const frozen = Object.freeze({ ...snapshot, replayFence: Object.freeze({ ...snapshot.replayFence }) });
   settlementArbitration = frozen;
@@ -363,6 +354,17 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
   if (typeof (pi as { registerTool?: unknown }).registerTool === "function") registerVisionDelegation(pi);
   const breaker = options.breaker ?? sharedModelCircuitBreaker;
   const visionAnalyzer = options.visionAnalyzer ?? analyzeAttachedImage;
+  // ⑥ Settlement funnel: memory arbitration (module-level) + best-effort
+  // append to the persistent event stream. Persistence must never break the
+  // arbitration path, so it is a fire-and-forget side effect of publishing.
+  const publish = (
+    snapshot: ModelFailoverSettlementSnapshot,
+    failureKind?: RetryErrorKind,
+  ): Readonly<ModelFailoverSettlementSnapshot> => {
+    const frozen = publishSettlement(snapshot);
+    appendModelFailoverSettlement(frozen, { homeDir: options.homeDir, failureKind });
+    return frozen;
+  };
   let active: ActiveModelRun | undefined;
   let finalObservation: AgentEndObservation | undefined;
   let observedGeneration: number | undefined;
@@ -386,7 +388,15 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
       if (sub === "status" || sub === "health") {
         config = loadModelFailoverConfig(ctx.cwd, options.homeDir);
         const status = config.enabled ? "automatic failover enabled" : "automatic failover disabled";
-        ctx.ui.notify(`${status}\n${formatModelHealth(breaker)}`, "info");
+        const events = listModelFailoverEvents(options.homeDir, 5);
+        const eventLines = events.length === 0
+          ? "No persisted settlement events."
+          : events.map((entry) => {
+              const stamp = new Date(entry.at).toISOString();
+              const target = entry.fallbackModel ? ` -> ${entry.fallbackModel}` : "";
+              return `${stamp} ${entry.outcome} ${entry.model}${target}`;
+            }).join("\n");
+        ctx.ui.notify(`${status}\n${formatModelHealth(breaker)}\n\nSettlements (recent ${events.length}):\n${eventLines}`, "info");
         return;
       }
       if (!ctx.hasUI) {
@@ -406,8 +416,12 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
   ): Promise<ActiveModelRun | undefined> => {
     await refreshModelRegistry(ctx);
     const models = availableModels(ctx);
-    for (let index = startIndex; index < chain.length; index += 1) {
-      const candidate = chain[index];
+    // ④ Health-order the remaining fallback tail: healthy/never-tried
+    // candidates float up while recovering (HALF_OPEN) trials and OPEN
+    // candidates sink. Equal health keeps the configured chain order.
+    const tail = rankModelsByHealth(chain.slice(startIndex), breaker);
+    for (let index = 0; index < tail.length; index += 1) {
+      const candidate = tail[index];
       const model = models.get(candidate);
       if (!model) continue;
       const acquisition = breaker.acquireCandidate(candidate);
@@ -650,7 +664,10 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
             completedTools: [...completedTools],
             unknownEffect: startedTools.size > 0,
           };
-    const fence = replayFence(observation);
+    const fence = buildReplayFence({
+      completedTools: observation.completedTools,
+      unknownEffect: observation.unknownEffect,
+    });
     const baseSnapshot = {
       protocolVersion: RECOVERY_PROTOCOL_VERSION,
       recoveryId,
@@ -670,7 +687,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     if (observation.outcome === "cancelled") {
       if (!activeRun.failureRecorded) breaker.releaseCandidate(activeRun.acquisition);
       activeRun.failureRecorded = true;
-      publishSettlement({ ...baseSnapshot, outcome: "cancelled" });
+      publish({ ...baseSnapshot, outcome: "cancelled" }, observation.failureKind);
       await restoreImageModel();
       return;
     }
@@ -681,7 +698,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
         else breaker.releaseCandidate(activeRun.acquisition);
       }
       activeRun.failureRecorded = true;
-      publishSettlement({ ...baseSnapshot, outcome: "success" });
+      publish({ ...baseSnapshot, outcome: "success" }, observation.failureKind);
       await restoreImageModel();
       return;
     }
@@ -699,7 +716,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     ) {
       if (!activeRun.failureRecorded) breaker.releaseCandidate(activeRun.acquisition);
       activeRun.failureRecorded = true;
-      publishSettlement({ ...baseSnapshot, outcome: "failed" });
+      publish({ ...baseSnapshot, outcome: "failed" }, observation.failureKind);
       await restoreImageModel();
       return;
     }
@@ -714,7 +731,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     // settlement and intent for diagnostics, but do not suppress recovery.
     const fallback = await selectCandidate(ctx, activeRun.chain, activeRun.index + 1);
     if (!fallback) {
-      publishSettlement({ ...baseSnapshot, outcome: "failed" });
+      publish({ ...baseSnapshot, outcome: "failed" }, observation.failureKind);
       ctx.ui.notify(
         `Model ${activeRun.model} exhausted its retries and no further fallback is available.`,
         "warning",
@@ -739,7 +756,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     };
     active = fallback;
     pendingRecoveryId = recoveryId;
-    publishSettlement({ ...baseSnapshot, outcome: "fallback-scheduled", fallbackModel: fallback.model });
+    publish({ ...baseSnapshot, outcome: "fallback-scheduled", fallbackModel: fallback.model }, observation.failureKind);
     setTimeout(() => {
       if (pendingRecoveryId !== recoveryId
         || active !== fallback
@@ -767,11 +784,11 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
         fallback.failureRecorded = true;
         if (active === fallback) active = undefined;
         if (pendingRecoveryId === recoveryId) pendingRecoveryId = undefined;
-        const failedSnapshot = publishSettlement({
+        const failedSnapshot = publish({
           ...baseSnapshot,
           outcome: "failed",
           failure: `Fallback handoff failed: ${error instanceof Error ? error.message : String(error)}`,
-        });
+        }, observation.failureKind);
         pi.events?.emit?.(FAILOVER_TERMINAL_EVENT, failedSnapshot);
         ctx.ui.notify(`Model fallback could not start on ${fallback.model}.`, "warning");
       }

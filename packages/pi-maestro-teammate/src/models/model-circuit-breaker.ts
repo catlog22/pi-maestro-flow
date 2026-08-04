@@ -227,3 +227,32 @@ export class ModelCircuitBreaker {
 }
 
 export const sharedModelCircuitBreaker = new ModelCircuitBreaker();
+
+/**
+ * Health rank: lower is healthier. Models with no circuit history (never
+ * attempted) rank as healthy; CLOSED models rank by consecutive failures
+ * (fewer first); HALF_OPEN recovery trials rank next; OPEN models last.
+ */
+function modelHealthRank(snapshot: ModelCircuitSnapshot | undefined): number {
+  if (!snapshot) return 0;
+  if (snapshot.state === "OPEN") return 10_000 + snapshot.consecutiveFailures;
+  if (snapshot.state === "HALF_OPEN") return 5_000 + snapshot.consecutiveFailures;
+  return snapshot.consecutiveFailures;
+}
+
+/**
+ * Stable sort of model selectors by circuit health: healthy/never-tried
+ * candidates first, recovering (HALF_OPEN) trials next, OPEN last. Equal
+ * health keeps the input (configured) order — `Array.prototype.sort` is
+ * stable. OPEN candidates are still gated by {@link acquireCandidate}; the
+ * rank only decides the order in which candidates are attempted.
+ */
+export function rankModelsByHealth(
+  models: readonly string[],
+  breaker: ModelCircuitBreaker,
+): string[] {
+  const snapshots = new Map(breaker.snapshot().map((entry) => [entry.model, entry]));
+  return [...models].sort((left, right) =>
+    modelHealthRank(snapshots.get(left)) - modelHealthRank(snapshots.get(right)),
+  );
+}
