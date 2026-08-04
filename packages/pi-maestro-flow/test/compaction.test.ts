@@ -1038,6 +1038,11 @@ test("provider payload guard disables only invalid Anthropic budget thinking", (
     });
   }
 
+  const deepSeek = {
+    model: "deepseek-v4-flash",
+    max_tokens: 384_000,
+    thinking: { type: "enabled" },
+  };
   const adaptive = {
     max_tokens: 1,
     thinking: { type: "adaptive" },
@@ -1046,6 +1051,7 @@ test("provider payload guard disables only invalid Anthropic budget thinking", (
     max_output_tokens: 1,
     reasoning: { effort: "high" },
   };
+  assert.equal(disableInvalidBudgetThinking(deepSeek), deepSeek);
   assert.equal(disableInvalidBudgetThinking(adaptive), adaptive);
   assert.equal(disableInvalidBudgetThinking(openAi), openAi);
 });

@@ -142,6 +142,8 @@ export function disableInvalidBudgetThinking(payload: unknown): unknown {
   const thinkingRecord = thinking as Record<string, unknown>;
   if (thinkingRecord.type !== "enabled") return payload;
   const budget = thinkingRecord.budget_tokens;
+  // Non-Anthropic reasoning formats do not carry Anthropic's budget field.
+  if (budget === undefined) return payload;
   if (
     typeof budget === "number"
     && Number.isSafeInteger(budget)
