@@ -5,7 +5,7 @@
  * TUI: Alt+R composer panel, widget above editor, Alt+B foreground→background detach
  * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { WorkspaceSessionScan } from "../transcript/session-transcript.ts";
 import { type WorkspaceOwnerState } from "./workspace-peers.ts";
 import { type LeaseToken } from "../runs/session-handoff.ts";
@@ -62,6 +62,14 @@ export declare const TEAMMATE_DEPTH_START_MARKER = "<teammate_nesting_context>";
 export declare const TEAMMATE_DEPTH_END_MARKER = "</teammate_nesting_context>";
 export declare function appendTeammateDepthContext(systemPrompt: string, depth: number, maxDispatchDepth?: number): string;
 export declare function backgroundWaitGuidance(correlationId: string): string;
+/**
+ * Appended to foreground detach acknowledgements so the Alt+B shortcut stays
+ * discoverable across the root single, root graph, and nested foreground paths.
+ */
+export declare const FOREGROUND_DETACH_HINT = "Alt+B detaches a foreground call to background.";
+export declare function setPersistentUi(ui: ExtensionUIContext | undefined): void;
+/** Registers one foreground owner; unregister is idempotent on every race path. */
+export declare function registerForegroundDetach(detach: () => void, ui?: ExtensionUIContext): () => void;
 export declare function foregroundWaitWindowMs(tasks: ReadonlyArray<{
     timeoutMs?: number;
 }>, fallbackMs?: number): number;

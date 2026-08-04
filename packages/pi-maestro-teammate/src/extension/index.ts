@@ -254,6 +254,9 @@ import {
   foregroundWaitWindowMs,
   createForegroundDeadline,
   backgroundWaitGuidance,
+  FOREGROUND_DETACH_HINT,
+  setPersistentUi,
+  registerForegroundDetach,
   buildAgentSelectorRows,
   renderAgentSelectorPanel,
   switchConversationSession,
@@ -2247,18 +2250,25 @@ export default function registerTeammateExtension(
           };
 
           if (params.background === false) {
-            const graphPromise = executeGraph();
             const waitMs = foregroundWaitWindowMs(normalizedTasks, runtimeOptions.foregroundMaxRunMs);
             const deadline = createForegroundDeadline(waitMs);
+            let detachResolve: ((reason: "manual") => void) | null = null;
+            const detachPromise = new Promise<"manual">((resolve) => { detachResolve = resolve; });
+            const removeListener = ctx.hasUI
+              ? registerForegroundDetach(() => detachResolve?.("manual"), ctx.ui)
+              : null;
+            const graphPromise = executeGraph();
             let race:
-              | { done: true; result: Awaited<typeof graphPromise> }
-              | { done: false; result: null };
+              | { done: true; result: Awaited<typeof graphPromise>; reason: undefined }
+              | { done: false; result: null; reason: "manual" | "timeout" };
             try {
               race = await Promise.race([
-                graphPromise.then((result) => ({ done: true as const, result })),
-                deadline.promise.then(() => ({ done: false as const, result: null })),
+                graphPromise.then((result) => ({ done: true as const, result, reason: undefined })),
+                detachPromise.then((reason) => ({ done: false as const, result: null, reason })),
+                deadline.promise.then((reason) => ({ done: false as const, result: null, reason })),
               ]);
             } finally {
+              removeListener?.();
               deadline.dispose();
             }
 
@@ -2288,12 +2298,16 @@ export default function registerTeammateExtension(
               };
             }
 
+            // Manual and timed detach share the same background completion path.
             detached = true;
             completeGraphInBackground(graphPromise);
+            const detachText = race.reason === "timeout"
+              ? `${normalizedTasks.length} tasks (${activeGraphMode}) moved to background after ${waitMs}ms.`
+              : `${normalizedTasks.length} tasks (${activeGraphMode}) detached.`;
             return {
               content: [{
                 type: "text",
-                text: `${warningPrefix}${normalizedTasks.length} tasks (${activeGraphMode}) moved to background after ${waitMs}ms. ${backgroundWaitGuidance(correlationId)}`,
+                text: `${warningPrefix}${detachText} ${FOREGROUND_DETACH_HINT} ${backgroundWaitGuidance(correlationId)}`,
               }],
               isError: false,
               details: { mode: activeGraphMode, results: [], progress: progressSnapshot() },
@@ -2321,11 +2335,7 @@ export default function registerTeammateExtension(
           const deadline = createForegroundDeadline(waitMs);
 
           const removeListener = ctx.hasUI
-            ? ctx.ui.onTerminalInput((data: string) => {
-                if (data !== "\x1bb") return undefined;
-                detachResolve?.("manual"); // Alt+B
-                return { consume: true };
-              })
+            ? registerForegroundDetach(() => detachResolve?.("manual"), ctx.ui)
             : null;
 
           let runPromise: Promise<SingleResult>;
@@ -2391,7 +2401,7 @@ export default function registerTeammateExtension(
           return {
             content: [{
               type: "text",
-              text: `${detachText} ${backgroundWaitGuidance(correlationId)}`,
+              text: `${detachText} ${FOREGROUND_DETACH_HINT} ${backgroundWaitGuidance(correlationId)}`,
             }],
             isError: false,
             details: { mode: "single", results: [] },
@@ -3710,6 +3720,7 @@ export default function registerTeammateExtension(
     state.currentSessionId = null;
     widgetCtx?.ui.setWidget("teammate-agents", undefined);
     widgetCtx = null;
+    setPersistentUi(undefined);
   }
 
 
@@ -4159,6 +4170,7 @@ export default function registerTeammateExtension(
     registerTeammateSettings();
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     widgetCtx = ctx;
+    setPersistentUi(ctx.ui);
     state.baseCwd = ctx.cwd;
     // Mailbox is bound to the real session cwd (workspace isolation).
     rebindMailboxHostForSession();
@@ -4178,6 +4190,7 @@ export default function registerTeammateExtension(
 
   pi.on("session_compact", (_event, ctx) => {
     widgetCtx = ctx;
+    setPersistentUi(ctx.ui);
     state.baseCwd = ctx.cwd;
     // Rebind if compaction moved to a different workspace.
     rebindMailboxHostForSession();

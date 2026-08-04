@@ -11,6 +11,7 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
+  ExtensionUIContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
@@ -507,6 +508,85 @@ export function appendTeammateDepthContext(
 
 export function backgroundWaitGuidance(correlationId: string): string {
   return `correlationId=${correlationId}. The teammate-complete notification is delivered automatically when the work finishes: for a root dispatch it arrives as a new turn in this session; for a nested dispatch the work runs in the root process and the root forwards the completion over IPC, so it also arrives as a new turn in this agent's session while this agent is still live (the root caller additionally sees it). If this agent has already ended, delivery is skipped and the result is settled and inspectable via observe. Do not poll observe or teammate-list. If this turn must consume the result, call observe exactly once with { action: "wait", targets: [{ kind: "teammate", id: "${correlationId}" }], timeoutMs: 600000 }; otherwise end the turn now.`;
+}
+
+/**
+ * Appended to foreground detach acknowledgements so the Alt+B shortcut stays
+ * discoverable across the root single, root graph, and nested foreground paths.
+ */
+export const FOREGROUND_DETACH_HINT = "Alt+B detaches a foreground call to background.";
+
+/**
+ * One session-scoped Alt+B listener dispatches to the oldest active foreground
+ * owner. This makes nested calls detach layer by layer from the outermost call
+ * instead of relying on TUI listener registration order.
+ */
+type ForegroundDetachOwner = {
+  active: boolean;
+  detach(): void;
+};
+
+let persistentUi: ExtensionUIContext | undefined;
+let persistentUiUnsubscribe: (() => void) | undefined;
+const foregroundDetachOwners: ForegroundDetachOwner[] = [];
+
+function uninstallForegroundDetachListener(): void {
+  const unsubscribe = persistentUiUnsubscribe;
+  persistentUiUnsubscribe = undefined;
+  unsubscribe?.();
+}
+
+function installForegroundDetachListener(): void {
+  if (!persistentUi || persistentUiUnsubscribe || foregroundDetachOwners.length === 0) return;
+  persistentUiUnsubscribe = persistentUi.onTerminalInput((data: string) => {
+    if (data !== "\x1bb") return undefined;
+    const owner = foregroundDetachOwners.shift();
+    if (!owner) return undefined;
+    owner.active = false;
+    if (foregroundDetachOwners.length === 0) uninstallForegroundDetachListener();
+    owner.detach();
+    return { consume: true };
+  });
+}
+
+export function setPersistentUi(ui: ExtensionUIContext | undefined): void {
+  if (persistentUi !== ui) {
+    uninstallForegroundDetachListener();
+    persistentUi = ui;
+  }
+  if (!ui) {
+    for (const owner of foregroundDetachOwners) owner.active = false;
+    foregroundDetachOwners.length = 0;
+    return;
+  }
+  installForegroundDetachListener();
+}
+
+/** Registers one foreground owner; unregister is idempotent on every race path. */
+export function registerForegroundDetach(
+  detach: () => void,
+  ui?: ExtensionUIContext,
+): () => void {
+  if (ui) setPersistentUi(ui);
+  const owner: ForegroundDetachOwner = { active: true, detach };
+  foregroundDetachOwners.push(owner);
+  try {
+    installForegroundDetachListener();
+  } catch (error) {
+    owner.active = false;
+    const index = foregroundDetachOwners.indexOf(owner);
+    if (index >= 0) foregroundDetachOwners.splice(index, 1);
+    if (foregroundDetachOwners.length === 0) uninstallForegroundDetachListener();
+    throw error;
+  }
+
+  return () => {
+    if (!owner.active) return;
+    owner.active = false;
+    const index = foregroundDetachOwners.indexOf(owner);
+    if (index >= 0) foregroundDetachOwners.splice(index, 1);
+    if (foregroundDetachOwners.length === 0) uninstallForegroundDetachListener();
+  };
 }
 
 export function foregroundWaitWindowMs(

@@ -207,6 +207,8 @@ import {
   aggregateGraphStructuredOutput,
   appendAgentProgressLine,
   backgroundWaitGuidance,
+  FOREGROUND_DETACH_HINT,
+  registerForegroundDetach,
   canProxySendTo,
   checkActiveAgentBudget,
   createForegroundDeadline,
@@ -1938,13 +1940,19 @@ export async function handleProxyRequest(
       if (routedParams.background === false) {
         const waitMs = foregroundWaitWindowMs(allTasks, runtimeOptions.foregroundMaxRunMs);
         const deadline = createForegroundDeadline(waitMs);
+        // Alt+B manual detach, mirroring the root single/graph foreground paths.
+        let detachResolve: (() => void) | null = null;
+        const detachPromise = new Promise<"manual">((resolve) => { detachResolve = () => resolve("manual"); });
+        const removeListener = registerForegroundDetach(() => detachResolve?.());
         const race = await Promise.race([
           nestedPromise.then(
             (completed) => ({ status: "completed" as const, completed }),
             (error: unknown) => ({ status: "failed" as const, error }),
           ),
+          detachPromise.then(() => ({ status: "manual" as const })),
           deadline.promise.then(() => ({ status: "timeout" as const })),
         ]);
+        removeListener?.();
         deadline.dispose();
 
         if (race.status === "failed") {
@@ -1983,10 +1991,13 @@ export async function handleProxyRequest(
           return;
         }
         completeNestedInBackground();
+        const detachText = race.status === "timeout"
+          ? `@${runningLabel} moved to background after ${waitMs}ms.`
+          : `@${runningLabel} detached.`;
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{
             type: "text",
-            text: `${warningPrefix}@${runningLabel} moved to background after ${waitMs}ms. ${backgroundWaitGuidance(cid)}`,
+            text: `${warningPrefix}${detachText} ${FOREGROUND_DETACH_HINT} ${backgroundWaitGuidance(cid)}`,
           }],
           isError: false,
           details: {

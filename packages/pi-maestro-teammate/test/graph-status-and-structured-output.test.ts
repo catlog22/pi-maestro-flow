@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import registerStructuredOutput from "../src/extension/structured-output.ts";
 import registerTeammateExtension, {
@@ -23,6 +23,8 @@ import registerTeammateExtension, {
   resolveProxyParentCorrelationId,
   restoreMainOwnershipIfHandbackPending,
   resolveWatchTarget,
+  registerForegroundDetach,
+  setPersistentUi,
   settleAgent,
   switchConversationSession,
   waitForTeammate,
@@ -726,6 +728,89 @@ test("foreground updates close before every public settlement and reject late ca
   }
 });
 
+test("shared Alt+B dispatcher uses one listener and detaches owners outermost first", () => {
+  let terminalInput: ((data: string) => { consume?: boolean; data?: string } | undefined) | undefined;
+  let subscriptions = 0;
+  let unsubscriptions = 0;
+  const ui = {
+    onTerminalInput(handler: (data: string) => { consume?: boolean; data?: string } | undefined) {
+      subscriptions += 1;
+      terminalInput = handler;
+      return () => {
+        unsubscriptions += 1;
+        if (terminalInput === handler) terminalInput = undefined;
+      };
+    },
+  } as unknown as ExtensionUIContext;
+
+  setPersistentUi(ui);
+  try {
+    const detached: string[] = [];
+    const releaseOuter = registerForegroundDetach(() => detached.push("outer"));
+    const releaseNested = registerForegroundDetach(() => detached.push("nested"));
+
+    assert.equal(subscriptions, 1, "all foreground owners must share one TUI listener");
+    assert.ok(terminalInput);
+    assert.deepEqual(terminalInput("\x1bb"), { consume: true });
+    assert.deepEqual(detached, ["outer"]);
+    assert.equal(unsubscriptions, 0, "the listener stays installed for the nested owner");
+
+    assert.deepEqual(terminalInput("\x1bb"), { consume: true });
+    assert.deepEqual(detached, ["outer", "nested"]);
+    assert.equal(unsubscriptions, 1, "the last owner removes the shared listener");
+
+    releaseOuter();
+    releaseNested();
+    assert.equal(unsubscriptions, 1, "owner unregister must be idempotent after detach");
+
+    const releaseShutdownOwner = registerForegroundDetach(() => detached.push("stale"));
+    assert.equal(subscriptions, 2);
+    assert.ok(terminalInput);
+    const staleInput = terminalInput;
+    setPersistentUi(undefined);
+    assert.equal(unsubscriptions, 2, "session teardown must remove the shared listener");
+    assert.equal(staleInput("\x1bb"), undefined, "teardown must clear pending foreground owners");
+    assert.deepEqual(detached, ["outer", "nested"]);
+    releaseShutdownOwner();
+    assert.equal(unsubscriptions, 2, "teardown makes later unregister a no-op");
+  } finally {
+    setPersistentUi(undefined);
+  }
+});
+
+test("shared Alt+B dispatcher rolls back owner when terminal listener registration fails", () => {
+  let staleDetach = 0;
+  let goodDetach = 0;
+  let terminalInput: ((data: string) => void) | undefined;
+  setPersistentUi({
+    onTerminalInput() {
+      throw new Error("terminal unavailable");
+    },
+  } as unknown as ExtensionUIContext);
+
+  assert.throws(
+    () => registerForegroundDetach(() => { staleDetach += 1; }),
+    /terminal unavailable/,
+  );
+
+  setPersistentUi({
+    onTerminalInput(handler: (data: string) => void) {
+      terminalInput = handler;
+      return () => {};
+    },
+  } as unknown as ExtensionUIContext);
+  try {
+    const release = registerForegroundDetach(() => { goodDetach += 1; });
+    assert.ok(terminalInput);
+    terminalInput("\x1bb");
+    assert.equal(staleDetach, 0, "failed registration must not leave a stale owner");
+    assert.equal(goodDetach, 1);
+    release();
+  } finally {
+    setPersistentUi(undefined);
+  }
+});
+
 test("detach and background acknowledgement never publish post-settlement updates", async () => {
   let rootStdout: PassThrough | undefined;
   const hangingSpawn = (() => {
@@ -745,6 +830,7 @@ test("detach and background acknowledgement never publish post-settlement update
   }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
   let capturedOptions: Parameters<NonNullable<TeammateRuntimeOptions["onRunOptionsCreated"]>>[0] | undefined;
   let terminalInput: ((data: string) => void) | undefined;
+  let removed = 0;
   const updates: PublicToolResult[] = [];
   const tool = createRootTool({
     spawnChildProcess: hangingSpawn,
@@ -761,7 +847,7 @@ test("detach and background acknowledgement never publish post-settlement update
       ui: {
         onTerminalInput(handler: (data: string) => void) {
           terminalInput = handler;
-          return () => {};
+          return () => { removed += 1; };
         },
       },
     },
@@ -771,11 +857,13 @@ test("detach and background acknowledgement never publish post-settlement update
   terminalInput("\x1bb");
   const detached = await execution;
   assert.match(detached.content[0]?.text ?? "", /detached/);
+  assert.equal(removed, 1, "manual detach must remove the shared terminal listener once");
   assert.ok(capturedOptions);
   const detachedCount = updates.length;
   capturedOptions.onProgress?.(lateProgress());
   assert.equal(updates.length, detachedCount);
   rootStdout?.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  setPersistentUi(undefined);
   delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
     Symbol.for("pi-maestro-teammate.root-registry")
   ];
@@ -806,6 +894,7 @@ test("foreground timeout moves single and graph dispatches to background without
   for (const taskCount of [1, 2]) {
     const stdouts: PassThrough[] = [];
     let killed = 0;
+    let removed = 0;
     const sentMessages: Array<{ customType?: string; content?: string }> = [];
     const spawnChildProcess = (() => {
       const child = new EventEmitter() as ChildProcess;
@@ -840,7 +929,15 @@ test("foreground timeout moves single and graph dispatches to background without
       { tasks, background: false, timeoutMs: 30 },
       new AbortController().signal,
       undefined,
-      rootToolContext(),
+      {
+        ...rootToolContext(),
+        hasUI: true,
+        ui: {
+          onTerminalInput() {
+            return () => { removed += 1; };
+          },
+        },
+      },
     );
 
     assert.match(result.content[0]?.text ?? "", /moved to background after 30ms/);
@@ -848,6 +945,7 @@ test("foreground timeout moves single and graph dispatches to background without
     assert.deepEqual(result.details.results, []);
     assert.equal(stdouts.length, taskCount);
     assert.equal(killed, 0, "foreground timeout must not terminate any child");
+    assert.equal(removed, 1, "foreground timeout must remove the shared listener once");
 
     for (const stdout of stdouts) {
       stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
@@ -860,6 +958,7 @@ test("foreground timeout moves single and graph dispatches to background without
       "detached dispatch must publish exactly one completion notification",
     );
 
+    setPersistentUi(undefined);
     delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
       Symbol.for("pi-maestro-teammate.root-registry")
     ];
@@ -911,6 +1010,46 @@ test("explicit background ignores the foreground timeout window", async () => {
   ];
 });
 
+test("foreground completion removes the shared Alt+B listener for single and graph", async () => {
+  for (const taskCount of [1, 2]) {
+    let subscriptions = 0;
+    let removed = 0;
+    const tasks = Array.from({ length: taskCount }, (_, index) => ({
+      agent: "general",
+      name: `complete-${index}`,
+      prompt: `complete ${index}`,
+    }));
+    const result = await createRootTool({
+      spawnChildProcess: createStructuredSpawn(Array.from({ length: taskCount }, () => undefined)),
+    }).execute(
+      `foreground-complete-${taskCount}`,
+      { tasks, background: false, timeoutMs: 60_000 },
+      new AbortController().signal,
+      undefined,
+      {
+        ...rootToolContext(),
+        hasUI: true,
+        ui: {
+          onTerminalInput() {
+            subscriptions += 1;
+            return () => { removed += 1; };
+          },
+        },
+      },
+    );
+
+    assert.equal(result.isError, false);
+    assert.equal(result.details.results.length, taskCount);
+    assert.equal(subscriptions, 1);
+    assert.equal(removed, 1, "foreground completion must remove the shared listener once");
+
+    setPersistentUi(undefined);
+    delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
+      Symbol.for("pi-maestro-teammate.root-registry")
+    ];
+  }
+});
+
 test("foreground rejection cleans its deadline and terminal listener", async () => {
   for (const taskCount of [1, 2]) {
     let removed = 0;
@@ -943,17 +1082,99 @@ test("foreground rejection cleans its deadline and terminal listener", async () 
       ),
       new RegExp(`forced rejection ${taskCount}`),
     );
-    assert.equal(removed, taskCount === 1 ? 1 : 0);
+    // Both single-task and graph foreground paths register (and must clean up)
+    // the Alt+B terminal listener.
+    assert.equal(removed, 1, "foreground rejection must unregister the terminal listener");
 
+    setPersistentUi(undefined);
     delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
       Symbol.for("pi-maestro-teammate.root-registry")
     ];
   }
 });
 
+test("graph foreground Alt+B detach keeps children running and publishes one background completion", async () => {
+  const stdouts: PassThrough[] = [];
+  let killed = 0;
+  let terminalInput: ((data: string) => void) | undefined;
+  let removed = 0;
+  const sentMessages: Array<{ customType?: string; content?: string }> = [];
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    stdouts.push(stdout);
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { killed += 1; return true; },
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+  const execution = createRootTool({ spawnChildProcess }, sentMessages).execute(
+    "graph-alt-b-detach",
+    {
+      tasks: [
+        { agent: "general", name: "detach-0", prompt: "detach 0" },
+        { agent: "general", name: "detach-1", prompt: "detach 1" },
+      ],
+      background: false,
+      timeoutMs: 60_000,
+    },
+    new AbortController().signal,
+    undefined,
+    {
+      ...rootToolContext(),
+      hasUI: true,
+      ui: {
+        onTerminalInput(handler: (data: string) => void) {
+          terminalInput = handler;
+          return () => { removed += 1; };
+        },
+      },
+    },
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(terminalInput, "graph foreground must register the Alt+B terminal listener");
+  terminalInput("\x1bb");
+  const detached = await execution;
+  assert.match(detached.content[0]?.text ?? "", /2 tasks \(.*\) detached\./);
+  assert.equal(detached.isError, false);
+  assert.equal(stdouts.length, 2, "graph must spawn both children");
+  assert.equal(killed, 0, "Alt+B detach must not terminate any child");
+  assert.equal(removed, 1, "manual graph detach must remove the shared listener once");
+
+  // Children finish in the background; the aggregate publishes exactly one
+  // teammate-complete notification.
+  for (const stdout of stdouts) {
+    const terminal = `${JSON.stringify({ type: "agent_end" })}\n`;
+    stdout.write(terminal);
+    stdout.write(terminal);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(killed, 0);
+  assert.equal(
+    sentMessages.filter((message) => message.customType === "teammate-complete").length,
+    1,
+    "detached graph dispatch must publish exactly one completion notification",
+  );
+
+  setPersistentUi(undefined);
+  delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ];
+});
+
 test("foreground nested dispatch timeout acknowledges background work and preserves the child", async () => {
   let stdoutRef: PassThrough | undefined;
   let killed = 0;
+  let removed = 0;
   const sentMessages: Array<{ customType?: string; content?: string }> = [];
   const spawnChildProcess = (() => {
     const child = new EventEmitter() as ChildProcess;
@@ -995,6 +1216,12 @@ test("foreground nested dispatch timeout acknowledges background work and preser
     },
   }) as unknown as ExtensionAPI;
 
+  setPersistentUi({
+    onTerminalInput() {
+      return () => { removed += 1; };
+    },
+  } as unknown as ExtensionUIContext);
+
   await handleProxyRequest(
     pi,
     state,
@@ -1018,7 +1245,111 @@ test("foreground nested dispatch timeout acknowledges background work and preser
   assert.ok(replyMessage);
   assert.match(replyMessage.result.content[0]?.text ?? "", /moved to background after 30ms/);
   assert.equal(killed, 0);
+  assert.equal(removed, 1, "nested timeout must remove the shared listener once");
   stdoutRef?.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(killed, 0);
+  assert.equal(sentMessages.filter((message) => message.customType === "teammate-complete").length, 1);
+  setPersistentUi(undefined);
+});
+
+test("shared Alt+B dispatcher detaches outer owner before nested foreground owner", async () => {
+  let stdoutRef: PassThrough | undefined;
+  let killed = 0;
+  let terminalInput: ((data: string) => void) | undefined;
+  let subscriptions = 0;
+  let removed = 0;
+  let outerDetached = 0;
+  let releaseOuter: (() => void) | undefined;
+  const sentMessages: Array<{ customType?: string; content?: string }> = [];
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    stdoutRef = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout: stdoutRef,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { killed += 1; return true; },
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  const state: TeammateState = {
+    baseCwd: process.cwd(),
+    currentSessionId: null,
+    activeRuns: new Map(),
+    namedAgents: new Map(),
+  };
+  let replyMessage: { result: PublicToolResult } | undefined;
+  const getReplyMessage = () => replyMessage;
+  const pi = new Proxy({
+    events: { on: () => () => {}, emit() {} },
+    sendMessage(message: { customType?: string; content?: string }) {
+      sentMessages.push(message);
+    },
+  }, {
+    get(target, property) {
+      if (property in target) return target[property as keyof typeof target];
+      return () => {};
+    },
+  }) as unknown as ExtensionAPI;
+
+  try {
+    setPersistentUi({
+      onTerminalInput(handler: (data: string) => void) {
+        subscriptions += 1;
+        terminalInput = handler;
+        return () => { removed += 1; };
+      },
+    } as unknown as ExtensionUIContext);
+    releaseOuter = registerForegroundDetach(() => { outerDetached += 1; });
+
+    const request = handleProxyRequest(
+      pi,
+      state,
+      {
+        tool: "teammate",
+        requestId: "nested-alt-b",
+        params: {
+          tasks: [{ agent: "general", name: "nested-alt-b-worker", prompt: "review" }],
+          background: false,
+          timeoutMs: 60_000,
+        },
+      },
+      (message) => { replyMessage = message as typeof replyMessage; },
+      undefined,
+      [],
+      undefined,
+      undefined,
+      { spawnChildProcess },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(subscriptions, 1, "root and nested owners must share one TUI listener");
+    assert.ok(terminalInput);
+    terminalInput("\x1bb");
+    assert.equal(outerDetached, 1, "the outer foreground owner must detach first");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(getReplyMessage(), undefined, "nested foreground remains blocked after outer detach");
+
+    terminalInput("\x1bb");
+    await request;
+    assert.equal(removed, 1, "nested manual detach must remove the shared listener once");
+  } finally {
+    releaseOuter?.();
+    setPersistentUi(undefined);
+  }
+
+  const completedReply = getReplyMessage();
+  assert.ok(completedReply);
+  assert.match(completedReply.result.content[0]?.text ?? "", /detached\./);
+  assert.equal(killed, 0, "Alt+B detach must not terminate the nested child");
+  const terminal = `${JSON.stringify({ type: "agent_end" })}\n`;
+  stdoutRef?.write(terminal);
+  stdoutRef?.write(terminal);
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(killed, 0);
   assert.equal(sentMessages.filter((message) => message.customType === "teammate-complete").length, 1);
