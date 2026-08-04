@@ -145,6 +145,7 @@ import type {
   MessageEnvelope,
   SettledAgentRecord,
   SingleResult,
+  StructuredResult,
   TeammateInteractionRecord,
 } from "../shared/types.ts";
 import { projectAgentActivity } from "../shared/agent-status.ts";
@@ -329,6 +330,34 @@ export function aggregateGraphStructuredOutput(
     }
   });
   return Object.keys(structuredOutput).length > 0 ? structuredOutput : undefined;
+}
+
+/**
+ * Compact projection of schema-valid results for completion events. Undefined
+ * when no result carries structured output, so emitters can spread it
+ * conditionally and keep the event payload minimal.
+ */
+export function toStructuredResults(
+  results: readonly SingleResult[],
+  originCwd: string,
+): StructuredResult[] | undefined {
+  const entries: StructuredResult[] = [];
+  for (const result of results) {
+    if (result.structuredOutput === undefined) continue;
+    entries.push({
+      correlationId: result.correlationId,
+      originCwd,
+      ...(result.name ? { name: result.name } : {}),
+      agent: result.agent,
+      structuredOutput: structuredClone(result.structuredOutput),
+    });
+  }
+  return entries.length > 0 ? entries : undefined;
+}
+
+/** Replace the retained turn value; undefined intentionally clears stale data. */
+export function setAgentStructuredOutput(agent: ActiveAgent, output: unknown): void {
+  agent.structuredOutput = output === undefined ? undefined : structuredClone(output);
 }
 
 export type TeammateRuntimeOptions = Pick<

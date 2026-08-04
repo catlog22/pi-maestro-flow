@@ -215,7 +215,7 @@ import { registerLoop } from "../tools/loop.ts";
 import { registerModelAvailability } from "../tools/model-availability.ts";
 import { registerResourceTool } from "../tools/resource.ts";
 import { registerConflictTool } from "../tools/conflict.ts";
-import { persistAgentOutput } from "../teammate/agent-output-store.ts";
+import { persistStructuredResults } from "../teammate/agent-output-capture.ts";
 import { registerMarkdownReviewCommand } from "../tools/markdown-review-command.ts";
 import {
   proxyTeammateChildTool,
@@ -621,6 +621,20 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   pi.events.on(TEAMMATE_STARTED_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateStarted, event));
   pi.events.on(TEAMMATE_MESSAGE_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateProgress, event));
   pi.events.on(TEAMMATE_COMPLETE_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateComplete, event));
+  // agent:// data source for background/detached runs: the root tool_result of
+  // a background dispatch carries empty results, so the authoritative completion
+  // event is the persistence channel for its structured outputs.
+  pi.events.on(TEAMMATE_COMPLETE_EVENT, (event) => {
+    try {
+      const payload = event as { structuredResults?: unknown };
+      if (!Array.isArray(payload.structuredResults) || payload.structuredResults.length === 0) return;
+      void persistStructuredResults(payload.structuredResults, undefined).catch((err) => {
+        console.warn(`[pi-maestro-flow] agent output capture failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    } catch (err) {
+      console.warn(`[pi-maestro-flow] agent output capture failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
   const emitGoalChanged = (): void => {
     if (!guiEvents.isActive()) return;
     const goal = getActiveGoal();
@@ -2140,6 +2154,8 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     widgetCtx?.ui.setWidget("todo-panel", undefined);
     widgetCtx = undefined;
     todoRootContext = undefined;
+    // Keep the cwd captured by the initial teammate tool_result: detached work
+    // may publish its completion after the session context has shut down.
     panelMode = "collapsed";
     goalSessionShutdown(ctx);
     todoSessionShutdown(ctx);
@@ -2244,30 +2260,17 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   });
 
   // agent:// data source: capture teammate structured outputs when the tool
-  // result arrives, before the child's temp output file is cleaned up.
+  // result arrives (foreground) or the authoritative completion event fires
+  // (background/detached, whose root tool_result carries empty results).
   pi.on("tool_result", (event, ctx) => {
     if ((event as { toolName?: unknown }).toolName !== "teammate") return;
     try {
       const details = (event as { details?: unknown }).details as
-        | { results?: unknown }
+        | { results?: unknown; progress?: unknown }
         | undefined;
-      const results = details?.results;
-      if (!Array.isArray(results) || results.length === 0) return;
-      for (const raw of results) {
-        if (raw === null || typeof raw !== "object") continue;
-        const result = raw as { correlationId?: unknown; name?: unknown; agent?: unknown; structuredOutput?: unknown };
-        const correlationId = typeof result.correlationId === "string" ? result.correlationId : "";
-        if (!correlationId || result.structuredOutput === undefined) continue;
-        persistAgentOutput(
-          correlationId,
-          typeof result.name === "string" ? result.name : undefined,
-          typeof result.agent === "string" ? result.agent : undefined,
-          result.structuredOutput,
-          ctx.cwd,
-        ).catch((err) => {
-          console.warn(`[pi-maestro-flow] agent output capture failed: ${err instanceof Error ? err.message : String(err)}`);
-        });
-      }
+      void persistStructuredResults(details?.results, details?.progress, ctx.cwd).catch((err) => {
+        console.warn(`[pi-maestro-flow] agent output capture failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
     } catch (err) {
       console.warn(`[pi-maestro-flow] agent output capture failed: ${err instanceof Error ? err.message : String(err)}`);
     }

@@ -2136,6 +2136,7 @@ export async function runGraph(
       const result = await runSingleTeammate(
         {
           agent: task.agent,
+          name: task.name,
           task: resolvedTask,
           context: task.context,
           model: task.model,

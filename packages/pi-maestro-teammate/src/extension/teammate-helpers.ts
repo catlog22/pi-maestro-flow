@@ -147,6 +147,7 @@ import type {
   MessageEnvelope,
   SettledAgentRecord,
   SingleResult,
+  StructuredResult,
   TeammateInteractionRecord,
 } from "../shared/types.ts";
 import { projectAgentActivity } from "../shared/agent-status.ts";
@@ -785,7 +786,14 @@ export function statusForWatchTarget(
   idleCeilingOverrideMs?: number,
 ): Extract<TeammateWaitStatus, "completed" | "failed" | "terminated" | "result-ready" | "stalled"> | undefined {
   const status = target.kind === "agent" ? target.agent.status : target.progress.status;
-  if (status === "sleeping" || status === "completed") return "completed";
+  if (status === "sleeping" || status === "completed") {
+    // Runtime activity and terminal outcome are separate dimensions: a
+    // wakeable agent sleeps after a *failed* run too. Report the retained
+    // terminal outcome instead of masking every sleeping agent as completed.
+    const lastOutcome = target.kind === "agent" ? target.agent.lastOutcome?.status : undefined;
+    if (lastOutcome === "failed" || lastOutcome === "terminated") return lastOutcome;
+    return "completed";
+  }
   if (status === "failed") return "failed";
   if (status === "terminated") return "terminated";
   const resultReadyAt = target.kind === "agent" ? target.agent.resultReadyAt : target.progress.resultReadyAt;
@@ -997,12 +1005,14 @@ export function emitComplete(
   durationMs: number,
   wakeable?: boolean,
   cancelled?: boolean,
+  structuredResults?: StructuredResult[],
 ): void {
   pi.events.emit(TEAMMATE_COMPLETE_EVENT, {
     ...(id ? { id } : {}),
     agent, correlationId, exitCode, durationMs,
     ...(wakeable !== undefined ? { wakeable } : {}),
     ...(cancelled !== undefined ? { cancelled } : {}),
+    ...(structuredResults && structuredResults.length > 0 ? { structuredResults } : {}),
   });
 }
 
@@ -1561,6 +1571,9 @@ export function recordSettledAgent(
     status,
     settledAt: Date.now(),
     ...(agent.lastResult ? { lastResult: agent.lastResult } : {}),
+    ...(agent.structuredOutput !== undefined
+      ? { structuredOutput: structuredClone(agent.structuredOutput) }
+      : {}),
     ...(agent.requestedModel ? { requestedModel: agent.requestedModel } : {}),
     ...(agent.resolvedModel ? { resolvedModel: agent.resolvedModel } : {}),
     ...(agent.attemptedModels ? { attemptedModels: [...agent.attemptedModels] } : {}),

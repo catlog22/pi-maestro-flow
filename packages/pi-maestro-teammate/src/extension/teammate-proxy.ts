@@ -147,6 +147,7 @@ import type {
   MessageEnvelope,
   SettledAgentRecord,
   SingleResult,
+  StructuredResult,
   TeammateInteractionRecord,
 } from "../shared/types.ts";
 
@@ -221,6 +222,8 @@ import {
   handleChildLifecycleEvent,
   resolveProxyParentCorrelationId,
   summarizeGraphResults,
+  toStructuredResults,
+  setAgentStructuredOutput,
   trimAgentBuffers,
   wakeSleepingAgent,
 } from "./index.ts";
@@ -896,9 +899,10 @@ export async function handleProxyRequest(
         const parent = parentCid ? state.activeRuns.get(parentCid) : undefined;
         return parent?.resolvedModel ?? parent?.requestedModel;
       })();
+      const dispatchOriginCwd = state.baseCwd || process.cwd();
       const routedParams = applyModelRouting(
         p,
-        state.baseCwd || process.cwd(),
+        dispatchOriginCwd,
         modelCapabilities.map((model) => model.id),
         undefined,
         parentModel,
@@ -1078,6 +1082,7 @@ export async function handleProxyRequest(
         exitCode: number,
         wakeable?: boolean,
         terminalStatus?: AgentTerminalStatus,
+        structuredResults?: StructuredResult[],
       ): void => {
         emitComplete(
           pi,
@@ -1088,6 +1093,7 @@ export async function handleProxyRequest(
           Date.now() - activeAgent.startedAt,
           wakeable,
           terminalStatus === "terminated",
+          structuredResults,
         );
       };
 
@@ -1153,7 +1159,10 @@ export async function handleProxyRequest(
         reportChildStatus(terminalStatus === "terminated"
           ? "terminated"
           : terminalStatus === "failed" ? "failed" : "completed");
-        emitNestedComplete(exitCode, wakeable, terminalStatus);
+        emitNestedComplete(exitCode, wakeable, terminalStatus, toStructuredResults(
+          nestedPublication.results,
+          dispatchOriginCwd,
+        ));
         if (nestedCompletionNotificationRequested) {
           const envelope = {
             customType: "teammate-complete",
@@ -1224,6 +1233,7 @@ export async function handleProxyRequest(
           result.durationMs,
           wakeable,
           terminalStatus === "terminated",
+          toStructuredResults([result], dispatchOriginCwd),
         );
         if (!safeSendMessage(
           pi,
@@ -1544,7 +1554,7 @@ export async function handleProxyRequest(
           const target = state.activeRuns.get(result.correlationId) ?? activeAgent;
           target.resolvedModel = target.resolvedModel ?? result.model;
           if (result.attemptedModels) target.attemptedModels = [...result.attemptedModels];
-          if (result.structuredOutput !== undefined) target.structuredOutput = result.structuredOutput;
+          setAgentStructuredOutput(target, result.structuredOutput);
           const lastMessage = displayMessageForResult(result);
           const settle = normalizedTasks ? settleGraphTaskAgent : settleAgent;
           settle(
@@ -1715,6 +1725,7 @@ export async function handleProxyRequest(
               terminalResult.durationMs,
               true,
               status === "terminated",
+              toStructuredResults([terminalResult], dispatchOriginCwd),
             );
             safeSendMessage(
               pi,
@@ -2057,7 +2068,7 @@ export async function handleProxyRequest(
         parentCid ? state.activeRuns.get(parentCid)?.abortController.signal : undefined,
         (proxySignal) => observeTargets(params as UnifiedObserveParams, proxySignal),
       );
-      const output = formatObserveResult(result, params.detail === "full");
+      const output = formatObserveResult(result, params.detail !== "summary");
       const failed = result.reason === "timeout"
         || result.reason === "aborted"
         || result.observations.some((item) => !item.found || item.outcome === "failure" || item.outcome === "stalled");

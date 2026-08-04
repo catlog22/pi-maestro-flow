@@ -18,7 +18,7 @@
  *   - `publishProgress`, the `teammate-send` tool, the attach overlay, and
  *     `handleChildInteractionRequest` -> {@link TeammateMessageEvent}
  */
-import type { AgentActivity, AgentProgressSnapshot, AgentRunOutcome, AgentStatus } from "../../shared/types.ts";
+import type { AgentActivity, AgentProgressSnapshot, AgentRunOutcome, AgentStatus, StructuredResult } from "../../shared/types.ts";
 export { TEAMMATE_COMPLETE_EVENT, TEAMMATE_MESSAGE_EVENT, TEAMMATE_OPEN_AGENT_EVENT, TEAMMATE_STARTED_EVENT, TEAMMATE_VIEWING_EVENT, } from "../../shared/types.ts";
 /** Tool identity of one child tool call, as reported inside a progress payload. */
 export interface TeammateEventTool {
@@ -75,6 +75,11 @@ export interface TeammateCompleteEvent {
     wakeable?: boolean;
     /** True when cancellation, rather than success/failure, ended the lifecycle. */
     cancelled?: boolean;
+    /**
+     * Compact schema-valid structured results for `agent://` persistence.
+     * Present only when the completed run produced structured output.
+     */
+    structuredResults?: StructuredResult[];
 }
 /**
  * `teammate:message` progress variant — a child reported tool/token activity.

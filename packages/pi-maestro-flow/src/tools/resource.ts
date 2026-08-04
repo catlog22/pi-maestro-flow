@@ -7,7 +7,7 @@
  * - skill://name — 已安装 skill 的 SKILL.md
  * - rule://name — 项目规则文件（AGENTS.md / RULES.md / .pi/rules/* / docs/*）
  * - agent://<correlationId-or-name>[/key[/index[/field]]] — 已完成 teammate 子代理的结构化输出
- *   （数据源：teammate/agent-output-store.ts，tool_result 钩子捕获持久化；裸 agent://<id> 返回完整 JSON，路径段按对象 key/数组下标取值）
+ *   （数据源：teammate/agent-output-store.ts，前台 tool_result + 后台 complete 事件持久化；裸 agent://<id> 返回完整 JSON）
  * - memory://… — 预留（返回明确的未实现提示，避免模型猜测）
  *
  * 只读工具：plan 白名单 + 权限 ALWAYS_ALLOWED + 系统提示引导同步注册

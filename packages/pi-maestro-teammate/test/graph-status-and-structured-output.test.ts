@@ -35,6 +35,7 @@ import {
   extractValidatedStructuredOutput,
   normalizeGraphConcurrency,
   resolveVariables,
+  runGraph,
   sendRpcMessage,
   STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS,
 } from "../src/runs/execution.ts";
@@ -73,6 +74,7 @@ import type {
   SingleResult,
   TeammateState,
 } from "../src/shared/types.ts";
+import type { NormalizedTask } from "../src/runs/execution-infra.ts";
 
 type PublicToolResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -426,6 +428,22 @@ test("root and proxy single/graph paths preserve provider cause before every sch
       }
     }
   }
+});
+
+test("runGraph results carry the task name for agent:// persistence", async () => {
+  const tasks: NormalizedTask[] = [{
+    agent: "general",
+    name: "named-producer",
+    prompt: "structured",
+    outputSchema: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false },
+  }];
+  const results = await runGraph(tasks, 1, {
+    baseCwd: process.cwd(),
+    spawnChildProcess: createStructuredSpawn([{ value: 3 }]),
+  });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].name, "named-producer");
+  assert.deepEqual(results[0].structuredOutput, { value: 3 });
 });
 
 test("root and proxy expose identical validated structuredOutput projections", async () => {

@@ -249,6 +249,8 @@ import {
   runWithProgressFlushCleanup,
   summarizeGraphResults,
   aggregateGraphStructuredOutput,
+  toStructuredResults,
+  setAgentStructuredOutput,
   foregroundWaitWindowMs,
   createForegroundDeadline,
   backgroundWaitGuidance,
@@ -729,7 +731,7 @@ export default function registerTeammateExtension(
       parameters: ObserveParams,
       async execute(_id: string, params: UnifiedObserveParams, signal: AbortSignal) {
         const result = await observeTargets(params, signal);
-        const output = formatObserveResult(result, params.detail === "full");
+        const output = formatObserveResult(result, params.detail !== "summary");
         const failed = result.reason === "timeout"
           || result.reason === "aborted"
           || result.observations.some((item) => !item.found || item.outcome === "failure" || item.outcome === "stalled");
@@ -1458,6 +1460,7 @@ export default function registerTeammateExtension(
             terminal.durationMs,
             isLogicallyWakeable(terminal),
             status === "terminated",
+            toStructuredResults([terminal], baseCwd),
           );
           // DEL-002: Use the published result for the notification content.
           // The terminal result may carry lifecycle diagnostics (e.g. "never
@@ -1494,6 +1497,7 @@ export default function registerTeammateExtension(
             singleTerminalResult.durationMs,
             isLogicallyWakeable(singleTerminalResult),
             singleTerminalStatus === "terminated",
+            toStructuredResults([singleTerminalResult], baseCwd),
           );
         }
       };
@@ -1548,6 +1552,7 @@ export default function registerTeammateExtension(
           graphPublication.totalDur,
           graphPublication.wakeable,
           terminalStatus === "terminated",
+          toStructuredResults(graphPublication.results, baseCwd),
         );
         if (graphCompletionNotificationRequested) {
           const delivered = safeSendMessage(
@@ -1595,6 +1600,7 @@ export default function registerTeammateExtension(
           result.durationMs,
           wakeable,
           terminalStatus === "terminated",
+          toStructuredResults([result], baseCwd),
         );
         if (!safeSendMessage(
           pi,
@@ -1683,7 +1689,7 @@ export default function registerTeammateExtension(
             const target = state.activeRuns.get(result.correlationId) ?? activeAgent;
             target.resolvedModel = target.resolvedModel ?? result.model;
             if (result.attemptedModels) target.attemptedModels = [...result.attemptedModels];
-            if (result.structuredOutput !== undefined) target.structuredOutput = result.structuredOutput;
+            setAgentStructuredOutput(target, result.structuredOutput);
             const lastMessage = displayMessageForResult(result);
             const settle = isMultiTask ? settleGraphTaskAgent : settleAgent;
             settle(
@@ -2076,6 +2082,7 @@ export default function registerTeammateExtension(
               terminalResult.durationMs,
               true,
               status === "terminated",
+              toStructuredResults([terminalResult], baseCwd),
             );
             const content = displayMessageForResult(terminalResult);
             if (!safeSendMessage(
@@ -2992,24 +2999,50 @@ export default function registerTeammateExtension(
       || nativeStatus === "failed"
       || nativeStatus === "terminated"
       || nativeStatus === "sleeping";
+    // Runtime activity (nativeStatus) and terminal outcome are separate
+    // dimensions: a wakeable agent sleeps after a *failed* run too. Prefer the
+    // retained terminal outcome for outcome/terminalStatus so a failed run is
+    // never masked as success by its sleeping activity state.
+    const liveAgent = resolved.match?.kind === "agent" ? resolved.match.agent : undefined;
+    const settledRecord = resolved.match ? undefined : findSettledAgent(state, id);
+    const terminal = monitored.waitStatus
+      ?? liveAgent?.lastOutcome?.status
+      ?? settledRecord?.status;
+    const outcome = terminal === "failed"
+      ? "failure" as const
+      : terminal === "terminated" ? "aborted" as const
+        : terminal === "completed" || terminal === "result-ready" ? "success" as const
+          : settled ? "success" as const
+            : undefined;
+    const includeResult = detail !== "summary";
+    const structuredOutput = liveAgent?.structuredOutput !== undefined
+      ? liveAgent.structuredOutput
+      : settledRecord?.structuredOutput;
+    const lastResult = liveAgent?.lastResult ?? settledRecord?.lastResult;
     return {
       target: { kind: "teammate", id },
       found: true,
       nativeStatus,
       phase: settled ? "settled" : nativeStatus === "pending" ? "pending" : "active",
-      ...(nativeStatus === "failed"
-        ? { outcome: "failure" as const }
-        : nativeStatus === "terminated" ? { outcome: "aborted" as const }
-          : settled ? { outcome: "success" as const } : {}),
+      ...(outcome ? { outcome } : {}),
       ...(monitored.waitStatus ? { waitStatus: monitored.waitStatus as ObservationWaitStatus } : {}),
+      ...(terminal ? { terminalStatus: terminal as string } : {}),
+      ...(includeResult && lastResult ? { lastResult } : {}),
+      ...(includeResult && structuredOutput !== undefined
+        ? { structuredOutput: structuredClone(structuredOutput) }
+        : {}),
       summary: monitored.summary || output.at(-1) || nativeStatus,
-      ...(detail === "summary" ? {} : { detail: output }),
+      ...(includeResult ? { detail: output } : {}),
       updatedAt: Date.now(),
       capabilities: teammateObservationCapabilities,
     };
   }
 
-  function teammateWaitObservation(id: string, result: TeammateWaitResult): ObservationSnapshot {
+  function teammateWaitObservation(
+    id: string,
+    result: TeammateWaitResult,
+    detail: "summary" | "tail" | "full",
+  ): ObservationSnapshot {
     const waitStatus: ObservationWaitStatus = result.status === "delayed"
       ? "completed"
       : result.status;
@@ -3024,6 +3057,14 @@ export default function registerTeammateExtension(
       : waitStatus === "stalled" ? "stalled"
         : waitStatus === "aborted" || waitStatus === "terminated" ? "aborted"
           : "failure";
+    const resolved = resolveWatchTarget(state, id);
+    const liveAgent = resolved.match?.kind === "agent" ? resolved.match.agent : undefined;
+    const settledRecord = resolved.match ? undefined : findSettledAgent(state, id);
+    const includeResult = detail !== "summary";
+    const structuredOutput = liveAgent?.structuredOutput !== undefined
+      ? liveAgent.structuredOutput
+      : settledRecord?.structuredOutput;
+    const lastResult = liveAgent?.lastResult ?? settledRecord?.lastResult;
     return {
       target: { kind: "teammate", id },
       found: waitStatus !== "not-found",
@@ -3031,8 +3072,13 @@ export default function registerTeammateExtension(
       phase,
       outcome,
       waitStatus,
+      ...(waitStatus !== "not-found" ? { terminalStatus: waitStatus as string } : {}),
+      ...(includeResult && lastResult ? { lastResult } : {}),
+      ...(includeResult && structuredOutput !== undefined
+        ? { structuredOutput: structuredClone(structuredOutput) }
+        : {}),
       summary: result.output[0] ?? result.status,
-      detail: result.output,
+      ...(includeResult ? { detail: result.output } : {}),
       updatedAt: Date.now(),
       capabilities: teammateObservationCapabilities,
       ...(waitStatus === "not-found" ? { error: result.output[0] } : {}),
@@ -3047,7 +3093,7 @@ export default function registerTeammateExtension(
       name: id,
       timeoutMs: Math.max(1, options.deadline - Date.now()),
       until: options.until,
-    }, options.signal)),
+    }, options.signal), options.detail),
   };
   registerObservationProvider(teammateObservationProvider);
 
@@ -3067,7 +3113,7 @@ export default function registerTeammateExtension(
       signal: AbortSignal,
     ): Promise<TeammateToolResult<{ output: string[]; result: ObserveResult }>> {
       const result = await observeTargets(params, signal);
-      const output = formatObserveResult(result, params.detail === "full");
+      const output = formatObserveResult(result, params.detail !== "summary");
       const failed = result.reason === "timeout"
         || result.reason === "aborted"
         || result.observations.some((item) => !item.found || item.outcome === "failure" || item.outcome === "stalled");

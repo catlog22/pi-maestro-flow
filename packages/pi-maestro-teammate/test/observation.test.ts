@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  formatObserveResult,
   getObservationProvider,
   observeTargets,
   registerObservationProvider,
@@ -355,4 +356,33 @@ test("until option is forwarded to providers", async () => {
   } finally {
     dispose();
   }
+});
+
+test("formatObserveResult renders structured output only in verbose detail", () => {
+  const observation: ObservationSnapshot = {
+    target: { kind: "teammate", id: "job" },
+    found: true,
+    nativeStatus: "sleeping",
+    phase: "settled",
+    waitStatus: "completed",
+    terminalStatus: "completed",
+    structuredOutput: { verdict: "ok", count: 2 },
+    summary: "done",
+    updatedAt: Date.now(),
+  };
+  const result = {
+    action: "status" as const,
+    reason: "snapshot" as const,
+    observations: [observation],
+    durationMs: 1,
+  };
+
+  const verbose = formatObserveResult(result, true).join("\n");
+  assert.match(verbose, /--- structured output ---/);
+  assert.match(verbose, /"verdict": "ok"/);
+  assert.match(verbose, /"count": 2/);
+
+  const compact = formatObserveResult(result, false).join("\n");
+  assert.doesNotMatch(compact, /structured output/);
+  assert.match(compact, /teammate:job/);
 });

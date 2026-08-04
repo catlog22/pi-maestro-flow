@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { displayMessageForResult } from "../src/extension/teammate-core.ts";
+import {
+  displayMessageForResult,
+  setAgentStructuredOutput,
+  toStructuredResults,
+} from "../src/extension/teammate-core.ts";
 import { buildWatchOutput } from "../src/extension/teammate-helpers.ts";
 import type { ActiveAgent, SingleResult } from "../src/shared/types.ts";
 
@@ -87,6 +91,29 @@ test("displayMessageForResult keeps failure diagnostics authoritative", () => {
     structuredOutput: { ok: true },
   }));
   assert.match(out, /Teammate child process exited abnormally/);
+});
+
+test("structured result snapshots are cloned and retain their origin cwd", () => {
+  const value = { nested: { verdict: "ok" } };
+  const projected = toStructuredResults([result({
+    name: "reviewer",
+    structuredOutput: value,
+  })], "D:/workspace");
+  assert.ok(projected);
+  assert.equal(projected[0].originCwd, "D:/workspace");
+  assert.equal(projected[0].name, "reviewer");
+  (projected[0].structuredOutput as { nested: { verdict: string } }).nested.verdict = "mutated";
+  assert.equal(value.nested.verdict, "ok");
+});
+
+test("setAgentStructuredOutput clones new values and clears stale values", () => {
+  const agent = agentFixture({ structuredOutput: { previous: true } });
+  const next = { nested: { value: 3 } };
+  setAgentStructuredOutput(agent, next);
+  (next.nested as { value: number }).value = 9;
+  assert.deepEqual(agent.structuredOutput, { nested: { value: 3 } });
+  setAgentStructuredOutput(agent, undefined);
+  assert.equal(agent.structuredOutput, undefined);
 });
 
 test("buildWatchOutput shows the structured output of a settled agent", () => {

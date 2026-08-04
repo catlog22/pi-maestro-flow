@@ -320,9 +320,26 @@ export interface SettledAgentRecord {
     status: AgentTerminalStatus;
     settledAt: number;
     lastResult?: string;
+    /** Schema-valid structured output retained for observe full-detail reads after eviction. */
+    structuredOutput?: unknown;
     requestedModel?: string;
     resolvedModel?: string;
     attemptedModels?: string[];
+}
+/**
+ * Compact structured-output projection carried on completion events so
+ * background/detached results can be persisted to `agent://` without parsing
+ * rendered messages. Deliberately smaller than `SingleResult`.
+ */
+export interface StructuredResult {
+    correlationId: string;
+    /** Workspace cwd captured by the dispatch owner at admission time. */
+    originCwd: string;
+    /** Task name; absent when the dispatch had none. */
+    name?: string;
+    agent: string;
+    /** Schema-valid structured output captured for this task. */
+    structuredOutput: unknown;
 }
 export declare const TEAMMATE_COMPLETE_EVENT = "teammate:complete";
 export declare const TEAMMATE_STARTED_EVENT = "teammate:started";

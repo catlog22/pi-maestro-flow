@@ -24,6 +24,7 @@ import type {
   AgentProgressSnapshot,
   AgentRunOutcome,
   AgentStatus,
+  StructuredResult,
 } from "../../shared/types.ts";
 
 export {
@@ -91,6 +92,11 @@ export interface TeammateCompleteEvent {
   wakeable?: boolean;
   /** True when cancellation, rather than success/failure, ended the lifecycle. */
   cancelled?: boolean;
+  /**
+   * Compact schema-valid structured results for `agent://` persistence.
+   * Present only when the completed run produced structured output.
+   */
+  structuredResults?: StructuredResult[];
 }
 
 /**

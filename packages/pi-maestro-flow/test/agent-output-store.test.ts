@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test, { after, before } from "node:test";
 
 const {
@@ -29,6 +29,10 @@ test("persistAgentOutput writes a private record readable by correlationId", asy
 
   const raw = await readFile(join(root, ".pi", "agents", "run-abc-1.json"), "utf8");
   assert.match(raw, /"output":/);
+  if (process.platform !== "win32") {
+    assert.equal((await stat(join(root, ".pi", "agents"))).mode & 0o777, 0o700);
+    assert.equal((await stat(join(root, ".pi", "agents", "run-abc-1.json"))).mode & 0o777, 0o600);
+  }
 });
 
 test("readAgentOutput resolves by task name", async () => {
@@ -85,6 +89,101 @@ test("getAgentOutputPath guards prototype pollution", () => {
   const constructorHit = getAgentOutputPath(output, ["constructor", "x"]);
   assert.ok(!constructorHit.hit, "constructor prototype access is blocked");
   assert.equal(({} as Record<string, unknown>).polluted, undefined, "Object.prototype stays clean");
+});
+
+test("persistAgentOutput replaces a repeated correlation id with the latest turn", async () => {
+  await persistAgentOutput("repeat-agent", "repeat", "general", { turn: 1 }, root);
+  await persistAgentOutput("repeat-agent", "repeat", "general", { turn: 2 }, root);
+  assert.deepEqual((await readAgentOutput("repeat-agent", root)).output, { turn: 2 });
+});
+
+test("persistAgentOutput rejects linked output directories", async (t) => {
+  const linkedRoot = await mkdtemp(join(tmpdir(), "pi-agent-linked-"));
+  const external = await mkdtemp(join(tmpdir(), "pi-agent-external-"));
+  try {
+    await mkdir(join(linkedRoot, ".pi"), { recursive: true });
+    try {
+      await symlink(external, join(linkedRoot, ".pi", "agents"), process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if (process.platform === "win32") {
+        t.skip(`junction creation unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+      throw error;
+    }
+    await assert.rejects(
+      () => persistAgentOutput("linked-agent", "linked", "general", { secret: true }, linkedRoot),
+      /must be a real directory/,
+    );
+    await assert.rejects(
+      () => readAgentOutput("linked-agent", linkedRoot),
+      /must be a real directory/,
+    );
+    assert.deepEqual(await readdir(external), []);
+  } finally {
+    await rm(linkedRoot, { recursive: true, force: true });
+    await rm(external, { recursive: true, force: true });
+  }
+});
+
+test("persistAgentOutput rejects a linked .pi directory", async (t) => {
+  const linkedRoot = await mkdtemp(join(tmpdir(), "pi-root-linked-"));
+  const external = await mkdtemp(join(tmpdir(), "pi-root-external-"));
+  try {
+    try {
+      await symlink(external, join(linkedRoot, ".pi"), process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if (process.platform === "win32") {
+        t.skip(`junction creation unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+      throw error;
+    }
+    await assert.rejects(
+      () => persistAgentOutput("linked-pi", "linked-pi", "general", { secret: true }, linkedRoot),
+      /must be a real directory/,
+    );
+    await assert.rejects(
+      () => readAgentOutput("linked-pi", linkedRoot),
+      /must be a real directory/,
+    );
+    assert.deepEqual(await readdir(external), []);
+  } finally {
+    await rm(linkedRoot, { recursive: true, force: true });
+    await rm(external, { recursive: true, force: true });
+  }
+});
+
+test("readAgentOutput does not follow a linked record file", async (t) => {
+  const linkedRoot = await mkdtemp(join(tmpdir(), "pi-record-linked-"));
+  const external = join(await mkdtemp(join(tmpdir(), "pi-record-external-")), "outside.json");
+  try {
+    await persistAgentOutput("linked-record", "linked-record", "general", { safe: true }, linkedRoot);
+    const recordPath = join(linkedRoot, ".pi", "agents", "linked-record.json");
+    await unlink(recordPath);
+    await writeFile(external, JSON.stringify({
+      correlationId: "linked-record",
+      name: "linked-record",
+      capturedAt: new Date().toISOString(),
+      output: { leaked: true },
+    }));
+    try {
+      await symlink(external, recordPath, "file");
+    } catch (error) {
+      if (process.platform === "win32") {
+        t.skip(`file symlink creation unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+      throw error;
+    }
+    await assert.rejects(
+      () => readAgentOutput("linked-record", linkedRoot),
+      /No persisted teammate output/,
+    );
+  } finally {
+    await rm(linkedRoot, { recursive: true, force: true });
+    await rm(resolve(external, ".."), { recursive: true, force: true });
+  }
 });
 
 test("persistAgentOutput skips non-serializable or oversized outputs", async () => {

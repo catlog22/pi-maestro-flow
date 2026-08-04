@@ -10,7 +10,7 @@ import type { WorkspaceSessionScan } from "../transcript/session-transcript.ts";
 import { type WorkspaceOwnerState } from "./workspace-peers.ts";
 import { type LeaseToken } from "../runs/session-handoff.ts";
 import type { RunTeammateOptions, RpcMessageMode, NormalizedTask } from "../runs/execution.ts";
-import type { TeammateState, AgentProgress, AgentProgressSnapshot, ActiveAgent, AgentStatus, AgentTerminalStatus, SingleResult } from "../shared/types.ts";
+import type { TeammateState, AgentProgress, AgentProgressSnapshot, ActiveAgent, AgentStatus, AgentTerminalStatus, SingleResult, StructuredResult } from "../shared/types.ts";
 export declare const TEAMMATE_PROMPT_SNIPPET = "Dispatch bounded work to discovered teammate roles for parallel, sequential, or specialist execution.";
 export declare const TEAMMATE_PROMPT_GUIDELINES: string[];
 export declare function terminalStatusForResult(result: SingleResult, callbackStatus?: AgentTerminalStatus): AgentTerminalStatus;
@@ -26,6 +26,14 @@ export declare function aggregateTerminalStatuses(statuses: Iterable<AgentTermin
 export declare function displayMessageForResult(result: SingleResult): string;
 export declare function summarizeGraphResults(results: readonly SingleResult[], tasks: readonly NormalizedTask[]): string;
 export declare function aggregateGraphStructuredOutput(results: readonly SingleResult[], tasks: readonly NormalizedTask[]): Record<string, unknown> | undefined;
+/**
+ * Compact projection of schema-valid results for completion events. Undefined
+ * when no result carries structured output, so emitters can spread it
+ * conditionally and keep the event payload minimal.
+ */
+export declare function toStructuredResults(results: readonly SingleResult[], originCwd: string): StructuredResult[] | undefined;
+/** Replace the retained turn value; undefined intentionally clears stale data. */
+export declare function setAgentStructuredOutput(agent: ActiveAgent, output: unknown): void;
 export type TeammateRuntimeOptions = Pick<RunTeammateOptions, "spawnChildProcess" | "resultReadyGraceMs" | "foregroundMaxRunMs"> & {
     /** @internal Observes the real runtime callbacks for public-path lifecycle tests. */
     onRunOptionsCreated?: (options: RunTeammateOptions) => void;

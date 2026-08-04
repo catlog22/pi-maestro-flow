@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -20,6 +20,7 @@ import registerMaestroExtension, {
 } from "../src/extension/index.ts";
 import type { WorkflowSnapshot } from "../src/session/types.ts";
 import { shutdownIntelligenceTools } from "../src/tools/intelligence.ts";
+import { readAgentOutput } from "../src/teammate/agent-output-store.ts";
 import { isRunControlReadAction } from "../src/tools/run-control.ts";
 import { PLAN_TOGGLE_KEY } from "../src/tools/plan.ts";
 import { NATIVE_FALLBACK_COMPACTION_MARKER } from "../src/compaction/compaction-arbiter.ts";
@@ -531,6 +532,118 @@ test("root teammate authority is fenced on session start and disposed on shutdow
   );
   assert.match(source, /generation !== teammateRegistrationGeneration/);
   assert.match(source, /pi\.events\.on\(TEAMMATE_STARTED_EVENT[\s\S]*?registerTodoActor\(actor\)/);
+});
+
+test("teammate tool_result persistence backfills graph task names from progress", async () => {
+  const root = mkdtempSync(join(tmpdir(), "flow-tool-result-capture-"));
+  try {
+    const tools: ToolDefinition[] = [];
+    const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
+    const api = new Proxy({} as ExtensionAPI, {
+      get(_target, property) {
+        if (property === "registerTool") return (tool: ToolDefinition) => { tools.push(tool); };
+        if (property === "events") return { on: () => () => undefined, emit: () => undefined };
+        if (property === "on") return (event: string, handler: (...args: unknown[]) => unknown) => {
+          const list = handlers.get(event) ?? [];
+          list.push(handler);
+          handlers.set(event, list);
+        };
+        return () => undefined;
+      },
+    });
+    registerMaestroExtension(api);
+
+    const toolResultHandlers = handlers.get("tool_result") ?? [];
+    assert.ok(toolResultHandlers.length > 0, "tool_result hook must be registered");
+    const toolResultEvent = {
+      type: "tool_result",
+      toolName: "teammate",
+      details: {
+        mode: "graph",
+        // Graph SingleResult intentionally carries no name; progress backfills it.
+        results: [{ correlationId: "flow-capture-cid", agent: "general", structuredOutput: { ok: true } }],
+        progress: [{
+          correlationId: "flow-capture-cid",
+          name: "flow-graph-task",
+          agent: "general",
+          status: "completed",
+          taskIndex: 0,
+          dependencies: [],
+        }],
+      },
+    };
+    for (const handler of toolResultHandlers) {
+      try {
+        await handler(toolResultEvent, { cwd: root });
+      } catch {
+        // Unrelated tool_result hooks may require their subsystem's full ctx.
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const record = await readAgentOutput("flow-graph-task", root);
+    assert.equal(record.correlationId, "flow-capture-cid");
+    assert.deepEqual(record.output, { ok: true });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("teammate complete event listener persists background structured results", async () => {
+  const root = mkdtempSync(join(tmpdir(), "flow-complete-capture-"));
+  try {
+    const tools: ToolDefinition[] = [];
+    const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
+    const api = new Proxy({} as ExtensionAPI, {
+      get(_target, property) {
+        if (property === "registerTool") return (tool: ToolDefinition) => { tools.push(tool); };
+        if (property === "events") return {
+          on: (event: string, handler: (...args: unknown[]) => unknown) => {
+            const list = handlers.get(event) ?? [];
+            list.push(handler);
+            handlers.set(event, list);
+          },
+          emit: () => undefined,
+        };
+        if (property === "on") return (event: string, handler: (...args: unknown[]) => unknown) => {
+          const list = handlers.get(event) ?? [];
+          list.push(handler);
+          handlers.set(event, list);
+        };
+        return () => undefined;
+      },
+    });
+    registerMaestroExtension(api);
+
+    // GUI forwarder + persistence listener both subscribe to the completion event.
+    const completeHandlers = handlers.get("teammate:complete") ?? [];
+    assert.ok(completeHandlers.length >= 2, "completion event must have a persistence listener");
+
+    // Completion results carry their originating workspace explicitly; empty
+    // background acknowledgements no longer establish a separate cwd binding.
+    for (const handler of completeHandlers) {
+      await handler({
+        correlationId: "flow-bg-cid",
+        agent: "general",
+        exitCode: 0,
+        durationMs: 5,
+        structuredResults: [{
+          correlationId: "flow-bg-cid",
+          name: "flow-bg-task",
+          agent: "general",
+          originCwd: root,
+          structuredOutput: { bg: true },
+        }],
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const record = await readAgentOutput("flow-bg-task", root);
+    assert.equal(record.correlationId, "flow-bg-cid");
+    assert.deepEqual(record.output, { bg: true });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("teammate child registers interaction, local Bash, and parent-permission surfaces", async () => {
