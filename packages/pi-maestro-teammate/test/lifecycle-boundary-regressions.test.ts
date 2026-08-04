@@ -1459,9 +1459,12 @@ test("nested background completion skips delivery when the parent is no longer l
 });
 
 test("child bridge consumes teammate_complete_delivery and injects it locally", () => {
-  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8")
+    + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8");
   assert.match(source, /type === "teammate_complete_delivery"/);
   assert.match(source, /m\.correlationId !== process\.env\.PI_TEAMMATE_CORRELATION_ID/);
   assert.match(source, /safeSendMessage\(pi, envelope as never, \{ triggerTurn: true \}\)/);
+  // Root side forwards the envelope over agent.sendControl.
   assert.match(source, /type: "teammate_complete_delivery"/);
+  assert.match(source, /parentAgent\.sendControl\(/);
 });
