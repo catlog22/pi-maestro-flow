@@ -1,0 +1,198 @@
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useI18n } from '@/client/i18n/index.js';
+import { searchGuides, type SearchResult } from '@/client/routes/route-config.js';
+
+// ---------------------------------------------------------------------------
+// SearchInput — warm minimal search with Ctrl+K shortcut and dropdown
+// ---------------------------------------------------------------------------
+
+interface SearchInputProps {
+  className?: string;
+  placeholder?: string;
+}
+
+interface CompactSearchInputProps {
+  onSearch: (query: string) => void;
+  className?: string;
+}
+
+export function CompactSearchInput({ onSearch, className = '' }: CompactSearchInputProps) {
+  const { t } = useI18n();
+  const [query, setQuery] = useState('');
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onSearch(query);
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className={className}>
+      <div className="relative flex items-center gap-[var(--spacing-2)] px-[var(--spacing-3)] py-[7px] bg-bg-card border border-border rounded-[var(--radius-md)] transition-all duration-[var(--duration-fast)] hover:border-text-placeholder focus-within:border-border-focused">
+        <svg
+          className="w-[14px] h-[14px] text-text-tertiary shrink-0"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+          strokeWidth="2"
+          strokeLinecap="round"
+          aria-hidden="true"
+        >
+          <circle cx="11" cy="11" r="8" />
+          <path d="M21 21l-4.35-4.35" />
+        </svg>
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={t('search.placeholder')}
+          className="flex-1 bg-transparent border-none outline-none text-text-primary placeholder:text-text-placeholder text-[length:var(--font-size-sm)]"
+        />
+      </div>
+    </form>
+  );
+}
+
+export function SearchInput({ className = '', placeholder }: SearchInputProps) {
+  const { t } = useI18n();
+  const navigate = useNavigate();
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [isOpen, setIsOpen] = useState(false);
+  const [focusedIndex, setFocusedIndex] = useState(-1);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (query.length < 1) {
+      setResults([]);
+      return;
+    }
+    const timer = setTimeout(() => {
+      const searchResults = searchGuides(query);
+      setResults(searchResults.slice(0, 12));
+      setFocusedIndex(-1);
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [query]);
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      switch (e.key) {
+        case 'ArrowDown':
+          e.preventDefault();
+          setFocusedIndex((prev) => (prev < results.length - 1 ? prev + 1 : prev));
+          break;
+        case 'ArrowUp':
+          e.preventDefault();
+          setFocusedIndex((prev) => (prev > 0 ? prev - 1 : -1));
+          break;
+        case 'Enter':
+          e.preventDefault();
+          if (focusedIndex >= 0 && results[focusedIndex]) {
+            selectResult(results[focusedIndex]);
+          } else if (results.length > 0) {
+            selectResult(results[0]);
+          }
+          break;
+        case 'Escape':
+          setIsOpen(false);
+          inputRef.current?.blur();
+          break;
+      }
+    },
+    [results, focusedIndex]
+  );
+
+  useEffect(() => {
+    const handleGlobalKeydown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        inputRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeydown);
+    return () => window.removeEventListener('keydown', handleGlobalKeydown);
+  }, []);
+
+  const selectResult = useCallback(
+    (result: SearchResult) => {
+      setIsOpen(false);
+      setQuery('');
+      navigate(`/guides/${result.slug}`);
+    },
+    [navigate]
+  );
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  return (
+    <div ref={dropdownRef} className={`relative ${className}`}>
+      <input
+        ref={inputRef}
+        type="text"
+        value={query}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setIsOpen(true);
+        }}
+        onFocus={() => setIsOpen(true)}
+        onKeyDown={handleKeyDown}
+        placeholder={placeholder || t('search.placeholder')}
+        aria-label={t('topbar.aria_search')}
+        className="w-full pl-8 pr-8 py-[var(--spacing-1-5)] text-[length:var(--font-size-sm)] text-text-primary bg-bg-secondary border border-border rounded-[var(--radius-default)] placeholder:text-text-placeholder focus:outline-none focus:border-accent-blue transition-colors duration-[var(--duration-fast)]"
+      />
+      {/* Search icon */}
+      <svg
+        className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-placeholder pointer-events-none"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <circle cx="11" cy="11" r="8" />
+        <path d="M21 21l-4.35-4.35" />
+      </svg>
+      {/* Keyboard hint */}
+      <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-placeholder border border-border rounded px-1 py-0.5 hidden sm:block">
+        ⌘K
+      </kbd>
+
+      {/* Dropdown */}
+      {isOpen && results.length > 0 && (
+        <div className="absolute z-50 mt-1 w-full bg-bg-card border border-border rounded-[var(--radius-lg)] shadow-[var(--shadow-lg)] overflow-hidden">
+          {results.map((result, index) => (
+            <button
+              key={result.slug}
+              type="button"
+              onClick={() => selectResult(result)}
+              onMouseEnter={() => setFocusedIndex(index)}
+              className={[
+                'w-full text-left px-[var(--spacing-3)] py-[var(--spacing-2-5)] transition-colors duration-[var(--duration-fast)]',
+                index === focusedIndex ? 'bg-bg-hover' : '',
+              ].join(' ')}
+            >
+              <div className="text-[length:var(--font-size-sm)] font-[var(--font-weight-medium)] text-text-primary">
+                {result.name}
+              </div>
+              <div className="text-[length:11px] text-text-secondary truncate">
+                {result.descriptionZh || result.description}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

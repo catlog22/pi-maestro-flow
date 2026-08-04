@@ -1,0 +1,77 @@
+{
+  "nav": {
+    "home": "Home",
+    "quick_start": "Quick Start",
+    "guides": "Guides",
+    "search": "Search",
+    "changelog": "Changelog",
+    "github": "GitHub"
+  },
+  "sidebar": {
+    "toggle": "Toggle sidebar",
+    "categories": "Documentation",
+    "aria_nav": "Documentation navigation",
+    "guides": "All Guides",
+    "quick_start": "Quick Start"
+  },
+  "topbar": {
+    "title": "Features & Configuration Docs",
+    "search_placeholder": "Search guides...",
+    "aria_search": "Search",
+    "logo_alt": "Maestro Flow Logo"
+  },
+  "accessibility": {
+    "main_content": "Main content area",
+    "skip_to_content": "Skip to main content"
+  },
+  "language_switcher": {
+    "en": "English",
+    "zh": "中文",
+    "aria_label": "Language switcher"
+  },
+  "theme_toggle": {
+    "light": "Light theme",
+    "dark": "Dark theme",
+    "aria_label": "Toggle theme"
+  },
+  "search": {
+    "placeholder": "Search...",
+    "no_results": "No results found",
+    "results_count": "{count} result(s)",
+    "searching": "Searching...",
+    "empty_title": "Search pi maestro flow Docs",
+    "empty_description": "Enter a search term to find feature guides and configuration references."
+  },
+  "breadcrumbs": {
+    "home": "Home",
+    "aria_label": "Breadcrumb navigation"
+  },
+  "guides": {
+    "title": "Guides",
+    "description": "Topic-based documentation for every pi maestro flow feature subsystem and its configuration.",
+    "back_to_all": "Back to all guides"
+  },
+  "categories": {
+    "getting_started": "Getting Started",
+    "core": "Core Features",
+    "orchestration": "Orchestration",
+    "connectivity": "Connectivity & Tools",
+    "configuration": "Configuration Reference"
+  },
+  "toc": {
+    "on_this_page": "On This Page",
+    "aria_label": "Table of contents"
+  },
+  "content": {
+    "parameters": "Parameters",
+    "type": "Type",
+    "default": "Default",
+    "description": "Description",
+    "required": "Required",
+    "optional": "Optional",
+    "expand_all": "Expand all",
+    "collapse_all": "Collapse all",
+    "copy": "Copy",
+    "search_json": "Search JSON"
+  }
+}

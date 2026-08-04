@@ -1,0 +1,77 @@
+{
+  "nav": {
+    "home": "首页",
+    "quick_start": "快速开始",
+    "guides": "指南",
+    "search": "搜索",
+    "changelog": "更新日志",
+    "github": "GitHub"
+  },
+  "sidebar": {
+    "toggle": "切换侧边栏",
+    "categories": "文档分类",
+    "aria_nav": "文档导航",
+    "guides": "全部指南",
+    "quick_start": "快速开始"
+  },
+  "topbar": {
+    "title": "功能与配置文档",
+    "search_placeholder": "搜索指南...",
+    "aria_search": "搜索",
+    "logo_alt": "Maestro Flow 标志"
+  },
+  "accessibility": {
+    "main_content": "主内容区域",
+    "skip_to_content": "跳转到主内容"
+  },
+  "language_switcher": {
+    "en": "English",
+    "zh": "中文",
+    "aria_label": "语言切换器"
+  },
+  "theme_toggle": {
+    "light": "浅色主题",
+    "dark": "深色主题",
+    "aria_label": "切换主题"
+  },
+  "search": {
+    "placeholder": "搜索...",
+    "no_results": "未找到结果",
+    "results_count": "{count} 个结果",
+    "searching": "搜索中...",
+    "empty_title": "搜索 pi maestro flow 文档",
+    "empty_description": "输入关键词搜索功能指南与配置说明。"
+  },
+  "breadcrumbs": {
+    "home": "首页",
+    "aria_label": "面包屑导航"
+  },
+  "guides": {
+    "title": "使用指南",
+    "description": "分主题了解 pi maestro flow 的每个功能子系统与详细配置说明。",
+    "back_to_all": "返回全部指南"
+  },
+  "categories": {
+    "getting_started": "入门上手",
+    "core": "核心功能",
+    "orchestration": "编排调度",
+    "connectivity": "连接与工具",
+    "configuration": "配置参考"
+  },
+  "toc": {
+    "on_this_page": "本页目录",
+    "aria_label": "目录导航"
+  },
+  "content": {
+    "parameters": "参数",
+    "type": "类型",
+    "default": "默认",
+    "description": "说明",
+    "required": "必填",
+    "optional": "可选",
+    "expand_all": "全部展开",
+    "collapse_all": "全部折叠",
+    "copy": "复制",
+    "search_json": "搜索 JSON"
+  }
+}

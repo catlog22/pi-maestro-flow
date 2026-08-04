@@ -1,0 +1,577 @@
+@import "tailwindcss";
+
+/*
+ * Gemini CLI Docs Design Token System
+ * 1:1 visual replication of geminicli.com docs design
+ * Light/dark mode via prefers-color-scheme + data-theme attribute
+ */
+
+/* ===== LIGHT MODE (default) — Gemini CLI style ===== */
+:root,
+[data-theme="light"] {
+  /* Background — clean white */
+  --color-bg-primary: #FFFFFF;
+  --color-bg-secondary: #FFFFFF;
+  --color-bg-card: #FFFFFF;
+  --color-bg-elevated: #F8F9FA;
+  --color-bg-hover: rgba(54, 75, 255, 0.06);
+  --color-bg-active: rgba(54, 75, 255, 0.10);
+
+  /* Tinted backgrounds */
+  --color-tint-blue: rgba(54, 75, 255, 0.08);
+  --color-tint-green: rgba(30, 142, 62, 0.08);
+  --color-tint-yellow: rgba(227, 116, 0, 0.08);
+  --color-tint-orange: rgba(227, 116, 0, 0.08);
+  --color-tint-purple: rgba(132, 48, 206, 0.08);
+  --color-tint-gray: #F1F3F4;
+
+  /* Text — Google style grays */
+  --color-text-primary: #353841;
+  --color-text-secondary: #5F6368;
+  --color-text-tertiary: #80868B;
+  --color-text-placeholder: #C4C7C5;
+  --color-text-inverse: #FFFFFF;
+
+  /* Border */
+  --color-border: #E0E0E0;
+  --color-border-divider: #E8EAED;
+  --color-border-focused: rgba(54, 75, 255, 0.5);
+
+  /* Accent — Gemini vivid blue */
+  --color-accent-blue: #364BFF;
+  --color-accent-blue-light: #5C6CFF;
+  --color-accent-orange: #E37400;
+  --color-accent-yellow: #E37400;
+  --color-accent-green: #1E8E3E;
+  --color-accent-pink: #C14C8A;
+  --color-accent-purple: #8430CE;
+  --color-accent-red: #D93025;
+  --color-accent-gray: #80868B;
+
+  /* Status */
+  --color-status-pending: #80868B;
+  --color-status-exploring: #364BFF;
+  --color-status-planning: #8430CE;
+  --color-status-executing: #E37400;
+  --color-status-verifying: #E37400;
+  --color-status-testing: #364BFF;
+  --color-status-completed: #1E8E3E;
+  --color-status-blocked: #D93025;
+
+  /* Status Backgrounds */
+  --color-status-bg-pending: rgba(128, 134, 139, 0.12);
+  --color-status-bg-exploring: rgba(54, 75, 255, 0.10);
+  --color-status-bg-planning: rgba(132, 48, 206, 0.10);
+  --color-status-bg-executing: rgba(227, 116, 0, 0.10);
+  --color-status-bg-verifying: rgba(227, 116, 0, 0.10);
+  --color-status-bg-testing: rgba(54, 75, 255, 0.10);
+  --color-status-bg-completed: rgba(30, 142, 62, 0.10);
+  --color-status-bg-blocked: rgba(217, 48, 37, 0.10);
+
+  /* Selection */
+  --color-selection: rgba(54, 75, 255, 0.28);
+  --color-selection-text: #353841;
+  --color-selection-range: rgba(54, 75, 255, 0.14);
+
+  /* Scrollbar */
+  --color-scrollbar-thumb: rgba(53, 56, 65, 0.16);
+  --color-scrollbar-thumb-hover: rgba(53, 56, 65, 0.28);
+  --color-scrollbar-track: transparent;
+
+  /* Code block */
+  --color-bg-code: #f5f3f1;
+  --color-text-code: #3C4043;
+  --color-code-keyword: #CBA6F7;
+  --color-code-string: #A6E3A1;
+  --color-code-comment: #6C7086;
+  --color-code-function: #89B4FA;
+  --color-code-number: #FAB387;
+
+  /* Terminal block (Mac-style code blocks in guides) */
+  --color-terminal-titlebar: #f0f0f0;
+  --color-terminal-titlebar-border: #e0e0e0;
+  --color-terminal-body: #faf8f8;
+  --color-terminal-border: #e0e0e0;
+  --color-terminal-title-text: #80868b;
+  --color-terminal-shadow: 1.6px 1.6px 3.2px 0px rgba(41,41,41,0.15);
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.12);
+  --shadow-inner: inset 0 0 0 1px rgba(0, 0, 0, 0.06);
+  --shadow-focus-ring: 0 0 0 2px #FFFFFF, 0 0 0 4px rgba(54, 75, 255, 0.5);
+}
+
+/* ===== DARK MODE ===== */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-bg-primary: #131118;
+    --color-bg-secondary: #0F0D14;
+    --color-bg-card: #1A1721;
+    --color-bg-elevated: #221F2A;
+    --color-bg-hover: rgba(255, 255, 255, 0.06);
+    --color-bg-active: rgba(255, 255, 255, 0.10);
+
+    --color-tint-blue: rgba(54, 75, 255, 0.12);
+    --color-tint-green: rgba(30, 142, 62, 0.12);
+    --color-tint-yellow: rgba(227, 116, 0, 0.12);
+    --color-tint-orange: rgba(227, 116, 0, 0.12);
+    --color-tint-purple: rgba(132, 48, 206, 0.12);
+    --color-tint-gray: rgba(255, 255, 255, 0.06);
+
+    --color-text-primary: #E8EAED;
+    --color-text-secondary: rgba(232, 234, 237, 0.7);
+    --color-text-tertiary: rgba(232, 234, 237, 0.5);
+    --color-text-placeholder: rgba(232, 234, 237, 0.3);
+    --color-text-inverse: #FFFFFF;
+
+    --color-border: rgba(232, 234, 237, 0.12);
+    --color-border-divider: rgba(232, 234, 237, 0.08);
+    --color-border-focused: rgba(54, 75, 255, 0.5);
+
+    --color-accent-blue: #8AB4F8;
+    --color-accent-blue-light: #A8C7FA;
+    --color-accent-orange: #FBBC04;
+    --color-accent-yellow: #FBBC04;
+    --color-accent-green: #81C995;
+    --color-accent-pink: #F48FB1;
+    --color-accent-purple: #CE93D8;
+    --color-accent-red: #F28B82;
+    --color-accent-gray: #9AA0A6;
+
+    --color-status-pending: #9AA0A6;
+    --color-status-exploring: #8AB4F8;
+    --color-status-planning: #CE93D8;
+    --color-status-executing: #FBBC04;
+    --color-status-verifying: #FBBC04;
+    --color-status-testing: #8AB4F8;
+    --color-status-completed: #81C995;
+    --color-status-blocked: #F28B82;
+
+    --color-status-bg-pending: rgba(154, 160, 166, 0.15);
+    --color-status-bg-exploring: rgba(138, 180, 248, 0.15);
+    --color-status-bg-planning: rgba(206, 147, 216, 0.15);
+    --color-status-bg-executing: rgba(251, 188, 4, 0.15);
+    --color-status-bg-verifying: rgba(251, 188, 4, 0.15);
+    --color-status-bg-testing: rgba(138, 180, 248, 0.15);
+    --color-status-bg-completed: rgba(129, 201, 149, 0.15);
+    --color-status-bg-blocked: rgba(242, 139, 130, 0.15);
+
+    --color-selection: rgba(138, 180, 248, 0.35);
+    --color-selection-text: #E8EAED;
+    --color-selection-range: rgba(138, 180, 248, 0.20);
+
+    --color-scrollbar-thumb: rgba(232, 234, 237, 0.14);
+    --color-scrollbar-thumb-hover: rgba(232, 234, 237, 0.24);
+    --color-scrollbar-track: transparent;
+
+    --color-bg-code: #11101A;
+    --color-text-code: #CDD6F4;
+
+    --color-terminal-titlebar: #2a2a2e;
+    --color-terminal-titlebar-border: rgba(232,234,237,0.08);
+    --color-terminal-body: #1a1a22;
+    --color-terminal-border: rgba(232,234,237,0.12);
+    --color-terminal-title-text: rgba(232,234,237,0.5);
+    --color-terminal-shadow: 1.6px 1.6px 3.2px 0px rgba(0,0,0,0.4);
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.5);
+    --shadow-inner: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+    --shadow-focus-ring: 0 0 0 2px #131118, 0 0 0 4px rgba(138, 180, 248, 0.5);
+  }
+}
+
+[data-theme="dark"] {
+  --color-bg-primary: #131118;
+  --color-bg-secondary: #0F0D14;
+  --color-bg-card: #1A1721;
+  --color-bg-elevated: #221F2A;
+  --color-bg-hover: rgba(255, 255, 255, 0.06);
+  --color-bg-active: rgba(255, 255, 255, 0.10);
+
+  --color-tint-blue: rgba(54, 75, 255, 0.12);
+  --color-tint-green: rgba(30, 142, 62, 0.12);
+  --color-tint-yellow: rgba(227, 116, 0, 0.12);
+  --color-tint-orange: rgba(227, 116, 0, 0.12);
+  --color-tint-purple: rgba(132, 48, 206, 0.12);
+  --color-tint-gray: rgba(255, 255, 255, 0.06);
+
+  --color-text-primary: #E8EAED;
+  --color-text-secondary: rgba(232, 234, 237, 0.7);
+  --color-text-tertiary: rgba(232, 234, 237, 0.5);
+  --color-text-placeholder: rgba(232, 234, 237, 0.3);
+  --color-text-inverse: #FFFFFF;
+
+  --color-border: rgba(232, 234, 237, 0.12);
+  --color-border-divider: rgba(232, 234, 237, 0.08);
+  --color-border-focused: rgba(54, 75, 255, 0.5);
+
+  --color-accent-blue: #8AB4F8;
+  --color-accent-blue-light: #A8C7FA;
+  --color-accent-orange: #FBBC04;
+  --color-accent-yellow: #FBBC04;
+  --color-accent-green: #81C995;
+  --color-accent-pink: #F48FB1;
+  --color-accent-purple: #CE93D8;
+  --color-accent-red: #F28B82;
+  --color-accent-gray: #9AA0A6;
+
+  --color-status-pending: #9AA0A6;
+  --color-status-exploring: #8AB4F8;
+  --color-status-planning: #CE93D8;
+  --color-status-executing: #FBBC04;
+  --color-status-verifying: #FBBC04;
+  --color-status-testing: #8AB4F8;
+  --color-status-completed: #81C995;
+  --color-status-blocked: #F28B82;
+
+  --color-status-bg-pending: rgba(154, 160, 166, 0.15);
+  --color-status-bg-exploring: rgba(138, 180, 248, 0.15);
+  --color-status-bg-planning: rgba(206, 147, 216, 0.15);
+  --color-status-bg-executing: rgba(251, 188, 4, 0.15);
+  --color-status-bg-verifying: rgba(251, 188, 4, 0.15);
+  --color-status-bg-testing: rgba(138, 180, 248, 0.15);
+  --color-status-bg-completed: rgba(129, 201, 149, 0.15);
+  --color-status-bg-blocked: rgba(242, 139, 130, 0.15);
+
+  --color-selection: rgba(138, 180, 248, 0.35);
+  --color-selection-text: #E8EAED;
+  --color-selection-range: rgba(138, 180, 248, 0.20);
+
+  --color-scrollbar-thumb: rgba(232, 234, 237, 0.14);
+  --color-scrollbar-thumb-hover: rgba(232, 234, 237, 0.24);
+  --color-scrollbar-track: transparent;
+
+  --color-bg-code: #11101A;
+  --color-text-code: #CDD6F4;
+
+  --color-terminal-titlebar: #2a2a2e;
+  --color-terminal-titlebar-border: rgba(232,234,237,0.08);
+  --color-terminal-body: #1a1a22;
+  --color-terminal-border: rgba(232,234,237,0.12);
+  --color-terminal-title-text: rgba(232,234,237,0.5);
+  --color-terminal-shadow: 1.6px 1.6px 3.2px 0px rgba(0,0,0,0.4);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.5);
+  --shadow-inner: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --shadow-focus-ring: 0 0 0 2px #131118, 0 0 0 4px rgba(138, 180, 248, 0.5);
+}
+
+/* ===== STATIC TOKENS ===== */
+:root {
+  /* Typography — match Gemini CLI (Inter as closest to Google Sans Text) */
+  --font-sans: 'Inter', ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Google Sans Mono', 'SF Mono', ui-monospace, monospace;
+
+  /* Gemini CLI uses 16px base, 28px line height */
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.875rem;
+  --font-size-base: 1rem;
+  --font-size-md: 1rem;
+  --font-size-lg: 1.0625rem;
+  --font-size-xl: 1.25rem;
+  --font-size-2xl: 1.5rem;
+  --font-size-3xl: 2.625rem;
+
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  --line-height-tight: 1.2;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.75;
+
+  --letter-spacing-tighter: -0.02em;
+  --letter-spacing-tight: -0.01em;
+  --letter-spacing-normal: 0em;
+  --letter-spacing-wide: 0.06em;
+
+  /* Spacing */
+  --spacing-0: 0px;
+  --spacing-0-5: 2px;
+  --spacing-1: 4px;
+  --spacing-1-5: 6px;
+  --spacing-2: 8px;
+  --spacing-3: 12px;
+  --spacing-4: 16px;
+  --spacing-5: 20px;
+  --spacing-6: 24px;
+  --spacing-8: 32px;
+  --spacing-10: 40px;
+  --spacing-12: 48px;
+  --spacing-16: 64px;
+
+  /* Sizing — match Gemini CLI dimensions */
+  --size-sidebar-width: 272px;
+  --size-topbar-height: 56px;
+  --size-banner-height: 37px;
+  --size-content-max-width: 1200px;
+  --size-toc-width: 220px;
+  --size-card-min-width: 280px;
+  --size-card-max-width: 360px;
+  --size-icon-sm: 14px;
+  --size-icon-md: 16px;
+  --size-icon-lg: 20px;
+  --size-scrollbar-width: 4px;
+
+  /* Border Radius — Gemini CLI uses subtle rounding */
+  --radius-none: 0px;
+  --radius-sm: 4px;
+  --radius-default: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+  --radius-full: 9999px;
+
+  /* Transitions */
+  --duration-fast: 120ms;
+  --duration-normal: 150ms;
+  --duration-slow: 200ms;
+  --duration-smooth: 300ms;
+  --ease-notion: cubic-bezier(0.2, 0, 0, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* Opacity */
+  --opacity-disabled: 0.4;
+  --opacity-hover-overlay: 0.06;
+  --opacity-active-overlay: 0.10;
+  --opacity-card-dimmed: 0.6;
+  --opacity-backdrop: 0.5;
+}
+
+/* ===== TAILWIND v4 @theme ===== */
+@theme {
+  /* Colors -- surfaces */
+  --color-bg-primary: var(--color-bg-primary);
+  --color-bg-secondary: var(--color-bg-secondary);
+  --color-bg-card: var(--color-bg-card);
+  --color-bg-elevated: var(--color-bg-elevated);
+  --color-bg-hover: var(--color-bg-hover);
+  --color-bg-active: var(--color-bg-active);
+  --color-bg-code: var(--color-bg-code);
+
+  /* Colors -- tints */
+  --color-tint-blue: var(--color-tint-blue);
+  --color-tint-green: var(--color-tint-green);
+  --color-tint-yellow: var(--color-tint-yellow);
+  --color-tint-orange: var(--color-tint-orange);
+  --color-tint-purple: var(--color-tint-purple);
+  --color-tint-gray: var(--color-tint-gray);
+
+  /* Colors -- text */
+  --color-text-primary: var(--color-text-primary);
+  --color-text-secondary: var(--color-text-secondary);
+  --color-text-tertiary: var(--color-text-tertiary);
+  --color-text-placeholder: var(--color-text-placeholder);
+  --color-text-inverse: var(--color-text-inverse);
+  --color-text-code: var(--color-text-code);
+
+  /* Colors -- borders */
+  --color-border: var(--color-border);
+  --color-border-divider: var(--color-border-divider);
+  --color-border-focused: var(--color-border-focused);
+
+  /* Colors -- accents */
+  --color-accent-blue: var(--color-accent-blue);
+  --color-accent-blue-light: var(--color-accent-blue-light);
+  --color-accent-orange: var(--color-accent-orange);
+  --color-accent-yellow: var(--color-accent-yellow);
+  --color-accent-green: var(--color-accent-green);
+  --color-accent-pink: var(--color-accent-pink);
+  --color-accent-purple: var(--color-accent-purple);
+  --color-accent-red: var(--color-accent-red);
+  --color-accent-gray: var(--color-accent-gray);
+
+  /* Colors -- workflow status */
+  --color-status-pending: var(--color-status-pending);
+  --color-status-exploring: var(--color-status-exploring);
+  --color-status-planning: var(--color-status-planning);
+  --color-status-executing: var(--color-status-executing);
+  --color-status-verifying: var(--color-status-verifying);
+  --color-status-testing: var(--color-status-testing);
+  --color-status-completed: var(--color-status-completed);
+  --color-status-blocked: var(--color-status-blocked);
+
+  /* Colors -- status badge backgrounds */
+  --color-status-bg-pending: var(--color-status-bg-pending);
+  --color-status-bg-exploring: var(--color-status-bg-exploring);
+  --color-status-bg-planning: var(--color-status-bg-planning);
+  --color-status-bg-executing: var(--color-status-bg-executing);
+  --color-status-bg-verifying: var(--color-status-bg-verifying);
+  --color-status-bg-testing: var(--color-status-bg-testing);
+  --color-status-bg-completed: var(--color-status-bg-completed);
+  --color-status-bg-blocked: var(--color-status-bg-blocked);
+
+  /* Colors -- selection */
+  --color-selection: var(--color-selection);
+  --color-selection-text: var(--color-selection-text);
+  --color-selection-range: var(--color-selection-range);
+
+  /* Colors -- scrollbar */
+  --color-scrollbar-thumb: var(--color-scrollbar-thumb);
+  --color-scrollbar-thumb-hover: var(--color-scrollbar-thumb-hover);
+
+  /* Typography */
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  --text-xs: var(--font-size-xs);
+  --text-sm: var(--font-size-sm);
+  --text-base: var(--font-size-base);
+  --text-md: var(--font-size-md);
+  --text-lg: var(--font-size-lg);
+  --text-xl: var(--font-size-xl);
+  --text-2xl: var(--font-size-2xl);
+  --text-3xl: var(--font-size-3xl);
+
+  /* Shadows */
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-inner: var(--shadow-inner);
+  --shadow-focus-ring: var(--shadow-focus-ring);
+
+  /* Border radius */
+  --radius-none: var(--radius-none);
+  --radius-sm: var(--radius-sm);
+  --radius-default: var(--radius-default);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+  --radius-full: var(--radius-full);
+
+  /* Transitions */
+  --ease-notion: var(--ease-notion);
+  --ease-out: var(--ease-out);
+  --ease-in-out: var(--ease-in-out);
+  --ease-bounce: var(--ease-bounce);
+
+  /* Custom spacing extensions */
+  --spacing-0-5: var(--spacing-0-5);
+  --spacing-1-5: var(--spacing-1-5);
+}
+
+/* ===== BASE STYLES ===== */
+body {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: 1.75;
+  background-color: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: var(--size-scrollbar-width);
+  height: var(--size-scrollbar-width);
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-scrollbar-thumb);
+  border-radius: var(--radius-sm);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-scrollbar-thumb-hover);
+}
+
+
+/* ===== MERMAID DIAGRAMS — light background, always ===== */
+.mermaid-diagram {
+  background-color: #FFFFFF !important;
+  border: 1px solid #E0E0E0 !important;
+  border-radius: 8px;
+  padding: 16px;
+}
+.mermaid-diagram svg {
+  max-width: 100%;
+  margin: 0 auto;
+}
+.mermaid-diagram .node rect,
+.mermaid-diagram .node polygon,
+.mermaid-diagram .node circle {
+  fill: #FFFFFF !important;
+  stroke-width: 1.5px !important;
+}
+.mermaid-diagram .node.default .basic.label-container,
+.mermaid-diagram .node.default rect { stroke: #BDC1C6 !important; }
+.mermaid-diagram .node.phaseNode rect { stroke: #1E8E3E !important; }
+.mermaid-diagram .node.issueNode rect { stroke: #8430CE !important; }
+.mermaid-diagram .node.sharedNode rect { stroke: #364BFF !important; }
+.mermaid-diagram .node.commander rect { stroke: #364BFF !important; }
+.mermaid-diagram .node .label rect,
+.mermaid-diagram .edgeLabel rect {
+  fill: transparent !important;
+  stroke: none !important;
+}
+.mermaid-diagram .nodeLabel,
+.mermaid-diagram .nodeLabel p,
+.mermaid-diagram .nodeLabel span,
+.mermaid-diagram .node text {
+  color: #353841 !important;
+  fill: #353841 !important;
+}
+.mermaid-diagram .edgePath .path {
+  stroke: #80868B !important;
+  stroke-width: 1.5px;
+}
+.mermaid-diagram .edgeLabel,
+.mermaid-diagram .edgeLabel .label {
+  background-color: transparent !important;
+  color: #5F6368 !important;
+  fill: #5F6368 !important;
+}
+.mermaid-diagram .arrowheadPath,
+.mermaid-diagram marker path {
+  fill: #80868B !important;
+  stroke: #80868B !important;
+}
+.mermaid-diagram .cluster rect {
+  fill: #F1F3F4 !important;
+  stroke: #E0E0E0 !important;
+  stroke-width: 1px;
+  rx: 8;
+}
+.mermaid-diagram .cluster .nodeLabel,
+.mermaid-diagram .cluster text {
+  color: #5F6368 !important;
+  fill: #5F6368 !important;
+}
+
+
+
+/* Selection */
+::selection {
+  background-color: var(--color-selection);
+  color: var(--color-selection-text);
+}
+
+/* Focus visible */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus-ring);
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
