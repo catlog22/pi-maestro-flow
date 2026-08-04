@@ -18,6 +18,7 @@ import {
 	createEditorBottomSentinel,
 	type EditorBottomController,
 } from "./editor-bottom.ts";
+import { createCockpitClaudeEditorFactory } from "./claude-editor.ts";
 import { BashBgOverlay } from "./bash-bg-overlay.ts";
 import { renderBashBgSummary } from "./bash-bg-widget.ts";
 import { registerQuietTools } from "./quiet-tools.ts";
@@ -243,6 +244,10 @@ export default function (pi: ExtensionAPI): void {
 	let activeSettingsOverlay: { finalize(): void } | undefined;
 	let sidebarController: SidebarController | undefined;
 	let editorBottomController: EditorBottomController | undefined;
+	// Whether Cockpit installed its custom editor this session (reload-gated).
+	// Tracks ownership so teardown restores the default editor only when ours.
+	let claudeEditorInstalled = false;
+	let claudeEditorForeignWarned = false;
 	let dockEffectiveVisible = false;
 	let surfaceState: CockpitSurfaceState = "disabled";
 	let running = false;
@@ -524,6 +529,45 @@ export default function (pi: ExtensionAPI): void {
 		editorBottomController?.hide();
 	};
 
+	// reload-gated: installing the custom editor swaps the live editor (text is
+	// preserved, in-memory history is not), so it only runs at session start and
+	// is never hot-toggled. If another extension owns the editor factory, fail
+	// closed with one warning and leave both gated features inert.
+	const installClaudeEditor = (ctx: ExtensionContext): void => {
+		if (claudeEditorInstalled) return;
+		if (!config.doubleEscapeClearInput && !config.fullscreenInput) return;
+		if (ctx.ui.getEditorComponent()) {
+			if (!claudeEditorForeignWarned) {
+				claudeEditorForeignWarned = true;
+				ctx.ui.notify(
+					"Cockpit double-Escape clear / fullscreen input unavailable: another extension owns the custom editor",
+				"warning",
+				);
+			}
+			return;
+		}
+		ctx.ui.setEditorComponent(createCockpitClaudeEditorFactory({
+			doubleEscapeClearInput: config.doubleEscapeClearInput,
+			emitEditorMarkers: config.fullscreenInput,
+			isBusy: () => running || Boolean(activeSettingsOverlay),
+			onError: (error) => ctx.ui.notify(
+				`Cockpit editor interaction error: ${error instanceof Error ? error.message : String(error)}`,
+				"warning",
+			),
+		}));
+		claudeEditorInstalled = true;
+	};
+
+	const clearClaudeEditor = (ctx: ExtensionContext): void => {
+		if (!claudeEditorInstalled) return;
+		try {
+			ctx.ui.setEditorComponent(undefined);
+		} catch {
+			// best-effort: teardown must not break Cockpit disposal
+		}
+		claudeEditorInstalled = false;
+	};
+
 	const installWidgets = (ctx: ExtensionContext): void => {
 		ctx.ui.setWidget(
 			STACK_WIDGET_KEY,
@@ -627,6 +671,7 @@ export default function (pi: ExtensionAPI): void {
 
 	const uninstallUi = (ctx: ExtensionContext): void => {
 		dockEffectiveVisible = false;
+		clearClaudeEditor(ctx);
 		clearEditorBottom(ctx);
 		disposeLayoutControllers();
 		clearWidgets(ctx);
@@ -654,6 +699,7 @@ export default function (pi: ExtensionAPI): void {
 		ctx.ui.setWorkingIndicator({ frames: [] });
 		if (config.pinEditorBottom) installEditorBottom(ctx);
 		else clearEditorBottom(ctx);
+		installClaudeEditor(ctx);
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			capturedTui = tui;
 			let observedWidth = tui.terminal.columns;
