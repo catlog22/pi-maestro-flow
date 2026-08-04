@@ -27,7 +27,8 @@ import { ensureThinkingFolded, readHideThinkingBlock } from "./thinking-fold.ts"
 import { ThinkingFoldTimer } from "./thinking-timer.ts";
 import { shouldAnimateFrames, shouldAnimateSidebar, shouldRunTick, type TickPolicyState } from "./tick-policy.ts";
 import { TodoStore } from "./todo-store.ts";
-import { makeTodoWidget, makeAgentWidget, terminalRows } from "./stack-widget.ts";
+import { makeTodoWidget, makeAgentWidget, terminalRows, visibleAgentRows } from "./stack-widget.ts";
+import { makeSessionBarWidget, SESSION_BAR_WIDGET_KEY } from "./session-bar.ts";
 import { activeThemeName, ThemePicker } from "./theme-picker.ts";
 import { ModelPicker, type ModelPickerEntry } from "./model-picker.ts";
 import { getUsageTotals, invalidateUsageCache, renderFooter, setUsageThrottle, type PaintTheme, type WidthUtils } from "./footer.ts";
@@ -254,6 +255,8 @@ export default function (pi: ExtensionAPI): void {
 	let activeSettingsOverlay: { finalize(): void } | undefined;
 	let sidebarController: SidebarController | undefined;
 	let editorBottomController: EditorBottomController | undefined;
+	/** Disposer for the session-bar ←/→ navigation hook (per applyUi). */
+	let sessionBarNavDisposer: (() => void) | undefined;
 	let dockEffectiveVisible = false;
 	let surfaceState: CockpitSurfaceState = "disabled";
 	let running = false;
@@ -660,6 +663,9 @@ export default function (pi: ExtensionAPI): void {
 		clearEditorBottom(ctx);
 		disposeLayoutControllers();
 		clearWidgets(ctx);
+		ctx.ui.setWidget(SESSION_BAR_WIDGET_KEY, undefined);
+		sessionBarNavDisposer?.();
+		sessionBarNavDisposer = undefined;
 		ctx.ui.setFooter(undefined);
 		surfaceState = "disabled";
 		try {
@@ -761,6 +767,36 @@ export default function (pi: ExtensionAPI): void {
 		syncSidebarMode(ctx);
 		// Re-enabling mid-run must restart live spinner and elapsed updates.
 		syncTick();
+
+		// Session bar: the persistent teammate-session switcher below the input
+		// box. Installed on every surface (dock and widgets) — it is the
+		// always-visible entry point for the viewing session.
+		ctx.ui.setWidget(
+			SESSION_BAR_WIDGET_KEY,
+			(tui, theme) => {
+				capturedTui = tui;
+				ensureViewportStability(tui);
+				return makeSessionBarWidget({
+					getAgents: () => agents.snapshot(),
+				})(tui, theme);
+			},
+			{ placement: "belowEditor" },
+		);
+		// ←/→ (empty composer, no active viewing state) enters the viewing
+		// session with the adjacent agent. While viewing, teammate's own hook
+		// consumes the arrows; while composing, they keep moving the cursor.
+		sessionBarNavDisposer?.();
+		sessionBarNavDisposer = ctx.ui.onTerminalInput((data) => {
+			if (data !== "\x1b[D" && data !== "\x1b[C") return undefined;
+			if (agents.snapshot().some((row) => row.viewing)) return undefined;
+			const text = ctx.ui.getEditorText();
+			if (text.trim() !== "") return undefined;
+			const roster = visibleAgentRows(agents.snapshot());
+			if (roster.length === 0) return undefined;
+			const target = data === "\x1b[C" ? roster[0] : roster[roster.length - 1];
+			pi.events.emit(TEAMMATE_OPEN_AGENT_EVENT, { correlationId: target.correlationId });
+			return { consume: true };
+		});
 	};
 
 	// --- teammate lifecycle (custom event bus; subscribed once for the extension lifetime) ---

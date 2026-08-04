@@ -35,7 +35,7 @@ export function terminalRows(tui: TUI): number | undefined {
 	}
 }
 
-function visibleAgentRows(rows: AgentRow[]): AgentRow[] {
+export function visibleAgentRows(rows: AgentRow[]): AgentRow[] {
 	const byId = new Map(rows.map((row) => [row.correlationId, row]));
 	return rows.filter((row) => !row.agent.startsWith("graph(")).map((row) => {
 		let parent = row.parentCorrelationId;
