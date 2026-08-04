@@ -30,7 +30,7 @@ type AutoAuthResult =
 function getAuthRequiredMessage(
   state: McpExtensionState,
   serverName: string,
-  defaultMessage = `Server "${serverName}" requires OAuth authentication. Run mcp({ action: "auth-start", server: "${serverName}" }) to get a browser URL, or /mcp-auth ${serverName} in an interactive local session.`,
+  defaultMessage = `Server "${serverName}" requires OAuth authentication. Run mcp({ action: "auth-start", server: "${serverName}" }) to get a browser URL, or /mcp auth ${serverName} in an interactive local session.`,
 ): string {
   return formatAuthRequiredMessage(state.config, serverName, defaultMessage);
 }
@@ -40,7 +40,7 @@ function getAuthFailedMessage(state: McpExtensionState, serverName: string, mess
   if (customGuidance) {
     return `OAuth authentication failed for "${serverName}": ${message}. ${getAuthRequiredMessage(state, serverName)}`;
   }
-  return `OAuth authentication failed for "${serverName}": ${message}. Run mcp({ action: "auth-start", server: "${serverName}" }) to get a browser URL, or /mcp-auth ${serverName} in an interactive local session.`;
+  return `OAuth authentication failed for "${serverName}": ${message}. Run mcp({ action: "auth-start", server: "${serverName}" }) to get a browser URL, or /mcp auth ${serverName} in an interactive local session.`;
 }
 
 function getRedirectPort(authorizationUrl: string): number | undefined {
@@ -95,7 +95,7 @@ async function attemptAutoAuth(
       message: getAuthRequiredMessage(
         state,
         serverName,
-        `Server "${serverName}" requires OAuth authentication. Run mcp({ action: "auth-start", server: "${serverName}" }) to get a browser URL, or /mcp-auth ${serverName} in an interactive local session.`,
+        `Server "${serverName}" requires OAuth authentication. Run mcp({ action: "auth-start", server: "${serverName}" }) to get a browser URL, or /mcp auth ${serverName} in an interactive local session.`,
       ),
     };
   }

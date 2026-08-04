@@ -404,6 +404,19 @@ export default function mcpAdapter(pi: ExtensionAPI): McpAdapterHandle {
           }
           break;
         }
+        case "auth":
+        case "login": {
+          const serverName = targetServer;
+          if (!serverName && !ctx.hasUI) {
+            return;
+          }
+          if (!serverName) {
+            await openMcpAuthPanel(state, pi, ctx, earlyConfigPath);
+            break;
+          }
+          await authenticateServer(serverName, state.config, ctx);
+          break;
+        }
         case "logout": {
           const serverName = rest;
           if (!serverName) {
@@ -427,37 +440,6 @@ export default function mcpAdapter(pi: ExtensionAPI): McpAdapterHandle {
           }
           break;
       }
-    },
-  });
-
-  pi.registerCommand("mcp-auth", {
-    description: "Authenticate with an MCP server (OAuth)",
-    handler: async (args, ctx) => {
-      const serverName = args?.trim();
-      if (!serverName && !ctx.hasUI) {
-        return;
-      }
-
-      if (!state && initPromise) {
-        try {
-          state = await awaitInitializedState();
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          if (ctx.hasUI) ctx.ui.notify(`MCP initialization failed: ${message}`, "error");
-          return;
-        }
-      }
-      if (!state) {
-        if (ctx.hasUI) ctx.ui.notify("MCP not initialized", "error");
-        return;
-      }
-
-      if (!serverName) {
-        await openMcpAuthPanel(state, pi, ctx, earlyConfigPath);
-        return;
-      }
-
-      await authenticateServer(serverName, state.config, ctx);
     },
   });
 

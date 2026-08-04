@@ -548,7 +548,9 @@ test("MCP manager accepts a complete pasted configuration document", async (t) =
 test("MCP adapter await sites use lifecycle-fenced initialization", async () => {
   const adapterSource = readFileSync(new URL("../src/mcp/index.ts", import.meta.url), "utf8");
   assert.doesNotMatch(adapterSource, /state\s*=\s*await initPromise/);
-  assert.equal((adapterSource.match(/await awaitInitializedState\(\)/g) ?? []).length, 4);
+  // mcp command handler, proxy tool execute, and logout path each fence init
+  // through awaitInitializedState (mcp-auth was folded into the mcp command).
+  assert.equal((adapterSource.match(/await awaitInitializedState\(\)/g) ?? []).length, 3);
   assert.match(adapterSource, /async openManager\(ctx\)/);
 
   const directSource = readFileSync(new URL("../src/mcp/direct-tools.ts", import.meta.url), "utf8");
@@ -571,7 +573,7 @@ test("MCP adapter 仅注册单一 MCP 管理入口", () => {
 
   mcpAdapter(pi);
 
-  assert.deepEqual([...commands], ["mcp", "mcp-auth"]);
+  assert.deepEqual([...commands], ["mcp"]);
   assert.ok(tools.has("mcp"));
   assert.ok(flags.has("mcp-config"));
   assert.ok(events.has("session_start"));

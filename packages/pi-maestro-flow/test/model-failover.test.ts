@@ -109,11 +109,11 @@ function writeProjectConfig(cwd: string, value: unknown): void {
   fs.writeFileSync(getProjectModelFailoverPath(cwd), JSON.stringify(value));
 }
 
-test("model failover registers both settings and health commands", () => {
+test("model failover registers the settings command with a status subcommand", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
   try {
     const runtime = harness(cwd);
-    assert.deepEqual(runtime.commands, ["model-failover", "model-health"]);
+    assert.deepEqual(runtime.commands, ["model-failover"]);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }

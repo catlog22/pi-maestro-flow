@@ -25,7 +25,7 @@ type DirectAutoAuthResult =
 function getDirectAuthRequiredMessage(
   state: McpExtensionState,
   serverName: string,
-  defaultMessage = `MCP server "${serverName}" requires OAuth authentication. Run mcp({ action: "auth-start", server: "${serverName}" }) to get a browser URL, or /mcp-auth ${serverName} in an interactive local session.`,
+  defaultMessage = `MCP server "${serverName}" requires OAuth authentication. Run mcp({ action: "auth-start", server: "${serverName}" }) to get a browser URL, or /mcp auth ${serverName} in an interactive local session.`,
 ): string {
   return formatAuthRequiredMessage(state.config, serverName, defaultMessage);
 }
@@ -35,7 +35,7 @@ function getDirectAuthFailedMessage(state: McpExtensionState, serverName: string
   if (customGuidance) {
     return `OAuth authentication failed for "${serverName}": ${message}. ${getDirectAuthRequiredMessage(state, serverName)}`;
   }
-  return `OAuth authentication failed for "${serverName}": ${message}. Run mcp({ action: "auth-start", server: "${serverName}" }) to get a browser URL, or /mcp-auth ${serverName} in an interactive local session.`;
+  return `OAuth authentication failed for "${serverName}": ${message}. Run mcp({ action: "auth-start", server: "${serverName}" }) to get a browser URL, or /mcp auth ${serverName} in an interactive local session.`;
 }
 
 async function attemptDirectAutoAuth(
@@ -58,7 +58,7 @@ async function attemptDirectAutoAuth(
       message: getDirectAuthRequiredMessage(
         state,
         serverName,
-        `MCP server "${serverName}" requires OAuth authentication. Run mcp({ action: "auth-start", server: "${serverName}" }) to get a browser URL, or /mcp-auth ${serverName} in an interactive local session.`,
+        `MCP server "${serverName}" requires OAuth authentication. Run mcp({ action: "auth-start", server: "${serverName}" }) to get a browser URL, or /mcp auth ${serverName} in an interactive local session.`,
       ),
     };
   }

@@ -296,7 +296,7 @@ Model calls are protected by a per-model circuit breaker with three states:
 | `OPEN` | The model is blocked after reaching the failure threshold (default: 3 consecutive failures); calls are rejected until the cooldown expires (default: 60 s) |
 | `HALF_OPEN` | After cooldown, one trial call is allowed; success resets to `CLOSED`, failure re-opens the circuit |
 
-The breaker prevents cascading failures when a model endpoint is down. Use `/model-health` (registered by `pi-maestro-flow`) to inspect live circuit state.
+The breaker prevents cascading failures when a model endpoint is down. Use `/model-failover status` (registered by `pi-maestro-flow`) to inspect live circuit state.
 
 ## Retry Resilience
 

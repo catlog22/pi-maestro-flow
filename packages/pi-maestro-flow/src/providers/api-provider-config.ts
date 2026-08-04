@@ -144,7 +144,7 @@ export interface ApiRetrySettings {
   maxRetries: number;
 }
 
-export type ApiProviderAction = "configure" | "delete" | "disable" | "enable" | "list" | "logout" | "reset" | "retry" | "show" | "toggle" | "vision";
+export type ApiProviderAction = "configure" | "delete" | "disable" | "effort" | "enable" | "list" | "logout" | "reset" | "retry" | "show" | "toggle" | "vision";
 export type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
@@ -189,6 +189,52 @@ export const PROVIDERS: readonly ProviderDefaults[] = [
 ];
 
 export const mutationQueues = new Map<string, Promise<void>>();
+
+/**
+ * Interactive thinking-effort picker backed by api-manager.json (defaultsPath).
+ * Shared by the /effort shortcut and the /api-manager effort action.
+ */
+async function adjustThinkingEffort(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  defaultsPath: string,
+): Promise<void> {
+  if (!ctx.model) {
+    ctx.ui.notify("当前没有模型，无法调整思考强度。", "warning");
+    return;
+  }
+  const current = pi.getThinkingLevel();
+  const levelMap = ctx.model.thinkingLevelMap;
+  const supportsMax = levelMap?.xhigh === "max" || levelMap?.max === "max";
+  const supported = [...new Set([
+    ...getSupportedThinkingLevels(ctx.model).filter(isThinkingLevel),
+    ...(supportsMax ? ["max" as ThinkingLevel] : []),
+  ])];
+  const labels = new Map<string, ThinkingLevel>();
+  const options = supported.map((level) => {
+    const label = `${level}${level === current ? "（当前）" : ""}`;
+    labels.set(label, level);
+    return label;
+  });
+  const choice = await ctx.ui.select(`选择思考强度（当前：${current}）`, options);
+  if (choice === undefined) return;
+  const selected = labels.get(choice);
+  if (!selected) return;
+  try {
+    await saveModelThinkingDefault(ctx.model.provider, ctx.model.id, selected, defaultsPath);
+  } catch (error) {
+    ctx.ui.notify(`思考强度保存失败：${errorMessage(error)}`, "error");
+    return;
+  }
+  try {
+    setPiThinkingLevel(pi, selected);
+  } catch (error) {
+    ctx.ui.notify(`思考强度应用失败：${errorMessage(error)}`, "error");
+    return;
+  }
+  syncEffortStatus(ctx, selected);
+  ctx.ui.notify(`思考强度已设为 ${selected}`, "info");
+}
 
 /**
  * Register API Providers through Pi's documented models.json contract. A Provider
@@ -236,43 +282,9 @@ export function registerApiProviderConfigs(
     },
   });
   pi.registerCommand("effort", {
-    description: "调整当前模型的思考强度",
+    description: "调整当前模型的思考强度（/api-manager effort 的快捷入口）",
     async handler(_args, ctx) {
-      if (!ctx.model) {
-        ctx.ui.notify("当前没有模型，无法调整思考强度。", "warning");
-        return;
-      }
-      const current = pi.getThinkingLevel();
-      const levelMap = ctx.model.thinkingLevelMap;
-      const supportsMax = levelMap?.xhigh === "max" || levelMap?.max === "max";
-      const supported = [...new Set([
-        ...getSupportedThinkingLevels(ctx.model).filter(isThinkingLevel),
-        ...(supportsMax ? ["max" as ThinkingLevel] : []),
-      ])];
-      const labels = new Map<string, ThinkingLevel>();
-      const options = supported.map((level) => {
-        const label = `${level}${level === current ? "（当前）" : ""}`;
-        labels.set(label, level);
-        return label;
-      });
-      const choice = await ctx.ui.select(`选择思考强度（当前：${current}）`, options);
-      if (choice === undefined) return;
-      const selected = labels.get(choice);
-      if (!selected) return;
-      try {
-        await saveModelThinkingDefault(ctx.model.provider, ctx.model.id, selected, defaultsPath);
-      } catch (error) {
-        ctx.ui.notify(`思考强度保存失败：${errorMessage(error)}`, "error");
-        return;
-      }
-      try {
-        setPiThinkingLevel(pi, selected);
-      } catch (error) {
-        ctx.ui.notify(`思考强度应用失败：${errorMessage(error)}`, "error");
-        return;
-      }
-      syncEffortStatus(ctx, selected);
-      ctx.ui.notify(`思考强度已设为 ${selected}`, "info");
+      await adjustThinkingEffort(pi, ctx, defaultsPath);
     },
   });
   if (typeof pi.on === "function") {
@@ -618,6 +630,14 @@ async function showApiProviderManager(
       return;
     }
     await showVisionDelegationManager(ctx, dirname(modelsPath));
+    return;
+  }
+  if (action === "effort") {
+    if (!ctx.hasUI) {
+      ctx.ui.notify("/api-manager effort 需要交互式 Pi 会话。", "warning");
+      return;
+    }
+    await adjustThinkingEffort(pi, ctx, defaultsPath);
     return;
   }
   if (action === "list") {

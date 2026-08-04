@@ -1814,7 +1814,6 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     },
   };
   pi.registerCommand("sysprompt", systemPromptCommand);
-  pi.registerCommand("systemprompt", systemPromptCommand);
 
   pi.registerCommand("export-session-info", {
     description:
@@ -2351,7 +2350,18 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       },
     },
   });
-  registerFlowSettingsProvider(pi.events, flowSettingsProvider);
+  // Settings providers re-register at each session boundary so a host reload
+  // cannot accumulate stale shared-bus listeners from previous instances
+  // (see issue ISS-20260803-005; cockpit follows the same pattern).
+  let flowSettingsDisposer: (() => void) | undefined;
+  const registerFlowSettings = (): void => {
+    if (flowSettingsDisposer) return;
+    flowSettingsDisposer = registerFlowSettingsProvider(pi.events, flowSettingsProvider);
+  };
+  const disposeFlowSettings = (): void => {
+    flowSettingsDisposer?.();
+    flowSettingsDisposer = undefined;
+  };
   const openApiManager = async (args: string, surface: string): Promise<void> => {
     const ctx = requireFlowSettingsContext(surface);
     if (ctx && apiProviderHandle) await apiProviderHandle.openManager(ctx as ExtensionCommandContext, args);
@@ -2365,10 +2375,24 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       "api.list": () => openApiManager("list", "API provider overview"),
     },
   });
-  registerApiManagerSettingsProvider(pi.events, apiManagerSettingsProvider);
-  pi.on("session_start", (_event, ctx) => { flowSettingsContext = ctx; });
+  let apiManagerSettingsDisposer: (() => void) | undefined;
+  const registerApiManagerSettings = (): void => {
+    if (apiManagerSettingsDisposer) return;
+    apiManagerSettingsDisposer = registerApiManagerSettingsProvider(pi.events, apiManagerSettingsProvider);
+  };
+  const disposeApiManagerSettings = (): void => {
+    apiManagerSettingsDisposer?.();
+    apiManagerSettingsDisposer = undefined;
+  };
+  pi.on("session_start", (_event, ctx) => {
+    flowSettingsContext = ctx;
+    registerFlowSettings();
+    registerApiManagerSettings();
+  });
   pi.on("session_shutdown", (_event, ctx) => {
     if (flowSettingsContext === ctx) flowSettingsContext = undefined;
+    disposeFlowSettings();
+    disposeApiManagerSettings();
   });
 
   const teammatePermissionBroker: TeammatePermissionBroker = async (call, ctx) => {

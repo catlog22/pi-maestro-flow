@@ -3701,10 +3701,21 @@ export default function registerTeammateExtension(
     }
   };
 
-  registerTeammateSettingsProvider({
-    on: (event, handler) => pi.events.on(event, handler),
-    emit: (event, payload) => pi.events.emit(event, payload),
-  }, teammateSettingsProvider);
+  // Settings providers re-register at each session boundary so a host reload
+  // cannot accumulate stale shared-bus listeners from previous instances
+  // (see issue ISS-20260803-005; cockpit follows the same pattern).
+  let teammateSettingsDisposer: (() => void) | undefined;
+  const registerTeammateSettings = (): void => {
+    if (teammateSettingsDisposer) return;
+    teammateSettingsDisposer = registerTeammateSettingsProvider({
+      on: (event, handler) => pi.events.on(event, handler),
+      emit: (event, payload) => pi.events.emit(event, payload),
+    }, teammateSettingsProvider);
+  };
+  const disposeTeammateSettings = (): void => {
+    teammateSettingsDisposer?.();
+    teammateSettingsDisposer = undefined;
+  };
 
   pi.registerCommand("teammate-session", {
     description: "Switch the main Pi conversation to a teammate session or return to main",
@@ -4101,6 +4112,7 @@ export default function registerTeammateExtension(
   // =========================================================================
 
   pi.on("session_start", (_event, ctx) => {
+    registerTeammateSettings();
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     widgetCtx = ctx;
     state.baseCwd = ctx.cwd;
@@ -4127,6 +4139,7 @@ export default function registerTeammateExtension(
   });
 
   pi.on("session_shutdown", () => {
+    disposeTeammateSettings();
     stopWidgetTimer();
     stopWakeableEvictionTimer();
     if (monitorPeerRefreshTimer) clearInterval(monitorPeerRefreshTimer);

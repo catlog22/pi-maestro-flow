@@ -101,12 +101,11 @@ After installation:
 | `/maestro-keybindings` | Shortcut conflict audit and fix |
 | `/hooks` | Hook trust review; `/hooks install` opens the installer |
 | `/mcp` | MCP server management |
-| `/mcp-auth` | MCP OAuth authentication flow |
+| `/mcp auth` | MCP OAuth authentication flow |
 | `/api-manager` | API provider configuration (models, retry settings) |
 | `/vision` | Vision delegation settings (model, fallbacks, cache, retries, timeout) |
 | `/effort` | Thinking effort level |
-| `/model-failover` | Model failover routing configuration |
-| `/model-health` | Circuit breaker health status |
+| `/model-failover` | Model failover routing configuration; `/model-failover status` shows circuit breaker health |
 | `/smart-search` | Smart Search provider configuration |
 | `/websearch`, `/curator` | Native web search and content curator |
 | `/skills` | Skill manager |
@@ -533,11 +532,11 @@ Pi compaction is extended with proactive capacity management:
 
 - **API retry settings** — `/api-manager` includes a `retry` action to view and toggle API retry behavior (enabled/disabled, max retries up to 12). Settings persist to `settings.json`.
 - **Circuit breaker** — model calls are protected by a circuit breaker that trips on repeated failures and automatically recovers after a cooldown period.
-- **Failover routing** — `/model-failover` configures automatic failover to backup models when the primary model is unavailable. `/model-health` shows live circuit breaker state.
+- **Failover routing** — `/model-failover` configures automatic failover to backup models when the primary model is unavailable. `/model-failover status` shows live circuit breaker state.
 
 ## MCP Auto-Auth
 
-MCP servers that require OAuth authentication are handled automatically: `/mcp-auth` manages the authentication flow, and the extension can auto-initiate OAuth when a server returns an authentication challenge during tool calls.
+MCP servers that require OAuth authentication are handled automatically: `/mcp auth` manages the authentication flow, and the extension can auto-initiate OAuth when a server returns an authentication challenge during tool calls.
 
 ## Architecture
 

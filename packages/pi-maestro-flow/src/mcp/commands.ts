@@ -106,7 +106,7 @@ export async function reconnectServers(
       const connection = await state.manager.connect(name, definition);
       if (connection.status === "needs-auth") {
         if (ctx.hasUI) {
-          ctx.ui.notify(`MCP: ${name} requires OAuth. Run /mcp-auth ${name} first.`, "warning");
+          ctx.ui.notify(`MCP: ${name} requires OAuth. Run /mcp auth ${name} first.`, "warning");
         }
         continue;
       }
@@ -218,7 +218,7 @@ export async function logoutServer(
   await state.manager.close(serverName);
   updateStatusBar(state);
 
-  const message = `OAuth credentials cleared for "${serverName}". Run /mcp-auth ${serverName} to authenticate again.`;
+  const message = `OAuth credentials cleared for "${serverName}". Run /mcp auth ${serverName} to authenticate again.`;
   if (ctx.hasUI) ctx.ui.notify(message, "info");
   return { ok: true, message };
 }

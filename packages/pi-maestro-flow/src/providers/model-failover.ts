@@ -373,8 +373,15 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
   };
 
   pi.registerCommand("model-failover", {
-    description: "Configure main-agent model circuit breaking and ordered fallback chains",
-    handler: async (_args, ctx) => {
+    description: "Configure main-agent model circuit breaking and ordered fallback chains; /model-failover status shows health",
+    handler: async (args, ctx) => {
+      const sub = args.trim().toLowerCase();
+      if (sub === "status" || sub === "health") {
+        config = loadModelFailoverConfig(ctx.cwd, options.homeDir);
+        const status = config.enabled ? "automatic failover enabled" : "automatic failover disabled";
+        ctx.ui.notify(`${status}\n${formatModelHealth(breaker)}`, "info");
+        return;
+      }
       if (!ctx.hasUI) {
         ctx.ui.notify("Model failover settings require interactive TUI mode.", "warning");
         return;
@@ -382,15 +389,6 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
       const { showModelFailoverOverlay } = await import("../tui/model-failover-settings.ts");
       const saved = await showModelFailoverOverlay(ctx, breaker);
       if (saved) config = loadModelFailoverConfig(ctx.cwd, options.homeDir);
-    },
-  });
-
-  pi.registerCommand("model-health", {
-    description: "Show model circuit-breaker health and automatic failover state",
-    handler: async (_args, ctx) => {
-      config = loadModelFailoverConfig(ctx.cwd, options.homeDir);
-      const status = config.enabled ? "automatic failover enabled" : "automatic failover disabled";
-      ctx.ui.notify(`${status}\n${formatModelHealth(breaker)}`, "info");
     },
   });
 
