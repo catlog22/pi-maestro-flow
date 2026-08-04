@@ -203,3 +203,14 @@ test("editor: onClear fires once when the draft is cleared", () => {
 	editor.handleInput("\x1b");
 	assert.equal(clears, 1);
 });
+
+test("editor: double-Escape and markers coexist (both features on)", () => {
+	const editor = makeEditor({ doubleEscapeClearInput: true, emitEditorMarkers: true });
+	editor.setText("draft");
+	editor.handleInput("\x1b");
+	editor.handleInput("\x1b");
+	assert.equal(editor.getText(), "", "double-Escape clears even with markers emitted");
+	const lines = editor.render(40);
+	assert.equal(lines[0], EDITOR_START_SENTINEL);
+	assert.equal(lines[lines.length - 1], EDITOR_END_SENTINEL);
+});

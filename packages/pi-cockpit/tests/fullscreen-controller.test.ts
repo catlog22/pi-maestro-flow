@@ -234,6 +234,17 @@ test("mouse lease pairs with an existing split-pane lease (ref-counted)", () => 
 	assert.ok(harness.writes.includes("\x1b[?1002l"), "disabled once the last lease releases");
 });
 
+test("compose strips the editor markers from the output", () => {
+	const transcript = Array.from({ length: 15 }, (_, i) => `r${i}`);
+	const harness = makeHarness(() => buildLines(transcript, EDITOR_BLOCK, CHROME), 20);
+	const controller = createFullscreenController({});
+	controller.attach(harness.tui);
+	const output = harness.render();
+	assert.equal(output.some((line) => line.includes(EDITOR_START_SENTINEL)), false);
+	assert.equal(output.some((line) => line.includes(EDITOR_END_SENTINEL)), false);
+	controller.dispose();
+});
+
 test("copy-on-select drag copies transcript text and wheel still scrolls", async () => {
 	const transcript = Array.from({ length: 15 }, (_, i) => `r${i}`);
 	const harness = makeHarness(() => buildLines(transcript, EDITOR_BLOCK, CHROME), 20);

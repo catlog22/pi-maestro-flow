@@ -6,6 +6,7 @@ import {
 	createTranscriptSelectionController,
 	type TranscriptSelectionController,
 } from "./transcript-selection.ts";
+import { registerTerminalCleanup } from "./terminal-cleanup.ts";
 
 export const COCKPIT_FULLSCREEN_WIDGET_KEY = "cockpit-fullscreen-anchor";
 export const COCKPIT_FULLSCREEN_MARKER = Symbol.for("pi-cockpit.fullscreen-render");
@@ -61,6 +62,7 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 	let wrappedRender: RenderFunction | undefined;
 	let mouseLease: MouseReportingLease | undefined;
 	let unsubscribeInput: (() => void) | undefined;
+	let cleanupTerminal: (() => void) | undefined;
 	let disposed = false;
 	// Lines-from-bottom viewport over the transcript. 0 = live follow.
 	let scrollOffset = 0;
@@ -247,6 +249,13 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 		} catch (error) {
 			reportError(error);
 		}
+		// Crash safety: restore the normal screen if the process dies while the
+		// alternate screen is active (reload/exit/SIGINT). Ref-counted owner.
+		try {
+			cleanupTerminal = registerTerminalCleanup((sequence) => nextTui.terminal.write(sequence));
+		} catch (error) {
+			reportError(error);
+		}
 		if (options.subscribeInput) {
 			try {
 				unsubscribeInput = options.subscribeInput(handleInput);
@@ -284,6 +293,8 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 				unsubscribeInput = undefined;
 			}
 			if (tui) flushMouseReportingWrites(tui);
+			cleanupTerminal?.();
+			cleanupTerminal = undefined;
 			selection.clear();
 			requestRender();
 			tui = undefined;

@@ -213,6 +213,10 @@ test("interaction settings describe with defaults off and complete bilingual key
 		assert.equal(activationByKey.get("doubleEscapeClearInput"), "extension-reload");
 		assert.equal(activationByKey.get("fullscreenInput"), "extension-reload");
 		assert.equal(activationByKey.get("copyOnSelect"), "live");
+		// Interaction matrix: the legacy pin option stays live and normal-mode only;
+		// all four defaults are off.
+		assert.equal(activationByKey.get("pinEditorBottom"), "live");
+		assert.equal(description.settings.find((s) => s.key === "pinEditorBottom")?.defaultValue, false);
 		const labelKeys = ["cockpit.doubleEscapeClearInput", "cockpit.fullscreenInput", "cockpit.copyOnSelect"];
 		const descriptionKeys = ["cockpit.doubleEscapeClearInput.description", "cockpit.fullscreenInput.description", "cockpit.copyOnSelect.description"];
 		for (const locale of ["en", "zh-CN"] as const) {

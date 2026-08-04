@@ -19,6 +19,7 @@ import {
 	type EditorBottomController,
 } from "./editor-bottom.ts";
 import { createCockpitClaudeEditorFactory } from "./claude-editor.ts";
+import { detectTerminalCompatibility } from "./terminal-capability.ts";
 import {
 	COCKPIT_FULLSCREEN_MARKER,
 	COCKPIT_FULLSCREEN_WIDGET_KEY,
@@ -596,6 +597,11 @@ export default function (pi: ExtensionAPI): void {
 		// Markers are emitted by the Cockpit custom editor; without it fullscreen
 		// cannot split the screen, so it stays inert (fail closed like the editor).
 		if (!claudeEditorInstalled) return;
+		const compatibility = detectTerminalCompatibility();
+		if (!compatibility.compatible) {
+			ctx.ui.notify(`Cockpit fullscreen input disabled: ${compatibility.reason}`, "warning");
+			return;
+		}
 		const controller = createFullscreenController({
 			subscribeInput: (handler) => ctx.ui.onTerminalInput(handler),
 			isCopyOnSelect: () => config.copyOnSelect,
