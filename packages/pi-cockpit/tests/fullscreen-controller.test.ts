@@ -39,6 +39,14 @@ function makeHarness(build: () => string[], rows = 20): FakeHarness {
 		render(width: number) {
 			return currentBuild();
 		},
+		// Diff-renderer baseline fields that seedBaseline resets.
+		previousLines: [] as string[],
+		previousWidth: -1,
+		previousHeight: -1,
+		previousViewportTop: 0,
+		maxLinesRendered: 0,
+		cursorRow: 0,
+		hardwareCursorRow: 0,
 	} as unknown as TUI;
 	return {
 		tui,
@@ -240,13 +248,24 @@ test("mouse lease pairs with an existing split-pane lease (ref-counted)", () => 
 	assert.ok(harness.writes.includes("\x1b[?1002l"), "disabled once the last lease releases");
 });
 
-test("enter and exit force a full redraw so the alternate screen is painted cleanly", () => {
-	const harness = makeHarness(() => buildLines([], EDITOR_BLOCK, CHROME), 20);
+test("attach seeds the alternate screen with the composed frame and resets the diff baseline", () => {
+	const harness = makeHarness(() => buildLines(Array.from({ length: 15 }, (_, i) => `r${i}`), EDITOR_BLOCK, CHROME), 20);
 	const controller = createFullscreenController({});
 	controller.attach(harness.tui);
-	assert.equal(harness.wasForceRendered(), true, "attach forces a full redraw into the alternate screen");
+	assert.ok(harness.writes.includes("\x1b[?1049h"), "enters the alternate screen");
+	// Direct entry write: clear + composed frame (editor + footer present).
+	const entry = harness.writes.join("");
+	assert.ok(entry.includes("\x1b[2J\x1b[H"), "clears and homes the alternate screen");
+	assert.ok(entry.includes("┌ editor"), "composed frame includes the editor");
+	assert.ok(entry.includes("[footer]"), "composed frame includes the footer");
+	assert.ok(!entry.includes("cockpit:editor"), "markers stripped from the entry frame");
+	// Diff baseline seeded to the composed frame so the next render only diffs.
+	const prev = (harness.tui as unknown as { previousLines: string[] }).previousLines;
+	assert.equal(prev.length, 20, "baseline is exactly the composed rows");
+	assert.ok(prev.some((l) => l.includes("┌ editor")), "baseline keeps the editor");
+	assert.ok(prev.some((l) => l.includes("[footer]")), "baseline keeps the footer");
 	controller.dispose();
-	assert.equal(harness.wasForceRendered(), true, "dispose forces a full redraw back on the main screen");
+	assert.ok(harness.writes.join("").includes("\x1b[?1049l"), "leaves the alternate screen on dispose");
 });
 
 test("compose strips the editor markers from the output", () => {

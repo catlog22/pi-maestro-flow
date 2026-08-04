@@ -56,6 +56,31 @@ function clamp(value: number, minimum: number, maximum: number): number {
 	return Math.min(maximum, Math.max(minimum, value));
 }
 
+/**
+ * Reset pi's differential-renderer baseline so the next frame diffs against the
+ * alternate screen's own content (exactly the seeded composed frame) instead of
+ * the main-screen document. Fields mirror TUI's render state; cast because they
+ * are not part of the public surface.
+ */
+function seedBaseline(tui: TUI, frame: string[], width: number): void {
+	const state = tui as unknown as {
+		previousLines: string[];
+		previousWidth: number;
+		previousHeight: number;
+		previousViewportTop: number;
+		maxLinesRendered: number;
+		cursorRow: number;
+		hardwareCursorRow: number;
+	};
+	state.previousLines = frame;
+	state.previousWidth = width;
+	state.previousHeight = Math.max(1, Math.trunc(tui.terminal.rows) || 1);
+	state.previousViewportTop = 0;
+	state.maxLinesRendered = frame.length;
+	state.cursorRow = Math.max(0, frame.length - 1);
+	state.hardwareCursorRow = Math.max(0, frame.length - 1);
+}
+
 export function createFullscreenController(options: FullscreenControllerOptions = {}): FullscreenController {
 	const owner = {};
 	let tui: TUI | undefined;
@@ -152,7 +177,8 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 			visibleTranscript[transcriptHeight - 1] = NEW_OUTPUT_HINT.replace("{n}", String(pendingLines));
 			hintRow = transcriptHeight; // 1-indexed row just above the editor block
 		}
-		return [...visibleTranscript, ...editorBlock, ...chrome];
+		const result = [...visibleTranscript, ...editorBlock, ...chrome];
+		return result;
 	};
 
 	const scrollBy = (delta: number): void => {
@@ -268,12 +294,22 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 		scrollOffset = 0;
 		pendingLines = 0;
 		lastTranscriptLength = -1;
-		// Force a full redraw: the alternate screen is a fresh (blank) surface, so
-		// a differential render against the main-screen previousLines would skip
-		// "unchanged" rows that were never painted here, hiding the editor and the
-		// fixed dock. requestRender(true) resets previousLines/width/height so the
-		// next frame clears and writes the composed rows exactly once.
-		requestRender(true);
+		// Deterministic entry (OpenTUI's invalidate()+present() pattern): the
+		// alternate screen is a fresh blank surface, but pi's differential renderer
+		// keeps the main-screen baseline and can race an in-flight render across
+		// the surface switch — skipping rows that were never painted (the editor
+		// and fixed dock vanish). Seed the alt screen with the composed frame
+		// directly and reset pi's diff baseline to that frame, so subsequent
+		// renders only write changed rows (no flicker, no full redraw per frame).
+		try {
+			const width = nextTui.terminal.columns;
+			const frame = compose(previousRender.call(nextTui, width), nextTui.terminal.rows);
+			nextTui.terminal.write(`\x1b[2J\x1b[H${frame.join("\r\n")}\r\n`);
+			seedBaseline(nextTui, frame, width);
+		} catch (error) {
+			reportError(error);
+			requestRender(true);
+		}
 	};
 
 	return {
