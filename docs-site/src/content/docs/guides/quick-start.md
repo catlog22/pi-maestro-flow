@@ -74,7 +74,7 @@ teammate({
 | `/cockpit` | Cockpit 设置覆盖层 |
 | `/api-manager` | API Provider 管理 |
 | `/mcp` | MCP 服务器管理 |
-| Alt+S / `/smart-search-config` | 搜索 Provider 配置 |
+| Alt+S / `/smart-search config` | 搜索 Provider 配置 |
 
 ## 6. 下一步
 

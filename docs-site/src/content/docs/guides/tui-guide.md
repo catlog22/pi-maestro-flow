@@ -94,11 +94,11 @@ settings
 | `enabled` | boolean | `true` | Cockpit 总开关 |
 | `quietMode` | boolean | `false` | Quiet 模式（压缩工具输出/折叠思考） |
 | `quietSymbols` | enum | `check` | `check`（✓/✗/⋯）或 `dot`（●/○/◌） |
-| `toolPalette` | enum | `classic` | `classic` / `family` / `readwrite` / `search` / `mono` |
+| `toolPalette` | enum | `family` | `classic` / `family` / `readwrite` / `search` / `mono` |
 | `agentsMode` / `todoMode` | enum | `list` | `list` / `compact` |
 | `todoExpanded` | boolean | `false` | Todo 默认展开 |
 | `hideNativeAgents` | boolean | `true` | 隐藏原生 Agent 组件 |
-| `sidebar.mode` | enum | `auto` | `auto` / `on` / `off` |
+| `sidebar.mode` | enum | `off` | `auto` / `on` / `off` |
 | `sidebar.width` | integer | `40` | 侧栏宽度（32-56） |
 | `sidebar.density` | enum | `comfortable` | `comfortable` / `compact` |
 | `icons.mode` | enum | `auto` | `auto` / `nerd` / `ascii` |
@@ -112,7 +112,7 @@ settings
 |------|--------|------|------|
 | API | `api.providers` | list | Provider 列表 CRUD（启用/停用/编辑） |
 | API | `api.retry.enabled` | boolean | API 重试开关（默认 `true`） |
-| API | `api.retry.maxRetries` | integer | 最大重试次数（默认 `12`） |
+| API | `api.retry.maxRetries` | integer | 最大重试次数（默认 `5`） |
 | API | `api.overview` | overview | Provider 只读诊断视图 |
 | MCP | `mcp.servers` | list | MCP 服务器（启用/停用/删除/导入） |
 | MCP | `mcp.editConfig` | action | 打开配置文件编辑器 |
@@ -190,7 +190,7 @@ api
 failover
 ```
 
-## 5. Smart Search 配置 `Alt+S` / `/smart-search-config`
+## 5. Smart Search 配置 `Alt+S` / `/smart-search config`
 
 | 按键 | 说明 |
 |------|------|
@@ -224,7 +224,7 @@ smartsearch
 mcp
 ```
 
-## 7. Hooks 安装器 `/maestro-hooks`
+## 7. Hooks 安装器 `/hooks`
 
 | 按键 | 说明 |
 |------|------|

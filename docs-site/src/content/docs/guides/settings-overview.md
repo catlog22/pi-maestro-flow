@@ -76,7 +76,7 @@ flowchart LR
 | `/cockpit` | Cockpit 设置覆盖层 |
 | `/api-manager` | API Provider 管理（启用/停用、请求头编辑） |
 | `/mcp` | MCP 服务器管理 |
-| `/smart-search-config` / Alt+S | Smart Search 配置 |
+| `/smart-search config` / Alt+S | Smart Search 配置 |
 | Alt+M / `/teammate-models` | taskType → 模型映射 |
 
 > 以上全部 TUI 的完整按键映射与操作流程见 [TUI 操作指南](/guides/tui-guide)。

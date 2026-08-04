@@ -51,7 +51,7 @@ teammate({
 task model > 顶层 model > taskType 映射 > 角色 model > 父 Pi 模型
 ```
 
-> `taskType` 只影响模型路由，不改变角色行为。自定义 Agent 可声明新的小写类型标识，Control Center 自动合并。
+> `taskType` 只影响模型路由，不改变角色行为。自定义 Agent 可声明新的小写类型标识，Control Center（`Alt+M` / `/teammate-models` 模型映射覆盖层，见 [TUI 操作指南](/guides/tui-guide)）自动合并。
 
 ## DAG 依赖图
 
@@ -112,8 +112,8 @@ observe({ action: "watch", targets: [{ kind: "teammate", id: "reviewer" }], time
 | 工具 | 用途 |
 |------|------|
 | `teammate-list` | 列出 Agent（`view: active / named / all / roles`） |
-| `teammate-watch` | 查看最近输出、工具活动、收件箱（`lines` 控制行数） |
-| `teammate-wait` | 事件驱动等待完成（`timeoutMs`）或固定延迟（`waitMs`） |
+| `teammate-watch` | 查看最近输出、工具活动、收件箱（`lines` 控制行数）——旧版工具，需 `PI_TEAMMATE_LEGACY_OBSERVATION_TOOLS=1`，新代码用 `observe` 替代 |
+| `teammate-wait` | 事件驱动等待完成（`timeoutMs`）或固定延迟（`waitMs`）——旧版工具，需 `PI_TEAMMATE_LEGACY_OBSERVATION_TOOLS=1`，新代码用 `observe` 替代 |
 | `teammate-send` | 发送消息（`follow_up` 排队 / `steer` 中断 / `abort` 终止） |
 
 ```javascript
@@ -137,7 +137,7 @@ teammate({
 
 优先级：任务级 `thinking` → 顶层 → `taskType` 映射 → Agent frontmatter → Pi 默认。
 
-> 注意：不同模型支持的思考级别范围不同。例如 `deepseek/deepseek-v4-flash` 仅支持 `off` 和 `high`，而 `maestro-openai/gpt-5.6-sol` 支持全部级别。
+> 注意：不同模型支持的思考级别范围不同，且由运行时模型目录动态决定（见[模型路由](/guides/model-routing)）。
 
 ## maestro — 知识感知调度
 

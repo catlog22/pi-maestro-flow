@@ -42,7 +42,7 @@ describe_image({ image_path: "截图.png", prompt: "分析重点" })
 
 ## 配置文件
 
-持久化于 `~/.pi/agent/vision-delegation.json`（首次运行自动创建）：
+持久化于 `~/.pi/agent/vision-delegation.json`（首次修改设置时自动创建）：
 
 ```json
 {

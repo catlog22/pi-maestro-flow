@@ -42,7 +42,7 @@ goal({ action: "complete", summary: "所有模块已实现并通过测试" })
 
 ### Goal 面板
 
-Goal 存在时，输入编辑器上方渲染 `goal-panel`：状态（ACTIVE / WAITING / VERIFYING / VERIFIED / STOPPED / BUDGET / BLOCKED / ERROR）、目标描述、已用时间、循环次数、Token 预算（未配置时不显示）。
+Goal 存在时，输入编辑器上方渲染 `goal-panel`：状态（ACTIVE / WAITING / VERIFYING / VERIFIED / STOPPED / BUDGET / BLOCKED）、目标描述、已用时间、循环次数、Token 预算（未配置时不显示）。
 
 ## 2. Plan — 先批准再动手
 

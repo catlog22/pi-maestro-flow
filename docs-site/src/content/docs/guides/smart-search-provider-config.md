@@ -77,7 +77,7 @@ TUI 编辑时自动识别：`$VAR` → `(env var)`，`!cmd` → `(shell command)
 
 ## TUI 操作
 
-`Alt+S` 或 `/smart-search-config` 打开：
+`Alt+S` 或 `/smart-search config` 打开：
 
 - **输入关键词** 过滤配置项（如 `exa`、`gemini`、`brave`）；
 - **Enter** 编辑选中项；

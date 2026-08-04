@@ -40,7 +40,7 @@ icon: "🔑"
 | 项 | 默认 | 说明 |
 |----|------|------|
 | `retry.enabled` | `true` | 是否启用 API 重试 |
-| `retry.maxRetries` | 12（上限） | 最大重试次数 |
+| `retry.maxRetries` | `5` | 最大重试次数（CLI `/api-manager retry` 上限 5；设置面板上限 10） |
 
 > 默认思考级别：`medium`。不同模型支持的级别范围不同（见[模型路由](/guides/model-routing)）。
 
@@ -82,7 +82,7 @@ icon: "🔑"
 - **电路断路器**：连续失败触发熔断，避免打爆配额；
 - **自动故障转移**：熔断后按 `fallbackModels` 链切换；
 - **图片触发切换**：附加图片时可按路由切到 Vision 模型，完成后恢复原模型（`imageTriggered` / `originalModel`）；
-- **事件记录**：切换与结算事件写入 `model-failover-events`，可用 `maestro` 工具查看；
+- **事件记录**：切换与结算事件写入 `model-failover-events.jsonl`，可用 `/model-failover status` 查看；
 - **终态广播**：计划内回退交接彻底失败时发布 `maestro-failover-terminal` 事件。
 
 ### 恢复协议

@@ -76,7 +76,7 @@ observe({ action: "watch", targets: [{ kind: "teammate", id: "reviewer" }], time
 | `detail` | `summary` / `tail` / `full` 输出详情级别 |
 | `lines` | 每个 target 的最近输出行数 |
 
-> `wait` 的每个 target 必须提供 `name` 或 `waitMs` 之一（schema 强制）。
+> `wait` 的目标统一为 `{ kind, id }` 形式；`name` / `waitMs` 二选一约束仅适用于旧版 `teammate-wait` 工具。
 
 ### 观察目标类型
 

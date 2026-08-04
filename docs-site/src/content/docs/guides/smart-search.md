@@ -7,7 +7,7 @@ icon: "🔍"
 
 ---
 
-## 三种模式
+## 模式概览
 
 | 模式 | 用途 | 关键参数 |
 |------|------|---------|
@@ -60,7 +60,7 @@ smart_search({ mode: "search", query: "your query" })   // 开箱即用
 
 ## 配置界面
 
-通过 `Alt+S` 或 `/smart-search-config` 打开 TUI 配置界面：
+通过 `Alt+S`（需宿主支持）或 `/smart-search config` 打开 TUI 配置界面：
 
 - **输入关键词** 过滤配置项（如 `exa`、`gemini`、`brave`）；
 - **Enter** 编辑选中项；

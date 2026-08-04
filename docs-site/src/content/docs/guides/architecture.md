@@ -67,7 +67,7 @@ maestro load --type <type> [--id <id>]
 |--------|------|
 | **Compaction 容量管理** | 上下文达到阈值自动修剪，防止长会话溢出 |
 | **模型熔断与故障转移** | 电路断路器保护 API 调用，自动切备用模型 |
-| **GUI 子系统（UCL）** | `PI_GUI=1` 启用，HTTP 工具发现/调用 + SSE 事件 |
+| **GUI 子系统（UCL）** | `PI_GUI=1` 启用，UCL（Unified Communication Layer，统一通信层）HTTP 工具发现/调用 + SSE 事件 |
 | **TUI 界面组件** | Goal 面板、Todo 覆盖层、进度树、状态栏等 |
 | **权限系统** | 5 种模式 + 细粒度 allow/ask/deny + 子进程 IPC 中继 |
 

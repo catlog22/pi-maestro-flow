@@ -25,15 +25,14 @@ icon: "🪝"
 ### 配置与信任
 
 ```bash
-# 查看/安装预设钩子（TUI 引导）
-/maestro-hooks
+# 打开 Hooks 安装器（TUI 引导，可安装/卸载预设钩子）
+/hooks
 
-# 信任 / 撤销信任钩子配置
-/maestro-hooks trust
-/maestro-hooks revoke
+# 撤销已授予的钩子信任（信任通过首次加载时的 TUI 审查授予）
+/hooks revoke
 ```
 
-钩子配置经过 Schema 校验（`validateCodexHooks`），非法配置直接报错（fail-closed），不会半启用。
+钩子配置经过 Schema 校验（`validateCodexHooks`），非法配置直接报错（fail-closed），不会半启用。首次加载时配置需经信任审查（`trustHookConfig`），可随时撤销（`revokeHookConfigTrust`）。
 
 > 安装器 TUI 的完整按键（`/` 筛选、`Space` 勾选、`A` 应用、`U` 卸载）见 [TUI 操作指南](/guides/tui-guide)。
 

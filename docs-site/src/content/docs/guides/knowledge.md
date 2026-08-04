@@ -5,6 +5,8 @@ icon: "🧠"
 
 持久化知识系统确保 Agent 在接触代码前拥有完整的项目上下文：语义搜索、Spec 规范与 Knowhow 经验沉淀，跨会话存活。
 
+> **执行边界**：本文的命令分三种界面——`bash` 代码块中的 `maestro search/load` 由 Agent 经 `bash_bg` 以 CLI 方式执行（区别于 teammate-dispatch 中模型侧 `maestro({ action: ... })` 工具的 explore/delegate/moa 三个 action）；`/maestro-spec`、`/maestro-knowhow` 是用户在 Pi 会话中输入的斜杠命令；`maestro spec supersede ...` 等维护命令同样是 Agent 侧 CLI。
+
 ---
 
 ## 强制知识门

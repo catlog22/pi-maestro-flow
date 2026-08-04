@@ -12,7 +12,7 @@ icon: "🌿"
 | 变量 | 说明 |
 |------|------|
 | `PI_CODING_AGENT_DIR` | 覆盖 agent 目录（默认 `~/.pi/agent`）——settings.json、cockpit.json、vision-delegation.json、model-failover.json 均位于此 |
-| `PI_GUI` | 设为 `1` 启用 GUI sidecar（UCL：`GET /tools`、`POST /tools/:name`、SSE 事件）；未启用时零侵入 |
+| `PI_GUI` | 设为 `1` 启用 GUI sidecar（UCL——Unified Communication Layer 统一通信层：`GET /tools` 工具发现、`POST /tools/:name` 工具调用、SSE 状态事件）；未启用时零侵入 |
 | `PI_GUI_PORT` | GUI sidecar 端口 |
 | `PI_GUI_DEBUG` | GUI 调试输出 |
 

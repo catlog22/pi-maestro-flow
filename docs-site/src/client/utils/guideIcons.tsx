@@ -305,7 +305,7 @@ const iconMap: Record<string, React.FC<IconProps>> = {
 };
 
 export function getGuideIcon(iconName: string, className = 'w-3.5 h-3.5') {
-  const Icon = iconMap[iconName];
+  const Icon = iconMap[iconName] ?? iconMap['book-open'];
   if (!Icon) return null;
   return <Icon className={className} />;
 }

@@ -131,8 +131,13 @@ const components: Components = {
     // Internal guide link (./foo-guide.md) → client-side route to /guides/{slug}
     const basename = href ? (href.split('/').pop() || '') : '';
     const guideSlug = basename.endsWith('.md') ? guideFileToSlug.get(basename) : undefined;
-    if (guideSlug && href && !/^[a-z][a-z0-9+.-]*:\/\//i.test(href)) {
+    const isExternal = href ? /^[a-z][a-z0-9+.-]*:\/\//i.test(href) : false;
+    if (guideSlug && href && !isExternal) {
       return <Link to={`/guides/${guideSlug}`} className="text-accent-blue font-[var(--font-weight-medium)] no-underline hover:underline">{children}</Link>;
+    }
+    // Absolute internal guide links (/guides/xxx) also use SPA routing (no new tab / full reload)
+    if (href && href.startsWith('/guides/') && !isExternal) {
+      return <Link to={href} className="text-accent-blue font-[var(--font-weight-medium)] no-underline hover:underline">{children}</Link>;
     }
     return <a href={href} className="text-accent-blue font-[var(--font-weight-medium)] no-underline hover:underline" target="_blank" rel="noopener noreferrer">{children}</a>;
   },

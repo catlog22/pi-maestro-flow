@@ -30,7 +30,7 @@ pi-cockpit 提供编辑器上方实时状态堆栈 + Starship 风格 Footer，�
   "hideNativeAgents": true,
   "icons": { "mode": "auto" },
   "sidebar": {
-    "mode": "auto",
+    "mode": "off",
     "width": 40,
     "density": "comfortable"
   },
@@ -66,7 +66,7 @@ pi-cockpit 提供编辑器上方实时状态堆栈 + Starship 风格 Footer，�
 
 | 键 | 默认 | 说明 |
 |----|------|------|
-| `sidebar.mode` | `"auto"` | `auto`/`on` 在主列 ≥72 + 侧栏 ≥32 时启用停靠；`off` 始终用组件 |
+| `sidebar.mode` | `"off"` | `auto`/`on` 在主列 ≥72 + 侧栏 ≥32 时启用停靠；`off` 始终用组件（默认） |
 | `sidebar.width` | `40` | 停靠宽度，钳制在 `32..56` |
 | `sidebar.density` | `"comfortable"` | `comfortable` 或 `compact` |
 

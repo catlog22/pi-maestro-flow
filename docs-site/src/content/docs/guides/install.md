@@ -48,7 +48,7 @@ pi install npm:pi-maestro-flow@<新版本>   # 升级到指定版本
 | 来源包 | 工具 | 用途 |
 |--------|------|------|
 | pi-maestro-teammate | `teammate` | 多智能体调度（单任务/并行/DAG） |
-| pi-maestro-teammate | `teammate-send` / `teammate-list` / `teammate-watch` / `teammate-wait` | Agent 控制 |
+| pi-maestro-teammate | `teammate-send` / `teammate-list` | Agent 控制（`teammate-watch` / `teammate-wait` 为旧版，需 `PI_TEAMMATE_LEGACY_OBSERVATION_TOOLS=1`，新代码用 `observe`） |
 | pi-maestro-flow | `maestro` | 知识感知调度（explore / delegate / moa） |
 | pi-maestro-flow | `goal` | 长时目标生命周期管理 |
 | pi-maestro-flow | `todo` | 任务分解与跟踪 |
