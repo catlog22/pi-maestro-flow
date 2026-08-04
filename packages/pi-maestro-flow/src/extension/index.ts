@@ -223,6 +223,7 @@ import {
   type TeammatePermissionBroker,
 } from "pi-maestro-teammate/v1/child-extensions";
 import { TEAMMATE_STARTED_EVENT, TEAMMATE_MESSAGE_EVENT, TEAMMATE_COMPLETE_EVENT } from "pi-maestro-teammate/v1/types";
+import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
 import { sharedModelCircuitBreaker } from "pi-maestro-teammate/v1/retry";
 import { createFlowSettingsProvider, registerFlowSettingsProvider } from "../settings/flow-settings-provider.ts";
 import {
@@ -360,6 +361,17 @@ export function todoActorFromTeammateStarted(event: unknown): TodoActorRef | und
   };
 }
 
+/**
+ * Access the teammate extension's published v1 mailbox registry (durable task
+ * notification + pending-count + capability negotiation for teammate agents).
+ * Available only while the teammate extension runs an active mailbox in this
+ * process (root host, mailbox not disabled); undefined otherwise.
+ */
+export function mailboxRegistry(): MailboxHostRegistry | undefined {
+  const bridge = globalThis as typeof globalThis & Record<symbol, unknown>;
+  return bridge[Symbol.for("pi-maestro-teammate.mailbox-registry")] as MailboxHostRegistry | undefined;
+}
+
 function parseGoalActionParams(params: Record<string, unknown>): GoalActionParams | undefined {
   const action = params.action;
   if (action === "get") return { action };
@@ -410,7 +422,7 @@ const RESOURCE_TOOL_GUIDANCE = [
   "  - issue://owner/repo/N or issue://N — GitHub issues (requires gh CLI)",
   "  - skill://name — installed skill's SKILL.md",
   "  - rule://name — project rule files (agents/rules/cursor/cline)",
-  "  - agent://<id>[/json/path] — structured output of a completed teammate subagent",
+  "  - agent://<id>[/key[/index[/field]]] — structured output of a completed teammate subagent (bare agent://<id> returns the full JSON; path segments are object keys / array indices, no /json prefix)",
   "The built-in read tool handles only local files and ordinary URLs.",
 ].join("\n");
 

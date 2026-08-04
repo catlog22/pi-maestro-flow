@@ -83,7 +83,7 @@ export class MailboxRouter {
   readonly #quota: QuotaAdmission;
   readonly #workspaceId: string | undefined;
   readonly #now: () => number;
-  #senderSeq = 0;
+  #senderSeqBySender = new Map<string, number>();
 
   constructor(options: MailboxRouterOptions) {
     this.#store = options.store;
@@ -141,6 +141,8 @@ export class MailboxRouter {
     // 4. Build envelope
     const messageId = randomUUID();
     const ttlMs = ttlForKind(request.kind);
+    const senderSeq = (this.#senderSeqBySender.get(request.senderId) ?? 0) + 1;
+    this.#senderSeqBySender.set(request.senderId, senderSeq);
     const envelopeBase: Omit<MailboxEnvelope, "hash"> = {
       messageId,
       schemaVersion: MAILBOX_SCHEMA_VERSION,
@@ -152,7 +154,7 @@ export class MailboxRouter {
       kind: request.kind,
       mode: request.mode,
       priority,
-      senderSeq: ++this.#senderSeq,
+      senderSeq,
       createdAt: now,
       expiresAt: now + ttlMs,
       ttlMs,
@@ -189,7 +191,7 @@ export class MailboxRouter {
       if (message.includes("payload exceeds")) {
         return { ok: false, code: "payload_too_large", message };
       }
-      if (message.includes("exceeds")) {
+      if (message.includes("envelope exceeds")) {
         return { ok: false, code: "envelope_too_large", message };
       }
       throw error;

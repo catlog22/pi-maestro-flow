@@ -61,12 +61,13 @@ export declare class MailboxRollout {
         path: "v1" | "v2" | "shadow";
         result: MailboxEnqueueResult | {
             ok: true;
-            messageId: string;
+            messageId?: string;
             state: "ready";
         };
     }>;
     /**
-     * Check if v2 files exist (for drain verification before cleanup).
+     * Check if v2 files still need draining (live messages only — applied/dead
+     * receipts are garbage-collected and do not block cleanup).
      */
     hasV2Files(): Promise<boolean>;
 }

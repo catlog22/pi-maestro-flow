@@ -111,10 +111,10 @@ export class MailboxRollout {
     payload: string;
     requestId?: string;
     correlationId?: string;
-  }): Promise<{ path: "v1" | "v2" | "shadow"; result: MailboxEnqueueResult | { ok: true; messageId: string; state: "ready" } }> {
+  }): Promise<{ path: "v1" | "v2" | "shadow"; result: MailboxEnqueueResult | { ok: true; messageId?: string; state: "ready" } }> {
     switch (this.#config.mode) {
       case "disabled": {
-        // Pure v1 direct path
+        // Pure v1 direct path — no durable message exists, so no messageId.
         await this.#directDeliver({
           recipientCorrelationId: request.recipientCorrelationId,
           payload: request.payload,
@@ -122,7 +122,7 @@ export class MailboxRollout {
         });
         return {
           path: "v1",
-          result: { ok: true, messageId: "direct-" + Date.now(), state: "ready" },
+          result: { ok: true, state: "ready" },
         };
       }
 
@@ -151,12 +151,11 @@ export class MailboxRollout {
   }
 
   /**
-   * Check if v2 files exist (for drain verification before cleanup).
+   * Check if v2 files still need draining (live messages only — applied/dead
+   * receipts are garbage-collected and do not block cleanup).
    */
   async hasV2Files(): Promise<boolean> {
     const live = await this.#service.store.countLive();
-    const applied = await this.#service.store.count("applied");
-    const dead = await this.#service.store.count("dead");
-    return live > 0 || applied > 0 || dead > 0;
+    return live > 0;
   }
 }

@@ -422,8 +422,8 @@ test("service start/stop is idempotent", async () => {
 test("pendingCount reflects undelivered messages", async () => {
   const service = new MailboxService(makeServiceOptions({
     onDispatch: async () => { throw new Error("no dispatch"); },
+    pollMs: 500, // slow poll: message stays live in ready during the check
   }));
-  service.on("dispatch-error", () => {}); // suppress unhandled
   await service.start();
 
   assert.equal(await service.pendingCount(), 0);

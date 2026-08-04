@@ -276,7 +276,11 @@ import {
 import { COCKPIT_PREEMPT_RESIZE_EVENT } from "../shared/cockpit-events.ts";
 import type { TeammateRuntimeOptions, ProgressFlushGate, AgentWidgetTheme, AgentWidgetRow, AgentSelectorRow, PendingChildProxyRequest, ChildProxyPendingRequests, IpcSender } from "./teammate-core.ts";
 import { buildHistoryRows, historyRowKey } from "./teammate-core.ts";
-import { MailboxHost, mailboxModeFromEnv, MAILBOX_ENV_VAR } from "./mailbox/host.ts";
+import { MailboxHost, mailboxModeFromEnv } from "./mailbox/host.ts";
+import { createMailboxHostRegistry } from "../public/v1/mailbox.ts";
+
+/** Shared-process bridge key: the root host publishes the live v1 mailbox registry here. */
+export const MAILBOX_REGISTRY_KEY = Symbol.for("pi-maestro-teammate.mailbox-registry");
 
 
 export default function registerTeammateExtension(
@@ -982,11 +986,11 @@ export default function registerTeammateExtension(
   const workspaceIdForCwd = (cwd: string | undefined): string =>
     cwd ? createHash("sha256").update(cwd, "utf8").digest("hex") : "0".repeat(64);
 
-  const createMailboxHost = (): MailboxHost | undefined => {
+  const createMailboxHost = (): MailboxHost => {
     const rootCorrelationId = state.activeRuns.values().next().value?.correlationId;
     const workspaceId = workspaceIdForCwd(state.baseCwd);
     mailboxWorkspaceId = workspaceId;
-    return new MailboxHost({
+    const host = new MailboxHost({
       rootDir: join(homedir(), ".pi", "teammate", "mailbox"),
       state,
       rootCorrelationId,
@@ -1002,6 +1006,10 @@ export default function registerTeammateExtension(
       },
       mode: mailboxMode,
     });
+    // Publish the v1 registry so external consumers (the Flow host) can enqueue
+    // durable task notifications through the same mailbox the extension uses.
+    rootGlobals[MAILBOX_REGISTRY_KEY] = createMailboxHostRegistry(host.service, "v2");
+    return host;
   };
 
   /** Rebind the mailbox host when the workspace (derived from cwd) changes. */
@@ -1657,6 +1665,7 @@ export default function registerTeammateExtension(
             const target = state.activeRuns.get(result.correlationId) ?? activeAgent;
             target.resolvedModel = target.resolvedModel ?? result.model;
             if (result.attemptedModels) target.attemptedModels = [...result.attemptedModels];
+            if (result.structuredOutput !== undefined) target.structuredOutput = result.structuredOutput;
             const lastMessage = displayMessageForResult(result);
             const settle = isMultiTask ? settleGraphTaskAgent : settleAgent;
             settle(
@@ -4518,6 +4527,7 @@ export default function registerTeammateExtension(
     const stoppedMailbox = mailboxHost;
     mailboxHost = undefined;
     mailboxWorkspaceId = undefined;
+    rootGlobals[MAILBOX_REGISTRY_KEY] = undefined;
     void stoppedMailbox?.stop().catch((error) => {
       console.error(`[pi-maestro-teammate] mailbox host stop failed:`, error);
     });

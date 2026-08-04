@@ -8,5 +8,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 export * from "./teammate-core.ts";
 import type { TeammateRuntimeOptions } from "./teammate-core.ts";
+/** Shared-process bridge key: the root host publishes the live v1 mailbox registry here. */
+export declare const MAILBOX_REGISTRY_KEY: unique symbol;
 export default function registerTeammateExtension(pi: ExtensionAPI, runtimeOptions?: TeammateRuntimeOptions): void;
 export * from "./teammate-helpers.ts";

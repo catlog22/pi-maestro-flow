@@ -123,7 +123,7 @@ async function renameWithRetry(temporary: string, path: string): Promise<void> {
 async function writeJsonAtomic(path: string, value: unknown, maxBytes: number): Promise<void> {
   const payload = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
   if (payload.byteLength > maxBytes) {
-    throw new Error(`payload exceeds ${maxBytes} byte limit (${payload.byteLength} bytes)`);
+    throw new Error(`envelope exceeds ${maxBytes} byte limit (${payload.byteLength} bytes)`);
   }
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;

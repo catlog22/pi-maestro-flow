@@ -327,7 +327,7 @@ observe({ action: "watch", targets: [{ kind: "teammate", id: "reviewer" }], time
 
 ## Mailbox Message Queue
 
-A durable, per-workspace-isolated message queue backing cross-session delivery (staging → ready → claimed → accepted, atomic writes + idempotent receipts). Cold resume stays synchronous when the mailbox is authoritative; Windows file-lock renames retry automatically and orphaned state records are garbage-collected. External consumers integrate through the `pi-maestro-teammate/v1/mailbox` subpath (host registry + capability negotiation).
+A durable, per-workspace-isolated message queue backing cross-session delivery (staging → ready → claimed → accepted, atomic writes + idempotent receipts). Cold resume stays synchronous when the mailbox is authoritative; Windows file-lock renames retry automatically and orphaned state records are garbage-collected. External consumers (the Flow host) integrate through the `pi-maestro-teammate/v1/mailbox` subpath: the extension publishes a live `MailboxHostRegistry` on the shared-process bridge key `Symbol.for("pi-maestro-teammate.mailbox-registry")` (durable `enqueueTaskNotification`, per-recipient `pendingCount`, and `negotiate` capability v1/v2, with `taskId`-keyed dedup); `pi-maestro-flow` consumes it via `mailboxRegistry()` (see `packages/pi-maestro-flow/src/extension/index.ts`) and the contract is covered by `test/mailbox-registry.test.ts`.
 
 ## Runtime
 
