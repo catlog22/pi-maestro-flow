@@ -46,6 +46,21 @@ test("pin editor bottom uses the layout accelerator without shadowing tool palet
 	assert.equal(rowKeyForAccel(buildRows(DEFAULT_CONFIG), "l"), "pinEditorBottom");
 });
 
+test("claude-style interaction rows use the free k/v/j accelerators and cycle", () => {
+	const cases = [
+		{ key: "doubleEscapeClearInput", accel: "k" },
+		{ key: "fullscreenInput", accel: "v" },
+		{ key: "copyOnSelect", accel: "j" },
+	] as const;
+	for (const { key, accel } of cases) {
+		const row = buildRows(DEFAULT_CONFIG).find((candidate) => candidate.key === key);
+		assert.deepEqual({ value: row?.value, next: row?.next, accel: row?.accel }, { value: "off", next: "on", accel });
+		assert.equal(rowKeyForAccel(buildRows(DEFAULT_CONFIG), accel), key);
+		assert.equal(applyRow(DEFAULT_CONFIG, key)[key], true);
+		assert.equal(applyRow(applyRow(DEFAULT_CONFIG, key), key)[key], false);
+	}
+});
+
 test("quiet controls stay grouped in mode, symbol, thinking order", () => {
 	const keys = buildRows(DEFAULT_CONFIG, { thinkingHidden: false }).map((row) => row.key);
 	const start = keys.indexOf("quietMode");

@@ -32,6 +32,21 @@ test("pinEditorBottom is opt-in and accepts only boolean values", () => {
 	assert.equal(mergeConfig(DEFAULT_CONFIG, { pinEditorBottom: "true" }).pinEditorBottom, false);
 });
 
+test("claude-style interaction settings are independent opt-in booleans, default off", () => {
+	for (const key of ["doubleEscapeClearInput", "fullscreenInput", "copyOnSelect"] as const) {
+		assert.equal(DEFAULT_CONFIG[key], false, `${key} must default to false`);
+		assert.equal(mergeConfig(DEFAULT_CONFIG, {} as Record<string, unknown>)[key], false);
+		assert.equal(mergeConfig(DEFAULT_CONFIG, { [key]: true } as Record<string, unknown>)[key], true);
+		assert.equal(mergeConfig(DEFAULT_CONFIG, { [key]: "yes" } as Record<string, unknown>)[key], false);
+		assert.equal(mergeConfig(DEFAULT_CONFIG, { [key]: null } as Record<string, unknown>)[key], false);
+	}
+	// Independent: turning one on leaves the other two off.
+	const one = mergeConfig(DEFAULT_CONFIG, { fullscreenInput: true } as Record<string, unknown>);
+	assert.equal(one.fullscreenInput, true);
+	assert.equal(one.doubleEscapeClearInput, false);
+	assert.equal(one.copyOnSelect, false);
+});
+
 test("quietSymbols accepts supported modes and rejects unknown values", () => {
 	assert.equal(mergeConfig(DEFAULT_CONFIG, { quietSymbols: "dot" }).quietSymbols, "dot");
 	assert.equal(mergeConfig(DEFAULT_CONFIG, { quietSymbols: "check" }).quietSymbols, "check");
@@ -83,6 +98,9 @@ test("serialized config documents preserve unknown extension fields", () => {
 	assert.equal(document.staticMode, false);
 	assert.equal(document.toolPalette, "family");
 	assert.equal(document.pinEditorBottom, false);
+	assert.equal(document.doubleEscapeClearInput, false);
+	assert.equal(document.fullscreenInput, false);
+	assert.equal(document.copyOnSelect, false);
 	assert.deepEqual(document.icons, { mode: "ascii", future: 1 });
 	assert.deepEqual(document.sidebar, { mode: "on", width: 48, density: "comfortable", future: 2 });
 });

@@ -197,6 +197,75 @@ test("quiet disable is persisted but reported as reload-required", async () => {
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("interaction settings describe with defaults off and complete bilingual keys", async () => {
+	const { directory, path } = tempConfig();
+	try {
+		const { provider } = providerAt(path);
+		const description = await provider.describe({ context });
+		for (const key of ["doubleEscapeClearInput", "fullscreenInput", "copyOnSelect"]) {
+			const setting = description.settings.find((candidate) => candidate.key === key);
+			assert.ok(setting, `${key} must be described`);
+			assert.equal(setting.editor.kind, "boolean");
+			assert.equal(setting.defaultValue, false);
+			assert.ok(setting.descriptionKey);
+		}
+		const activationByKey = new Map(description.settings.map((setting) => [setting.key, setting.activation]));
+		assert.equal(activationByKey.get("doubleEscapeClearInput"), "extension-reload");
+		assert.equal(activationByKey.get("fullscreenInput"), "extension-reload");
+		assert.equal(activationByKey.get("copyOnSelect"), "live");
+		const labelKeys = ["cockpit.doubleEscapeClearInput", "cockpit.fullscreenInput", "cockpit.copyOnSelect"];
+		const descriptionKeys = ["cockpit.doubleEscapeClearInput.description", "cockpit.fullscreenInput.description", "cockpit.copyOnSelect.description"];
+		for (const locale of ["en", "zh-CN"] as const) {
+			const catalog = description.catalogs?.[locale];
+			assert.ok(catalog);
+			for (const key of [...labelKeys, ...descriptionKeys]) assert.equal(typeof catalog[key], "string", `${locale} missing ${key}`);
+		}
+		const snapshot = await provider.read({ context });
+		for (const key of ["doubleEscapeClearInput", "fullscreenInput", "copyOnSelect"]) {
+			assert.equal(snapshot.effective.values.find((value) => value.key === key)?.value, false);
+		}
+	} finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("fullscreen/double-escape changes are persisted but reported reload-required; copy is live", async () => {
+	const { directory, path } = tempConfig();
+	try {
+		const { provider } = providerAt(path);
+		const before = await provider.read({ context });
+		const prepared = await provider.prepare!({
+			context,
+			transactionId: "tx-interactions",
+			changes: [
+				{ operation: "set", key: "fullscreenInput", scope: "global", value: true },
+				{ operation: "set", key: "doubleEscapeClearInput", scope: "global", value: true },
+				{ operation: "set", key: "copyOnSelect", scope: "global", value: true },
+			],
+			expectedRevisions: before.configured.resources,
+		});
+		assert.deepEqual(prepared.activation, [
+			{ boundary: "live", keys: ["copyOnSelect"] },
+			{ boundary: "extension-reload", keys: ["fullscreenInput", "doubleEscapeClearInput"], messageKey: "cockpit.runtime.reloadInteractions" },
+		]);
+		await provider.abort!({ context, transactionId: "tx-interactions", prepareToken: prepared.prepareToken! });
+	} finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("interaction settings accept only boolean values", async () => {
+	const { directory, path } = tempConfig();
+	try {
+		const { provider } = providerAt(path);
+		const before = await provider.read({ context });
+		const prepared = await provider.prepare!({
+			context,
+			transactionId: "tx-invalid",
+			changes: [{ operation: "set", key: "fullscreenInput", scope: "global", value: "yes" }],
+			expectedRevisions: before.configured.resources,
+		});
+		assert.equal(prepared.prepared, false);
+		assert.equal(prepared.validation.issues.some((issue) => issue.key === "fullscreenInput"), true);
+	} finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("actions and provider discovery stay owned by Cockpit", async () => {
 	const { directory, path } = tempConfig();
 	try {
