@@ -66,6 +66,8 @@ import {
   COMPACTION_LEASE_TIMEOUT_MS,
   CompactionArbiter,
   compactionRequestFromInstructions,
+  isNativeFallbackCompactionInstructions,
+  NATIVE_FALLBACK_COMPACTION_MARKER,
   runObservedCompaction,
 } from "../src/compaction/compaction-arbiter.ts";
 import { DEFAULT_SOFT_COMPACTION } from "../src/compaction/compaction-settings.ts";
@@ -1170,7 +1172,11 @@ test("mid-turn guard clears its trigger key after compaction failure", async () 
 
 test("mid-turn guard falls back to native compaction after exhausted failures trip the breaker", async () => {
   const callbacks: Array<{ onError(error: Error): void }> = [];
-  const nativeFallbacks: Array<{ onComplete?: () => void; onError?: (error: Error) => void }> = [];
+  const nativeFallbacks: Array<{
+    customInstructions?: string;
+    onComplete?: () => void;
+    onError?: (error: Error) => void;
+  }> = [];
   const sent: Array<{ message: string; options: unknown }> = [];
   const notifications: Array<{ message: string; level: string | undefined }> = [];
   let aborted = 0;
@@ -1190,8 +1196,11 @@ test("mid-turn guard falls back to native compaction after exhausted failures tr
     abort() { aborted++; },
     hasPendingMessages: () => pending,
     compact(options: { customInstructions?: string; onError?(error: Error): void; onComplete?(): void }) {
-      if (options.customInstructions) callbacks.push(options as { onError(error: Error): void });
-      else nativeFallbacks.push(options);
+      if (options.customInstructions === NATIVE_FALLBACK_COMPACTION_MARKER) {
+        nativeFallbacks.push(options);
+      } else {
+        callbacks.push(options as { onError(error: Error): void });
+      }
     },
     sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: {
@@ -1213,6 +1222,11 @@ test("mid-turn guard falls back to native compaction after exhausted failures tr
   assert.ok(sent.every(({ message }) => /compaction failed.*context was exhausted/i.test(message)));
   assert.ok(sent.every(({ options }) => JSON.stringify(options) === JSON.stringify({ deliverAs: "followUp" })));
   assert.equal(nativeFallbacks.length, 1, "a breaker trip triggers exactly one untagged native fallback");
+  assert.equal(
+    nativeFallbacks[0]?.customInstructions,
+    NATIVE_FALLBACK_COMPACTION_MARKER,
+    "the fallback marker preserves native arbitration while bypassing completed-turn cancellation",
+  );
   nativeFallbacks[0]?.onComplete?.();
   assert.equal(sent.length, MAX_CONSECUTIVE_COMPACTION_FAILURES, "native success resumes the interrupted task");
   assert.match(sent.at(-1)?.message ?? "", /Continue the interrupted task from the compacted session checkpoint/);
@@ -1262,8 +1276,11 @@ test("breaker trip does not start native fallback while the agent still has queu
     abort() {},
     hasPendingMessages: () => true,
     compact(options: { customInstructions?: string; onError?(error: Error): void }) {
-      if (options.customInstructions) callbacks.push(options as { onError(error: Error): void });
-      else nativeFallbacks++;
+      if (options.customInstructions === NATIVE_FALLBACK_COMPACTION_MARKER) {
+        nativeFallbacks++;
+      } else {
+        callbacks.push(options as { onError(error: Error): void });
+      }
     },
     sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: { setStatus() {}, notify() {} },
@@ -3067,6 +3084,29 @@ test("completed-turn native threshold gate only cancels the immediate unowned th
   assert.equal(shouldCancelCompletedTurnThreshold("threshold", true, true), false);
   assert.equal(shouldCancelCompletedTurnThreshold("threshold", false, false), false);
   assert.equal(shouldCancelCompletedTurnThreshold("threshold", true, false, true), false);
+  assert.equal(
+    shouldCancelCompletedTurnThreshold("threshold", true, false, false, true),
+    false,
+    "a recovery fallback must not be cancelled after its original request was aborted",
+  );
+});
+
+test("native fallback marker is accepted only as the leading instruction token", () => {
+  assert.equal(isNativeFallbackCompactionInstructions(NATIVE_FALLBACK_COMPACTION_MARKER), true);
+  assert.equal(isNativeFallbackCompactionInstructions(` \n${NATIVE_FALLBACK_COMPACTION_MARKER}\nresume`), true);
+  assert.equal(
+    isNativeFallbackCompactionInstructions(`User text ${NATIVE_FALLBACK_COMPACTION_MARKER}`),
+    false,
+    "embedded marker text must not bypass completed-turn preservation",
+  );
+
+  const arbiter = new CompactionArbiter();
+  const request = compactionRequestFromInstructions(NATIVE_FALLBACK_COMPACTION_MARKER);
+  assert.equal(request, undefined, "fallback stays unowned despite its recovery marker");
+  const observed = arbiter.observeStart(request);
+  assert.equal(observed.owner, "native");
+  assert.equal(observed.allowed, true);
+  observed.finalize("complete");
 });
 
 test("native compaction continues a pending output-limited response", async () => {
@@ -3906,6 +3946,49 @@ test("L2 spill replacement is byte-identical after a session-state restore", asy
   ] as never, resumedCtx);
   assert.equal(JSON.stringify(resumed?.[1]), firstReplacement);
 
+  // Version-6 records written before the digest addition can still reference
+  // an intact file. They deliberately downgrade rather than re-advertising an
+  // unverified path into model context.
+  const legacyData = JSON.parse(JSON.stringify(persisted?.data)) as {
+    prunes?: Array<{ callId?: string; spillContentDigest?: string }>;
+  };
+  for (const entry of legacyData.prunes ?? []) delete entry.spillContentDigest;
+  const legacyAppended: Array<{ type: string; data: unknown }> = [];
+  const legacyGuard = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: unknown) { legacyAppended.push({ type, data }); },
+    sendUserMessage() {},
+  } as never, {
+    readSettings: () => settings,
+  });
+  const legacyCtx = {
+    ...baseCtx,
+    sessionManager: {
+      getSessionId: () => "stable-spill-session",
+      getBranch: () => [{ type: "custom", customType: persisted?.type, data: legacyData }],
+    },
+  } as never;
+  legacyGuard.onSessionStart(legacyCtx);
+  const legacy = await legacyGuard.evaluate([
+    ...messages,
+    { role: "user", content: [{ type: "text", text: "resume-legacy" }] },
+  ] as never, legacyCtx);
+  assert.doesNotMatch(
+    JSON.stringify(legacy?.[1]),
+    /<persisted-output>/,
+    "legacy spill journal entries without a digest are not re-advertised",
+  );
+  const downgradedJournal = legacyAppended.findLast((entry) => entry.type === "maestro-auto-prune-state");
+  const downgradedRecords = (downgradedJournal?.data as {
+    prunes?: Array<{ callId?: string; level?: string; spillPath?: string; spillContentDigest?: string }>;
+    upserts?: Array<{ callId?: string; level?: string; spillPath?: string; spillContentDigest?: string }>;
+  } | undefined)?.prunes ?? (downgradedJournal?.data as {
+    upserts?: Array<{ callId?: string; level?: string; spillPath?: string; spillContentDigest?: string }>;
+  } | undefined)?.upserts ?? [];
+  const downgradedRecord = downgradedRecords.find((entry) => entry.callId === "old-spill");
+  assert.equal(downgradedRecord?.level, "pruned", "the downgrade is persisted for the next resume");
+  assert.equal(downgradedRecord?.spillPath, undefined);
+  assert.equal(downgradedRecord?.spillContentDigest, undefined);
+
   // A spill file may persist across a crashed/resumed session. Its journal
   // digest must be checked before the path is published back into context.
   await writeFile(
@@ -3929,6 +4012,7 @@ test("L2 spill replacement is byte-identical after a session-state restore", asy
 
   firstGuard.reset(baseCtx);
   resumedGuard.reset(resumedCtx);
+  legacyGuard.reset(legacyCtx);
   tamperedGuard.reset(resumedCtx);
   await cleanupSpillDir("stable-spill-session");
 });
@@ -5541,112 +5625,163 @@ test("cache stability: canonical serialized equality across growing frames in on
   }
 });
 
-test("tool-loop-end fast path settles a live critical intent without the second-turn defer", async () => {
+test("below-escalate streak hysteresis keeps the deferred intent alive across a band bounce", async () => {
   let compacted = 0;
-  const notifications: string[] = [];
-  const compactionModel = {
-    provider: "maestro-qwen",
-    id: "summary-small",
-    contextWindow: 400_000,
-    maxTokens: 128_000,
-  };
   const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
     loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
     readSettings: () => ({
       enabled: true,
       reserveTokens: 16_384,
       keepRecentTokens: 20_000,
-      model: "maestro-qwen/summary-small",
+      soft: {
+        ...DEFAULT_SOFT_COMPACTION,
+        cache: { ...DEFAULT_SOFT_COMPACTION.cache, enabled: false },
+      },
     }),
   });
   const ctx = {
     cwd: "D:\repo",
-    model: {
-      provider: "maestro-openai",
-      id: "session-large",
-      contextWindow: 1_000_000,
-      maxTokens: 128_000,
-    },
-    modelRegistry: {
-      find(provider: string, id: string) {
-        return provider === compactionModel.provider && id === compactionModel.id
-          ? compactionModel
-          : undefined;
-      },
-      async getApiKeyAndHeaders() {
-        return { ok: true, apiKey: "sk-test" };
-      },
-    },
+    model: { contextWindow: 400_000, maxTokens: 128_000 },
     abort() {},
     compact() { compacted++; },
     hasPendingMessages: () => false,
     sessionManager: { getBranch: () => [{ type: "message" }] },
-    ui: {
-      setStatus() {},
-      notify(message: string) { notifications.push(message); },
-    },
+    ui: { setStatus() {}, notify() {} },
   } as never;
 
-  // A long tool loop crossed the hard threshold (390K > 384K summary-model
-  // trigger): the context hook queues the intent (no submission), then
-  // agent_end fires at tool-loop completion.
-  await guard.evaluate(highUsageToolBatch(390_000), ctx);
-  assert.equal(compacted, 0, "context hook only queues the intent");
-  await guard.onToolLoopEnd(ctx);
-  assert.equal(compacted, 1, "agent_end settles the critical intent immediately");
-  assert.equal(notifications.length, 0, "no defer warning on the fast path");
+  // The trigger is 360K and the 3% escalate margin starts at 348K. 355K
+  // queues an auto-prune intent; 345K leaves the margin but remains in the
+  // auto-prune band. One bounce must not zero the completed-turn defer count.
+  await guard.evaluate(highUsageToolBatch(355_000), ctx);
+  await guard.evaluate(highUsageToolBatch(345_000), ctx);
+  await guard.onAgentEnd(ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(compacted, 1, "intent survives a single below-escalate evaluation");
 });
 
-test("tool-loop-end fast path skips an in-flight multi-tool loop that will continue", async () => {
+test("below-escalate streak clears a deferred intent after two consecutive relieved evaluations", async () => {
   let compacted = 0;
-  const compactionModel = {
-    provider: "maestro-qwen",
-    id: "summary-small",
-    contextWindow: 400_000,
-    maxTokens: 128_000,
-  };
   const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
     loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
     readSettings: () => ({
       enabled: true,
       reserveTokens: 16_384,
       keepRecentTokens: 20_000,
-      model: "maestro-qwen/summary-small",
+      soft: {
+        ...DEFAULT_SOFT_COMPACTION,
+        cache: { ...DEFAULT_SOFT_COMPACTION.cache, enabled: false },
+      },
     }),
   });
   const ctx = {
     cwd: "D:\repo",
-    model: {
-      provider: "maestro-openai",
-      id: "session-large",
-      contextWindow: 1_000_000,
-      maxTokens: 128_000,
-    },
-    modelRegistry: {
-      find(provider: string, id: string) {
-        return provider === compactionModel.provider && id === compactionModel.id
-          ? compactionModel
-          : undefined;
-      },
-      async getApiKeyAndHeaders() {
-        return { ok: true, apiKey: "sk-test" };
-      },
-    },
+    model: { contextWindow: 400_000, maxTokens: 128_000 },
     abort() {},
     compact() { compacted++; },
-    hasPendingMessages: () => true,
+    hasPendingMessages: () => false,
     sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: { setStatus() {}, notify() {} },
   } as never;
 
-  await guard.evaluate(highUsageToolBatch(390_000), ctx);
-  assert.equal(compacted, 0, "intent queued");
-  await guard.onToolLoopEnd(ctx);
-  assert.equal(compacted, 0, "a continuing loop is not interrupted mid-iteration");
+  await guard.evaluate(highUsageToolBatch(355_000), ctx);
+  await guard.evaluate(highUsageToolBatch(345_000), ctx);
+  await guard.evaluate(highUsageToolBatch(345_000), ctx);
+  await guard.onAgentEnd(ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(compacted, 0, "two relieved evaluations discard the stale deferred intent");
 });
 
-test("tool-loop-end fast path does not settle when no intent is pending", async () => {
+test("reset clears below-escalate hysteresis before loading a resumed intent", async () => {
   let compacted = 0;
+  let branch: Array<{ type?: string; customType?: string; data?: unknown }> = [];
+  const appended: Array<{ type: string; data: unknown }> = [];
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: unknown) { appended.push({ type, data }); },
+    sendUserMessage() {},
+  } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({
+      enabled: true,
+      reserveTokens: 16_384,
+      keepRecentTokens: 20_000,
+      soft: {
+        ...DEFAULT_SOFT_COMPACTION,
+        cache: { ...DEFAULT_SOFT_COMPACTION.cache, enabled: false },
+      },
+    }),
+  });
+  const ctx = {
+    cwd: "D:\repo",
+    model: { contextWindow: 400_000, maxTokens: 128_000 },
+    abort() {},
+    compact() { compacted++; },
+    hasPendingMessages: () => false,
+    sessionManager: {
+      getSessionId: () => "reset-resume-session",
+      getBranch: () => branch,
+    },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  guard.onSessionStart(ctx);
+  await guard.evaluate(highUsageToolBatch(355_000), ctx);
+  await guard.evaluate(highUsageToolBatch(345_000), ctx);
+  const persistedIntent = appended.findLast((entry) => entry.type === "maestro-auto-compaction-intent");
+  assert.ok(persistedIntent, "the initial deferred intent is persisted before reset");
+
+  guard.reset(ctx);
+  branch = [{ type: "custom", customType: persistedIntent.type, data: persistedIntent.data }];
+  guard.onSessionStart(ctx);
+  await guard.evaluate(highUsageToolBatch(345_000), ctx);
+  await guard.onAgentEnd(ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(compacted, 1, "a stale pre-reset relief streak cannot clear a resumed deferred intent");
+});
+
+test("tripped watchdog does not start native fallback while the original host compaction may still run", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    let primaryCompactions = 0;
+    let nativeFallbacks = 0;
+    const notifications: string[] = [];
+    const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+      loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+      readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+    });
+    const ctx = {
+      cwd: "D:\repo",
+      model: { contextWindow: 1_000 },
+      abort() {},
+      compact(options: { customInstructions?: string }) {
+        if (options.customInstructions === NATIVE_FALLBACK_COMPACTION_MARKER) nativeFallbacks++;
+        else primaryCompactions++;
+      },
+      hasPendingMessages: () => false,
+      sessionManager: { getBranch: () => [{ type: "message" }] },
+      ui: { setStatus() {}, notify(message: string) { notifications.push(message); } },
+    } as never;
+    const messages = highUsageToolBatch(950);
+
+    for (let attempt = 0; attempt < MAX_CONSECUTIVE_COMPACTION_FAILURES; attempt++) {
+      await guard.evaluate(messages, ctx);
+      await guard.onAgentEnd(ctx);
+      await guard.evaluate(messages, ctx);
+      await guard.onAgentEnd(ctx);
+      mock.timers.tick(COMPACTION_LEASE_TIMEOUT_MS + 1);
+    }
+
+    assert.equal(primaryCompactions, MAX_CONSECUTIVE_COMPACTION_FAILURES);
+    assert.equal(nativeFallbacks, 0, "watchdog never overlaps an unknown in-flight host compaction");
+    assert.ok(notifications.some((message) => /native fallback was not started.*host operation may still be active/i.test(message)));
+    assert.ok(notifications.some((message) => /compaction paused after 3 consecutive failures/i.test(message)));
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("non-exhausted callback failures never start native fallback", async () => {
+  const primaryCalls: Array<{ onError?: (error: unknown) => void; customInstructions?: string }> = [];
+  let nativeFallbacks = 0;
   const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
     loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
     readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
@@ -5655,18 +5790,36 @@ test("tool-loop-end fast path does not settle when no intent is pending", async 
     cwd: "D:\repo",
     model: { contextWindow: 1_000 },
     abort() {},
-    compact() { compacted++; },
+    compact(options: { onError?: (error: unknown) => void; customInstructions?: string }) {
+      if (options.customInstructions === NATIVE_FALLBACK_COMPACTION_MARKER) nativeFallbacks++;
+      else primaryCalls.push(options);
+    },
     hasPendingMessages: () => false,
-    sessionManager: { getBranch: () => [] },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: { setStatus() {}, notify() {} },
   } as never;
-  await guard.onToolLoopEnd(ctx);
-  assert.equal(compacted, 0, "nothing to settle");
+  const messages = highUsageToolBatch(950);
+
+  for (let attempt = 0; attempt < MAX_CONSECUTIVE_COMPACTION_FAILURES; attempt++) {
+    await guard.evaluate(messages, ctx);
+    await guard.onAgentEnd(ctx);
+    await guard.evaluate(messages, ctx);
+    await guard.onAgentEnd(ctx);
+    primaryCalls.at(-1)?.onError?.(new Error("summary unavailable"));
+  }
+
+  assert.equal(primaryCalls.length, MAX_CONSECUTIVE_COMPACTION_FAILURES);
+  assert.equal(nativeFallbacks, 0, "only exhausted failures may recover through native compaction");
 });
 
-test("below-escalate streak hysteresis keeps the deferred intent alive across a band bounce", async () => {
-  let compacted = 0;
-  const notifications: string[] = [];
+test("same pending trigger re-aborts when the active session window shrinks", async () => {
+  let aborted = 0;
+  let activeModel = {
+    provider: "maestro-openai",
+    id: "session-large",
+    contextWindow: 1_000_000,
+    maxTokens: 128_000,
+  };
   const compactionModel = {
     provider: "maestro-qwen",
     id: "summary-small",
@@ -5674,7 +5827,6 @@ test("below-escalate streak hysteresis keeps the deferred intent alive across a 
     maxTokens: 128_000,
   };
   const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
-    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
     readSettings: () => ({
       enabled: true,
       reserveTokens: 16_384,
@@ -5684,12 +5836,7 @@ test("below-escalate streak hysteresis keeps the deferred intent alive across a 
   });
   const ctx = {
     cwd: "D:\repo",
-    model: {
-      provider: "maestro-openai",
-      id: "session-large",
-      contextWindow: 1_000_000,
-      maxTokens: 128_000,
-    },
+    get model() { return activeModel; },
     modelRegistry: {
       find(provider: string, id: string) {
         return provider === compactionModel.provider && id === compactionModel.id
@@ -5700,25 +5847,93 @@ test("below-escalate streak hysteresis keeps the deferred intent alive across a 
         return { ok: true, apiKey: "sk-test" };
       },
     },
-    abort() {},
-    compact() { compacted++; },
-    hasPendingMessages: () => false,
+    abort() { aborted++; },
+    compact() {},
     sessionManager: { getBranch: () => [{ type: "message" }] },
-    ui: {
-      setStatus() {},
-      notify(message: string) { notifications.push(message); },
-    },
+    ui: { setStatus() {}, notify() {} },
   } as never;
+  const messages = highUsageToolBatch(600_000);
 
-  // First evaluation queues the escalated intent (390K > 384K trigger).
-  await guard.evaluate(highUsageToolBatch(390_000), ctx);
-  assert.equal(compacted, 0, "intent queued");
-  // A single below-escalate bounce (estimate dips under the escalate band but
-  // stays inside the prune band) must NOT drop the intent — otherwise the
-  // defer counter is zeroed and the 2-turn settle never fires.
-  await guard.evaluate(highUsageToolBatch(386_000), ctx);
-  // The second completed turn still settles because the intent survived.
-  await guard.onAgentEnd(ctx);
-  await guard.onAgentEnd(ctx);
-  assert.equal(compacted, 1, "intent survived the bounce and settled on turn 2");
+  await guard.evaluate(messages, ctx);
+  assert.equal(aborted, 0, "the initial 1M window has room for the queued intent");
+  activeModel = { ...activeModel, contextWindow: 500_000 };
+  await guard.evaluate(messages, ctx);
+  assert.equal(aborted, 1, "the same pending trigger re-checks the shrunken window before provider submission");
+});
+
+test("same escalated trigger re-aborts after a model switch or disappearance during threshold derivation", async () => {
+  let aborted = 0;
+  let shrinkOnLookup = false;
+  let disappearOnLookup = false;
+  let activeModel: {
+    provider: string;
+    id: string;
+    contextWindow: number;
+    maxTokens: number;
+  } | undefined = {
+    provider: "maestro-openai",
+    id: "session-large",
+    contextWindow: 1_000_000,
+    maxTokens: 128_000,
+  };
+  const compactionModel = {
+    provider: "maestro-qwen",
+    id: "summary-small",
+    contextWindow: 400_000,
+    maxTokens: 128_000,
+  };
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    readSettings: () => ({
+      enabled: true,
+      reserveTokens: 16_384,
+      keepRecentTokens: 20_000,
+      model: "maestro-qwen/summary-small",
+      soft: {
+        ...DEFAULT_SOFT_COMPACTION,
+        nudgeRatio: 0.3,
+        pruneRatio: 0.4,
+        pruneTargetRatio: 0.3,
+        cache: { ...DEFAULT_SOFT_COMPACTION.cache, enabled: false },
+      },
+    }),
+  });
+  const ctx = {
+    cwd: "D:\repo",
+    get model() { return activeModel; },
+    modelRegistry: {
+      find(provider: string, id: string) {
+        if (provider !== compactionModel.provider || id !== compactionModel.id) return undefined;
+        return compactionModel;
+      },
+      async getApiKeyAndHeaders() {
+        if (disappearOnLookup) {
+          activeModel = undefined;
+        } else if (shrinkOnLookup && activeModel) {
+          activeModel = { ...activeModel, contextWindow: 170_000 };
+        }
+        return { ok: true, apiKey: "sk-test" };
+      },
+    },
+    abort() { aborted++; },
+    compact() {},
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  const messages = highUsageToolBatch(180_000);
+
+  await guard.evaluate(messages, ctx);
+  assert.equal(aborted, 0, "the initial large window accepts the escalated intent");
+  shrinkOnLookup = true;
+  await guard.evaluate(messages, ctx);
+  assert.equal(aborted, 1, "the matching escalated trigger checks the post-lookup active window");
+  activeModel = {
+    provider: "maestro-openai",
+    id: "session-large",
+    contextWindow: 1_000_000,
+    maxTokens: 128_000,
+  };
+  shrinkOnLookup = false;
+  disappearOnLookup = true;
+  await guard.evaluate(messages, ctx);
+  assert.equal(aborted, 2, "a post-await missing model is treated as exhausted instead of falling through");
 });

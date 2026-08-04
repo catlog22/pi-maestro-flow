@@ -153,6 +153,13 @@ let publishWorkflowPlan: (
 
 export const PLAN_CLEAN_CONTEXT_COMPACTION_MARKER = "[maestro-plan-clean-context]";
 
+/** True only when the clean-context marker is the leading instruction token. */
+export function isPlanCleanContextCompactionInstructions(
+  customInstructions: string | undefined,
+): boolean {
+  return customInstructions?.trimStart().startsWith(PLAN_CLEAN_CONTEXT_COMPACTION_MARKER) === true;
+}
+
 export interface PlanCleanContextCompactionRequest {
   summary: string;
   firstKeptEntryId: string;

@@ -22,6 +22,7 @@ import type { WorkflowSnapshot } from "../src/session/types.ts";
 import { shutdownIntelligenceTools } from "../src/tools/intelligence.ts";
 import { isRunControlReadAction } from "../src/tools/run-control.ts";
 import { PLAN_TOGGLE_KEY } from "../src/tools/plan.ts";
+import { NATIVE_FALLBACK_COMPACTION_MARKER } from "../src/compaction/compaction-arbiter.ts";
 import {
   MAESTRO_GLOBAL_SHORTCUTS,
   auditShortcutConflicts,
@@ -585,6 +586,50 @@ test("teammate child registers interaction, local Bash, and parent-permission su
     input: { pass: false },
   }, {} as ExtensionContext);
   assert.equal(structuredOutputDecision, undefined, "child-local verdicts must not wait for parent permission RPC");
+
+  const childNotifications: string[] = [];
+  const childCtx = {
+    cwd: "D:/workspace",
+    model: { contextWindow: 400_000 },
+    hasPendingMessages: () => false,
+    sessionManager: { getBranch: () => [] },
+    ui: { setStatus() {}, notify(message: string) { childNotifications.push(message); } },
+  } as ExtensionContext;
+  await handlers.get("agent_end")?.[0]?.({
+    messages: [{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" }],
+  }, childCtx);
+  const completedTurnCancel = await handlers.get("session_before_compact")?.[0]?.({ reason: "threshold" }, childCtx);
+  assert.deepEqual(completedTurnCancel, { cancel: true }, "child preserves a normally completed transcript");
+
+  await handlers.get("agent_end")?.[0]?.({
+    messages: [{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" }],
+  }, childCtx);
+  const fallbackResult = await handlers.get("session_before_compact")?.[0]?.({
+    reason: "threshold",
+    customInstructions: NATIVE_FALLBACK_COMPACTION_MARKER,
+  }, childCtx);
+  assert.notDeepEqual(fallbackResult, { cancel: true }, "child permits the exhausted recovery fallback");
+
+  const endFailureNotifications: string[] = [];
+  const endFailureCtx = {
+    cwd: "D:/workspace",
+    get model() { throw new Error("model lookup failed"); },
+    ui: { setStatus() {}, notify(message: string) { endFailureNotifications.push(message); } },
+  } as ExtensionContext;
+  await assert.doesNotReject(() => handlers.get("agent_end")?.[0]?.({ messages: [] }, endFailureCtx) as Promise<unknown>);
+  assert.match(endFailureNotifications[0] ?? "", /Child output-limit compaction failed/);
+
+  const settledFailureNotifications: string[] = [];
+  const settledFailureCtx = {
+    cwd: "D:/workspace",
+    sessionManager: { getBranch: () => [] },
+    ui: {
+      setStatus() { throw new Error("status sink failed"); },
+      notify(message: string) { settledFailureNotifications.push(message); },
+    },
+  } as ExtensionContext;
+  await assert.doesNotReject(() => handlers.get("agent_settled")?.[0]?.({}, settledFailureCtx) as Promise<unknown>);
+  assert.match(settledFailureNotifications[0] ?? "", /Child settled context compaction failed/);
 });
 
 test("intelligence shutdown awaits both managers and contains cleanup failures", async () => {

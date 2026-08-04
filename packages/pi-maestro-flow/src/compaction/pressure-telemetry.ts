@@ -480,8 +480,13 @@ export function shouldCancelCompletedTurnThreshold(
   preserveCompletedTurn: boolean,
   hasOwnedRequest: boolean,
   hasPendingMessages = false,
+  isRecoveryFallback = false,
 ): boolean {
-  return reason === "threshold" && preserveCompletedTurn && !hasOwnedRequest && !hasPendingMessages;
+  return reason === "threshold"
+    && preserveCompletedTurn
+    && !hasOwnedRequest
+    && !hasPendingMessages
+    && !isRecoveryFallback;
 }
 
 export function buildOutputLimitInstructions(

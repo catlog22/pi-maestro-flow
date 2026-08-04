@@ -11,6 +11,7 @@ import {
   getPlanHandoffStatus,
   getPlanText,
   initPlan,
+  isPlanCleanContextCompactionInstructions,
   onAgentEndPlan,
   onBeforeAgentStartPlan,
   onContextPlan,
@@ -20,6 +21,7 @@ import {
   registerPlanCommand,
   registerPlanTools,
   setPlanModeChangeListener,
+  PLAN_CLEAN_CONTEXT_COMPACTION_MARKER,
   type PlanWorkflowPublicationResult,
 } from "../src/tools/plan.ts";
 import {
@@ -50,6 +52,18 @@ interface CommandLike {
 
 const COMPACT_EXECUTION_INPUTS = ["\x1b[B", "\x1b[C", "\x1b[13;5u"];
 const WORKFLOW_CURRENT_EXECUTION_INPUTS = ["\x1b[C", "\x1b[13;5u"];
+
+test("clean-context compaction marker is recognized only as a leading instruction token", () => {
+  assert.equal(isPlanCleanContextCompactionInstructions(PLAN_CLEAN_CONTEXT_COMPACTION_MARKER), true);
+  assert.equal(
+    isPlanCleanContextCompactionInstructions(` \n${PLAN_CLEAN_CONTEXT_COMPACTION_MARKER}\napproved`),
+    true,
+  );
+  assert.equal(
+    isPlanCleanContextCompactionInstructions(`User content ${PLAN_CLEAN_CONTEXT_COMPACTION_MARKER}`),
+    false,
+  );
+});
 
 function createHarness(
   root: string,

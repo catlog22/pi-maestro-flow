@@ -161,7 +161,7 @@ import {
   onAgentEndPlan,
   consumePlanCleanContextCompaction,
   applyPlanContextToCompaction,
-  PLAN_CLEAN_CONTEXT_COMPACTION_MARKER,
+  isPlanCleanContextCompactionInstructions,
   getMode as getPlanMode,
   hasPlan,
   getPlanText,
@@ -196,6 +196,7 @@ import {
 import {
   CompactionArbiter,
   compactionRequestFromInstructions,
+  isNativeFallbackCompactionInstructions,
   runObservedCompaction,
 } from "../compaction/compaction-arbiter.ts";
 import { registerCompactionSettingsCommand, showCompactionSettingsOverlay } from "../tui/compaction-settings.ts";
@@ -2084,11 +2085,13 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
 
   pi.on("session_before_compact", async (event, ctx) => {
     const request = compactionRequestFromInstructions(event.customInstructions);
+    const isRecoveryFallback = isNativeFallbackCompactionInstructions(event.customInstructions);
     if (shouldCancelCompletedTurnThreshold(
       event.reason,
       preserveCompletedTurnFromNativeThreshold,
       request !== undefined,
       Boolean(ctx.hasPendingMessages?.()),
+      isRecoveryFallback,
     )) {
       preserveCompletedTurnFromNativeThreshold = false;
       return { cancel: true };
@@ -2103,7 +2106,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
         goalBeforeCompact(ctx);
         const cleanContextRequest = observed.trigger?.owner === "plan-handoff"
           && observed.trigger.reason === "clean-context"
-          && event.customInstructions?.includes(PLAN_CLEAN_CONTEXT_COMPACTION_MARKER)
+          && isPlanCleanContextCompactionInstructions(event.customInstructions)
           ? consumePlanCleanContextCompaction()
           : undefined;
         if (observed.trigger?.owner === "plan-handoff" && observed.trigger.reason === "clean-context") {
@@ -2238,12 +2241,6 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     await step("Goal attempt", () => goalAgentEnd(event, ctx));
     await step("Output-limit compaction", () =>
       midTurnAutoCompaction.onOutputLimit(event.messages as AgentMessage[], ctx));
-    // Tool-loop-end fast path: settle a live critical intent as soon as the
-    // turn's tool loop completes instead of waiting for agent_settled's
-    // two-completed-turn defer. Without this, a long multi-tool turn that
-    // crossed the hard threshold stays above it (pruning-only) until a second
-    // completed turn arrives — the "tool call ends but no compaction" gap.
-    await step("Tool-loop compaction", () => midTurnAutoCompaction.onToolLoopEnd(ctx));
     await step("Goal change event", () => emitGoalChanged());
     await step("Todo", () => onAgentEndTodo());
     preserveCompletedTurnFromNativeThreshold = shouldPreserveCompletedTurn(
@@ -2472,6 +2469,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
 function registerMaestroChildSurface(pi: ExtensionAPI): void {
   const compactionArbiter = new CompactionArbiter();
   const autoCompaction = createMidTurnAutoCompaction(pi, { arbiter: compactionArbiter });
+  let preserveCompletedTurnFromNativeThreshold = false;
 
   pi.on("session_start", (event, ctx) => {
     autoCompaction.onSessionStart(ctx, event);
@@ -2491,14 +2489,44 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
   pi.on("before_provider_request", (event, ctx) =>
     autoCompaction.beforeProviderRequest(event.payload, ctx));
   pi.on("agent_end", async (event, ctx) => {
-    await autoCompaction.onOutputLimit(event.messages as AgentMessage[], ctx);
-    await autoCompaction.onToolLoopEnd(ctx);
+    try {
+      await autoCompaction.onOutputLimit(event.messages as AgentMessage[], ctx);
+    } catch (error) {
+      ctx.ui.notify(
+        `Child output-limit compaction failed at the end of the turn: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    }
+    preserveCompletedTurnFromNativeThreshold = shouldPreserveCompletedTurn(
+      event.messages as AgentMessage[],
+      Boolean(ctx.hasPendingMessages?.()),
+    );
   });
   pi.on("agent_settled", async (_event, ctx) => {
-    await autoCompaction.onAgentEnd(ctx);
+    try {
+      await autoCompaction.onAgentEnd(ctx);
+    } catch (error) {
+      ctx.ui.notify(
+        `Child settled context compaction failed: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    } finally {
+      preserveCompletedTurnFromNativeThreshold = false;
+    }
   });
   pi.on("session_before_compact", async (event, ctx) => {
     const request = compactionRequestFromInstructions(event.customInstructions);
+    const isRecoveryFallback = isNativeFallbackCompactionInstructions(event.customInstructions);
+    if (shouldCancelCompletedTurnThreshold(
+      event.reason,
+      preserveCompletedTurnFromNativeThreshold,
+      request !== undefined,
+      Boolean(ctx.hasPendingMessages?.()),
+      isRecoveryFallback,
+    )) {
+      preserveCompletedTurnFromNativeThreshold = false;
+      return { cancel: true };
+    }
     const observed = compactionArbiter.observeStart(request, event.signal);
     if (!observed.allowed) return { cancel: true };
     try {
@@ -2527,6 +2555,7 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
   });
   pi.on("session_shutdown", (_event, ctx) => {
     autoCompaction.onSessionShutdown(ctx);
+    preserveCompletedTurnFromNativeThreshold = false;
     compactionArbiter.reset();
   });
 

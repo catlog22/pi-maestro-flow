@@ -44,6 +44,20 @@ export type CompactionTrigger =
 export type CompactionOutcome = "success" | "cancel" | "error" | "timeout";
 
 export const COMPACTION_LEASE_TIMEOUT_MS = 5 * 60_000;
+/**
+ * Marks an unowned fallback request so completed-turn threshold preservation
+ * cannot cancel the only recovery path for an already aborted user request.
+ * It deliberately does not use the owner-tag grammar: the arbiter still
+ * observes it as a native request.
+ */
+export const NATIVE_FALLBACK_COMPACTION_MARKER = "[maestro-native-fallback]";
+
+/** True only when the fallback marker is the leading instruction token. */
+export function isNativeFallbackCompactionInstructions(
+  customInstructions: string | undefined,
+): boolean {
+  return customInstructions?.trimStart().startsWith(NATIVE_FALLBACK_COMPACTION_MARKER) === true;
+}
 
 export interface CompactionLease {
   readonly owner: CompactionRequestOwner;

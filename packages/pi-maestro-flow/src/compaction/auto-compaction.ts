@@ -14,6 +14,7 @@ import {
 } from "./compaction-settings.ts";
 import {
   COMPACTION_LEASE_TIMEOUT_MS,
+  NATIVE_FALLBACK_COMPACTION_MARKER,
   type CompactionArbiter,
   type CompactionLease,
   type CompactionOwner,
@@ -331,8 +332,6 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   projectCompactionInput(event: SessionBeforeCompactEvent, ctx: ExtensionContext): Promise<ProjectedCompactionInput>;
   beforeProviderRequest(payload: unknown, ctx: ExtensionContext): unknown | undefined;
   onAgentEnd(ctx: ExtensionContext): Promise<void>;
-  /** Tool-loop-end fast path: settle a live critical intent without waiting for the next agent_settled defer cycle. */
-  onToolLoopEnd(ctx: ExtensionContext): Promise<void>;
   onOutputLimit(messages: AgentMessage[], ctx: ExtensionContext): Promise<void>;
   onCompact(completedOwner?: CompactionOwner, ctx?: ExtensionContext): void;
   onSessionShutdown(ctx?: ExtensionContext): void;
@@ -418,6 +417,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       soft: settings.soft,
     });
   }
+  function isContextExhausted(ctx: ExtensionContext, estimatedTokens: number): boolean {
+    const contextWindow = ctx.model?.contextWindow;
+    return contextWindow === undefined || estimatedTokens >= contextWindow;
+  }
   /**
    * Every field a fresh lifecycle must start from. onSessionStart used to clear
    * only 13 of these and never touched the concurrency trio, so a session
@@ -436,6 +439,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     state.lastTriggerKey = undefined;
     state.lastNoCompactableKey = undefined;
     state.highPressureDroppedTurns = 0;
+    state.belowEscalateStreak = 0;
     state.notifiedPressureKeys.clear();
     state.internalsWarningTurn = undefined;
   }
@@ -444,6 +448,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     state.breaker = resetCompactionBreaker();
     state.breakerNotified = false;
     state.highPressureDroppedTurns = 0;
+    state.belowEscalateStreak = 0;
     state.notifiedPressureKeys.clear();
     state.outputLimitCompactions = 0;
     state.outputLimitBreakerNotified = false;
@@ -602,8 +607,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           state.belowEscalateStreak = 0;
           const estimate = { ...estimateContextTokens(pressure.messages), tokens: pressure.estimatedTokens };
           const triggerKey = `${estimate.tokens}:${pressure.thresholdTokens}:${messages.length}`;
+          // A matching trigger normally avoids re-queuing identical intent.
+          // Re-check exhaustion nevertheless: model/window changes can happen
+          // between pressure evaluations, and the current provider request must
+          // be aborted if it no longer fits even in the escalate branch.
+          const contextExhausted = isContextExhausted(ctx, estimate.tokens);
           if (state.pendingIntent?.triggerKey !== triggerKey) {
-            const contextExhausted = estimate.tokens >= (ctx.model?.contextWindow ?? Number.POSITIVE_INFINITY);
             state.pendingIntent = {
               generation,
               triggerKey,
@@ -623,6 +632,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
               `escalate:${pressure.thresholdTokens}`,
               `Context remains near the compaction threshold after pruning (${estimate.tokens.toLocaleString("en-US")}/${pressure.thresholdTokens.toLocaleString("en-US")} tokens). Compaction will run after this turn; responses may be truncated until then.`,
             );
+          } else if (contextExhausted) {
+            ctx.abort();
           }
         } else if (pressure.band === "critical" || pressure.band === "auto-prune") {
           // Still inside the prune/critical band but below the escalate window:
@@ -662,7 +673,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       // request must not fall through to the provider while waiting for the
       // settled-phase compaction owner.
       if (state.pendingIntent?.triggerKey === triggerKey) {
-        const stillExhausted = estimate.tokens >= (ctx.model?.contextWindow ?? Number.POSITIVE_INFINITY);
+        const stillExhausted = isContextExhausted(ctx, estimate.tokens);
         if (stillExhausted) ctx.abort();
         return pressure.messages;
       }
@@ -673,7 +684,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       // ctx.model may have been replaced across the awaits above; treat a
       // missing window as fully exhausted so an unbounded request never slips
       // through to the provider.
-      const contextExhausted = estimate.tokens >= (ctx.model?.contextWindow ?? Number.POSITIVE_INFINITY);
+      const contextExhausted = isContextExhausted(ctx, estimate.tokens);
       state.pendingIntent = {
         generation,
         triggerKey,
@@ -703,10 +714,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       "warning",
     );
     try {
-      // Deliberately omit customInstructions. The session_before_compact
-      // arbiter treats this as a native request, allowing Pi's fallback path
-      // rather than re-entering the tripped mid-turn owner.
+      // Deliberately omit an owner tag. The session_before_compact arbiter
+      // still observes this as native, while the marker exempts the recovery
+      // request from completed-turn threshold preservation after its original
+      // user turn was already aborted.
       ctx.compact({
+        customInstructions: NATIVE_FALLBACK_COMPACTION_MARKER,
         onComplete: () => {
           state.breaker = resetCompactionBreaker();
           state.breakerNotified = false;
@@ -1259,31 +1272,6 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         publishIdleStatus(ctx, settingsFor(ctx).enabled);
         if (!state.lastNoCompactableKey) clearPressureStatus(ctx);
       }
-    },
-    async onToolLoopEnd(ctx) {
-      const generation = state.generation;
-      const sessionId = sessionIdOf(ctx);
-      const isCurrentLifecycle = () => generation === state.generation
-        && (sessionId === undefined || state.sessionId === undefined || sessionId === state.sessionId);
-      if (!isCurrentLifecycle()) return;
-      const pending = state.pendingIntent;
-      // agent_end fires when the tool loop of a turn completes, before the
-      // next agent_settled. A live critical intent must settle here: the
-      // settled-phase defer keeps the first completed turn uncompressed on
-      // purpose, but when the user's turn is a long tool loop that already
-      // overflowed the trigger, waiting for a SECOND completed turn leaves the
-      // session above the hard threshold with no hard compaction — the exact
-      // 'tool call ends but no compaction' symptom. hasPendingMessages
-      // distinguishes a loop that will continue (next tool iteration) from one
-      // that actually ended: only the ended case settles here, so an in-flight
-      // multi-tool loop is not interrupted mid-iteration.
-      if (!pending || state.running || ctx.hasPendingMessages?.()) return;
-      if (pending.generation !== generation) return;
-      // Output-limit and mid-turn intents both target the same arbiter; let
-      // the settled-phase output-limit path win when both are live.
-      if (state.pendingOutputLimitIntent) return;
-      state.highPressureDroppedTurns = 0;
-      await settlePendingCompaction(ctx);
     },
     async onOutputLimit(messages, ctx) {
       const generation = state.generation;
