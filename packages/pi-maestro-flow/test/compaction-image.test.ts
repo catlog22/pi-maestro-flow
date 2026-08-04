@@ -113,6 +113,41 @@ test("estimateMessageTokens keeps image estimate unchanged at ~1200 per image", 
   assert.ok(oneImage >= 1200 && oneImage < 1300, `single image ~1200, got ${oneImage}`);
 });
 
+test("estimateMessageTokens charges image and document blocks independently in one message", () => {
+  const mixed = {
+    role: "user",
+    content: [
+      { type: "text", text: "attachments" },
+      imageBlock(),
+      { type: "document", title: "spec.pdf", source: { type: "base64", data: "A".repeat(100_000) } },
+      imageBlock(),
+    ],
+    timestamp: 1,
+  } as never;
+  const tokens = estimateMessageTokens(mixed);
+  // 2 images × 1200 + 1 document × 2000 + tiny text overhead
+  assert.ok(tokens >= 1200 * 2 + 2000, `must include 2×1200 image + 2000 document, got ${tokens}`);
+  assert.ok(tokens < 1200 * 2 + 2000 + 200, `must not count base64 as text, got ${tokens}`);
+});
+
+test("estimateMessageTokens and stripping tolerate empty/undefined content", () => {
+  const empty = { role: "user", content: [], timestamp: 1 } as never;
+  const tokens = estimateMessageTokens(empty);
+  assert.ok(tokens > 0 && tokens < 500, `empty content stays tiny, got ${tokens}`);
+  assert.deepEqual(stripImagesFromMessagesForSummary([empty]), [empty], "empty content passes through");
+  const missing = { role: "user", timestamp: 1 } as never;
+  assert.deepEqual(stripImagesFromMessagesForSummary([missing]), [missing], "undefined content passes through");
+});
+
+test("document placeholder is text, so summary capacity is not inflated by documents (027)", () => {
+  const base = estimateSummaryRequestTokens(MAESTRO_COMPACTION_SYSTEM_PROMPT, "hello");
+  const withDocs = estimateSummaryRequestTokens(
+    MAESTRO_COMPACTION_SYSTEM_PROMPT,
+    "hello [document] [document]",
+  );
+  assert.ok(withDocs < base + 200, "document placeholders are tiny text, not per-document token cost");
+});
+
 // --- P1-2: vision description text survives compaction independently ---
 
 test("maestro-vision-analysis custom message becomes text and survives summary serialization", () => {
