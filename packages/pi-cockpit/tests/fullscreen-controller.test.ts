@@ -233,3 +233,53 @@ test("mouse lease pairs with an existing split-pane lease (ref-counted)", () => 
 	other.release();
 	assert.ok(harness.writes.includes("\x1b[?1002l"), "disabled once the last lease releases");
 });
+
+test("copy-on-select drag copies transcript text and wheel still scrolls", async () => {
+	const transcript = Array.from({ length: 15 }, (_, i) => `r${i}`);
+	const harness = makeHarness(() => buildLines(transcript, EDITOR_BLOCK, CHROME), 20);
+	const copied: string[] = [];
+	const controller = createFullscreenController({
+		isCopyOnSelect: () => true,
+		copy: async (text) => { copied.push(text); },
+		subscribeInput: (handler) => {
+			harness.attachInput(handler);
+			return () => harness.attachInput(undefined);
+		},
+	});
+	controller.attach(harness.tui);
+	harness.render(); // transcript height 15, no padding
+	// Drag over rows 1-2 (r0, r1), cols 0-2.
+	harness.inputHandler?.("\x1b[<0;1;1M"); // press button 0 at (1,1)
+	harness.inputHandler?.("\x1b[<32;3;2M"); // motion to (3,2)
+	harness.inputHandler?.("\x1b[<0;3;2m"); // release at (3,2)
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.deepEqual(copied, ["r0\nr1"], "drag copies the selected transcript rows");
+	// Wheel still scrolls after a selection (selection is cleared on wheel).
+	harness.inputHandler?.(WHEEL_UP);
+	assert.equal(controller.getScrollOffset(), 3);
+	controller.dispose();
+});
+
+test("copy-on-select disabled: drags are ignored but wheel scrolling works", async () => {
+	const transcript = Array.from({ length: 15 }, (_, i) => `r${i}`);
+	const harness = makeHarness(() => buildLines(transcript, EDITOR_BLOCK, CHROME), 20);
+	const copied: string[] = [];
+	const controller = createFullscreenController({
+		isCopyOnSelect: () => false,
+		copy: async (text) => { copied.push(text); },
+		subscribeInput: (handler) => {
+			harness.attachInput(handler);
+			return () => harness.attachInput(undefined);
+		},
+	});
+	controller.attach(harness.tui);
+	harness.render();
+	harness.inputHandler?.("\x1b[<0;1;1M");
+	harness.inputHandler?.("\x1b[<32;3;2M");
+	harness.inputHandler?.("\x1b[<0;3;2m");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.deepEqual(copied, [], "no copy when copy-on-select is off");
+	harness.inputHandler?.(WHEEL_UP);
+	assert.equal(controller.getScrollOffset(), 3, "wheel still scrolls without copy-on-select");
+	controller.dispose();
+});

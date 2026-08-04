@@ -2,6 +2,10 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { EDITOR_END_SENTINEL, EDITOR_START_SENTINEL } from "./claude-editor.ts";
 import { acquireMouseReporting, flushMouseReportingWrites, type MouseReportingLease } from "./mouse-reporting.ts";
 import { parseSgrMouseEvent } from "./split-pane.ts";
+import {
+	createTranscriptSelectionController,
+	type TranscriptSelectionController,
+} from "./transcript-selection.ts";
 
 export const COCKPIT_FULLSCREEN_WIDGET_KEY = "cockpit-fullscreen-anchor";
 export const COCKPIT_FULLSCREEN_MARKER = Symbol.for("pi-cockpit.fullscreen-render");
@@ -24,11 +28,15 @@ interface RenderMarker {
 }
 
 export interface FullscreenControllerOptions {
-	/** Live read of copyOnSelect; consumed by the selection controller (T4). */
+	/** Live read of copyOnSelect; consumed by the selection controller. */
 	isCopyOnSelect?: () => boolean;
 	/** Subscribe to raw terminal input (wheel + selection). */
 	subscribeInput?(handler: (data: string) => InputResult): () => void;
 	onError?(error: unknown): void;
+	/** User notification surface (e.g. ctx.ui.notify). */
+	notify?(message: string, level: "warning" | "info"): void;
+	/** Injectable copy for selection tests; defaults to pi's copyToClipboard. */
+	copy?(text: string): Promise<void>;
 }
 
 export interface FullscreenController {
@@ -63,6 +71,17 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 	// Transcript length at the previous compose, to detect growth while anchored.
 	// -1 = not yet measured (first compose establishes the baseline, not "new").
 	let lastTranscriptLength = -1;
+	// Visible transcript viewport from the last compose (with ANSI), for selection.
+	let viewportLines: string[] = [];
+	let transcriptHeight = 0;
+	const selection = createTranscriptSelectionController({
+		isEnabled: () => options.isCopyOnSelect?.() ?? false,
+		getTranscriptHeight: () => transcriptHeight,
+		getViewportLines: () => viewportLines,
+		notify: (message, level) => options.notify?.(message, level),
+		copy: options.copy,
+		onError: options.onError,
+	});
 
 	const reportError = (error: unknown): void => {
 		try {
@@ -103,8 +122,8 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 		// first and then the transcript, keeping the editor whole.
 		const chromeKept = Math.max(0, Math.min(chromeRows, rows - editorRows));
 		const chrome = chromeKept === chromeRows ? trailingChrome : trailingChrome.slice(0, chromeKept);
-		const transcriptHeight = Math.max(0, rows - editorRows - chromeKept);
-		const maxOffset = Math.max(0, transcript.length - transcriptHeight);
+		const transcriptHeightFor = Math.max(0, rows - editorRows - chromeKept);
+		const maxOffset = Math.max(0, transcript.length - transcriptHeightFor);
 		hintRow = 0;
 		// Growing transcript while anchored: keep the visible anchor (offset moves
 		// down by delta) and surface the new lines via the hint (C4).
@@ -115,11 +134,17 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 		}
 		lastTranscriptLength = transcript.length;
 		scrollOffset = clamp(scrollOffset, 0, maxOffset);
-		const visibleStart = transcript.length - transcriptHeight - scrollOffset;
-		let visibleTranscript = transcript.slice(Math.max(0, visibleStart), Math.max(0, visibleStart + transcriptHeight));
+		transcriptHeight = transcriptHeightFor;
+		const visibleStart = transcript.length - transcriptHeightFor - scrollOffset;
+		let visibleTranscript = transcript.slice(Math.max(0, visibleStart), Math.max(0, visibleStart + transcriptHeightFor));
 		// Pad the top when the transcript is shorter than its viewport.
-		while (visibleTranscript.length < transcriptHeight) visibleTranscript.unshift("");
-		if (scrollOffset > 0 && pendingLines > 0 && transcriptHeight > 0) {
+		while (visibleTranscript.length < transcriptHeightFor) visibleTranscript.unshift("");
+		viewportLines = visibleTranscript;
+		// Composite the active selection highlight over the transcript viewport.
+		if (selection.isSelecting()) {
+			visibleTranscript = visibleTranscript.map((line, index) => selection.highlight(line, index));
+		}
+		if (scrollOffset > 0 && pendingLines > 0 && transcriptHeightFor > 0) {
 			// Replace the bottom transcript row with the new-output hint.
 			visibleTranscript[transcriptHeight - 1] = NEW_OUTPUT_HINT.replace("{n}", String(pendingLines));
 			hintRow = transcriptHeight; // 1-indexed row just above the editor block
@@ -145,10 +170,12 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 		const mouse = parseSgrMouseEvent(data);
 		if (!mouse) return undefined;
 		if (mouse.button === WHEEL_UP) {
+			selection.clear();
 			scrollBy(WHEEL_SCROLL_STEP);
 			return { consume: true };
 		}
 		if (mouse.button === WHEEL_DOWN) {
+			selection.clear();
 			scrollBy(-WHEEL_SCROLL_STEP);
 			return { consume: true };
 		}
@@ -162,10 +189,29 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 			hintRow > 0 &&
 			mouse.y === hintRow
 		) {
+			selection.clear();
 			jumpToBottom();
 			return { consume: true };
 		}
-		// Non-wheel mouse passes through (split-pane resize, later selection).
+		// Drag selection (copy-on-select) inside the transcript viewport.
+		if ((options.isCopyOnSelect?.() ?? false) && mouse.y <= transcriptHeight) {
+			if (!mouse.release && !mouse.motion && (mouse.button & 3) === 0) {
+				selection.press(mouse.x, mouse.y);
+				requestRender();
+				return { consume: true };
+			}
+			if (mouse.motion && (mouse.button & 31) === 0) {
+				selection.motion(mouse.x, mouse.y);
+				requestRender();
+				return { consume: true };
+			}
+			if (mouse.release && (mouse.button & 31) === 0) {
+				void selection.release(mouse.x, mouse.y);
+				requestRender();
+				return { consume: true };
+			}
+		}
+		// Non-wheel mouse passes through (split-pane resize).
 		return undefined;
 	};
 
@@ -238,6 +284,7 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 				unsubscribeInput = undefined;
 			}
 			if (tui) flushMouseReportingWrites(tui);
+			selection.clear();
 			requestRender();
 			tui = undefined;
 			originalRender = undefined;
