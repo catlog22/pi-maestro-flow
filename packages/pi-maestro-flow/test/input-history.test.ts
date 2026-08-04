@@ -23,6 +23,7 @@ import {
 
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
+const ESCAPE = "\x1b";
 
 async function workspace(): Promise<{ cwd: string; rootDir: string; file: string; cleanup: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), "pi-input-history-"));
@@ -39,7 +40,14 @@ async function workspace(): Promise<{ cwd: string; rootDir: string; file: string
 function editor(entries: string[]): { editor: HistoryEditor; recorded: string[] } {
   const tui = { requestRender() {}, terminal: { rows: 40, columns: 100 } } as unknown as TUI;
   const theme = { borderColor: (value: string) => value, selectList: {} } as unknown as EditorTheme;
-  const keybindings = new KeybindingsManager(TUI_KEYBINDINGS) as unknown as AppKeybindingsManager;
+  const tuiKeybindings = new KeybindingsManager(TUI_KEYBINDINGS);
+  const keybindings = {
+    matches(data: string, action: string): boolean {
+      return action === "app.interrupt"
+        ? data === ESCAPE
+        : tuiKeybindings.matches(data, action as never);
+    },
+  } as unknown as AppKeybindingsManager;
   const recorded: string[] = [];
   return {
     editor: new HistoryEditor(tui, theme, keybindings, {
@@ -126,7 +134,7 @@ const editorTheme = {
   },
 } as unknown as EditorTheme;
 
-test("the banner and recalled prompt survive pi's real render pipeline", async () => {
+test("the history label and recalled prompt survive pi's real render pipeline", async () => {
   const { cwd, rootDir, cleanup } = await workspace();
   try {
     const seeded = new InputHistoryStore(cwd, { rootDir, debounceMs: 0 });
@@ -163,12 +171,12 @@ test("the banner and recalled prompt survive pi's real render pipeline", async (
 
     terminal.press(UP);
     const first = await frame();
-    assert.match(first, /── History 1\/2 ─/);
+    assert.match(first, /History 1\/2/);
     assert.ok(first.includes("run the tests please"));
 
     terminal.press(UP);
     const second = await frame();
-    assert.match(second, /── History 2\/2 ─/);
+    assert.match(second, /History 2\/2/);
     assert.ok(second.includes("older prompt"));
 
     tui.stop();
@@ -454,16 +462,16 @@ test("browsing from a half-typed prompt gives it back on the way down", () => {
   assert.equal(instance.getText(), "half typed");
 });
 
-test("the banner shows only while browsing", () => {
+test("the history label shows only while browsing", () => {
   const { editor: instance } = editor(["newest", "older"]);
   assert.ok(!instance.render(40).at(-1)?.includes("History"));
 
   instance.handleInput(UP);
-  assert.match(instance.render(40).at(-1) ?? "", /── History 1\/2 ─+$/);
+  assert.equal(instance.render(40).at(-1), "History 1/2");
   instance.handleInput(UP);
-  assert.match(instance.render(40).at(-1) ?? "", /── History 2\/2 ─+$/);
+  assert.equal(instance.render(40).at(-1), "History 2/2");
 
-  // Typing leaves history behind, so the banner goes with it.
+  // Typing leaves history behind, so the label goes with it.
   instance.handleInput("x");
   assert.ok(!instance.render(40).at(-1)?.includes("History"));
 });
@@ -476,15 +484,34 @@ test("setText from outside the editor ends browsing", () => {
   assert.ok(!instance.render(40).at(-1)?.includes("History"));
 });
 
-test("the banner fills the editor width and degrades on narrow terminals", () => {
+test("double Escape clears a nonempty draft while empty input stays delegated to Pi", () => {
+  const { editor: instance } = editor([]);
+  let hostEscapes = 0;
+  instance.onEscape = () => { hostEscapes += 1; };
+
+  instance.setText("half typed");
+  instance.handleInput(ESCAPE);
+  assert.equal(instance.getText(), "half typed");
+  assert.equal(hostEscapes, 1);
+
+  instance.handleInput(ESCAPE);
+  assert.equal(instance.getText(), "");
+  assert.equal(hostEscapes, 1);
+
+  instance.handleInput(ESCAPE);
+  instance.handleInput(ESCAPE);
+  assert.equal(hostEscapes, 3);
+});
+
+test("the history label has no horizontal rule and truncates on narrow terminals", () => {
   const wide = historyBanner(3, 100, 40, 0, (value) => value);
-  assert.equal(wide.length, 40);
-  assert.equal(wide, `── History 3/100 ${"─".repeat(23)}`);
+  assert.equal(wide, "History 3/100");
+  assert.ok(!wide.includes("─"));
 
   const padded = historyBanner(3, 100, 40, 2, (value) => value);
-  assert.equal(padded.length, 38);
-  assert.ok(padded.startsWith("  ── History 3/100 "));
+  assert.equal(padded, "  History 3/100");
 
-  // truncateToWidth adds its own reset codes, so match on the visible text.
-  assert.match(historyBanner(3, 100, 10, 0, (value) => value), /^History 3\S*…/);
+  // truncateToWidth preserves terminal styling resets, so assert on visible text.
+  const narrow = historyBanner(3, 100, 10, 0, (value) => value).replace(/\x1b\[[0-9;]*m/g, "");
+  assert.equal(narrow, "History 3…");
 });
