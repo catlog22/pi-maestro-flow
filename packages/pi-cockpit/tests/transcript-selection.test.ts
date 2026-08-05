@@ -142,6 +142,22 @@ test("clipboard failure warns and keeps the selection", async () => {
 	assert.equal(harness.controller.isSelecting(), true, "selection retained after failure");
 });
 
+test("successful copy notifies the copied char/line count", async () => {
+	const harness = makeSelection();
+	harness.setLines(["alpha", "beta", "gamma"]);
+	const attempted = await drag(harness, [1, 1], [6, 3]);
+	assert.equal(attempted, true);
+	assert.equal(harness.copied, "alpha\nbeta\ngamma");
+	assert.ok(harness.notifications.some((m) => m.includes("16 chars") && m.includes("3 lines")), "reports chars and lines");
+});
+
+test("single-line copy reports just the char count", async () => {
+	const harness = makeSelection();
+	harness.setLines(["hello world"]);
+	await drag(harness, [1, 1], [6, 1]);
+	assert.ok(harness.notifications.some((m) => m.includes("5 chars") && !m.includes("lines")), "reports only chars");
+});
+
 test("copy disabled still allows drag selection (highlight), just no copy", async () => {
 	const harness = makeSelection();
 	harness.setLines(["alpha", "beta", "gamma"]);

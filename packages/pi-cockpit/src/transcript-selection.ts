@@ -178,6 +178,13 @@ export function createTranscriptSelectionController(options: TranscriptSelection
 			const copy = options.copy ?? copyToClipboard;
 			try {
 				await copy(text);
+				const lineCount = text.length > 0 ? text.split("\n").length : 0;
+				options.notify(
+					lineCount > 1
+						? `Copied ${text.length} chars · ${lineCount} lines`
+						: `Copied ${text.length} chars`,
+					"info",
+				);
 				anchor = null;
 				focus = null;
 			} catch (error) {
