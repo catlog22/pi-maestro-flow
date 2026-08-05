@@ -222,13 +222,13 @@ Runtime birth packets, `maestro run brief`, and `maestro run check` are authorit
 
 - Record accepted decisions and locked constraints in `report.md` frontmatter.
 - Attribute search hits before citing them: `maestro knowledge record <ids...> --signal consumed|cited|validated|contradicted --source search|load|manual` records pure ledger attribution on the active Run without staging a candidate (use `stage --signal` only when a candidate is intended).
-- Stage reusable recipes or pitfalls before completion:
+- Stage reusable recipes or pitfalls before completion. Write candidate content to a temp file and pass `--content-file <path|->` (or stdin `-`) — never inline as a positional argument: content with spaces, quotes, unicode, newlines, or leading dashes misparses and shifts later arguments.
 
 ```bash
-maestro knowledge stage spec|knowhow "<title>" "<content>" --run <run-id> [--category <category>]
+maestro knowledge stage spec|knowhow "<title>" --content-file <path|-> --run <run-id> [--category <category>]
 ```
 
-- Add `--signal cited|validated|contradicted --signal-ids <ids>` when relating a candidate to existing knowledge.
+- Add `--signal cited|validated|contradicted --signal-ids <comma-separated ids>` when relating a candidate to existing knowledge; space-separated `--signal-ids` values leak into positional arguments.
 - Run completion stages pending candidates; it does not promote them.
 - On Run seal a `run-knowledge` message summarizes the Run's attribution (consumed/cited/validated/contradicted) and staged candidates; on Session seal a `session-knowledge` message prompts candidate review when a backlog exists. Treat these as the authoritative seal-time knowledge state — do not re-derive it manually.
 - Work through the `run check` finish checklist and record intentional concerns.
