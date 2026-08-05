@@ -26,7 +26,7 @@ export const TERMINAL_RESTORE_SEQUENCE =
 	"\x1b[?1049l\x1b[?1l" +
 	"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" +
 	"\x1b[?2004l" +
-	"\x1b[?2027l\x1b[?2028l\x1b[?2029l\x1b[<u" +
+	"\x1b[?2027l\x1b[?2028l\x1b[?2029l\x1b[<u\x1b[?2031l" +
 	"\x1b[?25h\x1b[0m";
 
 const writers = new Set<WriteFn>();
@@ -73,11 +73,19 @@ function handleSigint(): void {
 	process.exit(1);
 }
 
+// SIGTERM/SIGHUP are handled gracefully by pi (session_shutdown -> our dispose), so
+// we only flush as a safety net and never terminate — pi owns the exit there.
+function handleTerminateSignal(): void {
+	flush();
+}
+
 function install(): void {
 	if (handlersInstalled) return;
 	handlersInstalled = true;
 	process.on("exit", flush);
 	process.on("SIGINT", handleSigint);
+	process.on("SIGTERM", handleTerminateSignal);
+	process.on("SIGHUP", handleTerminateSignal);
 }
 
 function uninstall(): void {
@@ -85,6 +93,8 @@ function uninstall(): void {
 	handlersInstalled = false;
 	process.removeListener("exit", flush);
 	process.removeListener("SIGINT", handleSigint);
+	process.removeListener("SIGTERM", handleTerminateSignal);
+	process.removeListener("SIGHUP", handleTerminateSignal);
 }
 
 /**
