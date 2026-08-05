@@ -27,6 +27,8 @@ export interface GoalOverlayParams {
   close: () => void;
   theme: Theme;
   onAction: (action: GoalOverlayAction, goalId: string) => void | Promise<void>;
+  /** Sampled once per passive render; the overlay intentionally owns no clock timer. */
+  now?: () => number;
 }
 
 type GoalOverlayMode = "list" | "detail" | "confirm";
@@ -89,12 +91,13 @@ export class GoalOverlay implements Component, Focusable {
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.min(width, 140));
+    const now = this.params.now?.() ?? Date.now();
     this.clampState();
     if (safeWidth < 20) return [this.renderCompact(safeWidth)];
     if (this.mode === "confirm") return this.renderConfirm(safeWidth);
-    if (this.mode === "detail") return this.renderDetail(safeWidth);
+    if (this.mode === "detail") return this.renderDetail(safeWidth, now);
     if (safeWidth < 88) return this.renderList(safeWidth);
-    return this.renderWide(safeWidth);
+    return this.renderWide(safeWidth, now);
   }
 
   private renderCompact(width: number): string {
@@ -125,7 +128,7 @@ export class GoalOverlay implements Component, Focusable {
     return this.card(rows, width, selectedRows);
   }
 
-  private renderWide(width: number): string[] {
+  private renderWide(width: number, now: number): string[] {
     const inner = width - 2;
     const leftWidth = Math.max(30, Math.floor((inner - 3) * 0.42));
     const rightWidth = inner - leftWidth - 3;
@@ -134,7 +137,7 @@ export class GoalOverlay implements Component, Focusable {
     const left = entries.slice(start, start + 8).map((entry, offset) =>
       this.goalRow(entry, start + offset === this.selected, leftWidth)
     );
-    const right = this.detailLines(this.selectedEntry(), rightWidth, 5);
+    const right = this.detailLines(this.selectedEntry(), rightWidth, 5, now);
     const rowCount = Math.max(left.length, right.length, 1);
     const rows: string[] = [this.header(inner), this.separator(inner)];
     const selectedRows = new Set<number>();
@@ -147,10 +150,10 @@ export class GoalOverlay implements Component, Focusable {
     return this.card(rows, width, selectedRows);
   }
 
-  private renderDetail(width: number): string[] {
+  private renderDetail(width: number, now: number): string[] {
     const inner = width - 2;
     const rows: string[] = [this.header(inner), this.separator(inner)];
-    rows.push(...this.detailLines(this.selectedEntry(), inner, 12));
+    rows.push(...this.detailLines(this.selectedEntry(), inner, 12, now));
     if (this.status) rows.push(fitLine(this.status, inner));
     rows.push(this.helpLine(inner, ["Esc back", "↑↓ goal", "s switch", "p stop", "r resume", "x clear"]));
     return this.card(rows, width);
@@ -182,7 +185,7 @@ export class GoalOverlay implements Component, Focusable {
     );
   }
 
-  private detailLines(entry: GoalDetailEntry | undefined, width: number, objectiveMax: number): string[] {
+  private detailLines(entry: GoalDetailEntry | undefined, width: number, objectiveMax: number, now: number): string[] {
     const theme = this.params.theme;
     if (!entry) return [fitLine("○ no goals · /goal create <objective>", width)];
     const state = goalVisualState(entry, this.phaseFor(entry));
@@ -208,7 +211,7 @@ export class GoalOverlay implements Component, Focusable {
     if (entry.verificationFailures) {
       lines.push(field("Failures", `${entry.verificationFailures} verification failure${entry.verificationFailures === 1 ? "" : "s"}`, width));
     }
-    lines.push(field("Updated", `${formatGoalDuration(ageSeconds(entry.updatedAt))} ago`, width));
+    lines.push(field("Updated", `${formatGoalDuration(ageSeconds(entry.updatedAt, now))} ago`, width));
     if (state.hint) lines.push(field("Hint", theme.fg("dim", state.hint), width));
     return lines;
   }
@@ -314,8 +317,8 @@ function field(label: string, value: string, width: number): string {
   return fitLine(`${label.padEnd(10)} ${value}`, width);
 }
 
-function ageSeconds(timestamp: number): number {
-  return Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+function ageSeconds(timestamp: number, now: number): number {
+  return Math.max(0, Math.floor((now - timestamp) / 1000));
 }
 
 function isEnter(data: string): boolean {
