@@ -439,7 +439,9 @@ export default function registerTeammateExtension(
       }
       publishSessionIdentity(ctx);
       refreshModelCatalog(ctx);
-      proxyTeammateTool.description = buildTeammateToolDescription(ctx.cwd);
+      // Nested-context (proxy) tool: trimmed variant without the per-cwd routing
+      // table; execution is proxied to the parent root process.
+      proxyTeammateTool.description = buildTeammateToolDescription(ctx.cwd, { nested: true });
       if (canDispatchNestedTeammate) pi.registerTool(proxyTeammateTool);
     });
     pi.on("before_agent_start", injectTeammateContext);
@@ -658,7 +660,9 @@ export default function registerTeammateExtension(
       name: "teammate",
       label: "Teammate",
       renderShell: "self",
-      description: buildTeammateToolDescription(process.cwd()),
+      // Initial placeholder (module-load cwd); refreshed with the session cwd at
+      // session_start below. Nested variant omits the per-cwd routing table.
+      description: buildTeammateToolDescription(process.cwd(), { nested: true }),
       promptSnippet: TEAMMATE_PROMPT_SNIPPET,
       promptGuidelines: TEAMMATE_PROMPT_GUIDELINES,
       parameters: TeammateParams,

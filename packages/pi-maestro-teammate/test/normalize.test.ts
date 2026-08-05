@@ -23,6 +23,36 @@ test("a task requires non-empty prompt text", () => {
   assert.match(blank.error ?? "", /requires a non-empty "prompt"/);
 });
 
+test("a prompt embedded inside outputSchema is diagnosed as mislocated, not just missing", () => {
+  // Regression: the task text was generated into outputSchema.prompt, leaving
+  // the task without its required prompt. The diagnostic must name the real
+  // location instead of the generic "requires a non-empty prompt".
+  const result = normalizeTeammateParams({
+    tasks: [{
+      name: "contract-auditor",
+      outputSchema: { type: "object", properties: {}, prompt: "PURPOSE: audit" },
+    }],
+  } as never);
+  assert.match(result.error ?? "", /has no "prompt"/);
+  assert.match(result.error ?? "", /inside "outputSchema"/);
+  assert.doesNotMatch(result.error ?? "", /requires a non-empty "prompt"/);
+});
+
+test("outputSchema keeps working when a prompt-like key is a legit schema fragment and task-level prompt exists", () => {
+  const result = normalizeTeammateParams({
+    tasks: [{
+      prompt: "audit",
+      outputSchema: { type: "object", properties: { prompt: { type: "string" } } },
+    }],
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.tasks[0].prompt, "audit");
+  assert.deepEqual(result.tasks[0].outputSchema, {
+    type: "object",
+    properties: { prompt: { type: "string" } },
+  });
+});
+
 test("one public task normalizes for the internal single-task primitive", () => {
   const result = normalizeTeammateParams({ tasks: [{ agent: "general", prompt: "Inspect auth" }] });
   assert.equal(result.error, undefined);

@@ -909,7 +909,22 @@ export function normalizeTeammateParams(
   const isMultiTask = normalized.length > 1;
 
   for (const [index, task] of normalized.entries()) {
-    if (typeof task.prompt !== "string" || task.prompt.trim().length === 0) {
+    const hasNoPrompt = typeof task.prompt !== "string" || task.prompt.trim().length === 0;
+    if (
+      hasNoPrompt
+      && task.outputSchema !== undefined
+      && typeof task.outputSchema === "object"
+      && task.outputSchema !== null
+      && typeof task.outputSchema.prompt === "string"
+    ) {
+      return {
+        tasks: normalized,
+        isMultiTask,
+        warnings,
+        error: `tasks[${index}]${task.name ? ` "${task.name}"` : ""} has no "prompt" — the prompt text was placed inside "outputSchema". Move "prompt" to the task level (a sibling of outputSchema); outputSchema holds only the JSON Schema.`,
+      };
+    }
+    if (hasNoPrompt) {
       return {
         tasks: normalized,
         isMultiTask,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Check } from "typebox/value";
+import { Check, Value } from "typebox/value";
 import {
   TeammateParams,
   TeammateSendParams,
@@ -124,4 +124,42 @@ test("findStructuredOutputSchemaHazard still rejects catastrophic pattern shapes
     findStructuredOutputSchemaHazard({ type: "string", pattern: "^(a+)+$" }) ?? "",
     /catastrophic backtracking/,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Misplaced prompt guard: a task text embedded inside outputSchema is rejected
+// at the parameter layer with a precise path (tasks.N.outputSchema.prompt)
+// instead of the misleading "tasks.N.prompt missing".
+// ---------------------------------------------------------------------------
+
+test("schema rejects a string prompt embedded inside task outputSchema", () => {
+  const task = {
+    prompt: "work",
+    outputSchema: {
+      type: "object",
+      properties: { summary: { type: "string" } },
+      prompt: "PURPOSE: the real task text was mislocated here",
+    },
+  };
+  assert.equal(Check(TeammateParams, { tasks: [task] }), false);
+  const errors = [...Value.Errors(TeammateParams, { tasks: [task] })].map(
+    (e: { instancePath?: string; message: string }) => `${e.instancePath ?? ""} ${e.message}`,
+  );
+  // The host formatter (pi-ai formatValidationPath) renders instancePath
+  // "/tasks/0/outputSchema/prompt" as "tasks.0.outputSchema.prompt".
+  assert.ok(errors.some((m) => /outputSchema\/prompt.*must be object/.test(m)), `expected an outputSchema.prompt error, got: ${errors.join(" | ")}`);
+});
+
+test("schema rejects a string prompt embedded inside top-level outputSchema", () => {
+  assert.equal(Check(TeammateParams, {
+    tasks: [{ prompt: "work" }],
+    outputSchema: { type: "object", prompt: "PURPOSE: mislocated" },
+  }), false);
+});
+
+test("schema accepts prompt as an object-valued JSON Schema key in outputSchema", () => {
+  // A schema fragment under "prompt" (object) is legitimate; only a bare
+  // task-text string is the mislocation we guard against.
+  assert.equal(Check(TeammateParams, { tasks: [{ prompt: "work", outputSchema: { prompt: { type: "string" } } }] }), true);
+  assert.equal(Check(TeammateParams, { tasks: [{ prompt: "work", outputSchema: { properties: { prompt: { type: "string" } } } }] }), true);
 });

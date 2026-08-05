@@ -375,23 +375,38 @@ export type TeammateRuntimeOptions = Pick<
   onRunOptionsCreated?: (options: RunTeammateOptions) => void;
 };
 
-export function buildTeammateToolDescription(cwd: string): string {
-  return `Dispatch tasks to teammate agents. Teammates run as Pi subprocesses with their own tools and context.
+export function buildTeammateToolDescription(
+  cwd: string,
+  options?: { nested?: boolean },
+): string {
+  const nested = options?.nested === true;
+  // Nested contexts (child agents) do not need the per-cwd routing table —
+  // execution is proxied to the parent root process, which owns routing.
+  const modelRoutingSection = nested
+    ? "Model routing inherits the parent session's configuration; pass an explicit model id to override (an id outside the catalog fails fast at dispatch with \"Unknown teammate model specifier\")."
+    : `When neither the top-level model nor a task-level model is set, teammates inherit the main session's current model by default. Configured task-type/role mappings take precedence when present; with no mapping and no session model, the agent's default model is used. An explicit model id that is not in the current catalog fails fast at dispatch with "Unknown teammate model specifier".
 
-Call form (per-task fields go inside tasks[]):
+Configured task-type model routing for ${cwd}:
+${formatModelRoutingConfig(cwd, discoverAgents(cwd))}`;
+  return `Dispatch tasks to teammate agents. Teammates run as Pi subprocesses with their own tools and context.
+${nested ? `Nested dispatch: this call is proxied to the parent root process — execution happens there, and the result (or teammate-complete notification) is delivered back to this agent's session.
+
+` : ""}Call form (per-task fields go inside tasks[]):
   { tasks: [{ prompt: "Inspect auth", agent: "analyst", taskType: "analysis", model: "provider/model", thinking: "high", outputSchema: {...}, maxNestingDepth: 0 }] }
 
-Every dispatch uses a non-empty tasks array; prompt is required and lives only inside tasks[] (as do name and dependsOn). Per-task fields also include description (a short display label used in graph summaries when the task has no name) and timeoutMs. Task-level values override the top-level defaults. Tasks that omit agent inherit the top-level agent, then default to "general".
+Every dispatch uses a non-empty tasks array; prompt is required and lives only inside tasks[] (as do name and dependsOn). Per-task fields also include description (a short display label used in graph summaries when the task has no name) and timeoutMs. Task-level values override the top-level defaults — except background, which is dispatch-level and belongs at the top level only. Tasks that omit agent inherit the top-level agent, then default to "general".
 The top level accepts only shared defaults for all tasks — agent, taskType, model, fallbackModels, thinking, context, cwd, outputSchema, timeoutMs, maxNestingDepth — plus reply_to, concurrency, maxAgents, background. A task field (prompt/name/dependsOn) placed at the top level is rejected as an unexpected property. background is dispatch-level: the whole call shares one foreground/background window, so it belongs at the top level only — a per-task background value is ignored with a warning.
 Use {name} or {name.field} in a dependent task's prompt, or dependsOn: ["name"] for ordering without output injection.
 
-Nesting control: pass maxNestingDepth on the root dispatch — or per task, which overrides the top-level value — to limit how many levels of nested teammate dispatch the spawned agents may perform below themselves. Omitting it everywhere defaults to the global ceiling. 0 forbids nested calls entirely — the assigned agents cannot dispatch teammates. Values above 1 behave like 1: the tree is globally hard-capped at 2 agent levels, and deeper nesting is rejected with an error. Inside a spawned agent, maxNestingDepth can only tighten the parent's budget — pass 0 to forbid further nesting below that call; it can never extend depth beyond what the parent allowed.
+Nesting control: pass maxNestingDepth on the root dispatch — or per task, which overrides the top-level value — to limit how many levels of nested teammate dispatch the spawned agents may perform below themselves. Omitting it everywhere defaults to the global ceiling. The only effective values are 0 and 1 — 2 is capped to 1 by the global 2-level ceiling and anything above 2 is rejected. 0 forbids nested calls entirely — the assigned agents cannot dispatch teammates. Inside a spawned agent, maxNestingDepth can only tighten the parent's budget — pass 0 to forbid further nesting below that call; it can never extend depth beyond what the parent allowed.
 
 Use an exact role name from the Available Teammate Agents section in the active system prompt. Unknown names are rejected.
 
-Background: the foreground wait window is bounded — the smallest per-task timeoutMs, or 10 minutes by default; when it elapses the call returns a background acknowledgement and the work continues, completing via one automatic teammate-complete notification that triggers a new turn. Do not poll observe or teammate-list; if the current turn must wait, call observe once with action="wait" and target { kind: "teammate", id: "<name-or-correlation-id>" }. Nested background dispatches: the work executes in the root process, and on completion the same teammate-complete envelope is delivered automatically to the dispatching child agent as a new turn in its session while that agent is still live, with the root caller additionally receiving the notification. If the dispatching agent has already ended, delivery is skipped and the result is settled and only inspectable via observe.
+Background: the foreground wait window is bounded — the smallest per-task timeoutMs, or a 600000 ms (10 minutes) default; when it elapses the call returns a background acknowledgement and the work continues, completing via one automatic teammate-complete notification that triggers a new turn. Do not poll observe or teammate-list; if the current turn must wait, call observe once with action="wait" and target { kind: "teammate", id: "<name-or-correlation-id>" }. Completion delivery details (root vs nested dispatch, skip-on-exit) are in the background parameter description.
 
 ## Structured output (outputSchema)
+
+prompt is a task-level field: always place the task text at tasks[].prompt, never inside outputSchema — outputSchema accepts only the JSON Schema object itself, and a prompt string embedded there is rejected as a mislocated prompt.
 
 When a task (or the top-level call) sets outputSchema, the child must submit its final answer through a \`structured_output\` tool that validates the value against that JSON Schema. On completion the value is returned directly in the result content (prefixed \`[structured_output]\`) and is persisted for later reads via \`agent://<correlationId>\` (resource tool). Schema-invalid submissions fail validation and the child retries automatically; a run that ends without a valid value fails with a diagnostic naming the offending field.
 
@@ -403,23 +418,15 @@ Use observe for teammate and background Bash status, barrier waits, or transitio
 - { action: "wait", until: "completed", targets: [{ kind: "teammate", id: "reviewer" }] } — block until the agent fully terminates (not just first result)
 - { action: "watch", targets: [{ kind: "teammate", id: "reviewer" }], timeoutMs: 30000 } — follow status transitions until timeout
 
-Set detail=full (or tail) to include a settled agent's captured result — including the structured_output value for schema tasks.
-
-When neither the top-level model nor a task-level model is set, teammates inherit the main session's current model by default. Configured task-type/role mappings take precedence when present; with no mapping and no session model, the agent's default model is used. An explicit model id that is not in the current catalog fails fast at dispatch with "Unknown teammate model specifier".
-
-Configured task-type model routing for ${cwd}:
-${formatModelRoutingConfig(cwd, discoverAgents(cwd))}`;
+${modelRoutingSection}`;
 }
 
-export const TEAMMATE_SEND_DESCRIPTION = `Send a message to a running or sleeping teammate agent, addressed by name, @name, displayed name#id-prefix, correlation ID, or unique ID prefix.
+export const TEAMMATE_SEND_DESCRIPTION = `Send a message to a running or sleeping teammate agent, addressed by name, @name, displayed name#id-prefix, or correlation ID (or prefix).
 
-Modes (default: follow_up):
-  - "steer" — interrupt the current turn and inject immediately
-  - "follow_up" — queue after the current turn completes
-  - "abort" — terminate the agent (message optional)`;
-export const TEAMMATE_SEND_SNIPPET = "Steer, follow up with, or abort a named running teammate agent.";
+Modes: "steer" | "follow_up" (default) | "abort" — per-mode semantics and the message requirement are in the mode and message parameter descriptions.`;
+export const TEAMMATE_SEND_SNIPPET = "Steer, follow up with, or abort a named running or sleeping teammate agent.";
 export const TEAMMATE_SEND_GUIDELINES = [
-  "Use teammate-send only for a named running or sleeping agent; use follow_up by default, steer for urgent correction, and abort only to terminate work.",
+  "Use teammate-send only for a named running or sleeping agent; steer for urgent correction, abort only to terminate work.",
 ];
 
 export const TEAMMATE_LIST_DESCRIPTION = `List available roles or teammate agents. view defaults to "active".
@@ -430,18 +437,18 @@ export const TEAMMATE_LIST_DESCRIPTION = `List available roles or teammate agent
 - "roles": builtin, project, and user-defined role definitions`;
 export const TEAMMATE_LIST_SNIPPET = "List available teammate roles or inspect active and named agent status.";
 export const TEAMMATE_LIST_GUIDELINES = [
-  'Use teammate-list with view="roles" when an available builtin or custom agent name is needed; use active/named/all for running work.',
+  'Use teammate-list with view="roles" when an available builtin, project, or user-defined agent name is needed; use active/named/all for running work.',
 ];
 
 export const TEAMMATE_WATCH_DESCRIPTION =
-  "Perform a one-shot inspection of a running or sleeping teammate agent's recent output, tool activity, inbox messages, and last result — including the structured_output value for schema tasks. This is not a completion-wait tool.";
+  "Perform a one-shot inspection of a running or sleeping teammate agent's recent output, tool activity, inbox messages, and last result — including the structured_output value for schema tasks. This returns one snapshot, unlike observe action=\"watch\" which polls until its timeoutMs; it is not a completion-wait tool.";
 export const TEAMMATE_WATCH_SNIPPET = "Inspect a specific teammate agent's recent activity and output.";
 export const TEAMMATE_WATCH_GUIDELINES = [
   "Use teammate-watch only for a one-off live inspection after selecting an agent name, displayed selector, or correlation ID; never call it repeatedly to wait for completion.",
   "Use teammate-wait once when completion or a result is required, or wait for the automatic teammate-complete notification.",
 ];
 export const TEAMMATE_WAIT_DESCRIPTION =
-  "Wait once for a teammate result or lifecycle settlement by name, or provide waitMs for a fixed delay. Named waits default to a bounded 10-minute timeout. Agent waits are event-driven and replace repeated teammate-watch calls.";
+  "Wait once for a teammate result by name, or provide waitMs for a fixed delay. Named waits default to a bounded 600000 ms (10 minutes) timeout and settle on result-ready (not terminal lifecycle); they are the single-target convenience form of observe action=\"wait\" — use observe with until=\"completed\" to wait for full termination. Agent waits replace repeated teammate-watch calls.";
 export const TEAMMATE_WAIT_SNIPPET = "Wait once for a teammate result or for a bounded delay.";
 export const TEAMMATE_WAIT_GUIDELINES = [
   "Call teammate-wait exactly once with a returned name or correlation ID and a bounded timeout instead of repeatedly calling teammate-watch.",
@@ -452,26 +459,27 @@ export const OBSERVE_DESCRIPTION = `Observe mixed teammate and background Bash t
 
 - "status": one-shot snapshot of every target
 - "wait": block on an all/any/count barrier with one request-level timeout; set until="completed" to block until agents fully terminate instead of first result
-- "watch": poll every target until timeoutMs, returning the full status-transition timeline (richer than status, no barrier required)
+- "watch": poll every target until the bounded timeoutMs you provide, returning the full status-transition timeline (richer than status, no barrier required); omitted timeoutMs defaults to 600000 (10 minutes)
 
 Targets use { kind, id }, where kind is currently "teammate" or "bash_bg". Use detail=full (or tail) to include a settled teammate's captured result — including the structured_output value for schema tasks. Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.`;
 export const OBSERVE_SNIPPET = "Observe, wait for, or watch mixed teammate and background Bash targets.";
 export const OBSERVE_GUIDELINES = [
   "Use observe for mixed or multi-target status and waits; use one bounded wait instead of polling status.",
-  "Use action=watch to follow status transitions over time; use action=wait until=completed to block until agents fully terminate.",
+  "Use action=watch to follow status transitions over time; always pass a bounded timeoutMs — omitted defaults to 600000 (10 minutes). Use action=wait until=completed to block until agents fully terminate.",
   "Use detail=full only when recent output is required; summary is the compact default. detail=full includes a settled agent's captured result and structured_output value.",
 ];
 
-export const TEAMMATE_MONITOR_DESCRIPTION = `Observe multiple teammate targets or block on a multi-agent barrier. Persistent supervision is entered/exited separately via /monitor.
+export const TEAMMATE_MONITOR_DESCRIPTION = `Observe multiple teammate targets or block on a multi-agent barrier. Monitor mode is user-controlled via /monitor; this tool only queries and waits.
 
 - "status": one-shot compact snapshot of targets — non-blocking
-- "wait": block until barrier condition (all/any/count targets settle)
+- "wait": block until the barrier condition (all/any/count targets reach a result; result-ready, not terminal)
 
-Output is compact by default (one line per target). Use verbose for detail.`;
+Output is compact by default (one line per target). Use verbose for detail.
+
+teammate-only: targets are plain agent-name strings (not observe's { kind, id } objects); there is no watch/until/detail — use observe for mixed bash_bg targets, watch transitions, or until="completed" waits.`;
 export const TEAMMATE_MONITOR_SNIPPET = "Query monitor snapshot or block on a multi-agent barrier.";
 export const TEAMMATE_MONITOR_GUIDELINES = [
   "Use teammate-monitor for multi-agent observation and barrier waits; for a single agent, prefer teammate-wait.",
-  'Use action="wait" with waitMode="all" to block until all parallel agents complete before proceeding.',
   "Monitor mode is user-controlled via /monitor; this tool only queries and waits.",
 ];
 
@@ -514,7 +522,7 @@ export function appendTeammateDepthContext(
 }
 
 export function backgroundWaitGuidance(correlationId: string): string {
-  return `correlationId=${correlationId}. The teammate-complete notification is delivered automatically when the work finishes: for a root dispatch it arrives as a new turn in this session; for a nested dispatch the work runs in the root process and the root forwards the completion over IPC, so it also arrives as a new turn in this agent's session while this agent is still live (the root caller additionally sees it). If this agent has already ended, delivery is skipped and the result is settled and inspectable via observe. Do not poll observe or teammate-list. If this turn must consume the result, call observe exactly once with { action: "wait", targets: [{ kind: "teammate", id: "${correlationId}" }], timeoutMs: 600000 }; otherwise end the turn now.`;
+  return `correlationId=${correlationId}. The teammate-complete notification is delivered automatically when the work finishes: for a root dispatch it arrives as a new turn in this session; for a nested dispatch the work runs in the root process and the root forwards the completion over IPC, so it also arrives as a new turn in this agent's session while this agent is still live (the root caller additionally sees it). If this agent has already ended, delivery is skipped and the result is settled and inspectable via observe. Do not poll observe or teammate-list. If this turn must consume the result, call observe exactly once with { action: "wait", targets: [{ kind: "teammate", id: "${correlationId}" }], timeoutMs: 600000 (10 minutes) }; otherwise end the turn now.`;
 }
 
 /**

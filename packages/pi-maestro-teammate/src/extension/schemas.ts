@@ -101,6 +101,13 @@ export const TaskSpec = Type.Object({
     Type.Unsafe({
       type: "object",
       additionalProperties: true,
+      properties: {
+        prompt: {
+          type: "object",
+          description:
+            "Never place the task text here — tasks[].prompt is the task text. A string under this key is rejected as a mislocated prompt.",
+        },
+      },
       description:
         "JSON Schema for structured output. Output becomes accessible as {name.field} in dependent tasks.",
     }),
@@ -199,6 +206,13 @@ export const TeammateParams = Type.Object({
     Type.Unsafe({
       type: "object",
       additionalProperties: true,
+      properties: {
+        prompt: {
+          type: "object",
+          description:
+            "Never place the task text here — tasks[].prompt is the task text. A string under this key is rejected as a mislocated prompt.",
+        },
+      },
       description:
         "JSON Schema for structured output validation. Serves as the default for every task without its own outputSchema.",
     }),
@@ -210,7 +224,7 @@ export const TeammateParams = Type.Object({
     Type.Boolean({
       default: false,
       description:
-        "Run in background (default: false). The foreground wait window is always bounded — by the smallest per-task timeoutMs or a 10-minute default — and a call that outlives it returns a background acknowledgement while the teammate continues, then delivers the result via one automatic teammate-complete notification. Explicit background calls acknowledge immediately and send that notification later. The completion is delivered automatically to the caller: for a root dispatch it arrives as a new turn in the root session; for a nested dispatch the work executes in the root process and the root forwards the same envelope over IPC, so it also arrives as a new turn in the dispatching child agent's session while that agent is still live (the root caller additionally receives it). If the dispatching agent has already ended, delivery is skipped and the result is settled and only inspectable via observe.",
+        "Run in background (default: false). The foreground wait window is always bounded — by the smallest per-task timeoutMs or a 600000 ms (10 minutes) default — and a call that outlives it returns a background acknowledgement while the teammate continues, then delivers the result via one automatic teammate-complete notification. Explicit background calls acknowledge immediately and send that notification later. The completion is delivered automatically to the caller: for a root dispatch it arrives as a new turn in the root session; for a nested dispatch the work executes in the root process and the root forwards the same envelope over IPC, so it also arrives as a new turn in the dispatching child agent's session while that agent is still live (the root caller additionally receives it). If the dispatching agent has already ended, delivery is skipped and the result is settled and only inspectable via observe.",
     }),
   ),
 
@@ -254,7 +268,7 @@ export const TeammateParams = Type.Object({
     Type.Integer({
       minimum: 1,
       description:
-        "Default foreground wait window in milliseconds. Per-task timeoutMs takes precedence; when the effective window elapses, the dispatch moves to background without terminating its agents.",
+        "Default foreground detach window in milliseconds for this dispatch (600000 ms / 10 minutes when omitted). Per-task timeoutMs takes precedence; when the effective window elapses, the dispatch moves to background without terminating its agents. This is NOT the observation-wait limit — observe/wait/monitor use their own timeoutMs semantics.",
     }),
   ),
 }, { additionalProperties: false });
@@ -266,7 +280,7 @@ export const TeammateParams = Type.Object({
 export const TeammateSendParams = Type.Object({
   to: Type.String({
     description:
-      "Target agent — name, @name, displayed name#id-prefix, correlation ID, or unique ID prefix from teammate-list",
+      "Target agent — name, @name, displayed name#id-prefix, or correlation ID (or prefix) from teammate-list",
   }),
   message: Type.Optional(
     Type.String({
@@ -298,7 +312,7 @@ export const TeammateListParams = Type.Object({
       type: "string",
       enum: ["active", "named", "all", "roles"],
       default: "active",
-      description: 'View to return: "active" live agents except completed entries, "named" addressable agents, "all" tracked live entries, or "roles" available role definitions.',
+      description: 'View to return: "active" live agents except completed entries, "named" addressable agents, "all" tracked live entries, or "roles" builtin, project, and user-defined role definitions.',
     }),
   ),
 }, { additionalProperties: false });
@@ -325,7 +339,7 @@ export const TeammateWaitParams = Type.Object({
     Type.Integer({
       minimum: 1,
       default: 10 * 60_000,
-      description: "Maximum named-wait time in milliseconds (default: 600000)",
+      description: "Maximum named-wait time in milliseconds (default: 600000, 10 minutes)",
     }),
   ),
   waitMs: Type.Optional(
@@ -355,7 +369,7 @@ export const ObserveParams = Type.Object({
     type: "string",
     enum: ["status", "wait", "watch"],
     description:
-      '"status" takes a one-shot snapshot; "wait" blocks on a multi-target barrier; "watch" polls until timeoutMs and returns the full status-transition timeline.',
+      '"status" takes a one-shot snapshot; "wait" blocks on a multi-target barrier; "watch" polls until the bounded timeoutMs you provide (omitted defaults to 600000, 10 minutes) and returns the full status-transition timeline.',
   }),
   targets: Type.Array(
     Type.Object({
@@ -385,7 +399,7 @@ export const ObserveParams = Type.Object({
     description:
       "Block until the target reaches a result (\"result-ready\", default) or until it fully completes (\"completed\": terminal lifecycle — completed/failed/terminated).",
   })),
-  timeoutMs: Type.Optional(Type.Integer({ minimum: 1, default: 600_000, description: "Request-level wait timeout in milliseconds." })),
+  timeoutMs: Type.Optional(Type.Integer({ minimum: 1, default: 600_000, description: "Request-level wait/watch timeout in milliseconds (default: 600000, 10 minutes)." })),
 }, { additionalProperties: false });
 
 // ---------------------------------------------------------------------------
@@ -397,7 +411,7 @@ export const TeammateMonitorParams = Type.Object({
     type: "string",
     enum: ["status", "wait"],
     description:
-      'Operation: "status" one-shot multi-target snapshot (non-blocking); "wait" block until barrier condition is met. Monitor mode is entered/exited by the user via /monitor command.',
+      'Operation: "status" one-shot multi-target snapshot (non-blocking); "wait" block until barrier condition is met. Monitor mode is user-controlled via /monitor; this tool only queries and waits.',
   }),
   targets: Type.Array(
     Type.String({ minLength: 1 }),
@@ -427,7 +441,7 @@ export const TeammateMonitorParams = Type.Object({
     Type.Integer({
       minimum: 1,
       default: 600_000,
-      description: "Maximum wait time in milliseconds for the wait action (default: 600000).",
+      description: "Maximum wait time in milliseconds for the wait action (default: 600000, 10 minutes).",
     }),
   ),
   lines: Type.Optional(
