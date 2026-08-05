@@ -1,10 +1,19 @@
 ---
 name: maestro-fork
 description: "Create or sync session worktree for parallel dev Arguments: --session <session_id> [--base <ref>] [--sync]"
-allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro observe
 disable-model-invocation: true
 session-mode: none
 ---
+
+<teammate_contract>
+
+- `background: false` is the default. Use foreground dispatch whenever the result determines the current answer or next action.
+- Use `background: true` only for independent work. If this turn must consume a background result, call `observe` exactly once with `action: "wait"` and a bounded timeout before continuing; never continue independently while the result is pending.
+- Otherwise end the turn and wait for the automatic `teammate-complete` notification. Do not rely on `SendMessage`, `team_msg`, or hook callbacks as completion signals.
+- Never silently ignore an unfinished dispatch.
+
+</teammate_contract>
 
 <required_reading>
 ~/.maestro/workflows/run-mode.md
@@ -72,7 +81,7 @@ Fork and sync algorithm steps are defined in workflow `fork.md`.
 | Condition | Suggestion |
 |-----------|-----------|
 | Fork complete | `cd {wt.path}` then `maestro run start "{goal}" --cmd analyze --topic "{topic}" --platform pi --workflow-root .` |
-| Fork + automated | `teammate({ agent: "delegate", taskType: "development", task: "run full lifecycle for session", cwd: "{wt.path}" }) |
+| Fork + automated | `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "run full lifecycle for session" }], cwd: "{wt.path}" }) |
 | Sync complete | Resume work in worktree |
 | Sync conflicts found | Resolve manually, then retry |
 </completion>

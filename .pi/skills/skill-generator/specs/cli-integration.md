@@ -14,11 +14,7 @@ Suitable for scenarios that need immediate results.
 
 ```javascript
 // Agent call - synchronous
-const result = teammate({
-  subagent_type: 'universal-executor',
-  prompt: 'Execute task...',
-  background: false  // Key: synchronous execution
-});
+const result = teammate({ agent: "general", tasks: [{ prompt: 'Execute task...' }], background: false  // Key: synchronous execution });
 
 // Result immediately available
 console.log(result);
@@ -31,7 +27,7 @@ Suitable for long-running CLI commands.
 ```javascript
 // CLI call - asynchronous
 const task = Bash({
-  command: 'teammate({ agent: "delegate", taskType: "analysis", task: "...", /* --to agy: set model via model-availability */ })
+  command: 'teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "..." }] })
   background: true  // Key: background execution
 });
 
@@ -46,7 +42,7 @@ const task = Bash({
 ### Basic Command Structure
 
 ```bash
-teammate({ agent: "delegate", taskType: "analysis", task: "<PROMPT>", /* --to <agy: set model via model-availability */ })
+teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "<PROMPT>" }] })
 ```
 
 ### Parameter Description
@@ -79,16 +75,12 @@ teammate({ agent: "delegate", taskType: "analysis", task: "<PROMPT>", /* --to <a
 General-purpose executor, the most commonly used agent type.
 
 ```javascript
-teammate({
-  subagent_type: 'universal-executor',
-  prompt: `
+teammate({ agent: "general", tasks: [{ prompt: `
 Execute task:
 1. Read configuration file
 2. Analyze dependencies
 3. Generate report to ${outputPath}
-  `,
-  background: false
-});
+  ` }], background: false });
 ```
 
 **Applicable Scenarios**:
@@ -101,18 +93,14 @@ Execute task:
 Code exploration agent for quick codebase understanding.
 
 ```javascript
-teammate({
-  subagent_type: 'Explore',
-  prompt: `
+teammate({ agent: "explorer", tasks: [{ prompt: `
 Explore src/ directory:
 - Identify main modules
 - Understand directory structure
 - Find entry points
 
 Thoroughness: medium
-  `,
-  background: false
-});
+  ` }], background: false });
 ```
 
 **Applicable Scenarios**:
@@ -125,16 +113,12 @@ Thoroughness: medium
 Deep code analysis agent.
 
 ```javascript
-teammate({
-  subagent_type: 'cli-explore-agent',
-  prompt: `
+teammate({ agent: "cli-explore-agent", tasks: [{ prompt: `
 Deep analysis of src/auth/ module:
 - Authentication flow
 - Session management
 - Security mechanisms
-  `,
-  background: false
-});
+  ` }], background: false });
 ```
 
 **Applicable Scenarios**:
@@ -151,13 +135,13 @@ Deep analysis of src/auth/ module:
 ```javascript
 // Save session ID
 const session = Bash({
-  command: 'teammate({ agent: "delegate", taskType: "analysis", task: "Initial analysis...", /* --to agy: set model via model-availability */ })
+  command: 'teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "Initial analysis..." }] })
   background: true
 });
 
 // Resume later
 const continuation = Bash({
-  command: `teammate({ agent: "delegate", taskType: "analysis", task: "Continue analysis...", /* --to agy: set model via model-availability */, /* --resume: no teammate equivalent; re-dispatch or use resident agent */ })
+  command: `teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "Continue analysis..." }] })
   background: true
 });
 ```
@@ -167,7 +151,7 @@ const continuation = Bash({
 ```javascript
 // Merge context from multiple sessions
 const merged = Bash({
-  command: `teammate({ agent: "delegate", taskType: "analysis", task: "Aggregate analysis...", /* --to agy: set model via model-availability */, /* --resume: no teammate equivalent; re-dispatch or use resident agent */ })
+  command: `teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "Aggregate analysis..." }] })
   background: true
 });
 ```
@@ -184,7 +168,7 @@ Simple tasks completed in one call.
 // Phase execution
 async function executePhase(context) {
   const result = Bash({
-    command: `teammate({ agent: "delegate", taskType: "analysis", task: "PURPOSE: Analyze project structure\nTASK: Identify modules, dependencies, entry points\nMODE: analysis\nCONTEXT: @src/**…", cwd: "${context.projectRoot}" })
+    command: `teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: Analyze project structure\nTASK: Identify modules, dependencies, entry points\nMODE: analysis\nCONTEXT: @src/**…" }], cwd: "${context.projectRoot}" })
     background: true,
     timeout: 600000
   });
@@ -220,7 +204,7 @@ async function runCLI(step, context, resumeFlag = '') {
   };
 
   const result = Bash({
-    command: `teammate({ agent: "delegate", taskType: "analysis", task: "${prompts[step]}", /* --to agy: set model via model-availability */ }) ${resumeFlag}`,
+    command: `teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "${prompts[step]}" }] }) ${resumeFlag}`,
     background: true
   });
 
@@ -243,7 +227,7 @@ async function executeParallel(context) {
   // Start tasks in parallel
   const taskIds = tasks.map(task =>
     Bash({
-      command: `teammate({ agent: "delegate", taskType: "analysis", task: "Analyze ${task.type}...", /* --to ${task.tool}: set model via model-availability */ })
+      command: `teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "Analyze ${task.type}..." }] })
       background: true
     }).task_id
   );
@@ -284,7 +268,7 @@ async function executeWithFallback(context) {
 
 async function runWithTool(tool, context) {
   const task = Bash({
-    command: `teammate({ agent: "delegate", taskType: "analysis", task: "...", /* --to ${tool}: set model via model-availability */ })
+    command: `teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "..." }] })
     background: true,
     timeout: 600000
   });
@@ -301,10 +285,10 @@ async function runWithTool(tool, context) {
 
 ```bash
 # Analysis mode - use --rule to auto-load protocol and template (appended to prompt)
-teammate({ agent: "delegate", taskType: "analysis", task: "CONSTRAINTS: ...\n...", prompt: "analysis-code-patterns" })
+teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "CONSTRAINTS: ...\n..." }], /* --rule "analysis-code-patterns" */ })
 
 # Write mode - use --rule to auto-load protocol and template (appended to prompt)
-teammate({ agent: "delegate", taskType: "development", task: "CONSTRAINTS: ...\n...", prompt: "development-feature" })
+teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "CONSTRAINTS: ...\n..." }], /* --rule "development-feature" */ })
 ```
 
 ### Dynamic Template Building
@@ -346,7 +330,7 @@ Codex requires longer timeout (recommend 3x).
 const timeout = tool === 'codex' ? baseTimeout * 3 : baseTimeout;
 
 Bash({
-  command: `teammate({ agent: "delegate", taskType: "development", task: "...", /* --to ${tool}: set model via model-availability */ })
+  command: `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "..." }] })
   background: true,
   timeout: timeout
 });

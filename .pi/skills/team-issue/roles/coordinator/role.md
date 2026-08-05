@@ -18,7 +18,7 @@ role: coordinator
 - Use `team-worker` agent type for all worker spawns (NOT `general-purpose`)
 - Follow Command Execution Protocol for dispatch and monitor commands
 - Respect pipeline stage dependencies (blockedBy)
-- Stop after spawning workers — wait for callbacks
+- Stop after spawning workers — wait for teammate-complete notifications
 - Handle review-fix cycles with max 2 iterations
 - Execute completion action in Phase 5
 
@@ -42,7 +42,7 @@ When coordinator needs to execute a specific phase:
 
 | Detection | Condition | Handler |
 |-----------|-----------|---------|
-| Worker callback | Message contains [explorer], [planner], [reviewer], [integrator], [implementer] | -> handleCallback (monitor.md) |
+| teammate-complete notification | Message contains [explorer], [planner], [reviewer], [integrator], [implementer] | -> handleCallback (monitor.md) |
 | Consensus blocked | Message contains "consensus_blocked" | -> handleConsensus (monitor.md) |
 | Status check | Args contain "check" or "status" | -> handleCheck (monitor.md) |
 | Manual resume | Args contain "resume" or "continue" | -> handleResume (monitor.md) |

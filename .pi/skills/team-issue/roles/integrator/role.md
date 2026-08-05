@@ -34,7 +34,7 @@ Read("{run_dir}/outputs/solutions/solution-<issueId>.json")
 **CLI invocation**:
 
 ```
-Bash("teammate({ agent: "delegate", taskType: "analysis", task: "PURPOSE: Form execution queue for <count> issues with conflict detection and optimal ordering; success = DAG-based queue…" }) { background: false })
+Bash("teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: Form execution queue for <count> issues with conflict detection and optimal ordering; success = DAG-based queue…" }] }) { background: false })
 ```
 
 **Parse queue result**:

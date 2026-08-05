@@ -65,11 +65,11 @@ Dependencies: <explorerContext.dependencies>
 ```
 
 Route by executor:
-- **codex**: `Bash("teammate({ agent: "delegate", taskType: "development", task: "<prompt>", /* --to codex: set model via model-availability */, name: "issue-<issueId>" }) { background: false })`
-- **agy**: `Bash("teammate({ agent: "delegate", taskType: "development", task: "<prompt>", /* --to agy: set model via model-availability */, name: "issue-<issueId>" }) { background: false })`
-- **qwen**: `Bash("teammate({ agent: "delegate", taskType: "development", task: "<prompt>", /* --to qwen: set model via model-availability */, name: "issue-<issueId>" }) { background: false })`
+- **codex**: `Bash("teammate({ agent: "general", taskType: "development", tasks: [{ name: "issue-<issueId>", prompt: "<prompt>" }] }) { background: false })`
+- **agy**: `Bash("teammate({ agent: "general", taskType: "development", tasks: [{ name: "issue-<issueId>", prompt: "<prompt>" }] }) { background: false })`
+- **qwen**: `Bash("teammate({ agent: "general", taskType: "development", tasks: [{ name: "issue-<issueId>", prompt: "<prompt>" }] }) { background: false })`
 
-On CLI failure, resume: `teammate({ agent: "delegate", taskType: "development", task: "Continue", /* --to <tool>: set model via model-availability */, /* --resume: no teammate equivalent; re-dispatch or use resident agent */ })
+On CLI failure, resume: `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "Continue" }] })
 
 ## Phase 4: Verify & Commit
 

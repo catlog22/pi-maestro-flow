@@ -4,6 +4,7 @@ description: "Deprecated compatibility alias for run-executor"
 tools:
   - Read
   - teammate
+  - observe
 ---
 
 # Ralph Executor Compatibility Alias

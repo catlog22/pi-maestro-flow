@@ -11,7 +11,7 @@
 - Use `team-worker` agent type for all worker spawns (NOT `general-purpose`)
 - Follow Command Execution Protocol for dispatch and monitor commands
 - Respect pipeline stage dependencies (blockedBy)
-- Stop after spawning workers -- wait for callbacks
+- Stop after spawning workers -- wait for teammate-complete notifications
 - Handle review-fix cycles with max 3 iterations per branch
 - Execute completion action in Phase 5
 
@@ -42,7 +42,7 @@ When coordinator is invoked, detect invocation type:
 
 | Detection | Condition | Handler |
 |-----------|-----------|---------|
-| Worker callback | Message contains role tag [profiler], [strategist], [optimizer], [benchmarker], [reviewer] | -> handleCallback (monitor.md) |
+| teammate-complete notification | Message contains role tag [profiler], [strategist], [optimizer], [benchmarker], [reviewer] | -> handleCallback (monitor.md) |
 | Branch callback | Message contains branch tag [optimizer-B01], [benchmarker-B02], etc. | -> handleCallback branch-aware (monitor.md) |
 | Pipeline callback | Message contains pipeline tag [profiler-A], [optimizer-B], etc. | -> handleCallback pipeline-aware (monitor.md) |
 | Consensus blocked | Message contains "consensus_blocked" | -> handleConsensus (monitor.md) |
@@ -128,7 +128,7 @@ Find first unblocked task and spawn its worker using SKILL.md Worker Spawn Templ
 - `role_spec: <skill_root>/roles/<role>/role.md`
 - `team_name: perf-opt`
 
-**STOP** after spawning. Wait for worker callback.
+**STOP** after spawning. Wait for teammate-complete notification.
 
 ### Coordination (via monitor.md handlers)
 

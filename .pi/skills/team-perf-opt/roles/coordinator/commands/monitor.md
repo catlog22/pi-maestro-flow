@@ -63,13 +63,7 @@ Find and spawn the next ready tasks.
 2. For each ready task, spawn team-worker:
 
 ```
-teammate({
-  subagent_type: "team-worker",
-  description: "Spawn <role> worker for <task-id>",
-  team_name: "perf-opt",
-  name: "<role>",
-  background: true,
-  prompt: `## Role Assignment
+teammate({ agent: "team-worker", tasks: [{ name: "<role>", prompt: `## Role Assignment
 role: <role>
 role_spec: ~  or <project>/.claude/skills/team-perf-opt/roles/<role>/role.md
 session: {run_dir}/work/team
@@ -85,8 +79,7 @@ Report blockers immediately via team_msg type="blocker".
 Report completion via team_msg type="task_complete" after final SendMessage.
 
 Read role_spec file to load Phase 2-4 domain instructions.
-Execute built-in Phase 1 -> role-spec Phase 2-4 -> built-in Phase 5.`
-})
+Execute built-in Phase 1 -> role-spec Phase 2-4 -> built-in Phase 5.`, description: "Spawn <role> worker for <task-id>" }], background: true })
 ```
 
 3. **Parallel spawn rules by mode**:

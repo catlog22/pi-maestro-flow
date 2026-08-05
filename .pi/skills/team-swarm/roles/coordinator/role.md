@@ -70,7 +70,7 @@ When coordinator needs to execute a phase command:
 
 | Detection | Condition | Handler |
 |-----------|-----------|---------|
-| Worker callback | Message contains `[ant]` / `[scorer]` / `[analyst]` | -> handleCallback |
+| teammate-complete notification | Message contains `[ant]` / `[scorer]` / `[analyst]` | -> handleCallback |
 | Status check | Args contain `check` or `status` | -> handleCheck |
 | Manual resume | Args contain `resume` or `continue` | -> handleResume |
 | Iteration complete | All ants of current iteration reported | -> Phase 3.5 (update + converged?) |

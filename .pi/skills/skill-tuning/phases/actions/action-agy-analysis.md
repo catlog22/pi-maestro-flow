@@ -158,7 +158,7 @@ async function executeAgyAnalysis(state, workDir) {
   const prompt = buildAnalysisPrompt(analysisType, state);
 
   // 3. 构建 CLI 命令
-  const cliCommand = `teammate({ agent: "delegate", taskType: "analysis", task: "${escapeForShell(prompt)}", cwd: ""${state.target_skill.path}", /* --to agy: set model via model-availability */ })
+  const cliCommand = `teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "${escapeForShell(prompt)}" }], cwd: "" })
 
   console.log(`Executing Agy analysis: ${analysisType}`);
   console.log(`Command: ${cliCommand}`);

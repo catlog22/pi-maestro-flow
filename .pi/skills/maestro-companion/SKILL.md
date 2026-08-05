@@ -1,10 +1,19 @@
 ---
 name: maestro-companion
 description: "Quick execution for small tasks — minimal run lifecycle (start + done) with evidence recording. Full LLM capability, scoped to mechanically clear tasks. Arguments: <intent> [-y]"
-allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro observe
 disable-model-invocation: false
 session-mode: none
 ---
+
+<teammate_contract>
+
+- `background: false` is the default. Use foreground dispatch whenever the result determines the current answer or next action.
+- Use `background: true` only for independent work. If this turn must consume a background result, call `observe` exactly once with `action: "wait"` and a bounded timeout before continuing; never continue independently while the result is pending.
+- Otherwise end the turn and wait for the automatic `teammate-complete` notification. Do not rely on `SendMessage`, `team_msg`, or hook callbacks as completion signals.
+- Never silently ignore an unfinished dispatch.
+
+</teammate_contract>
 
 <required_reading>
 ~/.maestro/workflows/run-mode.md
@@ -70,7 +79,7 @@ Init `{run_dir}/evidence/companion-log.md`:
 
 Locate targets and gather evidence before touching anything. Methods (pick what fits):
 
-- `teammate({ agent: "explorer", task: "FIND: ...\\nSCOPE: ...", taskType: "explore" })` — codebase search
+- `teammate({ agent: "explorer", taskType: "explore", tasks: [{ prompt: "FIND: ...\\nSCOPE: ..." }] })` — codebase search
 - `maestro search "<keywords>" --type spec --type knowhow` — knowledge recall
 - Agent (subagent) — multi-file analysis, cross-reference, pattern discovery
 - Direct Read/Grep/Glob — known targets, quick lookups

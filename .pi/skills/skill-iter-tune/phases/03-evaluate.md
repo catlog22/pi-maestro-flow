@@ -155,7 +155,7 @@ function escapeForShell(str) {
 
 const skillPath = state.target_skills[0].path;  // Primary skill for --cd
 
-const cliCommand = `teammate({ agent: "delegate", taskType: "analysis", task: "${escapeForShell(evalPrompt)}", cwd: ""${skillPath}", /* --to agy: set model via model-availability */ })
+const cliCommand = `teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "${escapeForShell(evalPrompt)}" }], cwd: "" })
 
 // Execute in background
 Bash({
@@ -164,7 +164,7 @@ Bash({
   timeout: 300000  // 5 minutes
 });
 
-// STOP -- wait for hook callback
+// STOP -- wait for the automatic teammate-complete notification (or call observe exactly once with action="wait" when this turn must consume the result)
 ```
 
 ### Step 3.4: Parse Score and Write Eval File

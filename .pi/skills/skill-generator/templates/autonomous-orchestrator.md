@@ -113,10 +113,7 @@ async function runOrchestrator() {
     try {
       const actionPrompt = Read(\`phases/actions/${actionId}.md\`);
 
-      const result = await teammate({
-        subagent_type: 'universal-executor',
-        background: false,
-        prompt: \`
+      const result = await teammate({ agent: "general", tasks: [{ prompt: \`
 [STATE]
 \${JSON.stringify(state, null, 2)}
 
@@ -125,8 +122,7 @@ async function runOrchestrator() {
 
 [RETURN]
 Return JSON with stateUpdates field.
-\`
-      });
+\` }], background: false });
 
       const actionResult = JSON.parse(result);
 

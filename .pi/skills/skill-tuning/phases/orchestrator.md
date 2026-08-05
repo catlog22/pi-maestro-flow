@@ -103,9 +103,24 @@ async function runOrchestrator(workDir) {
         target_skill: { name: state.target_skill.name, path: state.target_skill.path }
       };
 
-      const result = await teammate({
-        subagent_type: 'universal-executor',
-        description: `Execute skill-tuning action: ${actionId}`,
+      const result = await teammate({ agent: "general", tasks: [{ prompt: `
+[CONTEXT]
+Action: ${actionId}
+Work directory: ${workDir}
+
+[STATE KEY INFO]
+${JSON.stringify(stateKeyInfo, null, 2)}
+
+[FULL STATE PATH]
+${workDir}/state.json
+(Read full state from this file if needed)
+
+[ACTION INSTRUCTIONS]
+${actionPrompt}
+
+[OUTPUT]
+Return JSON: { stateUpdates: {}, outputFiles: [], summary: "..." }
+`, description: `Execute skill-tuning action: ${actionId}`,
         background: false,
         prompt: `
 [CONTEXT]
@@ -124,8 +139,7 @@ ${actionPrompt}
 
 [OUTPUT]
 Return JSON: { stateUpdates: {}, outputFiles: [], summary: "..." }
-`
-      });
+` }], background: false });
 
       // 5. Parse result
       let actionResult = result;

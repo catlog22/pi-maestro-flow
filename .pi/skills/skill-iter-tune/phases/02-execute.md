@@ -104,16 +104,16 @@ function escapeForShell(str) {
   return str.replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`');
 }
 
-const cliCommand = `teammate({ agent: "delegate", taskType: "development", task: "${escapeForShell(executePrompt)}", cwd: ""${iterDir}/artifacts", /* --to claude: set model via model-availability */ })
+const cliCommand = `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "${escapeForShell(executePrompt)}" }], cwd: "" })
 
-// Execute in background, wait for hook callback
+// Execute in background, wait for the automatic teammate-complete notification (or call observe exactly once with action="wait" when this turn must consume the result)
 Bash({
   command: cliCommand,
   background: true,
   timeout: 600000  // 10 minutes max
 });
 
-// STOP HERE -- wait for hook callback to resume
+// STOP HERE -- wait for the automatic teammate-complete notification (or call observe exactly once with action="wait" when this turn must consume the result) to resume
 // After callback, verify artifacts were produced
 ```
 
@@ -180,7 +180,7 @@ CONSTRAINTS: Follow skill flow exactly, produce realistic output`;
     return str.replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`');
   }
 
-  const cliCommand = `teammate({ agent: "delegate", taskType: "development", task: "${escapeForShell(chainPrompt)}", cwd: ""${skillArtifactDir}", /* --to claude: set model via model-availability */ })
+  const cliCommand = `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "${escapeForShell(chainPrompt)}" }], cwd: "" })
 
   // Execute in background
   Bash({
@@ -189,7 +189,7 @@ CONSTRAINTS: Follow skill flow exactly, produce realistic output`;
     timeout: 600000
   });
 
-  // STOP -- wait for hook callback
+  // STOP -- wait for the automatic teammate-complete notification (or call observe exactly once with action="wait" when this turn must consume the result)
 
   // After callback: collect artifacts for next skill in chain
   const artifacts = Glob(`${skillArtifactDir}/**/*`);

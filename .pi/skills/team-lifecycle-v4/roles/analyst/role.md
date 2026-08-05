@@ -32,7 +32,7 @@ message_types:
 4. If topic references file (@path or .md/.txt) → read it
 5. CLI seed analysis:
    ```
-   Bash({ command: `teammate({ agent: "delegate", taskType: "analysis", task: "PURPOSE: Analyze topic, extract structured seed info.\n   TASK: • Extract problem statement • Identify target users • De…" }) background: false })
+   teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: Analyze topic, extract structured seed info.\n   TASK: • Extract problem statement • Identify target users • De…" }] }) background: false })
    ```
 6. Parse result JSON
 
@@ -43,9 +43,7 @@ message_types:
 | package.json / Cargo.toml / pyproject.toml / go.mod exists | Explore |
 | No project files | Skip (codebase_context = null) |
 
-When project detected — prefer `teammate({ agent: "explorer" })` multi-prompt:
-```bash
-teammate({ agent: "explorer" }) \
+When project detected — prefer `teammate({ agent: "explorer" }) \
   "FIND: tech stack and framework detection
 SCOPE: package.json, Cargo.toml, pyproject.toml, go.mod, src/
 EXPECTED: tech_stack list with versions" \
@@ -56,7 +54,7 @@ EXPECTED: patterns list with file:line evidence" \
   --max-turns 3 --json
 ```
 
-**Fallback**: `teammate({ agent: "delegate", taskType: "analysis", task: "PURPOSE: Explore codebase for context ..." })
+**Fallback**: `teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: Explore codebase for context ..." }] })
 
 ### Tech Profile Scan
 

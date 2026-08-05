@@ -1,10 +1,19 @@
 ---
 name: team-coordinate
 description: "Universal team coordination skill with dynamic role generation. Uses team-worker agent architecture with role-spec files. Only coordinator is built-in -- all worker roles are generated at runtime as role-specs and spawned via team-worker agent. Beat/cadence model for orchestration. Triggers on \"Team Coordinate \"."
-allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro observe
 disable-model-invocation: true
 session-mode: none
 ---
+
+<teammate_contract>
+
+- `background: false` is the default. Use foreground dispatch whenever the result determines the current answer or next action.
+- Use `background: true` only for independent work. If this turn must consume a background result, call `observe` exactly once with `action: "wait"` and a bounded timeout before continuing; never continue independently while the result is pending.
+- Otherwise end the turn and wait for the automatic `teammate-complete` notification. Do not rely on `SendMessage`, `team_msg`, or hook callbacks as completion signals.
+- Never silently ignore an unfinished dispatch.
+
+</teammate_contract>
 
 <required_reading>
 ~/.maestro/workflows/run-mode-lite.md
@@ -93,7 +102,7 @@ User provides task description
   -> coordinator Phase 2: generate role-specs + initialize session
   -> coordinator Phase 3: create task chain from dependency graph
   -> coordinator Phase 4: spawn first batch workers (background) -> STOP
-  -> Worker executes -> SendMessage callback -> coordinator advances next step
+  -> Worker executes -> teammate-complete notification -> coordinator advances next step
   -> Loop until pipeline complete -> Phase 5 report + completion action
 ```
 
@@ -116,13 +125,7 @@ User provides task description
 When coordinator spawns workers, use `team-worker` agent with role-spec path:
 
 ```
-teammate({
-  subagent_type: "team-worker",
-  description: "Spawn <role> worker",
-  team_name: <team-name>,
-  name: "<role>",
-  background: true,
-  prompt: `## Role Assignment
+teammate({ agent: "team-worker", tasks: [{ name: "<role>", prompt: `## Role Assignment
 role: <role>
 role_spec: {run_dir}/work/team/role-specs/<role>.md
 session: {run_dir}/work/team
@@ -138,8 +141,7 @@ Report blockers immediately via team_msg type="blocker".
 Report completion via team_msg type="task_complete" after final SendMessage.
 
 Read role_spec file to load Phase 2-4 domain instructions.
-Execute built-in Phase 1 (task discovery) -> role-spec Phase 2-4 -> built-in Phase 5 (report).`
-})
+Execute built-in Phase 1 (task discovery) -> role-spec Phase 2-4 -> built-in Phase 5 (report).`, description: "Spawn <role> worker" }], background: true })
 ```
 
 **Inner Loop roles** (role has 2+ serial same-prefix tasks): Set `inner_loop: true`. The team-worker agent handles the loop internally.

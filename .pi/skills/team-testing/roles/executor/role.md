@@ -60,7 +60,7 @@ Bash("<test-command> 2>&1 || true")
 
 ```
 Bash({
-  command: `teammate({ agent: "delegate", taskType: "development", task: "PURPOSE: Fix test failures to achieve pass rate >= 0.95; success = all tests pass\nTASK: • Analyze test failure output •…", cwd: "{run_dir}/work/team" })
+  command: `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "PURPOSE: Fix test failures to achieve pass rate >= 0.95; success = all tests pass\nTASK: • Analyze test failure output •…" }], cwd: "{run_dir}/work/team" })
   background: false
 })
 ```

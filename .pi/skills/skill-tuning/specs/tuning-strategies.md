@@ -142,12 +142,7 @@ function updateHistory(state, newItem) {
 
 ```javascript
 // Add summarization before passing to next phase
-const summary = await teammate({
-  subagent_type: 'universal-executor',
-  description: 'Summarize content for context compression',
-  background: false,
-  prompt: `Summarize in <100 words: ${fullContent}\nReturn JSON: { summary, key_points[] }`
-});
+const summary = await teammate({ agent: "general", tasks: [{ prompt: `Summarize in <100 words: ${fullContent}\nReturn JSON: { summary, key_points[] }`, description: 'Summarize content for context compression' }], background: false });
 nextPhasePrompt = `Previous summary: ${summary.summary}`;
 ```
 
@@ -272,17 +267,12 @@ function validateAgentResult(result, requiredFields) {
 ### flatten_nesting
 
 ```javascript
-// Before: Agent A's prompt tells it to call teammate({subagent_type: 'B'})
+// Before: Agent A's prompt tells it to call teammate({ agent: "B" })
 // After: Agent A returns signal, orchestrator handles
 // Agent A: return { needs_agent_b: true, context: {...} }
 // Orchestrator:
 if (parsedA.needs_agent_b) {
-  resultB = await teammate({
-    subagent_type: 'B',
-    description: 'Handle delegated task from Agent A',
-    background: false,
-    prompt: `Context: ${parsedA.context}`
-  });
+  resultB = await teammate({ agent: "B", tasks: [{ prompt: `Context: ${parsedA.context}`, description: 'Handle delegated task from Agent A' }], background: false });
 }
 ```
 
@@ -384,5 +374,5 @@ For issues in these categories, use Agy CLI for custom analysis:
 
 **Agy CLI Template**:
 ```bash
-teammate({ agent: "delegate", taskType: "analysis", task: "PURPOSE: [optimization goal for skill at ${skillPath}]\nTASK: • [specific analysis steps]\nMODE: analysis\nCONTEXT: @${s…" })
+teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: [optimization goal for skill at ${skillPath}]\nTASK: • [specific analysis steps]\nMODE: analysis\nCONTEXT: @${s…" }] })
 ```

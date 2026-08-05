@@ -1,10 +1,19 @@
 ---
 name: maestro-init
 description: "Initialize project with auto state detection Arguments: [-y] [--from <source>] [--from-brainstorm SESSION-ID]"
-allowed-tools: Read Write Bash Glob Grep teammate maestro
+allowed-tools: Read Write Bash Glob Grep teammate maestro observe
 disable-model-invocation: true
 session-mode: none
 ---
+
+<teammate_contract>
+
+- `background: false` is the default. Use foreground dispatch whenever the result determines the current answer or next action.
+- Use `background: true` only for independent work. If this turn must consume a background result, call `observe` exactly once with `action: "wait"` and a bounded timeout before continuing; never continue independently while the result is pending.
+- Otherwise end the turn and wait for the automatic `teammate-complete` notification. Do not rely on `SendMessage`, `team_msg`, or hook callbacks as completion signals.
+- Never silently ignore an unfinished dispatch.
+
+</teammate_contract>
 
 <purpose>
 Initialize project: detect state, create `.workflow/` with project.md, state.json, config.json.

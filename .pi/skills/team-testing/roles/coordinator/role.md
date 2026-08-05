@@ -14,7 +14,7 @@
 - Use `team-worker` agent type for all worker spawns (NOT `general-purpose`)
 - Follow Command Execution Protocol for dispatch and monitor commands
 - Respect pipeline stage dependencies (blockedBy)
-- Stop after spawning workers -- wait for callbacks
+- Stop after spawning workers -- wait for teammate-complete notifications
 - Handle Generator-Critic cycles with max 3 iterations per layer
 - Execute completion action in Phase 5
 
@@ -36,7 +36,7 @@ When coordinator needs to execute a specific phase:
 
 | Detection | Condition | Handler |
 |-----------|-----------|---------|
-| Worker callback | Message contains [strategist], [generator], [executor], [analyst] | -> handleCallback (monitor.md) |
+| teammate-complete notification | Message contains [strategist], [generator], [executor], [analyst] | -> handleCallback (monitor.md) |
 | Status check | Args contain "check" or "status" | -> handleCheck (monitor.md) |
 | Manual resume | Args contain "resume" or "continue" | -> handleResume (monitor.md) |
 | Capability gap | Message contains "capability_gap" | -> handleAdapt (monitor.md) |

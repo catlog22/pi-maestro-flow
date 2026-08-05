@@ -1,10 +1,19 @@
 ---
 name: skill-generator
 description: "Meta-skill for creating new Claude Code skills with configurable execution modes. Supports sequential (fixed order) and autonomous (stateless) phase patterns. Use for skill scaffolding, skill creation, or building new workflows. Triggers on \"create skill\", \"new skill\", \"skill generator\"."
-allowed-tools: teammate Read Bash Glob Grep Write maestro
+allowed-tools: teammate Read Bash Glob Grep Write maestro observe
 disable-model-invocation: true
 session-mode: none
 ---
+
+<teammate_contract>
+
+- `background: false` is the default. Use foreground dispatch whenever the result determines the current answer or next action.
+- Use `background: true` only for independent work. If this turn must consume a background result, call `observe` exactly once with `action: "wait"` and a bounded timeout before continuing; never continue independently while the result is pending.
+- Otherwise end the turn and wait for the automatic `teammate-complete` notification. Do not rely on `SendMessage`, `team_msg`, or hook callbacks as completion signals.
+- Never silently ignore an unfinished dispatch.
+
+</teammate_contract>
 
 <required_reading>
 ~/.maestro/workflows/run-mode.md

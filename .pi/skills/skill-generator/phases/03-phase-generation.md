@@ -244,18 +244,14 @@ async function executePhase(phaseId, phaseConfig, workDir) {
   const phasePrompt = Read(\`\${skillDir}/phases/\${phaseId}.md\`);
 
   // Use Task to invoke Agent
-  const result = await teammate({
-    subagent_type: phaseConfig.agent?.type || 'universal-executor',
-    run_in_background: phaseConfig.agent?.run_in_background || false,
-    prompt: \`
+  const result = await teammate({ agent: "general", tasks: [{ prompt: \`
 [PHASE] \${phaseId}
 [WORK_DIR] \${workDir}
 [INPUT] \${phaseConfig.input ? \`\${workDir}/\${phaseConfig.input}\` : 'None'}
 [OUTPUT] \${workDir}/\${phaseConfig.output}
 
 \${phasePrompt}
-\`
-  });
+\` }], background: phaseConfig.agent?.run_in_background || false });
 
   return JSON.parse(result);
 }
@@ -577,10 +573,7 @@ async function runOrchestrator(workDir) {
     try {
       const actionPrompt = Read(\`\${skillDir}/phases/actions/\${actionId}.md\`);
 
-      const result = await teammate({
-        subagent_type: 'universal-executor',
-        background: false,
-        prompt: \`
+      const result = await teammate({ agent: "general", tasks: [{ prompt: \`
 [STATE]
 \${JSON.stringify(state, null, 2)}
 
@@ -595,8 +588,7 @@ ${contextStrategy}
 
 [RETURN FORMAT]
 Return JSON: { "status": "completed"|"failed", "stateUpdates": {...}, "summary": "..." }
-\`
-      });
+\` }], background: false });
 
       const actionResult = JSON.parse(result);
 

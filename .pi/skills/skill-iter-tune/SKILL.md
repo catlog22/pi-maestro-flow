@@ -1,10 +1,19 @@
 ---
 name: skill-iter-tune
 description: "Iterative skill tuning via execute-evaluate-improve feedback loop. Uses maestro delegate Claude to execute skill, Agy to evaluate quality, and Agent to apply improvements. Iterates until quality threshold or max iterations. Triggers on \"skill iter tune\", \"iterative skill tuning\", \"tune skill\"."
-allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro observe
 disable-model-invocation: true
 session-mode: none
 ---
+
+<teammate_contract>
+
+- `background: false` is the default. Use foreground dispatch whenever the result determines the current answer or next action.
+- Use `background: true` only for independent work. If this turn must consume a background result, call `observe` exactly once with `action: "wait"` and a bounded timeout before continuing; never continue independently while the result is pending.
+- Otherwise end the turn and wait for the automatic `teammate-complete` notification. Do not rely on `SendMessage`, `team_msg`, or hook callbacks as completion signals.
+- Never silently ignore an unfinished dispatch.
+
+</teammate_contract>
 
 <required_reading>
 ~/.maestro/workflows/run-mode.md
@@ -200,7 +209,7 @@ Read and execute: `Ref: phases/02-execute.md`
 
 - Snapshot skill → `iteration-{N}/skill-snapshot/`
 - Build execution prompt from skill content + test scenario
-- Execute: `teammate({ agent: "delegate", taskType: "development", task: "...", cwd: ""${iterDir}/artifacts", /* --to claude: set model via model-availability */ })
+- Execute: `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "..." }], cwd: "" })
 - Collect artifacts
 
 ### Phase 3: Evaluate Quality (per iteration)
@@ -208,7 +217,7 @@ Read and execute: `Ref: phases/02-execute.md`
 Read and execute: `Ref: phases/03-evaluate.md`
 
 - Build evaluation prompt with skill + artifacts + criteria + history
-- Execute: `teammate({ agent: "delegate", taskType: "analysis", task: "...", /* --to agy: set model via model-availability */ })
+- Execute: `teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "..." }] })
 - Parse 5-dimension score (Clarity, Completeness, Correctness, Effectiveness, Efficiency)
 - Write `iteration-{N}-eval.md`
 - Check termination: score >= threshold | iter >= max | convergence | error limit
@@ -250,7 +259,7 @@ Read and execute: `Ref: phases/05-report.md`
 1. **Start Immediately**: First action is preference collection → Phase 1 setup
 2. **Progressive Loading**: Read phase doc ONLY when that phase is about to execute
 3. **Snapshot Before Execute**: Always snapshot skill state before each iteration
-4. **Background CLI**: teammate runs in background, wait for hook callback before proceeding
+4. **Background CLI**: teammate runs in background, wait for the automatic teammate-complete notification (or call observe exactly once with action="wait" when this turn must consume the result) before proceeding
 5. **Parse Every Output**: Extract structured JSON from CLI outputs for state updates
 6. **DO NOT STOP**: Continuous iteration until termination condition met
 7. **Single State Source**: `iteration-state.json` is the only source of truth

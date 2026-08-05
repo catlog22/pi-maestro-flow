@@ -21,7 +21,7 @@ Master protocol document for team-swarm: defines how the LLM coordinator and Pyt
 |  LLM Coordinator (roles/coordinator/role.md)       |
 |  - Parses user task → emits swarm-config.json       |
 |  - Phase 3 main loop: calls script, spawns workers  |
-|  - Translates worker callbacks back into script ops |
+|  - Translates teammate-complete notifications back into script ops |
 +--------+--------------------------------------------+
          | Bash subprocess
          v

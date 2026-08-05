@@ -25,13 +25,7 @@ Save full report to `{run_dir}/outputs/swarm-report.json` (raw data for analyst)
 ### Step 2: Spawn analyst worker
 
 ```
-teammate({
-  subagent_type: "team-worker",
-  description: "Spawn analyst for swarm synthesis",
-  team_name: "swarm",
-  name: "analyst",
-  background: true,
-  prompt: `## Role Assignment
+teammate({ agent: "team-worker", tasks: [{ name: "analyst", prompt: `## Role Assignment
 role: analyst
 role_spec: <skill_root>/roles/analyst/role.md
 session: <session_path>
@@ -48,8 +42,7 @@ Original objective: <config.ant_prompt.objective>
 
 ## Progress Milestones
 Report via team_msg at: report loaded -> synthesis done -> verification done.
-Report completion via team_msg type="task_complete" after final SendMessage.`
-})
+Report completion via team_msg type="task_complete" after final SendMessage.`, description: "Spawn analyst for swarm synthesis" }], background: true })
 ```
 
 STOP. Resume on analyst callback.

@@ -47,7 +47,9 @@ const TOOL_REMAP = {
 // --- Remap allowed-tools line ---
 function remapAllowedTools(line) {
   // Parse: "allowed-tools: Read Write Agent AskUserQuestion ..."
-  const match = line.match(/^allowed-tools:\s*(.+)$/);
+  const carriage = line.endsWith('\r') ? '\r' : '';
+  const source = carriage ? line.slice(0, -1) : line;
+  const match = source.match(/^allowed-tools:\s*(.+)$/);
   if (!match) return line;
 
   const tools = match[1].split(/\s+/).filter(Boolean);
@@ -68,13 +70,20 @@ function remapAllowedTools(line) {
     }
   }
 
+  // teammate background results are consumed through observe; keep the pair
+  // available whenever conversion introduces or preserves teammate.
+  if (seen.has('teammate') && !seen.has('observe')) {
+    mapped.push('observe');
+    seen.add('observe');
+  }
+
   // Add maestro tool if skills reference maestro CLI
   if (!seen.has('maestro')) {
     mapped.push('maestro');
     seen.add('maestro');
   }
 
-  return `allowed-tools: ${mapped.join(' ')}`;
+  return `allowed-tools: ${mapped.join(' ')}${carriage}`;
 }
 
 // --- Remap agent tools list ---
@@ -83,6 +92,8 @@ function remapAgentTools(content) {
   //   tools:
   //     - Agent
   //     - AskUserQuestion
+  const usesCrLf = content.includes('\r\n');
+  const insertedLine = (value) => `${value}${usesCrLf ? '\r' : ''}`;
   const lines = content.split('\n');
   const result = [];
   let inTools = false;
@@ -90,21 +101,23 @@ function remapAgentTools(content) {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    const carriage = line.endsWith('\r') ? '\r' : '';
+    const source = carriage ? line.slice(0, -1) : line;
 
-    if (/^tools:\s*$/.test(line)) {
+    if (/^tools:\s*$/.test(source)) {
       inTools = true;
       result.push(line);
       continue;
     }
 
     if (inTools) {
-      const itemMatch = line.match(/^\s+-\s+(.+)$/);
+      const itemMatch = source.match(/^\s+-\s+(.+)$/);
       if (itemMatch) {
         const tool = itemMatch[1].trim().replace(/\(\*\)/g, '');
         if (tool in TOOL_REMAP) {
           const replacement = TOOL_REMAP[tool];
           if (replacement && !seen.has(replacement)) {
-            result.push(`  - ${replacement}`);
+            result.push(`  - ${replacement}${carriage}`);
             seen.add(replacement);
           }
           // Skip null mappings (remove tool)
@@ -114,11 +127,19 @@ function remapAgentTools(content) {
         }
         continue;
       } else {
+        if (seen.has('teammate') && !seen.has('observe')) {
+          result.push(insertedLine('  - observe'));
+          seen.add('observe');
+        }
         inTools = false;
       }
     }
 
     result.push(line);
+  }
+
+  if (inTools && seen.has('teammate') && !seen.has('observe')) {
+    result.push(insertedLine('  - observe'));
   }
 
   return result.join('\n');
@@ -205,6 +226,31 @@ function remapAllowedToolsInFrontmatter(content) {
     }
   }
   return changed ? lines.join('\n') + parts.body : content;
+}
+
+const piTeammateContractBlock = `
+<teammate_contract>
+
+- \`background: false\` is the default. Use foreground dispatch whenever the result determines the current answer or next action.
+- Use \`background: true\` only for independent work. If this turn must consume a background result, call \`observe\` exactly once with \`action: "wait"\` and a bounded timeout before continuing; never continue independently while the result is pending.
+- Otherwise end the turn and wait for the automatic \`teammate-complete\` notification. Do not rely on \`SendMessage\`, \`team_msg\`, or hook callbacks as completion signals.
+- Never silently ignore an unfinished dispatch.
+
+</teammate_contract>`;
+
+function ensurePiTeammateContract(content, filePath) {
+  const path = normalizePath(filePath);
+  if (!path.endsWith('/SKILL.md') || !path.includes('/skills/')) return content;
+  const parts = splitFrontmatter(content);
+  if (!parts || parts.body.includes('<teammate_contract>')) return content;
+  const usesTeammate = /allowed-tools:[^\r\n]*\bteammate\b/.test(parts.frontmatter)
+    || /\bteammate\s*\(/.test(parts.body);
+  if (!usesTeammate) return content;
+
+  const newline = content.includes('\r\n') ? '\r\n' : '\n';
+  const block = piTeammateContractBlock.trim().replaceAll('\n', newline);
+  const body = parts.body.replace(/^\r?\n/, '');
+  return `${parts.frontmatter}${newline}${block}${newline}${newline}${body}`;
 }
 
 const maestroCliSurface = `
@@ -554,22 +600,26 @@ function delegateModeToTaskType(mode) {
   return mode === 'write' ? 'development' : 'analysis';
 }
 
+// Delegate CLI has no direct agent equivalent; the catalog `general` role is the
+// safe target. `--to <tool>` (external model) survives as a routing comment only.
 function formatTeammateCall(prompt, opts) {
-  const parts = ['agent: "delegate"'];
-  parts.push(`taskType: "${delegateModeToTaskType(opts['mode'])}"`);
+  const taskType = delegateModeToTaskType(opts['mode']);
+  const parts = ['agent: "general"'];
+  parts.push(`taskType: "${taskType}"`);
+  const taskParts = [];
+  if (opts['id']) taskParts.push(`name: "${opts['id']}"`);
   const cleanPrompt = prompt.trim();
   if (cleanPrompt && cleanPrompt !== '<PROMPT>') {
     const escaped = cleanPrompt.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
-    const truncated = escaped.length > 120 ? escaped.slice(0, 120) + '…' : escaped;
-    parts.push(`task: "${truncated}"`);
+    taskParts.push(`prompt: "${escaped}"`);
   } else {
-    parts.push('task: "<PROMPT>"');
+    taskParts.push('prompt: "<PROMPT>"');
   }
-  if (opts['rule']) parts.push(`prompt: "${opts['rule']}"`);
+  parts.push(`tasks: [{ ${taskParts.join(', ')} }]`);
   if (opts['cd']) parts.push(`cwd: "${opts['cd']}"`);
+  if (opts['rule']) parts.push(`/* --rule ${opts['rule']}: inline the template content into prompt */`);
   if (opts['to']) parts.push(`/* --to ${opts['to']}: set model via model-availability */`);
   if (opts['resume']) parts.push('/* --resume: no teammate equivalent; re-dispatch or use resident agent */');
-  if (opts['id']) parts.push(`name: "${opts['id']}"`);
   return `teammate({ ${parts.join(', ')} })`;
 }
 
@@ -593,7 +643,7 @@ function rewriteDelegateCallsPi(body) {
     /maestro explore\s+(["'`])([\s\S]*?)\1((?:\s+--[\w-]+(?:\s+(?!--)[\S]+)?)*)/g,
     (_full, _q, prompt, _optsStr) => {
       const escaped = prompt.trim().replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
-      return `teammate({ agent: "explorer", task: "${escaped}", taskType: "explore" })`;
+      return `teammate({ agent: "explorer", tasks: [{ prompt: "${escaped}" }] })`;
     },
   );
 
@@ -603,10 +653,10 @@ function rewriteDelegateCallsPi(body) {
     (_full, optsStr) => {
       if (!optsStr.trim()) return 'teammate';
       const opts = parseDelegateOptions(optsStr);
-      const parts = [`taskType: "${delegateModeToTaskType(opts['mode'])}"`];
-      if (opts['rule']) parts.push(`prompt: "${opts['rule']}"`);
+      const parts = [`agent: "general"`, `taskType: "${delegateModeToTaskType(opts['mode'])}"`];
+      if (opts['rule']) parts.push(`/* --rule ${opts['rule']} */`);
       if (opts['to']) parts.push(`/* --to ${opts['to']} */`);
-      if (opts['id']) parts.push(`name: "${opts['id']}"`);
+      if (opts['id']) parts.push(`/* --id ${opts['id']} */`);
       return `teammate({ ${parts.join(', ')} })`;
     },
   );
@@ -624,6 +674,217 @@ function rewriteDelegateCallsPi(body) {
   out = out.replace(/maestro delegate message/g, 'teammate-send');
 
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// teammate({ subagent_type: ... }) object form → current contract
+// ---------------------------------------------------------------------------
+
+// Claude-era subagent_type names → current teammate-agent-catalog roles.
+// Unknown names pass through (they may be project-registered roles).
+const SUBAGENT_AGENT_MAP = {
+  'universal-executor': 'general',
+  'general-purpose': 'general',
+  'Explore': 'explorer',
+  'delegate': 'general',
+  'cli-explore-agent': 'cli-explore-agent',
+  'team-worker': 'team-worker',
+  'team-supervisor': 'team-supervisor',
+};
+
+function mapSubagentAgent(name) {
+  return SUBAGENT_AGENT_MAP[name] ?? name;
+}
+
+/**
+ * Rewrite legacy `teammate({ ... })` object literals into the current contract:
+ *   - `subagent_type: "X"`           → `agent: <mapped>`
+ *   - `agent: "delegate"`            → `agent: "general"`
+ *   - top-level `task: "..."`         → `tasks[0].prompt` (TaskSpec has no `task`)
+ *   - `name`/`description` move into `tasks[0]`
+ *   - `background`/`cwd`/`model`/`thinking`/`taskType` stay top-level
+ *   - a residual `prompt: "<rule>"` alongside `task:` is kept as a `--rule` note
+ * Unknown keys are dropped; unknown subagent_type names pass via mapSubagentAgent.
+ *
+ * Implemented as a line scanner (not a regex over the whole block) because
+ * prompt bodies are often JS template literals containing arbitrary backticks,
+ * `${...}` interpolations and braces — a non-greedy regex cannot bound the block.
+ */
+function extractQuotedField(source, fieldName) {
+  const match = new RegExp(`\\b${fieldName}\\s*[:=]\\s*`).exec(source);
+  if (!match) return null;
+  const start = match.index + match[0].length;
+
+  // Generated-skill source often escapes template delimiters as \`...\`.
+  // Preserve the raw delimiters and use the final escaped backtick in this
+  // object block as the close; inner literal backticks may also be escaped.
+  if (source.startsWith('\\`', start)) {
+    const end = source.lastIndexOf('\\`');
+    return end > start ? source.slice(start, end + 2) : null;
+  }
+
+  const quote = source[start];
+  if (quote !== '"' && quote !== "'" && quote !== '`') return null;
+  if (quote === '`') {
+    const end = source.lastIndexOf('`');
+    return end > start ? source.slice(start, end + 1) : null;
+  }
+
+  let escaped = false;
+  for (let index = start + 1; index < source.length; index++) {
+    const char = source[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (char === quote) return source.slice(start, index + 1);
+  }
+  return null;
+}
+
+function rewriteLegacyTeammateInner(inner) {
+  const hasSubagent = /\bsubagent_type\s*[:=]/.test(inner);
+  const isDelegate = /\bagent\s*[:=]\s*["']delegate["']/.test(inner);
+  const hasLegacyTask = /\btask\s*[:=]/.test(inner) && !/\btasks\s*[:=]/.test(inner);
+  if (!hasSubagent && !isDelegate && !hasLegacyTask) return null;
+
+  const subType = inner.match(/\bsubagent_type\s*[:=]\s*["']([^"']+)["']/)?.[1];
+  const agentField = inner.match(/\bagent\s*[:=]\s*["']([^"']+)["']/)?.[1];
+  const agent = subType
+    ? mapSubagentAgent(subType)
+    : (agentField && agentField !== 'delegate' ? mapSubagentAgent(agentField) : 'general');
+
+  const taskType = extractQuotedField(inner, 'taskType');
+  const name = extractQuotedField(inner, 'name');
+  const description = extractQuotedField(inner, 'description');
+  const background = inner.match(/\b(?:run_in_background|background)\s*[:=]\s*([^,\r\n]+)/)?.[1]?.trim();
+  const cwd = extractQuotedField(inner, 'cwd');
+  const model = extractQuotedField(inner, 'model');
+  const thinking = extractQuotedField(inner, 'thinking');
+  // Task body: `task:` (delegate legacy) wins over `prompt:`; a `prompt:`
+  // alongside `task:` is a rule-template name, kept as a note.
+  const task = extractQuotedField(inner, 'task');
+  const prompt = extractQuotedField(inner, 'prompt');
+
+  const parts = [`agent: "${agent}"`];
+  if (taskType) parts.push(`taskType: ${taskType}`);
+
+  const taskParts = [];
+  if (name) taskParts.push(`name: ${name}`);
+  const bodyVal = task ?? prompt;
+  if (bodyVal) taskParts.push(`prompt: ${bodyVal}`);
+  if (description) taskParts.push(`description: ${description}`);
+  if (taskParts.length) parts.push(`tasks: [{ ${taskParts.join(', ')} }]`);
+
+  if (task && prompt) parts.push(`/* --rule ${prompt} */`);
+  if (background) parts.push(`background: ${background}`);
+  if (cwd) parts.push(`cwd: ${cwd}`);
+  if (model) parts.push(`model: ${model}`);
+  if (thinking) parts.push(`thinking: ${thinking}`);
+
+  return `teammate({ ${parts.join(', ')} })`;
+}
+
+function rewriteAgentObjectCallsPi(body) {
+  const newline = body.includes('\r\n') ? '\r\n' : '\n';
+  const lines = body.split(/\r?\n/);
+  const out = [];
+  let index = 0;
+  while (index < lines.length) {
+    // Rewrite complete single-line teammate object calls wherever they occur
+    // (including command-string examples in documentation).
+    const singleLine = lines[index].replace(
+      /teammate\(\s*\{(.*?)\}\)/g,
+      (_full, inner) => rewriteLegacyTeammateInner(inner) ?? _full,
+    );
+    if (singleLine !== lines[index]) {
+      out.push(singleLine);
+      index++;
+      continue;
+    }
+
+    // Multi-line object: preserve indentation/prefix (`const x = await`) and
+    // closing suffix (`;`).
+    const open = lines[index].match(/^(\s*)(.*?)\bteammate\(\s*\{\s*$/);
+    if (!open) {
+      out.push(lines[index]);
+      index++;
+      continue;
+    }
+
+    const indent = open[1];
+    const prefix = open[2];
+    let inTemplate = false;
+    let cursor = index + 1;
+    let suffix = '';
+    let closed = false;
+    while (cursor < lines.length) {
+      const line = lines[cursor];
+      for (let charIndex = 0; charIndex < line.length; charIndex++) {
+        if (line[charIndex] !== '`') continue;
+        let slashCount = 0;
+        for (let prev = charIndex - 1; prev >= 0 && line[prev] === '\\'; prev--) slashCount++;
+        if (slashCount % 2 === 0) inTemplate = !inTemplate;
+      }
+      const close = !inTemplate ? line.match(/^\s*\}\)\s*(.*)$/) : null;
+      if (close) {
+        suffix = close[1];
+        closed = true;
+        break;
+      }
+      cursor++;
+    }
+
+    if (!closed) {
+      out.push(lines[index]);
+      index++;
+      continue;
+    }
+
+    const inner = lines.slice(index + 1, cursor).join('\n');
+    const rewritten = rewriteLegacyTeammateInner(inner);
+    if (!rewritten) {
+      out.push(...lines.slice(index, cursor + 1));
+    } else {
+      out.push(`${indent}${prefix}${rewritten}${suffix}`);
+    }
+    index = cursor + 1;
+  }
+  return out.join(newline);
+}
+
+function rewriteTeammateWaitSemanticsPi(body) {
+  let out = body;
+  const waitText = 'wait for the automatic teammate-complete notification (or call observe exactly once with action="wait" when this turn must consume the result)';
+  out = out.replace(/wait for hook callback/gi, waitText);
+  out = out.replace(/\bSendMessage callback\b/g, 'teammate-complete notification');
+  out = out.replace(/\bOn callback\b/g, 'On teammate-complete notification');
+  out = out.replace(/\bworker callbacks\b/gi, 'teammate-complete notifications');
+  out = out.replace(/\bworker callback\b/gi, 'teammate-complete notification');
+  out = out.replace(/\bwait for callbacks\b/gi, 'wait for teammate-complete notifications');
+  return out;
+}
+
+/**
+ * Strip a Bash wrapper around a teammate tool call where the command string is
+ * a literal teammate call: `Bash({ command: 'teammate({...})', background: true })`
+ * → the bare `teammate({...})` with `background` lifted to the call top level.
+ * Variable-indirection forms (`const c = \`teammate(...)\`; Bash({ command: c })`)
+ * are out of scope for mechanical rewriting.
+ */
+function stripBashWrapperTeammate(body) {
+  return body.replace(
+    /Bash\(\{\s*command\s*:\s*[`'"](teammate\(\{[\s\S]*?\}\))[`'"]\s*(?:,\s*background\s*:\s*(true|false))?[^}]*\}\)/g,
+    (_full, call, background) => {
+      if (!background) return call;
+      // Lift background into the teammate call top level.
+      return call.replace(/\}\s*\)$/, `, background: ${background} })`);
+    },
+  );
 }
 
 export function transformBody(body, filePath) {
@@ -644,6 +905,15 @@ export function transformBody(body, filePath) {
 
   // 5b. maestro delegate/explore CLI → teammate() tool calls
   result = rewriteDelegateCallsPi(result);
+
+  // 5c. teammate({ subagent_type: ... }) object form → agent + tasks[] contract
+  result = rewriteAgentObjectCallsPi(result);
+
+  // 5d. Legacy callback prose → teammate-complete / observe wait semantics
+  result = rewriteTeammateWaitSemanticsPi(result);
+
+  // 5e. Bash({ command: 'teammate({...})' }) wrapper → bare teammate call
+  result = stripBashWrapperTeammate(result);
 
   // 6. AskUserQuestion → ask the user
   result = result.replace(/\bAskUserQuestion\b(?!\s*\()/g, 'user prompt');
@@ -681,6 +951,7 @@ export function transformPiContent(content, filePath) {
     modified = transformBody(modified, filePath);
   }
 
+  modified = ensurePiTeammateContract(modified, filePath);
   return modified.replace(/[ \t]+$/gm, '');
 }
 

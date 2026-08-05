@@ -281,11 +281,7 @@ const tasks = [
 \`\`\`javascript
 const results = await Promise.all(
   tasks.map(task =>
-    teammate({
-      subagent_type: 'universal-executor',
-      background: false,
-      prompt: task.prompt
-    })
+    teammate({ agent: "general", background: false })
   )
 );
 \`\`\`

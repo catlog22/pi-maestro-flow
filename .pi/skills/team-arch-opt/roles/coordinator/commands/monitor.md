@@ -113,13 +113,7 @@ Find ready tasks, spawn workers, STOP.
    c. team_msg log -> task_unblocked
    d. Spawn team-worker (see SKILL.md Spawn Template):
       ```
-      teammate({
-        subagent_type: "team-worker",
-        description: "Spawn <role> worker for <task-id>",
-        team_name: "arch-opt",
-        name: "<role>",
-        background: true,
-        prompt: `## Role Assignment
+      teammate({ agent: "team-worker", tasks: [{ name: "<role>", prompt: `## Role Assignment
       role: <role>
       role_spec: ~  or <project>/.claude/skills/team-arch-opt/roles/<role>/role.md
       session: {run_dir}/work/team
@@ -135,8 +129,7 @@ Find ready tasks, spawn workers, STOP.
       Report completion via team_msg type="task_complete" after final SendMessage.
 
       Read role_spec file to load Phase 2-4 domain instructions.
-      Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
-      })
+      Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`, description: "Spawn <role> worker for <task-id>" }], background: true })
       ```
    e. Add to active_workers
 5. Parallel spawn rules by mode:

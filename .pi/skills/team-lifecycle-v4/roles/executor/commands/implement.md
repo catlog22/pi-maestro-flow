@@ -49,7 +49,7 @@ CONSTRAINTS: Only modify listed files | Follow existing patterns
 
 CLI call:
 ```
-Bash({ command: `teammate({ agent: "delegate", taskType: "development", task: "<prompt>", prompt: "development-implement-feature", /* --to <tool>: set model via model-availability */ })
+Bash({ command: `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "<prompt>" }], /* --rule "development-implement-feature" */ })
   background: false, timeout: 3600000 })
 ```
 

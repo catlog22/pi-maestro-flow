@@ -62,13 +62,7 @@ Set the task ID to match `ANT-<k>-<i>` (or record mapping in `.msg/meta.json` if
 For each assignment, spawn one team-worker:
 
 ```
-teammate({
-  subagent_type: "team-worker",
-  description: "Spawn ant <ANT-k-i>",
-  team_name: "swarm",
-  name: "ant-<k>-<i>",
-  background: true,
-  prompt: `## Role Assignment
+teammate({ agent: "team-worker", tasks: [{ name: "ant-<k>-<i>", prompt: `## Role Assignment
 role: ant
 role_spec: <skill_root>/roles/ant/role.md
 session: <session_path>
@@ -85,8 +79,7 @@ Report progress via team_msg at phase boundaries.
 Report blockers immediately via team_msg type="blocker".
 Report completion via team_msg type="task_complete" after final SendMessage.
 
-Read role_spec (@<skill_root>/roles/ant/role.md) for Phase 2-4 instructions.`
-})
+Read role_spec (@<skill_root>/roles/ant/role.md) for Phase 2-4 instructions.`, description: "Spawn ant <ANT-k-i>" }], background: true })
 ```
 
 All N spawns in a single message (parallel).
@@ -126,12 +119,7 @@ If all completed -> proceed.
 If `config.scoring.mode == "llm"`:
 
 ```
-teammate({
-  subagent_type: "team-worker",
-  team_name: "swarm",
-  name: "scorer-<k>",
-  background: true,
-  prompt: `## Role Assignment
+teammate({ agent: "team-worker", tasks: [{ name: "scorer-<k>", prompt: `## Role Assignment
 role: scorer
 role_spec: <skill_root>/roles/scorer/role.md
 session: <session_path>
@@ -143,11 +131,10 @@ inner_loop: false
 ## Context
 Iteration to score: <k>
 Output file: {run_dir}/work/team/scores/iter-<k>-scores.json
-Read all artifacts: {run_dir}/outputs/ant-<k>-*.json`
-})
+Read all artifacts: {run_dir}/outputs/ant-<k>-*.json` }], background: true })
 ```
 
-STOP and await scorer callback. On callback resume at Step 3.
+STOP and await scorer callback. On teammate-complete notification resume at Step 3.
 
 If `scoring.mode == "script"` or `"fallback"` -> proceed directly to Step 3.
 

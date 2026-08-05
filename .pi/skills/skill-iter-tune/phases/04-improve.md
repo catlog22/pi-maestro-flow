@@ -74,10 +74,53 @@ const suggestionsText = evaluation.suggestions.map((s, i) =>
   (s.code_snippet ? `   Suggested change:\n   ${s.code_snippet}\n` : '')
 ).join('\n');
 
-teammate({
-  subagent_type: 'general-purpose',
-  background: false,
-  description: `Apply skill improvements iteration ${N}`,
+teammate({ agent: "general", tasks: [{ prompt: `## Task: Apply Targeted Improvements to Skill Files
+
+You are improving a workflow skill based on evaluation feedback. Apply ONLY the suggested changes -- do not refactor, add features, or "improve" beyond what is explicitly suggested.
+
+## Current Score: ${evaluation.score}/100
+Dimension breakdown:
+${evaluation.dimensions.map(d => `- ${d.name}: ${d.score}/100`).join('\n')}
+
+## Skill File Inventory
+${skillFileInventory}
+
+${chainContext ? `## Chain Context\n${chainContext}\n\nPrioritize improvements on the weakest skill in the chain. Also consider interface compatibility between adjacent skills in the chain.\n` : ''}
+
+## Improvement Suggestions (apply in priority order)
+${suggestionsText}
+
+## Rules
+1. Read each target file BEFORE modifying it
+2. Apply ONLY the suggested changes -- no unsolicited modifications
+3. If a suggestion's target_file doesn't exist, skip it and note in summary
+4. If a suggestion conflicts with existing patterns, adapt it to fit (note adaptation)
+5. Preserve existing code style, naming conventions, and structure
+6. After all changes, write a change summary to: ${iterDir}/iteration-${N}-changes.md
+
+## Changes Summary Format (write to ${iterDir}/iteration-${N}-changes.md)
+
+# Iteration ${N} Changes
+
+## Applied Suggestions
+- [high] description: what was changed in which file
+- [medium] description: what was changed in which file
+
+## Files Modified
+- path/to/file.md: brief description of changes
+
+## Skipped Suggestions (if any)
+- description: reason for skipping
+
+## Notes
+- Any adaptations or considerations
+
+## Success Criteria
+- All high-priority suggestions applied
+- Medium-priority suggestions applied if feasible
+- Low-priority suggestions applied if trivial
+- Changes summary written to ${iterDir}/iteration-${N}-changes.md
+`, description: `Apply skill improvements iteration ${N}`,
   prompt: `## Task: Apply Targeted Improvements to Skill Files
 
 You are improving a workflow skill based on evaluation feedback. Apply ONLY the suggested changes -- do not refactor, add features, or "improve" beyond what is explicitly suggested.
@@ -124,8 +167,7 @@ ${suggestionsText}
 - Medium-priority suggestions applied if feasible
 - Low-priority suggestions applied if trivial
 - Changes summary written to ${iterDir}/iteration-${N}-changes.md
-`
-});
+` }], background: false });
 ```
 
 ### Step 4.3: Verify Changes

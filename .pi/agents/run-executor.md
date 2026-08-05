@@ -9,6 +9,7 @@ tools:
   - Glob
   - Grep
   - teammate
+  - observe
 ---
 
 # Run Executor

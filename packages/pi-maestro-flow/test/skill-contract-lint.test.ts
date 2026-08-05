@@ -54,6 +54,42 @@ test("Pi coordinators consume the read-only Topic Session reuse contract", () =>
   assert.doesNotMatch(ralph, /`--(?:from|dir)\b/i, "maestro-ralph must consume selected artifact refs instead of composing source/path args");
 });
 
+test("Pi skills using teammate expose observe and the wait contract", () => {
+  const findings: ContractFinding[] = [];
+  for (const file of listSkillFiles(skillsRoot)) {
+    const content = readFileSync(file, "utf8");
+    const { frontmatter } = parseFrontmatter<Record<string, unknown>>(content);
+    const tools = normalizeToolList(frontmatter["allowed-tools"]);
+    const usesTeammate = tools.includes("teammate") || /\bteammate\s*\(/.test(content);
+    if (!usesTeammate) continue;
+
+    const displayPath = relative(repoRoot, file).replaceAll("\\", "/");
+    if (!tools.includes("observe")) {
+      findings.push({ file: displayPath, rule: "teammate-observe", detail: "teammate requires observe in allowed-tools" });
+    }
+    const contracts = [...content.matchAll(/<teammate_contract>([\s\S]*?)<\/teammate_contract>/gi)];
+    if (contracts.length !== 1) {
+      findings.push({ file: displayPath, rule: "teammate-contract", detail: `expected one block, found ${contracts.length}` });
+      continue;
+    }
+    const contract = contracts[0]?.[1] ?? "";
+    if (!/background: false/.test(contract)
+      || !/\bobserve\b/.test(contract)
+      || !/action: "wait"/.test(contract)
+      || !/teammate-complete/.test(contract)
+      || !/never continue independently/i.test(contract)) {
+      findings.push({ file: displayPath, rule: "teammate-wait", detail: "wait contract is incomplete" });
+    }
+  }
+  assert.deepEqual(findings, []);
+});
+
+function normalizeToolList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
+  if (typeof value === "string") return value.split(/\s+/).filter(Boolean);
+  return [];
+}
+
 test("generated Pi prompts use the current Run/Session human CLI", () => {
   const generatedRoot = join(repoRoot, ".pi");
   const findings = listPromptFiles(generatedRoot).flatMap((file) => auditRunSessionPrompt(file));

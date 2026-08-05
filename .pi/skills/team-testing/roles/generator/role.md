@@ -62,7 +62,7 @@ For revision mode:
 
 ```
 Bash({
-  command: `teammate({ agent: "delegate", taskType: "development", task: "PURPOSE: Generate <layer> tests using <framework> to achieve coverage target; success = all priority files covered with …", cwd: "{run_dir}/work/team" })
+  command: `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "PURPOSE: Generate <layer> tests using <framework> to achieve coverage target; success = all priority files covered with …" }], cwd: "{run_dir}/work/team" })
   background: false
 })
 ```

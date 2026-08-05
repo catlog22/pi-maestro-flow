@@ -117,19 +117,14 @@ Write(`${workDir}/final-output.json`, finalResult);  // 只存最终结果
 async function executePhase(context) {
   const { previousResult, constraints, config } = context;
 
-  const result = await teammate({
-    subagent_type: 'universal-executor',
-    description: 'Execute phase with context passing',
-    background: false,
-    prompt: `
+  const result = await teammate({ agent: "general", tasks: [{ prompt: `
       [CONTEXT]
       Previous: ${JSON.stringify(previousResult)}
       Constraints: ${constraints.join(', ')}
 
       [TASK]
       Process and return result directly.
-    `
-  });
+    `, description: 'Execute phase with context passing' }], background: false });
 
   return {
     ...context,

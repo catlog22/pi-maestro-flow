@@ -98,13 +98,9 @@ async function execute${toPascalCase(id)}(context) {
   \` : '// No MCP tools configured'}
 
   // 3. Launch Agent for in-depth analysis
-  const agentResult = await teammate({
-    subagent_type: '\${agent.type}',
-    prompt: \`
+  const agentResult = await teammate({ agent: "\${agent.type}", tasks: [{ prompt: \`
 \${generateAgentPrompt(analysis_type, scope)}
-    \`,
-    background: false
-  });
+    \` }], background: false });
 
   results.push({ type: 'agent', data: agentResult });
 
@@ -410,17 +406,13 @@ const semanticContext = await mcp__ace_tool__search_context({
 });
 
 // Use semantic search results as Agent input context
-const agentResult = await teammate({
-  subagent_type: 'Explore',
-  prompt: \`
+const agentResult = await teammate({ agent: "explorer", tasks: [{ prompt: \`
 Based on following semantic search results, perform in-depth analysis:
 
 \${semanticContext}
 
 Task: Analyze authentication logic implementation details...
-  \`,
-  background: false
-});
+  \` }], background: false });
 \`\`\`
 
 ### smart_search Integration

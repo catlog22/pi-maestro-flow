@@ -9,7 +9,7 @@ Event-driven pipeline coordination with Spawn-and-Stop pattern. Role names are r
 
 | Trigger | Condition |
 |---------|-----------|
-| Worker callback | Message contains [role-name] from session roles |
+| teammate-complete notification | Message contains [role-name] from session roles |
 | User command | "check", "status", "resume", "continue" |
 | Capability gap | Worker reports capability_gap |
 | Pipeline spawn | After dispatch, initial spawn needed |
@@ -184,13 +184,7 @@ Ready tasks found?
 **Spawn worker tool call** (one per ready task):
 
 ```
-teammate({
-  subagent_type: "team-worker",
-  description: "Spawn <role> worker for <subject>",
-  team_name: <team-name>,
-  name: "<role>",
-  background: true,
-  prompt: `## Role Assignment
+teammate({ agent: "team-worker", tasks: [{ name: "<role>", prompt: `## Role Assignment
 role: <role>
 role_spec: {run_dir}/work/team/role-specs/<role>.md
 session: {run_dir}/work/team
@@ -205,8 +199,7 @@ Report progress via team_msg at natural phase boundaries (context loaded -> core
 Report blockers immediately via team_msg type="blocker".
 Report completion via team_msg type="task_complete" after final SendMessage.
 
-Read role_spec file to load Phase 2-4 domain instructions.`
-})
+Read role_spec file to load Phase 2-4 domain instructions.`, description: "Spawn <role> worker for <subject>" }], background: true })
 ```
 
 ---
@@ -356,7 +349,7 @@ handleCallback receives message with consensus_blocked flag
 | Scenario | Resolution |
 |----------|------------|
 | Session file not found | Error, suggest re-initialization |
-| Worker callback from unknown role | Log info, scan for other completions |
+| teammate-complete notification from unknown role | Log info, scan for other completions |
 | All workers still running on resume | Report status, suggest check later |
 | Pipeline stall (no ready, no running) | Check for missing tasks, report to user |
 | Fast-advance conflict | Coordinator reconciles, no duplicate spawns |

@@ -139,13 +139,7 @@ Find ready tasks, spawn workers, STOP.
    d. Spawn team-worker:
 
 ```
-teammate({
-  subagent_type: "team-worker",
-  description: "Spawn <role> worker for <subject>",
-  team_name: "review",
-  name: "<role>",
-  background: true,
-  prompt: `## Role Assignment
+teammate({ agent: "team-worker", tasks: [{ name: "<role>", prompt: `## Role Assignment
 role: <role>
 role_spec: ~  or <project>/.claude/skills/team-review/roles/<role>/role.md
 session: {run_dir}/work/team
@@ -165,8 +159,7 @@ Report blockers immediately via team_msg type="blocker".
 Report completion via team_msg type="task_complete" after final SendMessage.
 
 Read role_spec file to load Phase 2-4 domain instructions.
-Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
-})
+Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`, description: "Spawn <role> worker for <subject>" }], background: true })
 ```
 
    e. Add to active_workers
@@ -220,7 +213,7 @@ After every handler execution:
 | Scenario | Resolution |
 |----------|------------|
 | Session file not found | Error, suggest re-initialization |
-| Worker callback from unknown role | Log info, scan for other completions |
+| teammate-complete notification from unknown role | Log info, scan for other completions |
 | 0 findings after scan | Delete remaining stages, complete pipeline |
 | User declines fix | Delete FIX-* tasks, complete with review-only results |
 | Pipeline stall | Check blockedBy chains, report to user |

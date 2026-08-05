@@ -57,7 +57,7 @@ message_types:
 
 CLI generation:
 ```
-Bash({ command: `teammate({ agent: "delegate", taskType: "development", task: "PURPOSE: Generate <doc-type> document following template\nTASK: • Load template • Apply spec config and discovery contex…", cwd: "{run_dir}/work/team" }) background: false })
+Bash({ command: `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "PURPOSE: Generate <doc-type> document following template\nTASK: • Load template • Apply spec config and discovery contex…" }], cwd: "{run_dir}/work/team" }) background: false })
 ```
 
 ## Phase 4: Validation

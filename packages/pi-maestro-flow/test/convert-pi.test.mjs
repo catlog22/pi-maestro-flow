@@ -17,7 +17,9 @@ allowed-tools: Agent AskUserQuestion
 \`\`\`
 `,
     verify(output) {
-      assert.match(output, /^allowed-tools: Read teammate maestro$/m);
+      assert.match(output, /^allowed-tools: Read teammate observe maestro$/m);
+      assert.match(output, /<teammate_contract>/);
+      assert.match(output, /observe.*action: "wait"/);
       assert.match(output, /user prompt is used/);
       assert.match(output, /```yaml\nallowed-tools: Agent AskUserQuestion\n```/);
     },
@@ -175,6 +177,61 @@ maestro run complete <run_id>
     input: `todo({ action: "create", subject: "Phase 1", activeForm: "Running phase 1" })`,
     verify(output) {
       assert.equal(output, `todo({ action: "create", subject: "Phase 1" })`);
+    },
+  },
+  {
+    name: "rewrites multiline subagent calls into the current teammate contract",
+    file: "D:/fixture/skills/example/SKILL.md",
+    input: [
+      "const result = await Agent({",
+      "  subagent_type: 'universal-executor',",
+      "  run_in_background: phaseConfig.background || false,",
+      "  prompt: \\`",
+      "[PHASE] \\${phaseId}",
+      "\\`",
+      "});",
+    ].join("\r\n"),
+    verify(output) {
+      assert.match(output, /const result = await teammate\(\{ agent: "general"/);
+      assert.match(output, /tasks: \[\{ prompt: \\`/);
+      assert.match(output, /\[PHASE\] \\\${phaseId}/);
+      assert.match(output, /background: phaseConfig\.background \|\| false/);
+      assert.doesNotMatch(output, /subagent_type|run_in_background/);
+    },
+  },
+  {
+    name: "normalizes direct legacy teammate task fields",
+    file: "D:/fixture/skills/example/SKILL.md",
+    input: `teammate({ agent: "delegate", taskType: "analysis", task: "PURPOSE: inspect", prompt: "analysis-rule", name: "job-1" })`,
+    verify(output) {
+      assert.match(output, /agent: "general"/);
+      assert.match(output, /tasks: \[\{ name: "job-1", prompt: "PURPOSE: inspect" \}\]/);
+      assert.match(output, /\/\* --rule "analysis-rule" \*\//);
+      assert.doesNotMatch(output, /agent: "delegate"|\btask: "/);
+    },
+  },
+  {
+    name: "strips Bash wrappers around literal teammate calls",
+    file: "D:/fixture/skills/example/SKILL.md",
+    input: `Bash({ command: 'teammate({ agent: "delegate", taskType: "analysis", task: "inspect" })', background: true })`,
+    verify(output) {
+      assert.match(output, /^teammate\(\{ agent: "general"/);
+      assert.match(output, /tasks: \[\{ prompt: "inspect" \}\]/);
+      assert.match(output, /background: true/);
+      assert.doesNotMatch(output, /Bash\(|agent: "delegate"|\btask: "/);
+    },
+  },
+  {
+    name: "rewrites legacy callback prose to teammate completion semantics",
+    file: "D:/fixture/skills/example/SKILL.md",
+    input: `teammate runs in background, wait for hook callback before proceeding
+Worker callback -> handleCallback
+SendMessage callback
+On callback: consume result`,
+    verify(output) {
+      assert.match(output, /teammate-complete notification/);
+      assert.match(output, /observe exactly once with action="wait"/);
+      assert.doesNotMatch(output, /hook callback|SendMessage callback|Worker callback|On callback/);
     },
   },
 ];

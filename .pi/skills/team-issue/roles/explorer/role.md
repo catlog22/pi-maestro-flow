@@ -49,7 +49,7 @@ Bash("maestro issue status <issueId> --json")
 | Complexity | Execution |
 |------------|-----------|
 | Low | Direct ACE search: `(project_root_path, query)` |
-| Medium/High | CLI exploration: `Bash("teammate({ agent: "delegate", taskType: "analysis", task: "<exploration_prompt>", /* --to agy: set model via model-availability */ }) { background: false })` |
+| Medium/High | CLI exploration: `Bash("teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "<exploration_prompt>" }] }) { background: false })` |
 
 **CLI exploration prompt template**:
 

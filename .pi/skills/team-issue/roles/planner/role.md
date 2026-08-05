@@ -35,7 +35,7 @@ Read("{run_dir}/work/team/explorations/context-<issueId>.json")
 **CLI invocation**:
 
 ```
-Bash("teammate({ agent: "delegate", taskType: "analysis", task: "PURPOSE: Design solution for issue <issueId> and decompose into implementation tasks; success = canonical Run solution a…" })Solution: {run_dir}/outputs/solutions/solution-<issueId>.json\" --note \"Solution artifact created\" --json")`
+Bash("teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: Design solution for issue <issueId> and decompose into implementation tasks; success = canonical Run solution a…" }] })Solution: {run_dir}/outputs/solutions/solution-<issueId>.json\" --note \"Solution artifact created\" --json")`
 
 CONSTRAINTS: Follow existing patterns | Minimal changes | Address reviewer feedback if SOLVE-fix task
 \" --tool agy --mode analysis", { background: false })

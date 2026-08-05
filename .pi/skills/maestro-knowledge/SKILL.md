@@ -1,10 +1,19 @@
 ---
 name: maestro-knowledge
 description: "Intent-driven knowledge-store and Run knowledge lifecycle management — audit/prune, stage candidates (with signal recording), review/resolve/promote candidates, harvest artifacts, or manage wiki/domain knowledge. Arguments: [intent — e.g. '审计知识库' | 'harvest 这个 session' | 'wiki health' | '注册术语 MVP' | 'extractors']"
-allowed-tools: Read Write Edit Bash Glob Grep teammate WebFetch maestro
+allowed-tools: Read Write Edit Bash Glob Grep teammate WebFetch maestro observe
 disable-model-invocation: true
 session-mode: none
 ---
+
+<teammate_contract>
+
+- `background: false` is the default. Use foreground dispatch whenever the result determines the current answer or next action.
+- Use `background: true` only for independent work. If this turn must consume a background result, call `observe` exactly once with `action: "wait"` and a bounded timeout before continuing; never continue independently while the result is pending.
+- Otherwise end the turn and wait for the automatic `teammate-complete` notification. Do not rely on `SendMessage`, `team_msg`, or hook callbacks as completion signals.
+- Never silently ignore an unfinished dispatch.
+
+</teammate_contract>
 
 <purpose>
 Intent-driven knowledge-store management. No fixed grammar — state your intent; the command classifies it and runs the matching workflow or direct lifecycle command. Explicit keywords still work as deterministic shortcuts.

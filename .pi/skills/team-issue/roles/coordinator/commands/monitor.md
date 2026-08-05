@@ -117,13 +117,7 @@ Find ready tasks, spawn workers, STOP.
    b. team_msg log -> task_unblocked
    c. Spawn team-worker (see SKILL.md Spawn Template):
       ```
-      teammate({
-        subagent_type: "team-worker",
-        description: "Spawn <role> worker for <task-id>",
-        team_name: "issue",
-        name: "<role>",
-        background: true,
-        prompt: `## Role Assignment
+      teammate({ agent: "team-worker", tasks: [{ name: "<role>", prompt: `## Role Assignment
       role: <role>
       role_spec: ~  or <project>/.claude/skills/team-issue/roles/<role>/role.md
       session: {run_dir}/work/team
@@ -139,8 +133,7 @@ Find ready tasks, spawn workers, STOP.
       Report completion via team_msg type="task_complete" after final SendMessage.
 
       Read role_spec file to load Phase 2-4 domain instructions.
-      Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
-      })
+      Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`, description: "Spawn <role> worker for <task-id>" }], background: true })
       ```
    d. Add to active_workers
 
@@ -156,12 +149,7 @@ Find ready tasks, spawn workers, STOP.
 
 **Parallel spawn** (Batch mode with multiple ready tasks for same role):
 ```
-teammate({
-  subagent_type: "team-worker",
-  name: "<role>-<N>",
-  team_name: "issue",
-  background: true,
-  prompt: `## Role Assignment
+teammate({ agent: "team-worker", tasks: [{ name: "<role>-<N>", prompt: `## Role Assignment
 role: <role>
 role_spec: ~  or <project>/.claude/skills/team-issue/roles/<role>/role.md
 session: {run_dir}/work/team
@@ -178,8 +166,7 @@ Report blockers immediately via team_msg type="blocker".
 Report completion via team_msg type="task_complete" after final SendMessage.
 
 Read role_spec file to load Phase 2-4 domain instructions.
-Execute built-in Phase 1 (task discovery, owner=<role>-<N>) -> role Phase 2-4 -> built-in Phase 5 (report).`
-})
+Execute built-in Phase 1 (task discovery, owner=<role>-<N>) -> role Phase 2-4 -> built-in Phase 5 (report).` }], background: true })
 ```
 
 6. Update session, output summary, STOP

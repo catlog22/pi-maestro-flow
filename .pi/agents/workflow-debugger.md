@@ -50,7 +50,7 @@ Each line in evidence.ndjson:
 - **Project specs** — `maestro load --type spec --category debug`: known issues, root causes, workarounds. Check before forming hypotheses to avoid re-investigating known problems.
 - **Codebase docs** (if `.workflow/codebase/` exists) — Read `ARCHITECTURE.md` for module boundaries to scope impact analysis and form better hypotheses
 - **Wiki prior knowledge** (if `maestro wiki` available) — `maestro wiki search "<symptom keywords>"` for prior investigations on similar issues; skip already-documented root causes
-- **Codebase search** — prefer `teammate({ agent: "explorer", task: "FIND: <symptom> SCOPE: src/ ATTENTION: <error context>", taskType: "explore" })` over raw Grep for multi-file evidence gathering
+- **Codebase search** — prefer `teammate({ agent: "explorer", taskType: "explore", tasks: [{ prompt: "FIND: <symptom> SCOPE: src/ ATTENTION: <error context>" }] })` over raw Grep for multi-file evidence gathering
 
 ## Output
 - Debug session directory with:

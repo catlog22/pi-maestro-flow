@@ -1,10 +1,19 @@
 ---
 name: maestro-learn
 description: "User-invoked learning toolkit — guided reading, investigation, pattern extraction, or second opinions. Manual `/maestro-learn` only; NEVER auto-invoke for code exploration or analysis — route those intents to the analyze step via /maestro-next Arguments: follow|investigate|decompose|consult [args...]"
-allowed-tools: Read Write Bash Glob Grep teammate maestro
+allowed-tools: Read Write Bash Glob Grep teammate maestro observe
 disable-model-invocation: true
 session-mode: none
 ---
+
+<teammate_contract>
+
+- `background: false` is the default. Use foreground dispatch whenever the result determines the current answer or next action.
+- Use `background: true` only for independent work. If this turn must consume a background result, call `observe` exactly once with `action: "wait"` and a bounded timeout before continuing; never continue independently while the result is pending.
+- Otherwise end the turn and wait for the automatic `teammate-complete` notification. Do not rely on `SendMessage`, `team_msg`, or hook callbacks as completion signals.
+- Never silently ignore an unfinished dispatch.
+
+</teammate_contract>
 
 <purpose>
 Learning toolkit for building understanding of code, decisions, and plans. Four subcommands:
@@ -318,9 +327,9 @@ Rank by plausibility (evidence strength). Write to understanding.md:
 ### A_CLI_SUPPLEMENT
 
 ```
-teammate({ agent: "delegate", taskType: "analysis", task: "PURPOSE: Gather evidence for hypotheses\nTASK: Trace call chains and data flows per hypothesis | Find corroborating/cont…", /* --to <first-enabled-tool>: set model via model-availability */ })
+teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: Gather evidence for hypotheses\nTASK: Trace call chains and data flows per hypothesis | Find corroborating/cont…" }] })
 ```
-Run_in_background, STOP, wait. On callback: append to evidence.ndjson.
+Run_in_background, STOP, wait. On teammate-complete notification: append to evidence.ndjson.
 
 ### A_TEST_HYPOTHESIS
 

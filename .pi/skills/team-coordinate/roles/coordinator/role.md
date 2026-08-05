@@ -20,7 +20,7 @@ role: coordinator
 - Dynamically generate worker role-specs from specs/role-spec-template.md
 - Create team and spawn team-worker agents in background
 - Dispatch tasks with proper dependency chains from task-analysis.json
-- Monitor progress via worker callbacks and route messages
+- Monitor progress via teammate-complete notifications and route messages
 - Maintain session state persistence (team-session.json)
 - Handle capability_gap reports (generate new role-specs mid-pipeline)
 - Handle consensus_blocked HIGH verdicts (create revision tasks or pause)
@@ -104,7 +104,7 @@ When coordinator is invoked, first detect the invocation type:
 
 | Detection | Condition | Handler |
 |-----------|-----------|---------|
-| Worker callback | Message contains `[role-name]` from session roles | -> handleCallback |
+| teammate-complete notification | Message contains `[role-name]` from session roles | -> handleCallback |
 | Status check | Arguments contain "check" or "status" | -> handleCheck |
 | Manual resume | Arguments contain "resume" or "continue" | -> handleResume |
 | Capability gap | Message contains "capability_gap" | -> handleAdapt |
@@ -318,7 +318,7 @@ Delegate to `@commands/dispatch.md` which creates the full task chain:
 5. STOP
 
 **Pipeline advancement** driven by three wake sources:
-- Worker callback (automatic) -> Entry Router -> handleCallback
+- teammate-complete notification (automatic) -> Entry Router -> handleCallback
 - User "check" -> handleCheck (status only)
 - User "resume" -> handleResume (advance)
 

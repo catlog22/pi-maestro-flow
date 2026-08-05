@@ -37,7 +37,7 @@ When coordinator needs to execute a specific phase:
 
 | Detection | Condition | Handler |
 |-----------|-----------|---------|
-| Worker callback | Message contains [role-name] | -> handleCallback (monitor.md) |
+| teammate-complete notification | Message contains [role-name] | -> handleCallback (monitor.md) |
 | Status check | Args contain "check" or "status" | -> handleCheck (monitor.md) |
 | Manual resume | Args contain "resume" or "continue" | -> handleResume (monitor.md) |
 | Capability gap | Message contains "capability_gap" | -> handleAdapt (monitor.md) |
