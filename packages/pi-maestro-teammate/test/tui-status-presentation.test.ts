@@ -194,6 +194,33 @@ test("background tab updates never repaint the visible frame", () => {
   }
 });
 
+test("attach overlay ticks only for visible spinner frames and elapsed seconds", async () => {
+  const now = Date.now();
+  const agent = activeAgent({ startedAt: now - 5_000, lastActivityAt: now });
+  const overlay = new AttachOverlay(agent, () => {}, () => new Map([[agent.correlationId, agent]]));
+  let renders = 0;
+  overlay.setRequestRender(() => { renders += 1; });
+  try {
+    overlay.setActiveTools(agent.correlationId, [{ name: "read", status: "running", startedAt: now }]);
+    overlay.render(10, 24);
+    renders = 0;
+    await new Promise((resolve) => setTimeout(resolve, 280));
+    assert.equal(renders, 0, "a spinner hidden by compact layout must not repaint");
+
+    overlay.render(80, 24);
+    await new Promise((resolve) => setTimeout(resolve, 280));
+    assert.ok(renders >= 1, "a visible running tool must animate its spinner");
+
+    overlay.setActiveTools(agent.correlationId, []);
+    overlay.render(80, 24);
+    renders = 0;
+    await new Promise((resolve) => setTimeout(resolve, 1_300));
+    assert.ok(renders >= 1 && renders <= 2, `uptime should repaint only across seconds, got ${renders}`);
+  } finally {
+    overlay.dispose();
+  }
+});
+
 test("attach overlay log cache invalidates on append and bounds inbox payloads", () => {
   const now = Date.now();
   const agent = activeAgent({ correlationId: "cccccccc-log", lastActivityAt: now });

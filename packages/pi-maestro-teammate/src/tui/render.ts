@@ -65,6 +65,31 @@ function memoizedComponent(build: (width: number) => string[]): Component {
   };
 }
 
+function memoizedSnapshotComponent<T>(
+  getSnapshot: () => T,
+  build: (width: number, snapshot: T) => string[],
+): Component {
+  let cachedWidth: number | undefined;
+  let cachedSnapshot: T;
+  let cached: string[] = [];
+  let hasCache = false;
+  return {
+    render(w: number) {
+      const snapshot = getSnapshot();
+      if (!hasCache || cachedWidth !== w || cachedSnapshot !== snapshot) {
+        cached = build(w, snapshot);
+        cachedWidth = w;
+        cachedSnapshot = snapshot;
+        hasCache = true;
+      }
+      return [...cached];
+    },
+    invalidate() {
+      hasCache = false;
+    },
+  };
+}
+
 /**
  * Upper bound on wrapped lines emitted for a single result body. A message can
  * be up to `transcriptMessageBytes` (64KB); wrapping all of it every frame is
@@ -291,8 +316,9 @@ function renderProgress(
     });
   }
 
-  return dynamicComponent((w) => {
-    const entries = progress ?? [];
+  return memoizedSnapshotComponent(() => result.details ?? details, (w, snapshot) => {
+    const entries = snapshot?.progress ?? [];
+    const childCalls = snapshot?.childCalls ?? [];
     if (w < 20) {
       // Retrying counts as in-flight: a backing-off agent is not a success.
       const running = entries.filter((entry) => entry.status === "running" || entry.status === "retrying").length;
@@ -361,7 +387,7 @@ function renderProgress(
     }
     const taskCids = new Set(entries.map((entry) => entry.correlationId).filter(Boolean));
     const childCids = new Set(childCalls.map((child) => child.correlationId));
-    const mode = details?.mode ?? "single";
+    const mode = snapshot?.mode ?? "single";
     const stateText = entries.length === 0
       ? `${runningChildren || childCalls.length} child agent${childCalls.length === 1 ? "" : "s"}`
       : failed > 0

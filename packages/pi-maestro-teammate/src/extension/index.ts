@@ -3609,8 +3609,6 @@ export default function registerTeammateExtension(
         let lastWidth = 80;
         const pasteDecoder = new BracketedPasteDecoder();
         let pasteFlushTimer: ReturnType<typeof setTimeout> | undefined;
-        const refreshTimer = setInterval(requestRender, 1000);
-        refreshTimer.unref?.();
 
         function filtered(): AgentSelectorRow[] {
           const activeRows = buildAgentSelectorRows(Array.from(state.activeRuns.values()));
@@ -3708,7 +3706,6 @@ export default function registerTeammateExtension(
           invalidate() {},
           dispose() {
             if (pasteFlushTimer) clearTimeout(pasteFlushTimer);
-            clearInterval(refreshTimer);
           },
         };
       },

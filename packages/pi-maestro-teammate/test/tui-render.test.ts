@@ -198,6 +198,41 @@ test("streaming progress shows live duration and split token usage", () => {
   assert.match(rendered, /stalled 4[45]s/);
 });
 
+test("streaming progress memoizes by width and snapshot reference", () => {
+  const details: Details = {
+    mode: "single",
+    results: [],
+    progress: [{
+      agent: "general",
+      name: "memo",
+      correlationId: "memo-agent",
+      taskIndex: 0,
+      dependencies: [],
+      status: "running",
+      durationMs: 1_000,
+    }],
+  };
+  const result: AgentToolResult<Details> = {
+    content: [{ type: "text", text: "working" }],
+    details,
+  };
+  const component = renderTeammateResult(result, { expanded: false }, theme as never);
+
+  const first = component.render(120);
+  assert.match(first.join("\n"), /1s/);
+  details.progress![0].durationMs = 2_000;
+  const sameSnapshot = component.render(120);
+  assert.deepEqual(sameSnapshot, first);
+  assert.notEqual(sameSnapshot, first, "memoized output must not alias the cached array");
+
+  assert.match(component.render(121).join("\n"), /2s/);
+  result.details = {
+    ...details,
+    progress: details.progress!.map((entry) => ({ ...entry, durationMs: 3_000 })),
+  };
+  assert.match(component.render(121).join("\n"), /3s/);
+});
+
 test("streaming progress keeps per-second metrics off the header line", () => {
   const now = Date.now();
   const lines = renderTeammateResult({

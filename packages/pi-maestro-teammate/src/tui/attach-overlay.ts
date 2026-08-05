@@ -128,9 +128,9 @@ function fitFooter(width: number, segments: string[]): string {
   return footer || segments.find(Boolean) || "";
 }
 
-function activeMs(agent: ActiveAgent): number {
-  return Date.now() - agent.startedAt - agent.sleepMs
-    - (agent.sleptAt ? Date.now() - agent.sleptAt : 0);
+function activeMs(agent: ActiveAgent, now = Date.now()): number {
+  return now - agent.startedAt - agent.sleepMs
+    - (agent.sleptAt ? now - agent.sleptAt : 0);
 }
 
 function frameLine(content: string, innerWidth: number): string {
@@ -197,6 +197,8 @@ export class AttachOverlay implements Component, Focusable {
   private requestRender: (() => void) | null = null;
   private frame = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private tickVisibility: "hidden" | "tools" | "full" = "hidden";
+  private renderedTickSignature = "";
   private composing = false;
   private draft = "";
   private cursor = 0;
@@ -235,16 +237,47 @@ export class AttachOverlay implements Component, Focusable {
     }
 
     this.timer = setInterval(() => {
-      this.frame = (this.frame + 1) % SPINNER.length;
-      const log = this.agents.get(this.activeId);
-      if (log?.activeTools.some((tool) => tool.status === "running")) {
-        this.requestRender?.();
-      }
+      const nextFrame = (this.frame + 1) % SPINNER.length;
+      const nextSignature = this.tickSignature(Date.now(), nextFrame);
+      if (nextSignature === this.renderedTickSignature) return;
+      this.frame = nextFrame;
+      this.renderedTickSignature = nextSignature;
+      this.requestRender?.();
     }, SPINNER_MS);
   }
 
   setRequestRender(fn: () => void): void {
     this.requestRender = fn;
+  }
+
+  private tickSignature(now: number, frame: number): string {
+    if (this.tickVisibility === "hidden") return "";
+    const log = this.agents.get(this.activeId);
+    if (!log) return "";
+    const selected = log.selectedTaskIndex === undefined
+      ? undefined
+      : log.progress.find((entry) => entry.taskIndex === log.selectedTaskIndex);
+    const parts: string[] = [];
+    if (selected) {
+      for (const tool of (selected.recentTools ?? []).slice(-6)) {
+        if (tool.status === "running") parts.push(`spinner:${frame}`);
+      }
+      return parts.join("|");
+    }
+    if (this.tickVisibility === "full") {
+      parts.push(`uptime:${Math.max(0, Math.round(activeMs(log.agent, now) / 1000))}`);
+    }
+    for (const tool of log.activeTools.slice(-6)) {
+      if (tool.status !== "running") continue;
+      const elapsed = Math.max(0, Math.round((now - tool.startedAt) / 1000));
+      parts.push(`spinner:${frame}:${elapsed}`);
+    }
+    return parts.join("|");
+  }
+
+  private setTickVisibility(visibility: "hidden" | "tools" | "full", now: number): void {
+    this.tickVisibility = visibility;
+    this.renderedTickSignature = this.tickSignature(now, this.frame);
   }
 
   /**
@@ -626,21 +659,27 @@ export class AttachOverlay implements Component, Focusable {
 
   render(width: number, height?: number): string[] {
     this.syncAgents();
+    const now = Date.now();
     const w = Math.max(1, Math.min(width, 120));
     this.lastWidth = w;
     const log = this.agents.get(this.activeId);
-    if (w < 20) return [this.renderCompact(log, w)];
+    if (w < 20) {
+      this.setTickVisibility("hidden", now);
+      return [this.renderCompact(log, w)];
+    }
     const terminalHeight = Math.max(6, (process.stdout?.rows ?? 30) - 2);
     const targetHeight = Math.max(6, Math.min(height ?? terminalHeight, terminalHeight));
-    if (targetHeight <= 12) return this.renderDocked(log, w, targetHeight);
+    if (targetHeight <= 12) return this.renderDocked(log, w, targetHeight, now);
     const inner = w - 2;
     const rows: string[] = [this.renderTabs(inner), frameRule(inner)];
 
     if (this.activeId === MAIN_TAB) {
+      this.setTickVisibility("hidden", now);
       return this.renderMainTab(rows, inner, w);
     }
 
     if (!log) {
+      this.setTickVisibility("hidden", now);
       rows.push(dim("No agent selected"));
       return this.renderFrame(rows, w);
     }
@@ -649,8 +688,9 @@ export class AttachOverlay implements Component, Focusable {
     const selected = log.selectedTaskIndex === undefined
       ? undefined
       : log.progress.find((entry) => entry.taskIndex === log.selectedTaskIndex);
-    const uptime = Math.max(0, Math.round(activeMs(agent) / 1000));
-    const status = selected ? progressStatusText(selected) : agentStatusText(agent);
+    this.setTickVisibility("full", now);
+    const uptime = Math.max(0, Math.round(activeMs(agent, now) / 1000));
+    const status = selected ? progressStatusText(selected, now) : agentStatusText(agent, now);
     const title = selected
       ? `${progressIcon(selected.status, progressPalette)} ${bold(progressLabel(selected))}${dim(` (${selected.agent})`)}`
       : `${bold(agent.agent)}/${bold(agent.name ?? agent.correlationId.slice(0, 8))}`;
@@ -673,7 +713,7 @@ export class AttachOverlay implements Component, Focusable {
     }
 
     rows.push(frameRule(inner));
-    rows.push(...(selected ? this.renderSelectedTools(selected, inner) : this.renderTools(log, inner)));
+    rows.push(...(selected ? this.renderSelectedTools(selected, inner) : this.renderTools(log, inner, now)));
     rows.push(frameRule(inner));
     if (!selected) rows.push(...this.renderStream(log, inner));
     if (!selected && (log.streamingText || log.activeTools.some((tool) => tool.status === "running"))) {
@@ -699,7 +739,7 @@ export class AttachOverlay implements Component, Focusable {
     }
 
     const logHeight = targetHeight - rows.length - tailRows.length - 3;
-    if (logHeight < 1) return this.renderDocked(log, w, targetHeight);
+    if (logHeight < 1) return this.renderDocked(log, w, targetHeight, now);
     const maxOffset = Math.max(0, logLines.length - logHeight);
     log.maxScrollOffset = maxOffset;
     log.scrollOffset = log.followTail
@@ -794,8 +834,9 @@ export class AttachOverlay implements Component, Focusable {
     );
   }
 
-  private renderDocked(log: AgentLog | undefined, width: number, height: number): string[] {
+  private renderDocked(log: AgentLog | undefined, width: number, height: number, now: number): string[] {
     if (this.activeId === MAIN_TAB) {
+      this.setTickVisibility("hidden", now);
       return [
         this.renderTabs(width),
         truncateToWidth(dim("● main conversation · Enter return"), width, "…"),
@@ -803,6 +844,7 @@ export class AttachOverlay implements Component, Focusable {
       ];
     }
     if (!log) {
+      this.setTickVisibility("hidden", now);
       return [
         truncateToWidth(dim("Agents · no active session"), width, "…"),
         truncateToWidth(dim("Esc back"), width, "…"),
@@ -813,7 +855,8 @@ export class AttachOverlay implements Component, Focusable {
     const selected = log.selectedTaskIndex === undefined
       ? undefined
       : log.progress.find((entry) => entry.taskIndex === log.selectedTaskIndex);
-    const status = selected ? progressStatusText(selected) : agentStatusText(agent);
+    this.setTickVisibility("tools", now);
+    const status = selected ? progressStatusText(selected, now) : agentStatusText(agent, now);
     const title = selected
       ? `${progressIcon(selected.status, progressPalette)} ${bold(progressLabel(selected))} ${dim(`(${selected.agent})`)}`
       : `${bold(agent.agent)}/${bold(agent.name ?? agent.correlationId.slice(0, 8))}`;
@@ -854,7 +897,7 @@ export class AttachOverlay implements Component, Focusable {
 
     const toolLine = selected
       ? this.renderSelectedTools(selected, width)[0]
-      : this.renderTools(log, width)[0];
+      : this.renderTools(log, width, now)[0];
     lines.push(toolLine);
 
     const streamLines = selected
@@ -1165,12 +1208,12 @@ export class AttachOverlay implements Component, Focusable {
     );
   }
 
-  private renderTools(log: AgentLog, width: number): string[] {
-    if (log.activeTools.length === 0) return [dim(idleLabel(log.agent.lastActivityAt))];
+  private renderTools(log: AgentLog, width: number, now: number): string[] {
+    if (log.activeTools.length === 0) return [dim(idleLabel(log.agent.lastActivityAt, now))];
     const parts: string[] = [];
     const spinner = SPINNER[this.frame];
     for (const tool of log.activeTools.slice(-6)) {
-      const seconds = Math.max(0, Math.round((Date.now() - tool.startedAt) / 1000));
+      const seconds = Math.max(0, Math.round((now - tool.startedAt) / 1000));
       if (tool.status === "running") parts.push(yellow(`${spinner} ${bold(tool.name)} ${dim(`${seconds}s`)}`));
       else if (tool.status === "failed") parts.push(red(`✗ ${tool.name}`));
       else parts.push(dim(`✓ ${tool.name}`));
