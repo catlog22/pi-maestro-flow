@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -15,6 +16,39 @@ test("FFF tools are registered for the root Maestro session", () => {
 
   assert.ok(tools.includes("ffgrep"));
   assert.ok(tools.includes("fffind"));
+});
+
+test("FFF refuses home-directory workspace roots", async () => {
+  const tools: ToolDefinition[] = [];
+  const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
+  const register = {
+    registerTool(tool: ToolDefinition) { tools.push(tool); },
+    registerCommand() {},
+    on(event: string, handler: (...args: unknown[]) => unknown) {
+      const list = handlers.get(event) ?? [];
+      list.push(handler);
+      handlers.set(event, list);
+    },
+  };
+  registerFff(register as unknown as ExtensionAPI);
+
+  const grep = tools.find((tool) => tool.name === "ffgrep");
+  assert.ok(grep);
+  const ctx = {
+    cwd: homedir(),
+    ui: { notify() {} },
+    sessionManager: { getEntries: () => [] },
+  } as unknown as ExtensionContext;
+  await assert.rejects(
+    grep.execute(
+      "fff-home-reject",
+      { pattern: "needle", limit: 5 },
+      new AbortController().signal,
+      undefined,
+      ctx,
+    ),
+    /does not index home directories/,
+  );
 });
 
 test("FFF loads its native index and searches a root workspace", async () => {
