@@ -83,6 +83,34 @@ test("skill-config merges global, project, and explicit task args", async () => 
   }
 });
 
+test("loadSkillConfig preserves the enabled toggle from global and project configs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-config-enabled-"));
+  const agentDir = join(root, "agent");
+  const projectDir = join(root, "project");
+  await mkdir(join(projectDir, ".pi"), { recursive: true });
+  await mkdir(agentDir, { recursive: true });
+  await writeFile(join(agentDir, "skill-config.json"), JSON.stringify({
+    version: "1.0.0",
+    skills: { alpha: { params: {}, enabled: true }, beta: { params: {}, enabled: true } },
+  }));
+  await writeFile(join(projectDir, ".pi", "skill-config.json"), JSON.stringify({
+    version: "1.0.0",
+    skills: { alpha: { params: {}, enabled: false }, gamma: { params: {}, enabled: true } },
+  }));
+
+  try {
+    const { config } = await loadSkillConfig(projectDir, agentDir);
+    // project wins over global for the same skill
+    assert.equal(config.skills.alpha.enabled, false);
+    // global-only toggle survives
+    assert.equal(config.skills.beta.enabled, true);
+    // project-only toggle survives
+    assert.equal(config.skills.gamma.enabled, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("loader caches discovery and inlines required reading", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-todo-loader-"));
   const agentDir = join(root, "agent");

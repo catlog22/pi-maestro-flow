@@ -9,6 +9,8 @@ export interface SkillDefaults {
   params: Record<string, SkillParamValue>;
   updated?: string;
   "disable-model-invocation"?: boolean;
+  /** Enable toggle written by the settings panel; honored by loaders. */
+  enabled?: boolean;
 }
 
 export interface SkillPromptBudgets {
@@ -165,12 +167,21 @@ function validateConfig(raw: unknown, filePath: string): SkillConfigFile {
         `skills.${skillName}.disable-model-invocation must be a boolean`,
       );
     }
+    const enabled = value.enabled;
+    if (enabled !== undefined && typeof enabled !== "boolean") {
+      throw new SkillConfigError(
+        "E_SKILL_CONFIG_INVALID",
+        filePath,
+        `skills.${skillName}.enabled must be a boolean`,
+      );
+    }
     skills[skillName] = {
       params,
       ...(typeof value.updated === "string" ? { updated: value.updated } : {}),
       ...(typeof disableModelInvocation === "boolean"
         ? { "disable-model-invocation": disableModelInvocation }
         : {}),
+      ...(typeof enabled === "boolean" ? { enabled } : {}),
     };
   }
 
@@ -220,6 +231,11 @@ function mergeSkills(
             ? { "disable-model-invocation": defaults["disable-model-invocation"] }
             : "disable-model-invocation" in existing
               ? { "disable-model-invocation": existing["disable-model-invocation"] }
+              : {}),
+          ...("enabled" in defaults
+            ? { enabled: defaults.enabled }
+            : "enabled" in existing
+              ? { enabled: existing.enabled }
               : {}),
         }
       : defaults;
