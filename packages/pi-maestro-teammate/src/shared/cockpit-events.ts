@@ -7,3 +7,12 @@
 
 export const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
 export const COCKPIT_PREEMPT_RESIZE_EVENT = "cockpit:preempt-resize";
+
+/**
+ * Cockpit → teammate: user command against one agent. The payload carries
+ * `{ correlationId, action: "interrupt" | "steer", message? }`; teammate
+ * resolves the live agent and injects the command (interrupt = abort the
+ * current turn with a canned continue notice; steer = interrupt + inject the
+ * user's message).
+ */
+export const TEAMMATE_AGENT_COMMAND_EVENT = "teammate:agent-command";

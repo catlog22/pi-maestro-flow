@@ -39,6 +39,12 @@ export const TaskSpec = Type.Object({
     description:
       "Required non-empty task text. Use {name} to reference another task's output, {name.field} for structured output fields.",
   }),
+  description: Type.Optional(
+    Type.String({
+      description:
+        "Short human-readable purpose of this task; used as the display label in graph summaries when the task has no name.",
+    }),
+  ),
   agent: Type.Optional(
     Type.String({
       description: 'Agent name to dispatch; defaults to the top-level agent, then "general"',
@@ -104,6 +110,12 @@ export const TaskSpec = Type.Object({
       minimum: 1,
       description:
         "Foreground wait window in milliseconds. If it elapses first, the dispatch moves to background and continues running; for graphs, the shortest task window applies to the whole dispatch.",
+    }),
+  ),
+  background: Type.Optional(
+    Type.Boolean({
+      description:
+        "Not supported per task — background is a dispatch-level setting controlled by the top-level background flag (default: false). A per-task value is ignored with a warning; move it to the top level instead.",
     }),
   ),
   maxNestingDepth: Type.Optional(

@@ -582,6 +582,15 @@ interface AttemptState {
 }
 
 /**
+ * While a tool is in flight (e.g. a long bash script), the pi child emits no
+ * further events until the tool completes. Without a heartbeat the parent's
+ * 30s stall clock (`TEAMMATE_STALL_TIMEOUT_MS`) would mark a busy agent as
+ * stalled. This interval refreshes progress activity until the tool ends; it
+ * stays well under the stall threshold so dropped ticks cannot false-flag.
+ */
+export const TOOL_EXECUTION_HEARTBEAT_MS = 10_000;
+
+/**
  * The lifecycle deadlines an attempt can arm. Every settlement path clears
  * both; cleared handles are deliberately left in place so
  * `armResultReadyGrace` still recognises a grace window that was already used.
@@ -591,6 +600,7 @@ interface AttemptTimers {
   resultReadyGrace?: ReturnType<typeof setTimeout>;
   outputLimitRecovery?: ReturnType<typeof setTimeout>;
   interruptingSteer?: ReturnType<typeof setTimeout>;
+  toolHeartbeat?: ReturnType<typeof setInterval>;
 }
 
 interface PendingInterruptingSteer {
@@ -866,6 +876,36 @@ async function runSingleAttempt(
       if (timers.resultReadyGrace) clearTimeout(timers.resultReadyGrace);
       if (timers.outputLimitRecovery) clearTimeout(timers.outputLimitRecovery);
       if (timers.interruptingSteer) clearTimeout(timers.interruptingSteer);
+      if (timers.toolHeartbeat) clearInterval(timers.toolHeartbeat);
+    };
+
+    /**
+     * Start or stop the in-flight tool heartbeat. A long-running tool call
+     * (bash script, observe wait, …) emits no further child events until it
+     * completes; the heartbeat republishes progress so the parent's stall
+     * clock keeps seeing activity. Idempotent — call after every tool
+     * start/completion event and on any boundary that ends tool execution.
+     */
+    const syncToolHeartbeat = (): void => {
+      const inFlight = !state.terminal && !state.turnLifecycleSettled && state.inFlightToolCount > 0;
+      if (inFlight) {
+        if (!timers.toolHeartbeat) {
+          timers.toolHeartbeat = setInterval(() => {
+            if (state.terminal || state.turnLifecycleSettled || state.inFlightToolCount === 0) {
+              syncToolHeartbeat();
+              return;
+            }
+            progress.lastActivityAt = Date.now();
+            options.onProgress?.(progress);
+          }, options.toolExecutionHeartbeatMs ?? TOOL_EXECUTION_HEARTBEAT_MS);
+          timers.toolHeartbeat.unref?.();
+        }
+        return;
+      }
+      if (timers.toolHeartbeat) {
+        clearInterval(timers.toolHeartbeat);
+        timers.toolHeartbeat = undefined;
+      }
     };
     timers.firstActivity = setTimeout(() => {
       if (state.initialResultPublished || state.receivedFirstActivity) return;
@@ -1238,6 +1278,9 @@ async function runSingleAttempt(
       progress.resultReadyAt = undefined;
       progress.recentTools = [];
       state.turnToolCount = 0;
+      // A new turn means the previous turn's tools all completed; drop any
+      // stale counter so the in-flight heartbeat cannot leak across turns.
+      state.inFlightToolCount = 0;
       state.pendingStructuredOutput = undefined;
       state.capturedStructuredOutput = undefined;
       state.structuredOutputValidationFailure = undefined;
@@ -1360,6 +1403,7 @@ async function runSingleAttempt(
         );
       }
       options.onProgress?.(progress);
+      syncToolHeartbeat();
     }
 
     /**
@@ -1378,6 +1422,7 @@ async function runSingleAttempt(
       if (lastTool && lastTool.status === "running") {
         lastTool.status = "completed";
       }
+      syncToolHeartbeat();
       if (pendingInterruptingSteer) {
         state.pendingStructuredOutput = undefined;
         progress.phase = "continuing";

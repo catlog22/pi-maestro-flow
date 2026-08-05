@@ -49,6 +49,8 @@ import {
 
 export interface TeammateTaskSpec {
   prompt: string;
+  /** Short human-readable purpose; display label when the task has no name. */
+  description?: string;
   agent?: string;
   taskType?: TeammateTaskType;
   name?: string;
@@ -66,6 +68,12 @@ export interface TeammateTaskSpec {
    * itself defaults to the global ceiling (MAX_DEFAULT_DEPTH).
    */
   maxNestingDepth?: number;
+  /**
+   * Not supported per task — background is dispatch-level. Accepted by the
+   * schema for compatibility; normalizeTeammateParams emits a warning and
+   * ignores the value.
+   */
+  background?: boolean;
 }
 
 export interface RunTeammateParams {
@@ -188,6 +196,8 @@ export interface RunTeammateOptions {
   resultReadyGraceMs?: number;
   /** @internal Test seam for child output-limit compaction/continuation recovery. */
   outputLimitRecoveryTimeoutMs?: number;
+  /** @internal Test seam for the in-flight tool heartbeat interval. */
+  toolExecutionHeartbeatMs?: number;
   /** @internal Foreground wait window before the extension detaches a still-running task. */
   foregroundMaxRunMs?: number;
 }
@@ -199,6 +209,8 @@ export interface RunTeammateOptions {
 export interface NormalizedTask {
   agent: string;
   prompt: string;
+  /** Short human-readable purpose; display label when the task has no name. */
+  description?: string;
   taskType?: TeammateTaskType;
   name?: string;
   dependsOn?: string[];
@@ -857,6 +869,11 @@ export function normalizeTeammateParams(
   }
 
   for (const [index, task] of params.tasks.entries()) {
+    if (task.background !== undefined) {
+      warnings.push(
+        `tasks[${index}]${task.name ? ` "${task.name}"` : ""} "background" is a dispatch-level setting; per-task background is not supported and is ignored. Pass background at the top level instead.`,
+      );
+    }
     if (
       task.maxNestingDepth !== undefined
       && (!Number.isInteger(task.maxNestingDepth)
@@ -876,6 +893,7 @@ export function normalizeTeammateParams(
   const normalized: NormalizedTask[] = params.tasks.map((task) => ({
     agent: task.agent ?? params.agent ?? "general",
     prompt: task.prompt,
+    description: task.description,
     taskType: task.taskType ?? params.taskType,
     name: task.name,
     dependsOn: task.dependsOn,

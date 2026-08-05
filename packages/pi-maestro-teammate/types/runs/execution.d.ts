@@ -14,6 +14,14 @@ import { type LeaseToken } from "./session-handoff.ts";
 export * from "./execution-infra.ts";
 import type { NormalizedTask, RunSingleTeammateParams, RunTeammateOptions, RunTeammateParams } from "./execution-infra.ts";
 export declare function runSingleTeammate(params: RunSingleTeammateParams, options: RunTeammateOptions): Promise<SingleResult>;
+/**
+ * While a tool is in flight (e.g. a long bash script), the pi child emits no
+ * further events until the tool completes. Without a heartbeat the parent's
+ * 30s stall clock (`TEAMMATE_STALL_TIMEOUT_MS`) would mark a busy agent as
+ * stalled. This interval refreshes progress activity until the tool ends; it
+ * stays well under the stall threshold so dropped ticks cannot false-flag.
+ */
+export declare const TOOL_EXECUTION_HEARTBEAT_MS = 10000;
 export declare function normalizeGraphConcurrency(concurrency: number, taskCount: number): number;
 export declare function runGraph(tasks: NormalizedTask[], concurrency: number, options: RunTeammateOptions): Promise<SingleResult[]>;
 /** Programmatic tasks-only entry point matching the public teammate schema. */

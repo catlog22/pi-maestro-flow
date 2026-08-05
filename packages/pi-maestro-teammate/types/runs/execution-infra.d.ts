@@ -18,6 +18,8 @@ import { type ModelCircuitBreaker } from "../models/model-circuit-breaker.ts";
 import { type TeammateThinkingInput, type TeammateThinkingLevel } from "../shared/thinking.ts";
 export interface TeammateTaskSpec {
     prompt: string;
+    /** Short human-readable purpose; display label when the task has no name. */
+    description?: string;
     agent?: string;
     taskType?: TeammateTaskType;
     name?: string;
@@ -35,6 +37,12 @@ export interface TeammateTaskSpec {
      * itself defaults to the global ceiling (MAX_DEFAULT_DEPTH).
      */
     maxNestingDepth?: number;
+    /**
+     * Not supported per task — background is dispatch-level. Accepted by the
+     * schema for compatibility; normalizeTeammateParams emits a warning and
+     * ignores the value.
+     */
+    background?: boolean;
 }
 export interface RunTeammateParams {
     tasks: TeammateTaskSpec[];
@@ -146,12 +154,16 @@ export interface RunTeammateOptions {
     resultReadyGraceMs?: number;
     /** @internal Test seam for child output-limit compaction/continuation recovery. */
     outputLimitRecoveryTimeoutMs?: number;
+    /** @internal Test seam for the in-flight tool heartbeat interval. */
+    toolExecutionHeartbeatMs?: number;
     /** @internal Foreground wait window before the extension detaches a still-running task. */
     foregroundMaxRunMs?: number;
 }
 export interface NormalizedTask {
     agent: string;
     prompt: string;
+    /** Short human-readable purpose; display label when the task has no name. */
+    description?: string;
     taskType?: TeammateTaskType;
     name?: string;
     dependsOn?: string[];

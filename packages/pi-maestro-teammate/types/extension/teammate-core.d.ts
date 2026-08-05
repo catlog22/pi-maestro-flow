@@ -261,6 +261,39 @@ export declare function isAgentDescendantOf(state: TeammateState, descendant: st
 export declare function resolveProxyParentCorrelationId(event: Record<string, unknown>, spawnedBy?: string, state?: TeammateState): string | undefined;
 export declare function selectorAgentLabel(agent: ActiveAgent): string;
 export declare function emitTeammateStarted(pi: ExtensionAPI, agent: ActiveAgent, extra?: Record<string, unknown>): void;
+/**
+ * Canned notice injected when the user interrupts an agent from the cockpit
+ * agent list: the current turn/tool is aborted and the agent is told to report
+ * and continue, keeping the agent alive (unlike teammate-send's abort mode,
+ * which terminates the whole tree).
+ */
+export declare const TEAMMATE_INTERRUPT_NOTICE = "[user interrupt] Stop the current operation immediately, briefly report what you were doing, and continue your task.";
+export interface TeammateAgentCommandPayload {
+    correlationId: string;
+    action: "interrupt" | "steer";
+    message?: string;
+}
+/** The only bus surface this function consumes — a test harness needs no full EventBus. */
+export interface AgentCommandEventSink {
+    events: {
+        emit: (channel: string, data: unknown) => void;
+    };
+}
+/**
+ * Handle a cockpit agent-list command (TEAMMATE_AGENT_COMMAND_EVENT). Both
+ * actions route through the steer RPC (Pi abort → prompt): `interrupt` injects
+ * the canned notice, `steer` injects the user's message. A stalled agent stuck
+ * in a tool is woken by the abort; sleeping agents are woken by the delivery.
+ * Failures surface as an isSend message event so consumers never mistake the
+ * send for agent progress.
+ */
+export declare function applyTeammateAgentCommand(state: TeammateState, pi: AgentCommandEventSink, deliver: (correlationId: string, label: string, message: string) => Promise<{
+    delivered: boolean;
+    error?: string;
+}> | {
+    delivered: boolean;
+    error?: string;
+}, payload: unknown): Promise<void>;
 /** Reactivate a wakeable child and republish it to lifecycle-only consumers. */
 export declare function wakeSleepingAgent(pi: ExtensionAPI, agent: ActiveAgent, now?: number): boolean;
 export declare function buildAgentSelectorRows(agents: ActiveAgent[]): AgentSelectorRow[];

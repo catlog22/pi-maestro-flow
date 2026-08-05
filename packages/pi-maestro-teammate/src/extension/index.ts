@@ -20,7 +20,7 @@ import type {
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
-import { Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { loadTranscript, scanWorkspaceSessionDirs, type WorkspaceSessionScan } from "../transcript/session-transcript.ts";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams } from "./schemas.ts";
 import {
@@ -245,6 +245,7 @@ import {
   handleChildLifecycleEvent,
   AGENT_BUFFER_LIMITS,
   LIVE_AGENT_STATUSES,
+  applyTeammateAgentCommand,
   createProgressFlushGate,
   flushProgressBatch,
   runWithProgressFlushCleanup,
@@ -266,7 +267,7 @@ import {
   renderAgentStatusWidget,
   COCKPIT_UI_OWNERSHIP_EVENT,
 } from "./teammate-core.ts";
-import { COCKPIT_PREEMPT_RESIZE_EVENT } from "../shared/cockpit-events.ts";
+import { COCKPIT_PREEMPT_RESIZE_EVENT, TEAMMATE_AGENT_COMMAND_EVENT } from "../shared/cockpit-events.ts";
 import type { TeammateRuntimeOptions, ProgressFlushGate, AgentWidgetTheme, AgentWidgetRow, AgentSelectorRow, PendingChildProxyRequest, ChildProxyPendingRequests, IpcSender } from "./teammate-core.ts";
 import { buildHistoryRows, historyRowKey } from "./teammate-core.ts";
 import { MailboxHost, mailboxModeFromEnv } from "./mailbox/host.ts";
@@ -3291,60 +3292,65 @@ export default function registerTeammateExtension(
 
   async function showComposerPanel<T>(
     ctx: ExtensionContext,
-    key: string,
     create: (requestRender: () => void, done: (value: T) => void) => ComposerPanel,
     cancelValue: T,
   ): Promise<T> {
     interactivePanelActive = true;
     updateAgentWidget();
 
-    return new Promise<T>((resolve, reject) => {
-      let panel: ComposerPanel | undefined;
-      let unsubscribe = () => {};
-      let settled = false;
-      let panelDisposed = false;
+    // Rendered as a modal overlay (like the ask wizard) so the cockpit's
+    // empty-composer ←/→ agent cycling and other ambient input hooks yield to
+    // it: an interactive setWidget panel cannot win against listeners that
+    // registered at session_start, before this tool-time subscription.
+    try {
+      return await ctx.ui.custom<T>(
+        (tui, theme, _keybindings, done) => {
+          let panel: ComposerPanel | undefined;
+          let panelDisposed = false;
 
-      const disposePanel = (): void => {
-        if (panelDisposed) return;
-        panelDisposed = true;
-        panel?.dispose?.();
-      };
+          const disposePanel = (): void => {
+            if (panelDisposed) return;
+            panelDisposed = true;
+            panel?.dispose?.();
+          };
 
-      const cleanup = (): void => {
-        unsubscribe();
-        ctx.ui.setWidget(key, undefined);
-        interactivePanelActive = false;
-        updateAgentWidget();
-      };
-      const done = (value: T): void => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve(value);
-      };
+          const finish = (value: T): void => {
+            disposePanel();
+            interactivePanelActive = false;
+            updateAgentWidget();
+            done(value);
+          };
 
-      try {
-        ctx.ui.setWidget(key, (tui) => {
-          panel = create(() => tui.requestRender(), done);
+          panel = create(() => tui.requestRender(), finish);
           return {
-            render: (width: number) => panel?.render(width) ?? [],
-            handleInput: (data: string) => panel?.handleInput(data),
+            render: (width: number) => {
+              const lines = panel?.render(width) ?? [];
+              const inner = Math.max(1, Math.min(width, 60) - 2);
+              const edge = "─".repeat(inner);
+              const border = (glyph: string) => theme.bg("customMessageBg", theme.fg("borderMuted", glyph));
+              const fill = (line: string): string => {
+                const fitted = truncateToWidth(line, inner, "…");
+                return theme.bg("customMessageBg", " " + fitted + " ".repeat(Math.max(0, inner - visibleWidth(fitted))) + " ");
+              };
+              return [border(`╭${edge}╮`), ...lines.map(fill), border(`╰${edge}╯`)];
+            },
+            handleInput: (data: string) => {
+              panel?.handleInput(data === "\x03" ? "\x1b" : data);
+            },
             invalidate: () => panel?.invalidate(),
             dispose: () => {
               disposePanel();
-              done(cancelValue);
+              finish(cancelValue);
             },
           };
-        }, { placement: "aboveEditor" });
-        unsubscribe = ctx.ui.onTerminalInput((data) => {
-          panel?.handleInput(data === "\x03" ? "\x1b" : data);
-          return { consume: true };
-        });
-      } catch (error) {
-        cleanup();
-        reject(error);
-      }
-    });
+        },
+        { overlay: true, overlayOptions: { anchor: "center", width: "94%", maxHeight: "90%" } },
+      );
+    } catch (error) {
+      interactivePanelActive = false;
+      updateAgentWidget();
+      throw error;
+    }
   }
 
   /**
@@ -3597,7 +3603,6 @@ export default function registerTeammateExtension(
 
     const selected = await showComposerPanel<string | null>(
       ctx,
-      "teammate-agent-selector",
       (requestRender, done) => {
         let query = "";
         let cursor = 0;
@@ -4160,6 +4165,20 @@ export default function registerTeammateExtension(
     cockpitOwnsAgents = ownership.agents === true;
     setQuietMode(ownership.quiet === true, ownership.quietSymbols);
     updateAgentWidget();
+  });
+
+  // Cockpit agent list commands: interrupt (打断) aborts the current turn with
+  // a canned continue notice; steer (引导) interrupts and injects the user's
+  // message. Both reuse the steer RPC (Pi abort → prompt), so a stalled agent
+  // stuck in a tool is woken instead of left showing a hung tool forever.
+  pi.events.on(TEAMMATE_AGENT_COMMAND_EVENT, (payload) => {
+    void applyTeammateAgentCommand(
+      state,
+      pi,
+      (correlationId, label, message) =>
+        deliverLocalAgentMessage(correlationId, label, message, "steer"),
+      payload,
+    );
   });
   pi.events.on(TEAMMATE_STARTED_EVENT, () => {
     markWorkspacePeerDirty();

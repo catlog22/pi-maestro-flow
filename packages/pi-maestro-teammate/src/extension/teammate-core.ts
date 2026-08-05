@@ -313,12 +313,16 @@ export function displayMessageForResult(result: SingleResult): string {
 
 export function summarizeGraphResults(results: readonly SingleResult[], tasks: readonly NormalizedTask[]): string {
   return results
-    .map((result, index) => (
-      `[${result.agent}${tasks[index]?.name ? `/${tasks[index].name}` : ""}] `
-      + `${terminalStatusForResult(result) === "completed"
-        ? "OK"
-        : terminalStatusForResult(result) === "terminated" ? "TERMINATED" : "FAIL"}: ${displayMessageForResult(result)}`
-    ))
+    .map((result, index) => {
+      const task = tasks[index];
+      const label = task?.name ?? task?.description;
+      return (
+        `[${result.agent}${label ? `/${label}` : ""}] `
+        + `${terminalStatusForResult(result) === "completed"
+          ? "OK"
+          : terminalStatusForResult(result) === "terminated" ? "TERMINATED" : "FAIL"}: ${displayMessageForResult(result)}`
+      );
+    })
     .join("\n\n");
 }
 
@@ -377,8 +381,8 @@ export function buildTeammateToolDescription(cwd: string): string {
 Call form (per-task fields go inside tasks[]):
   { tasks: [{ prompt: "Inspect auth", agent: "analyst", taskType: "analysis", model: "provider/model", thinking: "high", outputSchema: {...}, maxNestingDepth: 0 }] }
 
-Every dispatch uses a non-empty tasks array; prompt is required and lives only inside tasks[] (as do name and dependsOn). Task-level values override the top-level defaults. Tasks that omit agent inherit the top-level agent, then default to "general".
-The top level accepts only shared defaults for all tasks — agent, taskType, model, fallbackModels, thinking, context, cwd, outputSchema, timeoutMs, maxNestingDepth — plus reply_to, concurrency, maxAgents, background. A task field (prompt/name/dependsOn) placed at the top level is rejected as an unexpected property.
+Every dispatch uses a non-empty tasks array; prompt is required and lives only inside tasks[] (as do name and dependsOn). Per-task fields also include description (a short display label used in graph summaries when the task has no name) and timeoutMs. Task-level values override the top-level defaults. Tasks that omit agent inherit the top-level agent, then default to "general".
+The top level accepts only shared defaults for all tasks — agent, taskType, model, fallbackModels, thinking, context, cwd, outputSchema, timeoutMs, maxNestingDepth — plus reply_to, concurrency, maxAgents, background. A task field (prompt/name/dependsOn) placed at the top level is rejected as an unexpected property. background is dispatch-level: the whole call shares one foreground/background window, so it belongs at the top level only — a per-task background value is ignored with a warning.
 Use {name} or {name.field} in a dependent task's prompt, or dependsOn: ["name"] for ordering without output injection.
 
 Nesting control: pass maxNestingDepth on the root dispatch — or per task, which overrides the top-level value — to limit how many levels of nested teammate dispatch the spawned agents may perform below themselves. Omitting it everywhere defaults to the global ceiling. 0 forbids nested calls entirely — the assigned agents cannot dispatch teammates. Values above 1 behave like 1: the tree is globally hard-capped at 2 agent levels, and deeper nesting is rejected with an error. Inside a spawned agent, maxNestingDepth can only tighten the parent's budget — pass 0 to forbid further nesting below that call; it can never extend depth beyond what the parent allowed.
@@ -1131,6 +1135,85 @@ export function emitTeammateStarted(
     ...(agent.phase ? { phase: agent.phase } : {}),
     ...(agent.lastOutcome ? { lastOutcome: { ...agent.lastOutcome } } : {}),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Cockpit agent commands (interrupt / steer)
+// ---------------------------------------------------------------------------
+
+/**
+ * Canned notice injected when the user interrupts an agent from the cockpit
+ * agent list: the current turn/tool is aborted and the agent is told to report
+ * and continue, keeping the agent alive (unlike teammate-send's abort mode,
+ * which terminates the whole tree).
+ */
+export const TEAMMATE_INTERRUPT_NOTICE =
+  "[user interrupt] Stop the current operation immediately, briefly report what you were doing, and continue your task.";
+
+export interface TeammateAgentCommandPayload {
+  correlationId: string;
+  action: "interrupt" | "steer";
+  message?: string;
+}
+
+/** The only bus surface this function consumes — a test harness needs no full EventBus. */
+export interface AgentCommandEventSink {
+  events: {
+    emit: (channel: string, data: unknown) => void;
+  };
+}
+
+/**
+ * Handle a cockpit agent-list command (TEAMMATE_AGENT_COMMAND_EVENT). Both
+ * actions route through the steer RPC (Pi abort → prompt): `interrupt` injects
+ * the canned notice, `steer` injects the user's message. A stalled agent stuck
+ * in a tool is woken by the abort; sleeping agents are woken by the delivery.
+ * Failures surface as an isSend message event so consumers never mistake the
+ * send for agent progress.
+ */
+export async function applyTeammateAgentCommand(
+  state: TeammateState,
+  pi: AgentCommandEventSink,
+  deliver: (correlationId: string, label: string, message: string) =>
+    Promise<{ delivered: boolean; error?: string }> | { delivered: boolean; error?: string },
+  payload: unknown,
+): Promise<void> {
+  if (!payload || typeof payload !== "object") return;
+  const command = payload as Partial<TeammateAgentCommandPayload>;
+  const correlationId = command.correlationId;
+  if (typeof correlationId !== "string") return;
+  // Reject unknown/typo'd actions with no side effects: a stray "abort" must
+  // never degrade into a real abort→prompt on the agent.
+  if (command.action !== "interrupt" && command.action !== "steer") return;
+  const action = command.action;
+  const message = typeof command.message === "string" ? command.message : "";
+  const agent = state.activeRuns.get(correlationId);
+  const label = agent?.name ?? correlationId.slice(0, 8);
+  const emitFeedback = (text: string, isError: boolean): void => {
+    pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+      correlationId,
+      from: "cockpit",
+      to: label,
+      mode: action,
+      message: text,
+      lastActivityAt: Date.now(),
+      isSend: true,
+      ...(isError ? { sendError: true } : {}),
+    });
+  };
+  if (!agent || !LIVE_AGENT_STATUSES.has(agent.status)) {
+    emitFeedback(`Agent "${label}" is not running and cannot receive commands.`, true);
+    return;
+  }
+  if (action === "steer" && !message.trim()) {
+    emitFeedback("Steering requires a message.", true);
+    return;
+  }
+  const effective = action === "interrupt" ? TEAMMATE_INTERRUPT_NOTICE : message;
+  const delivery = await deliver(correlationId, label, effective);
+  if (!delivery.delivered) {
+    emitFeedback(delivery.error ?? `Failed to ${action} agent "${label}".`, true);
+  }
 }
 
 /** Reactivate a wakeable child and republish it to lifecycle-only consumers. */

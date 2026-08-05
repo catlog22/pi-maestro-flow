@@ -63,6 +63,29 @@ test("top-level defaults apply to tasks and per-task overrides win", () => {
   assert.equal(second.cwd, "D:/other");
 });
 
+test("per-task description is carried and per-task background warns instead of erroring", () => {
+  const result = normalizeTeammateParams({
+    tasks: [
+      { prompt: "one", description: "scan auth paths" },
+      { name: "review", prompt: "two", background: true },
+    ],
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.tasks[0].description, "scan auth paths");
+  assert.equal(result.tasks[1].description, undefined);
+  assert.match(
+    result.warnings.join("\n"),
+    /\[1\] "review" "background" is a dispatch-level setting/,
+  );
+  // Dispatch-level background still works untouched.
+  const topLevel = normalizeTeammateParams({
+    background: false,
+    tasks: [{ prompt: "one" }],
+  });
+  assert.equal(topLevel.error, undefined);
+  assert.equal(topLevel.warnings.length, 0);
+});
+
 test("prompt text is always literal and template-like text is not loaded", () => {
   const result = normalizeTeammateParams({ tasks: [{ prompt: "template:analysis" }] });
   assert.equal(result.error, undefined);

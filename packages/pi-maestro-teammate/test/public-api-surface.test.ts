@@ -143,8 +143,8 @@ test("child IPC preserves model and thinking defaults before shared normalizatio
     model: "provider/default",
     thinking: "low",
     tasks: [
-      { prompt: "default" },
-      { agent: "analyst", prompt: "override", model: "provider/task", thinking: "max" },
+      { prompt: "default", description: "first task" },
+      { agent: "analyst", prompt: "override", model: "provider/task", thinking: "max", background: true },
     ],
     background: false,
     outputSchema: { type: "object" },
@@ -152,6 +152,8 @@ test("child IPC preserves model and thinking defaults before shared normalizatio
   assert.ok(parsed);
   assert.equal(parsed.model, "provider/default");
   assert.equal(parsed.thinking, "low");
+  assert.equal(parsed.tasks[0].description, "first task");
+  assert.equal(parsed.tasks[1].background, true);
   assert.equal(parsed.tasks[1]?.model, "provider/task");
   assert.equal(parsed.tasks[1]?.thinking, "max");
 
