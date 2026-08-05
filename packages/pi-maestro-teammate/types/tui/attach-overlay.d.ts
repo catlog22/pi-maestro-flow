@@ -74,6 +74,10 @@ export declare class AttachOverlay implements Component, Focusable {
     private composing;
     private draft;
     private cursor;
+    /** Target column for ↑/↓ across wrapped lines; cleared on any other edit. */
+    private desiredCursorCol;
+    /** Draft width used for cursor layout between renders (mirrors last composer render). */
+    private composerDraftWidth;
     private sendStatus;
     private sending;
     private readonly pasteDecoder;
@@ -107,9 +111,15 @@ export declare class AttachOverlay implements Component, Focusable {
     /** Composer key handling shared by wide and narrow render paths. */
     private handleComposerKey;
     private insertDraft;
+    /** Move the cursor one wrapped visual line up/down, keeping the target column. */
+    private moveCursorVertical;
+    /** Move the cursor to the start/end of the current wrapped visual line. */
+    private moveCursorLineEdge;
     invalidate(): void;
     render(width: number, height?: number): string[];
     private renderComposer;
+    /** One wrapped draft line, with the cursor grapheme reversed at `cursorOffset`. */
+    private renderComposerRow;
     private renderDocked;
     private renderProgressTree;
     private renderSelectedTools;

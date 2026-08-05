@@ -34,14 +34,19 @@ import type { TranscriptLoad, TranscriptRow } from "../shared/transcript.ts";
 export type TranscriptLoader = (agent: ActiveAgent) => Promise<TranscriptLoad>;
 import {
   BracketedPasteDecoder,
+  cursorForColumn,
+  layoutDraftCursor,
   nextGraphemeBoundary,
   previousGraphemeBoundary,
-  sanitizeSingleLineInput,
+  sanitizeMultiLineInput,
   type DecodedInputToken,
+  type DraftLayoutLine,
 } from "./input-text.ts";
 
 const MAX_LOG_LINES = 500;
 const STREAMING_MAX_LINES = 8;
+/** Composer draft rows shown before the window scrolls (a leading ⋯ marks hidden rows). */
+const MAX_COMPOSER_ROWS = 5;
 /** Inbox payloads are bounded by bytes, not by display size — preview only. */
 const INBOX_PREVIEW_CHARS = 400;
 const INBOX_PREVIEW_LINES = 4;
@@ -195,9 +200,13 @@ export class AttachOverlay implements Component, Focusable {
   private composing = false;
   private draft = "";
   private cursor = 0;
+  /** Target column for ↑/↓ across wrapped lines; cleared on any other edit. */
+  private desiredCursorCol: number | undefined;
+  /** Draft width used for cursor layout between renders (mirrors last composer render). */
+  private composerDraftWidth = 78;
   private sendStatus = "";
   private sending = false;
-  private readonly pasteDecoder = new BracketedPasteDecoder();
+  private readonly pasteDecoder = new BracketedPasteDecoder({ multiline: true });
   private pasteFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private lastWidth = 80;
   private readonly onSend?: (correlationId: string, message: string) => Promise<{ ok: boolean; message: string }>;
@@ -507,7 +516,19 @@ export class AttachOverlay implements Component, Focusable {
     if (this.sending) return;
     if (matchesKey(data, Key.escape)) {
       this.composing = false;
+      this.desiredCursorCol = undefined;
       this.sendStatus = "Message cancelled";
+    } else if (
+      data === "\n"
+      || data === "\x1b\r"
+      || data === "\x1b[13;2~"
+      || matchesKey(data, Key.shift("enter"))
+      || matchesKey(data, Key.alt("enter"))
+    ) {
+      // Shift+Enter / Alt+Enter (or a raw LF) inserts a hard newline; plain
+      // Enter below stays the send key, mirroring the host editor's semantics.
+      this.insertDraft("\n");
+      this.desiredCursorCol = undefined;
     } else if (matchesKey(data, Key.enter)) {
       const message = this.draft.trim();
       if (!message || !this.onSend) {
@@ -522,6 +543,7 @@ export class AttachOverlay implements Component, Focusable {
           this.composing = false;
           this.draft = "";
           this.cursor = 0;
+          this.desiredCursorCol = undefined;
           this.sendStatus = result.message;
         } else {
           this.composing = true;
@@ -540,19 +562,29 @@ export class AttachOverlay implements Component, Focusable {
         this.draft = this.draft.slice(0, previous) + this.draft.slice(this.cursor);
         this.cursor = previous;
       }
+      this.desiredCursorCol = undefined;
     } else if (matchesKey(data, Key.left)) {
       this.cursor = previousGraphemeBoundary(this.draft, this.cursor);
+      this.desiredCursorCol = undefined;
     } else if (matchesKey(data, Key.right)) {
       this.cursor = nextGraphemeBoundary(this.draft, this.cursor);
-    } else if (matchesKey(data, Key.up) || matchesKey(data, Key.down)
-      || matchesKey(data, Key.home) || matchesKey(data, Key.end)
-      || matchesKey(data, Key.pageUp) || matchesKey(data, Key.pageDown)
+      this.desiredCursorCol = undefined;
+    } else if (matchesKey(data, Key.up)) {
+      this.moveCursorVertical(-1);
+    } else if (matchesKey(data, Key.down)) {
+      this.moveCursorVertical(1);
+    } else if (matchesKey(data, Key.home)) {
+      this.moveCursorLineEdge("start");
+    } else if (matchesKey(data, Key.end)) {
+      this.moveCursorLineEdge("end");
+    } else if (matchesKey(data, Key.pageUp) || matchesKey(data, Key.pageDown)
       || matchesKey(data, Key.delete)) {
-      // 忽略导航/功能键，避免转义序列残渣（如 `[A`）混入文本。
+      // 忽略翻页/删除功能键，避免转义序列残渣（如 `[A`）混入文本。
     } else if (data.startsWith("\x1b")) {
       // 兜底：丢弃以 ESC 开头的未识别序列（拆分到达的 CSI/SS3 残渣）。
     } else {
-      this.insertDraft(sanitizeSingleLineInput(data));
+      this.insertDraft(sanitizeMultiLineInput(data));
+      this.desiredCursorCol = undefined;
     }
   }
 
@@ -560,6 +592,34 @@ export class AttachOverlay implements Component, Focusable {
     if (!input) return;
     this.draft = this.draft.slice(0, this.cursor) + input + this.draft.slice(this.cursor);
     this.cursor += input.length;
+  }
+
+  /** Move the cursor one wrapped visual line up/down, keeping the target column. */
+  private moveCursorVertical(direction: 1 | -1): void {
+    const layout = layoutDraftCursor(this.draft, this.cursor, this.composerDraftWidth);
+    if (this.desiredCursorCol === undefined) this.desiredCursorCol = layout.cursorCol;
+    const targetRow = layout.cursorRow + direction;
+    if (targetRow < 0) {
+      // Already on the first visual line: jump to its start (host editor behavior).
+      this.cursor = layout.lines[0].start;
+      this.desiredCursorCol = undefined;
+      return;
+    }
+    if (targetRow >= layout.lines.length) {
+      // Already on the last visual line: jump to its end.
+      this.cursor = layout.lines[layout.lines.length - 1].end;
+      this.desiredCursorCol = undefined;
+      return;
+    }
+    this.cursor = cursorForColumn(this.draft, layout.lines[targetRow], this.desiredCursorCol);
+  }
+
+  /** Move the cursor to the start/end of the current wrapped visual line. */
+  private moveCursorLineEdge(edge: "start" | "end"): void {
+    const layout = layoutDraftCursor(this.draft, this.cursor, this.composerDraftWidth);
+    const line = layout.lines[layout.cursorRow];
+    this.cursor = edge === "start" ? line.start : line.start + line.text.length;
+    this.desiredCursorCol = undefined;
   }
 
   invalidate(): void {}
@@ -635,7 +695,7 @@ export class AttachOverlay implements Component, Focusable {
       if (this.composing && this.sendStatus) {
         tailRows.push(truncateToWidth(`${red("!")} ${this.sendStatus}`, inner, "…"));
       }
-      tailRows.push(this.renderComposer(inner));
+      tailRows.push(...this.renderComposer(inner));
     }
 
     const logHeight = targetHeight - rows.length - tailRows.length - 3;
@@ -662,7 +722,8 @@ export class AttachOverlay implements Component, Focusable {
       : "";
     out.push(dim(fitFooter(w, [
       "Esc back",
-      this.onSend ? "Enter message" : "",
+      this.onSend ? (this.composing ? "Enter send" : "Enter message") : "",
+      this.composing ? "Shift+Enter newline" : "",
       `←→ switch(${this.order.length})`,
       agentHint.trim(),
       transcriptHint,
@@ -671,21 +732,63 @@ export class AttachOverlay implements Component, Focusable {
     return out;
   }
 
-  private renderComposer(width: number): string {
+  private renderComposer(width: number, maxRows = MAX_COMPOSER_ROWS, framed = true): string[] {
+    const prefix = `${green("›")} `;
+    // The frame line reserves `│ ` + a leading space (3 cols total); docked
+    // rows truncate at `width` directly, so only the prefix is reserved.
+    const draftWidth = Math.max(1, width - (framed ? 3 : 2));
+    this.composerDraftWidth = draftWidth;
     if (!this.composing) {
-      return truncateToWidth(
+      return [truncateToWidth(
         this.sendStatus ? `${dim("Message ·")} ${this.sendStatus}` : `${dim("Message ·")} Enter to compose`,
         width,
         "…",
-      );
+      )];
     }
-    const before = this.draft.slice(0, this.cursor);
-    const next = nextGraphemeBoundary(this.draft, this.cursor);
-    const cursorChar = this.cursor < this.draft.length ? this.draft.slice(this.cursor, next) : " ";
-    const after = this.draft.slice(next);
+    const layout = layoutDraftCursor(this.draft, this.cursor, draftWidth);
+    const indent = " ".repeat(visibleWidth(prefix));
+    const maxVisible = Math.max(1, maxRows);
+    const total = layout.lines.length;
+    // Window around the cursor line so a long draft scrolls instead of
+    // starving the log area; the window follows the cursor when it moves.
+    const start = total > maxVisible
+      ? Math.max(0, Math.min(layout.cursorRow - (maxVisible - 1), total - maxVisible))
+      : 0;
+    const rows = layout.lines.slice(start, start + maxVisible);
+    const out: string[] = [];
+    if (start > 0) out.push(truncateToWidth(dim("⋯"), width, "…"));
+    for (let i = 0; i < rows.length; i++) {
+      const rowIndex = start + i;
+      out.push(this.renderComposerRow(
+        rows[i],
+        rowIndex === 0 ? prefix : indent,
+        rowIndex === layout.cursorRow ? this.cursor : undefined,
+        width,
+      ));
+    }
+    return out;
+  }
+
+  /** One wrapped draft line, with the cursor grapheme reversed at `cursorOffset`. */
+  private renderComposerRow(
+    line: DraftLayoutLine,
+    prefix: string,
+    cursorOffset: number | undefined,
+    width: number,
+  ): string {
+    if (cursorOffset === undefined) {
+      return truncateToWidth(`${prefix}${line.text}`, width, "…");
+    }
+    const text = line.text;
+    const visualEnd = line.start + text.length;
     const marker = this.focused ? CURSOR_MARKER : "";
+    if (cursorOffset >= visualEnd) {
+      return truncateToWidth(`${prefix}${text}${marker}\x1b[7m \x1b[27m`, width, "…");
+    }
+    const next = nextGraphemeBoundary(this.draft, cursorOffset);
+    const cursorChar = this.draft.slice(cursorOffset, next);
     return truncateToWidth(
-      `${green("›")} ${before}${marker}\x1b[7m${cursorChar}\x1b[27m${after}`,
+      `${prefix}${this.draft.slice(line.start, cursorOffset)}${marker}\x1b[7m${cursorChar}\x1b[27m${this.draft.slice(next, visualEnd)}`,
       width,
       "…",
     );
@@ -721,7 +824,8 @@ export class AttachOverlay implements Component, Focusable {
 
     const footer = dim(fitFooter(width, [
       "Esc back",
-      this.onSend ? "Enter message" : "",
+      this.onSend ? (this.composing ? "Enter send" : "Enter message") : "",
+      this.composing ? "Shift+Enter newline" : "",
       "←→ switch",
       log.progress.length > 1 ? `0 overview · 1-${Math.min(9, log.progress.length)} view` : "",
       this.loadTranscript ? (log.transcriptMode ? "t activity" : "t transcript") : "",
@@ -731,7 +835,7 @@ export class AttachOverlay implements Component, Focusable {
     if (this.onSend && this.composing && this.sendStatus) {
       tailRows.push(truncateToWidth(`${red("!")} ${this.sendStatus}`, width, "…"));
     }
-    if (this.onSend) tailRows.push(this.renderComposer(width));
+    if (this.onSend) tailRows.push(...this.renderComposer(width, Math.max(1, Math.min(MAX_COMPOSER_ROWS, height - 6)), false));
     tailRows.push(footer);
 
     if (log.progress.length > 1) {
@@ -1002,7 +1106,7 @@ export class AttachOverlay implements Component, Focusable {
 
   private renderCompact(log: AgentLog | undefined, width: number): string {
     if (this.composing) {
-      const content = this.sendStatus || this.draft || "Type message";
+      const content = this.sendStatus || this.draft.replace(/\n/g, " ") || "Type message";
       return truncateToWidth(`Esc cancel · ${content}`, width, "…");
     }
     if (this.activeId === MAIN_TAB) {
