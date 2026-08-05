@@ -238,11 +238,11 @@ test("renderAgents treats provider/model formatting differences as the same mode
 	assert.match(realFallback, /model maestro-openai\/gpt-5\.6-sol→maestro-qwen\/qwen3\.8-max-preview/);
 });
 
-test("renderAgents list caps at 6 visible + overflow", () => {
+test("renderAgents list caps at 8 visible + overflow", () => {
 	const agents = Array.from({ length: 9 }, (_, i) => agent({ correlationId: `id${i}xxx`, task: `task ${i}` }));
 	const lines = renderAgents(agents, "list", 120, theme, utils, opts);
-	assert.equal(lines.length, 7); // 6 visible + 1 overflow
-	assert.ok(lines[6].includes("3 more"));
+	assert.equal(lines.length, 9); // 8 visible + 1 overflow
+	assert.ok(lines[8].includes("1 more"));
 });
 
 test("renderAgents keeps deep long-text rows bounded at narrow widths", () => {
@@ -265,8 +265,8 @@ test("renderAgents caps a 1000-row roster without rendering the full dataset", (
 		task: `task ${index}`,
 	}));
 	const lines = renderAgents(rows, "list", 120, theme, utils, opts);
-	assert.equal(lines.length, 7);
-	assert.ok(lines.at(-1)?.includes("994 more"));
+	assert.equal(lines.length, 9);
+	assert.ok(lines.at(-1)?.includes("992 more"));
 });
 
 test("renderAgents compact: single summary line, width bounded", () => {

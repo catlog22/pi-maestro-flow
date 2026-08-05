@@ -21,6 +21,7 @@ import {
 	type EditorBottomController,
 } from "./editor-bottom.ts";
 import { BashBgOverlay } from "./bash-bg-overlay.ts";
+import { AgentOverlay } from "./agent-overlay.ts";
 import { renderBashBgSummary } from "./bash-bg-widget.ts";
 import { registerQuietTools } from "./quiet-tools.ts";
 import { registerGuardedEditTool } from "./edit-guard.ts";
@@ -32,7 +33,7 @@ import { makeTodoWidget, makeAgentWidget, terminalRows, visibleAgentRows } from 
 import { agentListWindowRows, scrollBy, type AgentScrollState } from "./agent-scroll.ts";
 import { agentSessionColor, makeSessionBarWidget, SESSION_BAR_WIDGET_KEY, MAIN_SESSION_LABEL } from "./session-bar.ts";
 import { makeSessionDetailWidget, SESSION_DETAIL_WIDGET_KEY, DEFAULT_SESSION_DETAIL_ROWS, sessionDetailBodyLength, sessionDetailWindowRows, type SessionDetailScrollState } from "./session-detail.ts";
-import { panelRows } from "./viewport.ts";
+import { agentDetailRows, agentPanelRows, panelRows } from "./viewport.ts";
 import { routeAgentInput } from "./input-routing.ts";
 import { activeThemeName, ThemePicker } from "./theme-picker.ts";
 import { ModelPicker, type ModelPickerEntry } from "./model-picker.ts";
@@ -77,6 +78,7 @@ const MAILBOX_REGISTRY_KEY = Symbol.for("pi-maestro-teammate.mailbox-registry");
 
 const FOOTER_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 const BASH_BG_OVERLAY_KEY = "alt+j";
+const AGENT_OVERLAY_KEY = "alt+a";
 const SIDEBAR_RESIZE_KEY = "ctrl+shift+r";
 const SIDEBAR_FOCUS_KEY = "alt+shift+l";
 const SESSION_DETAIL_TOGGLE_KEY = "alt+shift+r";
@@ -178,6 +180,20 @@ function maestroWorkflowTag(
 	return workflow.run ? workflow.run.status : workflow.session.status;
 }
 
+/** Maestro knowledge evolution tag: c{consumed}/p{pending}/r{review} when tracked. */
+function maestroKnowledgeTag(knowledge: {
+	consumed: number;
+	pending: number;
+	review: number;
+} | null | undefined): string | undefined {
+	if (!knowledge) return undefined;
+	const parts: string[] = [];
+	if (knowledge.consumed > 0) parts.push(`c${knowledge.consumed}`);
+	if (knowledge.pending > 0) parts.push(`p${knowledge.pending}`);
+	if (knowledge.review > 0) parts.push(`r${knowledge.review}`);
+	return parts.length > 0 ? parts.join("/") : undefined;
+}
+
 /** Extract plain text from an agent message (string content or text blocks). */
 function messageText(message: unknown): string | undefined {
 	if (!message || typeof message !== "object") return undefined;
@@ -259,6 +275,12 @@ export default function (pi: ExtensionAPI): void {
 	// refuse to start while one is open; otherwise the resize listener — a
 	// global terminal-input hook — swallows the overlay's first arrow/Enter/Esc.
 	let capturingOverlayActive = false;
+	/** Extra repaint target while the Agent modal is consuming the live store. */
+	let activeAgentOverlayRender: (() => void) | undefined;
+	let activeAgentOverlay: { finalize(): void } | undefined;
+	/** Agent activity temporarily wins vertical space without rewriting Todo preference. */
+	let agentPriorityActive = false;
+	let todoExpandedOverAgents = false;
 	// Finalizer for the currently open legacy settings overlay, so a session
 	// boundary can tear it down even when the host hides it without calling
 	// component.dispose() (MW-2).
@@ -386,6 +408,9 @@ export default function (pi: ExtensionAPI): void {
 				state.thinking = title.showThinking ? thinkingTag(ctx.thinkingLevel) : undefined;
 				state.gitBranch = title.showGit ? (readGitBranch(ctx.cwd) ?? undefined) : undefined;
 				state.maestro = title.showMaestro ? maestroWorkflowTag(maestro.snapshot()?.workflow) : undefined;
+				state.maestroKnowledge = title.showMaestro
+					? maestroKnowledgeTag(maestro.snapshot()?.workflow?.knowledge)
+					: undefined;
 				state.frame = titleFrame(running);
 				ctx.ui.setTitle(titleFor(state, { ok: g.check, fail: g.cross }, g.separator, { maxLength: title.maxLength }));
 			}
@@ -394,6 +419,19 @@ export default function (pi: ExtensionAPI): void {
 			// ambient surfaces are best-effort; never let them break a render
 		}
 	};
+
+	// Agent presence changes the effective Todo layout, but never the persisted
+	// preference. An explicit Todo toggle during activity temporarily wins.
+	const syncAgentPriorityState = (): boolean => {
+		const next = visibleAgentRows(agents.snapshot()).length > 0;
+		if (next === agentPriorityActive) return false;
+		agentPriorityActive = next;
+		todoExpandedOverAgents = false;
+		if (!next) agentListScroll = { offset: 0, following: true };
+		return true;
+	};
+	const effectiveTodoExpanded = (): boolean =>
+		config.todoExpanded && (!agentPriorityActive || todoExpandedOverAgents);
 
 	// One microtask dirty latch: a burst of store events in the same tick (a
 	// message with many progress rows, a snapshot, a todo hydrate) coalesces into
@@ -404,10 +442,13 @@ export default function (pi: ExtensionAPI): void {
 		renderScheduled = true;
 		queueMicrotask(() => {
 			renderScheduled = false;
+			const agentPriorityChanged = syncAgentPriorityState();
 			publishInputTarget();
 			refreshAmbient();
+			if (agentPriorityChanged) publishUiOwnership();
 			try {
 				capturedTui?.requestRender();
+				activeAgentOverlayRender?.();
 				sidebarController?.requestRender();
 			} catch {
 				// tui may be gone between sessions
@@ -473,7 +514,7 @@ export default function (pi: ExtensionAPI): void {
 			footer: config.enabled,
 			sidebar: ownsDock,
 			goal: ownsDock,
-			todoExpanded: config.todoExpanded,
+			todoExpanded: effectiveTodoExpanded(),
 			quiet: config.enabled && config.quietMode,
 			quietSymbols: config.quietSymbols,
 			static: config.staticMode,
@@ -481,9 +522,15 @@ export default function (pi: ExtensionAPI): void {
 		pi.events.emit(COCKPIT_UI_OWNERSHIP_EVENT, ownership);
 	};
 	const setTodoExpanded = (expanded: boolean): void => {
-		if (config.todoExpanded === expanded) return;
-		config = { ...config, todoExpanded: expanded };
-		saveConfig(config);
+		syncAgentPriorityState();
+		const configChanged = config.todoExpanded !== expanded;
+		const overrideChanged = agentPriorityActive && todoExpandedOverAgents !== expanded;
+		if (!configChanged && !overrideChanged) return;
+		if (agentPriorityActive) todoExpandedOverAgents = expanded;
+		if (configChanged) {
+			config = { ...config, todoExpanded: expanded };
+			saveConfig(config);
+		}
 		publishUiOwnership();
 		req();
 	};
@@ -625,6 +672,7 @@ export default function (pi: ExtensionAPI): void {
 				return makeTodoWidget({
 					getTodos: () => todos.snapshot(),
 					getConfig: () => config,
+					getExpanded: effectiveTodoExpanded,
 					isAnimating,
 				})(tui, theme);
 			},
@@ -640,6 +688,7 @@ export default function (pi: ExtensionAPI): void {
 					getConfig: () => config,
 					isRunning: () => running,
 					isAnimating,
+					hasSessionDetail: () => sessionDetailVisible && agents.getViewingAgent() !== undefined,
 					getScroll: () => agentListScroll,
 					setScroll: (next) => {
 						agentListScroll = next;
@@ -743,6 +792,13 @@ export default function (pi: ExtensionAPI): void {
 	};
 
 	const uninstallUi = (ctx: ExtensionContext): void => {
+		try {
+			activeAgentOverlay?.finalize();
+		} catch {
+			// best effort
+		}
+		activeAgentOverlay = undefined;
+		activeAgentOverlayRender = undefined;
 		dockEffectiveVisible = false;
 		clearEditorBottom(ctx);
 		disposeLayoutControllers();
@@ -918,7 +974,7 @@ export default function (pi: ExtensionAPI): void {
 			const width = capturedTui?.terminal?.columns ?? 80;
 			const rows = capturedTui?.terminal?.rows;
 			const total = sessionDetailBodyLength(agents.snapshot(), viewingId, width);
-			const maxRows = panelRows(rows) ?? DEFAULT_SESSION_DETAIL_ROWS;
+			const maxRows = agentDetailRows(rows) ?? DEFAULT_SESSION_DETAIL_ROWS;
 			const budget = sessionDetailWindowRows(total, maxRows);
 			const next = scrollBy(sessionDetailScroll, up ? -1 : 1, total, Math.max(1, budget));
 			if (next.offset !== sessionDetailScroll.offset || next.following !== sessionDetailScroll.following) {
@@ -934,7 +990,16 @@ export default function (pi: ExtensionAPI): void {
 		agentScrollDisposer = ctx.ui.onTerminalInput((data) => {
 			if (data !== "\x1b[1;2A" && data !== "\x1b[1;2B") return undefined;
 			const roster = visibleAgentRows(agents.snapshot());
-			const budget = agentListWindowRows(capturedTui?.terminal?.columns, capturedTui?.terminal?.rows, roster.length);
+			const terminalHeight = capturedTui?.terminal?.rows;
+			const sharedPanel = sessionDetailVisible && agents.getViewingAgent() !== undefined
+				? panelRows(terminalHeight)
+				: agentPanelRows(terminalHeight);
+			const budget = agentListWindowRows(
+				capturedTui?.terminal?.columns,
+				terminalHeight,
+				roster.length,
+				sharedPanel,
+			);
 			const next = scrollBy(agentListScroll, data === "\x1b[1;2A" ? -1 : 1, roster.length, budget);
 			if (next.offset !== agentListScroll.offset || next.following !== agentListScroll.following) {
 				agentListScroll = next;
@@ -1059,7 +1124,7 @@ export default function (pi: ExtensionAPI): void {
 				const requested = payload && typeof payload === "object"
 					? (payload as { expanded?: unknown }).expanded
 					: undefined;
-				setTodoExpanded(typeof requested === "boolean" ? requested : !config.todoExpanded);
+				setTodoExpanded(typeof requested === "boolean" ? requested : !effectiveTodoExpanded());
 			}),
 			pi.events.on(COCKPIT_PREEMPT_RESIZE_EVENT, () => {
 				// A capturing overlay opened by another extension (teammate attach,
@@ -1108,6 +1173,10 @@ export default function (pi: ExtensionAPI): void {
 		registerSettingsProvider();
 		configProblem = undefined;
 		activeTools.clear();
+		agentListScroll = { offset: 0, following: true };
+		sessionDetailScroll = { offset: 0, following: true };
+		agentPriorityActive = false;
+		todoExpandedOverAgents = false;
 		thinkingTimer.reset();
 		maestro.clear();
 		aiTitle = undefined;
@@ -1219,6 +1288,10 @@ export default function (pi: ExtensionAPI): void {
 		thinkingTimer.reset();
 		invalidateUsageCache();
 		agents.clear();
+		agentListScroll = { offset: 0, following: true };
+		sessionDetailScroll = { offset: 0, following: true };
+		agentPriorityActive = false;
+		todoExpandedOverAgents = false;
 		bashBg.clear();
 		maestro.clear();
 	});
@@ -1304,6 +1377,56 @@ export default function (pi: ExtensionAPI): void {
 	};
 	const exitCapturingOverlay = (): void => {
 		capturingOverlayActive = false;
+	};
+
+	const openAgentOverlay = async (ctx: ExtensionContext): Promise<void> => {
+		if (!ctx.hasUI) return;
+		if (capturingOverlayActive) {
+			ctx.ui.notify("Close the open Cockpit overlay before opening Agents", "warning");
+			return;
+		}
+		if (visibleAgentRows(agents.snapshot()).length === 0) {
+			ctx.ui.notify("No agents to display", "info");
+			return;
+		}
+		let ownedOverlay: { finalize(): void } | undefined;
+		let ownedRender: (() => void) | undefined;
+		enterCapturingOverlay();
+		try {
+			await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+				let settled = false;
+				const finalize = (): void => {
+					if (settled) return;
+					settled = true;
+					done(undefined);
+				};
+				ownedOverlay = { finalize };
+				ownedRender = () => tui.requestRender();
+				activeAgentOverlay = ownedOverlay;
+				activeAgentOverlayRender = ownedRender;
+				return new AgentOverlay({
+					getAgents: () => agents.snapshot(),
+					getViewingId: () => agents.getViewingAgent(),
+					onSelect: (correlationId) => {
+						agents.setViewingAgent(correlationId);
+						sessionDetailScroll = { offset: 0, following: true };
+						req();
+					},
+					requestRender: ownedRender,
+					close: finalize,
+					theme,
+					glyphs: resolveGlyphs(config.icons.mode),
+					getTerminalRows: () => terminalRows(tui),
+				});
+			}, {
+				overlay: true,
+				overlayOptions: { anchor: "center", width: "94%", maxHeight: "90%" },
+			});
+		} finally {
+			if (activeAgentOverlay === ownedOverlay) activeAgentOverlay = undefined;
+			if (activeAgentOverlayRender === ownedRender) activeAgentOverlayRender = undefined;
+			exitCapturingOverlay();
+		}
 	};
 
 	const openBashBgOverlay = async (ctx: ExtensionContext): Promise<void> => {
@@ -1498,6 +1621,17 @@ export default function (pi: ExtensionAPI): void {
 	// The settings provider registers on the first session (registerSettingsProvider
 	// in session_start); its disposer is stored for teardown at session_shutdown.
 
+	pi.registerShortcut(AGENT_OVERLAY_KEY, {
+		description: "Open the live Agent panel",
+		async handler(ctx) {
+			if (!config.enabled) {
+				ctx.ui.notify("Cockpit is disabled", "warning");
+				return;
+			}
+			await openAgentOverlay(ctx);
+		},
+	});
+
 	pi.registerShortcut(BASH_BG_OVERLAY_KEY, {
 		description: "Open background Bash jobs — live status, command, cwd, duration and output tail",
 		async handler(ctx) {
@@ -1567,11 +1701,11 @@ export default function (pi: ExtensionAPI): void {
 
 	// --- /cockpit: legacy settings plus direct surface controls ---
 	pi.registerCommand("cockpit", {
-		description: "Open pi-cockpit settings; /cockpit sidebar controls the dock, /cockpit bg shows jobs",
+		description: "Open pi-cockpit settings; /cockpit agents opens the live Agent panel",
 		getArgumentCompletions: (prefix) => {
 			const query = prefix.trim().toLowerCase();
 			const candidates = [
-				"quiet", "quiet on", "quiet off", "bg", "jobs", "todo", "todo expand", "todo collapse",
+				"quiet", "quiet on", "quiet off", "agents", "bg", "jobs", "todo", "todo expand", "todo collapse",
 				"sidebar", "sidebar auto", "sidebar on", "sidebar off", "sidebar resize",
 				"static", "static on", "static off",
 			];
@@ -1581,6 +1715,10 @@ export default function (pi: ExtensionAPI): void {
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) return;
 			const action = args.trim().toLowerCase();
+			if (action === "agents" || action === "agent") {
+				await openAgentOverlay(ctx);
+				return;
+			}
 			if (action === "bg" || action === "jobs") {
 				await openBashBgOverlay(ctx);
 				return;
@@ -1602,7 +1740,7 @@ export default function (pi: ExtensionAPI): void {
 				return;
 			}
 			if (action === "todo" || action === "todo toggle") {
-				setTodoExpanded(!config.todoExpanded);
+				setTodoExpanded(!effectiveTodoExpanded());
 				ctx.ui.notify(`TODO ${config.todoExpanded ? "expanded" : "collapsed"}`, "info");
 				return;
 			}

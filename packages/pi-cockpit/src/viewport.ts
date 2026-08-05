@@ -10,10 +10,20 @@
 // footer then land near a third of the screen, which is the ceiling at which this
 // still reads as a status strip rather than as the application.
 export const CHROME_SHARE = 0.15;
+/** Agent surfaces get the space released by the auto-collapsed Todo panel. */
+export const AGENT_CHROME_SHARE = 0.24;
+/** Detail shares the screen with the roster, so its per-surface allowance is lower. */
+export const AGENT_DETAIL_CHROME_SHARE = 0.2;
 /** Below this a panel cannot say anything useful, so it stops shrinking. */
 export const MIN_PANEL_ROWS = 3;
 /** Above this extra rows stop earning their place, however tall the terminal is. */
 export const MAX_PANEL_ROWS = 10;
+export const MIN_AGENT_PANEL_ROWS = 4;
+export const MAX_AGENT_PANEL_ROWS = 14;
+export const MIN_AGENT_DETAIL_ROWS = 4;
+export const MAX_AGENT_DETAIL_ROWS = 12;
+export const AGENT_NARROW_ROW_CAP = 4;
+export const AGENT_WIDE_ROW_CAP = 8;
 
 /**
  * Rows one panel may use, or undefined when the terminal height is unknown — in
@@ -22,6 +32,24 @@ export const MAX_PANEL_ROWS = 10;
 export function panelRows(terminalRows: number | undefined): number | undefined {
 	if (terminalRows === undefined || !Number.isFinite(terminalRows) || terminalRows <= 0) return undefined;
 	return Math.max(MIN_PANEL_ROWS, Math.min(MAX_PANEL_ROWS, Math.floor(terminalRows * CHROME_SHARE)));
+}
+
+/** Larger budget for the roster when it is the only expanded Agent surface. */
+export function agentPanelRows(terminalRows: number | undefined): number | undefined {
+	if (terminalRows === undefined || !Number.isFinite(terminalRows) || terminalRows <= 0) return undefined;
+	return Math.max(
+		MIN_AGENT_PANEL_ROWS,
+		Math.min(MAX_AGENT_PANEL_ROWS, Math.floor(terminalRows * AGENT_CHROME_SHARE)),
+	);
+}
+
+/** Selected-session detail budget when the roster remains visible beside it. */
+export function agentDetailRows(terminalRows: number | undefined): number | undefined {
+	if (terminalRows === undefined || !Number.isFinite(terminalRows) || terminalRows <= 0) return undefined;
+	return Math.max(
+		MIN_AGENT_DETAIL_ROWS,
+		Math.min(MAX_AGENT_DETAIL_ROWS, Math.floor(terminalRows * AGENT_DETAIL_CHROME_SHARE)),
+	);
 }
 
 /** Rows an overlay list falls back to when the terminal height is unknown. */

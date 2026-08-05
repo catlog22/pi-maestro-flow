@@ -68,12 +68,25 @@ export interface MaestroWorkflowGatesV1 {
 	failed?: number;
 }
 
+export interface MaestroWorkflowKnowledgeV1 {
+	consumed: number;
+	cited: number;
+	validated: number;
+	contradicted: number;
+	pending: number;
+	corroborated: number;
+	review: number;
+	promoted: number;
+}
+
 export interface MaestroWorkflowV1 {
 	session: MaestroWorkflowSessionV1;
 	run: MaestroWorkflowRunV1 | null;
 	chain: MaestroWorkflowChainV1;
 	gates: MaestroWorkflowGatesV1;
 	next: string | null;
+	/** Session-level knowledge evolution summary; absent until a review is available. */
+	knowledge?: MaestroWorkflowKnowledgeV1;
 }
 
 export interface MaestroGoalV1 {

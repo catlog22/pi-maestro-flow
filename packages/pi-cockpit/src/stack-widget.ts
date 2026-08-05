@@ -5,13 +5,15 @@ import { effectiveAgentStatus } from "./agents-store.ts";
 import { renderAgents, renderTodos, type PaintTheme, type WidthUtils } from "./render.ts";
 import { fitLineByPriority, type PrioritizedSegment } from "./layout.ts";
 import { resolveGlyphs } from "./icons.ts";
-import { panelRows } from "./viewport.ts";
+import { agentPanelRows, panelRows } from "./viewport.ts";
 import type { AgentRow, CockpitConfig, TodoItem } from "./types.ts";
 import { agentListWindowRows, scrollWindowStart, type AgentScrollState } from "./agent-scroll.ts";
 
 export interface TodoWidgetDeps {
 	getTodos: () => TodoItem[];
 	getConfig: () => CockpitConfig;
+	/** Effective expansion may temporarily yield to a visible Agent panel. */
+	getExpanded?: () => boolean;
 	/** False when no redraw loop is running, so spinners must not freeze mid-cycle. */
 	isAnimating?: () => boolean;
 }
@@ -21,6 +23,8 @@ export interface AgentWidgetDeps {
 	getConfig: () => CockpitConfig;
 	isRunning: () => boolean;
 	isAnimating?: () => boolean;
+	/** True while selected-session detail shares the Agent height allowance. */
+	hasSessionDetail?: () => boolean;
 	/** Scroll window over the roster; absent → tail-following, non-scrollable. */
 	getScroll?: () => AgentScrollState;
 	setScroll?: (next: AgentScrollState) => void;
@@ -67,15 +71,16 @@ export function makeTodoWidget(deps: TodoWidgetDeps) {
 				const cfg = deps.getConfig();
 				const todos = deps.getTodos();
 				if (todos.length === 0) return [];
+				const expanded = deps.getExpanded?.() ?? cfg.todoExpanded;
 				const g = resolveGlyphs(cfg.icons.mode);
 				// Todo row glyphs come from the glyph table (a hollow rectangle for
 				// in-progress), never the animation clock — see render.ts todoPaint.
 				const opts = {
 					glyphs: g,
-					expanded: cfg.todoExpanded,
+					expanded,
 					maxRows: panelRows(terminalRows(tui)),
 				};
-				return renderTodos(todos, cfg.todoExpanded ? "list" : cfg.todoMode, width, paint, UTILS, opts);
+				return renderTodos(todos, expanded ? "list" : cfg.todoMode, width, paint, UTILS, opts);
 			},
 			invalidate(): void {},
 			dispose(): void {},
@@ -109,24 +114,39 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 				const spin = g.dotRunning;
 				const running = deps.isRunning();
 
-				// The panel budget covers the roster header and its rows. The roster
-				// is activity-ordered (newest first); the scroll window slices it so
-				// the panel follows the tail by default and can be scrolled up with
-				// Shift+↑ (see the cockpit terminal-input hook).
-				const panel = panelRows(terminalRows(tui));
+				// The panel budget covers the roster header and its rows. When the
+				// selected-session detail is also visible, the roster uses the normal
+				// status-panel share so the two Agent surfaces stay bounded together.
+				// Oldest-first storage makes the following suffix the newest activity;
+				// renderAgents restores the tree's newest-first presentation.
+				const panel = deps.hasSessionDetail?.()
+					? panelRows(terminalRows(tui))
+					: agentPanelRows(terminalRows(tui));
 				const rosterRows = panel === undefined
 					? undefined
 					: Math.max(1, panel - 1);
 				const ordered = [...agents].sort(
-					(a, b) => b.lastActivityAt - a.lastActivityAt || a.correlationId.localeCompare(b.correlationId),
+					(a, b) => a.lastActivityAt - b.lastActivityAt || a.correlationId.localeCompare(b.correlationId),
 				);
-				const windowRows = agentListWindowRows(tui.terminal?.columns, terminalRows(tui), ordered.length);
+				const windowRows = agentListWindowRows(
+					tui.terminal?.columns,
+					terminalRows(tui),
+					ordered.length,
+					panel,
+				);
 				const scroll = deps.getScroll?.() ?? { offset: 0, following: true };
 				const start = scrollWindowStart(ordered.length, windowRows, scroll);
 				const visible = ordered.slice(start, start + windowRows);
 				const above = start;
 				const below = Math.max(0, ordered.length - start - windowRows);
-				const opts = { glyphs: g, spin, now, maxRows: rosterRows, hideLiveDuration: cfg.staticMode };
+				const opts = {
+					glyphs: g,
+					spin,
+					now,
+					maxRows: rosterRows,
+					hideLiveDuration: cfg.staticMode,
+					agentContextRows: agents,
+				};
 				const dot = theme.fg(running ? "success" : "muted", running ? g.dotRunning : g.dotIdle);
 				const displayStatuses = agents.map((agent) => effectiveAgentStatus(agent, now));
 				const failedCount = displayStatuses.filter((status) => status === "failed").length;

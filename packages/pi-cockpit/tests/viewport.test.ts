@@ -1,12 +1,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+	AGENT_CHROME_SHARE,
+	AGENT_DETAIL_CHROME_SHARE,
 	CHROME_SHARE,
 	DEFAULT_OVERLAY_ROWS,
+	MAX_AGENT_PANEL_ROWS,
+	MAX_AGENT_DETAIL_ROWS,
 	MAX_OVERLAY_ROWS,
 	MAX_PANEL_ROWS,
+	MIN_AGENT_PANEL_ROWS,
+	MIN_AGENT_DETAIL_ROWS,
 	MIN_OVERLAY_ROWS,
 	MIN_PANEL_ROWS,
+	agentPanelRows,
+	agentDetailRows,
 	fitRows,
 	overlayListRows,
 	panelRows,
@@ -35,6 +43,20 @@ test("panelRows is undefined when the height is unknown or nonsensical", () => {
 	assert.equal(panelRows(0), undefined);
 	assert.equal(panelRows(-4), undefined);
 	assert.equal(panelRows(Number.NaN), undefined);
+});
+
+test("agentPanelRows uses the larger Agent-specific share", () => {
+	assert.equal(agentPanelRows(100), MAX_AGENT_PANEL_ROWS);
+	assert.equal(agentPanelRows(5), MIN_AGENT_PANEL_ROWS);
+	assert.equal(agentPanelRows(40), Math.floor(40 * AGENT_CHROME_SHARE));
+	assert.equal(agentPanelRows(undefined), undefined);
+});
+
+test("agentDetailRows keeps concurrent Agent surfaces inside a smaller share", () => {
+	assert.equal(agentDetailRows(100), MAX_AGENT_DETAIL_ROWS);
+	assert.equal(agentDetailRows(5), MIN_AGENT_DETAIL_ROWS);
+	assert.equal(agentDetailRows(40), Math.floor(40 * AGENT_DETAIL_CHROME_SHARE));
+	assert.equal(agentDetailRows(undefined), undefined);
 });
 
 test("fitRows pays for the overflow marker out of the budget", () => {
@@ -67,7 +89,7 @@ test("a short terminal shrinks the agent roster instead of overrunning the scree
 	const opts = { glyphs, spin: "*", now: 0, withHead: false };
 	const tall = renderAgents(rows, "list", 100, theme, utils, opts);
 	const short = renderAgents(rows, "list", 100, theme, utils, { ...opts, maxRows: 3 });
-	assert.equal(tall.length, 7, "unbounded height keeps the historical 6 rows + overflow");
+	assert.equal(tall.length, 9, "unbounded height keeps the expanded 8 rows + overflow");
 	assert.equal(short.length, 3, "a 3-row budget is a hard ceiling");
 	assert.match(short.at(-1)!, /18 more/);
 });

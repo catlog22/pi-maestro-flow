@@ -31,6 +31,8 @@ export interface AmbientState {
 	gitBranch?: string;
 	/** Maestro workflow status (run status when a run is active). */
 	maestro?: string;
+	/** Maestro knowledge evolution summary (consumed/pending/review). */
+	maestroKnowledge?: string;
 	/**
 	 * Leading title glyph: spinner frames while a turn runs, a static marker
 	 * when idle (Claude Code's `✳` / braille frames). Failure keeps its own
@@ -109,6 +111,7 @@ export function titleFor(
 	if (state.thinking) tags.push(`t:${state.thinking}`);
 	if (state.gitBranch) tags.push(`git:${state.gitBranch}`);
 	if (state.maestro) tags.push(`wf:${state.maestro}`);
+	if (state.maestroKnowledge) tags.push(`k:${state.maestroKnowledge}`);
 	if (tags.length > 0) title = `${title}${sep}${tags.join(sep)}`;
 	if (opts?.maxLength !== undefined && title.length > opts.maxLength) {
 		const cap = opts.maxLength;

@@ -189,6 +189,22 @@ test("Cockpit owns a fixed, toggleable and scrollable agent session region above
 	assert.match(source, /uninstallUi[\s\S]*?sessionDetailScrollDisposer\?\.\(\)[\s\S]*?agentScrollDisposer\?\.\(\)/);
 });
 
+test("Cockpit Agent modal shares the live store and repaint pipeline", () => {
+	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	assert.match(source, /AGENT_OVERLAY_KEY = "alt\+a"/);
+	assert.match(source, /registerShortcut\(AGENT_OVERLAY_KEY/);
+	assert.match(source, /new AgentOverlay\(\{[\s\S]*?getAgents: \(\) => agents\.snapshot\(\)/);
+	assert.match(source, /ownedRender = \(\) => tui\.requestRender\(\)/);
+	assert.match(source, /activeAgentOverlayRender = ownedRender/);
+	assert.match(source, /capturedTui\?\.requestRender\(\);[\s\S]*?activeAgentOverlayRender\?\.\(\)/);
+	assert.match(source, /getExpanded: effectiveTodoExpanded/);
+	assert.match(source, /todoExpanded: effectiveTodoExpanded\(\)/);
+	assert.match(source, /const effectiveTodoExpanded = \(\): boolean =>\s*config\.todoExpanded/);
+	assert.match(source, /uninstallUi[\s\S]*?activeAgentOverlay\?\.finalize\(\)/);
+	assert.match(source, /session_start[\s\S]*?agentListScroll = \{ offset: 0, following: true \}/);
+	assert.match(source, /session_shutdown[\s\S]*?agents\.clear\(\);[\s\S]*?agentListScroll = \{ offset: 0, following: true \}/);
+});
+
 test("Flow publishes authoritative bash_bg snapshots and Cockpit can request a refresh", () => {
 	const cockpitSource = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
 	const flowSource = readFileSync(

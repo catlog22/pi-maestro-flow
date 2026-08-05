@@ -3,7 +3,7 @@ import { effectiveAgentStatus, type AgentDisplayStatus } from "./agents-store.ts
 import type { AgentRow, TodoItem, ViewMode } from "./types.ts";
 import type { IconGlyphs } from "./icons.ts";
 import { composeByPriority, fitLineByPriority, type PriorityGroup, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
-import { fitRows } from "./viewport.ts";
+import { AGENT_NARROW_ROW_CAP, AGENT_WIDE_ROW_CAP, fitRows } from "./viewport.ts";
 
 // Re-exported for existing importers; the shared implementation lives in layout.ts.
 export type { WidthUtils };
@@ -73,6 +73,8 @@ export interface RenderOpts {
 	 * fixed caps apply.
 	 */
 	maxRows?: number;
+	/** Full roster context for tree prefixes and dependency labels after viewport slicing. */
+	agentContextRows?: readonly AgentRow[];
 }
 
 export const DEFAULT_TOGGLE_HINT = "Alt+T";
@@ -151,12 +153,12 @@ function roleColor(role: string): ThemeColor {
 	return ROLE_PALETTE[hash % ROLE_PALETTE.length];
 }
 
-interface AgentTreeEntry {
+export interface AgentTreeEntry {
 	row: AgentRow;
 	prefix: string;
 }
 
-function buildAgentTree(rows: readonly AgentRow[], glyphs: IconGlyphs): AgentTreeEntry[] {
+export function buildAgentTree(rows: readonly AgentRow[], glyphs: IconGlyphs): AgentTreeEntry[] {
 	const activityOrder = (a: AgentRow, b: AgentRow): number =>
 		b.lastActivityAt - a.lastActivityAt || a.correlationId.localeCompare(b.correlationId);
 	const byId = new Map(rows.map((row) => [row.correlationId, row]));
@@ -239,11 +241,13 @@ export function renderAgents(
 	}
 	const spin = opts.spin ?? "~";
 	const now = opts.now ?? Date.now();
-	const tree = buildAgentTree(rows, g);
+	const contextRows = opts.agentContextRows ?? rows;
+	const visibleIds = new Set(rows.map((row) => row.correlationId));
+	const tree = buildAgentTree(contextRows, g).filter((entry) => visibleIds.has(entry.row.correlationId));
 	// Width decides how much a row can say; height decides how many rows exist.
 	// The width cap counts roster rows and lets the overflow marker sit on top of
 	// it; maxRows is a hard ceiling on everything this call emits, marker included.
-	const widthCap = width < NARROW_WIDTH ? 3 : 6;
+	const widthCap = width < NARROW_WIDTH ? AGENT_NARROW_ROW_CAP : AGENT_WIDE_ROW_CAP;
 	const budget = Math.min(widthCap + 1, opts.maxRows ?? Number.POSITIVE_INFINITY);
 	// Priority-based vertical composition: running/retrying agents survive height
 	// pressure longer than sleeping/completed ones (pi-atelier dropRank pattern).
@@ -271,7 +275,7 @@ export function renderAgents(
 	// Identity (tree position, state, role, task) outranks telemetry (tool, tail,
 	// counts) so the row still answers "who is doing what" at 40 columns.
 	const dependencyLabels = new Map<number, string>();
-	for (const row of rows) {
+	for (const row of contextRows) {
 		if (row.taskIndex === undefined) continue;
 		const label = row.name || row.role || row.agent;
 		if (label) dependencyLabels.set(row.taskIndex, label);

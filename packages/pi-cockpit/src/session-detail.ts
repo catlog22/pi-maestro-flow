@@ -11,7 +11,7 @@ import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type TUI } from "@eare
 import type { AgentRow } from "./types.ts";
 import { effectiveAgentStatus, type AgentDisplayStatus } from "./agents-store.ts";
 import { scrollWindowStart } from "./agent-scroll.ts";
-import { panelRows } from "./viewport.ts";
+import { agentDetailRows } from "./viewport.ts";
 import { formatAgentMetric, formatDuration } from "./render.ts";
 
 function detailStatusColor(status: AgentDisplayStatus): ThemeColor {
@@ -79,6 +79,7 @@ export function renderSessionDetail(
 	theme: Theme,
 	maxRows = SESSION_DETAIL_TAIL_LINES + 1,
 	scroll: SessionDetailScrollState = { offset: 0, following: true },
+	hintText = "Alt+Shift+↑↓ scroll · Alt+Shift+R hide",
 ): string[] {
 	const row = rows.find((candidate) => candidate.correlationId === viewingId);
 	if (!row) return [];
@@ -103,7 +104,7 @@ export function renderSessionDetail(
 		theme.fg("dim", duration),
 		meta ? theme.fg("dim", meta) : "",
 	].filter(Boolean).join(" · ");
-	const hint = theme.fg("dim", "Alt+Shift+↑↓ scroll · Alt+Shift+R hide");
+	const hint = theme.fg("dim", hintText);
 	const hintWidth = visibleWidth(hint);
 	const header = hintWidth + 12 <= w
 		? (() => {
@@ -152,7 +153,7 @@ export function makeSessionDetailWidget(deps: SessionDetailDeps) {
 	return (tui: TUI, theme: Theme) => ({
 		render(width: number): string[] {
 			if (!deps.getVisible()) return [];
-			const maxRows = panelRows(tui.terminal?.rows) ?? DEFAULT_SESSION_DETAIL_ROWS;
+			const maxRows = agentDetailRows(tui.terminal?.rows) ?? DEFAULT_SESSION_DETAIL_ROWS;
 			return renderSessionDetail(
 				deps.getAgents(),
 				deps.getViewingId(),

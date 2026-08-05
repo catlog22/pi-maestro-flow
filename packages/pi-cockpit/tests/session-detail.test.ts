@@ -174,6 +174,6 @@ test("makeSessionDetailWidget: terminal height bounds the fixed region", () => {
 		getViewingId: () => "c1",
 		getVisible: () => true,
 	})({ terminal: { rows: terminalRows } } as never, theme as Theme).render(80);
-	assert.equal(make(24).length, 3);
-	assert.equal(make(60).length, 9);
+	assert.equal(make(24).length, 4);
+	assert.equal(make(60).length, 12);
 });

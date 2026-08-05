@@ -36,14 +36,14 @@ test("scrollBy: clamps at both ends and no-ops when everything fits", () => {
 	assert.deepEqual(scrollBy({ offset: 0, following: true }, -1, 3, 4), { offset: 0, following: true });
 });
 
-test("agentListWindowRows: width cap and terminal-height panel bound", () => {
-	// Tall terminal with plenty of height → the 6-row width cap plus marker.
-	assert.equal(agentListWindowRows(120, 50), 6);
-	// Narrow terminal → 3-row cap.
-	assert.equal(agentListWindowRows(30, 50), 3);
-	// Shorter terminals → the panel share shrinks the window.
-	assert.equal(agentListWindowRows(120, 40), 5);
+test("agentListWindowRows: expanded width cap and Agent panel bound", () => {
+	// Tall terminal with plenty of height → the expanded 8-row width cap.
+	assert.equal(agentListWindowRows(120, 50), 8);
+	// Narrow terminal → 4-row cap.
+	assert.equal(agentListWindowRows(30, 50), 4);
+	// Medium terminals can spend the larger Agent-specific panel share.
+	assert.equal(agentListWindowRows(120, 40), 8);
 	assert.ok(agentListWindowRows(120, 12) >= 1);
 	// Unknown terminal height falls back to the width cap.
-	assert.equal(agentListWindowRows(undefined, undefined), 6);
+	assert.equal(agentListWindowRows(undefined, undefined), 8);
 });

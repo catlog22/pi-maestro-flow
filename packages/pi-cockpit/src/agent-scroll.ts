@@ -8,7 +8,11 @@
  * resumes it. Pure state math, no UI dependencies.
  */
 
-import { panelRows } from "./viewport.ts";
+import {
+	AGENT_NARROW_ROW_CAP,
+	AGENT_WIDE_ROW_CAP,
+	agentPanelRows,
+} from "./viewport.ts";
 
 export interface AgentScrollState {
 	/** Window start over the activity-ordered roster. */
@@ -44,16 +48,17 @@ export function followWindow(total: number, budget: number): AgentScrollState {
 
 /**
  * How many agent rows the panel may render. Mirrors the roster widget's own
- * budget: a width cap (6 wide / 3 narrow) plus one marker row, bounded by the
- * terminal-height panel share.
+ * budget: eight wide / four narrow rows plus one marker row, bounded by the
+ * active-agent share unless the caller supplies a shared-surface budget.
  */
 export function agentListWindowRows(
 	terminalColumns: number | undefined,
 	terminalRows: number | undefined,
 	total?: number,
+	panelOverride?: number,
 ): number {
-	const widthCap = (terminalColumns ?? 80) < 40 ? 3 : 6;
-	const panel = panelRows(terminalRows);
+	const widthCap = (terminalColumns ?? 80) < 40 ? AGENT_NARROW_ROW_CAP : AGENT_WIDE_ROW_CAP;
+	const panel = panelOverride ?? agentPanelRows(terminalRows);
 	const panelBudget = Math.min(widthCap + 1, panel ?? widthCap + 1);
 	const bodyBudget = Math.max(1, panelBudget - 1); // roster header owns one row
 	// One combined overflow marker is paid from the body budget, preserving at
