@@ -49,12 +49,14 @@ interface UsageCacheEntry {
 	computedAt: number;
 }
 
+const DEFAULT_USAGE_THROTTLE_MS = 500;
+
 let usageCache: UsageCacheEntry | undefined;
 // Static mode lowers the token refresh cadence. The getter reads live config so
 // a toggle applies on the next render without re-registering.
 let usageThrottleMs: (() => number) | undefined;
 
-/** Set the wall-clock throttle for token totals; 0/undefined means uncapped. */
+/** Set the wall-clock throttle for token totals; 0 means uncapped. */
 export function setUsageThrottle(getMs: () => number): void {
 	usageThrottleMs = getMs;
 }
@@ -95,7 +97,7 @@ export function invalidateUsageCache(): void {
 export function getUsageTotals(entries: readonly unknown[], now: number = Date.now()): UsageTotals {
 	const key = entriesKey(entries);
 	if (usageCache && usageCache.key === key) return usageCache.totals;
-	const throttleMs = Math.max(0, usageThrottleMs?.() ?? 0);
+	const throttleMs = Math.max(0, usageThrottleMs?.() ?? DEFAULT_USAGE_THROTTLE_MS);
 	if (throttleMs > 0 && usageCache && now - usageCache.computedAt < throttleMs) {
 		// Within the window: keep the previous totals on screen. The cache entry is
 		// deliberately left untouched (key and computedAt stay put) so a later call

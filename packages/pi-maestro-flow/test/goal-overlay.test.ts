@@ -59,7 +59,10 @@ interface Harness {
 }
 
 function harness(
-  options: { onAction?: (action: GoalOverlayAction, goalId: string) => void | Promise<void> } = {},
+  options: {
+    onAction?: (action: GoalOverlayAction, goalId: string) => void | Promise<void>;
+    now?: () => number;
+  } = {},
 ): Harness {
   let entries = sampleEntries();
   const state: Harness = {
@@ -78,6 +81,7 @@ function harness(
     close: () => { state.closed++; },
     theme: mockTheme,
     onAction: options.onAction ?? ((action, goalId) => { state.actions.push({ action, goalId }); }),
+    now: options.now,
   });
   return state;
 }
@@ -155,6 +159,22 @@ test("Goal overlay detail mode shows the full objective and lifecycle fields", (
   assert.match(text, /Esc back/);
   h.overlay.handleInput("\x1b");
   assert.doesNotMatch(h.overlay.render(60).join("\n"), /Esc back/);
+});
+
+test("Goal overlay samples an injected clock once per render", () => {
+  let clockReads = 0;
+  const h = harness({
+    now: () => {
+      clockReads++;
+      return 15_999;
+    },
+  });
+  h.setEntries([entry("g1", "Clock snapshot", { updatedAt: 10_000 })]);
+  h.overlay.handleInput("\r");
+
+  const text = h.overlay.render(60).join("\n");
+  assert.match(text, /Updated\s+5s ago/);
+  assert.equal(clockReads, 1);
 });
 
 test("Goal overlay wide mode renders the list and detail panes side by side", () => {

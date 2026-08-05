@@ -68,12 +68,12 @@ export function effectiveDisplayStatus(
   status: AgentStatus,
   resultReadyAt: number | undefined,
   lastActivityAt: number | undefined,
-  now: number = Date.now(),
+  nowSnapshot: number = Date.now(),
 ): DisplayStatus {
   switch (status) {
     case "running":
       if (resultReadyAt !== undefined) return "result-ready";
-      return lastActivityAt !== undefined && now - lastActivityAt >= TEAMMATE_STALL_TIMEOUT_MS
+      return lastActivityAt !== undefined && nowSnapshot - lastActivityAt >= TEAMMATE_STALL_TIMEOUT_MS
         ? "stalled"
         : "running";
     case "pending":
@@ -108,7 +108,10 @@ export function projectAgentActivity(agent: Pick<ActiveAgent, "status" | "restar
 }
 
 /** Whole seconds since the last reported activity; 0 when never reported. */
-export function idleSeconds(lastActivityAt: number | undefined, now: number = Date.now()): number {
+export function idleSeconds(
+  lastActivityAt: number | undefined,
+  nowSnapshot: number = Date.now(),
+): number {
   if (lastActivityAt === undefined) return 0;
-  return Math.max(0, Math.floor((now - lastActivityAt) / 1000));
+  return Math.max(0, Math.floor((nowSnapshot - lastActivityAt) / 1000));
 }

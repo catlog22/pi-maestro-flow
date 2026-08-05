@@ -38,6 +38,24 @@ function parts(over: Partial<FooterParts> = {}): FooterParts {
 	};
 }
 
+test("getUsageTotals uses a 500ms throttle by default", (t) => {
+	invalidateUsageCache();
+	t.after(() => {
+		setUsageThrottle(() => 0);
+		invalidateUsageCache();
+	});
+	const entry = (input: number): unknown => ({
+		type: "message",
+		message: { role: "assistant", usage: { input, output: 1 } },
+	});
+	const entriesA = [entry(10)];
+	const entriesB = [entry(10), entry(20)];
+
+	assert.equal(getUsageTotals(entriesA, 1_000).input, 10);
+	assert.equal(getUsageTotals(entriesB, 1_499).input, 10);
+	assert.equal(getUsageTotals(entriesB, 1_500).input, 30);
+});
+
 test("getUsageTotals throttles recompute inside the configured window", (t) => {
 	invalidateUsageCache();
 	setUsageThrottle(() => 10_000);

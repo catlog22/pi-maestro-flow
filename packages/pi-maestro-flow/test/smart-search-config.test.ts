@@ -194,6 +194,37 @@ test("Smart Search TUI decodes bracketed paste and Ctrl+U unsets secret keys", a
   assert.deepEqual(saved[1], { XAI_MODEL: "grok 4" });
 });
 
+test("Smart Search TUI coalesces split bracketed paste rendering", async () => {
+  let renders = 0;
+  const overlay = new SmartSearchConfigOverlay({
+    config: {},
+    store: createStore({}, async (patch) => patch),
+    theme,
+    requestRender() { renders++; },
+    close() {},
+  });
+
+  overlay.handleInput("\x1b[20");
+  assert.equal(renders, 0, "a partial paste marker must wait for the flush window");
+  overlay.handleInput("0~context7\x1b[201~");
+  assert.equal(renders, 1, "the completed paste must render once");
+  assert.match(overlay.render(100).join("\n"), /Filter: context7/);
+
+  let timeoutRenders = 0;
+  const timeoutOverlay = new SmartSearchConfigOverlay({
+    config: {},
+    store: createStore({}, async (patch) => patch),
+    theme,
+    requestRender() { timeoutRenders++; },
+    close() {},
+  });
+  timeoutOverlay.handleInput("x\x1b[20");
+  assert.equal(timeoutRenders, 0);
+  await flushInput();
+  assert.equal(timeoutRenders, 1, "pending input and its timeout flush must share one render");
+  assert.match(timeoutOverlay.render(100).join("\n"), /Filter: x/);
+});
+
 test("Smart Search TUI filters provider keys and saves Context7 configuration", async () => {
   const saved: Array<Record<string, unknown | undefined>> = [];
   const store = createStore({}, async (patch) => {
