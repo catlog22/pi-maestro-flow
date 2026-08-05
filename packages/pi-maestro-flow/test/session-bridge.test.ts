@@ -154,6 +154,159 @@ test("bridge reads canonical Session/Run/Artifact state and changes revision by 
   }
 });
 
+test("bridge falls back to the unique running Session projection when active_session_id is absent", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-session-fallback-unique-"));
+  const sessionId = "20260717-fallback";
+  const sessionDir = join(root, ".workflow", "sessions", sessionId);
+  try {
+    await mkdir(sessionDir, { recursive: true });
+    await writeJson(join(root, ".workflow", "state.json"), {
+      version: "2.0",
+      active_session_id: null,
+      sessions: [{ session_id: sessionId, intent: "Fallback target", status: "running" }],
+    });
+    await writeJson(join(sessionDir, "session.json"), {
+      schema_version: "session/1.1",
+      session_id: sessionId,
+      intent: "Fallback target",
+      status: "running",
+      revision: 3,
+      active_run_id: null,
+      orchestration: {
+        chain: [{ step: "execute", command: "execute", status: "pending", run_id: null }],
+      },
+    });
+    const snapshot = await loadCanonicalSnapshot(root);
+    assert.equal(snapshot.source, "canonical");
+    assert.equal(snapshot.canonicalClaim?.status, "valid");
+    assert.equal(snapshot.canonicalClaim?.activeSessionId, sessionId);
+    assert.equal(snapshot.session?.sessionId, sessionId);
+    assert.match(snapshot.diagnostics.join("\n"), /resolved canonical Session/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bridge does not fall back to a running projection with only an active Run and no pending step", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-session-fallback-active-run-"));
+  const sessionId = "20260717-fallback-run";
+  const runId = "20260717-001-execute";
+  const sessionDir = join(root, ".workflow", "sessions", sessionId);
+  try {
+    await mkdir(join(sessionDir, "runs", runId), { recursive: true });
+    await writeJson(join(root, ".workflow", "state.json"), {
+      version: "2.0",
+      active_session_id: null,
+      sessions: [{ session_id: sessionId, intent: "Active Run target", status: "running" }],
+    });
+    await writeJson(join(sessionDir, "session.json"), {
+      schema_version: "session/1.1",
+      session_id: sessionId,
+      intent: "Active Run target",
+      status: "running",
+      revision: 2,
+      active_run_id: runId,
+      orchestration: { chain: [] },
+    });
+    await writeJson(join(sessionDir, "runs", runId, "run.json"), {
+      schema_version: "run/1.1",
+      run_id: runId,
+      parent_run_id: null,
+      command: "execute",
+      status: "running",
+      goal: "Execute",
+      input: { args: [], consumes: [] },
+      gates: [],
+      primary: null,
+      handoff: null,
+      started_at: "2026-07-17T00:00:00.000Z",
+      ended_at: null,
+    });
+    const snapshot = await loadCanonicalSnapshot(root);
+    // The CLI resolveSession only picks the unique running Session with a
+    // pending chain step; an active Run alone is not a canonical binding
+    // target, so the bridge must not invent one either.
+    assert.equal(snapshot.source, "none");
+    assert.equal(snapshot.session, undefined);
+    assert.match(snapshot.diagnostics.join("\n"), /no pending chain step/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bridge refuses fallback when multiple running Session projections are ambiguous", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-session-fallback-ambiguous-"));
+  try {
+    for (const sessionId of ["20260717-a", "20260717-b"]) {
+      await mkdir(join(root, ".workflow", "sessions", sessionId), { recursive: true });
+      await writeJson(join(root, ".workflow", "sessions", sessionId, "session.json"), {
+        schema_version: "session/1.1",
+        session_id: sessionId,
+        intent: `Session ${sessionId}`,
+        status: "running",
+        revision: 1,
+        active_run_id: null,
+        orchestration: { chain: [{ step: "execute", command: "execute", status: "pending", run_id: null }] },
+      });
+    }
+    await writeJson(join(root, ".workflow", "state.json"), {
+      version: "2.0",
+      active_session_id: null,
+      sessions: [
+        { session_id: "20260717-a", intent: "A", status: "running" },
+        { session_id: "20260717-b", intent: "B", status: "running" },
+      ],
+    });
+    const snapshot = await loadCanonicalSnapshot(root);
+    assert.equal(snapshot.source, "none");
+    assert.equal(snapshot.session, undefined);
+    assert.match(snapshot.diagnostics.join("\n"), /ambiguous/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bridge refuses fallback when the running projection is idle or not running on disk", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-session-fallback-idle-"));
+  const sessionId = "20260717-idle";
+  const sessionDir = join(root, ".workflow", "sessions", sessionId);
+  try {
+    await mkdir(sessionDir, { recursive: true });
+    await writeJson(join(root, ".workflow", "state.json"), {
+      version: "2.0",
+      active_session_id: null,
+      sessions: [{ session_id: sessionId, intent: "Idle", status: "running" }],
+    });
+    await writeJson(join(sessionDir, "session.json"), {
+      schema_version: "session/1.1",
+      session_id: sessionId,
+      intent: "Idle",
+      status: "running",
+      revision: 1,
+      active_run_id: null,
+      orchestration: { chain: [] },
+    });
+    const idle = await loadCanonicalSnapshot(root);
+    assert.equal(idle.source, "none");
+    assert.match(idle.diagnostics.join("\n"), /no pending chain step/);
+
+    await writeJson(join(sessionDir, "session.json"), {
+      schema_version: "session/1.1",
+      session_id: sessionId,
+      intent: "Idle",
+      status: "sealed",
+      revision: 2,
+      active_run_id: null,
+      orchestration: { chain: [] },
+    });
+    const sealed = await loadCanonicalSnapshot(root);
+    assert.equal(sealed.source, "none");
+    assert.match(sealed.diagnostics.join("\n"), /not running on disk/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("bridge falls back to legacy status without writing canonical files", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-session-legacy-"));
   try {
@@ -193,7 +346,7 @@ test("a present malformed canonical state is authoritative invalid and never fal
       assert.equal(snapshot.session, undefined);
       assert.equal(snapshot.canonicalClaim?.status, "invalid");
       assert.match(snapshot.canonicalClaim?.error ?? "", /JSON|must contain a JSON object/i);
-      assert.doesNotMatch(snapshot.diagnostics.join("\n"), /Using legacy workflow projection/i);
+      assert.ok(!/Using legacy workflow projection/i.test(snapshot.diagnostics.join("\n")), "canonical malformed state must not fall back to legacy");
     }
   } finally {
     await rm(root, { recursive: true, force: true });

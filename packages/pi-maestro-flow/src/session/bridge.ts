@@ -58,28 +58,30 @@ export async function loadCanonicalSnapshot(
     });
   }
 
-  if (activeSessionId) {
-    const sessionDir = join(workflowDir, "sessions", activeSessionId);
+  const canonicalSessionId = activeSessionId
+    ?? await resolveCanonicalFallbackSessionId(workflowDir, state.value, diagnostics, fingerprintParts);
+  if (canonicalSessionId) {
+    const sessionDir = join(workflowDir, "sessions", canonicalSessionId);
     const sessionResult = await readJson(join(sessionDir, "session.json"));
     if (sessionResult.raw) fingerprintParts.push(sessionResult.raw);
     if (sessionResult.error) diagnostics.push(sessionResult.error);
     if (!sessionResult.value) {
-      const error = sessionResult.error ?? `Canonical Workflow Session ${activeSessionId} is missing`;
+      const error = sessionResult.error ?? `Canonical Workflow Session ${canonicalSessionId} is missing`;
       return snapshot("canonical", projectRoot, undefined, fingerprintParts, diagnostics, options.now, {
-        activeSessionId,
+        activeSessionId: canonicalSessionId,
         status: "invalid",
         error,
       });
     }
 
     const declaredSessionId = stringValue(sessionResult.value.session_id);
-    if (declaredSessionId !== activeSessionId) {
+    if (declaredSessionId !== canonicalSessionId) {
       const error = declaredSessionId
-        ? `Canonical session identity mismatch: state declares ${activeSessionId}, session.json declares ${declaredSessionId}`
-        : `Canonical Workflow Session ${activeSessionId} is missing session_id`;
+        ? `Canonical session identity mismatch: state declares ${canonicalSessionId}, session.json declares ${declaredSessionId}`
+        : `Canonical Workflow Session ${canonicalSessionId} is missing session_id`;
       diagnostics.push(error);
       return snapshot("canonical", projectRoot, undefined, fingerprintParts, diagnostics, options.now, {
-        activeSessionId,
+        activeSessionId: canonicalSessionId,
         status: "invalid",
         error,
       });
@@ -95,14 +97,14 @@ export async function loadCanonicalSnapshot(
     const runResults = await readRuns(join(sessionDir, "runs"), diagnostics, gateRecords);
     fingerprintParts.push(...runResults.raw);
     const session = normalizeSession(
-      activeSessionId,
+      canonicalSessionId,
       sessionResult.value,
       runResults.runs,
       artifactResult.value,
       gateRecords,
     );
     return snapshot("canonical", projectRoot, session, fingerprintParts, diagnostics, options.now, {
-      activeSessionId,
+      activeSessionId: canonicalSessionId,
       status: "valid",
     });
   }
@@ -234,6 +236,73 @@ function snapshot(
     ...(session ? { session } : {}),
     diagnostics,
   };
+}
+
+/**
+ * Fallback canonical resolution when state.json carries no active_session_id.
+ *
+ * Mirrors the Maestro CLI `run next` resolveSession strategy: the unique
+ * running Session projection with a pending chain step becomes the canonical
+ * candidate. Absence or ambiguity (multiple running projections) falls
+ * through to the legacy/none projection so the CLI and the extension agree on
+ * the binding target instead of drifting apart.
+ */
+async function resolveCanonicalFallbackSessionId(
+  workflowDir: string,
+  stateValue: Record<string, unknown> | undefined,
+  diagnostics: string[],
+  fingerprintParts: string[],
+): Promise<string | undefined> {
+  const projections = Array.isArray(stateValue?.sessions)
+    ? stateValue.sessions
+        .map(recordValue)
+        .filter((entry): entry is Record<string, unknown> => Boolean(entry))
+        .filter((entry) => entry.status === "running")
+        .map((entry) => stringValue(entry.session_id))
+        .filter((entry): entry is string => Boolean(entry && safeId(entry)))
+    : [];
+  if (projections.length === 0) {
+    diagnostics.push(
+      "No active_session_id claim and no running Session projection; canonical resolution is unavailable",
+    );
+    return undefined;
+  }
+  if (projections.length > 1) {
+    diagnostics.push(
+      `No active_session_id claim; ${projections.length} running Session projections — canonical resolution is ambiguous`,
+    );
+    return undefined;
+  }
+  const sessionId = projections[0]!;
+  const result = await readJson(join(workflowDir, "sessions", sessionId, "session.json"));
+  if (result.raw) fingerprintParts.push(result.raw);
+  if (result.error) {
+    diagnostics.push(result.error);
+    return undefined;
+  }
+  const raw = recordValue(result.value);
+  if (!raw || raw.status !== "running") {
+    diagnostics.push(
+      `Running Session projection ${sessionId} is not running on disk; canonical resolution is unavailable`,
+    );
+    return undefined;
+  }
+  const orchestration = recordValue(raw.orchestration);
+  const rawChain = Array.isArray(orchestration?.chain) ? orchestration.chain : [];
+  const hasPendingStep = rawChain.some((entry) => {
+    const step = recordValue(entry);
+    return step?.status === "pending" && step.decision_ref === undefined;
+  });
+  if (!hasPendingStep) {
+    diagnostics.push(
+      `Running Session ${sessionId} has no pending chain step; canonical resolution is unavailable`,
+    );
+    return undefined;
+  }
+  diagnostics.push(
+    `No active_session_id claim; resolved canonical Session ${sessionId} with a pending chain step`,
+  );
+  return sessionId;
 }
 
 async function readJson(path: string, optional = false): Promise<ReadJsonResult> {

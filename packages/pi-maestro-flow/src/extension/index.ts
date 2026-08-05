@@ -1347,7 +1347,11 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       if (!session) return { allowNew: true };
       const active = activeWorkflowRun(snapshot);
       const ownership = await workflowCoordinator.ownership(hostSessionId);
+      // stale leases are reclaimable (WorkflowLeaseStore.acquire treats a
+      // heartbeat past staleAfterMs as unowned), so they never block binding
+      // the current Session or creating a new one.
       const ownedHere = ownership?.state === "unowned"
+        || ownership?.state === "stale"
         || (ownership?.isOwner === true && ownership.isAttached === true);
       const firstPendingStep = session.chain.find((step) => step.status === "pending");
       let reason: string | undefined;

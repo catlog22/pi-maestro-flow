@@ -629,6 +629,50 @@ test("Workflow Plan publication is host-fenced for current Sessions and requires
   }
 });
 
+test("a stale foreign lease never blocks binding the current Session or creating a new one", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-stale-publish-"));
+  let now = new Date("2026-08-02T12:00:00.000Z");
+  const staleStore = new WorkflowLeaseStore(root, 1_000, () => now);
+  const freshStore = new WorkflowLeaseStore(root, 1_000, () => now);
+  const calls: string[][] = [];
+  const snapshot = workflowSnapshot("running");
+  snapshot.session!.activeRunId = null;
+  const coordinator = new WorkflowCoordinator(
+    fakeBridge(snapshot),
+    fakeAdapter(calls),
+    freshStore,
+  );
+  const base = {
+    sourcePath: "C:/plans/approved.md",
+    sourceRoot: "C:/plans",
+    handoffKey: "b".repeat(64),
+    sourcePiSession: "pi-owner",
+    planRevision: 1,
+    approvedAt: "2026-08-02T12:00:00.000Z",
+  };
+  try {
+    // A foreign Pi session acquires the lease, then its heartbeat goes stale.
+    const oldOwner = new WorkflowLeaseStore(root, 1_000, () => now);
+    const foreign = await oldOwner.acquire("session-1", "pi-foreign");
+    assert.equal(foreign.hostSessionId, "pi-foreign");
+    now = new Date("2026-08-02T12:00:05.000Z");
+    const ownership = await freshStore.ownership("session-1", "pi-owner");
+    assert.equal(ownership.state, "stale", "the foreign lease must be past its heartbeat window");
+    // The confirmation equivalent (ownedHere) treats stale as reclaimable, and
+    // the current-binding path attaches first (acquiring the stale lease)
+    // before fencing and publishing — mirroring publishApprovedPlanToWorkflow.
+    await coordinator.attach("pi-owner");
+    await coordinator.publishPlan({ ...base, sessionId: "session-1" }, { hostSessionId: "pi-owner" });
+    assert.equal(calls.at(-1)?.[0], "plan-publish");
+    assert.equal(calls.at(-1)?.[1], "session-1");
+    const takenOver = await freshStore.ownership("session-1", "pi-owner");
+    assert.equal(takenOver.isOwner, true, "the stale foreign lease must be taken over");
+  } finally {
+    await coordinator.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("CLI adapter capability-detects and publishes an approved Plan", async () => {
   const calls: string[][] = [];
   const adapter = new RunCliAdapter("D:/workspace", async (args) => {
