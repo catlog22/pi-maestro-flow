@@ -13,6 +13,12 @@ export type RetryErrorKind = "network" | "provider" | "fallback-only" | "auth" |
  * transport → provider overload.
  */
 export declare function classifyRetryError(message: string | undefined, status?: number): RetryErrorKind;
+/**
+ * Pi core owns child provider retries, but older Pi retry classifiers do not
+ * recognize the machine-readable `stream_read_error` code. Add a semantic
+ * marker they understand without replacing the original diagnostic.
+ */
+export declare function normalizePiRetryErrorMessage(message: string | undefined): string | undefined;
 /** True when the failure is an authentication/permission problem. */
 export declare function isAuthError(message: string | undefined, status?: number): boolean;
 /** Whether the same model/credential is worth retrying (transient transport or provider overload). */

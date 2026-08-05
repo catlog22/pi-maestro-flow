@@ -141,6 +141,7 @@ import {
 } from "../tui/input-text.ts";
 import { showModelMappingOverlay } from "../tui/model-mapping-overlay.ts";
 import { sharedModelCircuitBreaker } from "../public/v1/retry.ts";
+import { normalizePiRetryErrorMessage } from "../runs/retry.ts";
 import { showMonitorOverlay, type MonitorSessionRow } from "../tui/monitor-overlay.ts";
 import { createTeammateSettingsProvider, registerTeammateSettingsProvider } from "../settings/teammate-settings-provider.ts";
 import type {
@@ -442,7 +443,13 @@ export default function registerTeammateExtension(
     });
     pi.on("before_agent_start", injectTeammateContext);
     pi.on("session_compact", (_event, ctx) => publishSessionIdentity(ctx));
-    pi.on("message_end", (_event, ctx) => publishSessionIdentity(ctx));
+    pi.on("message_end", (event, ctx) => {
+      publishSessionIdentity(ctx);
+      if (event.message.role !== "assistant" || event.message.stopReason !== "error") return;
+      const errorMessage = normalizePiRetryErrorMessage(event.message.errorMessage);
+      if (!errorMessage || errorMessage === event.message.errorMessage) return;
+      return { message: { ...event.message, errorMessage } };
+    });
     pi.on("agent_end", (_event, ctx) => {
       publishSessionIdentity(ctx);
       bridge.completedPromptSeq = bridge.acceptedPromptSeq;

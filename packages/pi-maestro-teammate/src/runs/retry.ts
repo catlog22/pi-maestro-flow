@@ -28,6 +28,8 @@ const NON_RETRYABLE_ERROR =
 const FALLBACK_ONLY_ERROR =
   /\b(?:402|insufficient[_\s-]*(?:quota|balance|credits?)|credits? exhausted|billing quota|quota exceeded|out of budget)\b/i;
 
+const STREAM_READ_ERROR = /\bstream[_\s-]*read[_\s-]*error\b/i;
+
 const NETWORK_ERROR =
   /\b(?:econnreset|econnrefused|econnaborted|enetunreach|enetdown|ehostunreach|enotfound|eai_again|etimedout|epipe|socket hang up|fetch failed|failed to fetch|getaddrinfo|network(?: ?error| request)?|connection (?:error|failed|failure|reset|refused|lost|timed out|timeout|closed|terminated)|other side closed|upstream connect|reset before headers|request timed out|timed out waiting|signal timed out|timed? out|timeout|terminated|(?:web)?socket (?:was )?(?:closed|error)|sse response headers timed out|headers timed out|stream ended (?:without|before)|http2 request did not get a response|connectionerror|connectionreseterror|connectionrefusederror|connectionabortederror|brokenpipeerror|timeouterror|remotedisconnected|read timed out|requests\.exceptions)\b/i;
 
@@ -77,9 +79,27 @@ export function classifyRetryError(message: string | undefined, status?: number)
   if (AUTH_ERROR.test(message)) return "auth";
   if (NON_RETRYABLE_ERROR.test(message)) return "non-retryable";
   if (FALLBACK_ONLY_ERROR.test(message)) return "fallback-only";
+  if (STREAM_READ_ERROR.test(message)) return "network";
   if (NETWORK_ERROR.test(message)) return "network";
   if (PROVIDER_ERROR.test(message)) return "provider";
   return "non-retryable";
+}
+
+/**
+ * Pi core owns child provider retries, but older Pi retry classifiers do not
+ * recognize the machine-readable `stream_read_error` code. Add a semantic
+ * marker they understand without replacing the original diagnostic.
+ */
+export function normalizePiRetryErrorMessage(message: string | undefined): string | undefined {
+  if (
+    !message
+    || classifyRetryError(message) !== "network"
+    || !STREAM_READ_ERROR.test(message)
+    || /\bnetwork(?: ?error| request)?\b/i.test(message)
+  ) {
+    return message;
+  }
+  return `${message} (network error)`;
 }
 
 /** True when the failure is an authentication/permission problem. */

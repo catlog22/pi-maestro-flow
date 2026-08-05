@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { isRetryableAssistantError } from "@earendil-works/pi-ai/compat";
 import {
   classifyRetryError,
   extractRetryAfterMs,
   isAuthError,
   isFallbackProviderError,
   isRetryableProviderError,
+  normalizePiRetryErrorMessage,
 } from "../src/runs/retry.ts";
 
 test("standalone transport terminations and timeouts classify as network errors", () => {
@@ -20,6 +22,41 @@ test("standalone transport terminations and timeouts classify as network errors"
   assert.equal(classifyRetryError("fetch failed"), "network");
   assert.equal(isRetryableProviderError("Error: terminated"), true);
   assert.equal(isFallbackProviderError("Error: terminated"), true);
+});
+
+test("stream_read_error is normalized into Pi-owned provider retry", () => {
+  const raw = "stream_read_error: upstream response body closed";
+  assert.equal(classifyRetryError(raw), "network");
+  assert.equal(classifyRetryError("Stream read error"), "network");
+  assert.equal(isRetryableProviderError(raw), true);
+  assert.equal(isFallbackProviderError(raw), true);
+
+  const normalized = normalizePiRetryErrorMessage(raw);
+  assert.equal(normalized, `${raw} (network error)`);
+  assert.equal(normalizePiRetryErrorMessage(normalized), normalized);
+  assert.equal(normalizePiRetryErrorMessage("context_length_exceeded"), "context_length_exceeded");
+  assert.equal(
+    normalizePiRetryErrorMessage("stream_read_error: HTTP 400 bad request"),
+    "stream_read_error: HTTP 400 bad request",
+  );
+  assert.equal(isRetryableAssistantError({
+    role: "assistant",
+    content: [],
+    api: "openai-responses",
+    provider: "openai",
+    model: "test-model",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "error",
+    errorMessage: normalized,
+    timestamp: 0,
+  }), true);
 });
 
 test("host:port text in connection errors is not mistaken for an HTTP status", () => {
