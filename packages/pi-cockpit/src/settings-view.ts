@@ -83,6 +83,27 @@ export function buildRows(config: CockpitConfig, live?: LiveRowState): SettingsR
 			next: config.pinEditorBottom ? "off" : "on",
 		},
 		{
+			key: "doubleEscapeClearInput",
+			accel: "k",
+			label: "double esc clear (reload)",
+			value: config.doubleEscapeClearInput ? "on" : "off",
+			next: config.doubleEscapeClearInput ? "off" : "on",
+		},
+		{
+			key: "fullscreenInput",
+			accel: "v",
+			label: "fullscreen input (reload)",
+			value: config.fullscreenInput ? "on" : "off",
+			next: config.fullscreenInput ? "off" : "on",
+		},
+		{
+			key: "copyOnSelect",
+			accel: "j",
+			label: "copy on select",
+			value: config.copyOnSelect ? "on" : "off",
+			next: config.copyOnSelect ? "off" : "on",
+		},
+		{
 			key: "quietMode",
 			accel: "q",
 			label: "quiet (reload)",
@@ -249,6 +270,12 @@ export function applyRow(config: CockpitConfig, key: string, textValue?: string)
 			return { ...config, staticMode: !config.staticMode };
 		case "pinEditorBottom":
 			return { ...config, pinEditorBottom: !config.pinEditorBottom };
+		case "doubleEscapeClearInput":
+			return { ...config, doubleEscapeClearInput: !config.doubleEscapeClearInput };
+		case "fullscreenInput":
+			return { ...config, fullscreenInput: !config.fullscreenInput };
+		case "copyOnSelect":
+			return { ...config, copyOnSelect: !config.copyOnSelect };
 		case "quietMode":
 			return { ...config, quietMode: !config.quietMode };
 		case "quietSymbols":

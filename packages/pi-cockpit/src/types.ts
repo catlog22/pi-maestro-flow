@@ -202,6 +202,27 @@ export interface CockpitConfig {
 	hideNativeAgents: boolean;
 	/** Experimental: keep the editor/footer block at the terminal bottom while the conversation is short. */
 	pinEditorBottom: boolean;
+	/**
+	 * Claude Code-style double bare-Escape clears a non-empty input draft.
+	 * The first Escape keeps its native meaning; only a second Escape within
+	 * the window, with a non-empty focused draft, is consumed. Empty-draft
+	 * double-Escape stays pi's rewind/tree action. Requires /reload to take
+	 * effect (installs a Cockpit custom editor at session start).
+	 */
+	doubleEscapeClearInput: boolean;
+	/**
+	 * Claude Code-style fullscreen input: alternate screen with the editor
+	 * fixed at the bottom and an application-owned scrolling transcript, so
+	 * the editor no longer scrolls away on manual scrollback. Terminal-native
+	 * scrollback/search is replaced by transcript scrolling. Requires /reload
+	 * to take effect (installs a Cockpit custom editor at session start).
+	 */
+	fullscreenInput: boolean;
+	/**
+	 * Copy transcript text to the clipboard when a drag selection is released.
+	 * Effective only while fullscreenInput is active; ignored otherwise.
+	 */
+	copyOnSelect: boolean;
 	icons: { mode: IconMode };
 	sidebar: SidebarConfig;
 	/** Terminal tab title surface (session summary + working state + optional tags). */
@@ -224,6 +245,9 @@ export const DEFAULT_CONFIG: CockpitConfig = {
 	todoExpanded: false,
 	hideNativeAgents: true,
 	pinEditorBottom: false,
+	doubleEscapeClearInput: false,
+	fullscreenInput: false,
+	copyOnSelect: false,
 	icons: { mode: "auto" },
 	sidebar: { mode: "off", width: 40, density: "comfortable" },
 	title: {

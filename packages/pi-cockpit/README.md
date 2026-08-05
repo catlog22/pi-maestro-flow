@@ -137,6 +137,46 @@ The original mockup was a browser page; a terminal is an ANSI stream with no DOM
 | Scanlines / logo light-up animation | no overlay/animation layer | a braille spinner frame, advanced on each redraw |
 | In-stream thinking-collapse / edit progress bar / colored bash stdout | built-in message & built-in tool rendering is **not** replaceable by extensions (`renderCall`/`renderResult` only apply to tools *you* register) | the conversation stream is left to Pi's native renderer — it is context, not a cockpit deliverable |
 
+## Claude Code-style interactions (all opt-in, all default off)
+
+Three independent settings, each stored in `cockpit.json` and exposed bilingually in `/cockpit` and `/maestro-settings`:
+
+| Setting | Default | Applies | What it does |
+|---|---|---|---|
+| `doubleEscapeClearInput` | off | after `/reload` | Press Escape twice quickly to clear a non-empty input draft. The first Escape keeps its native meaning; an empty-draft double-Escape stays pi's rewind/tree action. Requires the Cockpit custom editor (`/reload`). |
+| `fullscreenInput` | off | after `/reload` | Alternate screen with the editor fixed at the bottom and an application-scrolled transcript. Wheel scrolls history while the editor stays put; `↑ n new · click to bottom` appears when new output arrives while you are scrolled up. Replaces terminal-native scrollback/search inside fullscreen. Requires the Cockpit custom editor (`/reload`). |
+| `copyOnSelect` | off | live | Drag inside the fullscreen transcript to select; the visible text is copied to the clipboard on release. Effective only while `fullscreenInput` is active. |
+
+Interaction rules:
+
+- The three settings are independent; `copyOnSelect` is inert without `fullscreenInput`.
+- The legacy `pinEditorBottom` keeps working in normal mode and is ignored inside fullscreen.
+- If another extension already owns a custom editor, `doubleEscapeClearInput` and `fullscreenInput` fail closed with one warning (they share the Cockpit custom editor) and never overwrite it.
+- A clipboard failure shows a warning and keeps the selection so you can retry.
+
+### Terminal capability matrix
+
+Fullscreen needs an alternate screen (`?1049`) and SGR mouse reporting (`1006`/`1002`); copy-on-select additionally needs drag selection to be application-owned. No universal support is claimed — this is best effort, opt-in, and `TERM=dumb`/unset is refused with a warning.
+
+| Terminal | Alternate screen | SGR mouse | Copy-on-select | Verified |
+|---|---|---|---|---|
+| iTerm2 | ✓ | ✓ | ✓ | expected |
+| Ghostty | ✓ | ✓ | ✓ | expected |
+| WezTerm | ✓ | ✓ | ✓ | expected |
+| kitty | ✓ | ✓ | ✓ | expected |
+| Windows Terminal | ✓ | ✓ | ✓ | expected |
+| VS Code integrated terminal | ✓ | ✓ | ✓ | expected |
+| tmux (no `-T` config) | depends | depends | depends | not claimed |
+| `TERM=dumb` | ✗ | ✗ | ✗ | refused with a warning |
+
+### Manual smoke checklist
+
+1. `/maestro-settings` → Cockpit → enable `doubleEscapeClearInput`, then `/reload`; type a draft and press Escape twice — the draft clears; a single Escape does nothing; with an empty draft two Escapes still open the tree selector.
+2. Enable `fullscreenInput`, `/reload`; scroll the transcript with the mouse wheel — the editor stays fixed at the bottom; while scrolled up, new output shows the `↑ n new` hint; clicking it returns to the bottom.
+3. Enable `copyOnSelect` (live, no reload); drag across transcript lines — the visible text lands on the clipboard (verify with `pbpaste` on macOS); a plain click does not copy; a copy failure (e.g. headless) shows a warning and keeps the selection.
+4. Toggle everything off and `/reload` — behavior returns to stock pi.
+5. If a terminal ever gets stuck in a blank alternate screen (crash while fullscreen), run `reset` to restore the normal screen.
+
 ## Local development
 
 ```bash

@@ -57,6 +57,9 @@ const CONFIG_KEYS = [
 	"enabled",
 	"staticMode",
 	"pinEditorBottom",
+	"doubleEscapeClearInput",
+	"fullscreenInput",
+	"copyOnSelect",
 	"quietMode",
 	"quietSymbols",
 	"agentsMode",
@@ -122,6 +125,12 @@ const CATALOGS = {
 		"cockpit.staticMode": "Static rendering mode",
 		"cockpit.pinEditorBottom": "Pin input editor to bottom",
 		"cockpit.pinEditorBottom.description": "Experimental: add elastic space above the editor when the conversation is shorter than the terminal",
+		"cockpit.doubleEscapeClearInput": "Double Escape clears input",
+		"cockpit.doubleEscapeClearInput.description": "Press Escape twice quickly to clear a non-empty input draft. The first Escape keeps its native meaning and an empty-draft double Escape stays pi's rewind/tree action. Requires /reload.",
+		"cockpit.fullscreenInput": "Fullscreen input",
+		"cockpit.fullscreenInput.description": "Alternate screen with the editor fixed at the bottom and an application-scrolled transcript. Terminal-native scrollback/search is replaced by transcript scrolling. Requires /reload.",
+		"cockpit.copyOnSelect": "Copy on selection",
+		"cockpit.copyOnSelect.description": "Copy transcript text to the clipboard when a drag selection is released. Effective only while fullscreen input is active.",
 		"cockpit.quietMode": "Quiet tool rendering",
 		"cockpit.quietSymbols": "Quiet symbols",
 		"cockpit.agentsMode": "Agent display",
@@ -146,6 +155,7 @@ const CATALOGS = {
 		"cockpit.option.off": "Off",
 		"cockpit.option.comfortable": "Comfortable",
 		"cockpit.runtime.reloadQuiet": "Turning Quiet off requires /reload to restore native tool renderers",
+		"cockpit.runtime.reloadInteractions": "Editor interaction settings require /reload to take effect",
 	},
 	"zh-CN": {
 		"cockpit.provider": "驾驶舱",
@@ -159,6 +169,12 @@ const CATALOGS = {
 		"cockpit.staticMode": "静态渲染模式",
 		"cockpit.pinEditorBottom": "固定输入框到底部",
 		"cockpit.pinEditorBottom.description": "实验功能：当会话内容少于终端高度时，在输入框上方自动填充空间",
+		"cockpit.doubleEscapeClearInput": "双击 Esc 清空输入",
+		"cockpit.doubleEscapeClearInput.description": "在输入非空时快速按两次 Esc 清空草稿。第一次 Esc 保持原生含义，空输入框的双 Esc 仍是 pi 的 rewind/tree 操作。需执行 /reload 生效。",
+		"cockpit.fullscreenInput": "全屏输入模式",
+		"cockpit.fullscreenInput.description": "使用 alternate screen 将输入框固定到底部，历史内容由应用内滚动代替。终端原生滚动/搜索被替代。需执行 /reload 生效。",
+		"cockpit.copyOnSelect": "选中即复制",
+		"cockpit.copyOnSelect.description": "在拖选 transcript 文本并松开时自动复制到剪贴板。仅在全屏输入模式开启时生效。",
 		"cockpit.quietMode": "紧凑工具渲染",
 		"cockpit.quietSymbols": "紧凑状态符号",
 		"cockpit.agentsMode": "Agent 显示",
@@ -183,6 +199,7 @@ const CATALOGS = {
 		"cockpit.option.off": "关闭",
 		"cockpit.option.comfortable": "舒适",
 		"cockpit.runtime.reloadQuiet": "关闭紧凑渲染后需执行 /reload 才能恢复原生工具界面",
+		"cockpit.runtime.reloadInteractions": "编辑器交互设置需执行 /reload 才能生效",
 	},
 } as const;
 
@@ -196,6 +213,30 @@ const DEFINITIONS: readonly SettingDefinition[] = [
 		"cockpit.pinEditorBottom",
 		"live",
 		"cockpit.pinEditorBottom.description",
+	),
+	booleanDefinition(
+		"doubleEscapeClearInput",
+		"cockpit.group.layout",
+		1,
+		"cockpit.doubleEscapeClearInput",
+		"extension-reload",
+		"cockpit.doubleEscapeClearInput.description",
+	),
+	booleanDefinition(
+		"fullscreenInput",
+		"cockpit.group.layout",
+		2,
+		"cockpit.fullscreenInput",
+		"extension-reload",
+		"cockpit.fullscreenInput.description",
+	),
+	booleanDefinition(
+		"copyOnSelect",
+		"cockpit.group.layout",
+		3,
+		"cockpit.copyOnSelect",
+		"live",
+		"cockpit.copyOnSelect.description",
 	),
 	booleanDefinition("quietMode", "cockpit.group.general", 2, "cockpit.quietMode", "extension-reload"),
 	enumDefinition("quietSymbols", "cockpit.group.general", 3, "cockpit.quietSymbols", ["check", "dot"], "live"),
@@ -524,7 +565,7 @@ function setConfigValue(config: CockpitConfig, key: CockpitSettingKey, value: Js
 }
 
 function validValue(key: CockpitSettingKey, value: JsonValue): boolean {
-	if (["enabled", "staticMode", "pinEditorBottom", "quietMode", "todoExpanded", "hideNativeAgents"].includes(key)) return typeof value === "boolean";
+	if (["enabled", "staticMode", "pinEditorBottom", "doubleEscapeClearInput", "fullscreenInput", "copyOnSelect", "quietMode", "todoExpanded", "hideNativeAgents"].includes(key)) return typeof value === "boolean";
 	if (key === "sidebar.width") return typeof value === "number" && Number.isSafeInteger(value) && value >= 32 && value <= 56;
 	if (key === "quietSymbols") return value === "check" || value === "dot";
 	if (key === "agentsMode" || key === "todoMode") return value === "list" || value === "compact";
@@ -539,14 +580,21 @@ function activationFor(
 	after: CockpitConfig,
 ): SettingsActivationPlan[] {
 	const live: string[] = [];
-	const reload: string[] = [];
+	const reloadQuiet: string[] = [];
+	const reloadInteractions: string[] = [];
 	for (const change of changes) {
-		if (change.key === "quietMode" && before.quietMode && !after.quietMode) reload.push(change.key);
+		if (change.key === "quietMode" && before.quietMode && !after.quietMode) reloadQuiet.push(change.key);
+		else if (change.key === "doubleEscapeClearInput" || change.key === "fullscreenInput") reloadInteractions.push(change.key);
 		else live.push(change.key);
 	}
 	return [
 		...(live.length > 0 ? [{ boundary: "live" as const, keys: live }] : []),
-		...(reload.length > 0 ? [{ boundary: "extension-reload" as const, keys: reload, messageKey: "cockpit.runtime.reloadQuiet" }] : []),
+		...(reloadQuiet.length > 0
+			? [{ boundary: "extension-reload" as const, keys: reloadQuiet, messageKey: "cockpit.runtime.reloadQuiet" }]
+			: []),
+		...(reloadInteractions.length > 0
+			? [{ boundary: "extension-reload" as const, keys: reloadInteractions, messageKey: "cockpit.runtime.reloadInteractions" }]
+			: []),
 	];
 }
 
