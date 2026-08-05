@@ -549,15 +549,18 @@ function installForegroundDetachListener(): void {
   });
 }
 
-export function setPersistentUi(ui: ExtensionUIContext | undefined): void {
-  if (persistentUi !== ui) {
+export function setPersistentUi(
+  ui: ExtensionUIContext | undefined,
+  resetOwners = false,
+): void {
+  if (persistentUi !== ui || resetOwners) {
     uninstallForegroundDetachListener();
     persistentUi = ui;
   }
-  if (!ui) {
+  if (!ui || resetOwners) {
     for (const owner of foregroundDetachOwners) owner.active = false;
     foregroundDetachOwners.length = 0;
-    return;
+    if (!ui) return;
   }
   installForegroundDetachListener();
 }

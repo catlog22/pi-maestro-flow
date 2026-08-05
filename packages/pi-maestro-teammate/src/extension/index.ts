@@ -520,6 +520,8 @@ export default function registerTeammateExtension(
           // belongs to; a missing bridge.ctx (session inactive) drops it.
           if (!bridge.ctx) return;
           if (m.correlationId !== process.env.PI_TEAMMATE_CORRELATION_ID) return;
+          const deliverySessionId = typeof m.sessionId === "string" ? m.sessionId : undefined;
+          if (!deliverySessionId || deliverySessionId !== bridge.ctx.sessionManager.getSessionId()) return;
           const envelope = m.envelope as Record<string, unknown> | undefined;
           if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)
             || typeof envelope.customType !== "string") return;
@@ -2258,17 +2260,20 @@ export default function registerTeammateExtension(
 
           if (params.background === false) {
             const waitMs = foregroundWaitWindowMs(normalizedTasks, runtimeOptions.foregroundMaxRunMs);
-            const deadline = createForegroundDeadline(waitMs);
             let detachResolve: ((reason: "manual") => void) | null = null;
             const detachPromise = new Promise<"manual">((resolve) => { detachResolve = resolve; });
-            const removeListener = ctx.hasUI
-              ? registerForegroundDetach(() => detachResolve?.("manual"), ctx.ui)
-              : null;
-            const graphPromise = executeGraph();
+            let removeListener: (() => void) | null = null;
+            let deadline: ReturnType<typeof createForegroundDeadline> | undefined;
+            let graphPromise!: ReturnType<typeof executeGraph>;
             let race:
               | { done: true; result: Awaited<typeof graphPromise>; reason: undefined }
               | { done: false; result: null; reason: "manual" | "timeout" };
             try {
+              removeListener = ctx.hasUI
+                ? registerForegroundDetach(() => detachResolve?.("manual"), ctx.ui)
+                : null;
+              deadline = createForegroundDeadline(waitMs);
+              graphPromise = executeGraph();
               race = await Promise.race([
                 graphPromise.then((result) => ({ done: true as const, result, reason: undefined })),
                 detachPromise.then((reason) => ({ done: false as const, result: null, reason })),
@@ -2276,7 +2281,7 @@ export default function registerTeammateExtension(
               ]);
             } finally {
               removeListener?.();
-              deadline.dispose();
+              deadline?.dispose();
             }
 
             if (race.done) {
@@ -2339,17 +2344,17 @@ export default function registerTeammateExtension(
           let detachResolve: ((reason: "manual") => void) | null = null;
           const detachPromise = new Promise<"manual">((resolve) => { detachResolve = resolve; });
           const waitMs = foregroundWaitWindowMs(normalizedTasks, runtimeOptions.foregroundMaxRunMs);
-          const deadline = createForegroundDeadline(waitMs);
-
-          const removeListener = ctx.hasUI
-            ? registerForegroundDetach(() => detachResolve?.("manual"), ctx.ui)
-            : null;
-
-          let runPromise: Promise<SingleResult>;
+          let removeListener: (() => void) | null = null;
+          let deadline: ReturnType<typeof createForegroundDeadline> | undefined;
+          let runPromise!: Promise<SingleResult>;
           let race:
             | { done: true; result: SingleResult; reason: undefined }
             | { done: false; result: null; reason: "manual" | "timeout" };
           try {
+            removeListener = ctx.hasUI
+              ? registerForegroundDetach(() => detachResolve?.("manual"), ctx.ui)
+              : null;
+            deadline = createForegroundDeadline(waitMs);
             const options = makeOptions();
             runPromise = runWithProgressFlushCleanup(
               () => runSingleTeammate(singleRunParams, options),
@@ -2362,7 +2367,7 @@ export default function registerTeammateExtension(
             ]);
           } finally {
             removeListener?.();
-            deadline.dispose();
+            deadline?.dispose();
           }
 
           if (race.done) {
@@ -4177,7 +4182,7 @@ export default function registerTeammateExtension(
     registerTeammateSettings();
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     widgetCtx = ctx;
-    setPersistentUi(ctx.ui);
+    setPersistentUi(ctx.ui, true);
     state.baseCwd = ctx.cwd;
     // Mailbox is bound to the real session cwd (workspace isolation).
     rebindMailboxHostForSession();

@@ -763,16 +763,26 @@ test("shared Alt+B dispatcher uses one listener and detaches owners outermost fi
     releaseNested();
     assert.equal(unsubscriptions, 1, "owner unregister must be idempotent after detach");
 
-    const releaseShutdownOwner = registerForegroundDetach(() => detached.push("stale"));
+    const releasePreviousSessionOwner = registerForegroundDetach(() => detached.push("stale"));
     assert.equal(subscriptions, 2);
     assert.ok(terminalInput);
-    const staleInput = terminalInput;
+    const previousSessionInput = terminalInput;
+    setPersistentUi(ui, true);
+    assert.equal(unsubscriptions, 2, "session replacement must remove the previous listener even when UI identity is reused");
+    assert.equal(previousSessionInput("\x1bb"), undefined, "a new session must clear previous foreground owners");
+    assert.deepEqual(detached, ["outer", "nested"]);
+    releasePreviousSessionOwner();
+
+    const releaseShutdownOwner = registerForegroundDetach(() => detached.push("shutdown-stale"));
+    assert.equal(subscriptions, 3);
+    assert.ok(terminalInput);
+    const shutdownInput = terminalInput;
     setPersistentUi(undefined);
-    assert.equal(unsubscriptions, 2, "session teardown must remove the shared listener");
-    assert.equal(staleInput("\x1bb"), undefined, "teardown must clear pending foreground owners");
+    assert.equal(unsubscriptions, 3, "session teardown must remove the shared listener");
+    assert.equal(shutdownInput("\x1bb"), undefined, "teardown must clear pending foreground owners");
     assert.deepEqual(detached, ["outer", "nested"]);
     releaseShutdownOwner();
-    assert.equal(unsubscriptions, 2, "teardown makes later unregister a no-op");
+    assert.equal(unsubscriptions, 3, "teardown makes later unregister a no-op");
   } finally {
     setPersistentUi(undefined);
   }
@@ -808,6 +818,87 @@ test("shared Alt+B dispatcher rolls back owner when terminal listener registrati
     release();
   } finally {
     setPersistentUi(undefined);
+  }
+});
+
+test("foreground listener setup failure starts no work or deadline", async () => {
+  let scheduledTimeouts = 0;
+  let spawns = 0;
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((handler: (...args: unknown[]) => void, timeout?: number, ...args: unknown[]) => {
+    scheduledTimeouts += 1;
+    return realSetTimeout(handler, timeout, ...args);
+  }) as typeof setTimeout;
+  const throwingUi = {
+    onTerminalInput() {
+      throw new Error("terminal unavailable");
+    },
+  } as unknown as ExtensionUIContext;
+  const spawnChildProcess = (() => {
+    spawns += 1;
+    throw new Error("foreground work must not start");
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+  try {
+    for (const taskCount of [1, 2]) {
+      const tasks = Array.from({ length: taskCount }, (_, index) => ({
+        agent: "general",
+        name: `setup-failure-${index}`,
+        prompt: `setup failure ${index}`,
+      }));
+      await assert.rejects(
+        createRootTool({ spawnChildProcess }).execute(
+          `setup-failure-${taskCount}`,
+          { tasks, background: false, timeoutMs: 60_000 },
+          new AbortController().signal,
+          undefined,
+          { ...rootToolContext(), hasUI: true, ui: throwingUi },
+        ),
+        /terminal unavailable/,
+      );
+    }
+
+    const state: TeammateState = {
+      baseCwd: process.cwd(),
+      currentSessionId: null,
+      activeRuns: new Map(),
+      namedAgents: new Map(),
+    };
+    const replies: Array<{ result?: { isError?: boolean; content?: Array<{ text?: string }> } }> = [];
+    setPersistentUi(throwingUi);
+    await handleProxyRequest(
+      new Proxy({ events: { on: () => () => {}, emit() {} } }, {
+        get(target, property) {
+          if (property in target) return target[property as keyof typeof target];
+          return () => {};
+        },
+      }) as unknown as ExtensionAPI,
+      state,
+      {
+        type: "teammate_proxy_request",
+        tool: "teammate",
+        requestId: "nested-setup-failure",
+        params: { tasks: [{ agent: "general", prompt: "must not start" }], background: false },
+      },
+      (message) => replies.push(message as typeof replies[number]),
+      undefined,
+      [],
+      undefined,
+      undefined,
+      { spawnChildProcess },
+    );
+
+    assert.equal(spawns, 0, "listener setup must complete before root or nested work starts");
+    assert.equal(scheduledTimeouts, 0, "listener setup failure must not retain a foreground deadline");
+    assert.equal(replies.length, 1);
+    assert.equal(replies[0].result?.isError, true);
+    assert.match(replies[0].result?.content?.[0]?.text ?? "", /terminal unavailable/);
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+    setPersistentUi(undefined);
+    delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
+      Symbol.for("pi-maestro-teammate.root-registry")
+    ];
   }
 });
 
@@ -2303,7 +2394,7 @@ test("nested proxy preserves parentage, graph children, and explicit background 
   // Every name binding goes through the one helper that reports collisions.
   assert.equal(source.match(/state\.namedAgents\.set\(/g)?.length, 1, "only bindAgentName may write the name map");
   assert.match(source, /normalizedTasks \? \{ taskCorrelationIds \} : \{ correlationId: cid \}/);
-  assert.match(source, /if \(routedParams\.background === false\) \{[\s\S]*?createForegroundDeadline\(waitMs\)[\s\S]*?completeNestedInBackground\(\)/);
+  assert.match(source, /if \(routedParams\.background === false\) \{[\s\S]*?createForegroundDeadline\(waitMs\)[\s\S]*?completeNestedInBackground\(nestedPromise\)/);
   assert.doesNotMatch(source, /if \(p\.background === false\)/);
   assert.match(source, /running in background\. \$\{backgroundWaitGuidance\(cid\)\}/);
   assert.match(source, /function backgroundWaitGuidance\(/);

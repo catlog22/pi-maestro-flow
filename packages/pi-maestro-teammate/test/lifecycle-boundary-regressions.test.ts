@@ -1516,6 +1516,7 @@ test("nested background completion passively delivers teammate_complete_delivery
     agent: "general",
     correlationId: parentCid,
     startedAt: now,
+    sessionId: "parent-session",
     abortController: new AbortController(),
     inbox: [],
     outputLog: [],
@@ -1574,6 +1575,7 @@ test("nested background completion passively delivers teammate_complete_delivery
   assert.equal(controlMessages.length, 1);
   assert.equal(controlMessages[0].type, "teammate_complete_delivery");
   assert.equal(controlMessages[0].correlationId, parentCid);
+  assert.equal(controlMessages[0].sessionId, "parent-session");
   const envelope = controlMessages[0].envelope as Record<string, unknown>;
   assert.equal(envelope.customType, "teammate-complete");
   const results = (envelope.details as { results: Array<{ messages: Array<{ role: string; content: string }> }> }).results;
@@ -1648,7 +1650,7 @@ test("foreground nested completion does not double-deliver teammate_complete_del
   assert.equal(sentMessages.some((message) => message.customType === "teammate-complete"), false);
 });
 
-test("nested background completion skips delivery when the parent is no longer live", async () => {
+test("nested background completion skips delivery when the parent session changes", async () => {
   const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
   const sentMessages: Array<Record<string, unknown>> = [];
   const controlMessages: Record<string, unknown>[] = [];
@@ -1659,6 +1661,7 @@ test("nested background completion skips delivery when the parent is no longer l
     agent: "general",
     correlationId: parentCid,
     startedAt: now,
+    sessionId: "parent-session",
     abortController: new AbortController(),
     inbox: [],
     outputLog: [],
@@ -1709,8 +1712,9 @@ test("nested background completion skips delivery when the parent is no longer l
     String((replies[0] as { result: { content: Array<{ text: string }> } }).result.content[0].text),
     /running in background/,
   );
-  // Parent settles (removed from activeRuns) before the nested dispatch finishes.
-  settleAgent(state, parentCid, 0, "parent done", false);
+  // The child process remains live, but its active session no longer owns the
+  // dispatch that requested this completion.
+  parent.sessionId = "replacement-session";
   await delay(200);
   assert.equal(controlMessages.length, 0);
 });
@@ -1720,8 +1724,10 @@ test("child bridge consumes teammate_complete_delivery and injects it locally", 
     + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8");
   assert.match(source, /type === "teammate_complete_delivery"/);
   assert.match(source, /m\.correlationId !== process\.env\.PI_TEAMMATE_CORRELATION_ID/);
+  assert.match(source, /deliverySessionId !== bridge\.ctx\.sessionManager\.getSessionId\(\)/);
   assert.match(source, /safeSendMessage\(pi, envelope as never, \{ triggerTurn: true \}\)/);
-  // Root side forwards the envelope over agent.sendControl.
-  assert.match(source, /type: "teammate_complete_delivery"/);
-  assert.match(source, /parentAgent\.sendControl\(/);
+  // Root side forwards the envelope over agent.sendControl only while the
+  // dispatching child's session identity is unchanged.
+  assert.match(source, /parentAgent\?\.sessionId === parentSessionId/);
+  assert.match(source, /sessionId: parentSessionId/);
 });

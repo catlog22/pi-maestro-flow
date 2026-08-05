@@ -829,6 +829,7 @@ export async function handleProxyRequest(
   const ownsDispatchGeneration = (): boolean =>
     (state.sessionGeneration ?? 0) === dispatchGeneration;
   const parentCid = resolveProxyParentCorrelationId(event, spawnedBy, state);
+  const parentSessionId = parentCid ? state.activeRuns.get(parentCid)?.sessionId : undefined;
   const reservesProxyDispatch = tool === "teammate" && typeof requestId === "string";
   if (reservesProxyDispatch) {
     const duplicate = state.pendingProxyDispatchRequests?.has(requestId)
@@ -1196,7 +1197,9 @@ export async function handleProxyRequest(
           // own an open child channel.
           if (parentCid) {
             const parentAgent = state.activeRuns.get(parentCid);
-            if (parentAgent?.sendControl
+            if (parentSessionId
+              && parentAgent?.sessionId === parentSessionId
+              && parentAgent.sendControl
               && parentAgent.status !== "completed"
               && parentAgent.status !== "failed"
               && parentAgent.status !== "terminated") {
@@ -1204,6 +1207,7 @@ export async function handleProxyRequest(
                 type: "teammate_complete_delivery",
                 correlationId: parentCid,
                 generation: state.sessionGeneration ?? 0,
+                sessionId: parentSessionId,
                 envelope,
               });
             }
@@ -1904,11 +1908,12 @@ export async function handleProxyRequest(
         return message;
       };
 
-      const nestedPromise = executeNested();
       const mode = normalizedTasks ? inferGraphMode(normalizedTasks) : "single";
       const runningLabel = singleTask.name ?? activeAgent.agent;
 
-      const completeNestedInBackground = (): void => {
+      const completeNestedInBackground = (
+        nestedPromise: ReturnType<typeof executeNested>,
+      ): void => {
         // Background/detached nested dispatches promise a teammate-complete
         // notification on settle; a stall (never terminal) would otherwise
         // strand the parent — and the main caller of the top-level dispatch —
@@ -1939,21 +1944,33 @@ export async function handleProxyRequest(
 
       if (routedParams.background === false) {
         const waitMs = foregroundWaitWindowMs(allTasks, runtimeOptions.foregroundMaxRunMs);
-        const deadline = createForegroundDeadline(waitMs);
         // Alt+B manual detach, mirroring the root single/graph foreground paths.
         let detachResolve: (() => void) | null = null;
         const detachPromise = new Promise<"manual">((resolve) => { detachResolve = () => resolve("manual"); });
-        const removeListener = registerForegroundDetach(() => detachResolve?.());
-        const race = await Promise.race([
-          nestedPromise.then(
-            (completed) => ({ status: "completed" as const, completed }),
-            (error: unknown) => ({ status: "failed" as const, error }),
-          ),
-          detachPromise.then(() => ({ status: "manual" as const })),
-          deadline.promise.then(() => ({ status: "timeout" as const })),
-        ]);
-        removeListener?.();
-        deadline.dispose();
+        let removeListener: (() => void) | undefined;
+        let deadline: ReturnType<typeof createForegroundDeadline> | undefined;
+        let nestedPromise!: ReturnType<typeof executeNested>;
+        let race:
+          | { status: "completed"; completed: Awaited<ReturnType<typeof executeNested>> }
+          | { status: "failed"; error: unknown }
+          | { status: "manual" }
+          | { status: "timeout" };
+        try {
+          removeListener = registerForegroundDetach(() => detachResolve?.());
+          deadline = createForegroundDeadline(waitMs);
+          nestedPromise = executeNested();
+          race = await Promise.race([
+            nestedPromise.then(
+              (completed) => ({ status: "completed" as const, completed }),
+              (error: unknown) => ({ status: "failed" as const, error }),
+            ),
+            detachPromise.then(() => ({ status: "manual" as const })),
+            deadline.promise.then(() => ({ status: "timeout" as const })),
+          ]);
+        } finally {
+          removeListener?.();
+          deadline?.dispose();
+        }
 
         if (race.status === "failed") {
           const cancelled = finishProxyDispatchTracking();
@@ -1990,7 +2007,7 @@ export async function handleProxyRequest(
           finishProxyDispatchTracking();
           return;
         }
-        completeNestedInBackground();
+        completeNestedInBackground(nestedPromise);
         const detachText = race.status === "timeout"
           ? `@${runningLabel} moved to background after ${waitMs}ms.`
           : `@${runningLabel} detached.`;
@@ -2009,7 +2026,8 @@ export async function handleProxyRequest(
         return;
       }
 
-      completeNestedInBackground();
+      const nestedPromise = executeNested();
+      completeNestedInBackground(nestedPromise);
       reply({ type: "teammate_proxy_result", requestId, result: {
         content: [{
           type: "text",
