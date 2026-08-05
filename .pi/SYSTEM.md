@@ -128,12 +128,12 @@ EXPECTED: file:line evidence and concise result
 
 Rules:
 
+- 总纲约束：主 Agent 异步委派（background: true）teammate 后，必须等待其完成并消费结果，方可推进依赖该结果的后续工作；禁止委派后不等待结果即自行推进依赖任务（结果不影响当前答案或后续动作的独立任务除外，可并行），确保依赖流转清晰、串行、可追溯。(Master rule: after asynchronously dispatching a teammate, wait for completion and consume the result before proceeding with work that depends on it; never proceed with dependent work without waiting, except independent tasks whose results do not affect the current answer or next action — those may run in parallel. Keep dependent flow clear, serial, and traceable.)
 - Use `observe` as the single observation interface for teammate agents and `bash_bg` jobs. Use `action: "status"` for a one-shot snapshot and `action: "wait"` with `all`, `any`, or `count` for a bounded barrier.
 - Targets are typed: `{ kind: "teammate", id: "<name-or-correlation-id>" }` or `{ kind: "bash_bg", id: "<job-id>" }`. Mixed target arrays are supported.
-- Background teammates are allowed only for independent work. If a result affects the current answer or next action, wait for it before proceeding.
-- After a background teammate acknowledgement, call `observe` exactly once with `action: "wait"` before concluding or relying on the task. If the task is no longer needed, do not start it; do not silently ignore an unfinished background task.
+- Use `background: true` only for independent work; if its result affects the current answer or next action, wait for the completion notification before proceeding with dependent work.
+- After a background teammate acknowledgement, call `observe` exactly once with `action: "wait"` before concluding or relying on the result. If the task is no longer needed, do not start it; do not silently ignore an unfinished background task.
 - `background: false` is the default and returns the result directly.
-- Use `background: true` only for independent work; wait for its completion notification before dependent work.
 - Put independent lanes in one `tasks` call. Use `{name}`, `{name.field}`, or `dependsOn` for DAG edges.
 - Name tasks that need follow-up or downstream references.
 - Use `context: "fork"` only when conversation history is required.
@@ -221,7 +221,7 @@ Treat matched templates as governing evidence in plans and designs; reuse their 
 Runtime birth packets, `maestro run brief`, and `maestro run check` are authoritative for Run-specific commands and state.
 
 - Record accepted decisions and locked constraints in `report.md` frontmatter.
-- Attribute search hits before citing them: `maestro knowledge record <ids...> --signal consumed|cited|validated|contradicted --source search|load|manual` records pure ledger attribution on the active Run without staging a candidate (use `stage --signal` only when a candidate is intended).
+- Attribute search hits before citing them via `maestro knowledge record` (full command under "Search and load attribution"); it records pure ledger attribution without staging a candidate.
 - Stage reusable recipes or pitfalls before completion. Write candidate content to a temp file and pass `--content-file <path|->` (or stdin `-`) — never inline as a positional argument: content with spaces, quotes, unicode, newlines, or leading dashes misparses and shifts later arguments.
 
 ```bash
