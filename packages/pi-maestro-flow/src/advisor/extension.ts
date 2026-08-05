@@ -230,10 +230,19 @@ export default function registerAdvisor(pi: ExtensionAPI): void {
   function loadWorkspaceConfig(ctx: ExtensionContext): void {
     resetAdvisorLifecycle();
     const generation = ++configGeneration;
-    configCwd = ctx.cwd;
+    let cwd: string;
+    try {
+      // ctx.cwd asserts the extension context is still active; after a session
+      // replacement (e.g. --no-session startup) the captured ctx is stale and
+      // the getter throws. Skip this load — the next session_start re-runs it.
+      cwd = ctx.cwd;
+    } catch {
+      return;
+    }
+    configCwd = cwd;
     config = { ...DEFAULT_ADVISOR_CONFIG };
-    const load = loadConfig(ctx.cwd).then((loaded) => {
-      if (generation !== configGeneration || configCwd !== ctx.cwd) return;
+    const load = loadConfig(cwd).then((loaded) => {
+      if (generation !== configGeneration || configCwd !== cwd) return;
       config = loaded;
       if (config.enabled) pi.events?.emit?.("advisor:enabled", { enabled: true });
     }).finally(() => {
