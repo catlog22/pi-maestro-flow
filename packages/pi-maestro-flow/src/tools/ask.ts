@@ -1,5 +1,5 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { isTeammateChild, requestTeammateInteraction } from "../permissions/teammate-relay.ts";
 import {
@@ -221,9 +221,10 @@ async function showAskWizard(
   questions: QuestionSpec[],
   ctx: ExtensionContext,
 ): Promise<AskAnswer[] | undefined> {
-  // Rendered as a modal overlay (like /todo and /goal) so the cockpit's
-  // empty-composer ←/→ agent cycling yields to the wizard's own ←→ question
-  // navigation instead of consuming the keys first.
+  // Rendered as an in-composer interactive panel (the default ui.custom
+  // path), not an overlay: the cockpit's ambient ←/→/Shift+↑↓ hooks yield
+  // to any custom component holding input focus, so the wizard owns those
+  // keys while it is up without covering the rest of the UI.
   return ctx.ui.custom<AskAnswer[] | undefined>(
     (tui, theme, _keybindings, done) => {
       const optionsList = questions.map((q) => {
@@ -347,6 +348,11 @@ async function showAskWizard(
           if (index === step) {
             return theme.bg("selectedBg", theme.fg("success", theme.bold(` ${label} `)));
           }
+          if (index < questions.length && hasAnswer(index)) {
+            // Answered questions are marked in the tab bar so the completion
+            // state of every step is visible while switching with ←/→/Tab.
+            return theme.fg("success", ` ✓${label} `);
+          }
           return theme.fg(index < step ? "text" : "muted", ` ${label} `);
         }).join(theme.fg("dim", " > "));
         return truncateToWidth(
@@ -396,7 +402,15 @@ async function showAskWizard(
             : options.length > 0
             ? "单选 · 数字键选择 · 可附说明"
             : "自由输入";
-        lines.push(truncateToWidth(theme.fg("dim", modeLabel), width, "…"));
+        const picked = [...selected[step]].map((i) => options[i]?.label).filter(Boolean);
+        const statusText = picked.length > 0
+          ? theme.fg("success", `已选：${picked.join("、")}`)
+          : theme.fg("muted", "未选择（可 →/Tab 跳过）");
+        lines.push(truncateToWidth(
+          `${theme.fg("dim", modeLabel)} · ${statusText}`,
+          width,
+          "…",
+        ));
 
         if (typing) {
           const editingLabel = options.length > 0 && detailCursor >= 0
@@ -470,8 +484,8 @@ async function showAskWizard(
         lines.push(theme.fg("dim", actionFooter(width, typing
           ? ["Esc 返回", "Enter 保存"]
           : q.multiSelect
-            ? ["Esc 取消", "Enter/→/Tab 下一步", "↑↓ 移动", "空格 切换", "d 附加说明"]
-            : ["Esc 取消", "Enter 选择/确认", "→/Tab 下一步", "↑↓ 移动", "1-9 选择", "d 附加说明"])));
+            ? ["Esc 取消", "Enter 确认/下一步", "→/Tab 跳过", "↑↓ 移动", "空格 切换", "d 附加说明"]
+            : ["Esc 取消", "Enter 选择/确认", "→/Tab 跳过", "↑↓ 移动", "1-9 选择", "d 附加说明"])));
         return lines.slice(0, 10);
       }
 
@@ -487,11 +501,11 @@ async function showAskWizard(
             const detail = answer.details?.[label];
             return detail ? `${label} (${detail})` : label;
           });
-          const values = [...chosen, ...(answer.text ? [answer.text] : [])].join(" — ");
+          const values = [...chosen, ...(answer.text ? [answer.text] : [])].join(" — ") || theme.fg("muted", "（未选择）");
           const marker = active ? theme.fg("success", "›") : " ";
           const label = `${i + 1}. ${answer.question}`;
           lines.push(truncateToWidth(
-            `${marker} ${active ? theme.fg("success", theme.bold(label)) : theme.bold(label)}  ${theme.fg("muted", values)}`,
+            `${marker} ${active ? theme.fg("success", theme.bold(label)) : theme.bold(label)}  ${values}`,
             width,
             "…",
           ));
@@ -669,14 +683,22 @@ async function showAskWizard(
           : options.length > 0
             ? "单选 · 数字键选择 · 可附说明"
             : "自由输入";
-        header.push(truncateToWidth(theme.fg("dim", modeLabel), width, "…"));
+        const picked = [...selected[step]].map((i) => options[i]?.label).filter(Boolean);
+        const statusText = picked.length > 0
+          ? theme.fg("success", `已选：${picked.join("、")}`)
+          : theme.fg("muted", "未选择（可 →/Tab 跳过）");
+        header.push(truncateToWidth(
+          `${theme.fg("dim", modeLabel)} · ${statusText}`,
+          width,
+          "…",
+        ));
 
         const footer: string[] = [];
         if (feedback) footer.push(truncateToWidth(theme.fg("warning", `! ${feedback}`), width, "…"));
         footer.push(truncateToWidth(theme.fg("dim", actionFooter(width, q.multiSelect
-          ? ["Esc 取消", "Enter/→/Tab 下一步", "↑↓ 移动", "空格 切换", "d 附加说明", "PgDn/Shift+↓ 滚动"]
+          ? ["Esc 取消", "Enter 确认/下一步", "→/Tab 跳过", "↑↓ 移动", "空格 切换", "d 附加说明", "PgDn/Shift+↓ 滚动"]
           : options.length > 0
-            ? ["Esc 取消", "Enter 选择/确认", "→/Tab 下一步", "↑↓ 移动", "1-9 选择", "d 附加说明", "PgDn/Shift+↓ 滚动"]
+            ? ["Esc 取消", "Enter 选择/确认", "→/Tab 跳过", "↑↓ 移动", "1-9 选择", "d 附加说明", "PgDn/Shift+↓ 滚动"]
             : ["Esc 返回", "Enter 保存"])), width, "…"));
 
         const bodyBudget = clampInt(termRows() - header.length - footer.length - 9, 5, 18);
@@ -722,7 +744,7 @@ async function showAskWizard(
           const active = i === idx;
           const marker = active ? theme.fg("success", "›") : " ";
           const label = answer.header || answer.question;
-          const value = [...answer.selected, ...(answer.text ? [answer.text] : [])].join(", ");
+          const value = [...answer.selected, ...(answer.text ? [answer.text] : [])].join(", ") || "（未选择）";
           return truncateToWidth(
             `${marker} ${i + 1}. ${active ? theme.fg("success", label) : label}  ${theme.fg("muted", value)}`,
             leftW,
@@ -840,7 +862,7 @@ async function showAskWizard(
         }
       }
 
-      function handleChoice(data: string, advanceOnSelect = false): void {
+      function handleChoice(data: string): void {
         const q = currentQuestion();
         const options = optionsList[step];
         const noneIndex = noneOptionIndex(step);
@@ -932,7 +954,7 @@ async function showAskWizard(
               typing = true;
               input = optionDetails[step][cursor];
               tui.requestRender();
-            } else if (wasSelected || advanceOnSelect) {
+            } else if (wasSelected) {
               advance();
             } else {
               tui.requestRender();
@@ -1017,7 +1039,9 @@ async function showAskWizard(
           return;
         }
         if (value === "\x1b[C" || value === "\x1bOC" || value === "\t") {
-          handleChoice("\r", true);
+          // Pure navigation: →/Tab move to the next question without selecting
+          // the highlighted option. Unanswered questions may be skipped.
+          enterStep(step + 1);
           return;
         }
         handleChoice(value);
@@ -1045,11 +1069,7 @@ async function showAskWizard(
             : step === questions.length
               ? renderSubmit(safeWidth)
               : renderQuestion(safeWidth);
-          return frameAskCard(
-            lines.map((line) => truncateToWidth(line, safeWidth, "…")),
-            safeWidth,
-            theme,
-          );
+          return lines.map((line) => truncateToWidth(line, safeWidth, "…"));
         },
 
         handleInput(data: string): void {
@@ -1068,23 +1088,6 @@ async function showAskWizard(
       };
       return createdPanel;
     },
-    { overlay: true, overlayOptions: { anchor: "center", width: "94%", maxHeight: "90%" } },
   );
 }
 
-function pad(value: string, width: number): string {
-  const fitted = truncateToWidth(value, width, "…");
-  return fitted + " ".repeat(Math.max(0, width - visibleWidth(fitted)));
-}
-
-/**
- * Frame the wizard's lines in a rounded card so the centered overlay reads as
- * a panel (mirrors TodoOverlay/GoalOverlay presentation).
- */
-function frameAskCard(lines: readonly string[], width: number, theme: Theme): string[] {
-  const inner = Math.max(0, width - 2);
-  const edge = "─".repeat(inner);
-  const border = (glyph: string) => theme.bg("customMessageBg", theme.fg("borderMuted", glyph));
-  const fill = (line: string): string => theme.bg("customMessageBg", pad(line, width));
-  return [border(`╭${edge}╮`), ...lines.map(fill), border(`╰${edge}╯`)];
-}

@@ -34,3 +34,44 @@ export function capturingOverlayVisible(tui: TUI | undefined): boolean {
 		return options?.nonCapturing !== true;
 	});
 }
+
+interface FocusedComponentLike {
+	handleInput?: unknown;
+	getText?: unknown;
+	getExpandedText?: unknown;
+	setText?: unknown;
+}
+
+/**
+ * True while a non-overlay custom component (e.g. the ask wizard via
+ * `ui.custom`) owns input focus. `showExtensionCustom` mounts such components
+ * in the editor container and calls `setFocus` on them; the built-in editor is
+ * the only other focusable component, and it is distinguishable by its
+ * EditorComponent text API (getText/getExpandedText/setText). Ambient
+ * empty-composer hooks (←/→ cycling, Shift+↑/↓ scroll) must yield to any
+ * component that is actively consuming keys.
+ */
+export function customComponentCapturesInput(tui: TUI | undefined): boolean {
+	if (!tui) return false;
+	const focused = (tui as unknown as { focusedComponent?: FocusedComponentLike | null }).focusedComponent;
+	if (!focused) return false;
+	if (typeof focused.handleInput !== "function") return false;
+	// The built-in editor implements the EditorComponent text API.
+	if (
+		typeof focused.getText === "function"
+		|| typeof focused.getExpandedText === "function"
+		|| typeof focused.setText === "function"
+	) {
+		return false;
+	}
+	return true;
+}
+
+/**
+ * True when ambient empty-composer keyboard hooks should yield to whatever the
+ * user is actually interacting with: a capturing modal overlay, or a custom
+ * component mounted in the composer (ui.custom without overlay: true).
+ */
+export function ambientKeysShouldYield(tui: TUI | undefined): boolean {
+	return capturingOverlayVisible(tui) || customComponentCapturesInput(tui);
+}

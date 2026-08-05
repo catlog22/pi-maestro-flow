@@ -80,7 +80,7 @@ test("single select previews the answer before explicit submission", async () =>
     }],
   }, harness.ctx);
 
-  assert.equal(harness.overlay, true);
+  assert.equal(harness.overlay, false);
   assert.ok(harness.component);
   assert.ok(harness.handler);
 
@@ -112,7 +112,7 @@ test("single select previews the answer before explicit submission", async () =>
   assert.deepEqual(result.details.answers[0].details, { Preset: "Prefer the nearest region" });
   assert.equal(result.details.answers[0].text, undefined);
   assert.equal(harness.cleared, true);
-  assert.equal(harness.overlay, true);
+  assert.equal(harness.overlay, false);
 });
 
 test("single select Enter allows details before advancing and after back navigation", async () => {
@@ -188,7 +188,7 @@ test("review uses up and down to choose submit or cancel", async () => {
   assert.equal(result.details.cancelled, true);
 });
 
-test("single select right arrow and Tab keep direct progression", async () => {
+test("single select right arrow and Tab navigate without selecting", async () => {
   const harness = createHarness();
   const pending = executeAsk({
     questions: [
@@ -197,14 +197,67 @@ test("single select right arrow and Tab keep direct progression", async () => {
     ],
   }, harness.ctx);
 
+  // → moves to the next question without selecting the highlighted option;
+  // the unanswered state is shown explicitly.
   harness.handler?.("\x1b[C");
-  assert.match(harness.component?.render(80).join("\n") ?? "", /Second question\?/);
+  let rendered = harness.component?.render(80).join("\n") ?? "";
+  assert.match(rendered, /Second question\?/);
+  assert.match(rendered, /未选择/);
+  // Tab moves on as well; unanswered questions may be skipped.
   harness.handler?.("\t");
-  assert.match(harness.component?.render(80).join("\n") ?? "", /核对答案/);
+  rendered = harness.component?.render(80).join("\n") ?? "";
+  assert.match(rendered, /核对答案/);
   harness.handler?.("\r");
 
   const result = await pending;
+  assert.deepEqual(result.details.answers.map((answer) => answer.selected), [[], []]);
+});
+
+test("breadcrumb marks answered questions with a check", async () => {
+  const harness = createHarness();
+  const pending = executeAsk({
+    questions: [
+      { question: "First question?", header: "First", options: [{ label: "A" }] },
+      { question: "Second question?", header: "Second", options: [{ label: "B" }] },
+    ],
+  }, harness.ctx);
+
+  let rendered = harness.component?.render(100).join("\n") ?? "";
+  assert.doesNotMatch(rendered, /✓First/, "unanswered question carries no check");
+
+  harness.handler?.("\r"); // Select First's option.
+  harness.handler?.("\r"); // Advance to Second.
+  rendered = harness.component?.render(100).join("\n") ?? "";
+  assert.match(rendered, /✓First/, "answered First is checked in the tab bar");
+  assert.doesNotMatch(rendered, /✓Second/, "Second is not yet answered");
+
+  harness.handler?.("\r"); // Select Second's option.
+  harness.handler?.("\r"); // Advance to the review page.
+  rendered = harness.component?.render(100).join("\n") ?? "";
+  assert.match(rendered, /✓First/, "First stays checked on review");
+  assert.match(rendered, /✓Second/, "Second is checked on review");
+
+  harness.handler?.("\r"); // Submit.
+  const result = await pending;
   assert.deepEqual(result.details.answers.map((answer) => answer.selected), [["A"], ["B"]]);
+});
+
+test("single select Enter still selects and shows the picked state", async () => {
+  const harness = createHarness();
+  const pending = executeAsk({
+    questions: [{ question: "Choose one", options: [{ label: "A" }, { label: "B" }] }],
+  }, harness.ctx);
+
+  harness.handler?.("\r"); // Enter on the highlighted option selects it.
+  const rendered = harness.component?.render(80).join("\n") ?? "";
+  assert.match(rendered, /A  已选/);
+  assert.match(rendered, /已选：A/);
+  harness.handler?.("\r"); // Enter again advances.
+  assert.match(harness.component?.render(80).join("\n") ?? "", /核对答案/);
+  harness.handler?.("\r"); // Submit.
+
+  const result = await pending;
+  assert.deepEqual(result.details.answers[0].selected, ["A"]);
 });
 
 test("single select none-of-the-above captures a custom answer", async () => {

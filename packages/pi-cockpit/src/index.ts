@@ -2,7 +2,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readFileSync, statSync } from "node:fs";
 import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
-import { capturingOverlayVisible } from "./capturing-overlay.ts";
+import { ambientKeysShouldYield } from "./capturing-overlay.ts";
 import { Key, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AgentsStore, effectiveAgentStatus, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
 import { statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
@@ -1102,7 +1102,7 @@ export default function (pi: ExtensionAPI): void {
 		sessionBarNavDisposer?.();
 		sessionBarNavDisposer = ctx.ui.onTerminalInput((data) => {
 			if (data !== "\x1b[D" && data !== "\x1b[C") return undefined;
-			if (capturingOverlayVisible(capturedTui)) return undefined;
+			if (ambientKeysShouldYield(capturedTui)) return undefined;
 			const text = ctx.ui.getEditorText();
 			if (text.trim() !== "") return undefined;
 			const roster = visibleAgentRows(agents.snapshot());
@@ -1129,7 +1129,7 @@ export default function (pi: ExtensionAPI): void {
 			const up = data === detailUp || data === legacyDetailUp;
 			const down = data === detailDown || data === legacyDetailDown;
 			if (!up && !down) return undefined;
-			if (capturingOverlayVisible(capturedTui)) return undefined;
+			if (ambientKeysShouldYield(capturedTui)) return undefined;
 			const viewingId = agents.getViewingAgent();
 			if (!sessionDetailVisible || !viewingId) return undefined;
 			const width = capturedTui?.terminal?.columns ?? 80;
@@ -1150,7 +1150,7 @@ export default function (pi: ExtensionAPI): void {
 		agentScrollDisposer?.();
 		agentScrollDisposer = ctx.ui.onTerminalInput((data) => {
 			if (data !== "\x1b[1;2A" && data !== "\x1b[1;2B") return undefined;
-			if (capturingOverlayVisible(capturedTui)) return undefined;
+			if (ambientKeysShouldYield(capturedTui)) return undefined;
 			const roster = visibleAgentRows(agents.snapshot());
 			const terminalHeight = capturedTui?.terminal?.rows;
 			const sharedPanel = sessionDetailVisible && agents.getViewingAgent() !== undefined
