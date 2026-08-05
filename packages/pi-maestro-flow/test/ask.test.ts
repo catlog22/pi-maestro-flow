@@ -6,11 +6,11 @@ import { executeAsk } from "../src/tools/ask.ts";
 import { BracketedPasteDecoder } from "../src/tui/input-text.ts";
 
 function createHarness() {
-  let component: { render(width: number): string[]; dispose?(): void } | undefined;
+  let component: { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void } | undefined;
   let inputHandler: ((data: string) => { consume?: boolean } | undefined) | undefined;
-  let placement: string | undefined;
+  let overlay = false;
+  let overlayOptions: unknown;
   let cleared = false;
-  let unsubscribed = false;
   const theme = {
     fg: (_name: string, text: string) => text,
     bg: (_name: string, text: string) => text,
@@ -18,18 +18,43 @@ function createHarness() {
   };
   const hostTui = { requestRender() {} };
   const ui = {
-    setWidget(_key: string, content: unknown, options?: { placement?: string }) {
-      if (content === undefined) {
-        cleared = true;
-        component = undefined;
-        return;
-      }
-      placement = options?.placement;
-      component = (content as (tui: typeof hostTui, theme: typeof theme) => typeof component)(hostTui, theme);
+    setWidget() {
+      throw new Error("ask wizard no longer uses setWidget");
     },
-    onTerminalInput(handler: typeof inputHandler) {
-      inputHandler = handler;
-      return () => { unsubscribed = true; };
+    custom<T>(
+      factory: (
+        tui: typeof hostTui,
+        theme: typeof theme,
+        _keybindings: unknown,
+        done: (result: T | undefined) => void,
+      ) => unknown,
+      options?: { overlay?: boolean; overlayOptions?: unknown },
+    ) {
+      overlay = options?.overlay === true;
+      overlayOptions = options?.overlayOptions;
+      return new Promise<T | undefined>((resolve) => {
+        let resolved = false;
+        const done = (result: T | undefined) => {
+          if (resolved) return;
+          resolved = true;
+          cleared = true;
+          component?.dispose?.();
+          resolve(result);
+        };
+        component = factory(hostTui, theme, {}, done) as typeof component;
+        // The TUI routes keys to the focused overlay component; the harness
+        // simulates that dispatch on the captured component.
+        inputHandler = (data: string) => {
+          if (component?.handleInput) {
+            component.handleInput(data);
+            return { consume: true };
+          }
+          return undefined;
+        };
+      });
+    },
+    onTerminalInput() {
+      throw new Error("ask wizard no longer subscribes terminal input");
     },
   };
   const ctx = { hasUI: true, ui } as unknown as ExtensionContext;
@@ -37,9 +62,9 @@ function createHarness() {
     ctx,
     get component() { return component; },
     get handler() { return inputHandler; },
-    get placement() { return placement; },
+    get overlay() { return overlay; },
+    get overlayOptions() { return overlayOptions; },
     get cleared() { return cleared; },
-    get unsubscribed() { return unsubscribed; },
   };
 }
 
@@ -55,13 +80,13 @@ test("single select previews the answer before explicit submission", async () =>
     }],
   }, harness.ctx);
 
-  assert.equal(harness.placement, "aboveEditor");
+  assert.equal(harness.overlay, true);
   assert.ok(harness.component);
   assert.ok(harness.handler);
 
   for (const width of [12, 19, 20, 40, 80]) {
     const lines = harness.component.render(width);
-    assert.ok(lines.length <= 10);
+    assert.ok(lines.length <= 12);
     assert.doesNotMatch(lines.join("\n"), /\[[ x]\]|✓/);
     if (width >= 40) assert.match(lines.join("\n"), /以上都不是/);
     for (const line of lines) assert.ok(visibleWidth(line) <= width);
@@ -87,7 +112,7 @@ test("single select previews the answer before explicit submission", async () =>
   assert.deepEqual(result.details.answers[0].details, { Preset: "Prefer the nearest region" });
   assert.equal(result.details.answers[0].text, undefined);
   assert.equal(harness.cleared, true);
-  assert.equal(harness.unsubscribed, true);
+  assert.equal(harness.overlay, true);
 });
 
 test("single select Enter allows details before advancing and after back navigation", async () => {
@@ -357,7 +382,7 @@ test("host-driven widget disposal settles the questionnaire", async () => {
   harness.component?.dispose?.();
   const result = await pending;
   assert.equal(result.details.cancelled, true);
-  assert.equal(harness.unsubscribed, true);
+  assert.equal(harness.cleared, true);
 });
 
 test("questionnaire blocks invisible input and submit below 20 columns", async () => {

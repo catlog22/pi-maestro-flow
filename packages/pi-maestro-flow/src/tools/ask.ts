@@ -1,5 +1,5 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { isTeammateChild, requestTeammateInteraction } from "../permissions/teammate-relay.ts";
 import {
@@ -79,7 +79,7 @@ export async function executeAsk(
 
   const mode = (ctx as ExtensionContext & { mode?: string }).mode;
   const terminalUi = mode === "tui"
-    || (mode === undefined && Boolean(ctx.ui.setWidget) && Boolean(ctx.ui.onTerminalInput));
+    || (mode === undefined && Boolean(ctx.ui.custom) && Boolean(ctx.ui.onTerminalInput));
   if (!terminalUi) {
     const answers = await showAskDialogs(questions, ctx);
     return answers ? askSuccess(answers) : cancelledAsk();
@@ -221,28 +221,11 @@ async function showAskWizard(
   questions: QuestionSpec[],
   ctx: ExtensionContext,
 ): Promise<AskAnswer[] | undefined> {
-  const widgetKey = "ask-user-question-panel";
-  return new Promise<AskAnswer[] | undefined>((resolve) => {
-    let panel: {
-      render(width: number): string[];
-      handleInput(data: string): void;
-      invalidate(): void;
-      dispose?(): void;
-    } | undefined;
-    let unsubscribe = () => {};
-    let settled = false;
-
-    const done = (result: AskAnswer[] | undefined): void => {
-      if (settled) return;
-      settled = true;
-      unsubscribe();
-      ctx.ui.setWidget(widgetKey, undefined);
-      resolve(result);
-    };
-
-    ctx.ui.setWidget(
-      widgetKey,
-      (tui, theme) => {
+  // Rendered as a modal overlay (like /todo and /goal) so the cockpit's
+  // empty-composer ←/→ agent cycling yields to the wizard's own ←→ question
+  // navigation instead of consuming the keys first.
+  return ctx.ui.custom<AskAnswer[] | undefined>(
+    (tui, theme, _keybindings, done) => {
       const optionsList = questions.map((q) => {
         const options = q.options ?? [];
         if (options.length === 0 || options.some((option) => option.label === NONE_OPTION_LABEL)) {
@@ -1062,15 +1045,19 @@ async function showAskWizard(
             : step === questions.length
               ? renderSubmit(safeWidth)
               : renderQuestion(safeWidth);
-          return lines.map((line) => truncateToWidth(line, safeWidth, "…"));
+          return frameAskCard(
+            lines.map((line) => truncateToWidth(line, safeWidth, "…")),
+            safeWidth,
+            theme,
+          );
         },
 
         handleInput(data: string): void {
           if (lastWidth < 20) {
-            if (data === "\x1b") done(undefined);
+            if (data === "\x1b" || data === "\x03") done(undefined);
             return;
           }
-          decodeInput(data);
+          decodeInput(data === "\x03" ? "\x1b" : data);
         },
 
         invalidate() {},
@@ -1079,15 +1066,25 @@ async function showAskWizard(
           done(undefined);
         },
       };
-      panel = createdPanel;
       return createdPanel;
-      },
-      { placement: "aboveEditor" },
-    );
+    },
+    { overlay: true, overlayOptions: { anchor: "center", width: "94%", maxHeight: "90%" } },
+  );
+}
 
-    unsubscribe = ctx.ui.onTerminalInput((data) => {
-      panel?.handleInput(data === "\x03" ? "\x1b" : data);
-      return { consume: true };
-    });
-  });
+function pad(value: string, width: number): string {
+  const fitted = truncateToWidth(value, width, "…");
+  return fitted + " ".repeat(Math.max(0, width - visibleWidth(fitted)));
+}
+
+/**
+ * Frame the wizard's lines in a rounded card so the centered overlay reads as
+ * a panel (mirrors TodoOverlay/GoalOverlay presentation).
+ */
+function frameAskCard(lines: readonly string[], width: number, theme: Theme): string[] {
+  const inner = Math.max(0, width - 2);
+  const edge = "─".repeat(inner);
+  const border = (glyph: string) => theme.bg("customMessageBg", theme.fg("borderMuted", glyph));
+  const fill = (line: string): string => theme.bg("customMessageBg", pad(line, width));
+  return [border(`╭${edge}╮`), ...lines.map(fill), border(`╰${edge}╯`)];
 }

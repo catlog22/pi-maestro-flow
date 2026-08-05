@@ -943,6 +943,10 @@ export default function (pi: ExtensionAPI): void {
 		sessionBarNavDisposer?.();
 		sessionBarNavDisposer = ctx.ui.onTerminalInput((data) => {
 			if (data !== "\x1b[D" && data !== "\x1b[C") return undefined;
+			// A modal overlay (e.g. /todo, /goal, /swarm, the ask wizard) owns
+			// ←/→ while it is up; cycling the agent view must not steal them
+			// from the surface the user is actually interacting with.
+			if (capturedTui?.hasOverlay()) return undefined;
 			const text = ctx.ui.getEditorText();
 			if (text.trim() !== "") return undefined;
 			const roster = visibleAgentRows(agents.snapshot());
