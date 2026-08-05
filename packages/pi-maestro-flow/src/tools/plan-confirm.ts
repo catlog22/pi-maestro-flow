@@ -13,17 +13,22 @@ import type {
   PlanExecutionContextMode,
   PlanWorkflowTarget,
 } from "./plan-store.ts";
+import { FOLLOW_SESSION_LABEL } from "./plan-review.ts";
 
 export type PlanConfirmationAction =
   | "execute"
   | "modify"
   | "continue"
+  | "review"
+  | "apply-feedback"
   | "exit-plan"
   | "close";
 
 export interface PlanConfirmationDecision {
   action: PlanConfirmationAction;
   execution?: PlanExecutionChoice;
+  /** Selected review model (provider/model or FOLLOW_SESSION_LABEL) when review is triggered. */
+  reviewModel?: string;
 }
 
 export interface PlanWorkflowConfirmationTarget {
@@ -45,6 +50,12 @@ export interface PlanConfirmationOptions {
   contextPercent?: number;
   defaultExecution?: PlanExecutionChoice;
   workflow?: PlanWorkflowConfirmationOptions;
+  /** Markdown report from the AI review subagent; shown in its own preview panel, never in the Plan. */
+  reviewReport?: string;
+  /** Available review model references (provider/model); renders the Review model row. */
+  reviewModels?: string[];
+  /** Current review-model selection seed (provider/model or FOLLOW_SESSION_LABEL). */
+  reviewModel?: string;
 }
 
 interface ActionItem {
@@ -57,7 +68,10 @@ type SelectionRow =
   | { kind: "backend" }
   | { kind: "target" }
   | { kind: "context" }
+  | { kind: "reviewModel" }
   | { kind: "action"; item: ActionItem };
+
+type PreviewMode = "plan" | "report";
 
 const CTRL_ENTER_SEQUENCES = new Set([
   "\x1b[13;5u",
@@ -88,18 +102,40 @@ export async function openPlanConfirmation(
         { action: "modify", label: "View / modify Plan", description: "Open the full-screen Markdown editor" },
         { action: "continue", label: "Continue discussion", description: "Enter feedback or a question" },
         { action: "exit-plan", label: "Exit Plan mode", description: "Keep the draft without approval" },
+        { action: "review", label: "Review with AI subagent", description: "Spawn a read-only subagent to audit the Plan; the report opens in its own panel" },
+        ...(options.reviewReport
+          ? [{ action: "apply-feedback" as const, label: "Apply review feedback", description: "Send the AI review report back to the main agent to revise the Plan" }]
+          : []),
       ];
-      const markdown = new Markdown(options.markdown, 0, 0, markdownTheme(theme));
+      const reviewModelOptions = options.reviewModels?.length
+        ? [FOLLOW_SESSION_LABEL, ...options.reviewModels]
+        : [];
+      let reviewSelection = reviewModelOptions.length
+        ? (options.reviewModel && reviewModelOptions.includes(options.reviewModel)
+          ? options.reviewModel
+          : FOLLOW_SESSION_LABEL)
+        : FOLLOW_SESSION_LABEL;
+      let previewMode: PreviewMode = options.reviewReport ? "report" : "plan";
+      let markdown = new Markdown(currentPreviewSource(), 0, 0, markdownTheme(theme));
       let selected = 0;
       let previewOffset = 0;
       let previewMaxOffset = 0;
-      let status = "";
+      let status = options.reviewReport
+        ? "AI review report attached — R toggles Plan/Report, PgUp/PgDn scrolls"
+        : "";
       let lastWidth = 80;
+
+      function currentPreviewSource(): string {
+        return previewMode === "report" && options.reviewReport
+          ? options.reviewReport
+          : options.markdown;
+      }
 
       const rows = (): SelectionRow[] => [
         { kind: "backend" },
         ...(backend === "workflow" ? [{ kind: "target" } as const] : []),
         { kind: "context" },
+        ...(reviewModelOptions.length ? [{ kind: "reviewModel" } as const] : []),
         ...actions.map((item): SelectionRow => ({ kind: "action", item })),
       ];
 
@@ -121,7 +157,9 @@ export async function openPlanConfirmation(
       function complete(action: PlanConfirmationAction): void {
         done(action === "execute"
           ? { action, execution: executionChoice() }
-          : { action });
+          : action === "review" && reviewModelOptions.length > 0
+            ? { action, reviewModel: reviewSelection }
+            : { action });
       }
 
       function changeControl(row: SelectionRow, direction: -1 | 1): void {
@@ -152,6 +190,12 @@ export async function openPlanConfirmation(
             return;
           }
           contextMode = contextMode === "current" ? "compact" : "current";
+          return;
+        }
+        if (row.kind === "reviewModel") {
+          const index = reviewModelOptions.indexOf(reviewSelection);
+          reviewSelection = reviewModelOptions[(index + direction + reviewModelOptions.length) % reviewModelOptions.length]
+            ?? reviewModelOptions[0]!;
         }
       }
 
@@ -174,14 +218,14 @@ export async function openPlanConfirmation(
           const selectedRow = selectionRows[selected] ?? selectionRows[0]!;
           if (safeWidth < 24) {
             return [
-              truncateToWidth(`Plan confirm · ${selected + 1}/${selectionRows.length} ${rowLabel(selectedRow, options, backend, workflowTarget, contextMode)}`, safeWidth, "…"),
+              truncateToWidth(`Plan confirm · ${selected + 1}/${selectionRows.length} ${rowLabel(selectedRow, actions, reviewSelection, options, backend, workflowTarget, contextMode)}`, safeWidth, "…"),
               truncateToWidth(actionFooter(safeWidth, ["Esc exit", "Enter choose", "↑↓ navigate"]), safeWidth, "…"),
             ];
           }
 
           const innerWidth = Math.max(1, safeWidth - 2);
           const terminalRows = process.stdout?.rows ?? 30;
-          const previewHeight = Math.max(4, Math.min(14, terminalRows - 13));
+          const previewHeight = Math.max(4, Math.min(14, terminalRows - 13) - Math.max(0, selectionRows.length - 6));
           const renderedPlan = markdown.render(Math.max(1, innerWidth - 2));
           const maxOffset = Math.max(0, renderedPlan.length - previewHeight);
           previewMaxOffset = maxOffset;
@@ -196,7 +240,8 @@ export async function openPlanConfirmation(
             "←→ change mode",
             "↑↓ navigate",
             "Ctrl+Enter execute",
-            "PgUp/PgDn plan",
+            ...(options.reviewReport ? ["R plan/report"] : []),
+            "PgUp/PgDn scroll",
           ]);
           const rendered = [
             `${theme.bold("Plan confirmation")}  ${theme.fg("dim", options.pathLabel ?? "current.md")}`,
@@ -204,12 +249,12 @@ export async function openPlanConfirmation(
             ...preview.map((line) => ` ${line}`),
           ];
           while (rendered.length < previewHeight + 2) rendered.push("");
-          rendered.push(theme.fg("dim", `Plan ${range}`));
+          rendered.push(theme.fg("dim", `${previewMode === "report" ? "Report" : "Plan"} ${range}`));
           rendered.push(theme.fg("dim", "─".repeat(innerWidth)));
           for (let index = 0; index < selectionRows.length; index++) {
             const row = selectionRows[index]!;
             const marker = index === selected ? "›" : " ";
-            const label = rowLabel(row, options, backend, workflowTarget, contextMode);
+            const label = rowLabel(row, actions, reviewSelection, options, backend, workflowTarget, contextMode);
             const description = innerWidth >= 76 ? `  ${theme.fg("dim", `— ${rowDescription(row, options)}`)}` : "";
             const line = `${marker} ${label}${description}`;
             rendered.push(index === selected
@@ -244,9 +289,17 @@ export async function openPlanConfirmation(
             previewOffset = Math.max(0, previewOffset - 5);
           } else if (matchesKey(data, Key.pageDown)) {
             previewOffset = Math.min(previewMaxOffset, previewOffset + 5);
-          } else if (/^[1-4]$/.test(data)) {
-            complete(actions[Number(data) - 1]!.action);
-            return;
+          } else if (options.reviewReport && /^[rR]$/.test(data)) {
+            previewMode = previewMode === "report" ? "plan" : "report";
+            markdown = new Markdown(currentPreviewSource(), 0, 0, markdownTheme(theme));
+            previewOffset = 0;
+            previewMaxOffset = 0;
+          } else if (/^[1-9]$/.test(data)) {
+            const index = Number(data) - 1;
+            if (index < actions.length) {
+              complete(actions[index]!.action);
+              return;
+            }
           } else if (matchesKey(data, Key.enter)) {
             choose();
             return;
@@ -305,6 +358,8 @@ function workflowUnavailableMessage(options: PlanConfirmationOptions): string {
 
 function rowLabel(
   row: SelectionRow,
+  actions: ActionItem[],
+  reviewSelection: string,
   options: PlanConfirmationOptions,
   backend: PlanExecutionBackend,
   target: PlanWorkflowTarget,
@@ -317,7 +372,12 @@ function rowLabel(
     return `Workflow target  [Current: ${id}]`;
   }
   if (row.kind === "context") return `Context  [${context === "compact" ? "Compact current" : "Current"}]`;
-  return `${row.item.action === "execute" ? "1" : row.item.action === "modify" ? "2" : row.item.action === "continue" ? "3" : "4"}. ${row.item.label}`;
+  if (row.kind === "reviewModel") {
+    return `Review model  [${reviewSelection}]`;
+  }
+  const number = actions.findIndex((item) => item.action === row.item.action);
+  const prefix = number >= 0 ? `${number + 1}. ` : "";
+  return `${prefix}${row.item.label}`;
 }
 
 function rowDescription(row: SelectionRow, options: PlanConfirmationOptions): string {
@@ -328,6 +388,7 @@ function rowDescription(row: SelectionRow, options: PlanConfirmationOptions): st
       : "Select the canonical Workflow Session target";
   }
   if (row.kind === "context") return "Keep this Pi session; compaction only replaces model context";
+  if (row.kind === "reviewModel") return "Model used by the AI review subagent; ←→ to change, persisted on review";
   return row.item.description;
 }
 

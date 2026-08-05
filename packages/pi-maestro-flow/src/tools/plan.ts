@@ -33,6 +33,14 @@ import {
   type PlanSessionIdentity,
   type PlanWorkflowBinding,
 } from "./plan-store.ts";
+import {
+  FOLLOW_SESSION_LABEL,
+  listAvailableReviewModels,
+  loadPlanReviewModelSetting,
+  resolvePlanReviewModel,
+  runPlanReview,
+  saveLocalPlanReviewModelSetting,
+} from "./plan-review.ts";
 import { getVisibleTasks } from "./todo.ts";
 import {
   type CompactionArbiter,
@@ -193,6 +201,13 @@ let activePlanOperation: PlanOperationIdentity | undefined;
 let activePlanHandoffRequest: PlanHandoffRequestIdentity | undefined;
 let pendingCleanContextCompaction: PlanCleanContextCompactionRequest | undefined;
 let planContextReplacement: PlanContextReplacement | undefined;
+// AI review state: the report is attached to the confirmation preview only when
+// it still belongs to the current draft revision.
+let latestReviewReport: string | undefined;
+let latestReviewModel: string | undefined;
+let reviewReportRevision = -1;
+// Last review-model selection (provider/model or FOLLOW_SESSION_LABEL) to seed the next confirm UI.
+let latestReviewSelection: string | undefined;
 // The handoff gate reads todos only. Goal state was decoupled from it in 39a5f2dc;
 // the getters that used to feed it are gone so they cannot be wired back by accident.
 let hasExecutableTodoForHandoff = (handoffKey: string) => getVisibleTasks().some((task) =>
@@ -244,6 +259,10 @@ export function clearPlan(): void {
   latestHandoffKey = undefined;
   latestExecution = undefined;
   latestWorkflowBinding = undefined;
+  latestReviewReport = undefined;
+  latestReviewModel = undefined;
+  reviewReportRevision = -1;
+  latestReviewSelection = undefined;
   awaitingAction = false;
 }
 
@@ -767,6 +786,7 @@ async function reviewPlan(
   allowConfirm: boolean,
   handoffDelivery: PlanHandoffDelivery,
   operation: PlanOperationIdentity,
+  signal?: AbortSignal,
 ): Promise<PlanReviewOutcome> {
   if (!ctx.hasUI) {
     if (isCurrentPlanOperation(ctx, operation, false)) {
@@ -786,9 +806,21 @@ async function reviewPlan(
     return { approved: false, exited: false };
   }
 
+  let reviewModels: string[] | undefined;
   while (isCurrentPlanOperation(ctx, operation)) {
     const workflow = await workflowConfirmation(ctx);
     if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
+    if (reviewModels === undefined && ctx.hasUI) {
+      reviewModels = await listAvailableReviewModels(ctx);
+      if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
+    }
+    const configuredReview = reviewModels?.length
+      ? loadPlanReviewModelSetting(ctx.cwd, ctx.isProjectTrusted())
+      : undefined;
+    const reviewSelection = reviewModels?.length
+      ? (latestReviewSelection
+        ?? (configuredReview && reviewModels.includes(configuredReview) ? configuredReview : FOLLOW_SESSION_LABEL))
+      : undefined;
     const decision = await openPlanConfirmation(ctx, {
       markdown: latestPlan ?? "",
       pathLabel: store.currentPath,
@@ -796,13 +828,75 @@ async function reviewPlan(
       contextPercent: ctx.getContextUsage?.()?.percent ?? undefined,
       defaultExecution: latestExecution,
       workflow,
+      reviewReport: reviewReportRevision === latestRevision ? latestReviewReport : undefined,
+      reviewModel: reviewSelection,
+      reviewModels,
     });
     if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
     const action = decision.action;
     if (action === "modify") {
+      latestReviewReport = undefined;
+      reviewReportRevision = -1;
       await editPlan(ctx, store.currentPath, operation);
       if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
       continue;
+    }
+    if (action === "review") {
+      if (!extensionApi) {
+        ctx.ui.notify("AI review is unavailable: extension API is not initialized.", "warning");
+        continue;
+      }
+      const chosen = decision.reviewModel;
+      let model: string;
+      let label: string;
+      if (chosen && chosen !== FOLLOW_SESSION_LABEL) {
+        model = chosen;
+        label = chosen;
+        latestReviewSelection = chosen;
+        try { await saveLocalPlanReviewModelSetting(ctx.cwd, chosen); } catch { /* best effort */ }
+      } else if (chosen === FOLLOW_SESSION_LABEL) {
+        const sessionKey = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+        if (!sessionKey) {
+          ctx.ui.notify("AI review unavailable: no session model is set.", "warning");
+          continue;
+        }
+        model = sessionKey;
+        label = FOLLOW_SESSION_LABEL;
+        latestReviewSelection = FOLLOW_SESSION_LABEL;
+        try { await saveLocalPlanReviewModelSetting(ctx.cwd, null); } catch { /* best effort */ }
+      } else {
+        const resolution = await resolvePlanReviewModel(ctx);
+        if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
+        model = resolution.model;
+        label = resolution.label;
+        latestReviewSelection = FOLLOW_SESSION_LABEL;
+      }
+      ctx.ui.notify(`Running AI review of the Plan with ${label}…`, "info");
+      const review = await runPlanReview(extensionApi, ctx, {
+        markdown: latestPlan ?? "",
+        model,
+        signal,
+      });
+      if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
+      if (review.ok && review.report) {
+        latestReviewReport = review.report;
+        latestReviewModel = label;
+        reviewReportRevision = latestRevision;
+        ctx.ui.notify("AI review complete; report opens in its own panel.", "info");
+      } else {
+        latestReviewReport = undefined;
+        reviewReportRevision = -1;
+        ctx.ui.notify(`AI review failed: ${review.error ?? "unknown error"}`, "warning");
+      }
+      continue;
+    }
+    if (action === "apply-feedback") {
+      if (latestReviewReport && reviewReportRevision === latestRevision) {
+        queuePlanDiscussion(ctx, buildReviewFeedbackMessage(latestReviewReport));
+      } else {
+        ctx.ui.notify("No review report is attached to the current Plan revision.", "warning");
+      }
+      return { approved: false, exited: false };
     }
     if (action === "continue") {
       const discussion = await ctx.ui.input(
@@ -855,6 +949,15 @@ async function reviewPlan(
     return { approved: true, exited: true, executionMode, executionChoice, executionMessage };
   }
   return { approved: false, exited: false };
+}
+
+function buildReviewFeedbackMessage(report: string): string {
+  return [
+    "## AI Review Feedback (Plan)",
+    "The following is the AI review report for the current Plan draft. Revise the Plan with plan-update to address the valid findings (especially P0/P1), then present it again with plan-confirm. If you disagree with a finding, explain why in the discussion.",
+    "",
+    report,
+  ].join("\n");
 }
 
 function queuePlanDiscussion(ctx: PlanContext, discussion: string): void {
@@ -1333,14 +1436,14 @@ export function registerPlanTools(pi: ExtensionAPI): void {
   const confirmTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: "plan-confirm",
     label: "Plan Confirm",
-    description: "Present the Markdown Plan in an interactive UI with choices to execute, modify, discuss, or exit. The user always decides. Call in the same turn as plan-update when the draft is decision-complete.",
-    promptSnippet: "Standard presentation step after plan-update. Renders the plan and gives the user full control over next steps.",
+    description: "Present the Markdown Plan in an interactive UI with choices to execute, modify, discuss, review with an AI subagent, or exit. The user always decides. Call in the same turn as plan-update when the draft is decision-complete.",
+    promptSnippet: "Standard presentation step after plan-update. Renders the plan and gives the user full control over next steps, including an optional AI review subagent.",
     parameters: EmptyPlanParams,
-    async execute(_id, _params, _signal, _onUpdate, ctx) {
+    async execute(_id, _params, signal, _onUpdate, ctx) {
       const operation = beginPlanOperation(ctx);
       const blocked = requirePlanMode("confirm");
       if (blocked) return blocked;
-      const outcome = await reviewPlan(ctx, true, "tool-result", operation);
+      const outcome = await reviewPlan(ctx, true, "tool-result", operation, signal);
       if (!isCurrentPlanOperation(ctx, operation)) return supersededResult("confirm");
       onPlanModeChanged?.(ctx);
       const summary = outcome.approved

@@ -319,3 +319,91 @@ test("Plan editor ignores Esc while approval is in flight", async () => {
   const result = await pending;
   assert.equal(result.action, "approved");
 });
+
+test("Plan confirmation exposes AI review as the fifth action", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, { markdown: "# Plan" });
+  assert.ok(harness.component);
+  const rendered = harness.component.render(80).join("\n");
+  assert.match(rendered, /5\. Review with AI subagent/);
+  harness.component.handleInput("5");
+  assert.deepEqual(await pending, { action: "review" });
+});
+
+test("Plan confirmation renders the attached review report with an apply-feedback action", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: "# Approved Plan\n\n- Preserve boundaries",
+    reviewReport: "## 总体结论\n建议 修订。\n\n## 问题清单\n- P1 缺少验收标准",
+    reviewModels: ["provider/reviewer"],
+    reviewModel: "provider/reviewer",
+  });
+  assert.ok(harness.component);
+  const rendered = harness.component.render(80).join("\n");
+  assert.match(rendered, /Report \d+(?:-\d+)?(?:\/\d+)?/);
+  assert.match(rendered, /总体结论/);
+  assert.match(rendered, /5\. Review with AI subagent/);
+  assert.match(rendered, /Review model  \[provider\/reviewer\]/);
+  assert.match(rendered, /6\. Apply review feedback/);
+  assert.match(rendered, /AI review report attached/);
+  harness.component.handleInput("6");
+  assert.deepEqual(await pending, { action: "apply-feedback" });
+});
+
+test("Plan confirmation report panel defaults to Report and toggles with R", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: "# Approved Plan\n\n- First step",
+    reviewReport: "## 总体结论\n建议 修订。",
+  });
+  assert.ok(harness.component);
+  let rendered = harness.component.render(80).join("\n");
+  assert.match(rendered, /Report \d+(?:-\d+)?(?:\/\d+)?/);
+  assert.match(rendered, /总体结论/);
+  harness.component.handleInput("r");
+  rendered = harness.component.render(80).join("\n");
+  assert.match(rendered, /Plan \d+(?:-\d+)?(?:\/\d+)?/);
+  assert.doesNotMatch(rendered, /总体结论/);
+  harness.component.handleInput("R");
+  rendered = harness.component.render(80).join("\n");
+  assert.match(rendered, /Report \d+(?:-\d+)?(?:\/\d+)?/);
+  harness.component.handleInput("\x1b");
+  assert.deepEqual(await pending, { action: "close" });
+});
+
+test("Plan confirmation cycles the review model row and carries it in the review decision", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: "# Plan",
+    reviewModels: ["provider/a", "provider/b"],
+  });
+  assert.ok(harness.component);
+  let rendered = harness.component.render(80).join("\n");
+  assert.match(rendered, /Review model  \[Follow session model\]/);
+  // navigate to the review-model row: backend(0), context(1), reviewModel(2)
+  harness.component.handleInput("\x1b[B");
+  harness.component.handleInput("\x1b[B");
+  harness.component.handleInput("\x1b[C");
+  rendered = harness.component.render(80).join("\n");
+  assert.match(rendered, /Review model  \[provider\/a\]/);
+  harness.component.handleInput("5");
+  assert.deepEqual(await pending, { action: "review", reviewModel: "provider/a" });
+});
+
+test("Plan confirmation keeps review rows within the overlay bounds", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: "# Plan\n\nBody",
+    reviewReport: Array.from({ length: 30 }, (_, index) => `Finding ${index + 1}`).join("\n"),
+    reviewModels: ["provider/a", "provider/b"],
+    reviewModel: "provider/a",
+  });
+  assert.ok(harness.component);
+  for (const width of [40, 80, 120]) {
+    const lines = harness.component.render(width);
+    assert.ok(lines.length <= 28, `width ${width}: ${lines.length} lines`);
+    for (const line of lines) assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
+  }
+  harness.component.handleInput("\x1b");
+  assert.deepEqual(await pending, { action: "close" });
+});
