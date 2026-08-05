@@ -1,5 +1,6 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, type Component, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
+import { capturingOverlayVisible } from "./capturing-overlay.ts";
 import type { MaestroUiStateSnapshotV1 } from "./public/v1/events.ts";
 import { enumerateNavRows, renderSidebar, renderSidebarError } from "./sidebar-render.ts";
 import {
@@ -120,6 +121,8 @@ export interface SidebarControllerOptions {
 	onActivateRow?(id: string): void;
 	/** Terminal columns used for the compact flag when building nav rows. */
 	getNavWidth?(): number;
+	/** TUI instance for detecting capturing overlays while browse mode is active. */
+	getTui?(): TUI | undefined;
 }
 
 export function createSidebarController(options: SidebarControllerOptions): SidebarController {
@@ -276,6 +279,9 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 	};
 	const handleFocusInput = (data: string): { consume?: boolean; data?: string } | undefined => {
 		if (!focused) return undefined;
+		// A capturing modal overlay owns the keyboard while up; browse mode must
+		// yield to it (same class as the preempt events for teammate overlays).
+		if (capturingOverlayVisible(options.getTui?.())) return undefined;
 		if (matchesKey(data, Key.escape)) {
 			endFocus();
 			return { consume: true };

@@ -2,6 +2,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readFileSync, statSync } from "node:fs";
 import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
+import { capturingOverlayVisible } from "./capturing-overlay.ts";
 import { Key, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AgentsStore, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
 import { statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
@@ -760,6 +761,7 @@ export default function (pi: ExtensionAPI): void {
 				req();
 			},
 			getNavWidth: () => capturedTui?.terminal.columns ?? 80,
+			getTui: () => capturedTui,
 		});
 		return sidebarController;
 	};
@@ -939,14 +941,13 @@ export default function (pi: ExtensionAPI): void {
 		installSessionBar(ctx);
 		// ←/→ (empty composer) cycles the session bar through [main, ...agents]
 		// and selects the highlighted session. While composing, the arrows keep
-		// moving the text cursor.
+		// moving the text cursor. A capturing modal overlay (e.g. /todo, /goal,
+		// /swarm, the ask wizard) owns ←/→ while it is up; cycling the agent
+		// view must not steal them from the surface the user is on.
 		sessionBarNavDisposer?.();
 		sessionBarNavDisposer = ctx.ui.onTerminalInput((data) => {
 			if (data !== "\x1b[D" && data !== "\x1b[C") return undefined;
-			// A modal overlay (e.g. /todo, /goal, /swarm, the ask wizard) owns
-			// ←/→ while it is up; cycling the agent view must not steal them
-			// from the surface the user is actually interacting with.
-			if (capturedTui?.hasOverlay()) return undefined;
+			if (capturingOverlayVisible(capturedTui)) return undefined;
 			const text = ctx.ui.getEditorText();
 			if (text.trim() !== "") return undefined;
 			const roster = visibleAgentRows(agents.snapshot());
@@ -973,6 +974,7 @@ export default function (pi: ExtensionAPI): void {
 			const up = data === detailUp || data === legacyDetailUp;
 			const down = data === detailDown || data === legacyDetailDown;
 			if (!up && !down) return undefined;
+			if (capturingOverlayVisible(capturedTui)) return undefined;
 			const viewingId = agents.getViewingAgent();
 			if (!sessionDetailVisible || !viewingId) return undefined;
 			const width = capturedTui?.terminal?.columns ?? 80;
@@ -993,6 +995,7 @@ export default function (pi: ExtensionAPI): void {
 		agentScrollDisposer?.();
 		agentScrollDisposer = ctx.ui.onTerminalInput((data) => {
 			if (data !== "\x1b[1;2A" && data !== "\x1b[1;2B") return undefined;
+			if (capturingOverlayVisible(capturedTui)) return undefined;
 			const roster = visibleAgentRows(agents.snapshot());
 			const terminalHeight = capturedTui?.terminal?.rows;
 			const sharedPanel = sessionDetailVisible && agents.getViewingAgent() !== undefined

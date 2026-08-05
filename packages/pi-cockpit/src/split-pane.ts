@@ -4,6 +4,7 @@
  */
 import { matchesKey } from "@earendil-works/pi-tui";
 import type { OverlayOptions, TUI } from "@earendil-works/pi-tui";
+import { capturingOverlayVisible } from "./capturing-overlay.ts";
 import { attachViewportStability, type ViewportStabilityPatch } from "./viewport-stability.ts";
 import { acquireMouseReporting, flushMouseReportingWrites, type MouseReportingLease } from "./mouse-reporting.ts";
 
@@ -277,6 +278,9 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 	};
 
 	const handleResizeInput = (data: string): InputResult => {
+		// A capturing modal overlay owns the keyboard (and mouse) while up; the
+		// resize hook must not swallow its keys.
+		if (capturingOverlayVisible(tui)) return undefined;
 		const mouse = parseSgrMouseEvent(data);
 		if (mouse) {
 			if (mouse.release) {
