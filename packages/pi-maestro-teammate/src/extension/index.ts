@@ -1241,7 +1241,11 @@ export default function registerTeammateExtension(
       const singleTask = normalizedTasks[0];
       // Agents spawned by this root dispatch may dispatch at most
       // maxNestingDepth levels below themselves (0 forbids nested calls).
-      const childMaxDispatchDepth = rootChildMaxDispatchDepth(params.maxNestingDepth);
+      // Per-task values override the top-level default; the graph option uses
+      // the tightest budget so spawned-child diagnostics stay conservative.
+      const childMaxDispatchDepth = isMultiTask
+        ? Math.min(...normalizedTasks.map((task) => rootChildMaxDispatchDepth(task.maxNestingDepth)))
+        : rootChildMaxDispatchDepth(singleTask.maxNestingDepth);
       const singleRunParams = {
         agent: singleTask.agent,
         task: singleTask.prompt,
@@ -1404,8 +1408,9 @@ export default function registerTeammateExtension(
             spawnedBy: correlationId,
             // Graph tasks belong to their dispatch, so they share its depth;
             // a teammate call made *by* one of them is what advances it.
+            // Each task's own maxNestingDepth sets its agent's nesting budget.
             depth: activeAgent.depth,
-            maxDispatchDepth: childMaxDispatchDepth,
+            maxDispatchDepth: rootChildMaxDispatchDepth(task.maxNestingDepth),
             status: "pending",
             phase: "starting",
             runtimeGeneration: 1,

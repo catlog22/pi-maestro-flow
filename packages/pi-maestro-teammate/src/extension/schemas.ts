@@ -106,6 +106,16 @@ export const TaskSpec = Type.Object({
         "Foreground wait window in milliseconds. If it elapses first, the dispatch moves to background and continues running; for graphs, the shortest task window applies to the whole dispatch.",
     }),
   ),
+  maxNestingDepth: Type.Optional(
+    Type.Integer({
+      // Bound must match MAX_DEFAULT_DEPTH in runs/execution-infra.ts; the
+      // runtime re-validates as a second line of defense.
+      minimum: 0,
+      maximum: 2,
+      description:
+        "Nesting budget override for the agent spawned by this task; overrides the top-level maxNestingDepth. 0 forbids nested teammate calls by that agent. Omit to inherit the top-level value (which itself defaults to the global ceiling). Only 0 and 1 are effective; 2 is capped to 1 by the global 2-level ceiling and anything above 2 is rejected.",
+    }),
+  ),
 }, { additionalProperties: false });
 
 // ---------------------------------------------------------------------------
@@ -162,8 +172,12 @@ export const TeammateParams = Type.Object({
 
   maxNestingDepth: Type.Optional(
     Type.Integer({
+      // Bound must match MAX_DEFAULT_DEPTH in runs/execution-infra.ts; the
+      // runtime re-validates as a second line of defense.
+      minimum: 0,
+      maximum: 2,
       description:
-        "How many levels of nested teammate dispatch the agents spawned by this call may perform below themselves. Evaluated at the root dispatch: 0 forbids nested calls entirely (the assigned agents cannot dispatch teammates). The only effective values are 0 and 1 — 2 is capped to 1 by the global 2-level ceiling and anything above 2 is rejected, so deeper nesting is unreachable. Inside a spawned agent this parameter can only tighten the parent's budget — it can never extend depth beyond what the parent allowed; under the current ceiling the parent budget already forbids grandchildren, so passing 0 here is at most an explicit no-further-nesting marker.",
+        "How many levels of nested teammate dispatch the agents spawned by this call may perform below themselves. Default when omitted: the global ceiling. Per-task maxNestingDepth overrides this per task; otherwise every task inherits this value. Evaluated at the dispatch: 0 forbids nested calls entirely (the assigned agents cannot dispatch teammates). The only effective values are 0 and 1 — 2 is capped to 1 by the global 2-level ceiling and anything above 2 is rejected, so deeper nesting is unreachable. Inside a spawned agent this parameter can only tighten the parent's budget — it can never extend depth beyond what the parent allowed; under the current ceiling the parent budget already forbids grandchildren, so passing 0 here is at most an explicit no-further-nesting marker.",
     }),
   ),
 
@@ -245,7 +259,7 @@ export const TeammateSendParams = Type.Object({
   message: Type.Optional(
     Type.String({
       description:
-        'Message content. Required for "steer" and "follow_up"; optional for "abort".',
+        'Message content. Required for "steer" and "follow_up" (the default mode); optional only for "abort".',
     }),
   ),
   mode: Type.Optional(
@@ -257,7 +271,14 @@ export const TeammateSendParams = Type.Object({
         'Delivery mode. "steer" interrupts the current turn, "follow_up" queues after it, "abort" terminates the agent.',
     }),
   ),
-}, { additionalProperties: false });
+}, {
+  additionalProperties: false,
+  // message is required unless the mode is explicitly "abort". The guard uses
+  // required:["mode"] so a missing mode (default follow_up) still demands a
+  // message; the runtime enforces the same contract as a second line.
+  if: { not: { required: ["mode"], properties: { mode: { const: "abort" } } } },
+  then: { required: ["message"] },
+});
 
 export const TeammateListParams = Type.Object({
   view: Type.Optional(

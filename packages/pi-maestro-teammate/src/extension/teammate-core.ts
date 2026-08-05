@@ -204,7 +204,7 @@ export const TEAMMATE_PROMPT_GUIDELINES = [
   "Use teammate tasks for parallel or DAG work; {name} and {name.field} references create dependencies between named tasks, and dependsOn declares ordering without injecting output.",
   "Give every multi-task teammate item a stable unique name so nested work remains traceable and addressable; a {ref} that matches no task name is passed through as literal text.",
   "Set teammate concurrency explicitly for provider-safe fan-out; background defaults to false, so the call waits for results until completion or its foreground timeoutMs window, then moves unfinished work to background without terminating it.",
-  "maxNestingDepth is evaluated at the root dispatch: 0 disables nested teammate calls for the spawned agents, and only 0 and 1 are effective (2 is capped to 1 by the global 2-level ceiling; above 2 is rejected). Nested dispatches cannot extend that depth — at most they may pass maxNestingDepth: 0 as an explicit no-further-nesting marker.",
+  "maxNestingDepth may be set on the root dispatch or per task (task wins, omission inherits the top-level value and defaults to the global ceiling): 0 disables nested teammate calls for the spawned agents, and only 0 and 1 are effective (2 is capped to 1 by the global 2-level ceiling; above 2 is rejected). Nested dispatches cannot extend that depth — at most they may pass maxNestingDepth: 0 as an explicit no-further-nesting marker.",
   "After a nested (child-level) background dispatch, the completion is delivered automatically as a new turn in this agent's session — the root forwards the teammate-complete envelope over IPC while this agent is still live — so ending the turn to await the notification is correct; the root caller additionally sees the same notification. If this agent has ended, delivery is skipped and the result is only inspectable via observe.",
   'Use teammate with context: "fork" only when the child needs the current conversation history; fresh context is the default, and in multi-task mode prefer per-task fork over a top-level default.',
   "After teammate returns a background acknowledgement (explicit background, manual detach, or elapsed foreground window), normally end the current turn and wait for the automatic teammate-complete notification, which will trigger a new turn with the result.",
@@ -212,6 +212,8 @@ export const TEAMMATE_PROMPT_GUIDELINES = [
   "If the current turn must wait for an already-backgrounded result, call observe exactly once with action=wait, a teammate target, and a bounded timeout.",
   "Use teammate-send for steering or follow-up while a teammate remains running or wakeable.",
   "Omit model to use teammate task-type model routing; an exact task-level provider/model overrides the top-level model, and the top-level model overrides automatic routing.",
+  "Always wrap every teammate call in a non-empty tasks array: prompt, name, and dependsOn belong inside tasks[]; only shared defaults (agent/taskType/model/fallbackModels/thinking/context/cwd/outputSchema/timeoutMs/maxNestingDepth) may be set at the top level. A top-level prompt is rejected as an unexpected property.",
+  "An explicit model that is not in the current model catalog fails fast with 'Unknown teammate model specifier' — pick an id from the injected available model catalog.",
 ];
 
 export function terminalStatusForResult(
@@ -372,13 +374,14 @@ export type TeammateRuntimeOptions = Pick<
 export function buildTeammateToolDescription(cwd: string): string {
   return `Dispatch tasks to teammate agents. Teammates run as Pi subprocesses with their own tools and context.
 
-Call form:
-  { tasks: [{ prompt: "Inspect auth", agent: "general", taskType: "analysis" }] }
+Call form (per-task fields go inside tasks[]):
+  { tasks: [{ prompt: "Inspect auth", agent: "analyst", taskType: "analysis", model: "provider/model", thinking: "high", outputSchema: {...}, maxNestingDepth: 0 }] }
 
-Every dispatch uses a non-empty tasks array. Task-level values override top-level defaults. Tasks that omit agent inherit the top-level agent, then default to "general".
+Every dispatch uses a non-empty tasks array; prompt is required and lives only inside tasks[] (as do name and dependsOn). Task-level values override the top-level defaults. Tasks that omit agent inherit the top-level agent, then default to "general".
+The top level accepts only shared defaults for all tasks — agent, taskType, model, fallbackModels, thinking, context, cwd, outputSchema, timeoutMs, maxNestingDepth — plus reply_to, concurrency, maxAgents, background. A task field (prompt/name/dependsOn) placed at the top level is rejected as an unexpected property.
 Use {name} or {name.field} in a dependent task's prompt, or dependsOn: ["name"] for ordering without output injection.
 
-Nesting control: pass maxNestingDepth on the root dispatch to limit how many levels of nested teammate dispatch the spawned agents may perform below themselves. 0 forbids nested calls entirely — the assigned agents cannot dispatch teammates. Values above 1 behave like 1: the tree is globally hard-capped at 2 agent levels, and deeper nesting is rejected with an error. Inside a spawned agent, maxNestingDepth can only tighten the parent's budget — pass 0 to forbid further nesting below that call; it can never extend depth beyond what the parent allowed.
+Nesting control: pass maxNestingDepth on the root dispatch — or per task, which overrides the top-level value — to limit how many levels of nested teammate dispatch the spawned agents may perform below themselves. Omitting it everywhere defaults to the global ceiling. 0 forbids nested calls entirely — the assigned agents cannot dispatch teammates. Values above 1 behave like 1: the tree is globally hard-capped at 2 agent levels, and deeper nesting is rejected with an error. Inside a spawned agent, maxNestingDepth can only tighten the parent's budget — pass 0 to forbid further nesting below that call; it can never extend depth beyond what the parent allowed.
 
 Use an exact role name from the Available Teammate Agents section in the active system prompt. Unknown names are rejected.
 
@@ -398,7 +401,7 @@ Use observe for teammate and background Bash status, barrier waits, or transitio
 
 Set detail=full (or tail) to include a settled agent's captured result — including the structured_output value for schema tasks.
 
-When neither the top-level model nor a task-level model is set, teammates inherit the main session's current model by default. Configured task-type/role mappings take precedence when present; with no mapping and no session model, the agent's default model is used.
+When neither the top-level model nor a task-level model is set, teammates inherit the main session's current model by default. Configured task-type/role mappings take precedence when present; with no mapping and no session model, the agent's default model is used. An explicit model id that is not in the current catalog fails fast at dispatch with "Unknown teammate model specifier".
 
 Configured task-type model routing for ${cwd}:
 ${formatModelRoutingConfig(cwd, discoverAgents(cwd))}`;

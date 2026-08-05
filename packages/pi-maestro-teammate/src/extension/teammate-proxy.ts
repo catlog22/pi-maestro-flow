@@ -894,10 +894,6 @@ export async function handleProxyRequest(
         }});
         return;
       }
-      // The parent's budget is the hard cap; the call's own maxNestingDepth
-      // can only tighten it (0 forbids any further nesting below this call).
-      const childMaxDispatchDepth = nestedChildMaxDispatchDepth(parentBudget, dispatchDepth, p.maxNestingDepth);
-
       const parentModel = (() => {
         const parent = parentCid ? state.activeRuns.get(parentCid) : undefined;
         return parent?.resolvedModel ?? parent?.requestedModel;
@@ -943,6 +939,12 @@ export async function handleProxyRequest(
       }
       const singleTask = allTasks[0];
       const normalizedTasks = normalization.isMultiTask ? allTasks : null;
+      // The parent's budget is the hard cap; the call's own maxNestingDepth
+      // (per-task wins, else the top-level value) can only tighten it. Each
+      // normalized task already carries its effective value (task ?? top-level).
+      const childMaxDispatchDepth = normalizedTasks
+        ? Math.min(...allTasks.map((task) => nestedChildMaxDispatchDepth(parentBudget, dispatchDepth, task.maxNestingDepth)))
+        : nestedChildMaxDispatchDepth(parentBudget, dispatchDepth, singleTask.maxNestingDepth);
       const singleRunParams = {
         agent: singleTask.agent,
         task: singleTask.prompt,
@@ -1269,7 +1271,8 @@ export async function handleProxyRequest(
           requestedModel: task.model,
           spawnedBy: cid,
           depth: dispatchDepth,
-          maxDispatchDepth: childMaxDispatchDepth,
+          // Each task's own maxNestingDepth sets its agent's nesting budget.
+          maxDispatchDepth: nestedChildMaxDispatchDepth(parentBudget, dispatchDepth, task.maxNestingDepth),
           status: "pending",
           phase: "starting",
           runtimeGeneration: 1,

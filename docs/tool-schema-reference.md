@@ -113,10 +113,12 @@ edit({
 | `reply_to` | enum | | `caller`（默认）/`main`，控制结果路由 |
 | `concurrency` | integer | | 最大并发，默认 4 |
 | `maxAgents` | integer | | 单次派发允许的最大任务数，默认 15 |
+| `maxNestingDepth` | integer | | 嵌套派发深度预算（0..2），0 禁止子代理再派发 teammate；默认全局天花板 |
 | `outputSchema` | object | | 默认 JSON Schema |
 | `background` | boolean | | 后台运行，默认 `false` |
 | `context` | enum | | `fresh`（默认）/`fork` |
 | `model` | string | | 精确 `provider/model` 默认值 |
+| `fallbackModels` | string[] | | 默认的按序 fallback 链 |
 | `thinking` | enum | | 默认思考深度；`max` 是 `xhigh` 别名 |
 | `cwd` | string | | 默认工作目录 |
 | `timeoutMs` | integer | | 默认超时毫秒数 |
@@ -132,10 +134,12 @@ edit({
 | `dependsOn` | string[] | | 显式依赖任务名；未知名称直接报错 |
 | `context` | enum | | `fresh`/`fork` 覆盖 |
 | `model` | string | | 模型覆盖 |
+| `fallbackModels` | string[] | | fallback 链覆盖 |
 | `thinking` | enum | | 思考深度覆盖 |
 | `cwd` | string | | 工作目录覆盖 |
 | `outputSchema` | object | | 结构化输出 JSON Schema |
 | `timeoutMs` | integer | | 超时覆盖 |
+| `maxNestingDepth` | integer | | 嵌套深度预算覆盖（0..2，0 禁止嵌套） |
 
 ### 依赖与变量引用
 
@@ -182,6 +186,8 @@ teammate({ tasks: [
 ---
 
 ## 8. `teammate-watch` - 查看 Teammate 输出
+
+> ⚠️ **默认隐藏的 legacy 工具**：仅当 `PI_TEAMMATE_LEGACY_OBSERVATION_TOOLS=1` 时注册。公开的观察面是 `observe`（状态/等待/屏障，targets 为 `{kind,id}` 对象数组）；`teammate-wait`/`teammate-monitor` 同为 legacy。
 
 | 参数 | 类型 | 必需 | 说明 |
 |------|------|:---:|------|

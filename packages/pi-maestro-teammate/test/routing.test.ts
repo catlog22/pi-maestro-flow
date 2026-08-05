@@ -27,3 +27,16 @@ test("applyModelRouting preserves top-level maxNestingDepth", () => {
   const plain = applyModelRouting({ tasks: [{ prompt: "inspect" }] }, process.cwd(), []);
   assert.equal(plain.maxNestingDepth, undefined);
 });
+
+test("applyModelRouting preserves per-task maxNestingDepth", () => {
+  const routed = applyModelRouting(
+    { tasks: [{ prompt: "inspect", maxNestingDepth: 0 }], maxNestingDepth: 1 },
+    process.cwd(),
+    [],
+  );
+  assert.equal(routed.tasks[0].maxNestingDepth, 0);
+  assert.equal(routed.maxNestingDepth, 1);
+
+  const plain = applyModelRouting({ tasks: [{ prompt: "inspect" }] }, process.cwd(), []);
+  assert.equal(plain.tasks[0].maxNestingDepth, undefined);
+});

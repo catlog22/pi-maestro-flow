@@ -29,6 +29,12 @@ export interface TeammateTaskSpec {
     cwd?: string;
     outputSchema?: Record<string, unknown>;
     timeoutMs?: number;
+    /**
+     * Nesting budget override for the agent spawned by this task; overrides the
+     * top-level maxNestingDepth. Omit to inherit the top-level value, which
+     * itself defaults to the global ceiling (MAX_DEFAULT_DEPTH).
+     */
+    maxNestingDepth?: number;
 }
 export interface RunTeammateParams {
     tasks: TeammateTaskSpec[];
@@ -156,6 +162,8 @@ export interface NormalizedTask {
     cwd?: string;
     outputSchema?: Record<string, unknown>;
     timeoutMs?: number;
+    /** Effective nesting budget: task value ?? top-level value (undefined = ceiling). */
+    maxNestingDepth?: number;
 }
 export interface JsonLineEvent {
     type: string;

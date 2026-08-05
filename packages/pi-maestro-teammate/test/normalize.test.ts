@@ -216,3 +216,38 @@ test("maxNestingDepth accepts the full 0..ceiling range and rejects the rest", (
   assert.equal(normalizeTeammateParams(omitted).error, undefined);
   assert.equal(omitted.maxNestingDepth, undefined);
 });
+
+test("per-task maxNestingDepth overrides the top-level default and omission inherits it", () => {
+  const result = normalizeTeammateParams({
+    tasks: [
+      { prompt: "deep", maxNestingDepth: 0 },
+      { prompt: "plain" },
+    ],
+    maxNestingDepth: 1,
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.tasks[0].maxNestingDepth, 0, "task value wins over the top-level default");
+  assert.equal(result.tasks[1].maxNestingDepth, 1, "omission inherits the top-level default");
+
+  const allOmitted = normalizeTeammateParams({ tasks: [{ prompt: "inspect" }] });
+  assert.equal(
+    allOmitted.tasks[0].maxNestingDepth,
+    undefined,
+    "both omitted stays undefined (the ceiling applies at dispatch time)",
+  );
+});
+
+test("per-task maxNestingDepth validates the same 0..ceiling range", () => {
+  for (const value of [0, 1, 2]) {
+    const result = normalizeTeammateParams({ tasks: [{ prompt: "inspect", maxNestingDepth: value }] });
+    assert.equal(result.error, undefined, `per-task maxNestingDepth ${value} must be accepted`);
+  }
+
+  for (const value of [-1, 3, 1.5]) {
+    const result = normalizeTeammateParams({ tasks: [{ prompt: "inspect", maxNestingDepth: value }] });
+    assert.match(result.error ?? "", /tasks\[0\] maxNestingDepth must be an integer between 0 and 2/);
+  }
+
+  const named = normalizeTeammateParams({ tasks: [{ name: "deep", prompt: "inspect", maxNestingDepth: 3 }] });
+  assert.match(named.error ?? "", /tasks\[0\] "deep" maxNestingDepth/);
+});

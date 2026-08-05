@@ -60,6 +60,12 @@ export interface TeammateTaskSpec {
   cwd?: string;
   outputSchema?: Record<string, unknown>;
   timeoutMs?: number;
+  /**
+   * Nesting budget override for the agent spawned by this task; overrides the
+   * top-level maxNestingDepth. Omit to inherit the top-level value, which
+   * itself defaults to the global ceiling (MAX_DEFAULT_DEPTH).
+   */
+  maxNestingDepth?: number;
 }
 
 export interface RunTeammateParams {
@@ -203,6 +209,8 @@ export interface NormalizedTask {
   cwd?: string;
   outputSchema?: Record<string, unknown>;
   timeoutMs?: number;
+  /** Effective nesting budget: task value ?? top-level value (undefined = ceiling). */
+  maxNestingDepth?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -848,6 +856,23 @@ export function normalizeTeammateParams(
     };
   }
 
+  for (const [index, task] of params.tasks.entries()) {
+    if (
+      task.maxNestingDepth !== undefined
+      && (!Number.isInteger(task.maxNestingDepth)
+        || task.maxNestingDepth < 0
+        || task.maxNestingDepth > MAX_DEFAULT_DEPTH)
+    ) {
+      return {
+        tasks: [],
+        isMultiTask: false,
+        warnings,
+        error: `tasks[${index}]${task.name ? ` "${task.name}"` : ""} maxNestingDepth must be an integer between 0 and ${MAX_DEFAULT_DEPTH} `
+          + `(got ${task.maxNestingDepth}); 0 forbids nested teammate calls.`,
+      };
+    }
+  }
+
   const normalized: NormalizedTask[] = params.tasks.map((task) => ({
     agent: task.agent ?? params.agent ?? "general",
     prompt: task.prompt,
@@ -861,6 +886,7 @@ export function normalizeTeammateParams(
     cwd: task.cwd ?? params.cwd,
     outputSchema: task.outputSchema ?? params.outputSchema,
     timeoutMs: task.timeoutMs ?? params.timeoutMs,
+    maxNestingDepth: task.maxNestingDepth ?? params.maxNestingDepth,
   }));
   const isMultiTask = normalized.length > 1;
 
@@ -1588,6 +1614,29 @@ export function isRiskyRegexSource(source: string): boolean {
     || NESTED_QUANTIFIER.test(source);
 }
 
+// Common misspellings of JSON-Schema keywords that TypeBox would silently
+// ignore, producing schemas that validate less strictly than the caller
+// believes (or, with additionalProperties:false, can never validate at all).
+const REQUIRED_TYPO_KEYS = ["require", "requried"] as const;
+const PROPERTIES_TYPO_KEYS = ["propterties", "additionalproperty"] as const;
+
+const SCHEMA_KEYWORD_KEYS = new Set([
+  "type", "properties", "required", "items", "enum", "const", "allOf",
+  "anyOf", "oneOf", "not", "patternProperties", "additionalProperties",
+  "additionalItems", "if", "then", "else", "format", "pattern",
+  "minLength", "maxLength", "minimum", "maximum", "uniqueItems",
+  "description", "title", "$ref", "$schema",
+]);
+
+/**
+ * Nodes that carry any recognized schema keyword are treated as schema
+ * objects; keyword-typo detection is skipped for plain data nodes (e.g. a
+ * "default" value) so legitimate values never false-positive.
+ */
+function isSchemaShapedNode(node: Record<string, unknown>): boolean {
+  return Object.keys(node).some((key) => SCHEMA_KEYWORD_KEYS.has(key));
+}
+
 /**
  * The model may submit any JSON Schema, and TypeBox compiles its `pattern`
  * keywords into RegExp objects that then run on this process's main thread on
@@ -1607,19 +1656,51 @@ export function findStructuredOutputSchemaHazard(
     return `outputSchema exceeds ${STRUCTURED_OUTPUT_SCHEMA_LIMITS.maxBytes} bytes.`;
   }
 
-  const visit = (node: unknown, depth: number): string | undefined => {
+  const visit = (node: unknown, depth: number, path: string): string | undefined => {
     if (depth > STRUCTURED_OUTPUT_SCHEMA_LIMITS.maxDepth) {
       return `outputSchema nests deeper than ${STRUCTURED_OUTPUT_SCHEMA_LIMITS.maxDepth} levels.`;
     }
     if (Array.isArray(node)) {
-      for (const item of node) {
-        const hazard = visit(item, depth + 1);
+      for (let index = 0; index < node.length; index += 1) {
+        const hazard = visit(node[index], depth + 1, `${path}/${index}`);
         if (hazard) return hazard;
       }
       return undefined;
     }
     if (!node || typeof node !== "object") return undefined;
-    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    const record = node as Record<string, unknown>;
+    if (isSchemaShapedNode(record)) {
+      for (const typo of REQUIRED_TYPO_KEYS) {
+        if (typo in record) {
+          return `outputSchema at ${path} contains misspelled keyword "${typo}" (did you mean "required"?).`;
+        }
+      }
+      for (const typo of PROPERTIES_TYPO_KEYS) {
+        if (typo in record) {
+          return `outputSchema at ${path} contains misspelled keyword "${typo}" (did you mean "properties"?).`;
+        }
+      }
+      if (
+        record.properties !== undefined
+        && (!record.properties || typeof record.properties !== "object")
+      ) {
+        return `outputSchema at ${path} has a "properties" value that is not an object.`;
+      }
+      if (record.required !== undefined) {
+        if (!Array.isArray(record.required) || record.required.some((item) => typeof item !== "string")) {
+          return `outputSchema at ${path} has a "required" value that is not an array of strings.`;
+        }
+        if (record.additionalProperties === false) {
+          const props = record.properties as Record<string, unknown> | undefined;
+          for (const item of record.required) {
+            if (!props || !(item in props)) {
+              return `outputSchema at ${path}: required property ${JSON.stringify(item)} is not declared in "properties" while "additionalProperties" is false — the value can never validate.`;
+            }
+          }
+        }
+      }
+    }
+    for (const [key, value] of Object.entries(record)) {
       if (key === "pattern" && typeof value === "string" && isRiskyRegexSource(value)) {
         return `outputSchema contains a pattern that risks catastrophic backtracking: ${value}`;
       }
@@ -1630,13 +1711,13 @@ export function findStructuredOutputSchemaHazard(
           }
         }
       }
-      const hazard = visit(value, depth + 1);
+      const hazard = visit(value, depth + 1, `${path}/${key}`);
       if (hazard) return hazard;
     }
     return undefined;
   };
 
-  return visit(schema, 0);
+  return visit(schema, 0, "/");
 }
 
 export type ChildReclamationOutcome =

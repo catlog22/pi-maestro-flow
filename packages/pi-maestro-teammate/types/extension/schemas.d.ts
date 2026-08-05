@@ -24,6 +24,7 @@ export declare const TaskSpec: Type.TObject<{
     cwd: Type.TOptional<Type.TString>;
     outputSchema: Type.TOptional<Type.TUnsafe<unknown>>;
     timeoutMs: Type.TOptional<Type.TInteger>;
+    maxNestingDepth: Type.TOptional<Type.TInteger>;
 }>;
 export declare const TeammateParams: Type.TObject<{
     agent: Type.TOptional<Type.TString>;
@@ -42,6 +43,7 @@ export declare const TeammateParams: Type.TObject<{
         cwd: Type.TOptional<Type.TString>;
         outputSchema: Type.TOptional<Type.TUnsafe<unknown>>;
         timeoutMs: Type.TOptional<Type.TInteger>;
+        maxNestingDepth: Type.TOptional<Type.TInteger>;
     }>>;
     concurrency: Type.TOptional<Type.TInteger>;
     maxAgents: Type.TOptional<Type.TInteger>;

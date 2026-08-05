@@ -6,6 +6,7 @@ import { PassThrough } from "node:stream";
 import { handleProxyRequest, checkActiveAgentBudget } from "../src/extension/index.ts";
 import { appendTeammateDepthContext } from "../src/extension/teammate-core.ts";
 import { parseProxyTeammateParams } from "../src/extension/teammate-proxy.ts";
+import { normalizeTeammateParams } from "../src/runs/execution-infra.ts";
 import {
   checkDepthGuard,
   MAX_DEFAULT_DEPTH,
@@ -329,11 +330,25 @@ test("a parent with budget 1 at depth 0 is not rejected by the budget", async ()
 test("proxy parameter parsing carries maxNestingDepth through", () => {
   assert.equal(parseProxyTeammateParams({ tasks: [{ prompt: "noop" }], maxNestingDepth: 0 })?.maxNestingDepth, 0);
   assert.equal(parseProxyTeammateParams({ tasks: [{ prompt: "noop" }], maxNestingDepth: 2 })?.maxNestingDepth, 2);
+  // Per-task values survive the IPC parse unchanged.
+  assert.equal(parseProxyTeammateParams({ tasks: [{ prompt: "noop", maxNestingDepth: 0 }] })?.tasks[0].maxNestingDepth, 0);
+  assert.equal(parseProxyTeammateParams({ tasks: [{ prompt: "noop", maxNestingDepth: 1 }], maxNestingDepth: 2 })?.tasks[0].maxNestingDepth, 1);
 });
 
-test("out-of-range maxNestingDepth is rejected with the unified normalization message", async () => {
-  // Range validation lives only in normalizeTeammateParams (coding-009): the
-  // proxy path must surface the same message as the root path.
+test("per-task maxNestingDepth yields an independent budget per spawned agent", () => {
+  // Root dispatch: a 0-forbidden task and an inheriting task get distinct budgets.
+  assert.equal(rootChildMaxDispatchDepth(0), 0);
+  assert.equal(rootChildMaxDispatchDepth(undefined), MAX_DEFAULT_DEPTH - 1);
+
+  // Nested dispatch: the call's own value can only tighten the parent budget.
+  assert.equal(nestedChildMaxDispatchDepth(1, 1, 0), 0);
+  assert.equal(nestedChildMaxDispatchDepth(1, 1, 1), 0);
+});
+
+test("out-of-range maxNestingDepth is rejected before any agent registration", async () => {
+  // B1: the schema now bounds maxNestingDepth to 0..2, so the proxy path
+  // rejects out-of-range values at the parameter layer (parseProxyTeammateParams
+  // checks against TeammateParams) before normalize ever runs.
   for (const value of [3, -1]) {
     const state = makeState();
     const parentCid = randomUUID();
@@ -345,8 +360,20 @@ test("out-of-range maxNestingDepth is rejected with the unified normalization me
     });
     const result = reply.result as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /maxNestingDepth must be an integer between 0 and 2/);
+    assert.match(result.content[0].text, /Invalid teammate parameters received from child IPC/);
     assert.equal(state.activeRuns.size, 1, "rejection must happen before agent registration");
+  }
+});
+
+test("normalizeTeammateParams keeps the unified message for programmatic out-of-range calls", () => {
+  // Programmatic callers bypass the parameter schema, so the normalization
+  // message (coding-009 single implementation) must stay authoritative.
+  for (const value of [3, -1]) {
+    const result = normalizeTeammateParams({
+      tasks: [{ agent: "worker", prompt: "noop" }],
+      maxNestingDepth: value,
+    });
+    assert.match(result.error ?? "", /maxNestingDepth must be an integer between 0 and 2/);
   }
 });
 
