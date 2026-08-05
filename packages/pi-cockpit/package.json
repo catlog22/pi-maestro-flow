@@ -1,80 +1,80 @@
 {
-	"name": "pi-cockpit",
-	"version": "0.9.1",
-	"description": "Responsive Maestro operations sidebar, fallback status widgets, and footer for Pi.",
-	"type": "module",
-	"keywords": [
-		"pi-package",
-		"pi",
-		"pi-extension",
-		"tui",
-		"teammate",
-		"todo"
-	],
-	"license": "MIT",
-	"files": [
-		"src/",
-		"themes/",
-		"README.md"
-	],
-	"scripts": {
-		"test": "node --test --experimental-transform-types tests/config.test.ts tests/public-events.test.ts tests/maestro-store.test.ts tests/split-pane.test.ts tests/editor-bottom.test.ts tests/sidebar-render.test.ts tests/sidebar-controller.test.ts tests/viewport-stability.test.ts tests/quiet-tools.test.ts tests/edit-guard.test.ts tests/agents-store.test.ts tests/supervision-store.test.ts tests/bash-bg-store.test.ts tests/bash-bg-widget.test.ts tests/bash-bg-overlay.test.ts tests/agent-overlay.test.ts tests/todo-store.test.ts tests/render.test.ts tests/agent-scroll.test.ts tests/session-bar.test.ts tests/session-detail.test.ts tests/footer.test.ts tests/extension-status.test.ts tests/input-routing.test.ts tests/integration-contract.test.ts tests/stack-widget.test.ts tests/settings-view.test.ts tests/thinking-fold.test.ts tests/thinking-timer.test.ts tests/tick-policy.test.ts tests/ambient.test.ts tests/viewport.test.ts tests/theme-picker.test.ts tests/model-picker.test.ts tests/title-gen.test.ts tests/title-llm.test.ts tests/settings-registry.test.ts tests/settings-coordinator.test.ts tests/settings-locale.test.ts tests/settings-shell.test.ts tests/settings-cockpit-provider.test.ts tests/settings-cross-package.test.ts tests/ui-primitives.test.ts tests/settings-shell-secret.test.ts tests/settings-shell-listcrud.test.ts tests/capturing-overlay.test.ts tests/claude-editor.test.ts tests/fullscreen-controller.test.ts tests/transcript-selection.test.ts tests/terminal-cleanup.test.ts tests/terminal-capability.test.ts",
-		"typecheck": "tsc --noEmit"
-	},
-	"pi": {
-		"extensions": [
-			"./src/extension/index.ts"
-		],
-		"themes": [
-			"./themes"
-		]
-	},
-	"dependencies": {
-		"pi-maestro-settings-core": "0.1.0",
-		"proper-lockfile": "4.1.2"
-	},
-	"peerDependencies": {
-		"@earendil-works/pi-agent-core": "*",
-		"@earendil-works/pi-ai": "*",
-		"@earendil-works/pi-coding-agent": "*",
-		"@earendil-works/pi-tui": "*",
-		"pi-maestro-teammate": "^1.6.0",
-		"typebox": "*"
-	},
-	"peerDependenciesMeta": {
-		"@earendil-works/pi-agent-core": {
-			"optional": true
-		},
-		"@earendil-works/pi-ai": {
-			"optional": true
-		},
-		"@earendil-works/pi-coding-agent": {
-			"optional": true
-		},
-		"@earendil-works/pi-tui": {
-			"optional": true
-		},
-		"pi-maestro-teammate": {
-			"optional": true
-		},
-		"typebox": {
-			"optional": true
-		}
-	},
-	"devDependencies": {
-		"@earendil-works/pi-agent-core": "0.83.0",
-		"@earendil-works/pi-ai": "0.83.0",
-		"@earendil-works/pi-coding-agent": "0.83.0",
-		"@earendil-works/pi-tui": "0.83.0",
-		"@types/node": "^22.0.0",
-		"pi-maestro-teammate": "1.7.1",
-		"typebox": "1.3.7",
-		"typescript": "^5.5.0"
-	},
-	"main": "./src/index.ts",
-	"exports": {
-		".": "./src/index.ts",
-		"./v1/events": "./src/public/v1/events.ts",
-		"./src/*": "./src/*"
-	}
+  "name": "pi-cockpit",
+  "version": "0.10.0",
+  "description": "Responsive Maestro operations sidebar, fallback status widgets, and footer for Pi.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "tui",
+    "teammate",
+    "todo"
+  ],
+  "license": "MIT",
+  "files": [
+    "src/",
+    "themes/",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test --experimental-transform-types tests/config.test.ts tests/public-events.test.ts tests/maestro-store.test.ts tests/split-pane.test.ts tests/editor-bottom.test.ts tests/sidebar-render.test.ts tests/sidebar-controller.test.ts tests/viewport-stability.test.ts tests/quiet-tools.test.ts tests/edit-guard.test.ts tests/agents-store.test.ts tests/supervision-store.test.ts tests/bash-bg-store.test.ts tests/bash-bg-widget.test.ts tests/bash-bg-overlay.test.ts tests/agent-overlay.test.ts tests/todo-store.test.ts tests/render.test.ts tests/agent-scroll.test.ts tests/session-bar.test.ts tests/session-detail.test.ts tests/footer.test.ts tests/extension-status.test.ts tests/input-routing.test.ts tests/integration-contract.test.ts tests/stack-widget.test.ts tests/settings-view.test.ts tests/thinking-fold.test.ts tests/thinking-timer.test.ts tests/tick-policy.test.ts tests/ambient.test.ts tests/viewport.test.ts tests/theme-picker.test.ts tests/model-picker.test.ts tests/title-gen.test.ts tests/title-llm.test.ts tests/settings-registry.test.ts tests/settings-coordinator.test.ts tests/settings-locale.test.ts tests/settings-shell.test.ts tests/settings-cockpit-provider.test.ts tests/settings-cross-package.test.ts tests/ui-primitives.test.ts tests/settings-shell-secret.test.ts tests/settings-shell-listcrud.test.ts tests/capturing-overlay.test.ts tests/claude-editor.test.ts tests/fullscreen-controller.test.ts tests/transcript-selection.test.ts tests/terminal-cleanup.test.ts tests/terminal-capability.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "pi": {
+    "extensions": [
+      "./src/extension/index.ts"
+    ],
+    "themes": [
+      "./themes"
+    ]
+  },
+  "dependencies": {
+    "pi-maestro-settings-core": "0.1.0",
+    "proper-lockfile": "4.1.2"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "pi-maestro-teammate": "^1.6.0",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-agent-core": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    },
+    "pi-maestro-teammate": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.83.0",
+    "@earendil-works/pi-ai": "0.83.0",
+    "@earendil-works/pi-coding-agent": "0.83.0",
+    "@earendil-works/pi-tui": "0.83.0",
+    "@types/node": "^22.0.0",
+    "pi-maestro-teammate": "1.8.0",
+    "typebox": "1.3.7",
+    "typescript": "^5.5.0"
+  },
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./v1/events": "./src/public/v1/events.ts",
+    "./src/*": "./src/*"
+  }
 }

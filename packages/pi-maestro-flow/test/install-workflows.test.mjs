@@ -47,6 +47,19 @@ test("uses maestro-flow workflows-only command when supported", () => {
   assert.equal(result.archKbEntriesInstalled, 1);
 });
 
+test("falls back when the CLI exits successfully without installing arch-kb content", () => {
+  const { packageRoot, maestroHome } = fixture();
+  const result = installMaestroWorkflows({
+    packageRoot,
+    maestroHome,
+    stdio: "pipe",
+    runner() { return { status: 0 }; },
+  });
+
+  assert.equal(result.mode, "package-fallback");
+  assert.equal(readFileSync(join(maestroHome, "arch-kb", "templates", "web-app", "README.md"), "utf8"), "# Web app");
+});
+
 test("falls back to package workflows and arch-kb for older maestro-flow releases", () => {
   const { packageRoot, maestroHome } = fixture();
   const result = installMaestroWorkflows({

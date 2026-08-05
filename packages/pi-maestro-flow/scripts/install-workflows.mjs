@@ -69,20 +69,25 @@ export function installMaestroWorkflows({
 
   const workflowsTargetDir = join(maestroHome, "workflows");
   const archKbTargetDir = join(maestroHome, "arch-kb");
+  let cliFailure = result.error;
   if (!result.error && result.status === 0) {
-    const archKbEntriesInstalled = assertArchKbComplete(archKbTargetDir);
-    return {
-      mode: "maestro-cli",
-      targetDir: workflowsTargetDir,
-      archKbTargetDir,
-      archKbEntriesInstalled,
-    };
+    try {
+      const archKbEntriesInstalled = assertArchKbComplete(archKbTargetDir);
+      return {
+        mode: "maestro-cli",
+        targetDir: workflowsTargetDir,
+        archKbTargetDir,
+        archKbEntriesInstalled,
+      };
+    } catch (error) {
+      cliFailure = error;
+    }
   }
 
-  // Compatibility fallback for maestro-flow versions before `install workflows`.
+  // Compatibility fallback for missing commands or incomplete CLI installs.
   const workflowsSourceDir = join(packageRoot, "workflows");
   if (!existsSync(workflowsSourceDir)) {
-    throw result.error ?? new Error(`Maestro workflows directory not found: ${workflowsSourceDir}`);
+    throw cliFailure ?? new Error(`Maestro workflows directory not found: ${workflowsSourceDir}`);
   }
   const archKbSourceDir = join(packageRoot, "resources", "arch-kb");
   const archKbEntriesInstalled = assertArchKbComplete(archKbSourceDir);

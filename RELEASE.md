@@ -18,13 +18,16 @@ packages.
 | pi-maestro-teammate | 1.7.1 | **1.8.0** |
 | pi-cockpit | 0.9.1 | **0.10.0** |
 | pi-maestro-settings-core | 0.1.0 | 0.1.0 |
-| maestro-flow | 0.5.61 | 0.5.61 |
+| maestro-flow | 0.5.61 | **0.5.62** |
 
 - Requires Node.js `>=22.19.0`.
 - Validated with Pi SDK `0.83.0` and `typebox@1.3.7`.
 - Pi core packages remain optional wildcard peers supplied by the host; the
   release tarballs do not bundle private SDK copies.
 - `pi-maestro-settings-core` is unchanged in this release.
+- `pi-maestro-flow` pins the core engine `maestro-flow` exactly at `0.5.62`
+  (knowledge attribution `record`/`--content-file` and optional-skill toggle
+  live in the core engine).
 
 ## Highlights
 
@@ -117,9 +120,9 @@ Dry-run tarballs from the verified candidate:
 
 | Package | Files | Packed | Unpacked | SHA-1 |
 |---------|------:|-------:|---------:|-------|
-| pi-maestro-teammate@1.8.0 |  |  |  |  |
-| pi-cockpit@0.10.0 |  |  |  |  |
-| pi-maestro-flow@0.15.0 |  |  |  |  |
+| pi-maestro-teammate@1.8.0 | 135 | 335.4 kB | 1.4 MB | `ea51a05649f60cbacd70b4d935e2c4cc84ca525d` |
+| pi-cockpit@0.10.0 | 66 | 167.4 kB | 0.6 MB | `d539c09fc59b4fb85fbbdb2ab59df67fdd38837c` |
+| pi-maestro-flow@0.15.0 | 502 | 1409.5 kB | 5.3 MB | `3d23e06e52b3f1c006b68704859fabb87ad1897b` |
 
 Publication order is mandatory:
 
@@ -133,15 +136,15 @@ Publication order is mandatory:
 
 Final candidate compared with `v0.14.2`:
 
-- 52 commits including the release commit
-- 750 files changed
-- 10,004 insertions and 85,827 deletions
+- 56 commits including the release commit
+- 829 files changed
+- 11,166 insertions and 86,374 deletions
 - 3 published packages plus the unchanged settings-core package
 
 Package-level code deltas (excluding docs/skills/tooling):
 
 | Package | Files | Insertions | Deletions |
 |---------|------:|-----------:|----------:|
-| pi-maestro-teammate | 36 | +2,045 | -186 |
-| pi-cockpit | 56 | +3,798 | -176 |
-| pi-maestro-flow | 43 | +2,776 | -191 |
+| pi-maestro-teammate | 38 | +2,197 | -228 |
+| pi-cockpit | 56 | +3,882 | -176 |
+| pi-maestro-flow | 48 | +3,173 | -221 |
