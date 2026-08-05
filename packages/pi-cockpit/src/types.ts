@@ -6,6 +6,9 @@ export const TEAMMATE_MESSAGE_EVENT = "teammate:message";
 export const TEAMMATE_COMPLETE_EVENT = "teammate:complete";
 export const TEAMMATE_VIEWING_EVENT = "teammate:viewing";
 export const TEAMMATE_OPEN_AGENT_EVENT = "teammate:open-agent";
+// Cockpit → teammate: interrupt (打断) or steer (引导) one agent by correlationId.
+// Payload: { correlationId, action: "interrupt" | "steer", message? }.
+export const TEAMMATE_AGENT_COMMAND_EVENT = "teammate:agent-command";
 export const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
 export const BASH_BG_UPDATE_EVENT = "bash-bg:update";
 export const BASH_BG_QUERY_EVENT = "bash-bg:query";

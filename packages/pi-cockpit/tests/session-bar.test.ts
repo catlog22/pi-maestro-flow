@@ -62,6 +62,49 @@ test("renderSessionBar: active agents use stable per-agent colors and terminal s
 	assert.equal(assignedAgentColor("a"), assignedAgentColor("a"), "color is stable across frames");
 });
 
+test("renderSessionBar: chip order follows start time, not live activity (stable during a run)", () => {
+	// Activity (newest-first) says beta, gamma, alpha; start order says alpha,
+	// gamma, beta. The bar must render start order so progress ticks never
+	// reflow the chips mid-run.
+	const rows = [
+		agent({ correlationId: "oldest", name: "alpha", startedAt: 100, lastActivityAt: 500 }),
+		agent({ correlationId: "newest", name: "beta", startedAt: 300, lastActivityAt: 1000 }),
+		agent({ correlationId: "middle", name: "gamma", startedAt: 200, lastActivityAt: 900 }),
+	];
+	const orderOf = (line: string) => (name: string) => line.indexOf(`@${name}`);
+	const idx = orderOf(renderSessionBar(rows, 160, theme as Theme)[0]);
+	assert.ok(idx("alpha") < idx("gamma"), "start order: alpha before gamma");
+	assert.ok(idx("gamma") < idx("beta"), "start order: gamma before beta");
+	// A progress tick only bumps lastActivityAt; the rendered order must not move.
+	const churned = [
+		agent({ correlationId: "oldest", name: "alpha", startedAt: 100, lastActivityAt: 5000 }),
+		agent({ correlationId: "newest", name: "beta", startedAt: 300, lastActivityAt: 5000 }),
+		agent({ correlationId: "middle", name: "gamma", startedAt: 200, lastActivityAt: 5000 }),
+	];
+	const idx2 = orderOf(renderSessionBar(churned, 160, theme as Theme)[0]);
+	assert.ok(idx2("alpha") < idx2("gamma"), "order unchanged after activity churn");
+	assert.ok(idx2("gamma") < idx2("beta"), "order unchanged after activity churn");
+});
+
+test("renderSessionBar: a newly started agent appends after earlier sessions", () => {
+	const withNew = renderSessionBar(
+		[
+			agent({ correlationId: "a", name: "alpha", startedAt: 100 }),
+			agent({ correlationId: "b", name: "beta", startedAt: 200 }),
+		],
+		120,
+		theme as Theme,
+	)[0];
+	assert.ok(withNew.indexOf("@alpha") < withNew.indexOf("@beta"), "new agent appends at the end");
+	// Equal start times (e.g. self-healed rows) fall back to a stable id tiebreak.
+	const tied = renderSessionBar(
+		[agent({ correlationId: "z", name: "zeta", startedAt: 100 }), agent({ correlationId: "a", name: "alpha", startedAt: 100 })],
+		120,
+		theme as Theme,
+	)[0];
+	assert.ok(tied.indexOf("@alpha") < tied.indexOf("@zeta"), "id tiebreak is deterministic");
+});
+
 test("renderSessionBar: the shown session chip is highlighted with ▸ and its assigned color", () => {
 	const lines = renderSessionBar(
 		[

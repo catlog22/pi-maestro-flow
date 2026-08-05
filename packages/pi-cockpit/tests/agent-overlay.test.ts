@@ -35,6 +35,7 @@ function makeOverlay(
 	let renders = 0;
 	let closes = 0;
 	const selections: string[] = [];
+	const commands: Array<{ id: string; action: "interrupt" | "steer"; message?: string }> = [];
 	const component = new AgentOverlay({
 		getAgents: () => rows,
 		getViewingId: () => viewingId,
@@ -42,13 +43,16 @@ function makeOverlay(
 			viewingId = id;
 			selections.push(id);
 		},
+		onCommand: (id, action, message) => {
+			commands.push({ id, action, ...(message !== undefined ? { message } : {}) });
+		},
 		requestRender: () => { renders++; },
 		close: () => { closes++; },
 		theme,
 		glyphs: resolveGlyphs("nerd"),
 		getTerminalRows: () => terminalRows,
 	});
-	return { component, state: () => ({ renders, closes, selections, viewingId }) };
+	return { component, state: () => ({ renders, closes, selections, viewingId, commands }) };
 }
 
 test("Agent modal preserves hierarchy and renders the selected live stream", () => {
@@ -103,4 +107,65 @@ test("Agent modal stays width-bounded in compact, narrow and wide layouts", () =
 			assert.ok(visibleWidth(line) <= width, `${visibleWidth(line)} > ${width}`);
 		}
 	}
+});
+
+test("Agent modal i interrupts the selected agent and shows a transient ack", () => {
+	const rows = [row("worker")];
+	const { component, state } = makeOverlay(rows, "worker");
+	component.handleInput("i");
+	assert.deepEqual(state().commands, [{ id: "worker", action: "interrupt" }]);
+	const text = component.render(100).join("\n");
+	assert.match(text, /✓ interrupt @worker/);
+});
+
+test("Agent modal s composes a steer message, Enter sends, Esc cancels", () => {
+	const rows = [row("worker")];
+	const { component, state } = makeOverlay(rows, "worker");
+	component.handleInput("s");
+	assert.match(component.render(100).join("\n"), /steer @worker:/);
+	component.handleInput("r");
+	component.handleInput("e");
+	component.handleInput("t");
+	component.handleInput("r");
+	component.handleInput("y");
+	component.handleInput("\r");
+	assert.deepEqual(state().commands, [{ id: "worker", action: "steer", message: "retry" }]);
+	assert.match(component.render(100).join("\n"), /✓ steer @worker: retry/);
+
+	// A fresh compose can be cancelled without sending.
+	component.handleInput("s");
+	component.handleInput("a");
+	component.handleInput("\x1b");
+	assert.equal(state().commands.length, 1, "Esc cancels the draft without sending");
+});
+
+test("Agent modal ignores commands without a selected agent", () => {
+	const { component, state } = makeOverlay([], undefined);
+	component.handleInput("i");
+	component.handleInput("s");
+	assert.equal(state().commands.length, 0);
+});
+
+test("Agent modal freeze the compose target: roster changes cannot re-target the draft", () => {
+	// The roster mutates between compose start and Enter: A completes and the
+	// selection auto-moves to B. The draft must still steer A.
+	const rows = [row("a"), row("b")];
+	const { component, state } = makeOverlay(rows, "a");
+	component.handleInput("s");
+	rows[0] = row("a", { status: "done" }); // selection reconcile moves to b
+	component.handleInput("x");
+	component.handleInput("\r");
+	assert.deepEqual(state().commands, [{ id: "a", action: "steer", message: "x" }]);
+	assert.match(component.render(100).join("\n"), /✓ steer @a: x/);
+});
+
+test("Agent modal aborts a compose whose target disappears, without re-targeting", () => {
+	const rows = [row("a"), row("b")];
+	const { component, state } = makeOverlay(rows, "a");
+	component.handleInput("s");
+	rows[0] = row("b"); // target a removed entirely; selection falls to b
+	component.handleInput("y");
+	component.handleInput("\r");
+	assert.equal(state().commands.length, 0, "no command may be sent to a different agent");
+	assert.match(component.render(100).join("\n"), /steer aborted: @a is gone/);
 });

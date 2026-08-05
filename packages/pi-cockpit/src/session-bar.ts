@@ -18,6 +18,17 @@ export const SESSION_BAR_WIDGET_KEY = "cockpit-session-bar";
 /** Chip label for the main (root) session. */
 export const MAIN_SESSION_LABEL = "main";
 
+/**
+ * Stable chip order: agents appear in the order they started. The store
+ * snapshot orders by latest activity, so a raw pass-through would shuffle
+ * chips on every teammate progress message. `startedAt` is set once at
+ * materialization and never moves during a run: only a brand-new agent
+ * appends at the end, and a completed row keeps its slot until pruned.
+ */
+export function byStartOrder(a: AgentRow, b: AgentRow): number {
+	return a.startedAt - b.startedAt || a.correlationId.localeCompare(b.correlationId);
+}
+
 export interface SessionBarDeps {
 	getAgents: () => AgentRow[];
 	/** Whether the main (root) agent is currently working. */
@@ -85,7 +96,9 @@ export function renderSessionBar(
 	theme: Theme,
 	opts: { mainRunning?: boolean; current?: { label: string; color: ThemeColor } | undefined } = {},
 ): string[] {
-	const agents = visibleAgentRows(rows);
+	// Start-time order (see byStartOrder) keeps the bar from reflowing while
+	// agents run; visibleAgentRows returns a fresh array, so sort is safe.
+	const agents = visibleAgentRows(rows).sort(byStartOrder);
 	const viewingId = agents.find((row) => row.viewing)?.correlationId;
 	const now = Date.now();
 	const chips = [

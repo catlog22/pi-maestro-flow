@@ -25,6 +25,7 @@ export interface AgentOverlayParams {
 	getAgents: () => readonly AgentRow[];
 	getViewingId: () => string | undefined;
 	onSelect: (correlationId: string) => void;
+	onCommand: (correlationId: string, action: "interrupt" | "steer", message?: string) => void;
 	requestRender: () => void;
 	close: () => void;
 	theme: Theme;
@@ -33,6 +34,12 @@ export interface AgentOverlayParams {
 }
 
 const CARD_CHROME_ROWS = 5;
+const COMMAND_ACK_MS = 1_500;
+
+/** Plain letters reserved for command keys stay out of the draft. */
+function isDraftInput(data: string): boolean {
+	return data.length === 1 && data >= " ";
+}
 
 export class AgentOverlay implements Component, Focusable {
 	focused = false;
@@ -40,15 +47,45 @@ export class AgentOverlay implements Component, Focusable {
 	private outputScroll: AgentScrollState = { offset: 0, following: true };
 	private detailWidth = 80;
 	private detailRows = 8;
+	private compose: { targetId: string; draft: string } | null = null;
+	private lastAck: { text: string; at: number; error?: boolean } | null = null;
+	private ackTimer: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(private readonly params: AgentOverlayParams) {
 		this.selectedId = params.getViewingId();
 	}
 
 	invalidate(): void {}
-	dispose(): void {}
+	dispose(): void {
+		if (this.ackTimer) clearTimeout(this.ackTimer);
+		this.ackTimer = undefined;
+	}
 
 	handleInput(data: string): void {
+		if (this.compose) {
+			if (matchesKey(data, Key.escape)) {
+				this.compose = null;
+			} else if (data === "\r" || data === "\n") {
+				const targetId = this.compose.targetId;
+				const draft = this.compose.draft.trim();
+				this.compose = null;
+				// The compose target is frozen: the steer must never silently
+				// re-target another agent because the roster selection moved.
+				const target = this.entries().find((entry) => entry.row.correlationId === targetId)?.row;
+				if (!target) {
+					this.ack(`steer aborted: @${this.agentName(targetId)} is gone`, true);
+				} else if (draft) {
+					this.params.onCommand(targetId, "steer", draft);
+					this.ack(`steer @${target.name || target.role || target.agent || targetId}: ${draft}`);
+				}
+			} else if (data === "\x7f" || data === "\x08") {
+				this.compose.draft = this.compose.draft.slice(0, -1);
+			} else if (isDraftInput(data)) {
+				this.compose.draft += data;
+			}
+			this.params.requestRender();
+			return;
+		}
 		if (matchesKey(data, Key.escape)) {
 			this.params.close();
 			return;
@@ -75,7 +112,38 @@ export class AgentOverlay implements Component, Focusable {
 		}
 		if (matchesKey(data, Key.pageDown)) {
 			this.scrollOutput(Math.max(1, this.detailRows - 2));
+			return;
 		}
+		if (data === "i" && this.selectedId) {
+			// Interrupt (打断): abort the current turn/tool; the agent stays alive
+			// and is told to report and continue.
+			this.params.onCommand(this.selectedId, "interrupt");
+			this.ack(`interrupt @${this.agentName(this.selectedId)}`);
+			return;
+		}
+		if (data === "s" && this.selectedId) {
+			// Steer (引导): interrupt + inject the drafted message. The target is
+			// frozen at compose time so later roster changes cannot re-target it.
+			this.compose = { targetId: this.selectedId, draft: "" };
+			this.params.requestRender();
+		}
+	}
+
+	private ack(text: string, error = false): void {
+		this.lastAck = { text, at: Date.now(), ...(error ? { error: true } : {}) };
+		if (this.ackTimer) clearTimeout(this.ackTimer);
+		this.ackTimer = setTimeout(() => {
+			this.ackTimer = undefined;
+			this.lastAck = null;
+			this.params.requestRender();
+		}, COMMAND_ACK_MS);
+		this.ackTimer.unref?.();
+		this.params.requestRender();
+	}
+
+	private agentName(correlationId: string): string {
+		const row = this.entries().find((entry) => entry.row.correlationId === correlationId)?.row;
+		return row?.name || row?.role || row?.agent || correlationId.slice(0, 8);
 	}
 
 	render(width: number): string[] {
@@ -85,6 +153,10 @@ export class AgentOverlay implements Component, Focusable {
 		const terminalHeight = this.params.getTerminalRows?.();
 		const heightIsCompact = terminalHeight !== undefined && Math.floor(terminalHeight * 0.9) < CARD_CHROME_ROWS + 1;
 		if (safeWidth < 20 || heightIsCompact) {
+			if (this.compose) {
+				const target = this.agentName(this.compose.targetId);
+				return [fit(`steer @${target}: ${this.compose.draft}_ · Enter · Esc`, safeWidth)];
+			}
 			const selected = entries.find((entry) => entry.row.correlationId === this.selectedId)?.row;
 			return [fit(selected ? `Agents ${entries.length} · ${agentLabel(selected)} · Esc` : "Agents · none · Esc", safeWidth)];
 		}
@@ -163,20 +235,31 @@ export class AgentOverlay implements Component, Focusable {
 	}
 
 	private header(width: number): string {
+		if (this.compose) {
+			const target = this.agentName(this.compose.targetId);
+			return fit(`steer @${target}: ${this.compose.draft}_`, width);
+		}
 		const rows = this.entries().map((entry) => entry.row);
 		const statuses = rows.map((row) => effectiveAgentStatus(row));
 		const active = statuses.filter((status) => status === "running" || status === "retrying").length;
 		const failed = statuses.filter((status) => status === "failed" || status === "stalled").length;
+		const ack = this.lastAck && Date.now() - this.lastAck.at < COMMAND_ACK_MS ? this.lastAck : null;
 		return fit([
 			this.params.theme.bold("Agents"),
 			`${rows.length} total`,
 			active ? `${active} active` : "",
 			failed ? `${failed} failed` : "",
+			ack
+				? this.params.theme.fg(ack.error ? "error" : "success", ack.error ? `✗ ${ack.text}` : `${this.params.glyphs.check} ${ack.text}`)
+				: "",
 		].filter(Boolean).join(" · "), width);
 	}
 
 	private help(width: number): string {
-		return this.params.theme.fg("dim", fit("Esc close · ↑↓ agent · Home/End jump · PgUp/PgDn output", width));
+		if (this.compose) {
+			return this.params.theme.fg("dim", fit("Enter send · Esc cancel", width));
+		}
+		return this.params.theme.fg("dim", fit("Esc close · ↑↓ agent · Home/End jump · PgUp/PgDn output · i interrupt · s steer", width));
 	}
 
 	private rule(width: number): string {

@@ -68,6 +68,7 @@ import {
 	TEAMMATE_COMPLETE_EVENT,
 	TEAMMATE_MESSAGE_EVENT,
 	TEAMMATE_STARTED_EVENT,
+	TEAMMATE_AGENT_COMMAND_EVENT,
 	TODO_TOOL_NAME,
 	WORKFLOW_STATUS_KEY,
 	type AgentRow,
@@ -1418,6 +1419,9 @@ export default function (pi: ExtensionAPI): void {
 						agents.setViewingAgent(correlationId);
 						sessionDetailScroll = { offset: 0, following: true };
 						req();
+					},
+					onCommand: (correlationId, action, message) => {
+						pi.events.emit(TEAMMATE_AGENT_COMMAND_EVENT, { correlationId, action, ...(message !== undefined ? { message } : {}) });
 					},
 					requestRender: ownedRender,
 					close: finalize,

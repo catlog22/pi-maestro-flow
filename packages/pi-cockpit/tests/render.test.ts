@@ -163,16 +163,49 @@ test("formatAgentMetric abbreviates values above two digits", () => {
 
 test("renderAgents list includes teammate tool and input/output metrics", () => {
 	const line = renderAgents([agent({
-		activeTool: "edit (running)",
+		activeTool: "edit",
 		toolCount: 3,
 		tokens: 1_290,
 		inputTokens: 1_234,
 		outputTokens: 56,
 	})], "list", 120, theme, utils, opts)[0];
-	assert.match(line, /tool edit \(running\)/);
+	assert.match(line, /\bedit\b/);
+	assert.doesNotMatch(line, /tool edit/);
 	assert.match(line, /3 tools/);
 	assert.match(line, /in 1.2k · out 56/);
 	assert.doesNotMatch(line, /1290 tok/);
+});
+
+test("renderAgents hides the tool-execution phase while a tool is shown, and trims zero-second durations", () => {
+	// A running tool already names the phase; repeating "tool-execution" is noise.
+	const withTool = renderAgents([agent({
+		activeTool: "bash",
+		phase: "tool-execution",
+	})], "list", 120, theme, utils, opts)[0];
+	assert.match(withTool, /\bbash\b/);
+	assert.doesNotMatch(withTool, /tool-execution/);
+
+	// Phase is still visible when no tool is in flight.
+	const thinking = renderAgents([agent({ phase: "prompting" })], "list", 120, theme, utils, opts)[0];
+	assert.match(thinking, /prompting/);
+
+	// "14m 0s" reads as "14m"; hours drop both zero parts.
+	const past = Date.now();
+	const fourteen = renderAgents([agent({
+		startedAt: past - 840_000,
+		finishedAt: past,
+		status: "done",
+	})], "list", 120, theme, utils, { ...opts, now: past })[0];
+	assert.match(fourteen, /14m/);
+	assert.doesNotMatch(fourteen, /14m 0s/);
+
+	const twoHours = renderAgents([agent({
+		startedAt: past - 7_200_000,
+		finishedAt: past,
+		status: "done",
+	})], "list", 120, theme, utils, { ...opts, now: past })[0];
+	assert.match(twoHours, /2h/);
+	assert.doesNotMatch(twoHours, /2h 0m 0s/);
 });
 
 test("renderAgents falls back to compact aggregate tokens", () => {
@@ -212,7 +245,8 @@ test("renderAgents exposes cache, fallback model, and provider diagnostics", () 
 		cacheWriteTokens: 10,
 	})], "list", 180, theme, utils, opts)[0];
 	assert.match(line, /provider timeout/);
-	assert.match(line, /model primary→fallback/);
+	assert.match(line, /primary→fallback/);
+	assert.doesNotMatch(line, /model primary/);
 	assert.match(line, /cache 1.2kr\/10w/);
 });
 
@@ -221,21 +255,32 @@ test("renderAgents treats provider/model formatting differences as the same mode
 		requestedModel: "maestro-openai/gpt-5.6-sol",
 		resolvedModel: "gpt-5.6-sol",
 	})], "list", 180, theme, utils, opts)[0];
-	assert.match(qualifiedRequest, /model maestro-openai\/gpt-5\.6-sol/);
+	assert.match(qualifiedRequest, /maestro-openai\/gpt-5\.6-sol/);
 	assert.doesNotMatch(qualifiedRequest, /→/);
 
 	const bareRequest = renderAgents([agent({
 		requestedModel: "gpt-5.6-sol",
 		resolvedModel: "maestro-openai/gpt-5.6-sol",
 	})], "list", 180, theme, utils, opts)[0];
-	assert.match(bareRequest, /model maestro-openai\/gpt-5\.6-sol/);
+	assert.match(bareRequest, /maestro-openai\/gpt-5\.6-sol/);
 	assert.doesNotMatch(bareRequest, /→/);
 
 	const realFallback = renderAgents([agent({
 		requestedModel: "maestro-openai/gpt-5.6-sol",
 		resolvedModel: "maestro-qwen/qwen3.8-max-preview",
 	})], "list", 180, theme, utils, opts)[0];
-	assert.match(realFallback, /model maestro-openai\/gpt-5\.6-sol→maestro-qwen\/qwen3\.8-max-preview/);
+	assert.match(realFallback, /maestro-openai\/gpt-5\.6-sol→maestro-qwen\/qwen3\.8-max-preview/);
+});
+
+test("renderAgents keeps the active tool visible in narrow widths", () => {
+	for (const width of [24, 40]) {
+		const line = renderAgents([agent({
+			activeTool: "bash",
+			phase: "tool-execution",
+		})], "list", width, theme, utils, opts)[0];
+		assert.match(line, /bash/, `active tool survives ${width} columns: ${line}`);
+		assert.doesNotMatch(line, /tool-execution/, `phase stays hidden when the tool names it (${width})`);
+	}
 });
 
 test("renderAgents list caps at 8 visible + overflow", () => {

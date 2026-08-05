@@ -116,9 +116,11 @@ export function formatDuration(ms: number): string {
 	if (totalSeconds < 60) return `${totalSeconds}s`;
 	const s = totalSeconds % 60;
 	const totalMinutes = Math.floor(totalSeconds / 60);
-	if (totalMinutes < 60) return `${totalMinutes}m ${s}s`;
+	if (totalMinutes < 60) return s === 0 ? `${totalMinutes}m` : `${totalMinutes}m ${s}s`;
 	const m = totalMinutes % 60;
 	const h = Math.floor(totalMinutes / 60);
+	if (m === 0 && s === 0) return `${h}h`;
+	if (s === 0) return `${h}h ${m}m`;
 	return `${h}h ${m}m ${s}s`;
 }
 
@@ -289,7 +291,9 @@ export function renderAgents(
 			{ text: theme.fg(status.color, status.glyph), priority: 99, clippable: false },
 		];
 		if (status.label) segs.push({ text: theme.fg(status.color, status.label), priority: 95, clippable: false });
-		if (r.phase) segs.push({ text: theme.fg("dim", r.phase), priority: 92, minWidth: 6 });
+		if (r.phase && !(r.phase === "tool-execution" && r.activeTool)) {
+			segs.push({ text: theme.fg("dim", r.phase), priority: 92, minWidth: 6 });
+		}
 		if (r.lastOutcome?.status === "failed") {
 			segs.push({
 				text: theme.fg("error", r.lastOutcome.message ? `last failed: ${r.lastOutcome.message}` : "last failed"),
@@ -307,7 +311,7 @@ export function renderAgents(
 			segs.push({ text: theme.fg("dim", formatDependencies(r.dependencies, g, dependencyLabels)), priority: 60, clippable: false });
 		}
 		if (r.error) segs.push({ text: theme.fg("error", r.error), priority: 55, minWidth: 8 });
-		if (r.activeTool) segs.push({ text: theme.fg("accent", `tool ${r.activeTool}`), priority: 50, minWidth: 8 });
+		if (r.activeTool) segs.push({ text: theme.fg("accent", r.activeTool), priority: 85, minWidth: 8 });
 		if (r.tail) segs.push({ text: theme.fg("dim", r.tail), priority: 40, minWidth: 8 });
 		const model = r.resolvedModel ?? r.requestedModel;
 		if (model) {
@@ -321,7 +325,7 @@ export function renderAgents(
 			const fallback = both && !formatOnly;
 			const displayModel = formatOnly ? (resolved.includes("/") ? resolved : requested) : model;
 			segs.push({
-				text: theme.fg(fallback ? "warning" : "muted", fallback ? `model ${requested}→${resolved}` : `model ${displayModel}`),
+				text: theme.fg(fallback ? "warning" : "muted", fallback ? `${requested}→${resolved}` : displayModel),
 				priority: 25,
 				minWidth: 8,
 			});

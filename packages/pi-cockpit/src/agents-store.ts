@@ -154,7 +154,12 @@ function latestTool(tools: Array<string | { name?: string; status?: string }> | 
 	const name = tool?.name?.trim();
 	if (!name) return undefined;
 	const status = tool.status?.trim();
-	return truncateStatusText(status && status !== "completed" ? `${name} (${status})` : name);
+	// The active tool is by definition the one in flight, so "bash (running)"
+	// only repeats the row's own live state. Keep the suffix only for
+	// anomalies (failed/error) that the row state does not already convey.
+	return truncateStatusText(
+		status && status !== "completed" && status !== "running" ? `${name} (${status})` : name,
+	);
 }
 
 // Self-accumulating roster. The teammate extension only broadcasts deltas
