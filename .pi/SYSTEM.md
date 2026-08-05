@@ -91,7 +91,7 @@ After the knowledge gate:
 | Web research or URL fetch | `smart_search` |
 | Long or uncertain shell command | `bash_bg` |
 
-Use Maestro as a bash CLI for knowledge and workflow commands: `maestro search`, `load`, `spec`, `wiki`, `run`, and `knowhow`. Use `teammate` for ordinary delegation, exploration, and multi-model work. Do not use Maestro `delegate`, `explore`, or `moa` for ordinary pi work; the documented external-model fallback is the only exception.
+Use Maestro as a bash CLI for knowledge and workflow commands: `maestro search`, `load`, `spec`, `wiki`, `run`, `knowhow`, and `knowledge` (stage/record/review/promote). Use `teammate` for ordinary delegation, exploration, and multi-model work. Do not use Maestro `delegate`, `explore`, or `moa` for ordinary pi work; the documented external-model fallback is the only exception.
 
 If the user explicitly requests an external model absent from `<available_teammate_models>`, call `model-availability`. If listed only under `delegate_fallback`, run:
 
@@ -195,6 +195,14 @@ Use one to three core keywords per query. Separate conceptual queries from code 
 
 Re-search with different keywords when entering a new subsystem, after two failed fixes, or before an architecture decision.
 
+### Search and load attribution
+
+`maestro search` is **exposure only** — it never proves the Run used an entry. Turn hits into evidence explicitly:
+
+- `maestro load --id <id>` records `consumed` on the unique active Run automatically.
+- `maestro knowledge record <ids...> --signal consumed|cited|validated|contradicted --source search|load|manual` records **pure attribution** (no candidate staged) on the active Run; `--source search` is the retrieval-attribution spelling. Use `knowledge stage --signal` only when a candidate is intended.
+- `maestro knowledge review <session-id> --json` reports per-source totals (`input_totals_by_source`) and knowledge-id detail (`inputs`) so you can verify what was searched, loaded, and staged.
+
 # Architecture Template Library (arch-kb)
 
 `maestro arch-kb` is a prebuilt architecture template library for well-known product and system categories (URL shortener, e-commerce, AI gateway / proxy, cloud storage, collaborative document, browser extension, embedded device, AI agent platform, ...). Use it when the task maps to a common architecture category:
@@ -213,6 +221,7 @@ Treat matched templates as governing evidence in plans and designs; reuse their 
 Runtime birth packets, `maestro run brief`, and `maestro run check` are authoritative for Run-specific commands and state.
 
 - Record accepted decisions and locked constraints in `report.md` frontmatter.
+- Attribute search hits before citing them: `maestro knowledge record <ids...> --signal consumed|cited|validated|contradicted --source search|load|manual` records pure ledger attribution on the active Run without staging a candidate (use `stage --signal` only when a candidate is intended).
 - Stage reusable recipes or pitfalls before completion:
 
 ```bash
@@ -221,6 +230,7 @@ maestro knowledge stage spec|knowhow "<title>" "<content>" --run <run-id> [--cat
 
 - Add `--signal cited|validated|contradicted --signal-ids <ids>` when relating a candidate to existing knowledge.
 - Run completion stages pending candidates; it does not promote them.
+- On Run seal a `run-knowledge` message summarizes the Run's attribution (consumed/cited/validated/contradicted) and staged candidates; on Session seal a `session-knowledge` message prompts candidate review when a backlog exists. Treat these as the authoritative seal-time knowledge state — do not re-derive it manually.
 - Work through the `run check` finish checklist and record intentional concerns.
 - Review, resolution, promotion, supersession, conflict marking, and pruning require an explicit user request or confirmed governance step.
 - Promote only eligible candidates with fresh reconciliation receipts from sealed source Runs. Deprecated or superseded knowledge remains auditable but is excluded from normal search and injection.

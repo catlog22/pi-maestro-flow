@@ -79,6 +79,17 @@ export interface KnowledgeReviewView {
   run_count: number;
   ledger_count: number;
   input_totals: KnowledgeInputTotals;
+  /** Signal totals by attribution source; absent on older CLIs. */
+  input_totals_by_source?: Record<string, KnowledgeInputTotals>;
+  /** Knowledge-id attribution detail in ledger order; absent on older CLIs. */
+  inputs?: Array<{
+    run_id: string;
+    knowledge_id: string;
+    signal: string;
+    source: string;
+    count: number;
+    evidence?: string[];
+  }>;
   unique_inputs: number;
   candidates: ReviewCandidate[];
 }
@@ -152,6 +163,49 @@ export interface KnowledgePromoteResult {
   skipped_observed: Array<{ candidate_id: string }>;
   skipped_review_required: Array<{ candidate_id: string }>;
   skipped_suppressed: Array<{ candidate_id: string }>;
+}
+
+export interface KnowledgeRecordOptions {
+  /** Knowledge IDs to attribute. */
+  knowledgeIds: readonly string[];
+  signal?: "consumed" | "cited" | "validated" | "contradicted";
+  source?: "search" | "load" | "manual";
+  /** Optional evidence anchors (artifact/output/test refs). */
+  evidence?: readonly string[];
+  /** Active Run that owns the attribution; omit to target the unique active Run. */
+  runId?: string;
+  /** Explicit Session ID; requires runId. */
+  sessionId?: string;
+}
+
+export interface KnowledgeRecordResult {
+  session_id: string;
+  run_id: string;
+  recorded: number;
+}
+
+export interface KnowledgeStageOptions {
+  /** Candidate target corpus: spec or knowhow. */
+  target: "spec" | "knowhow";
+  title: string;
+  content: string;
+  /** Active Run that owns the staged candidate; omit to target the unique active Run. */
+  runId?: string;
+  /** Explicit Session ID; requires runId. */
+  sessionId?: string;
+  action?: KnowledgeCandidateAction;
+  category?: string | null;
+  /** Optional knowledge signal recorded alongside the candidate (attribution). */
+  signal?: "consumed" | "cited" | "validated" | "contradicted";
+  signalIds?: readonly string[];
+  evidence?: readonly string[];
+}
+
+export interface KnowledgeStageResult {
+  session_id: string;
+  run_id: string;
+  candidate_id: string;
+  signal_recorded: number;
 }
 
 export interface KnowledgeResolveOptions {
@@ -228,6 +282,51 @@ export class KnowledgeCliAdapter {
       "knowledge", "promote", required(sessionId, "sessionId"),
       ...candidates.flatMap((candidate) => ["--candidate", candidate]),
       ...(options.all ? ["--all"] : []),
+      "--json",
+      "--workflow-root", this.workflowRoot,
+    ]);
+  }
+
+  async recordInputs(options: KnowledgeRecordOptions): Promise<KnowledgeRecordResult> {
+    const ids = options.knowledgeIds.map((id) => id.trim()).filter(Boolean);
+    if (ids.length === 0) throw new Error("knowledgeIds must be non-empty");
+    if (options.sessionId && !options.runId) {
+      throw new Error("sessionId requires runId (the CLI binds --session to --run)");
+    }
+    return this.invokeJson<KnowledgeRecordResult>([
+      "knowledge", "record", ...ids,
+      "--signal", options.signal ?? "consumed",
+      "--source", options.source ?? "search",
+      ...(options.evidence?.length ? ["--evidence", options.evidence.join(",")] : []),
+      ...(options.runId ? ["--run", required(options.runId, "runId")] : []),
+      ...(options.sessionId ? ["--session", required(options.sessionId, "sessionId")] : []),
+      "--json",
+      "--workflow-root", this.workflowRoot,
+    ]);
+  }
+
+  async stage(options: KnowledgeStageOptions): Promise<KnowledgeStageResult> {
+    const target = required(options.target, "target");
+    const title = required(options.title, "title");
+    const content = required(options.content, "content");
+    if (options.signal && !options.signalIds?.length) {
+      throw new Error("signal requires signalIds");
+    }
+    if (options.signalIds?.length && !options.signal) {
+      throw new Error("signalIds requires signal");
+    }
+    if (options.sessionId && !options.runId) {
+      throw new Error("sessionId requires runId (the CLI binds --session to --run)");
+    }
+    return this.invokeJson<KnowledgeStageResult>([
+      "knowledge", "stage", target, title, content,
+      ...(options.sessionId ? ["--session", required(options.sessionId, "sessionId")] : []),
+      ...(options.runId ? ["--run", required(options.runId, "runId")] : []),
+      ...(options.action ? ["--action", options.action] : []),
+      ...(options.category ? ["--category", options.category] : []),
+      ...(options.evidence?.length ? ["--evidence", options.evidence.join(",")] : []),
+      ...(options.signal ? ["--signal", options.signal] : []),
+      ...(options.signalIds?.length ? ["--signal-ids", options.signalIds.join(",")] : []),
       "--json",
       "--workflow-root", this.workflowRoot,
     ]);

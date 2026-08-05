@@ -165,6 +165,18 @@ function projectWorkflow(view: WorkflowViewModel | null | undefined): MaestroWor
       total: 0,
     },
     next: view.nextAction ?? view.recoveryAction ?? null,
+    ...(view.knowledge ? {
+      knowledge: {
+        consumed: view.knowledge.consumed,
+        cited: view.knowledge.cited,
+        validated: view.knowledge.validated,
+        contradicted: view.knowledge.contradicted,
+        pending: view.knowledge.pendingCandidates,
+        corroborated: view.knowledge.corroboratedCandidates,
+        review: view.knowledge.reviewRequired,
+        promoted: view.knowledge.promotedCandidates,
+      },
+    } : {}),
   };
 }
 

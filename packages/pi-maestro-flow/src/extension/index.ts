@@ -141,6 +141,7 @@ import { TodoOverlay } from "../tui/todo-overlay.ts";
 import { GoalOverlay, type GoalOverlayAction } from "../tui/goal-overlay.ts";
 import { KnowledgeOverlay, type KnowledgeOverlayAction } from "../tui/knowledge-overlay.ts";
 import { KnowledgeCliAdapter, resolveLatestSessionId } from "../knowledge/cli-adapter.ts";
+import { SkillCliAdapter, type SkillCliListOptions } from "../skills/skill-cli-adapter.ts";
 import { buildKnowledgeCenterView, type KnowledgeCenterView } from "../knowledge/view-model.ts";
 import {
   onSessionStart as inputHistorySessionStart,
@@ -177,6 +178,7 @@ import {
 import type { PlanWorkflowConfirmationOptions } from "../tools/plan-confirm.ts";
 import type { LoadedPlan, PlanExecutionChoice, PlanWorkflowBinding } from "../tools/plan-store.ts";
 import { registerPlanModelSelection } from "../tools/plan-model.ts";
+import { registerPlanReviewModelCommand } from "../tools/plan-review.ts";
 import { installStatusline } from "../statusline/statusline.ts";
 import { registerCodexHookAdapter } from "../hooks/pi-adapter.ts";
 import { createPermissionController } from "../permissions/controller.ts";
@@ -691,6 +693,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   let attachedWorkflowSessionId: string | undefined;
   let attachedWorkflowHostSessionId: string | undefined;
   let lastRunStates = new Map<string, string>();
+  let lastSessionStatus: string | undefined;
   let workflowSessionOptedIn = true;
   let approvalMode: PermissionMode = DEFAULT_PERMISSION_MODE;
   let currentSwarmProjection: TeamSwarmProjection | undefined;
@@ -729,6 +732,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   }
 
   registerPlanModelSelection(pi);
+  registerPlanReviewModelCommand(pi);
   try {
     registerModelFailover(pi);
   } catch (error) {
@@ -1326,6 +1330,23 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       next.sessionGeneration,
     );
     if (workflowSessionOptedIn) reconcileWorkflowGoal(next, ctx);
+    if (nextSession?.status && nextSession.status !== lastSessionStatus) {
+      if (nextSession.status === "sealed" && lastSessionStatus !== undefined) {
+        const sealedSessionId = nextSession.sessionId;
+        const summary = await new KnowledgeCliAdapter(ctx.cwd).review(sealedSessionId).catch(() => null);
+        const pending = summary?.candidates.filter(candidate => candidate.status === "pending").length ?? 0;
+        const reviewRequired = summary?.candidates.filter(
+          candidate => candidate.reconciliation?.promotion_eligibility === "review_required",
+        ).length ?? 0;
+        if (pending > 0 || reviewRequired > 0) {
+          const message = `Workflow Session ${sealedSessionId} sealed — ${pending} candidate(s) pending, `
+            + `${reviewRequired} review required. Run \"maestro knowledge review ${sealedSessionId}\" before promotion.`;
+          ctx.ui.notify(message, "info");
+          pi.sendMessage({ customType: "session-knowledge", content: message, display: true });
+        }
+      }
+      lastSessionStatus = nextSession.status;
+    }
     if (emitEvents && activateWorkflowSession) emitRunTransitions(next);
     else lastRunStates = new Map(next.session?.runs.map((run) => [run.runId, run.status]) ?? []);
     updateTodoWidget();
@@ -1618,6 +1639,38 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
         command: run.command,
       });
       guiEvents.emit(GUI_EVENTS.stateChanged, { subsystem: GUI_EVENTS.runTransition, runId: run.runId });
+      // Run seal completes the knowledge pipeline for this step: surface the
+      // attribution and staged-candidate summary without blocking the refresh.
+      if (previous !== "sealed" && run.status === "sealed") {
+        const sealedSessionId = snapshot.session?.sessionId;
+        if (sealedSessionId) {
+          void (async () => {
+            const adapter = new KnowledgeCliAdapter(flowSettingsContext?.cwd ?? process.cwd());
+            const summary = await adapter.review(sealedSessionId).catch(() => null);
+            if (!summary) return;
+            const signals: Record<string, number> = { consumed: 0, cited: 0, validated: 0, contradicted: 0 };
+            for (const input of summary.inputs ?? []) {
+              if (input.run_id !== run.runId) continue;
+              signals[input.signal] += input.count;
+            }
+            const staged = summary.candidates
+              .filter(candidate => candidate.run_ids.includes(run.runId)).length;
+            const reviewRequired = summary.candidates
+              .filter(candidate => candidate.reconciliation?.promotion_eligibility === "review_required").length;
+            const reviewHint = reviewRequired > 0
+              ? ` · ${reviewRequired} review required — \"maestro knowledge review ${sealedSessionId}\"`
+              : ` — \"maestro knowledge review ${sealedSessionId}\"`;
+            pi.sendMessage({
+              customType: "run-knowledge",
+              content: `Run ${run.runId}/${run.command} sealed — knowledge: consumed ${signals.consumed} · `
+                + `cited ${signals.cited} · validated ${signals.validated} · contradicted ${signals.contradicted}`
+                + ` · staged ${staged} candidate(s)${reviewHint}`,
+              display: true,
+              details: { runId: run.runId, signals, staged, reviewRequired },
+            });
+          })();
+        }
+      }
     }
     lastRunStates = nextStates;
   }
@@ -1640,7 +1693,22 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
             validated: summary.input_totals.validated,
             contradicted: summary.input_totals.contradicted,
             pendingCandidates: summary.candidates.filter((c) => c.status === "pending").length,
+            corroboratedCandidates: summary.candidates.filter(
+              (c) => c.status === "pending" && c.stage === "corroborated",
+            ).length,
             reviewRequired: summary.candidates.filter((c) => c.reconciliation?.promotion_eligibility === "review_required").length,
+            promotedCandidates: summary.candidates.filter((c) => c.status === "promoted").length,
+            bySource: summary.input_totals_by_source ?? {},
+            inputs: [...(summary.inputs ?? [])]
+              .reverse()
+              .slice(0, 20)
+              .map((input) => ({
+                runId: input.run_id,
+                knowledgeId: input.knowledge_id,
+                signal: input.signal,
+                source: input.source,
+                count: input.count,
+              })),
           },
         };
       } catch {
@@ -1838,6 +1906,106 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   pi.registerCommand("maestro-knowledge", {
     description: "Open the Knowledge center — review session candidates, reconciliation matches, and corpus health",
     async handler(args, ctx) { await openKnowledgeOverlay(ctx, args); },
+  });
+  pi.registerCommand("maestro-knowledge-stage", {
+    description: "Stage a knowledge candidate (spec|knowhow) on the active Run, optionally with an attribution signal. Usage: maestro-knowledge-stage <spec|knowhow> <title> <content> [--category <c>] [--action <propose|reaffirm|supersede|contest>] [--signal <consumed|cited|validated|contradicted> --signal-ids <id1,id2>] [--evidence <ref1,ref2>]",
+    async handler(args, ctx) {
+      const parsed = parseKnowledgeStageArgs(args);
+      if (parsed instanceof Error) {
+        ctx.ui.notify(parsed.message, "error");
+        return;
+      }
+      const snapshot = workflowBridge?.getSnapshot();
+      const session = snapshot?.session;
+      const run = session ? activeWorkflowRun(snapshot) : undefined;
+      const adapter = new KnowledgeCliAdapter(ctx.cwd);
+      try {
+        const result = await adapter.stage({
+          target: parsed.target,
+          title: parsed.title,
+          content: parsed.content,
+          runId: run?.runId,
+          sessionId: run ? session?.sessionId : undefined,
+          action: parsed.action,
+          category: parsed.category,
+          signal: parsed.signal,
+          signalIds: parsed.signalIds,
+          evidence: parsed.evidence,
+        });
+        const signal = parsed.signal ? `; recorded ${result.signal_recorded} signal(s) as ${parsed.signal}` : "";
+        ctx.ui.notify(
+          `Staged ${result.candidate_id} on ${result.session_id}/${result.run_id}${signal} `
+          + `— review with \"maestro knowledge review ${result.session_id}\"`,
+          "info",
+        );
+      } catch (error) {
+        ctx.ui.notify(
+          error instanceof Error ? error.message : String(error),
+          "error",
+        );
+      }
+    },
+  });
+  pi.registerCommand("maestro-skills", {
+    description: "List Maestro CLI skills/steps for the pi platform. Usage: maestro-skills [--steps] [--platform <claude|codex|agent|agy|pi>]",
+    async handler(args, ctx) {
+      const steps = /--steps\b/.test(args);
+      const platform = /--platform\s+(\S+)/.exec(args)?.[1] ?? "pi";
+      const adapter = new SkillCliAdapter(ctx.cwd);
+      try {
+        const entries = await adapter.list({ platform: platform as SkillCliListOptions["platform"], steps });
+        const skills = entries.filter((entry) => entry.type === "skill");
+        const commands = entries.filter((entry) => entry.type === "command");
+        const stepCount = steps ? entries.filter((entry) => entry.type === "step").length : 0;
+        const names = [...new Set(skills.map((entry) => entry.name))].slice(0, 12).join(", ");
+        ctx.ui.notify(
+          `maestro skills (${platform}): ${skills.length} skills · ${commands.length} commands`
+          + (stepCount > 0 ? ` · ${stepCount} run-resolvable steps` : "")
+          + `${names ? ` — ${names}${skills.length > 12 ? " …" : ""}` : ""}`
+          + (entries.length === 0 ? " — CLI found no entries for this platform" : ""),
+          "info",
+        );
+      } catch (error) {
+        ctx.ui.notify(
+          error instanceof Error ? error.message : String(error),
+          "error",
+        );
+      }
+    },
+  });
+  pi.registerCommand("maestro-knowledge-record", {
+    description: "Record pure knowledge attribution on the active Run without staging a candidate. Usage: maestro-knowledge-record <knowledge-id...> [--signal <consumed|cited|validated|contradicted>] [--source <search|load|manual>]",
+    async handler(args, ctx) {
+      const parsed = parseKnowledgeRecordArgs(args);
+      if (parsed instanceof Error) {
+        ctx.ui.notify(parsed.message, "error");
+        return;
+      }
+      const snapshot = workflowBridge?.getSnapshot();
+      const session = snapshot?.session;
+      const run = session ? activeWorkflowRun(snapshot) : undefined;
+      const adapter = new KnowledgeCliAdapter(ctx.cwd);
+      try {
+        const result = await adapter.recordInputs({
+          knowledgeIds: parsed.knowledgeIds,
+          signal: parsed.signal,
+          source: parsed.source,
+          runId: run?.runId,
+          sessionId: run ? session?.sessionId : undefined,
+        });
+        ctx.ui.notify(
+          `Recorded ${result.recorded} input(s) as ${parsed.signal ?? "consumed"} `
+          + `(source ${parsed.source ?? "search"}) on ${result.session_id}/${result.run_id}; `
+          + `review with "maestro knowledge review ${result.session_id}"`,
+          "info",
+        );
+      } catch (error) {
+        ctx.ui.notify(
+          error instanceof Error ? error.message : String(error),
+          "error",
+        );
+      }
+    },
   });
   pi.registerCommand("maestro-todo", {
     description: "Open the shared root and teammate Todo center",
@@ -2420,6 +2588,13 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     const command = event.toolName === "bash"
       ? String((event as { input?: { command?: unknown } }).input?.command ?? "")
       : "";
+    // Knowledge evolution operations (record/stage/promote/review/load/search)
+    // change attribution or candidates; refresh the UI snapshot and GUI state so
+    // the current Session's knowledge view stays live.
+    if (event.toolName === "bash" && /\bmaestro\s+(?:knowledge\s+(?:record|stage|promote|review|reconcile)|load|search)\b/.test(command)) {
+      guiEvents.emit(GUI_EVENTS.stateChanged, { subsystem: "knowledge", at: Date.now() });
+      publishMaestroUi();
+    }
     if (event.toolName === "run-control" || /\bmaestro\s+(?:run|ralph)\b/.test(command)) {
       const runControlAction = event.toolName === "run-control"
         ? String((event as { input?: { action?: unknown } }).input?.action ?? "")
@@ -3126,4 +3301,144 @@ function widgetActorLabel(
   const actors = tasks.flatMap((task) => [task.createdBy, task.assignee])
     .filter((candidate): candidate is { id: string; label: string } => Boolean(candidate));
   return formatTodoActorSelector(actor, actors);
+}
+
+interface ParsedKnowledgeStageArgs {
+  target: "spec" | "knowhow";
+  title: string;
+  content: string;
+  action?: "propose" | "reaffirm" | "supersede" | "contest";
+  category?: string;
+  signal?: "consumed" | "cited" | "validated" | "contradicted";
+  signalIds?: string[];
+  evidence?: string[];
+}
+
+const KNOWLEDGE_STAGE_SIGNALS = new Set(["consumed", "cited", "validated", "contradicted"]);
+const KNOWLEDGE_STAGE_ACTIONS = new Set(["propose", "reaffirm", "supersede", "contest"]);
+
+function parseKnowledgeStageArgs(args: string): ParsedKnowledgeStageArgs | Error {
+  const tokens = tokenizeQuoted(args);
+  const positionals: string[] = [];
+  const flags = new Map<string, string[]>();
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token.startsWith("--")) {
+      const name = token.slice(2);
+      const values: string[] = [];
+      while (index + 1 < tokens.length && !tokens[index + 1]!.startsWith("--")) {
+        values.push(tokens[++index]!);
+      }
+      if (values.length === 0) return new Error(`--${name} requires a value`);
+      flags.set(name, values);
+    } else {
+      positionals.push(token);
+    }
+  }
+  const [target, ...rest] = positionals;
+  if (!target || !["spec", "knowhow"].includes(target)) {
+    return new Error('target must be "spec" or "knowhow"');
+  }
+  const title = rest.shift();
+  if (!title) return new Error("title is required");
+  const content = rest.length > 0 ? rest.join(" ") : "";
+  if (!content.trim()) return new Error("content is required");
+
+  const category = firstFlag(flags, "category");
+  const action = firstFlag(flags, "action");
+  if (action !== undefined && !KNOWLEDGE_STAGE_ACTIONS.has(action)) {
+    return new Error(`--action must be one of ${[...KNOWLEDGE_STAGE_ACTIONS].join("|")}`);
+  }
+  const signal = firstFlag(flags, "signal");
+  if (signal !== undefined && !KNOWLEDGE_STAGE_SIGNALS.has(signal)) {
+    return new Error(`--signal must be one of ${[...KNOWLEDGE_STAGE_SIGNALS].join("|")}`);
+  }
+  const signalIds = splitFlag(flags, "signal-ids");
+  const evidence = splitFlag(flags, "evidence");
+  if (signal && !signalIds) return new Error("--signal requires --signal-ids");
+  if (signalIds && !signal) return new Error("--signal-ids requires --signal");
+
+  return {
+    target: target as "spec" | "knowhow",
+    title,
+    content,
+    action: action as ParsedKnowledgeStageArgs["action"],
+    category,
+    signal: signal as ParsedKnowledgeStageArgs["signal"],
+    signalIds,
+    evidence,
+  };
+}
+
+interface ParsedKnowledgeRecordArgs {
+  knowledgeIds: string[];
+  signal?: "consumed" | "cited" | "validated" | "contradicted";
+  source?: "search" | "load" | "manual";
+}
+
+const KNOWLEDGE_RECORD_SOURCES = new Set(["search", "load", "manual"]);
+
+function parseKnowledgeRecordArgs(args: string): ParsedKnowledgeRecordArgs | Error {
+  const tokens = tokenizeQuoted(args);
+  const positionals: string[] = [];
+  const flags = new Map<string, string[]>();
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token.startsWith("--")) {
+      const name = token.slice(2);
+      const values: string[] = [];
+      while (index + 1 < tokens.length && !tokens[index + 1]!.startsWith("--")) {
+        values.push(tokens[++index]!);
+      }
+      if (values.length === 0) return new Error(`--${name} requires a value`);
+      flags.set(name, values);
+    } else {
+      positionals.push(token);
+    }
+  }
+  const knowledgeIds = positionals.flatMap((id) => id.split(",")).map((id) => id.trim()).filter(Boolean);
+  if (knowledgeIds.length === 0) return new Error("at least one knowledge id is required");
+  const signal = firstFlag(flags, "signal");
+  if (signal !== undefined && !KNOWLEDGE_STAGE_SIGNALS.has(signal)) {
+    return new Error(`--signal must be one of ${[...KNOWLEDGE_STAGE_SIGNALS].join("|")}`);
+  }
+  const source = firstFlag(flags, "source");
+  if (source !== undefined && !KNOWLEDGE_RECORD_SOURCES.has(source)) {
+    return new Error(`--source must be one of ${[...KNOWLEDGE_RECORD_SOURCES].join("|")}`);
+  }
+  return {
+    knowledgeIds,
+    signal: signal as ParsedKnowledgeRecordArgs["signal"],
+    source: source as ParsedKnowledgeRecordArgs["source"],
+  };
+}
+
+function tokenizeQuoted(input: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quoted = false;
+  for (const character of input.trim()) {
+    if (character === '"') {
+      quoted = !quoted;
+    } else if (character === " " && !quoted) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+    } else {
+      current += character;
+    }
+  }
+  if (current) tokens.push(current);
+  return tokens;
+}
+
+function firstFlag(flags: Map<string, string[]>, name: string): string | undefined {
+  return flags.get(name)?.[0];
+}
+
+function splitFlag(flags: Map<string, string[]>, name: string): string[] | undefined {
+  const values = flags.get(name);
+  if (!values) return undefined;
+  return values.flatMap((value) => value.split(",")).map((item) => item.trim()).filter(Boolean);
 }

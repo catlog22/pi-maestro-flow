@@ -139,10 +139,35 @@ export class SessionOverlay implements Component, Focusable {
       rows.push(rule(inner));
       const review = knowledge.reviewRequired > 0 ? ` · ${fg("33", `${knowledge.reviewRequired} review`)}` : "";
       rows.push(fitLine(
-        `Knowledge: ${knowledge.pendingCandidates} pending${review} · consumed ${knowledge.consumed} · `
-        + `validated ${knowledge.validated} · cited ${knowledge.cited} · contradicted ${knowledge.contradicted}`,
+        `Knowledge: consumed ${knowledge.consumed} · cited ${knowledge.cited} · `
+        + `validated ${knowledge.validated} · contradicted ${knowledge.contradicted}`,
         inner,
       ));
+      rows.push(fitLine(
+        `Evolution: pending ${knowledge.pendingCandidates} · corroborated ${knowledge.corroboratedCandidates}`
+        + ` · promoted ${knowledge.promotedCandidates}${review}`,
+        inner,
+      ));
+      const sourceLine = (["search", "load", "manual"] as const)
+        .map((source) => {
+          const totals = knowledge.bySource[source];
+          const total = totals
+            ? totals.consumed + totals.cited + totals.validated + totals.contradicted
+            : 0;
+          return `${source}:${total}`;
+        })
+        .join(" · ");
+      if (sourceLine) rows.push(fitLine(`Attribution: ${sourceLine}`, inner));
+      if (knowledge.inputs.length > 0) {
+        rows.push(fitLine(fg("2", "Recent attribution (newest first):"), inner));
+        for (const input of knowledge.inputs.slice(0, 5)) {
+          const shortRun = input.runId.length > 18 ? `${input.runId.slice(0, 15)}…` : input.runId;
+          rows.push(fitLine(
+            `  ${shortRun} · ${input.knowledgeId} · ${input.signal}/${input.source} ×${input.count}`,
+            inner,
+          ));
+        }
+      }
     }
     if (this.status) rows.push(fitLine(this.status, inner));
     rows.push(fitSegments(inner, this.controlSegments("Esc back")));

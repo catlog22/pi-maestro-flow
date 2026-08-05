@@ -112,7 +112,19 @@ export interface WorkflowViewModel {
     validated: number;
     contradicted: number;
     pendingCandidates: number;
+    corroboratedCandidates: number;
     reviewRequired: number;
+    promotedCandidates: number;
+    /** Per-source signal totals for the current Session's knowledge evolution. */
+    bySource: Record<string, { consumed: number; cited: number; validated: number; contradicted: number }>;
+    /** Knowledge-id attribution detail (newest first, bounded). */
+    inputs: Array<{
+      runId: string;
+      knowledgeId: string;
+      signal: string;
+      source: string;
+      count: number;
+    }>;
   };
 }
 
