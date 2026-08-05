@@ -69,7 +69,8 @@
     "!.pi/model-failover.json",
     "!.pi/scratch/**",
     "AGENTS.md",
-    "README.md"
+    "README.md",
+    "optional/"
   ],
   "exports": {
     "./gui": "./src/gui/index.ts",

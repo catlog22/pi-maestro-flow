@@ -6,7 +6,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
 import { loadSkillConfig, type SkillDefaults } from "./skill-config.ts";
-import { SkillManagerStore, type ManagedSkill, type ManagedSkillGroup } from "./skill-manager-store.ts";
+import { SkillManagerStore, type ManagedSkill, type ManagedSkillGroup, type OptionalSkill } from "./skill-manager-store.ts";
 import {
   SkillManagerOverlay,
   type SkillManagerAction,
@@ -39,6 +39,8 @@ const CATALOGS = {
     "notice.deleteCancelled": "Group deletion cancelled",
     "notice.deleteOk": "Group deleted · {name}",
     "notice.deleteFailed": "Failed to delete group · {message}",
+    "notice.installOk": "Installed optional skill · {name} · reload after closing",
+    "notice.installFailed": "Install failed · {message}",
     "notice.noSelection": "Cannot act · no skill or group selected",
     "status.toggling": "Skill · {action} {name}…",
     "status.action.enable": "enabling",
@@ -77,6 +79,8 @@ const CATALOGS = {
     "notice.deleteCancelled": "已取消删除分组",
     "notice.deleteOk": "已删除分组 · {name}",
     "notice.deleteFailed": "删除分组失败 · {message}",
+    "notice.installOk": "已安装选装 Skill · {name} · 重启后生效",
+    "notice.installFailed": "安装失败 · {message}",
     "notice.noSelection": "无法操作 · 未选择 Skill 或分组",
     "status.toggling": "Skill · 正在{action} {name}…",
     "status.action.enable": "启用",
@@ -147,12 +151,13 @@ export async function runSkillManager(
   locale: SupportedSettingsLocale = "zh-CN",
 ): Promise<SkillManagerResult> {
   let snapshot = await store.load();
+  let optionalSkills = await store.loadOptionalSkills();
   let uiState: Partial<SkillManagerUiState> = { query: "" };
   let notice = snapshot.skills.length === 0 ? t(locale, "notice.noSkills") : undefined;
   let configChanged = false;
 
   while (true) {
-    const action = await openSkillManagerOverlay(ctx, snapshot.skills, snapshot.groups, uiState, notice, locale);
+    const action = await openSkillManagerOverlay(ctx, snapshot.skills, snapshot.groups, optionalSkills, uiState, notice, locale);
     uiState = action.uiState;
     if (action.kind === "close") break;
 
@@ -179,6 +184,23 @@ export async function runSkillManager(
     const selectedGroup = action.groupName
       ? snapshot.groups.find((group) => group.name === action.groupName && group.custom === action.groupCustom)
       : undefined;
+
+    if (action.kind === "install-optional") {
+      if (!action.optionalName) {
+        notice = t(locale, "notice.noSelection");
+        continue;
+      }
+      try {
+        optionalSkills = await store.installOptionalSkill(action.optionalName);
+        snapshot = await store.load();
+        configChanged = true;
+        notice = t(locale, "notice.installOk", { name: action.optionalName });
+        uiState = { ...uiState, selectedKey: `skill:${joinOptionalInstalledPath(action.optionalName)}` };
+      } catch (error) {
+        notice = t(locale, "notice.installFailed", { message: errorMessage(error) });
+      }
+      continue;
+    }
 
     if (action.kind === "assign-group") {
       if (!selected) {
@@ -302,6 +324,7 @@ async function openSkillManagerOverlay(
   ctx: ExtensionContext,
   skills: ManagedSkill[],
   groups: ManagedSkillGroup[],
+  optionalSkills: OptionalSkill[],
   initialState: Partial<SkillManagerUiState>,
   notice: string | undefined,
   locale: SupportedSettingsLocale,
@@ -310,6 +333,7 @@ async function openSkillManagerOverlay(
     new SkillManagerOverlay({
       skills,
       groups,
+      optionalSkills,
       theme,
       notice,
       initialState,
@@ -320,6 +344,12 @@ async function openSkillManagerOverlay(
     overlay: true,
     overlayOptions: { anchor: "center", width: "94%", maxHeight: "92%" },
   });
+}
+
+function joinOptionalInstalledPath(name: string): string {
+  // After install the skill lives in <cwd>/.pi/skills/<name>/SKILL.md; the exact
+  // path is resolved on the next snapshot, so keep selection on the optional row.
+  return `optional:${name}`;
 }
 
 function errorMessage(error: unknown): string {

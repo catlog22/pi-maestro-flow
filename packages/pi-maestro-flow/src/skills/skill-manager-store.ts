@@ -1,4 +1,6 @@
-import { readFile, mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import { readFile, mkdir, rename, unlink, writeFile, cp, readdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import { basename, dirname, join, relative } from "node:path";
 import {
   DefaultPackageManager,
@@ -37,15 +39,46 @@ export interface ManagedSkillGroup {
   skills: ManagedSkill[];
 }
 
+/**
+ * A skill shipped in the package's `optional/skills/` (选装) — present in the
+ * repo but NOT installed by default. `installed` reports whether it already
+ * exists in the project `.pi/skills/`.
+ */
+export interface OptionalSkill {
+  name: string;
+  description: string;
+  sourcePath: string;
+  installed: boolean;
+}
+
+const ownRequire = createRequire(import.meta.url);
+
+/**
+ * Resolve the pi-maestro-flow package's `optional/skills/` directory.
+ * package.json lives at <repo>/packages/pi-maestro-flow/package.json, so the
+ * optional folder is two levels up at the repo root.
+ */
+export function resolveOptionalSkillsDir(): string | undefined {
+  try {
+    const pkgJson = ownRequire.resolve("../../package.json");
+    return join(dirname(pkgJson), "..", "..", "optional", "skills");
+  } catch {
+    return undefined;
+  }
+}
+
 export class SkillManagerStore {
   private readonly settingsManager: SettingsManager;
   private readonly agentDir: string;
+  private readonly optionalSkillsDir: string | undefined;
 
   constructor(
     private readonly cwd: string,
     agentDir = getAgentDir(),
+    optionalSkillsDir = resolveOptionalSkillsDir(),
   ) {
     this.agentDir = agentDir;
+    this.optionalSkillsDir = optionalSkillsDir;
     this.settingsManager = SettingsManager.create(cwd, agentDir);
   }
 
@@ -67,6 +100,55 @@ export class SkillManagerStore {
       .sort((left, right) => left.name.localeCompare(right.name) || left.filePath.localeCompare(right.filePath));
     const groups = buildSkillGroups(skills, loadedConfig.config.groups);
     return { skills, groups, projectConfigPath: loadedConfig.projectPath };
+  }
+
+  /**
+   * Enumerate 选装 skills from the package `optional/skills/` dir.
+   * `installed` is true when the skill already exists in the project `.pi/skills/`.
+   */
+  async loadOptionalSkills(): Promise<OptionalSkill[]> {
+    if (!this.optionalSkillsDir) return [];
+    let entries;
+    try {
+      entries = await readdir(this.optionalSkillsDir, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    const projectSkillsDir = join(this.cwd, ".pi", "skills");
+    const optional: OptionalSkill[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      const sourcePath = join(this.optionalSkillsDir, entry.name);
+      const skillFile = join(sourcePath, "SKILL.md");
+      let content: string;
+      try {
+        content = await readFile(skillFile, "utf8");
+      } catch {
+        continue;
+      }
+      const { frontmatter } = parseFrontmatter<Record<string, unknown>>(content);
+      optional.push({
+        name: entry.name,
+        description: typeof frontmatter.description === "string" ? frontmatter.description.trim() : "",
+        sourcePath,
+        installed: existsSync(join(projectSkillsDir, entry.name, "SKILL.md")),
+      });
+    }
+    return optional.sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  /**
+   * Install a 选装 skill into the project `.pi/skills/` (idempotent copy).
+   */
+  async installOptionalSkill(name: string): Promise<OptionalSkill[]> {
+    const optional = await this.loadOptionalSkills();
+    const skill = optional.find((entry) => entry.name === name);
+    if (!skill) throw new Error(`选装 skill "${name}" 不存在`);
+    if (skill.installed) return optional;
+    const targetDir = join(this.cwd, ".pi", "skills", name);
+    await mkdir(dirname(targetDir), { recursive: true });
+    await cp(skill.sourcePath, targetDir, { recursive: true });
+    return this.loadOptionalSkills();
   }
 
   async toggleEnabled(skill: ManagedSkill): Promise<SkillManagerSnapshot> {

@@ -7,7 +7,7 @@
  * Skills → Skills (format adjustment)
  */
 
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync, cpSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync, cpSync, rmSync } from 'node:fs';
 import { join, basename, dirname } from 'node:path';
 
 const SRC = 'D:/maestro2/.claude';
@@ -238,7 +238,15 @@ function convertSkills() {
 }
 
 // === Execute ===
-mkdirSync(join(DST, 'skills'), { recursive: true });
+// Prune stale skill dirs first — flow/skills must mirror the CURRENT .claude
+// source exactly (deleted/renamed skills would otherwise linger forever).
+const skillsDst = join(DST, 'skills');
+mkdirSync(skillsDst, { recursive: true });
+for (const entry of readdirSync(skillsDst)) {
+  if (statSync(join(skillsDst, entry)).isDirectory()) {
+    rmSync(join(skillsDst, entry), { recursive: true, force: true });
+  }
+}
 mkdirSync(join(DST, 'agents'), { recursive: true });
 
 console.log('Converting commands → skills...');

@@ -95,6 +95,21 @@ runPhase('Phase 2 (Claude → pi rewrite)', 'convert-pi.mjs', {
 runPhase('Phase 3 (normalize Maestro paths)', 'convert-paths.mjs');
 
 // ---------------------------------------------------------------------------
+// Optional skills (选装) — mirror <src>/optional/skills → <repo>/optional/skills
+// ---------------------------------------------------------------------------
+
+log('\n══════ Sync optional skills (选装) ══════');
+const srcOptional = join(SRC, '..', 'optional', 'skills');
+const dstOptional = join(repoRoot, 'optional', 'skills');
+if (existsSync(srcOptional)) {
+  if (existsSync(dstOptional)) rmSync(dstOptional, { recursive: true, force: true });
+  cpSync(srcOptional, dstOptional, { recursive: true });
+  log(`  ✓ optional/skills ← ${srcOptional} (${countFiles(dstOptional)} files)`);
+} else {
+  log('  - source optional/skills not found, skipped');
+}
+
+// ---------------------------------------------------------------------------
 // Verification — every skill subfolder must be fully ported
 // ---------------------------------------------------------------------------
 

@@ -151,6 +151,96 @@ description: ${name} description
 `);
 }
 
+async function writeOptionalSkill(optionalDir: string, name: string): Promise<void> {
+  const directory = join(optionalDir, name);
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, "SKILL.md"), `---
+name: ${name}
+description: ${name} optional description
+---
+# ${name} (optional)
+`);
+  await writeFile(join(directory, "notes.md"), `extra file for ${name}\n`);
+}
+
+test("SkillManagerStore discovers and installs optional (选装) skills", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-skill-optional-"));
+  const agentDir = join(root, "agent");
+  const projectDir = join(root, "project");
+  const optionalDir = join(root, "optional", "skills");
+  await mkdir(agentDir, { recursive: true });
+  await mkdir(join(projectDir, ".pi", "skills"), { recursive: true });
+  await writeOptionalSkill(optionalDir, "scholar-writing");
+  await writeOptionalSkill(optionalDir, "scholar-review");
+  await writeSkill(projectDir, "team-one");
+
+  try {
+    const store = new SkillManagerStore(projectDir, agentDir, optionalDir);
+    let optional = await store.loadOptionalSkills();
+    assert.deepEqual(optional.map((entry) => entry.name), ["scholar-review", "scholar-writing"]);
+    assert.equal(optional.every((entry) => !entry.installed), true);
+
+    // install one — copies the whole dir into project .pi/skills/
+    optional = await store.installOptionalSkill("scholar-writing");
+    const installed = optional.find((entry) => entry.name === "scholar-writing");
+    assert.equal(installed?.installed, true);
+    const installedSkill = await readFile(join(projectDir, ".pi", "skills", "scholar-writing", "SKILL.md"), "utf8");
+    assert.match(installedSkill, /scholar-writing optional description/);
+    const extraFile = await readFile(join(projectDir, ".pi", "skills", "scholar-writing", "notes.md"), "utf8");
+    assert.match(extraFile, /extra file/);
+
+    // idempotent — second install is a no-op
+    const before = await store.loadOptionalSkills();
+    await store.installOptionalSkill("scholar-writing");
+    const after = await store.loadOptionalSkills();
+    assert.deepEqual(after, before);
+
+    // installed skill now resolves as a managed skill
+    const snapshot = await store.load();
+    assert.ok(snapshot.skills.some((skill) => skill.name === "scholar-writing"));
+
+    // unknown name errors
+    await assert.rejects(() => store.installOptionalSkill("scholar-nope"), /不存在/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Skill manager TUI surfaces optional skills and installs with I", () => {
+  const skills = [managedSkill("team-one")];
+  const groups = [{ name: "team", custom: false, skills }];
+  const optionalSkills = [{
+    name: "scholar-writing",
+    description: "paper writing",
+    sourcePath: "/optional/skills/scholar-writing",
+    installed: false,
+  }];
+  let action: SkillManagerAction | undefined;
+  const overlay = new SkillManagerOverlay({
+    skills,
+    groups,
+    optionalSkills,
+    theme: {
+      fg(_role, text) { return text; },
+      bold(text) { return text; },
+    },
+    requestRender() {},
+    done(next) { action = next; },
+  });
+  const rendered = overlay.render(80).join("\n");
+  assert.match(rendered, /选装/);
+  assert.match(rendered, /scholar-writing/);
+  assert.match(rendered, /未安装/);
+
+  // navigate to the optional row and press I
+  overlay.handleInput("\x1b[B");
+  overlay.handleInput("\x1b[B");
+  overlay.handleInput("\x1b[B");
+  overlay.handleInput("i");
+  assert.equal(action?.kind, "install-optional");
+  assert.equal(action?.optionalName, "scholar-writing");
+});
+
 function skill(name: string, disableModelInvocation: boolean): Skill {
   const filePath = `/skills/${name}/SKILL.md`;
   return {

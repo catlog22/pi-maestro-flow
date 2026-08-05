@@ -50,7 +50,7 @@ Single source of truth: **[index/catalog.json](index/catalog.json)**
 | Field | Purpose |
 |-------|---------|
 | `commands[]` | 64 个 slash 命令，含分类和描述 |
-| `skills[]` | 44 个 Skill，含分类和描述 |
+| `skills[]` | 23 个 Skill（含 10 个选装 scholar-*，标 `optional: true`），含分类和描述 |
 | `agents[]` | 24 个 Agent，含分类和描述 |
 | `cli_commands[]` | 21 个终端命令 |
 | `guide_files[]` | 17 个 Guide 文档索引（planned，尚未创建） |
@@ -319,7 +319,7 @@ Odyssey 长周期循环（独立路径）
 
 - **Slash 命令**: 64 个（13 个分类：core/pipeline/milestone/manage/quality/spec/learn/worktree/team/ralph/ui/tools/odyssey）
 - **CLI 命令**: 21 个
-- **Skills**: 44 个（5 个分类：meta/team/knowledge/quality/scholar）
+- **Skills**: 23 个（3 个分类：meta/team/scholar；scholar-* 为选装，标 `optional: true`）
 - **Agents**: 24 个（4 个分类：workflow/team/cli/ui）
 - **Guide 文档**: 17 个（planned，尚未创建）
 - **工作流路径**: 7 个合法路径 (Path A-G) + 4 个辅助流程

@@ -14,7 +14,7 @@ import {
   rule,
   type FrameTheme,
 } from "pi-cockpit/src/settings/ui-primitives.ts";
-import type { ManagedSkill, ManagedSkillGroup } from "./skill-manager-store.ts";
+import type { ManagedSkill, ManagedSkillGroup, OptionalSkill } from "./skill-manager-store.ts";
 
 export type SkillManagerActionKind =
   | "close"
@@ -22,7 +22,8 @@ export type SkillManagerActionKind =
   | "toggle-model-invocation"
   | "create-group"
   | "assign-group"
-  | "delete-group";
+  | "delete-group"
+  | "install-optional";
 
 export interface SkillManagerUiState {
   query: string;
@@ -34,6 +35,7 @@ export interface SkillManagerAction {
   skillPath?: string;
   groupName?: string;
   groupCustom?: boolean;
+  optionalName?: string;
   uiState: SkillManagerUiState;
 }
 
@@ -42,6 +44,7 @@ interface SkillManagerTheme extends FrameTheme {}
 export interface SkillManagerOverlayParams {
   skills: readonly ManagedSkill[];
   groups: readonly ManagedSkillGroup[];
+  optionalSkills?: readonly OptionalSkill[];
   theme: SkillManagerTheme;
   notice?: string;
   initialState?: Partial<SkillManagerUiState>;
@@ -65,6 +68,12 @@ const CATALOGS = {
     "footer.createGroup": "N new group",
     "footer.move": "G move",
     "footer.deleteGroup": "D delete group",
+    "footer.installOptional": "I install optional",
+    "optional.section": "Optional (选装)",
+    "optional.installed": "installed",
+    "optional.notInstalled": "not installed",
+    "optional.hint": "I 安装到项目 .pi/skills/",
+    "optional.empty": "○ no optional skills",
     "compact.skill": "Esc · Skill · {state} · {name}",
     "compact.group": "Esc · Skill group · {name}",
     "compact.empty": "Esc · Skill · no matches",
@@ -106,6 +115,12 @@ const CATALOGS = {
     "footer.createGroup": "N 新建组",
     "footer.move": "G 移动",
     "footer.deleteGroup": "D 删除组",
+    "footer.installOptional": "I 安装选装",
+    "optional.section": "选装（Optional）",
+    "optional.installed": "已安装",
+    "optional.notInstalled": "未安装",
+    "optional.hint": "I 安装到项目 .pi/skills/",
+    "optional.empty": "○ 没有选装 Skill",
     "compact.skill": "Esc · Skill · {state} · {name}",
     "compact.group": "Esc · Skill 组 · {name}",
     "compact.empty": "Esc · Skill · 没有匹配项",
@@ -142,7 +157,8 @@ type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
 
 type SkillManagerEntry =
   | { kind: "group"; key: string; group: ManagedSkillGroup }
-  | { kind: "skill"; key: string; group: ManagedSkillGroup; skill: ManagedSkill };
+  | { kind: "skill"; key: string; group: ManagedSkillGroup; skill: ManagedSkill }
+  | { kind: "optional"; key: string; skill: OptionalSkill };
 
 export class SkillManagerOverlay implements Component, Focusable {
   focused = false;
@@ -190,6 +206,8 @@ export class SkillManagerOverlay implements Component, Focusable {
     const selected = this.selectedEntry();
     if (selected?.kind === "skill") {
       rows.push(helpLine(this.params.theme, selected.skill.description || selected.skill.filePath, inner));
+    } else if (selected?.kind === "optional") {
+      rows.push(helpLine(this.params.theme, selected.skill.description || this.t("optional.hint"), inner));
     } else if (selected?.kind === "group") {
       rows.push(helpLine(this.params.theme, this.t("group.detail", {
         kind: this.t(selected.group.custom ? "group.custom" : "group.prefix"),
@@ -206,6 +224,7 @@ export class SkillManagerOverlay implements Component, Focusable {
       this.t("footer.createGroup"),
       this.t("footer.move"),
       this.t("footer.deleteGroup"),
+      this.t("footer.installOptional"),
     ]));
     return frame(rows, safeWidth, this.params.theme);
   }
@@ -251,6 +270,7 @@ export class SkillManagerOverlay implements Component, Focusable {
     }
     if (matchesKey(data, Key.space) || data === " ") return this.finish("toggle-enabled");
     if (data === "m" || data === "M") return this.finish("toggle-model-invocation");
+    if (data === "i" || data === "I") return this.finish("install-optional");
     if (data === "n" || data === "N") return this.finish("create-group");
     if (data === "g" || data === "G") return this.finish("assign-group");
     if (data === "d" || data === "D") return this.finish("delete-group");
@@ -297,6 +317,15 @@ export class SkillManagerOverlay implements Component, Focusable {
           ? this.params.theme.bold(this.params.theme.fg("accent", label))
           : this.params.theme.bold(label);
         return fit(`${prefix} ${name} · ${availability} · ${invocation} · ${this.t("count.suffix", { count: entry.group.skills.length })}`, width);
+      }
+      if (entry.kind === "optional") {
+        const state = entry.skill.installed
+          ? this.params.theme.fg("success", this.t("optional.installed"))
+          : this.params.theme.fg("dim", this.t("optional.notInstalled"));
+        const name = selected
+          ? this.params.theme.bold(this.params.theme.fg("accent", `  ${entry.skill.name}`))
+          : `  ${entry.skill.name}`;
+        return fit(`${prefix} ▸ ${state} · ${name} · ${this.t("optional.hint")}`, width);
       }
       const skill = entry.skill;
       const name = selected
@@ -360,6 +389,20 @@ export class SkillManagerOverlay implements Component, Focusable {
         entries.push({ kind: "skill", key: `skill:${skill.filePath}`, group, skill });
       }
     }
+    if ((this.params.optionalSkills?.length ?? 0) > 0) {
+      const matchingOptional = (this.params.optionalSkills ?? []).filter((skill) => {
+        const haystack = [skill.name, skill.description].join(" ").toLocaleLowerCase();
+        return terms.every((term) => haystack.includes(term));
+      });
+      if (matchingOptional.length > 0) {
+        entries.push({ kind: "group", key: "group:default:选装", group: {
+          name: this.t("optional.section"), custom: false, skills: [],
+        } });
+        for (const skill of matchingOptional) {
+          entries.push({ kind: "optional", key: `optional:${skill.name}`, skill });
+        }
+      }
+    }
     return entries;
   }
 
@@ -372,8 +415,9 @@ export class SkillManagerOverlay implements Component, Focusable {
     this.params.done({
       kind,
       ...(selected?.kind === "skill" ? { skillPath: selected.skill.filePath } : {}),
-      ...(selected ? { groupName: selected.group.name } : {}),
-      ...(selected ? { groupCustom: selected.group.custom } : {}),
+      ...(selected?.kind === "optional" ? { optionalName: selected.skill.name } : {}),
+      ...(selected?.kind === "skill" || selected?.kind === "group" ? { groupName: selected.group.name } : {}),
+      ...(selected?.kind === "skill" || selected?.kind === "group" ? { groupCustom: selected.group.custom } : {}),
       uiState: {
         query: this.query,
         ...(selected ? { selectedKey: selected.key } : {}),
