@@ -41,6 +41,7 @@ function overlay(jobs: BashBgJob[]) {
 		close: () => { closes++; },
 		theme,
 		glyphs: resolveGlyphs("nerd"),
+		now: Date.now(),
 	});
 	return { component, counts: () => ({ renders, refreshes, closes }) };
 }
@@ -54,6 +55,7 @@ test("hideLiveDuration drops the live duration from the job row but keeps the co
 		close: () => {},
 		theme,
 		glyphs: resolveGlyphs("nerd"),
+		now: Date.now(),
 		hideLiveDuration: true,
 	});
 	const lines = component.render(100).join("\n");
@@ -64,6 +66,22 @@ test("hideLiveDuration drops the live duration from the job row but keeps the co
 	component.handleInput("\r");
 	const detail = component.render(100).join("\n");
 	assert.doesNotMatch(detail, /^Duration|Duration:/m);
+});
+
+test("tick keeps render output stable within a second and repaints at the next boundary", () => {
+	const running = job("run", "running", { startedAt: 1_000 });
+	const { component, counts } = overlay([running]);
+	component.tick(10_500);
+	const before = component.render(80).join("\n");
+	const renders = counts().renders;
+
+	component.tick(10_999);
+	assert.equal(counts().renders, renders);
+	assert.equal(component.render(80).join("\n"), before);
+
+	component.tick(11_000);
+	assert.equal(counts().renders, renders + 1);
+	assert.match(component.render(80).join("\n"), /10s/);
 });
 
 test("wide center shows concurrent lifecycle counts and selected job details", () => {

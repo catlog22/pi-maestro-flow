@@ -75,7 +75,7 @@ export function mapStatus(raw: unknown): TodoState | "deleted" {
 export class TodoStore {
 	private items = new Map<string, TodoItem>();
 
-	hydrateFromEntries(entries: readonly RawEntry[]): void {
+	hydrateFromEntries(entries: readonly RawEntry[]): boolean {
 		let entry: RawEntry | undefined;
 		for (let i = entries.length - 1; i >= 0; i--) {
 			const e = entries[i];
@@ -106,7 +106,20 @@ export class TodoStore {
 				next.set(id, item);
 			}
 		}
+		const current = [...this.items.values()];
+		const hydrated = [...next.values()];
+		const changed = current.length !== hydrated.length || current.some((item, index) => {
+			const candidate = hydrated[index];
+			return candidate === undefined
+				|| item.id !== candidate.id
+				|| item.status !== candidate.status
+				|| item.subject !== candidate.subject
+				|| item.blockedBy.length !== candidate.blockedBy.length
+				|| item.blockedBy.some((id, blockedIndex) => id !== candidate.blockedBy[blockedIndex]);
+		});
+		if (!changed) return false;
 		this.items = next;
+		return true;
 	}
 
 	snapshot(): TodoItem[] {

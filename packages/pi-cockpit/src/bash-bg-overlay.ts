@@ -24,6 +24,8 @@ export interface BashBgOverlayParams {
 	close: () => void;
 	theme: Theme;
 	glyphs: IconGlyphs;
+	/** Wall-clock snapshot supplied by the owner and advanced through tick(). */
+	now: number;
 	/** Live terminal height, so the card can use the space it already reserves. */
 	getTerminalRows?: () => number | undefined;
 	/** Static mode: hide live durations on running/stopping jobs, like the footer line. */
@@ -46,12 +48,24 @@ export class BashBgOverlay implements Component, Focusable {
 	private mode: BashBgOverlayMode = "list";
 	private selected = 0;
 	private selectedId: string | undefined;
-	private refreshedAt = 0;
+	private now: number;
+	private liveTickKey: string;
+	private refreshAckExpiresAt = 0;
 	private ackTimer: ReturnType<typeof setTimeout> | undefined;
 
-	constructor(private readonly params: BashBgOverlayParams) {}
+	constructor(private readonly params: BashBgOverlayParams) {
+		this.now = params.now;
+		this.liveTickKey = this.tickKey(params.now);
+	}
 
 	invalidate(): void {}
+	tick(now: number): void {
+		const nextKey = this.tickKey(now);
+		this.now = now;
+		if (nextKey === this.liveTickKey) return;
+		this.liveTickKey = nextKey;
+		this.params.requestRender();
+	}
 	dispose(): void {
 		if (this.ackTimer) clearTimeout(this.ackTimer);
 		this.ackTimer = undefined;
@@ -83,10 +97,14 @@ export class BashBgOverlay implements Component, Focusable {
 			// Ctrl+R / F5 — refresh is acknowledged immediately even though the
 			// authoritative snapshot only arrives later. Schedule the ack's own
 			// expiry so it disappears even without any follow-up repaint.
-			this.refreshedAt = Date.now();
+			const now = Date.now();
+			this.now = now;
+			this.refreshAckExpiresAt = now + REFRESH_ACK_MS;
 			if (this.ackTimer) clearTimeout(this.ackTimer);
+			const expiresAt = this.refreshAckExpiresAt;
 			this.ackTimer = setTimeout(() => {
 				this.ackTimer = undefined;
+				this.now = Math.max(this.now, expiresAt);
 				this.params.requestRender();
 			}, REFRESH_ACK_MS);
 			this.ackTimer.unref?.();
@@ -174,7 +192,7 @@ export class BashBgOverlay implements Component, Focusable {
 		const live = job.status === "running" || job.status === "stopping";
 		const duration = this.params.hideLiveDuration && live
 			? ""
-			: formatDuration((job.finishedAt ?? Date.now()) - job.startedAt);
+			: formatDuration((job.finishedAt ?? this.now) - job.startedAt);
 		const exit = job.exitCode === null ? "" : `${sep}exit ${job.exitCode}`;
 		const meta = duration !== "" || exit !== "" ? `${duration}${exit}${sep}` : "";
 		return fitLine(
@@ -191,7 +209,7 @@ export class BashBgOverlay implements Component, Focusable {
 		const live = job.status === "running" || job.status === "stopping";
 		const durationField = this.params.hideLiveDuration && live
 			? []
-			: [field("Duration", formatDuration((job.finishedAt ?? Date.now()) - job.startedAt), width)];
+			: [field("Duration", formatDuration((job.finishedAt ?? this.now) - job.startedAt), width)];
 		const lines: string[] = [
 			fitLine(`${theme.fg(visual.color, theme.bold(`${visual.glyph} ${job.id}`))}${this.params.glyphs.separator}${job.status}`, width),
 			field("PID", String(job.pid), width),
@@ -232,7 +250,7 @@ export class BashBgOverlay implements Component, Focusable {
 			{ text: "Background jobs", priority: 60, minWidth: 6 },
 			{ text: theme.fg("dim", `${jobs.length} total`), priority: 50, clippable: false },
 		];
-		if (Date.now() - this.refreshedAt < REFRESH_ACK_MS) {
+		if (this.now < this.refreshAckExpiresAt) {
 			segs.push({ text: theme.fg("dim", "refreshing…"), priority: 100, clippable: false });
 		}
 		if (failed) segs.push({ text: theme.fg("error", `${failed} failed`), priority: 90, clippable: false });
@@ -281,6 +299,13 @@ export class BashBgOverlay implements Component, Focusable {
 			: jobs.findIndex((job) => job.id === this.selectedId);
 		this.selected = preserved >= 0 ? preserved : clampIndex(this.selected, jobs.length);
 		this.selectedId = jobs[this.selected]?.id;
+	}
+
+	private tickKey(now: number): string {
+		return this.jobs()
+			.filter((job) => job.status === "running" || job.status === "stopping")
+			.map((job) => `${job.id}:${job.status}:${this.params.hideLiveDuration ? "" : formatDuration(now - job.startedAt)}`)
+			.join("|");
 	}
 
 	private jobs(): readonly BashBgJob[] {

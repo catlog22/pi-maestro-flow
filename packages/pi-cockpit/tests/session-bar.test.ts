@@ -207,10 +207,28 @@ test("renderSessionBar: long current-session label never exceeds terminal width"
 	}
 });
 
+test("makeSessionBarWidget: status colors change only when the cached effective state changes", () => {
+	let now = 10_000;
+	const rows = [agent({ correlationId: "stable", name: "stable", lastActivityAt: 1_000 })];
+	const widget = makeSessionBarWidget({
+		getAgents: () => rows,
+		getNow: () => now,
+	})({} as never, theme as Theme);
+	const assigned = assignedAgentColor("stable");
+	assert.ok(widget.render(100)[0].includes(`[${assigned}]@stable[/${assigned}]`));
+
+	now = 31_001;
+	assert.match(widget.render(100)[0], /\[error\]@stable\[\/error\]/);
+	assert.match(widget.render(100)[0], /\[error\]@stable\[\/error\]/, "same stable state keeps the same color");
+
+	rows[0].lastActivityAt = now;
+	assert.ok(widget.render(100)[0].includes(`[${assigned}]@stable[/${assigned}]`), "new activity crosses back to running");
+});
+
 test("makeSessionBarWidget: reads live agents on every render", () => {
 	let rows: AgentRow[] = [];
 	let mainRunning = false;
-	const widget = makeSessionBarWidget({ getAgents: () => rows, isMainRunning: () => mainRunning })({} as never, theme as Theme);
+	const widget = makeSessionBarWidget({ getAgents: () => rows, getNow: () => 10_000, isMainRunning: () => mainRunning })({} as never, theme as Theme);
 	assert.deepEqual(widget.render(80), renderSessionBar([], 80, theme as Theme));
 	rows = [agent({ name: "explorer" })];
 	mainRunning = true;

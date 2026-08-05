@@ -17,7 +17,7 @@
 
 import type { AssistantMessageEvent } from "@earendil-works/pi-ai";
 import type { TUI } from "@earendil-works/pi-tui";
-import { ANIMATION_PERIOD_MS, type IconGlyphs } from "./icons.ts";
+import type { IconGlyphs } from "./icons.ts";
 
 /**
  * Duck-typed AssistantMessageComponent: the two public setters pi gives it.
@@ -87,18 +87,25 @@ export interface ThinkingTimerOptions {
 }
 
 const DEFAULT_SETTLE_MS = 5_000;
+export const THINKING_TICK_PERIOD_MS = 1_000;
 
 export class ThinkingFoldTimer {
 	readonly #options: ThinkingTimerOptions;
 	#startedAt: number | undefined;
 	#ticker: ReturnType<typeof setInterval> | undefined;
 	#settleTimer: ReturnType<typeof setTimeout> | undefined;
+	#target: ThinkingLabelTarget | undefined;
+	#lastElapsedSecond: number | undefined;
 	// Invalidates pending settle restores across stop/reset boundaries so a
 	// late timer can never rewrite a label a newer run already owns.
 	#generation = 0;
 
 	constructor(options: ThinkingTimerOptions) {
 		this.#options = options;
+	}
+
+	onAssistantMessageStart(): void {
+		this.#rebuildTarget();
 	}
 
 	onAssistantMessageEvent(event: AssistantMessageEvent | undefined): void {
@@ -117,7 +124,9 @@ export class ThinkingFoldTimer {
 	 * duration written here is still accurate and lands on a mounted row.
 	 */
 	onAssistantMessageEnd(): void {
+		this.#rebuildTarget();
 		if (this.#startedAt !== undefined) this.#finish();
+		this.#target = undefined;
 	}
 
 	/** One animation frame. The internal interval drives it; tests call it directly. */
@@ -126,10 +135,13 @@ export class ThinkingFoldTimer {
 		// Static mode keeps a stable label; the live elapsed only ticks when not static.
 		if (this.#options.isStatic?.()) return;
 		const now = this.#now();
+		const elapsed = now - this.#startedAt;
+		const elapsedSecond = Math.max(0, Math.floor(elapsed / 1000));
+		if (elapsedSecond === this.#lastElapsedSecond) return;
+		this.#lastElapsedSecond = elapsedSecond;
 		// No spinner prefix: the thinking row shows a live elapsed without any
 		// animated indicator (the host working line is the only spinner left).
-		const label = `thinking ${formatThinkingDuration(now - (this.#startedAt ?? now))}`;
-		this.#paint(label);
+		this.#paint(`thinking ${formatThinkingDuration(elapsed)}`);
 	}
 
 	/** Re-evaluate the label policy after a static-mode toggle mid-run. */
@@ -137,11 +149,12 @@ export class ThinkingFoldTimer {
 		if (this.#startedAt === undefined) return;
 		if (this.#options.isStatic?.()) {
 			this.#clearTimers();
+			this.#lastElapsedSecond = undefined;
 			this.#paint(this.#options.getBaseLabel() ?? "thinking");
 			return;
 		}
 		if (!this.#ticker) {
-			this.#ticker = setInterval(() => this.tick(), ANIMATION_PERIOD_MS);
+			this.#ticker = setInterval(() => this.tick(), THINKING_TICK_PERIOD_MS);
 			this.#ticker.unref?.();
 		}
 		this.tick();
@@ -152,6 +165,8 @@ export class ThinkingFoldTimer {
 		this.#generation++;
 		this.#clearTimers();
 		this.#startedAt = undefined;
+		this.#target = undefined;
+		this.#lastElapsedSecond = undefined;
 	}
 
 	/** Session boundary: forget the run; pi rebuilds the chat from entries. */
@@ -159,6 +174,8 @@ export class ThinkingFoldTimer {
 		this.#generation++;
 		this.#clearTimers();
 		this.#startedAt = undefined;
+		this.#target = undefined;
+		this.#lastElapsedSecond = undefined;
 	}
 
 	#begin(): void {
@@ -166,17 +183,18 @@ export class ThinkingFoldTimer {
 		// rendered, so there is nothing to animate and no duration to keep.
 		if (!this.#options.isThinkingHidden()) return;
 		this.#startedAt = this.#now();
+		this.#lastElapsedSecond = undefined;
 		if (this.#options.isStatic?.()) {
 			// Static mode: a stable label, no live ticker; #finish settles the duration.
 			this.#paint(this.#options.getBaseLabel() ?? "thinking");
 			return;
 		}
 		if (!this.#ticker) {
-			this.#ticker = setInterval(() => this.tick(), ANIMATION_PERIOD_MS);
+			this.#ticker = setInterval(() => this.tick(), THINKING_TICK_PERIOD_MS);
 			this.#ticker.unref?.();
 		}
 		// Paint immediately so the row flips to the live label with the first
-		// frame instead of waiting a quarter second.
+		// frame instead of waiting one second.
 		this.tick();
 	}
 
@@ -185,26 +203,31 @@ export class ThinkingFoldTimer {
 		if (startedAt === undefined) return;
 		this.#clearTimers();
 		this.#startedAt = undefined;
+		this.#lastElapsedSecond = undefined;
 		const duration = formatThinkingDuration(this.#now() - startedAt);
 		const base = this.#options.getBaseLabel() ?? "thoughts";
 		this.#paint(`${base}${this.#options.getGlyphs().separator}${duration}`, true);
 	}
 
 	#paint(label: string, settle = false): void {
-		const tui = this.#options.getTui();
-		const targets = tui ? findThinkingLabelTargets(tui) : [];
-		const target = targets.at(-1);
+		const target = this.#target;
 		if (target) {
 			try {
 				target.setHiddenThinkingLabel(label);
 				this.#options.requestRender();
 			} catch {
 				// component may be mid-teardown; the global path recovers
+				this.#target = undefined;
 				this.#paintGlobal(label, settle);
 			}
 			return;
 		}
 		this.#paintGlobal(label, settle);
+	}
+
+	#rebuildTarget(): void {
+		const tui = this.#options.getTui();
+		this.#target = tui ? findThinkingLabelTargets(tui).at(-1) : undefined;
 	}
 
 	#paintGlobal(label: string, settle: boolean): void {

@@ -4,7 +4,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type Exte
 import type { TUI } from "@earendil-works/pi-tui";
 import { capturingOverlayVisible } from "./capturing-overlay.ts";
 import { Key, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { AgentsStore, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
+import { AgentsStore, effectiveAgentStatus, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
 import { statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
 import { generateTitleWithModel } from "./title-llm.ts";
 import { suggestTitle } from "./title-gen.ts";
@@ -280,6 +280,7 @@ export default function (pi: ExtensionAPI): void {
 	/** Extra repaint target while the Agent modal is consuming the live store. */
 	let activeAgentOverlayRender: (() => void) | undefined;
 	let activeAgentOverlay: { finalize(): void } | undefined;
+	let activeBashBgOverlay: BashBgOverlay | undefined;
 	/** Agent activity temporarily wins vertical space without rewriting Todo preference. */
 	let agentPriorityActive = false;
 	let todoExpandedOverAgents = false;
@@ -317,6 +318,7 @@ export default function (pi: ExtensionAPI): void {
 	let titleAbort: AbortController | undefined;
 	const activeTools = new Map<string, { name: string; startedAt: number }>();
 	let tick: ReturnType<typeof setInterval> | undefined;
+	let nowSnapshot = Date.now();
 	// Persisted rather than toasted: a config that failed to load silently downgrades
 	// the whole session to defaults, so it belongs in a slot that does not scroll away.
 	let configProblem: string | undefined;
@@ -380,7 +382,7 @@ export default function (pi: ExtensionAPI): void {
 		}
 		return TITLE_STATIC;
 	};
-	const refreshAmbient = (): void => {
+	const refreshAmbient = (now = Date.now()): void => {
 		const ctx = lastCtx;
 		if (!ctx || !isTuiContext(ctx)) return;
 		const g = resolveGlyphs(config.icons.mode);
@@ -403,7 +405,7 @@ export default function (pi: ExtensionAPI): void {
 				hideLiveDuration: config.staticMode,
 				separator: ` ${g.separator} `,
 			};
-			ctx.ui.setWorkingMessage(workingMessage(state));
+			ctx.ui.setWorkingMessage(workingMessage(state, now));
 			if (title.enabled) {
 				state.session = title.showSession ? sessionTag(ctx.sessionManager, aiTitle) : undefined;
 				state.model = title.showModel ? modelTag(ctx.model) : undefined;
@@ -435,18 +437,57 @@ export default function (pi: ExtensionAPI): void {
 	const effectiveTodoExpanded = (): boolean =>
 		config.todoExpanded && (!agentPriorityActive || todoExpandedOverAgents);
 
+	const renderContentKey = (now: number): string => {
+		const agentState = agents.snapshot().map((row) => {
+			const status = effectiveAgentStatus(row, now);
+			const liveElapsed = !config.staticMode && (row.status === "running" || row.status === "retrying")
+				? Math.max(0, Math.floor((now - row.startedAt) / 1000))
+				: undefined;
+			return [row.correlationId, status, liveElapsed];
+		});
+		const jobs = bashBg.snapshot();
+		const jobState = jobs.map((job) => {
+			const live = job.status === "running" || job.status === "stopping";
+			const liveElapsed = !config.staticMode && live
+				? Math.max(0, Math.floor((now - job.startedAt) / 1000))
+				: undefined;
+			return [job.id, job.status, liveElapsed];
+		});
+		const spinner = jobs.some((job) => job.status === "running" || job.status === "stopping")
+			? spinFrame(resolveGlyphs(config.icons.mode), now, shouldAnimateFrames(policy()))
+			: "";
+		return JSON.stringify([spinner, agentState, jobState]);
+	};
+
 	// One microtask dirty latch: a burst of store events in the same tick (a
 	// message with many progress rows, a snapshot, a todo hydrate) coalesces into
 	// a single ambient refresh and a single render request per host surface (SB-6).
+	// Tick callers additionally supply the visible clock-content key; equal elapsed
+	// seconds, statuses and spinner text do not schedule another tree render.
 	let renderScheduled = false;
-	const req = (): void => {
+	let ambientRefreshPending = false;
+	let lastRenderContentKey: string | undefined;
+	let scheduledRenderContentKey: string | undefined;
+	const req = (contentKey?: string, refreshAmbientSurface = true): void => {
+		if (contentKey !== undefined) {
+			if (contentKey === lastRenderContentKey) return;
+			scheduledRenderContentKey = contentKey;
+		}
+		if (refreshAmbientSurface) ambientRefreshPending = true;
 		if (renderScheduled) return;
 		renderScheduled = true;
 		queueMicrotask(() => {
 			renderScheduled = false;
+			const now = Date.now();
+			nowSnapshot = now;
+			const contentKey = scheduledRenderContentKey;
+			scheduledRenderContentKey = undefined;
+			lastRenderContentKey = contentKey ?? renderContentKey(now);
+			const refreshAmbientSurface = ambientRefreshPending;
+			ambientRefreshPending = false;
 			const agentPriorityChanged = syncAgentPriorityState();
 			publishInputTarget();
-			refreshAmbient();
+			if (refreshAmbientSurface) refreshAmbient(now);
 			if (agentPriorityChanged) publishUiOwnership();
 			try {
 				capturedTui?.requestRender();
@@ -477,6 +518,9 @@ export default function (pi: ExtensionAPI): void {
 	const startTick = (): void => {
 		if (tick) return;
 		tick = setInterval(() => {
+			const now = Date.now();
+			nowSnapshot = now;
+			activeBashBgOverlay?.tick(now);
 			if (needsTick()) {
 				// Static mode keeps the loop alive only so lingering rows can expire
 				// (prune is read-driven). The rows themselves are static, so skip the
@@ -487,7 +531,8 @@ export default function (pi: ExtensionAPI): void {
 					if (agents.size !== before) req();
 				} else {
 					titleFrameIndex += 1;
-					req();
+					refreshAmbient(now);
+					req(renderContentKey(now), false);
 				}
 			} else {
 				syncTick();
@@ -596,7 +641,7 @@ export default function (pi: ExtensionAPI): void {
 		return {
 			row,
 			label: row.name || row.role || row.agent || "agent",
-			color: agentSessionColor(row),
+			color: agentSessionColor(row, nowSnapshot),
 		};
 	};
 
@@ -657,6 +702,7 @@ export default function (pi: ExtensionAPI): void {
 				ensureViewportStability(tui);
 				return makeSessionBarWidget({
 					getAgents: () => agents.snapshot(),
+					getNow: () => nowSnapshot,
 					isMainRunning: () => running,
 					getCurrentSession: inputStatusState,
 				})(tui, theme);
@@ -874,7 +920,7 @@ export default function (pi: ExtensionAPI): void {
 					const branch = footerData.getGitBranch();
 					const extensionStatuses = collectExtensionStatuses(footerData.getExtensionStatuses());
 					const glyphs = resolveGlyphs(config.icons.mode);
-					const now = Date.now();
+					const now = nowSnapshot;
 					const bashBgStatus = renderBashBgSummary(
 						bashBg.snapshot(),
 						width,
@@ -1116,6 +1162,7 @@ export default function (pi: ExtensionAPI): void {
 			}),
 			pi.events.on(BASH_BG_UPDATE_EVENT, (payload) => {
 				if (!bashBg.applySnapshot(payload)) return;
+				activeBashBgOverlay?.tick(Date.now());
 				syncTick();
 				req();
 			}),
@@ -1166,8 +1213,11 @@ export default function (pi: ExtensionAPI): void {
 	});
 	pi.on("tool_execution_end", (e, ctx) => {
 		activeTools.delete(e.toolCallId);
-		if (e.toolName === TODO_TOOL_NAME) {
-			todos.hydrateFromEntries(ctx.sessionManager.getEntries());
+		if (e.toolName === TODO_TOOL_NAME && !todos.hydrateFromEntries(ctx.sessionManager.getEntries())) {
+			const now = Date.now();
+			nowSnapshot = now;
+			refreshAmbient(now);
+			return;
 		}
 		req();
 	});
@@ -1320,6 +1370,9 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	// --- live elapsed for folded thinking rows ---
+	pi.on("message_start", (e) => {
+		if (e.message.role === "assistant") thinkingTimer.onAssistantMessageStart();
+	});
 	pi.on("message_update", (e) => {
 		thinkingTimer.onAssistantMessageEvent(e.assistantMessageEvent);
 	});
@@ -1442,23 +1495,29 @@ export default function (pi: ExtensionAPI): void {
 
 	const openBashBgOverlay = async (ctx: ExtensionContext): Promise<void> => {
 		if (!ctx.hasUI) return;
+		let ownedOverlay: BashBgOverlay | undefined;
 		enterCapturingOverlay();
 		try {
-			await ctx.ui.custom<void>((tui, theme, _kb, done) =>
-				new BashBgOverlay({
+			await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+				ownedOverlay = new BashBgOverlay({
 					getJobs: () => bashBg.snapshot(),
 					requestRender: () => tui.requestRender(),
 					requestRefresh: () => pi.events.emit(BASH_BG_QUERY_EVENT, undefined),
 					close: () => done(undefined),
 					theme,
 					glyphs: resolveGlyphs(config.icons.mode),
+					now: Date.now(),
 					hideLiveDuration: config.staticMode,
 					getTerminalRows: () => terminalRows(tui),
-				}), {
+				});
+				activeBashBgOverlay = ownedOverlay;
+				return ownedOverlay;
+			}, {
 				overlay: true,
 				overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%" },
 			});
 		} finally {
+			if (activeBashBgOverlay === ownedOverlay) activeBashBgOverlay = undefined;
 			exitCapturingOverlay();
 		}
 	};

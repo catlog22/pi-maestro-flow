@@ -158,6 +158,43 @@ test("SGR mouse parsing and divider dragging resize the dock", () => {
 	assert.deepEqual(commits, [45]);
 });
 
+test("drag motion coalesces renders and skips unchanged clamped widths", () => {
+	const harness = tuiHarness();
+	const scheduled: Array<() => void> = [];
+	let handler: ((data: string) => { consume?: boolean } | undefined) | undefined;
+	const controller = createSplitPaneController({
+		schedule: (callback) => { scheduled.push(callback); },
+		subscribeInput: (next) => {
+			handler = next;
+			return () => undefined;
+		},
+	});
+	controller.attach(harness.tui);
+	controller.show();
+	while (scheduled.length > 0) scheduled.shift()?.();
+	controller.beginResize();
+	const beforeMotion = harness.renders();
+
+	handler?.("\x1b[<0;81;5M");
+	handler?.("\x1b[<32;76;5M");
+	handler?.("\x1b[<32;75;5M");
+	assert.equal(harness.renders(), beforeMotion, "motion renders are deferred");
+	while (scheduled.length > 0) scheduled.shift()?.();
+	assert.equal(harness.renders(), beforeMotion + 1, "a motion burst requests one render");
+	assert.equal(controller.getSidebarWidth(), 46, "the latest motion width wins");
+
+	const beforeClampedMotion = harness.renders();
+	handler?.("\x1b[<32;1;5M");
+	while (scheduled.length > 0) scheduled.shift()?.();
+	assert.equal(controller.getSidebarWidth(), 120 - MIN_MAIN_WIDTH);
+	assert.equal(harness.renders(), beforeClampedMotion + 1);
+
+	const atMaximum = harness.renders();
+	handler?.("\x1b[<32;1;5M");
+	assert.equal(scheduled.length, 0, "an unchanged clamped width schedules nothing");
+	assert.equal(harness.renders(), atMaximum);
+});
+
 test("a narrow-render failure disables the split and retries the prior renderer at full width", () => {
 	const calls: number[] = [];
 	const errors: unknown[] = [];

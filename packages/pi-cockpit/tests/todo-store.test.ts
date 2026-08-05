@@ -108,6 +108,27 @@ test("snapshot preserves insertion order", () => {
 	assert.deepEqual(s.snapshot().map((t) => t.id), ["b", "a"]);
 });
 
+test("hydrate reports changes and preserves the map on identical display content", () => {
+	const s = new TodoStore();
+	const initial = todoEntry({
+		a: { subject: "A", status: "pending", blockedBy: [] },
+		b: { subject: "B", status: "blocked", blockedBy: ["a"] },
+	});
+	assert.equal(s.hydrateFromEntries([initial]), true);
+	const snapshot = s.snapshot();
+	assert.equal(s.hydrateFromEntries([initial]), false);
+	assert.equal(s.snapshot()[0], snapshot[0], "no-op hydrate preserves existing item identities");
+
+	assert.equal(s.hydrateFromEntries([todoEntry({
+		a: { subject: "A", status: "completed", blockedBy: [] },
+		b: { subject: "B", status: "blocked", blockedBy: ["a"] },
+	})]), true, "status changes are visible");
+	assert.equal(s.hydrateFromEntries([todoEntry({
+		b: { subject: "B", status: "blocked", blockedBy: ["a"] },
+		a: { subject: "A", status: "completed", blockedBy: [] },
+	})]), true, "id order changes are visible");
+});
+
 // The todo snapshot is LLM-authored; same zero-width injection risk as teammate events.
 test("todo snapshot strings are stripped of control characters on hydrate", () => {
 	const store = new TodoStore();

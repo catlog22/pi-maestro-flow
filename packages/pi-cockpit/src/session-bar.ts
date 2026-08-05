@@ -31,6 +31,8 @@ export function byStartOrder(a: AgentRow, b: AgentRow): number {
 
 export interface SessionBarDeps {
 	getAgents: () => AgentRow[];
+	/** Stable owner clock snapshot; render never reads the wall clock itself. */
+	getNow: () => number;
 	/** Whether the main (root) agent is currently working. */
 	isMainRunning?: () => boolean;
 	/** Current session shown at the right edge (@label + status color). */
@@ -57,8 +59,8 @@ export function assignedAgentColor(correlationId: string): ThemeColor {
 	return AGENT_SESSION_COLORS[(hash >>> 0) % AGENT_SESSION_COLORS.length];
 }
 
-export function agentSessionColor(row: AgentRow, now = Date.now()): ThemeColor {
-	const status = effectiveAgentStatus(row, now);
+export function agentSessionColor(row: AgentRow, now: number, stableStatus?: AgentDisplayStatus): ThemeColor {
+	const status = stableStatus ?? effectiveAgentStatus(row, now);
 	if (status === "done" || status === "sleeping" || status === "terminated") return "muted";
 	if (status === "failed" || status === "stalled") return "error";
 	return assignedAgentColor(row.correlationId);
@@ -89,18 +91,31 @@ function chip(label: string, active: boolean, color: ThemeColor, theme: Theme): 
 		: theme.fg(color, text);
 }
 
+export interface SessionBarRenderOptions {
+	mainRunning?: boolean;
+	current?: { label: string; color: ThemeColor } | undefined;
+	now?: number;
+	stableStatuses?: Map<string, AgentDisplayStatus>;
+}
+
 /** Render the single-line session bar; the main chip is always present. */
 export function renderSessionBar(
 	rows: AgentRow[],
 	width: number,
 	theme: Theme,
-	opts: { mainRunning?: boolean; current?: { label: string; color: ThemeColor } | undefined } = {},
+	opts: SessionBarRenderOptions = {},
 ): string[] {
 	// Start-time order (see byStartOrder) keeps the bar from reflowing while
 	// agents run; visibleAgentRows returns a fresh array, so sort is safe.
 	const agents = visibleAgentRows(rows).sort(byStartOrder);
 	const viewingId = agents.find((row) => row.viewing)?.correlationId;
-	const now = Date.now();
+	const now = opts.now ?? agents.reduce((latest, row) => Math.max(latest, row.lastActivityAt), 0);
+	const liveIds = new Set(agents.map((row) => row.correlationId));
+	if (opts.stableStatuses) {
+		for (const id of opts.stableStatuses.keys()) {
+			if (!liveIds.has(id)) opts.stableStatuses.delete(id);
+		}
+	}
 	const chips = [
 		chip(
 			MAIN_SESSION_LABEL,
@@ -110,7 +125,11 @@ export function renderSessionBar(
 		),
 		...agents.map((row) => {
 			const label = row.name || row.role || row.agent || "agent";
-			const color = agentSessionColor(row, now);
+			const nextStatus = effectiveAgentStatus(row, now);
+			const previousStatus = opts.stableStatuses?.get(row.correlationId);
+			const stableStatus = previousStatus === nextStatus ? previousStatus : nextStatus;
+			opts.stableStatuses?.set(row.correlationId, stableStatus);
+			const color = agentSessionColor(row, now, stableStatus);
 			return chip(label, row.correlationId === viewingId, color, theme);
 		}),
 	];
@@ -135,11 +154,14 @@ export function renderSessionBar(
 }
 
 export function makeSessionBarWidget(deps: SessionBarDeps) {
+	const stableStatuses = new Map<string, AgentDisplayStatus>();
 	return (tui: TUI, theme: Theme) => ({
 		render(width: number): string[] {
 			return renderSessionBar(deps.getAgents(), width, theme, {
 				mainRunning: deps.isMainRunning?.(),
 				current: deps.getCurrentSession?.(),
+				now: deps.getNow(),
+				stableStatuses,
 			});
 		},
 		invalidate(): void {},

@@ -126,6 +126,7 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 	let pendingVisible = false;
 	let pendingWidth = 0;
 	let dockNotificationScheduled = false;
+	let dragRenderScheduled = false;
 	let controller: SplitPaneController;
 
 	const safely = (action: () => unknown): void => {
@@ -184,6 +185,15 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 
 	const requestRender = (): void => {
 		safely(() => tui?.requestRender());
+	};
+	const requestDragRender = (): void => {
+		if (dragRenderScheduled) return;
+		dragRenderScheduled = true;
+		schedule(() => {
+			dragRenderScheduled = false;
+			if (disposed) return;
+			requestRender();
+		});
 	};
 
 	const sidebarNudge = (tui: TUI | undefined, delta: number): void => {
@@ -304,10 +314,12 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 				if (dragButton === undefined || (mouse.button & 31) !== dragButton) return { consume: true };
 				const proposed = tui.terminal.columns - mouse.x + 1;
 				const effectiveMax = Math.min(maximumSidebar, tui.terminal.columns - minimumMain);
-				sidebarWidth = clamp(proposed, minimumSidebar, Math.max(minimumSidebar, effectiveMax));
+				const nextWidth = clamp(proposed, minimumSidebar, Math.max(minimumSidebar, effectiveMax));
+				if (nextWidth === sidebarWidth) return { consume: true };
+				sidebarWidth = nextWidth;
 				const effectiveWidth = syncOverlayWidth();
 				publishDockState(effectiveWidth);
-				requestRender();
+				requestDragRender();
 			}
 			return { consume: true };
 		}

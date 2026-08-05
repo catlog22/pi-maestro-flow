@@ -5,6 +5,7 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { resolveGlyphs } from "../src/icons.ts";
 import {
 	ThinkingFoldTimer,
+	THINKING_TICK_PERIOD_MS,
 	findThinkingLabelTargets,
 	formatThinkingDuration,
 	type ThinkingLabelTarget,
@@ -77,6 +78,7 @@ const makeHarness = (options: HarnessOptions = {}): Harness => {
 		now: () => nowMs,
 		settleMs: options.settleMs,
 	});
+	timer.onAssistantMessageStart();
 	return {
 		timer,
 		advance: (ms) => {
@@ -131,6 +133,30 @@ test("formatThinkingDuration formats tenths, seconds and minutes", () => {
 	assert.equal(formatThinkingDuration(59_400), "59s");
 	assert.equal(formatThinkingDuration(65_400), "1m05s");
 	assert.equal(formatThinkingDuration(3_600_000), "60m00s");
+});
+
+test("target lookup is cached between message boundaries and ticks only across seconds", () => {
+	assert.equal(THINKING_TICK_PERIOD_MS, 1_000);
+	const first = fakeTarget();
+	const second = fakeTarget();
+	const root = { children: [first] as unknown[] };
+	const h = makeHarness({ tui: fakeTui(root) });
+
+	h.timer.onAssistantMessageEvent(ev("thinking_start"));
+	assert.equal(first.labels.length, 1);
+	root.children = [second];
+	h.advance(500);
+	h.timer.tick();
+	assert.equal(first.labels.length, 1, "sub-second ticks do not repaint");
+	assert.equal(second.labels.length, 0, "tick does not rescan the component tree");
+
+	h.advance(600);
+	h.timer.tick();
+	assert.equal(first.labels.at(-1), "thinking 1.1s", "the cached target receives the next second");
+	assert.equal(second.labels.length, 0);
+
+	h.timer.onAssistantMessageEnd();
+	assert.equal(second.labels.at(-1), `thoughts${GLYPHS.separator}1.1s`, "message_end rebuilds the target once");
 });
 
 test("a thinking run ticks a live elapsed with no spinner and settles its duration", () => {
