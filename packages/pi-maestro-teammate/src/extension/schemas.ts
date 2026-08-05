@@ -163,7 +163,7 @@ export const TeammateParams = Type.Object({
   maxNestingDepth: Type.Optional(
     Type.Integer({
       description:
-        "How many levels of nested teammate dispatch the agents spawned by this call may perform below themselves. 0 forbids nested calls entirely: the assigned agents cannot dispatch teammates. Defaults to the global ceiling (range 0..2 enforced by normalization).",
+        "How many levels of nested teammate dispatch the agents spawned by this call may perform below themselves. Evaluated at the root dispatch: 0 forbids nested calls entirely (the assigned agents cannot dispatch teammates). The only effective values are 0 and 1 — 2 is capped to 1 by the global 2-level ceiling and anything above 2 is rejected, so deeper nesting is unreachable. Inside a spawned agent this parameter can only tighten the parent's budget — it can never extend depth beyond what the parent allowed; under the current ceiling the parent budget already forbids grandchildren, so passing 0 here is at most an explicit no-further-nesting marker.",
     }),
   ),
 
@@ -184,7 +184,7 @@ export const TeammateParams = Type.Object({
     Type.Boolean({
       default: false,
       description:
-        "Run in background (default: false). Foreground calls return the result directly when it is ready; if timeoutMs elapses first, they return a background acknowledgement while the teammate continues. Explicit background calls acknowledge immediately and send one automatic teammate-complete notification later.",
+        "Run in background (default: false). The foreground wait window is always bounded — by the smallest per-task timeoutMs or a 10-minute default — and a call that outlives it returns a background acknowledgement while the teammate continues, then delivers the result via one automatic teammate-complete notification. Explicit background calls acknowledge immediately and send that notification later. The completion is delivered automatically to the caller: for a root dispatch it arrives as a new turn in the root session; for a nested dispatch the work executes in the root process and the root forwards the same envelope over IPC, so it also arrives as a new turn in the dispatching child agent's session while that agent is still live (the root caller additionally receives it). If the dispatching agent has already ended, delivery is skipped and the result is settled and only inspectable via observe.",
     }),
   ),
 

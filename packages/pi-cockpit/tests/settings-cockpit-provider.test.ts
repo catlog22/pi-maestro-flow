@@ -69,7 +69,7 @@ test("Cockpit provider describes editable settings and host-owned actions", asyn
 		assert.equal(pinEditor?.defaultValue, false);
 		assert.equal(pinEditor?.descriptionKey, "cockpit.pinEditorBottom.description");
 		assert.ok(description.settings.some((setting) => setting.key === "staticMode" && setting.editor.kind === "boolean"));
-		assert.ok(description.settings.some((setting) => setting.key === "toolPalette" && setting.editor.kind === "enum"));
+		assert.equal(description.settings.some((setting) => setting.key === "toolPalette"), false);
 		assert.ok(description.settings.some((setting) => setting.key === "sidebar.width" && setting.editor.kind === "integer"));
 		assert.ok(description.settings.some((setting) => setting.key === "theme" && setting.editor.kind === "action"));
 		const keys = new Set(description.settings.flatMap((entry) => [
@@ -103,7 +103,6 @@ test("prepare and commit preserve unknown fields and apply runtime after durable
 		const before = await state.provider.read({ context });
 		const changes = [
 			{ operation: "set" as const, key: "staticMode", scope: "global" as const, value: true },
-			{ operation: "set" as const, key: "toolPalette", scope: "global" as const, value: "mono" },
 			{ operation: "set" as const, key: "sidebar.width", scope: "global" as const, value: 48 },
 			{ operation: "set" as const, key: "icons.mode", scope: "global" as const, value: "ascii" },
 			{ operation: "set" as const, key: "pinEditorBottom", scope: "global" as const, value: true },
@@ -124,10 +123,10 @@ test("prepare and commit preserve unknown fields and apply runtime after durable
 		assert.equal((raw.sidebar as Record<string, unknown>).width, 48);
 		assert.equal((raw.icons as Record<string, unknown>).mode, "ascii");
 		assert.equal(raw.staticMode, true);
-		assert.equal(raw.toolPalette, "mono");
-		assert.deepEqual(applied, ["staticMode", "toolPalette", "sidebar.width", "icons.mode", "pinEditorBottom"]);
+		assert.equal(raw.toolPalette, "family");
+		assert.deepEqual(applied, ["staticMode", "sidebar.width", "icons.mode", "pinEditorBottom"]);
 		assert.equal(state.runtime.staticMode, true);
-		assert.equal(state.runtime.toolPalette, "mono");
+		assert.equal(state.runtime.toolPalette, "family");
 		assert.equal(state.runtime.sidebar.width, 48);
 		assert.equal(state.runtime.pinEditorBottom, true);
 	} finally { rmSync(directory, { recursive: true, force: true }); }

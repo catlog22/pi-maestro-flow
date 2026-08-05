@@ -47,6 +47,78 @@ export const SUMMARY_REQUEST_PROTOCOL_TOKENS = 64;
 export const MAX_PROMPT_TOO_LONG_RETRIES = 2;
 const PROMPT_TOO_LONG_RETRY_FRACTION = 0.2;
 const SUMMARY_INPUT_TRUNCATION_MARKER = "[Earlier conversation omitted to fit the compaction model. Use previousSummary and runtimeState as the authoritative earlier checkpoint.]";
+const IMAGE_PLACEHOLDER = "[image]";
+const IMAGE_ROUTE_DETAILS_KIND = "maestro-image-routing";
+const IMAGE_ROUTE_DETAILS_VERSION = 1;
+type ImageRoute = "native" | "vision" | "vision+native" | "unread";
+const DOCUMENT_PLACEHOLDER = "[document]";
+
+function routedImagePlaceholders(messages: AgentMessage[]): Map<number, Map<number, ImageRoute>> {
+  const routesByMessage = new Map<number, Map<number, ImageRoute>>();
+  const pendingImageMessages: number[] = [];
+
+  for (const [messageIndex, message] of messages.entries()) {
+    const record = message as unknown as { role?: unknown; content?: unknown; details?: unknown };
+    if (record.role === "user" && Array.isArray(record.content) && record.content.some((block) =>
+      typeof block === "object" && block !== null && (block as { type?: unknown }).type === "image")) {
+      pendingImageMessages.push(messageIndex);
+    }
+
+    const details = record.details;
+    if (typeof details !== "object" || details === null || Array.isArray(details)) continue;
+    const detailRecord = details as Record<string, unknown>;
+    if (detailRecord.kind !== IMAGE_ROUTE_DETAILS_KIND || detailRecord.schemaVersion !== IMAGE_ROUTE_DETAILS_VERSION) continue;
+    if (!Array.isArray(detailRecord.routes)) continue;
+    const routes = new Map<number, ImageRoute>();
+    for (const entry of detailRecord.routes) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+      const routeRecord = entry as { imageIndex?: unknown; route?: unknown };
+      if (!Number.isSafeInteger(routeRecord.imageIndex) || (routeRecord.imageIndex as number) < 1) continue;
+      const route = routeRecord.route;
+      if (route !== "native" && route !== "vision" && route !== "vision+native" && route !== "unread") continue;
+      routes.set((routeRecord.imageIndex as number) - 1, route);
+    }
+    const targetMessage = pendingImageMessages.pop();
+    if (targetMessage !== undefined && routes.size > 0) routesByMessage.set(targetMessage, routes);
+  }
+
+  return routesByMessage;
+}
+
+/**
+ * Replace image/document content blocks with text placeholders before the
+ * summary prompt is serialized. The compaction model never receives image
+ * pixels (zero-upload principle); the placeholder preserves position semantics
+ * so the checkpoint keeps "a visual block existed here". New image turns carry
+ * a persisted route sidecar and become `[image:native|vision|unread]`; legacy
+ * turns without provenance remain `[image]`. Applies to every message whose
+ * content is an array; string content passes through unchanged.
+ */
+export function stripImagesFromMessagesForSummary(messages: AgentMessage[]): AgentMessage[] {
+  const routesByMessage = routedImagePlaceholders(messages);
+  return messages.map((message, messageIndex) => {
+    const record = message as unknown as { content?: unknown };
+    if (!Array.isArray(record.content)) return message;
+    const blocks = record.content as Array<Record<string, unknown>>;
+    const routes = routesByMessage.get(messageIndex);
+    let imageIndex = 0;
+    let hasMedia = false;
+    const content = blocks.map((block) => {
+      if (block?.type === "image") {
+        hasMedia = true;
+        const route = routes?.get(imageIndex++);
+        return { type: "text", text: route ? `[image:${route}]` : IMAGE_PLACEHOLDER };
+      }
+      if (block?.type === "document") {
+        hasMedia = true;
+        return { type: "text", text: DOCUMENT_PLACEHOLDER };
+      }
+      return block;
+    });
+    if (!hasMedia) return message;
+    return { ...message, content } as unknown as AgentMessage;
+  });
+}
 
 /**
  * Enforce the final Anthropic budget-thinking invariants after Pi has clamped
@@ -70,6 +142,8 @@ export function disableInvalidBudgetThinking(payload: unknown): unknown {
   const thinkingRecord = thinking as Record<string, unknown>;
   if (thinkingRecord.type !== "enabled") return payload;
   const budget = thinkingRecord.budget_tokens;
+  // Non-Anthropic reasoning formats do not carry Anthropic's budget field.
+  if (budget === undefined) return payload;
   if (
     typeof budget === "number"
     && Number.isSafeInteger(budget)
@@ -202,6 +276,10 @@ export function fitSummaryInputToWindow(input: {
     const messages = groups.length > 0 ? groups.slice(dropCount).flat() : [];
     const droppedRounds = (input.droppedRoundsBase ?? 0) + dropCount;
     const prompt = input.source.buildPrompt(messages, droppedRounds);
+    // The compaction API request is always pure text (complete() sends only
+    // fit.prompt; image pixels never reach it), so the capacity estimate stays
+    // text-only per 027 — adding per-image cost here would over-prune
+    // media-dense sessions. tokensBefore (image-inclusive) remains fallback only.
     const estimatedRequestTokens = estimateSummaryRequestTokens(MAESTRO_COMPACTION_SYSTEM_PROMPT, prompt);
     try {
       const maxTokens = fitSummaryOutputBudget({
@@ -330,6 +408,8 @@ interface CreateCompactionDependencies {
   summaryOverride?: string;
   /** Override the recent-history boundary. A non-matching id keeps no old entries. */
   firstKeptEntryIdOverride?: string;
+  /** Return cancel instead of falling through to Pi native summarization. */
+  failClosed?: boolean;
 }
 
 interface PersistCompactionDependencies {
@@ -517,7 +597,22 @@ export async function createMaestroCompaction(
   dependencies: CreateCompactionDependencies = {},
 ): Promise<SessionBeforeCompactResult | undefined> {
   const model = ctx.model;
-  if (!model) return undefined;
+  const failClosed = dependencies.failClosed === true;
+  const summaryFailure = (reason: string): SessionBeforeCompactResult | undefined => {
+    try {
+      ctx.ui.notify(
+        failClosed
+          ? `Maestro compaction summary failed; native fallback was blocked for provider-pressure recovery: ${reason}`
+          : `Maestro compaction summary failed; falling back to Pi native compaction: ${reason}`,
+        failClosed ? "error" : "warning",
+      );
+    } catch {
+      // The fail-closed return value is authoritative; UI failure must never
+      // erase cancellation and re-enable Pi native summarization.
+    }
+    return failClosed ? { cancel: true } : undefined;
+  };
+  if (!model) return summaryFailure("No model selected");
 
   const now = dependencies.now?.() ?? new Date();
   const checkpointId = dependencies.checkpointId?.() ?? randomUUID();
@@ -560,6 +655,11 @@ export async function createMaestroCompaction(
   if (dependencies.summaryOverride !== undefined) {
     const summary = dependencies.summaryOverride.trim();
     if (!summary) return undefined;
+    // P2-1 (appended recent images): intentionally not implemented on this path.
+    // Host appendCompaction() accepts only a summary string; without a
+    // patch-package mechanism, appending image blocks post-compact would break
+    // the firstKeptEntryId boundary and cache-stable prune manifest. Recent
+    // images inside the keep-recent window already survive compaction verbatim.
     return {
       compaction: {
         summary,
@@ -572,7 +672,8 @@ export async function createMaestroCompaction(
 
   const messages = [...event.preparation.messagesToSummarize, ...event.preparation.turnPrefixMessages];
   const buildPromptFor = (sourceMessages: AgentMessage[], droppedRounds: number): string => {
-    let conversationText = serializeConversation(convertToLlm(sourceMessages));
+    const stripped = stripImagesFromMessagesForSummary(sourceMessages);
+    let conversationText = serializeConversation(convertToLlm(stripped));
     if (droppedRounds > 0) {
       conversationText = `${SUMMARY_INPUT_TRUNCATION_MARKER}\n\n${conversationText}`;
     }
@@ -590,11 +691,7 @@ export async function createMaestroCompaction(
       ? await dependencies.completeSummary(prompt, event, ctx)
       : await completeWithCurrentModel({ messages, buildPrompt: buildPromptFor }, event, ctx, dependencies.summaryInputTokens);
     if (response.stopReason === "error") {
-      ctx.ui.notify(
-        `Maestro compaction summary failed; falling back to Pi native compaction: ${response.errorMessage || "Unknown provider error"}`,
-        "warning",
-      );
-      return undefined;
+      return summaryFailure(response.errorMessage || "Unknown provider error");
     }
     const summary = response.content
       .filter((part) => part.type === "text" && typeof part.text === "string")
@@ -602,11 +699,7 @@ export async function createMaestroCompaction(
       .join("\n")
       .trim();
     if (!summary) {
-      ctx.ui.notify(
-        "Maestro compaction summary was empty; falling back to Pi native compaction.",
-        "warning",
-      );
-      return undefined;
+      return summaryFailure("The summary was empty");
     }
 
     return {
@@ -618,11 +711,7 @@ export async function createMaestroCompaction(
       },
     };
   } catch (error) {
-    ctx.ui.notify(
-      `Maestro compaction summary failed; falling back to Pi native compaction: ${error instanceof Error ? error.message : String(error)}`,
-      "warning",
-    );
-    return undefined;
+    return summaryFailure(error instanceof Error ? error.message : String(error));
   }
 }
 

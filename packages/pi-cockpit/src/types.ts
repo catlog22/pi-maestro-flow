@@ -4,9 +4,13 @@
 export const TEAMMATE_STARTED_EVENT = "teammate:started";
 export const TEAMMATE_MESSAGE_EVENT = "teammate:message";
 export const TEAMMATE_COMPLETE_EVENT = "teammate:complete";
+export const TEAMMATE_VIEWING_EVENT = "teammate:viewing";
+export const TEAMMATE_OPEN_AGENT_EVENT = "teammate:open-agent";
 export const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
 export const BASH_BG_UPDATE_EVENT = "bash-bg:update";
 export const BASH_BG_QUERY_EVENT = "bash-bg:query";
+// Unified supervision telemetry from the shared layer (pi-maestro-teammate/v1/supervision).
+export const SUPERVISION_EVENT = "supervision:event";
 export const WORKFLOW_STATUS_KEY = "maestro-workflow";
 
 // Widget keys owned by pi-cockpit. Native Flow/teammate widgets yield through
@@ -46,6 +50,8 @@ export interface AgentRow {
 	lastActivityAt: number;
 	/** When the agent published its final result while lifecycle is still confirming (running). */
 	resultReadyAt?: number;
+	/** True when this agent is the one currently shown in the teammate viewing view. */
+	viewing?: boolean;
 	toolCount?: number;
 	tokens?: number;
 	inputTokens?: number;
@@ -110,14 +116,8 @@ export type ViewMode = "list" | "compact";
 export type QuietSymbolMode = "check" | "dot";
 
 /**
- * Colour grouping for compact Quiet tool rows. Each mode re-maps the seven
- * built-in tools onto existing theme slots, so it works across every theme
- * without new colour definitions and is orthogonal to the theme accent.
- * - classic: the original syntax-slot mapping (bash/read/ls share one hue).
- * - family: three operation families — inspect / mutate / execute.
- * - readwrite: cool reads vs warm writes, bash set apart.
- * - search: splits discovery into view (read/ls) vs search (grep/find).
- * - mono: single hue ramped by lightness; colourblind-safe, quietest look.
+ * Legacy quiet-tool palette values retained while existing cockpit.json files
+ * migrate. Tool names now use theme-owned lifecycle colors instead.
  */
 export type ToolPaletteMode = "classic" | "family" | "readwrite" | "search" | "mono";
 
@@ -191,7 +191,7 @@ export interface CockpitConfig {
 	quietMode: boolean;
 	/** Lifecycle glyph set used by compact Quiet tool rows. */
 	quietSymbols: QuietSymbolMode;
-	/** Colour grouping applied to compact Quiet tool names. */
+	/** Legacy persisted value; tool-name colors are derived from lifecycle state. */
 	toolPalette: ToolPaletteMode;
 	agentsMode: ViewMode;
 	todoMode: ViewMode;

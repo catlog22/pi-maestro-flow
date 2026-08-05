@@ -11,11 +11,14 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
+  ExtensionUIContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { createHash } from "node:crypto";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
+import type { WorkspaceSessionScan } from "../transcript/session-transcript.ts";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams } from "./schemas.ts";
 import {
@@ -143,6 +146,7 @@ import type {
   MessageEnvelope,
   SettledAgentRecord,
   SingleResult,
+  StructuredResult,
   TeammateInteractionRecord,
 } from "../shared/types.ts";
 import { projectAgentActivity } from "../shared/agent-status.ts";
@@ -200,6 +204,8 @@ export const TEAMMATE_PROMPT_GUIDELINES = [
   "Use teammate tasks for parallel or DAG work; {name} and {name.field} references create dependencies between named tasks, and dependsOn declares ordering without injecting output.",
   "Give every multi-task teammate item a stable unique name so nested work remains traceable and addressable; a {ref} that matches no task name is passed through as literal text.",
   "Set teammate concurrency explicitly for provider-safe fan-out; background defaults to false, so the call waits for results until completion or its foreground timeoutMs window, then moves unfinished work to background without terminating it.",
+  "maxNestingDepth is evaluated at the root dispatch: 0 disables nested teammate calls for the spawned agents, and only 0 and 1 are effective (2 is capped to 1 by the global 2-level ceiling; above 2 is rejected). Nested dispatches cannot extend that depth — at most they may pass maxNestingDepth: 0 as an explicit no-further-nesting marker.",
+  "After a nested (child-level) background dispatch, the completion is delivered automatically as a new turn in this agent's session — the root forwards the teammate-complete envelope over IPC while this agent is still live — so ending the turn to await the notification is correct; the root caller additionally sees the same notification. If this agent has ended, delivery is skipped and the result is only inspectable via observe.",
   'Use teammate with context: "fork" only when the child needs the current conversation history; fresh context is the default, and in multi-task mode prefer per-task fork over a top-level default.',
   "After teammate returns a background acknowledgement (explicit background, manual detach, or elapsed foreground window), normally end the current turn and wait for the automatic teammate-complete notification, which will trigger a new turn with the result.",
   "Do not poll observe or teammate-list after starting background work; use observe action=status only for a one-off inspection explicitly needed for debugging or requested by the user.",
@@ -242,12 +248,50 @@ export function aggregateTerminalStatuses(
   return sawTerminated ? "terminated" : "completed";
 }
 
+const STRUCTURED_OUTPUT_DISPLAY_BYTES = 4096;
+const STRUCTURED_OUTPUT_CONFIRMATION = "Structured output saved.";
+
+function truncateUtf8Head(value: string, maxBytes: number): string {
+  if (value.length * 3 <= maxBytes) return value;
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  const encoded = Buffer.from(value, "utf8");
+  let end = maxBytes;
+  while (end > 0 && (encoded[end] & 0xc0) === 0x80) end -= 1;
+  return encoded.subarray(0, end).toString("utf8");
+}
+
+function formatStructuredOutputForDisplay(result: SingleResult): string | undefined {
+  if (result.structuredOutput === undefined) return undefined;
+  let text: string;
+  try {
+    text = JSON.stringify(result.structuredOutput, null, 2);
+  } catch {
+    return "[structured_output] (value is not JSON-serializable)";
+  }
+  if (Buffer.byteLength(text, "utf8") <= STRUCTURED_OUTPUT_DISPLAY_BYTES) {
+    return `[structured_output] ${text}`;
+  }
+  const truncated = truncateUtf8Head(text, STRUCTURED_OUTPUT_DISPLAY_BYTES);
+  return `[structured_output] ${truncated}… [truncated; read the full value via agent://${result.correlationId}]`;
+}
+
+function isStructuredOutputConfirmation(text: string): boolean {
+  return text === STRUCTURED_OUTPUT_CONFIRMATION || text === "(no output)";
+}
+
 export function displayMessageForResult(result: SingleResult): string {
-  const lastMessage = result.messages.at(-1)?.content
-    ?? (result.structuredOutput !== undefined
-      ? `[structured_output] ${truncateUtf8Tail(JSON.stringify(result.structuredOutput), 512)}`
-      : "(no output)");
-  if (result.exitCode === 0) return lastMessage;
+  const structured = formatStructuredOutputForDisplay(result);
+  const lastMessage = result.messages.at(-1)?.content ?? structured ?? "(no output)";
+  // A structured_output completion ends with the tool's generic confirmation,
+  // not the answer. When the transcript tail is only that confirmation (or
+  // nothing), surface the value itself; otherwise keep the prose answer and
+  // append the value so callers see both.
+  const effective = structured !== undefined && lastMessage !== structured
+    ? isStructuredOutputConfirmation(lastMessage)
+      ? structured
+      : `${lastMessage}\n\n${structured}`
+    : lastMessage;
+  if (result.exitCode === 0) return effective;
 
   const schemaDiagnostic = result.messages
     .filter((message) => isStructuredOutputSettlementDiagnostic(message.content))
@@ -262,7 +306,7 @@ export function displayMessageForResult(result: SingleResult): string {
   if (primaryDiagnostic && schemaDiagnostic && primaryDiagnostic !== schemaDiagnostic) {
     return `${primaryDiagnostic}\n\nStructured output: ${schemaDiagnostic}`;
   }
-  return primaryDiagnostic ?? schemaDiagnostic ?? lastMessage;
+  return primaryDiagnostic ?? schemaDiagnostic ?? effective;
 }
 
 export function summarizeGraphResults(results: readonly SingleResult[], tasks: readonly NormalizedTask[]): string {
@@ -289,6 +333,34 @@ export function aggregateGraphStructuredOutput(
   return Object.keys(structuredOutput).length > 0 ? structuredOutput : undefined;
 }
 
+/**
+ * Compact projection of schema-valid results for completion events. Undefined
+ * when no result carries structured output, so emitters can spread it
+ * conditionally and keep the event payload minimal.
+ */
+export function toStructuredResults(
+  results: readonly SingleResult[],
+  originCwd: string,
+): StructuredResult[] | undefined {
+  const entries: StructuredResult[] = [];
+  for (const result of results) {
+    if (result.structuredOutput === undefined) continue;
+    entries.push({
+      correlationId: result.correlationId,
+      originCwd,
+      ...(result.name ? { name: result.name } : {}),
+      agent: result.agent,
+      structuredOutput: structuredClone(result.structuredOutput),
+    });
+  }
+  return entries.length > 0 ? entries : undefined;
+}
+
+/** Replace the retained turn value; undefined intentionally clears stale data. */
+export function setAgentStructuredOutput(agent: ActiveAgent, output: unknown): void {
+  agent.structuredOutput = output === undefined ? undefined : structuredClone(output);
+}
+
 export type TeammateRuntimeOptions = Pick<
   RunTeammateOptions,
   "spawnChildProcess" | "resultReadyGraceMs" | "foregroundMaxRunMs"
@@ -306,11 +378,15 @@ Call form:
 Every dispatch uses a non-empty tasks array. Task-level values override top-level defaults. Tasks that omit agent inherit the top-level agent, then default to "general".
 Use {name} or {name.field} in a dependent task's prompt, or dependsOn: ["name"] for ordering without output injection.
 
-Nesting control: pass maxNestingDepth to limit how many levels of nested teammate dispatch the spawned agents may perform below themselves. maxNestingDepth: 0 forbids nested calls entirely — the assigned agents cannot dispatch teammates.
+Nesting control: pass maxNestingDepth on the root dispatch to limit how many levels of nested teammate dispatch the spawned agents may perform below themselves. 0 forbids nested calls entirely — the assigned agents cannot dispatch teammates. Values above 1 behave like 1: the tree is globally hard-capped at 2 agent levels, and deeper nesting is rejected with an error. Inside a spawned agent, maxNestingDepth can only tighten the parent's budget — pass 0 to forbid further nesting below that call; it can never extend depth beyond what the parent allowed.
 
 Use an exact role name from the Available Teammate Agents section in the active system prompt. Unknown names are rejected.
 
-For background work, wait for the automatic teammate-complete notification. Do not poll observe or teammate-list; if the current turn must wait, call observe once with action="wait" and target { kind: "teammate", id: "<name-or-correlation-id>" }.
+Background: the foreground wait window is bounded — the smallest per-task timeoutMs, or 10 minutes by default; when it elapses the call returns a background acknowledgement and the work continues, completing via one automatic teammate-complete notification that triggers a new turn. Do not poll observe or teammate-list; if the current turn must wait, call observe once with action="wait" and target { kind: "teammate", id: "<name-or-correlation-id>" }. Nested background dispatches: the work executes in the root process, and on completion the same teammate-complete envelope is delivered automatically to the dispatching child agent as a new turn in its session while that agent is still live, with the root caller additionally receiving the notification. If the dispatching agent has already ended, delivery is skipped and the result is settled and only inspectable via observe.
+
+## Structured output (outputSchema)
+
+When a task (or the top-level call) sets outputSchema, the child must submit its final answer through a \`structured_output\` tool that validates the value against that JSON Schema. On completion the value is returned directly in the result content (prefixed \`[structured_output]\`) and is persisted for later reads via \`agent://<correlationId>\` (resource tool). Schema-invalid submissions fail validation and the child retries automatically; a run that ends without a valid value fails with a diagnostic naming the offending field.
 
 ## Observation
 
@@ -319,6 +395,10 @@ Use observe for teammate and background Bash status, barrier waits, or transitio
 - { action: "wait", targets: [{ kind: "teammate", id: "reviewer" }, { kind: "bash_bg", id: "bg-id" }], waitMode: "all" } — mixed barrier wait
 - { action: "wait", until: "completed", targets: [{ kind: "teammate", id: "reviewer" }] } — block until the agent fully terminates (not just first result)
 - { action: "watch", targets: [{ kind: "teammate", id: "reviewer" }], timeoutMs: 30000 } — follow status transitions until timeout
+
+Set detail=full (or tail) to include a settled agent's captured result — including the structured_output value for schema tasks.
+
+When neither the top-level model nor a task-level model is set, teammates inherit the main session's current model by default. Configured task-type/role mappings take precedence when present; with no mapping and no session model, the agent's default model is used.
 
 Configured task-type model routing for ${cwd}:
 ${formatModelRoutingConfig(cwd, discoverAgents(cwd))}`;
@@ -347,7 +427,7 @@ export const TEAMMATE_LIST_GUIDELINES = [
 ];
 
 export const TEAMMATE_WATCH_DESCRIPTION =
-  "Perform a one-shot inspection of a running or sleeping teammate agent's recent output, tool activity, inbox messages, and last result. This is not a completion-wait tool.";
+  "Perform a one-shot inspection of a running or sleeping teammate agent's recent output, tool activity, inbox messages, and last result — including the structured_output value for schema tasks. This is not a completion-wait tool.";
 export const TEAMMATE_WATCH_SNIPPET = "Inspect a specific teammate agent's recent activity and output.";
 export const TEAMMATE_WATCH_GUIDELINES = [
   "Use teammate-watch only for a one-off live inspection after selecting an agent name, displayed selector, or correlation ID; never call it repeatedly to wait for completion.",
@@ -367,12 +447,12 @@ export const OBSERVE_DESCRIPTION = `Observe mixed teammate and background Bash t
 - "wait": block on an all/any/count barrier with one request-level timeout; set until="completed" to block until agents fully terminate instead of first result
 - "watch": poll every target until timeoutMs, returning the full status-transition timeline (richer than status, no barrier required)
 
-Targets use { kind, id }, where kind is currently "teammate" or "bash_bg". Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.`;
+Targets use { kind, id }, where kind is currently "teammate" or "bash_bg". Use detail=full (or tail) to include a settled teammate's captured result — including the structured_output value for schema tasks. Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.`;
 export const OBSERVE_SNIPPET = "Observe, wait for, or watch mixed teammate and background Bash targets.";
 export const OBSERVE_GUIDELINES = [
   "Use observe for mixed or multi-target status and waits; use one bounded wait instead of polling status.",
   "Use action=watch to follow status transitions over time; use action=wait until=completed to block until agents fully terminate.",
-  "Use detail=full only when recent output is required; summary is the compact default.",
+  "Use detail=full only when recent output is required; summary is the compact default. detail=full includes a settled agent's captured result and structured_output value.",
 ];
 
 export const TEAMMATE_MONITOR_DESCRIPTION = `Observe multiple teammate targets or block on a multi-agent barrier. Persistent supervision is entered/exited separately via /monitor.
@@ -427,7 +507,86 @@ export function appendTeammateDepthContext(
 }
 
 export function backgroundWaitGuidance(correlationId: string): string {
-  return `correlationId=${correlationId}. Automatic teammate-complete notification will trigger a new turn with the result. Do not poll observe or teammate-list. If this turn must consume the result, call observe exactly once with { action: "wait", targets: [{ kind: "teammate", id: "${correlationId}" }], timeoutMs: 600000 }; otherwise end the turn now.`;
+  return `correlationId=${correlationId}. The teammate-complete notification is delivered automatically when the work finishes: for a root dispatch it arrives as a new turn in this session; for a nested dispatch the work runs in the root process and the root forwards the completion over IPC, so it also arrives as a new turn in this agent's session while this agent is still live (the root caller additionally sees it). If this agent has already ended, delivery is skipped and the result is settled and inspectable via observe. Do not poll observe or teammate-list. If this turn must consume the result, call observe exactly once with { action: "wait", targets: [{ kind: "teammate", id: "${correlationId}" }], timeoutMs: 600000 }; otherwise end the turn now.`;
+}
+
+/**
+ * Appended to foreground detach acknowledgements so the Alt+B shortcut stays
+ * discoverable across the root single, root graph, and nested foreground paths.
+ */
+export const FOREGROUND_DETACH_HINT = "Alt+B detaches a foreground call to background.";
+
+/**
+ * One session-scoped Alt+B listener dispatches to the oldest active foreground
+ * owner. This makes nested calls detach layer by layer from the outermost call
+ * instead of relying on TUI listener registration order.
+ */
+type ForegroundDetachOwner = {
+  active: boolean;
+  detach(): void;
+};
+
+let persistentUi: ExtensionUIContext | undefined;
+let persistentUiUnsubscribe: (() => void) | undefined;
+const foregroundDetachOwners: ForegroundDetachOwner[] = [];
+
+function uninstallForegroundDetachListener(): void {
+  const unsubscribe = persistentUiUnsubscribe;
+  persistentUiUnsubscribe = undefined;
+  unsubscribe?.();
+}
+
+function installForegroundDetachListener(): void {
+  if (!persistentUi || persistentUiUnsubscribe || foregroundDetachOwners.length === 0) return;
+  persistentUiUnsubscribe = persistentUi.onTerminalInput((data: string) => {
+    if (data !== "\x1bb") return undefined;
+    const owner = foregroundDetachOwners.shift();
+    if (!owner) return undefined;
+    owner.active = false;
+    if (foregroundDetachOwners.length === 0) uninstallForegroundDetachListener();
+    owner.detach();
+    return { consume: true };
+  });
+}
+
+export function setPersistentUi(ui: ExtensionUIContext | undefined): void {
+  if (persistentUi !== ui) {
+    uninstallForegroundDetachListener();
+    persistentUi = ui;
+  }
+  if (!ui) {
+    for (const owner of foregroundDetachOwners) owner.active = false;
+    foregroundDetachOwners.length = 0;
+    return;
+  }
+  installForegroundDetachListener();
+}
+
+/** Registers one foreground owner; unregister is idempotent on every race path. */
+export function registerForegroundDetach(
+  detach: () => void,
+  ui?: ExtensionUIContext,
+): () => void {
+  if (ui) setPersistentUi(ui);
+  const owner: ForegroundDetachOwner = { active: true, detach };
+  foregroundDetachOwners.push(owner);
+  try {
+    installForegroundDetachListener();
+  } catch (error) {
+    owner.active = false;
+    const index = foregroundDetachOwners.indexOf(owner);
+    if (index >= 0) foregroundDetachOwners.splice(index, 1);
+    if (foregroundDetachOwners.length === 0) uninstallForegroundDetachListener();
+    throw error;
+  }
+
+  return () => {
+    if (!owner.active) return;
+    owner.active = false;
+    const index = foregroundDetachOwners.indexOf(owner);
+    if (index >= 0) foregroundDetachOwners.splice(index, 1);
+    if (foregroundDetachOwners.length === 0) uninstallForegroundDetachListener();
+  };
 }
 
 export function foregroundWaitWindowMs(
@@ -1042,6 +1201,45 @@ export function buildAgentSelectorRows(agents: ActiveAgent[]): AgentSelectorRow[
   return rows;
 }
 
+/**
+ * Rows for completed teammate sessions recovered from disk after a restart.
+ * The selector merges these below the live-agent rows; selecting one opens the
+ * attach overlay in transcript mode (read-only).
+ */
+export function buildHistoryRows(
+  scans: WorkspaceSessionScan[],
+): AgentSelectorRow[] {
+  return scans.map((scan) => ({
+    correlationId: historyRowKey(scan),
+    agent: "teammate",
+    label: historyLabel(scan),
+    status: "completed",
+    startedAt: scan.startedAt ?? 0,
+    depth: 0,
+    treePrefix: "",
+    recentTools: [],
+    ...(scan.firstMessage ? { lastMessage: scan.firstMessage } : {}),
+  }));
+}
+
+/**
+ * Stable selector key for a history row, derived from the session file path —
+ * position-based keys would drift when the scan order changes across rebuilds.
+ */
+export function historyRowKey(scan: WorkspaceSessionScan): string {
+  const digest = createHash("sha256")
+    .update(scan.sessionFile)
+    .digest("hex")
+    .slice(0, 8);
+  return `hist-${digest}`;
+}
+
+export function historyLabel(scan: WorkspaceSessionScan): string {
+  const id = scan.sessionId?.slice(0, 8) ?? "session";
+  const count = scan.messageCount > 0 ? ` · ${scan.messageCount} msgs` : "";
+  return `history ${id}${count}`;
+}
+
 export function renderAgentSelectorPanel(
   rows: AgentSelectorRow[],
   cursor: number,
@@ -1061,6 +1259,10 @@ export function renderAgentSelectorPanel(
     if (row.status === "failed") return { icon: red("◉"), text: red("Sleeping · last run failed") };
     if (row.status === "pending") return { icon: dim("■"), text: dim("Running · starting") };
     if (row.status === "retrying") return { icon: yellow("■"), text: yellow("Running · retrying") };
+    // History rows are completed sessions — never render as runnable.
+    if (row.status === "completed" || row.status === "terminated") {
+      return { icon: dim("✓"), text: dim("Done") };
+    }
     return { icon: green("■"), text: green("Running") };
   };
 
@@ -1078,7 +1280,7 @@ export function renderAgentSelectorPanel(
   const out: string[] = [];
   const frameLine = (content: string) =>
     dim("│") + truncateToWidth(` ${content}`, inner, "…", true) + dim("│");
-  const maxVisible = 5;
+  const maxVisible = 8;
   const start = Math.max(0, Math.min(
     Math.max(0, rows.length - maxVisible),
     selectedIndex - Math.floor(maxVisible / 2),
@@ -1128,8 +1330,8 @@ export function renderAgentSelectorPanel(
 
   out.push(dim("╰" + "─".repeat(inner) + "╯"));
   const footer = w < 46
-    ? " Esc cancel · Enter attach · ↑↓ select"
-    : " Esc cancel · Enter attach · ↑↓ select · type to filter";
+    ? " Esc cancel · Enter view · ↑↓ select"
+    : " Esc cancel · Enter view · ↑↓ select · PgUp/PgDn page · type to filter";
   out.push(truncateToWidth(dim(footer), w, "…"));
   return out;
 }

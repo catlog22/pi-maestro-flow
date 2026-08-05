@@ -38,6 +38,12 @@ export interface ObservationSnapshot {
   updatedAt: number;
   capabilities?: ObservationCapabilities;
   error?: string;
+  /** Canonical terminal outcome when the target has settled (completed|failed|terminated). */
+  terminalStatus?: string;
+  /** Last captured result text of the settled agent. */
+  lastResult?: string;
+  /** Schema-valid structured output of a settled schema task (detail=full). */
+  structuredOutput?: unknown;
 }
 
 export interface ObservationReadOptions {
@@ -320,6 +326,16 @@ export function formatObserveResult(result: ObserveResult, verbose = false): str
     lines.push(`${label}\t${observation.nativeStatus}\t${observation.summary}`.trimEnd());
     if (verbose && observation.detail) {
       for (const detail of observation.detail) lines.push(`  ${detail}`);
+    }
+    const detailHasStructuredOutput = observation.detail?.includes("--- structured output ---") === true;
+    if (verbose && observation.structuredOutput !== undefined && !detailHasStructuredOutput) {
+      let text: string;
+      try {
+        text = JSON.stringify(observation.structuredOutput, null, 2);
+      } catch {
+        text = "(not JSON-serializable)";
+      }
+      lines.push("  --- structured output ---", ...text.split("\n").map((line) => `  ${line}`));
     }
   }
   return lines;

@@ -134,7 +134,7 @@ export async function initializeMcp(
     try {
       const connection = await manager.connect(name, definition, ctx.signal);
       if (connection.status === "needs-auth") {
-        return { name, definition, connection: null, error: `OAuth authentication required. Run /mcp-auth ${name}.` };
+        return { name, definition, connection: null, error: `OAuth authentication required. Run /mcp auth ${name}.` };
       }
       return { name, definition, connection, error: null };
     } catch (error) {

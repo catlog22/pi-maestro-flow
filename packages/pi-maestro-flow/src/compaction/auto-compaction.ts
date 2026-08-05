@@ -14,6 +14,7 @@ import {
 } from "./compaction-settings.ts";
 import {
   COMPACTION_LEASE_TIMEOUT_MS,
+  NATIVE_FALLBACK_COMPACTION_MARKER,
   type CompactionArbiter,
   type CompactionLease,
   type CompactionOwner,
@@ -75,6 +76,11 @@ const RELEVANCE_MAX_CANDIDATES = 64;
 const RELEVANCE_TOTAL_SAMPLE_CHARS = 512_000;
 /** Fixed token estimate per image content block, matching Pi's ESTIMATED_IMAGE_CHARS / 4. */
 const ESTIMATED_IMAGE_TOKENS = 1200;
+/** Fixed token estimate per document block. A base64 PDF in source.data must
+ * not reach the JSON text estimator — a 1MB PDF is ~1.33M base64 chars →
+ * ~325k estimated tokens, vs the ~2000 the API actually charges. Same order as
+ * Claude Code's IMAGE_MAX_TOKEN_SIZE semantics. */
+const ESTIMATED_DOCUMENT_TOKENS = 2000;
 const CONTINUE_PROMPT = "Continue the interrupted task from the compacted session checkpoint. Do not wait for another user request.";
 const COMPACTION_RETRY_PROMPT = "Automatic compaction failed after the request was stopped because the context was exhausted. Retry compaction, then continue the interrupted task. Do not restart or wait for another user request.";
 const OUTPUT_LIMIT_RETRY_PROMPT = "Automatic compaction failed after the previous response was cut off at the model output token limit. Retry compaction, then continue exactly where the interrupted response stopped. Do not restart or wait for another user request.";
@@ -83,6 +89,7 @@ const DEFAULT_OUTPUT_LIMIT_RATIO = 0.8;
 export const MAX_OUTPUT_LIMIT_COMPACTIONS = 2;
 const PRUNE_STATE_ENTRY_TYPE = "maestro-auto-prune-state";
 const PENDING_INTENT_ENTRY_TYPE = "maestro-auto-compaction-intent";
+const PENDING_INTENT_VERSION = 2;
 const PRUNE_STATE_VERSION = 6;
 export const MAX_PRUNE_DELTAS_BETWEEN_CHECKPOINTS = 32;
 export const MAX_OFF_BRANCH_PRUNE_ENTRIES = 128;
@@ -111,6 +118,8 @@ export interface PruneManifestEntry {
   savedTokens: number;
   introducedAtUsageEpoch?: string;
   spillPath?: string;
+  /** SHA-256 of the persisted spill file; distinct from the source message digest. */
+  spillContentDigest?: string;
   level?: PruneLevel;
   contentDigest?: string;
   writerId?: string;
@@ -126,6 +135,8 @@ interface PersistedPruneEntry {
   callId: string;
   level: PruneLevel;
   spillPath?: string;
+  /** SHA-256 of the persisted spill file; required before a restored path is advertised. */
+  spillContentDigest?: string;
   introducedAtUsageEpoch?: string;
   contentDigest?: string;
   writerId?: string;
@@ -224,6 +235,8 @@ interface PendingCompactionIntent {
   settings: CompactionSettings;
   effectiveSettings: CompactionSettings;
   contextExhausted: boolean;
+  /** The provider request was blocked before HTTP because budget thinking was invalid. */
+  requestBlocked?: boolean;
 }
 
 interface PendingOutputLimitIntent {
@@ -271,10 +284,20 @@ export interface AutoCompactionState {
   turnCount: number;
   /** Consecutive completed turns whose threshold intent was deferred instead of run. */
   highPressureDroppedTurns: number;
+  /** Consecutive evaluations sitting below the escalate band while an intent is live. */
+  belowEscalateStreak: number;
   /** Pressure notifications already emitted in the current compaction cycle. */
   notifiedPressureKeys: Set<string>;
   outputLimitCompactions: number;
   outputLimitBreakerNotified: boolean;
+  /** Last context frame passed toward the provider, including stable prune replacements. */
+  lastProviderMessages?: AgentMessage[];
+  /** One reactive provider-pressure compaction is allowed until a valid replay succeeds. */
+  providerPressureAttempted: boolean;
+  /** Suppresses ordinary Stop hooks while a synthetic abort is being recovered. */
+  providerPressureBlocked: boolean;
+  /** The one-shot replay also failed; no compaction completion may resume it. */
+  providerPressureTerminal: boolean;
   /** Provider usage epoch the cache ratio below was sampled at. */
   cacheEpoch?: string;
   cacheRatio?: number;
@@ -284,7 +307,7 @@ export interface AutoCompactionState {
   cacheDelta?: number;
 }
 
-interface AutoCompactionDependencies {
+export interface AutoCompactionDependencies {
   loadInternals?: () => Promise<PiCompactionInternals>;
   readSettings?: (projectRoot: string) => CompactionSettings;
   arbiter?: CompactionArbiter;
@@ -318,7 +341,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   onSessionStart(ctx: ExtensionContext, event?: { reason?: string }): void;
   evaluate(messages: AgentMessage[], ctx: ExtensionContext): Promise<AgentMessage[] | undefined>;
   projectCompactionInput(event: SessionBeforeCompactEvent, ctx: ExtensionContext): Promise<ProjectedCompactionInput>;
-  beforeProviderRequest(payload: unknown, ctx: ExtensionContext): unknown | undefined;
+  beforeProviderRequest(payload: unknown, ctx: ExtensionContext): Promise<unknown | undefined>;
+  shouldSkipStopHook(): boolean;
+  isProviderPressureRecoveryActive(): boolean;
   onAgentEnd(ctx: ExtensionContext): Promise<void>;
   onOutputLimit(messages: AgentMessage[], ctx: ExtensionContext): Promise<void>;
   onCompact(completedOwner?: CompactionOwner, ctx?: ExtensionContext): void;
@@ -345,9 +370,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     breakerNotified: false,
     turnCount: 0,
     highPressureDroppedTurns: 0,
+    belowEscalateStreak: 0,
     notifiedPressureKeys: new Set(),
     outputLimitCompactions: 0,
     outputLimitBreakerNotified: false,
+    providerPressureAttempted: false,
+    providerPressureBlocked: false,
+    providerPressureTerminal: false,
   };
   let transformTail = Promise.resolve();
   async function withTransformLock<T>(run: () => Promise<T>): Promise<T> {
@@ -404,6 +433,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       soft: settings.soft,
     });
   }
+  function isContextExhausted(ctx: ExtensionContext, estimatedTokens: number): boolean {
+    const contextWindow = ctx.model?.contextWindow;
+    return contextWindow === undefined || estimatedTokens >= contextWindow;
+  }
   /**
    * Every field a fresh lifecycle must start from. onSessionStart used to clear
    * only 13 of these and never touched the concurrency trio, so a session
@@ -422,14 +455,20 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     state.lastTriggerKey = undefined;
     state.lastNoCompactableKey = undefined;
     state.highPressureDroppedTurns = 0;
+    state.belowEscalateStreak = 0;
     state.notifiedPressureKeys.clear();
     state.internalsWarningTurn = undefined;
+    state.lastProviderMessages = undefined;
+    state.providerPressureAttempted = false;
+    state.providerPressureBlocked = false;
+    state.providerPressureTerminal = false;
   }
   function resetCycleState(): void {
     state.velocityTracker = EMPTY_VELOCITY_TRACKER;
     state.breaker = resetCompactionBreaker();
     state.breakerNotified = false;
     state.highPressureDroppedTurns = 0;
+    state.belowEscalateStreak = 0;
     state.notifiedPressureKeys.clear();
     state.outputLimitCompactions = 0;
     state.outputLimitBreakerNotified = false;
@@ -585,10 +624,15 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           && pressure.estimatedTokens >= pressure.thresholdTokens
             - Math.floor(capacityWindow * OUTPUT_CLAMP_BAND_MARGIN_RATIO);
         if (escalate) {
+          state.belowEscalateStreak = 0;
           const estimate = { ...estimateContextTokens(pressure.messages), tokens: pressure.estimatedTokens };
           const triggerKey = `${estimate.tokens}:${pressure.thresholdTokens}:${messages.length}`;
+          // A matching trigger normally avoids re-queuing identical intent.
+          // Re-check exhaustion nevertheless: model/window changes can happen
+          // between pressure evaluations, and the current provider request must
+          // be aborted if it no longer fits even in the escalate branch.
+          const contextExhausted = isContextExhausted(ctx, estimate.tokens);
           if (state.pendingIntent?.triggerKey !== triggerKey) {
-            const contextExhausted = estimate.tokens >= ctx.model.contextWindow;
             state.pendingIntent = {
               generation,
               triggerKey,
@@ -608,13 +652,33 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
               `escalate:${pressure.thresholdTokens}`,
               `Context remains near the compaction threshold after pruning (${estimate.tokens.toLocaleString("en-US")}/${pressure.thresholdTokens.toLocaleString("en-US")} tokens). Compaction will run after this turn; responses may be truncated until then.`,
             );
+          } else if (contextExhausted) {
+            ctx.abort();
+          }
+        } else if (pressure.band === "critical" || pressure.band === "auto-prune") {
+          // Still inside the prune/critical band but below the escalate window:
+          // pruning relieved some pressure, yet the intent must survive a
+          // single-band bounce. Zeroing the counter on every evaluation here
+          // let an estimate oscillating around the escalate boundary defer
+          // compaction forever — the 2-turn threshold on agent settle could
+          // never be reached. Only drop the intent after two consecutive
+          // below-escalate evaluations genuinely clear the band.
+          state.belowEscalateStreak += 1;
+          if (state.belowEscalateStreak >= 2) {
+            state.pendingIntent = undefined;
+            state.lastTriggerKey = undefined;
+            persistPendingIntent(pi, state);
+            state.highPressureDroppedTurns = 0;
+            state.belowEscalateStreak = 0;
           }
         } else {
           state.pendingIntent = undefined;
+          state.lastTriggerKey = undefined;
           persistPendingIntent(pi, state);
           // Pressure is genuinely relieved (intent dropped): reset the
           // consecutive-defer counter so a later fresh spike starts clean.
           state.highPressureDroppedTurns = 0;
+          state.belowEscalateStreak = 0;
         }
         return pressure.prunedToolResults > 0 ? pressure.messages : undefined;
       }
@@ -622,12 +686,25 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       const thresholdTokens = pressure.thresholdTokens;
 
       const triggerKey = `${estimate.tokens}:${thresholdTokens}:${messages.length}`;
-      if (state.pendingIntent?.triggerKey === triggerKey) return pressure.messages;
+      // Early-exit on an identical trigger key keeps the same epoch from
+      // re-queuing the intent on every evaluation. Re-derive contextExhausted
+      // anyway: a mid-session model/context-window switch (which does not bump
+      // generation) can make the stored flag stale, and an actually overflowing
+      // request must not fall through to the provider while waiting for the
+      // settled-phase compaction owner.
+      if (state.pendingIntent?.triggerKey === triggerKey) {
+        const stillExhausted = isContextExhausted(ctx, estimate.tokens);
+        if (stillExhausted) ctx.abort();
+        return pressure.messages;
+      }
 
       // The context transform owns pruning only. Full compaction is submitted
       // after the agent settles, where it can re-read the branch and arbitrate
       // with Pi's native compaction without a context-hook TOCTOU race.
-      const contextExhausted = estimate.tokens >= ctx.model.contextWindow;
+      // ctx.model may have been replaced across the awaits above; treat a
+      // missing window as fully exhausted so an unbounded request never slips
+      // through to the provider.
+      const contextExhausted = isContextExhausted(ctx, estimate.tokens);
       state.pendingIntent = {
         generation,
         triggerKey,
@@ -647,6 +724,50 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       return pressure.messages;
   }
 
+  function fallbackToNativeCompaction(
+    ctx: ExtensionContext,
+    intent: PendingCompactionIntent,
+  ): void {
+    if (!intent.contextExhausted || ctx.hasPendingMessages?.()) return;
+    ctx.ui.notify(
+      "Mid-turn compaction repeatedly failed; falling back to Pi native compaction to recover the interrupted request.",
+      "warning",
+    );
+    try {
+      // Deliberately omit an owner tag. The session_before_compact arbiter
+      // still observes this as native, while the marker exempts the recovery
+      // request from completed-turn threshold preservation after its original
+      // user turn was already aborted.
+      ctx.compact({
+        customInstructions: NATIVE_FALLBACK_COMPACTION_MARKER,
+        onComplete: () => {
+          state.breaker = resetCompactionBreaker();
+          state.breakerNotified = false;
+          if (ctx.hasPendingMessages?.()) return;
+          try {
+            pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
+          } catch (error) {
+            ctx.ui.notify(
+              `Native fallback continuation failed: ${error instanceof Error ? error.message : String(error)}`,
+              "error",
+            );
+          }
+        },
+        onError: (error) => {
+          ctx.ui.notify(
+            `Native fallback compaction failed: ${error instanceof Error ? error.message : String(error)}`,
+            "error",
+          );
+        },
+      });
+    } catch (error) {
+      ctx.ui.notify(
+        `Native fallback compaction could not start: ${error instanceof Error ? error.message : String(error)}`,
+        "error",
+      );
+    }
+  }
+
   async function settlePendingCompaction(ctx: ExtensionContext): Promise<void> {
     const intent = state.pendingIntent;
     if (!intent || state.running || intent.generation !== state.generation) return;
@@ -654,6 +775,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.pendingIntent = undefined;
       state.lastTriggerKey = undefined;
       persistPendingIntent(pi, state);
+      if (intent.requestBlocked) {
+        ctx.ui.notify(
+          "Request stopped because compaction settings changed while provider-pressure recovery was pending. Retry the request with the new settings.",
+          "error",
+        );
+      }
       return;
     }
 
@@ -676,7 +803,14 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     }
     state.breaker = breakerCheck.breaker;
     if (!breakerCheck.allowed) {
-      notifyBreakerPaused();
+      if (intent.requestBlocked) {
+        ctx.ui.notify(
+          "Request stopped because reactive compaction is paused by the compaction circuit breaker. Start a new session or retry after the cooldown.",
+          "error",
+        );
+      } else {
+        notifyBreakerPaused();
+      }
       clearPending();
       return;
     }
@@ -685,9 +819,19 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       if (intent.generation !== state.generation) return;
       state.breaker = recordCompactionFailure(state.breaker, state.turnCount);
       clearPressureStatus(ctx);
-      if (options.notify) ctx.ui.notify(`${message}: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      if (options.notify) ctx.ui.notify(
+        `${message}: ${error instanceof Error ? error.message : String(error)}`,
+        intent.requestBlocked ? "error" : "warning",
+      );
+      const breakerTripped = state.breaker.trippedAtTurn !== undefined;
       clearPending();
-      if (!intent.contextExhausted || state.breaker.trippedAtTurn !== undefined || ctx.hasPendingMessages?.()) return;
+      if (intent.requestBlocked) return;
+      if (!intent.contextExhausted || ctx.hasPendingMessages?.()) return;
+      if (breakerTripped) {
+        notifyBreakerPaused();
+        fallbackToNativeCompaction(ctx, intent);
+        return;
+      }
       try {
         pi.sendUserMessage(COMPACTION_RETRY_PROMPT, { deliverAs: "followUp" });
       } catch (recoveryError) {
@@ -711,8 +855,19 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       return;
     }
     if (intent.generation !== state.generation || state.running) return;
-    if (dependencies.arbiter?.currentOwner()) {
+    const failForeignProviderPressure = (): void => {
       clearPending();
+      state.providerPressureAttempted = false;
+      state.providerPressureBlocked = false;
+      state.providerPressureTerminal = false;
+      ctx.ui.notify(
+        "Request stopped because another compaction owner was already active. Retry after that compaction completes.",
+        "error",
+      );
+    };
+    if (dependencies.arbiter?.currentOwner()) {
+      if (intent.requestBlocked) failForeignProviderPressure();
+      else clearPending();
       return;
     }
 
@@ -729,10 +884,15 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         COMPACTION_STATUS_KEY,
         `CTX CRITICAL ${intent.estimate.tokens}/${intent.linkedThreshold.thresholdTokens}`,
       );
-      const noCompactableKey = `${intent.contextExhausted ? "exhausted" : "critical"}:${intent.linkedThreshold.thresholdTokens}:${intent.settings.keepRecentTokens}:${branch.length}`;
+      const noCompactableKey = `${intent.requestBlocked ? "provider-pressure" : intent.contextExhausted ? "exhausted" : "critical"}:${intent.linkedThreshold.thresholdTokens}:${intent.settings.keepRecentTokens}:${branch.length}`;
       if (state.lastNoCompactableKey !== noCompactableKey) {
         state.lastNoCompactableKey = noCompactableKey;
-        if (intent.contextExhausted) {
+        if (intent.requestBlocked) {
+          ctx.ui.notify(
+            "Request stopped because extended thinking had no legal output budget and Pi has no compactable history. Start a new session or reduce static prompt/tool scope.",
+            "error",
+          );
+        } else if (intent.contextExhausted) {
           ctx.ui.notify(
             `Mid-turn request stopped: context is already ${intent.estimate.tokens}/${ctx.model?.contextWindow ?? intent.linkedThreshold.contextWindow} tokens and Pi has no compactable history. Start a new session or reduce static prompt/tool scope.`,
             "error",
@@ -753,10 +913,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       estimatedTokens: intent.estimate.tokens,
       threshold: intent.linkedThreshold,
       configuredReserveTokens: intent.settings.reserveTokens,
+      ...(intent.requestBlocked ? { recovery: "provider-pressure" as const } : {}),
     });
     const lease = dependencies.arbiter?.request("mid-turn", midTurnTrigger);
     if (dependencies.arbiter && !lease) {
-      clearPending();
+      if (intent.requestBlocked) failForeignProviderPressure();
+      else clearPending();
       return;
     }
     clearPending();
@@ -788,11 +950,25 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         state.activeLease?.release();
         state.activeLease = undefined;
         clearPressureStatus(ctx);
+        if (intent.requestBlocked) {
+          state.providerPressureAttempted = false;
+          state.providerPressureBlocked = false;
+          state.providerPressureTerminal = false;
+          ctx.ui.notify(
+            "Reactive compaction timed out; the blocked request was not sent. Retry after the compaction settles, or reduce static prompt/tool scope.",
+            "error",
+          );
+          return;
+        }
+        const breakerTripped = state.breaker.trippedAtTurn !== undefined;
         ctx.ui.notify(
-          "Mid-turn compaction timed out; it will retry at the next pressure evaluation.",
+          breakerTripped
+            ? "Mid-turn compaction timed out; native fallback was not started because the host operation may still be active. Retry manually after it settles."
+            : "Mid-turn compaction timed out; it will retry at the next pressure evaluation.",
           "warning",
         );
-        if (!intent.contextExhausted || state.breaker.trippedAtTurn !== undefined || ctx.hasPendingMessages?.()) return;
+        if (breakerTripped) notifyBreakerPaused();
+        if (!intent.contextExhausted || breakerTripped || ctx.hasPendingMessages?.()) return;
         try {
           pi.sendUserMessage(COMPACTION_RETRY_PROMPT, { deliverAs: "followUp" });
         } catch (recoveryError) {
@@ -813,9 +989,16 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.activeLease = undefined;
       clearPressureStatus(ctx);
       ctx.ui.notify(`Mid-turn compaction failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+      if (intent.requestBlocked) {
+        state.providerPressureAttempted = false;
+        state.providerPressureBlocked = false;
+        state.providerPressureTerminal = false;
+        return;
+      }
       if (!intent.contextExhausted) return;
       if (state.breaker.trippedAtTurn !== undefined) {
         notifyBreakerPaused();
+        fallbackToNativeCompaction(ctx, intent);
         return;
       }
       if (ctx.hasPendingMessages?.()) return;
@@ -855,7 +1038,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           state.activeLease?.release();
           state.activeLease = undefined;
           clearPressureStatus(ctx);
-          if (!intent.contextExhausted || ctx.hasPendingMessages?.()) return;
+          if ((!intent.contextExhausted && !intent.requestBlocked) || ctx.hasPendingMessages?.()) return;
           try {
             pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
           } catch (error) {
@@ -1029,8 +1212,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.reachableCheckpoints = branch.reachable;
       touchRestoredPrunes(state, state.restoredPrunes.keys());
       evictOffBranchRestoredPrunes(state);
-      state.pendingIntent = loadPersistedIntent(ctx, state.sessionId, state.generation);
-      state.persistedIntentKey = pendingIntentKey(state.pendingIntent);
+      const restoredIntent = loadPersistedIntent(ctx, state.sessionId, state.generation);
+      // A provider-pressure intent belongs to the interrupted in-process request.
+      // After a crash/fork there is no safe request identity to replay, so drop it;
+      // the next genuinely invalid payload can derive a fresh intent.
+      state.pendingIntent = restoredIntent?.requestBlocked ? undefined : restoredIntent;
+      state.persistedIntentKey = pendingIntentKey(restoredIntent);
+      if (restoredIntent?.requestBlocked) persistPendingIntent(pi, state);
       state.persistedPruneKey = pruneKey(state.persistedPrunes.values());
       state.settingsSnapshot = undefined;
       state.settingsCwd = undefined;
@@ -1043,7 +1231,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       if (state.running) return undefined;
       return await withTransformLock(async () => {
         if (generation !== state.generation || state.running) return undefined;
-        return await evaluateInner(messages, ctx, generation);
+        const transformed = await evaluateInner(messages, ctx, generation);
+        if (generation === state.generation && !state.running) {
+          state.lastProviderMessages = transformed ?? messages;
+        }
+        return transformed;
       });
     },
     async projectCompactionInput(event, ctx) {
@@ -1109,14 +1301,114 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         };
       });
     },
-    beforeProviderRequest(payload, ctx) {
+    async beforeProviderRequest(payload, ctx) {
       const guarded = disableInvalidBudgetThinking(payload);
-      if (guarded === payload) return undefined;
-      ctx.ui.notify(
-        "Extended thinking was disabled for this request because context pressure left too little output room for a valid thinking budget.",
-        "warning",
-      );
-      return guarded;
+      if (guarded === payload) {
+        state.providerPressureAttempted = false;
+        state.providerPressureBlocked = false;
+        state.providerPressureTerminal = false;
+        return undefined;
+      }
+
+      // The final payload is already known to be illegal. Abort before any
+      // asynchronous model/auth lookup, then publish recovery state only if
+      // this exact session lifecycle still owns the request.
+      const generation = state.generation;
+      const sessionId = sessionIdOf(ctx);
+      const isCurrentLifecycle = () => generation === state.generation
+        && (sessionId === undefined || state.sessionId === undefined || sessionId === state.sessionId);
+      ctx.abort();
+      if (!isCurrentLifecycle()) return undefined;
+      state.providerPressureBlocked = true;
+      const abortWithError = (message: string): undefined => {
+        if (isCurrentLifecycle()) {
+          state.providerPressureTerminal = true;
+          if (state.pendingIntent?.requestBlocked) {
+            state.pendingIntent = undefined;
+            state.lastTriggerKey = undefined;
+            state.providerPressureAttempted = false;
+            persistPendingIntent(pi, state);
+          }
+        }
+        try {
+          ctx.ui.notify(message, "error");
+        } catch {
+          // The provider signal is already aborted; a broken UI sink must not
+          // let the invalid payload continue to HTTP.
+        }
+        return undefined;
+      };
+      if (state.pendingIntent?.requestBlocked) return undefined;
+      if (state.providerPressureAttempted) {
+        return abortWithError(
+          "Request stopped after reactive compaction because extended thinking still has no legal output budget. Start a new session or reduce static prompt/tool scope.",
+        );
+      }
+      const messages = state.lastProviderMessages;
+      if (!messages) {
+        return abortWithError(
+          "Request stopped before provider dispatch because extended thinking had no legal output budget and no context frame was available for safe compaction.",
+        );
+      }
+
+      try {
+        const settings = settingsFor(ctx);
+        if (!settings.enabled) {
+          return abortWithError(
+            "Request stopped before provider dispatch because extended thinking had no legal output budget and automatic compaction is disabled.",
+          );
+        }
+        const linkedThreshold = await linkedThresholdFor(ctx, settings);
+        if (!isCurrentLifecycle()) return undefined;
+        if (!linkedThreshold.usable) {
+          return abortWithError(
+            "Request stopped before provider dispatch because extended thinking had no legal output budget and the active model has no usable context window for compaction.",
+          );
+        }
+        const estimate = estimateContextTokens(messages);
+        const effectiveSettings: CompactionSettings = {
+          ...settings,
+          reserveTokens: linkedThreshold.effectiveReserveTokens,
+        };
+        const record = payload as Record<string, unknown>;
+        const thinking = record.thinking as Record<string, unknown>;
+        const triggerKey = `provider-pressure:${estimate.tokens}:${String(record.max_tokens)}:${String(thinking.budget_tokens)}:${messages.length}`;
+        state.pendingIntent = {
+          generation,
+          triggerKey,
+          estimate,
+          linkedThreshold,
+          settings,
+          effectiveSettings,
+          contextExhausted: false,
+          requestBlocked: true,
+        };
+        state.lastTriggerKey = triggerKey;
+        state.providerPressureAttempted = true;
+        state.providerPressureTerminal = false;
+        if (!persistPendingIntent(pi, state)) {
+          return abortWithError(
+            "Request stopped before provider dispatch because the reactive compaction intent could not be persisted safely.",
+          );
+        }
+        if (!isCurrentLifecycle()) return undefined;
+        notifyPressureOnce(
+          ctx,
+          `provider-pressure:${linkedThreshold.contextWindow}`,
+          "Provider request paused because extended thinking had no legal output budget. Context will be compacted once, then the interrupted task will resume automatically.",
+        );
+        return undefined;
+      } catch (error) {
+        return abortWithError(
+          `Request stopped before provider dispatch because extended thinking had no legal output budget and reactive compaction could not be prepared: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    },
+    shouldSkipStopHook() {
+      return state.providerPressureBlocked;
+    },
+    isProviderPressureRecoveryActive() {
+      return state.providerPressureBlocked;
     },
     async onAgentEnd(ctx) {
       const generation = state.generation;
@@ -1129,7 +1421,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       if (!isCurrentLifecycle()) return;
       if (!state.running && !outputLimitPending) {
         const pending = state.pendingIntent;
-        const needsContinuation = pending?.contextExhausted || Boolean(ctx.hasPendingMessages?.());
+        const needsContinuation = pending?.contextExhausted
+          || pending?.requestBlocked
+          || Boolean(ctx.hasPendingMessages?.());
         if (pending && !needsContinuation) {
           // A settled, non-exhausted loop may have completed the user's task.
           // Preserve its transcript once; if the session keeps running above the
@@ -1155,6 +1449,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         }
       }
       if (!isCurrentLifecycle()) return;
+      if (!state.running && !state.pendingIntent && state.providerPressureBlocked) {
+        state.providerPressureAttempted = false;
+        state.providerPressureBlocked = false;
+        state.providerPressureTerminal = false;
+      }
       if (!state.running && !state.pendingIntent && !state.pendingOutputLimitIntent) {
         state.settingsSnapshot = undefined;
         publishIdleStatus(ctx, settingsFor(ctx).enabled);
@@ -1223,10 +1522,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         threshold,
       };
     },
-    onCompact(completedOwner, ctx) {
-      const continueOutputLimit = state.pendingOutputLimitIntent !== undefined
-        && completedOwner === "native"
-        && !ctx?.hasPendingMessages?.();
+    onCompact(completedOwner, _ctx) {
       state.generation += 1;
       const activeRequestOwner = state.activeRequestOwner;
       const wasPreempted = activeRequestOwner !== undefined
@@ -1259,13 +1555,6 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       // was the only clear-path that skipped it.
       persistPruneManifest(pi, state);
       persistPendingIntent(pi, state);
-      if (continueOutputLimit) {
-        try {
-          pi.sendUserMessage(OUTPUT_LIMIT_CONTINUE_PROMPT, { deliverAs: "followUp" });
-        } catch (error) {
-          ctx?.ui.notify(`Output-limit continuation failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-        }
-      }
     },
     onSessionShutdown(ctx) {
       // Non-destructive: a normal shutdown must not tombstone the prune
@@ -1274,7 +1563,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       // resources stay on disk for the bounded resume lifetime. reset() and
       // onCompact() remain the paths that clear manifests and delete files.
       state.generation += 1;
-      const parkedIntent = state.pendingIntent;
+      const parkedIntent = state.pendingIntent?.requestBlocked
+        ? undefined
+        : state.pendingIntent;
       releaseInFlight();
       state.pendingIntent = parkedIntent
         ? { ...parkedIntent, generation: state.generation }
@@ -1587,6 +1878,7 @@ function persistedEntryOf(callId: string, entry: PruneManifestEntry | undefined)
     callId,
     level: entry?.level ?? (entry?.spillPath !== undefined ? "spill" : "pruned"),
     ...(entry?.spillPath !== undefined ? { spillPath: entry.spillPath } : {}),
+    ...(entry?.spillContentDigest !== undefined ? { spillContentDigest: entry.spillContentDigest } : {}),
     ...(entry?.introducedAtUsageEpoch !== undefined ? { introducedAtUsageEpoch: entry.introducedAtUsageEpoch } : {}),
     ...(entry?.contentDigest !== undefined ? { contentDigest: entry.contentDigest } : {}),
     ...(entry?.writerId !== undefined ? { writerId: entry.writerId } : {}),
@@ -1733,7 +2025,13 @@ async function hydrateRestoredPrunes(
     await Promise.all(visible.map(async (item) => {
       if (!item.persisted.spillPath) return item;
       const live = state.sessionId !== undefined
-        && await validateSpillPath(state.sessionId, item.persisted.spillPath, item.persisted.writerId);
+        && typeof item.persisted.spillContentDigest === "string"
+        && await validateSpillPath(
+          state.sessionId,
+          item.persisted.spillPath,
+          item.persisted.writerId,
+          item.persisted.spillContentDigest,
+        );
       if (live) return item;
       return {
         ...item,
@@ -1770,6 +2068,7 @@ async function hydrateRestoredPrunes(
       savedTokens,
       introducedAtUsageEpoch: item.persisted.introducedAtUsageEpoch,
       spillPath: item.persisted.spillPath,
+      spillContentDigest: item.persisted.spillContentDigest,
       contentDigest: item.persisted.contentDigest,
       writerId: item.persisted.writerId,
       level: item.persisted.level,
@@ -1840,18 +2139,26 @@ function pendingIntentKey(intent: PendingCompactionIntent | undefined): string {
     settings: intent.settings,
     effectiveSettings: intent.effectiveSettings,
     contextExhausted: intent.contextExhausted,
+    requestBlocked: intent.requestBlocked === true,
   });
 }
 
-function persistPendingIntent(pi: ExtensionAPI, state: AutoCompactionState): void {
+function persistPendingIntent(pi: ExtensionAPI, state: AutoCompactionState): boolean {
   const key = pendingIntentKey(state.pendingIntent);
-  if (key === state.persistedIntentKey || !pi.appendEntry) return;
-  pi.appendEntry(PENDING_INTENT_ENTRY_TYPE, {
-    version: 1,
-    sessionId: state.sessionId,
-    pending: state.pendingIntent ? JSON.parse(key) : null,
-  });
-  state.persistedIntentKey = key;
+  if (key === state.persistedIntentKey || !pi.appendEntry) return true;
+  try {
+    pi.appendEntry(PENDING_INTENT_ENTRY_TYPE, {
+      version: PENDING_INTENT_VERSION,
+      sessionId: state.sessionId,
+      pending: state.pendingIntent ? JSON.parse(key) : null,
+    });
+    state.persistedIntentKey = key;
+    return true;
+  } catch {
+    // Keep persistedIntentKey unchanged so every later lifecycle boundary
+    // retries the same pending state or tombstone instead of accepting drift.
+    return false;
+  }
 }
 
 function loadPersistedIntent(
@@ -1867,13 +2174,23 @@ function loadPersistedIntent(
   const entry = entries.filter((candidate) => candidate.type === "custom"
     && candidate.customType === PENDING_INTENT_ENTRY_TYPE).pop();
   const data = entry?.data as { version?: unknown; sessionId?: unknown; pending?: unknown } | undefined;
-  if (!data || data.version !== 1 || data.sessionId !== sessionId || !data.pending || typeof data.pending !== "object") {
+  const version = data?.version;
+  if (!data || (version !== 1 && version !== PENDING_INTENT_VERSION)
+    || data.sessionId !== sessionId || !data.pending || typeof data.pending !== "object") {
     return undefined;
   }
   const pending = data.pending as Omit<PendingCompactionIntent, "generation">;
   if (typeof pending.triggerKey !== "string" || !pending.estimate || !pending.linkedThreshold
-    || !pending.settings || !pending.effectiveSettings) return undefined;
-  return { ...pending, generation };
+    || !pending.settings || !pending.effectiveSettings
+    || typeof pending.contextExhausted !== "boolean"
+    || (version === PENDING_INTENT_VERSION && typeof pending.requestBlocked !== "boolean")) {
+    return undefined;
+  }
+  return {
+    ...pending,
+    requestBlocked: version === PENDING_INTENT_VERSION ? pending.requestBlocked : undefined,
+    generation,
+  };
 }
 
 interface LoadedPersistedPrunes {
@@ -2021,6 +2338,7 @@ function applyPersistedPruneRecords(
       ...(version >= 4 && record.hasSpill === true && typeof record.writerId === "string"
         ? { spillPath: resolveSpillPath(sessionId, record.callId, record.writerId) }
         : typeof record.spillPath === "string" ? { spillPath: record.spillPath } : {}),
+      ...(typeof record.spillContentDigest === "string" ? { spillContentDigest: record.spillContentDigest } : {}),
       ...(typeof record.introducedAtUsageEpoch === "string" ? { introducedAtUsageEpoch: record.introducedAtUsageEpoch } : {}),
       ...(typeof record.contentDigest === "string" ? { contentDigest: record.contentDigest } : {}),
       ...(typeof record.writerId === "string" ? { writerId: record.writerId } : {}),
@@ -2204,6 +2522,7 @@ function pruneKey(entries: Iterable<PersistedPruneEntry>): string {
       entry.callId,
       entry.level,
       entry.spillPath ?? null,
+      entry.spillContentDigest ?? null,
       entry.introducedAtUsageEpoch ?? null,
       entry.contentDigest ?? null,
       entry.writerId ?? null,
@@ -2331,25 +2650,38 @@ export function estimateMessageTokens(message: AgentMessage): number {
 
   const content = (message as MessageRecord).content;
   let imageCount = 0;
+  let documentCount = 0;
   if (Array.isArray(content)) {
     for (const block of content) {
-      if (block && typeof block === "object" && (block as { type?: unknown }).type === "image") imageCount++;
+      if (block && typeof block === "object") {
+        const type = (block as { type?: unknown }).type;
+        if (type === "image") imageCount++;
+        else if (type === "document") documentCount++;
+      }
     }
   }
 
   let tokens: number;
-  if (imageCount > 0) {
+  if (imageCount > 0 || documentCount > 0) {
     // Base64 image data must not be counted as text — Pi estimates ~1200 tokens
-    // per image regardless of resolution.  Build a lightweight copy with empty
+    // per image regardless of resolution. Build a lightweight copy with empty
     // data fields so the ratio-based estimator only sees the textual payload.
+    // Document blocks (e.g. base64 PDFs) are collapsed to a bare type marker
+    // for the same reason and charged a fixed per-document cost.
     const lightweight = {
       ...message,
       content: (content as Array<Record<string, unknown>>).map((block) =>
-        block?.type === "image" ? { type: "image", mimeType: block.mimeType, data: "" } : block,
+        block?.type === "image"
+          ? { type: "image", mimeType: block.mimeType, data: "" }
+          : block?.type === "document"
+            ? { type: "document" }
+            : block,
       ),
     };
     const serialized = JSON.stringify(lightweight);
-    tokens = Math.ceil(serialized.length / tokenCharsPerToken(serialized)) + imageCount * ESTIMATED_IMAGE_TOKENS;
+    tokens = Math.ceil(serialized.length / tokenCharsPerToken(serialized))
+      + imageCount * ESTIMATED_IMAGE_TOKENS
+      + documentCount * ESTIMATED_DOCUMENT_TOKENS;
   } else {
     const serialized = JSON.stringify(message);
     tokens = Math.ceil(serialized.length / tokenCharsPerToken(serialized));
@@ -2936,25 +3268,49 @@ function compactNewSpilledPrunes(
   return { tokenDelta };
 }
 
+// Tool-result messages are immutable in the compaction pipeline: every prune
+// replaces an array element with a new object. Cache the full-content digest by
+// object identity so applyRecordedPrunes does not re-hash every retained large
+// output on every context hook; a replayed or branch-replaced message naturally
+// gets a new identity and is verified again.
+const toolResultDigestMemo = new WeakMap<object, string>();
+
 function toolResultDigest(message: AgentMessage): string {
+  const key = message as unknown as object;
+  const memoized = toolResultDigestMemo.get(key);
+  if (memoized !== undefined) return memoized;
   const record = message as MessageRecord;
-  return createHash("sha256").update(JSON.stringify({
+  const digest = createHash("sha256").update(JSON.stringify({
     toolCallId: record.toolCallId,
     toolName: record.toolName,
     isError: record.isError === true,
     content: record.content,
   })).digest("hex");
+  toolResultDigestMemo.set(key, digest);
+  return digest;
 }
 
+// Tool-result messages are immutable in the compaction pipeline, so text
+// extraction can share the same object-identity cache discipline as token and
+// digest estimation. Replacements use new objects and automatically miss.
+const extractedTextMemo = new WeakMap<object, string>();
+
 function extractTextContent(message: AgentMessage): string {
+  const key = message as unknown as object;
+  const memoized = extractedTextMemo.get(key);
+  if (memoized !== undefined) return memoized;
+
   const content = (message as MessageRecord).content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
   let text = "";
-  for (const block of content) {
-    const blockText = (block as { text?: unknown } | null)?.text;
-    if (typeof blockText === "string") text += blockText;
+  if (typeof content === "string") {
+    text = content;
+  } else if (Array.isArray(content)) {
+    for (const block of content) {
+      const blockText = (block as { text?: unknown } | null)?.text;
+      if (typeof blockText === "string") text += blockText;
+    }
   }
+  extractedTextMemo.set(key, text);
   return text;
 }
 
@@ -3013,6 +3369,7 @@ async function upgradeNewPrunesWithSpill(
     transformedMessages[index] = upgraded;
     entry.replacement = upgraded;
     entry.spillPath = spill.path;
+    entry.spillContentDigest = spill.contentDigest;
     entry.writerId = writerId;
     entry.savedTokens = estimateMessageTokens(original) - estimateMessageTokens(upgraded);
     entry.level = "spill";

@@ -5,11 +5,12 @@
  * TUI: Alt+R composer panel, widget above editor, Alt+B foreground→background detach
  * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type { WorkspaceSessionScan } from "../transcript/session-transcript.ts";
 import { type WorkspaceOwnerState } from "./workspace-peers.ts";
 import { type LeaseToken } from "../runs/session-handoff.ts";
 import type { RunTeammateOptions, RpcMessageMode, NormalizedTask } from "../runs/execution.ts";
-import type { TeammateState, AgentProgress, AgentProgressSnapshot, ActiveAgent, AgentStatus, AgentTerminalStatus, SingleResult } from "../shared/types.ts";
+import type { TeammateState, AgentProgress, AgentProgressSnapshot, ActiveAgent, AgentStatus, AgentTerminalStatus, SingleResult, StructuredResult } from "../shared/types.ts";
 export declare const TEAMMATE_PROMPT_SNIPPET = "Dispatch bounded work to discovered teammate roles for parallel, sequential, or specialist execution.";
 export declare const TEAMMATE_PROMPT_GUIDELINES: string[];
 export declare function terminalStatusForResult(result: SingleResult, callbackStatus?: AgentTerminalStatus): AgentTerminalStatus;
@@ -25,6 +26,14 @@ export declare function aggregateTerminalStatuses(statuses: Iterable<AgentTermin
 export declare function displayMessageForResult(result: SingleResult): string;
 export declare function summarizeGraphResults(results: readonly SingleResult[], tasks: readonly NormalizedTask[]): string;
 export declare function aggregateGraphStructuredOutput(results: readonly SingleResult[], tasks: readonly NormalizedTask[]): Record<string, unknown> | undefined;
+/**
+ * Compact projection of schema-valid results for completion events. Undefined
+ * when no result carries structured output, so emitters can spread it
+ * conditionally and keep the event payload minimal.
+ */
+export declare function toStructuredResults(results: readonly SingleResult[], originCwd: string): StructuredResult[] | undefined;
+/** Replace the retained turn value; undefined intentionally clears stale data. */
+export declare function setAgentStructuredOutput(agent: ActiveAgent, output: unknown): void;
 export type TeammateRuntimeOptions = Pick<RunTeammateOptions, "spawnChildProcess" | "resultReadyGraceMs" | "foregroundMaxRunMs"> & {
     /** @internal Observes the real runtime callbacks for public-path lifecycle tests. */
     onRunOptionsCreated?: (options: RunTeammateOptions) => void;
@@ -36,13 +45,13 @@ export declare const TEAMMATE_SEND_GUIDELINES: string[];
 export declare const TEAMMATE_LIST_DESCRIPTION = "List available roles or teammate agents. view defaults to \"active\".\n\n- \"active\": live agents except completed entries\n- \"named\": addressable named agents\n- \"all\": all tracked live entries\n- \"roles\": builtin, project, and user-defined role definitions";
 export declare const TEAMMATE_LIST_SNIPPET = "List available teammate roles or inspect active and named agent status.";
 export declare const TEAMMATE_LIST_GUIDELINES: string[];
-export declare const TEAMMATE_WATCH_DESCRIPTION = "Perform a one-shot inspection of a running or sleeping teammate agent's recent output, tool activity, inbox messages, and last result. This is not a completion-wait tool.";
+export declare const TEAMMATE_WATCH_DESCRIPTION = "Perform a one-shot inspection of a running or sleeping teammate agent's recent output, tool activity, inbox messages, and last result \u2014 including the structured_output value for schema tasks. This is not a completion-wait tool.";
 export declare const TEAMMATE_WATCH_SNIPPET = "Inspect a specific teammate agent's recent activity and output.";
 export declare const TEAMMATE_WATCH_GUIDELINES: string[];
 export declare const TEAMMATE_WAIT_DESCRIPTION = "Wait once for a teammate result or lifecycle settlement by name, or provide waitMs for a fixed delay. Named waits default to a bounded 10-minute timeout. Agent waits are event-driven and replace repeated teammate-watch calls.";
 export declare const TEAMMATE_WAIT_SNIPPET = "Wait once for a teammate result or for a bounded delay.";
 export declare const TEAMMATE_WAIT_GUIDELINES: string[];
-export declare const OBSERVE_DESCRIPTION = "Observe mixed teammate and background Bash targets through one status/wait/watch interface.\n\n- \"status\": one-shot snapshot of every target\n- \"wait\": block on an all/any/count barrier with one request-level timeout; set until=\"completed\" to block until agents fully terminate instead of first result\n- \"watch\": poll every target until timeoutMs, returning the full status-transition timeline (richer than status, no barrier required)\n\nTargets use { kind, id }, where kind is currently \"teammate\" or \"bash_bg\". Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.";
+export declare const OBSERVE_DESCRIPTION = "Observe mixed teammate and background Bash targets through one status/wait/watch interface.\n\n- \"status\": one-shot snapshot of every target\n- \"wait\": block on an all/any/count barrier with one request-level timeout; set until=\"completed\" to block until agents fully terminate instead of first result\n- \"watch\": poll every target until timeoutMs, returning the full status-transition timeline (richer than status, no barrier required)\n\nTargets use { kind, id }, where kind is currently \"teammate\" or \"bash_bg\". Use detail=full (or tail) to include a settled teammate's captured result \u2014 including the structured_output value for schema tasks. Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.";
 export declare const OBSERVE_SNIPPET = "Observe, wait for, or watch mixed teammate and background Bash targets.";
 export declare const OBSERVE_GUIDELINES: string[];
 export declare const TEAMMATE_MONITOR_DESCRIPTION = "Observe multiple teammate targets or block on a multi-agent barrier. Persistent supervision is entered/exited separately via /monitor.\n\n- \"status\": one-shot compact snapshot of targets \u2014 non-blocking\n- \"wait\": block until barrier condition (all/any/count targets settle)\n\nOutput is compact by default (one line per target). Use verbose for detail.";
@@ -53,6 +62,14 @@ export declare const TEAMMATE_DEPTH_START_MARKER = "<teammate_nesting_context>";
 export declare const TEAMMATE_DEPTH_END_MARKER = "</teammate_nesting_context>";
 export declare function appendTeammateDepthContext(systemPrompt: string, depth: number, maxDispatchDepth?: number): string;
 export declare function backgroundWaitGuidance(correlationId: string): string;
+/**
+ * Appended to foreground detach acknowledgements so the Alt+B shortcut stays
+ * discoverable across the root single, root graph, and nested foreground paths.
+ */
+export declare const FOREGROUND_DETACH_HINT = "Alt+B detaches a foreground call to background.";
+export declare function setPersistentUi(ui: ExtensionUIContext | undefined): void;
+/** Registers one foreground owner; unregister is idempotent on every race path. */
+export declare function registerForegroundDetach(detach: () => void, ui?: ExtensionUIContext): () => void;
 export declare function foregroundWaitWindowMs(tasks: ReadonlyArray<{
     timeoutMs?: number;
 }>, fallbackMs?: number): number;
@@ -247,6 +264,18 @@ export declare function emitTeammateStarted(pi: ExtensionAPI, agent: ActiveAgent
 /** Reactivate a wakeable child and republish it to lifecycle-only consumers. */
 export declare function wakeSleepingAgent(pi: ExtensionAPI, agent: ActiveAgent, now?: number): boolean;
 export declare function buildAgentSelectorRows(agents: ActiveAgent[]): AgentSelectorRow[];
+/**
+ * Rows for completed teammate sessions recovered from disk after a restart.
+ * The selector merges these below the live-agent rows; selecting one opens the
+ * attach overlay in transcript mode (read-only).
+ */
+export declare function buildHistoryRows(scans: WorkspaceSessionScan[]): AgentSelectorRow[];
+/**
+ * Stable selector key for a history row, derived from the session file path —
+ * position-based keys would drift when the scan order changes across rebuilds.
+ */
+export declare function historyRowKey(scan: WorkspaceSessionScan): string;
+export declare function historyLabel(scan: WorkspaceSessionScan): string;
 export declare function renderAgentSelectorPanel(rows: AgentSelectorRow[], cursor: number, query: string, width: number): string[];
 export declare function compactMetric(value: number): string;
 export declare function toolAction(name: string): string;

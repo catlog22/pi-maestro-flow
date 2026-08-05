@@ -274,6 +274,36 @@ test("settings overlay budgets content for short terminals without losing its fo
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("narrow footers advertise plugin switching and scope cycling", async () => {
+	const directory = withTempDir();
+	try {
+		const state = await createShell(makeProvider(), directory);
+		const lines = state.shell.render(66);
+		assert.ok(lines.some((line) => line.includes("↑↓ select")), "the narrow footer must use the narrow-only help variant");
+		assert.ok(lines.some((line) => line.includes("←→ plugin")));
+		assert.ok(lines.some((line) => line.includes("Tab scope")));
+		state.shell.handleInput(" "); // dirty
+		const dirty = state.shell.render(66);
+		assert.ok(dirty.some((line) => line.includes("1 modified")), "the dirty narrow header must show the modified count");
+		assert.ok(dirty.some((line) => line.includes("↑↓ select")), "the dirty footer must keep the narrow-only help variant");
+	} finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("group-header backtracking never pushes the highlighted setting out of the window", async () => {
+	const directory = withTempDir();
+	try {
+		// A 17-row terminal yields a 1-row settings window where the group-header
+		// backtrack could previously drop the highlighted row past the window end.
+		const { shell } = await createShell(makeProvider(), directory, [], 17);
+		moveDown(shell, 4);
+		const lines = shell.render(112);
+		assert.ok(
+			lines.some((line) => line.includes("\u001b[7m") && line.includes("Model")),
+			"the selected row must stay visible and highlighted",
+		);
+	} finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("mouse hover highlights settings rows and left click activates the hovered setting", async () => {
 	const directory = withTempDir();
 	try {
@@ -497,7 +527,7 @@ test("showMaestroSettingsShell closes its custom UI before opening a provider ac
 		assert.equal(customCalls, 2, "Settings should reopen after the provider action closes");
 		assert.deepEqual(receivedOptions, {
 			overlay: true,
-			overlayOptions: { anchor: "center", width: 112, maxHeight: "92%", margin: 1 },
+			overlayOptions: { anchor: "center", width: "94%", maxHeight: "92%", margin: 1 },
 		});
 		assert.equal(terminalWrites.filter((value) => value.includes("?1003h")).length, 2);
 		assert.equal(terminalWrites.filter((value) => value.includes("?1003l")).length, 2);
@@ -523,3 +553,245 @@ test("action settings leave the active custom UI before invoking the owning prov
 		assert.equal(invoked, 1);
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
+
+test("not-yet-implemented editor kinds degrade to read-only instead of raw text editing", async () => {
+	const directory = withTempDir();
+	try {
+		const instanceId = "cockpit-1";
+		const snapshot: SettingsSnapshot = {
+			providerId: "cockpit",
+			providerInstanceId: instanceId,
+			configured: {
+				values: [{
+					key: "future",
+					scope: "global",
+					state: "set",
+					value: 42,
+					resource: { providerId: "cockpit", scope: "global", id: "cockpit.json" },
+				}],
+				resources: [{ resource: { providerId: "cockpit", scope: "global", id: "cockpit.json" }, etag: "r0" }],
+			},
+			effective: { values: [{ key: "future", value: 42, source: "configured", scope: "global" }] },
+		};
+		const provider: SettingsProviderV1 = {
+			describe: () => ({
+				id: "cockpit",
+				version: "1.0.0",
+				instanceId,
+				labelKey: "cockpit.label",
+				capabilities: { read: true, write: true, prepareCommit: true, rollback: "full", hotUpdate: true },
+				catalogs: {
+					en: { "cockpit.label": "Cockpit", "cockpit.future": "Future setting" },
+					"zh-CN": { "cockpit.label": "驾驶舱", "cockpit.future": "未来设置" },
+				},
+				settings: [{
+					key: "future",
+					group: "general",
+					order: 0,
+					labelKey: "cockpit.future",
+					scopes: ["global"],
+					merge: "override",
+					activation: "live",
+					sensitivity: "public",
+					reversibility: "full",
+					editor: { kind: "overview" },
+				}],
+			}),
+			read: () => snapshot,
+			validate: () => ({ valid: true, issues: [] }),
+			prepare: () => ({ prepared: true, prepareToken: "prepared", validation: { valid: true, issues: [] } }),
+			commit: () => ({ snapshot, revisions: [], changedKeys: [], activation: [] }),
+			abort: () => undefined,
+			rollback: () => ({ rolledBack: true }),
+			applyRuntime: () => ({ appliedKeys: [], deferred: [], failed: [] }),
+		};
+		const { shell, coordinator } = await createShell(provider, directory);
+		shell.handleInput("\r");
+		const rendered = shell.render(100).join("\n");
+		assert.ok(rendered.includes("Read only"), "an unimplemented editor kind must surface the read-only notice");
+		assert.equal(coordinator.changes().length, 0, "activating an unimplemented kind must not stage a change");
+	} finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("left/right provider switching restores each provider's remembered cursor highlight", async () => {
+	const directory = withTempDir();
+	try {
+		const registry = new SettingsProviderRegistry(new FakeEventBus());
+		registry.register({ version: SETTINGS_PROTOCOL_VERSION, providerId: "cockpit", instanceId: "cockpit-1", provider: makeProvider() });
+		registry.register({ version: SETTINGS_PROTOCOL_VERSION, providerId: "other", instanceId: "other-1", provider: makeSecondaryProvider() });
+		const coordinator = new SettingsCoordinator(registry);
+		const context = { cwd: "/workspace", locale: "en" } as const;
+		await coordinator.load(context);
+		const providers = await registry.describe(context);
+		const localeState = new SettingsLocaleState(join(directory, "maestro-ui.json"), registry);
+		const shell = new MaestroSettingsShell({
+			registry,
+			coordinator,
+			localeState,
+			initial: { context, providers, failures: [] },
+			reload: async () => ({ context, providers, failures: [] }),
+			theme,
+			modelOptions: [],
+			requestRender: () => {},
+			requestAction: () => {},
+			close: () => {},
+		});
+		// Provider A: move the highlight down to "Limit" (index 3).
+		moveDown(shell, 3);
+		// Right → provider B; the highlight starts at its first setting.
+		shell.handleInput("\x1b[C");
+		const onOther = shell.render(112).filter((line) => line.includes("\u001b[7m") && line.includes(" · ")).join("\n");
+		assert.ok(onOther.includes("B one"), "a fresh provider must start with its first setting highlighted");
+		// Move inside B, then left → back to provider A.
+		shell.handleInput("\x1b[B");
+		shell.handleInput("\x1b[D");
+		const backOnCockpit = shell.render(112).filter((line) => line.includes("\u001b[7m") && line.includes(" · ")).join("\n");
+		assert.ok(backOnCockpit.includes("Limit"), "switching back must restore the remembered highlight row");
+		assert.ok(!backOnCockpit.includes("Model"), "the highlight must not reset to the first setting");
+	} finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("highlight memory restores the remembered key inside an active search filter", async () => {
+	const directory = withTempDir();
+	try {
+		const registry = new SettingsProviderRegistry(new FakeEventBus());
+		registry.register({ version: SETTINGS_PROTOCOL_VERSION, providerId: "cockpit", instanceId: "cockpit-1", provider: makeProvider() });
+		registry.register({ version: SETTINGS_PROTOCOL_VERSION, providerId: "other", instanceId: "other-1", provider: makeSecondaryProvider() });
+		const coordinator = new SettingsCoordinator(registry);
+		const context = { cwd: "/workspace", locale: "en" } as const;
+		await coordinator.load(context);
+		const providers = await registry.describe(context);
+		const localeState = new SettingsLocaleState(join(directory, "maestro-ui.json"), registry);
+		const shell = new MaestroSettingsShell({
+			registry,
+			coordinator,
+			localeState,
+			initial: { context, providers, failures: [] },
+			reload: async () => ({ context, providers, failures: [] }),
+			theme,
+			modelOptions: [],
+			requestRender: () => {},
+			requestAction: () => {},
+			close: () => {},
+		});
+		// Provider A: remember "Advanced" (index 1), then filter to it via /ad.
+		shell.handleInput("\x1b[B");
+		shell.handleInput("/");
+		shell.handleInput("a");
+		shell.handleInput("d");
+		shell.handleInput("\x1b"); // exit search mode, keeping the filter
+		const filtered = shell.render(112).filter((line) => line.includes("\u001b[7m") && line.includes(" · ")).join("\n");
+		assert.ok(filtered.includes("Manage advanced"), "the filtered view must highlight the matching setting");
+		// Switch away and back: the remembered key must resolve inside the filter.
+		shell.handleInput("\x1b[C");
+		shell.handleInput("\x1b[D");
+		const restored = shell.render(112).filter((line) => line.includes("\u001b[7m") && line.includes(" · ")).join("\n");
+		assert.ok(restored.includes("Manage advanced"), "restore must land on the remembered key inside the active filter");
+	} finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("option editor pages with PageUp/PageDown and lands on enabled options", async () => {
+	const directory = withTempDir();
+	try {
+		const options = Array.from({ length: 10 }, (_, index) => ({ value: `opt-${index}`, labelKey: `opts.opt-${index}` }));
+		const provider = makeEnumProvider(options);
+		const { shell } = await createShell(provider, directory);
+		shell.handleInput("\r"); // open the option picker
+		shell.handleInput("\x1b[6~"); // page down
+		let rendered = shell.render(112);
+		const highlighted = rendered.filter((line) => line.includes("\u001b[7m") && line.includes("› opt-"));
+		assert.ok(highlighted.some((line) => line.includes("opt-7")), "page down must jump by one page of options");
+		shell.handleInput("\x1b[5~"); // page up
+		rendered = shell.render(112);
+		const back = rendered.filter((line) => line.includes("\u001b[7m") && line.includes("› opt-"));
+		assert.ok(back.some((line) => line.includes("opt-0")), "page up must return to the first option");
+	} finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+function makeEnumProvider(options: readonly { value: string; labelKey: string }[]): SettingsProviderV1 {
+	const instanceId = "cockpit-1";
+	const snapshot: SettingsSnapshot = {
+		providerId: "cockpit",
+		providerInstanceId: instanceId,
+		configured: {
+			values: [{
+				key: "choice", scope: "global", state: "set", value: options[0]!.value,
+				resource: { providerId: "cockpit", scope: "global", id: "enum.json" },
+			}],
+			resources: [{ resource: { providerId: "cockpit", scope: "global", id: "enum.json" }, etag: "r0" }],
+		},
+		effective: { values: [{ key: "choice", value: options[0]!.value, source: "configured", scope: "global" }] },
+	};
+	const en: Record<string, string> = { "enum.label": "Chooser", "enum.choice": "Choice" };
+	const zh: Record<string, string> = { "enum.label": "选择器", "enum.choice": "选项" };
+	for (const option of options) {
+		en[option.labelKey] = option.value;
+		zh[option.labelKey] = option.value;
+	}
+	return {
+		describe: () => ({
+			id: "cockpit",
+			version: "1.0.0",
+			instanceId,
+			labelKey: "enum.label",
+			capabilities: { read: true, write: true, prepareCommit: true, rollback: "full", hotUpdate: true },
+			catalogs: { en, "zh-CN": zh },
+			settings: [{
+				key: "choice", group: "general", order: 0, labelKey: "enum.choice",
+				defaultValue: options[0]!.value, scopes: ["global"],
+				merge: "override", activation: "live", sensitivity: "public", reversibility: "full",
+				editor: { kind: "enum", options: [...options] },
+			}],
+		}),
+		read: () => snapshot,
+		validate: () => ({ valid: true, issues: [] }),
+		prepare: () => ({ prepared: true, prepareToken: "prepared", validation: { valid: true, issues: [] } }),
+		commit: () => ({ snapshot, revisions: [], changedKeys: [], activation: [] }),
+		abort: () => undefined,
+		rollback: () => ({ rolledBack: true }),
+		applyRuntime: () => ({ appliedKeys: [], deferred: [], failed: [] }),
+	};
+}
+
+function makeSecondaryProvider(): SettingsProviderV1 {
+	const instanceId = "other-1";
+	const snapshot: SettingsSnapshot = {
+		providerId: "other",
+		providerInstanceId: instanceId,
+		configured: {
+			values: [
+				{ key: "bOne", scope: "global", state: "set", value: true, resource: { providerId: "other", scope: "global", id: "other.json" } },
+				{ key: "bTwo", scope: "global", state: "set", value: "x", resource: { providerId: "other", scope: "global", id: "other.json" } },
+			],
+			resources: [{ resource: { providerId: "other", scope: "global", id: "other.json" }, etag: "r0" }],
+		},
+		effective: { values: [
+			{ key: "bOne", value: true, source: "configured", scope: "global" },
+			{ key: "bTwo", value: "x", source: "configured", scope: "global" },
+		] },
+	};
+	return {
+		describe: () => ({
+			id: "other",
+			version: "1.0.0",
+			instanceId,
+			labelKey: "other.label",
+			capabilities: { read: true, write: true, prepareCommit: true, rollback: "full", hotUpdate: true },
+			catalogs: {
+				en: { "other.label": "Other provider", "other.bOne": "B one", "other.bTwo": "B two" },
+				"zh-CN": { "other.label": "其它", "other.bOne": "B 一", "other.bTwo": "B 二" },
+			},
+			settings: [
+				{ key: "bOne", group: "general", order: 0, labelKey: "other.bOne", defaultValue: true, scopes: ["global"], merge: "override", activation: "live", sensitivity: "public", reversibility: "full", editor: { kind: "boolean" } },
+				{ key: "bTwo", group: "general", order: 1, labelKey: "other.bTwo", defaultValue: "x", scopes: ["global"], merge: "override", activation: "live", sensitivity: "public", reversibility: "full", editor: { kind: "text" } },
+			],
+		}),
+		read: () => snapshot,
+		validate: () => ({ valid: true, issues: [] }),
+		prepare: () => ({ prepared: true, prepareToken: "prepared", validation: { valid: true, issues: [] } }),
+		commit: () => ({ snapshot, revisions: [], changedKeys: [], activation: [] }),
+		abort: () => undefined,
+		rollback: () => ({ rolledBack: true }),
+		applyRuntime: () => ({ appliedKeys: [], deferred: [], failed: [] }),
+	};
+}

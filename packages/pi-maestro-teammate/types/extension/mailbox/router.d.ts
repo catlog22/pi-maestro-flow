@@ -14,10 +14,10 @@ export interface MailboxAuthority {
     };
     /** Current session generation for revalidation. */
     currentGeneration(): number;
-    /** Current lease epoch. */
-    currentLeaseEpoch(): number;
-    /** Current lease nonce. */
-    currentLeaseNonce(): string;
+    /** Current lease epoch for the recipient (unbound when no recipient). */
+    currentLeaseEpoch(recipientCorrelationId?: string): number;
+    /** Current lease nonce for the recipient (unbound when no recipient). */
+    currentLeaseNonce(recipientCorrelationId?: string): string;
     /** Whether the recipient agent is fenced (queued but not dispatched). */
     isFenced(recipientCorrelationId: string): boolean;
     /** Whether the recipient agent is stale/unauthorized (should dead-letter). */

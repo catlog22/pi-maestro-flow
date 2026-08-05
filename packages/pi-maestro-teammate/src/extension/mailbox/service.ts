@@ -17,6 +17,7 @@ import {
   type MailboxMessageKind,
   type MailboxDeliveryMode,
   type MailboxPaths,
+  SAFE_ID_PATTERN,
 } from "./types.ts";
 
 // --- Capability ---
@@ -71,9 +72,16 @@ export class MailboxService extends EventEmitter {
   readonly #recipientCorrelationId: string;
 
   #started = false;
+  #stopped = true;
+  #startPromise: Promise<void> | undefined;
 
   constructor(options: MailboxServiceOptions) {
     super();
+    // Path-safety: the workspaceId is joined into the on-disk tree, so reject
+    // anything that could traverse or escape the mailbox root ("../", separators).
+    if (!SAFE_ID_PATTERN.test(options.workspaceId)) {
+      throw new Error(`invalid workspaceId "${options.workspaceId}": must match ${SAFE_ID_PATTERN}`);
+    }
     // Per-workspace isolation: every workspace gets its own directory tree
     // under rootDir/workspaces/<workspaceId>. Messages from different
     // workspaces never share state directories or claim locks.
@@ -109,16 +117,70 @@ export class MailboxService extends EventEmitter {
     this.consumer.on("error", (event) => this.emit("dispatch-error", event));
   }
 
-  /** Initialize directories and start the consumer. */
-  async start(): Promise<void> {
-    if (this.#started) return;
-    await ensureMailboxDirectories(this.paths);
-    this.consumer.start();
-    this.#started = true;
+  /**
+   * Initialize directories and start the consumer.
+   * startConsumer=false (shadow mode) initializes directories only — the
+   * shadow contract is "enqueue + validate but NEVER consume/inject".
+   */
+  async start(startConsumer = true): Promise<void> {
+    await this.#runStart(async () => {
+      if (!startConsumer) return;
+      // Crash recovery: replay accepted-without-ack back to ready before polling.
+      await this.consumer.replayAcceptedToReady();
+      this.consumer.start();
+      this.#started = true;
+    });
+  }
+
+  /** Start just the consumer (rollout upgrade to authoritative). */
+  async startConsumer(): Promise<void> {
+    await this.#runStart(async () => {
+      await this.consumer.replayAcceptedToReady();
+      this.consumer.start();
+      this.#started = true;
+    });
   }
 
   /** Stop the consumer. */
   async stop(): Promise<void> {
+    await this.#stopInternal();
+  }
+
+  /** Stop just the consumer (rollout downgrade away from authoritative). */
+  async stopConsumer(): Promise<void> {
+    await this.#stopInternal();
+  }
+
+  /**
+   * Generation-free start barrier: a stop() that lands while start() is still
+   * initializing flips #stopped so the in-flight continuation bails, and every
+   * stop waits for the in-flight start promise before deciding what to stop.
+   * A late start continuation can therefore never republish a running consumer
+   * after stop returned (ISS-20260803-003).
+   */
+  async #runStart(body: () => Promise<void>): Promise<void> {
+    if (this.#started) return;
+    if (this.#startPromise) {
+      await this.#startPromise;
+      return;
+    }
+    this.#stopped = false;
+    const promise = (async () => {
+      await ensureMailboxDirectories(this.paths);
+      if (this.#stopped) return;
+      await body();
+    })();
+    this.#startPromise = promise;
+    try {
+      await promise;
+    } finally {
+      this.#startPromise = undefined;
+    }
+  }
+
+  async #stopInternal(): Promise<void> {
+    this.#stopped = true;
+    if (this.#startPromise) await this.#startPromise.catch(() => undefined);
     if (!this.#started) return;
     await this.consumer.stop();
     this.#started = false;

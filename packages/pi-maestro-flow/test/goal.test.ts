@@ -7,6 +7,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { ModelCircuitBreaker } from "pi-maestro-teammate/v1/retry";
 import { GoalToolParams } from "../src/extension/schemas.ts";
 import {
+  FAILOVER_TERMINAL_EVENT,
   getProjectModelFailoverPath,
   registerModelFailover,
 } from "../src/providers/model-failover.ts";
@@ -28,6 +29,7 @@ import {
   isRetryableGoalFailure,
   onAgentEnd,
   onAgentSettled,
+  onProviderPressureSettled,
   onBeforeAgentStart,
   onBeforeCompact,
   onCompactionCancelled,
@@ -40,13 +42,50 @@ import {
   setAcceptanceRunnerForTest,
   setGoalPanelOwnership,
   setGoalStateChangeListener,
+  setGoalStaticMode,
   setGoalVerifierRunnerForTest,
   setWorkflowCoordinator,
   switchCurrentGoal,
+  tickGoalElapsed,
   onSessionShutdown,
   onSessionStart,
   type GoalContext,
 } from "../src/tools/goal.ts";
+
+test("provider-pressure settlement keeps an active Goal owned without consuming an iteration", () => {
+  initGoal({ appendEntry() {} } as never);
+  const ctx = createContext();
+  onSessionStart(ctx, { reason: "new" });
+  try {
+    const goal = addGoal("Continue after reactive compaction", ctx);
+    onProviderPressureSettled(ctx);
+    const active = getActiveGoal();
+    assert.equal(active?.id, goal.id);
+    assert.equal(active?.status, "active");
+    assert.equal(active?.iteration, 0);
+  } finally {
+    onSessionShutdown(ctx);
+  }
+});
+
+test("session_compact projection defers Goal continuation until the host reconnects", async () => {
+  const sent: string[] = [];
+  initGoal({
+    appendEntry() {},
+    sendMessage(message: { content?: string }) { sent.push(message.content ?? ""); },
+  } as never);
+  const ctx = createContext({ hasPendingMessages: () => false });
+  onSessionStart(ctx, { reason: "new" });
+  try {
+    addGoal("Continue only after reconnect", ctx);
+    await onCompact({}, ctx, { deferContinuation: true });
+    assert.deepEqual(sent, []);
+    await onCompact({}, ctx);
+    assert.equal(sent.length, 1, "the post-reconnect owner may deliver exactly one continuation");
+  } finally {
+    onSessionShutdown(ctx);
+  }
+});
 
 test("goal acceptance schema documents create/update, deterministic verification, and the command length boundary", () => {
   const acceptanceSchema = GoalToolParams.properties.acceptance;
@@ -97,6 +136,7 @@ type FailoverHandler = (event: Record<string, unknown>, ctx: GoalContext) => unk
 function createGoalFailoverRuntime(cwd: string) {
   const handlers = new Map<string, FailoverHandler[]>();
   const messages: Array<{ customType: string; content: string }> = [];
+  const eventSubscribers = new Map<string, Array<(data: unknown) => void>>();
   const models = [
     { provider: "provider", id: "primary", input: ["text"] },
     { provider: "provider", id: "backup", input: ["text"] },
@@ -114,6 +154,19 @@ function createGoalFailoverRuntime(cwd: string) {
       const registered = handlers.get(event) ?? [];
       registered.push(handler);
       handlers.set(event, registered);
+    },
+    events: {
+      on(channel: string, handler: (data: unknown) => void) {
+        const list = eventSubscribers.get(channel) ?? [];
+        list.push(handler);
+        eventSubscribers.set(channel, list);
+        return () => {
+          eventSubscribers.set(channel, (eventSubscribers.get(channel) ?? []).filter((candidate) => candidate !== handler));
+        };
+      },
+      emit(channel: string, data: unknown) {
+        for (const handler of eventSubscribers.get(channel) ?? []) handler(data);
+      },
     },
     async setModel(model: (typeof models)[number]) {
       ctx.model = model;
@@ -136,6 +189,9 @@ function createGoalFailoverRuntime(cwd: string) {
       for (const handler of handlers.get(event) ?? []) {
         await handler({ type: event, ...payload }, ctx);
       }
+    },
+    emitEvent(channel: string, data: unknown) {
+      for (const handler of eventSubscribers.get(channel) ?? []) handler(data);
     },
   };
 }
@@ -952,6 +1008,81 @@ test("Cockpit goal ownership withdraws the panel and release restores live Goal 
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);
   }
+});
+
+test("static mode freezes the per-second elapsed tick and hides the live duration", async () => {
+  let setWidgetCalls = 0;
+  let widgetContent: unknown;
+  const statuses: string[] = [];
+  initGoal({ appendEntry() {} } as never);
+  const ctx = createContext({
+    ui: {
+      notify() {},
+      setStatus(_key: string, value: string | undefined) { statuses.push(value ?? ""); },
+      setWidget(_key: string, content: unknown) { setWidgetCalls += 1; widgetContent = content; },
+    },
+  });
+  const renderCurrent = () => {
+    assert.equal(typeof widgetContent, "function");
+    return (widgetContent as (
+      tui: unknown,
+      theme: typeof goalWidgetTheme,
+    ) => { render(width: number): string[] })(undefined, goalWidgetTheme).render(100).join("\n");
+  };
+
+  onSessionStart(ctx);
+  try {
+    addGoal("Freeze the counter", ctx);
+    const goal = getActiveGoal();
+    assert.ok(goal);
+    const setWidgetCallsAfterCreate = setWidgetCalls;
+    // A clock 60s ahead makes the tick see a non-zero elapsed without
+    // touching the live goal's startedAt (getActiveGoal returns a copy).
+    const tickClock = Date.now() + 60_000;
+
+    setGoalStaticMode(true);
+    // The toggle repaints the panel immediately, without the elapsed segment.
+    assert.doesNotMatch(renderCurrent(), /1m|60s/);
+    const setWidgetCallsAfterToggle = setWidgetCalls;
+    const statusesAfterToggle = statuses.length;
+
+    assert.equal(tickGoalElapsed(ctx, goal.id, tickClock), false, "static tick must not advance the counter");
+    assert.equal(getActiveGoal()?.timeUsedSeconds, 0);
+    assert.equal(statuses.length, statusesAfterToggle, "static tick must not touch the status line");
+    assert.equal(setWidgetCalls, setWidgetCallsAfterToggle, "static tick must not rebuild the widget");
+
+    setGoalStaticMode(false);
+    const setWidgetCallsAfterResume = setWidgetCalls;
+    const statusesAfterResume = statuses.length;
+    assert.equal(tickGoalElapsed(ctx, goal.id, tickClock), true, "resumed tick advances the counter");
+    assert.equal(getActiveGoal()?.timeUsedSeconds, 60);
+    assert.ok(statuses.length > statusesAfterResume, "resumed tick refreshes the status line");
+    assert.equal(setWidgetCalls, setWidgetCallsAfterResume, "per-second refresh must not rebuild the widget");
+  } finally {
+    setGoalStaticMode(false);
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
+test("renderGoalPanel drops the live elapsed segment when hideLiveDuration is set", () => {
+  const goal: GoalPanelEntry = {
+    id: "g1",
+    objective: "Static panel",
+    status: "active",
+    iteration: 2,
+    tokensUsed: 12_000,
+    tokenBudget: 50_000,
+    timeUsedSeconds: 75,
+  };
+  const live = renderGoalPanel([goal], "g1", "normal", 120, goalWidgetTheme).join("\n");
+  assert.match(live, /1m/);
+  assert.match(live, /round 3/);
+
+  const frozen = renderGoalPanel([goal], "g1", "normal", 120, goalWidgetTheme, { hideLiveDuration: true }).join("\n");
+  assert.doesNotMatch(frozen, /1m/);
+  assert.match(frozen, /round 3/);
+  assert.match(frozen, /12k\/50k/);
 });
 
 test("a mounted goal panel frame renders current state, not the state it was mounted with", async () => {
@@ -3273,6 +3404,50 @@ test("fallback settlement retains Goal ownership and defers to the failover hand
       1,
       "fallback success must produce one Goal continuation",
     );
+  } finally {
+    await executeGoalCommand({ action: "clear" }, runtime.ctx);
+    onSessionShutdown(runtime.ctx);
+    await runtime.emit("session_shutdown");
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("handoff terminal event pauses a provider-retrying Goal", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-goal-failover-terminal-"));
+  const configPath = getProjectModelFailoverPath(cwd);
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, JSON.stringify({
+    enabled: true,
+    fallbackModels: { "provider/primary": ["provider/backup"] },
+  }));
+  const runtime = createGoalFailoverRuntime(cwd);
+  onSessionStart(runtime.ctx, { reason: "new" });
+
+  try {
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "start Goal work" });
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await executeGoal({ action: "create", objective: "Pause on terminal handoff failure" }, runtime.ctx);
+
+    const failure = {
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "Provider overloaded: 503", content: [] }],
+    };
+    await runtime.emit("agent_end", failure);
+    await onAgentEnd(failure, runtime.ctx);
+    await runtime.emit("agent_settled");
+    await onAgentSettled(runtime.ctx);
+    assert.equal(getActiveGoal()?.status, "active");
+
+    // The scheduled handoff fails; the terminal event must pause the Goal with
+    // the real failure instead of leaving it provider-retrying.
+    runtime.emitEvent(FAILOVER_TERMINAL_EVENT, {
+      recoveryId: "recovery-1",
+      outcome: "failed",
+      model: "provider/primary",
+      failure: "Fallback handoff failed: send failed",
+    });
+
+    assert.equal(getActiveGoal()?.status, "paused");
   } finally {
     await executeGoalCommand({ action: "clear" }, runtime.ctx);
     onSessionShutdown(runtime.ctx);

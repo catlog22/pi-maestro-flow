@@ -1,12 +1,20 @@
 import {
   Key,
   matchesKey,
-  truncateToWidth,
-  visibleWidth,
   type Component,
   type Focusable,
 } from "@earendil-works/pi-tui";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
+import {
+  fit,
+  frame,
+  headerLine,
+  helpLine,
+  pad,
+  rule,
+  type FrameTheme,
+} from "pi-cockpit/src/settings/ui-primitives.ts";
 import type {
   ModelCircuitBreaker,
   ModelCircuitSnapshot,
@@ -20,10 +28,78 @@ import {
 type Pane = "primary" | "fallback";
 type SaveState = "clean" | "dirty" | "saving" | "failed";
 
-interface FailoverTheme {
-  fg(role: string, text: string): string;
-  bold(text: string): string;
-}
+interface FailoverTheme extends FrameTheme {}
+
+const CATALOGS = {
+  en: {
+    "title": "Model Failover Settings",
+    "state.enabled": "● Enabled",
+    "state.disabled": "○ Disabled",
+    "pane.primary": "Primary model",
+    "pane.fallback": "Fallback priority",
+    "empty.primary": "No matching models",
+    "empty.fallback": "No available fallback models",
+    "detail.source": "Source",
+    "detail.noPrimary": "None",
+    "detail.unobserved": "Unobserved",
+    "detail.failures": "failures",
+    "detail.fallbackCount": "{count} fallbacks",
+    "footer.main": "Esc close · E toggle · Tab/←→ panes · ↑↓ select · Space add/remove · Ctrl+↑↓ reorder · Ctrl+S save · {filter}",
+    "filter.active": "filter {query} · Esc cancel",
+    "filter.hint": "/ filter",
+    "compact.noModel": "No model",
+    "compact.on": "on",
+    "compact.off": "off",
+    "compact.primary": "Primary",
+    "compact.fallback": "Fallback",
+    "compact.fuse": "Esc · fuse",
+    "notice.discardConfirm": "Uncommitted changes · press Esc again to discard",
+    "notice.nothingToSave": "No changes to save",
+    "notice.saving": "Saving…",
+    "notice.saved": "Saved project model failover configuration",
+    "notice.saveFailed": "Save failed: {message}",
+    "notice.dirty": "Uncommitted changes",
+    "saveLabel.saving": "Saving…",
+    "saveLabel.failed": "Save failed",
+    "saveLabel.dirty": "Uncommitted changes",
+    "saveLabel.clean": "Synced",
+  },
+  "zh-CN": {
+    "title": "模型故障转移",
+    "state.enabled": "● 已启用",
+    "state.disabled": "○ 已停用",
+    "pane.primary": "主模型",
+    "pane.fallback": "Fallback 优先级",
+    "empty.primary": "没有匹配的模型",
+    "empty.fallback": "没有可用 fallback 模型",
+    "detail.source": "源",
+    "detail.noPrimary": "无",
+    "detail.unobserved": "未观测",
+    "detail.failures": "failures",
+    "detail.fallbackCount": "{count} 个 fallback",
+    "footer.main": "Esc 关闭 · E 启停 · Tab/←→ 分栏 · ↑↓ 选择 · Space 增删 · Ctrl+↑↓ 排序 · Ctrl+S 保存 · {filter}",
+    "filter.active": "筛选 {query} · Esc 取消",
+    "filter.hint": "/ 筛选",
+    "compact.noModel": "无模型",
+    "compact.on": "开",
+    "compact.off": "关",
+    "compact.primary": "主",
+    "compact.fallback": "备",
+    "compact.fuse": "Esc · 熔断",
+    "notice.discardConfirm": "有未保存修改，再按 Esc 放弃",
+    "notice.nothingToSave": "配置未变更",
+    "notice.saving": "正在保存",
+    "notice.saved": "已保存项目模型故障转移配置",
+    "notice.saveFailed": "保存失败：{message}",
+    "notice.dirty": "未保存",
+    "saveLabel.saving": "保存中",
+    "saveLabel.failed": "保存失败",
+    "saveLabel.dirty": "未保存",
+    "saveLabel.clean": "已同步",
+  },
+} as const;
+
+type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
 
 export interface ModelFailoverOverlayParams {
   cwd: string;
@@ -36,6 +112,8 @@ export interface ModelFailoverOverlayParams {
   requestRender: () => void;
   done: (saved: boolean) => void;
   saveConfig?: (config: ModelFailoverConfig) => Promise<void> | void;
+  /** UI language; defaults to zh-CN when the host exposes no locale signal. */
+  locale?: SupportedSettingsLocale;
 }
 
 interface FallbackRow {
@@ -48,6 +126,7 @@ const MAX_VISIBLE = 10;
 
 export class ModelFailoverOverlay implements Component, Focusable {
   focused = false;
+  private readonly locale: SupportedSettingsLocale;
   private pane: Pane = "primary";
   private primarySelected = 0;
   private fallbackSelected = 0;
@@ -64,6 +143,7 @@ export class ModelFailoverOverlay implements Component, Focusable {
   private readonly multimodalModels = new Set<string>();
 
   constructor(private readonly params: ModelFailoverOverlayParams) {
+    this.locale = params.locale ?? "zh-CN";
     this.config = {
       enabled: params.config.enabled,
       fallbackModels: Object.fromEntries(
@@ -82,12 +162,25 @@ export class ModelFailoverOverlay implements Component, Focusable {
   invalidate(): void {}
   dispose(): void {}
 
+  /** Translate a catalog key with optional {var} substitution. */
+  private t(key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
+    const catalog = CATALOGS[this.locale] ?? CATALOGS["zh-CN"];
+    const template: unknown = catalog[key];
+    const text = typeof template === "string" ? template : CATALOGS["zh-CN"][key] as string;
+    if (!vars) return text;
+    return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
+      vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
+  }
+
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.min(width, 140));
     if (safeWidth < 20) return [this.renderCompact(safeWidth)];
     const inner = safeWidth - 2;
+    const enabledState = this.config.enabled
+      ? this.params.theme.fg("success", this.t("state.enabled"))
+      : this.params.theme.fg("dim", this.t("state.disabled"));
     const rows: string[] = [
-      fit(`${this.params.theme.bold("模型故障转移")} · ${this.config.enabled ? this.params.theme.fg("success", "● 已启用") : this.params.theme.fg("dim", "○ 已停用")} · ${this.saveLabel()}`, inner),
+      headerLine(this.params.theme, this.t("title"), [enabledState, this.saveLabel()], inner),
       rule(inner),
     ];
 
@@ -130,7 +223,7 @@ export class ModelFailoverOverlay implements Component, Focusable {
     if (matchesKey(data, Key.escape)) {
       if (this.isDirty() && !this.discardArmed) {
         this.discardArmed = true;
-        this.notice = "有未保存修改，再按 Esc 放弃";
+        this.notice = this.t("notice.discardConfirm");
         return this.refresh();
       }
       this.params.done(false);
@@ -188,17 +281,17 @@ export class ModelFailoverOverlay implements Component, Focusable {
     const right = this.fallbackRows(rightWidth);
     const height = Math.max(left.length, right.length);
     const rows = [
-      `${fit(this.pane === "primary" ? this.params.theme.bold("主模型") : "主模型", leftWidth)}${this.params.theme.fg("dim", "│")}${fit(this.pane === "fallback" ? this.params.theme.bold("Fallback 优先级") : "Fallback 优先级", rightWidth)}`,
+      `${pad(this.pane === "primary" ? this.params.theme.bold(this.t("pane.primary")) : this.t("pane.primary"), leftWidth)}${this.params.theme.fg("dim", "│")}${pad(this.pane === "fallback" ? this.params.theme.bold(this.t("pane.fallback")) : this.t("pane.fallback"), rightWidth)}`,
     ];
     for (let index = 0; index < height; index += 1) {
-      rows.push(`${fit(left[index] ?? "", leftWidth)}${this.params.theme.fg("dim", "│")}${fit(right[index] ?? "", rightWidth)}`);
+      rows.push(`${pad(left[index] ?? "", leftWidth)}${this.params.theme.fg("dim", "│")}${pad(right[index] ?? "", rightWidth)}`);
     }
     rows.push(this.detail(width));
     return rows;
   }
 
   private renderStacked(width: number): string[] {
-    const title = this.pane === "primary" ? this.params.theme.bold("主模型") : this.params.theme.bold("Fallback 优先级");
+    const title = this.params.theme.bold(this.pane === "primary" ? this.t("pane.primary") : this.t("pane.fallback"));
     const rows = [title];
     rows.push(...(this.pane === "primary" ? this.primaryRows(width) : this.fallbackRows(width)));
     rows.push(rule(width), this.detail(width));
@@ -208,7 +301,7 @@ export class ModelFailoverOverlay implements Component, Focusable {
   private primaryRows(width: number): string[] {
     const models = this.filteredPrimaries();
     this.primarySelected = clamp(this.primarySelected, models.length);
-    if (models.length === 0) return [this.params.theme.fg("warning", fit("没有匹配的模型", width))];
+    if (models.length === 0) return [this.params.theme.fg("warning", fit(this.t("empty.primary"), width))];
     const start = visibleStart(this.primarySelected, models.length);
     return models.slice(start, start + MAX_VISIBLE).map((model, offset) => {
       const selected = start + offset === this.primarySelected;
@@ -220,7 +313,7 @@ export class ModelFailoverOverlay implements Component, Focusable {
   private fallbackRows(width: number): string[] {
     const rows = this.filteredFallbackRows();
     this.fallbackSelected = clamp(this.fallbackSelected, rows.length);
-    if (rows.length === 0) return [this.params.theme.fg("warning", fit("没有可用 fallback 模型", width))];
+    if (rows.length === 0) return [this.params.theme.fg("warning", fit(this.t("empty.fallback"), width))];
     const start = visibleStart(this.fallbackSelected, rows.length);
     return rows.slice(start, start + MAX_VISIBLE).map((row, offset) => {
       const selected = start + offset === this.fallbackSelected;
@@ -236,19 +329,23 @@ export class ModelFailoverOverlay implements Component, Focusable {
     const primary = this.selectedPrimary();
     const chain = primary ? this.config.fallbackModels[primary] ?? [] : [];
     const health = primary ? this.health.get(primary) : undefined;
-    const state = health ? `${health.state} · failures ${health.consecutiveFailures}` : "未观测";
-    return fit(`${this.params.theme.fg("dim", "源")} ${primary ?? "无"} · ${state} · ${chain.length} 个 fallback`, width);
+    const state = health
+      ? `${health.state} · ${this.t("detail.failures")} ${health.consecutiveFailures}`
+      : this.t("detail.unobserved");
+    return fit(`${this.params.theme.fg("dim", this.t("detail.source"))} ${primary ?? this.t("detail.noPrimary")} · ${state} · ${this.t("detail.fallbackCount", { count: chain.length })}`, width);
   }
 
   private footer(width: number): string {
-    const filter = this.filterActive ? `筛选 ${this.query || "…"} · Esc 取消` : "/ 筛选";
-    return fit(`Esc 关闭 · E 启停 · Tab/←→ 分栏 · ↑↓ 选择 · Space 增删 · Ctrl+↑↓ 排序 · Ctrl+S 保存 · ${filter}`, width);
+    const filter = this.filterActive
+      ? this.t("filter.active", { query: this.query || "…" })
+      : this.t("filter.hint");
+    return fit(this.t("footer.main", { filter }), width);
   }
 
   private renderCompact(width: number): string {
-    const primary = this.selectedPrimary() ?? "无模型";
-    const enabled = this.config.enabled ? "开" : "关";
-    return fit(`Esc · 熔断${enabled} · ${this.pane === "primary" ? "主" : "备"} ${primary} · ${this.saveLabel()}`, width);
+    const primary = this.selectedPrimary() ?? this.t("compact.noModel");
+    const enabled = this.config.enabled ? this.t("compact.on") : this.t("compact.off");
+    return fit(`${this.t("compact.fuse")}${enabled} · ${this.pane === "primary" ? this.t("compact.primary") : this.t("compact.fallback")} ${primary} · ${this.saveLabel()}`, width);
   }
 
   private filteredPrimaries(): string[] {
@@ -319,11 +416,11 @@ export class ModelFailoverOverlay implements Component, Focusable {
 
   private async save(): Promise<void> {
     if (!this.isDirty()) {
-      this.notice = "配置未变更";
+      this.notice = this.t("notice.nothingToSave");
       return this.refresh();
     }
     this.saveState = "saving";
-    this.notice = "正在保存";
+    this.notice = this.t("notice.saving");
     this.refresh();
     try {
       await this.params.saveConfig?.({
@@ -331,12 +428,12 @@ export class ModelFailoverOverlay implements Component, Focusable {
         fallbackModels: Object.fromEntries(Object.entries(this.config.fallbackModels).map(([model, chain]) => [model, [...chain]])),
       });
       this.saveState = "clean";
-      this.notice = "已保存项目模型故障转移配置";
+      this.notice = this.t("notice.saved");
       this.discardArmed = false;
       this.params.done(true);
     } catch (error) {
       this.saveState = "failed";
-      this.notice = `保存失败：${error instanceof Error ? error.message : String(error)}`;
+      this.notice = this.t("notice.saveFailed", { message: error instanceof Error ? error.message : String(error) });
       this.refresh();
     }
   }
@@ -347,16 +444,16 @@ export class ModelFailoverOverlay implements Component, Focusable {
 
   private markDirty(): void {
     this.saveState = "dirty";
-    this.notice = "未保存";
+    this.notice = this.t("notice.dirty");
     this.discardArmed = false;
     this.refresh();
   }
 
   private saveLabel(): string {
-    if (this.saveState === "saving") return "保存中";
-    if (this.saveState === "failed") return "保存失败";
-    if (this.saveState === "dirty") return "未保存";
-    return "已同步";
+    if (this.saveState === "saving") return this.t("saveLabel.saving");
+    if (this.saveState === "failed") return this.t("saveLabel.failed");
+    if (this.saveState === "dirty") return this.t("saveLabel.dirty");
+    return this.t("saveLabel.clean");
   }
 
   private capabilityBadge(model: string): string {
@@ -442,28 +539,4 @@ function clamp(index: number, length: number): number {
 
 function visibleStart(selected: number, length: number): number {
   return Math.max(0, Math.min(Math.max(0, length - MAX_VISIBLE), selected - Math.floor(MAX_VISIBLE / 2)));
-}
-
-function fit(value: string, width: number): string {
-  return truncateToWidth(value, Math.max(0, width), "", true);
-}
-
-function rule(width: number): string {
-  return "─".repeat(Math.max(0, width));
-}
-
-function frame(rows: string[], width: number, theme: FailoverTheme): string[] {
-  if (width < 2) return rows.map((row) => fit(row, width));
-  const inner = width - 2;
-  const dim = (value: string) => theme.fg("dim", value);
-  return [
-    dim(`╭${"─".repeat(inner)}╮`),
-    ...rows.map((row) => `${dim("│")}${pad(` ${row}`, inner)}${dim("│")}`),
-    dim(`╰${"─".repeat(inner)}╯`),
-  ];
-}
-
-function pad(value: string, width: number): string {
-  const clipped = fit(value, width);
-  return `${clipped}${" ".repeat(Math.max(0, width - visibleWidth(clipped)))}`;
 }

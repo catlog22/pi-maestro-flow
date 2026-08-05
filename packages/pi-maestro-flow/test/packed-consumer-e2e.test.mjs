@@ -23,8 +23,9 @@ const localTeammatePackage = JSON.parse(readFileSync(join(localTeammateRoot, "pa
 const localSettingsCorePackage = JSON.parse(readFileSync(join(localSettingsCoreRoot, "package.json"), "utf8"));
 const localCockpitPackage = JSON.parse(readFileSync(join(localCockpitRoot, "package.json"), "utf8"));
 const piSdkVersion = localFlowPackage.devDependencies["@earendil-works/pi-coding-agent"];
+const piCodingAgentEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
 const piCodingAgentPackage = JSON.parse(readFileSync(
-  join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent", "package.json"),
+  resolve(dirname(piCodingAgentEntry), "..", "package.json"),
   "utf8",
 ));
 const teammatePublicSpecifiers = [
@@ -107,6 +108,17 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
     assert.ok(teammatePacked[0].files.some(({ path }) => path === "types/index.d.ts"));
     assert.ok(teammatePacked[0].files.some(({ path }) => path === "types/public/v1/execution.d.ts"));
 
+    verifyStandaloneCockpit({
+      consumer: join(root, "cockpit-standalone"),
+      workflowRoot: join(root, "cockpit-workflow"),
+      installHome: join(root, "cockpit-home"),
+      npmPrefix: join(root, "cockpit-npm-prefix"),
+      settingsCoreTarball,
+      cockpitTarball,
+      piSdkVersion,
+      npmCommand,
+    });
+
     writeFileSync(join(consumer, "package.json"), `${JSON.stringify({ private: true }, null, 2)}\n`);
     const installEnv = {
       ...process.env,
@@ -151,6 +163,7 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
     const installedSettingsCore = join(consumer, "node_modules", "pi-maestro-settings-core");
     const installedCockpit = join(consumer, "node_modules", "pi-cockpit");
     const installedTeammate = join(consumer, "node_modules", "pi-maestro-teammate");
+    const installedSmartSearch = join(consumer, "node_modules", "@konbakuyomu", "smart-search");
     assert.equal(lstatSync(installed).isSymbolicLink(), false);
     assert.equal(lstatSync(installedMaestro).isSymbolicLink(), false);
     assert.equal(lstatSync(installedSettingsCore).isSymbolicLink(), false);
@@ -165,6 +178,21 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
     assert.equal(installedTeammatePackage.dependencies["cross-spawn"], "7.0.6");
     assert.equal(installedTeammatePackage.dependencies["pi-maestro-settings-core"], localSettingsCorePackage.version);
     assert.equal(installedTeammatePackage.types, "./types/index.d.ts");
+    assert.equal(existsSync(installedSmartSearch), true, "the source-pinned Smart Search optional dependency must install");
+    assert.match(
+      readFileSync(join(installedSmartSearch, "src", "smart_search", "config.py"), "utf8"),
+      /SMART_SEARCH_INTENT_ROUTER/,
+    );
+    const smartSearchRegressionOutput = run(
+      [process.execPath, join(installedSmartSearch, "npm", "bin", "smart-search.js")],
+      ["regression"],
+      consumer,
+      installEnv,
+      180_000,
+    ).stdout;
+    const smartSearchRegression = JSON.parse(smartSearchRegressionOutput.slice(smartSearchRegressionOutput.indexOf("{")));
+    assert.equal(smartSearchRegression.ok, true);
+    assert.equal(smartSearchRegression.mode, "mock");
     assert.equal(existsSync(join(installed, ".pi", "skills", "workflow-skill-designer", "SKILL.md")), true);
     assert.equal(existsSync(join(installed, "src", "extension", "index.ts")), true);
     const extensionPath = join(installed, "src", "extension", "index.ts");
@@ -184,12 +212,25 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
         .map((specifier, index) => `import * as publicApi${index} from ${JSON.stringify(specifier)};`)
         .join("\n")}
 import { writeFileSync } from "node:fs";
+import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
 const specifiers = ${JSON.stringify(teammatePublicSpecifiers)};
 const loaded = [${teammatePublicSpecifiers.map((_, index) => `publicApi${index}`).join(", ")}]
   .map((publicApi) => Object.keys(publicApi).length);
+const refreshProbe = {
+  runtime: { refreshed: 0 },
+  async refresh() {
+    this.runtime.refreshed++;
+  },
+};
 export default function register(pi) {
-  pi.on("session_start", () => {
-    writeFileSync(${JSON.stringify(runtimeProbePath)}, JSON.stringify({ specifiers, loaded }));
+  pi.on("session_start", async () => {
+    await refreshModelRegistry({ modelRegistry: refreshProbe });
+    writeFileSync(${JSON.stringify(runtimeProbePath)}, JSON.stringify({
+      specifiers,
+      loaded,
+      refreshModelRegistry: typeof refreshModelRegistry,
+      refreshCalls: refreshProbe.runtime.refreshed,
+    }));
   });
 }
 `,
@@ -208,6 +249,8 @@ export default function register(pi) {
     const runtimeProbe = JSON.parse(readFileSync(runtimeProbePath, "utf8"));
     assert.deepEqual(runtimeProbe.specifiers, teammatePublicSpecifiers);
     assert.equal(runtimeProbe.loaded.length, teammatePublicSpecifiers.length);
+    assert.equal(runtimeProbe.refreshModelRegistry, "function");
+    assert.equal(runtimeProbe.refreshCalls, 1);
     assert.match(
       run(
         [process.execPath],
@@ -228,7 +271,8 @@ export default function register(pi) {
       `${teammatePublicSpecifiers
         .map((specifier, index) => `import * as publicApi${index} from ${JSON.stringify(specifier)};`)
         .join("\n")}
-void [${teammatePublicSpecifiers.map((_, index) => `publicApi${index}`).join(", ")}];
+import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
+void [${teammatePublicSpecifiers.map((_, index) => `publicApi${index}`).join(", ")}, refreshModelRegistry];
 `,
     );
     writeFileSync(
@@ -386,6 +430,74 @@ export default function register(pi) {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+function verifyStandaloneCockpit({
+  consumer,
+  workflowRoot,
+  installHome,
+  npmPrefix,
+  settingsCoreTarball,
+  cockpitTarball,
+  piSdkVersion,
+  npmCommand,
+}) {
+  for (const directory of [consumer, workflowRoot, installHome, npmPrefix]) {
+    mkdirSync(directory, { recursive: true });
+  }
+  writeFileSync(join(consumer, "package.json"), `${JSON.stringify({ private: true }, null, 2)}\n`);
+  const env = {
+    ...process.env,
+    HOME: installHome,
+    USERPROFILE: installHome,
+    npm_config_prefix: npmPrefix,
+  };
+  run(
+    npmCommand,
+    [
+      "install",
+      settingsCoreTarball,
+      cockpitTarball,
+      `@earendil-works/pi-agent-core@${piSdkVersion}`,
+      `@earendil-works/pi-ai@${piSdkVersion}`,
+      `@earendil-works/pi-coding-agent@${piSdkVersion}`,
+      `@earendil-works/pi-tui@${piSdkVersion}`,
+      "--legacy-peer-deps",
+      "--no-audit",
+      "--no-fund",
+    ],
+    consumer,
+    env,
+    installTimeout,
+  );
+
+  const installedCockpit = join(consumer, "node_modules", "pi-cockpit");
+  assert.equal(existsSync(installedCockpit), true);
+  assert.equal(
+    existsSync(join(consumer, "node_modules", "pi-maestro-teammate")),
+    false,
+    "standalone Cockpit must load without installing its optional Teammate peer",
+  );
+  const piCommand = [
+    process.execPath,
+    join(consumer, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js"),
+  ];
+  const smoke = run(
+    piCommand,
+    [
+      "--offline", "--mode", "rpc", "--no-session", "--no-extensions", "--no-skills",
+      "--no-context-files", "--extension", join(installedCockpit, "src", "extension", "index.ts"),
+    ],
+    workflowRoot,
+    {
+      ...env,
+      PATH: `${join(consumer, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}`,
+    },
+    45_000,
+    `${JSON.stringify({ id: "state", type: "get_state" })}\n`,
+  );
+  const messages = smoke.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  assert.ok(messages.some((message) => message.id === "state" && message.type === "response"), smoke.stdout);
+}
 
 function prepareSource(stage) {
   return `---\nname: ${stage}\nsession-mode: run\ncontract:\n  produces:\n    - { path: outputs/${stage}.json, kind: ${stage}, alias: current-${stage}, role: primary }\ngates: []\n---\n# ${stage}\n`;

@@ -69,6 +69,7 @@ function fixture() {
 		getGlobalPath: () => paths.globalTeammate,
 		getProjectPath: () => paths.projectTeammate,
 		discoverTaskTypes: () => ["analysis"],
+		discoverRoles: () => [],
 	});
 	const context: SettingsContextV1 = { cwd, locale: "en" };
 	return { root, cwd, paths, context, cockpit, flow, apiManager, teammate, get runtime() { return runtime; } };
@@ -242,7 +243,7 @@ test("API Manager has a dedicated Settings page with direct management actions",
 		const rendered = shell.render(120).join("\n");
 		assert.match(rendered, /API Manager/);
 		assert.match(rendered, /— Providers and models —/);
-		assert.match(rendered, /Open full API Manager/);
+		assert.match(rendered, /Open API Manager/);
 		assert.match(rendered, /Add or edit a provider model/);
 		assert.match(rendered, /— Retry policy —/);
 		assert.match(rendered, /Configure API retries/);
@@ -283,7 +284,7 @@ test("Teammate settings render task routing as ordered groups with management la
 		const controlCenter = rendered.indexOf("Open full Teammate control center");
 		assert.ok(analysis >= 0);
 		assert.ok(analysis < model && model < fallbacks && fallbacks < thinking);
-		assert.ok(thinking < management && management < controlCenter);
+		assert.ok(thinking < management && management < controlCenter, rendered);
 	} finally { rmSync(state.root, { recursive: true, force: true }); }
 });
 

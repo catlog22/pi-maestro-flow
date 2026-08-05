@@ -74,6 +74,7 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
   }
   let teammate: RegisteredTool | undefined;
   let teammateSend: RegisteredTool | undefined;
+  let observeTool: { execute(...args: unknown[]): Promise<Record<string, any>> } | undefined;
   const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
   const messages: Array<Record<string, unknown>> = [];
   const hooks = new Map<string, Array<(...args: any[]) => unknown>>();
@@ -92,6 +93,9 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
     registerTool(tool: RegisteredTool & { name: string }) {
       if (tool.name === "teammate") teammate = tool;
       if (tool.name === "teammate-send") teammateSend = tool;
+      if (tool.name === "observe") {
+        observeTool = tool as unknown as { execute(...args: unknown[]): Promise<Record<string, any>> };
+      }
     },
     registerCommand(name: string, command: { handler: (args: string, ctx: any) => Promise<void> | void }) {
       commands.set(name, command);
@@ -106,7 +110,8 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
   registerTeammateExtension(pi as unknown as ExtensionAPI, runtimeOptions);
   assert.ok(teammate);
   assert.ok(teammateSend);
-  return { teammate, teammateSend, emitted, messages, hooks, commands };
+  assert.ok(observeTool);
+  return { teammate, teammateSend, observeTool, emitted, messages, hooks, commands };
 }
 
 function context(): Record<string, unknown> {
@@ -332,6 +337,258 @@ test("root emits complete only after result-ready receives lifecycle confirmatio
   assert.equal(completed.length, 1);
   assert.equal(completed[0].payload.exitCode, 0);
   assert.equal(completed[0].payload.wakeable, true);
+});
+
+function structuredSpawn(value: unknown): NonNullable<TeammateRuntimeOptions["spawnChildProcess"]> {
+  return (() => {
+    const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      stdout.write(`${JSON.stringify({
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "structured-call", name: "structured_output", arguments: value }],
+        },
+      })}\n`);
+      stdout.write(`${JSON.stringify({
+        type: "tool_execution_end",
+        toolName: "structured_output",
+        toolCallId: "structured-call",
+        isError: false,
+      })}\n`);
+      stdout.write(`${JSON.stringify({
+        type: "agent_end",
+        message: { role: "assistant", content: [] },
+      })}\n`);
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+}
+
+const structuredSchema = {
+  type: "object",
+  properties: { verdict: { type: "string" } },
+  required: ["verdict"],
+  additionalProperties: false,
+};
+
+test("background single completion carries structuredResults for agent:// persistence", async () => {
+  const { teammate, emitted } = createHarness({ spawnChildProcess: structuredSpawn({ verdict: "ok" }) });
+
+  const result = await teammate.execute(
+    "bg-structured",
+    {
+      tasks: [{ agent: "general", name: "bg-worker", prompt: "structured", outputSchema: structuredSchema }],
+      background: true,
+    },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  assert.equal(result.isError, false);
+
+  await delay(60);
+  const completed = emitted.filter(({ event }) => event === "teammate:complete");
+  assert.equal(completed.length, 1);
+  const payload = completed[0].payload as {
+    structuredResults?: Array<{ correlationId: string; originCwd: string; name?: string; structuredOutput: unknown }>;
+  };
+  assert.ok(Array.isArray(payload.structuredResults) && payload.structuredResults.length === 1);
+  assert.equal(payload.structuredResults[0].originCwd, process.cwd());
+  assert.equal(payload.structuredResults[0].name, "bg-worker");
+  assert.deepEqual(payload.structuredResults[0].structuredOutput, { verdict: "ok" });
+  assert.equal(typeof payload.structuredResults[0].correlationId, "string");
+});
+
+test("background completion keeps the cwd captured at dispatch admission", async () => {
+  let stdout: PassThrough | undefined;
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  const { teammate, emitted } = createHarness({ spawnChildProcess });
+  const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ] as TeammateState;
+  const origin = process.cwd();
+  state.baseCwd = origin;
+
+  await teammate.execute(
+    "bg-origin",
+    {
+      tasks: [{ agent: "general", name: "origin-worker", prompt: "structured", outputSchema: structuredSchema }],
+      background: true,
+    },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  state.baseCwd = path.join(origin, "other-workspace");
+  const value = { verdict: "ok" };
+  stdout!.write(`${JSON.stringify({
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "origin-call", name: "structured_output", arguments: value }],
+    },
+  })}\n`);
+  stdout!.write(`${JSON.stringify({
+    type: "tool_execution_end",
+    toolName: "structured_output",
+    toolCallId: "origin-call",
+    isError: false,
+  })}\n`);
+  stdout!.write(`${JSON.stringify({ type: "agent_end", message: { role: "assistant", content: [] } })}\n`);
+  await delay(60);
+
+  const completion = emitted.find(({ event }) => event === "teammate:complete");
+  const result = (completion?.payload.structuredResults as Array<{ originCwd: string }> | undefined)?.[0];
+  assert.equal(result?.originCwd, origin);
+});
+
+test("observe full detail returns the structured output of a settled schema success", async () => {
+  const { teammate, observeTool } = createHarness({ spawnChildProcess: structuredSpawn({ verdict: "ok" }) });
+
+  await teammate.execute(
+    "bg-structured-2",
+    {
+      tasks: [{ agent: "general", name: "observe-worker", prompt: "structured", outputSchema: structuredSchema }],
+      background: true,
+    },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  await delay(60);
+
+  const snap = await observeTool!.execute(
+    "observe-1",
+    { action: "status", targets: [{ kind: "teammate", id: "observe-worker" }], detail: "full", lines: 20 },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  const observation = snap.details.result.observations[0] as {
+    nativeStatus: string;
+    terminalStatus?: string;
+    waitStatus?: string;
+    structuredOutput?: unknown;
+  };
+  assert.equal(observation.nativeStatus, "completed");
+  assert.equal(observation.terminalStatus, "completed");
+  assert.deepEqual(observation.structuredOutput, { verdict: "ok" });
+  const output = (snap.details.output as string[]).join("\n");
+  assert.match(output, /--- structured output ---/);
+  assert.match(output, /"verdict": "ok"/);
+
+  // Public snapshots are independent clones; mutating one cannot alter owner state.
+  (observation.structuredOutput as { verdict: string }).verdict = "mutated";
+  const compact = await observeTool!.execute(
+    "observe-summary",
+    { action: "status", targets: [{ kind: "teammate", id: "observe-worker" }], detail: "summary", lines: 20 },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  const compactObservation = compact.details.result.observations[0] as Record<string, unknown>;
+  assert.equal(Object.hasOwn(compactObservation, "structuredOutput"), false);
+  assert.equal(Object.hasOwn(compactObservation, "lastResult"), false);
+  assert.equal(Object.hasOwn(compactObservation, "detail"), false);
+  assert.doesNotMatch((compact.details.output as string[]).join("\n"), /structured output/);
+
+  const tail = await observeTool!.execute(
+    "observe-tail",
+    { action: "status", targets: [{ kind: "teammate", id: "observe-worker" }], detail: "tail", lines: 20 },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  const tailObservation = tail.details.result.observations[0] as { structuredOutput?: unknown };
+  assert.deepEqual(tailObservation.structuredOutput, { verdict: "ok" });
+  const tailOutput = (tail.details.output as string[]).join("\n");
+  assert.equal(tailOutput.match(/--- structured output ---/g)?.length, 1);
+
+  const waited = await observeTool!.execute(
+    "observe-wait-summary",
+    {
+      action: "wait",
+      targets: [{ kind: "teammate", id: "observe-worker" }],
+      detail: "summary",
+      until: "completed",
+      timeoutMs: 1_000,
+    },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  const waitedObservation = waited.details.result.observations[0] as Record<string, unknown>;
+  assert.equal(Object.hasOwn(waitedObservation, "structuredOutput"), false);
+  assert.equal(Object.hasOwn(waitedObservation, "detail"), false);
+});
+
+test("observe projects a wakeable failed agent as sleeping activity with failed terminal outcome", async () => {
+  const { observeTool } = createHarness();
+  const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ] as TeammateState;
+  const now = Date.now();
+  const cid = "sleep-failed-cid";
+  state.activeRuns.set(cid, {
+    agent: "worker",
+    name: "sleep-failed",
+    correlationId: cid,
+    startedAt: now,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now,
+    status: "sleeping",
+    sleepMs: 0,
+    depth: 0,
+    lastOutcome: { status: "failed", message: "boom", settledAt: now },
+    lastResult: "boom",
+  });
+  state.namedAgents.set("sleep-failed", cid);
+
+  const snap = await observeTool!.execute(
+    "observe-2",
+    { action: "status", targets: [{ kind: "teammate", id: "sleep-failed" }], detail: "full", lines: 20 },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  const observation = snap.details.result.observations[0] as {
+    nativeStatus: string;
+    terminalStatus?: string;
+    waitStatus?: string;
+    outcome?: string;
+  };
+  assert.equal(observation.nativeStatus, "sleeping", "activity stays sleeping (wakeable)");
+  assert.equal(observation.waitStatus, "failed");
+  assert.equal(observation.terminalStatus, "failed");
+  assert.equal(observation.outcome, "failure");
 });
 
 test("warm wake publishes every subsequent turn completion", async () => {
@@ -1248,51 +1505,223 @@ test("session shutdown fences delayed nested completion from the replacement ses
   assert.equal(state.proxyDispatchByRequest?.has("old-session-request") ?? false, false);
 });
 
-test("handoff shutdown is compensated when session replacement then fails", async () => {
-  const { hooks, commands } = createHarness();
-  const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
-    Symbol.for("pi-maestro-teammate.root-registry")
-  ] as TeammateState;
-  const controller = new AbortController();
-  const lease = transferToMain(confirmParked(requestPark(createChildLease())));
-  const agent: ActiveAgent = {
+test("nested background completion passively delivers teammate_complete_delivery to the parent child agent", async () => {
+  const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const sentMessages: Array<Record<string, unknown>> = [];
+  const controlMessages: Record<string, unknown>[] = [];
+  const state = createProxyState();
+  const parentCid = "parent-agent";
+  const now = Date.now();
+  const parent: ActiveAgent = {
     agent: "general",
-    name: "attached",
-    correlationId: "attached-agent",
-    startedAt: Date.now(),
-    abortController: controller,
+    correlationId: parentCid,
+    startedAt: now,
+    abortController: new AbortController(),
     inbox: [],
     outputLog: [],
-    lastActivityAt: Date.now(),
+    lastActivityAt: now,
     depth: 0,
     status: "running",
     sleepMs: 0,
-    sessionFile: "C:/sessions/child.jsonl",
-    lease,
-    promptSeq: 1,
-    sendControl: () => true,
-  };
-  state.activeRuns.set(agent.correlationId, agent);
-  state.namedAgents.set(agent.name!, agent.correlationId);
-  state.mainSessionFile = "C:/sessions/main.jsonl";
-  const shutdown = hooks.get("session_shutdown")?.[0];
-  const command = commands.get("teammate-session");
-  assert.ok(shutdown);
-  assert.ok(command);
-
-  await assert.rejects(async () => command.handler("", {
-    sessionManager: { getSessionFile: () => agent.sessionFile },
-    waitForIdle: async () => {},
-    ui: { notify() {} },
-    async switchSession() {
-      await shutdown();
-      throw new Error("replacement failed after old session shutdown");
+    sendControl(message) {
+      controlMessages.push(message);
+      return true;
     },
-  }), /replacement failed/);
+  };
+  state.activeRuns.set(parentCid, parent);
 
-  assert.equal(controller.signal.aborted, true);
-  assert.equal(state.activeRuns.size, 0);
-  assert.equal(state.namedAgents.size, 0);
-  assert.equal(state.handoffSwitching, false);
-  assert.equal(state.recentlySettled?.get(agent.correlationId)?.status, "terminated");
+  let stdout: PassThrough | undefined;
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => stdout!.write(`${JSON.stringify(resultReadyTurn("nested done"))}\n`));
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+  const replies: unknown[] = [];
+  await handleProxyRequest(
+    createProxyPi(emitted, sentMessages),
+    state,
+    {
+      type: "teammate_proxy_request",
+      tool: "teammate",
+      requestId: "nested-background",
+      parentCid,
+      params: { tasks: [{ agent: "general", prompt: "answer" }], background: true },
+    },
+    (message) => replies.push(message),
+    undefined,
+    [],
+    undefined,
+    undefined,
+    { spawnChildProcess: confirmFakeKills(spawnChildProcess), resultReadyGraceMs: 500 },
+  );
+
+  assert.equal(replies.length, 1);
+  assert.match(
+    String((replies[0] as { result: { content: Array<{ text: string }> } }).result.content[0].text),
+    /running in background/,
+  );
+
+  for (let attempt = 0; attempt < 40 && controlMessages.length === 0; attempt += 1) {
+    await delay(25);
+  }
+  assert.equal(controlMessages.length, 1);
+  assert.equal(controlMessages[0].type, "teammate_complete_delivery");
+  assert.equal(controlMessages[0].correlationId, parentCid);
+  const envelope = controlMessages[0].envelope as Record<string, unknown>;
+  assert.equal(envelope.customType, "teammate-complete");
+  const results = (envelope.details as { results: Array<{ messages: Array<{ role: string; content: string }> }> }).results;
+  assert.equal(results.length, 1);
+  assert.equal(results[0].messages.some((message) => message.content.includes("nested done")), true);
+  // The root session still receives the same envelope (backward compatible).
+  assert.equal(sentMessages.filter((message) => message.customType === "teammate-complete").length, 1);
+});
+
+test("foreground nested completion does not double-deliver teammate_complete_delivery", async () => {
+  const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const sentMessages: Array<Record<string, unknown>> = [];
+  const controlMessages: Record<string, unknown>[] = [];
+  const state = createProxyState();
+  const parentCid = "parent-agent";
+  const now = Date.now();
+  const parent: ActiveAgent = {
+    agent: "general",
+    correlationId: parentCid,
+    startedAt: now,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now,
+    depth: 0,
+    status: "running",
+    sleepMs: 0,
+    sendControl(message) {
+      controlMessages.push(message);
+      return true;
+    },
+  };
+  state.activeRuns.set(parentCid, parent);
+
+  let stdout: PassThrough | undefined;
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => stdout!.write(`${JSON.stringify(resultReadyTurn("foreground done"))}\n`));
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+  const replies: unknown[] = [];
+  await handleProxyRequest(
+    createProxyPi(emitted, sentMessages),
+    state,
+    {
+      type: "teammate_proxy_request",
+      tool: "teammate",
+      requestId: "nested-foreground",
+      parentCid,
+      params: { tasks: [{ agent: "general", prompt: "answer" }], background: false },
+    },
+    (message) => replies.push(message),
+    undefined,
+    [],
+    undefined,
+    undefined,
+    { spawnChildProcess: confirmFakeKills(spawnChildProcess), resultReadyGraceMs: 500 },
+  );
+
+  assert.equal(replies.length, 1);
+  assert.equal((replies[0] as { result: { isError?: boolean } }).result.isError, false);
+  await delay(60);
+  // In-window completion returns the result in the reply; no passive delivery.
+  assert.equal(controlMessages.length, 0);
+  assert.equal(sentMessages.some((message) => message.customType === "teammate-complete"), false);
+});
+
+test("nested background completion skips delivery when the parent is no longer live", async () => {
+  const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const sentMessages: Array<Record<string, unknown>> = [];
+  const controlMessages: Record<string, unknown>[] = [];
+  const state = createProxyState();
+  const parentCid = "parent-agent";
+  const now = Date.now();
+  const parent: ActiveAgent = {
+    agent: "general",
+    correlationId: parentCid,
+    startedAt: now,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now,
+    depth: 0,
+    status: "running",
+    sleepMs: 0,
+    sendControl(message) {
+      controlMessages.push(message);
+      return true;
+    },
+  };
+  state.activeRuns.set(parentCid, parent);
+
+  let stdout: PassThrough | undefined;
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    setTimeout(() => stdout!.write(`${JSON.stringify(resultReadyTurn("late done"))}\n`), 80);
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+  const replies: unknown[] = [];
+  await handleProxyRequest(
+    createProxyPi(emitted, sentMessages),
+    state,
+    {
+      type: "teammate_proxy_request",
+      tool: "teammate",
+      requestId: "nested-late-parent",
+      parentCid,
+      params: { tasks: [{ agent: "general", prompt: "answer" }], background: true },
+    },
+    (message) => replies.push(message),
+    undefined,
+    [],
+    undefined,
+    undefined,
+    { spawnChildProcess: confirmFakeKills(spawnChildProcess), resultReadyGraceMs: 500 },
+  );
+
+  assert.match(
+    String((replies[0] as { result: { content: Array<{ text: string }> } }).result.content[0].text),
+    /running in background/,
+  );
+  // Parent settles (removed from activeRuns) before the nested dispatch finishes.
+  settleAgent(state, parentCid, 0, "parent done", false);
+  await delay(200);
+  assert.equal(controlMessages.length, 0);
+});
+
+test("child bridge consumes teammate_complete_delivery and injects it locally", () => {
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8")
+    + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8");
+  assert.match(source, /type === "teammate_complete_delivery"/);
+  assert.match(source, /m\.correlationId !== process\.env\.PI_TEAMMATE_CORRELATION_ID/);
+  assert.match(source, /safeSendMessage\(pi, envelope as never, \{ triggerTurn: true \}\)/);
+  // Root side forwards the envelope over agent.sendControl.
+  assert.match(source, /type: "teammate_complete_delivery"/);
+  assert.match(source, /parentAgent\.sendControl\(/);
 });

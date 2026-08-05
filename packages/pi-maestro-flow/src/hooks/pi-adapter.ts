@@ -5,6 +5,7 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
 import {
   type CodexHookEvent,
   type LoadedCodexHooks,
@@ -58,11 +59,114 @@ const UNSUPPORTED_PI_EVENTS: CodexHookEvent[] = [
   "SubagentStop",
 ];
 
+const HOOK_UI_CATALOGS = {
+  en: {
+    "status.hook": "⬡ Hook…",
+    "notice.untrustedAnnounce": "Found an untrusted hooks config: {path}. Run /hooks to review.",
+    "notice.incompatibleOutput": "{event} Hook output is incompatible: {message}",
+    "notice.toggleUnsupported": "Cannot toggle · only synchronous command Hooks are executed",
+    "notice.toggled": "{state} · {event} · {command}",
+    "value.enabled": "Enabled",
+    "value.disabled": "Disabled",
+    "notice.toggleFailed": "Update failed · {error}",
+    "confirm.revokeTitle": "Revoke hooks trust?",
+    "confirm.trustTitle": "Trust project Hooks?",
+    "confirm.revokeDetail": "Config: {path}\nAfter revocation all Hooks stop firing immediately.",
+    "confirm.trustDetail": "Config: {path}\nHash: {hash}\nEnabled: {enabled}/{total}",
+    "notice.cancelRevoke": "Revoke cancelled",
+    "notice.cancelTrust": "Trust cancelled",
+    "notice.revoked": "Hooks trust revoked",
+    "notice.trusted": "Hooks config trusted · enabled entries will run automatically",
+    "notice.trustFailed": "Trust update failed · {error}",
+    "notice.notFound": "Not found: {path}",
+    "notice.revokedCurrent": "Trust for the current hooks config revoked.",
+    "notice.revokeFailed": "Failed to revoke hooks trust: {error}",
+    "notice.tuiUnavailable": "Hook TUI unavailable, nothing installed or trusted: {error}",
+    "notice.installNeedsTui": "Maestro Flow Hooks installation requires an interactive TUI.",
+    "notice.fallbackTrusted": "Hooks trusted and enabled: {path}",
+    "notice.fallbackUnsafe": "Cannot safely display the full hooks config, trust unchanged: {path}. Retry /hooks in the interactive TUI.",
+    "notice.unsupportedEvents": "Pi does not yet map Codex Hooks: {events}",
+    "notice.skippedHandlers": "Skipped {count} prompt, agent or async Hooks; only command Hooks run.",
+    "notice.compat.stopPlainText": "Stop must return JSON, not plain text",
+    "notice.compat.preToolUseUnsupported": "PreToolUse does not support continue, stopReason or suppressOutput",
+    "notice.compat.updatedInput": "updatedInput may only be returned with permissionDecision: allow or ask",
+    "notice.compat.postToolUseUnsupported": "PostToolUse currently does not support updatedMCPToolOutput or suppressOutput",
+    "failure.title": "Hook failed · {event}",
+    "failure.titleWithCount": "Hook failed · {event} ({count})",
+    "failure.command": "Command: {command}",
+    "failure.reason": "Reason: {reason}",
+    "failure.output": "Output: {output}",
+    "failure.others": "Other failures:",
+    "failure.more": "… {count} more failures",
+    "command.hooks.description": "Install, review, trust or revoke .pi/hooks.json",
+  },
+  "zh-CN": {
+    "status.hook": "⬡ Hook…",
+    "notice.untrustedAnnounce": "发现未信任的 Hook 配置：{path}。运行 /hooks 进行审核。",
+    "notice.incompatibleOutput": "{event} Hook 输出不兼容：{message}",
+    "notice.toggleUnsupported": "无法切换 · 当前仅执行同步 command Hook",
+    "notice.toggled": "{state} · {event} · {command}",
+    "value.enabled": "已启用",
+    "value.disabled": "已停用",
+    "notice.toggleFailed": "更新失败 · {error}",
+    "confirm.revokeTitle": "撤销 Hook 信任？",
+    "confirm.trustTitle": "信任项目 Hooks？",
+    "confirm.revokeDetail": "配置：{path}\n撤销后所有 Hook 将立即停止触发。",
+    "confirm.trustDetail": "配置：{path}\nHash：{hash}\n启用：{enabled}/{total}",
+    "notice.cancelRevoke": "已取消撤销",
+    "notice.cancelTrust": "已取消信任",
+    "notice.revoked": "已撤销 Hook 信任",
+    "notice.trusted": "已信任 Hook 配置 · 已启用项将自动运行",
+    "notice.trustFailed": "更新信任失败 · {error}",
+    "notice.notFound": "未找到 {path}",
+    "notice.revokedCurrent": "已撤销当前 Hook 配置的信任。",
+    "notice.revokeFailed": "撤销 Hook 信任失败：{error}",
+    "notice.tuiUnavailable": "Hook TUI 不可用，未进行安装或信任：{error}",
+    "notice.installNeedsTui": "Maestro Flow Hooks 安装需要交互式 TUI。",
+    "notice.fallbackTrusted": "Hook 已信任并启用：{path}",
+    "notice.fallbackUnsafe": "无法安全显示完整 Hook 配置，信任未更改：{path}。请在交互式 TUI 中重试 /hooks。",
+    "notice.unsupportedEvents": "Pi 暂未映射 Codex Hook：{events}",
+    "notice.skippedHandlers": "已跳过 {count} 个 prompt、agent 或 async Hook；当前仅执行 command Hook。",
+    "notice.compat.stopPlainText": "Stop 必须返回 JSON，不能返回纯文本",
+    "notice.compat.preToolUseUnsupported": "PreToolUse 不支持 continue、stopReason 或 suppressOutput",
+    "notice.compat.updatedInput": "updatedInput 只能与 permissionDecision: allow 或 ask 一起返回",
+    "notice.compat.postToolUseUnsupported": "PostToolUse 当前不支持 updatedMCPToolOutput 或 suppressOutput",
+    "failure.title": "Hook 失败 · {event}",
+    "failure.titleWithCount": "Hook 失败 · {event}（{count}）",
+    "failure.command": "命令：{command}",
+    "failure.reason": "原因：{reason}",
+    "failure.output": "输出：{output}",
+    "failure.others": "其他失败：",
+    "failure.more": "… 还有 {count} 个失败",
+    "command.hooks.description": "安装、审核、信任或撤销 .pi/hooks.json",
+  },
+} as const;
+
+type HookCatalogKey = keyof (typeof HOOK_UI_CATALOGS)["zh-CN"];
+type HookTranslator = (key: HookCatalogKey, vars?: Readonly<Record<string, string | number>>) => string;
+
+/** Translate a catalog key with optional {var} substitution. */
+function translateHook(
+  locale: SupportedSettingsLocale,
+  key: HookCatalogKey,
+  vars?: Readonly<Record<string, string | number>>,
+): string {
+  const catalog = HOOK_UI_CATALOGS[locale] ?? HOOK_UI_CATALOGS["zh-CN"];
+  const template: unknown = catalog[key];
+  const text = typeof template === "string" ? template : HOOK_UI_CATALOGS["zh-CN"][key] as string;
+  if (!vars) return text;
+  return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
+    vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
+}
+
 interface AdapterOptions {
   getPermissionMode?: () => PermissionMode;
   trustFilePath?: string;
   isTeammateChild?: () => boolean;
   onCompactionCancelled?: () => void;
+  shouldSkipStopHook?: () => boolean;
+  /** UI language for notices and the review overlay; defaults to zh-CN. */
+  locale?: SupportedSettingsLocale;
 }
 
 interface HookState {
@@ -93,6 +197,8 @@ export interface CodexHookAdapter {
 export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptions = {}): CodexHookAdapter {
   const trustFilePath = options.trustFilePath ?? join(getAgentDir(), "hook-trust.json");
   const getPermissionMode = options.getPermissionMode ?? (() => "default");
+  const locale = options.locale ?? "zh-CN";
+  const t: HookTranslator = (key, vars) => translateHook(locale, key, vars);
   const state: HookState = {
     active: false,
     lifecycle: new AbortController(),
@@ -116,9 +222,9 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
       state.toggles = await loadHookToggles(trustFilePath, state.loaded.filePath);
       state.active = await isHookConfigTrusted(trustFilePath, state.loaded.filePath, state.loaded.hash);
       if (!state.active && announce) {
-        ctx.ui.notify(`发现未信任的 Hook 配置：${sanitizeHookDisplayText(state.loaded.filePath)}。运行 /hooks 进行审核。`, "warning");
+        ctx.ui.notify(t("notice.untrustedAnnounce", { path: sanitizeHookDisplayText(state.loaded.filePath) }), "warning");
       }
-      if (state.active && announce) reportCompatibilityWarnings(ctx, state.loaded);
+      if (state.active && announce) reportCompatibilityWarnings(ctx, state.loaded, t);
     } catch (error) {
       state.loaded = undefined;
       state.active = false;
@@ -153,12 +259,12 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
       const failures = outputs.filter((output) =>
         output.error || output.timedOut || (output.exitCode !== 0 && output.exitCode !== 2),
       );
-      if (failures.length > 0) sendHookFailureMessage(pi, eventName, failures);
+      if (failures.length > 0) sendHookFailureMessage(pi, eventName, failures, t);
       const protocolErrors = outputs
-        .map((output) => outputCompatibilityError(eventName, output))
+        .map((output) => outputCompatibilityError(eventName, output, t))
         .filter((message): message is string => Boolean(message));
       if (protocolErrors.length > 0) {
-        ctx.ui.notify(`${eventName} Hook 输出不兼容：${protocolErrors[0]}`, "warning");
+        ctx.ui.notify(t("notice.incompatibleOutput", { event: eventName, message: protocolErrors[0] }), "warning");
       }
       for (const output of outputs) notifySystemMessage(output, ctx);
       return outputs;
@@ -218,7 +324,7 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
       const hash = loaded.hash;
       if (!hash) return "close";
       const entries = buildHookReviewEntries(loaded, state.toggles);
-      const action = await showHookReviewOverlay(ctx, entries, state.active, loaded, uiState, notice);
+      const action = await showHookReviewOverlay(ctx, entries, state.active, loaded, uiState, notice, locale);
       uiState = action.uiState;
       if (action.kind === "close") return "close";
       if (action.kind === "install") return "install";
@@ -226,43 +332,52 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
       if (action.kind === "toggle") {
         const selected = entries.find((entry) => entry.id === action.hookId);
         if (!selected?.supported) {
-          notice = "无法切换 · 当前仅执行同步 command Hook";
+          notice = t("notice.toggleUnsupported");
           continue;
         }
         const enabled = !selected.enabled;
         try {
           await setHookEnabled(trustFilePath, loaded.filePath, selected.id, enabled);
           state.toggles = { ...state.toggles, [selected.id]: enabled };
-          notice = `${enabled ? "已启用" : "已停用"} · ${selected.event} · ${truncateHookText(selected.command, 100)}`;
+          notice = t("notice.toggled", {
+            state: enabled ? t("value.enabled") : t("value.disabled"),
+            event: selected.event,
+            command: truncateHookText(selected.command, 100),
+          });
         } catch (error) {
-          notice = `更新失败 · ${errorMessage(error)}`;
+          notice = t("notice.toggleFailed", { error: errorMessage(error) });
         }
         continue;
       }
 
       const confirmed = await ctx.ui.confirm(
-        state.active ? "撤销 Hook 信任？" : "信任项目 Hooks？",
+        state.active ? t("confirm.revokeTitle") : t("confirm.trustTitle"),
         state.active
-          ? `配置：${sanitizeHookDisplayText(loaded.filePath)}\n撤销后所有 Hook 将立即停止触发。`
-          : `配置：${sanitizeHookDisplayText(loaded.filePath)}\nHash：${hash.slice(0, 12)}\n启用：${entries.filter((entry) => entry.enabled).length}/${entries.length}`,
+          ? t("confirm.revokeDetail", { path: sanitizeHookDisplayText(loaded.filePath) })
+          : t("confirm.trustDetail", {
+              path: sanitizeHookDisplayText(loaded.filePath),
+              hash: hash.slice(0, 12),
+              enabled: entries.filter((entry) => entry.enabled).length,
+              total: entries.length,
+            }),
       );
       if (!confirmed) {
-        notice = state.active ? "已取消撤销" : "已取消信任";
+        notice = state.active ? t("notice.cancelRevoke") : t("notice.cancelTrust");
         continue;
       }
       try {
         if (state.active) {
           await revokeHookConfigTrust(trustFilePath, loaded.filePath);
           state.active = false;
-          notice = "已撤销 Hook 信任";
+          notice = t("notice.revoked");
         } else {
           await trustHookConfig(trustFilePath, loaded.filePath, hash);
           state.active = true;
-          notice = "已信任 Hook 配置 · 已启用项将自动运行";
-          reportCompatibilityWarnings(ctx, loaded);
+          notice = t("notice.trusted");
+          reportCompatibilityWarnings(ctx, loaded, t);
         }
       } catch (error) {
-        notice = `更新信任失败 · ${errorMessage(error)}`;
+        notice = t("notice.trustFailed", { error: errorMessage(error) });
       }
     }
     return "close";
@@ -289,33 +404,33 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
 
   const fallbackHookReview = async (ctx: ExtensionContext, loaded: LoadedCodexHooks): Promise<void> => {
     if (state.active) {
-      ctx.ui.notify(`Hook 已信任并启用：${sanitizeHookDisplayText(loaded.filePath)}`, "info");
-      reportCompatibilityWarnings(ctx, loaded);
+      ctx.ui.notify(t("notice.fallbackTrusted", { path: sanitizeHookDisplayText(loaded.filePath) }), "info");
+      reportCompatibilityWarnings(ctx, loaded, t);
       return;
     }
     ctx.ui.notify(
-      `无法安全显示完整 Hook 配置，信任未更改：${sanitizeHookDisplayText(loaded.filePath)}。请在交互式 TUI 中重试 /hooks。`,
+      t("notice.fallbackUnsafe", { path: sanitizeHookDisplayText(loaded.filePath) }),
       "error",
     );
   };
 
   pi.registerCommand("hooks", {
-    description: "安装、审核、信任或撤销 .pi/hooks.json",
+    description: t("command.hooks.description"),
     async handler(args, ctx) {
       await reload(ctx, false);
       const action = args.trim().toLowerCase();
       const loaded = state.loaded;
       if (action === "revoke") {
         if (!loaded?.exists || !loaded.hash) {
-          ctx.ui.notify(`未找到 ${loaded?.filePath ?? join(ctx.cwd, ".pi", "hooks.json")}`, "info");
+          ctx.ui.notify(t("notice.notFound", { path: loaded?.filePath ?? join(ctx.cwd, ".pi", "hooks.json") }), "info");
           return;
         }
         try {
           await revokeHookConfigTrust(trustFilePath, loaded.filePath);
           state.active = false;
-          ctx.ui.notify("已撤销当前 Hook 配置的信任。", "info");
+          ctx.ui.notify(t("notice.revokedCurrent"), "info");
         } catch (error) {
-          ctx.ui.notify(`撤销 Hook 信任失败：${sanitizeHookDisplayText(errorMessage(error))}`, "error");
+          ctx.ui.notify(t("notice.revokeFailed", { error: sanitizeHookDisplayText(errorMessage(error)) }), "error");
         }
         return;
       }
@@ -324,12 +439,12 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
           await runHookInterface(ctx, action === "install" || !loaded?.exists || !loaded.hash);
           return;
         } catch (error) {
-          ctx.ui.notify(`Hook TUI 不可用，未进行安装或信任：${sanitizeHookDisplayText(errorMessage(error))}`, "error");
+          ctx.ui.notify(t("notice.tuiUnavailable", { error: sanitizeHookDisplayText(errorMessage(error)) }), "error");
           return;
         }
       }
       if (!loaded?.exists || !loaded.hash || action === "install") {
-        ctx.ui.notify("Maestro Flow Hooks 安装需要交互式 TUI。", "error");
+        ctx.ui.notify(t("notice.installNeedsTui"), "error");
         return;
       }
       await fallbackHookReview(ctx, loaded);
@@ -364,7 +479,7 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
     if (event.source === "extension" || !state.active) return;
     state.turnId = randomUUID();
     state.stopHookActive = false;
-    ctx.ui.setStatus(STATUS_KEY, "⬡ Hook…");
+    ctx.ui.setStatus(STATUS_KEY, t("status.hook"));
     try {
       const outputs = await execute("UserPromptSubmit", [], {
         ...turnInput("UserPromptSubmit", ctx, state, getPermissionMode()),
@@ -462,7 +577,7 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
   });
 
   pi.on("agent_end", async (event, ctx) => {
-    if (!state.active) return;
+    if (!state.active || options.shouldSkipStopHook?.()) return;
     const outputs = await execute("Stop", [], {
       ...turnInput("Stop", ctx, state, getPermissionMode()),
       stop_hook_active: state.stopHookActive,
@@ -494,6 +609,7 @@ async function showHookReviewOverlay(
   loaded: LoadedCodexHooks,
   initialState: Partial<HookReviewUiState>,
   notice: string | undefined,
+  locale: SupportedSettingsLocale,
 ): Promise<HookReviewAction> {
   return ctx.ui.custom<HookReviewAction>((tui, theme, _keybindings, done) =>
     new HookReviewOverlay({
@@ -504,6 +620,7 @@ async function showHookReviewOverlay(
       theme,
       notice,
       initialState,
+      locale,
       requestRender: () => tui.requestRender(),
       done,
     }), {
@@ -613,6 +730,7 @@ function sendHookFailureMessage(
   pi: ExtensionAPI,
   eventName: CodexHookEvent,
   failures: ParsedHookOutput[],
+  t: HookTranslator,
 ): void {
   const first = failures[0];
   if (!first) return;
@@ -627,14 +745,16 @@ function sendHookFailureMessage(
   pi.sendMessage({
     customType: "codex-hook-failure",
     content: [
-      `Hook 失败 · ${eventName}${failures.length > 1 ? `（${failures.length}）` : ""}`,
-      `命令：${truncateHookText(hookCommand(first), MAX_HOOK_COMMAND_LENGTH)}`,
-      `原因：${truncateHookText(firstReason, MAX_HOOK_NOTICE_LENGTH)}`,
+      failures.length > 1
+        ? t("failure.titleWithCount", { event: eventName, count: failures.length })
+        : t("failure.title", { event: eventName }),
+      t("failure.command", { command: truncateHookText(hookCommand(first), MAX_HOOK_COMMAND_LENGTH) }),
+      t("failure.reason", { reason: truncateHookText(firstReason, MAX_HOOK_NOTICE_LENGTH) }),
       ...(firstOutput && firstOutput !== firstReason
-        ? [`输出：${truncateHookText(firstOutput, MAX_HOOK_OUTPUT_LENGTH)}`]
+        ? [t("failure.output", { output: truncateHookText(firstOutput, MAX_HOOK_OUTPUT_LENGTH) })]
         : []),
-      ...(summaries.length > 0 ? ["其他失败：", ...summaries] : []),
-      ...(remaining > 0 ? [`… 还有 ${remaining} 个失败`] : []),
+      ...(summaries.length > 0 ? [t("failure.others"), ...summaries] : []),
+      ...(remaining > 0 ? [t("failure.more", { count: remaining })] : []),
     ].join("\n"),
     display: true,
     details: { event: eventName, count: failures.length },
@@ -669,26 +789,27 @@ function truncateHookText(value: string, maxLength: number): string {
 function outputCompatibilityError(
   eventName: CodexHookEvent,
   output: ParsedHookOutput,
+  t: HookTranslator,
 ): string | undefined {
   if (!isSuccessfulOutput(output)) return undefined;
   const json = output.json;
   if (eventName === "Stop" && output.exitCode === 0 && output.plainText) {
-    return "Stop 必须返回 JSON，不能返回纯文本";
+    return t("notice.compat.stopPlainText");
   }
   if (!json) return undefined;
   if (eventName === "PreToolUse") {
     const specific = hookSpecific(output);
     if (json.continue === false || "stopReason" in json || "suppressOutput" in json) {
-      return "PreToolUse 不支持 continue、stopReason 或 suppressOutput";
+      return t("notice.compat.preToolUseUnsupported");
     }
     if (isRecord(specific?.updatedInput) && specific?.permissionDecision !== "allow") {
       if (specific?.permissionDecision !== "ask") {
-        return "updatedInput 只能与 permissionDecision: allow 或 ask 一起返回";
+        return t("notice.compat.updatedInput");
       }
     }
   }
   if (eventName === "PostToolUse" && ("updatedMCPToolOutput" in json || "suppressOutput" in json)) {
-    return "PostToolUse 当前不支持 updatedMCPToolOutput 或 suppressOutput";
+    return t("notice.compat.postToolUseUnsupported");
   }
   return undefined;
 }
@@ -722,15 +843,15 @@ function contentText(content: unknown): string {
     .join("\n");
 }
 
-function reportCompatibilityWarnings(ctx: ExtensionContext, loaded: LoadedCodexHooks): void {
+function reportCompatibilityWarnings(ctx: ExtensionContext, loaded: LoadedCodexHooks, t: HookTranslator): void {
   const configuredUnsupported = UNSUPPORTED_PI_EVENTS.filter((eventName) =>
     (loaded.config.hooks[eventName]?.length ?? 0) > 0,
   );
   if (configuredUnsupported.length > 0) {
-    ctx.ui.notify(`Pi 暂未映射 Codex Hook：${configuredUnsupported.join(", ")}`, "warning");
+    ctx.ui.notify(t("notice.unsupportedEvents", { events: configuredUnsupported.join(", ") }), "warning");
   }
   const skipped = countSkippedHandlers(loaded.config);
-  if (skipped > 0) ctx.ui.notify(`已跳过 ${skipped} 个 prompt、agent 或 async Hook；当前仅执行 command Hook。`, "warning");
+  if (skipped > 0) ctx.ui.notify(t("notice.skippedHandlers", { count: skipped }), "warning");
 }
 
 function stringField(record: Record<string, unknown>, key: string): string | undefined {

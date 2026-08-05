@@ -106,7 +106,7 @@ export async function reconnectServers(
       const connection = await state.manager.connect(name, definition);
       if (connection.status === "needs-auth") {
         if (ctx.hasUI) {
-          ctx.ui.notify(`MCP: ${name} requires OAuth. Run /mcp-auth ${name} first.`, "warning");
+          ctx.ui.notify(`MCP: ${name} requires OAuth. Run /mcp auth ${name} first.`, "warning");
         }
         continue;
       }
@@ -218,7 +218,7 @@ export async function logoutServer(
   await state.manager.close(serverName);
   updateStatusBar(state);
 
-  const message = `OAuth credentials cleared for "${serverName}". Run /mcp-auth ${serverName} to authenticate again.`;
+  const message = `OAuth credentials cleared for "${serverName}". Run /mcp auth ${serverName} to authenticate again.`;
   if (ctx.hasUI) ctx.ui.notify(message, "info");
   return { ok: true, message };
 }
@@ -302,7 +302,7 @@ export async function openMcpSetup(
           resolve({ configChanged });
         });
       },
-      { overlay: true, overlayOptions: { anchor: "center", width: 92 } },
+      { overlay: true, overlayOptions: { anchor: "center", width: "94%" } },
     );
   });
 }
@@ -397,7 +397,7 @@ export async function openMcpPanel(
           resolve();
         }, { noticeLines, keybindings });
       },
-      { overlay: true, overlayOptions: { anchor: "center", width: 82 } },
+      { overlay: true, overlayOptions: { anchor: "center", width: "94%" } },
     );
   });
 
@@ -441,7 +441,7 @@ export async function openMcpAuthPanel(
           noticeLines: ["Select an OAuth MCP server and press Enter or ctrl+a to authenticate."],
         });
       },
-      { overlay: true, overlayOptions: { anchor: "center", width: 82 } },
+      { overlay: true, overlayOptions: { anchor: "center", width: "94%" } },
     );
   });
 

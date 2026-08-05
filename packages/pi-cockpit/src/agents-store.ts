@@ -7,7 +7,9 @@ import type { AgentProgressSnapshot } from "pi-maestro-teammate/v1/types";
 import { sanitizeExtensionStatusText } from "./extension-status.ts";
 import type { AgentRow, AgentStatus } from "./types.ts";
 
-const TAIL_MAX = 48;
+const STATUS_TEXT_MAX = 48;
+/** Selected-session output kept for the expandable fixed detail region. */
+export const SESSION_CONTENT_MAX = 2_048;
 
 // Every string here originates in an LLM-authored teammate event. A raw newline
 // would split one widget row into several physical terminal rows and a raw escape
@@ -18,10 +20,18 @@ function clean(raw: string | undefined): string {
 	return raw === undefined ? "" : sanitizeExtensionStatusText(raw);
 }
 
-function truncateTail(raw: string): string {
+function truncateText(raw: string, max: number): string {
 	const flat = clean(raw);
 	if (flat.length === 0) return "";
-	return flat.length > TAIL_MAX ? flat.slice(0, TAIL_MAX - 1) + "…" : flat;
+	return flat.length > max ? flat.slice(0, max - 1) + "…" : flat;
+}
+
+function truncateStatusText(raw: string): string {
+	return truncateText(raw, STATUS_TEXT_MAX);
+}
+
+function truncateSessionContent(raw: string): string {
+	return truncateText(raw, SESSION_CONTENT_MAX);
 }
 
 // Store inputs are compatibility-relaxed projections of the versioned public
@@ -47,29 +57,11 @@ export type MessagePayload = Partial<Omit<
 export type CompletePayload = Pick<TeammateCompleteEvent, "correlationId" | "exitCode">
 	& Partial<Pick<TeammateCompleteEvent, "durationMs" | "wakeable" | "cancelled">>;
 
-/**
- * How long a failed agent stays on screen after it completes.
- *
- * Long enough to read the role and the tail that explains it; short enough that
- * the panel still empties itself without the user clearing anything.
- */
-export const FAILED_LINGER_MS = 30_000;
-
-/**
- * How long a sleeping (wakeable) row stays visible after completion.
- *
- * Matches the native widget's idle-hide window so both surfaces agree on
- * when an idle agent stops occupying screen space.
- */
-export const SLEEPING_LINGER_MS = 60_000;
-
-/**
- * How long a terminated (cancelled/aborted) row stays on screen after it ends.
- *
- * Shorter than a failure: cancellation is expected, but the user should still
- * see the × long enough to read which agent was taken down.
- */
-export const TERMINATED_LINGER_MS = 15_000;
+export const AGENT_LINGER_MS = 60_000;
+/** Compatibility exports: every terminal state now uses one visible window. */
+export const FAILED_LINGER_MS = AGENT_LINGER_MS;
+export const SLEEPING_LINGER_MS = AGENT_LINGER_MS;
+export const TERMINATED_LINGER_MS = AGENT_LINGER_MS;
 
 /**
  * How long a completed agent's tombstone suppresses self-healing.
@@ -158,11 +150,11 @@ function latestTool(tools: Array<string | { name?: string; status?: string }> | 
 	const tool = tools.find((candidate) => typeof candidate === "object" && candidate?.status === "running")
 		?? tools.at(-1);
 	if (!tool) return undefined;
-	if (typeof tool === "string") return truncateTail(tool);
+	if (typeof tool === "string") return truncateStatusText(tool);
 	const name = tool?.name?.trim();
 	if (!name) return undefined;
 	const status = tool.status?.trim();
-	return truncateTail(status && status !== "completed" ? `${name} (${status})` : name);
+	return truncateStatusText(status && status !== "completed" ? `${name} (${status})` : name);
 }
 
 // Self-accumulating roster. The teammate extension only broadcasts deltas
@@ -175,6 +167,8 @@ export class AgentsStore {
 	private readonly roster = new Map<string, AgentRow>();
 	/** correlationId -> completion time; suppresses post-complete self-healing. */
 	private readonly completedAt = new Map<string, number>();
+	/** correlationId of the agent currently shown in teammate's viewing view. */
+	private viewingId: string | undefined;
 
 	private isTombstoned(id: string | undefined, now: number): boolean {
 		if (id === undefined) return false;
@@ -198,6 +192,29 @@ export class AgentsStore {
 		// tombstoned.
 		this.completedAt.delete(id);
 		const prev = this.roster.get(id);
+		const prevIsTerminal = prev?.status === "done"
+			|| prev?.status === "failed"
+			|| prev?.status === "terminated"
+			|| prev?.status === "sleeping";
+		const nextStatus = p.status === undefined
+			? prevIsTerminal ? "running" : prev?.status ?? "running"
+			: mapAgentStatus(p.status);
+		if ((clean(p.agent) || prev?.agent || "").startsWith("graph(") && nextStatus === "running") {
+			// Restarting a graph is authoritative for its retained descendants too;
+			// their next progress snapshot may reuse the same correlation ids.
+			const pending = [id];
+			const visited = new Set<string>();
+			while (pending.length > 0) {
+				const parent = pending.pop()!;
+				if (visited.has(parent)) continue;
+				visited.add(parent);
+				for (const candidate of this.roster.values()) {
+					if (candidate.parentCorrelationId !== parent) continue;
+					this.completedAt.delete(candidate.correlationId);
+					pending.push(candidate.correlationId);
+				}
+			}
+		}
 		const row: AgentRow = {
 			...prev,
 			correlationId: id,
@@ -205,12 +222,12 @@ export class AgentsStore {
 			name: p.name === undefined ? prev?.name : clean(p.name),
 			role: deriveRole(p.agent, p.name),
 			task: prev?.task ?? clean(p.name),
-			status: p.status === undefined ? prev?.status ?? "running" : mapAgentStatus(p.status),
+			status: nextStatus,
 			phase: typeof p.phase === "string" ? clean(p.phase) : prev?.phase,
 			lastOutcome: p.lastOutcome
 				? {
 					status: p.lastOutcome.status,
-					...(p.lastOutcome.message ? { message: truncateTail(p.lastOutcome.message) } : {}),
+					...(p.lastOutcome.message ? { message: truncateStatusText(p.lastOutcome.message) } : {}),
 					settledAt: p.lastOutcome.settledAt,
 				}
 				: prev?.lastOutcome,
@@ -227,12 +244,16 @@ export class AgentsStore {
 			row.turnStartedAt = now;
 			delete row.finishedAt;
 			delete row.failedAt;
+			delete row.resultReadyAt;
 		} else if (row.status === "sleeping") {
 			row.finishedAt = row.lastOutcome?.settledAt ?? prev?.finishedAt ?? now;
 		} else if (row.status !== "done" && row.status !== "failed" && row.status !== "terminated") {
 			delete row.finishedAt;
 		}
 		this.roster.set(id, row);
+		if (row.status === "done" || row.status === "failed" || row.status === "terminated" || row.status === "sleeping") {
+			this.completedAt.set(id, row.finishedAt ?? now);
+		}
 	}
 
 	applyMessage(p: MessagePayload, now = Date.now()): void {
@@ -269,13 +290,16 @@ export class AgentsStore {
 					? { spawnedBy: p.correlationId }
 					: {}),
 			}, now);
+			// This same delta is the authoritative content for the self-healed row;
+			// a provisional sleeping seed must not tombstone itself before ingestion.
+			this.completedAt.delete(targetId);
 		}
 		const row = this.roster.get(targetId);
-		if (!row) return;
+		if (!row || this.isTombstoned(targetId, now)) return;
 		const progressActivity = p.progress?.find((progress) => progress.correlationId === targetId)?.lastActivityAt;
 		row.lastActivityAt = normalizeStartedAt(p.lastActivityAt ?? progressActivity, now);
 		const tail = p.lastMessage ?? p.message;
-		if (typeof tail === "string" && tail.length > 0) row.tail = truncateTail(tail);
+		if (typeof tail === "string" && tail.length > 0) row.tail = truncateSessionContent(tail);
 		if (p.recentTools) {
 			const tool = latestTool(p.recentTools);
 			if (tool) row.activeTool = tool;
@@ -287,7 +311,7 @@ export class AgentsStore {
 		if (typeof p.outputTokens === "number") row.outputTokens = p.outputTokens;
 		if (typeof p.cacheReadTokens === "number") row.cacheReadTokens = p.cacheReadTokens;
 		if (typeof p.cacheWriteTokens === "number") row.cacheWriteTokens = p.cacheWriteTokens;
-		if (typeof p.error === "string") row.error = truncateTail(p.error);
+		if (typeof p.error === "string") row.error = truncateStatusText(p.error);
 		if (typeof p.requestedModel === "string") row.requestedModel = clean(p.requestedModel);
 		if (typeof p.resolvedModel === "string") row.resolvedModel = clean(p.resolvedModel);
 		if (Array.isArray(p.attemptedModels)) {
@@ -298,6 +322,10 @@ export class AgentsStore {
 			row.status = mapAgentStatus(p.status);
 			if (row.status === "done" || row.status === "failed" || row.status === "terminated") {
 				row.finishedAt ??= now;
+				this.completedAt.set(targetId, now);
+			} else if (row.status === "sleeping") {
+				row.finishedAt ??= now;
+				this.completedAt.set(targetId, now);
 			} else {
 				delete row.finishedAt;
 			}
@@ -319,10 +347,11 @@ export class AgentsStore {
 			for (const row of this.roster.values()) {
 				if (row.parentCorrelationId === id) pending.push(row.correlationId);
 			}
-			// A failed agent used to be deleted the moment its result arrived, so the
-			// only evidence of the failure disappeared in the same frame it appeared.
-			// Successes still vanish immediately — the work has simply moved on.
+			// Every terminal row remains visible for one minute. Tombstone it now so
+			// late progress cannot regress the retained row back to running; an
+			// explicit started event clears the tombstone for a genuine new turn.
 			const row = this.roster.get(id);
+			this.completedAt.set(id, now);
 			const cancelledById = id === p.correlationId && p.cancelled === true;
 			const failedByExitCode = id === p.correlationId
 				&& Number.isFinite(p.exitCode)
@@ -365,27 +394,30 @@ export class AgentsStore {
 				row.failedAt = now;
 				row.lastActivityAt = now;
 				delete row.activeTool;
-			} else {
-				this.roster.delete(id);
-				// Tombstone even when the row never existed: a `complete` that beats
-				// the first delta must still suppress the self-heal that follows.
-				this.completedAt.set(id, now);
+			} else if (row) {
+				row.status = "done";
+				row.taskStatus = "completed";
+				row.finishedAt = terminalTime(row, id === p.correlationId ? p : {}, now);
+				row.lastOutcome = { status: "completed", settledAt: row.finishedAt };
+				row.lastActivityAt = now;
+				delete row.activeTool;
+				delete row.failedAt;
 			}
 		}
 	}
 
-	/** Drop failed, terminated or expired sleeping rows that have had their time on screen. Returns true if any went. */
+	/** Drop terminal rows after their shared one-minute visible window. */
 	prune(now = Date.now()): boolean {
 		let changed = false;
 		for (const [id, row] of this.roster) {
-			if (row.failedAt !== undefined && now - row.failedAt >= FAILED_LINGER_MS) {
+			const terminal = row.status === "done"
+				|| row.status === "failed"
+				|| row.status === "terminated"
+				|| row.status === "sleeping";
+			const settledAt = this.completedAt.get(id);
+			if (terminal && settledAt !== undefined && now - settledAt >= AGENT_LINGER_MS) {
 				this.roster.delete(id);
-				changed = true;
-			} else if (row.status === "terminated" && row.finishedAt !== undefined && now - row.finishedAt >= TERMINATED_LINGER_MS) {
-				this.roster.delete(id);
-				changed = true;
-			} else if (row.status === "sleeping" && row.finishedAt !== undefined && now - row.finishedAt >= SLEEPING_LINGER_MS) {
-				this.roster.delete(id);
+				if (this.viewingId === id) this.viewingId = undefined;
 				changed = true;
 			}
 		}
@@ -395,12 +427,13 @@ export class AgentsStore {
 		return changed;
 	}
 
-	/** True while a failed, terminated or sleeping row is still counting down, so the redraw loop must run. */
+	/** True while a terminal row is counting down, so the redraw loop can expire it. */
 	hasLingering(): boolean {
 		for (const row of this.roster.values()) {
-			if (row.failedAt !== undefined) return true;
-			if (row.status === "terminated") return true;
-			if (row.status === "sleeping") return true;
+			if (row.status === "done"
+				|| row.status === "failed"
+				|| row.status === "terminated"
+				|| row.status === "sleeping") return true;
 		}
 		return false;
 	}
@@ -414,6 +447,7 @@ export class AgentsStore {
 	}
 
 	private applyProgress(parentCorrelationId: string, p: ProgressPayload, now: number): void {
+		if (this.isTombstoned(p.correlationId, now)) return;
 		if (!this.roster.has(p.correlationId)
 			&& this.canMaterialize(p.correlationId, parentCorrelationId, now)) {
 			// Self-heal: see applyMessage. A graph child whose `started` delta was
@@ -448,6 +482,10 @@ export class AgentsStore {
 			row.status = mapAgentStatus(p.status);
 			if (row.status === "done" || row.status === "failed" || row.status === "terminated") {
 				row.finishedAt = terminalTime(row, p, now);
+				this.completedAt.set(p.correlationId, now);
+			} else if (row.status === "sleeping") {
+				row.finishedAt = terminalTime(row, p, now);
+				this.completedAt.set(p.correlationId, now);
 			} else {
 				delete row.finishedAt;
 			}
@@ -472,7 +510,7 @@ export class AgentsStore {
 		row.cacheReadTokens = p.cacheReadTokens;
 		row.cacheWriteTokens = p.cacheWriteTokens;
 		if (p.error === undefined) delete row.error;
-		else row.error = truncateTail(p.error);
+		else row.error = truncateStatusText(p.error);
 		if (p.requestedModel === undefined) delete row.requestedModel;
 		else row.requestedModel = clean(p.requestedModel);
 		if (p.resolvedModel === undefined) delete row.resolvedModel;
@@ -480,7 +518,7 @@ export class AgentsStore {
 		if (p.attemptedModels === undefined) delete row.attemptedModels;
 		else row.attemptedModels = p.attemptedModels.map((model) => clean(model)).filter(Boolean);
 		if (typeof p.lastMessage === "string" && p.lastMessage.length > 0) {
-			row.tail = truncateTail(p.lastMessage);
+			row.tail = truncateSessionContent(p.lastMessage);
 		}
 	}
 
@@ -491,7 +529,19 @@ export class AgentsStore {
 		return [...this.roster.values()].sort((a, b) => {
 			const activity = b.lastActivityAt - a.lastActivityAt;
 			return activity || a.correlationId.localeCompare(b.correlationId);
-		});
+		}).map((row) =>
+			row.correlationId === this.viewingId ? { ...row, viewing: true } : row,
+		);
+	}
+
+	/** Mark which agent the teammate viewing view currently shows. */
+	setViewingAgent(correlationId: string | undefined): void {
+		this.viewingId = correlationId;
+	}
+
+	/** Correlation id of the agent currently shown in the viewing view. */
+	getViewingAgent(): string | undefined {
+		return this.viewingId;
 	}
 
 	get size(): number {
@@ -505,5 +555,6 @@ export class AgentsStore {
 	clear(): void {
 		this.roster.clear();
 		this.completedAt.clear();
+		this.viewingId = undefined;
 	}
 }

@@ -29,11 +29,12 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
+  ThemeColor,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { buildSessionContext, copyToClipboard } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { COCKPIT_TODO_TOGGLE_EVENT, type CockpitUiOwnershipV1 } from "pi-cockpit/v1/events";
+import { COCKPIT_INPUT_TARGET_EVENT, COCKPIT_TODO_TOGGLE_EVENT, type CockpitInputTargetV1, type CockpitUiOwnershipV1 } from "pi-cockpit/v1/events";
 import type { FlowToolResult } from "../tools/tool-result.ts";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
@@ -71,6 +72,7 @@ import {
   onBeforeAgentStart as goalBeforeAgentStart,
   onAgentEnd as goalAgentEnd,
   onAgentSettled as goalAgentSettled,
+  onProviderPressureSettled as goalProviderPressureSettled,
   getActiveGoal,
   getGoalPanelEntries,
   currentGoalPhase,
@@ -80,6 +82,7 @@ import {
   setWorkflowCoordinator,
   setGoalStateChangeListener,
   setGoalPanelOwnership,
+  setGoalStaticMode,
   type GoalParams as GoalActionParams,
 } from "../tools/goal.ts";
 import {
@@ -142,6 +145,7 @@ import { buildKnowledgeCenterView, type KnowledgeCenterView } from "../knowledge
 import {
   onSessionStart as inputHistorySessionStart,
   onSessionShutdown as inputHistorySessionShutdown,
+  setInputRouteTarget,
 } from "../tui/input-history.ts";
 import {
   initPlan,
@@ -161,7 +165,7 @@ import {
   onAgentEndPlan,
   consumePlanCleanContextCompaction,
   applyPlanContextToCompaction,
-  PLAN_CLEAN_CONTEXT_COMPACTION_MARKER,
+  isPlanCleanContextCompactionInstructions,
   getMode as getPlanMode,
   hasPlan,
   getPlanText,
@@ -196,6 +200,8 @@ import {
 import {
   CompactionArbiter,
   compactionRequestFromInstructions,
+  isNativeFallbackCompactionInstructions,
+  isProviderPressureCompactionTrigger,
   runObservedCompaction,
 } from "../compaction/compaction-arbiter.ts";
 import { registerCompactionSettingsCommand, showCompactionSettingsOverlay } from "../tui/compaction-settings.ts";
@@ -207,6 +213,9 @@ import { registerFff } from "../tools/fff.ts";
 import { registerBashBg } from "../tools/bash-bg.ts";
 import { registerLoop } from "../tools/loop.ts";
 import { registerModelAvailability } from "../tools/model-availability.ts";
+import { registerResourceTool } from "../tools/resource.ts";
+import { registerConflictTool } from "../tools/conflict.ts";
+import { persistStructuredResults } from "../teammate/agent-output-capture.ts";
 import { registerMarkdownReviewCommand } from "../tools/markdown-review-command.ts";
 import {
   proxyTeammateChildTool,
@@ -216,12 +225,25 @@ import {
   type TeammatePermissionBroker,
 } from "pi-maestro-teammate/v1/child-extensions";
 import { TEAMMATE_STARTED_EVENT, TEAMMATE_MESSAGE_EVENT, TEAMMATE_COMPLETE_EVENT } from "pi-maestro-teammate/v1/types";
+import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
 import { sharedModelCircuitBreaker } from "pi-maestro-teammate/v1/retry";
 import { createFlowSettingsProvider, registerFlowSettingsProvider } from "../settings/flow-settings-provider.ts";
 import {
   createApiManagerSettingsProvider,
   registerApiManagerSettingsProvider,
 } from "../settings/api-manager-settings-provider.ts";
+import {
+  createMcpSettingsProvider,
+  registerMcpSettingsProvider,
+} from "../settings/mcp-settings-provider.ts";
+import {
+  createSkillsSettingsProvider,
+  registerSkillsSettingsProvider,
+} from "../settings/skills-settings-provider.ts";
+import {
+  createSmartSearchSettingsProvider,
+  registerSmartSearchSettingsProvider,
+} from "../settings/smart-search-settings-provider.ts";
 
 interface MaestroState {
   baseCwd: string;
@@ -268,6 +290,9 @@ export function effectivePermissionMode(approvalMode: PermissionMode): Permissio
 const TODO_TOGGLE_KEY = "alt+t";
 const TODO_TOGGLE_LABEL = altKey("T");
 const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
+const INPUT_TARGET_COLORS = new Set<ThemeColor>([
+  "accent", "warning", "success", "mdLink", "thinkingLow", "thinkingMedium", "thinkingHigh", "muted", "error",
+]);
 const TEAMMATE_ATTACH_ENTRY = "maestro-teammate-attach";
 const GOAL_OVERLAY_KEY = "alt+g";
 const GOAL_OVERLAY_LABEL = altKey("G");
@@ -341,6 +366,17 @@ export function todoActorFromTeammateStarted(event: unknown): TodoActorRef | und
   };
 }
 
+/**
+ * Access the teammate extension's published v1 mailbox registry (durable task
+ * notification + pending-count + capability negotiation for teammate agents).
+ * Available only while the teammate extension runs an active mailbox in this
+ * process (root host, mailbox not disabled); undefined otherwise.
+ */
+export function mailboxRegistry(): MailboxHostRegistry | undefined {
+  const bridge = globalThis as typeof globalThis & Record<symbol, unknown>;
+  return bridge[Symbol.for("pi-maestro-teammate.mailbox-registry")] as MailboxHostRegistry | undefined;
+}
+
 function parseGoalActionParams(params: Record<string, unknown>): GoalActionParams | undefined {
   const action = params.action;
   if (action === "get") return { action };
@@ -382,6 +418,18 @@ function parseGoalActionParams(params: Record<string, unknown>): GoalActionParam
 const CHINESE_RESPONSE_STATE_ENTRY = "maestro-chinese-response-mode";
 const CHINESE_GLOBAL_STATE_FILE = "maestro-chinese-response-mode.json";
 const CHINESE_RESPONSE_PROMPT_MARKER = "<chinese_response_mode>";
+
+// Disambiguate the resource tool contract: the built-in read tool handles only
+// local files; protocol resources (pr:// issue:// skill:// rule://) go through resource.
+const RESOURCE_TOOL_GUIDANCE = [
+  "Protocol resources are read via the resource tool, not read:",
+  "  - pr://owner/repo/N[/diff|/files] or pr://N — GitHub pull requests (requires gh CLI)",
+  "  - issue://owner/repo/N or issue://N — GitHub issues (requires gh CLI)",
+  "  - skill://name — installed skill's SKILL.md",
+  "  - rule://name — project rule files (agents/rules/cursor/cline)",
+  "  - agent://<id>[/key[/index[/field]]] — structured output of a completed teammate subagent (bare agent://<id> returns the full JSON; path segments are object keys / array indices, no /json prefix)",
+  "The built-in read tool handles only local files and ordinary URLs.",
+].join("\n");
 
 export function chineseGlobalStatePath(homeDir: string): string {
   return join(homeDir, ".pi", CHINESE_GLOBAL_STATE_FILE);
@@ -533,7 +581,17 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   // pi install's SettingsManager overwrites postinstall's settings.json writes
   // with its stale in-memory cache. Re-register companion packages at load time
   // so the next pi startup picks them up.
-  try { registerCompanionPackages(); } catch { /* best-effort */ }
+  try {
+    const companionRegistration = registerCompanionPackages();
+    for (const entry of companionRegistration.preservedUnowned) {
+      console.warn(`[pi-maestro-flow] Preserved local companion override for ${entry.name}: ${entry.source}`);
+    }
+    for (const entry of companionRegistration.versionMismatch) {
+      console.warn(`[pi-maestro-flow] ${entry.name} resolved ${entry.actual ?? "unknown"}, but Flow requires ${entry.expected}; reinstall the versioned Flow package.`);
+    }
+  } catch (error) {
+    console.warn(`[pi-maestro-flow] Companion package registration skipped: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   // UCL: capture only the locked extension-tool surface. pi.getAllTools() exposes
   // schemas but not execute(), so the registry is the invocation source for the
@@ -563,6 +621,20 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   pi.events.on(TEAMMATE_STARTED_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateStarted, event));
   pi.events.on(TEAMMATE_MESSAGE_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateProgress, event));
   pi.events.on(TEAMMATE_COMPLETE_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateComplete, event));
+  // agent:// data source for background/detached runs: the root tool_result of
+  // a background dispatch carries empty results, so the authoritative completion
+  // event is the persistence channel for its structured outputs.
+  pi.events.on(TEAMMATE_COMPLETE_EVENT, (event) => {
+    try {
+      const payload = event as { structuredResults?: unknown };
+      if (!Array.isArray(payload.structuredResults) || payload.structuredResults.length === 0) return;
+      void persistStructuredResults(payload.structuredResults, undefined).catch((err) => {
+        console.warn(`[pi-maestro-flow] agent output capture failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    } catch (err) {
+      console.warn(`[pi-maestro-flow] agent output capture failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
   const emitGoalChanged = (): void => {
     if (!guiEvents.isActive()) return;
     const goal = getActiveGoal();
@@ -1102,6 +1174,8 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   registerBashBg(pi);
   registerLoop(pi);
   registerModelAvailability(pi);
+  registerResourceTool(pi);
+  registerConflictTool(pi);
   registerKeybindingsCommand(pi);
   registerMarkdownReviewCommand(pi);
 
@@ -1812,7 +1886,6 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     },
   };
   pi.registerCommand("sysprompt", systemPromptCommand);
-  pi.registerCommand("systemprompt", systemPromptCommand);
 
   pi.registerCommand("export-session-info", {
     description:
@@ -1898,11 +1971,26 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     const ownership = payload as Partial<CockpitUiOwnershipV1>;
     cockpitOwnsTodo = ownership.todo === true;
     setGoalPanelOwnership(ownership.goal === true, widgetCtx);
+    setGoalStaticMode(ownership.static === true);
     setQuietMode(ownership.quiet === true, ownership.quietSymbols);
     if (typeof ownership.todoExpanded === "boolean") {
       panelMode = ownership.todoExpanded ? "expanded" : "collapsed";
     }
     updateTodoWidget();
+  });
+
+  pi.events.on(COCKPIT_INPUT_TARGET_EVENT, (payload) => {
+    if (!payload || typeof payload !== "object") {
+      setInputRouteTarget(undefined);
+      return;
+    }
+    const target = payload as Partial<CockpitInputTargetV1>;
+    if (target.version !== 1 || typeof target.label !== "string" || !target.label.trim()
+      || typeof target.color !== "string" || !INPUT_TARGET_COLORS.has(target.color as ThemeColor)) {
+      setInputRouteTarget(undefined);
+      return;
+    }
+    setInputRouteTarget({ label: target.label.trim(), color: target.color as ThemeColor });
   });
 
   pi.registerShortcut(TODO_TOGGLE_KEY, {
@@ -2066,6 +2154,8 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     widgetCtx?.ui.setWidget("todo-panel", undefined);
     widgetCtx = undefined;
     todoRootContext = undefined;
+    // Keep the cwd captured by the initial teammate tool_result: detached work
+    // may publish its completion after the session context has shut down.
     panelMode = "collapsed";
     goalSessionShutdown(ctx);
     todoSessionShutdown(ctx);
@@ -2084,11 +2174,13 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
 
   pi.on("session_before_compact", async (event, ctx) => {
     const request = compactionRequestFromInstructions(event.customInstructions);
+    const isRecoveryFallback = isNativeFallbackCompactionInstructions(event.customInstructions);
     if (shouldCancelCompletedTurnThreshold(
       event.reason,
       preserveCompletedTurnFromNativeThreshold,
       request !== undefined,
       Boolean(ctx.hasPendingMessages?.()),
+      isRecoveryFallback,
     )) {
       preserveCompletedTurnFromNativeThreshold = false;
       return { cancel: true };
@@ -2098,12 +2190,13 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       event.signal,
     );
     if (!observed.allowed) return { cancel: true };
+    const providerPressureRecovery = isProviderPressureCompactionTrigger(observed.trigger);
     try {
       const result = await runObservedCompaction(observed, async () => {
         goalBeforeCompact(ctx);
         const cleanContextRequest = observed.trigger?.owner === "plan-handoff"
           && observed.trigger.reason === "clean-context"
-          && event.customInstructions?.includes(PLAN_CLEAN_CONTEXT_COMPACTION_MARKER)
+          && isPlanCleanContextCompactionInstructions(event.customInstructions)
           ? consumePlanCleanContextCompaction()
           : undefined;
         if (observed.trigger?.owner === "plan-handoff" && observed.trigger.reason === "clean-context") {
@@ -2133,21 +2226,53 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
             getWorkflowIdentity: () => workflowRecoveryIdentity(),
             trigger: observed.trigger,
             summaryInputTokens: projected.estimatedInputTokens,
+            failClosed: providerPressureRecovery,
           }), observed);
       });
       if (result?.cancel) {
         observed.finalize("cancel");
-        goalCompactionCancelled(ctx);
+        if (providerPressureRecovery) {
+          try { goalCompactionCancelled(ctx); } catch { /* cancellation remains authoritative */ }
+        } else {
+          goalCompactionCancelled(ctx);
+        }
       }
       return result;
     } catch (error) {
       observed.finalize("error");
+      if (providerPressureRecovery) {
+        try { goalCompactionCancelled(ctx); } catch { /* cancellation remains authoritative */ }
+        try {
+          ctx.ui.notify(
+            `Provider-pressure compaction failed; native fallback was blocked: ${error instanceof Error ? error.message : String(error)}`,
+            "error",
+          );
+        } catch { /* cancellation remains authoritative */ }
+        return { cancel: true };
+      }
       goalCompactionCancelled(ctx);
       ctx.ui.notify(
         `Compaction failed; falling back to Pi native compaction: ${error instanceof Error ? error.message : String(error)}`,
         "warning",
       );
       return undefined;
+    }
+  });
+
+  // agent:// data source: capture teammate structured outputs when the tool
+  // result arrives (foreground) or the authoritative completion event fires
+  // (background/detached, whose root tool_result carries empty results).
+  pi.on("tool_result", (event, ctx) => {
+    if ((event as { toolName?: unknown }).toolName !== "teammate") return;
+    try {
+      const details = (event as { details?: unknown }).details as
+        | { results?: unknown; progress?: unknown }
+        | undefined;
+      void persistStructuredResults(details?.results, details?.progress, ctx.cwd).catch((err) => {
+        console.warn(`[pi-maestro-flow] agent output capture failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    } catch (err) {
+      console.warn(`[pi-maestro-flow] agent output capture failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   });
 
@@ -2166,7 +2291,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
         "warning",
       );
     }
-    await goalCompact(event, ctx);
+    await goalCompact(event, ctx, { deferContinuation: true });
   });
 
   pi.on("input", (event) => {
@@ -2186,7 +2311,8 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     const todoResult = await onBeforeAgentStartTodo({
       systemPrompt: planResult?.systemPrompt ?? event.systemPrompt,
     });
-    return todoResult ?? planResult;
+    const base = todoResult?.systemPrompt ?? planResult?.systemPrompt ?? event.systemPrompt;
+    return { systemPrompt: `${base}\n\n${RESOURCE_TOOL_GUIDANCE}` };
   });
 
   pi.on("context", async (event, ctx) => {
@@ -2200,7 +2326,17 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     const planResult = onContextPlan(event.messages);
     const todoResult = await onContextTodo(planResult?.messages ?? event.messages);
     const messages = todoResult?.messages ?? planResult?.messages ?? event.messages;
-    const pressureMessages = await midTurnAutoCompaction.evaluate(messages, ctx);
+    let pressureMessages: AgentMessage[] | undefined;
+    try {
+      pressureMessages = await midTurnAutoCompaction.evaluate(messages, ctx);
+    } catch (error) {
+      // The context transform must never take down the request: fall back to
+      // the plain messages and surface the failure instead of throwing.
+      ctx.ui.notify(
+        `Mid-turn pressure evaluation failed; continuing without pruning: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    }
     if (pressureMessages) return { messages: pressureMessages };
     return todoResult ?? planResult;
   });
@@ -2213,6 +2349,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   // Todo widget stale and mid-turn compaction bookkeeping unrun, with no clue which
   // subsystem broke. Isolate each step and name it in the warning instead.
   pi.on("agent_end", async (event, ctx) => {
+    const providerPressureRecovery = midTurnAutoCompaction.isProviderPressureRecoveryActive();
     const step = async (label: string, run: () => unknown) => {
       try {
         await run();
@@ -2225,7 +2362,9 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     };
     await step("Plan", () => onAgentEndPlan(event, ctx));
     await step("Workflow refresh", () => refreshWorkflow(ctx, true));
-    await step("Goal attempt", () => goalAgentEnd(event, ctx));
+    if (!providerPressureRecovery) {
+      await step("Goal attempt", () => goalAgentEnd(event, ctx));
+    }
     await step("Output-limit compaction", () =>
       midTurnAutoCompaction.onOutputLimit(event.messages as AgentMessage[], ctx));
     await step("Goal change event", () => emitGoalChanged());
@@ -2241,8 +2380,10 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   // root handler. Goal therefore consumes the authoritative settlement first,
   // then compaction can safely act on the resulting continuation state.
   pi.on("agent_settled", async (_event, ctx) => {
+    const providerPressureRecovery = midTurnAutoCompaction.isProviderPressureRecoveryActive();
     try {
-      await goalAgentSettled(ctx);
+      if (providerPressureRecovery) goalProviderPressureSettled(ctx);
+      else await goalAgentSettled(ctx);
     } catch (error) {
       ctx.ui.notify(
         `Goal settlement failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -2289,6 +2430,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   // Hook denial runs after Plan's advisory tool_call pass and before the interactive prompt.
   const hookAdapter = registerCodexHookAdapter(pi, {
     getPermissionMode: () => effectivePermissionMode(approvalMode),
+    shouldSkipStopHook: () => midTurnAutoCompaction.shouldSkipStopHook(),
     onCompactionCancelled: () => {
       compactionArbiter.complete("cancel");
       goalCompactionCancelled();
@@ -2300,47 +2442,70 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     else if (!ctx.hasUI) ctx.ui.notify(`${surface} requires interactive TUI mode.`, "warning");
     return ctx?.hasUI ? ctx : undefined;
   };
+  /** Run an action with a unified status-line lifecycle (set before, clear after). */
+  const withActionStatus = async (status: string, run: (ctx: ExtensionContext) => Promise<void> | void): Promise<void> => {
+    const ctx = requireFlowSettingsContext(status);
+    if (!ctx) return;
+    ctx.ui.setStatus("maestro-settings", status);
+    try {
+      await run(ctx);
+    } finally {
+      ctx.ui.setStatus("maestro-settings", undefined);
+    }
+  };
   const flowSettingsProvider = createFlowSettingsProvider({
     getAgentResponseLanguage: () => chineseResponseMode.isEnabled() ? "zh-CN" : "default",
     actions: {
-      "compaction.manage": async () => {
-        const ctx = requireFlowSettingsContext("Compaction settings");
-        if (ctx) await showCompactionSettingsOverlay(ctx as ExtensionCommandContext);
-      },
-      "failover.manage": async () => {
-        const ctx = requireFlowSettingsContext("Model failover settings");
-        if (ctx) await showModelFailoverOverlay(ctx, sharedModelCircuitBreaker);
-      },
-      "responseLanguage.manage": () => {
-        const ctx = requireFlowSettingsContext("Agent response language");
-        if (ctx) chineseResponseMode.toggle(ctx);
-      },
-      "permissions.manage": () => {
-        const ctx = requireFlowSettingsContext("Permissions");
-        if (ctx) ctx.ui.notify(permissionController.summary(effectivePermissionMode(approvalMode)), "info");
-      },
-      "skills.manage": async () => {
-        const ctx = requireFlowSettingsContext("Skill manager");
-        if (!ctx) return;
+      "compaction.manage": () => withActionStatus("打开压缩设置…", async (ctx) => {
+        await showCompactionSettingsOverlay(ctx as ExtensionCommandContext);
+      }),
+      "failover.manage": () => withActionStatus("打开模型故障转移设置…", async (ctx) => {
+        await showModelFailoverOverlay(ctx, sharedModelCircuitBreaker);
+      }),
+      "responseLanguage.manage": () => withActionStatus("切换 Agent 回复语言…", async (ctx) => {
+        chineseResponseMode.toggle(ctx);
+      }),
+      "permissions.manage": () => withActionStatus("查看权限概览…", async (ctx) => {
+        ctx.ui.notify(permissionController.summary(effectivePermissionMode(approvalMode)), "info");
+      }),
+      "skills.manage": () => withActionStatus("打开 Skill 管理器…", async (ctx) => {
         const result = await runSkillManager(ctx, new SkillManagerStore(ctx.cwd));
         if (result.configChanged) ctx.ui.notify("Skill changes will apply after the extension reloads.", "info");
-      },
-      "mcp.manage": async () => {
-        const ctx = requireFlowSettingsContext("MCP manager");
-        if (ctx && mcpAdapterHandle) await mcpAdapterHandle.openManager(ctx);
-        else if (ctx) ctx.ui.notify("MCP adapter is unavailable.", "warning");
-      },
-      "hooks.manage": async () => {
-        const ctx = requireFlowSettingsContext("Hooks manager");
-        if (ctx) await hookAdapter.openSettings(ctx);
-      },
+      }),
+      "mcp.manage": () => withActionStatus("打开 MCP 管理器…", async (ctx) => {
+        if (mcpAdapterHandle) await mcpAdapterHandle.openManager(ctx);
+        else ctx.ui.notify("MCP adapter is unavailable.", "warning");
+      }),
+      "hooks.manage": () => withActionStatus("打开 Hooks 管理器…", async (ctx) => {
+        await hookAdapter.openSettings(ctx);
+      }),
     },
   });
-  registerFlowSettingsProvider(pi.events, flowSettingsProvider);
+  // Settings providers re-register at each session boundary so a host reload
+  // cannot accumulate stale shared-bus listeners from previous instances
+  // (see issue ISS-20260803-005; cockpit follows the same pattern).
+  let flowSettingsDisposer: (() => void) | undefined;
+  const registerFlowSettings = (): void => {
+    if (flowSettingsDisposer) return;
+    flowSettingsDisposer = registerFlowSettingsProvider(pi.events, flowSettingsProvider);
+  };
+  const disposeFlowSettings = (): void => {
+    flowSettingsDisposer?.();
+    flowSettingsDisposer = undefined;
+  };
   const openApiManager = async (args: string, surface: string): Promise<void> => {
     const ctx = requireFlowSettingsContext(surface);
-    if (ctx && apiProviderHandle) await apiProviderHandle.openManager(ctx as ExtensionCommandContext, args);
-    else if (ctx) ctx.ui.notify("API provider manager is unavailable.", "warning");
+    if (!ctx) return;
+    if (!apiProviderHandle) {
+      ctx.ui.notify("API provider manager is unavailable.", "warning");
+      return;
+    }
+    ctx.ui.setStatus("maestro-settings", `正在打开 ${surface}…`);
+    try {
+      await apiProviderHandle.openManager(ctx as ExtensionCommandContext, args);
+    } finally {
+      ctx.ui.setStatus("maestro-settings", undefined);
+    }
   };
   const apiManagerSettingsProvider = createApiManagerSettingsProvider({
     actions: {
@@ -2350,10 +2515,62 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       "api.list": () => openApiManager("list", "API provider overview"),
     },
   });
-  registerApiManagerSettingsProvider(pi.events, apiManagerSettingsProvider);
-  pi.on("session_start", (_event, ctx) => { flowSettingsContext = ctx; });
+  let apiManagerSettingsDisposer: (() => void) | undefined;
+  const registerApiManagerSettings = (): void => {
+    if (apiManagerSettingsDisposer) return;
+    apiManagerSettingsDisposer = registerApiManagerSettingsProvider(pi.events, apiManagerSettingsProvider);
+  };
+  const disposeApiManagerSettings = (): void => {
+    apiManagerSettingsDisposer?.();
+    apiManagerSettingsDisposer = undefined;
+  };
+  // Provider-only registrations: mcp/skills/smart-search expose their managed
+  // state through the settings shell without a legacy action surface.
+  const mcpSettingsProvider = createMcpSettingsProvider({});
+  let mcpSettingsDisposer: (() => void) | undefined;
+  const registerMcpSettings = (): void => {
+    if (mcpSettingsDisposer) return;
+    mcpSettingsDisposer = registerMcpSettingsProvider(pi.events, mcpSettingsProvider);
+  };
+  const disposeMcpSettings = (): void => {
+    mcpSettingsDisposer?.();
+    mcpSettingsDisposer = undefined;
+  };
+  const skillsSettingsProvider = createSkillsSettingsProvider({});
+  let skillsSettingsDisposer: (() => void) | undefined;
+  const registerSkillsSettings = (): void => {
+    if (skillsSettingsDisposer) return;
+    skillsSettingsDisposer = registerSkillsSettingsProvider(pi.events, skillsSettingsProvider);
+  };
+  const disposeSkillsSettings = (): void => {
+    skillsSettingsDisposer?.();
+    skillsSettingsDisposer = undefined;
+  };
+  const smartSearchSettingsProvider = createSmartSearchSettingsProvider({});
+  let smartSearchSettingsDisposer: (() => void) | undefined;
+  const registerSmartSearchSettings = (): void => {
+    if (smartSearchSettingsDisposer) return;
+    smartSearchSettingsDisposer = registerSmartSearchSettingsProvider(pi.events, smartSearchSettingsProvider);
+  };
+  const disposeSmartSearchSettings = (): void => {
+    smartSearchSettingsDisposer?.();
+    smartSearchSettingsDisposer = undefined;
+  };
+  pi.on("session_start", (_event, ctx) => {
+    flowSettingsContext = ctx;
+    registerFlowSettings();
+    registerApiManagerSettings();
+    registerMcpSettings();
+    registerSkillsSettings();
+    registerSmartSearchSettings();
+  });
   pi.on("session_shutdown", (_event, ctx) => {
     if (flowSettingsContext === ctx) flowSettingsContext = undefined;
+    disposeFlowSettings();
+    disposeApiManagerSettings();
+    disposeMcpSettings();
+    disposeSkillsSettings();
+    disposeSmartSearchSettings();
   });
 
   const teammatePermissionBroker: TeammatePermissionBroker = async (call, ctx) => {
@@ -2456,26 +2673,67 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
 function registerMaestroChildSurface(pi: ExtensionAPI): void {
   const compactionArbiter = new CompactionArbiter();
   const autoCompaction = createMidTurnAutoCompaction(pi, { arbiter: compactionArbiter });
+  let preserveCompletedTurnFromNativeThreshold = false;
 
   pi.on("session_start", (event, ctx) => {
     autoCompaction.onSessionStart(ctx, event);
   });
   pi.on("context", async (event, ctx) => {
-    const messages = await autoCompaction.evaluate(event.messages, ctx);
-    return messages ? { messages } : undefined;
+    try {
+      const messages = await autoCompaction.evaluate(event.messages, ctx);
+      return messages ? { messages } : undefined;
+    } catch (error) {
+      ctx.ui.notify(
+        `Mid-turn pressure evaluation failed; continuing without pruning: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+      return undefined;
+    }
   });
   pi.on("before_provider_request", (event, ctx) =>
     autoCompaction.beforeProviderRequest(event.payload, ctx));
   pi.on("agent_end", async (event, ctx) => {
-    await autoCompaction.onOutputLimit(event.messages as AgentMessage[], ctx);
+    try {
+      await autoCompaction.onOutputLimit(event.messages as AgentMessage[], ctx);
+    } catch (error) {
+      ctx.ui.notify(
+        `Child output-limit compaction failed at the end of the turn: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    }
+    preserveCompletedTurnFromNativeThreshold = shouldPreserveCompletedTurn(
+      event.messages as AgentMessage[],
+      Boolean(ctx.hasPendingMessages?.()),
+    );
   });
   pi.on("agent_settled", async (_event, ctx) => {
-    await autoCompaction.onAgentEnd(ctx);
+    try {
+      await autoCompaction.onAgentEnd(ctx);
+    } catch (error) {
+      ctx.ui.notify(
+        `Child settled context compaction failed: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    } finally {
+      preserveCompletedTurnFromNativeThreshold = false;
+    }
   });
   pi.on("session_before_compact", async (event, ctx) => {
     const request = compactionRequestFromInstructions(event.customInstructions);
+    const isRecoveryFallback = isNativeFallbackCompactionInstructions(event.customInstructions);
+    if (shouldCancelCompletedTurnThreshold(
+      event.reason,
+      preserveCompletedTurnFromNativeThreshold,
+      request !== undefined,
+      Boolean(ctx.hasPendingMessages?.()),
+      isRecoveryFallback,
+    )) {
+      preserveCompletedTurnFromNativeThreshold = false;
+      return { cancel: true };
+    }
     const observed = compactionArbiter.observeStart(request, event.signal);
     if (!observed.allowed) return { cancel: true };
+    const providerPressureRecovery = isProviderPressureCompactionTrigger(observed.trigger);
     try {
       const projected = await autoCompaction.projectCompactionInput(event, ctx);
       commitProjectedCompactionInput(event, projected);
@@ -2483,11 +2741,21 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
         createMaestroCompaction(event, ctx, {
           trigger: observed.trigger,
           summaryInputTokens: projected.estimatedInputTokens,
+          failClosed: providerPressureRecovery,
         }));
       if (result?.cancel) observed.finalize("cancel");
       return result;
     } catch (error) {
       observed.finalize("error");
+      if (providerPressureRecovery) {
+        try {
+          ctx.ui.notify(
+            `Child provider-pressure compaction failed; native fallback was blocked: ${error instanceof Error ? error.message : String(error)}`,
+            "error",
+          );
+        } catch { /* cancellation remains authoritative */ }
+        return { cancel: true };
+      }
       ctx.ui.notify(
         `Child compaction failed; falling back to Pi native compaction: ${error instanceof Error ? error.message : String(error)}`,
         "warning",
@@ -2502,6 +2770,7 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
   });
   pi.on("session_shutdown", (_event, ctx) => {
     autoCompaction.onSessionShutdown(ctx);
+    preserveCompletedTurnFromNativeThreshold = false;
     compactionArbiter.reset();
   });
 

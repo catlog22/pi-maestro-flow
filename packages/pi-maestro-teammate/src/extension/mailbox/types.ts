@@ -24,6 +24,9 @@ export const CLAIM_STALE_MS = 20_000;
 /** Cross-process poll interval. */
 export const POLL_INTERVAL_MS = 50;
 
+/** Maximum consecutive dispatch failures before a message is dead-lettered. */
+export const MAX_DISPATCH_RETRIES = 5;
+
 /** Maximum consecutive high-priority messages before servicing one normal. */
 export const STARVATION_BOUND = 8;
 
@@ -230,3 +233,11 @@ export const MESSAGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][
 export const OWNER_ID_PATTERN = /^[a-f0-9]{32}$/;
 export const WORKSPACE_ID_PATTERN = /^[a-f0-9]{64}$/;
 export const CORRELATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+/**
+ * Path-safe identifier pattern applied to workspace/owner ids before they are
+ * joined into filesystem paths. Rejects empty strings, path separators, and
+ * traversal sequences while staying compatible with test fixtures ("a") and
+ * production values ("caller", sha256 hex, workspace-peer owner ids).
+ */
+export const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;

@@ -59,13 +59,14 @@
 ### Install
 
 ```bash
-# Install (pi-maestro-teammate auto-installed as dependency)
-pi install npm:pi-maestro-flow
+# Install or upgrade (pi-maestro-teammate is installed as a dependency)
+pi install npm:pi-maestro-flow@0.14.2
 
-# Verify
+# Confirm Flow, Teammate, and Cockpit are listed, then restart Pi or reload extensions.
 pi list
-# Expected: pi-maestro-flow@0.4.x, pi-maestro-teammate@0.4.x
 ```
+
+Upgrades migrate Flow-managed companion registrations. A same-name local development override is preserved and reported in the startup log; update or remove that override explicitly.
 
 ### Registered Tools Overview
 
@@ -1109,7 +1110,7 @@ teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: Read 
 
 ```bash
 # ─── Install ───
-pi install npm:pi-maestro-flow
+pi install npm:pi-maestro-flow@0.14.2
 
 # ─── Knowledge ───
 maestro search "query" --code

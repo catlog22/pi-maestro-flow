@@ -82,7 +82,7 @@ test("shadow mode: v2 files written, message also delivered via direct path", as
   assert.ok(result.ok);
 
   // v2 file exists in ready (not consumed)
-  if (result.ok) {
+  if (result.ok && result.messageId) {
     const envelope = await service.store.readEnvelope("ready", result.messageId);
     assert.ok(envelope, "v2 envelope should exist in ready");
   }
@@ -156,26 +156,37 @@ test("disabled mode: uses v1 direct path only, no v2 files", async () => {
 
 test("rollback: switching from authoritative to disabled preserves v2 files", async () => {
   const dispatched: string[] = [];
-  const service = makeService(async (e) => { dispatched.push(e.messageId); });
+  // Slow poll keeps the enqueued message LIVE in ready at rollback time, which
+  // is the drain scenario hasV2Files() reports on (applied/dead are receipts).
+  const service = new MailboxService({
+    rootDir: join(baseDir, "mailbox"),
+    authority: permissiveAuthority(),
+    recipientCorrelationId: "corr-child-1",
+    workspaceId: "a".repeat(64),
+    teamId: "team-root",
+    ownerId: "b".repeat(32),
+    onDispatch: async (e) => { dispatched.push(e.messageId); },
+    pollMs: 500,
+    now: () => nowMs,
+  });
   await service.start();
   const rollout = makeRollout(service, { mode: "authoritative", advertiseV2: true });
 
-  // Enqueue via v2
+  // Enqueue via v2 — stays in ready (consumer has not polled yet)
   const { result } = await rollout.deliver(BASE_REQUEST);
   assert.ok(result.ok);
-  const messageId = result.ok ? result.messageId : "";
+  const messageId = result.ok && result.messageId ? result.messageId : "";
 
-  // Wait for consumer to accept
-  await new Promise((resolve) => setTimeout(resolve, 100));
-
-  // Rollback to disabled
-  rollout.setMode("disabled");
+  // Rollback to disabled BEFORE the consumer dispatches.
+  await rollout.setMode("disabled");
   assert.equal(rollout.mode, "disabled");
   assert.equal(rollout.advertisedCapability(), "v1");
 
-  // v2 files preserved (message in accepted state)
+  // v2 files preserved (message still live in ready for drain)
   const hasFiles = await rollout.hasV2Files();
   assert.equal(hasFiles, true);
+  assert.ok(await service.store.readEnvelope("ready", messageId));
+  assert.equal(dispatched.length, 0, "downgrade must stop the consumer before it dispatches");
 
   // New messages go via v1
   DELIVERED_V1.length = 0;
@@ -197,7 +208,7 @@ test("rollback: switching from shadow to disabled stops v2 admission", async () 
   assert.ok(liveBefore > 0);
 
   // Rollback
-  rollout.setMode("disabled");
+  await rollout.setMode("disabled");
 
   // New message goes v1 only
   DELIVERED_V1.length = 0;
@@ -241,18 +252,18 @@ test("disk error in authoritative mode is surfaced, not silently falling back", 
 
 // --- Capability Advertisement ---
 
-test("advertisedCapability reflects mode", () => {
+test("advertisedCapability reflects mode", async () => {
   const service = makeService();
   const rollout = makeRollout(service, { mode: "disabled" });
   assert.equal(rollout.advertisedCapability(), "v1");
 
-  rollout.setMode("shadow");
+  await rollout.setMode("shadow");
   assert.equal(rollout.advertisedCapability(), "v2");
 
-  rollout.setMode("authoritative");
+  await rollout.setMode("authoritative");
   assert.equal(rollout.advertisedCapability(), "v2");
 
-  rollout.setMode("disabled");
+  await rollout.setMode("disabled");
   assert.equal(rollout.advertisedCapability(), "v1");
 });
 
@@ -270,12 +281,12 @@ test("mixed v1/v2: disabled peer uses v1, v2 peer uses mailbox", async () => {
 
   // v1 delivery (simulating a v1 peer interaction)
   DELIVERED_V1.length = 0;
-  rollout.setMode("disabled");
+  await rollout.setMode("disabled");
   await rollout.deliver({ ...BASE_REQUEST, payload: "v1 message" });
   assert.equal(DELIVERED_V1[0], "v1 message");
 
   // Switch back to authoritative and deliver
-  rollout.setMode("authoritative");
+  await rollout.setMode("authoritative");
   await rollout.deliver({ ...BASE_REQUEST, payload: "v2 message" });
   await new Promise((resolve) => setTimeout(resolve, 200));
   await service.stop();

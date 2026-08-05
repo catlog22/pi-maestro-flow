@@ -1,0 +1,1757 @@
+{
+  "commands": {
+    "maestro": {
+      "name": "maestro",
+      "name_zh": "指挥家",
+      "description": "Intelligent coordinator - analyze intent + read project state → select optimal command chain → execute via Skill()",
+      "description_zh": "智能协调器 — 分析用户意图，读取项目状态，选择并执行最优命令链",
+      "workflow": "入口命令，自动路由到最优命令链",
+      "workflow_zh": "所有工作流的统一入口，可路由至任意下游命令",
+      "next_commands": [
+        "maestro-init",
+        "maestro-plan",
+        "maestro-execute",
+        "maestro-brainstorm"
+      ],
+      "flags": [
+        "-y (自动模式)",
+        "-c (恢复会话)",
+        "--dry-run (演练)",
+        "--chain (强制指定链)",
+        "--exec auto|cli|skill (执行引擎)",
+        "--tool <name> (指定工具)"
+      ]
+    },
+    "maestro-init": {
+      "name": "maestro-init",
+      "name_zh": "初始化项目",
+      "description": "Initialize project with auto state detection (empty/code/existing) — creates .workflow/ directory structure",
+      "description_zh": "自动检测项目状态（空项目/代码库/已有项目），创建 .workflow/ 目录结构，包含 project.md、state.json、config.json 和 specs/",
+      "workflow": "brainstorm → **init** → roadmap/blueprint",
+      "workflow_zh": "头脑风暴之后，路线图/规格生成之前执行",
+      "prev_commands": [
+        "maestro-brainstorm"
+      ],
+      "next_commands": [
+        "maestro-roadmap"
+      ],
+      "flags": [
+        "--auto (自动模式)",
+        "--from <source> (导入上游 context package，如 brainstorm:ID、@file)"
+      ]
+    },
+    "maestro-plan": {
+      "name": "maestro-plan",
+      "name_zh": "规划阶段",
+      "description": "Explore, clarify, plan, check, and confirm a phase execution plan — produces plan.json with waves and task definitions",
+      "description_zh": "5 阶段规划流水线：探索 → 澄清需求 → 规划 → 检查 → 确认。生成包含波次和任务定义的 plan.json",
+      "workflow": "init/roadmap → **plan** → execute",
+      "workflow_zh": "项目初始化和路线图就绪后执行，为 maestro-execute 生成计划",
+      "prev_commands": [
+        "maestro-init",
+        "maestro-roadmap"
+      ],
+      "next_commands": [
+        "maestro-execute"
+      ],
+      "flags": [
+        "[phase] (阶段编号或名称)",
+        "--collab (协作模式)",
+        "--spec SPEC-xxx (引用规格)",
+        "--auto (自动模式)",
+        "--gaps (填补缺口)",
+        "--dir <path> (草稿目录模式)",
+        "--revise [instructions] (修订计划)",
+        "--check <plan-dir> (检查计划)"
+      ]
+    },
+    "maestro-execute": {
+      "name": "maestro-execute",
+      "name_zh": "执行计划",
+      "description": "Execute phase plan with wave-based parallel execution and atomic commits",
+      "description_zh": "按波次并行执行阶段任务，支持依赖感知调度和原子提交。消费 plan.json 生成的任务定义",
+      "workflow": "plan → **execute** → verify",
+      "workflow_zh": "消费 maestro-plan 产出的 plan.json，执行时内置验证门控（E2.7）",
+      "prev_commands": [
+        "maestro-plan"
+      ],
+      "next_commands": [
+        "quality-review",
+        "maestro-milestone-audit"
+      ],
+      "flags": [
+        "[phase] (阶段)",
+        "--auto-commit (自动提交)",
+        "--method agent|codex|gemini|cli|auto (执行方式)",
+        "--executor <tool> (指定执行工具)",
+        "--dir <path> (草稿目录模式)",
+        "-y (自动模式)"
+      ]
+    },
+    "maestro-brainstorm": {
+      "name": "maestro-brainstorm",
+      "name_zh": "头脑风暴",
+      "description": "Unified brainstorming with dual-mode operation — auto pipeline (multi-role synthesis) and single role analysis",
+      "description_zh": "双模式头脑风暴：自动模式（框架生成 → 多角色并行分析 → 综合输出）或单角色分析。输出 .brainstorming/ 目录中的结构化产物",
+      "workflow": "**brainstorm** → init → roadmap/blueprint",
+      "workflow_zh": "工作流起点，为后续初始化和规划提供概念基础",
+      "prev_commands": [],
+      "next_commands": [
+        "maestro-init"
+      ],
+      "flags": [
+        "[topic|role-name] (主题或角色)",
+        "--yes (自动模式)",
+        "--count N (角色数量)",
+        "--session ID (指定会话)",
+        "--update (更新现有会话)",
+        "--skip-questions (跳过提问)",
+        "--include-questions (包含提问)",
+        "--style-skill PKG (引入风格记忆包)"
+      ]
+    },
+    "maestro-analyze": {
+      "name": "maestro-analyze",
+      "name_zh": "分析讨论",
+      "description": "Dual-layer analysis: macro (text) for requirement exploration with scope_verdict, micro (number) for phase-level 6-dimension deep analysis",
+      "description_zh": "双层分析：Macro（文本参数）宏观需求探索产出 scope_verdict，Micro（数字参数）Phase 级 6 维度深度分析。生成 analysis.md 和 context.md",
+      "workflow": "brainstorm/blueprint → **analyze** → roadmap/plan",
+      "workflow_zh": "Macro 层在 roadmap 之前探索需求影响面，Micro 层在 plan 之前深度分析 Phase",
+      "prev_commands": [
+        "maestro-brainstorm",
+        "maestro-init",
+        "maestro-blueprint"
+      ],
+      "next_commands": [
+        "maestro-roadmap",
+        "maestro-plan"
+      ],
+      "flags": [
+        "[phase|topic] (阶段编号=micro 或主题文本=macro)",
+        "-y (自动模式)",
+        "-c (恢复会话)",
+        "-q (快速模式，仅提取决策)",
+        "--gaps [ISS-ID] (缺口分析)",
+        "--from <source> (导入上游 context package)"
+      ]
+    },
+    "maestro-collab": {
+      "name": "maestro-collab",
+      "name_zh": "多 CLI 协作",
+      "description": "Multi-CLI collaborative analysis -- fan-out to multiple CLI tools, cross-verify, synthesize",
+      "description_zh": "多 CLI 协作分析：将同一需求扇出到多个 CLI 工具并行分析，交叉验证输出中的共识与冲突，合成统一报告和标准下游产物",
+      "workflow": "独立命令，可在任意阶段使用，产出标准 context.md + conclusions.json",
+      "workflow_zh": "扇出到多个 CLI 并行分析，交叉验证后合成统一报告",
+      "prev_commands": [],
+      "next_commands": [
+        "maestro-plan"
+      ],
+      "flags": [
+        "\"<requirement>\" (需求描述)",
+        "--tools <list> (指定 CLI 工具，逗号分隔)",
+        "--mode analysis|write (委派模式)",
+        "--rule <template> (共享规则模板)",
+        "-y (跳过确认)"
+      ]
+    },
+    "maestro-roadmap": {
+      "name": "maestro-roadmap",
+      "name_zh": "路线图",
+      "description": "Interactive roadmap creation with iterative refinement — lightweight alternative to blueprint",
+      "description_zh": "交互式路线图创建：需求分解 → 里程碑规划 → 迭代精化 → 阶段确认。blueprint 的轻量级替代方案",
+      "workflow": "init → **roadmap** → plan",
+      "workflow_zh": "项目初始化之后，阶段规划之前。适合不需要完整规格文档的项目",
+      "prev_commands": [
+        "maestro-init",
+        "maestro-brainstorm"
+      ],
+      "next_commands": [
+        "maestro-plan"
+      ],
+      "flags": [
+        "<requirement> (需求描述，必填)",
+        "-y (自动模式)",
+        "-c (恢复会话)",
+        "-m progressive|direct|auto (模式)",
+        "--from <source> (导入上游 context package，如 brainstorm:ID、@file)",
+        "--revise [instructions] (修订路线图)",
+        "--review (审查模式)"
+      ]
+    },
+    "maestro-impeccable": {
+      "name": "maestro-impeccable",
+      "name_zh": "UI 生产管线",
+      "description": "Chain maestro-impeccable commands with intelligent routing and quality gate loops for automated UI production",
+      "description_zh": "通过 critique/audit 评分驱动循环，将 impeccable skill 的命令编排为自动化质量门控管线，涵盖设计原型生成到生产加固",
+      "workflow": "init/roadmap → **maestro-impeccable --chain build** → plan → execute",
+      "workflow_zh": "可在规划前插入 UI 设计阶段（--chain build），为后续实现提供视觉参考",
+      "prev_commands": [
+        "maestro-init",
+        "maestro-roadmap"
+      ],
+      "next_commands": [
+        "maestro-plan"
+      ],
+      "flags": [
+        "<intent|target> (意图描述或目标路径)",
+        "--chain build|improve|enhance|harden|live (链类型)",
+        "--enhance <cmd> (enhance 链命令)",
+        "--threshold <score> (评分阈值)",
+        "--max-loops <n> (最大迭代次数)",
+        "-y (自动模式)"
+      ]
+    },
+    "maestro-milestone-audit": {
+      "name": "maestro-milestone-audit",
+      "name_zh": "里程碑审计",
+      "description": "Audit current milestone for cross-phase integration gaps",
+      "description_zh": "审核当前里程碑的跨阶段集成差距，检查功能完整性和接口一致性",
+      "workflow": "所有阶段完成后 → **milestone-audit** → milestone-complete",
+      "workflow_zh": "里程碑归档前的质量门控",
+      "prev_commands": [
+        "maestro-execute"
+      ],
+      "next_commands": [
+        "maestro-milestone-complete"
+      ],
+      "flags": [
+        "[milestone] (可选，如 'v1.0')"
+      ]
+    },
+    "maestro-milestone-complete": {
+      "name": "maestro-milestone-complete",
+      "name_zh": "完成里程碑",
+      "description": "Archive completed milestone and prepare for next",
+      "description_zh": "归档已完成的里程碑，提取经验教训，准备下一个里程碑的工作目录",
+      "workflow": "milestone-audit → **milestone-complete**",
+      "workflow_zh": "里程碑生命周期终点",
+      "prev_commands": [
+        "maestro-milestone-audit"
+      ],
+      "next_commands": [],
+      "flags": [
+        "[milestone] (可选，如 'v1.0')"
+      ]
+    },
+    "spec-setup": {
+      "name": "spec-setup",
+      "name_zh": "规格设置",
+      "description": "Initialize system specs by scanning project structure and generating conventions",
+      "description_zh": "扫描项目结构，自动生成代码约定、架构决策记录（ADR）和技术选型规范文件，初始化 specs/ 目录",
+      "workflow": "maestro-init 自动调用，或独立使用",
+      "workflow_zh": "通常由 maestro-init 自动执行，也可单独调用刷新规格",
+      "prev_commands": [
+        "maestro-init"
+      ],
+      "next_commands": [],
+      "flags": []
+    },
+    "spec-add": {
+      "name": "spec-add",
+      "name_zh": "添加规范",
+      "description": "Add a spec entry (bug, pattern, decision, or rule) to the appropriate specs file",
+      "description_zh": "向知识库添加规范条目：支持 project/global/team/personal 四种作用域，包含 bug、pattern、decision、rule 等分类",
+      "workflow": "随时使用，记录开发过程中的决策和模式",
+      "workflow_zh": "持续使用命令，在执行过程中积累项目知识",
+      "prev_commands": [],
+      "next_commands": [],
+      "flags": [
+        "--scope project|global|team|personal (作用域)",
+        "--roles <csv> (角色标签)",
+        "<category> (必填：分类)",
+        "<content> (必填：条目内容)"
+      ]
+    },
+    "spec-load": {
+      "name": "spec-load",
+      "name_zh": "加载规范",
+      "description": "Load relevant specs and lessons for current context (used by agents before execution)",
+      "description_zh": "加载与当前上下文相关的规范和学习记录，供代理在执行前注入上下文。支持按角色和关键词过滤",
+      "workflow": "代理执行前自动调用",
+      "workflow_zh": "通常由代理系统自动调用，也可手动检查当前上下文规范",
+      "prev_commands": [],
+      "next_commands": [],
+      "flags": [
+        "--role <role> (按角色过滤: implement|plan|test|review|analyze)",
+        "--keyword <word> (关键词搜索)",
+        "--with-lessons (包含学习记录)"
+      ]
+    },
+    "spec-remove": {
+      "name": "spec-remove",
+      "name_zh": "删除规范",
+      "description": "Remove a spec entry from a specs file by entry ID",
+      "description_zh": "通过条目 ID 从规范文件中删除指定条目。用于清理过时或错误的规范记录",
+      "workflow": "维护规范库时使用",
+      "workflow_zh": "配合 spec-add 使用，保持规范库整洁",
+      "prev_commands": [
+        "spec-add"
+      ],
+      "next_commands": [],
+      "flags": [
+        "<entry-id> (必填，条目 ID)"
+      ]
+    },
+    "quality-review": {
+      "name": "quality-review",
+      "name_zh": "代码审查",
+      "description": "Tiered code review (quick/standard/deep) with parallel agents, severity classification, and auto-issue creation",
+      "description_zh": "分层代码审查：quick（5 分钟）/ standard（全面）/ deep（深度，含安全审计）。并行代理审查，自动创建 BLOCK/WARN/INFO 分级问题",
+      "workflow": "execute → **quality-review** → [phase-transition | quality-auto-test]",
+      "workflow_zh": "执行完成后执行，发现问题可继续 quality-auto-test 或直接 phase-transition",
+      "prev_commands": [
+        "maestro-execute"
+      ],
+      "next_commands": [
+        "maestro-milestone-audit",
+        "quality-auto-test"
+      ],
+      "flags": [
+        "<phase> (必填)",
+        "--level quick|standard|deep (审查级别)",
+        "--dimensions security,architecture,... (审查维度)",
+        "--skip-specs (跳过规格检查)"
+      ]
+    },
+    "quality-test": {
+      "name": "quality-test",
+      "name_zh": "UAT 测试",
+      "description": "Conversational UAT with session persistence, auto-diagnosis, and gap-plan closure loop",
+      "description_zh": "对话式用户验收测试：会话持久化 → 自动诊断失败 → 差距修复计划 → 闭环执行。支持烟雾测试和自动修复模式",
+      "workflow": "quality-auto-test → **quality-test** → [quality-debug (if failures)]",
+      "workflow_zh": "自动测试之后运行 UAT，发现失败可触发 quality-debug",
+      "prev_commands": [
+        "quality-auto-test",
+        "maestro-execute"
+      ],
+      "next_commands": [
+        "quality-debug"
+      ],
+      "flags": [
+        "[phase] (阶段)",
+        "--smoke (仅冒烟测试)",
+        "--auto-fix (自动修复失败)"
+      ]
+    },
+    "quality-auto-test": {
+      "name": "quality-auto-test",
+      "name_zh": "统一自动测试",
+      "description": "Unified automated testing via CSV layer pipeline — generates, executes, and iterates tests from PRD specs, coverage gaps, or code exploration",
+      "description_zh": "统一自动测试 via CSV 层级管线：智能路由（spec/gap/code）→ 按层并行写测试 → 并行诊断失败 → 迭代收敛。替代原 quality-test-gen + quality-business-test + quality-integration-test",
+      "workflow": "quality-review → **quality-auto-test** → quality-test",
+      "workflow_zh": "验证后执行自动测试（智能路由选择 spec/gap/code 来源），然后 UAT",
+      "prev_commands": [
+        "quality-review",
+        "maestro-execute"
+      ],
+      "next_commands": [
+        "quality-test",
+        "quality-debug"
+      ],
+      "flags": [
+        "<phase> (必填)",
+        "--max-iter <N> (最大迭代，1=单次生成)",
+        "--layer <L0-L3> (限制层级)",
+        "--strategy (覆盖策略)",
+        "--dry-run (仅生成计划)",
+        "--re-run (重跑失败)",
+        "-c N (并发数)"
+      ]
+    },
+    "quality-debug": {
+      "name": "quality-debug",
+      "name_zh": "调试",
+      "description": "Parallel hypothesis-driven debugging with UAT integration and structured root cause collection",
+      "description_zh": "并行假设驱动调试：多个并行代理同时验证不同假设，结构化根因收集，可从 UAT 失败直接触发",
+      "workflow": "quality-test (失败) → **quality-debug** → [re-execute | quality-test]",
+      "workflow_zh": "测试失败后的调试闭环",
+      "prev_commands": [
+        "quality-test"
+      ],
+      "next_commands": [
+        "maestro-execute",
+        "quality-test"
+      ],
+      "flags": [
+        "[issue description] (问题描述)",
+        "--from-uat <phase> (从 UAT 失败触发)",
+        "--parallel (并行调试模式)"
+      ]
+    },
+    "quality-integration-test": {
+      "name": "quality-integration-test",
+      "name_zh": "集成测试 [已废弃]",
+      "description": "[DEPRECATED] Merged into quality-auto-test. Use /quality-auto-test <phase> instead.",
+      "description_zh": "[已废弃] 已合并入 quality-auto-test。使用 /quality-auto-test <phase> 替代。",
+      "workflow": "→ quality-auto-test",
+      "workflow_zh": "已合并，请使用 quality-auto-test",
+      "prev_commands": [],
+      "next_commands": [
+        "quality-auto-test"
+      ],
+      "flags": [],
+      "deprecated": true
+    },
+    "quality-refactor": {
+      "name": "quality-refactor",
+      "name_zh": "重构",
+      "description": "Tech debt reduction with reflection-driven iteration",
+      "description_zh": "技术债务减少：识别债务 → 评估影响 → 制定重构计划 → 反思驱动迭代执行，保证现有测试全部通过",
+      "workflow": "quality-review → **quality-refactor** → quality-test",
+      "workflow_zh": "代码审查发现技术债务后触发，重构后需重新测试",
+      "prev_commands": [
+        "quality-review"
+      ],
+      "next_commands": [
+        "quality-test"
+      ],
+      "flags": [
+        "[scope] (范围：模块路径、功能区域或 'all')"
+      ]
+    },
+    "quality-sync": {
+      "name": "quality-sync",
+      "name_zh": "文档同步",
+      "description": "Sync codebase docs after code changes — traces git diff through component/feature/requirement impact chain",
+      "description_zh": "代码变更后同步文档：检测 git diff → 追踪组件/功能/需求影响链 → 更新 .workflow/codebase/ 受影响文档",
+      "workflow": "任何代码变更后使用，保持文档与代码同步",
+      "workflow_zh": "维护命令，确保代码库文档始终反映最新代码状态",
+      "prev_commands": [
+        "maestro-execute"
+      ],
+      "next_commands": [],
+      "flags": [
+        "--full (全量同步)",
+        "--since <commit|HEAD~N> (指定起点)",
+        "--dry-run (演练，不写入)"
+      ]
+    },
+    "manage-status": {
+      "name": "manage-status",
+      "name_zh": "项目状态",
+      "description": "Display project dashboard with phase progress, active tasks, and next steps",
+      "description_zh": "显示项目仪表板：当前阶段进度、活跃任务状态、里程碑完成度和推荐的下一步操作",
+      "workflow": "随时使用，查看项目整体状态",
+      "workflow_zh": "状态查询命令，不影响工作流",
+      "prev_commands": [],
+      "next_commands": [],
+      "flags": []
+    },
+    "manage-knowhow": {
+      "name": "manage-knowhow",
+      "name_zh": "记忆管理",
+      "description": "Manage memory entries — workflow memory (.workflow/knowhow/) and system memory (~/.claude/projects/*/memory/)",
+      "description_zh": "管理两类记忆存储：工作流记忆（.workflow/knowhow/，项目级）和系统记忆（~/.claude/projects/*/memory/，跨项目）",
+      "workflow": "随时使用，管理和维护项目知识库",
+      "workflow_zh": "知识管理命令",
+      "prev_commands": [],
+      "next_commands": [],
+      "flags": [
+        "[list|search|view|edit|delete|prune] (操作)",
+        "[query|id|file] (查询或标识)",
+        "--store workflow|system|all (存储类型)",
+        "--type compact|tip (记忆类型)"
+      ]
+    },
+    "manage-knowhow-capture": {
+      "name": "manage-knowhow-capture",
+      "name_zh": "捕获记忆",
+      "description": "Capture session memory (compact or tips) into .workflow/knowhow/ with JSON index",
+      "description_zh": "将当前会话的经验捕获为记忆：compact（会话压缩摘要）或 tip（单个专业提示）。带 JSON 索引便于后续检索",
+      "workflow": "阶段或会话结束时使用，沉淀经验",
+      "workflow_zh": "在阶段完成或会话结束时使用",
+      "prev_commands": [],
+      "next_commands": [],
+      "flags": [
+        "[type] (知识类型: session|tip|template|recipe|reference|decision)",
+        "[description] (描述)",
+        "--lang <lang> (编程语言)",
+        "--source <url> (来源URL)",
+        "--tag tag1,tag2 (标签)"
+      ]
+    },
+    "manage-codebase-rebuild": {
+      "name": "manage-codebase-rebuild",
+      "name_zh": "重建代码库文档",
+      "description": "Full rebuild of codebase documentation — scans project, builds doc-index.json, generates all tech-registry and feature-maps",
+      "description_zh": "全量重建 .workflow/codebase/ 文档系统：扫描整个项目 → 识别组件/功能/需求/ADR → 并行生成所有文档产物（覆盖已有文档）",
+      "workflow": "项目初始化后或代码库大幅变更后使用",
+      "workflow_zh": "重量级操作，覆盖现有文档。增量更新请用 manage-codebase-refresh",
+      "prev_commands": [
+        "maestro-init"
+      ],
+      "next_commands": [],
+      "flags": [
+        "--focus <area> (聚焦区域)",
+        "--force (强制重建，跳过确认)",
+        "--skip-commit (不提交变更)"
+      ]
+    },
+    "manage-codebase-refresh": {
+      "name": "manage-codebase-refresh",
+      "name_zh": "刷新代码库文档",
+      "description": "Incremental refresh of codebase docs based on recent changes",
+      "description_zh": "增量刷新代码库文档：检测变更文件 → 识别受影响文档 → 仅重新生成必要部分。比全量重建快得多",
+      "workflow": "日常代码变更后使用，替代 manage-codebase-rebuild 的轻量级方案",
+      "workflow_zh": "推荐的日常维护命令",
+      "prev_commands": [],
+      "next_commands": [],
+      "flags": [
+        "--since <date> (指定起始日期)",
+        "--deep (深度刷新)"
+      ]
+    },
+    "manage-issue": {
+      "name": "manage-issue",
+      "name_zh": "问题管理",
+      "description": "Issue CRUD operations — create, query, update, close, and link issues to tasks",
+      "description_zh": "交互式问题管理：创建（记录 bug/功能需求）、查询（按状态/标签过滤）、更新、关闭、链接到任务",
+      "workflow": "质量审查或测试发现问题后使用",
+      "workflow_zh": "配合 quality-review 和 quality-debug 使用",
+      "prev_commands": [
+        "quality-review",
+        "quality-debug"
+      ],
+      "next_commands": [],
+      "flags": [
+        "<create|list|status|update|close|link> (操作，必填)",
+        "[options] (操作相关选项)"
+      ]
+    },
+    "manage-issue-discover": {
+      "name": "manage-issue-discover",
+      "name_zh": "问题发现",
+      "description": "Automated issue discovery — multi-perspective analysis or prompt-driven exploration",
+      "description_zh": "自动发现潜在问题：多视角分析（安全/性能/可用性/可维护性）或提示驱动探索。批量创建待跟踪问题",
+      "workflow": "主动质量扫描时使用，或在里程碑审计前运行",
+      "workflow_zh": "配合 maestro-milestone-audit 使用，发现集成差距",
+      "prev_commands": [],
+      "next_commands": [
+        "manage-issue"
+      ],
+      "flags": [
+        "[multi-perspective] (多视角分析模式)",
+        "[by-prompt \"what to look for\"] (提示驱动模式)",
+        "-y|--yes (自动模式)",
+        "--scope=src/** (限定范围)",
+        "--depth=standard|deep (分析深度)"
+      ]
+    },
+    "maestro-fork": {
+      "name": "maestro-fork",
+      "name_zh": "创建工作树",
+      "description": "Create a worktree for milestone-level parallel development, or sync existing worktree with main",
+      "description_zh": "为整个里程碑创建 git worktree，实现里程碑间并行开发。显式复制项目上下文和阶段目录到工作树",
+      "workflow": "里程碑规划完成后使用，支持多里程碑并行开发",
+      "workflow_zh": "maestro-merge 的前置操作，创建并行开发环境",
+      "prev_commands": [
+        "maestro-init",
+        "maestro-roadmap"
+      ],
+      "next_commands": [
+        "maestro-merge"
+      ],
+      "flags": [
+        "-m <milestone-number> (里程碑编号，必填)",
+        "--base <branch> (基准分支)",
+        "--sync (同步工作树)"
+      ]
+    },
+    "maestro-learn": {
+      "name": "maestro-learn",
+      "name_zh": "学习路由",
+      "description": "Learning coordinator — route intent to learn commands, execute single or multi-step chains",
+      "description_zh": "学习协调器：根据意图文本路由到最优学习命令，支持单命令或链式多步学习",
+      "workflow": "学习操作的统一入口",
+      "workflow_zh": "自动识别学习意图并路由到 learn-* 命令",
+      "prev_commands": [],
+      "next_commands": [
+        "learn-decompose",
+        "learn-follow",
+        "learn-investigate",
+        "learn-retro",
+        "learn-second-opinion"
+      ],
+      "flags": [
+        "\"intent text\" (意图文本)",
+        "-y (自动模式)",
+        "--dry-run (演练)",
+        "--chain <name> (指定链)"
+      ]
+    },
+    "maestro-link-coordinate": {
+      "name": "maestro-link-coordinate",
+      "name_zh": "步进协调器",
+      "description": "Step-mode graph coordinator via maestro coordinate endpoint — executes chain nodes one by one with session tracking",
+      "description_zh": "步进式工作流协调器：逐节点执行命令链图，决策/门控/评估节点自动解析，会话持久化支持恢复",
+      "workflow": "maestro-coordinate 的步进版本，适合需要逐步确认的场景",
+      "workflow_zh": "适合长时间运行的复杂工作流，每步可暂停恢复",
+      "prev_commands": [],
+      "next_commands": [
+        "maestro-plan",
+        "maestro-execute"
+      ],
+      "flags": [
+        "\"intent text\" (意图文本)",
+        "--list (列出可用链图)",
+        "-c [sessionId] (恢复会话)",
+        "--chain <name> (指定链图)",
+        "--tool <tool> (指定工具)",
+        "-y (自动模式)"
+      ]
+    },
+    "maestro-merge": {
+      "name": "maestro-merge",
+      "name_zh": "合并工作树",
+      "description": "Two-phase merge of milestone worktree branch back — git merge first, artifact sync only on success",
+      "description_zh": "两阶段合并：先 git merge（源代码），成功后再同步工作流产物（工件）。防止合并冲突时的部分状态损坏",
+      "workflow": "maestro-fork → **merge** → continue",
+      "workflow_zh": "maestro-fork 的收尾操作，将工作树成果合并回主分支",
+      "prev_commands": [
+        "maestro-fork"
+      ],
+      "next_commands": [
+        "maestro-milestone-release"
+      ],
+      "flags": [
+        "-m <milestone-number> (里程碑编号)",
+        "--force (强制合并)",
+        "--dry-run (演练)",
+        "--no-cleanup (不清理)",
+        "--continue (继续中断的合并)"
+      ]
+    },
+    "maestro-milestone-release": {
+      "name": "maestro-milestone-release",
+      "name_zh": "里程碑发布",
+      "description": "Version bump, changelog generation, and git tag for a completed milestone",
+      "description_zh": "版本号递增、变更日志生成和 git 标签创建。支持 semver 自动递增和自定义版本号",
+      "workflow": "milestone-complete → **milestone-release**",
+      "workflow_zh": "里程碑归档后的最终交付步骤",
+      "prev_commands": [
+        "maestro-milestone-complete"
+      ],
+      "next_commands": [],
+      "flags": [
+        "[<version>] (显式版本号)",
+        "--bump patch|minor|major (semver 递增)",
+        "--dry-run (演练)",
+        "--no-tag (不创建标签)",
+        "--no-push (不推送)"
+      ]
+    },
+    "maestro-overlay": {
+      "name": "maestro-overlay",
+      "name_zh": "命令叠加层",
+      "description": "Create or edit a non-invasive overlay that augments existing slash commands based on natural-language intent",
+      "description_zh": "创建或编辑非侵入式命令叠加层：JSON 补丁文件增强 .claude/commands/*.md，存储于 ~/.maestro/overlays/，自动应用",
+      "workflow": "自定义命令行为，无需修改原始 .md 文件",
+      "workflow_zh": "叠加层在 maestro install 时自动应用，支持追加/前置/替换 XML 段落",
+      "prev_commands": [],
+      "next_commands": [],
+      "flags": [
+        "<intent> (自然语言意图描述)"
+      ]
+    },
+    "maestro-amend": {
+      "name": "maestro-amend",
+      "name_zh": "修补命令",
+      "description": "Collect deficiency signals from workflow artifacts, sessions, and user reports, then generate overlays to amend workflow commands",
+      "description_zh": "从工作流产物、会话和用户报告中收集缺陷信号，生成叠加层修补工作流命令。支持从验证结果、审查报告、会话和问题中提取改进信号",
+      "workflow": "execute/review 后使用，修补发现的命令缺陷",
+      "workflow_zh": "自动分析缺陷来源，生成 overlay 修补命令行为",
+      "prev_commands": [
+        "maestro-execute",
+        "quality-review"
+      ],
+      "next_commands": [
+        "maestro-overlay"
+      ],
+      "flags": [
+        "[description] (缺陷描述)",
+        "--from-verify <dir> (从验证结果提取)",
+        "--from-review <dir> (从审查结果提取)",
+        "--from-session <id> (从会话提取)",
+        "--from-issues ISS-xxx,... (从问题提取)",
+        "--scan (扫描所有来源)",
+        "--dry-run (演练)"
+      ]
+    },
+    "maestro-composer": {
+      "name": "maestro-composer",
+      "name_zh": "工作流作曲",
+      "description": "Semantic workflow composer — parse natural language into DAG of skill/CLI/agent nodes, auto-inject checkpoints, persist as reusable JSON template",
+      "description_zh": "语义工作流作曲器：将自然语言描述解析为 DAG（有向无环图），自动注入检查点，持久化为可复用 JSON 模板。支持 skill/CLI/agent 三类节点",
+      "workflow": "创建可复用工作流模板",
+      "workflow_zh": "输出 JSON 模板，通过 /maestro-player 执行",
+      "prev_commands": [],
+      "next_commands": [
+        "maestro-player"
+      ],
+      "flags": [
+        "\"workflow description\" (工作流描述)",
+        "--resume (恢复设计会话)",
+        "--edit <template-path> (编辑现有模板)"
+      ]
+    },
+    "maestro-player": {
+      "name": "maestro-player",
+      "name_zh": "工作流播放器",
+      "description": "Workflow template player — load JSON template, bind variables, execute DAG nodes in order, persist state at checkpoints, support resume",
+      "description_zh": "工作流模板播放器：加载 JSON 模板 → 绑定变量 → 按 DAG 顺序执行节点 → 检查点持久化状态 → 支持恢复。maestro-composer 的执行搭档",
+      "workflow": "执行 maestro-composer 创建的模板",
+      "workflow_zh": "加载模板、绑定上下文变量、逐节点执行",
+      "prev_commands": [
+        "maestro-composer"
+      ],
+      "next_commands": [],
+      "flags": [
+        "<template-slug|path> (模板名称或路径)",
+        "--context key=value... (上下文变量)",
+        "-c [session-id] (恢复会话)",
+        "--list (列出所有模板)",
+        "--dry-run (演练)"
+      ]
+    },
+    "maestro-update": {
+      "name": "maestro-update",
+      "name_zh": "工作流更新",
+      "description": "Interactive workflow migration — detect version, preview changes, apply upgrades",
+      "description_zh": "交互式工作流迁移：检测当前版本 → 预览变更差异 → 应用升级。确保 .claude/commands/ 和工作流配置保持最新",
+      "workflow": "版本升级时使用",
+      "workflow_zh": "安全升级命令和工作流文件，支持预览和确认",
+      "prev_commands": [],
+      "next_commands": [],
+      "flags": [
+        "--dry-run (仅预览变更)",
+        "--force (强制覆盖)"
+      ]
+    },
+    "learn-decompose": {
+      "name": "learn-decompose",
+      "name_zh": "代码分解",
+      "description": "Decompose code into cataloged design patterns, saving findings to specs and wiki",
+      "description_zh": "系统性模式提取：4 维度（结构/行为/数据/错误）分析代码，并行代理探索，发现可复用设计模式并编目",
+      "workflow": "学习或理解代码时使用",
+      "workflow_zh": "将代码经验固化为可复用模式，供后续规划和开发参考",
+      "prev_commands": [],
+      "next_commands": [
+        "spec-add",
+        "wiki-digest"
+      ],
+      "flags": [
+        "<path|module> (目标路径或模块)",
+        "--patterns <list> (指定模式类型)",
+        "--save-spec (保存到规格)",
+        "--save-wiki (保存到知识图谱)"
+      ]
+    },
+    "learn-follow": {
+      "name": "learn-follow",
+      "name_zh": "跟读理解",
+      "description": "Guided follow-along reading of code or wiki entries, extracting patterns and building understanding",
+      "description_zh": "引导式阅读体验：逐段遍历代码或知识图谱条目，通过强制提问提取模式、识别假设、构建结构化理解图",
+      "workflow": "学习代码库或理解已有知识时使用",
+      "workflow_zh": "输出阅读笔记，包含提取的模式、开放问题和连接点",
+      "prev_commands": [],
+      "next_commands": [
+        "learn-decompose",
+        "spec-add"
+      ],
+      "flags": [
+        "<path|wiki-id|topic> (目标)",
+        "--depth shallow|deep (深度)",
+        "--save-wiki (保存到知识图谱)"
+      ]
+    },
+    "learn-investigate": {
+      "name": "learn-investigate",
+      "name_zh": "系统调查",
+      "description": "Systematic question investigation with hypothesis testing, evidence logging, and 3-strike escalation",
+      "description_zh": "系统性调查工作流：假设生成 → 测试验证 → 结构化证据记录，3 次假设失败后升级询问用户",
+      "workflow": "回答「X 是如何工作的？」「为什么会发生 Y？」等问题",
+      "workflow_zh": "不同于 quality-debug（修复 bug），此命令专注于理解性问题",
+      "prev_commands": [],
+      "next_commands": [
+        "manage-learn",
+        "wiki-digest"
+      ],
+      "flags": [
+        "<question> (调查问题)",
+        "--scope <path> (限制范围)",
+        "--max-hypotheses N (最大假设数，默认 3)"
+      ]
+    },
+    "learn-retro": {
+      "name": "learn-retro",
+      "name_zh": "学习复盘",
+      "description": "Unified retrospective — git activity metrics and decision quality evaluation with lens-based selection",
+      "description_zh": "统一复盘：结合 git 活动分析（提交指标、会话检测、文件热点）和决策质量评估（跨 wiki/spec/git 追踪），支持独立或组合使用",
+      "workflow": "定期复盘项目进展或评估决策质量",
+      "workflow_zh": "所有洞察持久化到 lessons.jsonl，支持跨会话查询",
+      "prev_commands": [],
+      "next_commands": [
+        "manage-learn"
+      ],
+      "flags": [
+        "--lens git|decision|all (视角选择)",
+        "--days N (天数)",
+        "--author <name> (作者)",
+        "--area <path> (区域)",
+        "--phase N (阶段)",
+        "--tag <tag> (标签)",
+        "--id <id> (会话ID)",
+        "--compare (对比)"
+      ]
+    },
+    "learn-second-opinion": {
+      "name": "learn-second-opinion",
+      "name_zh": "第二意见",
+      "description": "Multi-perspective analysis with review, challenge, and consult modes",
+      "description_zh": "结构化第二意见：review（3 个并行代理独立评估）、challenge（对抗性代理寻找隐藏假设）、consult（交互式问答）",
+      "workflow": "审查代码、验证决策或评估方案时使用",
+      "workflow_zh": "与阶段/执行生命周期解耦，可随时对任意代码或知识调用",
+      "prev_commands": [],
+      "next_commands": [
+        "manage-learn"
+      ],
+      "flags": [
+        "<target> (目标：文件路径/wiki ID/HEAD/staged)",
+        "--mode review|challenge|consult (模式)"
+      ]
+    },
+    "manage-harvest": {
+      "name": "manage-harvest",
+      "name_zh": "知识收获",
+      "description": "Extract knowledge from workflow artifacts and route to wiki / spec / issue stores",
+      "description_zh": "从工作流产物（分析结果、头脑风暴输出、调试会话、规划/修复结果）提取知识片段，路由到 wiki/spec/issue 三类存储",
+      "workflow": "任意工作流完成后使用，防止知识流失",
+      "workflow_zh": "闭环：harvest 提取 → wiki/spec/issue 存储 → 下游命令消费（wiki-digest、spec-load、maestro-plan --gaps）",
+      "prev_commands": [],
+      "next_commands": [
+        "wiki-digest",
+        "spec-load"
+      ],
+      "flags": [
+        "[<session-id|path>] (会话或路径)",
+        "--to wiki|spec|issue|auto (路由目标)",
+        "--source <type> (产物类型)",
+        "--recent N (最近 N 个)",
+        "--dry-run (演练)",
+        "-y (自动模式)"
+      ]
+    },
+    "manage-learn": {
+      "name": "manage-learn",
+      "name_zh": "学习管理",
+      "description": "Capture, search, and review atomic learning insights and tips into .workflow/learning/lessons.jsonl",
+      "description_zh": "统一原子知识捕获：洞察（模式、陷阱、技术）和提示（跨会话恢复笔记），存储到 .workflow/learning/lessons.jsonl",
+      "workflow": "随时使用，管理和查询学习库",
+      "workflow_zh": "与 learn-retro、quality-retrospective 共享 lessons.jsonl 存储",
+      "prev_commands": [],
+      "next_commands": [],
+      "flags": [
+        "[<text>] (洞察文本)",
+        "[tip <text>] (提示模式)",
+        "[list] (列表)",
+        "[search] (搜索)",
+        "[show <id>] (查看)",
+        "--category ... (分类)",
+        "--tag t1,t2 (标签)",
+        "--phase N (阶段)",
+        "--confidence ... (置信度)"
+      ]
+    },
+    "manage-wiki": {
+      "name": "manage-wiki",
+      "name_zh": "知识图谱管理",
+      "description": "Wiki knowledge graph management — health dashboard, orphan cleanup, entry search, and graph statistics",
+      "description_zh": "知识图谱管理工具：健康仪表板（连通性、孤立条目检测）、条目搜索、孤立清理和图谱统计",
+      "workflow": "定期维护知识图谱",
+      "workflow_zh": "配合 wiki-connect 和 wiki-digest 使用",
+      "prev_commands": [],
+      "next_commands": [
+        "wiki-connect",
+        "wiki-digest"
+      ],
+      "flags": [
+        "[health] (健康仪表板)",
+        "[search] (条目搜索)",
+        "[cleanup] (孤立清理)",
+        "[stats] (图谱统计)",
+        "[options] (子命令选项)"
+      ]
+    },
+    "quality-business-test": {
+      "name": "quality-business-test",
+      "name_zh": "业务测试 [已废弃]",
+      "description": "[DEPRECATED] Merged into quality-auto-test (spec route). Use /quality-auto-test <phase> instead.",
+      "description_zh": "[已废弃] 已合并入 quality-auto-test（spec 路由模式）。当检测到 REQ-*.md 时自动进入 spec 路由。",
+      "workflow": "→ quality-auto-test",
+      "workflow_zh": "已合并，请使用 quality-auto-test",
+      "prev_commands": [],
+      "next_commands": [
+        "quality-auto-test"
+      ],
+      "flags": [],
+      "deprecated": true
+    },
+    "quality-retrospective": {
+      "name": "quality-retrospective",
+      "name_zh": "质量复盘",
+      "description": "Multi-lens 复盘 of completed phase(s); routes insights to spec/note/issue stores and the lessons library",
+      "description_zh": "执行后多视角复盘：技术/流程/质量/决策 4 个并行视角，提取可复用洞察，路由到 spec/memory/issue 存储",
+      "workflow": "maestro-execute 完成后使用",
+      "workflow_zh": "自动扫描未复盘的已完成阶段，所有洞察持久化到 lessons.jsonl",
+      "prev_commands": [
+        "maestro-execute"
+      ],
+      "next_commands": [
+        "manage-learn",
+        "spec-add"
+      ],
+      "flags": [
+        "[phase|N..M] (阶段或范围)",
+        "--lens technical|process|quality|decision (视角)",
+        "--all (所有阶段)",
+        "--no-route (不路由到存储)",
+        "--compare N (与阶段 N 对比)",
+        "--auto-yes (自动模式)"
+      ]
+    },
+    "wiki-connect": {
+      "name": "wiki-connect",
+      "name_zh": "知识关联",
+      "description": "Surface hidden connections in the wiki knowledge graph and suggest or apply new links",
+      "description_zh": "知识图谱关联发现：分析 wiki 索引找到孤立条目、缺失连接和传递链接缺口，建议或自动应用新关联",
+      "workflow": "定期维护知识图谱完整性",
+      "workflow_zh": "利用 BM25 搜索和反向链接基础设施，改善图谱连通性",
+      "prev_commands": [
+        "manage-harvest"
+      ],
+      "next_commands": [
+        "wiki-digest"
+      ],
+      "flags": [
+        "--scope <type> (限制类型)",
+        "--min-similarity N (最小相似度)",
+        "--fix (自动应用建议)",
+        "--max N (最大建议数)"
+      ]
+    },
+    "wiki-digest": {
+      "name": "wiki-digest",
+      "name_zh": "知识摘要",
+      "description": "Generate knowledge digest from wiki entries with theme clustering, gap analysis, and coverage heatmap",
+      "description_zh": "知识综合命令：语义主题聚类 → 知识缺口识别 → 覆盖度热力图，产出可操作的摘要和推荐下一步",
+      "workflow": "定期综合知识图谱内容",
+      "workflow_zh": "不同于 wiki list（原始条目），此命令综合解释知识库，产出精选摘要",
+      "prev_commands": [
+        "manage-harvest",
+        "wiki-connect"
+      ],
+      "next_commands": [
+        "learn-follow",
+        "spec-add"
+      ],
+      "flags": [
+        "[<topic>] (主题)",
+        "--recent N (最近 N 天)",
+        "--type <type> (类型过滤)",
+        "--format brief|full (输出格式)"
+      ]
+    },
+    "maestro-tools-register": {
+      "name": "maestro-tools-register",
+      "name_zh": "工具注册",
+      "description": "Register tool specs — extract, generate, or optimize reusable process/tool definitions into .workflow/specs/tools.md",
+      "description_zh": "Codify reusable business processes as tool specs. Auto-discovered by agents via maestro spec load and spec-injector",
+      "workflow": "Register during planning · after execution · before testing · during retrospective/harvest",
+      "workflow_zh": "plan → execute → test → retrospective, auto-discovered by agents via spec-injector",
+      "prev_commands": [],
+      "next_commands": [
+        "maestro-tools-execute"
+      ],
+      "flags": [
+        "[description] (意图描述)"
+      ]
+    },
+    "maestro-tools-execute": {
+      "name": "maestro-tools-execute",
+      "name_zh": "工具执行",
+      "description": "Load and execute tool specs by role or name — supports direct invocation by name or role-based recommendation",
+      "description_zh": "加载并执行工具规格：支持按名称直接调用、按角色推荐或交互式选择。逐步执行并报告进度",
+      "workflow": "配合 maestro-tools-register 使用",
+      "workflow_zh": "加载已注册的工具定义并按步骤执行",
+      "prev_commands": [
+        "maestro-tools-register"
+      ],
+      "next_commands": [],
+      "flags": [
+        "[tool-name] (工具名称)",
+        "--role <role> (按角色推荐)"
+      ]
+    },
+    "maestro-swarm-workflow": {
+      "name": "maestro-swarm-workflow",
+      "name_zh": "并行加速层",
+      "description": "Parallel workflow accelerator — routes user intent to 8 pre-built Workflow scripts for multi-agent concurrent execution",
+      "description_zh": "并行工作流加速层 — 将用户意图路由到 8 个预构建的 Workflow 脚本，实现多 agent 并发执行。覆盖 analyze/brainstorm/review/verify/grill/plan/execute/milestone-audit",
+      "workflow": "独立使用或作为 ralph chain 中的步骤",
+      "workflow_zh": "可独立调用，也可集成到 ralph 生命周期链中作为并行加速步骤",
+      "prev_commands": [],
+      "next_commands": [],
+      "flags": [
+        "\"<intent>\" (意图描述)",
+        "--script <name> (指定脚本)",
+        "--dims <d1,d2> (限制分析维度)",
+        "--roles <r1,r2> (限制角色)",
+        "--count N (角色数量)",
+        "--tier quick|standard (审查层级)",
+        "--resume <runId> (恢复运行)"
+      ]
+    },
+    "maestro-companion": {
+      "name": "maestro-companion",
+      "name_zh": "轻量执行伴侣",
+      "description": "Quick execution for small tasks — minimal Run lifecycle with direct execution and evidence recording",
+      "description_zh": "轻量任务直接执行入口 — 仅使用 run create + run complete，并持续记录非正式证据",
+      "workflow": "create minimal Run → direct execution → evidence log → complete",
+      "workflow_zh": "创建最小 Run → 直接执行 → 记录 evidence log → 完成 Run",
+      "prev_commands": [],
+      "next_commands": [],
+      "flags": [
+        "<intent> (任务描述)",
+        "--note <text> (追加结构化记录)",
+        "--promote (将洞察提升为 spec/knowhow)",
+        "-y (跳过确认)"
+      ]
+    },
+    "maestro-next": {
+      "name": "maestro-next",
+      "name_zh": "单命令推荐",
+      "description": "Single-command recommendation engine — parses intent and project state, recommends one atomic command via routing-table scoring",
+      "description_zh": "单命令推荐引擎 — 解析意图和项目状态，通过路由表评分推荐一个原子命令。不创建 session，不写 status.json",
+      "workflow": "独立使用，轻量路由入口",
+      "workflow_zh": "与 /maestro 和 /maestro-ralph 的区别：不触发链，始终推荐 1 个命令 + 2-3 备选",
+      "prev_commands": [],
+      "next_commands": [],
+      "flags": [
+        "<intent> (意图描述)",
+        "-y (跳过确认)",
+        "--dry-run (仅显示推荐)",
+        "--top N (显示前 N 候选)",
+        "--list (列出候选池)"
+      ]
+    },
+    "manage-drift-realign": {
+      "name": "manage-drift-realign",
+      "name_zh": "漂移对齐",
+      "description": "Detect and realign .workflow/ artifact drift against code reality after refactoring — git timeline + session history driven",
+      "description_zh": "检测重构后代码现实与 .workflow/ 文档产物的偏移，通过 git 时间线 + session 历史驱动的 4 路并行扫描器识别漂移，交互式对齐",
+      "workflow": "互补于 manage-knowledge-audit：audit 检查知识内部矛盾，drift-realign 检查代码↔文档偏离",
+      "workflow_zh": "9 Stage 流程：时间线重建 → 漂移评分 → 4 并行 scanner（roadmap/spec/codebase/artifact）→ 合并+冲突标记集成 → 交互分诊 → 备份+应用 → 报告。支持 maestro timeline CLI 独立复用",
+      "prev_commands": [
+        "manage-knowledge-audit",
+        "quality-sync"
+      ],
+      "next_commands": [
+        "manage-codebase-rebuild",
+        "quality-sync",
+        "manage-knowledge-audit"
+      ],
+      "flags": [
+        "--scope <roadmap|spec|codebase|state|issue|knowhow|project|all> (扫描范围，默认 all)",
+        "--since <date|commit|HEAD~N> (分析起点)",
+        "--depth <shallow|deep> (检测深度)",
+        "--dry-run (预演)",
+        "--report (仅报告)",
+        "--auto-archive (自动归档)",
+        "--interactive (逐项交互，默认)"
+      ]
+    },
+    "manage-knowledge-audit": {
+      "name": "manage-knowledge-audit",
+      "name_zh": "知识审计",
+      "description": "Audit and prune spec/knowhow/artifact tri-store — detect contradictions, staleness, orphans; apply keep/deprecate/delete decisions",
+      "description_zh": "审计 spec/knowhow/artifact 三存储 — 检测矛盾、过期、孤立条目；应用 keep/deprecate/delete 三态决策清理",
+      "workflow": "与 manage-harvest 对称：harvest 积累知识，audit 清理知识",
+      "workflow_zh": "8 类 28 子场景审计：显式/隐式矛盾、过期、元数据质量、Maestro 特定、Timeline 产物、Knowhow 漂移、Artifact 残留",
+      "prev_commands": [
+        "manage-harvest"
+      ],
+      "next_commands": [],
+      "flags": [
+        "--scope <spec|knowhow|artifact|all> (审计范围)",
+        "--level P0|P1|P2 (严重级别)",
+        "--since YYYY-MM-DD (时间过滤)",
+        "--milestone <name> (里程碑限定)",
+        "--interactive (交互式决策)",
+        "--mark (仅标记)",
+        "--delete (软删除)",
+        "--purge (物理擦除)",
+        "--dry-run (预览)",
+        "--report (仅生成报告)"
+      ]
+    },
+    "maestro-grill": {
+      "name": "maestro-grill",
+      "name_zh": "压力测试",
+      "description": "Socratic stress-testing — adversarial questioning against codebase reality, verifying assumptions with code evidence",
+      "description_zh": "苏格拉底式压力测试 — 对抗性提问验证方案假设，用代码证据挑战模糊术语，产出验证过的 context-package",
+      "workflow": "**grill** → brainstorm → analyze/roadmap",
+      "workflow_zh": "在 brainstorm 之前使用，验证方案假设后再进行头脑风暴",
+      "prev_commands": [],
+      "next_commands": [
+        "maestro-brainstorm",
+        "maestro-analyze",
+        "maestro-roadmap"
+      ],
+      "flags": [
+        "<topic|plan> (主题或计划)",
+        "-y (自动模式)",
+        "-c (恢复会话)",
+        "--session ID (指定会话)",
+        "--depth shallow|standard|deep (深度)",
+        "--from <source> (导入上游材料)"
+      ]
+    },
+    "maestro-blueprint": {
+      "name": "maestro-blueprint",
+      "name_zh": "正式规格",
+      "description": "Generate formal spec package (Product Brief, PRD, Architecture, Epics) through 6-phase document chain with multi-CLI analysis",
+      "description_zh": "生成正式规格文档包（产品简报、PRD、架构、Epics）— 6 阶段文档链 + 多 CLI 分析 + 交互式精炼。纯文档，不生成代码",
+      "workflow": "brainstorm (可选) → **blueprint** → analyze → roadmap → plan",
+      "workflow_zh": "与 brainstorm 互补：brainstorm 是发散探索（轻量），blueprint 是收敛文档（重量级 6 阶段）",
+      "prev_commands": [
+        "maestro-brainstorm"
+      ],
+      "next_commands": [
+        "maestro-analyze",
+        "maestro-roadmap"
+      ],
+      "flags": [
+        "<idea|@file> (想法或文件)",
+        "-y (自动模式)",
+        "-c (恢复会话)",
+        "--from <source> (导入上游 context)",
+        "--from-brainstorm SESSION-ID (从 brainstorm 导入)"
+      ]
+    },
+    "maestro-ralph": {
+      "name": "maestro-ralph",
+      "name_zh": "Ralph 决策引擎",
+      "description": "Closed-loop decision engine for the maestro workflow lifecycle -- reads project state, infers position, builds adaptive chain, delegates execution",
+      "description_zh": "闭环决策引擎 — 读取项目状态，推断当前位置，构建自适应命令链，委派执行。支持 intent/status/continue 三种入口",
+      "workflow": "Use when optimal command sequence is unclear",
+      "workflow_zh": "当最优命令序列不明确时使用，自动推断并构建执行链",
+      "prev_commands": [],
+      "next_commands": [
+        "maestro-ralph-execute"
+      ],
+      "flags": [
+        "<intent> (意图描述)",
+        "-y (自动模式)",
+        "status (显示进度)",
+        "continue (继续执行)"
+      ]
+    },
+    "maestro-ralph-execute": {
+      "name": "maestro-ralph-execute",
+      "name_zh": "Ralph 步进执行器",
+      "description": "Single-step executor for ralph (adaptive) and maestro (static) sessions -- locate session, find next step, resolve args, execute, update, self-invoke next",
+      "description_zh": "单步执行器 — 定位会话，查找下一步，解析参数，执行，更新状态，自动调用下一步。与 ralph 互调形成自延续工作循环",
+      "workflow": "Ralph session step executor",
+      "workflow_zh": "ralph 会话的步进执行器，每次调用执行一个步骤",
+      "prev_commands": [
+        "maestro-ralph"
+      ],
+      "next_commands": [
+        "maestro-ralph"
+      ],
+      "flags": [
+        "-y (自动模式)",
+        "[session-id] (会话 ID)"
+      ]
+    },
+    "maestro-guard": {
+      "name": "maestro-guard",
+      "name_zh": "编辑边界控制",
+      "description": "Manage editing boundary restrictions -- configure directory-level write boundaries enforced by the workflow-guard PreToolUse hook",
+      "description_zh": "编辑边界控制 — 配置目录级写入边界，由 workflow-guard PreToolUse 钩子强制执行。启用后，对允许路径外的 Write/Edit 调用将被阻止",
+      "workflow": "Configure before constrained editing tasks",
+      "workflow_zh": "在需要限制编辑范围的任务前配置",
+      "prev_commands": [],
+      "next_commands": [],
+      "flags": [
+        "on (启用守卫)",
+        "off (禁用守卫)",
+        "status (显示配置)",
+        "allow <path> (添加允许路径)",
+        "deny <path> (切换到拒绝模式)"
+      ]
+    },
+    "maestro-ui-codify": {
+      "name": "maestro-ui-codify",
+      "name_zh": "UI 设计系统提取",
+      "description": "Extract design system from code, generate reference package, persist as knowledge assets -- 4-phase pipeline: validate, extract, package, knowhow",
+      "description_zh": "从代码中提取 UI 设计系统 — 4 阶段管线：验证参数 → 3 并行代理提取样式/动画/布局 → 生成参考包 → 持久化为知识资产",
+      "workflow": "Extract design tokens from existing code",
+      "workflow_zh": "从现有代码中提取设计标记，生成可复用的设计系统知识包",
+      "prev_commands": [],
+      "next_commands": [],
+      "flags": [
+        "<source-path> (源代码路径，必填)",
+        "--package-name <name> (包名称)",
+        "--output-dir <path> (输出目录)",
+        "--overwrite (覆盖已有)"
+      ]
+    },
+    "security-audit": {
+      "name": "security-audit",
+      "name_zh": "安全审计",
+      "description": "OWASP Top 10 and STRIDE security auditing with supply chain analysis -- three tiers: quick, standard, deep",
+      "description_zh": "系统性安全审计 — 覆盖 OWASP Top 10、依赖供应链、密钥泄露检测、CI/CD 管线审查和可选 STRIDE 威胁建模。三级深度控制",
+      "workflow": "Run before releases or after security-sensitive changes",
+      "workflow_zh": "发布前或安全敏感变更后运行",
+      "prev_commands": [],
+      "next_commands": [],
+      "flags": [
+        "quick|standard|deep (审计深度，默认 quick)",
+        "--scope <path> (限定扫描范围)"
+      ]
+    },
+    "maestro-universal-workflow": {
+      "name": "maestro-universal-workflow",
+      "name_zh": "通用工作流",
+      "description": "Dynamic adversarial workflow generator -- scan library, match or generate, execute, persist",
+      "description_zh": "动态对抗式工作流生成器 — 扫描工作流库，匹配或生成专用脚本，执行并持久化。支持 shallow/standard/deep 三级对抗深度",
+      "workflow": "Independent use for ad-hoc complex workflows",
+      "workflow_zh": "独立使用，适合需要对抗式决策的复杂临时工作流",
+      "prev_commands": [],
+      "next_commands": [],
+      "flags": [
+        "<intent> (意图描述)",
+        "--name <slug> (脚本名称)",
+        "--depth shallow|standard|deep (对抗深度)",
+        "--dry-run (演练)",
+        "--from <script> (从脚本导入)",
+        "--resume <runId> (恢复运行)"
+      ]
+    },
+    "odyssey-debug": {
+      "name": "odyssey-debug",
+      "name_zh": "深度调试",
+      "description": "Long-running debug cycle — archaeology, diagnosis, fix, confirmation, generalization, discovery, and knowledge persistence",
+      "description_zh": "长周期闭环调试：考古（git 变更溯源）→ 探索 → 假设驱动诊断 → 修复确认 → 泛化（举一反三）→ 发现同类 → 沉淀学习。三句哲学约束：零遗留 / 穷尽迭代 / 改进即标准",
+      "workflow": "Independent deep debugging — treats every bug as a learning signal",
+      "workflow_zh": "独立深度调试，将每个 bug 视为学习信号。与 quality-debug（快速修复）不同，本命令深入 git 历史、扫描同类问题",
+      "prev_commands": [],
+      "next_commands": [
+        "odyssey-improve",
+        "odyssey-review-test-fix"
+      ],
+      "flags": [
+        "\"<issue>\" (问题描述)",
+        "--skip-fix (仅分析)",
+        "--skip-generalize (跳过泛化)",
+        "--auto (自动模式)",
+        "--template <name> (调查策略模板)",
+        "-y (跳过确认)",
+        "-c (恢复会话)"
+      ]
+    },
+    "odyssey-improve": {
+      "name": "odyssey-improve",
+      "name_zh": "深度改进",
+      "description": "Long-running codebase improvement cycle — multi-dimensional audit, deep diagnosis, targeted fix, verify, generalize, and engineering knowledge persistence",
+      "description_zh": "代码质量深度提升：基线测量 → 6 维审计 → 根因诊断 → 逐轮修复（按 severity 递降）→ 验证 → 泛化 → 沉淀。穷尽修复至 0 remaining actionable findings",
+      "workflow": "Independent deep improvement — combines static analysis with runtime-aware reasoning",
+      "workflow_zh": "独立深度改进，结合静态分析与运行时感知。与 quality-review（通过/失败门控）不同，本命令逐个根因诊断并穷尽修复",
+      "prev_commands": [],
+      "next_commands": [
+        "odyssey-review-test-fix"
+      ],
+      "flags": [
+        "\"<target>\" (目标路径/模块)",
+        "--dimensions <list> (审计维度)",
+        "--skip-fix (仅审计)",
+        "--skip-generalize (跳过泛化)",
+        "--auto (自动模式)",
+        "-y (跳过确认)",
+        "-c (恢复会话)"
+      ]
+    },
+    "odyssey-planex": {
+      "name": "odyssey-planex",
+      "name_zh": "需求交付闭环",
+      "description": "Requirement-driven iterative cycle — plan, execute, strict verify, fix loop until acceptance criteria met",
+      "description_zh": "需求到交付闭环：解析需求 → 严格验收标准 → 分解任务 → 执行 → 验证 → 修复差距 → 迭代直到 ALL 标准通过。不允许「接近通过」",
+      "workflow": "Independent requirement-to-delivery loop — acceptance criteria are sacred",
+      "workflow_zh": "独立需求交付循环，验收标准神圣不可侵犯。与 maestro-execute（按计划执行）不同，本命令自带 verify→fix 闭环迭代",
+      "prev_commands": [],
+      "next_commands": [
+        "odyssey-review-test-fix"
+      ],
+      "flags": [
+        "\"<requirement>\" (需求描述)",
+        "--max-iterations N (最大迭代)",
+        "--skip-generalize (跳过泛化)",
+        "--auto (自动模式)",
+        "--method agent|cli|auto (执行方式)",
+        "--executor <tool> (执行工具)",
+        "--skip-verify (跳过验证)",
+        "--template <name> (需求模板)",
+        "-y (跳过确认)",
+        "-c (恢复会话)"
+      ]
+    },
+    "odyssey-review-test-fix": {
+      "name": "odyssey-review-test-fix",
+      "name_zh": "深度审查修复",
+      "description": "Deep review + fix cycle — archaeology, exploration, multi-dimensional review, targeted fix, generalization, discovery, and knowledge persistence",
+      "description_zh": "多维度深度审查 + 穷尽修复：考古 → 探索 → 多维审查 → 全 severity 逐轮修复 + re-review gate → 泛化到全项目。每次修复后重审同区域",
+      "workflow": "Independent deep code review with exhaustive fix — find one, fix one, find all",
+      "workflow_zh": "独立深度审查修复，发现一个修复一个再扫描全部。与 quality-review（门控裁决）不同，本命令自动修复并泛化",
+      "prev_commands": [],
+      "next_commands": [],
+      "flags": [
+        "\"<target>\" (目标路径/模块)",
+        "--dimensions <list> (审查维度)",
+        "--fix-threshold critical|high|medium|low|all (修复阈值)",
+        "--skip-fix (仅审查)",
+        "--skip-generalize (跳过泛化)",
+        "--auto (自动模式)",
+        "-y (跳过确认)",
+        "-c (恢复会话)"
+      ]
+    },
+    "odyssey-ui": {
+      "name": "odyssey-ui",
+      "name_zh": "UI 深度优化",
+      "description": "Long-running UI optimization cycle — visual survey, multi-dimensional audit, divergent exploration, fix, verify, generalize, and design knowledge persistence",
+      "description_zh": "UI 深度打磨循环：视觉普查 → 6 维审计 → 发散探索 → 修复 → 浏览器验证 → 泛化到兄弟组件 → 沉淀设计知识。按 impact×severity 递降穷尽修复",
+      "workflow": "Independent deep UI polish — every pixel tells a story",
+      "workflow_zh": "独立深度 UI 打磨，每个像素都有故事。与 maestro-impeccable（单次执行）不同，本命令是持久化会话，带证据链和迭代改进",
+      "prev_commands": [],
+      "next_commands": [],
+      "flags": [
+        "\"<target>\" (目标组件/页面)",
+        "--dimensions <list> (审计维度)",
+        "--skip-fix (仅审计)",
+        "--skip-generalize (跳过泛化)",
+        "--auto (自动模式)",
+        "-y (跳过确认)",
+        "-c (恢复会话)"
+      ]
+    }
+  },
+  "skills": {
+    "team-lifecycle-v4": {
+      "name": "team-lifecycle-v4",
+      "name_zh": "完整生命周期团队",
+      "description": "Full lifecycle team skill — plan, develop, test, review in one coordinated session with role-based beat model architecture",
+      "description_zh": "完整软件开发生命周期的多智能体编排：规格 → 规划 → 实现 → 测试 → 代码审查，采用角色驱动的节拍模型架构",
+      "workflow": "适用于需要完整团队协作的大型功能开发",
+      "workflow_zh": "替代单 agent 顺序执行，实现并行多角色协作",
+      "roles": [
+        "coordinator (协调器)",
+        "analyst (分析师)",
+        "writer (文档编写者)",
+        "planner (规划者)",
+        "executor (执行者)",
+        "tester (测试者)",
+        "reviewer (审查者)",
+        "supervisor (监督者)"
+      ],
+      "phases_zh": [
+        "规格阶段",
+        "规划阶段",
+        "实现阶段",
+        "测试阶段",
+        "审查阶段"
+      ]
+    },
+    "team-coordinate": {
+      "name": "team-coordinate",
+      "name_zh": "团队协调",
+      "description": "Universal team coordination skill with dynamic role generation — analyze task → generate role-specs → dispatch → execute → deliver",
+      "description_zh": "通用团队协调：分析任务 → 动态生成角色规范 → 分派 → 执行 → 交付。协调器是唯一内置角色，所有工作角色在运行时动态生成",
+      "workflow": "适用于任意需要多角色协作的任务",
+      "workflow_zh": "最灵活的团队技能，角色完全按任务需求动态创建",
+      "roles": [
+        "coordinator (内置协调器)",
+        "(动态生成的工作角色)"
+      ],
+      "phases_zh": [
+        "任务分析",
+        "角色生成",
+        "任务链",
+        "并行执行",
+        "结果报告"
+      ]
+    },
+    "team-executor": {
+      "name": "team-executor",
+      "name_zh": "团队执行器",
+      "description": "Lightweight session execution skill — resumes existing team sessions for pure execution via team-worker agents",
+      "description_zh": "轻量级执行技能：加载现有会话 → 协调状态 → 启动 team-worker 代理执行。无分析、无角色生成，纯执行",
+      "workflow": "配合 team-coordinate 使用，用于恢复中断的会话",
+      "workflow_zh": "team-coordinate 的执行续集，用于会话恢复",
+      "roles": [
+        "executor (执行器)"
+      ],
+      "phases_zh": [
+        "状态协调",
+        "执行",
+        "结果报告"
+      ]
+    },
+    "team-testing": {
+      "name": "team-testing",
+      "name_zh": "团队测试",
+      "description": "Multi-agent testing team — strategist → generator → executor → analyst with progressive L1/L2/L3 coverage and Generator-Critic loops",
+      "description_zh": "多智能体测试团队：策略师 → 生成器 → 执行器 → 分析师。Generator-Critic 循环确保覆盖率收敛，L1/L2/L3 渐进式测试层",
+      "workflow": "替代 quality-auto-test + quality-test 组合，适合复杂测试场景",
+      "workflow_zh": "专用测试团队，比单命令测试更全面",
+      "roles": [
+        "coordinator (协调器)",
+        "strategist (测试策略师)",
+        "generator (测试生成器)",
+        "executor (测试执行器)",
+        "analyst (结果分析师)"
+      ],
+      "phases_zh": [
+        "策略制定",
+        "测试生成",
+        "执行测试",
+        "结果分析"
+      ]
+    },
+    "team-review": {
+      "name": "team-review",
+      "name_zh": "团队审查",
+      "description": "Multi-agent code review — scanner → reviewer → fixer with 4-dimension analysis (SEC/COR/PRF/MNT)",
+      "description_zh": "多智能体代码审查：扫描器（工具链+LLM）→ 审查者（深度分析，根因溯源）→ 修复者（自动修复，失败回滚）。4 维度：安全/正确性/性能/可维护性",
+      "workflow": "替代 quality-review 命令，提供更深度的多角色协作审查",
+      "workflow_zh": "专用审查团队，比单命令审查更彻底",
+      "roles": [
+        "coordinator (协调器)",
+        "scanner (扫描器)",
+        "reviewer (审查者)",
+        "fixer (修复者)"
+      ],
+      "phases_zh": [
+        "代码扫描",
+        "深度审查",
+        "自动修复"
+      ]
+    },
+    "team-quality-assurance": {
+      "name": "team-quality-assurance",
+      "name_zh": "质量保证团队",
+      "description": "Full closed-loop QA team — scout → strategist → generator → executor → analyst with discovery, testing, and full modes",
+      "description_zh": "完整闭环 QA 团队：侦察者（问题发现）→ 策略师 → 生成器 → 执行器 → 分析师。支持 discovery/testing/full 三种模式",
+      "workflow": "替代 manage-issue-discover + quality-auto-test + quality-test 组合",
+      "workflow_zh": "最完整的 QA 解决方案，覆盖问题发现到测试验证的全流程",
+      "roles": [
+        "coordinator (协调器)",
+        "scout (问题侦察者)",
+        "strategist (QA 策略师)",
+        "generator (测试生成器)",
+        "executor (执行器)",
+        "analyst (分析师)"
+      ],
+      "phases_zh": [
+        "问题发现",
+        "QA 策略",
+        "测试生成",
+        "执行测试",
+        "结果分析"
+      ]
+    },
+    "team-tech-debt": {
+      "name": "team-tech-debt",
+      "name_zh": "技术债务团队",
+      "description": "Tech debt governance team — scanner → assessor → planner → executor → validator with 5 debt dimensions",
+      "description_zh": "系统性技术债务治理：扫描 → 评估影响 → 制定修复计划 → 执行重构 → 验证结果。5 个债务维度：代码质量/架构/安全/性能/文档",
+      "workflow": "替代 quality-refactor 命令，适合大规模技术债务治理",
+      "workflow_zh": "专用债务治理团队，比单命令重构更系统",
+      "roles": [
+        "coordinator (协调器)",
+        "scanner (债务扫描器)",
+        "assessor (影响评估者)",
+        "planner (修复规划者)",
+        "executor (重构执行者)",
+        "validator (验证者)"
+      ],
+      "phases_zh": [
+        "债务扫描",
+        "影响评估",
+        "修复规划",
+        "重构执行",
+        "结果验证"
+      ]
+    },
+    "codify-to-knowhow": {
+      "name": "codify-to-knowhow",
+      "name_zh": "知识固化",
+      "description": "Manifest-driven knowledge asset generator — converts any structured package into maestro knowhow + spec entries with ref linking",
+      "description_zh": "通用 manifest 驱动的知识资产生成器：读取 knowhow-manifest.json → 创建 knowhow 文件 → 创建 spec 条目 → 通过 ref 建立索引-详文桥梁",
+      "workflow": "上游 skill 生成 manifest 后调用",
+      "workflow_zh": "上游 skill（如 maestro-ui-codify）负责生成 manifest，本 skill 负责执行知识写入",
+      "roles": [
+        "generator (生成器)"
+      ],
+      "phases_zh": [
+        "加载 Manifest",
+        "生成 Knowhow 资产",
+        "生成 Spec 条目",
+        "索引验证"
+      ]
+    },
+    "skill-iter-tune": {
+      "name": "skill-iter-tune",
+      "name_zh": "技能迭代调优",
+      "description": "Iterative skill tuning via execute-evaluate-improve feedback loop with two-tool pipeline (Claude + Gemini)",
+      "description_zh": "迭代式技能调优：Claude 执行技能 → Gemini 评估质量 → Agent 应用改进。循环直到达到质量阈值或最大迭代次数",
+      "workflow": "独立使用，优化现有 skill 的输出质量",
+      "workflow_zh": "支持单 skill 和 skill chain 两种调优模式",
+      "roles": [
+        "executor (执行器)",
+        "evaluator (评估器)"
+      ],
+      "phases_zh": [
+        "初始化",
+        "执行技能",
+        "评估质量",
+        "应用改进",
+        "生成报告"
+      ]
+    },
+    "workflow-skill-designer": {
+      "name": "workflow-skill-designer",
+      "name_zh": "工作流技能设计器",
+      "description": "Meta-skill for designing orchestrator+phases structured workflow skills with progressive phase loading",
+      "description_zh": "元技能：设计编排器+阶段结构的工作流技能。生成 SKILL.md 协调器和 phases/ 文件夹，支持渐进式阶段加载和 TodoWrite 模式",
+      "workflow": "创建新工作流 skill 时使用",
+      "workflow_zh": "从命令/文本描述/需求文档/现有 skill 四种输入源生成完整 skill 包",
+      "roles": [
+        "designer (设计器)"
+      ],
+      "phases_zh": [
+        "需求分析",
+        "编排器设计",
+        "阶段文件设计",
+        "验证与集成"
+      ]
+    },
+    "team-swarm": {
+      "name": "team-swarm",
+      "name_zh": "蚁群智能",
+      "description": "ACO-driven swarm intelligence with pheromone optimizer — 4 roles + Python controller + 5 specs for collective problem solving",
+      "description_zh": "ACO 蚁群智能技能 — 信息素优化器驱动的群体问题求解。4 角色（协调器、蚁群、分析师、评分器）+ Python 控制器 + 5 份 spec",
+      "workflow": "适用于需要多路径探索和群体收敛的复杂问题",
+      "workflow_zh": "蚁群算法驱动，多 agent 并行探索解空间，通过信息素机制收敛到最优解",
+      "roles": [
+        "coordinator (协调器)",
+        "ant (蚁群代理)",
+        "analyst (分析师)",
+        "scorer (评分器)"
+      ],
+      "phases_zh": [
+        "初始化信息素图",
+        "蚁群探索",
+        "路径评估",
+        "信息素更新",
+        "收敛检查"
+      ]
+    },
+    "team-arch-opt": {
+      "name": "team-arch-opt",
+      "name_zh": "架构优化团队",
+      "description": "Architecture optimization team — multi-role analysis, bottleneck identification, and refactoring of system architecture",
+      "description_zh": "多角色架构优化团队：分析系统架构 → 识别瓶颈 → 重构落地，由协调器编排 team-worker 代理执行"
+    },
+    "team-brainstorm": {
+      "name": "team-brainstorm",
+      "name_zh": "多角色头脑风暴",
+      "description": "Multi-role brainstorming team — generates diverse perspectives and synthesizes a converged solution",
+      "description_zh": "多角色头脑风暴团队：从不同视角生成方案 → 交叉验证 → 综合最优解"
+    },
+    "team-designer": {
+      "name": "team-designer",
+      "name_zh": "团队技能脚手架",
+      "description": "Team skill scaffolding — designs and generates new team skill structures with role directories",
+      "description_zh": "团队技能脚手架：设计并生成新的 team skill 结构与角色目录"
+    },
+    "team-frontend": {
+      "name": "team-frontend",
+      "name_zh": "前端开发团队",
+      "description": "Frontend development team — component-driven UI implementation with multi-role collaboration",
+      "description_zh": "前端开发团队：组件驱动的 UI 实现，多角色协作完成前端功能"
+    },
+    "team-frontend-debug": {
+      "name": "team-frontend-debug",
+      "name_zh": "前端调试团队",
+      "description": "Frontend debugging team — Chrome DevTools-driven visual and runtime issue resolution",
+      "description_zh": "前端调试团队：基于 Chrome DevTools 的可视化与运行时问题定位修复"
+    },
+    "team-interactive-craft": {
+      "name": "team-interactive-craft",
+      "name_zh": "交互组件打磨",
+      "description": "Interactive component crafting team — builds interactive UI components with critique loops",
+      "description_zh": "交互组件打磨团队：构建交互式 UI 组件，配批评循环持续改进"
+    },
+    "team-issue": {
+      "name": "team-issue",
+      "name_zh": "问题闭环团队",
+      "description": "Issue resolution pipeline team — discovers, analyzes, fixes, and closes issues end-to-end",
+      "description_zh": "问题闭环团队：发现 → 分析 → 修复 → 关闭的端到端 Issue 处理管线"
+    },
+    "team-motion-design": {
+      "name": "team-motion-design",
+      "name_zh": "动效设计团队",
+      "description": "Animation & motion design team — designs and implements UI motion and transition patterns",
+      "description_zh": "动效设计团队：设计并实现 UI 动画与过渡效果"
+    },
+    "team-perf-opt": {
+      "name": "team-perf-opt",
+      "name_zh": "性能优化团队",
+      "description": "Performance optimization team — profiles, diagnoses, and fixes performance bottlenecks",
+      "description_zh": "性能优化团队：profiling → 诊断瓶颈 → 修复，多角色协作提升性能"
+    },
+    "team-planex": {
+      "name": "team-planex",
+      "name_zh": "规划执行团队",
+      "description": "Plan-and-execute pipeline team — requirement-to-delivery closed loop driven by acceptance criteria",
+      "description_zh": "规划执行团队：需求 → 验收标准 → 规划 → 执行 → 验证的需求交付闭环"
+    },
+    "team-roadmap-dev": {
+      "name": "team-roadmap-dev",
+      "name_zh": "路线图开发团队",
+      "description": "Roadmap-driven development team — phased milestone execution from a project roadmap",
+      "description_zh": "路线图驱动开发团队：按里程碑分阶段执行 roadmap"
+    },
+    "team-ui-polish": {
+      "name": "team-ui-polish",
+      "name_zh": "UI 打磨团队",
+      "description": "UI polish team — refines visual and interaction details for design quality",
+      "description_zh": "UI 设计质量打磨团队：精修视觉与交互细节"
+    },
+    "team-uidesign": {
+      "name": "team-uidesign",
+      "name_zh": "设计令牌审计",
+      "description": "Design tokens & audit team — manages design tokens and runs UI design audits",
+      "description_zh": "设计令牌与审计团队：管理 design tokens，执行 UI 设计审计"
+    },
+    "team-ultra-analyze": {
+      "name": "team-ultra-analyze",
+      "name_zh": "深度协作分析",
+      "description": "Deep collaborative analysis team — multi-perspective exhaustive codebase analysis",
+      "description_zh": "深度协作分析团队：多视角穷尽式代码库分析"
+    },
+    "team-ux-improve": {
+      "name": "team-ux-improve",
+      "name_zh": "UX 改进团队",
+      "description": "UX interaction team — identifies and fixes user-experience interaction issues",
+      "description_zh": "UX 交互改进团队：识别并修复用户体验交互问题"
+    },
+    "team-visual-a11y": {
+      "name": "team-visual-a11y",
+      "name_zh": "视觉无障碍 QA",
+      "description": "Visual accessibility QA team — WCAG-compliant visual accessibility checks and fixes",
+      "description_zh": "视觉无障碍 QA 团队：符合 WCAG 的视觉可访问性检查与修复"
+    },
+    "scholar-anti-ai-writing": {
+      "name": "scholar-anti-ai-writing",
+      "name_zh": "去 AI 痕迹",
+      "description": "Remove AI writing patterns — detects and rewrites AI-typical phrasing for natural prose",
+      "description_zh": "检测并改写 AI 典型表达模式，使文本更自然"
+    },
+    "scholar-citation-verify": {
+      "name": "scholar-citation-verify",
+      "name_zh": "引文核验",
+      "description": "Citation verification — checks references against source claims and contexts",
+      "description_zh": "核验参考文献与原文主张的一致性"
+    },
+    "scholar-experiment": {
+      "name": "scholar-experiment",
+      "name_zh": "实验分析",
+      "description": "Experiment analysis — analyzes, interprets, and visualizes experimental results",
+      "description_zh": "分析、解读并可视化实验结果"
+    },
+    "scholar-ideation": {
+      "name": "scholar-ideation",
+      "name_zh": "研究选题",
+      "description": "Research ideation — identifies research gaps and plans promising directions",
+      "description_zh": "识别研究空白并规划研究方向"
+    },
+    "scholar-latex-organizer": {
+      "name": "scholar-latex-organizer",
+      "name_zh": "LaTeX 整理",
+      "description": "LaTeX organizer — cleans and restructures LaTeX project files and templates",
+      "description_zh": "清理并重构 LaTeX 项目文件与模板"
+    },
+    "scholar-publish": {
+      "name": "scholar-publish",
+      "name_zh": "投稿准备",
+      "description": "Post-acceptance preparation — camera-ready and submission material packaging",
+      "description_zh": "录用后准备 camera-ready 与提交材料"
+    },
+    "scholar-rebuttal-pro": {
+      "name": "scholar-rebuttal-pro",
+      "name_zh": "审稿回复 Pro",
+      "description": "Rebuttal Pro — crafts reviewer responses with CLI-assisted argument analysis",
+      "description_zh": "基于 CLI 辅助论证分析撰写审稿回复"
+    },
+    "scholar-review": {
+      "name": "scholar-review",
+      "name_zh": "论文评审",
+      "description": "Paper review — reviews manuscripts and generates structured rebuttal responses",
+      "description_zh": "评审手稿并生成结构化 rebuttal 回复"
+    },
+    "scholar-thesis-docx": {
+      "name": "scholar-thesis-docx",
+      "name_zh": "学位论文排版",
+      "description": "Thesis Word formatting — formats thesis documents for Word submission",
+      "description_zh": "学位论文 Word 格式排版"
+    },
+    "scholar-writing": {
+      "name": "scholar-writing",
+      "name_zh": "论文写作",
+      "description": "End-to-end paper writing — repo to publication-ready LaTeX manuscript",
+      "description_zh": "端到端论文写作：从代码仓库到可投稿的 LaTeX 手稿"
+    },
+    "skill-generator": {
+      "name": "skill-generator",
+      "name_zh": "技能生成器",
+      "description": "Skill generator — creates new Claude Code skills with sequential or autonomous phase patterns",
+      "description_zh": "创建新的 Claude Code 技能，支持顺序与自治两种阶段模式"
+    },
+    "skill-simplify": {
+      "name": "skill-simplify",
+      "name_zh": "技能精简",
+      "description": "Skill simplify — refactors and trims skills while preserving behavior via integrity checks",
+      "description_zh": "在保持行为完整性的前提下精简重构技能"
+    },
+    "skill-tuning": {
+      "name": "skill-tuning",
+      "name_zh": "技能调优",
+      "description": "Skill tuning — diagnoses and iteratively optimizes skill execution issues",
+      "description_zh": "诊断并迭代优化技能执行问题"
+    },
+    "prompt-generator": {
+      "name": "prompt-generator",
+      "name_zh": "提示词生成器",
+      "description": "Prompt generator — generates or converts command, skill, and agent prompt files",
+      "description_zh": "生成或转换命令、技能、角色定义的提示词文件"
+    },
+    "delegation-check": {
+      "name": "delegation-check",
+      "name_zh": "委托契约检查",
+      "description": "Delegation check — validates delegation prompts against role definitions for boundary leaks",
+      "description_zh": "检查委托提示词与角色定义的边界与契约一致性"
+    }
+  }
+}

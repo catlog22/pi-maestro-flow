@@ -521,7 +521,7 @@ export class TeammateControlCenter implements Component, Focusable {
             if (this.modelSelected < 0) this.modelSelected = 0;
             this.statusText = `Saved model · choose thinking depth for ${value}`;
           } else {
-            this.statusText = `Saved · ${taskType} ${editorKind} → ${value ?? (editorKind === "thinking" ? "inherit / Pi default" : "auto / agent default")}`;
+            this.statusText = `Saved · ${taskType} ${editorKind} → ${value ?? (editorKind === "thinking" ? "inherit / Pi default" : "auto / inherit main session model")}`;
             this.modelTaskType = null;
           }
           this.modelQuery = "";
@@ -789,8 +789,8 @@ export class TeammateControlCenter implements Component, Focusable {
     const configured = this.config.mappings[taskType];
     const items = [{
       value: "__auto__",
-      label: "auto / agent default",
-      detail: "Use explicit task model, configured routing, or the agent default",
+      label: "auto / inherit main session model",
+      detail: "Use the task/top-level model, an explicitly configured mapping, or inherit the main session's model",
       active: !configured,
       unavailable: false,
     }];
@@ -1003,9 +1003,10 @@ export class TeammateControlCenter implements Component, Focusable {
       lines.push(this.params.theme.fg("dim", "Config · ~/.pi/agent/teammate-models.json"));
       if (unavailable.length > 0) lines.push(this.params.theme.fg("warning", `Unavailable · ${unavailable.map(displayText).join(", ")}`));
       if (hasRoutingRules(this.state.project.overrides)) {
+        const applied = this.state.project.applyOverrides;
         lines.push(this.params.theme.fg(
-          this.state.project.applyOverrides ? "warning" : "dim",
-          `Project overrides · ${this.state.project.applyOverrides ? "enabled" : "preserved / disabled"}`,
+          applied ? "warning" : "dim",
+          `Project overrides · ${applied ? "● enabled" : "○ preserved / disabled"}`,
         ));
       }
       if (this.state.missingProfile) lines.push(this.params.theme.fg("warning", `Missing selection · ${displayText(this.state.missingProfile)}`));
@@ -1013,7 +1014,7 @@ export class TeammateControlCenter implements Component, Focusable {
       const taskType = this.filteredTaskTypes()[this.selected.routing];
       if (!taskType) return [this.emptyState()];
       const meta = this.taskTypeMeta(taskType);
-      const mapping = this.config.mappings[taskType] ?? "auto / agent default";
+      const mapping = this.config.mappings[taskType] ?? "auto / inherit main session model";
       lines.push(this.params.theme.bold(displayText(meta.label)));
       lines.push(this.params.theme.fg("muted", `Roles · ${displayText(meta.roles)}`));
       lines.push(...wrapTextWithAnsi(displayText(meta.description), Math.max(1, width)).slice(0, 3));
@@ -1034,7 +1035,10 @@ export class TeammateControlCenter implements Component, Focusable {
       if (!agent) return [this.emptyState()];
       lines.push(`@${this.params.theme.bold(displayText(agent.name))} ${this.params.theme.fg("dim", `[${displayText(agent.source)}]`)}`);
       lines.push(...wrapTextWithAnsi(normalizedText(displayText(agent.description)), Math.max(1, width)).slice(0, 3));
-      lines.push(this.params.theme.fg("dim", `Model · ${displayText(agent.model ?? "auto / routed")}`));
+      const roleRules = this.config.roleMappings?.[agent.name];
+      lines.push(this.params.theme.fg("dim", `Model · ${displayText(roleRules?.model ?? agent.model ?? "auto / routed")}`));
+      lines.push(this.params.theme.fg("dim", `Fallbacks · ${displayText(roleRules?.fallbackModels?.join(", ") ?? "inherit / none")}`));
+      lines.push(this.params.theme.fg("dim", `Thinking · ${displayText(roleRules?.thinking ?? agent.thinking ?? "inherit / Pi default")}`));
       lines.push(this.params.theme.fg("dim", `Context · ${displayText(agent.defaultContext ?? "fresh")} · prompt ${displayText(agent.systemPromptMode)}`));
       lines.push(this.params.theme.fg("dim", `Tools · ${agent.tools?.map(displayText).join(", ") ?? "default"}`));
     } else {

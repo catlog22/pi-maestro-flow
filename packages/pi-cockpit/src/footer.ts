@@ -31,6 +31,7 @@ export interface FooterParts {
 	agentSummary?: string;
 	bashBgStatus?: string;
 	workflowStatus?: string;
+	supervisionStatus?: string;
 	extensionStatuses?: readonly ExtensionStatusSegment[];
 	width: number;
 	glyphs: IconGlyphs;
@@ -256,6 +257,14 @@ export function renderFooter(p: FooterParts): string[] {
 	});
 	if (p.thinking && p.thinking !== "off") {
 		leftParts.push({ text: theme.fg("muted", p.thinking), priority: 4, clippable: false });
+	}
+	if (p.supervisionStatus) {
+		leftParts.push({
+			text: `${theme.fg("muted", "SUP")} ${theme.fg("warning", p.supervisionStatus)}`,
+			priority: 2,
+			clippable: true,
+			minWidth: utils.measure("SUP") + 1 + utils.measure(g.ellipsis) + 3,
+		});
 	}
 	if (p.cwd) leftParts.push(labelled(g.workspace, p.cwd, 0, "syntaxFunction"));
 	if (p.git) leftParts.push(labelled(g.git, p.git, 3, "syntaxFunction"));

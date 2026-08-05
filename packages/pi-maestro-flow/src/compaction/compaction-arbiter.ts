@@ -11,6 +11,8 @@ export type CompactionOwner = CompactionRequestOwner | "native";
  */
 export interface MidTurnCompactionTrigger {
   owner: "mid-turn";
+  /** Recovery requests are fail-closed and must never enter Pi native summarization. */
+  recovery?: "provider-pressure";
   estimatedTokens: number;
   contextWindow: number;
   /** Effective trigger threshold: contextWindow - effectiveReserve. */
@@ -41,9 +43,29 @@ export type CompactionTrigger =
   | OutputLimitCompactionTrigger
   | PlanHandoffCompactionTrigger;
 
+export function isProviderPressureCompactionTrigger(
+  trigger: CompactionTrigger | undefined,
+): trigger is MidTurnCompactionTrigger & { recovery: "provider-pressure" } {
+  return trigger?.owner === "mid-turn" && trigger.recovery === "provider-pressure";
+}
+
 export type CompactionOutcome = "success" | "cancel" | "error" | "timeout";
 
 export const COMPACTION_LEASE_TIMEOUT_MS = 5 * 60_000;
+/**
+ * Marks an unowned fallback request so completed-turn threshold preservation
+ * cannot cancel the only recovery path for an already aborted user request.
+ * It deliberately does not use the owner-tag grammar: the arbiter still
+ * observes it as a native request.
+ */
+export const NATIVE_FALLBACK_COMPACTION_MARKER = "[maestro-native-fallback]";
+
+/** True only when the fallback marker is the leading instruction token. */
+export function isNativeFallbackCompactionInstructions(
+  customInstructions: string | undefined,
+): boolean {
+  return customInstructions?.trimStart().startsWith(NATIVE_FALLBACK_COMPACTION_MARKER) === true;
+}
 
 export interface CompactionLease {
   readonly owner: CompactionRequestOwner;
@@ -78,7 +100,11 @@ interface ActiveCompaction {
  * Session-local arbitration for extension-triggered compaction.
  *
  * Pi's native automatic and built-in manual compaction enter through
- * session_before_compact. They are observed, never replaced or cancelled.
+ * session_before_compact and participate in the same arbitration. The extension
+ * may replace their summary through its session_before_compact handler, while
+ * the completed-turn threshold policy may cancel a native threshold request to
+ * preserve an active transcript. Native starts still win an in-flight race with
+ * an extension request.
  */
 export class CompactionArbiter {
   private nextId = 0;

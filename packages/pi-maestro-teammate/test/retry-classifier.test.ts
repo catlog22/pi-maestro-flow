@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   classifyRetryError,
+  extractRetryAfterMs,
+  isAuthError,
   isFallbackProviderError,
   isRetryableProviderError,
 } from "../src/runs/retry.ts";
@@ -26,31 +28,70 @@ test("host:port text in connection errors is not mistaken for an HTTP status", (
   assert.equal(classifyRetryError("request to http://localhost:4000/v1 failed: connection refused"), "network");
 });
 
-test("genuine permanent errors stay non-retryable", () => {
-  assert.equal(classifyRetryError("Unauthorized: invalid API key"), "non-retryable");
-  assert.equal(classifyRetryError("HTTP 401 Unauthorized"), "non-retryable");
-  assert.equal(classifyRetryError("status 403 forbidden"), "non-retryable");
-  assert.equal(classifyRetryError("Error code: (401)"), "non-retryable");
-  assert.equal(classifyRetryError("context_length_exceeded"), "non-retryable");
-  assert.equal(classifyRetryError(undefined), "non-retryable");
+test("auth failures classify as auth and are fallback-eligible but never retried", () => {
+  assert.equal(classifyRetryError("Unauthorized: invalid API key"), "auth");
+  assert.equal(classifyRetryError("HTTP 401 Unauthorized"), "auth");
+  assert.equal(classifyRetryError("status 403 forbidden"), "auth");
+  assert.equal(classifyRetryError("Error code: (401)"), "auth");
+  assert.equal(classifyRetryError("access token expired"), "auth");
+  assert.equal(classifyRetryError("authentication failed"), "auth");
+  assert.equal(isAuthError("invalid api key"), true);
+  assert.equal(isAuthError("connection reset"), false);
+  // A broken credential will not heal by retrying the same model — but a
+  // different model (with its own key) can recover, so fallback stays open.
   assert.equal(isRetryableProviderError("HTTP 401 Unauthorized"), false);
+  assert.equal(isFallbackProviderError("Unauthorized: invalid API key"), true);
+});
+
+test("HTTP status short-circuits message text (authoritative)", () => {
+  assert.equal(classifyRetryError("Provider returned error", 401), "auth");
+  assert.equal(classifyRetryError("everything looks fine", 403), "auth");
+  assert.equal(classifyRetryError("random failure", 402), "fallback-only");
+  assert.equal(classifyRetryError("random failure", 429), "provider");
+  assert.equal(classifyRetryError("random failure", 503), "provider");
+  assert.equal(classifyRetryError("random failure", 400), "non-retryable");
+  assert.equal(classifyRetryError("random failure", 404), "non-retryable");
+  assert.equal(classifyRetryError("random failure", 422), "non-retryable");
+  // A sub-400 status leaves the message text in charge.
+  assert.equal(classifyRetryError("fetch failed", 200), "network");
+  // Statuses embedded in messages take the same authoritative path.
+  assert.equal(classifyRetryError("Provider error: 408"), "provider");
+  assert.equal(classifyRetryError("429 Too Many Requests"), "provider");
+});
+
+test("genuine permanent errors stay non-retryable and not fallback-eligible", () => {
+  assert.equal(classifyRetryError("context_length_exceeded"), "non-retryable");
+  assert.equal(classifyRetryError("invalid model: gpt-9"), "non-retryable");
+  assert.equal(classifyRetryError("validation error"), "non-retryable");
+  assert.equal(classifyRetryError(undefined), "non-retryable");
+  assert.equal(isFallbackProviderError("context_length_exceeded"), false);
 });
 
 test("provider and quota classes keep their existing routing", () => {
   assert.equal(classifyRetryError("Provider overloaded: 503"), "provider");
-  assert.equal(classifyRetryError("429 Too Many Requests"), "provider");
   assert.equal(classifyRetryError("402 insufficient_quota"), "fallback-only");
   assert.equal(isRetryableProviderError("402 insufficient_quota"), false);
   assert.equal(isFallbackProviderError("402 insufficient_quota"), true);
 });
 
-test("HTTP 408 and Python-style transport names classify as retryable", () => {
-  assert.equal(classifyRetryError("HTTP 408 Request Timeout"), "network");
-  assert.equal(classifyRetryError("Provider error: 408"), "provider");
+test("Python-style transport names classify as retryable", () => {
   assert.equal(classifyRetryError("requests.exceptions.ConnectionError: Max retries exceeded"), "network");
   assert.equal(classifyRetryError("ConnectionResetError: connection reset by peer"), "network");
   assert.equal(classifyRetryError("urllib3 ConnectionRefusedError"), "network");
   assert.equal(classifyRetryError("BrokenPipeError: [Errno 32]"), "network");
   assert.equal(classifyRetryError("TimeoutError: Read timed out"), "network");
   assert.equal(isRetryableProviderError("ConnectionResetError"), true);
+});
+
+test("retry-after hints parse into relative delays", () => {
+  const now = 1_800_000_000_000;
+  assert.equal(extractRetryAfterMs("Retry-After: 30", now), 30_000);
+  assert.equal(extractRetryAfterMs("retry-after: 120", now), 120_000);
+  assert.equal(extractRetryAfterMs("x-ratelimit-reset-ms: 1800000300000", now), 300_000);
+  assert.equal(extractRetryAfterMs("x-ratelimit-reset: 1800000300", now), 300_000);
+  assert.equal(extractRetryAfterMs("reset at 2027-01-01T00:00:00Z", Date.parse("2027-01-01T00:00:00Z")), 0);
+  assert.equal(extractRetryAfterMs("no hints here", now), undefined);
+  assert.equal(extractRetryAfterMs(undefined), undefined);
+  // A bare status code is not a retry hint.
+  assert.equal(extractRetryAfterMs("Provider overloaded: 503", now), undefined);
 });

@@ -11,7 +11,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, ThemeColor } from "@earendil-works/pi-coding-agent";
 
 import { workspaceStorageId } from "../tools/plan-store.ts";
 import { HistoryEditor } from "./history-editor.ts";
@@ -145,14 +145,20 @@ function capped(entries: string[], maxEntries: number): string[] {
 
 /** The subset of the extension context this feature touches. */
 export type InputHistoryContext = Pick<ExtensionContext, "cwd" | "hasUI"> & {
-  ui: Pick<ExtensionContext["ui"], "notify" | "getEditorComponent" | "setEditorComponent">;
+  ui: Pick<ExtensionContext["ui"], "notify" | "getEditorComponent" | "setEditorComponent" | "theme">;
 };
 
 type EditorFactory = Parameters<InputHistoryContext["ui"]["setEditorComponent"]>[0];
 
+export interface InputRouteTarget {
+  label: string;
+  color: ThemeColor;
+}
+
 export interface InputHistory {
   onSessionStart(ctx: InputHistoryContext): Promise<void>;
   onSessionShutdown(): Promise<void>;
+  setRouteTarget(target: InputRouteTarget | undefined): void;
 }
 
 /**
@@ -163,6 +169,13 @@ export function createInputHistory(storeOptions: InputHistoryStoreOptions = {}):
   let store: InputHistoryStore | undefined;
   let ourFactory: EditorFactory | undefined;
   let errorReported = false;
+  let activeEditor: HistoryEditor | undefined;
+  let activeTheme: ExtensionContext["ui"]["theme"] | undefined;
+  let routeTarget: InputRouteTarget | undefined;
+
+  const editorRouteTarget = () => routeTarget && activeTheme
+    ? { label: routeTarget.label, paint: (text: string) => activeTheme!.fg(routeTarget!.color, text) }
+    : undefined;
 
   return {
     /** Load this workspace's history, and claim the editor slot whenever it is free. */
@@ -177,6 +190,7 @@ export function createInputHistory(storeOptions: InputHistoryStoreOptions = {}):
         },
       });
       await next.load();
+      activeTheme = ctx.ui.theme;
       // A later session in another cwd gets its own store behind the same editor.
       store = next;
       // pi restores the default editor on every session switch (/new, /resume, /fork,
@@ -185,19 +199,33 @@ export function createInputHistory(storeOptions: InputHistoryStoreOptions = {}):
       // identity instead: keep an editor we installed, defer to a foreign one, and
       // re-claim when pi reset the slot to undefined.
       const owner = ctx.ui.getEditorComponent();
-      if (ourFactory !== undefined && owner === ourFactory) return;
+      if (ourFactory !== undefined && owner === ourFactory) {
+        activeEditor?.refreshRouteTarget();
+        return;
+      }
       if (owner !== undefined) return;
-      ourFactory = (tui, theme, keybindings) =>
-        new HistoryEditor(tui, theme, keybindings, {
+      ourFactory = (tui, theme, keybindings) => {
+        activeEditor = new HistoryEditor(tui, theme, keybindings, {
           getEntries: () => store?.list() ?? [],
           record: (text) => store?.record(text),
+          getRouteTarget: editorRouteTarget,
         });
+        return activeEditor;
+      };
       ctx.ui.setEditorComponent(ourFactory);
     },
 
     /** Only the pending write has to land; the editor re-claims itself next session start. */
     async onSessionShutdown(): Promise<void> {
       await store?.flush();
+      activeEditor = undefined;
+      activeTheme = undefined;
+      routeTarget = undefined;
+    },
+
+    setRouteTarget(target): void {
+      routeTarget = target;
+      activeEditor?.refreshRouteTarget();
     },
   };
 }
@@ -207,6 +235,10 @@ const defaultInputHistory = createInputHistory();
 
 export function onSessionStart(ctx: InputHistoryContext): Promise<void> {
   return defaultInputHistory.onSessionStart(ctx);
+}
+
+export function setInputRouteTarget(target: InputRouteTarget | undefined): void {
+  defaultInputHistory.setRouteTarget(target);
 }
 
 export function onSessionShutdown(): Promise<void> {

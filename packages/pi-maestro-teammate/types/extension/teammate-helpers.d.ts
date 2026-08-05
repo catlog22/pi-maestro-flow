@@ -8,7 +8,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type ChildReclamationOutcome } from "../runs/execution.ts";
 import type { RunTeammateOptions } from "../runs/execution.ts";
-import type { TeammateState, AgentActivity, AgentProgressSnapshot, AgentRunOutcome, AgentRunPhase, ActiveAgent, AgentTerminalStatus, SettledAgentRecord } from "../shared/types.ts";
+import type { TeammateState, AgentActivity, AgentProgressSnapshot, AgentRunOutcome, AgentRunPhase, ActiveAgent, AgentTerminalStatus, SettledAgentRecord, StructuredResult } from "../shared/types.ts";
 import { type AgentSummary } from "../agents/agents.ts";
 export type AgentListView = "active" | "named" | "all";
 export type TeammateListView = AgentListView | "roles";
@@ -125,7 +125,7 @@ export declare function waitForTeammate(state: TeammateState, params: {
     waitMs?: number;
     until?: "result-ready" | "completed";
 }, signal?: AbortSignal): Promise<TeammateWaitResult>;
-export declare function emitComplete(pi: ExtensionAPI, id: string | undefined, agent: string, correlationId: string, exitCode: number, durationMs: number, wakeable?: boolean, cancelled?: boolean): void;
+export declare function emitComplete(pi: ExtensionAPI, id: string | undefined, agent: string, correlationId: string, exitCode: number, durationMs: number, wakeable?: boolean, cancelled?: boolean, structuredResults?: StructuredResult[]): void;
 /**
  * Deferred background and IPC callbacks routinely outlive session replacement:
  * after ctx.newSession()/fork()/switchSession()/reload() the host invalidates

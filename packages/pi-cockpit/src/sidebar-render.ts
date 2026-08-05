@@ -21,6 +21,8 @@ export interface SidebarRenderInput {
 	resizing?: boolean;
 	/** Browse-window offset (content rows skipped) while the sidebar has keyboard focus. */
 	scrollStart?: number;
+	/** Row id (`Section:i`) currently selected in browse mode; gets a highlight. */
+	focusedRowId?: string;
 }
 
 type SidebarSectionTitle = "Workflow" | "Goal" | "Tasks" | "Agents" | "Jobs" | "Swarm";
@@ -28,6 +30,35 @@ type SidebarSectionTitle = "Workflow" | "Goal" | "Tasks" | "Agents" | "Jobs" | "
 interface SidebarSection {
 	title: SidebarSectionTitle;
 	rows: string[];
+}
+
+/** Sections in render order; row ids are `${title}:${index}` (mirrors group names). */
+function buildSections(input: SidebarRenderInput): SidebarSection[] {
+	const theme = input.theme;
+	const glyphs = resolveGlyphs(input.config.icons.mode);
+	const compact = input.width <= 35 || input.config.sidebar.density === "compact";
+	const now = Number.isFinite(input.now) ? input.now : 0;
+	const hideLiveDuration = input.config.staticMode === true;
+	return [
+		{ title: "Workflow" as const, rows: workflowRows(input.maestro, compact, theme, glyphs) },
+		{ title: "Goal" as const, rows: goalRows(input.maestro, compact, theme, glyphs) },
+		{ title: "Tasks" as const, rows: taskRows(input.todos, compact, theme, glyphs) },
+		{ title: "Agents" as const, rows: agentRows(input.agents, compact, theme, glyphs, now, hideLiveDuration) },
+		{ title: "Jobs" as const, rows: jobRows(input.jobs, compact, theme, glyphs, now, hideLiveDuration) },
+		{ title: "Swarm" as const, rows: swarmRows(input.maestro, compact, theme, glyphs) },
+	].filter((section) => section.rows.length > 0);
+}
+
+/** Nav-row ids in the same order the sidebar renders them (browse-mode keyboard navigation). */
+export function enumerateNavRows(input: SidebarRenderInput): string[] {
+	return buildSections(input).flatMap((section) =>
+		section.rows.map((_, index) => `${section.title}:${index}`),
+	);
+}
+
+/** Highlight a focused row: `▸` accent prefix on the original text. */
+function highlightRow(row: string, theme: Theme, contentWidth: number): string {
+	return fit(theme.bold(theme.fg("accent", `▸ ${row}`)), contentWidth);
 }
 
 /** Sidebar group extends the shared PriorityGroup with a section association. */
@@ -211,7 +242,9 @@ function agentRows(
 			// respond to (SB-5).
 			+ (action ? `${glyphs.separator}${action}` : "")
 			+ (task ? `${glyphs.separator}${task}` : "")
-			+ (telemetry ? theme.fg("muted", `${glyphs.separator}${telemetry}`) : "");
+			+ (telemetry ? theme.fg("muted", `${glyphs.separator}${telemetry}`) : "")
+			// Viewing marker: this agent is the one shown in teammate's viewing view.
+			+ (row.viewing ? theme.fg("dim", `${glyphs.separator}viewing`) : "");
 		if (elapsed !== "") line += theme.fg("dim", `${glyphs.separator}${elapsed}`);
 		return line;
 	})];
@@ -338,6 +371,7 @@ function renderScrolled(
 	contentWidth: number,
 	height: number,
 	totalBudget: number,
+	focusedRowId?: string,
 ): string[] {
 	const totalContentRows = groups.reduce((sum, g) => sum + g.rows.length, 0);
 	const above = Math.min(scrollStart, totalContentRows);
@@ -358,7 +392,7 @@ function renderScrolled(
 				output.push(sectionTitle(group.section, theme, contentWidth));
 				drewTitle = true;
 			}
-			output.push(fit(row, contentWidth));
+			output.push(group.name === focusedRowId ? highlightRow(row, theme, contentWidth) : fit(row, contentWidth));
 		}
 	}
 	if (above > 0) output.push(fit(theme.fg("dim", `${glyphs.ellipsis} ${above} above`), contentWidth));
@@ -376,6 +410,7 @@ function renderGroups(
 	contentWidth: number,
 	height: number,
 	totalBudget: number = groups.reduce((sum, g) => sum + 1 + g.rows.length, 0),
+	focusedRowId?: string,
 ): string[] {
 	const output: string[] = [];
 	let lastSection: SidebarSectionTitle | undefined;
@@ -391,7 +426,7 @@ function renderGroups(
 		}
 		for (const row of group.rows) {
 			if (output.length >= budget) break;
-			output.push(fit(row, contentWidth));
+			output.push(group.name === focusedRowId ? highlightRow(row, theme, contentWidth) : fit(row, contentWidth));
 		}
 	}
 	if (hasOverflow && totalBudget > output.length) {
@@ -408,6 +443,7 @@ function layoutSections(
 	glyphs: IconGlyphs,
 	contentWidth: number,
 	scrollStart = 0,
+	focusedRowId?: string,
 ): string[] {
 	const groups = sectionsToGroups(sections);
 	// Pre-composition cost (one section-title row per group plus its rows) is the
@@ -417,10 +453,10 @@ function layoutSections(
 		// Browse mode (sidebar keyboard focus): render a window starting at
 		// scrollStart content rows so rows the composer would drop are still
 		// reachable (SB-1). Section headers re-appear at the window top.
-		return renderScrolled(groups, scrollStart, theme, glyphs, contentWidth, height, totalBudget);
+		return renderScrolled(groups, scrollStart, theme, glyphs, contentWidth, height, totalBudget, focusedRowId);
 	}
 	const composed = composeByPriority(groups, height, sectionAwareCost) as SidebarGroup[];
-	return renderGroups(composed, theme, glyphs, contentWidth, height, totalBudget);
+	return renderGroups(composed, theme, glyphs, contentWidth, height, totalBudget, focusedRowId);
 }
 
 function dockRows(rows: readonly string[], width: number, height: number, theme: Theme, resizing: boolean, glyphs: IconGlyphs): string[] {
@@ -443,18 +479,7 @@ export function renderSidebar(input: SidebarRenderInput): string[] {
 	if (width <= 0 || height <= 0) return [];
 	const theme = input.theme;
 	const glyphs = resolveGlyphs(input.config.icons.mode);
-	const compact = width <= 35 || input.config.sidebar.density === "compact";
-	const now = Number.isFinite(input.now) ? input.now : 0;
-	const hideLiveDuration = input.config.staticMode === true;
-	const candidates: SidebarSection[] = [
-		{ title: "Workflow", rows: workflowRows(input.maestro, compact, theme, glyphs) },
-		{ title: "Goal", rows: goalRows(input.maestro, compact, theme, glyphs) },
-		{ title: "Tasks", rows: taskRows(input.todos, compact, theme, glyphs) },
-		{ title: "Agents", rows: agentRows(input.agents, compact, theme, glyphs, now, hideLiveDuration) },
-		{ title: "Jobs", rows: jobRows(input.jobs, compact, theme, glyphs, now, hideLiveDuration) },
-		{ title: "Swarm", rows: swarmRows(input.maestro, compact, theme, glyphs) },
-	];
-	const sections = candidates.filter((section) => section.rows.length > 0);
+	const sections = buildSections(input);
 	const content = layoutSections(
 		sections,
 		height,
@@ -462,6 +487,7 @@ export function renderSidebar(input: SidebarRenderInput): string[] {
 		glyphs,
 		Math.max(0, width - 2),
 		Number.isFinite(input.scrollStart) && (input.scrollStart ?? 0) > 0 ? Math.trunc(input.scrollStart ?? 0) : 0,
+		input.focusedRowId,
 	);
 	return dockRows(content, width, height, theme, input.resizing === true, glyphs);
 }

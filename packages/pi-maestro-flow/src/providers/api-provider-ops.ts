@@ -1026,6 +1026,7 @@ export async function chooseAction(
     { action: "configure", label: "新增或修改模型" },
     { action: "show", label: "查看模型详情" },
     { action: "vision", label: `Vision 多模态策略（当前：${vision.enabled ? "开启" : "关闭"}）` },
+    { action: "effort", label: "调整思考强度" },
     { action: "toggle", label: "启用或停用 Provider" },
     { action: "delete", label: "删除模型" },
     {
@@ -1051,6 +1052,7 @@ export function actionFromArg(value: string): ApiProviderAction | undefined {
   if (value === "logout") return "logout";
   if (value === "retry") return "retry";
   if (value === "vision") return "vision";
+  if (value === "effort") return "effort";
   if (value === "reset") return "reset";
   return undefined;
 }

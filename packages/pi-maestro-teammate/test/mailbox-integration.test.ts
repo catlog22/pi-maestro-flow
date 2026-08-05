@@ -76,9 +76,9 @@ beforeEach(async () => {
   };
 });
 
-// --- R2: APPLIED only after IPC ack ---
+// --- R2: dispatch success auto-applies (in-process delivery confirmation) ---
 
-test("inject without ack leaves message in ACCEPTED, not APPLIED", async () => {
+test("inject success transitions message to APPLIED (auto-ack)", async () => {
   const dispatched: MailboxEnvelope[] = [];
   const service = new MailboxService(makeServiceOptions({
     onDispatch: async (envelope) => { dispatched.push(envelope); },
@@ -104,14 +104,15 @@ test("inject without ack leaves message in ACCEPTED, not APPLIED", async () => {
   assert.equal(dispatched.length, 1);
   assert.equal(dispatched[0].payload, "hello child");
 
-  // But NOT acknowledged — should be in accepted, not applied
+  // Dispatch success is the delivery confirmation: message is APPLIED, never
+  // left stranded in accepted (which previously exhausted the quota).
   const accepted = await service.store.readEnvelope("accepted", result.messageId);
-  assert.ok(accepted, "message should be in accepted state");
+  assert.equal(accepted, undefined, "message should not linger in accepted");
   const applied = await service.store.readEnvelope("applied", result.messageId);
-  assert.equal(applied, undefined, "message should NOT be in applied state without ack");
+  assert.ok(applied, "message should be in applied state after dispatch");
 });
 
-test("ack after inject transitions to APPLIED", async () => {
+test("ack after inject is idempotent when already auto-applied", async () => {
   const dispatched: MailboxEnvelope[] = [];
   const service = new MailboxService(makeServiceOptions({
     onDispatch: async (envelope) => { dispatched.push(envelope); },
@@ -133,20 +134,19 @@ test("ack after inject transitions to APPLIED", async () => {
 
   assert.equal(dispatched.length, 1);
 
-  // Simulate IPC ack from child extension context hook
+  // Already applied by the auto-ack; an explicit IPC ack is a no-op.
   const acked = await service.acknowledge(result.messageId);
-  assert.equal(acked, true);
+  assert.equal(acked, false, "acknowledge on an already-applied message is a no-op");
 
   const applied = await service.store.readEnvelope("applied", result.messageId);
-  assert.ok(applied, "message should be in applied state after ack");
+  assert.ok(applied, "message should be in applied state");
 });
 
-// --- R1: Crash after injection → replay on restart ---
+// --- R1: Crash between accept and apply → replay on restart ---
 
 test("crash after injection: message replayed on restart", async () => {
-  const dispatchedFirst: string[] = [];
   const service1 = new MailboxService(makeServiceOptions({
-    onDispatch: async (envelope) => { dispatchedFirst.push(envelope.messageId); },
+    onDispatch: async () => {},
   }));
   await service1.start();
 
@@ -160,23 +160,30 @@ test("crash after injection: message replayed on restart", async () => {
   });
   assert.ok(result.ok);
 
-  // Wait for dispatch (message goes to accepted)
+  // Wait for dispatch then simulate a crash that leaves the message stranded
+  // in accepted (process dies between accept and auto-apply).
+  const messageId = result.messageId;
   await new Promise((resolve) => setTimeout(resolve, 100));
-  // Simulate crash: stop without ack
   await service1.stop();
-  assert.equal(dispatchedFirst.length, 1);
+  // Force the crash state: move applied back to accepted as if apply never ran.
+  const appliedEnv = await service1.store.readEnvelope("applied", messageId);
+  if (appliedEnv) {
+    await service1.store.remove("applied", messageId);
+    await service1.store.writeStaging(appliedEnv);
+    await service1.store.promoteToReady(messageId);
+    await service1.store.claim(messageId, {
+      messageId, claimerNonce: "crash", claimedAt: nowMs,
+      leaseExpiresAt: nowMs + 30_000, lastHeartbeatAt: nowMs,
+    });
+    await service1.store.accept(messageId, {
+      messageId, claimerNonce: "crash", claimedAt: nowMs,
+      leaseExpiresAt: nowMs + 30_000, lastHeartbeatAt: nowMs,
+    });
+  }
+  assert.ok(await service1.store.readEnvelope("accepted", messageId), "message stranded in accepted after crash");
 
-  // Message is in accepted state (injected but not acked)
-  const accepted = await service1.store.readEnvelope("accepted", result.messageId);
-  assert.ok(accepted);
-
-  // Simulate restart: move accepted back to ready for replay
-  // (In production, the restart path does this via the execution lifecycle)
-  await service1.store.remove("accepted", result.messageId);
-  await service1.store.writeStaging(accepted);
-  await service1.store.promoteToReady(result.messageId);
-
-  // New service instance (simulating process restart)
+  // New service instance (simulating process restart): start() replays
+  // accepted-without-apply back to ready and dispatches it.
   const dispatchedSecond: string[] = [];
   const service2 = new MailboxService(makeServiceOptions({
     onDispatch: async (envelope) => { dispatchedSecond.push(envelope.messageId); },
@@ -186,9 +193,9 @@ test("crash after injection: message replayed on restart", async () => {
   await new Promise((resolve) => setTimeout(resolve, 100));
   await service2.stop();
 
-  // Message was replayed
+  // Message was replayed and re-dispatched (at-least-once semantics)
   assert.equal(dispatchedSecond.length, 1);
-  assert.equal(dispatchedSecond[0], result.messageId);
+  assert.equal(dispatchedSecond[0], messageId);
 });
 
 // --- R8: Capability v1 → direct path ---
@@ -415,8 +422,8 @@ test("service start/stop is idempotent", async () => {
 test("pendingCount reflects undelivered messages", async () => {
   const service = new MailboxService(makeServiceOptions({
     onDispatch: async () => { throw new Error("no dispatch"); },
+    pollMs: 500, // slow poll: message stays live in ready during the check
   }));
-  service.on("dispatch-error", () => {}); // suppress unhandled
   await service.start();
 
   assert.equal(await service.pendingCount(), 0);

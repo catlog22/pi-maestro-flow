@@ -52,9 +52,15 @@ export declare class MailboxConsumer extends EventEmitter {
     notify(): void;
     /**
      * Acknowledge that a message was successfully injected and confirmed via IPC.
-     * Transitions ACCEPTED → APPLIED.
+     * Transitions ACCEPTED → APPLIED. In-process dispatch already auto-applies;
+     * this entry point serves external IPC-ack consumers and is idempotent.
      */
     acknowledge(messageId: string): Promise<boolean>;
+    /**
+     * Replay messages stranded in accepted (crashed mid-dispatch, no ack) back
+     * to ready so they are re-dispatched after a restart. At-least-once delivery.
+     */
+    replayAcceptedToReady(): Promise<number>;
     /**
      * Reclaim stale claims: if a claimed message's heartbeat is older than
      * CLAIM_STALE_MS, move it back to ready for re-claim.

@@ -6,7 +6,7 @@ Pi extension for dispatching one or more role-based teammate tasks through a sin
 
 ## Breaking Changes In 1.0
 
-> Current version: **1.5.0**. The 1.0 breaking changes below remain in effect; versions 1.1–1.5 added circuit breaker, retry resilience, quiet state, duration tracking, observe `watch`/`until=completed`, per-workspace mailbox isolation, and lifecycle hardening without breaking the public API.
+> Current version: **1.7.1**. The 1.0 breaking changes below remain in effect; later releases added circuit breaker, retry resilience, quiet state, duration tracking, observe `watch`/`until=completed`, per-workspace mailbox isolation, lifecycle hardening, and receiver-safe model-registry refresh without breaking the public API.
 
 - Every public `teammate` call requires a non-empty `tasks` array.
 - Single-agent work is represented by `tasks` with one item.
@@ -189,6 +189,8 @@ project .pi/agents > project .agents > ~/.agents > legacy user directory > bundl
 
 Configure task-type defaults with `Alt+M` or `/teammate-models`. The Control Center's **Profiles** tab manages named routing Profiles shared by every project. Its **Routing** tab edits the active global Profile and combines built-in task types, discovered agent types, and types already present in that Profile.
 
+The **Roles** tab lists discovered roles and their effective durable route. Role-scoped settings can be edited through the unified Settings surface as `role.<role-name>.model`, `role.<role-name>.fallbacks`, and `role.<role-name>.thinking`. These settings are stored in the same global Profile or project override file; package updates never rewrite role definitions or user routing data.
+
 Global Profiles are stored in `~/.pi/agent/teammate-models.json`:
 
 ```json
@@ -208,6 +210,13 @@ Global Profiles are stored in `~/.pi/agent/teammate-models.json`:
       "thinkingLevels": {
         "explore": "low",
         "analysis": "high"
+      },
+      "roleMappings": {
+        "security-specialist": {
+          "model": "provider/security-model",
+          "fallbackModels": ["provider/security-backup"],
+          "thinking": "high"
+        }
       }
     }
   }
@@ -223,7 +232,8 @@ Each project persists its active Profile and optional compatibility overrides in
   "applyOverrides": false,
   "overrides": {
     "mappings": {},
-    "thinkingLevels": {}
+    "thinkingLevels": {},
+    "roleMappings": {}
   }
 }
 ```
@@ -239,13 +249,13 @@ project overrides (when enabled) > active global Profile > global default Profil
 Model precedence:
 
 ```text
-task.model > top-level model > taskType mapping > role model > parent Pi model
+task.model > top-level model > taskType mapping > role mapping > role frontmatter model > parent Pi model
 ```
 
 Thinking precedence:
 
 ```text
-task.thinking > top-level thinking > taskType mapping > role thinking > Pi default
+task.thinking > top-level thinking > taskType mapping > role mapping > role frontmatter thinking > Pi default
 ```
 
 Role `fallbackModels` follow the selected primary model. Model identifiers must use exact authenticated `provider/model` values.
@@ -286,7 +296,7 @@ Model calls are protected by a per-model circuit breaker with three states:
 | `OPEN` | The model is blocked after reaching the failure threshold (default: 3 consecutive failures); calls are rejected until the cooldown expires (default: 60 s) |
 | `HALF_OPEN` | After cooldown, one trial call is allowed; success resets to `CLOSED`, failure re-opens the circuit |
 
-The breaker prevents cascading failures when a model endpoint is down. Use `/model-health` (registered by `pi-maestro-flow`) to inspect live circuit state.
+The breaker prevents cascading failures when a model endpoint is down. Use `/model-failover status` (registered by `pi-maestro-flow`) to inspect live circuit state.
 
 ## Retry Resilience
 
@@ -317,7 +327,7 @@ observe({ action: "watch", targets: [{ kind: "teammate", id: "reviewer" }], time
 
 ## Mailbox Message Queue
 
-A durable, per-workspace-isolated message queue backing cross-session delivery (staging → ready → claimed → accepted, atomic writes + idempotent receipts). Cold resume stays synchronous when the mailbox is authoritative; Windows file-lock renames retry automatically and orphaned state records are garbage-collected. External consumers integrate through the `pi-maestro-teammate/v1/mailbox` subpath (host registry + capability negotiation).
+A durable, per-workspace-isolated message queue backing cross-session delivery (staging → ready → claimed → accepted, atomic writes + idempotent receipts). Cold resume stays synchronous when the mailbox is authoritative; Windows file-lock renames retry automatically and orphaned state records are garbage-collected. External consumers (the Flow host) integrate through the `pi-maestro-teammate/v1/mailbox` subpath: the extension publishes a live `MailboxHostRegistry` on the shared-process bridge key `Symbol.for("pi-maestro-teammate.mailbox-registry")` (durable `enqueueTaskNotification`, per-recipient `pendingCount`, and `negotiate` capability v1/v2, with `taskId`-keyed dedup); `pi-maestro-flow` consumes it via `mailboxRegistry()` (see `packages/pi-maestro-flow/src/extension/index.ts`) and the contract is covered by `test/mailbox-registry.test.ts`.
 
 ## Runtime
 

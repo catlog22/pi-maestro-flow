@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
 import { McpManagerOverlay, type McpManagerAction, type McpManagerServerView, type McpManagerStatus, type McpManagerUiState } from "./mcp-manager.ts";
 import {
   McpManagerStore,
@@ -25,18 +26,91 @@ interface ConfigEditorResult {
   snapshot?: McpManagerSnapshot;
 }
 
+const CATALOGS = {
+  en: {
+    "notice.noServers": "No servers · press E to paste or edit the MCP config",
+    "notice.noSelection": "Cannot act · no server selected",
+    "status.togglingOn": "MCP · enabling {name}…",
+    "status.togglingOff": "MCP · disabling {name}…",
+    "notice.toggledOn": "Enabled · {name} · reload after closing",
+    "notice.toggledOff": "Disabled · {name} · reload after closing",
+    "notice.toggleFailed": "Failed to update the toggle · {message}",
+    "notice.cannotAuth": "Cannot authenticate · {name} does not support OAuth (set auth: \"oauth\" or omit auth for auto-detection)",
+    "status.authing": "MCP · authenticating {name}…",
+    "notice.authOk": "Authenticated · {name} · takes effect after reload",
+    "notice.authFailed": "Authentication failed · {name} · {message}",
+    "notice.authFailedNoMsg": "Authentication failed · {name}",
+    "notice.cannotDeleteReadonly": "Cannot delete · {name} is a read-only import",
+    "confirm.deleteTitle": "Delete MCP server “{name}”?",
+    "confirm.deleteMessage": "This removes the server from the {scope} configuration:\n{path}\nOther MCP servers are unaffected.",
+    "notice.deleteCancelled": "Delete cancelled · server unchanged",
+    "status.deleting": "MCP · deleting {name}…",
+    "notice.deleted": "Deleted · {name} · reload after closing",
+    "notice.deleteFailed": "Delete failed · {message}",
+    "status.saving": "MCP · saving configuration…",
+    "editor.title": "Edit MCP configuration · {path}",
+    "notice.editCancelled": "Edit cancelled · no changes saved",
+    "notice.configSaved": "Configuration saved · reload after closing",
+    "notice.saveFailed": "Failed to save configuration · {message}",
+    "scope.user": "user",
+    "scope.project": "project",
+    "scope.import": "import",
+  },
+  "zh-CN": {
+    "notice.noServers": "没有服务 · 按 E 粘贴或编辑 MCP 配置",
+    "notice.noSelection": "无法操作 · 未选择服务",
+    "status.togglingOn": "MCP · 正在启用 {name}…",
+    "status.togglingOff": "MCP · 正在停用 {name}…",
+    "notice.toggledOn": "已启用 · {name} · 关闭后重载",
+    "notice.toggledOff": "已停用 · {name} · 关闭后重载",
+    "notice.toggleFailed": "更新开关失败 · {message}",
+    "notice.cannotAuth": "无法认证 · {name} 不支持 OAuth（需设置 auth: \"oauth\" 或省略 auth 自动检测）",
+    "status.authing": "MCP · 正在认证 {name}…",
+    "notice.authOk": "认证成功 · {name} · 关闭后重载生效",
+    "notice.authFailed": "认证失败 · {name} · {message}",
+    "notice.authFailedNoMsg": "认证失败 · {name}",
+    "notice.cannotDeleteReadonly": "无法删除 · {name} 是只读导入项",
+    "confirm.deleteTitle": "删除 MCP 服务「{name}」？",
+    "confirm.deleteMessage": "这会从{scope}配置中删除该服务：\n{path}\n其他 MCP 服务不会受影响。",
+    "notice.deleteCancelled": "已取消删除 · 服务保持不变",
+    "status.deleting": "MCP · 正在删除 {name}…",
+    "notice.deleted": "已删除 · {name} · 关闭后重载",
+    "notice.deleteFailed": "删除失败 · {message}",
+    "status.saving": "MCP · 正在保存配置…",
+    "editor.title": "编辑 MCP 配置 · {path}",
+    "notice.editCancelled": "已取消编辑 · 未保存更改",
+    "notice.configSaved": "已保存配置 · 关闭后重载",
+    "notice.saveFailed": "保存配置失败 · {message}",
+    "scope.user": "用户",
+    "scope.project": "项目",
+    "scope.import": "导入",
+  },
+} as const;
+
+type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
+
+function t(locale: SupportedSettingsLocale, key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
+  const catalog = CATALOGS[locale] ?? CATALOGS["zh-CN"];
+  const template: unknown = catalog[key];
+  const text = typeof template === "string" ? template : CATALOGS["zh-CN"][key] as string;
+  if (!vars) return text;
+  return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
+    vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
+}
+
 export async function runMcpManager(
   ctx: ExtensionContext,
   store: McpManagerStore,
   runtime: McpManagerRuntime,
+  locale: SupportedSettingsLocale = "zh-CN",
 ): Promise<McpManagerFlowResult> {
   let snapshot = await store.load();
   let uiState: Partial<McpManagerUiState> = { detail: false, query: "" };
-  let notice = snapshot.servers.length === 0 ? "没有服务 · 按 E 粘贴或编辑 MCP 配置" : undefined;
+  let notice = snapshot.servers.length === 0 ? t(locale, "notice.noServers") : undefined;
   let configChanged = false;
 
   while (true) {
-    const action = await openManagerOverlay(ctx, buildViews(snapshot, runtime), uiState, notice);
+    const action = await openManagerOverlay(ctx, buildViews(snapshot, runtime), uiState, notice, locale);
     uiState = action.uiState;
     if (action.kind === "close") break;
     const selected = action.serverName
@@ -44,7 +118,7 @@ export async function runMcpManager(
       : undefined;
 
     if (action.kind === "edit-config") {
-      const result = await editMcpConfig(ctx, store);
+      const result = await editMcpConfig(ctx, store, locale);
       if (result.snapshot) snapshot = result.snapshot;
       configChanged ||= result.configChanged;
       notice = result.notice;
@@ -52,20 +126,20 @@ export async function runMcpManager(
     }
 
     if (!selected) {
-      notice = "无法操作 · 未选择服务";
+      notice = t(locale, "notice.noSelection");
       continue;
     }
 
     if (action.kind === "toggle") {
       try {
         const nextEnabled = selected.entry.enabled === false;
-        ctx.ui.setStatus("mcp-manager", `MCP · 正在${nextEnabled ? "启用" : "停用"} ${selected.name}…`);
+        ctx.ui.setStatus("mcp-manager", t(locale, nextEnabled ? "status.togglingOn" : "status.togglingOff", { name: selected.name }));
         snapshot = await store.toggle(selected);
         configChanged = true;
         uiState = { ...uiState, selectedName: selected.name };
-        notice = `${nextEnabled ? "已启用" : "已停用"} · ${selected.name} · 关闭后重载`;
+        notice = t(locale, nextEnabled ? "notice.toggledOn" : "notice.toggledOff", { name: selected.name });
       } catch (error) {
-        notice = `更新开关失败 · ${errorMessage(error)}`;
+        notice = t(locale, "notice.toggleFailed", { message: errorMessage(error) });
       } finally {
         ctx.ui.setStatus("mcp-manager", undefined);
       }
@@ -74,19 +148,21 @@ export async function runMcpManager(
 
     if (action.kind === "authenticate") {
       if (!runtime.canAuthenticate(selected.name)) {
-        notice = `无法认证 · ${selected.name} 不支持 OAuth（需设置 auth: "oauth" 或省略 auth 自动检测）`;
+        notice = t(locale, "notice.cannotAuth", { name: selected.name });
         continue;
       }
       try {
-        ctx.ui.setStatus("mcp-manager", `MCP · 正在认证 ${selected.name}…`);
+        ctx.ui.setStatus("mcp-manager", t(locale, "status.authing", { name: selected.name }));
         const result = await runtime.authenticate(selected.name);
         if (result.ok) {
-          notice = `认证成功 · ${selected.name} · 关闭后重载生效`;
+          notice = t(locale, "notice.authOk", { name: selected.name });
         } else {
-          notice = `认证失败 · ${selected.name}${result.message ? ` · ${result.message}` : ""}`;
+          notice = result.message
+            ? t(locale, "notice.authFailed", { name: selected.name, message: result.message })
+            : t(locale, "notice.authFailedNoMsg", { name: selected.name });
         }
       } catch (error) {
-        notice = `认证失败 · ${selected.name} · ${errorMessage(error)}`;
+        notice = t(locale, "notice.authFailed", { name: selected.name, message: errorMessage(error) });
       } finally {
         ctx.ui.setStatus("mcp-manager", undefined);
       }
@@ -96,25 +172,25 @@ export async function runMcpManager(
 
     if (action.kind === "delete") {
       if (selected.readOnly) {
-        notice = `无法删除 · ${selected.name} 是只读导入项`;
+        notice = t(locale, "notice.cannotDeleteReadonly", { name: selected.name });
         continue;
       }
       const confirmed = await ctx.ui.confirm(
-        `删除 MCP 服务「${selected.name}」？`,
-        `这会从${scopeLabel(selected.scope)}配置中删除该服务：\n${selected.path}\n其他 MCP 服务不会受影响。`,
+        t(locale, "confirm.deleteTitle", { name: selected.name }),
+        t(locale, "confirm.deleteMessage", { scope: scopeLabel(locale, selected.scope), path: selected.path }),
       );
       if (!confirmed) {
-        notice = "已取消删除 · 服务保持不变";
+        notice = t(locale, "notice.deleteCancelled");
         continue;
       }
       try {
-        ctx.ui.setStatus("mcp-manager", `MCP · 正在删除 ${selected.name}…`);
+        ctx.ui.setStatus("mcp-manager", t(locale, "status.deleting", { name: selected.name }));
         snapshot = await store.delete(selected);
         configChanged = true;
         uiState = { ...uiState, selectedName: undefined, detail: false };
-        notice = `已删除 · ${selected.name} · 关闭后重载`;
+        notice = t(locale, "notice.deleted", { name: selected.name });
       } catch (error) {
-        notice = `删除失败 · ${errorMessage(error)}`;
+        notice = t(locale, "notice.deleteFailed", { message: errorMessage(error) });
       } finally {
         ctx.ui.setStatus("mcp-manager", undefined);
       }
@@ -127,16 +203,17 @@ export async function runMcpManager(
 async function editMcpConfig(
   ctx: ExtensionContext,
   store: McpManagerStore,
+  locale: SupportedSettingsLocale,
 ): Promise<ConfigEditorResult> {
   try {
     const document = store.getEditableConfig();
-    const nextText = await ctx.ui.editor(`编辑 MCP 配置 · ${document.path}`, document.text);
-    if (nextText === undefined) return { configChanged: false, notice: "已取消编辑 · 未保存更改" };
-    ctx.ui.setStatus("mcp-manager", "MCP · 正在保存配置…");
+    const nextText = await ctx.ui.editor(t(locale, "editor.title", { path: document.path }), document.text);
+    if (nextText === undefined) return { configChanged: false, notice: t(locale, "notice.editCancelled") };
+    ctx.ui.setStatus("mcp-manager", t(locale, "status.saving"));
     const snapshot = await store.replaceEditableConfig(nextText);
-    return { configChanged: true, snapshot, notice: "已保存配置 · 关闭后重载" };
+    return { configChanged: true, snapshot, notice: t(locale, "notice.configSaved") };
   } catch (error) {
-    return { configChanged: false, notice: `保存配置失败 · ${errorMessage(error)}` };
+    return { configChanged: false, notice: t(locale, "notice.saveFailed", { message: errorMessage(error) }) };
   } finally {
     ctx.ui.setStatus("mcp-manager", undefined);
   }
@@ -147,12 +224,14 @@ async function openManagerOverlay(
   servers: McpManagerServerView[],
   initialState: Partial<McpManagerUiState>,
   notice: string | undefined,
+  locale: SupportedSettingsLocale,
 ): Promise<McpManagerAction> {
   return ctx.ui.custom<McpManagerAction>((tui, theme, _keybindings, done) => new McpManagerOverlay({
     servers,
     theme,
     notice,
     initialState,
+    locale,
     requestRender: () => tui.requestRender(),
     done,
   }), {
@@ -294,10 +373,10 @@ function required(value: string, label: string): string {
   return normalized;
 }
 
-function scopeLabel(scope: McpManagedServer["scope"]): string {
-  if (scope === "user") return "用户";
-  if (scope === "project") return "项目";
-  return "导入";
+function scopeLabel(locale: SupportedSettingsLocale, scope: McpManagedServer["scope"]): string {
+  if (scope === "user") return t(locale, "scope.user");
+  if (scope === "project") return t(locale, "scope.project");
+  return t(locale, "scope.import");
 }
 
 function errorMessage(error: unknown): string {

@@ -12,7 +12,6 @@ import type {
 	QuietSymbolMode,
 	SidebarDensity,
 	SidebarMode,
-	ToolPaletteMode,
 	ViewMode,
 } from "./types.ts";
 
@@ -30,13 +29,12 @@ export interface SettingsRow {
 	value: string;
 	/** What pressing Enter/Space/accel switches to — shown so the cycle is visible. */
 	next: string;
-	/** "cycle" (default) toggles on Enter; "text" opens an edit field instead. */
-	kind?: "text";
+	/** "cycle" (default) toggles on Enter; "text" opens an edit field; "select" opens a picker sub-view. */
+	kind?: "text" | "select";
 }
 
 const VIEW_MODES: ViewMode[] = ["list", "compact"];
 const QUIET_SYMBOL_MODES: QuietSymbolMode[] = ["check", "dot"];
-const TOOL_PALETTE_MODES: ToolPaletteMode[] = ["family", "readwrite", "search", "mono", "classic"];
 const ICON_MODES: IconMode[] = ["auto", "nerd", "ascii"];
 const SIDEBAR_MODES: SidebarMode[] = ["auto", "on", "off"];
 const SIDEBAR_DENSITIES: SidebarDensity[] = ["comfortable", "compact"];
@@ -128,16 +126,6 @@ export function buildRows(config: CockpitConfig, live?: LiveRowState): SettingsR
 			label: "thinking fold",
 			value: thinkingHidden ? "hidden" : "visible",
 			next: thinkingHidden ? "visible" : "hidden",
-		},
-		{
-			// Colour grouping for the compact Quiet tool rows. Placed after the
-			// quiet trio rather than inside it: it only matters when quiet mode is
-			// on, and the mode/symbol/thinking order above is a tested invariant.
-			key: "toolPalette",
-			accel: "p",
-			label: "tool palette",
-			value: config.toolPalette,
-			next: cycle(TOOL_PALETTE_MODES, config.toolPalette),
 		},
 		{
 			key: "agentsMode",
@@ -254,17 +242,18 @@ export function buildRows(config: CockpitConfig, live?: LiveRowState): SettingsR
 			value: config.title.showMaestro ? "on" : "off",
 			next: config.title.showMaestro ? "off" : "on",
 		},
-		// Free text, not a cycle: Enter opens an edit field, Esc/Enter commits,
-		// empty clears back to the offline rule-based extractor. "(rule-based)"
-		// is a display value — the stored config stays "" so title-llm keeps
-		// its empty-means-offline contract.
+		// Not a cycle: Enter opens the model picker over the /api-manager
+		// providers, with a trailing "custom ref…" entry that drops into the
+		// free-text editor for refs not on the list yet. "(rule-based)" is a
+		// display value — the stored config stays "" so title-llm keeps its
+		// empty-means-offline contract.
 		{
 			key: "titleGenerationModel",
 			accel: "z",
 			label: "title gen model",
 			value: config.title.generationModel || "(rule-based)",
-			next: "type…",
-			kind: "text",
+			next: "picker…",
+			kind: "select",
 		},
 	];
 }
@@ -291,8 +280,6 @@ export function applyRow(config: CockpitConfig, key: string, textValue?: string)
 			return { ...config, quietMode: !config.quietMode };
 		case "quietSymbols":
 			return { ...config, quietSymbols: cycle(QUIET_SYMBOL_MODES, config.quietSymbols) };
-		case "toolPalette":
-			return { ...config, toolPalette: cycle(TOOL_PALETTE_MODES, config.toolPalette) };
 		case "agentsMode":
 			return { ...config, agentsMode: cycle(VIEW_MODES, config.agentsMode) };
 		case "todoMode":

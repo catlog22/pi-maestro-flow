@@ -147,6 +147,7 @@ import type {
   MessageEnvelope,
   SettledAgentRecord,
   SingleResult,
+  StructuredResult,
   TeammateInteractionRecord,
 } from "../shared/types.ts";
 
@@ -206,6 +207,8 @@ import {
   aggregateGraphStructuredOutput,
   appendAgentProgressLine,
   backgroundWaitGuidance,
+  FOREGROUND_DETACH_HINT,
+  registerForegroundDetach,
   canProxySendTo,
   checkActiveAgentBudget,
   createForegroundDeadline,
@@ -221,6 +224,8 @@ import {
   handleChildLifecycleEvent,
   resolveProxyParentCorrelationId,
   summarizeGraphResults,
+  toStructuredResults,
+  setAgentStructuredOutput,
   trimAgentBuffers,
   wakeSleepingAgent,
 } from "./index.ts";
@@ -892,10 +897,17 @@ export async function handleProxyRequest(
       // can only tighten it (0 forbids any further nesting below this call).
       const childMaxDispatchDepth = nestedChildMaxDispatchDepth(parentBudget, dispatchDepth, p.maxNestingDepth);
 
+      const parentModel = (() => {
+        const parent = parentCid ? state.activeRuns.get(parentCid) : undefined;
+        return parent?.resolvedModel ?? parent?.requestedModel;
+      })();
+      const dispatchOriginCwd = state.baseCwd || process.cwd();
       const routedParams = applyModelRouting(
         p,
-        state.baseCwd || process.cwd(),
+        dispatchOriginCwd,
         modelCapabilities.map((model) => model.id),
+        undefined,
+        parentModel,
       );
 
       // Normalize (shared with the root tool execute path). The root process is
@@ -1072,6 +1084,7 @@ export async function handleProxyRequest(
         exitCode: number,
         wakeable?: boolean,
         terminalStatus?: AgentTerminalStatus,
+        structuredResults?: StructuredResult[],
       ): void => {
         emitComplete(
           pi,
@@ -1082,6 +1095,7 @@ export async function handleProxyRequest(
           Date.now() - activeAgent.startedAt,
           wakeable,
           terminalStatus === "terminated",
+          structuredResults,
         );
       };
 
@@ -1147,25 +1161,52 @@ export async function handleProxyRequest(
         reportChildStatus(terminalStatus === "terminated"
           ? "terminated"
           : terminalStatus === "failed" ? "failed" : "completed");
-        emitNestedComplete(exitCode, wakeable, terminalStatus);
+        emitNestedComplete(exitCode, wakeable, terminalStatus, toStructuredResults(
+          nestedPublication.results,
+          dispatchOriginCwd,
+        ));
         if (nestedCompletionNotificationRequested) {
+          const envelope = {
+            customType: "teammate-complete",
+            content: nestedPublication.summary,
+            display: true,
+            details: {
+              mode: nestedPublication.mode,
+              results: nestedPublication.results,
+              ...(nestedPublication.progress ? { progress: nestedPublication.progress } : {}),
+              ...(nestedChildCalls.size > 0 ? { childCalls: [...nestedChildCalls.values()] } : {}),
+            },
+          };
           const delivered = safeSendMessage(
             pi,
-            {
-              customType: "teammate-complete",
-              content: nestedPublication.summary,
-              display: true,
-              details: {
-                mode: nestedPublication.mode,
-                results: nestedPublication.results,
-                ...(nestedPublication.progress ? { progress: nestedPublication.progress } : {}),
-                ...(nestedChildCalls.size > 0 ? { childCalls: [...nestedChildCalls.values()] } : {}),
-              },
-            },
+            envelope,
             { triggerTurn: true },
           );
           if (!delivered) {
             markSettledResultInspectable(state, cid);
+          }
+          // Passive completion delivery to the dispatching child agent. Nested
+          // dispatches execute in the root process, so the child that issued
+          // this background dispatch only ever saw the immediate ack. Forward
+          // the same teammate-complete envelope over the root->child IPC
+          // channel (agent.sendControl) and let the child inject it into its
+          // own session, where it wakes the agent for a new turn. Root-owned
+          // dispatches have no parentCid and are covered by the root delivery
+          // above. Fenced: the parent must still be live (non-terminal) and
+          // own an open child channel.
+          if (parentCid) {
+            const parentAgent = state.activeRuns.get(parentCid);
+            if (parentAgent?.sendControl
+              && parentAgent.status !== "completed"
+              && parentAgent.status !== "failed"
+              && parentAgent.status !== "terminated") {
+              parentAgent.sendControl({
+                type: "teammate_complete_delivery",
+                correlationId: parentCid,
+                generation: state.sessionGeneration ?? 0,
+                envelope,
+              });
+            }
           }
         }
         finishProxyDispatchTracking();
@@ -1194,6 +1235,7 @@ export async function handleProxyRequest(
           result.durationMs,
           wakeable,
           terminalStatus === "terminated",
+          toStructuredResults([result], dispatchOriginCwd),
         );
         if (!safeSendMessage(
           pi,
@@ -1514,6 +1556,7 @@ export async function handleProxyRequest(
           const target = state.activeRuns.get(result.correlationId) ?? activeAgent;
           target.resolvedModel = target.resolvedModel ?? result.model;
           if (result.attemptedModels) target.attemptedModels = [...result.attemptedModels];
+          setAgentStructuredOutput(target, result.structuredOutput);
           const lastMessage = displayMessageForResult(result);
           const settle = normalizedTasks ? settleGraphTaskAgent : settleAgent;
           settle(
@@ -1684,6 +1727,7 @@ export async function handleProxyRequest(
               terminalResult.durationMs,
               true,
               status === "terminated",
+              toStructuredResults([terminalResult], dispatchOriginCwd),
             );
             safeSendMessage(
               pi,
@@ -1896,13 +1940,19 @@ export async function handleProxyRequest(
       if (routedParams.background === false) {
         const waitMs = foregroundWaitWindowMs(allTasks, runtimeOptions.foregroundMaxRunMs);
         const deadline = createForegroundDeadline(waitMs);
+        // Alt+B manual detach, mirroring the root single/graph foreground paths.
+        let detachResolve: (() => void) | null = null;
+        const detachPromise = new Promise<"manual">((resolve) => { detachResolve = () => resolve("manual"); });
+        const removeListener = registerForegroundDetach(() => detachResolve?.());
         const race = await Promise.race([
           nestedPromise.then(
             (completed) => ({ status: "completed" as const, completed }),
             (error: unknown) => ({ status: "failed" as const, error }),
           ),
+          detachPromise.then(() => ({ status: "manual" as const })),
           deadline.promise.then(() => ({ status: "timeout" as const })),
         ]);
+        removeListener?.();
         deadline.dispose();
 
         if (race.status === "failed") {
@@ -1941,10 +1991,13 @@ export async function handleProxyRequest(
           return;
         }
         completeNestedInBackground();
+        const detachText = race.status === "timeout"
+          ? `@${runningLabel} moved to background after ${waitMs}ms.`
+          : `@${runningLabel} detached.`;
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{
             type: "text",
-            text: `${warningPrefix}@${runningLabel} moved to background after ${waitMs}ms. ${backgroundWaitGuidance(cid)}`,
+            text: `${warningPrefix}${detachText} ${FOREGROUND_DETACH_HINT} ${backgroundWaitGuidance(cid)}`,
           }],
           isError: false,
           details: {
@@ -2026,7 +2079,7 @@ export async function handleProxyRequest(
         parentCid ? state.activeRuns.get(parentCid)?.abortController.signal : undefined,
         (proxySignal) => observeTargets(params as UnifiedObserveParams, proxySignal),
       );
-      const output = formatObserveResult(result, params.detail === "full");
+      const output = formatObserveResult(result, params.detail !== "summary");
       const failed = result.reason === "timeout"
         || result.reason === "aborted"
         || result.observations.some((item) => !item.found || item.outcome === "failure" || item.outcome === "stalled");

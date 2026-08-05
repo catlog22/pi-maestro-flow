@@ -480,8 +480,13 @@ export function shouldCancelCompletedTurnThreshold(
   preserveCompletedTurn: boolean,
   hasOwnedRequest: boolean,
   hasPendingMessages = false,
+  isRecoveryFallback = false,
 ): boolean {
-  return reason === "threshold" && preserveCompletedTurn && !hasOwnedRequest && !hasPendingMessages;
+  return reason === "threshold"
+    && preserveCompletedTurn
+    && !hasOwnedRequest
+    && !hasPendingMessages
+    && !isRecoveryFallback;
 }
 
 export function buildOutputLimitInstructions(
@@ -508,10 +513,12 @@ export function buildMidTurnTrigger(input: {
   estimatedTokens: number;
   threshold: CompactionThresholdDerivation;
   configuredReserveTokens: number;
+  recovery?: "provider-pressure";
 }): CompactionTrigger {
   const derivation = input.threshold;
   return {
     owner: "mid-turn",
+    ...(input.recovery ? { recovery: input.recovery } : {}),
     estimatedTokens: input.estimatedTokens,
     contextWindow: derivation.contextWindow,
     effectiveThresholdTokens: derivation.thresholdTokens,

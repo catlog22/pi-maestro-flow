@@ -15,6 +15,8 @@ import {
   CLAIM_LEASE_MS,
   CLAIM_RENEW_MS,
   CLAIM_STALE_MS,
+  MAX_DISPATCH_RETRIES,
+  MESSAGE_ID_PATTERN,
   POLL_INTERVAL_MS,
   STARVATION_BOUND,
 } from "./types.ts";
@@ -112,6 +114,7 @@ export class MailboxConsumer extends EventEmitter {
   #timer: ReturnType<typeof setInterval> | undefined;
   #polling: Promise<void> | undefined;
   #consecutiveHigh = 0;
+  #dispatchFailures = new Map<string, number>();
   #activeClaim: { messageId: string; claim: MailboxClaim; renewTimer: ReturnType<typeof setInterval> } | undefined;
   #stopped = false;
 
@@ -145,19 +148,44 @@ export class MailboxConsumer extends EventEmitter {
 
   /** Notify the consumer that same-process messages may be available. */
   notify(): void {
+    if (this.#stopped) return;
     void this.#poll();
   }
 
   /**
    * Acknowledge that a message was successfully injected and confirmed via IPC.
-   * Transitions ACCEPTED → APPLIED.
+   * Transitions ACCEPTED → APPLIED. In-process dispatch already auto-applies;
+   * this entry point serves external IPC-ack consumers and is idempotent.
    */
   async acknowledge(messageId: string): Promise<boolean> {
+    if (!MESSAGE_ID_PATTERN.test(messageId)) return false;
     const applied = await this.#store.apply(messageId);
     if (applied) {
       this.emit("ack", { messageId } satisfies ConsumerAckEvent);
     }
     return applied;
+  }
+
+  /**
+   * Replay messages stranded in accepted (crashed mid-dispatch, no ack) back
+   * to ready so they are re-dispatched after a restart. At-least-once delivery.
+   */
+  async replayAcceptedToReady(): Promise<number> {
+    if (this.#stopped) return 0;
+    let replayed = 0;
+    const acceptedIds = await this.#store.listMessages("accepted");
+    for (const messageId of acceptedIds) {
+      if (this.#stopped) break;
+      const envelope = await this.#store.readEnvelope("accepted", messageId);
+      if (!envelope) continue;
+      // Workspace isolation: only replay messages this consumer serves.
+      if (envelope.workspaceId !== this.workspaceId) continue;
+      await this.#store.remove("accepted", messageId);
+      await this.#store.writeStaging(envelope);
+      await this.#store.promoteToReady(messageId);
+      replayed += 1;
+    }
+    return replayed;
   }
 
   /**
@@ -203,6 +231,7 @@ export class MailboxConsumer extends EventEmitter {
 
     // First reclaim any stale claims
     await this.reclaimStaleClaims();
+    if (this.#stopped) return;
 
     // Skip if we already have an active claim being processed
     if (this.#activeClaim) return;
@@ -213,7 +242,12 @@ export class MailboxConsumer extends EventEmitter {
 
     for (const messageId of readyIds) {
       const envelope = await this.#store.readEnvelope("ready", messageId);
-      if (!envelope) continue;
+      if (!envelope) {
+        // Unreadable (tampered/corrupt/oversized) — dead-letter rather than stall.
+        await this.#store.dead(messageId, "ready", "envelope unreadable or integrity check failed").catch(() => undefined);
+        continue;
+      }
+      if (this.#stopped) return;
       // Workspace isolation: never consume messages from other workspaces.
       if (envelope.workspaceId !== this.workspaceId) continue;
       // "*" consumer matches every recipient; otherwise exact match required.
@@ -241,6 +275,7 @@ export class MailboxConsumer extends EventEmitter {
       // "hold" means leave in ready for later
       return;
     }
+    if (this.#stopped) return;
 
     // Claim the message
     const now = this.#now();
@@ -270,6 +305,10 @@ export class MailboxConsumer extends EventEmitter {
       this.emit("dispatch", { messageId: next.messageId, envelope: next } satisfies ConsumerDispatchEvent);
       await this.#onDispatch(next);
 
+      // In-process dispatch success is the delivery confirmation: ACCEPTED → APPLIED.
+      this.#dispatchFailures.delete(next.messageId);
+      await this.#completeDispatch(next.messageId);
+
       // Track starvation bound
       if (isHighPriority(next.priority)) {
         this.#consecutiveHigh++;
@@ -281,13 +320,27 @@ export class MailboxConsumer extends EventEmitter {
         messageId: next.messageId,
         error: error instanceof Error ? error.message : String(error),
       } satisfies ConsumerErrorEvent);
-      // On dispatch failure, move back to ready for retry
-      await this.#store.remove("accepted", next.messageId);
-      await this.#store.writeStaging(next);
-      await this.#store.promoteToReady(next.messageId);
+      const failures = (this.#dispatchFailures.get(next.messageId) ?? 0) + 1;
+      if (failures >= MAX_DISPATCH_RETRIES) {
+        // Bounded retries: dead-letter instead of hot-looping every poll.
+        this.#dispatchFailures.delete(next.messageId);
+        await this.#store.dead(next.messageId, "accepted", "dispatch retries exceeded").catch(() => undefined);
+      } else {
+        // On dispatch failure, move back to ready for retry
+        this.#dispatchFailures.set(next.messageId, failures);
+        await this.#store.remove("accepted", next.messageId);
+        await this.#store.writeStaging(next);
+        await this.#store.promoteToReady(next.messageId);
+      }
     } finally {
       this.#stopRenewTimer();
     }
+  }
+
+  /** Transition ACCEPTED → APPLIED and emit the ack event. */
+  async #completeDispatch(messageId: string): Promise<void> {
+    await this.#store.apply(messageId);
+    this.emit("ack", { messageId } satisfies ConsumerAckEvent);
   }
 
   #startRenewTimer(messageId: string, baseClaim: MailboxClaim): void {

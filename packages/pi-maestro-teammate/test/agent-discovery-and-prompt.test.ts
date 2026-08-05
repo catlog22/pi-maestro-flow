@@ -67,7 +67,7 @@ Act as the project specialist.
     const description = buildTeammateToolDescription(project);
     assert.match(description, /Available Teammate Agents section/);
     assert.doesNotMatch(description, /specialist \[project\]/);
-    assert.match(description, /specialist-work: model=auto\/default/);
+    assert.match(description, /specialist-work: model=auto\/inherit main session/);
 
     const systemPrompt = appendAgentCatalog("Base prompt", project);
     assert.match(systemPrompt, /# Available Teammate Agents/);

@@ -27,6 +27,12 @@ export interface ObservationSnapshot {
     updatedAt: number;
     capabilities?: ObservationCapabilities;
     error?: string;
+    /** Canonical terminal outcome when the target has settled (completed|failed|terminated). */
+    terminalStatus?: string;
+    /** Last captured result text of the settled agent. */
+    lastResult?: string;
+    /** Schema-valid structured output of a settled schema task (detail=full). */
+    structuredOutput?: unknown;
 }
 export interface ObservationReadOptions {
     detail: ObservationDetail;

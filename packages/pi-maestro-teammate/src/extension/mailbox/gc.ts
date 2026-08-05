@@ -94,6 +94,25 @@ export class MailboxGC {
       }
     }
 
+    // Sweep stale dedup markers (seen/*.seen) older than the receipt retention
+    // so the seen-set cannot grow without bound.
+    const nowSeen = this.#now();
+    try {
+      const seen = await this.#store.listSeen();
+      for (const record of seen) {
+        if (nowSeen - record.seenAt > TTL_RECEIPT_MS) {
+          try {
+            await this.#store.removeSeen(record.file);
+            removed += 1;
+          } catch (error) {
+            errors.push(`seen/${record.file}: ${errorMessage(error)}`);
+          }
+        }
+      }
+    } catch (error) {
+      errors.push(`seen: ${errorMessage(error)}`);
+    }
+
     return { removed, errors };
   }
 

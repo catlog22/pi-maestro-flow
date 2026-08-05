@@ -1,11 +1,19 @@
 import {
   Key,
   matchesKey,
-  truncateToWidth,
   visibleWidth,
   type Component,
   type Focusable,
 } from "@earendil-works/pi-tui";
+import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
+import {
+  fit,
+  frame,
+  headerLine,
+  helpLine,
+  rule,
+  type FrameTheme,
+} from "pi-cockpit/src/settings/ui-primitives.ts";
 import type { ManagedSkill, ManagedSkillGroup } from "./skill-manager-store.ts";
 
 export type SkillManagerActionKind =
@@ -29,10 +37,7 @@ export interface SkillManagerAction {
   uiState: SkillManagerUiState;
 }
 
-interface SkillManagerTheme {
-  fg(role: string, text: string): string;
-  bold(text: string): string;
-}
+interface SkillManagerTheme extends FrameTheme {}
 
 export interface SkillManagerOverlayParams {
   skills: readonly ManagedSkill[];
@@ -40,11 +45,100 @@ export interface SkillManagerOverlayParams {
   theme: SkillManagerTheme;
   notice?: string;
   initialState?: Partial<SkillManagerUiState>;
+  /** UI language; defaults to zh-CN when the host exposes no locale signal. */
+  locale?: SupportedSettingsLocale;
   requestRender: () => void;
   done: (action: SkillManagerAction) => void;
 }
 
 const MAX_VISIBLE = 12;
+
+const CATALOGS = {
+  en: {
+    "title": "Skill Manager",
+    "header.count": "{count} skills",
+    "footer.close": "Esc close",
+    "footer.navigate": "Up/Down select",
+    "footer.filter": "/ filter",
+    "footer.load": "Space load",
+    "footer.modelInvocation": "M model invocation",
+    "footer.createGroup": "N new group",
+    "footer.move": "G move",
+    "footer.deleteGroup": "D delete group",
+    "compact.skill": "Esc · Skill · {state} · {name}",
+    "compact.group": "Esc · Skill group · {name}",
+    "compact.empty": "Esc · Skill · no matches",
+    "value.enabled": "available",
+    "value.disabled": "disabled",
+    "entry.empty": "○ no matching skills",
+    "skill.state.enabled": "● available",
+    "skill.state.disabled": "○ disabled",
+    "skill.invocation.model": "model invocation",
+    "skill.invocation.manual": "manual only",
+    "readonly": "read-only",
+    "group.state.all": "● all available",
+    "group.state.none": "○ all disabled",
+    "group.state.mixed": "◐ partly available",
+    "group.invocation.all": "model invocation",
+    "group.invocation.none": "manual only",
+    "group.invocation.mixed": "invocation mixed",
+    "group.detail": "{kind} group · {count} skills",
+    "group.custom": "custom",
+    "group.prefix": "prefix",
+    "count.suffix": "{count} items",
+    "scope.package": "pkg:{source}",
+    "scope.project": "project",
+    "scope.user": "user",
+    "scope.ephemeral": "temporary",
+    "filter.idle": "Filter: press / and type a skill name",
+    "filter.active": "Filtering: {query} · Esc cancel",
+    "filter.placeholder": "type a skill name",
+    "filter.count": "showing {count}",
+  },
+  "zh-CN": {
+    "title": "Skill 管理",
+    "header.count": "{count} 个 Skill",
+    "footer.close": "Esc 关闭",
+    "footer.navigate": "↑↓ 选择",
+    "footer.filter": "/ 筛选",
+    "footer.load": "空格 加载",
+    "footer.modelInvocation": "M 模型调用",
+    "footer.createGroup": "N 新建组",
+    "footer.move": "G 移动",
+    "footer.deleteGroup": "D 删除组",
+    "compact.skill": "Esc · Skill · {state} · {name}",
+    "compact.group": "Esc · Skill 组 · {name}",
+    "compact.empty": "Esc · Skill · 没有匹配项",
+    "value.enabled": "可用",
+    "value.disabled": "停用",
+    "entry.empty": "○ 没有匹配的 Skill",
+    "skill.state.enabled": "● 可用",
+    "skill.state.disabled": "○ 停用",
+    "skill.invocation.model": "模型可调用",
+    "skill.invocation.manual": "仅手动",
+    "readonly": "只读",
+    "group.state.all": "● 全部可用",
+    "group.state.none": "○ 全部停用",
+    "group.state.mixed": "◐ 部分可用",
+    "group.invocation.all": "模型可调用",
+    "group.invocation.none": "仅手动",
+    "group.invocation.mixed": "调用混合",
+    "group.detail": "{kind}分组 · {count} 个 Skill",
+    "group.custom": "自定义",
+    "group.prefix": "前缀",
+    "count.suffix": "{count} 个",
+    "scope.package": "包:{source}",
+    "scope.project": "项目",
+    "scope.user": "用户",
+    "scope.ephemeral": "临时",
+    "filter.idle": "筛选：按 / 输入 Skill 名称",
+    "filter.active": "筛选中：{query} · Esc 取消",
+    "filter.placeholder": "输入 Skill 名称",
+    "filter.count": "显示 {count} 个",
+  },
+} as const;
+
+type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
 
 type SkillManagerEntry =
   | { kind: "group"; key: string; group: ManagedSkillGroup }
@@ -52,11 +146,13 @@ type SkillManagerEntry =
 
 export class SkillManagerOverlay implements Component, Focusable {
   focused = false;
+  private readonly locale: SupportedSettingsLocale;
   private query: string;
   private selected = 0;
   private filterActive = false;
 
   constructor(private readonly params: SkillManagerOverlayParams) {
+    this.locale = params.locale ?? "zh-CN";
     this.query = params.initialState?.query ?? "";
     const selectedKey = params.initialState?.selectedKey;
     if (selectedKey) {
@@ -68,6 +164,16 @@ export class SkillManagerOverlay implements Component, Focusable {
   invalidate(): void {}
   dispose(): void {}
 
+  /** Translate a catalog key with optional {var} substitution. */
+  private t(key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
+    const catalog = CATALOGS[this.locale] ?? CATALOGS["zh-CN"];
+    const template: unknown = catalog[key];
+    const text = typeof template === "string" ? template : CATALOGS["zh-CN"][key] as string;
+    if (!vars) return text;
+    return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
+      vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
+  }
+
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.min(width, 140));
     this.selected = clampIndex(this.selected, this.filteredEntries().length);
@@ -76,22 +182,31 @@ export class SkillManagerOverlay implements Component, Focusable {
     const inner = safeWidth - 2;
     const entries = this.filteredEntries();
     const rows = [
-      fitLine(`${this.params.theme.bold("Skill 管理")} · ${this.params.skills.length} 个 Skill`, inner),
+      headerLine(this.params.theme, this.t("title"), [this.t("header.count", { count: this.params.skills.length })], inner),
       rule(inner),
       ...this.entryRows(entries, inner),
       this.filterLine(inner, entries.filter((entry) => entry.kind === "skill").length),
     ];
     const selected = this.selectedEntry();
     if (selected?.kind === "skill") {
-      rows.push(this.params.theme.fg("dim", fitLine(selected.skill.description || selected.skill.filePath, inner)));
+      rows.push(helpLine(this.params.theme, selected.skill.description || selected.skill.filePath, inner));
     } else if (selected?.kind === "group") {
-      rows.push(this.params.theme.fg(
-        "dim",
-        fitLine(`${selected.group.custom ? "自定义" : "前缀"}分组 · ${selected.group.skills.length} 个 Skill`, inner),
-      ));
+      rows.push(helpLine(this.params.theme, this.t("group.detail", {
+        kind: this.t(selected.group.custom ? "group.custom" : "group.prefix"),
+        count: selected.group.skills.length,
+      }), inner));
     }
     if (this.params.notice) rows.push(this.styledNotice(this.params.notice, inner));
-    rows.push(fitSegments(inner, ["Esc 关闭", "↑↓ 选择", "/ 筛选", "空格 加载", "M 模型调用", "N 新建组", "G 移动", "D 删除组"]));
+    rows.push(fitSegments(inner, [
+      this.t("footer.close"),
+      this.t("footer.navigate"),
+      this.t("footer.filter"),
+      this.t("footer.load"),
+      this.t("footer.modelInvocation"),
+      this.t("footer.createGroup"),
+      this.t("footer.move"),
+      this.t("footer.deleteGroup"),
+    ]));
     return frame(rows, safeWidth, this.params.theme);
   }
 
@@ -144,48 +259,57 @@ export class SkillManagerOverlay implements Component, Focusable {
   private renderCompact(width: number): string {
     const entry = this.selectedEntry() ?? this.filteredEntries()[0];
     const text = entry?.kind === "skill"
-      ? `Esc · Skill · ${entry.skill.enabled ? "可用" : "停用"} · ${entry.skill.name}`
+      ? this.t("compact.skill", {
+          state: this.t(entry.skill.enabled ? "value.enabled" : "value.disabled"),
+          name: entry.skill.name,
+        })
       : entry?.kind === "group"
-        ? `Esc · Skill 组 · ${entry.group.name}`
-      : "Esc · Skill · 没有匹配项";
-    return truncateToWidth(text, width, "…");
+        ? this.t("compact.group", { name: entry.group.name })
+        : this.t("compact.empty");
+    return fit(text, width);
   }
 
   private entryRows(entries: readonly SkillManagerEntry[], width: number): string[] {
     if (entries.length === 0) {
-      return [this.params.theme.fg("warning", fitLine("○ 没有匹配的 Skill", width))];
+      return [this.params.theme.fg("warning", fit(this.t("entry.empty"), width))];
     }
     const start = visibleStart(this.selected, entries.length, MAX_VISIBLE);
     return entries.slice(start, start + MAX_VISIBLE).map((entry, offset) => {
       const selected = start + offset === this.selected;
       const prefix = selected ? this.params.theme.fg("accent", "›") : " ";
       if (entry.kind === "group") {
-        const availability = groupState(entry.group.skills, (skill) => skill.enabled, "● 全部可用", "○ 全部停用", "◐ 部分可用");
+        const availability = groupState(
+          entry.group.skills,
+          (skill) => skill.enabled,
+          this.t("group.state.all"),
+          this.t("group.state.none"),
+          this.t("group.state.mixed"),
+        );
         const invocation = groupState(
           entry.group.skills,
           (skill) => !skill.disableModelInvocation,
-          "模型可调用",
-          "仅手动",
-          "调用混合",
+          this.t("group.invocation.all"),
+          this.t("group.invocation.none"),
+          this.t("group.invocation.mixed"),
         );
         const label = `${entry.group.custom ? "◆" : "◇"} ${entry.group.name}`;
         const name = selected
           ? this.params.theme.bold(this.params.theme.fg("accent", label))
           : this.params.theme.bold(label);
-        return fitLine(`${prefix} ${name} · ${availability} · ${invocation} · ${entry.group.skills.length} 个`, width);
+        return fit(`${prefix} ${name} · ${availability} · ${invocation} · ${this.t("count.suffix", { count: entry.group.skills.length })}`, width);
       }
       const skill = entry.skill;
       const name = selected
         ? this.params.theme.bold(this.params.theme.fg("accent", `  ${skill.name}`))
         : `  ${skill.name}`;
       const availability = skill.enabled
-        ? this.params.theme.fg("success", "● 可用")
-        : this.params.theme.fg("dim", "○ 停用");
+        ? this.params.theme.fg("success", this.t("skill.state.enabled"))
+        : this.params.theme.fg("dim", this.t("skill.state.disabled"));
       const invocation = skill.disableModelInvocation
-        ? this.params.theme.fg("dim", "仅手动")
-        : this.params.theme.fg("success", "模型可调用");
-      return fitLine(
-        `${prefix} ${availability} · ${invocation} · ${name} · ${scopeLabel(skill)}${skill.readOnly ? " · 只读" : ""}`,
+        ? this.params.theme.fg("dim", this.t("skill.invocation.manual"))
+        : this.params.theme.fg("success", this.t("skill.invocation.model"));
+      return fit(
+        `${prefix} ${availability} · ${invocation} · ${name} · ${this.scopeLabel(skill)}${skill.readOnly ? ` · ${this.t("readonly")}` : ""}`,
         width,
       );
     });
@@ -193,16 +317,23 @@ export class SkillManagerOverlay implements Component, Focusable {
 
   private filterLine(width: number, count: number): string {
     const prompt = this.filterActive
-      ? `筛选中：${this.query || "输入 Skill 名称"} · Esc 取消`
-      : "筛选：按 / 输入 Skill 名称";
-    return this.params.theme.fg("dim", fitLine(`${prompt} · 显示 ${count} 个`, width));
+      ? this.t("filter.active", { query: this.query || this.t("filter.placeholder") })
+      : this.t("filter.idle");
+    return helpLine(this.params.theme, `${prompt} · ${this.t("filter.count", { count })}`, width);
   }
 
   private styledNotice(notice: string, width: number): string {
     const role = /(失败|错误|failed|error)/i.test(notice) ? "error"
       : /^(已保存|已启用|已停用|Saved)/.test(notice) ? "success"
       : "warning";
-    return this.params.theme.fg(role, fitLine(notice, width));
+    return this.params.theme.fg(role, fit(notice, width));
+  }
+
+  private scopeLabel(skill: ManagedSkill): string {
+    if (skill.origin === "package") return this.t("scope.package", { source: skill.source });
+    if (skill.scope === "project") return this.t("scope.project");
+    if (skill.scope === "user") return this.t("scope.user");
+    return this.t("scope.ephemeral");
   }
 
   private moveSelection(delta: number): void {
@@ -265,13 +396,6 @@ function groupState(
   return mixedLabel;
 }
 
-function scopeLabel(skill: ManagedSkill): string {
-  if (skill.origin === "package") return `包:${skill.source}`;
-  if (skill.scope === "project") return "项目";
-  if (skill.scope === "user") return "用户";
-  return "临时";
-}
-
 function visibleStart(selected: number, length: number, maxVisible: number): number {
   if (length <= maxVisible) return 0;
   return Math.min(Math.max(0, selected - maxVisible + 1), length - maxVisible);
@@ -302,29 +426,12 @@ function sanitizeSingleLineInput(value: string): string {
   return value.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "").replace(/[\r\n\t\x00-\x08\x0b-\x1f\x7f]/g, "");
 }
 
-function fitLine(value: string, width: number): string {
-  return truncateToWidth(value, Math.max(0, width), "…");
-}
-
-function fitSegments(width: number, segments: string[]): string {
-  return fitLine(segments.join(" · "), width);
-}
-
-function rule(width: number): string {
-  return "─".repeat(Math.max(0, width));
-}
-
-function frame(rows: readonly string[], width: number, theme: SkillManagerTheme): string[] {
-  if (width < 2) return rows.map((row) => fitLine(row, width));
-  const inner = width - 2;
-  const top = `┌${"─".repeat(inner)}┐`;
-  const bottom = `└${"─".repeat(inner)}┘`;
-  return [
-    theme.fg("dim", top),
-    ...rows.map((row) => {
-      const fitted = fitLine(row, inner);
-      return `${theme.fg("dim", "│")}${fitted}${" ".repeat(Math.max(0, inner - visibleWidth(fitted)))}${theme.fg("dim", "│")}`;
-    }),
-    theme.fg("dim", bottom),
-  ];
+function fitSegments(width: number, segments: readonly string[]): string {
+  const kept: string[] = [];
+  for (const segment of segments) {
+    const candidate = [...kept, segment].join(" · ");
+    if (visibleWidth(candidate) > width) break;
+    kept.push(segment);
+  }
+  return kept.length ? kept.join(" · ") : fit(segments[0] ?? "", width);
 }

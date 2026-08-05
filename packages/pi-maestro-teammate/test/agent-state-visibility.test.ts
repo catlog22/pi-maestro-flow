@@ -13,6 +13,7 @@ import {
   recordSettledAgent,
   reclaimResultReadyAgents,
   settleAgent,
+  statusForWatchTarget,
   sweepFailedAgents,
   FAILED_AGENT_RETENTION_MS,
   RESULT_READY_RECLAIM_MS,
@@ -293,6 +294,36 @@ test("result-ready is reported once, then the wait waits for the real terminal s
 
   agent.status = "sleeping";
   assert.equal((await waitForTeammate(state, { name: "worker" })).status, "completed");
+});
+
+test("a wakeable agent that failed stays sleeping but projects failed", async () => {
+  const state = makeState();
+  const now = Date.now();
+  addAgent(state, "doomed-sleep", {
+    status: "sleeping",
+    lastOutcome: { status: "failed", message: "boom", settledAt: now },
+    lastResult: "boom",
+    sleptAt: now,
+  });
+  const agent = state.activeRuns.get(state.namedAgents.get("doomed-sleep")!)!;
+
+  assert.equal(statusForWatchTarget({ kind: "agent", agent }, Date.now(), state), "failed");
+  const waited = await waitForTeammate(state, { name: "doomed-sleep" });
+  assert.equal(waited.status, "failed");
+  assert.match(waited.output.join("\n"), /failed/);
+});
+
+test("a successful sleeping agent still projects completed", async () => {
+  const state = makeState();
+  const now = Date.now();
+  addAgent(state, "fine-sleep", {
+    status: "sleeping",
+    lastOutcome: { status: "completed", message: "done", settledAt: now },
+    lastResult: "done",
+    sleptAt: now,
+  });
+  const agent = state.activeRuns.get(state.namedAgents.get("fine-sleep")!)!;
+  assert.equal(statusForWatchTarget({ kind: "agent", agent }, Date.now(), state), "completed");
 });
 
 test("a cleared result-ready re-arms the notice for the next result", async () => {

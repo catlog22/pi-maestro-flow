@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   consumeModelFailoverSettlement,
+  FAILOVER_TERMINAL_EVENT,
   snapshotModelFailoverSettlement,
+  type ModelFailoverSettlementSnapshot,
 } from "../providers/model-failover.ts";
 import type { WorkflowCoordinator } from "../session/coordinator.ts";
 import { activeWorkflowRun, type WorkflowSession, type WorkflowSnapshot } from "../session/types.ts";
@@ -170,6 +172,11 @@ let goalSessionId: string | undefined;
 let goalLoopOwner: { goalId: string; epoch: number } | undefined;
 let workflowCoordinator: WorkflowCoordinator | undefined;
 let elapsedTimer: ReturnType<typeof setInterval> | undefined;
+// Cockpit static mode mirror: while on, the per-second elapsed tick freezes
+// and the panel hides the live duration — same contract as every other
+// cockpit surface (agent rows, sidebar, thinking label).
+let goalStaticMode = false;
+let disposeFailoverTerminal: (() => void) | undefined;
 const issuedGoalMarkers = new Set<string>();
 
 configureGoalVerification({
@@ -324,10 +331,28 @@ export function goalArgumentCompletions(prefix: string) {
 
 export function initGoal(pi: ExtensionAPI) {
   extensionApi = pi;
+  disposeFailoverTerminal?.();
+  disposeFailoverTerminal = pi.events?.on?.(FAILOVER_TERMINAL_EVENT, onFailoverTerminal);
 }
 
 export function setWorkflowCoordinator(coordinator: WorkflowCoordinator | undefined): void {
   workflowCoordinator = coordinator;
+}
+
+/**
+ * Cockpit static-mode mirror. While on, the per-second elapsed tick freezes
+ * and the panel hides the live duration (event-driven state changes still
+ * update normally). Turning it back off resumes the tick immediately.
+ */
+export function setGoalStaticMode(staticMode: boolean): void {
+  if (goalStaticMode === staticMode) return;
+  goalStaticMode = staticMode;
+  const ctx = goalDisplayContext;
+  const goal = activeGoal;
+  if (!ctx || !goal || goal.status !== "active") return;
+  // Repaint now so the panel hides (or restores) the elapsed immediately
+  // instead of waiting for the next state change or per-second tick.
+  updateStatusLine(ctx, goal);
 }
 
 /** Cooperatively withdraw or restore Flow's below-editor Goal panel. */
@@ -478,7 +503,11 @@ export function onCompactionCancelled(ctx?: GoalContext) {
   }
 }
 
-export async function onCompact(event: unknown, ctx: GoalContext) {
+export async function onCompact(
+  event: unknown,
+  ctx: GoalContext,
+  options: { deferContinuation?: boolean } = {},
+) {
   suspendedContinuation = undefined;
   if (!activeGoal || activeGoal.status !== "active") {
     clearRecovery();
@@ -511,7 +540,7 @@ export async function onCompact(event: unknown, ctx: GoalContext) {
       return;
     }
   }
-  if (wasPiRetry || attemptAwaitingSettlement || hasPending(ctx)) return;
+  if (wasPiRetry || attemptAwaitingSettlement || hasPending(ctx) || options.deferContinuation) return;
   await sendContinuation(ctx, activeGoal);
 }
 
@@ -547,22 +576,35 @@ export async function onAgentEnd(event: { messages: unknown[] }, ctx: GoalContex
   updateStatusLine(ctx, activeGoal);
 }
 
+export function onProviderPressureSettled(ctx: GoalContext) {
+  const arbitrationSnapshot = snapshotModelFailoverSettlement();
+  if (arbitrationSnapshot) consumeModelFailoverSettlement(arbitrationSnapshot.recoveryId);
+  latestGoalAttempt = undefined;
+  if (!activeGoal || activeGoal.status !== "active") return;
+  clearRecoveryFor(activeGoal.id);
+  updateStatusLine(ctx, activeGoal);
+}
+
 export async function onAgentSettled(ctx: GoalContext) {
   if (!activeGoal || activeGoal.status !== "active") return;
   if (goalLoopOwner?.goalId !== activeGoal.id || goalLoopOwner.epoch !== goalLifecycleEpoch) return;
 
   const goalId = activeGoal.id;
   const arbitrationSnapshot = snapshotModelFailoverSettlement();
-  const arbitration = arbitrationSnapshot
-    ? consumeModelFailoverSettlement(arbitrationSnapshot.recoveryId)
-    : undefined;
-  if (arbitrationSnapshot && !arbitration) return;
-
   const capturedObservation = latestGoalAttempt;
   const observationMissing = !capturedObservation
     || capturedObservation.goalId !== goalId
     || capturedObservation.epoch !== goalLifecycleEpoch;
-  if (observationMissing && !arbitration) return;
+  const arbitration = arbitrationSnapshot
+    ? consumeModelFailoverSettlement(arbitrationSnapshot.recoveryId)
+    : undefined;
+  if (arbitrationSnapshot && !arbitration) return;
+  if (observationMissing) {
+    // A stale arbitration snapshot (for example failover fired during a
+    // non-Goal turn) was consumed above. It has no attempt correlation, so it
+    // must never drive this Goal's outcome; ignore it and keep the Goal as-is.
+    return;
+  }
   latestGoalAttempt = undefined;
 
   if (arbitration?.outcome === "fallback-scheduled") {
@@ -1513,6 +1555,26 @@ function markGoalRecovery(goalId: string, kind: "compaction_retry" | "provider_r
   goalRecovery = { goalId, kind };
 }
 
+/**
+ * Terminal failover handoff failure delivered asynchronously after the
+ * settlement that marked the Goal as provider-retrying. Pauses the Goal with
+ * the real failure so it does not remain in a retry state indefinitely.
+ */
+function onFailoverTerminal(data: unknown): void {
+  const ctx = goalDisplayContext;
+  if (!activeGoal || activeGoal.status !== "active" || !ctx) return;
+  const snapshot = data as ModelFailoverSettlementSnapshot | undefined;
+  const failure = snapshot?.failure ?? "Model fallback could not start.";
+  clearRecoveryFor(activeGoal.id);
+  goalLoopOwner = undefined;
+  latestGoalAttempt = undefined;
+  cancelContinuation();
+  const paused = pauseGoal(activeGoal);
+  persistGoal(paused);
+  updateStatusLine(ctx, paused);
+  ctx.ui.notify(`Goal paused: ${failure}`, "warning");
+}
+
 function hasUnsettledAttempt(goalId: string): boolean {
   return latestGoalAttempt?.goalId === goalId && latestGoalAttempt.epoch === goalLifecycleEpoch;
 }
@@ -1568,7 +1630,7 @@ export function currentGoalPhase(): GoalWidgetPhase {
   return "normal";
 }
 
-function updateStatusLine(ctx: GoalContext, goal: ActiveGoal) {
+function updateStatusLine(ctx: GoalContext, goal: ActiveGoal, refreshOnly = false) {
   clearCompletionTimer();
   if (goal.status === "active") ensureElapsedTimer(ctx, goal.id);
   else clearElapsedTimer();
@@ -1586,6 +1648,7 @@ function updateStatusLine(ctx: GoalContext, goal: ActiveGoal) {
           ? "waiting"
           : fmtStatusLine(goal),
   );
+  if (refreshOnly) return;
   updateGoalWidget(ctx, goal, phase);
 }
 
@@ -1616,7 +1679,7 @@ function updateGoalWidget(ctx: GoalContext, goal: ActiveGoal, phase: GoalWidgetP
       if (!entries.some((entry) => entry.id === currentGoalId)) {
         entries.push(toDetailEntry(goal, undefined));
       }
-      return renderGoalPanel(entries, currentGoalId, phase, width, theme);
+      return renderGoalPanel(entries, currentGoalId, phase, width, theme, { hideLiveDuration: goalStaticMode });
     },
     invalidate() {},
   }), { placement: "belowEditor" });
@@ -1696,18 +1759,31 @@ function clearGoalDisplay(ctx: GoalContext): void {
 function clearCompletionTimer() { if (completionTimer) { clearTimeout(completionTimer); completionTimer = undefined; } }
 function clearElapsedTimer() { if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = undefined; } }
 
+/**
+ * One per-second goal tick: advance the live counter and refresh the status
+ * line. The below-editor widget is deliberately NOT re-set here — its render
+ * closure reads getGoalPanelEntries() live and the status update already
+ * triggers a frame render, so rebuilding the widget would only churn the
+ * widget container once per second.
+ */
+export function tickGoalElapsed(ctx: GoalContext, goalId: string, now = Date.now()): boolean {
+  const goal = activeGoal;
+  if (!goal || goal.id !== goalId || goal.status !== "active") {
+    clearElapsedTimer();
+    return false;
+  }
+  if (goalStaticMode) return false;
+  const elapsed = Math.max(0, Math.floor((now - goal.startedAt) / 1000));
+  if (elapsed === goal.timeUsedSeconds) return false;
+  goal.timeUsedSeconds = elapsed;
+  updateStatusLine(ctx, goal, true);
+  return true;
+}
+
 function ensureElapsedTimer(ctx: GoalContext, goalId: string): void {
   if (elapsedTimer) return;
   elapsedTimer = setInterval(() => {
-    const goal = activeGoal;
-    if (!goal || goal.id !== goalId || goal.status !== "active") {
-      clearElapsedTimer();
-      return;
-    }
-    const elapsed = Math.max(0, Math.floor((Date.now() - goal.startedAt) / 1000));
-    if (elapsed === goal.timeUsedSeconds) return;
-    goal.timeUsedSeconds = elapsed;
-    updateStatusLine(ctx, goal);
+    tickGoalElapsed(ctx, goalId);
   }, 1_000);
 }
 

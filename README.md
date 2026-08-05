@@ -75,12 +75,11 @@ pi-maestro-flow 是 **Pi 插件**，用 `pi install` 安装（不是普通 npm �
 
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # 宿主运行时
-pi install npm:pi-maestro-flow                                     # 安装插件
-pi list                                                            # 验证
-# 预期: pi-maestro-flow@0.13.0, pi-maestro-teammate@1.5.0, pi-cockpit@0.8.0
+pi install npm:pi-maestro-flow@0.14.2                              # 安装或升级插件
+pi list                                                            # 确认 Flow、Teammate 与 Cockpit 均已列出
 ```
 
-安装 `pi-maestro-flow` 会自动拉取并注册 `pi-maestro-teammate` 与 `pi-cockpit`，无需手动配置。
+安装 `pi-maestro-flow` 会自动拉取并注册 `pi-maestro-teammate` 与 `pi-cockpit`。升级会迁移由 Flow 管理的旧 companion 路径；同名的本地开发覆盖会被保留并在启动日志中提示，需由用户自行升级或移除。重启 Pi 或 reload extensions 后再执行模型相关操作。
 
 ## 快速开始
 
@@ -114,7 +113,7 @@ Maestro Flow 自动分类意图并路由：**简单任务**直接执行 · **多
 | **[用户手册](GUIDE.md)** | 深入教程，每个子系统附示例 |
 | **[Smart Search Provider 配置指南](docs/smart-search-provider-config.md)** | 搜索引擎配置 — 双路径架构、Provider API Key、凭证源语法、TUI 操作、配置同步 |
 | **[发布说明](RELEASE.md)** | 版本历史与变更日志 |
-| **[更新说明](docs/UPDATES.md)** | v0.13.0 → 当前 提交变更汇总 |
+| **[更新说明](docs/UPDATES.md)** | 历史提交变更记录 |
 | **[新特性使用说明](docs/new-features-usage.md)** | Vision 委托 · 终端标题 · Mailbox · observe watch 快速上手 |
 | 各插件 README | [flow](packages/pi-maestro-flow/README.md) · [teammate](packages/pi-maestro-teammate/README.md) · [cockpit](packages/pi-cockpit/README.md) |
 

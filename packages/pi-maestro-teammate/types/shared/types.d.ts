@@ -235,6 +235,8 @@ export interface ActiveAgent {
     /** Pi emitted a final no-tool assistant turn; agent_end has not necessarily arrived yet. */
     resultReadyAt?: number;
     lastResult?: string;
+    /** Schema-valid structured output of the settled run, kept for observe inspection. */
+    structuredOutput?: unknown;
     /**
      * This dispatch runs in background/detached mode and will send a
      * `teammate-complete` notification on terminal settle. If it goes silent
@@ -318,10 +320,29 @@ export interface SettledAgentRecord {
     status: AgentTerminalStatus;
     settledAt: number;
     lastResult?: string;
+    /** Schema-valid structured output retained for observe full-detail reads after eviction. */
+    structuredOutput?: unknown;
     requestedModel?: string;
     resolvedModel?: string;
     attemptedModels?: string[];
 }
+/**
+ * Compact structured-output projection carried on completion events so
+ * background/detached results can be persisted to `agent://` without parsing
+ * rendered messages. Deliberately smaller than `SingleResult`.
+ */
+export interface StructuredResult {
+    correlationId: string;
+    /** Workspace cwd captured by the dispatch owner at admission time. */
+    originCwd: string;
+    /** Task name; absent when the dispatch had none. */
+    name?: string;
+    agent: string;
+    /** Schema-valid structured output captured for this task. */
+    structuredOutput: unknown;
+}
 export declare const TEAMMATE_COMPLETE_EVENT = "teammate:complete";
 export declare const TEAMMATE_STARTED_EVENT = "teammate:started";
 export declare const TEAMMATE_MESSAGE_EVENT = "teammate:message";
+export declare const TEAMMATE_VIEWING_EVENT = "teammate:viewing";
+export declare const TEAMMATE_OPEN_AGENT_EVENT = "teammate:open-agent";

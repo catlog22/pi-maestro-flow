@@ -54,3 +54,11 @@ export declare class ModelCircuitBreaker {
     private retryAt;
 }
 export declare const sharedModelCircuitBreaker: ModelCircuitBreaker;
+/**
+ * Stable sort of model selectors by circuit health: healthy/never-tried
+ * candidates first, recovering (HALF_OPEN) trials next, OPEN last. Equal
+ * health keeps the input (configured) order — `Array.prototype.sort` is
+ * stable. OPEN candidates are still gated by {@link acquireCandidate}; the
+ * rank only decides the order in which candidates are attempted.
+ */
+export declare function rankModelsByHealth(models: readonly string[], breaker: ModelCircuitBreaker): string[];

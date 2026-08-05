@@ -1,13 +1,22 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, type Component, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
 import type { MaestroUiStateSnapshotV1 } from "./public/v1/events.ts";
-import { renderSidebar, renderSidebarError } from "./sidebar-render.ts";
+import { enumerateNavRows, renderSidebar, renderSidebarError } from "./sidebar-render.ts";
 import {
 	createSplitPaneController,
 	DEFAULT_SIDEBAR_WIDTH,
 	type SplitPaneController,
 } from "./split-pane.ts";
 import type { AgentRow, BashBgJob, CockpitConfig, TodoItem } from "./types.ts";
+
+/** No-op theme used only to count rows while building nav ids; never rendered. */
+const countingTheme = {
+	fg: (_color: string, text: string) => text,
+	bg: (_color: string, text: string) => text,
+	bold: (text: string) => text,
+	dim: (text: string) => text,
+	strikethrough: (text: string) => text,
+} as unknown as Theme;
 
 export interface SidebarComponentOptions {
 	getMaestroSnapshot(): MaestroUiStateSnapshotV1 | undefined;
@@ -19,6 +28,8 @@ export interface SidebarComponentOptions {
 	isResizing(): boolean;
 	/** Browse-window offset (content rows skipped) while the sidebar has keyboard focus. */
 	getScrollStart(): number;
+	/** Row id (`Section:i`) selected in browse mode, for the highlight. */
+	getFocusedRowId?(): string | undefined;
 	theme: Theme;
 	onRenderError?(error: unknown): void;
 	now?(): number;
@@ -52,6 +63,7 @@ export function createSidebarComponent(options: SidebarComponentOptions): Compon
 					now: options.now?.() ?? Date.now(),
 					resizing,
 					scrollStart: options.getScrollStart(),
+					...(options.getFocusedRowId ? { focusedRowId: options.getFocusedRowId() } : {}),
 				});
 			} catch (error) {
 				reportRenderError(error);
@@ -104,6 +116,10 @@ export interface SidebarControllerOptions {
 	onWarning?(message: string): void;
 	onError?(error: unknown): void;
 	schedule?(callback: () => void): void;
+	/** Enter pressed on a browsed row; `agent:<correlationId>` for agents. */
+	onActivateRow?(id: string): void;
+	/** Terminal columns used for the compact flag when building nav rows. */
+	getNavWidth?(): number;
 }
 
 export function createSidebarController(options: SidebarControllerOptions): SidebarController {
@@ -120,7 +136,7 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 	let focused = false;
 	let focusScroll = 0;
 	let focusSelectedId: string | undefined;
-	let navRows: Array<{ id: string }> = [];
+	let navRows: Array<{ id: string; correlationId?: string }> = [];
 	let unsubscribeFocusInput: (() => void) | undefined;
 	const animationIntervalMs = Math.max(1, Math.trunc(options.animationIntervalMs ?? 1_000));
 	const schedule = options.schedule ?? queueMicrotask;
@@ -204,10 +220,26 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 	// --- Sidebar browse (focus) mode ---
 	const rebuildNav = (): void => {
 		try {
-			const todoIds = options.getTodos().map((item) => `task:${item.id}`);
-			const agentIds = options.getAgents().map((row) => `agent:${row.correlationId}`);
-			const jobIds = options.getJobs().map((job) => `job:${job.id}`);
-			navRows = [...todoIds, ...agentIds, ...jobIds].map((id) => ({ id }));
+			// Row ids mirror the renderer's `${Section}:${index}` names so the
+			// focused row can be highlighted in the dock. Workflow/Goal/Swarm
+			// become browsable too, keeping the nav order identical to render order.
+			navRows = enumerateNavRows({
+				maestro: options.getMaestroSnapshot(),
+				todos: options.getTodos(),
+				agents: options.getAgents(),
+				jobs: options.getJobs(),
+				config: options.getConfig(),
+				width: options.getNavWidth?.() ?? 80,
+				height: options.getHeight?.() ?? 12,
+				theme: countingTheme,
+				now: options.now?.() ?? Date.now(),
+			}).map((id) => {
+				const agentIndex = /^Agents:(\d+)$/.exec(id)?.[1];
+				return {
+					id,
+					...(agentIndex !== undefined ? { correlationId: options.getAgents()[Number(agentIndex)]?.correlationId } : {}),
+				};
+			});
 		} catch {
 			navRows = [];
 		}
@@ -273,6 +305,16 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 		if (matchesKey(data, Key.end)) {
 			focusSelectedId = navRows[navRows.length - 1]?.id;
 			reconcileFocus();
+			requestOverlayRender?.();
+			return { consume: true };
+		}
+		if (matchesKey(data, Key.enter) && focusSelectedId) {
+			// Enter on an agent row opens that agent in teammate's viewing view.
+			const selected = navRows.find((row) => row.id === focusSelectedId);
+			if (selected?.correlationId) {
+				options.onActivateRow?.(`agent:${selected.correlationId}`);
+				endFocus();
+			}
 			requestOverlayRender?.();
 			return { consume: true };
 		}
@@ -367,6 +409,7 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 						getHeight: () => tui.terminal.rows,
 						isResizing: split.isResizing,
 						getScrollStart: () => (focused ? focusScroll : 0),
+						getFocusedRowId: () => (focused ? focusSelectedId : undefined),
 						theme,
 						...(options.now ? { now: options.now } : {}),
 						onRenderError: (error) => {

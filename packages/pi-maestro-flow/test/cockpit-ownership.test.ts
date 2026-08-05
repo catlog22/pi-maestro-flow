@@ -12,6 +12,13 @@ test("Alt+T delegates Todo disclosure to Cockpit when Cockpit owns the panel", (
   );
 });
 
+test("Cockpit input-target events update the immutable HistoryEditor route prefix", () => {
+  const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  assert.match(source, /pi\.events\.on\(COCKPIT_INPUT_TARGET_EVENT/);
+  assert.match(source, /setInputRouteTarget\(\{ label: target\.label\.trim\(\), color:/);
+  assert.match(source, /setInputRouteTarget\(undefined\)/);
+});
+
 test("Cockpit ownership also withdraws and restores Flow's live Goal panel", () => {
   const extensionSource = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   const goalSource = readFileSync(new URL("../src/tools/goal.ts", import.meta.url), "utf8");
@@ -19,6 +26,16 @@ test("Cockpit ownership also withdraws and restores Flow's live Goal panel", () 
   assert.match(goalSource, /export function setGoalPanelOwnership/);
   assert.match(goalSource, /if \(goalPanelOwnedExternally\) return/);
   assert.match(goalSource, /updateGoalWidget\(displayCtx, activeGoal, currentGoalPhase\(\)\)/);
+});
+
+test("Cockpit static mode freezes Flow's Goal elapsed tick through the ownership channel", () => {
+  const extensionSource = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  const goalSource = readFileSync(new URL("../src/tools/goal.ts", import.meta.url), "utf8");
+  assert.match(extensionSource, /setGoalStaticMode\(ownership\.static === true\)/);
+  assert.match(goalSource, /export function setGoalStaticMode/);
+  assert.match(goalSource, /if \(goalStaticMode\) return false;/);
+  assert.match(goalSource, /updateStatusLine\(ctx, goal, true\)/);
+  assert.match(goalSource, /hideLiveDuration: goalStaticMode/);
 });
 
 test("todo main renderCall uses the shared single-line shell and clears after settlement", () => {

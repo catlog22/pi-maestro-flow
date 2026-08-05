@@ -62,7 +62,6 @@ const CONFIG_KEYS = [
 	"copyOnSelect",
 	"quietMode",
 	"quietSymbols",
-	"toolPalette",
 	"agentsMode",
 	"todoMode",
 	"todoExpanded",
@@ -134,7 +133,6 @@ const CATALOGS = {
 		"cockpit.copyOnSelect.description": "Copy transcript text to the clipboard when a drag selection is released. Effective only while fullscreen input is active.",
 		"cockpit.quietMode": "Quiet tool rendering",
 		"cockpit.quietSymbols": "Quiet symbols",
-		"cockpit.toolPalette": "Quiet tool palette",
 		"cockpit.agentsMode": "Agent display",
 		"cockpit.todoMode": "Todo display",
 		"cockpit.todoExpanded": "Todo expanded",
@@ -156,11 +154,6 @@ const CATALOGS = {
 		"cockpit.option.on": "On",
 		"cockpit.option.off": "Off",
 		"cockpit.option.comfortable": "Comfortable",
-		"cockpit.option.classic": "Classic",
-		"cockpit.option.family": "Operation families",
-		"cockpit.option.readwrite": "Read / write",
-		"cockpit.option.search": "Search focused",
-		"cockpit.option.mono": "Monochrome",
 		"cockpit.runtime.reloadQuiet": "Turning Quiet off requires /reload to restore native tool renderers",
 		"cockpit.runtime.reloadInteractions": "Editor interaction settings require /reload to take effect",
 	},
@@ -184,7 +177,6 @@ const CATALOGS = {
 		"cockpit.copyOnSelect.description": "在拖选 transcript 文本并松开时自动复制到剪贴板。仅在全屏输入模式开启时生效。",
 		"cockpit.quietMode": "紧凑工具渲染",
 		"cockpit.quietSymbols": "紧凑状态符号",
-		"cockpit.toolPalette": "紧凑工具配色",
 		"cockpit.agentsMode": "Agent 显示",
 		"cockpit.todoMode": "Todo 显示",
 		"cockpit.todoExpanded": "展开 Todo",
@@ -206,11 +198,6 @@ const CATALOGS = {
 		"cockpit.option.on": "开启",
 		"cockpit.option.off": "关闭",
 		"cockpit.option.comfortable": "舒适",
-		"cockpit.option.classic": "经典",
-		"cockpit.option.family": "操作族",
-		"cockpit.option.readwrite": "读写区分",
-		"cockpit.option.search": "搜索强调",
-		"cockpit.option.mono": "单色",
 		"cockpit.runtime.reloadQuiet": "关闭紧凑渲染后需执行 /reload 才能恢复原生工具界面",
 		"cockpit.runtime.reloadInteractions": "编辑器交互设置需执行 /reload 才能生效",
 	},
@@ -253,7 +240,6 @@ const DEFINITIONS: readonly SettingDefinition[] = [
 	),
 	booleanDefinition("quietMode", "cockpit.group.general", 2, "cockpit.quietMode", "extension-reload"),
 	enumDefinition("quietSymbols", "cockpit.group.general", 3, "cockpit.quietSymbols", ["check", "dot"], "live"),
-	enumDefinition("toolPalette", "cockpit.group.general", 4, "cockpit.toolPalette", ["classic", "family", "readwrite", "search", "mono"], "live"),
 	enumDefinition("agentsMode", "cockpit.group.panels", 0, "cockpit.agentsMode", ["list", "compact"], "live"),
 	enumDefinition("todoMode", "cockpit.group.panels", 1, "cockpit.todoMode", ["list", "compact"], "live"),
 	booleanDefinition("todoExpanded", "cockpit.group.panels", 2, "cockpit.todoExpanded", "live"),
@@ -582,7 +568,6 @@ function validValue(key: CockpitSettingKey, value: JsonValue): boolean {
 	if (["enabled", "staticMode", "pinEditorBottom", "doubleEscapeClearInput", "fullscreenInput", "copyOnSelect", "quietMode", "todoExpanded", "hideNativeAgents"].includes(key)) return typeof value === "boolean";
 	if (key === "sidebar.width") return typeof value === "number" && Number.isSafeInteger(value) && value >= 32 && value <= 56;
 	if (key === "quietSymbols") return value === "check" || value === "dot";
-	if (key === "toolPalette") return value === "classic" || value === "family" || value === "readwrite" || value === "search" || value === "mono";
 	if (key === "agentsMode" || key === "todoMode") return value === "list" || value === "compact";
 	if (key === "icons.mode") return value === "auto" || value === "nerd" || value === "ascii";
 	if (key === "sidebar.mode") return value === "auto" || value === "on" || value === "off";

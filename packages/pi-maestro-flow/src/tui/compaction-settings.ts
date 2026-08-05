@@ -3,7 +3,6 @@ import { access } from "node:fs/promises";
 import {
   Key,
   matchesKey,
-  truncateToWidth,
   visibleWidth,
   type Component,
   type Focusable,
@@ -12,6 +11,15 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
+import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
+import {
+  fit,
+  frame,
+  headerLine,
+  helpLine,
+  rule,
+  type FrameTheme,
+} from "pi-cockpit/src/settings/ui-primitives.ts";
 import {
   COMPACTION_FIELDS,
   readCompactionSettings,
@@ -39,10 +47,285 @@ type MenuItem = "threshold" | "enabled" | "keepRecentTokens" | "softEnabled" | S
 type ConfigFieldItem = Exclude<MenuItem, "softEnabled" | SoftMechanismItem>;
 type SaveState = "clean" | "dirty" | "saving" | "failed";
 
-interface CompactionTheme {
-  fg(role: string, text: string): string;
-  bold(text: string): string;
-}
+interface CompactionTheme extends FrameTheme {}
+
+const CATALOGS = {
+  en: {
+    "title": "Maestro Compaction Settings",
+    "menu": "Settings menu",
+    "scope.project": "Project",
+    "scope.user": "User",
+    "scope.projectConfig": "Project configuration",
+    "scope.userConfig": "User configuration",
+    "state.ready": "Ready",
+    "state.dirty": "Uncommitted changes",
+    "state.saving": "Saving…",
+    "state.failed": "Save failed",
+    "state.editing": "Edit",
+    "item.threshold": "Hard compaction threshold",
+    "item.enabled": "Automatic compaction",
+    "item.keepRecentTokens": "Keep recent context",
+    "item.softEnabled": "Soft compaction toggle",
+    "item.softLossless": "Lossless folding",
+    "item.softCacheGate": "Cache economy gate",
+    "item.softTimeBased": "Time-based staleness",
+    "item.softRelevance": "Relevance ranking",
+    "item.softDedup": "Cross-turn dedup",
+    "item.compactModel": "Compaction model",
+    "item.threshold.short": "Threshold",
+    "item.enabled.short": "Auto",
+    "item.softEnabled.short": "Soft",
+    "item.softLossless.short": "Lossless",
+    "item.softCacheGate.short": "Cache",
+    "item.softTimeBased.short": "Time",
+    "item.softRelevance.short": "Relevance",
+    "item.softDedup.short": "Dedup",
+    "item.compactModel.short": "Model",
+    "item.keepRecentTokens.short": "Keep",
+    "detail.threshold": "Shows the real runtime threshold; editing changes the configured threshold, converted back to reserved output space on save.",
+    "detail.enabled": "Controls both Pi native automatic compaction and Maestro in-flight compaction.",
+    "detail.keepRecentTokens": "When cleaning stale tool results, keep the most recent context first.",
+    "detail.softEnabled": "Prunes stale tool output before hard compaction; if the hard threshold fires first, the soft stage is marked unreachable.",
+    "detail.softLossless": "Folds tool output in a reversible format (duplicate lines, grep headers, diff indexes) without losing information; on by default.",
+    "detail.softCacheGate": "Accounts for the cost of invalidated cache prefixes before pruning; skips pruning when the benefit does not pay the cost; on by default.",
+    "detail.softTimeBased": "When the last assistant message is older than the threshold, the cache is certain to be stale; skips the cache economy gate and prunes directly; off by default.",
+    "detail.softRelevance": "Prioritizes pruning low-relevance output by lexical relevance (BM25/keywords) to the latest user instruction; off by default.",
+    "detail.softDedup": "Replaces verbatim duplicates of earlier tool output with context pointers; referenced output stays protected; off by default.",
+    "detail.compactModel": "Model used for text-compaction summaries; follows the current session model by default and falls back at runtime when resolution fails.",
+    "value.on": "● On",
+    "value.off": "○ Off",
+    "value.inherit": "Follow session model",
+    "value.inheritPrefix": "Inherited from",
+    "value.unconfigured": "Unconfigured, follows the current session model",
+    "value.followSession": "Follow session model",
+    "value.reservePrefix": "Reserve",
+    "editor.title": "Edit",
+    "editor.current": "Current value",
+    "editor.newValue": "New value",
+    "editor.tokens": "tokens",
+    "editor.configThreshold": "Configured threshold",
+    "editor.configReserve": "Configured reserve",
+    "editor.reservePositive": "Configured reserve · must be greater than 0 tokens",
+    "editor.floor5pct": "Window 5% floor",
+    "editor.outputLimit": "Model output limit",
+    "editor.outputLimitShrink": "shrinks dynamically with the remaining window",
+    "editor.effectiveReserve": "Effective safe reserve",
+    "editor.hardThreshold": "Hard compaction",
+    "editor.exceeds": "exceeds",
+    "editor.capacitySource": "Capacity source",
+    "editor.effectReason": "Effect reason",
+    "editor.noContext": "Current model has no context window; editing the reserved output space",
+    "editor.noContextDetail": "Current model has no context window; cannot compute the actual compaction threshold",
+    "picker.title": "Choose compaction model",
+    "picker.current": "current",
+    "picker.models": "models",
+    "notice.enterPositive": "Enter an integer greater than 0",
+    "notice.invalid": "× invalid",
+    "notice.warn": "△ notice",
+    "notice.notEditable": "This setting is not editable",
+    "notice.thresholdBelowContext": "Compaction threshold must be below the context window",
+    "notice.nothingToSave": "No changes to save",
+    "notice.cannotSave": "Cannot save",
+    "notice.saving": "Saving…",
+    "notice.saveFailed": "Save failed",
+    "notice.readonlyProject": "Project configuration is read-only",
+    "notice.readonlyReason.writable": "workspace is not writable",
+    "notice.discardConfirm": "Uncommitted changes · press Esc again to discard",
+    "footer.close": "Esc close",
+    "footer.closeNarrow": "Esc close",
+    "footer.save": "Ctrl+S save",
+    "footer.saveNarrow": "Ctrl+S save",
+    "footer.toggle": "toggle",
+    "footer.choose": "choose",
+    "footer.edit": "edit",
+    "footer.navigate": "Up/Down select",
+    "footer.scope": "Tab switch scope",
+    "footer.space": "Space toggle",
+    "footer.inherit": "U restore inheritance",
+    "footer.escEdit": "Esc back",
+    "footer.escEditNarrow": "Esc back",
+    "footer.enterConfirm": "Enter confirm",
+    "footer.enterConfirmNarrow": "Enter confirm",
+    "notice.validation.reservePositive": "Reserved output space must be a positive integer",
+    "notice.validation.keepPositive": "Keep-recent context must be a positive integer",
+    "notice.validation.reserveCeiling": "Reserved output space {value} must not exceed {ceiling}",
+    "notice.validation.reserveContext": "Reserved output space {value} must be smaller than the context window {window}",
+    "notice.validation.keepThreshold": "Keep-recent context {value} must not be greater than or equal to the compaction threshold {threshold}",
+    "notice.validation.reserveMaxOutput": "Reserved output space {value} is smaller than the model's single max output {max}, the response may not complete",
+    "notice.validation.noContext": "Current model has no context window; threshold validation skipped",
+    "soft.summary.unconfigured": "Soft stage · not configured",
+    "soft.summary.warn": "Soft stage",
+    "soft.summary.nudge": "nudge",
+    "soft.summary.prune": "prune",
+    "soft.summary.reachable": "reachable",
+    "soft.summary.unreachable": "unreachable",
+    "soft.summary.hardFirst": "hard compaction fires first",
+    "soft.units": "soft stage",
+    "threshold.actual": "Actual",
+    "threshold.configured": "Configured threshold",
+    "threshold.effective": "Effective safe reserve",
+    "threshold.limiter.compaction": "Compaction model window",
+    "threshold.limiter.session": "Current session model window",
+    "threshold.reason.configured": "determined by the configured reserve",
+    "threshold.reason.ratioFloor": "lowered by the 5% window safety floor",
+    "threshold.reason.maxOutput": "lowered by the model max output protection",
+    "threshold.reason.selfHosted": "summary model window bootstraps, hard compaction fires early",
+    "threshold.reason.capped": "model max output is too large, safe reserve capped at 90% of the window",
+    "source.project": "project",
+    "source.user": "user",
+    "source.default": "default",
+
+    "footer.typeDigits": "Type digits",
+    "footer.backspace": "Backspace delete",
+    "footer.escChoose": "Esc back",
+    "footer.enterChoose": "Enter choose",
+    "footer.enterChooseNarrow": "Enter choose",
+    "footer.move": "Up/Down move",
+    "model.detail.configured": "Configured model",
+    "model.detail.source": "source",
+    "model.detail.stale": "Configured model is not in the available list; falls back at runtime",
+    "model.detail.unconfigured": "Configured model · unconfigured, follows the current session model",
+    "model.detail.fallback": "fallback",
+  },
+  "zh-CN": {
+    "title": "Maestro 压缩设置",
+    "menu": "设置菜单",
+    "scope.project": "项目",
+    "scope.user": "用户",
+    "scope.projectConfig": "项目配置",
+    "scope.userConfig": "用户配置",
+    "state.ready": "✓ 就绪",
+    "state.dirty": "△ 未保存",
+    "state.saving": "… 保存中",
+    "state.failed": "保存失败",
+    "state.editing": "编辑",
+    "item.threshold": "实际硬压缩阈值",
+    "item.enabled": "自动压缩",
+    "item.keepRecentTokens": "保留最近上下文",
+    "item.softEnabled": "软压缩开关",
+    "item.softLossless": "无损折叠",
+    "item.softCacheGate": "缓存经济门槛",
+    "item.softTimeBased": "时间基冷检测",
+    "item.softRelevance": "相关性排序",
+    "item.softDedup": "跨轮去重",
+    "item.compactModel": "压缩模型",
+    "item.threshold.short": "阈值",
+    "item.enabled.short": "自动",
+    "item.softEnabled.short": "软压缩",
+    "item.softLossless.short": "无损",
+    "item.softCacheGate.short": "缓存",
+    "item.softTimeBased.short": "时间",
+    "item.softRelevance.short": "相关",
+    "item.softDedup.short": "去重",
+    "item.compactModel.short": "模型",
+    "item.keepRecentTokens.short": "保留",
+    "detail.threshold": "显示运行时真实阈值；编辑的是配置阈值，保存后仍换算为预留输出空间。",
+    "detail.enabled": "同时控制 Pi 原生自动压缩与 Maestro 执行中压缩。",
+    "detail.keepRecentTokens": "清理旧工具结果时，优先保留最近的上下文。",
+    "detail.softEnabled": "开启后在硬压缩前裁剪陈旧工具结果；若硬阈值更早，界面会标记软阶段不可达。",
+    "detail.softLossless": "以可逆格式折叠工具输出（重复行、grep 表头、diff 索引），不丢信息；默认开启。",
+    "detail.softCacheGate": "裁剪前核算作废缓存前缀的代价，收益不足以支付时不裁剪；默认开启（只拒绝、不触发）。",
+    "detail.softTimeBased": "距最后一条助手消息超过阈值时缓存必然过期，跳过缓存经济门槛直接裁剪；默认关闭。",
+    "detail.softRelevance": "按最近用户指令的词法相关性（BM25/关键词）优先裁剪低相关输出；默认关闭。",
+    "detail.softDedup": "把与更早工具输出逐字重复的片段替换为上下文指针，被引用输出受保护；默认关闭。",
+    "detail.compactModel": "用于生成文本压缩摘要的模型；默认跟随当前会话模型，解析失败运行时自动回退。",
+    "value.on": "● 已开启",
+    "value.off": "○ 已关闭",
+    "value.inherit": "跟随当前会话模型",
+    "value.inheritPrefix": "继承自",
+    "value.unconfigured": "未配置，跟随当前会话模型",
+    "value.followSession": "跟随会话模型",
+    "value.reservePrefix": "预留",
+    "editor.title": "修改",
+    "editor.current": "当前值",
+    "editor.newValue": "新值",
+    "editor.tokens": "Token",
+    "editor.configThreshold": "配置阈值",
+    "editor.configReserve": "配置预留",
+    "editor.reservePositive": "配置预留 · 必须大于 0 Token",
+    "editor.floor5pct": "窗口 5% 底线",
+    "editor.outputLimit": "模型输出上限",
+    "editor.outputLimitShrink": "按剩余窗口动态收缩",
+    "editor.effectiveReserve": "实际安全预留",
+    "editor.hardThreshold": "实际硬压缩",
+    "editor.exceeds": "超过",
+    "editor.capacitySource": "容量来源",
+    "editor.effectReason": "生效原因",
+    "editor.noContext": "△ 当前模型缺少上下文窗口，正在编辑预留输出空间",
+    "editor.noContextDetail": "△ 当前模型缺少上下文窗口，无法计算实际压缩阈值",
+    "picker.title": "选择压缩模型",
+    "picker.current": "当前",
+    "picker.models": "个模型",
+    "notice.enterPositive": "× 请输入大于 0 的整数",
+    "notice.invalid": "× 无效",
+    "notice.warn": "△ 提醒",
+    "notice.notEditable": "× 当前设置不可编辑",
+    "notice.thresholdBelowContext": "× 压缩阈值必须小于上下文窗口",
+    "notice.nothingToSave": "✓ 没有需要保存的修改",
+    "notice.cannotSave": "× 无法保存",
+    "notice.saving": "… 正在保存",
+    "notice.saveFailed": "! 保存失败",
+    "notice.readonlyProject": "△ 项目配置只读",
+    "notice.readonlyReason.writable": "工作区不可写",
+    "notice.discardConfirm": "△ 有未保存的修改 · 再按一次 Esc 放弃修改",
+    "notice.validation.reservePositive": "预留输出空间必须是大于 0 的整数",
+    "notice.validation.keepPositive": "保留最近上下文必须是大于 0 的整数",
+    "notice.validation.reserveCeiling": "预留输出空间 {value} 不得超过 {ceiling}",
+    "notice.validation.reserveContext": "预留输出空间 {value} 必须小于上下文窗口 {window}",
+    "notice.validation.keepThreshold": "保留最近上下文 {value} 不应大于或等于压缩阈值 {threshold}",
+    "notice.validation.reserveMaxOutput": "预留输出空间 {value} 小于模型单次最大输出 {max}，可能无法完成响应",
+    "notice.validation.noContext": "当前模型缺少上下文窗口，已跳过阈值校验",
+    "soft.summary.unconfigured": "软阶段 · 未配置",
+    "soft.summary.warn": "软阶段",
+    "soft.summary.nudge": "提醒",
+    "soft.summary.prune": "裁剪",
+    "soft.summary.reachable": "可达",
+    "soft.summary.unreachable": "不可达",
+    "soft.summary.hardFirst": "硬压缩会先触发",
+    "soft.units": "软阶段",
+    "threshold.actual": "实际",
+    "threshold.configured": "配置阈值",
+    "threshold.effective": "实际安全预留",
+    "threshold.limiter.compaction": "压缩模型窗口",
+    "threshold.limiter.session": "当前会话模型窗口",
+    "threshold.reason.configured": "由配置预留决定",
+    "threshold.reason.ratioFloor": "窗口 5% 安全底线下调",
+    "threshold.reason.maxOutput": "模型最大输出保护下调",
+    "threshold.reason.selfHosted": "摘要模型窗口自举，硬压缩提前触发",
+    "threshold.reason.capped": "模型最大输出过大，安全预留封顶为窗口 90%",
+    "source.project": "项目",
+    "source.user": "用户",
+    "source.default": "默认值",
+    "footer.close": "Esc 关闭",
+    "footer.closeNarrow": "Esc关闭",
+    "footer.save": "Ctrl+S 保存",
+    "footer.saveNarrow": "Ctrl+S保存",
+    "footer.toggle": "切换",
+    "footer.choose": "选择",
+    "footer.edit": "修改",
+    "footer.navigate": "↑↓ 选择",
+    "footer.scope": "Tab 切换范围",
+    "footer.space": "Space 切换",
+    "footer.inherit": "U 恢复继承",
+    "footer.escEdit": "Esc 返回",
+    "footer.escEditNarrow": "Esc返回",
+    "footer.enterConfirm": "Enter 确认",
+    "footer.enterConfirmNarrow": "Enter确认",
+    "footer.typeDigits": "输入数字",
+    "footer.backspace": "Backspace 删除",
+    "footer.escChoose": "Esc 返回",
+    "footer.enterChoose": "Enter 选择",
+    "footer.enterChooseNarrow": "Enter选择",
+    "footer.move": "↑↓ 移动",
+    "model.detail.configured": "配置模型",
+    "model.detail.source": "来源",
+    "model.detail.stale": "配置模型不在可用列表中，运行时回退",
+    "model.detail.unconfigured": "配置模型 · 未配置，跟随当前会话模型",
+    "model.detail.fallback": "当前会话模型",
+  },
+} as const;
+
+type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
 
 interface ScopeDraft {
   enabled?: boolean;
@@ -73,6 +356,8 @@ export interface CompactionSettingsOverlayParams {
   /** Models selectable as the compaction model (`provider/id` references). */
   availableModels?: CompactionModelOption[];
   projectReadonlyReason?: string;
+  /** UI language; defaults to zh-CN when the host exposes no locale signal. */
+  locale?: SupportedSettingsLocale;
   theme: CompactionTheme;
   requestRender: () => void;
   done: (result: CompactionSettingsResult) => void;
@@ -97,37 +382,45 @@ function isSoftMechanismItem(item: MenuItem): item is SoftMechanismItem {
   return item in SOFT_MECHANISM_KEYS;
 }
 
-const ITEM_LABELS: Record<MenuItem, string> = {
-  threshold: "实际硬压缩阈值",
-  enabled: "自动压缩",
-  keepRecentTokens: "保留最近上下文",
-  softEnabled: "软压缩开关",
-  softLossless: "无损折叠",
-  softCacheGate: "缓存经济门槛",
-  softTimeBased: "时间基冷检测",
-  softRelevance: "相关性排序",
-  softDedup: "跨轮去重",
-  compactModel: "压缩模型",
-};
+function itemLabel(item: MenuItem): CatalogKey {
+  switch (item) {
+    case "threshold": return "item.threshold";
+    case "enabled": return "item.enabled";
+    case "keepRecentTokens": return "item.keepRecentTokens";
+    case "softEnabled": return "item.softEnabled";
+    case "softLossless": return "item.softLossless";
+    case "softCacheGate": return "item.softCacheGate";
+    case "softTimeBased": return "item.softTimeBased";
+    case "softRelevance": return "item.softRelevance";
+    case "softDedup": return "item.softDedup";
+    case "compactModel": return "item.compactModel";
+  }
+}
 
-const ITEM_DETAILS: Record<MenuItem, string> = {
-  threshold: "显示运行时真实阈值；编辑的是配置阈值，保存后仍换算为预留输出空间。",
-  enabled: "同时控制 Pi 原生自动压缩与 Maestro 执行中压缩。",
-  keepRecentTokens: "清理旧工具结果时，优先保留最近的上下文。",
-  softEnabled: "开启后在硬压缩前裁剪陈旧工具结果；若硬阈值更早，界面会标记软阶段不可达。",
-  softLossless: "以可逆格式折叠工具输出（重复行、grep 表头、diff 索引），不丢信息；默认开启。",
-  softCacheGate: "裁剪前核算作废缓存前缀的代价，收益不足以支付时不裁剪；默认开启（只拒绝、不触发）。",
-  softTimeBased: "距最后一条助手消息超过阈值时缓存必然过期，跳过缓存经济门槛直接裁剪；默认关闭。",
-  softRelevance: "按最近用户指令的词法相关性（BM25/关键词）优先裁剪低相关输出；默认关闭。",
-  softDedup: "把与更早工具输出逐字重复的片段替换为上下文指针，被引用输出受保护；默认关闭。",
-  compactModel: "用于生成文本压缩摘要的模型；默认跟随当前会话模型，解析失败运行时自动回退。",
-};
+function itemDetailKey(item: MenuItem): CatalogKey {
+  return `detail.${item}` as CatalogKey;
+}
 
-const INHERIT_MODEL_LABEL = "跟随当前会话模型";
+function shortLabel(item: MenuItem): CatalogKey {
+  switch (item) {
+    case "threshold": return "item.threshold.short";
+    case "enabled": return "item.enabled.short";
+    case "softEnabled": return "item.softEnabled.short";
+    case "softLossless": return "item.softLossless.short";
+    case "softCacheGate": return "item.softCacheGate.short";
+    case "softTimeBased": return "item.softTimeBased.short";
+    case "softRelevance": return "item.softRelevance.short";
+    case "softDedup": return "item.softDedup.short";
+    case "compactModel": return "item.compactModel.short";
+    case "keepRecentTokens": return "item.keepRecentTokens.short";
+  }
+}
+
 const MODEL_PICKER_MAX_VISIBLE = 10;
 
 export class CompactionSettingsOverlay implements Component, Focusable {
   focused = false;
+  private readonly locale: SupportedSettingsLocale;
   private scope: CompactionScope;
   private selected = 0;
   private editing = false;
@@ -141,6 +434,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
   private readonly drafts: Record<CompactionScope, ScopeDraft>;
 
   constructor(private readonly params: CompactionSettingsOverlayParams) {
+    this.locale = params.locale ?? "zh-CN";
     this.scope = params.projectReadonlyReason ? "user" : "project";
     this.initialDrafts = {
       project: toDraft(params.snapshot.scopes.project),
@@ -155,6 +449,16 @@ export class CompactionSettingsOverlay implements Component, Focusable {
   invalidate(): void {}
   dispose(): void {}
 
+  /** Translate a catalog key with optional {var} substitution. */
+  private t(key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
+    const catalog = CATALOGS[this.locale] ?? CATALOGS["zh-CN"];
+    const template: unknown = catalog[key];
+    const text = typeof template === "string" ? template : CATALOGS["zh-CN"][key] as string;
+    if (!vars) return text;
+    return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
+      vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
+  }
+
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.min(width, 140));
     if (safeWidth < 20) return [this.renderTiny(safeWidth)];
@@ -162,15 +466,15 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     if (this.editing) return this.renderEditor(safeWidth);
     const inner = safeWidth - 2;
     const rows = [
-      fitLine(`${this.params.theme.bold("Maestro 压缩设置")} · ${this.scopeTabs()}`, inner),
+      headerLine(this.params.theme, this.t("title"), [this.scopeTabs()], inner),
       rule(inner),
-      this.params.theme.fg("dim", fitLine("设置菜单", inner)),
+      this.params.theme.fg("dim", fit(this.t("menu"), inner)),
       ...MENU_ITEMS.map((item, index) => this.renderMenuItem(item, index === this.selected, inner)),
     ];
     rows.push(rule(inner), ...this.detailRows(inner, safeWidth));
     if (this.params.projectReadonlyReason && this.scope === "project") {
-      rows.push(this.params.theme.fg("warning", fitLine(
-        `△ 项目配置只读 · ${localizeReadonlyReason(this.params.projectReadonlyReason)}`,
+      rows.push(this.params.theme.fg("warning", fit(
+        `${this.t("notice.readonlyProject")} · ${this.localizeReadonlyReason(this.params.projectReadonlyReason)}`,
         inner,
       )));
     }
@@ -181,8 +485,8 @@ export class CompactionSettingsOverlay implements Component, Focusable {
         ?? validation.warnings.find((message) => message.startsWith(configField))
       : undefined;
     if (fieldIssue) {
-      rows.push(this.params.theme.fg(validation.errors.includes(fieldIssue) ? "error" : "warning", fitLine(
-        `${validation.errors.includes(fieldIssue) ? "× 无效" : "△ 提醒"} · ${localizeValidation(fieldIssue)}`,
+      rows.push(this.params.theme.fg(validation.errors.includes(fieldIssue) ? "error" : "warning", fit(
+        `${validation.errors.includes(fieldIssue) ? this.t("notice.invalid") : this.t("notice.warn")} · ${this.localizeValidation(fieldIssue)}`,
         inner,
       )));
     }
@@ -208,7 +512,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     if (matchesKey(data, Key.escape)) {
       if (this.isDirty() && !this.discardArmed) {
         this.discardArmed = true;
-        this.notice = "△ 有未保存的修改 · 再按一次 Esc 放弃修改";
+        this.notice = this.t("notice.discardConfirm");
         this.requestRender();
         return;
       }
@@ -219,7 +523,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
       this.scope = this.scope === "project" ? "user" : "project";
       this.discardArmed = false;
       this.notice = this.scope === "project" && this.params.projectReadonlyReason
-        ? `△ 项目配置只读 · ${localizeReadonlyReason(this.params.projectReadonlyReason)}`
+        ? `${this.t("notice.readonlyProject")} · ${this.localizeReadonlyReason(this.params.projectReadonlyReason)}`
         : "";
       this.requestRender();
       return;
@@ -278,47 +582,47 @@ export class CompactionSettingsOverlay implements Component, Focusable {
 
   private renderTiny(width: number): string {
     const item = this.selectedItem();
-    const state = this.saveState === "saving" ? "… 保存中"
-      : this.saveState === "failed" ? `! ${this.notice || "保存失败"}`
-      : this.isDirty() ? "△ 未保存"
-      : "✓ 就绪";
-    const prefix = this.editing ? "编辑" : this.scope === "project" ? "项目" : "用户";
+    const state = this.saveState === "saving" ? this.t("state.saving")
+      : this.saveState === "failed" ? `! ${this.notice || this.t("state.failed")}`
+      : this.isDirty() ? this.t("state.dirty")
+      : this.t("state.ready");
+    const prefix = this.editing ? this.t("state.editing") : this.scope === "project" ? this.t("scope.project") : this.t("scope.user");
     const value = this.editing ? this.formattedEditValue() : this.itemValue(item);
-    return fitLine(`${prefix} · ${shortLabel(item)} ${value} · ${state} · Esc`, width);
+    return fit(`${prefix} · ${this.t(shortLabel(item))} ${value} · ${state} · Esc`, width);
   }
 
   private renderMenuItem(item: MenuItem, selected: boolean, width: number): string {
     const marker = selected ? this.params.theme.fg("accent", "›") : " ";
-    const label = selected ? this.params.theme.bold(ITEM_LABELS[item]) : ITEM_LABELS[item];
-    return fitLine(`${marker} ${label} · ${this.itemValue(item)} · ${this.draftSource(item)}`, width);
+    const label = selected ? this.params.theme.bold(this.t(itemLabel(item))) : this.t(itemLabel(item));
+    return fit(`${marker} ${label} · ${this.itemValue(item)} · ${this.draftSource(item)}`, width);
   }
 
   private draftSource(item: MenuItem): string {
     if (item === "softEnabled") {
       return this.drafts[this.scope].soft?.enabled === undefined
-        ? `继承自${sourceLabel(this.effective().source.soft)}`
-        : sourceLabel(this.scope);
+        ? `${this.t("value.inheritPrefix")}${this.sourceLabel(this.effective().source.soft)}`
+        : this.sourceLabel(this.scope);
     }
     if (isSoftMechanismItem(item)) {
       const key = SOFT_MECHANISM_KEYS[item];
       return this.drafts[this.scope].soft?.[key]?.enabled === undefined
-        ? `继承自${sourceLabel(this.effective().source.soft)}`
-        : sourceLabel(this.scope);
+        ? `${this.t("value.inheritPrefix")}${this.sourceLabel(this.effective().source.soft)}`
+        : this.sourceLabel(this.scope);
     }
     const field = configFieldForItem(item);
     return this.drafts[this.scope][field] === undefined
-      ? `继承自${sourceLabel(this.effective().source[field])}`
-      : sourceLabel(this.scope);
+      ? `${this.t("value.inheritPrefix")}${this.sourceLabel(this.effective().source[field])}`
+      : this.sourceLabel(this.scope);
   }
 
   private renderEditor(width: number): string[] {
     const inner = width - 2;
     const item = this.selectedItem();
     const rows = [
-      fitLine(`${this.params.theme.bold(`修改${ITEM_LABELS[item]}`)} · ${scopeLabel(this.scope)}`, inner),
+      headerLine(this.params.theme, `${this.t("editor.title")}${this.t(itemLabel(item))}`, [this.scopeLabel(this.scope)], inner),
       rule(inner),
-      fitLine(`当前值 · ${this.itemValue(item)}`, inner),
-      this.params.theme.fg("accent", fitLine(`› 新值 · ${this.formattedEditValue()} Token`, inner)),
+      fit(`${this.t("editor.current")} · ${this.itemValue(item)}`, inner),
+      this.params.theme.fg("accent", fit(`› ${this.t("editor.newValue")} · ${this.formattedEditValue()} ${this.t("editor.tokens")}`, inner)),
     ];
     if (item === "threshold") {
       const capacity = this.linkedThreshold();
@@ -328,11 +632,11 @@ export class CompactionSettingsOverlay implements Component, Focusable {
         const reserve = contextWindow - configuredThreshold;
         const validReserve = Number.isSafeInteger(reserve) && reserve > 0;
         rows.push(
-          fitLine(`配置阈值 · ${formatNumber(configuredThreshold)} / ${formatNumber(contextWindow)} Token`, inner),
-          fitLine(
+          fit(`${this.t("editor.configThreshold")} · ${formatNumber(configuredThreshold)} / ${formatNumber(contextWindow)} ${this.t("editor.tokens")}`, inner),
+          fit(
             validReserve
-              ? `配置预留 · ${formatNumber(reserve)} Token`
-              : "配置预留 · 必须大于 0 Token",
+              ? `${this.t("editor.configReserve")} · ${formatNumber(reserve)} ${this.t("editor.tokens")}`
+              : this.t("editor.reservePositive"),
             inner,
           ),
         );
@@ -341,33 +645,33 @@ export class CompactionSettingsOverlay implements Component, Focusable {
           if (model.usable) {
             const maxTokens = this.thresholdOutputLimit(model, reserve);
             rows.push(
-              fitLine(`窗口 5% 底线 · ${formatNumber(model.ratioFloorTokens)} Token`, inner),
-              fitLine(`模型输出上限 · ${formatNumber(maxTokens ?? 0)} Token · 按剩余窗口动态收缩`, inner),
-              fitLine(`实际安全预留 · ${formatNumber(model.effectiveReserveTokens)} Token`, inner),
-              this.params.theme.fg("accent", fitLine(
-                `实际硬压缩 · 超过 ${formatNumber(model.thresholdTokens)} Token (${formatPercent(model.thresholdTokens, contextWindow)})`,
+              fit(`${this.t("editor.floor5pct")} · ${formatNumber(model.ratioFloorTokens)} ${this.t("editor.tokens")}`, inner),
+              fit(`${this.t("editor.outputLimit")} · ${formatNumber(maxTokens ?? 0)} ${this.t("editor.tokens")} · ${this.t("editor.outputLimitShrink")}`, inner),
+              fit(`${this.t("editor.effectiveReserve")} · ${formatNumber(model.effectiveReserveTokens)} ${this.t("editor.tokens")}`, inner),
+              this.params.theme.fg("accent", fit(
+                `${this.t("editor.hardThreshold")} · ${this.t("editor.exceeds")} ${formatNumber(model.thresholdTokens)} ${this.t("editor.tokens")} (${formatPercent(model.thresholdTokens, contextWindow)})`,
                 inner,
               )),
-              fitLine(`容量来源 · ${thresholdLimiterLabel(model)}`, inner),
-              fitLine(`生效原因 · ${thresholdReasonLabel(model.reason)}`, inner),
-              fitLine(softThresholdSummary(model), inner),
+              fit(`${this.t("editor.capacitySource")} · ${this.thresholdLimiterLabel(model)}`, inner),
+              fit(`${this.t("editor.effectReason")} · ${this.thresholdReasonLabel(model.reason)}`, inner),
+              fit(this.softThresholdSummary(model), inner),
             );
           }
         }
       } else {
-        rows.push(this.params.theme.fg("warning", fitLine(
-          "△ 当前模型缺少上下文窗口，正在编辑预留输出空间",
+        rows.push(this.params.theme.fg("warning", fit(
+          this.t("editor.noContext"),
           inner,
         )));
       }
     } else {
-      rows.push(fitLine(ITEM_DETAILS[item], inner));
+      rows.push(fit(this.t(itemDetailKey(item)), inner));
     }
     rows.push(rule(inner));
     if (this.notice) rows.push(this.styledNotice(this.notice, inner));
     rows.push(inner < 30
-      ? fitLine("Esc返回 Enter确认", inner)
-      : fitSegments(inner, ["Esc 返回", "Enter 确认", "输入数字", "Backspace 删除"]));
+      ? fit(`${this.t("footer.escEditNarrow")} ${this.t("footer.enterConfirmNarrow")}`, inner)
+      : fitSegments(inner, [this.t("footer.escEdit"), this.t("footer.enterConfirm"), this.t("footer.typeDigits"), this.t("footer.backspace")]));
     return frame(rows, width, this.params.theme);
   }
 
@@ -387,13 +691,13 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     if (matchesKey(data, Key.enter) || data === "\r") {
       const numeric = Number(this.editValue);
       if (!Number.isSafeInteger(numeric) || numeric <= 0) {
-        this.notice = "× 请输入大于 0 的整数";
+        this.notice = this.t("notice.enterPositive");
         this.requestRender();
         return;
       }
       const field = this.selectedConfigField();
       if (!field) {
-        this.notice = "× 当前设置不可编辑";
+        this.notice = this.t("notice.notEditable");
         this.requestRender();
         return;
       }
@@ -403,7 +707,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
         if (contextWindow) {
           const reserveTokens = contextWindow - numeric;
           if (!Number.isSafeInteger(reserveTokens) || reserveTokens <= 0) {
-            this.notice = `× 压缩阈值必须小于上下文窗口 ${formatNumber(contextWindow)}`;
+            this.notice = `${this.t("notice.thresholdBelowContext")} ${formatNumber(contextWindow)}`;
             this.requestRender();
             return;
           }
@@ -434,19 +738,19 @@ export class CompactionSettingsOverlay implements Component, Focusable {
 
   private async save(): Promise<void> {
     if (!this.isDirty()) {
-      this.notice = "✓ 没有需要保存的修改";
+      this.notice = this.t("notice.nothingToSave");
       this.requestRender();
       return;
     }
     const validation = this.validation();
     if (validation.errors.length > 0) {
       this.saveState = "dirty";
-      this.notice = `× 无法保存 · ${localizeValidation(validation.errors[0]!)}`;
+      this.notice = `${this.t("notice.cannotSave")} · ${this.localizeValidation(validation.errors[0]!)}`;
       this.requestRender();
       return;
     }
     this.saveState = "saving";
-    this.notice = "… 正在保存";
+    this.notice = this.t("notice.saving");
     this.requestRender();
     try {
       for (const scope of ["user", "project"] as const) {
@@ -460,7 +764,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
       this.params.done({ saved: true });
     } catch (error) {
       this.saveState = "failed";
-      this.notice = `! 保存失败 · ${error instanceof Error ? error.message : String(error)}`;
+      this.notice = `${this.t("notice.saveFailed")} · ${error instanceof Error ? error.message : String(error)}`;
       this.requestRender();
     }
   }
@@ -522,34 +826,34 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     const rows: string[] = [];
     const { option, stale } = this.effectiveModelOption();
     if (effective.model) {
-      rows.push(fitLine(`配置模型 · ${effective.model} · 来源${sourceLabel(effective.source.model)}`, width));
+      rows.push(fit(`${this.t("model.detail.configured")} · ${effective.model} · ${this.t("model.detail.source")}${this.sourceLabel(effective.source.model)}`, width));
       if (stale) {
-        rows.push(this.params.theme.fg("warning", fitLine(
-          `△ 配置模型不在可用列表中，运行时回退${option ? ` ${option.reference}` : "当前会话模型"}`,
+        rows.push(this.params.theme.fg("warning", fit(
+          `${this.t("model.detail.stale")}${option ? ` ${option.reference}` : this.t("model.detail.fallback")}`,
           width,
         )));
       }
     } else {
-      rows.push(fitLine(`配置模型 · 未配置，跟随当前会话模型${option ? ` ${option.reference}` : ""}`, width));
+      rows.push(fit(`${this.t("model.detail.unconfigured")}${option ? ` ${option.reference}` : ""}`, width));
     }
     return rows;
   }
 
   private itemValue(item: MenuItem): string {
     const effective = this.effective();
-    if (item === "enabled") return effective.enabled ? "已开启" : "已关闭";
-    if (item === "softEnabled") return effective.soft.enabled ? "已开启" : "已关闭";
+    if (item === "enabled") return effective.enabled ? this.t("value.on") : this.t("value.off");
+    if (item === "softEnabled") return effective.soft.enabled ? this.t("value.on") : this.t("value.off");
     if (isSoftMechanismItem(item)) {
-      return effective.soft[SOFT_MECHANISM_KEYS[item]]?.enabled === true ? "已开启" : "已关闭";
+      return effective.soft[SOFT_MECHANISM_KEYS[item]]?.enabled === true ? this.t("value.on") : this.t("value.off");
     }
-    if (item === "compactModel") return effective.model ?? "跟随会话模型";
+    if (item === "compactModel") return effective.model ?? this.t("value.followSession");
     if (item === "threshold") {
       const model = this.linkedThreshold();
       return model.usable
-        ? actualThresholdLabel(model)
-        : `预留 ${formatNumber(effective.reserveTokens)} Token`;
+        ? this.actualThresholdLabel(model)
+        : `${this.t("value.reservePrefix")} ${formatNumber(effective.reserveTokens)} ${this.t("editor.tokens")}`;
     }
-    return `${formatNumber(effective.keepRecentTokens)} Token`;
+    return `${formatNumber(effective.keepRecentTokens)} ${this.t("editor.tokens")}`;
   }
 
   private editorValue(item: MenuItem): string {
@@ -574,7 +878,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
 
   private detailRows(width: number, safeWidth: number): string[] {
     const item = this.selectedItem();
-    const rows = [fitLine(ITEM_DETAILS[item], width)];
+    const rows = [fit(this.t(itemDetailKey(item)), width)];
     if (item === "compactModel") {
       rows.push(...this.compactModelDetailRows(width));
       return rows;
@@ -586,46 +890,46 @@ export class CompactionSettingsOverlay implements Component, Focusable {
       const configuredThreshold = model.contextWindow - model.configuredReserveTokens;
       const maxTokens = this.thresholdOutputLimit(model, effective.reserveTokens);
       rows.push(
-        this.params.theme.fg("accent", fitLine(
-          `实际硬压缩 · 超过 ${formatNumber(model.thresholdTokens)} / ${formatNumber(model.contextWindow)} Token (${formatPercent(model.thresholdTokens, model.contextWindow)})`,
+        this.params.theme.fg("accent", fit(
+          `${this.t("editor.hardThreshold")} · ${this.t("editor.exceeds")} ${formatNumber(model.thresholdTokens)} / ${formatNumber(model.contextWindow)} ${this.t("editor.tokens")} (${formatPercent(model.thresholdTokens, model.contextWindow)})`,
           width,
         )),
-        fitLine(
-          `配置阈值 · ${formatNumber(configuredThreshold)} Token (${formatPercent(configuredThreshold, model.contextWindow)}) · 配置预留 ${formatNumber(model.configuredReserveTokens)}`,
+        fit(
+          `${this.t("editor.configThreshold")} · ${formatNumber(configuredThreshold)} ${this.t("editor.tokens")} (${formatPercent(configuredThreshold, model.contextWindow)}) · ${this.t("editor.configReserve")} ${formatNumber(model.configuredReserveTokens)}`,
           width,
         ),
-        fitLine(
-          `实际安全预留 · ${formatNumber(model.effectiveReserveTokens)} Token · ${thresholdReasonLabel(model.reason)}`,
+        fit(
+          `${this.t("editor.effectiveReserve")} · ${formatNumber(model.effectiveReserveTokens)} ${this.t("editor.tokens")} · ${this.thresholdReasonLabel(model.reason)}`,
           width,
         ),
-        fitLine(`容量来源 · ${thresholdLimiterLabel(model)}`, width),
-        fitLine(`模型输出上限 · ${formatNumber(maxTokens ?? 0)} Token · 按剩余窗口动态收缩`, width),
+        fit(`${this.t("editor.capacitySource")} · ${this.thresholdLimiterLabel(model)}`, width),
+        fit(`${this.t("editor.outputLimit")} · ${formatNumber(maxTokens ?? 0)} ${this.t("editor.tokens")} · ${this.t("editor.outputLimitShrink")}`, width),
       );
-      if (safeWidth >= 40) rows.push(fitLine(this.pressurePreview(model), width));
+      if (safeWidth >= 40) rows.push(fit(this.pressurePreview(model), width));
     } else {
-      rows.push(this.params.theme.fg("warning", fitLine("△ 当前模型缺少上下文窗口，无法计算实际压缩阈值", width)));
+      rows.push(this.params.theme.fg("warning", fit(this.t("editor.noContextDetail"), width)));
     }
     return rows;
   }
 
   private pressurePreview(model: CompactionThresholdDerivation): string {
-    return softThresholdSummary(model);
+    return this.softThresholdSummary(model);
   }
 
   private styledNotice(notice: string, width: number): string {
     const role = notice.startsWith("!") || notice.startsWith("×") ? "error"
       : notice.startsWith("✓") ? "success"
       : "warning";
-    return this.params.theme.fg(role, fitLine(notice, width));
+    return this.params.theme.fg(role, fit(notice, width));
   }
 
   private scopeTabs(): string {
-    return `${this.scope === "project" ? "[项目]" : "项目"}  ${this.scope === "user" ? "[用户]" : "用户"}`;
+    return `${this.scope === "project" ? `[${this.t("scope.project")}]` : this.t("scope.project")}  ${this.scope === "user" ? `[${this.t("scope.user")}]` : this.t("scope.user")}`;
   }
 
   private canEdit(): boolean {
     if (this.scope !== "project" || !this.params.projectReadonlyReason) return true;
-    this.notice = `△ 项目配置只读 · ${localizeReadonlyReason(this.params.projectReadonlyReason)}`;
+    this.notice = `${this.t("notice.readonlyProject")} · ${this.localizeReadonlyReason(this.params.projectReadonlyReason)}`;
     this.requestRender();
     return false;
   }
@@ -691,7 +995,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     const start = visibleStart(this.modelCursor, options.length, MODEL_PICKER_MAX_VISIBLE);
     const visible = options.slice(start, start + MODEL_PICKER_MAX_VISIBLE);
     const rows = [
-      fitLine(`${this.params.theme.bold("选择压缩模型")} · ${scopeLabel(this.scope)}`, inner),
+      headerLine(this.params.theme, this.t("picker.title"), [this.scopeLabel(this.scope)], inner),
       rule(inner),
       ...visible.map((option, index) => {
         const absolute = start + index;
@@ -700,20 +1004,20 @@ export class CompactionSettingsOverlay implements Component, Focusable {
           ? !effectiveModel ? this.params.theme.fg("success", "✓") : " "
           : option.reference === effectiveModel ? this.params.theme.fg("success", "✓") : " ";
         const label = absolute === 0
-          ? `${INHERIT_MODEL_LABEL}${this.params.currentModel ? `（当前 ${this.params.currentModel.reference}）` : ""}`
+          ? `${this.t("value.inherit")}${this.params.currentModel ? `（${this.t("picker.current")} ${this.params.currentModel.reference}）` : ""}`
           : option.reference;
         const boldLabel = absolute === this.modelCursor ? this.params.theme.bold(label) : label;
-        return fitLine(`${marker} ${current} ${boldLabel}`, inner);
+        return fit(`${marker} ${current} ${boldLabel}`, inner);
       }),
     ];
     if (options.length > MODEL_PICKER_MAX_VISIBLE) {
-      rows.push(this.params.theme.fg("dim", fitLine(`… ${options.length} 个模型 · ${start + 1}-${Math.min(start + MODEL_PICKER_MAX_VISIBLE, options.length)}`, inner)));
+      rows.push(this.params.theme.fg("dim", fit(`… ${options.length} ${this.t("picker.models")} · ${start + 1}-${Math.min(start + MODEL_PICKER_MAX_VISIBLE, options.length)}`, inner)));
     }
     rows.push(rule(inner));
     if (this.notice) rows.push(this.styledNotice(this.notice, inner));
     rows.push(inner < 30
-      ? fitLine("Esc返回 Enter选择", inner)
-      : fitSegments(inner, ["Esc 返回", "Enter 选择", "↑↓ 移动"]));
+      ? fit(`${this.t("footer.escEditNarrow")} ${this.t("footer.enterChooseNarrow")}`, inner)
+      : fitSegments(inner, [this.t("footer.escEdit"), this.t("footer.enterChoose"), this.t("footer.move")]));
     return frame(rows, width, this.params.theme);
   }
 
@@ -752,13 +1056,13 @@ export class CompactionSettingsOverlay implements Component, Focusable {
   private menuFooterSegments(): string[] {
     const item = this.selectedItem();
     return [
-      "Esc 关闭",
-      ...(this.isDirty() ? ["Ctrl+S 保存"] : []),
-      `Enter ${this.isToggleItem(item) ? "切换" : item === "compactModel" ? "选择" : "修改"}`,
-      "↑↓ 选择",
-      "Tab 切换范围",
-      ...(this.isToggleItem(item) ? ["Space 切换"] : []),
-      "U 恢复继承",
+      this.t("footer.close"),
+      ...(this.isDirty() ? [this.t("footer.save")] : []),
+      `Enter ${this.isToggleItem(item) ? this.t("footer.toggle") : item === "compactModel" ? this.t("footer.choose") : this.t("footer.edit")}`,
+      this.t("footer.navigate"),
+      this.t("footer.scope"),
+      ...(this.isToggleItem(item) ? [this.t("footer.space")] : []),
+      this.t("footer.inherit"),
     ];
   }
 
@@ -766,9 +1070,9 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     if (width < 30) {
       const item = this.selectedItem();
       const footer = this.isDirty()
-        ? "Esc关闭 Ctrl+S保存"
-        : `Esc关闭 Enter${this.isToggleItem(item) ? "切换" : item === "compactModel" ? "选择" : "修改"}`;
-      return fitLine(footer, width);
+        ? `${this.t("footer.closeNarrow")} ${this.t("footer.saveNarrow")}`
+        : `${this.t("footer.closeNarrow")} Enter${this.isToggleItem(item) ? this.t("footer.toggle") : item === "compactModel" ? this.t("footer.choose") : this.t("footer.edit")}`;
+      return fit(footer, width);
     }
     return fitSegments(width, this.menuFooterSegments());
   }
@@ -783,6 +1087,75 @@ export class CompactionSettingsOverlay implements Component, Focusable {
   private isDirty(): boolean {
     return !draftEqual(this.drafts.project, this.initialDrafts.project)
       || !draftEqual(this.drafts.user, this.initialDrafts.user);
+  }
+
+  private actualThresholdLabel(model: CompactionThresholdDerivation): string {
+    return `${this.t("threshold.actual")} >${formatNumber(model.thresholdTokens)} / ${formatNumber(model.contextWindow)} (${formatPercent(model.thresholdTokens, model.contextWindow)})`;
+  }
+
+  private thresholdLimiterLabel(model: LinkedCompactionThresholdModel): string {
+    return model.limiter === "compaction"
+      ? this.t("threshold.limiter.compaction")
+      : this.t("threshold.limiter.session");
+  }
+
+  private thresholdReasonLabel(reason: CompactionThresholdReason): string {
+    if (reason === "configured") return this.t("threshold.reason.configured");
+    if (reason === "ratio-floor") return this.t("threshold.reason.ratioFloor");
+    if (reason === "max-output") return this.t("threshold.reason.maxOutput");
+    if (reason === "self-hosted") return this.t("threshold.reason.selfHosted");
+    return this.t("threshold.reason.capped");
+  }
+
+  private softThresholdSummary(model: CompactionThresholdDerivation): string {
+    if (!model.soft) return this.t("soft.summary.unconfigured");
+    const nudge = `${this.t("soft.summary.nudge")} ${formatNumber(model.soft.nudgeTokens)} (${formatPercent(model.soft.nudgeTokens, model.contextWindow)})`;
+    const prune = `${this.t("soft.summary.prune")} ${formatNumber(model.soft.pruneTokens)} (${formatPercent(model.soft.pruneTokens, model.contextWindow)})`;
+    const nudgeState = model.soft.nudgeReachable ? this.t("soft.summary.reachable") : this.t("soft.summary.unreachable");
+    const pruneState = model.soft.pruneReachable ? this.t("soft.summary.reachable") : this.t("soft.summary.unreachable");
+    const warning = !model.soft.nudgeReachable || !model.soft.pruneReachable ? ` · ${this.t("soft.summary.hardFirst")}` : "";
+    return `${this.t("soft.summary.warn")} · ${nudge} ${nudgeState} · ${prune} ${pruneState}${warning}`;
+  }
+
+  private sourceLabel(source: CompactionScope | "default"): string {
+    if (source === "project") return this.t("source.project");
+    if (source === "user") return this.t("source.user");
+    return this.t("source.default");
+  }
+
+  private scopeLabel(scope: CompactionScope): string {
+    return scope === "project" ? this.t("scope.projectConfig") : this.t("scope.userConfig");
+  }
+
+  private localizeReadonlyReason(reason: string): string {
+    return reason === "workspace is not writable" ? this.t("notice.readonlyReason.writable") : reason;
+  }
+
+  private localizeValidation(message: string): string {
+    const values = [...message.matchAll(/\((\d+)\)/g)].map((match) => formatNumber(Number(match[1])));
+    if (message.startsWith("reserveTokens") && message.includes("positive safe integer")) {
+      return this.t("notice.validation.reservePositive");
+    }
+    if (message.startsWith("keepRecentTokens") && message.includes("positive safe integer")) {
+      return this.t("notice.validation.keepPositive");
+    }
+    if (message.startsWith("reserveTokens") && message.includes("must be <=")) {
+      const ceiling = message.match(/must be <= (\d+)/)?.[1];
+      return this.t("notice.validation.reserveCeiling", { value: values[0] ?? "", ceiling: ceiling ? formatNumber(Number(ceiling)) : "" });
+    }
+    if (message.startsWith("reserveTokens") && message.includes("contextWindow")) {
+      return this.t("notice.validation.reserveContext", { value: values[0] ?? "", window: values[1] ?? "" });
+    }
+    if (message.startsWith("keepRecentTokens") && message.includes("thresholdTokens")) {
+      return this.t("notice.validation.keepThreshold", { value: values[0] ?? "", threshold: values[1] ?? "" });
+    }
+    if (message.startsWith("reserveTokens") && message.includes("maxTokens")) {
+      return this.t("notice.validation.reserveMaxOutput", { value: values[0] ?? "", max: values[1] ?? "" });
+    }
+    if (message.startsWith("No model context window")) {
+      return this.t("notice.validation.noContext");
+    }
+    return message;
   }
 
   private requestRender(): void {
@@ -887,49 +1260,8 @@ function softDraftEqual(left?: SoftCompactionConfigPatch, right?: SoftCompaction
   return true;
 }
 
-function actualThresholdLabel(model: CompactionThresholdDerivation): string {
-  return `实际 >${formatNumber(model.thresholdTokens)} / ${formatNumber(model.contextWindow)} (${formatPercent(model.thresholdTokens, model.contextWindow)})`;
-}
-
-function thresholdLimiterLabel(model: LinkedCompactionThresholdModel): string {
-  return model.limiter === "compaction" ? "压缩模型窗口" : "当前会话模型窗口";
-}
-
-function thresholdReasonLabel(reason: CompactionThresholdReason): string {
-  if (reason === "configured") return "由配置预留决定";
-  if (reason === "ratio-floor") return "窗口 5% 安全底线下调";
-  if (reason === "max-output") return "模型最大输出保护下调";
-  if (reason === "self-hosted") return "摘要模型窗口自举，硬压缩提前触发";
-  return "模型最大输出过大，安全预留封顶为窗口 90%";
-}
-
-function softThresholdSummary(model: CompactionThresholdDerivation): string {
-  if (!model.soft) return "软阶段 · 未配置";
-  const nudge = `提醒 ${formatNumber(model.soft.nudgeTokens)} (${formatPercent(model.soft.nudgeTokens, model.contextWindow)})`;
-  const prune = `裁剪 ${formatNumber(model.soft.pruneTokens)} (${formatPercent(model.soft.pruneTokens, model.contextWindow)})`;
-  const nudgeState = model.soft.nudgeReachable ? "可达" : "不可达";
-  const pruneState = model.soft.pruneReachable ? "可达" : "不可达";
-  const warning = !model.soft.nudgeReachable || !model.soft.pruneReachable ? " · 硬压缩会先触发" : "";
-  return `软阶段 · ${nudge} ${nudgeState} · ${prune} ${pruneState}${warning}`;
-}
-
 function formatPercent(tokens: number, contextWindow: number): string {
   return `${(tokens / contextWindow * 100).toFixed(1)}%`;
-}
-
-function shortLabel(item: MenuItem): string {
-  if (item === "threshold") return "阈值";
-  if (item === "enabled") return "自动";
-  if (item === "softEnabled") return "软压缩";
-  if (isSoftMechanismItem(item)) {
-    return item === "softLossless" ? "无损"
-      : item === "softCacheGate" ? "缓存"
-      : item === "softTimeBased" ? "时间"
-      : item === "softRelevance" ? "相关"
-      : "去重";
-  }
-  if (item === "compactModel") return "模型";
-  return "保留";
 }
 
 function visibleStart(selected: number, length: number, maxVisible: number): number {
@@ -943,53 +1275,8 @@ function configFieldForItem(item: ConfigFieldItem): CompactionField {
   return item;
 }
 
-function sourceLabel(source: CompactionScope | "default"): string {
-  if (source === "project") return "项目";
-  if (source === "user") return "用户";
-  return "默认值";
-}
-
-function scopeLabel(scope: CompactionScope): string {
-  return scope === "project" ? "项目配置" : "用户配置";
-}
-
 function formatNumber(value: number): string {
   return value.toLocaleString("zh-CN");
-}
-
-function localizeReadonlyReason(reason: string): string {
-  return reason === "workspace is not writable" ? "工作区不可写" : reason;
-}
-
-function localizeValidation(message: string): string {
-  const values = [...message.matchAll(/\((\d+)\)/g)].map((match) => formatNumber(Number(match[1])));
-  if (message.startsWith("reserveTokens") && message.includes("positive safe integer")) {
-    return "预留输出空间必须是大于 0 的整数";
-  }
-  if (message.startsWith("keepRecentTokens") && message.includes("positive safe integer")) {
-    return "保留最近上下文必须是大于 0 的整数";
-  }
-  if (message.startsWith("reserveTokens") && message.includes("must be <=")) {
-    const ceiling = message.match(/must be <= (\d+)/)?.[1];
-    return `预留输出空间 ${values[0] ?? ""} 不得超过 ${ceiling ? formatNumber(Number(ceiling)) : ""}`.trim();
-  }
-  if (message.startsWith("reserveTokens") && message.includes("contextWindow")) {
-    return `预留输出空间 ${values[0] ?? ""} 必须小于上下文窗口 ${values[1] ?? ""}`.trim();
-  }
-  if (message.startsWith("keepRecentTokens") && message.includes("thresholdTokens")) {
-    return `保留最近上下文 ${values[0] ?? ""} 不应大于或等于压缩阈值 ${values[1] ?? ""}`;
-  }
-  if (message.startsWith("reserveTokens") && message.includes("maxTokens")) {
-    return `预留输出空间 ${values[0] ?? ""} 小于模型单次最大输出 ${values[1] ?? ""}，可能无法完成响应`;
-  }
-  if (message.startsWith("No model context window")) {
-    return "当前模型缺少上下文窗口，已跳过阈值校验";
-  }
-  return message;
-}
-
-function fitLine(value: string, width: number): string {
-  return truncateToWidth(value, Math.max(0, width), "…");
 }
 
 function fitSegments(width: number, segments: readonly string[]): string {
@@ -999,24 +1286,5 @@ function fitSegments(width: number, segments: readonly string[]): string {
     if (visibleWidth(next) > width) break;
     line = next;
   }
-  return fitLine(line || segments[0] || "", width);
-}
-
-function rule(width: number): string {
-  return "─".repeat(Math.max(0, width));
-}
-
-function frame(rows: readonly string[], width: number, theme: CompactionTheme): string[] {
-  if (width < 2) return rows.map((row) => fitLine(row, width));
-  const inner = width - 2;
-  const top = `┌${"─".repeat(inner)}┐`;
-  const bottom = `└${"─".repeat(inner)}┘`;
-  return [
-    theme.fg("dim", top),
-    ...rows.map((row) => {
-      const fitted = fitLine(row, inner);
-      return `${theme.fg("dim", "│")}${fitted}${" ".repeat(Math.max(0, inner - visibleWidth(fitted)))}${theme.fg("dim", "│")}`;
-    }),
-    theme.fg("dim", bottom),
-  ];
+  return fit(line || segments[0] || "", width);
 }

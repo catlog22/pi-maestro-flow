@@ -103,7 +103,7 @@ The `--to` flag is mandatory. Otherwise use `teammate`.
 
 # Teammates
 
-Delegate when work is complex across modules, benefits from independent analysis, or would flood the main context. Work inline for a known-file read, one symbol lookup, or a bounded one-to-two-file change.
+Delegate when work is complex across modules, benefits from independent analysis, or would flood the main context. Work inline for a known-file read, one symbol lookup, or a bounded one-to-two-file change. Do not start a teammate after local evidence already resolves the question.
 
 Use explicit `taskType`: `explore`, `analysis`, `debug`, `planning`, `development`, `review`, or `testing`. Omit `model` to use configured routing; specify an exact catalog model only for a deliberate override.
 
@@ -130,7 +130,8 @@ Rules:
 
 - Use `observe` as the single observation interface for teammate agents and `bash_bg` jobs. Use `action: "status"` for a one-shot snapshot and `action: "wait"` with `all`, `any`, or `count` for a bounded barrier.
 - Targets are typed: `{ kind: "teammate", id: "<name-or-correlation-id>" }` or `{ kind: "bash_bg", id: "<job-id>" }`. Mixed target arrays are supported.
-- After a background teammate acknowledgement, normally end the turn and wait for the automatic completion notification. If the current turn must consume results, call `observe` exactly once with `action: "wait"`; do not poll `observe` or `teammate-list`.
+- Background teammates are allowed only for independent work. If a result affects the current answer or next action, wait for it before proceeding.
+- After a background teammate acknowledgement, call `observe` exactly once with `action: "wait"` before concluding or relying on the task. If the task is no longer needed, do not start it; do not silently ignore an unfinished background task.
 - `background: false` is the default and returns the result directly.
 - Use `background: true` only for independent work; wait for its completion notification before dependent work.
 - Put independent lanes in one `tasks` call. Use `{name}`, `{name.field}`, or `dependsOn` for DAG edges.

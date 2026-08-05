@@ -3,7 +3,7 @@ import test from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { MaestroUiStateSnapshotV1 } from "../src/public/v1/events.ts";
-import { renderSidebar } from "../src/sidebar-render.ts";
+import { enumerateNavRows, renderSidebar } from "../src/sidebar-render.ts";
 import { DEFAULT_CONFIG, type AgentRow, type BashBgJob, type TodoItem } from "../src/types.ts";
 
 const theme = {
@@ -259,4 +259,39 @@ test("SB-2: hidden rows after priority composition report a truthful \"N more\" 
 	const match = /(\d+) more/.exec(text);
 	assert.ok(match, "the hidden counter must carry an actual number");
 	assert.ok(Number(match[1]!) > 0, `expected a positive hidden count, got ${match[1]}`);
+});
+
+test("focusedRowId highlights the selected browse row with a ▸ prefix", () => {
+	const twoAgents = [agents[0]!, { ...agents[0]!, correlationId: "agent-2", name: "scan" }];
+	const lines = render({
+		agents: twoAgents,
+		todos: [],
+		jobs: [],
+		height: 30,
+		scrollStart: 0,
+		focusedRowId: "Agents:0",
+	});
+	const text = lines.join("\n");
+	assert.match(text, /▸/, "the focused row must carry a ▸ marker");
+	const focused = lines.find((line) => line.includes("▸"));
+	const unfocused = lines.find((line) => !line.includes("▸") && line.includes("scan"));
+	assert.ok(focused && unfocused, "only the selected row is marked");
+	assert.ok(!unfocused?.includes("▸"), "non-selected agent rows are not marked");
+});
+
+test("enumerateNavRows mirrors render order and covers all sections", () => {
+	const ids = enumerateNavRows({
+		maestro: { workflow: { session: { label: "wf", id: "s1", status: "running" }, chain: { completed: 1, total: 2, running: 0, pending: 0 }, gates: { passed: 0, total: 0 }, run: undefined, next: undefined }, goals: [], currentGoalId: undefined, swarm: undefined } as never,
+		todos,
+		agents: [agents[0]!, { ...agents[0]!, correlationId: "agent-2", name: "scan" }],
+		jobs,
+		config: DEFAULT_CONFIG,
+		width: 40,
+		height: 30,
+		theme,
+		now: 11_000,
+	});
+	assert.ok(ids.includes("Workflow:0"), "workflow rows are browsable");
+	assert.ok(ids.includes("Agents:1"), "agent rows are browsable in render order");
+	assert.ok(ids.indexOf("Agents:0") < ids.indexOf("Agents:1"), "agent rows keep render order");
 });

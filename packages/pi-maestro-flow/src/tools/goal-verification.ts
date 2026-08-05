@@ -1,6 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isRetryableProviderError } from "pi-maestro-teammate/v1/retry";
+import {
+  createSupervisionEvent,
+  runSupervisedEvaluation,
+  SUPERVISION_EVENT,
+} from "pi-maestro-teammate/v1/supervision";
+import type { SingleResult } from "pi-maestro-teammate/v1/types";
 import { activeWorkflowRun, type WorkflowSnapshot } from "../session/types.ts";
 import { createDirectTeammateRunOptions } from "./direct-teammate.ts";
 import type { ActiveGoal, GoalContext } from "./goal.ts";
@@ -139,38 +145,8 @@ function getGoalVerificationBridge(): GoalVerificationBridge {
 // Verifier — spawns a teammate subprocess for independent verification
 // ---------------------------------------------------------------------------
 
-/** @internal Runs the verifier under an owned deadline that aborts its child tree. */
-export async function runTeammateVerifierWithDeadline(
-  runTeammateFn: RunTeammateFn,
-  params: RunTeammateParams,
-  options: RunTeammateOptions,
-  timeoutMs: number,
-): Promise<TeammateResult[] | TeammateResult> {
-  const controller = new AbortController();
-  const parentSignal = options.signal;
-  const onParentAbort = () => controller.abort(parentSignal?.reason);
-  if (parentSignal?.aborted) onParentAbort();
-  else parentSignal?.addEventListener("abort", onParentAbort, { once: true });
-
-  const timeoutError = new Error(`Goal verifier timed out after ${timeoutMs}ms.`);
-  let timer: ReturnType<typeof setTimeout>;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      controller.abort(timeoutError);
-      reject(timeoutError);
-    }, timeoutMs);
-  });
-  const execution = runTeammateFn(params, { ...options, signal: controller.signal });
-  execution.catch(() => {});
-
-  try {
-    return await Promise.race([execution, deadline]);
-  } finally {
-    clearTimeout(timer!);
-    parentSignal?.removeEventListener("abort", onParentAbort);
-  }
-}
-
+// The owned verifier deadline (previously runTeammateVerifierWithDeadline) is now
+// provided by the shared runSupervisedEvaluation: deadlineMs aborts the dispatch signal.
 async function runVerifier(
   goal: ActiveGoal,
   completionSummary: string,
@@ -238,17 +214,58 @@ async function runVerifier(
   );
 
   try {
-    const verifierResult = await runTeammateVerifierWithDeadline(
-      runTeammateFn,
-      verifierParams(verifyTask, VERIFIER_TIMEOUT_MS),
-      options,
-      VERIFIER_TIMEOUT_MS,
+    const evaluation = await runSupervisedEvaluation<VerifierVerdict>(
+      async (dispatchContext) => {
+        const raw = await runTeammateFn(
+          verifierParams(
+            dispatchContext.task,
+            dispatchContext.timeoutMs ?? VERIFIER_TIMEOUT_MS,
+            dispatchContext.outputSchema,
+          ),
+          { ...options, signal: dispatchContext.signal },
+        );
+        const single = Array.isArray(raw) ? raw[0] : raw;
+        if (!single) throw new Error("Verifier returned no teammate result");
+        return single as SingleResult;
+      },
+      {
+        task: verifyTask,
+        deadlineMs: VERIFIER_TIMEOUT_MS,
+        maxFailures: MAX_VERIFICATION_FAILURES,
+        outputSchema: VERIFIER_OUTPUT_SCHEMA,
+        fallbackTextParser: parseVerifierOutput,
+        beforeVerdict: (result) => verifierExitStatusReason(result),
+        signal: options.signal,
+      },
     );
-    const result = Array.isArray(verifierResult) ? verifierResult[0] : verifierResult;
-    if (!result) {
-      return { status: "error", pass: false, reasoning: "Verifier returned no teammate result", evidence: [] };
+
+    let verdict: VerifierVerdict;
+    if (!evaluation.ok) {
+      // Shared-evaluator failure (exit-status gate, dispatch failure, or deadline
+      // abort). The evaluator never throws, so this is the only error channel.
+      verdict = {
+        status: "error",
+        pass: false,
+        reasoning: evaluation.reason ?? "Verifier unavailable — cannot confirm completion",
+        evidence: [],
+      };
+    } else if (evaluation.raw?.structuredOutput === undefined) {
+      // The deprecated text fallback produced a verdict, but structured output is
+      // the Goal's only accepted verdict channel: keep the legacy
+      // no-structured-output contract (inconclusive, never a completion verdict).
+      const output = lastAssistantContent(evaluation.raw);
+      verdict = {
+        status: "inconclusive",
+        pass: false,
+        reasoning: "Verifier returned no structured_output verdict.",
+        evidence: output ? [boundedSecretText(output, 500)] : [],
+      };
+    } else {
+      verdict = normalizeVerifierVerdict(evaluation.verdict);
     }
-    return verdictFromTeammateResult(result);
+
+    publishSupervisionVerdict(bridge, goal, verdict);
+    return verdict;
   } catch (error) {
     ctx.ui.notify(
       `Verifier failed: ${error instanceof Error ? error.message : String(error)}. Completion remains unverified.`,
@@ -377,28 +394,33 @@ function buildVerifierTask(
   ].join("\n");
 }
 
-function verifierParams(task: string, timeoutMs: number): RunTeammateParams {
-  return {
-    tasks: [{
-      agent: "verifier",
-      prompt: task,
-      timeoutMs,
-      outputSchema: {
-        type: "object",
-        properties: {
-          pass: { type: "boolean" },
-          reasoning: { type: "string" },
-          unmet: { type: "array", items: { type: "string" } },
-          evidence: { type: "array", items: { type: "string" } },
-        },
-        required: ["pass", "reasoning", "unmet", "evidence"],
-        additionalProperties: false,
-      },
-    }],
-  };
+const VERIFIER_OUTPUT_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    pass: { type: "boolean" },
+    reasoning: { type: "string" },
+    unmet: { type: "array", items: { type: "string" } },
+    evidence: { type: "array", items: { type: "string" } },
+  },
+  required: ["pass", "reasoning", "unmet", "evidence"],
+  additionalProperties: false,
+};
+
+function verifierParams(
+  task: string,
+  timeoutMs: number,
+  outputSchema: Record<string, unknown> = VERIFIER_OUTPUT_SCHEMA,
+): RunTeammateParams {
+  return { tasks: [{ agent: "verifier", prompt: task, timeoutMs, outputSchema }] };
 }
 
-function verdictFromTeammateResult(result: TeammateResult): VerifierVerdict {
+/**
+ * Exit-status gate for the shared evaluator's beforeVerdict hook: any result
+ * without an explicit safe-integer zero exit is rejected before verdict
+ * extraction, with the same bounded child diagnostics the verifier produced
+ * before the shared-layer migration.
+ */
+function verifierExitStatusReason(result: SingleResult): string | undefined {
   if (
     typeof result.exitCode !== "number"
     || !Number.isSafeInteger(result.exitCode)
@@ -419,21 +441,38 @@ function verdictFromTeammateResult(result: TeammateResult): VerifierVerdict {
       result.correlationId ? `correlation=${boundedSecretText(result.correlationId, 80)}` : undefined,
       output ? `output=${boundedSecretText(output, 500)}` : undefined,
     ].filter((item): item is string => Boolean(item));
-    return {
-      status: "error",
-      pass: false,
-      reasoning: `Verifier process exit status was ${exitDescription}; completion requires a successful zero exit.${diagnostics.length ? ` ${diagnostics.join("; ")}` : ""}`,
-      evidence: output ? [boundedSecretText(output, 500)] : [],
-    };
+    return `Verifier process exit status was ${exitDescription}; completion requires a successful zero exit.${diagnostics.length ? ` ${diagnostics.join("; ")}` : ""}`;
   }
-  if (result.structuredOutput !== undefined) return normalizeVerifierVerdict(result.structuredOutput);
-  const output = result.messages[result.messages.length - 1]?.content ?? "";
-  return {
-    status: "inconclusive",
-    pass: false,
-    reasoning: "Verifier returned no structured_output verdict.",
-    evidence: output ? [boundedSecretText(output, 500)] : [],
-  };
+  return undefined;
+}
+
+function lastAssistantContent(result: SingleResult | undefined): string {
+  if (!result) return "";
+  return result.messages[result.messages.length - 1]?.content ?? "";
+}
+
+function publishSupervisionVerdict(bridge: GoalVerificationBridge, goal: ActiveGoal, verdict: VerifierVerdict): void {
+  const api = bridge.extensionApi;
+  if (!api?.events) return; // no parent event bus — supervision telemetry is best effort
+  try {
+    api.events.emit(
+      SUPERVISION_EVENT,
+      createSupervisionEvent("goal", "verdict", verdict.status === "pass" ? "info" : "concern", {
+        target: goal.id,
+        verdict: { status: verdict.status, pass: verdict.pass },
+        message: supervisionVerdictMessage(verdict),
+        meta: { goalId: goal.id },
+      }),
+    );
+  } catch { /* best effort: a supervision event must never break verification */ }
+}
+
+function supervisionVerdictMessage(verdict: VerifierVerdict): string {
+  const detail = boundedSecretText(verdict.reasoning, 200);
+  if (verdict.status === "pass") return "Goal completion verified by the independent verifier.";
+  if (verdict.status === "fail") return `Goal verification failed: ${detail}`;
+  if (verdict.status === "inconclusive") return `Goal verification inconclusive: ${detail}`;
+  return `Goal verification errored: ${detail}`;
 }
 
 /**

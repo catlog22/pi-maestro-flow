@@ -1450,7 +1450,7 @@ test("Pi adapter absorbs hook results after session shutdown", async () => {
   }
 });
 
-test("Pi adapter does not append a Stop continuation behind a pending message", async () => {
+test("Pi adapter does not append a Stop continuation behind recovery ownership", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-hooks-stop-pending-"));
   const configDir = join(root, ".pi");
   const trustPath = join(root, "user", "hook-trust.json");
@@ -1469,6 +1469,8 @@ test("Pi adapter does not append a Stop continuation behind a pending message", 
   type Handler = (event: any, ctx: ExtensionContext) => unknown | Promise<unknown>;
   const handlers = new Map<string, Handler[]>();
   const continuations: string[] = [];
+  let pending = true;
+  let skipStop = false;
   const fakePi = {
     on(name: string, handler: Handler) {
       handlers.set(name, [...(handlers.get(name) ?? []), handler]);
@@ -1481,7 +1483,7 @@ test("Pi adapter does not append a Stop continuation behind a pending message", 
   const ctx = {
     cwd: root,
     model: { id: "test-model" },
-    hasPendingMessages: () => true,
+    hasPendingMessages: () => pending,
     sessionManager: {
       getSessionId: () => "session-1",
       getSessionFile: () => undefined,
@@ -1491,7 +1493,10 @@ test("Pi adapter does not append a Stop continuation behind a pending message", 
       setStatus() {},
     },
   } as unknown as ExtensionContext;
-  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+  registerCodexHookAdapter(fakePi, {
+    trustFilePath: trustPath,
+    shouldSkipStopHook: () => skipStop,
+  });
 
   try {
     for (const handler of handlers.get("session_start") ?? []) {
@@ -1500,8 +1505,14 @@ test("Pi adapter does not append a Stop continuation behind a pending message", 
     for (const handler of handlers.get("agent_end") ?? []) {
       await handler({ type: "agent_end", messages: [{ role: "assistant", content: [] }] }, ctx);
     }
+    assert.deepEqual(continuations, [], "a pending recovery owner suppresses the Stop continuation");
 
-    assert.deepEqual(continuations, []);
+    pending = false;
+    skipStop = true;
+    for (const handler of handlers.get("agent_end") ?? []) {
+      await handler({ type: "agent_end", messages: [{ role: "assistant", content: [] }] }, ctx);
+    }
+    assert.deepEqual(continuations, [], "provider-pressure recovery suppresses ordinary Stop hooks");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

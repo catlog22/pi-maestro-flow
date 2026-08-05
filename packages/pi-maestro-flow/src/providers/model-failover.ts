@@ -6,6 +6,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { lockSettingsResourceSync } from "../settings/resource-lock.ts";
 import { writeFileDurableSync } from "../settings/durable-write.ts";
+import { appendModelFailoverSettlement, listModelFailoverEvents } from "./model-failover-events.ts";
 import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
 import {
   analyzeAttachedImage,
@@ -15,7 +16,9 @@ import {
   type AttachedImageInput,
 } from "./vision-assist.ts";
 import {
+  buildReplayFence,
   classifyRetryError,
+  rankModelsByHealth,
   RECOVERY_PROTOCOL_VERSION,
   sharedModelCircuitBreaker,
   type AcquiredModelCandidate,
@@ -35,6 +38,8 @@ interface ActiveModelRun {
   index: number;
   model: string;
   acquisition: AcquiredModelCandidate;
+  /** Monotonic run generation; isolates late events from older logical runs. */
+  generation: number;
   used: boolean;
   failureRecorded: boolean;
   lastError?: string;
@@ -95,8 +100,87 @@ export interface ModelFailoverOptions {
 const CONFIG_FILE = "model-failover.json";
 /** Upper bound on attached images auto-analyzed in one turn; prevents linear cost blowup. */
 const MAX_ATTACHED_IMAGES_PER_TURN = 5;
+const IMAGE_ROUTE_DETAILS_KIND = "maestro-image-routing";
+const IMAGE_ROUTE_DETAILS_VERSION = 1;
+type ImageRoute = "native" | "vision" | "vision+native" | "unread";
+interface ImageRouteRecord {
+  imageIndex: number;
+  route: ImageRoute;
+  model?: string;
+  nativeModel?: string;
+  reason?: string;
+}
+interface ImageRouteDetails {
+  kind: typeof IMAGE_ROUTE_DETAILS_KIND;
+  schemaVersion: typeof IMAGE_ROUTE_DETAILS_VERSION;
+  routes: ImageRouteRecord[];
+}
+type InjectedImageMessage = {
+  message: {
+    customType: string;
+    content: string;
+    display: false;
+    details: ImageRouteDetails;
+  };
+};
 const FAILOVER_RETRY_PROMPT = "The previous model exhausted its native retries with a transient network, provider, or quota error. Retry the original user request from the beginning on the selected fallback model and complete it.";
 const FAILOVER_RECOVERY_MARKER = "maestro-model-failover";
+/** Published on the pi event bus when a scheduled fallback handoff fails terminally. */
+export const FAILOVER_TERMINAL_EVENT = "maestro-failover-terminal";
+
+function imageRouteMessage(
+  customType: string,
+  routes: ImageRouteRecord[],
+  content: string,
+): InjectedImageMessage {
+  return {
+    message: {
+      customType,
+      content,
+      display: false,
+      details: {
+        kind: IMAGE_ROUTE_DETAILS_KIND,
+        schemaVersion: IMAGE_ROUTE_DETAILS_VERSION,
+        routes,
+      },
+    },
+  };
+}
+
+function directImageRouteMessage(
+  images: AttachedImageInput[],
+  model: string,
+  native: boolean,
+  unreadReason = "vision_disabled",
+): InjectedImageMessage {
+  const route: ImageRoute = native ? "native" : "unread";
+  const routes = images.map((_image, index): ImageRouteRecord => ({
+    imageIndex: index + 1,
+    route,
+    ...(native ? { model } : { reason: unreadReason }),
+  }));
+  const markers = routes.map((entry) => `[image:${entry.route}]`).join(" ");
+  const explanation = native
+    ? `Attached images are read natively by ${model}.`
+    : "Attached images were not read because the text-only primary model has no active Vision delegation.";
+  return imageRouteMessage("maestro-image-routing", routes, `${markers}\n${explanation}`);
+}
+
+function addNativeImageRoute(message: InjectedImageMessage, model: string): InjectedImageMessage {
+  const routes = message.message.details.routes.map((entry): ImageRouteRecord => {
+    if (entry.route === "vision") {
+      return { ...entry, route: "vision+native", nativeModel: model };
+    }
+    return { imageIndex: entry.imageIndex, route: "native", model };
+  });
+  return imageRouteMessage(
+    message.message.customType,
+    routes,
+    message.message.content
+      .replaceAll("[image:vision]", "[image:vision+native]")
+      .replaceAll("[image:unread]", "[image:native]"),
+  );
+}
 
 function recoveryPrompt(recoveryId: string): string {
   return `${FAILOVER_RETRY_PROMPT}\n\n[${FAILOVER_RECOVERY_MARKER}:${recoveryId}]`;
@@ -223,18 +307,6 @@ function observeAgentEnd(
   return { outcome: "success", completedTools: [...completedTools], unknownEffect };
 }
 
-function replayFence(observation: AgentEndObservation): ReplayFence {
-  const completedTools = Object.freeze([...observation.completedTools]);
-  if (completedTools.length > 0 || observation.unknownEffect) {
-    const evidence = [
-      completedTools.length > 0 ? `completed tools: ${completedTools.join(", ")}` : undefined,
-      observation.unknownEffect ? "one or more tool effects could not be confirmed" : undefined,
-    ].filter(Boolean).join("; ");
-    return Object.freeze({ completedTools, blocked: true, blockedReason: `Fresh replay blocked after ${evidence}.` });
-  }
-  return Object.freeze({ completedTools, blocked: false });
-}
-
 function publishSettlement(snapshot: ModelFailoverSettlementSnapshot): Readonly<ModelFailoverSettlementSnapshot> {
   const frozen = Object.freeze({ ...snapshot, replayFence: Object.freeze({ ...snapshot.replayFence }) });
   settlementArbitration = frozen;
@@ -282,8 +354,21 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
   if (typeof (pi as { registerTool?: unknown }).registerTool === "function") registerVisionDelegation(pi);
   const breaker = options.breaker ?? sharedModelCircuitBreaker;
   const visionAnalyzer = options.visionAnalyzer ?? analyzeAttachedImage;
+  // ⑥ Settlement funnel: memory arbitration (module-level) + best-effort
+  // append to the persistent event stream. Persistence must never break the
+  // arbitration path, so it is a fire-and-forget side effect of publishing.
+  const publish = (
+    snapshot: ModelFailoverSettlementSnapshot,
+    failureKind?: RetryErrorKind,
+  ): Readonly<ModelFailoverSettlementSnapshot> => {
+    const frozen = publishSettlement(snapshot);
+    appendModelFailoverSettlement(frozen, { homeDir: options.homeDir, failureKind });
+    return frozen;
+  };
   let active: ActiveModelRun | undefined;
   let finalObservation: AgentEndObservation | undefined;
+  let observedGeneration: number | undefined;
+  let runGeneration = 0;
   let pendingRecoveryId: string | undefined;
   const completedTools: string[] = [];
   const startedTools = new Map<string, string>();
@@ -291,13 +376,29 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
 
   const resetRunEvidence = (): void => {
     finalObservation = undefined;
+    observedGeneration = undefined;
     completedTools.length = 0;
     startedTools.clear();
   };
 
   pi.registerCommand("model-failover", {
-    description: "Configure main-agent model circuit breaking and ordered fallback chains",
-    handler: async (_args, ctx) => {
+    description: "Configure main-agent model circuit breaking and ordered fallback chains; /model-failover status shows health",
+    handler: async (args, ctx) => {
+      const sub = args.trim().toLowerCase();
+      if (sub === "status" || sub === "health") {
+        config = loadModelFailoverConfig(ctx.cwd, options.homeDir);
+        const status = config.enabled ? "automatic failover enabled" : "automatic failover disabled";
+        const events = listModelFailoverEvents(options.homeDir, 5);
+        const eventLines = events.length === 0
+          ? "No persisted settlement events."
+          : events.map((entry) => {
+              const stamp = new Date(entry.at).toISOString();
+              const target = entry.fallbackModel ? ` -> ${entry.fallbackModel}` : "";
+              return `${stamp} ${entry.outcome} ${entry.model}${target}`;
+            }).join("\n");
+        ctx.ui.notify(`${status}\n${formatModelHealth(breaker)}\n\nSettlements (recent ${events.length}):\n${eventLines}`, "info");
+        return;
+      }
       if (!ctx.hasUI) {
         ctx.ui.notify("Model failover settings require interactive TUI mode.", "warning");
         return;
@@ -308,15 +409,6 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     },
   });
 
-  pi.registerCommand("model-health", {
-    description: "Show model circuit-breaker health and automatic failover state",
-    handler: async (_args, ctx) => {
-      config = loadModelFailoverConfig(ctx.cwd, options.homeDir);
-      const status = config.enabled ? "automatic failover enabled" : "automatic failover disabled";
-      ctx.ui.notify(`${status}\n${formatModelHealth(breaker)}`, "info");
-    },
-  });
-
   const selectCandidate = async (
     ctx: ExtensionContext,
     chain: string[],
@@ -324,8 +416,12 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
   ): Promise<ActiveModelRun | undefined> => {
     await refreshModelRegistry(ctx);
     const models = availableModels(ctx);
-    for (let index = startIndex; index < chain.length; index += 1) {
-      const candidate = chain[index];
+    // ④ Health-order the remaining fallback tail: healthy/never-tried
+    // candidates float up while recovering (HALF_OPEN) trials and OPEN
+    // candidates sink. Equal health keeps the configured chain order.
+    const tail = rankModelsByHealth(chain.slice(startIndex), breaker);
+    for (let index = 0; index < tail.length; index += 1) {
+      const candidate = tail[index];
       const model = models.get(candidate);
       if (!model) continue;
       const acquisition = breaker.acquireCandidate(candidate);
@@ -345,6 +441,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
         index,
         model: candidate,
         acquisition,
+        generation: ++runGeneration,
         used: false,
         failureRecorded: false,
       };
@@ -365,6 +462,10 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
 
   pi.on("before_agent_start", async (event, ctx) => {
     config = loadModelFailoverConfig(ctx.cwd, options.homeDir);
+    // Any arbitration snapshot surviving into a new turn is stale: it was
+    // either consumed by the previous settlement dispatch or never claimed.
+    // Clearing here prevents a later Goal settlement from misattributing it.
+    settlementArbitration = undefined;
     const recoveryId = pendingRecoveryId;
     if (active && recoveryId && event.prompt.includes(`[${FAILOVER_RECOVERY_MARKER}:${recoveryId}]`)) {
       // The fallback acquisition was made after the previous logical run
@@ -389,7 +490,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     // Attached-image handling is gated by the vision delegation config, not by
     // model-failover.enabled: the feature must work even when failover is off.
     const visionEnabled = loadVisionDelegationConfig(options.visionAgentDir ?? getAgentDir()).enabled;
-    let injectedMessage: { message: { customType: string; content: string; display: boolean } } | undefined;
+    let injectedMessage: InjectedImageMessage | undefined;
 
     if (images.length > 0 && !isMultimodalModel(ctx.model) && visionEnabled) {
       const models = availableModels(ctx);
@@ -401,38 +502,52 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
           preferred.originalModel = current;
           active = preferred;
           ctx.ui.notify(`Attached image detected; switched from text-only ${current} to multimodal ${preferred.model}.`, "info");
-          return;
+          return directImageRouteMessage(images, preferred.model, true);
         }
       }
 
       // No healthy multimodal candidate: delegate analysis (bounded + cancellable).
-      const analyses: string[] = [];
+      const sections: string[] = [];
+      const routes: ImageRouteRecord[] = [];
       const signal = ctx.signal;
-      for (const [index, image] of images.slice(0, MAX_ATTACHED_IMAGES_PER_TURN).entries()) {
-        if (signal?.aborted) break;
+      for (const [index, image] of images.entries()) {
+        if (index >= MAX_ATTACHED_IMAGES_PER_TURN) {
+          routes.push({ imageIndex: index + 1, route: "unread", reason: "analysis_limit" });
+          sections.push(`### Attached image ${index + 1} [image:unread]\nNot analyzed: the per-turn Vision limit is ${MAX_ATTACHED_IMAGES_PER_TURN} images.`);
+          continue;
+        }
+        if (signal?.aborted) {
+          routes.push({ imageIndex: index + 1, route: "unread", reason: "cancelled" });
+          sections.push(`### Attached image ${index + 1} [image:unread]\nNot analyzed: the turn was cancelled.`);
+          continue;
+        }
         try {
           const result = await visionAnalyzer(ctx, image, {
             agentDir: options.visionAgentDir,
             signal,
             prompt: `Analyze attached image ${index + 1} for the primary coding agent. Extract visible text, structure, UI state, diagrams, and details relevant to the user's request.`,
           });
-          analyses.push(`### Attached image ${index + 1} (${result.model})\n${result.text}`);
+          routes.push({ imageIndex: index + 1, route: "vision", model: result.model });
+          sections.push(`### Attached image ${index + 1} [image:vision] (${result.model})\n${result.text}`);
         } catch (error) {
-          ctx.ui.notify(`Automatic vision analysis failed for attached image ${index + 1}: ${error instanceof Error ? error.message : String(error)}`, "warning");
+          const failure = error instanceof Error ? error.message : String(error);
+          routes.push({ imageIndex: index + 1, route: "unread", reason: "analysis_failed" });
+          sections.push(`### Attached image ${index + 1} [image:unread]\nVision analysis failed: ${failure}`);
+          ctx.ui.notify(`Automatic vision analysis failed for attached image ${index + 1}: ${failure}`, "warning");
         }
       }
-      if (analyses.length > 0) {
-        injectedMessage = {
-          message: {
-            customType: "maestro-vision-analysis",
-            content: ["Automatic multimodal analysis for the text-only primary model:", ...analyses].join("\n\n"),
-            display: false,
-          },
-        };
-      }
+      injectedMessage = imageRouteMessage(
+        "maestro-vision-analysis",
+        routes,
+        ["Automatic image handling for the text-only primary model:", ...sections].join("\n\n"),
+      );
     }
 
-    if (!config.enabled) return injectedMessage;
+    if (!config.enabled) {
+      return injectedMessage ?? (images.length > 0
+        ? directImageRouteMessage(images, current, isMultimodalModel(ctx.model))
+        : undefined);
+    }
 
     // Without an explicit fallback chain every other authenticated model is an
     // implicit ordered fallback, mirroring teammate's implicit candidate sweep
@@ -444,8 +559,10 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     const currentIndex = chain.indexOf(current);
     const acquisition = breaker.acquireCandidate(current);
     if (acquisition.allowed) {
-      active = { chain, index: currentIndex >= 0 ? currentIndex : 0, model: current, acquisition, used: false, failureRecorded: false };
-      return injectedMessage;
+      active = { chain, index: currentIndex >= 0 ? currentIndex : 0, model: current, acquisition, generation: ++runGeneration, used: false, failureRecorded: false };
+      return injectedMessage ?? (images.length > 0
+        ? directImageRouteMessage(images, current, isMultimodalModel(ctx.model), visionEnabled ? "analysis_unavailable" : "vision_disabled")
+        : undefined);
     }
 
     const fallback = await selectCandidate(ctx, chain, 0);
@@ -459,11 +576,29 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
         "warning",
       );
     }
-    return injectedMessage;
+    const effectiveModel = fallback?.model ?? current;
+    if (images.length === 0) return injectedMessage;
+    if (isMultimodalModel(ctx.model)) {
+      return injectedMessage
+        ? addNativeImageRoute(injectedMessage, effectiveModel)
+        : directImageRouteMessage(images, effectiveModel, true);
+    }
+    return injectedMessage ?? directImageRouteMessage(
+      images,
+      effectiveModel,
+      false,
+      visionEnabled ? "analysis_unavailable" : "vision_disabled",
+    );
   });
 
   pi.on("turn_start", () => {
-    if (active) active.used = true;
+    if (!active) return;
+    active.used = true;
+    // The fallback turn acknowledges the handoff; from here its own
+    // settlement may arbitrate. Keeping pendingRecoveryId set until this
+    // point prevents a stale duplicate old-run settlement from settling the
+    // not-yet-started fallback run.
+    pendingRecoveryId = undefined;
   });
 
   pi.on("tool_execution_start", (event) => {
@@ -490,10 +625,13 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
   });
 
   pi.on("agent_end", (event) => {
-    if (!active || !config.enabled) return;
+    // Image-triggered switches are observed even when automatic failover is
+    // disabled; only genuine failover runs are gated by config.enabled.
+    if (!active || (!config.enabled && !active.imageTriggered)) return;
     const fallbackFailure = active.lastHttpStatus && active.lastHttpStatus >= 400 ? active.lastError : undefined;
     // Pi's extension event omits willRetry. This observation may be replaced by
     // a later native retry/compaction/queue-drain result before agent_settled.
+    observedGeneration = active.generation;
     finalObservation = observeAgentEnd(
       event.messages as AgentMessage[],
       fallbackFailure,
@@ -517,14 +655,19 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
           completedTools: [...(finalObservation?.completedTools ?? completedTools)],
           unknownEffect: finalObservation?.unknownEffect ?? startedTools.size > 0,
         }
-      : finalObservation ?? {
-          outcome: "failed",
-          failure: "Agent settled without a final agent_end observation",
-          failureKind: "non-retryable",
-          completedTools: [...completedTools],
-          unknownEffect: startedTools.size > 0,
-        };
-    const fence = replayFence(observation);
+      : finalObservation && observedGeneration === activeRun.generation
+        ? finalObservation
+        : {
+            outcome: "failed",
+            failure: "Agent settled without a final agent_end observation",
+            failureKind: "non-retryable",
+            completedTools: [...completedTools],
+            unknownEffect: startedTools.size > 0,
+          };
+    const fence = buildReplayFence({
+      completedTools: observation.completedTools,
+      unknownEffect: observation.unknownEffect,
+    });
     const baseSnapshot = {
       protocolVersion: RECOVERY_PROTOCOL_VERSION,
       recoveryId,
@@ -544,7 +687,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     if (observation.outcome === "cancelled") {
       if (!activeRun.failureRecorded) breaker.releaseCandidate(activeRun.acquisition);
       activeRun.failureRecorded = true;
-      publishSettlement({ ...baseSnapshot, outcome: "cancelled" });
+      publish({ ...baseSnapshot, outcome: "cancelled" }, observation.failureKind);
       await restoreImageModel();
       return;
     }
@@ -555,17 +698,25 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
         else breaker.releaseCandidate(activeRun.acquisition);
       }
       activeRun.failureRecorded = true;
-      publishSettlement({ ...baseSnapshot, outcome: "success" });
+      publish({ ...baseSnapshot, outcome: "success" }, observation.failureKind);
       await restoreImageModel();
       return;
     }
 
     // Authentication, invalid-model, context, and other terminal failures do
     // not poison provider health and never initiate a fresh logical replay.
-    if (!config.enabled || observation.failureKind === "non-retryable") {
+    // Image-triggered runs settle independently of the failover switch.
+    // `auth` is terminal here even though the teammate candidate sweep treats
+    // it as fallback-eligible: a broken credential will not heal by replaying
+    // the same logical run, so it must not trigger a fresh replay.
+    if (
+      (!config.enabled && !activeRun.imageTriggered)
+      || observation.failureKind === "non-retryable"
+      || observation.failureKind === "auth"
+    ) {
       if (!activeRun.failureRecorded) breaker.releaseCandidate(activeRun.acquisition);
       activeRun.failureRecorded = true;
-      publishSettlement({ ...baseSnapshot, outcome: "failed" });
+      publish({ ...baseSnapshot, outcome: "failed" }, observation.failureKind);
       await restoreImageModel();
       return;
     }
@@ -575,19 +726,12 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     if (!activeRun.failureRecorded) breaker.recordRetryableFailure(activeRun.acquisition);
     activeRun.failureRecorded = true;
 
-    if (fence.blocked) {
-      publishSettlement({ ...baseSnapshot, outcome: "replay-blocked" });
-      ctx.ui.notify(
-        `Model ${activeRun.model} exhausted its retries, but automatic restart was blocked because tool effects were observed.`,
-        "warning",
-      );
-      await restoreImageModel();
-      return;
-    }
-
+    // The configured failover policy allows a fresh fallback replay even when
+    // the failed attempt observed tool activity. Keep the replay fence in the
+    // settlement and intent for diagnostics, but do not suppress recovery.
     const fallback = await selectCandidate(ctx, activeRun.chain, activeRun.index + 1);
     if (!fallback) {
-      publishSettlement({ ...baseSnapshot, outcome: "failed" });
+      publish({ ...baseSnapshot, outcome: "failed" }, observation.failureKind);
       ctx.ui.notify(
         `Model ${activeRun.model} exhausted its retries and no further fallback is available.`,
         "warning",
@@ -595,18 +739,24 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
       await restoreImageModel();
       return;
     }
+    // Preserve image-switch provenance so the terminal settlement restores the
+    // original text-only model even when the first multimodal candidate failed.
+    if (activeRun.imageTriggered) {
+      fallback.imageTriggered = true;
+      fallback.originalModel = activeRun.originalModel;
+    }
 
     const intent: RecoveryFallbackModelIntent = {
       intentId: `${recoveryId}:fallback`,
       kind: "fallback_model",
       fromModel: activeRun.model,
       toModel: fallback.model,
-      mode: "restart",
+      mode: fence.blocked ? "force_restart" : "restart",
       replayFence: fence,
     };
     active = fallback;
     pendingRecoveryId = recoveryId;
-    publishSettlement({ ...baseSnapshot, outcome: "fallback-scheduled", fallbackModel: fallback.model });
+    publish({ ...baseSnapshot, outcome: "fallback-scheduled", fallbackModel: fallback.model }, observation.failureKind);
     setTimeout(() => {
       if (pendingRecoveryId !== recoveryId
         || active !== fallback
@@ -615,7 +765,8 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
       // sendCustomMessage({ triggerTurn: true }) starts a hidden custom turn
       // directly and does not emit before_agent_start. Transfer ownership to
       // the fallback run before starting it so its agent_settled can arbitrate.
-      pendingRecoveryId = undefined;
+      // pendingRecoveryId stays set until the fallback turn's turn_start
+      // acknowledges the handoff.
       fallback.used = false;
       fallback.lastError = undefined;
       fallback.lastHttpStatus = undefined;
@@ -633,11 +784,12 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
         fallback.failureRecorded = true;
         if (active === fallback) active = undefined;
         if (pendingRecoveryId === recoveryId) pendingRecoveryId = undefined;
-        publishSettlement({
+        const failedSnapshot = publish({
           ...baseSnapshot,
           outcome: "failed",
           failure: `Fallback handoff failed: ${error instanceof Error ? error.message : String(error)}`,
-        });
+        }, observation.failureKind);
+        pi.events?.emit?.(FAILOVER_TERMINAL_EVENT, failedSnapshot);
         ctx.ui.notify(`Model fallback could not start on ${fallback.model}.`, "warning");
       }
     }, 0);

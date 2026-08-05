@@ -19,17 +19,22 @@ import {
 	type SettingsActivationPlan,
 	type SettingsChange,
 	type SettingsContextV1,
+	type SettingsOverviewRow,
 	type SettingsResourceConflict,
 	type SettingsScope,
 	type SettingsSnapshot,
 	type SettingsTranslator,
 } from "pi-maestro-settings-core/v1";
+import {
+	SETTINGS_SECRET_SET_PLACEHOLDER,
+} from "pi-maestro-settings-core/v1/schema";
 import { parseSgrMouseEvent } from "../split-pane.ts";
 import { terminalRows } from "../stack-widget.ts";
 import { SettingsCoordinator, type SettingsApplyOutcome, type SettingsProviderFailure } from "./coordinator.ts";
 import { SETTINGS_SHELL_CATALOGS } from "./i18n.ts";
 import type { SettingsLocaleState } from "./locale-state.ts";
 import type { DescribedSettingsProvider, SettingsProviderRegistry } from "./registry.ts";
+import { fit, frame, headerLine, helpLine, pad, rule, type FrameTheme } from "./ui-primitives.ts";
 
 export interface SettingsShellLoadResult {
 	context: SettingsContextV1;
@@ -65,6 +70,8 @@ interface EditingState {
 	value: string;
 	replaceOnType: boolean;
 	error?: string;
+	/** list-crud: when set, committing writes the value back into the item field. */
+	itemWriteback?: { key: string; itemIndex: number; fieldKey: string };
 }
 
 interface OptionEditingState {
@@ -76,7 +83,7 @@ interface OptionEditingState {
 
 interface MouseTarget {
 	id: string;
-	kind: "provider" | "setting" | "option";
+	kind: "provider" | "setting" | "option" | "list-item" | "list-field";
 	index: number;
 	row: number;
 	startColumn: number;
@@ -84,12 +91,51 @@ interface MouseTarget {
 	disabled?: boolean;
 }
 
+interface ListCrudState {
+	providerId: string;
+	key: string;
+	items: JsonValue[];
+	selected: number;
+}
+
+interface ListCrudFieldState {
+	itemIndex: number;
+	fieldIndex: number;
+}
+
+const OVERVIEW_TONE: Record<NonNullable<SettingsOverviewRow["status"]>, "success" | "warning" | "error" | "dim"> = {
+	ok: "success",
+	warn: "warning",
+	error: "error",
+	dim: "dim",
+} as const;
+
 const MAX_SETTING_ROWS = 10;
 const MAX_PROVIDER_ROWS = 9;
-const SETTINGS_OVERLAY_WIDTH = 112;
+/** Preferred overlay width as a fraction of the terminal, matching sibling overlays; the shell caps its own render width. */
+const SETTINGS_OVERLAY_WIDTH_VALUE = "94%" as const;
 const SETTINGS_OVERLAY_MAX_HEIGHT = 0.92;
 const SETTINGS_OVERLAY_MAX_HEIGHT_VALUE = "92%" as const;
 const SETTINGS_OVERLAY_MARGIN = 1;
+/** Editor kinds whose value can be edited inline by typing a raw value. */
+const EDITABLE_VALUE_KINDS: ReadonlySet<string> = new Set([
+	"text", "integer", "number", "json", "string-list", "multiselect",
+]);
+
+/** Mask an in-progress secret draft so typed plaintext never renders. */
+function maskSecretValue(value: string): string {
+	return value ? "•".repeat(visibleWidth(value)) : "";
+}
+
+/** Stable status glyph for overview rows so state is never color-only (ui-conventions). */
+function overviewGlyph(status: SettingsOverviewRow["status"] | undefined): string {
+	switch (status) {
+		case "ok": return "●";
+		case "warn": return "◐";
+		case "error": return "!";
+		default: return "○";
+	}
+}
 
 export class MaestroSettingsShell implements Component, Focusable {
 	focused = false;
@@ -98,11 +144,16 @@ export class MaestroSettingsShell implements Component, Focusable {
 	private failures: SettingsProviderFailure[];
 	private providerIndex = 0;
 	private settingIndex = 0;
+	/** Per-provider remembered highlight (setting key) so ←/→ plugin switching keeps the cursor position. */
+	private settingKeyByProvider = new Map<string, string>();
 	private scope: SettingsScope = "global";
 	private search = "";
 	private searching = false;
 	private editing: EditingState | undefined;
 	private optionEditing: OptionEditingState | undefined;
+	private listCrud: ListCrudState | undefined;
+	private listCrudField: ListCrudFieldState | undefined;
+	private deleteArmed = false;
 	private applying = false;
 	private notice = "";
 	private noticeTone: "dim" | "success" | "warning" | "error" = "dim";
@@ -179,6 +230,14 @@ export class MaestroSettingsShell implements Component, Focusable {
 		if (this.applying) return;
 		if (this.editing) {
 			this.handleEditorInput(data);
+			return;
+		}
+		if (this.listCrudField) {
+			this.handleListCrudFieldInput(data);
+			return;
+		}
+		if (this.listCrud) {
+			this.handleListCrudInput(data);
 			return;
 		}
 		if (this.optionEditing) {
@@ -258,7 +317,9 @@ export class MaestroSettingsShell implements Component, Focusable {
 
 	private renderNarrow(width: number, rowStart: number): string[] {
 		const provider = this.selectedProvider();
-		const title = provider ? this.params.theme.bold(this.t(provider.description.labelKey)) : this.t("settings.providers");
+		const title = provider
+			? `${this.params.theme.bold(this.t(provider.description.labelKey))} · ${this.providerIndex + 1}/${this.providers.length}`
+			: this.t("settings.providers");
 		return [fit(title, width), ...this.contentRows(width, this.settingRowLimit(true), rowStart + 1, 1)];
 	}
 
@@ -287,6 +348,8 @@ export class MaestroSettingsShell implements Component, Focusable {
 	private contentRows(width: number, maxSettingRows: number, rowStart: number, columnStart: number): string[] {
 		const provider = this.selectedProvider();
 		if (!provider) return [this.params.theme.fg("dim", fit(this.t("settings.noProviders"), width))];
+		if (this.listCrudField) return this.listCrudFieldRows(width, rowStart, columnStart);
+		if (this.listCrud) return this.listCrudRows(width, rowStart, columnStart);
 		const settings = this.visibleSettings();
 		if (settings.length === 0) return [this.params.theme.fg("dim", fit(this.t("settings.noMatches"), width))];
 		const rows: string[] = [];
@@ -295,6 +358,11 @@ export class MaestroSettingsShell implements Component, Focusable {
 		while (start > 0 && backtracked < 2 && settings[start - 1]?.group === settings[start]?.group) {
 			start--;
 			backtracked++;
+		}
+		// Group-header backtracking shrinks the window from the top; on short
+		// terminals it must never push the highlighted row past the window end.
+		if (start + maxSettingRows <= this.settingIndex) {
+			start = Math.max(0, this.settingIndex - maxSettingRows + 1);
 		}
 		const end = Math.min(settings.length, start + maxSettingRows);
 		let renderedGroup: string | undefined;
@@ -331,6 +399,122 @@ export class MaestroSettingsShell implements Component, Focusable {
 		return rows;
 	}
 
+	/** ●/○ toggle indicator for list items carrying an `enabled` boolean field, mirroring the /skills UI. */
+	private listCrudToggleIcon(item: JsonValue): string {
+		const enabledField = this.listCrudFields().find((field) => field.key === "enabled" && field.editor.kind === "boolean");
+		if (!enabledField) return "";
+		const record = item && typeof item === "object" ? item as Record<string, unknown> : undefined;
+		// Strictly true only, matching listCrudFieldValue: null/undefined or a legacy
+		// string "false" renders disabled in both the list and the field form.
+		const enabled = record?.["enabled"] === true;
+		return enabled ? this.params.theme.fg("success", "●") : this.params.theme.fg("dim", "○");
+	}
+
+	/**
+	 * Boolean field values render with the ●/○ glyph so the field form matches the
+	 * item list; an in-progress editor value is echoed inline with a cursor.
+	 */
+	private listCrudFieldValue(field: SettingDefinition, item: Record<string, unknown> | undefined, itemIndex: number): string {
+		const editing = this.editing;
+		if (editing?.itemWriteback
+			&& editing.itemWriteback.itemIndex === itemIndex
+			&& editing.definition.key === field.key) {
+			const isSecret = field.editor.kind === "secret";
+			const value = (isSecret ? maskSecretValue(editing.value) : editing.value) || this.t("settings.value.empty");
+			return editing.replaceOnType ? `[${value}]` : `${value}█`;
+		}
+		const value = this.formatValue(field, item?.[field.key] as JsonValue | undefined);
+		if (field.editor.kind !== "boolean") return value;
+		const enabled = item?.[field.key] === true;
+		return `${this.params.theme.fg(enabled ? "success" : "dim", enabled ? "●" : "○")} ${value}`;
+	}
+
+	private listCrudItemLabel(item: JsonValue, index: number): string {
+		const editor = this.selectedSetting()?.editor;
+		const labelKey = editor?.itemLabelKey;
+		const record = item && typeof item === "object" ? item as Record<string, unknown> : undefined;
+		if (labelKey && record) {
+			const vars: Record<string, string | number | boolean> = {};
+			for (const [key, value] of Object.entries(record)) {
+				if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") vars[key] = value;
+			}
+			return this.t(labelKey, vars);
+		}
+		const firstField = editor?.itemFields?.[0];
+		const value = firstField ? record?.[firstField.key] : undefined;
+		return typeof value === "string" && value ? value : `${this.t("settings.listCrudItem")} ${index + 1}`;
+	}
+
+	private listCrudRows(width: number, rowStart: number, columnStart: number): string[] {
+		const list = this.listCrud;
+		const definition = this.selectedSetting();
+		if (!list || !definition) return [];
+		const rows = [headerLine(this.params.theme, this.t(definition.labelKey), [], width), rule(width)];
+		if (list.items.length === 0) {
+			rows.push(this.params.theme.fg("dim", fit(this.t("settings.listCrudEmpty"), width)));
+		} else {
+			const limit = this.listCrudRowLimit();
+			const start = visibleStart(list.selected, list.items.length, limit);
+			const end = Math.min(list.items.length, start + limit);
+			for (let index = start; index < end; index++) {
+				const marker = index === list.selected ? this.params.theme.fg("accent", "›") : " ";
+				const toggle = this.listCrudToggleIcon(list.items[index]!);
+				const label = index === list.selected
+					? this.params.theme.bold(this.listCrudItemLabel(list.items[index]!, index))
+					: this.listCrudItemLabel(list.items[index]!, index);
+				const targetId = `list-item:${index}`;
+				this.mouseTargets.push({
+					id: targetId,
+					kind: "list-item",
+					index,
+					row: rowStart + rows.length,
+					startColumn: columnStart,
+					endColumn: columnStart + width,
+				});
+				rows.push(this.interactiveRow(
+					`${marker} ${[toggle, label].filter(Boolean).join(" ")}`,
+					width,
+					targetId,
+					index === list.selected,
+				));
+			}
+			if (end < list.items.length) {
+				rows.push(this.params.theme.fg("dim", fit(this.t("settings.listCrudMore", { count: list.items.length - end }), width)));
+			}
+		}
+		rows.push(rule(width));
+		rows.push(helpLine(this.params.theme, this.t("settings.listCrudHelp"), width));
+		return rows;
+	}
+
+	private listCrudFieldRows(width: number, rowStart: number, columnStart: number): string[] {
+		const list = this.listCrud;
+		const fieldState = this.listCrudField;
+		if (!list || !fieldState) return [];
+		const fields = this.listCrudFields();
+		const item = list.items[fieldState.itemIndex] as Record<string, unknown> | undefined;
+		const rows = [headerLine(this.params.theme, this.listCrudItemLabel(list.items[fieldState.itemIndex]!, fieldState.itemIndex), [], width), rule(width)];
+		for (let index = 0; index < fields.length; index++) {
+			const field = fields[index]!;
+			const marker = index === fieldState.fieldIndex ? this.params.theme.fg("accent", "›") : " ";
+			const label = index === fieldState.fieldIndex ? this.params.theme.bold(this.t(field.labelKey)) : this.t(field.labelKey);
+			const value = this.listCrudFieldValue(field, item, fieldState.itemIndex);
+			const targetId = `list-field:${index}`;
+			this.mouseTargets.push({
+				id: targetId,
+				kind: "list-field",
+				index,
+				row: rowStart + rows.length,
+				startColumn: columnStart,
+				endColumn: columnStart + width,
+			});
+			rows.push(this.interactiveRow(`${marker} ${label} · ${value}`, width, targetId, index === fieldState.fieldIndex));
+		}
+		rows.push(rule(width));
+		rows.push(helpLine(this.params.theme, this.t("settings.listCrudFieldHelp"), width));
+		return rows;
+	}
+
 	private detailRows(
 		provider: DescribedSettingsProvider,
 		definition: SettingDefinition,
@@ -354,6 +538,17 @@ export class MaestroSettingsShell implements Component, Focusable {
 			fit(`${this.t("settings.applies")} · ${this.t(`settings.activation.${definition.activation}`)}`, width),
 		];
 		if (definition.sensitivity === "secret") rows.push(this.params.theme.fg("warning", fit(this.t("settings.secret"), width)));
+		if (definition.editor.kind === "overview") {
+			const overview = effective?.value;
+			if (Array.isArray(overview)) {
+				rows.push(rule(width));
+				for (const row of overview as SettingsOverviewRow[]) {
+					const label = row.labelKey ? this.t(row.labelKey) : (row.label ?? "");
+					const tone = OVERVIEW_TONE[row.status ?? "dim"];
+					rows.push(this.params.theme.fg(tone, fit(`${overviewGlyph(row.status)} ${label} · ${row.value}`, width)));
+				}
+			}
+		}
 		if (this.editing?.providerId === provider.providerId && this.editing.definition.key === definition.key) {
 			rows.push(rule(width), ...this.textEditorRows(this.editing, width));
 		}
@@ -388,6 +583,19 @@ export class MaestroSettingsShell implements Component, Focusable {
 			return;
 		}
 		if (definition.editor.kind === "secret") {
+			if (definition.editor.writeOnly) {
+				// Writable secrets are entered masked and never pre-filled from the
+				// snapshot: the provider returns a placeholder, not the plaintext.
+				this.editing = {
+					providerId: provider.providerId,
+					definition,
+					value: "",
+					replaceOnType: true,
+				};
+				this.discardArmed = false;
+				this.requestRender();
+				return;
+			}
 			this.setNotice(this.t("settings.secret"), "warning");
 			return;
 		}
@@ -423,6 +631,22 @@ export class MaestroSettingsShell implements Component, Focusable {
 				definition,
 				values.map((value) => ({ value, label: value })),
 			);
+			return;
+		}
+		if (definition.editor.kind === "list-crud") {
+			const current = this.currentValue(provider.providerId, definition);
+			const items = Array.isArray(current) ? [...current] : [];
+			this.listCrud = { providerId: provider.providerId, key: definition.key, items, selected: 0 };
+			this.listCrudField = undefined;
+			this.deleteArmed = false;
+			this.requestRender();
+			return;
+		}
+		// Unknown or not-yet-implemented editor kinds degrade to a read-only
+		// entry instead of being treated as raw text (forward-compatible with
+		// list-crud/overview added by later protocol revisions).
+		if (!EDITABLE_VALUE_KINDS.has(definition.editor.kind)) {
+			this.setNotice(this.t("settings.readOnly"), "warning");
 			return;
 		}
 		this.editing = {
@@ -464,12 +688,23 @@ export class MaestroSettingsShell implements Component, Focusable {
 				this.setNotice(editing.error, "error");
 				return;
 			}
-			this.params.coordinator.setChange(editing.providerId, {
-				operation: "set",
-				key: editing.definition.key,
-				scope: this.scope,
-				value: parsed.value,
-			});
+			if (editing.itemWriteback && this.listCrud) {
+				const { itemIndex, fieldKey } = editing.itemWriteback;
+				this.listCrud.items = this.listCrud.items.map((entry, index) => {
+					if (index !== itemIndex) return entry;
+					// Defensive: only object items can carry the written-back field.
+					if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+					return { ...entry as object, [fieldKey]: parsed.value } as JsonValue;
+				});
+				this.stageListCrud();
+			} else {
+				this.params.coordinator.setChange(editing.providerId, {
+					operation: "set",
+					key: editing.definition.key,
+					scope: this.scope,
+					value: parsed.value,
+				});
+			}
 			this.editing = undefined;
 			this.afterDraftChange();
 			return;
@@ -512,6 +747,133 @@ export class MaestroSettingsShell implements Component, Focusable {
 		this.requestRender();
 	}
 
+	private listCrudFields(): readonly SettingDefinition[] {
+		return this.selectedSetting()?.editor.itemFields ?? [];
+	}
+
+	private stageListCrud(): void {
+		if (!this.listCrud) return;
+		this.params.coordinator.setChange(this.listCrud.providerId, {
+			operation: "set",
+			key: this.listCrud.key,
+			scope: this.scope,
+			value: this.listCrud.items,
+		});
+		this.afterDraftChange();
+	}
+
+	private handleListCrudInput(data: string): void {
+		const list = this.listCrud;
+		if (!list) return;
+		const printable = decodeKittyPrintable(data) ?? data;
+		if (matchesKey(data, Key.escape)) {
+			this.listCrud = undefined;
+			this.requestRender();
+			return;
+		}
+		if (matchesKey(data, Key.up)) {
+			if (list.items.length === 0) return;
+			list.selected = (list.selected - 1 + list.items.length) % list.items.length;
+			this.deleteArmed = false;
+			this.requestRender();
+			return;
+		}
+		if (matchesKey(data, Key.down)) {
+			if (list.items.length === 0) return;
+			list.selected = (list.selected + 1) % list.items.length;
+			this.deleteArmed = false;
+			this.requestRender();
+			return;
+		}
+		if (printable === "a" || printable === "A" || printable === "+") {
+			const fields = this.listCrudFields();
+			const blank = Object.fromEntries(fields.map((field) => [field.key, field.defaultValue ?? null]));
+			list.items = [...list.items, blank];
+			list.selected = list.items.length - 1;
+			this.deleteArmed = false;
+			this.stageListCrud();
+			return;
+		}
+		if (printable === "d" || printable === "D") {
+			if (list.items.length === 0) return;
+			if (!this.deleteArmed) {
+				this.deleteArmed = true;
+				this.setNotice(this.t("settings.listCrudDeleteConfirm"), "warning");
+				this.requestRender();
+				return;
+			}
+			list.items = list.items.filter((_entry, index) => index !== list.selected);
+			list.selected = Math.min(list.selected, Math.max(0, list.items.length - 1));
+			this.deleteArmed = false;
+			this.stageListCrud();
+			return;
+		}
+		if (matchesKey(data, Key.enter) || data === "\r") {
+			if (list.items.length === 0 || this.listCrudFields().length === 0) return;
+			this.listCrudField = { itemIndex: list.selected, fieldIndex: 0 };
+			this.deleteArmed = false;
+			this.requestRender();
+		}
+	}
+
+	private handleListCrudFieldInput(data: string): void {
+		const list = this.listCrud;
+		const fieldState = this.listCrudField;
+		if (!list || !fieldState) return;
+		const fields = this.listCrudFields();
+		if (matchesKey(data, Key.escape)) {
+			this.listCrudField = undefined;
+			this.requestRender();
+			return;
+		}
+		if (matchesKey(data, Key.up)) {
+			if (fields.length === 0) return;
+			fieldState.fieldIndex = (fieldState.fieldIndex - 1 + fields.length) % fields.length;
+			this.requestRender();
+			return;
+		}
+		if (matchesKey(data, Key.down)) {
+			if (fields.length === 0) return;
+			fieldState.fieldIndex = (fieldState.fieldIndex + 1) % fields.length;
+			this.requestRender();
+			return;
+		}
+		if (matchesKey(data, Key.space) || data === " " || matchesKey(data, Key.enter) || data === "\r") {
+			const field = fields[fieldState.fieldIndex];
+			if (!field) return;
+			if (field.editor.kind === "boolean") {
+				// Boolean fields toggle in place (mirrors the /skills Space toggle) instead
+				// of opening a raw text editor that would write a string "true"/"false".
+				this.toggleListCrudBoolean(list, fieldState, field);
+				return;
+			}
+			if (!(matchesKey(data, Key.enter) || data === "\r")) return;
+			const item = list.items[fieldState.itemIndex] as Record<string, unknown> | undefined;
+			this.editing = {
+				providerId: list.providerId,
+				definition: field,
+				value: editableValue(item?.[field.key] as JsonValue | undefined),
+				replaceOnType: true,
+				itemWriteback: { key: list.key, itemIndex: fieldState.itemIndex, fieldKey: field.key },
+			};
+			this.discardArmed = false;
+			this.requestRender();
+		}
+	}
+
+	private toggleListCrudBoolean(list: ListCrudState, fieldState: ListCrudFieldState, field: SettingDefinition): void {
+		const entry = list.items[fieldState.itemIndex];
+		// Only object items carry fields; toggling a primitive would spread its
+		// index keys into an object and corrupt the entry.
+		if (!entry || typeof entry !== "object" || Array.isArray(entry)) return;
+		const record = entry as Record<string, unknown>;
+		const next = record[field.key] !== true;
+		list.items = list.items.map((item, index) =>
+			index === fieldState.itemIndex ? { ...item as object, [field.key]: next } as JsonValue : item);
+		this.deleteArmed = false;
+		this.stageListCrud();
+	}
+
 	private handleOptionEditorInput(data: string): void {
 		const editing = this.optionEditing;
 		if (!editing) return;
@@ -530,6 +892,16 @@ export class MaestroSettingsShell implements Component, Focusable {
 				replaceOnType: true,
 			};
 			this.optionEditing = undefined;
+			this.requestRender();
+			return;
+		}
+		if (matchesKey(data, Key.pageUp)) {
+			editing.selected = pageEnabledOption(editing.options, editing.selected, -this.optionRowLimit());
+			this.requestRender();
+			return;
+		}
+		if (matchesKey(data, Key.pageDown)) {
+			editing.selected = pageEnabledOption(editing.options, editing.selected, this.optionRowLimit());
 			this.requestRender();
 			return;
 		}
@@ -558,13 +930,17 @@ export class MaestroSettingsShell implements Component, Focusable {
 	}
 
 	private textEditorRows(editing: EditingState, width: number): string[] {
-		const value = editing.value || this.t("settings.value.empty");
+		const isSecret = editing.definition.editor.kind === "secret";
+		const displayValue = isSecret ? maskSecretValue(editing.value) : editing.value;
+		const value = displayValue || this.t("settings.value.empty");
 		const input = editing.replaceOnType ? `[${value}]` : `${value}█`;
 		return [
 			this.params.theme.fg("accent", fit(`✎ ${this.t("settings.input")} · ${input}`, width)),
 			...(editing.error ? [this.params.theme.fg("error", fit(`! ${editing.error}`, width))] : []),
 			this.params.theme.fg("dim", fit(
-				editing.replaceOnType ? this.t("settings.editorReplaceHelp") : this.t("settings.editorHelp"),
+				editing.replaceOnType
+					? isSecret ? this.t("settings.secretEditHelp") : this.t("settings.editorReplaceHelp")
+					: this.t("settings.editorHelp"),
 				width,
 			)),
 		];
@@ -594,6 +970,9 @@ export class MaestroSettingsShell implements Component, Focusable {
 			});
 			const line = this.interactiveRow(`${marker} ${option.label}`, width, targetId, index === editing.selected);
 			rows.push(option.disabled ? this.params.theme.fg("dim", line) : line);
+		}
+		if (start + maxRows < editing.options.length) {
+			rows.push(this.params.theme.fg("dim", fit(this.t("settings.optionMore", { count: editing.options.length - (start + maxRows) }), width)));
 		}
 		rows.push(this.params.theme.fg("dim", fit(
 			editing.definition.editor.kind === "model" ? this.t("settings.modelPickerHelp") : this.t("settings.optionPickerHelp"),
@@ -719,7 +1098,8 @@ export class MaestroSettingsShell implements Component, Focusable {
 
 	private displayValue(providerId: string, definition: SettingDefinition, scope: SettingsScope): string {
 		if (this.editing?.providerId === providerId && this.editing.definition.key === definition.key) {
-			const value = this.editing.value || this.t("settings.value.empty");
+			const isSecret = definition.editor.kind === "secret";
+			const value = (isSecret ? maskSecretValue(this.editing.value) : this.editing.value) || this.t("settings.value.empty");
 			return this.editing.replaceOnType ? `[${value}]` : `${value}█`;
 		}
 		if (this.optionEditing?.providerId === providerId && this.optionEditing.definition.key === definition.key) {
@@ -744,6 +1124,16 @@ export class MaestroSettingsShell implements Component, Focusable {
 
 	private formatValue(definition: SettingDefinition, value: JsonValue | undefined): string {
 		if (value === undefined) return "—";
+		if (definition.editor.kind === "overview") {
+			return Array.isArray(value) ? this.t("settings.overviewCount", { count: value.length }) : this.t("settings.value.empty");
+		}
+		if (definition.editor.kind === "secret") {
+			// Never render secret plaintext: providers return the masked placeholder
+			// when set, or null/empty when unset.
+			return value === SETTINGS_SECRET_SET_PLACEHOLDER
+				? this.t("settings.secretSet")
+				: this.t("settings.secretUnset");
+		}
 		if (definition.editor.kind === "action" || definition.editor.kind === "custom" || definition.editor.kind === "resource") {
 			const option = definition.editor.options?.find((entry) => Object.is(entry.value, value));
 			return option ? this.t(option.labelKey) : this.t("settings.manage");
@@ -788,6 +1178,13 @@ export class MaestroSettingsShell implements Component, Focusable {
 		}
 		if ((mouse.button & 3) !== 0 || !target) return true;
 		this.hoveredTargetId = target.id;
+		// While a text editor is open, every click is inert: the editor owns the
+		// keystrokes and the list-field highlight must not diverge from the
+		// itemWriteback commit target.
+		if (this.editing) {
+			this.requestRender();
+			return true;
+		}
 		if (target.kind === "option") {
 			const editing = this.optionEditing;
 			const option = editing?.options[target.index];
@@ -806,14 +1203,37 @@ export class MaestroSettingsShell implements Component, Focusable {
 			this.afterDraftChange();
 			return true;
 		}
-		if (this.editing || this.optionEditing || this.searching || this.applying) {
+		if (target.kind === "list-item") {
+			const list = this.listCrud;
+			if (!list) {
+				this.requestRender();
+				return true;
+			}
+			list.selected = target.index;
+			this.deleteArmed = false;
+			this.requestRender();
+			return true;
+		}
+		if (target.kind === "list-field") {
+			const fieldState = this.listCrudField;
+			if (!fieldState) {
+				this.requestRender();
+				return true;
+			}
+			fieldState.fieldIndex = target.index;
+			this.requestRender();
+			return true;
+		}
+		if (this.optionEditing || this.searching || this.applying) {
 			this.requestRender();
 			return true;
 		}
 		if (target.kind === "provider") {
 			if (target.index !== this.providerIndex) {
+				const previous = this.selectedProvider();
+				if (previous) this.rememberSetting(previous.providerId);
 				this.providerIndex = target.index;
-				this.settingIndex = 0;
+				this.restoreSetting(this.selectedProvider()?.providerId);
 				this.syncSelection();
 				this.afterNavigation(false);
 			} else {
@@ -823,6 +1243,7 @@ export class MaestroSettingsShell implements Component, Focusable {
 		}
 		this.settingIndex = target.index;
 		this.syncScope();
+		this.rememberSetting(this.selectedProvider()?.providerId);
 		this.afterNavigation(false);
 		void this.activateSelected();
 		return true;
@@ -864,7 +1285,18 @@ export class MaestroSettingsShell implements Component, Focusable {
 	private optionRowLimit(): number {
 		const overlayHeight = this.overlayHeightTarget();
 		if (!overlayHeight) return 7;
-		return Math.max(1, Math.min(7, overlayHeight - 20));
+		// Reserve the option chrome, the detail rows and one row for the possible
+		// "N more" overflow marker so the trailing help line stays visible.
+		return Math.max(1, Math.min(7, overlayHeight - 21));
+	}
+
+	private listCrudRowLimit(): number {
+		const overlayHeight = this.overlayHeightTarget();
+		if (!overlayHeight) return 10;
+		// Shell chrome (header+rule, footer rule/help, frame, narrow title) plus the
+		// list's own header/rule/rule/help and the possible "N more" marker ≈ 11;
+		// a set notice adds one footer row. The TUI clips the frame at maxHeight.
+		return Math.max(1, overlayHeight - 11 - (this.notice ? 1 : 0));
 	}
 
 	private settingRowLimit(narrow: boolean): number {
@@ -906,8 +1338,10 @@ export class MaestroSettingsShell implements Component, Focusable {
 
 	private moveProvider(delta: number): void {
 		if (this.providers.length === 0) return;
+		const previous = this.selectedProvider();
+		if (previous) this.rememberSetting(previous.providerId);
 		this.providerIndex = (this.providerIndex + delta + this.providers.length) % this.providers.length;
-		this.settingIndex = 0;
+		this.restoreSetting(this.selectedProvider()?.providerId);
 		this.syncSelection();
 		this.afterNavigation();
 	}
@@ -916,7 +1350,8 @@ export class MaestroSettingsShell implements Component, Focusable {
 		// Wheel must not bypass the modal input guards: while applying, navigation
 		// is frozen; inside the option editor the wheel moves the option list;
 		// while editing text the wheel must not yank the current row away from
-		// the editor that still owns the keystrokes.
+		// the editor that still owns the keystrokes; inside list-crud the wheel
+		// must not mutate the hidden settings list or clear the delete confirm.
 		if (this.applying) return;
 		if (this.optionEditing) {
 			const editing = this.optionEditing;
@@ -924,7 +1359,7 @@ export class MaestroSettingsShell implements Component, Focusable {
 			this.requestRender();
 			return;
 		}
-		if (this.editing) return;
+		if (this.editing || this.listCrud || this.listCrudField) return;
 		this.moveSetting(delta);
 	}
 
@@ -933,6 +1368,7 @@ export class MaestroSettingsShell implements Component, Focusable {
 		if (settings.length === 0) return;
 		this.settingIndex = (this.settingIndex + delta + settings.length) % settings.length;
 		this.syncScope();
+		this.rememberSetting(this.selectedProvider()?.providerId);
 		this.afterNavigation();
 	}
 
@@ -960,6 +1396,23 @@ export class MaestroSettingsShell implements Component, Focusable {
 		this.conflicts = [];
 		this.notice = "";
 		this.requestRender();
+	}
+
+	/** Remember the highlighted setting key for the current provider. */
+	private rememberSetting(providerId: string | undefined): void {
+		const selected = this.selectedSetting();
+		if (providerId && selected) this.settingKeyByProvider.set(providerId, selected.key);
+	}
+
+	/** Restore the remembered highlight for a provider, defaulting to the first setting. */
+	private restoreSetting(providerId: string | undefined): void {
+		const key = providerId ? this.settingKeyByProvider.get(providerId) : undefined;
+		if (!key) {
+			this.settingIndex = 0;
+			return;
+		}
+		const index = this.visibleSettings().findIndex((setting) => setting.key === key);
+		this.settingIndex = index >= 0 ? index : 0;
 	}
 
 	private afterNavigation(clearHover = true): void {
@@ -1036,7 +1489,7 @@ export async function showMaestroSettingsShell(
 			overlay: true,
 			overlayOptions: {
 				anchor: "center",
-				width: SETTINGS_OVERLAY_WIDTH,
+				width: SETTINGS_OVERLAY_WIDTH_VALUE,
 				maxHeight: SETTINGS_OVERLAY_MAX_HEIGHT_VALUE,
 				margin: SETTINGS_OVERLAY_MARGIN,
 			},
@@ -1089,6 +1542,15 @@ function parseEditorValue(definition: SettingDefinition, value: string): ParsedE
 		}
 		return { ok: true, value: parsed };
 	}
+	// Boolean fields toggle in place (activateSelected and toggleListCrudBoolean), so
+	// this branch is a defensive fallback for any future entry point that still
+	// routes boolean definitions through the raw text editor.
+	if (definition.editor.kind === "boolean") {
+		const normalized = value.trim().toLocaleLowerCase();
+		if (normalized === "true" || normalized === "1" || normalized === "yes") return { ok: true, value: true };
+		if (normalized === "false" || normalized === "0" || normalized === "no") return { ok: true, value: false };
+		return { ok: false, messageKey: "settings.invalidBoolean" };
+	}
 	if (definition.editor.kind === "json") {
 		try { return { ok: true, value: JSON.parse(value) as JsonValue }; }
 		catch { return { ok: false, messageKey: "settings.invalidJson" }; }
@@ -1129,6 +1591,23 @@ function nextEnabledOption(
 	return current;
 }
 
+/** Page jump that lands on the nearest enabled option around the page target. */
+function pageEnabledOption(
+	options: OptionEditingState["options"],
+	current: number,
+	offset: number,
+): number {
+	if (options.length === 0) return 0;
+	const target = Math.max(0, Math.min(options.length - 1, current + offset));
+	if (!options[target]?.disabled) return target;
+	for (let distance = 1; distance < options.length; distance++) {
+		for (const candidate of [target - distance, target + distance]) {
+			if (candidate >= 0 && candidate < options.length && !options[candidate]?.disabled) return candidate;
+		}
+	}
+	return current;
+}
+
 function visibleStart(selected: number, total: number, maxRows: number): number {
 	if (total <= maxRows) return 0;
 	return Math.max(0, Math.min(total - maxRows, selected - Math.floor(maxRows / 2)));
@@ -1136,19 +1615,6 @@ function visibleStart(selected: number, total: number, maxRows: number): number 
 
 function clampIndex(index: number, length: number): number {
 	return length <= 0 ? 0 : Math.max(0, Math.min(index, length - 1));
-}
-
-function fit(value: string, width: number): string {
-	return truncateToWidth(value, Math.max(0, width), "…");
-}
-
-function pad(value: string, width: number): string {
-	const fitted = fit(value, width);
-	return `${fitted}${" ".repeat(Math.max(0, width - visibleWidth(fitted)))}`;
-}
-
-function rule(width: number): string {
-	return "─".repeat(Math.max(0, width));
 }
 
 function terminalColumns(tui: TUI): number | undefined {
@@ -1170,13 +1636,4 @@ function enableSettingsMouseReporting(tui: TUI): () => void {
 	};
 }
 
-function frame(rows: readonly string[], width: number, theme: Theme): string[] {
-	if (width < 2) return rows.map((row) => fit(row, width));
-	const inner = width - 2;
-	const background = (value: string): string => theme.bg?.("customMessageBg", value) ?? value;
-	return [
-		background(theme.fg("dim", `┌${"─".repeat(inner)}┐`)),
-		...rows.map((row) => background(`${theme.fg("dim", "│")}${pad(row, inner)}${theme.fg("dim", "│")}`)),
-		background(theme.fg("dim", `└${"─".repeat(inner)}┘`)),
-	];
-}
+

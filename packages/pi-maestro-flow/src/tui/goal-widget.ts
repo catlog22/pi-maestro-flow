@@ -40,6 +40,14 @@ export interface GoalWidgetTheme {
   bold(text: string): string;
 }
 
+export interface GoalWidgetRenderOptions {
+  /**
+   * Static mode: drop the live elapsed segment so the header cannot tick
+   * between repaints. Frozen counters (iteration, token budget) stay.
+   */
+  hideLiveDuration?: boolean;
+}
+
 export interface GoalVisualState {
   glyph: string;
   label: string;
@@ -52,13 +60,14 @@ export function renderGoalWidget(
   phase: GoalWidgetPhase,
   width: number,
   theme: GoalWidgetTheme,
+  opts: GoalWidgetRenderOptions = {},
 ): string[] {
   const safeWidth = Math.max(1, width);
   const state = goalVisualState(goal, phase);
   const title = theme.fg(state.color, theme.bold(`${state.glyph} Goal`));
   if (safeWidth < 20) return [truncateToWidth(`${title} ${state.label}`, safeWidth, "…")];
 
-  const metrics = metricText(goal, safeWidth);
+  const metrics = metricText(goal, safeWidth, opts.hideLiveDuration === true);
   const hint = state.hint ? ` · ${theme.fg("dim", state.hint)}` : "";
   const header = `${title} · ${state.label}${metrics ? ` · ${metrics}` : ""}${hint}`;
   if (safeWidth < 44) return [truncateToWidth(header, safeWidth, "…")];
@@ -80,6 +89,7 @@ export function renderGoalPanel(
   phase: GoalWidgetPhase,
   width: number,
   theme: GoalWidgetTheme,
+  opts: GoalWidgetRenderOptions = {},
 ): string[] {
   const safeWidth = Math.max(1, width);
   if (goals.length === 0) return [];
@@ -95,7 +105,7 @@ export function renderGoalPanel(
         lines.push(truncateToWidth(`${title} ${state.label}`, safeWidth, "…"));
         return;
       }
-      const metrics = metricText(goal, safeWidth);
+      const metrics = metricText(goal, safeWidth, opts.hideLiveDuration === true);
       const hint = state.hint ? ` · ${theme.fg("dim", state.hint)}` : "";
       const detail = ` · ${theme.fg("dim", `${altKey("G")} details`)}`;
       const header = `${title} · ${state.label}${metrics ? ` · ${metrics}` : ""}${hint}${detail}`;
@@ -134,14 +144,17 @@ export function goalVisualState(goal: GoalWidgetModel, phase: GoalWidgetPhase): 
   return { glyph: "⏸", label: "STOPPED", color: "warning", hint: "/goal resume" };
 }
 
-function metricText(goal: GoalWidgetModel, width: number): string {
-  const elapsed = formatGoalDuration(goal.timeUsedSeconds);
+function metricText(goal: GoalWidgetModel, width: number, hideLiveDuration: boolean): string {
+  const elapsed = hideLiveDuration ? undefined : formatGoalDuration(goal.timeUsedSeconds);
   const round = `round ${Math.max(1, goal.iteration + 1)}`;
-  if (goal.tokenBudget === undefined) return width >= 64 ? `${round} · ${elapsed}` : elapsed;
+  if (goal.tokenBudget === undefined) {
+    if (elapsed === undefined) return width >= 64 ? round : "";
+    return width >= 64 ? `${round} · ${elapsed}` : elapsed;
+  }
 
   const budget = `${formatGoalTokens(goal.tokensUsed)}/${formatGoalTokens(goal.tokenBudget)}`;
   if (width < 64) return budget;
-  return `${round} · ${elapsed} · ${budget} ${goalProgressBar(goal.tokensUsed, goal.tokenBudget)}`;
+  return `${round}${elapsed === undefined ? "" : ` · ${elapsed}`} · ${budget} ${goalProgressBar(goal.tokensUsed, goal.tokenBudget)}`;
 }
 
 export function goalProgressBar(used: number, budget: number, size = 8): string {

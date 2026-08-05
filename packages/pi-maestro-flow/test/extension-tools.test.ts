@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -20,8 +20,10 @@ import registerMaestroExtension, {
 } from "../src/extension/index.ts";
 import type { WorkflowSnapshot } from "../src/session/types.ts";
 import { shutdownIntelligenceTools } from "../src/tools/intelligence.ts";
+import { readAgentOutput } from "../src/teammate/agent-output-store.ts";
 import { isRunControlReadAction } from "../src/tools/run-control.ts";
 import { PLAN_TOGGLE_KEY } from "../src/tools/plan.ts";
+import { NATIVE_FALLBACK_COMPACTION_MARKER } from "../src/compaction/compaction-arbiter.ts";
 import {
   MAESTRO_GLOBAL_SHORTCUTS,
   auditShortcutConflicts,
@@ -532,6 +534,118 @@ test("root teammate authority is fenced on session start and disposed on shutdow
   assert.match(source, /pi\.events\.on\(TEAMMATE_STARTED_EVENT[\s\S]*?registerTodoActor\(actor\)/);
 });
 
+test("teammate tool_result persistence backfills graph task names from progress", async () => {
+  const root = mkdtempSync(join(tmpdir(), "flow-tool-result-capture-"));
+  try {
+    const tools: ToolDefinition[] = [];
+    const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
+    const api = new Proxy({} as ExtensionAPI, {
+      get(_target, property) {
+        if (property === "registerTool") return (tool: ToolDefinition) => { tools.push(tool); };
+        if (property === "events") return { on: () => () => undefined, emit: () => undefined };
+        if (property === "on") return (event: string, handler: (...args: unknown[]) => unknown) => {
+          const list = handlers.get(event) ?? [];
+          list.push(handler);
+          handlers.set(event, list);
+        };
+        return () => undefined;
+      },
+    });
+    registerMaestroExtension(api);
+
+    const toolResultHandlers = handlers.get("tool_result") ?? [];
+    assert.ok(toolResultHandlers.length > 0, "tool_result hook must be registered");
+    const toolResultEvent = {
+      type: "tool_result",
+      toolName: "teammate",
+      details: {
+        mode: "graph",
+        // Graph SingleResult intentionally carries no name; progress backfills it.
+        results: [{ correlationId: "flow-capture-cid", agent: "general", structuredOutput: { ok: true } }],
+        progress: [{
+          correlationId: "flow-capture-cid",
+          name: "flow-graph-task",
+          agent: "general",
+          status: "completed",
+          taskIndex: 0,
+          dependencies: [],
+        }],
+      },
+    };
+    for (const handler of toolResultHandlers) {
+      try {
+        await handler(toolResultEvent, { cwd: root });
+      } catch {
+        // Unrelated tool_result hooks may require their subsystem's full ctx.
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const record = await readAgentOutput("flow-graph-task", root);
+    assert.equal(record.correlationId, "flow-capture-cid");
+    assert.deepEqual(record.output, { ok: true });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("teammate complete event listener persists background structured results", async () => {
+  const root = mkdtempSync(join(tmpdir(), "flow-complete-capture-"));
+  try {
+    const tools: ToolDefinition[] = [];
+    const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
+    const api = new Proxy({} as ExtensionAPI, {
+      get(_target, property) {
+        if (property === "registerTool") return (tool: ToolDefinition) => { tools.push(tool); };
+        if (property === "events") return {
+          on: (event: string, handler: (...args: unknown[]) => unknown) => {
+            const list = handlers.get(event) ?? [];
+            list.push(handler);
+            handlers.set(event, list);
+          },
+          emit: () => undefined,
+        };
+        if (property === "on") return (event: string, handler: (...args: unknown[]) => unknown) => {
+          const list = handlers.get(event) ?? [];
+          list.push(handler);
+          handlers.set(event, list);
+        };
+        return () => undefined;
+      },
+    });
+    registerMaestroExtension(api);
+
+    // GUI forwarder + persistence listener both subscribe to the completion event.
+    const completeHandlers = handlers.get("teammate:complete") ?? [];
+    assert.ok(completeHandlers.length >= 2, "completion event must have a persistence listener");
+
+    // Completion results carry their originating workspace explicitly; empty
+    // background acknowledgements no longer establish a separate cwd binding.
+    for (const handler of completeHandlers) {
+      await handler({
+        correlationId: "flow-bg-cid",
+        agent: "general",
+        exitCode: 0,
+        durationMs: 5,
+        structuredResults: [{
+          correlationId: "flow-bg-cid",
+          name: "flow-bg-task",
+          agent: "general",
+          originCwd: root,
+          structuredOutput: { bg: true },
+        }],
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const record = await readAgentOutput("flow-bg-task", root);
+    assert.equal(record.correlationId, "flow-bg-cid");
+    assert.deepEqual(record.output, { bg: true });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("teammate child registers interaction, local Bash, and parent-permission surfaces", async () => {
   const tools: ToolDefinition[] = [];
   const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
@@ -570,14 +684,25 @@ test("teammate child registers interaction, local Bash, and parent-permission su
     "tool_call",
   ]);
   assert.equal(handlers.has("before_agent_start"), false, "child must not own parent Goal/Todo/Workflow startup");
+  let providerAborts = 0;
+  const providerCtx = {
+    cwd: "D:/workspace",
+    model: { provider: "test", id: "child", contextWindow: 10_000, maxTokens: 4_000 },
+    abort() { providerAborts++; },
+    sessionManager: { getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as ExtensionContext;
+  await handlers.get("context")?.[0]?.({
+    type: "context",
+    messages: [{ role: "user", content: [{ type: "text", text: "continue" }] }],
+  }, providerCtx);
   const guardedPayload = await handlers.get("before_provider_request")?.[0]?.({
     type: "before_provider_request",
     payload: { max_tokens: 1, thinking: { type: "enabled", budget_tokens: 1024 } },
-  }, { ui: { notify() {} } } as ExtensionContext);
-  assert.deepEqual(guardedPayload, {
-    max_tokens: 1,
-    thinking: { type: "disabled" },
-  });
+  }, providerCtx);
+  assert.equal(guardedPayload, undefined, "child aborts invalid thinking instead of degrading it");
+  assert.equal(providerAborts, 1);
+  await handlers.get("session_start")?.[0]?.({ reason: "new" }, providerCtx);
   const structuredOutputDecision = await handlers.get("tool_call")?.[0]?.({
     type: "tool_call",
     toolName: "structured_output",
@@ -585,6 +710,50 @@ test("teammate child registers interaction, local Bash, and parent-permission su
     input: { pass: false },
   }, {} as ExtensionContext);
   assert.equal(structuredOutputDecision, undefined, "child-local verdicts must not wait for parent permission RPC");
+
+  const childNotifications: string[] = [];
+  const childCtx = {
+    cwd: "D:/workspace",
+    model: { contextWindow: 400_000 },
+    hasPendingMessages: () => false,
+    sessionManager: { getBranch: () => [] },
+    ui: { setStatus() {}, notify(message: string) { childNotifications.push(message); } },
+  } as ExtensionContext;
+  await handlers.get("agent_end")?.[0]?.({
+    messages: [{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" }],
+  }, childCtx);
+  const completedTurnCancel = await handlers.get("session_before_compact")?.[0]?.({ reason: "threshold" }, childCtx);
+  assert.deepEqual(completedTurnCancel, { cancel: true }, "child preserves a normally completed transcript");
+
+  await handlers.get("agent_end")?.[0]?.({
+    messages: [{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" }],
+  }, childCtx);
+  const fallbackResult = await handlers.get("session_before_compact")?.[0]?.({
+    reason: "threshold",
+    customInstructions: NATIVE_FALLBACK_COMPACTION_MARKER,
+  }, childCtx);
+  assert.notDeepEqual(fallbackResult, { cancel: true }, "child permits the exhausted recovery fallback");
+
+  const endFailureNotifications: string[] = [];
+  const endFailureCtx = {
+    cwd: "D:/workspace",
+    get model() { throw new Error("model lookup failed"); },
+    ui: { setStatus() {}, notify(message: string) { endFailureNotifications.push(message); } },
+  } as ExtensionContext;
+  await assert.doesNotReject(() => handlers.get("agent_end")?.[0]?.({ messages: [] }, endFailureCtx) as Promise<unknown>);
+  assert.match(endFailureNotifications[0] ?? "", /Child output-limit compaction failed/);
+
+  const settledFailureNotifications: string[] = [];
+  const settledFailureCtx = {
+    cwd: "D:/workspace",
+    sessionManager: { getBranch: () => [] },
+    ui: {
+      setStatus() { throw new Error("status sink failed"); },
+      notify(message: string) { settledFailureNotifications.push(message); },
+    },
+  } as ExtensionContext;
+  await assert.doesNotReject(() => handlers.get("agent_settled")?.[0]?.({}, settledFailureCtx) as Promise<unknown>);
+  assert.match(settledFailureNotifications[0] ?? "", /Child settled context compaction failed/);
 });
 
 test("intelligence shutdown awaits both managers and contains cleanup failures", async () => {

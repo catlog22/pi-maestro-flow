@@ -1,94 +1,154 @@
-# v0.14.1 - Durable Settings, Compaction Fixes, and Runtime Hardening
+# v0.14.2 - Routing, Structured Results, Compaction Recovery, and Safe Upgrades
 
 ## Overview
 
-This patch release hardens the Flow runtime after v0.14.0. It fixes several
-compaction threshold and large-context failure paths, makes settings writes
-durable with strict integer budget validation, prevents slow vision assistance
- from hanging for 60 seconds, and tightens lifecycle, subprocess, SSRF, and
- trust-boundary behavior across the plugin. It also ships the latest teammate
- and cockpit packages and updates the external engine pin to `maestro-flow@0.5.61`.
+Flow `0.14.2` bundles Teammate `1.7.1` and Cockpit `0.9.1`. This suite
+release makes teammate routing and schema results durable, adds persistent
+session navigation and optional Advisor supervision, hardens multimodal
+compaction and provider failover, and safely migrates Flow-managed companion
+registrations.
 
-## Package Versions
+## Package Versions and Requirements
 
-| Package | v0.14.0 | v0.14.1 |
+| Package | v0.14.1 | v0.14.2 |
 |---------|---------|---------|
-| pi-maestro-flow | 0.14.0 | **0.14.1** |
-| pi-maestro-teammate | 1.6.0 | **1.7.0** |
-| pi-cockpit | 0.8.0 | **0.9.0** |
+| pi-maestro-flow | 0.14.1 | **0.14.2** |
+| pi-maestro-teammate | 1.7.0 | **1.7.1** |
+| pi-cockpit | 0.9.0 | **0.9.1** |
 | pi-maestro-settings-core | 0.1.0 | 0.1.0 |
-| maestro-flow | 0.5.60 | **0.5.61** |
+| maestro-flow | 0.5.61 | 0.5.61 |
+
+- Requires Node.js `>=22.19.0`.
+- Validated with Pi SDK `0.83.0` and `typebox@1.3.7`.
+- Pi core packages remain optional wildcard peers supplied by the host; the
+  release tarballs do not bundle private SDK copies.
+- Smart Search is source-locked to commit `667c465d0f6ea16a423f03c434f94e21505d3595`
+  because the npm `0.1.14` artifact and upstream source expose different
+  routing/configuration contracts under the same version.
+- Smart Search postinstall requires Python `>=3.10`. It remains optional:
+  `search` and `fetch` retain fallback providers if installation is omitted,
+  while `route` and `research` report that the optional package is unavailable.
 
 ## Highlights
 
-### Compaction and Context Stability
+### Teammate Routing and Reliability
 
-- Fixed four threshold and overflow paths that could leave oversized turns
-  uncompressed (`3d5b0e7f`).
-- Added a replay regression covering a stuck 272K context window
-  (`b52b777c`).
-- Added broader compaction settings validation and failure-path coverage.
+- Persist per-role model, fallback, and thinking settings, and inherit the
+  active main-session model when no explicit task or role mapping wins.
+- Rank fallback candidates by circuit health, classify provider failures by
+  kind, apply bounded backoff, and fence replay after tool side effects.
+- Recover silent child startup exits and harden mailbox routing, fencing,
+  cleanup, public v1 registration, and isolated agent-session ownership.
+- Refresh the model registry with its receiver intact and coalesce refreshes
+  per registry instance.
 
-### Durable Settings
+### Structured Results and Session Navigation
 
-- Added fsync-backed atomic settings writes and strict integer budget
-  validation (`826a20a2`).
-- Extended settings provider tests for persistence and validation behavior.
-- Refreshed generated teammate declarations and package documentation
-  (`c886e1bb`).
+- Return validated schema output in foreground teammate results and expose it
+  through `observe` and `watch` detail.
+- Persist completed schema output for `agent://<id>/<key-or-index>` reads. The
+  old `/json` path prefix is not part of the resource contract.
+- Keep `@main` and teammate sessions in Cockpit's persistent session bar;
+  switch the viewed session with Left/Right when the composer is empty.
+- Remove the legacy `/teammate-session` workflow in favor of the session bar,
+  and use `Alt+B` consistently to detach foreground teammates.
 
-### Model and Vision Reliability
+### Compaction, Vision, and Recovery
 
-- Prevented deleted models from being reloaded from stale registry snapshots
-  (`2d1a98dc`).
-- Added teammate fallback-chain editing and circuit-health visibility in the
-  TUI (`acd4249b`).
-- Added cockpit title-generation model configuration (`c6c6df84`).
-- Fixed slow vision assistance timeout behavior so `describe_image` does not
-  remain blocked for 60 seconds (`38fb242a`).
+- Preserve image routing, image-aware placeholders, and non-Anthropic thinking
+  across compaction.
+- Add tool-loop completion handling, spill digest validation, invalid-thinking
+  recovery, and safer native/model fallback behavior.
+- Persist per-workspace input history with bounded, merge-aware storage.
 
-### Security and Lifecycle Hardening
+### Advisor, Supervision, and Settings
 
-- Hardened project MCP trust gating and resource ownership in the core plugin
-  (`d9fac2c0`, `07143dc0`, `cd350533`).
-- Hardened markdown-review subprocess handling, including stdin failures,
-  process-tree timeout cleanup, path/token sanitization, and narrow preview
-  behavior (`64254da9`, `9eb2b60a`, `0dc0adc9`).
-- Added the markdown-review multi-select and Markdown/DOCX/PDF export command
-  (`8a0e703b`).
-- Standardized smart-search synchronization status rendering so it is not
-  confused with a checkbox (`0b332f37`).
+- Add optional asynchronous Advisor reviews at agent and tool checkpoints;
+  only concerns and blockers are injected into the main session.
+- Unify supervision events across Flow, Teammate, and Cockpit.
+- Add settings providers for MCP, skills, smart search, failover, and related
+  operational configuration surfaces.
 
-## Dependency Notes
+### Cockpit Operability
 
-The published Flow package now uses exact pins for the published workspace
-artifacts and external engine:
+- Prevent per-second and streaming updates from bouncing or clearing the
+  visible terminal viewport.
+- Add model selection for generated session titles and preserve rule-based
+  fallback behavior.
+- Harden guarded edit matching and keep teammate content plus the active route
+  target visible.
+- Color quiet tool names by lifecycle state (`warning`, `success`, `error`).
+  Existing `toolPalette` values remain readable for migration but no longer
+  select call/result colors.
 
-- `maestro-flow@0.5.61`
-- `pi-maestro-teammate@1.7.0`
-- `pi-cockpit@0.9.0`
-- `pi-maestro-settings-core@0.1.0`
+### Upgrade Safety and Documentation
 
-The cockpit peer range `pi-maestro-teammate@^1.6.0` remains compatible with
-teammate 1.7.0 under npm semver.
+- Track Flow-managed Teammate and Cockpit registrations in a versioned sidecar.
+- Replace proven Flow-owned and legacy nested companion paths while preserving
+  readable local development overrides that Flow does not own.
+- Preserve string/object settings entries and resource filters during atomic,
+  recoverable settings writes.
+- Add the React/Vite documentation site and GitHub Pages deployment with
+  guides for routing, compaction, Advisor, mailbox, Cockpit, and settings.
+- Lock Smart Search to a reproducible HTTPS commit tarball so intent routing,
+  research providers, Jina, and Zhipu MCP configuration match the runtime
+  command surface.
 
-## Statistics
+## Behavior and Upgrade Notes
 
-- 19 commits since v0.14.0
-- 112 files changed, +13,672 / -1,242 lines
-- pi-maestro-flow: 76 files, +12,153 / -1,022 lines
-- pi-maestro-teammate: 12 files, +471 / -26 lines
-- pi-cockpit: 21 files, +1,029 / -188 lines
+- Close all running Pi processes before upgrading. The installer updates disk
+  settings that an older in-memory SettingsManager could otherwise overwrite.
+- Back up Pi's `settings.json` and `pi-maestro-flow-companions.json` before an
+  upgrade that changes companion registrations.
+- Start Pi again after installation; extension reload alone is not the
+  authoritative companion-registration boundary.
+- Unspecified teammate models now inherit the main-session model.
+- Use Cockpit's session bar instead of `/teammate-session`.
+- A reported local Teammate or Cockpit override was intentionally preserved;
+  update or remove it explicitly, then restart Pi.
 
 ## Install / Upgrade
 
 ```bash
-npm install pi-maestro-flow@0.14.1
+# Close running Pi processes first.
+pi install npm:pi-maestro-flow@0.14.2
+pi list
 ```
 
-## Verification
+After restarting Pi, verify that Flow, Teammate, and Cockpit are registered at
+the versions in the table above before running model-sensitive workflows.
 
-- `pi-maestro-teammate@1.7.0` published before dependent packages.
-- `pi-cockpit@0.9.0` published with teammate dev dependency 1.7.0.
-- `pi-maestro-flow@0.14.1` lockfile resolves maestro-flow 0.5.61,
-  pi-maestro-teammate 1.7.0, and pi-cockpit 0.9.0.
+## Release Verification
+
+The release candidate passed the serial root `test:release` gate, including
+all changed Flow subsystems, Teammate declarations, Cockpit tests, and both
+fresh packed-consumer tests. The enhanced packed consumer also installs and
+loads Cockpit without its optional Teammate peer, verifies the source-pinned
+Smart Search package, and runs its offline regression command. Packed tests
+remain intentionally serial because Flow prepack/postpack share
+`packages/pi-maestro-flow/.pi/skills`.
+
+Dry-run tarballs from the verified candidate:
+
+| Package | Files | Packed | Unpacked | SHA-1 |
+|---------|------:|-------:|---------:|-------|
+| pi-maestro-teammate@1.7.1 | 135 | 332.7 kB | 1.5 MB | `ae6d2ca4f071d505fa2b19dcebd2c3506e149681` |
+| pi-cockpit@0.9.1 | 58 | 147.7 kB | 542.3 kB | `ed65e92a99e8ac17c6898d51e5e0f11d5146186b` |
+| pi-maestro-flow@0.14.2 | 820 | 1.9 MB | 7.3 MB | `05e88ed93522271984708fdff5bd37d4ff6ede85` |
+
+Publication order is mandatory:
+
+1. Publish and verify `pi-maestro-teammate@1.7.1`.
+2. Publish and verify `pi-cockpit@0.9.1`.
+3. Publish and verify `pi-maestro-flow@0.14.2` with exact companion versions.
+4. Run a fresh temporary-home registry install and Pi runtime smoke test.
+5. Create and push `v0.14.2`, then create the GitHub Release.
+
+## Change Statistics
+
+Final candidate compared with `v0.14.1`:
+
+- 40 commits including the release commit
+- 323 files changed
+- 42,397 insertions and 7,237 deletions
+- 3 published packages plus the unchanged settings-core package

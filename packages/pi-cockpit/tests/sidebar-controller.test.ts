@@ -301,3 +301,24 @@ test("browse focus mode consumes keys, scrolls by stable id, and yields to resiz
 	assert.equal(controller.isFocused(), false);
 	h.input("\x1b");
 });
+
+test("Enter on a focused agent row fires onActivateRow with the agent id", () => {
+	const h = harness();
+	const activated: string[] = [];
+	const controller = createSidebarController({
+		...baseOptions(h.ctx),
+		getAgents: () => [
+			{ correlationId: "cid-1", agent: "explorer", name: "scan", role: "explorer", task: "", status: "running", tail: "", startedAt: 0, lastActivityAt: 0 } as never,
+			{ correlationId: "cid-2", agent: "builder", name: "build", role: "builder", task: "", status: "running", tail: "", startedAt: 0, lastActivityAt: 0 } as never,
+		],
+		onActivateRow: (id) => activated.push(id),
+	});
+	controller.show();
+	controller.beginFocus();
+	// ↓ moves to the first agent row; Enter activates it.
+	h.input("\x1b[B");
+	h.input("\r");
+	assert.deepEqual(activated, ["agent:cid-1"]);
+	// Focus leaves after activation.
+	assert.equal(controller.isFocused?.(), false);
+});

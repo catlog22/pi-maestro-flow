@@ -185,7 +185,7 @@ export class TodoOverlay implements Component, Focusable {
     if (status === "blocked") return theme.fg("error", "! blocked");
     if (status === "completed") return theme.fg("success", "✓ completed");
     if (status === "deleted") return theme.fg("dim", "⊘ deleted");
-    return theme.fg("dim", "○ pending");
+    return theme.fg("dim", "□ pending");
   }
 
   private separator(width: number): string {
@@ -214,7 +214,8 @@ export class TodoOverlay implements Component, Focusable {
   private moveScope(delta: number): void {
     const scopes = this.scopes();
     this.scopeIndex = wrapIndex(this.scopeIndex + delta, scopes.length);
-    this.selected = 0;
+    // Keep the cursor highlight on the closest task instead of jumping to the top.
+    this.selected = clampIndex(this.selected, this.filteredTasks().length);
     this.mode = "list";
     this.params.requestRender();
   }

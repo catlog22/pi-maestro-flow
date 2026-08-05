@@ -26,7 +26,7 @@ export interface MailboxHostContext {
 /**
  * Builds a MailboxAuthority from the live TeammateState.
  * Revalidates route via canProxySendTo, generation via state.sessionGeneration,
- * and lease via the recipient agent's current lease token.
+ * and lease via the recipient agent's current SessionLease epoch/nonce.
  */
 export declare function createMailboxAuthority(context: MailboxHostContext): MailboxAuthority;
 export interface MailboxHostOptions {
@@ -45,12 +45,16 @@ export interface MailboxHostOptions {
     }) => Promise<void>;
     mode?: RolloutMode;
     pollMs?: number;
+    /** GC sweep interval (default 10 minutes). */
+    gcIntervalMs?: number;
     now?: () => number;
 }
 export declare class MailboxHost {
+    #private;
     readonly service: MailboxService;
     readonly rollout: MailboxRollout;
-    readonly mode: RolloutMode;
+    /** Live mode — proxies the rollout controller so runtime setMode stays the single source of truth. */
+    get mode(): RolloutMode;
     constructor(options: MailboxHostOptions);
     stop(): Promise<void>;
 }

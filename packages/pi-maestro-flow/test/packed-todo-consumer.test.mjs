@@ -10,13 +10,15 @@ import test from "node:test";
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const teammateRoot = resolve(packageRoot, "..", "pi-maestro-teammate");
 const settingsCoreRoot = resolve(packageRoot, "..", "pi-maestro-settings-core");
+const cockpitRoot = resolve(packageRoot, "..", "pi-cockpit");
 const require = createRequire(import.meta.url);
 const localFlowPackage = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+const localCockpitPackage = JSON.parse(readFileSync(join(cockpitRoot, "package.json"), "utf8"));
 const piSdkVersion = localFlowPackage.devDependencies["@earendil-works/pi-coding-agent"];
 const npmCommand = [process.execPath, process.env.npm_execpath ?? require.resolve("npm/bin/npm-cli.js")];
 const packTimeout = 360_000;
 const installTimeout = 600_000;
-const testTimeout = packTimeout * 3 + installTimeout + 120_000;
+const testTimeout = packTimeout * 4 + installTimeout + 120_000;
 
 test("packed child Pi discovers shared Todo without root-only lifecycle tools", { timeout: testTimeout }, () => {
   const base = process.env.SystemDrive ? `${process.env.SystemDrive}\\tmp` : tmpdir();
@@ -42,6 +44,13 @@ test("packed child Pi discovers shared Todo without root-only lifecycle tools", 
       process.env,
       packTimeout,
     ).stdout);
+    const cockpitPack = parseTrailingJson(run(
+      npmCommand,
+      ["pack", "--json", "--pack-destination", root],
+      cockpitRoot,
+      process.env,
+      packTimeout,
+    ).stdout);
     const flowPack = parseTrailingJson(run(
       npmCommand,
       ["pack", "--json", "--pack-destination", root],
@@ -51,10 +60,13 @@ test("packed child Pi discovers shared Todo without root-only lifecycle tools", 
     ).stdout);
     const settingsCoreTarball = join(root, settingsCorePack[0].filename);
     const teammateTarball = join(root, teammatePack[0].filename);
+    const cockpitTarball = join(root, cockpitPack[0].filename);
     const flowTarball = join(root, flowPack[0].filename);
     assert.equal(existsSync(settingsCoreTarball), true);
     assert.equal(existsSync(teammateTarball), true);
+    assert.equal(existsSync(cockpitTarball), true);
     assert.equal(existsSync(flowTarball), true);
+    assert.equal(cockpitPack[0].version, localCockpitPackage.version);
 
     writeFileSync(join(consumer, "package.json"), `${JSON.stringify({ private: true }, null, 2)}\n`);
     const env = {
@@ -67,6 +79,7 @@ test("packed child Pi discovers shared Todo without root-only lifecycle tools", 
       "install",
       settingsCoreTarball,
       teammateTarball,
+      cockpitTarball,
       flowTarball,
       `@earendil-works/pi-agent-core@${piSdkVersion}`,
       `@earendil-works/pi-ai@${piSdkVersion}`,
@@ -79,9 +92,47 @@ test("packed child Pi discovers shared Todo without root-only lifecycle tools", 
     const installedFlow = join(consumer, "node_modules", "pi-maestro-flow");
     const installedSettingsCore = join(consumer, "node_modules", "pi-maestro-settings-core");
     const installedTeammate = join(consumer, "node_modules", "pi-maestro-teammate");
+    const installedCockpit = join(consumer, "node_modules", "pi-cockpit");
+    const agentDir = join(home, ".pi", "agent");
+    const settingsPath = join(agentDir, "settings.json");
+    const statePath = join(agentDir, "pi-maestro-flow-companions.json");
     assert.equal(lstatSync(installedFlow).isSymbolicLink(), false);
     assert.equal(lstatSync(installedSettingsCore).isSymbolicLink(), false);
     assert.equal(lstatSync(installedTeammate).isSymbolicLink(), false);
+    assert.equal(lstatSync(installedCockpit).isSymbolicLink(), false);
+    assert.equal(JSON.parse(readFileSync(join(installedCockpit, "package.json"), "utf8")).version, localCockpitPackage.version);
+    assert.equal(existsSync(settingsPath), true);
+    assert.equal(existsSync(statePath), true);
+    const installedSettings = JSON.parse(readFileSync(settingsPath, "utf8"));
+    const registeredSources = installedSettings.packages
+      .map((entry) => typeof entry === "string" ? entry : entry?.source)
+      .filter((entry) => typeof entry === "string");
+    assert.ok(registeredSources.includes(installedTeammate), registeredSources.join(","));
+    assert.ok(registeredSources.includes(installedCockpit), registeredSources.join(","));
+    const companionState = JSON.parse(readFileSync(statePath, "utf8"));
+    assert.equal(companionState.companions["pi-maestro-teammate"].source, installedTeammate);
+    assert.equal(companionState.companions["pi-cockpit"].source, installedCockpit);
+
+    const piCommand = [
+      process.execPath,
+      join(consumer, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js"),
+    ];
+    const discoveryEvidencePath = join(consumer, "discovered-tools.json");
+    const discoveryVerifierPath = join(consumer, "verify-discovered-tools.mjs");
+    writeFileSync(discoveryVerifierPath, `import { writeFileSync } from "node:fs";
+export default function register(pi) {
+  pi.on("session_start", () => {
+    writeFileSync(${JSON.stringify(discoveryEvidencePath)}, JSON.stringify(pi.getAllTools().map((tool) => tool.name)));
+  });
+}
+`);
+    run(piCommand, [
+      "--offline", "--mode", "rpc", "--no-session", "--no-skills", "--no-context-files",
+      "--extension", join(installedFlow, "src", "extension", "index.ts"),
+      "--extension", discoveryVerifierPath,
+    ], workspace, { ...env, PATH: `${join(consumer, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}` }, 45_000, `${JSON.stringify({ id: "state", type: "get_state" })}\n`);
+    const discoveredTools = JSON.parse(readFileSync(discoveryEvidencePath, "utf8"));
+    assert.ok(discoveredTools.includes("teammate"), discoveredTools.join(","));
 
     const evidencePath = join(consumer, "child-tools.json");
     const verifierPath = join(consumer, "verify-child-tools.mjs");
@@ -92,17 +143,13 @@ export default function register(pi) {
   });
 }
 `);
-    const piCommand = [
-      process.execPath,
-      join(consumer, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js"),
-    ];
     const runtimeEnv = {
       ...env,
       PI_TEAMMATE_CHILD: "1",
       PATH: `${join(consumer, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}`,
     };
     run(piCommand, [
-      "--offline", "--mode", "rpc", "--no-session", "--no-extensions", "--no-skills",
+      "--offline", "--mode", "rpc", "--no-session", "--no-skills",
       "--no-context-files",
       "--extension", join(installedFlow, "src", "extension", "index.ts"),
       "--extension", verifierPath,

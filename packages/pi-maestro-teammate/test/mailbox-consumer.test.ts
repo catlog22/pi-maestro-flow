@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test, { afterEach, beforeEach } from "node:test";
 import {
   MailboxFileStore,
+  computeEnvelopeHash,
   createMailboxPaths,
   ensureMailboxDirectories,
 } from "../src/extension/mailbox/file-store.ts";
@@ -43,7 +44,7 @@ function permissiveAuthority(): MailboxAuthority {
 }
 
 function makeEnvelope(id: string, overrides: Partial<MailboxEnvelope> = {}): MailboxEnvelope {
-  return {
+  const base: Omit<MailboxEnvelope, "hash"> = {
     messageId: id,
     schemaVersion: MAILBOX_SCHEMA_VERSION,
     workspaceId: "a".repeat(64),
@@ -62,9 +63,9 @@ function makeEnvelope(id: string, overrides: Partial<MailboxEnvelope> = {}): Mai
     leaseEpoch: 1,
     leaseNonce: "nonce-abc",
     payload: "test",
-    hash: "dummy-hash",
     ...overrides,
   };
+  return { ...base, hash: computeEnvelopeHash(base) };
 }
 
 afterEach(async () => {
@@ -154,7 +155,7 @@ test("isHighPriority classifies correctly", () => {
 
 // --- Consumer integration ---
 
-test("consumer dispatches a ready message and transitions to accepted", async () => {
+test("consumer dispatches a ready message and transitions to applied", async () => {
   const dispatched: string[] = [];
   const consumer = new MailboxConsumer({
     store,
@@ -178,12 +179,13 @@ test("consumer dispatches a ready message and transitions to accepted", async ()
   assert.equal(dispatched.length, 1);
   assert.equal(dispatched[0], envelope.messageId);
 
-  // Message should be in accepted state (awaiting IPC ack)
-  const accepted = await store.readEnvelope("accepted", envelope.messageId);
-  assert.ok(accepted);
+  // In-process dispatch success is the delivery confirmation: message is APPLIED.
+  const applied = await store.readEnvelope("applied", envelope.messageId);
+  assert.ok(applied);
+  assert.equal(await store.readEnvelope("accepted", envelope.messageId), undefined);
 });
 
-test("consumer acknowledge transitions accepted to applied", async () => {
+test("consumer acknowledge transitions accepted to applied (IPC-ack path)", async () => {
   const consumer = new MailboxConsumer({
     store,
     router,
@@ -194,20 +196,31 @@ test("consumer acknowledge transitions accepted to applied", async () => {
     now: () => nowMs,
   });
 
+  // Place a message in accepted directly (simulating a claim+accept without a
+  // completed in-process dispatch, e.g. an external IPC-ack flow).
   const envelope = makeEnvelope("00000000-0000-4000-8000-000000000011");
   await store.writeStaging(envelope);
   await store.promoteToReady(envelope.messageId);
+  const claim = {
+    messageId: envelope.messageId,
+    claimerNonce: "external-ipc",
+    claimedAt: nowMs,
+    leaseExpiresAt: nowMs + 30_000,
+    lastHeartbeatAt: nowMs,
+  };
+  assert.equal(await store.claim(envelope.messageId, claim), true);
+  assert.equal(await store.accept(envelope.messageId, claim), true);
 
-  consumer.start();
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  await consumer.stop();
-
-  // Acknowledge
+  // Acknowledge via IPC
   const acked = await consumer.acknowledge(envelope.messageId);
   assert.equal(acked, true);
 
   const applied = await store.readEnvelope("applied", envelope.messageId);
   assert.ok(applied);
+
+  // Idempotent: acknowledging an already-applied message is a no-op.
+  assert.equal(await consumer.acknowledge(envelope.messageId), false);
+  assert.equal(await consumer.acknowledge("not-a-valid-message-id"), false);
 });
 
 test("consumer skips messages for other recipients", async () => {

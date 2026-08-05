@@ -9,9 +9,16 @@ import {
   type Focusable,
   type KeyId,
   matchesKey,
-  truncateToWidth,
-  visibleWidth,
 } from "@earendil-works/pi-tui";
+import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
+import {
+  fit,
+  frame,
+  headerLine,
+  helpLine,
+  rule,
+  type FrameTheme,
+} from "pi-cockpit/src/settings/ui-primitives.ts";
 import {
   ALL_CONFIG_KEYS,
   SMART_SEARCH_CONFIG_KEYS,
@@ -27,15 +34,93 @@ import {
   type WebAccessSyncMapping,
 } from "../tools/smart-search-config.ts";
 import { invalidateWebConfigCaches } from "../tools/web-access/web-config-cache.ts";
-interface SmartSearchConfigTheme {
-  fg(role: string, text: string): string;
-  bold(text: string): string;
-}
+interface SmartSearchConfigTheme extends FrameTheme {}
 
 export interface SmartSearchConfigStoreLike {
   load(): Promise<SmartSearchConfig>;
   save(patch: Record<string, unknown | undefined>): Promise<SmartSearchConfig>;
 }
+
+const CATALOGS = {
+  en: {
+    "appName": "Smart Search",
+    "title": "Smart Search configuration",
+    "group.custom": "Custom",
+    "source.smartSearch": "Smart Search",
+    "source.webAccess": "web-access",
+    "state.saving": "Saving…",
+    "edit.unsetHint": "unset key on save",
+    "edit.envVar": "(env var)",
+    "edit.shellCommand": "(shell command)",
+    "edit.secretPlaceholder": "type replacement secret",
+    "edit.emptyPlaceholder": "empty value",
+    "filter.line": "Filter: {query} · {count}/{total} · {source}",
+    "filter.allKeys": "all keys",
+    "footer.escBack": "Esc back",
+    "footer.escClose": "Esc close",
+    "footer.editHelp": "Enter save · Esc back · Ctrl+U clear · Backspace delete",
+    "footer.listHelp": "Type provider/capability/key · PgUp/PgDn · Enter edit · Tab source · Ctrl+S sync · Esc",
+    "notice.noMatchKeys": "No matching configuration keys",
+    "notice.noMatchKey": "No matching configuration key",
+    "notice.filterCleared": "Filter cleared",
+    "notice.source": "Source: {name}",
+    "notice.sourceSmartSearch": "Smart Search config",
+    "notice.sourceWebSearch": "web-search.json",
+    "notice.unsetOnSave": "Unset {key} on save",
+    "notice.secretUnchanged": "Secret unchanged",
+    "notice.savingKey": "Saving {key}…",
+    "notice.saved": "Saved · {key}",
+    "notice.saveFailed": "Save failed",
+    "notice.syncUnavailable": "Sync not available",
+    "notice.synced": "Synced Smart Search → web-search.json",
+    "notice.syncFailed": "Sync failed",
+    "sync.synced": "✓ synced",
+    "sync.conflict": "⚠ conflict",
+    "sync.smartOnly": "→ smart-only",
+    "sync.webOnly": "← web-only",
+    "sync.unmapped": "",
+  },
+  "zh-CN": {
+    "appName": "Smart Search",
+    "title": "Smart Search 配置",
+    "group.custom": "自定义",
+    "source.smartSearch": "Smart Search",
+    "source.webAccess": "web-access",
+    "state.saving": "… 正在保存",
+    "edit.unsetHint": "保存时移除该键",
+    "edit.envVar": "(环境变量)",
+    "edit.shellCommand": "(Shell 命令)",
+    "edit.secretPlaceholder": "输入替换密钥",
+    "edit.emptyPlaceholder": "空值",
+    "filter.line": "筛选：{query} · {count}/{total} · {source}",
+    "filter.allKeys": "全部键",
+    "footer.escBack": "Esc 返回",
+    "footer.escClose": "Esc 关闭",
+    "footer.editHelp": "Enter 保存 · Esc 返回 · Ctrl+U 清空 · Backspace 删除",
+    "footer.listHelp": "输入 provider/能力/键 · PgUp/PgDn · Enter 编辑 · Tab 切换来源 · Ctrl+S 同步 · Esc",
+    "notice.noMatchKeys": "没有匹配的配置键",
+    "notice.noMatchKey": "没有匹配的配置键",
+    "notice.filterCleared": "已清除筛选",
+    "notice.source": "来源：{name}",
+    "notice.sourceSmartSearch": "Smart Search 配置",
+    "notice.sourceWebSearch": "web-search.json",
+    "notice.unsetOnSave": "保存时移除 {key}",
+    "notice.secretUnchanged": "密钥未变更",
+    "notice.savingKey": "正在保存 {key}…",
+    "notice.saved": "已保存 · {key}",
+    "notice.saveFailed": "保存失败",
+    "notice.syncUnavailable": "同步不可用",
+    "notice.synced": "已同步 Smart Search → web-search.json",
+    "notice.syncFailed": "同步失败",
+    "sync.synced": "✓ 已同步",
+    "sync.conflict": "⚠ 冲突",
+    "sync.smartOnly": "→ 仅 Smart Search",
+    "sync.webOnly": "← 仅 web-search",
+    "sync.unmapped": "",
+  },
+} as const;
+
+type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
 
 // ---------------------------------------------------------------------------
 // Web Access config sync — bridges ~/.pi/web-search.json ↔ Smart Search config
@@ -154,21 +239,21 @@ export class WebAccessConfigSync implements WebAccessConfigSyncLike {
   }
 }
 
-// 同步状态标签：glyph + 文本（规范 ui-conventions-004：状态 MUST 同时使用稳定
-// glyph 与文本，颜色只能增强语义）。不用裸 ✓/⚠，避免被误认成可勾选的复选框。
-const SYNC_STATUS_LABEL: Record<SyncStatus, string> = {
-  synced: "✓ synced",
-  conflict: "⚠ conflict",
-  "smart-only": "→ smart-only",
-  "web-only": "← web-only",
-  unmapped: "",
+// 同步状态标签走目录文案（glyph + 文本，规范 ui-conventions-004：状态 MUST 同时
+// 使用稳定 glyph 与文本，颜色只能增强语义）；不用裸 ✓/⚠，避免被误认成可勾选的复选框。
+const SYNC_STATUS_KEY: Record<SyncStatus, CatalogKey> = {
+  synced: "sync.synced",
+  conflict: "sync.conflict",
+  "smart-only": "sync.smartOnly",
+  "web-only": "sync.webOnly",
+  unmapped: "sync.unmapped",
 };
 
-const SYNC_STATUS_TONE: Record<SyncStatus, string> = {
+const SYNC_STATUS_TONE: Record<SyncStatus, StatusTone> = {
   synced: "success",
   conflict: "warning",
   "smart-only": "dim",
-  "web-only": "accent",
+  "web-only": "dim",
   unmapped: "dim",
 };
 
@@ -180,6 +265,8 @@ export interface SmartSearchConfigOverlayParams {
   close: () => void;
   initialKey?: string;
   sync?: WebAccessConfigSyncLike;
+  /** UI language; defaults to en. */
+  locale?: SupportedSettingsLocale;
 }
 
 type OverlayMode = "list" | "edit";
@@ -203,6 +290,7 @@ type ConfigSource = "smart-search" | "web-access";
 
 export class SmartSearchConfigOverlay implements Component, Focusable {
   focused = false;
+  private readonly locale: SupportedSettingsLocale;
   private config: SmartSearchConfig;
   private readonly keys: string[];
   private selected = 0;
@@ -220,6 +308,7 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
   private readonly sync: WebAccessConfigSyncLike | undefined;
 
   constructor(private readonly params: SmartSearchConfigOverlayParams) {
+    this.locale = params.locale ?? "en";
     this.config = { ...params.config };
     this.sync = params.sync;
     const known = new Set<string>(ALL_CONFIG_KEYS);
@@ -236,47 +325,54 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
     if (this.pasteFlushTimer) clearTimeout(this.pasteFlushTimer);
   }
 
+  /** Translate a catalog key with optional {var} substitution. */
+  private t(key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
+    const catalog = CATALOGS[this.locale] ?? CATALOGS["en"];
+    const template: unknown = catalog[key];
+    const text = typeof template === "string" ? template : CATALOGS["en"][key] as string;
+    if (!vars) return text;
+    return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
+      vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
+  }
+
   render(width: number): string[] {
     const safeWidth = Math.max(1, width);
     this.lastWidth = safeWidth;
     if (safeWidth < 20) {
-      const action = this.mode === "edit" ? "Esc back" : "Esc close";
-      return [truncateToWidth(`Smart Search · ${action}`, safeWidth, "…")];
+      const action = this.mode === "edit" ? this.t("footer.escBack") : this.t("footer.escClose");
+      return [fit(`${this.t("appName")} · ${action}`, safeWidth)];
     }
 
     const inner = Math.max(1, safeWidth - 2);
     const key = this.currentKey() ?? "";
     const rows = [
-      truncateToWidth(this.params.theme.bold("Smart Search configuration"), inner, "…"),
-      this.params.theme.fg("dim", "─".repeat(inner)),
+      headerLine(this.params.theme, this.t("title"), [], inner),
+      rule(inner),
     ];
     if (this.mode === "edit") {
       const secret = isSmartSearchSecretKey(key);
-      const credentialHint = credentialSourceHint(this.draft);
+      const credentialHint = this.credentialSourceHint(this.draft);
       const renderedDraft = this.unsetDraft
-        ? this.params.theme.fg("warning", "unset key on save")
+        ? this.params.theme.fg("warning", this.t("edit.unsetHint"))
         : credentialHint
           ? this.params.theme.fg("accent", this.draft) + " " + this.params.theme.fg("dim", credentialHint)
           : secret && this.draft ? maskSmartSearchSecret(this.draft) : this.draft;
-      rows.push(truncateToWidth(this.params.theme.fg("accent", key), inner, "…"));
-      rows.push(truncateToWidth(`> ${renderedDraft || this.params.theme.fg("dim", secret ? "type replacement secret" : "empty value")}`, inner, "…"));
-      rows.push(truncateToWidth(
-        this.params.theme.fg("dim", this.saving ? "Saving…" : "Enter save · Esc back · Ctrl+U clear · Backspace delete"),
-        inner,
-        "…",
-      ));
+      rows.push(fit(this.params.theme.fg("accent", key), inner));
+      rows.push(fit(`> ${renderedDraft || this.params.theme.fg("dim", secret ? this.t("edit.secretPlaceholder") : this.t("edit.emptyPlaceholder"))}`, inner));
+      rows.push(helpLine(this.params.theme, this.saving ? this.t("state.saving") : this.t("footer.editHelp"), inner));
     } else {
       const filteredKeys = this.filteredKeys();
       const start = Math.max(0, Math.min(this.selected - Math.floor(MAX_VISIBLE_ITEMS / 2), filteredKeys.length - MAX_VISIBLE_ITEMS));
       const visibleKeys = filteredKeys.slice(start, start + MAX_VISIBLE_ITEMS);
-      const sourceLabel = this.configSource === "smart-search" ? "Smart Search" : "web-access";
-      rows.push(truncateToWidth(
-        this.params.theme.fg("dim", `Filter: ${this.query || "all keys"} · ${filteredKeys.length}/${this.keys.length} · ${sourceLabel}`),
-        inner,
-        "…",
-      ));
+      const sourceLabel = this.configSource === "smart-search" ? this.t("source.smartSearch") : this.t("source.webAccess");
+      rows.push(helpLine(this.params.theme, this.t("filter.line", {
+        query: this.query || this.t("filter.allKeys"),
+        count: filteredKeys.length,
+        total: this.keys.length,
+        source: sourceLabel,
+      }), inner));
       if (visibleKeys.length === 0) {
-        rows.push(truncateToWidth(this.params.theme.fg("warning", "No matching configuration keys"), inner, "…"));
+        rows.push(this.params.theme.fg("warning", fit(this.t("notice.noMatchKeys"), inner)));
       }
       for (let offset = 0; offset < visibleKeys.length; offset++) {
         const itemKey = visibleKeys[offset];
@@ -286,20 +382,15 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
         const value = this.configSource === "web-access" && this.sync
           ? displaySmartSearchConfigValue(itemKey, this.sync.webValueForKey(itemKey))
           : displaySmartSearchConfigValue(itemKey, this.config[itemKey]);
-        const line = `${marker} [${group?.label ?? "Custom"}] ${itemKey} = ${value}${syncTag}`;
-        rows.push(truncateToWidth(
+        const line = `${marker} [${group?.label ?? this.t("group.custom")}] ${itemKey} = ${value}${syncTag}`;
+        rows.push(fit(
           start + offset === this.selected ? this.params.theme.fg("accent", line) : line,
           inner,
-          "…",
         ));
       }
-      rows.push(truncateToWidth(
-        this.params.theme.fg("dim", "Type provider/capability/key · PgUp/PgDn · Enter edit · Tab source · Ctrl+S sync · Esc"),
-        inner,
-        "…",
-      ));
+      rows.push(helpLine(this.params.theme, this.t("footer.listHelp"), inner));
     }
-    if (this.status) rows.push(truncateToWidth(this.params.theme.fg(this.statusTone, this.status), inner, "…"));
+    if (this.status) rows.push(fit(this.params.theme.fg(this.statusTone, this.status), inner));
     return frame(rows, safeWidth, this.params.theme);
   }
 
@@ -346,7 +437,7 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
       if (this.query) {
         this.query = "";
         this.selected = 0;
-        this.status = "Filter cleared";
+        this.status = this.t("notice.filterCleared");
         this.statusTone = "dim";
         return;
       }
@@ -355,7 +446,9 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
     }
     if (matchesKey(data, Key.tab)) {
       this.configSource = this.configSource === "smart-search" ? "web-access" : "smart-search";
-      this.status = `Source: ${this.configSource === "smart-search" ? "Smart Search config" : "web-search.json"}`;
+      this.status = this.t("notice.source", {
+        name: this.configSource === "smart-search" ? this.t("notice.sourceSmartSearch") : this.t("notice.sourceWebSearch"),
+      });
       this.statusTone = "dim";
       return;
     }
@@ -402,7 +495,7 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
     if (data === CTRL_U) {
       this.draft = "";
       this.unsetDraft = true;
-      this.status = `Unset ${this.currentKey()} on save`;
+      this.status = this.t("notice.unsetOnSave", { key: this.currentKey() ?? "" });
       this.statusTone = "dim";
       return;
     }
@@ -425,7 +518,7 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
   private beginEdit(): void {
     const key = this.currentKey();
     if (!key) {
-      this.status = "No matching configuration key";
+      this.status = this.t("notice.noMatchKey");
       this.statusTone = "warning";
       return;
     }
@@ -440,13 +533,13 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
     if (!key) return;
     if (isSmartSearchSecretKey(key) && !this.draft && !this.unsetDraft) {
       this.mode = "list";
-      this.status = "Secret unchanged";
+      this.status = this.t("notice.secretUnchanged");
       this.statusTone = "dim";
       this.params.requestRender();
       return;
     }
     this.saving = true;
-    this.status = `Saving ${key}…`;
+    this.status = this.t("notice.savingKey", { key });
     this.statusTone = "dim";
     this.params.requestRender();
     try {
@@ -455,11 +548,11 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
       this.mode = "list";
       this.draft = "";
       this.unsetDraft = false;
-      this.status = `Saved · ${key}`;
+      this.status = this.t("notice.saved", { key });
       this.statusTone = "success";
     } catch (error) {
       this.saving = false;
-      this.status = `Save failed · ${errorMessage(error)}`;
+      this.status = `${this.t("notice.saveFailed")} · ${errorMessage(error)}`;
       this.statusTone = "error";
     }
     this.params.requestRender();
@@ -482,23 +575,30 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
     if (!this.sync) return "";
     const status = this.sync.syncStatusForKey(key, this.config[key]);
     if (status === "unmapped") return "";
-    const label = SYNC_STATUS_LABEL[status];
+    const label = this.t(SYNC_STATUS_KEY[status]);
     const tone = SYNC_STATUS_TONE[status];
     return ` ${this.params.theme.fg(tone, label)}`;
   }
 
+  private credentialSourceHint(value: string): string | undefined {
+    if (!value) return undefined;
+    if (/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(value)) return this.t("edit.envVar");
+    if (value.startsWith("!")) return this.t("edit.shellCommand");
+    return undefined;
+  }
+
   private performSync(): void {
     if (!this.sync) {
-      this.status = "Sync not available";
+      this.status = this.t("notice.syncUnavailable");
       this.statusTone = "warning";
       return;
     }
     try {
       this.sync.pushToWebConfig(this.config);
-      this.status = "Synced Smart Search → web-search.json";
+      this.status = this.t("notice.synced");
       this.statusTone = "success";
     } catch (error) {
-      this.status = `Sync failed · ${errorMessage(error)}`;
+      this.status = `${this.t("notice.syncFailed")} · ${errorMessage(error)}`;
       this.statusTone = "error";
     }
   }
@@ -560,19 +660,6 @@ function isHomeKey(data: string): boolean {
 
 function isEndKey(data: string): boolean {
   return data === "\x1b[F" || data === "\x1bOF" || data === "\x1b[4~";
-}
-
-function frame(rows: string[], width: number, theme: SmartSearchConfigTheme): string[] {
-  const inner = Math.max(0, width - 2);
-  const border = (value: string) => theme.fg("dim", value);
-  return [
-    border(`╭${"─".repeat(inner)}╮`),
-    ...rows.map((row) => {
-      const content = truncateToWidth(row, inner, "…");
-      return `${border("│")}${content}${" ".repeat(Math.max(0, inner - visibleWidth(content)))}${border("│")}`;
-    }),
-    border(`╰${"─".repeat(inner)}╯`),
-  ];
 }
 
 function errorMessage(error: unknown): string {
@@ -671,11 +758,4 @@ function partialMarkerSuffix(value: string, marker: string): string {
     if (marker.startsWith(suffix)) return suffix;
   }
   return "";
-}
-
-function credentialSourceHint(value: string): string | undefined {
-  if (!value) return undefined;
-  if (/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(value)) return "(env var)";
-  if (value.startsWith("!")) return "(shell command)";
-  return undefined;
 }

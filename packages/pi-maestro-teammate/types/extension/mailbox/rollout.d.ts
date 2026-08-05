@@ -36,7 +36,7 @@ export declare class MailboxRollout {
     get mode(): RolloutMode;
     get config(): Readonly<RolloutConfig>;
     /** Switch rollout mode. Preserves v2 files on downgrade. */
-    setMode(mode: RolloutMode): void;
+    setMode(mode: RolloutMode): Promise<void>;
     /** Get the capability to advertise to peers based on current mode. */
     advertisedCapability(): MailboxCapability;
     /**
@@ -61,12 +61,13 @@ export declare class MailboxRollout {
         path: "v1" | "v2" | "shadow";
         result: MailboxEnqueueResult | {
             ok: true;
-            messageId: string;
+            messageId?: string;
             state: "ready";
         };
     }>;
     /**
-     * Check if v2 files exist (for drain verification before cleanup).
+     * Check if v2 files still need draining (live messages only — applied/dead
+     * receipts are garbage-collected and do not block cleanup).
      */
     hasV2Files(): Promise<boolean>;
 }

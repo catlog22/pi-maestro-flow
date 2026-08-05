@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test, { afterEach, beforeEach } from "node:test";
 import {
   MailboxFileStore,
+  computeEnvelopeHash,
   createMailboxPaths,
   ensureMailboxDirectories,
 } from "../src/extension/mailbox/file-store.ts";
@@ -46,7 +47,7 @@ function permissiveAuthority(): MailboxAuthority {
 }
 
 function makeEnvelope(id: string, overrides: Partial<MailboxEnvelope> = {}): MailboxEnvelope {
-  return {
+  const base: Omit<MailboxEnvelope, "hash"> = {
     messageId: id,
     schemaVersion: MAILBOX_SCHEMA_VERSION,
     workspaceId: "a".repeat(64),
@@ -65,9 +66,9 @@ function makeEnvelope(id: string, overrides: Partial<MailboxEnvelope> = {}): Mai
     leaseEpoch: 1,
     leaseNonce: "nonce-abc",
     payload: "test",
-    hash: "dummy-hash",
     ...overrides,
   };
+  return { ...base, hash: computeEnvelopeHash(base) };
 }
 
 afterEach(async () => {
@@ -117,8 +118,8 @@ test("concurrent claims: two consumers never both claim the same message", async
 
   // Exactly one dispatch, no duplicates
   assert.equal(dispatched.length, 1);
-  // Message should be in accepted (claimed + dispatched once)
-  assert.ok(await store.readEnvelope("accepted", envelope.messageId));
+  // Message should be in applied (claimed + dispatched once)
+  assert.ok(await store.readEnvelope("applied", envelope.messageId));
 });
 
 test("concurrent claims over N messages: each claimed exactly once", async () => {
@@ -188,6 +189,7 @@ test("crash injection: stranded claimed message is reclaimed and re-dispatched",
 });
 
 test("crash injection: accepted message without ack is replayed after restart", async () => {
+  const dispatchedAfterReplay: string[] = [];
   const envelope = makeEnvelope("00000000-0000-4000-8000-000000000021");
   await store.writeStaging(envelope);
   await store.promoteToReady(envelope.messageId);
@@ -201,24 +203,22 @@ test("crash injection: accepted message without ack is replayed after restart", 
   await store.claim(envelope.messageId, claim);
   await store.accept(envelope.messageId, claim);
 
-  // Simulate restart: move accepted back to ready manually (execution layer does this)
-  const acceptedEnv = await store.readEnvelope("accepted", envelope.messageId);
-  assert.ok(acceptedEnv);
-  await store.remove("accepted", envelope.messageId);
-  await store.writeStaging(acceptedEnv);
-  await store.promoteToReady(envelope.messageId);
-
-  const dispatched: string[] = [];
+  // Simulate restart: replayAcceptedToReady moves accepted back to ready.
   const restarted = new MailboxConsumer({
     store, router, recipientCorrelationId: "corr-001", pollMs: 10, now: () => nowMs,
     workspaceId: "a".repeat(64),
-    onDispatch: async (e) => { dispatched.push(e.messageId); },
+    onDispatch: async (e) => { dispatchedAfterReplay.push(e.messageId); },
   });
+  const replayed = await restarted.replayAcceptedToReady();
+  assert.equal(replayed, 1, "accepted-without-ack must be replayed to ready");
+  assert.equal(await store.readEnvelope("accepted", envelope.messageId), undefined);
+  assert.ok(await store.readEnvelope("ready", envelope.messageId));
+
   restarted.start();
   await new Promise((r) => setTimeout(r, 150));
   await restarted.stop();
 
-  assert.equal(dispatched.length, 1, "accepted-without-ack must replay after restart");
+  assert.equal(dispatchedAfterReplay.length, 1, "replayed message must be dispatched again");
 });
 
 // ===========================================================================

@@ -4,6 +4,7 @@ import {
   DEFAULT_MODEL_CIRCUIT_BREAKER_COOLDOWN_MS,
   DEFAULT_MODEL_CIRCUIT_BREAKER_THRESHOLD,
   ModelCircuitBreaker,
+  rankModelsByHealth,
   type AcquiredModelCandidate,
 } from "../src/models/model-circuit-breaker.ts";
 
@@ -266,4 +267,34 @@ test("onTransition fires on CLOSED→OPEN→HALF_OPEN→CLOSED transitions", () 
   assert.equal(trial.allowed, true);
   if (trial.allowed) breaker.recordSuccess(trial); // HALF_OPEN → CLOSED
   assert.deepEqual(transitions.map((t) => `${t.from}->${t.to}`), ["CLOSED->OPEN", "OPEN->HALF_OPEN", "HALF_OPEN->CLOSED"]);
+});
+
+test("rankModelsByHealth orders healthy first, OPEN last, and stays stable for ties", () => {
+  let now = 1_000;
+  const breaker = new ModelCircuitBreaker({ now: () => now });
+  const never = "never/tried";
+  const closed1 = "provider/closed1";
+  const closed2 = "provider/closed2";
+  const halfOpen = "provider/half";
+  const open = "provider/open";
+
+  breaker.recordRetryableFailure(acquire(breaker, closed1)); // CLOSED, 1 failure
+  breaker.recordRetryableFailure(acquire(breaker, closed2));
+  breaker.recordRetryableFailure(acquire(breaker, closed2)); // CLOSED, 2 failures
+  for (let failure = 0; failure < DEFAULT_MODEL_CIRCUIT_BREAKER_THRESHOLD; failure += 1) {
+    breaker.recordRetryableFailure(acquire(breaker, halfOpen));
+  }
+  for (let failure = 0; failure < DEFAULT_MODEL_CIRCUIT_BREAKER_THRESHOLD; failure += 1) {
+    breaker.recordRetryableFailure(acquire(breaker, open));
+  }
+  now += DEFAULT_MODEL_CIRCUIT_BREAKER_COOLDOWN_MS;
+  const trial = acquire(breaker, halfOpen); // OPEN → HALF_OPEN recovery trial in progress
+  assert.equal(trial.state, "HALF_OPEN");
+
+  const input = [open, halfOpen, closed2, never, closed1];
+  assert.deepEqual(rankModelsByHealth(input, breaker), [never, closed1, closed2, halfOpen, open]);
+  assert.deepEqual(input, [open, halfOpen, closed2, never, closed1], "input must not be mutated");
+
+  // Ties keep the configured order (stable sort): two never-tried candidates.
+  assert.deepEqual(rankModelsByHealth(["b/second", "a/first"], breaker), ["b/second", "a/first"]);
 });

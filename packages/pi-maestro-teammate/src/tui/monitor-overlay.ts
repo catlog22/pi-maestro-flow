@@ -144,7 +144,9 @@ export class MonitorOverlay {
   // --- Rendering ---
 
   render(width: number): string[] {
-    const inner = Math.max(20, width - 4);
+    // Follow the overlay width; the previous 20-col floor forced overflow on
+    // narrow terminals (frameLine truncates, borders repeat inner exactly).
+    const inner = Math.max(1, width - 4);
     const lines: string[] = [];
     const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
     const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;

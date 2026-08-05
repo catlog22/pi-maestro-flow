@@ -4,6 +4,7 @@ import {
   type ExtensionContext,
   type Skill,
 } from "@earendil-works/pi-coding-agent";
+import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
 import { loadSkillConfig, type SkillDefaults } from "./skill-config.ts";
 import { SkillManagerStore, type ManagedSkill, type ManagedSkillGroup } from "./skill-manager-store.ts";
 import {
@@ -16,12 +17,102 @@ export interface SkillManagerResult {
   configChanged: boolean;
 }
 
+const CATALOGS = {
+  en: {
+    "command.description": "Manage skill loading state and model-invocation permissions",
+    "notify.noTui": "The Skill Manager requires an interactive TUI.",
+    "notice.noSkills": "No skills found",
+    "input.title": "New skill group",
+    "input.prompt": "Enter a group name",
+    "notice.createCancelled": "Group creation cancelled",
+    "notice.createOk": "Group created · {name}",
+    "notice.createFailed": "Failed to create group · {message}",
+    "notice.moveNeedSkill": "Cannot move · select a skill first",
+    "defaultGroup": "Default prefix group",
+    "select.title": "Move {name}",
+    "notice.moveCancelled": "Move cancelled",
+    "notice.moveOk": "Moved · {name} → {target}",
+    "notice.moveFailed": "Failed to move · {message}",
+    "notice.deleteForbidden": "Cannot delete · the default prefix group is generated from skill names",
+    "confirm.title": "Delete group “{name}”?",
+    "confirm.detail": "Skills in the group return to the default prefix group; the skills themselves are not deleted.",
+    "notice.deleteCancelled": "Group deletion cancelled",
+    "notice.deleteOk": "Group deleted · {name}",
+    "notice.deleteFailed": "Failed to delete group · {message}",
+    "notice.noSelection": "Cannot act · no skill or group selected",
+    "status.toggling": "Skill · {action} {name}…",
+    "status.action.enable": "enabling",
+    "status.action.disable": "disabling",
+    "notice.toggledOn": "Enabled · {name} · reload after closing",
+    "notice.toggledOff": "Disabled · {name} · reload after closing",
+    "status.togglingGroup": "Skill · toggling group {name}…",
+    "notice.toggleGroupOk": "Group load state toggled · {name} · reload after closing",
+    "status.invocation": "Skill · {action} model invocation {name}…",
+    "status.action.allow": "allowing",
+    "status.action.forbid": "forbidding",
+    "notice.invocationAllowed": "Model invocation allowed · {name} · reload after closing",
+    "notice.invocationManual": "Manual-only invocation · {name} · reload after closing",
+    "status.togglingGroupInvocation": "Skill · toggling group model invocation {name}…",
+    "notice.toggleGroupInvocationOk": "Group model invocation toggled · {name} · reload after closing",
+    "notice.updateFailed": "Update failed · {message}",
+  },
+  "zh-CN": {
+    "command.description": "管理 Skill 的加载状态与模型主动调用权限",
+    "notify.noTui": "Skill 管理器需要交互式 TUI。",
+    "notice.noSkills": "没有发现 Skill",
+    "input.title": "新建 Skill 分组",
+    "input.prompt": "输入分组名称",
+    "notice.createCancelled": "已取消新建分组",
+    "notice.createOk": "已新建分组 · {name}",
+    "notice.createFailed": "新建分组失败 · {message}",
+    "notice.moveNeedSkill": "无法移动 · 请选择一个 Skill",
+    "defaultGroup": "默认前缀分组",
+    "select.title": "移动 {name}",
+    "notice.moveCancelled": "已取消移动",
+    "notice.moveOk": "已移动 · {name} → {target}",
+    "notice.moveFailed": "移动失败 · {message}",
+    "notice.deleteForbidden": "无法删除 · 默认前缀分组由 Skill 名称自动生成",
+    "confirm.title": "删除分组「{name}」？",
+    "confirm.detail": "组内 Skill 会返回默认前缀分组，Skill 本身不会被删除。",
+    "notice.deleteCancelled": "已取消删除分组",
+    "notice.deleteOk": "已删除分组 · {name}",
+    "notice.deleteFailed": "删除分组失败 · {message}",
+    "notice.noSelection": "无法操作 · 未选择 Skill 或分组",
+    "status.toggling": "Skill · 正在{action} {name}…",
+    "status.action.enable": "启用",
+    "status.action.disable": "停用",
+    "notice.toggledOn": "已启用 · {name} · 关闭后重载",
+    "notice.toggledOff": "已停用 · {name} · 关闭后重载",
+    "status.togglingGroup": "Skill · 正在切换分组 {name}…",
+    "notice.toggleGroupOk": "已切换分组加载状态 · {name} · 关闭后重载",
+    "status.invocation": "Skill · 正在{action}模型调用 {name}…",
+    "status.action.allow": "允许",
+    "status.action.forbid": "禁止",
+    "notice.invocationAllowed": "已允许模型主动调用 · {name} · 关闭后重载",
+    "notice.invocationManual": "已设为仅手动调用 · {name} · 关闭后重载",
+    "status.togglingGroupInvocation": "Skill · 正在切换分组模型调用 {name}…",
+    "notice.toggleGroupInvocationOk": "已切换分组模型调用状态 · {name} · 关闭后重载",
+    "notice.updateFailed": "更新失败 · {message}",
+  },
+} as const;
+
+type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
+
+function t(locale: SupportedSettingsLocale, key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
+  const catalog = CATALOGS[locale] ?? CATALOGS["zh-CN"];
+  const template: unknown = catalog[key];
+  const text = typeof template === "string" ? template : CATALOGS["zh-CN"][key] as string;
+  if (!vars) return text;
+  return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
+    vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
+}
+
 export function registerSkillManager(pi: ExtensionAPI): void {
   pi.registerCommand("skills", {
-    description: "管理 Skill 的加载状态与模型主动调用权限",
+    description: t("zh-CN", "command.description"),
     async handler(_args, ctx) {
       if (!ctx.hasUI) {
-        ctx.ui.notify("Skill 管理器需要交互式 TUI。", "error");
+        ctx.ui.notify(t("zh-CN", "notify.noTui"), "error");
         return;
       }
       const result = await runSkillManager(ctx, new SkillManagerStore(ctx.cwd));
@@ -53,30 +144,31 @@ export function registerSkillManager(pi: ExtensionAPI): void {
 export async function runSkillManager(
   ctx: ExtensionContext,
   store: SkillManagerStore,
+  locale: SupportedSettingsLocale = "zh-CN",
 ): Promise<SkillManagerResult> {
   let snapshot = await store.load();
   let uiState: Partial<SkillManagerUiState> = { query: "" };
-  let notice = snapshot.skills.length === 0 ? "没有发现 Skill" : undefined;
+  let notice = snapshot.skills.length === 0 ? t(locale, "notice.noSkills") : undefined;
   let configChanged = false;
 
   while (true) {
-    const action = await openSkillManagerOverlay(ctx, snapshot.skills, snapshot.groups, uiState, notice);
+    const action = await openSkillManagerOverlay(ctx, snapshot.skills, snapshot.groups, uiState, notice, locale);
     uiState = action.uiState;
     if (action.kind === "close") break;
 
     if (action.kind === "create-group") {
-      const name = await ctx.ui.input("新建 Skill 分组", "输入分组名称");
+      const name = await ctx.ui.input(t(locale, "input.title"), t(locale, "input.prompt"));
       if (!name) {
-        notice = "已取消新建分组";
+        notice = t(locale, "notice.createCancelled");
         continue;
       }
       try {
         snapshot = await store.createGroup(name);
         configChanged = true;
-        notice = `已新建分组 · ${name.trim()}`;
+        notice = t(locale, "notice.createOk", { name: name.trim() });
         uiState = { ...uiState, selectedKey: `group:custom:${name.trim()}` };
       } catch (error) {
-        notice = `新建分组失败 · ${error instanceof Error ? error.message : String(error)}`;
+        notice = t(locale, "notice.createFailed", { message: errorMessage(error) });
       }
       continue;
     }
@@ -90,81 +182,80 @@ export async function runSkillManager(
 
     if (action.kind === "assign-group") {
       if (!selected) {
-        notice = "无法移动 · 请选择一个 Skill";
+        notice = t(locale, "notice.moveNeedSkill");
         continue;
       }
-      const defaultGroup = "默认前缀分组";
+      const defaultGroup = t(locale, "defaultGroup");
       const customGroups = snapshot.groups.filter((group) => group.custom).map((group) => group.name);
-      const target = await ctx.ui.select(`移动 ${selected.name}`, [defaultGroup, ...customGroups]);
+      const target = await ctx.ui.select(t(locale, "select.title", { name: selected.name }), [defaultGroup, ...customGroups]);
       if (!target) {
-        notice = "已取消移动";
+        notice = t(locale, "notice.moveCancelled");
         continue;
       }
       try {
         snapshot = await store.assignSkillToGroup(selected.name, target === defaultGroup ? undefined : target);
         configChanged = true;
-        notice = `已移动 · ${selected.name} → ${target}`;
+        notice = t(locale, "notice.moveOk", { name: selected.name, target });
         uiState = { ...uiState, selectedKey: `skill:${selected.filePath}` };
       } catch (error) {
-        notice = `移动失败 · ${error instanceof Error ? error.message : String(error)}`;
+        notice = t(locale, "notice.moveFailed", { message: errorMessage(error) });
       }
       continue;
     }
 
     if (action.kind === "delete-group") {
       if (!selectedGroup?.custom) {
-        notice = "无法删除 · 默认前缀分组由 Skill 名称自动生成";
+        notice = t(locale, "notice.deleteForbidden");
         continue;
       }
       const confirmed = await ctx.ui.confirm(
-        `删除分组「${selectedGroup.name}」？`,
-        "组内 Skill 会返回默认前缀分组，Skill 本身不会被删除。",
+        t(locale, "confirm.title", { name: selectedGroup.name }),
+        t(locale, "confirm.detail"),
       );
       if (!confirmed) {
-        notice = "已取消删除分组";
+        notice = t(locale, "notice.deleteCancelled");
         continue;
       }
       try {
         snapshot = await store.deleteGroup(selectedGroup.name);
         configChanged = true;
-        notice = `已删除分组 · ${selectedGroup.name}`;
+        notice = t(locale, "notice.deleteOk", { name: selectedGroup.name });
         uiState = { ...uiState, selectedKey: undefined };
       } catch (error) {
-        notice = `删除分组失败 · ${error instanceof Error ? error.message : String(error)}`;
+        notice = t(locale, "notice.deleteFailed", { message: errorMessage(error) });
       }
       continue;
     }
 
     if (!selected && !selectedGroup) {
-      notice = "无法操作 · 未选择 Skill 或分组";
+      notice = t(locale, "notice.noSelection");
       continue;
     }
 
     try {
       if (action.kind === "toggle-enabled") {
         if (selected) {
-          ctx.ui.setStatus("skill-manager", `Skill · 正在${selected.enabled ? "停用" : "启用"} ${selected.name}…`);
+          const actionLabel = selected.enabled ? t(locale, "status.action.disable") : t(locale, "status.action.enable");
+          ctx.ui.setStatus("skill-manager", t(locale, "status.toggling", { action: actionLabel, name: selected.name }));
           snapshot = await store.toggleEnabled(selected);
-          notice = `${selected.enabled ? "已停用" : "已启用"} · ${selected.name} · 关闭后重载`;
+          notice = t(locale, selected.enabled ? "notice.toggledOff" : "notice.toggledOn", { name: selected.name });
         } else {
-          ctx.ui.setStatus("skill-manager", `Skill · 正在切换分组 ${selectedGroup!.name}…`);
+          ctx.ui.setStatus("skill-manager", t(locale, "status.togglingGroup", { name: selectedGroup!.name }));
           snapshot = await store.toggleGroupEnabled(selectedGroup!);
-          notice = `已切换分组加载状态 · ${selectedGroup!.name} · 关闭后重载`;
+          notice = t(locale, "notice.toggleGroupOk", { name: selectedGroup!.name });
         }
       } else {
         if (selected) {
-          ctx.ui.setStatus(
-            "skill-manager",
-            `Skill · 正在${selected.disableModelInvocation ? "允许" : "禁止"}模型调用 ${selected.name}…`,
-          );
+          const actionLabel = selected.disableModelInvocation ? t(locale, "status.action.allow") : t(locale, "status.action.forbid");
+          ctx.ui.setStatus("skill-manager", t(locale, "status.invocation", { action: actionLabel, name: selected.name }));
           snapshot = await store.toggleModelInvocation(selected);
           notice = selected.disableModelInvocation
-            ? `已允许模型主动调用 · ${selected.name} · 关闭后重载`
-            : `已设为仅手动调用 · ${selected.name} · 关闭后重载`;
+            ? t(locale, "notice.invocationAllowed", { name: selected.name })
+            : t(locale, "notice.invocationManual", { name: selected.name });
         } else {
-          ctx.ui.setStatus("skill-manager", `Skill · 正在切换分组模型调用 ${selectedGroup!.name}…`);
+          ctx.ui.setStatus("skill-manager", t(locale, "status.togglingGroupInvocation", { name: selectedGroup!.name }));
           snapshot = await store.toggleGroupModelInvocation(selectedGroup!);
-          notice = `已切换分组模型调用状态 · ${selectedGroup!.name} · 关闭后重载`;
+          notice = t(locale, "notice.toggleGroupInvocationOk", { name: selectedGroup!.name });
         }
       }
       configChanged = true;
@@ -173,7 +264,7 @@ export async function runSkillManager(
         selectedKey: selected ? `skill:${selected.filePath}` : action.uiState.selectedKey,
       };
     } catch (error) {
-      notice = `更新失败 · ${error instanceof Error ? error.message : String(error)}`;
+      notice = t(locale, "notice.updateFailed", { message: errorMessage(error) });
     } finally {
       ctx.ui.setStatus("skill-manager", undefined);
     }
@@ -213,6 +304,7 @@ async function openSkillManagerOverlay(
   groups: ManagedSkillGroup[],
   initialState: Partial<SkillManagerUiState>,
   notice: string | undefined,
+  locale: SupportedSettingsLocale,
 ): Promise<SkillManagerAction> {
   return ctx.ui.custom<SkillManagerAction>((tui, theme, _keybindings, done) =>
     new SkillManagerOverlay({
@@ -221,10 +313,15 @@ async function openSkillManagerOverlay(
       theme,
       notice,
       initialState,
+      locale,
       requestRender: () => tui.requestRender(),
       done,
     }), {
     overlay: true,
     overlayOptions: { anchor: "center", width: "94%", maxHeight: "92%" },
   });
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

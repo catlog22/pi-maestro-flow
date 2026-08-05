@@ -20,6 +20,7 @@ import {
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { NETWORK_RETRY_POLICY } from "pi-maestro-teammate/v1/retry";
+import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
 import {
   EFFORT_LEVELS,
   EFFORT_STATUS_KEY,
@@ -64,6 +65,78 @@ const API_FORMAT_NAMES: Readonly<Record<string, string>> = Object.freeze({
   "bedrock-converse-stream": "Amazon Bedrock Converse Stream",
   "google-vertex": "Google Vertex AI",
 });
+
+/**
+ * UI copy for the API Manager menu/notification surface. zh-CN is the runtime
+ * default until the host wires a locale signal through the command context.
+ */
+const CATALOGS = {
+  en: {
+    "effort.noModel": "No active model; cannot adjust thinking effort.",
+    "effort.currentMarker": " (current)",
+    "effort.title": "Choose thinking effort (current: {level})",
+    "effort.saveFailed": "Failed to save thinking effort: {message}",
+    "effort.applyFailed": "Failed to apply thinking effort: {message}",
+    "effort.applied": "Thinking effort set to {level}",
+    "retry.on": "On",
+    "retry.off": "Off",
+    "retry.menuTitle": "Provider auto-retry",
+    "retry.countPrompt": "Max retry count (1-{max})",
+    "retry.confirmTitle": "Save Provider retry settings?",
+    "retry.summary": "Auto-retry: {state}",
+    "retry.count": "Max retry count: {count}",
+    "retry.owner": "Execution owner: Pi core (exponential backoff, live status in TUI)",
+    "retry.notifySummary": "Provider auto-retry: {state}",
+    "retry.notifyPath": "Config: {path}",
+    "manager.needTui": "/api-manager interactive menu requires an interactive Pi session.",
+    "manager.visionNeedTui": "/api-manager vision requires an interactive Pi session; use /vision status to view state.",
+    "manager.effortNeedTui": "/api-manager effort requires an interactive Pi session.",
+    "manager.needProviderId": "/api-manager {action} requires a Provider ID.",
+    "manager.configureNeedTui": "/api-manager configure requires an interactive Pi session.",
+    "manager.actionNeedTui": "/api-manager {action} requires an interactive Pi session.",
+    "manager.specifyProvider": "Specify a Provider: openai, qwen, anthropic, or a user-defined Provider ID.",
+  },
+  "zh-CN": {
+    "effort.noModel": "当前没有模型，无法调整思考强度。",
+    "effort.currentMarker": "（当前）",
+    "effort.title": "选择思考强度（当前：{level}）",
+    "effort.saveFailed": "思考强度保存失败：{message}",
+    "effort.applyFailed": "思考强度应用失败：{message}",
+    "effort.applied": "思考强度已设为 {level}",
+    "retry.on": "开启",
+    "retry.off": "关闭",
+    "retry.menuTitle": "Provider 自动重试",
+    "retry.countPrompt": "最大重试次数（1-{max}）",
+    "retry.confirmTitle": "保存 Provider 重试配置？",
+    "retry.summary": "自动重试：{state}",
+    "retry.count": "最大重试次数：{count}",
+    "retry.owner": "执行所有权：Pi core（指数退避，TUI 显示实时状态）",
+    "retry.notifySummary": "Provider 自动重试：{state}",
+    "retry.notifyPath": "配置：{path}",
+    "manager.needTui": "/api-manager 交互菜单需要交互式 Pi 会话。",
+    "manager.visionNeedTui": "/api-manager vision 需要交互式 Pi 会话；状态查看可使用 /vision status。",
+    "manager.effortNeedTui": "/api-manager effort 需要交互式 Pi 会话。",
+    "manager.needProviderId": "/api-manager {action} 需要指定 Provider ID。",
+    "manager.configureNeedTui": "/api-manager configure 需要交互式 Pi 会话。",
+    "manager.actionNeedTui": "/api-manager {action} 需要交互式 Pi 会话。",
+    "manager.specifyProvider": "请指定 Provider：openai、qwen、anthropic 或用户定义的 Provider ID。",
+  },
+} as const;
+
+type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
+
+/** UI language for the API Manager menu/notification surface. */
+const API_UI_LOCALE: SupportedSettingsLocale = "zh-CN";
+
+/** Translate a catalog key with optional {var} substitution. */
+function t(key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
+  const catalog = CATALOGS[API_UI_LOCALE] ?? CATALOGS["zh-CN"];
+  const template: unknown = catalog[key];
+  const text = typeof template === "string" ? template : CATALOGS["zh-CN"][key] as string;
+  if (!vars) return text;
+  return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
+    vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
+}
 
 export interface ApiProviderSettings {
   /** Provider id used by Pi to qualify models and isolate URL/API key configuration. */
@@ -144,7 +217,7 @@ export interface ApiRetrySettings {
   maxRetries: number;
 }
 
-export type ApiProviderAction = "configure" | "delete" | "disable" | "enable" | "list" | "logout" | "reset" | "retry" | "show" | "toggle" | "vision";
+export type ApiProviderAction = "configure" | "delete" | "disable" | "effort" | "enable" | "list" | "logout" | "reset" | "retry" | "show" | "toggle" | "vision";
 export type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
@@ -189,6 +262,52 @@ export const PROVIDERS: readonly ProviderDefaults[] = [
 ];
 
 export const mutationQueues = new Map<string, Promise<void>>();
+
+/**
+ * Interactive thinking-effort picker backed by api-manager.json (defaultsPath).
+ * Shared by the /effort shortcut and the /api-manager effort action.
+ */
+async function adjustThinkingEffort(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  defaultsPath: string,
+): Promise<void> {
+  if (!ctx.model) {
+    ctx.ui.notify(t("effort.noModel"), "warning");
+    return;
+  }
+  const current = pi.getThinkingLevel();
+  const levelMap = ctx.model.thinkingLevelMap;
+  const supportsMax = levelMap?.xhigh === "max" || levelMap?.max === "max";
+  const supported = [...new Set([
+    ...getSupportedThinkingLevels(ctx.model).filter(isThinkingLevel),
+    ...(supportsMax ? ["max" as ThinkingLevel] : []),
+  ])];
+  const labels = new Map<string, ThinkingLevel>();
+  const options = supported.map((level) => {
+    const label = `${level}${level === current ? t("effort.currentMarker") : ""}`;
+    labels.set(label, level);
+    return label;
+  });
+  const choice = await ctx.ui.select(t("effort.title", { level: current }), options);
+  if (choice === undefined) return;
+  const selected = labels.get(choice);
+  if (!selected) return;
+  try {
+    await saveModelThinkingDefault(ctx.model.provider, ctx.model.id, selected, defaultsPath);
+  } catch (error) {
+    ctx.ui.notify(t("effort.saveFailed", { message: errorMessage(error) }), "error");
+    return;
+  }
+  try {
+    setPiThinkingLevel(pi, selected);
+  } catch (error) {
+    ctx.ui.notify(t("effort.applyFailed", { message: errorMessage(error) }), "error");
+    return;
+  }
+  syncEffortStatus(ctx, selected);
+  ctx.ui.notify(t("effort.applied", { level: selected }), "info");
+}
 
 /**
  * Register API Providers through Pi's documented models.json contract. A Provider
@@ -236,43 +355,9 @@ export function registerApiProviderConfigs(
     },
   });
   pi.registerCommand("effort", {
-    description: "调整当前模型的思考强度",
+    description: "调整当前模型的思考强度（/api-manager effort 的快捷入口）",
     async handler(_args, ctx) {
-      if (!ctx.model) {
-        ctx.ui.notify("当前没有模型，无法调整思考强度。", "warning");
-        return;
-      }
-      const current = pi.getThinkingLevel();
-      const levelMap = ctx.model.thinkingLevelMap;
-      const supportsMax = levelMap?.xhigh === "max" || levelMap?.max === "max";
-      const supported = [...new Set([
-        ...getSupportedThinkingLevels(ctx.model).filter(isThinkingLevel),
-        ...(supportsMax ? ["max" as ThinkingLevel] : []),
-      ])];
-      const labels = new Map<string, ThinkingLevel>();
-      const options = supported.map((level) => {
-        const label = `${level}${level === current ? "（当前）" : ""}`;
-        labels.set(label, level);
-        return label;
-      });
-      const choice = await ctx.ui.select(`选择思考强度（当前：${current}）`, options);
-      if (choice === undefined) return;
-      const selected = labels.get(choice);
-      if (!selected) return;
-      try {
-        await saveModelThinkingDefault(ctx.model.provider, ctx.model.id, selected, defaultsPath);
-      } catch (error) {
-        ctx.ui.notify(`思考强度保存失败：${errorMessage(error)}`, "error");
-        return;
-      }
-      try {
-        setPiThinkingLevel(pi, selected);
-      } catch (error) {
-        ctx.ui.notify(`思考强度应用失败：${errorMessage(error)}`, "error");
-        return;
-      }
-      syncEffortStatus(ctx, selected);
-      ctx.ui.notify(`思考强度已设为 ${selected}`, "info");
+      await adjustThinkingEffort(pi, ctx, defaultsPath);
     },
   });
   if (typeof pi.on === "function") {
@@ -557,26 +642,26 @@ async function manageRetrySettings(
     return;
   }
 
-  const enabledLabel = `开启${current.enabled ? "（当前）" : ""}`;
-  const disabledLabel = `关闭${current.enabled ? "" : "（当前）"}`;
-  const enabledChoice = await ctx.ui.select("Provider 自动重试", [enabledLabel, disabledLabel]);
+  const enabledLabel = `${t("retry.on")}${current.enabled ? t("effort.currentMarker") : ""}`;
+  const disabledLabel = `${t("retry.off")}${current.enabled ? "" : t("effort.currentMarker")}`;
+  const enabledChoice = await ctx.ui.select(t("retry.menuTitle"), [enabledLabel, disabledLabel]);
   if (!enabledChoice) return;
   const enabled = enabledChoice === enabledLabel;
   let maxRetries = current.maxRetries;
   if (enabled) {
     const input = await ctx.ui.input(
-      `最大重试次数（1-${API_RETRY_MAX_RETRIES}）`,
+      t("retry.countPrompt", { max: API_RETRY_MAX_RETRIES }),
       String(current.maxRetries),
     );
     if (input === undefined) return;
     maxRetries = retryCount(input);
   }
   const confirmed = await ctx.ui.confirm(
-    "保存 Provider 重试配置？",
+    t("retry.confirmTitle"),
     [
-      `自动重试：${enabled ? "开启" : "关闭"}`,
-      `最大重试次数：${maxRetries}`,
-      "执行所有权：Pi core（指数退避，TUI 显示实时状态）",
+      t("retry.summary", { state: enabled ? t("retry.on") : t("retry.off") }),
+      t("retry.count", { count: maxRetries }),
+      t("retry.owner"),
     ].join("\n"),
   );
   if (!confirmed) return;
@@ -591,9 +676,9 @@ function notifyRetrySettings(
   settingsPath: string,
 ): void {
   ctx.ui.notify([
-    `Provider 自动重试：${settings.enabled ? "开启" : "关闭"}`,
-    `最大重试次数：${settings.maxRetries}`,
-    `配置：${settingsPath}`,
+    t("retry.notifySummary", { state: settings.enabled ? t("retry.on") : t("retry.off") }),
+    t("retry.count", { count: settings.maxRetries }),
+    t("retry.notifyPath", { path: settingsPath }),
   ].join("\n"), "info");
 }
 
@@ -607,17 +692,25 @@ async function showApiProviderManager(
 ): Promise<void> {
   const parsed = parseManagerArgs(args);
   if (!ctx.hasUI && !parsed.action) {
-    ctx.ui.notify("/api-manager 交互菜单需要交互式 Pi 会话。", "warning");
+    ctx.ui.notify(t("manager.needTui"), "warning");
     return;
   }
   const action = parsed.action ?? await chooseAction(ctx, settingsPath, dirname(modelsPath));
   if (!action) return;
   if (action === "vision") {
     if (!ctx.hasUI) {
-      ctx.ui.notify("/api-manager vision 需要交互式 Pi 会话；状态查看可使用 /vision status。", "warning");
+      ctx.ui.notify(t("manager.visionNeedTui"), "warning");
       return;
     }
     await showVisionDelegationManager(ctx, dirname(modelsPath));
+    return;
+  }
+  if (action === "effort") {
+    if (!ctx.hasUI) {
+      ctx.ui.notify(t("manager.effortNeedTui"), "warning");
+      return;
+    }
+    await adjustThinkingEffort(pi, ctx, defaultsPath);
     return;
   }
   if (action === "list") {
@@ -630,7 +723,7 @@ async function showApiProviderManager(
   }
   if (action === "enable" || action === "disable" || action === "toggle") {
     if (!ctx.hasUI && !parsed.target) {
-      ctx.ui.notify(`/api-manager ${action} 需要指定 Provider ID。`, "warning");
+      ctx.ui.notify(t("manager.needProviderId", { action }), "warning");
       return;
     }
     const target = parsed.target ?? await chooseProvider(ctx, modelsPath, defaultsPath);
@@ -644,7 +737,7 @@ async function showApiProviderManager(
   }
   if (action === "configure") {
     if (!ctx.hasUI) {
-      ctx.ui.notify("/api-manager configure 需要交互式 Pi 会话。", "warning");
+      ctx.ui.notify(t("manager.configureNeedTui"), "warning");
       return;
     }
     if (parsed.target) {
@@ -677,14 +770,14 @@ async function showApiProviderManager(
         return;
       }
       if (!ctx.hasUI) {
-        ctx.ui.notify(`/api-manager ${action} 需要交互式 Pi 会话。`, "warning");
+        ctx.ui.notify(t("manager.actionNeedTui", { action }), "warning");
         return;
       }
       await deleteProvider(pi, ref.id, ref.name, ctx, modelsPath, defaultsPath, settingsPath);
       return;
     }
     if (!ctx.hasUI) {
-      ctx.ui.notify(`/api-manager ${action} 需要交互式 Pi 会话。`, "warning");
+      ctx.ui.notify(t("manager.actionNeedTui", { action }), "warning");
       return;
     }
     const pick = await chooseModelGlobally(ctx, action, modelsPath, defaultsPath);
@@ -695,13 +788,13 @@ async function showApiProviderManager(
   // logout / reset 是 Provider（URL/key）级操作。
   const target = parsed.target ?? (ctx.hasUI ? await chooseProvider(ctx, modelsPath, defaultsPath) : undefined);
   if (!target) {
-    ctx.ui.notify("请指定 Provider：openai、qwen、anthropic 或用户定义的 Provider ID。", "warning");
+    ctx.ui.notify(t("manager.specifyProvider"), "warning");
     return;
   }
   const ref = await resolveChannelRef(target, ctx, modelsPath);
   if (!ref) return;
   if (!ctx.hasUI) {
-    ctx.ui.notify(`/api-manager ${action} 需要交互式 Pi 会话。`, "warning");
+    ctx.ui.notify(t("manager.actionNeedTui", { action }), "warning");
     return;
   }
   if (action === "logout") {

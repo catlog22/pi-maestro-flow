@@ -16,6 +16,7 @@ import {
 	TEAMMATE_STARTED_EVENT,
 } from "../src/types.ts";
 import {
+	COCKPIT_INPUT_TARGET_EVENT,
 	COCKPIT_MAESTRO_QUERY_EVENT,
 	COCKPIT_TODO_TOGGLE_EVENT,
 	MAESTRO_UI_SNAPSHOT_EVENT,
@@ -149,6 +150,16 @@ test("Cockpit consumes Maestro snapshots and emits versioned queries at session 
 	assert.match(source, /session_start[\s\S]*?emitMaestroQuery\(\)/);
 });
 
+test("selected Cockpit sessions publish editor targets and route input through teammate registry", () => {
+	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	assert.equal(COCKPIT_INPUT_TARGET_EVENT, "cockpit:input-target");
+	assert.match(source, /pi\.events\.emit\(COCKPIT_INPUT_TARGET_EVENT, payload\)/);
+	assert.match(source, /MAILBOX_REGISTRY_KEY[\s\S]*?routeAgentInput\(/);
+	assert.match(source, /Symbol\.for\("pi-maestro-teammate\.mailbox-registry"\)/);
+	assert.doesNotMatch(source, /import\s*\{\s*MAILBOX_REGISTRY_KEY/);
+	assert.match(source, /if \(action === "handled"\) return \{ action: "handled" as const \}/);
+});
+
 test("Cockpit defers settings-driven re-enable until the settings overlay is closed", () => {
 	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
 	assert.match(source, /let enableAfterClose = false/);
@@ -164,6 +175,18 @@ test("Cockpit sidebar controls persist only committed resize widths", () => {
 	assert.match(source, /registerShortcut\(SIDEBAR_RESIZE_KEY/);
 	assert.match(source, /"sidebar auto"[\s\S]*?"sidebar on"[\s\S]*?"sidebar off"[\s\S]*?"sidebar resize"/);
 	assert.doesNotMatch(source, /onEffectiveWidthChange:[\s\S]*?saveConfig/);
+});
+
+test("Cockpit owns a fixed, toggleable and scrollable agent session region above Todo", () => {
+	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	assert.match(source, /SESSION_DETAIL_TOGGLE_KEY = "alt\+shift\+r"/);
+	assert.match(source, /registerShortcut\(SESSION_DETAIL_TOGGLE_KEY/);
+	assert.match(source, /setWidget\([\s\S]*?SESSION_DETAIL_WIDGET_KEY[\s\S]*?placement: "aboveEditor"[\s\S]*?syncSidebarMode\(ctx\)/);
+	assert.match(source, /reconcileSurface[\s\S]*?installWidgets\(ctx\)[\s\S]*?setWidget\(SESSION_BAR_WIDGET_KEY, undefined\)[\s\S]*?installSessionBar\(ctx\)/);
+	assert.match(source, /detailUp = "\\x1b\[1;4A"/);
+	assert.match(source, /detailDown = "\\x1b\[1;4B"/);
+	assert.match(source, /sessionDetailScroll = next/);
+	assert.match(source, /uninstallUi[\s\S]*?sessionDetailScrollDisposer\?\.\(\)[\s\S]*?agentScrollDisposer\?\.\(\)/);
 });
 
 test("Flow publishes authoritative bash_bg snapshots and Cockpit can request a refresh", () => {

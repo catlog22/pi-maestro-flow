@@ -48,6 +48,34 @@ test("direct teammate options install the parent-authoritative request bridge", 
   }
 });
 
+test("direct teammate options refresh the registry through its receiver before reading the model catalog", async () => {
+  let available = [{ provider: "provider", id: "stale", reasoning: true }];
+  const registry = {
+    runtime: { refreshed: false },
+    async refresh() {
+      this.runtime.refreshed = true;
+      available = [{ provider: "provider", id: "fresh", reasoning: true }];
+    },
+    getAvailable() {
+      return available;
+    },
+  };
+  const pi = {
+    sendMessage() {},
+    events: { emit() {} },
+  } as unknown as ExtensionAPI;
+  const ctx = {
+    cwd: "D:/workspace",
+    hasUI: false,
+    modelRegistry: registry,
+  } as unknown as ExtensionContext;
+
+  const options = await createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd });
+
+  assert.equal(registry.runtime.refreshed, true);
+  assert.deepEqual(options.modelCapabilities?.map((model) => model.id), ["provider/fresh"]);
+});
+
 test("every non-Swarm direct teammate consumer uses the shared options factory", () => {
   for (const relative of ["delegate.ts", "explore.ts", "moa.ts", "goal-verification.ts"]) {
     const source = readFileSync(new URL(`../src/tools/${relative}`, import.meta.url), "utf8");

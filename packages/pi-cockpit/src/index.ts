@@ -1,6 +1,6 @@
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readFileSync, statSync } from "node:fs";
-import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { Key, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AgentsStore, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
@@ -8,9 +8,11 @@ import { statusText, titleFor, workingMessage, type AmbientState } from "./ambie
 import { generateTitleWithModel } from "./title-llm.ts";
 import { suggestTitle } from "./title-gen.ts";
 import { BashBgStore } from "./bash-bg-store.ts";
+import { SupervisionStore } from "./supervision-store.ts";
 import { MaestroStore } from "./maestro-store.ts";
 import { createSidebarController, type SidebarController } from "./sidebar-controller.ts";
 import { COCKPIT_SPLIT_PANE_MARKER } from "./split-pane.ts";
+import { attachViewportStability } from "./viewport-stability.ts";
 import {
 	COCKPIT_EDITOR_BOTTOM_MARKER,
 	EDITOR_BOTTOM_WIDGET_KEY,
@@ -29,12 +31,19 @@ import {
 import { BashBgOverlay } from "./bash-bg-overlay.ts";
 import { renderBashBgSummary } from "./bash-bg-widget.ts";
 import { registerQuietTools } from "./quiet-tools.ts";
+import { registerGuardedEditTool } from "./edit-guard.ts";
 import { ensureThinkingFolded, readHideThinkingBlock } from "./thinking-fold.ts";
 import { ThinkingFoldTimer } from "./thinking-timer.ts";
 import { shouldAnimateFrames, shouldAnimateSidebar, shouldRunTick, type TickPolicyState } from "./tick-policy.ts";
 import { TodoStore } from "./todo-store.ts";
-import { makeTodoWidget, makeAgentWidget, terminalRows } from "./stack-widget.ts";
+import { makeTodoWidget, makeAgentWidget, terminalRows, visibleAgentRows } from "./stack-widget.ts";
+import { agentListWindowRows, scrollBy, type AgentScrollState } from "./agent-scroll.ts";
+import { agentSessionColor, makeSessionBarWidget, SESSION_BAR_WIDGET_KEY, MAIN_SESSION_LABEL } from "./session-bar.ts";
+import { makeSessionDetailWidget, SESSION_DETAIL_WIDGET_KEY, DEFAULT_SESSION_DETAIL_ROWS, sessionDetailBodyLength, sessionDetailWindowRows, type SessionDetailScrollState } from "./session-detail.ts";
+import { panelRows } from "./viewport.ts";
+import { routeAgentInput } from "./input-routing.ts";
 import { activeThemeName, ThemePicker } from "./theme-picker.ts";
+import { ModelPicker, type ModelPickerEntry } from "./model-picker.ts";
 import { getUsageTotals, invalidateUsageCache, renderFooter, setUsageThrottle, type PaintTheme, type WidthUtils } from "./footer.ts";
 import { collectExtensionStatuses } from "./extension-status.ts";
 import { ANIMATION_PERIOD_MS, resolveGlyphs, spinFrame } from "./icons.ts";
@@ -45,11 +54,14 @@ import { SettingsLocaleState, getMaestroUiPreferencesPath } from "./settings/loc
 import { SettingsProviderRegistry } from "./settings/registry.ts";
 import { showMaestroSettingsShell } from "./settings/settings-shell.ts";
 import {
+	COCKPIT_INPUT_TARGET_EVENT,
 	COCKPIT_MAESTRO_QUERY_EVENT,
 	COCKPIT_PREEMPT_RESIZE_EVENT,
 	COCKPIT_TODO_TOGGLE_EVENT,
 	MAESTRO_UI_SNAPSHOT_EVENT,
 	MAESTRO_UI_SNAPSHOT_VERSION,
+	SUPERVISION_EVENT,
+	type CockpitInputTargetV1,
 	type CockpitUiOwnershipV1,
 } from "./public/v1/events.ts";
 import {
@@ -64,13 +76,18 @@ import {
 	TEAMMATE_STARTED_EVENT,
 	TODO_TOOL_NAME,
 	WORKFLOW_STATUS_KEY,
+	type AgentRow,
 	type CockpitConfig,
 } from "./types.ts";
+import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
+
+const MAILBOX_REGISTRY_KEY = Symbol.for("pi-maestro-teammate.mailbox-registry");
 
 const FOOTER_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 const BASH_BG_OVERLAY_KEY = "alt+j";
 const SIDEBAR_RESIZE_KEY = "ctrl+shift+r";
 const SIDEBAR_FOCUS_KEY = "alt+shift+l";
+const SESSION_DETAIL_TOGGLE_KEY = "alt+shift+r";
 const COCKPIT_STATUS_KEY = "cockpit";
 // Claude Code title chrome: a static marker when idle, two braille frames while
 // a turn runs (screens/REPL.tsx TITLE_STATIC_PREFIX / TITLE_ANIMATION_FRAMES).
@@ -220,6 +237,7 @@ export default function (pi: ExtensionAPI): void {
 	const bashBg = new BashBgStore();
 	const todos = new TodoStore();
 	const maestro = new MaestroStore();
+	const supervision = new SupervisionStore();
 	const settingsRegistry = new SettingsProviderRegistry({
 		on: (event, handler) => pi.events.on(event, handler),
 		emit: (event, payload) => pi.events.emit(event, payload),
@@ -240,6 +258,10 @@ export default function (pi: ExtensionAPI): void {
 	let lastCtx: ExtensionContext | undefined;
 	let settingsCommandCtx: ExtensionCommandContext | undefined;
 	let capturedTui: TUI | undefined;
+	// TUI the unconditional viewport-stability hook is currently installed on.
+	// Independent of the split-pane attach: the sidebar can be off while the
+	// thinking label / teammate tree still stream above the visible viewport.
+	let stabilityTui: TUI | undefined;
 	// True while Cockpit owns a capturing overlay (bash jobs, theme picker,
 	// settings panel). Split-pane resize must yield to the overlay's focus and
 	// refuse to start while one is open; otherwise the resize listener — a
@@ -257,6 +279,18 @@ export default function (pi: ExtensionAPI): void {
 	let claudeEditorForeignWarned = false;
 	// Fullscreen (alternate-screen fixed editor) controller, reload-gated.
 	let fullscreenController: FullscreenController | undefined;
+	/** Disposer for the session-bar ←/→ navigation hook (per applyUi). */
+	let sessionBarNavDisposer: (() => void) | undefined;
+	/** Disposer for the selected-session Alt+Shift+↑/↓ scroll hook. */
+	let sessionDetailScrollDisposer: (() => void) | undefined;
+	/** Disposer for the agent-list Shift+↑/↓ scroll hook (per applyUi). */
+	let agentScrollDisposer: (() => void) | undefined;
+	/** Scroll window over the below-input agent roster (tail-following default). */
+	let agentListScroll: AgentScrollState = { offset: 0, following: true };
+	/** Explicit progressive-disclosure state for the selected agent session. */
+	let sessionDetailVisible = true;
+	let sessionDetailScroll: SessionDetailScrollState = { offset: 0, following: true };
+	let lastPublishedInputTarget: string | undefined;
 	let dockEffectiveVisible = false;
 	let surfaceState: CockpitSurfaceState = "disabled";
 	let running = false;
@@ -288,6 +322,9 @@ export default function (pi: ExtensionAPI): void {
 	// AgentSession construction — before renderInitialMessages runs.
 	ensureConfigExists();
 	config = loadConfig();
+	// Guarded edit replaces the built-in edit (same name, same execution, plus a
+	// UTF-8 gate): editing a non-UTF-8 file would otherwise corrupt its bytes.
+	registerGuardedEditTool(pi);
 	// Reads config live, so toggling static mode re-throttles without re-registering.
 	setUsageThrottle(() => (config.staticMode ? USAGE_REFRESH_THROTTLE_MS : 0));
 	if (config.quietMode) {
@@ -381,6 +418,7 @@ export default function (pi: ExtensionAPI): void {
 		renderScheduled = true;
 		queueMicrotask(() => {
 			renderScheduled = false;
+			publishInputTarget();
 			refreshAmbient();
 			try {
 				capturedTui?.requestRender();
@@ -452,6 +490,7 @@ export default function (pi: ExtensionAPI): void {
 			todoExpanded: config.todoExpanded,
 			quiet: config.enabled && config.quietMode,
 			quietSymbols: config.quietSymbols,
+			static: config.staticMode,
 		};
 		pi.events.emit(COCKPIT_UI_OWNERSHIP_EVENT, ownership);
 	};
@@ -503,9 +542,45 @@ export default function (pi: ExtensionAPI): void {
 	};
 
 
+	const ensureViewportStability = (tui: TUI): void => {
+		if (stabilityTui === tui) return;
+		stabilityTui = tui;
+		attachViewportStability(tui);
+	};
+
 	const clearWidgets = (ctx: ExtensionContext): void => {
 		ctx.ui.setWidget(STACK_WIDGET_KEY, undefined);
 		ctx.ui.setWidget(AGENT_WIDGET_KEY, undefined);
+	};
+
+	const selectedAgentTarget = (): { row: AgentRow; label: string; color: ThemeColor } | undefined => {
+		const viewingId = agents.getViewingAgent();
+		if (!viewingId) return undefined;
+		const row = visibleAgentRows(agents.snapshot()).find((candidate) => candidate.correlationId === viewingId);
+		if (!row) return undefined;
+		return {
+			row,
+			label: row.name || row.role || row.agent || "agent",
+			color: agentSessionColor(row),
+		};
+	};
+
+	const publishInputTarget = (force = false): void => {
+		const target = selectedAgentTarget();
+		const fingerprint = target ? `${target.row.correlationId}:${target.label}:${target.color}` : "@main";
+		if (!force && fingerprint === lastPublishedInputTarget) return;
+		lastPublishedInputTarget = fingerprint;
+		const payload: CockpitInputTargetV1 = target
+			? { version: 1, label: target.label, color: target.color }
+			: { version: 1 };
+		pi.events.emit(COCKPIT_INPUT_TARGET_EVENT, payload);
+	};
+
+	/** Live state for the session bar's right-edge session indicator. */
+	const inputStatusState = (): { label: string; color: ThemeColor } => {
+		const target = selectedAgentTarget();
+		if (target) return { label: target.label, color: target.color };
+		return { label: MAIN_SESSION_LABEL, color: running ? "warning" : "muted" };
 	};
 
 	const ensureEditorBottomController = (ctx: ExtensionContext): EditorBottomController => {
@@ -525,6 +600,7 @@ export default function (pi: ExtensionAPI): void {
 			EDITOR_BOTTOM_WIDGET_KEY,
 			(tui) => {
 				capturedTui = tui;
+				ensureViewportStability(tui);
 				controller.attach(tui);
 				controller.show();
 				return createEditorBottomSentinel();
@@ -583,11 +659,17 @@ export default function (pi: ExtensionAPI): void {
 	const syncAgentWidgetPlacement = (ctx: ExtensionContext, placement: "aboveEditor" | "belowEditor"): void => {
 		ctx.ui.setWidget(AGENT_WIDGET_KEY, (tui, theme) => {
 			capturedTui = tui;
+			ensureViewportStability(tui);
 			return makeAgentWidget({
 				getAgents: () => agents.snapshot(),
 				getConfig: () => config,
 				isRunning: () => running,
 				isAnimating,
+				getScroll: () => agentListScroll,
+				setScroll: (next) => {
+					agentListScroll = next;
+					req();
+				},
 			})(tui, theme);
 		}, { placement });
 	};
@@ -631,11 +713,28 @@ export default function (pi: ExtensionAPI): void {
 		if (config.enabled) syncAgentWidgetPlacement(ctx, "belowEditor");
 	};
 
+	const installSessionBar = (ctx: ExtensionContext): void => {
+		ctx.ui.setWidget(
+			SESSION_BAR_WIDGET_KEY,
+			(tui, theme) => {
+				capturedTui = tui;
+				ensureViewportStability(tui);
+				return makeSessionBarWidget({
+					getAgents: () => agents.snapshot(),
+					isMainRunning: () => running,
+					getCurrentSession: inputStatusState,
+				})(tui, theme);
+			},
+			{ placement: "aboveEditor" },
+		);
+	};
+
 	const installWidgets = (ctx: ExtensionContext): void => {
 		ctx.ui.setWidget(
 			STACK_WIDGET_KEY,
 			(tui, theme) => {
 				capturedTui = tui;
+				ensureViewportStability(tui);
 				return makeTodoWidget({
 					getTodos: () => todos.snapshot(),
 					getConfig: () => config,
@@ -651,7 +750,14 @@ export default function (pi: ExtensionAPI): void {
 		const next = resolveCockpitSurfaceState(config.enabled, config.sidebar.mode, dockEffectiveVisible);
 		if (next === surfaceState) return;
 		if (next === "dock" || next === "disabled") clearWidgets(ctx);
-		else installWidgets(ctx);
+		else {
+			installWidgets(ctx);
+			// Host widget maps preserve insertion order when an existing key is set.
+			// Todo was just re-added after a dock period, so remove/re-add the bar to
+			// keep the invariant: detail → Todo → session bar → editor.
+			ctx.ui.setWidget(SESSION_BAR_WIDGET_KEY, undefined);
+			installSessionBar(ctx);
+		}
 		surfaceState = next;
 		publishUiOwnership();
 		req();
@@ -689,6 +795,17 @@ export default function (pi: ExtensionAPI): void {
 			onError: (error) => {
 				ctx.ui.notify(`Cockpit sidebar unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
 			},
+			onActivateRow: (id) => {
+				// Enter on an agent row selects it as the shown session (toggle).
+				// The cockpit session bar mirrors the highlight; nothing is written
+				// into the main conversation, so the main agent keeps working.
+				if (!id.startsWith("agent:")) return;
+				const cid = id.slice("agent:".length);
+				agents.setViewingAgent(agents.getViewingAgent() === cid ? undefined : cid);
+				sessionDetailScroll = { offset: 0, following: true };
+				req();
+			},
+			getNavWidth: () => capturedTui?.terminal.columns ?? 80,
 		});
 		return sidebarController;
 	};
@@ -736,6 +853,14 @@ export default function (pi: ExtensionAPI): void {
 		clearEditorBottom(ctx);
 		disposeLayoutControllers();
 		clearWidgets(ctx);
+		ctx.ui.setWidget(SESSION_BAR_WIDGET_KEY, undefined);
+		ctx.ui.setWidget(SESSION_DETAIL_WIDGET_KEY, undefined);
+		sessionBarNavDisposer?.();
+		sessionBarNavDisposer = undefined;
+		sessionDetailScrollDisposer?.();
+		sessionDetailScrollDisposer = undefined;
+		agentScrollDisposer?.();
+		agentScrollDisposer = undefined;
 		ctx.ui.setFooter(undefined);
 		surfaceState = "disabled";
 		try {
@@ -748,6 +873,8 @@ export default function (pi: ExtensionAPI): void {
 			// ambient surfaces are best-effort
 		}
 		stopTick();
+		lastPublishedInputTarget = "@main";
+		pi.events.emit(COCKPIT_INPUT_TARGET_EVENT, { version: 1 } satisfies CockpitInputTargetV1);
 		capturedTui = undefined;
 	};
 
@@ -764,6 +891,7 @@ export default function (pi: ExtensionAPI): void {
 		installFullscreen(ctx);
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			capturedTui = tui;
+			ensureViewportStability(tui);
 			let observedWidth = tui.terminal.columns;
 			const widthTimer = setInterval(() => {
 				try {
@@ -835,9 +963,93 @@ export default function (pi: ExtensionAPI): void {
 			};
 			return component;
 		});
+		// Install first in aboveEditor order so this fixed session region sits
+		// above Todo; Todo and the session bar are mounted closer to the editor.
+		ctx.ui.setWidget(
+			SESSION_DETAIL_WIDGET_KEY,
+			(tui, theme) => {
+				capturedTui = tui;
+				ensureViewportStability(tui);
+				return makeSessionDetailWidget({
+					getAgents: () => agents.snapshot(),
+					getViewingId: () => agents.getViewingAgent(),
+					getVisible: () => sessionDetailVisible,
+					getScroll: () => sessionDetailScroll,
+				})(tui, theme);
+			},
+			{ placement: "aboveEditor" },
+		);
 		syncSidebarMode(ctx);
 		// Re-enabling mid-run must restart live spinner and elapsed updates.
 		syncTick();
+
+		// Session bar: the session switcher pinned directly above the input box.
+		// One line — color-coded chips (@main + every agent) on the left, the
+		// currently shown session's status (● @session, the input box's top-right
+		// corner) at the right edge. Installed on every surface (dock and
+		// widgets), inserted last so it sits closest to the editor.
+		installSessionBar(ctx);
+		// ←/→ (empty composer) cycles the session bar through [main, ...agents]
+		// and selects the highlighted session. While composing, the arrows keep
+		// moving the text cursor.
+		sessionBarNavDisposer?.();
+		sessionBarNavDisposer = ctx.ui.onTerminalInput((data) => {
+			if (data !== "\x1b[D" && data !== "\x1b[C") return undefined;
+			const text = ctx.ui.getEditorText();
+			if (text.trim() !== "") return undefined;
+			const roster = visibleAgentRows(agents.snapshot());
+			const viewingId = agents.getViewingAgent();
+			const delta = data === "\x1b[C" ? 1 : -1;
+			const total = roster.length + 1; // [main, ...agents]
+			const current = viewingId
+				? Math.max(0, roster.findIndex((row) => row.correlationId === viewingId)) + 1
+				: 0;
+			const next = (current + delta + total) % total;
+			agents.setViewingAgent(next === 0 ? undefined : roster[next - 1].correlationId);
+			sessionDetailScroll = { offset: 0, following: true };
+			req();
+			return { consume: true };
+		});
+		// Alt+Shift+↑/↓ scroll the selected agent's fixed session content.
+		// Scrolling down to the bottom resumes automatic following as output grows.
+		const detailUp = "\x1b[1;4A";
+		const detailDown = "\x1b[1;4B";
+		const legacyDetailUp = "\x1b\x1b[1;2A";
+		const legacyDetailDown = "\x1b\x1b[1;2B";
+		sessionDetailScrollDisposer?.();
+		sessionDetailScrollDisposer = ctx.ui.onTerminalInput((data) => {
+			const up = data === detailUp || data === legacyDetailUp;
+			const down = data === detailDown || data === legacyDetailDown;
+			if (!up && !down) return undefined;
+			const viewingId = agents.getViewingAgent();
+			if (!sessionDetailVisible || !viewingId) return undefined;
+			const width = capturedTui?.terminal?.columns ?? 80;
+			const rows = capturedTui?.terminal?.rows;
+			const total = sessionDetailBodyLength(agents.snapshot(), viewingId, width);
+			const maxRows = panelRows(rows) ?? DEFAULT_SESSION_DETAIL_ROWS;
+			const budget = sessionDetailWindowRows(total, maxRows);
+			const next = scrollBy(sessionDetailScroll, up ? -1 : 1, total, Math.max(1, budget));
+			if (next.offset !== sessionDetailScroll.offset || next.following !== sessionDetailScroll.following) {
+				sessionDetailScroll = next;
+				req();
+			}
+			return { consume: true };
+		});
+		// Shift+↑/↓ scroll the below-input agent roster (plain ↑/↓ stay with the
+		// composer's input-history navigation). Scrolling up pauses the tail
+		// follow; reaching the bottom resumes it.
+		agentScrollDisposer?.();
+		agentScrollDisposer = ctx.ui.onTerminalInput((data) => {
+			if (data !== "\x1b[1;2A" && data !== "\x1b[1;2B") return undefined;
+			const roster = visibleAgentRows(agents.snapshot());
+			const budget = agentListWindowRows(capturedTui?.terminal?.columns, capturedTui?.terminal?.rows, roster.length);
+			const next = scrollBy(agentListScroll, data === "\x1b[1;2A" ? -1 : 1, roster.length, budget);
+			if (next.offset !== agentListScroll.offset || next.following !== agentListScroll.following) {
+				agentListScroll = next;
+				req();
+			}
+			return { consume: true };
+		});
 	};
 
 	// --- teammate lifecycle (custom event bus; subscribed once for the extension lifetime) ---
@@ -946,6 +1158,10 @@ export default function (pi: ExtensionAPI): void {
 				if (!maestro.applySnapshot(payload)) return;
 				req();
 			}),
+			pi.events.on(SUPERVISION_EVENT, (payload) => {
+				if (!supervision.applyEvent(payload)) return;
+				req();
+			}),
 			pi.events.on(COCKPIT_TODO_TOGGLE_EVENT, (payload) => {
 				if (!config.enabled) return;
 				const requested = payload && typeof payload === "object"
@@ -994,6 +1210,7 @@ export default function (pi: ExtensionAPI): void {
 	// --- session + agent lifecycle ---
 	pi.on("session_start", (_e, ctx) => {
 		lastCtx = ctx;
+		lastPublishedInputTarget = undefined;
 		subscribeBusEvents();
 		settingsRegistry.start();
 		registerSettingsProvider();
@@ -1084,6 +1301,7 @@ export default function (pi: ExtensionAPI): void {
 			todoExpanded: config.todoExpanded,
 			quiet: false,
 			quietSymbols: config.quietSymbols,
+			static: config.staticMode,
 		};
 		// A session boundary must invalidate any in-flight title request: abort it
 		// and bump the generation so its result is discarded (MW-3).
@@ -1156,14 +1374,24 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("thinking_level_select", (_e, ctx) => {
 		if (isTuiContext(ctx)) req();
 	});
-	pi.on("input", (e) => {
-		// Remember the first real user message; the title is generated after the
-		// first turn completes, so it can reflect the whole exchange. Slash
-		// commands and bash-mode inputs are synthetic, not the user's topic.
-		if (!firstUserText && e.source === "interactive" && e.text) {
-			const isSynthetic = e.text.startsWith("/") || e.text.startsWith("!");
-			if (!isSynthetic) firstUserText = e.text;
-		}
+	pi.on("input", async (e, ctx) => {
+		const target = selectedAgentTarget();
+		const globals = globalThis as typeof globalThis & Record<symbol, unknown>;
+		const registry = globals[MAILBOX_REGISTRY_KEY] as MailboxHostRegistry | undefined;
+		const action = await routeAgentInput(
+			e,
+			target ? { correlationId: target.row.correlationId, label: target.label } : undefined,
+			registry,
+			ctx.ui,
+		);
+		if (action === "handled") return { action: "handled" as const };
+
+		const interactiveText = e.source === "interactive" && e.text.trim().length > 0;
+		const isSynthetic = e.text.startsWith("/") || e.text.startsWith("!");
+		// Remember the first real main-session user message; child-directed input
+		// is handled above and must not influence the main session title.
+		if (!firstUserText && interactiveText && !isSynthetic) firstUserText = e.text;
+		return { action: "continue" as const };
 	});
 	pi.on("turn_end", (e, ctx) => {
 		// Claude Code generates its title from the first user message; we wait
@@ -1326,6 +1554,9 @@ export default function (pi: ExtensionAPI): void {
 		// must kill a running tick, turning it off must revive one mid-run.
 		syncTick();
 		thinkingTimer.syncMode();
+		// Broadcast so cross-extension surfaces (e.g. pi-maestro-flow's Goal
+		// panel) freeze their per-second elapsed ticks along with the cockpit.
+		publishUiOwnership();
 		req();
 		return result.ok;
 	};
@@ -1396,6 +1627,20 @@ export default function (pi: ExtensionAPI): void {
 				return;
 			}
 			sidebarController?.beginResize();
+		},
+	});
+
+	pi.registerShortcut(SESSION_DETAIL_TOGGLE_KEY, {
+		description: "Show or hide the selected teammate session above Todo",
+		handler(ctx) {
+			if (!config.enabled) {
+				ctx.ui.notify("Cockpit is disabled", "warning");
+				return;
+			}
+			sessionDetailVisible = !sessionDetailVisible;
+			if (sessionDetailVisible) sessionDetailScroll = { offset: 0, following: true };
+			ctx.ui.notify(`Agent session detail ${sessionDetailVisible ? "shown" : "hidden"}`, "info");
+			req();
 		},
 	});
 
@@ -1519,6 +1764,38 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("supervision", {
+		description: "Supervision: /supervision [events] — unified goal/monitor/advisor telemetry",
+		handler: async (args, ctx) => {
+			const totals = supervision.getTotals();
+			const wantEvents = args.trim().toLowerCase() === "events";
+			if (!wantEvents) {
+				const status = supervision.footerStatus();
+				ctx.ui.notify(
+					[
+						`SUPERVISION ${status ?? "idle (no events)"}`,
+						`  interventions: ${totals.interventions} · notifications: ${totals.notifications} · verdicts: ${totals.verdicts}`,
+						"  /supervision events — list recent events",
+					].join("\n"),
+					"info",
+				);
+				return;
+			}
+			const recent = supervision.recentEvents(10);
+			if (recent.length === 0) {
+				ctx.ui.notify("No supervision events observed yet.", "info");
+				return;
+			}
+			const lines = recent.map((event) => {
+				const time = new Date(event.timestamp).toLocaleTimeString();
+				const marker = event.severity === "blocker" ? "▲" : event.severity === "concern" ? "△" : "·";
+				const message = (event.message ?? event.kind).slice(0, 100);
+				return `${marker} [${event.source}] ${event.kind} ${time} — ${message}`;
+			});
+			ctx.ui.notify([`SUPERVISION recent ${recent.length}`, ...lines].join("\n"), "info");
+		},
+	});
+
 	const openSettings = async (ctx: ExtensionCommandContext): Promise<void> => {
 		enterCapturingOverlay();
 		try {
@@ -1540,37 +1817,22 @@ export default function (pi: ExtensionAPI): void {
 			// a second overlay: pi's `theme` is a live Proxy, so both surfaces repaint
 			// in the previewed colours, and Esc lands back on the row it was invoked
 			// from instead of on a panel that looks freshly opened.
-			let sub: ThemePicker | undefined;
+			let sub: ThemePicker | ModelPicker | undefined;
 			const closeSub = (): void => {
 				sub?.dispose();
 				sub = undefined;
 				tui.requestRender();
 			};
-			const apply = (key: string, textValue?: string): void => {
+			// Persisting apply shared by cycle rows and the model picker: commits the
+			// row to config, saves it, and runs the live side effects (quiet mode,
+			// sidebar, enable-after-close). apply() routes row-specific hand-offs
+			// first and only falls through here for rows the panel itself owns.
+			const persist = (key: string, textValue?: string): void => {
 				const wasEnabled = config.enabled;
 				const wasQuiet = config.quietMode;
 				const wasStatic = config.staticMode;
 				const wasPinEditorBottom = config.pinEditorBottom;
 				const wasSidebarMode = config.sidebar.mode;
-				if (key === "theme") {
-					// Delegate: the picker previews live and reverts on Esc, neither of
-					// which a blind one-key cycle through the name list can do.
-					sub = makeThemePicker(ctx, tui, theme, closeSub);
-					tui.requestRender();
-					return;
-				}
-				if (key === "thinkingFold") {
-					// Pass-through row: pi owns hideThinkingBlock, so bring it to the
-					// wanted state through the native toggle instead of saving config.
-					// pi persists the flip synchronously through its settingsManager.
-					const target = !thinkingHidden;
-					const ok = ensureThinkingFolded(tui, ctx.cwd, target);
-					if (ok) thinkingHidden = target;
-					saveState = ok
-						? { kind: "saved" }
-						: { kind: "failed", message: "editor unreachable" };
-					return;
-				}
 				config = applyRow(config, key, textValue);
 				saveState = { kind: "saving" };
 				const result = saveConfig(config);
@@ -1611,6 +1873,69 @@ export default function (pi: ExtensionAPI): void {
 					thinkingTimer.syncMode();
 				}
 				req();
+			};
+			// The model row expands like the theme row: the picker owns the whole
+			// card, Enter saves through persist(), Esc lands back on the panel. The
+			// entries are the /api-manager providers, so what is offered here is
+			// exactly what title-llm can resolve at generation time.
+			const makeModelPicker = (): ModelPicker => {
+				const entries: ModelPickerEntry[] = [
+					{ kind: "model", ref: "", label: "(rule-based)" },
+					...ctx.modelRegistry.getAvailable().map((m) => ({
+						kind: "model" as const,
+						ref: `${m.provider}/${m.id}`,
+						label: `${m.provider}/${m.id}`,
+					})),
+					{ kind: "custom", label: "custom ref…" },
+				];
+				return new ModelPicker({
+					entries,
+					initial: config.title.generationModel ?? "",
+					commit: (ref) => {
+						persist("titleGenerationModel", ref);
+					},
+					requestCustom: () => {
+						// Hand off to the existing free-text editor so a ref that is not
+						// on the list (yet) can still be typed; resolution against the
+						// registry still happens at generation time. The picker closes
+						// itself after this callback, so the panel repaints into
+						// text-edit mode.
+						editingText = "titleGenerationModel";
+						textDraft = config.title.generationModel ?? "";
+					},
+					close: closeSub,
+					requestRender: () => tui.requestRender(),
+					getTerminalRows: () => terminalRows(tui),
+					theme,
+					glyphs: resolveGlyphs(config.icons.mode),
+				});
+			};
+			const apply = (key: string, textValue?: string): void => {
+				if (key === "theme") {
+					// Delegate: the picker previews live and reverts on Esc, neither of
+					// which a blind one-key cycle through the name list can do.
+					sub = makeThemePicker(ctx, tui, theme, closeSub);
+					tui.requestRender();
+					return;
+				}
+				if (key === "thinkingFold") {
+					// Pass-through row: pi owns hideThinkingBlock, so bring it to the
+					// wanted state through the native toggle instead of saving config.
+					// pi persists the flip synchronously through its settingsManager.
+					const target = !thinkingHidden;
+					const ok = ensureThinkingFolded(tui, ctx.cwd, target);
+					if (ok) thinkingHidden = target;
+					saveState = ok
+						? { kind: "saved" }
+						: { kind: "failed", message: "editor unreachable" };
+					return;
+				}
+				if (key === "titleGenerationModel") {
+					sub = makeModelPicker();
+					tui.requestRender();
+					return;
+				}
+				persist(key, textValue);
 			};
 			// Idempotent teardown shared by component.dispose() and session shutdown:
 			// the host hides a stale overlay via hideOverlay() without calling

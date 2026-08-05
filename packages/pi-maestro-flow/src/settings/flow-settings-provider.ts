@@ -19,6 +19,7 @@ import {
   type SettingsResourceRevision,
   type SettingsSnapshot,
   type SettingsValidationIssue,
+  type SettingsOverviewRow,
 } from "pi-maestro-settings-core/v1";
 import {
   MAX_RESERVE_TOKENS,
@@ -27,6 +28,7 @@ import {
   resolveUserSettingsPath,
   validateEffectiveCompactionSettings,
   type CompactionConfigPatch,
+  type EffectiveCompactionSettings,
   type SoftCompactionConfigPatch,
 } from "../compaction/compaction-settings.ts";
 import { DEFAULT_DEDUP_MIN_CHARS, DEFAULT_DEDUP_MIN_LINES } from "../compaction/dedup.ts";
@@ -123,6 +125,36 @@ const ACTION_KEYS = [
   "hooks.manage",
 ] as const;
 
+/** Read-only diagnostic views rendered by the settings shell. */
+const OVERVIEW_DEFINITIONS: readonly SettingDefinition[] = [
+  {
+    key: "compaction.derived",
+    group: "flow.group.compaction",
+    order: 60,
+    labelKey: "flow.compaction.derived",
+    descriptionKey: "flow.compaction.derived.description",
+    scopes: ["global", "project"],
+    merge: "provider-defined",
+    activation: "live",
+    sensitivity: "public",
+    reversibility: "none",
+    editor: { kind: "overview" },
+  },
+  {
+    key: "failover.overview",
+    group: "flow.group.failover",
+    order: 61,
+    labelKey: "flow.failover.overview",
+    descriptionKey: "flow.failover.overview.description",
+    scopes: ["global", "project"],
+    merge: "provider-defined",
+    activation: "live",
+    sensitivity: "public",
+    reversibility: "none",
+    editor: { kind: "overview" },
+  },
+];
+
 const BASE_CATALOGS = {
   en: {
     "flow.provider": "Flow",
@@ -156,16 +188,36 @@ const BASE_CATALOGS = {
     "flow.option.relevanceMode.keyword": "Keyword scoring",
     "flow.failover.enabled": "Enable automatic model failover",
     "flow.failover.fallbackModels": "Fallback chains",
-    "flow.action.compaction": "Open compaction control center",
-    "flow.action.failover": "Open model failover control center",
+    "flow.action.compaction": "Open compaction settings",
+    "flow.action.compaction.description": "Opens the full compaction control center; changes save to global or project settings",
+    "flow.action.failover": "Open model failover settings",
+    "flow.action.failover.description": "Opens the two-pane failover chain editor; changes apply to the next invocation",
     "flow.action.responseLanguage": "Agent response language",
     "flow.action.responseLanguage.description": "Independent from the Maestro Settings interface language; toggles /chinese for this session",
     "flow.option.responseLanguage.default": "Default Agent language",
     "flow.option.responseLanguage.zh-CN": "Chinese replies",
-    "flow.action.permissions": "Review permissions",
+    "flow.action.permissions": "Open permissions summary",
+    "flow.action.permissions.description": "Shows the current permission mode for this session",
     "flow.action.skills": "Manage skills",
+    "flow.action.skills.description": "Enables or disables skills and model-invocation rights; changes apply after the extension reloads",
     "flow.action.mcp": "Manage MCP servers",
+    "flow.action.mcp.description": "Adds, edits, toggles or deletes MCP servers, or edits the full JSON configuration",
     "flow.action.hooks": "Manage hooks",
+    "flow.action.hooks.description": "Reviews and manages the codex hooks configuration",
+    "flow.compaction.derived": "Derived threshold preview",
+    "flow.compaction.derived.description": "Read-only view of the effective thresholds and soft-stage reachability",
+    "flow.failover.overview": "Failover chains",
+    "flow.failover.overview.description": "Read-only view of the enabled failover chains",
+    "flow.overview.enabled": "Enabled",
+    "flow.overview.reserve": "Reserved tokens",
+    "flow.overview.keep": "Recent tokens kept",
+    "flow.overview.model": "Compaction model",
+    "flow.overview.soft": "Soft stage",
+    "flow.overview.chains": "Fallback chains",
+    "flow.overview.noChains": "No fallback chains configured",
+    "flow.overview.followsSession": "follows the session model",
+    "flow.overview.off": "Off",
+    "flow.overview.on": "On",
     "flow.settings.unknownKey": "Unknown Flow setting",
     "flow.settings.invalidScope": "Flow settings support only global and project scopes",
     "flow.settings.invalidValue": "Invalid Flow setting value",
@@ -204,16 +256,36 @@ const BASE_CATALOGS = {
     "flow.option.relevanceMode.keyword": "关键词评分",
     "flow.failover.enabled": "启用模型自动故障转移",
     "flow.failover.fallbackModels": "回退链",
-    "flow.action.compaction": "打开压缩控制中心",
-    "flow.action.failover": "打开模型故障转移控制中心",
+    "flow.action.compaction": "打开压缩设置",
+    "flow.action.compaction.description": "打开完整压缩控制中心；更改保存到全局或项目设置",
+    "flow.action.failover": "打开模型故障转移设置",
+    "flow.action.failover.description": "打开主备故障转移链编辑器；更改在下一次调用时生效",
     "flow.action.responseLanguage": "Agent 回复语言",
     "flow.action.responseLanguage.description": "与 Maestro 设置界面语言相互独立；切换本会话的 /chinese 模式",
     "flow.option.responseLanguage.default": "默认 Agent 语言",
     "flow.option.responseLanguage.zh-CN": "中文回复",
-    "flow.action.permissions": "查看权限",
+    "flow.action.permissions": "打开权限概览",
+    "flow.action.permissions.description": "显示本会话当前的权限模式",
     "flow.action.skills": "管理 Skills",
+    "flow.action.skills.description": "启用/停用 Skill 与模型主动调用权限；更改在扩展重载后生效",
     "flow.action.mcp": "管理 MCP 服务",
+    "flow.action.mcp.description": "新增、编辑、启停或删除 MCP 服务，或编辑完整 JSON 配置",
     "flow.action.hooks": "管理 Hooks",
+    "flow.action.hooks.description": "查看并管理 codex hooks 配置",
+    "flow.compaction.derived": "派生阈值预览",
+    "flow.compaction.derived.description": "只读展示生效阈值与软阶段可达性",
+    "flow.failover.overview": "故障转移链",
+    "flow.failover.overview.description": "只读展示已启用的故障转移链",
+    "flow.overview.enabled": "启用",
+    "flow.overview.reserve": "预留 Token",
+    "flow.overview.keep": "保留最近 Token",
+    "flow.overview.model": "压缩模型",
+    "flow.overview.soft": "软阶段",
+    "flow.overview.chains": "回退链",
+    "flow.overview.noChains": "尚未配置回退链",
+    "flow.overview.followsSession": "跟随会话模型",
+    "flow.overview.off": "关闭",
+    "flow.overview.on": "开启",
     "flow.settings.unknownKey": "未知的 Flow 设置",
     "flow.settings.invalidScope": "Flow 设置仅支持全局和项目作用域",
     "flow.settings.invalidValue": "Flow 设置值无效",
@@ -463,12 +535,12 @@ function definitions(): SettingDefinition[] {
     setting("failover.enabled", "flow.group.failover", "flow.failover.enabled", "boolean", false, "next-invocation"),
     setting("failover.fallbackModels", "flow.group.failover", "flow.failover.fallbackModels", "json", {}, "next-invocation", { multiline: true }, "deep-merge"),
   ];
-  return [...writable, ...ACTION_KEYS.map((key, index): SettingDefinition => ({
+  return [...writable, ...OVERVIEW_DEFINITIONS, ...ACTION_KEYS.map((key, index): SettingDefinition => ({
     key,
     group: "flow.group.manage",
     order: 100 + index,
     labelKey: `flow.action.${key.split(".")[0]}`,
-    ...(key === "responseLanguage.manage" ? { descriptionKey: "flow.action.responseLanguage.description" } : {}),
+    descriptionKey: `flow.action.${key.split(".")[0]}.description`,
     scopes: ["project"],
     merge: "provider-defined",
     activation: "live",
@@ -524,6 +596,17 @@ function snapshot(
   const effectiveCompaction = resolveEffectiveCompactionSettings(compactionPatches.get("global") ?? {}, compactionPatches.get("project") ?? {});
 
   for (const definition of definitions()) {
+    if (definition.key === "compaction.derived" || definition.key === "failover.overview") {
+      configured.push({ key: definition.key, scope: "project", state: "absent" });
+      effective.push({
+        key: definition.key,
+        value: definition.key === "compaction.derived"
+          ? compactionDerivedRows(effectiveCompaction) as unknown as JsonValue
+          : failoverOverviewRows(failover.map((entry) => entry.document.raw)) as unknown as JsonValue,
+        source: "runtime",
+      });
+      continue;
+    }
     const parsed = parseSettingKey(definition.key);
     if (!parsed) {
       configured.push({ key: definition.key, scope: "project", state: "absent" });
@@ -1029,4 +1112,43 @@ function isDiscover(payload: unknown): payload is SettingsDiscoverEventV1 {
   return Boolean(payload && typeof payload === "object"
     && (payload as Partial<SettingsDiscoverEventV1>).version === SETTINGS_PROTOCOL_VERSION
     && typeof (payload as Partial<SettingsDiscoverEventV1>).requestId === "string");
+}
+
+function compactionDerivedRows(effective: EffectiveCompactionSettings): SettingsOverviewRow[] {
+  return [
+    { labelKey: "flow.overview.enabled", value: effective.enabled ? "on" : "off", status: effective.enabled ? "ok" : "dim" },
+    { labelKey: "flow.overview.reserve", value: String(effective.reserveTokens) },
+    { labelKey: "flow.overview.keep", value: String(effective.keepRecentTokens) },
+    { labelKey: "flow.overview.model", value: effective.model ?? "—" },
+    {
+      labelKey: "flow.overview.soft",
+      value: effective.soft.enabled
+        ? `nudge ${effective.soft.nudgeRatio} · prune ${effective.soft.pruneRatio}`
+        : "off",
+      status: effective.soft.enabled ? "ok" : "dim",
+    },
+  ];
+}
+
+function failoverOverviewRows(records: readonly Record<string, unknown>[]): SettingsOverviewRow[] {
+  const merged = Object.assign({}, ...records) as { enabled?: boolean; fallbackModels?: unknown };
+  const enabled = merged.enabled === true;
+  const chains = merged.fallbackModels && typeof merged.fallbackModels === "object"
+    ? Object.entries(merged.fallbackModels as Record<string, unknown>)
+    : [];
+  const rows: SettingsOverviewRow[] = [
+    { labelKey: "flow.overview.enabled", value: enabled ? "on" : "off", status: enabled ? "ok" : "dim" },
+  ];
+  if (chains.length === 0) {
+    rows.push({ labelKey: "flow.overview.chains", value: "—", status: "dim" });
+  } else {
+    for (const [model, fallbacks] of chains) {
+      rows.push({
+        label: model,
+        value: Array.isArray(fallbacks) ? fallbacks.join(" → ") : "—",
+        status: enabled ? "ok" : "dim",
+      });
+    }
+  }
+  return rows;
 }

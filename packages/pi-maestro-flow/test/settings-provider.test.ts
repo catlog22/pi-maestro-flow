@@ -77,46 +77,57 @@ test("Flow provider describes editable settings, complex actions and bilingual c
   }
 });
 
-test("API Manager provider exposes focused actions and invokes the original manager routes", async () => {
+test("API Manager provider exposes settings, retry policy and the original manager routes", async () => {
   const calls: string[] = [];
-  const provider = createApiManagerSettingsProvider({
-    actions: {
-      "api.manage": () => { calls.push("manage"); },
-      "api.configure": () => { calls.push("configure"); },
-      "api.retry": () => { calls.push("retry"); },
-      "api.list": () => { calls.push("list"); },
-    },
-  });
-  const context: SettingsContextV1 = { cwd: "/project", locale: "en" };
-  const description = await provider.describe({ context });
-  assert.equal(description.id, "pi-maestro-api-manager");
-  assert.equal(description.labelKey, "api.provider");
-  assert.equal(description.capabilities.write, false);
-  assert.deepEqual(description.settings.map((entry) => entry.key), [
-    "api.manage",
-    "api.configure",
-    "api.retry",
-    "api.list",
-  ]);
-  assert.equal(description.catalogs?.["zh-CN"]["api.action.manage"], "打开完整 API Manager");
-  const snapshot = await provider.read({ context });
-  assert.equal(snapshot.effective.values.length, 4);
-  for (const actionId of ["api.manage", "api.configure", "api.retry", "api.list"]) {
-    assert.deepEqual(await provider.invokeAction!({ context, actionId }), { handled: true, refresh: false });
-  }
-  assert.deepEqual(calls, ["manage", "configure", "retry", "list"]);
-  assert.equal((await provider.validate({
-    context,
-    transactionId: "read-only",
-    changes: [{ operation: "set", key: "api.retry", scope: "global", value: true }],
-  })).valid, false);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "api-settings-"));
+  try {
+    const provider = createApiManagerSettingsProvider({
+      getModelsPath: () => path.join(directory, "models.json"),
+      getSettingsPath: () => path.join(directory, "settings.json"),
+      actions: {
+        "api.manage": () => { calls.push("manage"); },
+        "api.configure": () => { calls.push("configure"); },
+        "api.retry": () => { calls.push("retry"); },
+        "api.list": () => { calls.push("list"); },
+      },
+    });
+    const context: SettingsContextV1 = { cwd: "/project", locale: "en" };
+    const description = await provider.describe({ context });
+    assert.equal(description.id, "pi-maestro-api-manager");
+    assert.equal(description.labelKey, "api.provider");
+    assert.equal(description.capabilities.write, true);
+    assert.deepEqual(description.settings.map((entry) => entry.key), [
+      "api.providers",
+      "api.retry.enabled",
+      "api.retry.maxRetries",
+      "api.overview",
+      "api.manage",
+      "api.configure",
+      "api.retry",
+      "api.list",
+    ]);
+    assert.equal(description.catalogs?.["zh-CN"]["api.action.manage"], "打开 API Manager");
+    const snapshot = await provider.read({ context });
+    assert.equal(snapshot.effective.values.length, 8);
+    for (const actionId of ["api.manage", "api.configure", "api.retry", "api.list"]) {
+      assert.deepEqual(await provider.invokeAction!({ context, actionId }), { handled: true, refresh: false });
+    }
+    assert.deepEqual(calls, ["manage", "configure", "retry", "list"]);
+    assert.equal((await provider.validate({
+      context,
+      transactionId: "t1",
+      changes: [{ operation: "set", key: "api.providers", scope: "global", value: "not-a-list" }],
+    })).valid, false);
 
-  const events = new EventEmitter();
-  registerApiManagerSettingsProvider(events, provider);
-  const announcements: unknown[] = [];
-  events.on(SETTINGS_ANNOUNCE_EVENT, (payload) => announcements.push(payload));
-  events.emit(SETTINGS_DISCOVER_EVENT, { version: SETTINGS_PROTOCOL_VERSION, requestId: "api-request", context });
-  assert.equal((announcements.at(-1) as { providerId?: string }).providerId, "pi-maestro-api-manager");
+    const events = new EventEmitter();
+    registerApiManagerSettingsProvider(events, provider);
+    const announcements: unknown[] = [];
+    events.on(SETTINGS_ANNOUNCE_EVENT, (payload) => announcements.push(payload));
+    events.emit(SETTINGS_DISCOVER_EVENT, { version: SETTINGS_PROTOCOL_VERSION, requestId: "api-request", context });
+    assert.equal((announcements.at(-1) as { providerId?: string }).providerId, "pi-maestro-api-manager");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("Flow provider reports configured and effective values across global and project scopes", async () => {
@@ -145,6 +156,14 @@ test("Flow provider reports configured and effective values across global and pr
     "openai/main": ["qwen/fallback"],
     "qwen/main": ["openai/fallback"],
   });
+  const derived = snapshot.effective.values.find((entry) => entry.key === "compaction.derived");
+  assert.equal(derived?.source, "runtime");
+  const derivedRows = derived?.value as Array<Record<string, unknown>>;
+  assert.ok(Array.isArray(derivedRows) && derivedRows.length >= 4);
+  assert.equal(derivedRows.find((row) => row.labelKey === "flow.overview.enabled")?.value, "off");
+  const chains = snapshot.effective.values.find((entry) => entry.key === "failover.overview")?.value as Array<Record<string, unknown>>;
+  assert.ok(Array.isArray(chains) && chains.length >= 2);
+  assert.ok(chains.some((row) => String(row.label).includes("qwen/main")));
 });
 
 test("Flow provider validates ranges, effective compaction invariants and fallback maps", async () => {

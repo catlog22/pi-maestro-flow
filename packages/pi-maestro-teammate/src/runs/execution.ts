@@ -30,6 +30,7 @@ import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
 import { applyModelRouting, type TeammateTaskType } from "../models/model-routing.ts";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
 import {
+  rankModelsByHealth,
   sharedModelCircuitBreaker,
   type ModelCircuitBreaker,
 } from "../models/model-circuit-breaker.ts";
@@ -40,8 +41,12 @@ import {
   type TeammateThinkingLevel,
 } from "../shared/thinking.ts";
 import {
+  classifyRetryError,
+  extractRetryAfterMs,
   isFallbackProviderError,
+  retryDelayMs,
 } from "./retry.ts";
+import { buildReplayFence } from "./recovery-protocol.ts";
 
 export * from "./execution-infra.ts";
 import {
@@ -88,6 +93,7 @@ import {
   truncateUtf8Tail,
   validateStructuredOutputValue,
   validateTaskReferences,
+  waitForRetryDelay,
   writeSchemaFile,
   writeSystemPromptFile,
 } from "./execution-infra.ts";
@@ -111,10 +117,20 @@ interface AttemptRecoveryFacts {
   settlementCapability: AttemptSettlementCapability;
   completedToolCount: number;
   inFlightToolCount: number;
+  /** A non-zero close before any child event, stderr, or possible side effect. */
+  preActivityInfrastructureExit: boolean;
+  /** IPC or non-protocol output that may represent untracked external work. */
+  externalReplayRisk: boolean;
 }
 
 const attemptRecoveryFacts = new WeakMap<SingleResult, AttemptRecoveryFacts>();
 const INTERRUPTING_STEER_TIMEOUT_MS = 10_000;
+
+/** Provider identity of a `provider/model` selector, or undefined when unparsable. */
+function providerOf(model: string): string | undefined {
+  const slash = model.indexOf("/");
+  return slash > 0 ? model.slice(0, slash) : undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Core: run a single teammate agent
@@ -222,9 +238,21 @@ export async function runSingleTeammate(
   const implicitFallbacks = candidates.length === 0
     ? (options.modelCapabilities ?? []).map((capability) => capability.id)
     : [];
-  const modelCandidates: Array<string | undefined> = candidates.length > 0
+  const baseCandidates: Array<string | undefined> = candidates.length > 0
     ? candidates
     : [undefined, ...implicitFallbacks];
+  // ④ Health-order the fallback tail (the primary stays first — it is the
+  // user's explicit choice). Healthy/never-tried fallbacks float up, while
+  // recovering (HALF_OPEN) trials and OPEN candidates sink.
+  const modelCandidates: Array<string | undefined> = baseCandidates.length > 1
+    ? [
+        baseCandidates[0],
+        ...rankModelsByHealth(
+          baseCandidates.slice(1).filter((model): model is string => model !== undefined),
+          breaker,
+        ),
+      ]
+    : baseCandidates;
   const attemptedModels: string[] = [];
   const attemptedModelSet = new Set<string>();
   const recordAttemptedModel = (model: string): void => {
@@ -251,9 +279,19 @@ export async function runSingleTeammate(
     return result;
   };
 
+  const waitForRetry = options.waitForRetry ?? waitForRetryDelay;
+  let candidateIndex = 0;
+  let failedCandidateCount = 0;
+  // Providers whose credential just failed auth: their remaining candidates
+  // are doomed launches and are skipped (D1-A).
+  const authSkippedProviders = new Set<string>();
+
   for (const modelToUse of modelCandidates) {
     if (options.signal?.aborted) return cancelAtBoundary("before model candidate launch");
     if (modelToUse && modelToUse === resolvedDefaultModel) continue;
+    const candidateProvider = modelToUse ? providerOf(modelToUse) : undefined;
+    if (candidateProvider !== undefined && authSkippedProviders.has(candidateProvider)) continue;
+    candidateIndex += 1;
     const acquisition = modelToUse ? breaker.acquireCandidate(modelToUse) : undefined;
     if (acquisition && !acquisition.allowed) continue;
     if (modelToUse) recordAttemptedModel(modelToUse);
@@ -334,12 +372,22 @@ export async function runSingleTeammate(
       const fallbackFailure = isFallbackProviderError(error);
       const recoveryFacts = attemptRecoveryFacts.get(candidateResult);
       const authoritativeFailure = recoveryFacts?.settlementCapability === "agent_settled";
+      const preActivityInfrastructureExit = recoveryFacts?.preActivityInfrastructureExit === true;
+      // ⑤ Shared replay-fence semantics: blocked when any tool completed or
+      // its effect is unknown. The executor tracks counts (not names), so the
+      // reason string carries the counts explicitly.
       const replayFenceClear = recoveryFacts !== undefined
-        && recoveryFacts.completedToolCount === 0
-        && recoveryFacts.inFlightToolCount === 0;
-      let fallbackEligible = fallbackFailure && authoritativeFailure && replayFenceClear;
+        && !buildReplayFence({
+          completedToolCount: recoveryFacts.completedToolCount,
+          unknownEffect: recoveryFacts.inFlightToolCount > 0 || recoveryFacts.externalReplayRisk,
+          blockedReason:
+            `Fresh replay blocked after completedTools=${recoveryFacts.completedToolCount}, `
+            + `inFlightTools=${recoveryFacts.inFlightToolCount}, externalReplayRisk=${recoveryFacts.externalReplayRisk}.`,
+        }).blocked;
+      let fallbackEligible = replayFenceClear
+        && ((fallbackFailure && authoritativeFailure) || preActivityInfrastructureExit);
 
-      if (fallbackFailure && !authoritativeFailure) {
+      if (fallbackFailure && !authoritativeFailure && !preActivityInfrastructureExit) {
         candidateResult.messages.push({
           role: "system",
           content:
@@ -347,15 +395,18 @@ export async function runSingleTeammate(
             + `(capability=${recoveryFacts?.settlementCapability ?? "unknown"}). `
             + `Legacy or interrupted child streams have degraded recovery capability and cannot be fresh-replayed safely.`,
         });
-      } else if (fallbackFailure && !replayFenceClear) {
+      } else if ((fallbackFailure || preActivityInfrastructureExit) && !replayFenceClear) {
         const completedTools = recoveryFacts?.completedToolCount ?? 0;
         const inFlightTools = recoveryFacts?.inFlightToolCount ?? 0;
+        const externalReplayRisk = recoveryFacts?.externalReplayRisk ?? false;
         candidateResult.messages.push({
           role: "system",
           content:
             `Model fallback blocked by the side-effect replay fence `
-            + `(completedTools=${completedTools}, inFlightTools=${inFlightTools}). `
-            + `A fresh model process could repeat a completed tool or a tool whose effect is unknown.`,
+            + `(completedTools=${completedTools}, inFlightTools=${inFlightTools}, `
+            + `externalReplayRisk=${externalReplayRisk}). `
+            + `A fresh model process could repeat a completed tool, a tool whose effect is unknown, `
+            + `or external work observed through child IPC/runtime diagnostics.`,
         });
       }
 
@@ -378,10 +429,29 @@ export async function runSingleTeammate(
 
       if (fallbackEligible) {
         if (acquisition?.allowed) {
-          breaker.recordRetryableFailure(acquisition);
+          if (preActivityInfrastructureExit) breaker.releaseCandidate(acquisition);
+          else breaker.recordRetryableFailure(acquisition);
           settled = true;
         }
         discardCompletion();
+        const kind = preActivityInfrastructureExit ? "non-retryable" : classifyRetryError(error);
+        // D1-A: an auth failure marks this provider's credential as bad —
+        // remaining same-provider candidates will fail identically, so skip
+        // them instead of launching doomed subprocesses.
+        if (kind === "auth" && modelToUse !== undefined) {
+          const failedProvider = providerOf(modelToUse);
+          if (failedProvider !== undefined) authSkippedProviders.add(failedProvider);
+        }
+        // D2: bounded kind-aware backoff before the next candidate. Only
+        // transient network/provider failures wait (a degraded provider gets
+        // a beat instead of consecutive hammering); quota, auth, and
+        // permanent failures switch immediately. The final candidate never
+        // sleeps — the loop exits to the terminal failure path.
+        failedCandidateCount += 1;
+        const delayMs = retryDelayMs(failedCandidateCount, kind, extractRetryAfterMs(error));
+        if (delayMs > 0 && options.enableRetryBackoff !== false && candidateIndex < modelCandidates.length) {
+          await waitForRetry(delayMs, options.signal);
+        }
         continue;
       }
 
@@ -498,6 +568,10 @@ interface AttemptState {
   completedCacheWriteTokens: number;
   /** One-way latches; never reset. */
   receivedFirstActivity: boolean;
+  /** True only for a silent non-zero close before any child event or possible effect. */
+  preActivityInfrastructureExit: boolean;
+  /** IPC or non-protocol output makes cross-process replay unsafe. */
+  externalReplayRisk: boolean;
   initialResultPublished: boolean;
   /** Recovery evidence used to fence any fresh-process model fallback. */
   settlementCapability: AttemptSettlementCapability;
@@ -563,6 +637,7 @@ function bindChildIpcRelay(
   child: ChildProcess,
   correlationId: string,
   options: RunTeammateOptions,
+  onActivity?: () => void,
 ): void {
   child.on("message", (msg: unknown) => {
     // PERFSEC-001: process.send(null) or malformed envelopes must not crash
@@ -572,6 +647,7 @@ function bindChildIpcRelay(
     // GEN-001: After teardown aborts the signal, a dying child's in-flight
     // IPC messages must not re-enter the parent and spawn new nested agents.
     if (options.signal?.aborted) return;
+    onActivity?.();
     const m = msg as Record<string, unknown>;
     dispatchChildIpcMessage(
       m,
@@ -656,6 +732,8 @@ async function runSingleAttempt(
     completedCacheReadTokens: 0,
     completedCacheWriteTokens: 0,
     receivedFirstActivity: false,
+    preActivityInfrastructureExit: false,
+    externalReplayRisk: false,
     initialResultPublished: false,
     settlementCapability: "unknown",
     completedToolCount: 0,
@@ -672,6 +750,8 @@ async function runSingleAttempt(
       settlementCapability: state.settlementCapability,
       completedToolCount: state.completedToolCount,
       inFlightToolCount: state.inFlightToolCount,
+      preActivityInfrastructureExit: state.preActivityInfrastructureExit,
+      externalReplayRisk: state.externalReplayRisk,
     });
     return result;
   };
@@ -756,8 +836,15 @@ async function runSingleAttempt(
       sendRpcMessage(child.stdin, params.task, "prompt", initialLeaseToken);
     }
 
-    // IPC message listener — proxy requests from child extensions
-    if (useIpc) bindChildIpcRelay(child, correlationId, options);
+    // IPC message listener — proxy requests from child extensions. Any valid
+    // child envelope disqualifies a fresh-process replay because it may have
+    // already caused work in the parent process.
+    if (useIpc) {
+      bindChildIpcRelay(child, correlationId, options, () => {
+        state.receivedFirstActivity = true;
+        state.externalReplayRisk = true;
+      });
+    }
 
     // Report initial progress
     options.onProgress?.(progress);
@@ -800,11 +887,19 @@ async function runSingleAttempt(
     const stdoutLines = createUtf8LineDecoder();
     const processStdoutLine = (line: string) => {
       const trimmed = line.trim();
-      if (!trimmed) return;
+      if (!trimmed) {
+        state.receivedFirstActivity = true;
+        state.externalReplayRisk = true;
+        if (timers.firstActivity) clearTimeout(timers.firstActivity);
+        return;
+      }
       try {
         const event = JSON.parse(trimmed) as JsonLineEvent;
         processEvent(event);
       } catch {
+        state.receivedFirstActivity = true;
+        state.externalReplayRisk = true;
+        if (timers.firstActivity) clearTimeout(timers.firstActivity);
         state.lastContent = appendUtf8Tail(
           state.lastContent,
           trimmed + "\n",
@@ -1563,6 +1658,7 @@ async function runSingleAttempt(
     const stderrDecoder = new StringDecoder("utf8");
     child.stderr?.on("data", (chunk: Buffer) => {
       pokeLifecycleDeadline();
+      if (chunk.length > 0) state.externalReplayRisk = true;
       state.stderrBuffer = appendUtf8Tail(
         state.stderrBuffer,
         stderrDecoder.write(chunk),
@@ -1628,6 +1724,13 @@ async function runSingleAttempt(
       }
 
       const stderrTail = state.stderrBuffer.trim();
+      state.preActivityInfrastructureExit = code !== null
+        && code !== 0
+        && signal === null
+        && !state.receivedFirstActivity
+        && !state.runtimeFailure
+        && stderrTail.length === 0
+        && state.lastContent.trim().length === 0;
       const finalContent = state.lastContent.trim();
       if (finalContent && !messages.some((message) => message.content === finalContent)) {
         appendDistinctAssistantMessage(messages, finalContent);
@@ -2033,6 +2136,7 @@ export async function runGraph(
       const result = await runSingleTeammate(
         {
           agent: task.agent,
+          name: task.name,
           task: resolvedTask,
           context: task.context,
           model: task.model,
@@ -2106,6 +2210,8 @@ export async function runTeammate(
     params,
     options.baseCwd,
     options.modelCapabilities?.map((capability) => capability.id) ?? [],
+    undefined,
+    options.inheritModel,
   );
   const normalized = normalizeTeammateParams(routed);
   if (normalized.error) throw new Error(normalized.error);

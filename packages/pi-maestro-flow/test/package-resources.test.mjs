@@ -12,13 +12,16 @@ import {
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const teammateRoot = join(root, "..", "pi-maestro-teammate");
 const cockpitRoot = join(root, "..", "pi-cockpit");
+const settingsCoreRoot = join(root, "..", "pi-maestro-settings-core");
 const exactSemver = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
-const piCoreSdkNames = [
-  "@earendil-works/pi-agent-core",
-  "@earendil-works/pi-ai",
-  "@earendil-works/pi-coding-agent",
-  "@earendil-works/pi-tui",
-];
+const piCorePeerBaselines = {
+  "@earendil-works/pi-agent-core": "0.83.0",
+  "@earendil-works/pi-ai": "0.83.0",
+  "@earendil-works/pi-coding-agent": "0.83.0",
+  "@earendil-works/pi-tui": "0.83.0",
+  typebox: "1.3.7",
+};
+const smartSearchSource = "https://github.com/konbakuyomu/smartsearch/archive/667c465d0f6ea16a423f03c434f94e21505d3595.tar.gz";
 const teammatePublicExports = {
   ".": ["./types/index.d.ts", "./src/index.ts"],
   "./v1": ["./types/public/v1/index.d.ts", "./src/public/v1/index.ts"],
@@ -39,6 +42,8 @@ after(() => cleanPackagedSkills());
 test("package manifest publishes the extension and canonical Pi skills", () => {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const teammatePkg = JSON.parse(readFileSync(join(teammateRoot, "package.json"), "utf8"));
+  const cockpitPkg = JSON.parse(readFileSync(join(cockpitRoot, "package.json"), "utf8"));
+  const settingsCorePkg = JSON.parse(readFileSync(join(settingsCoreRoot, "package.json"), "utf8"));
   assert.match(pkg.version, exactSemver);
   assert.equal(pkg.files.includes(".pi/"), true);
   assert.equal(pkg.files.includes("workflows/"), false);
@@ -51,9 +56,13 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   assert.ok(pkg.files.includes("!.pi/model-failover.json"));
   assert.ok(pkg.files.includes("!.pi/scratch/**"));
   assert.match(pkg.dependencies["maestro-flow"], exactSemver);
+  assert.equal(pkg.dependencies["pi-maestro-settings-core"], settingsCorePkg.version);
+  assert.equal(teammatePkg.dependencies["pi-maestro-settings-core"], settingsCorePkg.version);
+  assert.equal(cockpitPkg.dependencies["pi-maestro-settings-core"], settingsCorePkg.version);
   assert.equal(pkg.dependencies["pi-maestro-teammate"], teammatePkg.version);
+  assert.equal(pkg.dependencies["pi-cockpit"], cockpitPkg.version);
   assert.equal(pkg.dependencies["@konbakuyomu/smart-search"], undefined);
-  assert.match(pkg.optionalDependencies["@konbakuyomu/smart-search"], exactSemver);
+  assert.equal(pkg.optionalDependencies["@konbakuyomu/smart-search"], smartSearchSource);
   assert.equal(pkg.dependencies["puppeteer-core"], "24.31.0");
   assert.equal(pkg.dependencies["cross-spawn"], "7.0.6");
   assert.equal(pkg.devDependencies.typescript, "5.7.3");
@@ -117,18 +126,18 @@ test("teammate package publishes a versioned API with a real root entry", () => 
   }
 });
 
-test("Pi extension manifests keep host SDKs as optional wildcard peers", () => {
+test("Pi extension manifests keep host core packages as optional wildcard peers", () => {
   for (const packageRoot of [root, teammateRoot, cockpitRoot]) {
     const pkg = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
-    for (const sdkName of piCoreSdkNames) {
-      assert.equal(pkg.dependencies?.[sdkName], undefined, `${pkg.name} must not own ${sdkName} at runtime`);
-      assert.equal(pkg.peerDependencies?.[sdkName], "*", `${pkg.name} must accept the host ${sdkName}`);
+    for (const [packageName, devBaseline] of Object.entries(piCorePeerBaselines)) {
+      assert.equal(pkg.dependencies?.[packageName], undefined, `${pkg.name} must not own ${packageName} at runtime`);
+      assert.equal(pkg.peerDependencies?.[packageName], "*", `${pkg.name} must accept the host ${packageName}`);
       assert.equal(
-        pkg.peerDependenciesMeta?.[sdkName]?.optional,
+        pkg.peerDependenciesMeta?.[packageName]?.optional,
         true,
-        `${pkg.name} must make the ${sdkName} peer optional`,
+        `${pkg.name} must make the ${packageName} peer optional`,
       );
-      assert.equal(pkg.devDependencies?.[sdkName], "0.82.1", `${pkg.name} must develop against ${sdkName}@0.82.1`);
+      assert.equal(pkg.devDependencies?.[packageName], devBaseline, `${pkg.name} must develop against ${packageName}@${devBaseline}`);
     }
   }
 });

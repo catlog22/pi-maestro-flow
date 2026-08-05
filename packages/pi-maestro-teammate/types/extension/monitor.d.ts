@@ -10,6 +10,7 @@
  * Pure algorithms with no dependency on extension/index.ts. The tool
  * registration in index.ts injects the watch/wait callbacks.
  */
+import { DeliveryGate } from "../supervision/delivery.ts";
 /** LLM-callable actions (enter/exit are user-only via /monitor command). */
 export type MonitorAction = "status" | "wait";
 export type MonitorWaitMode = "all" | "any" | "count";
@@ -120,6 +121,8 @@ export interface MonitorBinding {
     driftDetected: boolean;
     /** Last notified reason for dedup (avoid spamming main session). */
     lastNotifiedReason?: string;
+    /** Per-binding intervention delivery gate (cooldown + dedup + window limit). */
+    deliveryGate: DeliveryGate;
 }
 /** Agent info snapshot provided by the host (index.ts) to the engine. */
 export interface EngineAgentInfo {
@@ -144,8 +147,8 @@ export interface EngineCallbacks {
     sendIntervention: (correlationId: string, message: string, mode: "steer" | "follow_up") => boolean | Promise<boolean>;
     /** Update the status bar text. */
     onStatusUpdate: (statusText: string | undefined) => void;
-    /** Notify the main session (e.g., interaction needed). */
-    notifyMain: (message: string) => void;
+    /** Notify the main session (e.g., interaction needed). `target` is the binding key. */
+    notifyMain: (message: string, target?: string) => void;
     /** LLM analysis (Phase C). Returns undefined if not available or failed. */
     analyze?: (binding: MonitorBinding, info: EngineAgentInfo) => Promise<AnalysisResult | undefined>;
 }
@@ -156,6 +159,12 @@ export interface AnalysisResult {
     action?: "none" | "send";
     message?: string;
 }
+/**
+ * JSON schema for structured LLM analysis output — shared with the
+ * supervision evaluator (structured first, text fallback via
+ * parseAnalysisResult).
+ */
+export declare const ANALYSIS_RESULT_SCHEMA: Record<string, unknown>;
 /** Minimum seconds between interventions on the same session. */
 export declare const INTERVENTION_COOLDOWN_MS = 60000;
 /** Engine tick interval. */

@@ -1,0 +1,120 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import type { SettingsContextV1 } from "pi-maestro-settings-core/v1";
+import { SETTINGS_SECRET_SET_PLACEHOLDER } from "pi-maestro-settings-core/v1/schema";
+import { createApiManagerSettingsProvider } from "../src/settings/api-manager-settings-provider.ts";
+
+interface Harness {
+  provider: ReturnType<typeof createApiManagerSettingsProvider>;
+  modelsPath: string;
+  settingsPath: string;
+  context: SettingsContextV1;
+}
+
+function harness(initialModels: Record<string, unknown> = {}, initialSettings: Record<string, unknown> = {}): Harness {
+  const directory = mkdtempSync(join(tmpdir(), "api-settings-e2e-"));
+  const modelsPath = join(directory, "models.json");
+  const settingsPath = join(directory, "settings.json");
+  writeFileSync(modelsPath, JSON.stringify(initialModels, null, 2));
+  writeFileSync(settingsPath, JSON.stringify(initialSettings, null, 2));
+  const provider = createApiManagerSettingsProvider({
+    getModelsPath: () => modelsPath,
+    getSettingsPath: () => settingsPath,
+  });
+  return { provider, modelsPath, settingsPath, context: { cwd: "/project", locale: "en" } };
+}
+
+test("api manager read surfaces providers with a masked apiKey placeholder", async () => {
+  const { provider, context } = harness({
+    providers: {
+      "maestro-openai": { baseUrl: "https://gateway.example.com/v1", api: "openai-responses", apiKey: "sk-live", models: [{ id: "gpt-5.6" }] },
+      "qwen": { baseUrl: "https://q.example.com/v1", api: "openai-completions", enabled: false },
+    },
+  });
+  const snapshot = await provider.read({ context });
+  const providers = snapshot.effective.values.find((entry) => entry.key === "api.providers")?.value as Array<Record<string, unknown>>;
+  assert.equal(providers.length, 2);
+  const openai = providers.find((entry) => entry.id === "maestro-openai")!;
+  assert.equal(openai.apiKey, SETTINGS_SECRET_SET_PLACEHOLDER, "read must never expose the plaintext key");
+  assert.equal(openai.enabled, true);
+  const qwen = providers.find((entry) => entry.id === "qwen")!;
+  assert.equal(qwen.enabled, false);
+});
+
+test("api manager commit adds a provider, keeps an untouched secret and writes retry policy", async () => {
+  const { provider, modelsPath, settingsPath, context } = harness({
+    providers: {
+      "maestro-openai": { baseUrl: "https://gateway.example.com/v1", api: "openai-responses", apiKey: "sk-live", models: [{ id: "gpt-5.6" }] },
+    },
+  });
+  const changes = [
+    { operation: "set" as const, key: "api.providers", scope: "global" as const, value: [
+      { id: "maestro-openai", baseUrl: "https://gateway.example.com/v1", api: "openai-responses", enabled: true, apiKey: SETTINGS_SECRET_SET_PLACEHOLDER },
+      { id: "new-vendor", baseUrl: "https://n.example.com/v1", api: "anthropic-messages", enabled: true, apiKey: "sk-new" },
+    ]},
+    { operation: "set" as const, key: "api.retry.enabled", scope: "global" as const, value: true },
+    { operation: "set" as const, key: "api.retry.maxRetries", scope: "global" as const, value: 4 },
+  ];
+  const transactionId = "tx-1";
+  const prepared = await provider.prepare!({ context, transactionId, changes, expectedRevisions: [] });
+  assert.equal(prepared.prepared, true);
+  const committed = await provider.commit!({ context, transactionId, prepareToken: transactionId });
+  assert.ok(committed.changedKeys.includes("api.providers"));
+
+  const models = JSON.parse(readFileSync(modelsPath, "utf8")) as Record<string, unknown>;
+  const providers = models.providers as Record<string, Record<string, unknown>>;
+  assert.equal(providers["maestro-openai"]!.apiKey, "sk-live", "placeholder on an existing provider must keep the original key");
+  assert.equal(providers["new-vendor"]!.apiKey, "sk-new", "a fresh plaintext key must be written once");
+  assert.deepEqual(providers["maestro-openai"]!.models, [{ id: "gpt-5.6" }], "existing models are preserved");
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as { retry: { enabled: boolean; maxRetries: number } };
+  assert.equal(settings.retry.enabled, true);
+  assert.equal(settings.retry.maxRetries, 4);
+});
+
+test("api manager commit replaces the provider list, dropping removed providers", async () => {
+  const { provider, modelsPath, context } = harness({
+    providers: {
+      "keep": { baseUrl: "https://k.example.com/v1", api: "openai-responses" },
+      "drop": { baseUrl: "https://d.example.com/v1", api: "openai-completions" },
+    },
+  });
+  const transactionId = "tx-2";
+  await provider.prepare!({
+    context, transactionId,
+    changes: [{ operation: "set", key: "api.providers", scope: "global", value: [
+      { id: "keep", baseUrl: "https://k.example.com/v1", api: "openai-responses", enabled: true },
+    ] }],
+    expectedRevisions: [],
+  });
+  await provider.commit!({ context, transactionId, prepareToken: transactionId });
+  const providers = (JSON.parse(readFileSync(modelsPath, "utf8")) as { providers: Record<string, unknown> }).providers;
+  assert.deepEqual(Object.keys(providers), ["keep"]);
+});
+
+test("api manager validates malformed provider lists", async () => {
+  const { provider, context } = harness();
+  const invalid = await provider.validate!({
+    context, transactionId: "tx-3",
+    changes: [{ operation: "set", key: "api.providers", scope: "global", value: [{ baseUrl: "no-id" }] }],
+  });
+  assert.equal(invalid.valid, false);
+  const valid = await provider.validate!({
+    context, transactionId: "tx-3",
+    changes: [{ operation: "set", key: "api.providers", scope: "global", value: [{ id: "ok", enabled: true }] }],
+  });
+  assert.equal(valid.valid, true);
+});
+
+test("api manager overview carries provider and retry rows", async () => {
+  const { provider, context } = harness({
+    providers: { "maestro-openai": { baseUrl: "https://g/v1", api: "openai-responses", enabled: true } },
+  }, { retry: { enabled: true, maxRetries: 3 } });
+  const snapshot = await provider.read({ context });
+  const rows = snapshot.effective.values.find((entry) => entry.key === "api.overview")?.value as Array<Record<string, unknown>>;
+  assert.ok(rows.length >= 3);
+  assert.ok(rows.some((row) => String(row.label).includes("maestro-openai")));
+  assert.ok(rows.some((row) => row.labelKey === "api.overview.retry"));
+});

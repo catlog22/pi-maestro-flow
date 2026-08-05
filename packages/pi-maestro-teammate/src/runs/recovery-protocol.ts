@@ -34,6 +34,43 @@ export type ReplayFence =
       blockedReason: string;
     };
 
+export interface ReplayFenceInput {
+  /** Completed tool names; implies blocked when non-empty. */
+  completedTools?: readonly string[];
+  /** Completed tool count when names are unknown; implies blocked when > 0. */
+  completedToolCount?: number;
+  /** True when a tool started but its effect is unknown. */
+  unknownEffect: boolean;
+  /** Override for blockedReason; default derives from the evidence. */
+  blockedReason?: string;
+}
+
+/**
+ * Build a replay fence from tool-activity evidence. Blocked when any tool
+ * completed or its effect is unknown — a fresh replay would risk repeating
+ * side effects. Callers with tool names use {@link ReplayFenceInput.completedTools}
+ * (the derived reason names them); callers that only track counts use
+ * {@link ReplayFenceInput.completedToolCount} with an explicit blockedReason.
+ */
+export function buildReplayFence(input: ReplayFenceInput): ReplayFence {
+  const completedTools = Object.freeze([...(input.completedTools ?? [])]);
+  const hasCompleted = input.completedTools !== undefined
+    ? input.completedTools.length > 0
+    : (input.completedToolCount ?? 0) > 0;
+  if (!hasCompleted && !input.unknownEffect) {
+    return Object.freeze({ completedTools, blocked: false });
+  }
+  const reason = input.blockedReason ?? ((): string => {
+    const parts = [
+      completedTools.length > 0 ? `completed tools: ${completedTools.join(", ")}` : undefined,
+      hasCompleted && completedTools.length === 0 ? `completed tools: ${input.completedToolCount ?? 0}` : undefined,
+      input.unknownEffect ? "one or more tool effects could not be confirmed" : undefined,
+    ].filter(Boolean).join("; ");
+    return `Fresh replay blocked after ${parts}.`;
+  })();
+  return Object.freeze({ completedTools, blocked: true, blockedReason: reason });
+}
+
 interface RecoveryIntentBase {
   intentId: string;
 }
@@ -49,7 +86,7 @@ export interface RecoveryFallbackModelIntent extends RecoveryIntentBase {
   kind: "fallback_model";
   fromModel: string;
   toModel: string;
-  mode: "continue_context" | "restart";
+  mode: "continue_context" | "restart" | "force_restart";
   replayFence: ReplayFence;
 }
 
@@ -298,7 +335,7 @@ export function validateRecoveryEvent(
     if (event.intent.kind === "fallback_model"
       && event.intent.mode === "restart"
       && event.intent.replayFence.blocked) {
-      return invalid("replay-fence", "A blocked replay fence cannot authorize a fallback restart");
+      return invalid("replay-fence", "A blocked replay fence cannot authorize a fallback restart; use force_restart to override");
     }
     const budgetViolation = validateIntentBudget(event.intent);
     if (budgetViolation) return { valid: false, violation: budgetViolation };

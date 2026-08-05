@@ -153,6 +153,13 @@ let publishWorkflowPlan: (
 
 export const PLAN_CLEAN_CONTEXT_COMPACTION_MARKER = "[maestro-plan-clean-context]";
 
+/** True only when the clean-context marker is the leading instruction token. */
+export function isPlanCleanContextCompactionInstructions(
+  customInstructions: string | undefined,
+): boolean {
+  return customInstructions?.trimStart().startsWith(PLAN_CLEAN_CONTEXT_COMPACTION_MARKER) === true;
+}
+
 export interface PlanCleanContextCompactionRequest {
   summary: string;
   firstKeptEntryId: string;
@@ -634,6 +641,9 @@ export function onToolCallPlan(event: {
   if (toolName === "todo") {
     return ["get", "list"].includes(action) ? undefined : planMutationBlock(`todo ${action || "mutation"}`);
   }
+  if (toolName === "conflict") {
+    return action === "list" || action === "diff" ? undefined : planMutationBlock(`conflict ${action || "resolve"}`);
+  }
   if (toolName === "goal") {
     return action === "get" ? undefined : planMutationBlock(`goal ${action || "mutation"}`);
   }
@@ -677,6 +687,7 @@ export function onToolCallPlan(event: {
   if (new Set([
     "read", "grep", "glob", "ls", "find", "ffgrep", "fffind", "ask-user-question",
     "teammate-list", "teammate-watch", "observe", "search_tool_bm25", "smart_search", "source_check",
+    "resource",
     "plan-enter", "plan-update", "plan-review", "plan-confirm", "plan-exit", "plan-status",
   ]).has(toolName)) return undefined;
   return planMutationBlock(event.toolName);

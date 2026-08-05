@@ -10,67 +10,71 @@ const repoRoot = resolve(packageRoot, "..", "..");
 const npmCliPath = process.env.npm_execpath
   ?? resolve(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
 const npmCommand = [process.execPath, npmCliPath];
-const piCoreSdkNames = [
-  "@earendil-works/pi-agent-core",
-  "@earendil-works/pi-ai",
-  "@earendil-works/pi-coding-agent",
-  "@earendil-works/pi-tui",
-];
-const supportedSdkVersion = "0.82.1";
+const piCorePackageVersions = {
+  "@earendil-works/pi-agent-core": "0.83.0",
+  "@earendil-works/pi-ai": "0.83.0",
+  "@earendil-works/pi-coding-agent": "0.83.0",
+  "@earendil-works/pi-tui": "0.83.0",
+  typebox: "1.3.7",
+};
+const piCorePackageNames = Object.keys(piCorePackageVersions);
 const extensionRoots = [
   packageRoot,
   resolve(packageRoot, "..", "pi-maestro-teammate"),
   resolve(packageRoot, "..", "pi-cockpit"),
 ];
 
-test("installed and locked Pi SDKs have supported versions without extraneous entries", () => {
+test("installed and locked Pi core packages have supported versions without extraneous entries", () => {
   const lock = JSON.parse(readFileSync(join(repoRoot, "package-lock.json"), "utf8"));
-  const lockedSdkEntries = Object.entries(lock.packages)
-    .filter(([path]) => piCoreSdkNames.some((sdkName) => path.endsWith(`node_modules/${sdkName}`)))
-    .map(([path, entry]) => ({
-      path,
-      version: entry.version,
-      extraneous: entry.extraneous === true,
-    }));
+  const lockedCoreEntries = Object.entries(lock.packages)
+    .flatMap(([path, entry]) => {
+      const name = piCorePackageNames.find((packageName) => path.endsWith(`node_modules/${packageName}`));
+      return name ? [{
+        name,
+        path,
+        version: entry.version,
+        extraneous: entry.extraneous === true,
+      }] : [];
+    });
 
-  assert.ok(lockedSdkEntries.length >= piCoreSdkNames.length, "package-lock must contain the Pi SDK development graph");
-  assert.deepEqual(
-    [...new Set(lockedSdkEntries.map(({ version }) => version))],
-    [supportedSdkVersion],
-    `unsupported locked Pi SDK versions:\n${JSON.stringify(lockedSdkEntries, null, 2)}`,
+  assert.ok(lockedCoreEntries.length >= piCorePackageNames.length, "package-lock must contain the Pi core development graph");
+  assert.equal(
+    lockedCoreEntries.some(({ name, version }) => version !== piCorePackageVersions[name]),
+    false,
+    `unsupported locked Pi core versions:\n${JSON.stringify(lockedCoreEntries, null, 2)}`,
   );
   assert.equal(
-    lockedSdkEntries.some(({ extraneous }) => extraneous),
+    lockedCoreEntries.some(({ extraneous }) => extraneous),
     false,
-    `extraneous locked Pi SDK entries:\n${JSON.stringify(lockedSdkEntries, null, 2)}`,
+    `extraneous locked Pi core entries:\n${JSON.stringify(lockedCoreEntries, null, 2)}`,
   );
 
   const listed = runNpm([
     "ls",
-    ...piCoreSdkNames,
+    ...piCorePackageNames,
     "--all",
     "--json",
   ], repoRoot);
   assert.equal(
     listed.status,
     0,
-    `npm ls reported Pi SDK problems\nstdout:\n${listed.stdout}\nstderr:\n${listed.stderr}`,
+    `npm ls reported Pi core package problems\nstdout:\n${listed.stdout}\nstderr:\n${listed.stderr}`,
   );
-  const physicalSdkRoots = collectSdkNodes(JSON.parse(listed.stdout));
-  assert.ok(physicalSdkRoots.length >= piCoreSdkNames.length, "npm ls must expose the physical Pi SDK roots");
+  const physicalCoreRoots = collectCorePackageNodes(JSON.parse(listed.stdout));
+  assert.ok(physicalCoreRoots.length >= piCorePackageNames.length, "npm ls must expose the physical Pi core package roots");
   assert.equal(
-    physicalSdkRoots.some(({ version }) => version !== supportedSdkVersion),
+    physicalCoreRoots.some(({ name, version }) => version !== piCorePackageVersions[name]),
     false,
-    `unsupported installed Pi SDK versions:\n${JSON.stringify(physicalSdkRoots, null, 2)}`,
+    `unsupported installed Pi core versions:\n${JSON.stringify(physicalCoreRoots, null, 2)}`,
   );
   assert.equal(
-    physicalSdkRoots.some(({ extraneous }) => extraneous),
+    physicalCoreRoots.some(({ extraneous }) => extraneous),
     false,
-    `extraneous installed Pi SDKs:\n${JSON.stringify(physicalSdkRoots, null, 2)}`,
+    `extraneous installed Pi core packages:\n${JSON.stringify(physicalCoreRoots, null, 2)}`,
   );
 });
 
-test("published extension packages do not bundle Pi core SDKs", { timeout: 180_000 }, () => {
+test("published extension packages do not bundle Pi core packages", { timeout: 180_000 }, () => {
   for (const extensionRoot of extensionRoots) {
     const pkg = JSON.parse(readFileSync(join(extensionRoot, "package.json"), "utf8"));
     const packed = runNpm(["pack", "--dry-run", "--json", "--ignore-scripts"], extensionRoot);
@@ -85,33 +89,34 @@ test("published extension packages do not bundle Pi core SDKs", { timeout: 180_0
       ...(pkg.bundledDependencies ?? []),
     ];
     assert.equal(
-      bundled.some((name) => piCoreSdkNames.includes(name)),
+      bundled.some((name) => piCorePackageNames.includes(name)),
       false,
-      `${pkg.name} must not declare bundled Pi core SDKs`,
+      `${pkg.name} must not declare bundled Pi core packages`,
     );
     assert.equal(
       packResult.files.some(({ path }) =>
-        piCoreSdkNames.some((sdkName) => path.includes(`node_modules/${sdkName}/`))
+        piCorePackageNames.some((packageName) => path.includes(`node_modules/${packageName}/`))
       ),
       false,
-      `${pkg.name} tarball must not contain Pi core SDK files`,
+      `${pkg.name} tarball must not contain Pi core package files`,
     );
   }
 });
 
-function collectSdkNodes(node, parentPath = "") {
+function collectCorePackageNodes(node, parentPath = "") {
   const nodes = [];
   for (const [name, dependency] of Object.entries(node.dependencies ?? {})) {
     const path = parentPath ? `${parentPath} > ${name}` : name;
-    if (piCoreSdkNames.includes(name)) {
+    if (piCorePackageNames.includes(name)) {
       nodes.push({
+        name,
         path,
         version: dependency.version,
         extraneous: dependency.extraneous === true
           || dependency.problems?.some((problem) => problem.startsWith("extraneous:")) === true,
       });
     }
-    nodes.push(...collectSdkNodes(dependency, path));
+    nodes.push(...collectCorePackageNodes(dependency, path));
   }
   return nodes;
 }
