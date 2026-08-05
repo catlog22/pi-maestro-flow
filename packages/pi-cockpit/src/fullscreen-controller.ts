@@ -88,7 +88,6 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 	let wrappedRender: RenderFunction | undefined;
 	let mouseLease: MouseReportingLease | undefined;
 	let unsubscribeInput: (() => void) | undefined;
-	let cleanupTerminal: (() => void) | undefined;
 	let disposed = false;
 	// Lines-from-bottom viewport over the transcript. 0 = live follow.
 	let scrollOffset = 0;
@@ -279,10 +278,12 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 		} catch (error) {
 			reportError(error);
 		}
-		// Crash safety: restore the normal screen if the process dies while the
-		// alternate screen is active (reload/exit/SIGINT). Ref-counted owner.
+		// Crash safety: restore the terminal if the process dies while the alternate
+		// screen is active (reload/exit/SIGINT). Ref-counted owner; kept for the
+		// process lifetime so the comprehensive restore also covers graceful exits
+		// where pi's own restore may be incomplete.
 		try {
-			cleanupTerminal = registerTerminalCleanup((sequence) => nextTui.terminal.write(sequence));
+			registerTerminalCleanup((sequence) => nextTui.terminal.write(sequence));
 		} catch (error) {
 			reportError(error);
 		}
@@ -338,8 +339,11 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 				unsubscribeInput = undefined;
 			}
 			if (tui) flushMouseReportingWrites(tui);
-			cleanupTerminal?.();
-			cleanupTerminal = undefined;
+			// Keep the terminal cleanup registered for the process lifetime. On a
+			// graceful exit, dispose runs BEFORE process.exit, so releasing the
+			// cleanup here would remove the comprehensive exit-flush (kitty/mouse/
+			// raw restore) that must run as a safety net in case pi's own restore is
+			// incomplete on the user's terminal.
 			selection.clear();
 			// Leaving the alternate screen returns to the main screen; force a full
 			// redraw so the main-screen document is repainted instead of diffed
