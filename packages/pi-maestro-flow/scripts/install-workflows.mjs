@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
@@ -18,6 +18,32 @@ function copyDirectory(sourceDir, targetDir) {
     }
   }
   return files;
+}
+
+function assertArchKbComplete(archKbDir) {
+  const indexPath = join(archKbDir, "index.json");
+  if (!existsSync(indexPath)) {
+    throw new Error(`Maestro arch-kb index not found: ${indexPath}`);
+  }
+
+  let index;
+  try {
+    index = JSON.parse(readFileSync(indexPath, "utf8"));
+  } catch (error) {
+    throw new Error(`Maestro arch-kb index is invalid: ${indexPath}`, { cause: error });
+  }
+
+  if (!Array.isArray(index.entries) || index.entries.length === 0) {
+    throw new Error(`Maestro arch-kb index has no entries: ${indexPath}`);
+  }
+  const missing = index.entries
+    .filter((entry) => typeof entry?.path !== "string" || !existsSync(join(archKbDir, entry.path)))
+    .map((entry) => entry?.path ?? "<invalid path>");
+  if (missing.length > 0) {
+    throw new Error(`Maestro arch-kb source files are missing (${missing.length}): ${missing.slice(0, 3).join(", ")}`);
+  }
+
+  return index.entries.length;
 }
 
 export function resolveMaestroFlowRoot() {
@@ -41,24 +67,43 @@ export function installMaestroWorkflows({
       })
     : { status: 1, error: new Error(`Runnable Maestro CLI not found under: ${packageRoot}`) };
 
+  const workflowsTargetDir = join(maestroHome, "workflows");
+  const archKbTargetDir = join(maestroHome, "arch-kb");
   if (!result.error && result.status === 0) {
-    return { mode: "maestro-cli", targetDir: join(maestroHome, "workflows") };
+    const archKbEntriesInstalled = assertArchKbComplete(archKbTargetDir);
+    return {
+      mode: "maestro-cli",
+      targetDir: workflowsTargetDir,
+      archKbTargetDir,
+      archKbEntriesInstalled,
+    };
   }
 
   // Compatibility fallback for maestro-flow versions before `install workflows`.
-  const sourceDir = join(packageRoot, "workflows");
-  if (!existsSync(sourceDir)) {
-    throw result.error ?? new Error(`Maestro workflows directory not found: ${sourceDir}`);
+  const workflowsSourceDir = join(packageRoot, "workflows");
+  if (!existsSync(workflowsSourceDir)) {
+    throw result.error ?? new Error(`Maestro workflows directory not found: ${workflowsSourceDir}`);
   }
-  const targetDir = join(maestroHome, "workflows");
-  const filesInstalled = copyDirectory(sourceDir, targetDir);
-  return { mode: "package-fallback", targetDir, filesInstalled };
+  const archKbSourceDir = join(packageRoot, "resources", "arch-kb");
+  const archKbEntriesInstalled = assertArchKbComplete(archKbSourceDir);
+  const filesInstalled = copyDirectory(workflowsSourceDir, workflowsTargetDir);
+  const archKbFilesInstalled = copyDirectory(archKbSourceDir, archKbTargetDir);
+  return {
+    mode: "package-fallback",
+    targetDir: workflowsTargetDir,
+    filesInstalled,
+    archKbTargetDir,
+    archKbFilesInstalled,
+    archKbEntriesInstalled,
+  };
 }
 
 function run() {
   try {
     const result = installMaestroWorkflows();
-    console.log(`[pi-maestro-flow] Installed Maestro workflows to ${result.targetDir} via ${result.mode}`);
+    console.log(
+      `[pi-maestro-flow] Installed Maestro workflows to ${result.targetDir} and ${result.archKbEntriesInstalled} arch-kb entries to ${result.archKbTargetDir} via ${result.mode}`,
+    );
   } catch (error) {
     console.warn(`[pi-maestro-flow] Workflow installation failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`);
     console.warn("[pi-maestro-flow] Run 'maestro install workflows' manually to complete setup.");

@@ -71,6 +71,8 @@ export declare class AttachOverlay implements Component, Focusable {
     private requestRender;
     private frame;
     private timer;
+    private tickVisibility;
+    private renderedTickSignature;
     private composing;
     private draft;
     private cursor;
@@ -89,6 +91,8 @@ export declare class AttachOverlay implements Component, Focusable {
         message: string;
     }>, loadTranscript?: TranscriptLoader, initialTranscript?: boolean);
     setRequestRender(fn: () => void): void;
+    private tickSignature;
+    private setTickVisibility;
     /**
      * The overlay only ever draws the active tab, but progress events arrive for
      * every concurrent agent. Repainting on a background agent's event burns a

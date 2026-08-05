@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { installMaestroWorkflows } from "../scripts/install-workflows.mjs";
 
-function fixture({ withRuntime = true } = {}) {
+function fixture({ withRuntime = true, withArchKb = true } = {}) {
   const root = mkdtempSync(join(tmpdir(), "pi-maestro-workflows-"));
   const packageRoot = join(root, "maestro-flow");
   const maestroHome = join(root, ".maestro");
@@ -18,6 +18,14 @@ function fixture({ withRuntime = true } = {}) {
   }
   writeFileSync(join(packageRoot, "workflows", "analyze.md"), "analyze");
   writeFileSync(join(packageRoot, "workflows", "nested", "review.md"), "review");
+  if (withArchKb) {
+    const archKbDir = join(packageRoot, "resources", "arch-kb");
+    mkdirSync(join(archKbDir, "templates", "web-app"), { recursive: true });
+    writeFileSync(join(archKbDir, "index.json"), JSON.stringify({
+      entries: [{ path: "templates/web-app/README.md" }],
+    }));
+    writeFileSync(join(archKbDir, "templates", "web-app", "README.md"), "# Web app");
+  }
   return { packageRoot, maestroHome };
 }
 
@@ -30,14 +38,16 @@ test("uses maestro-flow workflows-only command when supported", () => {
     stdio: "pipe",
     runner(_command, nextArgs) {
       args = nextArgs;
+      cpSync(join(packageRoot, "resources", "arch-kb"), join(maestroHome, "arch-kb"), { recursive: true });
       return { status: 0 };
     },
   });
   assert.deepEqual(args.slice(-2), ["install", "workflows"]);
   assert.equal(result.mode, "maestro-cli");
+  assert.equal(result.archKbEntriesInstalled, 1);
 });
 
-test("falls back to package workflows for older maestro-flow releases", () => {
+test("falls back to package workflows and arch-kb for older maestro-flow releases", () => {
   const { packageRoot, maestroHome } = fixture();
   const result = installMaestroWorkflows({
     packageRoot,
@@ -48,9 +58,11 @@ test("falls back to package workflows for older maestro-flow releases", () => {
   assert.equal(result.mode, "package-fallback");
   assert.equal(readFileSync(join(maestroHome, "workflows", "analyze.md"), "utf8"), "analyze");
   assert.equal(existsSync(join(maestroHome, "workflows", "nested", "review.md")), true);
+  assert.equal(readFileSync(join(maestroHome, "arch-kb", "templates", "web-app", "README.md"), "utf8"), "# Web app");
+  assert.equal(result.archKbEntriesInstalled, 1);
 });
 
-test("source-locked maestro-flow tarballs skip an unrunnable bin and copy workflows", () => {
+test("source-locked maestro-flow tarballs skip an unrunnable bin and copy resources", () => {
   const { packageRoot, maestroHome } = fixture({ withRuntime: false });
   const result = installMaestroWorkflows({
     packageRoot,
@@ -60,4 +72,15 @@ test("source-locked maestro-flow tarballs skip an unrunnable bin and copy workfl
   });
   assert.equal(result.mode, "package-fallback");
   assert.equal(readFileSync(join(maestroHome, "workflows", "analyze.md"), "utf8"), "analyze");
+  assert.equal(readFileSync(join(maestroHome, "arch-kb", "templates", "web-app", "README.md"), "utf8"), "# Web app");
+});
+
+test("rejects a package whose arch-kb index has no source markdown", () => {
+  const { packageRoot, maestroHome } = fixture({ withArchKb: false });
+  assert.throws(() => installMaestroWorkflows({
+    packageRoot,
+    maestroHome,
+    stdio: "pipe",
+    runner() { return { status: 1 }; },
+  }), /arch-kb index not found/);
 });

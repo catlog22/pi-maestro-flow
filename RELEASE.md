@@ -1,20 +1,22 @@
-# v0.14.2 - Routing, Structured Results, Compaction Recovery, and Safe Upgrades
+# v0.15.0 - Claude-Style Terminal Interactions, In-Composer Wizard, and TUI Hardening
 
 ## Overview
 
-Flow `0.14.2` bundles Teammate `1.7.1` and Cockpit `0.9.1`. This suite
-release makes teammate routing and schema results durable, adds persistent
-session navigation and optional Advisor supervision, hardens multimodal
-compaction and provider failover, and safely migrates Flow-managed companion
-registrations.
+Flow `0.15.0` bundles Teammate `1.8.0` and Cockpit `0.10.0`. This suite
+release delivers the claude-style terminal interaction set (fullscreen fixed
+editor, copy-on-select, crash-safe cleanup), an in-composer ask wizard with
+step-completion marks, per-task nesting budgets with schema contract
+hardening, knowledge attribution notifications, optional (选装) skills
+support, and broad TUI flicker/robustness hardening across all three
+packages.
 
 ## Package Versions and Requirements
 
-| Package | v0.14.1 | v0.14.2 |
+| Package | v0.14.2 | v0.15.0 |
 |---------|---------|---------|
-| pi-maestro-flow | 0.14.1 | **0.14.2** |
-| pi-maestro-teammate | 1.7.0 | **1.7.1** |
-| pi-cockpit | 0.9.0 | **0.9.1** |
+| pi-maestro-flow | 0.14.2 | **0.15.0** |
+| pi-maestro-teammate | 1.7.1 | **1.8.0** |
+| pi-cockpit | 0.9.1 | **0.10.0** |
 | pi-maestro-settings-core | 0.1.0 | 0.1.0 |
 | maestro-flow | 0.5.61 | 0.5.61 |
 
@@ -22,96 +24,82 @@ registrations.
 - Validated with Pi SDK `0.83.0` and `typebox@1.3.7`.
 - Pi core packages remain optional wildcard peers supplied by the host; the
   release tarballs do not bundle private SDK copies.
-- Smart Search is source-locked to commit `667c465d0f6ea16a423f03c434f94e21505d3595`
-  because the npm `0.1.14` artifact and upstream source expose different
-  routing/configuration contracts under the same version.
-- Smart Search postinstall requires Python `>=3.10`. It remains optional:
-  `search` and `fetch` retain fallback providers if installation is omitted,
-  while `route` and `research` report that the optional package is unavailable.
+- `pi-maestro-settings-core` is unchanged in this release.
 
 ## Highlights
 
-### Teammate Routing and Reliability
+### Cockpit - Claude-Style Terminal Interactions
 
-- Persist per-role model, fallback, and thinking settings, and inherit the
-  active main-session model when no explicit task or role mapping wins.
-- Rank fallback candidates by circuit health, classify provider failures by
-  kind, apply bounded backoff, and fence replay after tool side effects.
-- Recover silent child startup exits and harden mailbox routing, fencing,
-  cleanup, public v1 registration, and isolated agent-session ownership.
-- Refresh the model registry with its receiver intact and coalesce refreshes
-  per registry instance.
+- Fullscreen fixed editor with application-owned transcript scroll; drag
+  selection always works in fullscreen while copy-on-select only gates the
+  copy.
+- Copy-on-select in the fullscreen transcript with copied char/line count
+  notification and flowing (normal text) selection style.
+- Double-Escape clears the input via the Cockpit custom editor; Escape-first
+  UX plumbed through claude-style interaction settings.
+- Crash-safe terminal cleanup: unconditional raw-mode reset, bracketed paste
+  and cursor restore, keyboard protocol restore (`?2031l`) on
+  SIGTERM/SIGHUP, deterministic alternate-screen seeding, forced full redraw
+  on alternate-screen enter/leave, and process-lifetime cleanup so the
+  exit-flush always runs. Capability fallback and docs included.
+- `pinEditorBottom` stays inert inside fullscreen on live toggles.
+- bash-bg, split-pane, and thinking-timer overlays plus the todo store.
+- Agent overlay (`Alt+A`) with agent-priority layout; interrupt/steer overlay;
+  trimmed agent roster fields.
+- Ambient key hooks yield to capturing overlays and focused custom components;
+  modal overlays keep `←/→` instead of empty-composer agent cycling; wheel
+  captured by bit-mask so modifier-wheel still scrolls the transcript.
+- P2 flicker hardening: footer throttle, thinking-fold cache, monitor
+  snapshot gate.
 
-### Structured Results and Session Navigation
+### Teammate - Nesting Budgets, Composer, and Reliability
 
-- Return validated schema output in foreground teammate results and expose it
-  through `observe` and `watch` detail.
-- Persist completed schema output for `agent://<id>/<key-or-index>` reads. The
-  old `/json` path prefix is not part of the resource contract.
-- Keep `@main` and teammate sessions in Cockpit's persistent session bar;
-  switch the viewed session with Left/Right when the composer is empty.
-- Remove the legacy `/teammate-session` workflow in favor of the session bar,
-  and use `Alt+B` consistently to detach foreground teammates.
+- Per-task nesting budget with schema contract hardening; the per-task
+  `maxNestingDepth` override is documented in the dispatch guide.
+- Multi-line composer with auto-wrap and cursor navigation.
+- Tool heartbeat, cockpit agent commands, and task labels.
+- Attach-overlay rework with TUI rendering fixes; smart-search paste flush
+  rendering, progress-tree tweaks, and injectable goal-overlay clock.
+- Odyssey-review fixes: generalized fence monitor ownership, reclaimed failed
+  admission, hardened foreground ownership.
+- Stream read error retry; P2 flicker hardening shared with Cockpit.
+- Dropped the noisy mailbox authoritative-mode log line.
 
-### Compaction, Vision, and Recovery
+### Flow - Ask Wizard, Knowledge Attribution, and Skills
 
-- Preserve image routing, image-aware placeholders, and non-Anthropic thinking
-  across compaction.
-- Add tool-loop completion handling, spill digest validation, invalid-thinking
-  recovery, and safer native/model fallback behavior.
-- Persist per-workspace input history with bounded, merge-aware storage.
-
-### Advisor, Supervision, and Settings
-
-- Add optional asynchronous Advisor reviews at agent and tool checkpoints;
-  only concerns and blockers are injected into the main session.
-- Unify supervision events across Flow, Teammate, and Cockpit.
-- Add settings providers for MCP, skills, smart search, failover, and related
-  operational configuration surfaces.
-
-### Cockpit Operability
-
-- Prevent per-second and streaming updates from bouncing or clearing the
-  visible terminal viewport.
-- Add model selection for generated session titles and preserve rule-based
-  fallback behavior.
-- Harden guarded edit matching and keep teammate content plus the active route
-  target visible.
-- Color quiet tool names by lifecycle state (`warning`, `success`, `error`).
-  Existing `toolPalette` values remain readable for migration but no longer
-  select call/result colors.
-
-### Upgrade Safety and Documentation
-
-- Track Flow-managed Teammate and Cockpit registrations in a versioned sidecar.
-- Replace proven Flow-owned and legacy nested companion paths while preserving
-  readable local development overrides that Flow does not own.
-- Preserve string/object settings entries and resource filters during atomic,
-  recoverable settings writes.
-- Add the React/Vite documentation site and GitHub Pages deployment with
-  guides for routing, compaction, Advisor, mailbox, Cockpit, and settings.
-- Lock Smart Search to a reproducible HTTPS commit tarball so intent routing,
-  research providers, Jina, and Zhipu MCP configuration match the runtime
-  command surface.
+- Ask wizard rendered as an in-composer interactive panel (not an overlay):
+  navigation-only `←/→`, answered-step `✓` marks in the tab bar, and a
+  `已选/未选择` status line; covered by a new ask-sessionbar integration test.
+- Knowledge attribution `record`/`stage` commands with run/session
+  notifications.
+- `maestro-skills` CLI adapter with a per-skill enabled toggle; optional
+  (选装) skills support synced with the maestro2 skill cleanup.
+- AI review subagent in plan confirmation.
+- GUI server/events, statusline, and todo tool hardening.
+- Recovery fixes: canonical Session binding when the claim is absent, advisor
+  config load guarded against a stale extension context, and fff background
+  index-scan runaway guard.
+- Release guard: `test:release` now asserts workspace package version drift
+  and manifest contract consistency.
 
 ## Behavior and Upgrade Notes
 
 - Close all running Pi processes before upgrading. The installer updates disk
   settings that an older in-memory SettingsManager could otherwise overwrite.
-- Back up Pi's `settings.json` and `pi-maestro-flow-companions.json` before an
-  upgrade that changes companion registrations.
-- Start Pi again after installation; extension reload alone is not the
-  authoritative companion-registration boundary.
-- Unspecified teammate models now inherit the main-session model.
-- Use Cockpit's session bar instead of `/teammate-session`.
-- A reported local Teammate or Cockpit override was intentionally preserved;
-  update or remove it explicitly, then restart Pi.
+- The ask wizard no longer renders as a modal overlay; it is an in-composer
+  panel. `Esc` returns to the input, and answered steps are marked `✓` in the
+  tab bar while switching with `←/→/Tab`.
+- Fullscreen transcript interactions (copy-on-select, double-Esc clear) are
+  controlled by the claude-style interaction settings; they are off unless
+  enabled.
+- Companion registration order remains mandatory: Teammate, then Cockpit,
+  then Flow. Verify all three versions after restart.
 
 ## Install / Upgrade
 
 ```bash
 # Close running Pi processes first.
-pi install npm:pi-maestro-flow@0.14.2
+pi install npm:pi-maestro-flow@0.15.0
 pi list
 ```
 
@@ -121,34 +109,39 @@ the versions in the table above before running model-sensitive workflows.
 ## Release Verification
 
 The release candidate passed the serial root `test:release` gate, including
-all changed Flow subsystems, Teammate declarations, Cockpit tests, and both
-fresh packed-consumer tests. The enhanced packed consumer also installs and
-loads Cockpit without its optional Teammate peer, verifies the source-pinned
-Smart Search package, and runs its offline regression command. Packed tests
-remain intentionally serial because Flow prepack/postpack share
-`packages/pi-maestro-flow/.pi/skills`.
+all changed Flow subsystems, Teammate declarations, Cockpit tests, and the
+packed-consumer tests. Packed tests remain intentionally serial because Flow
+prepack/postpack share `packages/pi-maestro-flow/.pi/skills`.
 
 Dry-run tarballs from the verified candidate:
 
 | Package | Files | Packed | Unpacked | SHA-1 |
 |---------|------:|-------:|---------:|-------|
-| pi-maestro-teammate@1.7.1 | 135 | 332.7 kB | 1.5 MB | `ae6d2ca4f071d505fa2b19dcebd2c3506e149681` |
-| pi-cockpit@0.9.1 | 58 | 147.7 kB | 542.3 kB | `ed65e92a99e8ac17c6898d51e5e0f11d5146186b` |
-| pi-maestro-flow@0.14.2 | 820 | 1.9 MB | 7.3 MB | `05e88ed93522271984708fdff5bd37d4ff6ede85` |
+| pi-maestro-teammate@1.8.0 |  |  |  |  |
+| pi-cockpit@0.10.0 |  |  |  |  |
+| pi-maestro-flow@0.15.0 |  |  |  |  |
 
 Publication order is mandatory:
 
-1. Publish and verify `pi-maestro-teammate@1.7.1`.
-2. Publish and verify `pi-cockpit@0.9.1`.
-3. Publish and verify `pi-maestro-flow@0.14.2` with exact companion versions.
+1. Publish and verify `pi-maestro-teammate@1.8.0`.
+2. Publish and verify `pi-cockpit@0.10.0`.
+3. Publish and verify `pi-maestro-flow@0.15.0` with exact companion versions.
 4. Run a fresh temporary-home registry install and Pi runtime smoke test.
-5. Create and push `v0.14.2`, then create the GitHub Release.
+5. Create and push `v0.15.0`, then create the GitHub Release.
 
 ## Change Statistics
 
-Final candidate compared with `v0.14.1`:
+Final candidate compared with `v0.14.2`:
 
-- 40 commits including the release commit
-- 323 files changed
-- 42,397 insertions and 7,237 deletions
+- 52 commits including the release commit
+- 750 files changed
+- 10,004 insertions and 85,827 deletions
 - 3 published packages plus the unchanged settings-core package
+
+Package-level code deltas (excluding docs/skills/tooling):
+
+| Package | Files | Insertions | Deletions |
+|---------|------:|-----------:|----------:|
+| pi-maestro-teammate | 36 | +2,045 | -186 |
+| pi-cockpit | 56 | +3,798 | -176 |
+| pi-maestro-flow | 43 | +2,776 | -191 |

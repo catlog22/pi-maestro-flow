@@ -35,7 +35,7 @@ export declare function displayStatusPresentation(status: DisplayStatus): Status
  * `result-ready`; one that has been silent past the stall threshold is
  * `stalled`. Every other status displays as itself.
  */
-export declare function effectiveDisplayStatus(status: AgentStatus, resultReadyAt: number | undefined, lastActivityAt: number | undefined, now?: number): DisplayStatus;
+export declare function effectiveDisplayStatus(status: AgentStatus, resultReadyAt: number | undefined, lastActivityAt: number | undefined, nowSnapshot?: number): DisplayStatus;
 export declare function projectAgentActivity(agent: Pick<ActiveAgent, "status" | "restart" | "sessionFile">): AgentActivity;
 /** Whole seconds since the last reported activity; 0 when never reported. */
-export declare function idleSeconds(lastActivityAt: number | undefined, now?: number): number;
+export declare function idleSeconds(lastActivityAt: number | undefined, nowSnapshot?: number): number;

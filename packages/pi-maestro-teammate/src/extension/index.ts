@@ -1060,9 +1060,6 @@ export default function registerTeammateExtension(
     void previous?.stop().catch((error) => {
       console.error(`[pi-maestro-teammate] mailbox host stop failed:`, error);
     });
-    if (mailboxHost && mailboxMode === "authoritative") {
-      console.info(`[pi-maestro-teammate] mailbox authoritative mode enabled (PI_TEAMMATE_MAILBOX=${mailboxMode}, workspace=${workspaceId.slice(0, 12)})`);
-    }
   };
 
   const deliverLocalAgentMessage = async (
