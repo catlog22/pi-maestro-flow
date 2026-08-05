@@ -44,46 +44,40 @@ test("getUsageTotals uses a 500ms throttle by default", (t) => {
 		setUsageThrottle(() => 0);
 		invalidateUsageCache();
 	});
-	const entry = (input: number): unknown => ({
+	const entry = (input: number) => ({
 		type: "message",
 		message: { role: "assistant", usage: { input, output: 1 } },
 	});
-	const entriesA = [entry(10)];
-	const entriesB = [entry(10), entry(20)];
+	const entries = [entry(10), entry(20), entry(30)];
 
-	assert.equal(getUsageTotals(entriesA, 1_000).input, 10);
-	assert.equal(getUsageTotals(entriesB, 1_499).input, 10);
-	assert.equal(getUsageTotals(entriesB, 1_500).input, 30);
+	assert.equal(getUsageTotals(entries, 1_000).input, 60);
+	entries[1].message.usage.input = 25;
+	assert.equal(getUsageTotals(entries, 1_499).input, 60, "same-key totals stay cached inside 500ms");
+	assert.equal(getUsageTotals(entries, 1_500).input, 65, "same-key totals refresh at the wall-clock limit");
 });
 
-test("getUsageTotals throttles recompute inside the configured window", (t) => {
+test("getUsageTotals keeps entry-key changes immediate while throttling same-key refreshes", (t) => {
 	invalidateUsageCache();
 	setUsageThrottle(() => 10_000);
 	t.after(() => {
 		setUsageThrottle(() => 0);
 		invalidateUsageCache();
 	});
-	const entry = (input: number): unknown => ({
+	const entry = (input: number) => ({
 		type: "message",
 		message: { role: "assistant", usage: { input, output: 1 } },
 	});
 	const entriesA = [entry(10)];
-	const entriesB = [entry(10), entry(20)];
-	const entriesC = [entry(10), entry(20), entry(15)];
+	const entriesB = [entry(10), entry(20), entry(30)];
 
-	// First computation lands immediately.
 	assert.equal(getUsageTotals(entriesA, 1_000).input, 10);
-	// Changed entries inside the window keep the previous totals on screen.
-	assert.equal(getUsageTotals(entriesB, 5_000).input, 10);
-	assert.equal(getUsageTotals(entriesB, 6_000).input, 10, "same key stays throttled inside the window");
-	// Just before the window elapses, still stale.
-	assert.equal(getUsageTotals(entriesB, 10_999).input, 10);
-	// The same key past the window must recompute — it may not stay stale forever.
-	assert.equal(getUsageTotals(entriesB, 11_000).input, 30);
-	assert.equal(getUsageTotals(entriesB, 20_000).input, 30, "recomputed totals are cached");
-	// A newer key past the new window recomputes from all entries.
-	assert.equal(getUsageTotals(entriesC, 26_000).input, 45);
-	assert.equal(getUsageTotals(entriesC, 30_000).input, 45);
+	assert.equal(getUsageTotals(entriesB, 5_000).input, 60, "a changed entries key recomputes immediately");
+	entriesB[1].message.usage.input = 25;
+	assert.equal(getUsageTotals(entriesB, 6_000).input, 60, "same-key totals stay cached inside the window");
+	assert.equal(getUsageTotals(entriesB, 14_999).input, 60);
+	assert.equal(getUsageTotals(entriesB, 15_000).input, 65);
+	const entriesC = [...entriesB, entry(40)];
+	assert.equal(getUsageTotals(entriesC, 16_000).input, 105, "a newer entries key bypasses the window");
 });
 
 test("getUsageTotals sums assistant usage and skips the rest", () => {

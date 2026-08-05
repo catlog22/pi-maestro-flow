@@ -83,6 +83,32 @@ test("findThinkingToggle survives cycles and non-container nodes", () => {
 	assert.equal(findThinkingToggle(fakeTui(a)), undefined);
 });
 
+test("findThinkingToggle reuses a valid path and lazily refreshes a detached handler", () => {
+	const firstToggle = (): void => {};
+	const secondToggle = (): void => {};
+	const firstEditor = fakeEditor(firstToggle);
+	const secondEditor = fakeEditor(secondToggle);
+	const editorContainer: Record<string, unknown> = { children: [firstEditor] };
+	let decoyWalks = 0;
+	const decoy = fakeComponent() as Record<string, unknown>;
+	Object.defineProperty(decoy, "children", {
+		get: () => {
+			decoyWalks++;
+			return [];
+		},
+	});
+	const tui = fakeTui(editorContainer, decoy);
+
+	assert.equal(findThinkingToggle(tui), firstToggle);
+	assert.equal(decoyWalks, 1);
+	assert.equal(findThinkingToggle(tui), firstToggle);
+	assert.equal(decoyWalks, 1, "cache validation should not repeat the full DFS");
+
+	editorContainer.children = [secondEditor];
+	assert.equal(findThinkingToggle(tui), secondToggle);
+	assert.equal(decoyWalks, 2, "detaching the cached path should trigger one fresh DFS");
+});
+
 test("readHideThinkingBlock defaults to false when no settings exist", () => {
 	assert.equal(readHideThinkingBlock(projectDir), false);
 });

@@ -146,6 +146,26 @@ export function takeSnapshot(resolve: TargetResolver, targets: string[], lines: 
   return targets.map((name) => resolve(name, lines));
 }
 
+function sameTargetSnapshot(
+  previous: MonitorTargetSnapshot,
+  next: MonitorTargetSnapshot,
+): boolean {
+  if (previous === next) return true;
+  const previousKeys = Object.keys(previous) as Array<keyof MonitorTargetSnapshot>;
+  const nextKeys = Object.keys(next) as Array<keyof MonitorTargetSnapshot>;
+  return previousKeys.length === nextKeys.length
+    && previousKeys.every((key) => Object.is(previous[key], next[key]));
+}
+
+function sameMonitorSnapshot(
+  previous: MonitorTargetSnapshot[],
+  next: MonitorTargetSnapshot[],
+): boolean {
+  return previous === next
+    || (previous.length === next.length
+      && previous.every((target, index) => sameTargetSnapshot(target, next[index])));
+}
+
 
 // ---------------------------------------------------------------------------
 // Monitor mode state
@@ -185,8 +205,10 @@ export function startMonitorMode(
   onRefresh(modeState.lastSnapshot);
 
   modeState.timer = setInterval(() => {
-    modeState.lastSnapshot = capture();
-    onRefresh(modeState.lastSnapshot);
+    const nextSnapshot = capture();
+    if (sameMonitorSnapshot(modeState.lastSnapshot, nextSnapshot)) return;
+    modeState.lastSnapshot = nextSnapshot;
+    onRefresh(nextSnapshot);
   }, MONITOR_STATUS_REFRESH_MS);
 
   if (modeState.timer && typeof modeState.timer === "object" && "unref" in modeState.timer) {

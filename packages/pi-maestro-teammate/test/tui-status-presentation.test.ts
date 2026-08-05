@@ -81,6 +81,17 @@ test("effective display status derives result-ready and stalled from the shared 
   assert.equal(idleSeconds(undefined, now), 0);
 });
 
+test("status calculations use the caller's shared frame clock", (t) => {
+  const now = 1_000_000;
+  const lastActivityAt = now - TEAMMATE_STALL_TIMEOUT_MS;
+  t.mock.method(Date, "now", () => {
+    throw new Error("wall clock must not be read when a frame clock is injected");
+  });
+
+  assert.equal(effectiveDisplayStatus("running", undefined, lastActivityAt, now), "stalled");
+  assert.equal(idleSeconds(lastActivityAt, now), TEAMMATE_STALL_TIMEOUT_MS / 1000);
+});
+
 test("progress tree renders retrying tasks distinctly instead of pending", () => {
   const rows = buildProgressTree([
     { agent: "general", name: "flaky", correlationId: "flaky", taskIndex: 0, dependencies: [], status: "retrying" },

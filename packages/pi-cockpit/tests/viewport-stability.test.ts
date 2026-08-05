@@ -49,7 +49,7 @@ function renderHarness(initialLines: string[]) {
 	};
 }
 
-test("stable-height changes above the viewport do not clear screen or scrollback", () => {
+test("equal-height hidden changes fold into the baseline without host clearing", () => {
 	const h = renderHarness(["zero", "one", "two", "three", "four"]);
 	const patch = attachViewportStability(h.tui);
 	assert.equal(patch.active, true);
@@ -59,12 +59,12 @@ test("stable-height changes above the viewport do not clear screen or scrollback
 	assert.equal(h.internals.previousViewportTop, 2);
 	h.terminal.writes.length = 0;
 
-	h.setLines(["ZERO", "one", "two", "three", "four"]);
+	h.setLines(["ZERO", "ONE", "two", "three", "four"]);
 	h.render();
-	assert.equal(h.tui.fullRedraws, 1);
+	assert.equal(h.tui.fullRedraws, 1, "must not enter pi-tui's fullRender(true) branch");
 	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
 	assert.ok(h.internals.previousLines[0]?.startsWith("ZERO\x1b[0m"));
-	assert.ok(h.internals.previousLines[1]?.startsWith("one\x1b[0m"));
+	assert.ok(h.internals.previousLines[1]?.startsWith("ONE\x1b[0m"));
 });
 
 test("visible changes still render differentially after hidden changes are absorbed", () => {
@@ -79,6 +79,23 @@ test("visible changes still render differentially after hidden changes are absor
 	assert.equal(h.terminal.writes.length, 1);
 	assert.equal(h.terminal.writes[0].includes("\x1b[3J"), false);
 	assert.match(h.terminal.writes[0], /FOUR/);
+});
+
+test("visible Kitty image lines do not block hidden equal-height baseline folding", () => {
+	const image = "\x1b_Ga=T,f=100,r=1,i=1;image\x1b\\";
+	const h = renderHarness(["zero", "one", image, "three", "four"]);
+	attachViewportStability(h.tui);
+	h.render();
+	assert.equal(h.internals.previousViewportTop, 2);
+	h.terminal.writes.length = 0;
+
+	h.setLines(["ZERO", "ONE", image, "three", "four"]);
+	h.render();
+	assert.equal(h.tui.fullRedraws, 1, "a visible Kitty image must not force host clearing");
+	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
+	assert.ok(h.internals.previousLines[0]?.startsWith("ZERO\x1b[0m"));
+	assert.ok(h.internals.previousLines[1]?.startsWith("ONE\x1b[0m"));
+	assert.ok(h.internals.previousLines[2]?.includes("\x1b_G"));
 });
 
 test("content height changes retain pi-tui full redraw behavior", () => {

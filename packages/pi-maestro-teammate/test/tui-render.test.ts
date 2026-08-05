@@ -148,6 +148,31 @@ test("progress tree renders one row per task index when snapshots repeat", () =>
   assert.match(rows[0]?.text ?? "", /second-c/);
 });
 
+test("progress tree uses one clock snapshot for every row in a frame", (t) => {
+  const palette = {
+    dim: (text: string) => text,
+    accent: (text: string) => text,
+    running: (text: string) => text,
+    success: (text: string) => text,
+    error: (text: string) => text,
+    bold: (text: string) => text,
+  };
+  let nowReads = 0;
+  t.mock.method(Date, "now", () => {
+    nowReads += 1;
+    return 65_000;
+  });
+
+  const rows = buildProgressTree([
+    { agent: "general", correlationId: "first", taskIndex: 0, dependencies: [], status: "running", startedAt: new Date(0).toISOString() },
+    { agent: "general", correlationId: "second", taskIndex: 1, dependencies: [], status: "running", startedAt: new Date(0).toISOString() },
+  ], palette);
+
+  assert.equal(nowReads, 1);
+  assert.match(rows[0]?.text ?? "", /1m5s/);
+  assert.match(rows[1]?.text ?? "", /1m5s/);
+});
+
 test("progress tree shows dependencies as result flow rather than agent hierarchy", () => {
   const palette = {
     dim: (text: string) => text,

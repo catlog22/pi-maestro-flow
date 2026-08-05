@@ -27,6 +27,7 @@ import {
   parseAnalysisResult,
   INTERVENTION_COOLDOWN_MS,
   MONITOR_MAX_TARGETS,
+  MONITOR_STATUS_REFRESH_MS,
   type BarrierEntry,
   type MonitorTargetSnapshot,
   type MonitorParams,
@@ -225,6 +226,38 @@ test("startMonitorMode activates and stopMonitorMode deactivates", () => {
   stopMonitorMode(ms);
   assert.equal(ms.active, false);
   assert.equal(ms.timer, undefined);
+});
+
+test("startMonitorMode skips unchanged periodic snapshots", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const ms = createMonitorModeState();
+  const initial = [snap("a", "running")];
+  let nextSnapshot = initial;
+  const refreshed: MonitorTargetSnapshot[][] = [];
+
+  startMonitorMode(
+    ms,
+    ["a"],
+    false,
+    () => nextSnapshot,
+    (snapshot) => { refreshed.push(snapshot); },
+  );
+
+  t.mock.timers.tick(MONITOR_STATUS_REFRESH_MS);
+  assert.equal(refreshed.length, 1, "the same array reference must not refresh");
+  assert.equal(ms.lastSnapshot, initial);
+
+  nextSnapshot = [snap("a", "running")];
+  t.mock.timers.tick(MONITOR_STATUS_REFRESH_MS);
+  assert.equal(refreshed.length, 1, "equal shallow content must not refresh");
+  assert.equal(ms.lastSnapshot, initial);
+
+  nextSnapshot = [snap("a", "running", 6)];
+  t.mock.timers.tick(MONITOR_STATUS_REFRESH_MS);
+  assert.equal(refreshed.length, 2, "changed content must refresh");
+  assert.equal(ms.lastSnapshot, nextSnapshot);
+
+  stopMonitorMode(ms);
 });
 
 test("startMonitorMode replaces previous monitor", () => {

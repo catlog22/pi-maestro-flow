@@ -96,14 +96,12 @@ export function invalidateUsageCache(): void {
 // Sum assistant-message usage across session entries (shape: entry.message.usage).
 export function getUsageTotals(entries: readonly unknown[], now: number = Date.now()): UsageTotals {
 	const key = entriesKey(entries);
-	if (usageCache && usageCache.key === key) return usageCache.totals;
 	const throttleMs = Math.max(0, usageThrottleMs?.() ?? DEFAULT_USAGE_THROTTLE_MS);
-	if (throttleMs > 0 && usageCache && now - usageCache.computedAt < throttleMs) {
-		// Within the window: keep the previous totals on screen. The cache entry is
-		// deliberately left untouched (key and computedAt stay put) so a later call
-		// past the window with these same entries still mismatches the cached key
-		// and recomputes — rebinding the new key here would pin stale totals to it
-		// forever, since the key-match fast path above would then win every time.
+	if (
+		usageCache
+		&& usageCache.key === key
+		&& (throttleMs === 0 || now - usageCache.computedAt < throttleMs)
+	) {
 		return usageCache.totals;
 	}
 
