@@ -878,7 +878,10 @@ test("foreground listener setup failure starts no work or deadline", async () =>
         type: "teammate_proxy_request",
         tool: "teammate",
         requestId: "nested-setup-failure",
-        params: { tasks: [{ agent: "general", prompt: "must not start" }], background: false },
+        params: {
+          tasks: [{ agent: "general", name: "nested-setup-failure-agent", prompt: "must not start" }],
+          background: false,
+        },
       },
       (message) => replies.push(message as typeof replies[number]),
       undefined,
@@ -890,6 +893,10 @@ test("foreground listener setup failure starts no work or deadline", async () =>
 
     assert.equal(spawns, 0, "listener setup must complete before root or nested work starts");
     assert.equal(scheduledTimeouts, 0, "listener setup failure must not retain a foreground deadline");
+    assert.equal(state.activeRuns.size, 0, "failed admission must release the active-agent budget slot");
+    assert.equal(state.namedAgents.size, 0, "failed admission must release its name binding");
+    assert.equal(state.proxyDispatchByRequest?.size ?? 0, 0, "failed admission must release its request mapping");
+    assert.equal(state.cancelledProxyDispatches?.size ?? 0, 0, "pre-execution cleanup needs no retained tombstone");
     assert.equal(replies.length, 1);
     assert.equal(replies[0].result?.isError, true);
     assert.match(replies[0].result?.content?.[0]?.text ?? "", /terminal unavailable/);

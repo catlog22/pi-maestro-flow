@@ -1967,6 +1967,13 @@ export async function handleProxyRequest(
             detachPromise.then(() => ({ status: "manual" as const })),
             deadline.promise.then(() => ({ status: "timeout" as const })),
           ]);
+        } catch (error) {
+          cancelProxyDispatch(state, requestId, "nested foreground setup failed");
+          if (state.cancelledProxyDispatches?.get(requestId) === cid) {
+            state.cancelledProxyDispatches.delete(requestId);
+            if (state.cancelledProxyDispatches.size === 0) state.cancelledProxyDispatches = undefined;
+          }
+          throw error;
         } finally {
           removeListener?.();
           deadline?.dispose();
