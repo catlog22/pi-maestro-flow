@@ -993,6 +993,7 @@ Rules:
 - subject is the title; description is the detail — do not swap. Set summary on completion; the next action consumes prior summaries.
 - Each actor may have at most one in_progress task.
 - Skill binding requires exactly one primary; guard/support are optional. Skill file changes after activation mark the binding stale — re-activate.
+- status is update-only: create derives it from dependencies and rejects an explicit status. create takes either subject (single) or tasks (batch) — never both.
 - In update: list changed fields in updateFields. Unlisted fields are preserved; empty strings or arrays clear fields that support clearing.`,
 
     promptSnippet: "Lay out a whole multi-step plan in one batch create (≥3 steps), then drive it step by step with resolved context and optional skill guidance.",

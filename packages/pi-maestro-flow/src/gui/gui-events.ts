@@ -30,8 +30,8 @@ export interface GuiEventForwarder {
   emit(name: string, payload?: unknown): void;
   /**
    * Push a subsystem event only when `key` differs from the last emission for
-   * that name; also pushes a generic `state.changed`. Used for change-points that
-   * may fire on renders/refreshes (todo, goal, plan mode).
+   * that name. Visible snapshot changes advance a global revision and enqueue
+   * one generic `state.changed` notification for the current tick.
    */
   emitDeduped(name: string, key: string, payload?: unknown): void;
   isActive(): boolean;
@@ -39,17 +39,44 @@ export interface GuiEventForwarder {
 
 export function createGuiEventForwarder(): GuiEventForwarder {
   let server: GuiServerHandle | null = null;
+  let bindGeneration = 0;
+  let revision = 0;
+  let stateChangedQueued = false;
   const lastKeys = new Map<string, string>();
+  const changedSubsystems = new Set<string>();
 
   const emit = (name: string, payload?: unknown): void => {
     if (!server) return;
     server.pushEvent(name, cloneSerializable(payload));
   };
 
+  const queueStateChanged = (subsystem: string): void => {
+    revision += 1;
+    changedSubsystems.add(subsystem);
+    if (stateChangedQueued) return;
+    stateChangedQueued = true;
+    const generation = bindGeneration;
+    queueMicrotask(() => {
+      if (generation !== bindGeneration) return;
+      stateChangedQueued = false;
+      if (!server || changedSubsystems.size === 0) return;
+      const subsystems = [...changedSubsystems];
+      changedSubsystems.clear();
+      emit(GUI_EVENTS.stateChanged, {
+        revision,
+        subsystem: subsystems.length === 1 ? subsystems[0] : undefined,
+        subsystems,
+      });
+    });
+  };
+
   return {
     bind(next) {
+      bindGeneration += 1;
       server = next;
       lastKeys.clear();
+      changedSubsystems.clear();
+      stateChangedQueued = false;
     },
     emit,
     emitDeduped(name, key, payload) {
@@ -57,7 +84,7 @@ export function createGuiEventForwarder(): GuiEventForwarder {
       if (lastKeys.get(name) === key) return;
       lastKeys.set(name, key);
       emit(name, payload);
-      emit(GUI_EVENTS.stateChanged, { subsystem: name, at: Date.now() });
+      queueStateChanged(name);
     },
     isActive() {
       return server !== null;

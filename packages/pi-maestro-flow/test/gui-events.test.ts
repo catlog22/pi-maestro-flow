@@ -39,7 +39,7 @@ test("forwarder is a no-op when unbound", () => {
   forwarder.emitDeduped(GUI_EVENTS.goalChanged, "k", { y: 2 });
 });
 
-test("forwarder emits cloned payloads, dedupes, and receives durable state notifications", async () => {
+test("forwarder emits cloned payloads, dedupes snapshots, and coalesces revision notifications", async () => {
   const forwarder = createGuiEventForwarder();
   const { handle, pushed } = fakeServer();
   forwarder.bind(handle);
@@ -51,22 +51,26 @@ test("forwarder emits cloned payloads, dedupes, and receives durable state notif
   assert.equal(pushed.length, 1);
   assert.deepEqual(pushed[0].payload, { value: 5 }, "function dropped by clone");
 
-  // Deduped emit: first fires event + state.changed.
   forwarder.emitDeduped(GUI_EVENTS.todoUpdated, "fp1", { count: 1 });
-  assert.equal(pushed.length, 3);
+  assert.equal(pushed.length, 2, "state.changed is deferred until the tick completes");
   assert.equal(pushed[1].name, GUI_EVENTS.todoUpdated);
-  assert.equal(pushed[2].name, GUI_EVENTS.stateChanged);
-  assert.deepEqual((pushed[2].payload as any).subsystem, GUI_EVENTS.todoUpdated);
 
-  // Same key -> suppressed.
   forwarder.emitDeduped(GUI_EVENTS.todoUpdated, "fp1", { count: 1 });
-  assert.equal(pushed.length, 3);
+  assert.equal(pushed.length, 2, "the same visible snapshot key is suppressed");
 
-  // Different key -> fires again.
   forwarder.emitDeduped(GUI_EVENTS.todoUpdated, "fp2", { count: 2 });
-  assert.equal(pushed.length, 5);
+  forwarder.emitDeduped(GUI_EVENTS.goalChanged, "g1", { objective: "ship" });
+  assert.equal(pushed.length, 4);
 
-  // Rebind clears dedup state and detaches when null.
+  await Promise.resolve();
+  assert.equal(pushed.length, 5, "one state.changed covers all changes in the tick");
+  assert.equal(pushed[4].name, GUI_EVENTS.stateChanged);
+  assert.deepEqual(pushed[4].payload, {
+    revision: 3,
+    subsystems: [GUI_EVENTS.todoUpdated, GUI_EVENTS.goalChanged],
+  });
+
+  // Rebind clears dedup and queued subsystem state and detaches when null.
   forwarder.bind(null);
   assert.equal(forwarder.isActive(), false);
   forwarder.emit(GUI_EVENTS.todoUpdated, { z: 9 });

@@ -179,7 +179,7 @@ test("Cockpit ownership isolates the Flow footer from lifecycle reinstalls", () 
   }
 });
 
-test("statusline reflows on silent terminal width changes using the same footer instance", (t) => {
+test("statusline reflows on stable silent terminal width changes using the same footer instance", (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const harness = createHarness({ terminalWidth: 120 });
   try {
@@ -189,7 +189,10 @@ test("statusline reflows on silent terminal width changes using the same footer 
     assert.match(stripAnsi(harness.render(120)[0]), /AUTO-COMPACT ON/);
 
     harness.setTerminalWidth(42);
-    t.mock.timers.tick(250);
+    t.mock.timers.tick(500);
+    assert.equal(harness.resizeState().forcedRenderRequests, 0, "one width sample must not redraw");
+
+    t.mock.timers.tick(500);
     let state = harness.resizeState();
     assert.deepEqual(
       { invalidations: state.invalidations, forcedRenderRequests: state.forcedRenderRequests },
@@ -200,25 +203,72 @@ test("statusline reflows on silent terminal width changes using the same footer 
     assert.doesNotMatch(stripAnsi(state.lastRequestedRender[0]), /AUTO-COMPACT ON/);
     assert.ok(visibleWidth(state.lastRequestedRender[0]) <= 42);
 
-    t.mock.timers.tick(250);
+    t.mock.timers.tick(1_000);
     assert.equal(harness.resizeState().forcedRenderRequests, 1, "unchanged width must not redraw");
 
     harness.setTerminalWidth(120);
-    t.mock.timers.tick(250);
+    t.mock.timers.tick(500);
+    assert.equal(harness.resizeState().forcedRenderRequests, 1);
+    t.mock.timers.tick(500);
     state = harness.resizeState();
     assert.equal(state.forcedRenderRequests, 2);
     assert.ok(state.lastRequestedRender);
     assert.match(stripAnsi(state.lastRequestedRender[0]), /AUTO-COMPACT ON/);
     assert.ok(visibleWidth(state.lastRequestedRender[0]) <= 120);
 
+    const renderRequestsBeforeSameBandResize = state.renderRequests;
+    harness.setTerminalWidth(100);
+    t.mock.timers.tick(1_000);
+    state = harness.resizeState();
+    assert.equal(state.renderRequests, renderRequestsBeforeSameBandResize + 1);
+    assert.equal(state.forcedRenderRequests, 2, "same-layout-band changes use incremental rendering");
+    assert.ok(state.lastRequestedRender);
+    assert.ok(visibleWidth(state.lastRequestedRender[0]) <= 100);
+
     harness.setTerminalWidth(70);
     harness.render(70);
-    t.mock.timers.tick(250);
+    t.mock.timers.tick(1_000);
     assert.equal(
       harness.resizeState().forcedRenderRequests,
       2,
       "a normal resize render must suppress the watchdog redraw",
     );
+  } finally {
+    harness.dispose();
+    t.mock.timers.reset();
+  }
+});
+
+test("periodic Git refresh redraws only when visible Git content changes", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let stdout = "## main...origin/main [ahead 1]\n M tracked.ts\n";
+  let execCalls = 0;
+  const harness = createHarness({
+    exec: async () => {
+      execCalls += 1;
+      return { code: 0, stdout, stderr: "" };
+    },
+  });
+  try {
+    await settleAsyncWork();
+    const initialRenderRequests = harness.resizeState().renderRequests;
+    assert.equal(execCalls, 1);
+
+    t.mock.timers.tick(30_000);
+    await settleAsyncWork();
+    assert.equal(execCalls, 2);
+    assert.equal(
+      harness.resizeState().renderRequests,
+      initialRenderRequests,
+      "unchanged branch/dirty/ahead/behind must not invalidate",
+    );
+
+    stdout = "## main...origin/main [behind 2]\n";
+    t.mock.timers.tick(30_000);
+    await settleAsyncWork();
+    assert.equal(execCalls, 3);
+    assert.equal(harness.resizeState().renderRequests, initialRenderRequests + 1);
+    assert.match(stripAnsi(harness.render(120)[0]), /main.*↓2/);
   } finally {
     harness.dispose();
     t.mock.timers.reset();

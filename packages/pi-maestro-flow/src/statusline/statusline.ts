@@ -257,6 +257,17 @@ async function refreshGit(pi: ExtensionAPI, cwd: string): Promise<GitInfo | null
 	}
 }
 
+function gitInfoEqual(left: GitInfo | null, right: GitInfo | null): boolean {
+	return left === right || (
+		left !== null
+		&& right !== null
+		&& left.branch === right.branch
+		&& left.dirty === right.dirty
+		&& left.ahead === right.ahead
+		&& left.behind === right.behind
+	);
+}
+
 // ---------------------------------------------------------------------------
 // Renderer — produces line strings
 // ---------------------------------------------------------------------------
@@ -370,8 +381,12 @@ export function renderSwarmStatusline(value: string | undefined, width: number):
 
 const GIT_REFRESH_INTERVAL = 30_000;
 const GIT_DEBOUNCE_MS = 500;
-const WIDTH_POLL_INTERVAL = 250;
+const WIDTH_POLL_INTERVAL = 500;
 const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
+
+function widthLayoutBand(width: number): number {
+	return width < 20 ? 0 : width < 48 ? 1 : width < 80 ? 2 : 3;
+}
 export function installStatusline(
 	pi: ExtensionAPI,
 	getMaestroState: () => MaestroState,
@@ -424,6 +439,12 @@ export function installStatusline(
 		rs.tokens = totals;
 	}
 
+	function updateGit(git: GitInfo | null): void {
+		if (gitInfoEqual(rs.git, git)) return;
+		rs.git = git;
+		invalidate();
+	}
+
 	function scheduleGitRefresh(generation: number): void {
 		if (gitDebounceTimer) clearTimeout(gitDebounceTimer);
 		const session = sessionGeneration;
@@ -437,8 +458,7 @@ export function installStatusline(
 				|| session !== sessionGeneration
 				|| refreshCwd !== cwd
 			) return;
-			rs.git = git;
-			invalidate();
+			updateGit(git);
 		}, GIT_DEBOUNCE_MS);
 	}
 
@@ -452,18 +472,35 @@ export function installStatusline(
 			// Connect invalidate → requestRender
 			invalidateFn = () => tui.requestRender();
 			let observedWidth = tui.terminal.columns;
+			let pendingWidth: number | null = null;
+			let stableWidthSamples = 0;
 			const widthTimer = setInterval(() => {
 				if (disposed || generation !== footerGeneration) {
 					clearInterval(widthTimer);
 					return;
 				}
 				const nextWidth = tui.terminal.columns;
-				if (!Number.isFinite(nextWidth) || nextWidth <= 0 || nextWidth === observedWidth) return;
+				if (!Number.isFinite(nextWidth) || nextWidth <= 0) return;
+				if (nextWidth === observedWidth) {
+					pendingWidth = null;
+					stableWidthSamples = 0;
+					return;
+				}
+				if (nextWidth !== pendingWidth) {
+					pendingWidth = nextWidth;
+					stableWidthSamples = 1;
+					return;
+				}
+				stableWidthSamples += 1;
+				if (stableWidthSamples < 2) return;
+
+				const previousWidth = observedWidth;
 				observedWidth = nextWidth;
-				// Some browser-hosted terminals update columns on zoom without a reliable
-				// stdout resize event. Force a fresh layout only when the width changes.
+				pendingWidth = null;
+				stableWidthSamples = 0;
+				// Browser-hosted terminals can change columns without a stdout resize event.
 				tui.invalidate();
-				tui.requestRender(true);
+				tui.requestRender(widthLayoutBand(previousWidth) !== widthLayoutBand(nextWidth));
 			}, WIDTH_POLL_INTERVAL);
 
 			// Subscribe to branch changes for git refresh
@@ -487,7 +524,11 @@ export function installStatusline(
 				},
 
 				render(width: number): string[] {
-					if (Number.isFinite(width) && width > 0) observedWidth = width;
+					if (Number.isFinite(width) && width > 0) {
+						observedWidth = width;
+						pendingWidth = null;
+						stableWidthSamples = 0;
+					}
 					const state = getMaestroState();
 					const activeToolCalls = (state.activeToolCalls ?? state.activeRuns)?.size ?? 0;
 					const lines: string[] = [];
@@ -558,8 +599,7 @@ export function installStatusline(
 		// Fire-and-forget async git refresh
 		refreshGit(pi, sessionCwd).then((git) => {
 			if (disposed || generation !== sessionGeneration || sessionCwd !== cwd) return;
-			rs.git = git;
-			invalidate();
+			updateGit(git);
 		});
 
 		// Periodic git refresh
@@ -567,8 +607,7 @@ export function installStatusline(
 			if (disposed) return;
 			refreshGit(pi, sessionCwd).then((git) => {
 				if (disposed || generation !== sessionGeneration || sessionCwd !== cwd) return;
-				rs.git = git;
-				invalidate();
+				updateGit(git);
 			});
 		}, GIT_REFRESH_INTERVAL);
 

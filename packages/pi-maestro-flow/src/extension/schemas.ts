@@ -9,10 +9,11 @@ import { Type } from "typebox";
 import { MAX_ACCEPTANCE_COMMAND_CHARS } from "../tools/goal-verification.ts";
 import { TODO_UPDATE_FIELDS } from "../tools/todo-contract.ts";
 
-function StringEnum<T extends string[]>(values: [...T]) {
+function StringEnum<T extends string[]>(values: [...T], description?: string) {
   return Type.Unsafe<T[number]>({
     type: "string",
     enum: values,
+    ...(description ? { description } : {}),
   });
 }
 
@@ -236,7 +237,7 @@ export const TodoToolParams = Type.Object({
     Type.String({ description: "Long-form task detail" }),
   ),
   status: Type.Optional(
-    StringEnum(["pending", "in_progress", "completed", "blocked"]),
+    StringEnum(["pending", "in_progress", "completed", "blocked"], "Target status for update only; create derives status from dependencies and rejects an explicit status"),
   ),
   blockedBy: Type.Optional(
     Type.Array(Type.String(), { description: "Task IDs this depends on" }),
@@ -265,7 +266,7 @@ export const TodoToolParams = Type.Object({
   tasks: Type.Optional(
     Type.Array(TodoBatchTaskSchema, {
       minItems: 1,
-      description: "Non-empty batch for create. Inside tasks[i].blockedBy, each integer N means tasks[N] in this same array and must satisfy 0 <= N < i.",
+      description: "Non-empty batch for create. Inside tasks[i].blockedBy, each integer N means tasks[N] in this same array and must satisfy 0 <= N < i. Cannot be combined with single-task fields (subject, description, blockedBy, assignee, context, skills, goalId)",
     }),
   ),
 

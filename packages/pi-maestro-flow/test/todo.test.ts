@@ -1971,3 +1971,94 @@ test("todo batch create is atomic — an invalid spec aborts without creating an
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("todo create rejects update-only status/summary and mixed single/batch params", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-create-contract-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+
+  try {
+    const withStatus = await executeTodo({ action: "create", subject: "S", status: "in_progress" }, ctx);
+    assert.equal((withStatus as { isError?: boolean }).isError, true);
+    assert.match((withStatus.content[0] as { text: string }).text, /create does not support status/);
+    assert.equal(getVisibleTasks().length, 0);
+
+    const withSummary = await executeTodo({ action: "create", subject: "S", summary: "Done" }, ctx);
+    assert.equal((withSummary as { isError?: boolean }).isError, true);
+    assert.match((withSummary.content[0] as { text: string }).text, /create does not support summary/);
+    assert.equal(getVisibleTasks().length, 0);
+
+    const mixed = await executeTodo({ action: "create", tasks: [{ subject: "A" }], subject: "B" }, ctx);
+    assert.equal((mixed as { isError?: boolean }).isError, true);
+    assert.match((mixed.content[0] as { text: string }).text, /either a single task \(subject\) or a batch \(tasks\)/);
+    assert.equal(getVisibleTasks().length, 0);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo update clears description and summary with empty strings", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-empty-clear-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+
+  try {
+    const created = await executeTodo({
+      action: "create",
+      subject: "S",
+      description: "Detail",
+      context: "Ctx",
+    }, ctx);
+    const id = (created.details as { tasks: Array<{ id: string }> }).tasks[0].id;
+
+    await executeTodo({ action: "update", id, summary: "Finished" }, ctx);
+    assert.equal(getVisibleTasks()[0].summary, "Finished");
+
+    await executeTodo({
+      action: "update",
+      id,
+      updateFields: ["description", "summary"],
+      description: "",
+      summary: "",
+    }, ctx);
+    const task = getVisibleTasks()[0];
+    assert.equal(task.description, undefined);
+    assert.equal(task.summary, undefined);
+    assert.equal(task.context, "Ctx", "unlisted fields are preserved");
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo list errors on unknown member selectors instead of silently returning empty", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-list-unknown-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+
+  try {
+    await executeTodo({ action: "create", subject: "A" }, ctx);
+    const unknown = await executeTodo({ action: "list", filter: { memberId: "ghost" } }, ctx);
+    assert.equal((unknown as { isError?: boolean }).isError, true);
+    assert.match((unknown.content[0] as { text: string }).text, /Unknown Todo member selector/);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -541,7 +541,29 @@ async function executeTodoAction(
 // ---------------------------------------------------------------------------
 
 function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActorRef): FlowToolResult {
-  if (params.tasks && params.tasks.length > 0) return handleBatchCreate(params.tasks, actor, params.planHandoffKey);
+  // `status`/`summary` are update-only concepts. Silently dropping them here
+  // would make a create that passes JSON Schema validation behave differently
+  // than the caller intended.
+  const rejected: string[] = [];
+  if (params.status !== undefined) rejected.push("status");
+  if (params.summary !== undefined) rejected.push("summary");
+  if (rejected.length > 0) {
+    return err(`create does not support ${rejected.join(" and ")}; they are set via update`, "create");
+  }
+  if (params.tasks && params.tasks.length > 0) {
+    const conflicting: string[] = [];
+    if (params.subject !== undefined) conflicting.push("subject");
+    if (params.description !== undefined) conflicting.push("description");
+    if (params.blockedBy !== undefined) conflicting.push("blockedBy");
+    if (params.assignee !== undefined) conflicting.push("assignee");
+    if (params.context !== undefined) conflicting.push("context");
+    if (params.skills !== undefined) conflicting.push("skills");
+    if (params.goalId !== undefined) conflicting.push("goalId");
+    if (conflicting.length > 0) {
+      return err(`create accepts either a single task (subject) or a batch (tasks), not both; ${conflicting.join(", ")} cannot accompany tasks.`, "create");
+    }
+    return handleBatchCreate(params.tasks, actor, params.planHandoffKey);
+  }
   const subject = params.subject?.trim();
   if (!subject) return err("subject is required for create", "create");
 
@@ -693,8 +715,14 @@ async function handleUpdate(
     if (!subject.trim()) return err("subject cannot be empty", "update");
     draft.subject = subject;
   }
-  if (updates("description")) draft.description = params.description;
-  if (updates("summary")) draft.summary = params.summary;
+  if (updates("description")) {
+    if (params.description === "") delete draft.description;
+    else draft.description = params.description;
+  }
+  if (updates("summary")) {
+    if (params.summary === "") delete draft.summary;
+    else draft.summary = params.summary;
+  }
   if (updates("goalId")) {
     if (params.goalId === "") delete draft.goalId;
     else draft.goalId = params.goalId;
@@ -818,12 +846,12 @@ function handleList(params: TodoParams, actor: TodoActorRef): FlowToolResult {
   if (memberSelector) {
     const member = resolveTodoActorSelector(memberSelector, actor);
     if ("error" in member) {
-      if (member.reason === "ambiguous") return err(member.error, "list");
-      filtered = [];
-    } else {
-      filtered = filtered.filter((task) => task.createdBy.id === member.actor.id
-        || task.assignee.id === member.actor.id);
+      // Ambiguous and unknown selectors are both caller errors: report them
+      // instead of silently filtering down to an empty list.
+      return err(member.error, "list");
     }
+    filtered = filtered.filter((task) => task.createdBy.id === member.actor.id
+      || task.assignee.id === member.actor.id);
   }
 
   if (filtered.length === 0) {

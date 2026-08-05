@@ -17,6 +17,7 @@ import {
 
 const MAX_BODY_SIZE = 2 * 1024 * 1024;
 const DEFAULT_HEARTBEAT_MS = 15_000;
+const EVENT_FLUSH_MS = 40;
 const MAX_EVENT_LOG = 256;
 const MAX_EVENT_LOG_BYTES = 2 * 1024 * 1024;
 
@@ -31,6 +32,12 @@ interface EventLogEntry {
   name: string;
   chunk: string;
   bytes: number;
+}
+
+interface SseClient {
+  response: ServerResponse;
+  pending: Map<string, string>;
+  flushTimer: NodeJS.Timeout | null;
 }
 
 const discoveryOwners = new Map<string, string>();
@@ -154,7 +161,7 @@ export async function createGuiServer(options: GuiServerOptions): Promise<GuiSer
   const heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
   const eventLogMaxBytes = Math.max(1, options.eventLogMaxBytes ?? MAX_EVENT_LOG_BYTES);
 
-  const sseClients = new Set<ServerResponse>();
+  const sseClients = new Set<SseClient>();
   const closeHandlers = new Set<(reason: string) => void>();
   const routes: RouteEntry[] = [];
   const eventLog: EventLogEntry[] = [];
@@ -167,6 +174,34 @@ export async function createGuiServer(options: GuiServerOptions): Promise<GuiSer
 
   const serializeEvent = (id: number, name: string, payload: unknown): string =>
     `id: ${id}\nevent: ${name}\ndata: ${JSON.stringify(payload)}\n\n`;
+
+  const removeSseClient = (client: SseClient): void => {
+    if (client.flushTimer) clearTimeout(client.flushTimer);
+    client.flushTimer = null;
+    client.pending.clear();
+    sseClients.delete(client);
+  };
+
+  const flushSseClient = (client: SseClient): void => {
+    if (client.flushTimer) clearTimeout(client.flushTimer);
+    client.flushTimer = null;
+    if (client.pending.size === 0) return;
+    const chunk = [...client.pending.values()].join("");
+    client.pending.clear();
+    try {
+      client.response.write(chunk);
+    } catch {
+      removeSseClient(client);
+    }
+  };
+
+  const queueSseEvent = (client: SseClient, name: string, chunk: string): void => {
+    if (client.pending.has(name)) client.pending.delete(name);
+    client.pending.set(name, chunk);
+    if (client.flushTimer) return;
+    client.flushTimer = setTimeout(() => flushSseClient(client), EVENT_FLUSH_MS);
+    client.flushTimer.unref();
+  };
 
   const pushEvent = (name: string, payload: unknown): void => {
     if (closed) return;
@@ -182,25 +217,19 @@ export async function createGuiServer(options: GuiServerOptions): Promise<GuiSer
         eventLogBytes -= evicted.bytes;
       }
     }
-    for (const client of sseClients) {
-      try {
-        client.write(chunk);
-      } catch {
-        sseClients.delete(client);
-      }
-    }
+    for (const client of sseClients) queueSseEvent(client, name, chunk);
   };
 
-  const replayEvents = (res: ServerResponse, lastEventIdHeader?: string | null): void => {
+  const replayEvents = (client: SseClient, lastEventIdHeader?: string | null): void => {
     const parsed = lastEventIdHeader ? Number(lastEventIdHeader) : Number.NaN;
     const toReplay = Number.isFinite(parsed)
       ? eventLog.filter((entry) => entry.id > parsed)
       : eventLog;
     for (const entry of toReplay) {
       try {
-        res.write(entry.chunk);
+        client.response.write(entry.chunk);
       } catch {
-        sseClients.delete(res);
+        removeSseClient(client);
         return;
       }
     }
@@ -276,9 +305,10 @@ export async function createGuiServer(options: GuiServerOptions): Promise<GuiSer
           "X-Accel-Buffering": "no",
         });
         res.write(": connected\n\n");
-        sseClients.add(res);
-        replayEvents(res, req.headers["last-event-id"] ? String(req.headers["last-event-id"]) : null);
-        req.on("close", () => sseClients.delete(res));
+        const client: SseClient = { response: res, pending: new Map(), flushTimer: null };
+        sseClients.add(client);
+        replayEvents(client, req.headers["last-event-id"] ? String(req.headers["last-event-id"]) : null);
+        req.on("close", () => removeSseClient(client));
         return;
       }
 
@@ -326,14 +356,15 @@ export async function createGuiServer(options: GuiServerOptions): Promise<GuiSer
   });
 
   const closeSse = (): void => {
-    for (const client of sseClients) {
+    for (const client of [...sseClients]) {
+      flushSseClient(client);
       try {
-        client.end();
+        client.response.end();
       } catch {
         // ignore
       }
+      removeSseClient(client);
     }
-    sseClients.clear();
   };
 
   const stopHeartbeat = (): void => {
@@ -403,9 +434,9 @@ export async function createGuiServer(options: GuiServerOptions): Promise<GuiSer
       heartbeat = setInterval(() => {
         for (const client of sseClients) {
           try {
-            client.write(": ping\n\n");
+            client.response.write(": ping\n\n");
           } catch {
-            sseClients.delete(client);
+            removeSseClient(client);
           }
         }
       }, heartbeatMs);

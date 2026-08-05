@@ -143,6 +143,31 @@ test("gui-server: SSE delivers pushed events and replays via Last-Event-ID", asy
   }
 });
 
+test("gui-server: SSE flush coalesces same-name client events to the latest frame", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "gui-server-coalesce-"));
+  const server = await startGuiServer({ sessionId: "sess-coalesce", cwd, writeDiscovery: false });
+  try {
+    const live = collectSse(server.port, server.token, 2, { timeoutMs: 1_000 });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    server.pushEvent("tool.progress", { sequence: 1 });
+    server.pushEvent("goal.changed", { phase: "run" });
+    server.pushEvent("tool.progress", { sequence: 2 });
+
+    const events = await live;
+    assert.deepEqual(
+      events.map(({ event, data }) => ({ event, data })),
+      [
+        { event: "goal.changed", data: { phase: "run" } },
+        { event: "tool.progress", data: { sequence: 2 } },
+      ],
+    );
+    assert.ok(Number(events[0].id) < Number(events[1].id), "flushed event ids stay chronological");
+  } finally {
+    server.close("test-done");
+  }
+});
+
 test("gui-server: route registry handles GET, POST, path params, and 404", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "gui-server-"));
   const server = await startGuiServer({ sessionId: "sess-3", cwd, writeDiscovery: false });
