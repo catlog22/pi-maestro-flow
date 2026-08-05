@@ -92,3 +92,5 @@ idx-names.txt
 
 # Eval artifacts (pi-terminal-bench / tbench21 runs)
 .cache/
+filter.py
+instr.txt
