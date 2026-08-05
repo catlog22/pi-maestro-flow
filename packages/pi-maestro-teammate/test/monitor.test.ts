@@ -20,6 +20,7 @@ import {
   canIntervene,
   recordIntervention,
   engineTick,
+  stopEngine,
   formatEngineStatusBar,
   buildAutoAnalysisPrompt,
   buildCustomAnalysisPrompt,
@@ -404,6 +405,70 @@ test("engineTick awaits asynchronous intervention acknowledgement", async () => 
   assert.equal(acknowledged, true);
   assert.equal(count, 1);
   assert.equal(engine.bindings.get("remote-owner:cid")?.interventions.length, 1);
+});
+
+test("engineTick drops an analysis result after its binding is replaced", async () => {
+  const engine = createEngineState();
+  const sent: string[] = [];
+  let signalAnalysisStarted!: () => void;
+  const analysisStarted = new Promise<void>((resolve) => { signalAnalysisStarted = resolve; });
+  let resolveAnalysis!: (result: { status: "drift"; action: "send"; message: string }) => void;
+  const analysis = new Promise<{ status: "drift"; action: "send"; message: string }>(
+    (resolve) => { resolveAnalysis = resolve; },
+  );
+  addBinding(engine, "cid-reused", "original", "auto");
+  const original = engine.bindings.get("cid-reused")!;
+  engine.callbacks = {
+    getAgentInfo: () => engineInfo("original", "running", 0),
+    sendIntervention: (_cid, message) => { sent.push(message); return true; },
+    onStatusUpdate: () => {},
+    notifyMain: () => {},
+    analyze: async () => {
+      signalAnalysisStarted();
+      return analysis;
+    },
+  };
+
+  const tick = engineTick(engine);
+  await analysisStarted;
+  removeBinding(engine, "cid-reused");
+  addBinding(engine, "cid-reused", "replacement", "auto");
+  resolveAnalysis({ status: "drift", action: "send", message: "stale steer" });
+
+  assert.equal(await tick, 0);
+  assert.deepEqual(sent, []);
+  assert.equal(original.driftDetected, false);
+  assert.equal(engine.bindings.get("cid-reused")?.driftDetected, false);
+});
+
+test("engineTick drops an analysis result after the engine stops", async () => {
+  const engine = createEngineState();
+  const sent: string[] = [];
+  let signalAnalysisStarted!: () => void;
+  const analysisStarted = new Promise<void>((resolve) => { signalAnalysisStarted = resolve; });
+  let resolveAnalysis!: (result: { status: "drift"; action: "send"; message: string }) => void;
+  const analysis = new Promise<{ status: "drift"; action: "send"; message: string }>(
+    (resolve) => { resolveAnalysis = resolve; },
+  );
+  addBinding(engine, "cid-stop", "stopping", "auto");
+  engine.callbacks = {
+    getAgentInfo: () => engineInfo("stopping", "running", 0),
+    sendIntervention: (_cid, message) => { sent.push(message); return true; },
+    onStatusUpdate: () => {},
+    notifyMain: () => {},
+    analyze: async () => {
+      signalAnalysisStarted();
+      return analysis;
+    },
+  };
+
+  const tick = engineTick(engine);
+  await analysisStarted;
+  stopEngine(engine);
+  resolveAnalysis({ status: "drift", action: "send", message: "stale after stop" });
+
+  assert.equal(await tick, 0);
+  assert.deepEqual(sent, []);
 });
 
 test("engineTick notifies main for failed agents", async () => {

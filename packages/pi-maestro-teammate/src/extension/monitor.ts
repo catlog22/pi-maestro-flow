@@ -573,7 +573,9 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
       binding.deliveryGate.beginWindow();
     }
 
-  for (const [cid, binding] of engine.bindings) {
+  for (const [cid, binding] of [...engine.bindings]) {
+    const ownsBinding = (): boolean =>
+      engine.callbacks === cb && engine.bindings.get(cid) === binding;
     const info = cb.getAgentInfo(cid);
     if (!info) {
       // Agent is gone — remove binding
@@ -604,7 +606,7 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
         continue;
       }
       const sent = await cb.sendIntervention(cid, heuristic.message, "steer");
-      if (sent) {
+      if (sent && ownsBinding()) {
         recordIntervention(binding, heuristic.reason!, heuristic.message, "steer");
         interventionCount++;
       }
@@ -614,6 +616,7 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
     // 2. LLM analysis (only for running agents that pass heuristic)
     if (cb.analyze && info.status === "running" && info.idleSeconds < ENGINE_STALL_IDLE_SECONDS) {
       const result = await cb.analyze(binding, info).catch(() => undefined);
+      if (!ownsBinding()) continue;
       if (result) {
         binding.driftDetected = result.status === "drift";
         if (result.status === "drift" && result.action === "send" && result.message && canIntervene(binding, now)) {
@@ -621,7 +624,7 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
             continue;
           }
           const sent = await cb.sendIntervention(cid, result.message, "steer");
-          if (sent) {
+          if (sent && ownsBinding()) {
             recordIntervention(binding, binding.mode === "custom" ? "custom" : "drift", result.message, "steer");
             interventionCount++;
           }
