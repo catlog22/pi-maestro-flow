@@ -14,8 +14,6 @@ export const COCKPIT_FULLSCREEN_MARKER = Symbol.for("pi-cockpit.fullscreen-rende
 const ALT_SCREEN_ENTER = "\u001b[?1049h";
 const ALT_SCREEN_EXIT = "\u001b[?1049l";
 
-const WHEEL_UP = 64;
-const WHEEL_DOWN = 65;
 const WHEEL_SCROLL_STEP = 3;
 /** New-output hint replaces the bottom transcript row while scrolled up. */
 const NEW_OUTPUT_HINT = "\u001b[7m ↑ {n} new · click to bottom \u001b[27m";
@@ -197,14 +195,13 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 	const handleInput = (data: string): InputResult => {
 		const mouse = parseSgrMouseEvent(data);
 		if (!mouse) return undefined;
-		if (mouse.button === WHEEL_UP) {
+		// Wheel buttons are 64 (up) / 65 (down) plus optional modifier bits; match
+		// on the wheel bit so modifier-wheel still scrolls the transcript instead of
+		// falling through to selection or native terminal scrolling.
+		if ((mouse.button & 64) !== 0) {
 			selection.clear();
-			scrollBy(WHEEL_SCROLL_STEP);
-			return { consume: true };
-		}
-		if (mouse.button === WHEEL_DOWN) {
-			selection.clear();
-			scrollBy(-WHEEL_SCROLL_STEP);
+			const delta = (mouse.button & 1) === 0 ? WHEEL_SCROLL_STEP : -WHEEL_SCROLL_STEP;
+			scrollBy(delta);
 			return { consume: true };
 		}
 		// Clicking the new-output hint jumps to the live bottom.
@@ -225,7 +222,8 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 		// is disabled while mouse reporting is on, so press/drag/release always
 		// routes to the selection controller (highlight works regardless of
 		// copyOnSelect); only the auto-copy on release is gated by that setting.
-		if (mouse.y <= transcriptHeight) {
+		// Wheel (button bit 64) is handled above and must never start a drag.
+		if (mouse.y <= transcriptHeight && (mouse.button & 64) === 0) {
 			if (!mouse.release && !mouse.motion && (mouse.button & 3) === 0) {
 				selection.press(mouse.x, mouse.y);
 				requestRender();

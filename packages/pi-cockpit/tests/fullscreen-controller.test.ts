@@ -134,6 +134,23 @@ test("wheel scroll keeps editor+chrome physically fixed and clamps to the viewpo
 	controller.dispose();
 });
 
+test("modifier-wheel still scrolls the transcript instead of starting a drag", () => {
+	let transcript = Array.from({ length: 40 }, (_, i) => `line ${i}`);
+	const harness = makeHarness(() => buildLines(transcript, EDITOR_BLOCK, CHROME), 20);
+	const controller = createFullscreenController({
+		subscribeInput: (handler) => {
+			harness.attachInput(handler);
+			return () => harness.attachInput(undefined);
+		},
+	});
+	controller.attach(harness.tui);
+	// Shift+wheel-up = button 68 (64 + 4 shift). Must scroll, not select.
+	harness.inputHandler?.("\x1b[<68;5;10M");
+	assert.equal(controller.getScrollOffset(), 3, "modifier wheel scrolls the transcript");
+	assert.equal(harness.render()[14].includes("\x1b[7m"), false, "no selection highlight from wheel");
+	controller.dispose();
+});
+
 test("wheel down returns toward the live bottom", () => {
 	let transcript = Array.from({ length: 40 }, (_, i) => `line ${i}`);
 	const harness = makeHarness(() => buildLines(transcript, EDITOR_BLOCK, CHROME), 20);
