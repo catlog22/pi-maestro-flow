@@ -43,7 +43,7 @@ teammate({
 | `dependsOn` | 只声明顺序，不注入输出 |
 | `background` | 默认 `false`；`true` 时立即确认并后台执行，完成时推送通知 |
 | `concurrency` | 最大并行任务数（默认 4） |
-| `maxNestingDepth` | 限制子代理再派生子代理的层级（0 禁止嵌套） |
+| `maxNestingDepth` | 限制子代理再派生子代理的层级（0 禁止嵌套）；顶层为默认值，task 同名字段可覆盖，均省略时取全局上限（2，实际生效 0/1） |
 
 ### 模型优先级
 
