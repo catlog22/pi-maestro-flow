@@ -28,7 +28,10 @@ function formatTokens(count: number): string {
   return `${(count / 1_000_000).toFixed(2)}M`;
 }
 
-export function progressDurationMs(entry: AgentProgressSnapshot, now = Date.now()): number | undefined {
+export function progressDurationMs(
+  entry: AgentProgressSnapshot,
+  now: number = Date.now(),
+): number | undefined {
   const reported = entry.durationMs;
   if (entry.status !== "running" || !entry.startedAt) return reported;
   const startedAt = Date.parse(entry.startedAt);
@@ -67,6 +70,7 @@ function statusText(status: AgentProgressSnapshot["status"], palette: ProgressPa
 export function buildProgressTree(
   progress: AgentProgressSnapshot[],
   palette: ProgressPalette,
+  now: number = Date.now(),
 ): ProgressTreeRow[] {
   const byIndex = new Map<number, AgentProgressSnapshot>();
   for (const entry of progress) byIndex.set(entry.taskIndex, entry);
@@ -95,7 +99,7 @@ export function buildProgressTree(
       : entry.tokens
         ? [`${formatTokens(entry.tokens)} tok`]
         : [];
-    const durationMs = progressDurationMs(entry);
+    const durationMs = progressDurationMs(entry, now);
     const metaParts = [
       entry.toolCount ? `${entry.toolCount} tools` : "",
       ...tokenParts,

@@ -397,15 +397,17 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
   handleInput(data: string): void {
     if (this.saving) return;
     if (this.pasteFlushTimer) clearTimeout(this.pasteFlushTimer);
-    for (const token of this.pasteDecoder.feed(data)) this.dispatchDecodedToken(token);
+    const tokens = this.pasteDecoder.feed(data);
+    for (const token of tokens) this.dispatchDecodedToken(token);
     if (this.pasteDecoder.hasPending()) {
       this.pasteFlushTimer = setTimeout(() => {
         this.pasteFlushTimer = undefined;
         for (const token of this.pasteDecoder.flushPending()) this.dispatchDecodedToken(token);
         this.params.requestRender();
       }, 16);
+      return;
     }
-    this.params.requestRender();
+    if (tokens.length > 0) this.params.requestRender();
   }
 
   private dispatchDecodedToken(token: DecodedInputToken): void {
