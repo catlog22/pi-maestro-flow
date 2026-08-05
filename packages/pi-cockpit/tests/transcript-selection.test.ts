@@ -55,6 +55,33 @@ async function drag(harness: SelectionHarness, from: [number, number], to: [numb
 	return harness.controller.release(to[0], to[1]);
 }
 
+test("flowing selection down-right: first row to EOL, middle full, last to focus", async () => {
+	const harness = makeSelection();
+	harness.setLines(["alpha beta", "gamma delta", "epsilon zeta"]);
+	// anchor col 1 ("lpha…"), focus row 3 col 8 ("epsilon"); middle row full line.
+	await drag(harness, [2, 1], [8, 3]);
+	assert.equal(harness.copied, "lpha beta\ngamma delta\nepsilon");
+});
+
+test("flowing selection upward mirrors the first/last row extents", async () => {
+	const harness = makeSelection();
+	harness.setLines(["alpha beta", "gamma delta", "epsilon zeta"]);
+	// Same region dragged from bottom-right to top-left.
+	await drag(harness, [8, 3], [2, 1]);
+	assert.equal(harness.copied, "lpha beta\ngamma delta\nepsilon");
+});
+
+test("flowing highlight covers full middle rows and partial ends", () => {
+	const harness = makeSelection();
+	harness.setLines(["alpha beta", "gamma delta", "epsilon zeta"]);
+	harness.controller.press(2, 1);
+	harness.controller.motion(8, 3);
+	// First row: from col 1 to EOL. Middle row: whole line. Last row: 0..focus.
+	assert.equal(harness.controller.highlight("alpha beta", 0), "a\x1b[7mlpha beta\x1b[27m", "first row from anchor to EOL");
+	assert.ok(harness.controller.highlight("gamma delta", 1).startsWith("\x1b[7m"), "middle row fully highlighted");
+	assert.equal(harness.controller.highlight("epsilon zeta", 2), "\x1b[7mepsilon \x1b[27mzeta", "last row 0..focus (cursor cell included; copy trims it)");
+});
+
 test("ascii multi-line selection copies the selected rows joined by newline", async () => {
 	const harness = makeSelection();
 	harness.setLines(["alpha", "beta", "gamma"]);

@@ -5,11 +5,15 @@ import { sliceByColumn, visibleWidth } from "@earendil-works/pi-tui";
  * Transcript drag-selection with copy-on-release for fullscreen mode.
  *
  * Selection is anchored on a button-0 press inside the transcript viewport and
- * followed on drag; release copies the visible plain text of the selected cell
- * rectangle via copyToClipboard (native platform tools with OSC 52 fallback).
- * Only transcript rows can be selected — the editor and trailing chrome are
- * never in range. ANSI/OSC styling is excluded from the copied text, while the
- * visual highlight is composed with reverse video over the selected cells.
+ * followed on drag; release copies the visible plain text of the selected
+ * flowing region via copyToClipboard (native platform tools with OSC 52
+ * fallback). The region is a normal text-style selection: the first row runs
+ * from the anchor column to its line end, middle rows cover the full line, and
+ * the last row runs from the line start to the focus column (mirrored when
+ * dragging upward). Only transcript rows can be selected — the editor and
+ * trailing chrome are never in range. ANSI/OSC styling is excluded from the
+ * copied text, while the visual highlight is composed with reverse video over
+ * the selected cells.
  */
 
 export interface SelectionRect {
@@ -123,12 +127,42 @@ export function createTranscriptSelectionController(options: TranscriptSelection
 		return { minRow, maxRow, minCol, maxCol, singleCell: minRow === maxRow && minCol === maxCol };
 	};
 
-	const extractText = (region: SelectionRect): string => {
+	/**
+	 * Flowing-selection cell range for one viewport row: first row anchor→EOL,
+	 * last row 0→focus (mirrored when dragging upward), middle rows full line.
+	 */
+	const segmentFor = (row: number, lineWidth: number): { start: number; end: number } | null => {
+		if (!anchor || !focus) return null;
+		const top = Math.min(anchor.row, focus.row);
+		const bottom = Math.max(anchor.row, focus.row);
+		if (row < top || row > bottom) return null;
+		if (top === bottom) {
+			// Single-row drag: plain horizontal selection between the two columns.
+			const start = Math.min(anchor.col, focus.col);
+			return { start, end: Math.max(anchor.col, focus.col) + 1 };
+		}
+		const forward = focus.row >= anchor.row;
+		if (row === top) {
+			const start = forward ? anchor.col : focus.col;
+			return { start, end: lineWidth };
+		}
+		if (row === bottom) {
+			const endCol = forward ? focus.col : anchor.col;
+			return { start: 0, end: endCol + 1 };
+		}
+		return { start: 0, end: lineWidth };
+	};
+
+	const extractText = (): string => {
+		const region = rect();
+		if (!region) return "";
 		const lines = options.getViewportLines();
 		const parts: string[] = [];
 		for (let row = region.minRow; row <= region.maxRow; row++) {
 			const line = lines[row] ?? "";
-			parts.push(extractPlainSegment(line, region.minCol, region.maxCol + 1).trimEnd());
+			const segment = segmentFor(row, visibleWidth(line));
+			if (!segment) continue;
+			parts.push(extractPlainSegment(line, segment.start, segment.end).trimEnd());
 		}
 		return parts.join("\n");
 	};
@@ -174,7 +208,7 @@ export function createTranscriptSelectionController(options: TranscriptSelection
 				focus = null;
 				return false;
 			}
-			const text = extractText(region);
+			const text = extractText();
 			const copy = options.copy ?? copyToClipboard;
 			try {
 				await copy(text);
@@ -205,8 +239,9 @@ export function createTranscriptSelectionController(options: TranscriptSelection
 			if (!anchor || !focus) return line;
 			const region = rect();
 			if (!region || region.singleCell) return line;
-			if (rowIndex < region.minRow || rowIndex > region.maxRow) return line;
-			return highlightSegment(line, region.minCol, region.maxCol + 1);
+			const segment = segmentFor(rowIndex, visibleWidth(line));
+			if (!segment) return line;
+			return highlightSegment(line, segment.start, segment.end);
 		},
 	};
 }
