@@ -1351,6 +1351,68 @@ test("Goal continuation remains queued once across compaction cancel", async () 
   }
 });
 
+test("compaction completion auto-resumes a Goal paused by a preempted continuation", async () => {
+  const sent: string[] = [];
+  initGoal({
+    appendEntry() {},
+    sendMessage(message: { content?: string }) { sent.push(message.content ?? ""); },
+  } as never);
+  const ctx = createContext({
+    isIdle: () => false,
+    hasPendingMessages: () => false,
+  });
+  onSessionStart(ctx, { reason: "new" });
+  try {
+    await executeGoal({ action: "create", objective: "Resume after compaction" }, ctx);
+    assert.equal(sent.length, 0, "busy tool create queues no prompt");
+
+    // Compaction preempts the in-flight continuation: the turn aborts and
+    // pauseAfterEnd pauses the Goal without a pauseReason.
+    onBeforeCompact(ctx);
+    await settleGoalAttempt({ messages: [{ role: "assistant", stopReason: "aborted", content: [] }] }, ctx);
+    assert.equal(getActiveGoal()?.status, "paused", "aborted continuation pauses the Goal");
+    assert.equal(getActiveGoal()?.pauseReason, undefined, "interruption pause carries no reason");
+
+    // Compaction completes: the Goal auto-resumes and its continuation is re-sent.
+    await onCompact({}, ctx);
+    assert.equal(getActiveGoal()?.status, "active", "compaction completion auto-resumes the Goal");
+    assert.equal(sent.length, 1, "auto-resume re-sends exactly one continuation");
+    assert.match(sent[0] ?? "", /Resume after compaction/);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
+test("compaction completion does not auto-resume a user-stopped Goal", async () => {
+  const sent: string[] = [];
+  initGoal({
+    appendEntry() {},
+    sendMessage(message: { content?: string }) { sent.push(message.content ?? ""); },
+  } as never);
+  const ctx = createContext({
+    isIdle: () => false,
+    hasPendingMessages: () => false,
+  });
+  onSessionStart(ctx, { reason: "new" });
+  try {
+    await executeGoal({ action: "create", objective: "Stay stopped after compaction" }, ctx);
+    const stopped = await executeGoalCommand({ action: "stop" }, ctx);
+    assert.equal(stopped.isError, false, stopped.text);
+    assert.equal(getActiveGoal()?.status, "paused");
+    assert.equal(getActiveGoal()?.pauseReason, "user");
+
+    onBeforeCompact(ctx);
+    await onCompact({}, ctx);
+    assert.equal(getActiveGoal()?.status, "paused", "a user stop stays paused across compaction");
+    assert.equal(getActiveGoal()?.pauseReason, "user");
+    assert.equal(sent.length, 0, "no continuation is sent for a user-stopped Goal");
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
 test("slash Goal commands keep lifecycle control user-owned", () => {
   assert.deepEqual(parseGoalCommand(""), { action: "status" });
   assert.deepEqual(parseGoalCommand("status"), { action: "status" });

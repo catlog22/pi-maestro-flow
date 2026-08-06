@@ -154,6 +154,10 @@ let goalDisplayContext: GoalContext | undefined;
 let baseCwd = "";
 let continuationPending: ContinuationPending | undefined;
 let suspendedContinuation: ContinuationPending | undefined;
+// Set while a compaction is in flight and the Goal was active when it started.
+// Lets onCompact tell a compaction-preempted interruption (pauseAfterEnd, no
+// pauseReason) apart from a deliberate stop, and auto-resume only the former.
+let compactionInFlight = false;
 let goalRecovery: {
   goalId: string;
   kind: "compaction_retry" | "provider_retry";
@@ -478,6 +482,7 @@ export function onSessionShutdown(ctx: GoalContext) {
   goalDisplayContext = undefined;
   clearCompletionTimer();
   clearElapsedTimer();
+  compactionInFlight = false;
 }
 
 export function onBeforeCompact(ctx: GoalContext) {
@@ -485,11 +490,13 @@ export function onBeforeCompact(ctx: GoalContext) {
   const compactingGoal = { ...activeGoal };
   updateUsage(compactingGoal, ctx);
   suspendedContinuation = continuationPending ? { ...continuationPending } : undefined;
+  compactionInFlight = true;
   persistGoal(compactingGoal);
   updateStatusLine(ctx, compactingGoal);
 }
 
 export function onCompactionCancelled(ctx?: GoalContext) {
+  compactionInFlight = false;
   const displayCtx = ctx ?? goalDisplayContext;
   const suspended = suspendedContinuation;
   suspendedContinuation = undefined;
@@ -508,8 +515,31 @@ export async function onCompact(
   ctx: GoalContext,
   options: { deferContinuation?: boolean } = {},
 ) {
+  const compactionRan = compactionInFlight;
+  compactionInFlight = false;
   suspendedContinuation = undefined;
   if (!activeGoal || activeGoal.status !== "active") {
+    if (
+      compactionRan
+      && activeGoal?.status === "paused"
+      && activeGoal.pauseReason === undefined
+    ) {
+      // Compaction preempted this Goal's in-flight continuation turn, so
+      // pauseAfterEnd paused it with no pauseReason (interruption). The user
+      // did not cancel (that path ends in onCompactionCancelled), so compaction
+      // completion auto-resumes instead of stranding the Goal paused.
+      clearRecovery();
+      const resumedGoal = activateResumedGoal(activeGoal);
+      persistGoal(resumedGoal);
+      updateStatusLine(ctx, resumedGoal);
+      ctx.ui.notify(`Goal auto-resumed after compaction: ${resumedGoal.text}`, "info");
+      // Re-send the continuation now: the follow-up triggers a fresh turn
+      // against the compacted context. deferContinuation only coordinates
+      // provider-pressure failover, which never leaves a Goal in this state.
+      const sent = await sendContinuation(ctx, resumedGoal);
+      if (!sent && ctx.isIdle?.() !== true) armGoalLoop(resumedGoal);
+      return;
+    }
     clearRecovery();
     return;
   }
@@ -872,16 +902,7 @@ async function handleResume(
   }
 
   clearRecovery();
-  const activated = {
-    ...resumedGoal,
-    status: "active" as const,
-    pauseReason: undefined,
-    verificationFailures: 0,
-    infraErrorStreak: 0,
-    lowProgressCount: 0,
-    prevTokensUsed: resumedGoal.tokensUsed,
-    updatedAt: Date.now(),
-  };
+  const activated = activateResumedGoal(resumedGoal);
   persistGoal(activated);
   updateStatusLine(ctx, activated);
   ctx.ui.notify(`Goal resumed: ${activated.text}`, "info");
@@ -983,6 +1004,20 @@ function createGoal(
 function pauseGoal(goal: ActiveGoal, reason?: PauseReason): ActiveGoal {
   const { pauseReason: _pauseReason, ...rest } = goal;
   return { ...rest, status: "paused", ...(reason ? { pauseReason: reason } : {}), updatedAt: Date.now() };
+}
+
+/** Reactivate a paused Goal with the same field set handleResume applies. */
+function activateResumedGoal(goal: ActiveGoal): ActiveGoal {
+  return {
+    ...goal,
+    status: "active" as const,
+    pauseReason: undefined,
+    verificationFailures: 0,
+    infraErrorStreak: 0,
+    lowProgressCount: 0,
+    prevTokensUsed: goal.tokensUsed,
+    updatedAt: Date.now(),
+  };
 }
 
 function createWorkflowGoal(
