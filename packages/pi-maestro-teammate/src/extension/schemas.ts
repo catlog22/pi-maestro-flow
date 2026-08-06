@@ -34,11 +34,18 @@ function StringEnum<T extends string[]>(values: [...T]) {
 // ---------------------------------------------------------------------------
 
 export const TaskSpec = Type.Object({
-  prompt: Type.String({
-    minLength: 1,
-    description:
-      "Required non-empty task text. Use {name} to reference another task's output, {name.field} for structured output fields.",
-  }),
+  // Optional at the schema layer on purpose: a missing or mislocated prompt must
+  // reach dispatch normalization, which diagnoses it precisely ("move prompt to
+  // the task level") instead of a generic TypeBox "required properties" error
+  // the model cannot self-correct from. normalizeTeammateParams enforces the
+  // non-empty invariant before any child is spawned.
+  prompt: Type.Optional(
+    Type.String({
+      minLength: 1,
+      description:
+        "Task text; enforced non-empty at dispatch (a missing or mislocated prompt is diagnosed precisely). Use {name} to reference another task's output, {name.field} for structured output fields. Never place the task text inside outputSchema.",
+    }),
+  ),
   description: Type.Optional(
     Type.String({
       description:
@@ -101,15 +108,8 @@ export const TaskSpec = Type.Object({
     Type.Unsafe({
       type: "object",
       additionalProperties: true,
-      properties: {
-        prompt: {
-          type: "object",
-          description:
-            "Never place the task text here — tasks[].prompt is the task text. A string under this key is rejected as a mislocated prompt.",
-        },
-      },
       description:
-        "JSON Schema for structured output. Output becomes accessible as {name.field} in dependent tasks.",
+        "JSON Schema for structured output (root must be type \"object\"; recommended keywords: type/properties/required/items/enum/description). Output becomes accessible as {name.field} in dependent tasks. Holds only the JSON Schema — the task text belongs at tasks[].prompt, never here.",
     }),
   ),
   timeoutMs: Type.Optional(
@@ -215,15 +215,8 @@ export const TeammateParams = Type.Object({
     Type.Unsafe({
       type: "object",
       additionalProperties: true,
-      properties: {
-        prompt: {
-          type: "object",
-          description:
-            "Never place the task text here — tasks[].prompt is the task text. A string under this key is rejected as a mislocated prompt.",
-        },
-      },
       description:
-        "JSON Schema for structured output validation. Serves as the default for every task without its own outputSchema.",
+        "JSON Schema for structured output validation (root must be type \"object\"). Serves as the default for every task without its own outputSchema. Holds only the JSON Schema — the task text belongs at tasks[].prompt, never here.",
     }),
   ),
 

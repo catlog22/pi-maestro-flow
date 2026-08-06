@@ -12,7 +12,7 @@
  */
 import { Type } from "typebox";
 export declare const TaskSpec: Type.TObject<{
-    prompt: Type.TString;
+    prompt: Type.TOptional<Type.TString>;
     description: Type.TOptional<Type.TString>;
     agent: Type.TOptional<Type.TString>;
     taskType: Type.TOptional<Type.TUnsafe<unknown>>;
@@ -26,6 +26,7 @@ export declare const TaskSpec: Type.TObject<{
     outputSchema: Type.TOptional<Type.TUnsafe<unknown>>;
     timeoutMs: Type.TOptional<Type.TInteger>;
     background: Type.TOptional<Type.TBoolean>;
+    todo: Type.TOptional<Type.TUnion<[Type.TString, Type.TArray<Type.TString>]>>;
     maxNestingDepth: Type.TOptional<Type.TInteger>;
 }>;
 export declare const TeammateParams: Type.TObject<{
@@ -33,7 +34,7 @@ export declare const TeammateParams: Type.TObject<{
     taskType: Type.TOptional<Type.TUnsafe<unknown>>;
     reply_to: Type.TOptional<Type.TUnsafe<"main" | "caller">>;
     tasks: Type.TArray<Type.TObject<{
-        prompt: Type.TString;
+        prompt: Type.TOptional<Type.TString>;
         description: Type.TOptional<Type.TString>;
         agent: Type.TOptional<Type.TString>;
         taskType: Type.TOptional<Type.TUnsafe<unknown>>;
@@ -47,6 +48,7 @@ export declare const TeammateParams: Type.TObject<{
         outputSchema: Type.TOptional<Type.TUnsafe<unknown>>;
         timeoutMs: Type.TOptional<Type.TInteger>;
         background: Type.TOptional<Type.TBoolean>;
+        todo: Type.TOptional<Type.TUnion<[Type.TString, Type.TArray<Type.TString>]>>;
         maxNestingDepth: Type.TOptional<Type.TInteger>;
     }>>;
     concurrency: Type.TOptional<Type.TInteger>;

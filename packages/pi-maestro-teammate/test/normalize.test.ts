@@ -53,6 +53,25 @@ test("outputSchema keeps working when a prompt-like key is a legit schema fragme
   });
 });
 
+test("a stray task-text prompt inside outputSchema is salvaged when a task-level prompt exists", () => {
+  // Regression: the generating model duplicated the task text into
+  // outputSchema.prompt while also setting a valid task-level prompt. The
+  // stray string is not a JSON Schema keyword — salvage it instead of
+  // rejecting, and surface a warning so the caller can fix the generator.
+  const result = normalizeTeammateParams({
+    tasks: [{
+      prompt: "audit",
+      outputSchema: { type: "object", properties: { summary: { type: "string" } }, prompt: "PURPOSE: stray copy" },
+    }],
+  });
+  assert.equal(result.error, undefined);
+  assert.ok(result.warnings.some((w) => /removed a task-text "prompt" key/.test(w)), result.warnings.join(" | "));
+  assert.deepEqual(result.tasks[0].outputSchema, {
+    type: "object",
+    properties: { summary: { type: "string" } },
+  });
+});
+
 test("one public task normalizes for the internal single-task primitive", () => {
   const result = normalizeTeammateParams({ tasks: [{ agent: "general", prompt: "Inspect auth" }] });
   assert.equal(result.error, undefined);

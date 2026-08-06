@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Check, Value } from "typebox/value";
+import { Check } from "typebox/value";
 import {
   TeammateParams,
   TeammateSendParams,
@@ -134,35 +134,78 @@ test("findStructuredOutputSchemaHazard still rejects catastrophic pattern shapes
   );
 });
 
-// ---------------------------------------------------------------------------
-// Misplaced prompt guard: a task text embedded inside outputSchema is rejected
-// at the parameter layer with a precise path (tasks.N.outputSchema.prompt)
-// instead of the misleading "tasks.N.prompt missing".
-// ---------------------------------------------------------------------------
-
-test("schema rejects a string prompt embedded inside task outputSchema", () => {
-  const task = {
-    prompt: "work",
-    outputSchema: {
-      type: "object",
-      properties: { summary: { type: "string" } },
-      prompt: "PURPOSE: the real task text was mislocated here",
-    },
-  };
-  assert.equal(Check(TeammateParams, { tasks: [task] }), false);
-  const errors = [...Value.Errors(TeammateParams, { tasks: [task] })].map(
-    (e: { instancePath?: string; message: string }) => `${e.instancePath ?? ""} ${e.message}`,
-  );
-  // The host formatter (pi-ai formatValidationPath) renders instancePath
-  // "/tasks/0/outputSchema/prompt" as "tasks.0.outputSchema.prompt".
-  assert.ok(errors.some((m) => /outputSchema\/prompt.*must be object/.test(m)), `expected an outputSchema.prompt error, got: ${errors.join(" | ")}`);
+test("findStructuredOutputSchemaHazard rejects invalid type values", () => {
+  assert.match(findStructuredOutputSchemaHazard({ type: "objct", properties: {} }) ?? "", /invalid "type"/);
+  assert.match(findStructuredOutputSchemaHazard({ type: ["object", "arrayy"] }) ?? "", /invalid "type"/);
 });
 
-test("schema rejects a string prompt embedded inside top-level outputSchema", () => {
+test("findStructuredOutputSchemaHazard accepts loose arrays and requires items only for non-array types", () => {
+  // A bare { type: "array" } is valid JSON Schema (array of anything) — keep it.
+  assert.equal(
+    findStructuredOutputSchemaHazard({ type: "object", properties: { xs: { type: "array" } } }),
+    undefined,
+  );
+  assert.equal(
+    findStructuredOutputSchemaHazard({ type: "object", properties: { xs: { type: "array", items: { type: "string" } } } }),
+    undefined,
+  );
+  assert.match(
+    findStructuredOutputSchemaHazard({ type: "object", properties: { xs: { type: "object", items: { type: "string" } } } }) ?? "",
+    /has "items" but "type" is not "array"/,
+  );
+});
+
+test("findStructuredOutputSchemaHazard rejects malformed enum values", () => {
+  assert.match(
+    findStructuredOutputSchemaHazard({ type: "object", properties: { status: { type: "string", enum: "x" } } }) ?? "",
+    /"enum".*not a non-empty array/,
+  );
+  assert.match(
+    findStructuredOutputSchemaHazard({ type: "object", properties: { status: { type: "string", enum: [] } } }) ?? "",
+    /"enum".*not a non-empty array/,
+  );
+  assert.equal(
+    findStructuredOutputSchemaHazard({ type: "object", properties: { status: { type: "string", enum: ["a", "b"] } } }),
+    undefined,
+  );
+});
+
+test("findStructuredOutputSchemaHazard enforces the object-root contract", () => {
+  assert.match(findStructuredOutputSchemaHazard({ type: "string" }) ?? "", /root must be type "object"/);
+  assert.match(findStructuredOutputSchemaHazard({ anyOf: [{ type: "object" }] }) ?? "", /root must not use "anyOf"/);
+  assert.match(findStructuredOutputSchemaHazard({ oneOf: [{ type: "object" }] }) ?? "", /root must not use "anyOf"/);
+  assert.equal(findStructuredOutputSchemaHazard({ type: "object", properties: {} }), undefined);
+});
+
+test("findStructuredOutputSchemaHazard flags a stray task-text prompt key inside outputSchema", () => {
+  assert.match(
+    findStructuredOutputSchemaHazard({ type: "object", prompt: "PURPOSE: task text" }) ?? "",
+    /task-text "prompt" key/,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Misplaced prompt handling: the task text may never live inside outputSchema.
+// The parameter schema deliberately stays permissive (prompt is optional at
+// the schema layer) so a mislocated prompt reaches dispatch normalization,
+// which diagnoses it precisely — the generic TypeBox "must have required
+// properties prompt" error was not actionable for the generating model.
+// ---------------------------------------------------------------------------
+
+test("parameter schema stays permissive for a mislocated-only prompt", () => {
+  // Regression: the model generated the task text inside outputSchema and no
+  // task-level prompt. Previously this died at parameter validation with the
+  // generic "tasks.0.prompt: must have required properties prompt"; now it
+  // passes validation and is diagnosed precisely by normalizeTeammateParams.
   assert.equal(Check(TeammateParams, {
-    tasks: [{ prompt: "work" }],
-    outputSchema: { type: "object", prompt: "PURPOSE: mislocated" },
-  }), false);
+    tasks: [{ name: "audit", outputSchema: { type: "object", prompt: "PURPOSE: mislocated" } }],
+  }), true);
+});
+
+test("parameter schema stays permissive for a duplicated prompt (task-level + stray copy)", () => {
+  assert.equal(Check(TeammateParams, {
+    tasks: [{ prompt: "work", outputSchema: { type: "object", properties: { summary: { type: "string" } }, prompt: "PURPOSE: stray" } }],
+  }), true);
 });
 
 test("schema accepts prompt as an object-valued JSON Schema key in outputSchema", () => {

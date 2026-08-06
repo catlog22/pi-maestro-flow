@@ -944,13 +944,12 @@ export function normalizeTeammateParams(
 
   for (const [index, task] of normalized.entries()) {
     const hasNoPrompt = typeof task.prompt !== "string" || task.prompt.trim().length === 0;
-    if (
-      hasNoPrompt
-      && task.outputSchema !== undefined
+    const strayPrompt =
+      task.outputSchema !== undefined
       && typeof task.outputSchema === "object"
       && task.outputSchema !== null
-      && typeof task.outputSchema.prompt === "string"
-    ) {
+      && typeof task.outputSchema.prompt === "string";
+    if (hasNoPrompt && strayPrompt) {
       return {
         tasks: normalized,
         isMultiTask,
@@ -965,6 +964,17 @@ export function normalizeTeammateParams(
         warnings,
         error: `tasks[${index}]${task.name ? ` "${task.name}"` : ""} requires a non-empty "prompt".`,
       };
+    }
+    if (strayPrompt) {
+      // Task-level prompt already exists: the stray string is not a JSON Schema
+      // keyword and would otherwise leak into the child's schema file. Salvage
+      // it instead of rejecting — the dispatch intent is unambiguous.
+      const cleaned = { ...task.outputSchema! };
+      delete cleaned.prompt;
+      normalized[index] = { ...task, outputSchema: cleaned };
+      warnings.push(
+        `tasks[${index}]${task.name ? ` "${task.name}"` : ""}: removed a task-text "prompt" key from "outputSchema" (not a JSON Schema keyword). Keep the task text at the task-level "prompt".`,
+      );
     }
   }
 
@@ -1673,6 +1683,10 @@ const SCHEMA_KEYWORD_KEYS = new Set([
   "description", "title", "$ref", "$schema",
 ]);
 
+const VALID_SCHEMA_TYPES = new Set([
+  "object", "array", "string", "number", "integer", "boolean", "null",
+]);
+
 /**
  * Nodes that carry any recognized schema keyword are treated as schema
  * objects; keyword-typo detection is skipped for plain data nodes (e.g. a
@@ -1744,6 +1758,34 @@ export function findStructuredOutputSchemaHazard(
           }
         }
       }
+      if (record.type !== undefined) {
+        const types = Array.isArray(record.type) ? record.type : [record.type];
+        if (
+          types.length === 0
+          || types.some((t) => typeof t !== "string" || !VALID_SCHEMA_TYPES.has(t))
+        ) {
+          return `outputSchema at ${path} has an invalid "type" (${JSON.stringify(record.type)}) — expected one of object|array|string|number|integer|boolean|null.`;
+        }
+      }
+      if (record.items !== undefined) {
+        if (typeof record.items !== "object" || record.items === null) {
+          return `outputSchema at ${path} has an "items" value that is not an object.`;
+        }
+        if (record.type !== undefined) {
+          const types = Array.isArray(record.type) ? record.type : [record.type];
+          if (!types.includes("array")) {
+            return `outputSchema at ${path} has "items" but "type" is not "array".`;
+          }
+        }
+      }
+      if (record.enum !== undefined) {
+        if (!Array.isArray(record.enum) || record.enum.length === 0) {
+          return `outputSchema at ${path} has an "enum" value that is not a non-empty array.`;
+        }
+      }
+      if (typeof record.prompt === "string") {
+        return `outputSchema at ${path} has a task-text "prompt" key, which is not a JSON Schema keyword — move it to the task level (tasks[].prompt).`;
+      }
     }
     for (const [key, value] of Object.entries(record)) {
       if (key === "pattern" && typeof value === "string" && isRiskyRegexSource(value)) {
@@ -1762,7 +1804,22 @@ export function findStructuredOutputSchemaHazard(
     return undefined;
   };
 
-  return visit(schema, 0, "/");
+  const nested = visit(schema, 0, "/");
+  if (nested) return nested;
+
+  // Root contract (docs/tool-schema-reference): structured output must be a
+  // single type:"object" schema; a root-level anyOf/oneOf is rejected by
+  // providers when the child registers the structured_output tool.
+  if (schema.anyOf !== undefined || schema.oneOf !== undefined) {
+    return `outputSchema root must not use "anyOf"/"oneOf" — use a single type:"object" schema.`;
+  }
+  if (schema.type !== undefined) {
+    const rootTypes = Array.isArray(schema.type) ? schema.type : [schema.type];
+    if (rootTypes.length !== 1 || rootTypes[0] !== "object") {
+      return `outputSchema root must be type "object" (got ${JSON.stringify(schema.type)}).`;
+    }
+  }
+  return undefined;
 }
 
 export type ChildReclamationOutcome =
