@@ -73,6 +73,15 @@ export interface TeammateStartedEvent {
   lastOutcome?: AgentRunOutcome;
   /** Tool-call id; present only when the run was started by a root `teammate` call. */
   id?: string;
+  /**
+   * Optional Todo task id(s) bound to this agent at dispatch (`tasks[].todo`),
+   * priority order. The host re-assigns each task's assignee to this agent on
+   * start and activates the first runnable one. `todo` (single) is kept for
+   * backward compatibility as the first binding.
+   */
+  todos?: string[];
+  /** First Todo binding; kept for backward compatibility with single-binding consumers. */
+  todo?: string;
 }
 
 /**

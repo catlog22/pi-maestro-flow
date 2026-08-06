@@ -1280,6 +1280,7 @@ export async function handleProxyRequest(
           lease: createChildLease(),
           promptSeq: 1,
           expectsStructuredOutput: (task.outputSchema ?? p.outputSchema) !== undefined,
+          ...(task.todos ? { todos: [...task.todos] } : {}),
         };
         state.activeRuns.set(childId, childAgent);
         if (task.name) bindAgentName(state, task.name, childId);

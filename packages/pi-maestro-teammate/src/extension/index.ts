@@ -1337,6 +1337,7 @@ export default function registerTeammateExtension(
         outputLog: [],
         lastActivityAt: Date.now(),
         requestedModel: isMultiTask ? undefined : singleTask.model,
+        ...(isMultiTask ? {} : singleTask.todos ? { todos: [...singleTask.todos] } : {}),
         replyTo: params.reply_to,
         // Root-tool dispatches start the tree.
         depth: 0,
@@ -1420,6 +1421,7 @@ export default function registerTeammateExtension(
             lease: createChildLease(),
             promptSeq: 1,
             expectsStructuredOutput: (task.outputSchema ?? params.outputSchema) !== undefined,
+            ...(task.todos ? { todos: [...task.todos] } : {}),
           };
           state.activeRuns.set(childId, childAgent);
           if (task.name) bindAgentName(state, task.name, childId);

@@ -410,6 +410,10 @@ prompt is a task-level field: always place the task text at tasks[].prompt, neve
 
 When a task (or the top-level call) sets outputSchema, the child must submit its final answer through a \`structured_output\` tool that validates the value against that JSON Schema. On completion the value is returned directly in the result content (prefixed \`[structured_output]\`) and is persisted for later reads via \`agent://<correlationId>\` (resource tool). Schema-invalid submissions fail validation and the child retries automatically; a run that ends without a valid value fails with a diagnostic naming the offending field.
 
+## Todo binding (todo)
+
+A task may carry an optional per-task \`todo\` field — a single Todo task id (\"12\" or \"#12\") or an ordered array of ids (\"[\"#1\", \"#2\"]\", first = highest priority). On agent start the host re-assigns each task's assignee to the agent (actor changes from root to the agent), auto-activates the first runnable one (skipping blocked/done bindings), and injects the whole ordered list into the agent's system prompt as a managed fragment: the agent finishes the active task with \`todo update <id> status=completed summary=...\`, then activates the next with \`todo update <id> status=in_progress\`. The tasks must exist before dispatch; missing ids produce a warning and dispatch continues.
+
 ## Observation
 
 Use observe for teammate and background Bash status, barrier waits, or transition watching:
@@ -1142,6 +1146,7 @@ export function emitTeammateStarted(
     activity: projectAgentActivity(agent),
     ...(agent.phase ? { phase: agent.phase } : {}),
     ...(agent.lastOutcome ? { lastOutcome: { ...agent.lastOutcome } } : {}),
+    ...(agent.todos && agent.todos.length > 0 ? { todos: [...agent.todos], todo: agent.todos[0] } : {}),
   });
 }
 

@@ -94,6 +94,9 @@ import {
   initTodo,
   isolateTodoForTeammateAttach,
   executeTodo,
+  delegateTodoTaskToAgent,
+  delegateTodoTasksToAgent,
+  sealTodoTasksOnAgentComplete,
   formatTodoActorSelector,
   getVisibleTasks,
   onAgentEndTodo,
@@ -637,6 +640,28 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
       console.warn(`[pi-maestro-flow] agent output capture failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   });
+  // Auto-seal: a cleanly finished agent seals any Todo task it left
+  // in_progress, so delegated tasks never dangle after their agent ends.
+  pi.events.on(TEAMMATE_COMPLETE_EVENT, (event) => {
+    if (!todoRootContext) return;
+    const rootCtx = todoRootContext;
+    const record = event as { correlationId?: unknown; agent?: unknown; exitCode?: unknown; cancelled?: unknown };
+    const cid = typeof record.correlationId === "string" ? record.correlationId.trim() : "";
+    if (!cid || cid === "unknown") return;
+    const agent = typeof record.agent === "string" && record.agent.trim() ? record.agent.trim() : undefined;
+    const actor: TodoActorRef = {
+      kind: "teammate",
+      id: cid,
+      label: agent ?? cid.slice(0, 8),
+      ...(agent ? { agentType: agent } : {}),
+    };
+    void sealTodoTasksOnAgentComplete(actor, Number(record.exitCode ?? 1), record.cancelled === true, rootCtx)
+      .then((result) => {
+        if (result.sealed.length === 0) return;
+        updateTodoWidget();
+        rootCtx.ui?.notify?.(`Todo: sealed ${result.sealed.length} task(s) for @${actor.label} on completion`, "info");
+      });
+  });
   const emitGoalChanged = (): void => {
     if (!guiEvents.isActive()) return;
     const goal = getActiveGoal();
@@ -968,8 +993,30 @@ Only request completion after all work is done; the extension verifies it indepe
   initTodo(pi);
   pi.events.on(TEAMMATE_STARTED_EVENT, (event) => {
     if (!todoRootContext) return;
+    const rootCtx = todoRootContext;
     const actor = todoActorFromTeammateStarted(event);
     if (actor) registerTodoActor(actor);
+    const record = event as { todos?: unknown; todo?: unknown };
+    const todos = Array.isArray(record.todos)
+      ? record.todos.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      : typeof record.todo === "string" && record.todo.trim()
+        ? [record.todo]
+        : [];
+    if (actor && todos.length > 0) {
+      // tasks[].todo binding: hand the tasks to the agent that just started —
+      // each assignee becomes the agent (root → agent) and the first runnable
+      // one is auto-activated. Runs synchronously in this tick via the
+      // serialized todo mutation queue — well before the child's first tool call.
+      void delegateTodoTasksToAgent(todos, actor, rootCtx)
+        .then((result) => {
+          updateTodoWidget();
+          if (result.errors.length > 0) {
+            rootCtx.ui?.notify?.(`Todo delegation to @${actor.label} partial: ${result.errors.join("; ")}`, "warning");
+          } else if (result.delegated.length > 0) {
+            rootCtx.ui?.notify?.(`Todo: @${actor.label} now owns ${result.delegated.length} task(s)${result.activated.length > 0 ? `, activated #${result.activated[0]}` : ""}`, "info");
+          }
+        });
+    }
   });
 
   const todoTool: ToolDefinition<typeof TodoToolParams> = {
@@ -2963,11 +3010,14 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
     description: `Manage the shared root Todo list from this teammate.
 
 Tasks created here are attributed to this teammate and assigned to self by default.
-Use assignee="root" to hand work back to root. Teammates can update tasks they created or were assigned; only root can clear the shared list.`,
+Use assignee="root" to hand work back to root. Teammates can update tasks they created or were assigned; only root can clear the shared list.
+
+If root delegated a task to you (you were spawned with todo: "<id>"), pull it with \`todo next\` (or \`todo update <id> status=in_progress\`), and before your final answer mark it \`todo update <id> status=completed summary=<one-line result>\`. Leave it pending only if you could not complete it.`,
     promptSnippet: "Create and update teammate-owned tasks in the shared root Todo list.",
     promptGuidelines: [
       "Use todo for newly discovered follow-up work, explicit blockers, and resumable steps.",
       "Complete or pause your active Todo before activating another task assigned to you.",
+      "If root delegated a task to you (spawned with todo: \"<id>\"), finish it with todo update <id> status=completed summary=... before your final answer; keep it pending only if you could not complete it.",
     ],
     parameters: TodoToolParams,
     async execute(_id, params, signal) {

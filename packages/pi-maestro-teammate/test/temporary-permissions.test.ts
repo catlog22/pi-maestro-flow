@@ -114,3 +114,20 @@ test("private writers refuse pre-existing symbolic-link targets", {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("todo binding appends an assigned-task instruction to the child system prompt", () => {
+  const correlationId = `todo-prompt-${randomUUID()}`;
+  const plain = writeSystemPromptFile(promptAgent, correlationId);
+  const bound = writeSystemPromptFile(promptAgent, `todo-prompt-2-${randomUUID()}`, undefined, ["#12", "7"]);
+  try {
+    assert.equal(fs.readFileSync(plain, "utf8"), "private prompt");
+    const boundText = fs.readFileSync(bound, "utf8");
+    assert.match(boundText, /## Assigned Todo tasks/);
+    assert.match(boundText, /#12, #7/);
+    assert.match(boundText, /already active \(status=in_progress\)/);
+    assert.match(boundText, /private prompt/);
+  } finally {
+    fs.rmSync(plain, { force: true });
+    fs.rmSync(bound, { force: true });
+  }
+});

@@ -502,6 +502,165 @@ export async function executeTodo(
   return result;
 }
 
+/**
+ * Auto-delegation hook for `teammate:started` events that carry `todo`
+ * bindings (tasks[].todo at dispatch time, single id or ordered array). Each
+ * bound task's assignee moves from root to the agent, and the first runnable
+ * one (priority order, pending and not blocked) is auto-activated so the
+ * agent can drive it immediately without calling `todo next`.
+ */
+export interface TodoDelegationResult {
+  /** Task ids whose assignee now is the agent. */
+  delegated: string[];
+  /** Task ids whose assignee was actually changed by this delegation. */
+  reassigned: string[];
+  /** Task ids auto-activated (at most one unless one was already active). */
+  activated: string[];
+  /** Human-readable errors for bindings that could not be delegated. */
+  errors: string[];
+}
+
+/**
+ * Delegate an ordered list of Todo tasks to an agent and auto-activate the
+ * first runnable one. Blocked tasks keep their state (they auto-unblock when
+ * the dependency completes); already-active tasks are preserved; if the agent
+ * already holds an in_progress task, nothing new is activated (one
+ * in_progress per actor).
+ */
+export async function delegateTodoTasksToAgent(
+  todos: readonly string[],
+  actor: TodoActorRef,
+  ctx: ExtensionContext,
+): Promise<TodoDelegationResult> {
+  const delegated: string[] = [];
+  const reassigned: string[] = [];
+  const activated: string[] = [];
+  const errors: string[] = [];
+  if (todos.length === 0) return { delegated, reassigned, activated, errors };
+  // Mirror the started-event listener: the agent's identity must be known to
+  // the assignee selector before the update resolves `actor.id`.
+  rememberActor(actor);
+  let alreadyActive = findActiveTask(actor.id) !== undefined;
+  for (const raw of todos) {
+    const trimmed = String(raw).trim();
+    const id = trimmed.startsWith("#") ? trimmed.slice(1) : trimmed;
+    if (!id) {
+      errors.push("Todo delegation: empty task id.");
+      continue;
+    }
+    const task = tasks.get(id);
+    if (!task || task.status === "deleted") {
+      errors.push(`Todo delegation: unknown task "${raw}"; no assignment performed.`);
+      continue;
+    }
+    if (task.assignee.id !== actor.id) {
+      const result = await executeTodo(
+        { action: "update", id, assignee: actor.id },
+        ctx,
+        ROOT_TODO_ACTOR,
+      );
+      if (result.isError) {
+        errors.push(`Todo delegation: task #${id} failed to reassign: ${result.content[0] && "text" in result.content[0] ? result.content[0].text : "unknown"}`);
+        continue;
+      }
+      reassigned.push(id);
+    }
+    delegated.push(id);
+  }
+  // Auto-activate the highest-priority runnable task (first pending,
+  // non-blocked binding). A task already in_progress counts as activated.
+  for (const id of delegated) {
+    const task = tasks.get(id);
+    if (!task || task.status === "completed" || task.status === "deleted") continue;
+    if (task.status === "in_progress") {
+      activated.push(id);
+      break;
+    }
+    if (task.status !== "pending" || task.blockedBy.length > 0) continue;
+    if (alreadyActive) break;
+    const result = await executeTodo(
+      { action: "update", id, status: "in_progress" },
+      ctx,
+      ROOT_TODO_ACTOR,
+    );
+    if (!result.isError) {
+      activated.push(id);
+      alreadyActive = true;
+    }
+    break;
+  }
+  return { delegated, reassigned, activated, errors };
+}
+
+/**
+ * Single-binding convenience wrapper over {@link delegateTodoTasksToAgent};
+ * returns a FlowToolResult for callers that need one (e.g. tests).
+ */
+export async function delegateTodoTaskToAgent(
+  taskId: string,
+  actor: TodoActorRef,
+  ctx: ExtensionContext,
+): Promise<FlowToolResult> {
+  const result = await delegateTodoTasksToAgent([taskId], actor, ctx);
+  if (result.errors.length > 0) return err(result.errors[0], "update");
+  const id = result.delegated[0] ?? "";
+  const task = tasks.get(id);
+  if (task && result.reassigned.length === 0) {
+    return ok(`Todo task #${id} already assigned to @${actor.label}${result.activated.length > 0 ? ` (active #${result.activated[0]})` : ""}.`, "update");
+  }
+  const extra = result.activated.length > 0
+    ? `; activated #${result.activated[0]}`
+    : task && task.status === "blocked" && task.blockedBy.length > 0
+      ? ` (blocked by ${task.blockedBy.map((depId) => `#${depId}`).join(", ")}; auto-unblocks when the dependency completes)`
+      : "";
+  return ok(
+    id
+      ? `Todo task #${id} delegated to @${actor.label}${extra}.`
+      : "Todo delegation: no task delegated.",
+    "update",
+  );
+}
+
+export interface TodoSealResult {
+  /** Task ids auto-sealed to `completed` on a successful agent completion. */
+  sealed: string[];
+}
+
+/**
+ * Auto-seal hook for `teammate:complete`. On a clean agent exit (exitCode 0
+ * and not cancelled) every task the agent left `in_progress` is sealed to
+ * `completed` with a marker summary, so a delegated task never dangles after
+ * its agent finishes — even if the agent forgot to update it. Pending/blocked
+ * tasks are left untouched (the agent never activated them), and failed or
+ * cancelled runs leave everything as-is.
+ */
+export async function sealTodoTasksOnAgentComplete(
+  actor: TodoActorRef,
+  exitCode: number,
+  cancelled: boolean,
+  ctx: ExtensionContext,
+): Promise<TodoSealResult> {
+  const sealed: string[] = [];
+  if (exitCode !== 0 || cancelled) return { sealed };
+  const candidates = getVisibleTasks().filter(
+    (task) => task.assignee.id === actor.id && task.status === "in_progress",
+  );
+  for (const task of candidates) {
+    const result = await executeTodo(
+      {
+        action: "update",
+        id: task.id,
+        status: "completed",
+        summary: `Agent @${actor.label} finished (auto-sealed by teammate:complete)`,
+      },
+      ctx,
+      ROOT_TODO_ACTOR,
+    );
+    if (!result.isError) sealed.push(task.id);
+  }
+  return { sealed };
+}
+
 async function executeTodoAction(
   input: TodoParamsInput,
   ctx: ExtensionContext,

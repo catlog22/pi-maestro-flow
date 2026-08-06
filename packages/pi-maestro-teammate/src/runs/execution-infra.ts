@@ -74,6 +74,14 @@ export interface TeammateTaskSpec {
    * ignores the value.
    */
   background?: boolean;
+  /**
+   * Optional Todo task id(s) bound to this agent, in priority order (first =
+   * highest). On start the host re-assigns each task's assignee to the agent,
+   * auto-activates the first runnable one, and injects the ordered list as a
+   * managed fragment. `"12"`, `"#12"`, or an ordered array like
+   * `["#1", "#2"]` are accepted.
+   */
+  todo?: string | string[];
 }
 
 export interface RunTeammateParams {
@@ -115,6 +123,8 @@ export interface RunSingleTeammateParams {
   cwd?: string;
   timeoutMs?: number;
   outputSchema?: Record<string, unknown>;
+  /** Todo task ids bound to this agent; injected into the child system prompt. */
+  todos?: string[];
 }
 
 export interface RunTeammateOptions {
@@ -223,6 +233,8 @@ export interface NormalizedTask {
   timeoutMs?: number;
   /** Effective nesting budget: task value ?? top-level value (undefined = ceiling). */
   maxNestingDepth?: number;
+  /** Optional Todo task ids bound to this agent (see TeammateTaskSpec.todo). */
+  todos?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -828,6 +840,25 @@ export function inferGraphMode(
 
 // ---------------------------------------------------------------------------
 // Unified param normalization (shared by tool execute and child proxy paths)
+
+/**
+ * Normalize a `todo` binding (single id or ordered array) into a de-duplicated
+ * ordered id list. The array order is the priority order (first = highest).
+ */
+export function normalizeTodoBindings(todo: string | string[] | undefined): string[] | undefined {
+  if (todo === undefined) return undefined;
+  const ids = Array.isArray(todo) ? todo : [todo];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const raw of ids) {
+    const id = String(raw).trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    result.push(id);
+  }
+  return result.length > 0 ? result : undefined;
+}
+
 // ---------------------------------------------------------------------------
 
 export interface NormalizeTeammateResult {
@@ -905,6 +936,7 @@ export function normalizeTeammateParams(
     outputSchema: task.outputSchema ?? params.outputSchema,
     timeoutMs: task.timeoutMs ?? params.timeoutMs,
     maxNestingDepth: task.maxNestingDepth ?? params.maxNestingDepth,
+    todos: normalizeTodoBindings(task.todo),
   }));
   const isMultiTask = normalized.length > 1;
 
@@ -1509,6 +1541,7 @@ export function writeSystemPromptFile(
   agentConfig: AgentConfig,
   correlationId: string,
   outputSchema?: Record<string, unknown>,
+  todos?: string[],
 ): string {
   const tmpDir = teammateTempRoot();
   ensurePrivateDirectory(tmpDir);
@@ -1516,7 +1549,10 @@ export function writeSystemPromptFile(
   const structuredOutputInstruction = outputSchema
     ? "\n\n## Required structured output\nYou must finish by calling the structured_output tool exactly once with a value that satisfies its JSON Schema. A prose-only final answer is invalid. Do not emit any answer after that tool call."
     : "";
-  writePrivateTextFile(promptFile, `${agentConfig.systemPrompt}${structuredOutputInstruction}`);
+  const todoInstruction = todos && todos.length > 0
+    ? `\n\n## Assigned Todo tasks\nYour assigned Todo tasks, in priority order (you manage them yourself): ${todos.map((id) => `#${id.replace(/^#/, "")}`).join(", ")}.\nThe first runnable task is already active (status=in_progress) — work on it first without calling \`todo next\`. Use \`todo list\` to see their current states.\nFinish each task with \`todo update <id> status=completed summary=<one-line result>\`, then activate the next one with \`todo update <id> status=in_progress\` and continue in order.\nIf a task is blocked by a dependency or you cannot complete it, leave it pending and explain why in your final answer.`
+    : "";
+  writePrivateTextFile(promptFile, `${agentConfig.systemPrompt}${structuredOutputInstruction}${todoInstruction}`);
   return promptFile;
 }
 

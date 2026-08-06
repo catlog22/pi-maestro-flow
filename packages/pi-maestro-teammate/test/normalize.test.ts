@@ -304,3 +304,18 @@ test("per-task maxNestingDepth validates the same 0..ceiling range", () => {
   const named = normalizeTeammateParams({ tasks: [{ name: "deep", prompt: "inspect", maxNestingDepth: 3 }] });
   assert.match(named.error ?? "", /tasks\[0\] "deep" maxNestingDepth/);
 });
+
+test("task-level todo binding survives normalization (single id and ordered array)", () => {
+  const single = normalizeTeammateParams({ tasks: [{ prompt: "build", todo: "#12" }] });
+  assert.equal(single.error, undefined);
+  assert.deepEqual(single.tasks[0].todos, ["#12"]);
+
+  const ordered = normalizeTeammateParams({
+    tasks: [{ prompt: "multi", todo: ["#1", "#2", "#1", " "] }],
+  });
+  assert.equal(ordered.error, undefined);
+  assert.deepEqual(ordered.tasks[0].todos, ["#1", "#2"], "array order preserved, blanks and duplicates dropped");
+
+  const omitted = normalizeTeammateParams({ tasks: [{ prompt: "plain" }] });
+  assert.equal(omitted.tasks[0].todos, undefined);
+});

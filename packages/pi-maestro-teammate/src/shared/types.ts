@@ -208,6 +208,12 @@ export interface ActiveAgent {
   resolvedModel?: string;
   attemptedModels?: string[];
   /**
+   * Optional Todo task ids bound to this agent at dispatch time (priority
+   * order); emitted with `teammate:started` so the host can auto-delegate the
+   * tasks' assignee and activate the first runnable one.
+   */
+  todos?: string[];
+  /**
    * When this agent failed. Set alongside `status: "failed"`, mirroring
    * `sleptAt` for retired agents, and read by the retention sweep that
    * eventually removes the tombstone.

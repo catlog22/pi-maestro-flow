@@ -8,6 +8,9 @@ import type { Skill } from "@earendil-works/pi-coding-agent";
 import { TodoSkillLoader } from "../src/skills/skill-loader.ts";
 import {
   executeTodo,
+  delegateTodoTaskToAgent,
+  delegateTodoTasksToAgent,
+  sealTodoTasksOnAgentComplete,
   getTodoCompactionSnapshot,
   getVisibleTasks,
   initTodo,
@@ -2057,6 +2060,360 @@ test("todo list errors on unknown member selectors instead of silently returning
     const unknown = await executeTodo({ action: "list", filter: { memberId: "ghost" } }, ctx);
     assert.equal((unknown as { isError?: boolean }).isError, true);
     assert.match((unknown.content[0] as { text: string }).text, /Unknown Todo member selector/);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo delegation re-assigns a bound task to the started agent so it can drive its own status", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-delegate-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  const ant: TodoActorRef = { kind: "teammate", id: "ant-1", label: "ant-1" };
+
+  try {
+    await executeTodo({ action: "create", subject: "Ant task" }, ctx);
+    const task = getVisibleTasks()[0];
+    assert.equal(task.assignee.id, "root", "batch-created tasks default to root");
+
+    const delegated = await delegateTodoTaskToAgent(task.id, ant, ctx);
+    assert.equal((delegated as { isError?: boolean }).isError, undefined);
+    assert.equal(getVisibleTasks()[0].assignee.id, "ant-1", "actor changes from root to the agent");
+    // Auto-activation: the delegated task is already in_progress.
+    assert.equal(getVisibleTasks()[0].status, "in_progress", "delegation auto-activates the task");
+
+    // Idempotent: re-delegating the same task to the same agent is a no-op.
+    const again = await delegateTodoTaskToAgent(`#${task.id}`, ant, ctx);
+    assert.equal((again as { isError?: boolean }).isError, undefined);
+    assert.match((again.content[0] as { text: string }).text, /already assigned/);
+
+    // The agent drives the already-active task directly (no next needed).
+    const antDone = await executeTodo({ action: "update", id: task.id, status: "completed", summary: "done by ant" }, ctx, ant);
+    assert.equal((antDone as { isError?: boolean }).isError, undefined);
+    assert.equal(getVisibleTasks()[0].status, "completed");
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo delegation rejects unknown or deleted tasks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-delegate-err-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  const ant: TodoActorRef = { kind: "teammate", id: "ant-2", label: "ant-2" };
+
+  try {
+    const missing = await delegateTodoTaskToAgent("#999", ant, ctx);
+    assert.equal((missing as { isError?: boolean }).isError, true);
+    assert.match((missing.content[0] as { text: string }).text, /unknown task/);
+
+    const empty = await delegateTodoTaskToAgent("   ", ant, ctx);
+    assert.equal((empty as { isError?: boolean }).isError, true);
+    assert.match((empty.content[0] as { text: string }).text, /empty task id/);
+
+    await executeTodo({ action: "create", subject: "Doomed" }, ctx);
+    const doomed = getVisibleTasks()[0];
+    await executeTodo({ action: "update", id: doomed.id, status: "deleted" }, ctx);
+    const deleted = await delegateTodoTaskToAgent(doomed.id, ant, ctx);
+    assert.equal((deleted as { isError?: boolean }).isError, true);
+    assert.match((deleted.content[0] as { text: string }).text, /unknown task/);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo auto-seals an agent's in_progress task on clean completion", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-seal-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  const ant: TodoActorRef = { kind: "teammate", id: "ant-seal", label: "ant-seal" };
+
+  try {
+    await executeTodo({ action: "create", subject: "Seal me" }, ctx);
+    const task = getVisibleTasks()[0];
+    // Delegation auto-activates the task, so it is already in_progress.
+    await delegateTodoTaskToAgent(task.id, ant, ctx);
+    assert.equal(getVisibleTasks()[0].status, "in_progress");
+
+    const sealed = await sealTodoTasksOnAgentComplete(ant, 0, false, ctx);
+    assert.deepEqual(sealed.sealed, [task.id]);
+    const after = getVisibleTasks()[0];
+    assert.equal(after.status, "completed");
+    assert.match(after.summary ?? "", /auto-sealed by teammate:complete/);
+
+    // Idempotent: a second clean-complete event seals nothing new.
+    const again = await sealTodoTasksOnAgentComplete(ant, 0, false, ctx);
+    assert.deepEqual(again.sealed, []);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo auto-seal leaves pending tasks and failed/cancelled runs untouched", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-seal-skip-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  const ant: TodoActorRef = { kind: "teammate", id: "ant-skip", label: "ant-skip" };
+
+  try {
+    // A task the agent created but never activated stays pending: seal skips it.
+    await executeTodo({ action: "create", subject: "Untouched" }, ctx, ant);
+    const untouched = getVisibleTasks()[0];
+    assert.equal(untouched.status, "pending");
+    const cleanPending = await sealTodoTasksOnAgentComplete(ant, 0, false, ctx);
+    assert.deepEqual(cleanPending.sealed, []);
+    assert.equal(getVisibleTasks()[0].status, "pending");
+
+    // A delegated (auto-activated) task on a failed exit: stays in_progress.
+    await executeTodo({ action: "create", subject: "Doomed" }, ctx);
+    const doomed = getVisibleTasks()[1];
+    await delegateTodoTaskToAgent(doomed.id, ant, ctx);
+    assert.equal(getVisibleTasks()[1].status, "in_progress");
+    const failed = await sealTodoTasksOnAgentComplete(ant, 1, false, ctx);
+    assert.deepEqual(failed.sealed, []);
+    assert.equal(getVisibleTasks()[1].status, "in_progress");
+
+    // Cancelled exit: stays in_progress.
+    const cancelled = await sealTodoTasksOnAgentComplete(ant, 0, true, ctx);
+    assert.deepEqual(cancelled.sealed, []);
+    assert.equal(getVisibleTasks()[1].status, "in_progress");
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo delegation to a second agent overrides the first; each agent keeps one in_progress", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-redelegate-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  const antA: TodoActorRef = { kind: "teammate", id: "ant-a", label: "ant-a" };
+  const antB: TodoActorRef = { kind: "teammate", id: "ant-b", label: "ant-b" };
+
+  try {
+    await executeTodo({ action: "create", subject: "Hot potato" }, ctx);
+    const task = getVisibleTasks()[0];
+
+    await delegateTodoTaskToAgent(task.id, antA, ctx);
+    assert.equal(getVisibleTasks()[0].assignee.id, "ant-a");
+    assert.equal(getVisibleTasks()[0].status, "in_progress", "first delegation auto-activates");
+
+    // A second agent binds the same task: the later delegation wins (explicit root intent).
+    await delegateTodoTaskToAgent(task.id, antB, ctx);
+    assert.equal(getVisibleTasks()[0].assignee.id, "ant-b");
+    assert.equal(getVisibleTasks()[0].status, "in_progress", "already-active task keeps its state");
+
+    // antB owns and drives the active task directly; antA now has nothing assigned.
+    const bDone = await executeTodo({ action: "update", id: task.id, status: "completed", summary: "done by ant-b" }, ctx, antB);
+    assert.equal((bDone as { isError?: boolean }).isError, undefined);
+    assert.equal(getVisibleTasks()[0].status, "completed");
+
+    const aNext = await executeTodo({ action: "next" }, ctx, antA);
+    assert.match((aNext.content[0] as { text: string }).text, /All tasks completed or no tasks exist/);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("delegating while the agent already holds an in_progress task leaves the new task pending", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-delegate-occupied-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  const ant: TodoActorRef = { kind: "teammate", id: "ant-busy", label: "ant-busy" };
+
+  try {
+    // The agent creates and activates its own task first.
+    await executeTodo({ action: "create", subject: "Already working" }, ctx, ant);
+    const own = getVisibleTasks()[0];
+    await executeTodo({ action: "next" }, ctx, ant);
+    assert.equal(getVisibleTasks()[0].status, "in_progress");
+
+    // Root delegates a second task to the same busy agent: assignee moves but
+    // the task stays pending — the one-in_progress-per-actor guard must not
+    // be violated by delegation itself.
+    await executeTodo({ action: "create", subject: "Next up" }, ctx);
+    const second = getVisibleTasks()[1];
+    await delegateTodoTaskToAgent(second.id, ant, ctx);
+    assert.equal(getVisibleTasks()[1].assignee.id, "ant-busy");
+    assert.equal(getVisibleTasks()[1].status, "pending");
+
+    // next refuses until the first task is done.
+    const denied = await executeTodo({ action: "next" }, ctx, ant);
+    assert.equal((denied as { isError?: boolean }).isError, true);
+    assert.match((denied.content[0] as { text: string }).text, /already in progress/);
+
+    // After sealing the first task, next activates the delegated one.
+    await sealTodoTasksOnAgentComplete(ant, 0, false, ctx);
+    const promoted = await executeTodo({ action: "next" }, ctx, ant);
+    assert.equal((promoted as { isError?: boolean }).isError, undefined);
+    assert.equal(getVisibleTasks()[1].status, "in_progress");
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo delegation is DAG-aware: blocked tasks delegate with dependency info and auto-unblock", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-dag-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  const antUp: TodoActorRef = { kind: "teammate", id: "ant-up", label: "ant-up" };
+  const antDown: TodoActorRef = { kind: "teammate", id: "ant-down", label: "ant-down" };
+
+  try {
+    await executeTodo({
+      action: "create",
+      tasks: [
+        { subject: "Upstream" },
+        { subject: "Downstream", blockedBy: [0] },
+      ],
+    }, ctx);
+    const [upstream, downstream] = getVisibleTasks();
+    assert.equal(downstream.status, "blocked");
+
+    // Delegating a blocked task still moves the assignee and names the deps.
+    const delegated = await delegateTodoTaskToAgent(downstream.id, antDown, ctx);
+    assert.equal((delegated as { isError?: boolean }).isError, undefined);
+    assert.match((delegated.content[0] as { text: string }).text, /blocked by #0/);
+    assert.equal(getVisibleTasks()[1].assignee.id, "ant-down");
+    assert.equal(getVisibleTasks()[1].status, "blocked");
+
+    // The downstream agent cannot pull it while gated.
+    const deadlock = await executeTodo({ action: "next" }, ctx, antDown);
+    assert.equal((deadlock as { isError?: boolean }).isError, true);
+    assert.match((deadlock.content[0] as { text: string }).text, /Dependency deadlock/);
+
+    // Upstream completes → autoUnblock → downstream becomes runnable for its agent.
+    // Delegating the upstream auto-activates it (no next needed).
+    await delegateTodoTaskToAgent(upstream.id, antUp, ctx);
+    assert.equal(getVisibleTasks()[0].status, "in_progress");
+    await executeTodo({ action: "update", id: upstream.id, status: "completed" }, ctx, antUp);
+    assert.equal(getVisibleTasks()[1].status, "pending");
+
+    const pulled = await executeTodo({ action: "next" }, ctx, antDown);
+    assert.equal((pulled as { isError?: boolean }).isError, undefined);
+    assert.equal(getVisibleTasks()[1].status, "in_progress");
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("multi-todo delegation activates the highest-priority runnable task and leaves the rest pending", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-multi-delegate-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  const ant: TodoActorRef = { kind: "teammate", id: "ant-multi", label: "ant-multi" };
+
+  try {
+    await executeTodo({
+      action: "create",
+      tasks: [
+        { subject: "First" },
+        { subject: "Second" },
+        { subject: "Third" },
+      ],
+    }, ctx);
+    const ids = getVisibleTasks().map((task) => task.id);
+
+    // Priority order is the array order: first binding wins activation.
+    const result = await delegateTodoTasksToAgent([`#${ids[2]}`, ids[0], `#${ids[1]}`], ant, ctx);
+    assert.deepEqual(result.delegated, [ids[2], ids[0], ids[1]]);
+    assert.deepEqual(result.activated, [ids[2]], "highest-priority binding is activated");
+    assert.deepEqual(result.errors, []);
+
+    const states = Object.fromEntries(getVisibleTasks().map((task) => [task.id, task.status]));
+    assert.equal(states[ids[2]], "in_progress");
+    assert.equal(states[ids[0]], "pending");
+    assert.equal(states[ids[1]], "pending");
+    assert.ok(getVisibleTasks().every((task) => task.assignee.id === "ant-multi"));
+
+    // Agent completes the active one, then next promotes the next pending in creation order.
+    await executeTodo({ action: "update", id: ids[2], status: "completed" }, ctx, ant);
+    const next = await executeTodo({ action: "next" }, ctx, ant);
+    assert.equal((next as { isError?: boolean }).isError, undefined);
+    const remaining = getVisibleTasks().filter((task) => task.status === "in_progress");
+    assert.equal(remaining.length, 1);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("multi-todo delegation skips blocked bindings when choosing what to activate", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-multi-dag-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  const ant: TodoActorRef = { kind: "teammate", id: "ant-dag", label: "ant-dag" };
+
+  try {
+    await executeTodo({
+      action: "create",
+      tasks: [
+        { subject: "Gate" },
+        { subject: "Gated" },
+        { subject: "Runnable" },
+      ],
+    }, ctx);
+    const [gate, gated, runnable] = getVisibleTasks();
+    await executeTodo({ action: "update", id: gated.id, blockedBy: [gate.id] }, ctx);
+
+    // Priority: gated (blocked) first, runnable second → activation falls to runnable.
+    const result = await delegateTodoTasksToAgent([gated.id, runnable.id], ant, ctx);
+    assert.deepEqual(result.delegated, [gated.id, runnable.id]);
+    assert.deepEqual(result.activated, [runnable.id], "blocked binding is skipped for activation");
+    assert.equal(getVisibleTasks()[1].status, "blocked");
+    assert.equal(getVisibleTasks()[2].status, "in_progress");
   } finally {
     onSessionShutdown(todoContext);
     await rm(root, { recursive: true, force: true });

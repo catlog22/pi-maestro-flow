@@ -125,6 +125,15 @@ export const TaskSpec = Type.Object({
         "Not supported per task — background is a dispatch-level setting controlled by the top-level background flag (default: false). A per-task value is ignored with a warning; move it to the top level instead.",
     }),
   ),
+  todo: Type.Optional(
+    Type.Union([
+      Type.String({ minLength: 1 }),
+      Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
+    ], {
+      description:
+        "Optional Todo task id(s) bound to this agent, in priority order (first = highest). On start the host re-assigns each task's assignee to this agent (actor changes from root to the agent), auto-activates the first runnable one, and injects the whole list as a managed fragment. Accepts `\"12\"`, `\"#12\"`, or an ordered array like `[\"#1\", \"#2\"]`.",
+    }),
+  ),
   maxNestingDepth: Type.Optional(
     Type.Integer({
       // Bound must match MAX_DEFAULT_DEPTH in runs/execution-infra.ts; the

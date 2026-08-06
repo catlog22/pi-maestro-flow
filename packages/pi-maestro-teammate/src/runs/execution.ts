@@ -713,7 +713,7 @@ async function runSingleAttempt(
 ): Promise<SingleResult> {
   const effectiveContext = params.context ?? agentConfig.defaultContext;
   const wakeable = effectiveContext !== "fork";
-  const systemPromptFile = writeSystemPromptFile(agentConfig, correlationId, params.outputSchema);
+  const systemPromptFile = writeSystemPromptFile(agentConfig, correlationId, params.outputSchema, params.todos);
   const { sessionDir, resumeSessionFile, forkSessionFile, forkWarning } =
     resolveAttemptSessionContext(params, agentConfig, correlationId, options);
 
@@ -2206,6 +2206,7 @@ export async function runGraph(
           thinking: task.thinking,
           cwd: task.cwd,
           outputSchema: task.outputSchema,
+          todos: task.todos,
         },
         {
           ...options,

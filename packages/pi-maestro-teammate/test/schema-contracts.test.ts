@@ -37,6 +37,14 @@ test("schema maxNestingDepth maximum stays in sync with MAX_DEFAULT_DEPTH", () =
   assert.equal(task.minimum, 0);
 });
 
+test("schema accepts an optional per-task todo binding and rejects non-string values", () => {
+  assert.equal(Check(TeammateParams, { tasks: [{ prompt: "work", todo: "#12" }] }), true);
+  assert.equal(Check(TeammateParams, { tasks: [{ prompt: "work", todo: "7" }] }), true);
+  assert.equal(Check(TeammateParams, { tasks: [{ prompt: "work" }] }), true);
+  assert.equal(Check(TeammateParams, { tasks: [{ prompt: "work", todo: "" }] }), false);
+  assert.equal(Check(TeammateParams, { tasks: [{ prompt: "work", todo: 12 }] }), false);
+});
+
 // ---------------------------------------------------------------------------
 // teammate-send message contract (P1/B4): message required unless mode is
 // explicitly "abort"; a missing mode defaults to follow_up and still demands
