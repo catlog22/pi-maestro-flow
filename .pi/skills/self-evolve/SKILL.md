@@ -101,11 +101,13 @@ maestro session done <run-id> --verdict done|done-with-concerns|needs-retry|bloc
 - verdict 诚实选择：`done`（干净）或 `done-with-concerns`（有 caveat，全部列入 concerns）。
 - seal 后 run 不可变（拒绝 sidecar 写入）；frontmatter decisions/constraints 自动物化为 spec 候选。
 
-#### Step 4 — session seal 前 review --resolve（人工裁决台）
+#### Step 4 — session seal 前 review --resolve（人工裁决台，呈现协议）
 ```bash
 maestro knowledge review <session-id> [--refresh] [--json]
 maestro knowledge review <session-id> --resolve <candidate-id> --as duplicate|related|conflict|supersede|unique [--target <knowledge-id>] --reason "<非空理由>"
 ```
+**呈现协议（铁律）**：裁决环节 agent 自己跑 `review --json`，逐条向用户呈现：标题、类型与来源（run/session）、内容摘要、evidence 锚点、证据支撑的既有匹配（id+标题）、**推荐处置（五选一 + target）与一行理由**；收集用户逐条决策（或批量采纳推荐）后再执行 `--resolve`。用户只决策，agent 负责读取/呈现/执行——**禁止把 review 命令甩给用户当全部任务**。`-y` 自动裁决仅限验证过明确独立的候选（`--as unique`）。
+
 - `--as unique` 时**不得传 `--target`**；duplicate/related/conflict/supersede 必须传 `--target`，且 target 必须来自该候选 evidence-backed match。
 - 5 种处置：duplicate / related / conflict / supersede / unique。supersede 要求候选与 target 同 knowledge store。
 - exact_duplicate 自动 suppressed（无需 resolve）；semantic_duplicate/conflict/supersession 必须 resolve，否则 **promote fail-closed**。

@@ -61,6 +61,7 @@ Note: maestro-next suggests session-seal when 'Tests green + active session'. Th
 ### Step 2: Knowledge Reconciliation
 
 1. Run `maestro knowledge review {session_id} --json`. Treat its Run/Session ledgers, reconciliation policies, diversified matches, and candidate IDs as authoritative; do not rescan outputs to recreate candidates. Use `--refresh` only when the review reports missing or stale source receipts (session seal refreshes the session receipt automatically on a best-effort basis).
+   Review Presentation Protocol: present each candidate needing disposition to the user (title, content summary, evidence anchors, evidence-backed matches, recommended disposition + one-line rationale), collect the user's decisions, then execute the `--resolve` commands yourself. Never hand the user the raw review command as the whole task.
 2. Explain signal semantics when relevant: search/injection is exposure only; explicit loads are consumed; `cited`, `validated`, and `contradicted` are explicit Run relations.
 3. Report exact/semantic duplicates, related/extends candidates, potential conflicts, supersession candidates, missing receipts, and promotion eligibility separately. Exact duplicates are suppressed automatically; unresolved `review_required` candidates cannot be promoted.
 4. If `--skip-knowledge`, report the pending/promoting/review-required/suppressed counts and continue. The backlog and reconciliation receipts remain durable after seal.
