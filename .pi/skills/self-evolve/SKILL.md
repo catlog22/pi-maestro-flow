@@ -63,9 +63,9 @@ session done（seal 事务：自动 stage frontmatter 草拟 + 自动抑制 exac
    ▼
 session seal 前：knowledge review --resolve（人工裁决 review_required）
    ▼
-promote（fail-closed 硬门，见下方阻断语义）→ 用户确认后执行
+promote（fail-closed 硬门，见下方阻断语义）→ 用户确认后执行；run 源候选 run seal 后即可，session 源候选需等下方 session seal 完成（双源门禁）
    ▼
-session seal
+session seal（sealed 后 session 源候选方可晋升；seal 自动 best-effort 刷 session receipt）
    ▼
 未来 run：maestro search 命中验证（索引器 mtime 增量感知）
 ```
@@ -87,7 +87,7 @@ maestro knowledge stage knowhow "<title>" --content-file <path|-> --run <run-id>
 maestro knowledge stage knowhow "<title>" --content-file <path|-> --session <session-id> --evidence "<file:line>,<artifact-ref>" [--category <cat>]
 ```
 - `--evidence` 建议必填（证据源可靠性：reconciliation receipt > report.md frontmatter > outputs/工件 file:line 锚点 > session 轨迹）。
-- **report.md frontmatter 契约（实测 zod schema，schemas.ts:565-584）**：`verdict` 必须 `ready|ready_with_concerns|blocked|failed`（**不是** `done`）；`decisions`/`constraints` 数组元素**必须带 `id`**（`{id, text, status}`，status 分别 ∈ proposed/accepted/rejected 与 locked/open/deferred）。CLI `maestro session done --verdict` 接受 `done|done-with-concerns|needs-retry|blocked` 并内部映射——**两者别混**（e2e 实测：frontmatter 写 `verdict: done` 或缺 `id` → seal 校验失败、候选零草拟）。
+- **report.md frontmatter 契约（实测 zod schema，schemas.ts:565-616）**：`verdict` 规范词表 `ready|ready_with_concerns|blocked|failed`（**建议写规范词**）；chain 词 `done|done-with-concerns|needs-retry` 也被接受并自动映射（done→ready、done-with-concerns→ready_with_concerns、needs-retry→failed，reportVerdictSchema preprocess）——写 `verdict: done` **不再**校验失败，但仍应写规范词避免歧义。`decisions`/`constraints` 元素为 `{text, status}`，status 分别 ∈ proposed/accepted/rejected 与 locked/open/deferred；**`id` 可省，runtime 自动盖章 `C-001`/`D-001`…，不要手写**（手写不报错但无必要）。CLI `maestro session done --verdict` 接受 `done|done-with-concerns|needs-retry|blocked` 并反向映射 ready 系别名——两表双向互通，不再是 seal 失败源。
 - **防噪音候选（铁律）**：seal 会把每条 accepted decision / locked constraint 自动草拟成语料候选，因此 frontmatter **只写可复用的规定性决策/约束**（未来工作必须遵守的规则）。严禁写运行状态叙述：只读声明（“Read-only audit…”“Debug investigation remained read-only”）、worktree/审计过程观察（“working tree changed concurrently”）、文件缺失记录、issue 路由备忘——这些是存量分诊实测确认的主要噪音源。
 - 归因（不产生候选，仅记账）：`maestro knowledge record <ids...> --signal consumed|cited|validated|contradicted --source search|load|manual [--run <run-id> | --session <session-id> | --channel <name>] [--allow-unknown]`。搜索/注入是 exposure，load 才算 consumed；load 归因三级路由（唯一活跃 run → 无歧义 Session 身份 → 全局账本+warning）不阻塞加载。ID 写入前经 wiki 索引校验，未知 ID 默认拒收，`--allow-unknown` 降级记账留痕。
 - `--signal-ids` 用逗号分隔（`--signal-ids spec:project:a,knowhow:b`）；空格分隔会泄漏进位置参数。
