@@ -790,11 +790,12 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
 
       if (cmd === "panel") {
         const panelView = await buildPanelView(ctx);
-        await ctx.ui.custom<void>((tui, _theme, _keybindings, done) => {
+        await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
           const overlay = new SelfEvolveOverlay({
             view: panelView,
             requestRender: () => tui.requestRender(),
             close: () => done(undefined),
+            theme,
             onAction: async (action) => {
               if (action === "close") {
                 done(undefined);
