@@ -249,6 +249,10 @@ import {
   createSmartSearchSettingsProvider,
   registerSmartSearchSettingsProvider,
 } from "../settings/smart-search-settings-provider.ts";
+import {
+  createVisionDelegationSettingsProvider,
+  registerVisionDelegationSettingsProvider,
+} from "../settings/vision-delegation-provider.ts";
 
 interface MaestroState {
   baseCwd: string;
@@ -2784,6 +2788,17 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     smartSearchSettingsDisposer?.();
     smartSearchSettingsDisposer = undefined;
   };
+
+  const visionDelegationSettingsProvider = createVisionDelegationSettingsProvider({});
+  let visionDelegationSettingsDisposer: (() => void) | undefined;
+  const registerVisionDelegationSettings = (): void => {
+    if (visionDelegationSettingsDisposer) return;
+    visionDelegationSettingsDisposer = registerVisionDelegationSettingsProvider(pi.events, visionDelegationSettingsProvider);
+  };
+  const disposeVisionDelegationSettings = (): void => {
+    visionDelegationSettingsDisposer?.();
+    visionDelegationSettingsDisposer = undefined;
+  };
   pi.on("session_start", (_event, ctx) => {
     flowSettingsContext = ctx;
     registerFlowSettings();
@@ -2791,6 +2806,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     registerMcpSettings();
     registerSkillsSettings();
     registerSmartSearchSettings();
+    registerVisionDelegationSettings();
   });
   pi.on("session_shutdown", (_event, ctx) => {
     if (flowSettingsContext === ctx) flowSettingsContext = undefined;
@@ -2799,6 +2815,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     disposeMcpSettings();
     disposeSkillsSettings();
     disposeSmartSearchSettings();
+    disposeVisionDelegationSettings();
   });
 
   const teammatePermissionBroker: TeammatePermissionBroker = async (call, ctx) => {
