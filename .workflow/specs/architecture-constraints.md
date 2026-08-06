@@ -338,3 +338,252 @@ graph task 与 graph 容器共享 AbortController 时，task 的自然成功、n
 
 
 
+
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260731-119aac78bd6819c0" title="Treat spill-retry prefix mutation, dead spill restoration, and shutdown tombstoning as the primary confirmed finding clu" description="Promoted from run:20260731-001-team-swarm, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004, artifact:ART-001-005, artifact:ART-001-006, artifact:ART-001-007, artifact:ART-001-008, artifact:ART-001-009, artifact:ART-001-010, artifact:ART-001-011, artifact:ART-001-012, artifact:ART-001-013, artifact:ART-001-014, artifact:ART-001-015, artifact:ART-001-016" source="session:20260731-team-swarm-cache-hit-audit:KDC-119aac78bd6819c0">
+
+### Treat spill-retry prefix mutation, dead spill restoration, and shutdown tombstoning as the primary confirmed finding clu
+
+Treat spill-retry prefix mutation, dead spill restoration, and shutdown tombstoning as the primary confirmed finding cluster.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260731-510f3266859dfbee" title="Scope web-config invalidation to memoized provider credentials/routing; SSRF/domain-policy loaders remain live reads." description="Promoted from run:20260731-001-team-swarm, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004, artifact:ART-001-005, artifact:ART-001-006, artifact:ART-001-007, artifact:ART-001-008, artifact:ART-001-009, artifact:ART-001-010, artifact:ART-001-011, artifact:ART-001-012, artifact:ART-001-013, artifact:ART-001-014, artifact:ART-001-015, artifact:ART-001-016" source="session:20260731-team-swarm-cache-hit-audit:KDC-510f3266859dfbee">
+
+### Scope web-config invalidation to memoized provider credentials/routing; SSRF/domain-policy loaders remain live reads.
+
+Scope web-config invalidation to memoized provider credentials/routing; SSRF/domain-policy loaders remain live reads.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,constraint" date="2026-08-06" sid="S-20260731-8c29a8220aaa1483" title="ACO script owns selection, update, scoring, and convergence." description="Promoted from run:20260731-001-team-swarm, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004, artifact:ART-001-005, artifact:ART-001-006, artifact:ART-001-007, artifact:ART-001-008, artifact:ART-001-009, artifact:ART-001-010, artifact:ART-001-011, artifact:ART-001-012, artifact:ART-001-013, artifact:ART-001-014, artifact:ART-001-015, artifact:ART-001-016" source="session:20260731-team-swarm-cache-hit-audit:KDC-8c29a8220aaa1483">
+
+### ACO script owns selection, update, scoring, and convergence.
+
+ACO script owns selection, update, scoring, and convergence.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260731-e8458fc50528ec35" title="Implement in dependency order: freeze retry replacement bytes; validate/downgrade restored resources; then preserve mani" description="Promoted from run:20260731-001-team-swarm, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004, artifact:ART-001-005, artifact:ART-001-006, artifact:ART-001-007, artifact:ART-001-008, artifact:ART-001-009, artifact:ART-001-010, artifact:ART-001-011, artifact:ART-001-012, artifact:ART-001-013, artifact:ART-001-014, artifact:ART-001-015, artifact:ART-001-016" source="session:20260731-team-swarm-cache-hit-audit:KDC-e8458fc50528ec35">
+
+### Implement in dependency order: freeze retry replacement bytes; validate/downgrade restored resources; then preserve mani
+
+Implement in dependency order: freeze retry replacement bytes; validate/downgrade restored resources; then preserve manifests across normal shutdown.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,constraint" date="2026-08-06" sid="S-20260801-368fbefa12e38825" title="aco.py encoding 补丁属 swarm 基础设施（trails 读 UTF-8），非审查对象" description="Promoted from run:20260801-001-team-swarm, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004, artifact:ART-001-005, artifact:ART-001-006, artifact:ART-001-007, artifact:ART-001-008, artifact:ART-001-009, artifact:ART-001-010, artifact:ART-001-011, artifact:ART-001-012, artifact:ART-001-013, artifact:ART-001-014, artifact:ART-001-015, artifact:ART-001-016" source="session:20260801-team-swarm-cockpit-review:KDC-368fbefa12e38825">
+
+### aco.py encoding 补丁属 swarm 基础设施（trails 读 UTF-8），非审查对象
+
+aco.py encoding 补丁属 swarm 基础设施（trails 读 UTF-8），非审查对象
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,constraint" date="2026-08-06" sid="S-20260801-4ebe7d05dde0106e" title="审查只读：未修改 pi-cockpit/pi-maestro-teammate 产品代码" description="Promoted from run:20260801-001-team-swarm, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004, artifact:ART-001-005, artifact:ART-001-006, artifact:ART-001-007, artifact:ART-001-008, artifact:ART-001-009, artifact:ART-001-010, artifact:ART-001-011, artifact:ART-001-012, artifact:ART-001-013, artifact:ART-001-014, artifact:ART-001-015, artifact:ART-001-016" source="session:20260801-team-swarm-cockpit-review:KDC-4ebe7d05dde0106e">
+
+### 审查只读：未修改 pi-cockpit/pi-maestro-teammate 产品代码
+
+审查只读：未修改 pi-cockpit/pi-maestro-teammate 产品代码
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260801-7605377bc750dc4e" title="analyst 子代理因 rate_limit 停滞被中止，best-solution.md 由 coordinator 直接综合（converge.md 失败回退路径）" description="Promoted from run:20260801-001-team-swarm, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004, artifact:ART-001-005, artifact:ART-001-006, artifact:ART-001-007, artifact:ART-001-008, artifact:ART-001-009, artifact:ART-001-010, artifact:ART-001-011, artifact:ART-001-012, artifact:ART-001-013, artifact:ART-001-014, artifact:ART-001-015, artifact:ART-001-016" source="session:20260801-team-swarm-cockpit-review:KDC-7605377bc750dc4e">
+
+### analyst 子代理因 rate_limit 停滞被中止，best-solution.md 由 coordinator 直接综合（converge.md 失败回退路径）
+
+analyst 子代理因 rate_limit 停滞被中止，best-solution.md 由 coordinator 直接综合（converge.md 失败回退路径）
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260801-a9cde0f0584232a9" title="ANT-1-4 工件 _meta 为空已修复（swarm-ant-result/1.0）；ANT-3-1 无工件未参与评分" description="Promoted from run:20260801-001-team-swarm, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004, artifact:ART-001-005, artifact:ART-001-006, artifact:ART-001-007, artifact:ART-001-008, artifact:ART-001-009, artifact:ART-001-010, artifact:ART-001-011, artifact:ART-001-012, artifact:ART-001-013, artifact:ART-001-014, artifact:ART-001-015, artifact:ART-001-016" source="session:20260801-team-swarm-cockpit-review:KDC-a9cde0f0584232a9">
+
+### ANT-1-4 工件 _meta 为空已修复（swarm-ant-result/1.0）；ANT-3-1 无工件未参与评分
+
+ANT-1-4 工件 _meta 为空已修复（swarm-ant-result/1.0）；ANT-3-1 无工件未参与评分
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260802-2d7f720204a93024" title="复用 pandoc 转换链路实现 Word/PDF" description="Promoted from run:20260802-001-odyssey-planex, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003" source="session:20260802-odyssey-planex-markdown-review-export:KDC-2d7f720204a93024">
+
+### 复用 pandoc 转换链路实现 Word/PDF
+
+复用 pandoc 转换链路实现 Word/PDF
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260802-afed0bd8ed2e6ea7" title="导出函数支持注入 spawn 以便行为测试" description="Promoted from run:20260802-001-odyssey-planex, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003" source="session:20260802-odyssey-planex-markdown-review-export:KDC-afed0bd8ed2e6ea7">
+
+### 导出函数支持注入 spawn 以便行为测试
+
+导出函数支持注入 spawn 以便行为测试
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260802-faf8faef1a514524" title="提取层保留 user 消息并多 turn 组装" description="Promoted from run:20260802-001-odyssey-planex, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003" source="session:20260802-odyssey-planex-markdown-review-export:KDC-faf8faef1a514524">
+
+### 提取层保留 user 消息并多 turn 组装
+
+提取层保留 user 消息并多 turn 组装
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260804-04a904e46fb1dff4" title="Applied completed-turn cancellation and error isolation to the teammate child surface." description="Promoted from run:20260804-001-odyssey-review, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004, artifact:ART-001-005" source="session:20260802-odyssey-review-compaction:KDC-04a904e46fb1dff4">
+
+### Applied completed-turn cancellation and error isolation to the teammate child surface.
+
+Applied completed-turn cancellation and error isolation to the teammate child surface.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,constraint" date="2026-08-06" sid="S-20260804-4bb29a5041329567" title="Native recovery is exhausted-only, has no queued work, remains arbiter-native/unowned, and uses a leading marker." description="Promoted from run:20260804-001-odyssey-review, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004, artifact:ART-001-005" source="session:20260802-odyssey-review-compaction:KDC-4bb29a5041329567">
+
+### Native recovery is exhausted-only, has no queued work, remains arbiter-native/unowned, and uses a leading marker.
+
+Native recovery is exhausted-only, has no queued work, remains arbiter-native/unowned, and uses a leading marker.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260804-98d39335d17bb885" title="Removed the tool-loop fast path because it violated the governing completed-turn preservation rule." description="Promoted from run:20260804-001-odyssey-review, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004, artifact:ART-001-005" source="session:20260802-odyssey-review-compaction:KDC-98d39335d17bb885">
+
+### Removed the tool-loop fast path because it violated the governing completed-turn preservation rule.
+
+Removed the tool-loop fast path because it violated the governing completed-turn preservation rule.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,constraint" date="2026-08-06" sid="S-20260804-d6a3d4192d6b438c" title="Normal non-exhausted completed turns defer/reassess compaction to preserve the transcript." description="Promoted from run:20260804-001-odyssey-review, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004, artifact:ART-001-005" source="session:20260802-odyssey-review-compaction:KDC-d6a3d4192d6b438c">
+
+### Normal non-exhausted completed turns defer/reassess compaction to preserve the transcript.
+
+Normal non-exhausted completed turns defer/reassess compaction to preserve the transcript.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,constraint" date="2026-08-06" sid="S-20260802-09b0cdae94fc2156" title="Preserve concurrent user-owned README.md, package.json, and embedding metadata changes." description="Promoted from run:20260802-001-odyssey-review, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004" source="session:20260802-odyssey-review-core-plugin:KDC-09b0cdae94fc2156">
+
+### Preserve concurrent user-owned README.md, package.json, and embedding metadata changes.
+
+Preserve concurrent user-owned README.md, package.json, and embedding metadata changes.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,constraint" date="2026-08-06" sid="S-20260802-2792e41e6b75c030" title="Do not promote staged knowledge automatically; promotion remains a separate governance action." description="Promoted from run:20260802-001-odyssey-review, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004" source="session:20260802-odyssey-review-core-plugin:KDC-2792e41e6b75c030">
+
+### Do not promote staged knowledge automatically; promotion remains a separate governance action.
+
+Do not promote staged knowledge automatically; promotion remains a separate governance action.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260802-5992008f0c57a4d5" title="ARCH-002 deferred: raw external Maestro CLI mutations require a CLI/core lease or expected-revision/CAS contract." description="Promoted from run:20260802-001-odyssey-review, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004" source="session:20260802-odyssey-review-core-plugin:KDC-5992008f0c57a4d5">
+
+### ARCH-002 deferred: raw external Maestro CLI mutations require a CLI/core lease or expected-revision/CAS contract.
+
+ARCH-002 deferred: raw external Maestro CLI mutations require a CLI/core lease or expected-revision/CAS contract.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260802-7f8086ae21efd5bf" title="MED-018 deferred: Firecrawl fresh scraping fails closed until the external deployment enforces target-network policy." description="Promoted from run:20260802-001-odyssey-review, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004" source="session:20260802-odyssey-review-core-plugin:KDC-7f8086ae21efd5bf">
+
+### MED-018 deferred: Firecrawl fresh scraping fails closed until the external deployment enforces target-network policy.
+
+MED-018 deferred: Firecrawl fresh scraping fails closed until the external deployment enforces target-network policy.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260802-d7ff82c54fef1a89" title="ARCH-005 deferred: removing wildcard source exports requires packed-consumer inventory and a versioned facade migration." description="Promoted from run:20260802-001-odyssey-review, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004" source="session:20260802-odyssey-review-core-plugin:KDC-d7ff82c54fef1a89">
+
+### ARCH-005 deferred: removing wildcard source exports requires packed-consumer inventory and a versioned facade migration.
+
+ARCH-005 deferred: removing wildcard source exports requires packed-consumer inventory and a versioned facade migration.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260801-66cf4dcb387e11e7" title="Prioritize canonical post-normalization dispatch parameters, then separate published result, terminal result, and proces" description="Promoted from run:20260801-001-team-swarm, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004, artifact:ART-001-005, artifact:ART-001-006, artifact:ART-001-007, artifact:ART-001-008, artifact:ART-001-009, artifact:ART-001-010, artifact:ART-001-011, artifact:ART-001-012" source="session:20260802-team-swarm-teammate-blocking:KDC-66cf4dcb387e11e7">
+
+### Prioritize canonical post-normalization dispatch parameters, then separate published result, terminal result, and proces
+
+Prioritize canonical post-normalization dispatch parameters, then separate published result, terminal result, and process-reclamation outcome.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260801-b05504f4bb7dd6e2" title="Treat result-ready as a valid consumable boundary; report only stale output, false terminal, ownership, and projection c" description="Promoted from run:20260801-001-team-swarm, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004, artifact:ART-001-005, artifact:ART-001-006, artifact:ART-001-007, artifact:ART-001-008, artifact:ART-001-009, artifact:ART-001-010, artifact:ART-001-011, artifact:ART-001-012" source="session:20260802-team-swarm-teammate-blocking:KDC-b05504f4bb7dd6e2">
+
+### Treat result-ready as a valid consumable boundary; report only stale output, false terminal, ownership, and projection c
+
+Treat result-ready as a valid consumable boundary; report only stale output, false terminal, ownership, and projection consequences.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260801-b7b4c9250ed11e77" title="Classify failed TERM/KILL acknowledgement as a structural risk, not a confirmed real OS orphan." description="Promoted from run:20260801-001-team-swarm, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004, artifact:ART-001-005, artifact:ART-001-006, artifact:ART-001-007, artifact:ART-001-008, artifact:ART-001-009, artifact:ART-001-010, artifact:ART-001-011, artifact:ART-001-012" source="session:20260802-team-swarm-teammate-blocking:KDC-b7b4c9250ed11e77">
+
+### Classify failed TERM/KILL acknowledgement as a structural risk, not a confirmed real OS orphan.
+
+Classify failed TERM/KILL acknowledgement as a structural risk, not a confirmed real OS orphan.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260805-2a576fc153bccfc9" title="Monitor ticks use a start-of-tick binding snapshot and exact owner revalidation after awaits." description="Promoted from run:20260805-001-odyssey-review, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004" source="session:20260804-odyssey-review-multi-agent:KDC-2a576fc153bccfc9">
+
+### Monitor ticks use a start-of-tick binding snapshot and exact owner revalidation after awaits.
+
+Monitor ticks use a start-of-tick binding snapshot and exact owner revalidation after awaits.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260805-54057244cc36dc04" title="Passive nested completion is valid only while both captured parent and current child session identities match." description="Promoted from run:20260805-001-odyssey-review, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004" source="session:20260804-odyssey-review-multi-agent:KDC-54057244cc36dc04">
+
+### Passive nested completion is valid only while both captured parent and current child session identities match.
+
+Passive nested completion is valid only while both captured parent and current child session identities match.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260805-bc5cedffcfc42ee5" title="Foreground controls must be established before deadline allocation or child work admission." description="Promoted from run:20260805-001-odyssey-review, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004" source="session:20260804-odyssey-review-multi-agent:KDC-bc5cedffcfc42ee5">
+
+### Foreground controls must be established before deadline allocation or child work admission.
+
+Foreground controls must be established before deadline allocation or child work admission.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260806-8c9b07cc5aa9d11e" title="Apply a fail-closed stable-function-identity guard to all four equivalent TUI wrapper entry points before attempting a b" description="Promoted from run:20260806-001-debug, artifact:ART-001-001, artifact:ART-001-002, artifact:ART-001-003, artifact:ART-001-004, artifact:ART-001-005" source="session:20260806-debug-pi-viewport-stack:KDC-8c9b07cc5aa9d11e">
+
+### Apply a fail-closed stable-function-identity guard to all four equivalent TUI wrapper entry points before attempting a b
+
+Apply a fail-closed stable-function-identity guard to all four equivalent TUI wrapper entry points before attempting a broader native-layout migration.
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260804-59f4c1d42750a01d" title="MailboxHost 绑定从激活期改为 session_start/session_compact 惰性绑定（baseCwd 在激活期为空，workspaceId 需真实 cwd 派生）" description="Promoted from run:20260804-001-learn, artifact:ART-001-001, artifact:ART-001-002" source="session:mailbox-multi-agent-review-hardening-20260804-100833:KDC-59f4c1d42750a01d">
+
+### MailboxHost 绑定从激活期改为 session_start/session_compact 惰性绑定（baseCwd 在激活期为空，workspaceId 需真实 cwd 派生）
+
+MailboxHost 绑定从激活期改为 session_start/session_compact 惰性绑定（baseCwd 在激活期为空，workspaceId 需真实 cwd 派生）
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260804-91eab191d89982c0" title="stop() 采用 drain 语义——排空已在途 dispatch 但不再发起新 claim（post-claim/post-accept 不中止在途工作，pre-claim 复验 #stopped）" description="Promoted from run:20260804-001-learn, artifact:ART-001-001, artifact:ART-001-002" source="session:mailbox-multi-agent-review-hardening-20260804-100833:KDC-91eab191d89982c0">
+
+### stop() 采用 drain 语义——排空已在途 dispatch 但不再发起新 claim（post-claim/post-accept 不中止在途工作，pre-claim 复验 #stopped）
+
+stop() 采用 drain 语义——排空已在途 dispatch 但不再发起新 claim（post-claim/post-accept 不中止在途工作，pre-claim 复验 #stopped）
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260804-d4b7afc6a20285f9" title="去重键改为 requestId ?? correlationId，无 requestId 不写 seen（messageId 每次新 UUID 使旧去重恒不命中且 seen 无界增长）" description="Promoted from run:20260804-001-learn, artifact:ART-001-001, artifact:ART-001-002" source="session:mailbox-multi-agent-review-hardening-20260804-100833:KDC-d4b7afc6a20285f9">
+
+### 去重键改为 requestId ?? correlationId，无 requestId 不写 seen（messageId 每次新 UUID 使旧去重恒不命中且 seen 无界增长）
+
+去重键改为 requestId ?? correlationId，无 requestId 不写 seen（messageId 每次新 UUID 使旧去重恒不命中且 seen 无界增长）
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-06" sid="S-20260804-d5e7b06f58b6bd17" title="accepted 状态机由 IPC ack 改为 dispatch 成功自动 apply（生产接线无 ack 通道，auto-apply 是唯一收敛路径；外部 IPC-ack 保留为幂等 API）" description="Promoted from run:20260804-001-learn, artifact:ART-001-001, artifact:ART-001-002" source="session:mailbox-multi-agent-review-hardening-20260804-100833:KDC-d5e7b06f58b6bd17">
+
+### accepted 状态机由 IPC ack 改为 dispatch 成功自动 apply（生产接线无 ack 通道，auto-apply 是唯一收敛路径；外部 IPC-ack 保留为幂等 API）
+
+accepted 状态机由 IPC ack 改为 dispatch 成功自动 apply（生产接线无 ack 通道，auto-apply 是唯一收敛路径；外部 IPC-ack 保留为幂等 API）
+
+</spec-entry>
