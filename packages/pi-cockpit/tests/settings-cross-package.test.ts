@@ -292,10 +292,10 @@ test("Teammate settings render task routing as ordered groups with management la
 		const fallbacks = inner.indexOf("Fallback models");
 		const thinking = inner.indexOf("Thinking level");
 		const management = inner.indexOf("— Management —");
-		const controlCenter = inner.indexOf("Open full Teammate control center");
+		const roles = inner.indexOf("Discovered roles");
 		assert.ok(analysis >= 0);
 		assert.ok(analysis < model && model < fallbacks && fallbacks < thinking, inner);
-		assert.ok(thinking < management && management < controlCenter, inner);
+		assert.ok(thinking < management && management < roles, inner);
 	} finally { rmSync(state.root, { recursive: true, force: true }); }
 });
 

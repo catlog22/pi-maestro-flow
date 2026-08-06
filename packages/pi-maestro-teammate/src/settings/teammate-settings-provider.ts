@@ -53,6 +53,7 @@ export interface TeammateSettingsProviderOptions {
   getProjectPath?: (cwd: string) => string;
   discoverTaskTypes?: (cwd: string) => readonly TeammateTaskType[];
   discoverRoles?: (cwd: string) => readonly string[];
+  discoverRoleSummaries?: (cwd: string) => { name: string; description: string }[];
   openLegacySettings?: () => Promise<void> | void;
 }
 
@@ -90,8 +91,9 @@ const BASE_CATALOGS = {
     "teammate.routing.model": "Primary model",
     "teammate.routing.fallbacks": "Fallback models",
     "teammate.routing.thinking": "Thinking level",
-    "teammate.routing.manage": "Open full Teammate control center",
-    "teammate.routing.manage.description": "Open the original Routing, Roles and Active Agents interface",
+    "teammate.roles": "Discovered roles",
+    "teammate.roles.description": "Read-only catalog of the discovered teammate roles.",
+    "teammate.roles.row": "Role",
     "routing.manage": "Management",
     "teammate.option.off": "Off",
     "teammate.option.minimal": "Minimal",
@@ -106,8 +108,9 @@ const BASE_CATALOGS = {
     "teammate.routing.model": "主模型",
     "teammate.routing.fallbacks": "回退模型",
     "teammate.routing.thinking": "思考强度",
-    "teammate.routing.manage": "打开完整 Teammate 控制中心",
-    "teammate.routing.manage.description": "进入原生 Routing、Roles 与 Active Agents 控制界面",
+    "teammate.roles": "发现角色",
+    "teammate.roles.description": "发现的 teammate 角色只读目录。",
+    "teammate.roles.row": "角色",
     "routing.manage": "管理",
     "teammate.option.off": "关闭",
     "teammate.option.minimal": "最小",
@@ -134,6 +137,7 @@ export function createTeammateSettingsProvider(options: TeammateSettingsProvider
   const getProjectPath = options.getProjectPath ?? getProjectModelRoutingPath;
   const taskTypes = options.discoverTaskTypes ?? ((cwd: string) => discoverRoutingTaskTypes(cwd));
   const roles = options.discoverRoles ?? ((cwd: string) => discoverAgents(cwd).map((agent) => agent.name));
+  const roleSummaries = options.discoverRoleSummaries ?? ((cwd: string) => discoverAgents(cwd).map((agent) => ({ name: agent.name, description: agent.description })));
   const prepared = new Map<string, PreparedRoutingChange>();
 
   return {
@@ -149,13 +153,13 @@ export function createTeammateSettingsProvider(options: TeammateSettingsProvider
         descriptionKey: "teammate.provider.description",
         order: 20,
         capabilities: { read: true, write: true, prepareCommit: true, rollback: "compensating", hotUpdate: true },
-        settings: definitions(types, roles(request.context.cwd)),
+        settings: definitions(types, roles(request.context.cwd), roleSummaries(request.context.cwd)),
         catalogs: catalogs(types, roles(request.context.cwd)),
       };
     },
     read: (request) => {
       const resources = readResources(request.context.cwd, getGlobalPath, getProjectPath);
-      return snapshot(resources, instanceId, taskTypes(request.context.cwd), roles(request.context.cwd));
+      return snapshot(resources, instanceId, taskTypes(request.context.cwd), roles(request.context.cwd), roleSummaries(request.context.cwd));
     },
     validate: (request) => {
       const resources = readResources(request.context.cwd, getGlobalPath, getProjectPath);
@@ -218,7 +222,7 @@ export function createTeammateSettingsProvider(options: TeammateSettingsProvider
       }
       state.committedRevisions = resources.map((entry) => entry.revision);
       return {
-        snapshot: snapshot(resources, instanceId, taskTypes(request.context.cwd), roles(request.context.cwd)),
+        snapshot: snapshot(resources, instanceId, taskTypes(request.context.cwd), roles(request.context.cwd), roleSummaries(request.context.cwd)),
         revisions: resources.map((entry) => entry.revision),
         changedKeys: state.changedKeys,
         activation: [{ boundary: "next-invocation", keys: state.changedKeys }],
@@ -246,7 +250,7 @@ export function createTeammateSettingsProvider(options: TeammateSettingsProvider
       );
       prepared.delete(request.prepareToken);
       const restored = readResources(request.context.cwd, getGlobalPath, getProjectPath);
-      return { rolledBack: true, snapshot: snapshot(restored, instanceId, taskTypes(request.context.cwd), roles(request.context.cwd)) };
+      return { rolledBack: true, snapshot: snapshot(restored, instanceId, taskTypes(request.context.cwd), roles(request.context.cwd), roleSummaries(request.context.cwd)) };
     },
     applyRuntime: (request) => {
       const state = [...prepared.values()].find((entry) => entry.transactionId === request.transactionId);
@@ -257,11 +261,7 @@ export function createTeammateSettingsProvider(options: TeammateSettingsProvider
         failed: [],
       };
     },
-    invokeAction: async (request) => {
-      if (request.actionId !== "teammate.routing.manage" || !options.openLegacySettings) return { handled: false };
-      await options.openLegacySettings();
-      return { handled: true, refresh: true };
-    },
+    invokeAction: async () => ({ handled: false }),
   };
 }
 
@@ -282,7 +282,7 @@ export function registerTeammateSettingsProvider(events: SettingsEventBus, provi
   return () => { if (typeof result === "function") result(); };
 }
 
-function definitions(taskTypes: readonly TeammateTaskType[], roles: readonly string[]): SettingDefinition[] {
+function definitions(taskTypes: readonly TeammateTaskType[], roles: readonly string[], summaries: readonly { name: string; description: string }[]): SettingDefinition[] {
   const settings = taskTypes.flatMap((taskType, index): SettingDefinition[] => [
     {
       key: settingKey(taskType, "model"),
@@ -366,17 +366,17 @@ function definitions(taskTypes: readonly TeammateTaskType[], roles: readonly str
     },
   ]));
   settings.push({
-    key: "routing.manage",
+    key: "teammate.roles",
     group: "routing.manage",
     order: Number.MAX_SAFE_INTEGER,
-    labelKey: "teammate.routing.manage",
-    descriptionKey: "teammate.routing.manage.description",
+    labelKey: "teammate.roles",
+    descriptionKey: "teammate.roles.description",
     scopes: ["project"],
     merge: "provider-defined",
     activation: "live",
     sensitivity: "private",
-    reversibility: "full",
-    editor: { kind: "action", actionId: "teammate.routing.manage" },
+    reversibility: "none",
+    editor: { kind: "overview" },
   });
   return settings;
 }
@@ -402,6 +402,7 @@ function snapshot(
   instanceId: string,
   taskTypes: readonly TeammateTaskType[],
   roles: readonly string[],
+  summaries: readonly { name: string; description: string }[],
 ): SettingsSnapshot {
   const configured: ConfiguredSettingValue[] = [];
   const effective: SettingsSnapshot["effective"]["values"][number][] = [];
@@ -482,7 +483,12 @@ function snapshot(
     }
   }
 
-  effective.push({ key: "routing.manage", value: "open", source: "runtime" });
+  const roleRows = summaries.map((summary) => ({
+    labelKey: "teammate.roles.row",
+    value: summary.description || summary.name,
+    status: "dim" as const,
+  }));
+  effective.push({ key: "teammate.roles", value: roleRows, source: "runtime" });
   return {
     providerId: PROVIDER_ID,
     providerInstanceId: instanceId,
