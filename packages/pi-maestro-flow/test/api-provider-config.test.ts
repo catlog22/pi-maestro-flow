@@ -36,6 +36,18 @@ import {
   saveApiRetrySettings,
   setApiProviderEnabled,
 } from "../src/providers/api-provider-config.ts";
+import {
+  applyCacheRetentionEnv,
+  loadAgentCacheRetention,
+  loadCacheRetentionSetting,
+  loadPromptCachePolicy,
+  promptCacheCompatFlags,
+  PROMPT_CACHE_POLICY_DEFAULT,
+  saveAgentCacheRetention,
+  saveCacheRetentionSetting,
+  savePromptCachePolicy,
+  supportsOpenAIPromptCacheOptions,
+} from "../src/providers/prompt-cache-policy.ts";
 
 function createEffortHarness(options: {
   modelsPath: string;
@@ -470,6 +482,236 @@ test("/api-manager manages retry from commands and the interactive menu", async 
     },
   });
   assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 5 });
+});
+
+test("prompt-cache detection gates on gpt-5.6 and later only", () => {
+  for (const supported of ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-chat-latest", "gpt-6", "gpt-6.1"]) {
+    assert.equal(supportsOpenAIPromptCacheOptions(supported), true, supported);
+  }
+  for (const unsupported of ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5", "gpt-4.1", "o3", "o4-mini", "deepseek-v4-flash", "qwen3.8-max-preview", "claude-opus-4-6", ""] as const) {
+    assert.equal(supportsOpenAIPromptCacheOptions(unsupported), false, unsupported);
+  }
+});
+
+test("prompt-cache policy maps to pi compat flags", () => {
+  assert.deepEqual(promptCacheCompatFlags("off", "gpt-5.6-sol"), { supportsExplicitPromptCacheMode: false, supportsLongCacheRetention: false });
+  assert.deepEqual(promptCacheCompatFlags("on", "gpt-5.5"), { supportsExplicitPromptCacheMode: true, supportsLongCacheRetention: true });
+  assert.deepEqual(promptCacheCompatFlags("auto", "gpt-5.6-sol"), { supportsExplicitPromptCacheMode: true, supportsLongCacheRetention: true });
+  assert.deepEqual(promptCacheCompatFlags("auto", "gpt-5.5"), { supportsExplicitPromptCacheMode: false, supportsLongCacheRetention: false });
+  assert.deepEqual(promptCacheCompatFlags("auto", "deepseek-v4-flash"), { supportsExplicitPromptCacheMode: false, supportsLongCacheRetention: false });
+});
+
+test("prompt-cache policy persists to settings.json and defaults to off", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-prompt-cache-policy-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const settingsPath = join(tempDir, "settings.json");
+  assert.equal(PROMPT_CACHE_POLICY_DEFAULT, "off");
+  assert.equal(await loadPromptCachePolicy(settingsPath), "off");
+  await savePromptCachePolicy("auto", settingsPath);
+  assert.equal(await loadPromptCachePolicy(settingsPath), "auto");
+  await savePromptCachePolicy("on", settingsPath);
+  assert.equal(await loadPromptCachePolicy(settingsPath), "on");
+  await assert.rejects(() => savePromptCachePolicy("always" as never, settingsPath), /Invalid prompt cache policy/);
+  assert.equal(await loadPromptCachePolicy(settingsPath), "on", "invalid save must not corrupt the stored policy");
+});
+
+test("registration injects prompt-cache compat flags per policy and API format", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-prompt-cache-register-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const settingsPath = join(tempDir, "settings.json");
+  await saveApiProviderSettings({
+    provider: "maestro-openai",
+    baseUrl: "https://api.openai.com/v1",
+    modelId: "gpt-5.6-sol",
+    reasoning: true,
+    apiKey: "sk-a",
+  }, modelsPath);
+  await saveApiProviderSettings({
+    provider: "maestro-qwen",
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    modelId: "deepseek-v4-flash",
+    reasoning: true,
+    apiKey: "sk-b",
+  }, modelsPath);
+  await saveApiProviderSettings({
+    provider: "maestro-anthropic",
+    baseUrl: "https://api.anthropic.com",
+    modelId: "claude-sonnet-4-5",
+    reasoning: true,
+    apiKey: "sk-c",
+  }, modelsPath);
+
+  const capture = () => {
+    const registered: Array<{ name: string; config: any }> = [];
+    registerApiProviderConfigs({
+      registerProvider(name: string, config: any) { registered.push({ name, config }); },
+      registerCommand() {},
+    } as any, { modelsPath, settingsPath });
+    return registered;
+  };
+
+  // auto: gpt-5.6-sol advertises the flags; non-5.6 OpenAI-format models and
+  // Anthropic-format models (separate cache_control mechanism) do not.
+  await savePromptCachePolicy("auto", settingsPath);
+  let registered = capture();
+  let openai = registered.find((entry) => entry.name === "maestro-openai")!.config.models[0];
+  assert.equal(openai.compat.supportsExplicitPromptCacheMode, true);
+  assert.equal(openai.compat.supportsLongCacheRetention, true);
+  let qwen = registered.find((entry) => entry.name === "maestro-qwen")!.config.models[0];
+  assert.equal(qwen.compat.supportsExplicitPromptCacheMode, false);
+  assert.equal(qwen.compat.supportsLongCacheRetention, false);
+  let anthropic = registered.find((entry) => entry.name === "maestro-anthropic")!.config.models[0];
+  assert.equal(anthropic.compat?.supportsExplicitPromptCacheMode, undefined);
+
+  // off: even gpt-5.6 models stop advertising the flags (prompt_cache_options never sent).
+  await savePromptCachePolicy("off", settingsPath);
+  registered = capture();
+  openai = registered.find((entry) => entry.name === "maestro-openai")!.config.models[0];
+  assert.equal(openai.compat.supportsExplicitPromptCacheMode, false);
+  assert.equal(openai.compat.supportsLongCacheRetention, false);
+
+  // on: non-5.6 OpenAI-format models advertise them too (admin opt-in).
+  await savePromptCachePolicy("on", settingsPath);
+  registered = capture();
+  qwen = registered.find((entry) => entry.name === "maestro-qwen")!.config.models[0];
+  assert.equal(qwen.compat.supportsExplicitPromptCacheMode, true);
+  assert.equal(qwen.compat.supportsLongCacheRetention, true);
+});
+
+test("/api-manager manages prompt-cache policy from commands and the interactive menu", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-cache-command-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const settingsPath = join(tempDir, "settings.json");
+  const commands = new Map<string, any>();
+  let sessionStart: ((event: unknown, ctx: any) => Promise<void>) | undefined;
+  registerApiProviderConfigs({
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+    getThinkingLevel() { return "medium"; },
+    on(event: string, handler: (event: unknown, ctx: any) => Promise<void>) {
+      if (event === "session_start") sessionStart = handler;
+    },
+  } as any, { modelsPath, settingsPath });
+  const notifications: string[] = [];
+  const baseContext = {
+    cwd: tempDir,
+    hasUI: false,
+    ui: { notify(message: string) { notifications.push(message); } },
+  };
+  assert.ok(sessionStart);
+  await sessionStart!({}, baseContext);
+  assert.equal(await loadPromptCachePolicy(settingsPath), "off");
+
+  const manager = commands.get("api-manager");
+  await manager.handler("cache auto", baseContext);
+  assert.equal(await loadPromptCachePolicy(settingsPath), "auto");
+  await manager.handler("cache on", baseContext);
+  assert.equal(await loadPromptCachePolicy(settingsPath), "on");
+  await manager.handler("cache show", baseContext);
+  assert.match(notifications.at(-1) ?? "", /提示缓存策略：on（始终发送）/);
+  await manager.handler("cache off", baseContext);
+  assert.equal(await loadPromptCachePolicy(settingsPath), "off");
+
+  const selections = ["提示缓存策略", "auto"];
+  await manager.handler("", {
+    ...baseContext,
+    hasUI: true,
+    ui: {
+      async select(_title: string, options: string[]) {
+        const wanted = selections.shift();
+        return options.find((option) => option === wanted || option.startsWith(wanted));
+      },
+      async confirm() { return true; },
+      notify(message: string) { notifications.push(message); },
+    },
+  });
+  assert.equal(await loadPromptCachePolicy(settingsPath), "auto");
+});
+
+test("cache tiers persist to settings.json and apply to process env", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-cache-tiers-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const settingsPath = join(tempDir, "settings.json");
+  const savedMain = process.env.PI_CACHE_RETENTION;
+  const savedAgent = process.env.PI_TEAMMATE_CACHE_RETENTION;
+  t.after(() => {
+    if (savedMain === undefined) delete process.env.PI_CACHE_RETENTION;
+    else process.env.PI_CACHE_RETENTION = savedMain;
+    if (savedAgent === undefined) delete process.env.PI_TEAMMATE_CACHE_RETENTION;
+    else process.env.PI_TEAMMATE_CACHE_RETENTION = savedAgent;
+  });
+
+  assert.equal(await loadCacheRetentionSetting(settingsPath), "auto");
+  assert.equal(await loadAgentCacheRetention(settingsPath), "short");
+
+  // auto leaves an existing main env untouched, but still pins the agent tier.
+  process.env.PI_CACHE_RETENTION = "long";
+  await saveCacheRetentionSetting("auto", settingsPath);
+  await saveAgentCacheRetention("none", settingsPath);
+  applyCacheRetentionEnv(settingsPath);
+  assert.equal(process.env.PI_CACHE_RETENTION, "long", "auto must keep the user-set env");
+  assert.equal(process.env.PI_TEAMMATE_CACHE_RETENTION, "none");
+
+  // Explicit main tier overrides the env.
+  await saveCacheRetentionSetting("long", settingsPath);
+  applyCacheRetentionEnv(settingsPath);
+  assert.equal(process.env.PI_CACHE_RETENTION, "long");
+  await saveCacheRetentionSetting("short", settingsPath);
+  applyCacheRetentionEnv(settingsPath);
+  assert.equal(process.env.PI_CACHE_RETENTION, "short");
+  assert.equal(await loadCacheRetentionSetting(settingsPath), "short");
+  assert.equal(await loadAgentCacheRetention(settingsPath), "none");
+});
+
+test("/api-manager manages agent cache tier from commands and the interactive menu", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-cache-agent-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const settingsPath = join(tempDir, "settings.json");
+  const commands = new Map<string, any>();
+  let sessionStart: ((event: unknown, ctx: any) => Promise<void>) | undefined;
+  registerApiProviderConfigs({
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+    getThinkingLevel() { return "medium"; },
+    on(event: string, handler: (event: unknown, ctx: any) => Promise<void>) {
+      if (event === "session_start") sessionStart = handler;
+    },
+  } as any, { modelsPath, settingsPath });
+  const notifications: string[] = [];
+  const baseContext = {
+    cwd: tempDir,
+    hasUI: false,
+    ui: { notify(message: string) { notifications.push(message); } },
+  };
+  assert.ok(sessionStart);
+  await sessionStart!({}, baseContext);
+  assert.equal(await loadAgentCacheRetention(settingsPath), "short");
+
+  const manager = commands.get("api-manager");
+  await manager.handler("cache agent long", baseContext);
+  assert.equal(await loadAgentCacheRetention(settingsPath), "long");
+  await manager.handler("cache agent show", baseContext);
+  assert.match(notifications.at(-1) ?? "", /Agent 缓存档位：long（1h \/ 24h）/);
+  await manager.handler("cache agent none", baseContext);
+  assert.equal(await loadAgentCacheRetention(settingsPath), "none");
+  await manager.handler("cache agent short", baseContext);
+  assert.equal(await loadAgentCacheRetention(settingsPath), "short");
+
+  const selections = ["Agent 缓存档位", "long"];
+  await manager.handler("", {
+    ...baseContext,
+    hasUI: true,
+    ui: {
+      async select(_title: string, options: string[]) {
+        const wanted = selections.shift();
+        return options.find((option) => option === wanted || option.startsWith(wanted));
+      },
+      async confirm() { return true; },
+      notify(message: string) { notifications.push(message); },
+    },
+  });
+  assert.equal(await loadAgentCacheRetention(settingsPath), "long");
 });
 
 test("validates custom API base URLs", (t) => {
@@ -1711,6 +1953,10 @@ test("legacy Qwen entry path preserves ProviderConfig metadata, compat, and live
     thinkingFormat: "qwen",
     openRouterRouting: { allow_fallbacks: false, data_collection: "deny", require_parameters: true },
     vercelGatewayRouting: { only: ["provider-default"], order: ["model-first"] },
+    // Unified prompt-cache policy (default off) pins the compat flags pi-ai
+    // turns into prompt_cache_options / prompt_cache_retention request params.
+    supportsExplicitPromptCacheMode: false,
+    supportsLongCacheRetention: false,
   });
   assert.equal(live.thinkingLevelMap?.xhigh, "max");
   assert.equal("max" in (live.thinkingLevelMap ?? {}), false);

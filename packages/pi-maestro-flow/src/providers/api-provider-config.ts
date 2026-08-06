@@ -217,7 +217,7 @@ export interface ApiRetrySettings {
   maxRetries: number;
 }
 
-export type ApiProviderAction = "configure" | "delete" | "disable" | "effort" | "enable" | "list" | "logout" | "reset" | "retry" | "show" | "toggle" | "vision";
+export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "effort" | "enable" | "list" | "logout" | "reset" | "retry" | "show" | "toggle" | "vision";
 export type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
@@ -337,6 +337,10 @@ export function registerApiProviderConfigs(
       pi.registerProvider(id, configuredProviderRegistration(id, modelsPath));
     }
   }
+  // Persisted cache tiers: main-flow retention lands on PI_CACHE_RETENTION
+  // (pi-ai reads it per request), the agent tier on PI_TEAMMATE_CACHE_RETENTION
+  // (teammate subprocess spawn pin). "auto" keeps a user-set env untouched.
+  applyCacheRetentionEnv(settingsPath);
 
   const handle: ApiProviderConfigHandle = {
     async openManager(ctx, args = "") {
@@ -670,6 +674,115 @@ async function manageRetrySettings(
   notifyRetrySettings(ctx, next, settingsPath);
 }
 
+export async function managePromptCacheSettings(
+  ctx: ExtensionCommandContext,
+  settingsPath: string,
+  command?: CacheManagerArgs,
+): Promise<void> {
+  const current = await loadPromptCachePolicy(settingsPath);
+  if (command?.policy !== undefined) {
+    await savePromptCachePolicy(command.policy, settingsPath);
+    notifyPromptCacheSettings(ctx, command.policy, settingsPath);
+    return;
+  }
+  if (!ctx.hasUI || command?.showOnly) {
+    notifyPromptCacheSettings(ctx, current, settingsPath);
+    return;
+  }
+
+  const options = PROMPT_CACHE_POLICIES.map((policy) =>
+    `${policy}${policy === current ? t("effort.currentMarker") : ""}`,
+  );
+  const choice = await ctx.ui.select(
+    "提示缓存策略（auto: 仅 gpt-5.6+ 模型发送；off: 不发送；on: 始终发送）",
+    options,
+  );
+  if (!choice) return;
+  const policy = PROMPT_CACHE_POLICIES.find(
+    (value) => `${value}${value === current ? t("effort.currentMarker") : ""}` === choice,
+  );
+  if (!policy || !isPromptCachePolicy(policy)) return;
+  const confirmed = await ctx.ui.confirm(
+    "确认修改提示缓存策略",
+    [
+      `将改为：${policy}`,
+      "auto 会对 gpt-5.6+ 模型发送 prompt_cache_options / prompt_cache_retention；部分网关会拒绝这些参数，遇到 400 请切回 off。",
+    ].join("\n"),
+  );
+  if (!confirmed) return;
+  await savePromptCachePolicy(policy, settingsPath);
+  notifyPromptCacheSettings(ctx, policy, settingsPath);
+}
+
+export async function manageAgentCacheRetention(
+  ctx: ExtensionCommandContext,
+  settingsPath: string,
+  command?: CacheAgentManagerArgs,
+): Promise<void> {
+  const current = await loadAgentCacheRetention(settingsPath);
+  if (command?.retention !== undefined) {
+    await saveAgentCacheRetention(command.retention, settingsPath);
+    applyCacheRetentionEnv(settingsPath);
+    notifyAgentCacheRetention(ctx, command.retention, settingsPath);
+    return;
+  }
+  if (!ctx.hasUI || command?.showOnly) {
+    notifyAgentCacheRetention(ctx, current, settingsPath);
+    return;
+  }
+
+  const tiers = ["short", "long", "none"] as const;
+  const options = tiers.map((tier) => `${tier}${tier === current ? t("effort.currentMarker") : ""}`);
+  const choice = await ctx.ui.select(
+    "Agent 缓存档位（short: 5m/隐含 30m；long: 1h/24h；none: 不缓存）",
+    options,
+  );
+  if (!choice) return;
+  const tier = tiers.find((value) => `${value}${value === current ? t("effort.currentMarker") : ""}` === choice);
+  if (!tier || !isAgentCacheRetention(tier)) return;
+  const confirmed = await ctx.ui.confirm(
+    "确认修改 Agent 缓存档位",
+    [`将改为：${tier}`, "agent 子进程始终使用该档位，不继承主流程的 long 档。"].join("\n"),
+  );
+  if (!confirmed) return;
+  await saveAgentCacheRetention(tier, settingsPath);
+  applyCacheRetentionEnv(settingsPath);
+  notifyAgentCacheRetention(ctx, tier, settingsPath);
+}
+
+function notifyAgentCacheRetention(
+  ctx: Pick<ExtensionCommandContext, "ui">,
+  retention: CacheRetention,
+  settingsPath: string,
+): void {
+  const label = retention === "short"
+    ? "short（5m / 隐含 30m）"
+    : retention === "long"
+      ? "long（1h / 24h）"
+      : "none（不缓存）";
+  ctx.ui.notify([
+    `Agent 缓存档位：${label}`,
+    `文件：${settingsPath}`,
+  ].join("\n"), "info");
+}
+
+function notifyPromptCacheSettings(
+  ctx: Pick<ExtensionCommandContext, "ui">,
+  policy: PromptCachePolicy,
+  settingsPath: string,
+): void {
+  const label = policy === "off"
+    ? "off（不发送）"
+    : policy === "on"
+      ? "on（始终发送）"
+      : "auto（仅 gpt-5.6+）";
+  ctx.ui.notify([
+    `提示缓存策略：${label}`,
+    "gpt-5.6+ 模型将按策略发送 OpenAI 提示缓存参数；严格网关可能拒绝，遇 400 请切回 off。",
+    `文件：${settingsPath}`,
+  ].join("\n"), "info");
+}
+
 function notifyRetrySettings(
   ctx: Pick<ExtensionCommandContext, "ui">,
   settings: ApiRetrySettings,
@@ -719,6 +832,14 @@ async function showApiProviderManager(
   }
   if (action === "retry") {
     await manageRetrySettings(ctx, settingsPath, parsed.retry);
+    return;
+  }
+  if (action === "cache") {
+    await managePromptCacheSettings(ctx, settingsPath, parsed.cache);
+    return;
+  }
+  if (action === "cache-agent") {
+    await manageAgentCacheRetention(ctx, settingsPath, parsed.cacheAgent);
     return;
   }
   if (action === "enable" || action === "disable" || action === "toggle") {
@@ -1801,5 +1922,17 @@ import {
   writeApiProviderSettings,
   writeModelsRoot,
 } from "./api-provider-ops.ts";
-import type { ConfigureModelTarget, RetryManagerArgs } from "./api-provider-ops.ts";
+import type { CacheAgentManagerArgs, CacheManagerArgs, ConfigureModelTarget, RetryManagerArgs } from "./api-provider-ops.ts";
+import {
+  applyCacheRetentionEnv,
+  isAgentCacheRetention,
+  isPromptCachePolicy,
+  loadAgentCacheRetention,
+  loadPromptCachePolicy,
+  PROMPT_CACHE_POLICIES,
+  saveAgentCacheRetention,
+  savePromptCachePolicy,
+  type CacheRetention,
+  type PromptCachePolicy,
+} from "./prompt-cache-policy.ts";
 

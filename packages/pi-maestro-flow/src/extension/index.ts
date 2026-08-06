@@ -2692,6 +2692,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       "api.manage": () => openApiManager("", "API provider manager"),
       "api.configure": () => openApiManager("configure", "API provider editor"),
       "api.retry": () => openApiManager("retry", "API retry settings"),
+      "api.cache": () => openApiManager("cache", "Prompt cache policy"),
       "api.list": () => openApiManager("list", "API provider overview"),
     },
   });

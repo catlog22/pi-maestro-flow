@@ -51,6 +51,17 @@ import {
 } from "./api-provider-config.ts";
 import type { ApiProviderAction, ApiProviderId, ApiProviderSettings, ApiThinkingLevel, ProviderDefaults, SaveApiProviderResult } from "./api-provider-config.ts";
 import { loadVisionDelegationConfig } from "./vision-assist.ts";
+import {
+  isCacheRetention,
+  isOpenAIFormatApi,
+  isPromptCachePolicy,
+  loadAgentCacheRetention,
+  loadPromptCachePolicy,
+  loadPromptCachePolicySync,
+  promptCacheCompatFlags,
+  type CacheRetention,
+  type PromptCachePolicy,
+} from "./prompt-cache-policy.ts";
 
 
 export async function removeProviderKey(
@@ -657,6 +668,9 @@ export function configuredProviderRegistration(
   if (typeof config.authHeader === "boolean") registration.authHeader = config.authHeader;
   if (isRecord(config.oauth)) registration.oauth = { ...config.oauth } as ProviderConfig["oauth"];
 
+  const promptCachePolicy = loadPromptCachePolicySync(join(dirname(modelsPath), "settings.json"));
+  const registrationApi = typeof config.api === "string" ? config.api : undefined;
+
   registration.models = config.models.filter(isRecord).flatMap((model) => {
     if (typeof model.id !== "string" || model.id.length === 0) return [];
     const normalizedMap = canonicalizeLegacyThinkingLevelMap(model.thinkingLevelMap).map;
@@ -688,6 +702,13 @@ export function configuredProviderRegistration(
     if (isStringRecord(model.headers)) clone.headers = { ...model.headers };
     const compat = materializeProviderCompat(config.compat, model.compat);
     if (compat) clone.compat = compat;
+    // Unified prompt-cache policy: control whether the model advertises the
+    // OpenAI prompt-cache compat flags pi-ai turns into prompt_cache_options /
+    // prompt_cache_retention request parameters (strict gateways reject them).
+    // Anthropic-style cache_control is a separate mechanism and stays untouched.
+    if (isOpenAIFormatApi(clone.api ?? registrationApi)) {
+      clone.compat = { ...(clone.compat ?? {}), ...promptCacheCompatFlags(promptCachePolicy, model.id) };
+    }
     return [clone];
   });
   return registration;
@@ -713,16 +734,50 @@ export interface RetryManagerArgs {
   showOnly?: boolean;
 }
 
+export interface CacheManagerArgs {
+  policy?: PromptCachePolicy;
+  showOnly?: boolean;
+}
+
+export interface CacheAgentManagerArgs {
+  retention?: CacheRetention;
+  showOnly?: boolean;
+}
+
 export interface ParsedManagerArgs {
   action?: ApiProviderAction;
   target?: ChannelTarget;
   retry?: RetryManagerArgs;
+  cache?: CacheManagerArgs;
+  cacheAgent?: CacheAgentManagerArgs;
 }
 
 export function parseManagerArgs(args: string): ParsedManagerArgs {
   const values = args.trim().split(/\s+/).filter(Boolean);
   const normalized = values.map((value) => value.toLowerCase());
   if (values.length === 0) return {};
+  if (normalized[0] === "cache" || normalized[0] === "prompt-cache" || normalized[0] === "promptcache") {
+    if (values.length === 1) return { action: "cache" };
+    if (normalized[1] === "agent" && values.length === 2) {
+      return { action: "cache-agent" };
+    }
+    if (normalized[1] === "agent" && values.length === 3) {
+      if (normalized[2] === "show" || normalized[2] === "status") {
+        return { action: "cache-agent", cacheAgent: { showOnly: true } };
+      }
+      if (isCacheRetention(normalized[2])) {
+        return { action: "cache-agent", cacheAgent: { retention: normalized[2] } };
+      }
+      throw usageError();
+    }
+    if ((normalized[1] === "show" || normalized[1] === "status") && values.length === 2) {
+      return { action: "cache", cache: { showOnly: true } };
+    }
+    if (values.length === 2 && isPromptCachePolicy(normalized[1])) {
+      return { action: "cache", cache: { policy: normalized[1] } };
+    }
+    throw usageError();
+  }
   if (normalized[0] === "retry") {
     if (values.length === 1) return { action: "retry" };
     if ((normalized[1] === "show" || normalized[1] === "status") && values.length === 2) {
@@ -769,7 +824,7 @@ export function resolveTargetToken(value: string): ChannelTarget | undefined {
 
 export function usageError(): Error {
   return new Error(
-    `用法：/api-manager list | retry [show|on [1-${API_RETRY_MAX_RETRIES}]|off] | show|set|delete|enable|disable|logout|reset [openai|qwen|anthropic|<Provider ID>|new]`,
+    `用法：/api-manager list | retry [show|on [1-${API_RETRY_MAX_RETRIES}]|off] | cache [show|auto|off|on] | cache agent [show|short|long|none] | show|set|delete|enable|disable|logout|reset [openai|qwen|anthropic|<Provider ID>|new]`,
   );
 }
 
@@ -1033,6 +1088,14 @@ export async function chooseAction(
       action: "retry",
       label: `自动重试（当前：${retry.enabled ? "开启" : "关闭"}）`,
     },
+    {
+      action: "cache",
+      label: `提示缓存策略（当前：${await loadPromptCachePolicy(settingsPath)}）`,
+    },
+    {
+      action: "cache-agent",
+      label: `Agent 缓存档位（当前：${await loadAgentCacheRetention(settingsPath)}）`,
+    },
     { action: "logout", label: "注销 Provider" },
     { action: "reset", label: "重置 Provider" },
   ];
@@ -1051,6 +1114,8 @@ export function actionFromArg(value: string): ApiProviderAction | undefined {
   if (value === "show" || value === "get") return "show";
   if (value === "logout") return "logout";
   if (value === "retry") return "retry";
+  if (value === "cache" || value === "prompt-cache" || value === "promptcache") return "cache";
+  if (value === "cache-agent" || value === "agent-cache") return "cache-agent";
   if (value === "vision") return "vision";
   if (value === "effort") return "effort";
   if (value === "reset") return "reset";

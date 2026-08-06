@@ -611,6 +611,19 @@ interface PendingInterruptingSteer {
   phase: "aborting" | "prompting";
 }
 
+/**
+ * Cache tier for agent subprocesses.
+ *
+ * Agents stay on the short tier (5m on Anthropic, implicit 30m on OpenAI) even
+ * when the main process runs with PI_CACHE_RETENTION=long, so a long-lived main
+ * session does not leak its expensive 1h/24h cache tier into short-lived agents.
+ * PI_TEAMMATE_CACHE_RETENTION overrides the pin (valid values: short | long | none).
+ */
+export function resolveAgentCacheRetention(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.PI_TEAMMATE_CACHE_RETENTION;
+  return override === "long" || override === "none" || override === "short" ? override : "short";
+}
+
 /** Environment handed to the pi child: identity, depth diagnostics and file seams. */
 function buildChildSpawnEnv(
   correlationId: string,
@@ -628,6 +641,10 @@ function buildChildSpawnEnv(
     PI_TEAMMATE_DEPTH: String((options.depth ?? getTeammateDepth()) + 1),
     PI_TEAMMATE_CORRELATION_ID: correlationId,
     PI_TEAMMATE_REPLY_TO: replyTo,
+    // Cache-tier pin (see resolveAgentCacheRetention): the child inherits the
+    // parent env via the spread above, so an explicit short-tier override keeps
+    // agents from inheriting the main process's long retention.
+    PI_CACHE_RETENTION: resolveAgentCacheRetention(process.env),
   };
   if (options.maxDispatchDepth !== undefined) {
     spawnEnv.PI_TEAMMATE_MAX_DISPATCH_DEPTH = String(options.maxDispatchDepth);

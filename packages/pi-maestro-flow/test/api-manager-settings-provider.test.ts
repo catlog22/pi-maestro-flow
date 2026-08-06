@@ -44,6 +44,88 @@ test("api manager read surfaces providers with a masked apiKey placeholder", asy
   assert.equal(qwen.enabled, false);
 });
 
+test("api manager read surfaces the prompt cache policy and defaults to off", async () => {
+  const { provider, context } = harness();
+  const snapshot = await provider.read({ context });
+  const value = snapshot.effective.values.find((entry) => entry.key === "api.promptCache")?.value;
+  assert.equal(value, "off");
+});
+
+test("api manager commit persists the prompt cache policy to settings.json", async () => {
+  const { provider, modelsPath, settingsPath, context } = harness({}, { promptCache: "auto" });
+  const transactionId = "tx-cache";
+  const prepared = await provider.prepare!({
+    context,
+    transactionId,
+    changes: [{ operation: "set" as const, key: "api.promptCache", scope: "global" as const, value: "on" }],
+    expectedRevisions: [],
+  });
+  assert.equal(prepared.prepared, true);
+  const committed = await provider.commit!({ context, transactionId, prepareToken: transactionId });
+  assert.ok(committed.changedKeys.includes("api.promptCache"));
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as { promptCache: string };
+  assert.equal(settings.promptCache, "on");
+  const snapshot = await provider.read({ context });
+  assert.equal(snapshot.effective.values.find((entry) => entry.key === "api.promptCache")?.value, "on");
+});
+
+test("api manager validate rejects an invalid prompt cache policy", async () => {
+  const { provider, context } = harness();
+  const invalid = await provider.validate!({
+    context,
+    changes: [{ operation: "set" as const, key: "api.promptCache", scope: "global" as const, value: "always" }],
+  });
+  assert.equal(invalid.valid, false);
+  assert.equal(invalid.issues[0]?.code, "invalid-prompt-cache");
+  const valid = await provider.validate!({
+    context,
+    changes: [{ operation: "set" as const, key: "api.promptCache", scope: "global" as const, value: "auto" }],
+  });
+  assert.equal(valid.valid, true);
+});
+
+test("api manager read surfaces cache tiers with defaults (auto / short)", async () => {
+  const { provider, context } = harness();
+  const snapshot = await provider.read({ context });
+  const values = snapshot.effective.values;
+  assert.equal(values.find((entry) => entry.key === "api.cacheRetention")?.value, "auto");
+  assert.equal(values.find((entry) => entry.key === "api.agentCacheRetention")?.value, "short");
+});
+
+test("api manager commit persists cache tiers and validates them", async () => {
+  const { provider, modelsPath, settingsPath, context } = harness({}, { cacheRetention: "long", agentCacheRetention: "short" });
+  const transactionId = "tx-cache-tiers";
+  const prepared = await provider.prepare!({
+    context,
+    transactionId,
+    changes: [
+      { operation: "set" as const, key: "api.cacheRetention", scope: "global" as const, value: "long" },
+      { operation: "set" as const, key: "api.agentCacheRetention", scope: "global" as const, value: "none" },
+    ],
+    expectedRevisions: [],
+  });
+  assert.equal(prepared.prepared, true);
+  const committed = await provider.commit!({ context, transactionId, prepareToken: transactionId });
+  assert.ok(committed.changedKeys.includes("api.cacheRetention"));
+  assert.ok(committed.changedKeys.includes("api.agentCacheRetention"));
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as { cacheRetention: string; agentCacheRetention: string };
+  assert.equal(settings.cacheRetention, "long");
+  assert.equal(settings.agentCacheRetention, "none");
+
+  const invalid = await provider.validate!({
+    context,
+    changes: [{ operation: "set" as const, key: "api.agentCacheRetention", scope: "global" as const, value: "forever" }],
+  });
+  assert.equal(invalid.valid, false);
+  assert.equal(invalid.issues[0]?.code, "invalid-agent-cache-retention");
+  const invalidMain = await provider.validate!({
+    context,
+    changes: [{ operation: "set" as const, key: "api.cacheRetention", scope: "global" as const, value: "bogus" }],
+  });
+  assert.equal(invalidMain.valid, false);
+  assert.equal(invalidMain.issues[0]?.code, "invalid-cache-retention");
+});
+
 test("api manager commit adds a provider, keeps an untouched secret and writes retry policy", async () => {
   const { provider, modelsPath, settingsPath, context } = harness({
     providers: {
