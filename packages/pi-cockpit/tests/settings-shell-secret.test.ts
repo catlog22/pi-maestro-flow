@@ -133,6 +133,7 @@ async function createShell(provider: SettingsProviderV1): Promise<{
 
 test("writable secrets render a masked placeholder, never the plaintext", async () => {
 	const state = await createShell(makeSecretProvider({ writeOnly: true }));
+	state.shell.handleInput("\r"); // open group
 	const rendered = state.shell.render(100).join("\n");
 	assert.ok(rendered.includes("••••••"), "a set secret shows the masked placeholder");
 	assert.ok(!rendered.includes(PLAINTEXT));
@@ -140,6 +141,7 @@ test("writable secrets render a masked placeholder, never the plaintext", async 
 
 test("typing into a writable secret masks every character and stages the plaintext once", async () => {
 	const state = await createShell(makeSecretProvider({ writeOnly: true }));
+	state.shell.handleInput("\r"); // open group
 	state.shell.handleInput("\r");
 	for (const char of PLAINTEXT) state.shell.handleInput(char);
 	const editing = state.shell.render(100).join("\n");
@@ -155,6 +157,7 @@ test("typing into a writable secret masks every character and stages the plainte
 
 test("non-writable secrets stay read-only", async () => {
 	const state = await createShell(makeSecretProvider({ writeOnly: false }));
+	state.shell.handleInput("\r"); // open group
 	state.shell.handleInput("\r");
 	const rendered = state.shell.render(100).join("\n");
 	assert.ok(rendered.includes("Secret values are managed by the owning plugin"));
