@@ -88,6 +88,7 @@ maestro knowledge stage knowhow "<title>" --content-file <path|-> --session <ses
 ```
 - `--evidence` 建议必填（证据源可靠性：reconciliation receipt > report.md frontmatter > outputs/工件 file:line 锚点 > session 轨迹）。
 - **report.md frontmatter 契约（实测 zod schema，schemas.ts:565-584）**：`verdict` 必须 `ready|ready_with_concerns|blocked|failed`（**不是** `done`）；`decisions`/`constraints` 数组元素**必须带 `id`**（`{id, text, status}`，status 分别 ∈ proposed/accepted/rejected 与 locked/open/deferred）。CLI `maestro session done --verdict` 接受 `done|done-with-concerns|needs-retry|blocked` 并内部映射——**两者别混**（e2e 实测：frontmatter 写 `verdict: done` 或缺 `id` → seal 校验失败、候选零草拟）。
+- **防噪音候选（铁律）**：seal 会把每条 accepted decision / locked constraint 自动草拟成语料候选，因此 frontmatter **只写可复用的规定性决策/约束**（未来工作必须遵守的规则）。严禁写运行状态叙述：只读声明（“Read-only audit…”“Debug investigation remained read-only”）、worktree/审计过程观察（“working tree changed concurrently”）、文件缺失记录、issue 路由备忘——这些是存量分诊实测确认的主要噪音源。
 - 归因（不产生候选，仅记账）：`maestro knowledge record <ids...> --signal consumed|cited|validated|contradicted --source search|load|manual [--run <run-id> | --session <session-id> | --channel <name>] [--allow-unknown]`。搜索/注入是 exposure，load 才算 consumed；load 归因三级路由（唯一活跃 run → 无歧义 Session 身份 → 全局账本+warning）不阻塞加载。ID 写入前经 wiki 索引校验，未知 ID 默认拒收，`--allow-unknown` 降级记账留痕。
 - `--signal-ids` 用逗号分隔（`--signal-ids spec:project:a,knowhow:b`）；空格分隔会泄漏进位置参数。
 - 负知识（失败测试/被拒评审/被推翻实践）同样 stage 为反例候选（scope + 失败原因 + 替代方案）。

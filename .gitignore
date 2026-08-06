@@ -12,6 +12,7 @@ dist/
 *.swp
 *.swo
 *~
+scripts
 
 # OS
 .DS_Store
