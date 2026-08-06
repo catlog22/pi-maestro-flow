@@ -22,6 +22,7 @@ Thumbs.db
 .pi/settings.local.json
 .pi/scratch/
 .pi/agents/
+.maestro-lifecycle.coordinator
 .workflow/*.pid
 .workflow/.backups/
 .workflow/.csv-wave/
