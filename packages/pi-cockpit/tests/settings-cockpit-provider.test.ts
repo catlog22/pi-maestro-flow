@@ -71,7 +71,7 @@ test("Cockpit provider describes editable settings and host-owned actions", asyn
 		assert.ok(description.settings.some((setting) => setting.key === "staticMode" && setting.editor.kind === "boolean"));
 		assert.ok(description.settings.some((setting) => setting.key === "toolPalette" && setting.editor.kind === "enum"), "toolPalette now editable via the provider");
 		assert.ok(description.settings.some((setting) => setting.key === "sidebar.width" && setting.editor.kind === "integer"));
-		assert.ok(description.settings.some((setting) => setting.key === "theme" && setting.editor.kind === "action"));
+		assert.equal(description.settings.some((setting) => setting.key === "theme"), false, "theme moved to the pi-native enum");
 		const keys = new Set(description.settings.flatMap((entry) => [
 			entry.group,
 			entry.labelKey,
@@ -84,7 +84,7 @@ test("Cockpit provider describes editable settings and host-owned actions", asyn
 			for (const key of keys) assert.equal(typeof catalog[key], "string", `${locale} missing ${key}`);
 		}
 		const snapshot = await provider.read({ context });
-		assert.equal(snapshot.effective.values.find((value) => value.key === "theme")?.value, "cockpit-ocean");
+		assert.equal(snapshot.effective.values.find((value) => value.key === "theme"), undefined, "theme no longer in cockpit snapshot");
 		assert.equal(snapshot.effective.values.find((value) => value.key === "thinkingFold")?.value, true);
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
@@ -300,9 +300,9 @@ test("actions and provider discovery stay owned by Cockpit", async () => {
 	try {
 		const actions: string[] = [];
 		const { provider } = providerAt(path, { action: (name) => actions.push(name) });
-		await provider.invokeAction!({ context, actionId: "cockpit.theme", key: "theme" });
 		await provider.invokeAction!({ context, actionId: "cockpit.thinkingFold", key: "thinkingFold" });
-		assert.deepEqual(actions, ["theme", "thinking"]);
+		await provider.invokeAction!({ context, actionId: "cockpit.thinkingFold", key: "thinkingFold" });
+		assert.deepEqual(actions, ["thinking", "thinking"]);
 
 		const bus = new FakeEventBus();
 		registerCockpitSettingsProvider(bus, provider);

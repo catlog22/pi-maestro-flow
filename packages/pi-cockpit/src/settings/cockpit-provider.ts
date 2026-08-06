@@ -333,7 +333,6 @@ const DEFINITIONS: readonly SettingDefinition[] = [
 		reversibility: "full",
 		editor: { kind: "integer", min: 20, max: 200, step: 1 },
 	},
-	actionDefinition("theme", "cockpit.group.appearance", 1, "cockpit.theme", "cockpit.theme"),
 	actionDefinition("thinkingFold", "cockpit.group.appearance", 2, "cockpit.thinkingFold", "cockpit.thinkingFold"),
 ];
 
@@ -486,8 +485,7 @@ export function createCockpitSettingsProvider(options: CockpitSettingsProviderOp
 			};
 		},
 		invokeAction: async (request) => {
-			if (request.actionId === "cockpit.theme" && options.openThemeSettings) await options.openThemeSettings();
-			else if (request.actionId === "cockpit.thinkingFold" && options.toggleThinkingFold) await options.toggleThinkingFold();
+			if (request.actionId === "cockpit.thinkingFold" && options.toggleThinkingFold) await options.toggleThinkingFold();
 			else return { handled: false };
 			return { handled: true, refresh: true };
 		},
@@ -526,7 +524,6 @@ function snapshot(document: ConfigDocument, instanceId: string, options: Cockpit
 		...(document.error ? { messageKey: document.error } : {}),
 	}));
 	configured.push(
-		{ key: "theme", scope: "global", state: "absent" },
 		{ key: "thinkingFold", scope: "global", state: "absent" },
 	);
 	return {
@@ -536,7 +533,6 @@ function snapshot(document: ConfigDocument, instanceId: string, options: Cockpit
 		effective: {
 			values: [
 				...CONFIG_KEYS.map((key) => ({ key, value: getConfigValue(document.config, key), source: "configured" as const, scope: "global" as const, resource })),
-				{ key: "theme", value: options.getThemeName?.() ?? "Pi settings", source: "runtime" as const },
 				{ key: "thinkingFold", value: options.getThinkingFolded?.() ?? false, source: "runtime" as const },
 			],
 		},

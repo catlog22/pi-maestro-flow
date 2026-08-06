@@ -304,6 +304,8 @@ export interface NativePiSettingsProvider extends SettingsProviderV1 {
 export interface NativePiSettingsProviderOptions {
 	getGlobalPath?: () => string;
 	getProjectPath?: (cwd: string) => string;
+	/** Available theme names (from the host UI) to expose theme as an enum. */
+	getThemes?: () => readonly string[];
 	onError?(error: unknown): void;
 }
 
@@ -375,17 +377,25 @@ export function createNativePiSettingsProvider(options: NativePiSettingsProvider
 	return {
 		providerId: PROVIDER_ID,
 		instanceId,
-		describe: () => ({
-			id: PROVIDER_ID,
-			version: PROVIDER_VERSION,
-			instanceId,
-			labelKey: "native.provider",
-			descriptionKey: "native.provider.description",
-			order: 5,
-			capabilities: { read: true, write: true, prepareCommit: true, rollback: "full", hotUpdate: true },
-			settings: DEFINITIONS,
-			catalogs: CATALOGS,
-		}),
+		describe: () => {
+			const themes = options.getThemes?.() ?? [];
+			const settings = themes.length > 0
+				? DEFINITIONS.map((definition) => definition.key === "theme"
+					? { ...definition, editor: { kind: "enum" as const, options: themes.map((name) => ({ value: name, labelKey: name })) } }
+					: definition)
+				: DEFINITIONS;
+			return {
+				id: PROVIDER_ID,
+				version: PROVIDER_VERSION,
+				instanceId,
+				labelKey: "native.provider",
+				descriptionKey: "native.provider.description",
+				order: 5,
+				capabilities: { read: true, write: true, prepareCommit: true, rollback: "full", hotUpdate: true },
+				settings,
+				catalogs: CATALOGS,
+			};
+		},
 		read: (request) => snapshot(load(request.context), instanceId),
 		validate: (request) => {
 			const docs = load(request.context);

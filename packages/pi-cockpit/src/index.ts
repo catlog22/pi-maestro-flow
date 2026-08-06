@@ -1822,7 +1822,9 @@ export default function (pi: ExtensionAPI): void {
 	// The settings provider registers on the first session (registerSettingsProvider
 	// in session_start); its disposer is stored for teardown at session_shutdown.
 
-	const nativePiSettingsProvider = createNativePiSettingsProvider({});
+	const nativePiSettingsProvider = createNativePiSettingsProvider({
+		getThemes: () => (lastCtx?.ui.getAllThemes?.() ?? []).map((theme) => theme.name),
+	});
 
 	pi.registerShortcut(AGENT_OVERLAY_KEY, {
 		description: "Open the live Agent panel",
