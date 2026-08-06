@@ -70,6 +70,7 @@ interface ThemeColors {
 	danger: RGB;
 	tokens: RGB;
 	separator: RGB;
+	evol: RGB;
 }
 
 export const THEMES: Record<string, ThemeColors> = {
@@ -87,6 +88,7 @@ export const THEMES: Record<string, ThemeColors> = {
 		danger: [243, 139, 168],
 		tokens: [205, 214, 244],
 		separator: [88, 91, 112],
+		evol: [180, 190, 254],
 	},
 	cyberpunk: {
 		model: [0, 255, 204],
@@ -102,6 +104,7 @@ export const THEMES: Record<string, ThemeColors> = {
 		danger: [255, 50, 50],
 		tokens: [220, 220, 220],
 		separator: [60, 60, 80],
+		evol: [0, 255, 170],
 	},
 	nord: {
 		model: [136, 192, 208],
@@ -117,6 +120,7 @@ export const THEMES: Record<string, ThemeColors> = {
 		danger: [191, 97, 106],
 		tokens: [216, 222, 233],
 		separator: [76, 86, 106],
+		evol: [136, 192, 208],
 	},
 };
 

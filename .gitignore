@@ -94,3 +94,7 @@ idx-names.txt
 .cache/
 filter.py
 instr.txt
+
+# self-evolve runtime artifacts (global output lives in ~/.maestro/self-evolve)
+.pi/self-evolve/
+.pi/self-evolve.json

@@ -172,6 +172,42 @@ function renderAutoCompactionMode(value: string | undefined, width: number): str
 	return colored(disabled ? "ctxWarn" : "ctxOk", text);
 }
 
+/**
+ * Compact self-evolve marker for the cockpit statusline.
+ *
+ * Reads the `self-evolve` extension status (`EVOL ● s·d·p` / `EVOL off`):
+ *   - disabled → muted `EV○`
+ *   - enabled, no signals yet → `EV●`
+ *   - enabled, with counters → `EV● s·d·p`
+ * Returns "" when the extension never set a status (not loaded).
+ */
+export function renderEvolMarker(value: string | undefined): string {
+	if (!value) return "";
+	const counts = /^EVOL ● (\d+·\d+·\d+)/.exec(value)?.[1];
+	if (counts) return colored("evol", `EV● ${counts}`);
+	if (value === "EVOL off") return colored("separator", `EV○`);
+	return colored("evol", `EV●`);
+}
+
+/**
+ * Knowledge-pending marker: surfaces candidates awaiting manual resolve.
+ *
+ * Reads the `maestro-knowledge-pending` extension status (`N review · M pending`
+ * or `M pending`): review_required shows in danger color (needs resolve), plain
+ * pending in phase color. Returns "" when nothing is pending.
+ */
+export function renderKnowledgePendingMarker(value: string | undefined): string {
+	if (!value) return "";
+	const review = /^(\d+) review/.exec(value)?.[1];
+	const pending = /· (\d+) pending$/.exec(value)?.[1] ?? /^(\d+) pending$/.exec(value)?.[1];
+	if (review) {
+		const total = pending ? `${review}·${pending}` : review;
+		return colored("danger", `KNOW ${total}`);
+	}
+	if (pending) return colored("phase", `KNOW ${pending}`);
+	return colored("phase", `KNOW ?`);
+}
+
 function renderContextPressure(value: string | undefined, width: number): string {
 	if (!value) return "";
 	const normalized = value.replace(/^CTX\s+/i, "").trim();
@@ -287,6 +323,8 @@ function renderLine1(
 	approvalStatus: string | undefined,
 	compactionStatus: string | undefined,
 	effortStatus: string | undefined,
+	evolStatus: string | undefined,
+	knowledgeStatus: string | undefined,
 ): string {
 	const safeWidth = Math.max(1, width);
 	const modeFull = renderPlanModeStatus(modeStatus, approvalStatus, 80);
@@ -294,6 +332,8 @@ function renderLine1(
 	const modeNarrow = renderPlanModeStatus(modeStatus, approvalStatus, 1);
 	const autoCompactionFull = renderAutoCompactionMode(compactionStatus, 80);
 	const autoCompactionCompact = renderAutoCompactionMode(compactionStatus, 48);
+	const evolText = renderEvolMarker(evolStatus);
+	const knowledgeText = renderKnowledgePendingMarker(knowledgeStatus);
 	const autoCompactionNarrow = renderAutoCompactionMode(compactionStatus, 1);
 	const effort = formatEffortStatus(effortStatus);
 	const modelText = colored("model", `${ICONS.model} ${shortenModel(rs.model)}${effort ? ` · ${effort}` : ""}`);
@@ -317,17 +357,17 @@ function renderLine1(
 
 	const candidates = safeWidth >= 80
 		? [
-			[modeFull, modelText, contextFull, autoCompactionFull, toolCallText, dirGitText, tokenText],
-			[modeCompact, modelText, contextCompact, autoCompactionCompact, toolCallText, dirGitText, tokenText],
+			[modeFull, modelText, contextFull, autoCompactionFull, evolText, knowledgeText, toolCallText, dirGitText, tokenText],
+			[modeCompact, modelText, contextCompact, autoCompactionCompact, evolText, toolCallText, dirGitText, tokenText],
+			[modeCompact, modelText, contextCompact, autoCompactionCompact, evolText, toolCallText, dirGitText],
 			[modeCompact, modelText, contextCompact, autoCompactionCompact, toolCallText, dirGitText],
-			[modeCompact, modelText, contextCompact, autoCompactionCompact, toolCallText, dirText],
 			[modeCompact, modelText, contextCompact, autoCompactionCompact, dirText],
 			[modeNarrow, autoCompactionNarrow, contextCompact, modelText],
 		]
 		: safeWidth >= 48
 			? [
+				[modeCompact, autoCompactionCompact, modelText, contextCompact, evolText, dirGitText],
 				[modeCompact, autoCompactionCompact, modelText, contextCompact, dirGitText],
-				[modeCompact, autoCompactionCompact, modelText, contextCompact, dirText],
 				[modeCompact, autoCompactionCompact, modelText, contextCompact],
 				[modeNarrow, autoCompactionNarrow, contextCompact, modelText],
 			]
@@ -539,7 +579,9 @@ export function installStatusline(
 					const effortStatus = footerData.getExtensionStatuses().get(EFFORT_STATUS_KEY);
 					const pressureStatus = footerData.getExtensionStatuses().get("maestro-auto-compact");
 					const swarmStatus = footerData.getExtensionStatuses().get("maestro-swarm");
-					lines.push(renderLine1(rs, activeToolCalls, cwd, width, modeStatus, approvalStatus, compactionModeStatus, effortStatus));
+					const evolStatus = footerData.getExtensionStatuses().get("self-evolve");
+					const knowledgeStatus = footerData.getExtensionStatuses().get("maestro-knowledge-pending");
+					lines.push(renderLine1(rs, activeToolCalls, cwd, width, modeStatus, approvalStatus, compactionModeStatus, effortStatus, evolStatus, knowledgeStatus));
 
 					const pressureLine = renderPressureLine(pressureStatus, width);
 					if (pressureLine) lines.push(pressureLine);

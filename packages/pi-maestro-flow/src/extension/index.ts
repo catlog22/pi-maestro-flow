@@ -191,6 +191,7 @@ import {
   type PermissionMode,
 } from "../permissions/types.ts";
 import {
+  COMPACTION_STATUS_KEY,
   createMaestroCompaction,
   persistMaestroCompactionKnowhow,
   runWithCompactionStatus,
@@ -718,12 +719,63 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   let attachedWorkflowSessionId: string | undefined;
   let attachedWorkflowHostSessionId: string | undefined;
   let lastRunStates = new Map<string, string>();
+
+  // Knowledge-pending UI indicator: persistent status-bar segment + 0→N
+  // notify so manual resolve (review_required) is surfaced without opening
+  // the knowledge center.
+  const KNOWLEDGE_PENDING_STATUS_KEY = "maestro-knowledge-pending";
+  let lastKnowledgePendingNotify = "";
+
+  function updateKnowledgePendingStatus(
+    ctx: ExtensionContext,
+    counts: { pending: number; reviewRequired: number },
+  ): void {
+    try {
+      const total = counts.pending + counts.reviewRequired;
+      if (total === 0) {
+        ctx.ui.setStatus(KNOWLEDGE_PENDING_STATUS_KEY, undefined);
+        return;
+      }
+      const value = counts.reviewRequired > 0
+        ? `${counts.reviewRequired} review · ${counts.pending} pending`
+        : `${counts.pending} pending`;
+      ctx.ui.setStatus(KNOWLEDGE_PENDING_STATUS_KEY, value);
+      // One-shot notify on 0→N transition (dedup by key).
+      const key = `${counts.reviewRequired}:${counts.pending}`;
+      if (lastKnowledgePendingNotify !== key) {
+        lastKnowledgePendingNotify = key;
+        ctx.ui.notify(
+          `Knowledge center: ${counts.reviewRequired} candidate(s) need manual resolve`
+            + ` (${counts.pending} pending total) — /maestro-knowledge`,
+          "info",
+        );
+      }
+    } catch {
+      // Status bar is cosmetic — never break the refresh flow.
+    }
+  }
+
+  async function refreshKnowledgePendingStatus(ctx: ExtensionContext, sessionId: string): Promise<void> {
+    try {
+      const summary = await new KnowledgeCliAdapter(ctx.cwd).review(sessionId).catch(() => null);
+      if (!summary) return;
+      updateKnowledgePendingStatus(ctx, {
+        pending: summary.candidates.filter((candidate) => candidate.status === "pending").length,
+        reviewRequired: summary.candidates.filter(
+          (candidate) => candidate.reconciliation?.promotion_eligibility === "review_required",
+        ).length,
+      });
+    } catch {
+      // Ignore — next seal/refresh will retry.
+    }
+  }
   let lastSessionStatus: string | undefined;
   let workflowSessionOptedIn = true;
   let approvalMode: PermissionMode = DEFAULT_PERMISSION_MODE;
   let currentSwarmProjection: TeamSwarmProjection | undefined;
   let maestroUiSessionActive = false;
   let preserveCompletedTurnFromNativeThreshold = false;
+  let lastCompactionCancel: { reason: string; at: number; operationId?: number } | undefined;
   let teammateAttachTodoIsolated = false;
   let flowSettingsContext: ExtensionContext | undefined;
   const maestroUiPublisher = new MaestroUiPublisher({
@@ -780,6 +832,37 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   const chineseResponseMode = registerChineseResponseMode(pi);
   registerSkillManager(pi);
   registerCompactionSettingsCommand(pi);
+  pi.registerCommand("compaction-status", {
+    description: "Show maestro auto-compaction state: arbiter owner, pending intents, breaker, and the last cancel reason.",
+    async handler(_args, ctx) {
+      const state = midTurnAutoCompaction.describeState();
+      const arbiterOwner = compactionArbiter.currentOwner();
+      const operationId = compactionArbiter.currentOperationId();
+      const tombstone = compactionArbiter.timeoutTombstone();
+      const lines: string[] = [
+        `turn: ${state.turnCount}`,
+        `running: ${state.running ? `yes${state.activeRequestOwner ? ` (${state.activeRequestOwner})` : ""}` : "no"}`,
+        state.zombieOwner !== undefined
+          ? `zombie: owner#${state.zombieOwner} may still be settling (new submissions held)`
+          : "zombie: (none)",
+        `arbiter owner: ${arbiterOwner ?? "(idle)"}${operationId !== undefined ? ` op#${operationId}` : ""}`,
+        tombstone
+          ? `arbiter tombstone: holding extension submissions for ~${Math.ceil(tombstone.remainingMs / 1000)}s after a lease timeout`
+          : "arbiter tombstone: (none)",
+        state.pendingIntent
+          ? `pending intent: ${state.pendingIntent.tokens.toLocaleString("en-US")}/${state.pendingIntent.thresholdTokens.toLocaleString("en-US")} tokens${state.pendingIntent.contextExhausted ? " (context exhausted)" : ""}${state.pendingIntent.requestBlocked ? " (request blocked)" : ""}`
+          : "pending intent: (none)",
+        `output-limit intent: ${state.outputLimitIntentPending ? "pending" : "(none)"}`,
+        state.breaker.trippedAtTurn !== undefined && state.breaker.cooldownRemainingTurns !== undefined
+          ? `breaker: TRIPPED after ${state.breaker.consecutiveFailures} consecutive failures; cooldown has ${state.breaker.cooldownRemainingTurns} completed turn(s) left`
+          : `breaker: ok (${state.breaker.consecutiveFailures} consecutive failures)`,
+        lastCompactionCancel
+          ? `last cancel: ${lastCompactionCancel.reason} (at ${new Date(lastCompactionCancel.at).toLocaleTimeString()})`
+          : "last cancel: (none)",
+      ];
+      ctx.ui.notify(lines.join("\n"), "info");
+    },
+  });
 
   // === Main Tool: maestro ===
   const maestroTool: ToolDefinition<typeof MaestroParams> = {
@@ -1389,6 +1472,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
         const reviewRequired = summary?.candidates.filter(
           candidate => candidate.reconciliation?.promotion_eligibility === "review_required",
         ).length ?? 0;
+        updateKnowledgePendingStatus(ctx, { pending, reviewRequired });
         if (pending > 0 || reviewRequired > 0) {
           const message = `Workflow Session ${sealedSessionId} sealed — ${pending} candidate(s) pending, `
             + `${reviewRequired} review required. Run \"maestro knowledge review ${sealedSessionId}\" before promotion.`;
@@ -1398,7 +1482,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       }
       lastSessionStatus = nextSession.status;
     }
-    if (emitEvents && activateWorkflowSession) emitRunTransitions(next);
+    if (emitEvents && activateWorkflowSession) emitRunTransitions(next, ctx);
     else lastRunStates = new Map(next.session?.runs.map((run) => [run.runId, run.status]) ?? []);
     updateTodoWidget();
     publishMaestroUi();
@@ -1661,7 +1745,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     }
   }
 
-  function emitRunTransitions(snapshot: WorkflowSnapshot): void {
+  function emitRunTransitions(snapshot: WorkflowSnapshot, ctx: ExtensionContext): void {
     const nextStates = new Map(snapshot.session?.runs.map((run) => [run.runId, run.status]) ?? []);
     for (const run of snapshot.session?.runs ?? []) {
       const previous = lastRunStates.get(run.runId);
@@ -1708,6 +1792,10 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
               .filter(candidate => candidate.run_ids.includes(run.runId)).length;
             const reviewRequired = summary.candidates
               .filter(candidate => candidate.reconciliation?.promotion_eligibility === "review_required").length;
+            updateKnowledgePendingStatus(ctx, {
+              pending: summary.candidates.filter(candidate => candidate.status === "pending").length,
+              reviewRequired,
+            });
             const reviewHint = reviewRequired > 0
               ? ` · ${reviewRequired} review required — \"maestro knowledge review ${sealedSessionId}\"`
               : ` — \"maestro knowledge review ${sealedSessionId}\"`;
@@ -1903,7 +1991,10 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       overlay = new KnowledgeOverlay({
         view,
         requestRender: () => tui.requestRender(),
-        close: () => done(undefined),
+        close: () => {
+          void refreshKnowledgePendingStatus(ctx, sessionId);
+          done(undefined);
+        },
         onAction: async (action: KnowledgeOverlayAction) => {
           if (action.kind === "refresh") {
             overlay.update(await loadView(true));
@@ -2368,6 +2459,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     // enqueue continuation work into the departing session.
     midTurnAutoCompaction.onSessionShutdown(ctx);
     preserveCompletedTurnFromNativeThreshold = false;
+    lastCompactionCancel = undefined;
     compactionArbiter.reset();
     await inputHistorySessionShutdown();
     // Non-destructive: preserve the prune manifest and spill resources so a
@@ -2404,15 +2496,56 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       request !== undefined,
       Boolean(ctx.hasPendingMessages?.()),
       isRecoveryFallback,
+      midTurnAutoCompaction.hasPendingTakeover(),
     )) {
       preserveCompletedTurnFromNativeThreshold = false;
+      const breakerPause = midTurnAutoCompaction.describeBreakerPause();
+      lastCompactionCancel = {
+        reason: breakerPause
+          ? `completed-turn preservation (deferred; ${breakerPause})`
+          : "completed-turn preservation (deferred to maestro settle)",
+        at: Date.now(),
+      };
+      try {
+        ctx.ui.setStatus(COMPACTION_STATUS_KEY, breakerPause ? "CTX DEFERRED (BREAKER)" : "CTX DEFERRED → SETTLE");
+        ctx.ui.notify(
+          breakerPause
+            ? `Native threshold compaction deferred: ${breakerPause}.`
+            : "Native threshold compaction deferred: the turn completed cleanly; maestro compaction will run at agent settle.",
+          "info",
+        );
+      } catch { /* status/notification are best-effort; cancellation stays authoritative */ }
       return { cancel: true };
     }
     const observed = compactionArbiter.observeStart(
       request,
       event.signal,
     );
-    if (!observed.allowed) return { cancel: true };
+    if (!observed.allowed) {
+      const activeOwner = compactionArbiter.currentOwner();
+      const tombstone = compactionArbiter.timeoutTombstone();
+      const reason = activeOwner
+        ? `arbiter denied: a ${activeOwner} compaction is already active`
+        : tombstone
+          ? "arbiter denied: a timed-out compaction may still be settling"
+          : "arbiter denied: stale or mismatched compaction request";
+      lastCompactionCancel = {
+        reason,
+        at: Date.now(),
+        operationId: observed.operationId,
+      };
+      try {
+        ctx.ui.notify(
+          activeOwner
+            ? `Auto-compaction skipped: a ${activeOwner} compaction is already active.`
+            : tombstone
+              ? `Auto-compaction skipped: a timed-out compaction may still be settling (~${Math.ceil(tombstone.remainingMs / 1000)}s hold left).`
+              : "Auto-compaction skipped: the compaction request no longer matches the active lease.",
+          "info",
+        );
+      } catch { /* best-effort */ }
+      return { cancel: true };
+    }
     const providerPressureRecovery = isProviderPressureCompactionTrigger(observed.trigger);
     try {
       const result = await runObservedCompaction(observed, async () => {
@@ -2425,6 +2558,11 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
         if (observed.trigger?.owner === "plan-handoff" && observed.trigger.reason === "clean-context") {
           if (!cleanContextRequest) {
             ctx.ui.notify("Approved Plan context reset was cancelled because its payload was unavailable.", "warning");
+            lastCompactionCancel = {
+              reason: "plan clean-context payload unavailable",
+              at: Date.now(),
+              operationId: observed.operationId,
+            };
             return { cancel: true };
           }
           const compaction = await runWithCompactionStatus(event, ctx, () =>
@@ -2454,6 +2592,15 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       });
       if (result?.cancel) {
         observed.finalize("cancel");
+        if (lastCompactionCancel?.operationId !== observed.operationId) {
+          lastCompactionCancel = {
+            reason: providerPressureRecovery
+              ? "provider-pressure recovery failed (fail-closed; native fallback blocked)"
+              : "maestro compaction declined (see notification)",
+            at: Date.now(),
+            operationId: observed.operationId,
+          };
+        }
         if (providerPressureRecovery) {
           try { goalCompactionCancelled(ctx); } catch { /* cancellation remains authoritative */ }
         } else {
@@ -2471,6 +2618,11 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
             "error",
           );
         } catch { /* cancellation remains authoritative */ }
+        lastCompactionCancel = {
+          reason: "provider-pressure recovery failed (fail-closed; native fallback blocked)",
+          at: Date.now(),
+          operationId: observed.operationId,
+        };
         return { cancel: true };
       }
       goalCompactionCancelled(ctx);
@@ -2664,6 +2816,10 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     onCompactionCancelled: () => {
       compactionArbiter.complete("cancel");
       goalCompactionCancelled();
+      lastCompactionCancel = {
+        reason: "PreCompact hook rejected the compaction",
+        at: Date.now(),
+      };
     },
   });
   const requireFlowSettingsContext = (surface: string): ExtensionContext | undefined => {
@@ -2958,12 +3114,37 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
       request !== undefined,
       Boolean(ctx.hasPendingMessages?.()),
       isRecoveryFallback,
+      autoCompaction.hasPendingTakeover(),
     )) {
       preserveCompletedTurnFromNativeThreshold = false;
+      const breakerPause = autoCompaction.describeBreakerPause();
+      try {
+        ctx.ui.setStatus(COMPACTION_STATUS_KEY, breakerPause ? "CTX DEFERRED (BREAKER)" : "CTX DEFERRED → SETTLE");
+        ctx.ui.notify(
+          breakerPause
+            ? `Native threshold compaction deferred: ${breakerPause}.`
+            : "Native threshold compaction deferred: the turn completed cleanly; maestro compaction will run at agent settle.",
+          "info",
+        );
+      } catch { /* status/notification are best-effort; cancellation stays authoritative */ }
       return { cancel: true };
     }
     const observed = compactionArbiter.observeStart(request, event.signal);
-    if (!observed.allowed) return { cancel: true };
+    if (!observed.allowed) {
+      const activeOwner = compactionArbiter.currentOwner();
+      const tombstone = compactionArbiter.timeoutTombstone();
+      try {
+        ctx.ui.notify(
+          activeOwner
+            ? `Auto-compaction skipped: a ${activeOwner} compaction is already active.`
+            : tombstone
+              ? `Auto-compaction skipped: a timed-out compaction may still be settling (~${Math.ceil(tombstone.remainingMs / 1000)}s hold left).`
+              : "Auto-compaction skipped: the compaction request no longer matches the active lease.",
+          "info",
+        );
+      } catch { /* best-effort */ }
+      return { cancel: true };
+    }
     const providerPressureRecovery = isProviderPressureCompactionTrigger(observed.trigger);
     try {
       const projected = await autoCompaction.projectCompactionInput(event, ctx);
