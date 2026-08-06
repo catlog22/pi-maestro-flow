@@ -9,6 +9,9 @@ import { attachViewportStability, type ViewportStabilityPatch } from "./viewport
 import { acquireMouseReporting, flushMouseReportingWrites, type MouseReportingLease } from "./mouse-reporting.ts";
 
 const SGR_MOUSE = /^\u001b\[<(\d+);(\d+);(\d+)([Mm])$/;
+// Legacy X10 mouse: ESC [ M + 3 bytes (button+32, x+32, y+32). Some terminals fall
+// back to it when SGR (1006) is not active; wheel still uses 64/65 in the button byte.
+const X10_MOUSE = /^\u001b\[M(.{3})$/s;
 
 export const DEFAULT_SIDEBAR_WIDTH = 40;
 export const MIN_SIDEBAR_WIDTH = 32;
@@ -36,6 +39,21 @@ export function parseSgrMouseEvent(data: string): SgrMouseEvent | undefined {
 	const y = Number(match[3]);
 	if (![button, x, y].every(Number.isFinite) || x < 1 || y < 1) return undefined;
 	return { button, x, y, release: match[4] === "m", motion: (button & 32) !== 0 };
+}
+
+/** Parse the legacy X10 mouse encoding into the same SgrMouseEvent shape. */
+export function parseX10MouseEvent(data: string): SgrMouseEvent | undefined {
+	const match = data.match(X10_MOUSE);
+	if (!match) return undefined;
+	const raw = match[1].charCodeAt(0) - 32;
+	const x = match[1].charCodeAt(1) - 32;
+	const y = match[1].charCodeAt(2) - 32;
+	if (x < 1 || y < 1 || raw < 0) return undefined;
+	const release = (raw & 3) === 3;
+	// Normalise the release bits (X10 uses 3) away so downstream routing sees the
+	// same button value as an SGR release (0) and satisfies (button & 31) === 0.
+	const button = release ? raw & ~3 : raw;
+	return { button, x, y, release, motion: (raw & 32) !== 0 };
 }
 
 type RenderFunction = TUI["render"];

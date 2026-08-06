@@ -134,6 +134,69 @@ test("wheel scroll keeps editor+chrome physically fixed and clamps to the viewpo
 	controller.dispose();
 });
 
+test("X10 wheel (non-SGR fallback) still scrolls the transcript", () => {
+	let transcript = Array.from({ length: 40 }, (_, i) => `line ${i}`);
+	const harness = makeHarness(() => buildLines(transcript, EDITOR_BLOCK, CHROME), 20);
+	const controller = createFullscreenController({
+		subscribeInput: (handler) => {
+			harness.attachInput(handler);
+			return () => harness.attachInput(undefined);
+		},
+	});
+	controller.attach(harness.tui);
+	const x10 = (btn: number, x: number, y: number) => `\x1b[M${String.fromCharCode(btn + 32, x + 32, y + 32)}`;
+	harness.inputHandler?.(x10(64, 5, 10)); // X10 wheel-up
+	harness.inputHandler?.(x10(64, 5, 10));
+	assert.equal(controller.getScrollOffset(), 6, "X10 wheel scrolls the transcript");
+	harness.inputHandler?.(x10(65, 5, 10)); // X10 wheel-down
+	assert.equal(controller.getScrollOffset(), 3, "X10 wheel-down returns toward live bottom");
+	assert.ok(!harness.render()[14].includes("\x1b[7m"), "X10 wheel never starts a selection");
+	controller.dispose();
+});
+
+test("X10 drag (non-SGR fallback) selects and copies like SGR", async () => {
+	let transcript = Array.from({ length: 20 }, (_, i) => `line ${i}`);
+	let copied: string | undefined;
+	const harness = makeHarness(() => buildLines(transcript, EDITOR_BLOCK, CHROME), 20);
+	const controller = createFullscreenController({
+		subscribeInput: (handler) => {
+			harness.attachInput(handler);
+			return () => harness.attachInput(undefined);
+		},
+		isCopyOnSelect: () => true,
+		copy: async (text) => {
+			copied = text;
+		},
+	});
+	controller.attach(harness.tui);
+	const x10 = (btn: number, x: number, y: number) => `\x1b[M${String.fromCharCode(btn + 32, x + 32, y + 32)}`;
+	harness.inputHandler?.(x10(0, 1, 1)); // press button 0 at (1,1)
+	harness.inputHandler?.(x10(32, 6, 2)); // motion to (6,2)
+	harness.inputHandler?.(x10(3, 6, 2)); // release
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(copied, "line 5\nline 6", "X10 drag copies the selected rows");
+	controller.dispose();
+});
+
+test("legacy urxvt wheel buttons 4/5 scroll instead of starting a drag", () => {
+	let transcript = Array.from({ length: 40 }, (_, i) => `line ${i}`);
+	const harness = makeHarness(() => buildLines(transcript, EDITOR_BLOCK, CHROME), 20);
+	const controller = createFullscreenController({
+		subscribeInput: (handler) => {
+			harness.attachInput(handler);
+			return () => harness.attachInput(undefined);
+		},
+	});
+	controller.attach(harness.tui);
+	harness.inputHandler?.("\x1b[<4;5;10M"); // button 4 = legacy wheel up
+	harness.inputHandler?.("\x1b[<4;5;10M");
+	assert.equal(controller.getScrollOffset(), 6, "legacy wheel-up scrolls the transcript");
+	harness.inputHandler?.("\x1b[<5;5;10M"); // button 5 = legacy wheel down
+	assert.equal(controller.getScrollOffset(), 3, "legacy wheel-down returns toward live bottom");
+	assert.ok(!harness.render()[14].includes("\x1b[7m"), "legacy wheel never starts a selection");
+	controller.dispose();
+});
+
 test("modifier-wheel still scrolls the transcript instead of starting a drag", () => {
 	let transcript = Array.from({ length: 40 }, (_, i) => `line ${i}`);
 	const harness = makeHarness(() => buildLines(transcript, EDITOR_BLOCK, CHROME), 20);

@@ -21,7 +21,7 @@ import {
 	createEditorBottomSentinel,
 	type EditorBottomController,
 } from "./editor-bottom.ts";
-import { createCockpitClaudeEditorFactory } from "./claude-editor.ts";
+import { createCockpitClaudeEditorFactory, isCockpitClaudeEditorFactory } from "./claude-editor.ts";
 import { detectTerminalCompatibility } from "./terminal-capability.ts";
 import {
 	COCKPIT_FULLSCREEN_MARKER,
@@ -713,9 +713,21 @@ export default function (pi: ExtensionAPI): void {
 	// is never hot-toggled. If another extension owns the editor factory, fail
 	// closed with one warning and leave both gated features inert.
 	const installClaudeEditor = (ctx: ExtensionContext): void => {
-		if (claudeEditorInstalled) return;
 		if (!config.doubleEscapeClearInput && !config.fullscreenInput) return;
-		if (ctx.ui.getEditorComponent()) {
+		const current = ctx.ui.getEditorComponent();
+		if (isCockpitClaudeEditorFactory(current)) {
+			// Our own factory is already in pi's editor slot — it survives a resume
+			// or reload that cleared the module state but not the slot. Treat it as
+			// installed and never misreport it as a foreign owner.
+			claudeEditorInstalled = true;
+			return;
+		}
+		if (claudeEditorInstalled && current === undefined) {
+			// pi cleared our editor (e.g. resetExtensionUI on a session switch) but
+			// the flag is stale; reinstall below instead of staying inert.
+			claudeEditorInstalled = false;
+		}
+		if (current) {
 			if (!claudeEditorForeignWarned) {
 				claudeEditorForeignWarned = true;
 				ctx.ui.notify(
@@ -738,7 +750,8 @@ export default function (pi: ExtensionAPI): void {
 	};
 
 	const clearClaudeEditor = (ctx: ExtensionContext): void => {
-		if (!claudeEditorInstalled) return;
+		const current = ctx.ui.getEditorComponent();
+		if (!claudeEditorInstalled && !isCockpitClaudeEditorFactory(current)) return;
 		try {
 			ctx.ui.setEditorComponent(undefined);
 		} catch {
