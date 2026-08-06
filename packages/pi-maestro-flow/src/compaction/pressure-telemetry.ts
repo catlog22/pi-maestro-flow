@@ -283,7 +283,13 @@ export function resetCompactionBreaker(): CompactionBreakerState {
 export function recordCompactionFailure(
   breaker: CompactionBreakerState,
   turnCount: number,
+  options: { transient?: boolean } = {},
 ): CompactionBreakerState {
+  // Transient provider/gateway failures (502 upstream_error, network drops)
+  // neither advance nor reset the streak: the summary path already retries
+  // them internally, and letting them trip the breaker would pause compaction
+  // for exactly the high-pressure turns that need it.
+  if (options.transient) return breaker;
   const consecutiveFailures = breaker.consecutiveFailures + 1;
   const trippedAtTurn = consecutiveFailures >= MAX_CONSECUTIVE_COMPACTION_FAILURES
     ? breaker.trippedAtTurn ?? turnCount

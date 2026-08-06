@@ -35,6 +35,7 @@ import {
   COMPACTION_STATUS_KEY,
   disableInvalidBudgetThinking,
   formatCompactionStatus,
+  isTransientSummaryError,
   resolveConfiguredCompactionModel,
 } from "./maestro-compaction.ts";
 import { loadPiCompactionInternals, type PiCompactionInternals } from "./pi-internals.ts";
@@ -884,7 +885,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
 
     const recoverBeforeSubmission = (error: unknown, message: string, options: { notify: boolean } = { notify: true }) => {
       if (intent.generation !== state.generation) return;
-      state.breaker = recordCompactionFailure(state.breaker, state.turnCount);
+      state.breaker = recordCompactionFailure(state.breaker, state.turnCount, { transient: isTransientSummaryError(error) });
       clearPressureStatus(ctx);
       if (options.notify) ctx.ui.notify(
         `${message}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1076,7 +1077,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         );
       }
       if (intent.generation !== state.generation || state.activeOwner !== owner) return;
-      state.breaker = recordCompactionFailure(state.breaker, state.turnCount);
+      state.breaker = recordCompactionFailure(state.breaker, state.turnCount, { transient: isTransientSummaryError(error) });
       state.running = false;
       state.activeOwner = undefined;
       state.activeRequestOwner = undefined;

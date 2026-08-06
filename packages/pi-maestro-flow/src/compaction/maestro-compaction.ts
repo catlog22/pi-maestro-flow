@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, realpath, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { complete } from "@earendil-works/pi-ai/compat";
+import { complete, isRetryableAssistantError } from "@earendil-works/pi-ai/compat";
 import {
   convertToLlm,
   serializeConversation,
@@ -46,6 +46,12 @@ export { MIN_SUMMARY_OUTPUT_TOKENS, SUMMARY_CAPACITY_MARGIN_TOKENS } from "./com
 export const SUMMARY_REQUEST_PROTOCOL_TOKENS = 64;
 export const MAX_PROMPT_TOO_LONG_RETRIES = 2;
 const PROMPT_TOO_LONG_RETRY_FRACTION = 0.2;
+/** Provider-level HTTP retries (retry-after aware) for each summary attempt. */
+export const SUMMARY_PROVIDER_MAX_RETRIES = 2;
+/** Outer retries for transient provider/transport failures (5xx, upstream_error, ...). */
+export const MAX_TRANSIENT_SUMMARY_RETRIES = 2;
+export const TRANSIENT_SUMMARY_RETRY_BASE_DELAY_MS = 10_000;
+export const TRANSIENT_SUMMARY_RETRY_MAX_DELAY_MS = 30_000;
 const SUMMARY_INPUT_TRUNCATION_MARKER = "[Earlier conversation omitted to fit the compaction model. Use previousSummary and runtimeState as the authoritative earlier checkpoint.]";
 const IMAGE_PLACEHOLDER = "[image]";
 const IMAGE_ROUTE_DETAILS_KIND = "maestro-image-routing";
@@ -309,15 +315,142 @@ export function trimSummaryInputForPromptTooLong(messages: AgentMessage[]): { me
 }
 
 export function isPromptTooLongError(error: unknown): boolean {
+  return /prompt(?:\s+is)?\s+too\s+long|request\s+too\s+large|context(?!\s+deadline)[^.\n]*(?:exceed|too\s+long|too\s+large|limit)|too\s+many\s+tokens|maximum\s+context/i.test(errorClassificationText(error));
+}
+
+function errorClassificationText(error: unknown): string {
   const record = error && typeof error === "object" ? error as Record<string, unknown> : undefined;
   const nested = record?.error && typeof record.error === "object" ? record.error as Record<string, unknown> : undefined;
-  const text = [
+  return [
     error instanceof Error ? error.message : typeof error === "string" ? error : undefined,
     typeof record?.message === "string" ? record.message : undefined,
     typeof record?.errorMessage === "string" ? record.errorMessage : undefined,
     typeof nested?.message === "string" ? nested.message : undefined,
   ].filter((value): value is string => Boolean(value)).join(" ");
-  return /prompt(?:\s+is)?\s+too\s+long|request\s+too\s+large|context(?!\s+deadline)[^.\n]*(?:exceed|too\s+long|too\s+large|limit)|too\s+many\s+tokens|maximum\s+context/i.test(text);
+}
+
+/**
+ * Classify a thrown summary-completion error or provider errorMessage as a
+ * transient provider/transport failure worth retrying (5xx, 408/409/429,
+ * gateway `upstream_error`, network drops). Aborts, deterministic 4xx, and
+ * quota/billing exhaustion are never transient. Text classification reuses the
+ * pi-ai retry taxonomy so the summary path matches the main agent loop.
+ */
+export function isTransientSummaryError(error: unknown): boolean {
+  if (!error) return false;
+  if (error instanceof Error && error.name === "AbortError") return false;
+  const record = error && typeof error === "object" ? error as Record<string, unknown> : undefined;
+  if (typeof record?.status === "number") {
+    const status = record.status;
+    return status === 408 || status === 409 || status === 429 || status >= 500;
+  }
+  const text = errorClassificationText(error);
+  if (!text || /\baborted?\b/i.test(text)) return false;
+  return isRetryableAssistantError({ stopReason: "error", errorMessage: text } as Parameters<typeof isRetryableAssistantError>[0]);
+}
+
+export function transientSummaryRetryDelayMs(retryIndex: number): number {
+  return Math.min(
+    TRANSIENT_SUMMARY_RETRY_MAX_DELAY_MS,
+    TRANSIENT_SUMMARY_RETRY_BASE_DELAY_MS * 2 ** Math.max(0, retryIndex),
+  );
+}
+
+/** Abortable backoff sleep for summary retries; rejects once the signal fires. */
+export function summaryRetryDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error("Compaction summary retry aborted"));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error("Compaction summary retry aborted"));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+export interface SummaryCompletionRetryInput {
+  /** Issue one completion attempt against the current fit. */
+  attempt: (fit: SummaryInputFit) => Promise<SummaryResponse>;
+  /** Produce a smaller fit after a prompt-too-long failure, or undefined when nothing can be dropped. */
+  trimForPromptTooLong: (fit: SummaryInputFit) => SummaryInputFit | undefined;
+  initialFit: SummaryInputFit;
+  signal: AbortSignal;
+  /** Notified before each transient backoff sleep. */
+  onTransientRetry?: (info: { attempt: number; maxRetries: number; delayMs: number; errorMessage: string }) => void;
+  /** Injectable backoff sleep; defaults to the abortable summaryRetryDelay. */
+  delay?: (ms: number, signal: AbortSignal) => Promise<void>;
+}
+
+/**
+ * Run summary completion attempts with two independent retry budgets:
+ * prompt-too-long failures trim the oldest rounds (fail-closed capacity
+ * boundary unchanged), and transient provider/transport failures back off and
+ * retry without touching the input. Deterministic errors surface immediately.
+ */
+export async function completeSummaryWithRetries(
+  input: SummaryCompletionRetryInput,
+): Promise<{ response: SummaryResponse; fit: SummaryInputFit }> {
+  const delay = input.delay ?? summaryRetryDelay;
+  let fit = input.initialFit;
+  let promptTooLongRetries = 0;
+  let transientRetries = 0;
+  const scheduleTransientRetry = (errorMessage: string): number => {
+    const delayMs = transientSummaryRetryDelayMs(transientRetries);
+    transientRetries += 1;
+    input.onTransientRetry?.({
+      attempt: transientRetries,
+      maxRetries: MAX_TRANSIENT_SUMMARY_RETRIES,
+      delayMs,
+      errorMessage,
+    });
+    return delayMs;
+  };
+  for (;;) {
+    let response: SummaryResponse;
+    try {
+      response = await input.attempt(fit);
+    } catch (error) {
+      if (isPromptTooLongError(error) && promptTooLongRetries < MAX_PROMPT_TOO_LONG_RETRIES) {
+        const retryFit = input.trimForPromptTooLong(fit);
+        if (retryFit) {
+          fit = retryFit;
+          promptTooLongRetries += 1;
+          continue;
+        }
+      }
+      if (transientRetries < MAX_TRANSIENT_SUMMARY_RETRIES && isTransientSummaryError(error)) {
+        const delayMs = scheduleTransientRetry(error instanceof Error ? error.message : String(error));
+        await delay(delayMs, input.signal);
+        continue;
+      }
+      throw error;
+    }
+
+    if (response.stopReason !== "error") return { response, fit };
+
+    if (isPromptTooLongError(response.errorMessage)) {
+      if (promptTooLongRetries >= MAX_PROMPT_TOO_LONG_RETRIES) return { response, fit };
+      const retryFit = input.trimForPromptTooLong(fit);
+      if (!retryFit) return { response, fit };
+      fit = retryFit;
+      promptTooLongRetries += 1;
+      continue;
+    }
+
+    if (transientRetries < MAX_TRANSIENT_SUMMARY_RETRIES && isTransientSummaryError(response.errorMessage)) {
+      const delayMs = scheduleTransientRetry(response.errorMessage ?? "Unknown transient provider error");
+      await delay(delayMs, input.signal);
+      continue;
+    }
+    return { response, fit };
+  }
 }
 
 export interface WorkflowRecoveryIdentity {
@@ -379,7 +512,7 @@ export interface MaestroCompactionDetails {
   trigger?: CompactionTrigger;
 }
 
-interface SummaryResponse {
+export interface SummaryResponse {
   stopReason?: string;
   errorMessage?: string;
   content: Array<{ type: string; text?: string }>;
@@ -425,6 +558,7 @@ export function buildSummaryCompletionOptions(input: {
 }) {
   return {
     ...input,
+    maxRetries: SUMMARY_PROVIDER_MAX_RETRIES,
     cacheRetention: "none" as const,
     onPayload: disableInvalidBudgetThinking,
   };
@@ -953,6 +1087,10 @@ async function completeWithCurrentModel(
     auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
   }
   if (!auth.ok || !auth.apiKey) throw new Error("Compaction model authentication is unavailable");
+  // Capture for the attempt closure: narrowing on the mutable `auth` binding
+  // does not survive into deferred calls.
+  const summaryApiKey = auth.apiKey;
+  const summaryHeaders = auth.headers;
 
   const fitPromptTooLongRetry = (current: SummaryInputFit): SummaryInputFit | undefined => {
     const trimmed = trimSummaryInputForPromptTooLong(current.messages);
@@ -964,43 +1102,39 @@ async function completeWithCurrentModel(
     );
   };
 
-  let promptTooLongRetries = 0;
-  for (;;) {
-    let response: SummaryResponse;
-    try {
-      response = await complete(
-        model,
-        {
-          systemPrompt: MAESTRO_COMPACTION_SYSTEM_PROMPT,
-          messages: [{
-            role: "user",
-            content: [{ type: "text", text: fit.prompt }],
-            timestamp: Date.now(),
-          }],
-        },
-        buildSummaryCompletionOptions({
-          apiKey: auth.apiKey,
-          headers: auth.headers,
-          maxTokens: fit.maxTokens,
-          signal: event.signal,
-        }),
-      );
-    } catch (error) {
-      if (!isPromptTooLongError(error) || promptTooLongRetries >= MAX_PROMPT_TOO_LONG_RETRIES) throw error;
-      const retryFit = fitPromptTooLongRetry(fit);
-      if (!retryFit) throw error;
-      fit = retryFit;
-      promptTooLongRetries += 1;
-      continue;
-    }
-
-    if (response.stopReason !== "error" || !isPromptTooLongError(response.errorMessage)) return response;
-    if (promptTooLongRetries >= MAX_PROMPT_TOO_LONG_RETRIES) return response;
-    const retryFit = fitPromptTooLongRetry(fit);
-    if (!retryFit) return response;
-    fit = retryFit;
-    promptTooLongRetries += 1;
-  }
+  const { response } = await completeSummaryWithRetries({
+    attempt: (attemptFit) => complete(
+      model,
+      {
+        systemPrompt: MAESTRO_COMPACTION_SYSTEM_PROMPT,
+        messages: [{
+          role: "user",
+          content: [{ type: "text", text: attemptFit.prompt }],
+          timestamp: Date.now(),
+        }],
+      },
+      buildSummaryCompletionOptions({
+        apiKey: summaryApiKey,
+        headers: summaryHeaders,
+        maxTokens: attemptFit.maxTokens,
+        signal: event.signal,
+      }),
+    ),
+    trimForPromptTooLong: fitPromptTooLongRetry,
+    initialFit: fit,
+    signal: event.signal,
+    onTransientRetry: ({ attempt, maxRetries, delayMs, errorMessage }) => {
+      try {
+        ctx.ui.notify(
+          `Compaction summary hit a transient provider error (${errorMessage}); retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt}/${maxRetries}).`,
+          "warning",
+        );
+      } catch {
+        // Notification is best-effort; the retry schedule is authoritative.
+      }
+    },
+  });
+  return response;
 }
 
 function compactionModelCacheKey(reference: string, currentModel: Model<Api>): string {

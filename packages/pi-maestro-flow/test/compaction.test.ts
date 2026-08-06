@@ -9,6 +9,7 @@ import {
   buildSummaryCompletionOptions,
   COMPACTION_MODE_STATUS_KEY,
   COMPACTION_STATUS_KEY,
+  completeSummaryWithRetries,
   createMaestroCompaction,
   CompactionCapacityError,
   estimateSummaryRequestTokens,
@@ -17,14 +18,22 @@ import {
   formatCompactionStatus,
   groupSummaryMessagesByApiRound,
   isPromptTooLongError,
+  isTransientSummaryError,
   mergeCompactionReferences,
   MAESTRO_COMPACTION_SYSTEM_PROMPT,
   MAX_PROMPT_TOO_LONG_RETRIES,
+  MAX_TRANSIENT_SUMMARY_RETRIES,
   persistMaestroCompactionKnowhow,
   resolveConfiguredCompactionModel,
   runWithCompactionStatus,
+  SUMMARY_PROVIDER_MAX_RETRIES,
+  summaryRetryDelay,
+  TRANSIENT_SUMMARY_RETRY_BASE_DELAY_MS,
+  TRANSIENT_SUMMARY_RETRY_MAX_DELAY_MS,
+  transientSummaryRetryDelayMs,
   trimSummaryInputForPromptTooLong,
   type MaestroCompactionDetails,
+  type SummaryInputFit,
 } from "../src/compaction/maestro-compaction.ts";
 import {
   applyContextPressurePolicy,
@@ -208,6 +217,7 @@ test("compaction summary completion disables provider prompt caching", () => {
   });
   assert.equal(options.cacheRetention, "none");
   assert.equal(options.headers?.["x-test"], "yes");
+  assert.equal(options.maxRetries, SUMMARY_PROVIDER_MAX_RETRIES, "provider-level transient retries stay enabled");
 });
 
 test("reference merge preserves inherited lineage and upgrades modified files", () => {
@@ -3205,6 +3215,152 @@ test("summary input groups by API round and trims 20% on prompt-too-long", () =>
   assert.equal(isPromptTooLongError({ error: { message: "prompt is too long (max 200000)" } }), true);
 });
 
+test("transient summary error classification separates gateway failures from deterministic ones", () => {
+  assert.equal(
+    isTransientSummaryError(new Error('OpenAI API error (502): {"message":"Upstream service temporarily unavailable","type":"upstream_error"}')),
+    true,
+    "the observed gateway 502 is transient",
+  );
+  assert.equal(isTransientSummaryError("stream_read_error (network error)"), true);
+  assert.equal(isTransientSummaryError(new Error("Connection error.")), true);
+  assert.equal(isTransientSummaryError({ status: 503, message: "bad gateway" }), true);
+  assert.equal(isTransientSummaryError({ status: 429 }), true);
+  assert.equal(isTransientSummaryError({ status: 401, message: "invalid api key" }), false, "deterministic 4xx fails fast");
+  assert.equal(isTransientSummaryError(new Error("insufficient_quota: you exceeded your billing budget")), false, "quota exhaustion is not transient");
+  assert.equal(isTransientSummaryError(new Error("Request too large for model context window")), false, "PTL belongs to the trim budget");
+  assert.equal(isTransientSummaryError(new Error("Operation aborted")), false, "aborts are terminal");
+  const abortError = new Error("Request aborted");
+  abortError.name = "AbortError";
+  assert.equal(isTransientSummaryError(abortError), false);
+  assert.equal(isTransientSummaryError(undefined), false);
+});
+
+test("transient summary retry delays escalate with a bounded ceiling", () => {
+  assert.equal(transientSummaryRetryDelayMs(0), TRANSIENT_SUMMARY_RETRY_BASE_DELAY_MS);
+  assert.equal(transientSummaryRetryDelayMs(1), TRANSIENT_SUMMARY_RETRY_BASE_DELAY_MS * 2);
+  assert.equal(transientSummaryRetryDelayMs(2), TRANSIENT_SUMMARY_RETRY_MAX_DELAY_MS);
+  assert.equal(transientSummaryRetryDelayMs(9), TRANSIENT_SUMMARY_RETRY_MAX_DELAY_MS);
+});
+
+test("summary retry backoff resolves and respects the abort signal", async () => {
+  await summaryRetryDelay(1, new AbortController().signal);
+  const aborted = new AbortController();
+  aborted.abort();
+  await assert.rejects(summaryRetryDelay(50, aborted.signal), /aborted/i, "an already-aborted signal rejects immediately");
+  const controller = new AbortController();
+  const pending = summaryRetryDelay(60_000, controller.signal);
+  setTimeout(() => controller.abort(), 5);
+  await assert.rejects(pending, /aborted/i, "aborting mid-backoff rejects the sleep");
+});
+
+const retryFit: SummaryInputFit = { messages: [], prompt: "p", estimatedRequestTokens: 10, maxTokens: 512, droppedRounds: 0 };
+
+test("summary completion retries transient response failures and recovers", async () => {
+  const delays: number[] = [];
+  const scheduled: Array<{ attempt: number; maxRetries: number; delayMs: number; errorMessage: string }> = [];
+  const transientMessage = 'OpenAI API error (502): {"message":"Upstream service temporarily unavailable","type":"upstream_error"}';
+  let attempts = 0;
+  const outcome = await completeSummaryWithRetries({
+    attempt: async () => {
+      attempts += 1;
+      if (attempts === 1) return { stopReason: "error", errorMessage: transientMessage, content: [] };
+      return { stopReason: "stop", content: [{ type: "text", text: "summary" }] };
+    },
+    trimForPromptTooLong: () => { throw new Error("trim must not run for transient failures"); },
+    initialFit: retryFit,
+    signal: new AbortController().signal,
+    onTransientRetry: (info) => scheduled.push(info),
+    delay: async (ms) => { delays.push(ms); },
+  });
+  assert.equal(attempts, 2);
+  assert.deepEqual(delays, [TRANSIENT_SUMMARY_RETRY_BASE_DELAY_MS]);
+  assert.deepEqual(scheduled, [{ attempt: 1, maxRetries: MAX_TRANSIENT_SUMMARY_RETRIES, delayMs: TRANSIENT_SUMMARY_RETRY_BASE_DELAY_MS, errorMessage: transientMessage }]);
+  assert.equal(outcome.response.stopReason, "stop");
+  assert.equal(outcome.fit, retryFit, "transient retries keep the original input");
+});
+
+test("summary completion retries thrown transient errors, then surfaces a persistent one", async () => {
+  let attempts = 0;
+  const delays: number[] = [];
+  await assert.rejects(
+    completeSummaryWithRetries({
+      attempt: async () => {
+        attempts += 1;
+        throw new Error("OpenAI API error (503): upstream unavailable");
+      },
+      trimForPromptTooLong: () => undefined,
+      initialFit: retryFit,
+      signal: new AbortController().signal,
+      delay: async (ms) => { delays.push(ms); },
+    }),
+    /503/,
+  );
+  assert.equal(attempts, MAX_TRANSIENT_SUMMARY_RETRIES + 1, "one initial attempt plus the bounded retry budget");
+  assert.deepEqual(delays, [TRANSIENT_SUMMARY_RETRY_BASE_DELAY_MS, TRANSIENT_SUMMARY_RETRY_BASE_DELAY_MS * 2]);
+});
+
+test("summary completion never retries deterministic failures", async () => {
+  let attempts = 0;
+  await assert.rejects(
+    completeSummaryWithRetries({
+      attempt: async () => {
+        attempts += 1;
+        const error = new Error("authentication expired") as Error & { status?: number };
+        error.status = 401;
+        throw error;
+      },
+      trimForPromptTooLong: () => undefined,
+      initialFit: retryFit,
+      signal: new AbortController().signal,
+      delay: async () => { throw new Error("deterministic failures must not back off"); },
+    }),
+    /authentication expired/,
+  );
+  assert.equal(attempts, 1);
+
+  let responseAttempts = 0;
+  const outcome = await completeSummaryWithRetries({
+    attempt: async () => {
+      responseAttempts += 1;
+      return { stopReason: "error", errorMessage: "invalid api key", content: [] };
+    },
+    trimForPromptTooLong: () => undefined,
+    initialFit: retryFit,
+    signal: new AbortController().signal,
+    delay: async () => { throw new Error("deterministic failures must not back off"); },
+  });
+  assert.equal(responseAttempts, 1);
+  assert.equal(outcome.response.stopReason, "error", "deterministic error responses keep the original fail-closed handoff");
+});
+
+test("transient retries stay independent from the prompt-too-long trim budget", async () => {
+  const fits: SummaryInputFit[] = [retryFit];
+  let trims = 0;
+  let attempts = 0;
+  const outcome = await completeSummaryWithRetries({
+    attempt: async (fit) => {
+      attempts += 1;
+      if (attempts === 1) return { stopReason: "error", errorMessage: "OpenAI API error (502): upstream_error", content: [] };
+      if (attempts === 2) return { stopReason: "error", errorMessage: "prompt is too long (max 200000)", content: [] };
+      assert.equal(fit.droppedRounds, 1, "the PTL attempt uses the trimmed fit");
+      return { stopReason: "stop", content: [{ type: "text", text: "summary" }] };
+    },
+    trimForPromptTooLong: (fit) => {
+      trims += 1;
+      const trimmed: SummaryInputFit = { ...fit, droppedRounds: fit.droppedRounds + 1 };
+      fits.push(trimmed);
+      return trimmed;
+    },
+    initialFit: retryFit,
+    signal: new AbortController().signal,
+    delay: async () => {},
+  });
+  assert.equal(attempts, 3);
+  assert.equal(trims, 1, "only the PTL failure trims; the 502 only backs off");
+  assert.equal(outcome.response.stopReason, "stop");
+  assert.equal(outcome.fit.droppedRounds, 1);
+});
+
 test("fitSummaryOutputBudget prefers the measured request estimate over tokensBefore", () => {
   // The old max() formula would have used the inflated 500K tokensBefore and
   // thrown; the measured 100K request estimate fits, so the budget survives
@@ -4308,6 +4464,23 @@ test("compaction breaker trips after MAX consecutive failures and resets after t
   const after = compactionBreakerAllows(breaker, COMPACTION_BREAKER_COOLDOWN_TURNS);
   assert.equal(after.allowed, true, "cooldown elapsed re-allows compaction");
   assert.equal(after.breaker.consecutiveFailures, 0, "breaker resets on cooldown");
+});
+
+test("compaction breaker ignores transient gateway failures but keeps counting deterministic ones", () => {
+  let breaker = resetCompactionBreaker();
+  for (let i = 0; i < MAX_CONSECUTIVE_COMPACTION_FAILURES + 2; i++) {
+    breaker = recordCompactionFailure(breaker, i, { transient: true });
+  }
+  assert.equal(breaker.consecutiveFailures, 0, "transient failures never advance the streak");
+  assert.equal(compactionBreakerAllows(breaker, MAX_CONSECUTIVE_COMPACTION_FAILURES + 2).allowed, true);
+
+  breaker = recordCompactionFailure(breaker, 10);
+  breaker = recordCompactionFailure(breaker, 11, { transient: true });
+  breaker = recordCompactionFailure(breaker, 12);
+  assert.equal(breaker.consecutiveFailures, 2, "a transient blip neither advances nor resets the deterministic streak");
+  assert.equal(compactionBreakerAllows(breaker, 12).allowed, true, "still below the cap");
+  breaker = recordCompactionFailure(breaker, 13);
+  assert.equal(compactionBreakerAllows(breaker, 13).allowed, false, "deterministic failures still trip the breaker");
 });
 
 // --- F3: graduated eviction of bulk tool outputs ---
