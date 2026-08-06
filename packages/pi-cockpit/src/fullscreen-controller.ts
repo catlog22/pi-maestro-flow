@@ -1,7 +1,7 @@
 import type { TUI } from "@earendil-works/pi-tui";
 import { EDITOR_END_SENTINEL, EDITOR_START_SENTINEL } from "./claude-editor.ts";
 import { acquireMouseReporting, flushMouseReportingWrites, type MouseReportingLease } from "./mouse-reporting.ts";
-import { parseSgrMouseEvent } from "./split-pane.ts";
+import { parseSgrMouseEvent, parseX10MouseEvent } from "./split-pane.ts";
 import {
 	createTranscriptSelectionController,
 	type TranscriptSelectionController,
@@ -193,7 +193,7 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 	};
 
 	const handleInput = (data: string): InputResult => {
-		const mouse = parseSgrMouseEvent(data);
+		const mouse = parseSgrMouseEvent(data) ?? parseX10MouseEvent(data);
 		if (!mouse) return undefined;
 		// Wheel buttons are 64 (up) / 65 (down) plus optional modifier bits; match
 		// on the wheel bit so modifier-wheel still scrolls the transcript instead of
