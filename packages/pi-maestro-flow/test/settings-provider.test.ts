@@ -86,9 +86,6 @@ test("API Manager provider exposes settings, retry policy and the original manag
       getSettingsPath: () => path.join(directory, "settings.json"),
       actions: {
         "api.manage": () => { calls.push("manage"); },
-        "api.configure": () => { calls.push("configure"); },
-        "api.retry": () => { calls.push("retry"); },
-        "api.list": () => { calls.push("list"); },
       },
     });
     const context: SettingsContextV1 = { cwd: "/project", locale: "en" };
@@ -100,23 +97,18 @@ test("API Manager provider exposes settings, retry policy and the original manag
       "api.providers",
       "api.retry.enabled",
       "api.retry.maxRetries",
+      "api.retry.baseDelayMs",
       "api.promptCache",
       "api.cacheRetention",
       "api.agentCacheRetention",
       "api.overview",
       "api.manage",
-      "api.configure",
-      "api.retry",
-      "api.cache",
-      "api.list",
     ]);
     assert.equal(description.catalogs?.["zh-CN"]["api.action.manage"], "打开 API Manager");
     const snapshot = await provider.read({ context });
-    assert.equal(snapshot.effective.values.length, 12);
-    for (const actionId of ["api.manage", "api.configure", "api.retry", "api.list"]) {
-      assert.deepEqual(await provider.invokeAction!({ context, actionId }), { handled: true, refresh: false });
-    }
-    assert.deepEqual(calls, ["manage", "configure", "retry", "list"]);
+    assert.equal(snapshot.effective.values.length, 9);
+    assert.deepEqual(await provider.invokeAction!({ context, actionId: "api.manage" }), { handled: true, refresh: false });
+    assert.deepEqual(calls, ["manage"]);
     assert.equal((await provider.validate({
       context,
       transactionId: "t1",

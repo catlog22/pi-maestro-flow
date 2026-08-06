@@ -215,6 +215,8 @@ export interface RegisterApiProviderOptions {
 export interface ApiRetrySettings {
   enabled: boolean;
   maxRetries: number;
+  /** Optional: saved callers preserve the existing value; loaders always resolve a default. */
+  baseDelayMs?: number;
 }
 
 export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "effort" | "enable" | "list" | "logout" | "reset" | "retry" | "show" | "toggle" | "vision";
@@ -585,6 +587,9 @@ export async function loadApiRetrySettings(
     maxRetries: isPositiveInteger(retry.maxRetries)
       ? retry.maxRetries
       : DEFAULT_API_RETRY_SETTINGS.maxRetries,
+    baseDelayMs: isPositiveInteger(retry.baseDelayMs)
+      ? retry.baseDelayMs
+      : API_RETRY_DEFAULT_BASE_DELAY_MS,
   };
 }
 

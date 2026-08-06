@@ -246,15 +246,15 @@ test("API Manager has a dedicated Settings page with direct management actions",
 		shell.handleInput("\r");
 		let inner = shell.render(120).join("\n");
 		assert.match(inner, /— Providers and models —/);
+		assert.match(inner, /Providers/);
 		assert.match(inner, /Open API Manager/);
-		assert.match(inner, /Add or edit a provider model/);
 		assert.match(inner, /— Retry policy —/);
 		assert.match(inner, /Auto-retry enabled/);
 		assert.match(inner, /Max retries/);
-		// The provider page scrolls: navigate down to reveal the later groups/actions.
+		assert.match(inner, /Retry base delay \(ms\)/);
+		// The provider page scrolls: navigate down to reveal the later groups.
 		for (let index = 0; index < 8; index++) shell.handleInput("\x1b[B");
 		inner = shell.render(120).join("\n");
-		assert.match(inner, /Configure API retries/);
 		assert.match(inner, /— Configuration overview —/);
 		assert.match(inner, /Configuration overview ·/);
 	} finally { rmSync(state.root, { recursive: true, force: true }); }
