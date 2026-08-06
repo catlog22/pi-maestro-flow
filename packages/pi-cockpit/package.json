@@ -19,7 +19,9 @@
   ],
   "scripts": {
     "test": "node --test --experimental-transform-types tests/config.test.ts tests/public-events.test.ts tests/maestro-store.test.ts tests/split-pane.test.ts tests/editor-bottom.test.ts tests/sidebar-render.test.ts tests/sidebar-controller.test.ts tests/viewport-stability.test.ts tests/quiet-tools.test.ts tests/edit-guard.test.ts tests/agents-store.test.ts tests/supervision-store.test.ts tests/bash-bg-store.test.ts tests/bash-bg-widget.test.ts tests/bash-bg-overlay.test.ts tests/agent-overlay.test.ts tests/todo-store.test.ts tests/render.test.ts tests/agent-scroll.test.ts tests/session-bar.test.ts tests/session-detail.test.ts tests/footer.test.ts tests/extension-status.test.ts tests/input-routing.test.ts tests/integration-contract.test.ts tests/stack-widget.test.ts tests/settings-view.test.ts tests/thinking-fold.test.ts tests/thinking-timer.test.ts tests/tick-policy.test.ts tests/ambient.test.ts tests/viewport.test.ts tests/theme-picker.test.ts tests/model-picker.test.ts tests/title-gen.test.ts tests/title-llm.test.ts tests/settings-registry.test.ts tests/settings-coordinator.test.ts tests/settings-locale.test.ts tests/settings-shell.test.ts tests/settings-cockpit-provider.test.ts tests/settings-cross-package.test.ts tests/ui-primitives.test.ts tests/settings-shell-secret.test.ts tests/settings-shell-listcrud.test.ts tests/capturing-overlay.test.ts tests/claude-editor.test.ts tests/fullscreen-controller.test.ts tests/transcript-selection.test.ts tests/terminal-cleanup.test.ts tests/terminal-capability.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepack": "node ../../scripts/bundle-settings-core.mjs",
+    "postpack": "node ../../scripts/bundle-settings-core.mjs --clean"
   },
   "pi": {
     "extensions": [
@@ -33,6 +35,9 @@
     "pi-maestro-settings-core": "0.1.0",
     "proper-lockfile": "4.1.2"
   },
+  "bundledDependencies": [
+    "pi-maestro-settings-core"
+  ],
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",

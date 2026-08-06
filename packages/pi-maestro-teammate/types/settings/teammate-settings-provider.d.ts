@@ -14,6 +14,10 @@ export interface TeammateSettingsProviderOptions {
     getProjectPath?: (cwd: string) => string;
     discoverTaskTypes?: (cwd: string) => readonly TeammateTaskType[];
     discoverRoles?: (cwd: string) => readonly string[];
+    discoverRoleSummaries?: (cwd: string) => {
+        name: string;
+        description: string;
+    }[];
     openLegacySettings?: () => Promise<void> | void;
 }
 export declare function createTeammateSettingsProvider(options?: TeammateSettingsProviderOptions): TeammateSettingsProvider;

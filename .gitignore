@@ -65,6 +65,7 @@ Thumbs.db
 # Nested package artifacts
 packages/*/dist/
 packages/*/node_modules/
+packages/*/package/
 packages/*/.workflow/
 packages/*/.tmp-*.log
 packages/*/.verify-*.ts

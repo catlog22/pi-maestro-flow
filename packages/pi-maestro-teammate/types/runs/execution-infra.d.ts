@@ -43,6 +43,14 @@ export interface TeammateTaskSpec {
      * ignores the value.
      */
     background?: boolean;
+    /**
+     * Optional Todo task id(s) bound to this agent, in priority order (first =
+     * highest). On start the host re-assigns each task's assignee to the agent,
+     * auto-activates the first runnable one, and injects the ordered list as a
+     * managed fragment. `"12"`, `"#12"`, or an ordered array like
+     * `["#1", "#2"]` are accepted.
+     */
+    todo?: string | string[];
 }
 export interface RunTeammateParams {
     tasks: TeammateTaskSpec[];
@@ -82,6 +90,8 @@ export interface RunSingleTeammateParams {
     cwd?: string;
     timeoutMs?: number;
     outputSchema?: Record<string, unknown>;
+    /** Todo task ids bound to this agent; injected into the child system prompt. */
+    todos?: string[];
 }
 export interface RunTeammateOptions {
     baseCwd: string;
@@ -176,6 +186,8 @@ export interface NormalizedTask {
     timeoutMs?: number;
     /** Effective nesting budget: task value ?? top-level value (undefined = ceiling). */
     maxNestingDepth?: number;
+    /** Optional Todo task ids bound to this agent (see TeammateTaskSpec.todo). */
+    todos?: string[];
 }
 export interface JsonLineEvent {
     type: string;
@@ -305,6 +317,11 @@ export declare function resolvePath(obj: unknown, pathStr: string): unknown;
 export declare function resolveVariables(template: string, outputs: Map<string, TaskOutput>, taskNames: Set<string>): string;
 export declare function hasCycle(adjList: number[][]): boolean;
 export declare function inferGraphMode(tasks: NormalizedTask[]): "parallel" | "chain" | "graph";
+/**
+ * Normalize a `todo` binding (single id or ordered array) into a de-duplicated
+ * ordered id list. The array order is the priority order (first = highest).
+ */
+export declare function normalizeTodoBindings(todo: string | string[] | undefined): string[] | undefined;
 export interface NormalizeTeammateResult {
     tasks: NormalizedTask[];
     isMultiTask: boolean;
@@ -425,7 +442,7 @@ export declare function writePrivateTextFile(filePath: string, content: string):
 export declare function openPrivateRegularFile(filePath: string): number;
 export declare function errorCode(error: unknown): string | undefined;
 export declare function readRegularTextFile(filePath: string): string;
-export declare function writeSystemPromptFile(agentConfig: AgentConfig, correlationId: string, outputSchema?: Record<string, unknown>): string;
+export declare function writeSystemPromptFile(agentConfig: AgentConfig, correlationId: string, outputSchema?: Record<string, unknown>, todos?: string[]): string;
 export declare function writeSchemaFile(schema: Record<string, unknown>, correlationId: string): {
     schemaFile: string;
     outputFile: string;

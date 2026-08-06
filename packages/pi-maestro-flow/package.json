@@ -8,8 +8,8 @@
   },
   "scripts": {
     "postinstall": "node scripts/configure-keybindings.mjs && node scripts/install-workflows.mjs && node scripts/register-companion-packages.mjs",
-    "prepack": "node scripts/prepare-package-skills.mjs",
-    "postpack": "node scripts/prepare-package-skills.mjs --clean",
+    "prepack": "node scripts/prepare-package-skills.mjs && node ../../scripts/bundle-settings-core.mjs",
+    "postpack": "node ../../scripts/bundle-settings-core.mjs --clean && node scripts/prepare-package-skills.mjs --clean",
     "test:install": "node --test test/configure-keybindings.test.mjs test/install-workflows.test.mjs test/register-companion-packages.test.mjs",
     "test:package": "node scripts/verify-maestro-run-capabilities.mjs && node --experimental-transform-types --test test/prepare-package-skills.test.mjs test/package-resources.test.mjs test/package-resources-runtime.test.ts && node --test test/sdk-resolution-contract.test.mjs",
     "test:conversion": "node --experimental-transform-types --test test/convert-pi.test.mjs test/maestro-run-capabilities.test.mjs test/skill-contract-lint.test.ts",
@@ -110,6 +110,9 @@
     "unpdf": "^1.8.0",
     "zod": "3.25.76"
   },
+  "bundledDependencies": [
+    "pi-maestro-settings-core"
+  ],
   "optionalDependencies": {
     "@konbakuyomu/smart-search": "https://github.com/konbakuyomu/smartsearch/archive/667c465d0f6ea16a423f03c434f94e21505d3595.tar.gz"
   },
