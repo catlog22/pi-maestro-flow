@@ -88,9 +88,6 @@ const CONFIG_KEYS = [
 	"websocketConnectTimeoutMs",
 	"httpProxy",
 	"warnings.anthropicExtraUsage",
-	"compaction.enabled",
-	"compaction.reserveTokens",
-	"compaction.keepRecentTokens",
 	"retry.enabled",
 	"retry.maxRetries",
 	"retry.baseDelayMs",
@@ -127,9 +124,6 @@ const DEFAULTS: Readonly<Record<NativeSettingKey, JsonValue>> = {
 	websocketConnectTimeoutMs: 15000,
 	httpProxy: "",
 	"warnings.anthropicExtraUsage": true,
-	"compaction.enabled": true,
-	"compaction.reserveTokens": 16384,
-	"compaction.keepRecentTokens": 20000,
 	"retry.enabled": true,
 	"retry.maxRetries": 3,
 	"retry.baseDelayMs": 2000,
@@ -145,7 +139,6 @@ const CATALOGS = {
 		"native.group.delivery": "Message Delivery",
 		"native.group.network": "Network",
 		"native.group.warnings": "Warnings",
-		"native.group.compaction": "Compaction",
 		"native.group.retry": "Retry",
 		"native.group.manage": "Manage",
 		"native.defaultProvider": "Default provider",
@@ -191,9 +184,6 @@ const CATALOGS = {
 		"native.httpProxy": "HTTP proxy",
 		"native.httpProxy.description": "Proxy URL applied as HTTP_PROXY/HTTPS_PROXY (global only).",
 		"native.warnings.anthropicExtraUsage": "Anthropic extra-usage warning",
-		"native.compaction.enabled": "Auto-compaction",
-		"native.compaction.reserveTokens": "Compaction reserve tokens",
-		"native.compaction.keepRecentTokens": "Compaction keep-recent tokens",
 		"native.retry.enabled": "Agent retry",
 		"native.retry.maxRetries": "Retry max attempts",
 		"native.retry.baseDelayMs": "Retry base delay (ms)",
@@ -214,7 +204,6 @@ const CATALOGS = {
 		"native.group.delivery": "消息投递",
 		"native.group.network": "网络",
 		"native.group.warnings": "警告",
-		"native.group.compaction": "压缩",
 		"native.group.retry": "重试",
 		"native.group.manage": "管理",
 		"native.defaultProvider": "默认 Provider",
@@ -260,9 +249,6 @@ const CATALOGS = {
 		"native.httpProxy": "HTTP 代理",
 		"native.httpProxy.description": "作为 HTTP_PROXY/HTTPS_PROXY 使用的代理 URL（仅全局）。",
 		"native.warnings.anthropicExtraUsage": "Anthropic 额外用量警告",
-		"native.compaction.enabled": "自动压缩",
-		"native.compaction.reserveTokens": "压缩预留 token",
-		"native.compaction.keepRecentTokens": "压缩保留最近 token",
 		"native.retry.enabled": "Agent 重试",
 		"native.retry.maxRetries": "重试最大次数",
 		"native.retry.baseDelayMs": "重试基础延迟（毫秒）",
@@ -304,9 +290,6 @@ const DEFINITIONS: readonly SettingDefinition[] = [
 	intDefinition("websocketConnectTimeoutMs", "native.group.delivery", 4, "native.websocketConnectTimeoutMs", 0, 600000, "extension-reload"),
 	textDefinition("httpProxy", "native.group.network", 0, "native.httpProxy", "extension-reload", "native.httpProxy.description", true),
 	booleanDefinition("warnings.anthropicExtraUsage", "native.group.warnings", 0, "native.warnings.anthropicExtraUsage", "extension-reload"),
-	booleanDefinition("compaction.enabled", "native.group.compaction", 0, "native.compaction.enabled", "extension-reload"),
-	intDefinition("compaction.reserveTokens", "native.group.compaction", 1, "native.compaction.reserveTokens", 0, 10000000, "extension-reload"),
-	intDefinition("compaction.keepRecentTokens", "native.group.compaction", 2, "native.compaction.keepRecentTokens", 0, 10000000, "extension-reload"),
 	booleanDefinition("retry.enabled", "native.group.retry", 0, "native.retry.enabled", "extension-reload"),
 	intDefinition("retry.maxRetries", "native.group.retry", 1, "native.retry.maxRetries", 0, 100, "extension-reload"),
 	intDefinition("retry.baseDelayMs", "native.group.retry", 2, "native.retry.baseDelayMs", 0, 600000, "extension-reload"),
@@ -739,8 +722,6 @@ function validValue(key: NativeSettingKey, value: JsonValue): boolean {
 			return typeof value === "number" && value >= 1 && value <= 240;
 		case "httpIdleTimeoutMs":
 		case "websocketConnectTimeoutMs":
-		case "compaction.reserveTokens":
-		case "compaction.keepRecentTokens":
 		case "retry.maxRetries":
 		case "retry.baseDelayMs":
 			return typeof value === "number" && Number.isFinite(value) && value >= 0;

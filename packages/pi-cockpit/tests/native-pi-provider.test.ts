@@ -48,7 +48,8 @@ test("native-pi provider describes the high-value Pi settings", async () => {
 		assert.ok(keys.includes("terminal.showImages"));
 		assert.ok(keys.includes("transport"));
 		assert.ok(keys.includes("httpProxy"));
-		assert.ok(keys.includes("compaction.enabled"));
+		assert.equal(keys.includes("compaction.enabled"), false, "compaction.* is owned solely by the flow provider (dedup)");
+		assert.equal(keys.includes("retry.enabled"), true);
 		const model = description.settings.find((setting) => setting.key === "defaultModel")!;
 		assert.equal(model.editor.kind, "model");
 		const trust = description.settings.find((setting) => setting.key === "defaultProjectTrust")!;
