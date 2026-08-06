@@ -600,8 +600,9 @@ export function signalLineMatchesPrefix(line: string, prefixes: readonly string[
   if (prefixes.length === 0) return false;
   try {
     const parsed = JSON.parse(line) as { id?: unknown };
-    return typeof parsed.id === "string"
-      && prefixes.some((prefix) => prefix.length > 0 && parsed.id!.startsWith(prefix));
+    const id = parsed.id;
+    return typeof id === "string"
+      && prefixes.some((prefix) => prefix.length > 0 && id.startsWith(prefix));
   } catch {
     return false;
   }

@@ -320,6 +320,23 @@ async function main(): Promise<void> {
   await cmd.handler("config model=auto", ctx);
   ctx.model = { provider: "test-provider", id: "test-model" };
 
+  // ---- 8e. signal record management: delete by id prefix, clear ----
+  const sigLinesBefore = (await readFile(join(dir, files[0]), "utf8")).trim().split("\n").filter(Boolean);
+  const firstSigId = (JSON.parse(sigLinesBefore[0]!) as { id: string }).id;
+  let delMsg = "";
+  ctx.ui.notify = (message, level) => { if (message.includes("deleted")) delMsg = message; prevNotify(message, level); };
+  await cmd.handler(`signals delete ${firstSigId.slice(0, 10)}`, ctx);
+  const sigLinesAfter = (await readFile(join(dir, files[0]), "utf8")).trim().split("\n").filter(Boolean);
+  check("signals delete 按前缀删除一条", sigLinesAfter.length === sigLinesBefore.length - 1 && delMsg.includes("deleted 1"), `before=${sigLinesBefore.length} after=${sigLinesAfter.length} ${delMsg.slice(0, 80)}`);
+  let noMatchMsg = "";
+  ctx.ui.notify = (message, level) => { if (message.includes("no signals matched")) noMatchMsg = message; prevNotify(message, level); };
+  await cmd.handler("signals delete se-000000000000", ctx);
+  const sigLinesAfterNoop = (await readFile(join(dir, files[0]), "utf8")).trim().split("\n").filter(Boolean);
+  check("signals delete 无匹配不删", sigLinesAfterNoop.length === sigLinesAfter.length && noMatchMsg.includes("no signals matched"), noMatchMsg.slice(0, 80));
+  await cmd.handler("signals clear", ctx);
+  const sigLinesAfterClear = (await readFile(join(dir, files[0]), "utf8")).trim().split("\n").filter(Boolean);
+  check("signals clear 清空全部", sigLinesAfterClear.length === 0, `left=${sigLinesAfterClear.length}`);
+
   // ---- 9. /self-evolve opens the panel by default; `status` stays a text notify ----
   await cmd.handler("", ctx);
   check("默认（无参数）打开 panel（custom 被调用）", ctx.customCalls === 1, `customCalls=${ctx.customCalls}`);

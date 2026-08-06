@@ -49,7 +49,9 @@
    /self-evolve config             # 查看全部配置
    /self-evolve config <k>=<v> ... # 修改配置（校验后持久化）
    /self-evolve config reset       # 恢复默认（保留 enabled）
-   /self-evolve signals [N]        # 列出最近 N 条候选信号（默认 10）
+   /self-evolve signals [N]        # 列出最近 N 条候选信号（默认 10；含 id，供删除引用）
+   /self-evolve signals delete <se-id-prefix...>  # 按 id（支持前缀）删除候选信号记录
+   /self-evolve signals clear     # 清空全部候选信号记录（dry-run 候选，可重建）
    /self-evolve review [N]         # dry-run 评审最近 N 条信号（默认 5，用配置模型）
    /self-evolve panel              # 打开 TUI 面板（同默认；r 刷新 · q/esc 关闭）
    ```
