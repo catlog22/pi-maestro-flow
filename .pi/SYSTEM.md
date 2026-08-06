@@ -238,6 +238,8 @@ maestro knowledge stage spec|knowhow "<title>" --content-file <path|-> --run <ru
 - Review, resolution, promotion, supersession, conflict marking, and pruning require an explicit user request or confirmed governance step.
 - Promote only eligible candidates with fresh reconciliation receipts from sealed source Runs. Deprecated or superseded knowledge remains auditable but is excluded from normal search and injection.
 - Outside a Run, direct knowledge writes require an explicit knowledge-management request.
+- **知识自动沉淀（self-evolve 自动化层）**：seal 时 report.md frontmatter 的 `accepted` decisions / `locked` constraints 会**自动 stage 为候选**（T1）——无需手动重复 stage 同一事实；T2 事实型候选可于 seal 后 `promote --all` 自动晋升（唯一 eligible + receipt 新鲜时），推断型（`review_required`）留人工 resolve；promote 前按 `.pi/skills/self-evolve` 的 TOCTOU fence（`knowledge review --refresh`）+ approval receipt（`node scripts/self-evolve-approval.mjs record`）。
+- **自进化入口**：`/self-evolve`（面板/status/signals/review 命令）、`.pi/skills/self-evolve`（skill 编排）、`node scripts/self-evolve-health.mjs`（健康 sidecar：signals 聚合 + contest queue + 跨 run 候选索引，全局输出 `~/.maestro/self-evolve/`）、`node scripts/self-evolve-phase5.mjs`（canary 在线验证 + skill proposal 治理链）。
 - Commands emitted by current runtime receipts override static examples.
 
 # Execution Order
