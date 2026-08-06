@@ -116,12 +116,9 @@ interface ParsedKey {
 }
 
 const ACTION_KEYS = [
-  "compaction.manage",
   "failover.manage",
   "responseLanguage.manage",
   "permissions.manage",
-  "skills.manage",
-  "mcp.manage",
   "hooks.manage",
 ] as const;
 

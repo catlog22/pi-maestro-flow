@@ -335,7 +335,6 @@ const DEFINITIONS: readonly SettingDefinition[] = [
 	},
 	actionDefinition("theme", "cockpit.group.appearance", 1, "cockpit.theme", "cockpit.theme"),
 	actionDefinition("thinkingFold", "cockpit.group.appearance", 2, "cockpit.thinkingFold", "cockpit.thinkingFold"),
-	actionDefinition("legacy", "cockpit.group.appearance", 3, "cockpit.action.legacy", "cockpit.legacy"),
 ];
 
 export function createCockpitSettingsProvider(options: CockpitSettingsProviderOptions): CockpitSettingsProvider {
@@ -487,8 +486,7 @@ export function createCockpitSettingsProvider(options: CockpitSettingsProviderOp
 			};
 		},
 		invokeAction: async (request) => {
-			if (request.actionId === "cockpit.legacy" && options.openLegacySettings) await options.openLegacySettings();
-			else if (request.actionId === "cockpit.theme" && options.openThemeSettings) await options.openThemeSettings();
+			if (request.actionId === "cockpit.theme" && options.openThemeSettings) await options.openThemeSettings();
 			else if (request.actionId === "cockpit.thinkingFold" && options.toggleThinkingFold) await options.toggleThinkingFold();
 			else return { handled: false };
 			return { handled: true, refresh: true };
@@ -530,7 +528,6 @@ function snapshot(document: ConfigDocument, instanceId: string, options: Cockpit
 	configured.push(
 		{ key: "theme", scope: "global", state: "absent" },
 		{ key: "thinkingFold", scope: "global", state: "absent" },
-		{ key: "legacy", scope: "global", state: "absent" },
 	);
 	return {
 		providerId: PROVIDER_ID,
@@ -541,7 +538,6 @@ function snapshot(document: ConfigDocument, instanceId: string, options: Cockpit
 				...CONFIG_KEYS.map((key) => ({ key, value: getConfigValue(document.config, key), source: "configured" as const, scope: "global" as const, resource })),
 				{ key: "theme", value: options.getThemeName?.() ?? "Pi settings", source: "runtime" as const },
 				{ key: "thinkingFold", value: options.getThinkingFolded?.() ?? false, source: "runtime" as const },
-				{ key: "legacy", value: "open", source: "runtime" as const },
 			],
 		},
 	};

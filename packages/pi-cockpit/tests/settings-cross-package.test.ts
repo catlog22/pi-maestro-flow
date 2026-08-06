@@ -247,7 +247,6 @@ test("API Manager has a dedicated Settings page with direct management actions",
 		let inner = shell.render(120).join("\n");
 		assert.match(inner, /— Providers and models —/);
 		assert.match(inner, /Providers/);
-		assert.match(inner, /Open API Manager/);
 		assert.match(inner, /— Retry policy —/);
 		assert.match(inner, /Auto-retry enabled/);
 		assert.match(inner, /Max retries/);

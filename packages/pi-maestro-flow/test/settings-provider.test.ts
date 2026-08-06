@@ -60,7 +60,6 @@ test("Flow provider describes editable settings, complex actions and bilingual c
   assert.ok(description.settings.some((entry) => entry.key === "compaction.soft.velocity.minFullness"));
   assert.equal(description.settings.find((entry) => entry.key === "compaction.keepRecentTokens")?.editor.max, 2_000_000);
   assert.ok(description.settings.some((entry) => entry.key === "failover.fallbackModels" && entry.editor.kind === "json"));
-  assert.ok(description.settings.some((entry) => entry.key === "mcp.manage" && entry.editor.kind === "action"));
   const responseLanguage = description.settings.find((entry) => entry.key === "responseLanguage.manage");
   assert.equal(responseLanguage?.descriptionKey, "flow.action.responseLanguage.description");
   assert.deepEqual(responseLanguage?.editor.options?.map((entry) => entry.value), ["default", "zh-CN"]);
@@ -84,9 +83,6 @@ test("API Manager provider exposes settings, retry policy and the original manag
     const provider = createApiManagerSettingsProvider({
       getModelsPath: () => path.join(directory, "models.json"),
       getSettingsPath: () => path.join(directory, "settings.json"),
-      actions: {
-        "api.manage": () => { calls.push("manage"); },
-      },
     });
     const context: SettingsContextV1 = { cwd: "/project", locale: "en" };
     const description = await provider.describe({ context });
@@ -102,13 +98,10 @@ test("API Manager provider exposes settings, retry policy and the original manag
       "api.cacheRetention",
       "api.agentCacheRetention",
       "api.overview",
-      "api.manage",
     ]);
-    assert.equal(description.catalogs?.["zh-CN"]["api.action.manage"], "打开 API Manager");
+    assert.equal(description.catalogs?.["zh-CN"]["api.group.diagnostics"], "配置概览");
     const snapshot = await provider.read({ context });
-    assert.equal(snapshot.effective.values.length, 9);
-    assert.deepEqual(await provider.invokeAction!({ context, actionId: "api.manage" }), { handled: true, refresh: false });
-    assert.deepEqual(calls, ["manage"]);
+    assert.equal(snapshot.effective.values.length, 8);
     assert.equal((await provider.validate({
       context,
       transactionId: "t1",
@@ -529,12 +522,9 @@ test("Flow provider invokes plugin-owned actions and participates in discovery",
   const provider = createFlowSettingsProvider({
     getAgentResponseLanguage: () => chinese ? "zh-CN" : "default",
     actions: {
-      "skills.manage": () => { calls.push("skills"); },
       "responseLanguage.manage": () => { chinese = !chinese; },
     },
   });
-  assert.deepEqual(await provider.invokeAction!({ context, actionId: "skills.manage" }), { handled: true, refresh: false });
-  assert.deepEqual(calls, ["skills"]);
   assert.equal((await provider.read({ context })).effective.values.find((entry) => entry.key === "responseLanguage.manage")?.value, "default");
   assert.deepEqual(await provider.invokeAction!({ context, actionId: "responseLanguage.manage" }), { handled: true, refresh: true });
   assert.equal((await provider.read({ context })).effective.values.find((entry) => entry.key === "responseLanguage.manage")?.value, "zh-CN");

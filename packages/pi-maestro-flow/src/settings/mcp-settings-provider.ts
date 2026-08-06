@@ -120,19 +120,6 @@ const DEFINITIONS: readonly SettingDefinition[] = [
     reversibility: "none",
     editor: { kind: "overview" },
   },
-  {
-    key: "mcp.editConfig",
-    group: "mcp.group.diagnostics",
-    order: 20,
-    labelKey: "mcp.editConfig",
-    descriptionKey: "mcp.editConfig.description",
-    scopes: ["global"],
-    merge: "provider-defined",
-    activation: "live",
-    sensitivity: "private",
-    reversibility: "none",
-    editor: { kind: "action", actionId: "mcp.editConfig" },
-  },
 ];
 
 const CATALOGS = {

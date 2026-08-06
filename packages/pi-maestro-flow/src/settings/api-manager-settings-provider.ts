@@ -224,19 +224,6 @@ const DEFINITIONS: readonly SettingDefinition[] = [
     reversibility: "none",
     editor: { kind: "overview" },
   },
-  ...["api.manage"].map((key, index): SettingDefinition => ({
-    key,
-    group: index < 2 ? "api.group.providers" : "api.group.diagnostics",
-    order: 30 + index,
-    labelKey: `api.action.${key.split(".")[1] ?? key}`,
-    descriptionKey: `api.action.${key.split(".")[1] ?? key}.description`,
-    scopes: ["global"],
-    merge: "provider-defined",
-    activation: "live",
-    sensitivity: "private",
-    reversibility: "none",
-    editor: { kind: "action", actionId: key },
-  })),
 ];
 
 const CATALOGS = {

@@ -86,19 +86,6 @@ const DEFINITIONS: readonly SettingDefinition[] = [
   intDefinition("explore.maxTurns", "explore.group.global", 0, "explore.maxTurns", 1, 1000),
   intDefinition("explore.concurrency", "explore.group.global", 1, "explore.concurrency", 1, 64),
   intDefinition("explore.treeDepth", "explore.group.global", 2, "explore.treeDepth", 1, 32),
-  {
-    key: "explore.manage",
-    group: "explore.group.manage",
-    order: 3,
-    labelKey: "explore.manage",
-    descriptionKey: "explore.manage.description",
-    scopes: ["global"],
-    merge: "provider-defined",
-    activation: "live",
-    sensitivity: "private",
-    reversibility: "none",
-    editor: { kind: "action", actionId: "explore.manage", options: [{ value: "open", labelKey: "explore.manage.open" }] },
-  },
 ];
 
 const CATALOGS = {

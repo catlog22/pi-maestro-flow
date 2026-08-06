@@ -32,7 +32,6 @@ test("explore provider describes endpoints list-crud and defaults", async () => 
     assert.ok(endpoints.editor.itemFields?.some((f) => f.key === "apiKey" && f.editor.kind === "secret"));
     assert.ok(endpoints.editor.itemFields?.some((f) => f.key === "format" && f.editor.kind === "enum"));
     assert.ok(description.settings.some((s) => s.key === "explore.maxTurns" && s.editor.kind === "integer"));
-    assert.ok(description.settings.some((s) => s.key === "explore.manage" && s.editor.kind === "action"));
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -111,16 +110,6 @@ test("explore falls back to the legacy api-explore.json when canonical is absent
     const endpoints = snapshot.effective.values.find((e) => e.key === "explore.endpoints")?.value as Array<Record<string, unknown>>;
     assert.equal(endpoints.length, 1);
     assert.equal(endpoints[0]?.name, "old");
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test("explore action is handled", async () => {
-  const { provider, directory } = harness();
-  try {
-    const result = await provider.invokeAction!({ context, actionId: "explore.manage", key: "explore.manage" });
-    assert.equal(result.handled, true);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
