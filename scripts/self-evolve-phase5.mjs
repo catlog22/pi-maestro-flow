@@ -35,6 +35,9 @@ import {
   copyFileSync,
   renameSync,
   rmSync,
+  openSync,
+  writeSync,
+  closeSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -99,7 +102,7 @@ const CANARY_THRESHOLD = 1; // 观察期内 validated/cited 信号 ≥ 1 → pro
 const CANARY_WINDOW_DEFAULT = 3; // 默认观察窗口（run 数）
 
 function canaryLedgerPath(id) {
-  const safe = id.replace(/[^a-zA-Z0-9._:-]/g, "_");
+  const safe = id.replace(/[^a-zA-Z0-9._-]/g, "_"); // Windows 文件名不允许 : 等字符
   return join(CANARY_DIR, `${safe}.json`);
 }
 
@@ -182,18 +185,18 @@ function staticChecks(targetPath) {
   } catch {
     return { ok: false, problems: ["文件不可读"] };
   }
-  if (!/^---\nname:/.test(content)) problems.push("frontmatter 缺失（须以 --- 开头且含 name）");
+  if (!/^---\r?\nname:/.test(content)) problems.push("frontmatter 缺失（须以 --- 开头且含 name）");
   if (!content.includes("description:")) problems.push("frontmatter 缺 description");
   if (!content.includes("allowed-tools:")) problems.push("frontmatter 缺 allowed-tools");
-  const openTags = (content.match(/^<(execution|success_criteria|required_reading|purpose|dispatch|error_codes)>/gm) ?? []).length;
-  const closeTags = (content.match(/^<\/(execution|success_criteria|required_reading|purpose|dispatch|error_codes)>/gm) ?? []).length;
+  const openTags = (content.match(/^<(execution|success_criteria|required_reading|purpose|dispatch|error_codes)>\r?$/gm) ?? []).length;
+  const closeTags = (content.match(/^<\/(execution|success_criteria|required_reading|purpose|dispatch|error_codes)>\r?$/gm) ?? []).length;
   if (openTags !== closeTags) problems.push(`结构标签不配对（开 ${openTags} / 关 ${closeTags}）`);
   return { ok: problems.length === 0, problems, openTags, closeTags };
 }
 
 function permissionDelta(oldContent, newContent) {
   const getTools = (s) => {
-    const m = s.match(/^allowed-tools:\s*(.+)$/m);
+    const m = s.match(/^allowed-tools:\s*([^\r\n]*)/m);
     return m ? m[1].trim().split(/\s+/).filter(Boolean) : [];
   };
   const oldTools = getTools(oldContent);
@@ -240,6 +243,7 @@ function proposalCreate(targetPath, newContent, reason) {
   writeJson(join(dir, "proposal.json"), proposal);
   writeFileSync(snapshotPath, sha256(oldContent), { encoding: "utf8", mode: 0o600 });
   if (oldContent) copyFileSync(targetPath, join(dir, "previous.md"));
+  if (newContent) writeFileSync(join(dir, "proposal.md"), finalContent, { encoding: "utf8", mode: 0o600 });
 
   console.log(`SKILL PROPOSAL — ${id}`);
   console.log(`  target: ${targetPath}`);
@@ -280,7 +284,8 @@ function proposalApply(id, reason) {
   }
   const target = proposal.target;
   const oldContent = readFileSync(target, "utf8");
-  const finalContent = readFileSync(join(dir, "proposal.md"), "utf8");
+  const proposalFile = join(dir, "proposal.md");
+  const finalContent = existsSync(proposalFile) ? readFileSync(proposalFile, "utf8") : readFileSync(target, "utf8");
   const checks = staticChecks(target);
   if (!checks.ok) {
     console.error(`apply: 静态检查失败，中止 → ${checks.problems.join("; ")}`);
@@ -321,9 +326,9 @@ function proposalApply(id, reason) {
     reason,
   };
   const recPath = join(APPROVAL_DIR, `${date.getFullYear()}-${month}-${day}.jsonl`);
-  const fd = require("node:fs").openSync(recPath, "a", 0o600);
-  require("node:fs").writeSync(fd, `${JSON.stringify(receipt)}\n`);
-  require("node:fs").closeSync(fd);
+  const fd = openSync(recPath, "a", 0o600);
+  writeSync(fd, `${JSON.stringify(receipt)}\n`);
+  closeSync(fd);
   console.log(`SKILL APPLY — ${id} → ${target}`);
   console.log(`  approval: ${ACTOR} @ ${proposal.approval.at}`);
   console.log(`  receipt: ${recPath}`);
