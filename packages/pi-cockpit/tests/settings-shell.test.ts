@@ -246,7 +246,7 @@ function moveDown(shell: MaestroSettingsShell, count: number): void {
 	for (let index = 0; index < count; index++) shell.handleInput("\x1b[B");
 }
 
-test("settings shell renders responsive provider and effective-value views", async () => {
+test("settings shell renders a single vertical list with effective values", async () => {
 	const directory = withTempDir();
 	try {
 		const { shell } = await createShell(makeProvider(), directory);
@@ -259,7 +259,6 @@ test("settings shell renders responsive provider and effective-value views", asy
 		const localizedValues = shell.render(100);
 		assert.ok(localizedValues.some((line) => line.includes("Off")));
 		assert.ok(localizedValues.some((line) => line.includes("Compact view")));
-		assert.ok(localizedValues.some((line) => line.includes("Global")));
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -274,18 +273,17 @@ test("settings overlay budgets content for short terminals without losing its fo
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("narrow footers advertise plugin switching and scope cycling", async () => {
+test("narrow footers advertise scope cycling and vertical navigation", async () => {
 	const directory = withTempDir();
 	try {
 		const state = await createShell(makeProvider(), directory);
 		const lines = state.shell.render(66);
-		assert.ok(lines.some((line) => line.includes("↑↓ select")), "the narrow footer must use the narrow-only help variant");
-		assert.ok(lines.some((line) => line.includes("←→ plugin")));
+		assert.ok(lines.some((line) => line.includes("↑↓ setting")), "footer must advertise vertical navigation");
 		assert.ok(lines.some((line) => line.includes("Tab scope")));
+		assert.ok(!lines.some((line) => line.includes("←→ plugin")), "no left/right plugin switching in the vertical layout");
 		state.shell.handleInput(" "); // dirty
 		const dirty = state.shell.render(66);
-		assert.ok(dirty.some((line) => line.includes("1 modified")), "the dirty narrow header must show the modified count");
-		assert.ok(dirty.some((line) => line.includes("↑↓ select")), "the dirty footer must keep the narrow-only help variant");
+		assert.ok(dirty.some((line) => line.includes("1 modified")), "the dirty header must show the modified count");
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -312,8 +310,8 @@ test("mouse hover highlights settings rows and left click activates the hovered 
 		const overlayHeight = Math.min(initial.length, Math.floor(30 * 0.92), 28);
 		const left = 1 + Math.floor((118 - 112) / 2);
 		const top = 1 + Math.floor((28 - overlayHeight) / 2);
-		const advancedColumn = left + 31 + 1;
-		const advancedRow = top + 5 + 1;
+		const advancedColumn = left + 10;
+		const advancedRow = top + 5;
 		state.shell.handleInput(`\u001b[<35;${advancedColumn};${advancedRow}M`);
 		const hovered = state.shell.render(112).find((line) => line.includes("Manage advanced")) ?? "";
 		assert.match(hovered, /\u001b\[7m/);
@@ -378,7 +376,7 @@ test("enum settings open a visible option picker instead of cycling invisibly", 
 		state.shell.handleInput("\r");
 		assert.ok(state.shell.render(100).some((line) => line.includes("Choose a value")));
 		state.shell.handleInput("\x1b[B");
-		assert.ok(state.shell.render(100).some((line) => line.includes("Display mode · List view")));
+		assert.ok(state.shell.render(100).some((line) => line.includes("List view")));
 		state.shell.handleInput("\r");
 		assert.equal(state.coordinator.changes("cockpit").find((entry) => entry.key === "mode")?.operation, "set");
 		assert.equal((state.coordinator.changes("cockpit").find((entry) => entry.key === "mode") as { value?: unknown })?.value, "list");
@@ -390,17 +388,16 @@ test("expanded option rows support mouse hover and click-to-confirm", async () =
 	try {
 		const state = await createShell(makeProvider(), directory, [], 30, 120);
 		moveDown(state.shell, 2);
-		const closedHeight = state.shell.render(112).length;
 		state.shell.handleInput("\r");
 		const initial = state.shell.render(112);
-		assert.equal(initial.length, closedHeight);
+		assert.ok(initial.some((line) => line.includes("Choose a value")), "option picker popup is visible");
 		const optionRow = initial.findIndex((line) => line.includes("List view"));
 		assert.ok(optionRow >= 0);
 		const overlayHeight = Math.min(initial.length, Math.floor(30 * 0.92), 28);
 		const left = 1 + Math.floor((118 - 112) / 2);
 		const top = 1 + Math.floor((28 - overlayHeight) / 2);
-		const optionColumn = left + 31 + 1;
-		const optionScreenRow = top + optionRow + 1;
+		const optionColumn = left + 10;
+		const optionScreenRow = top + optionRow;
 		state.shell.handleInput(`\u001b[<35;${optionColumn};${optionScreenRow}M`);
 		const hoveredLines = state.shell.render(112);
 		const hovered = hoveredLines.find((line) => line.includes("List view")) ?? "";
@@ -410,8 +407,8 @@ test("expanded option rows support mouse hover and click-to-confirm", async () =
 		const change = state.coordinator.changes("cockpit").find((entry) => entry.key === "mode");
 		assert.equal((change as { value?: unknown })?.value, "list");
 		const closed = state.shell.render(112);
-		assert.equal(closed.length, initial.length);
-		assert.ok(closed.every((line) => !line.includes("Choose a value")));
+		assert.ok(closed.some((line) => line.includes("Display mode · List view")), "committed value shown back in the list");
+		assert.ok(closed.every((line) => !line.includes("Choose a value")), "option picker popup is gone");
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -426,7 +423,7 @@ test("text editors visibly mark editing and replace the selected current value o
 		assert.ok(lines.some((line) => line.includes("Input · [20]")));
 		state.shell.handleInput("5");
 		lines = state.shell.render(100);
-		assert.ok(lines.some((line) => line.includes("Limit · 5█")));
+		assert.ok(lines.some((line) => line.includes("Input · 5█")), "the editor input reflects the typed digit");
 		state.shell.handleInput("\r");
 		const change = state.coordinator.changes("cockpit").find((entry) => entry.key === "limit");
 		assert.equal(change?.operation, "set");
@@ -455,7 +452,7 @@ test("model settings use the host model catalog and retain a custom-entry path",
 		state.shell.handleInput("\r");
 		assert.ok(state.shell.render(100).some((line) => line.includes("E custom model")));
 		state.shell.handleInput("\x1b[B");
-		assert.ok(state.shell.render(100).some((line) => line.includes("Model · provider/b")));
+		assert.ok(state.shell.render(100).some((line) => line.includes("provider/b")));
 		state.shell.handleInput("\r");
 		const change = state.coordinator.changes("cockpit").find((entry) => entry.key === "model");
 		assert.equal((change as { value?: unknown })?.value, "provider/b");
@@ -594,7 +591,7 @@ test("not-yet-implemented editor kinds degrade to read-only instead of raw text 
 					activation: "live",
 					sensitivity: "public",
 					reversibility: "full",
-					editor: { kind: "overview" },
+					editor: { kind: "slider" } as never,
 				}],
 			}),
 			read: () => snapshot,
@@ -613,7 +610,7 @@ test("not-yet-implemented editor kinds degrade to read-only instead of raw text 
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("left/right provider switching restores each provider's remembered cursor highlight", async () => {
+test("vertical list aggregates every provider into one navigable list", async () => {
 	const directory = withTempDir();
 	try {
 		const registry = new SettingsProviderRegistry(new FakeEventBus());
@@ -636,22 +633,17 @@ test("left/right provider switching restores each provider's remembered cursor h
 			requestAction: () => {},
 			close: () => {},
 		});
-		// Provider A: move the highlight down to "Limit" (index 3).
-		moveDown(shell, 3);
-		// Right → provider B; the highlight starts at its first setting.
-		shell.handleInput("\x1b[C");
-		const onOther = shell.render(112).filter((line) => line.includes("\u001b[7m") && line.includes(" · ")).join("\n");
-		assert.ok(onOther.includes("B one"), "a fresh provider must start with its first setting highlighted");
-		// Move inside B, then left → back to provider A.
-		shell.handleInput("\x1b[B");
-		shell.handleInput("\x1b[D");
-		const backOnCockpit = shell.render(112).filter((line) => line.includes("\u001b[7m") && line.includes(" · ")).join("\n");
-		assert.ok(backOnCockpit.includes("Limit"), "switching back must restore the remembered highlight row");
-		assert.ok(!backOnCockpit.includes("Model"), "the highlight must not reset to the first setting");
+		const rendered = shell.render(112).join("\n");
+		assert.ok(rendered.includes("Enabled"), "cockpit settings appear in the single vertical list");
+		assert.ok(rendered.includes("B one"), "the second provider's settings appear in the same list");
+		// Navigate down past cockpit into the other provider's settings.
+		moveDown(shell, 6);
+		const highlighted = shell.render(112).filter((line) => line.includes("\u001b[7m")).join("\n");
+		assert.ok(highlighted.includes("B one") || highlighted.includes("B two"), "navigation crosses provider boundaries in the flat list");
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("highlight memory restores the remembered key inside an active search filter", async () => {
+test("search filter narrows the single list and highlights the matching setting", async () => {
 	const directory = withTempDir();
 	try {
 		const registry = new SettingsProviderRegistry(new FakeEventBus());
@@ -674,7 +666,6 @@ test("highlight memory restores the remembered key inside an active search filte
 			requestAction: () => {},
 			close: () => {},
 		});
-		// Provider A: remember "Advanced" (index 1), then filter to it via /ad.
 		shell.handleInput("\x1b[B");
 		shell.handleInput("/");
 		shell.handleInput("a");
@@ -682,11 +673,6 @@ test("highlight memory restores the remembered key inside an active search filte
 		shell.handleInput("\x1b"); // exit search mode, keeping the filter
 		const filtered = shell.render(112).filter((line) => line.includes("\u001b[7m") && line.includes(" · ")).join("\n");
 		assert.ok(filtered.includes("Manage advanced"), "the filtered view must highlight the matching setting");
-		// Switch away and back: the remembered key must resolve inside the filter.
-		shell.handleInput("\x1b[C");
-		shell.handleInput("\x1b[D");
-		const restored = shell.render(112).filter((line) => line.includes("\u001b[7m") && line.includes(" · ")).join("\n");
-		assert.ok(restored.includes("Manage advanced"), "restore must land on the remembered key inside the active filter");
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

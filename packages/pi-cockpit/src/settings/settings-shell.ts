@@ -103,6 +103,14 @@ interface ListCrudFieldState {
 	fieldIndex: number;
 }
 
+/** One row of the flat vertical settings list (a group header or a setting). */
+interface FlatRow {
+	kind: "header" | "setting";
+	label: string;
+	providerIndex: number;
+	settingIndex: number;
+}
+
 const OVERVIEW_TONE: Record<NonNullable<SettingsOverviewRow["status"]>, "success" | "warning" | "error" | "dim"> = {
 	ok: "success",
 	warn: "warning",
@@ -142,15 +150,17 @@ export class MaestroSettingsShell implements Component, Focusable {
 	private context: SettingsContextV1;
 	private providers: DescribedSettingsProvider[];
 	private failures: SettingsProviderFailure[];
-	private providerIndex = 0;
-	private settingIndex = 0;
-	/** Per-provider remembered highlight (setting key) so ←/→ plugin switching keeps the cursor position. */
-	private settingKeyByProvider = new Map<string, string>();
+	/** Index into the flattened visible rows (group headers + settings). */
+	private flatIndex = 0;
+	/** Domain filter: "all" or a providerId. */
+	private domain: "all" | string = "all";
 	private scope: SettingsScope = "global";
 	private search = "";
 	private searching = false;
 	private editing: EditingState | undefined;
 	private optionEditing: OptionEditingState | undefined;
+	/** Read-only popup showing an overview setting's diagnostic rows. */
+	private viewingOverview = false;
 	private listCrud: ListCrudState | undefined;
 	private listCrudField: ListCrudFieldState | undefined;
 	private deleteArmed = false;
@@ -183,9 +193,9 @@ export class MaestroSettingsShell implements Component, Focusable {
 
 	render(width: number): string[] {
 		const safeWidth = Math.max(1, Math.min(150, Math.trunc(width)));
-		// A width/wide-narrow switch invalidates hover coordinates even when the
-		// target ids are the same: the highlight must not linger at a stale spot
-		// until the mouse moves again (SK-7).
+		// A width switch invalidates hover coordinates even when the target ids
+		// are the same: the highlight must not linger at a stale spot until the
+		// mouse moves again (SK-7).
 		if (safeWidth !== this.lastRenderedWidth) this.hoveredTargetId = undefined;
 		this.mouseTargets = [];
 		if (safeWidth < 20) {
@@ -195,31 +205,10 @@ export class MaestroSettingsShell implements Component, Focusable {
 			return rendered;
 		}
 		const inner = safeWidth - 2;
-		const rows = [this.header(inner), rule(inner)];
-		const interactiveRowStart = rows.length + 1;
-		if (safeWidth >= 82) rows.push(...this.renderWide(inner, interactiveRowStart));
-		else rows.push(...this.renderNarrow(inner, interactiveRowStart));
-		const footerRows = [rule(inner)];
-		if (this.notice) footerRows.push(this.paintNotice(this.notice, inner));
-		for (const conflict of this.conflicts.slice(0, 2)) {
-			footerRows.push(this.params.theme.fg("error", fit(`! ${conflict.resource.id}`, inner)));
-		}
-		if (!this.notice && this.failures.length > 0) {
-			const failure = this.failures[0]!;
-			footerRows.push(this.params.theme.fg("warning", fit(`${failure.providerId} · ${failure.message}`, inner)));
-		}
-		const dirty = this.params.coordinator.modifiedProviderIds().length > 0;
-		footerRows.push(this.params.theme.fg("dim", fit(
-			safeWidth < 70
-				? dirty ? this.t("settings.helpNarrowDirty") : this.t("settings.helpNarrow")
-				: dirty ? this.t("settings.helpDirty") : this.t("settings.help"),
-			inner,
-		)));
-		const targetHeight = this.overlayHeightTarget();
-		const paddingRows = targetHeight ? Math.max(0, targetHeight - 2 - rows.length - footerRows.length) : 0;
-		for (let index = 0; index < paddingRows; index++) rows.push("");
-		rows.push(...footerRows);
-		const rendered = frame(rows, safeWidth, this.params.theme);
+		const body = this.editing || this.optionEditing || this.listCrud || this.listCrudField || this.viewingOverview
+			? this.renderEditPopup(inner)
+			: this.renderMain(inner);
+		const rendered = frame(body, safeWidth, this.params.theme);
 		this.lastRenderedWidth = safeWidth;
 		this.lastRenderedHeight = rendered.length;
 		return rendered;
@@ -266,6 +255,11 @@ export class MaestroSettingsShell implements Component, Focusable {
 			return;
 		}
 		if (matchesKey(data, Key.escape)) {
+			if (this.viewingOverview) {
+				this.viewingOverview = false;
+				this.afterNavigation();
+				return;
+			}
 			if (this.params.coordinator.modifiedProviderIds().length > 0 && !this.discardArmed) {
 				this.discardArmed = true;
 				this.setNotice(this.t("settings.discardConfirm"), "warning");
@@ -282,10 +276,8 @@ export class MaestroSettingsShell implements Component, Focusable {
 			this.requestRender();
 			return;
 		}
-		if (matchesKey(data, Key.left)) return this.moveProvider(-1);
-		if (matchesKey(data, Key.right)) return this.moveProvider(1);
-		if (matchesKey(data, Key.up)) return this.moveSetting(-1);
-		if (matchesKey(data, Key.down)) return this.moveSetting(1);
+		if (matchesKey(data, Key.up)) return this.moveFlat(-1);
+		if (matchesKey(data, Key.down)) return this.moveFlat(1);
 		if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab"))) {
 			this.moveScope(matchesKey(data, Key.shift("tab")) ? -1 : 1);
 			return;
@@ -304,98 +296,99 @@ export class MaestroSettingsShell implements Component, Focusable {
 		}
 	}
 
-	private renderWide(width: number, rowStart: number): string[] {
-		const providerWidth = Math.min(26, Math.max(20, Math.floor(width * 0.24)));
-		const contentWidth = Math.max(1, width - providerWidth - 3);
-		const providerRows = this.providerRows(providerWidth, rowStart, 1);
-		const contentRows = this.contentRows(contentWidth, this.settingRowLimit(false), rowStart, providerWidth + 4);
-		const rowCount = Math.max(providerRows.length, contentRows.length, 1);
-		return Array.from({ length: rowCount }, (_, index) =>
-			`${pad(providerRows[index] ?? "", providerWidth)} │ ${pad(contentRows[index] ?? "", contentWidth)}`
-		);
-	}
-
-	private renderNarrow(width: number, rowStart: number): string[] {
-		const provider = this.selectedProvider();
-		const title = provider
-			? `${this.params.theme.bold(this.t(provider.description.labelKey))} · ${this.providerIndex + 1}/${this.providers.length}`
-			: this.t("settings.providers");
-		return [fit(title, width), ...this.contentRows(width, this.settingRowLimit(true), rowStart + 1, 1)];
-	}
-
-	private providerRows(width: number, rowStart: number, columnStart: number): string[] {
-		const rows = [this.params.theme.bold(this.t("settings.providers"))];
-		if (this.providers.length === 0) return [...rows, this.params.theme.fg("dim", fit(this.t("settings.noProviders"), width))];
-		const start = visibleStart(this.providerIndex, this.providers.length, MAX_PROVIDER_ROWS);
-		for (let index = start; index < Math.min(this.providers.length, start + MAX_PROVIDER_ROWS); index++) {
-			const provider = this.providers[index]!;
-			const marker = index === this.providerIndex ? this.params.theme.fg("accent", "›") : " ";
-			const dirty = this.params.coordinator.changes(provider.providerId).length > 0 ? "*" : " ";
-			const targetId = `provider:${provider.providerId}`;
-			this.mouseTargets.push({
-				id: targetId,
-				kind: "provider",
-				index,
-				row: rowStart + rows.length,
-				startColumn: columnStart,
-				endColumn: columnStart + width,
-			});
-			rows.push(this.interactiveRow(`${marker}${dirty} ${this.t(provider.description.labelKey)}`, width, targetId, index === this.providerIndex));
+	private renderMain(inner: number): string[] {
+		const rows = [this.header(inner), rule(inner)];
+		const flatRows = this.visibleRows();
+		const rowStart = rows.length + 1;
+		if (flatRows.length === 0) {
+			rows.push(this.params.theme.fg("dim", fit(this.t("settings.noMatches"), inner)));
+		} else {
+			const start = visibleStart(this.flatIndex, flatRows.length, MAX_SETTING_ROWS);
+			const end = Math.min(flatRows.length, start + MAX_SETTING_ROWS);
+			for (let index = start; index < end; index++) {
+				const flat = flatRows[index]!;
+				if (flat.kind === "header") {
+					rows.push(this.params.theme.fg("muted", fit(`— ${flat.label} —`, inner)));
+					continue;
+				}
+				const provider = this.providers[flat.providerIndex];
+				const definition = provider?.description.settings[flat.settingIndex];
+				if (!provider || !definition) continue;
+				const selected = index === this.flatIndex;
+				const activeEditor = this.isEditing(provider.providerId, definition.key);
+				const marker = activeEditor
+					? this.params.theme.fg("accent", "✎")
+					: selected ? this.params.theme.fg("accent", "›") : " ";
+				const value = this.displayValue(provider.providerId, definition, this.scope);
+				const targetId = `setting:${provider.providerId}:${definition.key}`;
+				this.mouseTargets.push({
+					id: targetId,
+					kind: "setting",
+					index,
+					row: rows.length,
+					startColumn: 1,
+					endColumn: 1 + inner,
+				});
+				rows.push(this.interactiveRow(
+					`${marker} ${selected ? this.params.theme.bold(flat.label) : flat.label} · ${value}`,
+					inner,
+					targetId,
+					selected,
+				));
+			}
 		}
+		const footerRows = [rule(inner)];
+		if (this.notice) footerRows.push(this.paintNotice(this.notice, inner));
+		for (const conflict of this.conflicts.slice(0, 2)) {
+			footerRows.push(this.params.theme.fg("error", fit(`! ${conflict.resource.id}`, inner)));
+		}
+		if (!this.notice && this.failures.length > 0) {
+			const failure = this.failures[0]!;
+			footerRows.push(this.params.theme.fg("warning", fit(`${failure.providerId} · ${failure.message}`, inner)));
+		}
+		const dirty = this.params.coordinator.modifiedProviderIds().length > 0;
+		footerRows.push(this.params.theme.fg("dim", fit(dirty ? this.t("settings.helpDirty") : this.t("settings.help"), inner)));
+		rows.push(...footerRows);
+		// Pad so the overlay (frame + content) fills its height target and the footer
+		// stays at the bottom. The frame adds 2 border rows.
+		const targetHeight = this.overlayHeightTarget();
+		const paddingRows = targetHeight ? Math.max(0, targetHeight - 2 - rows.length) : 0;
+		for (let index = 0; index < paddingRows; index++) rows.push("");
 		return rows;
 	}
 
-	private contentRows(width: number, maxSettingRows: number, rowStart: number, columnStart: number): string[] {
+	/** Centered editing popup for the selected setting (reuses the editor state machines). */
+	private renderEditPopup(inner: number): string[] {
 		const provider = this.selectedProvider();
-		if (!provider) return [this.params.theme.fg("dim", fit(this.t("settings.noProviders"), width))];
-		if (this.listCrudField) return this.listCrudFieldRows(width, rowStart, columnStart);
-		if (this.listCrud) return this.listCrudRows(width, rowStart, columnStart);
-		const settings = this.visibleSettings();
-		if (settings.length === 0) return [this.params.theme.fg("dim", fit(this.t("settings.noMatches"), width))];
+		const definition = this.selectedSetting();
+		if (!provider || !definition) return [this.params.theme.fg("dim", fit(this.t("settings.noMatches"), inner))];
 		const rows: string[] = [];
-		let start = visibleStart(this.settingIndex, settings.length, maxSettingRows);
-		let backtracked = 0;
-		while (start > 0 && backtracked < 2 && settings[start - 1]?.group === settings[start]?.group) {
-			start--;
-			backtracked++;
-		}
-		// Group-header backtracking shrinks the window from the top; on short
-		// terminals it must never push the highlighted row past the window end.
-		if (start + maxSettingRows <= this.settingIndex) {
-			start = Math.max(0, this.settingIndex - maxSettingRows + 1);
-		}
-		const end = Math.min(settings.length, start + maxSettingRows);
-		let renderedGroup: string | undefined;
-		for (let index = start; index < end; index++) {
-			const definition = settings[index]!;
-			if (definition.group !== renderedGroup) {
-				renderedGroup = definition.group;
-				rows.push(this.params.theme.fg("muted", fit(`— ${this.t(definition.group)} —`, width)));
-			}
-			const selected = index === this.settingIndex;
-			const activeEditor = this.isEditing(provider.providerId, definition.key);
-			const marker = activeEditor
-				? this.params.theme.fg("accent", "✎")
-				: selected ? this.params.theme.fg("accent", "›") : " ";
+		const scopes = definition.scopes.length > 0 ? this.t(`settings.scope.${this.scope}`) : "";
+		const activation = this.t(`settings.activation.${definition.activation}`);
+		const editingFlag = this.editing || this.optionEditing ? this.t("settings.editing") : "";
+		rows.push(headerLine(this.params.theme, this.t(definition.labelKey), [scopes, activation, editingFlag].filter(Boolean), inner));
+		if (definition.descriptionKey) rows.push(this.params.theme.fg("dim", fit(this.t(definition.descriptionKey), inner)));
+		rows.push(rule(inner));
+		if (this.listCrudField) {
+			rows.push(...this.listCrudFieldRows(inner, rows.length, 1));
+		} else if (this.listCrud) {
+			rows.push(...this.listCrudRows(inner, rows.length, 1));
+		} else if (this.editing) {
+			rows.push(...this.textEditorRows(this.editing, inner));
+		} else if (this.optionEditing) {
+			rows.push(...this.optionEditorRows(this.optionEditing, inner, rows.length, 1));
+		} else if (definition.editor.kind === "overview") {
+			rows.push(...this.detailRows(provider, definition, inner, rows.length, 1));
+		} else {
 			const value = this.displayValue(provider.providerId, definition, this.scope);
-			const targetId = `setting:${provider.providerId}:${definition.key}`;
-			this.mouseTargets.push({
-				id: targetId,
-				kind: "setting",
-				index,
-				row: rowStart + rows.length,
-				startColumn: columnStart,
-				endColumn: columnStart + width,
-			});
-			rows.push(this.interactiveRow(
-				`${marker} ${selected ? this.params.theme.bold(this.t(definition.labelKey)) : this.t(definition.labelKey)} · ${value}`,
-				width,
-				targetId,
-				selected,
-			));
+			rows.push(fit(`${this.t("settings.effective")} · ${value}`, inner));
+			if (definition.editor.kind === "action" || definition.editor.kind === "custom") {
+				rows.push(fit(`${this.t("settings.manage")} · Enter`, inner));
+			}
 		}
-		rows.push(rule(width));
-		rows.push(...this.detailRows(provider, settings[this.settingIndex]!, width, rowStart + rows.length, columnStart));
+		rows.push(rule(inner));
+		if (this.notice) rows.push(this.paintNotice(this.notice, inner));
+		rows.push(helpLine(this.params.theme, this.t("settings.editHelp"), inner));
 		return rows;
 	}
 
@@ -574,6 +567,12 @@ export class MaestroSettingsShell implements Component, Focusable {
 		const provider = this.selectedProvider();
 		const definition = this.selectedSetting();
 		if (!provider || !definition || !definition.scopes.includes(this.scope)) return;
+		if (definition.editor.kind === "overview") {
+			this.viewingOverview = true;
+			this.discardArmed = false;
+			this.requestRender();
+			return;
+		}
 		if (!provider.description.capabilities.write && definition.editor.kind !== "action" && definition.editor.kind !== "custom") {
 			this.setNotice(this.t("settings.readOnly"), "warning");
 			return;
@@ -998,7 +997,7 @@ export class MaestroSettingsShell implements Component, Focusable {
 			const printable = decodeKittyPrintable(data) ?? (/^[^\x00-\x1f\x7f]+$/u.test(data) ? data : "");
 			if (printable) this.search += printable;
 		}
-		this.settingIndex = 0;
+		this.flatIndex = 0;
 		this.syncSelection();
 		this.requestRender();
 	}
@@ -1224,28 +1223,18 @@ export class MaestroSettingsShell implements Component, Focusable {
 			this.requestRender();
 			return true;
 		}
+		if (target.kind === "setting") {
+			this.flatIndex = target.index;
+			this.syncScope();
+			this.afterNavigation(false);
+			void this.activateSelected();
+			return true;
+		}
 		if (this.optionEditing || this.searching || this.applying) {
 			this.requestRender();
 			return true;
 		}
-		if (target.kind === "provider") {
-			if (target.index !== this.providerIndex) {
-				const previous = this.selectedProvider();
-				if (previous) this.rememberSetting(previous.providerId);
-				this.providerIndex = target.index;
-				this.restoreSetting(this.selectedProvider()?.providerId);
-				this.syncSelection();
-				this.afterNavigation(false);
-			} else {
-				this.requestRender();
-			}
-			return true;
-		}
-		this.settingIndex = target.index;
-		this.syncScope();
-		this.rememberSetting(this.selectedProvider()?.providerId);
-		this.afterNavigation(false);
-		void this.activateSelected();
+		this.requestRender();
 		return true;
 	}
 
@@ -1311,38 +1300,70 @@ export class MaestroSettingsShell implements Component, Focusable {
 	}
 
 	private selectedProvider(): DescribedSettingsProvider | undefined {
-		return this.providers[this.providerIndex];
+		return this.selectedRow()?.providerIndex !== undefined ? this.providers[this.selectedRow()!.providerIndex] : undefined;
 	}
 
-	private visibleSettings(): readonly SettingDefinition[] {
-		const settings = this.selectedProvider()?.description.settings ?? [];
+	/** Flattened vertical rows (group headers + settings) across the active domain. */
+	private visibleRows(): FlatRow[] {
 		const query = this.search.trim().toLocaleLowerCase();
-		const groupOrder = new Map<string, number>();
-		for (const definition of settings) {
-			if (!groupOrder.has(definition.group)) groupOrder.set(definition.group, groupOrder.size);
-		}
-		return settings
-			.filter((definition) => !query
-				|| definition.key.toLocaleLowerCase().includes(query)
-				|| this.t(definition.labelKey).toLocaleLowerCase().includes(query)
-				|| this.t(definition.group).toLocaleLowerCase().includes(query))
-			.sort((left, right) => (groupOrder.get(left.group) ?? Number.MAX_SAFE_INTEGER)
+		const rows: FlatRow[] = [];
+		for (let providerIndex = 0; providerIndex < this.providers.length; providerIndex++) {
+			const provider = this.providers[providerIndex]!;
+			if (this.domain !== "all" && provider.providerId !== this.domain) continue;
+			const settings = provider.description.settings
+				.filter((definition) => !query
+					|| definition.key.toLocaleLowerCase().includes(query)
+					|| this.t(definition.labelKey).toLocaleLowerCase().includes(query)
+					|| this.t(definition.group).toLocaleLowerCase().includes(query))
+				.sort((left, right) => (left.order ?? 0) - (right.order ?? 0) || left.key.localeCompare(right.key));
+			const groupOrder = new Map<string, number>();
+			for (const definition of settings) {
+				if (!groupOrder.has(definition.group)) groupOrder.set(definition.group, groupOrder.size);
+			}
+			const grouped = [...settings].sort((left, right) => (groupOrder.get(left.group) ?? Number.MAX_SAFE_INTEGER)
 				- (groupOrder.get(right.group) ?? Number.MAX_SAFE_INTEGER)
 				|| (left.order ?? 0) - (right.order ?? 0)
 				|| left.key.localeCompare(right.key));
+			const rawSettings = provider.description.settings;
+			let renderedGroup: string | undefined;
+			for (const definition of grouped) {
+				if (definition.group !== renderedGroup) {
+					renderedGroup = definition.group;
+					rows.push({ kind: "header", label: this.t(definition.group), providerIndex, settingIndex: 0 });
+				}
+				const rawIndex = rawSettings.findIndex((entry) => entry.key === definition.key);
+				rows.push({ kind: "setting", label: this.t(definition.labelKey), providerIndex, settingIndex: rawIndex >= 0 ? rawIndex : 0 });
+			}
+		}
+		return rows;
+	}
+
+	private selectedRow(): FlatRow | undefined {
+		const rows = this.visibleRows();
+		const index = clampIndex(this.flatIndex, rows.length);
+		const row = rows[index];
+		return row?.kind === "setting" ? row : rows.find((entry) => entry.kind === "setting") ?? rows[index];
 	}
 
 	private selectedSetting(): SettingDefinition | undefined {
-		return this.visibleSettings()[this.settingIndex];
+		const row = this.selectedRow();
+		if (row?.kind !== "setting" || row.providerIndex === undefined) return undefined;
+		const settings = this.providers[row.providerIndex]?.description.settings ?? [];
+		return settings[row.settingIndex] ?? settings[0];
 	}
 
-	private moveProvider(delta: number): void {
-		if (this.providers.length === 0) return;
-		const previous = this.selectedProvider();
-		if (previous) this.rememberSetting(previous.providerId);
-		this.providerIndex = (this.providerIndex + delta + this.providers.length) % this.providers.length;
-		this.restoreSetting(this.selectedProvider()?.providerId);
-		this.syncSelection();
+	private moveFlat(delta: number): void {
+		const rows = this.visibleRows();
+		if (rows.length === 0) return;
+		let index = this.flatIndex;
+		for (let step = 0; step < rows.length; step++) {
+			index = (index + delta + rows.length) % rows.length;
+			if (rows[index]?.kind === "setting") {
+				this.flatIndex = index;
+				break;
+			}
+		}
+		this.syncScope();
 		this.afterNavigation();
 	}
 
@@ -1360,16 +1381,7 @@ export class MaestroSettingsShell implements Component, Focusable {
 			return;
 		}
 		if (this.editing || this.listCrud || this.listCrudField) return;
-		this.moveSetting(delta);
-	}
-
-	private moveSetting(delta: number): void {
-		const settings = this.visibleSettings();
-		if (settings.length === 0) return;
-		this.settingIndex = (this.settingIndex + delta + settings.length) % settings.length;
-		this.syncScope();
-		this.rememberSetting(this.selectedProvider()?.providerId);
-		this.afterNavigation();
+		this.moveFlat(delta);
 	}
 
 	private moveScope(delta: number): void {
@@ -1381,8 +1393,12 @@ export class MaestroSettingsShell implements Component, Focusable {
 	}
 
 	private syncSelection(): void {
-		this.providerIndex = clampIndex(this.providerIndex, this.providers.length);
-		this.settingIndex = clampIndex(this.settingIndex, this.visibleSettings().length);
+		const rows = this.visibleRows();
+		if (rows.length > 0) {
+			if (rows[this.flatIndex]?.kind !== "setting") {
+				this.flatIndex = rows.findIndex((entry) => entry.kind === "setting");
+			}
+		}
 		this.syncScope();
 	}
 
@@ -1396,23 +1412,6 @@ export class MaestroSettingsShell implements Component, Focusable {
 		this.conflicts = [];
 		this.notice = "";
 		this.requestRender();
-	}
-
-	/** Remember the highlighted setting key for the current provider. */
-	private rememberSetting(providerId: string | undefined): void {
-		const selected = this.selectedSetting();
-		if (providerId && selected) this.settingKeyByProvider.set(providerId, selected.key);
-	}
-
-	/** Restore the remembered highlight for a provider, defaulting to the first setting. */
-	private restoreSetting(providerId: string | undefined): void {
-		const key = providerId ? this.settingKeyByProvider.get(providerId) : undefined;
-		if (!key) {
-			this.settingIndex = 0;
-			return;
-		}
-		const index = this.visibleSettings().findIndex((setting) => setting.key === key);
-		this.settingIndex = index >= 0 ? index : 0;
 	}
 
 	private afterNavigation(clearHover = true): void {

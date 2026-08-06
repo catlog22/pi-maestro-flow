@@ -364,6 +364,11 @@ test("overview editors render read-only diagnostic rows with status tones", asyn
 	const state = await createShell(provider);
 	const rendered = state.shell.render(100).join("\n");
 	assert.ok(rendered.includes("2 rows"), "the list value summarizes the row count");
-	assert.ok(rendered.includes("● Healthy · 2/2"), "an ok overview row must carry the ● glyph");
-	assert.ok(rendered.includes("◐ Stale · 1 server stale"), "a warn overview row must carry the ◐ glyph");
+	// Enter on the overview setting opens a read-only popup with the diagnostic rows.
+	state.shell.handleInput("\r");
+	const popup = state.shell.render(100).join("\n");
+	assert.ok(popup.includes("● Healthy · 2/2"), "an ok overview row must carry the ● glyph");
+	assert.ok(popup.includes("◐ Stale · 1 server stale"), "a warn overview row must carry the ◐ glyph");
+	state.shell.handleInput("\x1b");
+	assert.ok(!state.shell.render(100).join("\n").includes("● Healthy · 2/2"), "Esc closes the overview popup");
 });

@@ -241,14 +241,17 @@ test("API Manager has a dedicated Settings page with direct management actions",
 			close() {},
 		});
 		const rendered = shell.render(120).join("\n");
-		assert.match(rendered, /API Manager/);
 		assert.match(rendered, /— Providers and models —/);
 		assert.match(rendered, /Open API Manager/);
 		assert.match(rendered, /Add or edit a provider model/);
 		assert.match(rendered, /— Retry policy —/);
-		assert.match(rendered, /Configure API retries/);
-		assert.match(rendered, /— Configuration overview —/);
-		assert.match(rendered, /Configuration overview ·/);
+		assert.match(rendered, /Auto-retry enabled/);
+		// The vertical list scrolls: navigate down to reveal the later groups/actions.
+		for (let index = 0; index < 8; index++) shell.handleInput("\x1b[B");
+		const scrolled = shell.render(120).join("\n");
+		assert.match(scrolled, /Configure API retries/);
+		assert.match(scrolled, /— Configuration overview —/);
+		assert.match(scrolled, /Configuration overview ·/);
 	} finally { rmSync(state.root, { recursive: true, force: true }); }
 });
 
