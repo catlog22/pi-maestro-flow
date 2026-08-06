@@ -115,6 +115,9 @@ export function mergeConfigDocument(raw: unknown, config: CockpitConfig): Record
 			density: config.sidebar.density,
 		}
 		: { ...config.sidebar };
+	const title = root.title && typeof root.title === "object" && !Array.isArray(root.title)
+		? { ...(root.title as Record<string, unknown>), ...config.title }
+		: { ...config.title };
 	return {
 		...root,
 		enabled: config.enabled,
@@ -132,6 +135,7 @@ export function mergeConfigDocument(raw: unknown, config: CockpitConfig): Record
 		copyOnSelect: config.copyOnSelect,
 		icons,
 		sidebar,
+		title,
 		theme: config.theme,
 	};
 }
