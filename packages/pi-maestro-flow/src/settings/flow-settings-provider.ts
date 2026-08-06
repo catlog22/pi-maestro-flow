@@ -116,7 +116,6 @@ interface ParsedKey {
 }
 
 const ACTION_KEYS = [
-  "failover.manage",
   "responseLanguage.manage",
   "permissions.manage",
   "hooks.manage",
@@ -185,6 +184,10 @@ const BASE_CATALOGS = {
     "flow.option.relevanceMode.keyword": "Keyword scoring",
     "flow.failover.enabled": "Enable automatic model failover",
     "flow.failover.fallbackModels": "Fallback chains",
+    "flow.failover.fallbackModels.add": "Add chain",
+    "flow.failover.fallbackModels.item": "{model}",
+    "flow.failover.field.model": "Model",
+    "flow.failover.field.fallbacks": "Fallback models",
     "flow.action.compaction": "Open compaction settings",
     "flow.action.compaction.description": "Opens the full compaction control center; changes save to global or project settings",
     "flow.action.failover": "Open model failover settings",
@@ -253,6 +256,10 @@ const BASE_CATALOGS = {
     "flow.option.relevanceMode.keyword": "关键词评分",
     "flow.failover.enabled": "启用模型自动故障转移",
     "flow.failover.fallbackModels": "回退链",
+    "flow.failover.fallbackModels.add": "添加链",
+    "flow.failover.fallbackModels.item": "{model}",
+    "flow.failover.field.model": "模型",
+    "flow.failover.field.fallbacks": "回退模型",
     "flow.action.compaction": "打开压缩设置",
     "flow.action.compaction.description": "打开完整压缩控制中心；更改保存到全局或项目设置",
     "flow.action.failover": "打开模型故障转移设置",
@@ -530,7 +537,14 @@ function definitions(): SettingDefinition[] {
     setting("compaction.soft.crossTurnDedup.minChars", "flow.group.compactionSoft", "flow.compaction.soft.crossTurnDedup.minChars", "integer", DEFAULT_DEDUP_MIN_CHARS, "next-turn", { min: 1, step: 1 }),
     setting("compaction.soft.lossless.enabled", "flow.group.compactionSoft", "flow.compaction.soft.lossless.enabled", "boolean", true, "next-turn"),
     setting("failover.enabled", "flow.group.failover", "flow.failover.enabled", "boolean", false, "next-invocation"),
-    setting("failover.fallbackModels", "flow.group.failover", "flow.failover.fallbackModels", "json", {}, "next-invocation", { multiline: true }, "deep-merge"),
+    setting("failover.fallbackModels", "flow.group.failover", "flow.failover.fallbackModels", "list-crud", [], "next-invocation", {
+      addLabelKey: "flow.failover.fallbackModels.add",
+      itemLabelKey: "flow.failover.fallbackModels.item",
+      itemFields: [
+        { key: "model", group: "flow.group.failover", order: 0, labelKey: "flow.failover.field.model", scopes: ["global", "project"], merge: "override", activation: "next-invocation", sensitivity: "public", reversibility: "full", editor: { kind: "text" } },
+        { key: "fallbacks", group: "flow.group.failover", order: 1, labelKey: "flow.failover.field.fallbacks", scopes: ["global", "project"], merge: "override", activation: "next-invocation", sensitivity: "public", reversibility: "full", editor: { kind: "string-list" } },
+      ],
+    }, "deep-merge"),
   ];
   return [...writable, ...OVERVIEW_DEFINITIONS, ...ACTION_KEYS.map((key, index): SettingDefinition => ({
     key,
@@ -617,11 +631,12 @@ function snapshot(
     const relevant = parsed.kind === "compaction" ? compaction : failover;
     for (const resource of relevant) {
       const value = readConfiguredValue(resource.document.raw, parsed);
+      const display = parsed.path[0] === "fallbackModels" ? fallbackMapToItems(value.value) : value.value;
       configured.push({
         key: definition.key,
         scope: resource.scope,
         state: resource.document.error ? "invalid" : value.present ? "set" : "absent",
-        ...(value.present ? { value: value.value } : {}),
+        ...(value.present ? { value: display } : {}),
         resource: resource.revision.resource,
         ...(resource.document.error ? { messageKey: "flow.settings.malformedResource" } : {}),
       });
@@ -647,7 +662,7 @@ function snapshot(
       const resource = selected?.scope ? failover.find((entry) => entry.scope === selected.scope) : undefined;
       effective.push({
         key: definition.key,
-        value: selected?.value ?? definition.defaultValue ?? null,
+        value: parsed.path[0] === "fallbackModels" ? fallbackMapToItems(selected?.value) : (selected?.value ?? definition.defaultValue ?? null),
         source: selected ? "configured" : "default",
         ...(selected?.scope ? { scope: selected.scope, resource: resource?.revision.resource } : {}),
       });
@@ -726,7 +741,14 @@ function validValue(key: string, value: JsonValue): boolean {
     return positiveInt(value) !== undefined;
   }
   if (key === "compaction.soft.relevance.mode") return value === "bm25" || value === "keyword";
-  if (key === "failover.fallbackModels") return isFallbackMap(value);
+  if (key === "failover.fallbackModels") {
+    return Array.isArray(value)
+      ? value.every((item) => isRecord(item)
+        && typeof (item as Record<string, unknown>).model === "string"
+        && Array.isArray((item as Record<string, unknown>).fallbacks)
+        && ((item as Record<string, unknown>).fallbacks as unknown[]).every((entry) => typeof entry === "string"))
+      : isFallbackMap(value);
+  }
   return false;
 }
 
@@ -845,7 +867,11 @@ function applyChanges(kind: ResourceKind, raw: Record<string, unknown>, changes:
     for (const change of changes) {
       const parsed = parseSettingKey(change.key);
       if (!parsed) continue;
-      setOrUnsetPath(root, parsed.path, change);
+      if (parsed.path[0] === "fallbackModels" && change.operation === "set" && Array.isArray(change.value)) {
+        setOrUnsetPath(root, parsed.path, { ...change, value: fallbackItemsToMap(change.value) });
+      } else {
+        setOrUnsetPath(root, parsed.path, change);
+      }
     }
     return root;
   }
@@ -889,6 +915,27 @@ function setOrUnsetPath(root: Record<string, unknown>, segments: readonly string
       delete parents[index - 1][segments[index - 1]];
     }
   } else cursor[leaf] = change.value;
+}
+
+function fallbackMapToItems(map: unknown): JsonValue {
+  const source = isRecord(map) ? map : {};
+  return Object.entries(source).map(([model, fallbacks]) => ({
+    model,
+    fallbacks: Array.isArray(fallbacks) ? fallbacks.filter((entry): entry is string => typeof entry === "string") : [],
+  }));
+}
+
+function fallbackItemsToMap(items: JsonValue): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  if (!Array.isArray(items)) return result;
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    if (typeof record.model === "string" && record.model && Array.isArray(record.fallbacks)) {
+      result[record.model] = record.fallbacks.filter((entry): entry is string => typeof entry === "string");
+    }
+  }
+  return result;
 }
 
 function mergedFallbackValue(

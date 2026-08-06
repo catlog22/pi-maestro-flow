@@ -59,7 +59,9 @@ test("Flow provider describes editable settings, complex actions and bilingual c
   assert.equal(description.capabilities.prepareCommit, true);
   assert.ok(description.settings.some((entry) => entry.key === "compaction.soft.velocity.minFullness"));
   assert.equal(description.settings.find((entry) => entry.key === "compaction.keepRecentTokens")?.editor.max, 2_000_000);
-  assert.ok(description.settings.some((entry) => entry.key === "failover.fallbackModels" && entry.editor.kind === "json"));
+  const failoverDef = description.settings.find((entry) => entry.key === "failover.fallbackModels")!;
+  assert.equal(failoverDef.editor.kind, "list-crud");
+  assert.ok(failoverDef.editor.itemFields?.some((f) => f.key === "fallbacks" && f.editor.kind === "string-list"));
   const responseLanguage = description.settings.find((entry) => entry.key === "responseLanguage.manage");
   assert.equal(responseLanguage?.descriptionKey, "flow.action.responseLanguage.description");
   assert.deepEqual(responseLanguage?.editor.options?.map((entry) => entry.value), ["default", "zh-CN"]);
@@ -141,10 +143,10 @@ test("Flow provider reports configured and effective values across global and pr
   const softEnabled = snapshot.effective.values.find((entry) => entry.key === "compaction.soft.enabled");
   assert.equal(softEnabled?.value, true);
   assert.equal(softEnabled?.scope, "project");
-  assert.deepEqual(snapshot.effective.values.find((entry) => entry.key === "failover.fallbackModels")?.value, {
-    "openai/main": ["qwen/fallback"],
-    "qwen/main": ["openai/fallback"],
-  });
+  assert.deepEqual(snapshot.effective.values.find((entry) => entry.key === "failover.fallbackModels")?.value, [
+    { model: "openai/main", fallbacks: ["qwen/fallback"] },
+    { model: "qwen/main", fallbacks: ["openai/fallback"] },
+  ]);
   const derived = snapshot.effective.values.find((entry) => entry.key === "compaction.derived");
   assert.equal(derived?.source, "runtime");
   const derivedRows = derived?.value as Array<Record<string, unknown>>;
@@ -587,4 +589,40 @@ test("Flow provider rejects invalid values for registered compaction fields", as
   const prepared = await provider.prepare!({ context, transactionId: "invalid", changes: invalidChanges, expectedRevisions: baseline.configured.resources });
   assert.equal(prepared.prepared, false);
   assert.ok(prepared.validation.issues.length >= invalidChanges.length);
+});
+
+test("failover chain edits through the list-crud value persist to the file", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "flow-failover-crud-"));
+  try {
+    const globalFailover = path.join(root, "home", "model-failover.json");
+    const projectFailover = path.join(root, "project", ".pi", "model-failover.json");
+    fs.mkdirSync(path.dirname(projectFailover), { recursive: true });
+    const provider = createFlowSettingsProvider({
+      getGlobalFailoverPath: () => globalFailover,
+      getProjectFailoverPath: () => projectFailover,
+    });
+    const context: SettingsContextV1 = { cwd: path.join(root, "project"), locale: "en" };
+    writeJson(projectFailover, { enabled: true, fallbackModels: { "openai/main": ["qwen/fallback"] } });
+    const snapshot = await provider.read({ context });
+    assert.deepEqual(snapshot.effective.values.find((entry) => entry.key === "failover.fallbackModels")?.value, [
+      { model: "openai/main", fallbacks: ["qwen/fallback"] },
+    ]);
+    const prepared = await provider.prepare!({
+      context,
+      transactionId: "tx-fc",
+      changes: [{ operation: "set", key: "failover.fallbackModels", scope: "project", value: [
+        { model: "openai/main", fallbacks: ["qwen/fallback", "anthropic/fallback"] },
+        { model: "deepseek/main", fallbacks: ["qwen/main"] },
+      ] }],
+    });
+    assert.equal(prepared.prepared, true);
+    await provider.commit!({ context, transactionId: "tx-fc", prepareToken: prepared.prepareToken! });
+    const written = JSON.parse(fs.readFileSync(projectFailover, "utf8"));
+    assert.deepEqual(written.fallbackModels, {
+      "openai/main": ["qwen/fallback", "anthropic/fallback"],
+      "deepseek/main": ["qwen/main"],
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
