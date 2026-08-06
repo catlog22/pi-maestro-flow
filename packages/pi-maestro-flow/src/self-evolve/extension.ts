@@ -41,6 +41,7 @@ import {
   DEDUP_CAPACITY,
   DEFAULT_SELF_EVOLVE_CONFIG,
   envOverrideForSelfEvolve,
+  filterSignalLines,
   formatConfigSummary,
   formatReviewSummary,
   formatSignalLine,
@@ -611,7 +612,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
   // -------------------------------------------------------------------------
 
   pi.registerCommand("self-evolve", {
-    description: "Self-evolve: /self-evolve (panel, default) | status | on | off | config [k=v ...|reset] | signals [N] | review [N]",
+    description: "Self-evolve: /self-evolve (editable panel, default) | status | on | off | config [k=v ...|reset] | signals [N] | review [N]",
     async handler(args: string, ctx) {
       await ensureWorkspaceConfig(ctx);
       const trimmed = args.trim();
@@ -679,6 +680,70 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       }
 
       if (cmd === "signals") {
+        const sub = rest[0]?.toLowerCase();
+        const signalsDir = suggestionsDirPath(outputDir ?? selfEvolveOutputRoot(process.env[SELF_EVOLVE_OUTPUT_DIR_FLAG]));
+        if (sub === "delete") {
+          const prefixes = rest.slice(1).filter((prefix) => prefix.trim().length > 0);
+          if (prefixes.length === 0) {
+            ctx.ui.notify(
+              "Usage: /self-evolve signals delete <se-id-prefix...> (e.g. se-3f2a1b9c0d4e; ids shown by /self-evolve signals)",
+              "info",
+            );
+            return;
+          }
+          let total = 0;
+          let touched = 0;
+          try {
+            const names = (await readdir(signalsDir))
+              .filter((name) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name))
+              .sort();
+            for (const name of names) {
+              const path = join(signalsDir, name);
+              const lines = (await readFile(path, "utf8")).split("\n");
+              const { kept, deleted } = filterSignalLines(lines, prefixes);
+              if (deleted === 0) continue;
+              await writeFile(path, kept.join("\n"), "utf8");
+              total += deleted;
+              touched += 1;
+            }
+          } catch {
+            // Directory may not exist yet — treated as zero matches.
+          }
+          ctx.ui.notify(
+            total > 0
+              ? `Self-evolve: deleted ${total} signal(s) across ${touched} file(s).`
+              : `Self-evolve: no signals matched ${prefixes.join(", ")}.`,
+            total > 0 ? "info" : "warning",
+          );
+          return;
+        }
+        if (sub === "clear") {
+          let total = 0;
+          let touched = 0;
+          try {
+            const names = (await readdir(signalsDir))
+              .filter((name) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name))
+              .sort();
+            for (const name of names) {
+              const path = join(signalsDir, name);
+              const lines = (await readFile(path, "utf8")).split("\n");
+              const kept = lines.filter((line) => !line.trim());
+              if (kept.length === lines.length) continue;
+              await writeFile(path, kept.join("\n"), "utf8");
+              total += lines.length - kept.length;
+              touched += 1;
+            }
+          } catch {
+            // Directory may not exist yet — nothing to clear.
+          }
+          ctx.ui.notify(
+            total > 0
+              ? `Self-evolve: cleared ${total} signal(s) across ${touched} file(s).`
+              : "Self-evolve: no signals to clear.",
+            total > 0 ? "info" : "warning",
+          );
+          return;
+        }
         const limit = rest[0]
           ? Math.max(1, Math.min(50, Number.parseInt(rest[0], 10) || 10))
           : 10;
@@ -797,12 +862,21 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
             close: () => done(undefined),
             theme,
             onAction: async (action) => {
-              if (action === "close") {
+              if (action.type === "close") {
                 done(undefined);
                 return;
               }
-              if (action === "refresh") {
+              if (action.type === "refresh") {
                 overlay.update(await buildPanelView(ctx));
+                return;
+              }
+              if (action.type === "save") {
+                // Persist first, then adopt the new config: a failed write must
+                // leave the in-memory config and the panel untouched.
+                await saveConfig(action.config, ctx.cwd);
+                config = action.config;
+                resetSessionState();
+                updateStatusBar(ctx);
               }
             },
           });
@@ -817,7 +891,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       if (cmd === "status") {
         const lines = [
         `SELF-EVOLVE ${effectiveEnabled() ? "on" : "off"} (${source})`,
-        "  mode: dry-run — candidate signals only, never stages or promotes knowledge",
+        `  mode: ${config.mode} — candidate signals only, never stages or promotes knowledge (Phase 2A; auto-deposit arrives with Phase 2B)`,
         `  model: ${config.model ?? "auto"}${resolveSelfEvolveModel(ctx) && resolveSelfEvolveModel(ctx) !== config.model ? ` → ${resolveSelfEvolveModel(ctx)}` : ""} (Phase 2B LLM steps)`,
         `  cooldown: ${config.cooldownMs}ms · max ${config.maxSignalsPerSession} signals/session`,
         `  evidence: ${config.maxEvidence} refs · trace: ${config.maxTraceMessages} msgs / ${config.maxTraceChars} chars`,
@@ -827,7 +901,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         state.lastSource
           ? `  last: ${state.lastSource}${lastSignalBySource[state.lastSource] ? ` · ${new Date(lastSignalBySource[state.lastSource]!).toLocaleTimeString()}` : ""}`
           : "  last: (none yet)",
-        `  usage: /self-evolve config <key>=<value> (cooldownMs, maxSignalsPerSession, maxTraceChars, maxTraceMessages, maxEvidence, maxFiles, enabled) · signals [N] · panel`,
+        `  usage: /self-evolve panel (editable: ↑↓ Enter Ctrl+S) · config <key>=<value> (enabled, mode, model, cooldownMs, maxSignalsPerSession, maxTraceChars, maxTraceMessages, maxEvidence, maxFiles) · signals [N]`,
       ];
       ctx.ui.notify(lines.join("\n"), "info");
       return;

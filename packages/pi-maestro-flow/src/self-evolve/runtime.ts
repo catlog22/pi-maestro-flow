@@ -40,9 +40,24 @@ export const PRIVATE_FILE_MODE = 0o600;
 // Config
 // ---------------------------------------------------------------------------
 
+/** Evolution modes. Phase 2A has a single safe mode: dry-run (candidate
+ * signals only, never stages/promotes knowledge). Future phases may extend
+ * this enum (e.g. auto-deposit); validation stays in `setConfigValue`. */
+export type SelfEvolveMode = "dry-run";
+
+/** All currently legal evolution modes, in display order. */
+export const SELF_EVOLVE_MODES: readonly SelfEvolveMode[] = ["dry-run"];
+
 export interface SelfEvolveConfig {
   /** Master switch; the extension only observes events while enabled. */
   enabled: boolean;
+  /**
+   * Evolution mode. Phase 2A ships only `dry-run` (collect candidate signals,
+   * never stage/promote knowledge); the field is explicit so the panel/status
+   * show the real value instead of a hardcoded label, and so future phases
+   * can add modes without changing the config shape.
+   */
+  mode: SelfEvolveMode;
   /**
    * Model for Phase 2B LLM steps (candidate synthesis / review gate).
    * `provider/model` id, or `auto` / unset to inherit the main-session model.
@@ -65,6 +80,7 @@ export interface SelfEvolveConfig {
 
 export const DEFAULT_SELF_EVOLVE_CONFIG: SelfEvolveConfig = {
   enabled: false,
+  mode: "dry-run",
   cooldownMs: 300_000,
   maxSignalsPerSession: 20,
   maxTraceChars: 8_000,
@@ -84,8 +100,13 @@ export function normalizeSelfEvolveConfig(raw: Partial<SelfEvolveConfig> | undef
   const model = typeof raw?.model === "string" && raw.model.trim().length > 0
     ? raw.model.trim()
     : defaults.model;
+  const mode: SelfEvolveMode =
+    typeof raw?.mode === "string" && (SELF_EVOLVE_MODES as readonly string[]).includes(raw.mode)
+      ? (raw.mode as SelfEvolveMode)
+      : defaults.mode;
   return {
     enabled: typeof raw?.enabled === "boolean" ? raw.enabled : defaults.enabled,
+    mode,
     ...(model ? { model } : {}),
     cooldownMs: typeof raw?.cooldownMs === "number" && raw.cooldownMs >= 0
       ? raw.cooldownMs
@@ -478,6 +499,16 @@ export function setConfigValue(
     }
     return { config, error: `enabled expects true/false (got "${raw.trim()}")` };
   }
+  if (normalizedKey === "mode") {
+    const value = raw.trim();
+    if ((SELF_EVOLVE_MODES as readonly string[]).includes(value)) {
+      return { config: { ...config, mode: value as SelfEvolveMode } };
+    }
+    return {
+      config,
+      error: `mode expects one of ${SELF_EVOLVE_MODES.join(" | ")} (Phase 2A ships dry-run only; auto-deposit arrives with Phase 2B), got "${raw}"`,
+    };
+  }
   if (normalizedKey === "cooldownMs") {
     const parsed = parseDurationMs(raw);
     if (parsed === undefined) return { config, error: `cooldownMs expects a duration (e.g. 300000, 5m, 30s), got "${raw}"` };
@@ -501,7 +532,7 @@ export function setConfigValue(
   }
   return {
     config,
-    error: `unknown key "${normalizedKey}" (editable: ${[...EDITABLE_CONFIG_KEYS, "enabled"].join(", ")})`,
+    error: `unknown key "${normalizedKey}" (editable: ${[...EDITABLE_CONFIG_KEYS, "enabled", "mode", "model"].join(", ")})`,
   };
 }
 
@@ -517,7 +548,7 @@ export function formatDurationMs(ms: number): string {
 export function formatConfigSummary(config: SelfEvolveConfig, source: string, resolvedModel?: string): string {
   const lines = [
     `SELF-EVOLVE ${config.enabled ? "on" : "off"} (${source})`,
-    "  mode: dry-run — candidate signals only, never stages or promotes knowledge",
+    `  mode: ${config.mode} — candidate signals only, never stages or promotes knowledge`,
     `  model: ${config.model ?? "auto"}${resolvedModel && resolvedModel !== config.model ? ` → ${resolvedModel}` : ""} (Phase 2B LLM steps)`,
     `  cooldown: ${formatDurationMs(config.cooldownMs)} (${config.cooldownMs}ms)`,
     `  budget: ${config.maxSignalsPerSession} signals/session`,
@@ -557,7 +588,43 @@ export function parseSignalLines(lines: readonly string[]): SelfEvolveSignal[] {
 export function formatSignalLine(signal: SelfEvolveSignal): string {
   const time = new Date(signal.createdAt).toLocaleTimeString();
   const evidenceCount = signal.evidence?.length ?? 0;
-  return `[${time}] ${signal.source} · ${signal.candidateType} · ${evidenceCount} ev: ${signal.title}`;
+  return `[${time}] ${signal.id} · ${signal.source} · ${signal.candidateType} · ${evidenceCount} ev: ${signal.title}`;
+}
+
+// ---------------------------------------------------------------------------
+// Signal record management (delete / clear helpers)
+// ---------------------------------------------------------------------------
+
+/** True when a signal line's id starts with any given prefix (id or prefix). */
+export function signalLineMatchesPrefix(line: string, prefixes: readonly string[]): boolean {
+  if (prefixes.length === 0) return false;
+  try {
+    const parsed = JSON.parse(line) as { id?: unknown };
+    return typeof parsed.id === "string"
+      && prefixes.some((prefix) => prefix.length > 0 && parsed.id!.startsWith(prefix));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Filter signal lines, dropping any whose id matches one of the prefixes.
+ * Keeps blank and non-signal lines untouched so rewriting stays lossless.
+ */
+export function filterSignalLines(
+  lines: readonly string[],
+  prefixes: readonly string[],
+): { kept: string[]; deleted: number } {
+  const kept: string[] = [];
+  let deleted = 0;
+  for (const line of lines) {
+    if (line.trim() && signalLineMatchesPrefix(line, prefixes)) {
+      deleted += 1;
+    } else {
+      kept.push(line);
+    }
+  }
+  return { kept, deleted };
 }
 
 // ---------------------------------------------------------------------------

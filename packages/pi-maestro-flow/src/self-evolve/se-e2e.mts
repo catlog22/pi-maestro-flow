@@ -248,6 +248,19 @@ async function main(): Promise<void> {
   const cfgM3 = JSON.parse(await readFile(cfgPath, "utf8"));
   check("model=auto 清除显式模型", cfgM3.model === undefined, JSON.stringify(cfgM3));
 
+  // ---- 8d. mode config: dry-run is the only legal Phase 2A mode ----
+  await cmd.handler("config mode=dry-run", ctx);
+  const cfgMode1 = JSON.parse(await readFile(cfgPath, "utf8"));
+  check("config mode=dry-run 持久化", cfgMode1.mode === "dry-run", JSON.stringify(cfgMode1));
+  let modeReject = "";
+  ctx.ui.notify = (message, level) => { if (level === "warning") modeReject = message; prevNotify(message, level); };
+  await cmd.handler("config mode=live", ctx);
+  const cfgMode2 = JSON.parse(await readFile(cfgPath, "utf8"));
+  check("非法 mode 拒绝（配置未变）", cfgMode2.mode === "dry-run" && modeReject.includes("mode expects"), modeReject.slice(0, 120));
+  await cmd.handler("config reset", ctx);
+  const cfgMode3 = JSON.parse(await readFile(cfgPath, "utf8"));
+  check("config reset 恢复 mode=dry-run", cfgMode3.mode === "dry-run", JSON.stringify(cfgMode3));
+
   // ---- 8c. dry-run review: fake teammate runtime, verdicts written globally ----
 
   let capturedTask = "";

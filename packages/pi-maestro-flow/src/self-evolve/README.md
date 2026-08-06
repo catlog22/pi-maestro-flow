@@ -71,12 +71,18 @@
 
 ### 面板 `/self-evolve`（默认） / `/self-evolve panel`
 
-只读 TUI 面板（`ctx.ui.custom` overlay），展示：配置摘要（含来源）、运行时计数器、最近信号列表。配置修改请走 `/self-evolve config`（带校验与持久化）——面板仅刷新/关闭。渲染遵循 Maestro settings 视觉语言（共享 `frame`/`headerLine`/`rule` 原语）；按终端高度计算行预算，信号列表超出时以 `… +N more` 截断，底部帮助行永不被裁剪；窄终端（<20 列）自动折叠为单行状态。
+TUI 面板（`ctx.ui.custom` overlay），展示：配置菜单（含来源）、运行时计数器、最近信号列表，并支持**面板内直接编辑配置**。配置修改经 `setConfigValue` 校验后，`Ctrl+S` 持久化到 `.pi/self-evolve.json` 并刷新状态栏。渲染遵循 Maestro settings 视觉语言（共享 `frame`/`headerLine`/`rule` 原语）；按终端高度计算行预算，信号列表超出时以 `… +N more` 截断，底部帮助行永不被裁剪；窄终端（<20 列）自动折叠为单行状态。
 
 | 键 | 动作 |
 |---|---|
-| `r` | 刷新（重读配置与信号文件） |
-| `q` / `Esc` | 关闭 |
+| `↑` / `↓` | 选择配置字段 |
+| `Enter` | 编辑字段（数字/时长/model 文本）；对 `enabled` 为切换 |
+| `Space` | 切换 `enabled` 总开关 |
+| `Ctrl+S` | 保存修改（校验通过后持久化） |
+| `r` | 刷新（重读配置与信号文件；有未保存修改时需再按一次确认丢弃） |
+| `q` / `Esc` | 关闭（有未保存修改时需再按一次确认丢弃） |
+
+`mode` 行是信息展示（当前唯一合法值 `dry-run`，Phase 2A 安全设计；自动沉淀属 Phase 2B）。
 
 ### 配置控制 `/self-evolve config <key>=<value>`
 
@@ -85,6 +91,7 @@
 | 键 | 类型 | 示例 |
 |---|---|---|
 | `enabled` | bool | `true` / `false` |
+| `mode` | 枚举（当前仅 `dry-run`） | `dry-run`（Phase 2A 唯一合法模式；其他值整体拒绝，自动沉淀属 Phase 2B） |
 | `model` | `provider/model` 或 `auto` | `maestro-qwen/qwen3.8-max`、`auto` |
 | `cooldownMs` | 时长 | `300000`、`5m`、`30s`、`1.5h` |
 | `maxSignalsPerSession` | 正整数 | `20` |
@@ -169,8 +176,8 @@ node --experimental-strip-types <(cat <<'EOF'
 ...
 EOF
 )
-# 行为回归（mock 宿主，47 断言：默认禁用零副作用 / 启用持久化 / 信号生成 /
-# 去重与冷却语义 / 状态栏 / 配置校验 / dry-run 保证）
+# 行为回归（mock 宿主，50 断言：默认禁用零副作用 / 启用持久化 / 信号生成 /
+# 去重与冷却语义 / 状态栏 / 配置校验含 mode / dry-run 保证）
 cd packages/pi-maestro-flow && node --experimental-strip-types src/self-evolve/se-e2e.mts
 ```
 
