@@ -30,6 +30,7 @@ Thumbs.db
 .workflow/sessions/
 .workflow/embedding-index.bin
 .workflow/embedding.zvec/
+.workflow/embedding.zvec.meta.json
 .workflow/explore/
 .workflow/impeccable/
 .workflow/kg/
