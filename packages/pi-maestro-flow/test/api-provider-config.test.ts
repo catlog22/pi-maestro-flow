@@ -366,12 +366,12 @@ test("API Manager retry defaults are enabled and preserve explicit overrides", a
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const settingsPath = join(tempDir, "settings.json");
 
-  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 5 });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 3 });
   await ensureApiRetryDefaults(settingsPath);
   assert.deepEqual(JSON.parse(readFileSync(settingsPath, "utf8")).retry, {
     enabled: true,
-    maxRetries: 5,
-    baseDelayMs: 1_000,
+    maxRetries: 3,
+    baseDelayMs: 2_000,
   });
 
   writeFileSync(settingsPath, JSON.stringify({
@@ -387,7 +387,7 @@ test("API Manager retry defaults are enabled and preserve explicit overrides", a
   assert.equal(saved.theme, "custom");
   assert.deepEqual(saved.retry, {
     enabled: false,
-    maxRetries: 5,
+    maxRetries: 3,
     baseDelayMs: 3_000,
     provider: { maxRetries: 0, maxRetryDelayMs: 600_000 },
   });
@@ -440,11 +440,11 @@ test("/api-manager manages retry from commands and the interactive menu", async 
 
   assert.ok(sessionStart);
   await sessionStart!({}, baseContext);
-  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 5 });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 3 });
 
   const manager = commands.get("api-manager");
   await manager.handler("retry off", baseContext);
-  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: false, maxRetries: 5 });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: false, maxRetries: 3 });
   await manager.handler("retry on 4", baseContext);
   assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 4 });
   await manager.handler("retry show", baseContext);

@@ -222,9 +222,12 @@ export type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "
 
 export const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
 export const API_RETRY_MAX_RETRIES = NETWORK_RETRY_POLICY.maxRetries;
+// Defaults mirror the pi runtime (settings-manager): maxRetries 3 / baseDelayMs 2000.
+export const API_RETRY_DEFAULT_MAX_RETRIES = 3;
+export const API_RETRY_DEFAULT_BASE_DELAY_MS = 2000;
 const DEFAULT_API_RETRY_SETTINGS: Readonly<ApiRetrySettings> = Object.freeze({
   enabled: true,
-  maxRetries: API_RETRY_MAX_RETRIES,
+  maxRetries: API_RETRY_DEFAULT_MAX_RETRIES,
 });
 
 export const PROVIDERS: readonly ProviderDefaults[] = [
@@ -602,7 +605,7 @@ export async function saveApiRetrySettings(
         maxRetries,
         baseDelayMs: isPositiveInteger(retry.baseDelayMs)
           ? retry.baseDelayMs
-          : NETWORK_RETRY_POLICY.initialDelayMs,
+          : API_RETRY_DEFAULT_BASE_DELAY_MS,
       },
     }, settingsPath, exists);
   });
