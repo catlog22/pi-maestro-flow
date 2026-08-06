@@ -311,8 +311,9 @@ export class MaestroSettingsShell implements Component, Focusable {
 		if (providerRows.length === 0) {
 			rows.push(this.params.theme.fg("dim", fit(this.t("settings.noMatches"), inner)));
 		} else {
-			const start = visibleStart(this.providerIndex, providerRows.length, MAX_PROVIDER_ROWS);
-			const end = Math.min(providerRows.length, start + MAX_PROVIDER_ROWS);
+			const limit = this.providerRowLimit();
+			const start = visibleStart(this.providerIndex, providerRows.length, limit);
+			const end = Math.min(providerRows.length, start + limit);
 			for (let index = start; index < end; index++) {
 				const row = providerRows[index]!;
 				const selected = index === this.providerIndex;
@@ -347,8 +348,9 @@ export class MaestroSettingsShell implements Component, Focusable {
 		if (settings.length === 0) {
 			rows.push(this.params.theme.fg("dim", fit(this.t("settings.noMatches"), inner)));
 		} else {
-			const start = visibleStart(this.settingIndex, settings.length, MAX_SETTING_ROWS);
-			const end = Math.min(settings.length, start + MAX_SETTING_ROWS);
+			const limit = this.settingRowLimit();
+			const start = visibleStart(this.settingIndex, settings.length, limit);
+			const end = Math.min(settings.length, start + limit);
 			let renderedGroup: string | undefined;
 			let backtracks = 0;
 			while (start > 0 && backtracks < 2 && settings[start - 1]?.group === settings[start]?.group) {
@@ -1335,6 +1337,23 @@ export class MaestroSettingsShell implements Component, Focusable {
 		));
 	}
 
+	/** Max settings rows visible at once, scaled to the overlay height so tall
+	 * terminals show more and scrolling is minimised. */
+	private settingRowLimit(): number {
+		const overlayHeight = this.overlayHeightTarget();
+		if (!overlayHeight) return MAX_SETTING_ROWS;
+		// Chrome: frame borders(2) + header(1) + rule(1) + provider name(1) + rule(1)
+		// + footer(rule+help ≈2); leave room for a couple of group headers.
+		return Math.max(6, overlayHeight - 10);
+	}
+
+	private providerRowLimit(): number {
+		const overlayHeight = this.overlayHeightTarget();
+		if (!overlayHeight) return MAX_PROVIDER_ROWS;
+		// Chrome: frame borders(2) + header(1) + rule(1) + footer(rule+help ≈2).
+		return Math.max(4, overlayHeight - 6);
+	}
+
 	private optionRowLimit(): number {
 		const overlayHeight = this.overlayHeightTarget();
 		if (!overlayHeight) return 7;
@@ -1350,17 +1369,6 @@ export class MaestroSettingsShell implements Component, Focusable {
 		// list's own header/rule/rule/help and the possible "N more" marker ≈ 11;
 		// a set notice adds one footer row. The TUI clips the frame at maxHeight.
 		return Math.max(1, overlayHeight - 11 - (this.notice ? 1 : 0));
-	}
-
-	private settingRowLimit(narrow: boolean): number {
-		const overlayHeight = this.overlayHeightTarget();
-		if (!overlayHeight) return MAX_SETTING_ROWS;
-		if (this.optionEditing) return 1;
-		const available = Math.max(1, overlayHeight - (narrow ? 17 : 16));
-		for (let rows = MAX_SETTING_ROWS; rows > 1; rows--) {
-			if (rows + Math.ceil(rows / 3) <= available) return rows;
-		}
-		return 1;
 	}
 
 	private selectedProvider(): DescribedSettingsProvider | undefined {
