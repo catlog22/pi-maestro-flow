@@ -106,6 +106,32 @@ test("structured result snapshots are cloned and retain their origin cwd", () =>
   assert.equal(value.nested.verdict, "ok");
 });
 
+test("toStructuredResults carries the final assistant text for tasks without an outputSchema", () => {
+  const projected = toStructuredResults([result({
+    name: "scanner",
+    messages: [
+      { role: "system", content: "running" },
+      { role: "assistant", content: "Found 3 issues in src/" },
+    ],
+  })], "D:/workspace");
+  assert.ok(projected);
+  assert.equal(projected[0].structuredOutput, undefined);
+  assert.equal(projected[0].output, "Found 3 issues in src/");
+});
+
+test("toStructuredResults prefers structuredOutput and omits output for empty transcripts", () => {
+  const structured = toStructuredResults([result({
+    name: "reviewer",
+    messages: [{ role: "tool", content: "Structured output saved." }],
+    structuredOutput: { ok: true },
+  })], "D:/workspace");
+  assert.ok(structured);
+  assert.deepEqual(structured[0].structuredOutput, { ok: true });
+  assert.equal(structured[0].output, undefined);
+
+  assert.equal(toStructuredResults([result({ messages: [] })], "D:/workspace"), undefined);
+});
+
 test("setAgentStructuredOutput clones new values and clears stale values", () => {
   const agent = agentFixture({ structuredOutput: { previous: true } });
   const next = { nested: { value: 3 } };

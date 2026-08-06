@@ -340,9 +340,32 @@ export function aggregateGraphStructuredOutput(
 }
 
 /**
- * Compact projection of schema-valid results for completion events. Undefined
- * when no result carries structured output, so emitters can spread it
- * conditionally and keep the event payload minimal.
+ * Final assistant answer of a settled result: the last non-empty assistant
+ * message, or the last non-empty message of any role (e.g. a failure
+ * diagnostic) when no assistant text survived. Empty only when the transcript
+ * is empty.
+ */
+export function finalResultText(result: SingleResult): string | undefined {
+  const messages = result.messages ?? [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || message.role !== "assistant") continue;
+    const text = message.content?.trim();
+    if (text) return text;
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const text = messages[index]?.content?.trim();
+    if (text) return text;
+  }
+  return undefined;
+}
+
+/**
+ * Compact projection of settled results for completion events. Each entry
+ * carries either the schema-valid `structuredOutput` or, when the task had no
+ * outputSchema, the final assistant text as `output`. Undefined when no result
+ * produced either, so emitters can spread it conditionally and keep the event
+ * payload minimal.
  */
 export function toStructuredResults(
   results: readonly SingleResult[],
@@ -350,13 +373,16 @@ export function toStructuredResults(
 ): StructuredResult[] | undefined {
   const entries: StructuredResult[] = [];
   for (const result of results) {
-    if (result.structuredOutput === undefined) continue;
+    const structured = result.structuredOutput;
+    const text = structured !== undefined ? undefined : finalResultText(result);
+    if (structured === undefined && text === undefined) continue;
     entries.push({
       correlationId: result.correlationId,
       originCwd,
       ...(result.name ? { name: result.name } : {}),
       agent: result.agent,
-      structuredOutput: structuredClone(result.structuredOutput),
+      ...(structured !== undefined ? { structuredOutput: structuredClone(structured) } : {}),
+      ...(text !== undefined ? { output: text } : {}),
     });
   }
   return entries.length > 0 ? entries : undefined;
@@ -406,7 +432,8 @@ Background: the foreground wait window is bounded — the smallest per-task time
 
 ## Structured output (outputSchema)
 
-prompt is a task-level field: always place the task text at tasks[].prompt, never inside outputSchema — outputSchema accepts only the JSON Schema object itself, and a prompt string embedded there is rejected as a mislocated prompt.
+prompt is a task-level field: always place the task text at tasks[].prompt, never inside outputSchema — outputSchema holds only the JSON Schema object. A prompt string embedded in outputSchema is diagnosed at dispatch with a pointer to the correct location (or silently salvaged when the task already has a prompt). Example task shape:
+{ "name": "audit", "agent": "analyst", "prompt": "<the task text>", "outputSchema": { "type": "object", "properties": { "result": { "type": "string" } }, "required": ["result"] } }
 
 When a task (or the top-level call) sets outputSchema, the child must submit its final answer through a \`structured_output\` tool that validates the value against that JSON Schema. On completion the value is returned directly in the result content (prefixed \`[structured_output]\`) and is persisted for later reads via \`agent://<correlationId>\` (resource tool). Schema-invalid submissions fail validation and the child retries automatically; a run that ends without a valid value fails with a diagnostic naming the offending field.
 

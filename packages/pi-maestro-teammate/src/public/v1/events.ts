@@ -102,8 +102,8 @@ export interface TeammateCompleteEvent {
   /** True when cancellation, rather than success/failure, ended the lifecycle. */
   cancelled?: boolean;
   /**
-   * Compact schema-valid structured results for `agent://` persistence.
-   * Present only when the completed run produced structured output.
+   * Compact settled results for `agent://` persistence. Present when the
+   * completed run produced structured output or a final assistant text.
    */
   structuredResults?: StructuredResult[];
 }

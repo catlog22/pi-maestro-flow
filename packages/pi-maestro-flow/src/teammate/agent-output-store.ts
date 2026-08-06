@@ -271,7 +271,7 @@ export async function readAgentOutput(id: string, cwd: string): Promise<AgentOut
   throw new Error(
     `No persisted teammate output for "${id}". ` +
     `Available agent ids: ${available.slice(0, 20).join(", ") || "(none)"}. ` +
-    "Outputs are captured when a teammate task finishes with an outputSchema.",
+    "Outputs are captured when a teammate task finishes (its final answer, or the validated outputSchema value).",
   );
 }
 

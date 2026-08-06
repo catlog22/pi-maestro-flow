@@ -169,6 +169,14 @@ test("resolveResource agent:// path miss reports a precise reason and a usage ti
   );
 });
 
+test("resolveResource reads agent:// text records persisted without an outputSchema", async () => {
+  await persistAgentOutput("run-agent-3", "planner", "general", "Plan: land in three steps.", root);
+  const whole = await resolveResource("agent://run-agent-3", root);
+  assert.equal(whole.content.trim(), "Plan: land in three steps.");
+  const byName = await resolveResource("agent://planner", root);
+  assert.equal(byName.content.trim(), "Plan: land in three steps.");
+});
+
 test("resolveResource rejects skill/rule name traversal", async () => {
   await assert.rejects(
     () => resolveResource("skill://../escape", root),

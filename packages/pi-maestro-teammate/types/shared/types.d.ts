@@ -199,6 +199,12 @@ export interface ActiveAgent {
     resolvedModel?: string;
     attemptedModels?: string[];
     /**
+     * Optional Todo task ids bound to this agent at dispatch time (priority
+     * order); emitted with `teammate:started` so the host can auto-delegate the
+     * tasks' assignee and activate the first runnable one.
+     */
+    todos?: string[];
+    /**
      * When this agent failed. Set alongside `status: "failed"`, mirroring
      * `sleptAt` for retired agents, and read by the retention sweep that
      * eventually removes the tombstone.
@@ -327,9 +333,13 @@ export interface SettledAgentRecord {
     attemptedModels?: string[];
 }
 /**
- * Compact structured-output projection carried on completion events so
+ * Compact result projection carried on completion events so
  * background/detached results can be persisted to `agent://` without parsing
  * rendered messages. Deliberately smaller than `SingleResult`.
+ *
+ * A task carries `structuredOutput` when it completed with an `outputSchema`;
+ * otherwise it carries `output` — the final assistant message text — so
+ * `agent://` records exist for plain tasks too.
  */
 export interface StructuredResult {
     correlationId: string;
@@ -339,7 +349,9 @@ export interface StructuredResult {
     name?: string;
     agent: string;
     /** Schema-valid structured output captured for this task. */
-    structuredOutput: unknown;
+    structuredOutput?: unknown;
+    /** Final assistant message text; present when the task had no outputSchema. */
+    output?: string;
 }
 export declare const TEAMMATE_COMPLETE_EVENT = "teammate:complete";
 export declare const TEAMMATE_STARTED_EVENT = "teammate:started";

@@ -95,7 +95,7 @@ test("persistStructuredResults backfills graph task names from progress", async 
   assert.equal(byName.correlationId, "capture-cid-2");
 });
 
-test("persistStructuredResults skips entries without structured output or correlation id", async () => {
+test("persistStructuredResults skips entries without any output or correlation id", async () => {
   await persistStructuredResults(
     [
       { correlationId: "capture-cid-3", name: "plain", agent: "general" },
@@ -108,6 +108,58 @@ test("persistStructuredResults skips entries without structured output or correl
   );
   await assert.rejects(
     () => readAgentOutput("capture-cid-3", root),
+    (err: unknown) => err instanceof Error && err.message.includes("No persisted teammate output"),
+  );
+});
+
+test("persistStructuredResults persists the final answer text for tasks without outputSchema", async () => {
+  await persistStructuredResults(
+    [{ correlationId: "text-cid-1", name: "text-task", agent: "general", output: "Found 3 issues in src/" }],
+    undefined,
+    root,
+  );
+  const record = await readAgentOutput("text-cid-1", root);
+  assert.equal(record.output, "Found 3 issues in src/");
+  const byName = await readAgentOutput("text-task", root);
+  assert.equal(byName.correlationId, "text-cid-1");
+});
+
+test("persistStructuredResults falls back to the last assistant message of the foreground transcript", async () => {
+  await persistStructuredResults(
+    [{
+      correlationId: "text-cid-2",
+      name: "plain-run",
+      messages: [
+        { role: "system", content: "begin" },
+        { role: "assistant", content: "  Done.  " },
+      ],
+    }],
+    undefined,
+    root,
+  );
+  assert.equal((await readAgentOutput("text-cid-2", root)).output, "Done.");
+});
+
+test("persistStructuredResults prefers structuredOutput and skips whitespace-only text", async () => {
+  await persistStructuredResults(
+    [{
+      correlationId: "text-cid-3",
+      output: "fallback text",
+      messages: [{ role: "assistant", content: "fallback from messages" }],
+      structuredOutput: { ok: true },
+    }],
+    undefined,
+    root,
+  );
+  assert.deepEqual((await readAgentOutput("text-cid-3", root)).output, { ok: true });
+
+  await persistStructuredResults(
+    [{ correlationId: "text-cid-4", output: "   " }],
+    undefined,
+    root,
+  );
+  await assert.rejects(
+    () => readAgentOutput("text-cid-4", root),
     (err: unknown) => err instanceof Error && err.message.includes("No persisted teammate output"),
   );
 });

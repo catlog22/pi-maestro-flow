@@ -27,9 +27,18 @@ export declare function displayMessageForResult(result: SingleResult): string;
 export declare function summarizeGraphResults(results: readonly SingleResult[], tasks: readonly NormalizedTask[]): string;
 export declare function aggregateGraphStructuredOutput(results: readonly SingleResult[], tasks: readonly NormalizedTask[]): Record<string, unknown> | undefined;
 /**
- * Compact projection of schema-valid results for completion events. Undefined
- * when no result carries structured output, so emitters can spread it
- * conditionally and keep the event payload minimal.
+ * Final assistant answer of a settled result: the last non-empty assistant
+ * message, or the last non-empty message of any role (e.g. a failure
+ * diagnostic) when no assistant text survived. Empty only when the transcript
+ * is empty.
+ */
+export declare function finalResultText(result: SingleResult): string | undefined;
+/**
+ * Compact projection of settled results for completion events. Each entry
+ * carries either the schema-valid `structuredOutput` or, when the task had no
+ * outputSchema, the final assistant text as `output`. Undefined when no result
+ * produced either, so emitters can spread it conditionally and keep the event
+ * payload minimal.
  */
 export declare function toStructuredResults(results: readonly SingleResult[], originCwd: string): StructuredResult[] | undefined;
 /** Replace the retained turn value; undefined intentionally clears stale data. */

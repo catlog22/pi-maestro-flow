@@ -347,9 +347,13 @@ export interface SettledAgentRecord {
 }
 
 /**
- * Compact structured-output projection carried on completion events so
+ * Compact result projection carried on completion events so
  * background/detached results can be persisted to `agent://` without parsing
  * rendered messages. Deliberately smaller than `SingleResult`.
+ *
+ * A task carries `structuredOutput` when it completed with an `outputSchema`;
+ * otherwise it carries `output` — the final assistant message text — so
+ * `agent://` records exist for plain tasks too.
  */
 export interface StructuredResult {
   correlationId: string;
@@ -359,7 +363,9 @@ export interface StructuredResult {
   name?: string;
   agent: string;
   /** Schema-valid structured output captured for this task. */
-  structuredOutput: unknown;
+  structuredOutput?: unknown;
+  /** Final assistant message text; present when the task had no outputSchema. */
+  output?: string;
 }
 
 export const TEAMMATE_COMPLETE_EVENT = "teammate:complete";

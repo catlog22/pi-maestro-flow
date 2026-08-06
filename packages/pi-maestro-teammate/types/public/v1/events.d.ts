@@ -57,6 +57,15 @@ export interface TeammateStartedEvent {
     lastOutcome?: AgentRunOutcome;
     /** Tool-call id; present only when the run was started by a root `teammate` call. */
     id?: string;
+    /**
+     * Optional Todo task id(s) bound to this agent at dispatch (`tasks[].todo`),
+     * priority order. The host re-assigns each task's assignee to this agent on
+     * start and activates the first runnable one. `todo` (single) is kept for
+     * backward compatibility as the first binding.
+     */
+    todos?: string[];
+    /** First Todo binding; kept for backward compatibility with single-binding consumers. */
+    todo?: string;
 }
 /**
  * `teammate:complete` — one agent reached a terminal state.
@@ -76,8 +85,8 @@ export interface TeammateCompleteEvent {
     /** True when cancellation, rather than success/failure, ended the lifecycle. */
     cancelled?: boolean;
     /**
-     * Compact schema-valid structured results for `agent://` persistence.
-     * Present only when the completed run produced structured output.
+     * Compact settled results for `agent://` persistence. Present when the
+     * completed run produced structured output or a final assistant text.
      */
     structuredResults?: StructuredResult[];
 }
