@@ -335,3 +335,6 @@ graph task 与 graph 容器共享 AbortController 时，task 的自然成功、n
 - prune 跨 turn 稳定、cache gate 语义不变（本文件 S-20260724-cbhh 与 coding-conventions 同款规则）。
 
 </spec-entry>
+
+
+
