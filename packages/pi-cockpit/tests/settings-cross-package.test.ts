@@ -248,7 +248,7 @@ test("API Manager has a dedicated Settings page with direct management actions",
 		assert.match(rendered, /— Retry policy —/);
 		assert.match(rendered, /Configure API retries/);
 		assert.match(rendered, /— Configuration overview —/);
-		assert.match(rendered, /Show configured providers and models/);
+		assert.match(rendered, /Configuration overview ·/);
 	} finally { rmSync(state.root, { recursive: true, force: true }); }
 });
 

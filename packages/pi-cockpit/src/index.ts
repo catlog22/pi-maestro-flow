@@ -52,6 +52,7 @@ import { ANIMATION_PERIOD_MS, resolveGlyphs, spinFrame } from "./icons.ts";
 import { ensureConfigExists, loadConfig, saveConfig } from "./config.ts";
 import { applyRow, buildRows, rowKeyForAccel, type SaveState } from "./settings-view.ts";
 import { createCockpitSettingsProvider, registerCockpitSettingsProvider } from "./settings/cockpit-provider.ts";
+import { createNativePiSettingsProvider, registerNativePiSettingsProvider } from "./settings/native-pi-provider.ts";
 import { SettingsLocaleState, getMaestroUiPreferencesPath } from "./settings/locale-state.ts";
 import { SettingsProviderRegistry } from "./settings/registry.ts";
 import { showMaestroSettingsShell } from "./settings/settings-shell.ts";
@@ -266,10 +267,17 @@ export default function (pi: ExtensionAPI): void {
 	let settingsProviderDisposer: (() => void) | undefined;
 	const registerSettingsProvider = (): void => {
 		if (settingsProviderDisposer) return;
-		settingsProviderDisposer = registerCockpitSettingsProvider({
-			on: (event, handler) => pi.events.on(event, handler),
-			emit: (event, payload) => pi.events.emit(event, payload),
-		}, cockpitSettingsProvider);
+		const eventBus = {
+			on: (event: string, handler: (payload: unknown) => void) => pi.events.on(event, handler),
+			emit: (event: string, payload: unknown) => pi.events.emit(event, payload),
+		};
+		settingsProviderDisposer = registerCockpitSettingsProvider(eventBus, cockpitSettingsProvider);
+		const nativeDisposer = registerNativePiSettingsProvider(eventBus, nativePiSettingsProvider);
+		const previous = settingsProviderDisposer;
+		settingsProviderDisposer = () => {
+			previous();
+			nativeDisposer();
+		};
 	};
 	const settingsLocale = new SettingsLocaleState(getMaestroUiPreferencesPath(getAgentDir()), settingsRegistry);
 	let config: CockpitConfig = structuredClone(DEFAULT_CONFIG);
@@ -1813,6 +1821,8 @@ export default function (pi: ExtensionAPI): void {
 	});
 	// The settings provider registers on the first session (registerSettingsProvider
 	// in session_start); its disposer is stored for teardown at session_shutdown.
+
+	const nativePiSettingsProvider = createNativePiSettingsProvider({});
 
 	pi.registerShortcut(AGENT_OVERLAY_KEY, {
 		description: "Open the live Agent panel",
