@@ -89,6 +89,13 @@ const OUTPUT_LIMIT_RETRY_PROMPT = "Automatic compaction failed after the previou
 const OUTPUT_LIMIT_CONTINUE_PROMPT = "Your previous response was cut off at the model output token limit, and the context was just compacted to free room. Continue exactly from where the interrupted response stopped and complete it. Do not restart or wait for another user request.";
 const DEFAULT_OUTPUT_LIMIT_RATIO = 0.8;
 export const MAX_OUTPUT_LIMIT_COMPACTIONS = 2;
+/**
+ * Consecutive compact-action evaluations at/above the loop-critical band an
+ * active tool loop must hold before it is interrupted for compaction. A run
+ * about to settle naturally relieves pressure within one or two requests; only
+ * a genuinely sustained loop pays the interruption.
+ */
+export const LOOP_CRITICAL_PERSIST_EVALUATIONS = 3;
 const PRUNE_STATE_ENTRY_TYPE = "maestro-auto-prune-state";
 const PENDING_INTENT_ENTRY_TYPE = "maestro-auto-compaction-intent";
 const PENDING_INTENT_VERSION = 2;
@@ -239,6 +246,8 @@ interface PendingCompactionIntent {
   contextExhausted: boolean;
   /** The provider request was blocked before HTTP because budget thinking was invalid. */
   requestBlocked?: boolean;
+  /** Sustained critical-band pressure inside an active tool loop aborted the run for immediate settle. */
+  loopCritical?: boolean;
 }
 
 interface PendingOutputLimitIntent {
@@ -297,6 +306,8 @@ export interface AutoCompactionState {
   highPressureDroppedTurns: number;
   /** Consecutive evaluations sitting below the escalate band while an intent is live. */
   belowEscalateStreak: number;
+  /** Consecutive compact-action evaluations at/above the loop-critical band within the current run. */
+  criticalLoopStreak: number;
   /** Pressure notifications already emitted in the current compaction cycle. */
   notifiedPressureKeys: Set<string>;
   outputLimitCompactions: number;
@@ -362,6 +373,7 @@ export interface MidTurnCompactionStatus {
     thresholdTokens: number;
     contextExhausted: boolean;
     requestBlocked: boolean;
+    loopCritical: boolean;
   };
   outputLimitIntentPending: boolean;
   breaker: {
@@ -419,6 +431,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     turnCount: 0,
     highPressureDroppedTurns: 0,
     belowEscalateStreak: 0,
+    criticalLoopStreak: 0,
     notifiedPressureKeys: new Set(),
     outputLimitCompactions: 0,
     outputLimitBreakerNotified: false,
@@ -487,6 +500,44 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     return contextWindow === undefined || estimatedTokens >= contextWindow;
   }
   /**
+   * A tool loop can hold the context between the derived threshold and the
+   * window limit indefinitely: the host only checks its native threshold at
+   * run boundaries, and agent settle never fires mid-run. Once critical-band
+   * pressure (window minus effective reserve — where Pi itself would compact)
+   * persists across several requests, interrupt the run so the settled-phase
+   * compaction fires well before exhaustion. Reuses the exhausted pathway:
+   * settle sees a continuation-needing intent, submits it immediately, and the
+   * task resumes automatically. Single-owner semantics stay untouched — the
+   * context hook still never submits compaction itself.
+   */
+  function maybeInterruptForCriticalLoop(
+    ctx: ExtensionContext,
+    estimatedTokens: number,
+    linkedThreshold: LinkedCompactionThresholdModel & { usable: true },
+  ): boolean {
+    const loopCriticalTokens = linkedThreshold.contextWindow - linkedThreshold.effectiveReserveTokens;
+    if (estimatedTokens < loopCriticalTokens) {
+      state.criticalLoopStreak = 0;
+      return false;
+    }
+    state.criticalLoopStreak += 1;
+    const intent = state.pendingIntent;
+    if (!intent || intent.contextExhausted || intent.requestBlocked || intent.loopCritical) return false;
+    if (state.criticalLoopStreak < LOOP_CRITICAL_PERSIST_EVALUATIONS) return false;
+    if (state.running) return false;
+    if (ctx.hasPendingMessages?.()) return false;
+    if (!compactionBreakerAllows(state.breaker, state.turnCount).allowed) return false;
+    intent.loopCritical = true;
+    persistPendingIntent(pi, state);
+    ctx.abort();
+    notifyPressureOnce(
+      ctx,
+      `loop-critical:${linkedThreshold.contextWindow}`,
+      `Context held above ${loopCriticalTokens.toLocaleString("en-US")} tokens inside an active tool loop (${estimatedTokens.toLocaleString("en-US")}/${linkedThreshold.contextWindow}). Interrupting to compact; the task resumes automatically.`,
+    );
+    return true;
+  }
+  /**
    * Every field a fresh lifecycle must start from. onSessionStart used to clear
    * only 13 of these and never touched the concurrency trio, so a session
    * switched in-process without a shutdown inherited `running: true` and
@@ -507,6 +558,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     state.lastNoCompactableKey = undefined;
     state.highPressureDroppedTurns = 0;
     state.belowEscalateStreak = 0;
+    state.criticalLoopStreak = 0;
     state.notifiedPressureKeys.clear();
     state.internalsWarningTurn = undefined;
     state.lastProviderMessages = undefined;
@@ -520,6 +572,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     state.breakerNotified = false;
     state.highPressureDroppedTurns = 0;
     state.belowEscalateStreak = 0;
+    state.criticalLoopStreak = 0;
     state.notifiedPressureKeys.clear();
     state.outputLimitCompactions = 0;
     state.outputLimitBreakerNotified = false;
@@ -662,6 +715,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       if (pressure.action !== "compact") {
         state.lastNoCompactableKey = undefined;
         state.lastTriggerKey = undefined;
+        state.criticalLoopStreak = 0;
         // Escalation: pruning ran (or found nothing) yet the estimate still sits
         // within 3% of the hard trigger. Queue the intent now instead of letting
         // the next request run against a clamped output budget — the prune band
@@ -746,6 +800,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       if (state.pendingIntent?.triggerKey === triggerKey) {
         const stillExhausted = isContextExhausted(ctx, estimate.tokens);
         if (stillExhausted) ctx.abort();
+        else maybeInterruptForCriticalLoop(ctx, estimate.tokens, linkedThreshold);
         return pressure.messages;
       }
 
@@ -771,6 +826,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         // An actually overflowing request must never fall through to the
         // provider while waiting for the settled-phase compaction owner.
         ctx.abort();
+      } else {
+        maybeInterruptForCriticalLoop(ctx, estimate.tokens, linkedThreshold);
       }
       return pressure.messages;
   }
@@ -779,7 +836,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     ctx: ExtensionContext,
     intent: PendingCompactionIntent,
   ): void {
-    if (!intent.contextExhausted || ctx.hasPendingMessages?.()) return;
+    if ((!intent.contextExhausted && !intent.loopCritical) || ctx.hasPendingMessages?.()) return;
     ctx.ui.notify(
       "Mid-turn compaction repeatedly failed; falling back to Pi native compaction to recover the interrupted request.",
       "warning",
@@ -894,7 +951,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       const breakerTripped = state.breaker.trippedAtTurn !== undefined;
       clearPending();
       if (intent.requestBlocked) return;
-      if (!intent.contextExhausted || ctx.hasPendingMessages?.()) return;
+      if ((!intent.contextExhausted && !intent.loopCritical) || ctx.hasPendingMessages?.()) return;
       if (breakerTripped) {
         notifyBreakerPaused();
         fallbackToNativeCompaction(ctx, intent);
@@ -960,7 +1017,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         COMPACTION_STATUS_KEY,
         `CTX CRITICAL ${intent.estimate.tokens}/${intent.linkedThreshold.thresholdTokens}`,
       );
-      const noCompactableKey = `${intent.requestBlocked ? "provider-pressure" : intent.contextExhausted ? "exhausted" : "critical"}:${intent.linkedThreshold.thresholdTokens}:${intent.settings.keepRecentTokens}:${branch.length}`;
+      const noCompactableKey = `${intent.requestBlocked ? "provider-pressure" : intent.contextExhausted ? "exhausted" : intent.loopCritical ? "loop-critical" : "critical"}:${intent.linkedThreshold.thresholdTokens}:${intent.settings.keepRecentTokens}:${branch.length}`;
       if (state.lastNoCompactableKey !== noCompactableKey) {
         state.lastNoCompactableKey = noCompactableKey;
         if (intent.requestBlocked) {
@@ -971,6 +1028,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         } else if (intent.contextExhausted) {
           ctx.ui.notify(
             `Mid-turn request stopped: context is already ${intent.estimate.tokens}/${ctx.model?.contextWindow ?? intent.linkedThreshold.contextWindow} tokens and Pi has no compactable history. Start a new session or reduce static prompt/tool scope.`,
+            "error",
+          );
+        } else if (intent.loopCritical) {
+          ctx.ui.notify(
+            `Mid-turn loop interrupted: context is already ${intent.estimate.tokens}/${ctx.model?.contextWindow ?? intent.linkedThreshold.contextWindow} tokens and Pi has no compactable history. Start a new session or reduce static prompt/tool scope.`,
             "error",
           );
         } else {
@@ -1057,7 +1119,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           "warning",
         );
         if (breakerTripped) notifyBreakerPaused();
-        if (!intent.contextExhausted || breakerTripped || ctx.hasPendingMessages?.()) return;
+        if ((!intent.contextExhausted && !intent.loopCritical) || breakerTripped || ctx.hasPendingMessages?.()) return;
         try {
           pi.sendUserMessage(COMPACTION_RETRY_PROMPT, { deliverAs: "followUp" });
         } catch (recoveryError) {
@@ -1140,7 +1202,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           state.activeLease?.release();
           state.activeLease = undefined;
           clearPressureStatus(ctx);
-          if ((!intent.contextExhausted && !intent.requestBlocked) || ctx.hasPendingMessages?.()) return;
+          if ((!intent.contextExhausted && !intent.requestBlocked && !intent.loopCritical) || ctx.hasPendingMessages?.()) return;
           try {
             pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
           } catch (error) {
@@ -1542,12 +1604,15 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         && (sessionId === undefined || state.sessionId === undefined || sessionId === state.sessionId);
       if (!isCurrentLifecycle()) return;
       state.turnCount += 1;
+      // The run ended: any within-run critical-loop streak restarts fresh.
+      state.criticalLoopStreak = 0;
       const outputLimitPending = await settlePendingOutputLimit(ctx);
       if (!isCurrentLifecycle()) return;
       if (!state.running && !outputLimitPending) {
         const pending = state.pendingIntent;
         const needsContinuation = pending?.contextExhausted
           || pending?.requestBlocked
+          || pending?.loopCritical
           || Boolean(ctx.hasPendingMessages?.());
         if (pending && !needsContinuation) {
           // A settled, non-exhausted loop may have completed the user's task.
@@ -1733,7 +1798,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     shouldRetainNativeThreshold(ctx) {
       const pending = state.pendingIntent;
       if (!pending || pending.generation !== state.generation
-        || pending.contextExhausted || pending.requestBlocked) return false;
+        || pending.contextExhausted || pending.requestBlocked || pending.loopCritical) return false;
       const contextWindow = ctx.model?.contextWindow;
       if (contextWindow === undefined) return false;
       const usage = ctx.getContextUsage?.();
@@ -1757,6 +1822,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           thresholdTokens: state.pendingIntent.linkedThreshold.thresholdTokens,
           contextExhausted: state.pendingIntent.contextExhausted,
           requestBlocked: state.pendingIntent.requestBlocked === true,
+          loopCritical: state.pendingIntent.loopCritical === true,
         } : undefined,
         outputLimitIntentPending: state.pendingOutputLimitIntent !== undefined,
         breaker: {
@@ -2307,6 +2373,7 @@ function pendingIntentKey(intent: PendingCompactionIntent | undefined): string {
     effectiveSettings: intent.effectiveSettings,
     contextExhausted: intent.contextExhausted,
     requestBlocked: intent.requestBlocked === true,
+    loopCritical: intent.loopCritical === true,
   });
 }
 
@@ -2356,6 +2423,7 @@ function loadPersistedIntent(
   return {
     ...pending,
     requestBlocked: version === PENDING_INTENT_VERSION ? pending.requestBlocked : undefined,
+    loopCritical: pending.loopCritical === true,
     generation,
   };
 }

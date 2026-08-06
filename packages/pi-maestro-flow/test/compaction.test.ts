@@ -59,6 +59,7 @@ import {
   effectiveReserveTokens,
   estimateContextTokens,
   MAX_CONSECUTIVE_COMPACTION_FAILURES,
+  LOOP_CRITICAL_PERSIST_EVALUATIONS,
   MAX_OFF_BRANCH_PRUNE_BYTES,
   MAX_OFF_BRANCH_PRUNE_ENTRIES,
   MAX_PRUNE_DELTAS_BETWEEN_CHECKPOINTS,
@@ -3803,6 +3804,216 @@ test("native completion clears a preempted output-limit owner", async () => {
   await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
   await guard.onAgentEnd(ctx);
   assert.equal(compactCalls, 2, "native preemption must not strand running=true");
+});
+
+// --- P1: loop-critical interruption of sustained tool loops ---
+
+function loopCriticalFixture(options: { hasPendingMessages?: () => boolean } = {}) {
+  let aborted = 0;
+  const compactCalls: Array<{ onComplete(): void; onError(error: Error): void }> = [];
+  const sent: string[] = [];
+  const notifications: Array<{ message: string; level: string | undefined }> = [];
+  const guard = createMidTurnAutoCompaction({
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, {
+    leaseTimeoutMs: 100,
+    arbiter: new CompactionArbiter(100),
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    // window 400K, effective reserve 20K (5% floor), summary reserve 20K:
+    // threshold 360K < loop-critical band 380K < exhaustion 400K.
+    readSettings: () => ({ enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { provider: "maestro-openai", id: "session-large", contextWindow: 400_000, maxTokens: 128_000 },
+    abort() { aborted++; },
+    compact(options: { onComplete(): void; onError(error: Error): void }) { compactCalls.push(options); },
+    hasPendingMessages: options.hasPendingMessages ?? (() => false),
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: {
+      setStatus() {},
+      notify(message: string, level: string | undefined) { notifications.push({ message, level }); },
+    },
+  } as never;
+  return {
+    guard,
+    ctx,
+    aborted: () => aborted,
+    compactCalls,
+    sent,
+    notifications,
+  };
+}
+
+test("sustained critical-band pressure inside a tool loop aborts once and settles immediately", async () => {
+  const fx = loopCriticalFixture();
+  for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS - 1; evaluation++) {
+    await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
+    assert.equal(fx.aborted(), 0, `evaluation ${evaluation + 1} stays below the persistence floor`);
+  }
+  assert.equal(fx.guard.describeState().pendingIntent?.loopCritical, false, "no flag before the streak completes");
+
+  await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
+  assert.equal(fx.aborted(), 1, "the persistent critical loop is interrupted exactly once");
+  assert.equal(fx.guard.describeState().pendingIntent?.loopCritical, true);
+  assert.ok(
+    fx.notifications.some(({ message }) => /Interrupting to compact/.test(message)),
+    "the interruption is explained once",
+  );
+
+  await fx.guard.onAgentEnd(fx.ctx);
+  assert.equal(fx.compactCalls.length, 1, "a loop-critical intent bypasses the two-turn defer");
+  fx.compactCalls[0].onComplete();
+  assert.match(fx.sent.at(-1) ?? "", /Continue the interrupted task/, "the interrupted loop resumes automatically");
+
+  await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
+  await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
+  assert.equal(fx.aborted(), 1, "a fresh run counts the critical streak from zero");
+});
+
+test("a brief critical spike defers to the ordinary completed-turn path", async () => {
+  const fx = loopCriticalFixture();
+  await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
+  await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
+  assert.equal(fx.aborted(), 0);
+  assert.equal(fx.guard.describeState().pendingIntent?.loopCritical, false);
+
+  await fx.guard.onAgentEnd(fx.ctx);
+  assert.equal(fx.compactCalls.length, 0, "the first completed turn still defers");
+  await fx.guard.onAgentEnd(fx.ctx);
+  assert.equal(fx.compactCalls.length, 1, "the second completed turn submits through the ordinary path");
+});
+
+test("pressure between threshold and the critical band never interrupts the loop", async () => {
+  const fx = loopCriticalFixture();
+  for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS + 2; evaluation++) {
+    // Varying tokens keep every evaluation on the fresh-intent path.
+    await fx.guard.evaluate(highUsageToolBatch(365_000 + evaluation), fx.ctx);
+  }
+  assert.equal(fx.aborted(), 0);
+  assert.equal(fx.guard.describeState().pendingIntent?.loopCritical, false);
+});
+
+test("queued user messages suppress the loop interruption", async () => {
+  const fx = loopCriticalFixture({ hasPendingMessages: () => true });
+  for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS + 1; evaluation++) {
+    await fx.guard.evaluate(highUsageToolBatch(385_000 + evaluation), fx.ctx);
+  }
+  assert.equal(fx.aborted(), 0, "an imminent natural settlement is never preempted");
+  assert.equal(fx.guard.describeState().pendingIntent?.loopCritical, false);
+});
+
+test("window exhaustion keeps priority over the loop-critical interruption", async () => {
+  const fx = loopCriticalFixture();
+  for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS; evaluation++) {
+    await fx.guard.evaluate(highUsageToolBatch(405_000), fx.ctx);
+  }
+  assert.equal(fx.aborted(), LOOP_CRITICAL_PERSIST_EVALUATIONS, "exhaustion aborts every evaluation as before");
+  const pending = fx.guard.describeState().pendingIntent;
+  assert.equal(pending?.contextExhausted, true);
+  assert.equal(pending?.loopCritical, false, "the exhausted pathway owns the interruption");
+});
+
+test("an open breaker suppresses loop interruption", async () => {
+  const callbacks: Array<{ onError(error: Error): void }> = [];
+  const nativeFallbacks: Array<{ onComplete?: () => void }> = [];
+  let aborted = 0;
+  let pending = false;
+  const guard = createMidTurnAutoCompaction({
+    sendUserMessage() { pending = true; },
+  } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    // window 1000, reserve 100, no maxTokens: threshold and loop-critical band
+    // both sit at 900, exhaustion at 1000.
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() { aborted++; },
+    hasPendingMessages: () => pending,
+    compact(options: { customInstructions?: string; onError?(error: Error): void; onComplete?(): void }) {
+      if (options.customInstructions === NATIVE_FALLBACK_COMPACTION_MARKER) nativeFallbacks.push(options);
+      else callbacks.push(options as { onError(error: Error): void });
+    },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  for (let attempt = 0; attempt < MAX_CONSECUTIVE_COMPACTION_FAILURES; attempt++) {
+    pending = false;
+    await guard.evaluate(highUsageToolBatch(1_100), ctx);
+    await guard.onAgentEnd(ctx);
+    callbacks.at(-1)?.onError(new Error(`failure ${attempt + 1}`));
+  }
+  assert.equal(aborted, MAX_CONSECUTIVE_COMPACTION_FAILURES, "the tripping cycles abort on exhaustion");
+  assert.equal(nativeFallbacks.length, 1, "the breaker trip falls back to native once");
+
+  for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS + 1; evaluation++) {
+    await guard.evaluate(highUsageToolBatch(950), ctx);
+  }
+  assert.equal(aborted, MAX_CONSECUTIVE_COMPACTION_FAILURES, "a paused breaker never interrupts the loop");
+  assert.equal(guard.describeState().pendingIntent?.loopCritical, false);
+});
+
+test("loop-critical flag survives persistence and legacy intents hydrate without it", async () => {
+  const journal: Array<{ type: string; data: unknown }> = [];
+  let branch: Array<{ type?: string; customType?: string; data?: unknown }> = [];
+  let compacted = 0;
+  const pi = {
+    appendEntry(type: string, data: unknown) { journal.push({ type, data }); },
+    sendUserMessage() {},
+  } as never;
+  const dependencies = {
+    leaseTimeoutMs: 100,
+    arbiter: new CompactionArbiter(100),
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 }),
+  };
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { provider: "maestro-openai", id: "session-large", contextWindow: 400_000, maxTokens: 128_000 },
+    abort() {},
+    compact() { compacted++; },
+    hasPendingMessages: () => false,
+    sessionManager: {
+      getSessionId: () => "loop-critical-persistence",
+      getBranch: () => branch,
+    },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  const seed = createMidTurnAutoCompaction(pi, dependencies);
+  seed.onSessionStart(ctx);
+  for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS; evaluation++) {
+    await seed.evaluate(highUsageToolBatch(385_000), ctx);
+  }
+  const encoded = journal.findLast((entry) => {
+    const data = entry.data as { pending?: unknown } | undefined;
+    return entry.type === "maestro-auto-compaction-intent" && data?.pending;
+  })?.data as { version: number; sessionId: string; pending: Record<string, unknown> };
+  assert.equal(encoded.version, 2);
+  assert.equal(encoded.pending.loopCritical, true, "the interruption flag is durable");
+
+  branch = [{ type: "custom", customType: "maestro-auto-compaction-intent", data: encoded }];
+  const resumed = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, dependencies);
+  resumed.onSessionStart(ctx, { reason: "resume" });
+  assert.equal(resumed.describeState().pendingIntent?.loopCritical, true);
+  await resumed.onAgentEnd(ctx);
+  assert.equal(compacted, 1, "a resumed loop-critical intent still settles immediately");
+
+  const legacyPending = { ...encoded.pending };
+  delete legacyPending.loopCritical;
+  branch = [{
+    type: "custom",
+    customType: "maestro-auto-compaction-intent",
+    data: { ...encoded, pending: legacyPending },
+  }];
+  const legacy = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, dependencies);
+  legacy.onSessionStart(ctx, { reason: "resume" });
+  assert.equal(legacy.describeState().pendingIntent?.loopCritical, false);
+  await legacy.onAgentEnd(ctx);
+  assert.equal(compacted, 1, "an intent without the flag keeps the two-turn defer");
 });
 
 function pressureToolBatch() {
