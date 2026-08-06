@@ -52,7 +52,7 @@ test("agentPanelRows uses the larger Agent-specific share", () => {
 	assert.equal(agentPanelRows(undefined), undefined);
 });
 
-test("agentDetailRows keeps concurrent Agent surfaces inside a smaller share", () => {
+test("agentDetailRows reclaims the roster's released share for the focused session", () => {
 	assert.equal(agentDetailRows(100), MAX_AGENT_DETAIL_ROWS);
 	assert.equal(agentDetailRows(5), MIN_AGENT_DETAIL_ROWS);
 	assert.equal(agentDetailRows(40), Math.floor(40 * AGENT_DETAIL_CHROME_SHARE));

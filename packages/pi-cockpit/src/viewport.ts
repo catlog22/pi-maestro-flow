@@ -12,8 +12,13 @@
 export const CHROME_SHARE = 0.15;
 /** Agent surfaces get the space released by the auto-collapsed Todo panel. */
 export const AGENT_CHROME_SHARE = 0.24;
-/** Detail shares the screen with the roster, so its per-surface allowance is lower. */
-export const AGENT_DETAIL_CHROME_SHARE = 0.2;
+/**
+ * Focused-session share. Opening the session detail collapses the roster to a
+ * one-line summary (see stack-widget), so the detail reclaims the released
+ * rows instead of stacking on top of them: total chrome stays flat while the
+ * selected session's content roughly doubles.
+ */
+export const AGENT_DETAIL_CHROME_SHARE = 0.28;
 /** Below this a panel cannot say anything useful, so it stops shrinking. */
 export const MIN_PANEL_ROWS = 3;
 /** Above this extra rows stop earning their place, however tall the terminal is. */
@@ -21,7 +26,7 @@ export const MAX_PANEL_ROWS = 10;
 export const MIN_AGENT_PANEL_ROWS = 4;
 export const MAX_AGENT_PANEL_ROWS = 14;
 export const MIN_AGENT_DETAIL_ROWS = 4;
-export const MAX_AGENT_DETAIL_ROWS = 12;
+export const MAX_AGENT_DETAIL_ROWS = 16;
 export const AGENT_NARROW_ROW_CAP = 4;
 export const AGENT_WIDE_ROW_CAP = 8;
 

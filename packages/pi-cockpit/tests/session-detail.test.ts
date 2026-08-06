@@ -57,14 +57,37 @@ test("renderSessionDetail: header explains scroll and visibility controls", () =
 	assert.match(header, /Alt\+Shift\+R hide/);
 });
 
-test("renderSessionDetail: running agent without tail shows a working hint", () => {
+test("renderSessionDetail: running agent without tail names the thinking state", () => {
 	const lines = renderSessionDetail(
 		[agent({ status: "running", tail: "" })],
 		"c1",
 		80,
 		theme as Theme,
 	);
+	assert.ok(lines.some((line) => line.includes("thinking")));
+});
+
+test("renderSessionDetail: running agent with an active tool keeps the working hint", () => {
+	const lines = renderSessionDetail(
+		[agent({ status: "running", tail: "", activeTool: "bash" })],
+		"c1",
+		80,
+		theme as Theme,
+	);
 	assert.ok(lines.some((line) => line.includes("working")));
+	assert.ok(lines.some((line) => line.includes("bash")));
+});
+
+test("renderSessionDetail: stalled agent without tail reports the silence instead of working", () => {
+	const lines = renderSessionDetail(
+		[agent({ status: "running", tail: "", lastActivityAt: Date.now() - 45_000 })],
+		"c1",
+		80,
+		theme as Theme,
+	);
+	const text = lines.join("\n");
+	assert.match(text, /no activity/);
+	assert.doesNotMatch(text, /working/);
 });
 
 test("renderSessionDetail: explicit session view keeps content and actionable state", () => {
@@ -174,6 +197,6 @@ test("makeSessionDetailWidget: terminal height bounds the fixed region", () => {
 		getViewingId: () => "c1",
 		getVisible: () => true,
 	})({ terminal: { rows: terminalRows } } as never, theme as Theme).render(80);
-	assert.equal(make(24).length, 4);
-	assert.equal(make(60).length, 12);
+	assert.equal(make(24).length, 6);
+	assert.equal(make(60).length, 16);
 });

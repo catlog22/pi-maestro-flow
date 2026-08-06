@@ -42,7 +42,7 @@ import { makeTodoWidget, makeAgentWidget, terminalRows, visibleAgentRows } from 
 import { agentListWindowRows, scrollBy, type AgentScrollState } from "./agent-scroll.ts";
 import { agentSessionColor, makeSessionBarWidget, SESSION_BAR_WIDGET_KEY, MAIN_SESSION_LABEL } from "./session-bar.ts";
 import { makeSessionDetailWidget, SESSION_DETAIL_WIDGET_KEY, DEFAULT_SESSION_DETAIL_ROWS, sessionDetailBodyLength, sessionDetailWindowRows, type SessionDetailScrollState } from "./session-detail.ts";
-import { agentDetailRows, agentPanelRows, panelRows } from "./viewport.ts";
+import { agentDetailRows, agentPanelRows } from "./viewport.ts";
 import { routeAgentInput } from "./input-routing.ts";
 import { activeThemeName, ThemePicker } from "./theme-picker.ts";
 import { ModelPicker, type ModelPickerEntry } from "./model-picker.ts";
@@ -1165,10 +1165,11 @@ export default function (pi: ExtensionAPI): void {
 			if (data !== "\x1b[1;2A" && data !== "\x1b[1;2B") return undefined;
 			if (ambientKeysShouldYield(capturedTui)) return undefined;
 			const roster = visibleAgentRows(agents.snapshot());
+			// A focused session collapses the roster to its summary line, so there
+			// are no roster rows to scroll — leave the keys to the surface below.
+			if (sessionDetailVisible && agents.getViewingAgent() !== undefined) return undefined;
 			const terminalHeight = capturedTui?.terminal?.rows;
-			const sharedPanel = sessionDetailVisible && agents.getViewingAgent() !== undefined
-				? panelRows(terminalHeight)
-				: agentPanelRows(terminalHeight);
+			const sharedPanel = agentPanelRows(terminalHeight);
 			const budget = agentListWindowRows(
 				capturedTui?.terminal?.columns,
 				terminalHeight,

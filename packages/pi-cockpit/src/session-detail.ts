@@ -121,7 +121,19 @@ export function renderSessionDetail(
 			body.push(theme.fg("dim", `  ${line}`));
 		}
 	} else if (status === "running" || status === "retrying") {
-		body.push(theme.fg("dim", "  working…"));
+		if (status === "running" && !row.activeTool) {
+			// No text has streamed yet: the model is producing its first response
+			// (thinking deltas never reach lastMessage). A bare "working…" can sit
+			// unchanged for minutes there, so name the state and show how long the
+			// silence has lasted — a live agent stays distinguishable from a stuck one.
+			const idleMs = Math.max(0, now - row.lastActivityAt);
+			const idle = idleMs >= 5_000 ? ` · ${formatDuration(idleMs)}` : "";
+			body.push(theme.fg("dim", `  thinking…${idle}`));
+		} else {
+			body.push(theme.fg("dim", "  working…"));
+		}
+	} else if (status === "stalled") {
+		body.push(theme.fg("error", `  no activity for ${formatDuration(Math.max(0, now - row.lastActivityAt))}`));
 	}
 	if (row.activeTool) {
 		body.push(truncateToWidth(theme.fg("dim", `  ${theme.fg("warning", "→")} ${row.activeTool}`), w, "…"));

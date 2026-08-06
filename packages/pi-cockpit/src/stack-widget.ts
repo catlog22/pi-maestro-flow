@@ -114,14 +114,40 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 				const spin = g.dotRunning;
 				const running = deps.isRunning();
 
-				// The panel budget covers the roster header and its rows. When the
-				// selected-session detail is also visible, the roster uses the normal
-				// status-panel share so the two Agent surfaces stay bounded together.
+				const dot = theme.fg(running ? "success" : "muted", running ? g.dotRunning : g.dotIdle);
+				const displayStatuses = agents.map((agent) => effectiveAgentStatus(agent, now));
+				const failedCount = displayStatuses.filter((status) => status === "failed").length;
+				const terminatedCount = displayStatuses.filter((status) => status === "terminated").length;
+				const stalledCount = displayStatuses.filter((status) => status === "stalled").length;
+				const runCount = displayStatuses.filter((status) => status === "running" || status === "retrying").length;
+				const pendingCount = displayStatuses.filter((status) => status === "pending").length;
+				const sleepingCount = displayStatuses.filter((status) => status === "sleeping").length;
+				// This header owns the roster summary, so compact mode must not print
+				// its own count line right underneath saying the same thing.
+				const headerSegs: PrioritizedSegment[] = [
+					{ text: dot, priority: 100, clippable: false },
+					{ text: theme.fg("muted", "Agents"), priority: 90, clippable: false },
+				];
+				if (failedCount) {
+					headerSegs.push({ text: theme.fg("error", `${failedCount} failed`), priority: 95, clippable: false });
+				}
+				if (stalledCount) headerSegs.push({ text: theme.fg("error", `${stalledCount} stalled`), priority: 94, clippable: false });
+				if (terminatedCount) headerSegs.push({ text: theme.fg("warning", `${terminatedCount} terminated`), priority: 85, clippable: false });
+				if (runCount) headerSegs.push({ text: theme.fg("dim", `${runCount} running`), priority: 80, clippable: false });
+				if (pendingCount) headerSegs.push({ text: theme.fg("dim", `${pendingCount} pending`), priority: 60, clippable: false });
+				if (sleepingCount) headerSegs.push({ text: theme.fg("dim", `${sleepingCount} sleeping`), priority: 50, clippable: false });
+				const headerLine = fitLineByPriority(headerSegs, width, UTILS, theme.fg("dim", g.separator), g.ellipsis);
+				// Focused-session priority: while a selected session's detail block is
+				// open, it owns the Agent height allowance and the roster collapses to
+				// this one-line summary. The per-agent rows stay reachable through the
+				// session-bar chips and the Alt+A overlay, so monitoring is preserved
+				// while the session content gains the released rows.
+				if (deps.hasSessionDetail?.()) return [headerLine];
+
+				// The panel budget covers the roster header and its rows.
 				// Oldest-first storage makes the following suffix the newest activity;
 				// renderAgents restores the tree's newest-first presentation.
-				const panel = deps.hasSessionDetail?.()
-					? panelRows(terminalRows(tui))
-					: agentPanelRows(terminalRows(tui));
+				const panel = agentPanelRows(terminalRows(tui));
 				const rosterRows = panel === undefined
 					? undefined
 					: Math.max(1, panel - 1);
@@ -147,31 +173,9 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 					hideLiveDuration: cfg.staticMode,
 					agentContextRows: agents,
 				};
-				const dot = theme.fg(running ? "success" : "muted", running ? g.dotRunning : g.dotIdle);
-				const displayStatuses = agents.map((agent) => effectiveAgentStatus(agent, now));
-				const failedCount = displayStatuses.filter((status) => status === "failed").length;
-				const terminatedCount = displayStatuses.filter((status) => status === "terminated").length;
-				const stalledCount = displayStatuses.filter((status) => status === "stalled").length;
-				const runCount = displayStatuses.filter((status) => status === "running" || status === "retrying").length;
-				const pendingCount = displayStatuses.filter((status) => status === "pending").length;
-				const sleepingCount = displayStatuses.filter((status) => status === "sleeping").length;
-				// This header owns the roster summary, so compact mode must not print
-				// its own count line right underneath saying the same thing.
-				const headerSegs: PrioritizedSegment[] = [
-					{ text: dot, priority: 100, clippable: false },
-					{ text: theme.fg("muted", "Agents"), priority: 90, clippable: false },
-				];
-				if (failedCount) {
-					headerSegs.push({ text: theme.fg("error", `${failedCount} failed`), priority: 95, clippable: false });
-				}
-				if (stalledCount) headerSegs.push({ text: theme.fg("error", `${stalledCount} stalled`), priority: 94, clippable: false });
-				if (terminatedCount) headerSegs.push({ text: theme.fg("warning", `${terminatedCount} terminated`), priority: 85, clippable: false });
-				if (runCount) headerSegs.push({ text: theme.fg("dim", `${runCount} running`), priority: 80, clippable: false });
-				if (pendingCount) headerSegs.push({ text: theme.fg("dim", `${pendingCount} pending`), priority: 60, clippable: false });
-				if (sleepingCount) headerSegs.push({ text: theme.fg("dim", `${sleepingCount} sleeping`), priority: 50, clippable: false });
 				const lines: string[] = [];
 				// Was the one line in the package pushed without any width clipping.
-				lines.push(fitLineByPriority(headerSegs, width, UTILS, theme.fg("dim", g.separator), g.ellipsis));
+				lines.push(headerLine);
 				const marker = above > 0 || below > 0
 					? truncateToWidth(
 						theme.fg("dim", [above > 0 ? `↑ ${above} more` : "", below > 0 ? `↓ ${below} more` : ""].filter(Boolean).join(` ${g.separator} `)),

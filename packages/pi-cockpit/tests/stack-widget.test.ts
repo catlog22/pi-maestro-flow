@@ -215,8 +215,9 @@ test("short terminal gives Agent detail the rows released by collapsed Todo", ()
 		hasSessionDetail: () => true,
 	})(shortTui, theme).render(80);
 	assert.equal(todoLines.length, 1);
-	assert.ok(detailLines.length <= 4);
-	assert.ok(rosterLines.length <= 3);
+	assert.ok(detailLines.length <= 6);
+	assert.equal(rosterLines.length, 1, "a focused session collapses the roster to its summary line");
+	assert.ok(!rosterLines.some((line) => line.includes("task ")), "collapsed roster drops the agent rows");
 	assert.ok(todoLines.length + detailLines.length + rosterLines.length <= 8, "all Agent surfaces share one bounded screen allowance");
 });
 
