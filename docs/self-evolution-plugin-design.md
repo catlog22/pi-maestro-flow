@@ -246,6 +246,12 @@ harness 与 maestro 知识体系**控制方向相反**：
 - **skill 真实 run 端到端演练**：`scripts/self-evolve-skill-e2e.sh` **9/9 全绿**——create → frontmatter 事实 → check → seal（T1 自动草拟 2 候选）→ `--refresh` fence → **promote --all 自动晋升 2 个事实候选（T2 实证）** → approval receipt → search 命中 → health 重生成
 - **实测踩坑（已写入 skill）**：report.md frontmatter 契约（`schemas.ts:565-584`）`verdict` 用 `ready|ready_with_concerns`（非 `done`）、decisions/constraints 必须带 `id`；CLI `session done --verdict` 则用 `done` 系——两套枚举，混用致 seal 校验失败零草拟
 
+### M6 Phase 5 落地 — ✅ 完成（2026-08-06）
+- **canary/shadow 在线验证**：`scripts/self-evolve-phase5.mjs canary <id> [--window N]`——shadow 观察窗内从全局 health 信号判定（validated+cited≥1 → PROMOTE 建议；contradicted>0 或窗口到期无佐证 → ROLLBACK 建议），只出**建议命令**，promotion 仍走 fail-closed 显式门。实测三路径：冲突知识→ROLLBACK ✓ / 有信号→PROMOTE ✓ / 无信号窗口到期→ROLLBACK ✓
+- **skill 独立 proposal 治理链**：proposal（sha256 快照 + diff + 权限差异审查 + 静态检查（frontmatter/标签配对）+ 签名）→ apply（非空 reason=批准记录 + approvals 回执；应用后重校验失败自动回滚）→ revert（快照恢复）。实测全链 + 可逆性 ✓（副本 + 真实 skill 各走一遍）
+- **修复**（Windows/ESM 实测）：CRLF 行尾正则兼容（`---?
+`）；canary ledger 文件名 sanitize Windows 非法 `:`；apply receipt 写入去 `require`（ESM）；proposal 落 `proposal.md`（无内容变化场景 apply 读目标当前内容）
+
 ### 遗留跟进项
 1. ~~V8 前置修复~~ **已完成**：legacy `KNW-investigate-*/report.md` 重复 id 冲突已通过按目录前缀重命名解决（`scanKnowhow` 不再撞名）；restore intent 账本清理逻辑已入验收脚本
 2. M2 skill 需真实 run 端到端演练（当前仅签名级验证）——可由 V1-V11 验收脚本的 full-cycle 流程覆盖
