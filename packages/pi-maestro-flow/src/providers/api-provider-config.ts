@@ -247,7 +247,7 @@ export const PROVIDERS: readonly ProviderDefaults[] = [
     name: "Qwen · OpenAI Chat Completions",
     api: "openai-completions",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    modelId: "qwen3.8-max-preview",
+    modelId: "qwen3.8-max",
     contextWindow: 400_000,
     maxTokens: 128_000,
     compat: {

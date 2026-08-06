@@ -142,7 +142,7 @@ test("title.* and toolPalette are editable through the provider (P3 gap closure)
 			{ operation: "set" as const, key: "toolPalette", scope: "global" as const, value: "mono" },
 			{ operation: "set" as const, key: "title.showModel", scope: "global" as const, value: true },
 			{ operation: "set" as const, key: "title.maxLength", scope: "global" as const, value: 120 },
-			{ operation: "set" as const, key: "title.generationModel", scope: "global" as const, value: "maestro-qwen/qwen3.8-max-preview" },
+			{ operation: "set" as const, key: "title.generationModel", scope: "global" as const, value: "maestro-qwen/qwen3.8-max" },
 		];
 		const prepared = await provider.prepare!({ context, transactionId: "tx-title", changes, expectedRevisions: before.configured.resources });
 		assert.equal(prepared.prepared, true);
@@ -151,7 +151,7 @@ test("title.* and toolPalette are editable through the provider (P3 gap closure)
 		assert.equal(raw.toolPalette, "mono");
 		assert.equal((raw.title as Record<string, unknown>).showModel, true);
 		assert.equal((raw.title as Record<string, unknown>).maxLength, 120);
-		assert.equal((raw.title as Record<string, unknown>).generationModel, "maestro-qwen/qwen3.8-max-preview");
+		assert.equal((raw.title as Record<string, unknown>).generationModel, "maestro-qwen/qwen3.8-max");
 		const snapshot = await provider.read({ context });
 		assert.equal(snapshot.effective.values.find((entry) => entry.key === "title.showModel")?.value, true);
 		assert.equal(snapshot.effective.values.find((entry) => entry.key === "toolPalette")?.value, "mono");

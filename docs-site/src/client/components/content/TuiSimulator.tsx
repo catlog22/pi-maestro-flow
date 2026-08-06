@@ -122,12 +122,12 @@ const PRESETS: Record<string, SimPreset> = {
     items: [
       { key: 'maestro-openai/gpt-5.6-sol', label: '主模型', editor: 'action', value: '启用', badge: { text: '熔断: 正常', tone: 'green' } },
       { key: 'maestro-openai/gpt-5.6-luna', label: '候选', editor: 'action', value: '备用', badge: { text: '熔断: 正常', tone: 'green' } },
-      { key: 'maestro-qwen/qwen3.8-max-preview', label: '候选', editor: 'action', value: '备用', badge: { text: '熔断: 正常', tone: 'green' } },
+      { key: 'maestro-qwen/qwen3.8-max', label: '候选', editor: 'action', value: '备用', badge: { text: '熔断: 正常', tone: 'green' } },
       { key: 'maestro-anthropic/model', label: '候选', editor: 'action', value: '备用', badge: { text: '熔断: 正常', tone: 'green' } },
     ],
     rightItems: [
       { key: 'fallback[1]', label: '→ maestro-openai/gpt-5.6-luna', editor: 'action', value: 'Space 移除' },
-      { key: 'fallback[2]', label: '→ maestro-qwen/qwen3.8-max-preview', editor: 'action', value: 'Space 移除' },
+      { key: 'fallback[2]', label: '→ maestro-qwen/qwen3.8-max', editor: 'action', value: 'Space 移除' },
     ],
   },
   smartsearch: {
@@ -180,12 +180,12 @@ const PRESETS: Record<string, SimPreset> = {
     layout: 'list',
     items: [
       { key: 'explore', label: '代码探索', editor: 'string', value: 'auto / gpt-5.6-sol' },
-      { key: 'analysis', label: '技术分析', editor: 'string', value: 'qwen3.8-max-preview' },
-      { key: 'debug', label: '调试', editor: 'string', value: 'qwen3.8-max-preview' },
-      { key: 'planning', label: '规划', editor: 'string', value: 'qwen3.8-max-preview' },
-      { key: 'development', label: '开发', editor: 'string', value: 'qwen3.8-max-preview' },
-      { key: 'review', label: '评审', editor: 'string', value: 'qwen3.8-max-preview' },
-      { key: 'testing', label: '测试', editor: 'string', value: 'qwen3.8-max-preview' },
+      { key: 'analysis', label: '技术分析', editor: 'string', value: 'qwen3.8-max' },
+      { key: 'debug', label: '调试', editor: 'string', value: 'qwen3.8-max' },
+      { key: 'planning', label: '规划', editor: 'string', value: 'qwen3.8-max' },
+      { key: 'development', label: '开发', editor: 'string', value: 'qwen3.8-max' },
+      { key: 'review', label: '评审', editor: 'string', value: 'qwen3.8-max' },
+      { key: 'testing', label: '测试', editor: 'string', value: 'qwen3.8-max' },
       { key: 'verification', label: '验证', editor: 'string', value: '（无回退）' },
       { key: 'custom-review', label: '自定义类型', editor: 'string', value: '新增映射…' },
     ],

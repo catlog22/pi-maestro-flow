@@ -16,7 +16,7 @@
 ### 使用步骤
 
 1. 查看状态：`/vision show`
-2. （可选）指定首选模型：`/vision model maestro-qwen/qwen3.8-max-preview`
+2. （可选）指定首选模型：`/vision model maestro-qwen/qwen3.8-max`
 3. 让模型分析图片：`describe_image({ image_path: "截图.png" | URL | data-url, prompt: "分析重点" })`
 4. 采信结论前先确认委托已成功（工具内置该约束，成功前不得声称看过图）。
 
@@ -46,7 +46,7 @@ Claude Code 风格 Tab 标题：`frame + pi - <会话> - <工作状态>`，默�
 3. （可选）LLM 生成标题：
 
    ```json
-   { "title": { "generationModel": "maestro-qwen/qwen3.8-max-preview" } }
+   { "title": { "generationModel": "maestro-qwen/qwen3.8-max" } }
    ```
 
    首个完整回合后由该模型生成 2–4 词标题（10s 超时，`thinking` 关闭控成本）；失败自动回退本地规则提取。

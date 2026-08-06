@@ -926,7 +926,10 @@ export async function persistMaestroCompactionKnowhow(
   const ensureDir = dependencies.ensureDir ?? mkdir;
   const write = dependencies.write ?? writeFile;
   const outputPath = resolve(buildKnowhowPath(ctx.cwd, details.createdAt, details.sessionId, details.checkpointId));
-  const knowhowRoot = resolve(ctx.cwd, ".workflow", "knowhow");
+  // K10: checkpoints are recovery-only artifacts, not governed knowledge.
+  // They live outside .workflow/knowhow so the corpus never gains unreviewed
+  // active entries; governance (if adopted later) stages them as candidates.
+  const knowhowRoot = resolve(ctx.cwd, ".workflow", "recovery", "compaction-checkpoints");
   if (!isPathInside(knowhowRoot, outputPath)) throw new Error(`Compaction knowhow path escaped its root: ${outputPath}`);
   const knowhowDir = dirname(outputPath);
   await ensureDir(knowhowDir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
@@ -1294,7 +1297,7 @@ function safeToken(value: string): string {
 function buildKnowhowPath(projectRoot: string, createdAt: string, sessionId: string, checkpointId: string): string {
   const stamp = compactTimestamp(createdAt);
   const fileName = `KNW-${stamp}-session-compact-${safeToken(sessionId)}-${safeToken(checkpointId)}.md`;
-  return join(projectRoot, ".workflow", "knowhow", fileName);
+  return join(projectRoot, ".workflow", "recovery", "compaction-checkpoints", fileName);
 }
 
 function isAlreadyExists(error: unknown): boolean {

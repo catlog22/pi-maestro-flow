@@ -267,9 +267,9 @@ test("renderAgents treats provider/model formatting differences as the same mode
 
 	const realFallback = renderAgents([agent({
 		requestedModel: "maestro-openai/gpt-5.6-sol",
-		resolvedModel: "maestro-qwen/qwen3.8-max-preview",
+		resolvedModel: "maestro-qwen/qwen3.8-max",
 	})], "list", 180, theme, utils, opts)[0];
-	assert.match(realFallback, /maestro-openai\/gpt-5\.6-sol→maestro-qwen\/qwen3\.8-max-preview/);
+	assert.match(realFallback, /maestro-openai\/gpt-5\.6-sol→maestro-qwen\/qwen3\.8-max/);
 });
 
 test("renderAgents keeps the active tool visible in narrow widths", () => {

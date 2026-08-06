@@ -30,9 +30,9 @@ import {
 } from "../src/tools/plan-workflow.ts";
 
 test("run-control schema rejects unknown fields", () => {
-  assert.equal(Check(RunControlParams, { action: "status" }), true);
-  assert.equal(Check(RunControlParams, { action: "status", typo: true }), false);
-  assert.equal(Check(RunControlParams, { action: "status", hostSessionId: "spoofed" }), false);
+  assert.equal(Check(RunControlParams, { argv: ["session", "status"] }), true);
+  assert.equal(Check(RunControlParams, { argv: ["session", "status"], typo: true }), false);
+  assert.equal(Check(RunControlParams, { argv: ["session", "status"], hostSessionId: "spoofed" }), false);
 });
 
 test("public workflow errors redact lease-path fencing tokens", () => {
@@ -784,7 +784,7 @@ test("run-control read results expose owner and non-owner Pi session attribution
   try {
     await owner.attach("pi-owner");
     const ownerStatus = await executeRunControl(
-      { action: "status" },
+      { argv: ["run", "status"] },
       owner,
       { hostSessionId: "pi-owner" },
     );
@@ -796,7 +796,7 @@ test("run-control read results expose owner and non-owner Pi session attribution
     assert.equal("token" in ownerDetails.ownership, false);
 
     const readerStatus = await executeRunControl(
-      { action: "status" },
+      { argv: ["run", "status"] },
       reader,
       { hostSessionId: "pi-reader" },
     );
@@ -809,7 +809,7 @@ test("run-control read results expose owner and non-owner Pi session attribution
     assert.equal(readerDetails.ownership.isAttached, false);
 
     const brief = await executeRunControl(
-      { action: "brief" },
+      { argv: ["run", "brief"] },
       reader,
       { hostSessionId: "pi-reader" },
     );
@@ -822,97 +822,60 @@ test("run-control read results expose owner and non-owner Pi session attribution
   }
 });
 
-test("run-control forwards canonical lifecycle inputs without legacy action aliases", async () => {
+test("run-control forwards arbitrary Maestro argv through the shell", async () => {
   const calls: Array<[string, ...unknown[]]> = [];
   const command = result([], "ok");
   const transition = { command, snapshot: workflowSnapshot("running") };
   const coordinator = {
-    async check(runId?: string) { calls.push(["check", runId]); return command; },
+    async exec(argv: readonly string[], classification: unknown, hostSessionId?: string) {
+      calls.push(["exec", argv, classification, hostSessionId]);
+      return transition;
+    },
     async ownership() { return undefined; },
-    async next(pick?: string, context?: { hostSessionId: string }) {
-      calls.push(["next", context?.hostSessionId, pick]);
-      return transition;
-    },
-    async done(runId: string, options: RunDoneOptions, context?: { hostSessionId: string }) {
-      calls.push(["done", runId, context?.hostSessionId, options]);
-      return transition;
-    },
-    async edit(
-      commands: readonly string[],
-      options: Omit<RunEditOptions, "sessionId">,
-      context?: { hostSessionId: string },
-    ) {
-      calls.push(["edit", commands, context?.hostSessionId, options]);
-      return transition;
-    },
   } as unknown as WorkflowCoordinator;
   const context = { hostSessionId: "pi-session-1" };
 
-  assert.equal((await executeRunControl({ action: "check", runId: "run-1" }, coordinator, context)).ok, true);
-  assert.equal((await executeRunControl({ action: "next", pick: "step-2" }, coordinator, context)).ok, true);
+  assert.equal((await executeRunControl({ argv: ["run", "check", "run-1"] }, coordinator, context)).ok, true);
+  assert.equal((await executeRunControl({ argv: ["session", "next", "--pick", "step-2"] }, coordinator, context)).ok, true);
   assert.equal((await executeRunControl({
-    action: "done",
-    runId: "run-1",
-    verdict: "done-with-concerns",
-    notes: ["note"],
+    argv: ["session", "done", "run-1", "--verdict", "done-with-concerns"],
   }, coordinator, context)).ok, true);
   assert.equal((await executeRunControl({
-    action: "edit",
-    commands: ["review"],
-    after: "latest",
-    args: "--scope core",
+    argv: ["run", "edit", "review", "--after", "latest"],
   }, coordinator, context)).ok, true);
 
   assert.deepEqual(calls, [
-    ["check", "run-1"],
-    ["next", "pi-session-1", "step-2"],
-    ["done", "run-1", "pi-session-1", {
-      verdict: "done-with-concerns",
-      summary: undefined,
-      reason: undefined,
-      notes: ["note"],
-      decisions: undefined,
-      evidence: undefined,
-      artifacts: undefined,
-    }],
-    ["edit", ["review"], "pi-session-1", {
-      after: "latest",
-      replace: undefined,
-      remove: undefined,
-      args: "--scope core",
-      stage: undefined,
-      goalRef: undefined,
-      insertedBy: undefined,
-    }],
+    ["exec", ["run", "check", "run-1"], { write: false, sessionless: false }, "pi-session-1"],
+    ["exec", ["session", "next", "--pick", "step-2"], { write: true, sessionless: false }, "pi-session-1"],
+    ["exec", ["session", "done", "run-1", "--verdict", "done-with-concerns"], { write: true, sessionless: false }, "pi-session-1"],
+    ["exec", ["run", "edit", "review", "--after", "latest"], { write: true, sessionless: false }, "pi-session-1"],
   ]);
 });
 
-test("legacy direct callers keep read compatibility but mutations fail closed without host identity", async () => {
+test("run-control reads pass through but mutations fail closed without host identity", async () => {
   const snapshot = workflowSnapshot("running");
-  let nextCalls = 0;
+  let execCalls = 0;
   const coordinator = {
-    status() { return snapshot; },
-    async next() {
-      nextCalls++;
+    async exec() {
+      execCalls++;
       return { command: result([], "ok"), snapshot };
     },
   } as unknown as WorkflowCoordinator;
 
-  const status = await executeRunControl({ action: "status" }, coordinator);
+  const status = await executeRunControl({ argv: ["run", "status"] }, coordinator);
   assert.equal(status.ok, true);
-  assert.equal((status.details as WorkflowSnapshot).session?.sessionId, "session-1");
 
-  const next = await executeRunControl({ action: "next" }, coordinator);
+  const next = await executeRunControl({ argv: ["session", "next"] }, coordinator);
   assert.equal(next.ok, false);
   assert.match(next.message, /hostSessionId is required/);
-  assert.equal(nextCalls, 0);
+  assert.equal(execCalls, 1);
 });
 
 test("run-control does not turn a completed mutation into a failure when attribution is unavailable", async () => {
   const transition = { command: result([], "ok"), snapshot: workflowSnapshot("running") };
   let ownershipCalls = 0;
   const coordinator = {
-    async next() { return transition; },
+    async exec() { return transition; },
     async ownership() {
       ownershipCalls++;
       throw new Error("ownership unavailable");
@@ -920,7 +883,7 @@ test("run-control does not turn a completed mutation into a failure when attribu
   } as unknown as WorkflowCoordinator;
 
   const resultValue = await executeRunControl(
-    { action: "next" },
+    { argv: ["session", "next"] },
     coordinator,
     { hostSessionId: "pi-session-1" },
   );
@@ -1031,6 +994,10 @@ function fakeAdapter(
       calls.push(["edit", ...commands, options.sessionId]);
       hooks.onEdit?.(commands, options);
       return result([], `edit ${commands.join(" ")}`);
+    },
+    async exec(argv) {
+      calls.push(["exec", ...argv]);
+      return result([], `exec ${argv.join(" ")}`);
     },
     async supportsPlanPublish() { return true; },
     async publishPlan(options) {

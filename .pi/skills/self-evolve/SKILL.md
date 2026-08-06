@@ -32,7 +32,7 @@ Self-evolve 是**薄 router**：把「run check 评审 → stage → run complet
 |--------|--------|------------------|
 | `review-run` | `check` / `评审` / `审查` / `finish checklist` / `对账` | `maestro run check <run-id> [--json]` — 扫描 outputs、评估 run gates、刷新 reconciliation receipt；gates clean 时输出注入 finish-checklist 评审清单 |
 | `review-signals` | `信号` / `signal` / `review-signals` / `候选评估` / `dry-run` | 读取全局 `~/.maestro/self-evolve/{suggestions,reviews}/` → 按评审 `stage` 判定构建沉淀候选（见「信号沉淀流水线」） |
-| `stage` | `stage` / `暂存` / `沉淀` / `候选` / `candidate` / `记录命中` | `maestro knowledge stage <spec\|knowhow> "<title>" --content-file <path\|-> --run <run-id> [--category <cat>] [--evidence <refs>]`；归因用 `maestro knowledge record <ids...> --signal <signal> --source search`（不产生候选） |
+| `stage` | `stage` / `暂存` / `沉淀` / `候选` / `candidate` / `记录命中` | `maestro knowledge stage <spec\|knowhow> "<title>" --content-file <path\|-> --run <run-id> [--category <cat>] [--evidence <refs>]`；session 源（无需 Run）：`--session <session-id> --evidence <refs>`（evidence 必填；无 Run 时写授权分层解析并自动幂等落 ksyn-* 合成 Session）；归因用 `maestro knowledge record <ids...> --signal <signal> --source search [--run <run-id> \| --session <session-id> \| --channel <name>] [--allow-unknown]`（不产生候选；ID 经 wiki 索引校验，未知默认拒收） |
 | `seal` | `seal` / `complete` / `封存` / `封板` | `maestro session done <run-id> [--verdict done\|done-with-concerns]` → `maestro session seal <session-id> [--summary "..."]` |
 | `promote` | `promote` / `晋升` / `发布` / `落库` | `maestro knowledge review <session-id> --resolve <candidate-id> --as <choice> --target <knowledge-id> --reason "..."` → `maestro knowledge promote <session-id> --candidate <id>\|--all` |
 | `health` | `health` / `audit` / `健康` / `基线` / `库存` | `node scripts/self-evolve-health.mjs`（生成全局健康 sidecar）→ `maestro knowledge audit --scope all [--json]` 定位检索；按 revalidation queue 逐项治理（见「知识健康闭环」） |
@@ -44,7 +44,7 @@ Self-evolve 是**薄 router**：把「run check 评审 → stage → run complet
 规则：
 
 1. 无法分类或意图含糊 → 展示上表并请用户选择。
-2. `review-run` 输出中的 finish-checklist 与 reconciliation receipt 是**提示层**（非阻断）：sealed run 拒绝 sidecar 写入，promote 却要求源 run 已 seal —— 评审必须在 seal 之前、promote 在 seal 之后（时序铁律，见 §4）。
+2. `review-run` 输出中的 finish-checklist 与 reconciliation receipt 是**提示层**（非阻断）：sealed run 拒绝 sidecar 写入，promote 却要求源已 seal —— 评审必须在 seal 之前、promote 在 seal 之后（时序铁律，见 §4）。**双源门禁**：run 源 = 源 run sealed + 新鲜 run receipt；session 源 = Session sealed + 新鲜 session receipt + stage 时非空 `--evidence`（session seal 自动 best-effort 刷 session receipt，缺失/stale 用 `review <session-id> --refresh` 修复）。
 3. `stage` / `review` / `promote` / `record` 一律经 `maestro knowledge ...` CLI，**不得翻译成直接写 spec/knowhow 文件**。
 4. 保留 stable knowledge ID、Run ID、Session ID、candidate ID、disposition、target、signal、reason 原样传递，不做改写。
 </dispatch>
@@ -81,20 +81,24 @@ maestro run check <run-id> --json
 #### Step 2 — stage（按清单沉淀）
 可复用发现 → 候选内容**写临时文件**（绝不 inline 传参：空格/引号/unicode/换行/前导破折号会错位后续参数）：
 ```bash
+# run 源（run 内沉淀）
 maestro knowledge stage knowhow "<title>" --content-file <path|-> --run <run-id> --evidence "<file:line>,<artifact-ref>" [--category <cat>] [--signal validated --signal-ids <ids>]
+# session 源（无 Run 场景；evidence 必填）——无活跃 run 时写授权分层解析（显式参数 > --channel/MAESTRO_CHANNEL > Pi lease > 单活 hook 通道 > 收窄扫描），什么都没有则自动幂等创建 ksyn-* 合成 Session
+maestro knowledge stage knowhow "<title>" --content-file <path|-> --session <session-id> --evidence "<file:line>,<artifact-ref>" [--category <cat>]
 ```
 - `--evidence` 建议必填（证据源可靠性：reconciliation receipt > report.md frontmatter > outputs/工件 file:line 锚点 > session 轨迹）。
 - **report.md frontmatter 契约（实测 zod schema，schemas.ts:565-584）**：`verdict` 必须 `ready|ready_with_concerns|blocked|failed`（**不是** `done`）；`decisions`/`constraints` 数组元素**必须带 `id`**（`{id, text, status}`，status 分别 ∈ proposed/accepted/rejected 与 locked/open/deferred）。CLI `maestro session done --verdict` 接受 `done|done-with-concerns|needs-retry|blocked` 并内部映射——**两者别混**（e2e 实测：frontmatter 写 `verdict: done` 或缺 `id` → seal 校验失败、候选零草拟）。
-- 归因（不产生候选，仅记账）：`maestro knowledge record <ids...> --signal consumed|cited|validated|contradicted --source search|load|manual --run <run-id>`。搜索/注入是 exposure，load 才算 consumed。
+- 归因（不产生候选，仅记账）：`maestro knowledge record <ids...> --signal consumed|cited|validated|contradicted --source search|load|manual [--run <run-id> | --session <session-id> | --channel <name>] [--allow-unknown]`。搜索/注入是 exposure，load 才算 consumed；load 归因三级路由（唯一活跃 run → 无歧义 Session 身份 → 全局账本+warning）不阻塞加载。ID 写入前经 wiki 索引校验，未知 ID 默认拒收，`--allow-unknown` 降级记账留痕。
 - `--signal-ids` 用逗号分隔（`--signal-ids spec:project:a,knowhow:b`）；空格分隔会泄漏进位置参数。
 - 负知识（失败测试/被拒评审/被推翻实践）同样 stage 为反例候选（scope + 失败原因 + 替代方案）。
 
 #### Step 3 — session done（seal 事务）
 ```bash
-maestro session done <run-id> --verdict ready|ready_with_concerns|blocked|failed --summary "<text>" [--decision "<text>"] [--reason "<text>"]
+maestro session done <run-id> --verdict done|done-with-concerns|needs-retry|blocked --summary "<text>" [--decision "<text>"] [--reason "<text>"]
 # 兼容别名：maestro run complete <run-id>（deprecated，行为相同）
+# CLI --verdict 同时接受 report 层 ready 词表别名并内部映射：ready→done / ready_with_concerns→done-with-concerns / failed→needs-retry（blocked 两表一致）
 ```
-- verdict 诚实选择：`ready`（干净）或 `ready_with_concerns`（有 caveat，全部列入 concerns）。
+- verdict 诚实选择：`done`（干净）或 `done-with-concerns`（有 caveat，全部列入 concerns）。
 - seal 后 run 不可变（拒绝 sidecar 写入）；frontmatter decisions/constraints 自动物化为 spec 候选。
 
 #### Step 4 — session seal 前 review --resolve（人工裁决台）
@@ -123,7 +127,9 @@ node scripts/self-evolve-approval.mjs record --action promote --session <session
 - **阻断语义（实测 CLI throw）**：
   | 条件 | 行为 |
   |---|---|
-  | 源 run 未 seal | throw `Knowledge candidates require sealed source Runs before promotion` |
+  | run 源：源 run 未 seal | throw `Knowledge candidates require sealed source Runs before promotion` |
+  | session 源：Session 未 seal | throw `Session-source candidates require Session <sid> to be sealed before promotion` |
+  | session 源：session receipt 缺失/stale | throw（缺失：`no session knowledge reconciliation receipt`；seal 时自动 best-effort 刷新，失败留缺口 → `review <session-id> --refresh` 修复后放行） |
   | `review_required` 未裁决 | `--all` 跳过（skipped_review_required）；显式 `--candidate` throw |
   | 与既有 spec 同 title 不同 content | throw —— 需先 `--as supersede` resolve 或 `spec supersede <old-sid> --by <new>` / `spec conflict mark <file> <line> --note "<reason>"` |
   | `--candidate` 与 `--all` 同时给 | throw |
@@ -205,9 +211,11 @@ EOF
 ```
 
 #### Step C — 构建并确认 stage 命令
-对每个 stage 候选：内容（title/summary/evidence）写临时文件（绝不 inline），目标 run 用当前活跃 run（`maestro run brief` 解析 `run_id`）；无活跃 run 时请用户提供或先 `maestro run create`：
+对每个 stage 候选：内容（title/summary/evidence）写临时文件（绝不 inline）。归属优先级：有活跃 run 时用 `--run <run-id>`（`maestro run brief` 解析 `run_id`）；**无活跃 run 时直接用 session 源 stage——写授权分层解析（`--channel`/MAESTRO_CHANNEL → Pi host lease → 单活 hook 通道 → 收窄扫描），什么都没有则自动幂等创建 ksyn-* 合成 Session，无需用户提供或创建 run**；并发多会话工作区用 `--channel <name>` 显式隔离：
 ```bash
 maestro knowledge stage <knowhow|spec> "<title>" --content-file <tmpfile> --run <run-id> --evidence "<file:line>,<file:line>"
+# 无 run 场景（evidence 必填）：
+maestro knowledge stage <knowhow|spec> "<title>" --content-file <tmpfile> --evidence "<file:line>,<file:line>" [--channel <name>]
 ```
 执行前 `ask-user-question` 逐条确认（全部 stage / 逐个选择 / 暂不处理）；评审为 `skip`/`uncertain` 的信号不 stage，`uncertain` 可展示理由供用户决策。
 

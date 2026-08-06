@@ -23,6 +23,8 @@ export interface WorkflowRunAdapter {
   next(sessionId: string, pick?: string): Promise<RunCliResult>;
   done(runId: string, sessionId: string, options?: RunDoneOptions): Promise<RunCliResult>;
   edit(commands: readonly string[], options: RunEditOptions): Promise<RunCliResult>;
+  /** Raw Maestro CLI argv passthrough (run-control shell surface). */
+  exec(argv: readonly string[]): Promise<RunCliResult>;
   supportsPlanPublish(): Promise<boolean>;
   publishPlan(options: RunPlanPublishOptions): Promise<RunCliResult>;
 }
@@ -577,6 +579,30 @@ export class WorkflowCoordinator {
     return { command: result, snapshot: await this.bridge.refresh() };
   }
 
+  /**
+   * Raw Maestro CLI argv passthrough (run-control shell surface).
+   * Write commands fence the mutation lease; sessionless entry commands
+   * (create/start) are allowed without a held lease but refuse to mint a
+   * second Session while one is held.
+   */
+  async exec(
+    argv: readonly string[],
+    classification: { write: boolean; sessionless: boolean },
+    hostSessionId?: string,
+  ): Promise<WorkflowTransitionResult> {
+    if (classification.write) {
+      if (classification.sessionless) {
+        this.requireSessionlessWrite(argv);
+      } else {
+        const snapshot = await this.bridge.refresh();
+        const session = requireSession(snapshot);
+        await this.fenceLease(session.sessionId, hostSessionId);
+      }
+    }
+    const command = await this.adapter.exec(argv);
+    return { command, snapshot: await this.bridge.refresh() };
+  }
+
   continuationMarker(iteration: number): string {
     const snapshot = this.bridge.getSnapshot();
     if (!snapshot) throw new Error("Coordinator is not attached");
@@ -685,6 +711,28 @@ export class WorkflowCoordinator {
     return lease;
   }
 
+  /**
+   * Entry commands (create/start) may run without a held lease, but must not
+   * mint a second Session (or target another Session) while this Pi session
+   * holds the active mutation lease.
+   */
+  private requireSessionlessWrite(argv: readonly string[]): void {
+    const lease = this.leases.current();
+    if (!lease) return;
+    const target = extractSessionId(argv);
+    if (!target) {
+      throw new Error(
+        `Workflow mutation lease is already held for ${lease.sessionId}; `
+        + "release it before creating a new Session",
+      );
+    }
+    if (target !== lease.sessionId) {
+      throw new Error(
+        `Workflow mutation lease belongs to ${lease.sessionId}, but this command targets Session ${target}`,
+      );
+    }
+  }
+
   private startHeartbeat(lease: WorkflowLease): void {
     const generation = ++this.heartbeatGeneration;
     const timer = setInterval(() => {
@@ -709,6 +757,20 @@ export class WorkflowCoordinator {
     this.heartbeatTimer = undefined;
     await this.heartbeatWork.catch(() => {});
   }
+}
+
+/** Extract --session/--id (or = form) from a Maestro argv list, if present. */
+function extractSessionId(argv: readonly string[]): string | undefined {
+  for (let index = 0; index < argv.length; index++) {
+    const argument = argv[index]!;
+    if ((argument === "--session" || argument === "--id") && index + 1 < argv.length) {
+      return argv[index + 1];
+    }
+    for (const flag of ["--session=", "--id="]) {
+      if (argument.startsWith(flag)) return argument.slice(flag.length);
+    }
+  }
+  return undefined;
 }
 
 function parseMarker(text: string): ContinuationMarker | undefined {

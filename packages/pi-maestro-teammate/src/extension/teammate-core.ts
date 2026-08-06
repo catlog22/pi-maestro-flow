@@ -250,17 +250,7 @@ export function aggregateTerminalStatuses(
   return sawTerminated ? "terminated" : "completed";
 }
 
-const STRUCTURED_OUTPUT_DISPLAY_BYTES = 4096;
 const STRUCTURED_OUTPUT_CONFIRMATION = "Structured output saved.";
-
-function truncateUtf8Head(value: string, maxBytes: number): string {
-  if (value.length * 3 <= maxBytes) return value;
-  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
-  const encoded = Buffer.from(value, "utf8");
-  let end = maxBytes;
-  while (end > 0 && (encoded[end] & 0xc0) === 0x80) end -= 1;
-  return encoded.subarray(0, end).toString("utf8");
-}
 
 function formatStructuredOutputForDisplay(result: SingleResult): string | undefined {
   if (result.structuredOutput === undefined) return undefined;
@@ -270,11 +260,9 @@ function formatStructuredOutputForDisplay(result: SingleResult): string | undefi
   } catch {
     return "[structured_output] (value is not JSON-serializable)";
   }
-  if (Buffer.byteLength(text, "utf8") <= STRUCTURED_OUTPUT_DISPLAY_BYTES) {
-    return `[structured_output] ${text}`;
-  }
-  const truncated = truncateUtf8Head(text, STRUCTURED_OUTPUT_DISPLAY_BYTES);
-  return `[structured_output] ${truncated}… [truncated; read the full value via agent://${result.correlationId}]`;
+  // Deliver the full value: the parent agent consumes this text as the
+  // authoritative result, so it must never be head-truncated.
+  return `[structured_output] ${text}`;
 }
 
 function isStructuredOutputConfirmation(text: string): boolean {

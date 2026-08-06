@@ -353,20 +353,19 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   const runControlProperties = (runControl?.parameters as {
     properties?: Record<string, { description?: string; anyOf?: Array<{ const?: string }> }>;
   })?.properties;
-  const actionSchema = runControlProperties?.action;
-  assert.deepEqual(actionSchema?.anyOf?.map((item) => item.const), [
-    "status", "brief", "prepare", "check", "next", "done", "edit",
-  ]);
-  assert.match(runControl?.description ?? "", /status: read the current projected Session snapshot/);
-  assert.match(runControl?.description ?? "", /next: allocate the next chain Run/);
-  assert.match(runControl?.description ?? "", /done: seal a Run with a verdict/);
-  assert.match(runControl?.description ?? "", /edit: modify future chain steps/);
-  assert.match(actionSchema?.description ?? "", /Read: status, brief, prepare, check/);
-  assert.match(runControlProperties?.runId?.description ?? "", /Required for done/);
-  assert.match(runControlProperties?.step?.description ?? "", /required for prepare/);
-  assert.match(runControlProperties?.verdict?.description ?? "", /defaults to done/);
-  assert.match(runControlProperties?.commands?.description ?? "", /Supply one command for replace/);
-  assert.match(runControlProperties?.args?.description ?? "", /exactly one command/);
+  const argvSchema = runControlProperties?.argv;
+  assert.ok(argvSchema, "run-control exposes a single argv passthrough parameter");
+  assert.match(argvSchema?.description ?? "", /Maestro CLI arguments/);
+  assert.match(runControl?.description ?? "", /Transparent shell over the canonical Maestro CLI/);
+  assert.match(runControl?.description ?? "", /single LLM surface for the lifecycle/);
+  assert.match(runControl?.description ?? "", /do not hand-write/);
+  assert.match(runControl?.description ?? "", /mutation lease and are blocked in Plan mode/);
+  assert.match(runControl?.description ?? "", /session\/run create\|start/);
+  assert.match(argvSchema?.description ?? "", /without the leading executable/);
+  assert.equal(runControlProperties?.step, undefined, "typed per-action params are removed in the shell surface");
+  assert.equal(runControlProperties?.verdict, undefined);
+  assert.equal(runControlProperties?.commands, undefined);
+  assert.equal(runControlProperties?.args, undefined);
 
   const maestro = tools.find((tool) => tool.name === "maestro");
   const maestroProperties = (maestro?.parameters as { properties?: Record<string, unknown> } | undefined)?.properties;

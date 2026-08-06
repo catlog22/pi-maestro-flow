@@ -195,6 +195,18 @@ export class RunCliAdapter {
     ]);
   }
 
+  /**
+   * Raw argv passthrough for the run-control shell. Appends the canonical
+   * --workflow-root unless the caller already pinned it.
+   */
+  async exec(argv: readonly string[]): Promise<RunCliResult> {
+    return this.invoke(
+      argv.some((argument) => argument === "--workflow-root")
+        ? [...argv]
+        : [...argv, "--workflow-root", this.workflowRoot],
+    );
+  }
+
   async edit(commands: readonly string[], options: RunEditOptions): Promise<RunCliResult> {
     // run edit is the unified chain-edit interface (insert/skip/replace via flags).
     // session chain insert/skip/replace are the split subcommands but run edit

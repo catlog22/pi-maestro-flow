@@ -2132,9 +2132,9 @@ test("teammate-list expands graph tasks and watch keeps sleeping messages visibl
       inbox: [],
       outputLog: [`[10:00:00] @api#11111111 │ found /health`],
       lastActivityAt: now - 1000,
-      requestedModel: "maestro-qwen/qwen3.8-max-preview",
-      resolvedModel: "qwen3.8-max-preview",
-      attemptedModels: ["deepseek/deepseek-v4-pro", "maestro-qwen/qwen3.8-max-preview"],
+      requestedModel: "maestro-qwen/qwen3.8-max",
+      resolvedModel: "qwen3.8-max",
+      attemptedModels: ["deepseek/deepseek-v4-pro", "maestro-qwen/qwen3.8-max"],
       status: "sleeping",
       sleptAt: now - 1000,
       depth: 0,
@@ -2149,24 +2149,24 @@ test("teammate-list expands graph tasks and watch keeps sleeping messages visibl
         startedAt: new Date(now - 4000).toISOString(),
         completedAt: new Date(now - 1500).toISOString(),
         requestedModel: "deepseek/deepseek-v4-pro",
-        resolvedModel: "qwen3.8-max-preview",
-        attemptedModels: ["deepseek/deepseek-v4-pro", "maestro-qwen/qwen3.8-max-preview"],
+        resolvedModel: "qwen3.8-max",
+        attemptedModels: ["deepseek/deepseek-v4-pro", "maestro-qwen/qwen3.8-max"],
         lastMessage: "found /health",
       }],
     }]]),
   };
 
   const listed = buildAgentList(state, "active");
-  assert.match(listed.text, /◉ \[graph\(2\)\].*id=aaaaaaaa.*model=qwen3\.8-max-preview/);
-  assert.match(listed.text, /└─ ◉ \[scout\] name="api".*id=11111111.*last=completed.*model=qwen3\.8-max-preview/);
-  assert.match(listed.text, /attempted=deepseek\/deepseek-v4-pro,maestro-qwen\/qwen3\.8-max-preview/);
+  assert.match(listed.text, /◉ \[graph\(2\)\].*id=aaaaaaaa.*model=qwen3\.8-max/);
+  assert.match(listed.text, /└─ ◉ \[scout\] name="api".*id=11111111.*last=completed.*model=qwen3\.8-max/);
+  assert.match(listed.text, /attempted=deepseek\/deepseek-v4-pro,maestro-qwen\/qwen3\.8-max/);
 
   const resolved = resolveWatchTarget(state, "11111111");
   assert.equal(resolved.match?.kind, "graph-task");
   assert.ok(resolved.match);
   const watched = buildWatchOutput(resolved.match, 20).join("\n");
-  assert.match(watched, /Model: qwen3\.8-max-preview \(requested deepseek\/deepseek-v4-pro\)/);
-  assert.match(watched, /Attempted models: deepseek\/deepseek-v4-pro, maestro-qwen\/qwen3\.8-max-preview/);
+  assert.match(watched, /Model: qwen3\.8-max \(requested deepseek\/deepseek-v4-pro\)/);
+  assert.match(watched, /Attempted models: deepseek\/deepseek-v4-pro, maestro-qwen\/qwen3\.8-max/);
   assert.match(watched, /found \/health/);
   assert.match(watched, /graph is sleeping/);
 });

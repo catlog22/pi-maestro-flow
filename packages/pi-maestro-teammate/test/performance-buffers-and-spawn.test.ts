@@ -556,13 +556,13 @@ test("invalid model input is rejected before a child process is spawned", async 
 
 test("model specifiers resolve provider shorthand and reject unavailable exact routes", () => {
   const models = [
-    { id: "maestro-qwen/qwen3.8-max-preview" },
+    { id: "maestro-qwen/qwen3.8-max" },
     { id: "deepseek/deepseek-v4-pro" },
     { id: "openrouter/ai21/jamba-large-1.7" },
   ];
   assert.equal(
     resolveModelSpecifier("maestro-qwen", models),
-    "maestro-qwen/qwen3.8-max-preview",
+    "maestro-qwen/qwen3.8-max",
   );
   assert.equal(
     resolveModelSpecifier("deepseek-v4-pro", models),
@@ -2132,7 +2132,7 @@ test("fresh agents publish follow-up turns while fork agents terminate after the
         message: {
           role: "assistant",
           content: [{ type: "text", text: "first answer" }],
-          model: "maestro-qwen/qwen3.8-max-preview",
+          model: "maestro-qwen/qwen3.8-max",
           usage: { input: 12, output: 4, cacheRead: 2, cacheWrite: 1, cost: { total: 0.01 } },
         },
       })}\n`);
@@ -2155,7 +2155,7 @@ test("fresh agents publish follow-up turns while fork agents terminate after the
     },
   );
   assert.deepEqual(first.messages.map((message) => message.content), ["first answer"]);
-  assert.equal(first.model, "maestro-qwen/qwen3.8-max-preview");
+  assert.equal(first.model, "maestro-qwen/qwen3.8-max");
   assert.equal(first.usage.inputTokens, 12);
   assert.equal(first.usage.outputTokens, 4);
   assert.equal(first.wakeable, true);

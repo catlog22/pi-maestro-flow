@@ -6,22 +6,22 @@
       "maestro-openai/gpt-5.6-sol"
     ],
     "analysis": [
-      "maestro-qwen/qwen3.8-max-preview"
+      "maestro-qwen/qwen3.8-max"
     ],
     "review": [
-      "maestro-qwen/qwen3.8-max-preview"
+      "maestro-qwen/qwen3.8-max"
     ],
     "debug": [
-      "maestro-qwen/qwen3.8-max-preview"
+      "maestro-qwen/qwen3.8-max"
     ],
     "development": [
-      "maestro-qwen/qwen3.8-max-preview"
+      "maestro-qwen/qwen3.8-max"
     ],
     "testing": [
-      "maestro-qwen/qwen3.8-max-preview"
+      "maestro-qwen/qwen3.8-max"
     ],
     "planning": [
-      "maestro-qwen/qwen3.8-max-preview"
+      "maestro-qwen/qwen3.8-max"
     ]
   },
   "thinkingLevels": {

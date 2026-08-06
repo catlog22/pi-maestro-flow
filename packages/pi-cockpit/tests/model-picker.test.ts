@@ -12,7 +12,7 @@ const glyphs = resolveGlyphs("nerd");
 // as "provider/id", then the custom escape hatch.
 const ENTRIES: ModelPickerEntry[] = [
 	{ kind: "model", ref: "", label: "(rule-based)" },
-	{ kind: "model", ref: "maestro-qwen/qwen3.8-max-preview", label: "maestro-qwen/qwen3.8-max-preview" },
+	{ kind: "model", ref: "maestro-qwen/qwen3.8-max", label: "maestro-qwen/qwen3.8-max" },
 	{ kind: "model", ref: "openai/gpt-5.5", label: "openai/gpt-5.5" },
 	{ kind: "custom", label: "custom ref…" },
 ];
@@ -49,7 +49,7 @@ function harness(over: Partial<ModelPickerParams> = {}): Harness {
 
 test("initialModelIndex parks on the current ref and falls back to the first entry", () => {
 	assert.equal(initialModelIndex(ENTRIES, "openai/gpt-5.5"), 2);
-	assert.equal(initialModelIndex(ENTRIES, "maestro-qwen/qwen3.8-max-preview"), 1);
+	assert.equal(initialModelIndex(ENTRIES, "maestro-qwen/qwen3.8-max"), 1);
 	// The offline ref is stored as "" — parking on it means "(rule-based)".
 	assert.equal(initialModelIndex(ENTRIES, ""), 0);
 	// A ref that is no longer on the list (provider removed) lands on rule-based.

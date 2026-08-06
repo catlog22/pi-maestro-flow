@@ -601,14 +601,14 @@ test("compaction summary model layers across scopes with field-level sources", a
   const fixture = await createFixture();
   try {
     await writeSettings(fixture.agentDir, {
-      compaction: { model: "maestro-qwen/qwen3.8-max-preview" },
+      compaction: { model: "maestro-qwen/qwen3.8-max" },
     });
 
     assert.deepEqual(readScopeCompaction("user", fixture.projectDir), {
-      model: "maestro-qwen/qwen3.8-max-preview",
+      model: "maestro-qwen/qwen3.8-max",
     });
     const effective = readEffectiveCompactionSettings(fixture.projectDir);
-    assert.equal(effective.model, "maestro-qwen/qwen3.8-max-preview");
+    assert.equal(effective.model, "maestro-qwen/qwen3.8-max");
     assert.equal(effective.source.model, "user");
   } finally {
     await fixture.dispose();
@@ -645,10 +645,10 @@ test("saveCompactionScope persists the summary model and clears retired endpoint
       compaction: { endpoint: "compact" },
     });
     await saveCompactionScope("project", fixture.projectDir, {
-      model: "maestro-qwen/qwen3.8-max-preview",
+      model: "maestro-qwen/qwen3.8-max",
     });
     assert.deepEqual(await readJson(path), {
-      compaction: { model: "maestro-qwen/qwen3.8-max-preview" },
+      compaction: { model: "maestro-qwen/qwen3.8-max" },
     });
 
     await saveCompactionScope("project", fixture.projectDir, {});

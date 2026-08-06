@@ -73,12 +73,15 @@ test("displayMessageForResult leaves non-structured results unchanged", () => {
   assert.equal(out, "Plain answer");
 });
 
-test("displayMessageForResult truncates large structured outputs with a read hint", () => {
+test("displayMessageForResult delivers large structured outputs in full", () => {
+  const data = "x".repeat(20_000);
   const out = displayMessageForResult(result({
     messages: [{ role: "tool", content: "Structured output saved." }],
-    structuredOutput: { data: "x".repeat(20_000) },
+    structuredOutput: { data },
   }));
-  assert.match(out, /\[truncated; read the full value via agent:\/\/run-abc\]/);
+  assert.doesNotMatch(out, /truncated/);
+  assert.ok(out.includes(data), "full structured value must be present");
+  assert.ok(out.endsWith(`${data}"\n}`), "value must not be cut off");
 });
 
 test("displayMessageForResult keeps failure diagnostics authoritative", () => {

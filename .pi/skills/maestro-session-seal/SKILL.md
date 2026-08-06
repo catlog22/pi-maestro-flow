@@ -60,7 +60,7 @@ Note: maestro-next suggests session-seal when 'Tests green + active session'. Th
 
 ### Step 2: Knowledge Reconciliation
 
-1. Run `maestro knowledge review {session_id} --json`. Treat its Run ledgers, reconciliation policies, diversified matches, and candidate IDs as authoritative; do not rescan outputs to recreate candidates. Use `--refresh` only when the review reports missing or stale source receipts.
+1. Run `maestro knowledge review {session_id} --json`. Treat its Run/Session ledgers, reconciliation policies, diversified matches, and candidate IDs as authoritative; do not rescan outputs to recreate candidates. Use `--refresh` only when the review reports missing or stale source receipts (session seal refreshes the session receipt automatically on a best-effort basis).
 2. Explain signal semantics when relevant: search/injection is exposure only; explicit loads are consumed; `cited`, `validated`, and `contradicted` are explicit Run relations.
 3. Report exact/semantic duplicates, related/extends candidates, potential conflicts, supersession candidates, missing receipts, and promotion eligibility separately. Exact duplicates are suppressed automatically; unresolved `review_required` candidates cannot be promoted.
 4. If `--skip-knowledge`, report the pending/promoting/review-required/suppressed counts and continue. The backlog and reconciliation receipts remain durable after seal.
@@ -73,7 +73,7 @@ Note: maestro-next suggests session-seal when 'Tests green + active session'. Th
      - "逐个选择" (review each candidate)
      - "暂不晋升" (leave backlog pending)
    ```
-7. Promote only through the receipt-aware CLI:
+7. Promote only through the receipt-aware CLI (dual-source gates, equally strong: run-source = sealed source Runs + fresh run receipts; session-source = sealed Session + fresh session receipt + non-empty `--evidence` given at stage):
    - Bulk selection → `maestro knowledge promote {session_id} --all`
    - Explicit selection → repeat `maestro knowledge promote {session_id} --candidate <candidate-id>` for each selection (comma-separated compatibility remains supported)
    - `-y` may run `--all`, which promotes all eligible candidates (observed-only emits a warning) and skips review-required and suppressed candidates. It MUST NOT auto-resolve a candidate without explicit user selection.

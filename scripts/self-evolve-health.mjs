@@ -134,7 +134,12 @@ function aggregateCandidates(projectRoot) {
       else if (entry.name === "knowledge-delta.json") {
         let data;
         try { data = JSON.parse(readFileSync(full, "utf8")); } catch { continue; }
-        const runId = data.run_id ?? "?";
+        // Session-level ledgers (session-knowledge-delta/1.0) carry no run_id;
+        // attribute by session so cross-source duplication stays visible
+        // instead of collapsing into "?" (K7 origin split).
+        const runId = data.schema_version === "session-knowledge-delta/1.0"
+          ? `session:${data.session_id ?? "?"}`
+          : (data.run_id ?? "?");
         for (const candidate of data.candidates ?? []) {
           const title = String(candidate.title ?? "").trim();
           if (!title) continue;

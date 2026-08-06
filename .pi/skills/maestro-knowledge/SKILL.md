@@ -42,7 +42,7 @@ Classify the intent in `$ARGUMENTS` into one operation, then run `maestro run sk
 ### Routing rules
 
 - Remaining tokens after classification become the chosen step's own arguments.
-- During an active Run, reusable knowhow is staged here with `maestro knowledge stage knowhow ...`; project knowhow is written only by explicit promotion. Outside a Run, direct `/maestro-knowhow` capture remains available.
+- During an active Run, reusable knowhow is staged here with `maestro knowledge stage knowhow ...`; project knowhow is written only by explicit promotion. Outside a Run, governed staging still works: `stage --session <session-id> --evidence <refs>` (or no binding at all — write authority resolves through identity tiers and, with nothing running, idempotently creates a daily `ksyn-*` synthetic knowledge Session); direct `/maestro-knowhow` capture remains a bypass reserved for explicit knowledge-management work.
 - Stage candidate content from a temp file or stdin, never inline: write the content to a file and pass `maestro knowledge stage <target> "<title>" --content-file <path|->`. Inline positional content containing spaces, quotes, unicode (e.g. `…`), newlines, or leading dashes is misparsed and shifts later arguments.
 - `--signal-ids` takes comma-separated IDs (`--signal-ids spec:project:a,knowhow:b`); space-separated values leak into positional arguments and corrupt the stage call.
 - Use `maestro knowledge review <session-id>` as the human review surface. It shows fresh/missing/stale receipts, diversified evidence-backed matches, and copyable promote commands. `--refresh` reconciles all candidate source Runs. `--resolve <candidate-id> --as <choice> --reason "..."` resolves a candidate inline before displaying the refreshed view.

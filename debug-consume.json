@@ -1,0 +1,43 @@
+{
+ "command": {
+  "name": "test",
+  "version": "1.0",
+  "source_path": ".claude/commands/test.md",
+  "content_hash": "0b41a1b463cb1aae36a9ae62d72ab3f2df37230a424dbaf72d392feda253d1de",
+  "resolved_prompt_hash": "0b41a1b463cb1aae36a9ae62d72ab3f2df37230a424dbaf72d392feda253d1de",
+  "contract_hash": "21baf496177f521f1613f1f9aef228bacf52cec3ab9753f3734d19003c30e6c5"
+ },
+ "gate_ids": [
+  "GATE-001-01"
+ ],
+ "input_consumes": [],
+ "quality_mode": "standard",
+ "gates": {
+  "GATE-001-01": {
+   "key": "consume-latest-verification",
+   "scope": "entry",
+   "required": true,
+   "blocking": true,
+   "status": "failed",
+   "check": {
+    "type": "artifact",
+    "kind": "verification",
+    "alias": "latest-verification"
+   }
+  }
+ },
+ "run_sealed": false,
+ "seal_status": "blocked",
+ "seal_gates": {
+  "passed": [],
+  "failed": [
+   "GATE-001-01"
+  ],
+  "skipped": [],
+  "blocking": [
+   "GATE-001-01"
+  ]
+ },
+ "scan_errors": [],
+ "run_status": "blocked"
+}

@@ -200,10 +200,10 @@ Re-search with different keywords when entering a new subsystem, after two faile
 
 ### Search and load attribution
 
-`maestro search` is **exposure only** — it never proves the Run used an entry. Turn hits into evidence explicitly:
+`maestro search` is **exposure only** — it never proves the Run/Session used an entry. Turn hits into evidence explicitly:
 
-- `maestro load --id <id>` records `consumed` on the unique active Run automatically.
-- `maestro knowledge record <ids...> --signal consumed|cited|validated|contradicted --source search|load|manual` records **pure attribution** (no candidate staged) on the active Run; `--source search` is the retrieval-attribution spelling. Use `knowledge stage --signal` only when a candidate is intended.
+- `maestro load --id <id>` records `consumed` via three-tier routing: unique active Run, then an unambiguous Session identity (host lease / single live channel), else the global usage ledger with a warning — attribution never blocks loading.
+- `maestro knowledge record <ids...> --signal consumed|cited|validated|contradicted --source search|load|manual [--run <run-id> | --session <session-id> | --channel <name>]` records **pure attribution** (no candidate staged) on the resolved Run or Session ledger; `--source search` is the retrieval-attribution spelling. Write authority resolves by tiers: explicit args > explicit/env channel (`--channel`/`MAESTRO_CHANNEL`) > Pi host lease > single live hook channel > narrowed scan (exactly one running Session with an active Run and zero live channels) > synthetic knowledge Session; ambiguity fails closed and lists live channels. Use `knowledge stage --signal` only when a candidate is intended. IDs are validated against the wiki index; unknown IDs are rejected unless `--allow-unknown` (which records a degraded marker).
 - `maestro knowledge review <session-id> --json` reports per-source totals (`input_totals_by_source`) and knowledge-id detail (`inputs`) so you can verify what was searched, loaded, and staged.
 
 # Architecture Template Library (arch-kb)
@@ -228,7 +228,8 @@ Runtime birth packets, `maestro run brief`, and `maestro run check` are authorit
 - Stage reusable recipes or pitfalls before completion. Write candidate content to a temp file and pass `--content-file <path|->` (or stdin `-`) — never inline as a positional argument: content with spaces, quotes, unicode, newlines, or leading dashes misparses and shifts later arguments.
 
 ```bash
-maestro knowledge stage spec|knowhow "<title>" --content-file <path|-> --run <run-id> [--category <category>]
+maestro knowledge stage spec|knowhow "<title>" --content-file <path|-> --run <run-id> [--category <category>]   # run source (inside a Run)
+maestro knowledge stage spec|knowhow "<title>" --content-file <path|-> --session <session-id> --evidence <file:line,...>   # session source (no Run needed; evidence required)
 ```
 
 - Add `--signal cited|validated|contradicted --signal-ids <comma-separated ids>` when relating a candidate to existing knowledge; space-separated `--signal-ids` values leak into positional arguments.
@@ -236,8 +237,8 @@ maestro knowledge stage spec|knowhow "<title>" --content-file <path|-> --run <ru
 - On Run seal a `run-knowledge` message summarizes the Run's attribution (consumed/cited/validated/contradicted) and staged candidates; on Session seal a `session-knowledge` message prompts candidate review when a backlog exists. Treat these as the authoritative seal-time knowledge state — do not re-derive it manually.
 - Work through the `run check` finish checklist and record intentional concerns.
 - Review, resolution, promotion, supersession, conflict marking, and pruning require an explicit user request or confirmed governance step.
-- Promote only eligible candidates with fresh reconciliation receipts from sealed source Runs. Deprecated or superseded knowledge remains auditable but is excluded from normal search and injection.
-- Outside a Run, direct knowledge writes require an explicit knowledge-management request.
+- Promote only eligible candidates whose sources are sealed with fresh reconciliation receipts: sealed source Runs for run-source candidates; sealed Session + fresh session receipt (+ non-empty `--evidence` at stage) for session-source candidates. Session seal refreshes the session receipt automatically (best-effort); `maestro knowledge review <session-id> --refresh` repairs missing/stale receipts. Deprecated or superseded knowledge remains auditable but is excluded from normal search and injection.
+- Outside a Run, governed staging still works: without `--run/--session`, write authority falls back through identity tiers and, with nothing running, idempotently creates a daily-partitioned synthetic knowledge Session (`ksyn-*`). Direct writes to project spec/knowhow still require an explicit knowledge-management request; prefer `--channel <name>` when multiple concurrent sessions share one workspace.
 - **Knowledge auto-deposition (self-evolve automation layer)**: at seal, `accepted` decisions / `locked` constraints in report.md frontmatter are automatically staged as candidates (T1) — do not manually re-stage the same facts; T2 fact candidates can be auto-promoted via `promote --all` after seal (unique/eligible with a fresh reconciliation receipt), while inferred ones (`review_required`) stay for manual resolve; before promote, follow the TOCTOU fence (`maestro knowledge review <session> --refresh`) and approval receipt (`node scripts/self-evolve-approval.mjs record`) per `.pi/skills/self-evolve`.
 - **Self-evolve entry points**: `.pi/skills/self-evolve` (orchestration skill), `node scripts/self-evolve-health.mjs` (health sidecar: signal aggregation + contest queue + cross-run candidate index; global output `~/.maestro/self-evolve/`), `node scripts/self-evolve-phase5.mjs` (canary online verification + skill proposal governance).
 - Commands emitted by current runtime receipts override static examples.

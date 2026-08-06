@@ -269,6 +269,8 @@ interface WorkflowCoordinator {
 
 `run-control` tool 或 `/maestro-session` 命令暴露以下稳定动作：
 
+> **2026-08 演进**：`run-control` 已重构为 Maestro CLI 的 argv 透传壳（`{ argv: [...] }`），不再枚举动作。读写由命令分类决定（读：`status`/`brief`/`prepare`/`check`/`recall`/`evidence`/`list`/`show`/`graph`/`skills`/`search`/`load`/`review`；写：其余生命周期命令，需 lease；入口：`session/run create|start`）。下表为原始设计意图，语义由分类器继承。
+
 | 动作 | 是否写入 | 实现 |
 |---|---:|---|
 | `status` / `brief` | 否 | bridge snapshot / `maestro run brief` |

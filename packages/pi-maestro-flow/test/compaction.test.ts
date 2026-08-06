@@ -2965,7 +2965,7 @@ test("successful Maestro compaction is copied to a unique knowhow document", asy
     const root = await mkdtemp(join(tmpdir(), "pi-maestro-compact-"));
   const checkpoint = details();
   checkpoint.projectRoot = root;
-  checkpoint.knowhowPath = join(root, ".workflow", "knowhow", "KNW-checkpoint.md");
+  checkpoint.knowhowPath = join(root, ".workflow", "recovery", "compaction-checkpoints", "KNW-checkpoint.md");
   const event = {
     compactionEntry: {
       type: "compaction",
@@ -2993,7 +2993,7 @@ test("successful Maestro compaction is copied to a unique knowhow document", asy
     assert.match(content, /status: active/);
     assert.match(content, /Verify checkpoint copy/);
     assert.match(content, /D:\\repo\\plan\.md/);
-    assert.match(outputPath!, /[\\/]\.workflow[\\/]knowhow[\\/]KNW-.*session-compact-session-1-checkpoint-2\.md$/);
+    assert.match(outputPath!, /[\\/]\.workflow[\\/]recovery[\\/]compaction-checkpoints[\\/]KNW-.*session-compact-session-1-checkpoint-2\.md$/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -3019,7 +3019,7 @@ test("Maestro compaction recomputes knowhow paths and rejects cross-session deta
       cwd: root,
       sessionManager: { getSessionId: () => checkpoint.sessionId },
     } as never);
-    assert.ok(outputPath?.startsWith(join(root, ".workflow", "knowhow")));
+    assert.ok(outputPath?.startsWith(join(root, ".workflow", "recovery", "compaction-checkpoints")));
     assert.notEqual(outputPath, checkpoint.knowhowPath);
 
     const rejected = await persistMaestroCompactionKnowhow(event, {

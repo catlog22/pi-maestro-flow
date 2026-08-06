@@ -181,11 +181,11 @@ test("title generation model is a picker row that commits its ref and clears on 
 		{ value: "(rule-based)", next: "picker…", accel: "z", kind: "select" },
 	);
 	// A picked ref lands in the config and shows up on the row.
-	const committed = applyRow(DEFAULT_CONFIG, "titleGenerationModel", "maestro-qwen/qwen3.8-max-preview");
-	assert.equal(committed.title.generationModel, "maestro-qwen/qwen3.8-max-preview");
+	const committed = applyRow(DEFAULT_CONFIG, "titleGenerationModel", "maestro-qwen/qwen3.8-max");
+	assert.equal(committed.title.generationModel, "maestro-qwen/qwen3.8-max");
 	assert.equal(
 		buildRows(committed).find((r) => r.key === "titleGenerationModel")!.value,
-		"maestro-qwen/qwen3.8-max-preview",
+		"maestro-qwen/qwen3.8-max",
 	);
 	// Empty pick clears back to the offline rule-based extractor.
 	assert.equal(applyRow(committed, "titleGenerationModel", "").title.generationModel, "");

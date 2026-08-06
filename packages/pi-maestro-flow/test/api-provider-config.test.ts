@@ -264,7 +264,7 @@ test("registers configured providers and the /api-manager command", async (t) =>
   await saveApiProviderSettings({
     provider: "maestro-qwen",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    modelId: "qwen3.8-max-preview",
+    modelId: "qwen3.8-max",
     reasoning: true,
     apiKey: "qwen-secret",
   }, modelsPath);
@@ -290,7 +290,7 @@ test("registers configured providers and the /api-manager command", async (t) =>
   assert.equal(registered[0].config.name, undefined);
   assert.equal(registered[0].config.models[0].id, "gpt-5.4");
   assert.equal(registered[1].config.name, undefined);
-  assert.equal(registered[1].config.models[0].id, "qwen3.8-max-preview");
+  assert.equal(registered[1].config.models[0].id, "qwen3.8-max");
   assert.equal(registered[2].config.name, undefined);
   assert.equal(registered[2].config.models[0].id, "claude-sonnet-4-5");
   assert.deepEqual(registered[2].config.models[0].thinkingLevelMap, { xhigh: "high" });
@@ -488,7 +488,7 @@ test("prompt-cache detection gates on gpt-5.6 and later only", () => {
   for (const supported of ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-chat-latest", "gpt-6", "gpt-6.1"]) {
     assert.equal(supportsOpenAIPromptCacheOptions(supported), true, supported);
   }
-  for (const unsupported of ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5", "gpt-4.1", "o3", "o4-mini", "deepseek-v4-flash", "qwen3.8-max-preview", "claude-opus-4-6", ""] as const) {
+  for (const unsupported of ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5", "gpt-4.1", "o3", "o4-mini", "deepseek-v4-flash", "qwen3.8-max", "claude-opus-4-6", ""] as const) {
     assert.equal(supportsOpenAIPromptCacheOptions(unsupported), false, unsupported);
   }
 });
@@ -793,7 +793,7 @@ test("saves Qwen as an OpenAI-compatible completions provider", async (t) => {
   await saveApiProviderSettings({
     provider: "maestro-qwen",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1/",
-    modelId: "qwen3.8-max-preview",
+    modelId: "qwen3.8-max",
     reasoning: true,
     apiKey: "qwen-secret",
     maxThinking: true,
@@ -808,7 +808,7 @@ test("saves Qwen as an OpenAI-compatible completions provider", async (t) => {
     supportsDeveloperRole: false,
     thinkingFormat: "qwen",
   });
-  assert.equal(qwen.models[0].id, "qwen3.8-max-preview");
+  assert.equal(qwen.models[0].id, "qwen3.8-max");
   assert.deepEqual(qwen.models[0].thinkingLevelMap, { off: null, xhigh: "max" });
 
   qwen.compat.openRouterRouting = { allow_fallbacks: false };
@@ -817,7 +817,7 @@ test("saves Qwen as an OpenAI-compatible completions provider", async (t) => {
   await saveApiProviderSettings({
     provider: "maestro-qwen",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    modelId: "qwen3.8-max-preview",
+    modelId: "qwen3.8-max",
     reasoning: true,
     apiKey: "qwen-secret",
     maxThinking: true,
@@ -1336,7 +1336,7 @@ test("/api-manager qwen creates an OpenAI-compatible provider and default model"
 
   const inputAnswers = [
     "https://dashscope.aliyuncs.com/compatible-mode/v1/",
-    "qwen3.8-max-preview",
+    "qwen3.8-max",
     "1000000",
     "128000",
     "qwen-secret",
@@ -1377,19 +1377,19 @@ test("/api-manager qwen creates an OpenAI-compatible provider and default model"
     supportsDeveloperRole: false,
     thinkingFormat: "qwen",
   });
-  assert.equal(saved.providers["maestro-qwen"].models[0].id, "qwen3.8-max-preview");
+  assert.equal(saved.providers["maestro-qwen"].models[0].id, "qwen3.8-max");
   assert.equal(saved.providers["maestro-qwen"].models[0].contextWindow, 1_000_000);
   assert.equal(saved.providers["maestro-qwen"].models[0].thinkingLevelMap.xhigh, "max");
   assert.equal("max" in saved.providers["maestro-qwen"].models[0].thinkingLevelMap, false);
   const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
   assert.equal(settings.defaultProvider, "maestro-qwen");
-  assert.equal(settings.defaultModel, "qwen3.8-max-preview");
+  assert.equal(settings.defaultModel, "qwen3.8-max");
   // Global defaultThinkingLevel is only a fallback; configuring a model leaves it untouched.
   assert.equal(settings.defaultThinkingLevel, undefined);
   assert.ok(selectOptions[0]?.includes("启用：off / minimal / low / medium / high / xhigh / max"));
   assert.equal(registrations.at(-1)?.name, "maestro-qwen");
   assert.equal(registrations.at(-1)?.config.name, undefined);
-  assert.equal(registrations.at(-1)?.config.models[0].id, "qwen3.8-max-preview");
+  assert.equal(registrations.at(-1)?.config.models[0].id, "qwen3.8-max");
 });
 
 test("/api-manager rejects invalid URL, context window, and API key", async (t) => {
@@ -1791,7 +1791,7 @@ test("/effort offers max when the model maps a max wire value", async (t) => {
   await harness.command.handler("", {
     model: {
       provider: "maestro-qwen",
-      id: "qwen3.8-max-preview",
+      id: "qwen3.8-max",
       reasoning: true,
       thinkingLevelMap: { off: null, xhigh: "max" },
     },
@@ -2531,7 +2531,7 @@ test("startup keeps multiple models under one Provider and preserves model defau
         authHeader: false,
         compat: { supportsDeveloperRole: false, thinkingFormat: "qwen" },
         models: [
-          { id: "qwen3.8-max-preview", reasoning: true, contextWindow: 400_000, maxTokens: 128_000 },
+          { id: "qwen3.8-max", reasoning: true, contextWindow: 400_000, maxTokens: 128_000 },
           { id: "deepseek-v4-flash", reasoning: true, contextWindow: 600_000, maxTokens: 128_000, compat: {} },
         ],
       },
@@ -2545,7 +2545,7 @@ test("startup keeps multiple models under one Provider and preserves model defau
   const defaultsBytes = JSON.stringify({
     version: 1,
     modelDefaults: {
-      "maestro-qwen/qwen3.8-max-preview": "high",
+      "maestro-qwen/qwen3.8-max": "high",
       "maestro-qwen/deepseek-v4-flash": "medium",
     },
   });
@@ -2570,7 +2570,7 @@ test("startup keeps multiple models under one Provider and preserves model defau
   assert.deepEqual([...registrations.keys()], ["maestro-qwen"]);
   assert.deepEqual(
     registrations.get("maestro-qwen")?.models.map((m: any) => m.id),
-    ["qwen3.8-max-preview", "deepseek-v4-flash"],
+    ["qwen3.8-max", "deepseek-v4-flash"],
   );
 
   // Editing one model under a multi-model Provider keeps the sibling intact.
@@ -2596,12 +2596,12 @@ test("startup keeps multiple models under one Provider and preserves model defau
   });
   assert.deepEqual(
     edited["maestro-qwen"].models.map((m: any) => m.id),
-    ["qwen3.8-max-preview", "deepseek-v4-flash"],
+    ["qwen3.8-max", "deepseek-v4-flash"],
   );
   assert.equal(edited["maestro-qwen"].models[1].contextWindow, 700_000);
   assert.equal(edited["maestro-qwen"].models[0].contextWindow, 400_000);
   assert.deepEqual(JSON.parse(readFileSync(defaultsPath, "utf8")).modelDefaults, {
-    "maestro-qwen/qwen3.8-max-preview": "high",
+    "maestro-qwen/qwen3.8-max": "high",
     "maestro-qwen/deepseek-v4-flash": "medium",
   });
 });

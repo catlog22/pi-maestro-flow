@@ -15,8 +15,12 @@ export interface TitleLlmDeps {
 	/** Model id sent in the request body (the API-side id, not the display name). */
 	modelId: string;
 	apiKey?: string;
-	/** Extra auth headers resolved by the ModelRegistry. */
-	headers?: Record<string, string>;
+	/**
+	 * Extra auth headers resolved by the ModelRegistry. Values may be null
+	 * (Pi 0.84 ProviderHeaders deletion markers); null entries are filtered
+	 * before the request is built so fetch never stringifies them.
+	 */
+	headers?: Record<string, string | null>;
 }
 
 export const TITLE_PROMPT = `Generate a very short, concrete title (2-4 words, at most 20 characters) capturing the main topic of this coding session. Output an objective noun phrase, not a sentence. Never use first or second person (no "I", "we", "my", "you", "我们", "我", "你"); the title must not read like a spoken instruction. Sentence case: capitalize only the first word and proper nouns. Titles must be short enough to fit a terminal tab.
@@ -89,6 +93,24 @@ export function parseTitleResponse(body: unknown): string | null {
  * Generate a title by calling `POST {baseUrl}/chat/completions`. Returns null
  * on any failure (network, auth, parse) so the caller can fall back.
  */
+/**
+ * Drop null header values (Pi 0.84 ProviderHeaders deletion markers). Mirrors
+ * the pi SDK's own null filtering before a request is built; exposed for tests.
+ */
+export function filterNullHeaders(
+	headers: Record<string, string | null> | undefined,
+): Record<string, string> | undefined {
+	if (!headers) return undefined;
+	const entries = Object.entries(headers).filter(
+		(entry): entry is [string, string] => entry[1] !== null,
+	);
+	return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+/**
+ * Generate a title by calling `POST {baseUrl}/chat/completions`. Returns null
+ * on any failure (network, auth, parse) so the caller can fall back.
+ */
 export async function generateTitleWithModel(
 	deps: TitleLlmDeps,
 	text: string,
@@ -101,7 +123,7 @@ export async function generateTitleWithModel(
 			headers: {
 				"content-type": "application/json",
 				...(deps.apiKey ? { authorization: `Bearer ${deps.apiKey}` } : {}),
-				...deps.headers,
+				...filterNullHeaders(deps.headers),
 			},
 			body: buildTitleRequestBody(deps.modelId, text),
 			signal,

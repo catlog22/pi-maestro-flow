@@ -21,7 +21,7 @@ icon: "🖼️"
 /vision show
 
 // 2.（可选）指定首选模型
-/vision model maestro-qwen/qwen3.8-max-preview
+/vision model maestro-qwen/qwen3.8-max
 
 // 3. 让模型分析图片（本地路径 / URL / data-url）
 describe_image({ image_path: "截图.png", prompt: "分析重点" })

@@ -159,7 +159,7 @@ export interface TitleConfig {
 	showMaestro: boolean;
 	/**
 	 * Model used to generate the session title after the first turn, as
-	 * "provider/model" (e.g. "maestro-qwen/qwen3.8-max-preview"). Resolved
+	 * "provider/model" (e.g. "maestro-qwen/qwen3.8-max"). Resolved
 	 * through pi's ModelRegistry — the same providers /api-manager manages.
 	 * Empty (default) falls back to the offline rule-based suggestTitle().
 	 */

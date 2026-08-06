@@ -859,7 +859,7 @@ function splitReference(value: string): [string, string] { const slash = value.i
 
 /** qwen-family providers derive enable_thinking from reasoningEffort (pi-ai
  *  openai-completions buildParams), so an absent effort sends
- *  enable_thinking=false, which DashScope rejects for qwen3.8-max-preview.
+ *  enable_thinking=false, which DashScope rejects for qwen3.8-max.
  *  Mirror the main-session convention (createSummarizationOptions): forward the
  *  session thinking level, clamped to the model's supported levels; fall back
  *  to a non-off level when the runtime did not provide one. */

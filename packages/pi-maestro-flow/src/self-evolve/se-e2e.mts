@@ -236,14 +236,14 @@ async function main(): Promise<void> {
 
   // ---- 8b. model config: set provider/model, validate bad ids, auto resets ----
 
-  await cmd.handler("config model=maestro-qwen/qwen3.8-max-preview", ctx);
+  await cmd.handler("config model=maestro-qwen/qwen3.8-max", ctx);
   const cfgM1 = JSON.parse(await readFile(cfgPath, "utf8"));
-  check("config model 持久化", cfgM1.model === "maestro-qwen/qwen3.8-max-preview", JSON.stringify(cfgM1));
+  check("config model 持久化", cfgM1.model === "maestro-qwen/qwen3.8-max", JSON.stringify(cfgM1));
   let modelReject = "";
   ctx.ui.notify = (message, level) => { if (level === "warning") modelReject = message; prevNotify(message, level); };
   await cmd.handler("config model=bad-id-no-slash", ctx);
   const cfgM2 = JSON.parse(await readFile(cfgPath, "utf8"));
-  check("非法 model 拒绝（配置未变）", cfgM2.model === "maestro-qwen/qwen3.8-max-preview" && modelReject.includes("provider/model"), modelReject.slice(0, 100));
+  check("非法 model 拒绝（配置未变）", cfgM2.model === "maestro-qwen/qwen3.8-max" && modelReject.includes("provider/model"), modelReject.slice(0, 100));
   await cmd.handler("config model=auto", ctx);
   const cfgM3 = JSON.parse(await readFile(cfgPath, "utf8"));
   check("model=auto 清除显式模型", cfgM3.model === undefined, JSON.stringify(cfgM3));

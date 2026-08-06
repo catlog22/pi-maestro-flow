@@ -490,7 +490,7 @@ export function setConfigValue(
       return { config: rest };
     }
     if (!isValidModelId(value)) {
-      return { config, error: `model expects "provider/model" (e.g. maestro-qwen/qwen3.8-max-preview) or auto, got "${raw}"` };
+      return { config, error: `model expects "provider/model" (e.g. maestro-qwen/qwen3.8-max) or auto, got "${raw}"` };
     }
     return { config: { ...config, model: value } };
   }

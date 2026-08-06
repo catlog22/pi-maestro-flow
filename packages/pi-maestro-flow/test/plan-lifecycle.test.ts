@@ -906,6 +906,16 @@ test("Plan hooks preserve read-only discovery and block mutations before approva
     for (const action of ["next", "done", "edit"]) {
       assert.match(onToolCallPlan({ toolName: "run-control", input: { action } })?.reason ?? "", /blocked/, action);
     }
+    assert.equal(onToolCallPlan({ toolName: "run-control", input: { argv: ["session", "status"] } }), undefined);
+    assert.equal(onToolCallPlan({ toolName: "run-control", input: { argv: ["run", "brief", "run-1"] } }), undefined);
+    for (const argv of [
+      ["session", "next"],
+      ["run", "done", "run-1"],
+      ["run", "edit", "verify"],
+      ["session", "create", "topic"],
+    ]) {
+      assert.match(onToolCallPlan({ toolName: "run-control", input: { argv } })?.reason ?? "", /blocked/, argv.join(" "));
+    }
     assert.equal(onToolCallPlan({ toolName: "todo", input: { action: "list" } }), undefined);
     assert.match(onToolCallPlan({ toolName: "todo", input: { action: "create" } })?.reason ?? "", /blocked/);
     assert.equal(onToolCallPlan({ toolName: "goal", input: { action: "get" } }), undefined);

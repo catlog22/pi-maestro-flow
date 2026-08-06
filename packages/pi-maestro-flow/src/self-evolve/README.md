@@ -71,7 +71,7 @@
 
 ### 面板 `/self-evolve`（默认） / `/self-evolve panel`
 
-只读 TUI 面板（`ctx.ui.custom` overlay），展示：配置摘要（含来源）、运行时计数器、最近信号列表。配置修改请走 `/self-evolve config`（带校验与持久化）——面板仅刷新/关闭：
+只读 TUI 面板（`ctx.ui.custom` overlay），展示：配置摘要（含来源）、运行时计数器、最近信号列表。配置修改请走 `/self-evolve config`（带校验与持久化）——面板仅刷新/关闭。渲染遵循 Maestro settings 视觉语言（共享 `frame`/`headerLine`/`rule` 原语）；按终端高度计算行预算，信号列表超出时以 `… +N more` 截断，底部帮助行永不被裁剪；窄终端（<20 列）自动折叠为单行状态。
 
 | 键 | 动作 |
 |---|---|
@@ -85,7 +85,7 @@
 | 键 | 类型 | 示例 |
 |---|---|---|
 | `enabled` | bool | `true` / `false` |
-| `model` | `provider/model` 或 `auto` | `maestro-qwen/qwen3.8-max-preview`、`auto` |
+| `model` | `provider/model` 或 `auto` | `maestro-qwen/qwen3.8-max`、`auto` |
 | `cooldownMs` | 时长 | `300000`、`5m`、`30s`、`1.5h` |
 | `maxSignalsPerSession` | 正整数 | `20` |
 | `maxTraceChars` | 正整数 | `8000` |

@@ -5,7 +5,11 @@ import {
   type WorkflowLeaseOwnership,
 } from "../session/coordinator.ts";
 
-/** Read-only across both the native run-control tool and Maestro CLI aliases. */
+/**
+ * Read-only action/command names. Doubles as:
+ * - SessionOverlay UI action names (brief/check are read; pause/resume/decision/next/done write)
+ * - bash `maestro run <action>` classification for workflow opt-in (isWorkflowOptInCommand)
+ */
 export const RUN_CONTROL_READ_ACTIONS: ReadonlySet<string> = new Set([
   "status",
   "brief",
@@ -17,103 +21,67 @@ export const RUN_CONTROL_READ_ACTIONS: ReadonlySet<string> = new Set([
   "list",
   "show",
 ]);
-export const RUN_CONTROL_WRITE_ACTIONS = new Set(["next", "done", "edit"] as const);
-export type RunControlAction = "status" | "brief" | "prepare" | "check" | "next" | "done" | "edit";
+
+/** Maestro CLI subcommands classified as read-only by the passthrough shell. */
+const RUN_CONTROL_READ_COMMANDS: ReadonlySet<string> = new Set([
+  ...RUN_CONTROL_READ_ACTIONS,
+  // session family read-only
+  "evidence",
+  "graph",
+  // top-level read-only surfaces
+  "skills",
+  "search",
+  "load",
+  "review",
+  "help",
+]);
+
+/** Entry commands that mint a Session; allowed without a held mutation lease. */
+const SESSIONLESS_WRITE_COMMANDS: ReadonlySet<string> = new Set(["create", "start"]);
+
+export interface RunControlClassification {
+  write: boolean;
+  /** Write that mints a new Session; allowed without an attached lease (entry commands). */
+  sessionless: boolean;
+}
+
+export function classifyRunControlArgv(argv: readonly string[]): RunControlClassification {
+  if (argv.length === 0 || argv.some((argument) => argument === "-h" || argument === "--help")) {
+    return { write: false, sessionless: false };
+  }
+  const command = argv[1] ?? argv[0] ?? "";
+  if (RUN_CONTROL_READ_COMMANDS.has(command)) return { write: false, sessionless: false };
+  if (SESSIONLESS_WRITE_COMMANDS.has(command)) return { write: true, sessionless: true };
+  // Unknown commands default to write-conservative: mutation lease + Plan-mode block apply.
+  return { write: true, sessionless: false };
+}
 
 export function isRunControlReadAction(action: string): boolean {
   return RUN_CONTROL_READ_ACTIONS.has(action);
 }
 
+export function isRunControlReadArgv(argv: readonly string[]): boolean {
+  return !classifyRunControlArgv(argv).write;
+}
+
 export const RunControlParams = Type.Object({
-  action: Type.Union([
-    Type.Literal("status"),
-    Type.Literal("brief"),
-    Type.Literal("prepare"),
-    Type.Literal("check"),
-    Type.Literal("next"),
-    Type.Literal("done"),
-    Type.Literal("edit"),
-  ], {
-    description: "Operation to perform. Read: status, brief, prepare, check. Write: next, done, edit.",
+  argv: Type.Array(Type.String(), {
+    description:
+      "Maestro CLI arguments without the leading executable, e.g. [\"session\",\"next\",\"--json\"] "
+      + "or [\"run\",\"check\",\"run-123\"]. Read commands (status/brief/prepare/check/recall/"
+      + "evidence/list/show/graph/skills/search/load/review) need no mutation lease; write commands "
+      + "(next/done/decide/seal/edit/...) require the current Pi session to own the Workflow "
+      + "mutation lease. Entry commands (session/run create|start) may run without a lease.",
   }),
-  runId: Type.Optional(Type.String({
-    description: "Run ID. Required for done; optional for brief/check, which default to the active Run.",
-  })),
-  step: Type.Optional(Type.String({
-    description: "Workflow step or command to preview (e.g. \"implement\", \"verify\"); required for prepare.",
-  })),
-  pick: Type.Optional(Type.String({
-    description: "Pending chain-step selector for next: a step ID (e.g. \"step-2\") or a command name (e.g. \"implement\"). Omit to take the default next step.",
-  })),
-  verdict: Type.Optional(Type.Union([
-    Type.Literal("done"),
-    Type.Literal("done-with-concerns"),
-    Type.Literal("needs-retry"),
-    Type.Literal("blocked"),
-  ], {
-    description: "Completion verdict for done; defaults to done.",
-  })),
-  summary: Type.Optional(Type.String({ description: "Completion summary for done." })),
-  reason: Type.Optional(Type.String({ description: "Completion reason for done." })),
-  notes: Type.Optional(Type.Array(Type.String(), {
-    description: "Completion notes for done; each item is forwarded as --note.",
-  })),
-  decisions: Type.Optional(Type.Array(Type.String(), {
-    description: "Decision records for done; each item is forwarded as --decision.",
-  })),
-  evidence: Type.Optional(Type.Array(Type.String(), {
-    description: "Evidence paths for done; each item is forwarded as --evidence.",
-  })),
-  artifacts: Type.Optional(Type.Array(Type.String(), {
-    description: "Artifact paths for done; each item is forwarded as --artifact.",
-  })),
-  commands: Type.Optional(Type.Array(Type.String(), {
-    description: "Commands to insert with edit. Supply one command for replace; omit when only removing a step.",
-  })),
-  after: Type.Optional(Type.String({
-    description: "Insertion point for edit: \"current\" (after active step), \"latest\", \"start\", a step ID (e.g. \"step-3\"), or a numeric index. Defaults to \"current\".",
-  })),
-  replace: Type.Optional(Type.String({
-    description: "Pending step ID to replace with the first edit command.",
-  })),
-  remove: Type.Optional(Type.String({
-    description: "Pending step ID to remove by marking it skipped; commands may be omitted.",
-  })),
-  args: Type.Optional(Type.String({
-    description: "Step arguments for edit; valid only when commands contains exactly one command.",
-  })),
-  stage: Type.Optional(Type.String({ description: "Optional stage label for an inserted edit step." })),
-  goalRef: Type.Optional(Type.String({ description: "Optional goal reference for an inserted edit step." })),
-  insertedBy: Type.Optional(Type.String({
-    description: "Actor recorded for an inserted edit step; Maestro defaults to manual.",
-  })),
 }, { additionalProperties: false });
 
 export interface RunControlInput {
-  action: RunControlAction;
-  runId?: string;
-  step?: string;
-  pick?: string;
-  verdict?: "done" | "done-with-concerns" | "needs-retry" | "blocked";
-  summary?: string;
-  reason?: string;
-  notes?: string[];
-  decisions?: string[];
-  evidence?: string[];
-  artifacts?: string[];
-  commands?: string[];
-  after?: string;
-  replace?: string;
-  remove?: string;
-  args?: string;
-  stage?: string;
-  goalRef?: string;
-  insertedBy?: string;
+  argv: string[];
 }
 
 export interface RunControlResult {
   ok: boolean;
-  action: RunControlAction;
+  action: "exec";
   message: string;
   details?: unknown;
 }
@@ -128,68 +96,35 @@ export async function executeRunControl(
   context?: RunControlExecutionContext,
 ): Promise<RunControlResult> {
   try {
-    const hostSessionId = context?.hostSessionId?.trim();
-    switch (input.action) {
-      case "status": {
-        const snapshot = coordinator.status();
-        if (!snapshot) return failure(input.action, "Coordinator is not attached; attach during session_start first");
-        const ownership = hostSessionId ? await coordinator.ownership(hostSessionId) : undefined;
-        return success(
-          input.action,
-          statusMessage(`${snapshot.source} snapshot ${snapshot.revision.fingerprint.slice(0, 12)}`, ownership),
-          attributed(snapshot, ownership),
-        );
-      }
-      case "brief": {
-        const result = await coordinator.brief(input.runId);
-        const ownership = hostSessionId ? await coordinator.ownership(hostSessionId) : undefined;
-        return success(input.action, readMessage(result.stdout, ownership), attributed(result, ownership));
-      }
-      case "prepare": {
-        const result = await coordinator.prepare(required(input.step, "step"));
-        const ownership = hostSessionId ? await coordinator.ownership(hostSessionId) : undefined;
-        return success(input.action, readMessage(result.stdout, ownership), attributed(result, ownership));
-      }
-      case "check": {
-        const result = await coordinator.check(input.runId);
-        const ownership = hostSessionId ? await coordinator.ownership(hostSessionId) : undefined;
-        return success(input.action, readMessage(result.stdout, ownership), attributed(result, ownership));
-      }
-      case "next": {
-        const currentHostSessionId = required(hostSessionId, "hostSessionId");
-        const result = await coordinator.next(input.pick, { hostSessionId: currentHostSessionId });
-        return success(input.action, result.command.stdout, result);
-      }
-      case "done": {
-        const currentHostSessionId = required(hostSessionId, "hostSessionId");
-        const result = await coordinator.done(required(input.runId, "runId"), {
-          verdict: input.verdict,
-          summary: input.summary,
-          reason: input.reason,
-          notes: input.notes,
-          decisions: input.decisions,
-          evidence: input.evidence,
-          artifacts: input.artifacts,
-        }, { hostSessionId: currentHostSessionId });
-        return success(input.action, result.command.stdout, result);
-      }
-      case "edit": {
-        const currentHostSessionId = required(hostSessionId, "hostSessionId");
-        const result = await coordinator.edit(input.commands ?? [], {
-          after: input.after,
-          replace: input.replace,
-          remove: input.remove,
-          args: input.args,
-          stage: input.stage,
-          goalRef: input.goalRef,
-          insertedBy: input.insertedBy,
-        }, { hostSessionId: currentHostSessionId });
-        return success(input.action, result.command.stdout, result);
-      }
+    const argv = sanitizeArgv(input.argv);
+    if (argv.length === 0) {
+      return failure('argv is required, e.g. ["session","status"]');
     }
+    const classification = classifyRunControlArgv(argv);
+    const hostSessionId = context?.hostSessionId?.trim();
+    if (classification.write && !classification.sessionless) {
+      required(hostSessionId, "hostSessionId");
+    }
+    const result = await coordinator.exec(argv, classification, hostSessionId);
+    const ownership = hostSessionId && !classification.write
+      ? await coordinator.ownership(hostSessionId)
+      : undefined;
+    return success(readMessage(result.command.stdout, ownership), {
+      argv,
+      classification,
+      command: result.command,
+      snapshot: result.snapshot,
+      ...(ownership ? { ownership } : {}),
+    });
   } catch (error) {
-    return failure(input.action, publicWorkflowErrorMessage(error));
+    return failure(publicWorkflowErrorMessage(error));
   }
+}
+
+function sanitizeArgv(argv: readonly string[] | undefined): string[] {
+  const cleaned = (argv ?? []).map((argument) => String(argument).trim()).filter(Boolean);
+  if (cleaned[0] === "maestro" || cleaned[0] === "maestro.cmd") cleaned.shift();
+  return cleaned;
 }
 
 function required(value: string | undefined, field: string): string {
@@ -198,20 +133,10 @@ function required(value: string | undefined, field: string): string {
   return normalized;
 }
 
-function attributed<T extends object>(
-  details: T,
-  ownership: WorkflowLeaseOwnership | undefined,
-): T & { ownership?: WorkflowLeaseOwnership } {
-  return ownership ? { ...details, ownership } : details;
-}
-
-function statusMessage(message: string, ownership: WorkflowLeaseOwnership | undefined): string {
-  return ownership ? `${message}; ${ownershipSummary(ownership)}` : message;
-}
-
 function readMessage(message: string, ownership: WorkflowLeaseOwnership | undefined): string {
   const notice = ownership ? readOwnershipNotice(ownership) : undefined;
-  return notice ? `${notice}\n${message}` : message;
+  const base = notice ? `${notice}\n${message}` : message;
+  return ownership ? `${base}\n[lease: ${ownershipSummary(ownership)}]` : base;
 }
 
 function ownershipSummary(ownership: WorkflowLeaseOwnership): string {
@@ -240,10 +165,10 @@ function readOwnershipNotice(ownership: WorkflowLeaseOwnership): string | undefi
     + `owned by Pi session ${ownership.ownerHostSessionId}.`;
 }
 
-function success(action: RunControlAction, message: string, details?: unknown): RunControlResult {
-  return { ok: true, action, message, ...(details === undefined ? {} : { details }) };
+function success(message: string, details?: unknown): RunControlResult {
+  return { ok: true, action: "exec", message, ...(details === undefined ? {} : { details }) };
 }
 
-function failure(action: RunControlAction, message: string): RunControlResult {
-  return { ok: false, action, message };
+function failure(message: string): RunControlResult {
+  return { ok: false, action: "exec", message };
 }

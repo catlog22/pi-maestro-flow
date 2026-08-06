@@ -1,15 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildTitleRequestBody, parseTitleResponse } from "../src/title-llm.ts";
+import { buildTitleRequestBody, filterNullHeaders, parseTitleResponse } from "../src/title-llm.ts";
 
 test("buildTitleRequestBody carries the short-title prompt and the clipped user text", () => {
-	const body = JSON.parse(buildTitleRequestBody("qwen3.8-max-preview", "analyze this project")) as {
+	const body = JSON.parse(buildTitleRequestBody("qwen3.8-max", "analyze this project")) as {
 		model: string;
 		messages: { role: string; content: string }[];
 		max_tokens: number;
 		thinking: { type: string };
 	};
-	assert.equal(body.model, "qwen3.8-max-preview");
+	assert.equal(body.model, "qwen3.8-max");
 	assert.equal(body.messages[0]?.role, "system");
 	assert.match(body.messages[0]!.content, /at most 20 characters/);
 	assert.equal(body.messages[1]?.content, "analyze this project");
@@ -38,4 +38,13 @@ test("parseTitleResponse returns null for malformed or empty responses", () => {
 	assert.equal(parseTitleResponse({ choices: [] }), null);
 	assert.equal(parseTitleResponse({ choices: [{ message: { content: "{}" } }] }), null);
 	assert.equal(parseTitleResponse({ choices: [{ message: { content: '{"title": ""}' } }] }), null);
+});
+
+test("filterNullHeaders drops ProviderHeaders deletion markers", () => {
+	assert.deepEqual(
+		filterNullHeaders({ authorization: "Bearer abc", "x-delete": null }),
+		{ authorization: "Bearer abc" },
+	);
+	assert.equal(filterNullHeaders(undefined), undefined);
+	assert.equal(filterNullHeaders({ "x-delete": null }), undefined);
 });

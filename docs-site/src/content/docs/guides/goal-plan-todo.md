@@ -120,22 +120,21 @@ todo({
 
 `blockedBy` 用数组下标引用更早的任务，构成依赖链；完成的任务摘要会作为上下文注入后续任务。
 
-## 4. run-control — 工作流运行控制
+## 4. run-control — Maestro CLI 透传壳
 
-通过统一类型化 Shell 读取和控制规范化 Maestro Workflow Run：
+通过 argv 透传调用 canonical Maestro CLI，是 **Session/Run 生命周期的唯一 LLM 工具面**：
 
-| Action | 类型 | 说明 |
-|--------|------|------|
-| `status` / `brief` / `prepare` / `check` | 只读 | 会话快照、Run 恢复包、步骤预览、门控评估 |
-| `next` | 写入 | 分配下一个链式 Run |
-| `done` | 写入 | 以裁决封印 Run（done / done-with-concerns / needs-retry / blocked） |
-| `edit` | 写入 | 修改未来链步骤（commands / after / replace / remove） |
+| 命令分类 | 说明 |
+|---------|------|
+| 读命令 | `status`/`brief`/`prepare`/`check`/`recall`/`evidence`/`list`/`show`/`graph`/`skills`/`search`/`load`/`review` —— 无需 mutation lease |
+| 写命令 | `next`/`done`/`decide`/`seal`/`edit`/`meta`/`recover`/`accept-reuse`/… —— 需当前 Pi session 持有 mutation lease；Plan 模式阻断 |
+| 入口命令 | `session/run create|start` —— 无 lease 时可建新 Session |
 
 ```javascript
-run-control({ action: "status" })
-run-control({ action: "next" })
-run-control({ action: "done", runId: "run-123", verdict: "done", summary: "完成" })
-run-control({ action: "edit", commands: ["quality-review"], after: "current" })
+run-control({ argv: ["session", "status"] })
+run-control({ argv: ["session", "next"] })
+run-control({ argv: ["run", "done", "run-123", "--verdict", "done", "--summary", "完成"] })
+run-control({ argv: ["run", "edit", "quality-review", "--after", "current"] })
 ```
 
 > Run 绑定发起它的 Pi session；其他会话只读，防止误操作。

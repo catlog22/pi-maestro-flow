@@ -5,20 +5,18 @@
  * Read-only by design: config changes go through `/self-evolve config`
  * (validated + persisted). The panel only refreshes and closes.
  *
- * The panel is theme-aware (host `Theme`), mirroring the Todo/Goal overlay
- * card rendering; `focused` drives a visible focus affordance so the panel
- * reads as interactive (keys: r refresh · q/esc close).
+ * Rendering follows the Maestro settings visual language (shared
+ * `frame`/`headerLine`/`rule`/`pad` primitives from pi-cockpit): the
+ * panel computes a row budget from the terminal height (matching the overlay
+ * `maxHeight: 90%`), reserves the fixed chrome, and caps the signals list with
+ * a "… +N more" overflow marker so the trailing help line always stays
+ * visible — never clipped by the host. `focused` drives a visible non-color
+ * focus affordance (keys: r refresh · q/esc close).
  */
 
-import {
-  Key,
-  matchesKey,
-  type Component,
-  type Focusable,
-  truncateToWidth,
-  visibleWidth,
-} from "@earendil-works/pi-tui";
+import { Key, matchesKey, type Component, type Focusable } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import { fit, frame, headerLine, pad, rule } from "pi-cockpit/src/settings/ui-primitives.ts";
 import {
   type SelfEvolveConfig,
   type SelfEvolveCounters,
@@ -48,6 +46,13 @@ export interface SelfEvolveOverlayParams {
   theme: Theme;
 }
 
+/** Cap on signal entries shown before the overflow marker. */
+const SIGNAL_ENTRY_CAP = 8;
+/** Row-budget factor — must match the overlay `maxHeight` in the extension. */
+const OVERLAY_MAX_HEIGHT_FACTOR = 0.9;
+/** Below this width the panel collapses to a single status line. */
+const NARROW_WIDTH = 20;
+
 export class SelfEvolveOverlay implements Component, Focusable {
   focused = false;
 
@@ -68,20 +73,10 @@ export class SelfEvolveOverlay implements Component, Focusable {
   }
 
   render(width: number): string[] {
-    const safeWidth = Math.max(1, Math.min(width, 110));
-    const inner = Math.max(1, safeWidth - 2);
-    const rows: string[] = [
-      this.header(inner),
-      this.separator(inner),
-      ...this.configRows(inner),
-      this.separator(inner),
-      ...this.counterRows(inner),
-      this.separator(inner),
-      ...this.signalRows(inner),
-      this.separator(inner),
-      this.helpLine(inner),
-    ];
-    return this.card(rows, safeWidth);
+    const safeWidth = Math.max(1, Math.min(width, 120));
+    if (safeWidth < NARROW_WIDTH) return [this.renderCompact(safeWidth)];
+    const inner = safeWidth - 2;
+    return frame(this.buildRows(inner), safeWidth, this.params.theme);
   }
 
   handleInput(data: string): void {
@@ -94,15 +89,48 @@ export class SelfEvolveOverlay implements Component, Focusable {
     }
   }
 
+  /** Full content rows (frame borders added by `frame`). */
+  private buildRows(inner: number): string[] {
+    const theme = this.params.theme;
+    const configRows = this.configRows(inner);
+    const counterRows = this.counterRows(inner);
+    const entries = this.view.recentSignals.slice(-SIGNAL_ENTRY_CAP);
+    const signalHeader = fitLine(`${theme.fg("dim", "recent signals")} ${entries.length}`, inner);
+
+    // Row budget: total overlay rows ≤ floor(terminalRows × factor). Fixed
+    // chrome = borders (2) + header/rule + config + rule + counters + rule +
+    // signal header + rule + help; the remainder belongs to signal entries.
+    const terminalRows = process.stdout?.rows ?? 30;
+    const overlayMax = Math.max(8, Math.floor(terminalRows * OVERLAY_MAX_HEIGHT_FACTOR));
+    const fixedChrome = 2 + 1 + 1 + configRows.length + 1 + counterRows.length + 1 + 1 + 1 + 1;
+    const entryBudget = Math.max(0, overlayMax - fixedChrome);
+
+    const truncated = entries.length > entryBudget;
+    const visibleCount = truncated ? Math.max(0, entryBudget - 1) : Math.min(entries.length, entryBudget);
+    const visible = entries.slice(0, visibleCount);
+    const marker = truncated && entryBudget >= 1
+      ? [theme.fg("dim", fitLine(`  … +${entries.length - visibleCount} more`, inner))]
+      : [];
+
+    const rows: string[] = [this.header(inner), rule(inner), ...configRows, rule(inner), ...counterRows];
+    if (entryBudget >= 1) {
+      rows.push(
+        rule(inner),
+        signalHeader,
+        ...visible.map((signal) => this.signalLine(signal, inner)),
+        ...marker,
+      );
+    }
+    rows.push(rule(inner), this.helpLine(inner));
+    return rows;
+  }
+
   private header(width: number): string {
     const theme = this.params.theme;
     const { config, source } = this.view;
     const state = config.enabled ? theme.fg("success", "● on") : theme.fg("dim", "○ off");
     const focus = this.focused ? theme.fg("accent", "· keys live") : theme.fg("dim", "· not focused");
-    return fitLine(
-      `${theme.bold("SELF-EVOLVE PANEL")} ${state} · ${theme.fg("dim", source)}${focus}`,
-      width,
-    );
+    return headerLine(theme, "SELF-EVOLVE PANEL", [state, theme.fg("dim", source), focus], width);
   }
 
   private configRows(width: number): string[] {
@@ -155,24 +183,16 @@ export class SelfEvolveOverlay implements Component, Focusable {
       (counters.lastSignalAt ? ` · ${new Date(counters.lastSignalAt).toLocaleTimeString()}` : "");
     rows.push(fitLine(last, width));
     if (counters.lastError) {
-      rows.push(fitLine(`${theme.fg("error", "error")} ${truncateToWidth(counters.lastError, Math.max(1, width - 8))}`, width));
+      rows.push(fitLine(`${theme.fg("error", "error")} ${fit(counters.lastError, Math.max(1, width - 8))}`, width));
     }
     return rows;
   }
 
-  private signalRows(width: number): string[] {
+  private signalLine(signal: SelfEvolveSignal, width: number): string {
     const theme = this.params.theme;
-    const signals = this.view.recentSignals.slice(-8);
-    if (signals.length === 0) {
-      return [fitLine(`${theme.fg("dim", "recent signals")} none yet`, width)];
-    }
-    const rows = [fitLine(`${theme.fg("dim", "recent signals")} ${signals.length}`, width)];
-    for (const signal of signals) {
-      const time = new Date(signal.createdAt).toLocaleTimeString();
-      const type = this.candidateTypeColor(signal.candidateType, signal.candidateType);
-      rows.push(fitLine(`  [${theme.fg("dim", time)}] ${signal.source} · ${type}: ${signal.title}`, width));
-    }
-    return rows;
+    const time = new Date(signal.createdAt).toLocaleTimeString();
+    const type = this.candidateTypeColor(signal.candidateType, signal.candidateType);
+    return fitLine(`  [${theme.fg("dim", time)}] ${signal.source} · ${type}: ${signal.title}`, width);
   }
 
   private candidateTypeColor(text: string, fallback: string): string {
@@ -182,51 +202,23 @@ export class SelfEvolveOverlay implements Component, Focusable {
     return theme.fg("dim", fallback);
   }
 
-  private separator(width: number): string {
-    return this.params.theme.fg("borderMuted", "─".repeat(Math.max(1, width)));
-  }
-
   private helpLine(width: number): string {
     const theme = this.params.theme;
     const focus = this.focused ? theme.fg("accent", "●") : theme.fg("dim", "○");
-    return fitSegments(width, [
-      `${focus}`,
-      theme.fg("dim", "r refresh"),
-      theme.fg("dim", "q/esc close"),
-      theme.fg("dim", "config via /self-evolve config <key>=<value>"),
-    ]);
+    const text = `${focus} ${theme.fg("dim", "r refresh · q/esc close · config via /self-evolve config <key>=<value>")}`;
+    return fit(text, width);
   }
 
-  /** Rounded card; the border turns accent-colored while the panel has focus. */
-  private card(rows: string[], width: number): string[] {
+  /** Narrow terminals: collapse to a single read-only status line. */
+  private renderCompact(width: number): string {
     const theme = this.params.theme;
-    const edge = "─".repeat(Math.max(0, width - 2));
-    const borderColor = this.focused ? "borderAccent" : "borderMuted";
-    const border = (glyph: string) => theme.bg("customMessageBg", theme.fg(borderColor, glyph));
-    const out: string[] = [border(`╭${edge}╮`)];
-    for (const row of rows) {
-      out.push(theme.bg("customMessageBg", pad(` ${row}`, width)));
-    }
-    out.push(border(`╰${edge}╯`));
-    return out;
+    const { config, counters } = this.view;
+    const state = config.enabled ? theme.fg("success", "● on") : theme.fg("dim", "○ off");
+    const text = `${state} SELF-EVOLVE · ${counters.signals}·${counters.deduped}·${counters.suppressed} · r refresh · q close`;
+    return theme.bg("customMessageBg", pad(fit(text, width), width));
   }
 }
 
 function fitLine(value: string, width: number): string {
-  return truncateToWidth(value, Math.max(1, width), "…");
-}
-
-function fitSegments(width: number, segments: readonly string[]): string {
-  const kept: string[] = [];
-  for (const segment of segments) {
-    const candidate = [...kept, segment].join(" · ");
-    if (visibleWidth(candidate) > width) break;
-    kept.push(segment);
-  }
-  return kept.length ? kept.join(" · ") : fitLine(segments[0] ?? "", width);
-}
-
-function pad(value: string, width: number): string {
-  const fitted = fitLine(value, width);
-  return `${fitted}${" ".repeat(Math.max(0, width - visibleWidth(fitted)))}`;
+  return fit(value, Math.max(1, width));
 }

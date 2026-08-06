@@ -809,7 +809,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
           return overlay;
         }, {
           overlay: true,
-          overlayOptions: { anchor: "center", width: "78%", maxHeight: "85%" },
+          overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%" },
         });
         return;
       }

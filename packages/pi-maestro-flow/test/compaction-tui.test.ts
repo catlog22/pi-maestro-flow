@@ -385,23 +385,23 @@ test("compaction TUI selects a compaction model from the catalog and saves it", 
   overlay.handleInput("\x1b[B"); // inherit -> first catalog model
   overlay.handleInput("\x1b[B"); // -> second catalog model (qwen)
   overlay.handleInput("\r");
-  assert.match(overlay.render(80).join("\n"), /压缩模型 · maestro-qwen\/qwen3\.8-max-preview · 项目/);
+  assert.match(overlay.render(80).join("\n"), /压缩模型 · maestro-qwen\/qwen3\.8-max · 项目/);
   assert.match(overlay.render(80).join("\n"), /实际 >47,904 \/ 120,000 \(39\.9%\)/);
   overlay.handleInput("\x13");
   await flushAsync();
   const projectSave = saves.find((save) => save.scope === "project");
-  assert.equal(projectSave?.values.model, "maestro-qwen/qwen3.8-max-preview");
+  assert.equal(projectSave?.values.model, "maestro-qwen/qwen3.8-max");
 });
 
 test("compaction TUI model picker inherit entry clears the configured model", () => {
   const overlay = createOverlay({
     snapshot: {
-      scopes: { user: {}, project: { model: "maestro-qwen/qwen3.8-max-preview" } },
+      scopes: { user: {}, project: { model: "maestro-qwen/qwen3.8-max" } },
       effective: {} as never,
     },
   });
   for (let index = 0; index < 9; index++) overlay.handleInput("\x1b[B");
-  assert.match(overlay.render(80).join("\n"), /压缩模型 · maestro-qwen\/qwen3\.8-max-preview/);
+  assert.match(overlay.render(80).join("\n"), /压缩模型 · maestro-qwen\/qwen3\.8-max/);
   overlay.handleInput("\r"); // cursor starts on the matching entry
   overlay.handleInput("\x1b[A");
   overlay.handleInput("\x1b[A"); // -> inherit entry
@@ -437,7 +437,7 @@ function createOverlay(overrides: Partial<ConstructorParameters<typeof Compactio
     },
     availableModels: [
       { reference: "maestro-openai/gpt-5.6-sol", contextWindow: 300_000, maxTokens: 16_000 },
-      { reference: "maestro-qwen/qwen3.8-max-preview", contextWindow: 120_000, maxTokens: 16_000 },
+      { reference: "maestro-qwen/qwen3.8-max", contextWindow: 120_000, maxTokens: 16_000 },
       { reference: "maestro-anthropic/claude-sonnet", contextWindow: 200_000, maxTokens: 32_000 },
     ],
     theme,

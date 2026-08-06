@@ -2348,6 +2348,17 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     maestroUiSessionActive = true;
     disposeTeammateSessionRegistrations();
     state.baseCwd = ctx.cwd;
+    // K9: inject the host session identity into the process environment so all
+    // maestro CLI subprocesses can resolve knowledge write authority via the
+    // lease/channel tiers. Env-only by design (no capability probe, no new CLI
+    // flag): older CLIs simply ignore it and degrade to prior behavior.
+    try {
+      const hostSessionId = workflowHostSessionId(ctx);
+      if (hostSessionId) process.env.PI_HOST_SESSION_ID = hostSessionId;
+      else delete process.env.PI_HOST_SESSION_ID;
+    } catch {
+      // Identity injection is best-effort; resolution falls back to other tiers.
+    }
     await inputHistorySessionStart(ctx);
     compactionArbiter.reset();
     preserveCompletedTurnFromNativeThreshold = false;

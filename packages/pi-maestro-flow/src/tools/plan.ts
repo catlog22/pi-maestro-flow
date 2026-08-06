@@ -17,7 +17,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { altKey } from "../key-labels.ts";
 import { toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts";
-import { isRunControlReadAction } from "./run-control.ts";
+import { isRunControlReadAction, isRunControlReadArgv } from "./run-control.ts";
 import {
   openPlanConfirmation,
   type PlanWorkflowConfirmationOptions,
@@ -653,6 +653,12 @@ export function onToolCallPlan(event: {
   const toolName = event.toolName.toLowerCase();
   const action = typeof event.input.action === "string" ? event.input.action : "";
   if (toolName === "run-control") {
+    const argv = Array.isArray(event.input.argv) ? event.input.argv.map(String) : [];
+    if (argv.length > 0) {
+      return isRunControlReadArgv(argv)
+        ? undefined
+        : planMutationBlock(`run-control ${argv.join(" ")}`);
+    }
     return isRunControlReadAction(action)
       ? undefined
       : planMutationBlock(`run-control ${action || "mutation"}`);

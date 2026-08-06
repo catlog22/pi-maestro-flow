@@ -122,10 +122,12 @@ Append outcome:
 **Files:** {modified/created, or "none"}
 ```
 
-Before completion, put accepted decisions/locked constraints in `report.md`. If a reusable recipe or pitfall emerged, stage it now:
+Before completion, put accepted decisions/locked constraints in `report.md`. If a reusable recipe or pitfall emerged, stage it now (content via temp file, never inline):
 
 ```bash
-maestro knowledge stage knowhow "<title>" "<content>" --run <run_id>
+maestro knowledge stage knowhow "<title>" --content-file <tmpfile> --evidence "<file:line>" --run <run_id>
+# 无 Run 场景（session 源，evidence 必填）：写授权分层解析，什么都没有时自动落 ksyn-* 合成 Session
+maestro knowledge stage knowhow "<title>" --content-file <tmpfile> --evidence "<file:line>" [--session <session-id> | --channel <name>]
 maestro session done <run_id> --verdict done --workflow-root .
 ```
 

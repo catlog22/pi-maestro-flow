@@ -1454,7 +1454,12 @@ async function runSingleAttempt(
       }
       // Ignore thinking_delta, thinking_start, etc.
 
-      // Extract usage from message snapshot
+      // Pi 0.84 dropped the cumulative `message` (and `assistantMessageEvent.partial`)
+      // fields from JSON/RPC message_update events — only assistantMessageEvent
+      // deltas remain. Reading `event.message.usage` is kept defensively for 0.83
+      // hosts (it is undefined on 0.84); in-flight usage on 0.84 arrives via the
+      // dedicated `usage` event (onUsageSnapshot) and settles at `message_end`
+      // (onAssistantMessage), so usage totals are unaffected.
       const msg = event.message as Record<string, unknown> | undefined;
       const msgUsage = msg?.usage as Record<string, unknown> | undefined;
       if (msgUsage) {

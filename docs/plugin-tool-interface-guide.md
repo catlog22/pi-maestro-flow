@@ -54,7 +54,7 @@
 | `maestro` | 将任务路由到外部 CLI 端点（explore / delegate / moa） | flow |
 | `goal` | 读取/创建/更新自治目标，请求完成验证 | flow |
 | `todo` | 任务管理（create/update/list/get/delete/clear/next） | flow |
-| `run-control` | 读写规范化 Maestro Workflow Run（status/brief/check/next/done/edit） | flow |
+| `run-control` | Maestro CLI 透传壳（Session/Run 生命周期，读写分类） | flow |
 | `ask-user-question` | 通过键盘优先的 TUI 向导收集结构化用户答案 | flow |
 | `ffgrep` | FFF 后端快速字面内容搜索 | flow |
 | `fffind` | FFF 后端模糊文件路径搜索 | flow |
@@ -133,7 +133,7 @@ interface AgentToolResult<TDetails> {
 
 ### 3.3 通用约定
 
-- **action 分发**：`maestro`、`goal`、`todo`、`run-control` 以 `action` 字段分发子命令；不同 action 的必填字段不同（见各工具说明）。
+- **argv 分发**：`maestro`、`goal`、`todo` 以 `action` 字段分发子命令；`run-control` 以 `argv` 透传 Maestro CLI（不经过 shell，无注入面）。
 - **枚举值大小写敏感**：如 `status`、`verdict`、`mode` 等枚举必须精确匹配小写值。
 - **选择器（selector）**：`todo` 的 `assignee`/`filter.memberId` 与 `teammate-*` 的 `to`/`name` 接受多种写法：`self`、`root`、完整 id、唯一 id 前缀、`label`、`@label`、`label#id-prefix`。
 
@@ -350,44 +350,32 @@ todo({ action: "next" })   // 激活下一个 pending 任务并返回其解析�
 
 ---
 
-### 4.9 `run-control` — 工作流 Run 控制
+### 4.9 `run-control` — Maestro CLI 透传壳
 
-通过单一类型化外壳读写规范化 Maestro Workflow Run。读动作：`status`/`brief`/`prepare`/`check`；写动作：`next`/`done`/`edit`（写动作需已附着规范化 Session 与 Flow host mutation lease）。
+`run-control` 是 canonical Maestro CLI 的透明壳（argv 透传，不经 shell），是 **Session/Run 生命周期的唯一 LLM 工具面**。读写由命令分类决定：
+
+- **读命令**（`status`/`brief`/`prepare`/`check`/`recall`/`evidence`/`list`/`show`/`graph`/`skills`/`search`/`load`/`review`）无需 mutation lease。
+- **写命令**（`next`/`done`/`decide`/`seal`/`edit`/`meta`/`recover`/`accept-reuse`/…）需当前 Pi session 持有 Flow host mutation lease，且 Plan 模式下被阻断。
+- **入口命令**（`session/run create|start`）可在无 lease 时铸建新 Session；若已持有 lease 且目标 Session 不一致则拒绝。
+- 未知命令默认按写命令保守处理。
 
 **参数**（`RunControlParams`）：
 
 | 参数 | 类型 | 必需 | 说明 |
 |------|------|:---:|------|
-| `action` | enum | ✅ | 读：`status`/`brief`/`prepare`/`check`；写：`next`/`done`/`edit` |
-| `runId` | string | done ✅ | Run ID。`brief`/`check` 可选（默认活跃 Run） |
-| `step` | string | prepare ✅ | 要预览的工作流步骤/命令 |
-| `pick` | string | | `next` 的待选 chain-step 选择器 |
-| `verdict` | enum | | `done` 的完成裁决：`done`（默认）/`done-with-concerns`/`needs-retry`/`blocked` |
-| `summary` | string | | `done` 的完成摘要 |
-| `reason` | string | | `done` 的完成原因 |
-| `notes` | string[] | | `done` 的备注（每条 → `--note`） |
-| `decisions` | string[] | | `done` 的决策记录（每条 → `--decision`） |
-| `evidence` | string[] | | `done` 的证据路径（每条 → `--evidence`） |
-| `artifacts` | string[] | | `done` 的制品路径（每条 → `--artifact`） |
-| `commands` | string[] | | `edit` 要插入的命令；replace 时供一条；仅删除时可省 |
-| `after` | string | | `edit` 插入位置：`current`/`latest`/`start`/步骤 ID/索引（默认 `current`） |
-| `replace` | string | | 用首条 edit 命令替换的待处理步骤 ID |
-| `remove` | string | | 标记为 skipped 移除的待处理步骤 ID |
-| `args` | string | | `edit` 步骤参数（仅当 `commands` 恰含一条时有效） |
-| `stage` | string | | 插入 edit 步骤的可选 stage 标签 |
-| `goalRef` | string | | 插入 edit 步骤的可选 goal 引用 |
-| `insertedBy` | string | | 记录的插入者（Maestro 默认 `manual`） |
+| `argv` | string[] | ✅ | Maestro CLI 参数（不含可执行名），如 `["session","next","--json"]`；自动追加 `--workflow-root` |
 
-**返回**：`AgentToolResult`，`content[0].text` 为底层 CLI stdout；`details` 含结构化结果（snapshot / brief / check / command 等）。
+**返回**：`AgentToolResult`，`content[0].text` 为底层 CLI stdout（读命令附 lease 归属标注）；`details` 含 `argv`/`classification`/`command`/`snapshot`（读命令另附 `ownership`）。
 
 **示例**：
 
 ```js
-runControl({ action: "status" })
-runControl({ action: "brief" })
-runControl({ action: "check" })
-runControl({ action: "done", runId: "run-123", verdict: "done", summary: "步骤完成" })
-runControl({ action: "edit", commands: ["maestro run validate"], after: "current" })
+runControl({ argv: ["session", "status"] })
+runControl({ argv: ["run", "brief"] })
+runControl({ argv: ["run", "check", "run-123"] })
+runControl({ argv: ["session", "next"] })
+runControl({ argv: ["run", "done", "run-123", "--verdict", "done", "--summary", "步骤完成"] })
+runControl({ argv: ["run", "edit", "verify", "--after", "latest"] })
 ```
 
 ---
@@ -866,8 +854,8 @@ console.log("风险清单:", risks);
 - 编程式：检查 `SingleResult.exitCode !== 0`，末条 `messages` 为错误信息；prompt 解析失败、嵌套深度超限等会返回 `exitCode: 1` 与说明文本。
 
 **常见错误来源**：
-- 未知 `action`（如 `maestro`/`goal`/`todo`/`run-control` 传了非法 action）。
-- 缺少某 action 的必填字段（如 `goal.complete` 缺 `summary`、`run-control.done` 缺 `runId`、`run-control.prepare` 缺 `step`）。
+- 未知 `action`（如 `maestro`/`goal`/`todo` 传了非法 action；`run-control` 传了空 `argv` 或非法命令）。
+- 缺少某 action 的必填字段（如 `goal.complete` 缺 `summary`、`run-control` 写命令缺 `hostSessionId`/lease）。
 - 枚举值拼写/大小写错误。
 - `teammate` 的 `agent` 名不匹配任何 `agents/*.md`。
 - `teammate-send`/`watch` 的 `to`/`name` 选择器无法解析到代理。
@@ -876,7 +864,7 @@ console.log("风险清单:", risks);
 - `teammate` 默认前台返回结果；仅独立任务使用 `background: true`，并依赖 `teammate-complete` 通知而非轮询。
 - 所有调用使用非空 `tasks[]`；用 `{name}` 和 `dependsOn` 表达依赖。
 - 需要程序化消费输出时提供 `outputSchema`，通过 `structuredOutput`/`{name.field}` 获取。
-- `run-control` 写动作（next/done/edit）需已附着规范化 Session；只读动作（status/brief/check）无此要求。
+- `run-control` 写命令（next/done/decide/seal/edit/…）需已附着规范化 Session 且当前 Pi session 持有 mutation lease；读命令无需 lease。
 - `goal`/`todo` 的 `planHandoffKey` 为内部字段，对接方不要手工填写。
 - 编程式调用务必传 `baseCwd`，并用 `signal` 支持取消。
 
@@ -894,7 +882,7 @@ console.log("风险清单:", risks);
 | `maestro` | `action` | explore:`prompts`/`concurrency`；delegate:`prompt`/`tool`/`mode`；moa:`preset` | 文本结果 |
 | `goal` | `action`（+`objective`/`summary` 视 action） | `tokenBudget` | 文本状态 |
 | `todo` | `action`（+`subject`/`id` 视 action） | `status`/`context`/`skills`/`filter`/`summary`/`goalId` | `{ tasks[], action, error? }` |
-| `run-control` | `action`（+`runId`/`step` 视 action） | `verdict`/`summary`/`commands`/`after` | CLI stdout + 结构化结果 |
+| `run-control` | `argv`（Maestro CLI 参数） | — | CLI stdout + `{ argv, classification, command, snapshot, ownership? }` |
 | `ask-user-question` | `questions` | `options`/`multiSelect`/`header` | 结构化答案文本 |
 | `ffgrep` | `pattern` | `context`/`limit` | `path:line: content` 文本 |
 | `fffind` | `pattern` | `limit` | 相对路径列表文本 |

@@ -248,25 +248,21 @@ todo({ action: "create", subject: "Explore codebase", assignee: "explorer-1" })
 
 ---
 
-### 2.5 run-control — Workflow Run Control
+### 2.5 run-control — Maestro CLI passthrough shell
 
-Read and control canonical Maestro Workflow Runs through a unified typed shell:
+Drive the canonical Maestro CLI through argv passthrough — the single LLM surface for the Session/Run lifecycle (no hand-written `maestro run/session` in bash):
 
-| Action | Type | Description |
-|--------|------|-------------|
-| `status` | Read | Read current Session snapshot |
-| `brief` | Read | Load Run resume packet |
-| `prepare` | Read | Preview workflow step (no Run created) |
-| `check` | Read | Evaluate Run gates and finish guidance |
-| `next` | Write | Allocate next chain Run |
-| `done` | Write | Seal Run with verdict (done / done-with-concerns / needs-retry / blocked) |
-| `edit` | Write | Modify future chain steps (commands / after / replace / remove) |
+| Command class | Description |
+|---------------|-------------|
+| Read | `status`/`brief`/`prepare`/`check`/`recall`/`evidence`/`list`/`show`/`graph`/`skills`/`search`/`load`/`review` — no mutation lease needed |
+| Write | `next`/`done`/`decide`/`seal`/`edit`/`meta`/`recover`/`accept-reuse`/… — current Pi session must own the mutation lease; blocked in Plan mode |
+| Entry | `session/run create|start` — allowed without a held lease; refused when a lease is held for another Session |
 
 ```javascript
-run-control({ action: "status" })
-run-control({ action: "next" })
-run-control({ action: "done", runId: "run-123", verdict: "done", summary: "Complete" })
-run-control({ action: "edit", commands: ["quality-review"], after: "current" })
+run-control({ argv: ["session", "status"] })
+run-control({ argv: ["session", "next"] })
+run-control({ argv: ["run", "done", "run-123", "--verdict", "done", "--summary", "Complete"] })
+run-control({ argv: ["run", "edit", "quality-review", "--after", "current"] })
 ```
 
 ---
