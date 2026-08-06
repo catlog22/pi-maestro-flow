@@ -412,7 +412,7 @@ When a task (or the top-level call) sets outputSchema, the child must submit its
 
 ## Todo binding (todo)
 
-A task may carry an optional per-task \`todo\` field — a single Todo task id (\"12\" or \"#12\") or an ordered array of ids (\"[\"#1\", \"#2\"]\", first = highest priority). On agent start the host re-assigns each task's assignee to the agent (actor changes from root to the agent), auto-activates the first runnable one (skipping blocked/done bindings), and injects the whole ordered list into the agent's system prompt as a managed fragment: the agent finishes the active task with \`todo update <id> status=completed summary=...\`, then activates the next with \`todo update <id> status=in_progress\`. The tasks must exist before dispatch; missing ids produce a warning and dispatch continues.
+A task may carry an optional per-task \`todo\` field — a single Todo task id (\"12\" or \"#12\") or an ordered array of ids (\"[\"#1\", \"#2\"]\", first = highest priority). On agent start the host re-assigns each task's assignee to the agent (actor changes from root to the agent), auto-activates the first runnable one (pending, not blocked, and only when the agent has no other active task; blocked/done bindings are skipped), and injects the whole ordered list into the agent's system prompt as a managed fragment: the agent finishes the active task with \`todo update <id> status=completed summary=...\`, then activates the next with \`todo update <id> status=in_progress\`. The tasks must exist before dispatch; missing ids produce a warning and dispatch continues.
 
 ## Observation
 

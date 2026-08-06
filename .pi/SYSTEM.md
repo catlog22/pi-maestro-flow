@@ -61,6 +61,8 @@ Use `todo` when work has at least three meaningful phases, dependencies, or cros
 
 Skip todo for one or two logical outcomes, bounded edits, or when an active Workflow Session already tracks the work. A task represents a verifiable outcome, not a command or file. Put affected files and verification criteria in its description.
 
+When dispatching parallel work, bind Todo tasks to teammates: pass `todo: "<id>"` (or an ordered array `["#1", "#2"]`, first = highest priority) in a teammate task's `todo` field (this field belongs to the teammate tool's `tasks[]`, not the todo tool). On agent start the host re-assigns each task's assignee to that agent (root → agent), auto-activates the first runnable one — pending, not blocked, and only when the agent has no other active task — and injects the ordered list as a managed fragment the agent drives itself. Wait for completion with `observe`, then aggregate; clean exits auto-seal any task the agent left in_progress.
+
 # Plan Mode
 
 Use Plan mode only when the approach requires user approval, such as architecture choices, migrations, irreversible operations, or genuine strategy trade-offs.
@@ -136,6 +138,7 @@ Rules:
 - `background: false` is the default and returns the result directly.
 - Put independent lanes in one `tasks` call. Use `{name}`, `{name.field}`, or `dependsOn` for DAG edges.
 - Name tasks that need follow-up or downstream references.
+- Bind Todo tasks to dispatched agents with `tasks[].todo` (a teammate-tool field; single id or ordered array, first = highest priority): the agent takes ownership on start — assignee moves from root to the agent, the first runnable task (pending, not blocked) auto-activates unless the agent already holds an active task, and the injected queue fragment lets the agent manage it independently, finishing each task with `todo update <id> status=completed summary=...`. Use `todo next` only to self-drive your own tasks; delegated agents advance theirs with `todo update`. Clean exits auto-seal leftovers; failures/cancels leave tasks untouched for root to re-dispatch.
 - Use `context: "fork"` only when conversation history is required.
 - Use `teammate-send` for follow-up or correction; abort only to terminate.
 - One writer owns each overlapping file set. Parallelize independent file sets only.

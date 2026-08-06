@@ -1034,6 +1034,8 @@ Only request completion after all work is done; the extension verifies it indepe
 - clear: { action: "clear" }
 - next: { action: "next" } — activate the oldest runnable pending task assigned to the caller and return its resolved context
 
+Parallel delegation: pass todo task id(s) to a teammate dispatch via the teammate tool's tasks[].todo field — the agent takes ownership on start (assignee root → agent, first runnable task auto-activates unless the agent is already busy), manages the injected ordered queue itself, and clean exits auto-seal leftovers. Self-drive your own tasks with todo next; delegated agents advance theirs with todo update.
+
 Rules:
 - For multi-step work, create the ENTIRE plan up front in ONE batch create (the tasks array) — never create tasks one at a time as you go.
 - In a batch, each blockedBy integer N means the earlier array item tasks[N]. For tasks[i], every dependency must satisfy 0 <= N < i. Example: tasks[1] depends on tasks[0] with blockedBy: [0].
@@ -1052,6 +1054,7 @@ Rules:
       "Skip todo only for single-action work (one tool call or edit fully satisfies the request) or when an active Workflow Session already mirrors tasks.",
       "Decision rule: 1–2 logical phases → skip; ≥3 → always batch-create todos. Count logical phases and independently verifiable outcomes, not individual file edits or commands.",
       "Drive each step with todo action=next, and close it with todo update status=completed plus a concise summary before starting the next step.",
+      "To parallelize independent work across agents: batch-create one task per agent, then dispatch teammates with the teammate tool's tasks[].todo bindings (single id or ordered array, first = highest priority). Each agent owns its tasks and drives them to completion (auto-activates the first runnable one unless it is already busy); wait via observe and aggregate. Clean exits auto-seal in_progress leftovers; failures/cancels stay untouched for root to re-dispatch.",
     ],
 
     parameters: TodoToolParams,
@@ -3012,12 +3015,12 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
 Tasks created here are attributed to this teammate and assigned to self by default.
 Use assignee="root" to hand work back to root. Teammates can update tasks they created or were assigned; only root can clear the shared list.
 
-If root delegated a task to you (you were spawned with todo: "<id>"), pull it with \`todo next\` (or \`todo update <id> status=in_progress\`), and before your final answer mark it \`todo update <id> status=completed summary=<one-line result>\`. Leave it pending only if you could not complete it.`,
+If root delegated a task to you (spawned with todo: "<id>"), it is usually already active (in_progress) — check with \`todo list\`, work on the in_progress one, and finish it with \`todo update <id> status=completed summary=<one-line result>\`. Only call \`todo next\` when you have no active task. Leave a task pending only if you could not complete it.`,
     promptSnippet: "Create and update teammate-owned tasks in the shared root Todo list.",
     promptGuidelines: [
       "Use todo for newly discovered follow-up work, explicit blockers, and resumable steps.",
       "Complete or pause your active Todo before activating another task assigned to you.",
-      "If root delegated a task to you (spawned with todo: \"<id>\"), finish it with todo update <id> status=completed summary=... before your final answer; keep it pending only if you could not complete it.",
+      "If root delegated a task to you (spawned with todo: \"<id>\"), it is usually already active — work on the in_progress one and finish it with todo update <id> status=completed summary=... before your final answer; keep it pending only if you could not complete it.",
     ],
     parameters: TodoToolParams,
     async execute(_id, params, signal) {
