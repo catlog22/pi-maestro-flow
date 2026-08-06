@@ -150,11 +150,11 @@ export class MaestroSettingsShell implements Component, Focusable {
 	private context: SettingsContextV1;
 	private providers: DescribedSettingsProvider[];
 	private failures: SettingsProviderFailure[];
-	/** Index into the top-level group list. */
-	private groupIndex = 0;
-	/** When set, the shell is showing that group's settings (level 1). */
-	private activeGroup: { providerIndex: number; group: string } | undefined;
-	/** Index into the active group's settings (level 1). */
+	/** Index into the top-level provider list. */
+	private providerIndex = 0;
+	/** When set, the shell is showing that provider's settings (level 1). */
+	private activeProvider: number | undefined;
+	/** Index into the active provider's settings (level 1). */
 	private settingIndex = 0;
 	private scope: SettingsScope = "global";
 	private search = "";
@@ -209,9 +209,9 @@ export class MaestroSettingsShell implements Component, Focusable {
 		const inner = safeWidth - 2;
 		const body = this.editing || this.optionEditing || this.listCrud || this.listCrudField || this.viewingOverview
 			? this.renderEditPopup(inner)
-			: this.activeGroup
-				? this.renderGroupSettings(inner)
-				: this.renderGroups(inner);
+			: this.activeProvider !== undefined
+				? this.renderProviderSettings(inner)
+				: this.renderProviders(inner);
 		const rendered = frame(body, safeWidth, this.params.theme);
 		this.lastRenderedWidth = safeWidth;
 		this.lastRenderedHeight = rendered.length;
@@ -264,8 +264,8 @@ export class MaestroSettingsShell implements Component, Focusable {
 				this.afterNavigation();
 				return;
 			}
-			if (this.activeGroup) {
-				this.closeGroup();
+			if (this.activeProvider !== undefined) {
+				this.closeProvider();
 				return;
 			}
 			if (this.params.coordinator.modifiedProviderIds().length > 0 && !this.discardArmed) {
@@ -284,8 +284,8 @@ export class MaestroSettingsShell implements Component, Focusable {
 			this.requestRender();
 			return;
 		}
-		if (matchesKey(data, Key.up)) return this.activeGroup ? this.moveSetting(-1) : this.moveGroup(-1);
-		if (matchesKey(data, Key.down)) return this.activeGroup ? this.moveSetting(1) : this.moveGroup(1);
+		if (matchesKey(data, Key.up)) return this.activeProvider !== undefined ? this.moveSetting(-1) : this.moveProvider(-1);
+		if (matchesKey(data, Key.down)) return this.activeProvider !== undefined ? this.moveSetting(1) : this.moveProvider(1);
 		if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab"))) {
 			this.moveScope(matchesKey(data, Key.shift("tab")) ? -1 : 1);
 			return;
@@ -300,25 +300,24 @@ export class MaestroSettingsShell implements Component, Focusable {
 			return;
 		}
 		if (matchesKey(data, Key.space) || data === " " || matchesKey(data, Key.enter) || data === "\r") {
-			if (this.activeGroup) void this.activateSelected();
-			else this.openGroup();
+			if (this.activeProvider !== undefined) void this.activateSelected();
+			else this.openProvider();
 		}
 	}
 
-	private renderGroups(inner: number): string[] {
+	private renderProviders(inner: number): string[] {
 		const rows = [this.header(inner), rule(inner)];
-		const groupRows = this.groupRows();
-		const rowStart = rows.length + 1;
-		if (groupRows.length === 0) {
+		const providerRows = this.providerRows();
+		if (providerRows.length === 0) {
 			rows.push(this.params.theme.fg("dim", fit(this.t("settings.noMatches"), inner)));
 		} else {
-			const start = visibleStart(this.groupIndex, groupRows.length, MAX_SETTING_ROWS);
-			const end = Math.min(groupRows.length, start + MAX_SETTING_ROWS);
+			const start = visibleStart(this.providerIndex, providerRows.length, MAX_PROVIDER_ROWS);
+			const end = Math.min(providerRows.length, start + MAX_PROVIDER_ROWS);
 			for (let index = start; index < end; index++) {
-				const row = groupRows[index]!;
-				const selected = index === this.groupIndex;
+				const row = providerRows[index]!;
+				const selected = index === this.providerIndex;
 				const marker = selected ? this.params.theme.fg("accent", "›") : " ";
-				const targetId = `group:${row.providerIndex}:${row.group}`;
+				const targetId = `provider:${row.providerIndex}`;
 				this.mouseTargets.push({
 					id: targetId,
 					kind: "group",
@@ -339,20 +338,28 @@ export class MaestroSettingsShell implements Component, Focusable {
 		return this.padToTarget(rows);
 	}
 
-	/** Level 1: the active group's settings as a vertical list. */
-	private renderGroupSettings(inner: number): string[] {
-		const group = this.activeGroup;
-		const provider = group ? this.providers[group.providerIndex] : undefined;
-		if (!provider || !group) return [this.params.theme.fg("dim", fit(this.t("settings.noMatches"), inner))];
-		const rows = [this.header(inner), rule(inner), headerLine(this.params.theme, this.t(group.group), [], inner), rule(inner)];
-		const settings = this.groupSettings();
+	/** Level 1: the active provider's settings, grouped with headers. */
+	private renderProviderSettings(inner: number): string[] {
+		const provider = this.selectedProvider();
+		if (!provider) return [this.params.theme.fg("dim", fit(this.t("settings.noMatches"), inner))];
+		const rows = [this.header(inner), rule(inner), headerLine(this.params.theme, this.t(provider.description.labelKey), [], inner), rule(inner)];
+		const settings = this.providerSettings();
 		if (settings.length === 0) {
 			rows.push(this.params.theme.fg("dim", fit(this.t("settings.noMatches"), inner)));
 		} else {
 			const start = visibleStart(this.settingIndex, settings.length, MAX_SETTING_ROWS);
 			const end = Math.min(settings.length, start + MAX_SETTING_ROWS);
+			let renderedGroup: string | undefined;
+			let backtracks = 0;
+			while (start > 0 && backtracks < 2 && settings[start - 1]?.group === settings[start]?.group) {
+				backtracks++;
+			}
 			for (let index = start; index < end; index++) {
 				const { definition } = settings[index]!;
+				if (definition.group !== renderedGroup) {
+					renderedGroup = definition.group;
+					rows.push(this.params.theme.fg("muted", fit(`— ${this.t(definition.group)} —`, inner)));
+				}
 				const selected = index === this.settingIndex;
 				const activeEditor = this.isEditing(provider.providerId, definition.key);
 				const marker = activeEditor
@@ -393,7 +400,7 @@ export class MaestroSettingsShell implements Component, Focusable {
 		}
 		const dirty = this.params.coordinator.modifiedProviderIds().length > 0;
 		footerRows.push(this.params.theme.fg("dim", fit(
-			this.activeGroup
+			this.activeProvider !== undefined
 				? (dirty ? this.t("settings.helpDirty") : this.t("settings.help"))
 				: (dirty ? this.t("settings.helpGroupDirty") : this.t("settings.helpGroup")),
 			inner,
@@ -1049,7 +1056,7 @@ export class MaestroSettingsShell implements Component, Focusable {
 			const printable = decodeKittyPrintable(data) ?? (/^[^\x00-\x1f\x7f]+$/u.test(data) ? data : "");
 			if (printable) this.search += printable;
 		}
-		this.groupIndex = 0;
+		this.providerIndex = 0;
 		this.syncSelection();
 		this.requestRender();
 	}
@@ -1276,8 +1283,8 @@ export class MaestroSettingsShell implements Component, Focusable {
 			return true;
 		}
 		if (target.kind === "group") {
-			this.groupIndex = target.index;
-			this.openGroup();
+			this.providerIndex = target.index;
+			this.openProvider();
 			return true;
 		}
 		if (target.kind === "setting") {
@@ -1357,76 +1364,75 @@ export class MaestroSettingsShell implements Component, Focusable {
 	}
 
 	private selectedProvider(): DescribedSettingsProvider | undefined {
-		if (!this.activeGroup) return undefined;
-		return this.providers[this.activeGroup.providerIndex];
+		if (this.activeProvider === undefined) return undefined;
+		return this.providers[this.activeProvider];
 	}
 
-	/** Distinct groups across providers (top-level navigation). */
-	private groupRows(): { providerIndex: number; group: string; label: string; count: number }[] {
+	/** Top-level provider rows (level 0 navigation). */
+	private providerRows(): { providerIndex: number; label: string; count: number }[] {
 		const query = this.search.trim().toLocaleLowerCase();
-		const rows: { providerIndex: number; group: string; label: string; count: number }[] = [];
+		const rows: { providerIndex: number; label: string; count: number }[] = [];
 		for (let providerIndex = 0; providerIndex < this.providers.length; providerIndex++) {
 			const provider = this.providers[providerIndex]!;
-			const seen = new Set<string>();
-			const providerLabel = this.t(provider.description.labelKey);
-			for (const definition of provider.description.settings) {
-				if (seen.has(definition.group)) continue;
-				seen.add(definition.group);
-				const count = provider.description.settings.filter((entry) => entry.group === definition.group).length;
-				const label = `${providerLabel} · ${this.t(definition.group)}`;
-				if (query && !label.toLocaleLowerCase().includes(query)) continue;
-				rows.push({ providerIndex, group: definition.group, label, count });
-			}
+			const label = this.t(provider.description.labelKey);
+			if (query && !label.toLocaleLowerCase().includes(query)) continue;
+			rows.push({ providerIndex, label, count: provider.description.settings.length });
 		}
 		return rows;
 	}
 
-	/** Settings inside the active group (level 1), in provider order. */
-	private groupSettings(): readonly { provider: DescribedSettingsProvider; definition: SettingDefinition }[] {
-		if (!this.activeGroup) return [];
-		const provider = this.providers[this.activeGroup.providerIndex];
+	/** Settings inside the active provider (level 1), grouped and ordered. */
+	private providerSettings(): readonly { provider: DescribedSettingsProvider; definition: SettingDefinition; group: string }[] {
+		if (this.activeProvider === undefined) return [];
+		const provider = this.providers[this.activeProvider];
 		if (!provider) return [];
 		const query = this.search.trim().toLocaleLowerCase();
-		return provider.description.settings
-			.filter((definition) => definition.group === this.activeGroup!.group
-				&& (!query
-					|| definition.key.toLocaleLowerCase().includes(query)
-					|| this.t(definition.labelKey).toLocaleLowerCase().includes(query)))
-			.sort((left, right) => (left.order ?? 0) - (right.order ?? 0) || left.key.localeCompare(right.key))
-			.map((definition) => ({ provider, definition }));
+		const groupOrder = new Map<string, number>();
+		const settings = provider.description.settings.filter((definition) => !query
+			|| definition.key.toLocaleLowerCase().includes(query)
+			|| this.t(definition.labelKey).toLocaleLowerCase().includes(query));
+		for (const definition of settings) {
+			if (!groupOrder.has(definition.group)) groupOrder.set(definition.group, groupOrder.size);
+		}
+		return settings
+			.sort((left, right) => (groupOrder.get(left.group) ?? Number.MAX_SAFE_INTEGER)
+				- (groupOrder.get(right.group) ?? Number.MAX_SAFE_INTEGER)
+				|| (left.order ?? 0) - (right.order ?? 0)
+				|| left.key.localeCompare(right.key))
+			.map((definition) => ({ provider, definition, group: definition.group }));
 	}
 
 	private selectedSetting(): SettingDefinition | undefined {
-		return this.groupSettings()[this.settingIndex]?.definition;
+		return this.providerSettings()[this.settingIndex]?.definition;
 	}
 
-	private moveGroup(delta: number): void {
-		const rows = this.groupRows();
+	private moveProvider(delta: number): void {
+		const rows = this.providerRows();
 		if (rows.length === 0) return;
-		this.groupIndex = (this.groupIndex + delta + rows.length) % rows.length;
+		this.providerIndex = (this.providerIndex + delta + rows.length) % rows.length;
 		this.afterNavigation();
 	}
 
-	private openGroup(): void {
-		const rows = this.groupRows();
-		const row = rows[clampIndex(this.groupIndex, rows.length)];
+	private openProvider(): void {
+		const rows = this.providerRows();
+		const row = rows[clampIndex(this.providerIndex, rows.length)];
 		if (!row) return;
-		// Opening a group drops the group-search filter so its settings are all visible.
+		// Opening a provider drops the search filter so its settings are all visible.
 		this.search = "";
 		this.searching = false;
-		this.activeGroup = { providerIndex: row.providerIndex, group: row.group };
+		this.activeProvider = row.providerIndex;
 		this.settingIndex = 0;
 		this.syncScope();
 		this.afterNavigation();
 	}
 
-	private closeGroup(): void {
-		this.activeGroup = undefined;
+	private closeProvider(): void {
+		this.activeProvider = undefined;
 		this.afterNavigation();
 	}
 
 	private moveSetting(delta: number): void {
-		const settings = this.groupSettings();
+		const settings = this.providerSettings();
 		if (settings.length === 0) return;
 		this.settingIndex = (this.settingIndex + delta + settings.length) % settings.length;
 		this.syncScope();
@@ -1434,11 +1440,6 @@ export class MaestroSettingsShell implements Component, Focusable {
 	}
 
 	private moveSettingByWheel(delta: number): void {
-		// Wheel must not bypass the modal input guards: while applying, navigation
-		// is frozen; inside the option editor the wheel moves the option list;
-		// while editing text the wheel must not yank the current row away from the
-		// editor that still owns the keystrokes; inside list-crud the wheel must
-		// not mutate the hidden settings list or clear the delete confirm.
 		if (this.applying) return;
 		if (this.optionEditing) {
 			const editing = this.optionEditing;
@@ -1447,8 +1448,8 @@ export class MaestroSettingsShell implements Component, Focusable {
 			return;
 		}
 		if (this.editing || this.listCrud || this.listCrudField) return;
-		if (this.activeGroup) this.moveSetting(delta);
-		else this.moveGroup(delta);
+		if (this.activeProvider !== undefined) this.moveSetting(delta);
+		else this.moveProvider(delta);
 	}
 
 	private moveScope(delta: number): void {
@@ -1460,8 +1461,8 @@ export class MaestroSettingsShell implements Component, Focusable {
 	}
 
 	private syncSelection(): void {
-		this.groupIndex = clampIndex(this.groupIndex, this.groupRows().length);
-		this.settingIndex = clampIndex(this.settingIndex, this.groupSettings().length);
+		this.providerIndex = clampIndex(this.providerIndex, this.providerRows().length);
+		this.settingIndex = clampIndex(this.settingIndex, this.providerSettings().length);
 		this.syncScope();
 	}
 

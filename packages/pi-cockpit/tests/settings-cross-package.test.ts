@@ -241,30 +241,21 @@ test("API Manager has a dedicated Settings page with direct management actions",
 			close() {},
 		});
 		const rendered = shell.render(120).join("\n");
-		assert.match(rendered, /Providers and models/);
-		assert.match(rendered, /Retry policy/);
-		assert.match(rendered, /Configuration overview/);
-		// Open the first group (Providers and models) and check the management actions.
+		assert.match(rendered, /API Manager/);
+		// Open the API Manager provider and check its grouped settings.
 		shell.handleInput("\r");
 		let inner = shell.render(120).join("\n");
+		assert.match(inner, /— Providers and models —/);
 		assert.match(inner, /Open API Manager/);
 		assert.match(inner, /Add or edit a provider model/);
-		// Back to groups, jump to Retry policy via search.
-		shell.handleInput("\x1b");
-		shell.handleInput("/");
-		for (const ch of "retry") shell.handleInput(ch);
-		shell.handleInput("\x1b");
-		shell.handleInput("\r");
-		inner = shell.render(120).join("\n");
+		assert.match(inner, /— Retry policy —/);
 		assert.match(inner, /Auto-retry enabled/);
 		assert.match(inner, /Max retries/);
-		// Jump to Configuration overview.
-		shell.handleInput("\x1b");
-		shell.handleInput("/");
-		for (const ch of "configuration") shell.handleInput(ch);
-		shell.handleInput("\x1b");
-		shell.handleInput("\r");
+		// The provider page scrolls: navigate down to reveal the later groups/actions.
+		for (let index = 0; index < 8; index++) shell.handleInput("\x1b[B");
 		inner = shell.render(120).join("\n");
+		assert.match(inner, /Configure API retries/);
+		assert.match(inner, /— Configuration overview —/);
 		assert.match(inner, /Configuration overview ·/);
 	} finally { rmSync(state.root, { recursive: true, force: true }); }
 });
@@ -293,23 +284,19 @@ test("Teammate settings render task routing as ordered groups with management la
 			close() {},
 		});
 		const rendered = shell.render(120).join("\n");
-		assert.match(rendered, /Analysis/);
-		assert.match(rendered, /Management/);
-		// Open the Analysis routing group and check the model/fallback/thinking order.
+		assert.match(rendered, /Teammate/);
+		// Open the Teammate provider: its settings render as ordered groups with management last.
 		shell.handleInput("\r");
 		const inner = shell.render(120).join("\n");
+		const analysis = inner.indexOf("— Analysis —");
 		const model = inner.indexOf("Primary model");
 		const fallbacks = inner.indexOf("Fallback models");
 		const thinking = inner.indexOf("Thinking level");
-		assert.ok(model >= 0 && model < fallbacks && fallbacks < thinking, inner);
-		// Back to groups, jump to Management via search.
-		shell.handleInput("\x1b");
-		shell.handleInput("/");
-		for (const ch of "management") shell.handleInput(ch);
-		shell.handleInput("\x1b");
-		shell.handleInput("\r");
-		const mgmt = shell.render(120).join("\n");
-		assert.match(mgmt, /Open full Teammate control center/);
+		const management = inner.indexOf("— Management —");
+		const controlCenter = inner.indexOf("Open full Teammate control center");
+		assert.ok(analysis >= 0);
+		assert.ok(analysis < model && model < fallbacks && fallbacks < thinking, inner);
+		assert.ok(thinking < management && management < controlCenter, inner);
 	} finally { rmSync(state.root, { recursive: true, force: true }); }
 });
 

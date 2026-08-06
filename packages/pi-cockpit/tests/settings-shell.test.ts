@@ -251,19 +251,20 @@ function openFirstGroup(shell: MaestroSettingsShell): void {
 	shell.handleInput("\r");
 }
 
-test("settings shell shows group names outside and settings inside", async () => {
+test("settings shell shows provider names outside and settings inside", async () => {
 	const directory = withTempDir();
 	try {
 		const { shell } = await createShell(makeProvider(), directory);
 		for (const width of [40, 90, 140]) {
 			const lines = shell.render(width);
 			assert.ok(lines.some((line) => line.includes("Maestro Settings")));
-			assert.ok(lines.some((line) => line.includes("Cockpit · general")), "group name shown outside");
+			assert.ok(lines.some((line) => line.includes("Cockpit")), "provider name shown outside");
 			assert.ok(lines.every((line) => visibleWidth(line) <= width));
 		}
 		openFirstGroup(shell);
 		const inner = shell.render(100).join("\n");
-		assert.ok(inner.includes("Enabled"), "settings shown inside the group");
+		assert.ok(inner.includes("— general —"), "the provider page groups its settings");
+		assert.ok(inner.includes("Enabled"), "settings shown inside the provider");
 		assert.ok(inner.includes("Off"));
 		assert.ok(inner.includes("Compact view"));
 	} finally { rmSync(directory, { recursive: true, force: true }); }
@@ -328,7 +329,7 @@ test("mouse hover highlights settings rows and left click activates the hovered 
 		const left = 1 + Math.floor((118 - 112) / 2);
 		const top = 1 + Math.floor((28 - overlayHeight) / 2);
 		const advancedColumn = left + 10;
-		const advancedRow = top + 6;
+		const advancedRow = top + 7;
 		state.shell.handleInput(`\u001b[<35;${advancedColumn};${advancedRow}M`);
 		const hovered = state.shell.render(112).find((line) => line.includes("Manage advanced")) ?? "";
 		assert.match(hovered, /\u001b\[7m/);
@@ -642,7 +643,7 @@ test("not-yet-implemented editor kinds degrade to read-only instead of raw text 
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("group list aggregates every provider's groups", async () => {
+test("provider list aggregates every provider; opening one shows its settings", async () => {
 	const directory = withTempDir();
 	try {
 		const registry = new SettingsProviderRegistry(new FakeEventBus());
@@ -660,13 +661,13 @@ test("group list aggregates every provider's groups", async () => {
 			theme, modelOptions: [], requestRender: () => {}, requestAction: () => {}, close: () => {},
 		});
 		const rendered = shell.render(112).join("\n");
-		assert.ok(rendered.includes("Cockpit · general"), "cockpit group appears");
-		assert.ok(rendered.includes("Other provider · general"), "second provider's group appears in the same list");
-		// Open the second provider's group and check its settings.
+		assert.ok(rendered.includes("Cockpit"), "cockpit provider appears");
+		assert.ok(rendered.includes("Other provider"), "second provider appears in the same list");
+		// Open the second provider and check its settings.
 		shell.handleInput("\x1b[B");
 		shell.handleInput("\r");
 		const inner = shell.render(112).join("\n");
-		assert.ok(inner.includes("B one"), "opening a group shows its inner settings");
+		assert.ok(inner.includes("B one"), "opening a provider shows its inner settings");
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
