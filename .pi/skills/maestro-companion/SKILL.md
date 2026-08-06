@@ -122,7 +122,7 @@ Append outcome:
 **Files:** {modified/created, or "none"}
 ```
 
-Before completion, put accepted decisions/locked constraints in `report.md`. If a reusable recipe or pitfall emerged, stage it now (content via temp file, never inline):
+Before completion, put accepted decisions/locked constraints in `report.md`. If a reusable recipe or pitfall emerged, stage it now (content via temp file, never inline). Quality bar: stage only pitfalls ("when doing X, watch out for Y because Z"), failure lessons, non-trivial trade-offs, or newly established constraints — never process notes, re-descriptions of existing patterns, or raw traces; **zero candidates is a legitimate outcome**.
 
 ```bash
 maestro knowledge stage knowhow "<title>" --content-file <tmpfile> --evidence "<file:line>" --run <run_id>
