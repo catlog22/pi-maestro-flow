@@ -3810,14 +3810,15 @@ test("native completion clears a preempted output-limit owner", async () => {
 
 function loopCriticalFixture(options: { hasPendingMessages?: () => boolean } = {}) {
   let aborted = 0;
-  const compactCalls: Array<{ onComplete(): void; onError(error: Error): void }> = [];
+  const compactCalls: Array<{ customInstructions?: string; onComplete(): void; onError(error: Error): void }> = [];
   const sent: string[] = [];
   const notifications: Array<{ message: string; level: string | undefined }> = [];
+  const arbiter = new CompactionArbiter(100);
   const guard = createMidTurnAutoCompaction({
     sendUserMessage(message: string) { sent.push(message); },
   } as never, {
     leaseTimeoutMs: 100,
-    arbiter: new CompactionArbiter(100),
+    arbiter,
     loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
     // window 400K, effective reserve 20K (5% floor), summary reserve 20K:
     // threshold 360K < loop-critical band 380K < exhaustion 400K.
@@ -3827,7 +3828,7 @@ function loopCriticalFixture(options: { hasPendingMessages?: () => boolean } = {
     cwd: "D:\\repo",
     model: { provider: "maestro-openai", id: "session-large", contextWindow: 400_000, maxTokens: 128_000 },
     abort() { aborted++; },
-    compact(options: { onComplete(): void; onError(error: Error): void }) { compactCalls.push(options); },
+    compact(options: { customInstructions?: string; onComplete(): void; onError(error: Error): void }) { compactCalls.push(options); },
     hasPendingMessages: options.hasPendingMessages ?? (() => false),
     sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: {
@@ -3838,6 +3839,7 @@ function loopCriticalFixture(options: { hasPendingMessages?: () => boolean } = {
   return {
     guard,
     ctx,
+    arbiter,
     aborted: () => aborted,
     compactCalls,
     sent,
@@ -4014,6 +4016,127 @@ test("loop-critical flag survives persistence and legacy intents hydrate without
   assert.equal(legacy.describeState().pendingIntent?.loopCritical, false);
   await legacy.onAgentEnd(ctx);
   assert.equal(compacted, 1, "an intent without the flag keeps the two-turn defer");
+});
+
+test("prompt-too-long carrying a server status consumes only the trim budget", async () => {
+  let attempts = 0;
+  const delays: number[] = [];
+  const outcome = await completeSummaryWithRetries({
+    attempt: async () => {
+      attempts += 1;
+      return { stopReason: "error", errorMessage: "OpenAI API error (503): prompt is too long (max 200000)", content: [] };
+    },
+    trimForPromptTooLong: () => undefined,
+    initialFit: retryFit,
+    signal: new AbortController().signal,
+    delay: async (ms) => { delays.push(ms); },
+  });
+  assert.equal(attempts, 1, "PTL never borrows the transient budget, even with a 5xx status");
+  assert.deepEqual(delays, []);
+  assert.equal(outcome.response.stopReason, "error", "the fail-closed handoff survives");
+});
+
+test("a swallowed loop-critical abort is re-asserted while the intent survives", async () => {
+  const fx = loopCriticalFixture();
+  for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS; evaluation++) {
+    await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
+  }
+  assert.equal(fx.aborted(), 1);
+  // The host ignored the abort: the loop keeps running, pressure persists.
+  await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
+  assert.equal(fx.aborted(), 2, "the interruption re-asserts until the run actually ends");
+  assert.equal(fx.guard.describeState().pendingIntent?.loopCritical, true);
+});
+
+test("a zombie submission suppresses the loop interruption until it settles", async () => {
+  const fx = loopCriticalFixture();
+  for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS; evaluation++) {
+    await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
+  }
+  await fx.guard.onAgentEnd(fx.ctx);
+  assert.equal(fx.compactCalls.length, 1);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.notEqual(fx.guard.describeState().zombieOwner, undefined, "the unsettled submission becomes a zombie");
+
+  for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS; evaluation++) {
+    await fx.guard.evaluate(highUsageToolBatch(386_000 + evaluation), fx.ctx);
+  }
+  assert.equal(fx.aborted(), 1, "no new interruption while the zombie may still settle");
+  assert.equal(fx.guard.describeState().pendingIntent?.loopCritical, false, "a suppressed interruption never flags the intent");
+
+  fx.compactCalls[0].onComplete();
+  assert.equal(fx.guard.describeState().zombieOwner, undefined);
+  for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS; evaluation++) {
+    await fx.guard.evaluate(highUsageToolBatch(387_000 + evaluation), fx.ctx);
+  }
+  // The streak kept counting through the suppressed burst, so every evaluation
+  // of the next burst re-asserts the interruption (bounded resend semantics).
+  assert.equal(fx.aborted(), 1 + LOOP_CRITICAL_PERSIST_EVALUATIONS, "after the zombie settles the interruption re-asserts");
+});
+
+test("an active foreign compaction owner suppresses the loop interruption", async () => {
+  const fx = loopCriticalFixture();
+  const lease = fx.arbiter.request("plan-handoff");
+  assert.ok(lease, "the foreign owner acquires the arbiter");
+  for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS + 1; evaluation++) {
+    await fx.guard.evaluate(highUsageToolBatch(385_000 + evaluation), fx.ctx);
+  }
+  assert.equal(fx.aborted(), 0, "a foreign owner is already relieving pressure");
+  assert.equal(fx.guard.describeState().pendingIntent?.loopCritical, false);
+  lease.release();
+});
+
+test("loop-critical failure retries via the recovery prompt and clears the synthetic flag", async () => {
+  const fx = loopCriticalFixture();
+  for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS; evaluation++) {
+    await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
+  }
+  assert.equal(fx.guard.isSyntheticCompactionInterruptionActive(), true);
+  assert.equal(fx.guard.shouldSkipStopHook(), true, "Stop hooks stay suppressed during the recovery");
+
+  await fx.guard.onAgentEnd(fx.ctx);
+  assert.equal(fx.compactCalls.length, 1);
+  fx.compactCalls[0].onError(new Error('OpenAI API error (502): {"message":"Upstream service temporarily unavailable","type":"upstream_error"}'));
+  assert.match(fx.sent.at(-1) ?? "", /Retry compaction, then continue the interrupted task/, "the interrupted loop gets an explicit retry");
+  assert.equal(fx.guard.isSyntheticCompactionInterruptionActive(), false, "dispatching recovery clears the synthetic flag");
+});
+
+test("a breaker trip during loop-critical recovery resumes via continuation, never native fallback", async () => {
+  const fx = loopCriticalFixture();
+  for (let cycle = 0; cycle < MAX_CONSECUTIVE_COMPACTION_FAILURES; cycle++) {
+    for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS; evaluation++) {
+      await fx.guard.evaluate(highUsageToolBatch(385_000 + cycle * 10 + evaluation), fx.ctx);
+    }
+    await fx.guard.onAgentEnd(fx.ctx);
+    fx.compactCalls.at(-1)?.onError(new Error('OpenAI API error (502): {"message":"Upstream service temporarily unavailable","type":"upstream_error"}'));
+  }
+  assert.equal(fx.compactCalls.length, MAX_CONSECUTIVE_COMPACTION_FAILURES);
+  assert.ok(
+    fx.compactCalls.every((call) => call.customInstructions !== NATIVE_FALLBACK_COMPACTION_MARKER),
+    "non-exhausted interruptions never take unowned native recovery",
+  );
+  const retries = fx.sent.filter((message) => /Retry compaction, then continue/.test(message));
+  assert.equal(retries.length, MAX_CONSECUTIVE_COMPACTION_FAILURES - 1, "pre-trip failures retry compaction");
+  assert.match(fx.sent.at(-1) ?? "", /Continue the interrupted task from the compacted session checkpoint/, "the tripping failure resumes the loop without compaction");
+  assert.ok(fx.notifications.some(({ message }) => /compaction paused/.test(message)), "the pause is explained");
+});
+
+test("loop-critical settlement is visible as a synthetic interruption until it clears", async () => {
+  const fx = loopCriticalFixture();
+  assert.equal(fx.guard.isSyntheticCompactionInterruptionActive(), false);
+  assert.equal(fx.guard.shouldSkipStopHook(), false);
+
+  for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS; evaluation++) {
+    await fx.guard.evaluate(highUsageToolBatch(385_000), fx.ctx);
+  }
+  assert.equal(fx.guard.isSyntheticCompactionInterruptionActive(), true);
+
+  await fx.guard.onAgentEnd(fx.ctx);
+  fx.compactCalls[0].onComplete();
+  assert.equal(fx.guard.isSyntheticCompactionInterruptionActive(), true, "the continuation run still settles as recovery");
+  await fx.guard.onAgentEnd(fx.ctx);
+  assert.equal(fx.guard.isSyntheticCompactionInterruptionActive(), false, "the next ordinary settlement clears the flag");
+  assert.equal(fx.guard.shouldSkipStopHook(), false);
 });
 
 function pressureToolBatch() {
@@ -4677,21 +4800,33 @@ test("compaction breaker trips after MAX consecutive failures and resets after t
   assert.equal(after.breaker.consecutiveFailures, 0, "breaker resets on cooldown");
 });
 
-test("compaction breaker ignores transient gateway failures but keeps counting deterministic ones", () => {
-  let breaker = resetCompactionBreaker();
-  for (let i = 0; i < MAX_CONSECUTIVE_COMPACTION_FAILURES + 2; i++) {
-    breaker = recordCompactionFailure(breaker, i, { transient: true });
-  }
-  assert.equal(breaker.consecutiveFailures, 0, "transient failures never advance the streak");
-  assert.equal(compactionBreakerAllows(breaker, MAX_CONSECUTIVE_COMPACTION_FAILURES + 2).allowed, true);
+test("transient classification defers to quota, prompt-too-long and abort exclusions even with retryable status", () => {
+  assert.equal(
+    isTransientSummaryError({ status: 429, message: "insufficient_quota: you exceeded your billing budget" }),
+    false,
+    "quota wording demotes a retryable status",
+  );
+  assert.equal(isTransientSummaryError({ status: 503, message: "prompt is too long (max 200000)" }), false, "PTL belongs to the trim budget");
+  assert.equal(isTransientSummaryError({ status: 503, message: "request aborted by caller" }), false, "local cancellation is terminal");
+  assert.equal(isTransientSummaryError({ status: 503 }), true, "status-only server errors stay transient");
+  assert.equal(isTransientSummaryError(new Error("The operation was aborted")), false);
+  assert.equal(isTransientSummaryError(new Error("request cancelled")), false);
+});
 
-  breaker = recordCompactionFailure(breaker, 10);
-  breaker = recordCompactionFailure(breaker, 11, { transient: true });
-  breaker = recordCompactionFailure(breaker, 12);
-  assert.equal(breaker.consecutiveFailures, 2, "a transient blip neither advances nor resets the deterministic streak");
-  assert.equal(compactionBreakerAllows(breaker, 12).allowed, true, "still below the cap");
-  breaker = recordCompactionFailure(breaker, 13);
-  assert.equal(compactionBreakerAllows(breaker, 13).allowed, false, "deterministic failures still trip the breaker");
+test("compaction breaker counts retry-exhausted transient failures like any other failure", () => {
+  // Failures reaching the breaker have already burned the summary's internal
+  // transient-retry budget, so a persistent gateway outage must keep
+  // advancing the streak instead of retrying every turn forever.
+  let breaker = resetCompactionBreaker();
+  for (let i = 0; i < MAX_CONSECUTIVE_COMPACTION_FAILURES; i++) {
+    breaker = recordCompactionFailure(breaker, i);
+  }
+  assert.equal(breaker.consecutiveFailures, MAX_CONSECUTIVE_COMPACTION_FAILURES);
+  assert.equal(
+    compactionBreakerAllows(breaker, MAX_CONSECUTIVE_COMPACTION_FAILURES).allowed,
+    false,
+    "retry-exhausted transient failures trip the bounded-failure policy",
+  );
 });
 
 // --- F3: graduated eviction of bulk tool outputs ---

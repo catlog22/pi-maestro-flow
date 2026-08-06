@@ -330,22 +330,41 @@ function errorClassificationText(error: unknown): string {
 }
 
 /**
+ * Mirrors pi-ai's NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN (subscription
+ * and quota/billing exhaustion returned with retryable-looking statuses);
+ * review when pi-ai's retry taxonomy changes.
+ */
+const NON_RETRYABLE_QUOTA_SUMMARY_PATTERN = /GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing/i;
+
+/**
  * Classify a thrown summary-completion error or provider errorMessage as a
  * transient provider/transport failure worth retrying (5xx, 408/409/429,
- * gateway `upstream_error`, network drops). Aborts, deterministic 4xx, and
- * quota/billing exhaustion are never transient. Text classification reuses the
- * pi-ai retry taxonomy so the summary path matches the main agent loop.
+ * gateway `upstream_error`, network drops). Aborts, deterministic 4xx,
+ * quota/billing exhaustion, and prompt-too-long are never transient, even
+ * when they arrive with a retryable HTTP status. Text classification reuses
+ * the pi-ai retry taxonomy so the summary path matches the main agent loop.
  */
 export function isTransientSummaryError(error: unknown): boolean {
   if (!error) return false;
   if (error instanceof Error && error.name === "AbortError") return false;
+  const text = errorClassificationText(error);
+  // Local cancellation and capacity errors are terminal regardless of status:
+  // an abort must never be retried, and prompt-too-long belongs to the trim
+  // budget, not the transient budget.
+  if (/\babort(?:ed|ing)?\b|\bcancel(?:l)?ed\b/i.test(text)) return false;
+  if (isPromptTooLongError(error)) return false;
   const record = error && typeof error === "object" ? error as Record<string, unknown> : undefined;
   if (typeof record?.status === "number") {
     const status = record.status;
-    return status === 408 || status === 409 || status === 429 || status >= 500;
+    if (!(status === 408 || status === 409 || status === 429 || status >= 500)) return false;
+    if (!text) return true;
+    // A retryable status stays transient even when its message misses the
+    // taxonomy (e.g. "bad gateway") — pi-ai's provider-level retry treats
+    // retryable statuses as retryable regardless of text — but quota/billing
+    // wording demotes it to deterministic.
+    return !NON_RETRYABLE_QUOTA_SUMMARY_PATTERN.test(text);
   }
-  const text = errorClassificationText(error);
-  if (!text || /\baborted?\b/i.test(text)) return false;
+  if (!text) return false;
   return isRetryableAssistantError({ stopReason: "error", errorMessage: text } as Parameters<typeof isRetryableAssistantError>[0]);
 }
 

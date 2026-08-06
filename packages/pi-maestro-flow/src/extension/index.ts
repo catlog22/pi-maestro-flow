@@ -130,8 +130,10 @@ import {
   type SessionLocationInfo,
 } from "../session/session-export.ts";
 import {
+  classifyRunControlArgv,
   executeRunControl,
   isRunControlReadAction,
+  isRunControlReadArgv,
   RunControlParams,
   type RunControlInput,
 } from "../tools/run-control.ts";
@@ -893,6 +895,8 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
 
 These actions route to external CLI endpoints (gemini/codex CLI processes). Prefer the **teammate** tool for ordinary delegation and exploration.
 
+This tool is NOT the Maestro Session/Run lifecycle CLI: use the **run-control** tool for session/run commands (or the bash \`maestro\` CLI for knowledge search/load), never this tool.
+
 Progressive fallback: when a user explicitly requests an external model (codex, gemini, claude, opencode) NOT in <available_teammate_models>, call **model-availability** first, then route via bash:
   maestro delegate "<PROMPT>" --to <tool> --mode analysis
 The --to flag is MANDATORY. A bare \`maestro delegate codex\` treats "codex" as the prompt and falls back to the first enabled tool. Contract: D:\\maestro2\\workflows\\delegate-usage.md.`,
@@ -901,6 +905,7 @@ The --to flag is MANDATORY. A bare \`maestro delegate codex\` treats "codex" as 
     promptGuidelines: [
       "In the pi-agent, use the teammate tool for all delegation, code exploration, and multi-model synthesis — teammate supports prompt templates (prompt field) and model selection (model field). Do not call the maestro tool's explore/delegate/moa for ordinary pi-agent work.",
       "Reserve the maestro tool (explore/delegate/moa) for the rare case of routing work directly to an external CLI endpoint (gemini/codex CLI process); for knowledge search use the maestro search/load bash CLI.",
+      "Session/Run lifecycle commands belong to the run-control tool (argv passthrough shell), not this tool and not hand-written bash `maestro run/session` calls.",
       "Progressive fallback: when a user explicitly requests an external model (codex/gemini/claude/opencode) that is NOT in <available_teammate_models>, call the model-availability tool, then route via bash `maestro delegate \"<PROMPT>\" --to <tool> --mode analysis`. The --to flag is mandatory — a bare `maestro delegate codex` sends \"codex\" as the prompt to the first enabled tool. Contract: D:\\maestro2\\workflows\\delegate-usage.md.",
     ],
 
@@ -1228,36 +1233,30 @@ Rules:
   const runControlTool: ToolDefinition<typeof RunControlParams> = {
     name: "run-control",
     label: "Run Control",
-    description: `Read or control canonical Maestro Workflow Runs through one typed shell.
-Actions:
-- status: read the current projected Session snapshot; no CLI mutation.
-- brief: load a Run resume packet; runId is optional and defaults to the active Run.
-- prepare: preview a workflow step without creating a Run; requires step.
-- check: evaluate Run gates and finish guidance; runId is optional and defaults to the active Run.
-- next: allocate the next chain Run with optional pick; if a Run is already active, return its brief instead.
-- done: seal a Run with a verdict; requires runId, defaults verdict to done, and delegates to the stable complete protocol.
-- edit: modify future chain steps with commands/after/replace/remove and optional metadata.
-Mutating actions next/done/edit require an attached canonical Session, the Flow host mutation lease, and ownership by the current Pi session.
-Read results report mutation-lease ownership so a Pi session can distinguish its Run from another session's workspace-wide Run.
+    description: `Transparent shell over the canonical Maestro CLI for the Session/Run lifecycle. Pass argv exactly as the CLI takes it (without the leading \`maestro\` executable), e.g. { argv: ["session","next","--json"] } or { argv: ["run","check","run-abc","--json"] }.
+Read commands (status/brief/prepare/check/recall/evidence/list/show/graph/skills/search/load/review) need no mutation lease; write commands (next/done/decide/seal/edit/...) require the current Pi session to own the Workflow mutation lease and are blocked in Plan mode. Entry commands (session/run create|start) may mint a Session without a held lease.
+This is the single LLM surface for the lifecycle: do not hand-write \`maestro\` run/session calls in bash. Read results report mutation-lease ownership so a Pi session can distinguish its Run from another session's workspace-wide Run.
 
 When to use:
-- Inside an active Maestro Workflow Session: status/brief/check to inspect (read-only), next/done/edit to drive the chain (mutating).
+- Inside an active Maestro Workflow Session: any session/run lifecycle operation.
 
 When NOT to use:
 - No active workflow or coordinator not attached — the call errors; do not invoke it.
+- Knowledge operations (search/load/knowledge stage/review) and explore/delegate/moa belong to the bash \`maestro\` CLI and the \`maestro\` tool respectively, not this shell.
 
-Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "done", summary: "Implemented feature X" }, { action: "edit", commands: ["verify"], after: "current" }.`,
-    promptSnippet: "Read (status/brief/check) or drive (next/done/edit) canonical Maestro Workflow Runs",
+Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--verdict","done"] }, { argv: ["run","edit","verify","--after","latest"] }.`,
+    promptSnippet: "Maestro CLI passthrough shell for Session/Run lifecycle",
     parameters: RunControlParams,
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (!workflowCoordinator) {
         return {
           content: [{ type: "text", text: "Workflow Coordinator is not attached." }],
           isError: true,
-          details: { ok: false, action: params.action, message: "Workflow Coordinator is not attached." },
+          details: { ok: false, action: "exec", message: "Workflow Coordinator is not attached." },
         };
       }
-      const actionOptsIn = !isRunControlReadAction(params.action);
+      const argv = Array.isArray(params.argv) ? params.argv.map(String) : [];
+      const actionOptsIn = classifyRunControlArgv(argv).write;
       const hostSessionId = workflowHostSessionId(ctx);
       if (actionOptsIn && hostSessionId) {
         await ensureWorkflowHostIdentity(ctx, hostSessionId);
@@ -1285,14 +1284,15 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     renderShell: "self",
     renderCall(args, theme, ctx) {
       if (ctx?.isPartial === false) return new Text("", 0, 0);
-      return toolCallLine(theme, "run-control", String(args.action ?? "?"));
+      const argv = Array.isArray(args.argv) ? args.argv.join(" ") : "?";
+      return toolCallLine(theme, "run-control", argv);
     },
     renderResult(result, opts, theme, ctx) {
       if (opts.isPartial) return new Text("", 0, 0);
-      const details = result.details as { ok?: boolean; action?: string; message?: string } | undefined;
+      const details = result.details as { ok?: boolean; message?: string } | undefined;
       const text = result.content.find((item) => item.type === "text");
       const message = text && "text" in text ? text.text : "";
-      const arg = String(ctx.args.action ?? details?.action ?? "?");
+      const arg = Array.isArray(ctx.args.argv) ? ctx.args.argv.join(" ") : "?";
       return toolResultLine(theme, { name: "run-control", ok: details?.ok !== false, arg, summary: resultSummary(result), expanded: opts.expanded, detail: message });
     },
   };
@@ -2749,7 +2749,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   // Todo widget stale and mid-turn compaction bookkeeping unrun, with no clue which
   // subsystem broke. Isolate each step and name it in the warning instead.
   pi.on("agent_end", async (event, ctx) => {
-    const providerPressureRecovery = midTurnAutoCompaction.isProviderPressureRecoveryActive();
+    const syntheticInterruption = midTurnAutoCompaction.isSyntheticCompactionInterruptionActive();
     const step = async (label: string, run: () => unknown) => {
       try {
         await run();
@@ -2762,7 +2762,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     };
     await step("Plan", () => onAgentEndPlan(event, ctx));
     await step("Workflow refresh", () => refreshWorkflow(ctx, true));
-    if (!providerPressureRecovery) {
+    if (!syntheticInterruption) {
       await step("Goal attempt", () => goalAgentEnd(event, ctx));
     }
     await step("Output-limit compaction", () =>
@@ -2780,9 +2780,9 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   // root handler. Goal therefore consumes the authoritative settlement first,
   // then compaction can safely act on the resulting continuation state.
   pi.on("agent_settled", async (_event, ctx) => {
-    const providerPressureRecovery = midTurnAutoCompaction.isProviderPressureRecoveryActive();
+    const syntheticInterruption = midTurnAutoCompaction.isSyntheticCompactionInterruptionActive();
     try {
-      if (providerPressureRecovery) goalProviderPressureSettled(ctx);
+      if (syntheticInterruption) goalProviderPressureSettled(ctx);
       else await goalAgentSettled(ctx);
     } catch (error) {
       ctx.ui.notify(
@@ -2824,11 +2824,13 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       publishMaestroUi();
     }
     if (event.toolName === "run-control" || /\bmaestro\s+(?:run|ralph)\b/.test(command)) {
-      const runControlAction = event.toolName === "run-control"
-        ? String((event as { input?: { action?: unknown } }).input?.action ?? "")
-        : "";
+      const runControlArgv = event.toolName === "run-control"
+        ? Array.isArray((event as { input?: { argv?: unknown } }).input?.argv)
+          ? ((event as { input?: { argv?: unknown } }).input!.argv as unknown[]).map(String)
+          : []
+        : [];
       const allowOptIn = event.toolName === "run-control"
-        ? Boolean(runControlAction && !isRunControlReadAction(runControlAction))
+        ? Boolean(runControlArgv.length && !isRunControlReadArgv(runControlArgv))
         : isWorkflowOptInCommand(command);
       await refreshWorkflow(ctx, true, allowOptIn, allowOptIn);
     }
