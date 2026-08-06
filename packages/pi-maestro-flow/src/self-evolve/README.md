@@ -42,15 +42,16 @@
    可用字段：`enabled` / `cooldownMs`（默认 300000）/ `maxSignalsPerSession`（默认 20）/ `maxTraceChars`（默认 8000）/ `maxTraceMessages`（默认 12）/ `maxEvidence`（默认 8）/ `maxFiles`（默认 14）。
 3. **会话内命令**（写入 `.pi/self-evolve.json`）：
    ```
+   /self-evolve                     # 打开 TUI 面板（默认；r 刷新 · q/esc 关闭）
    /self-evolve on                 # 启用（dry-run）
    /self-evolve off                # 禁用
-   /self-evolve status             # 完整状态（默认）
+   /self-evolve status             # 完整状态（文本通知）
    /self-evolve config             # 查看全部配置
    /self-evolve config <k>=<v> ... # 修改配置（校验后持久化）
    /self-evolve config reset       # 恢复默认（保留 enabled）
    /self-evolve signals [N]        # 列出最近 N 条候选信号（默认 10）
    /self-evolve review [N]         # dry-run 评审最近 N 条信号（默认 5，用配置模型）
-   /self-evolve panel              # 打开 TUI 面板（r 刷新 · q/esc 关闭）
+   /self-evolve panel              # 打开 TUI 面板（同默认；r 刷新 · q/esc 关闭）
    ```
 
 ## Dry-run 评审（Phase 2B 最小验证版）
@@ -68,7 +69,7 @@
 
 启用后状态栏常驻 `EVOL ● s·d·p` 段（s=已写信号 · d=去重 · p=抑制），失败时追加 `!n`；禁用时显示 `EVOL off`。随事件与配置变更实时刷新。
 
-### 面板 `/self-evolve panel`
+### 面板 `/self-evolve`（默认） / `/self-evolve panel`
 
 只读 TUI 面板（`ctx.ui.custom` overlay），展示：配置摘要（含来源）、运行时计数器、最近信号列表。配置修改请走 `/self-evolve config`（带校验与持久化）——面板仅刷新/关闭：
 
@@ -157,7 +158,7 @@ src/self-evolve/
   se-e2e.mts    行为回归测试（mock 宿主，32 断言）
   README.md     本文档
 src/tui/
-  self-evolve-overlay.ts  /self-evolve panel 只读面板（Component + Focusable）
+  self-evolve-overlay.ts  /self-evolve（默认）/panel 只读面板（Component + Focusable）
 ```
 
 ## 测试
@@ -168,7 +169,7 @@ node --experimental-strip-types <(cat <<'EOF'
 ...
 EOF
 )
-# 行为回归（mock 宿主，32 断言：默认禁用零副作用 / 启用持久化 / 信号生成 /
+# 行为回归（mock 宿主，47 断言：默认禁用零副作用 / 启用持久化 / 信号生成 /
 # 去重与冷却语义 / 状态栏 / 配置校验 / dry-run 保证）
 cd packages/pi-maestro-flow && node --experimental-strip-types src/self-evolve/se-e2e.mts
 ```

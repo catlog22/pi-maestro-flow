@@ -611,7 +611,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
   // -------------------------------------------------------------------------
 
   pi.registerCommand("self-evolve", {
-    description: "Self-evolve: /self-evolve [status|on|off|config [k=v ...|reset]|signals [N]|panel]",
+    description: "Self-evolve: /self-evolve (panel, default) | status | on | off | config [k=v ...|reset] | signals [N] | review [N]",
     async handler(args: string, ctx) {
       await ensureWorkspaceConfig(ctx);
       const trimmed = args.trim();
@@ -788,7 +788,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         return;
       }
 
-      if (cmd === "panel") {
+      if (cmd === "panel" || cmd === "") {
         const panelView = await buildPanelView(ctx);
         await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
           const overlay = new SelfEvolveOverlay({
@@ -814,8 +814,8 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         return;
       }
 
-      // status (default)
-      const lines = [
+      if (cmd === "status") {
+        const lines = [
         `SELF-EVOLVE ${effectiveEnabled() ? "on" : "off"} (${source})`,
         "  mode: dry-run — candidate signals only, never stages or promotes knowledge",
         `  model: ${config.model ?? "auto"}${resolveSelfEvolveModel(ctx) && resolveSelfEvolveModel(ctx) !== config.model ? ` → ${resolveSelfEvolveModel(ctx)}` : ""} (Phase 2B LLM steps)`,
@@ -830,6 +830,14 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         `  usage: /self-evolve config <key>=<value> (cooldownMs, maxSignalsPerSession, maxTraceChars, maxTraceMessages, maxEvidence, maxFiles, enabled) · signals [N] · panel`,
       ];
       ctx.ui.notify(lines.join("\n"), "info");
+      return;
+    }
+
+      // Unknown subcommand — surface usage instead of silently opening the panel.
+      ctx.ui.notify(
+        "Usage: /self-evolve [panel (default)|status|on|off|config [k=v ...|reset]|signals [N]|review [N]]",
+        "info",
+      );
     },
   });
 }

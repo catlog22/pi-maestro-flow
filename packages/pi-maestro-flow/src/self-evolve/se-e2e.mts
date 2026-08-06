@@ -38,6 +38,7 @@ function makeCtx(cwd: string): ExtensionContext & {
 } {
   const notifications: { message: string; level: string }[] = [];
   const status: Record<string, string | undefined> = {};
+  let customCalls = 0;
   return {
     cwd,
     model: { provider: "test-provider", id: "test-model" },
@@ -47,6 +48,7 @@ function makeCtx(cwd: string): ExtensionContext & {
       notify: (message, level) => notifications.push({ message, level }),
       setStatus: (key, text) => { status[key] = text; },
       custom: async (factory) => {
+        customCalls += 1;
         let resolveDone: (r: never) => void = () => undefined;
         const done = (r: never) => resolveDone(r);
         factory({ requestRender: () => undefined }, undefined, undefined, done);
@@ -55,6 +57,9 @@ function makeCtx(cwd: string): ExtensionContext & {
     },
     notifications,
     status,
+    get customCalls() {
+      return customCalls;
+    },
   } as never as ExtensionContext & {
     ui: {
       notify: (message: string, level: string) => void;
@@ -62,6 +67,7 @@ function makeCtx(cwd: string): ExtensionContext & {
       custom: <T>(factory: (tui: unknown, theme: unknown, kb: unknown, done: (r: T) => void) => unknown) => Promise<T>;
     };
     sessionManager: { getSessionId: () => string };
+    customCalls: number;
   };
 }
 
@@ -301,9 +307,15 @@ async function main(): Promise<void> {
   await cmd.handler("config model=auto", ctx);
   ctx.model = { provider: "test-provider", id: "test-model" };
 
-  // ---- 9. panel opens without crashing (custom factory invoked) ----
+  // ---- 9. /self-evolve opens the panel by default; `status` stays a text notify ----
+  await cmd.handler("", ctx);
+  check("默认（无参数）打开 panel（custom 被调用）", ctx.customCalls === 1, `customCalls=${ctx.customCalls}`);
+  const notifyCountBeforeStatus = ctx.notifications.length;
+  await cmd.handler("status", ctx);
+  check("status 不打开 panel（custom 计数不变）", ctx.customCalls === 1, `customCalls=${ctx.customCalls}`);
+  check("status 输出文本通知", ctx.notifications.length > notifyCountBeforeStatus);
   await cmd.handler("panel", ctx);
-  check("panel 打开无异常", true);
+  check("panel 显式打开正常（custom 计数递增）", ctx.customCalls === 2, `customCalls=${ctx.customCalls}`);
 
   // ---- 10. off → disabled, status bar EVOL off, no more writes ----
   await cmd.handler("off", ctx);
