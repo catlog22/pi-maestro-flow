@@ -330,6 +330,252 @@ test("managed steer fails when the child exits before the correction starts", as
   assert.deepEqual(commandTypes, ["prompt", "abort", "prompt"]);
 });
 
+test("unacknowledged steer abort degrades to follow_up and the task continues", async () => {
+  let handle: FakeChildHandle | undefined;
+  const commands: Array<Record<string, unknown>> = [];
+  let stdinBuffer = "";
+
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    handle.child.stdin!.on("data", (chunk: Buffer) => {
+      stdinBuffer += chunk.toString();
+      while (true) {
+        const newline = stdinBuffer.indexOf("\n");
+        if (newline < 0) break;
+        const raw = stdinBuffer.slice(0, newline).trim();
+        stdinBuffer = stdinBuffer.slice(newline + 1);
+        if (!raw) continue;
+        const command = JSON.parse(raw) as Record<string, unknown>;
+        commands.push(command);
+
+        if (command.type === "prompt" && command.id === undefined) {
+          queueMicrotask(() => {
+            handle!.stdout.write(line({ type: "agent_start" }));
+            handle!.stdout.write(line({ type: "turn_start" }));
+            handle!.stdout.write(line({ type: "tool_execution_start", toolName: "bash" }));
+          });
+        } else if (command.type === "abort") {
+          // The child is blocked (long tool, permission prompt): the abort is
+          // never acknowledged within the deadline.
+        } else if (command.type === "follow_up") {
+          queueMicrotask(() => {
+            handle!.stdout.write(line({ type: "agent_start" }));
+            handle!.stdout.write(line({ type: "turn_start" }));
+            handle!.stdout.write(line({
+              type: "message_end",
+              message: { role: "assistant", content: [{ type: "text", text: "TASK_CONTINUED" }] },
+            }));
+            handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+            handle!.stdout.write(line({ type: "agent_settled" }));
+          });
+        }
+      }
+    });
+    return handle.child;
+  }) as unknown as SpawnSeam;
+
+  let stdin: import("node:stream").Writable | undefined;
+  let steerSent = false;
+  // The fake child holds no real process handle and the degrade deadline is
+  // unref'd, so keep the loop alive until the turn settles.
+  const keepAlive = setInterval(() => {}, 10);
+  let result: SingleResult;
+  try {
+    result = await runSingleTeammate(
+      { agent: "general", task: "run a long tool", context: "fresh" },
+      {
+        baseCwd: process.cwd(),
+        spawnChildProcess,
+        interruptingSteerTimeoutMs: 30,
+        onChildSpawned: (stream) => { stdin = stream; },
+        onProgress: (progress) => {
+          if (steerSent || progress.phase !== "tool-execution" || !stdin) return;
+          steerSent = true;
+          assert.equal(sendRpcMessage(stdin, "scope correction", "steer"), true);
+        },
+      },
+    );
+  } finally {
+    clearInterval(keepAlive);
+  }
+
+  assert.equal(result.exitCode, 0, "an unacknowledged interrupt must not fail the task");
+  assert.equal(result.terminalStatus, "completed");
+  assert.equal(handle!.killed(), false, "a degraded steer must not terminate the child");
+  assert.deepEqual(commands.map((command) => command.type), ["prompt", "abort", "follow_up"]);
+  assert.equal(commands[2].message, "scope correction");
+  assert.equal(result.messages.at(-1)?.content, "TASK_CONTINUED");
+  assert.ok(
+    result.messages.some((entry) => entry.role === "system" && /Steer degraded to follow_up/.test(entry.content)),
+    "the control error must stay visible in the transcript",
+  );
+});
+
+test("rejected steer abort degrades to follow_up instead of failing the task", async () => {
+  let handle: FakeChildHandle | undefined;
+  const commands: Array<Record<string, unknown>> = [];
+  let stdinBuffer = "";
+
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    handle.child.stdin!.on("data", (chunk: Buffer) => {
+      stdinBuffer += chunk.toString();
+      while (true) {
+        const newline = stdinBuffer.indexOf("\n");
+        if (newline < 0) break;
+        const raw = stdinBuffer.slice(0, newline).trim();
+        stdinBuffer = stdinBuffer.slice(newline + 1);
+        if (!raw) continue;
+        const command = JSON.parse(raw) as Record<string, unknown>;
+        commands.push(command);
+
+        if (command.type === "prompt" && command.id === undefined) {
+          queueMicrotask(() => {
+            handle!.stdout.write(line({ type: "agent_start" }));
+            handle!.stdout.write(line({ type: "turn_start" }));
+            handle!.stdout.write(line({ type: "tool_execution_start", toolName: "bash" }));
+          });
+        } else if (command.type === "abort") {
+          queueMicrotask(() => {
+            handle!.stdout.write(line({
+              type: "response",
+              id: command.id,
+              command: "abort",
+              success: false,
+            }));
+          });
+        } else if (command.type === "follow_up") {
+          queueMicrotask(() => {
+            handle!.stdout.write(line({ type: "agent_start" }));
+            handle!.stdout.write(line({ type: "turn_start" }));
+            handle!.stdout.write(line({
+              type: "message_end",
+              message: { role: "assistant", content: [{ type: "text", text: "REJECTED_ABORT_CONTINUED" }] },
+            }));
+            handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+            handle!.stdout.write(line({ type: "agent_settled" }));
+          });
+        }
+      }
+    });
+    return handle.child;
+  }) as unknown as SpawnSeam;
+
+  let stdin: import("node:stream").Writable | undefined;
+  let steerSent = false;
+  // The fake child holds no real process handle; keep the loop alive while
+  // waiting for the rejection response and the degraded follow_up.
+  const keepAlive = setInterval(() => {}, 10);
+  let result: SingleResult;
+  try {
+    result = await runSingleTeammate(
+      { agent: "general", task: "run a long tool", context: "fresh" },
+      {
+        baseCwd: process.cwd(),
+        spawnChildProcess,
+        interruptingSteerTimeoutMs: 500,
+        onChildSpawned: (stream) => { stdin = stream; },
+        onProgress: (progress) => {
+          if (steerSent || progress.phase !== "tool-execution" || !stdin) return;
+          steerSent = true;
+          assert.equal(sendRpcMessage(stdin, "scope correction", "steer"), true);
+        },
+      },
+    );
+  } finally {
+    clearInterval(keepAlive);
+  }
+
+  assert.equal(result.exitCode, 0, "a rejected abort leaves the turn intact and must not fail it");
+  assert.equal(result.terminalStatus, "completed");
+  assert.equal(handle!.killed(), false);
+  assert.deepEqual(commands.map((command) => command.type), ["prompt", "abort", "follow_up"]);
+  assert.equal(result.messages.at(-1)?.content, "REJECTED_ABORT_CONTINUED");
+  assert.ok(
+    result.messages.some(
+      (entry) => entry.role === "system" && /Pi rejected the turn abort command/.test(entry.content),
+    ),
+  );
+});
+
+test("swallowed settlement during an unacknowledged steer converges on degrade", async () => {
+  let handle: FakeChildHandle | undefined;
+  const commands: Array<Record<string, unknown>> = [];
+  let stdinBuffer = "";
+
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    handle.child.stdin!.on("data", (chunk: Buffer) => {
+      stdinBuffer += chunk.toString();
+      while (true) {
+        const newline = stdinBuffer.indexOf("\n");
+        if (newline < 0) break;
+        const raw = stdinBuffer.slice(0, newline).trim();
+        stdinBuffer = stdinBuffer.slice(newline + 1);
+        if (!raw) continue;
+        const command = JSON.parse(raw) as Record<string, unknown>;
+        commands.push(command);
+
+        if (command.type === "prompt" && command.id === undefined) {
+          queueMicrotask(() => {
+            handle!.stdout.write(line({ type: "agent_start" }));
+            handle!.stdout.write(line({ type: "turn_start" }));
+            handle!.stdout.write(line({ type: "tool_execution_start", toolName: "bash" }));
+          });
+        } else if (command.type === "abort") {
+          queueMicrotask(() => {
+            // The turn completes naturally while the abort stays unacknowledged;
+            // the settlement boundary is swallowed by the pending interrupt.
+            handle!.stdout.write(line({ type: "tool_execution_end", toolName: "bash", isError: false }));
+            handle!.stdout.write(line({
+              type: "message_end",
+              message: { role: "assistant", content: [{ type: "text", text: "NATURAL_COMPLETION" }] },
+            }));
+            handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+            handle!.stdout.write(line({ type: "agent_settled" }));
+          });
+        }
+        // follow_up: the child is idle; the queued message waits for the next wake.
+      }
+    });
+    return handle.child;
+  }) as unknown as SpawnSeam;
+
+  let stdin: import("node:stream").Writable | undefined;
+  let steerSent = false;
+  // The fake child holds no real process handle and the degrade deadline is
+  // unref'd, so keep the loop alive until the turn settles.
+  const keepAlive = setInterval(() => {}, 10);
+  let result: SingleResult;
+  try {
+    result = await runSingleTeammate(
+      { agent: "general", task: "run a long tool", context: "fresh" },
+      {
+        baseCwd: process.cwd(),
+        spawnChildProcess,
+        interruptingSteerTimeoutMs: 40,
+        onChildSpawned: (stream) => { stdin = stream; },
+        onProgress: (progress) => {
+          if (steerSent || progress.phase !== "tool-execution" || !stdin) return;
+          steerSent = true;
+          assert.equal(sendRpcMessage(stdin, "scope correction", "steer"), true);
+        },
+      },
+    );
+  } finally {
+    clearInterval(keepAlive);
+  }
+
+  assert.equal(result.exitCode, 0, "the swallowed natural completion must settle as success");
+  assert.equal(result.terminalStatus, "completed");
+  assert.equal(handle!.killed(), false);
+  assert.deepEqual(commands.map((command) => command.type), ["prompt", "abort", "follow_up"]);
+  assert.ok(result.messages.some((entry) => entry.content === "NATURAL_COMPLETION"));
+  assert.ok(
+    result.messages.some((entry) => entry.role === "system" && /Steer degraded to follow_up/.test(entry.content)),
+  );
+});
+
 test("REL-4: a silent child after result-ready settles on the lifecycle deadline", async () => {
   const completions: SingleResult[] = [];
   const progress: AgentProgress[] = [];

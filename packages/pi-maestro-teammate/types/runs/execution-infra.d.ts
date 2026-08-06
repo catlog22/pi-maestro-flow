@@ -156,6 +156,8 @@ export interface RunTeammateOptions {
     outputLimitRecoveryTimeoutMs?: number;
     /** @internal Test seam for the in-flight tool heartbeat interval. */
     toolExecutionHeartbeatMs?: number;
+    /** @internal Test seam for the interrupting-steer acknowledgement deadline. */
+    interruptingSteerTimeoutMs?: number;
     /** @internal Foreground wait window before the extension detaches a still-running task. */
     foregroundMaxRunMs?: number;
 }

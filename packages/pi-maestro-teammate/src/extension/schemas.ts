@@ -303,7 +303,7 @@ export const TeammateSendParams = Type.Object({
       enum: ["steer", "follow_up", "abort"],
       default: "follow_up",
       description:
-        'Delivery mode. "steer" interrupts the current turn, "follow_up" queues after it, "abort" terminates the agent.',
+        'Delivery mode. "steer" interrupts the current turn; if the interruption is not acknowledged promptly it degrades to a queued follow_up instead of failing the agent. "follow_up" queues after the current turn. "abort" terminates the agent.',
     }),
   ),
 }, {

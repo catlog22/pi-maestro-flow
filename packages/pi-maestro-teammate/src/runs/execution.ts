@@ -799,6 +799,14 @@ async function runSingleAttempt(
     let child: ChildProcess;
     let releaseRetryPersistenceGuard = () => {};
     let pendingInterruptingSteer: PendingInterruptingSteer | undefined;
+    /**
+     * True when a settlement boundary (agent_settled, legacy agent_end) was
+     * swallowed while the interrupt transaction owned settlement. A degraded
+     * steer must converge the turn the swallowed boundary would have, or the
+     * turn strands with no deadline armed.
+     */
+    let steerSettlementSwallowed = false;
+    const interruptingSteerTimeoutMs = options.interruptingSteerTimeoutMs ?? INTERRUPTING_STEER_TIMEOUT_MS;
 
     const spawnEnv = buildChildSpawnEnv(correlationId, replyTo, options, schemaFile, outputFile);
 
@@ -969,18 +977,65 @@ async function runSingleAttempt(
       for (const line of stdoutLines.write(chunk)) processStdoutLine(line);
     });
 
-    const failInterruptingSteer = (reason: string): void => {
-      if (!pendingInterruptingSteer || state.terminal || state.turnLifecycleSettled) return;
+    const clearInterruptingSteer = (): PendingInterruptingSteer | undefined => {
+      const pending = pendingInterruptingSteer;
       pendingInterruptingSteer = undefined;
       if (timers.interruptingSteer) {
         clearTimeout(timers.interruptingSteer);
         timers.interruptingSteer = undefined;
       }
+      return pending;
+    };
+
+    /**
+     * Settle the steer transaction as a task failure. Reserved for outcomes
+     * where the turn was already interrupted (acknowledged abort) or the
+     * child is gone, so the original work cannot continue either way.
+     */
+    const failInterruptingSteer = (reason: string): void => {
+      if (!pendingInterruptingSteer || state.terminal || state.turnLifecycleSettled) return;
+      clearInterruptingSteer();
       const diagnostic =
         `Failed to interrupt and steer teammate (agent=${params.agent}, correlationId=${correlationId}): ${reason}`;
       state.runtimeFailure = diagnostic;
       appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
       completeTurn(readStructuredOutput(true), true, 1);
+    };
+
+    /**
+     * A control-plane failure must not masquerade as a task failure. When the
+     * abort was never acknowledged (timeout) or Pi rejected it, the running
+     * turn is untouched: killing the child and settling exitCode=1 turned one
+     * undelivered interruption into a failed task and — through graph
+     * dependencies — into a cascading failure of every downstream dependent.
+     * Requeue the correction as a non-interrupting follow_up, surface the
+     * control error in the transcript and progress, and let the task run on.
+     */
+    const degradeInterruptingSteerToFollowUp = (reason: string): void => {
+      if (!pendingInterruptingSteer || state.terminal || state.turnLifecycleSettled) return;
+      const pending = clearInterruptingSteer();
+      if (!pending) return;
+      const diagnostic =
+        `Steer degraded to follow_up (agent=${params.agent}, correlationId=${correlationId}): ${reason}. `
+        + "The turn was not interrupted; the correction message was queued and the task continues.";
+      appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
+      progress.lastMessage = diagnostic;
+      options.onProgress?.(progress);
+      if (!child.stdin || !writeChildStdinLine(child.stdin, JSON.stringify({
+        type: "follow_up",
+        message: wrapLeasedMessage(pending.message, pending.token),
+      }))) {
+        const undelivered =
+          `Steer follow_up could not be delivered (agent=${params.agent}, correlationId=${correlationId}): `
+          + "the correction message was dropped; the task continues.";
+        appendBoundedTranscriptMessage(messages, { role: "system", content: undelivered });
+        progress.lastMessage = undelivered;
+        options.onProgress?.(progress);
+      }
+      // A settlement boundary swallowed while the interrupt owned settlement
+      // would strand the turn now that the pending state is gone; converge it
+      // the way the swallowed boundary would have.
+      if (steerSettlementSwallowed) settleAgentSession();
     };
 
     const armInterruptingSteerTimeout = (): void => {
@@ -991,18 +1046,23 @@ async function runSingleAttempt(
       }
       timers.interruptingSteer = setTimeout(() => {
         const phase = pendingInterruptingSteer?.phase;
-        failInterruptingSteer(
-          phase === "prompting"
-            ? `Pi did not start the correction prompt within ${INTERRUPTING_STEER_TIMEOUT_MS}ms`
-            : `Pi did not acknowledge the turn abort within ${INTERRUPTING_STEER_TIMEOUT_MS}ms`,
-        );
-      }, INTERRUPTING_STEER_TIMEOUT_MS);
+        if (phase === "prompting") {
+          failInterruptingSteer(
+            `Pi did not start the correction prompt within ${interruptingSteerTimeoutMs}ms`,
+          );
+        } else {
+          degradeInterruptingSteerToFollowUp(
+            `Pi did not acknowledge the turn abort within ${interruptingSteerTimeoutMs}ms`,
+          );
+        }
+      }, interruptingSteerTimeoutMs);
       timers.interruptingSteer.unref?.();
     };
 
     const requestInterruptingSteer = (message: string, token?: LeaseToken): boolean => {
       if (!child.stdin || pendingInterruptingSteer || state.terminal || state.turnLifecycleSettled) return false;
       const nonce = randomUUID();
+      steerSettlementSwallowed = false;
       pendingInterruptingSteer = {
         abortRequestId: `teammate-steer-abort-${nonce}`,
         promptRequestId: `teammate-steer-prompt-${nonce}`,
@@ -1546,6 +1606,9 @@ async function runSingleAttempt(
     function onAgentEnd(event: JsonLineEvent): void {
       recordRuntimeEventError(event, "agent_end");
       if (pendingInterruptingSteer) {
+        // Legacy streams without willRetry settle here; remember the boundary
+        // so a degraded steer can converge the turn it would have settled.
+        if (typeof event.willRetry !== "boolean") steerSettlementSwallowed = true;
         progress.status = "running";
         progress.phase = "continuing";
         progress.resultReadyAt = undefined;
@@ -1583,6 +1646,7 @@ async function runSingleAttempt(
     function onAgentSettled(): void {
       state.settlementCapability = "agent_settled";
       if (pendingInterruptingSteer) {
+        steerSettlementSwallowed = true;
         progress.status = "running";
         progress.phase = "continuing";
         progress.resultReadyAt = undefined;
@@ -1644,7 +1708,9 @@ async function runSingleAttempt(
       if (!pending || typeof event.id !== "string") return;
       if (pending.phase === "aborting" && event.id === pending.abortRequestId) {
         if (event.success !== true || event.command !== "abort") {
-          failInterruptingSteer("Pi rejected the turn abort command");
+          // A rejected abort leaves the turn intact; never fail the task for
+          // an interruption Pi declined to perform.
+          degradeInterruptingSteerToFollowUp("Pi rejected the turn abort command");
           return;
         }
         pending.phase = "prompting";
