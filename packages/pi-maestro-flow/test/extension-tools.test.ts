@@ -719,15 +719,35 @@ test("teammate child registers interaction, local Bash, and parent-permission su
   const childCtx = {
     cwd: "D:/workspace",
     model: { contextWindow: 400_000 },
+    abort() {},
     hasPendingMessages: () => false,
     sessionManager: { getBranch: () => [] },
     ui: { setStatus() {}, notify(message: string) { childNotifications.push(message); } },
   } as ExtensionContext;
+  await handlers.get("context")?.[0]?.({
+    type: "context",
+    messages: [{
+      role: "assistant",
+      content: [{ type: "toolCall", id: "critical-call", name: "read", arguments: {} }],
+      usage: { input: 398_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 398_000 },
+    }, {
+      role: "toolResult",
+      toolCallId: "critical-call",
+      toolName: "read",
+      content: [{ type: "text", text: "done" }],
+      isError: false,
+    }],
+  }, childCtx);
   await handlers.get("agent_end")?.[0]?.({
     messages: [{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" }],
   }, childCtx);
-  const completedTurnCancel = await handlers.get("session_before_compact")?.[0]?.({ reason: "threshold" }, childCtx);
-  assert.deepEqual(completedTurnCancel, { cancel: true }, "child preserves a normally completed transcript");
+  const completedTurnResult = await handlers.get("session_before_compact")?.[0]?.({ reason: "threshold" }, childCtx);
+  assert.notDeepEqual(completedTurnResult, { cancel: true }, "exhausted output headroom keeps native ownership");
+  assert.ok(
+    childNotifications.some((message) => /Native threshold compaction retained/.test(message)),
+    "the child explains why native ownership was retained",
+  );
+  await handlers.get("session_compact")?.[0]?.({}, childCtx);
 
   await handlers.get("agent_end")?.[0]?.({
     messages: [{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" }],

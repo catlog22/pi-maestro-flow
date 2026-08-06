@@ -563,6 +563,12 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
       trigger: "auto",
     }, ctx);
     if (outputs.some(hasContinueFalse)) {
+      try {
+        ctx.ui.notify(
+          "Auto-compaction cancelled: a PreCompact hook rejected it. Check your hooks configuration.",
+          "info",
+        );
+      } catch { /* best-effort; cancellation stays authoritative */ }
       options.onCompactionCancelled?.();
       return { cancel: true };
     }

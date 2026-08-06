@@ -2490,32 +2490,45 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   pi.on("session_before_compact", async (event, ctx) => {
     const request = compactionRequestFromInstructions(event.customInstructions);
     const isRecoveryFallback = isNativeFallbackCompactionInstructions(event.customInstructions);
-    if (shouldCancelCompletedTurnThreshold(
+    const cancelCompletedTurnThreshold = shouldCancelCompletedTurnThreshold(
       event.reason,
       preserveCompletedTurnFromNativeThreshold,
       request !== undefined,
       Boolean(ctx.hasPendingMessages?.()),
       isRecoveryFallback,
       midTurnAutoCompaction.hasPendingTakeover(),
-    )) {
+    );
+    if (cancelCompletedTurnThreshold) {
+      const retainNative = midTurnAutoCompaction.shouldRetainNativeThreshold(ctx);
       preserveCompletedTurnFromNativeThreshold = false;
-      const breakerPause = midTurnAutoCompaction.describeBreakerPause();
-      lastCompactionCancel = {
-        reason: breakerPause
-          ? `completed-turn preservation (deferred; ${breakerPause})`
-          : "completed-turn preservation (deferred to maestro settle)",
-        at: Date.now(),
-      };
-      try {
-        ctx.ui.setStatus(COMPACTION_STATUS_KEY, breakerPause ? "CTX DEFERRED (BREAKER)" : "CTX DEFERRED → SETTLE");
-        ctx.ui.notify(
-          breakerPause
-            ? `Native threshold compaction deferred: ${breakerPause}.`
-            : "Native threshold compaction deferred: the turn completed cleanly; maestro compaction will run at agent settle.",
-          "info",
-        );
-      } catch { /* status/notification are best-effort; cancellation stays authoritative */ }
-      return { cancel: true };
+      if (retainNative) {
+        lastCompactionCancel = undefined;
+        try {
+          ctx.ui.setStatus(COMPACTION_STATUS_KEY, "CTX CRITICAL → NATIVE");
+          ctx.ui.notify(
+            "Native threshold compaction retained because provider output headroom is exhausted.",
+            "info",
+          );
+        } catch { /* native ownership remains authoritative */ }
+      } else {
+        const breakerPause = midTurnAutoCompaction.describeBreakerPause();
+        lastCompactionCancel = {
+          reason: breakerPause
+            ? `completed-turn preservation (deferred; ${breakerPause})`
+            : "completed-turn preservation (deferred to maestro settle)",
+          at: Date.now(),
+        };
+        try {
+          ctx.ui.setStatus(COMPACTION_STATUS_KEY, breakerPause ? "CTX DEFERRED (BREAKER)" : "CTX DEFERRED → SETTLE");
+          ctx.ui.notify(
+            breakerPause
+              ? `Native threshold compaction deferred: ${breakerPause}.`
+              : "Native threshold compaction deferred: the turn completed cleanly; maestro compaction will run at agent settle.",
+            "info",
+          );
+        } catch { /* status/notification are best-effort; cancellation stays authoritative */ }
+        return { cancel: true };
+      }
     }
     const observed = compactionArbiter.observeStart(
       request,
@@ -3063,6 +3076,8 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
   let preserveCompletedTurnFromNativeThreshold = false;
 
   pi.on("session_start", (event, ctx) => {
+    preserveCompletedTurnFromNativeThreshold = false;
+    compactionArbiter.reset();
     autoCompaction.onSessionStart(ctx, event);
   });
   pi.on("context", async (event, ctx) => {
@@ -3108,26 +3123,38 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
   pi.on("session_before_compact", async (event, ctx) => {
     const request = compactionRequestFromInstructions(event.customInstructions);
     const isRecoveryFallback = isNativeFallbackCompactionInstructions(event.customInstructions);
-    if (shouldCancelCompletedTurnThreshold(
+    const cancelCompletedTurnThreshold = shouldCancelCompletedTurnThreshold(
       event.reason,
       preserveCompletedTurnFromNativeThreshold,
       request !== undefined,
       Boolean(ctx.hasPendingMessages?.()),
       isRecoveryFallback,
       autoCompaction.hasPendingTakeover(),
-    )) {
+    );
+    if (cancelCompletedTurnThreshold) {
+      const retainNative = autoCompaction.shouldRetainNativeThreshold(ctx);
       preserveCompletedTurnFromNativeThreshold = false;
-      const breakerPause = autoCompaction.describeBreakerPause();
-      try {
-        ctx.ui.setStatus(COMPACTION_STATUS_KEY, breakerPause ? "CTX DEFERRED (BREAKER)" : "CTX DEFERRED → SETTLE");
-        ctx.ui.notify(
-          breakerPause
-            ? `Native threshold compaction deferred: ${breakerPause}.`
-            : "Native threshold compaction deferred: the turn completed cleanly; maestro compaction will run at agent settle.",
-          "info",
-        );
-      } catch { /* status/notification are best-effort; cancellation stays authoritative */ }
-      return { cancel: true };
+      if (retainNative) {
+        try {
+          ctx.ui.setStatus(COMPACTION_STATUS_KEY, "CTX CRITICAL → NATIVE");
+          ctx.ui.notify(
+            "Native threshold compaction retained because provider output headroom is exhausted.",
+            "info",
+          );
+        } catch { /* native ownership remains authoritative */ }
+      } else {
+        const breakerPause = autoCompaction.describeBreakerPause();
+        try {
+          ctx.ui.setStatus(COMPACTION_STATUS_KEY, breakerPause ? "CTX DEFERRED (BREAKER)" : "CTX DEFERRED → SETTLE");
+          ctx.ui.notify(
+            breakerPause
+              ? `Native threshold compaction deferred: ${breakerPause}.`
+              : "Native threshold compaction deferred: the turn completed cleanly; maestro compaction will run at agent settle.",
+            "info",
+          );
+        } catch { /* status/notification are best-effort; cancellation stays authoritative */ }
+        return { cancel: true };
+      }
     }
     const observed = compactionArbiter.observeStart(request, event.signal);
     if (!observed.allowed) {

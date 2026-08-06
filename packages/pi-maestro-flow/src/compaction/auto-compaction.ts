@@ -25,6 +25,7 @@ import {
   deriveLinkedCompactionThreshold,
   effectiveReserveTokens,
   OUTPUT_CLAMP_BAND_MARGIN_RATIO,
+  OUTPUT_CLAMP_SAFETY_TOKENS,
   type CompactionThresholdDerivation,
   type LinkedCompactionThresholdModel,
 } from "./compaction-threshold.ts";
@@ -251,6 +252,15 @@ export interface AutoCompactionState {
   generation: number;
   nextOwner: number;
   activeOwner?: number;
+  /**
+   * Owner of a submission whose watchdog expired but whose host compact() has
+   * neither completed nor errored yet. New submissions are held until the
+   * zombie settles or the grace deadline passes, so a late completion cannot
+   * race a fresh compaction.
+   */
+  zombieOwner?: number;
+  /** Wall-clock deadline after which an unsettled zombie is presumed dead. */
+  zombieDeadlineMs?: number;
   /** Logical request owner, independent of whether an arbiter lease exists. */
   activeRequestOwner?: CompactionOwner;
   activeLease?: CompactionLease;
@@ -311,6 +321,8 @@ export interface AutoCompactionDependencies {
   loadInternals?: () => Promise<PiCompactionInternals>;
   readSettings?: (projectRoot: string) => CompactionSettings;
   arbiter?: CompactionArbiter;
+  /** Test hook: override the watchdog/lease timeout (defaults to COMPACTION_LEASE_TIMEOUT_MS). */
+  leaseTimeoutMs?: number;
 }
 
 export interface MessageRecord {
@@ -337,6 +349,27 @@ export function commitProjectedCompactionInput(
   event.preparation.turnPrefixMessages = projected.event.preparation.turnPrefixMessages;
 }
 
+/** Snapshot of the mid-turn compaction module state for diagnostics (/compaction-status). */
+export interface MidTurnCompactionStatus {
+  turnCount: number;
+  running: boolean;
+  activeRequestOwner?: CompactionOwner;
+  /** Owner of a timed-out submission that has not settled yet, if any. */
+  zombieOwner?: number;
+  pendingIntent?: {
+    tokens: number;
+    thresholdTokens: number;
+    contextExhausted: boolean;
+    requestBlocked: boolean;
+  };
+  outputLimitIntentPending: boolean;
+  breaker: {
+    consecutiveFailures: number;
+    trippedAtTurn?: number;
+    cooldownRemainingTurns?: number;
+  };
+}
+
 export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: AutoCompactionDependencies = {}): {
   onSessionStart(ctx: ExtensionContext, event?: { reason?: string }): void;
   evaluate(messages: AgentMessage[], ctx: ExtensionContext): Promise<AgentMessage[] | undefined>;
@@ -344,6 +377,20 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   beforeProviderRequest(payload: unknown, ctx: ExtensionContext): Promise<unknown | undefined>;
   shouldSkipStopHook(): boolean;
   isProviderPressureRecoveryActive(): boolean;
+  /**
+   * True when a queued mid-turn or output-limit intent will take over
+   * compaction at agent settle. Native threshold compaction may only be
+   * cancelled for completed-turn preservation when this returns true.
+   */
+  hasPendingTakeover(): boolean;
+  /**
+   * True when the completed turn has consumed Pi's output safety headroom and
+   * the already-started native threshold compaction must retain ownership.
+   */
+  shouldRetainNativeThreshold(ctx: ExtensionContext): boolean;
+  /** Breaker pause explanation (with remaining cooldown), or undefined when attempts are allowed. */
+  describeBreakerPause(): string | undefined;
+  describeState(): MidTurnCompactionStatus;
   onAgentEnd(ctx: ExtensionContext): Promise<void>;
   onOutputLimit(messages: AgentMessage[], ctx: ExtensionContext): Promise<void>;
   onCompact(completedOwner?: CompactionOwner, ctx?: ExtensionContext): void;
@@ -392,6 +439,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   }
   const loadInternals = dependencies.loadInternals ?? loadPiCompactionInternals;
   const readSettings = dependencies.readSettings ?? readEffectiveCompactionSettings;
+  const leaseTimeoutMs = dependencies.leaseTimeoutMs ?? COMPACTION_LEASE_TIMEOUT_MS;
   // Settings are reparsed at most once per turn boundary (F11): the snapshot is
   // reused across the many context-hook evaluations within a turn and re-read only
   // when the cwd changes or refreshSettings() invalidates it.
@@ -447,6 +495,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   function releaseInFlight(): void {
     state.running = false;
     state.activeOwner = undefined;
+    state.zombieOwner = undefined;
+    state.zombieDeadlineMs = undefined;
     state.activeRequestOwner = undefined;
     state.activeLease?.release();
     state.activeLease = undefined;
@@ -771,6 +821,23 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   async function settlePendingCompaction(ctx: ExtensionContext): Promise<void> {
     const intent = state.pendingIntent;
     if (!intent || state.running || intent.generation !== state.generation) return;
+    if (state.zombieOwner !== undefined) {
+      if (Date.now() >= (state.zombieDeadlineMs ?? 0)) {
+        // The grace window elapsed without any settle callback; treat the
+        // swallowed call as dead so compaction is not disabled forever.
+        state.zombieOwner = undefined;
+        state.zombieDeadlineMs = undefined;
+      } else {
+        // A timed-out submission may still settle inside the host; starting a
+        // new one now would race its late completion. Keep the intent queued.
+        notifyPressureOnce(
+          ctx,
+          `zombie:${state.zombieOwner}`,
+          "Mid-turn compaction held: a previously timed-out compaction may still be settling. New submissions resume once it completes or fails.",
+        );
+        return;
+      }
+    }
     if (!sameSettings(settingsFor(ctx), intent.settings)) {
       state.pendingIntent = undefined;
       state.lastTriggerKey = undefined;
@@ -867,7 +934,15 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     };
     if (dependencies.arbiter?.currentOwner()) {
       if (intent.requestBlocked) failForeignProviderPressure();
-      else clearPending();
+      else {
+        clearPending();
+        // The in-flight foreign compaction will relieve pressure, but the
+        // dropped intent is not requeued — say so instead of failing silently.
+        ctx.ui.notify(
+          `Mid-turn compaction intent dropped: a ${dependencies.arbiter.currentOwner()} compaction is already active.`,
+          "info",
+        );
+      }
       return;
     }
 
@@ -918,7 +993,16 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     const lease = dependencies.arbiter?.request("mid-turn", midTurnTrigger);
     if (dependencies.arbiter && !lease) {
       if (intent.requestBlocked) failForeignProviderPressure();
-      else clearPending();
+      else {
+        clearPending();
+        const tombstone = dependencies.arbiter.timeoutTombstone();
+        ctx.ui.notify(
+          tombstone
+            ? `Mid-turn compaction skipped: a timed-out compaction may still be settling (~${Math.ceil(tombstone.remainingMs / 1000)}s hold left). It will retry on the next trigger.`
+            : "Mid-turn compaction skipped: the compaction arbiter is busy.",
+          "info",
+        );
+      }
       return;
     }
     clearPending();
@@ -942,6 +1026,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       // Mirror the lease timeout so a legitimately long summarization cannot trip.
       watchdog = setTimeout(() => {
         if (state.activeOwner !== owner) return;
+        // The host submission is unconfirmed, not dead: remember it so a late
+        // completion cannot race the next compaction attempt.
+        state.zombieOwner = owner;
+        state.zombieDeadlineMs = Date.now() + leaseTimeoutMs;
         state.breaker = recordCompactionFailure(state.breaker, state.turnCount);
         state.running = false;
         state.activeOwner = undefined;
@@ -974,11 +1062,19 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         } catch (recoveryError) {
           ctx.ui.notify(`Mid-turn compaction recovery failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`, "error");
         }
-      }, COMPACTION_LEASE_TIMEOUT_MS);
+      }, leaseTimeoutMs);
       watchdog.unref?.();
     };
     const failCompaction = (error: unknown) => {
       disarmWatchdog();
+      if (state.zombieOwner === owner) {
+        state.zombieOwner = undefined;
+        state.zombieDeadlineMs = undefined;
+        ctx.ui.notify(
+          `The timed-out mid-turn compaction eventually failed: ${error instanceof Error ? error.message : String(error)}`,
+          "warning",
+        );
+      }
       if (intent.generation !== state.generation || state.activeOwner !== owner) return;
       state.breaker = recordCompactionFailure(state.breaker, state.turnCount);
       state.running = false;
@@ -1028,6 +1124,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         customInstructions: state.activeLease?.tagInstructions(instructions) ?? instructions,
         onComplete: () => {
           disarmWatchdog();
+          if (state.zombieOwner === owner) {
+            state.zombieOwner = undefined;
+            state.zombieDeadlineMs = undefined;
+            ctx.ui.notify("The timed-out mid-turn compaction eventually completed.", "info");
+          }
           if (state.activeOwner !== owner) return;
           state.breaker = resetCompactionBreaker();
           state.breakerNotified = false;
@@ -1056,6 +1157,14 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   async function settlePendingOutputLimit(ctx: ExtensionContext): Promise<boolean> {
     const intent = state.pendingOutputLimitIntent;
     if (!intent || state.running || intent.generation !== state.generation) return false;
+    if (state.zombieOwner !== undefined) {
+      if (Date.now() >= (state.zombieDeadlineMs ?? 0)) {
+        state.zombieOwner = undefined;
+        state.zombieDeadlineMs = undefined;
+      } else {
+        return false;
+      }
+    }
     if (!sameSettings(settingsFor(ctx), intent.settings)) {
       state.pendingOutputLimitIntent = undefined;
       return false;
@@ -1135,6 +1244,14 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     const instructions = buildOutputLimitInstructions(intent.usage, instructionReserve);
     const failOutputLimit = (error: unknown) => {
       disarmWatchdog();
+      if (state.zombieOwner === owner) {
+        state.zombieOwner = undefined;
+        state.zombieDeadlineMs = undefined;
+        ctx.ui.notify(
+          `The timed-out output-limit compaction eventually failed: ${error instanceof Error ? error.message : String(error)}`,
+          "warning",
+        );
+      }
       if (state.activeOwner !== owner) return;
       state.running = false;
       state.activeOwner = undefined;
@@ -1156,6 +1273,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         customInstructions: lease?.tagInstructions(instructions) ?? instructions,
         onComplete: () => {
           disarmWatchdog();
+          if (state.zombieOwner === owner) {
+            state.zombieOwner = undefined;
+            state.zombieDeadlineMs = undefined;
+            ctx.ui.notify("The timed-out output-limit compaction eventually completed.", "info");
+          }
           if (state.activeOwner !== owner) return;
           state.running = false;
           state.activeOwner = undefined;
@@ -1175,6 +1297,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       // host never settles, so a future output-limit event can re-arm.
       watchdog = setTimeout(() => {
         if (state.activeOwner !== owner) return;
+        state.zombieOwner = owner;
+        state.zombieDeadlineMs = Date.now() + leaseTimeoutMs;
         state.running = false;
         state.activeOwner = undefined;
         state.activeRequestOwner = undefined;
@@ -1184,7 +1308,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           "Output-limit compaction timed out; it will retry on the next truncated response.",
           "warning",
         );
-      }, COMPACTION_LEASE_TIMEOUT_MS);
+      }, leaseTimeoutMs);
       watchdog.unref?.();
     } catch (error) {
       failOutputLimit(error);
@@ -1524,6 +1648,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     },
     onCompact(completedOwner, _ctx) {
       state.generation += 1;
+      // A completed compaction proves any hung submission settled.
+      state.zombieOwner = undefined;
+      state.zombieDeadlineMs = undefined;
       const activeRequestOwner = state.activeRequestOwner;
       const wasPreempted = activeRequestOwner !== undefined
         && completedOwner !== undefined
@@ -1598,6 +1725,45 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     },
     refreshSettings() {
       state.settingsSnapshot = undefined;
+    },
+    hasPendingTakeover() {
+      return state.pendingIntent !== undefined || state.pendingOutputLimitIntent !== undefined;
+    },
+    shouldRetainNativeThreshold(ctx) {
+      const pending = state.pendingIntent;
+      if (!pending || pending.generation !== state.generation
+        || pending.contextExhausted || pending.requestBlocked) return false;
+      const contextWindow = ctx.model?.contextWindow;
+      if (contextWindow === undefined) return false;
+      const usage = ctx.getContextUsage?.();
+      const usageTokens = usage?.tokens ?? (usage?.percent != null
+        ? Math.floor((usage.percent / 100) * usage.contextWindow)
+        : undefined);
+      const currentTokens = Math.max(pending.estimate.tokens, usageTokens ?? 0);
+      return currentTokens >= Math.max(0, contextWindow - OUTPUT_CLAMP_SAFETY_TOKENS);
+    },
+    describeBreakerPause() {
+      return describeCompactionBreakerPause(state.breaker, state.turnCount);
+    },
+    describeState(): MidTurnCompactionStatus {
+      return {
+        turnCount: state.turnCount,
+        running: state.running,
+        activeRequestOwner: state.activeRequestOwner,
+        zombieOwner: state.zombieOwner,
+        pendingIntent: state.pendingIntent ? {
+          tokens: state.pendingIntent.estimate.tokens,
+          thresholdTokens: state.pendingIntent.linkedThreshold.thresholdTokens,
+          contextExhausted: state.pendingIntent.contextExhausted,
+          requestBlocked: state.pendingIntent.requestBlocked === true,
+        } : undefined,
+        outputLimitIntentPending: state.pendingOutputLimitIntent !== undefined,
+        breaker: {
+          consecutiveFailures: state.breaker.consecutiveFailures,
+          trippedAtTurn: state.breaker.trippedAtTurn,
+          cooldownRemainingTurns: compactionBreakerCooldownRemaining(state.breaker, state.turnCount),
+        },
+      };
     },
   };
 }
@@ -3383,8 +3549,9 @@ import {
   adjustPressureAfterReplacementChange,
   assistantToolCallIds, buildMidTurnInstructions, buildMidTurnTrigger,
   buildOutputLimitInstructions, buildVelocityInfo, cacheHitRatio, clearPressureStatus,
-  compactionBreakerAllows, COMPACTION_BREAKER_COOLDOWN_TURNS, computeContextSignals,
-  decideContextAction, derivePressureBand, EMPTY_VELOCITY_TRACKER,
+  compactionBreakerAllows, COMPACTION_BREAKER_COOLDOWN_TURNS, compactionBreakerCooldownRemaining,
+  computeContextSignals,
+  decideContextAction, derivePressureBand, describeCompactionBreakerPause, EMPTY_VELOCITY_TRACKER,
   finalAssistantStopReason, formatTokens, latestCacheHitRatio,
   MAX_CONSECUTIVE_COMPACTION_FAILURES, observeCacheAttribution, observeVelocity,
   pressureResult, publishIdleStatus, recordCompactionFailure,
@@ -3395,7 +3562,8 @@ import {
 } from "./pressure-telemetry.ts";
 export {
   cacheHitRatio, compactionBreakerAllows, COMPACTION_BREAKER_COOLDOWN_TURNS,
-  computeContextSignals, decideContextAction, derivePressureBand,
+  compactionBreakerCooldownRemaining, computeContextSignals, decideContextAction,
+  derivePressureBand, describeCompactionBreakerPause,
   EMPTY_VELOCITY_TRACKER, finalAssistantStopReason,
   MAX_CONSECUTIVE_COMPACTION_FAILURES, observeVelocity, buildVelocityInfo,
   recordCompactionFailure, redundantToolResultCallIds, resetCompactionBreaker,

@@ -34,6 +34,7 @@ import {
   cacheWorthwhileDepth,
   commitProjectedCompactionInput,
   compactionBreakerAllows,
+  compactionBreakerCooldownRemaining,
   COMPACTION_BREAKER_COOLDOWN_TURNS,
   computeContextSignals,
   suffixTokenSums,
@@ -42,6 +43,7 @@ import {
   deriveCompactionThreshold,
   deriveLinkedCompactionThreshold,
   derivePressureBand,
+  describeCompactionBreakerPause,
   disableInvalidBudgetThinking,
   EMPTY_VELOCITY_TRACKER,
   endsWithCompleteToolResultBatch,
@@ -312,6 +314,120 @@ test("extension compaction leases start their timeout only for the matching obse
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(arbiter.currentOwner(), undefined);
   assert.equal(observed.finalize("success"), false, "a timed-out lease cannot settle again");
+});
+
+test("lease timeout arms a tombstone that holds extension submissions but never native ones", async () => {
+  const arbiter = new CompactionArbiter(60);
+  const native = arbiter.observeStart(undefined);
+  assert.equal(native.allowed, true);
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  assert.equal(arbiter.currentOwner(), undefined, "the lease expired");
+  const tombstone = arbiter.timeoutTombstone();
+  assert.ok(tombstone, "a wall-clock expiry arms the tombstone");
+  assert.equal(arbiter.request("mid-turn"), undefined, "extension submissions are held");
+  const tagged = arbiter.observeStart({ owner: "mid-turn", id: 99 }, undefined);
+  assert.equal(tagged.allowed, false, "tagged extension observations are denied");
+  const nextNative = arbiter.observeStart(undefined);
+  assert.equal(nextNative.allowed, true, "native requests still proceed so overflow recovery is never blocked");
+  nextNative.finalize("cancel");
+  assert.equal(arbiter.complete("success"), false);
+  assert.equal(arbiter.timeoutTombstone(), undefined, "an observed settlement clears the tombstone");
+  assert.ok(arbiter.request("mid-turn"), "extension submissions resume after settlement");
+});
+
+test("lease tombstone self-expires after one more lease period", async () => {
+  const arbiter = new CompactionArbiter(40);
+  arbiter.observeStart(undefined);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.ok(arbiter.timeoutTombstone(), "tombstone active right after expiry");
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(arbiter.timeoutTombstone(), undefined, "tombstone self-expires");
+  assert.ok(arbiter.request("mid-turn"), "submissions resume after the grace window");
+});
+
+test("signal abort finalizes the lease without a tombstone", () => {
+  const arbiter = new CompactionArbiter(60_000);
+  const controller = new AbortController();
+  const observed = arbiter.observeStart(undefined, controller.signal);
+  assert.equal(observed.allowed, true);
+  controller.abort();
+  assert.equal(arbiter.currentOwner(), undefined, "abort releases the lease");
+  assert.equal(arbiter.timeoutTombstone(), undefined, "abort proves the compaction dead; no tombstone");
+  assert.ok(arbiter.request("mid-turn"), "extension submissions proceed immediately after an abort");
+});
+
+test("a timed-out mid-turn submission holds new submissions until it settles", async () => {
+  const compactCalls: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
+  const notifications: string[] = [];
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    leaseTimeoutMs: 100,
+    arbiter: new CompactionArbiter(100),
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({
+      enabled: true,
+      reserveTokens: 16_384,
+      keepRecentTokens: 20_000,
+      model: "maestro-qwen/summary-small",
+    }),
+  });
+  const compactionModel = {
+    provider: "maestro-qwen",
+    id: "summary-small",
+    contextWindow: 400_000,
+    maxTokens: 128_000,
+  };
+  const ctx = {
+    cwd: "D:\\repo",
+    model: {
+      provider: "maestro-openai",
+      id: "session-large",
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+    },
+    modelRegistry: {
+      find(provider: string, id: string) {
+        return provider === compactionModel.provider && id === compactionModel.id
+          ? compactionModel
+          : undefined;
+      },
+      async getApiKeyAndHeaders() {
+        return { ok: true, apiKey: "sk-test" };
+      },
+    },
+    abort() {},
+    compact(options: { onComplete: () => void; onError: (error: Error) => void }) {
+      compactCalls.push(options);
+    },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: {
+      setStatus() {},
+      notify(message: string) { notifications.push(message); },
+    },
+  } as never;
+
+  await guard.evaluate(highUsageToolBatch(390_000), ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(compactCalls.length, 0, "the first completed turn defers compaction");
+  await guard.onAgentEnd(ctx);
+  assert.equal(compactCalls.length, 1, "the second completed turn submits");
+  assert.equal(guard.describeState().zombieOwner, undefined);
+
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.notEqual(guard.describeState().zombieOwner, undefined, "the watchdog marks the unsettled submission");
+
+  await guard.evaluate(highUsageToolBatch(390_000), ctx);
+  assert.equal(guard.hasPendingTakeover(), true, "pressure re-queues an intent while the zombie is pending");
+  await guard.onAgentEnd(ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(compactCalls.length, 1, "no new submission while the zombie is unsettled");
+  assert.ok(
+    notifications.some((message) => message.includes("may still be settling")),
+    "the hold is explained to the user",
+  );
+
+  compactCalls[0].onComplete();
+  assert.equal(guard.describeState().zombieOwner, undefined, "a late completion clears the zombie");
+  assert.ok(notifications.some((message) => message.includes("eventually completed")));
 });
 
 test("compaction arbiter preserves output-limit ownership through instruction tags", () => {
@@ -766,6 +882,70 @@ test("mid-turn guard compacts at the second completed turn above the threshold",
   assert.equal(compacted, 1, "the second consecutive completed turn above the threshold compacts");
   assert.equal(notifications.length, 1, "the compaction turn does not re-warn");
   assert.equal(aborted, 0, "below the full window no abort is needed");
+});
+
+test("exhausted output headroom retains the already-started native threshold owner", async () => {
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    readSettings: () => ({ enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 200_000, maxTokens: 32_000 },
+    abort() {},
+    hasPendingMessages: () => false,
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  await guard.evaluate(highUsageToolBatch(196_600), ctx);
+  const status = guard.describeState();
+  assert.ok(status.pendingIntent);
+  assert.ok(status.pendingIntent.tokens >= 196_600);
+  assert.equal(guard.shouldRetainNativeThreshold(ctx), true);
+});
+
+test("completed-turn takeover keeps ordinary non-exhausted pressure deferred", async () => {
+  let compacted = 0;
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 200_000, maxTokens: 32_000 },
+    abort() {},
+    compact() { compacted++; },
+    hasPendingMessages: () => false,
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  await guard.evaluate(highUsageToolBatch(190_000), ctx);
+  assert.equal(guard.shouldRetainNativeThreshold(ctx), false);
+  await guard.onAgentEnd(ctx);
+  assert.equal(compacted, 0, "normal completed-turn preservation remains unchanged");
+});
+
+test("fresh completed-turn usage retains native ownership after crossing the output safety boundary", async () => {
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    readSettings: () => ({ enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 200_000, maxTokens: 32_000 },
+    abort() {},
+    getContextUsage: () => ({ tokens: 198_000, contextWindow: 200_000, percent: 99 }),
+    hasPendingMessages: () => false,
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  await guard.evaluate(highUsageToolBatch(190_000), ctx);
+  assert.equal(
+    guard.shouldRetainNativeThreshold(ctx),
+    true,
+    "the completed-turn usage refresh overrides the older queued estimate",
+  );
 });
 
 test("escalation zone keeps the defer counter so compaction runs on the second completed turn", async () => {
@@ -3506,7 +3686,7 @@ function lengthTruncatedBatch(stopReason = "length") {
   }] as never;
 }
 
-test("completed-turn native threshold gate only cancels the immediate unowned threshold", () => {
+test("completed-turn native threshold gate only cancels the immediate unowned threshold when a takeover is queued", () => {
   const completed = [{
     role: "assistant",
     content: [{ type: "text", text: "done" }],
@@ -3521,17 +3701,96 @@ test("completed-turn native threshold gate only cancels the immediate unowned th
   assert.equal(shouldPreserveCompletedTurn(completed, false), true);
   assert.equal(shouldPreserveCompletedTurn(completed, true), false);
   assert.equal(shouldPreserveCompletedTurn(truncated, false), false);
-  assert.equal(shouldCancelCompletedTurnThreshold("threshold", true, false), true);
-  assert.equal(shouldCancelCompletedTurnThreshold("overflow", true, false), false);
-  assert.equal(shouldCancelCompletedTurnThreshold("manual", true, false), false);
-  assert.equal(shouldCancelCompletedTurnThreshold("threshold", true, true), false);
-  assert.equal(shouldCancelCompletedTurnThreshold("threshold", false, false), false);
-  assert.equal(shouldCancelCompletedTurnThreshold("threshold", true, false, true), false);
+  // Without a queued takeover intent the native threshold compaction must NOT
+  // be cancelled — otherwise nothing would compact until overflow recovery.
+  assert.equal(shouldCancelCompletedTurnThreshold("threshold", true, false), false);
   assert.equal(
-    shouldCancelCompletedTurnThreshold("threshold", true, false, false, true),
+    shouldCancelCompletedTurnThreshold("threshold", true, false, false, false, true),
+    true,
+    "a queued takeover intent makes the completed-turn cancel safe",
+  );
+  assert.equal(shouldCancelCompletedTurnThreshold("overflow", true, false, false, false, true), false);
+  assert.equal(shouldCancelCompletedTurnThreshold("manual", true, false, false, false, true), false);
+  assert.equal(shouldCancelCompletedTurnThreshold("threshold", true, true, false, false, true), false);
+  assert.equal(shouldCancelCompletedTurnThreshold("threshold", false, false, false, false, true), false);
+  assert.equal(shouldCancelCompletedTurnThreshold("threshold", true, false, true, false, true), false);
+  assert.equal(
+    shouldCancelCompletedTurnThreshold("threshold", true, false, false, true, true),
     false,
     "a recovery fallback must not be cancelled after its original request was aborted",
   );
+});
+
+test("breaker pause description reports the remaining cooldown", () => {
+  assert.equal(describeCompactionBreakerPause({ consecutiveFailures: 0 }, 10), undefined);
+  assert.equal(
+    describeCompactionBreakerPause({ consecutiveFailures: 2 }, 10),
+    undefined,
+    "an untripped breaker allows attempts",
+  );
+  const tripped = { consecutiveFailures: MAX_CONSECUTIVE_COMPACTION_FAILURES, trippedAtTurn: 10 };
+  assert.equal(compactionBreakerCooldownRemaining(tripped, 10), COMPACTION_BREAKER_COOLDOWN_TURNS);
+  assert.equal(compactionBreakerCooldownRemaining(tripped, 12), COMPACTION_BREAKER_COOLDOWN_TURNS - 2);
+  assert.equal(compactionBreakerCooldownRemaining(tripped, 10 + COMPACTION_BREAKER_COOLDOWN_TURNS), undefined);
+  assert.match(describeCompactionBreakerPause(tripped, 10) ?? "", /circuit breaker is cooling down/);
+  assert.match(describeCompactionBreakerPause(tripped, 10) ?? "", /5 completed turns/);
+  assert.match(
+    describeCompactionBreakerPause(tripped, 10 + COMPACTION_BREAKER_COOLDOWN_TURNS - 1) ?? "",
+    /1 completed turn/,
+  );
+});
+
+test("hasPendingTakeover reflects queued intents so native cancels stay safe", async () => {
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({
+      enabled: true,
+      reserveTokens: 16_384,
+      keepRecentTokens: 20_000,
+      model: "maestro-qwen/summary-small",
+    }),
+  });
+  const compactionModel = {
+    provider: "maestro-qwen",
+    id: "summary-small",
+    contextWindow: 400_000,
+    maxTokens: 128_000,
+  };
+  const ctx = {
+    cwd: "D:\\repo",
+    model: {
+      provider: "maestro-openai",
+      id: "session-large",
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+    },
+    modelRegistry: {
+      find(provider: string, id: string) {
+        return provider === compactionModel.provider && id === compactionModel.id
+          ? compactionModel
+          : undefined;
+      },
+      async getApiKeyAndHeaders() {
+        return { ok: true, apiKey: "sk-test" };
+      },
+    },
+    abort() {},
+    compact() {},
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: {
+      setStatus() {},
+      notify() {},
+    },
+  } as never;
+
+  assert.equal(guard.hasPendingTakeover(), false, "no intent before any pressure evaluation");
+  assert.equal(guard.describeBreakerPause(), undefined);
+  await guard.evaluate(highUsageToolBatch(390_000), ctx);
+  assert.equal(guard.hasPendingTakeover(), true, "critical pressure queues a takeover intent");
+  const status = guard.describeState();
+  assert.ok(status.pendingIntent, "describeState exposes the queued intent");
+  assert.equal(status.running, false);
+  assert.equal(status.breaker.cooldownRemainingTurns, undefined);
 });
 
 test("native fallback marker is accepted only as the leading instruction token", () => {
@@ -6180,45 +6439,56 @@ test("reset clears below-escalate hysteresis before loading a resumed intent", a
   assert.equal(compacted, 1, "a stale pre-reset relief streak cannot clear a resumed deferred intent");
 });
 
-test("tripped watchdog does not start native fallback while the original host compaction may still run", async () => {
-  mock.timers.enable({ apis: ["setTimeout"] });
-  try {
-    let primaryCompactions = 0;
-    let nativeFallbacks = 0;
-    const notifications: string[] = [];
-    const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
-      loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
-      readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
-    });
-    const ctx = {
-      cwd: "D:\repo",
-      model: { contextWindow: 1_000 },
-      abort() {},
-      compact(options: { customInstructions?: string }) {
-        if (options.customInstructions === NATIVE_FALLBACK_COMPACTION_MARKER) nativeFallbacks++;
-        else primaryCompactions++;
-      },
-      hasPendingMessages: () => false,
-      sessionManager: { getBranch: () => [{ type: "message" }] },
-      ui: { setStatus() {}, notify(message: string) { notifications.push(message); } },
-    } as never;
-    const messages = highUsageToolBatch(950);
+test("tripped watchdog holds overlapping submissions and never starts native fallback while the host compaction may still run", async () => {
+  let primaryCompactions = 0;
+  let nativeFallbacks = 0;
+  const notifications: string[] = [];
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    leaseTimeoutMs: 100,
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\repo",
+    model: { contextWindow: 1_000 },
+    abort() {},
+    compact(options: { customInstructions?: string }) {
+      if (options.customInstructions === NATIVE_FALLBACK_COMPACTION_MARKER) nativeFallbacks++;
+      else primaryCompactions++;
+    },
+    hasPendingMessages: () => false,
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify(message: string) { notifications.push(message); } },
+  } as never;
+  const messages = highUsageToolBatch(950);
 
-    for (let attempt = 0; attempt < MAX_CONSECUTIVE_COMPACTION_FAILURES; attempt++) {
-      await guard.evaluate(messages, ctx);
-      await guard.onAgentEnd(ctx);
-      await guard.evaluate(messages, ctx);
-      await guard.onAgentEnd(ctx);
-      mock.timers.tick(COMPACTION_LEASE_TIMEOUT_MS + 1);
-    }
+  await guard.evaluate(messages, ctx);
+  await guard.onAgentEnd(ctx);
+  await guard.evaluate(messages, ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(primaryCompactions, 1, "the first settled turn submits once");
 
-    assert.equal(primaryCompactions, MAX_CONSECUTIVE_COMPACTION_FAILURES);
-    assert.equal(nativeFallbacks, 0, "watchdog never overlaps an unknown in-flight host compaction");
-    assert.ok(notifications.some((message) => /native fallback was not started.*host operation may still be active/i.test(message)));
-    assert.ok(notifications.some((message) => /compaction paused after 3 consecutive failures/i.test(message)));
-  } finally {
-    mock.timers.reset();
-  }
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  // While the timed-out submission is unconfirmed, repeated pressure must not
+  // overlap it with a new submission or a native fallback.
+  await guard.evaluate(messages, ctx);
+  await guard.onAgentEnd(ctx);
+  await guard.evaluate(messages, ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(primaryCompactions, 1, "no overlapping submission while the zombie is pending");
+  assert.equal(nativeFallbacks, 0, "watchdog never overlaps an unknown in-flight host compaction");
+  assert.ok(notifications.some((message) => /may still be settling/i.test(message)));
+
+  // Once the bounded grace window elapses without any settle callback the
+  // swallowed call is presumed dead and a fresh attempt is allowed.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  await guard.evaluate(messages, ctx);
+  await guard.onAgentEnd(ctx);
+  await guard.evaluate(messages, ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(primaryCompactions, 2, "a fresh attempt resumes after the grace window");
+  assert.equal(nativeFallbacks, 0);
 });
 
 test("non-exhausted callback failures never start native fallback", async () => {

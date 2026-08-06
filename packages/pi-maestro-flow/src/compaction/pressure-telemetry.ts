@@ -307,6 +307,30 @@ export function compactionBreakerAllows(
   return { allowed: false, breaker };
 }
 
+/** Remaining cooldown turns while the breaker is open, or undefined when allowed. */
+export function compactionBreakerCooldownRemaining(
+  breaker: CompactionBreakerState,
+  turnCount: number,
+): number | undefined {
+  if (breaker.trippedAtTurn === undefined) return undefined;
+  const remaining = COMPACTION_BREAKER_COOLDOWN_TURNS - (turnCount - breaker.trippedAtTurn);
+  return remaining > 0 ? remaining : undefined;
+}
+
+/**
+ * Human-readable pause explanation while the breaker is open, so cancel paths
+ * can tell the user why compaction is being deferred. Undefined when allowed.
+ */
+export function describeCompactionBreakerPause(
+  breaker: CompactionBreakerState,
+  turnCount: number,
+): string | undefined {
+  const remaining = compactionBreakerCooldownRemaining(breaker, turnCount);
+  if (remaining === undefined) return undefined;
+  const turns = remaining === 1 ? "1 completed turn" : `${remaining} completed turns`;
+  return `the compaction circuit breaker is cooling down after ${breaker.consecutiveFailures} consecutive failures; it retries after ${turns}`;
+}
+
 export const VELOCITY_SAMPLE_CAP = 4;
 export const EMPTY_VELOCITY_TRACKER: VelocityTracker = { samples: [] };
 
@@ -481,12 +505,19 @@ export function shouldCancelCompletedTurnThreshold(
   hasOwnedRequest: boolean,
   hasPendingMessages = false,
   isRecoveryFallback = false,
+  hasTakeoverIntent = false,
 ): boolean {
+  // The cancel is only safe when the extension actually takes over: without a
+  // pending compaction intent (e.g. pressure mechanism disabled, linked
+  // threshold unusable, or estimate below the extension threshold) cancelling
+  // the native threshold compaction would leave nothing compacting until
+  // overflow recovery.
   return reason === "threshold"
     && preserveCompletedTurn
     && !hasOwnedRequest
     && !hasPendingMessages
-    && !isRecoveryFallback;
+    && !isRecoveryFallback
+    && hasTakeoverIntent;
 }
 
 export function buildOutputLimitInstructions(
