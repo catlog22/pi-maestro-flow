@@ -9,7 +9,7 @@ import {
   supportedThinkingLevels,
   type AvailableModelEntry,
 } from "../src/models/model-catalog.ts";
-import { buildPiArgs, clampThinkingForModel } from "../src/runs/execution.ts";
+import { buildPiArgs } from "../src/runs/execution.ts";
 
 const baseAgent: AgentConfig = {
   name: "general",
@@ -33,7 +33,7 @@ test("model catalog is deterministic, deduplicated, and replaceable", () => {
 
   const injected = appendModelCatalog("base", first);
   assert.match(injected, /anthropic\/claude-opus/);
-  assert.match(injected, /openai\/gpt-5 \[thinking:minimal,low,medium,high\]/);
+  assert.match(injected, /openai\/gpt-5 \[thinking:off,minimal,low,medium,high,xhigh\]/);
 
   const second = createModelCatalogSnapshot([{ provider: "google", id: "gemini-pro" }]);
   const refreshed = appendModelCatalog(injected, second);
@@ -42,19 +42,24 @@ test("model catalog is deterministic, deduplicated, and replaceable", () => {
   assert.equal((refreshed.match(/<available_teammate_models>/g) ?? []).length, 1);
 });
 
-test("model catalog exposes legacy and modern thinking capabilities", () => {
+test("model catalog advertises the full thinking range for reasoning models", () => {
   assert.deepEqual(supportedThinkingLevels({
     provider: "maestro-openai",
     id: "gpt-5",
     reasoning: true,
     thinkingLevelMap: { off: null },
-  }), ["minimal", "low", "medium", "high"]);
+  }), ["off", "minimal", "low", "medium", "high", "xhigh"]);
   assert.deepEqual(supportedThinkingLevels({
     provider: "maestro-anthropic",
     id: "claude-sonnet-4-5",
     reasoning: true,
     thinkingLevelMap: { xhigh: "high" },
   }), ["off", "minimal", "low", "medium", "high", "xhigh"]);
+  assert.deepEqual(supportedThinkingLevels({
+    provider: "custom",
+    id: "plain",
+    reasoning: false,
+  }), ["off"]);
   assert.equal(supportedThinkingLevels({ provider: "custom", id: "unknown" }), undefined);
 });
 
@@ -109,7 +114,7 @@ test("session start snapshots models and before_agent_start refreshes changed re
 
     models = [{ provider: "openai", id: "gpt-5", reasoning: true, thinkingLevelMap: { off: null } }];
     const capabilityRefresh = await handlers.get("before_agent_start")![0]({ systemPrompt: "base" }, ctx);
-    assert.match(capabilityRefresh.systemPrompt, /openai\/gpt-5 \[thinking:minimal,low,medium,high\]/);
+    assert.match(capabilityRefresh.systemPrompt, /openai\/gpt-5 \[thinking:off,minimal,low,medium,high,xhigh\]/);
 
     models = [{ provider: "anthropic", id: "claude-opus" }];
     const second = await handlers.get("before_agent_start")![0]({ systemPrompt: "base" }, ctx);
@@ -143,39 +148,44 @@ test("thinking overrides reach child Pi once", () => {
   assert.equal(maxAlias[maxAlias.indexOf("--thinking") + 1], "xhigh");
 });
 
-test("thinking clamps to the final model capability before child Pi", () => {
-  const capabilities = [
+test("thinking overrides pass through unchanged; capability is advisory", () => {
+  // The teammate layer never clamps thinking depth: the exact requested level
+  // reaches the child Pi, which clamps to its own provider capability boundary.
+  const narrowCapabilities = [
     { id: "maestro-openai/gpt-5", reasoning: true, thinkingLevels: ["minimal", "low", "medium", "high"] },
-    { id: "maestro-anthropic/claude-sonnet-4-5", reasoning: true, thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh"] },
     { id: "custom/plain", reasoning: false, thinkingLevels: ["off"] },
   ] as const;
 
-  assert.equal(clampThinkingForModel("xhigh", "maestro-openai/gpt-5", capabilities), "high");
-  assert.equal(clampThinkingForModel("off", "maestro-openai/gpt-5", capabilities), "minimal");
-  assert.equal(clampThinkingForModel("xhigh", "custom/plain", capabilities), "off");
-  assert.equal(clampThinkingForModel("xhigh", "unknown/model", capabilities), "xhigh");
-
-  const fallbackAttempt = buildPiArgs(
+  const gpt5 = buildPiArgs(
     baseAgent,
-    { agent: "general", thinking: "max" },
+    { agent: "general", thinking: "xhigh" },
     "prompt.md",
     "maestro-openai/gpt-5",
     undefined,
     undefined,
     undefined,
-    capabilities,
+    narrowCapabilities,
   );
-  assert.equal(fallbackAttempt[fallbackAttempt.indexOf("--thinking") + 1], "high");
+  assert.equal(gpt5[gpt5.indexOf("--thinking") + 1], "xhigh");
 
-  const anthropic = buildPiArgs(
+  const plain = buildPiArgs(
     baseAgent,
-    { agent: "general", model: "maestro-anthropic/claude-sonnet-4-5", thinking: "max" },
+    { agent: "general", thinking: "off" },
     "prompt.md",
+    "custom/plain",
     undefined,
     undefined,
     undefined,
-    undefined,
-    capabilities,
+    narrowCapabilities,
   );
-  assert.equal(anthropic[anthropic.indexOf("--thinking") + 1], "xhigh");
+  assert.equal(plain[plain.indexOf("--thinking") + 1], "off");
+
+  // With no routed model there is no capability data either; the level still
+  // passes through unchanged.
+  const unmodeled = buildPiArgs(
+    baseAgent,
+    { agent: "general", thinking: "high" },
+    "prompt.md",
+  );
+  assert.equal(unmodeled[unmodeled.indexOf("--thinking") + 1], "high");
 });

@@ -562,7 +562,7 @@ teammate({
 
 Task-level `thinking` → top-level `thinking` → `taskType` mapping → agent frontmatter → Pi default
 
-> Note: supported thinking levels vary by model. E.g. `deepseek/deepseek-v4-flash` supports only `off` and `high`, while `maestro-openai/gpt-5.6-sol` supports all levels.
+> Note: thinking depth is never restricted by the teammate layer — every level in the table above is selectable for any routed model. If a provider cannot honor a level, the child Pi host clamps to its own capability boundary.
 
 ---
 

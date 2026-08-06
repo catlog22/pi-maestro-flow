@@ -1265,35 +1265,6 @@ export function childSettingsPath(env: NodeJS.ProcessEnv): string {
 // Build pi CLI arguments
 // ---------------------------------------------------------------------------
 
-export const ORDERED_THINKING_LEVELS: readonly TeammateThinkingLevel[] = [
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-];
-
-export function clampThinkingForModel(
-  thinking: TeammateThinkingLevel,
-  model: string | undefined,
-  modelCapabilities: readonly TeammateModelCapability[] = [],
-): TeammateThinkingLevel {
-  const supported = modelCapabilities.find((candidate) => candidate.id === model)?.thinkingLevels;
-  if (!supported?.length || supported.includes(thinking)) return thinking;
-
-  const requestedIndex = ORDERED_THINKING_LEVELS.indexOf(thinking);
-  for (let index = requestedIndex; index < ORDERED_THINKING_LEVELS.length; index += 1) {
-    const candidate = ORDERED_THINKING_LEVELS[index];
-    if (supported.includes(candidate)) return candidate;
-  }
-  for (let index = requestedIndex - 1; index >= 0; index -= 1) {
-    const candidate = ORDERED_THINKING_LEVELS[index];
-    if (supported.includes(candidate)) return candidate;
-  }
-  return thinking;
-}
-
 export const MODEL_SPECIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:-]*)*$/;
 export const MAX_MODEL_SPECIFIER_BYTES = 256;
 
@@ -1375,7 +1346,10 @@ export function buildPiArgs(
 
   const requestedThinking = parseTeammateThinkingLevel(params.thinking) ?? agentConfig.thinking;
   if (requestedThinking) {
-    args.push("--thinking", clampThinkingForModel(requestedThinking, model, modelCapabilities));
+    // Thinking depth passes through unchanged: the teammate layer never
+    // restricts levels; the child Pi host clamps to its own capability
+    // boundary when a provider cannot honor the requested level.
+    args.push("--thinking", requestedThinking);
   }
 
   if (agentConfig.tools && agentConfig.tools.length > 0) {

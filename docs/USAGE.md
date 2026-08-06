@@ -562,7 +562,7 @@ teammate({
 
 任务级 `thinking` → 顶层 `thinking` → `taskType` 映射 → Agent frontmatter → Pi 默认
 
-> 注意：不同模型支持的思考级别范围不同。例如 `deepseek/deepseek-v4-flash` 仅支持 `off` 和 `high`，而 `maestro-openai/gpt-5.6-sol` 支持全部级别。
+> 注意：teammate 层不限制思考深度——上表中的所有级别对任意路由模型均可选择。若 provider 无法兑现某级别，子进程 Pi host 会在自身能力边界内收敛。
 
 ---
 

@@ -33,15 +33,18 @@ export interface ModelCatalogSnapshot {
   models: TeammateModelCapability[];
 }
 
+/**
+ * Declared thinking depth support for a model. The teammate layer never
+ * restricts thinking depth: a reasoning model is advertised as supporting the
+ * full level range, and the child Pi host clamps to its own provider-specific
+ * capability boundary when a level cannot be honored. The model's
+ * thinkingLevelMap is advisory (how a level maps to a provider parameter),
+ * not an availability gate.
+ */
 export function supportedThinkingLevels(model: AvailableModelEntry): TeammateThinkingLevel[] | undefined {
   if (model.reasoning === false) return ["off"];
   if (model.reasoning !== true) return undefined;
-
-  return TEAMMATE_THINKING_LEVELS.filter((level) => {
-    const mapped = model.thinkingLevelMap?.[level];
-    if (mapped === null) return false;
-    return level !== "xhigh" || mapped !== undefined;
-  });
+  return [...TEAMMATE_THINKING_LEVELS];
 }
 
 const START_MARKER = "<available_teammate_models>";

@@ -403,8 +403,6 @@ export declare function acquireRetryPersistenceGuard(settingsPath: string): () =
 export declare function readRetrySettingSnapshot(settingsPath: string): RetrySettingSnapshot | undefined;
 export declare function restoreRetrySettingSnapshot(settingsPath: string, snapshot: RetrySettingSnapshot): void;
 export declare function childSettingsPath(env: NodeJS.ProcessEnv): string;
-export declare const ORDERED_THINKING_LEVELS: readonly TeammateThinkingLevel[];
-export declare function clampThinkingForModel(thinking: TeammateThinkingLevel, model: string | undefined, modelCapabilities?: readonly TeammateModelCapability[]): TeammateThinkingLevel;
 export declare const MODEL_SPECIFIER_PATTERN: RegExp;
 export declare const MAX_MODEL_SPECIFIER_BYTES = 256;
 export declare function validateModelSpecifier(model: string): string;

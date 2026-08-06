@@ -276,7 +276,7 @@ test("control center removes terminal controls from every untrusted display path
   for (const line of failed.render(100)) assertNoInjectedControls(line);
 });
 
-test("thinking picker shows the full depth range and marks model capability limits", () => {
+test("thinking picker shows the full depth range and never restricts levels by model", () => {
   const openai = makeCenter({
     config: { version: 2, mappings: { explore: "openai/gpt-5" }, thinkingLevels: {} },
   }).center;
@@ -285,10 +285,11 @@ test("thinking picker shows the full depth range and marks model capability limi
   const openaiPicker = openai.render(90).join("\n");
   assert.match(openaiPicker, /off/);
   assert.match(openaiPicker, /minimal/);
+  assert.match(openaiPicker, /medium/);
   assert.match(openaiPicker, /high/);
   assert.match(openaiPicker, /xhigh \/ max/);
-  assert.match(openaiPicker, /does not support this level/);
-  assert.match(openaiPicker, /! unavailable/);
+  assert.doesNotMatch(openaiPicker, /does not support this level/);
+  assert.doesNotMatch(openaiPicker, /! unavailable/);
 
   const anthropic = makeCenter({
     config: { version: 2, mappings: { explore: "anthropic/sonnet" }, thinkingLevels: {} },
@@ -299,7 +300,7 @@ test("thinking picker shows the full depth range and marks model capability limi
   assert.match(anthropicPicker, /xhigh \/ max/);
 });
 
-test("unsupported persisted thinking remains visible but cannot be saved", async () => {
+test("persisted thinking depth beyond declared capabilities stays selectable and saves", async () => {
   const { center, savedThinking } = makeCenter({
     config: {
       version: 2,
@@ -308,11 +309,11 @@ test("unsupported persisted thinking remains visible but cannot be saved", async
     },
   });
   center.handleInput("\x1b[1;5C");
-  assert.match(center.render(90).join("\n"), /does not support this level/);
+  assert.match(center.render(90).join("\n"), /xhigh \/ max/);
   center.handleInput("\r");
   await new Promise((resolve) => setTimeout(resolve, 25));
-  assert.deepEqual(savedThinking, []);
-  assert.match(center.render(90).join("\n"), /Unsupported/);
+  assert.deepEqual(savedThinking, [{ taskType: "explore", thinking: "xhigh" }]);
+  assert.match(center.render(90).join("\n"), /Saved · explore thinking → xhigh/);
 });
 
 test("model routing is reversible and saves inline", async () => {

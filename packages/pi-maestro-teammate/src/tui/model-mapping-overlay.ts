@@ -488,12 +488,6 @@ export class TeammateControlCenter implements Component, Focusable {
       const taskType = this.modelTaskType;
       const item = items[this.modelSelected];
       if (!taskType || !item) return;
-      if (this.editorKind === "thinking" && item.unavailable) {
-        this.statusTone = "error";
-        this.statusText = `Unsupported · ${item.detail}`;
-        this.params.requestRender();
-        return;
-      }
       this.saving = true;
       this.statusTone = "dim";
       this.statusText = `Saving ${this.taskTypeMeta(taskType).label}…`;
@@ -821,8 +815,6 @@ export class TeammateControlCenter implements Component, Focusable {
   private thinkingItems(taskType: TeammateTaskType) {
     const configured = this.config.thinkingLevels[taskType];
     const routedModel = this.config.mappings[taskType];
-    const capability = routedModel ? this.modelCapabilities.get(routedModel) : undefined;
-    const supported = capability?.thinkingLevels;
     const items = [{
       value: "__auto__",
       label: "inherit / Pi default",
@@ -833,15 +825,15 @@ export class TeammateControlCenter implements Component, Focusable {
       .map((thinking) => ({
         value: thinking,
         label: thinking === "xhigh" ? "xhigh / max" : thinking,
-        detail: supported && !supported.includes(thinking)
-          ? `${routedModel} does not support this level`
-          : thinking === configured
-            ? `Current ${taskType} thinking depth`
-            : routedModel
-              ? `Supported by ${routedModel}`
-              : "Model-dependent; select a routed model for exact capabilities",
+        detail: thinking === configured
+          ? `Current ${taskType} thinking depth`
+          : routedModel
+            ? `Applies to ${routedModel}`
+            : "Applies to the routed task model",
         active: thinking === configured,
-        unavailable: !!supported && !supported.includes(thinking),
+        // Thinking depth is never restricted by model capability; the child
+        // Pi host clamps to its provider-specific boundary if needed.
+        unavailable: false,
       }))];
     return items;
   }
