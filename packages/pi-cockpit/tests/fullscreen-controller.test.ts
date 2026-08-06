@@ -178,6 +178,25 @@ test("X10 drag (non-SGR fallback) selects and copies like SGR", async () => {
 	controller.dispose();
 });
 
+test("legacy urxvt wheel buttons 4/5 scroll instead of starting a drag", () => {
+	let transcript = Array.from({ length: 40 }, (_, i) => `line ${i}`);
+	const harness = makeHarness(() => buildLines(transcript, EDITOR_BLOCK, CHROME), 20);
+	const controller = createFullscreenController({
+		subscribeInput: (handler) => {
+			harness.attachInput(handler);
+			return () => harness.attachInput(undefined);
+		},
+	});
+	controller.attach(harness.tui);
+	harness.inputHandler?.("\x1b[<4;5;10M"); // button 4 = legacy wheel up
+	harness.inputHandler?.("\x1b[<4;5;10M");
+	assert.equal(controller.getScrollOffset(), 6, "legacy wheel-up scrolls the transcript");
+	harness.inputHandler?.("\x1b[<5;5;10M"); // button 5 = legacy wheel down
+	assert.equal(controller.getScrollOffset(), 3, "legacy wheel-down returns toward live bottom");
+	assert.ok(!harness.render()[14].includes("\x1b[7m"), "legacy wheel never starts a selection");
+	controller.dispose();
+});
+
 test("modifier-wheel still scrolls the transcript instead of starting a drag", () => {
 	let transcript = Array.from({ length: 40 }, (_, i) => `line ${i}`);
 	const harness = makeHarness(() => buildLines(transcript, EDITOR_BLOCK, CHROME), 20);

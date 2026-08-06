@@ -195,12 +195,14 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 	const handleInput = (data: string): InputResult => {
 		const mouse = parseSgrMouseEvent(data) ?? parseX10MouseEvent(data);
 		if (!mouse) return undefined;
-		// Wheel buttons are 64 (up) / 65 (down) plus optional modifier bits; match
-		// on the wheel bit so modifier-wheel still scrolls the transcript instead of
-		// falling through to selection or native terminal scrolling.
-		if ((mouse.button & 64) !== 0) {
+		// Wheel: SGR 64/65 (plus modifier bits) is the modern encoding; buttons 4/5
+		// are the legacy urxvt/xterm wheel. Either must scroll the transcript and be
+		// consumed so the terminal never falls back to native alternate-screen
+		// scrollback (which would move the whole frame including the editor).
+		if ((mouse.button & 64) !== 0 || mouse.button === 4 || mouse.button === 5) {
 			selection.clear();
-			const delta = (mouse.button & 1) === 0 ? WHEEL_SCROLL_STEP : -WHEEL_SCROLL_STEP;
+			const isDown = (mouse.button & 1) === 1 || mouse.button === 5;
+			const delta = isDown ? -WHEEL_SCROLL_STEP : WHEEL_SCROLL_STEP;
 			scrollBy(delta);
 			return { consume: true };
 		}
