@@ -46,7 +46,15 @@ const DEFAULT_PREPARED_TRANSACTION_TTL_MS = 30_000;
 
 type WritableScope = "global" | "project";
 type ResourceKind = "compaction" | "failover";
-type FlowSettingsAction = (context: SettingsContextV1) => Promise<void> | void;
+type FlowSettingsAction = (context: SettingsContextV1) => Promise<string | void> | string | void;
+
+export interface PermissionOverview {
+  mode: string;
+  allow: readonly string[];
+  ask: readonly string[];
+  deny: readonly string[];
+  sources: string;
+}
 
 interface SettingsEventBus {
   on(event: string, handler: (payload: unknown) => void): void | (() => void);
@@ -70,6 +78,7 @@ export interface FlowSettingsProviderOptions {
   getProjectFailoverPath?: (cwd: string) => string;
   actions?: Readonly<Record<string, FlowSettingsAction>>;
   getAgentResponseLanguage?: () => "default" | "zh-CN";
+  getPermissionOverview?: () => PermissionOverview | undefined;
   replacementOperations?: Partial<FlowSettingsReplacementOperations>;
   preparedTransactionTtlMs?: number;
 }
@@ -117,7 +126,6 @@ interface ParsedKey {
 
 const ACTION_KEYS = [
   "responseLanguage.manage",
-  "permissions.manage",
 ] as const;
 
 /** Read-only diagnostic views rendered by the settings shell. */
@@ -145,6 +153,19 @@ const OVERVIEW_DEFINITIONS: readonly SettingDefinition[] = [
     merge: "provider-defined",
     activation: "live",
     sensitivity: "public",
+    reversibility: "none",
+    editor: { kind: "overview" },
+  },
+  {
+    key: "flow.permissions",
+    group: "flow.group.permissions",
+    order: 62,
+    labelKey: "flow.permissions",
+    descriptionKey: "flow.permissions.description",
+    scopes: ["project"],
+    merge: "provider-defined",
+    activation: "live",
+    sensitivity: "private",
     reversibility: "none",
     editor: { kind: "overview" },
   },
@@ -195,8 +216,14 @@ const BASE_CATALOGS = {
     "flow.action.responseLanguage.description": "Independent from the Maestro Settings interface language; toggles /chinese for this session",
     "flow.option.responseLanguage.default": "Default Agent language",
     "flow.option.responseLanguage.zh-CN": "Chinese replies",
-    "flow.action.permissions": "Open permissions summary",
-    "flow.action.permissions.description": "Shows the current permission mode for this session",
+    "flow.group.permissions": "Permissions",
+    "flow.permissions": "Permission rules",
+    "flow.permissions.description": "Read-only view of the current permission mode, rules and config sources",
+    "flow.permissions.mode": "Mode",
+    "flow.permissions.allow": "Allow",
+    "flow.permissions.ask": "Ask",
+    "flow.permissions.deny": "Deny",
+    "flow.permissions.sources": "Sources",
     "flow.action.skills": "Manage skills",
     "flow.action.skills.description": "Enables or disables skills and model-invocation rights; changes apply after the extension reloads",
     "flow.action.mcp": "Manage MCP servers",
@@ -267,8 +294,14 @@ const BASE_CATALOGS = {
     "flow.action.responseLanguage.description": "与 Maestro 设置界面语言相互独立；切换本会话的 /chinese 模式",
     "flow.option.responseLanguage.default": "默认 Agent 语言",
     "flow.option.responseLanguage.zh-CN": "中文回复",
-    "flow.action.permissions": "打开权限概览",
-    "flow.action.permissions.description": "显示本会话当前的权限模式",
+    "flow.group.permissions": "权限",
+    "flow.permissions": "权限规则",
+    "flow.permissions.description": "只读展示当前权限模式、规则与配置来源",
+    "flow.permissions.mode": "模式",
+    "flow.permissions.allow": "允许",
+    "flow.permissions.ask": "询问",
+    "flow.permissions.deny": "拒绝",
+    "flow.permissions.sources": "来源",
     "flow.action.skills": "管理 Skills",
     "flow.action.skills.description": "启用/停用 Skill 与模型主动调用权限；更改在扩展重载后生效",
     "flow.action.mcp": "管理 MCP 服务",
@@ -481,12 +514,13 @@ export function createFlowSettingsProvider(options: FlowSettingsProviderOptions 
     invokeAction: async (request) => {
       const action = options.actions?.[request.actionId];
       if (!action) return { handled: false };
-      await action(request.context);
+      const message = await action(request.context);
       return {
         handled: true,
         refresh: request.actionId === "compaction.manage"
           || request.actionId === "failover.manage"
           || request.actionId === "responseLanguage.manage",
+        ...(typeof message === "string" && message ? { message } : {}),
       };
     },
   };
@@ -596,7 +630,7 @@ function setting(
 function snapshot(
   resources: readonly ResourceState[],
   instanceId: string,
-  options: Pick<FlowSettingsProviderOptions, "getAgentResponseLanguage"> = {},
+  options: Pick<FlowSettingsProviderOptions, "getAgentResponseLanguage" | "getPermissionOverview"> = {},
 ): SettingsSnapshot {
   const configured: ConfiguredSettingValue[] = [];
   const effective: SettingsSnapshot["effective"]["values"][number][] = [];
@@ -606,13 +640,15 @@ function snapshot(
   const effectiveCompaction = resolveEffectiveCompactionSettings(compactionPatches.get("global") ?? {}, compactionPatches.get("project") ?? {});
 
   for (const definition of definitions()) {
-    if (definition.key === "compaction.derived" || definition.key === "failover.overview") {
+    if (definition.key === "compaction.derived" || definition.key === "failover.overview" || definition.key === "flow.permissions") {
       configured.push({ key: definition.key, scope: "project", state: "absent" });
       effective.push({
         key: definition.key,
         value: definition.key === "compaction.derived"
           ? compactionDerivedRows(effectiveCompaction) as unknown as JsonValue
-          : failoverOverviewRows(failover.map((entry) => entry.document.raw)) as unknown as JsonValue,
+          : definition.key === "failover.overview"
+            ? failoverOverviewRows(failover.map((entry) => entry.document.raw)) as unknown as JsonValue
+            : permissionOverviewRows(options.getPermissionOverview?.()) as unknown as JsonValue,
         source: "runtime",
       });
       continue;
@@ -1171,6 +1207,26 @@ function compactionDerivedRows(effective: EffectiveCompactionSettings): Settings
       status: effective.soft.enabled ? "ok" : "dim",
     },
   ];
+}
+
+function permissionOverviewRows(overview: PermissionOverview | undefined): SettingsOverviewRow[] {
+  if (!overview) {
+    return [{ labelKey: "flow.permissions.mode", value: "—", status: "dim" }];
+  }
+  const rows: SettingsOverviewRow[] = [
+    { labelKey: "flow.permissions.mode", value: overview.mode, status: "ok" },
+  ];
+  for (const [key, rules] of [["allow", overview.allow], ["ask", overview.ask], ["deny", overview.deny]] as const) {
+    if (rules.length === 0) {
+      rows.push({ labelKey: `flow.permissions.${key}`, value: "—", status: "dim" });
+    } else {
+      for (const rule of rules) {
+        rows.push({ labelKey: `flow.permissions.${key}`, value: rule, status: key === "allow" ? "ok" : "dim" });
+      }
+    }
+  }
+  rows.push({ labelKey: "flow.permissions.sources", value: overview.sources || "—", status: "dim" });
+  return rows;
 }
 
 function failoverOverviewRows(records: readonly Record<string, unknown>[]): SettingsOverviewRow[] {

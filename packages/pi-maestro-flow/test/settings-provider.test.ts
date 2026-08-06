@@ -524,11 +524,14 @@ test("Flow provider invokes plugin-owned actions and participates in discovery",
   const provider = createFlowSettingsProvider({
     getAgentResponseLanguage: () => chinese ? "zh-CN" : "default",
     actions: {
-      "responseLanguage.manage": () => { chinese = !chinese; },
+      "responseLanguage.manage": () => { chinese = !chinese; return chinese ? "已切换到中文回复" : "已切换到默认回复"; },
     },
   });
   assert.equal((await provider.read({ context })).effective.values.find((entry) => entry.key === "responseLanguage.manage")?.value, "default");
-  assert.deepEqual(await provider.invokeAction!({ context, actionId: "responseLanguage.manage" }), { handled: true, refresh: true });
+  const acted = await provider.invokeAction!({ context, actionId: "responseLanguage.manage" });
+  assert.equal(acted.handled, true);
+  assert.equal(acted.refresh, true);
+  assert.equal(acted.message, "已切换到中文回复");
   assert.equal((await provider.read({ context })).effective.values.find((entry) => entry.key === "responseLanguage.manage")?.value, "zh-CN");
 
   const events = new EventEmitter();
@@ -622,6 +625,38 @@ test("failover chain edits through the list-crud value persist to the file", asy
       "openai/main": ["qwen/fallback", "anthropic/fallback"],
       "deepseek/main": ["qwen/main"],
     });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Flow provider exposes the permission rules as a read-only overview", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "flow-settings-provider-perm-"));
+  try {
+    const context: SettingsContextV1 = { cwd: path.join(root, "project"), locale: "en" };
+    const provider = createFlowSettingsProvider({
+      getGlobalSettingsPath: () => path.join(root, "home", "settings.json"),
+      getProjectSettingsPath: () => path.join(root, "project", ".pi", "settings.json"),
+      getGlobalFailoverPath: () => path.join(root, "home", "model-failover.json"),
+      getProjectFailoverPath: () => path.join(root, "project", ".pi", "model-failover.json"),
+      getPermissionOverview: () => ({
+        mode: "default",
+        allow: ["Read(x)"],
+        ask: ["Bash(git *)"],
+        deny: ["Bash(rm *)"],
+        sources: "home settings.json",
+      }),
+    });
+    const description = await provider.describe({ context });
+    assert.ok(description.settings.some((entry) => entry.key === "flow.permissions" && entry.editor.kind === "overview"));
+    assert.ok(!description.settings.some((entry) => entry.key === "permissions.manage"), "legacy action removed");
+    const snapshot = await provider.read({ context });
+    const rows = snapshot.effective.values.find((entry) => entry.key === "flow.permissions")?.value as Array<Record<string, unknown>>;
+    assert.ok(Array.isArray(rows));
+    assert.equal(rows[0]?.labelKey, "flow.permissions.mode");
+    assert.equal(rows[0]?.value, "default");
+    assert.ok(rows.some((row) => row.labelKey === "flow.permissions.allow" && row.value === "Read(x)"));
+    assert.ok(rows.some((row) => row.labelKey === "flow.permissions.sources"));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

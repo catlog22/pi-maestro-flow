@@ -119,6 +119,12 @@ export interface SettingsInvokeActionResultV1 {
   refresh?: boolean;
   messageKey?: string;
   params?: Readonly<Record<string, string | number | boolean>>;
+  /**
+   * Raw, already-localized text the action wants surfaced in the settings
+   * shell (e.g. a diagnostic dump or confirmation). Rendered directly,
+   * bypassing catalog lookup.
+   */
+  message?: string;
 }
 
 export interface SettingsRuntimeFailureV1 {

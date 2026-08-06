@@ -28,6 +28,7 @@ import {
 import {
 	SETTINGS_SECRET_SET_PLACEHOLDER,
 } from "pi-maestro-settings-core/v1/schema";
+import { translateSettings } from "pi-maestro-settings-core/v1";
 import { parseSgrMouseEvent } from "../split-pane.ts";
 import { terminalRows } from "../stack-widget.ts";
 import { SettingsCoordinator, type SettingsApplyOutcome, type SettingsProviderFailure } from "./coordinator.ts";
@@ -62,6 +63,8 @@ export interface SettingsShellParams {
 	requestRender: () => void;
 	requestAction: (request: SettingsShellActionRequest) => void;
 	close: () => void;
+	/** Message returned by an invoked setting action, shown as an in-shell notice. */
+	initialActionMessage?: SettingsActionFeedback;
 }
 
 interface EditingState {
@@ -184,6 +187,10 @@ export class MaestroSettingsShell implements Component, Focusable {
 		this.failures = params.initial.failures;
 		this.translator = this.createTranslator();
 		this.syncSelection();
+		if (params.initialActionMessage) {
+			this.notice = params.initialActionMessage.text;
+			this.noticeTone = params.initialActionMessage.tone;
+		}
 	}
 
 	invalidate(): void {}
@@ -1531,6 +1538,7 @@ export async function showMaestroSettingsShell(
 		return { context, providers, failures };
 	};
 	let initial = await load();
+	let actionFeedback: SettingsActionFeedback | undefined;
 	while (true) {
 		const result = await ctx.ui.custom<
 			{ kind: "close" } | { kind: "action"; request: SettingsShellActionRequest }
@@ -1567,9 +1575,14 @@ export async function showMaestroSettingsShell(
 		});
 		if (result.kind === "close") return;
 
-		await executeSettingsShellAction(ctx, registry, initial.context, result.request);
+		actionFeedback = await executeSettingsShellAction(ctx, registry, initial.context, result.request);
 		initial = await load();
 	}
+}
+
+export interface SettingsActionFeedback {
+	text: string;
+	tone: "success" | "warning" | "error";
 }
 
 export async function executeSettingsShellAction(
@@ -1577,11 +1590,11 @@ export async function executeSettingsShellAction(
 	registry: SettingsProviderRegistry,
 	context: SettingsContextV1,
 	request: SettingsShellActionRequest,
-): Promise<void> {
+): Promise<SettingsActionFeedback | undefined> {
 	const registration = registry.get(request.providerId);
 	if (!registration?.provider.invokeAction) {
 		ctx.ui.notify("This setting action is no longer available.", "warning");
-		return;
+		return undefined;
 	}
 	try {
 		const action = await registration.provider.invokeAction({
@@ -1589,9 +1602,22 @@ export async function executeSettingsShellAction(
 			actionId: request.actionId,
 			key: request.key,
 		});
-		if (!action.handled) ctx.ui.notify("This setting action is not supported by its provider.", "warning");
+		if (!action.handled) {
+			ctx.ui.notify("This setting action is not supported by its provider.", "warning");
+			return undefined;
+		}
+		if (action.message) return { text: action.message, tone: "success" };
+		if (action.messageKey) {
+			const described = await Promise.resolve(registration.provider.describe({ context }));
+			const catalogs = described?.catalogs;
+			if (catalogs) {
+				return { text: translateSettings(catalogs, context.locale, action.messageKey, action.params), tone: "success" };
+			}
+		}
+		return undefined;
 	} catch (error) {
 		ctx.ui.notify(`Could not open setting manager: ${error instanceof Error ? error.message : String(error)}`, "error");
+		return undefined;
 	}
 }
 

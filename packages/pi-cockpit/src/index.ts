@@ -1815,8 +1815,10 @@ export default function (pi: ExtensionAPI): void {
 		openLegacySettings: async () => { if (settingsCommandCtx) await openSettings(settingsCommandCtx); },
 		openThemeSettings: async () => { if (settingsCommandCtx) await openThemePicker(settingsCommandCtx); },
 		toggleThinkingFold: () => {
-			if (!lastCtx) return;
-			ensureThinkingFolded(capturedTui, lastCtx.cwd, !readHideThinkingBlock(lastCtx.cwd));
+			if (!lastCtx) return false;
+			const next = !readHideThinkingBlock(lastCtx.cwd);
+			ensureThinkingFolded(capturedTui, lastCtx.cwd, next);
+			return next;
 		},
 	});
 	// The settings provider registers on the first session (registerSettingsProvider

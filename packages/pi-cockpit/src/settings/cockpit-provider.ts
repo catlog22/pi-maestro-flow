@@ -97,7 +97,7 @@ export interface CockpitSettingsProviderOptions {
 	getThinkingFolded?: () => boolean | undefined;
 	openLegacySettings?: () => Promise<void> | void;
 	openThemeSettings?: () => Promise<void> | void;
-	toggleThinkingFold?: () => Promise<void> | void;
+	toggleThinkingFold?: () => Promise<boolean | void> | boolean | void;
 }
 
 interface ConfigDocument {
@@ -485,9 +485,11 @@ export function createCockpitSettingsProvider(options: CockpitSettingsProviderOp
 			};
 		},
 		invokeAction: async (request) => {
-			if (request.actionId === "cockpit.thinkingFold" && options.toggleThinkingFold) await options.toggleThinkingFold();
-			else return { handled: false };
-			return { handled: true, refresh: true };
+			if (request.actionId === "cockpit.thinkingFold" && options.toggleThinkingFold) {
+				const next = await options.toggleThinkingFold();
+				return { handled: true, refresh: true, message: next ? "Thinking fold enabled" : "Thinking fold disabled" };
+			}
+			return { handled: false };
 		},
 	};
 }
