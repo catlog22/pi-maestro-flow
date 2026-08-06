@@ -1727,36 +1727,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         state.outputLimitBreakerNotified = false;
         return;
       }
-      const usage = ctx.getContextUsage?.();
-      let linkedGate: LinkedCompactionThresholdModel;
-      try {
-        linkedGate = await linkedThresholdFor(ctx, settings);
-      } catch (error) {
-        if (generation !== state.generation) return;
-        state.pendingOutputLimitIntent = undefined;
-        ctx.ui.notify(
-          `Output-limit compaction threshold resolution failed: ${error instanceof Error ? error.message : String(error)}`,
-          "warning",
-        );
-        return;
-      }
       if (generation !== state.generation) return;
-      const gateTokens = linkedGate.usable
-        ? linkedGate.soft?.pruneTokens
-          ?? Math.floor(linkedGate.contextWindow * DEFAULT_OUTPUT_LIMIT_RATIO)
-        : undefined;
-      const usageTokens = usage?.tokens ?? (usage?.percent != null
-        ? Math.floor((usage.percent / 100) * usage.contextWindow)
-        : undefined);
-      const threshold = linkedGate.usable && gateTokens !== undefined
-        ? gateTokens / linkedGate.contextWindow
-        : settings.soft?.pruneRatio ?? DEFAULT_OUTPUT_LIMIT_RATIO;
-      if (!usage || usageTokens == null || (gateTokens !== undefined
-        ? usageTokens < gateTokens
-        : usage.percent == null || usage.percent / 100 < threshold)) {
-        state.pendingOutputLimitIntent = undefined;
-        return;
-      }
       if (state.outputLimitCompactions >= MAX_OUTPUT_LIMIT_COMPACTIONS) {
         state.pendingOutputLimitIntent = undefined;
         if (!state.outputLimitBreakerNotified) {
@@ -1772,11 +1743,19 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         state.pendingOutputLimitIntent = undefined;
         return;
       }
+      // A length stop means the assistant response was truncated at the model
+      // output token limit regardless of context pressure. Recovery must NOT be
+      // gated on high context usage: truncation is an output-side problem that
+      // occurs at any context size, and skipping recovery here leaves the
+      // truncated response incomplete with no continuation. settlePendingOutputLimit
+      // still fails safely when there is no compactable history.
+      const usage = ctx.getContextUsage?.()
+        ?? { percent: null, tokens: null, contextWindow: ctx.model?.contextWindow ?? 0 };
       state.pendingOutputLimitIntent = {
         generation,
         settings,
         usage: { ...usage },
-        threshold,
+        threshold: settings.soft?.pruneRatio ?? DEFAULT_OUTPUT_LIMIT_RATIO,
       };
     },
     onCompact(completedOwner, _ctx) {

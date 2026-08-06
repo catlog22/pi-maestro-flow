@@ -3651,9 +3651,11 @@ test("exhausted pre-submission failure queues recovery", async () => {
   assert.match(sent[0] ?? "", /context was exhausted/);
 });
 
-test("output-limit guard ignores a length stop below the pressure threshold", async () => {
+test("output-limit guard compacts and continues on a length stop even below the pressure threshold", async () => {
+  const sent: string[] = [];
+  let complete: (() => void) | undefined;
   let compactCalls = 0;
-  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+  const guard = createMidTurnAutoCompaction({ sendUserMessage(message: string) { sent.push(message); } } as never, {
     loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
     readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100, soft: { enabled: true, nudgeRatio: 0.7, pruneRatio: 0.8, pruneTargetRatio: 0.7 } }),
   });
@@ -3662,12 +3664,43 @@ test("output-limit guard ignores a length stop below the pressure threshold", as
     model: { contextWindow: 400_000 },
     getContextUsage: () => ({ tokens: 200_000, contextWindow: 400_000, percent: 50 }),
     hasPendingMessages: () => false,
-    compact() { compactCalls++; },
+    compact(options: { onComplete(): void }) { compactCalls++; complete = options.onComplete; },
     sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: { setStatus() {}, notify() {} },
   } as never;
   await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
-  assert.equal(compactCalls, 0);
+  assert.equal(compactCalls, 0, "agent_end only records the output-limit intent");
+  await guard.onAgentEnd(ctx);
+  assert.equal(compactCalls, 1, "a low-pressure length stop still submits the recovery compaction");
+  guard.onCompact();
+  complete?.();
+  assert.equal(sent.length, 1);
+  assert.match(sent[0] ?? "", /Continue/);
+});
+
+test("output-limit guard recovers even when context usage is unavailable", async () => {
+  const sent: string[] = [];
+  let complete: (() => void) | undefined;
+  let compactCalls = 0;
+  const guard = createMidTurnAutoCompaction({ sendUserMessage(message: string) { sent.push(message); } } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 400_000, maxTokens: 32_000 },
+    hasPendingMessages: () => false,
+    compact(options: { onComplete(): void }) { compactCalls++; complete = options.onComplete; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(compactCalls, 1, "a length stop without usage data still recovers");
+  guard.onCompact();
+  complete?.();
+  assert.equal(sent.length, 1);
+  assert.match(sent[0] ?? "", /Continue/);
 });
 
 test("output-limit guard ignores a normal stop and resets its breaker", async () => {
