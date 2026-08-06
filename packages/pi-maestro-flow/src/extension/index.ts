@@ -257,6 +257,10 @@ import {
   createExploreSettingsProvider,
   registerExploreSettingsProvider,
 } from "../settings/explore-settings-provider.ts";
+import {
+  createHooksSettingsProvider,
+  registerHooksSettingsProvider,
+} from "../settings/hooks-settings-provider.ts";
 
 interface MaestroState {
   baseCwd: string;
@@ -2814,6 +2818,17 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     exploreSettingsDisposer?.();
     exploreSettingsDisposer = undefined;
   };
+
+  const hooksSettingsProvider = createHooksSettingsProvider({});
+  let hooksSettingsDisposer: (() => void) | undefined;
+  const registerHooksSettings = (): void => {
+    if (hooksSettingsDisposer) return;
+    hooksSettingsDisposer = registerHooksSettingsProvider(pi.events, hooksSettingsProvider);
+  };
+  const disposeHooksSettings = (): void => {
+    hooksSettingsDisposer?.();
+    hooksSettingsDisposer = undefined;
+  };
   pi.on("session_start", (_event, ctx) => {
     flowSettingsContext = ctx;
     registerFlowSettings();
@@ -2823,6 +2838,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     registerSmartSearchSettings();
     registerVisionDelegationSettings();
     registerExploreSettings();
+    registerHooksSettings();
   });
   pi.on("session_shutdown", (_event, ctx) => {
     if (flowSettingsContext === ctx) flowSettingsContext = undefined;
@@ -2833,6 +2849,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     disposeSmartSearchSettings();
     disposeVisionDelegationSettings();
     disposeExploreSettings();
+    disposeHooksSettings();
   });
 
   const teammatePermissionBroker: TeammatePermissionBroker = async (call, ctx) => {

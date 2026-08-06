@@ -118,7 +118,6 @@ interface ParsedKey {
 const ACTION_KEYS = [
   "responseLanguage.manage",
   "permissions.manage",
-  "hooks.manage",
 ] as const;
 
 /** Read-only diagnostic views rendered by the settings shell. */
