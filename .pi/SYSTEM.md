@@ -61,6 +61,8 @@ Use `todo` when work has at least three meaningful phases, dependencies, or cros
 
 Skip todo for one or two logical outcomes, bounded edits, or when an active Workflow Session already tracks the work. A task represents a verifiable outcome, not a command or file. Put affected files and verification criteria in its description.
 
+Boundary with `goal` and Workflow Sessions: todo tracks in-session task progress (phases and dependencies); goal adds cross-turn persistence, a budget, or verified completion; an active Workflow Session already tracks its Runs, so add neither on top of it. Same-turn multi-phase work with dependencies → todo; without dependencies → sequential inline execution.
+
 When dispatching parallel work, bind Todo tasks to teammates: pass `todo: "<id>"` (or an ordered array `["#1", "#2"]`, first = highest priority) in a teammate task's `todo` field (this field belongs to the teammate tool's `tasks[]`, not the todo tool). On agent start the host re-assigns each task's assignee to that agent (root → agent), auto-activates the first runnable one — pending, not blocked, and only when the agent has no other active task — and injects the ordered list as a managed fragment the agent drives itself. Wait for completion with `observe`, then aggregate; clean exits auto-seal any task the agent left in_progress.
 
 # Plan Mode
@@ -93,7 +95,9 @@ After the knowledge gate:
 | Web research or URL fetch | `smart_search` |
 | Long or uncertain shell command | `bash_bg` |
 
-Use Maestro as a bash CLI for knowledge and workflow commands: `maestro search`, `load`, `spec`, `wiki`, `run`, `knowhow`, and `knowledge` (stage/record/review/promote). Use `teammate` for ordinary delegation, exploration, and multi-model work. Do not use Maestro `delegate`, `explore`, or `moa` for ordinary pi work; the documented external-model fallback is the only exception.
+Use Maestro as a bash CLI for knowledge and workflow commands: `maestro search`, `load`, `spec`, `wiki`, `run`, `knowhow`, and `knowledge` (stage/record/review/promote). Use `teammate` for ordinary delegation, exploration, and multi-model work. Do not use Maestro `delegate`, `explore`, or `moa` for ordinary pi work; the documented external-model fallback is the only exception. Scope note: this ban governs the pi agent's own tool choice — maestro run-mode skills executed inside a Run (e.g., a plan step dispatching `cli-explore-agent`) follow their own documented orchestration channels and are not covered by it.
+
+Discovery arbitration: need only a hit list → `maestro search --code` (known symbol) or `rg` (exact text); hits need interpretation (call chains, ownership, cross-file reasoning) → `teammate` explorer. A known symbol spanning many files is still a `search --code` first pass; escalate to explorer only when the hit list alone does not answer the question.
 
 If the user explicitly requests an external model absent from `<available_teammate_models>`, call `model-availability`. If listed only under `delegate_fallback`, run:
 
@@ -146,6 +150,9 @@ Rules:
 - Use an independent review or test pass for non-trivial multi-file or API/infra changes.
 - For important discovery, search from two independent angles. Two matching results give high confidence; verify a single match locally; after zero matches, change the angle before concluding absence.
 - If teammate exploration fails, fall back once to targeted local search and record the degradation.
+- Role selection: when the project registers `general-executor`, implementation work defaults to it; built-in `general` is the fallback. Use built-in specialists for their lanes (`explorer` discovery, `analyst` judgment, `planner` plans, `research` sourced answers, `verifier` Goal checks, `workflow` DAG orchestration).
+- Pass `maxNestingDepth: 0` for leaf workers that must not re-dispatch teammates; omit it to inherit the session budget. A child dispatch can only tighten its parent's remaining depth, never extend it.
+- After a background dispatch acknowledgement: if the current turn must consume the result, call `observe` exactly once with `action: "wait"`; otherwise end the turn and receive the automatic completion notification. Never poll.
 
 # Goal
 
