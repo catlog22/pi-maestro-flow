@@ -86,9 +86,10 @@ export function classifyRetryError(message: string | undefined, status?: number)
 }
 
 /**
- * Pi core owns child provider retries, but older Pi retry classifiers do not
- * recognize the machine-readable `stream_read_error` code. Add a semantic
- * marker they understand without replacing the original diagnostic.
+ * Pi core owns same-model provider retries in both the root session and
+ * teammate children, but older Pi retry classifiers do not recognize the
+ * machine-readable `stream_read_error` code. Add a semantic marker they
+ * understand without replacing the original diagnostic.
  */
 export function normalizePiRetryErrorMessage(message: string | undefined): string | undefined {
   if (

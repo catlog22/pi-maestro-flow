@@ -14,9 +14,10 @@ export type RetryErrorKind = "network" | "provider" | "fallback-only" | "auth" |
  */
 export declare function classifyRetryError(message: string | undefined, status?: number): RetryErrorKind;
 /**
- * Pi core owns child provider retries, but older Pi retry classifiers do not
- * recognize the machine-readable `stream_read_error` code. Add a semantic
- * marker they understand without replacing the original diagnostic.
+ * Pi core owns same-model provider retries in both the root session and
+ * teammate children, but older Pi retry classifiers do not recognize the
+ * machine-readable `stream_read_error` code. Add a semantic marker they
+ * understand without replacing the original diagnostic.
  */
 export declare function normalizePiRetryErrorMessage(message: string | undefined): string | undefined;
 /** True when the failure is an authentication/permission problem. */

@@ -4,7 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { ModelCircuitBreaker } from "pi-maestro-teammate/v1/retry";
+import { isRetryableAssistantError } from "@earendil-works/pi-ai/compat";
+import { classifyRetryError, ModelCircuitBreaker } from "pi-maestro-teammate/v1/retry";
 import {
   consumeModelFailoverSettlement,
   FAILOVER_TERMINAL_EVENT,
@@ -398,6 +399,58 @@ test("agent_end is observational and retry exhaustion falls back only after sett
     await runtime.emit("agent_settled");
     assert.equal(runtime.breaker.snapshot().find((entry) => entry.model === "provider/backup")?.state, "CLOSED");
     assert.equal(snapshotModelFailoverSettlement()?.outcome, "success");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("message_end rewrites stream_read_error so native same-model retries run before fallback", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
+  try {
+    writeProjectConfig(cwd, {
+      enabled: true,
+      fallbackModels: { "provider/primary": ["provider/backup"] },
+    });
+    const runtime = harness(cwd);
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    await runtime.emit("turn_start", { turnIndex: 0 });
+
+    // Pi's native retry classifier does not match the machine-readable
+    // stream_read_error code; without a marker a single transient stream drop
+    // skips same-model retries and settles straight into this failover, which
+    // then switches models on the first occurrence.
+    const failure = "stream_read_error: upstream response body closed";
+    const rewritten = await runtime.emit("message_end", {
+      message: { role: "assistant", stopReason: "error", errorMessage: failure, content: [] },
+    }) as { message?: { errorMessage?: string } } | undefined;
+    assert.equal(rewritten?.message?.errorMessage, `${failure} (network error)`);
+    assert.equal(classifyRetryError(rewritten?.message?.errorMessage), "network");
+    assert.equal(isRetryableAssistantError({
+      role: "assistant",
+      content: [],
+      api: "openai-responses",
+      provider: "provider",
+      model: "primary",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "error",
+      errorMessage: rewritten?.message?.errorMessage,
+      timestamp: 0,
+    }), true);
+
+    // Idempotent: an already-marked message passes through untouched, as do
+    // successful assistant messages.
+    assert.equal(await runtime.emit("message_end", { message: rewritten?.message }), undefined);
+    assert.equal(await runtime.emit("message_end", {
+      message: { role: "assistant", stopReason: "stop", content: [] },
+    }), undefined);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }

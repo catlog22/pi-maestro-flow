@@ -21,6 +21,7 @@ export {
   extractRetryAfterMs,
   isAuthError,
   isRetryableProviderError,
+  normalizePiRetryErrorMessage,
   retryDelayMs,
 } from "../../runs/retry.ts";
 export type { RetryErrorKind } from "../../runs/retry.ts";

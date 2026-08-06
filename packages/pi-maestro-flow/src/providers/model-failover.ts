@@ -18,6 +18,7 @@ import {
 import {
   buildReplayFence,
   classifyRetryError,
+  normalizePiRetryErrorMessage,
   rankModelsByHealth,
   RECOVERY_PROTOCOL_VERSION,
   sharedModelCircuitBreaker,
@@ -622,6 +623,22 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     if (!active || event.message.role !== "assistant") return;
     const message = event.message as unknown as { stopReason?: string; errorMessage?: string };
     active.lastError = message.stopReason === "error" ? message.errorMessage : undefined;
+  });
+
+  // Pi's native same-model retry classifier predates the machine-readable
+  // `stream_read_error` code and does not match it, so a single transient
+  // stream drop settles straight into this failover, which then mistakes the
+  // first occurrence for "native retries exhausted" and switches models
+  // immediately. Rewrite the persisted error once with a marker the native
+  // classifier understands so same-model retries run before any fallback.
+  // Registered after the lastError observer so the harness-visible result is
+  // the rewrite; the observer's classification is identical either way.
+  pi.on("message_end", (event) => {
+    if (event.message.role !== "assistant" || event.message.stopReason !== "error") return;
+    const message = event.message as unknown as { errorMessage?: string };
+    const errorMessage = normalizePiRetryErrorMessage(message.errorMessage);
+    if (!errorMessage || errorMessage === message.errorMessage) return;
+    return { message: { ...event.message, errorMessage } };
   });
 
   pi.on("agent_end", (event) => {
