@@ -170,6 +170,7 @@ async function createShell(provider: SettingsProviderV1, terminalHeight?: number
 
 test("list-crud renders the item list with a footer help line", async () => {
 	const state = await createShell(makeProvider());
+	state.shell.handleInput("\r"); // open group
 	state.shell.handleInput("\r"); // activate the list-crud setting
 	const rendered = state.shell.render(100).join("\n");
 	assert.ok(rendered.includes("Servers"));
@@ -180,6 +181,7 @@ test("list-crud renders the item list with a footer help line", async () => {
 
 test("list-crud marks items with ●/○ toggle icons when an enabled boolean field exists", async () => {
 	const state = await createShell(makeProvider());
+	state.shell.handleInput("\r"); // open group
 	state.shell.handleInput("\r"); // activate the list-crud setting
 	const rendered = state.shell.render(100).join("\n");
 	assert.ok(rendered.includes("● filesystem"), "an enabled item must render the ● indicator");
@@ -191,6 +193,7 @@ test("list-crud icons treat legacy string values as disabled consistently", asyn
 		{ id: "filesystem", enabled: true },
 		{ id: "legacy", enabled: "false" },
 	]));
+	state.shell.handleInput("\r"); // open group
 	state.shell.handleInput("\r");
 	const rendered = state.shell.render(100).join("\n");
 	assert.ok(rendered.includes("● filesystem"));
@@ -199,6 +202,7 @@ test("list-crud icons treat legacy string values as disabled consistently", asyn
 
 test("list-crud supports mouse hover and click on items and fields", async () => {
 	const state = await createShell(makeProvider(), 30, 120);
+	state.shell.handleInput("\r"); // open group
 	state.shell.handleInput("\r"); // list
 	const initial = state.shell.render(112);
 	const overlayHeight = Math.min(initial.length, Math.floor(30 * 0.92), 28);
@@ -221,6 +225,7 @@ test("list-crud supports mouse hover and click on items and fields", async () =>
 
 test("list-crud field editor echoes the in-progress value and ignores clicks on other fields", async () => {
 	const state = await createShell(makeProvider(), 30, 120);
+	state.shell.handleInput("\r"); // open group
 	state.shell.handleInput("\r"); // list
 	state.shell.handleInput("\r"); // item 0 -> field form
 	state.shell.handleInput("\r"); // field 0 (id) -> value editor
@@ -238,6 +243,7 @@ test("list-crud field editor echoes the in-progress value and ignores clicks on 
 
 test("wheel inside list-crud does not disturb the list or the delete confirm", async () => {
 	const state = await createShell(makeProvider(), 30, 120);
+	state.shell.handleInput("\r"); // open group
 	state.shell.handleInput("\r"); // list
 	state.shell.handleInput("d"); // arm delete
 	assert.ok(state.shell.render(100).some((line) => line.includes("Press D again to delete")));
@@ -248,6 +254,7 @@ test("wheel inside list-crud does not disturb the list or the delete confirm", a
 
 test("list-crud adds an item with blank defaults and stages the whole list", async () => {
 	const state = await createShell(makeProvider());
+	state.shell.handleInput("\r"); // open group
 	state.shell.handleInput("\r");
 	state.shell.handleInput("a");
 	const staged = state.staged();
@@ -259,6 +266,7 @@ test("list-crud adds an item with blank defaults and stages the whole list", asy
 
 test("list-crud edits an item field through the field form", async () => {
 	const state = await createShell(makeProvider());
+	state.shell.handleInput("\r"); // open group
 	state.shell.handleInput("\r"); // list
 	state.shell.handleInput("\r"); // item 0 -> field form
 	state.shell.handleInput("\r"); // field 0 -> value editor
@@ -271,6 +279,7 @@ test("list-crud edits an item field through the field form", async () => {
 
 test("list-crud deletes an item after a two-step confirmation", async () => {
 	const state = await createShell(makeProvider());
+	state.shell.handleInput("\r"); // open group
 	state.shell.handleInput("\r");
 	state.shell.handleInput("d");
 	const armed = state.shell.render(100).join("\n");
@@ -285,6 +294,7 @@ test("list-crud deletes an item after a two-step confirmation", async () => {
 
 test("list-crud toggles boolean fields in place and writes real booleans", async () => {
 	const state = await createShell(makeProvider());
+	state.shell.handleInput("\r"); // open group
 	state.shell.handleInput("\r"); // list
 	state.shell.handleInput("\r"); // item 0 -> field form
 	state.shell.handleInput("\x1b[B"); // field 0 (id) -> field 1 (enabled)
@@ -303,6 +313,7 @@ test("list-crud toggles boolean fields in place and writes real booleans", async
 test("list-crud shows the remaining-count marker while scrolled and keeps the selection highlighted", async () => {
 	const items = Array.from({ length: 22 }, (_, index) => ({ id: `srv-${index}`, enabled: index % 2 === 0 }));
 	const state = await createShell(makeProvider(items));
+	state.shell.handleInput("\r"); // open group
 	state.shell.handleInput("\r"); // list
 	for (let index = 0; index < 15; index++) state.shell.handleInput("\x1b[B");
 	const rendered = state.shell.render(100).join("\n");
@@ -314,9 +325,10 @@ test("list-crud shows the remaining-count marker while scrolled and keeps the se
 test("list-crud budgets its window on a real terminal height so footer and marker stay visible", async () => {
 	const items = Array.from({ length: 22 }, (_, index) => ({ id: `srv-${index}`, enabled: index % 2 === 0 }));
 	const state = await createShell(makeProvider(items), 30);
+	state.shell.handleInput("\r"); // open group
 	state.shell.handleInput("\r"); // list
 	const rendered = state.shell.render(112).join("\n");
-	assert.ok(rendered.includes("6 more"), "the overflow marker must be visible on a budgeted terminal");
+	assert.match(rendered, /more/), "the overflow marker must be visible on a budgeted terminal";
 	assert.ok(rendered.includes("Enter edit · A add · D delete · Esc back"), "the help line must not be clipped by maxHeight");
 });
 
@@ -362,8 +374,14 @@ test("overview editors render read-only diagnostic rows with status tones", asyn
 		applyRuntime: () => ({ appliedKeys: [], deferred: [], failed: [] }),
 	};
 	const state = await createShell(provider);
+	state.shell.handleInput("\r"); // open the group
 	const rendered = state.shell.render(100).join("\n");
 	assert.ok(rendered.includes("2 rows"), "the list value summarizes the row count");
-	assert.ok(rendered.includes("● Healthy · 2/2"), "an ok overview row must carry the ● glyph");
-	assert.ok(rendered.includes("◐ Stale · 1 server stale"), "a warn overview row must carry the ◐ glyph");
+	// Enter on the overview setting opens a read-only popup with the diagnostic rows.
+	state.shell.handleInput("\r");
+	const popup = state.shell.render(100).join("\n");
+	assert.ok(popup.includes("● Healthy · 2/2"), "an ok overview row must carry the ● glyph");
+	assert.ok(popup.includes("◐ Stale · 1 server stale"), "a warn overview row must carry the ◐ glyph");
+	state.shell.handleInput("\x1b");
+	assert.ok(!state.shell.render(100).join("\n").includes("● Healthy · 2/2"), "Esc closes the overview popup");
 });

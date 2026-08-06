@@ -246,20 +246,27 @@ function moveDown(shell: MaestroSettingsShell, count: number): void {
 	for (let index = 0; index < count; index++) shell.handleInput("\x1b[B");
 }
 
-test("settings shell renders responsive provider and effective-value views", async () => {
+/** The test provider has one group ("general"); Enter opens it (level 1). */
+function openFirstGroup(shell: MaestroSettingsShell): void {
+	shell.handleInput("\r");
+}
+
+test("settings shell shows provider names outside and settings inside", async () => {
 	const directory = withTempDir();
 	try {
 		const { shell } = await createShell(makeProvider(), directory);
 		for (const width of [40, 90, 140]) {
 			const lines = shell.render(width);
 			assert.ok(lines.some((line) => line.includes("Maestro Settings")));
-			assert.ok(lines.some((line) => line.includes("Enabled")));
+			assert.ok(lines.some((line) => line.includes("Cockpit")), "provider name shown outside");
 			assert.ok(lines.every((line) => visibleWidth(line) <= width));
 		}
-		const localizedValues = shell.render(100);
-		assert.ok(localizedValues.some((line) => line.includes("Off")));
-		assert.ok(localizedValues.some((line) => line.includes("Compact view")));
-		assert.ok(localizedValues.some((line) => line.includes("Global")));
+		openFirstGroup(shell);
+		const inner = shell.render(100).join("\n");
+		assert.ok(inner.includes("— general —"), "the provider page groups its settings");
+		assert.ok(inner.includes("Enabled"), "settings shown inside the provider");
+		assert.ok(inner.includes("Off"));
+		assert.ok(inner.includes("Compact view"));
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -274,33 +281,41 @@ test("settings overlay budgets content for short terminals without losing its fo
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("narrow footers advertise plugin switching and scope cycling", async () => {
+test("narrow footers advertise scope cycling and vertical navigation", async () => {
 	const directory = withTempDir();
 	try {
 		const state = await createShell(makeProvider(), directory);
 		const lines = state.shell.render(66);
-		assert.ok(lines.some((line) => line.includes("↑↓ select")), "the narrow footer must use the narrow-only help variant");
-		assert.ok(lines.some((line) => line.includes("←→ plugin")));
-		assert.ok(lines.some((line) => line.includes("Tab scope")));
+		assert.ok(lines.some((line) => line.includes("↑↓ group")), "footer must advertise group navigation");
+		assert.ok(lines.some((line) => line.includes("Enter open")));
+		assert.ok(!lines.some((line) => line.includes("←→ plugin")), "no left/right plugin switching in the vertical layout");
+		openFirstGroup(state.shell);
 		state.shell.handleInput(" "); // dirty
 		const dirty = state.shell.render(66);
-		assert.ok(dirty.some((line) => line.includes("1 modified")), "the dirty narrow header must show the modified count");
-		assert.ok(dirty.some((line) => line.includes("↑↓ select")), "the dirty footer must keep the narrow-only help variant");
+		assert.ok(dirty.some((line) => line.includes("1 modified")), "the dirty header must show the modified count");
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("group-header backtracking never pushes the highlighted setting out of the window", async () => {
+test("group list scrolls and keeps the selected group visible", async () => {
 	const directory = withTempDir();
 	try {
-		// A 17-row terminal yields a 1-row settings window where the group-header
-		// backtrack could previously drop the highlighted row past the window end.
-		const { shell } = await createShell(makeProvider(), directory, [], 17);
-		moveDown(shell, 4);
+		const registry = new SettingsProviderRegistry(new FakeEventBus());
+		registry.register({ version: SETTINGS_PROTOCOL_VERSION, providerId: "cockpit", instanceId: "cockpit-1", provider: makeProvider() });
+		registry.register({ version: SETTINGS_PROTOCOL_VERSION, providerId: "other", instanceId: "other-1", provider: makeSecondaryProvider() });
+		const coordinator = new SettingsCoordinator(registry);
+		const context = { cwd: "/workspace", locale: "en" } as const;
+		await coordinator.load(context);
+		const providers = await registry.describe(context);
+		const localeState = new SettingsLocaleState(join(directory, "maestro-ui.json"), registry);
+		const shell = new MaestroSettingsShell({
+			registry, coordinator, localeState,
+			initial: { context, providers, failures: [] },
+			reload: async () => ({ context, providers, failures: [] }),
+			theme, modelOptions: [], requestRender: () => {}, requestAction: () => {}, close: () => {},
+		});
+		shell.handleInput("\x1b[B"); // second group
 		const lines = shell.render(112);
-		assert.ok(
-			lines.some((line) => line.includes("\u001b[7m") && line.includes("Model")),
-			"the selected row must stay visible and highlighted",
-		);
+		assert.ok(lines.some((line) => line.includes("\u001b[7m") && line.includes("Other provider")), "the selected group stays highlighted");
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -308,12 +323,13 @@ test("mouse hover highlights settings rows and left click activates the hovered 
 	const directory = withTempDir();
 	try {
 		const state = await createShell(makeProvider(), directory, [], 30, 120);
+		openFirstGroup(state.shell);
 		const initial = state.shell.render(112);
-		const overlayHeight = Math.min(initial.length, Math.floor(30 * 0.92), 28);
+		const overlayHeight = Math.min(initial.length, Math.floor(30 * 0.97), 28);
 		const left = 1 + Math.floor((118 - 112) / 2);
 		const top = 1 + Math.floor((28 - overlayHeight) / 2);
-		const advancedColumn = left + 31 + 1;
-		const advancedRow = top + 5 + 1;
+		const advancedColumn = left + 10;
+		const advancedRow = top + 7;
 		state.shell.handleInput(`\u001b[<35;${advancedColumn};${advancedRow}M`);
 		const hovered = state.shell.render(112).find((line) => line.includes("Manage advanced")) ?? "";
 		assert.match(hovered, /\u001b\[7m/);
@@ -327,11 +343,14 @@ test("boolean edits stay in draft until apply and Esc discards with confirmation
 	const directory = withTempDir();
 	try {
 		const state = await createShell(makeProvider(), directory);
+		openFirstGroup(state.shell);
 		state.shell.handleInput(" ");
 		assert.equal(state.coordinator.changes("cockpit")[0]?.operation, "set");
-		state.shell.handleInput("\x1b");
+		state.shell.handleInput("\x1b"); // back to the group list (draft kept)
 		assert.equal(state.closed, false);
-		state.shell.handleInput("\x1b");
+		state.shell.handleInput("\x1b"); // discard confirmation
+		assert.equal(state.closed, false);
+		state.shell.handleInput("\x1b"); // discard + close
 		assert.equal(state.closed, true);
 		assert.deepEqual(state.coordinator.changes(), []);
 	} finally { rmSync(directory, { recursive: true, force: true }); }
@@ -341,6 +360,7 @@ test("apply commits drafts and conflict state is rendered", async () => {
 	const directory = withTempDir();
 	try {
 		const committed = await createShell(makeProvider(), directory);
+		openFirstGroup(committed.shell);
 		committed.shell.handleInput(" ");
 		committed.shell.handleInput("\x13");
 		await settle();
@@ -348,6 +368,7 @@ test("apply commits drafts and conflict state is rendered", async () => {
 		assert.ok(committed.shell.render(100).some((line) => line.includes("Settings saved")));
 
 		const conflicted = await createShell(makeProvider({ conflict: true }), directory);
+		openFirstGroup(conflicted.shell);
 		conflicted.shell.handleInput(" ");
 		conflicted.shell.handleInput("\x13");
 		await settle();
@@ -362,9 +383,11 @@ test("Ctrl+L persists locale and rerenders provider catalogs in Chinese", async 
 		state.shell.handleInput("\x0c");
 		await settle();
 		assert.equal(state.localeState.locale, "zh-CN");
-		const lines = state.shell.render(100);
+		let lines = state.shell.render(100);
 		assert.ok(lines.some((line) => line.includes("Maestro 设置")));
 		assert.ok(lines.some((line) => line.includes("界面语言")));
+		openFirstGroup(state.shell);
+		lines = state.shell.render(100);
 		assert.ok(lines.some((line) => line.includes("启用")));
 		assert.ok(lines.some((line) => line.includes("关闭")));
 	} finally { rmSync(directory, { recursive: true, force: true }); }
@@ -374,11 +397,12 @@ test("enum settings open a visible option picker instead of cycling invisibly", 
 	const directory = withTempDir();
 	try {
 		const state = await createShell(makeProvider(), directory);
+		openFirstGroup(state.shell);
 		moveDown(state.shell, 2);
 		state.shell.handleInput("\r");
 		assert.ok(state.shell.render(100).some((line) => line.includes("Choose a value")));
 		state.shell.handleInput("\x1b[B");
-		assert.ok(state.shell.render(100).some((line) => line.includes("Display mode · List view")));
+		assert.ok(state.shell.render(100).some((line) => line.includes("List view")));
 		state.shell.handleInput("\r");
 		assert.equal(state.coordinator.changes("cockpit").find((entry) => entry.key === "mode")?.operation, "set");
 		assert.equal((state.coordinator.changes("cockpit").find((entry) => entry.key === "mode") as { value?: unknown })?.value, "list");
@@ -389,18 +413,18 @@ test("expanded option rows support mouse hover and click-to-confirm", async () =
 	const directory = withTempDir();
 	try {
 		const state = await createShell(makeProvider(), directory, [], 30, 120);
+		openFirstGroup(state.shell);
 		moveDown(state.shell, 2);
-		const closedHeight = state.shell.render(112).length;
 		state.shell.handleInput("\r");
 		const initial = state.shell.render(112);
-		assert.equal(initial.length, closedHeight);
+		assert.ok(initial.some((line) => line.includes("Choose a value")), "option picker popup is visible");
 		const optionRow = initial.findIndex((line) => line.includes("List view"));
 		assert.ok(optionRow >= 0);
 		const overlayHeight = Math.min(initial.length, Math.floor(30 * 0.92), 28);
 		const left = 1 + Math.floor((118 - 112) / 2);
 		const top = 1 + Math.floor((28 - overlayHeight) / 2);
-		const optionColumn = left + 31 + 1;
-		const optionScreenRow = top + optionRow + 1;
+		const optionColumn = left + 10;
+		const optionScreenRow = top + optionRow;
 		state.shell.handleInput(`\u001b[<35;${optionColumn};${optionScreenRow}M`);
 		const hoveredLines = state.shell.render(112);
 		const hovered = hoveredLines.find((line) => line.includes("List view")) ?? "";
@@ -410,8 +434,8 @@ test("expanded option rows support mouse hover and click-to-confirm", async () =
 		const change = state.coordinator.changes("cockpit").find((entry) => entry.key === "mode");
 		assert.equal((change as { value?: unknown })?.value, "list");
 		const closed = state.shell.render(112);
-		assert.equal(closed.length, initial.length);
-		assert.ok(closed.every((line) => !line.includes("Choose a value")));
+		assert.ok(closed.some((line) => line.includes("Display mode · List view")), "committed value shown back in the list");
+		assert.ok(closed.every((line) => !line.includes("Choose a value")), "option picker popup is gone");
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -419,6 +443,7 @@ test("text editors visibly mark editing and replace the selected current value o
 	const directory = withTempDir();
 	try {
 		const state = await createShell(makeProvider(), directory);
+		openFirstGroup(state.shell);
 		moveDown(state.shell, 3);
 		state.shell.handleInput("\r");
 		let lines = state.shell.render(100);
@@ -426,7 +451,7 @@ test("text editors visibly mark editing and replace the selected current value o
 		assert.ok(lines.some((line) => line.includes("Input · [20]")));
 		state.shell.handleInput("5");
 		lines = state.shell.render(100);
-		assert.ok(lines.some((line) => line.includes("Limit · 5█")));
+		assert.ok(lines.some((line) => line.includes("Input · 5█")), "the editor input reflects the typed digit");
 		state.shell.handleInput("\r");
 		const change = state.coordinator.changes("cockpit").find((entry) => entry.key === "limit");
 		assert.equal(change?.operation, "set");
@@ -438,6 +463,7 @@ test("numeric editors keep invalid min/max values visible and out of the draft",
 	const directory = withTempDir();
 	try {
 		const state = await createShell(makeProvider(), directory);
+		openFirstGroup(state.shell);
 		moveDown(state.shell, 3);
 		state.shell.handleInput("\r");
 		for (const digit of "101") state.shell.handleInput(digit);
@@ -451,11 +477,12 @@ test("model settings use the host model catalog and retain a custom-entry path",
 	const directory = withTempDir();
 	try {
 		const state = await createShell(makeProvider(), directory, ["provider/a", "provider/b"]);
+		openFirstGroup(state.shell);
 		moveDown(state.shell, 4);
 		state.shell.handleInput("\r");
 		assert.ok(state.shell.render(100).some((line) => line.includes("E custom model")));
 		state.shell.handleInput("\x1b[B");
-		assert.ok(state.shell.render(100).some((line) => line.includes("Model · provider/b")));
+		assert.ok(state.shell.render(100).some((line) => line.includes("provider/b")));
 		state.shell.handleInput("\r");
 		const change = state.coordinator.changes("cockpit").find((entry) => entry.key === "model");
 		assert.equal((change as { value?: unknown })?.value, "provider/b");
@@ -513,8 +540,9 @@ test("showMaestroSettingsShell closes its custom UI before opening a provider ac
 							terminal: { rows: 30, columns: 120, write: (value) => { terminalWrites.push(value); } },
 						}, theme, {}, done);
 						if (customCalls === 1) {
-							shell.handleInput("\x1b[B");
-							shell.handleInput("\r");
+							shell.handleInput("\r"); // open the group
+							shell.handleInput("\x1b[B"); // move to the advanced action
+							shell.handleInput("\r"); // invoke the action
 						} else {
 							shell.handleInput("\x1b");
 						}
@@ -527,7 +555,7 @@ test("showMaestroSettingsShell closes its custom UI before opening a provider ac
 		assert.equal(customCalls, 2, "Settings should reopen after the provider action closes");
 		assert.deepEqual(receivedOptions, {
 			overlay: true,
-			overlayOptions: { anchor: "center", width: "94%", maxHeight: "92%", margin: 1 },
+			overlayOptions: { anchor: "center", width: "94%", maxHeight: "97%", margin: 1 },
 		});
 		assert.equal(terminalWrites.filter((value) => value.includes("?1003h")).length, 2);
 		assert.equal(terminalWrites.filter((value) => value.includes("?1003l")).length, 2);
@@ -539,6 +567,7 @@ test("action settings leave the active custom UI before invoking the owning prov
 	try {
 		let invoked = 0;
 		const state = await createShell(makeProvider({ action: () => { invoked++; } }), directory);
+		openFirstGroup(state.shell);
 		state.shell.handleInput("\x1b[B");
 		state.shell.handleInput("\r");
 		await settle();
@@ -594,7 +623,7 @@ test("not-yet-implemented editor kinds degrade to read-only instead of raw text 
 					activation: "live",
 					sensitivity: "public",
 					reversibility: "full",
-					editor: { kind: "overview" },
+					editor: { kind: "slider" } as never,
 				}],
 			}),
 			read: () => snapshot,
@@ -606,6 +635,7 @@ test("not-yet-implemented editor kinds degrade to read-only instead of raw text 
 			applyRuntime: () => ({ appliedKeys: [], deferred: [], failed: [] }),
 		};
 		const { shell, coordinator } = await createShell(provider, directory);
+		openFirstGroup(shell);
 		shell.handleInput("\r");
 		const rendered = shell.render(100).join("\n");
 		assert.ok(rendered.includes("Read only"), "an unimplemented editor kind must surface the read-only notice");
@@ -613,7 +643,7 @@ test("not-yet-implemented editor kinds degrade to read-only instead of raw text 
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("left/right provider switching restores each provider's remembered cursor highlight", async () => {
+test("provider list aggregates every provider; opening one shows its settings", async () => {
 	const directory = withTempDir();
 	try {
 		const registry = new SettingsProviderRegistry(new FakeEventBus());
@@ -625,33 +655,23 @@ test("left/right provider switching restores each provider's remembered cursor h
 		const providers = await registry.describe(context);
 		const localeState = new SettingsLocaleState(join(directory, "maestro-ui.json"), registry);
 		const shell = new MaestroSettingsShell({
-			registry,
-			coordinator,
-			localeState,
+			registry, coordinator, localeState,
 			initial: { context, providers, failures: [] },
 			reload: async () => ({ context, providers, failures: [] }),
-			theme,
-			modelOptions: [],
-			requestRender: () => {},
-			requestAction: () => {},
-			close: () => {},
+			theme, modelOptions: [], requestRender: () => {}, requestAction: () => {}, close: () => {},
 		});
-		// Provider A: move the highlight down to "Limit" (index 3).
-		moveDown(shell, 3);
-		// Right → provider B; the highlight starts at its first setting.
-		shell.handleInput("\x1b[C");
-		const onOther = shell.render(112).filter((line) => line.includes("\u001b[7m") && line.includes(" · ")).join("\n");
-		assert.ok(onOther.includes("B one"), "a fresh provider must start with its first setting highlighted");
-		// Move inside B, then left → back to provider A.
+		const rendered = shell.render(112).join("\n");
+		assert.ok(rendered.includes("Cockpit"), "cockpit provider appears");
+		assert.ok(rendered.includes("Other provider"), "second provider appears in the same list");
+		// Open the second provider and check its settings.
 		shell.handleInput("\x1b[B");
-		shell.handleInput("\x1b[D");
-		const backOnCockpit = shell.render(112).filter((line) => line.includes("\u001b[7m") && line.includes(" · ")).join("\n");
-		assert.ok(backOnCockpit.includes("Limit"), "switching back must restore the remembered highlight row");
-		assert.ok(!backOnCockpit.includes("Model"), "the highlight must not reset to the first setting");
+		shell.handleInput("\r");
+		const inner = shell.render(112).join("\n");
+		assert.ok(inner.includes("B one"), "opening a provider shows its inner settings");
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("highlight memory restores the remembered key inside an active search filter", async () => {
+test("search filter narrows the active group's settings", async () => {
 	const directory = withTempDir();
 	try {
 		const registry = new SettingsProviderRegistry(new FakeEventBus());
@@ -663,30 +683,18 @@ test("highlight memory restores the remembered key inside an active search filte
 		const providers = await registry.describe(context);
 		const localeState = new SettingsLocaleState(join(directory, "maestro-ui.json"), registry);
 		const shell = new MaestroSettingsShell({
-			registry,
-			coordinator,
-			localeState,
+			registry, coordinator, localeState,
 			initial: { context, providers, failures: [] },
 			reload: async () => ({ context, providers, failures: [] }),
-			theme,
-			modelOptions: [],
-			requestRender: () => {},
-			requestAction: () => {},
-			close: () => {},
+			theme, modelOptions: [], requestRender: () => {}, requestAction: () => {}, close: () => {},
 		});
-		// Provider A: remember "Advanced" (index 1), then filter to it via /ad.
-		shell.handleInput("\x1b[B");
+		shell.handleInput("\r"); // open the cockpit group
 		shell.handleInput("/");
 		shell.handleInput("a");
 		shell.handleInput("d");
 		shell.handleInput("\x1b"); // exit search mode, keeping the filter
 		const filtered = shell.render(112).filter((line) => line.includes("\u001b[7m") && line.includes(" · ")).join("\n");
 		assert.ok(filtered.includes("Manage advanced"), "the filtered view must highlight the matching setting");
-		// Switch away and back: the remembered key must resolve inside the filter.
-		shell.handleInput("\x1b[C");
-		shell.handleInput("\x1b[D");
-		const restored = shell.render(112).filter((line) => line.includes("\u001b[7m") && line.includes(" · ")).join("\n");
-		assert.ok(restored.includes("Manage advanced"), "restore must land on the remembered key inside the active filter");
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -696,6 +704,7 @@ test("option editor pages with PageUp/PageDown and lands on enabled options", as
 		const options = Array.from({ length: 10 }, (_, index) => ({ value: `opt-${index}`, labelKey: `opts.opt-${index}` }));
 		const provider = makeEnumProvider(options);
 		const { shell } = await createShell(provider, directory);
+		openFirstGroup(shell); // open the group
 		shell.handleInput("\r"); // open the option picker
 		shell.handleInput("\x1b[6~"); // page down
 		let rendered = shell.render(112);

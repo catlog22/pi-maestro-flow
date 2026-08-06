@@ -59,8 +59,9 @@ test("Flow provider describes editable settings, complex actions and bilingual c
   assert.equal(description.capabilities.prepareCommit, true);
   assert.ok(description.settings.some((entry) => entry.key === "compaction.soft.velocity.minFullness"));
   assert.equal(description.settings.find((entry) => entry.key === "compaction.keepRecentTokens")?.editor.max, 2_000_000);
-  assert.ok(description.settings.some((entry) => entry.key === "failover.fallbackModels" && entry.editor.kind === "json"));
-  assert.ok(description.settings.some((entry) => entry.key === "mcp.manage" && entry.editor.kind === "action"));
+  const failoverDef = description.settings.find((entry) => entry.key === "failover.fallbackModels")!;
+  assert.equal(failoverDef.editor.kind, "list-crud");
+  assert.ok(failoverDef.editor.itemFields?.some((f) => f.key === "fallbacks" && f.editor.kind === "string-list"));
   const responseLanguage = description.settings.find((entry) => entry.key === "responseLanguage.manage");
   assert.equal(responseLanguage?.descriptionKey, "flow.action.responseLanguage.description");
   assert.deepEqual(responseLanguage?.editor.options?.map((entry) => entry.value), ["default", "zh-CN"]);
@@ -84,12 +85,6 @@ test("API Manager provider exposes settings, retry policy and the original manag
     const provider = createApiManagerSettingsProvider({
       getModelsPath: () => path.join(directory, "models.json"),
       getSettingsPath: () => path.join(directory, "settings.json"),
-      actions: {
-        "api.manage": () => { calls.push("manage"); },
-        "api.configure": () => { calls.push("configure"); },
-        "api.retry": () => { calls.push("retry"); },
-        "api.list": () => { calls.push("list"); },
-      },
     });
     const context: SettingsContextV1 = { cwd: "/project", locale: "en" };
     const description = await provider.describe({ context });
@@ -100,23 +95,15 @@ test("API Manager provider exposes settings, retry policy and the original manag
       "api.providers",
       "api.retry.enabled",
       "api.retry.maxRetries",
+      "api.retry.baseDelayMs",
       "api.promptCache",
       "api.cacheRetention",
       "api.agentCacheRetention",
       "api.overview",
-      "api.manage",
-      "api.configure",
-      "api.retry",
-      "api.cache",
-      "api.list",
     ]);
-    assert.equal(description.catalogs?.["zh-CN"]["api.action.manage"], "打开 API Manager");
+    assert.equal(description.catalogs?.["zh-CN"]["api.group.diagnostics"], "配置概览");
     const snapshot = await provider.read({ context });
-    assert.equal(snapshot.effective.values.length, 12);
-    for (const actionId of ["api.manage", "api.configure", "api.retry", "api.list"]) {
-      assert.deepEqual(await provider.invokeAction!({ context, actionId }), { handled: true, refresh: false });
-    }
-    assert.deepEqual(calls, ["manage", "configure", "retry", "list"]);
+    assert.equal(snapshot.effective.values.length, 8);
     assert.equal((await provider.validate({
       context,
       transactionId: "t1",
@@ -156,10 +143,10 @@ test("Flow provider reports configured and effective values across global and pr
   const softEnabled = snapshot.effective.values.find((entry) => entry.key === "compaction.soft.enabled");
   assert.equal(softEnabled?.value, true);
   assert.equal(softEnabled?.scope, "project");
-  assert.deepEqual(snapshot.effective.values.find((entry) => entry.key === "failover.fallbackModels")?.value, {
-    "openai/main": ["qwen/fallback"],
-    "qwen/main": ["openai/fallback"],
-  });
+  assert.deepEqual(snapshot.effective.values.find((entry) => entry.key === "failover.fallbackModels")?.value, [
+    { model: "openai/main", fallbacks: ["qwen/fallback"] },
+    { model: "qwen/main", fallbacks: ["openai/fallback"] },
+  ]);
   const derived = snapshot.effective.values.find((entry) => entry.key === "compaction.derived");
   assert.equal(derived?.source, "runtime");
   const derivedRows = derived?.value as Array<Record<string, unknown>>;
@@ -537,14 +524,14 @@ test("Flow provider invokes plugin-owned actions and participates in discovery",
   const provider = createFlowSettingsProvider({
     getAgentResponseLanguage: () => chinese ? "zh-CN" : "default",
     actions: {
-      "skills.manage": () => { calls.push("skills"); },
-      "responseLanguage.manage": () => { chinese = !chinese; },
+      "responseLanguage.manage": () => { chinese = !chinese; return chinese ? "已切换到中文回复" : "已切换到默认回复"; },
     },
   });
-  assert.deepEqual(await provider.invokeAction!({ context, actionId: "skills.manage" }), { handled: true, refresh: false });
-  assert.deepEqual(calls, ["skills"]);
   assert.equal((await provider.read({ context })).effective.values.find((entry) => entry.key === "responseLanguage.manage")?.value, "default");
-  assert.deepEqual(await provider.invokeAction!({ context, actionId: "responseLanguage.manage" }), { handled: true, refresh: true });
+  const acted = await provider.invokeAction!({ context, actionId: "responseLanguage.manage" });
+  assert.equal(acted.handled, true);
+  assert.equal(acted.refresh, true);
+  assert.equal(acted.message, "已切换到中文回复");
   assert.equal((await provider.read({ context })).effective.values.find((entry) => entry.key === "responseLanguage.manage")?.value, "zh-CN");
 
   const events = new EventEmitter();
@@ -605,4 +592,72 @@ test("Flow provider rejects invalid values for registered compaction fields", as
   const prepared = await provider.prepare!({ context, transactionId: "invalid", changes: invalidChanges, expectedRevisions: baseline.configured.resources });
   assert.equal(prepared.prepared, false);
   assert.ok(prepared.validation.issues.length >= invalidChanges.length);
+});
+
+test("failover chain edits through the list-crud value persist to the file", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "flow-failover-crud-"));
+  try {
+    const globalFailover = path.join(root, "home", "model-failover.json");
+    const projectFailover = path.join(root, "project", ".pi", "model-failover.json");
+    fs.mkdirSync(path.dirname(projectFailover), { recursive: true });
+    const provider = createFlowSettingsProvider({
+      getGlobalFailoverPath: () => globalFailover,
+      getProjectFailoverPath: () => projectFailover,
+    });
+    const context: SettingsContextV1 = { cwd: path.join(root, "project"), locale: "en" };
+    writeJson(projectFailover, { enabled: true, fallbackModels: { "openai/main": ["qwen/fallback"] } });
+    const snapshot = await provider.read({ context });
+    assert.deepEqual(snapshot.effective.values.find((entry) => entry.key === "failover.fallbackModels")?.value, [
+      { model: "openai/main", fallbacks: ["qwen/fallback"] },
+    ]);
+    const prepared = await provider.prepare!({
+      context,
+      transactionId: "tx-fc",
+      changes: [{ operation: "set", key: "failover.fallbackModels", scope: "project", value: [
+        { model: "openai/main", fallbacks: ["qwen/fallback", "anthropic/fallback"] },
+        { model: "deepseek/main", fallbacks: ["qwen/main"] },
+      ] }],
+    });
+    assert.equal(prepared.prepared, true);
+    await provider.commit!({ context, transactionId: "tx-fc", prepareToken: prepared.prepareToken! });
+    const written = JSON.parse(fs.readFileSync(projectFailover, "utf8"));
+    assert.deepEqual(written.fallbackModels, {
+      "openai/main": ["qwen/fallback", "anthropic/fallback"],
+      "deepseek/main": ["qwen/main"],
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Flow provider exposes the permission rules as a read-only overview", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "flow-settings-provider-perm-"));
+  try {
+    const context: SettingsContextV1 = { cwd: path.join(root, "project"), locale: "en" };
+    const provider = createFlowSettingsProvider({
+      getGlobalSettingsPath: () => path.join(root, "home", "settings.json"),
+      getProjectSettingsPath: () => path.join(root, "project", ".pi", "settings.json"),
+      getGlobalFailoverPath: () => path.join(root, "home", "model-failover.json"),
+      getProjectFailoverPath: () => path.join(root, "project", ".pi", "model-failover.json"),
+      getPermissionOverview: () => ({
+        mode: "default",
+        allow: ["Read(x)"],
+        ask: ["Bash(git *)"],
+        deny: ["Bash(rm *)"],
+        sources: "home settings.json",
+      }),
+    });
+    const description = await provider.describe({ context });
+    assert.ok(description.settings.some((entry) => entry.key === "flow.permissions" && entry.editor.kind === "overview"));
+    assert.ok(!description.settings.some((entry) => entry.key === "permissions.manage"), "legacy action removed");
+    const snapshot = await provider.read({ context });
+    const rows = snapshot.effective.values.find((entry) => entry.key === "flow.permissions")?.value as Array<Record<string, unknown>>;
+    assert.ok(Array.isArray(rows));
+    assert.equal(rows[0]?.labelKey, "flow.permissions.mode");
+    assert.equal(rows[0]?.value, "default");
+    assert.ok(rows.some((row) => row.labelKey === "flow.permissions.allow" && row.value === "Read(x)"));
+    assert.ok(rows.some((row) => row.labelKey === "flow.permissions.sources"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

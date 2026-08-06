@@ -250,6 +250,18 @@ import {
   createSmartSearchSettingsProvider,
   registerSmartSearchSettingsProvider,
 } from "../settings/smart-search-settings-provider.ts";
+import {
+  createVisionDelegationSettingsProvider,
+  registerVisionDelegationSettingsProvider,
+} from "../settings/vision-delegation-provider.ts";
+import {
+  createExploreSettingsProvider,
+  registerExploreSettingsProvider,
+} from "../settings/explore-settings-provider.ts";
+import {
+  createHooksSettingsProvider,
+  registerHooksSettingsProvider,
+} from "../settings/hooks-settings-provider.ts";
 
 interface MaestroState {
   baseCwd: string;
@@ -2842,18 +2854,19 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     return ctx?.hasUI ? ctx : undefined;
   };
   /** Run an action with a unified status-line lifecycle (set before, clear after). */
-  const withActionStatus = async (status: string, run: (ctx: ExtensionContext) => Promise<void> | void): Promise<void> => {
+  const withActionStatus = async (status: string, run: (ctx: ExtensionContext) => Promise<string | void> | string | void): Promise<string | void> => {
     const ctx = requireFlowSettingsContext(status);
-    if (!ctx) return;
+    if (!ctx) return undefined;
     ctx.ui.setStatus("maestro-settings", status);
     try {
-      await run(ctx);
+      return await run(ctx);
     } finally {
       ctx.ui.setStatus("maestro-settings", undefined);
     }
   };
   const flowSettingsProvider = createFlowSettingsProvider({
     getAgentResponseLanguage: () => chineseResponseMode.isEnabled() ? "zh-CN" : "default",
+    getPermissionOverview: () => permissionController.overview(effectivePermissionMode(approvalMode)),
     actions: {
       "compaction.manage": () => withActionStatus("打开压缩设置…", async (ctx) => {
         await showCompactionSettingsOverlay(ctx as ExtensionCommandContext);
@@ -2863,9 +2876,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       }),
       "responseLanguage.manage": () => withActionStatus("切换 Agent 回复语言…", async (ctx) => {
         chineseResponseMode.toggle(ctx);
-      }),
-      "permissions.manage": () => withActionStatus("查看权限概览…", async (ctx) => {
-        ctx.ui.notify(permissionController.summary(effectivePermissionMode(approvalMode)), "info");
+        return chineseResponseMode.isEnabled() ? "已切换到中文回复" : "已切换到默认回复";
       }),
       "skills.manage": () => withActionStatus("打开 Skill 管理器…", async (ctx) => {
         const result = await runSkillManager(ctx, new SkillManagerStore(ctx.cwd));
@@ -2956,6 +2967,39 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     smartSearchSettingsDisposer?.();
     smartSearchSettingsDisposer = undefined;
   };
+
+  const visionDelegationSettingsProvider = createVisionDelegationSettingsProvider({});
+  let visionDelegationSettingsDisposer: (() => void) | undefined;
+  const registerVisionDelegationSettings = (): void => {
+    if (visionDelegationSettingsDisposer) return;
+    visionDelegationSettingsDisposer = registerVisionDelegationSettingsProvider(pi.events, visionDelegationSettingsProvider);
+  };
+  const disposeVisionDelegationSettings = (): void => {
+    visionDelegationSettingsDisposer?.();
+    visionDelegationSettingsDisposer = undefined;
+  };
+
+  const exploreSettingsProvider = createExploreSettingsProvider({});
+  let exploreSettingsDisposer: (() => void) | undefined;
+  const registerExploreSettings = (): void => {
+    if (exploreSettingsDisposer) return;
+    exploreSettingsDisposer = registerExploreSettingsProvider(pi.events, exploreSettingsProvider);
+  };
+  const disposeExploreSettings = (): void => {
+    exploreSettingsDisposer?.();
+    exploreSettingsDisposer = undefined;
+  };
+
+  const hooksSettingsProvider = createHooksSettingsProvider({});
+  let hooksSettingsDisposer: (() => void) | undefined;
+  const registerHooksSettings = (): void => {
+    if (hooksSettingsDisposer) return;
+    hooksSettingsDisposer = registerHooksSettingsProvider(pi.events, hooksSettingsProvider);
+  };
+  const disposeHooksSettings = (): void => {
+    hooksSettingsDisposer?.();
+    hooksSettingsDisposer = undefined;
+  };
   pi.on("session_start", (_event, ctx) => {
     flowSettingsContext = ctx;
     registerFlowSettings();
@@ -2963,6 +3007,9 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     registerMcpSettings();
     registerSkillsSettings();
     registerSmartSearchSettings();
+    registerVisionDelegationSettings();
+    registerExploreSettings();
+    registerHooksSettings();
   });
   pi.on("session_shutdown", (_event, ctx) => {
     if (flowSettingsContext === ctx) flowSettingsContext = undefined;
@@ -2971,6 +3018,9 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     disposeMcpSettings();
     disposeSkillsSettings();
     disposeSmartSearchSettings();
+    disposeVisionDelegationSettings();
+    disposeExploreSettings();
+    disposeHooksSettings();
   });
 
   const teammatePermissionBroker: TeammatePermissionBroker = async (call, ctx) => {

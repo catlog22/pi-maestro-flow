@@ -242,13 +242,20 @@ test("API Manager has a dedicated Settings page with direct management actions",
 		});
 		const rendered = shell.render(120).join("\n");
 		assert.match(rendered, /API Manager/);
-		assert.match(rendered, /— Providers and models —/);
-		assert.match(rendered, /Open API Manager/);
-		assert.match(rendered, /Add or edit a provider model/);
-		assert.match(rendered, /— Retry policy —/);
-		assert.match(rendered, /Configure API retries/);
-		assert.match(rendered, /— Configuration overview —/);
-		assert.match(rendered, /Show configured providers and models/);
+		// Open the API Manager provider and check its grouped settings.
+		shell.handleInput("\r");
+		let inner = shell.render(120).join("\n");
+		assert.match(inner, /— Providers and models —/);
+		assert.match(inner, /Providers/);
+		assert.match(inner, /— Retry policy —/);
+		assert.match(inner, /Auto-retry enabled/);
+		assert.match(inner, /Max retries/);
+		assert.match(inner, /Retry base delay \(ms\)/);
+		// The provider page scrolls: navigate down to reveal the later groups.
+		for (let index = 0; index < 8; index++) shell.handleInput("\x1b[B");
+		inner = shell.render(120).join("\n");
+		assert.match(inner, /— Configuration overview —/);
+		assert.match(inner, /Configuration overview ·/);
 	} finally { rmSync(state.root, { recursive: true, force: true }); }
 });
 
@@ -276,15 +283,19 @@ test("Teammate settings render task routing as ordered groups with management la
 			close() {},
 		});
 		const rendered = shell.render(120).join("\n");
-		const analysis = rendered.indexOf("— Analysis —");
-		const model = rendered.indexOf("Primary model");
-		const fallbacks = rendered.indexOf("Fallback models");
-		const thinking = rendered.indexOf("Thinking level");
-		const management = rendered.indexOf("— Management —");
-		const controlCenter = rendered.indexOf("Open full Teammate control center");
+		assert.match(rendered, /Teammate/);
+		// Open the Teammate provider: its settings render as ordered groups with management last.
+		shell.handleInput("\r");
+		const inner = shell.render(120).join("\n");
+		const analysis = inner.indexOf("— Analysis —");
+		const model = inner.indexOf("Primary model");
+		const fallbacks = inner.indexOf("Fallback models");
+		const thinking = inner.indexOf("Thinking level");
+		const management = inner.indexOf("— Management —");
+		const roles = inner.indexOf("Discovered roles");
 		assert.ok(analysis >= 0);
-		assert.ok(analysis < model && model < fallbacks && fallbacks < thinking);
-		assert.ok(thinking < management && management < controlCenter, rendered);
+		assert.ok(analysis < model && model < fallbacks && fallbacks < thinking, inner);
+		assert.ok(thinking < management && management < roles, inner);
 	} finally { rmSync(state.root, { recursive: true, force: true }); }
 });
 

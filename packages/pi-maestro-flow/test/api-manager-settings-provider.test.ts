@@ -40,8 +40,34 @@ test("api manager read surfaces providers with a masked apiKey placeholder", asy
   const openai = providers.find((entry) => entry.id === "maestro-openai")!;
   assert.equal(openai.apiKey, SETTINGS_SECRET_SET_PLACEHOLDER, "read must never expose the plaintext key");
   assert.equal(openai.enabled, true);
+  assert.deepEqual(openai.models, [{ id: "gpt-5.6" }], "read surfaces the provider's models for in-shell editing");
   const qwen = providers.find((entry) => entry.id === "qwen")!;
   assert.equal(qwen.enabled, false);
+});
+
+test("api manager commit writes edited provider models back to models.json", async () => {
+  const { provider, modelsPath, context } = harness({
+    providers: { "maestro-openai": { baseUrl: "https://gateway.example.com/v1", api: "openai-responses", models: [{ id: "gpt-5.6" }] } },
+  });
+  const transactionId = "tx-models";
+  const prepared = await provider.prepare!({
+    context,
+    transactionId,
+    changes: [{
+      operation: "set" as const,
+      key: "api.providers",
+      scope: "global" as const,
+      value: [
+        { id: "maestro-openai", baseUrl: "https://gateway.example.com/v1", api: "openai-responses", enabled: true, models: [{ id: "gpt-5.6" }, { id: "grok-4.5" }] },
+        { id: "qwen", baseUrl: "https://q.example.com/v1", api: "openai-completions", enabled: true, models: [{ id: "qwen3.8-max" }] },
+      ],
+    }],
+  });
+  assert.equal(prepared.prepared, true);
+  await provider.commit!({ context, transactionId, prepareToken: prepared.prepareToken! });
+  const written = JSON.parse(readFileSync(modelsPath, "utf8")) as Record<string, any>;
+  assert.deepEqual(written.providers["maestro-openai"].models, [{ id: "gpt-5.6" }, { id: "grok-4.5" }], "edited models persisted");
+  assert.deepEqual(written.providers["qwen"].models, [{ id: "qwen3.8-max" }], "new provider models persisted");
 });
 
 test("api manager read surfaces the prompt cache policy and defaults to off", async () => {

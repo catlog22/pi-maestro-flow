@@ -15,7 +15,8 @@
     "typecheck": "tsc -p tsconfig.build.json",
     "build:declarations": "tsc -p tsconfig.declarations.json",
     "check:declarations": "node scripts/check-declarations.mjs",
-    "prepack": "npm run build:declarations"
+    "prepack": "npm run build:declarations && node ../../scripts/bundle-settings-core.mjs",
+    "postpack": "node ../../scripts/bundle-settings-core.mjs --clean"
   },
   "main": "./src/index.ts",
   "types": "./types/index.d.ts",
@@ -121,6 +122,9 @@
     "pi-maestro-settings-core": "0.1.0",
     "proper-lockfile": "4.1.2"
   },
+  "bundledDependencies": [
+    "pi-maestro-settings-core"
+  ],
   "devDependencies": {
     "@earendil-works/pi-agent-core": "0.83.0",
     "@types/cross-spawn": "6.0.6",

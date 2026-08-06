@@ -28,6 +28,7 @@ import {
 import {
 	SETTINGS_SECRET_SET_PLACEHOLDER,
 } from "pi-maestro-settings-core/v1/schema";
+import { translateSettings } from "pi-maestro-settings-core/v1";
 import { parseSgrMouseEvent } from "../split-pane.ts";
 import { terminalRows } from "../stack-widget.ts";
 import { SettingsCoordinator, type SettingsApplyOutcome, type SettingsProviderFailure } from "./coordinator.ts";
@@ -62,6 +63,8 @@ export interface SettingsShellParams {
 	requestRender: () => void;
 	requestAction: (request: SettingsShellActionRequest) => void;
 	close: () => void;
+	/** Message returned by an invoked setting action, shown as an in-shell notice. */
+	initialActionMessage?: SettingsActionFeedback;
 }
 
 interface EditingState {
@@ -83,7 +86,7 @@ interface OptionEditingState {
 
 interface MouseTarget {
 	id: string;
-	kind: "provider" | "setting" | "option" | "list-item" | "list-field";
+	kind: "group" | "setting" | "option" | "list-item" | "list-field";
 	index: number;
 	row: number;
 	startColumn: number;
@@ -103,6 +106,14 @@ interface ListCrudFieldState {
 	fieldIndex: number;
 }
 
+/** One row of the flat vertical settings list (a group header or a setting). */
+interface FlatRow {
+	kind: "header" | "setting";
+	label: string;
+	providerIndex: number;
+	settingIndex: number;
+}
+
 const OVERVIEW_TONE: Record<NonNullable<SettingsOverviewRow["status"]>, "success" | "warning" | "error" | "dim"> = {
 	ok: "success",
 	warn: "warning",
@@ -114,8 +125,8 @@ const MAX_SETTING_ROWS = 10;
 const MAX_PROVIDER_ROWS = 9;
 /** Preferred overlay width as a fraction of the terminal, matching sibling overlays; the shell caps its own render width. */
 const SETTINGS_OVERLAY_WIDTH_VALUE = "94%" as const;
-const SETTINGS_OVERLAY_MAX_HEIGHT = 0.92;
-const SETTINGS_OVERLAY_MAX_HEIGHT_VALUE = "92%" as const;
+const SETTINGS_OVERLAY_MAX_HEIGHT = 0.97;
+const SETTINGS_OVERLAY_MAX_HEIGHT_VALUE = "97%" as const;
 const SETTINGS_OVERLAY_MARGIN = 1;
 /** Editor kinds whose value can be edited inline by typing a raw value. */
 const EDITABLE_VALUE_KINDS: ReadonlySet<string> = new Set([
@@ -142,15 +153,19 @@ export class MaestroSettingsShell implements Component, Focusable {
 	private context: SettingsContextV1;
 	private providers: DescribedSettingsProvider[];
 	private failures: SettingsProviderFailure[];
+	/** Index into the top-level provider list. */
 	private providerIndex = 0;
+	/** When set, the shell is showing that provider's settings (level 1). */
+	private activeProvider: number | undefined;
+	/** Index into the active provider's settings (level 1). */
 	private settingIndex = 0;
-	/** Per-provider remembered highlight (setting key) so ←/→ plugin switching keeps the cursor position. */
-	private settingKeyByProvider = new Map<string, string>();
 	private scope: SettingsScope = "global";
 	private search = "";
 	private searching = false;
 	private editing: EditingState | undefined;
 	private optionEditing: OptionEditingState | undefined;
+	/** Read-only popup showing an overview setting's diagnostic rows. */
+	private viewingOverview = false;
 	private listCrud: ListCrudState | undefined;
 	private listCrudField: ListCrudFieldState | undefined;
 	private deleteArmed = false;
@@ -172,6 +187,10 @@ export class MaestroSettingsShell implements Component, Focusable {
 		this.failures = params.initial.failures;
 		this.translator = this.createTranslator();
 		this.syncSelection();
+		if (params.initialActionMessage) {
+			this.notice = params.initialActionMessage.text;
+			this.noticeTone = params.initialActionMessage.tone;
+		}
 	}
 
 	invalidate(): void {}
@@ -183,9 +202,9 @@ export class MaestroSettingsShell implements Component, Focusable {
 
 	render(width: number): string[] {
 		const safeWidth = Math.max(1, Math.min(150, Math.trunc(width)));
-		// A width/wide-narrow switch invalidates hover coordinates even when the
-		// target ids are the same: the highlight must not linger at a stale spot
-		// until the mouse moves again (SK-7).
+		// A width switch invalidates hover coordinates even when the target ids
+		// are the same: the highlight must not linger at a stale spot until the
+		// mouse moves again (SK-7).
 		if (safeWidth !== this.lastRenderedWidth) this.hoveredTargetId = undefined;
 		this.mouseTargets = [];
 		if (safeWidth < 20) {
@@ -195,31 +214,12 @@ export class MaestroSettingsShell implements Component, Focusable {
 			return rendered;
 		}
 		const inner = safeWidth - 2;
-		const rows = [this.header(inner), rule(inner)];
-		const interactiveRowStart = rows.length + 1;
-		if (safeWidth >= 82) rows.push(...this.renderWide(inner, interactiveRowStart));
-		else rows.push(...this.renderNarrow(inner, interactiveRowStart));
-		const footerRows = [rule(inner)];
-		if (this.notice) footerRows.push(this.paintNotice(this.notice, inner));
-		for (const conflict of this.conflicts.slice(0, 2)) {
-			footerRows.push(this.params.theme.fg("error", fit(`! ${conflict.resource.id}`, inner)));
-		}
-		if (!this.notice && this.failures.length > 0) {
-			const failure = this.failures[0]!;
-			footerRows.push(this.params.theme.fg("warning", fit(`${failure.providerId} · ${failure.message}`, inner)));
-		}
-		const dirty = this.params.coordinator.modifiedProviderIds().length > 0;
-		footerRows.push(this.params.theme.fg("dim", fit(
-			safeWidth < 70
-				? dirty ? this.t("settings.helpNarrowDirty") : this.t("settings.helpNarrow")
-				: dirty ? this.t("settings.helpDirty") : this.t("settings.help"),
-			inner,
-		)));
-		const targetHeight = this.overlayHeightTarget();
-		const paddingRows = targetHeight ? Math.max(0, targetHeight - 2 - rows.length - footerRows.length) : 0;
-		for (let index = 0; index < paddingRows; index++) rows.push("");
-		rows.push(...footerRows);
-		const rendered = frame(rows, safeWidth, this.params.theme);
+		const body = this.editing || this.optionEditing || this.listCrud || this.listCrudField || this.viewingOverview
+			? this.renderEditPopup(inner)
+			: this.activeProvider !== undefined
+				? this.renderProviderSettings(inner)
+				: this.renderProviders(inner);
+		const rendered = frame(body, safeWidth, this.params.theme);
 		this.lastRenderedWidth = safeWidth;
 		this.lastRenderedHeight = rendered.length;
 		return rendered;
@@ -266,6 +266,15 @@ export class MaestroSettingsShell implements Component, Focusable {
 			return;
 		}
 		if (matchesKey(data, Key.escape)) {
+			if (this.viewingOverview) {
+				this.viewingOverview = false;
+				this.afterNavigation();
+				return;
+			}
+			if (this.activeProvider !== undefined) {
+				this.closeProvider();
+				return;
+			}
 			if (this.params.coordinator.modifiedProviderIds().length > 0 && !this.discardArmed) {
 				this.discardArmed = true;
 				this.setNotice(this.t("settings.discardConfirm"), "warning");
@@ -282,10 +291,8 @@ export class MaestroSettingsShell implements Component, Focusable {
 			this.requestRender();
 			return;
 		}
-		if (matchesKey(data, Key.left)) return this.moveProvider(-1);
-		if (matchesKey(data, Key.right)) return this.moveProvider(1);
-		if (matchesKey(data, Key.up)) return this.moveSetting(-1);
-		if (matchesKey(data, Key.down)) return this.moveSetting(1);
+		if (matchesKey(data, Key.up)) return this.activeProvider !== undefined ? this.moveSetting(-1) : this.moveProvider(-1);
+		if (matchesKey(data, Key.down)) return this.activeProvider !== undefined ? this.moveSetting(1) : this.moveProvider(1);
 		if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab"))) {
 			this.moveScope(matchesKey(data, Key.shift("tab")) ? -1 : 1);
 			return;
@@ -300,103 +307,157 @@ export class MaestroSettingsShell implements Component, Focusable {
 			return;
 		}
 		if (matchesKey(data, Key.space) || data === " " || matchesKey(data, Key.enter) || data === "\r") {
-			void this.activateSelected();
+			if (this.activeProvider !== undefined) void this.activateSelected();
+			else this.openProvider();
 		}
 	}
 
-	private renderWide(width: number, rowStart: number): string[] {
-		const providerWidth = Math.min(26, Math.max(20, Math.floor(width * 0.24)));
-		const contentWidth = Math.max(1, width - providerWidth - 3);
-		const providerRows = this.providerRows(providerWidth, rowStart, 1);
-		const contentRows = this.contentRows(contentWidth, this.settingRowLimit(false), rowStart, providerWidth + 4);
-		const rowCount = Math.max(providerRows.length, contentRows.length, 1);
-		return Array.from({ length: rowCount }, (_, index) =>
-			`${pad(providerRows[index] ?? "", providerWidth)} │ ${pad(contentRows[index] ?? "", contentWidth)}`
-		);
-	}
-
-	private renderNarrow(width: number, rowStart: number): string[] {
-		const provider = this.selectedProvider();
-		const title = provider
-			? `${this.params.theme.bold(this.t(provider.description.labelKey))} · ${this.providerIndex + 1}/${this.providers.length}`
-			: this.t("settings.providers");
-		return [fit(title, width), ...this.contentRows(width, this.settingRowLimit(true), rowStart + 1, 1)];
-	}
-
-	private providerRows(width: number, rowStart: number, columnStart: number): string[] {
-		const rows = [this.params.theme.bold(this.t("settings.providers"))];
-		if (this.providers.length === 0) return [...rows, this.params.theme.fg("dim", fit(this.t("settings.noProviders"), width))];
-		const start = visibleStart(this.providerIndex, this.providers.length, MAX_PROVIDER_ROWS);
-		for (let index = start; index < Math.min(this.providers.length, start + MAX_PROVIDER_ROWS); index++) {
-			const provider = this.providers[index]!;
-			const marker = index === this.providerIndex ? this.params.theme.fg("accent", "›") : " ";
-			const dirty = this.params.coordinator.changes(provider.providerId).length > 0 ? "*" : " ";
-			const targetId = `provider:${provider.providerId}`;
-			this.mouseTargets.push({
-				id: targetId,
-				kind: "provider",
-				index,
-				row: rowStart + rows.length,
-				startColumn: columnStart,
-				endColumn: columnStart + width,
-			});
-			rows.push(this.interactiveRow(`${marker}${dirty} ${this.t(provider.description.labelKey)}`, width, targetId, index === this.providerIndex));
-		}
-		return rows;
-	}
-
-	private contentRows(width: number, maxSettingRows: number, rowStart: number, columnStart: number): string[] {
-		const provider = this.selectedProvider();
-		if (!provider) return [this.params.theme.fg("dim", fit(this.t("settings.noProviders"), width))];
-		if (this.listCrudField) return this.listCrudFieldRows(width, rowStart, columnStart);
-		if (this.listCrud) return this.listCrudRows(width, rowStart, columnStart);
-		const settings = this.visibleSettings();
-		if (settings.length === 0) return [this.params.theme.fg("dim", fit(this.t("settings.noMatches"), width))];
-		const rows: string[] = [];
-		let start = visibleStart(this.settingIndex, settings.length, maxSettingRows);
-		let backtracked = 0;
-		while (start > 0 && backtracked < 2 && settings[start - 1]?.group === settings[start]?.group) {
-			start--;
-			backtracked++;
-		}
-		// Group-header backtracking shrinks the window from the top; on short
-		// terminals it must never push the highlighted row past the window end.
-		if (start + maxSettingRows <= this.settingIndex) {
-			start = Math.max(0, this.settingIndex - maxSettingRows + 1);
-		}
-		const end = Math.min(settings.length, start + maxSettingRows);
-		let renderedGroup: string | undefined;
-		for (let index = start; index < end; index++) {
-			const definition = settings[index]!;
-			if (definition.group !== renderedGroup) {
-				renderedGroup = definition.group;
-				rows.push(this.params.theme.fg("muted", fit(`— ${this.t(definition.group)} —`, width)));
+	private renderProviders(inner: number): string[] {
+		const rows = [this.header(inner), rule(inner)];
+		const providerRows = this.providerRows();
+		if (providerRows.length === 0) {
+			rows.push(this.params.theme.fg("dim", fit(this.t("settings.noMatches"), inner)));
+		} else {
+			const limit = this.providerRowLimit();
+			const start = visibleStart(this.providerIndex, providerRows.length, limit);
+			const end = Math.min(providerRows.length, start + limit);
+			for (let index = start; index < end; index++) {
+				const row = providerRows[index]!;
+				const selected = index === this.providerIndex;
+				const marker = selected ? this.params.theme.fg("accent", "›") : " ";
+				const targetId = `provider:${row.providerIndex}`;
+				this.mouseTargets.push({
+					id: targetId,
+					kind: "group",
+					index,
+					row: rows.length,
+					startColumn: 1,
+					endColumn: 1 + inner,
+				});
+				rows.push(this.interactiveRow(
+					`${marker} ${selected ? this.params.theme.bold(row.label) : row.label} · ${this.t("settings.groupCount", { count: row.count })}`,
+					inner,
+					targetId,
+					selected,
+				));
 			}
-			const selected = index === this.settingIndex;
-			const activeEditor = this.isEditing(provider.providerId, definition.key);
-			const marker = activeEditor
-				? this.params.theme.fg("accent", "✎")
-				: selected ? this.params.theme.fg("accent", "›") : " ";
-			const value = this.displayValue(provider.providerId, definition, this.scope);
-			const targetId = `setting:${provider.providerId}:${definition.key}`;
-			this.mouseTargets.push({
-				id: targetId,
-				kind: "setting",
-				index,
-				row: rowStart + rows.length,
-				startColumn: columnStart,
-				endColumn: columnStart + width,
-			});
-			rows.push(this.interactiveRow(
-				`${marker} ${selected ? this.params.theme.bold(this.t(definition.labelKey)) : this.t(definition.labelKey)} · ${value}`,
-				width,
-				targetId,
-				selected,
-			));
 		}
-		rows.push(rule(width));
-		rows.push(...this.detailRows(provider, settings[this.settingIndex]!, width, rowStart + rows.length, columnStart));
+		rows.push(...this.footerRows(inner));
+		return this.padToTarget(rows);
+	}
+
+	/** Level 1: the active provider's settings, grouped with headers. */
+	private renderProviderSettings(inner: number): string[] {
+		const provider = this.selectedProvider();
+		if (!provider) return [this.params.theme.fg("dim", fit(this.t("settings.noMatches"), inner))];
+		const rows = [this.header(inner), rule(inner), headerLine(this.params.theme, this.t(provider.description.labelKey), [], inner), rule(inner)];
+		const settings = this.providerSettings();
+		if (settings.length === 0) {
+			rows.push(this.params.theme.fg("dim", fit(this.t("settings.noMatches"), inner)));
+		} else {
+			const limit = this.settingRowLimit();
+			const start = visibleStart(this.settingIndex, settings.length, limit);
+			const end = Math.min(settings.length, start + limit);
+			let renderedGroup: string | undefined;
+			let backtracks = 0;
+			while (start > 0 && backtracks < 2 && settings[start - 1]?.group === settings[start]?.group) {
+				backtracks++;
+			}
+			for (let index = start; index < end; index++) {
+				const { definition } = settings[index]!;
+				if (definition.group !== renderedGroup) {
+					renderedGroup = definition.group;
+					rows.push(this.params.theme.fg("muted", fit(`— ${this.t(definition.group)} —`, inner)));
+				}
+				const selected = index === this.settingIndex;
+				const activeEditor = this.isEditing(provider.providerId, definition.key);
+				const marker = activeEditor
+					? this.params.theme.fg("accent", "✎")
+					: selected ? this.params.theme.fg("accent", "›") : " ";
+				const value = this.displayValue(provider.providerId, definition, this.scope);
+				const targetId = `setting:${provider.providerId}:${definition.key}`;
+				this.mouseTargets.push({
+					id: targetId,
+					kind: "setting",
+					index,
+					row: rows.length,
+					startColumn: 1,
+					endColumn: 1 + inner,
+				});
+				rows.push(this.interactiveRow(
+					`${marker} ${selected ? this.params.theme.bold(this.t(definition.labelKey)) : this.t(definition.labelKey)} · ${value}`,
+					inner,
+					targetId,
+					selected,
+				));
+			}
+		}
+		rows.push(...this.footerRows(inner));
+		return this.padToTarget(rows);
+	}
+
+	/** Shared footer (rule + notice/conflicts/failures + help). */
+	private footerRows(inner: number): string[] {
+		const footerRows = [rule(inner)];
+		if (this.notice) footerRows.push(this.paintNotice(this.notice, inner));
+		for (const conflict of this.conflicts.slice(0, 2)) {
+			footerRows.push(this.params.theme.fg("error", fit(`! ${conflict.resource.id}`, inner)));
+		}
+		if (!this.notice && this.failures.length > 0) {
+			const failure = this.failures[0]!;
+			footerRows.push(this.params.theme.fg("warning", fit(`${failure.providerId} · ${failure.message}`, inner)));
+		}
+		const dirty = this.params.coordinator.modifiedProviderIds().length > 0;
+		footerRows.push(this.params.theme.fg("dim", fit(
+			this.activeProvider !== undefined
+				? (dirty ? this.t("settings.helpDirty") : this.t("settings.help"))
+				: (dirty ? this.t("settings.helpGroupDirty") : this.t("settings.helpGroup")),
+			inner,
+		)));
+		return footerRows;
+	}
+
+	/** Pad so the overlay (frame + content) fills its height target. */
+	private padToTarget(rows: string[]): string[] {
+		const targetHeight = this.overlayHeightTarget();
+		const paddingRows = targetHeight ? Math.max(0, targetHeight - 2 - rows.length) : 0;
+		for (let index = 0; index < paddingRows; index++) rows.push("");
 		return rows;
+	}
+
+	/** Centered editing popup for the selected setting (reuses the editor state machines). */
+	private renderEditPopup(inner: number): string[] {
+		const provider = this.selectedProvider();
+		const definition = this.selectedSetting();
+		if (!provider || !definition) return [this.params.theme.fg("dim", fit(this.t("settings.noMatches"), inner))];
+		const rows: string[] = [];
+		const scopes = definition.scopes.length > 0 ? this.t(`settings.scope.${this.scope}`) : "";
+		const activation = this.t(`settings.activation.${definition.activation}`);
+		const editingFlag = this.editing || this.optionEditing ? this.t("settings.editing") : "";
+		rows.push(headerLine(this.params.theme, this.t(definition.labelKey), [scopes, activation, editingFlag].filter(Boolean), inner));
+		if (definition.descriptionKey) rows.push(this.params.theme.fg("dim", fit(this.t(definition.descriptionKey), inner)));
+		rows.push(rule(inner));
+		if (this.listCrudField) {
+			rows.push(...this.listCrudFieldRows(inner, rows.length, 1));
+		} else if (this.listCrud) {
+			rows.push(...this.listCrudRows(inner, rows.length, 1));
+		} else if (this.editing) {
+			rows.push(...this.textEditorRows(this.editing, inner));
+		} else if (this.optionEditing) {
+			rows.push(...this.optionEditorRows(this.optionEditing, inner, rows.length, 1));
+		} else if (definition.editor.kind === "overview") {
+			rows.push(...this.detailRows(provider, definition, inner, rows.length, 1));
+		} else {
+			const value = this.displayValue(provider.providerId, definition, this.scope);
+			rows.push(fit(`${this.t("settings.effective")} · ${value}`, inner));
+			if (definition.editor.kind === "action" || definition.editor.kind === "custom") {
+				rows.push(fit(`${this.t("settings.manage")} · Enter`, inner));
+			}
+		}
+		rows.push(rule(inner));
+		if (this.notice) rows.push(this.paintNotice(this.notice, inner));
+		rows.push(helpLine(this.params.theme, this.t("settings.editHelp"), inner));
+		return this.padToTarget(rows);
 	}
 
 	/** ●/○ toggle indicator for list items carrying an `enabled` boolean field, mirroring the /skills UI. */
@@ -574,6 +635,12 @@ export class MaestroSettingsShell implements Component, Focusable {
 		const provider = this.selectedProvider();
 		const definition = this.selectedSetting();
 		if (!provider || !definition || !definition.scopes.includes(this.scope)) return;
+		if (definition.editor.kind === "overview") {
+			this.viewingOverview = true;
+			this.discardArmed = false;
+			this.requestRender();
+			return;
+		}
 		if (!provider.description.capabilities.write && definition.editor.kind !== "action" && definition.editor.kind !== "custom") {
 			this.setNotice(this.t("settings.readOnly"), "warning");
 			return;
@@ -998,7 +1065,7 @@ export class MaestroSettingsShell implements Component, Focusable {
 			const printable = decodeKittyPrintable(data) ?? (/^[^\x00-\x1f\x7f]+$/u.test(data) ? data : "");
 			if (printable) this.search += printable;
 		}
-		this.settingIndex = 0;
+		this.providerIndex = 0;
 		this.syncSelection();
 		this.requestRender();
 	}
@@ -1224,28 +1291,23 @@ export class MaestroSettingsShell implements Component, Focusable {
 			this.requestRender();
 			return true;
 		}
+		if (target.kind === "group") {
+			this.providerIndex = target.index;
+			this.openProvider();
+			return true;
+		}
+		if (target.kind === "setting") {
+			this.settingIndex = target.index;
+			this.syncScope();
+			this.afterNavigation(false);
+			void this.activateSelected();
+			return true;
+		}
 		if (this.optionEditing || this.searching || this.applying) {
 			this.requestRender();
 			return true;
 		}
-		if (target.kind === "provider") {
-			if (target.index !== this.providerIndex) {
-				const previous = this.selectedProvider();
-				if (previous) this.rememberSetting(previous.providerId);
-				this.providerIndex = target.index;
-				this.restoreSetting(this.selectedProvider()?.providerId);
-				this.syncSelection();
-				this.afterNavigation(false);
-			} else {
-				this.requestRender();
-			}
-			return true;
-		}
-		this.settingIndex = target.index;
-		this.syncScope();
-		this.rememberSetting(this.selectedProvider()?.providerId);
-		this.afterNavigation(false);
-		void this.activateSelected();
+		this.requestRender();
 		return true;
 	}
 
@@ -1282,6 +1344,23 @@ export class MaestroSettingsShell implements Component, Focusable {
 		));
 	}
 
+	/** Max settings rows visible at once, scaled to the overlay height so tall
+	 * terminals show more and scrolling is minimised. */
+	private settingRowLimit(): number {
+		const overlayHeight = this.overlayHeightTarget();
+		if (!overlayHeight) return MAX_SETTING_ROWS;
+		// Chrome: frame borders(2) + header(1) + rule(1) + provider name(1) + rule(1)
+		// + footer(rule+help ≈2); leave room for a couple of group headers.
+		return Math.max(6, overlayHeight - 10);
+	}
+
+	private providerRowLimit(): number {
+		const overlayHeight = this.overlayHeightTarget();
+		if (!overlayHeight) return MAX_PROVIDER_ROWS;
+		// Chrome: frame borders(2) + header(1) + rule(1) + footer(rule+help ≈2).
+		return Math.max(4, overlayHeight - 6);
+	}
+
 	private optionRowLimit(): number {
 		const overlayHeight = this.overlayHeightTarget();
 		if (!overlayHeight) return 7;
@@ -1299,59 +1378,83 @@ export class MaestroSettingsShell implements Component, Focusable {
 		return Math.max(1, overlayHeight - 11 - (this.notice ? 1 : 0));
 	}
 
-	private settingRowLimit(narrow: boolean): number {
-		const overlayHeight = this.overlayHeightTarget();
-		if (!overlayHeight) return MAX_SETTING_ROWS;
-		if (this.optionEditing) return 1;
-		const available = Math.max(1, overlayHeight - (narrow ? 17 : 16));
-		for (let rows = MAX_SETTING_ROWS; rows > 1; rows--) {
-			if (rows + Math.ceil(rows / 3) <= available) return rows;
-		}
-		return 1;
-	}
-
 	private selectedProvider(): DescribedSettingsProvider | undefined {
-		return this.providers[this.providerIndex];
+		if (this.activeProvider === undefined) return undefined;
+		return this.providers[this.activeProvider];
 	}
 
-	private visibleSettings(): readonly SettingDefinition[] {
-		const settings = this.selectedProvider()?.description.settings ?? [];
+	/** Top-level provider rows (level 0 navigation). */
+	private providerRows(): { providerIndex: number; label: string; count: number }[] {
+		const query = this.search.trim().toLocaleLowerCase();
+		const rows: { providerIndex: number; label: string; count: number }[] = [];
+		for (let providerIndex = 0; providerIndex < this.providers.length; providerIndex++) {
+			const provider = this.providers[providerIndex]!;
+			const label = this.t(provider.description.labelKey);
+			if (query && !label.toLocaleLowerCase().includes(query)) continue;
+			rows.push({ providerIndex, label, count: provider.description.settings.length });
+		}
+		return rows;
+	}
+
+	/** Settings inside the active provider (level 1), grouped and ordered. */
+	private providerSettings(): readonly { provider: DescribedSettingsProvider; definition: SettingDefinition; group: string }[] {
+		if (this.activeProvider === undefined) return [];
+		const provider = this.providers[this.activeProvider];
+		if (!provider) return [];
 		const query = this.search.trim().toLocaleLowerCase();
 		const groupOrder = new Map<string, number>();
+		const settings = provider.description.settings.filter((definition) => !query
+			|| definition.key.toLocaleLowerCase().includes(query)
+			|| this.t(definition.labelKey).toLocaleLowerCase().includes(query));
 		for (const definition of settings) {
 			if (!groupOrder.has(definition.group)) groupOrder.set(definition.group, groupOrder.size);
 		}
 		return settings
-			.filter((definition) => !query
-				|| definition.key.toLocaleLowerCase().includes(query)
-				|| this.t(definition.labelKey).toLocaleLowerCase().includes(query)
-				|| this.t(definition.group).toLocaleLowerCase().includes(query))
 			.sort((left, right) => (groupOrder.get(left.group) ?? Number.MAX_SAFE_INTEGER)
 				- (groupOrder.get(right.group) ?? Number.MAX_SAFE_INTEGER)
 				|| (left.order ?? 0) - (right.order ?? 0)
-				|| left.key.localeCompare(right.key));
+				|| left.key.localeCompare(right.key))
+			.map((definition) => ({ provider, definition, group: definition.group }));
 	}
 
 	private selectedSetting(): SettingDefinition | undefined {
-		return this.visibleSettings()[this.settingIndex];
+		return this.providerSettings()[this.settingIndex]?.definition;
 	}
 
 	private moveProvider(delta: number): void {
-		if (this.providers.length === 0) return;
-		const previous = this.selectedProvider();
-		if (previous) this.rememberSetting(previous.providerId);
-		this.providerIndex = (this.providerIndex + delta + this.providers.length) % this.providers.length;
-		this.restoreSetting(this.selectedProvider()?.providerId);
-		this.syncSelection();
+		const rows = this.providerRows();
+		if (rows.length === 0) return;
+		this.providerIndex = (this.providerIndex + delta + rows.length) % rows.length;
+		this.afterNavigation();
+	}
+
+	private openProvider(): void {
+		const rows = this.providerRows();
+		const row = rows[clampIndex(this.providerIndex, rows.length)];
+		if (!row) return;
+		// Opening a provider drops the search filter so its settings are all visible.
+		this.search = "";
+		this.searching = false;
+		this.activeProvider = row.providerIndex;
+		this.settingIndex = 0;
+		this.syncScope();
+		this.afterNavigation();
+	}
+
+	private closeProvider(): void {
+		this.activeProvider = undefined;
+		this.afterNavigation();
+	}
+
+	private moveSetting(delta: number): void {
+		const settings = this.providerSettings();
+		if (settings.length === 0) return;
+		this.settingIndex = (this.settingIndex + delta + settings.length) % settings.length;
+		this.syncScope();
 		this.afterNavigation();
 	}
 
 	private moveSettingByWheel(delta: number): void {
-		// Wheel must not bypass the modal input guards: while applying, navigation
-		// is frozen; inside the option editor the wheel moves the option list;
-		// while editing text the wheel must not yank the current row away from
-		// the editor that still owns the keystrokes; inside list-crud the wheel
-		// must not mutate the hidden settings list or clear the delete confirm.
 		if (this.applying) return;
 		if (this.optionEditing) {
 			const editing = this.optionEditing;
@@ -1360,16 +1463,8 @@ export class MaestroSettingsShell implements Component, Focusable {
 			return;
 		}
 		if (this.editing || this.listCrud || this.listCrudField) return;
-		this.moveSetting(delta);
-	}
-
-	private moveSetting(delta: number): void {
-		const settings = this.visibleSettings();
-		if (settings.length === 0) return;
-		this.settingIndex = (this.settingIndex + delta + settings.length) % settings.length;
-		this.syncScope();
-		this.rememberSetting(this.selectedProvider()?.providerId);
-		this.afterNavigation();
+		if (this.activeProvider !== undefined) this.moveSetting(delta);
+		else this.moveProvider(delta);
 	}
 
 	private moveScope(delta: number): void {
@@ -1381,8 +1476,8 @@ export class MaestroSettingsShell implements Component, Focusable {
 	}
 
 	private syncSelection(): void {
-		this.providerIndex = clampIndex(this.providerIndex, this.providers.length);
-		this.settingIndex = clampIndex(this.settingIndex, this.visibleSettings().length);
+		this.providerIndex = clampIndex(this.providerIndex, this.providerRows().length);
+		this.settingIndex = clampIndex(this.settingIndex, this.providerSettings().length);
 		this.syncScope();
 	}
 
@@ -1396,23 +1491,6 @@ export class MaestroSettingsShell implements Component, Focusable {
 		this.conflicts = [];
 		this.notice = "";
 		this.requestRender();
-	}
-
-	/** Remember the highlighted setting key for the current provider. */
-	private rememberSetting(providerId: string | undefined): void {
-		const selected = this.selectedSetting();
-		if (providerId && selected) this.settingKeyByProvider.set(providerId, selected.key);
-	}
-
-	/** Restore the remembered highlight for a provider, defaulting to the first setting. */
-	private restoreSetting(providerId: string | undefined): void {
-		const key = providerId ? this.settingKeyByProvider.get(providerId) : undefined;
-		if (!key) {
-			this.settingIndex = 0;
-			return;
-		}
-		const index = this.visibleSettings().findIndex((setting) => setting.key === key);
-		this.settingIndex = index >= 0 ? index : 0;
 	}
 
 	private afterNavigation(clearHover = true): void {
@@ -1460,6 +1538,7 @@ export async function showMaestroSettingsShell(
 		return { context, providers, failures };
 	};
 	let initial = await load();
+	let actionFeedback: SettingsActionFeedback | undefined;
 	while (true) {
 		const result = await ctx.ui.custom<
 			{ kind: "close" } | { kind: "action"; request: SettingsShellActionRequest }
@@ -1496,9 +1575,14 @@ export async function showMaestroSettingsShell(
 		});
 		if (result.kind === "close") return;
 
-		await executeSettingsShellAction(ctx, registry, initial.context, result.request);
+		actionFeedback = await executeSettingsShellAction(ctx, registry, initial.context, result.request);
 		initial = await load();
 	}
+}
+
+export interface SettingsActionFeedback {
+	text: string;
+	tone: "success" | "warning" | "error";
 }
 
 export async function executeSettingsShellAction(
@@ -1506,11 +1590,11 @@ export async function executeSettingsShellAction(
 	registry: SettingsProviderRegistry,
 	context: SettingsContextV1,
 	request: SettingsShellActionRequest,
-): Promise<void> {
+): Promise<SettingsActionFeedback | undefined> {
 	const registration = registry.get(request.providerId);
 	if (!registration?.provider.invokeAction) {
 		ctx.ui.notify("This setting action is no longer available.", "warning");
-		return;
+		return undefined;
 	}
 	try {
 		const action = await registration.provider.invokeAction({
@@ -1518,9 +1602,22 @@ export async function executeSettingsShellAction(
 			actionId: request.actionId,
 			key: request.key,
 		});
-		if (!action.handled) ctx.ui.notify("This setting action is not supported by its provider.", "warning");
+		if (!action.handled) {
+			ctx.ui.notify("This setting action is not supported by its provider.", "warning");
+			return undefined;
+		}
+		if (action.message) return { text: action.message, tone: "success" };
+		if (action.messageKey) {
+			const described = await Promise.resolve(registration.provider.describe({ context }));
+			const catalogs = described?.catalogs;
+			if (catalogs) {
+				return { text: translateSettings(catalogs, context.locale, action.messageKey, action.params), tone: "success" };
+			}
+		}
+		return undefined;
 	} catch (error) {
 		ctx.ui.notify(`Could not open setting manager: ${error instanceof Error ? error.message : String(error)}`, "error");
+		return undefined;
 	}
 }
 

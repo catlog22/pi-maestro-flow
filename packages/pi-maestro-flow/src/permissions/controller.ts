@@ -27,6 +27,14 @@ export interface PermissionRequestHookRunner {
   ): Promise<PermissionRequestHookDecision | undefined>;
 }
 
+export interface PermissionOverview {
+  mode: string;
+  allow: readonly string[];
+  ask: readonly string[];
+  deny: readonly string[];
+  sources: string;
+}
+
 export interface PermissionController {
   reload(ctx: ExtensionContext): Promise<PermissionMode | undefined>;
   setDefaultMode(ctx: ExtensionContext, mode: PermissionMode): Promise<void>;
@@ -37,6 +45,7 @@ export interface PermissionController {
     hooks?: PermissionRequestHookRunner,
   ): Promise<{ block: true; reason: string } | undefined>;
   summary(mode: PermissionMode): string;
+  overview(mode: PermissionMode): PermissionOverview;
   bypassDisabled(): boolean;
 }
 
@@ -182,6 +191,17 @@ export function createPermissionController(options: {
         "",
         `Sources:\n${sources}`,
       ].join("\n");
+    },
+
+    overview(mode) {
+      const permissions = loaded?.permissions ?? { allow: [], ask: [], deny: [] };
+      return {
+        mode,
+        allow: [...new Set([...permissions.allow, ...sessionRules.allow])],
+        ask: [...new Set([...permissions.ask, ...sessionRules.ask])],
+        deny: [...new Set([...permissions.deny, ...sessionRules.deny])],
+        sources: loaded?.sources.length ? loaded.sources.join(", ") : "无配置文件",
+      };
     },
 
     bypassDisabled() {

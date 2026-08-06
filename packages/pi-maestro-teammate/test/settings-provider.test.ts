@@ -362,13 +362,13 @@ test("single-scope commit restores the previous bytes when the durability sync f
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("legacy action and synchronous discovery stay provider-owned", async () => {
+test("discovery stays provider-owned and roles overview is exposed", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "teammate-settings-provider-"));
   try {
-    let actions = 0;
-    const provider = providerAt(root, () => { actions++; });
-    await provider.invokeAction!({ context: context(root), actionId: "teammate.routing.manage" });
-    assert.equal(actions, 1);
+    const provider = providerAt(root);
+    assert.deepEqual(await provider.invokeAction!({ context: context(root), actionId: "teammate.routing.manage" }), { handled: false });
+    const description = await provider.describe({ context: context(root) });
+    assert.ok(description.settings.some((entry) => entry.key === "teammate.roles" && entry.editor.kind === "overview"));
     const bus = new FakeEventBus();
     registerTeammateSettingsProvider(bus, provider);
     bus.emit(SETTINGS_DISCOVER_EVENT, { version: SETTINGS_PROTOCOL_VERSION, requestId: "r", context: context(root) });

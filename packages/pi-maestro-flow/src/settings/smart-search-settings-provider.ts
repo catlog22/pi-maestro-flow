@@ -27,6 +27,7 @@ import {
 } from "pi-maestro-settings-core/v1";
 import { SETTINGS_SECRET_SET_PLACEHOLDER } from "pi-maestro-settings-core/v1/schema";
 import {
+  ALL_CONFIG_KEYS,
   SMART_SEARCH_CONFIG_KEYS,
   SmartSearchConfigStore,
   WEB_ACCESS_SYNC_MAPPINGS,
@@ -71,6 +72,12 @@ const BOOLEAN_CONFIG_KEYS = new Set([
   "SMART_SEARCH_OUTPUT_CLEANUP",
   "SMART_SEARCH_LOG_TO_FILE",
   "SSL_VERIFY",
+  // Native web-search keys.
+  "ALLOW_BROWSER_COOKIES",
+  "SSRF_TRUST_ENV_PROXY",
+  "WEB_SEARCH_ENABLED",
+  "VIDEO_ENABLED",
+  "YOUTUBE_ENABLED",
 ]);
 
 const NUMBER_CONFIG_KEYS = new Set([
@@ -87,6 +94,9 @@ const NUMBER_CONFIG_KEYS = new Set([
   "SMART_SEARCH_RETRY_MAX_ATTEMPTS",
   "SMART_SEARCH_RETRY_MULTIPLIER",
   "SMART_SEARCH_RETRY_MAX_WAIT",
+  // Native web-search keys.
+  "CURATOR_TIMEOUT_SECONDS",
+  "VIDEO_MAX_SIZE_MB",
 ]);
 
 const ENUM_OPTIONS: Readonly<Record<string, readonly SettingsSelectOption[]>> = {
@@ -138,7 +148,7 @@ function editorFor(key: string, kind: ConfigEditorKind): SettingDefinition["edit
 }
 
 const DEFINITIONS: readonly SettingDefinition[] = [
-  ...SMART_SEARCH_CONFIG_KEYS.map((key, index): SettingDefinition => {
+  ...ALL_CONFIG_KEYS.map((key, index): SettingDefinition => {
     const kind = configEditorKind(key);
     return {
       key,
@@ -201,6 +211,16 @@ const EN_CATALOG = {
   "smartSearch.group.firecrawl": "Firecrawl",
   "smartSearch.group.anysearch": "AnySearch",
   "smartSearch.group.runtime": "Runtime",
+  "smartSearch.group.wa-perplexity": "Perplexity (native)",
+  "smartSearch.group.wa-openai": "OpenAI Search (native)",
+  "smartSearch.group.wa-brave": "Brave Search (native)",
+  "smartSearch.group.wa-parallel": "Parallel AI (native)",
+  "smartSearch.group.wa-serpdive": "SERPdive (native)",
+  "smartSearch.group.wa-searxng": "SearXNG (native)",
+  "smartSearch.group.wa-gemini": "Gemini Platform",
+  "smartSearch.group.wa-ssrf": "SSRF Protection",
+  "smartSearch.group.wa-workflow": "Curator & Workflow",
+  "smartSearch.group.wa-video": "Video Analysis",
   "smartSearch.group.overview": "Sync overview",
   "smartSearch.group.manage": "Smart Search management",
   "smartSearch.group.custom": "Custom",
@@ -309,6 +329,16 @@ const ZH_CATALOG: Record<CatalogKey, string> = {
   "smartSearch.group.firecrawl": "Firecrawl",
   "smartSearch.group.anysearch": "AnySearch",
   "smartSearch.group.runtime": "运行环境",
+  "smartSearch.group.wa-perplexity": "Perplexity（原生）",
+  "smartSearch.group.wa-openai": "OpenAI 搜索（原生）",
+  "smartSearch.group.wa-brave": "Brave 搜索（原生）",
+  "smartSearch.group.wa-parallel": "Parallel AI（原生）",
+  "smartSearch.group.wa-serpdive": "SERPdive（原生）",
+  "smartSearch.group.wa-searxng": "SearXNG（原生）",
+  "smartSearch.group.wa-gemini": "Gemini 平台",
+  "smartSearch.group.wa-ssrf": "SSRF 防护",
+  "smartSearch.group.wa-workflow": "Curator 与工作流",
+  "smartSearch.group.wa-video": "视频分析",
   "smartSearch.group.overview": "同步概览",
   "smartSearch.group.manage": "Smart Search 管理",
   "smartSearch.group.custom": "自定义",
@@ -399,7 +429,33 @@ const ZH_CATALOG: Record<CatalogKey, string> = {
   "smartSearch.settings.readOnly": "Smart Search 同步与操作项不能作为草稿值提交",
 };
 
-const CATALOGS = { en: EN_CATALOG, "zh-CN": ZH_CATALOG };
+const CATALOGS = buildCatalogs();
+
+/** Human-readable label for a config key (e.g. PERPLEXITY_API_KEY → Perplexity API key). */
+function humanizeKey(key: string): string {
+  return key
+    .split("_")
+    .map((part) => {
+      const upper = part.toUpperCase();
+      return ["API", "URL", "MCP", "SSRF", "SSL", "HTTP", "TLS", "LLM", "AI", "DB"].includes(upper)
+        ? upper
+        : `${part.charAt(0)}${part.slice(1).toLowerCase()}`;
+    })
+    .join(" ");
+}
+
+/** Explicit catalogs + auto-generated labels for every configured key. */
+function buildCatalogs(): Record<string, Record<string, string>> {
+  const merge = (base: Record<string, string>): Record<string, string> => {
+    const out: Record<string, string> = { ...base };
+    for (const key of ALL_CONFIG_KEYS) {
+      const labelKey = `smartSearch.key.${key}`;
+      if (!out[labelKey]) out[labelKey] = humanizeKey(key);
+    }
+    return out;
+  };
+  return { en: merge(EN_CATALOG), "zh-CN": merge(ZH_CATALOG) };
+}
 
 // ---------------------------------------------------------------------------
 // web-search.json sync — mirrors the TUI's WebAccessConfigSync so the settings

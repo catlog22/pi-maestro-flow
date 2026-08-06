@@ -108,6 +108,21 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
     assert.ok(teammatePacked[0].files.some(({ path }) => path === "types/index.d.ts"));
     assert.ok(teammatePacked[0].files.some(({ path }) => path === "types/public/v1/execution.d.ts"));
 
+    // pi loads packages with separate module roots, so the shared settings-core
+    // protocol must be bundled inside each plugin tarball (packages.md). npm
+    // pack stores bundled deps under package/node_modules/...
+    for (const [label, tarball] of [
+      ["flow", flowTarball],
+      ["cockpit", cockpitTarball],
+      ["teammate", teammateTarball],
+    ]) {
+      const entries = tarList(tarball);
+      assert.ok(
+        entries.some((entry) => entry.startsWith("package/node_modules/pi-maestro-settings-core/")),
+        `${label} tarball must bundle node_modules/pi-maestro-settings-core`,
+      );
+    }
+
     verifyStandaloneCockpit({
       consumer: join(root, "cockpit-standalone"),
       workflowRoot: join(root, "cockpit-workflow"),
@@ -506,6 +521,12 @@ function prepareSource(stage) {
 function parseTrailingJson(stdout) {
   const arrayStart = stdout.lastIndexOf("\n[");
   return JSON.parse(arrayStart >= 0 ? stdout.slice(arrayStart + 1) : stdout);
+}
+
+function tarList(tarball) {
+  const result = spawnSync("tar", ["-tzf", tarball], { encoding: "utf8" });
+  assert.equal(result.status, 0, `tar -tzf failed for ${tarball}: ${result.stderr}`);
+  return result.stdout.split(/\r?\n/).filter(Boolean);
 }
 
 function run(command, args, cwd, env = process.env, timeout = 60_000, input) {

@@ -66,10 +66,20 @@ const CONFIG_KEYS = [
 	"todoMode",
 	"todoExpanded",
 	"hideNativeAgents",
+	"toolPalette",
 	"icons.mode",
 	"sidebar.mode",
 	"sidebar.width",
 	"sidebar.density",
+	"title.enabled",
+	"title.showSession",
+	"title.showCwd",
+	"title.showModel",
+	"title.showThinking",
+	"title.showGit",
+	"title.showMaestro",
+	"title.generationModel",
+	"title.maxLength",
 ] as const;
 
 type CockpitSettingKey = (typeof CONFIG_KEYS)[number];
@@ -87,7 +97,7 @@ export interface CockpitSettingsProviderOptions {
 	getThinkingFolded?: () => boolean | undefined;
 	openLegacySettings?: () => Promise<void> | void;
 	openThemeSettings?: () => Promise<void> | void;
-	toggleThinkingFold?: () => Promise<void> | void;
+	toggleThinkingFold?: () => Promise<boolean | void> | boolean | void;
 }
 
 interface ConfigDocument {
@@ -120,6 +130,7 @@ const CATALOGS = {
 		"cockpit.group.layout": "Layout",
 		"cockpit.group.panels": "Panels",
 		"cockpit.group.sidebar": "Sidebar",
+		"cockpit.group.title": "Tab title",
 		"cockpit.group.appearance": "Appearance",
 		"cockpit.enabled": "Cockpit enabled",
 		"cockpit.staticMode": "Static rendering mode",
@@ -141,6 +152,25 @@ const CATALOGS = {
 		"cockpit.sidebar.mode": "Sidebar mode",
 		"cockpit.sidebar.width": "Sidebar width",
 		"cockpit.sidebar.density": "Sidebar density",
+		"cockpit.toolPalette": "Tool palette",
+		"cockpit.toolPalette.description": "Tool-name color source. Applies on /reload.",
+		"cockpit.title.enabled": "Tab title enabled",
+		"cockpit.title.enabled.description": "Show a session summary in the terminal tab title.",
+		"cockpit.title.showSession": "Title: show session",
+		"cockpit.title.showCwd": "Title: show working directory",
+		"cockpit.title.showModel": "Title: show model",
+		"cockpit.title.showThinking": "Title: show thinking level",
+		"cockpit.title.showGit": "Title: show git branch",
+		"cockpit.title.showMaestro": "Title: show maestro status",
+		"cockpit.title.generationModel": "Title generation model",
+		"cockpit.title.generationModel.description": "Model used to generate the session title after the first turn (provider/model). Empty falls back to the offline rule-based suggest.",
+		"cockpit.title.maxLength": "Title max length",
+		"cockpit.title.maxLength.description": "Hard cap on the composed tab title (the middle is ellided).",
+		"cockpit.option.classic": "Classic",
+		"cockpit.option.family": "Family",
+		"cockpit.option.readwrite": "Read/Write",
+		"cockpit.option.search": "Search",
+		"cockpit.option.mono": "Mono",
 		"cockpit.theme": "Theme",
 		"cockpit.thinkingFold": "Thinking fold",
 		"cockpit.action.legacy": "Open legacy Cockpit settings",
@@ -164,6 +194,7 @@ const CATALOGS = {
 		"cockpit.group.layout": "布局",
 		"cockpit.group.panels": "面板",
 		"cockpit.group.sidebar": "侧边栏",
+		"cockpit.group.title": "标签页标题",
 		"cockpit.group.appearance": "外观",
 		"cockpit.enabled": "启用 Cockpit",
 		"cockpit.staticMode": "静态渲染模式",
@@ -185,6 +216,25 @@ const CATALOGS = {
 		"cockpit.sidebar.mode": "侧边栏模式",
 		"cockpit.sidebar.width": "侧边栏宽度",
 		"cockpit.sidebar.density": "侧边栏密度",
+		"cockpit.toolPalette": "工具调色板",
+		"cockpit.toolPalette.description": "工具名称配色来源。需执行 /reload 生效。",
+		"cockpit.title.enabled": "启用标签页标题",
+		"cockpit.title.enabled.description": "在终端标签页标题显示会话摘要。",
+		"cockpit.title.showSession": "标题：显示会话",
+		"cockpit.title.showCwd": "标题：显示工作目录",
+		"cockpit.title.showModel": "标题：显示模型",
+		"cockpit.title.showThinking": "标题：显示思考级别",
+		"cockpit.title.showGit": "标题：显示 git 分支",
+		"cockpit.title.showMaestro": "标题：显示 Maestro 状态",
+		"cockpit.title.generationModel": "标题生成模型",
+		"cockpit.title.generationModel.description": "首轮后用于生成会话标题的模型（provider/model）。留空则回退到离线的规则建议。",
+		"cockpit.title.maxLength": "标题最大长度",
+		"cockpit.title.maxLength.description": "组合标签页标题的硬上限（中间省略）。",
+		"cockpit.option.classic": "经典",
+		"cockpit.option.family": "族",
+		"cockpit.option.readwrite": "读写",
+		"cockpit.option.search": "搜索",
+		"cockpit.option.mono": "单色",
 		"cockpit.theme": "主题",
 		"cockpit.thinkingFold": "折叠思考过程",
 		"cockpit.action.legacy": "打开旧版 Cockpit 设置",
@@ -260,9 +310,30 @@ const DEFINITIONS: readonly SettingDefinition[] = [
 	},
 	enumDefinition("sidebar.density", "cockpit.group.sidebar", 2, "cockpit.sidebar.density", ["comfortable", "compact"], "live"),
 	enumDefinition("icons.mode", "cockpit.group.appearance", 0, "cockpit.icons.mode", ["auto", "nerd", "ascii"], "live"),
-	actionDefinition("theme", "cockpit.group.appearance", 1, "cockpit.theme", "cockpit.theme"),
+	enumDefinition("toolPalette", "cockpit.group.appearance", 0, "cockpit.toolPalette", ["classic", "family", "readwrite", "search", "mono"], "extension-reload", "cockpit.toolPalette.description"),
+	booleanDefinition("title.enabled", "cockpit.group.title", 0, "cockpit.title.enabled", "live", "cockpit.title.enabled.description"),
+	booleanDefinition("title.showSession", "cockpit.group.title", 1, "cockpit.title.showSession", "live"),
+	booleanDefinition("title.showCwd", "cockpit.group.title", 2, "cockpit.title.showCwd", "live"),
+	booleanDefinition("title.showModel", "cockpit.group.title", 3, "cockpit.title.showModel", "live"),
+	booleanDefinition("title.showThinking", "cockpit.group.title", 4, "cockpit.title.showThinking", "live"),
+	booleanDefinition("title.showGit", "cockpit.group.title", 5, "cockpit.title.showGit", "live"),
+	booleanDefinition("title.showMaestro", "cockpit.group.title", 6, "cockpit.title.showMaestro", "live"),
+	modelDefinition("title.generationModel", "cockpit.group.title", 7, "cockpit.title.generationModel", "live", "cockpit.title.generationModel.description"),
+	{
+		key: "title.maxLength",
+		group: "cockpit.group.title",
+		order: 8,
+		labelKey: "cockpit.title.maxLength",
+		descriptionKey: "cockpit.title.maxLength.description",
+		defaultValue: DEFAULT_CONFIG.title.maxLength,
+		scopes: ["global"],
+		merge: "override",
+		activation: "live",
+		sensitivity: "public",
+		reversibility: "full",
+		editor: { kind: "integer", min: 20, max: 200, step: 1 },
+	},
 	actionDefinition("thinkingFold", "cockpit.group.appearance", 2, "cockpit.thinkingFold", "cockpit.thinkingFold"),
-	actionDefinition("legacy", "cockpit.group.appearance", 3, "cockpit.action.legacy", "cockpit.legacy"),
 ];
 
 export function createCockpitSettingsProvider(options: CockpitSettingsProviderOptions): CockpitSettingsProvider {
@@ -414,11 +485,11 @@ export function createCockpitSettingsProvider(options: CockpitSettingsProviderOp
 			};
 		},
 		invokeAction: async (request) => {
-			if (request.actionId === "cockpit.legacy" && options.openLegacySettings) await options.openLegacySettings();
-			else if (request.actionId === "cockpit.theme" && options.openThemeSettings) await options.openThemeSettings();
-			else if (request.actionId === "cockpit.thinkingFold" && options.toggleThinkingFold) await options.toggleThinkingFold();
-			else return { handled: false };
-			return { handled: true, refresh: true };
+			if (request.actionId === "cockpit.thinkingFold" && options.toggleThinkingFold) {
+				const next = await options.toggleThinkingFold();
+				return { handled: true, refresh: true, message: next ? "Thinking fold enabled" : "Thinking fold disabled" };
+			}
+			return { handled: false };
 		},
 	};
 }
@@ -455,9 +526,7 @@ function snapshot(document: ConfigDocument, instanceId: string, options: Cockpit
 		...(document.error ? { messageKey: document.error } : {}),
 	}));
 	configured.push(
-		{ key: "theme", scope: "global", state: "absent" },
 		{ key: "thinkingFold", scope: "global", state: "absent" },
-		{ key: "legacy", scope: "global", state: "absent" },
 	);
 	return {
 		providerId: PROVIDER_ID,
@@ -466,9 +535,7 @@ function snapshot(document: ConfigDocument, instanceId: string, options: Cockpit
 		effective: {
 			values: [
 				...CONFIG_KEYS.map((key) => ({ key, value: getConfigValue(document.config, key), source: "configured" as const, scope: "global" as const, resource })),
-				{ key: "theme", value: options.getThemeName?.() ?? "Pi settings", source: "runtime" as const },
 				{ key: "thinkingFold", value: options.getThinkingFolded?.() ?? false, source: "runtime" as const },
-				{ key: "legacy", value: "open", source: "runtime" as const },
 			],
 		},
 	};
@@ -553,7 +620,23 @@ function getConfigValue(config: CockpitConfig, key: CockpitSettingKey): JsonValu
 	if (key === "sidebar.mode") return config.sidebar.mode;
 	if (key === "sidebar.width") return config.sidebar.width;
 	if (key === "sidebar.density") return config.sidebar.density;
-	return config[key];
+	if (key.startsWith("title.")) return getTitleValue(config.title, key.slice("title.".length));
+	return config[key as keyof CockpitConfig] as JsonValue;
+}
+
+function getTitleValue(title: CockpitConfig["title"], field: string): JsonValue {
+	switch (field) {
+		case "enabled": return title.enabled;
+		case "showSession": return title.showSession;
+		case "showCwd": return title.showCwd;
+		case "showModel": return title.showModel;
+		case "showThinking": return title.showThinking;
+		case "showGit": return title.showGit;
+		case "showMaestro": return title.showMaestro;
+		case "generationModel": return title.generationModel ?? "";
+		case "maxLength": return title.maxLength;
+		default: return "";
+	}
 }
 
 function setConfigValue(config: CockpitConfig, key: CockpitSettingKey, value: JsonValue): CockpitConfig {
@@ -561,13 +644,22 @@ function setConfigValue(config: CockpitConfig, key: CockpitSettingKey, value: Js
 	if (key === "sidebar.mode") return { ...config, sidebar: { ...config.sidebar, mode: value as CockpitConfig["sidebar"]["mode"] } };
 	if (key === "sidebar.width") return { ...config, sidebar: { ...config.sidebar, width: value as number } };
 	if (key === "sidebar.density") return { ...config, sidebar: { ...config.sidebar, density: value as CockpitConfig["sidebar"]["density"] } };
+	if (key.startsWith("title.")) return { ...config, title: setTitleValue(config.title, key.slice("title.".length), value) };
 	return { ...config, [key]: value } as CockpitConfig;
+}
+
+function setTitleValue(title: CockpitConfig["title"], field: string, value: JsonValue): CockpitConfig["title"] {
+	return { ...title, [field]: value } as CockpitConfig["title"];
 }
 
 function validValue(key: CockpitSettingKey, value: JsonValue): boolean {
 	if (["enabled", "staticMode", "pinEditorBottom", "doubleEscapeClearInput", "fullscreenInput", "copyOnSelect", "quietMode", "todoExpanded", "hideNativeAgents"].includes(key)) return typeof value === "boolean";
 	if (key === "sidebar.width") return typeof value === "number" && Number.isSafeInteger(value) && value >= 32 && value <= 56;
+	if (key === "title.maxLength") return typeof value === "number" && Number.isSafeInteger(value) && value >= 20 && value <= 200;
+	if (key === "title.generationModel") return typeof value === "string";
+	if (key.startsWith("title.")) return typeof value === "boolean";
 	if (key === "quietSymbols") return value === "check" || value === "dot";
+	if (key === "toolPalette") return ["classic", "family", "readwrite", "search", "mono"].includes(String(value));
 	if (key === "agentsMode" || key === "todoMode") return value === "list" || value === "compact";
 	if (key === "icons.mode") return value === "auto" || value === "nerd" || value === "ascii";
 	if (key === "sidebar.mode") return value === "auto" || value === "on" || value === "off";
@@ -637,12 +729,14 @@ function enumDefinition(
 	labelKey: string,
 	values: readonly string[],
 	activation: SettingDefinition["activation"],
+	descriptionKey?: string,
 ): SettingDefinition {
 	return {
 		key,
 		group,
 		order,
 		labelKey,
+		...(descriptionKey ? { descriptionKey } : {}),
 		defaultValue: getConfigValue(DEFAULT_CONFIG, key),
 		scopes: ["global"],
 		merge: "override",
@@ -653,6 +747,30 @@ function enumDefinition(
 			kind: "enum",
 			options: values.map((value) => ({ value, labelKey: `cockpit.option.${value}` })),
 		},
+	};
+}
+
+function modelDefinition(
+	key: CockpitSettingKey,
+	group: string,
+	order: number,
+	labelKey: string,
+	activation: SettingDefinition["activation"],
+	descriptionKey?: string,
+): SettingDefinition {
+	return {
+		key,
+		group,
+		order,
+		labelKey,
+		...(descriptionKey ? { descriptionKey } : {}),
+		defaultValue: getConfigValue(DEFAULT_CONFIG, key),
+		scopes: ["global"],
+		merge: "override",
+		activation,
+		sensitivity: "public",
+		reversibility: "full",
+		editor: { kind: "model" },
 	};
 }
 

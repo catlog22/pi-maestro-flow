@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { SettingsContextV1, SettingsSnapshot } from "pi-maestro-settings-core/v1";
 import { SETTINGS_SECRET_SET_PLACEHOLDER } from "pi-maestro-settings-core/v1/schema";
-import { SMART_SEARCH_CONFIG_KEYS } from "../src/tools/smart-search-config.ts";
+import { ALL_CONFIG_KEYS, SMART_SEARCH_CONFIG_KEYS } from "../src/tools/smart-search-config.ts";
 import { createSmartSearchSettingsProvider } from "../src/settings/smart-search-settings-provider.ts";
 
 interface Harness {
@@ -155,7 +155,10 @@ test("smart search describe exposes typed editors and complete bilingual catalog
   const description = await provider.describe({ context });
   assert.equal(description.id, "pi-maestro-smart-search");
   const settings = new Map(description.settings.map((entry) => [entry.key, entry]));
-  assert.equal(settings.size, SMART_SEARCH_CONFIG_KEYS.length + 2);
+  assert.equal(settings.size, ALL_CONFIG_KEYS.length + 2);
+  assert.equal(settings.get("PERPLEXITY_API_KEY")?.editor.kind, "secret", "native web-search key exposed as secret");
+  assert.equal(settings.get("WEB_SEARCH_ENABLED")?.editor.kind, "boolean", "native web-search boolean exposed");
+  assert.equal(settings.get("SSRF_TRUST_ENV_PROXY")?.editor.kind, "boolean");
   assert.equal(settings.get("XAI_API_KEY")?.editor.kind, "secret");
   assert.equal(settings.get("XAI_API_KEY")?.editor.writeOnly, true);
   assert.equal(settings.get("XAI_API_KEY")?.sensitivity, "secret");

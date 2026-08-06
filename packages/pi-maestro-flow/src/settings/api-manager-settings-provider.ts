@@ -101,6 +101,7 @@ const PROVIDER_FIELDS: readonly SettingDefinition[] = [
   }, "openai-responses"),
   field("enabled", "boolean", "api.field.enabled", {}, true),
   field("apiKey", "secret", "api.field.apiKey", { writeOnly: true }),
+  field("models", "json", "api.field.models", { multiline: true }),
 ];
 
 const DEFINITIONS: readonly SettingDefinition[] = [
@@ -145,6 +146,19 @@ const DEFINITIONS: readonly SettingDefinition[] = [
     sensitivity: "public",
     reversibility: "full",
     editor: { kind: "integer", min: 0, max: 10, step: 1 },
+  },
+  {
+    key: "api.retry.baseDelayMs",
+    group: "api.group.retry",
+    order: 12,
+    labelKey: "api.retry.baseDelayMs",
+    descriptionKey: "api.retry.baseDelayMs.description",
+    scopes: ["global"],
+    merge: "provider-defined",
+    activation: "next-invocation",
+    sensitivity: "public",
+    reversibility: "full",
+    editor: { kind: "integer", min: 0, max: 600000, step: 100 },
   },
   {
     key: "api.promptCache",
@@ -210,19 +224,6 @@ const DEFINITIONS: readonly SettingDefinition[] = [
     reversibility: "none",
     editor: { kind: "overview" },
   },
-  ...["api.manage", "api.configure", "api.retry", "api.cache", "api.list"].map((key, index): SettingDefinition => ({
-    key,
-    group: index < 2 ? "api.group.providers" : "api.group.diagnostics",
-    order: 30 + index,
-    labelKey: `api.action.${key.split(".")[1] ?? key}`,
-    descriptionKey: `api.action.${key.split(".")[1] ?? key}.description`,
-    scopes: ["global"],
-    merge: "provider-defined",
-    activation: "live",
-    sensitivity: "private",
-    reversibility: "none",
-    editor: { kind: "action", actionId: key },
-  })),
 ];
 
 const CATALOGS = {
@@ -234,12 +235,13 @@ const CATALOGS = {
     "api.group.cache": "Prompt cache policy",
     "api.group.diagnostics": "Configuration overview",
     "api.providers": "Providers",
-    "api.providers.description": "Provider endpoints and credentials; model management stays in the API Manager",
+    "api.providers.description": "Provider endpoints, credentials and the models each provider serves — fully editable here",
     "api.field.id": "Provider id",
     "api.field.baseUrl": "Base URL",
     "api.field.api": "API protocol",
     "api.field.enabled": "Enabled",
     "api.field.apiKey": "API key",
+    "api.field.models": "Models (JSON)",
     "api.item.provider": "{id}",
     "api.action.addProvider": "Add provider",
     "api.apiKind.openai-responses": "OpenAI Responses",
@@ -248,6 +250,8 @@ const CATALOGS = {
     "api.apiKind.azure-openai-responses": "Azure OpenAI Responses",
     "api.retry.enabled": "Auto-retry enabled",
     "api.retry.maxRetries": "Max retries",
+    "api.retry.baseDelayMs": "Retry base delay (ms)",
+    "api.retry.baseDelayMs.description": "Base delay for retry backoff. Applies to the next invocation.",
     "api.promptCache": "Prompt cache policy",
     "api.promptCache.description": "Whether OpenAI prompt-cache parameters (prompt_cache_options / prompt_cache_retention) are sent on OpenAI-format requests. Strict gateways reject them: off never sends them, auto sends them only for gpt-5.6+ models, on always sends them",
     "api.promptCache.auto": "Auto (gpt-5.6+ only)",
@@ -299,12 +303,13 @@ const CATALOGS = {
     "api.group.cache": "提示缓存策略",
     "api.group.diagnostics": "配置概览",
     "api.providers": "Providers",
-    "api.providers.description": "Provider 端点与凭据；模型管理保留在 API Manager",
+    "api.providers.description": "Provider 端点、凭据与各 provider 提供的模型 —— 均可在此完整配置",
     "api.field.id": "Provider ID",
     "api.field.baseUrl": "Base URL",
     "api.field.api": "API 协议",
     "api.field.enabled": "启用",
     "api.field.apiKey": "API Key",
+    "api.field.models": "模型（JSON）",
     "api.item.provider": "{id}",
     "api.action.addProvider": "新增 Provider",
     "api.apiKind.openai-responses": "OpenAI Responses",
@@ -313,6 +318,8 @@ const CATALOGS = {
     "api.apiKind.azure-openai-responses": "Azure OpenAI Responses",
     "api.retry.enabled": "启用自动重试",
     "api.retry.maxRetries": "最大重试次数",
+    "api.retry.baseDelayMs": "重试基础延迟（毫秒）",
+    "api.retry.baseDelayMs.description": "重试退避的基础延迟。下一次调用生效。",
     "api.promptCache": "提示缓存策略",
     "api.promptCache.description": "控制是否发送 OpenAI 提示缓存参数（prompt_cache_options / prompt_cache_retention）。部分网关会拒绝这些参数：禁止模式不发送，自动模式仅对 gpt-5.6+ 模型发送，开启模式始终发送",
     "api.promptCache.auto": "自动（仅 gpt-5.6+）",
@@ -364,6 +371,7 @@ interface ApiProviderEntry {
   api: string;
   enabled: boolean;
   apiKey: string | null;
+  models?: JsonValue;
 }
 
 function parseProviderEntry(value: unknown): ApiProviderEntry | undefined {
@@ -376,6 +384,7 @@ function parseProviderEntry(value: unknown): ApiProviderEntry | undefined {
     api: typeof entry.api === "string" ? entry.api : "openai-responses",
     enabled: entry.enabled !== false,
     apiKey: typeof entry.apiKey === "string" ? entry.apiKey : null,
+    models: Array.isArray(entry.models) ? (entry.models as JsonValue) : undefined,
   };
 }
 
@@ -386,6 +395,7 @@ function providerConfig(entry: ApiProviderEntry): Record<string, unknown> {
     enabled: entry.enabled,
   };
   if (entry.apiKey && entry.apiKey !== SETTINGS_SECRET_SET_PLACEHOLDER) config.apiKey = entry.apiKey;
+  if (Array.isArray(entry.models)) config.models = entry.models;
   return config;
 }
 
@@ -401,7 +411,7 @@ export function createApiManagerSettingsProvider(
   const load = async (): Promise<{
     providers: ApiProviderEntry[];
     modelsRoot: Record<string, unknown>;
-    retry: { enabled: boolean; maxRetries: number };
+    retry: { enabled: boolean; maxRetries: number; baseDelayMs?: number };
     promptCache: PromptCachePolicy;
     cacheRetention: CacheRetentionSetting;
     agentCacheRetention: CacheRetention;
@@ -420,14 +430,14 @@ export function createApiManagerSettingsProvider(
         const entry = config !== undefined && config !== null && typeof config === "object"
           ? config as Record<string, unknown>
           : {};
+        const parsed = parseProviderEntry({ ...entry, id });
+        if (!parsed) return undefined;
         return {
-          id,
-          baseUrl: typeof entry.baseUrl === "string" ? entry.baseUrl : "",
-          api: typeof entry.api === "string" ? entry.api : "openai-responses",
-          enabled: entry.enabled !== false,
+          ...parsed,
           apiKey: typeof entry.apiKey === "string" ? SETTINGS_SECRET_SET_PLACEHOLDER : null,
         };
       })
+      .filter((entry): entry is ApiProviderEntry => entry !== undefined)
       .sort((left, right) => left.id.localeCompare(right.id));
     const retry = await loadApiRetrySettings(settingsPath);
     const promptCache = await loadPromptCachePolicy(settingsPath);
@@ -457,6 +467,9 @@ export function createApiManagerSettingsProvider(
       } else if (definition.key === "api.retry.maxRetries") {
         configured.push({ key: definition.key, scope: "global", state: "set", value: data.retry.maxRetries });
         effective.push({ key: definition.key, value: data.retry.maxRetries, source: "configured", scope: "global" });
+      } else if (definition.key === "api.retry.baseDelayMs") {
+        configured.push({ key: definition.key, scope: "global", state: "set", value: data.retry.baseDelayMs ?? 2000 });
+        effective.push({ key: definition.key, value: data.retry.baseDelayMs ?? 2000, source: "configured", scope: "global" });
       } else if (definition.key === "api.promptCache") {
         configured.push({ key: definition.key, scope: "global", state: "set", value: data.promptCache });
         effective.push({ key: definition.key, value: data.promptCache, source: "configured", scope: "global" });
@@ -621,17 +634,20 @@ export function createApiManagerSettingsProvider(
             if (previous && (entry.apiKey === null || entry.apiKey === SETTINGS_SECRET_SET_PLACEHOLDER)) {
               if (typeof previous.apiKey === "string") config.apiKey = previous.apiKey;
             }
-            if (previous && Array.isArray(previous.models)) config.models = previous.models;
+            if (Array.isArray(entry.models)) config.models = entry.models;
+            else if (previous && Array.isArray(previous.models)) config.models = previous.models;
             nextProviders[entry.id] = config;
           }
           const nextRoot = { ...data.modelsRoot, providers: nextProviders };
           await writeModelsRoot(nextRoot, modelsPath, await existsFile(modelsPath));
           modelsWritten = true;
         }
-        if (retryEnabled?.operation === "set" || retryMax?.operation === "set") {
+        const retryBase = changes.find((change) => change.key === "api.retry.baseDelayMs");
+        if (retryEnabled?.operation === "set" || retryMax?.operation === "set" || retryBase?.operation === "set") {
           const next = {
             enabled: retryEnabled?.operation === "set" ? retryEnabled.value as boolean : data.retry.enabled,
             maxRetries: retryMax?.operation === "set" ? retryMax.value as number : data.retry.maxRetries,
+            baseDelayMs: retryBase?.operation === "set" ? retryBase.value as number : data.retry.baseDelayMs ?? 2000,
           };
           await saveApiRetrySettings(next, settingsPath);
         }

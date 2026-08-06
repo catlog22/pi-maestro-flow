@@ -69,9 +69,9 @@ test("Cockpit provider describes editable settings and host-owned actions", asyn
 		assert.equal(pinEditor?.defaultValue, false);
 		assert.equal(pinEditor?.descriptionKey, "cockpit.pinEditorBottom.description");
 		assert.ok(description.settings.some((setting) => setting.key === "staticMode" && setting.editor.kind === "boolean"));
-		assert.equal(description.settings.some((setting) => setting.key === "toolPalette"), false);
+		assert.ok(description.settings.some((setting) => setting.key === "toolPalette" && setting.editor.kind === "enum"), "toolPalette now editable via the provider");
 		assert.ok(description.settings.some((setting) => setting.key === "sidebar.width" && setting.editor.kind === "integer"));
-		assert.ok(description.settings.some((setting) => setting.key === "theme" && setting.editor.kind === "action"));
+		assert.equal(description.settings.some((setting) => setting.key === "theme"), false, "theme moved to the pi-native enum");
 		const keys = new Set(description.settings.flatMap((entry) => [
 			entry.group,
 			entry.labelKey,
@@ -84,7 +84,7 @@ test("Cockpit provider describes editable settings and host-owned actions", asyn
 			for (const key of keys) assert.equal(typeof catalog[key], "string", `${locale} missing ${key}`);
 		}
 		const snapshot = await provider.read({ context });
-		assert.equal(snapshot.effective.values.find((value) => value.key === "theme")?.value, "cockpit-ocean");
+		assert.equal(snapshot.effective.values.find((value) => value.key === "theme"), undefined, "theme no longer in cockpit snapshot");
 		assert.equal(snapshot.effective.values.find((value) => value.key === "thinkingFold")?.value, true);
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
@@ -129,6 +129,32 @@ test("prepare and commit preserve unknown fields and apply runtime after durable
 		assert.equal(state.runtime.toolPalette, "family");
 		assert.equal(state.runtime.sidebar.width, 48);
 		assert.equal(state.runtime.pinEditorBottom, true);
+	} finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("title.* and toolPalette are editable through the provider (P3 gap closure)", async () => {
+	const { directory, path } = tempConfig();
+	try {
+		writeFileSync(path, JSON.stringify(DEFAULT_CONFIG));
+		const { provider } = providerAt(path);
+		const before = await provider.read({ context });
+		const changes = [
+			{ operation: "set" as const, key: "toolPalette", scope: "global" as const, value: "mono" },
+			{ operation: "set" as const, key: "title.showModel", scope: "global" as const, value: true },
+			{ operation: "set" as const, key: "title.maxLength", scope: "global" as const, value: 120 },
+			{ operation: "set" as const, key: "title.generationModel", scope: "global" as const, value: "maestro-qwen/qwen3.8-max-preview" },
+		];
+		const prepared = await provider.prepare!({ context, transactionId: "tx-title", changes, expectedRevisions: before.configured.resources });
+		assert.equal(prepared.prepared, true);
+		await provider.commit!({ context, transactionId: "tx-title", prepareToken: prepared.prepareToken! });
+		const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+		assert.equal(raw.toolPalette, "mono");
+		assert.equal((raw.title as Record<string, unknown>).showModel, true);
+		assert.equal((raw.title as Record<string, unknown>).maxLength, 120);
+		assert.equal((raw.title as Record<string, unknown>).generationModel, "maestro-qwen/qwen3.8-max-preview");
+		const snapshot = await provider.read({ context });
+		assert.equal(snapshot.effective.values.find((entry) => entry.key === "title.showModel")?.value, true);
+		assert.equal(snapshot.effective.values.find((entry) => entry.key === "toolPalette")?.value, "mono");
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -274,9 +300,9 @@ test("actions and provider discovery stay owned by Cockpit", async () => {
 	try {
 		const actions: string[] = [];
 		const { provider } = providerAt(path, { action: (name) => actions.push(name) });
-		await provider.invokeAction!({ context, actionId: "cockpit.theme", key: "theme" });
 		await provider.invokeAction!({ context, actionId: "cockpit.thinkingFold", key: "thinkingFold" });
-		assert.deepEqual(actions, ["theme", "thinking"]);
+		await provider.invokeAction!({ context, actionId: "cockpit.thinkingFold", key: "thinkingFold" });
+		assert.deepEqual(actions, ["thinking", "thinking"]);
 
 		const bus = new FakeEventBus();
 		registerCockpitSettingsProvider(bus, provider);

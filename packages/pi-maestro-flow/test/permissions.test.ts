@@ -623,3 +623,24 @@ test("PermissionRequest updated input is re-evaluated against deny rules", async
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("Permission overview exposes mode, rules and sources structurally", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-permissions-overview-"));
+  const userPath = join(root, "user-settings.json");
+  await writeFile(userPath, JSON.stringify({
+    permissions: { defaultMode: "default", allow: ["Read(x)"], ask: ["Bash(git *)"], deny: ["Bash(rm *)"] },
+  }));
+  const ctx = { cwd: root, ui: { notify() {} } } as unknown as ExtensionContext;
+  const controller = createPermissionController({ userSettingsPath: userPath });
+  try {
+    await controller.reload(ctx);
+    const overview = controller.overview("default");
+    assert.equal(overview.mode, "default");
+    assert.deepEqual([...overview.allow], ["Read(x)"]);
+    assert.deepEqual([...overview.ask], ["Bash(git *)"]);
+    assert.deepEqual([...overview.deny], ["Bash(rm *)"]);
+    assert.ok(overview.sources.length > 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

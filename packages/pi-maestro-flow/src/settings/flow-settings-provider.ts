@@ -46,7 +46,15 @@ const DEFAULT_PREPARED_TRANSACTION_TTL_MS = 30_000;
 
 type WritableScope = "global" | "project";
 type ResourceKind = "compaction" | "failover";
-type FlowSettingsAction = (context: SettingsContextV1) => Promise<void> | void;
+type FlowSettingsAction = (context: SettingsContextV1) => Promise<string | void> | string | void;
+
+export interface PermissionOverview {
+  mode: string;
+  allow: readonly string[];
+  ask: readonly string[];
+  deny: readonly string[];
+  sources: string;
+}
 
 interface SettingsEventBus {
   on(event: string, handler: (payload: unknown) => void): void | (() => void);
@@ -70,6 +78,7 @@ export interface FlowSettingsProviderOptions {
   getProjectFailoverPath?: (cwd: string) => string;
   actions?: Readonly<Record<string, FlowSettingsAction>>;
   getAgentResponseLanguage?: () => "default" | "zh-CN";
+  getPermissionOverview?: () => PermissionOverview | undefined;
   replacementOperations?: Partial<FlowSettingsReplacementOperations>;
   preparedTransactionTtlMs?: number;
 }
@@ -116,13 +125,7 @@ interface ParsedKey {
 }
 
 const ACTION_KEYS = [
-  "compaction.manage",
-  "failover.manage",
   "responseLanguage.manage",
-  "permissions.manage",
-  "skills.manage",
-  "mcp.manage",
-  "hooks.manage",
 ] as const;
 
 /** Read-only diagnostic views rendered by the settings shell. */
@@ -150,6 +153,19 @@ const OVERVIEW_DEFINITIONS: readonly SettingDefinition[] = [
     merge: "provider-defined",
     activation: "live",
     sensitivity: "public",
+    reversibility: "none",
+    editor: { kind: "overview" },
+  },
+  {
+    key: "flow.permissions",
+    group: "flow.group.permissions",
+    order: 62,
+    labelKey: "flow.permissions",
+    descriptionKey: "flow.permissions.description",
+    scopes: ["project"],
+    merge: "provider-defined",
+    activation: "live",
+    sensitivity: "private",
     reversibility: "none",
     editor: { kind: "overview" },
   },
@@ -188,6 +204,10 @@ const BASE_CATALOGS = {
     "flow.option.relevanceMode.keyword": "Keyword scoring",
     "flow.failover.enabled": "Enable automatic model failover",
     "flow.failover.fallbackModels": "Fallback chains",
+    "flow.failover.fallbackModels.add": "Add chain",
+    "flow.failover.fallbackModels.item": "{model}",
+    "flow.failover.field.model": "Model",
+    "flow.failover.field.fallbacks": "Fallback models",
     "flow.action.compaction": "Open compaction settings",
     "flow.action.compaction.description": "Opens the full compaction control center; changes save to global or project settings",
     "flow.action.failover": "Open model failover settings",
@@ -196,8 +216,14 @@ const BASE_CATALOGS = {
     "flow.action.responseLanguage.description": "Independent from the Maestro Settings interface language; toggles /chinese for this session",
     "flow.option.responseLanguage.default": "Default Agent language",
     "flow.option.responseLanguage.zh-CN": "Chinese replies",
-    "flow.action.permissions": "Open permissions summary",
-    "flow.action.permissions.description": "Shows the current permission mode for this session",
+    "flow.group.permissions": "Permissions",
+    "flow.permissions": "Permission rules",
+    "flow.permissions.description": "Read-only view of the current permission mode, rules and config sources",
+    "flow.permissions.mode": "Mode",
+    "flow.permissions.allow": "Allow",
+    "flow.permissions.ask": "Ask",
+    "flow.permissions.deny": "Deny",
+    "flow.permissions.sources": "Sources",
     "flow.action.skills": "Manage skills",
     "flow.action.skills.description": "Enables or disables skills and model-invocation rights; changes apply after the extension reloads",
     "flow.action.mcp": "Manage MCP servers",
@@ -256,6 +282,10 @@ const BASE_CATALOGS = {
     "flow.option.relevanceMode.keyword": "关键词评分",
     "flow.failover.enabled": "启用模型自动故障转移",
     "flow.failover.fallbackModels": "回退链",
+    "flow.failover.fallbackModels.add": "添加链",
+    "flow.failover.fallbackModels.item": "{model}",
+    "flow.failover.field.model": "模型",
+    "flow.failover.field.fallbacks": "回退模型",
     "flow.action.compaction": "打开压缩设置",
     "flow.action.compaction.description": "打开完整压缩控制中心；更改保存到全局或项目设置",
     "flow.action.failover": "打开模型故障转移设置",
@@ -264,8 +294,14 @@ const BASE_CATALOGS = {
     "flow.action.responseLanguage.description": "与 Maestro 设置界面语言相互独立；切换本会话的 /chinese 模式",
     "flow.option.responseLanguage.default": "默认 Agent 语言",
     "flow.option.responseLanguage.zh-CN": "中文回复",
-    "flow.action.permissions": "打开权限概览",
-    "flow.action.permissions.description": "显示本会话当前的权限模式",
+    "flow.group.permissions": "权限",
+    "flow.permissions": "权限规则",
+    "flow.permissions.description": "只读展示当前权限模式、规则与配置来源",
+    "flow.permissions.mode": "模式",
+    "flow.permissions.allow": "允许",
+    "flow.permissions.ask": "询问",
+    "flow.permissions.deny": "拒绝",
+    "flow.permissions.sources": "来源",
     "flow.action.skills": "管理 Skills",
     "flow.action.skills.description": "启用/停用 Skill 与模型主动调用权限；更改在扩展重载后生效",
     "flow.action.mcp": "管理 MCP 服务",
@@ -478,12 +514,13 @@ export function createFlowSettingsProvider(options: FlowSettingsProviderOptions 
     invokeAction: async (request) => {
       const action = options.actions?.[request.actionId];
       if (!action) return { handled: false };
-      await action(request.context);
+      const message = await action(request.context);
       return {
         handled: true,
         refresh: request.actionId === "compaction.manage"
           || request.actionId === "failover.manage"
           || request.actionId === "responseLanguage.manage",
+        ...(typeof message === "string" && message ? { message } : {}),
       };
     },
   };
@@ -533,7 +570,14 @@ function definitions(): SettingDefinition[] {
     setting("compaction.soft.crossTurnDedup.minChars", "flow.group.compactionSoft", "flow.compaction.soft.crossTurnDedup.minChars", "integer", DEFAULT_DEDUP_MIN_CHARS, "next-turn", { min: 1, step: 1 }),
     setting("compaction.soft.lossless.enabled", "flow.group.compactionSoft", "flow.compaction.soft.lossless.enabled", "boolean", true, "next-turn"),
     setting("failover.enabled", "flow.group.failover", "flow.failover.enabled", "boolean", false, "next-invocation"),
-    setting("failover.fallbackModels", "flow.group.failover", "flow.failover.fallbackModels", "json", {}, "next-invocation", { multiline: true }, "deep-merge"),
+    setting("failover.fallbackModels", "flow.group.failover", "flow.failover.fallbackModels", "list-crud", [], "next-invocation", {
+      addLabelKey: "flow.failover.fallbackModels.add",
+      itemLabelKey: "flow.failover.fallbackModels.item",
+      itemFields: [
+        { key: "model", group: "flow.group.failover", order: 0, labelKey: "flow.failover.field.model", scopes: ["global", "project"], merge: "override", activation: "next-invocation", sensitivity: "public", reversibility: "full", editor: { kind: "text" } },
+        { key: "fallbacks", group: "flow.group.failover", order: 1, labelKey: "flow.failover.field.fallbacks", scopes: ["global", "project"], merge: "override", activation: "next-invocation", sensitivity: "public", reversibility: "full", editor: { kind: "string-list" } },
+      ],
+    }, "deep-merge"),
   ];
   return [...writable, ...OVERVIEW_DEFINITIONS, ...ACTION_KEYS.map((key, index): SettingDefinition => ({
     key,
@@ -586,7 +630,7 @@ function setting(
 function snapshot(
   resources: readonly ResourceState[],
   instanceId: string,
-  options: Pick<FlowSettingsProviderOptions, "getAgentResponseLanguage"> = {},
+  options: Pick<FlowSettingsProviderOptions, "getAgentResponseLanguage" | "getPermissionOverview"> = {},
 ): SettingsSnapshot {
   const configured: ConfiguredSettingValue[] = [];
   const effective: SettingsSnapshot["effective"]["values"][number][] = [];
@@ -596,13 +640,15 @@ function snapshot(
   const effectiveCompaction = resolveEffectiveCompactionSettings(compactionPatches.get("global") ?? {}, compactionPatches.get("project") ?? {});
 
   for (const definition of definitions()) {
-    if (definition.key === "compaction.derived" || definition.key === "failover.overview") {
+    if (definition.key === "compaction.derived" || definition.key === "failover.overview" || definition.key === "flow.permissions") {
       configured.push({ key: definition.key, scope: "project", state: "absent" });
       effective.push({
         key: definition.key,
         value: definition.key === "compaction.derived"
           ? compactionDerivedRows(effectiveCompaction) as unknown as JsonValue
-          : failoverOverviewRows(failover.map((entry) => entry.document.raw)) as unknown as JsonValue,
+          : definition.key === "failover.overview"
+            ? failoverOverviewRows(failover.map((entry) => entry.document.raw)) as unknown as JsonValue
+            : permissionOverviewRows(options.getPermissionOverview?.()) as unknown as JsonValue,
         source: "runtime",
       });
       continue;
@@ -620,11 +666,12 @@ function snapshot(
     const relevant = parsed.kind === "compaction" ? compaction : failover;
     for (const resource of relevant) {
       const value = readConfiguredValue(resource.document.raw, parsed);
+      const display = parsed.path[0] === "fallbackModels" ? fallbackMapToItems(value.value) : value.value;
       configured.push({
         key: definition.key,
         scope: resource.scope,
         state: resource.document.error ? "invalid" : value.present ? "set" : "absent",
-        ...(value.present ? { value: value.value } : {}),
+        ...(value.present ? { value: display } : {}),
         resource: resource.revision.resource,
         ...(resource.document.error ? { messageKey: "flow.settings.malformedResource" } : {}),
       });
@@ -650,7 +697,7 @@ function snapshot(
       const resource = selected?.scope ? failover.find((entry) => entry.scope === selected.scope) : undefined;
       effective.push({
         key: definition.key,
-        value: selected?.value ?? definition.defaultValue ?? null,
+        value: parsed.path[0] === "fallbackModels" ? fallbackMapToItems(selected?.value) : (selected?.value ?? definition.defaultValue ?? null),
         source: selected ? "configured" : "default",
         ...(selected?.scope ? { scope: selected.scope, resource: resource?.revision.resource } : {}),
       });
@@ -729,7 +776,14 @@ function validValue(key: string, value: JsonValue): boolean {
     return positiveInt(value) !== undefined;
   }
   if (key === "compaction.soft.relevance.mode") return value === "bm25" || value === "keyword";
-  if (key === "failover.fallbackModels") return isFallbackMap(value);
+  if (key === "failover.fallbackModels") {
+    return Array.isArray(value)
+      ? value.every((item) => isRecord(item)
+        && typeof (item as Record<string, unknown>).model === "string"
+        && Array.isArray((item as Record<string, unknown>).fallbacks)
+        && ((item as Record<string, unknown>).fallbacks as unknown[]).every((entry) => typeof entry === "string"))
+      : isFallbackMap(value);
+  }
   return false;
 }
 
@@ -848,7 +902,11 @@ function applyChanges(kind: ResourceKind, raw: Record<string, unknown>, changes:
     for (const change of changes) {
       const parsed = parseSettingKey(change.key);
       if (!parsed) continue;
-      setOrUnsetPath(root, parsed.path, change);
+      if (parsed.path[0] === "fallbackModels" && change.operation === "set" && Array.isArray(change.value)) {
+        setOrUnsetPath(root, parsed.path, { ...change, value: fallbackItemsToMap(change.value) });
+      } else {
+        setOrUnsetPath(root, parsed.path, change);
+      }
     }
     return root;
   }
@@ -892,6 +950,27 @@ function setOrUnsetPath(root: Record<string, unknown>, segments: readonly string
       delete parents[index - 1][segments[index - 1]];
     }
   } else cursor[leaf] = change.value;
+}
+
+function fallbackMapToItems(map: unknown): JsonValue {
+  const source = isRecord(map) ? map : {};
+  return Object.entries(source).map(([model, fallbacks]) => ({
+    model,
+    fallbacks: Array.isArray(fallbacks) ? fallbacks.filter((entry): entry is string => typeof entry === "string") : [],
+  }));
+}
+
+function fallbackItemsToMap(items: JsonValue): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  if (!Array.isArray(items)) return result;
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    if (typeof record.model === "string" && record.model && Array.isArray(record.fallbacks)) {
+      result[record.model] = record.fallbacks.filter((entry): entry is string => typeof entry === "string");
+    }
+  }
+  return result;
 }
 
 function mergedFallbackValue(
@@ -1128,6 +1207,26 @@ function compactionDerivedRows(effective: EffectiveCompactionSettings): Settings
       status: effective.soft.enabled ? "ok" : "dim",
     },
   ];
+}
+
+function permissionOverviewRows(overview: PermissionOverview | undefined): SettingsOverviewRow[] {
+  if (!overview) {
+    return [{ labelKey: "flow.permissions.mode", value: "—", status: "dim" }];
+  }
+  const rows: SettingsOverviewRow[] = [
+    { labelKey: "flow.permissions.mode", value: overview.mode, status: "ok" },
+  ];
+  for (const [key, rules] of [["allow", overview.allow], ["ask", overview.ask], ["deny", overview.deny]] as const) {
+    if (rules.length === 0) {
+      rows.push({ labelKey: `flow.permissions.${key}`, value: "—", status: "dim" });
+    } else {
+      for (const rule of rules) {
+        rows.push({ labelKey: `flow.permissions.${key}`, value: rule, status: key === "allow" ? "ok" : "dim" });
+      }
+    }
+  }
+  rows.push({ labelKey: "flow.permissions.sources", value: overview.sources || "—", status: "dim" });
+  return rows;
 }
 
 function failoverOverviewRows(records: readonly Record<string, unknown>[]): SettingsOverviewRow[] {
