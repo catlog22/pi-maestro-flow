@@ -153,6 +153,22 @@ export class CockpitClaudeEditor extends CustomEditor {
 
 /** Build the editor factory Cockpit installs when a gated feature is on. */
 export function createCockpitClaudeEditorFactory(options: CockpitClaudeEditorOptions) {
-	return (tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) =>
+	const factory = (tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) =>
 		new CockpitClaudeEditor(tui, theme, keybindings, options);
+	// Global-symbol marker so a later (possibly re-evaluated) extension instance
+	// can recognise its own factory left in pi's editor slot across resume/reload
+	// and never misreport it as owned by another extension.
+	(factory as { [COCKPIT_EDITOR_FACTORY_MARKER]?: true })[COCKPIT_EDITOR_FACTORY_MARKER] = true;
+	return factory;
 }
+
+/** True when the factory in pi's editor slot is one Cockpit installed. */
+export function isCockpitClaudeEditorFactory(factory: unknown): boolean {
+	return (
+		typeof factory === "function" &&
+		(factory as { [COCKPIT_EDITOR_FACTORY_MARKER]?: true })[COCKPIT_EDITOR_FACTORY_MARKER] === true
+	);
+}
+
+/** Global registry key (same symbol identity across module re-evaluations). */
+export const COCKPIT_EDITOR_FACTORY_MARKER = Symbol.for("cockpit.claudeEditorFactory");

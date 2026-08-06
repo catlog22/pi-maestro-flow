@@ -7,7 +7,9 @@ import {
 	DoubleEscapeGate,
 	EDITOR_END_SENTINEL,
 	EDITOR_START_SENTINEL,
+	COCKPIT_EDITOR_FACTORY_MARKER,
 	createCockpitClaudeEditorFactory,
+	isCockpitClaudeEditorFactory,
 	type CockpitClaudeEditorOptions,
 } from "../src/claude-editor.ts";
 
@@ -193,6 +195,23 @@ test("factory builds a working CockpitClaudeEditor", () => {
 	editor.handleInput("\x1b");
 	editor.handleInput("\x1b");
 	assert.equal(editor.getText(), "");
+});
+
+test("factory marker identifies Cockpit's own editor factory (across module re-eval)", () => {
+	const factory = createCockpitClaudeEditorFactory({ doubleEscapeClearInput: true, emitEditorMarkers: false });
+	assert.equal(isCockpitClaudeEditorFactory(factory), true, "own factory is recognised");
+	// A re-evaluated module sees the same global symbol, so a factory tagged with
+	// a locally-constructed Symbol.for copy is still recognised.
+	const reEvaluatedTag = { [Symbol.for("cockpit.claudeEditorFactory")]: true };
+	const foreign = Object.assign(() => ({}), reEvaluatedTag);
+	assert.equal(COCKPIT_EDITOR_FACTORY_MARKER, Symbol.for("cockpit.claudeEditorFactory"), "global symbol identity holds");
+	assert.equal(isCockpitClaudeEditorFactory(foreign), true, "tagged function is recognised");
+});
+
+test("factory marker rejects non-Cockpit factories", () => {
+	assert.equal(isCockpitClaudeEditorFactory(undefined), false);
+	assert.equal(isCockpitClaudeEditorFactory(() => ({})), false);
+	assert.equal(isCockpitClaudeEditorFactory({ render() {} }), false);
 });
 
 test("editor: onClear fires once when the draft is cleared", () => {
