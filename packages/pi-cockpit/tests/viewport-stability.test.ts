@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { TUI, type Component, type Terminal } from "@earendil-works/pi-tui";
 import { attachViewportStability } from "../src/viewport-stability.ts";
+import { createDynamicTuiReference } from "./dynamic-tui-reference.ts";
 
 class FakeTerminal implements Terminal {
 	columns = 40;
@@ -162,4 +163,16 @@ test("detach restores the exact prior hook and preserves later replacements", ()
 	h.internals.applyLineResets = replacement;
 	second.detach();
 	assert.equal(h.internals.applyLineResets, replacement);
+});
+
+test("dynamic TUI references fail closed instead of wrapping their dispatch closure", () => {
+	const h = renderHarness(["zero", "one", "two"]);
+	const original = h.internals.applyLineResets;
+	const reference = createDynamicTuiReference(h.tui);
+
+	const patch = attachViewportStability(reference);
+
+	assert.equal(patch.active, false);
+	assert.equal(h.internals.applyLineResets, original);
+	assert.doesNotThrow(() => h.render());
 });

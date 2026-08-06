@@ -6,6 +6,7 @@ import {
 	createEditorBottomController,
 	createEditorBottomSentinel,
 } from "../src/editor-bottom.ts";
+import { createDynamicTuiReference } from "./dynamic-tui-reference.ts";
 
 function harness(rows = 10, content?: string[]) {
 	const marker = createEditorBottomSentinel().render(80)[0]!;
@@ -87,4 +88,15 @@ test("dispose restores the exact original renderer and is idempotent", () => {
 	assert.equal(state.tui.render, state.baseRender);
 	controller.dispose();
 	assert.equal(state.tui.render, state.baseRender);
+});
+
+test("dynamic TUI references are left unwrapped", () => {
+	const state = harness();
+	const reference = createDynamicTuiReference(state.tui);
+	const controller = createEditorBottomController();
+
+	controller.attach(reference);
+
+	assert.equal(state.tui.render, state.baseRender);
+	assert.doesNotThrow(() => reference.render(100));
 });

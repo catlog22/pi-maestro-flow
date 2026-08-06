@@ -1,4 +1,5 @@
 import type { Component, TUI } from "@earendil-works/pi-tui";
+import { readStableReference } from "./stable-reference.ts";
 
 export const EDITOR_BOTTOM_WIDGET_KEY = "cockpit-editor-bottom-anchor";
 export const COCKPIT_EDITOR_BOTTOM_MARKER = Symbol.for("pi-cockpit.editor-bottom-render");
@@ -62,13 +63,14 @@ export function createEditorBottomController(
 		if (disposed) return;
 		if (tui === nextTui) return;
 		if (tui) throw new Error("Cockpit editor-bottom layout is already attached to another TUI");
-		const existing = (nextTui.render as RenderFunction & Record<symbol, RenderMarker | undefined>)[COCKPIT_EDITOR_BOTTOM_MARKER];
+		const previousRender = readStableReference(() => nextTui.render);
+		if (!previousRender) return;
+		const existing = (previousRender as RenderFunction & Record<symbol, RenderMarker | undefined>)[COCKPIT_EDITOR_BOTTOM_MARKER];
 		if (existing?.owner === owner) return;
 		if (existing) throw new Error("Cockpit editor-bottom layout is already attached to this TUI");
 
 		tui = nextTui;
-		originalRender = nextTui.render;
-		const previousRender = nextTui.render;
+		originalRender = previousRender;
 		wrappedRender = function (this: TUI, width: number): string[] {
 			const rendered = previousRender.call(nextTui, width);
 			const markerIndex = rendered.findIndex((line) => line.includes(EDITOR_BOTTOM_SENTINEL));

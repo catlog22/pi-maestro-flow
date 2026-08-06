@@ -7,6 +7,7 @@ import {
 	type TranscriptSelectionController,
 } from "./transcript-selection.ts";
 import { registerTerminalCleanup } from "./terminal-cleanup.ts";
+import { readStableReference } from "./stable-reference.ts";
 
 export const COCKPIT_FULLSCREEN_WIDGET_KEY = "cockpit-fullscreen-anchor";
 export const COCKPIT_FULLSCREEN_MARKER = Symbol.for("pi-cockpit.fullscreen-render");
@@ -250,13 +251,14 @@ export function createFullscreenController(options: FullscreenControllerOptions 
 		if (disposed) return;
 		if (tui === nextTui) return;
 		if (tui) throw new Error("Cockpit fullscreen is already attached to another TUI");
-		const existing = (nextTui.render as RenderFunction & Record<symbol, RenderMarker | undefined>)[COCKPIT_FULLSCREEN_MARKER];
+		const previousRender = readStableReference(() => nextTui.render);
+		if (!previousRender) return;
+		const existing = (previousRender as RenderFunction & Record<symbol, RenderMarker | undefined>)[COCKPIT_FULLSCREEN_MARKER];
 		if (existing?.owner === owner) return;
 		if (existing) throw new Error("Cockpit fullscreen is already attached to this TUI");
 
 		tui = nextTui;
-		originalRender = nextTui.render;
-		const previousRender = nextTui.render;
+		originalRender = previousRender;
 		wrappedRender = function (this: TUI, width: number): string[] {
 			const rendered = previousRender.call(nextTui, width);
 			try {

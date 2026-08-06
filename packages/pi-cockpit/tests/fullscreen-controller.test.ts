@@ -4,6 +4,7 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { EDITOR_END_SENTINEL, EDITOR_START_SENTINEL } from "../src/claude-editor.ts";
 import { COCKPIT_FULLSCREEN_MARKER, createFullscreenController } from "../src/fullscreen-controller.ts";
 import { acquireMouseReporting } from "../src/mouse-reporting.ts";
+import { createDynamicTuiReference } from "./dynamic-tui-reference.ts";
 
 interface FakeHarness {
 	tui: TUI;
@@ -93,6 +94,20 @@ test("attach enters alternate screen and wraps render with marker ownership", ()
 	assert.ok(harness.writes.includes("\x1b[?1049l"), "writes alt-screen exit");
 	assert.ok(harness.writes.includes("\x1b[?1002l"), "releases button mouse mode");
 	assert.ok(harness.writes.includes("\x1b[?1006l"), "releases SGR mouse mode");
+});
+
+test("dynamic TUI references are left inactive and unwrapped", () => {
+	const harness = makeHarness(() => buildLines([], EDITOR_BLOCK, CHROME));
+	const reference = createDynamicTuiReference(harness.tui);
+	const original = harness.tui.render;
+	const controller = createFullscreenController({});
+
+	controller.attach(reference);
+
+	assert.equal(controller.isActive(), false);
+	assert.equal(harness.tui.render, original);
+	assert.equal(harness.writes.includes("\x1b[?1049h"), false);
+	assert.doesNotThrow(() => reference.render(80));
 });
 
 test("compose pads short transcript to exactly terminal rows with editor+chrome fixed at bottom", () => {

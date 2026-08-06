@@ -1,4 +1,5 @@
 import type { TUI } from "@earendil-works/pi-tui";
+import { readStableReference } from "./stable-reference.ts";
 
 const VIEWPORT_STABILITY_MARKER = Symbol.for("pi-cockpit.viewport-stability");
 
@@ -49,7 +50,7 @@ function isKittyImageLine(line: string | undefined): boolean {
  */
 export function attachViewportStability(tui: TUI): ViewportStabilityPatch {
 	const internals = tui as unknown as ViewportTuiInternals;
-	const original = internals.applyLineResets;
+	const original = readStableReference(() => internals.applyLineResets);
 	if (typeof original !== "function") return { active: false, detach() {} };
 	const existing = markerOf(original);
 	if (existing) return { active: true, detach: existing.retain() };

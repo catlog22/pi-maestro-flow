@@ -7,6 +7,7 @@ import type { OverlayOptions, TUI } from "@earendil-works/pi-tui";
 import { ambientKeysShouldYield } from "./capturing-overlay.ts";
 import { attachViewportStability, type ViewportStabilityPatch } from "./viewport-stability.ts";
 import { acquireMouseReporting, flushMouseReportingWrites, type MouseReportingLease } from "./mouse-reporting.ts";
+import { readStableReference } from "./stable-reference.ts";
 
 const SGR_MOUSE = /^\u001b\[<(\d+);(\d+);(\d+)([Mm])$/;
 // Legacy X10 mouse: ESC [ M + 3 bytes (button+32, x+32, y+32). Some terminals fall
@@ -264,7 +265,9 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 		if (disposed) return;
 		if (tui === nextTui) return;
 		if (tui) throw new Error("Cockpit split pane is already attached to another TUI");
-		const existing = renderMarker(nextTui.render);
+		const previousRender = readStableReference(() => nextTui.render);
+		if (!previousRender) return;
+		const existing = renderMarker(previousRender);
 		if (existing?.owner === owner) return;
 		if (existing) throw new Error("Cockpit split pane is already attached to this TUI");
 		// Instance-level guard: when another renderer (e.g. editor-bottom) wraps
@@ -278,8 +281,7 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 
 		tui = nextTui;
 		viewportStability = attachViewportStability(nextTui);
-		originalRender = nextTui.render;
-		const previousRender = nextTui.render;
+		originalRender = previousRender;
 		wrappedRender = function (this: TUI, terminalWidth: number): string[] {
 			reconcileResizeWidth(terminalWidth);
 			const reserved = effectiveSidebarWidth(terminalWidth);

@@ -11,6 +11,7 @@ import {
 	MIN_SPLIT_TERMINAL_WIDTH,
 	parseSgrMouseEvent,
 } from "../src/split-pane.ts";
+import { createDynamicTuiReference } from "./dynamic-tui-reference.ts";
 
 interface TuiHarness {
 	tui: TUI;
@@ -318,4 +319,17 @@ test("SP-5: a second split controller is rejected even when the render chain is 
 	assert.throws(() => second.attach(harness.tui), /already attached/);
 	first.dispose();
 	assert.equal(harness.tui.render, wrapped, "dispose restores the wrapper that replaced us");
+});
+
+test("dynamic TUI references are left unwrapped", () => {
+	const harness = tuiHarness();
+	const reference = createDynamicTuiReference(harness.tui);
+	const controller = createSplitPaneController();
+
+	controller.attach(reference);
+	controller.show();
+
+	assert.equal(harness.tui.render, harness.baseRender);
+	assert.equal(controller.beginResize(), false);
+	assert.doesNotThrow(() => reference.render(120));
 });
