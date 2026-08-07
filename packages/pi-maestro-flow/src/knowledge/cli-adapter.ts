@@ -1,4 +1,6 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultRunner, type RunCliResult, type RunCliRunner } from "../session/cli-adapter.ts";
 
@@ -199,11 +201,25 @@ export interface KnowledgeStageOptions {
   signal?: "consumed" | "cited" | "validated" | "contradicted";
   signalIds?: readonly string[];
   evidence?: readonly string[];
+  /**
+   * K13/K14: transcript quote JSON string
+   * `{host_kind, host_session_id, entry_id, quote}`（见 src/knowledge/extractor.ts）。
+   * stage 时以 `--transcript-quote <path>` 传给 CLI。当前 defaultRunner 以
+   * stdio:["ignore",...] 拉起子进程（无 stdin 注入），故 JSON 写入临时文件后传
+   * 文件路径——quote 内容不进进程 argv（K13：原始片段不得进进程列表）。
+   */
+  transcriptQuote?: string;
+  /**
+   * K13/K14: 已存在的 transcript quote JSON 文件路径，原样经
+   * `--transcript-quote <path>` 透传（不新建临时文件）。
+   */
+  transcriptQuoteFile?: string;
 }
 
 export interface KnowledgeStageResult {
   session_id: string;
-  run_id: string;
+  run_id?: string;
+  origin?: "run" | "session";
   candidate_id: string;
   signal_recorded: number;
 }
@@ -312,7 +328,7 @@ export class KnowledgeCliAdapter {
     if (options.signalIds?.length && !options.signal) {
       throw new Error("signalIds requires signal");
     }
-    return this.invokeJson<KnowledgeStageResult>([
+    const args = [
       "knowledge", "stage", target, title, content,
       ...(options.sessionId ? ["--session", required(options.sessionId, "sessionId")] : []),
       ...(options.runId ? ["--run", required(options.runId, "runId")] : []),
@@ -323,7 +339,37 @@ export class KnowledgeCliAdapter {
       ...(options.signalIds?.length ? ["--signal-ids", options.signalIds.join(",")] : []),
       "--json",
       "--workflow-root", this.workflowRoot,
-    ]);
+    ];
+    // K13/K14: --transcript-quote <path> 透传。defaultRunner（src/session/cli-adapter.ts）
+    // 以 stdio:["ignore",...] 拉起子进程，不支持 stdin 注入，因此 JSON 写入
+    // os.tmpdir() 下的私有临时目录；argv 只出现文件路径，quote 原文不进进程列表。
+    // 显式 transcriptQuote（JSON 字符串）优先于 transcriptQuoteFile。
+    let transcriptQuotePath: string | undefined;
+    let transcriptQuoteTmpDir: string | undefined;
+    try {
+      if (options.transcriptQuote !== undefined) {
+        transcriptQuoteTmpDir = await mkdtemp(join(tmpdir(), "pi-knowledge-transcript-"));
+        transcriptQuotePath = join(transcriptQuoteTmpDir, "quote.json");
+        await writeFile(transcriptQuotePath, options.transcriptQuote, { encoding: "utf8", mode: 0o600 });
+      } else if (options.transcriptQuoteFile !== undefined) {
+        transcriptQuotePath = required(options.transcriptQuoteFile, "transcriptQuoteFile");
+      }
+      if (transcriptQuotePath) args.push("--transcript-quote", transcriptQuotePath);
+      return await this.invokeJson<KnowledgeStageResult>(args);
+    } finally {
+      if (transcriptQuoteTmpDir) {
+        try {
+          await rm(transcriptQuoteTmpDir, { recursive: true, force: true });
+        } catch (error) {
+          // Cleanup failure must be visible because the directory contains a
+          // transcript quote. Do not fail an otherwise successful stage, but
+          // surface the residual path for operator cleanup/audit.
+          console.warn(
+            `[pi-maestro-flow][knowledge] failed to remove transcript temp directory ${transcriptQuoteTmpDir}: ${errorMessage(error)}`,
+          );
+        }
+      }
+    }
   }
 
   private async invokeJson<T>(args: readonly string[]): Promise<T> {

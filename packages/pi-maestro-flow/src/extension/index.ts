@@ -146,6 +146,7 @@ import { TodoOverlay } from "../tui/todo-overlay.ts";
 import { GoalOverlay, type GoalOverlayAction } from "../tui/goal-overlay.ts";
 import { KnowledgeOverlay, type KnowledgeOverlayAction } from "../tui/knowledge-overlay.ts";
 import { KnowledgeCliAdapter, resolveLatestSessionId } from "../knowledge/cli-adapter.ts";
+import { stageWindowKnowledgeCandidate } from "../knowledge/extractor.ts";
 import { SkillCliAdapter, type SkillCliListOptions } from "../skills/skill-cli-adapter.ts";
 import { buildKnowledgeCenterView, type KnowledgeCenterView } from "../knowledge/view-model.ts";
 import {
@@ -2087,8 +2088,11 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
           evidence: parsed.evidence,
         });
         const signal = parsed.signal ? `; recorded ${result.signal_recorded} signal(s) as ${parsed.signal}` : "";
+        const location = result.run_id
+          ? `${result.session_id}/${result.run_id}`
+          : `${result.session_id} (session source)`;
         ctx.ui.notify(
-          `Staged ${result.candidate_id} on ${result.session_id}/${result.run_id}${signal} `
+          `Staged ${result.candidate_id} on ${location}${signal} `
           + `— review with \"maestro knowledge review ${result.session_id}\"`,
           "info",
         );
@@ -2097,6 +2101,55 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
           error instanceof Error ? error.message : String(error),
           "error",
         );
+      }
+    },
+  });
+  pi.registerCommand("maestro-knowledge-from-window", {
+    description: "Stage a spec/knowhow candidate with explicit distilled content plus evidence from the latest readable entry in this Pi window. Usage: maestro-knowledge-from-window <spec|knowhow> <title> <content> [--category <c>] [--action <propose|reaffirm|supersede|contest>] [--signal <consumed|cited|validated|contradicted> --signal-ids <id1,id2>] [--evidence <ref1,ref2>]",
+    async handler(args, ctx) {
+      const parsed = parseKnowledgeStageArgs(args);
+      if (parsed instanceof Error) {
+        ctx.ui.notify(parsed.message, "error");
+        return;
+      }
+      const snapshot = workflowBridge?.getSnapshot();
+      const session = snapshot?.session;
+      const run = session ? activeWorkflowRun(snapshot) : undefined;
+      const adapter = new KnowledgeCliAdapter(ctx.cwd);
+      try {
+        const outcome = await stageWindowKnowledgeCandidate(
+          ctx,
+          workflowHostSessionId(ctx),
+          {
+            target: parsed.target,
+            title: parsed.title,
+            content: parsed.content,
+            runId: run?.runId,
+            sessionId: run ? session?.sessionId : undefined,
+            action: parsed.action,
+            category: parsed.category,
+            signal: parsed.signal,
+            signalIds: parsed.signalIds,
+            evidence: parsed.evidence,
+          },
+          options => adapter.stage(options),
+        );
+        if (!outcome.result) {
+          ctx.ui.notify(outcome.reason ?? "No readable transcript entry is available", "error");
+          return;
+        }
+        const result = outcome.result;
+        const signal = parsed.signal ? `; recorded ${result.signal_recorded} signal(s) as ${parsed.signal}` : "";
+        const location = result.run_id
+          ? `${result.session_id}/${result.run_id}`
+          : `${result.session_id} (session source)`;
+        ctx.ui.notify(
+          `Staged ${result.candidate_id} from this Pi window on ${location}${signal} `
+          + `— review with "maestro knowledge review ${result.session_id}"`,
+          "info",
+        );
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
     },
   });

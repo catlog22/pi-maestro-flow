@@ -105,7 +105,7 @@ test("knowledge stage allows session-only (session-source authority)", async () 
       "--workflow-root", "/proj",
     ]);
     return jsonResult(args, {
-      session_id: "session-1", run_id: "", candidate_id: "KDC-0123456789abcdef", signal_recorded: 0,
+      session_id: "session-1", origin: "session", candidate_id: "KDC-0123456789abcdef", signal_recorded: 0,
     });
   }));
 
@@ -118,6 +118,8 @@ test("knowledge stage allows session-only (session-source authority)", async () 
 
   assert.equal(result.candidate_id, "KDC-0123456789abcdef");
   assert.equal(result.session_id, "session-1");
+  assert.equal(result.run_id, undefined);
+  assert.equal(result.origin, "session");
 });
 
 test("knowledge stage surfaces CLI failures", async () => {

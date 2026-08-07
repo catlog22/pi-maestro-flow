@@ -343,6 +343,7 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.ok(commands.includes("maestro-todo"));
   assert.ok(commands.includes("maestro-knowledge"));
   assert.ok(commands.includes("maestro-knowledge-stage"));
+  assert.ok(commands.includes("maestro-knowledge-from-window"));
   assert.ok(commands.includes("maestro-knowledge-record"));
   assert.ok(commands.includes("maestro-skills"));
   assert.ok(commands.includes("maestro-keybindings"));
