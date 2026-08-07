@@ -117,6 +117,7 @@ export interface TodoSkill {
 export type ViewMode = "list" | "compact";
 
 export type QuietSymbolMode = "check" | "dot";
+export type CurrencyMode = "usd" | "cny";
 
 /**
  * Legacy quiet-tool palette values retained while existing cockpit.json files
@@ -223,6 +224,10 @@ export interface CockpitConfig {
 	 * Effective only while fullscreenInput is active; ignored otherwise.
 	 */
 	copyOnSelect: boolean;
+	/** Footer cost currency: USD or CNY (CNY converts the USD estimate by currencyRate). */
+	currency: CurrencyMode;
+	/** CNY per 1 USD; only used while currency is "cny". */
+	currencyRate: number;
 	icons: { mode: IconMode };
 	sidebar: SidebarConfig;
 	/** Terminal tab title surface (session summary + working state + optional tags). */
@@ -248,6 +253,8 @@ export const DEFAULT_CONFIG: CockpitConfig = {
 	doubleEscapeClearInput: false,
 	fullscreenInput: false,
 	copyOnSelect: false,
+	currency: "usd",
+	currencyRate: 7.2,
 	icons: { mode: "auto" },
 	sidebar: { mode: "off", width: 40, density: "comfortable" },
 	title: {

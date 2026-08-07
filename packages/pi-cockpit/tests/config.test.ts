@@ -19,6 +19,19 @@ test("staticMode invalid values fall back to the caller's base", () => {
 	assert.equal(mergeConfig(enabledBase, { staticMode: false }).staticMode, false);
 });
 
+test("currency merges as usd|cny and rate clamps to a positive number", () => {
+	assert.equal(DEFAULT_CONFIG.currency, "usd");
+	assert.equal(DEFAULT_CONFIG.currencyRate, 7.2);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, {}).currency, "usd");
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { currency: "cny" }).currency, "cny");
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { currency: "eur" }).currency, "usd");
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { currencyRate: 8 }).currencyRate, 8);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { currencyRate: 0 }).currencyRate, 7.2);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { currencyRate: -3 }).currencyRate, 7.2);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { currencyRate: 500 }).currencyRate, 100);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { currencyRate: 7.135 }).currencyRate, 7.14);
+});
+
 test("legacy config without quietSymbols keeps the check default", () => {
 	const config = mergeConfig(DEFAULT_CONFIG, { quietMode: true });
 	assert.equal(config.quietMode, true);

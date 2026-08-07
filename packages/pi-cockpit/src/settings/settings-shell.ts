@@ -293,6 +293,16 @@ export class MaestroSettingsShell implements Component, Focusable {
 		}
 		if (matchesKey(data, Key.up)) return this.activeProvider !== undefined ? this.moveSetting(-1) : this.moveProvider(-1);
 		if (matchesKey(data, Key.down)) return this.activeProvider !== undefined ? this.moveSetting(1) : this.moveProvider(1);
+		if (matchesKey(data, Key.pageUp)) {
+			return this.activeProvider !== undefined
+				? this.moveSetting(-this.settingRowLimit())
+				: this.moveProvider(-this.providerRowLimit());
+		}
+		if (matchesKey(data, Key.pageDown)) {
+			return this.activeProvider !== undefined
+				? this.moveSetting(this.settingRowLimit())
+				: this.moveProvider(this.providerRowLimit());
+		}
 		if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab"))) {
 			this.moveScope(matchesKey(data, Key.shift("tab")) ? -1 : 1);
 			return;
@@ -319,8 +329,8 @@ export class MaestroSettingsShell implements Component, Focusable {
 			rows.push(this.params.theme.fg("dim", fit(this.t("settings.noMatches"), inner)));
 		} else {
 			const limit = this.providerRowLimit();
-			const start = visibleStart(this.providerIndex, providerRows.length, limit);
-			const end = Math.min(providerRows.length, start + limit);
+			const { start, end } = this.listWindow(this.providerIndex, providerRows.length, limit);
+			if (start > 0) rows.push(this.overflowMarker(start, inner));
 			for (let index = start; index < end; index++) {
 				const row = providerRows[index]!;
 				const selected = index === this.providerIndex;
@@ -341,6 +351,7 @@ export class MaestroSettingsShell implements Component, Focusable {
 					selected,
 				));
 			}
+			if (end < providerRows.length) rows.push(this.overflowMarker(providerRows.length - end, inner));
 		}
 		rows.push(...this.footerRows(inner));
 		return this.padToTarget(rows);
@@ -356,8 +367,8 @@ export class MaestroSettingsShell implements Component, Focusable {
 			rows.push(this.params.theme.fg("dim", fit(this.t("settings.noMatches"), inner)));
 		} else {
 			const limit = this.settingRowLimit();
-			const start = visibleStart(this.settingIndex, settings.length, limit);
-			const end = Math.min(settings.length, start + limit);
+			const { start, end } = this.listWindow(this.settingIndex, settings.length, limit);
+			if (start > 0) rows.push(this.overflowMarker(start, inner));
 			let renderedGroup: string | undefined;
 			let backtracks = 0;
 			while (start > 0 && backtracks < 2 && settings[start - 1]?.group === settings[start]?.group) {
@@ -391,6 +402,7 @@ export class MaestroSettingsShell implements Component, Focusable {
 					selected,
 				));
 			}
+			if (end < settings.length) rows.push(this.overflowMarker(settings.length - end, inner));
 		}
 		rows.push(...this.footerRows(inner));
 		return this.padToTarget(rows);
@@ -1359,6 +1371,25 @@ export class MaestroSettingsShell implements Component, Focusable {
 		if (!overlayHeight) return MAX_PROVIDER_ROWS;
 		// Chrome: frame borders(2) + header(1) + rule(1) + footer(rule+help ≈2).
 		return Math.max(4, overlayHeight - 6);
+	}
+
+	/**
+	 * Scrolling window for a list. When the list overflows the row budget, one
+	 * row per visible overflow edge is reserved for the "N more" marker, so the
+	 * marker is deducted from the budget instead of stacking on top of it
+	 * (ui-conventions: overflow markers must come out of the row budget).
+	 */
+	private listWindow(selected: number, length: number, limit: number): { start: number; end: number } {
+		const overflow = length > limit;
+		const markerBudget = overflow ? Math.min(2, Math.max(1, limit - 1)) : 0;
+		const size = Math.max(1, limit - markerBudget);
+		const start = visibleStart(selected, length, size);
+		return { start, end: Math.min(length, start + size) };
+	}
+
+	/** "… N more" marker row for an overflowed list edge. */
+	private overflowMarker(count: number, inner: number): string {
+		return this.params.theme.fg("dim", fit(`… ${this.t("settings.more", { n: count })}`, inner));
 	}
 
 	private optionRowLimit(): number {

@@ -1072,6 +1072,8 @@ export default function (pi: ExtensionAPI): void {
 						ctxTokens: cu?.tokens ?? 0,
 						ctxWindow: cu?.contextWindow ?? ctx.model?.contextWindow ?? 0,
 						totals: getUsageTotals(ctx.sessionManager.getEntries()),
+						currency: config.currency,
+						currencyRate: config.currencyRate,
 						git: branch ?? undefined,
 						bashBgStatus,
 						workflowStatus: extensionStatuses.find((status) => status.key === WORKFLOW_STATUS_KEY)?.text,

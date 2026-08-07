@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { type CockpitConfig, DEFAULT_CONFIG } from "./types.ts";
+import { type CockpitConfig, type CurrencyMode, DEFAULT_CONFIG } from "./types.ts";
 
 const SIDEBAR_MIN_WIDTH = 32;
 const SIDEBAR_MAX_WIDTH = 56;
@@ -19,6 +19,7 @@ export function mergeConfig(base: CockpitConfig, over: unknown): CockpitConfig {
 	const isToolPaletteMode = (v: unknown): v is "classic" | "family" | "readwrite" | "search" | "mono" =>
 		v === "classic" || v === "family" || v === "readwrite" || v === "search" || v === "mono";
 	const isIconMode = (v: unknown): v is "auto" | "nerd" | "ascii" => v === "auto" || v === "nerd" || v === "ascii";
+const isCurrencyMode = (v: unknown): v is CurrencyMode => v === "usd" || v === "cny";
 	const isSidebarMode = (v: unknown): v is "auto" | "on" | "off" => v === "auto" || v === "on" || v === "off";
 	const isSidebarDensity = (v: unknown): v is "comfortable" | "compact" => v === "comfortable" || v === "compact";
 	const iconsRaw = o.icons && typeof o.icons === "object" && !Array.isArray(o.icons)
@@ -51,6 +52,10 @@ export function mergeConfig(base: CockpitConfig, over: unknown): CockpitConfig {
 		doubleEscapeClearInput: typeof o.doubleEscapeClearInput === "boolean" ? o.doubleEscapeClearInput : base.doubleEscapeClearInput,
 		fullscreenInput: typeof o.fullscreenInput === "boolean" ? o.fullscreenInput : base.fullscreenInput,
 		copyOnSelect: typeof o.copyOnSelect === "boolean" ? o.copyOnSelect : base.copyOnSelect,
+		currency: isCurrencyMode(o.currency) ? o.currency : base.currency,
+		currencyRate: typeof o.currencyRate === "number" && Number.isFinite(o.currencyRate) && o.currencyRate > 0
+			? Math.min(100, Math.max(0.01, Math.round(o.currencyRate * 100) / 100))
+			: base.currencyRate,
 		icons: { mode: iconsRaw && isIconMode(iconsRaw.mode) ? iconsRaw.mode : base.icons.mode },
 		sidebar: {
 			mode: sidebarRaw && isSidebarMode(sidebarRaw.mode) ? sidebarRaw.mode : base.sidebar.mode,
@@ -133,6 +138,8 @@ export function mergeConfigDocument(raw: unknown, config: CockpitConfig): Record
 		doubleEscapeClearInput: config.doubleEscapeClearInput,
 		fullscreenInput: config.fullscreenInput,
 		copyOnSelect: config.copyOnSelect,
+		currency: config.currency,
+		currencyRate: config.currencyRate,
 		icons,
 		sidebar,
 		title,

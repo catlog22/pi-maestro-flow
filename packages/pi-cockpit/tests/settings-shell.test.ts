@@ -10,6 +10,7 @@ import {
 	SETTINGS_DISCOVER_EVENT,
 	SETTINGS_PROTOCOL_VERSION,
 	type SettingsProviderV1,
+	type SettingDefinition,
 	type SettingsSnapshot,
 } from "pi-maestro-settings-core/v1";
 import { SettingsCoordinator } from "../src/settings/coordinator.ts";
@@ -804,3 +805,78 @@ function makeSecondaryProvider(): SettingsProviderV1 {
 		applyRuntime: () => ({ appliedKeys: [], deferred: [], failed: [] }),
 	};
 }
+
+function makeManySettingsProvider(count: number): SettingsProviderV1 {
+	const instanceId = "cockpit-1";
+	const snapshot: SettingsSnapshot = {
+		providerId: "cockpit",
+		providerInstanceId: instanceId,
+		configured: { values: [], resources: [{ resource: { providerId: "cockpit", scope: "global", id: "cockpit.json" }, etag: "r0" }] },
+		effective: { values: [] },
+	};
+	const en: Record<string, string> = { "many.label": "Many" };
+	const zh: Record<string, string> = { "many.label": "多设置" };
+	const settings: SettingDefinition[] = [];
+	for (let index = 0; index < count; index++) {
+		en[`many.s${index}`] = `Setting ${index}`;
+		zh[`many.s${index}`] = `设置 ${index}`;
+		settings.push({
+			key: `s${index}`,
+			group: "general",
+			order: index,
+			labelKey: `many.s${index}`,
+			defaultValue: false,
+			scopes: ["global"],
+			merge: "override",
+			activation: "live",
+			sensitivity: "public",
+			reversibility: "full",
+			editor: { kind: "boolean" },
+		});
+	}
+	return {
+		describe: () => ({
+			id: "cockpit",
+			version: "1.0.0",
+			instanceId,
+			labelKey: "many.label",
+			capabilities: { read: true, write: true, prepareCommit: true, rollback: "full", hotUpdate: true },
+			catalogs: { en, "zh-CN": zh },
+			settings,
+		}),
+		read: () => snapshot,
+		validate: () => ({ valid: true, issues: [] }),
+		prepare: () => ({ prepared: true, prepareToken: "prepared", validation: { valid: true, issues: [] } }),
+		commit: () => ({ snapshot, revisions: [], changedKeys: [], activation: [] }),
+		abort: () => undefined,
+		rollback: () => ({ rolledBack: true }),
+		applyRuntime: () => ({ appliedKeys: [], deferred: [], failed: [] }),
+	};
+}
+
+test("PageUp/PageDown page the settings list window", async () => {
+	const directory = withTempDir();
+	try {
+		const { shell } = await createShell(makeManySettingsProvider(20), directory, [], 24);
+		openFirstGroup(shell);
+		shell.handleInput("\x1b[6~"); // page down
+		const down = shell.render(76).join("\n");
+		assert.ok(down.includes("more"), "overflow markers appear after paging");
+		assert.ok(!down.includes("Setting 0"), "the window moved away from the first row");
+		shell.handleInput("\x1b[5~"); // page up
+		const up = shell.render(76).join("\n");
+		assert.ok(up.includes("Setting 0"), "PageUp brings the first row back into view");
+	} finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("long settings lists keep overflow markers and the footer inside the overlay budget", async () => {
+	const directory = withTempDir();
+	try {
+		const { shell } = await createShell(makeManySettingsProvider(20), directory, [], 24);
+		openFirstGroup(shell);
+		const lines = shell.render(76);
+		assert.ok(lines.length <= 22, `overlay must not exceed its budget: ${lines.length}`);
+		assert.ok(lines.some((line) => line.includes("Ctrl+S")), "footer stays visible");
+		assert.ok(lines.some((line) => line.includes("more")), "bottom overflow marker is shown");
+	} finally { rmSync(directory, { recursive: true, force: true }); }
+});

@@ -246,6 +246,23 @@ test("footer omits monetary cost when the channel has no pricing (cost 0)", () =
 	assert.match(lines[0], /↑12k · ↓3\.4k$/);
 });
 
+test("footer converts cost to CNY with the configured rate", () => {
+	const lines = renderFooter(parts({ width: 100, currency: "cny", currencyRate: 7.2 }));
+	assert.match(lines[0], /¥3\.74$/);
+	assert.doesNotMatch(lines[0], /\$0\.52$/);
+});
+
+test("footer keeps USD by default and for an explicit usd currency", () => {
+	const lines = renderFooter(parts({ width: 100, currency: "usd" }));
+	assert.match(lines[0], /\$0\.52$/);
+	assert.doesNotMatch(lines[0], /¥/);
+});
+
+test("footer treats an unusable rate as 1:1 and stays CNY", () => {
+	const lines = renderFooter(parts({ width: 100, currency: "cny", currencyRate: 0 }));
+	assert.match(lines[0], /¥0\.52$/);
+});
+
 test("footer uses a coherent nerd icon set for model, workspace and git", () => {
 	const lines = renderFooter(parts({ cwd: "~/work/project", git: "main", width: 120 }));
 	assert.match(lines[0], /^⚡ stream-70b ·  ~\/work\/project ·  main/);

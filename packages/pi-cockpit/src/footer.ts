@@ -27,6 +27,10 @@ export interface FooterParts {
 	ctxTokens: number;
 	ctxWindow: number;
 	totals: UsageTotals;
+	/** Cost currency for the footer: "usd" shows $, "cny" converts by currencyRate and shows ¥. */
+	currency?: "usd" | "cny";
+	/** CNY per 1 USD; only used when currency is "cny". */
+	currencyRate?: number;
 	git?: string;
 	agentSummary?: string;
 	bashBgStatus?: string;
@@ -304,7 +308,11 @@ export function renderFooter(p: FooterParts): string[] {
 
 	// Cost only appears once the channel registers pricing; a $0 estimate is
 	// noise on every session of an unconfigured custom provider.
-	const costText = t.cost > 0 ? `${theme.fg("warning", g.cost)}${fmtCost(t.cost)}` : "";
+	const currency = p.currency ?? "usd";
+	const rate = p.currencyRate && p.currencyRate > 0 ? p.currencyRate : 1;
+	const costValue = currency === "cny" ? t.cost * rate : t.cost;
+	const costSymbol = currency === "cny" ? "¥" : g.cost;
+	const costText = costValue > 0 ? `${theme.fg("warning", costSymbol)}${fmtCost(costValue)}` : "";
 	const withCost = (stats: string[]): string[] => (costText && stats.length > 0 ? [...stats, costText] : stats);
 
 	if (p.ctxWindow > 0) {
