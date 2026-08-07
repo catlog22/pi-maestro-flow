@@ -121,7 +121,7 @@ export async function openPlanConfirmation(
       let previewOffset = 0;
       let previewMaxOffset = 0;
       let status = options.reviewReport
-        ? "AI review report attached — R toggles Plan/Report, PgUp/PgDn scrolls"
+        ? "AI review report attached — R switches Plan/Report, PgUp/PgDn scrolls"
         : "";
       let lastWidth = 80;
 
@@ -225,7 +225,10 @@ export async function openPlanConfirmation(
 
           const innerWidth = Math.max(1, safeWidth - 2);
           const terminalRows = process.stdout?.rows ?? 30;
-          const previewHeight = Math.max(4, Math.min(14, terminalRows - 13) - Math.max(0, selectionRows.length - 6));
+          // A transient status line renders under the key hints; shrink the preview
+          // by one row so the overlay stays within maxHeight.
+          const hasStatusLine = Boolean(status);
+          const previewHeight = Math.max(4, Math.min(14, terminalRows - 13) - Math.max(0, selectionRows.length - 6) - (hasStatusLine ? 1 : 0));
           const renderedPlan = markdown.render(Math.max(1, innerWidth - 2));
           const maxOffset = Math.max(0, renderedPlan.length - previewHeight);
           previewMaxOffset = maxOffset;
@@ -234,13 +237,15 @@ export async function openPlanConfirmation(
           const range = renderedPlan.length > previewHeight
             ? `${previewOffset + 1}-${Math.min(renderedPlan.length, previewOffset + previewHeight)}/${renderedPlan.length}`
             : `${renderedPlan.length}`;
-          const footer = status || actionFooter(innerWidth, [
+          // Key hints are always visible; a transient status line is rendered below
+          // them instead of replacing them, so report/plan navigation stays discoverable.
+          const footer = actionFooter(innerWidth, [
             "Esc close",
             "Enter choose",
             "←→ change mode",
             "↑↓ navigate",
             "Ctrl+Enter execute",
-            ...(options.reviewReport ? ["R plan/report"] : []),
+            ...(options.reviewReport ? [previewMode === "report" ? "R: back to Plan" : "R: view report"] : []),
             "PgUp/PgDn scroll",
           ]);
           const rendered = [
@@ -249,7 +254,11 @@ export async function openPlanConfirmation(
             ...preview.map((line) => ` ${line}`),
           ];
           while (rendered.length < previewHeight + 2) rendered.push("");
-          rendered.push(theme.fg("dim", `${previewMode === "report" ? "Report" : "Plan"} ${range}`));
+          const modeLabel = previewMode === "report" ? "Review report" : "Plan";
+          const toggleHint = options.reviewReport
+            ? `   R: ${previewMode === "report" ? "back to Plan" : "view review report"}`
+            : "";
+          rendered.push(theme.fg("dim", `${modeLabel} ${range}${toggleHint}`));
           rendered.push(theme.fg("dim", "─".repeat(innerWidth)));
           for (let index = 0; index < selectionRows.length; index++) {
             const row = selectionRows[index]!;
@@ -261,7 +270,8 @@ export async function openPlanConfirmation(
               ? theme.fg("accent", theme.bold(line))
               : theme.fg("text", line));
           }
-          rendered.push(theme.fg(status ? "warning" : "dim", footer));
+          rendered.push(theme.fg("dim", footer));
+          if (status) rendered.push(theme.fg("warning", status));
           return renderFrame(rendered, safeWidth, theme);
         },
 
@@ -294,6 +304,9 @@ export async function openPlanConfirmation(
             markdown = new Markdown(currentPreviewSource(), 0, 0, markdownTheme(theme));
             previewOffset = 0;
             previewMaxOffset = 0;
+            status = previewMode === "report"
+              ? "Viewing the review report — R returns to the Plan preview"
+              : "Viewing the Plan — R opens the review report";
           } else if (/^[1-9]$/.test(data)) {
             const index = Number(data) - 1;
             if (index < actions.length) {

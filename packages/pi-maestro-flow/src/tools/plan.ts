@@ -13,7 +13,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
-import { Text } from "@earendil-works/pi-tui";
+import { Key, Text, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { altKey } from "../key-labels.ts";
 import { toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts";
@@ -40,6 +40,7 @@ import {
   resolvePlanReviewModel,
   runPlanReview,
   saveLocalPlanReviewModelSetting,
+  type PlanReviewResult,
 } from "./plan-review.ts";
 import { getVisibleTasks } from "./todo.ts";
 import {
@@ -877,18 +878,23 @@ async function reviewPlan(
         label = resolution.label;
         latestReviewSelection = FOLLOW_SESSION_LABEL;
       }
-      ctx.ui.notify(`Running AI review of the Plan with ${label}…`, "info");
-      const review = await runPlanReview(extensionApi, ctx, {
+      const outcome = await runReviewWithProgress(ctx, extensionApi, {
         markdown: latestPlan ?? "",
         model,
+        label,
         signal,
       });
       if (!isCurrentPlanOperation(ctx, operation)) return { approved: false, exited: false };
+      if (outcome.cancelled) {
+        ctx.ui.notify("AI review cancelled; returning to Plan confirmation.", "info");
+        continue;
+      }
+      const review = outcome.review;
       if (review.ok && review.report) {
         latestReviewReport = review.report;
         latestReviewModel = label;
         reviewReportRevision = latestRevision;
-        ctx.ui.notify("AI review complete; report opens in its own panel.", "info");
+        ctx.ui.notify("AI review complete; the confirmation panel shows the report (R toggles Plan/Report).", "info");
       } else {
         latestReviewReport = undefined;
         reviewReportRevision = -1;
@@ -955,6 +961,108 @@ async function reviewPlan(
     return { approved: true, exited: true, executionMode, executionChoice, executionMessage };
   }
   return { approved: false, exited: false };
+}
+
+interface PlanReviewProgressOutcome {
+  review: PlanReviewResult;
+  /** True when the user (Esc) or the turn aborted the review before it finished. */
+  cancelled: boolean;
+}
+
+const REVIEW_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/**
+ * Run the AI review while a modal progress overlay shows the model, a spinner
+ * and a ticking elapsed clock. Esc cancels the subagent (via AbortSignal) and
+ * returns to the confirmation panel without a report.
+ */
+async function runReviewWithProgress(
+  ctx: PlanContext,
+  pi: ExtensionAPI,
+  options: { markdown: string; model: string; label: string; signal?: AbortSignal },
+): Promise<PlanReviewProgressOutcome> {
+  const abort = new AbortController();
+  const onExternalAbort = (): void => { if (!abort.signal.aborted) abort.abort(); };
+  if (options.signal?.aborted) abort.abort();
+  options.signal?.addEventListener("abort", onExternalAbort, { once: true });
+  const reviewPromise = runPlanReview(pi, ctx, {
+    markdown: options.markdown,
+    model: options.model,
+    signal: abort.signal,
+  });
+  let outcome: PlanReviewProgressOutcome;
+  try {
+    outcome = await ctx.ui.custom<PlanReviewProgressOutcome>(
+      (tui, theme, _keybindings, done) => {
+        let settled = false;
+        const startedAt = Date.now();
+        let frame = 0;
+        const timer = setInterval(() => {
+          frame = (frame + 1) % REVIEW_SPINNER_FRAMES.length;
+          tui.requestRender();
+        }, 120);
+        const settle = (value: PlanReviewProgressOutcome): void => {
+          if (settled) return;
+          settled = true;
+          clearInterval(timer);
+          done(value);
+        };
+        abort.signal.addEventListener("abort", () => {
+          settle({ review: { ok: false, error: "cancelled" }, cancelled: true });
+        }, { once: true });
+        reviewPromise.then(
+          (review) => settle({ review, cancelled: false }),
+          (error) => settle({ review: { ok: false, error: errorMessage(error) }, cancelled: true }),
+        );
+        return {
+          render(width: number): string[] {
+            const inner = Math.max(1, width - 2);
+            const rows = [
+              `${REVIEW_SPINNER_FRAMES[frame]!}  AI review in progress`,
+              "",
+              `  Model: ${options.label}`,
+              `  Elapsed: ${formatElapsed(Date.now() - startedAt)}`,
+              "",
+              "  Esc cancel · returns to Plan confirmation",
+            ];
+            const border = (text: string) => theme.fg("dim", text);
+            return [
+              border(`╭${"─".repeat(inner)}╮`),
+              ...rows.map((row) => {
+                const content = truncateToWidth(row, inner, "…");
+                return `${border("│")}${content}${' '.repeat(Math.max(0, inner - visibleWidth(content)))}${border("│")}`;
+              }),
+              border(`╰${"─".repeat(inner)}╯`),
+            ];
+          },
+          handleInput(data: string): void {
+            if (matchesKey(data, Key.escape)) abort.abort();
+          },
+          invalidate(): void {},
+          dispose(): void { clearInterval(timer); },
+        };
+      },
+      {
+        overlay: true,
+        overlayOptions: {
+          width: "70%",
+          minWidth: 48,
+          maxHeight: 12,
+          anchor: "center" as const,
+        },
+      },
+    );
+  } catch {
+    outcome = { review: { ok: false, error: "interrupted" }, cancelled: true };
+  }
+  return outcome ?? { review: { ok: false, error: "interrupted" }, cancelled: true };
+}
+
+function formatElapsed(milliseconds: number): string {
+  const total = Math.max(0, Math.round(milliseconds / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
 function buildReviewFeedbackMessage(report: string): string {
