@@ -68,6 +68,10 @@ flowchart LR
 - **耐久写入**：`durable-write` 提供 fsync 级持久化，防掉电丢失；
 - **版本化契约**：`SETTINGS_PROTOCOL_VERSION` 协商，旧版插件安全降级。
 
+## In-Shell 设置套件（v0.16.0+）
+
+配置全部在 Shell 内完成，不再跳转到系统原生选择器：API Manager、Hooks、主题、Provider 导航、故障转移链（列表 CRUD）与探索 Provider 均在设置界面内直接操作（旧式跳转动作已移除）。Provider 动作结果直接渲染在 Shell 内，配套权限总览；`teammate` 角色目录也已内嵌呈现。
+
 ## 设置入口速查
 
 | 入口 | 用途 |

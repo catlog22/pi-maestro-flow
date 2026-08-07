@@ -69,6 +69,7 @@ maestro load --type <type> [--id <id>]
 | **模型熔断与故障转移** | 电路断路器保护 API 调用，自动切备用模型 |
 | **GUI 子系统（UCL）** | `PI_GUI=1` 启用，UCL（Unified Communication Layer，统一通信层）HTTP 工具发现/调用 + SSE 事件 |
 | **TUI 界面组件** | Goal 面板、Todo 覆盖层、进度树、状态栏等 |
+| **self-evolve 自进化层** | 运行轨迹 → 知识沉淀闭环的候选信号层（M1-M5：瘦路由器、健康侧车、提案治理、canary 验证），默认禁用（见 [新特性使用说明](https://github.com/catlog22/pi-maestro-flow/blob/main/docs/new-features-usage.md)） |
 | **权限系统** | 5 种模式 + 细粒度 allow/ask/deny + 子进程 IPC 中继 |
 
 ## 数据与配置文件位置

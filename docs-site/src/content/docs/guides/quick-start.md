@@ -10,11 +10,11 @@ icon: "🚀"
 ## 1. 安装
 
 ```bash
-# 1. 前置：Node.js ≥ 22.19.0 与 Pi Coding Agent ≥ 0.74.0
+# 1. 前置：Node.js ≥ 22.19.0 与 Pi Coding Agent ≥ 0.83.0
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
 # 2. 安装或升级插件（teammate 与 cockpit 自动随附）
-pi install npm:pi-maestro-flow@0.14.2
+pi install npm:pi-maestro-flow@0.16.0
 
 # 3. 验证 Flow、Teammate 与 Cockpit 均已列出
 pi list

@@ -20,6 +20,11 @@
     "aria_search": "搜索",
     "logo_alt": "Maestro Flow 标志"
   },
+  "announcement": {
+    "title": "v0.16.0 已发布 — In-Shell 设置套件 · 会话级知识治理 · Self-Evolve M1-M5。升级：",
+    "install": "pi install npm:pi-maestro-flow@0.16.0",
+    "close": "关闭提示"
+  },
   "accessibility": {
     "main_content": "主内容区域",
     "skip_to_content": "跳转到主内容"

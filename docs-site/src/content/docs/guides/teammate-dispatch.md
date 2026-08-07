@@ -42,6 +42,7 @@ teammate({
 | `{name}` / `{name.field}` | 注入上游任务输出（自动建立依赖） |
 | `dependsOn` | 只声明顺序，不注入输出 |
 | `background` | 默认 `false`；`true` 时立即确认并后台执行，完成时推送通知 |
+| `todo` | 绑定 Todo 任务给被派发 Agent：启动时接管归属、自动激活首个可运行任务，并注入有序队列由其自行推进（首个优先） |
 | `concurrency` | 最大并行任务数（默认 4） |
 | `maxNestingDepth` | 限制子代理再派生子代理的层级（0 禁止嵌套）；顶层为默认值，task 同名字段可覆盖，均省略时取全局上限（2，实际生效 0/1） |
 
@@ -68,6 +69,19 @@ teammate({
 ```
 
 第三个任务自动等待前两个完成后执行——**一条指令搞定并行 + 依赖合并**。
+
+## todo 绑定派发（v0.16.0+）
+
+任务可通过 `tasks[].todo` 绑定到 Todo（单 id 或有序数组，首个优先级最高）：Agent 启动时接管任务归属（root → agent）、自动激活第一个可运行任务，并注入有序队列由其独立推进；每完成一个任务即 `todo update <id> status=completed summary=...`。干净退出时自动封存遗留任务；失败/取消则保留给 root 重新派发。
+
+```javascript
+teammate({
+  tasks: [
+    { name: "impl", agent: "general-executor", todo: "12",
+      prompt: "实现 JWT 认证模块并完成绑定任务" }
+  ]
+})
+```
 
 ## 结构化输出
 
@@ -116,14 +130,20 @@ observe({ action: "watch", targets: [{ kind: "teammate", id: "reviewer" }], time
 | `teammate-wait` | 事件驱动等待完成（`timeoutMs`）或固定延迟（`waitMs`）——旧版工具，需 `PI_TEAMMATE_LEGACY_OBSERVATION_TOOLS=1`，新代码用 `observe` 替代 |
 | `teammate-send` | 发送消息（`follow_up` 排队 / `steer` 中断 / `abort` 终止） |
 
+> v0.16.0 起，steer 控制面失败（未确认/拒绝的中断）降级为排队 follow-up，不再伪装成任务失败。
+
 ```javascript
 teammate-send({ to: "my-agent", message: "请也检查边界情况", mode: "follow_up" })
 teammate-send({ to: "my-agent", message: "停止当前方案，改用替代方案", mode: "steer" })
 ```
 
+## 结果记录（agent://）
+
+完成任务的输出可通过协议资源读取：`agent://<correlationId>` 返回结构化输出（带 outputSchema 的任务）或最终答案文本（普通任务）；路径段可取嵌套字段，如 `agent://reviewer-1/findings/0/path`。
+
 ## 思考深度控制
 
-逐任务控制推理深度：`off` → `minimal` → `low` → `medium` → `high` → `xhigh`（`max` 为别名）。
+逐任务控制推理深度：`off` → `minimal` → `low` → `medium` → `high` → `xhigh`（`max` 为别名）。v0.16.0 起所有级别均可选并透传（不再受限）。
 
 ```javascript
 teammate({

@@ -83,6 +83,32 @@ maestro search "旧模式" --include-deprecated       # 搜索含已废弃
 | `maestro wiki backlinks <id>` / `forward <id>` | 关联导航 |
 | `maestro spec history <sid>` | 规则历史 |
 | `maestro knowledge stage` | 暂存可复用配方/坑 |
+| `maestro knowledge record <ids...>` | 记录纯归因（search/load 来源） |
+| `maestro knowledge review <session-id> --json` | 待裁决候选清单（含归因统计） |
+| `maestro knowledge promote <session> --resolve <id> --as <处置>` | 裁决并提升候选 |
+
+## 会话级知识治理（v0.16.0+）
+
+知识治理下沉到会话（Session）级：候选在来源 Run/Session 封存时自动结算，带**窗口转录证据**与**可审计裁决**，杜绝无来源或脱离轨迹的知识入库。
+
+### 窗口转录证据（K12-K17）
+
+- `/maestro-knowledge-from-window <spec|knowhow> <标题> <内容>`（Pi）或 `maestro knowledge stage ... --transcript-quote <descriptor.json>`（CLI）以**当前窗口的原始记录**为候选背书。
+- 原始引文仅作为**不可信快照证据**存储——绝不进入候选内容、评审输出或检索（铁律：暴露 ≠ 消费）；评审只呈现 `[untrusted]` 状态。
+- 转录-only 候选自动进入 `review_required`，`promote --all` 会跳过它们，必须经人工裁决后显式提升。
+
+### 归因与结算
+
+- `maestro search` 是**暴露而非消费**——需要把命中转为证据时用 `maestro load --id`（记 `consumed`）或 `maestro knowledge record <ids...> --signal ... --source search`（纯归因）。
+- Run/Session 封存时自动生成知识汇总（`run-knowledge` / `session-knowledge` 消息）——那是封存时刻的权威知识状态，无需手工重推。
+
+### 评审呈现协议
+
+候选需要裁决时（封存提示、`review_required`、冲突），Agent 必须自行读取 `maestro knowledge review <session-id> --json`，逐条呈现：标题、内容摘要、evidence 锚点、匹配到的既有条目（id+标题）、推荐处置（unique / duplicate / related / conflict / supersede）及一行理由；**用户只做决策**，Agent 负责读取、呈现与执行。
+
+### 写入质量门槛
+
+只有未来工作能直接复用、避免重付学习成本的内容才值得沉淀，且至少满足一条：① 踩坑警示（非显而易见的失败模式+预防）；② 失败教训（失败、根因、替代方案）；③ 非平凡权衡（为何 A 不选 B）；④ 新确立的规定性约束。**0 候选是合法结果**——不为证明管道有价值而硬造候选。
 
 ## 下一步
 

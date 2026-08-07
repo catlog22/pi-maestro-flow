@@ -80,7 +80,7 @@ export function Sidebar() {
           'max-lg:-translate-x-full',
           isMobileOpen ? 'max-lg:translate-x-0' : '',
         ].join(' ')}
-        style={{ top: 'var(--size-topbar-height)', bottom: 0 }}
+        style={{ top: 'calc(var(--size-topbar-height) + var(--banner-offset, 0px))', bottom: 0 }}
       >
         <nav className="py-[var(--spacing-4)]" aria-label={t('sidebar.aria_nav')}>
           {/* Quick Start — top level */}

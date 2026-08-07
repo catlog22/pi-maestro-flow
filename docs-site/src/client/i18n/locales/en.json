@@ -20,6 +20,11 @@
     "aria_search": "Search",
     "logo_alt": "Maestro Flow Logo"
   },
+  "announcement": {
+    "title": "v0.16.0 released — in-shell settings suite · session-level knowledge governance · Self-Evolve M1-M5. Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.16.0",
+    "close": "Dismiss"
+  },
   "accessibility": {
     "main_content": "Main content area",
     "skip_to_content": "Skip to main content"

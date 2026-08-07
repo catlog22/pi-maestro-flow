@@ -120,6 +120,10 @@ todo({
 
 `blockedBy` 用数组下标引用更早的任务，构成依赖链；完成的任务摘要会作为上下文注入后续任务。
 
+### 绑定给 Teammate 执行（v0.16.0+）
+
+todo 任务可通过 `tasks[].todo` 绑定给被派发的 Agent（`teammate` 工具）：Agent 接管归属并自动激活首个可运行任务，完成后自动推进队列（详见 [并行多智能体调度](/guides/teammate-dispatch)）。
+
 ## 4. run-control — Maestro CLI 透传壳
 
 通过 argv 透传调用 canonical Maestro CLI，是 **Session/Run 生命周期的唯一 LLM 工具面**：
