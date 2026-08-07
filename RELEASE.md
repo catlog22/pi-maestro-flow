@@ -1,108 +1,144 @@
-# v0.15.0 - Claude-Style Terminal Interactions, In-Composer Wizard, and TUI Hardening
+# v0.16.0 - In-Shell Settings Suite, Self-Evolve M1-M5, and Core Engine 0.5.65
 
 ## Overview
 
-Flow `0.15.0` bundles Teammate `1.8.0` and Cockpit `0.10.0`. This suite
-release delivers the claude-style terminal interaction set (fullscreen fixed
-editor, copy-on-select, crash-safe cleanup), an in-composer ask wizard with
-step-completion marks, per-task nesting budgets with schema contract
-hardening, knowledge attribution notifications, optional (选装) skills
-support, and broad TUI flicker/robustness hardening across all three
-packages.
+Flow `0.16.0` bundles Teammate `1.9.0`, Cockpit `0.11.0`, and the first
+`pi-maestro-settings-core` bump (`0.1.1`). This suite release delivers the
+complete in-shell settings experience (API manager, hooks, theme, provider
+navigation — no legacy picker jumps), the self-evolve automation layer
+(M1-M5 deliverables plus parallel-session runtime/TUI work), session-level
+knowledge governance with window transcript evidence staging, compaction
+critical-pressure hardening, and teammate todo-bound dispatch.
+
+The core engine reference is updated from `maestro-flow@0.5.62` to
+**`maestro-flow@0.5.65`** (exact pin). The engine bump carries the sharp
+runtime chain security fix (GHSA-f88m-g3jw-g9cj / CVE-2026-33327,
+CVE-2026-33328, CVE-2026-35590, CVE-2026-35591), three prompt quality gates
+(Staging Quality Bar, frontmatter quality gate, Review Presentation
+Protocol), session-level knowledge governance, and the K12-K17 window
+transcript evidence flow.
 
 ## Package Versions and Requirements
 
-| Package | v0.14.2 | v0.15.0 |
+| Package | v0.15.0 | v0.16.0 |
 |---------|---------|---------|
-| pi-maestro-flow | 0.14.2 | **0.15.0** |
-| pi-maestro-teammate | 1.7.1 | **1.8.0** |
-| pi-cockpit | 0.9.1 | **0.10.0** |
-| pi-maestro-settings-core | 0.1.0 | 0.1.0 |
-| maestro-flow | 0.5.61 | **0.5.62** |
+| pi-maestro-flow | 0.15.0 | **0.16.0** |
+| pi-maestro-teammate | 1.8.0 | **1.9.0** |
+| pi-cockpit | 0.10.0 | **0.11.0** |
+| pi-maestro-settings-core | 0.1.0 | **0.1.1** |
+| maestro-flow | 0.5.62 | **0.5.65** |
 
 - Requires Node.js `>=22.19.0`.
-- Validated with Pi SDK `0.83.0` and `typebox@1.3.7`.
 - Pi core packages remain optional wildcard peers supplied by the host; the
   release tarballs do not bundle private SDK copies.
-- `pi-maestro-settings-core` is unchanged in this release.
-- `pi-maestro-flow` pins the core engine `maestro-flow` exactly at `0.5.62`
-  (knowledge attribution `record`/`--content-file` and optional-skill toggle
-  live in the core engine).
+- `pi-maestro-flow` pins the core engine `maestro-flow` exactly at `0.5.65`.
+  Exact pins do not auto-follow upstream: the 0.5.62 → 0.5.65 bump is an
+  explicit preflight decision (see `TIP-20260727-exact-pin-stale-upstream-dep`).
+- Exact workspace pins were bumped together with the closure
+  (settings-core `0.1.0` → `0.1.1` in Teammate, Cockpit, and Flow).
 
 ## Highlights
 
-### Cockpit - Claude-Style Terminal Interactions
+### Settings-Core - In-Shell Action Results
 
-- Fullscreen fixed editor with application-owned transcript scroll; drag
-  selection always works in fullscreen while copy-on-select only gates the
-  copy.
-- Copy-on-select in the fullscreen transcript with copied char/line count
-  notification and flowing (normal text) selection style.
-- Double-Escape clears the input via the Cockpit custom editor; Escape-first
-  UX plumbed through claude-style interaction settings.
-- Crash-safe terminal cleanup: unconditional raw-mode reset, bracketed paste
-  and cursor restore, keyboard protocol restore (`?2031l`) on
-  SIGTERM/SIGHUP, deterministic alternate-screen seeding, forced full redraw
-  on alternate-screen enter/leave, and process-lifetime cleanup so the
-  exit-flush always runs. Capability fallback and docs included.
-- `pinEditorBottom` stays inert inside fullscreen on live toggles.
-- bash-bg, split-pane, and thinking-timer overlays plus the todo store.
-- Agent overlay (`Alt+A`) with agent-priority layout; interrupt/steer overlay;
-  trimmed agent roster fields.
-- Ambient key hooks yield to capturing overlays and focused custom components;
-  modal overlays keep `←/→` instead of empty-composer agent cycling; wheel
-  captured by bit-mask so modifier-wheel still scrolls the transcript.
-- P2 flicker hardening: footer throttle, thinking-fold cache, monitor
-  snapshot gate.
+- `provider.ts` exposes action-result rendering and the permission overview
+  so settings actions render their output in-shell instead of jumping to a
+  native picker.
 
-### Teammate - Nesting Budgets, Composer, and Reliability
+### Teammate - Todo-Bound Dispatch, Evidence Records, and Failover Hardening
 
-- Per-task nesting budget with schema contract hardening; the per-task
-  `maxNestingDepth` override is documented in the dispatch guide.
-- Multi-line composer with auto-wrap and cursor navigation.
-- Tool heartbeat, cockpit agent commands, and task labels.
-- Attach-overlay rework with TUI rendering fixes; smart-search paste flush
-  rendering, progress-tree tweaks, and injectable goal-overlay clock.
-- Odyssey-review fixes: generalized fence monitor ownership, reclaimed failed
-  admission, hardened foreground ownership.
-- Stream read error retry; P2 flicker hardening shared with Cockpit.
-- Dropped the noisy mailbox authoritative-mode log line.
+- Todo binding in teammate dispatch: dispatched agents take ownership of
+  bound todo tasks, auto-activate the first runnable one, and advance the
+  injected queue themselves.
+- `agent://` records the final answer text of tasks without an outputSchema.
+- Thinking depth is no longer restricted for teammates — all levels are
+  selectable and passed through.
+- Packaged agents are discovered globally; structured output schemas
+  hardened with precise task-prompt offset diagnostics and outputSchema type
+  validation.
+- Steer control-plane failures no longer masquerade as task failures
+  (unconfirmed/rejected abort degrades to a queued follow-up).
+- Model failover: `stream_read_error` rewritten as a native retry marker —
+  transient stream drops retry the same model first, then switch.
+- Unified prompt-cache policy with tiered cache levels in the API manager;
+  teammate roles catalog now rendered in-shell.
 
-### Flow - Ask Wizard, Knowledge Attribution, and Skills
+### Cockpit - In-Shell Settings Suite and Terminal Interaction Fixes
 
-- Ask wizard rendered as an in-composer interactive panel (not an overlay):
-  navigation-only `←/→`, answered-step `✓` marks in the tab bar, and a
-  `已选/未选择` status line; covered by a new ask-sessionbar integration test.
-- Knowledge attribution `record`/`stage` commands with run/session
-  notifications.
-- `maestro-skills` CLI adapter with a per-skill enabled toggle; optional
-  (选装) skills support synced with the maestro2 skill cleanup.
-- AI review subagent in plan confirmation.
-- GUI server/events, statusline, and todo tool hardening.
-- Recovery fixes: canonical Session binding when the claim is absent, advisor
-  config load guarded against a stale extension context, and fff background
-  index-scan runaway guard.
-- Release guard: `test:release` now asserts workspace package version drift
-  and manifest contract consistency.
+- Full in-shell settings suite: `pi-native` provider (Pi's own settings.json
+  in maestro-settings), theme as an in-shell enum, provider-level navigation
+  with settings inside, two-level group navigation with adaptive-height
+  overlay, and vertical-list/per-setting popup layout.
+- Config/footer/settings UI updates and focused-session Agent roster
+  collapsed to a single-line summary (detail reuse frees row height).
+- Cost-rate backfill for custom API channels with footer/cockpit updates.
+- Mouse/wheel fixes: legacy urxvt wheel buttons 4/5 treated as scroll,
+  legacy X10 mouse events captured so the wheel never escapes to native
+  scrollback, and the editor is no longer misreported as foreign after
+  resume/reload.
+- Dynamic visible rows scale to terminal height; compatibility with Pi
+  `0.84` dynamic TUI references.
+
+### Flow - Self-Evolve M1-M5, Knowledge Governance, and Compaction Hardening
+
+- Self-evolve automation layer: M1-M5 deliverables (skill thin router,
+  Phase 2A/2B extension, Phase 3 health sidecar, Phase 5 proposal/canary),
+  parallel-session runtime/extension/TUI overlay work, and the
+  multi-agent review-gap fixes (review gate / noise filter / executable
+  templates / governance scripts / docs).
+- Knowledge governance: plugin integration for session-level knowledge
+  governance and window transcript evidence staging (engine 0.5.65 provides
+  the transcript evidence snapshots and the K12-K17 harvest flow).
+- Compaction hardening: critical-pressure abort→settle inside tool loops,
+  transient-error retry for summary calls, circuit-breaker downgrade on
+  gateway faults, output-truncation recovery no longer gated by context
+  pressure, and mid-turn zombie-lease fix.
+- Plan AI-review UX: progress overlay with Esc cancel and persistent
+  report/plan key hints.
+- Goal auto-resume when a Goal was paused by a compaction-preempted
+  interruption.
+- In-shell configuration: full API Manager configuration, hooks aggregating
+  provider (`.pi/hooks.json`), explore provider, failover chains as list-CRUD,
+  and a vision-delegation provider with native web-search keys.
+- Provider cost-rate backfill for custom API channels with missing-config
+  guard and api-aware catalog lookup.
+- Plugin adapter session-source unbind + prompt sync for promote inline
+  adjudication.
+
+## Core Engine Update - maestro-flow 0.5.62 → 0.5.65
+
+- **0.5.63 (security)**: removes the vulnerable `sharp@0.34.5` runtime chain
+  (GHSA-f88m-g3jw-g9cj; resolves CVE-2026-33327, CVE-2026-33328,
+  CVE-2026-35590, CVE-2026-35591). Maestro vendors the unmodified
+  `@huggingface/transformers@3.8.1` runtime and constrains `sharp` to `^0.35.3`.
+- **0.5.64 (governance + UX)**: session/run lifecycle ergonomics (8 friction
+  points), dual-model knowledge-flow walkthrough fixes (8 friction points),
+  three prompt quality gates (Staging Quality Bar, frontmatter quality gate,
+  Review Presentation Protocol), session-level knowledge governance, promote
+  inline adjudication, and knowledge-graph code-relation/FTS integrity fixes.
+- **0.5.65 (evidence)**: transcript evidence snapshots for promotion
+  decisions plus the run-mode/harvest K12-K17 window evidence flow, giving
+  knowledge promotion auditable raw transcript backing.
 
 ## Behavior and Upgrade Notes
 
-- Close all running Pi processes before upgrading. The installer updates disk
-  settings that an older in-memory SettingsManager could otherwise overwrite.
-- The ask wizard no longer renders as a modal overlay; it is an in-composer
-  panel. `Esc` returns to the input, and answered steps are marked `✓` in the
-  tab bar while switching with `←/→/Tab`.
-- Fullscreen transcript interactions (copy-on-select, double-Esc clear) are
-  controlled by the claude-style interaction settings; they are off unless
-  enabled.
+- Close all running Pi processes before upgrading. The installer updates
+  disk settings that an older in-memory SettingsManager could otherwise
+  overwrite.
+- Settings are now configured fully in-shell: API manager, hooks, theme,
+  failover chains, and the explore provider no longer jump to native pickers.
+  Legacy jump actions were removed.
 - Companion registration order remains mandatory: Teammate, then Cockpit,
   then Flow. Verify all three versions after restart.
+- The core engine is pinned exactly at `0.5.65`; the engine bump is
+  deliberate and includes security fixes — do not downgrade below `0.5.63`
+  (sharp chain vulnerability).
 
 ## Install / Upgrade
 
 ```bash
 # Close running Pi processes first.
-pi install npm:pi-maestro-flow@0.15.0
+pi install npm:pi-maestro-flow@0.16.0
 pi list
 ```
 
@@ -112,39 +148,45 @@ the versions in the table above before running model-sensitive workflows.
 ## Release Verification
 
 The release candidate passed the serial root `test:release` gate, including
-all changed Flow subsystems, Teammate declarations, Cockpit tests, and the
-packed-consumer tests. Packed tests remain intentionally serial because Flow
-prepack/postpack share `packages/pi-maestro-flow/.pi/skills`.
+settings-core typecheck/test, workspace version-drift and manifest-contract
+assertions (three consumers pin `pi-maestro-settings-core` exactly at
+`0.1.1`), all changed Flow subsystems, Teammate declarations, Cockpit tests,
+and the packed-consumer tests. Packed tests remain intentionally serial
+because Flow prepack/postpack share `packages/pi-maestro-flow/.pi/skills`.
 
 Dry-run tarballs from the verified candidate:
 
 | Package | Files | Packed | Unpacked | SHA-1 |
 |---------|------:|-------:|---------:|-------|
-| pi-maestro-teammate@1.8.0 | 135 | 335.4 kB | 1.4 MB | `ea51a05649f60cbacd70b4d935e2c4cc84ca525d` |
-| pi-cockpit@0.10.0 | 66 | 167.4 kB | 0.6 MB | `d539c09fc59b4fb85fbbdb2ab59df67fdd38837c` |
-| pi-maestro-flow@0.15.0 | 502 | 1409.5 kB | 5.3 MB | `3d23e06e52b3f1c006b68704859fabb87ad1897b` |
+| pi-maestro-settings-core@0.1.1 | 7 | 5.1 kB | 0.0 MB | `9953fa821c569e3081b722513cc53dd89be66fda` |
+| pi-maestro-teammate@1.9.0 | 142 | 347.3 kB | 1.5 MB | `ca0bd3cb162cae7a8365bf9327e88295fc106af6` |
+| pi-cockpit@0.11.0 | 75 | 187.2 kB | 0.7 MB | `9e5f6fffd1a3528aec5c35736e8a2a5edba430fc` |
+| pi-maestro-flow@0.16.0 | 518 | 1508.6 kB | 5.7 MB | `f28dff144fd406ef13091a184483027348f19583` |
 
 Publication order is mandatory:
 
-1. Publish and verify `pi-maestro-teammate@1.8.0`.
-2. Publish and verify `pi-cockpit@0.10.0`.
-3. Publish and verify `pi-maestro-flow@0.15.0` with exact companion versions.
-4. Run a fresh temporary-home registry install and Pi runtime smoke test.
-5. Create and push `v0.15.0`, then create the GitHub Release.
+1. Publish and verify `pi-maestro-settings-core@0.1.1`.
+2. Publish and verify `pi-maestro-teammate@1.9.0` (pins settings-core 0.1.1).
+3. Publish and verify `pi-cockpit@0.11.0` (pins settings-core 0.1.1).
+4. Publish and verify `pi-maestro-flow@0.16.0` with exact companion versions
+   and `maestro-flow@0.5.65`.
+5. Run a fresh temporary-home registry install and Pi runtime smoke test.
+6. Create and push `v0.16.0`, then create the GitHub Release.
 
 ## Change Statistics
 
-Final candidate compared with `v0.14.2`:
+Final candidate compared with `v0.15.0`:
 
-- 56 commits including the release commit
-- 829 files changed
-- 11,166 insertions and 86,374 deletions
-- 3 published packages plus the unchanged settings-core package
+- 72 commits including the release commit
+- 213 files changed
+- 21,952 insertions and 1,707 deletions
+- 4 published packages (settings-core, teammate, cockpit, flow)
 
 Package-level code deltas (excluding docs/skills/tooling):
 
 | Package | Files | Insertions | Deletions |
 |---------|------:|-----------:|----------:|
-| pi-maestro-teammate | 38 | +2,197 | -228 |
-| pi-cockpit | 56 | +3,882 | -176 |
-| pi-maestro-flow | 48 | +3,173 | -221 |
+| pi-maestro-settings-core | 1 | +6 | -0 |
+| pi-maestro-teammate | 42 | +1,603 | -327 |
+| pi-cockpit | 41 | +2,403 | -426 |
+| pi-maestro-flow | 66 | +10,961 | -635 |

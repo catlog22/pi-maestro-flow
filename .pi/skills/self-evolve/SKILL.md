@@ -12,6 +12,7 @@ session-mode: none
 - Use `background: true` only for independent work. If this turn must consume a background result, call `observe` exactly once with `action: "wait"` with a bounded timeout before continuing.
 - Otherwise end the turn and wait for the automatic `teammate-complete` notification.
 - Never silently ignore an unfinished dispatch.
+- Never continue independently while a dispatched task's result is still pending.
 
 </teammate_contract>
 
