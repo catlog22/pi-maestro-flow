@@ -137,6 +137,16 @@
 4. **reconcile 命令保持 run-scoped**：session 级对账由 `review <session-id> --refresh` 承担；reconcile 无 run 时报错指向新路径。
 5. **review 裁决命令输出修正**：`resolution_choices` 从不存在的 `knowledge resolve` 子命令改为实际的 `review <sid> --resolve <id>`。
 
+## §11 流程收敛决策：promote 内联裁决 + review 回退化（2026-08-07）
+
+**背景**：reconcile（内嵌 `run check`）与 `review` 职责重叠（对账/展示/裁决），agent 流程存在 check → review → promote 三步职责混淆；且候选集在 check 时并不完整——frontmatter 自动草拟发生在 seal 事务内，因此**呈现时机必须在 seal 之后**（即 `session done` 之后的 receipt/消息呈现）。
+
+**决策**：
+1. **happy path 收敛为一步**：`run check`（自动 reconcile）→ `session done`（seal，自动草拟 frontmatter 候选 + 自动刷 receipt）→ agent 从 seal receipt 直接呈现候选+evidence-backed 匹配+推荐处置 → 用户决策 → `promote --resolve <candidate-id> --as <choice> [--target <knowledge-id>] --reason "<非空理由>"`（TOCTOU fence + resolve + promote 一次完成）。
+2. **review 降级为回退面（不删除）**：① receipt 缺失/stale 修复（`--refresh`）；② 批量积压/审计分诊（OQ-4 式，session 级聚合）；③ 用户要求重新呈现。从 happy path 必走步骤移除。
+3. **resolve 规则不变**：`unique` 不传 `--target`；duplicate/related/conflict/supersede 必须传 evidence-backed `--target`；`--reason` 非空强制；跨源同 ID 优先 run 源。TOCTOU fence 在 promote 内先于 resolve 执行。
+4. **实现顺序**：先改 CLI（`promote` 增 `--resolve/--as/--target/--reason` + 单测），再同步注入提示词（run-mode/instructions/skills），**禁止先改提示词**造成文档-代码漂移。
+
 ---
 
 ## 附录：双轮审核留痕（一行版）

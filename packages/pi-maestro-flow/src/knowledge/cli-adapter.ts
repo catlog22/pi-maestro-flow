@@ -174,7 +174,7 @@ export interface KnowledgeRecordOptions {
   evidence?: readonly string[];
   /** Active Run that owns the attribution; omit to target the unique active Run. */
   runId?: string;
-  /** Explicit Session ID; requires runId. */
+  /** Explicit Session ID (session-source authority; usable without runId). */
   sessionId?: string;
 }
 
@@ -191,7 +191,7 @@ export interface KnowledgeStageOptions {
   content: string;
   /** Active Run that owns the staged candidate; omit to target the unique active Run. */
   runId?: string;
-  /** Explicit Session ID; requires runId. */
+  /** Explicit Session ID (session-source authority; usable without runId). */
   sessionId?: string;
   action?: KnowledgeCandidateAction;
   category?: string | null;
@@ -290,9 +290,6 @@ export class KnowledgeCliAdapter {
   async recordInputs(options: KnowledgeRecordOptions): Promise<KnowledgeRecordResult> {
     const ids = options.knowledgeIds.map((id) => id.trim()).filter(Boolean);
     if (ids.length === 0) throw new Error("knowledgeIds must be non-empty");
-    if (options.sessionId && !options.runId) {
-      throw new Error("sessionId requires runId (the CLI binds --session to --run)");
-    }
     return this.invokeJson<KnowledgeRecordResult>([
       "knowledge", "record", ...ids,
       "--signal", options.signal ?? "consumed",
@@ -314,9 +311,6 @@ export class KnowledgeCliAdapter {
     }
     if (options.signalIds?.length && !options.signal) {
       throw new Error("signalIds requires signal");
-    }
-    if (options.sessionId && !options.runId) {
-      throw new Error("sessionId requires runId (the CLI binds --session to --run)");
     }
     return this.invokeJson<KnowledgeStageResult>([
       "knowledge", "stage", target, title, content,

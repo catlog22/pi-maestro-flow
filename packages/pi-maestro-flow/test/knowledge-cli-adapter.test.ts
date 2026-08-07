@@ -91,15 +91,33 @@ test("knowledge stage validates option pairing", async () => {
     /signalIds requires signal/,
   );
   await assert.rejects(
-    adapter.stage({
-      target: "spec", title: "t", content: "c", sessionId: "s",
-    }),
-    /sessionId requires runId/,
-  );
-  await assert.rejects(
     adapter.stage({ target: "spec", title: " ", content: "c" }),
     /title must be non-empty/,
   );
+});
+
+test("knowledge stage allows session-only (session-source authority)", async () => {
+  const adapter = new KnowledgeCliAdapter("/proj", fakeRunner((args) => {
+    assert.deepEqual(args, [
+      "knowledge", "stage", "spec", "Decision: use the fence", "fence before mutation",
+      "--session", "session-1",
+      "--json",
+      "--workflow-root", "/proj",
+    ]);
+    return jsonResult(args, {
+      session_id: "session-1", run_id: "", candidate_id: "KDC-0123456789abcdef", signal_recorded: 0,
+    });
+  }));
+
+  const result = await adapter.stage({
+    target: "spec",
+    title: "Decision: use the fence",
+    content: "fence before mutation",
+    sessionId: "session-1",
+  });
+
+  assert.equal(result.candidate_id, "KDC-0123456789abcdef");
+  assert.equal(result.session_id, "session-1");
 });
 
 test("knowledge stage surfaces CLI failures", async () => {
@@ -187,7 +205,7 @@ test("knowledge record passes evidence anchors", async () => {
   assert.equal(result.recorded, 1);
 });
 
-test("knowledge record validates ids and session/run pairing", async () => {
+test("knowledge record validates ids", async () => {
   const adapter = new KnowledgeCliAdapter("/proj");
   await assert.rejects(
     adapter.recordInputs({ knowledgeIds: [] }),
@@ -197,10 +215,27 @@ test("knowledge record validates ids and session/run pairing", async () => {
     adapter.recordInputs({ knowledgeIds: ["  "] }),
     /knowledgeIds must be non-empty/,
   );
-  await assert.rejects(
-    adapter.recordInputs({ knowledgeIds: ["spec:S-1"], sessionId: "s" }),
-    /sessionId requires runId/,
-  );
+});
+
+test("knowledge record allows session-only (session-source authority)", async () => {
+  const adapter = new KnowledgeCliAdapter("/proj", fakeRunner((args) => {
+    assert.deepEqual(args, [
+      "knowledge", "record", "spec:S-1",
+      "--signal", "consumed",
+      "--source", "search",
+      "--session", "session-1",
+      "--json",
+      "--workflow-root", "/proj",
+    ]);
+    return jsonResult(args, { session_id: "session-1", run_id: "", recorded: 1 });
+  }));
+
+  const result = await adapter.recordInputs({
+    knowledgeIds: ["spec:S-1"],
+    sessionId: "session-1",
+  });
+  assert.equal(result.recorded, 1);
+  assert.equal(result.session_id, "session-1");
 });
 
 test("knowledge record surfaces CLI failures", async () => {
