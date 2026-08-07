@@ -7,6 +7,18 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Gitignored local-only entries in the canonical .pi directory; never packaged.
 const localOnlyEntries = new Set(["settings.local.json", "model-failover.json", "scratch"]);
 
+// Runtime capture records under .pi/agents (<correlationId>.json) are
+// gitignored but would still ship because the npm "files" whitelist for .pi/
+// bypasses gitignore. Role definitions (*.md) and their schema (*.schema.json)
+// must ship — the packaged role catalog is what the teammate extension
+// discovers from any cwd.
+function isPackagedAgentsEntry(relative) {
+  if (!relative.startsWith("agents/")) return true;
+  if (relative.endsWith(".md")) return true;
+  if (relative.endsWith(".schema.json")) return true;
+  return false;
+}
+
 // Names retained for script/test compatibility; syncs the whole canonical .pi directory
 // (SYSTEM.md, agents, hooks, settings, skills, ...), not just skills.
 export function preparePackagedSkills({
@@ -28,7 +40,8 @@ export function preparePackagedSkills({
         return false;
       }
       const relative = normalized === sourcePrefix ? "" : normalized.slice(sourcePrefix.length + 1);
-      return !localOnlyEntries.has(relative.split("/")[0]);
+      if (localOnlyEntries.has(relative.split("/")[0])) return false;
+      return isPackagedAgentsEntry(relative);
     },
   });
   return { sourceDir, targetDir };

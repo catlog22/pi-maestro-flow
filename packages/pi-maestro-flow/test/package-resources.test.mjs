@@ -201,6 +201,12 @@ test("package publishes the full canonical Pi directory except local-only files"
   for (const entry of ["settings.local.json", "model-failover.json", "scratch"]) {
     assert.equal(existsSync(join(root, ".pi", entry)), false, `.pi/${entry} is local-only and must not be packaged`);
   }
+  // The packaged role catalog ships role definitions and their schema, but
+  // never the runtime capture records (<correlationId>.json).
+  const packagedAgents = readdirSync(join(root, ".pi", "agents"));
+  assert.equal(packagedAgents.includes("general-executor.md"), true, "role definitions must be packaged");
+  assert.equal(packagedAgents.includes("general-executor-report.schema.json"), true, "role schema must be packaged");
+  assert.equal(packagedAgents.some((name) => /^[0-9a-f-]+\.json$/.test(name)), false, "capture records must not be packaged");
 });
 
 function collectTypeScriptFiles(directory) {

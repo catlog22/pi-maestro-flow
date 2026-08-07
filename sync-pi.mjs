@@ -156,6 +156,17 @@ if (ALSO_PI) {
     cpSync(from, to, { recursive: true });
     log(`  ✓ .pi/${sub} ← flow/${sub} (${countFiles(to)} files)`);
   }
+  // Package mirror: the published pi-maestro-flow npm package ships its role
+  // catalog at <pkgRoot>/.pi/agents. The teammate package resolver finds that
+  // sibling in global npm installs and uses the workspace-root canonical .pi
+  // as a dev/npm-link fallback, so roles remain discoverable from ANY cwd.
+  const pkgAgentsDir = join(repoRoot, 'packages', 'pi-maestro-flow', '.pi', 'agents');
+  const agentsFrom = join(DST, 'agents');
+  if (existsSync(agentsFrom)) {
+    if (existsSync(pkgAgentsDir)) rmSync(pkgAgentsDir, { recursive: true, force: true });
+    cpSync(agentsFrom, pkgAgentsDir, { recursive: true });
+    log(`  ✓ packages/pi-maestro-flow/.pi/agents ← flow/agents (${countFiles(pkgAgentsDir)} files)`);
+  }
 }
 
 log('\n✓ sync-pi complete.');

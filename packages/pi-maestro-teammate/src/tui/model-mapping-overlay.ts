@@ -103,7 +103,7 @@ interface TeammateControlCenterParams {
   modelHealth?: readonly ModelCircuitSnapshot[];
 }
 
-const SOURCE_ORDER: Record<AgentSource, number> = { project: 0, user: 1, builtin: 2 };
+const SOURCE_ORDER: Record<AgentSource, number> = { package: 0, project: 1, user: 2, builtin: 3 };
 const TAB_ORDER: ControlCenterTab[] = ["profiles", "routing", "roles", "active"];
 const TAB_LABELS: Record<ControlCenterTab, string> = {
   profiles: "Profiles",

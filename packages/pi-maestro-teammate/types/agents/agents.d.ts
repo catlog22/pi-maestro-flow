@@ -1,13 +1,13 @@
 /**
  * Agent discovery and configuration.
  *
- * Discovers agent definitions from compatible project and user locations.
- * Precedence: project .pi/agents > project .agents > ~/.agents > legacy user > builtin.
+ * Discovers agent definitions from package, compatible project, and user locations.
+ * Precedence: package > project .pi/agents > project .agents > user global dirs > builtin.
  */
 import { type TeammateTaskType } from "../shared/task-types.ts";
 import { type TeammateThinkingLevel } from "../shared/thinking.ts";
 type SystemPromptMode = "append" | "replace";
-export type AgentSource = "builtin" | "user" | "project";
+export type AgentSource = "builtin" | "package" | "user" | "project";
 export declare const BUILTIN_AGENT_NAMES: readonly ["general", "explorer", "planner", "analyst", "research", "verifier", "workflow"];
 export type BuiltinAgentName = (typeof BUILTIN_AGENT_NAMES)[number];
 export declare const PUBLIC_BUILTIN_AGENT_NAMES: readonly ["general", "explorer", "planner", "analyst", "research", "verifier", "workflow"];
@@ -39,7 +39,7 @@ export interface AgentCatalogSnapshot {
 export declare function isBuiltinAgentName(name: string): name is BuiltinAgentName;
 /**
  * Discover all agent definitions, merged by priority:
- * project > user > builtin (name collisions: higher priority wins).
+ * package > project > user > builtin (name collisions: higher priority wins).
  */
 export declare function discoverAgents(cwd: string, homeDir?: string): AgentConfig[];
 /**

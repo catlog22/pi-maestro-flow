@@ -49,10 +49,10 @@ test("general-executor dedicated report schema is valid, complete, and dispatch-
   }
 });
 
-test("general-executor resolves as a project agent with an execution toolset", () => {
+test("general-executor resolves from the highest-priority package catalog", () => {
   const agent = resolveAgent(REPO_ROOT, "general-executor");
   assert.ok(agent, "general-executor must resolve via resolveAgent");
-  assert.equal(agent.source, "project");
+  assert.equal(agent.source, "package");
   assert.equal(agent.systemPromptMode, "replace");
   for (const tool of ["read", "write", "edit", "bash"]) {
     assert.ok(agent.tools?.includes(tool), `tool ${tool} must be granted`);

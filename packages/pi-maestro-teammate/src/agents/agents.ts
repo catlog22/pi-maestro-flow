@@ -1,8 +1,8 @@
 /**
  * Agent discovery and configuration.
  *
- * Discovers agent definitions from compatible project and user locations.
- * Precedence: project .pi/agents > project .agents > ~/.agents > legacy user > builtin.
+ * Discovers agent definitions from package, compatible project, and user locations.
+ * Precedence: package > project .pi/agents > project .agents > user global dirs > builtin.
  */
 
 import * as fs from "node:fs";
@@ -14,7 +14,7 @@ import { parseTeammateTaskType, type TeammateTaskType } from "../shared/task-typ
 import { parseTeammateThinkingLevel, type TeammateThinkingLevel } from "../shared/thinking.ts";
 
 type SystemPromptMode = "append" | "replace";
-export type AgentSource = "builtin" | "user" | "project";
+export type AgentSource = "builtin" | "package" | "user" | "project";
 
 export const BUILTIN_AGENT_NAMES = [
   "general",
@@ -177,9 +177,95 @@ function isReservedAgentName(name: string): boolean {
 
 interface DiscoveryDirs {
   legacyUserAgentsDir: string;
+  userPiAgentsDir: string;
   userAgentsDir: string;
+  userNestedAgentsDir: string;
+  packageAgentsDirs: string[];
   projectPiAgentsDir: string | null;
   projectCompatAgentsDir: string | null;
+  projectNestedAgentsDir: string | null;
+}
+
+// The installed pi-maestro-flow package ships its role catalog at
+// <pkgRoot>/.pi/agents. Resolving the package root keeps those roles
+// discoverable from ANY working directory (global npm installs, arbitrary
+// projects), instead of only inside the repo tree via the project tier.
+// PI_TEAMMATE_PACKAGE_AGENTS_DIR overrides the location (tests / forks).
+let cachedPackageAgentsDirs: string[] | undefined;
+
+function packageRootFromAncestors(startDir: string): string | null {
+  // The package has no main and no "exports" covering ./package.json, so
+  // require.resolve cannot name it. Walk the ancestor chain instead, checking
+  // both a sibling and a node_modules child at each level — this covers the
+  // global install (both packages under one node_modules) and the monorepo
+  // (workspace symlink under the repo root node_modules).
+  let currentDir = startDir;
+  while (true) {
+    for (const candidate of [
+      path.join(currentDir, "pi-maestro-flow"),
+      path.join(currentDir, "node_modules", "pi-maestro-flow"),
+    ]) {
+      try {
+        const packageJsonPath = path.join(candidate, "package.json");
+        if (!fs.existsSync(packageJsonPath)) continue;
+        const { name } = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as { name?: string };
+        if (name !== "pi-maestro-flow") continue;
+        return fs.realpathSync(candidate);
+      } catch {
+        // unreadable package.json — keep walking
+      }
+    }
+    const parentDir = path.dirname(currentDir);
+    if (parentDir === currentDir) return null;
+    currentDir = parentDir;
+  }
+}
+
+function workspaceRootFromPackage(packageRoot: string): string | null {
+  // The prepack pipeline materializes the workspace-root canonical .pi into the
+  // package dir, so the repo-root .pi/agents is the packaged catalog's source.
+  // In the monorepo the package dir's own .pi is empty outside pack time;
+  // falling back to the nearest workspace root (package.json "workspaces")
+  // keeps dev/npm-link discovery working. Global installs have no workspaces
+  // ancestor, so this adds nothing there.
+  let currentDir = path.dirname(packageRoot);
+  while (true) {
+    try {
+      const { workspaces } = JSON.parse(
+        fs.readFileSync(path.join(currentDir, "package.json"), "utf8"),
+      ) as { workspaces?: unknown };
+      if (Array.isArray(workspaces)) return currentDir;
+    } catch {
+      // not a workspace root — keep walking
+    }
+    const parentDir = path.dirname(currentDir);
+    if (parentDir === currentDir) return null;
+    currentDir = parentDir;
+  }
+}
+
+function resolvePackageAgentsDirs(): string[] {
+  const override = process.env.PI_TEAMMATE_PACKAGE_AGENTS_DIR;
+  if (override !== undefined) {
+    const dir = path.resolve(override);
+    return fs.existsSync(dir) ? [dir] : [];
+  }
+  if (cachedPackageAgentsDirs !== undefined) return cachedPackageAgentsDirs;
+  const dirs: string[] = [];
+  const packageRoot = packageRootFromAncestors(path.dirname(fileURLToPath(import.meta.url)));
+  if (packageRoot) {
+    const packageAgents = path.join(packageRoot, ".pi", "agents");
+    if (fs.existsSync(packageAgents)) dirs.push(packageAgents);
+    const workspaceRoot = workspaceRootFromPackage(packageRoot);
+    if (workspaceRoot) {
+      const workspaceAgents = path.join(workspaceRoot, ".pi", "agents");
+      if (fs.existsSync(workspaceAgents) && workspaceAgents !== packageAgents) {
+        dirs.push(workspaceAgents);
+      }
+    }
+  }
+  cachedPackageAgentsDirs = dirs;
+  return dirs;
 }
 
 function resolveDiscoveryDirs(cwd: string, homeDir: string): DiscoveryDirs {
@@ -191,18 +277,24 @@ function resolveDiscoveryDirs(cwd: string, homeDir: string): DiscoveryDirs {
     "teammate",
     "agents",
   );
+  const userPiAgentsDir = path.join(homeDir, ".pi", "agents");
   const userAgentsDir = path.join(homeDir, ".agents");
+  const userNestedAgentsDir = path.join(userAgentsDir, "agents");
+  const packageAgentsDirs = resolvePackageAgentsDirs();
 
   // Find the nearest ancestor containing either supported project directory.
   let projectPiAgentsDir: string | null = null;
   let projectCompatAgentsDir: string | null = null;
+  let projectNestedAgentsDir: string | null = null;
   let currentDir = cwd;
   while (true) {
     const piAgentsDir = path.join(currentDir, ".pi", "agents");
     const compatAgentsDir = path.join(currentDir, ".agents");
+    const nestedAgentsDir = path.join(compatAgentsDir, "agents");
     if (fs.existsSync(piAgentsDir) || fs.existsSync(compatAgentsDir)) {
       projectPiAgentsDir = fs.existsSync(piAgentsDir) ? piAgentsDir : null;
       projectCompatAgentsDir = fs.existsSync(compatAgentsDir) ? compatAgentsDir : null;
+      projectNestedAgentsDir = fs.existsSync(nestedAgentsDir) ? nestedAgentsDir : null;
       break;
     }
     const parentDir = path.dirname(currentDir);
@@ -210,19 +302,32 @@ function resolveDiscoveryDirs(cwd: string, homeDir: string): DiscoveryDirs {
     currentDir = parentDir;
   }
 
-  return { legacyUserAgentsDir, userAgentsDir, projectPiAgentsDir, projectCompatAgentsDir };
+  return {
+    legacyUserAgentsDir,
+    userPiAgentsDir,
+    userAgentsDir,
+    userNestedAgentsDir,
+    packageAgentsDirs,
+    projectPiAgentsDir,
+    projectCompatAgentsDir,
+    projectNestedAgentsDir,
+  };
 }
 
 /**
  * Discover all agent definitions, merged by priority:
- * project > user > builtin (name collisions: higher priority wins).
+ * package > project > user > builtin (name collisions: higher priority wins).
  */
 export function discoverAgents(cwd: string, homeDir = os.homedir()): AgentConfig[] {
   const {
     legacyUserAgentsDir,
+    userPiAgentsDir,
     userAgentsDir,
+    userNestedAgentsDir,
+    packageAgentsDirs,
     projectPiAgentsDir,
     projectCompatAgentsDir,
+    projectNestedAgentsDir,
   } = resolveDiscoveryDirs(cwd, homeDir);
 
   const builtinByName = new Map(
@@ -239,8 +344,14 @@ export function discoverAgents(cwd: string, homeDir = os.homedir()): AgentConfig
 
   // Builtin names are reserved so project/user definitions cannot silently
   // replace the stable general, exploration, and DAG orchestration roles.
+  const packageAgents = packageAgentsDirs.flatMap((dir) => loadCustomAgents(dir, "package"));
   const legacyUserAgents = loadCustomAgents(legacyUserAgentsDir, "user");
+  const userPiAgents = loadCustomAgents(userPiAgentsDir, "user");
+  const userNestedAgents = loadCustomAgents(userNestedAgentsDir, "user");
   const userAgents = loadCustomAgents(userAgentsDir, "user");
+  const projectNestedAgents = projectNestedAgentsDir
+    ? loadCustomAgents(projectNestedAgentsDir, "project")
+    : [];
   const projectCompatAgents = projectCompatAgentsDir
     ? loadCustomAgents(projectCompatAgentsDir, "project")
     : [];
@@ -248,13 +359,19 @@ export function discoverAgents(cwd: string, homeDir = os.homedir()): AgentConfig
     ? loadCustomAgents(projectPiAgentsDir, "project")
     : [];
 
-  // Merge from lowest to highest priority.
+  // Merge from lowest to highest priority: builtin < user < project < package.
+  // Map replacement is the deduplication contract: each exact role name is
+  // emitted once, with the highest-priority definition as its final value.
   const agentMap = new Map<string, AgentConfig>();
   for (const agent of builtinAgents) agentMap.set(agent.name, agent);
   for (const agent of legacyUserAgents) agentMap.set(agent.name, agent);
+  for (const agent of userPiAgents) agentMap.set(agent.name, agent);
+  for (const agent of userNestedAgents) agentMap.set(agent.name, agent);
   for (const agent of userAgents) agentMap.set(agent.name, agent);
+  for (const agent of projectNestedAgents) agentMap.set(agent.name, agent);
   for (const agent of projectCompatAgents) agentMap.set(agent.name, agent);
   for (const agent of projectPiAgents) agentMap.set(agent.name, agent);
+  for (const agent of packageAgents) agentMap.set(agent.name, agent);
 
   return Array.from(agentMap.values());
 }
@@ -366,9 +483,13 @@ function directoryManifestSignature(dir: string): string {
 function discoveryManifestSignature(dirs: DiscoveryDirs): string {
   return [
     `builtin=${directoryManifestSignature(BUILTIN_AGENTS_DIR)}`,
+    `package=${dirs.packageAgentsDirs.map((dir) => directoryManifestSignature(dir)).join(",") || "none"}`,
     `legacyUser=${directoryManifestSignature(dirs.legacyUserAgentsDir)}`,
+    `userPi=${directoryManifestSignature(dirs.userPiAgentsDir)}`,
+    `userNested=${directoryManifestSignature(dirs.userNestedAgentsDir)}`,
     `user=${directoryManifestSignature(dirs.userAgentsDir)}`,
     `projectPi=${dirs.projectPiAgentsDir ? directoryManifestSignature(dirs.projectPiAgentsDir) : "none"}`,
+    `projectNested=${dirs.projectNestedAgentsDir ? directoryManifestSignature(dirs.projectNestedAgentsDir) : "none"}`,
     `projectCompat=${dirs.projectCompatAgentsDir ? directoryManifestSignature(dirs.projectCompatAgentsDir) : "none"}`,
   ].join("|");
 }
@@ -411,7 +532,7 @@ export function createAgentCatalogSnapshot(
     "Built-in roles:",
     ...builtins.map(formatLine),
     "",
-    "Discovered project and user roles:",
+    "Discovered package, project, and user roles:",
     ...(discovered.length > 0 ? discovered.map(formatLine) : ["(none)"]),
   ];
 

@@ -61,7 +61,9 @@ test("cached and freshly rebuilt catalogs are byte-identical", () => {
 test("adding a role invalidates through the directory manifest", () => {
   writeRole("auditor", "Audits things");
   const first = appendAgentCatalog("Base prompt", project);
-  assert.doesNotMatch(first, /reviewer/);
+  // Exact role-line assertion: packaged roles legitimately contain the
+  // substring "reviewer" (workflow-reviewer, cross-role-reviewer).
+  assert.doesNotMatch(first, /- reviewer:/);
   const missesBefore = agentCatalogCacheStats.misses;
 
   writeRole("reviewer", "Reviews things");

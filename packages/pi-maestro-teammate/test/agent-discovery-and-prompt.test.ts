@@ -9,6 +9,7 @@ import {
   BUILTIN_AGENT_NAMES,
   discoverAgents,
   formatAgentCatalog,
+  invalidateAgentCatalogCache,
   PUBLIC_BUILTIN_AGENT_NAMES,
   listAgentSummaries,
   resolveAgent,
@@ -78,7 +79,7 @@ Act as the project specialist.
     assert.match(systemPrompt, /- research:/);
     assert.match(systemPrompt, /- verifier:/);
     assert.match(systemPrompt, /- workflow:/);
-    assert.match(systemPrompt, /Discovered project and user roles:\n- specialist: Project-specific specialist/);
+    assert.match(systemPrompt, /- specialist: Project-specific specialist/);
     assert.doesNotMatch(description, /Act as the project specialist/);
     assert.doesNotMatch(systemPrompt, /Act as the project specialist/);
     assert.doesNotMatch(systemPrompt, /swarm-ant/);
@@ -92,16 +93,28 @@ Act as the project specialist.
   }
 });
 
-test(".agents and ~/.agents roles are discovered with canonical precedence", () => {
+test("global and project agent directories resolve with canonical precedence", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-compatible-dirs-"));
   const project = path.join(root, "project");
   const nested = path.join(project, "src", "feature");
   const home = path.join(root, "home");
   const legacyUserDir = path.join(home, ".pi", "agent", "extensions", "teammate", "agents");
+  const userPiDir = path.join(home, ".pi", "agents");
   const userDir = path.join(home, ".agents");
+  const userNestedDir = path.join(userDir, "agents");
   const projectCompatDir = path.join(project, ".agents");
+  const projectNestedDir = path.join(projectCompatDir, "agents");
   const projectPiDir = path.join(project, ".pi", "agents");
-  for (const dir of [nested, legacyUserDir, userDir, projectCompatDir, projectPiDir]) {
+  for (const dir of [
+    nested,
+    legacyUserDir,
+    userPiDir,
+    userDir,
+    userNestedDir,
+    projectCompatDir,
+    projectNestedDir,
+    projectPiDir,
+  ]) {
     fs.mkdirSync(dir, { recursive: true });
   }
 
@@ -114,8 +127,14 @@ ${description} prompt.
 `);
   };
   writeAgent(legacyUserDir, "shared-role", "Legacy user role");
+  writeAgent(userPiDir, "shared-role", "Global Pi user role");
+  writeAgent(userPiDir, "global-pi-only", "Global Pi agents role");
+  writeAgent(userNestedDir, "shared-role", "Nested user role");
+  writeAgent(userNestedDir, "nested-user-only", "Nested user home role");
   writeAgent(userDir, "shared-role", "Standard user role");
   writeAgent(userDir, "user-only", "User home role");
+  writeAgent(projectNestedDir, "shared-role", "Nested project role");
+  writeAgent(projectNestedDir, "nested-project-only", "Nested project role only");
   writeAgent(projectCompatDir, "shared-role", "Project compatible role");
   writeAgent(projectCompatDir, "compat-only", "Project dot agents role");
   writeAgent(projectPiDir, "shared-role", "Canonical project role");
@@ -124,10 +143,78 @@ ${description} prompt.
     const agents = discoverAgents(nested, home);
     assert.equal(agents.find((agent) => agent.name === "shared-role")?.description, "Canonical project role");
     assert.equal(agents.find((agent) => agent.name === "compat-only")?.source, "project");
+    assert.equal(agents.find((agent) => agent.name === "nested-project-only")?.source, "project");
+    assert.equal(agents.find((agent) => agent.name === "global-pi-only")?.source, "user");
+    assert.equal(agents.find((agent) => agent.name === "global-pi-only")?.description, "Global Pi agents role");
+    assert.equal(agents.find((agent) => agent.name === "nested-user-only")?.source, "user");
     assert.equal(agents.find((agent) => agent.name === "user-only")?.source, "user");
     assert.equal(resolveAgent(nested, "compat-only")?.description, "Project dot agents role");
+    assert.equal(resolveAgent(nested, "nested-project-only")?.description, "Nested project role only");
     assert.match(appendAgentCatalog("Base prompt", nested), /- compat-only: Project dot agents role/);
   } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("npm package roles have highest custom priority and deduplicate by exact name", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-package-tier-"));
+  const packageAgentsDir = path.join(root, "pkg", ".pi", "agents");
+  const foreignCwd = path.join(root, "elsewhere");
+  const projectPiDir = path.join(root, "project", ".pi", "agents");
+  for (const dir of [packageAgentsDir, foreignCwd, projectPiDir]) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  fs.writeFileSync(path.join(packageAgentsDir, "packed-role.md"), `---
+name: packed-role
+description: Role shipped inside the npm package
+---
+
+Packed role prompt.
+`);
+  fs.writeFileSync(path.join(packageAgentsDir, "shared.md"), `---
+name: shared
+description: Package default role
+---
+
+Package default prompt.
+`);
+  fs.writeFileSync(path.join(projectPiDir, "shared.md"), `---
+name: shared
+description: Project override of the packaged role
+---
+
+Project override prompt.
+`);
+
+  const previous = process.env.PI_TEAMMATE_PACKAGE_AGENTS_DIR;
+  process.env.PI_TEAMMATE_PACKAGE_AGENTS_DIR = packageAgentsDir;
+  invalidateAgentCatalogCache();
+  try {
+    // A cwd with no .pi/.agents ancestor still discovers the packaged roles.
+    const agents = discoverAgents(foreignCwd, root);
+    const packed = agents.find((agent) => agent.name === "packed-role");
+    assert.equal(packed?.source, "package");
+    assert.equal(packed?.filePath, path.join(packageAgentsDir, "packed-role.md"));
+    assert.equal(resolveAgent(foreignCwd, "packed-role")?.description, "Role shipped inside the npm package");
+    assert.match(appendAgentCatalog("Base prompt", foreignCwd), /- packed-role: Role shipped inside the npm package/);
+    // The packaged role resolves from a foreign project as well (the original
+    // D:/maestro2 general-executor failure scenario).
+    assert.equal(resolveAgent(path.join(foreignCwd, "deep", "nested"), "packed-role")?.source, "package");
+    // Package tier wins over project definitions with the same exact name,
+    // and the merged catalog emits that name only once.
+    const projectCwd = path.join(root, "project", "src");
+    const projectAgents = discoverAgents(projectCwd, root);
+    const sharedMatches = projectAgents.filter((agent) => agent.name === "shared");
+    assert.equal(sharedMatches.length, 1);
+    assert.equal(sharedMatches[0]?.source, "package");
+    assert.equal(sharedMatches[0]?.description, "Package default role");
+    assert.equal(sharedMatches[0]?.filePath, path.join(packageAgentsDir, "shared.md"));
+    const projectCatalog = appendAgentCatalog("Base prompt", projectCwd);
+    assert.equal(projectCatalog.match(/- shared:/g)?.length, 1);
+  } finally {
+    if (previous === undefined) delete process.env.PI_TEAMMATE_PACKAGE_AGENTS_DIR;
+    else process.env.PI_TEAMMATE_PACKAGE_AGENTS_DIR = previous;
+    invalidateAgentCatalogCache();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
