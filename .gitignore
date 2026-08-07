@@ -26,6 +26,7 @@ Thumbs.db
 .maestro-lifecycle.coordinator
 .workflow/*.pid
 .workflow/.backups/
+.workflow/recovery/
 .workflow/.csv-wave/
 .workflow/.maestro/
 .workflow/.scratchpad/
