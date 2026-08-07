@@ -171,20 +171,13 @@ test("child IPC preserves model and thinking defaults before shared normalizatio
   assert.equal(parseProxyTeammateParams({ tasks: [{ agent: 42, prompt: "inspect" }] }), undefined);
 });
 
-test("child IPC without a task prompt reaches normalization's precise mislocation diagnostic", () => {
-  // Regression (nested dispatch path): the child LLM generated the task text
-  // inside outputSchema and no task-level prompt. The proxy must NOT reject it
-  // with a generic "invalid parameters" error — the shared normalization gate
-  // produces the actionable message the child's model can self-correct from.
-  const parsed = parseProxyTeammateParams({
+test("child IPC rejects a missing task-level prompt at admission", () => {
+  assert.equal(parseProxyTeammateParams({
     tasks: [{ name: "audit", outputSchema: { type: "object", prompt: "PURPOSE: mislocated" } }],
-  });
-  assert.ok(parsed);
-  const normalized = normalizeTeammateParams(parsed);
-  assert.match(normalized.error ?? "", /has no "prompt"/);
-  assert.match(normalized.error ?? "", /inside "outputSchema"/);
+  }), undefined);
 
-  // A stray duplicate (task-level prompt present) is salvaged with a warning.
+  // A stray duplicate (task-level prompt present) is still salvageable because
+  // the dispatch intent is unambiguous and no task text is missing.
   const parsedDup = parseProxyTeammateParams({
     tasks: [{ prompt: "work", outputSchema: { type: "object", properties: { summary: { type: "string" } }, prompt: "PURPOSE: stray" } }],
   });

@@ -2411,7 +2411,136 @@ test("parent rejects a schema-invalid structured output file", async () => {
 
   assert.equal(result.exitCode, 1);
   assert.equal(result.structuredOutput, undefined);
+  assert.ok(
+    result.messages.some((message) => /structured_output validation failed at \/ok/.test(message.content)),
+    result.messages.map((message) => message.content).join(" | "),
+  );
   assert.match(result.messages.at(-1)?.content ?? "", /schema-valid value/);
+});
+
+test("parent accepts a schema-valid structured output file without an event payload", async () => {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["ok"],
+    properties: { ok: { type: "boolean" } },
+  };
+  const spawnChildProcess = adaptFakeSpawn((_command, _args, options) => {
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    const outputFile = options.env?.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH;
+    if (typeof outputFile !== "string") throw new Error("structured output path was not provided");
+    setTimeout(() => {
+      fs.writeFileSync(outputFile, JSON.stringify({ ok: true }));
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    }, 0);
+    return child;
+  });
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
+    { baseCwd: process.cwd(), spawnChildProcess },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.structuredOutput, { ok: true });
+  assert.equal(result.messages.some((message) => /validation failed/.test(message.content)), false);
+});
+
+test("a valid persisted output wins when the event payload is schema-invalid", async () => {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["ok"],
+    properties: { ok: { type: "boolean" } },
+  };
+  const spawnChildProcess = adaptFakeSpawn((_command, _args, options) => {
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    const outputFile = options.env?.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH;
+    if (typeof outputFile !== "string") throw new Error("structured output path was not provided");
+    setTimeout(() => {
+      stdout.write(`${JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "toolCall", name: "structured_output", arguments: { ok: "invalid" } }] },
+      })}\n`);
+      fs.writeFileSync(outputFile, JSON.stringify({ ok: true }));
+      stdout.write(`${JSON.stringify({ type: "tool_execution_end", toolName: "structured_output", isError: false })}\n`);
+    }, 0);
+    return child;
+  });
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
+    { baseCwd: process.cwd(), spawnChildProcess },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.structuredOutput, { ok: true });
+  assert.equal(result.messages.some((message) => /validation failed/.test(message.content)), false);
+});
+
+test("a valid event payload wins when the persisted output is schema-invalid", async () => {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["ok"],
+    properties: { ok: { type: "boolean" } },
+  };
+  const spawnChildProcess = adaptFakeSpawn((_command, _args, options) => {
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    const outputFile = options.env?.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH;
+    if (typeof outputFile !== "string") throw new Error("structured output path was not provided");
+    setTimeout(() => {
+      stdout.write(`${JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "toolCall", name: "structured_output", arguments: { ok: true } }] },
+      })}\n`);
+      fs.writeFileSync(outputFile, JSON.stringify({ ok: "invalid" }));
+      stdout.write(`${JSON.stringify({ type: "tool_execution_end", toolName: "structured_output", isError: false })}\n`);
+    }, 0);
+    return child;
+  });
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
+    { baseCwd: process.cwd(), spawnChildProcess },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.structuredOutput, { ok: true });
+  assert.equal(result.messages.some((message) => /validation failed/.test(message.content)), false);
 });
 
 // --- Lane safety-net regressions: a lane must never wedge the caller forever ---

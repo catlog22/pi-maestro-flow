@@ -12,18 +12,25 @@
  */
 import { Type } from "typebox";
 export declare const TaskSpec: Type.TObject<{
-    prompt: Type.TOptional<Type.TString>;
+    prompt: Type.TString;
     description: Type.TOptional<Type.TString>;
     agent: Type.TOptional<Type.TString>;
-    taskType: Type.TOptional<Type.TUnsafe<unknown>>;
+    taskType: Type.TOptional<Type.TString>;
     name: Type.TOptional<Type.TString>;
     dependsOn: Type.TOptional<Type.TArray<Type.TString>>;
     context: Type.TOptional<Type.TUnsafe<"fresh" | "fork">>;
     model: Type.TOptional<Type.TString>;
     fallbackModels: Type.TOptional<Type.TArray<Type.TString>>;
-    thinking: Type.TOptional<Type.TUnsafe<unknown>>;
+    thinking: Type.TOptional<Type.TUnsafe<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max">>;
     cwd: Type.TOptional<Type.TString>;
-    outputSchema: Type.TOptional<Type.TUnsafe<unknown>>;
+    outputSchema: Type.TOptional<Type.TObject<{
+        type: Type.TLiteral<"object">;
+        properties: Type.TOptional<Type.TObject<{}>>;
+        required: Type.TOptional<Type.TArray<Type.TString>>;
+        additionalProperties: Type.TOptional<Type.TUnion<[Type.TBoolean, Type.TObject<{}>]>>;
+        title: Type.TOptional<Type.TString>;
+        description: Type.TOptional<Type.TString>;
+    }>>;
     timeoutMs: Type.TOptional<Type.TInteger>;
     background: Type.TOptional<Type.TBoolean>;
     todo: Type.TOptional<Type.TUnion<[Type.TString, Type.TArray<Type.TString>]>>;
@@ -31,21 +38,28 @@ export declare const TaskSpec: Type.TObject<{
 }>;
 export declare const TeammateParams: Type.TObject<{
     agent: Type.TOptional<Type.TString>;
-    taskType: Type.TOptional<Type.TUnsafe<unknown>>;
+    taskType: Type.TOptional<Type.TString>;
     reply_to: Type.TOptional<Type.TUnsafe<"main" | "caller">>;
     tasks: Type.TArray<Type.TObject<{
-        prompt: Type.TOptional<Type.TString>;
+        prompt: Type.TString;
         description: Type.TOptional<Type.TString>;
         agent: Type.TOptional<Type.TString>;
-        taskType: Type.TOptional<Type.TUnsafe<unknown>>;
+        taskType: Type.TOptional<Type.TString>;
         name: Type.TOptional<Type.TString>;
         dependsOn: Type.TOptional<Type.TArray<Type.TString>>;
         context: Type.TOptional<Type.TUnsafe<"fresh" | "fork">>;
         model: Type.TOptional<Type.TString>;
         fallbackModels: Type.TOptional<Type.TArray<Type.TString>>;
-        thinking: Type.TOptional<Type.TUnsafe<unknown>>;
+        thinking: Type.TOptional<Type.TUnsafe<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max">>;
         cwd: Type.TOptional<Type.TString>;
-        outputSchema: Type.TOptional<Type.TUnsafe<unknown>>;
+        outputSchema: Type.TOptional<Type.TObject<{
+            type: Type.TLiteral<"object">;
+            properties: Type.TOptional<Type.TObject<{}>>;
+            required: Type.TOptional<Type.TArray<Type.TString>>;
+            additionalProperties: Type.TOptional<Type.TUnion<[Type.TBoolean, Type.TObject<{}>]>>;
+            title: Type.TOptional<Type.TString>;
+            description: Type.TOptional<Type.TString>;
+        }>>;
         timeoutMs: Type.TOptional<Type.TInteger>;
         background: Type.TOptional<Type.TBoolean>;
         todo: Type.TOptional<Type.TUnion<[Type.TString, Type.TArray<Type.TString>]>>;
@@ -54,12 +68,19 @@ export declare const TeammateParams: Type.TObject<{
     concurrency: Type.TOptional<Type.TInteger>;
     maxAgents: Type.TOptional<Type.TInteger>;
     maxNestingDepth: Type.TOptional<Type.TInteger>;
-    outputSchema: Type.TOptional<Type.TUnsafe<unknown>>;
+    outputSchema: Type.TOptional<Type.TObject<{
+        type: Type.TLiteral<"object">;
+        properties: Type.TOptional<Type.TObject<{}>>;
+        required: Type.TOptional<Type.TArray<Type.TString>>;
+        additionalProperties: Type.TOptional<Type.TUnion<[Type.TBoolean, Type.TObject<{}>]>>;
+        title: Type.TOptional<Type.TString>;
+        description: Type.TOptional<Type.TString>;
+    }>>;
     background: Type.TOptional<Type.TBoolean>;
     context: Type.TOptional<Type.TUnsafe<"fresh" | "fork">>;
     model: Type.TOptional<Type.TString>;
     fallbackModels: Type.TOptional<Type.TArray<Type.TString>>;
-    thinking: Type.TOptional<Type.TUnsafe<unknown>>;
+    thinking: Type.TOptional<Type.TUnsafe<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max">>;
     cwd: Type.TOptional<Type.TString>;
     timeoutMs: Type.TOptional<Type.TInteger>;
 }>;

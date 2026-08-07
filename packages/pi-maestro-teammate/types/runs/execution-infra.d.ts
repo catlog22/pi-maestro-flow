@@ -230,6 +230,7 @@ export declare function extractStructuredOutputCandidate(event: Record<string, u
  * Execution code treats this as pending until the tool execution succeeds.
  */
 export declare function extractValidatedStructuredOutput(event: Record<string, unknown>, schema: Record<string, unknown>): unknown | undefined;
+export declare function describeStructuredOutputValueValidationFailure(value: unknown, schema: Record<string, unknown>): string | undefined;
 export declare function describeStructuredOutputValidationFailure(event: Record<string, unknown>, schema: Record<string, unknown>): string | undefined;
 export declare function extractPiEventError(event: Record<string, unknown>): string | undefined;
 export declare function validateStructuredOutputValue(value: unknown, schema: Record<string, unknown>): boolean;

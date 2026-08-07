@@ -370,6 +370,28 @@ export function extractValidatedStructuredOutput(
   return extractStructuredOutputCandidate(event, schema)?.value;
 }
 
+export function describeStructuredOutputValueValidationFailure(
+  value: unknown,
+  schema: Record<string, unknown>,
+): string | undefined {
+  try {
+    if (Check(schema, value)) return undefined;
+    const issue = [...Errors(schema, value)][0] as {
+      instancePath?: string;
+      schemaPath?: string;
+      message?: string;
+    } | undefined;
+    if (issue) {
+      const instancePath = issue.instancePath || "/";
+      const schemaPath = issue.schemaPath ? `, schema=${issue.schemaPath}` : "";
+      return `structured_output validation failed at ${instancePath}${schemaPath}: ${issue.message ?? "value does not match the schema"}.`;
+    }
+  } catch (error) {
+    return `structured_output validation failed: schema validation could not run (${error instanceof Error ? error.message : String(error)}).`;
+  }
+  return "structured_output validation failed: value does not match the supplied schema.";
+}
+
 export function describeStructuredOutputValidationFailure(
   event: Record<string, unknown>,
   schema: Record<string, unknown>,
@@ -391,22 +413,7 @@ export function describeStructuredOutputValidationFailure(
         return `structured_output validation failed: arguments are not valid JSON (${error instanceof Error ? error.message : String(error)}).`;
       }
     }
-    if (validateStructuredOutputValue(value, schema)) return undefined;
-    try {
-      const issue = [...Errors(schema, value)][0] as {
-        instancePath?: string;
-        schemaPath?: string;
-        message?: string;
-      } | undefined;
-      if (issue) {
-        const instancePath = issue.instancePath || "/";
-        const schemaPath = issue.schemaPath ? `, schema=${issue.schemaPath}` : "";
-        return `structured_output validation failed at ${instancePath}${schemaPath}: ${issue.message ?? "value does not match the schema"}.`;
-      }
-    } catch {
-      // The final generic diagnostic below still identifies the failing phase.
-    }
-    return "structured_output validation failed: value does not match the supplied schema.";
+    return describeStructuredOutputValueValidationFailure(value, schema);
   }
   return undefined;
 }
@@ -428,11 +435,7 @@ export function validateStructuredOutputValue(
   value: unknown,
   schema: Record<string, unknown>,
 ): boolean {
-  try {
-    return Check(schema, value);
-  } catch {
-    return false;
-  }
+  return describeStructuredOutputValueValidationFailure(value, schema) === undefined;
 }
 
 export interface Utf8LineDecoder {
@@ -975,6 +978,19 @@ export function normalizeTeammateParams(
       warnings.push(
         `tasks[${index}]${task.name ? ` "${task.name}"` : ""}: removed a task-text "prompt" key from "outputSchema" (not a JSON Schema keyword). Keep the task text at the task-level "prompt".`,
       );
+    }
+
+    const outputSchema = normalized[index].outputSchema;
+    if (outputSchema) {
+      const schemaHazard = findStructuredOutputSchemaHazard(outputSchema);
+      if (schemaHazard) {
+        return {
+          tasks: normalized,
+          isMultiTask,
+          warnings,
+          error: `tasks[${index}]${task.name ? ` "${task.name}"` : ""} has an invalid outputSchema: ${schemaHazard}`,
+        };
+      }
     }
   }
 
@@ -1741,7 +1757,11 @@ export function findStructuredOutputSchemaHazard(
       }
       if (
         record.properties !== undefined
-        && (!record.properties || typeof record.properties !== "object")
+        && (
+          !record.properties
+          || typeof record.properties !== "object"
+          || Array.isArray(record.properties)
+        )
       ) {
         return `outputSchema at ${path} has a "properties" value that is not an object.`;
       }
@@ -1768,14 +1788,10 @@ export function findStructuredOutputSchemaHazard(
         }
       }
       if (record.items !== undefined) {
-        if (typeof record.items !== "object" || record.items === null) {
-          return `outputSchema at ${path} has an "items" value that is not an object.`;
-        }
-        if (record.type !== undefined) {
-          const types = Array.isArray(record.type) ? record.type : [record.type];
-          if (!types.includes("array")) {
-            return `outputSchema at ${path} has "items" but "type" is not "array".`;
-          }
+        const validItems = typeof record.items === "boolean"
+          || (typeof record.items === "object" && record.items !== null);
+        if (!validItems) {
+          return `outputSchema at ${path} has an "items" value that is not a schema, boolean schema, or tuple schema array.`;
         }
       }
       if (record.enum !== undefined) {
@@ -1783,7 +1799,7 @@ export function findStructuredOutputSchemaHazard(
           return `outputSchema at ${path} has an "enum" value that is not a non-empty array.`;
         }
       }
-      if (typeof record.prompt === "string") {
+      if (path === "/" && typeof record.prompt === "string") {
         return `outputSchema at ${path} has a task-text "prompt" key, which is not a JSON Schema keyword — move it to the task level (tasks[].prompt).`;
       }
     }
@@ -1813,11 +1829,12 @@ export function findStructuredOutputSchemaHazard(
   if (schema.anyOf !== undefined || schema.oneOf !== undefined) {
     return `outputSchema root must not use "anyOf"/"oneOf" — use a single type:"object" schema.`;
   }
-  if (schema.type !== undefined) {
-    const rootTypes = Array.isArray(schema.type) ? schema.type : [schema.type];
-    if (rootTypes.length !== 1 || rootTypes[0] !== "object") {
-      return `outputSchema root must be type "object" (got ${JSON.stringify(schema.type)}).`;
-    }
+  if (schema.type === undefined) {
+    return `outputSchema root must declare type "object".`;
+  }
+  const rootTypes = Array.isArray(schema.type) ? schema.type : [schema.type];
+  if (rootTypes.length !== 1 || rootTypes[0] !== "object") {
+    return `outputSchema root must be type "object" (got ${JSON.stringify(schema.type)}).`;
   }
   return undefined;
 }

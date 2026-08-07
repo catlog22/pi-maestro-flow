@@ -69,6 +69,7 @@ import {
   createProgress,
   createUtf8LineDecoder,
   describeStructuredOutputValidationFailure,
+  describeStructuredOutputValueValidationFailure,
   emptyUsage,
   ensurePrivateDirectory,
   extractPiEventError,
@@ -91,7 +92,6 @@ import {
   setUsageSnapshot,
   taskDependencyNames,
   truncateUtf8Tail,
-  validateStructuredOutputValue,
   validateTaskReferences,
   waitForRetryDelay,
   writeSchemaFile,
@@ -1096,11 +1096,26 @@ async function runSingleAttempt(
       let structuredOutput: unknown;
       if (outputFile) {
         try {
-          const candidate = JSON.parse(readRegularTextFile(outputFile));
-          if (!params.outputSchema || validateStructuredOutputValue(candidate, params.outputSchema)) {
-            structuredOutput = candidate;
+          const serialized = readRegularTextFile(outputFile);
+          if (serialized.trim().length > 0) {
+            try {
+              const candidate = JSON.parse(serialized);
+              const validationFailure = params.outputSchema
+                ? describeStructuredOutputValueValidationFailure(candidate, params.outputSchema)
+                : undefined;
+              if (validationFailure) {
+                state.structuredOutputValidationFailure = validationFailure;
+              } else {
+                structuredOutput = candidate;
+              }
+            } catch (error) {
+              state.structuredOutputValidationFailure =
+                `structured_output validation failed: output file is not valid JSON (${error instanceof Error ? error.message : String(error)}).`;
+            }
           }
-        } catch { /* output is absent or not complete */ }
+        } catch {
+          // The structured_output tool has not persisted a result yet.
+        }
         if (cleanup) cleanupFile(outputFile);
       }
       return structuredOutput ?? state.capturedStructuredOutput;

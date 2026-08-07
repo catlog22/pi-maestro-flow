@@ -18,14 +18,55 @@ const TaskType = Type.String({
   minLength: 1,
   maxLength: 64,
   pattern: "^[a-z][a-z0-9._-]*$",
+  description: "Task phase used only for automatic model routing; it does not change agent behavior.",
 });
 
-const ThinkingLevel = StringEnum([...TEAMMATE_THINKING_INPUTS]);
+const ThinkingLevel = StringEnum(
+  [...TEAMMATE_THINKING_INPUTS],
+  "Pi thinking depth; max is accepted as an alias for xhigh.",
+);
 
-function StringEnum<T extends string[]>(values: [...T]) {
+function StringEnum<T extends string[]>(values: [...T], description?: string) {
   return Type.Unsafe<T[number]>({
     type: "string",
     enum: values,
+    ...(description ? { description } : {}),
+  });
+}
+
+function structuredOutputSchema(description: string) {
+  return Type.Object({
+    type: Type.Literal("object", {
+      description: 'Structured output schemas must declare a single object root.',
+    }),
+    properties: Type.Optional(
+      Type.Object({}, {
+        additionalProperties: true,
+        description: "JSON Schema definitions for the returned object fields.",
+      }),
+    ),
+    required: Type.Optional(
+      Type.Array(Type.String(), {
+        uniqueItems: true,
+        description: "Names of fields that every structured result must contain.",
+      }),
+    ),
+    additionalProperties: Type.Optional(
+      Type.Union([
+        Type.Boolean(),
+        Type.Object({}, { additionalProperties: true }),
+      ]),
+    ),
+    title: Type.Optional(Type.String()),
+    description: Type.Optional(Type.String()),
+  }, {
+    additionalProperties: true,
+    description,
+    examples: [{
+      type: "object",
+      properties: { result: { type: "string" } },
+      required: ["result"],
+    }],
   });
 }
 
@@ -34,18 +75,11 @@ function StringEnum<T extends string[]>(values: [...T]) {
 // ---------------------------------------------------------------------------
 
 export const TaskSpec = Type.Object({
-  // Optional at the schema layer on purpose: a missing or mislocated prompt must
-  // reach dispatch normalization, which diagnoses it precisely ("move prompt to
-  // the task level") instead of a generic TypeBox "required properties" error
-  // the model cannot self-correct from. normalizeTeammateParams enforces the
-  // non-empty invariant before any child is spawned.
-  prompt: Type.Optional(
-    Type.String({
-      minLength: 1,
-      description:
-        "Task text; enforced non-empty at dispatch (a missing or mislocated prompt is diagnosed precisely). Use {name} to reference another task's output, {name.field} for structured output fields. Never place the task text inside outputSchema.",
-    }),
-  ),
+  prompt: Type.String({
+    minLength: 1,
+    description:
+      "Required task text. Use {name} to reference another task's output and {name.field} for structured fields. This field is a sibling of outputSchema; never place task text inside outputSchema.",
+  }),
   description: Type.Optional(
     Type.String({
       description:
@@ -57,13 +91,7 @@ export const TaskSpec = Type.Object({
       description: 'Agent name to dispatch; defaults to the top-level agent, then "general"',
     }),
   ),
-  taskType: Type.Optional(
-    Type.Unsafe({
-      ...TaskType,
-      description:
-        "Task phase used only for automatic model routing (task model > top-level model > taskType routing). Does not change the agent's behavior — that is defined by the agent role.",
-    }),
-  ),
+  taskType: Type.Optional(TaskType),
   name: Type.Optional(
     Type.String({
       minLength: 1,
@@ -95,22 +123,14 @@ export const TaskSpec = Type.Object({
       description: "Ordered provider/model fallbacks for this task; overrides the top-level fallback chain",
     }),
   ),
-  thinking: Type.Optional(
-    Type.Unsafe({
-      ...ThinkingLevel,
-      description: "Pi thinking depth override for this task; max is accepted as an alias for xhigh",
-    }),
-  ),
+  thinking: Type.Optional(ThinkingLevel),
   cwd: Type.Optional(
     Type.String({ description: "Working directory for this task" }),
   ),
   outputSchema: Type.Optional(
-    Type.Unsafe({
-      type: "object",
-      additionalProperties: true,
-      description:
-        "JSON Schema for structured output (root must be type \"object\"; recommended keywords: type/properties/required/items/enum/description). Output becomes accessible as {name.field} in dependent tasks. Holds only the JSON Schema — the task text belongs at tasks[].prompt, never here.",
-    }),
+    structuredOutputSchema(
+      "JSON Schema for this task's structured result. The root type must be object. This overrides the top-level default. Put only JSON Schema here; task text belongs in the sibling tasks[].prompt field.",
+    ),
   ),
   timeoutMs: Type.Optional(
     Type.Integer({
@@ -156,13 +176,7 @@ export const TeammateParams = Type.Object({
       description: 'Default agent for tasks that omit agent; defaults to "general"',
     }),
   ),
-  taskType: Type.Optional(
-    Type.Unsafe({
-      ...TaskType,
-      description:
-        "Default task phase for automatic model routing; per-task taskType takes precedence. Routing only — does not change agent behavior.",
-    }),
-  ),
+  taskType: Type.Optional(TaskType),
 
   // === P0 Result Routing ===
 
@@ -212,12 +226,9 @@ export const TeammateParams = Type.Object({
   // === Structured Output (default for tasks without their own) ===
 
   outputSchema: Type.Optional(
-    Type.Unsafe({
-      type: "object",
-      additionalProperties: true,
-      description:
-        "JSON Schema for structured output validation (root must be type \"object\"). Serves as the default for every task without its own outputSchema. Holds only the JSON Schema — the task text belongs at tasks[].prompt, never here.",
-    }),
+    structuredOutputSchema(
+      "Default JSON Schema for each task that does not define tasks[].outputSchema. The root type must be object. Put only JSON Schema here; task text always belongs in tasks[].prompt.",
+    ),
   ),
 
   // === Execution Control (applies to all modes) ===
@@ -251,13 +262,7 @@ export const TeammateParams = Type.Object({
         "Ordered provider/model fallback chain. Per-task fallbackModels takes precedence.",
     }),
   ),
-  thinking: Type.Optional(
-    Type.Unsafe({
-      ...ThinkingLevel,
-      description:
-        "Default Pi thinking depth. Precedence: task thinking, top-level thinking, taskType routing, agent frontmatter, then Pi default. max aliases xhigh.",
-    }),
-  ),
+  thinking: Type.Optional(ThinkingLevel),
 
   cwd: Type.Optional(
     Type.String({

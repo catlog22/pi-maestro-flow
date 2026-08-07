@@ -758,11 +758,9 @@ export function parseProxyTeammateParams(
   params: Record<string, unknown>,
 ): RunTeammateParams | undefined {
   if (!Check(TeammateParams, params)) return undefined;
-  // prompt is optional at the schema layer so the generative path (including
-  // nested child dispatches over IPC) reaches normalizeTeammateParams' precise
-  // mislocation diagnostic instead of dying here with a generic error. The
-  // normalization gate below runs before any spawn and rejects empty/missing
-  // prompts with an actionable message.
+  // TypeBox admission requires each task-level prompt and validates the common
+  // outputSchema root shape. Shared normalization remains the compatibility
+  // and semantic-validation gate before any child is spawned.
   const tasks = params.tasks;
   return {
     ...params,
@@ -771,8 +769,6 @@ export function parseProxyTeammateParams(
     outputSchema: parseOutputSchema(params.outputSchema),
     tasks: tasks.map((task) => ({
       ...task,
-      // The static public contract keeps prompt required; normalization rejects
-      // non-string/empty prompts before any consumer reads the value.
       prompt: task.prompt as string,
       taskType: parseTeammateTaskType(task.taskType),
       thinking: parseThinkingInput(task.thinking),

@@ -420,10 +420,10 @@ Background: the foreground wait window is bounded — the smallest per-task time
 
 ## Structured output (outputSchema)
 
-prompt is a task-level field: always place the task text at tasks[].prompt, never inside outputSchema — outputSchema holds only the JSON Schema object. A prompt string embedded in outputSchema is diagnosed at dispatch with a pointer to the correct location (or silently salvaged when the task already has a prompt). Example task shape:
+prompt is a required task-level field: always place the task text at tasks[].prompt, never inside outputSchema — outputSchema holds only the JSON Schema object. Parameter validation rejects tasks without their own prompt; a duplicated task-text prompt inside outputSchema is removed with a warning. Example task shape:
 { "name": "audit", "agent": "analyst", "prompt": "<the task text>", "outputSchema": { "type": "object", "properties": { "result": { "type": "string" } }, "required": ["result"] } }
 
-When a task (or the top-level call) sets outputSchema, the child must submit its final answer through a \`structured_output\` tool that validates the value against that JSON Schema. On completion the value is returned directly in the result content (prefixed \`[structured_output]\`) and is persisted for later reads via \`agent://<correlationId>\` (resource tool). Schema-invalid submissions fail validation and the child retries automatically; a run that ends without a valid value fails with a diagnostic naming the offending field.
+When a task (or the top-level call) sets outputSchema, the child must submit its final answer through a \`structured_output\` tool that validates the value against that JSON Schema. On completion the value is returned directly in the result content (prefixed \`[structured_output]\`) and is persisted for later reads via \`agent://<correlationId>\` (resource tool). Schema-invalid submissions are rejected by the child tool so the model can correct them within the current Pi turn; teammate does not replay validation failures. A run that ends without a valid value fails with a diagnostic naming the offending field.
 
 ## Todo binding (todo)
 

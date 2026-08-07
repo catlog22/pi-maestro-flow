@@ -72,6 +72,40 @@ test("a stray task-text prompt inside outputSchema is salvaged when a task-level
   });
 });
 
+test("effective output schemas are validated for every task before dispatch", () => {
+  const inherited = normalizeTeammateParams({
+    outputSchema: { type: "object", required: "summary" } as never,
+    tasks: [{ name: "first", prompt: "one" }],
+  });
+  assert.match(inherited.error ?? "", /tasks\[0\] "first" has an invalid outputSchema/);
+  assert.match(inherited.error ?? "", /"required" value that is not an array/);
+
+  const perTask = normalizeTeammateParams({
+    tasks: [
+      { name: "valid", prompt: "one", outputSchema: { type: "object" } },
+      { name: "invalid", prompt: "two", outputSchema: {} as never },
+    ],
+  });
+  assert.match(perTask.error ?? "", /tasks\[1\] "invalid" has an invalid outputSchema/);
+  assert.match(perTask.error ?? "", /must declare type "object"/);
+
+  const nested = normalizeTeammateParams({
+    tasks: [
+      { name: "valid", prompt: "one" },
+      {
+        name: "nested-invalid",
+        prompt: "two",
+        outputSchema: {
+          type: "object",
+          properties: { value: { type: "object", properties: [] } },
+        } as never,
+      },
+    ],
+  });
+  assert.match(nested.error ?? "", /tasks\[1\] "nested-invalid" has an invalid outputSchema/);
+  assert.match(nested.error ?? "", /\/properties\/value.*"properties" value that is not an object/);
+});
+
 test("one public task normalizes for the internal single-task primitive", () => {
   const result = normalizeTeammateParams({ tasks: [{ agent: "general", prompt: "Inspect auth" }] });
   assert.equal(result.error, undefined);

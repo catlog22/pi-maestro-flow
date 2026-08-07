@@ -5,8 +5,13 @@ import {
   TeammateParams,
   TeammateSendParams,
 } from "../src/extension/schemas.ts";
-import { MAX_DEFAULT_DEPTH } from "../src/runs/execution-infra.ts";
-import { findStructuredOutputSchemaHazard } from "../src/runs/execution-infra.ts";
+import {
+  MAX_DEFAULT_DEPTH,
+  describeStructuredOutputValidationFailure,
+  describeStructuredOutputValueValidationFailure,
+  findStructuredOutputSchemaHazard,
+  validateStructuredOutputValue,
+} from "../src/runs/execution-infra.ts";
 
 // ---------------------------------------------------------------------------
 // maxNestingDepth bounds (P1/B1): schema rejects out-of-range values at the
@@ -110,6 +115,14 @@ test("findStructuredOutputSchemaHazard rejects misspelled keywords", () => {
 
 test("findStructuredOutputSchemaHazard rejects malformed properties and required values", () => {
   assert.match(findStructuredOutputSchemaHazard({ type: "object", properties: "nope" }) ?? "", /"properties" value that is not an object/);
+  assert.match(findStructuredOutputSchemaHazard({ type: "object", properties: [] }) ?? "", /"properties" value that is not an object/);
+  assert.match(
+    findStructuredOutputSchemaHazard({
+      type: "object",
+      properties: { nested: { type: "object", properties: [] } },
+    }) ?? "",
+    /\/properties\/nested.*"properties" value that is not an object/,
+  );
   assert.match(findStructuredOutputSchemaHazard({ type: "object", required: "summary" }) ?? "", /"required" value that is not an array/);
   assert.match(findStructuredOutputSchemaHazard({ type: "object", required: [42] }) ?? "", /"required" value that is not an array/);
 });
@@ -139,8 +152,7 @@ test("findStructuredOutputSchemaHazard rejects invalid type values", () => {
   assert.match(findStructuredOutputSchemaHazard({ type: ["object", "arrayy"] }) ?? "", /invalid "type"/);
 });
 
-test("findStructuredOutputSchemaHazard accepts loose arrays and requires items only for non-array types", () => {
-  // A bare { type: "array" } is valid JSON Schema (array of anything) — keep it.
+test("findStructuredOutputSchemaHazard accepts supported items forms", () => {
   assert.equal(
     findStructuredOutputSchemaHazard({ type: "object", properties: { xs: { type: "array" } } }),
     undefined,
@@ -149,9 +161,23 @@ test("findStructuredOutputSchemaHazard accepts loose arrays and requires items o
     findStructuredOutputSchemaHazard({ type: "object", properties: { xs: { type: "array", items: { type: "string" } } } }),
     undefined,
   );
+  assert.equal(
+    findStructuredOutputSchemaHazard({ type: "object", properties: { xs: { type: "array", items: false } } }),
+    undefined,
+  );
+  assert.equal(
+    findStructuredOutputSchemaHazard({ type: "object", properties: { xs: { type: "array", items: [{ type: "string" }, { type: "number" }] } } }),
+    undefined,
+  );
+  // JSON Schema ignores an inapplicable keyword; preflight must not reject a
+  // schema shape that the runtime validator accepts.
+  assert.equal(
+    findStructuredOutputSchemaHazard({ type: "object", properties: { xs: { type: "object", items: { type: "string" } } } }),
+    undefined,
+  );
   assert.match(
-    findStructuredOutputSchemaHazard({ type: "object", properties: { xs: { type: "object", items: { type: "string" } } } }) ?? "",
-    /has "items" but "type" is not "array"/,
+    findStructuredOutputSchemaHazard({ type: "object", properties: { xs: { type: "array", items: "invalid" } } }) ?? "",
+    /"items" value that is not a schema/,
   );
 });
 
@@ -171,46 +197,113 @@ test("findStructuredOutputSchemaHazard rejects malformed enum values", () => {
 });
 
 test("findStructuredOutputSchemaHazard enforces the object-root contract", () => {
+  assert.match(findStructuredOutputSchemaHazard({}) ?? "", /must declare type "object"/);
   assert.match(findStructuredOutputSchemaHazard({ type: "string" }) ?? "", /root must be type "object"/);
   assert.match(findStructuredOutputSchemaHazard({ anyOf: [{ type: "object" }] }) ?? "", /root must not use "anyOf"/);
   assert.match(findStructuredOutputSchemaHazard({ oneOf: [{ type: "object" }] }) ?? "", /root must not use "anyOf"/);
   assert.equal(findStructuredOutputSchemaHazard({ type: "object", properties: {} }), undefined);
 });
 
-test("findStructuredOutputSchemaHazard flags a stray task-text prompt key inside outputSchema", () => {
+test("findStructuredOutputSchemaHazard flags only a root task-text prompt key", () => {
   assert.match(
     findStructuredOutputSchemaHazard({ type: "object", prompt: "PURPOSE: task text" }) ?? "",
     /task-text "prompt" key/,
   );
+  assert.equal(
+    findStructuredOutputSchemaHazard({
+      type: "object",
+      properties: { value: { type: "string", prompt: "provider annotation" } },
+    }),
+    undefined,
+  );
+});
+
+test("event and persisted-value validation share the same field-level diagnostic", () => {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: { ok: { type: "boolean" } },
+    required: ["ok"],
+  };
+  const value = { ok: "not-a-boolean" };
+  const fromValue = describeStructuredOutputValueValidationFailure(value, schema);
+  const fromEvent = describeStructuredOutputValidationFailure({
+    message: {
+      content: [{ type: "toolCall", name: "structured_output", arguments: value }],
+    },
+  }, schema);
+  assert.equal(fromEvent, fromValue);
+  assert.match(fromValue ?? "", /validation failed at \/ok/);
+  assert.match(fromValue ?? "", /schema=/);
 });
 
 // ---------------------------------------------------------------------------
-// Misplaced prompt handling: the task text may never live inside outputSchema.
-// The parameter schema deliberately stays permissive (prompt is optional at
-// the schema layer) so a mislocated prompt reaches dispatch normalization,
-// which diagnoses it precisely — the generic TypeBox "must have required
-// properties prompt" error was not actionable for the generating model.
+// The public parameter schema prevents the two recurrent generative mistakes:
+// omitting the task-level prompt and supplying a non-object-root output schema.
+// Dispatch normalization remains a second line of defense for programmatic and
+// compatibility callers that do not enter through TypeBox admission.
 // ---------------------------------------------------------------------------
 
-test("parameter schema stays permissive for a mislocated-only prompt", () => {
-  // Regression: the model generated the task text inside outputSchema and no
-  // task-level prompt. Previously this died at parameter validation with the
-  // generic "tasks.0.prompt: must have required properties prompt"; now it
-  // passes validation and is diagnosed precisely by normalizeTeammateParams.
+test("parameter schema requires a task-level prompt", () => {
   assert.equal(Check(TeammateParams, {
     tasks: [{ name: "audit", outputSchema: { type: "object", prompt: "PURPOSE: mislocated" } }],
-  }), true);
-});
-
-test("parameter schema stays permissive for a duplicated prompt (task-level + stray copy)", () => {
+  }), false);
   assert.equal(Check(TeammateParams, {
-    tasks: [{ prompt: "work", outputSchema: { type: "object", properties: { summary: { type: "string" } }, prompt: "PURPOSE: stray" } }],
+    tasks: [{ name: "audit", prompt: "work", outputSchema: { type: "object" } }],
   }), true);
 });
 
-test("schema accepts prompt as an object-valued JSON Schema key in outputSchema", () => {
-  // A schema fragment under "prompt" (object) is legitimate; only a bare
-  // task-text string is the mislocation we guard against.
-  assert.equal(Check(TeammateParams, { tasks: [{ prompt: "work", outputSchema: { prompt: { type: "string" } } }] }), true);
-  assert.equal(Check(TeammateParams, { tasks: [{ prompt: "work", outputSchema: { properties: { prompt: { type: "string" } } } }] }), true);
+test("parameter schema requires object-root output schemas at both levels", () => {
+  assert.equal(Check(TeammateParams, {
+    tasks: [{ prompt: "work", outputSchema: { properties: { result: { type: "string" } } } }],
+  }), false);
+  assert.equal(Check(TeammateParams, {
+    outputSchema: { type: "string" },
+    tasks: [{ prompt: "work" }],
+  }), false);
+  assert.equal(Check(TeammateParams, {
+    outputSchema: { type: "object", properties: { result: { type: "string" } }, required: ["result"] },
+    tasks: [{ prompt: "work" }],
+  }), true);
+});
+
+test("parameter schema validates common root keyword shapes", () => {
+  assert.equal(Check(TeammateParams, {
+    tasks: [{ prompt: "work", outputSchema: { type: "object", properties: "nope" } }],
+  }), false);
+  assert.equal(Check(TeammateParams, {
+    tasks: [{ prompt: "work", outputSchema: { type: "object", required: "result" } }],
+  }), false);
+  assert.equal(Check(TeammateParams, {
+    tasks: [{ prompt: "work", outputSchema: { type: "object", required: ["result", "result"] } }],
+  }), false);
+});
+
+test("parameter admission and value validation support boolean and tuple items", () => {
+  const booleanItems = {
+    type: "object",
+    properties: { empty: { type: "array", items: false } },
+    required: ["empty"],
+  };
+  const tupleItems = {
+    type: "object",
+    properties: { pair: { type: "array", items: [{ type: "string" }, { type: "number" }] } },
+    required: ["pair"],
+  };
+  assert.equal(Check(TeammateParams, {
+    tasks: [{ prompt: "work", outputSchema: booleanItems }],
+  }), true);
+  assert.equal(Check(TeammateParams, {
+    tasks: [{ prompt: "work", outputSchema: tupleItems }],
+  }), true);
+  assert.equal(validateStructuredOutputValue({ empty: [] }, booleanItems), true);
+  assert.equal(validateStructuredOutputValue({ empty: ["blocked"] }, booleanItems), false);
+  assert.equal(validateStructuredOutputValue({ pair: ["id", 1] }, tupleItems), true);
+  assert.equal(validateStructuredOutputValue({ pair: [1, "id"] }, tupleItems), false);
+});
+
+test("a result field named prompt remains valid under properties", () => {
+  assert.equal(Check(TeammateParams, {
+    tasks: [{ prompt: "work", outputSchema: { type: "object", properties: { prompt: { type: "string" } } } }],
+  }), true);
 });

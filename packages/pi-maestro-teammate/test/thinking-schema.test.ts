@@ -30,13 +30,10 @@ test("teammate schema accepts string models at top-level and task boundaries", (
   assert.equal(Check(TeammateParams, { tasks: [{ prompt: "work", model: 42 }] }), false);
 });
 
-test("teammate schema requires a non-empty tasks array; prompt is enforced at normalization", () => {
+test("teammate schema requires a non-empty tasks array and a task-level prompt", () => {
   assert.equal(Check(TeammateParams, {}), false);
   assert.equal(Check(TeammateParams, { tasks: [] }), false);
-  // prompt is intentionally optional at the schema layer: a missing or
-  // mislocated prompt must reach normalizeTeammateParams, which diagnoses it
-  // precisely, instead of dying at validation with a generic error.
-  assert.equal(Check(TeammateParams, { tasks: [{}] }), true);
+  assert.equal(Check(TeammateParams, { tasks: [{}] }), false);
   assert.equal(Check(TeammateParams, { tasks: [{ prompt: "" }] }), false);
   // TypeBox cannot express trim semantics; shared normalization rejects this.
   assert.equal(Check(TeammateParams, { tasks: [{ prompt: "   " }] }), true);
