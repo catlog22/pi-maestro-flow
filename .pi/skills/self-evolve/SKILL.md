@@ -1,6 +1,6 @@
 ---
 name: self-evolve
-description: "Self-evolution knowledge lifecycle router — orchestrates run check review → stage → run complete (seal) → review --resolve（裁决）→ promote（晋升）→ 未来 run search 验证；session 源候选先 session seal 再 promote. Thin coordinator over maestro CLI; never writes spec/knowhow files directly. Arguments: [intent — e.g. 'review-run' | 'stage' | 'seal' | 'promote' | 'health' | 'full-cycle' | '沉淀这段经验']"
+description: "Self-evolution knowledge lifecycle router — orchestrates run check review → stage → run complete (seal) → promote --resolve（内联裁决+晋升）→ 未来 run search 验证；session 源候选先 session seal 再 promote. Thin coordinator over maestro CLI; never writes spec/knowhow files directly. Arguments: [intent — e.g. 'review-run' | 'stage' | 'seal' | 'promote' | 'health' | 'full-cycle' | '沉淀这段经验']"
 allowed-tools: Read Write Edit Bash Glob Grep teammate WebFetch maestro observe ask-user-question
 disable-model-invocation: true
 session-mode: none
@@ -22,7 +22,7 @@ docs/self-evolution-plugin-design.md        # v2 设计：双层评审门（§5�
 </required_reading>
 
 <purpose>
-Self-evolve 是**薄 router**：把「run check 评审 → stage → run complete seal → review --resolve 裁决 → promote → 未来 run search 验证」的时序编排封装成可执行流程（session 源候选先 session seal 再 promote；时序铁律：promote 在 seal 之后），命令面全部复用 maestro CLI（与 maestro-knowledge 共用同一套 `maestro knowledge ...` 生命周期命令，避免双份维护）。本 skill 只做**时序编排与护栏**，不做知识内容生产，也不直接写 spec/knowhow 文件。
+Self-evolve 是**薄 router**：把「run check 评审 → stage → run complete seal → promote --resolve 内联裁决+晋升 → 未来 run search 验证」的时序编排封装成可执行流程（session 源候选先 session seal 再 promote；时序铁律：promote 在 seal 之后），命令面全部复用 maestro CLI（与 maestro-knowledge 共用同一套 `maestro knowledge ...` 生命周期命令，避免双份维护）。本 skill 只做**时序编排与护栏**，不做知识内容生产，也不直接写 spec/knowhow 文件。
 </purpose>
 
 <dispatch>
@@ -34,7 +34,7 @@ Self-evolve 是**薄 router**：把「run check 评审 → stage → run complet
 | `review-signals` | `信号` / `signal` / `review-signals` / `候选评估` / `dry-run` | 读取全局 `~/.maestro/self-evolve/{suggestions,reviews}/` → 按评审 `stage` 判定构建沉淀候选（见「信号沉淀流水线」） |
 | `stage` | `stage` / `暂存` / `沉淀` / `候选` / `candidate` / `记录命中` | `maestro knowledge stage <spec\|knowhow> "<title>" --content-file <path\|-> --run <run-id> [--category <cat>] [--evidence <refs>]`；session 源（无需 Run）：`--session <session-id> --evidence <refs>`（evidence 必填；无 Run 时写授权分层解析并自动幂等落 ksyn-* 合成 Session）；归因用 `maestro knowledge record <ids...> --signal <signal> --source search [--run <run-id> \| --session <session-id> \| --channel <name>] [--allow-unknown]`（不产生候选；ID 经 wiki 索引校验，未知默认拒收） |
 | `seal` | `seal` / `complete` / `封存` / `封板` | `maestro session done <run-id> [--verdict done\|done-with-concerns]` → `maestro session seal <session-id> [--summary "..."]` |
-| `promote` | `promote` / `晋升` / `发布` / `落库` | 先裁决 `maestro knowledge review <session-id> --resolve <candidate-id> --as <choice> [--target <knowledge-id>] --reason "..."`，再晋升 `maestro knowledge promote <session-id> --candidate <id>\|--all`（promote 仅接受 --candidate/--all，无 --reason/--resolve/--as/--target） |
+| `promote` | `promote` / `晋升` / `发布` / `落库` | happy path 内联裁决+晋升 `maestro knowledge promote <session-id> --resolve <candidate-id> --as <choice> [--target <knowledge-id>] --reason "..."`（fence+resolve+promote 一步）；纯晋升 `--candidate <id>\|--all`；兼容回退 `review <session-id> --resolve` |
 | `health` | `health` / `audit` / `健康` / `基线` / `库存` | `node scripts/self-evolve-health.mjs`（生成全局健康 sidecar：health.json + health-<project>.json）→ 读 `health.json`（audit/revalidation/reviewRequired/reviews/approval 段已含所需信息；如需实时明细可选 `maestro knowledge audit --json`）；按 revalidation queue 逐项治理（见「知识健康闭环」） |
 | `full-cycle` | `full` / `闭环` / `自进化` / `整条流水线` / `完整流程` | 执行下方「核心时序编排（full-cycle）」全链 |
 | `proposal` | `proposal` / `提案` / `skill 演化` / `改 skill` / `skill 变更` | Phase 5 独立 proposal 流程（见「Phase 5 skill 演化」）：`node scripts/self-evolve-phase5.mjs proposal <skill-path> --content <path> --reason "<why>"` → 静态检查/权限差异/签名 → `apply`（reason 非空=批准记录）→ `revert`（--reason 必填；sha256 冲突检测，不一致需 --force；写 skill-revert receipt） |
@@ -53,7 +53,7 @@ Self-evolve 是**薄 router**：把「run check 评审 → stage → run complet
 
 ### 核心时序编排（full-cycle）
 
-两条路径（run 源 / session 源），裁决统一走 `review --resolve`，晋升统一走 `promote --candidate|--all`（promote 无 --reason/--resolve；时序铁律：**promote 在 seal 之后**）：
+两条路径（run 源 / session 源），happy path 裁决+晋升统一走 `promote --resolve <id> --as <choice> [--target <id>] --reason "<reason>"`（TOCTOU fence + resolve + promote 一步；`review --resolve` 保留为兼容回退）；纯晋升走 `promote --candidate|--all`（时序铁律：**promote 在 seal 之后**）：
 
 ```
 ── run 源 ──────────────────────────────────────────────────
@@ -64,7 +64,7 @@ run check（读 finish-checklist 评审清单 + 对账 receipt）
    ▼
 session done（seal 事务：自动 stage frontmatter 草拟 + 自动抑制 exact_duplicate + receipt 固化，run 转不可变）
    ▼
-review --resolve（裁决 review_required：--as <choice> --target --reason）
+promote --resolve（内联裁决+晋升：--as <choice> --target --reason）
    ▼
 promote（fail-closed 硬门，见下方阻断语义）→ 用户确认后执行（run 源候选 run seal 后即可）
    ▼
@@ -73,7 +73,7 @@ promote（fail-closed 硬门，见下方阻断语义）→ 用户确认后执行
 ── session 源 ─────────────────────────────────────────────
 stage（无 Run 场景；evidence 必填）→ 用户确认
    ▼
-review --resolve（裁决 review_required：--as <choice> --target --reason）
+promote --resolve（内联裁决+晋升：--as <choice> --target --reason）
    ▼
 session seal（sealed 后 session 源候选方可晋升；seal 自动 best-effort 刷 session receipt）
    ▼
@@ -114,13 +114,15 @@ maestro session done <run-id> --verdict done|done-with-concerns|needs-retry|bloc
 - verdict 诚实选择：`done`（干净）或 `done-with-concerns`（有 caveat，全部列入 concerns）。
 - seal 后 run 不可变（拒绝 sidecar 写入）；frontmatter decisions/constraints 自动物化为 spec 候选。
 
-#### Step 4 — review --resolve 裁决（评审呈现协议）
+#### Step 4 — 呈现 + 裁决（happy path: promote --resolve；review --resolve 兼容回退）
 ```bash
 maestro knowledge review <session-id> [--refresh] [--json]   # 呈现数据源（只读；--refresh 刷新 receipt = TOCTOU fence）
-# 裁决（review 持有 --resolve/--as/--target/--reason；promote 没有这些选项）
+# happy path：promote 内联裁决+晋升一步（fence + resolve + promote）
+maestro knowledge promote <session-id> --resolve <candidate-id> --as duplicate|related|conflict|supersede|unique [--target <knowledge-id>] --reason "<非空理由>"
+# 兼容回退（review 仍持有 --resolve，deprecated）：
 maestro knowledge review <session-id> --resolve <candidate-id> --as duplicate|related|conflict|supersede|unique [--target <knowledge-id>] --reason "<非空理由>"
 ```
-**呈现协议（铁律，完整规则见 maestro-knowledge SKILL / SYSTEM.md 知识操作节「评审呈现协议」）**：裁决环节 agent 自己跑 `review --json`，逐条向用户呈现：标题、类型与来源（run/session）、内容摘要、evidence 锚点、证据支撑的既有匹配（id+标题）、**推荐处置（五选一 + target）与一行理由**；收集用户逐条决策（或批量采纳推荐）后再执行 `review --resolve` 裁决。用户只决策，agent 负责读取/呈现/执行——**禁止把 review 命令甩给用户当全部任务**。批量采纳推荐时仅限验证过明确独立的候选（`--as unique`）。
+**呈现协议（铁律，完整规则见 maestro-knowledge SKILL / SYSTEM.md 知识操作节「评审呈现协议」）**：裁决环节 agent 自己跑 `review --json`，逐条向用户呈现：标题、类型与来源（run/session）、内容摘要、evidence 锚点、证据支撑的既有匹配（id+标题）、**推荐处置（五选一 + target）与一行理由**；收集用户逐条决策（或批量采纳推荐）后再执行 `promote --resolve` 内联裁决（或兼容回退 `review --resolve`）。用户只决策，agent 负责读取/呈现/执行——**禁止把 review 命令甩给用户当全部任务**。批量采纳推荐时仅限验证过明确独立的候选（`--as unique`）。
 
 - 裁决 `--resolve` 前建议先 `review <session-id> --refresh`（TOCTOU fence：刷新 run/session receipt，防「校验后、写入前」语料漂移），receipt 缺失/stale 会中止（E005）。
 - `--as unique` 时**不得传 `--target`**；duplicate/related/conflict/supersede 必须传 `--target`，且 target 必须来自该候选 evidence-backed match。
@@ -129,7 +131,9 @@ maestro knowledge review <session-id> --resolve <candidate-id> --as duplicate|re
 
 #### Step 5 — promote（阻断层硬门，用户确认后执行）
 ```bash
-# 裁决已完成（Step 4）→ 晋升（promote 仅接受 --candidate/--all，无 --reason/--resolve/--as/--target）：
+# 未裁决候选 → 内联裁决+晋升一步（happy path）：
+maestro knowledge promote <session-id> --resolve <candidate-id> --as <choice> [--target <knowledge-id>] --reason "<非空理由>"
+# 已裁决候选 → 纯晋升（--candidate/--all）：
 maestro knowledge promote <session-id> --candidate <candidate-id>[,<id>...]  # 显式逐个（裁决过的候选）
 maestro knowledge promote <session-id> --all        # 批量晋升全部合格项（observed-only 仅警告）
 # 晋升成功后记录 approval receipt（审计轨迹）：
@@ -154,7 +158,7 @@ node scripts/self-evolve-approval.mjs record --action promote --session <session
 #### Step 5.5 — 回退操作（错误 promote 后的处置）
 
 - **候选级处置（错误 promote 的候选）**：`maestro knowledge review <session-id> --resolve <candidate-id> --as rejected|supersede --reason "<原因>"` 裁决回退，随后补 `node scripts/self-evolve-approval.mjs record --action supersede --session <session-id> --reason "<原因>" --candidates <id>`（审计留痕）。
-- **knowhow snapshot restore（仅限生命周期迁移场景）**：知识条目没有 CLI 快照回滚——快照恢复只存在于 Phase 5 skill proposal 的 `revert`（`proposals/<id>/backup.md`）；knowhow 错误晋升一律走上面的 review --resolve/supersede 处置。
+- **knowhow snapshot restore（仅限生命周期迁移场景）**：知识条目没有 CLI 快照回滚——快照恢复只存在于 Phase 5 skill proposal 的 `revert`（`proposals/<id>/backup.md`）；knowhow 错误晋升一律走上面的 promote --resolve（或兼容回退 review --resolve）/supersede 处置。
 - **spec 已晋升内容回滚 = 手工（已知限制）**：已晋升/已发布的 spec 内容无 CLI 回滚，建议 `maestro spec supersede <sid> --by <修正版sid>` 到修正版，而不是直接改写已晋升条目。
 
 #### Step 6 — session seal + 未来验证
@@ -171,7 +175,7 @@ maestro search "<title>" --type knowhow|spec --json
 <guardrails>
 1. **禁止直接写 spec/knowhow 文件**：一切生命周期写入只走 `maestro knowledge stage|review|promote|record` CLI 或 `run complete` 的 seal 事务；不在 `.workflow/specs|knowhow` 下手动增改条目。
 2. **evidence 必填**：stage 与 record 尽量携带 `--evidence <refs>`（file:line / artifact / output 锚点），promote 强依赖 sealed source run 的 reconciliation receipt 新鲜度。
-3. **reason 必填**：`review --resolve` 的 `--reason` 非空（为空 → throw；promote 命令本身无 --reason）；promote 前所有 review_required 必须有裁决 reason。
+3. **reason 必填**：`promote --resolve`/`review --resolve` 的 `--reason` 非空（为空 → throw）；promote 前所有 review_required 必须有裁决 reason。
 4. **promote 需用户确认**：任何晋升动作先 `ask-user-question`；批量晋升仅允许 `--all`，不得自动 resolve 任何候选（`-y` 不是 knowledge review/promote/session seal 的 CLI 选项——它是 maestro-session-seal skill 的调用参数 `maestro-session-seal --session <sid> -y`，且同样不得自动 resolve）。
 5. **global 语义警告**：spec 有 scope（`project`（默认）/ `global` / `team` / `personal`）。**global scope 条目属于 MVP 不可自动改清单**（§6 不可变边界）：本 skill 的 stage/promote 默认面向 project scope；涉及 global 条目的 supersede/conflict/晋升必须显式提示用户 scope 影响并确认，不得静默执行。
 6. **不自动改 `.pi/skills/` 与共享 workflow**：Phase 2 前禁止自动改写 `.pi/skills/`；`finish:` 注入仅提供示例与落点说明（见下），不实际修改 `~/.maestro/workflows/` 共享文件。
@@ -187,7 +191,7 @@ maestro search "<title>" --type knowhow|spec --json
 # <workflow-doc>.md frontmatter 追加段
 finish:
   - "Stage reusable findings: put accepted decisions and locked constraints in report.md frontmatter (completion stages them automatically); reusable recipes/pitfalls → `maestro knowledge stage knowhow \"<title>\" --content-file <path> --run <run-id> --evidence <file:line>`. Never write project spec/knowhow directly from routine Run completion."
-  - "Resolve reconciliation candidates: inspect the receipt created by `maestro run check`; resolve semantic duplicates/conflicts/supersession with `maestro knowledge review <session-id> --resolve <candidate-id> --as <duplicate|related|conflict|supersede|unique> [--target <knowledge-id>] --reason \"<reason>\"`, then promote with `maestro knowledge promote <session-id> --candidate <candidate-id>` (promote has no --reason/--resolve). Unresolved items may be sealed but cannot be promoted."
+  - "Resolve reconciliation candidates: inspect the receipt created by `maestro run check`; adjudicate semantic duplicates/conflicts/supersession with `maestro knowledge promote <session-id> --resolve <candidate-id> --as <duplicate|related|conflict|supersede|unique> [--target <knowledge-id>] --reason \"<reason>\"` (fence + resolve + promote in one step; `review --resolve` is the deprecated compatibility fallback). Unresolved items may be sealed but cannot be promoted."
   - "Record attribution: a search hit or automatic injection is exposure only — `maestro knowledge record <ids...> --signal consumed|cited|validated|contradicted --source search --run <run-id>` before citing."
   - "Contradicted canonical knowledge: record the contradiction before sealing; after review/promotion replace stale rules with `maestro spec supersede <old-sid> --by <new-sid>`; coexisting valid rules → `maestro spec conflict mark <file> <line> --note \"<reason>\"`."
   - "Pick the verdict honestly: `done` (clean) or `done-with-concerns` (works but carries caveats — list every caveat in concerns)."
@@ -313,9 +317,9 @@ maestro knowledge review <session-id> --json   # 收尾：剩余 review_required
 | Code | Severity | Condition | Recovery |
 |------|----------|-----------|----------|
 | E001 | error | promote：源 run 未 seal | 先 `maestro session done <run-id>`（或别名 `run complete`）再重试 |
-| E002 | error | promote：review_required 未裁决 | `knowledge review --resolve --as <choice> --reason "..."` 裁决后重试 |
+| E002 | error | promote：review_required 未裁决 | `knowledge promote <sid> --resolve <id> --as <choice> --reason "..."` 内联裁决（或回退 `review --resolve`）后重试 |
 | E003 | error | promote：spec title 冲突（同 title 异 content） | `--as supersede` resolve 或 `spec supersede` / `spec conflict mark` 后重试 |
-| E004 | error | review --resolve：reason 为空 / target 缺失 / target 非 evidence-backed | 补全参数重试 |
+| E004 | error | promote --resolve / review --resolve：reason 为空 / target 缺失 / target 非 evidence-backed | 补全参数重试 |
 | E005 | error | 候选源 run 无 reconciliation receipt 或 receipt stale | `knowledge review <session-id> --refresh` 后重试 |
 | E006 | warning | check 阶段无自动草拟候选 | 预期行为（seal 后物化），非闭环失效 |
 | E007 | warning | `--all` 晋升 observed-only 候选并警告（实测 CLI 行为，非跳过） | 如需显式逐个，用 `--candidate <id>`（先 resolve） |
@@ -331,10 +335,10 @@ maestro knowledge review <session-id> --json   # 收尾：剩余 review_required
   首次 observe 只记 `signalsBaseline`（增量窗口），重复 observe 同一快照不递增；窗口内用**增量**信号判定：
   validated+cited ≥ 1 → PROMOTE 建议；contradicted>0 或窗口到期无佐证 → ROLLBACK 建议。
   脚本只出**建议命令（需按会话实际 session-id/candidate-id/target 补全后执行）**：
-  - PROMOTE → `maestro knowledge promote <session-id> --candidate <id>`（promote 无 --reason；session-id 经 `maestro knowledge review <session-id> --json` 或 run brief 解析）
+  - PROMOTE → `maestro knowledge promote <session-id> --resolve <id> --as <choice> --reason "<reason>"`（内联裁决+晋升；纯晋升用 --candidate；session-id 经 `maestro knowledge review <session-id> --json` 或 run brief 解析）
   - ROLLBACK → ①候选未晋升：`maestro knowledge review <session-id> --resolve <candidate-id> --as rejected --reason "canary rollback: 无佐证"`；②已晋升为知识条目：`maestro spec supersede <sid> --by <修正版sid>`
   promotion 仍需经 Step 5 显式 `promote`（fail-closed 门不变）。
-- **ROLLBACK 执行链**：canary ROLLBACK 建议 → 呈现协议（展示证据与 target 候选，见 Step 4）→ 用户确认（护栏：涉及 global 条目必须显式确认）→ `review --resolve --as rejected|supersede`（补全 session-id/candidate-id/target）→ `node scripts/self-evolve-approval.mjs record --action supersede --session <session-id> --reason "canary rollback" --candidates <id>`。窗口到期无佐证走同一链条（`--as rejected`）。
+- **ROLLBACK 执行链**：canary ROLLBACK 建议 → 呈现协议（展示证据与 target 候选，见 Step 4）→ 用户确认（护栏：涉及 global 条目必须显式确认）→ `promote --resolve --as rejected|supersede`（补全 session-id/candidate-id/target；回退 `review --resolve`）→ `node scripts/self-evolve-approval.mjs record --action supersede --session <session-id> --reason "canary rollback" --candidates <id>`。窗口到期无佐证走同一链条（`--as rejected`）。
 - **skill 修改独立 proposal（不复用 knowhow promotion）**：
   `proposal` 生成快照（sha256）+ diff + 权限差异审查（allowed-tools 增删，敏感工具变更标注）+ 静态检查
   （frontmatter 完整、execution/success_criteria 标签配对）→ 全局 `proposals/<id>/`（id 带时间后缀）；
@@ -344,7 +348,7 @@ maestro knowledge review <session-id> --json   # 收尾：剩余 review_required
 
 <success_criteria>
 - [ ] intent 正确分类并映射到对应 CLI 步骤，命令参数与 `maestro <cmd> --help` 一致
-- [ ] full-cycle：run check 评审清单已读 → stage（evidence 锚点）→ session done seal → review --resolve 裁决（reason 非空）→ promote（--candidate/--all）→ search 命中验证；session 源候选需先 session seal 再 promote（session seal 仅 session 源候选需要）
+- [ ] full-cycle：run check 评审清单已读 → stage（evidence 锚点）→ session done seal → promote --resolve 内联裁决+晋升（reason 非空）→ search 命中验证；session 源候选需先 session seal 再 promote（session seal 仅 session 源候选需要）
 - [ ] 所有知识写入均经 `maestro knowledge ...` CLI 或 seal 事务，未直接写 spec/knowhow 文件
 - [ ] 阻断条件（未 seal / 未裁决 / 冲突 / 空 reason / stale receipt）被显式报告而非绕过
 - [ ] global scope 影响已提示用户并确认；共享 workflow 文件未被修改

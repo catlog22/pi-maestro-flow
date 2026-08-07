@@ -113,7 +113,7 @@ observe({ action: "watch", targets: [{ kind: "teammate", id: "reviewer" }], time
 ~/.maestro/self-evolve/exports/                   # signals export 导出（signals-<ts>.jsonl）
 ```
 
-**与 maestro-knowledge skill 的关系**：self-evolve 只产出**信号 → 评审**（dry-run）；真正沉淀走 CLI：`maestro knowledge stage`（信号自带可执行 suggestion 模板，证据文件已生成）→ `maestro knowledge review --resolve` 裁决 → `maestro knowledge promote` 晋升 → 未来 `maestro search` 验证。全程人工确认，无自动写库。
+**与 maestro-knowledge skill 的关系**：self-evolve 只产出**信号 → 评审**（dry-run）；真正沉淀走 CLI：`maestro knowledge stage`（信号自带可执行 suggestion 模板，证据文件已生成）→ `maestro knowledge promote --resolve` 内联裁决+晋升（或兼容回退 `review --resolve`）→ 未来 `maestro search` 验证。全程人工确认，无自动写库。
 
 **相关脚本**：
 
