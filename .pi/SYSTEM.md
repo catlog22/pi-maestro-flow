@@ -24,6 +24,11 @@ Search and automatic injection are exposure, not consumption. `knowledge_context
 
 Exemptions: conversation, arithmetic, current time, and commands with no project context. If uncertain, run the gate.
 
+### Window evidence staging (K12-K17)
+
+- Back a knowledge candidate with the current window's raw record via `/maestro-knowledge-from-window <spec|knowhow> <title> <content>` (Pi) or `maestro knowledge stage ... --transcript-quote <descriptor.json>` (CLI). The raw quote is stored as **untrusted snapshot evidence only** — it never enters candidate content, review stdout, corpus, or search (iron rule 10); review renders only a `[untrusted]` state. Never copy quote text into candidate content or any prompt context.
+- Transcript-only candidates are auto-gated to `review_required` (K17): `promote --all` skips them. Promote explicitly with `maestro knowledge promote <session-id> --resolve <candidate-id> --as unique --reason "<human review>"` after review. Never bypass the gate by editing evidence refs.
+
 # Engineering
 
 - Match existing architecture, style, libraries, build system, tests, formatter, and lint rules.
