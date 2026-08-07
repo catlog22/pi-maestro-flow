@@ -7,6 +7,7 @@ import {
 	invalidateUsageCache,
 	setUsageThrottle,
 	fmtTokens,
+	fmtCost,
 	renderBar,
 	type FooterParts,
 	type WidthUtils,
@@ -173,7 +174,10 @@ test("context and token usage form one right-aligned resource group on line one"
 });
 
 test("medium footer uses the compact five-cell context bar", () => {
-	const lines = renderFooter(parts({ width: 60 }));
+	const lines = renderFooter(parts({
+		width: 60,
+		totals: { input: 12000, output: 3400, cacheRead: 0, cacheWrite: 0, cost: 0, latestCacheHitRate: undefined },
+	}));
 	assert.equal(lines.length, 1);
 	assert.match(lines[0], /\[██░░░\] 42% · 84k\/200k · ↑12k · ↓3\.4k$/);
 	assert.doesNotMatch(lines[0], /\[████░░░░░░\]/);
@@ -198,7 +202,7 @@ test("narrow footer simplifies the resource group before dropping identity", () 
 	assert.doesNotMatch(lines[0], /\[/);
 });
 
-test("approval mode leads line one while usage stays right aligned", () => {
+	test("approval mode leads line one while usage stays right aligned", () => {
 	const lines = renderFooter(parts({
 		width: 80,
 		extensionStatuses: [{ key: "approval-mode", text: "APPROVAL YOLO" }],
@@ -206,7 +210,7 @@ test("approval mode leads line one while usage stays right aligned", () => {
 	assert.equal(lines.length, 1);
 	assert.match(lines[0], /^YOLO · ⚡ stream-70b/);
 	assert.equal(lines[0].length, 80);
-	assert.match(lines[0], /↑12k · ↓3\.4k$/);
+	assert.match(lines[0], /↑12k · ↓3\.4k · \$0\.52$/);
 });
 
 test("auto compact stays hidden while approval remains at the start of line one", () => {
@@ -221,15 +225,25 @@ test("auto compact stays hidden while approval remains at the start of line one"
 	assert.match(lines[0], /^APPROVAL default · ⚡ stream-70b/);
 	assert.doesNotMatch(lines.join("\n"), /AUTO COMPACT|AUTO ON/);
 	assert.equal(lines[0].length, 100);
-	assert.match(lines[0], /↑12k · ↓3\.4k$/);
+	assert.match(lines[0], /↑12k · ↓3\.4k · \$0\.52$/);
 });
 
-test("footer uses a workspace icon and omits monetary cost while keeping token usage", () => {
+test("footer shows monetary cost on the resource line once pricing is registered", () => {
 	const lines = renderFooter(parts({ cwd: "~/work/project", width: 100 }));
 	assert.match(lines[0], /^⚡ stream-70b ·  ~\/work\/project/);
 	assert.match(lines[0], /↑12k/);
 	assert.match(lines[0], /↓3.4k/);
-	assert.doesNotMatch(lines.join("\n"), /\$0\.52/);
+	assert.match(lines[0], /\$0\.52$/);
+});
+
+test("footer omits monetary cost when the channel has no pricing (cost 0)", () => {
+	const lines = renderFooter(parts({
+		cwd: "~/work/project",
+		width: 100,
+		totals: { input: 12000, output: 3400, cacheRead: 0, cacheWrite: 0, cost: 0, latestCacheHitRate: undefined },
+	}));
+	assert.doesNotMatch(lines.join("\n"), /\$/);
+	assert.match(lines[0], /↑12k · ↓3\.4k$/);
 });
 
 test("footer uses a coherent nerd icon set for model, workspace and git", () => {
@@ -354,4 +368,14 @@ test("fmtTokens formats k and m", () => {
 	assert.equal(fmtTokens(1500), "1.5k");
 	assert.equal(fmtTokens(2000), "2k");
 	assert.equal(fmtTokens(2_500_000), "2.5m");
+});
+
+test("fmtCost formats USD magnitudes (glyph paints the $ sign)", () => {
+	assert.equal(fmtCost(1500), "1.5k");
+	assert.equal(fmtCost(123), "123");
+	assert.equal(fmtCost(12.5), "12.50");
+	assert.equal(fmtCost(0.52), "0.52");
+	assert.equal(fmtCost(0.075), "0.08");
+	assert.equal(fmtCost(0.008), "0.008");
+	assert.equal(fmtCost(0.0004), "0.0004");
 });

@@ -50,6 +50,7 @@ import {
   configureCustomModelTarget,
 } from "./api-provider-config.ts";
 import type { ApiProviderAction, ApiProviderId, ApiProviderSettings, ApiThinkingLevel, ProviderDefaults, SaveApiProviderResult } from "./api-provider-config.ts";
+import { lookupBuiltinPricing } from "./cost-backfill.ts";
 import { loadVisionDelegationConfig } from "./vision-assist.ts";
 import {
   isCacheRetention,
@@ -680,7 +681,9 @@ export function configuredProviderRegistration(
       : ["text"];
     const cost = isCost(model.cost)
       ? { ...model.cost }
-      : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+      // Custom channels rarely carry cost in models.json; fall back to the
+      // built-in pi-ai catalog so the footer shows real spend instead of $0.
+      : (lookupBuiltinPricing(model.id)?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
     const clone: ProviderModelConfig = {
       id: model.id,
       name: typeof model.name === "string" ? model.name : model.id,
@@ -824,7 +827,7 @@ export function resolveTargetToken(value: string): ChannelTarget | undefined {
 
 export function usageError(): Error {
   return new Error(
-    `用法：/api-manager list | retry [show|on [1-${API_RETRY_MAX_RETRIES}]|off] | cache [show|auto|off|on] | cache agent [show|short|long|none] | show|set|delete|enable|disable|logout|reset [openai|qwen|anthropic|<Provider ID>|new]`,
+    `用法：/api-manager list | retry [show|on [1-${API_RETRY_MAX_RETRIES}]|off] | cache [show|auto|off|on] | cache agent [show|short|long|none] | price [openai|qwen|anthropic|<Provider ID>] | show|set|delete|enable|disable|logout|reset [openai|qwen|anthropic|<Provider ID>|new]`,
   );
 }
 
@@ -1096,6 +1099,7 @@ export async function chooseAction(
       action: "cache-agent",
       label: `Agent 缓存档位（当前：${await loadAgentCacheRetention(settingsPath)}）`,
     },
+    { action: "price", label: "回填模型价格（内置表 + OpenRouter 在线）" },
     { action: "logout", label: "注销 Provider" },
     { action: "reset", label: "重置 Provider" },
   ];
@@ -1118,6 +1122,7 @@ export function actionFromArg(value: string): ApiProviderAction | undefined {
   if (value === "cache-agent" || value === "agent-cache") return "cache-agent";
   if (value === "vision") return "vision";
   if (value === "effort") return "effort";
+  if (value === "price" || value === "pricing" || value === "cost") return "price";
   if (value === "reset") return "reset";
   return undefined;
 }

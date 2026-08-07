@@ -132,6 +132,16 @@ export function fmtTokens(n: number): string {
 	return String(n);
 }
 
+// USD cost formatting (the "$" glyph is painted by the caller, like ↑/↓ for tokens):
+// cents below $1, two decimals above, compact k above $1k. Sub-cent values keep
+// enough significant digits to stay meaningful (e.g. 0.008).
+export function fmtCost(n: number): string {
+	if (n >= 1_000) return trim(n / 1_000) + "k";
+	if (n >= 100) return String(Math.round(n));
+	if (n >= 0.01) return (Math.round((n + Number.EPSILON) * 100) / 100).toFixed(2);
+	return n.toFixed(4).replace(/\.?0+$/, "");
+}
+
 function trim(x: number): string {
 	return x.toFixed(1).replace(/\.0$/, "");
 }
@@ -292,6 +302,11 @@ export function renderFooter(p: FooterParts): string[] {
 		? [...coreStats, theme.fg("accent", p.agentSummary)]
 		: coreStats;
 
+	// Cost only appears once the channel registers pricing; a $0 estimate is
+	// noise on every session of an unconfigured custom provider.
+	const costText = t.cost > 0 ? `${theme.fg("warning", g.cost)}${fmtCost(t.cost)}` : "";
+	const withCost = (stats: string[]): string[] => (costText && stats.length > 0 ? [...stats, costText] : stats);
+
 	if (p.ctxWindow > 0) {
 		// A contextWindow that under-reports the live token count (custom providers
 		// do this) previously printed e.g. "137%" beside a bar clamped at full.
@@ -304,18 +319,18 @@ export function renderFooter(p: FooterParts): string[] {
 		const fullContext = `${renderBar(p.ctxPct, 10, g, theme)} ${pctText} ${sep} ${tokText}`;
 		const compactContext = `${renderBar(p.ctxPct, 5, g, theme)} ${pctText} ${sep} ${tokText}`;
 		const capacityContext = `${pctText} ${sep} ${tokText}`;
-		addResourceCandidate(fullContext, ...fullStats);
-		addResourceCandidate(fullContext, ...coreStats);
-		addResourceCandidate(compactContext, ...coreStats);
-		addResourceCandidate(compactContext, ...tokenStats);
-		addResourceCandidate(capacityContext, ...tokenStats);
-		addResourceCandidate(pctText, ...tokenStats);
-		addResourceCandidate(...tokenStats);
+		addResourceCandidate(fullContext, ...withCost(fullStats));
+		addResourceCandidate(fullContext, ...withCost(coreStats));
+		addResourceCandidate(compactContext, ...withCost(coreStats));
+		addResourceCandidate(compactContext, ...withCost(tokenStats));
+		addResourceCandidate(capacityContext, ...withCost(tokenStats));
+		addResourceCandidate(pctText, ...withCost(tokenStats));
+		addResourceCandidate(...withCost(tokenStats));
 		addResourceCandidate(pctText);
 	} else {
-		addResourceCandidate(...fullStats);
-		addResourceCandidate(...coreStats);
-		addResourceCandidate(...tokenStats);
+		addResourceCandidate(...withCost(fullStats));
+		addResourceCandidate(...withCost(coreStats));
+		addResourceCandidate(...withCost(tokenStats));
 	}
 	resourceCandidates.push("");
 

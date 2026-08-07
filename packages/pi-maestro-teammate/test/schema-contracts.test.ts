@@ -198,10 +198,42 @@ test("findStructuredOutputSchemaHazard rejects malformed enum values", () => {
 
 test("findStructuredOutputSchemaHazard enforces the object-root contract", () => {
   assert.match(findStructuredOutputSchemaHazard({}) ?? "", /must declare type "object"/);
-  assert.match(findStructuredOutputSchemaHazard({ type: "string" }) ?? "", /root must be type "object"/);
+  assert.match(findStructuredOutputSchemaHazard({ type: "string" }) ?? "", /root must be a single type:"object" schema/);
   assert.match(findStructuredOutputSchemaHazard({ anyOf: [{ type: "object" }] }) ?? "", /root must not use "anyOf"/);
   assert.match(findStructuredOutputSchemaHazard({ oneOf: [{ type: "object" }] }) ?? "", /root must not use "anyOf"/);
   assert.equal(findStructuredOutputSchemaHazard({ type: "object", properties: {} }), undefined);
+});
+
+test("findStructuredOutputSchemaHazard accepts type+enum on nested properties", () => {
+  // The common analyst-style schema: a typed enum inside properties must pass
+  // preflight — the runtime validator (TypeBox Compile/Check) accepts it.
+  assert.equal(
+    findStructuredOutputSchemaHazard({
+      type: "object",
+      properties: { status: { type: "string", enum: ["ok", "fail"] } },
+      required: ["status"],
+    }),
+    undefined,
+  );
+  assert.equal(
+    findStructuredOutputSchemaHazard({
+      type: "object",
+      properties: { status: { type: ["string", "null"], enum: ["ok", null] } },
+      required: ["status"],
+    }),
+    undefined,
+  );
+});
+
+test("findStructuredOutputSchemaHazard rejects a root type+enum with actionable guidance", () => {
+  const message = findStructuredOutputSchemaHazard({ type: "string", enum: ["a", "b"] }) ?? "";
+  assert.match(message, /root must be a single type:"object" schema \(got "string" with "enum"\)/);
+  assert.match(message, /"properties": \{ "value"/);
+  assert.match(message, /"required": \["value"\]/);
+  assert.match(
+    findStructuredOutputSchemaHazard({ type: ["string", "null"], enum: ["a", null] }) ?? "",
+    /root must be a single type:"object" schema/,
+  );
 });
 
 test("findStructuredOutputSchemaHazard flags only a root task-text prompt key", () => {

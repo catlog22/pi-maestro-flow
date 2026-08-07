@@ -1834,7 +1834,15 @@ export function findStructuredOutputSchemaHazard(
   }
   const rootTypes = Array.isArray(schema.type) ? schema.type : [schema.type];
   if (rootTypes.length !== 1 || rootTypes[0] !== "object") {
-    return `outputSchema root must be type "object" (got ${JSON.stringify(schema.type)}).`;
+    const typeLabel = JSON.stringify(schema.type);
+    if (schema.enum !== undefined) {
+      // type+enum at the root is the common analyst-style mistake: a
+      // fixed-value answer written as a bare primitive. Structured output is
+      // contractually an object, so point at the wrapping shape instead of a
+      // bare "must be object" rejection.
+      return `outputSchema root must be a single type:"object" schema (got ${typeLabel} with "enum") — structured output must be an object; move the value choice into a property, e.g. { "type": "object", "properties": { "value": { "type": ${typeLabel}, "enum": [...] } }, "required": ["value"] }.`;
+    }
+    return `outputSchema root must be a single type:"object" schema (got ${typeLabel}).`;
   }
   return undefined;
 }

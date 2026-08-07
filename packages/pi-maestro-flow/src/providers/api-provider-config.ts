@@ -18,7 +18,7 @@ import {
   type ProviderModelConfig,
 } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type ModelCost } from "@earendil-works/pi-ai";
 import { NETWORK_RETRY_POLICY } from "pi-maestro-teammate/v1/retry";
 import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
 import {
@@ -34,6 +34,11 @@ import {
   type ApiModelFormValues,
 } from "../tui/api-model-editor.ts";
 import { showVisionDelegationManager } from "./vision-assist.ts";
+import {
+  fetchOpenRouterPricing,
+  lookupBuiltinPricing,
+  matchOpenRouterPricing,
+} from "./cost-backfill.ts";
 
 export type ApiProviderId = "maestro-openai" | "maestro-qwen" | "maestro-anthropic";
 
@@ -219,7 +224,7 @@ export interface ApiRetrySettings {
   baseDelayMs?: number;
 }
 
-export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "effort" | "enable" | "list" | "logout" | "reset" | "retry" | "show" | "toggle" | "vision";
+export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "effort" | "enable" | "list" | "logout" | "price" | "reset" | "retry" | "show" | "toggle" | "vision";
 export type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
@@ -791,6 +796,86 @@ function notifyPromptCacheSettings(
   ].join("\n"), "info");
 }
 
+/**
+ * Backfill cost rates for a channel's models missing a `cost` entry in
+ * models.json: pi-ai built-in catalog first, OpenRouter online pricing second.
+ * Persisted through the same atomic write path as the config wizard.
+ */
+async function backfillProviderCosts(
+  ctx: ExtensionCommandContext,
+  providerId: string,
+  displayName: string,
+  modelsPath: string,
+): Promise<void> {
+  const root = await readModelsRoot(modelsPath);
+  const providers = isRecord(root.providers) ? root.providers : {};
+  const config = isRecord(providers[providerId]) ? providers[providerId] : undefined;
+  const models = config && Array.isArray(config.models) ? config.models.filter(isRecord) : [];
+  if (models.length === 0) {
+    ctx.ui.notify(`${displayName}：未配置模型，无法回填价格。`, "warning");
+    return;
+  }
+  const missing = models.filter((model) => typeof model.id === "string" && !isCost(model.cost));
+  if (missing.length === 0) {
+    ctx.ui.notify(`${displayName}：所有模型均已配置价格。`, "info");
+    return;
+  }
+  const ids = missing.map((model) => model.id as string);
+  const builtin = new Map<string, ModelCost>();
+  for (const id of ids) {
+    const match = lookupBuiltinPricing(id);
+    if (match) builtin.set(id, match.cost);
+  }
+  const unresolved = ids.filter((id) => !builtin.has(id));
+  const online = new Map<string, ModelCost>();
+  if (unresolved.length > 0) {
+    try {
+      const openRouter = await fetchOpenRouterPricing();
+      for (const id of unresolved) {
+        const match = matchOpenRouterPricing(openRouter, id);
+        if (match) online.set(id, match.cost);
+      }
+    } catch {
+      // Offline: skip the online pass; unmatched ids are listed in the report.
+    }
+  }
+  if (builtin.size + online.size === 0) {
+    ctx.ui.notify(
+      `${displayName}：内置表与 OpenRouter 均未命中定价（保持 $0）：${unresolved.join(", ")}`,
+      "warning",
+    );
+    return;
+  }
+  await serializeMutation(modelsPath, async () => {
+    const current = await readModelsRoot(modelsPath);
+    const currentProviders = isRecord(current.providers) ? current.providers : {};
+    const currentConfig = isRecord(currentProviders[providerId])
+      ? { ...currentProviders[providerId] }
+      : undefined;
+    if (!currentConfig || !Array.isArray(currentConfig.models)) return;
+    const nextModels = currentConfig.models.map((model) => {
+      if (!isRecord(model) || typeof model.id !== "string") return model;
+      const fill = builtin.get(model.id) ?? online.get(model.id);
+      if (!fill || isCost(model.cost)) return model;
+      return { ...model, cost: fill };
+    });
+    currentConfig.models = nextModels;
+    await writeModelsRoot(
+      { ...current, providers: { ...currentProviders, [providerId]: currentConfig } },
+      modelsPath,
+      true,
+    );
+  });
+  const unmatched = unresolved.filter((id) => !online.has(id));
+  ctx.ui.notify(
+    [
+      `${displayName}：已回填 ${builtin.size} 个（内置表）${online.size > 0 ? `、${online.size} 个（OpenRouter 在线）` : ""}模型的定价。`,
+      ...(unmatched.length > 0 ? [`未匹配（保持 $0）：${unmatched.join(", ")}`] : []),
+    ].join("\n"),
+    "info",
+  );
+}
+
 function notifyRetrySettings(
   ctx: Pick<ExtensionCommandContext, "ui">,
   settings: ApiRetrySettings,
@@ -848,6 +933,17 @@ async function showApiProviderManager(
   }
   if (action === "cache-agent") {
     await manageAgentCacheRetention(ctx, settingsPath, parsed.cacheAgent);
+    return;
+  }
+  if (action === "price") {
+    const target = parsed.target ?? (ctx.hasUI ? await chooseProvider(ctx, modelsPath, defaultsPath) : undefined);
+    if (!target) {
+      ctx.ui.notify(t("manager.specifyProvider"), "warning");
+      return;
+    }
+    const ref = await resolveChannelRef(target, ctx, modelsPath);
+    if (!ref) return;
+    await backfillProviderCosts(ctx, ref.id, ref.name, modelsPath);
     return;
   }
   if (action === "enable" || action === "disable" || action === "toggle") {
@@ -1901,6 +1997,7 @@ import {
   isProviderConfigured,
   isProviderEnabled,
   isRecord,
+  isCost,
   isStringRecord,
   isThinkingLevel,
   listProviders,
