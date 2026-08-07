@@ -133,7 +133,7 @@ maestro session done <run_id> --verdict done --workflow-root .
 
 Display: `Companion done. Run: {run_id} | Evidence: {path}`
 
-If the completion receipt contains candidate IDs, display its `review_command`. Do not persist the same insight again through `/maestro-spec` or `/maestro-knowhow`.
+If the completion receipt contains candidate IDs, run `maestro knowledge review <session-id> --json` yourself and apply the Review Presentation Protocol: present each candidate (title, content summary, evidence anchors, evidence-backed matches, recommended disposition + one-line rationale), collect the user's decisions, then execute the `--resolve` commands. Never hand the raw review command to the user as the whole task. Do not persist the same insight again through `/maestro-spec` or `/maestro-knowhow`.
 
 If execution revealed the task requires multi-phase audit/diagnosis (e.g., root cause unknown, >3 files need coordinated changes), suggest: `/maestro-odyssey "<scope>" --mode debug|improve` for re-planning.
 

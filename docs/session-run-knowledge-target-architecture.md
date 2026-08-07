@@ -124,7 +124,7 @@ source_refs: [{ kind: 'run' | 'session', id: string, evidence_root: string }]
 | 源 | 门禁 |
 |---|---|
 | run 源 | 所有源 run sealed **AND** 每源有 receipt **AND** receipt 新鲜（corpus fingerprint 比对）——现状不变 |
-| session 源 | session delta 不可变（sealed 或带 candidate snapshot revision 的显式 freeze）**AND** 新鲜 session corpus receipt **AND** stage 时 `--evidence` 非空 |
+| session 源 | session delta 不可变（**MVP 为 seal-only 单分支**；显式 freeze 分支按 §6A.4 条件性回归——仅在实证"长开 synthetic session 不便 seal"后重新引入）**AND** 新鲜 session corpus receipt **AND** stage 时 `--evidence` 非空 |
 
 两源门禁强度等价："不可变"只保证候选内容冻结，"新鲜 receipt"证明候选已对当前 corpus 完成对账——缺一不可。
 

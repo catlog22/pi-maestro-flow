@@ -340,9 +340,9 @@ maestro knowledge promote <sid>           ← 双源门禁（D4，均为双重�
 ## 9. 开放问题（v2 状态）
 
 - ~~**OQ-1**：无参隐式解析顺序~~ → 已收敛（D2 写授权分级），channel TTL 改为按 hostKind 的存活策略（D9）。
-- **OQ-2**：checkpoint 收编 → **评审推荐：纳入本轮，recovery-only + 治理候选**（已采纳为 Phase 4 方案，待最终确认）。
+- ~~**OQ-2**：checkpoint 收编~~ → **已实施（K10）**：compaction checkpoint 物理迁至 `.workflow/recovery/compaction-checkpoints/` 并加越界守卫，corpus 停止 active 直写；staging 半边按设计延后。
 - **OQ-3**：跨 session corroboration → **评审推荐：分级门禁**——机器验证的单 session 事实可显式晋升；LLM/人工提炼的 session-only 候选进 T2 自动路径需跨 session 独立证据根或机器 verifier；单 session 手动 promote 需确认 + reason（待确认采纳）。
-- **OQ-4**：存量积压 → **评审推荐：不阻断切换，上线前基线分区 + 一次性分诊**（已写入 §7，待确认采纳）。
+- ~~**OQ-4**：存量积压~~ → **已采纳执行**：mvp §7 risk 4 明确分诊原则；sealed 部分已分诊（47 promoted / 剩余 pending 含噪音与 running 旧 session，按用户决策不处理）。
 - **OQ-5**：指纹算法 → v2 曾采纳为 D3/§4.1 约束；**v2.1 复杂度审计后降级：指纹全套砍出 MVP，延后二期且需三平台原型实证后再议**（MVP 用显式/lease/hook 通道 + 收窄扫描已覆盖全部已证实平台；纯终端多会话并发接受 `--channel` 手动摩擦）。
 
 ---
