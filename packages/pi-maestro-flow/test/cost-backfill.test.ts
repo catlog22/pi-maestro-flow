@@ -8,6 +8,7 @@ import {
   lookupBuiltinPricing,
   matchOpenRouterPricing,
 } from "../src/providers/cost-backfill.ts";
+import { providerIdsInModels } from "../src/providers/api-provider-ops.ts";
 
 test("lookupBuiltinPricing resolves official OpenAI rates from the pi-ai catalog", () => {
   const match = lookupBuiltinPricing("gpt-5.6-sol");
@@ -35,6 +36,20 @@ test("lookupBuiltinPricing returns undefined for unknown ids", () => {
   assert.equal(lookupBuiltinPricing("definitely-not-a-model-12345"), undefined);
 });
 
+test("lookupBuiltinPricing prefers the catalog matching the channel's API driver", () => {
+  const openai = lookupBuiltinPricing("gpt-5.6-sol", "openai-responses");
+  assert.equal(openai?.source, "openai");
+  assert.equal(openai?.cost.cacheWrite, 6.25);
+  const azure = lookupBuiltinPricing("gpt-5.6-sol", "azure-openai-responses");
+  assert.equal(azure?.source, "azure-openai-responses");
+  assert.equal(azure?.cost.cacheWrite, 6.25);
+  const codex = lookupBuiltinPricing("gpt-5.6-sol", "openai-codex-responses");
+  assert.equal(codex?.source, "openai-codex");
+  const deepseek = lookupBuiltinPricing("deepseek-v4-flash", "openai-completions");
+  assert.equal(deepseek?.source, "deepseek");
+  assert.equal(deepseek?.cost.input, 0.14);
+});
+
 test("matchOpenRouterPricing matches bare channel ids to provider-prefixed ids", () => {
   const models = new Map<string, never>([
     ["openai/gpt-5.6-sol", undefined as never],
@@ -45,6 +60,23 @@ test("matchOpenRouterPricing matches bare channel ids to provider-prefixed ids",
   assert.equal(match!.source, "openrouter:openai/gpt-5.6-sol");
   assert.equal(matchOpenRouterPricing(models as never, "claude-sonnet-4-5")?.source, "openrouter:anthropic/claude-sonnet-4-5");
   assert.equal(matchOpenRouterPricing(models as never, "no-such-model"), undefined);
+});
+
+test("providerIdsInModels enumerates every provider including native ones", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-cost-backfill-"));
+  const modelsPath = join(dir, "models.json");
+  try {
+    writeFileSync(modelsPath, JSON.stringify({
+      providers: {
+        openai: { baseUrl: "https://hub.linux.do/v1", models: [{ id: "gpt-5.5" }] },
+        "maestro-openai": { baseUrl: "https://api.openai.com/v1", models: [{ id: "gpt-5.6-sol" }] },
+        broken: "not-a-record",
+      },
+    }));
+    assert.deepEqual(providerIdsInModels(modelsPath).sort(), ["maestro-openai", "openai"].sort());
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("fetchOpenRouterPricing converts per-token pricing from a fresh disk cache", async () => {

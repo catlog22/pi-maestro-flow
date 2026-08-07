@@ -595,6 +595,19 @@ export function configuredProviderIds(modelsPath: string): Set<ApiProviderId> {
   }
 }
 
+/** Every provider id present in models.json, native ones (e.g. "openai") included. */
+export function providerIdsInModels(modelsPath: string): string[] {
+  try {
+    const parsed = JSON.parse(readFileSync(modelsPath, "utf8")) as unknown;
+    if (!isRecord(parsed) || !isRecord(parsed.providers)) return [];
+    // Hoisted: TypeScript drops property narrowing inside the filter callback.
+    const providers = parsed.providers;
+    return Object.keys(providers).filter((id) => isRecord(providers[id]));
+  } catch {
+    return [];
+  }
+}
+
 export function hasEnabledProviderSync(providerId: string, modelsPath: string): boolean {
   try {
     const parsed = JSON.parse(readFileSync(modelsPath, "utf8")) as unknown;
@@ -683,7 +696,10 @@ export function configuredProviderRegistration(
       ? { ...model.cost }
       // Custom channels rarely carry cost in models.json; fall back to the
       // built-in pi-ai catalog so the footer shows real spend instead of $0.
-      : (lookupBuiltinPricing(model.id)?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      // Prefer the catalog matching this channel's API driver (e.g. Azure
+      // pricing for azure-openai-responses channels).
+      : (lookupBuiltinPricing(model.id, typeof model.api === "string" ? model.api : registrationApi)?.cost
+        ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
     const clone: ProviderModelConfig = {
       id: model.id,
       name: typeof model.name === "string" ? model.name : model.id,

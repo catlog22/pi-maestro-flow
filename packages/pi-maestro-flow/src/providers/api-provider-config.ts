@@ -798,8 +798,9 @@ function notifyPromptCacheSettings(
 
 /**
  * Backfill cost rates for a channel's models missing a `cost` entry in
- * models.json: pi-ai built-in catalog first, OpenRouter online pricing second.
- * Persisted through the same atomic write path as the config wizard.
+ * models.json: pi-ai built-in catalog first (api-aware), OpenRouter online
+ * pricing second. Persisted through the same atomic write path as the config
+ * wizard.
  */
 async function backfillProviderCosts(
   ctx: ExtensionCommandContext,
@@ -810,23 +811,28 @@ async function backfillProviderCosts(
   const root = await readModelsRoot(modelsPath);
   const providers = isRecord(root.providers) ? root.providers : {};
   const config = isRecord(providers[providerId]) ? providers[providerId] : undefined;
-  const models = config && Array.isArray(config.models) ? config.models.filter(isRecord) : [];
+  if (!config || !Array.isArray(config.models)) {
+    ctx.ui.notify(`${displayName}：未配置模型，无法回填价格。`, "warning");
+    return;
+  }
+  const models = config.models.filter(isRecord);
   if (models.length === 0) {
     ctx.ui.notify(`${displayName}：未配置模型，无法回填价格。`, "warning");
     return;
   }
+  const configApi = typeof config.api === "string" ? config.api : undefined;
   const missing = models.filter((model) => typeof model.id === "string" && !isCost(model.cost));
   if (missing.length === 0) {
     ctx.ui.notify(`${displayName}：所有模型均已配置价格。`, "info");
     return;
   }
-  const ids = missing.map((model) => model.id as string);
   const builtin = new Map<string, ModelCost>();
-  for (const id of ids) {
-    const match = lookupBuiltinPricing(id);
-    if (match) builtin.set(id, match.cost);
+  for (const model of missing) {
+    const api = typeof model.api === "string" ? model.api : configApi;
+    const match = lookupBuiltinPricing(model.id as string, api);
+    if (match) builtin.set(model.id as string, match.cost);
   }
-  const unresolved = ids.filter((id) => !builtin.has(id));
+  const unresolved = missing.map((model) => model.id as string).filter((id) => !builtin.has(id));
   const online = new Map<string, ModelCost>();
   if (unresolved.length > 0) {
     try {
@@ -874,6 +880,29 @@ async function backfillProviderCosts(
     ].join("\n"),
     "info",
   );
+}
+
+/** Pick a channel from every provider in models.json, native ones included. */
+async function choosePriceProvider(
+  ctx: ExtensionCommandContext,
+  modelsPath: string,
+): Promise<{ id: string; name: string } | undefined> {
+  const ids = providerIdsInModels(modelsPath).sort();
+  if (ids.length === 0) return undefined;
+  const labels = new Map<string, string>();
+  const options: string[] = [];
+  for (const id of ids) {
+    const preset = findPreset(id);
+    const name = await channelDisplayName(id, modelsPath);
+    const label = `${name} · ${id}${preset ? "（预设）" : ""}`;
+    labels.set(label, id);
+    options.push(label);
+  }
+  const choice = await ctx.ui.select("选择要回填价格的渠道（内置表 + OpenRouter 在线）", options);
+  if (!choice) return undefined;
+  const id = labels.get(choice);
+  if (!id) return undefined;
+  return { id, name: await channelDisplayName(id, modelsPath) };
 }
 
 function notifyRetrySettings(
@@ -936,14 +965,33 @@ async function showApiProviderManager(
     return;
   }
   if (action === "price") {
-    const target = parsed.target ?? (ctx.hasUI ? await chooseProvider(ctx, modelsPath, defaultsPath) : undefined);
-    if (!target) {
+    // A literal provider id in models.json (e.g. the native "openai" channel)
+    // wins over preset aliases, so native channels are addressable by id too.
+    const rawTarget = args.trim().split(/\s+/).filter(Boolean)[1];
+    const literal = rawTarget && providerIdsInModels(modelsPath).includes(rawTarget)
+      ? rawTarget
+      : undefined;
+    let providerId: string | undefined;
+    let displayName: string | undefined;
+    if (literal) {
+      providerId = literal;
+      displayName = await channelDisplayName(literal, modelsPath);
+    } else if (parsed.target) {
+      const ref = await resolveChannelRef(parsed.target, ctx, modelsPath);
+      if (!ref) return;
+      providerId = ref.id;
+      displayName = ref.name;
+    } else if (ctx.hasUI) {
+      const pick = await choosePriceProvider(ctx, modelsPath);
+      if (!pick) return;
+      providerId = pick.id;
+      displayName = pick.name;
+    }
+    if (!providerId) {
       ctx.ui.notify(t("manager.specifyProvider"), "warning");
       return;
     }
-    const ref = await resolveChannelRef(target, ctx, modelsPath);
-    if (!ref) return;
-    await backfillProviderCosts(ctx, ref.id, ref.name, modelsPath);
+    await backfillProviderCosts(ctx, providerId, displayName ?? providerId, modelsPath);
     return;
   }
   if (action === "enable" || action === "disable" || action === "toggle") {
@@ -2008,6 +2056,7 @@ import {
   notifySaved,
   parseManagerArgs,
   positiveInteger,
+  providerIdsInModels,
   readModelsRoot,
   reloadProviderRegistration,
   removeProviderKey,

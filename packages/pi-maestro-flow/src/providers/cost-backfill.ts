@@ -54,22 +54,35 @@ function isZeroRates(cost: ModelCost): boolean {
 
 /**
  * Look up a model's pricing in the pi-ai built-in catalog by model id.
- * All-zero entries (e.g. token-plan placeholders whose rate is unknown) are
- * treated as missing so they never masquerade as "free".
+ * When `api` is given, providers whose catalog matches that API driver are
+ * preferred (a gpt-5.6-sol served over azure-openai-responses prices like
+ * Azure, not like OpenAI). All-zero entries (e.g. token-plan placeholders
+ * whose rate is unknown) are treated as missing so they never masquerade as
+ * "free".
  */
-export function lookupBuiltinPricing(modelId: string): CostMatch | undefined {
+export function lookupBuiltinPricing(modelId: string, api?: string): CostMatch | undefined {
   const providers = getBuiltinProviders();
   const ordered = [
     ...BUILTIN_PROVIDER_PRIORITY.filter((id) => providers.includes(id as never)),
     ...providers.filter((id) => !BUILTIN_PROVIDER_PRIORITY.includes(id as never)),
   ];
-  for (const provider of ordered) {
-    const model = getBuiltinModel(provider as never, modelId) as { cost?: unknown } | undefined;
-    const cost = model?.cost;
-    if (!validCostRates(cost) || isZeroRates(cost)) continue;
-    return { cost, source: provider };
+  const first = (list: readonly string[]): CostMatch | undefined => {
+    for (const provider of list) {
+      const model = getBuiltinModel(provider as never, modelId) as { api?: string; cost?: unknown } | undefined;
+      const cost = model?.cost;
+      if (!validCostRates(cost) || isZeroRates(cost)) continue;
+      return { cost, source: provider };
+    }
+    return undefined;
+  };
+  if (api) {
+    const apiMatched = first(ordered.filter((id) => {
+      const model = getBuiltinModel(id as never, modelId) as { api?: string } | undefined;
+      return model?.api === api;
+    }));
+    if (apiMatched) return apiMatched;
   }
-  return undefined;
+  return first(ordered);
 }
 
 const OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models";
@@ -208,12 +221,12 @@ export function matchOpenRouterPricing(
 }
 
 /**
- * Resolve pricing for one model: built-in catalog first, then OpenRouter.
- * OpenRouter is only consulted when `online` is true and the built-in table
- * missed, so offline runs never wait on the network.
+ * Resolve pricing for one model: built-in catalog first (api-aware), then
+ * OpenRouter. OpenRouter is only consulted when `online` is true and the
+ * built-in table missed, so offline runs never wait on the network.
  */
-export async function resolveModelCost(modelId: string, online = false): Promise<CostMatch | undefined> {
-  const builtin = lookupBuiltinPricing(modelId);
+export async function resolveModelCost(modelId: string, api?: string, online = false): Promise<CostMatch | undefined> {
+  const builtin = lookupBuiltinPricing(modelId, api);
   if (builtin) return builtin;
   if (!online) return undefined;
   try {
