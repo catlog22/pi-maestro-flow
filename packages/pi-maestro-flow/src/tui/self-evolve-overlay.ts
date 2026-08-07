@@ -73,7 +73,9 @@ type MenuField =
   | "maxTraceChars"
   | "maxTraceMessages"
   | "maxEvidence"
-  | "maxFiles";
+  | "maxFiles"
+  | "maxReviewFiles"
+  | "reviewScoreThreshold";
 
 const MENU_FIELDS: readonly MenuField[] = [
   "enabled",
@@ -85,6 +87,8 @@ const MENU_FIELDS: readonly MenuField[] = [
   "maxTraceMessages",
   "maxEvidence",
   "maxFiles",
+  "maxReviewFiles",
+  "reviewScoreThreshold",
 ];
 
 type SaveState = "clean" | "dirty" | "saving" | "saved" | "failed";
@@ -256,10 +260,12 @@ export class SelfEvolveOverlay implements Component, Focusable {
       case "model": return "model";
       case "cooldownMs": return "cooldown";
       case "maxSignalsPerSession": return "budget";
-      case "maxTraceChars": return "trace";
-      case "maxTraceMessages": return "trace";
+      case "maxTraceChars": return "trace chars";
+      case "maxTraceMessages": return "trace msgs";
       case "maxEvidence": return "evidence";
       case "maxFiles": return "retention";
+      case "maxReviewFiles": return "review retention";
+      case "reviewScoreThreshold": return "review score gate";
     }
   }
 
@@ -283,13 +289,17 @@ export class SelfEvolveOverlay implements Component, Focusable {
       case "maxSignalsPerSession":
         return `${draft.maxSignalsPerSession} signals/session`;
       case "maxTraceChars":
-        return `${draft.maxTraceMessages} msgs / ${draft.maxTraceChars} chars`;
+        return `${draft.maxTraceChars} chars`;
       case "maxTraceMessages":
-        return `${draft.maxTraceMessages} msgs / ${draft.maxTraceChars} chars`;
+        return `${draft.maxTraceMessages} msgs`;
       case "maxEvidence":
         return `${draft.maxEvidence} refs`;
       case "maxFiles":
         return `${draft.maxFiles} daily files`;
+      case "maxReviewFiles":
+        return `${draft.maxReviewFiles} daily files`;
+      case "reviewScoreThreshold":
+        return `${draft.reviewScoreThreshold} (stage below → uncertain)`;
     }
   }
 
@@ -313,7 +323,11 @@ export class SelfEvolveOverlay implements Component, Focusable {
       case "maxEvidence":
         return "max evidence references collected per candidate";
       case "maxFiles":
-        return "recent daily suggestion files to keep (oldest pruned)";
+        return "recent daily suggestion files to keep (oldest archived)";
+      case "maxReviewFiles":
+        return "recent daily review files to keep (independent of suggestion retention)";
+      case "reviewScoreThreshold":
+        return "review-gate score: stage verdicts below this are downgraded to uncertain (0..1)";
     }
   }
 
@@ -328,6 +342,14 @@ export class SelfEvolveOverlay implements Component, Focusable {
       );
     } else {
       rows.push(theme.fg(field === "mode" ? "warning" : "dim", fit(this.fieldHint(field), width)));
+      // Disabled-state guidance: without it a first-time user cannot tell how
+      // to enable the extension (review finding: zero discoverability).
+      if (!this.view.config.enabled && this.view.source !== "env(PI_SELF_EVOLVE=1)") {
+        rows.push(theme.fg("dim", fit(`system disabled — press Enter on enabled · or run /self-evolve on · or start pi with PI_SELF_EVOLVE=1`, width)));
+      }
+      if (this.view.suggestionsDir) {
+        rows.push(theme.fg("dim", fit(`output: ${this.view.suggestionsDir}`, width)));
+      }
     }
     if (this.notice) rows.push(this.styledNotice(this.notice, width));
     return rows;
@@ -370,10 +392,16 @@ export class SelfEvolveOverlay implements Component, Focusable {
 
   private signalLine(signal: SelfEvolveSignal, width: number): string {
     const theme = this.params.theme;
-    const time = new Date(signal.createdAt).toLocaleTimeString();
+    const createdAt = new Date(signal.createdAt);
+    const sameDay = createdAt.toDateString() === new Date().toDateString();
+    const time = sameDay
+      ? createdAt.toLocaleTimeString()
+      : createdAt.toLocaleString();
     const shortId = signal.id.startsWith("se-") ? signal.id.slice(0, 10) : signal.id;
     const type = this.candidateTypeColor(signal.candidateType, signal.candidateType);
-    return fitLine(`  [${theme.fg("dim", time)}] ${theme.fg("dim", shortId)} ${signal.source} · ${type}: ${signal.title}`, width);
+    const project = signal.project ? theme.fg("dim", ` ${signal.project}`) : "";
+    const actionable = (signal as { suggestion?: unknown }).suggestion ? "" : theme.fg("dim", " · not-actionable");
+    return fitLine(`  [${theme.fg("dim", time)}] ${theme.fg("dim", shortId)}${project} ${signal.source} · ${type}: ${signal.title}${actionable}`, width);
   }
 
   private candidateTypeColor(text: string, fallback: string): string {
@@ -435,6 +463,7 @@ export class SelfEvolveOverlay implements Component, Focusable {
     switch (field) {
       case "cooldownMs": return formatDurationMs(this.draft.cooldownMs);
       case "model": return this.draft.model ?? "";
+      case "reviewScoreThreshold": return String(this.draft.reviewScoreThreshold);
       default: return String(this.draft[field]);
     }
   }
@@ -479,6 +508,9 @@ export class SelfEvolveOverlay implements Component, Focusable {
       this.editValue += printable;
     } else if (field === "cooldownMs") {
       const clean = printable.replace(/[^0-9a-z.]/gi, "");
+      if (clean) this.editValue += clean;
+    } else if (field === "reviewScoreThreshold") {
+      const clean = printable.replace(/[^0-9.]/g, "");
       if (clean) this.editValue += clean;
     } else {
       const digits = printable.replace(/\D/g, "");

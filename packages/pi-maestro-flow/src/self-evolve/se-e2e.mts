@@ -175,6 +175,10 @@ async function main(): Promise<void> {
   check("信号携带 project 字段（basename(cwd)）", sig.project === "ws", String(sig.project));
   check("信号携带继承模型 provider/id", sig.model === "test-provider/test-model", String(sig.model));
   check("suggestion 为命令模板（不执行）", typeof sig.suggestion === "string" && sig.suggestion.startsWith("maestro knowledge stage"));
+  check("suggestion 为可执行的 session 源模板（无死占位符）", sig.suggestion.includes("--session test-session-1") && sig.suggestion.includes("--content-file"), sig.suggestion);
+  const evidencePath = join(outRoot, "evidence", `${sig.id}.md`);
+  const evidenceContent = await readFile(evidencePath, "utf8");
+  check("证据文件已生成（suggestion --content-file 指向真实文件）", evidenceContent.includes(sig.title) && evidenceContent.includes("session: test-session-1"), evidencePath);
   check("状态栏已更新 EVOL ● 1·0·0", ctx.status["self-evolve"] === "EVOL ● 1·0·0", ctx.status["self-evolve"]);
 
   // ---- 4. identical trace hash → deduped (no second line) ----
@@ -192,6 +196,26 @@ async function main(): Promise<void> {
   check("冷却内新轨迹被抑制（仍 1 条）", linesAfter2.length === 1, `got ${linesAfter2.length}`);
   check("状态栏 EVOL ● 1·1·1（suppressed=1）", ctx.status["self-evolve"] === "EVOL ● 1·1·1", ctx.status["self-evolve"]);
 
+  // ---- 5b. collection-side noise filter: trace fragments never become signals ----
+  await cmd.handler("config cooldownMs=0", ctx);
+  const noiseMsg = [assistantMessage("TOOL bash: 28: ??")];
+  for (const h of handlers.agent_end) h(agentEndEvent(noiseMsg), ctx);
+  await sleep(200);
+  const linesAfterNoise = (await readFile(join(dir, files[0]), "utf8")).trim().split("\n").filter(Boolean);
+  check("噪音轨迹片段被源头丢弃（仍 1 条）", linesAfterNoise.length === 1, `got ${linesAfterNoise.length}`);
+  check("状态栏 EVOL ● 1·1·2（噪音计入 suppressed）", ctx.status["self-evolve"] === "EVOL ● 1·1·2", ctx.status["self-evolve"]);
+
+  // ---- 5c. unknown type → signal written without stage suggestion (not actionable) ----
+  const unknownMsg = [assistantMessage("A turn about general topic with no knowledge hints whatsoever.")];
+  for (const h of handlers.agent_end) h(agentEndEvent(unknownMsg), ctx);
+  await sleep(200);
+  const linesAfterUnknown = (await readFile(join(dir, files[0]), "utf8")).trim().split("\n").filter(Boolean);
+  check("unknown 类型信号仍落盘（2 条）", linesAfterUnknown.length === 2, `got ${linesAfterUnknown.length}`);
+  const unknownSig = JSON.parse(linesAfterUnknown[1]!);
+  check("unknown 信号 candidateType=unknown 且无 suggestion", unknownSig.candidateType === "unknown" && unknownSig.suggestion === undefined, JSON.stringify(unknownSig));
+  check("状态栏 EVOL ● 2·1·2（unknown 写入不计 suppressed）", ctx.status["self-evolve"] === "EVOL ● 2·1·2", ctx.status["self-evolve"]);
+  await cmd.handler("config cooldownMs=10m", ctx);
+
   // ---- 6. session_compact signal with file-op evidence ----
   const fileOps = {
     read: ["src/a.ts"],
@@ -206,11 +230,11 @@ async function main(): Promise<void> {
   }
   await sleep(200);
   const linesAfter3 = (await readFile(join(dir, files[0]), "utf8")).trim().split("\n").filter(Boolean);
-  check("session_compact 信号落盘（2 条）", linesAfter3.length === 2, `got ${linesAfter3.length}`);
-  const sig2 = JSON.parse(linesAfter3[1]);
+  check("session_compact 信号落盘（3 条）", linesAfter3.length === 3, `got ${linesAfter3.length}`);
+  const sig2 = JSON.parse(linesAfter3[2]!);
   check("compact 信号 source=session_compact", sig2.source === "session_compact");
   check("compact 信号 evidence 含 modified 文件", sig2.evidence.some((e: { type: string; role?: string }) => e.type === "file" && e.role === "modified"), JSON.stringify(sig2.evidence));
-  check("状态栏 EVOL ● 2·1·1", ctx.status["self-evolve"] === "EVOL ● 2·1·1", ctx.status["self-evolve"]);
+  check("状态栏 EVOL ● 3·1·2", ctx.status["self-evolve"] === "EVOL ● 3·1·2", ctx.status["self-evolve"]);
 
   // ---- 7. signals command lists records ----
   let signalsNotified = "";
@@ -218,6 +242,14 @@ async function main(): Promise<void> {
   ctx.ui.notify = (message, level) => { if (message.includes("Self-evolve signals")) signalsNotified = message; prevNotify(message, level); };
   await cmd.handler("signals 5", ctx);
   check("signals 命令列出记录", signalsNotified.includes("agent_end") && signalsNotified.includes("session_compact"), signalsNotified.slice(0, 120));
+
+  // ---- 7b. signals export writes a JSONL snapshot ----
+  let exportMsg = "";
+  ctx.ui.notify = (message, level) => { if (message.includes("exported")) exportMsg = message; prevNotify(message, level); };
+  await cmd.handler("signals export", ctx);
+  const exportDir = join(outRoot, "exports");
+  const exportFiles = await readdir(exportDir);
+  check("signals export 落盘 exports/ 目录", exportFiles.length === 1 && exportFiles[0]!.endsWith(".jsonl") && exportMsg.includes("exported 3"), exportMsg.slice(0, 120));
 
   // ---- 8. config set + validation ----
   await cmd.handler("config cooldownMs=10m maxSignalsPerSession=3", ctx);
@@ -265,21 +297,14 @@ async function main(): Promise<void> {
 
   let capturedTask = "";
   let capturedModel: string | undefined;
+  let fakeVerdicts: Array<{ id: string; action: string; candidateType: string; score: number; reason: string }> = [];
   setSelfEvolveReviewRuntimeForTest({
     supervision: {
       async runSupervisedEvaluation(dispatch, params) {
         capturedTask = params.task;
         // Dispatch would route to a teammate; the fake model produces JSON text.
         await dispatch({ task: params.task, outputSchema: params.outputSchema, timeoutMs: 1 });
-        const fakeText = JSON.stringify({
-          verdicts: [{
-            id: "se-abc",
-            action: "stage",
-            candidateType: "knowhow",
-            score: 0.8,
-            reason: "reusable lesson with concrete evidence",
-          }],
-        });
+        const fakeText = JSON.stringify({ verdicts: fakeVerdicts });
         const parsed = params.fallbackTextParser
           ? params.fallbackTextParser(fakeText)
           : undefined;
@@ -298,18 +323,34 @@ async function main(): Promise<void> {
       };
     },
   });
+  // Real signal ids (actionable ones) drive the review-gate assertions.
+  const sigLinesForReview = (await readFile(join(dir, files[0]), "utf8")).trim().split("\n").filter(Boolean);
+  const reviewSignals = sigLinesForReview.map((l) => JSON.parse(l)).filter((s) => s.suggestion !== undefined);
+  const [reviewSigA, reviewSigB] = reviewSignals as Array<{ id: string }>;
+  fakeVerdicts = [
+    { id: reviewSigA.id, action: "stage", candidateType: "knowhow", score: 0.8, reason: "reusable lesson with concrete evidence" },
+    { id: "se-zzzzzzzzzzzz", action: "stage", candidateType: "knowhow", score: 0.9, reason: "hallucinated id" },
+    { id: reviewSigB.id, action: "stage", candidateType: "knowhow", score: 0.2, reason: "low confidence" },
+  ];
   let reviewMsg = "";
   ctx.ui.notify = (message, level) => { if (message.includes("SELF-EVOLVE REVIEW")) reviewMsg = message; prevNotify(message, level); };
   await cmd.handler("review 5", ctx);
   check("review 使用继承模型", capturedModel === "test-provider/test-model", String(capturedModel));
-  check("review prompt 包含信号", capturedTask.includes("Signals:") && capturedTask.includes("se-"), capturedTask.slice(0, 80));
+  check("review prompt 包含信号与质量门槛", capturedTask.includes("Signals:") && capturedTask.includes("Staging Quality Bar"), capturedTask.slice(0, 80));
   check("review 汇总含 stage 判定", reviewMsg.includes("stage: 1") && reviewMsg.includes("reusable lesson"), reviewMsg.slice(0, 160));
+  check("评审门：幻觉 id 丢弃 + 低分 stage 降级", reviewMsg.includes("1 invalid verdict id(s) dropped") && reviewMsg.includes("1 low-score stage(s) downgraded"), reviewMsg.slice(0, 240));
   const reviewsDir = join(outRoot, "reviews");
   const reviewFiles = await readdir(reviewsDir);
   check("review 落盘全局 reviews 目录", reviewFiles.length === 1 && reviewFiles[0].endsWith(".jsonl"), reviewFiles.join(","));
   const reviewRecord = JSON.parse((await readFile(join(reviewsDir, reviewFiles[0]), "utf8")).trim().split("\n").at(-1)!);
   check("review 记录 dryRun=true", reviewRecord.dryRun === true && reviewRecord.kind === "review");
   check("review 记录 project+model", reviewRecord.project === "ws" && reviewRecord.model === "test-provider/test-model", JSON.stringify(reviewRecord));
+  check("review 记录评审门统计", reviewRecord.droppedInvalid === 1 && reviewRecord.downgraded === 1 && reviewRecord.nonActionableSkipped === 1, JSON.stringify(reviewRecord));
+  // reviews history command
+  let reviewsMsg = "";
+  ctx.ui.notify = (message, level) => { if (message.includes("review history")) reviewsMsg = message; prevNotify(message, level); };
+  await cmd.handler("reviews 5", ctx);
+  check("reviews 命令查看历史评审", reviewsMsg.includes("SELF-EVOLVE REVIEW") && reviewsMsg.includes("stage: 1"), reviewsMsg.slice(0, 120));
   // review failure path: model unavailable
   let unavailableMsg = "";
   ctx.ui.notify = (message, level) => { if (level === "warning") unavailableMsg = message; prevNotify(message, level); };
@@ -361,6 +402,15 @@ async function main(): Promise<void> {
   // ---- 11. dry-run guarantee: nothing staged/promoted anywhere ----
   const anyKnowledgeWrites = JSON.stringify(await readdir(cwd)).includes("specs") || JSON.stringify(await readdir(cwd)).includes("knowhow");
   check("dry-run 保证：工作区无知识写入", !anyKnowledgeWrites);
+
+  // ---- 12. env override display: PI_SELF_EVOLVE=1 shows on even when config is off ----
+  const ctxEnv = makeCtx(cwd);
+  const { pi: piEnv, handlers: handlersEnv, commands: commandsEnv } = makeMockPi(ctxEnv);
+  process.env.PI_SELF_EVOLVE = "1";
+  registerSelfEvolve(piEnv);
+  for (const h of handlersEnv.session_start) h({}, ctxEnv);
+  check("env 覆盖：config off + PI_SELF_EVOLVE=1 时状态栏显示 EVOL ● 0·0·0", ctxEnv.status["self-evolve"] === "EVOL ● 0·0·0", ctxEnv.status["self-evolve"]);
+  delete process.env.PI_SELF_EVOLVE;
 
   // ---- cleanup ----
   await rm(workDir, { recursive: true, force: true });

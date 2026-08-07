@@ -7,18 +7,22 @@
  *
  *   A. canary  <knowledge-id|spec-path> [--window <runs>]
  *      High-impact knowledge online verification: mark a candidate as SHADOW
- *      (trial window), observe validated/cited signals from the run ledgers,
- *      then PROMOTE (threshold met) or ROLLBACK (contradicted / window expired
- *      without corroboration). Never mutates the corpus by itself — it only
- *      advises the promote/rollback command.
+ *      (trial window), observe validated/cited signals from the run ledgers
+ *      (incremental vs signalsBaseline), then PROMOTE (threshold met) or
+ *      ROLLBACK (contradicted / window expired without corroboration). The
+ *      observation is gated on a FRESH health snapshot (health.json /
+ *      health-<project>.json, generated < 1 day ago for this project);
+ *      stale snapshots never increment observedRuns. Never mutates the corpus
+ *      by itself — it only advises the promote/rollback command.
  *
  *   B. proposal <skill-path> [--content <path|new-content>] [--reason "<why>"]
  *      Skill-modification governance: snapshot (sha256) + diff + permission
  *      delta review (allowed-tools) + static checks (frontmatter, execution
- *      tag pairing) + signature + approval receipt, written to
+ *      tag pairing — content-based) + signature + approval receipt, written to
  *      proposals/<id>/. `apply` restores backup on failed validation;
- *      `revert` restores the snapshot. Requires a non-empty --reason
- *      (explicit approval record) — never silent.
+ *      `revert` restores the snapshot (requires --reason; sha256 conflict
+ *      detection against backup.md needs --force to override). Requires a
+ *      non-empty --reason (explicit approval record) — never silent.
  *
  * Commands: canary | proposal | apply | revert | list
  */
@@ -48,6 +52,7 @@ const ACTOR = userInfo().username ?? "unknown";
 const CANARY_DIR = join(OUTPUT_DIR, "canaries");
 const PROPOSAL_DIR = join(OUTPUT_DIR, "proposals");
 const APPROVAL_DIR = join(OUTPUT_DIR, "approvals");
+const HEALTH_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 1 天
 
 function parseArgs(argv) {
   const args = { _: [] };
@@ -70,7 +75,7 @@ function usage() {
   canary <knowledge-id|spec-path> [--window N]              # shadow 观察 → promote/rollback 建议
   proposal <skill-path> [--content <path>] --reason "<why>" # 生成 proposal 包（快照/签名/权限审查/静态检查）
   apply <proposal-id> --reason "<why>"                      # 应用（校验失败自动回滚；reason 非空=批准记录）
-  revert <proposal-id> [--reason "<why>"]                   # 回滚到快照
+  revert <proposal-id> --reason "<why>" [--force]           # 回滚到快照（--reason 必填；与快照不一致需 --force）
   list [--type canary|proposal]                             # 列表`);
   process.exit(1);
 }
@@ -96,9 +101,22 @@ function writeJson(p, data) {
   writeFileSync(p, `${JSON.stringify(data, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
+/** 追加 approval receipt（apply / revert 同款，approvals/<date>.jsonl）。 */
+function appendReceipt(receipt) {
+  mkdirSync(APPROVAL_DIR, { recursive: true, mode: 0o700 });
+  const date = new Date();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const recPath = join(APPROVAL_DIR, `${date.getFullYear()}-${month}-${day}.jsonl`);
+  const fd = openSync(recPath, "a", 0o600);
+  writeSync(fd, `${JSON.stringify(receipt)}\n`);
+  closeSync(fd);
+  return recPath;
+}
+
 // ── A. Canary ────────────────────────────────────────────────────────────────
 
-const CANARY_THRESHOLD = 1; // 观察期内 validated/cited 信号 ≥ 1 → promote 建议
+const CANARY_THRESHOLD = 1; // 观察期内增量 validated/cited 信号 ≥ 1 → promote 建议
 const CANARY_WINDOW_DEFAULT = 3; // 默认观察窗口（run 数）
 
 function canaryLedgerPath(id) {
@@ -114,20 +132,38 @@ function canaryStart(id, windowRuns) {
     return existing;
   }
   const ledger = {
-    schemaVersion: 1,
+    schemaVersion: 2, // v2: signalsBaseline 增量观察 + health 快照新鲜度门禁
     id,
     status: "shadow",
     startedAt: nowIso(),
     windowRuns,
     observedRuns: 0,
+    signalsBaseline: null, // 首次 observe 时记录当前计数，之后用增量
+    baselineRecordedAt: null,
+    lastHealthGeneratedAt: null, // 上次 observe 时的 health.generatedAt（快照未更新检测）
     signals: { validated: 0, cited: 0, contradicted: 0 },
     history: [],
   };
   writeJson(ledgerPath, ledger);
   console.log(`CANARY SHADOW — ${id}`);
-  console.log(`  观察窗口: ${windowRuns} runs · 阈值: validated/cited ≥ ${CANARY_THRESHOLD}`);
+  console.log(`  观察窗口: ${windowRuns} runs · 阈值: 增量 validated/cited ≥ ${CANARY_THRESHOLD}`);
   console.log(`  → ${ledgerPath}`);
   return ledger;
+}
+
+/** 读取新鲜且属于本项目的 health 快照；过期/缺失/非本项目 → null。 */
+function readFreshHealth() {
+  const projectName = basename(process.cwd());
+  const projectHealthPath = join(OUTPUT_DIR, `health-${projectName}.json`);
+  const health = readJson(
+    existsSync(projectHealthPath) ? projectHealthPath : join(OUTPUT_DIR, "health.json"),
+    null,
+  );
+  if (!health) return null;
+  const generatedAt = health.generatedAt ? Date.parse(health.generatedAt) : NaN;
+  const fresh = Number.isFinite(generatedAt) && Date.now() - generatedAt <= HEALTH_MAX_AGE_MS;
+  if (!fresh || health.project !== projectName) return null;
+  return health;
 }
 
 function canaryObserve(id) {
@@ -137,19 +173,59 @@ function canaryObserve(id) {
     console.log(`CANARY 非 shadow 状态（${ledger?.status ?? "unknown"}）— 无观察`);
     return ledger;
   }
-  // 从全局 health sidecar 的 signals 提取该知识的信号计数
-  const health = readJson(join(OUTPUT_DIR, "health.json"), { signals: { entries: [] } });
+  const projectName = basename(process.cwd());
+  // 新鲜度校验：过期/非本项目 → 警告且不递增 observedRuns、不写判定
+  const health = readFreshHealth();
+  if (!health) {
+    const raw = readJson(
+      existsSync(join(OUTPUT_DIR, `health-${projectName}.json`))
+        ? join(OUTPUT_DIR, `health-${projectName}.json`)
+        : join(OUTPUT_DIR, "health.json"),
+      null,
+    );
+    console.log(`CANARY 跳过 — health 快照过期/非本项目（project=${raw?.project ?? "(无)"}, generatedAt=${raw?.generatedAt ?? "(无)"}）`);
+    console.log(`  先运行: node scripts/self-evolve-health.mjs（写入 health.json 与 health-${projectName}.json）`);
+    console.log(`  （本次观察不递增 observedRuns，不写判定）`);
+    return ledger;
+  }
+  // 快照未更新：health.generatedAt 与上次 observe 相同 → 提示先重跑 health
+  if (ledger.lastHealthGeneratedAt && ledger.lastHealthGeneratedAt === health.generatedAt) {
+    console.log(`CANARY 跳过 — health 快照未更新（generatedAt=${health.generatedAt}）`);
+    console.log(`  先重跑: node scripts/self-evolve-health.mjs 后再 observe`);
+    console.log(`  （observedRuns 不递增）`);
+    return ledger;
+  }
+  // 从全局 health sidecar 的 signals 提取该知识的当前计数（全量 entries）
   const entry = (health.signals?.entries ?? []).find((e) => e.id === id);
-  const signals = entry ?? { validated: 0, cited: 0, contradicted: 0 };
-  ledger.observedRuns += 1;
-  ledger.signals = {
-    validated: signals.validated ?? 0,
-    cited: signals.cited ?? 0,
-    contradicted: signals.contradicted ?? 0,
+  const cur = {
+    validated: Number(entry?.validated ?? 0),
+    cited: Number(entry?.cited ?? 0),
+    contradicted: Number(entry?.contradicted ?? 0),
   };
-  ledger.history.push({ at: nowIso(), signals: { ...ledger.signals } });
-  const contradicted = ledger.signals.contradicted > 0;
-  const corroborated = ledger.signals.validated + ledger.signals.cited >= CANARY_THRESHOLD;
+  // 首次 observe：仅记录 baseline，保持 observedRuns=0
+  if (!ledger.signalsBaseline || !ledger.baselineRecordedAt) {
+    ledger.signalsBaseline = { ...cur };
+    ledger.baselineRecordedAt = nowIso();
+    ledger.lastHealthGeneratedAt = health.generatedAt;
+    writeJson(ledgerPath, ledger);
+    console.log(`CANARY BASELINE — ${id}（signalsBaseline 已记录，observedRuns=0）`);
+    console.log(`  基线: validated ${cur.validated} · cited ${cur.cited} · contradicted ${cur.contradicted}`);
+    console.log(`  → ${ledgerPath}`);
+    return ledger;
+  }
+  const base = ledger.signalsBaseline ?? {};
+  const delta = {
+    validated: Math.max(0, cur.validated - Number(base.validated ?? 0)),
+    cited: Math.max(0, cur.cited - Number(base.cited ?? 0)),
+    contradicted: Math.max(0, cur.contradicted - Number(base.contradicted ?? 0)),
+  };
+  ledger.observedRuns += 1;
+  ledger.signals = { ...delta };
+  ledger.history.push({ at: nowIso(), signals: { ...delta }, healthGeneratedAt: health.generatedAt });
+  ledger.lastHealthGeneratedAt = health.generatedAt;
+  // 判定逻辑保留，但基于增量而非累计
+  const contradicted = delta.contradicted > 0;
+  const corroborated = delta.validated + delta.cited >= CANARY_THRESHOLD;
   let verdict = "observing";
   if (contradicted) {
     ledger.status = "rollback";
@@ -164,26 +240,28 @@ function canaryObserve(id) {
   writeJson(ledgerPath, ledger);
   console.log(`CANARY OBSERVE — ${id} (${ledger.observedRuns}/${ledger.windowRuns})`);
   console.log(
-    `  信号: validated ${ledger.signals.validated} · cited ${ledger.signals.cited} · contradicted ${ledger.signals.contradicted}`,
+    `  增量信号: validated ${delta.validated} · cited ${delta.cited} · contradicted ${delta.contradicted}`,
   );
   console.log(`  判定: ${verdict}`);
   if (ledger.status === "promote") {
-    console.log(`  建议命令: maestro knowledge promote <session-id> --candidate ${id} --reason "canary corroborated"`);
+    // maestro v0.5.63: knowledge promote 无 --reason 选项
+    console.log(`  建议命令: maestro knowledge promote <session-id> --candidate ${id}`);
+    console.log(`    # session-id 经 maestro knowledge review <session-id> --json 或 run brief 解析`);
   } else if (ledger.status === "rollback") {
-    console.log(`  建议命令: maestro knowledge review --resolve --as supersede --target <id> --reason "canary rollback"`);
+    console.log(`  回滚说明（补全 session-id/candidate-id/target 后执行）:`);
+    console.log(`    1) 候选未晋升场景: maestro knowledge review <session-id> --resolve <candidate-id> --as rejected --reason "canary rollback: 无佐证"`);
+    console.log(`    2) 已晋升为知识条目场景: maestro spec supersede <sid> --by <修正版sid>`);
   }
   return ledger;
 }
 
 // ── B. Skill proposal ────────────────────────────────────────────────────────
 
-function staticChecks(targetPath) {
+/** 静态检查：基于内容字符串（proposalCreate/apply 均针对将要写入的内容）。 */
+function staticChecksContent(content) {
   const problems = [];
-  let content;
-  try {
-    content = readFileSync(targetPath, "utf8");
-  } catch {
-    return { ok: false, problems: ["文件不可读"] };
+  if (typeof content !== "string" || content.length === 0) {
+    return { ok: false, problems: ["内容为空或不可读"], openTags: 0, closeTags: 0 };
   }
   if (!/^---\r?\nname:/.test(content)) problems.push("frontmatter 缺失（须以 --- 开头且含 name）");
   if (!content.includes("description:")) problems.push("frontmatter 缺 description");
@@ -216,14 +294,16 @@ function proposalCreate(targetPath, newContent, reason) {
     process.exit(1);
   }
   const finalContent = newContent ?? oldContent;
-  const id = `PROP-${sha256(targetPath + finalContent)}`;
+  // id 防碰撞：确定性前缀（target+content）+ 时间后缀（同内容不同 reason 不覆盖）
+  const id = `PROP-${sha256(targetPath + finalContent)}-${Date.now().toString(36)}`;
   const dir = join(PROPOSAL_DIR, id);
   const snapshotPath = join(dir, "snapshot.sha256");
   const diff = oldContent === finalContent
     ? "(无内容变化)"
     : `--- ${targetPath}\n+++ ${targetPath} (proposal)\n${diffLines(oldContent, finalContent)}`;
 
-  const checks = staticChecks(targetPath);
+  const checksNew = staticChecksContent(finalContent);
+  const checksOld = oldContent ? staticChecksContent(oldContent) : null;
   const perm = permissionDelta(oldContent, finalContent);
   const proposal = {
     schemaVersion: 1,
@@ -235,7 +315,8 @@ function proposalCreate(targetPath, newContent, reason) {
     status: "proposed",
     signature: sha256(finalContent),
     snapshotSha256: sha256(oldContent),
-    staticChecks: checks,
+    staticChecksNew: checksNew,
+    ...(checksOld ? { staticChecksOld: checksOld } : {}),
     permissionDelta: perm,
     diff,
     approval: null,
@@ -249,7 +330,8 @@ function proposalCreate(targetPath, newContent, reason) {
   console.log(`  target: ${targetPath}`);
   console.log(`  reason: ${reason}`);
   console.log(`  signature: ${proposal.signature}`);
-  console.log(`  静态检查: ${checks.ok ? "OK" : "FAIL"} (${checks.problems.join("; ") || "无"})`);
+  console.log(`  静态检查(新): ${checksNew.ok ? "OK" : "FAIL"} (${checksNew.problems.join("; ") || "无"})`);
+  if (checksOld) console.log(`  静态检查(旧): ${checksOld.ok ? "OK" : "FAIL"} (${checksOld.problems.join("; ") || "无"})`);
   console.log(`  权限差异: ${perm.note} ${perm.added.length ? `+${perm.added.join(",")}` : ""} ${perm.removed.length ? `-${perm.removed.join(",")}` : ""}`);
   console.log(`  diff:\n${diff.slice(0, 1600)}`);
   console.log(`  → ${dir}`);
@@ -286,11 +368,12 @@ function proposalApply(id, reason) {
   const oldContent = readFileSync(target, "utf8");
   const proposalFile = join(dir, "proposal.md");
   const finalContent = existsSync(proposalFile) ? readFileSync(proposalFile, "utf8") : readFileSync(target, "utf8");
-  const checks = staticChecks(target);
+  // 静态检查基于将要写入的内容
+  const checks = staticChecksContent(finalContent);
   if (!checks.ok) {
     console.error(`apply: 静态检查失败，中止 → ${checks.problems.join("; ")}`);
     proposal.status = "rejected";
-    proposal.staticChecks = checks;
+    proposal.staticChecksNew = checks;
     writeJson(join(dir, "proposal.json"), proposal);
     process.exit(1);
   }
@@ -298,11 +381,11 @@ function proposalApply(id, reason) {
   const backup = join(dir, "backup.md");
   copyFileSync(target, backup);
   writeFileSync(target, finalContent, { encoding: "utf8" });
-  const post = staticChecks(target);
+  const post = staticChecksContent(readFileSync(target, "utf8"));
   if (!post.ok) {
     copyFileSync(backup, target);
     proposal.status = "rejected";
-    proposal.staticChecks = post;
+    proposal.staticChecksNew = post;
     writeJson(join(dir, "proposal.json"), proposal);
     console.error(`apply: 应用后校验失败，已自动回滚 → ${post.problems.join("; ")}`);
     process.exit(1);
@@ -311,10 +394,6 @@ function proposalApply(id, reason) {
   proposal.approval = { at: nowIso(), actor: ACTOR, reason };
   writeJson(join(dir, "proposal.json"), proposal);
   // approval receipt（与 knowledge promote 同源审计）
-  mkdirSync(APPROVAL_DIR, { recursive: true, mode: 0o700 });
-  const date = new Date();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
   const receipt = {
     schemaVersion: 1,
     kind: "approval-receipt",
@@ -325,19 +404,17 @@ function proposalApply(id, reason) {
     target,
     reason,
   };
-  const recPath = join(APPROVAL_DIR, `${date.getFullYear()}-${month}-${day}.jsonl`);
-  const fd = openSync(recPath, "a", 0o600);
-  writeSync(fd, `${JSON.stringify(receipt)}\n`);
-  closeSync(fd);
+  const recPath = appendReceipt(receipt);
   console.log(`SKILL APPLY — ${id} → ${target}`);
   console.log(`  approval: ${ACTOR} @ ${proposal.approval.at}`);
   console.log(`  receipt: ${recPath}`);
-  console.log(`  revert: node scripts/self-evolve-phase5.mjs revert ${id}`);
+  console.log(`  revert: node scripts/self-evolve-phase5.mjs revert ${id} --reason "<why>"`);
   return proposal;
 }
 
-function proposalRevert(id, reason) {
-  if (!id) usage();
+function proposalRevert(id, reason, force) {
+  // revert 强制 --reason（缺失则 usage 报错）
+  if (!id || !reason) usage();
   const dir = join(PROPOSAL_DIR, id);
   const proposal = readJson(join(dir, "proposal.json"), null);
   if (!proposal) {
@@ -349,12 +426,41 @@ function proposalRevert(id, reason) {
     console.error(`revert: 无备份（${id} 未 apply 过或备份缺失）`);
     process.exit(1);
   }
-  copyFileSync(backup, proposal.target);
+  const target = proposal.target;
+  // 冲突检测：恢复前比较当前 target 文件 sha256 与 backup.md 的 sha256
+  let currentContent = "";
+  try { currentContent = readFileSync(target, "utf8"); } catch { currentContent = ""; }
+  const backupContent = readFileSync(backup, "utf8");
+  const currentSha = sha256(currentContent);
+  const backupSha = sha256(backupContent);
+  if (currentSha !== backupSha) {
+    console.error(`revert: 目标文件与快照不一致（当前 sha256 ${currentSha} ≠ backup ${backupSha}）`);
+    console.error(`  diff 摘要:\n${diffLines(currentContent, backupContent).slice(0, 1200)}`);
+    if (!force) {
+      console.error(`  → 需要 --force 才能覆盖当前修改；已中止`);
+      process.exit(1);
+    }
+    console.error(`  → 已提供 --force，继续恢复`);
+  }
+  copyFileSync(backup, target);
   proposal.status = "reverted";
   proposal.revertedAt = nowIso();
-  proposal.revertReason = reason ?? "unrecorded";
+  proposal.revertReason = reason;
   writeJson(join(dir, "proposal.json"), proposal);
-  console.log(`SKILL REVERT — ${id} → ${proposal.target}（快照已恢复）`);
+  // revert 写 approval receipt（action: skill-revert，与 apply 同款）
+  const receipt = {
+    schemaVersion: 1,
+    kind: "approval-receipt",
+    approvedAt: nowIso(),
+    actor: ACTOR,
+    action: "skill-revert",
+    proposalId: id,
+    target,
+    reason,
+  };
+  const recPath = appendReceipt(receipt);
+  console.log(`SKILL REVERT — ${id} → ${target}（快照已恢复）`);
+  console.log(`  receipt: ${recPath}`);
   return proposal;
 }
 
@@ -385,6 +491,7 @@ const command = args._[0];
 const target = args._[1] ?? String(args.target ?? "");
 const windowRuns = Number(args.window ?? CANARY_WINDOW_DEFAULT);
 const reason = String(args.reason ?? "");
+const force = args.force === true || String(args.force ?? "") === "true";
 
 switch (command) {
   case "canary":
@@ -406,7 +513,7 @@ switch (command) {
     proposalApply(target, reason);
     break;
   case "revert":
-    proposalRevert(target, reason);
+    proposalRevert(target, reason, force);
     break;
   case "list":
     listItems(String(args.type ?? "proposal"));

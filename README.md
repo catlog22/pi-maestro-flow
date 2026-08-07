@@ -45,6 +45,7 @@
 - 👀 **observe 阻塞观察** — `status`/`wait`/`watch` 三态观察，支持终态阻塞等待
 - ⏱️ **bash_bg 自适应 Shell** — 长命令超时自动转后台，完成时推送通知，不阻塞对话
 - 🧠 **持久化知识系统** — 语义搜索、规范与经验沉淀，跨会话存活
+- 🪄 **self-evolve 自进化** — 运行轨迹→知识沉淀闭环的 dry-run 候选信号层（默认禁用，详见 [新特性使用说明](docs/new-features-usage.md)）
 - 🔄 **Compaction 容量管理** — 主动压缩阈值、链接阈值推导、摘要输出预算，防止上下文窗口溢出
 - 🔁 **模型熔断与故障转移** — 电路断路器保护 API 调用，自动故障转移到备用模型；API 重试策略可配置（最多 12 次）
 - 📤 **会话导出** — 导出当前会话上下文信息，用于调试与审计
@@ -114,7 +115,7 @@ Maestro Flow 自动分类意图并路由：**简单任务**直接执行 · **多
 | **[Smart Search Provider 配置指南](docs/smart-search-provider-config.md)** | 搜索引擎配置 — 双路径架构、Provider API Key、凭证源语法、TUI 操作、配置同步 |
 | **[发布说明](RELEASE.md)** | 版本历史与变更日志 |
 | **[更新说明](docs/UPDATES.md)** | 历史提交变更记录 |
-| **[新特性使用说明](docs/new-features-usage.md)** | Vision 委托 · 终端标题 · Mailbox · observe watch 快速上手 |
+| **[新特性使用说明](docs/new-features-usage.md)** | Vision 委托 · 终端标题 · Mailbox · observe watch · self-evolve 快速上手 |
 | 各插件 README | [flow](packages/pi-maestro-flow/README.md) · [teammate](packages/pi-maestro-teammate/README.md) · [cockpit](packages/pi-cockpit/README.md) |
 
 ---

@@ -18,7 +18,7 @@
  *      consumer; this extension never executes it.
  */
 
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type {
   AgentEndEvent,
@@ -39,6 +39,7 @@ import {
   compactDigest,
   dailySuggestionFileName,
   DEDUP_CAPACITY,
+  DEDUP_SEED_DAYS,
   DEFAULT_SELF_EVOLVE_CONFIG,
   envOverrideForSelfEvolve,
   filterSignalLines,
@@ -46,9 +47,11 @@ import {
   formatReviewSummary,
   formatSignalLine,
   formatStatusText,
+  isNoiseTitle,
   isPathInside,
   lastAssistantLine,
   makeTitle,
+  normalizeReviewVerdicts,
   normalizeSelfEvolveConfig,
   parseReviewVerdicts,
   parseSignalLines,
@@ -63,6 +66,8 @@ import {
   selfEvolveOutputRoot,
   setConfigValue,
   sha256Hex,
+  signalEvidenceContent,
+  signalIsActionable,
   staleSuggestionFiles,
   suggestionsDirPath,
   summarizeText,
@@ -83,6 +88,40 @@ import {
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
+
+/**
+ * Parse `signals [N] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--project p]`
+ * arguments into a filter object. Unknown flags are ignored (non-fatal).
+ */
+function parseSignalFlags(args: readonly string[]): {
+  limit?: number;
+  since?: string;
+  until?: string;
+  project?: string;
+} {
+  const result: { limit?: number; since?: string; until?: string; project?: string } = {};
+  const positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--since" || arg === "--until" || arg === "--project" || arg === "--limit") {
+      const value = args[i + 1];
+      if (value && !value.startsWith("--")) {
+        if (arg === "--since") result.since = value;
+        else if (arg === "--until") result.until = value;
+        else if (arg === "--project") result.project = value;
+        else if (arg === "--limit") result.limit = Number.parseInt(value, 10) || undefined;
+        i += 1;
+      }
+    } else {
+      positional.push(arg);
+    }
+  }
+  const firstNumber = positional.find((p) => /^\d+$/.test(p));
+  if (firstNumber && result.limit === undefined) {
+    result.limit = Math.max(1, Math.min(50, Number.parseInt(firstNumber, 10) || 10));
+  }
+  return result;
+}
 
 interface SelfEvolveRuntimeState {
   /** Candidate signals written to suggestion files. */
@@ -234,9 +273,22 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     pendingCompact = undefined;
   }
 
-  function recordFailure(error: unknown): void {
+  function recordFailure(error: unknown, ctx?: ExtensionContext): void {
+    const firstFailure = state.failures === 0;
     state.failures++;
     state.lastError = error instanceof Error ? error.message : String(error);
+    if (ctx) {
+      // Surface the first failure immediately (status bar + one-shot notify),
+      // so a silently failing collector is not mistaken for a healthy one.
+      updateStatusBar(ctx);
+      if (firstFailure) {
+        try {
+          ctx.ui.notify(`Self-evolve: signal collection failed — ${state.lastError.slice(0, 240)}`, "warning");
+        } catch {
+          // Notification is best-effort.
+        }
+      }
+    }
   }
 
   /** Snapshot of runtime counters for the status bar, command, and panel. */
@@ -272,24 +324,89 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
   /** Refresh the status-bar segment; never breaks event handlers on failure. */
   function updateStatusBar(ctx: ExtensionContext): void {
     try {
-      ctx.ui.setStatus(SELF_EVOLVE_STATUS_KEY, formatStatusText(config, buildCounters()));
+      ctx.ui.setStatus(SELF_EVOLVE_STATUS_KEY, formatStatusText(effectiveEnabled(), buildCounters()));
     } catch {
       // Status bar is cosmetic — never propagate.
     }
   }
 
+  /** Resolved suggestions output dir (env override or ~/.maestro/self-evolve). */
+  function resolvedSuggestionsDir(): string {
+    return suggestionsDirPath(outputDir ?? selfEvolveOutputRoot(process.env[SELF_EVOLVE_OUTPUT_DIR_FLAG]));
+  }
+
+  /** Resolved global output root. */
+  function resolvedOutputRoot(): string {
+    return outputDir ?? selfEvolveOutputRoot(process.env[SELF_EVOLVE_OUTPUT_DIR_FLAG]);
+  }
+
   /** Tail the most recent suggestion files and parse the last N signals. */
   async function loadRecentSignals(limit: number): Promise<SelfEvolveSignal[]> {
+    return loadSignals({ limit });
+  }
+
+  /**
+   * Load signals across daily suggestion files with optional range/project
+   * filters. Without an explicit range the last `maxFiles` files are read
+   * (the retention window); `since`/`until` extend to any date within retention.
+   */
+  async function loadSignals(opts: {
+    limit?: number;
+    since?: string;
+    until?: string;
+    project?: string;
+  }): Promise<SelfEvolveSignal[]> {
     try {
-      const dir = suggestionsDirPath(outputDir ?? selfEvolveOutputRoot(process.env[SELF_EVOLVE_OUTPUT_DIR_FLAG]));
+      const dir = resolvedSuggestionsDir();
       const names = (await readdir(dir))
         .filter((name) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name))
         .sort();
+      const inRange = names.filter((name) => {
+        const day = name.slice(0, 10);
+        if (opts.since && day < opts.since) return false;
+        if (opts.until && day > opts.until) return false;
+        return true;
+      });
+      const selected = opts.since || opts.until
+        ? inRange
+        : inRange.slice(-config.maxFiles);
       const lines: string[] = [];
-      for (const name of names.slice(-3)) {
+      for (const name of selected) {
         lines.push(...(await readFile(join(dir, name), "utf8")).split("\n"));
       }
-      return parseSignalLines(lines).slice(-limit);
+      let signals = parseSignalLines(lines);
+      if (opts.project) signals = signals.filter((s) => s.project === opts.project);
+      if (opts.limit !== undefined) signals = signals.slice(-opts.limit);
+      return signals;
+    } catch {
+      return [];
+    }
+  }
+
+  /** Load the most recent review records (reverse chronological). */
+  async function loadRecentReviews(limit: number): Promise<SelfEvolveReview[]> {
+    try {
+      const dir = reviewsDirPath(resolvedOutputRoot());
+      const names = (await readdir(dir))
+        .filter((name) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name))
+        .sort()
+        .slice(-config.maxReviewFiles);
+      const lines: string[] = [];
+      for (const name of names) {
+        lines.push(...(await readFile(join(dir, name), "utf8")).split("\n"));
+      }
+      const reviews: SelfEvolveReview[] = [];
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const parsed = JSON.parse(trimmed) as Partial<SelfEvolveReview>;
+          if (parsed && parsed.kind === "review") reviews.push(parsed as SelfEvolveReview);
+        } catch {
+          // skip malformed lines
+        }
+      }
+      return reviews.slice(-limit);
     } catch {
       return [];
     }
@@ -303,7 +420,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       counters: buildCounters(),
       recentSignals: await loadRecentSignals(8),
       resolvedModel: resolveSelfEvolveModel(ctx),
-      suggestionsDir: suggestionsDirPath(outputDir ?? selfEvolveOutputRoot(process.env[SELF_EVOLVE_OUTPUT_DIR_FLAG])),
+      suggestionsDir: resolvedSuggestionsDir(),
     };
   }
 
@@ -392,7 +509,6 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     summary: string;
     evidence: EvidenceRef[];
     candidateType: CandidateType;
-    suggestion?: string;
     trigger?: { reason?: string; turnIndex?: number };
   }): Promise<void> {
     if (sessionSignals >= config.maxSignalsPerSession) {
@@ -410,10 +526,15 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       project: projectNameFor(params.ctx.cwd),
       skill: process.env[SELF_EVOLVE_SKILL_FLAG]?.trim() || "general",
       model: resolveSelfEvolveModel(params.ctx),
-      suggestion: params.suggestion,
       trigger: params.trigger,
     });
-    const outputRoot = outputDir ?? selfEvolveOutputRoot(process.env[SELF_EVOLVE_OUTPUT_DIR_FLAG]);
+    // Persist the evidence file first so the stage template below is
+    // copy-paste executable (no dead `<evidence-file>` placeholder).
+    const suggestion = await writeSignalEvidence(record);
+    const withSuggestion: SelfEvolveSignal = suggestion
+      ? { ...record, suggestion }
+      : record;
+    const outputRoot = resolvedOutputRoot();
     const dir = suggestionsDirPath(outputRoot);
     // Defense-in-depth: the output root is global (env or ~/.maestro), but a
     // misconfigured env override must never redirect writes outside of it.
@@ -422,7 +543,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     }
     await mkdir(dir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
     const filePath = join(dir, dailySuggestionFileName());
-    await writeFile(filePath, `${JSON.stringify(record)}\n`, {
+    await writeFile(filePath, `${JSON.stringify(withSuggestion)}\n`, {
       encoding: "utf8",
       flag: "a",
       mode: PRIVATE_FILE_MODE,
@@ -431,18 +552,60 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     state.signals++;
     lastSignalBySource[params.source] = Date.now();
     state.lastSource = params.source;
-    await pruneSuggestionFiles(dir);
+    await pruneSignalFiles(dir);
     updateStatusBar(params.ctx);
   }
 
-  /** Best-effort retention: keep only the most recent `maxFiles` daily files. */
-  async function pruneSuggestionFiles(dir: string): Promise<void> {
+  /**
+   * Write the signal's markdown evidence file under `{outputRoot}/evidence/`
+   * and build the executable stage template. Returns undefined for
+   * non-actionable signals (unknown type → no stage suggestion).
+   */
+  async function writeSignalEvidence(signal: SelfEvolveSignal): Promise<string | undefined> {
+    if (signal.candidateType === "unknown") return undefined;
+    const outputRoot = resolvedOutputRoot();
+    const evidenceDir = join(outputRoot, "evidence");
+    if (!isPathInside(outputRoot, evidenceDir)) {
+      throw new Error(`Self-evolve evidence dir escaped the output root: ${evidenceDir}`);
+    }
+    await mkdir(evidenceDir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+    const filePath = join(evidenceDir, `${signal.id}.md`);
+    await writeFile(filePath, `${signalEvidenceContent(signal)}\n`, {
+      encoding: "utf8",
+      mode: PRIVATE_FILE_MODE,
+    });
+    return buildSuggestion(signal.candidateType, signal.title, {
+      evidenceFile: filePath,
+      sessionId: signal.sessionId,
+      runId: signal.runId,
+      evidenceRefs: signal.evidence.map((entry) => entry.ref),
+    });
+  }
+
+  /**
+   * Best-effort retention: keep only the most recent N daily files. Instead of
+   * deleting, stale files are moved into `{outputRoot}/archive/` (with a
+   * timestamp suffix to avoid collisions) so collected signal corpus is never
+   * silently destroyed — the review finding was that pruning deleted data
+   * with no backup and no notification.
+   */
+  async function pruneSignalFiles(dir: string, maxFiles: number = config.maxFiles): Promise<void> {
     try {
       const names = await readdir(dir);
-      const stale = staleSuggestionFiles(names, config.maxFiles);
-      await Promise.all(
-        stale.map((name) => rm(join(dir, name), { force: true }).catch(() => undefined)),
-      );
+      const stale = staleSuggestionFiles(names, maxFiles);
+      if (stale.length === 0) return;
+      const archiveDir = join(resolvedOutputRoot(), "archive");
+      await mkdir(archiveDir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+      for (const name of stale) {
+        const from = join(dir, name);
+        const to = join(archiveDir, `${name}.${Date.now()}.archived`);
+        await rename(from, to).catch(async () => {
+          // rename across devices — fall back to copy+remove.
+          const { copyFile } = await import("node:fs/promises");
+          await copyFile(from, to);
+          await rm(from, { force: true });
+        }).catch(() => undefined);
+      }
     } catch {
       // Pruning must never fail the write that triggered it.
     }
@@ -462,30 +625,40 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       flag: "a",
       mode: PRIVATE_FILE_MODE,
     });
-    await pruneSuggestionFiles(dir);
+    // Reviews retention is independent of suggestions (longer by default).
+    await pruneSignalFiles(dir, config.maxReviewFiles);
     return filePath;
   }
 
-  /** Seed dedup from today's file so a restart doesn't duplicate candidates. */
+  /** Seed dedup from the most recent daily files so a restart doesn't duplicate candidates. */
   async function seedSeenHashes(): Promise<void> {
-    const filePath = join(
-      suggestionsDirPath(outputDir ?? selfEvolveOutputRoot(process.env[SELF_EVOLVE_OUTPUT_DIR_FLAG])),
-      dailySuggestionFileName(),
-    );
-    let fileStat: Awaited<ReturnType<typeof stat>>;
+    const dir = resolvedSuggestionsDir();
+    let names: string[];
     try {
-      fileStat = await stat(filePath);
+      names = (await readdir(dir))
+        .filter((name) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name))
+        .sort()
+        .slice(-DEDUP_SEED_DAYS);
     } catch {
       return; // no suggestions yet
     }
-    if (fileStat.size > SEED_FILE_MAX_BYTES) return;
-    const raw = await readFile(filePath, "utf8");
-    for (const line of raw.split("\n").filter(Boolean).slice(-128)) {
+    let bytes = 0;
+    for (const name of names) {
+      if (bytes > SEED_FILE_MAX_BYTES) break;
+      let raw: string;
       try {
-        const parsed = JSON.parse(line) as { traceHash?: unknown };
-        if (typeof parsed.traceHash === "string") seenHashes.set(parsed.traceHash, Date.now());
+        raw = await readFile(join(dir, name), "utf8");
       } catch {
-        // skip malformed lines
+        continue;
+      }
+      bytes += raw.length;
+      for (const line of raw.split("\n").filter(Boolean).slice(-128)) {
+        try {
+          const parsed = JSON.parse(line) as { traceHash?: unknown };
+          if (typeof parsed.traceHash === "string") seenHashes.set(parsed.traceHash, Date.now());
+        } catch {
+          // skip malformed lines
+        }
       }
     }
   }
@@ -530,6 +703,13 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       const assistantText = lastAssistantLine(digest);
       const summary = summarizeText(assistantText || digest);
       const title = makeTitle(summary);
+      // Collection-side quality filter: trace fragments / progress reports are
+      // never candidates — drop at the source and count as suppressed.
+      if (isNoiseTitle(title)) {
+        state.suppressed++;
+        updateStatusBar(ctx);
+        return;
+      }
       const candidateType = classifyCandidateType(`${summary}\n${title}`);
       void writeSignal({
         source: "agent_end",
@@ -539,11 +719,10 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         summary,
         evidence,
         candidateType,
-        suggestion: buildSuggestion(candidateType, title),
         trigger: { turnIndex: agentEndCount },
-      }).catch(recordFailure);
+      }).catch((error) => recordFailure(error, ctx));
     } catch (error) {
-      recordFailure(error);
+      recordFailure(error, ctx);
     }
   });
 
@@ -590,6 +769,11 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       }
       const evidence = buildEvidenceFromFileOps(fileOps, config.maxEvidence);
       const title = makeTitle(summary);
+      if (isNoiseTitle(title)) {
+        state.suppressed++;
+        updateStatusBar(ctx);
+        return;
+      }
       const candidateType = classifyCandidateType(summary);
       void writeSignal({
         source: "session_compact",
@@ -599,11 +783,10 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         summary: summarizeText(summary),
         evidence,
         candidateType,
-        suggestion: buildSuggestion(candidateType, title),
         trigger: { reason: compact.reason },
-      }).catch(recordFailure);
+      }).catch((error) => recordFailure(error, ctx));
     } catch (error) {
-      recordFailure(error);
+      recordFailure(error, ctx);
     }
   });
 
@@ -612,7 +795,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
   // -------------------------------------------------------------------------
 
   pi.registerCommand("self-evolve", {
-    description: "Self-evolve: /self-evolve (editable panel, default) | status | on | off | config [k=v ...|reset] | signals [N] | review [N]",
+    description: "Self-evolve: /self-evolve (editable panel, default) | status | on | off | config [k=v ...|reset] | signals [N|delete <id>|clear|export] | review [N] | reviews [N]",
     async handler(args: string, ctx) {
       await ensureWorkspaceConfig(ctx);
       const trimmed = args.trim();
@@ -621,9 +804,15 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       const source = configSourceLabel();
 
       if (cmd === "on") {
-        config = { ...config, enabled: true };
+        const next = { ...config, enabled: true };
+        try {
+          await saveConfig(next, ctx.cwd);
+        } catch (error) {
+          ctx.ui.notify(`Self-evolve: config 保存失败 — ${error instanceof Error ? error.message : String(error)}`, "warning");
+          return;
+        }
+        config = next;
         resetSessionState();
-        await saveConfig(config, ctx.cwd);
         updateStatusBar(ctx);
         ctx.ui.notify(
           "Self-evolve enabled: dry-run candidate signals only — nothing is staged or promoted automatically.",
@@ -633,9 +822,15 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       }
 
       if (cmd === "off") {
-        config = { ...config, enabled: false };
+        const next = { ...config, enabled: false };
+        try {
+          await saveConfig(next, ctx.cwd);
+        } catch (error) {
+          ctx.ui.notify(`Self-evolve: config 保存失败 — ${error instanceof Error ? error.message : String(error)}`, "warning");
+          return;
+        }
+        config = next;
         resetSessionState();
-        await saveConfig(config, ctx.cwd);
         updateStatusBar(ctx);
         ctx.ui.notify("Self-evolve disabled.", "info");
         return;
@@ -643,15 +838,21 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
 
       if (cmd === "config") {
         if (rest.length === 0) {
-          ctx.ui.notify(formatConfigSummary(config, source, resolveSelfEvolveModel(ctx)), "info");
+          ctx.ui.notify(formatConfigSummary(config, source, { resolvedModel: resolveSelfEvolveModel(ctx), enabled: effectiveEnabled(), suggestionsDir: resolvedSuggestionsDir() }), "info");
           return;
         }
         if (rest.length === 1 && rest[0].toLowerCase() === "reset") {
-          config = { ...DEFAULT_SELF_EVOLVE_CONFIG, enabled: config.enabled };
+          const next = { ...DEFAULT_SELF_EVOLVE_CONFIG, enabled: config.enabled };
+          try {
+            await saveConfig(next, ctx.cwd);
+          } catch (error) {
+            ctx.ui.notify(`Self-evolve: config 保存失败 — ${error instanceof Error ? error.message : String(error)}`, "warning");
+            return;
+          }
+          config = next;
           resetSessionState();
-          await saveConfig(config, ctx.cwd);
           updateStatusBar(ctx);
-          ctx.ui.notify(formatConfigSummary(config, source, resolveSelfEvolveModel(ctx)), "info");
+          ctx.ui.notify(formatConfigSummary(config, source, { resolvedModel: resolveSelfEvolveModel(ctx), enabled: effectiveEnabled(), suggestionsDir: resolvedSuggestionsDir() }), "info");
           return;
         }
         // Set one or more key=value pairs (all-or-nothing on validation).
@@ -671,17 +872,22 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
           ctx.ui.notify(`Self-evolve config rejected: ${errors.join("; ")}`, "warning");
           return;
         }
+        try {
+          await saveConfig(next, ctx.cwd);
+        } catch (error) {
+          ctx.ui.notify(`Self-evolve: config 保存失败 — ${error instanceof Error ? error.message : String(error)}`, "warning");
+          return;
+        }
         config = next;
         resetSessionState();
-        await saveConfig(config, ctx.cwd);
         updateStatusBar(ctx);
-        ctx.ui.notify(formatConfigSummary(config, source, resolveSelfEvolveModel(ctx)), "info");
+        ctx.ui.notify(formatConfigSummary(config, source, { resolvedModel: resolveSelfEvolveModel(ctx), enabled: effectiveEnabled(), suggestionsDir: resolvedSuggestionsDir() }), "info");
         return;
       }
 
       if (cmd === "signals") {
         const sub = rest[0]?.toLowerCase();
-        const signalsDir = suggestionsDirPath(outputDir ?? selfEvolveOutputRoot(process.env[SELF_EVOLVE_OUTPUT_DIR_FLAG]));
+        const signalsDir = resolvedSuggestionsDir();
         if (sub === "delete") {
           const prefixes = rest.slice(1).filter((prefix) => prefix.trim().length > 0);
           if (prefixes.length === 0) {
@@ -744,10 +950,36 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
           );
           return;
         }
-        const limit = rest[0]
-          ? Math.max(1, Math.min(50, Number.parseInt(rest[0], 10) || 10))
-          : 10;
-        const signals = await loadRecentSignals(limit);
+        if (sub === "export") {
+          const args2 = parseSignalFlags(rest.slice(1));
+          const signals = await loadSignals({
+            limit: args2.limit,
+            since: args2.since,
+            until: args2.until,
+            project: args2.project,
+          });
+          if (signals.length === 0) {
+            ctx.ui.notify("Self-evolve: no signals to export.", "warning");
+            return;
+          }
+          const exportDir = join(resolvedOutputRoot(), "exports");
+          await mkdir(exportDir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+          const exportPath = join(exportDir, `signals-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
+          await writeFile(exportPath, signals.map((s) => JSON.stringify(s)).join("\n") + "\n", {
+            encoding: "utf8",
+            mode: PRIVATE_FILE_MODE,
+          });
+          ctx.ui.notify(`Self-evolve: exported ${signals.length} signal(s) → ${exportPath}`, "info");
+          return;
+        }
+        // `signals [N] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--project <p>]`
+        const flags = parseSignalFlags(rest);
+        const signals = await loadSignals({
+          limit: flags.limit,
+          since: flags.since,
+          until: flags.until,
+          project: flags.project,
+        });
         if (signals.length === 0) {
           ctx.ui.notify(
             "Self-evolve: no signals yet. Enable with /self-evolve on, then signals appear at agent_end / session_compact boundaries.",
@@ -755,8 +987,9 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
           );
           return;
         }
+        const windowNote = flags.since || flags.until ? "" : ` (last ${config.maxFiles} daily files)`;
         ctx.ui.notify(
-          `Self-evolve signals (${signals.length}):\n${signals.map(formatSignalLine).join("\n")}`,
+          `Self-evolve signals (${signals.length}${windowNote}):\n${signals.map(formatSignalLine).join("\n")}`,
           "info",
         );
         return;
@@ -766,9 +999,18 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         const limit = rest[0]
           ? Math.max(1, Math.min(10, Number.parseInt(rest[0], 10) || 5))
           : 5;
-        const signals = await loadRecentSignals(limit);
+        const allSignals = await loadRecentSignals(limit * 3);
+        // Non-actionable signals (no stage template — e.g. unknown type) are
+        // excluded from the review set; they cannot be staged anyway.
+        const signals = allSignals.filter(signalIsActionable).slice(-limit);
+        const nonActionableSkipped = allSignals.length - signals.length;
         if (signals.length === 0) {
-          ctx.ui.notify("Self-evolve: no signals to review yet.", "info");
+          ctx.ui.notify(
+            nonActionableSkipped > 0
+              ? `Self-evolve: no actionable signals to review (${nonActionableSkipped} non-actionable skipped).`
+              : "Self-evolve: no signals to review yet.",
+            "info",
+          );
           return;
         }
         const selectedModel = resolveSelfEvolveModel(ctx);
@@ -810,7 +1052,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
               return single;
             },
             {
-              task: buildReviewPrompt(signals),
+              task: buildReviewPrompt(signals, config.reviewScoreThreshold),
               timeoutMs: REVIEW_TIMEOUT_MS,
               deadlineMs: REVIEW_DEADLINE_MS,
               outputSchema: REVIEW_OUTPUT_SCHEMA,
@@ -829,6 +1071,15 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
             ctx.ui.notify(`Self-evolve review failed: ${evaluation.reason ?? "unknown"}`, "warning");
             return;
           }
+          // Review-gate hardening: hallucinated ids dropped, low-score stages
+          // downgraded to uncertain, non-actionable stages downgraded too.
+          const actionableIds = new Set(signals.map((s) => s.id));
+          const gate = normalizeReviewVerdicts(
+            evaluation.verdict.verdicts,
+            signals.map((s) => s.id),
+            config.reviewScoreThreshold,
+            actionableIds,
+          );
           const review: SelfEvolveReview = {
             schemaVersion: 1,
             kind: "review",
@@ -837,11 +1088,19 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
             project: projectNameFor(ctx.cwd),
             model: selectedModel,
             signals: signals.length,
-            verdicts: evaluation.verdict.verdicts,
+            verdicts: gate.verdicts,
+            droppedInvalid: gate.droppedInvalid,
+            downgraded: gate.downgraded,
+            nonActionableSkipped,
           };
           const path = await writeReview(review);
+          const gateNote = [
+            gate.droppedInvalid > 0 ? `${gate.droppedInvalid} invalid verdict id(s) dropped` : "",
+            gate.downgraded > 0 ? `${gate.downgraded} low-score stage(s) downgraded` : "",
+            nonActionableSkipped > 0 ? `${nonActionableSkipped} non-actionable skipped` : "",
+          ].filter(Boolean).join(" · ");
           ctx.ui.notify(
-            `${formatReviewSummary(review)}\n  → saved: ${path}`,
+            `${formatReviewSummary(review)}${gateNote ? `\n  gate: ${gateNote}` : ""}\n  → saved: ${path}`,
             "info",
           );
         } catch (error) {
@@ -850,6 +1109,25 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
             "warning",
           );
         }
+        return;
+      }
+
+      if (cmd === "reviews") {
+        const limit = rest[0]
+          ? Math.max(1, Math.min(30, Number.parseInt(rest[0], 10) || 5))
+          : 5;
+        const reviews = await loadRecentReviews(limit);
+        if (reviews.length === 0) {
+          ctx.ui.notify(
+            "Self-evolve: no review records yet. Run /self-evolve review first.",
+            "info",
+          );
+          return;
+        }
+        ctx.ui.notify(
+          `Self-evolve review history (${reviews.length}):\n${reviews.map(formatReviewSummary).join("\n\n")}`,
+          "info",
+        );
         return;
       }
 
@@ -889,19 +1167,22 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       }
 
       if (cmd === "status") {
+        const model = resolveSelfEvolveModel(ctx);
         const lines = [
         `SELF-EVOLVE ${effectiveEnabled() ? "on" : "off"} (${source})`,
         `  mode: ${config.mode} — candidate signals only, never stages or promotes knowledge (Phase 2A; auto-deposit arrives with Phase 2B)`,
-        `  model: ${config.model ?? "auto"}${resolveSelfEvolveModel(ctx) && resolveSelfEvolveModel(ctx) !== config.model ? ` → ${resolveSelfEvolveModel(ctx)}` : ""} (Phase 2B LLM steps)`,
+        `  model: ${config.model ?? "auto"}${model && model !== config.model ? ` → ${model}` : ""} (Phase 2B LLM steps)`,
         `  cooldown: ${config.cooldownMs}ms · max ${config.maxSignalsPerSession} signals/session`,
         `  evidence: ${config.maxEvidence} refs · trace: ${config.maxTraceMessages} msgs / ${config.maxTraceChars} chars`,
-        `  retention: keep ${config.maxFiles} daily files in ${suggestionsDirPath(outputDir ?? selfEvolveOutputRoot(process.env[SELF_EVOLVE_OUTPUT_DIR_FLAG]))}`,
+        `  review gate: stage below score ${config.reviewScoreThreshold} downgraded to uncertain`,
+        `  retention: keep ${config.maxFiles} daily signal files · ${config.maxReviewFiles} daily review files (stale archived)`,
+        `  output: ${resolvedSuggestionsDir()}`,
         `  signals: ${state.signals} written · deduped: ${state.deduped} · suppressed: ${state.suppressed}`,
         `  failures: ${state.failures}${state.lastError ? ` · last: ${state.lastError.slice(0, 200)}` : ""}`,
         state.lastSource
           ? `  last: ${state.lastSource}${lastSignalBySource[state.lastSource] ? ` · ${new Date(lastSignalBySource[state.lastSource]!).toLocaleTimeString()}` : ""}`
           : "  last: (none yet)",
-        `  usage: /self-evolve panel (editable: ↑↓ Enter Ctrl+S) · config <key>=<value> (enabled, mode, model, cooldownMs, maxSignalsPerSession, maxTraceChars, maxTraceMessages, maxEvidence, maxFiles) · signals [N]`,
+        `  usage: /self-evolve panel (editable: ↑↓ Enter Ctrl+S) · config <key>=<value> (enabled, mode, model, reviewScoreThreshold, cooldownMs, maxSignalsPerSession, maxTraceChars, maxTraceMessages, maxEvidence, maxFiles, maxReviewFiles) · signals [N|--since d|--until d|--project p|delete <id>|clear|export] · review [N] · reviews [N]`,
       ];
       ctx.ui.notify(lines.join("\n"), "info");
       return;
@@ -909,7 +1190,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
 
       // Unknown subcommand — surface usage instead of silently opening the panel.
       ctx.ui.notify(
-        "Usage: /self-evolve [panel (default)|status|on|off|config [k=v ...|reset]|signals [N]|review [N]]",
+        "Usage: /self-evolve [panel (default)|status|on|off|config [k=v ...|reset]|signals [N|delete <id>|clear|export|--since d --until d --project p]|review [N]|reviews [N]]",
         "info",
       );
     },

@@ -80,7 +80,53 @@ observe({ action: "watch", targets: [{ kind: "teammate", id: "reviewer" }], time
 - `until`：`"result-ready"`（默认，出结果即返回）或 `"completed"`（终态生命周期）；
 - `wait` 的每个 target 必须提供 `name` 或 `waitMs` 之一（schema 强制）。
 
-## 5. 其他增强
+## 5. self-evolve 自进化（dry-run 候选信号）
+
+**是什么**：运行轨迹 → 知识沉淀闭环的 **dry-run 层**。启用后监听每轮结束（`agent_end`）与会话压缩（`session_compact`）事件，把可复用经验提炼为**候选信号**（JSONL 建议文件 + 可执行 stage 命令模板），由你或后续治理步骤决定是否沉淀进知识库。它本身**绝不 stage / promote / 写知识**（dry-run 保证）。
+
+**默认禁用**，三种启用方式任一即可：
+
+1. 会话内命令：`/self-evolve on`（写 `.pi/self-evolve.json`）
+2. 环境变量：`PI_SELF_EVOLVE=1 pi`（`PI_SELF_EVOLVE=0` 显式关闭，覆盖配置文件）
+3. 项目配置：`.pi/self-evolve.json` → `{ "enabled": true }`
+
+**命令速查**：
+
+```
+/self-evolve [panel]                    # 打开面板（默认）
+/self-evolve status                     # 完整状态（含有效状态与 env 覆盖）
+/self-evolve on|off                     # 启用 / 禁用
+/self-evolve config [k=v ...|reset]     # 查看 / 修改配置（含评审门阈值）
+/self-evolve signals [N]                # 最近 N 条候选信号（默认 10）
+/self-evolve signals delete <id>|clear|export [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--project p]
+/self-evolve review [N]                 # dry-run 评审最近 N 条（默认 5；评分低于阈值自动降级 uncertain）
+/self-evolve reviews [N]                # 查历史评审记录
+```
+
+**输出位置**（全局，不污染项目 git；`SELF_EVOLVE_OUTPUT_DIR` 可覆盖根）：
+
+```
+~/.maestro/self-evolve/suggestions/<date>.jsonl   # 候选信号
+~/.maestro/self-evolve/reviews/<date>.jsonl       # 评审记录（含评审门统计）
+~/.maestro/self-evolve/evidence/<se-id>.md        # 信号证据文件（suggestion 直接引用）
+~/.maestro/self-evolve/archive/                   # 旧日文件归档（不删除）
+~/.maestro/self-evolve/exports/                   # signals export 导出（signals-<ts>.jsonl）
+```
+
+**与 maestro-knowledge skill 的关系**：self-evolve 只产出**信号 → 评审**（dry-run）；真正沉淀走 CLI：`maestro knowledge stage`（信号自带可执行 suggestion 模板，证据文件已生成）→ `maestro knowledge review --resolve` 裁决 → `maestro knowledge promote` 晋升 → 未来 `maestro search` 验证。全程人工确认，无自动写库。
+
+**相关脚本**：
+
+```
+node scripts/self-evolve-health.mjs                            # 健康闭环：health.json + health-<project>.json（revalidation 队列）
+node scripts/self-evolve-health.mjs mark|unmark <item-id>      # 队列项已处理标记（health-handled.json）
+node scripts/self-evolve-approval.mjs record|query|reconcile   # 晋升审计回执（record/query/reconcile）
+node scripts/self-evolve-phase5.mjs canary|proposal|apply|revert  # 在线验证 / skill 演化
+```
+
+详见 [self-evolve SKILL](../.pi/skills/self-evolve/SKILL.md) 与 [扩展 README](../packages/pi-maestro-flow/src/self-evolve/README.md)。
+
+## 6. 其他增强
 
 | 能力 | 说明 |
 |---|---|
