@@ -455,6 +455,17 @@ export function validateMonitorLease(value: unknown): MonitorLease | undefined {
   };
 }
 
+/** Read the current physical lease without changing the workspace-peer protocol. */
+export async function readMonitorLease(
+  identity: WorkspacePeerIdentity,
+  targetOwnerId: string,
+): Promise<MonitorLease | undefined> {
+  return validateMonitorLease(await readBoundedJson(
+    monitorLeasePath(identity, targetOwnerId),
+    MAX_COMMAND_FILE_BYTES,
+  ));
+}
+
 /** True when the given ownerId has a fresh owner snapshot (process alive). */
 async function ownerSnapshotAlive(identity: WorkspacePeerIdentity, ownerId: string, staleMs: number, now: number): Promise<boolean> {
   const raw = await readBoundedJson(ownerSnapshotPath(identity, ownerId), MAX_OWNER_FILE_BYTES);

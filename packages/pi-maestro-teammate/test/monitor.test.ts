@@ -79,12 +79,15 @@ test("validateMonitorParams accepts valid params", () => {
 
 test("independent monitor session identity and command entry points stay stable", async () => {
   const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  const sessionSource = await readFile(new URL("../src/extension/monitor-session.ts", import.meta.url), "utf8");
 
-  assert.match(source, /const MONITOR_SESSION_NAME = "monitor-session"/);
+  assert.match(sessionSource, /export const MONITOR_SESSION_NAME = "monitor-session"/);
+  assert.match(sessionSource, /export const MONITOR_SESSION_ENV_VAR = "PI_TEAMMATE_MONITOR"/);
+  assert.match(sessionSource, /export const MONITOR_SESSION_RELATIVE_DIR = "\.pi\/monitor-sessions"/);
   assert.match(source, /name: MONITOR_SESSION_NAME,[\s\S]*?context: "fresh"/);
   assert.match(source, /background: true,[\s\S]*?maxNestingDepth: 0/);
-  assert.match(source, /singleTask\.name === "monitor-session"[\s\S]*?\.pi", "monitor-sessions", correlationId/);
-  assert.match(source, /childEnvironment: \{ PI_TEAMMATE_MONITOR: "1" \}/);
+  assert.match(source, /singleTask\.name === MONITOR_SESSION_NAME[\s\S]*?MONITOR_SESSION_RELATIVE_DIR, correlationId/);
+  assert.match(source, /childEnvironment: \{ \[MONITOR_SESSION_ENV_VAR\]: "1" \}/);
   assert.equal(source.match(/pi\.registerCommand\("monitor"/g)?.length, 1);
   assert.equal(source.match(/pi\.registerCommand\("teammate-send"/g)?.length, 1);
   assert.match(source, /kind: "workspace",[\s\S]*?capabilities: \{ inspect: true, wait: true, cancel: false, message: true, supervise: true \}/);
@@ -92,7 +95,9 @@ test("independent monitor session identity and command entry points stay stable"
   assert.match(source, /workspaceMainSessionDeliveryDecision\(command\.action, workspaceBackgroundJobs\)/);
   assert.match(source, /deliverAs: delivery\.deliverAs/);
   assert.match(source, /steer deferred as follow_up while foreground bash_bg is active/);
-  assert.match(source, /active bash_bg work/);
+  assert.match(sessionSource, /foreground background-job entry/);
+  assert.match(source, /if \(trimmed === ""\)[\s\S]*?requestWindowMode\("enter"\)/);
+  assert.match(source, /event\.source !== "interactive"[\s\S]*?event\.text\.trim\(\) !== "monitor"/);
   assert.match(source, /if \(trimmed === "exit" \|\| trimmed === "stop"\)/);
   assert.match(source, /if \(trimmed === "resume"\)/);
   assert.match(source, /if \(trimmed === "status"\)/);

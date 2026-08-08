@@ -210,6 +210,8 @@ export interface MonitorLease {
 }
 export declare function monitorLeasePath(identity: WorkspacePeerIdentity, targetOwnerId: string): string;
 export declare function validateMonitorLease(value: unknown): MonitorLease | undefined;
+/** Read the current physical lease without changing the workspace-peer protocol. */
+export declare function readMonitorLease(identity: WorkspacePeerIdentity, targetOwnerId: string): Promise<MonitorLease | undefined>;
 export interface AcquireMonitorLeaseResult {
     ok: boolean;
     error?: string;

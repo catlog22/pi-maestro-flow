@@ -110,6 +110,7 @@ export function projectTeammateSessionEndpoints(
       status: owner.agents.some((agent) => agent.status === "running") ? "running" : "sleeping",
       ...(owner.sessionId ? { sessionId: owner.sessionId } : {}),
       ...(owner.sessionName ? { sessionName: owner.sessionName } : {}),
+      ...(owner.contextPressure === undefined ? {} : { contextPressure: owner.contextPressure }),
       agents: [
         ...owner.agents.map((agent) => remoteAgentProjection(owner, agent, false)),
         ...owner.settled.map((agent) => remoteAgentProjection(owner, agent, true)),

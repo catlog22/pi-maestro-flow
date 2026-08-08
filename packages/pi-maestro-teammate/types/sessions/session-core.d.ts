@@ -8,6 +8,13 @@ export declare const WINDOW_THREAD_EVENT: "teammate:window-thread";
 export declare const WINDOW_THREAD_ENTRY_TYPE: "teammate-window-thread";
 export declare const DEFAULT_WINDOW_THREAD_LIMIT = 512;
 export type SessionSurfaceMode = "legacy" | "shadow" | "unified";
+export type SessionViewMode = "agents" | "windows";
+export type SessionWindowModeAction = "enter" | "exit";
+export interface SessionMonitorOptions {
+    mode?: "auto" | "custom";
+    customPrompt?: string;
+    goalId?: string;
+}
 export type SessionEndpointKind = "root" | "agent";
 export type SessionEndpointScope = "local" | "workspace-peer";
 export type SessionEndpointTransport = "local-root" | "local-agent-mailbox" | "workspace-peer-v1" | "child-ipc";
@@ -40,6 +47,8 @@ export interface SessionEndpoint extends SessionEndpointIdentity {
     phase?: string;
     parentCorrelationId?: string;
     summary?: string;
+    contextPressure?: number;
+    agentCount?: number;
 }
 export interface SessionAgentProjection extends SessionEndpointIdentity {
     correlationId: string;
@@ -58,6 +67,7 @@ export interface SessionOwnerProjection extends Omit<SessionEndpointIdentity, "c
     transport?: SessionEndpointTransport;
     sessionId?: string;
     sessionName?: string;
+    contextPressure?: number;
     agents: readonly SessionAgentProjection[];
 }
 export type SessionSelectorKind = "endpoint-id" | "owner-root" | "owner-agent" | "session-name" | "window-owner-prefix" | "name" | "name-id-prefix" | "correlation-id" | "correlation-prefix";
@@ -130,6 +140,11 @@ export interface WindowThreadSnapshot {
     entries: readonly WindowThreadEntry[];
 }
 export type WindowThreadEntryInput = Omit<WindowThreadEntry, "version" | "revision" | "contentRevision">;
+/** Terminal entries are replay receipts; pending entries must retry delivery after a crash. */
+export declare function windowThreadReplayReceipt(entry: WindowThreadEntry | undefined): {
+    status: "accepted" | "rejected";
+    message: string;
+} | undefined;
 export interface WindowThreadStoreOptions {
     limit?: number;
     persist?: (entry: WindowThreadEntry) => void;
@@ -208,15 +223,22 @@ export declare class MessageRouter {
     compare(request: SessionMessageRequest): SessionShadowComparison | undefined;
     route(request: SessionMessageRequest): Promise<SessionMessageResult>;
 }
+export interface SessionHostControls {
+    requestWindowMode?: (action: SessionWindowModeAction) => void | Promise<void>;
+    setMonitored?: (endpointId: string, enabled: boolean, options?: SessionMonitorOptions) => void | Promise<void>;
+}
 export interface SessionHostRegistryOptions extends Omit<MessageRouterOptions, "directory"> {
     endpoints?: readonly SessionEndpoint[];
     thread?: WindowThreadStore;
+    controls?: SessionHostControls;
 }
 export interface SessionHostSnapshot {
     version: typeof SESSION_ENDPOINT_VERSION;
     contentRevision: string;
     endpointContentRevision: string;
     threadContentRevision: string;
+    viewMode: SessionViewMode;
+    monitoredEndpointIds: readonly string[];
     endpoints: readonly SessionEndpoint[];
     thread: readonly WindowThreadEntry[];
 }
@@ -228,10 +250,17 @@ export declare class SessionHostRegistry {
     readonly thread: WindowThreadStore;
     constructor(options?: SessionHostRegistryOptions);
     get contentRevision(): string;
+    get viewMode(): SessionViewMode;
+    get monitoredEndpointIds(): readonly string[];
     replaceEndpoints(endpoints: readonly SessionEndpoint[]): void;
     listEndpoints(): readonly SessionEndpoint[];
     resolve(selector: string, options?: SessionResolveOptions): SessionResolution;
     send(request: SessionMessageRequest): Promise<SessionMessageResult>;
+    setControls(controls: SessionHostControls): void;
+    setViewMode(mode: SessionViewMode): void;
+    setMonitoredEndpointIds(endpointIds: readonly string[]): void;
+    requestWindowMode(action: SessionWindowModeAction): Promise<void>;
+    setMonitored(endpointId: string, enabled: boolean, options?: SessionMonitorOptions): Promise<void>;
     snapshot(): SessionHostSnapshot;
     subscribe(subscriber: (snapshot: SessionHostSnapshot) => void, options?: {
         emitCurrent?: boolean;

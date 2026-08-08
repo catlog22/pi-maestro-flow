@@ -181,6 +181,10 @@ export interface EngineCallbacks {
     getAgentInfo: (correlationId: string) => EngineAgentInfo | undefined;
     /** Send an intervention message to an agent. */
     sendIntervention: (correlationId: string, message: string, mode: "steer" | "follow_up") => boolean | Promise<boolean>;
+    /** Exact lifecycle fence supplied by a host-owned deterministic runtime. */
+    isCurrent?: (correlationId: string, binding: MonitorBinding) => boolean;
+    /** Defer a missing-target removal to a quiescence-owning controller. */
+    onBindingMissing?: (correlationId: string, binding: MonitorBinding) => void;
     /** Update the status bar text. */
     onStatusUpdate: (statusText: string | undefined) => void;
     /** Notify the main session (e.g., interaction needed). `target` is the binding key. */
@@ -307,7 +311,7 @@ export declare function addBinding(engine: MonitorEngineState, correlationId: st
     ok: boolean;
     error?: string;
 };
-export declare function removeBinding(engine: MonitorEngineState, correlationId: string): boolean;
+export declare function removeBinding(engine: MonitorEngineState, correlationId: string, status?: string, reason?: string): boolean;
 export declare function clearBindings(engine: MonitorEngineState): void;
 /**
  * Record binding exits before the engine stops (user-exit / shutdown).
@@ -334,9 +338,11 @@ export declare function createTraceId(): string;
 export declare function sendInterventionWithRetry(send: (message: string, mode: "steer" | "follow_up") => boolean | Promise<boolean>, message: string, mode: "steer" | "follow_up", maxRetries: number, backoffMs: number, options?: {
     signal?: AbortSignal;
     sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>;
+    isCurrent?: () => boolean;
 }): Promise<{
     delivered: boolean;
     attempts: number;
+    stale?: boolean;
 }>;
 /**
  * One engine tick: check all bindings, run heuristics, optionally run LLM

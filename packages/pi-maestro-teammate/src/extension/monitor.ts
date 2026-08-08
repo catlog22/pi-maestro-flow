@@ -437,6 +437,10 @@ export interface EngineCallbacks {
   getAgentInfo: (correlationId: string) => EngineAgentInfo | undefined;
   /** Send an intervention message to an agent. */
   sendIntervention: (correlationId: string, message: string, mode: "steer" | "follow_up") => boolean | Promise<boolean>;
+  /** Exact lifecycle fence supplied by a host-owned deterministic runtime. */
+  isCurrent?: (correlationId: string, binding: MonitorBinding) => boolean;
+  /** Defer a missing-target removal to a quiescence-owning controller. */
+  onBindingMissing?: (correlationId: string, binding: MonitorBinding) => void;
   /** Update the status bar text. */
   onStatusUpdate: (statusText: string | undefined) => void;
   /** Notify the main session (e.g., interaction needed). `target` is the binding key. */
@@ -756,16 +760,24 @@ export function addBinding(
   return { ok: true };
 }
 
-export function removeBinding(engine: MonitorEngineState, correlationId: string): boolean {
+export function removeBinding(
+  engine: MonitorEngineState,
+  correlationId: string,
+  status = "removed",
+  reason?: string,
+): boolean {
   const binding = engine.bindings.get(correlationId);
   if (!binding) return false;
   engine.bindings.delete(correlationId);
   emitLedger(engine, {
     kind: "binding",
     action: "exit",
-    status: "removed",
+    status,
     target: correlationId,
-    metadata: { displayName: binding.displayName },
+    metadata: {
+      displayName: binding.displayName,
+      ...(reason ? { reason } : {}),
+    },
   });
   return true;
 }
@@ -953,19 +965,27 @@ export async function sendInterventionWithRetry(
   mode: "steer" | "follow_up",
   maxRetries: number,
   backoffMs: number,
-  options: { signal?: AbortSignal; sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void> } = {},
-): Promise<{ delivered: boolean; attempts: number }> {
+  options: {
+    signal?: AbortSignal;
+    sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>;
+    isCurrent?: () => boolean;
+  } = {},
+): Promise<{ delivered: boolean; attempts: number; stale?: boolean }> {
   const sleepFn = options.sleepFn ?? ((ms: number, signal?: AbortSignal) => sleep(ms, signal));
   let attempts = 0;
   for (;;) {
     attempts += 1;
     const ok = await send(message, mode);
+    if (options.isCurrent?.() === false) return { delivered: false, attempts, stale: true };
     if (ok) return { delivered: true, attempts };
     if (attempts > maxRetries) return { delivered: false, attempts };
     try {
       await sleepFn(backoffMs * attempts, options.signal);
+      if (options.isCurrent?.() === false) return { delivered: false, attempts, stale: true };
     } catch {
-      return { delivered: false, attempts };
+      return options.isCurrent?.() === false
+        ? { delivered: false, attempts, stale: true }
+        : { delivered: false, attempts };
     }
   }
 }
@@ -995,18 +1015,24 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
 
     for (const [cid, binding] of [...engine.bindings]) {
       const ownsBinding = (): boolean =>
-        engine.callbacks === cb && engine.bindings.get(cid) === binding;
+        engine.callbacks === cb
+        && engine.bindings.get(cid) === binding
+        && cb.isCurrent?.(cid, binding) !== false;
       const info = cb.getAgentInfo(cid);
       if (!info) {
-        // Agent is gone — remove binding and record exit.
-        engine.bindings.delete(cid);
-        emitLedger(engine, {
-          kind: "binding",
-          action: "exit",
-          status: "gone",
-          target: cid,
-          metadata: { displayName: binding.displayName },
-        });
+        if (cb.onBindingMissing) {
+          cb.onBindingMissing(cid, binding);
+        } else {
+          // Legacy hosts remove immediately; deterministic hosts quiesce first.
+          engine.bindings.delete(cid);
+          emitLedger(engine, {
+            kind: "binding",
+            action: "exit",
+            status: "gone",
+            target: cid,
+            metadata: { displayName: binding.displayName },
+          });
+        }
         continue;
       }
 
@@ -1108,13 +1134,11 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
               if (binding.goalId && cb.postGoalObjection) {
                 const summary = `${binding.displayName} ${pending.reason === "stalled" ? "stalled" : "drifting"} after ${binding.interventionStreak} intervention(s) — monitor escalation.`;
                 try {
-                  const result = cb.postGoalObjection(binding.goalId, summary, "monitor");
-                  if (result && typeof (result as Promise<void>).catch === "function") {
-                    (result as Promise<void>).catch(() => {});
-                  }
+                  await cb.postGoalObjection(binding.goalId, summary, "monitor");
                 } catch {
                   // best-effort
                 }
+                if (!ownsBinding()) continue;
               }
               continue;
             }
@@ -1154,15 +1178,15 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
           continue;
         }
         const traceId = createTraceId();
-        const { delivered, attempts } = await sendInterventionWithRetry(
+        const { delivered, attempts, stale } = await sendInterventionWithRetry(
           (message, mode) => cb.sendIntervention(cid, message, mode),
           plan.message,
           "steer",
           engine.config.maxRetries,
           engine.config.retryBackoffMs,
-          { signal: engine.abortController?.signal },
+          { signal: engine.abortController?.signal, isCurrent: ownsBinding },
         );
-        if (!ownsBinding()) continue;
+        if (!ownsBinding() || stale) continue;
         if (delivered) {
           recordIntervention(binding, plan.reason, plan.message, "steer", traceId);
           binding.pendingIntervention = {

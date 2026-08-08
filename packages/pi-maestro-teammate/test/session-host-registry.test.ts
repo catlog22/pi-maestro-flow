@@ -54,3 +54,45 @@ test("root extension publishes the parsed session surface registry", () => {
     else process.env.PI_TEAMMATE_SESSION_SURFACE = previousSurface;
   }
 });
+
+test("session replacement keeps the canonical registry published for the following session_start", async () => {
+  const previousChild = process.env.PI_TEAMMATE_CHILD;
+  delete process.env.PI_TEAMMATE_CHILD;
+  const globals = globalThis as typeof globalThis & Record<symbol, unknown>;
+  delete globals[ROOT_REGISTRY_KEY];
+  publishSessionHostRegistry(undefined, globals);
+  const handlers = new Map<string, Array<(event?: unknown, ctx?: unknown) => unknown>>();
+  const api = new Proxy({
+    events: { on() { return () => {}; }, emit() {} },
+    on(event: string, handler: (event?: unknown, ctx?: unknown) => unknown) {
+      const list = handlers.get(event) ?? [];
+      list.push(handler);
+      handlers.set(event, list);
+      return () => {};
+    },
+    registerTool() {}, registerCommand() {}, registerShortcut() {}, registerMessageRenderer() {},
+  }, {
+    get(target, property) {
+      if (property in target) return target[property as keyof typeof target];
+      return () => {};
+    },
+  }) as unknown as ExtensionAPI;
+
+  try {
+    registerTeammateExtension(api);
+    const registry = getSessionHostRegistry(globals);
+    assert.ok(registry);
+    const shutdown = handlers.get("session_shutdown")?.[0];
+    assert.ok(shutdown);
+    await shutdown({ reason: "resume" });
+    assert.equal(getSessionHostRegistry(globals), registry);
+    assert.deepEqual(registry.listEndpoints(), []);
+    await shutdown({ reason: "quit" });
+    assert.equal(getSessionHostRegistry(globals), undefined);
+  } finally {
+    publishSessionHostRegistry(undefined, globals);
+    delete globals[ROOT_REGISTRY_KEY];
+    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previousChild;
+  }
+});
