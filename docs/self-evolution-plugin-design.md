@@ -2,7 +2,7 @@
 kind: design
 title: 自进化插件设计 — pi-maestro-flow harness 式知识沉淀闭环（修订 v2）
 created: 2026-08-06
-updated: 2026-08-06
+updated: 2026-08-07
 status: draft-v2
 supersedes: [self-evolution-plugin-design-v1]
 related:
@@ -174,7 +174,7 @@ harness 与 maestro 知识体系**控制方向相反**：
 ## 9. Phase 2+ 演进路线（v2 重排，采纳 gpt 建议）
 
 - **Phase 2A — 候选生成与遥测**：事件采集 + 轨迹 hash 去重 + 证据引用 + stage 建议；默认 dry-run，**禁止自动 promote / skill mutation**。
-- **Phase 2B — 治理硬化**：capability + approval receipt + **promotion 强制 reason/actor**；跨 Run candidate 事务索引（当前跨 Run 冲突检查在 SessionStore 锁外，`run/knowledge.ts:411`）；promotion generation fence（TOCTOU）；untrusted transcript redaction；并发/失败注入测试。
+- **Phase 2B — 治理硬化**：capability + approval receipt + **promotion 强制 reason/actor**；跨 Run candidate 事务索引（当前跨 Run 冲突检查在 SessionStore 锁外，`run/knowledge.ts:411`）；promotion generation fence（TOCTOU）；untrusted transcript redaction；并发/失败注入测试。**（2026-08-07 已落地 auto-deposit 模式**：显式触发、评审门后自动 stage 不 promote，见 M7；跨 Run 事务索引仍在 maestro2 仓库未实现）
 - **Phase 3 — 知识健康闭环（v2 补的核心缺口）**：建立统一 `knowledge-health.json` sidecar（覆盖 spec/knowhow）：`last_validated_at`、证据根数量、contradiction 状态、freshness；Session seal 聚合 validated/contradicted 信号 → 达阈值自动创建 **contest/revalidation queue** → 人工执行 supersede/deprecate；候选 TTL 分诊（过期未 corroborate → expired/suppressed，保留审计不物理删）。
 - **Phase 4 — 受控自动化**：仅 exact duplicate 自动 suppress、低风险候选自动生成 promote 建议；**promotion 仍需用户请求或 confirmed governance step**（遵 `.pi/SYSTEM.md`）。
 - **Phase 5 — 在线验证与 skill 演化**：高影响知识 canary/shadow 对照；skill 修改走独立 proposal（签名、静态检查、权限差异审查、快照、显式批准），不复用普通 knowhow promotion。
@@ -249,14 +249,23 @@ harness 与 maestro 知识体系**控制方向相反**：
 ### M6 Phase 5 落地 — ✅ 完成（2026-08-06）
 - **canary/shadow 在线验证**：`scripts/self-evolve-phase5.mjs canary <id> [--window N]`——shadow 观察窗内从全局 health 信号判定（validated+cited≥1 → PROMOTE 建议；contradicted>0 或窗口到期无佐证 → ROLLBACK 建议），只出**建议命令**，promotion 仍走 fail-closed 显式门。实测三路径：冲突知识→ROLLBACK ✓ / 有信号→PROMOTE ✓ / 无信号窗口到期→ROLLBACK ✓
 - **skill 独立 proposal 治理链**：proposal（sha256 快照 + diff + 权限差异审查 + 静态检查（frontmatter/标签配对）+ 签名）→ apply（非空 reason=批准记录 + approvals 回执；应用后重校验失败自动回滚）→ revert（快照恢复）。实测全链 + 可逆性 ✓（副本 + 真实 skill 各走一遍）
-- **修复**（Windows/ESM 实测）：CRLF 行尾正则兼容（`---?
+- **修复**（Windows/ESM 实测）：CRLF 行尾正则兼容（`---
+?
 `）；canary ledger 文件名 sanitize Windows 非法 `:`；apply receipt 写入去 `require`（ESM）；proposal 落 `proposal.md`（无内容变化场景 apply 读目标当前内容）
+
+### M7 Phase 2B auto-deposit 模式 — ✅ 完成（2026-08-07）
+- **交付**：`SelfEvolveMode` 扩展为 `dry-run | auto-deposit`（`runtime.ts`：枚举、`setConfigValue`、`DepositRecord`/`buildStageCommandArgs`/`parseStagedId`/`formatDepositSummary`/`isValidSignalId` 纯逻辑；`extension.ts`：cross-spawn CLI 执行器（60s 超时 + 进程树终止 + 1MB 输出上限，对齐 `defaultRunner` 范式）+ `setSelfEvolveDepositExecutorForTest` 接缝 + `deposits` 命令 + 幂等去重 + 跨项目守卫；`tui/self-evolve-overlay.ts`：mode 字段可编辑；`se-e2e.mts` 新增 19 断言（HEAD 65 → 84 执行））
+- **语义（治理纪律）**：`mode=auto-deposit` 时 `/self-evolve review` 评审门后，verdict=stage 且过门（评分 ≥ 阈值、可行动、evidence 文件存在、id 合法、同项目、未沉淀）的信号**自动 stage 进知识库 pending 池**；**永不自动 promote**（§9 Phase 4 受控自动化纪律：promotion 仍需用户请求或 confirmed governance step）；触发保持显式（用户主动跑 review），不在 agent_end 自动触发
+- **幂等与安全**：已成功沉淀信号从 ledger 种子化去重（跨重启）；跨项目信号跳过；evidence 缺失 / id 非法 fail-closed 不执行；每次尝试（成功/失败/缺失/异常）全审计
+- **审计**：每次沉淀（成功与失败）写 `~/.maestro/self-evolve/deposits/<date>.jsonl`（signal id/title/type/命令/退出码/`stagedId`/error）；状态栏追加 `·<n>D` 计数
+- **验证**：`tsc --noEmit` 通过；`se-e2e.mts` 79 PASS / 0 FAIL（dry-run 不写 ledger、mode 切换持久化+非法值拒绝、stage argv 结构化、ledger 成功/失败/fail-closed evidence 缺失、deposits 命令）
+- **默认保持 dry-run**：切换显式（`/self-evolve config mode=auto-deposit` 或面板编辑）
 
 ### 遗留跟进项
 1. ~~V8 前置修复~~ **已完成**：legacy `KNW-investigate-*/report.md` 重复 id 冲突已通过按目录前缀重命名解决（`scanKnowhow` 不再撞名）；restore intent 账本清理逻辑已入验收脚本
 2. M2 skill 需真实 run 端到端演练（当前仅签名级验证）——可由 V1-V11 验收脚本的 full-cycle 流程覆盖
-3. M3 Phase 2B：capability/approval receipt/跨 Run 事务化/TOCTOU fence
+3. M3 Phase 2B：capability/approval receipt/跨 Run 事务化/TOCTOU fence —— **部分完成**：approval receipt + TOCTOU fence + **auto-deposit 模式**已落地（见 M7）；**跨 Run 候选事务索引（`run/knowledge.ts:411`）遗留**——位于 maestro2 仓库（非本仓库 pi-maestro-flow），未实现
 4. ~~Phase 3~~ **健康闭环已起步**：sidecar 生成器完成；validated/contradicted 信号聚合（run ledger）与自动 contest queue 待接入 signals 扩展点
 
 ---
-*本文档为设计草案 v2；所有机制均为实测命令/源码行为；M1-M4 实施记录如上，未改核心代码。*
+*本文档为设计草案 v2；所有机制均为实测命令/源码行为；M1-M7 实施记录如上，未改 maestro/Pi 核心代码。*
