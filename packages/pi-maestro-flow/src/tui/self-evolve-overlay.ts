@@ -6,9 +6,9 @@
  * interaction: `↑`/`↓` select a field, `Enter` toggles `enabled` or opens an
  * inline editor for the other keys, `Space` toggles the master switch,
  * `Ctrl+S` persists through the host (`onAction save`), `Esc` cancels an edit
- * or (when armed) discards uncommitted changes. `mode` is a Phase 2A
- * informational row — the only legal mode today is `dry-run`; auto-deposit
- * arrives with Phase 2B.
+ * or (when armed) discards uncommitted changes. `mode` is editable and toggles
+ * between `dry-run` (review only) and `auto-deposit` (gate-passing candidates
+ * auto-staged via the explicit CLI; never auto-promoted).
  *
  * Rendering follows the Maestro settings visual language (shared
  * `frame`/`headerLine`/`rule`/`pad` primitives from pi-cockpit): the panel
@@ -309,7 +309,7 @@ export class SelfEvolveOverlay implements Component, Focusable {
       case "enabled":
         return "master switch · Enter/Space toggles collection on/off";
       case "mode":
-        return `${SELF_EVOLVE_MODES.join(" | ")} — Phase 2A ships dry-run only (candidate signals, never auto-writes knowledge); auto-deposit arrives with Phase 2B`;
+        return `${SELF_EVOLVE_MODES.join(" | ")} — dry-run: review only; auto-deposit: gate-passing candidates auto-staged (pending pool, never auto-promoted)`;
       case "model":
         return 'Phase 2B LLM steps (review) · "provider/model" or "auto" to inherit the session model';
       case "cooldownMs":
@@ -448,11 +448,6 @@ export class SelfEvolveOverlay implements Component, Focusable {
       this.toggleEnabled();
       return;
     }
-    if (field === "mode") {
-      this.notice = this.fieldHint("mode");
-      this.requestRender();
-      return;
-    }
     this.editValue = this.editorValue(field);
     this.editing = true;
     this.notice = "";
@@ -463,6 +458,7 @@ export class SelfEvolveOverlay implements Component, Focusable {
     switch (field) {
       case "cooldownMs": return formatDurationMs(this.draft.cooldownMs);
       case "model": return this.draft.model ?? "";
+      case "mode": return this.draft.mode;
       case "reviewScoreThreshold": return String(this.draft.reviewScoreThreshold);
       default: return String(this.draft[field]);
     }
@@ -506,6 +502,8 @@ export class SelfEvolveOverlay implements Component, Focusable {
     if (!printable) return;
     if (field === "model") {
       this.editValue += printable;
+    } else if (field === "mode") {
+      this.editValue += printable.replace(/[^a-z-]/gi, "");
     } else if (field === "cooldownMs") {
       const clean = printable.replace(/[^0-9a-z.]/gi, "");
       if (clean) this.editValue += clean;
