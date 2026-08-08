@@ -4,7 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
-import { createLspTool, LSP_ACTIONS } from "../src/tools/lsp-tool.ts";
+import { Check } from "typebox/value";
+import { createLspTool, LSP_ACTIONS, LspParams } from "../src/tools/lsp-tool.ts";
 import type { Diagnostic, LspClientLike, LspManagerLike, LspServerConfig, ServerStatus, WorkspaceEdit } from "../src/tools/lsp/types.ts";
 
 class FakeClient implements LspClientLike {
@@ -67,6 +68,10 @@ test("LSP schema exposes the complete oh-my-pi 14-action contract", () => {
     "diagnostics", "definition", "references", "hover", "symbols", "rename", "rename_file",
     "code_actions", "type_definition", "implementation", "status", "reload", "capabilities", "request",
   ]);
+  assert.equal(Check(LspParams, { action: "status", timeout: 5 }), true);
+  assert.equal(Check(LspParams, { action: "status", timeout: 60 }), true);
+  assert.equal(Check(LspParams, { action: "status", timeout: 1 }), false);
+  assert.equal(Check(LspParams, { action: "status", timeout: 120 }), false);
 });
 
 test("LSP tool routes navigation, diagnostics, symbols, capabilities, status, reload, and raw requests", async () => {

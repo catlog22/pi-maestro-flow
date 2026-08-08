@@ -23,14 +23,7 @@ export declare const TaskSpec: Type.TObject<{
     fallbackModels: Type.TOptional<Type.TArray<Type.TString>>;
     thinking: Type.TOptional<Type.TUnsafe<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max">>;
     cwd: Type.TOptional<Type.TString>;
-    outputSchema: Type.TOptional<Type.TObject<{
-        type: Type.TLiteral<"object">;
-        properties: Type.TOptional<Type.TObject<{}>>;
-        required: Type.TOptional<Type.TArray<Type.TString>>;
-        additionalProperties: Type.TOptional<Type.TUnion<[Type.TBoolean, Type.TObject<{}>]>>;
-        title: Type.TOptional<Type.TString>;
-        description: Type.TOptional<Type.TString>;
-    }>>;
+    outputSchema: Type.TOptional<Type.TUnsafe<Record<string, unknown>>>;
     timeoutMs: Type.TOptional<Type.TInteger>;
     background: Type.TOptional<Type.TBoolean>;
     todo: Type.TOptional<Type.TUnion<[Type.TString, Type.TArray<Type.TString>]>>;
@@ -52,14 +45,7 @@ export declare const TeammateParams: Type.TObject<{
         fallbackModels: Type.TOptional<Type.TArray<Type.TString>>;
         thinking: Type.TOptional<Type.TUnsafe<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max">>;
         cwd: Type.TOptional<Type.TString>;
-        outputSchema: Type.TOptional<Type.TObject<{
-            type: Type.TLiteral<"object">;
-            properties: Type.TOptional<Type.TObject<{}>>;
-            required: Type.TOptional<Type.TArray<Type.TString>>;
-            additionalProperties: Type.TOptional<Type.TUnion<[Type.TBoolean, Type.TObject<{}>]>>;
-            title: Type.TOptional<Type.TString>;
-            description: Type.TOptional<Type.TString>;
-        }>>;
+        outputSchema: Type.TOptional<Type.TUnsafe<Record<string, unknown>>>;
         timeoutMs: Type.TOptional<Type.TInteger>;
         background: Type.TOptional<Type.TBoolean>;
         todo: Type.TOptional<Type.TUnion<[Type.TString, Type.TArray<Type.TString>]>>;
@@ -68,14 +54,7 @@ export declare const TeammateParams: Type.TObject<{
     concurrency: Type.TOptional<Type.TInteger>;
     maxAgents: Type.TOptional<Type.TInteger>;
     maxNestingDepth: Type.TOptional<Type.TInteger>;
-    outputSchema: Type.TOptional<Type.TObject<{
-        type: Type.TLiteral<"object">;
-        properties: Type.TOptional<Type.TObject<{}>>;
-        required: Type.TOptional<Type.TArray<Type.TString>>;
-        additionalProperties: Type.TOptional<Type.TUnion<[Type.TBoolean, Type.TObject<{}>]>>;
-        title: Type.TOptional<Type.TString>;
-        description: Type.TOptional<Type.TString>;
-    }>>;
+    outputSchema: Type.TOptional<Type.TUnsafe<Record<string, unknown>>>;
     background: Type.TOptional<Type.TBoolean>;
     context: Type.TOptional<Type.TUnsafe<"fresh" | "fork">>;
     model: Type.TOptional<Type.TString>;

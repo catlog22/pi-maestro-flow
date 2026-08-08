@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Check } from "typebox/value";
 import { readFile } from "node:fs/promises";
 import {
+  LoopParams,
   LoopScheduler,
   parseLoopDuration,
   LOOP_UPDATE_EVENT,
@@ -53,6 +55,16 @@ async function flush(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
 }
+
+test("loop schema enforces action-specific required fields and millisecond units", () => {
+  assert.equal(Check(LoopParams, { action: "list" }), true);
+  assert.equal(Check(LoopParams, { action: "create" }), false);
+  assert.equal(Check(LoopParams, { action: "create", kind: "prompt", task: "check", intervalMs: 1_000 }), true);
+  assert.equal(Check(LoopParams, { action: "create", kind: "prompt", task: "check", intervalMs: "1s" }), false);
+  assert.equal(Check(LoopParams, { action: "cancel" }), false);
+  assert.equal(Check(LoopParams, { action: "cancel", loopId: "loop-1" }), true);
+  assert.match(String((LoopParams.properties.intervalMs as { description?: string }).description), /milliseconds/);
+});
 
 test("loop schedules the first run after the configured delay", () => {
   const harness = createHarness();

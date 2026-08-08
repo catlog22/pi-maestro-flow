@@ -79,42 +79,53 @@ export function findToolByName(metadata: ToolMetadata[] | undefined, toolName: s
   return metadata.find(m => m.name.replace(/-/g, "_") === normalized);
 }
 
+const SCHEMA_FORMAT_LIMITS = {
+  maxDepth: 8,
+  maxLines: 200,
+  maxChars: 16_000,
+  maxEnumItems: 20,
+  maxValueChars: 240,
+} as const;
+
 export function formatSchema(schema: unknown, indent = "  "): string {
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
     return `${indent}(no schema)`;
   }
 
   const s = schema as Record<string, unknown>;
+  const lines: string[] = [];
+  if (typeof s.description === "string" && s.description.trim()) {
+    lines.push(`${indent}${truncateInline(s.description.trim())}`);
+  }
 
   if (s.type === "object" && s.properties && typeof s.properties === "object" && !Array.isArray(s.properties)) {
     const props = s.properties as Record<string, unknown>;
     const required = Array.isArray(s.required) ? s.required.filter((name): name is string => typeof name === "string") : [];
 
     if (Object.keys(props).length === 0) {
-      return `${indent}(no parameters)`;
+      lines.push(`${indent}(no parameters)`);
+      return boundFormattedSchema(lines, indent);
     }
 
-    const lines: string[] = [];
     for (const [name, propSchema] of Object.entries(props)) {
-      lines.push(...formatProperty(name, propSchema, required.includes(name), indent));
+      lines.push(...formatProperty(name, propSchema, required.includes(name), indent, 0));
     }
-    return lines.join("\n");
+    return boundFormattedSchema(lines, indent);
   }
 
-  const lines = formatNestedSchema(s, indent);
-  if (lines.length > 0) {
-    return lines.join("\n");
-  }
+  lines.push(...formatNestedSchema(s, indent, 0));
+  if (lines.length > 0) return boundFormattedSchema(lines, indent);
 
   const typeStr = formatType(s);
-  if (typeStr) {
-    return `${indent}(${typeStr})`;
-  }
-
-  return `${indent}(complex schema)`;
+  if (typeStr) lines.push(`${indent}(${typeStr})`);
+  else lines.push(`${indent}(complex schema)`);
+  return boundFormattedSchema(lines, indent);
 }
 
-function formatProperty(name: string, schema: unknown, required: boolean, indent: string): string[] {
+function formatProperty(name: string, schema: unknown, required: boolean, indent: string, depth: number): string[] {
+  if (depth >= SCHEMA_FORMAT_LIMITS.maxDepth) {
+    return [`${indent}${name}${required ? " *required*" : ""} ... [nested schema omitted]`];
+  }
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
     return [`${indent}${name}${required ? " *required*" : ""}`];
   }
@@ -126,37 +137,41 @@ function formatProperty(name: string, schema: unknown, required: boolean, indent
   if (required) parts.push("*required*");
   appendSchemaAnnotations(parts, s);
 
-  return [parts.join(" "), ...formatNestedSchema(s, `${indent}  `)];
+  return [parts.join(" "), ...formatNestedSchema(s, `${indent}  `, depth + 1)];
 }
 
-function formatNestedSchema(schema: Record<string, unknown>, indent: string): string[] {
+function formatNestedSchema(schema: Record<string, unknown>, indent: string, depth: number): string[] {
+  if (depth >= SCHEMA_FORMAT_LIMITS.maxDepth) {
+    return hasNestedSchema(schema) ? [`${indent}... [nested schema omitted]`] : [];
+  }
   const lines: string[] = [];
 
   if (Array.isArray(schema.anyOf)) {
-    lines.push(...formatVariants("anyOf", schema.anyOf, indent));
+    lines.push(...formatVariants("anyOf", schema.anyOf, indent, depth + 1));
   }
   if (Array.isArray(schema.oneOf)) {
-    lines.push(...formatVariants("oneOf", schema.oneOf, indent));
+    lines.push(...formatVariants("oneOf", schema.oneOf, indent, depth + 1));
   }
   if (schema.items !== undefined) {
-    lines.push(...formatProperty("items", schema.items, false, indent));
+    lines.push(...formatProperty("items", schema.items, false, indent, depth + 1));
   }
   if (schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)) {
     const required = Array.isArray(schema.required) ? schema.required.filter((name): name is string => typeof name === "string") : [];
     for (const [name, propSchema] of Object.entries(schema.properties as Record<string, unknown>)) {
-      lines.push(...formatProperty(name, propSchema, required.includes(name), indent));
+      lines.push(...formatProperty(name, propSchema, required.includes(name), indent, depth + 1));
     }
   }
 
   return lines;
 }
 
-function formatVariants(keyword: "anyOf" | "oneOf", variants: unknown[], indent: string): string[] {
+function formatVariants(keyword: "anyOf" | "oneOf", variants: unknown[], indent: string, depth: number): string[] {
+  if (depth >= SCHEMA_FORMAT_LIMITS.maxDepth) return [`${indent}${keyword}: ... [nested schema omitted]`];
   const lines = [`${indent}${keyword}:`];
 
   for (const variant of variants) {
     if (!variant || typeof variant !== "object" || Array.isArray(variant)) {
-      lines.push(`${indent}  - ${JSON.stringify(variant)}`);
+      lines.push(`${indent}  - ${formatSchemaValue(variant)}`);
       continue;
     }
 
@@ -165,7 +180,7 @@ function formatVariants(keyword: "anyOf" | "oneOf", variants: unknown[], indent:
     const parts = [`${indent}  - ${typeStr}`];
     appendSchemaAnnotations(parts, s);
     lines.push(parts.join(" "));
-    lines.push(...formatNestedSchema(s, `${indent}    `));
+    lines.push(...formatNestedSchema(s, `${indent}    `, depth + 1));
   }
 
   return lines;
@@ -173,11 +188,13 @@ function formatVariants(keyword: "anyOf" | "oneOf", variants: unknown[], indent:
 
 function formatType(schema: Record<string, unknown>): string {
   if (Object.hasOwn(schema, "const")) {
-    return `const ${JSON.stringify(schema.const)}`;
+    return `const ${formatSchemaValue(schema.const)}`;
   }
 
   if (Array.isArray(schema.enum)) {
-    return `enum: ${schema.enum.map(v => JSON.stringify(v)).join(", ")}`;
+    const shown = schema.enum.slice(0, SCHEMA_FORMAT_LIMITS.maxEnumItems).map(formatSchemaValue);
+    const omitted = schema.enum.length - shown.length;
+    return `enum: ${shown.join(", ")}${omitted > 0 ? `, ... (+${omitted} more)` : ""}`;
   }
 
   if (Array.isArray(schema.type)) {
@@ -201,16 +218,50 @@ function formatType(schema: Record<string, unknown>): string {
 
 function appendSchemaAnnotations(parts: string[], schema: Record<string, unknown>): void {
   if (schema.description && typeof schema.description === "string") {
-    parts.push(`- ${schema.description}`);
+    parts.push(`- ${truncateInline(schema.description)}`);
   }
 
   for (const key of ["minLength", "maxLength", "minimum", "maximum", "minItems", "maxItems", "format", "pattern"] as const) {
     if (schema[key] !== undefined) {
-      parts.push(`[${key}: ${JSON.stringify(schema[key])}]`);
+      parts.push(`[${key}: ${formatSchemaValue(schema[key])}]`);
     }
   }
 
   if (schema.default !== undefined) {
-    parts.push(`[default: ${JSON.stringify(schema.default)}]`);
+    parts.push(`[default: ${formatSchemaValue(schema.default)}]`);
   }
+}
+
+function hasNestedSchema(schema: Record<string, unknown>): boolean {
+  return Array.isArray(schema.anyOf)
+    || Array.isArray(schema.oneOf)
+    || schema.items !== undefined
+    || (!!schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties));
+}
+
+function formatSchemaValue(value: unknown): string {
+  let rendered: string;
+  try {
+    rendered = JSON.stringify(value) ?? String(value);
+  } catch {
+    rendered = String(value);
+  }
+  return truncateInline(rendered);
+}
+
+function truncateInline(value: string): string {
+  if (value.length <= SCHEMA_FORMAT_LIMITS.maxValueChars) return value;
+  return `${value.slice(0, SCHEMA_FORMAT_LIMITS.maxValueChars - 3)}...`;
+}
+
+function boundFormattedSchema(lines: string[], indent: string): string {
+  let truncated = lines.length > SCHEMA_FORMAT_LIMITS.maxLines;
+  let text = lines.slice(0, SCHEMA_FORMAT_LIMITS.maxLines).join("\n");
+  const notice = `${indent}... [schema output truncated]`;
+  const separator = text ? "\n" : "";
+  if (text.length > SCHEMA_FORMAT_LIMITS.maxChars) truncated = true;
+  if (!truncated) return text;
+  const budget = Math.max(0, SCHEMA_FORMAT_LIMITS.maxChars - separator.length - notice.length);
+  if (text.length > budget) text = text.slice(0, budget);
+  return `${text}${separator}${notice}`;
 }

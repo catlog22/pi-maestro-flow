@@ -110,7 +110,10 @@ export function normalizeDirectToolInputSchema(schema: unknown): Record<string, 
   const inputSchema = schema && typeof schema === "object" && !Array.isArray(schema)
     ? schema as Record<string, unknown>
     : { type: "object", properties: {} };
-  const { $schema, additionalProperties, ...normalized } = inputSchema;
+  // Provider tool schemas do not need a dialect declaration, but all argument
+  // constraints (including additionalProperties and local $defs/$ref) must be
+  // preserved so model-side validation matches the MCP server contract.
+  const { $schema: _dialect, ...normalized } = inputSchema;
   return normalized;
 }
 

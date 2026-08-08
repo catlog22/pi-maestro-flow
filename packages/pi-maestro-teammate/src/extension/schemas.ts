@@ -35,38 +35,12 @@ function StringEnum<T extends string[]>(values: [...T], description?: string) {
 }
 
 function structuredOutputSchema(description: string) {
-  return Type.Object({
-    type: Type.Literal("object", {
-      description: 'Structured output schemas must declare a single object root.',
-    }),
-    properties: Type.Optional(
-      Type.Object({}, {
-        additionalProperties: true,
-        description: "JSON Schema definitions for the returned object fields.",
-      }),
-    ),
-    required: Type.Optional(
-      Type.Array(Type.String(), {
-        uniqueItems: true,
-        description: "Names of fields that every structured result must contain.",
-      }),
-    ),
-    additionalProperties: Type.Optional(
-      Type.Union([
-        Type.Boolean(),
-        Type.Object({}, { additionalProperties: true }),
-      ]),
-    ),
-    title: Type.Optional(Type.String()),
-    description: Type.Optional(Type.String()),
-  }, {
+  // Keep the model-facing argument compact. The runtime performs the detailed
+  // JSON Schema preflight and can return more actionable diagnostics.
+  return Type.Unsafe<Record<string, unknown>>({
+    type: "object",
     additionalProperties: true,
     description,
-    examples: [{
-      type: "object",
-      properties: { result: { type: "string" } },
-      required: ["result"],
-    }],
   });
 }
 
@@ -78,7 +52,7 @@ export const TaskSpec = Type.Object({
   prompt: Type.String({
     minLength: 1,
     description:
-      "Required task text. Use {name} to reference another task's output and {name.field} for structured fields. This field is a sibling of outputSchema; never place task text inside outputSchema.",
+      "Required task instruction. Use {name} to reference another task's output and {name.field} for structured fields.",
   }),
   description: Type.Optional(
     Type.String({
@@ -129,7 +103,7 @@ export const TaskSpec = Type.Object({
   ),
   outputSchema: Type.Optional(
     structuredOutputSchema(
-      "JSON Schema for this task's structured result. The root type must be object. This overrides the top-level default. Put only JSON Schema here; task text belongs in the sibling tasks[].prompt field.",
+      "Optional JSON Schema for a machine-readable result. Use only when structured fields are required; this overrides the top-level default.",
     ),
   ),
   timeoutMs: Type.Optional(
@@ -227,7 +201,7 @@ export const TeammateParams = Type.Object({
 
   outputSchema: Type.Optional(
     structuredOutputSchema(
-      "Default JSON Schema for each task that does not define tasks[].outputSchema. The root type must be object. Put only JSON Schema here; task text always belongs in tasks[].prompt.",
+      "Advanced optional default JSON Schema for machine-readable results. Omit for ordinary tasks; a task-level outputSchema overrides this default.",
     ),
   ),
 
@@ -331,6 +305,7 @@ export const TeammateWatchParams = Type.Object({
   lines: Type.Optional(
     Type.Integer({
       minimum: 1,
+      default: 20,
       description: "Number of recent output lines to return (default: 20)",
     }),
   ),
@@ -376,7 +351,7 @@ export const ObserveParams = Type.Object({
     type: "string",
     enum: ["status", "wait", "watch"],
     description:
-      '"status" takes a one-shot snapshot; "wait" blocks on a multi-target barrier; "watch" polls until the bounded timeoutMs you provide (omitted defaults to 600000, 10 minutes) and returns the full status-transition timeline.',
+      '"status" takes a one-shot snapshot; "wait" blocks on a multi-target barrier; "watch" polls until timeoutMs and returns the full status-transition timeline.',
   }),
   targets: Type.Array(
     Type.Object({
@@ -389,25 +364,60 @@ export const ObserveParams = Type.Object({
     type: "string",
     enum: ["summary", "tail", "full"],
     default: "summary",
-    description: "Observation detail level.",
+    description: 'Observation detail level. "tail" is a compatibility alias for "full".',
   })),
   lines: Type.Optional(Type.Integer({ minimum: 1, maximum: 500, default: 20, description: "Recent detail lines per target." })),
   waitMode: Type.Optional(Type.Unsafe<"all" | "any" | "count">({
     type: "string",
     enum: ["all", "any", "count"],
     default: "all",
-    description: "Barrier mode for wait.",
+    description: "Barrier mode for wait only.",
   })),
-  waitCount: Type.Optional(Type.Integer({ minimum: 1, description: "Targets required when waitMode is count." })),
+  waitCount: Type.Optional(Type.Integer({ minimum: 1, description: "Number of targets required when waitMode is count." })),
   until: Type.Optional(Type.Unsafe<"result-ready" | "completed">({
     type: "string",
     enum: ["result-ready", "completed"],
     default: "result-ready",
     description:
-      "Block until the target reaches a result (\"result-ready\", default) or until it fully completes (\"completed\": terminal lifecycle — completed/failed/terminated).",
+      "Wait-only completion threshold: first result (default) or full terminal completion.",
   })),
   timeoutMs: Type.Optional(Type.Integer({ minimum: 1, default: 600_000, description: "Request-level wait/watch timeout in milliseconds (default: 600000, 10 minutes)." })),
-}, { additionalProperties: false });
+}, {
+  additionalProperties: false,
+  allOf: [
+    {
+      if: { properties: { action: { const: "status" } }, required: ["action"] },
+      then: { not: { anyOf: [
+        { required: ["waitMode"] },
+        { required: ["waitCount"] },
+        { required: ["until"] },
+        { required: ["timeoutMs"] },
+      ] } },
+    },
+    {
+      if: { properties: { action: { const: "watch" } }, required: ["action"] },
+      then: { not: { anyOf: [
+        { required: ["waitMode"] },
+        { required: ["waitCount"] },
+        { required: ["until"] },
+      ] } },
+    },
+    {
+      if: {
+        properties: { action: { const: "wait" }, waitMode: { const: "count" } },
+        required: ["action", "waitMode"],
+      },
+      then: { required: ["waitCount"] },
+    },
+    {
+      if: { required: ["waitCount"] },
+      then: {
+        properties: { action: { const: "wait" }, waitMode: { const: "count" } },
+        required: ["action", "waitMode"],
+      },
+    },
+  ],
+});
 
 // ---------------------------------------------------------------------------
 // Monitor — teammate-compatible multi-agent observation and barrier wait
@@ -461,7 +471,7 @@ export const TeammateMonitorParams = Type.Object({
   verbose: Type.Optional(
     Type.Boolean({
       default: false,
-      description: "Include full watch output per target (default: false).",
+      description: "Include expanded output per target (default: false).",
     }),
   ),
 }, { additionalProperties: false });

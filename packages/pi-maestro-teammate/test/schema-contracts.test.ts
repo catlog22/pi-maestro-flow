@@ -2,9 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Check } from "typebox/value";
 import {
+  ObserveParams,
+  TeammateMonitorParams,
   TeammateParams,
   TeammateSendParams,
+  TeammateWatchParams,
 } from "../src/extension/schemas.ts";
+import { TEAMMATE_MONITOR_DESCRIPTION } from "../src/extension/teammate-core.ts";
 import {
   MAX_DEFAULT_DEPTH,
   describeStructuredOutputValidationFailure,
@@ -67,6 +71,30 @@ test("teammate-send allows omitting message only for explicit abort", () => {
   assert.equal(Check(TeammateSendParams, { to: "a", mode: "abort" }), true);
   assert.equal(Check(TeammateSendParams, { to: "a", mode: "abort", message: "bye" }), true);
   assert.equal(Check(TeammateSendParams, { to: "a", mode: "unknown" }), false);
+});
+
+test("observe schema scopes wait parameters to wait and requires count thresholds", () => {
+  const target = [{ kind: "teammate", id: "worker" }];
+  assert.equal(Check(ObserveParams, { action: "status", targets: target }), true);
+  assert.equal(Check(ObserveParams, { action: "status", targets: target, timeoutMs: 100 }), false);
+  assert.equal(Check(ObserveParams, { action: "watch", targets: target, timeoutMs: 100 }), true);
+  assert.equal(Check(ObserveParams, { action: "watch", targets: target, until: "completed" }), false);
+  assert.equal(Check(ObserveParams, { action: "wait", targets: target, until: "completed" }), true);
+  assert.equal(Check(ObserveParams, { action: "wait", waitMode: "count", targets: target }), false);
+  assert.equal(Check(ObserveParams, { action: "wait", waitMode: "count", waitCount: 1, targets: target }), true);
+  assert.equal(Check(ObserveParams, { action: "wait", waitCount: 1, targets: target }), false);
+});
+
+test("legacy observation descriptions use consistent expanded-output terminology", () => {
+  const watchLines = TeammateWatchParams.properties.lines as unknown as { default?: number };
+  const detail = ObserveParams.properties.detail as unknown as { description?: string };
+  const verbose = TeammateMonitorParams.properties.verbose as unknown as { description?: string };
+  assert.equal(watchLines.default, 20);
+  assert.match(detail.description ?? "", /compatibility alias/);
+  assert.match(verbose.description ?? "", /expanded output/);
+  assert.doesNotMatch(verbose.description ?? "", /watch output/);
+  assert.match(TEAMMATE_MONITOR_DESCRIPTION, /verbose=true for expanded output/);
+  assert.match(TEAMMATE_MONITOR_DESCRIPTION, /no watch action, until threshold, or detail parameter/);
 });
 
 // ---------------------------------------------------------------------------
@@ -270,45 +298,53 @@ test("event and persisted-value validation share the same field-level diagnostic
 });
 
 // ---------------------------------------------------------------------------
-// The public parameter schema prevents the two recurrent generative mistakes:
-// omitting the task-level prompt and supplying a non-object-root output schema.
-// Dispatch normalization remains a second line of defense for programmatic and
-// compatibility callers that do not enter through TypeBox admission.
+// The public parameter schema keeps the dominant call shape small: tasks and
+// each task's prompt are required, while outputSchema is an optional opaque
+// object. Detailed JSON Schema checks remain in dispatch normalization, which
+// can return field-specific diagnostics.
 // ---------------------------------------------------------------------------
 
-test("parameter schema requires a task-level prompt", () => {
+test("parameter schema keeps outputSchema optional for ordinary tasks", () => {
+  assert.deepEqual(TeammateParams.required, ["tasks"]);
+  assert.deepEqual(TeammateParams.properties.tasks.items.required, ["prompt"]);
   assert.equal(Check(TeammateParams, {
-    tasks: [{ name: "audit", outputSchema: { type: "object", prompt: "PURPOSE: mislocated" } }],
-  }), false);
+    tasks: [{ prompt: "work" }],
+  }), true);
   assert.equal(Check(TeammateParams, {
-    tasks: [{ name: "audit", prompt: "work", outputSchema: { type: "object" } }],
+    tasks: [{ prompt: "work", outputSchema: { type: "object" } }],
+  }), true);
+  assert.equal(Check(TeammateParams, {
+    outputSchema: { type: "object" },
+    tasks: [{ prompt: "work" }],
   }), true);
 });
 
-test("parameter schema requires object-root output schemas at both levels", () => {
+test("parameter schema keeps outputSchema compact and object-valued", () => {
+  const taskOutputSchema = TeammateParams.properties.tasks.items.properties.outputSchema as unknown as Record<string, unknown>;
+  const topOutputSchema = TeammateParams.properties.outputSchema as unknown as Record<string, unknown>;
+  assert.equal(taskOutputSchema.type, "object");
+  assert.equal(topOutputSchema.type, "object");
+  assert.equal("properties" in taskOutputSchema, false);
+  assert.equal("properties" in topOutputSchema, false);
+  assert.equal(Check(TeammateParams, {
+    tasks: [{ prompt: "work", outputSchema: "not-an-object" }],
+  }), false);
+  assert.equal(Check(TeammateParams, {
+    outputSchema: "not-an-object",
+    tasks: [{ prompt: "work" }],
+  }), false);
+});
+
+test("parameter admission defers detailed outputSchema checks to runtime preflight", () => {
   assert.equal(Check(TeammateParams, {
     tasks: [{ prompt: "work", outputSchema: { properties: { result: { type: "string" } } } }],
-  }), false);
-  assert.equal(Check(TeammateParams, {
-    outputSchema: { type: "string" },
-    tasks: [{ prompt: "work" }],
-  }), false);
-  assert.equal(Check(TeammateParams, {
-    outputSchema: { type: "object", properties: { result: { type: "string" } }, required: ["result"] },
-    tasks: [{ prompt: "work" }],
   }), true);
-});
-
-test("parameter schema validates common root keyword shapes", () => {
   assert.equal(Check(TeammateParams, {
     tasks: [{ prompt: "work", outputSchema: { type: "object", properties: "nope" } }],
-  }), false);
+  }), true);
   assert.equal(Check(TeammateParams, {
     tasks: [{ prompt: "work", outputSchema: { type: "object", required: "result" } }],
-  }), false);
-  assert.equal(Check(TeammateParams, {
-    tasks: [{ prompt: "work", outputSchema: { type: "object", required: ["result", "result"] } }],
-  }), false);
+  }), true);
 });
 
 test("parameter admission and value validation support boolean and tuple items", () => {

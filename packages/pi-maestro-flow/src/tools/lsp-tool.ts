@@ -52,7 +52,7 @@ export const LspParams = Type.Object({
   query: Type.Optional(Type.String({ description: "Workspace symbol query, code-action selector, or raw LSP method" })),
   new_name: Type.Optional(Type.String({ description: "New symbol name or destination path" })),
   apply: Type.Optional(Type.Boolean({ description: "Apply returned edits instead of previewing/listing" })),
-  timeout: Type.Optional(Type.Number({ minimum: 1, maximum: 120, description: "Timeout in seconds; clamped to 5..60" })),
+  timeout: Type.Optional(Type.Number({ minimum: 5, maximum: 60, description: "Timeout in seconds" })),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200, description: "Maximum result items to return; defaults to 50" })),
   offset: Type.Optional(Type.Integer({ minimum: 0, description: "Result offset for continuing a truncated list" })),
   payload: Type.Optional(Type.String({ description: "JSON payload for action=request" })),

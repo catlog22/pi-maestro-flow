@@ -158,11 +158,23 @@ function validate(params: ObserveParams): void {
   if (params.targets.some((target) => !target.kind.trim() || !target.id.trim())) {
     throw new Error("Every observation target requires non-empty kind and id.");
   }
-  if (params.lines !== undefined && (!Number.isInteger(params.lines) || params.lines < 1)) {
-    throw new Error("Observe lines must be a positive integer.");
+  if (params.lines !== undefined && (!Number.isInteger(params.lines) || params.lines < 1 || params.lines > 500)) {
+    throw new Error("Observe lines must be an integer between 1 and 500.");
   }
   if (params.timeoutMs !== undefined && (!Number.isInteger(params.timeoutMs) || params.timeoutMs < 1)) {
     throw new Error("Observe timeoutMs must be a positive integer.");
+  }
+  if (params.action === "status" && params.timeoutMs !== undefined) {
+    throw new Error("Observe timeoutMs is supported only for wait and watch actions.");
+  }
+  if (
+    params.action !== "wait"
+    && (params.waitMode !== undefined || params.waitCount !== undefined || params.until !== undefined)
+  ) {
+    throw new Error("Observe waitMode, waitCount, and until are supported only for the wait action.");
+  }
+  if (params.waitCount !== undefined && params.waitMode !== "count") {
+    throw new Error('Observe waitCount requires waitMode="count".');
   }
   if (params.waitMode === "count") {
     if (!Number.isInteger(params.waitCount) || (params.waitCount ?? 0) < 1 || (params.waitCount ?? 0) > params.targets.length) {

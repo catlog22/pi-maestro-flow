@@ -55,7 +55,7 @@ export interface BashBgSnapshotPayload {
 export const BashBgParams = Type.Object({
   action: Type.Union(
     [Type.Literal("run"), Type.Literal("start"), Type.Literal("status"), Type.Literal("wait"), Type.Literal("kill"), Type.Literal("list")],
-    { description: "run: block up to timeout then auto-background (recommended default); start: background immediately; status: snapshot; wait: block until done/timeout; kill: terminate; list: all jobs" },
+    { description: "run: block up to timeout then auto-background (recommended for uncertain-duration commands); start: background immediately; status: snapshot; wait: block until done/timeout; kill: terminate; list: all jobs" },
   ),
   command: Type.Optional(Type.String({ minLength: 1, description: "Shell command (required for run/start)" })),
   jobId: Type.Optional(Type.String({ description: "Job id returned by run/start (required for status/wait/kill)" })),

@@ -7,6 +7,7 @@ import type { ExtensionAPI, Theme, ToolDefinition } from "@earendil-works/pi-cod
 import {
 	BASH_BG_QUERY_EVENT,
 	BASH_BG_UPDATE_EVENT,
+	BashBgParams,
 	type BashBgDetails,
 	type BashBgJobSnapshot,
 	type BashBgSnapshotPayload,
@@ -19,6 +20,12 @@ import {
 	registerObservationProvider,
 	type ObservationProvider,
 } from "pi-maestro-teammate/v1/observation";
+
+test("bash_bg action description recommends run without implying an omitted default", () => {
+	const action = BashBgParams.properties.action as unknown as { description?: string };
+	assert.match(action.description ?? "", /recommended for uncertain-duration commands/);
+	assert.doesNotMatch(action.description ?? "", /recommended default/);
+});
 
 interface ToolLike {
 	execute(

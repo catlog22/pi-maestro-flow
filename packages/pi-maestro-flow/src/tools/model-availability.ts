@@ -85,11 +85,10 @@ export function createModelAvailabilityTool(): ToolDefinition<typeof ModelAvaila
 
 Call this before routing to a specific external model (codex, gemini, claude, opencode) to confirm availability. For ordinary delegation, use the teammate tool directly.
 
-Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\` treats "codex" as the prompt and falls back to the first enabled tool. Contract: ${DELEGATE_USAGE_DOC}.`,
+Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\` treats "codex" as the prompt and falls back to the first enabled tool.`,
     promptSnippet: "Check reachable teammate models + Maestro delegate CLI tools before routing to a specific external model (codex/gemini/claude).",
     promptGuidelines: [
       "When a user explicitly requests an external model (codex, gemini, claude, opencode) that is NOT in <available_teammate_models>, call model-availability to confirm it is enabled, then route via bash: maestro delegate \"<PROMPT>\" --to <tool> --mode analysis.",
-      "The --to flag is mandatory. A bare `maestro delegate codex` sends \"codex\" as the prompt to the first enabled tool. See D:\\maestro2\\workflows\\delegate-usage.md.",
     ],
     parameters: ModelAvailabilityParams,
     async execute(_id, params, signal, onUpdate, ctx): Promise<AgentToolResult<ModelAvailabilityDetails>> {

@@ -37,10 +37,14 @@ export const BrowserParams = Type.Object({
   })),
   wait_until: Type.Optional(WaitUntil),
   dialogs: Type.Optional(DialogPolicy),
-  code: Type.Optional(Type.String({ description: "Async JavaScript function body executed with page/browser/tab helpers" })),
+  code: Type.Optional(Type.String({ minLength: 1, description: "Async JavaScript function body executed with page/browser/tab helpers; required for run" })),
   timeout: Type.Optional(Type.Number({ minimum: 1, maximum: 300, description: "Timeout in seconds" })),
   all: Type.Optional(Type.Boolean({ description: "Close all named tabs" })),
   kill: Type.Optional(Type.Boolean({ description: "Deprecated alias for close; owned browsers are always closed regardless of this flag" })),
+}, {
+  additionalProperties: false,
+  if: { properties: { action: { const: "run" } }, required: ["action"] },
+  then: { required: ["code"] },
 });
 
 export interface BrowserToolDetails {
@@ -57,7 +61,7 @@ export function createBrowserTool(manager: BrowserManagerLike = browserManager):
   return {
     name: "browser",
     label: "Browser",
-    description: "Control Chromium through named tabs. Open or attach a browser, run trusted host-level JavaScript with page/browser/tab helpers, capture screenshots, and close one or all tabs. The run action is shell-equivalent and is blocked in Plan mode. In run code, page is a puppeteer-core Page (page.setViewport({width,height}), page.goto, page.evaluate, page.screenshot — Puppeteer, not Playwright, so there is no page.setViewportSize), browser is a puppeteer Browser, and tab is a high-level helper (tab.setViewport, tab.observe, tab.click, tab.screenshot). Pass visible: true to open a headed (visible) browser window; the default is headless.",
+    description: "Control Chromium through named tabs. Open or attach a browser, run trusted host-level JavaScript with page/browser/tab helpers, capture screenshots, and close one or all tabs. The run action requires non-empty code, is shell-equivalent, and is blocked in Plan mode. In run code, page is a puppeteer-core Page (page.setViewport({width,height}), page.goto, page.evaluate, page.screenshot — Puppeteer, not Playwright, so there is no page.setViewportSize), browser is a puppeteer Browser, and tab is a high-level helper (tab.setViewport, tab.observe, tab.click, tab.screenshot). Pass visible: true to open a headed (visible) browser window; the default is headless.",
     promptSnippet: "Use browser for interactive web navigation, DOM observation, form input, and screenshots. In run code page is a puppeteer-core Page (page.setViewport/page.goto/page.evaluate); tab offers tab.setViewport/tab.observe/tab.click/tab.screenshot. Pass visible:true on open for a headed (visible) window.",
     promptGuidelines: [
       "Call browser open before run, and reuse a stable tab name across related steps.",

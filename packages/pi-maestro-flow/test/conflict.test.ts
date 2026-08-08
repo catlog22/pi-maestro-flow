@@ -3,8 +3,10 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, before } from "node:test";
+import { Check } from "typebox/value";
 
 const {
+  ConflictParams,
   createConflictTool,
   conflictParseIssue,
   parseConflictHunks,
@@ -70,6 +72,15 @@ before(async () => {
 
 after(async () => {
   await rm(root, { recursive: true, force: true });
+});
+
+test("conflict schema enforces action-specific uri and content", () => {
+  assert.equal(Check(ConflictParams, { action: "list" }), true);
+  assert.equal(Check(ConflictParams, { action: "diff" }), false);
+  assert.equal(Check(ConflictParams, { action: "diff", uri: "conflict://1" }), true);
+  assert.equal(Check(ConflictParams, { action: "resolve", uri: "conflict://1" }), false);
+  assert.equal(Check(ConflictParams, { action: "resolve", uri: "conflict://1", content: "@theirs" }), true);
+  assert.equal(Check(ConflictParams, { action: "resolve", uri: "conflict://1", content: "" }), false);
 });
 
 test("parseConflictHunks extracts ours/theirs with precise offsets", () => {

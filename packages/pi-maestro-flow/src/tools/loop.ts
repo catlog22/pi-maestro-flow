@@ -288,14 +288,26 @@ export class LoopScheduler {
 
 export const LoopParams = Type.Object({
   action: Type.Union([Type.Literal("create"), Type.Literal("list"), Type.Literal("cancel")]),
-  kind: Type.Optional(Type.Union([Type.Literal("prompt"), Type.Literal("shell")])),
-  task: Type.Optional(Type.String({ minLength: 1, description: "Prompt text or shell command for create." })),
-  intervalMs: Type.Optional(Type.Integer({ minimum: MIN_INTERVAL_MS, maximum: MAX_INTERVAL_MS })),
+  kind: Type.Optional(Type.Union([Type.Literal("prompt"), Type.Literal("shell")], { description: "Loop execution kind; required for create." })),
+  task: Type.Optional(Type.String({ minLength: 1, description: "Prompt text or shell command; required for create." })),
+  intervalMs: Type.Optional(Type.Integer({ minimum: MIN_INTERVAL_MS, maximum: MAX_INTERVAL_MS, description: "Fixed delay between runs in milliseconds; required for create." })),
   maxRuns: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_RUNS, default: DEFAULT_MAX_RUNS })),
-  loopId: Type.Optional(Type.String({ minLength: 1, description: "Loop ID for cancel." })),
+  loopId: Type.Optional(Type.String({ minLength: 1, description: "Loop ID; required for cancel." })),
   cwd: Type.Optional(Type.String({ description: "Working directory for shell loops." })),
-  timeoutMs: Type.Optional(Type.Integer({ minimum: 1_000, maximum: MAX_SHELL_TIMEOUT_MS, default: DEFAULT_SHELL_TIMEOUT_MS, description: "Per-run timeout for shell loops." })),
-}, { additionalProperties: false });
+  timeoutMs: Type.Optional(Type.Integer({ minimum: 1_000, maximum: MAX_SHELL_TIMEOUT_MS, default: DEFAULT_SHELL_TIMEOUT_MS, description: "Per-run timeout for shell loops in milliseconds." })),
+}, {
+  additionalProperties: false,
+  allOf: [
+    {
+      if: { properties: { action: { const: "create" } }, required: ["action"] },
+      then: { required: ["kind", "task", "intervalMs"] },
+    },
+    {
+      if: { properties: { action: { const: "cancel" } }, required: ["action"] },
+      then: { required: ["loopId"] },
+    },
+  ],
+});
 
 export interface LoopParamsInput {
   action: "create" | "list" | "cancel";
@@ -396,7 +408,7 @@ export function registerLoop(pi: ExtensionAPI): void {
     name: "loop",
     label: "Loop",
     description:
-      "Create, list, or cancel session-scoped recurring tasks. A loop runs a prompt or shell command after each fixed delay, never overlaps shell runs, stops after maxRuns, and is cancelled on session shutdown.",
+      "Create, list, or cancel session-scoped recurring tasks. Create requires kind, task, and intervalMs (milliseconds); cancel requires loopId. A loop runs a prompt or shell command after each fixed delay, never overlaps shell runs, stops after maxRuns, and is cancelled on session shutdown.",
     promptSnippet: "Schedule bounded recurring prompt or shell tasks for the current session.",
     promptGuidelines: [
       "Use action=create only when the user explicitly asks for recurring or delayed work.",

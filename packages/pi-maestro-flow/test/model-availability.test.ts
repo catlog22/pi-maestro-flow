@@ -8,6 +8,13 @@ function mockContext(models: Array<{ provider: string; id: string }>): Extension
   return { modelRegistry: { getAvailable: () => models } } as unknown as ExtensionContext;
 }
 
+test("description states the delegate routing pitfall once before execution", () => {
+  const tool = createModelAvailabilityTool();
+  assert.equal((tool.description.match(/bare \`maestro delegate codex\`/g) ?? []).length, 1);
+  assert.equal((tool.promptGuidelines ?? []).some((line) => /bare `maestro delegate codex`/.test(line)), false);
+  assert.doesNotMatch(tool.description, /D:\\maestro2/);
+});
+
 test("streams progressive detail updates and returns both model sources", async () => {
   const tool = createModelAvailabilityTool();
   const updates: Array<AgentToolResult> = [];

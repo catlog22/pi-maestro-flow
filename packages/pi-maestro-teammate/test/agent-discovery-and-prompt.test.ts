@@ -69,6 +69,13 @@ Act as the project specialist.
     assert.match(description, /Available Teammate Agents section/);
     assert.doesNotMatch(description, /specialist \[project\]/);
     assert.match(description, /specialist-work: model=auto\/inherit main session/);
+    assert.match(description, /Minimal call:\n  \{ tasks: \[\{ prompt: "Inspect auth" \}\] \}/);
+    assert.match(description, /Omit outputSchema for ordinary tasks/);
+    const ordinaryCallSection = description.slice(
+      description.indexOf("Minimal call:"),
+      description.indexOf("Every dispatch"),
+    );
+    assert.doesNotMatch(ordinaryCallSection, /outputSchema/);
 
     const systemPrompt = appendAgentCatalog("Base prompt", project);
     assert.match(systemPrompt, /# Available Teammate Agents/);

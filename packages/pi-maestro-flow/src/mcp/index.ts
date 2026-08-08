@@ -447,7 +447,7 @@ export default function mcpAdapter(pi: ExtensionAPI): McpAdapterHandle {
     (pi.registerTool as (tool: unknown) => unknown)({
       name: "mcp",
       label: "MCP",
-      description: buildProxyDescription(earlyConfig, earlyCache, directSpecs),
+      description: buildProxyDescription(),
       promptSnippet: "MCP gateway - connect to MCP servers and call their tools",
       renderShell: "self",
       renderCall: renderMcpProxyToolCall,

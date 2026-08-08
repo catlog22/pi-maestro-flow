@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Check } from "typebox/value";
 import * as fs from "node:fs/promises";
 import * as http from "node:http";
 import { BrowserParams, createBrowserTool } from "../src/tools/browser-tool.ts";
@@ -37,6 +38,11 @@ test("browser schema preserves open/run/close and full control inputs", () => {
   assert.deepEqual(Object.keys(BrowserParams.properties).sort(), [
     "action", "all", "app", "code", "dialogs", "kill", "name", "timeout", "url", "viewport", "visible", "wait_until",
   ]);
+  assert.equal(Check(BrowserParams, { action: "open" }), true);
+  assert.equal(Check(BrowserParams, { action: "close" }), true);
+  assert.equal(Check(BrowserParams, { action: "run" }), false);
+  assert.equal(Check(BrowserParams, { action: "run", code: "return true;" }), true);
+  assert.equal(Check(BrowserParams, { action: "run", code: "" }), false);
 });
 
 test("browser tool forwards named-tab open options and returns run displays, images, and screenshots", async () => {

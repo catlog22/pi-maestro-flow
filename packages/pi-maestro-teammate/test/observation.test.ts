@@ -275,6 +275,26 @@ test("count validation rejects missing and out-of-range thresholds", async () =>
   );
 });
 
+test("validation rejects action-inapplicable parameters and oversized lines", async () => {
+  const target = [{ kind: "test", id: "one" }];
+  await assert.rejects(
+    observeTargets({ action: "watch", targets: target, until: "completed", timeoutMs: 10 }),
+    /supported only for the wait action/,
+  );
+  await assert.rejects(
+    observeTargets({ action: "status", targets: target, timeoutMs: 10 }),
+    /supported only for wait and watch actions/,
+  );
+  await assert.rejects(
+    observeTargets({ action: "wait", targets: target, waitCount: 1 }),
+    /requires waitMode="count"/,
+  );
+  await assert.rejects(
+    observeTargets({ action: "status", targets: target, lines: 501 }),
+    /between 1 and 500/,
+  );
+});
+
 test("provider disposal cannot remove a newer replacement", () => {
   const first = provider("test-replace", async (id) => snapshot("test-replace", id));
   const second = provider("test-replace", async (id) => snapshot("test-replace", id));

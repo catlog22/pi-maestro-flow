@@ -405,11 +405,11 @@ ${formatModelRoutingConfig(cwd, discoverAgents(cwd))}`;
   return `Dispatch tasks to teammate agents. Teammates run as Pi subprocesses with their own tools and context.
 ${nested ? `Nested dispatch: this call is proxied to the parent root process — execution happens there, and the result (or teammate-complete notification) is delivered back to this agent's session.
 
-` : ""}Call form (per-task fields go inside tasks[]):
-  { tasks: [{ prompt: "Inspect auth", agent: "analyst", taskType: "analysis", model: "provider/model", thinking: "high", outputSchema: {...}, maxNestingDepth: 0 }] }
+` : ""}Minimal call:
+  { tasks: [{ prompt: "Inspect auth" }] }
 
-Every dispatch uses a non-empty tasks array; prompt is required and lives only inside tasks[] (as do name and dependsOn). Per-task fields also include description (a short display label used in graph summaries when the task has no name) and timeoutMs. Task-level values override the top-level defaults — except background, which is dispatch-level and belongs at the top level only. Tasks that omit agent inherit the top-level agent, then default to "general".
-The top level accepts only shared defaults for all tasks — agent, taskType, model, fallbackModels, thinking, context, cwd, outputSchema, timeoutMs, maxNestingDepth — plus reply_to, concurrency, maxAgents, background. A task field (prompt/name/dependsOn) placed at the top level is rejected as an unexpected property. background is dispatch-level: the whole call shares one foreground/background window, so it belongs at the top level only — a per-task background value is ignored with a warning.
+Every dispatch uses a non-empty tasks array; prompt is the only required per-task field and lives inside tasks[]. Optional per-task fields include agent, taskType, model, thinking, context, cwd, outputSchema, maxNestingDepth, name, dependsOn, description, and timeoutMs. Omit outputSchema for ordinary tasks; use it only when the caller explicitly requires machine-readable structured fields. Task-level values override the top-level defaults — except background, which is dispatch-level and belongs at the top level only. Tasks that omit agent inherit the top-level agent, then default to "general".
+The top level accepts shared defaults for all tasks — agent, taskType, model, fallbackModels, thinking, context, cwd, timeoutMs, and maxNestingDepth — plus reply_to, concurrency, maxAgents, background, and the advanced optional outputSchema default. A task field (prompt/name/dependsOn) placed at the top level is rejected as an unexpected property. background is dispatch-level: the whole call shares one foreground/background window, so it belongs at the top level only — a per-task background value is ignored with a warning.
 Use {name} or {name.field} in a dependent task's prompt, or dependsOn: ["name"] for ordering without output injection.
 
 Nesting control: pass maxNestingDepth on the root dispatch — or per task, which overrides the top-level value — to limit how many levels of nested teammate dispatch the spawned agents may perform below themselves. Omitting it everywhere defaults to the global ceiling. The only effective values are 0 and 1 — 2 is capped to 1 by the global 2-level ceiling and anything above 2 is rejected. 0 forbids nested calls entirely — the assigned agents cannot dispatch teammates. Inside a spawned agent, maxNestingDepth can only tighten the parent's budget — pass 0 to forbid further nesting below that call; it can never extend depth beyond what the parent allowed.
@@ -418,12 +418,12 @@ Use an exact role name from the Available Teammate Agents section in the active 
 
 Background: the foreground wait window is bounded — the smallest per-task timeoutMs, or a 600000 ms (10 minutes) default; when it elapses the call returns a background acknowledgement and the work continues, completing via one automatic teammate-complete notification that triggers a new turn. Do not poll observe or teammate-list; if the current turn must wait, call observe once with action="wait" and target { kind: "teammate", id: "<name-or-correlation-id>" }. Completion delivery details (root vs nested dispatch, skip-on-exit) are in the background parameter description.
 
-## Structured output (outputSchema)
+## Structured output (optional)
 
-prompt is a required task-level field: always place the task text at tasks[].prompt, never inside outputSchema — outputSchema holds only the JSON Schema object. Parameter validation rejects tasks without their own prompt; a duplicated task-text prompt inside outputSchema is removed with a warning. Example task shape:
-{ "name": "audit", "agent": "analyst", "prompt": "<the task text>", "outputSchema": { "type": "object", "properties": { "result": { "type": "string" } }, "required": ["result"] } }
+Use outputSchema only when the caller needs machine-readable fields for validation or downstream {name.field} references. The task instruction remains in tasks[].prompt:
+{ "tasks": [{ "name": "audit", "agent": "analyst", "prompt": "Inspect auth", "outputSchema": { "type": "object", "properties": { "result": { "type": "string" } }, "required": ["result"] } }] }
 
-When a task (or the top-level call) sets outputSchema, the child must submit its final answer through a \`structured_output\` tool that validates the value against that JSON Schema. On completion the value is returned directly in the result content (prefixed \`[structured_output]\`) and is persisted for later reads via \`agent://<correlationId>\` (resource tool). Schema-invalid submissions are rejected by the child tool so the model can correct them within the current Pi turn; teammate does not replay validation failures. A run that ends without a valid value fails with a diagnostic naming the offending field.
+When a task (or the top-level call) sets outputSchema, the child must submit its final answer through a \`structured_output\` tool that validates the value against that JSON Schema. On completion the value is returned directly in the result content (prefixed \`[structured_output]\`) and is persisted for later reads via \`agent://<correlationId>\` (resource tool). Schema-invalid submissions are rejected by the child tool so the model can correct them within the current Pi turn; teammate does not replay validation failures. A run that ends without a valid value fails with a diagnostic naming the offending field. Without outputSchema, the teammate's final answer is returned as text.
 
 ## Todo binding (todo)
 
@@ -493,9 +493,9 @@ export const TEAMMATE_MONITOR_DESCRIPTION = `Observe multiple teammate targets o
 - "status": one-shot compact snapshot of targets — non-blocking
 - "wait": block until the barrier condition (all/any/count targets reach a result; result-ready, not terminal)
 
-Output is compact by default (one line per target). Use verbose for detail.
+Output is compact by default (one line per target). Set verbose=true for expanded output.
 
-teammate-only: targets are plain agent-name strings (not observe's { kind, id } objects); there is no watch/until/detail — use observe for mixed bash_bg targets, watch transitions, or until="completed" waits.`;
+teammate-only: targets are plain agent-name strings (not observe's { kind, id } objects). This tool has no watch action, until threshold, or detail parameter; use observe for mixed bash_bg targets, transition watching, or until="completed" waits.`;
 export const TEAMMATE_MONITOR_SNIPPET = "Query monitor snapshot or block on a multi-agent barrier.";
 export const TEAMMATE_MONITOR_GUIDELINES = [
   "Use teammate-monitor for multi-agent observation and barrier waits; for a single agent, prefer teammate-wait.",

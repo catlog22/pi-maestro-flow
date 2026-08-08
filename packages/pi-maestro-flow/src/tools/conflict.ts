@@ -27,8 +27,20 @@ export const ConflictParams = Type.Object({
     Type.Literal("diff"),
     Type.Literal("resolve"),
   ]),
-  uri: Type.Optional(Type.String({ description: "conflict://N（编号）或 conflict://*（全部）。list 不需要。" })),
-  content: Type.Optional(Type.String({ description: "resolve 的解决内容：@ours / @theirs 或自定义文本。" })),
+  uri: Type.Optional(Type.String({ description: "Conflict URI. Required for diff/resolve; use conflict://N for one conflict or conflict://* for bulk resolve." })),
+  content: Type.Optional(Type.String({ minLength: 1, description: "Resolution content. Required for resolve; accepts @ours, @theirs, or custom text." })),
+}, {
+  additionalProperties: false,
+  allOf: [
+    {
+      if: { properties: { action: { const: "diff" } }, required: ["action"] },
+      then: { required: ["uri"] },
+    },
+    {
+      if: { properties: { action: { const: "resolve" } }, required: ["action"] },
+      then: { required: ["uri", "content"] },
+    },
+  ],
 });
 
 export interface ConflictDetails {
