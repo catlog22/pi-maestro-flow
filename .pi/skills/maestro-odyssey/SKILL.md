@@ -95,17 +95,18 @@ $ARGUMENTS
 
 Mode-scoped flags passed to inapplicable mode: emit W008 warning and ignore the flag.
 
-**Run creation** (per run-mode.md §Start or Resume):
+**Run creation** (per run-mode.md §Start or Continue a Run):
 ```bash
-# command-name is odyssey-{mode} — resolves the mode's own prepare contract and workflow
-maestro run start --platform pi "<short goal phrase>" \
-  --cmd odyssey-<mode> \
-  --topic "odyssey-{mode}-{topic}" \
-  --platform pi \
-  [--arg "<flags...>"]
+# command-name is odyssey-{mode} — resolves the mode's own prepare contract and workflow.
+# The intent phrase is Session metadata only (may contain Chinese) and does NOT enter
+# Run input.args or satisfy the command contract.
+maestro session start "<short goal phrase>" \
+  --chain odyssey-<mode> \
+  --session "YYYYMMDD-odyssey-<mode>-<topic>" \
+  [--arg "<command input>"]
 ```
 
-Use `maestro run start --platform pi` as the only lifecycle entry; no compatibility alias is required.
+`--arg` carries the command input required by the mode's prepare contract / `argument-hint` — for odyssey-review and odyssey-ui this is the **target** (`<target: file|dir|HEAD|staged|phase#|PR#>`), e.g. `--arg "."` for the whole project or `--arg "HEAD"` for the diff; for odyssey-planex/debug/improve it is the requirement/intent text. Do NOT pass the bare intent phrase as `--arg` for review/ui — a non-path value fails argument validation (`ARGUMENT_REQUIRED`).
 
 **Session**: `{run_dir}/outputs/`
 **Output**: `session.json` | `evidence.ndjson` | `understanding.md` | `explore.json` (debug/review only)
