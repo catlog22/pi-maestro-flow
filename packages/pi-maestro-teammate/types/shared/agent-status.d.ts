@@ -7,7 +7,7 @@
  * the state up in `STATUS_PRESENTATION` and derive transient display states
  * (`result-ready`, `stalled`) through `effectiveDisplayStatus`.
  */
-import type { ActiveAgent, AgentActivity, AgentStatus } from "./types.ts";
+import type { ActiveAgent, AgentActivity, AgentRunPhase, AgentStatus } from "./types.ts";
 /**
  * Semantic color slot. The names match both the Pi theme foreground slots
  * (`theme.fg(tone, text)`) and the `ProgressPalette` tone mapping used by the
@@ -29,13 +29,38 @@ export type DisplayStatus = AgentStatus | DerivedDisplayStatus;
 export declare const STATUS_PRESENTATION: Readonly<Record<AgentStatus, StatusPresentation>>;
 export declare const DERIVED_STATUS_PRESENTATION: Readonly<Record<DerivedDisplayStatus, StatusPresentation>>;
 export declare function displayStatusPresentation(status: DisplayStatus): StatusPresentation;
+export interface AgentStallProjection {
+    status: AgentStatus | string;
+    phase?: AgentRunPhase | string;
+    resultReadyAt?: number;
+    lastActivityAt?: number;
+    pendingInteractions?: number;
+}
+export interface AgentPhaseProjection {
+    status: string;
+    phase?: AgentRunPhase | string;
+    lastActivityAt?: number;
+    recentTools?: readonly {
+        status: string;
+    }[];
+}
 /**
- * Normalize `(status, resultReadyAt, lastActivityAt)` into the state the user
- * should see. A running agent that already produced its final assistant turn is
- * `result-ready`; one that has been silent past the stall threshold is
- * `stalled`. Every other status displays as itself.
+ * Projects a graph container from its live task phases. A running tool wins so
+ * the container keeps the heartbeat-backed 30s deadline; otherwise the most
+ * recently active task supplies the expected-silence phase.
  */
-export declare function effectiveDisplayStatus(status: AgentStatus, resultReadyAt: number | undefined, lastActivityAt: number | undefined, nowSnapshot?: number): DisplayStatus;
+export declare function aggregateAgentRunPhase(entries: readonly AgentPhaseProjection[]): AgentRunPhase | undefined;
+/** Canonical idle ceiling shared by wait, notifications and every renderer. */
+export declare function agentStallIdleCeilingMs(status: AgentStatus | string, phase?: AgentRunPhase | string, defaultIdleCeilingMs?: number): number;
+/** Pure stalled projection; callers may provide one shared frame clock. */
+export declare function isAgentStalled(projection: AgentStallProjection, nowSnapshot?: number, defaultIdleCeilingMs?: number): boolean;
+/**
+ * Normalize `(status, resultReadyAt, lastActivityAt, phase)` into the state the
+ * user should see. Expected-silence phases use a bounded five-minute window;
+ * tool execution keeps the normal 30s ceiling because its heartbeat is the
+ * liveness signal.
+ */
+export declare function effectiveDisplayStatus(status: AgentStatus, resultReadyAt: number | undefined, lastActivityAt: number | undefined, nowSnapshot?: number, phase?: AgentRunPhase | string, pendingInteractions?: number): DisplayStatus;
 export declare function projectAgentActivity(agent: Pick<ActiveAgent, "status" | "restart" | "sessionFile">): AgentActivity;
 /** Whole seconds since the last reported activity; 0 when never reported. */
 export declare function idleSeconds(lastActivityAt: number | undefined, nowSnapshot?: number): number;

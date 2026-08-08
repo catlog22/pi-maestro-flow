@@ -115,6 +115,7 @@ export interface ChildAgentCallSnapshot {
   parentCorrelationId?: string;
   parentName?: string;
   status: "running" | "retrying" | "completed" | "failed" | "terminated";
+  phase?: AgentRunPhase;
   startedAt?: number;
   durationMs?: number;
   lastActivityAt?: number;
@@ -368,6 +369,16 @@ export interface StructuredResult {
   output?: string;
 }
 
+/**
+ * Per-result publication boundary. Consumers register durable work synchronously
+ * with `waitUntil`; DAG dependents are released after those promises settle.
+ */
+export interface TeammateResultPublishedEvent {
+  result: StructuredResult;
+  waitUntil(promise: Promise<unknown>): void;
+}
+
+export const TEAMMATE_RESULT_PUBLISHED_EVENT = "teammate:result-published";
 export const TEAMMATE_COMPLETE_EVENT = "teammate:complete";
 export const TEAMMATE_STARTED_EVENT = "teammate:started";
 export const TEAMMATE_MESSAGE_EVENT = "teammate:message";

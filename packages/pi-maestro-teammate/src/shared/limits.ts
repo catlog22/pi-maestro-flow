@@ -13,3 +13,12 @@
  * and `teammate-wait`; they must never disagree.
  */
 export const TEAMMATE_STALL_TIMEOUT_MS = 30_000;
+
+/**
+ * Model, startup, restore and compaction phases can legitimately emit no child
+ * events for much longer than a tool heartbeat interval. Give those phases a
+ * bounded confirmation window instead of treating the first 30s of silence as
+ * a stall. Tool execution keeps the shorter limit because it has a 10s
+ * heartbeat and therefore only goes quiet when that heartbeat is actually lost.
+ */
+export const TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS = 5 * 60_000;

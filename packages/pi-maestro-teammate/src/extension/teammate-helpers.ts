@@ -150,7 +150,11 @@ import type {
   StructuredResult,
   TeammateInteractionRecord,
 } from "../shared/types.ts";
-import { projectAgentActivity } from "../shared/agent-status.ts";
+import {
+  agentStallIdleCeilingMs,
+  isAgentStalled,
+  projectAgentActivity,
+} from "../shared/agent-status.ts";
 
 type TeammateToolResult<T> = AgentToolResult<T> & { isError?: boolean };
 
@@ -200,7 +204,6 @@ import {
   LIVE_AGENT_STATUSES,
   TEAMMATE_INTERACTION_QUEUE_LIMIT,
   TEAMMATE_INTERACTION_TIMEOUT_MS,
-  TEAMMATE_PENDING_STALL_TIMEOUT_MS,
   TEAMMATE_STALL_NOTIFY_IDLE_MS,
   TEAMMATE_STALL_TIMEOUT_MS,
   TEAMMATE_WAIT_DEFAULT_TIMEOUT_MS,
@@ -232,7 +235,7 @@ import type { TeammateRuntimeOptions } from "./index.ts";
 // ===========================================================================
 
 export type AgentListView = "active" | "named" | "all";
-export type TeammateListView = AgentListView | "roles";
+export type TeammateListView = AgentListView | "roles" | "windows";
 export type ListedAgentStatus = AgentActivity;
 
 export interface ListedAgent {
@@ -433,14 +436,13 @@ export function buildAgentList(
         // one, so the derived state — result ready, blocked on a prompt, or
         // silent past the stall ceiling — has to be on the line too.
         const idleSeconds = Math.round(entry.idleMs / 1000);
-        const stalled = entry.status === "running"
-          && entry.phase !== "retrying"
-          && entry.phase !== "compacting"
-          && entry.resultReadyAt === undefined
-          && !entry.pendingInteractions
-          && entry.idleMs >= (entry.phase === "starting"
-            ? TEAMMATE_PENDING_STALL_TIMEOUT_MS
-            : TEAMMATE_STALL_TIMEOUT_MS);
+        const stalled = isAgentStalled({
+          status: entry.status,
+          phase: entry.phase,
+          resultReadyAt: entry.resultReadyAt,
+          lastActivityAt: 0,
+          pendingInteractions: entry.pendingInteractions,
+        }, entry.idleMs);
         const metadata = [
           `id=${correlationIdPrefix(entry.correlationId, listedCorrelationIds)}`,
           entry.taskIndex !== undefined ? `task=${entry.taskIndex + 1}` : "",
@@ -760,12 +762,11 @@ export function watchTargetStalledAt(
   idleCeilingOverrideMs?: number,
 ): number {
   const status = target.kind === "agent" ? target.agent.status : target.progress.status;
+  const phase = target.kind === "agent" ? target.agent.phase : target.progress.phase;
   const lastActivityAt = target.kind === "agent"
     ? target.agent.lastActivityAt
     : target.progress.lastActivityAt ?? target.agent.lastActivityAt;
-  const idleCeiling = status === "pending"
-    ? TEAMMATE_PENDING_STALL_TIMEOUT_MS
-    : (idleCeilingOverrideMs ?? TEAMMATE_STALL_TIMEOUT_MS);
+  const idleCeiling = agentStallIdleCeilingMs(status, phase, idleCeilingOverrideMs);
   const baseStalledAt = lastActivityAt + idleCeiling;
   if (status !== "retrying") return baseStalledAt;
   const correlationId = target.kind === "agent"

@@ -57,6 +57,8 @@ const LEAF_SUBPATHS = [
   "model-routing.ts",
   "observation.ts",
   "child-extensions.ts",
+  "scheduler.ts",
+  "sessions.ts",
 ];
 
 test("narrow v1 subpaths never load the extension entry point", () => {
@@ -79,12 +81,30 @@ test("narrow v1 subpaths never load the extension entry point", () => {
   }
 });
 
-test("the v1 event contract is a leaf that costs nothing beyond the type module", () => {
+test("the v1 event contract depends only on dependency-free contract modules", () => {
   const { modules, externals } = runtimeGraph(path.join(PUBLIC_DIR, "events.ts"));
   assert.deepEqual([...externals], [], "the event contract must have no external runtime dependency");
   assert.deepEqual(
     [...modules].map((file) => path.relative(SRC_DIR, file).replaceAll(path.sep, "/")).sort(),
-    ["public/v1/events.ts", "shared/types.ts"],
+    ["public/v1/events.ts", "sessions/session-core.ts", "shared/types.ts"],
+  );
+});
+
+test("the v1 scheduler is dependency-free", () => {
+  const { modules, externals } = runtimeGraph(path.join(PUBLIC_DIR, "scheduler.ts"));
+  assert.deepEqual([...externals], []);
+  assert.deepEqual(
+    [...modules].map((file) => path.relative(SRC_DIR, file).replaceAll(path.sep, "/")).sort(),
+    ["public/v1/scheduler.ts", "scheduler/scheduler-core.ts"],
+  );
+});
+
+test("the v1 sessions API is dependency-free", () => {
+  const { modules, externals } = runtimeGraph(path.join(PUBLIC_DIR, "sessions.ts"));
+  assert.deepEqual([...externals], []);
+  assert.deepEqual(
+    [...modules].map((file) => path.relative(SRC_DIR, file).replaceAll(path.sep, "/")).sort(),
+    ["public/v1/sessions.ts", "sessions/session-core.ts"],
   );
 });
 
@@ -113,6 +133,7 @@ test("v1 event names match the strings the extension actually emits", async () =
   const expected: Record<string, string> = {
     TEAMMATE_STARTED_EVENT: "teammate:started",
     TEAMMATE_MESSAGE_EVENT: "teammate:message",
+    TEAMMATE_RESULT_PUBLISHED_EVENT: "teammate:result-published",
     TEAMMATE_COMPLETE_EVENT: "teammate:complete",
   };
   for (const [name, value] of Object.entries(expected)) {

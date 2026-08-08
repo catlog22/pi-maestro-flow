@@ -140,6 +140,10 @@ export interface RunTeammateOptions {
     onChildRequest?: (event: Record<string, unknown>, reply: (msg: unknown) => void) => void;
     onChildEvent?: (event: Record<string, unknown>) => void;
     parentSessionFile?: string;
+    /** Explicit private session directory for independent long-lived children. */
+    sessionDir?: string;
+    /** Additional child-only environment values (never applied to the host). */
+    childEnvironment?: Record<string, string | undefined>;
     initialLeaseToken?: LeaseToken | ((correlationId: string) => LeaseToken | undefined);
     onChildSpawned?: (stdin: import("node:stream").Writable, sendControl: (message: Record<string, unknown>) => boolean, sessionDir?: string, correlationId?: string) => void;
     /** Existing persisted Pi session to load for a cold logical-agent restart. */
@@ -151,6 +155,11 @@ export interface RunTeammateOptions {
         signal: NodeJS.Signals | null;
         settled: boolean;
     }) => void;
+    /**
+     * Runs once when the final consumable result is published, before the caller
+     * or a DAG dependent can observe it. Observer failures are non-fatal.
+     */
+    onResultPublished?: (result: SingleResult) => void | Promise<void>;
     onTurnComplete?: (result: SingleResult, terminalStatus?: AgentTerminalStatus) => void;
     /** Physical child-process reclamation, independent of logical turn settlement. */
     onReclamationOutcome?: (correlationId: string, outcome: ChildReclamationOutcome) => void;

@@ -16,6 +16,7 @@ import registerTeammateExtension, {
   buildAgentSelectorRows,
   buildWatchOutput,
   correlationIdPrefix,
+  emitTeammateResultPublished,
   handleProxyRequest,
   handleChildLifecycleEvent,
   renderAgentSelectorPanel,
@@ -446,6 +447,76 @@ test("runGraph results carry the task name for agent:// persistence", async () =
   assert.equal(results.length, 1);
   assert.equal(results[0].name, "named-producer");
   assert.deepEqual(results[0].structuredOutput, { value: 3 });
+});
+
+test("runGraph awaits result publication before releasing a dependent", async () => {
+  const tasks: NormalizedTask[] = [
+    {
+      agent: "general",
+      name: "producer",
+      prompt: "produce",
+      outputSchema: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false },
+    },
+    {
+      agent: "general",
+      name: "consumer",
+      prompt: "consume {producer.value}",
+      outputSchema: { type: "object", properties: { seen: { type: "integer" } }, required: ["seen"], additionalProperties: false },
+    },
+  ];
+  const baseSpawn = createStructuredSpawn([{ value: 7 }, { seen: 7 }]);
+  const childStarts: boolean[] = [];
+  let producerPersisted = false;
+  const spawn = ((...args: Parameters<typeof baseSpawn>) => {
+    childStarts.push(producerPersisted);
+    return baseSpawn(...args);
+  }) as typeof baseSpawn;
+
+  const results = await runGraph(tasks, 2, {
+    baseCwd: process.cwd(),
+    spawnChildProcess: spawn,
+    onResultPublished: async (result) => {
+      if (result.name !== "producer") return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      producerPersisted = true;
+    },
+  });
+
+  assert.deepEqual(childStarts, [false, true]);
+  assert.deepEqual(results[1].structuredOutput, { seen: 7 });
+});
+
+test("result publication waits for synchronously claimed durable work", async () => {
+  let durable = false;
+  const pi = {
+    events: {
+      emit(name: string, event: { waitUntil(promise: Promise<unknown>): void }) {
+        assert.equal(name, "teammate:result-published");
+        event.waitUntil(new Promise<void>((resolve) => {
+          setTimeout(() => {
+            durable = true;
+            resolve();
+          }, 10);
+        }));
+      },
+    },
+  } as unknown as ExtensionAPI;
+  const result: SingleResult = {
+    agent: "general",
+    name: "producer",
+    task: "produce",
+    exitCode: 0,
+    messages: [{ role: "assistant", content: "done" }],
+    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cost: 0, turns: 1 },
+    model: "test/model",
+    correlationId: "published-result",
+    durationMs: 1,
+  };
+
+  const publication = emitTeammateResultPublished(pi, result, process.cwd());
+  assert.equal(durable, false);
+  await publication;
+  assert.equal(durable, true);
 });
 
 test("root and proxy expose identical validated structuredOutput projections", async () => {
@@ -1716,6 +1787,10 @@ test("structured_output writes the validated tool payload for field references",
       new Set(["api"]),
     );
     assert.equal(resolved, "Check /health");
+    assert.throws(
+      () => resolveVariables("Check {api}", new Map(), new Set(["api"])),
+      /completed without publishing a consumable output/,
+    );
   } finally {
     if (previousSchema === undefined) delete process.env.PI_TEAMMATE_STRUCTURED_SCHEMA_PATH;
     else process.env.PI_TEAMMATE_STRUCTURED_SCHEMA_PATH = previousSchema;
@@ -1869,8 +1944,11 @@ test("nested teammate-send republishes a running lifecycle when it wakes an agen
 
 test("session ownership handoff fences stale writers and requires reload before child resumes", () => {
   let lease = createChildLease();
+  const childEpoch = lease.epoch;
+  const childNonce = lease.nonce;
   const staleChild = leaseToken(lease);
   assert.equal(ownsLease(lease, staleChild), true);
+  assert.equal(canChildWrite(lease), true);
 
   lease = requestPark(lease);
   assert.equal(lease.state, "parking");
@@ -1879,12 +1957,21 @@ test("session ownership handoff fences stale writers and requires reload before 
   assert.equal(lease.state, "parked");
   lease = transferToMain(lease);
   assert.equal(lease.owner, "main");
+  assert.equal(lease.epoch, childEpoch + 1);
+  assert.notEqual(lease.nonce, childNonce);
   assert.equal(ownsLease(lease, staleChild), false);
+  assert.equal(canChildWrite(lease), false);
 
   const mainToken = leaseToken(lease);
   assert.equal(ownsLease(lease, mainToken), true);
   lease = requestHandback(lease);
+  const handbackToken = leaseToken(lease);
+  assert.equal(lease.owner, "none");
   assert.equal(lease.state, "reloading");
+  assert.equal(lease.epoch, mainToken.epoch + 1);
+  assert.notEqual(lease.nonce, mainToken.nonce);
+  assert.equal(ownsLease(lease, mainToken), false);
+  assert.equal(canChildWrite(lease), false);
   assert.equal(restoreMainOwnership(lease).owner, "main");
   const pendingToken = leaseToken(lease);
   const recoveringAgent = {
@@ -1905,6 +1992,10 @@ test("session ownership handoff fences stale writers and requires reload before 
   lease = confirmChildReloaded(lease);
   assert.equal(lease.owner, "child");
   assert.equal(lease.state, "active");
+  assert.equal(lease.epoch, handbackToken.epoch + 1);
+  assert.notEqual(lease.nonce, handbackToken.nonce);
+  assert.equal(canChildWrite(lease), true);
+  assert.equal(ownsLease(lease, handbackToken), false);
 
   const fenced = fenceLease(lease);
   assert.equal(fenced.state, "fenced");

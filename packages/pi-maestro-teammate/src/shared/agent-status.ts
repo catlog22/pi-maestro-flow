@@ -8,8 +8,11 @@
  * (`result-ready`, `stalled`) through `effectiveDisplayStatus`.
  */
 
-import { TEAMMATE_STALL_TIMEOUT_MS } from "./limits.ts";
-import type { ActiveAgent, AgentActivity, AgentStatus } from "./types.ts";
+import {
+  TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS,
+  TEAMMATE_STALL_TIMEOUT_MS,
+} from "./limits.ts";
+import type { ActiveAgent, AgentActivity, AgentRunPhase, AgentStatus } from "./types.ts";
 
 /**
  * Semantic color slot. The names match both the Pi theme foreground slots
@@ -58,25 +61,120 @@ function unhandledStatus(status: never): never {
   throw new Error(`unhandled agent status: ${String(status)}`);
 }
 
+const EXPECTED_SILENCE_PHASES: ReadonlySet<AgentRunPhase> = new Set<AgentRunPhase>([
+  "starting",
+  "restoring",
+  "prompting",
+  "compacting",
+  "continuing",
+  "settling",
+]);
+
+export interface AgentStallProjection {
+  status: AgentStatus | string;
+  phase?: AgentRunPhase | string;
+  resultReadyAt?: number;
+  lastActivityAt?: number;
+  pendingInteractions?: number;
+}
+
+export interface AgentPhaseProjection {
+  status: string;
+  phase?: AgentRunPhase | string;
+  lastActivityAt?: number;
+  recentTools?: readonly { status: string }[];
+}
+
 /**
- * Normalize `(status, resultReadyAt, lastActivityAt)` into the state the user
- * should see. A running agent that already produced its final assistant turn is
- * `result-ready`; one that has been silent past the stall threshold is
- * `stalled`. Every other status displays as itself.
+ * Projects a graph container from its live task phases. A running tool wins so
+ * the container keeps the heartbeat-backed 30s deadline; otherwise the most
+ * recently active task supplies the expected-silence phase.
+ */
+export function aggregateAgentRunPhase(
+  entries: readonly AgentPhaseProjection[],
+): AgentRunPhase | undefined {
+  const active = entries.filter((entry) =>
+    entry.status === "running" || entry.status === "pending" || entry.status === "retrying"
+  );
+  if (active.length === 0 && entries.length > 0) return "settling";
+  if (active.some((entry) => entry.recentTools?.some((tool) => tool.status === "running"))) {
+    return "tool-execution";
+  }
+  const latest = active.reduce<AgentPhaseProjection | undefined>(
+    (selected, entry) => selected === undefined
+      || (entry.lastActivityAt ?? 0) > (selected.lastActivityAt ?? 0)
+      ? entry
+      : selected,
+    undefined,
+  );
+  if (latest?.phase !== undefined) return latest.phase as AgentRunPhase;
+  if (latest?.status === "pending") return "starting";
+  if (latest?.status === "retrying") return "retrying";
+  return undefined;
+}
+
+/** Canonical idle ceiling shared by wait, notifications and every renderer. */
+export function agentStallIdleCeilingMs(
+  status: AgentStatus | string,
+  phase?: AgentRunPhase | string,
+  defaultIdleCeilingMs = TEAMMATE_STALL_TIMEOUT_MS,
+): number {
+  if (status === "running" && phase === "retrying") return TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS;
+  return status === "pending" || (phase !== undefined && EXPECTED_SILENCE_PHASES.has(phase as AgentRunPhase))
+    ? TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS
+    : defaultIdleCeilingMs;
+}
+
+/** Pure stalled projection; callers may provide one shared frame clock. */
+export function isAgentStalled(
+  projection: AgentStallProjection,
+  nowSnapshot = Date.now(),
+  defaultIdleCeilingMs = TEAMMATE_STALL_TIMEOUT_MS,
+): boolean {
+  if ((projection.status !== "running" && projection.status !== "pending")
+    || projection.resultReadyAt !== undefined) return false;
+  if ((projection.pendingInteractions ?? 0) > 0 || projection.lastActivityAt === undefined) return false;
+  return nowSnapshot - projection.lastActivityAt >= agentStallIdleCeilingMs(
+    projection.status,
+    projection.phase,
+    defaultIdleCeilingMs,
+  );
+}
+
+/**
+ * Normalize `(status, resultReadyAt, lastActivityAt, phase)` into the state the
+ * user should see. Expected-silence phases use a bounded five-minute window;
+ * tool execution keeps the normal 30s ceiling because its heartbeat is the
+ * liveness signal.
  */
 export function effectiveDisplayStatus(
   status: AgentStatus,
   resultReadyAt: number | undefined,
   lastActivityAt: number | undefined,
   nowSnapshot: number = Date.now(),
+  phase?: AgentRunPhase | string,
+  pendingInteractions = 0,
 ): DisplayStatus {
   switch (status) {
     case "running":
       if (resultReadyAt !== undefined) return "result-ready";
-      return lastActivityAt !== undefined && nowSnapshot - lastActivityAt >= TEAMMATE_STALL_TIMEOUT_MS
+      return isAgentStalled({
+        status,
+        phase,
+        lastActivityAt,
+        pendingInteractions,
+      }, nowSnapshot)
         ? "stalled"
         : "running";
     case "pending":
+      return isAgentStalled({
+        status,
+        phase,
+        lastActivityAt,
+        pendingInteractions,
+      }, nowSnapshot)
+        ? "stalled"
+        : "pending";
     case "retrying":
     case "sleeping":
     case "completed":

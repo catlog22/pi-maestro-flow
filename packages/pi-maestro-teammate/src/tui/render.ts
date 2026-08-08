@@ -243,7 +243,7 @@ export function renderTeammateResult(
 
 function childStateText(child: ChildAgentCallSnapshot): string {
   const activityAt = child.lastActivityAt ?? child.startedAt;
-  const display = effectiveDisplayStatus(child.status, child.resultReadyAt, activityAt);
+  const display = effectiveDisplayStatus(child.status, child.resultReadyAt, activityAt, Date.now(), child.phase);
   if (display === "result-ready") return "result ready; confirming terminal";
   if (display === "stalled") return `stalled ${idleSeconds(activityAt)}s`;
   return STATUS_PRESENTATION[display].text;
@@ -360,7 +360,7 @@ function renderProgress(
     const focused = entries.find((entry) => entry.taskIndex === focus) ?? entries[0];
     const idleMs = focused?.lastActivityAt ? Date.now() - focused.lastActivityAt : 0;
     const focusedDisplay = focused
-      ? effectiveDisplayStatus(focused.status, focused.resultReadyAt, focused.lastActivityAt)
+      ? effectiveDisplayStatus(focused.status, focused.resultReadyAt, focused.lastActivityAt, Date.now(), focused.phase)
       : undefined;
     const resultReady = focusedDisplay === "result-ready";
     const stalled = focusedDisplay === "stalled";

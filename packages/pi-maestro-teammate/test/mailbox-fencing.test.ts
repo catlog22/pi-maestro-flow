@@ -476,6 +476,7 @@ test("lease handoff invalidates in-flight envelopes (epoch/nonce bound to recipi
   assert.ok(result.ok);
   const envelope = await localStore.readEnvelope("ready", result.messageId);
   assert.equal(envelope?.leaseEpoch, 1, "envelope stamps the recipient lease at enqueue");
+  assert.equal(envelope?.leaseNonce, "nonce-a", "envelope stamps the recipient nonce at enqueue");
 
   // Handoff advances the recipient lease (epoch + nonce rotate).
   lease.epoch = 2;
@@ -483,12 +484,14 @@ test("lease handoff invalidates in-flight envelopes (epoch/nonce bound to recipi
   const validation = await localRouter.revalidateForDispatch(envelope!);
   assert.equal(validation.allowed, false, "old-lease envelope must not dispatch");
   assert.equal(validation.action, "dead");
+  assert.match(validation.reason ?? "", /lease/);
 
   // A fresh enqueue under the new lease passes revalidation.
   const result2 = await localRouter.enqueue({ ...request, payload: "after handoff" });
   assert.ok(result2.ok);
   const env2 = await localStore.readEnvelope("ready", result2.messageId);
   assert.equal(env2?.leaseEpoch, 2);
+  assert.equal(env2?.leaseNonce, "nonce-b");
   const validation2 = await localRouter.revalidateForDispatch(env2!);
   assert.equal(validation2.allowed, true);
 });

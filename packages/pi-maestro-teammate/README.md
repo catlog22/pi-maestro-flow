@@ -282,7 +282,7 @@ These are computed by `effectiveDisplayStatus()` for rendering only:
 | Display status | Icon | Condition |
 |----------------|------|-----------|
 | `result-ready` | ◆ | A `running` agent whose final assistant turn has already been produced (`resultReadyAt` is set) but whose result has not yet been consumed by a waiter |
-| `stalled` | ▲ | A `running` agent with no activity for longer than the stall timeout (30 s, `TEAMMATE_STALL_TIMEOUT_MS`) |
+| `stalled` | ▲ | An active `pending`/`running` agent with no activity past its canonical deadline: 30 s for heartbeat-backed tool execution, and 5 min for queueing and expected-silence phases such as startup, model prompting, restore, continuation and compaction |
 
 All other statuses display as themselves. Rendering surfaces must use `STATUS_PRESENTATION` / `DERIVED_STATUS_PRESENTATION` lookup tables rather than `status === "..."` chains.
 

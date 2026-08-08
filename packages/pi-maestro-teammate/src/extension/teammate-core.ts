@@ -65,6 +65,7 @@ import {
   resolveWorkspaceTarget,
   sendWorkspacePeerCommand,
   type WorkspaceAgentSnapshot,
+  type WorkspaceBackgroundJobSnapshot,
   type WorkspaceOwnerSnapshot,
   type WorkspaceOwnerState,
   type WorkspacePeerCommandConsumer,
@@ -139,6 +140,7 @@ import type {
   TeammateState,
   AgentProgress,
   AgentProgressSnapshot,
+  AgentRunPhase,
   ChildAgentCallSnapshot,
   ActiveAgent,
   AgentStatus,
@@ -148,8 +150,15 @@ import type {
   SingleResult,
   StructuredResult,
   TeammateInteractionRecord,
+  TeammateResultPublishedEvent,
 } from "../shared/types.ts";
-import { projectAgentActivity } from "../shared/agent-status.ts";
+import { isAgentStalled, projectAgentActivity } from "../shared/agent-status.ts";
+import {
+  TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS,
+  TEAMMATE_STALL_TIMEOUT_MS,
+} from "../shared/limits.ts";
+
+export { TEAMMATE_STALL_TIMEOUT_MS };
 
 type TeammateToolResult<T> = AgentToolResult<T> & { isError?: boolean };
 
@@ -164,6 +173,7 @@ import {
   TEAMMATE_COMPLETE_EVENT,
   TEAMMATE_STARTED_EVENT,
   TEAMMATE_MESSAGE_EVENT,
+  TEAMMATE_RESULT_PUBLISHED_EVENT,
 } from "../shared/types.ts";
 import {
   appendAgentCatalog,
@@ -376,6 +386,35 @@ export function toStructuredResults(
   return entries.length > 0 ? entries : undefined;
 }
 
+/** Publish one consumable result and await durable work claimed by listeners. */
+export async function emitTeammateResultPublished(
+  pi: ExtensionAPI,
+  result: SingleResult,
+  originCwd: string,
+): Promise<void> {
+  const projected = toStructuredResults([result], originCwd)?.[0];
+  if (!projected) return;
+
+  const pending: Promise<unknown>[] = [];
+  const event: TeammateResultPublishedEvent = {
+    result: projected,
+    waitUntil(promise) {
+      pending.push(Promise.resolve(promise));
+    },
+  };
+  pi.events.emit(TEAMMATE_RESULT_PUBLISHED_EVENT, event);
+
+  const outcomes = await Promise.allSettled(pending);
+  for (const outcome of outcomes) {
+    if (outcome.status === "rejected") {
+      console.warn(
+        `[pi-maestro-teammate] result publication observer failed for ${result.correlationId}: `
+        + `${outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)}`,
+      );
+    }
+  }
+}
+
 /** Replace the retained turn value; undefined intentionally clears stale data. */
 export function setAgentStructuredOutput(agent: ActiveAgent, output: unknown): void {
   agent.structuredOutput = output === undefined ? undefined : structuredClone(output);
@@ -440,23 +479,26 @@ Use observe for teammate and background Bash status, barrier waits, or transitio
 ${modelRoutingSection}`;
 }
 
-export const TEAMMATE_SEND_DESCRIPTION = `Send a message to a running or sleeping teammate agent, addressed by name, @name, displayed name#id-prefix, or correlation ID (or prefix).
+export const TEAMMATE_SEND_DESCRIPTION = `Send a message to a running or sleeping teammate agent, addressed by name, @name, displayed name#id-prefix, correlation ID (or prefix), or a cross-session target from teammate-list such as owner:<ownerId> or owner:<ownerId>:<correlationId>.
 
-Modes: "steer" | "follow_up" (default) | "abort" — per-mode semantics and the message requirement are in the mode and message parameter descriptions.`;
-export const TEAMMATE_SEND_SNIPPET = "Steer, follow up with, or abort a named running or sleeping teammate agent.";
+Modes: "steer" | "follow_up" (default) | "abort" — per-mode semantics and the message requirement are in the mode and message parameter descriptions. Cross-session targets support only "steer" and "follow_up".`;
+export const TEAMMATE_SEND_SNIPPET = "Steer, follow up with, or send a message to a cross-session teammate target.";
 export const TEAMMATE_SEND_GUIDELINES = [
   "Use teammate-send only for a named running or sleeping agent; steer for urgent correction, abort only to terminate work.",
+  "For another Pi window, call teammate-list with view=windows first, then send to the returned target (owner:<ownerId> for the window or owner:<ownerId>:<correlationId> for one of its agents). Cross-session abort is unsupported.",
 ];
 
-export const TEAMMATE_LIST_DESCRIPTION = `List available roles or teammate agents. view defaults to "active".
+export const TEAMMATE_LIST_DESCRIPTION = `List available roles, teammate agents, or cross-session windows. view defaults to "active".
 
 - "active": live agents except completed entries
-- "named": addressable named agents
+- "named": addressable agents
 - "all": all tracked live entries
-- "roles": builtin, project, and user-defined role definitions`;
-export const TEAMMATE_LIST_SNIPPET = "List available teammate roles or inspect active and named agent status.";
+- "roles": builtin, project, and user-defined role definitions
+- "windows": available peer Pi windows; use each returned target with teammate-send`;
+export const TEAMMATE_LIST_SNIPPET = "List teammate roles, agent status, or available cross-session windows.";
 export const TEAMMATE_LIST_GUIDELINES = [
   'Use teammate-list with view="roles" when an available builtin, project, or user-defined agent name is needed; use active/named/all for running work.',
+  'Use teammate-list with view="windows" before sending across Pi sessions; the returned owner:<ownerId> target addresses the window main session.',
 ];
 
 export const TEAMMATE_WATCH_DESCRIPTION =
@@ -672,24 +714,15 @@ export const AGENT_BUFFER_LIMITS = Object.freeze({
   /** PERFSEC-004: Cap per-interaction payload retention (16 concurrent × 256KB = 4MB max). */
   interactionPayloadBytes: 256 * 1024,
 });
-export const TEAMMATE_STALL_TIMEOUT_MS = 30_000;
-
 /**
- * Idle confirmation window for the caller-facing stall notification. The wait
- * path reports a stall after `TEAMMATE_STALL_TIMEOUT_MS` (30s), which is right
- * for a caller actively blocking on a result. Pushing a new turn at that speed
- * would wake the caller on long-but-healthy model/tool calls that emit no
- * progress events, so the push channel requires a longer, monitor-aligned
- * confirmation window before it wakes the caller.
+ * Idle confirmation window for caller-facing notifications during phases that
+ * have a 30s canonical deadline. Expected-silence phases keep their longer
+ * five-minute deadline and are never shortened by this override.
  */
 export const TEAMMATE_STALL_NOTIFY_IDLE_MS = 60_000;
 
-/**
- * Stall ceiling for queued work. A `pending` graph task is waiting on a
- * dependency or a concurrency slot, which is expected — it just must not wait
- * without any ceiling at all.
- */
-export const TEAMMATE_PENDING_STALL_TIMEOUT_MS = 5 * 60_000;
+/** Expected queue/model silence uses the shared five-minute ceiling. */
+export const TEAMMATE_PENDING_STALL_TIMEOUT_MS = TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS;
 
 /** Lower bound on teammate-wait re-poll spacing. */
 export const TEAMMATE_WAIT_POLL_FLOOR_MS = 250;
@@ -762,6 +795,7 @@ export function buildWorkspaceOwnerState(
   state: TeammateState,
   sessionName?: string,
   contextPressure?: number,
+  backgroundJobs?: readonly WorkspaceBackgroundJobSnapshot[],
 ): WorkspaceOwnerState {
   const agents: WorkspaceAgentSnapshot[] = [];
   const settledById = new Map<string, WorkspaceSettledSnapshot>();
@@ -812,6 +846,7 @@ export function buildWorkspaceOwnerState(
   return {
     agents,
     settled: [...settledById.values()],
+    ...(backgroundJobs === undefined ? {} : { backgroundJobs: [...backgroundJobs] }),
     ...(state.currentSessionId ? { sessionId: state.currentSessionId } : {}),
     ...(sessionName ? { sessionName } : {}),
     ...(contextPressure !== undefined && Number.isFinite(contextPressure) ? { contextPressure: Math.max(0, Math.min(100, Math.round(contextPressure))) } : {}),
@@ -1010,6 +1045,7 @@ export interface AgentWidgetRow {
   label: string;
   agent: string;
   status: AgentProgressSnapshot["status"] | "sleeping";
+  phase?: AgentRunPhase;
   action: string;
   direction: "↑" | "↓";
   toolCount: number;
@@ -1543,6 +1579,7 @@ export function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
           label: direct?.name ?? existing.label,
           agent: direct?.agent ?? existing.agent,
           status,
+          phase: direct?.phase ?? active.phase,
           pendingInteractions,
           action: status === "sleeping"
             ? "sleeping"
@@ -1561,6 +1598,7 @@ export function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
         label: progress?.name ?? direct?.name ?? active.name ?? correlationId.slice(0, 8),
         agent: progress?.agent ?? direct?.agent ?? active.agent,
         status,
+        phase: progress?.phase ?? direct?.phase ?? active.phase,
         action,
         direction: runningTool ? "↓" : "↑",
         toolCount: progress?.toolCount ?? 0,
@@ -1687,10 +1725,13 @@ export function renderAgentStatusWidget(
     const now = Date.now();
     const duration = `${Math.max(0, Math.floor(row.durationMs / 1000))}s`;
     const idleMs = Math.max(0, now - row.lastActivityAt);
-    const stalled = row.status === "running"
-      && row.resultReadyAt === undefined
-      && row.pendingInteractions === 0
-      && idleMs >= TEAMMATE_STALL_TIMEOUT_MS;
+    const stalled = isAgentStalled({
+      status: row.status,
+      phase: row.phase,
+      resultReadyAt: row.resultReadyAt,
+      lastActivityAt: row.lastActivityAt,
+      pendingInteractions: row.pendingInteractions,
+    }, now);
     const state = row.resultReadyAt !== undefined && row.status === "running"
       ? "result returned; lifecycle pending"
       : stalled

@@ -1583,6 +1583,12 @@ test("nested background completion passively delivers teammate_complete_delivery
   assert.equal(results[0].messages.some((message) => message.content.includes("nested done")), true);
   // The root session still receives the same envelope (backward compatible).
   assert.equal(sentMessages.filter((message) => message.customType === "teammate-complete").length, 1);
+
+  // Duplicate terminal IPC cannot create a second writer for either session.
+  stdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  await delay(40);
+  assert.equal(controlMessages.length, 1);
+  assert.equal(sentMessages.filter((message) => message.customType === "teammate-complete").length, 1);
 });
 
 test("foreground nested completion does not double-deliver teammate_complete_delivery", async () => {

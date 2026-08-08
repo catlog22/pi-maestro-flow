@@ -18,5 +18,7 @@ export * from "./model-routing.ts";
 export * from "./observation.ts";
 export * from "./progress-tree.ts";
 export * from "./retry.ts";
+export * from "./scheduler.ts";
+export * from "./sessions.ts";
 export * from "./supervision.ts";
 export * from "./types.ts";

@@ -69,6 +69,14 @@
       "types": "./types/public/v1/retry.d.ts",
       "default": "./src/public/v1/retry.ts"
     },
+    "./v1/scheduler": {
+      "types": "./types/public/v1/scheduler.d.ts",
+      "default": "./src/public/v1/scheduler.ts"
+    },
+    "./v1/sessions": {
+      "types": "./types/public/v1/sessions.d.ts",
+      "default": "./src/public/v1/sessions.ts"
+    },
     "./v1/supervision": {
       "types": "./types/public/v1/supervision.d.ts",
       "default": "./src/public/v1/supervision.ts"

@@ -170,6 +170,14 @@ export async function runSingleTeammate(
     }
   };
 
+  const publishResult = async (result: SingleResult): Promise<void> => {
+    try {
+      await options.onResultPublished?.(result);
+    } catch {
+      // Publication observers are advisory; the in-memory result remains authoritative.
+    }
+  };
+
   const rejectAndPublish = (
     content: string,
     terminalStatus?: AgentTerminalStatus,
@@ -355,6 +363,7 @@ export async function runSingleTeammate(
           settled = true;
         }
         candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
+        await publishResult(candidateResult);
         commitCompletion();
         return candidateResult;
       }
@@ -473,6 +482,7 @@ export async function runSingleTeammate(
   if (options.signal?.aborted) return cancelAtBoundary("during model fallback handoff");
   if (lastResult) {
     lastResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
+    await publishResult(lastResult);
     publishTurnComplete(lastResult);
     return lastResult;
   }
@@ -506,6 +516,10 @@ function resolveAttemptSessionContext(
   if (options.resumeSessionFile && fs.existsSync(options.resumeSessionFile)) {
     context.resumeSessionFile = options.resumeSessionFile;
     context.sessionDir = path.dirname(options.resumeSessionFile);
+  }
+  if (!context.sessionDir && options.sessionDir) {
+    ensurePrivateDirectory(options.sessionDir);
+    context.sessionDir = path.resolve(options.sessionDir);
   }
   if (hasParentSession && !context.sessionDir) {
     const sessionRoot = getTeammateSessionRoot(parentSession as string);
@@ -645,6 +659,7 @@ function buildChildSpawnEnv(
     // parent env via the spread above, so an explicit short-tier override keeps
     // agents from inheriting the main process's long retention.
     PI_CACHE_RETENTION: resolveAgentCacheRetention(process.env),
+    ...options.childEnvironment,
   };
   if (options.maxDispatchDepth !== undefined) {
     spawnEnv.PI_TEAMMATE_MAX_DISPATCH_DEPTH = String(options.maxDispatchDepth);
@@ -1515,6 +1530,12 @@ async function runSingleAttempt(
       state.turnToolCount += 1;
       state.completedToolCount += 1;
       state.inFlightToolCount = Math.max(0, state.inFlightToolCount - 1);
+      if (state.inFlightToolCount === 0 && progress.phase === "tool-execution") {
+        // The next silent interval belongs to model continuation, not to the
+        // completed tool. This selects the model-phase stall window while the
+        // child waits for its next provider event.
+        progress.phase = "continuing";
+      }
       const lastTool = progress.recentTools[progress.recentTools.length - 1];
       if (lastTool && lastTool.status === "running") {
         lastTool.status = "completed";

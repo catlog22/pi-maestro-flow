@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS } from "../src/shared/limits.ts";
 import { renderAgentStatusWidget } from "../src/extension/index.ts";
 
 test("agent widget keeps recent failed work and the latest live edge visible in the compact budget", () => {
@@ -97,6 +98,23 @@ test("agent widget shows pending interaction instead of stalled", () => {
   const output = renderAgentStatusWidget([agent], 120, theme).join("\n");
   assert.match(output, /awaiting 1 prompt/);
   assert.doesNotMatch(output, /stalled/);
+});
+
+test("agent widget shows a pending task as stalled after its bounded queue deadline", () => {
+  const now = Date.now();
+  const agent = {
+    agent: "worker", name: "queued", correlationId: "queued",
+    startedAt: now - TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS,
+    abortController: new AbortController(), inbox: [], outputLog: [],
+    lastActivityAt: now - TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS,
+    status: "pending" as const, phase: "starting" as const,
+    depth: 0, sleepMs: 0,
+  };
+  const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
+  const output = renderAgentStatusWidget([agent], 120, theme).join("\n");
+
+  assert.match(output, /queued.*stalled/);
+  assert.doesNotMatch(output, /waiting for dependencies/);
 });
 
 test("agent widget reads a completed container as terminal when the child record is pruned", () => {

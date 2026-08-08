@@ -1,22 +1,9 @@
 /**
  * Version 1 cross-extension event contract.
  *
- * The teammate extension broadcasts three events on the shared `pi.events` bus.
- * They are the only supported integration point for out-of-process observers
- * (`pi-cockpit`, `pi-maestro-flow`'s GUI bridge) that must not import the
- * extension entry point — this module is a leaf: it re-exports the event-name
- * constants and declares the payload shapes, and pulls in nothing but the
- * dependency-free `shared/types.ts`.
- *
- * Consumers previously hard-coded `"teammate:started"` / `"teammate:message"` /
- * `"teammate:complete"` with a line-number comment pointing at the emitter.
- * Import from here instead; the strings are the same values the emitter uses.
- *
- * Emitters (pi-maestro-teammate/src/extension/index.ts):
- *   - `emitTeammateStarted` -> {@link TeammateStartedEvent}
- *   - `emitComplete`        -> {@link TeammateCompleteEvent}
- *   - `publishProgress`, the `teammate-send` tool, the attach overlay, and
- *     `handleChildInteractionRequest` -> {@link TeammateMessageEvent}
+ * The teammate extension broadcasts lifecycle, registry, and window-thread
+ * updates on the shared `pi.events` bus. Consumers should import event names
+ * and payload types from this leaf module instead of the extension entry point.
  */
 
 import type {
@@ -25,15 +12,22 @@ import type {
   AgentRunOutcome,
   AgentStatus,
   StructuredResult,
+  TeammateResultPublishedEvent,
 } from "../../shared/types.ts";
+import type { SessionHostSnapshot, WindowThreadSnapshot } from "../../sessions/session-core.ts";
 
 export {
   TEAMMATE_COMPLETE_EVENT,
   TEAMMATE_MESSAGE_EVENT,
   TEAMMATE_OPEN_AGENT_EVENT,
+  TEAMMATE_RESULT_PUBLISHED_EVENT,
   TEAMMATE_STARTED_EVENT,
   TEAMMATE_VIEWING_EVENT,
 } from "../../shared/types.ts";
+export {
+  SESSION_HOST_REGISTRY_EVENT,
+  WINDOW_THREAD_EVENT,
+} from "../../sessions/session-core.ts";
 
 /** Tool identity of one child tool call, as reported inside a progress payload. */
 export interface TeammateEventTool {
@@ -187,7 +181,10 @@ export interface TeammateOpenAgentEvent {
 export interface TeammateEventMap {
   "teammate:started": TeammateStartedEvent;
   "teammate:message": TeammateMessageEvent;
+  "teammate:result-published": TeammateResultPublishedEvent;
   "teammate:complete": TeammateCompleteEvent;
   "teammate:viewing": TeammateViewingEvent;
   "teammate:open-agent": TeammateOpenAgentEvent;
+  "teammate:sessions": SessionHostSnapshot;
+  "teammate:window-thread": WindowThreadSnapshot;
 }

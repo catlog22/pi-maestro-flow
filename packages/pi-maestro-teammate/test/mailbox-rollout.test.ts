@@ -255,15 +255,19 @@ test("disk error in authoritative mode is surfaced, not silently falling back", 
 test("advertisedCapability reflects mode", async () => {
   const service = makeService();
   const rollout = makeRollout(service, { mode: "disabled" });
+  assert.deepEqual(rollout.config, { mode: "disabled", advertiseV2: false });
   assert.equal(rollout.advertisedCapability(), "v1");
 
   await rollout.setMode("shadow");
+  assert.deepEqual(rollout.config, { mode: "shadow", advertiseV2: true });
   assert.equal(rollout.advertisedCapability(), "v2");
 
   await rollout.setMode("authoritative");
+  assert.deepEqual(rollout.config, { mode: "authoritative", advertiseV2: true });
   assert.equal(rollout.advertisedCapability(), "v2");
 
   await rollout.setMode("disabled");
+  assert.deepEqual(rollout.config, { mode: "disabled", advertiseV2: false });
   assert.equal(rollout.advertisedCapability(), "v1");
 });
 

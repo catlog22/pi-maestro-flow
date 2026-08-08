@@ -261,7 +261,7 @@ export const TeammateParams = Type.Object({
 export const TeammateSendParams = Type.Object({
   to: Type.String({
     description:
-      "Target agent — name, @name, displayed name#id-prefix, or correlation ID (or prefix) from teammate-list",
+      "Target agent or peer session — name, @name, displayed name#id-prefix, correlation ID (or prefix), owner:<ownerId> for a window, or owner:<ownerId>:<correlationId> for a remote agent",
   }),
   message: Type.Optional(
     Type.String({
@@ -289,11 +289,11 @@ export const TeammateSendParams = Type.Object({
 
 export const TeammateListParams = Type.Object({
   view: Type.Optional(
-    Type.Unsafe<"active" | "named" | "all" | "roles">({
+    Type.Unsafe<"active" | "named" | "all" | "roles" | "windows">({
       type: "string",
-      enum: ["active", "named", "all", "roles"],
+      enum: ["active", "named", "all", "roles", "windows"],
       default: "active",
-      description: 'View to return: "active" live agents except completed entries, "named" addressable agents, "all" tracked live entries, or "roles" builtin, project, and user-defined role definitions.',
+      description: 'View to return: "active" live agents except completed entries, "named" addressable agents, "all" tracked live entries, "roles" builtin, project, and user-defined role definitions, or "windows" available cross-session windows.',
     }),
   ),
 }, { additionalProperties: false });

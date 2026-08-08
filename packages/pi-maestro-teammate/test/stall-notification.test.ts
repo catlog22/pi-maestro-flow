@@ -321,3 +321,25 @@ test("watchTargetStalledAt applies the override to running agents only", () => {
   );
   assert.equal(watchTargetStalledAt(target(fresh), state) - now, TEAMMATE_STALL_TIMEOUT_MS);
 });
+
+test("expected-silence phases are not shortened by wait or notification overrides", () => {
+  const state = makeState();
+  const now = Date.now();
+  const prompting = addAgent(state, "thinking", {
+    notifyOnStall: true,
+    phase: "prompting",
+    lastActivityAt: now - TEAMMATE_STALL_NOTIFY_IDLE_MS - 1_000,
+  });
+  const target = { kind: "agent" as const, agent: prompting };
+  const { notifications, notify } = collectNotifications();
+
+  assert.equal(statusForWatchTarget(target, now, state), undefined);
+  assert.equal(statusForWatchTarget(target, now, state, TEAMMATE_STALL_NOTIFY_IDLE_MS), undefined);
+  sweepStalledAgents(state, notify, now);
+  assert.equal(notifications.length, 0);
+
+  prompting.lastActivityAt = now - TEAMMATE_PENDING_STALL_TIMEOUT_MS - 1;
+  assert.equal(statusForWatchTarget(target, now, state), "stalled");
+  sweepStalledAgents(state, notify, now);
+  assert.equal(notifications.length, 1, "the extended expected-silence window is still bounded");
+});

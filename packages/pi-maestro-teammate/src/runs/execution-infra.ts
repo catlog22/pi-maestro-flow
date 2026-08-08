@@ -174,6 +174,10 @@ export interface RunTeammateOptions {
   onChildRequest?: (event: Record<string, unknown>, reply: (msg: unknown) => void) => void;
   onChildEvent?: (event: Record<string, unknown>) => void;
   parentSessionFile?: string;
+  /** Explicit private session directory for independent long-lived children. */
+  sessionDir?: string;
+  /** Additional child-only environment values (never applied to the host). */
+  childEnvironment?: Record<string, string | undefined>;
   initialLeaseToken?: LeaseToken | ((correlationId: string) => LeaseToken | undefined);
   onChildSpawned?: (
     stdin: import("node:stream").Writable,
@@ -190,6 +194,11 @@ export interface RunTeammateOptions {
     generation: number | undefined,
     details: { code: number | null; signal: NodeJS.Signals | null; settled: boolean },
   ) => void;
+  /**
+   * Runs once when the final consumable result is published, before the caller
+   * or a DAG dependent can observe it. Observer failures are non-fatal.
+   */
+  onResultPublished?: (result: SingleResult) => void | Promise<void>;
   onTurnComplete?: (result: SingleResult, terminalStatus?: AgentTerminalStatus) => void;
   /** Physical child-process reclamation, independent of logical turn settlement. */
   onReclamationOutcome?: (
@@ -768,7 +777,11 @@ export function resolveVariables(
     (match, name: string, pathSuffix: string) => {
       if (!taskNames.has(name)) return match;
       const output = outputs.get(name);
-      if (!output) return match;
+      if (!output) {
+        throw new Error(
+          `Task "${name}" completed without publishing a consumable output`,
+        );
+      }
 
       if (!pathSuffix) {
         if (output.structured !== undefined) {

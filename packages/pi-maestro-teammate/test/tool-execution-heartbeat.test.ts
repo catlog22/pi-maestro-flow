@@ -103,6 +103,11 @@ test("a long-running tool keeps progress activity fresh via heartbeat; the heart
   // Complete the tool: the heartbeat must stop instead of running forever.
   handle!.stdout.write(line({ type: "tool_execution_end", toolName: "bash" }));
   await delay(20);
+  assert.equal(
+    progressCalls.at(-1)?.phase,
+    "continuing",
+    "silence after a completed tool belongs to model continuation, not tool execution",
+  );
   const callsAtToolEnd = progressCalls.length;
   await delay(100); // several heartbeat periods
   assert.equal(

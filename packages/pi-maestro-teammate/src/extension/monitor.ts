@@ -1,14 +1,13 @@
 /**
- * Teammate monitor — persistent observation and supervision.
+ * Teammate monitor — independent session supervision primitives.
  *
- * Design principles:
- *   - Monitor is a MODE (like Plan): enter/exit lifecycle, persistent state,
- *     status-bar integration, compact output by default.
- *   - Token efficiency: default output is one compact line per target.
- *     Verbose output is opt-in.
+ * The user-facing Monitor is a user-entered/exited mode, like Plan, whose active
+ * state is carried by an independent wakeable session. This module keeps
+ * the pure target/supervision algorithms and ledger-compatible binding state;
+ * the host extension no longer starts a MonitorEngine timer for /monitor.
  *
  * Pure algorithms with no dependency on extension/index.ts. The tool
- * registration in index.ts injects the watch/wait callbacks.
+ * registration in index.ts injects the observation and intervention callbacks.
  */
 
 import { randomUUID } from "node:crypto";
@@ -835,6 +834,17 @@ function deliverLedgerRecord(emit: (record: MonitorLedgerRecord) => void | Promi
 function flushPendingLedger(engine: MonitorEngineState): void {
   const emit = engine.callbacks?.recordLedger;
   if (!emit || engine.pendingLedgerRecords.length === 0) return;
+  const pending = engine.pendingLedgerRecords;
+  engine.pendingLedgerRecords = [];
+  for (const record of pending) deliverLedgerRecord(emit, record);
+}
+
+/** Flush binding records without starting the host-owned monitor engine. */
+export function flushPendingMonitorLedger(
+  engine: MonitorEngineState,
+  emit: (record: MonitorLedgerRecord) => void | Promise<void>,
+): void {
+  if (engine.pendingLedgerRecords.length === 0) return;
   const pending = engine.pendingLedgerRecords;
   engine.pendingLedgerRecords = [];
   for (const record of pending) deliverLedgerRecord(emit, record);

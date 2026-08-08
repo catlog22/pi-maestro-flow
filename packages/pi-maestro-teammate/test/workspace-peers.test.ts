@@ -7,8 +7,10 @@ import {
   MAX_OWNER_AGENTS,
   MAX_OWNER_FILE_BYTES,
   WORKSPACE_MAIN_SESSION_MARKER,
+  WORKSPACE_PEER_PROTOCOL_VERSION,
   WorkspaceTargetResolutionError,
   acquireMonitorLease,
+  activeWorkspaceBackgroundJobsFromPayload,
   buildWorkspaceOwnerSnapshot,
   commandMailboxPath,
   consumeWorkspacePeerCommands,
@@ -27,9 +29,13 @@ import {
   resolveWorkspaceTarget,
   sendWorkspacePeerCommand,
   validateWorkspaceOwnerSnapshot,
+  validateWorkspaceBackgroundJobSnapshot,
   validateWorkspacePeerCommand,
+  validateWorkspacePeerCommandResponse,
   waitForWorkspacePeerCommandResponse,
   workspaceIdForCwd,
+  workspaceMainSessionDeliveryAction,
+  workspaceMainSessionDeliveryDecision,
   writePrivateJsonAtomic,
   type WorkspaceAgentSnapshot,
   type WorkspaceOwnerSnapshot,
@@ -115,6 +121,81 @@ test("workspace identity is normalized, hashed, and isolated by cwd", async () =
   assert.deepEqual(discovery.corruptFiles, [`${OWNER_A}.json`]);
 });
 
+test("workspace peer protocol version and main-session selector stay stable", async () => {
+  const { cwd, rootDir } = await temporaryWorkspace();
+  const identity = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const snapshot = buildWorkspaceOwnerSnapshot(identity, state(agent("cid-protocol", "protocol")), 1_000);
+
+  assert.equal(WORKSPACE_PEER_PROTOCOL_VERSION, 1);
+  assert.equal(WORKSPACE_MAIN_SESSION_MARKER, "window-main-session");
+  assert.equal(identity.version, WORKSPACE_PEER_PROTOCOL_VERSION);
+  assert.equal(snapshot.version, WORKSPACE_PEER_PROTOCOL_VERSION);
+  assert.equal(snapshot.kind, "owner");
+
+  const extensionSource = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  const schemaSource = await readFile(new URL("../src/extension/schemas.ts", import.meta.url), "utf8");
+  assert.match(extensionSource, /target: `owner:\$\{owner\.ownerId\}`/);
+  assert.match(extensionSource, /const agentSelector = \/\^owner:/);
+  assert.match(extensionSource, /target: `owner:\$\{owner\.ownerId\}:\$\{agent\.correlationId\}`/);
+  assert.match(schemaSource, /enum: \["active", "named", "all", "roles", "windows"\]/);
+});
+
+test("workspace snapshots expose active bash jobs and protect foreground work from steer", async () => {
+  const { cwd, rootDir } = await temporaryWorkspace();
+  const identity = createWorkspacePeerIdentity(cwd, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const foreground = validateWorkspaceBackgroundJobSnapshot({
+    id: "bg-foreground",
+    command: "npm test",
+    status: "running",
+    background: false,
+    startedAt: 1_000,
+    updatedAt: 1_100,
+  });
+  const background = validateWorkspaceBackgroundJobSnapshot({
+    id: "bg-background",
+    command: "npm run dev",
+    status: "running",
+    background: true,
+    startedAt: 900,
+    updatedAt: 1_100,
+  });
+  assert.ok(foreground);
+  assert.ok(background);
+  assert.deepEqual(activeWorkspaceBackgroundJobsFromPayload({
+    jobs: [
+      { ...background, startedAt: 900 },
+      { ...foreground, startedAt: 1_000 },
+      { ...background, id: "done", status: "completed" },
+    ],
+  }), [foreground, background]);
+  assert.equal(activeWorkspaceBackgroundJobsFromPayload({ nope: [] }), undefined);
+
+  const snapshot = buildWorkspaceOwnerSnapshot(identity, {
+    agents: [],
+    settled: [],
+    backgroundJobs: [foreground, background],
+  }, 1_200);
+  assert.deepEqual(snapshot.backgroundJobs, [foreground, background]);
+  assert.equal(workspaceMainSessionDeliveryAction("steer", snapshot.backgroundJobs ?? []), "follow_up");
+  assert.deepEqual(workspaceMainSessionDeliveryDecision("steer", snapshot.backgroundJobs ?? []), {
+    action: "follow_up",
+    deliverAs: "followUp",
+    deferred: true,
+  });
+  assert.deepEqual(workspaceMainSessionDeliveryDecision("steer", [background]), {
+    action: "steer",
+    deliverAs: "steer",
+    deferred: false,
+  });
+  assert.equal(workspaceMainSessionDeliveryAction("follow_up", snapshot.backgroundJobs ?? []), "follow_up");
+  assert.equal(workspaceMainSessionDeliveryAction("steer", [background]), "steer");
+  assert.equal(
+    validateWorkspaceBackgroundJobSnapshot({ ...foreground, background: "no" }),
+    undefined,
+  );
+  assert.equal(validateWorkspaceOwnerSnapshot({ ...snapshot, backgroundJobs: undefined })?.backgroundJobs, undefined);
+});
+
 test("owner files are private where mode bits are supported", async (t) => {
   if (process.platform === "win32") {
     t.skip("Windows ACLs are not represented by POSIX mode bits");
@@ -197,6 +278,7 @@ test("global target resolution supports exact ids, names, name#prefix, and uniqu
   const peers = [remoteSnapshot(remote, [agent("cid-remote-2222", "reviewer")])];
 
   assert.equal(resolveWorkspaceTarget("cid-local-1111", local, localState, peers).scope, "local");
+  assert.equal(resolveWorkspaceTarget("reviewer", local, localState, peers).agent.correlationId, "cid-remote-2222");
   assert.equal(resolveWorkspaceTarget("@reviewer", local, localState, peers).agent.correlationId, "cid-remote-2222");
   assert.equal(resolveWorkspaceTarget("reviewer#cid-rem", local, localState, peers).scope, "remote");
   assert.equal(resolveWorkspaceTarget("cid-loc", local, localState, peers).agent.name, "builder");
@@ -382,6 +464,12 @@ test("owner nonce changes return an explicit rejection instead of timing out", a
   assert.equal(response?.status, "rejected");
   assert.equal(response?.fromOwnerNonce, NONCE_C);
   assert.match(response?.message ?? "", /owner instance has changed/);
+  assert.deepEqual(validateWorkspacePeerCommandResponse(response, command), response);
+  assert.equal(
+    validateWorkspacePeerCommandResponse({ ...response, status: "accepted" }, command),
+    undefined,
+    "a restarted owner may reject a stale command but cannot accept it under the new nonce",
+  );
 });
 
 test("command waits time out without hiding the queued command", async () => {

@@ -41,6 +41,7 @@ interface SpawnCapture {
 async function runWithCapture(
   params: Parameters<typeof runSingleTeammate>[0],
   parentSessionFile: string | undefined,
+  extraOptions: Partial<Parameters<typeof runSingleTeammate>[1]> = {},
 ): Promise<{ capture: SpawnCapture; messages: Array<{ role: string; content: string }> }> {
   const capture: SpawnCapture = { args: [], spawnEnv: {} };
   const spawnChildProcess = ((
@@ -61,6 +62,7 @@ async function runWithCapture(
 
   const result = await runSingleTeammate(params, {
     baseCwd: process.cwd(),
+    ...extraOptions,
     spawnChildProcess,
     parentSessionFile,
     onChildSpawned: (_stdin, _send, sessionDir) => {
@@ -175,6 +177,26 @@ test("no parent session means no session directory and no fork", async () => {
     assert.equal(capture.args.includes("--fork"), false);
     assert.equal(capture.spawnEnv.PI_TEAMMATE_PARENT_SESSION, undefined);
   });
+});
+
+test("an independent monitor child keeps its explicit session directory and marker env", async () => {
+  await withoutAmbientParentSession(() =>
+    withTempSession(async (parentSessionFile) => {
+      const explicitSessionDir = path.join(path.dirname(parentSessionFile), "monitor-session");
+      const { capture } = await runWithCapture(
+        { agent: "general", task: "observe the workspace", context: "fresh" },
+        parentSessionFile,
+        {
+          sessionDir: explicitSessionDir,
+          childEnvironment: { PI_TEAMMATE_MONITOR: "1" },
+        },
+      );
+
+      assert.equal(capture.sessionDir, explicitSessionDir);
+      assert.equal(capture.spawnEnv.PI_TEAMMATE_MONITOR, "1");
+      assert.equal(fs.existsSync(explicitSessionDir), true);
+    })
+  );
 });
 
 // ---------------------------------------------------------------------------

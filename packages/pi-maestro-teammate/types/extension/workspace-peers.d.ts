@@ -10,10 +10,12 @@ export declare const DEFAULT_PEER_PUBLISH_THROTTLE_MS = 200;
 export declare const DEFAULT_COMMAND_TIMEOUT_MS = 5000;
 export declare const MAX_OWNER_AGENTS = 256;
 export declare const MAX_OWNER_SETTLED = 256;
+export declare const MAX_OWNER_BACKGROUND_JOBS = 32;
 export declare const MAX_OWNER_FILE_BYTES: number;
 export declare const MAX_COMMAND_FILE_BYTES: number;
 export declare const MAX_RESPONSE_FILE_BYTES: number;
 export declare const MAX_COMMAND_MESSAGE_BYTES: number;
+export declare const MONITOR_LEASE_STALE_MS = 60000;
 export type WorkspaceAgentStatus = "running" | "sleeping";
 export type WorkspaceSettledStatus = "completed" | "failed" | "terminated";
 export type WorkspacePeerCommandAction = "steer" | "follow_up";
@@ -62,11 +64,23 @@ export interface WorkspaceSettledSnapshot {
     settledAt: number;
     summary?: string;
 }
+export interface WorkspaceBackgroundJobSnapshot {
+    id: string;
+    command: string;
+    status: "running" | "stopping";
+    /** False while bash_bg action=run still owns the foreground tool call. */
+    background: boolean;
+    startedAt: number;
+    updatedAt: number;
+}
 export interface WorkspaceOwnerState {
     agents: readonly WorkspaceAgentSnapshot[];
     settled?: readonly WorkspaceSettledSnapshot[];
+    backgroundJobs?: readonly WorkspaceBackgroundJobSnapshot[];
     sessionId?: string;
     sessionName?: string;
+    /** Context pressure as percentage of the window's context window (0-100). */
+    contextPressure?: number;
 }
 export interface WorkspaceOwnerSnapshot {
     version: typeof WORKSPACE_PEER_PROTOCOL_VERSION;
@@ -79,9 +93,24 @@ export interface WorkspaceOwnerSnapshot {
     publishedAt: number;
     sessionId?: string;
     sessionName?: string;
+    /** Context pressure as percentage of the window's context window (0-100). */
+    contextPressure?: number;
     agents: WorkspaceAgentSnapshot[];
     settled: WorkspaceSettledSnapshot[];
+    backgroundJobs?: WorkspaceBackgroundJobSnapshot[];
 }
+export interface WorkspacePeerWindowListing {
+    /** Selector accepted by teammate-send for the window's main session. */
+    target: string;
+    ownerId: string;
+    sessionId?: string;
+    sessionName?: string;
+    status: "running" | "sleeping";
+    agentCount: number;
+    publishedAt: number;
+    contextPressure?: number;
+}
+/** Peer discovery result retained for existing callers and ledger reconciliation. */
 export interface WorkspacePeerDiscovery {
     peers: WorkspaceOwnerSnapshot[];
     staleOwnerIds: string[];
@@ -166,6 +195,52 @@ export declare function commandMailboxPath(identity: WorkspacePeerIdentity, owne
 export declare function responseMailboxPath(identity: WorkspacePeerIdentity, ownerId: string): string;
 export declare function ensureWorkspacePeerDirectories(identity: WorkspacePeerIdentity): Promise<void>;
 export declare function writePrivateJsonAtomic(path: string, value: unknown, maximumBytes: number): Promise<void>;
+/**
+ * Lease file declaring that `monitorOwnerId` supervises `targetOwnerId`.
+ * Lives next to the target's owner snapshot in the shared workspace root, so
+ * any Pi root session can see who is monitoring a window before binding.
+ */
+export interface MonitorLease {
+    version: typeof WORKSPACE_PEER_PROTOCOL_VERSION;
+    monitorOwnerId: string;
+    targetOwnerId: string;
+    sessionName?: string;
+    pid: number;
+    since: number;
+}
+export declare function monitorLeasePath(identity: WorkspacePeerIdentity, targetOwnerId: string): string;
+export declare function validateMonitorLease(value: unknown): MonitorLease | undefined;
+export interface AcquireMonitorLeaseResult {
+    ok: boolean;
+    error?: string;
+    lease?: MonitorLease;
+}
+export interface AcquireMonitorLeaseOptions {
+    sessionName?: string;
+    /** Lease staleness: an offline holder's lease may be taken over. */
+    staleMs?: number;
+    now?: number;
+}
+/**
+ * Acquire the supervision lease for a peer window. Refuses when another
+ * live monitor already holds it (double-monitoring prevention); a stale
+ * lease whose holder has gone offline is taken over silently.
+ */
+export declare function acquireMonitorLease(identity: WorkspacePeerIdentity, targetOwnerId: string, options?: AcquireMonitorLeaseOptions): Promise<AcquireMonitorLeaseResult>;
+/**
+ * Release the supervision lease. Only the lease holder may release it;
+ * returns false when the lease belongs to someone else.
+ */
+export declare function releaseMonitorLease(identity: WorkspacePeerIdentity, targetOwnerId: string, monitorOwnerId?: string): Promise<boolean>;
+export declare function activeWorkspaceBackgroundJobsFromPayload(payload: unknown): WorkspaceBackgroundJobSnapshot[] | undefined;
+export interface WorkspaceMainSessionDeliveryDecision {
+    action: WorkspacePeerCommandAction;
+    deliverAs: "steer" | "followUp";
+    deferred: boolean;
+}
+export declare function workspaceMainSessionDeliveryDecision(requested: WorkspacePeerCommandAction, backgroundJobs: readonly WorkspaceBackgroundJobSnapshot[]): WorkspaceMainSessionDeliveryDecision;
+export declare function workspaceMainSessionDeliveryAction(requested: WorkspacePeerCommandAction, backgroundJobs: readonly WorkspaceBackgroundJobSnapshot[]): WorkspacePeerCommandAction;
+export declare function validateWorkspaceBackgroundJobSnapshot(value: unknown): WorkspaceBackgroundJobSnapshot | undefined;
 export declare function validateWorkspaceOwnerSnapshot(value: unknown, expected?: {
     workspaceId?: string;
     ownerId?: string;

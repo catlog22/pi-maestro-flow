@@ -3,11 +3,15 @@ import test from "node:test";
 import {
   DERIVED_STATUS_PRESENTATION,
   STATUS_PRESENTATION,
+  aggregateAgentRunPhase,
   displayStatusPresentation,
   effectiveDisplayStatus,
   idleSeconds,
 } from "../src/shared/agent-status.ts";
-import { TEAMMATE_STALL_TIMEOUT_MS } from "../src/shared/limits.ts";
+import {
+  TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS,
+  TEAMMATE_STALL_TIMEOUT_MS,
+} from "../src/shared/limits.ts";
 import { AttachOverlay } from "../src/tui/attach-overlay.ts";
 import { buildProgressTree } from "../src/tui/progress-tree.ts";
 import { renderTeammateResult } from "../src/tui/render.ts";
@@ -68,13 +72,45 @@ test("effective display status derives result-ready and stalled from the shared 
     effectiveDisplayStatus("running", undefined, now - TEAMMATE_STALL_TIMEOUT_MS, now),
     "stalled",
   );
+  for (const phase of ["starting", "restoring", "prompting", "compacting", "continuing", "settling"] as const) {
+    assert.equal(
+      effectiveDisplayStatus("running", undefined, now - TEAMMATE_STALL_TIMEOUT_MS, now, phase),
+      "running",
+      `${phase} uses the expected-silence window`,
+    );
+    assert.equal(
+      effectiveDisplayStatus("running", undefined, now - TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS, now, phase),
+      "stalled",
+      `${phase} remains bounded`,
+    );
+  }
+  assert.equal(
+    effectiveDisplayStatus("running", undefined, now - TEAMMATE_STALL_TIMEOUT_MS, now, "retrying"),
+    "running",
+    "a running graph container inherits retry backoff silence",
+  );
+  assert.equal(
+    effectiveDisplayStatus("running", undefined, now - TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS, now, "retrying"),
+    "stalled",
+    "aggregated retry silence remains bounded",
+  );
+  assert.equal(
+    effectiveDisplayStatus("running", undefined, now - TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS, now, "tool-execution", 1),
+    "running",
+    "pending human interaction outranks the idle deadline",
+  );
   // result-ready outranks stalled: the agent is not stuck, it is confirming.
   assert.equal(
     effectiveDisplayStatus("running", now - 1_000, now - 10 * TEAMMATE_STALL_TIMEOUT_MS, now),
     "result-ready",
   );
-  // Non-running statuses are shown verbatim, never re-derived.
-  for (const status of ["pending", "retrying", "sleeping", "completed", "failed", "terminated"] as const) {
+  // Pending work shares the bounded five-minute deadline with wait/observe.
+  assert.equal(
+    effectiveDisplayStatus("pending", undefined, now - TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS, now, "starting"),
+    "stalled",
+  );
+  // Other non-running statuses are shown verbatim, never re-derived.
+  for (const status of ["retrying", "sleeping", "completed", "failed", "terminated"] as const) {
     assert.equal(effectiveDisplayStatus(status, undefined, now - 600_000, now), status);
   }
   assert.equal(idleSeconds(now - 90_000, now), 90);
@@ -90,6 +126,30 @@ test("status calculations use the caller's shared frame clock", (t) => {
 
   assert.equal(effectiveDisplayStatus("running", undefined, lastActivityAt, now), "stalled");
   assert.equal(idleSeconds(lastActivityAt, now), TEAMMATE_STALL_TIMEOUT_MS / 1000);
+});
+
+test("graph phase aggregation keeps tool heartbeat deadlines visible at the container", () => {
+  const now = 1_000_000;
+  assert.equal(aggregateAgentRunPhase([
+    { status: "running", phase: "prompting", lastActivityAt: now },
+    {
+      status: "running",
+      phase: "tool-execution",
+      lastActivityAt: now - 1,
+      recentTools: [{ status: "running" }],
+    },
+  ]), "tool-execution");
+  assert.equal(aggregateAgentRunPhase([
+    { status: "running", phase: "continuing", lastActivityAt: now },
+    { status: "pending", phase: "starting", lastActivityAt: now - 1 },
+  ]), "continuing");
+  assert.equal(aggregateAgentRunPhase([
+    { status: "retrying", phase: "retrying", lastActivityAt: now },
+    { status: "pending", phase: "starting", lastActivityAt: now - 1 },
+  ]), "retrying");
+  assert.equal(aggregateAgentRunPhase([
+    { status: "completed", phase: "settling" },
+  ]), "settling");
 });
 
 test("progress tree renders retrying tasks distinctly instead of pending", () => {
@@ -120,6 +180,28 @@ test("streaming child agents render retrying without a success checkmark", () =>
 
   assert.match(rendered, /■ @review child agent · running · retrying/);
   assert.doesNotMatch(rendered, /✓/);
+});
+
+test("streaming child calls honor expected-silence phases", () => {
+  const now = Date.now();
+  const rendered = renderTeammateResult({
+    content: [{ type: "text", text: "delegating" }],
+    details: {
+      mode: "single",
+      results: [],
+      childCalls: [{
+        agent: "analyst",
+        name: "deep-thought",
+        correlationId: "thinking-child",
+        status: "running",
+        phase: "prompting",
+        lastActivityAt: now - TEAMMATE_STALL_TIMEOUT_MS,
+      }],
+    },
+  }, { expanded: false }, theme as never).render(100).join("\n");
+
+  assert.match(rendered, /deep-thought child agent · running/);
+  assert.doesNotMatch(rendered, /stalled/);
 });
 
 test("attach overlay detail view surfaces a stalled agent instead of plain Running", () => {

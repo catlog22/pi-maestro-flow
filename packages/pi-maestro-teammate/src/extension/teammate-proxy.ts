@@ -17,6 +17,7 @@ import type {
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
+import { aggregateAgentRunPhase } from "../shared/agent-status.ts";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams } from "./schemas.ts";
 import {
@@ -67,6 +68,7 @@ import {
   type WorkspaceOwnerState,
   type WorkspacePeerCommandConsumer,
   type WorkspacePeerPublisher,
+  type WorkspacePeerWindowListing,
   type WorkspaceResolvedTarget,
   type WorkspaceSettledSnapshot,
 } from "./workspace-peers.ts";
@@ -225,6 +227,7 @@ import {
   resolveProxyParentCorrelationId,
   summarizeGraphResults,
   toStructuredResults,
+  emitTeammateResultPublished,
   setAgentStructuredOutput,
   trimAgentBuffers,
   wakeSleepingAgent,
@@ -820,6 +823,17 @@ export async function handleProxyRequest(
     mode: "steer" | "follow_up" | "abort" | "notify";
     payload: string;
   }) => Promise<{ path: string; result: { ok: boolean } }>,
+  workspacePeerSend?: (target: string, message: string, mode: "steer" | "follow_up") => Promise<boolean>,
+  workspacePeerList?: () => Promise<readonly WorkspacePeerWindowListing[]>,
+  sessionSend?: (request: {
+    selector: string;
+    message: string;
+    mode: "steer" | "follow_up" | "abort";
+  }) => Promise<{
+    delivered: boolean;
+    error?: string;
+    receipt?: { mode?: string; wasSleeping?: boolean; terminatedCount?: number };
+  }>,
 ): Promise<void> {
   let replied = false;
   const reply = (message: unknown): void => {
@@ -1066,6 +1080,7 @@ export async function handleProxyRequest(
           ...(parentAgent ? { parentName: parentAgent.name ?? parentAgent.agent } : {}),
           startedAt: activeAgent.startedAt,
           status,
+          phase: progress?.phase ?? activeAgent.phase,
           ...(progress ? {
             durationMs: progress.durationMs,
             lastActivityAt: progress.lastActivityAt,
@@ -1455,12 +1470,18 @@ export async function handleProxyRequest(
       const aggregateTaskProgress = (): AgentProgress | undefined => {
         const entries = [...progressState.values()];
         if (entries.length === 0) return undefined;
-        const running = entries.find((entry) => entry.status === "running");
+        const runningTool = entries.find((entry) =>
+          entry.status === "running" && entry.recentTools?.some((tool) => tool.status === "running")
+        );
+        const running = runningTool ?? entries.find((entry) => entry.status === "running");
+        const phase = aggregateAgentRunPhase(entries);
+        activeAgent.phase = phase ?? activeAgent.phase;
         return {
           agent: activeAgent.agent,
           ...(!normalizedTasks && singleTask.name ? { name: singleTask.name } : {}),
           correlationId: cid,
           status: "running",
+          phase,
           recentTools: running?.recentTools ?? [],
           toolCount: entries.reduce((total, entry) => total + (entry.toolCount ?? 0), 0),
           tokens: entries.reduce((total, entry) => total + (entry.tokens ?? 0), 0),
@@ -1563,6 +1584,7 @@ export async function handleProxyRequest(
         onReclamationOutcome: (childId, outcome) => {
           recordChildReclamationOutcome(state, childId, outcome);
         },
+        onResultPublished: (result) => emitTeammateResultPublished(pi, result, dispatchOriginCwd),
         onTurnComplete: (result, terminalStatus) => {
           const canonicalStatus = terminalStatusForResult(result, terminalStatus);
           result.terminalStatus = canonicalStatus;
@@ -1650,6 +1672,9 @@ export async function handleProxyRequest(
           }
           handleProxyRequest(
             pi, state, evt, rep, cid, modelCapabilities, onInteraction, publishNestedChildStatus, runtimeOptions,
+            undefined,
+            workspacePeerSend,
+            workspacePeerList,
           );
         },
       };
@@ -2174,6 +2199,40 @@ export async function handleProxyRequest(
       const to = params.to as string;
       const message = (params.message as string | undefined) ?? "";
       const requestedMode = (params.mode as RpcMessageMode) ?? "follow_up";
+      const localCid = resolveAgentCorrelationId(state, to);
+
+      if (to.startsWith("owner:") && (sessionSend || workspacePeerSend) && !localCid) {
+        if (!message && requestedMode !== "abort") {
+          reply({ type: "teammate_proxy_result", requestId, result: {
+            content: [{ type: "text", text: `"message" is required for mode "${requestedMode}".` }],
+            isError: true, details: { delivered: false },
+          }});
+          return;
+        }
+        if (requestedMode === "abort") {
+          reply({ type: "teammate_proxy_result", requestId, result: {
+            content: [{ type: "text", text: "Cross-session targets support only steer and follow_up; abort is local-only." }],
+            isError: true, details: { delivered: false },
+          }});
+          return;
+        }
+        if (requestedMode !== "steer" && requestedMode !== "follow_up") {
+          reply({ type: "teammate_proxy_result", requestId, result: {
+            content: [{ type: "text", text: `Unsupported workspace intervention mode: ${requestedMode}.` }],
+            isError: true, details: { delivered: false },
+          }});
+          return;
+        }
+        const delivered = sessionSend
+          ? (await sessionSend({ selector: to, message, mode: requestedMode })).delivered
+          : await workspacePeerSend!(to, message, requestedMode);
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: delivered ? `Message delivered to workspace target ${to}.` : `Message rejected for workspace target ${to}.` }],
+          isError: !delivered,
+          details: { delivered },
+        }});
+        return;
+      }
 
       if (!message && requestedMode !== "abort") {
         reply({ type: "teammate_proxy_result", requestId, result: {
@@ -2183,7 +2242,7 @@ export async function handleProxyRequest(
         return;
       }
 
-      const cid = resolveAgentCorrelationId(state, to);
+      const cid = localCid ?? resolveAgentCorrelationId(state, to);
       if (!cid) {
         const available = Array.from(state.namedAgents.keys());
         reply({ type: "teammate_proxy_result", requestId, result: {
@@ -2210,6 +2269,36 @@ export async function handleProxyRequest(
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{ type: "text", text: `Agent "${to}" is already ${agent.status} and cannot receive commands.` }],
           isError: true, details: { delivered: false },
+        }});
+        return;
+      }
+      if (sessionSend) {
+        const mode = requestedMode === "steer" || requestedMode === "abort" ? requestedMode : "follow_up";
+        const delivery = await sessionSend({ selector: to, message, mode });
+        if (!delivery.delivered) {
+          reply({ type: "teammate_proxy_result", requestId, result: {
+            content: [{ type: "text", text: delivery.error ?? `Failed to send message to "${to}".` }],
+            isError: true, details: { delivered: false },
+          }});
+          return;
+        }
+        if (mode === "abort") {
+          const terminatedCount = delivery.receipt?.terminatedCount ?? 1;
+          reply({ type: "teammate_proxy_result", requestId, result: {
+            content: [{
+              type: "text",
+              text: `Agent "${to}" aborted; terminated ${terminatedCount} agent${terminatedCount === 1 ? "" : "s"} in its subtree.`,
+            }],
+            isError: false, details: { delivered: true },
+          }});
+          return;
+        }
+        const modeLabel = delivery.receipt?.wasSleeping
+          ? "woken up + prompt"
+          : delivery.receipt?.mode === "steer" ? "interrupted + injected" : "queued after current turn";
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Message ${modeLabel} for "${to}".${delivery.receipt?.wasSleeping ? " Agent woken up." : ""}` }],
+          isError: false, details: { delivered: true },
         }});
         return;
       }
@@ -2393,7 +2482,21 @@ export async function handleProxyRequest(
         }});
         return;
       }
-      const { entries, text } = buildAgentList(state, view);
+      if (view === "windows") {
+        const windows = workspacePeerList ? await workspacePeerList() : [];
+        const entries = windows.map((window) => ({ kind: "window" as const, ...window }));
+        const text = entries.length === 0
+          ? "No available peer sessions."
+          : entries.map((window) => {
+            const label = window.sessionName ?? `window:${window.ownerId.slice(0, 8)}`;
+            return `● [window] ${label} · ${window.status} · agents=${window.agentCount} · target=${window.target}`;
+          }).join("\n");
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text }], isError: false, details: { agents: entries },
+        }});
+        return;
+      }
+      const { entries, text } = buildAgentList(state, view as "active" | "named" | "all");
       reply({ type: "teammate_proxy_result", requestId, result: {
         content: [{ type: "text", text }], isError: false, details: { agents: entries },
       }});

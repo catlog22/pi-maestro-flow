@@ -24,6 +24,7 @@ export const DEFAULT_PEER_PUBLISH_THROTTLE_MS = 200;
 export const DEFAULT_COMMAND_TIMEOUT_MS = 5_000;
 export const MAX_OWNER_AGENTS = 256;
 export const MAX_OWNER_SETTLED = 256;
+export const MAX_OWNER_BACKGROUND_JOBS = 32;
 export const MAX_OWNER_FILE_BYTES = 256 * 1024;
 export const MAX_COMMAND_FILE_BYTES = 96 * 1024;
 export const MAX_RESPONSE_FILE_BYTES = 32 * 1024;
@@ -93,9 +94,20 @@ export interface WorkspaceSettledSnapshot {
   summary?: string;
 }
 
+export interface WorkspaceBackgroundJobSnapshot {
+  id: string;
+  command: string;
+  status: "running" | "stopping";
+  /** False while bash_bg action=run still owns the foreground tool call. */
+  background: boolean;
+  startedAt: number;
+  updatedAt: number;
+}
+
 export interface WorkspaceOwnerState {
   agents: readonly WorkspaceAgentSnapshot[];
   settled?: readonly WorkspaceSettledSnapshot[];
+  backgroundJobs?: readonly WorkspaceBackgroundJobSnapshot[];
   sessionId?: string;
   sessionName?: string;
   /** Context pressure as percentage of the window's context window (0-100). */
@@ -117,8 +129,22 @@ export interface WorkspaceOwnerSnapshot {
   contextPressure?: number;
   agents: WorkspaceAgentSnapshot[];
   settled: WorkspaceSettledSnapshot[];
+  backgroundJobs?: WorkspaceBackgroundJobSnapshot[];
 }
 
+export interface WorkspacePeerWindowListing {
+  /** Selector accepted by teammate-send for the window's main session. */
+  target: string;
+  ownerId: string;
+  sessionId?: string;
+  sessionName?: string;
+  status: "running" | "sleeping";
+  agentCount: number;
+  publishedAt: number;
+  contextPressure?: number;
+}
+
+/** Peer discovery result retained for existing callers and ledger reconciliation. */
 export interface WorkspacePeerDiscovery {
   peers: WorkspaceOwnerSnapshot[];
   staleOwnerIds: string[];
@@ -583,6 +609,70 @@ function validateSettled(value: unknown): WorkspaceSettledSnapshot | undefined {
   };
 }
 
+export function activeWorkspaceBackgroundJobsFromPayload(
+  payload: unknown,
+): WorkspaceBackgroundJobSnapshot[] | undefined {
+  if (!isRecord(payload) || !Array.isArray(payload.jobs)) return undefined;
+  const active: WorkspaceBackgroundJobSnapshot[] = [];
+  for (const value of payload.jobs) {
+    if (!isRecord(value) || (value.status !== "running" && value.status !== "stopping")) continue;
+    const candidate = validateWorkspaceBackgroundJobSnapshot({
+      ...value,
+      command: typeof value.command === "string" ? value.command.slice(0, MAX_STRING) : value.command,
+    });
+    if (candidate) active.push(candidate);
+  }
+  return active
+    .sort((left, right) => right.startedAt - left.startedAt)
+    .slice(0, MAX_OWNER_BACKGROUND_JOBS);
+}
+
+export interface WorkspaceMainSessionDeliveryDecision {
+  action: WorkspacePeerCommandAction;
+  deliverAs: "steer" | "followUp";
+  deferred: boolean;
+}
+
+export function workspaceMainSessionDeliveryDecision(
+  requested: WorkspacePeerCommandAction,
+  backgroundJobs: readonly WorkspaceBackgroundJobSnapshot[],
+): WorkspaceMainSessionDeliveryDecision {
+  const hasForegroundWork = backgroundJobs.some((job) =>
+    !job.background && (job.status === "running" || job.status === "stopping")
+  );
+  const action = requested === "steer" && hasForegroundWork ? "follow_up" : requested;
+  return {
+    action,
+    deliverAs: action === "steer" ? "steer" : "followUp",
+    deferred: action !== requested,
+  };
+}
+
+export function workspaceMainSessionDeliveryAction(
+  requested: WorkspacePeerCommandAction,
+  backgroundJobs: readonly WorkspaceBackgroundJobSnapshot[],
+): WorkspacePeerCommandAction {
+  return workspaceMainSessionDeliveryDecision(requested, backgroundJobs).action;
+}
+
+export function validateWorkspaceBackgroundJobSnapshot(value: unknown): WorkspaceBackgroundJobSnapshot | undefined {
+  if (!isRecord(value)
+    || !boundedString(value.id, 256)
+    || !boundedString(value.command, MAX_STRING)
+    || (value.status !== "running" && value.status !== "stopping")
+    || typeof value.background !== "boolean"
+    || !boundedInteger(value.startedAt)
+    || !boundedInteger(value.updatedAt)) return undefined;
+  return {
+    id: value.id,
+    command: value.command,
+    status: value.status,
+    background: value.background,
+    startedAt: value.startedAt,
+    updatedAt: value.updatedAt,
+  };
+}
+
 export function validateWorkspaceOwnerSnapshot(
   value: unknown,
   expected?: { workspaceId?: string; ownerId?: string },
@@ -607,11 +697,18 @@ export function validateWorkspaceOwnerSnapshot(
     || value.agents.length > MAX_OWNER_AGENTS
     || !Array.isArray(value.settled)
     || value.settled.length > MAX_OWNER_SETTLED
+    || (value.backgroundJobs !== undefined
+      && (!Array.isArray(value.backgroundJobs) || value.backgroundJobs.length > MAX_OWNER_BACKGROUND_JOBS))
     || (expected?.workspaceId !== undefined && value.workspaceId !== expected.workspaceId)
     || (expected?.ownerId !== undefined && value.ownerId !== expected.ownerId)) return undefined;
   const agents = value.agents.map(validateAgent);
   const settled = value.settled.map(validateSettled);
-  if (agents.some((item) => item === undefined) || settled.some((item) => item === undefined)) return undefined;
+  const backgroundJobs = value.backgroundJobs === undefined
+    ? undefined
+    : value.backgroundJobs.map(validateWorkspaceBackgroundJobSnapshot);
+  if (agents.some((item) => item === undefined)
+    || settled.some((item) => item === undefined)
+    || backgroundJobs?.some((item) => item === undefined)) return undefined;
   const ids = [...agents, ...settled].map((item) => item!.correlationId);
   if (new Set(ids).size !== ids.length) return undefined;
   return {
@@ -628,6 +725,7 @@ export function validateWorkspaceOwnerSnapshot(
     ...(value.contextPressure === undefined ? {} : { contextPressure: value.contextPressure }),
     agents: agents as WorkspaceAgentSnapshot[],
     settled: settled as WorkspaceSettledSnapshot[],
+    ...(backgroundJobs === undefined ? {} : { backgroundJobs: backgroundJobs as WorkspaceBackgroundJobSnapshot[] }),
   };
 }
 
@@ -651,6 +749,7 @@ export function buildWorkspaceOwnerSnapshot(
     ...(state.contextPressure === undefined ? {} : { contextPressure: Math.max(0, Math.min(100, Math.round(state.contextPressure))) }),
     agents: [...state.agents],
     settled: [...(state.settled ?? [])],
+    ...(state.backgroundJobs === undefined ? {} : { backgroundJobs: [...state.backgroundJobs] }),
   };
   const validated = validateWorkspaceOwnerSnapshot(raw, identity);
   if (!validated) throw new Error("workspace owner state is invalid or exceeds protocol bounds");

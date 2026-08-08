@@ -68,6 +68,26 @@ test("createMailboxAuthority reports current generation from state", () => {
   assert.equal(authority.currentGeneration(), 42);
 });
 
+test("createMailboxAuthority reads the recipient lease epoch and nonce at each boundary", () => {
+  const state = makeState();
+  const agent = {
+    correlationId: "corr-lease",
+    lease: { owner: "child", state: "active" as const, epoch: 7, nonce: "nonce-7" },
+  };
+  state.activeRuns.set(agent.correlationId, agent as never);
+  const authority = createMailboxAuthority({ state, ownerId: "owner-fallback" });
+
+  assert.equal(authority.currentLeaseEpoch(agent.correlationId), 7);
+  assert.equal(authority.currentLeaseNonce(agent.correlationId), "nonce-7");
+
+  agent.lease.epoch = 8;
+  agent.lease.nonce = "nonce-8";
+  assert.equal(authority.currentLeaseEpoch(agent.correlationId), 8);
+  assert.equal(authority.currentLeaseNonce(agent.correlationId), "nonce-8");
+  assert.equal(authority.currentLeaseEpoch("missing"), 1);
+  assert.equal(authority.currentLeaseNonce("missing"), "owner-fallback");
+});
+
 test("createMailboxAuthority treats non-active lease as fenced", () => {
   const state = makeState();
   const agent = {

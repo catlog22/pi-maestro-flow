@@ -7,10 +7,12 @@
  */
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { WorkspaceSessionScan } from "../transcript/session-transcript.ts";
-import { type WorkspaceOwnerState } from "./workspace-peers.ts";
+import { type WorkspaceBackgroundJobSnapshot, type WorkspaceOwnerState } from "./workspace-peers.ts";
 import { type LeaseToken } from "../runs/session-handoff.ts";
 import type { RunTeammateOptions, RpcMessageMode, NormalizedTask } from "../runs/execution.ts";
-import type { TeammateState, AgentProgress, AgentProgressSnapshot, ActiveAgent, AgentStatus, AgentTerminalStatus, SingleResult, StructuredResult } from "../shared/types.ts";
+import type { TeammateState, AgentProgress, AgentProgressSnapshot, AgentRunPhase, ActiveAgent, AgentStatus, AgentTerminalStatus, SingleResult, StructuredResult } from "../shared/types.ts";
+import { TEAMMATE_STALL_TIMEOUT_MS } from "../shared/limits.ts";
+export { TEAMMATE_STALL_TIMEOUT_MS };
 export declare const TEAMMATE_PROMPT_SNIPPET = "Dispatch bounded work to discovered teammate roles for parallel, sequential, or specialist execution.";
 export declare const TEAMMATE_PROMPT_GUIDELINES: string[];
 export declare function terminalStatusForResult(result: SingleResult, callbackStatus?: AgentTerminalStatus): AgentTerminalStatus;
@@ -41,6 +43,8 @@ export declare function finalResultText(result: SingleResult): string | undefine
  * payload minimal.
  */
 export declare function toStructuredResults(results: readonly SingleResult[], originCwd: string): StructuredResult[] | undefined;
+/** Publish one consumable result and await durable work claimed by listeners. */
+export declare function emitTeammateResultPublished(pi: ExtensionAPI, result: SingleResult, originCwd: string): Promise<void>;
 /** Replace the retained turn value; undefined intentionally clears stale data. */
 export declare function setAgentStructuredOutput(agent: ActiveAgent, output: unknown): void;
 export type TeammateRuntimeOptions = Pick<RunTeammateOptions, "spawnChildProcess" | "resultReadyGraceMs" | "foregroundMaxRunMs"> & {
@@ -50,11 +54,11 @@ export type TeammateRuntimeOptions = Pick<RunTeammateOptions, "spawnChildProcess
 export declare function buildTeammateToolDescription(cwd: string, options?: {
     nested?: boolean;
 }): string;
-export declare const TEAMMATE_SEND_DESCRIPTION = "Send a message to a running or sleeping teammate agent, addressed by name, @name, displayed name#id-prefix, or correlation ID (or prefix).\n\nModes: \"steer\" | \"follow_up\" (default) | \"abort\" \u2014 per-mode semantics and the message requirement are in the mode and message parameter descriptions.";
-export declare const TEAMMATE_SEND_SNIPPET = "Steer, follow up with, or abort a named running or sleeping teammate agent.";
+export declare const TEAMMATE_SEND_DESCRIPTION = "Send a message to a running or sleeping teammate agent, addressed by name, @name, displayed name#id-prefix, correlation ID (or prefix), or a cross-session target from teammate-list such as owner:<ownerId> or owner:<ownerId>:<correlationId>.\n\nModes: \"steer\" | \"follow_up\" (default) | \"abort\" \u2014 per-mode semantics and the message requirement are in the mode and message parameter descriptions. Cross-session targets support only \"steer\" and \"follow_up\".";
+export declare const TEAMMATE_SEND_SNIPPET = "Steer, follow up with, or send a message to a cross-session teammate target.";
 export declare const TEAMMATE_SEND_GUIDELINES: string[];
-export declare const TEAMMATE_LIST_DESCRIPTION = "List available roles or teammate agents. view defaults to \"active\".\n\n- \"active\": live agents except completed entries\n- \"named\": addressable named agents\n- \"all\": all tracked live entries\n- \"roles\": builtin, project, and user-defined role definitions";
-export declare const TEAMMATE_LIST_SNIPPET = "List available teammate roles or inspect active and named agent status.";
+export declare const TEAMMATE_LIST_DESCRIPTION = "List available roles, teammate agents, or cross-session windows. view defaults to \"active\".\n\n- \"active\": live agents except completed entries\n- \"named\": addressable agents\n- \"all\": all tracked live entries\n- \"roles\": builtin, project, and user-defined role definitions\n- \"windows\": available peer Pi windows; use each returned target with teammate-send";
+export declare const TEAMMATE_LIST_SNIPPET = "List teammate roles, agent status, or available cross-session windows.";
 export declare const TEAMMATE_LIST_GUIDELINES: string[];
 export declare const TEAMMATE_WATCH_DESCRIPTION = "Perform a one-shot inspection of a running or sleeping teammate agent's recent output, tool activity, inbox messages, and last result \u2014 including the structured_output value for schema tasks. This returns one snapshot, unlike observe action=\"watch\" which polls until its timeoutMs; it is not a completion-wait tool.";
 export declare const TEAMMATE_WATCH_SNIPPET = "Inspect a specific teammate agent's recent activity and output.";
@@ -100,21 +104,13 @@ export declare const AGENT_BUFFER_LIMITS: Readonly<{
     /** PERFSEC-004: Cap per-interaction payload retention (16 concurrent × 256KB = 4MB max). */
     interactionPayloadBytes: number;
 }>;
-export declare const TEAMMATE_STALL_TIMEOUT_MS = 30000;
 /**
- * Idle confirmation window for the caller-facing stall notification. The wait
- * path reports a stall after `TEAMMATE_STALL_TIMEOUT_MS` (30s), which is right
- * for a caller actively blocking on a result. Pushing a new turn at that speed
- * would wake the caller on long-but-healthy model/tool calls that emit no
- * progress events, so the push channel requires a longer, monitor-aligned
- * confirmation window before it wakes the caller.
+ * Idle confirmation window for caller-facing notifications during phases that
+ * have a 30s canonical deadline. Expected-silence phases keep their longer
+ * five-minute deadline and are never shortened by this override.
  */
 export declare const TEAMMATE_STALL_NOTIFY_IDLE_MS = 60000;
-/**
- * Stall ceiling for queued work. A `pending` graph task is waiting on a
- * dependency or a concurrency slot, which is expected — it just must not wait
- * without any ceiling at all.
- */
+/** Expected queue/model silence uses the shared five-minute ceiling. */
 export declare const TEAMMATE_PENDING_STALL_TIMEOUT_MS: number;
 /** Lower bound on teammate-wait re-poll spacing. */
 export declare const TEAMMATE_WAIT_POLL_FLOOR_MS = 250;
@@ -162,7 +158,7 @@ export { COCKPIT_UI_OWNERSHIP_EVENT } from "../shared/cockpit-events.ts";
  * only "Waiting for model capacity or first activity…".
  */
 export declare function appendAgentProgressLine(agent: ActiveAgent, data: AgentProgress, correlationId: string): void;
-export declare function buildWorkspaceOwnerState(state: TeammateState, sessionName?: string): WorkspaceOwnerState;
+export declare function buildWorkspaceOwnerState(state: TeammateState, sessionName?: string, contextPressure?: number, backgroundJobs?: readonly WorkspaceBackgroundJobSnapshot[]): WorkspaceOwnerState;
 /** Compatibility vocabulary for legacy internal status checks. */
 export declare const LIVE_AGENT_STATUSES: ReadonlySet<AgentStatus>;
 /** Resource admission is independent of the externally projected activity. */
@@ -203,6 +199,7 @@ export interface AgentWidgetRow {
     label: string;
     agent: string;
     status: AgentProgressSnapshot["status"] | "sleeping";
+    phase?: AgentRunPhase;
     action: string;
     direction: "↑" | "↓";
     toolCount: number;

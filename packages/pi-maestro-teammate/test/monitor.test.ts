@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   barrierWait,
@@ -74,6 +75,27 @@ test("validateMonitorParams accepts valid params", () => {
   assert.equal(validateMonitorParams({ action: "status", targets: ["a"] }), undefined);
   assert.equal(validateMonitorParams({ action: "wait", targets: ["a", "b"], waitMode: "all" }), undefined);
   assert.equal(validateMonitorParams({ action: "wait", targets: ["a"], waitMode: "count", waitCount: 1 }), undefined);
+});
+
+test("independent monitor session identity and command entry points stay stable", async () => {
+  const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+
+  assert.match(source, /const MONITOR_SESSION_NAME = "monitor-session"/);
+  assert.match(source, /name: MONITOR_SESSION_NAME,[\s\S]*?context: "fresh"/);
+  assert.match(source, /background: true,[\s\S]*?maxNestingDepth: 0/);
+  assert.match(source, /singleTask\.name === "monitor-session"[\s\S]*?\.pi", "monitor-sessions", correlationId/);
+  assert.match(source, /childEnvironment: \{ PI_TEAMMATE_MONITOR: "1" \}/);
+  assert.equal(source.match(/pi\.registerCommand\("monitor"/g)?.length, 1);
+  assert.equal(source.match(/pi\.registerCommand\("teammate-send"/g)?.length, 1);
+  assert.match(source, /kind: "workspace",[\s\S]*?capabilities: \{ inspect: true, wait: true, cancel: false, message: true, supervise: true \}/);
+  assert.match(source, /pi\.events\.on\("bash-bg:update", applyBashBgSnapshot\)/);
+  assert.match(source, /workspaceMainSessionDeliveryDecision\(command\.action, workspaceBackgroundJobs\)/);
+  assert.match(source, /deliverAs: delivery\.deliverAs/);
+  assert.match(source, /steer deferred as follow_up while foreground bash_bg is active/);
+  assert.match(source, /active bash_bg work/);
+  assert.match(source, /if \(trimmed === "exit" \|\| trimmed === "stop"\)/);
+  assert.match(source, /if \(trimmed === "resume"\)/);
+  assert.match(source, /if \(trimmed === "status"\)/);
 });
 
 // ---------------------------------------------------------------------------

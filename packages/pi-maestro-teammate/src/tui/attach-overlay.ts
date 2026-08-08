@@ -156,7 +156,7 @@ function idleLabel(lastActivityAt: number | undefined, now = Date.now()): string
  * quiet reads `stalled 42s` instead of an indistinguishable `Running`.
  */
 function progressStatusText(entry: AgentProgressSnapshot, now = Date.now()): string {
-  const display = effectiveDisplayStatus(entry.status, entry.resultReadyAt, entry.lastActivityAt, now);
+  const display = effectiveDisplayStatus(entry.status, entry.resultReadyAt, entry.lastActivityAt, now, entry.phase);
   const status = display === "stalled"
     ? red(`stalled ${idleSeconds(entry.lastActivityAt, now)}s`)
     : display === "result-ready"
@@ -176,7 +176,14 @@ function progressStatusText(entry: AgentProgressSnapshot, now = Date.now()): str
  * the widget does — a 10-minute-idle agent cannot look like a fresh one.
  */
 function agentStatusText(agent: ActiveAgent, now = Date.now()): string {
-  const display = effectiveDisplayStatus(agent.status, agent.resultReadyAt, agent.lastActivityAt, now);
+  const display = effectiveDisplayStatus(
+    agent.status,
+    agent.resultReadyAt,
+    agent.lastActivityAt,
+    now,
+    agent.phase,
+    agent.pendingInteractions?.size ?? 0,
+  );
   if (display === "stalled") return red(`stalled ${idleSeconds(agent.lastActivityAt, now)}s`);
   if (display === "result-ready") return green("Result ready");
   if (display === "completed") return dim("Done");
