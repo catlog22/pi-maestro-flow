@@ -26,6 +26,8 @@ Thumbs.db
 # (*.md) are versioned and ship inside the npm package for global discovery.
 .pi/agents/*
 !.pi/agents/*.md
+# Runtime monitor ledger (per-session binding/supervision trace).
+.pi/monitor-ledger.jsonl
 # Materialized by prepare-package-skills/sync-pi; canonical sources live at
 # the workspace root .pi and flow/agents.
 packages/pi-maestro-flow/.pi/
