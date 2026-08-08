@@ -398,7 +398,17 @@ export async function writeApiProviderSettings(
     throw new Error(`Provider ${settings.provider} contains malformed model entries; refusing a lossy save`);
   }
   const currentModels = rawModels as Record<string, unknown>[];
-  const existingIndex = currentModels.findIndex((model) => model.id === settings.modelId);
+  const renameFrom = settings.previousModelId && settings.previousModelId !== settings.modelId
+    ? settings.previousModelId
+    : undefined;
+  const existingIndex = currentModels.findIndex((model) => model.id === (renameFrom ?? settings.modelId));
+  if (renameFrom && existingIndex < 0) {
+    throw new Error(`Model ${renameFrom} is not configured; cannot rename`);
+  }
+  if (renameFrom) {
+    const collisionIndex = currentModels.findIndex((model, index) => index !== existingIndex && model.id === settings.modelId);
+    if (collisionIndex >= 0) throw new Error(`Model ${settings.modelId} already exists; cannot rename`);
+  }
   const existingModel = existingIndex >= 0 ? currentModels[existingIndex] : {};
   const contextWindow = settings.contextWindow
     ?? (typeof existingModel.contextWindow === "number" ? existingModel.contextWindow : defaults.contextWindow);
@@ -418,7 +428,9 @@ export async function writeApiProviderSettings(
   const nextModel: Record<string, unknown> = {
     ...existingModel,
     id: settings.modelId,
-    name: typeof existingModel.name === "string" ? existingModel.name : settings.modelId,
+    name: typeof existingModel.name === "string" && existingModel.name !== renameFrom
+      ? existingModel.name
+      : settings.modelId,
     reasoning: settings.reasoning,
     input,
     contextWindow,
@@ -1308,6 +1320,45 @@ export async function deleteModelThinkingDefault(
     if (legacyKey !== key) delete modelDefaults[legacyKey];
     await writeModelsRoot({ ...root, modelDefaults }, defaultsPath, true);
   });
+}
+
+export async function renameModelThinkingDefault(
+  provider: string,
+  oldModelId: string,
+  newModelId: string,
+  defaultsPath: string,
+): Promise<void> {
+  if (oldModelId === newModelId || !await fileExists(defaultsPath)) return;
+  await serializeMutation(defaultsPath, async () => {
+    const root = await readModelsRoot(defaultsPath);
+    const modelDefaults = isRecord(root.modelDefaults) ? { ...root.modelDefaults } : {};
+    const oldKey = modelThinkingKey(provider, oldModelId);
+    const legacyOldKey = legacyModelThinkingKey(provider, oldModelId);
+    const value = modelDefaults[oldKey] ?? modelDefaults[legacyOldKey];
+    if (value === undefined) return;
+    delete modelDefaults[oldKey];
+    if (legacyOldKey !== oldKey) delete modelDefaults[legacyOldKey];
+    modelDefaults[modelThinkingKey(provider, newModelId)] = value;
+    await writeModelsRoot({ ...root, version: 1, modelDefaults }, defaultsPath, true);
+  });
+}
+
+export async function renameDefaultModelRef(
+  ctx: ExtensionCommandContext,
+  modelsPath: string,
+  provider: string,
+  oldModelId: string,
+  newModelId: string,
+): Promise<void> {
+  if (oldModelId === newModelId) return;
+  const manager = SettingsManager.create(ctx.cwd, dirname(modelsPath));
+  if (manager.getDefaultProvider() !== provider || manager.getDefaultModel() !== oldModelId) return;
+  manager.setDefaultModel(newModelId);
+  await manager.flush();
+  const errors = manager.drainErrors();
+  if (errors.length > 0) {
+    throw new Error(`Unable to update default model reference: ${errors.map((entry) => entry.error.message).join("; ")}`);
+  }
 }
 
 export async function deleteProviderThinkingDefaults(

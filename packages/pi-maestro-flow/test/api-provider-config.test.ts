@@ -32,8 +32,11 @@ import {
   loadApiRetrySettings,
   normalizeBaseUrl,
   registerApiProviderConfigs,
+  renameDefaultModelRef,
+  renameModelThinkingDefault,
   saveApiProviderSettings,
   saveApiRetrySettings,
+  saveModelThinkingDefault,
   setApiProviderEnabled,
 } from "../src/providers/api-provider-config.ts";
 import {
@@ -1008,7 +1011,7 @@ test("/api-manager edits a concrete OpenAI model and shows its API format", asyn
   assert.doesNotMatch(confirmations[0] ?? "", /其余 .*model|同时用于/);
 });
 
-test("/api-manager form preloads an existing model and preserves its API key", async (t) => {
+test("/api-manager form preloads an existing model, renames it in place, and preserves its API key", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-form-edit-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const modelsPath = join(tempDir, "models.json");
@@ -1077,10 +1080,13 @@ test("/api-manager form preloads an existing model and preserves its API key", a
   const provider = saved.providers["maestro-openai"];
   assert.equal(provider.models[0].maxTokens, 96_000);
   assert.equal(provider.models[0].contextWindow, 333_000);
-  assert.equal(provider.models[0].id, "existing-model");
+  assert.equal(provider.models[0].id, "attempted-rename");
   assert.equal(provider.models.length, 1);
   assert.equal(provider.models[0].thinkingLevelMap.xhigh, "xhigh");
   assert.equal(provider.apiKey, "existing-secret-must-stay");
+  const defaults = JSON.parse(readFileSync(join(tempDir, "api-manager.json"), "utf8"));
+  assert.equal(defaults.modelDefaults["maestro-openai/attempted-rename"], "medium");
+  assert.equal(defaults.modelDefaults["maestro-openai/existing-model"], undefined);
 });
 
 test("/api-manager form reconciles an incompatible global thinking default", async (t) => {
@@ -1201,7 +1207,7 @@ test("loadApiProviderSettings returns advanced user-defined Provider form parame
   assert.deepEqual(providers["advanced-proxy"].headers, { "X-Title": "pi", "X-Custom": "value" });
 });
 
-test("/api-manager custom form preserves advanced parameters and unknown compat fields", async (t) => {
+test("/api-manager custom form preserves advanced parameters and unknown compat fields, renaming the model", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-custom-form-edit-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const modelsPath = join(tempDir, "models.json");
@@ -1270,7 +1276,7 @@ test("/api-manager custom form preserves advanced parameters and unknown compat 
   const saved = JSON.parse(readFileSync(modelsPath, "utf8")).providers["advanced-proxy"];
   assert.equal(saved.apiKey, "advanced-secret-must-stay");
   assert.equal(saved.models[0].maxTokens, 48_000);
-  assert.equal(saved.models[0].id, "advanced-model");
+  assert.equal(saved.models[0].id, "attempted-custom-rename");
   assert.equal(saved.models.length, 1);
   assert.deepEqual(saved.compat, {
     thinkingFormat: "deepseek",
@@ -1282,6 +1288,104 @@ test("/api-manager custom form preserves advanced parameters and unknown compat 
   assert.equal(saved.models[0].compat, undefined);
   assert.equal(saved.models[0].headers, undefined);
   assert.equal(saved.authHeader, false);
+  const defaults = JSON.parse(readFileSync(defaultsPath, "utf8"));
+  assert.equal(defaults.modelDefaults["advanced-proxy/attempted-custom-rename"], "medium");
+  assert.equal(defaults.modelDefaults["advanced-proxy/advanced-model"], undefined);
+});
+
+test("saveApiProviderSettings renames a model in place and preserves siblings", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-rename-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  await saveApiProviderSettings({
+    provider: "maestro-openai",
+    baseUrl: "https://api.example.com/v1",
+    modelId: "old-model",
+    contextWindow: 100_000,
+    maxTokens: 16_384,
+    reasoning: true,
+    apiKey: "shared-key",
+  }, modelsPath);
+  await saveApiProviderSettings({
+    provider: "maestro-openai",
+    baseUrl: "https://api.example.com/v1",
+    modelId: "sibling",
+    contextWindow: 50_000,
+    maxTokens: 8_192,
+    reasoning: false,
+    apiKey: "shared-key",
+  }, modelsPath);
+  await saveApiProviderSettings({
+    provider: "maestro-openai",
+    baseUrl: "https://api.example.com/v1",
+    modelId: "new-model",
+    previousModelId: "old-model",
+    contextWindow: 111_000,
+    maxTokens: 22_000,
+    reasoning: true,
+    apiKey: "shared-key",
+  }, modelsPath);
+  const models = JSON.parse(readFileSync(modelsPath, "utf8")).providers["maestro-openai"].models;
+  assert.deepEqual(models.map((model: { id: string }) => model.id), ["new-model", "sibling"]);
+  const renamed = models.find((model: { id: string }) => model.id === "new-model");
+  assert.equal(renamed.contextWindow, 111_000);
+  assert.equal(renamed.maxTokens, 22_000);
+  assert.equal(renamed.reasoning, true);
+  const sibling = models.find((model: { id: string }) => model.id === "sibling");
+  assert.equal(sibling.maxTokens, 8_192);
+  assert.equal(sibling.reasoning, false);
+});
+
+test("saveApiProviderSettings rejects renaming onto an existing model id", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-rename-collision-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const base = {
+    provider: "maestro-openai",
+    baseUrl: "https://api.example.com/v1",
+    contextWindow: 100_000,
+    maxTokens: 16_384,
+    reasoning: true,
+    apiKey: "shared-key",
+  };
+  await saveApiProviderSettings({ ...base, modelId: "old-model" }, modelsPath);
+  await saveApiProviderSettings({ ...base, modelId: "sibling" }, modelsPath);
+  await assert.rejects(
+    saveApiProviderSettings({ ...base, modelId: "sibling", previousModelId: "old-model" }, modelsPath),
+    /already exists/,
+  );
+  await assert.rejects(
+    saveApiProviderSettings({ ...base, modelId: "ghost", previousModelId: "unknown-model" }, modelsPath),
+    /not configured/,
+  );
+  const models = JSON.parse(readFileSync(modelsPath, "utf8")).providers["maestro-openai"].models;
+  assert.deepEqual(models.map((model: { id: string }) => model.id), ["old-model", "sibling"]);
+});
+
+test("renameModelThinkingDefault moves the per-model thinking default", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-rename-thinking-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const defaultsPath = join(tempDir, "api-manager.json");
+  await saveModelThinkingDefault("maestro-openai", "old-model", "high", defaultsPath);
+  await saveModelThinkingDefault("maestro-openai", "other-model", "low", defaultsPath);
+  await renameModelThinkingDefault("maestro-openai", "old-model", "new-model", defaultsPath);
+  const defaults = JSON.parse(readFileSync(defaultsPath, "utf8"));
+  assert.equal(defaults.modelDefaults["maestro-openai/old-model"], undefined);
+  assert.equal(defaults.modelDefaults["maestro-openai/new-model"], "high");
+  assert.equal(defaults.modelDefaults["maestro-openai/other-model"], "low");
+});
+
+test("renameDefaultModelRef updates the default model reference", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-rename-default-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const settingsPath = join(tempDir, "settings.json");
+  writeFileSync(settingsPath, JSON.stringify({ defaultProvider: "maestro-openai", defaultModel: "old-model" }));
+  await renameDefaultModelRef({ cwd: tempDir } as any, join(tempDir, "models.json"), "maestro-openai", "old-model", "new-model");
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  assert.equal(settings.defaultProvider, "maestro-openai");
+  assert.equal(settings.defaultModel, "new-model");
+  await renameDefaultModelRef({ cwd: tempDir } as any, join(tempDir, "models.json"), "maestro-openai", "unrelated", "other");
+  assert.equal(JSON.parse(readFileSync(settingsPath, "utf8")).defaultModel, "new-model");
 });
 
 test("/api-manager shows one concrete Anthropic model with anthropic-messages format", async (t) => {

@@ -148,6 +148,8 @@ export interface ApiProviderSettings {
   provider: string;
   baseUrl: string;
   modelId: string;
+  /** Previous identity when this save renames an existing model; matches and renames the entry in place, rejecting collisions. */
+  previousModelId?: string;
   contextWindow?: number;
   reasoning: boolean;
   /** Whether the model supports multimodal input (text + image). Derived from model.input array. */
@@ -466,6 +468,7 @@ export async function saveApiProviderSettings(
     provider: normalizeChannelId(settings.provider),
     baseUrl: normalizeBaseUrl(settings.baseUrl),
     modelId: required(settings.modelId, "Model ID"),
+    previousModelId: settings.previousModelId ?? undefined,
     contextWindow: settings.contextWindow === undefined
       ? undefined
       : positiveInteger(settings.contextWindow, "上下文窗口 contextWindow"),
@@ -1125,6 +1128,7 @@ async function configurePresetModelWithSteps(
   if (modelInput === undefined) return;
   const modelIds = parseModelIdList(modelInput);
   if (modelIds.length === 0) throw new Error("Model ID 不能为空");
+  if (!target.adding && modelIds.length !== 1) throw new Error("修改已有模型时只能指定一个 Model ID");
   const targetProviderId = provider.id;
   const maxSuffix = maxThinking ? " / max" : "";
   const enabledLabel = provider.api === "openai-responses"
@@ -1140,7 +1144,7 @@ async function configurePresetModelWithSteps(
     ctx,
     provider.api,
     reasoningChoice === enabledLabel,
-    await loadModelThinkingDefault(targetProviderId, modelIds[0], defaultsPath)
+    await loadModelThinkingDefault(targetProviderId, target.modelId ?? modelIds[0], defaultsPath)
       ?? currentDefaultThinkingLevel(ctx, modelsPath),
     maxThinking,
   );
@@ -1190,12 +1194,15 @@ async function configurePresetModelWithSteps(
   );
   if (!confirmed) return;
   const reasoning = reasoningChoice === enabledLabel;
+  const wasAdding = target.modelId === null;
+  const previousModelId = target.modelId ?? undefined;
   let result: SaveApiProviderResult | undefined;
   for (const [index, nextModelId] of modelIds.entries()) {
     const next: ApiProviderSettings = {
       provider: targetProviderId,
       baseUrl,
       modelId: nextModelId,
+      previousModelId,
       contextWindow,
       maxTokens,
       reasoning,
@@ -1204,13 +1211,17 @@ async function configurePresetModelWithSteps(
       maxThinking,
     };
     result = await saveApiProviderSettings(next, modelsPath);
+    if (previousModelId !== undefined && previousModelId !== nextModelId) {
+      await renameModelThinkingDefault(targetProviderId, previousModelId, nextModelId, defaultsPath);
+      await renameDefaultModelRef(ctx, modelsPath, targetProviderId, previousModelId, nextModelId);
+    }
     await saveModelThinkingDefault(
       targetProviderId,
       nextModelId,
       canonicalThinkingLevel(defaultThinkingLevel),
       defaultsPath,
     );
-    if (index === 0) await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, nextModelId, target.modelId === null);
+    if (index === 0) await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, nextModelId, wasAdding);
   }
   if (!findPreset(targetProviderId)) await addManagedProvider(defaultsPath, targetProviderId);
   reloadProviderRegistration(pi, ctx, targetProviderId, modelsPath);
@@ -1314,6 +1325,7 @@ async function configureCustomModelWithSteps(
   if (modelInput === undefined) return;
   const modelIds = parseModelIdList(modelInput);
   if (modelIds.length === 0) throw new Error("Model ID 不能为空");
+  if (!target.adding && modelIds.length !== 1) throw new Error("修改已有模型时只能指定一个 Model ID");
   const targetProviderId = providerId;
   const maxThinking = current.maxThinking === true || runtimeSupportsMaxThinking(ctx);
   const maxSuffix = maxThinking ? " / max" : "";
@@ -1331,7 +1343,7 @@ async function configureCustomModelWithSteps(
     ctx,
     api,
     reasoning,
-    await loadModelThinkingDefault(targetProviderId, modelIds[0], defaultsPath)
+    await loadModelThinkingDefault(targetProviderId, target.modelId ?? modelIds[0], defaultsPath)
       ?? currentDefaultThinkingLevel(ctx, modelsPath),
     maxThinking,
   );
@@ -1441,12 +1453,15 @@ async function configureCustomModelWithSteps(
     ].join("\n"),
   );
   if (!confirmed) return;
+  const wasAdding = target.modelId === null;
+  const previousModelId = target.modelId ?? undefined;
   let result: SaveApiProviderResult | undefined;
   for (const [index, nextModelId] of modelIds.entries()) {
     const next: ApiProviderSettings = {
       provider: targetProviderId,
       baseUrl,
       modelId: nextModelId,
+      previousModelId,
       contextWindow,
       maxTokens,
       reasoning,
@@ -1460,13 +1475,17 @@ async function configureCustomModelWithSteps(
       authHeader,
     };
     result = await saveApiProviderSettings(next, modelsPath);
+    if (previousModelId !== undefined && previousModelId !== nextModelId) {
+      await renameModelThinkingDefault(targetProviderId, previousModelId, nextModelId, defaultsPath);
+      await renameDefaultModelRef(ctx, modelsPath, targetProviderId, previousModelId, nextModelId);
+    }
     await saveModelThinkingDefault(
       targetProviderId,
       nextModelId,
       canonicalThinkingLevel(defaultThinkingLevel),
       defaultsPath,
     );
-    if (index === 0) await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, nextModelId, target.modelId === null);
+    if (index === 0) await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, nextModelId, wasAdding);
   }
   await addManagedProvider(defaultsPath, targetProviderId);
   reloadProviderRegistration(pi, ctx, targetProviderId, modelsPath);
@@ -1522,9 +1541,11 @@ async function configurePresetModelWithForm(
       {
         id: "modelId",
         label: "Model ID",
-        kind: adding ? "text" : "readonly",
+        kind: "text",
         value: adding ? (current.configured ? "" : provider.modelId) : current.modelId,
-        help: adding ? "多个 Model ID 用逗号分隔，一次新增多个模型（其余字段作为模板应用到每个模型）" : undefined,
+        help: adding
+          ? "多个 Model ID 用逗号分隔，一次新增多个模型（其余字段作为模板应用到每个模型）"
+          : "修改 Model ID 将重命名该模型：条目原位更名，思考强度默认值与默认模型引用自动迁移；新 ID 不能与其他模型冲突。",
       },
       { id: "reasoning", label: "推理能力", kind: "toggle", value: current.reasoning },
       {
@@ -1548,15 +1569,14 @@ async function configurePresetModelWithForm(
       values,
       provider.api,
       maxThinking,
-      adding ? existingModelIds : undefined,
+      adding ? existingModelIds : existingModelIds.filter((id) => id !== modelId),
+      !adding,
     ),
   });
   if (!result) return;
 
   const baseUrl = normalizeBaseUrl(formText(result.values, "baseUrl"));
-  const nextModelIds = modelId
-    ? [modelId]
-    : parseModelIdList(formText(result.values, "modelId"));
+  const nextModelIds = parseModelIdList(formText(result.values, "modelId"));
   const targetProviderId = provider.id;
   const reasoning = formBoolean(result.values, "reasoning");
   const multimodal = formBooleanOrDefault(result.values, "multimodal", current.multimodal !== false);
@@ -1588,6 +1608,7 @@ async function configurePresetModelWithForm(
       provider: targetProviderId,
       baseUrl,
       modelId: nextModelId,
+      previousModelId: adding ? undefined : modelId,
       contextWindow,
       maxTokens,
       reasoning,
@@ -1596,6 +1617,10 @@ async function configurePresetModelWithForm(
       maxThinking,
     };
     saveResult = await saveApiProviderSettings(next, modelsPath);
+    if (!adding && modelId !== nextModelId) {
+      await renameModelThinkingDefault(targetProviderId, modelId, nextModelId, defaultsPath);
+      await renameDefaultModelRef(ctx, modelsPath, targetProviderId, modelId, nextModelId);
+    }
     await saveModelThinkingDefault(
       targetProviderId,
       nextModelId,
@@ -1730,9 +1755,11 @@ async function configureCustomModelWithForm(
       {
         id: "modelId",
         label: "Model ID",
-        kind: adding ? "text" : "readonly",
+        kind: "text",
         value: adding ? "" : current.modelId,
-        help: adding ? "多个 Model ID 用逗号分隔，一次新增多个模型（其余字段作为模板应用到每个模型）" : undefined,
+        help: adding
+          ? "多个 Model ID 用逗号分隔，一次新增多个模型（其余字段作为模板应用到每个模型）"
+          : "修改 Model ID 将重命名该模型：条目原位更名，思考强度默认值与默认模型引用自动迁移；新 ID 不能与其他模型冲突。",
       },
       { id: "reasoning", label: "推理能力", kind: "toggle", value: current.reasoning },
       {
@@ -1757,7 +1784,8 @@ async function configureCustomModelWithForm(
         values,
         formText(values, "api"),
         maxThinking,
-        adding ? existingModelIds : undefined,
+        adding ? existingModelIds : existingModelIds.filter((id) => id !== modelId),
+        !adding,
       );
       try {
         parseHeadersForm(formText(values, "headers"));
@@ -1772,9 +1800,7 @@ async function configureCustomModelWithForm(
   const api = required(formText(result.values, "api"), "API type");
   const nextDisplayName = formText(result.values, "name").trim() || providerId;
   const baseUrl = normalizeBaseUrl(formText(result.values, "baseUrl"));
-  const nextModelIds = modelId
-    ? [modelId]
-    : parseModelIdList(formText(result.values, "modelId"));
+  const nextModelIds = parseModelIdList(formText(result.values, "modelId"));
   const targetProviderId = providerId;
   const reasoning = formBoolean(result.values, "reasoning");
   const multimodal = formBooleanOrDefault(result.values, "multimodal", current.multimodal !== false);
@@ -1819,6 +1845,7 @@ async function configureCustomModelWithForm(
       provider: targetProviderId,
       baseUrl,
       modelId: nextModelId,
+      previousModelId: adding ? undefined : modelId,
       contextWindow,
       maxTokens,
       reasoning,
@@ -1833,6 +1860,10 @@ async function configureCustomModelWithForm(
       authHeader,
     };
     saveResult = await saveApiProviderSettings(next, modelsPath);
+    if (!adding && modelId !== nextModelId) {
+      await renameModelThinkingDefault(targetProviderId, modelId, nextModelId, defaultsPath);
+      await renameDefaultModelRef(ctx, modelsPath, targetProviderId, modelId, nextModelId);
+    }
     await saveModelThinkingDefault(
       targetProviderId,
       nextModelId,
@@ -1941,12 +1972,14 @@ function validateApiModelForm(
   api: string,
   maxThinking: boolean,
   duplicateModelIds?: readonly string[],
+  single = false,
 ): string[] {
   const errors: string[] = [];
   try {
     normalizeBaseUrl(formText(values, "baseUrl"));
     const modelIds = parseModelIdList(formText(values, "modelId"));
     if (modelIds.length === 0) throw new Error("Model ID 不能为空");
+    if (single && modelIds.length !== 1) errors.push("修改已有模型时只能指定一个 Model ID");
     const seen = new Set<string>();
     for (const modelId of modelIds) {
       if (seen.has(modelId)) errors.push(`Model ID ${modelId} 重复；每个模型只能出现一次`);
@@ -2060,6 +2093,8 @@ import {
   readModelsRoot,
   reloadProviderRegistration,
   removeProviderKey,
+  renameDefaultModelRef,
+  renameModelThinkingDefault,
   required,
   resetProvider,
   resolveChannelRef,
