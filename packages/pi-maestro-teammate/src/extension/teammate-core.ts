@@ -728,6 +728,13 @@ export const AGENT_BUFFER_LIMITS = Object.freeze({
  */
 export const TEAMMATE_STALL_NOTIFY_IDLE_MS = 60_000;
 
+/**
+ * Minimum spacing between caller-facing stall notifications for the same
+ * agent. Without it, an agent that alternates activity and silence re-arms
+ * the one-shot marker on every resume and notifies on every silent spell.
+ */
+export const TEAMMATE_STALL_NOTIFY_COOLDOWN_MS = 5 * 60_000;
+
 /** Expected queue/model silence uses the shared five-minute ceiling. */
 export const TEAMMATE_PENDING_STALL_TIMEOUT_MS = TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS;
 

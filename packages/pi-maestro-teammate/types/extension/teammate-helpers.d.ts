@@ -102,8 +102,8 @@ export declare function claimResultReadyNotice(state: TeammateState | undefined,
 export declare function watchTargetStalledAt(target: WatchTarget, state?: TeammateState, idleCeilingOverrideMs?: number): number;
 export declare function statusForWatchTarget(target: WatchTarget, now?: number, state?: TeammateState, idleCeilingOverrideMs?: number): Extract<TeammateWaitStatus, "completed" | "failed" | "terminated" | "result-ready" | "stalled"> | undefined;
 /**
- * Sweep for caller-facing stall notifications (edge-triggered, one-shot per
- * episode). Consumes the same canonical verdict as `teammate-wait`/`observe`
+ * Sweep for caller-facing stall notifications, throttled per agent.
+ * Consumes the same canonical verdict as `teammate-wait`/`observe`
  * (`statusForWatchTarget`) with a longer confirmation window
  * (`TEAMMATE_STALL_NOTIFY_IDLE_MS`), so the push channel never drifts into its
  * own stall heuristic — the exemptions (pending interaction, result-ready,
@@ -114,8 +114,12 @@ export declare function statusForWatchTarget(target: WatchTarget, now?: number, 
  * verdict from the wait path. An agent with an active waiter is skipped — the
  * waiter resolves `stalled` itself, so a pushed turn would be redundant.
  *
- * `notify` fires at most once per stall episode; clearing the marker happens
- * when the agent resumes activity or leaves the stall candidate set.
+ * `notify` fires at most once per stall episode AND at most once per
+ * cooldown window (`TEAMMATE_STALL_NOTIFY_COOLDOWN_MS`) per agent: the marker
+ * records the last notification time and is kept while the agent resumes
+ * activity, so an agent that alternates activity and silence (e.g. long
+ * thinking between sparse events) cannot re-trigger on every silent spell.
+ * The record is dropped when the agent settles terminally.
  */
 export declare function sweepStalledAgents(state: TeammateState, notify: (message: string, agent: ActiveAgent) => void, now?: number): void;
 export declare function waitDelayForWatchTarget(target: WatchTarget, timeoutAt: number | undefined, state?: TeammateState, until?: "result-ready" | "completed"): number;

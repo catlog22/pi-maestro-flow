@@ -110,6 +110,12 @@ export declare const AGENT_BUFFER_LIMITS: Readonly<{
  * five-minute deadline and are never shortened by this override.
  */
 export declare const TEAMMATE_STALL_NOTIFY_IDLE_MS = 60000;
+/**
+ * Minimum spacing between caller-facing stall notifications for the same
+ * agent. Without it, an agent that alternates activity and silence re-arms
+ * the one-shot marker on every resume and notifies on every silent spell.
+ */
+export declare const TEAMMATE_STALL_NOTIFY_COOLDOWN_MS: number;
 /** Expected queue/model silence uses the shared five-minute ceiling. */
 export declare const TEAMMATE_PENDING_STALL_TIMEOUT_MS: number;
 /** Lower bound on teammate-wait re-poll spacing. */

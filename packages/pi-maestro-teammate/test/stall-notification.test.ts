@@ -7,6 +7,7 @@ import {
   statusForWatchTarget,
   watchTargetStalledAt,
   TEAMMATE_STALL_NOTIFY_IDLE_MS,
+  TEAMMATE_STALL_NOTIFY_COOLDOWN_MS,
   TEAMMATE_STALL_TIMEOUT_MS,
   TEAMMATE_PENDING_STALL_TIMEOUT_MS,
 } from "../src/extension/index.ts";
@@ -108,28 +109,43 @@ test("a foreground agent (no notifyOnStall) is never push-notified", () => {
   assert.equal(notifications.length, 0);
 });
 
-// --- Episode lifecycle ------------------------------------------------------
+// --- Episode lifecycle and notification cooldown ----------------------------
 
-test("resuming activity clears the marker so a later stall episode notifies again", () => {
+test("activity between silent spells is throttled by the notification cooldown", () => {
   const state = makeState();
   const agent = addAgent(state, "flaky", {
     notifyOnStall: true,
     lastActivityAt: Date.now() - TEAMMATE_STALL_NOTIFY_IDLE_MS - 10_000,
   });
   const { notifications, notify } = collectNotifications();
+  const now = Date.now();
 
-  sweepStalledAgents(state, notify);
+  sweepStalledAgents(state, notify, now);
   assert.equal(notifications.length, 1);
 
-  // Activity resumes: lastActivityAt refreshes, the episode ends.
-  agent.lastActivityAt = Date.now();
-  sweepStalledAgents(state, notify);
+  // Activity resumes: the episode ends, but the cooldown keeps counting.
+  agent.lastActivityAt = now;
+  sweepStalledAgents(state, notify, now + 1_000);
   assert.equal(notifications.length, 1, "no notification for the healthy moment");
 
-  // A new silent spell is a fresh episode and may notify again.
-  agent.lastActivityAt = Date.now() - TEAMMATE_STALL_NOTIFY_IDLE_MS - 20_000;
-  sweepStalledAgents(state, notify);
-  assert.equal(notifications.length, 2);
+  // A new silent spell inside the cooldown must not notify again — this is
+  // the activity/silence alternation that used to spam the caller.
+  agent.lastActivityAt = now - TEAMMATE_STALL_NOTIFY_IDLE_MS - 20_000;
+  sweepStalledAgents(state, notify, now + 1_000);
+  assert.equal(notifications.length, 1, "cooldown suppresses the repeat notification");
+
+  // Still inside the cooldown after another activity burst: still silent.
+  agent.lastActivityAt = now + 500;
+  sweepStalledAgents(state, notify, now + 60_000);
+  agent.lastActivityAt = now + 500 - TEAMMATE_STALL_NOTIFY_IDLE_MS - 20_000;
+  sweepStalledAgents(state, notify, now + 60_000);
+  assert.equal(notifications.length, 1, "repeated alternation stays throttled");
+
+  // After the cooldown elapses, a stalled agent may notify again.
+  const later = now + TEAMMATE_STALL_NOTIFY_COOLDOWN_MS + 1_000;
+  agent.lastActivityAt = later - TEAMMATE_STALL_NOTIFY_IDLE_MS - 20_000;
+  sweepStalledAgents(state, notify, later);
+  assert.equal(notifications.length, 2, "a new episode after the cooldown notifies again");
 });
 
 test("a settled agent clears the marker and never notifies", () => {

@@ -303,12 +303,13 @@ export interface TeammateState {
    */
   resultReadyNotified?: Set<string>;
   /**
-   * Agents whose stall edge has already been reported to the caller (one-shot
-   * per episode, mirroring `resultReadyNotified`). Cleared when the agent
-   * resumes activity or leaves the stall candidate set, so a later stall
-   * episode can notify again.
+   * Correlation id → timestamp of the last caller-facing stall notification
+   * (throttle marker). A repeat notification is suppressed until the cooldown
+   * elapses, so an agent that alternates activity and silence nudges the
+   * caller at most once per cooldown window instead of on every silent spell.
+   * Entries are removed when the agent settles terminally.
    */
-  stallNotified?: Set<string>;
+  stallNotified?: Map<string, number>;
   /**
    * Teammate proxy requests reserved before the handler's first asynchronous
    * boundary. Cancellation removes the reservation so the resumed request

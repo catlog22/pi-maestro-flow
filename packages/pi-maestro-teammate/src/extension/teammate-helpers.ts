@@ -205,6 +205,7 @@ import {
   TEAMMATE_INTERACTION_QUEUE_LIMIT,
   TEAMMATE_INTERACTION_TIMEOUT_MS,
   TEAMMATE_STALL_NOTIFY_IDLE_MS,
+  TEAMMATE_STALL_NOTIFY_COOLDOWN_MS,
   TEAMMATE_STALL_TIMEOUT_MS,
   TEAMMATE_WAIT_DEFAULT_TIMEOUT_MS,
   TEAMMATE_WAIT_POLL_FLOOR_MS,
@@ -813,8 +814,8 @@ export function statusForWatchTarget(
 }
 
 /**
- * Sweep for caller-facing stall notifications (edge-triggered, one-shot per
- * episode). Consumes the same canonical verdict as `teammate-wait`/`observe`
+ * Sweep for caller-facing stall notifications, throttled per agent.
+ * Consumes the same canonical verdict as `teammate-wait`/`observe`
  * (`statusForWatchTarget`) with a longer confirmation window
  * (`TEAMMATE_STALL_NOTIFY_IDLE_MS`), so the push channel never drifts into its
  * own stall heuristic — the exemptions (pending interaction, result-ready,
@@ -825,34 +826,32 @@ export function statusForWatchTarget(
  * verdict from the wait path. An agent with an active waiter is skipped — the
  * waiter resolves `stalled` itself, so a pushed turn would be redundant.
  *
- * `notify` fires at most once per stall episode; clearing the marker happens
- * when the agent resumes activity or leaves the stall candidate set.
+ * `notify` fires at most once per stall episode AND at most once per
+ * cooldown window (`TEAMMATE_STALL_NOTIFY_COOLDOWN_MS`) per agent: the marker
+ * records the last notification time and is kept while the agent resumes
+ * activity, so an agent that alternates activity and silence (e.g. long
+ * thinking between sparse events) cannot re-trigger on every silent spell.
+ * The record is dropped when the agent settles terminally.
  */
 export function sweepStalledAgents(
   state: TeammateState,
   notify: (message: string, agent: ActiveAgent) => void,
   now = Date.now(),
 ): void {
-  const notified = state.stallNotified ??= new Set<string>();
+  const notified = state.stallNotified ??= new Map<string, number>();
   for (const agent of state.activeRuns.values()) {
     if (!agent.notifyOnStall) continue;
     const cid = agent.correlationId;
     // The caller is actively waiting on this agent: the wait already reports
-    // the stall verdict, so a pushed turn would be redundant. Drop any marker
-    // so a later episode (after this wait ends) can still notify.
+    // the stall verdict, so a pushed turn would be redundant. The throttle
+    // marker is left in place so the cooldown still applies after the wait.
     const waiters = teammateWaiters.get(state)?.get(cid);
-    if (waiters && waiters.size > 0) {
-      notified.delete(cid);
-      continue;
-    }
+    if (waiters && waiters.size > 0) continue;
     // A consumable result is never a stall; check the field directly so this
     // sweep does not consume the one-shot result-ready notice that a later
     // waiter is entitled to (claimResultReadyNotice runs inside
     // statusForWatchTarget).
-    if (agent.resultReadyAt !== undefined) {
-      notified.delete(cid);
-      continue;
-    }
+    if (agent.resultReadyAt !== undefined) continue;
     const verdict = statusForWatchTarget(
       { kind: "agent", agent },
       now,
@@ -860,8 +859,11 @@ export function sweepStalledAgents(
       TEAMMATE_STALL_NOTIFY_IDLE_MS,
     );
     if (verdict === "stalled") {
-      if (notified.has(cid)) continue;
-      notified.add(cid);
+      const lastNotifiedAt = notified.get(cid);
+      if (lastNotifiedAt !== undefined && now - lastNotifiedAt < TEAMMATE_STALL_NOTIFY_COOLDOWN_MS) {
+        continue;
+      }
+      notified.set(cid, now);
       const idleSeconds = Math.max(0, Math.round((now - agent.lastActivityAt) / 1000));
       const label = agent.name ?? agent.agent;
       notify(
@@ -869,11 +871,14 @@ export function sweepStalledAgents(
           + `inspect its captured output (teammate-watch) before retrying or terminating it.`,
         agent,
       );
-    } else {
-      // Active again, result-ready, or settled: the episode is over, so the
-      // next silent spell is a fresh episode that may notify again.
+    } else if (agent.status === "completed" || agent.status === "failed" || agent.status === "terminated") {
+      // Terminal settle ends the throttle record: the agent can no longer
+      // stall, and the entry must not leak once it leaves activeRuns.
       notified.delete(cid);
     }
+    // Activity resumed or still inside an exemption: keep the marker — the
+    // cooldown is measured from the last notification, not from the last
+    // stall episode.
   }
 }
 
