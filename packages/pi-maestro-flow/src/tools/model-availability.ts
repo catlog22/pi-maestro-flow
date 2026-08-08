@@ -77,7 +77,7 @@ export function createModelAvailabilityTool(): ToolDefinition<typeof ModelAvaila
   return {
     name: "model-availability",
     label: "Model Availability",
-    description: `Check which models are reachable for delegated work, across two sources:
+    description: `Check which models are reachable for delegated work, across three sources:
 
 - **teammate_models**: pi's own authenticated models (the same set shown in <available_teammate_models>), selectable via the teammate tool's model field.
 - **delegate_tools**: CLI tools enabled in the Maestro delegate config (~/.maestro/cli-tools.json), reachable via \`maestro delegate "<PROMPT>" --to <tool>\`.
@@ -87,9 +87,6 @@ Call this before routing to a specific external model (codex, gemini, claude, op
 
 Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\` treats "codex" as the prompt and falls back to the first enabled tool.`,
     promptSnippet: "Check reachable teammate models + Maestro delegate CLI tools before routing to a specific external model (codex/gemini/claude).",
-    promptGuidelines: [
-      "When a user explicitly requests an external model (codex, gemini, claude, opencode) that is NOT in <available_teammate_models>, call model-availability to confirm it is enabled, then route via bash: maestro delegate \"<PROMPT>\" --to <tool> --mode analysis.",
-    ],
     parameters: ModelAvailabilityParams,
     async execute(_id, params, signal, onUpdate, ctx): Promise<AgentToolResult<ModelAvailabilityDetails>> {
       const filter = (params.filter ?? "").trim();

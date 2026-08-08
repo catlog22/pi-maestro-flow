@@ -10,7 +10,7 @@ Before any project-related read, search, plan, todo, Git command, delegation, or
 |---|---|
 | Standalone task | `maestro search "<1-3 task keywords>" [--type <type>] --json` |
 | Fresh Workflow Run | Inspect injected `knowledge_context`, then run the task-specific search |
-| Reattached or compacted Run | `maestro run brief <run-id>`, inspect `knowledge_context`, then search/load |
+| Reattached or compacted Run | `run-control { argv: ["run","brief","<run-id>"] }`, inspect `knowledge_context`, then search/load |
 
 This gate overrides generic advice to start with `rg`, direct reads, explorer agents, todos, plans, or `git status`.
 
@@ -62,11 +62,13 @@ Exemptions: conversation, arithmetic, current time, and commands with no project
 
 The Project Knowledge Gate precedes todo creation.
 
-Use `todo` when work has at least three meaningful phases, dependencies, or cross-turn state. Create the complete plan in one batch, use `blockedBy` for dependencies, drive it with `todo next`, and complete each task with a short summary before starting the next. Add newly discovered remaining phases in another batch so the plan stays complete.
+Use `todo` when work has ≥3 steps/phases, has step dependencies, or spans turns. Same-turn work with <3 steps and no dependencies: execute inline without todo. Count verifiable outcomes, not file edits or commands; once the trigger holds, create the batch immediately — do not pause to re-judge.
 
-Skip todo for one or two logical outcomes, bounded edits, or when an active Workflow Session already tracks the work. A task represents a verifiable outcome, not a command or file. Put affected files and verification criteria in its description.
+Create the complete plan in one batch right after the knowledge gate, before discovery or implementation; use `blockedBy` for dependencies. If discovery changes the plan, add a new batch (never one task at a time). A task represents a verifiable outcome, not a command or file. Put affected files and verification criteria in its description.
 
-Boundary with `goal` and Workflow Sessions: todo tracks in-session task progress (phases and dependencies); goal adds cross-turn persistence, a budget, or verified completion; an active Workflow Session already tracks its Runs, so add neither on top of it. Same-turn multi-phase work with dependencies → todo; without dependencies → sequential inline execution.
+Drive it with `todo next`, but next does NOT auto-complete the current task. Immediately after each phase's outcome is verified: `todo update <id> status=completed summary=...`, then `todo next`. Before ending any turn with remaining work, sync todo state so the next turn starts from an accurate list.
+
+Boundary with `goal` and Workflow Sessions — decide in order: (1) an active Workflow Session already tracks its Runs → use run-control, add neither todo nor goal; (2) multi-turn work needing persistence, a budget, or independent verification → goal; (3) in-session multi-phase, dependency, or cross-turn work → todo; (4) otherwise inline execution.
 
 When dispatching parallel work, bind Todo tasks to teammates: pass `todo: "<id>"` (or an ordered array `["#1", "#2"]`, first = highest priority) in a teammate task's `todo` field (this field belongs to the teammate tool's `tasks[]`, not the todo tool). On agent start the host re-assigns each task's assignee to that agent (root → agent), auto-activates the first runnable one — pending, not blocked, and only when the agent has no other active task — and injects the ordered list as a managed fragment the agent drives itself. Wait for completion with `observe`, then aggregate; clean exits auto-seal any task the agent left in_progress.
 
@@ -93,18 +95,18 @@ After the knowledge gate:
 | Known project symbol | `maestro search "<symbol>" --code` |
 | Multi-file code discovery | `teammate`, agent `explorer` |
 | Mixed teammate/background status or waits | `observe` with typed `{ kind, id }` targets |
-| Exact bounded text search | `rg` |
+| Exact bounded text search | `rg`; workspace literal content / fuzzy paths use `ffgrep` / `fffind` |
 | Delegated analysis/development/review/testing | `teammate` |
 | External model absent from teammate catalog | `model-availability`, then delegate fallback |
 | Cross-turn autonomous work | `goal` |
 | Web research or URL fetch | `smart_search` |
 | Long or uncertain shell command | `bash_bg` |
 
-Use Maestro as a bash CLI for knowledge and workflow commands: `maestro search`, `load`, `spec`, `wiki`, `run`, `knowhow`, and `knowledge` (stage/record/review/promote). Use `teammate` for ordinary delegation, exploration, and multi-model work. Do not use Maestro `delegate`, `explore`, or `moa` for ordinary pi work; the documented external-model fallback is the only exception. Scope note: this ban governs the pi agent's own tool choice — maestro run-mode skills executed inside a Run (e.g., a plan step dispatching `cli-explore-agent`) follow their own documented orchestration channels and are not covered by it.
+Use Maestro as a bash CLI for knowledge commands: `maestro search`, `load`, `spec`, `wiki`, `knowhow`, and `knowledge` (stage/record/review/promote). Session/Run lifecycle commands go through the `run-control` tool instead. Use `teammate` for ordinary delegation, exploration, and multi-model work. Do not use Maestro `delegate`, `explore`, or `moa` for ordinary pi work; the documented external-model fallback is the only exception for ordinary pi work. Scope note: this ban governs the pi agent's own tool choice — maestro run-mode skills executed inside a Run (e.g., a plan step dispatching `cli-explore-agent`) follow their own documented orchestration channels and are not covered by it.
 
 Discovery arbitration: need only a hit list → `maestro search --code` (known symbol) or `rg` (exact text); hits need interpretation (call chains, ownership, cross-file reasoning) → `teammate` explorer. A known symbol spanning many files is still a `search --code` first pass; escalate to explorer only when the hit list alone does not answer the question.
 
-If the user explicitly requests an external model absent from `<available_teammate_models>`, call `model-availability`. If listed only under `delegate_fallback`, run:
+If the user explicitly requests an external model absent from `<available_teammate_models>`, call `model-availability`. If the model is only reachable via the Maestro delegate CLI (delegate_tools or delegate_fallback), run:
 
 ```bash
 maestro delegate "<prompt>" --to <tool> --mode analysis
@@ -144,6 +146,7 @@ Rules:
 - Targets are typed: `{ kind: "teammate", id: "<name-or-correlation-id>" }` or `{ kind: "bash_bg", id: "<job-id>" }`. Mixed target arrays are supported.
 - Use `background: true` only for independent work; if its result affects the current answer or next action, wait for the completion notification before proceeding with dependent work.
 - After a background teammate acknowledgement, call `observe` exactly once with `action: "wait"` before concluding or relying on the result. If the task is no longer needed, do not start it; do not silently ignore an unfinished background task.
+- After a background dispatch acknowledgement: if the current turn must consume the result, call `observe` exactly once with `action: "wait"`; otherwise end the turn and receive the automatic completion notification. Never poll.
 - `background: false` is the default and returns the result directly.
 - Put independent lanes in one `tasks` call. Use `{name}`, `{name.field}`, or `dependsOn` for DAG edges.
 - Name tasks that need follow-up or downstream references.
@@ -157,11 +160,10 @@ Rules:
 - If teammate exploration fails, fall back once to targeted local search and record the degradation.
 - Role selection: when the project registers `general-executor`, implementation work defaults to it; built-in `general` is the fallback. Use built-in specialists for their lanes (`explorer` discovery, `analyst` judgment, `planner` plans, `research` sourced answers, `verifier` Goal checks, `workflow` DAG orchestration).
 - Pass `maxNestingDepth: 0` for leaf workers that must not re-dispatch teammates; omit it to inherit the session budget. A child dispatch can only tighten its parent's remaining depth, never extend it.
-- After a background dispatch acknowledgement: if the current turn must consume the result, call `observe` exactly once with `action: "wait"`; otherwise end the turn and receive the automatic completion notification. Never poll.
 
 # Goal
 
-Use `goal` for multi-turn work needing persistence, a user-requested budget, or independent completion verification. Do not create a Goal for a single-turn task or when a Workflow Session already projects one.
+Use `goal` for multi-turn work needing persistence, a user-requested budget, or independent completion verification. Do not create a Goal for a single-turn task or when an active Workflow Session already tracks its Runs.
 
 - `create`: start a Goal; omit `tokenBudget` unless explicitly requested.
 - `get`: inspect current state.
@@ -233,7 +235,7 @@ Treat matched templates as governing evidence in plans and designs; reuse their 
 
 ## Run Knowledge
 
-Runtime birth packets, `maestro run brief`, and `maestro run check` are authoritative for Run-specific commands and state.
+Runtime birth packets are authoritative for Run-specific commands and state; read them via `run-control { argv: ["run","brief","<run-id>"] }` / `{ argv: ["run","check","<run-id>"] }`.
 
 - Record accepted decisions and locked constraints in `report.md` frontmatter.
 - Attribute search hits before citing them via `maestro knowledge record` (full command under "Search and load attribution"); it records pure ledger attribution without staging a candidate.

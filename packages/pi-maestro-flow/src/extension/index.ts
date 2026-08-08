@@ -894,7 +894,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
 - **moa**: Mixture-of-Agents — parallel reference analysis across models, then aggregator synthesis.
   { action: "moa", prompts: ["Compare auth strategies"], preset: "deep" }
 
-These actions route to external CLI endpoints (gemini/codex CLI processes). Prefer the **teammate** tool for ordinary delegation and exploration.
+These actions route to external CLI endpoints (gemini/codex CLI processes). Results are returned inline in the tool response as text. Prefer the **teammate** tool for ordinary delegation and exploration.
 
 This tool is NOT the Maestro Session/Run lifecycle CLI: use the **run-control** tool for session/run commands (or the bash \`maestro\` CLI for knowledge search/load), never this tool.
 
@@ -907,7 +907,6 @@ The --to flag is MANDATORY. A bare \`maestro delegate codex\` treats "codex" as 
       "In the pi-agent, use the teammate tool for all delegation, code exploration, and multi-model synthesis — teammate supports prompt templates (prompt field) and model selection (model field). Do not call the maestro tool's explore/delegate/moa for ordinary pi-agent work.",
       "Reserve the maestro tool (explore/delegate/moa) for the rare case of routing work directly to an external CLI endpoint (gemini/codex CLI process); for knowledge search use the maestro search/load bash CLI.",
       "Session/Run lifecycle commands belong to the run-control tool (argv passthrough shell), not this tool and not hand-written bash `maestro run/session` calls.",
-      "Progressive fallback: when a user explicitly requests an external model (codex/gemini/claude/opencode) that is NOT in <available_teammate_models>, call the model-availability tool, then route via bash `maestro delegate \"<PROMPT>\" --to <tool> --mode analysis`. The --to flag is mandatory — a bare `maestro delegate codex` sends \"codex\" as the prompt to the first enabled tool. Contract: D:\\maestro2\\workflows\\delegate-usage.md.",
     ],
 
     parameters: MaestroParams,
@@ -1027,7 +1026,7 @@ When to use:
 - create a Goal for multi-turn autonomous work that needs sustained momentum, a token budget, or verified completion.
 
 When NOT to use:
-- single-turn tasks; or when an active Workflow Session already projects a Goal — do not create a competing one.
+- single-turn tasks; or when an active Workflow Session already tracks its Runs — do not create a competing one.
 
 Only request completion after all work is done; the extension verifies it independently. The model cannot stop, resume, or clear a Goal.`,
 
@@ -1133,29 +1132,27 @@ Only request completion after all work is done; the extension verifies it indepe
 - get: { action: "get", id: "..." }
 - delete: { action: "delete", id: "..." }
 - clear: { action: "clear" }
-- next: { action: "next" } — activate the oldest runnable pending task assigned to the caller and return its resolved context
+- next: { action: "next" } — activate the oldest runnable pending task assigned to the caller and return its resolved context; ERRORS if you already hold an in_progress task — close it first with update status=completed (+ summary), then call next
 
 Parallel delegation: pass todo task id(s) to a teammate dispatch via the teammate tool's tasks[].todo field — the agent takes ownership on start (assignee root → agent, first runnable task auto-activates unless the agent is already busy), manages the injected ordered queue itself, and clean exits auto-seal leftovers. Self-drive your own tasks with todo next; delegated agents advance theirs with todo update.
 
 Rules:
+- Use todo when the work has ≥3 steps/phases, has step dependencies, or spans turns; otherwise (same-turn, <3 steps, no dependencies) skip it. Count verifiable outcomes, not file edits or commands.
 - For multi-step work, create the ENTIRE plan up front in ONE batch create (the tasks array) — never create tasks one at a time as you go.
 - In a batch, each blockedBy integer N means the earlier array item tasks[N]. For tasks[i], every dependency must satisfy 0 <= N < i. Example: tasks[1] depends on tasks[0] with blockedBy: [0].
 - subject is the title; description is the detail — do not swap. Set summary on completion; the next action consumes prior summaries.
 - Each actor may have at most one in_progress task.
 - Skill binding requires exactly one primary; guard/support are optional. Skill file changes after activation mark the binding stale — re-activate.
 - status is update-only: create derives it from dependencies and rejects an explicit status. create takes either subject (single) or tasks (batch) — never both.
-- In update: list changed fields in updateFields. Unlisted fields are preserved; empty strings or arrays clear fields that support clearing.`,
+- In update: list changed fields in updateFields. Unlisted fields are preserved; empty strings or arrays clear fields that support clearing. Always use updateFields; legacy presence-based updates (top-level fields without updateFields) are deprecated.`,
 
     promptSnippet: "Lay out a whole multi-step plan in one batch create (≥3 steps), then drive it step by step with resolved context and optional skill guidance.",
     promptGuidelines: [
-      "Use todo for multi-step work: create the COMPLETE plan in a single batch create (action=create with a tasks array) BEFORE executing, whenever a request needs ≥3 distinct logical phases, spans multiple tool-call rounds, has step dependencies, or needs resumable cross-turn context. This trigger is mandatory — do not pause to judge whether tracking is needed.",
+      "Use todo whenever the request has ≥3 steps/phases, step dependencies, or cross-turn context — create the COMPLETE plan in a single batch create (action=create with a tasks array) BEFORE executing. This trigger is mandatory — do not pause to judge whether tracking is needed.",
       "A todo task is a meaningful unit of work — a feature, a logical phase, a component, or an independently verifiable outcome — not a single edit or command. Multiple related edits that serve one logical change belong in ONE task (e.g. \"Implement JWT middleware\" touching 3 files = 1 task, not 3). Use description and context to make each task rich: affected files, expected changes, verification criteria.",
       "Always lay out the full plan up front with one batch create. Do NOT create a single task, finish it, then create the next — a one-at-a-time list hides the overall plan and provides no tracking value. Discover new sub-steps mid-work? Add them with another batch create so the whole remaining plan stays visible.",
       "For batch dependencies, use earlier zero-based integer indexes: tasks[i].blockedBy = [N] means tasks[i] depends on tasks[N], where 0 <= N < i.",
-      "Skip todo only for single-action work (one tool call or edit fully satisfies the request) or when an active Workflow Session already mirrors tasks.",
-      "Decision rule: 1–2 logical phases → skip; ≥3 → always batch-create todos. Count logical phases and independently verifiable outcomes, not individual file edits or commands.",
-      "Drive each step with todo action=next, and close it with todo update status=completed plus a concise summary before starting the next step.",
-      "To parallelize independent work across agents: batch-create one task per agent, then dispatch teammates with the teammate tool's tasks[].todo bindings (single id or ordered array, first = highest priority). Each agent owns its tasks and drives them to completion (auto-activates the first runnable one unless it is already busy); wait via observe and aggregate. Clean exits auto-seal in_progress leftovers; failures/cancels stay untouched for root to re-dispatch.",
+      "Drive each step with todo action=next — next errors while a task is in_progress, so close each step first with todo update status=completed plus a concise summary before calling it.",
     ],
 
     parameters: TodoToolParams,
@@ -1243,7 +1240,7 @@ When to use:
 
 When NOT to use:
 - No active workflow or coordinator not attached — the call errors; do not invoke it.
-- Knowledge operations (search/load/knowledge stage/review) and explore/delegate/moa belong to the bash \`maestro\` CLI and the \`maestro\` tool respectively, not this shell.
+- Knowledge writes (knowledge stage/record/promote) and explore/delegate/moa belong to the bash \`maestro\` CLI and the \`maestro\` tool respectively; read-only knowledge lookups (search/load/review) may pass through this shell (they are classified as read commands above).
 
 Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--verdict","done"] }, { argv: ["run","edit","verify","--after","latest"] }.`,
     promptSnippet: "Maestro CLI passthrough shell for Session/Run lifecycle",

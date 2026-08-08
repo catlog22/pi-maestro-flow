@@ -437,7 +437,7 @@ export function createResourceTool(): ToolDefinition<typeof ResourceParams, Reso
 - \`rule://name\` — project rule files (agents → AGENTS.md, rules → RULES.md, cursor → .cursorrules, cline → .clinerules, plus .pi/rules/ and docs/).
 - \`agent://<correlationId-or-name>[/key[/index[/field]]]\` — output of a completed teammate subagent (recorded when a task finishes: its validated outputSchema value, or its final answer text). Bare \`agent://<id>\` returns the whole output; optional path segments pull one nested field by object key / array index, e.g. \`agent://reviewer-1/findings/0/path\`. Do NOT append \`/json\` — the bare URI already returns the output.
 
-pr:// and issue:// require the gh CLI (https://cli.github.com). Results are cached in memory for 5 minutes.
+pr:// and issue:// require the gh CLI (https://cli.github.com). Results are cached in memory for 5 minutes — re-reads within the window return the cached copy, so refetch after state changes only when the window has expired.
 Read local files with the built-in read tool — resource is for protocol resources only.`,
     promptSnippet: "Use resource for pr://, issue://, skill://, rule://, agent:// protocol resources; use read for local files.",
     promptGuidelines: [

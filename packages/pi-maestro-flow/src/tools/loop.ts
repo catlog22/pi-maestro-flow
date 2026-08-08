@@ -408,12 +408,12 @@ export function registerLoop(pi: ExtensionAPI): void {
     name: "loop",
     label: "Loop",
     description:
-      "Create, list, or cancel session-scoped recurring tasks. Create requires kind, task, and intervalMs (milliseconds); cancel requires loopId. A loop runs a prompt or shell command after each fixed delay, never overlaps shell runs, stops after maxRuns, and is cancelled on session shutdown.",
+      "Create, list, or cancel session-scoped recurring tasks. Create requires kind, task, and intervalMs (milliseconds); cancel requires loopId. A loop runs a prompt or shell command after each fixed delay, never overlaps shell runs, and stops after maxRuns. Prompt loops are cancelled on session shutdown; shell loops with remaining runs are detached and keep running, and are reported/restored on the next session start.",
     promptSnippet: "Schedule bounded recurring prompt or shell tasks for the current session.",
     promptGuidelines: [
       "Use action=create only when the user explicitly asks for recurring or delayed work.",
       "Prefer prompt loops for recurring agent work and shell loops only for commands the user has authorized.",
-      "Loops are session-scoped and default to 10 runs; use list to inspect and cancel to stop one early.",
+      "Loops default to 10 runs (maxRuns); use list to inspect and cancel to stop one early. Prompt loops are session-scoped; shell loops survive session shutdown.",
     ],
     parameters: LoopParams,
     async execute(_id, params: LoopParamsInput): Promise<FlowToolResult<{ jobs: LoopJobSnapshot[] }>> {
