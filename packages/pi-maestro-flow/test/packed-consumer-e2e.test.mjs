@@ -524,8 +524,11 @@ function parseTrailingJson(stdout) {
 }
 
 function tarList(tarball) {
-  const result = spawnSync("tar", ["-tzf", tarball], { encoding: "utf8" });
-  assert.equal(result.status, 0, `tar -tzf failed for ${tarball}: ${result.stderr}`);
+  const args = process.platform === "win32"
+    ? ["--force-local", "-tzf", tarball]
+    : ["-tzf", tarball];
+  const result = spawnSync("tar", args, { encoding: "utf8" });
+  assert.equal(result.status, 0, `tar ${args.slice(0, -1).join(" ")} failed for ${tarball}: ${result.stderr}`);
   return result.stdout.split(/\r?\n/).filter(Boolean);
 }
 
