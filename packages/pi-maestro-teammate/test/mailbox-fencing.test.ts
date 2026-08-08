@@ -283,7 +283,11 @@ test("persistently failing dispatch dead-letters after MAX_DISPATCH_RETRIES", as
   await store.promoteToReady(envelope.messageId);
 
   consumer.start();
-  await new Promise((resolve) => setTimeout(resolve, 400));
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if ((await store.listMessages("dead")).includes(envelope.messageId)) break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
   await consumer.stop();
 
   // Bounded: exactly MAX_DISPATCH_RETRIES attempts, then dead-lettered.

@@ -376,7 +376,8 @@ export function toStructuredResults(
     if (structured === undefined && text === undefined) continue;
     entries.push({
       correlationId: result.correlationId,
-      originCwd,
+      ...(result.publicationId ? { publicationId: result.publicationId } : {}),
+      originCwd: result.originCwd ?? originCwd,
       ...(result.name ? { name: result.name } : {}),
       agent: result.agent,
       ...(structured !== undefined ? { structuredOutput: structuredClone(structured) } : {}),
@@ -402,7 +403,12 @@ export async function emitTeammateResultPublished(
       pending.push(Promise.resolve(promise));
     },
   };
-  pi.events.emit(TEAMMATE_RESULT_PUBLISHED_EVENT, event);
+  let emissionError: unknown;
+  try {
+    pi.events.emit(TEAMMATE_RESULT_PUBLISHED_EVENT, event);
+  } catch (error) {
+    emissionError = error;
+  }
 
   const outcomes = await Promise.allSettled(pending);
   for (const outcome of outcomes) {
@@ -413,6 +419,7 @@ export async function emitTeammateResultPublished(
       );
     }
   }
+  if (emissionError !== undefined) throw emissionError;
 }
 
 /** Replace the retained turn value; undefined intentionally clears stale data. */

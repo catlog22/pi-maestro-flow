@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import type { TeammateResultPublishedEvent } from "../src/public/v1/events.ts";
 import { parseProxyTeammateParams } from "../src/extension/index.ts";
 import { normalizeTeammateParams } from "../src/runs/execution.ts";
 
@@ -128,6 +129,17 @@ test("every v1 module is reachable through a declared package export", () => {
 });
 
 test("v1 event names match the strings the extension actually emits", async () => {
+  const publishedContract: TeammateResultPublishedEvent = {
+    result: {
+      correlationId: "contract",
+      originCwd: process.cwd(),
+      agent: "general",
+      output: "done",
+    },
+    waitUntil() {},
+  };
+  assert.equal(publishedContract.result.correlationId, "contract");
+
   const events = await import("../src/public/v1/events.ts");
   const emitter = fs.readFileSync(path.join(SRC_DIR, "shared/types.ts"), "utf8");
   const expected: Record<string, string> = {

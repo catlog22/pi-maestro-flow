@@ -142,6 +142,8 @@ export async function runSingleTeammate(
 ): Promise<SingleResult> {
   const startTime = Date.now();
   const correlationId = options.correlationId ?? randomUUID();
+  let resolvedRunCwd: string | undefined;
+  let publicationAwaitingCompletion: { publicationId: string; originCwd: string } | undefined;
 
   const rejectWith = (content: string): SingleResult => ({
     agent: params.agent,
@@ -159,6 +161,12 @@ export async function runSingleTeammate(
     result: SingleResult,
     terminalStatus?: AgentTerminalStatus,
   ): void => {
+    if (resolvedRunCwd) result.originCwd ??= resolvedRunCwd;
+    if (publicationAwaitingCompletion) {
+      result.publicationId ??= publicationAwaitingCompletion.publicationId;
+      result.originCwd ??= publicationAwaitingCompletion.originCwd;
+      publicationAwaitingCompletion = undefined;
+    }
     const canonicalStatus = terminalStatus
       ?? result.terminalStatus
       ?? (result.exitCode === 0 ? "completed" : "failed");
@@ -170,10 +178,20 @@ export async function runSingleTeammate(
     }
   };
 
-  const publishResult = async (result: SingleResult): Promise<void> => {
+  const publishResult = async (result: SingleResult, originCwd: string): Promise<void> => {
+    result.publicationId ??= randomUUID();
+    result.originCwd ??= originCwd;
+    publicationAwaitingCompletion = {
+      publicationId: result.publicationId,
+      originCwd: result.originCwd,
+    };
     try {
-      await options.onResultPublished?.(result);
-    } catch {
+      await options.onResultPublished?.(result, originCwd);
+    } catch (error) {
+      console.warn(
+        `[pi-maestro-teammate] result publication observer failed for ${result.correlationId}: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
       // Publication observers are advisory; the in-memory result remains authoritative.
     }
   };
@@ -194,6 +212,7 @@ export async function runSingleTeammate(
   const containedCwd = resolveContainedCwd(params.cwd, options.baseCwd);
   if ("error" in containedCwd) return rejectAndPublish(containedCwd.error);
   const cwd = containedCwd.cwd;
+  resolvedRunCwd = cwd;
 
   if (params.outputSchema) {
     const schemaHazard = findStructuredOutputSchemaHazard(params.outputSchema);
@@ -283,6 +302,7 @@ export async function runSingleTeammate(
       attemptedModels: attemptedModels.length > 1 ? attemptedModels : undefined,
       terminalStatus: "terminated",
     };
+    if (resolvedRunCwd) result.originCwd ??= resolvedRunCwd;
     publishTurnComplete(result, "terminated");
     return result;
   };
@@ -310,14 +330,23 @@ export async function runSingleTeammate(
       result: SingleResult;
       terminalStatus?: AgentTerminalStatus;
     }> = [];
-    const attemptOptions: RunTeammateOptions = options.onTurnComplete
+    const attemptOptions: RunTeammateOptions = options.onTurnComplete || options.onResultPublished
       ? {
           ...options,
           onTurnComplete(result, terminalStatus) {
             const effectiveStatus = terminalStatus
               ?? (options.signal?.aborted ? "terminated" : undefined);
-            if (completionState === "forwarding") publishTurnComplete(result, effectiveStatus);
-            else if (completionState === "buffering") {
+            if (completionState === "forwarding") {
+              if (publicationAwaitingCompletion) {
+                // The first forwarded completion confirms the already-published initial turn.
+                publishTurnComplete(result, effectiveStatus);
+              } else {
+                // Warm follow-up turns establish the same durable boundary before completion delivery.
+                void publishResult(result, cwd).then(() => {
+                  publishTurnComplete(result, effectiveStatus);
+                });
+              }
+            } else if (completionState === "buffering") {
               pendingCompletions.push({ result, terminalStatus: effectiveStatus });
             }
           },
@@ -345,6 +374,7 @@ export async function runSingleTeammate(
         throw error;
       }
       lastResult = candidateResult;
+      candidateResult.originCwd ??= cwd;
       if (modelToUse === undefined) {
         try {
           resolvedDefaultModel = resolveModelSpecifier(candidateResult.model, options.modelCapabilities);
@@ -363,7 +393,7 @@ export async function runSingleTeammate(
           settled = true;
         }
         candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
-        await publishResult(candidateResult);
+        await publishResult(candidateResult, cwd);
         commitCompletion();
         return candidateResult;
       }
@@ -482,7 +512,7 @@ export async function runSingleTeammate(
   if (options.signal?.aborted) return cancelAtBoundary("during model fallback handoff");
   if (lastResult) {
     lastResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
-    await publishResult(lastResult);
+    await publishResult(lastResult, cwd);
     publishTurnComplete(lastResult);
     return lastResult;
   }

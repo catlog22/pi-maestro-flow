@@ -28,6 +28,7 @@ import registerTeammateExtension, {
   setPersistentUi,
   settleAgent,
   switchConversationSession,
+  toStructuredResults,
   waitForTeammate,
   type TeammateRuntimeOptions,
 } from "../src/extension/index.ts";
@@ -39,6 +40,7 @@ import {
   normalizeGraphConcurrency,
   resolveVariables,
   runGraph,
+  runSingleTeammate,
   sendRpcMessage,
   STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS,
 } from "../src/runs/execution.ts";
@@ -449,23 +451,48 @@ test("runGraph results carry the task name for agent:// persistence", async () =
   assert.deepEqual(results[0].structuredOutput, { value: 3 });
 });
 
+test("direct failed runs retain the resolved task cwd without a completion observer", async () => {
+  const taskCwd = path.join(process.cwd(), "packages", "pi-maestro-teammate");
+  const result = await runSingleTeammate({
+    agent: "general",
+    task: "fail",
+    cwd: taskCwd,
+    outputSchema: {
+      type: "object",
+      properties: { value: { type: "integer" } },
+      required: ["value"],
+      additionalProperties: false,
+    },
+  }, {
+    baseCwd: process.cwd(),
+    spawnChildProcess: createScriptedSpawn("agentEnd", "provider failed"),
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.originCwd, taskCwd);
+});
+
 test("runGraph awaits result publication before releasing a dependent", async () => {
+  const taskCwd = path.join(process.cwd(), "packages", "pi-maestro-teammate");
   const tasks: NormalizedTask[] = [
     {
       agent: "general",
       name: "producer",
       prompt: "produce",
+      cwd: taskCwd,
       outputSchema: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false },
     },
     {
       agent: "general",
       name: "consumer",
       prompt: "consume {producer.value}",
+      cwd: taskCwd,
       outputSchema: { type: "object", properties: { seen: { type: "integer" } }, required: ["seen"], additionalProperties: false },
     },
   ];
   const baseSpawn = createStructuredSpawn([{ value: 7 }, { seen: 7 }]);
   const childStarts: boolean[] = [];
+  const publicationCwds: string[] = [];
   let producerPersisted = false;
   const spawn = ((...args: Parameters<typeof baseSpawn>) => {
     childStarts.push(producerPersisted);
@@ -475,7 +502,8 @@ test("runGraph awaits result publication before releasing a dependent", async ()
   const results = await runGraph(tasks, 2, {
     baseCwd: process.cwd(),
     spawnChildProcess: spawn,
-    onResultPublished: async (result) => {
+    onResultPublished: async (result, originCwd) => {
+      publicationCwds.push(originCwd);
       if (result.name !== "producer") return;
       await new Promise((resolve) => setTimeout(resolve, 10));
       producerPersisted = true;
@@ -483,7 +511,48 @@ test("runGraph awaits result publication before releasing a dependent", async ()
   });
 
   assert.deepEqual(childStarts, [false, true]);
+  assert.deepEqual(publicationCwds, [taskCwd, taskCwd]);
+  assert.equal(results[0].originCwd, taskCwd);
+  assert.equal(results[1].originCwd, taskCwd);
+  assert.ok(results[0].publicationId);
+  assert.ok(results[1].publicationId);
+  assert.notEqual(results[0].publicationId, results[1].publicationId);
+  assert.deepEqual(
+    toStructuredResults(results, process.cwd())?.map((entry) => ({
+      publicationId: entry.publicationId,
+      originCwd: entry.originCwd,
+    })),
+    results.map((result) => ({
+      publicationId: result.publicationId,
+      originCwd: taskCwd,
+    })),
+  );
   assert.deepEqual(results[1].structuredOutput, { seen: 7 });
+});
+
+test("publication observer failures stay non-fatal and are visible", async () => {
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
+  try {
+    const results = await runGraph([{
+      agent: "general",
+      name: "producer",
+      prompt: "produce",
+      outputSchema: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false },
+    }], 1, {
+      baseCwd: process.cwd(),
+      spawnChildProcess: createStructuredSpawn([{ value: 9 }]),
+      onResultPublished() {
+        throw new Error("persistence unavailable");
+      },
+    });
+    assert.equal(results[0].exitCode, 0);
+    assert.deepEqual(results[0].structuredOutput, { value: 9 });
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.ok(warnings.some((line) => line.includes("persistence unavailable")), warnings.join("\n"));
 });
 
 test("result publication waits for synchronously claimed durable work", async () => {
@@ -516,6 +585,39 @@ test("result publication waits for synchronously claimed durable work", async ()
   const publication = emitTeammateResultPublished(pi, result, process.cwd());
   assert.equal(durable, false);
   await publication;
+  assert.equal(durable, true);
+});
+
+test("result publication drains claimed work when an event listener throws", async () => {
+  let durable = false;
+  const pi = {
+    events: {
+      emit(_name: string, event: { waitUntil(promise: Promise<unknown>): void }) {
+        event.waitUntil(new Promise<void>((resolve) => {
+          setTimeout(() => {
+            durable = true;
+            resolve();
+          }, 10);
+        }));
+        throw new Error("listener failed");
+      },
+    },
+  } as unknown as ExtensionAPI;
+  const result: SingleResult = {
+    agent: "general",
+    task: "produce",
+    exitCode: 0,
+    messages: [{ role: "assistant", content: "done" }],
+    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cost: 0, turns: 1 },
+    model: "test/model",
+    correlationId: "published-listener-error",
+    durationMs: 1,
+  };
+
+  await assert.rejects(
+    () => emitTeammateResultPublished(pi, result, process.cwd()),
+    /listener failed/,
+  );
   assert.equal(durable, true);
 });
 

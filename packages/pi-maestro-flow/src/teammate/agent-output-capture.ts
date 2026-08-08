@@ -17,6 +17,7 @@ import { persistAgentOutputChecked } from "./agent-output-store.ts";
 
 interface StructuredResultLike {
   correlationId?: unknown;
+  publicationId?: unknown;
   originCwd?: unknown;
   name?: unknown;
   agent?: unknown;
@@ -30,6 +31,19 @@ interface StructuredResultLike {
 interface ProgressLike {
   correlationId?: unknown;
   name?: unknown;
+}
+
+/** Remove results already durably acknowledged by the per-result publication path. */
+export function filterUnacknowledgedResults(
+  results: unknown,
+  acknowledged: { has(publicationId: string): boolean },
+): unknown {
+  if (!Array.isArray(results)) return results;
+  return results.filter((entry) => {
+    if (!entry || typeof entry !== "object") return true;
+    const publicationId = (entry as { publicationId?: unknown }).publicationId;
+    return typeof publicationId !== "string" || !acknowledged.has(publicationId);
+  });
 }
 
 /** Last non-empty assistant message text; falls back to the last non-empty message. */
@@ -123,12 +137,16 @@ export async function persistStructuredResults(
 }
 
 /** Register one result's persistence promise with a teammate publication event. */
-export function capturePublishedAgentResult(event: unknown): boolean {
+export function capturePublishedAgentResult(
+  event: unknown,
+  onStored?: (publicationId: string) => void,
+): boolean {
   if (!event || typeof event !== "object") return false;
   const payload = event as { result?: unknown; waitUntil?: unknown };
   if (typeof payload.waitUntil !== "function" || !payload.result) return false;
-  const result = payload.result as { correlationId?: unknown };
+  const result = payload.result as { correlationId?: unknown; publicationId?: unknown };
   const correlationId = typeof result.correlationId === "string" ? result.correlationId : "unknown";
+  const publicationId = typeof result.publicationId === "string" ? result.publicationId : undefined;
   const persistence = persistStructuredResults([payload.result], undefined).then((summary) => {
     if (summary.stored !== 1) {
       throw new Error(
@@ -136,6 +154,7 @@ export function capturePublishedAgentResult(event: unknown): boolean {
         + `(stored=${summary.stored}, skipped=${summary.skipped}, failed=${summary.failed})`,
       );
     }
+    if (publicationId) onStored?.(publicationId);
   });
   (payload.waitUntil as (promise: Promise<unknown>) => void)(persistence);
   return true;

@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, before } from "node:test";
 
-const { capturePublishedAgentResult, persistStructuredResults } = await import("../src/teammate/agent-output-capture.ts");
+const {
+  capturePublishedAgentResult,
+  filterUnacknowledgedResults,
+  persistStructuredResults,
+} = await import("../src/teammate/agent-output-capture.ts");
 const { readAgentOutput } = await import("../src/teammate/agent-output-store.ts");
 
 let root: string;
@@ -178,9 +182,11 @@ test("persistStructuredResults writes a private record readable by correlationId
 
 test("capturePublishedAgentResult acknowledges persistence before release", async () => {
   let persistence: Promise<unknown> | undefined;
+  let acknowledged: string | undefined;
   const claimed = capturePublishedAgentResult({
     result: {
       correlationId: "published-cid-1",
+      publicationId: "publication-1",
       originCwd: root,
       name: "published-node",
       agent: "general",
@@ -189,12 +195,27 @@ test("capturePublishedAgentResult acknowledges persistence before release", asyn
     waitUntil(promise: Promise<unknown>) {
       persistence = promise;
     },
+  }, (publicationId) => {
+    acknowledged = publicationId;
   });
 
   assert.equal(claimed, true);
   assert.ok(persistence);
   await persistence;
+  assert.equal(acknowledged, "publication-1");
   assert.deepEqual((await readAgentOutput("published-cid-1", root)).output, { ready: true });
+});
+
+test("compatibility capture excludes only the acknowledged publication instance", () => {
+  const results = [
+    { correlationId: "shared-cid", publicationId: "publication-1", output: "primary" },
+    { correlationId: "shared-cid", publicationId: "publication-2", output: "warm turn" },
+    { correlationId: "legacy-cid", output: "fallback" },
+  ];
+  assert.deepEqual(
+    filterUnacknowledgedResults(results, new Set(["publication-1"])),
+    [results[1], results[2]],
+  );
 });
 
 test("capturePublishedAgentResult rejects an unpersistable publication", async () => {
@@ -202,6 +223,7 @@ test("capturePublishedAgentResult rejects an unpersistable publication", async (
   assert.equal(capturePublishedAgentResult({
     result: {
       correlationId: "published-cid-oversized",
+      publicationId: "publication-oversized",
       originCwd: root,
       agent: "general",
       structuredOutput: { data: "x".repeat(600_000) },

@@ -21,6 +21,10 @@ export interface SingleResult {
   usage: Usage;
   model: string;
   correlationId: string;
+  /** Unique identity of one published turn; stable across its compatibility projections. */
+  publicationId?: string;
+  /** Resolved task cwd used for durable result projection. */
+  originCwd?: string;
   durationMs: number;
   /** Number of child tool completions observed before this result settled. */
   toolCount?: number;
@@ -358,7 +362,9 @@ export interface SettledAgentRecord {
  */
 export interface StructuredResult {
   correlationId: string;
-  /** Workspace cwd captured by the dispatch owner at admission time. */
+  /** Unique identity of one published turn. */
+  publicationId?: string;
+  /** Workspace cwd captured from the resolved task execution. */
   originCwd: string;
   /** Task name; absent when the dispatch had none. */
   name?: string;

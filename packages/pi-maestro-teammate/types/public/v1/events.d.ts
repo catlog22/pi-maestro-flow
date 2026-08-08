@@ -7,6 +7,7 @@
  */
 import type { AgentActivity, AgentProgressSnapshot, AgentRunOutcome, AgentStatus, StructuredResult, TeammateResultPublishedEvent } from "../../shared/types.ts";
 import type { SessionHostSnapshot, WindowThreadSnapshot } from "../../sessions/session-core.ts";
+export type { TeammateResultPublishedEvent } from "../../shared/types.ts";
 export { TEAMMATE_COMPLETE_EVENT, TEAMMATE_MESSAGE_EVENT, TEAMMATE_OPEN_AGENT_EVENT, TEAMMATE_RESULT_PUBLISHED_EVENT, TEAMMATE_STARTED_EVENT, TEAMMATE_VIEWING_EVENT, } from "../../shared/types.ts";
 export { SESSION_HOST_REGISTRY_EVENT, WINDOW_THREAD_EVENT, } from "../../sessions/session-core.ts";
 /** Tool identity of one child tool call, as reported inside a progress payload. */

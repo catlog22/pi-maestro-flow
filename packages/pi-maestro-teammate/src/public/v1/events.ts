@@ -16,6 +16,7 @@ import type {
 } from "../../shared/types.ts";
 import type { SessionHostSnapshot, WindowThreadSnapshot } from "../../sessions/session-core.ts";
 
+export type { TeammateResultPublishedEvent } from "../../shared/types.ts";
 export {
   TEAMMATE_COMPLETE_EVENT,
   TEAMMATE_MESSAGE_EVENT,

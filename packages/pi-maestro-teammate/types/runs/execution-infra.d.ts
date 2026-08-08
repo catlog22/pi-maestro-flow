@@ -159,7 +159,7 @@ export interface RunTeammateOptions {
      * Runs once when the final consumable result is published, before the caller
      * or a DAG dependent can observe it. Observer failures are non-fatal.
      */
-    onResultPublished?: (result: SingleResult) => void | Promise<void>;
+    onResultPublished?: (result: SingleResult, originCwd: string) => void | Promise<void>;
     onTurnComplete?: (result: SingleResult, terminalStatus?: AgentTerminalStatus) => void;
     /** Physical child-process reclamation, independent of logical turn settlement. */
     onReclamationOutcome?: (correlationId: string, outcome: ChildReclamationOutcome) => void;

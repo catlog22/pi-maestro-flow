@@ -1584,7 +1584,7 @@ export async function handleProxyRequest(
         onReclamationOutcome: (childId, outcome) => {
           recordChildReclamationOutcome(state, childId, outcome);
         },
-        onResultPublished: (result) => emitTeammateResultPublished(pi, result, dispatchOriginCwd),
+        onResultPublished: (result, originCwd) => emitTeammateResultPublished(pi, result, originCwd),
         onTurnComplete: (result, terminalStatus) => {
           const canonicalStatus = terminalStatusForResult(result, terminalStatus);
           result.terminalStatus = canonicalStatus;
