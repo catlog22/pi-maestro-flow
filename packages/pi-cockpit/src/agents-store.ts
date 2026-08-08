@@ -4,11 +4,25 @@ import type {
 	TeammateStartedEvent,
 } from "pi-maestro-teammate/v1/events";
 import type { AgentProgressSnapshot } from "pi-maestro-teammate/v1/types";
-import { isAgentStalled, TEAMMATE_STALL_TIMEOUT_MS } from "pi-maestro-teammate/v1/types";
 import { sanitizeExtensionStatusText } from "./extension-status.ts";
 import type { AgentRow, AgentStatus } from "./types.ts";
 
 const STATUS_TEXT_MAX = 48;
+const TEAMMATE_STALL_TIMEOUT_MS = 30_000;
+const TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS = 5 * 60_000;
+const EXPECTED_SILENCE_PHASES = new Set(["starting", "restoring", "prompting", "compacting", "continuing", "settling"]);
+
+function isAgentStalled(
+	projection: { status: string; phase?: string; resultReadyAt?: number; lastActivityAt?: number; pendingInteractions?: number },
+	now: number,
+): boolean {
+	if ((projection.status !== "running" && projection.status !== "pending") || projection.resultReadyAt !== undefined) return false;
+	if ((projection.pendingInteractions ?? 0) > 0 || projection.lastActivityAt === undefined) return false;
+	const idleCeiling = projection.status === "pending" || projection.phase === "retrying" || (projection.phase !== undefined && EXPECTED_SILENCE_PHASES.has(projection.phase))
+		? TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS
+		: TEAMMATE_STALL_TIMEOUT_MS;
+	return now - projection.lastActivityAt >= idleCeiling;
+}
 /** Selected-session output kept for the expandable fixed detail region. */
 export const SESSION_CONTENT_MAX = 2_048;
 

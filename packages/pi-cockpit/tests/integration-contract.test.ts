@@ -59,19 +59,20 @@ test("Cockpit session bar, command, and shortcut contracts stay stable", () => {
   );
 
   const shortcutConstants = Object.fromEntries(
-    [...source.matchAll(/const (BASH_BG_OVERLAY_KEY|AGENT_OVERLAY_KEY|SIDEBAR_RESIZE_KEY|SIDEBAR_FOCUS_KEY|SESSION_DETAIL_TOGGLE_KEY) = "([^"]+)"/g)]
+    [...source.matchAll(/const (BASH_BG_OVERLAY_KEY|AGENT_OVERLAY_KEY|WINDOW_MONITOR_TOGGLE_KEY|SIDEBAR_RESIZE_KEY|SIDEBAR_FOCUS_KEY|SESSION_DETAIL_TOGGLE_KEY) = "([^"]+)"/g)]
       .map((match) => [match[1], match[2]]),
   );
   assert.deepEqual(shortcutConstants, {
     BASH_BG_OVERLAY_KEY: "alt+j",
     AGENT_OVERLAY_KEY: "alt+a",
+    WINDOW_MONITOR_TOGGLE_KEY: "alt+w",
     SIDEBAR_RESIZE_KEY: "ctrl+shift+r",
     SIDEBAR_FOCUS_KEY: "alt+shift+l",
     SESSION_DETAIL_TOGGLE_KEY: "alt+shift+r",
   });
   assert.deepEqual(
     [...source.matchAll(/pi\.registerShortcut\(([^,]+),/g)].map((match) => match[1]),
-    ["AGENT_OVERLAY_KEY", "BASH_BG_OVERLAY_KEY", "SIDEBAR_RESIZE_KEY", "SESSION_DETAIL_TOGGLE_KEY", "SIDEBAR_FOCUS_KEY"],
+    ["AGENT_OVERLAY_KEY", "WINDOW_MONITOR_TOGGLE_KEY", "BASH_BG_OVERLAY_KEY", "SIDEBAR_RESIZE_KEY", "SESSION_DETAIL_TOGGLE_KEY", "SIDEBAR_FOCUS_KEY"],
   );
 
   assert.match(source, /data !== "\\x1b\[D" && data !== "\\x1b\[C"/);
@@ -216,7 +217,7 @@ test("Cockpit owns a fixed, toggleable and scrollable agent session region above
 	assert.match(source, /reconcileSurface[\s\S]*?installWidgets\(ctx\)[\s\S]*?setWidget\(SESSION_BAR_WIDGET_KEY, undefined\)[\s\S]*?installSessionBar\(ctx\)/);
 	assert.match(source, /detailUp = "\\x1b\[1;4A"/);
 	assert.match(source, /detailDown = "\\x1b\[1;4B"/);
-	assert.match(source, /sessionDetailScroll = next/);
+	assert.match(source, /sessionUi\.setScroll\(endpoint\.id, next\.offset, next\.following\)/);
 	assert.match(source, /uninstallUi[\s\S]*?sessionDetailScrollDisposer\?\.\(\)[\s\S]*?agentScrollDisposer\?\.\(\)/);
 });
 

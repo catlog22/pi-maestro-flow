@@ -79,3 +79,75 @@ test("image-only input is handled instead of leaking to main", async () => {
 	assert.equal(host.notifications[0]?.type, "warning");
 	assert.match(host.notifications[0]?.message ?? "", /must be reattached/);
 });
+
+test("SessionHostRegistry sender is preferred and receives the canonical endpoint selector", async () => {
+	const host = ui();
+	const sessionRequests: unknown[] = [];
+	let mailboxDeliveries = 0;
+	const action = await routeAgentInput(
+		{ text: "continue", source: "interactive", streamingBehavior: "followUp" },
+		{ ...target, endpointId: "pi-session/v1/workspace/owner/nonce/agent/corr-builder" },
+		{
+			sessions: {
+				async send(request) {
+					sessionRequests.push(request);
+					return { delivered: true, endpointId: request.selector };
+				},
+			},
+			mailbox: registry(async () => {
+				mailboxDeliveries++;
+				return { delivered: true };
+			}),
+		},
+		host.value,
+	);
+	assert.equal(action, "handled");
+	assert.deepEqual(sessionRequests, [{
+		selector: "pi-session/v1/workspace/owner/nonce/agent/corr-builder",
+		message: "continue",
+		mode: "follow_up",
+		source: "user",
+	}]);
+	assert.equal(mailboxDeliveries, 0);
+});
+
+test("MessageRouter route is used when the registry does not expose send", async () => {
+	const host = ui();
+	const selectors: string[] = [];
+	await routeAgentInput(
+		{ text: "steer now", source: "interactive", streamingBehavior: "steer" },
+		{ ...target, routeSelector: "canonical-agent" },
+		{
+			sessions: {
+				router: {
+					async route(request) {
+						selectors.push(request.selector);
+						return { delivered: true };
+					},
+				},
+			},
+		},
+		host.value,
+	);
+	assert.deepEqual(selectors, ["canonical-agent"]);
+});
+
+test("registry rejection is definitive and never retries through Mailbox", async () => {
+	const host = ui();
+	let mailboxDeliveries = 0;
+	await routeAgentInput(
+		{ text: "do not duplicate", source: "interactive" },
+		target,
+		{
+			sessions: { send: async () => ({ delivered: false, error: "settled" }) },
+			mailbox: registry(async () => {
+				mailboxDeliveries++;
+				return { delivered: true };
+			}),
+		},
+		host.value,
+	);
+	assert.equal(mailboxDeliveries, 0);
+	assert.deepEqual(host.restored, ["do not duplicate"]);
+	assert.match(host.notifications[0]?.message ?? "", /settled/);
+});

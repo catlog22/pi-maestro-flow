@@ -40,8 +40,19 @@ import { shouldAnimateFrames, shouldAnimateSidebar, shouldRunTick, type TickPoli
 import { TodoStore } from "./todo-store.ts";
 import { makeTodoWidget, makeAgentWidget, terminalRows, visibleAgentRows } from "./stack-widget.ts";
 import { agentListWindowRows, scrollBy, type AgentScrollState } from "./agent-scroll.ts";
-import { agentSessionColor, makeSessionBarWidget, SESSION_BAR_WIDGET_KEY, MAIN_SESSION_LABEL } from "./session-bar.ts";
-import { makeSessionDetailWidget, SESSION_DETAIL_WIDGET_KEY, DEFAULT_SESSION_DETAIL_ROWS, sessionDetailBodyLength, sessionDetailWindowRows, type SessionDetailScrollState } from "./session-detail.ts";
+import { agentSessionColor, assignedAgentColor, makeAgentBarWidget, renderAgentBar, SESSION_BAR_WIDGET_KEY } from "./session-bar.ts";
+import { makeSessionDetailWidget, SESSION_DETAIL_WIDGET_KEY, DEFAULT_SESSION_DETAIL_ROWS, sessionDetailBodyLength, sessionDetailWindowRows } from "./session-detail.ts";
+import {
+	EndpointStore,
+	SESSION_HOST_REGISTRY_KEY,
+	isSessionHostRegistryLike,
+	type CockpitEndpoint,
+	type SessionHostRegistryLike,
+} from "./endpoint-store.ts";
+import { SessionUiState } from "./session-ui-state.ts";
+import { nextSessionTabId } from "./session-tabs.ts";
+import { renderWindowBar } from "./window-bar.ts";
+import { makeWindowThreadWidget, windowThreadBody } from "./window-thread-view.ts";
 import { agentDetailRows, agentPanelRows } from "./viewport.ts";
 import { routeAgentInput } from "./input-routing.ts";
 import { activeThemeName, ThemePicker } from "./theme-picker.ts";
@@ -85,12 +96,32 @@ import {
 } from "./types.ts";
 import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
 
+export {
+	EndpointStore,
+	LEGACY_MAIN_ENDPOINT_ID,
+	SESSION_HOST_REGISTRY_EVENT,
+	SESSION_HOST_REGISTRY_KEY,
+} from "./endpoint-store.ts";
+export { SessionUiState } from "./session-ui-state.ts";
+export {
+	SESSION_TAB_ACTION_FIRST_WIDTH,
+	nextSessionTabId,
+	orderedSessionTabs,
+	renderSessionTabLine,
+	sessionTabWidth,
+	sessionTabWidthMode,
+} from "./session-tabs.ts";
+export { AGENT_BAR_WIDGET_KEY, makeAgentBarWidget, renderAgentBar } from "./agent-bar.ts";
+export { makeWindowBarWidget, renderWindowBar } from "./window-bar.ts";
+export { makeWindowThreadWidget, renderWindowThreadView, windowThreadBody } from "./window-thread-view.ts";
+
 const MAILBOX_REGISTRY_KEY = Symbol.for("pi-maestro-teammate.mailbox-registry");
 
 const FOOTER_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 const BASH_BG_OVERLAY_KEY = "alt+j";
 const AGENT_OVERLAY_KEY = "alt+a";
 const SIDEBAR_RESIZE_KEY = "ctrl+shift+r";
+const WINDOW_MONITOR_TOGGLE_KEY = "alt+w";
 const SIDEBAR_FOCUS_KEY = "alt+shift+l";
 const SESSION_DETAIL_TOGGLE_KEY = "alt+shift+r";
 const COCKPIT_STATUS_KEY = "cockpit";
@@ -253,6 +284,8 @@ function isCompletePayload(value: unknown): value is CompletePayload {
 
 export default function (pi: ExtensionAPI): void {
 	const agents = new AgentsStore();
+	const endpoints = new EndpointStore({ getLegacyAgents: () => visibleAgentRows(agents.snapshot()) });
+	const sessionUi = new SessionUiState();
 	const bashBg = new BashBgStore();
 	const todos = new TodoStore();
 	const maestro = new MaestroStore();
@@ -320,9 +353,6 @@ export default function (pi: ExtensionAPI): void {
 	let agentScrollDisposer: (() => void) | undefined;
 	/** Scroll window over the below-input agent roster (tail-following default). */
 	let agentListScroll: AgentScrollState = { offset: 0, following: true };
-	/** Explicit progressive-disclosure state for the selected agent session. */
-	let sessionDetailVisible = true;
-	let sessionDetailScroll: SessionDetailScrollState = { offset: 0, following: true };
 	let lastPublishedInputTarget: string | undefined;
 	let dockEffectiveVisible = false;
 	let surfaceState: CockpitSurfaceState = "disabled";
@@ -334,6 +364,7 @@ export default function (pi: ExtensionAPI): void {
 	let firstUserText: string | undefined;
 	let titleRequested = false;
 	let titleFrameIndex = 0;
+	let mainOutputRevision = 0;
 	// Session fence for async title generation: bumped on session start/shutdown
 	// so a stale request can never write into a newer session (MW-3).
 	let titleGeneration = 0;
@@ -543,14 +574,16 @@ export default function (pi: ExtensionAPI): void {
 			const now = Date.now();
 			nowSnapshot = now;
 			activeBashBgOverlay?.tick(now);
+			const agentCountBeforePrune = agents.size;
+			agents.snapshot(now);
+			const agentsPruned = agents.size !== agentCountBeforePrune;
+			if (agentsPruned) endpoints.refreshLegacy();
 			if (needsTick()) {
 				// Static mode keeps the loop alive only so lingering rows can expire
 				// (prune is read-driven). The rows themselves are static, so skip the
 				// full repaint and repaint just once when a prune removed something.
 				if (config.staticMode) {
-					const before = agents.size;
-					agents.snapshot();
-					if (agents.size !== before) req();
+					if (agentsPruned) req();
 				} else {
 					titleFrameIndex += 1;
 					refreshAmbient(now);
@@ -655,34 +688,128 @@ export default function (pi: ExtensionAPI): void {
 		ctx.ui.setWidget(AGENT_WIDGET_KEY, undefined);
 	};
 
-	const selectedAgentTarget = (): { row: AgentRow; label: string; color: ThemeColor } | undefined => {
-		const viewingId = agents.getViewingAgent();
-		if (!viewingId) return undefined;
-		const row = visibleAgentRows(agents.snapshot()).find((candidate) => candidate.correlationId === viewingId);
-		if (!row) return undefined;
+	const sessionRegistry = (): SessionHostRegistryLike | undefined => {
+		const globals = globalThis as typeof globalThis & Record<symbol, unknown>;
+		const candidate = globals[SESSION_HOST_REGISTRY_KEY];
+		return isSessionHostRegistryLike(candidate) ? candidate : undefined;
+	};
+
+	const selectedEndpoint = (): CockpitEndpoint | undefined => {
+		const id = sessionUi.selectedId("agent");
+		return id ? endpoints.get(id) : undefined;
+	};
+
+	const selectedWindowEndpoint = (): CockpitEndpoint | undefined => {
+		const id = sessionUi.selectedId("window");
+		const endpoint = id ? endpoints.get(id) : undefined;
+		return endpoint?.kind === "window" ? endpoint : undefined;
+	};
+
+	const selectedAgentCorrelationId = (): string | undefined => {
+		if (sessionUi.mode !== "agent") return undefined;
+		const endpoint = selectedEndpoint();
+		return endpoint?.kind === "agent" ? endpoint.correlationId : undefined;
+	};
+
+	const readEditorDraft = (ctx: ExtensionContext | undefined): string | undefined => {
+		if (!ctx || !isTuiContext(ctx)) return undefined;
+		try {
+			return ctx.ui.getEditorText();
+		} catch {
+			return undefined;
+		}
+	};
+
+	const syncViewingSelection = (): void => {
+		agents.setViewingAgent(sessionUi.mode === "agent" ? selectedAgentCorrelationId() : undefined);
+	};
+
+	const reconcileEndpointUi = (): void => {
+		const snapshot = endpoints.snapshot();
+		const previousMode = sessionUi.mode;
+		const previousId = sessionUi.selectedId(previousMode);
+		const editorDraft = readEditorDraft(lastCtx);
+		if (previousId && editorDraft !== undefined) sessionUi.setDraft(previousId, editorDraft);
+
+		const agentResult = sessionUi.reconcile("agent", snapshot.endpoints, snapshot.mainEndpointId);
+		const windowResult = sessionUi.reconcile("window", snapshot.windows, snapshot.windows[0]?.id);
+		const nextMode = snapshot.viewMode === "windows" ? "window" : "agent";
+		sessionUi.setMode(nextMode);
+		syncViewingSelection();
+
+		const activeResult = nextMode === "window" ? windowResult : agentResult;
+		const activeId = sessionUi.selectedId(nextMode);
+		if ((previousMode !== nextMode || activeResult.selectionChanged) && activeId && lastCtx && isTuiContext(lastCtx)) {
+			try { lastCtx.ui.setEditorText(sessionUi.endpoint(activeId).draft); } catch { /* best effort */ }
+		} else if (previousId === undefined && activeId && editorDraft !== undefined) {
+			sessionUi.setDraft(activeId, editorDraft);
+		}
+		req();
+	};
+	endpoints.subscribe(() => reconcileEndpointUi(), { emitCurrent: false });
+
+	const selectEndpoint = (id: string): void => {
+		const target = endpoints.get(id);
+		if (!target || target.kind === "window") return;
+		const previousId = sessionUi.selectedId("agent");
+		const editorDraft = readEditorDraft(lastCtx);
+		if (previousId && editorDraft !== undefined) sessionUi.setDraft(previousId, editorDraft);
+		sessionUi.select(id, "agent");
+		syncViewingSelection();
+		if (previousId !== id && lastCtx && isTuiContext(lastCtx)) {
+			try { lastCtx.ui.setEditorText(sessionUi.endpoint(id).draft); } catch { /* best effort */ }
+		}
+		req();
+	};
+
+	const selectWindow = (id: string): void => {
+		const target = endpoints.get(id);
+		if (!target || target.kind !== "window") return;
+		const previousId = sessionUi.selectedId("window");
+		const editorDraft = readEditorDraft(lastCtx);
+		if (previousId && editorDraft !== undefined) sessionUi.setDraft(previousId, editorDraft);
+		sessionUi.select(id, "window");
+		if (previousId !== id && lastCtx && isTuiContext(lastCtx)) {
+			try { lastCtx.ui.setEditorText(sessionUi.endpoint(id).draft); } catch { /* best effort */ }
+		}
+		req();
+	};
+
+	const selectAgent = (correlationId: string, toggle = false): void => {
+		const endpoint = endpoints.findAgent(correlationId);
+		if (!endpoint) return;
+		const snapshot = endpoints.snapshot();
+		selectEndpoint(toggle && sessionUi.selectedId("agent") === endpoint.id
+			? snapshot.mainEndpointId
+			: endpoint.id);
+	};
+
+	const selectedAgentTarget = (): { endpoint: CockpitEndpoint; row?: AgentRow; label: string; color: ThemeColor } | undefined => {
+		if (sessionUi.mode !== "agent") return undefined;
+		const endpoint = selectedEndpoint();
+		if (!endpoint || endpoint.kind !== "agent" || !endpoint.correlationId) return undefined;
+		const row = visibleAgentRows(agents.snapshot()).find(
+			(candidate) => candidate.correlationId === endpoint.correlationId,
+		) ?? endpoint.agentRow;
 		return {
-			row,
-			label: row.name || row.role || row.agent || "agent",
-			color: agentSessionColor(row, nowSnapshot),
+			endpoint,
+			...(row ? { row } : {}),
+			label: endpoint.label,
+			color: row
+				? agentSessionColor(row, nowSnapshot)
+				: assignedAgentColor(endpoint.correlationId),
 		};
 	};
 
 	const publishInputTarget = (force = false): void => {
 		const target = selectedAgentTarget();
-		const fingerprint = target ? `${target.row.correlationId}:${target.label}:${target.color}` : "@main";
+		const fingerprint = target ? `${target.endpoint.id}:${target.label}:${target.color}` : "@main";
 		if (!force && fingerprint === lastPublishedInputTarget) return;
 		lastPublishedInputTarget = fingerprint;
 		const payload: CockpitInputTargetV1 = target
 			? { version: 1, label: target.label, color: target.color }
 			: { version: 1 };
 		pi.events.emit(COCKPIT_INPUT_TARGET_EVENT, payload);
-	};
-
-	/** Live state for the session bar's right-edge session indicator. */
-	const inputStatusState = (): { label: string; color: ThemeColor } => {
-		const target = selectedAgentTarget();
-		if (target) return { label: target.label, color: target.color };
-		return { label: MAIN_SESSION_LABEL, color: running ? "warning" : "muted" };
 	};
 
 	const ensureEditorBottomController = (ctx: ExtensionContext): EditorBottomController => {
@@ -776,11 +903,14 @@ export default function (pi: ExtensionAPI): void {
 			capturedTui = tui;
 			ensureViewportStability(tui);
 			return makeAgentWidget({
-				getAgents: () => agents.snapshot(),
+				getAgents: () => sessionUi.mode === "window" ? [] : agents.snapshot(),
 				getConfig: () => config,
 				isRunning: () => running,
 				isAnimating,
-				hasSessionDetail: () => sessionDetailVisible && agents.getViewingAgent() !== undefined,
+				hasSessionDetail: () => {
+					const endpoint = selectedEndpoint();
+					return sessionUi.mode === "agent" && endpoint?.kind === "agent" && sessionUi.endpoint(endpoint.id).detail;
+				},
 				getScroll: () => agentListScroll,
 				setScroll: (next) => {
 					agentListScroll = next;
@@ -835,12 +965,30 @@ export default function (pi: ExtensionAPI): void {
 			(tui, theme) => {
 				capturedTui = tui;
 				ensureViewportStability(tui);
-				return makeSessionBarWidget({
-					getAgents: () => agents.snapshot(),
+				const agentWidget = makeAgentBarWidget({
+					getEndpoints: () => endpoints.snapshot().endpoints,
+					getState: () => sessionUi,
 					getNow: () => nowSnapshot,
 					isMainRunning: () => running,
-					getCurrentSession: inputStatusState,
+					getContextPressure: () => {
+						try {
+							const percent = ctx.getContextUsage()?.percent;
+							return typeof percent === "number" && Number.isFinite(percent) ? percent : undefined;
+						} catch {
+							return undefined;
+						}
+					},
 				})(tui, theme);
+				return {
+					render(width: number): string[] {
+						const snapshot = endpoints.snapshot();
+						return sessionUi.mode === "window"
+							? renderWindowBar(snapshot.windows, sessionUi, snapshot.monitoredEndpointIds, width, theme)
+							: agentWidget.render(width);
+					},
+					invalidate(): void { agentWidget.invalidate(); },
+					dispose(): void { agentWidget.dispose(); },
+				};
 			},
 			{ placement: "aboveEditor" },
 		);
@@ -919,9 +1067,7 @@ export default function (pi: ExtensionAPI): void {
 				// into the main conversation, so the main agent keeps working.
 				if (!id.startsWith("agent:")) return;
 				const cid = id.slice("agent:".length);
-				agents.setViewingAgent(agents.getViewingAgent() === cid ? undefined : cid);
-				sessionDetailScroll = { offset: 0, following: true };
-				req();
+				selectAgent(cid, true);
 			},
 			getNavWidth: () => capturedTui?.terminal.columns ?? 80,
 			getTui: () => capturedTui,
@@ -1098,12 +1244,38 @@ export default function (pi: ExtensionAPI): void {
 			(tui, theme) => {
 				capturedTui = tui;
 				ensureViewportStability(tui);
-				return makeSessionDetailWidget({
+				const agentDetail = makeSessionDetailWidget({
 					getAgents: () => agents.snapshot(),
-					getViewingId: () => agents.getViewingAgent(),
-					getVisible: () => sessionDetailVisible,
-					getScroll: () => sessionDetailScroll,
+					getViewingId: selectedAgentCorrelationId,
+					getVisible: () => {
+						const endpoint = selectedEndpoint();
+						return sessionUi.mode === "agent" && endpoint?.kind === "agent" && sessionUi.endpoint(endpoint.id).detail;
+					},
+					getScroll: () => {
+						const endpoint = selectedEndpoint();
+						if (!endpoint) return { offset: 0, following: true };
+						const state = sessionUi.endpoint(endpoint.id);
+						return { offset: state.scroll, following: state.followTail };
+					},
 				})(tui, theme);
+				const windowDetail = makeWindowThreadWidget({
+					getWindow: selectedWindowEndpoint,
+					getEntries: () => endpoints.snapshot().thread,
+					getVisible: () => sessionUi.mode === "window" && Boolean(selectedWindowEndpoint()),
+					getScroll: () => {
+						const endpoint = selectedWindowEndpoint();
+						if (!endpoint) return { offset: 0, following: true };
+						const state = sessionUi.endpoint(endpoint.id);
+						return { offset: state.scroll, following: state.followTail };
+					},
+				})(tui, theme);
+				return {
+					render(width: number): string[] {
+						return sessionUi.mode === "window" ? windowDetail.render(width) : agentDetail.render(width);
+					},
+					invalidate(): void { agentDetail.invalidate(); windowDetail.invalidate(); },
+					dispose(): void { agentDetail.dispose(); windowDetail.dispose(); },
+				};
 			},
 			{ placement: "aboveEditor" },
 		);
@@ -1128,17 +1300,15 @@ export default function (pi: ExtensionAPI): void {
 			if (ambientKeysShouldYield(capturedTui)) return undefined;
 			const text = ctx.ui.getEditorText();
 			if (text.trim() !== "") return undefined;
-			const roster = visibleAgentRows(agents.snapshot());
-			const viewingId = agents.getViewingAgent();
+			const snapshot = endpoints.snapshot();
 			const delta = data === "\x1b[C" ? 1 : -1;
-			const total = roster.length + 1; // [main, ...agents]
-			const current = viewingId
-				? Math.max(0, roster.findIndex((row) => row.correlationId === viewingId)) + 1
-				: 0;
-			const next = (current + delta + total) % total;
-			agents.setViewingAgent(next === 0 ? undefined : roster[next - 1].correlationId);
-			sessionDetailScroll = { offset: 0, following: true };
-			req();
+			if (sessionUi.mode === "window") {
+				const next = nextSessionTabId(snapshot.windows, sessionUi.selectedId("window"), delta);
+				if (next) selectWindow(next);
+			} else {
+				const next = nextSessionTabId(snapshot.endpoints, sessionUi.selectedId("agent"), delta);
+				if (next) selectEndpoint(next);
+			}
 			return { consume: true };
 		});
 		// Alt+Shift+↑/↓ scroll the selected agent's fixed session content.
@@ -1153,16 +1323,50 @@ export default function (pi: ExtensionAPI): void {
 			const down = data === detailDown || data === legacyDetailDown;
 			if (!up && !down) return undefined;
 			if (ambientKeysShouldYield(capturedTui)) return undefined;
-			const viewingId = agents.getViewingAgent();
-			if (!sessionDetailVisible || !viewingId) return undefined;
 			const width = capturedTui?.terminal?.columns ?? 80;
 			const rows = capturedTui?.terminal?.rows;
+			if (sessionUi.mode === "window") {
+				const endpoint = selectedWindowEndpoint();
+				if (!endpoint) return undefined;
+				const endpointState = sessionUi.endpoint(endpoint.id);
+				const total = windowThreadBody(
+					endpoint,
+					endpoints.snapshot().thread.filter((entry) =>
+						entry.peerOwnerId === endpoint.registryEndpoint?.ownerId
+						&& entry.peerOwnerNonce === endpoint.registryEndpoint?.ownerNonce
+					),
+					width,
+					{ fg: (_color: string, value: string) => value, bold: (value: string) => value } as Theme,
+				).length;
+				const budget = Math.max(1, agentDetailRows(rows) ?? DEFAULT_SESSION_DETAIL_ROWS);
+				const next = scrollBy(
+					{ offset: endpointState.scroll, following: endpointState.followTail },
+					up ? -1 : 1,
+					total,
+					budget,
+				);
+				if (next.offset !== endpointState.scroll || next.following !== endpointState.followTail) {
+					sessionUi.setScroll(endpoint.id, next.offset, next.following);
+					req();
+				}
+				return { consume: true };
+			}
+			const endpoint = selectedEndpoint();
+			const viewingId = selectedAgentCorrelationId();
+			if (!endpoint || endpoint.kind !== "agent" || !viewingId) return undefined;
+			const endpointState = sessionUi.endpoint(endpoint.id);
+			if (!endpointState.detail) return undefined;
 			const total = sessionDetailBodyLength(agents.snapshot(), viewingId, width);
 			const maxRows = agentDetailRows(rows) ?? DEFAULT_SESSION_DETAIL_ROWS;
 			const budget = sessionDetailWindowRows(total, maxRows);
-			const next = scrollBy(sessionDetailScroll, up ? -1 : 1, total, Math.max(1, budget));
-			if (next.offset !== sessionDetailScroll.offset || next.following !== sessionDetailScroll.following) {
-				sessionDetailScroll = next;
+			const next = scrollBy(
+				{ offset: endpointState.scroll, following: endpointState.followTail },
+				up ? -1 : 1,
+				total,
+				Math.max(1, budget),
+			);
+			if (next.offset !== endpointState.scroll || next.following !== endpointState.followTail) {
+				sessionUi.setScroll(endpoint.id, next.offset, next.following);
 				req();
 			}
 			return { consume: true };
@@ -1177,7 +1381,8 @@ export default function (pi: ExtensionAPI): void {
 			const roster = visibleAgentRows(agents.snapshot());
 			// A focused session collapses the roster to its summary line, so there
 			// are no roster rows to scroll — leave the keys to the surface below.
-			if (sessionDetailVisible && agents.getViewingAgent() !== undefined) return undefined;
+			const focused = selectedEndpoint();
+			if (sessionUi.mode === "agent" && focused?.kind === "agent" && sessionUi.endpoint(focused.id).detail) return undefined;
 			const terminalHeight = capturedTui?.terminal?.rows;
 			const sharedPanel = agentPanelRows(terminalHeight);
 			const budget = agentListWindowRows(
@@ -1273,6 +1478,7 @@ export default function (pi: ExtensionAPI): void {
 			pi.events.on(TEAMMATE_STARTED_EVENT, (payload) => {
 				if (!isStartedPayload(payload)) return;
 				agents.applyStarted(payload);
+				endpoints.refreshLegacy();
 				// A background agent needs the loop to keep its elapsed/stall repaints
 				// alive even after the foreground turn ended (SB-4).
 				syncTick();
@@ -1281,12 +1487,14 @@ export default function (pi: ExtensionAPI): void {
 			pi.events.on(TEAMMATE_MESSAGE_EVENT, (payload) => {
 				if (!isProgressPayload(payload)) return;
 				agents.applyMessage(payload);
+				endpoints.refreshLegacy();
 				syncTick();
 				req();
 			}),
 			pi.events.on(TEAMMATE_COMPLETE_EVENT, (payload) => {
 				if (!isCompletePayload(payload)) return;
 				agents.applyComplete(payload);
+				endpoints.refreshLegacy();
 				// A failure that arrives after the session went idle still needs a loop to
 				// expire it, so the tick is re-evaluated rather than assumed to be running.
 				syncTick();
@@ -1358,13 +1566,19 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("session_start", (_e, ctx) => {
 		lastCtx = ctx;
 		lastPublishedInputTarget = undefined;
+		sessionUi.reset();
+		mainOutputRevision = 0;
+		endpoints.setMainOutputRevision(undefined);
+		endpoints.connect({
+			registry: sessionRegistry(),
+			events: { on: (event, handler) => pi.events.on(event, handler) },
+		});
 		subscribeBusEvents();
 		settingsRegistry.start();
 		registerSettingsProvider();
 		configProblem = undefined;
 		activeTools.clear();
 		agentListScroll = { offset: 0, following: true };
-		sessionDetailScroll = { offset: 0, following: true };
 		agentPriorityActive = false;
 		todoExpandedOverAgents = false;
 		thinkingTimer.reset();
@@ -1471,15 +1685,16 @@ export default function (pi: ExtensionAPI): void {
 			// best effort
 		}
 		settingsProviderDisposer = undefined;
+		endpoints.disconnect();
 		lastCtx = undefined;
 		running = false;
 		runningStartedAt = undefined;
 		activeTools.clear();
 		thinkingTimer.reset();
 		invalidateUsageCache();
+		sessionUi.reset();
 		agents.clear();
 		agentListScroll = { offset: 0, following: true };
-		sessionDetailScroll = { offset: 0, following: true };
 		agentPriorityActive = false;
 		todoExpandedOverAgents = false;
 		bashBg.clear();
@@ -1513,7 +1728,11 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("message_end", (e, ctx) => {
 		// Settle an interrupted thinking run: message_end fires for aborted and
 		// failed messages too, while the row is still mounted.
-		if (e.message.role === "assistant") thinkingTimer.onAssistantMessageEnd();
+		if (e.message.role === "assistant") {
+			thinkingTimer.onAssistantMessageEnd();
+			mainOutputRevision += 1;
+			endpoints.setMainOutputRevision(`main:${mainOutputRevision}`);
+		}
 		invalidateUsageCache();
 		if (isTuiContext(ctx)) req();
 	});
@@ -1533,21 +1752,81 @@ export default function (pi: ExtensionAPI): void {
 		if (isTuiContext(ctx)) req();
 	});
 	pi.on("input", async (e, ctx) => {
-		const target = selectedAgentTarget();
 		const globals = globalThis as typeof globalThis & Record<symbol, unknown>;
-		const registry = globals[MAILBOX_REGISTRY_KEY] as MailboxHostRegistry | undefined;
-		const action = await routeAgentInput(
-			e,
-			target ? { correlationId: target.row.correlationId, label: target.label } : undefined,
-			registry,
-			ctx.ui,
-		);
-		if (action === "handled") return { action: "handled" as const };
-
+		const registry = sessionRegistry() ?? endpoints.registry;
+		const mailboxRegistry = globals[MAILBOX_REGISTRY_KEY] as MailboxHostRegistry | undefined;
+		const hasImages = (e.images?.length ?? 0) > 0;
 		const interactiveText = e.source === "interactive" && e.text.trim().length > 0;
 		const isSynthetic = e.text.startsWith("/") || e.text.startsWith("!");
-		// Remember the first real main-session user message; child-directed input
-		// is handled above and must not influence the main session title.
+
+		if (e.source === "interactive" && !hasImages && e.text.trim() === "monitor") {
+			if (!registry?.requestWindowMode) {
+				ctx.ui.notify("Window monitor mode is unavailable in this session.", "warning");
+				return { action: "handled" as const };
+			}
+			await registry.requestWindowMode("enter");
+			return { action: "handled" as const };
+		}
+
+		if (sessionUi.mode === "window" && (interactiveText || hasImages) && !isSynthetic) {
+			const target = selectedWindowEndpoint();
+			if (hasImages) {
+				ctx.ui.notify("Image input cannot be routed to a peer window; reattach it after leaving monitor mode.", "warning");
+				ctx.ui.setEditorText(e.text);
+				return { action: "handled" as const };
+			}
+			if (!target || !registry) {
+				ctx.ui.notify("No peer window is selected.", "warning");
+				ctx.ui.setEditorText(e.text);
+				return { action: "handled" as const };
+			}
+			sessionUi.setDraft(target.id, e.text);
+			const delivery = await (registry.send?.({
+				selector: target.routeSelector,
+				message: e.text,
+				mode: e.streamingBehavior === "steer" ? "steer" : "follow_up",
+				source: "user",
+			}) ?? registry.router?.route({
+				selector: target.routeSelector,
+				message: e.text,
+				mode: e.streamingBehavior === "steer" ? "steer" : "follow_up",
+				source: "user",
+			}));
+			if (!delivery?.delivered) {
+				ctx.ui.notify(`Message to #${target.label} was not sent: ${delivery?.error ?? "delivery registry unavailable"}`, "error");
+				ctx.ui.setEditorText(e.text);
+			} else {
+				sessionUi.setDraft(target.id, "");
+			}
+			return { action: "handled" as const };
+		}
+
+		const target = selectedAgentTarget();
+		let restored = false;
+		if (target && interactiveText && !isSynthetic) sessionUi.setDraft(target.endpoint.id, e.text);
+		const action = await routeAgentInput(
+			e,
+			target ? {
+				correlationId: target.endpoint.correlationId!,
+				label: target.label,
+				endpointId: target.endpoint.id,
+				routeSelector: target.endpoint.routeSelector,
+			} : undefined,
+			{ sessions: registry, mailbox: mailboxRegistry },
+			{
+				notify: (message, type) => ctx.ui.notify(message, type),
+				setEditorText: (text) => {
+					restored = true;
+					if (target) sessionUi.setDraft(target.endpoint.id, text);
+					ctx.ui.setEditorText(text);
+				},
+			},
+		);
+		if (action === "handled" && target && !restored) sessionUi.setDraft(target.endpoint.id, "");
+		if (action === "handled") return { action: "handled" as const };
+
+		const selectedId = sessionUi.selectedId("agent");
+		if (selectedId && interactiveText && !isSynthetic) sessionUi.setDraft(selectedId, "");
 		if (!firstUserText && interactiveText && !isSynthetic) firstUserText = e.text;
 		return { action: "continue" as const };
 	});
@@ -1599,12 +1878,8 @@ export default function (pi: ExtensionAPI): void {
 				activeAgentOverlayRender = ownedRender;
 				return new AgentOverlay({
 					getAgents: () => agents.snapshot(),
-					getViewingId: () => agents.getViewingAgent(),
-					onSelect: (correlationId) => {
-						agents.setViewingAgent(correlationId);
-						sessionDetailScroll = { offset: 0, following: true };
-						req();
-					},
+					getViewingId: selectedAgentCorrelationId,
+					onSelect: (correlationId) => selectAgent(correlationId),
 					onCommand: (correlationId, action, message) => {
 						pi.events.emit(TEAMMATE_AGENT_COMMAND_EVENT, { correlationId, action, ...(message !== undefined ? { message } : {}) });
 					},
@@ -1842,6 +2117,26 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerShortcut(WINDOW_MONITOR_TOGGLE_KEY, {
+		description: "Toggle supervision for the selected Window Bar session",
+		async handler(ctx) {
+			if (sessionUi.mode !== "window") return;
+			const window = selectedWindowEndpoint();
+			const registry = sessionRegistry() ?? endpoints.registry;
+			if (!window || !registry?.setMonitored) {
+				ctx.ui.notify("No monitorable peer window is selected.", "warning");
+				return;
+			}
+			const enabled = !endpoints.snapshot().monitoredEndpointIds.includes(window.id);
+			try {
+				await registry.setMonitored(window.id, enabled);
+				ctx.ui.notify(`${enabled ? "Monitoring" : "Stopped monitoring"} #${window.label}.`, "info");
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+			}
+		},
+	});
+
 	pi.registerShortcut(BASH_BG_OVERLAY_KEY, {
 		description: "Open background Bash jobs — live status, command, cwd, duration and output tail",
 		async handler(ctx) {
@@ -1871,9 +2166,10 @@ export default function (pi: ExtensionAPI): void {
 				ctx.ui.notify("Cockpit is disabled", "warning");
 				return;
 			}
-			sessionDetailVisible = !sessionDetailVisible;
-			if (sessionDetailVisible) sessionDetailScroll = { offset: 0, following: true };
-			ctx.ui.notify(`Agent session detail ${sessionDetailVisible ? "shown" : "hidden"}`, "info");
+			const endpoint = selectedEndpoint();
+			if (!endpoint) return;
+			const visible = sessionUi.toggleDetail(endpoint.id);
+			ctx.ui.notify(`Agent session detail ${visible ? "shown" : "hidden"}`, "info");
 			req();
 		},
 	});

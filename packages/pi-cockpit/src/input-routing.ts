@@ -1,8 +1,12 @@
 import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
+import type { SessionMessageRequest, SessionMessageResult } from "pi-maestro-teammate/v1/sessions";
 
 export interface AgentInputTarget {
 	correlationId: string;
 	label: string;
+	/** Canonical endpoint selector when supplied by EndpointStore. */
+	endpointId?: string;
+	routeSelector?: string;
 }
 
 export interface AgentInputEvent {
@@ -17,6 +21,23 @@ export interface AgentInputUi {
 	setEditorText(text: string): void;
 }
 
+export interface SessionInputRegistry {
+	send?(request: SessionMessageRequest): Promise<SessionMessageResult>;
+	router?: { route(request: SessionMessageRequest): Promise<SessionMessageResult> };
+}
+
+export interface AgentInputRegistries {
+	sessions?: SessionInputRegistry;
+	mailbox?: MailboxHostRegistry;
+}
+
+export type AgentInputRegistryProvider = MailboxHostRegistry | AgentInputRegistries;
+
+function inputRegistries(provider: AgentInputRegistryProvider | undefined): AgentInputRegistries {
+	if (provider && "deliverAgentMessage" in provider) return { mailbox: provider };
+	return provider ?? {};
+}
+
 /**
  * Route ordinary interactive text to the selected teammate. Commands and bash
  * input remain local. A failed child delivery is still handled so the text can
@@ -25,7 +46,7 @@ export interface AgentInputUi {
 export async function routeAgentInput(
 	event: AgentInputEvent,
 	target: AgentInputTarget | undefined,
-	registry: MailboxHostRegistry | undefined,
+	provider: AgentInputRegistryProvider | undefined,
 	ui: AgentInputUi,
 ): Promise<"continue" | "handled"> {
 	const hasImages = (event.images?.length ?? 0) > 0;
@@ -41,16 +62,27 @@ export async function routeAgentInput(
 
 	let error: string | undefined;
 	try {
-		if (!registry) {
-			error = "teammate delivery registry is unavailable";
-		} else {
-			const delivery = await registry.deliverAgentMessage({
+		const registries = inputRegistries(provider);
+		const sessionSend = registries.sessions?.send?.bind(registries.sessions)
+			?? registries.sessions?.router?.route.bind(registries.sessions.router);
+		if (sessionSend) {
+			const delivery = await sessionSend({
+				selector: target.routeSelector ?? target.endpointId ?? target.correlationId,
+				message: event.text,
+				mode: event.streamingBehavior === "steer" ? "steer" : "follow_up",
+				source: "user",
+			});
+			if (!delivery.delivered) error = delivery.error ?? "delivery was rejected";
+		} else if (registries.mailbox) {
+			const delivery = await registries.mailbox.deliverAgentMessage({
 				recipientCorrelationId: target.correlationId,
 				recipientLabel: target.label,
 				message: event.text,
 				mode: event.streamingBehavior === "steer" ? "steer" : "follow_up",
 			});
 			if (!delivery.delivered) error = delivery.error ?? "delivery was rejected";
+		} else {
+			error = "teammate delivery registry is unavailable";
 		}
 	} catch (cause) {
 		error = cause instanceof Error ? cause.message : String(cause);
