@@ -296,6 +296,13 @@ export interface AutoCompactionState {
   persistedIntentKey?: string;
   settingsSnapshot?: CompactionSettings;
   settingsCwd?: string;
+  /** Current lifecycle's hard threshold, cached by the context hook for tool-call checks. */
+  latestThreshold?: {
+    generation: number;
+    linkedThreshold: LinkedCompactionThresholdModel & { usable: true };
+    settings: CompactionSettings;
+    effectiveSettings: CompactionSettings;
+  };
   velocityTracker: VelocityTracker;
   /** Held whole so the two fields can never be written back out of step. */
   breaker: CompactionBreakerState;
@@ -387,6 +394,8 @@ export interface MidTurnCompactionStatus {
 export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: AutoCompactionDependencies = {}): {
   onSessionStart(ctx: ExtensionContext, event?: { reason?: string }): void;
   evaluate(messages: AgentMessage[], ctx: ExtensionContext): Promise<AgentMessage[] | undefined>;
+  /** Interrupt a tool loop at the first tool boundary after the hard threshold is crossed. */
+  onToolCall(ctx: ExtensionContext): boolean;
   projectCompactionInput(event: SessionBeforeCompactEvent, ctx: ExtensionContext): Promise<ProjectedCompactionInput>;
   beforeProviderRequest(payload: unknown, ctx: ExtensionContext): Promise<unknown | undefined>;
   shouldSkipStopHook(): boolean;
@@ -581,6 +590,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     state.notifiedPressureKeys.clear();
     state.internalsWarningTurn = undefined;
     state.lastProviderMessages = undefined;
+    state.latestThreshold = undefined;
     state.providerPressureAttempted = false;
     state.providerPressureBlocked = false;
     state.providerPressureTerminal = false;
@@ -627,12 +637,19 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   ): Promise<AgentMessage[] | undefined> {
       publishIdleStatus(ctx, settings.enabled);
       if (!ctx.model) {
+        state.latestThreshold = undefined;
         clearPressureStatus(ctx);
         return undefined;
       }
       const linkedThreshold = await linkedThresholdFor(ctx, settings);
       if (generation !== state.generation) return undefined;
       if (!settings.enabled || !linkedThreshold.usable || linkedThreshold.contextWindow <= settings.reserveTokens) {
+        state.latestThreshold = undefined;
+        if (state.pendingIntent) {
+          state.pendingIntent = undefined;
+          state.lastTriggerKey = undefined;
+          persistPendingIntent(pi, state);
+        }
         state.criticalLoopStreak = 0;
         if (state.sessionId) void cleanupSpillDir(state.sessionId, state.writerId);
         state.pruneManifest.clear();
@@ -642,6 +659,16 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         return undefined;
       }
       const capacityWindow = linkedThreshold.contextWindow;
+      const effectiveSettings: CompactionSettings = {
+        ...settings,
+        reserveTokens: linkedThreshold.effectiveReserveTokens,
+      };
+      state.latestThreshold = {
+        generation,
+        linkedThreshold,
+        settings,
+        effectiveSettings,
+      };
       const downgraded = await hydrateRestoredPrunes(state, messages, generation);
       if (state.generation !== generation) return undefined;
       // A dead spill path was downgraded to the plain placeholder; persist the
@@ -660,10 +687,6 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         persistPruneManifest(pi, state);
         return stable.prunedToolResults > 0 ? stable.messages : undefined;
       }
-      const effectiveSettings: CompactionSettings = {
-        ...settings,
-        reserveTokens: linkedThreshold.effectiveReserveTokens,
-      };
       const softBands: SoftPressureBands | undefined = linkedThreshold.soft
         ? {
             nudgeTokens: linkedThreshold.soft.nudgeTokens,
@@ -1485,6 +1508,74 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         }
         return transformed;
       });
+    },
+    onToolCall(ctx) {
+      const currentSettings = settingsFor(ctx);
+      const snapshot = currentSettings.enabled
+        && state.latestThreshold?.generation === state.generation
+        && sameSettings(currentSettings, state.latestThreshold.settings)
+        ? state.latestThreshold
+        : undefined;
+      const usage = ctx.getContextUsage?.();
+      const usageTokens = usage?.tokens ?? (usage?.percent != null
+        ? Math.floor((usage.percent / 100) * usage.contextWindow)
+        : undefined);
+      let intent = state.pendingIntent?.generation === state.generation
+        ? state.pendingIntent
+        : undefined;
+      if (intent && (!currentSettings.enabled || !sameSettings(currentSettings, intent.settings))) {
+        if (state.pendingIntent === intent) state.pendingIntent = undefined;
+        if (state.lastTriggerKey === intent.triggerKey) state.lastTriggerKey = undefined;
+        persistPendingIntent(pi, state);
+        intent = undefined;
+      }
+      const threshold = intent?.linkedThreshold ?? snapshot?.linkedThreshold;
+      if (threshold && usageTokens !== undefined && usageTokens > threshold.thresholdTokens
+        && (!intent || usageTokens > intent.estimate.tokens)) {
+        const baseEstimate = state.lastProviderMessages
+          ? estimateContextTokens(state.lastProviderMessages)
+          : { tokens: usageTokens, usageTokens, trailingTokens: 0 };
+        const estimate = {
+          ...baseEstimate,
+          tokens: Math.max(baseEstimate.tokens, usageTokens),
+          usageTokens: Math.max(baseEstimate.usageTokens, usageTokens),
+        };
+        const settings = intent?.settings ?? snapshot?.settings;
+        const effectiveSettings = intent?.effectiveSettings ?? snapshot?.effectiveSettings;
+        if (settings && effectiveSettings) {
+          const triggerKey = `tool-call:${estimate.tokens}:${threshold.thresholdTokens}`;
+          intent = {
+            generation: state.generation,
+            triggerKey,
+            estimate,
+            linkedThreshold: threshold,
+            settings,
+            effectiveSettings,
+            contextExhausted: isContextExhausted(ctx, estimate.tokens),
+          };
+          state.pendingIntent = intent;
+          state.lastTriggerKey = triggerKey;
+        }
+      }
+      if (!intent || state.running || intent.requestBlocked || intent.loopCritical
+        || intent.estimate.tokens <= intent.linkedThreshold.thresholdTokens) return false;
+      // Abort at the tool boundary, then let agent_settled submit through the
+      // existing arbiter-owned compaction path. Calling compact() directly from
+      // this hook would race the active agent loop and bypass recovery state.
+      if (state.zombieOwner !== undefined) return false;
+      if (dependencies.arbiter?.currentOwner()) return false;
+      if (dependencies.arbiter?.timeoutTombstone()) return false;
+      if (!compactionBreakerAllows(state.breaker, state.turnCount).allowed) return false;
+      intent.loopCritical = true;
+      state.loopCriticalBlocked = true;
+      persistPendingIntent(pi, state);
+      ctx.abort();
+      notifyPressureOnce(
+        ctx,
+        `tool-call-hard-threshold:${intent.linkedThreshold.thresholdTokens}`,
+        `Context crossed the hard compaction threshold at a tool boundary (${intent.estimate.tokens.toLocaleString("en-US")}/${intent.linkedThreshold.thresholdTokens.toLocaleString("en-US")} tokens). Interrupting to compact before the tool runs; the task resumes automatically.`,
+      );
+      return true;
     },
     async projectCompactionInput(event, ctx) {
       const generation = state.generation;

@@ -678,6 +678,7 @@ test("teammate child registers interaction, local Bash, and parent-permission su
   assert.deepEqual(tools.map((tool) => tool.name), ["ask-user-question", "bash_bg", "todo"]);
   assert.deepEqual([...handlers.keys()], [
     "session_start",
+    "tool_call",
     "context",
     "before_provider_request",
     "agent_end",
@@ -685,8 +686,8 @@ test("teammate child registers interaction, local Bash, and parent-permission su
     "session_before_compact",
     "session_compact",
     "session_shutdown",
-    "tool_call",
   ]);
+  assert.equal(handlers.get("tool_call")?.length, 2, "compaction guard precedes child permission handling");
   assert.equal(handlers.has("before_agent_start"), false, "child must not own parent Goal/Todo/Workflow startup");
   let providerAborts = 0;
   const providerCtx = {
@@ -707,7 +708,7 @@ test("teammate child registers interaction, local Bash, and parent-permission su
   assert.equal(guardedPayload, undefined, "child aborts invalid thinking instead of degrading it");
   assert.equal(providerAborts, 1);
   await handlers.get("session_start")?.[0]?.({ reason: "new" }, providerCtx);
-  const structuredOutputDecision = await handlers.get("tool_call")?.[0]?.({
+  const structuredOutputDecision = await handlers.get("tool_call")?.[1]?.({
     type: "tool_call",
     toolName: "structured_output",
     toolCallId: "verdict-1",

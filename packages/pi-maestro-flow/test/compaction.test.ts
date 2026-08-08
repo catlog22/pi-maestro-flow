@@ -3919,6 +3919,114 @@ test("a brief critical spike defers to the ordinary completed-turn path", async 
   assert.equal(fx.compactCalls.length, 1, "the second completed turn submits through the ordinary path");
 });
 
+test("the first tool call after the hard threshold interrupts and compacts at settle", async () => {
+  const fx = loopCriticalFixture();
+  await fx.guard.evaluate(highUsageToolBatch(365_000), fx.ctx);
+  const pending = fx.guard.describeState().pendingIntent;
+  assert.ok(pending);
+  assert.ok(pending.tokens > pending.thresholdTokens);
+  assert.equal(fx.aborted(), 0, "the context hook only records the hard-threshold intent");
+
+  assert.equal(fx.guard.onToolCall(fx.ctx), true);
+  assert.equal(fx.guard.onToolCall(fx.ctx), false, "parallel tool-call hooks cannot interrupt twice");
+  assert.equal(fx.aborted(), 1, "the tool is interrupted before execution");
+  assert.equal(fx.guard.describeState().pendingIntent?.loopCritical, true);
+  assert.ok(
+    fx.notifications.some(({ message }) => /hard compaction threshold at a tool boundary/.test(message)),
+    "the immediate compaction reason is visible",
+  );
+
+  await fx.guard.onAgentEnd(fx.ctx);
+  assert.equal(fx.compactCalls.length, 1, "the first settlement submits compaction without a two-turn delay");
+});
+
+test("tool-call usage creates a hard-threshold intent when the context frame could not", async () => {
+  const fx = loopCriticalFixture();
+  Object.assign(fx.ctx, {
+    getContextUsage: () => ({ tokens: 365_000, contextWindow: 400_000, percent: 91.25 }),
+  });
+  await fx.guard.evaluate([{ role: "user", content: "continue" }] as never, fx.ctx);
+  assert.equal(fx.guard.describeState().pendingIntent, undefined, "an incomplete tool-result frame skips pressure policy");
+
+  assert.equal(fx.guard.onToolCall(fx.ctx), true);
+  const pending = fx.guard.describeState().pendingIntent;
+  assert.ok(pending);
+  assert.equal(pending.tokens, 365_000);
+  assert.equal(pending.thresholdTokens, 360_000);
+  assert.equal(fx.aborted(), 1);
+
+  await fx.guard.onAgentEnd(fx.ctx);
+  assert.equal(fx.compactCalls.length, 1, "usage-derived pressure compacts at the same settlement");
+});
+
+test("usage-derived intent judges exhaustion against the active session window", async () => {
+  let aborted = 0;
+  const summaryModel = {
+    provider: "maestro-qwen",
+    id: "summary-small",
+    contextWindow: 300_000,
+    maxTokens: 64_000,
+  };
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    readSettings: () => ({
+      enabled: true,
+      reserveTokens: 16_384,
+      keepRecentTokens: 20_000,
+      model: "maestro-qwen/summary-small",
+    }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: {
+      provider: "maestro-openai",
+      id: "session-large",
+      contextWindow: 400_000,
+      maxTokens: 128_000,
+    },
+    modelRegistry: {
+      find(provider: string, id: string) {
+        return provider === summaryModel.provider && id === summaryModel.id ? summaryModel : undefined;
+      },
+      async getApiKeyAndHeaders() { return { ok: true, apiKey: "sk-test" }; },
+    },
+    getContextUsage: () => ({ tokens: 320_000, contextWindow: 400_000, percent: 80 }),
+    abort() { aborted++; },
+    hasPendingMessages: () => false,
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  await guard.evaluate([{ role: "user", content: "continue" }] as never, ctx);
+  assert.equal(guard.onToolCall(ctx), true);
+  const pending = guard.describeState().pendingIntent;
+  assert.ok(pending);
+  assert.equal(pending.contextExhausted, false, "the smaller summary window is a trigger limiter, not the provider limit");
+  assert.equal(aborted, 1);
+});
+
+test("usage exactly at the hard threshold does not interrupt a tool call", async () => {
+  const fx = loopCriticalFixture();
+  Object.assign(fx.ctx, {
+    getContextUsage: () => ({ tokens: 360_000, contextWindow: 400_000, percent: 90 }),
+  });
+  await fx.guard.evaluate([{ role: "user", content: "continue" }] as never, fx.ctx);
+
+  assert.equal(fx.guard.onToolCall(fx.ctx), false);
+  assert.equal(fx.aborted(), 0);
+  assert.equal(fx.guard.describeState().pendingIntent, undefined);
+});
+
+test("hard-threshold tool calls compact before queued messages without duplicate continuation", async () => {
+  const fx = loopCriticalFixture({ hasPendingMessages: () => true });
+  await fx.guard.evaluate(highUsageToolBatch(365_000), fx.ctx);
+
+  assert.equal(fx.guard.onToolCall(fx.ctx), true, "hard pressure takes priority over the queued-message shortcut");
+  await fx.guard.onAgentEnd(fx.ctx);
+  assert.equal(fx.compactCalls.length, 1);
+  fx.compactCalls[0].onComplete();
+  assert.deepEqual(fx.sent, [], "the host's queued message resumes the run without an injected continuation");
+});
+
 test("pressure between threshold and the critical band never interrupts the loop", async () => {
   const fx = loopCriticalFixture();
   for (let evaluation = 0; evaluation < LOOP_CRITICAL_PERSIST_EVALUATIONS + 2; evaluation++) {
@@ -4049,6 +4157,18 @@ test("loop-critical flag survives persistence and legacy intents hydrate without
   assert.equal(legacy.describeState().pendingIntent?.loopCritical, false);
   await legacy.onAgentEnd(ctx);
   assert.equal(compacted, 1, "an intent without the flag keeps the two-turn defer");
+
+  let disabledAborts = 0;
+  const disabledCtx = { ...ctx, abort() { disabledAborts++; } } as never;
+  const disabled = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    ...dependencies,
+    readSettings: () => ({ enabled: false, reserveTokens: 16_384, keepRecentTokens: 20_000 }),
+  });
+  disabled.onSessionStart(disabledCtx, { reason: "resume" });
+  assert.ok(disabled.describeState().pendingIntent, "the persisted intent is visible before current settings are checked");
+  assert.equal(disabled.onToolCall(disabledCtx), false);
+  assert.equal(disabledAborts, 0, "disabled compaction cannot interrupt the resumed task");
+  assert.equal(disabled.describeState().pendingIntent, undefined, "the stale intent is cleared before tool execution");
 });
 
 test("prompt-too-long carrying a server status consumes only the trim budget", async () => {
