@@ -4,7 +4,7 @@ import { Check } from "typebox/value";
 import * as fs from "node:fs/promises";
 import * as http from "node:http";
 import { BrowserParams, createBrowserTool } from "../src/tools/browser-tool.ts";
-import { BrowserManager, compileRunCode, type BrowserManagerLike, type BrowserOpenOptions, type BrowserRunOutput, type BrowserTabInfo } from "../src/tools/browser/manager.ts";
+import { BrowserManager, browserRunErrorHint, compileRunCode, type BrowserManagerLike, type BrowserOpenOptions, type BrowserRunOutput, type BrowserTabInfo } from "../src/tools/browser/manager.ts";
 
 class FakeBrowserManager implements BrowserManagerLike {
   opened?: BrowserOpenOptions;
@@ -86,6 +86,30 @@ test("browser close supports one tab and all tabs, while run validates code and 
   await assert.rejects(() => tool.execute("abort", { action: "run", code: "await wait(1000)" }, undefined, undefined, ctx), { name: "AbortError" });
 });
 
+test("browser run error hints explain evaluate callback scoping", () => {
+  const reference = browserRunErrorHint(new ReferenceError("clicked is not defined")) as Error;
+  assert.equal(reference.name, "ReferenceError");
+  assert.match(reference.message, /Browser run hint/);
+  assert.match(reference.message, /`clicked` is referenced where it is not defined/);
+  assert.match(reference.message, /page\.evaluate\(\)\/tab\.evaluate\(\) callbacks runs in the browser page context/);
+  assert.match(reference.message, /Pass values explicitly: await tab\.evaluate\(\(v\) => …, v\)/);
+  assert.match(reference.message, /tab\.click\(\)\/tab\.type\(\)\/tab\.fill\(\) return undefined/);
+  // 其他 ReferenceError（非 "is not defined"）不加浏览器提示，保持原样。
+  const other = browserRunErrorHint(new ReferenceError("Cannot read properties of null (reading 'x')")) as Error;
+  assert.equal(other.message, "Cannot read properties of null (reading 'x')");
+  // 语法错误附带解析提示。
+  const syntax = browserRunErrorHint(new SyntaxError("Unexpected token 'x'")) as Error;
+  assert.match(syntax.message, /Browser run hint: the run code failed to parse/);
+  // 普通错误原样透传。
+  const plain = new Error("boom");
+  assert.equal(browserRunErrorHint(plain), plain);
+});
+
+test("compileRunCode surfaces ReferenceError with the undefined name", async () => {
+  const execute = compileRunCode("return missingClicked;");
+  await assert.rejects(() => execute(undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined), /missingClicked is not defined/);
+});
+
 test("browser temporary screenshots use exclusive owner-only creation", async () => {
   const source = await fs.readFile(new URL("../src/tools/browser/manager.ts", import.meta.url), "utf8");
   assert.match(source, /flag:\s*options\?\.save\s*\?\s*"w"\s*:\s*"wx"/);
@@ -132,6 +156,12 @@ test("browser manager drives a real local Chromium tab when an executable is ava
     assert.equal(cv.shadowed, "w,p,a,d,pr,s,c,b");
     assert.equal(cv.tabName, "live");
     assert.equal(cv.ok, true);
+    // Node-side variables are invisible inside evaluate callbacks (browser context);
+    // the error must carry the scoping hint so the agent can self-correct.
+    await assert.rejects(
+      manager.run("live", `const clicked = "n"; return await tab.evaluate(() => clicked);`, process.cwd(), undefined, 15_000),
+      (error) => error instanceof Error && /clicked is not defined/.test(error.message) && /Browser run hint/.test(error.message),
+    );
     const screenshotPath = output.screenshots[0]?.path;
     assert.ok(screenshotPath);
     const screenshotStat = await fs.stat(screenshotPath);

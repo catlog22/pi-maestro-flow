@@ -39,6 +39,8 @@ export interface BashBgJobSnapshot {
   cwd: string;
   pid: number;
   status: BashBgJobStatus;
+  /** False only while action=run still owns the foreground tool call. */
+  background: boolean;
   startedAt: number;
   updatedAt: number;
   finishedAt?: number;
@@ -147,6 +149,7 @@ function jobSnapshot(job: Job): BashBgJobSnapshot {
     cwd: job.cwd,
     pid: job.pid,
     status: jobStatus(job),
+    background: job.background,
     startedAt: job.startedAt,
     updatedAt: job.updatedAt,
     ...(job.finishedAt === undefined ? {} : { finishedAt: job.finishedAt }),
@@ -732,6 +735,9 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
           };
         }
         job.background = true;
+        job.updatedAt = Date.now();
+        job.cachedSnapshot = undefined;
+        publishSnapshot();
         return {
           content: [{
             type: "text",

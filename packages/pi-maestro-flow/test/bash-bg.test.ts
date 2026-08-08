@@ -262,6 +262,7 @@ test("bash_bg run follows teammate detach semantics after the foreground timeout
 		const jobId = result.details?.jobId;
 		assert.ok(jobId);
 		assert.equal(result.details?.running, true);
+		assert.equal(harness.snapshots.at(-1)?.jobs.find((job) => job.id === jobId)?.background, true);
 		assert.deepEqual(harness.messages, []);
 		await waitForStatus(harness.snapshots, jobId, "completed");
 		await waitForMessage(harness.messages, "bash-bg-complete");
@@ -285,6 +286,7 @@ test("bash_bg run abort cancels the process tree without background transfer or 
 		const started = harness.snapshots.at(-1)?.jobs[0];
 		assert.ok(started);
 		assert.equal(started.status, "running");
+		assert.equal(started.background, false, "action=run is foreground until its detach deadline");
 
 		controller.abort();
 		await assert.rejects(running, /aborted/);

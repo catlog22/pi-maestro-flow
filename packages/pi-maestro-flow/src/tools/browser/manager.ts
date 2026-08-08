@@ -171,7 +171,7 @@ export class BrowserManager implements BrowserManagerLike {
       return { displays, returnValue, screenshots, url: entry.page.isClosed() ? "" : entry.page.url() };
     } catch (error) {
       if (isInterruptError(error)) await this.close(name);
-      throw error;
+      throw browserRunErrorHint(error);
     } finally {
       entry.busy = false;
     }
@@ -578,6 +578,32 @@ function isInterruptError(error: unknown): boolean {
 
 const RUN_HELPER_NAMES = ["page", "browser", "tab", "assert", "wait", "display", "print", "signal", "console"] as const;
 const RUN_PARAM_NAMES = RUN_HELPER_NAMES.map((name) => `__pi_${name}`);
+
+// Augments common user run-code errors with actionable browser-context guidance so
+// the agent can self-correct instead of repeatedly failing: the top cause of
+// `X is not defined` is referencing a Node-side variable inside a
+// page.evaluate/tab.evaluate callback (which runs in the page context), and
+// tab.click()/type()/fill() return void, so `const x = await tab.click(...)`
+// yields undefined rather than a boolean. Unmatched errors pass through untouched.
+export function browserRunErrorHint(error: unknown): unknown {
+  if (!(error instanceof Error)) return error;
+  if (error.name === "ReferenceError") {
+    const match = error.message.match(/^([A-Za-z_$][\w$]*) is not defined/);
+    if (match) {
+      error.message +=
+        `\nBrowser run hint: \`${match[1]}\` is referenced where it is not defined. ` +
+        `Code inside page.evaluate()/tab.evaluate() callbacks runs in the browser page context, ` +
+        `so Node-side variables declared in this run are invisible there. ` +
+        `Pass values explicitly: await tab.evaluate((v) => …, v), or compute the value inside the callback. ` +
+        `Note: tab.click()/tab.type()/tab.fill() return undefined; test element existence with tab.observe() or tab.waitFor().`;
+      return error;
+    }
+  }
+  if (error instanceof SyntaxError) {
+    error.message += "\nBrowser run hint: the run code failed to parse. Fix the syntax error above and retry.";
+  }
+  return error;
+}
 
 // Wraps user run code so the injected helpers (page, browser, tab, ...) never
 // collide with a top-level const/let/class/function the user declares. Helpers
