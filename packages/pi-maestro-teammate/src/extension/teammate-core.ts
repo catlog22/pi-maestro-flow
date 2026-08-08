@@ -761,6 +761,7 @@ export function appendAgentProgressLine(
 export function buildWorkspaceOwnerState(
   state: TeammateState,
   sessionName?: string,
+  contextPressure?: number,
 ): WorkspaceOwnerState {
   const agents: WorkspaceAgentSnapshot[] = [];
   const settledById = new Map<string, WorkspaceSettledSnapshot>();
@@ -813,6 +814,7 @@ export function buildWorkspaceOwnerState(
     settled: [...settledById.values()],
     ...(state.currentSessionId ? { sessionId: state.currentSessionId } : {}),
     ...(sessionName ? { sessionName } : {}),
+    ...(contextPressure !== undefined && Number.isFinite(contextPressure) ? { contextPressure: Math.max(0, Math.min(100, Math.round(contextPressure))) } : {}),
   };
 }
 

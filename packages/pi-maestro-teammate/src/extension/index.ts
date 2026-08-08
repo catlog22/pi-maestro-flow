@@ -8,7 +8,9 @@
 
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import type { ChildProcess } from "node:child_process";
+import crossSpawn from "cross-spawn";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -54,6 +56,13 @@ import {
   parseAnalysisResult,
   ANALYSIS_RESULT_SCHEMA,
   ENGINE_TICK_MS,
+  DEFAULT_MONITOR_CONFIG,
+  normalizeMonitorConfig,
+  recordBindingExits,
+  buildAnalysisTrendBlock,
+  deriveMonitorMetrics,
+  formatMonitorMetrics,
+  type MonitorEngineConfig,
   type MonitorTargetSnapshot,
   type MonitorParams,
   type MonitorEngineState,
@@ -61,12 +70,41 @@ import {
   type EngineAgentInfo,
   type AnalysisResult,
 } from "./monitor.ts";
+import {
+  appendMonitorLedgerRecord,
+  deriveMonitorLedgerState,
+  loadMonitorLedger,
+  reconcileMonitorLedger,
+  type MonitorLedgerRecord,
+  type MonitorLedgerState,
+} from "./monitor-ledger.ts";
+import {
+  appendPeerGoalObjection,
+  buildGoalContextBlock,
+  loadPeerGoalContext,
+} from "./monitor-goals.ts";
+import {
+  DEFAULT_ADVISOR_CONFIG,
+  buildAdvisorPrompt,
+  createAdvisorState,
+  extractAdvisorTranscript,
+  normalizeAdvisorConfig,
+  parseAdvisorVerdict,
+  shouldReview,
+  ADVISOR_VERDICT_SCHEMA,
+  type AdvisorConfig,
+  type AdvisorMessageSlice,
+  type AdvisorState,
+  type AdvisorVerdict,
+} from "./advisor.ts";
 import { runSupervisedEvaluation } from "../supervision/evaluator.ts";
 import { SUPERVISION_EVENT, createSupervisionEvent } from "../supervision/types.ts";
 import {
   createWorkspacePeerCommandConsumer,
   createWorkspacePeerRuntime,
   discoverWorkspacePeers,
+  acquireMonitorLease,
+  releaseMonitorLease,
   sendWorkspacePeerCommand,
   WORKSPACE_MAIN_SESSION_MARKER,
   type WorkspaceAgentSnapshot,
@@ -142,6 +180,7 @@ import {
 import { showModelMappingOverlay } from "../tui/model-mapping-overlay.ts";
 import { sharedModelCircuitBreaker } from "../public/v1/retry.ts";
 import { normalizePiRetryErrorMessage } from "../runs/retry.ts";
+import { getPiSpawnCommand } from "../runs/execution-infra.ts";
 import { showMonitorOverlay, type MonitorSessionRow } from "../tui/monitor-overlay.ts";
 import { createTeammateSettingsProvider, registerTeammateSettingsProvider } from "../settings/teammate-settings-provider.ts";
 import type {
@@ -838,6 +877,12 @@ export default function registerTeammateExtension(
 
   const markWorkspacePeerDirty = (): void => workspacePeerPublisher?.markDirty();
 
+  /** Context pressure % of this session (published to peer windows). */
+  const currentContextPressure = (): number | undefined => {
+    const usage = widgetCtx?.getContextUsage?.();
+    return usage && usage.percent !== null && Number.isFinite(usage.percent) ? usage.percent : undefined;
+  };
+
   const refreshWorkspacePeerOwners = async (): Promise<WorkspaceOwnerSnapshot[]> => {
     if (workspacePeerRefresh) return workspacePeerRefresh;
     const publisher = workspacePeerPublisher;
@@ -876,7 +921,7 @@ export default function registerTeammateExtension(
         agent,
       };
     }
-    const localState = buildWorkspaceOwnerState(state, workspacePeerSessionName);
+    const localState = buildWorkspaceOwnerState(state, workspacePeerSessionName, currentContextPressure());
     const agent = localState.agents.find((candidate) => candidate.correlationId === bindingKey)
       ?? localState.settled?.find((candidate) => candidate.correlationId === bindingKey);
     if (!agent) return undefined;
@@ -1131,7 +1176,7 @@ export default function registerTeammateExtension(
         await stopWorkspacePeers();
         const publisher = createWorkspacePeerRuntime({
           cwd,
-          getState: () => buildWorkspaceOwnerState(state, workspacePeerSessionName),
+          getState: () => buildWorkspaceOwnerState(state, workspacePeerSessionName, currentContextPressure()),
         });
         await publisher.start();
         workspacePeerPublisher = publisher;
@@ -2799,6 +2844,275 @@ export default function registerTeammateExtension(
 
   const monitorEngine: MonitorEngineState = createEngineState();
   let monitorPeerRefreshTimer: ReturnType<typeof setInterval> | undefined;
+  /** Effective monitor configuration (`.pi/settings.json` `monitor` + env). */
+  let monitorConfig: MonitorEngineConfig = { ...DEFAULT_MONITOR_CONFIG };
+  /** Ledger root — the real session cwd once known. */
+  let monitorLedgerRoot: string | undefined;
+  /** In-memory ledger read-model cache for status/doctor output. */
+  let monitorLedgerState: MonitorLedgerState | undefined;
+  let monitorLedgerWarnings: string[] = [];
+  /** In-flight ledger appends (flushed before /monitor exit returns). */
+  let monitorLedgerWrites: Promise<unknown>[] = [];
+  /** Supervision leases held by this session: targetOwnerId → monitorOwnerId. */
+  const monitorLeases = new Map<string, string>();
+
+  // ---------------------------------------------------------------------------
+  // Turn-level advisor (quality review of THIS session on agent_end)
+  // ---------------------------------------------------------------------------
+
+  let advisorConfig: AdvisorConfig = { ...DEFAULT_ADVISOR_CONFIG };
+  const advisorState: AdvisorState = createAdvisorState(advisorConfig);
+
+  /** Load `.pi/settings.json` → `monitor.advisor` (or top-level `advisor`). */
+  function loadAdvisorConfigForRoot(root: string): AdvisorConfig {
+    let section: unknown;
+    try {
+      const settingsPath = join(root, ".pi", "settings.json");
+      if (existsSync(settingsPath)) {
+        const parsed = JSON.parse(readFileSync(settingsPath, "utf8")) as { monitor?: { advisor?: unknown }; advisor?: unknown };
+        section = parsed?.monitor?.advisor ?? parsed?.advisor;
+      }
+    } catch (error) {
+      console.error("[pi-maestro-teammate] failed to read advisor settings:", error);
+    }
+    return normalizeAdvisorConfig(section);
+  }
+
+  /** Low-frequency turn review on agent_end (best-effort, never blocks). */
+  async function runAdvisorReview(event: { messages?: unknown[] }, ctx: ExtensionContext): Promise<void> {
+    const root = monitorLedgerRoot ?? state.baseCwd ?? ctx.cwd;
+    advisorConfig = loadAdvisorConfigForRoot(root);
+    if (!shouldReview(advisorState, advisorConfig, Date.now())) return;
+    const messages = Array.isArray(event.messages) ? event.messages as AdvisorMessageSlice[] : [];
+    if (messages.length === 0) return;
+    const { objective, transcript } = extractAdvisorTranscript(messages, {
+      tailMessages: advisorConfig.tailMessages,
+      maxMessageChars: advisorConfig.maxMessageChars,
+    });
+    if (transcript.length === 0) return;
+
+    const evaluation = await runSupervisedEvaluation<AdvisorVerdict>(
+      ({ task, signal, timeoutMs, outputSchema }) =>
+        runSingleTeammate(
+          { agent: "analyst", task, thinking: "low", timeoutMs, outputSchema },
+          { baseCwd: root, depth: 0, signal },
+        ),
+      {
+        task: buildAdvisorPrompt(objective, transcript),
+        timeoutMs: 30_000,
+        outputSchema: ADVISOR_VERDICT_SCHEMA,
+        fallbackTextParser: parseAdvisorVerdict,
+        signal: undefined,
+      },
+    );
+
+    advisorState.lastReviewAt = Date.now();
+    advisorState.reviews += 1;
+    const verdict = evaluation.ok && evaluation.verdict ? evaluation.verdict : undefined;
+    advisorState.lastVerdict = verdict;
+    if (!verdict || verdict.status === "on-track") return;
+
+    // DeliveryGate: cooldown + dedup — the same frequency-control strategy
+    // as the fleet Monitor.
+    const guidance = verdict.guidance ?? verdict.reason ?? "review the last turn";
+    if (advisorState.gate.gate("advisor", guidance, "notify") === undefined) return;
+    safeSendMessage(pi, {
+      customType: "teammate-message",
+      content: `[advisor] ${verdict.status === "blocker" ? "⚠ " : ""}${guidance}`,
+      display: true,
+      details: { source: "advisor", severity: verdict.status },
+    }, { triggerTurn: false });
+    if (monitorConfig.ledgerEnabled) {
+      void appendMonitorLedgerRecord(root, {
+        kind: "review",
+        action: "verdict",
+        status: verdict.status,
+        reason: verdict.reason,
+        message: guidance,
+        metadata: { source: "advisor" },
+      }).then(() => { void refreshMonitorLedgerState(); }).catch((error) => {
+        console.error("[pi-maestro-teammate] advisor ledger append failed:", error);
+      });
+    }
+  }
+
+  /** Acquire the supervision lease for a peer window (double-monitor guard). */
+  async function acquireLeaseForBinding(targetOwnerId: string): Promise<{ ok: boolean; error?: string }> {
+    const publisher = workspacePeerPublisher;
+    if (!publisher) return { ok: false, error: "workspace peer publisher unavailable" };
+    const result = await acquireMonitorLease(publisher.identity, targetOwnerId, {
+      sessionName: workspacePeerSessionName,
+    }).catch((error) => ({ ok: false as const, error: `lease error: ${error instanceof Error ? error.message : String(error)}` }));
+    if (result.ok) monitorLeases.set(targetOwnerId, publisher.identity.ownerId);
+    return result;
+  }
+
+  /** Release every lease held by this session (exit / shutdown). */
+  async function releaseAllMonitorLeases(): Promise<void> {
+    const publisher = workspacePeerPublisher;
+    if (!publisher) return;
+    for (const [targetOwnerId, monitorOwnerId] of [...monitorLeases]) {
+      await releaseMonitorLease(publisher.identity, targetOwnerId, monitorOwnerId).catch(() => undefined);
+      monitorLeases.delete(targetOwnerId);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Managed windows — /monitor spawn launches headless pi sessions as
+  // supervised work windows (pi-peer process-spawn pattern: children are
+  // attached to this session and SIGTERM'd on shutdown).
+  // ---------------------------------------------------------------------------
+
+  interface ManagedWindow {
+    name: string;
+    child: ChildProcess;
+    startedAt: number;
+    cwd: string;
+    objective: string;
+  }
+
+  const managedWindows = new Map<string, ManagedWindow>();
+
+  async function spawnManagedWindow(
+    name: string,
+    objective: string,
+    ctx: ExtensionContext,
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (managedWindows.has(name)) return { ok: false, error: `window "${name}" is already spawned` };
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name)) {
+      return { ok: false, error: "window name must start alphanumeric and use [A-Za-z0-9._-]" };
+    }
+    const cwd = monitorLedgerRoot ?? state.baseCwd ?? ctx.cwd;
+    const { command, args } = getPiSpawnCommand(["-p", objective, "--name", name]);
+    const child = crossSpawn(command, args, { cwd, stdio: "ignore" });
+    const window: ManagedWindow = { name, child, startedAt: Date.now(), cwd, objective };
+    managedWindows.set(name, window);
+    child.once("exit", (code, signal) => {
+      managedWindows.delete(name);
+      console.error(`[pi-maestro-teammate] managed window ${name} exited (code ${code ?? "?"}, signal ${signal ?? "none"})`);
+    });
+    child.once("error", (error) => {
+      managedWindows.delete(name);
+      console.error(`[pi-maestro-teammate] managed window ${name} failed to spawn:`, error);
+    });
+    return { ok: true };
+  }
+
+  function stopAllManagedWindows(): void {
+    for (const window of managedWindows.values()) {
+      try {
+        window.child.kill("SIGTERM");
+      } catch {
+        // child already gone
+      }
+    }
+  }
+
+  /** Load `.pi/settings.json` → `monitor` section, merged with env. */
+  function loadMonitorConfigForRoot(root: string): MonitorEngineConfig {
+    let section: unknown;
+    try {
+      const settingsPath = join(root, ".pi", "settings.json");
+      if (existsSync(settingsPath)) {
+        const parsed = JSON.parse(readFileSync(settingsPath, "utf8")) as { monitor?: unknown };
+        section = parsed?.monitor;
+      }
+    } catch (error) {
+      console.error("[pi-maestro-teammate] failed to read monitor settings:", error);
+    }
+    return normalizeMonitorConfig(section);
+  }
+
+  /** Refresh the in-memory ledger read-model (best-effort). */
+  async function refreshMonitorLedgerState(): Promise<void> {
+    const root = monitorLedgerRoot;
+    if (!root || !monitorConfig.ledgerEnabled) {
+      monitorLedgerState = undefined;
+      return;
+    }
+    try {
+      const loaded = await loadMonitorLedger(root);
+      monitorLedgerWarnings = loaded.warnings;
+      monitorLedgerState = deriveMonitorLedgerState(loaded.records);
+    } catch (error) {
+      console.error("[pi-maestro-teammate] monitor ledger load failed:", error);
+    }
+  }
+
+  /**
+   * Session-start reconciliation: restore active ledger bindings when
+   * autoResume is enabled, then mark ledger-active bindings without a live
+   * in-process owner as disconnected (pi-peer reconcile semantics).
+   */
+  async function reconcileMonitorLedgerAtStart(ctx: ExtensionContext): Promise<void> {
+    const root = monitorLedgerRoot;
+    if (!root) return;
+    try {
+      const loaded = await loadMonitorLedger(root);
+      const state = deriveMonitorLedgerState(loaded.records);
+      if (state.activeBindings.length === 0) {
+        monitorLedgerWarnings = loaded.warnings;
+        return;
+      }
+      if (monitorConfig.autoResume) {
+        await resumeMonitorBindings(ctx);
+      }
+      const live = new Set([...monitorEngine.bindings.keys()]);
+      const reconciled = await reconcileMonitorLedger(root, { liveTargets: [...live], nowMs: Date.now() });
+      if (reconciled.records.length > 0 || reconciled.warnings.length > 0) {
+        monitorLedgerWarnings = reconciled.warnings;
+        await refreshMonitorLedgerState();
+      }
+    } catch (error) {
+      console.error("[pi-maestro-teammate] monitor ledger reconcile failed:", error);
+    }
+  }
+
+  /**
+   * Restore active bindings from the durable ledger (auto-resume / /monitor
+   * resume). Returns the number of restored bindings.
+   */
+  async function resumeMonitorBindings(ctx: ExtensionContext): Promise<number> {
+    const root = monitorLedgerRoot;
+    if (!root || !monitorConfig.ledgerEnabled) return 0;
+    let loaded;
+    try {
+      loaded = await loadMonitorLedger(root);
+    } catch (error) {
+      console.error("[pi-maestro-teammate] monitor ledger load failed:", error);
+      return 0;
+    }
+    const state = deriveMonitorLedgerState(loaded.records);
+    let restored = 0;
+    for (const binding of state.activeBindings) {
+      // Window-level bindings need the supervision lease; skip when another
+      // live session took over monitoring since we were last running.
+      if (binding.target.startsWith("owner:")) {
+        const targetOwnerId = binding.target.slice("owner:".length);
+        const lease = await acquireLeaseForBinding(targetOwnerId);
+        if (!lease.ok) {
+          console.error(`[pi-maestro-teammate] monitor resume skipped ${binding.target}: ${lease.error}`);
+          continue;
+        }
+      }
+      const mode = binding.mode === "custom" ? "custom" : "auto";
+      const result = addBinding(
+        monitorEngine,
+        binding.target,
+        binding.displayName ?? binding.target,
+        mode,
+        binding.customPrompt,
+        { resumed: true, ...(binding.goalId ? { goalId: binding.goalId } : {}) },
+      );
+      if (result.ok) restored++;
+    }
+    if (restored > 0 && !monitorEngine.running) {
+      startMonitorEngine(ctx);
+    } else if (restored > 0) {
+      ctx.ui.setStatus(MONITOR_STATUS_KEY, formatEngineStatusBar(monitorEngine));
+    }
+    return restored;
+  }
 
   /** Build EngineAgentInfo from a local agent or a cached remote snapshot. */
   function buildEngineAgentInfo(bindingKey: string): EngineAgentInfo | undefined {
@@ -2817,6 +3131,7 @@ export default function registerTeammateExtension(
         outputTail: active.slice(-3).map((agent) => `${agent.name ?? agent.correlationId.slice(0, 8)}: ${agent.summary ?? agent.status}`),
         objective: `${active.length} agents · window ${owner.sessionName ?? ownerId.slice(0, 6)}`,
         hasPendingInteractions: active.some((agent) => (agent.pendingInteractions ?? 0) > 0),
+        ...(owner.contextPressure !== undefined ? { contextPressure: owner.contextPressure } : {}),
         kind: "window",
       };
     }
@@ -2857,6 +3172,7 @@ export default function registerTeammateExtension(
     void refreshWorkspacePeerOwners();
     monitorPeerRefreshTimer = setInterval(() => void refreshWorkspacePeerOwners(), 5_000);
     monitorPeerRefreshTimer.unref?.();
+    void refreshMonitorLedgerState();
     startEngine(monitorEngine, {
       getAgentInfo: buildEngineAgentInfo,
       sendIntervention: async (bindingKey, message, mode) => {
@@ -2915,9 +3231,15 @@ export default function registerTeammateExtension(
         pi.events.emit(SUPERVISION_EVENT, createSupervisionEvent("monitor", "notification", "info", { target, message }));
       },
       analyze: async (binding, info) => {
+        const trendBlock = buildAnalysisTrendBlock(binding.analysisHistory, binding.driftScore);
+        const goalBlock = binding.goalId
+          ? await loadPeerGoalContext(monitorLedgerRoot ?? state.baseCwd, binding.goalId)
+              .then((context) => (context ? buildGoalContextBlock(context) : ""))
+              .catch(() => "")
+          : "";
         const prompt = binding.mode === "custom" && binding.customPrompt
-          ? buildCustomAnalysisPrompt(binding.customPrompt, info.objective, info.outputTail)
-          : buildAutoAnalysisPrompt(info.objective, info.outputTail);
+          ? buildCustomAnalysisPrompt(binding.customPrompt, info.objective, info.outputTail, monitorConfig.analysisTailLines, trendBlock, goalBlock)
+          : buildAutoAnalysisPrompt(info.objective, info.outputTail, monitorConfig.analysisTailLines, trendBlock, goalBlock);
         const evaluation = await runSupervisedEvaluation<AnalysisResult>(
           ({ task, signal, timeoutMs, outputSchema }) =>
             runSingleTeammate(
@@ -2936,17 +3258,45 @@ export default function registerTeammateExtension(
         // (no intervention, no blocking).
         return evaluation.ok && evaluation.verdict ? evaluation.verdict : undefined;
       },
-    });
+      recordLedger: (record: MonitorLedgerRecord) => {
+        const root = monitorLedgerRoot ?? state.baseCwd;
+        if (!root || !monitorConfig.ledgerEnabled) return;
+        const write = appendMonitorLedgerRecord(root, record)
+          .then(() => { void refreshMonitorLedgerState(); })
+          .catch((error) => {
+            console.error("[pi-maestro-teammate] monitor ledger append failed:", error);
+          })
+          .finally(() => {
+            // Drop settled writes so the array cannot grow unbounded during
+            // long sessions (it only needs to survive until /monitor exit).
+            const index = monitorLedgerWrites.indexOf(write);
+            if (index >= 0) monitorLedgerWrites.splice(index, 1);
+          });
+        monitorLedgerWrites.push(write);
+        return write;
+      },
+      postGoalObjection: (goalId: string, summary: string) => {
+        const root = monitorLedgerRoot ?? state.baseCwd;
+        if (!root) return;
+        return appendPeerGoalObjection(root, goalId, { peerId: workspacePeerSessionName ?? "monitor", summary })
+          .then(() => undefined)
+          .catch(() => undefined);
+      },
+    }, monitorConfig);
     ctx.ui.setStatus(MONITOR_STATUS_KEY, formatEngineStatusBar(monitorEngine));
   }
 
   /** Stop the monitor engine and clear status. */
   function stopMonitorEngine(ctx: ExtensionContext): void {
+    // Persist exits BEFORE stopping so auto-resume does not restore bindings
+    // the user explicitly exited.
+    recordBindingExits(monitorEngine, "user-exit");
     if (monitorPeerRefreshTimer) clearInterval(monitorPeerRefreshTimer);
     monitorPeerRefreshTimer = undefined;
     stopEngine(monitorEngine);
     clearBindings(monitorEngine);
     ctx.ui.setStatus(MONITOR_STATUS_KEY, undefined);
+    void refreshMonitorLedgerState();
   }
 
   /** Resolve a single target name into a compact MonitorTargetSnapshot. */
@@ -3948,7 +4298,107 @@ export default function registerTeammateExtension(
           return;
         }
         stopMonitorEngine(ctx);
+        // Persist user-exit records and release leases before reporting
+        // success so auto-resume does not restore bindings the user exited
+        // and no stale lease blocks the next monitor.
+        await releaseAllMonitorLeases();
+        await Promise.allSettled(monitorLedgerWrites);
+        monitorLedgerWrites = [];
         ctx.ui.notify("Monitor stopped.", "info");
+        return;
+      }
+
+      // /monitor spawn <name> <objective...> — launch a managed headless work window
+      if (trimmed === "spawn" || trimmed.startsWith("spawn ")) {
+        const rest = trimmed.slice("spawn".length).trim();
+        if (rest === "status") {
+          if (managedWindows.size === 0) {
+            ctx.ui.notify("No managed windows spawned.", "info");
+            return;
+          }
+          const lines = [...managedWindows.values()].map((window) => {
+            const seconds = Math.round((Date.now() - window.startedAt) / 1000);
+            const alive = window.child.exitCode === null && !window.child.killed;
+            return `  ${alive ? "■" : "✗"} ${window.name} · ${seconds}s · ${window.objective.slice(0, 60)}`;
+          });
+          ctx.ui.notify(`MANAGED WINDOWS ${managedWindows.size}\n${lines.join("\n")}`, "info");
+          return;
+        }
+        if (rest === "stop" || rest.startsWith("stop ")) {
+          const name = rest.slice("stop".length).trim();
+          const window = name ? managedWindows.get(name) : undefined;
+          if (!window) {
+            ctx.ui.notify(`No managed window "${name || ""}". Use /monitor spawn status to list.`, "warning");
+            return;
+          }
+          try {
+            window.child.kill("SIGTERM");
+          } catch { /* already gone */ }
+          managedWindows.delete(name);
+          ctx.ui.notify(`Stopped managed window ${name}.`, "info");
+          return;
+        }
+        const space = rest.indexOf(" ");
+        const name = space < 0 ? rest : rest.slice(0, space);
+        const objective = space < 0 ? "" : rest.slice(space + 1).trim();
+        if (!name || !objective) {
+          ctx.ui.notify("Usage: /monitor spawn <name> <objective> | /monitor spawn status | /monitor spawn stop <name>", "warning");
+          return;
+        }
+        const result = await spawnManagedWindow(name, objective, ctx);
+        if (!result.ok) {
+          ctx.ui.notify(`Spawn failed: ${result.error}`, "warning");
+          return;
+        }
+        ctx.ui.notify(
+          `Spawned managed window ${name}. Wait for it to appear in /monitor status, then bind with /monitor ${name} [--goal <id>].`,
+          "info",
+        );
+        return;
+      }
+
+      // /monitor resume — restore active bindings from the durable ledger
+      if (trimmed === "resume") {
+        monitorConfig = loadMonitorConfigForRoot(monitorLedgerRoot ?? state.baseCwd ?? ctx.cwd);
+        const restored = await resumeMonitorBindings(ctx);
+        ctx.ui.notify(
+          restored > 0 ? `Resumed ${restored} binding${restored === 1 ? "" : "s"} from the monitor ledger.` : "No active bindings in the monitor ledger to resume.",
+          restored > 0 ? "info" : "warning",
+        );
+        return;
+      }
+
+      // /monitor metrics — derived supervision metrics from the ledger
+      if (trimmed === "metrics") {
+        await refreshMonitorLedgerState();
+        if (!monitorLedgerState) {
+          ctx.ui.notify("Monitor ledger is not loaded. Start the monitor first.", "warning");
+          return;
+        }
+        const lines = formatMonitorMetrics(deriveMonitorMetrics(monitorLedgerState));
+        ctx.ui.notify(lines.join("\n"), "info");
+        return;
+      }
+
+      // /monitor doctor — read-only health check
+      if (trimmed === "doctor") {
+        monitorConfig = loadMonitorConfigForRoot(monitorLedgerRoot ?? state.baseCwd ?? ctx.cwd);
+        await refreshMonitorLedgerState();
+        const root = monitorLedgerRoot ?? state.baseCwd ?? ctx.cwd;
+        const ledgerLines = monitorLedgerState
+          ? [
+              `  ledger: ${monitorLedgerState.records} records · ${monitorLedgerState.activeBindings.length} active · ${monitorLedgerState.disconnectedBindings.length} disconnected`,
+              `  interventions: ${monitorLedgerState.interventions.length} · outcomes: ${monitorLedgerState.outcomes.length} · dead-letter: ${monitorLedgerState.deadLetters.length}`,
+            ]
+          : [`  ledger: not loaded${monitorConfig.ledgerEnabled ? "" : " (disabled)"}`];
+        const lines = [
+          `MONITOR doctor · engine ${monitorEngine.running ? "running" : "stopped"} · ${monitorEngine.bindings.size} bindings`,
+          `  config: tick ${monitorConfig.tickMs}ms · stall ${monitorConfig.stallIdleSeconds}s · cooldown ${monitorConfig.interventionCooldownMs}ms · retries ${monitorConfig.maxRetries} · escalate ×${monitorConfig.escalationThreshold} · autoResume ${monitorConfig.autoResume ? "on" : "off"}`,
+          `  ledger: ${monitorConfig.ledgerEnabled ? "enabled" : "disabled"} @ ${join(root, ".pi", "monitor-ledger.jsonl")}`,
+          ...ledgerLines,
+          ...(monitorLedgerWarnings.length ? [`  warnings: ${monitorLedgerWarnings.join("; ")}`] : []),
+        ];
+        ctx.ui.notify(lines.join("\n"), "info");
         return;
       }
 
@@ -3961,10 +4411,16 @@ export default function registerTeammateExtension(
         const bindingLines = [...monitorEngine.bindings.values()].map((b) => {
           const icon = b.driftDetected ? "▲" : "✓";
           const fixes = b.interventions.length;
-          return `  ${icon} @${b.displayName} ${b.mode}${fixes ? ` · ${fixes} fixes` : ""}`;
+          const streak = b.interventionStreak > 0 ? ` · streak ×${b.interventionStreak}` : "";
+          const pressure = buildEngineAgentInfo(b.correlationId)?.contextPressure;
+          const ctxPressure = pressure !== undefined ? ` · ctx ${pressure}%` : "";
+          return `  ${icon} @${b.displayName} ${b.mode}${fixes ? ` · ${fixes} fixes` : ""}${streak}${ctxPressure}${b.resumed ? " · resumed" : ""}`;
         });
+        const ledgerLine = monitorLedgerState
+          ? `ledger: ${monitorLedgerState.activeBindings.length} active · ${monitorLedgerState.disconnectedBindings.length} disconnected · ${monitorLedgerState.deadLetters.length} dead-letter`
+          : "ledger: not loaded";
         const lines = [
-          `MONITOR ${monitorEngine.running ? "active" : "idle"} · ${monitorEngine.bindings.size} bindings`,
+          `MONITOR ${monitorEngine.running ? "active" : "idle"} · ${monitorEngine.bindings.size} bindings · ${ledgerLine}`,
           ...bindingLines,
         ];
         ctx.ui.notify(lines.join("\n"), "info");
@@ -3976,6 +4432,7 @@ export default function registerTeammateExtension(
       let mode: MonitorSupervisionMode = "auto";
       let customPrompt: string | undefined;
       let targetPart = trimmed;
+      let goalId: string | undefined;
 
       const customIdx = trimmed.indexOf("custom:");
       if (customIdx >= 0) {
@@ -3986,10 +4443,17 @@ export default function registerTeammateExtension(
         targetPart = trimmed.replace(/\s*auto$/, "").trim();
       }
 
+      // Optional --goal <id> links the binding to a pi-peer goal board.
+      const goalMatch = /--goal\s+(\S+)/.exec(targetPart);
+      if (goalMatch) {
+        goalId = goalMatch[1];
+        targetPart = targetPart.replace(/--goal\s+\S+/, "").trim();
+      }
+
       const targets = targetPart.split(/\s+/).filter((t) => t && t !== "auto");
 
       if (targets.length === 0) {
-        ctx.ui.notify("Usage: /monitor <target1> [target2 ...] [auto|custom:<prompt>]", "warning");
+        ctx.ui.notify("Usage: /monitor <target1> [target2 ...] [auto|custom:<prompt>] [--goal <goalId>]", "warning");
         return;
       }
 
@@ -4005,7 +4469,13 @@ export default function registerTeammateExtension(
         }
         const bindingKey = `owner:${owner.ownerId}`;
         const displayName = owner.sessionName ?? `window:${owner.ownerId.slice(0, 6)}`;
-        const result = addBinding(monitorEngine, bindingKey, displayName, mode, customPrompt);
+        // Supervision lease: refuse double-monitoring by another live session.
+        const lease = await acquireLeaseForBinding(owner.ownerId);
+        if (!lease.ok) {
+          errors.push(`${name}: ${lease.error}`);
+          continue;
+        }
+        const result = addBinding(monitorEngine, bindingKey, displayName, mode, customPrompt, { ...(goalId ? { goalId } : {}) });
         if (result.ok) bound++;
         else errors.push(result.error ?? `${name}: unknown error`);
       }
@@ -4024,6 +4494,34 @@ export default function registerTeammateExtension(
 
       const modeLabel = mode === "custom" ? `custom: ${customPrompt?.slice(0, 40)}` : "auto";
       ctx.ui.notify(`Monitoring ${bound} session${bound === 1 ? "" : "s"} (${modeLabel})${errors.length ? ` · ${errors.length} errors` : ""}`, "info");
+    },
+  });
+
+  pi.registerCommand("advisor", {
+    description: "Turn-level advisor: /advisor on|off|status",
+    async handler(args: string, ctx: ExtensionCommandContext) {
+      const trimmed = args.trim().toLowerCase();
+      advisorConfig = loadAdvisorConfigForRoot(monitorLedgerRoot ?? state.baseCwd ?? ctx.cwd);
+      if (trimmed === "on") {
+        advisorConfig.enabled = true;
+        advisorState.enabled = true;
+        ctx.ui.notify("Advisor enabled — turn-level quality reviews on agent_end (cooldown-gated).", "info");
+        return;
+      }
+      if (trimmed === "off") {
+        advisorConfig.enabled = false;
+        advisorState.enabled = false;
+        ctx.ui.notify("Advisor disabled.", "info");
+        return;
+      }
+      // status (default)
+      const lines = [
+        `ADVISOR ${advisorState.enabled ? "enabled" : "disabled"} · ${advisorState.reviews}/${advisorConfig.maxReviewsPerSession} reviews · cooldown ${Math.round(advisorConfig.cooldownMs / 1000)}s`,
+        ...(advisorState.lastVerdict
+          ? [`  last: ${advisorState.lastVerdict.status}${advisorState.lastVerdict.reason ? ` — ${advisorState.lastVerdict.reason.slice(0, 80)}` : ""}`]
+          : ["  last: no review yet"]),
+      ];
+      ctx.ui.notify(lines.join("\n"), "info");
     },
   });
 
@@ -4208,6 +4706,10 @@ export default function registerTeammateExtension(
     widgetCtx = ctx;
     setPersistentUi(ctx.ui, true);
     state.baseCwd = ctx.cwd;
+    // Monitor ledger + config bind to the real session cwd.
+    monitorLedgerRoot = ctx.cwd;
+    monitorConfig = loadMonitorConfigForRoot(ctx.cwd);
+    void reconcileMonitorLedgerAtStart(ctx);
     // Mailbox is bound to the real session cwd (workspace isolation).
     rebindMailboxHostForSession();
     refreshModelCatalog(ctx);
@@ -4223,6 +4725,11 @@ export default function registerTeammateExtension(
   });
 
   pi.on("before_agent_start", injectTeammateContext);
+
+  // Turn-level advisor: low-frequency quality review of this session's turns.
+  pi.on("agent_end", (event, ctx) => {
+    void runAdvisorReview(event, ctx);
+  });
 
   pi.on("session_compact", (_event, ctx) => {
     widgetCtx = ctx;
@@ -4242,7 +4749,10 @@ export default function registerTeammateExtension(
     stopWakeableEvictionTimer();
     if (monitorPeerRefreshTimer) clearInterval(monitorPeerRefreshTimer);
     monitorPeerRefreshTimer = undefined;
+    recordBindingExits(monitorEngine, "shutdown");
     stopEngine(monitorEngine);
+    void releaseAllMonitorLeases();
+    stopAllManagedWindows();
     workspacePeerLifecycle = workspacePeerLifecycle.then(stopWorkspacePeers);
     // Stop the mailbox consumer BEFORE killing agents so no in-flight poll can
     // inject into a dying session (previously never stopped at all).

@@ -29,6 +29,8 @@ export const MAX_COMMAND_FILE_BYTES = 96 * 1024;
 export const MAX_RESPONSE_FILE_BYTES = 32 * 1024;
 export const MAX_COMMAND_MESSAGE_BYTES = 64 * 1024;
 
+export const MONITOR_LEASE_STALE_MS = 60_000;
+
 const MAX_STRING = 4_096;
 const MAX_SUMMARY = 8_192;
 const MAX_MAILBOX_ENTRIES = 512;
@@ -59,7 +61,6 @@ export interface WorkspacePeerIdentity {
   ownerNonce: string;
   paths: WorkspacePeerPaths;
 }
-
 export interface WorkspaceAgentSnapshot {
   correlationId: string;
   name?: string;
@@ -97,6 +98,8 @@ export interface WorkspaceOwnerState {
   settled?: readonly WorkspaceSettledSnapshot[];
   sessionId?: string;
   sessionName?: string;
+  /** Context pressure as percentage of the window's context window (0-100). */
+  contextPressure?: number;
 }
 
 export interface WorkspaceOwnerSnapshot {
@@ -110,6 +113,8 @@ export interface WorkspaceOwnerSnapshot {
   publishedAt: number;
   sessionId?: string;
   sessionName?: string;
+  /** Context pressure as percentage of the window's context window (0-100). */
+  contextPressure?: number;
   agents: WorkspaceAgentSnapshot[];
   settled: WorkspaceSettledSnapshot[];
 }
@@ -384,6 +389,133 @@ async function readBoundedJson(path: string, maximumBytes: number): Promise<unkn
   }
 }
 
+// ---------------------------------------------------------------------------
+// Supervision lease — one monitor per peer window
+// ---------------------------------------------------------------------------
+
+/**
+ * Lease file declaring that `monitorOwnerId` supervises `targetOwnerId`.
+ * Lives next to the target's owner snapshot in the shared workspace root, so
+ * any Pi root session can see who is monitoring a window before binding.
+ */
+export interface MonitorLease {
+  version: typeof WORKSPACE_PEER_PROTOCOL_VERSION;
+  monitorOwnerId: string;
+  targetOwnerId: string;
+  sessionName?: string;
+  pid: number;
+  since: number;
+}
+
+export function monitorLeasePath(identity: WorkspacePeerIdentity, targetOwnerId: string): string {
+  assertOwnerId(targetOwnerId, "targetOwnerId");
+  return containedPath(identity.paths.ownersDir, `${targetOwnerId}.monitor.json`);
+}
+
+export function validateMonitorLease(value: unknown): MonitorLease | undefined {
+  if (!isRecord(value)
+    || value.version !== WORKSPACE_PEER_PROTOCOL_VERSION
+    || !assertOwnerIdSafe(value.monitorOwnerId)
+    || !assertOwnerIdSafe(value.targetOwnerId)
+    || !boundedInteger(value.pid) || (value.pid as number) <= 0
+    || !boundedInteger(value.since)) return undefined;
+  return {
+    version: WORKSPACE_PEER_PROTOCOL_VERSION,
+    monitorOwnerId: value.monitorOwnerId as string,
+    targetOwnerId: value.targetOwnerId as string,
+    ...(typeof value.sessionName === "string" && value.sessionName.trim() ? { sessionName: value.sessionName.trim().slice(0, MAX_SUMMARY) } : {}),
+    pid: value.pid as number,
+    since: value.since as number,
+  };
+}
+
+/** True when the given ownerId has a fresh owner snapshot (process alive). */
+async function ownerSnapshotAlive(identity: WorkspacePeerIdentity, ownerId: string, staleMs: number, now: number): Promise<boolean> {
+  const raw = await readBoundedJson(ownerSnapshotPath(identity, ownerId), MAX_OWNER_FILE_BYTES);
+  if (!isRecord(raw)) return false;
+  const snapshot = validateWorkspaceOwnerSnapshot(raw);
+  if (!snapshot) return false;
+  if (!boundedInteger(snapshot.pid) || snapshot.pid <= 0) return false;
+  return now - snapshot.publishedAt < staleMs;
+}
+
+export interface AcquireMonitorLeaseResult {
+  ok: boolean;
+  error?: string;
+  lease?: MonitorLease;
+}
+
+export interface AcquireMonitorLeaseOptions {
+  sessionName?: string;
+  /** Lease staleness: an offline holder's lease may be taken over. */
+  staleMs?: number;
+  now?: number;
+}
+
+/**
+ * Acquire the supervision lease for a peer window. Refuses when another
+ * live monitor already holds it (double-monitoring prevention); a stale
+ * lease whose holder has gone offline is taken over silently.
+ */
+export async function acquireMonitorLease(
+  identity: WorkspacePeerIdentity,
+  targetOwnerId: string,
+  options: AcquireMonitorLeaseOptions = {},
+): Promise<AcquireMonitorLeaseResult> {
+  if (targetOwnerId === identity.ownerId) {
+    return { ok: false, error: "Cannot monitor your own session window." };
+  }
+  const path = monitorLeasePath(identity, targetOwnerId);
+  const existing = validateMonitorLease(await readBoundedJson(path, MAX_COMMAND_FILE_BYTES));
+  if (existing && existing.monitorOwnerId !== identity.ownerId) {
+    const now = options.now ?? Date.now();
+    const staleMs = options.staleMs ?? MONITOR_LEASE_STALE_MS;
+    const holderAlive = await ownerSnapshotAlive(identity, existing.monitorOwnerId, staleMs, now);
+    if (holderAlive) {
+      const holder = existing.sessionName ? ` (${existing.sessionName})` : ` (${existing.monitorOwnerId.slice(0, 6)})`;
+      return { ok: false, error: `Window is already monitored by ${holder} since ${new Date(existing.since).toISOString()}.` };
+    }
+  }
+  const lease: MonitorLease = {
+    version: WORKSPACE_PEER_PROTOCOL_VERSION,
+    monitorOwnerId: identity.ownerId,
+    targetOwnerId,
+    ...(options.sessionName && options.sessionName.trim() ? { sessionName: options.sessionName.trim().slice(0, MAX_SUMMARY) } : {}),
+    pid: process.pid,
+    since: options.now ?? Date.now(),
+  };
+  await writePrivateJsonAtomic(path, lease, MAX_COMMAND_FILE_BYTES);
+  // Write-then-verify: two monitors acquiring concurrently could both pass
+  // the empty check and both write; the file is single-writer by atomic
+  // rename, so the last writer wins — read back and confirm it is us.
+  const verified = validateMonitorLease(await readBoundedJson(path, MAX_COMMAND_FILE_BYTES));
+  if (!verified || verified.monitorOwnerId !== identity.ownerId) {
+    return { ok: false, error: "Lease race: another monitor acquired the window concurrently." };
+  }
+  return { ok: true, lease };
+}
+
+/**
+ * Release the supervision lease. Only the lease holder may release it;
+ * returns false when the lease belongs to someone else.
+ */
+export async function releaseMonitorLease(
+  identity: WorkspacePeerIdentity,
+  targetOwnerId: string,
+  monitorOwnerId: string = identity.ownerId,
+): Promise<boolean> {
+  const path = monitorLeasePath(identity, targetOwnerId);
+  const existing = validateMonitorLease(await readBoundedJson(path, MAX_COMMAND_FILE_BYTES));
+  if (!existing) return true;
+  if (existing.monitorOwnerId !== monitorOwnerId) return false;
+  await rm(path, { force: true }).catch(() => undefined);
+  return true;
+}
+
+function assertOwnerIdSafe(value: unknown): value is string {
+  return typeof value === "string" && OWNER_ID_PATTERN.test(value);
+}
+
 function validateAgent(value: unknown): WorkspaceAgentSnapshot | undefined {
   if (!isRecord(value)
     || !safeCorrelationId(value.correlationId)
@@ -470,6 +602,7 @@ export function validateWorkspaceOwnerSnapshot(
     || !boundedInteger(value.publishedAt)
     || !optional(value.sessionId, (candidate): candidate is string => boundedString(candidate, 256))
     || !optional(value.sessionName, (candidate): candidate is string => boundedString(candidate, 256))
+    || !optional(value.contextPressure, (candidate): candidate is number => boundedInteger(candidate) && candidate >= 0 && candidate <= 100)
     || !Array.isArray(value.agents)
     || value.agents.length > MAX_OWNER_AGENTS
     || !Array.isArray(value.settled)
@@ -492,6 +625,7 @@ export function validateWorkspaceOwnerSnapshot(
     publishedAt: value.publishedAt,
     ...(value.sessionId === undefined ? {} : { sessionId: value.sessionId }),
     ...(value.sessionName === undefined ? {} : { sessionName: value.sessionName }),
+    ...(value.contextPressure === undefined ? {} : { contextPressure: value.contextPressure }),
     agents: agents as WorkspaceAgentSnapshot[],
     settled: settled as WorkspaceSettledSnapshot[],
   };
@@ -513,6 +647,8 @@ export function buildWorkspaceOwnerSnapshot(
     publishedAt,
     ...(state.sessionId === undefined ? {} : { sessionId: state.sessionId }),
     ...(state.sessionName === undefined ? {} : { sessionName: state.sessionName }),
+    // Protocol boundary: clamp/round pressure so publish never rejects.
+    ...(state.contextPressure === undefined ? {} : { contextPressure: Math.max(0, Math.min(100, Math.round(state.contextPressure))) }),
     agents: [...state.agents],
     settled: [...(state.settled ?? [])],
   };

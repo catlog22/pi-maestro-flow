@@ -11,7 +11,10 @@
  * registration in index.ts injects the watch/wait callbacks.
  */
 
+import { randomUUID } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import { DeliveryGate } from "../supervision/delivery.ts";
+import type { MonitorLedgerRecord } from "./monitor-ledger.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -339,6 +342,28 @@ export function validateMonitorParams(params: MonitorParams): string | undefined
 
 export type MonitorSupervisionMode = "auto" | "custom";
 
+export interface PendingIntervention {
+  traceId: string;
+  at: number;
+  reason: InterventionRecord["reason"];
+  mode: "steer" | "follow_up";
+  message: string;
+}
+
+/** One LLM drift-analysis verdict in the per-binding history. */
+export interface AnalysisVerdictRecord {
+  at: number;
+  verdict: "on-track" | "drift";
+}
+
+/** Resolution of a previously sent intervention (closed loop). */
+export type InterventionOutcome =
+  | "recovered"   // agent resumed healthy work or completed
+  | "failed"      // agent settled as failed while the intervention was pending
+  | "repeated"    // same issue recurred (below escalation threshold)
+  | "escalated"   // threshold crossed — main session notified
+  | "abandoned";  // binding/target disappeared before resolution
+
 /** A single intervention action taken by the engine. */
 export interface InterventionRecord {
   timestamp: number;
@@ -347,6 +372,8 @@ export interface InterventionRecord {
   /** The corrective message sent to the agent. */
   message: string;
   mode: "steer" | "follow_up";
+  traceId?: string;
+  outcome?: InterventionOutcome;
 }
 
 /** Binding between a monitor and a single session (1:1). */
@@ -367,6 +394,24 @@ export interface MonitorBinding {
   lastNotifiedReason?: string;
   /** Per-binding intervention delivery gate (cooldown + dedup + window limit). */
   deliveryGate: DeliveryGate;
+  /** Intervention awaiting outcome resolution on later ticks. */
+  pendingIntervention?: PendingIntervention;
+  /** Last recorded analysis verdict (ledger emits on flip only). */
+  lastRecordedVerdict?: "on-track" | "drift";
+  /** Bounded per-binding analysis history (drift signal input). */
+  analysisHistory: AnalysisVerdictRecord[];
+  /** Decay-weighted drift score derived from analysisHistory. */
+  driftScore: number;
+  /** Whether the drift score crossed the elevated threshold. */
+  elevated: boolean;
+  /** Consecutive unresolved repeats — persists across intervention cycles. */
+  interventionStreak: number;
+  /** Last escalation timestamp (bounds escalation frequency). */
+  lastEscalatedAt: number;
+  /** Whether this binding was restored from the ledger (auto-resume). */
+  resumed?: boolean;
+  /** Optional goal-board link (pi-peer `.pi/peer-goals.json` interop). */
+  goalId?: string;
 }
 
 /** Agent info snapshot provided by the host (index.ts) to the engine. */
@@ -381,6 +426,8 @@ export interface EngineAgentInfo {
   objective: string;
   /** Whether the agent has pending interactions (waiting on user). */
   hasPendingInteractions: boolean;
+  /** Context pressure percentage of the monitored session (0-100). */
+  contextPressure?: number;
   /** "agent" for sub-agents, "window" for peer windows. */
   kind?: "agent" | "window";
 }
@@ -397,6 +444,10 @@ export interface EngineCallbacks {
   notifyMain: (message: string, target?: string) => void;
   /** LLM analysis (Phase C). Returns undefined if not available or failed. */
   analyze?: (binding: MonitorBinding, info: EngineAgentInfo) => Promise<AnalysisResult | undefined>;
+  /** Durable ledger append (best-effort; engine never blocks on it). */
+  recordLedger?: (record: MonitorLedgerRecord) => void | Promise<void>;
+  /** Post a blocking objection to the goal board (best-effort). */
+  postGoalObjection?: (goalId: string, summary: string, peerId: string) => void | Promise<void>;
 }
 
 /** Result from LLM drift analysis. */
@@ -437,6 +488,181 @@ export const ENGINE_STALL_IDLE_SECONDS = 60;
 export const ENGINE_ANALYSIS_TAIL_LINES = 20;
 /** Max interventions recorded per binding. */
 export const ENGINE_MAX_INTERVENTION_LOG = 20;
+/** Minimum interval between escalations of the same binding. */
+export const ESCALATION_COOLDOWN_MS = 5 * 60_000;
+
+// ---------------------------------------------------------------------------
+// Drift signal field (pi-peer stigmergy-lite)
+// ---------------------------------------------------------------------------
+
+/** Max analysis verdicts kept per binding. */
+export const ANALYSIS_HISTORY_MAX = 20;
+/** Decay time constant for the drift score (ms). */
+export const DRIFT_SCORE_HALF_LIFE_MS = 5 * 60_000;
+/** Weight of a drift verdict. */
+export const DRIFT_SCORE_DRIFT_WEIGHT = 1;
+/** Weight of an on-track verdict. */
+export const DRIFT_SCORE_ON_TRACK_WEIGHT = -0.5;
+/** Score at/above which a binding becomes elevated. */
+export const DRIFT_SCORE_ELEVATED_THRESHOLD = 2;
+/** Score at/below which an elevated binding clears (hysteresis). */
+export const DRIFT_SCORE_CLEAR_THRESHOLD = 0.5;
+/** Number of recent verdicts injected into analysis prompts. */
+export const ANALYSIS_TREND_INJECTION = 5;
+
+/**
+ * Decay-weighted drift score (pi-peer signal-field pattern): each verdict
+ * contributes +1 (drift) or −0.5 (on-track), weighted by exp(−age/τ) so old
+ * incidents fade and a recovered agent's score returns toward zero.
+ */
+export function computeDriftScore(
+  history: readonly AnalysisVerdictRecord[],
+  now: number,
+  options: { halfLifeMs?: number } = {},
+): number {
+  const halfLifeMs = options.halfLifeMs ?? DRIFT_SCORE_HALF_LIFE_MS;
+  let score = 0;
+  for (const record of history) {
+    const age = Math.max(0, now - record.at);
+    const weight = record.verdict === "drift" ? DRIFT_SCORE_DRIFT_WEIGHT : DRIFT_SCORE_ON_TRACK_WEIGHT;
+    score += weight * Math.exp(-age / halfLifeMs);
+  }
+  return score;
+}
+
+/**
+ * Recent-verdict trend block injected into analysis prompts so the analyst
+ * sees the trajectory, not just the latest tick (stateful analysis).
+ */
+export function buildAnalysisTrendBlock(
+  history: readonly AnalysisVerdictRecord[],
+  score: number,
+  options: { now?: number; inject?: number } = {},
+): string {
+  if (history.length === 0) return "";
+  const recent = history.slice(-(options.inject ?? ANALYSIS_TREND_INJECTION));
+  const sequence = recent.map((record) => record.verdict).join(" · ");
+  const elevated = score >= DRIFT_SCORE_ELEVATED_THRESHOLD;
+  const note = elevated
+    ? " (ELEVATED — repeated drift; consider escalating toward user review)"
+    : score > 0
+      ? " (mild positive signal — watch)"
+      : "";
+  return `Drift trend (oldest → newest): ${sequence}\nCurrent drift score: ${score.toFixed(2)}${note}`;
+}
+
+// ---------------------------------------------------------------------------
+// Engine configuration (settings + env overrides, pi-peer idle-watcher style)
+// ---------------------------------------------------------------------------
+
+export interface MonitorEngineConfig {
+  /** Engine tick interval. */
+  tickMs: number;
+  /** Idle threshold for stalled detection (seconds). */
+  stallIdleSeconds: number;
+  /** Minimum interval between interventions on the same binding. */
+  interventionCooldownMs: number;
+  /** Delivery retries before dead-letter (0 = single attempt). */
+  maxRetries: number;
+  /** Linear backoff base between retries. */
+  retryBackoffMs: number;
+  /** Max interventions recorded per binding. */
+  maxInterventionLog: number;
+  /** Max output lines fed to drift analysis. */
+  analysisTailLines: number;
+  /** Repeated unresolved interventions before escalation to the user. */
+  escalationThreshold: number;
+  /** Minimum elapsed time before a pending intervention is evaluated. */
+  pendingOutcomeEvalMs: number;
+  /** Whether ledger records are appended (best-effort). */
+  ledgerEnabled: boolean;
+  /** Whether active ledger bindings are restored on session start. */
+  autoResume: boolean;
+  /** Context pressure % at which stalled interventions downgrade to compact requests. */
+  contextCompactThresholdPercent: number;
+}
+
+export const DEFAULT_MONITOR_CONFIG: MonitorEngineConfig = {
+  tickMs: ENGINE_TICK_MS,
+  stallIdleSeconds: ENGINE_STALL_IDLE_SECONDS,
+  interventionCooldownMs: INTERVENTION_COOLDOWN_MS,
+  maxRetries: 2,
+  retryBackoffMs: 1_000,
+  maxInterventionLog: ENGINE_MAX_INTERVENTION_LOG,
+  analysisTailLines: ENGINE_ANALYSIS_TAIL_LINES,
+  escalationThreshold: 2,
+  pendingOutcomeEvalMs: 30_000,
+  ledgerEnabled: true,
+  autoResume: true,
+  contextCompactThresholdPercent: 80,
+};
+
+const FALSE_VALUES = new Set(["0", "false", "off", "no", "disabled"]);
+const TRUE_VALUES = new Set(["1", "true", "on", "yes", "enabled"]);
+
+function parseBooleanEnv(value: string | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  const lower = value.trim().toLowerCase();
+  if (FALSE_VALUES.has(lower)) return false;
+  if (TRUE_VALUES.has(lower)) return true;
+  return undefined;
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  const number = typeof value === "string" || typeof value === "number" ? Number(value) : NaN;
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : undefined;
+}
+
+const CONFIG_NUMERIC_KEYS = [
+  "tickMs",
+  "stallIdleSeconds",
+  "interventionCooldownMs",
+  "maxRetries",
+  "retryBackoffMs",
+  "maxInterventionLog",
+  "analysisTailLines",
+  "escalationThreshold",
+  "pendingOutcomeEvalMs",
+  "contextCompactThresholdPercent",
+] as const;
+
+const CONFIG_ENV_OVERRIDES: Record<string, (typeof CONFIG_NUMERIC_KEYS)[number]> = {
+  PI_MONITOR_TICK_MS: "tickMs",
+  PI_MONITOR_STALL_IDLE_SECONDS: "stallIdleSeconds",
+  PI_MONITOR_COOLDOWN_MS: "interventionCooldownMs",
+  PI_MONITOR_MAX_RETRIES: "maxRetries",
+  PI_MONITOR_RETRY_BACKOFF_MS: "retryBackoffMs",
+  PI_MONITOR_ESCALATION_THRESHOLD: "escalationThreshold",
+};
+
+/**
+ * Merge `.pi/settings.json` `monitor` section + env overrides onto defaults.
+ * Mirrors pi-peer's normalizePeerIdleWatcherConfig(source, { env }).
+ */
+export function normalizeMonitorConfig(input: unknown = {}, options: { env?: NodeJS.ProcessEnv } = {}): MonitorEngineConfig {
+  const source = plainObject(input) ? input : {};
+  const env = options.env ?? process.env;
+  const config: MonitorEngineConfig = { ...DEFAULT_MONITOR_CONFIG };
+  for (const key of CONFIG_NUMERIC_KEYS) {
+    const value = positiveInteger(source[key]);
+    if (value !== undefined) config[key] = value;
+  }
+  for (const [envKey, configKey] of Object.entries(CONFIG_ENV_OVERRIDES)) {
+    const value = positiveInteger(env[envKey]);
+    if (value !== undefined) config[configKey] = value;
+  }
+  const ledger = parseBooleanEnv(env.PI_MONITOR_LEDGER);
+  if (ledger !== undefined) config.ledgerEnabled = ledger;
+  else if (typeof source.ledgerEnabled === "boolean") config.ledgerEnabled = source.ledgerEnabled;
+  const autoResume = parseBooleanEnv(env.PI_MONITOR_AUTO_RESUME);
+  if (autoResume !== undefined) config.autoResume = autoResume;
+  else if (typeof source.autoResume === "boolean") config.autoResume = source.autoResume;
+  return config;
+}
+
+function plainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
 
 // ---------------------------------------------------------------------------
 // Engine state
@@ -452,15 +678,33 @@ export interface MonitorEngineState {
   callbacks?: EngineCallbacks;
   /** Aborts in-flight analysis on stop. */
   abortController?: AbortController;
+  /** Effective engine configuration. */
+  config: MonitorEngineConfig;
+  /** Ledger records emitted before callbacks were wired (flushed on start/tick). */
+  pendingLedgerRecords: MonitorLedgerRecord[];
 }
 
 export function createEngineState(): MonitorEngineState {
-  return { running: false, ticking: false, bindings: new Map(), startedAt: 0 };
+  return {
+    running: false,
+    ticking: false,
+    bindings: new Map(),
+    startedAt: 0,
+    config: { ...DEFAULT_MONITOR_CONFIG },
+    pendingLedgerRecords: [],
+  };
 }
 
 // ---------------------------------------------------------------------------
 // Binding management (1:1 constraint)
 // ---------------------------------------------------------------------------
+
+export interface AddBindingOptions {
+  /** Restored from the durable ledger (auto-resume); not a fresh enter. */
+  resumed?: boolean;
+  /** Optional goal-board link: closure standards feed drift analysis. */
+  goalId?: string;
+}
 
 export function addBinding(
   engine: MonitorEngineState,
@@ -468,6 +712,7 @@ export function addBinding(
   displayName: string,
   mode: MonitorSupervisionMode,
   customPrompt?: string,
+  options: AddBindingOptions = {},
 ): { ok: boolean; error?: string } {
   if (engine.bindings.has(correlationId)) {
     return { ok: false, error: `Session ${displayName} already has a monitor.` };
@@ -484,20 +729,115 @@ export function addBinding(
     driftDetected: false,
     lastNotifiedReason: undefined,
     deliveryGate: new DeliveryGate({
-      cooldownMs: INTERVENTION_COOLDOWN_MS,
+      cooldownMs: engine.config.interventionCooldownMs,
       dedup: { scope: "target" },
       perWindowLimit: 1,
     }),
+    interventionStreak: 0,
+    lastEscalatedAt: 0,
+    analysisHistory: [],
+    driftScore: 0,
+    elevated: false,
+    resumed: options.resumed ?? false,
+    ...(options.goalId ? { goalId: options.goalId } : {}),
+  });
+  emitLedger(engine, {
+    kind: "binding",
+    action: "enter",
+    status: "active",
+    target: correlationId,
+    metadata: {
+      displayName,
+      mode,
+      ...(customPrompt ? { customPrompt } : {}),
+      ...(options.resumed ? { resumed: true } : {}),
+      ...(options.goalId ? { goalId: options.goalId } : {}),
+    },
   });
   return { ok: true };
 }
 
 export function removeBinding(engine: MonitorEngineState, correlationId: string): boolean {
-  return engine.bindings.delete(correlationId);
+  const binding = engine.bindings.get(correlationId);
+  if (!binding) return false;
+  engine.bindings.delete(correlationId);
+  emitLedger(engine, {
+    kind: "binding",
+    action: "exit",
+    status: "removed",
+    target: correlationId,
+    metadata: { displayName: binding.displayName },
+  });
+  return true;
 }
 
 export function clearBindings(engine: MonitorEngineState): void {
-  engine.bindings.clear();
+  for (const [correlationId, binding] of [...engine.bindings]) {
+    engine.bindings.delete(correlationId);
+    emitLedger(engine, {
+      kind: "binding",
+      action: "exit",
+      status: "cleared",
+      target: correlationId,
+      metadata: { displayName: binding.displayName },
+    });
+  }
+}
+
+/**
+ * Record binding exits before the engine stops (user-exit / shutdown).
+ * Must be called while callbacks are still wired.
+ */
+export function recordBindingExits(engine: MonitorEngineState, status: string, reason?: string): void {
+  for (const [correlationId, binding] of [...engine.bindings]) {
+    emitLedger(engine, {
+      kind: "binding",
+      action: "exit",
+      status,
+      target: correlationId,
+      metadata: {
+        displayName: binding.displayName,
+        ...(reason ? { reason } : {}),
+      },
+    });
+  }
+}
+
+/** Best-effort ledger emit — never blocks or throws into the engine. */
+function emitLedger(engine: MonitorEngineState, record: Omit<MonitorLedgerRecord, "id" | "at">): void {
+  const full: MonitorLedgerRecord = {
+    id: `mon_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`,
+    at: new Date().toISOString(),
+    ...record,
+  };
+  const emit = engine.callbacks?.recordLedger;
+  if (!emit) {
+    // Callbacks not wired yet (e.g. bindings added before engine start) —
+    // buffer and flush once the engine is started.
+    engine.pendingLedgerRecords.push(full);
+    return;
+  }
+  deliverLedgerRecord(emit, full);
+}
+
+function deliverLedgerRecord(emit: (record: MonitorLedgerRecord) => void | Promise<void>, record: MonitorLedgerRecord): void {
+  try {
+    const result = emit(record);
+    if (result && typeof (result as Promise<void>).catch === "function") {
+      (result as Promise<void>).catch(() => {});
+    }
+  } catch {
+    // Ledger is best-effort; supervision must never fail because of it.
+  }
+}
+
+/** Flush records buffered before callbacks were wired (start/tick). */
+function flushPendingLedger(engine: MonitorEngineState): void {
+  const emit = engine.callbacks?.recordLedger;
+  if (!emit || engine.pendingLedgerRecords.length === 0) return;
+  const pending = engine.pendingLedgerRecords;
+  engine.pendingLedgerRecords = [];
+  for (const record of pending) deliverLedgerRecord(emit, record);
 }
 
 // ---------------------------------------------------------------------------
@@ -511,7 +851,7 @@ export interface HeuristicResult {
   notifyOnly?: boolean; // true = notify main session, don't send to agent
 }
 
-export function heuristicCheck(info: EngineAgentInfo): HeuristicResult {
+export function heuristicCheck(info: EngineAgentInfo, contextCompactThresholdPercent = 80): HeuristicResult {
   const windowKind = info.kind === "window";
   // Failed agent
   if (info.status === "failed") {
@@ -539,12 +879,17 @@ export function heuristicCheck(info: EngineAgentInfo): HeuristicResult {
 
   // Stalled (running but idle too long)
   if (info.status === "running" && info.idleSeconds >= ENGINE_STALL_IDLE_SECONDS) {
+    const compactHint = info.kind === "window"
+      && info.contextPressure !== undefined
+      && info.contextPressure >= contextCompactThresholdPercent;
     return {
       needsIntervention: true,
       reason: "stalled",
-      message: windowKind
-        ? `Window @${info.name}'s agents appear stalled (idle ${info.idleSeconds}s). Review and steer them.`
-        : `You appear to be stalled (idle ${info.idleSeconds}s). Please continue working on your task or report what is blocking you.`,
+      message: compactHint
+        ? `Window @${info.name} is stalled (idle ${info.idleSeconds}s) with high context pressure (${info.contextPressure}%) — ask it to compact before continuing.`
+        : windowKind
+          ? `Window @${info.name}'s agents appear stalled (idle ${info.idleSeconds}s). Review and steer them.`
+          : `You appear to be stalled (idle ${info.idleSeconds}s). Please continue working on your task or report what is blocking you.`,
     };
   }
 
@@ -559,17 +904,59 @@ export function canIntervene(binding: MonitorBinding, now: number): boolean {
   return now - binding.lastInterventionAt >= INTERVENTION_COOLDOWN_MS;
 }
 
+/** Config-aware cooldown check used by the engine. */
+function canInterveneWith(binding: MonitorBinding, now: number, cooldownMs: number): boolean {
+  return now - binding.lastInterventionAt >= cooldownMs;
+}
+
 export function recordIntervention(
   binding: MonitorBinding,
   reason: InterventionRecord["reason"],
   message: string,
   mode: "steer" | "follow_up",
+  traceId?: string,
 ): void {
   binding.lastInterventionAt = Date.now();
-  binding.interventions.push({ timestamp: Date.now(), reason, message, mode });
+  binding.interventions.push({ timestamp: Date.now(), reason, message, mode, ...(traceId ? { traceId } : {}) });
   // Trim log
   if (binding.interventions.length > ENGINE_MAX_INTERVENTION_LOG) {
     binding.interventions = binding.interventions.slice(-ENGINE_MAX_INTERVENTION_LOG);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Delivery retry + dead-letter (pi-peer comms retry policy pattern)
+// ---------------------------------------------------------------------------
+
+export function createTraceId(): string {
+  return `mon_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
+}
+
+/**
+ * Send an intervention with bounded retry. Each attempt calls `send`;
+ * `maxRetries` failures after the first attempt produce a dead-letter.
+ * Backoff is linear (`backoffMs * attempt`), abortable via `signal`.
+ */
+export async function sendInterventionWithRetry(
+  send: (message: string, mode: "steer" | "follow_up") => boolean | Promise<boolean>,
+  message: string,
+  mode: "steer" | "follow_up",
+  maxRetries: number,
+  backoffMs: number,
+  options: { signal?: AbortSignal; sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void> } = {},
+): Promise<{ delivered: boolean; attempts: number }> {
+  const sleepFn = options.sleepFn ?? ((ms: number, signal?: AbortSignal) => sleep(ms, signal));
+  let attempts = 0;
+  for (;;) {
+    attempts += 1;
+    const ok = await send(message, mode);
+    if (ok) return { delivered: true, attempts };
+    if (attempts > maxRetries) return { delivered: false, attempts };
+    try {
+      await sleepFn(backoffMs * attempts, options.signal);
+    } catch {
+      return { delivered: false, attempts };
+    }
   }
 }
 
@@ -587,6 +974,7 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
   const cb = engine.callbacks;
   if (!cb || engine.ticking) return 0;
   engine.ticking = true;
+  flushPendingLedger(engine);
   const now = Date.now();
   let interventionCount = 0;
   try {
@@ -595,67 +983,215 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
       binding.deliveryGate.beginWindow();
     }
 
-  for (const [cid, binding] of [...engine.bindings]) {
-    const ownsBinding = (): boolean =>
-      engine.callbacks === cb && engine.bindings.get(cid) === binding;
-    const info = cb.getAgentInfo(cid);
-    if (!info) {
-      // Agent is gone — remove binding
-      engine.bindings.delete(cid);
-      continue;
-    }
-
-    binding.lastCheckAt = now;
-
-    // 1. Heuristic fast check
-    const heuristic = heuristicCheck(info);
-
-    if (heuristic.notifyOnly && heuristic.message) {
-      // Dedup: only notify on state transition, not every tick
-      if (binding.lastNotifiedReason !== heuristic.reason) {
-        binding.lastNotifiedReason = heuristic.reason;
-        cb.notifyMain(heuristic.message, cid);
-      }
-      continue;
-    }
-    // Clear notification dedup when agent recovers
-    if (binding.lastNotifiedReason && !heuristic.notifyOnly) {
-      binding.lastNotifiedReason = undefined;
-    }
-
-    if (heuristic.needsIntervention && heuristic.message && canIntervene(binding, now)) {
-      if (binding.deliveryGate.gate(cid, heuristic.message, "interrupt") === undefined) {
+    for (const [cid, binding] of [...engine.bindings]) {
+      const ownsBinding = (): boolean =>
+        engine.callbacks === cb && engine.bindings.get(cid) === binding;
+      const info = cb.getAgentInfo(cid);
+      if (!info) {
+        // Agent is gone — remove binding and record exit.
+        engine.bindings.delete(cid);
+        emitLedger(engine, {
+          kind: "binding",
+          action: "exit",
+          status: "gone",
+          target: cid,
+          metadata: { displayName: binding.displayName },
+        });
         continue;
       }
-      const sent = await cb.sendIntervention(cid, heuristic.message, "steer");
-      if (sent && ownsBinding()) {
-        recordIntervention(binding, heuristic.reason!, heuristic.message, "steer");
-        interventionCount++;
-      }
-      continue;
-    }
 
-    // 2. LLM analysis (only for running agents that pass heuristic)
-    if (cb.analyze && info.status === "running" && info.idleSeconds < ENGINE_STALL_IDLE_SECONDS) {
-      const result = await cb.analyze(binding, info).catch(() => undefined);
-      if (!ownsBinding()) continue;
-      if (result) {
-        binding.driftDetected = result.status === "drift";
-        if (result.status === "drift" && result.action === "send" && result.message && canIntervene(binding, now)) {
-          if (binding.deliveryGate.gate(cid, result.message, "interrupt") === undefined) {
-            continue;
+      binding.lastCheckAt = now;
+
+      // 1. Heuristic fast check
+      const heuristic = heuristicCheck(info, engine.config.contextCompactThresholdPercent);
+
+      if (heuristic.notifyOnly && heuristic.message) {
+        // Dedup: only notify on state transition, not every tick
+        if (binding.lastNotifiedReason !== heuristic.reason) {
+          binding.lastNotifiedReason = heuristic.reason;
+          cb.notifyMain(heuristic.message, cid);
+        }
+        continue;
+      }
+      // Clear notification dedup when agent recovers
+      if (binding.lastNotifiedReason && !heuristic.notifyOnly) {
+        binding.lastNotifiedReason = undefined;
+      }
+
+      // 2. LLM drift analysis (only for running agents that pass heuristic)
+      let driftSignal: { message: string } | undefined;
+      if (cb.analyze && info.status === "running" && info.idleSeconds < engine.config.stallIdleSeconds) {
+        const result = await cb.analyze(binding, info).catch(() => undefined);
+        if (!ownsBinding()) continue;
+        if (result) {
+          const verdict = result.status === "drift" ? "drift" : "on-track";
+          binding.driftDetected = result.status === "drift";
+          // Ledger emits only on verdict flips (event semantics, not per-tick).
+          if (binding.lastRecordedVerdict !== verdict) {
+            binding.lastRecordedVerdict = verdict;
+            emitLedger(engine, {
+              kind: "analysis",
+              action: "verdict",
+              status: verdict,
+              target: cid,
+              reason: result.reason,
+              metadata: { mode: binding.mode },
+            });
           }
-          const sent = await cb.sendIntervention(cid, result.message, "steer");
-          if (sent && ownsBinding()) {
-            recordIntervention(binding, binding.mode === "custom" ? "custom" : "drift", result.message, "steer");
-            interventionCount++;
+          // Drift signal field: bounded history + decay-weighted score.
+          binding.analysisHistory.push({ at: now, verdict });
+          if (binding.analysisHistory.length > ANALYSIS_HISTORY_MAX) {
+            binding.analysisHistory = binding.analysisHistory.slice(-ANALYSIS_HISTORY_MAX);
+          }
+          binding.driftScore = computeDriftScore(binding.analysisHistory, now);
+          const elevated = binding.driftScore >= DRIFT_SCORE_ELEVATED_THRESHOLD;
+          if (elevated !== binding.elevated) {
+            binding.elevated = elevated;
+            if (elevated) {
+              const driftCount = binding.analysisHistory.filter((record) => record.verdict === "drift").length;
+              cb.notifyMain(
+                `⚠ @${binding.displayName} drift trend rising (score ${binding.driftScore.toFixed(1)}) — ${driftCount} recent drift verdict(s); consider reviewing the task.`,
+                cid,
+              );
+            }
+          }
+          if (result.status === "drift" && result.action === "send" && result.message) {
+            driftSignal = { message: result.message };
           }
         }
       }
-    }
-  }
 
-  return interventionCount;
+      // 3. Pending intervention outcome resolution (closed loop)
+      if (binding.pendingIntervention) {
+        const pending = binding.pendingIntervention;
+        const elapsed = now - pending.at;
+        const signalActive = heuristic.needsIntervention || driftSignal !== undefined;
+        let outcome: InterventionOutcome | undefined;
+        if (info.status === "completed") outcome = "recovered";
+        else if (info.status === "failed") outcome = "failed";
+        else if (info.status === "sleeping") outcome = "recovered";
+        else if (signalActive && elapsed >= engine.config.pendingOutcomeEvalMs) outcome = "repeated";
+        else if (!signalActive && elapsed >= engine.config.pendingOutcomeEvalMs && info.status === "running") outcome = "recovered";
+
+        if (outcome !== undefined) {
+          if (outcome === "repeated") {
+            binding.interventionStreak += 1;
+            if (binding.interventionStreak >= engine.config.escalationThreshold && now - binding.lastEscalatedAt >= ESCALATION_COOLDOWN_MS) {
+              // Escalate: clear pending, notify main session, record outcome.
+              binding.pendingIntervention = undefined;
+              binding.lastEscalatedAt = now;
+              cb.notifyMain(
+                `⚠ @${binding.displayName} still ${pending.reason === "stalled" ? "stalled" : "drifting"} after ${binding.interventionStreak} intervention(s) — review required.`,
+                cid,
+              );
+              emitLedger(engine, {
+                kind: "outcome",
+                action: "resolve",
+                status: "escalated",
+                target: cid,
+                traceId: pending.traceId,
+                reason: pending.reason,
+                attempts: binding.interventionStreak,
+              });
+              // Goal-linked binding: escalate onto the goal board as a blocking
+              // objection so supervision becomes closure evidence.
+              if (binding.goalId && cb.postGoalObjection) {
+                const summary = `${binding.displayName} ${pending.reason === "stalled" ? "stalled" : "drifting"} after ${binding.interventionStreak} intervention(s) — monitor escalation.`;
+                try {
+                  const result = cb.postGoalObjection(binding.goalId, summary, "monitor");
+                  if (result && typeof (result as Promise<void>).catch === "function") {
+                    (result as Promise<void>).catch(() => {});
+                  }
+                } catch {
+                  // best-effort
+                }
+              }
+              continue;
+            }
+            emitLedger(engine, {
+              kind: "outcome",
+              action: "resolve",
+              status: "repeated",
+              target: cid,
+              traceId: pending.traceId,
+              reason: pending.reason,
+              attempts: binding.interventionStreak,
+            });
+          } else {
+            binding.pendingIntervention = undefined;
+            binding.interventionStreak = 0;
+            emitLedger(engine, {
+              kind: "outcome",
+              action: "resolve",
+              status: outcome,
+              target: cid,
+              traceId: pending.traceId,
+              reason: pending.reason,
+            });
+          }
+        }
+      }
+
+      // 4. Intervention — heuristic wins over drift signal
+      const plan: { message: string; reason: InterventionRecord["reason"] } | undefined =
+        heuristic.needsIntervention && heuristic.message
+          ? { message: heuristic.message, reason: heuristic.reason! }
+          : driftSignal
+            ? { message: driftSignal.message, reason: binding.mode === "custom" ? "custom" : "drift" }
+            : undefined;
+      if (plan && canInterveneWith(binding, now, engine.config.interventionCooldownMs)) {
+        if (binding.deliveryGate.gate(cid, plan.message, "interrupt") === undefined) {
+          continue;
+        }
+        const traceId = createTraceId();
+        const { delivered, attempts } = await sendInterventionWithRetry(
+          (message, mode) => cb.sendIntervention(cid, message, mode),
+          plan.message,
+          "steer",
+          engine.config.maxRetries,
+          engine.config.retryBackoffMs,
+          { signal: engine.abortController?.signal },
+        );
+        if (!ownsBinding()) continue;
+        if (delivered) {
+          recordIntervention(binding, plan.reason, plan.message, "steer", traceId);
+          binding.pendingIntervention = {
+            traceId,
+            at: Date.now(),
+            reason: plan.reason,
+            mode: "steer",
+            message: plan.message,
+          };
+          emitLedger(engine, {
+            kind: "intervention",
+            action: "steer",
+            status: "sent",
+            target: cid,
+            traceId,
+            reason: plan.reason,
+            message: plan.message,
+          });
+          interventionCount++;
+        } else {
+          // Dead-letter: delivery exhausted retries.
+          cb.notifyMain(
+            `⚠ Intervention to @${binding.displayName} failed after ${attempts} attempt(s) — target unreachable, review needed.`,
+            cid,
+          );
+          emitLedger(engine, {
+            kind: "delivery",
+            action: "dead-letter",
+            status: "failed",
+            target: cid,
+            traceId,
+            reason: plan.reason,
+            attempts,
+          });
+        }
+      }
+    }
+
+    return interventionCount;
   } finally {
     engine.ticking = false;
   }
@@ -668,17 +1204,20 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
 export function startEngine(
   engine: MonitorEngineState,
   callbacks: EngineCallbacks,
+  config?: Partial<MonitorEngineConfig>,
 ): void {
   stopEngine(engine);
   engine.running = true;
   engine.ticking = false;
   engine.startedAt = Date.now();
+  engine.config = { ...engine.config, ...(config ?? {}) };
   engine.callbacks = callbacks;
   engine.abortController = new AbortController();
+  flushPendingLedger(engine);
 
   engine.timer = setInterval(() => {
     void engineTick(engine);
-  }, ENGINE_TICK_MS);
+  }, engine.config.tickMs);
 
   // Background work — never prevent process exit
   if (engine.timer && typeof engine.timer === "object" && "unref" in engine.timer) {
@@ -706,6 +1245,84 @@ export function stopEngine(engine: MonitorEngineState): void {
 // Engine status bar
 // ---------------------------------------------------------------------------
 
+export interface MonitorMetrics {
+  records: number;
+  bindings: number;
+  interventions: number;
+  outcomes: number;
+  recovered: number;
+  repeated: number;
+  escalated: number;
+  failed: number;
+  deadLetters: number;
+  analysisVerdicts: number;
+  driftVerdicts: number;
+  /** interventions with a terminal outcome / total interventions */
+  resolutionRate: number;
+  /** recovered / terminal outcomes */
+  recoveryRate: number;
+  /** escalated outcomes / interventions */
+  escalationRate: number;
+  /** drift verdicts / all verdicts */
+  driftRate: number;
+}
+
+/**
+ * Metrics derived from the monitor ledger read-model (pi-peer metrics.mjs
+ * pattern: derive, never record). Pure — unit-testable.
+ */
+export function deriveMonitorMetrics(state: {
+  records: number;
+  bindings: unknown[];
+  interventions: MonitorLedgerRecord[];
+  outcomes: MonitorLedgerRecord[];
+  deadLetters: MonitorLedgerRecord[];
+  analyses: MonitorLedgerRecord[];
+}): MonitorMetrics {
+  const interventions = state.interventions.length;
+  const outcomes = state.outcomes;
+  const recovered = outcomes.filter((outcome) => outcome.status === "recovered").length;
+  const repeated = outcomes.filter((outcome) => outcome.status === "repeated").length;
+  const escalated = outcomes.filter((outcome) => outcome.status === "escalated").length;
+  const failed = outcomes.filter((outcome) => outcome.status === "failed").length;
+  const deadLetters = state.deadLetters.length;
+  const analysisVerdicts = state.analyses.length;
+  const driftVerdicts = state.analyses.filter((analysis) => analysis.status === "drift").length;
+  const terminal = recovered + escalated + failed;
+  return {
+    records: state.records,
+    bindings: state.bindings.length,
+    interventions,
+    outcomes: outcomes.length,
+    recovered,
+    repeated,
+    escalated,
+    failed,
+    deadLetters,
+    analysisVerdicts,
+    driftVerdicts,
+    resolutionRate: ratio(outcomes.length, interventions),
+    recoveryRate: ratio(recovered, terminal),
+    escalationRate: ratio(escalated, interventions),
+    driftRate: ratio(driftVerdicts, analysisVerdicts),
+  };
+}
+
+function ratio(part: number, total: number): number {
+  return total > 0 ? part / total : 0;
+}
+
+export function formatMonitorMetrics(metrics: MonitorMetrics): string[] {
+  const pct = (value: number): string => `${Math.round(value * 100)}%`;
+  return [
+    `MONITOR metrics · ${metrics.records} ledger records · ${metrics.bindings} bindings`,
+    `  interventions: ${metrics.interventions} · resolved: ${metrics.recovered} recovered / ${metrics.repeated} repeated / ${metrics.escalated} escalated / ${metrics.failed} failed`,
+    `  delivery: ${metrics.deadLetters} dead-letter`,
+    `  analysis: ${metrics.analysisVerdicts} verdicts (${metrics.driftVerdicts} drift) · drift rate ${pct(metrics.driftRate)}`,
+    `  recovery rate ${pct(metrics.recoveryRate)} · escalation rate ${pct(metrics.escalationRate)}`,
+  ];
+}
+
 export function formatEngineStatusBar(engine: MonitorEngineState): string {
   const total = engine.bindings.size;
   if (total === 0) return "MON idle";
@@ -713,26 +1330,35 @@ export function formatEngineStatusBar(engine: MonitorEngineState): string {
   const elapsed = Math.round((Date.now() - engine.startedAt) / 1000);
   const totalFixes = [...engine.bindings.values()].reduce((n, b) => n + b.interventions.length, 0);
   const anyDrift = [...engine.bindings.values()].some((b) => b.driftDetected);
+  const anyElevated = [...engine.bindings.values()].some((b) => b.elevated);
 
   let suffix = "";
-  if (anyDrift) suffix = " · ▲ drift";
+  if (anyElevated) suffix = " · ⚑ elevated";
+  else if (anyDrift) suffix = " · ▲ drift";
   else if (totalFixes > 0) suffix = ` · ◆ ${totalFixes} fix${totalFixes === 1 ? "" : "es"}`;
 
   return `MON ${total} · ${elapsed}s${suffix}`;
 }
-
 // ---------------------------------------------------------------------------
 // Analysis prompt builders (Phase C)
 // ---------------------------------------------------------------------------
 
-export function buildAutoAnalysisPrompt(objective: string, outputTail: string[]): string {
+export function buildAutoAnalysisPrompt(
+  objective: string,
+  outputTail: string[],
+  tailLines: number = ENGINE_ANALYSIS_TAIL_LINES,
+  trendBlock: string = "",
+  goalBlock: string = "",
+): string {
   return [
     "Analyze the following agent output and determine if it is drifting from its task objective.",
     "",
     `Task objective: ${objective}`,
+    ...(trendBlock ? ["", trendBlock] : []),
+    ...(goalBlock ? ["", goalBlock] : []),
     "",
     "Recent output:",
-    ...outputTail.slice(-ENGINE_ANALYSIS_TAIL_LINES),
+    ...outputTail.slice(-tailLines),
     "",
     'Return ONLY a JSON object: { "status": "on-track" | "drift", "reason": "...", "action": "none" | "send", "message": "corrective prompt if drift" }',
     "If on-track, action should be \"none\" and message can be empty.",
@@ -740,16 +1366,25 @@ export function buildAutoAnalysisPrompt(objective: string, outputTail: string[])
   ].join("\n");
 }
 
-export function buildCustomAnalysisPrompt(customPrompt: string, objective: string, outputTail: string[]): string {
+export function buildCustomAnalysisPrompt(
+  customPrompt: string,
+  objective: string,
+  outputTail: string[],
+  tailLines: number = ENGINE_ANALYSIS_TAIL_LINES,
+  trendBlock: string = "",
+  goalBlock: string = "",
+): string {
   return [
     "You are a task supervisor. Check the agent output against the management requirements below.",
     "",
     `Management requirements: ${customPrompt}`,
     "",
     `Original task objective: ${objective}`,
+    ...(trendBlock ? ["", trendBlock] : []),
+    ...(goalBlock ? ["", goalBlock] : []),
     "",
     "Recent output:",
-    ...outputTail.slice(-ENGINE_ANALYSIS_TAIL_LINES),
+    ...outputTail.slice(-tailLines),
     "",
     'Return ONLY a JSON object: { "status": "on-track" | "drift", "reason": "...", "action": "none" | "send", "message": "corrective prompt if needed" }',
     "If requirements are met, action should be \"none\".",

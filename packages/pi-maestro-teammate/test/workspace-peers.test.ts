@@ -8,6 +8,7 @@ import {
   MAX_OWNER_FILE_BYTES,
   WORKSPACE_MAIN_SESSION_MARKER,
   WorkspaceTargetResolutionError,
+  acquireMonitorLease,
   buildWorkspaceOwnerSnapshot,
   commandMailboxPath,
   consumeWorkspacePeerCommands,
@@ -21,6 +22,7 @@ import {
   normalizeWorkspacePath,
   ownerSnapshotPath,
   publishWorkspaceOwner,
+  releaseMonitorLease,
   requireRoutableWorkspaceTarget,
   resolveWorkspaceTarget,
   sendWorkspacePeerCommand,
@@ -460,4 +462,151 @@ test("protocol ids and generated mailbox paths reject traversal", async () => {
       /not a private real directory/,
     );
   }
+});
+
+// ===========================================================================
+// Supervision lease — one monitor per peer window
+// ===========================================================================
+
+test("acquireMonitorLease grants a fresh lease and releases it", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const monitor = createWorkspacePeerIdentity(join(rootDir, "project"), { rootDir: join(rootDir, "runtime"), ownerId: OWNER_A, ownerNonce: NONCE_A });
+  await ensureWorkspacePeerDirectories(monitor);
+
+  const acquired = await acquireMonitorLease(monitor, OWNER_B, { sessionName: "coordinator" });
+  assert.equal(acquired.ok, true);
+  assert.equal(acquired.lease?.monitorOwnerId, OWNER_A);
+  assert.equal(acquired.lease?.targetOwnerId, OWNER_B);
+  assert.equal(acquired.lease?.sessionName, "coordinator");
+  assert.ok(acquired.lease!.since > 0);
+
+  assert.equal(await releaseMonitorLease(monitor, OWNER_B), true);
+  assert.equal(await releaseMonitorLease(monitor, OWNER_B), true, "double release is a no-op");
+});
+
+test("acquireMonitorLease refuses its own window", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const identity = createWorkspacePeerIdentity(join(rootDir, "project"), { rootDir: join(rootDir, "runtime"), ownerId: OWNER_A, ownerNonce: NONCE_A });
+  await ensureWorkspacePeerDirectories(identity);
+  const result = await acquireMonitorLease(identity, OWNER_A);
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /own session/);
+});
+
+test("acquireMonitorLease blocks a second live monitor", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const runtime = join(rootDir, "runtime");
+  const project = join(rootDir, "project");
+  const first = createWorkspacePeerIdentity(project, { rootDir: runtime, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const second = createWorkspacePeerIdentity(project, { rootDir: runtime, ownerId: OWNER_B, ownerNonce: NONCE_B });
+  await ensureWorkspacePeerDirectories(first);
+  await ensureWorkspacePeerDirectories(second);
+
+  // First monitor acquires the lease.
+  const acquired = await acquireMonitorLease(first, OWNER_C, { sessionName: "coordinator" });
+  assert.equal(acquired.ok, true);
+
+  // A second monitor sees the live holder (publish a fresh snapshot for A).
+  await publishWorkspaceOwner(first, { agents: [], settled: [], sessionId: "s1" }, Date.now());
+  const blocked = await acquireMonitorLease(second, OWNER_C);
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.error ?? "", /already monitored by/);
+});
+
+test("acquireMonitorLease takes over a stale lease from an offline holder", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const runtime = join(rootDir, "runtime");
+  const project = join(rootDir, "project");
+  const first = createWorkspacePeerIdentity(project, { rootDir: runtime, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const second = createWorkspacePeerIdentity(project, { rootDir: runtime, ownerId: OWNER_B, ownerNonce: NONCE_B });
+  await ensureWorkspacePeerDirectories(first);
+  await ensureWorkspacePeerDirectories(second);
+
+  await acquireMonitorLease(first, OWNER_C, { sessionName: "dead-coordinator" });
+
+  // Holder A never published a fresh snapshot → its lease is stale and the
+  // second monitor may take over.
+  const taken = await acquireMonitorLease(second, OWNER_C);
+  assert.equal(taken.ok, true);
+  assert.equal(taken.lease?.monitorOwnerId, OWNER_B);
+
+  // Original holder can no longer release (lease belongs to B).
+  assert.equal(await releaseMonitorLease(first, OWNER_C), false);
+  assert.equal(await releaseMonitorLease(second, OWNER_C), true);
+});
+
+test("acquireMonitorLease honors explicit staleness window", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const runtime = join(rootDir, "runtime");
+  const project = join(rootDir, "project");
+  const first = createWorkspacePeerIdentity(project, { rootDir: runtime, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const second = createWorkspacePeerIdentity(project, { rootDir: runtime, ownerId: OWNER_B, ownerNonce: NONCE_B });
+  await ensureWorkspacePeerDirectories(first);
+  await ensureWorkspacePeerDirectories(second);
+
+  await acquireMonitorLease(first, OWNER_C, { sessionName: "h", now: 1_000 });
+  // A publishes a snapshot that is still fresh within the window.
+  await publishWorkspaceOwner(first, { agents: [], settled: [], sessionId: "s1" }, 1_000);
+
+  const blocked = await acquireMonitorLease(second, OWNER_C, { now: 1_500, staleMs: 1_000 });
+  assert.equal(blocked.ok, false, "fresh snapshot blocks takeover");
+
+  // After the window elapses the same lease is stale.
+  const taken = await acquireMonitorLease(second, OWNER_C, { now: 2_500, staleMs: 1_000 });
+  assert.equal(taken.ok, true);
+});
+
+// ===========================================================================
+// Context pressure advertisement (P2)
+// ===========================================================================
+
+test("owner snapshot carries validated contextPressure", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const identity = createWorkspacePeerIdentity(join(rootDir, "project"), { rootDir: join(rootDir, "runtime"), ownerId: OWNER_A, ownerNonce: NONCE_A });
+  await ensureWorkspacePeerDirectories(identity);
+
+  const snapshot = await publishWorkspaceOwner(identity, { agents: [], settled: [], contextPressure: 87 });
+  assert.equal(snapshot.contextPressure, 87);
+
+  // Out-of-range pressure is rejected by validation.
+  const invalid = validateWorkspaceOwnerSnapshot({ ...snapshot, contextPressure: 150 });
+  assert.equal(invalid, undefined);
+  // Absent pressure is optional.
+  const minimal = validateWorkspaceOwnerSnapshot({ ...snapshot, contextPressure: undefined });
+  assert.equal(minimal?.contextPressure, undefined);
+});
+
+test("discovered owners expose contextPressure", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const runtime = join(rootDir, "runtime");
+  const project = join(rootDir, "project");
+  const first = createWorkspacePeerIdentity(project, { rootDir: runtime, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  await ensureWorkspacePeerDirectories(first);
+  await publishWorkspaceOwner(first, { agents: [], settled: [], sessionName: "busy", contextPressure: 91 });
+
+  const discovered = await discoverWorkspacePeers(first, { cleanupStale: false, includeSelf: true });
+  assert.equal(discovered.peers.length, 1);
+  assert.equal(discovered.peers[0]!.contextPressure, 91);
+});
+
+// ===========================================================================
+// Context pressure clamping (publish path)
+// ===========================================================================
+
+test("contextPressure is clamped and rounded on the publish path", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const identity = createWorkspacePeerIdentity(join(rootDir, "project"), { rootDir: join(rootDir, "runtime"), ownerId: OWNER_A, ownerNonce: NONCE_A });
+  await ensureWorkspacePeerDirectories(identity);
+
+  // Over-range and fractional values are clamped/rounded to [0,100].
+  const high = await publishWorkspaceOwner(identity, { agents: [], settled: [], contextPressure: 150 });
+  assert.equal(high.contextPressure, 100);
+  const negative = await publishWorkspaceOwner(identity, { agents: [], settled: [], contextPressure: -5 });
+  assert.equal(negative.contextPressure, 0);
+  const fractional = await publishWorkspaceOwner(identity, { agents: [], settled: [], contextPressure: 87.6 });
+  assert.equal(fractional.contextPressure, 88);
+
+  // Absent pressure is omitted entirely.
+  const none = await publishWorkspaceOwner(identity, { agents: [], settled: [] });
+  assert.equal(none.contextPressure, undefined);
 });
