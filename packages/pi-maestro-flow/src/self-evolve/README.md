@@ -1,8 +1,10 @@
-# self-evolve 扩展（Phase 2A 脚手架）
+# self-evolve 扩展（Phase 2A 脚手架 + Phase 2B auto-deposit）
 
 > Harness 式知识沉淀闭环的第二扩展入口（第三个 `pi.extensions` 条目）。
-> **默认禁用，零行为影响。** 本阶段（Phase 2A）只做 **dry-run 候选信号收集**：
-> 绝不 stage / promote / 写知识，只产出建议文件供人工或 Phase 2B 治理步骤消费。
+> **默认禁用，零行为影响。** Phase 2A 做 **dry-run 候选信号收集**：
+> 绝不 stage / promote / 写知识，只产出建议文件供人工或治理步骤消费；
+> **Phase 2B 增加 `auto-deposit` 模式**：评审门通过的候选**自动 stage** 进知识库 pending 池
+> （永不自动 promote，治理纪律）。
 
 设计依据：`docs/self-evolution-plugin-design.md`（v2）§3（载体与集成点）、§9（Phase 2A 范围）。
 
@@ -55,8 +57,9 @@
    /self-evolve signals clear     # 清空全部候选信号记录（dry-run 候选，可重建）
    /self-evolve signals export [--since ...] [--until ...] [--project ...]
                                   # 导出过滤后的信号到 ~/.maestro/self-evolve/exports/signals-<ts>.jsonl
-   /self-evolve review [N]         # dry-run 评审最近 N 条信号（默认 5，用配置模型）
+   /self-evolve review [N]         # 评审最近 N 条信号（默认 5，用配置模型）；auto-deposit 模式下过门信号自动 stage
    /self-evolve reviews [N]        # 查历史评审记录（默认 5，含评审门统计）
+   /self-evolve deposits [N]       # 查自动沉淀记录（默认 10；成功含 stagedId，失败含 exitCode/error）
    /self-evolve panel              # 打开 TUI 面板（同默认；r 刷新 · q/esc 关闭）
    ```
 
@@ -69,6 +72,37 @@
 - **dry-run 保证**：只评估并落盘评审记录，**绝不 stage / promote**；评审落盘全局目录 `~/.maestro/self-evolve/reviews/<date>.jsonl`；
 - 评审经 teammate analyst 路由（复用 supervision 共享层，与 advisor 同模式）；模型不可用或 teammate 未安装时优雅降级提示；
 - 模型必须在 `modelRegistry.getAvailable()` 中，否则提示用 `/self-evolve config model=<provider>/<model>` 配置。
+
+## Auto-deposit 模式（Phase 2B）
+
+`mode=auto-deposit` 时，`/self-evolve review [N]` 在评审门之后多一步：**verdict=stage 且过门的信号自动执行 `maestro knowledge stage`**（写入点复用显式 CLI 护栏，不经扩展直写），候选进入知识库 **pending 池**。**永不自动 promote**（治理纪律：promotion 仍需用户请求或 confirmed governance step）。
+
+**模式切换（显式，默认仍 `dry-run`）**：
+
+```
+/self-evolve config mode=auto-deposit   # 切换（写入 .pi/self-evolve.json）
+/self-evolve config mode=dry-run        # 切回
+```
+TUI 面板中 `mode` 行直接编辑（`Enter` 输入后 `Ctrl+S` 保存）。
+
+**行为差异**：
+
+| 模式 | `/self-evolve review [N]` 行为 |
+|---|---|
+| `dry-run`（默认） | 只评估信号 → 落盘 `reviews/<date>.jsonl`；suggestion 供人工复制执行 |
+| `auto-deposit` | 评估后，过门（`stage` 且评分 ≥ `reviewScoreThreshold` 且可行动）信号 → 自动执行 stage → 落盘 `deposits/<date>.jsonl` 审计 |
+
+**执行与审计**：
+
+- stage 命令由信号重建为结构化 argv（`knowledge stage <type> "<title>" --content-file <evidence.md> --session <sid>|--run <rid> --evidence <refs>`，与人工 `suggestion` 模板同源——session-first，run 兜底；执行时追加 `--json` 保证 `candidate_id` 解析可靠），经 **cross-spawn** 执行 `maestro` CLI（Windows 上 `maestro.cmd` 安全解析，与 `session/cli-adapter.ts` `defaultRunner` 同范式）：**60s 硬超时** + 进程树终止（win32 `taskkill /T /F`）、**1MB 输出上限**（超限即终止）、stdout/stderr error 处理器、监听器 cleanup；
+- 每次尝试（成功与失败）都写一条 deposit 审计记录（`~/.maestro/self-evolve/deposits/<date>.jsonl`），含 signal id、title、type、完整命令、退出码、解析出的 `stagedId`（`KDC-*`）、错误摘要——**绝不静默失败**；
+- **fail-closed 前置校验**：信号对应 evidence 文件（`evidence/<se-id>.md`）缺失时**不执行** stage，ledger 直接记 `exitCode=-1 + error`；signal id 不匹配 `se-[0-9a-f]{12}`（手改 JSONL 防御）同样拒绝并记录；
+- **幂等去重**：已成功沉淀（`exitCode=0`）的信号从 ledger 种子化去重集合，二次 review 自动跳过（跨重启持久）；失败/缺失/异常的记录可重试；
+- **跨项目守卫**：信号 `project` 与当前项目不一致时跳过（全局 suggestions 目录混聚多项目，绝不把 A 项目信号 stage 进 B 项目知识库）；
+- **计数语义**：`·<n>D` 状态栏计数与 review 汇总 `deposit: N staged · M failed` 只统计**成功** stage（`exitCode=0`），失败尝试在 `deposits` 命令中可查；
+- `/self-evolve deposits [N]` 查历史（成功与失败记录并列）。
+
+> ⚠️ 触发保持**显式**：仅在用户主动运行 `/self-evolve review` 时自动沉淀，不在 `agent_end`/`session_compact` 上自动触发（评估成本护栏 + 无意识写入防线）。
 
 ## TUI 显示与控制
 
@@ -83,13 +117,13 @@ TUI 面板（`ctx.ui.custom` overlay），展示：配置菜单（含来源）�
 | 键 | 动作 |
 |---|---|
 | `↑` / `↓` | 选择配置字段 |
-| `Enter` | 编辑字段（数字/时长/model 文本）；对 `enabled` 为切换 |
+| `Enter` | 编辑字段（数字/时长/model 文本）；对 `enabled` 为切换；`mode` 在 `dry-run` / `auto-deposit` 间切换（文本输入，经 `setConfigValue` 校验） |
 | `Space` | 切换 `enabled` 总开关 |
 | `Ctrl+S` | 保存修改（校验通过后持久化） |
 | `r` | 刷新（重读配置与信号文件；有未保存修改时需再按一次确认丢弃） |
 | `q` / `Esc` | 关闭（有未保存修改时需再按一次确认丢弃） |
 
-`mode` 行是信息展示（当前唯一合法值 `dry-run`，Phase 2A 安全设计；自动沉淀属 Phase 2B）。
+`mode` 行可编辑：`dry-run`（默认，评审不写知识）/ `auto-deposit`（评审过门候选自动沉淀，见下节）。
 
 ### 配置控制 `/self-evolve config <key>=<value>`
 
@@ -98,7 +132,7 @@ TUI 面板（`ctx.ui.custom` overlay），展示：配置菜单（含来源）�
 | 键 | 类型 | 示例 |
 |---|---|---|
 | `enabled` | bool | `true` / `false` |
-| `mode` | 枚举（当前仅 `dry-run`） | `dry-run`（Phase 2A 唯一合法模式；其他值整体拒绝，自动沉淀属 Phase 2B） |
+| `mode` | 枚举 | `dry-run`（默认，评审不写知识）/ `auto-deposit`（评审过门候选自动 stage，见「Auto-deposit 模式」）；其他值整体拒绝 |
 | `model` | `provider/model` 或 `auto` | `maestro-qwen/qwen3.8-max`、`auto` |
 | `cooldownMs` | 时长 | `300000`、`5m`、`30s`、`1.5h` |
 | `maxSignalsPerSession` | 正整数 | `20` |
@@ -144,6 +178,27 @@ TUI 面板（`ctx.ui.custom` overlay），展示：配置菜单（含来源）�
 - `candidateType` 为关键词启发式（knowhow/spec/unknown），仅作提示，不作结论。
 - 全部内容经 secret 脱敏后才落盘（复用 `advisor/runtime.ts` 的 `redactAdvisorText`）。
 
+自动沉淀审计记录（`~/.maestro/self-evolve/deposits/<date>.jsonl`，每行一个对象）：
+
+```json
+{
+  "schemaVersion": 1,
+  "kind": "deposit",
+  "createdAt": "2026-08-07T…",
+  "project": "pi-maestro-flow",
+  "mode": "auto-deposit",
+  "signalId": "se-3f2a1b9c0d4e",
+  "title": "…",
+  "candidateType": "knowhow",
+  "source": "agent_end",
+  "sessionId": "20260807-xxxx",
+  "command": "maestro knowledge stage knowhow \"…\" --content-file … --session …",
+  "exitCode": 0,
+  "stagedId": "KDC-…",
+  "error": "…（失败时）"
+}
+```
+
 ## 护栏
 
 - 默认禁用；启用后所有 handler 均 try/catch，任何失败只计数上报，**绝不抛出到宿主事件链**。
@@ -153,16 +208,17 @@ TUI 面板（`ctx.ui.custom` overlay），展示：配置菜单（含来源）�
 - **采集侧噪音过滤**：轨迹片段（`ASSISTANT:` / `TOOL <name>:` / `grep: No matches` / 纯 markdown 标题 / 进度词）在源头丢弃并计入 `suppressed`，不落盘。
 - 绝不 stage/promote/写知识、绝不自动改 `.pi/skills/`（设计 v2 §9.5）。
 - per-session 预算：`maxSignalsPerSession` + `cooldownMs` 双重限频（设计 v2 §10「评估成本失控」护栏）。
+- **auto-deposit 护栏**：默认仍 `dry-run`，模式切换显式；只自动 stage **不自动 promote**；每次沉淀全审计（成功与失败）；evidence 缺失 / id 非法 fail-closed 不执行；stage 经显式 CLI 写入点（cross-spawn + 60s 超时 + 1MB 输出上限 + 进程树终止）；已沉淀幂等去重；跨项目信号跳过；失败计入 `deposits` 历史（不静默）。
 
 ## Phase 2B 集成点（见设计 v2 §9 / §6）
 
-| 缺口 | 建议接入 |
-|---|---|
-| 治理硬化 | 消费 `.pi/self-evolve/suggestions/` 时补 capability + approval receipt + promotion 强制 reason/actor |
-| 跨 Run 候选索引 | 现有建议为按日 JSONL；Phase 2B 可建跨 run 事务索引（对应 `run/knowledge.ts:411` 锁外冲突检查） |
-| 证据根提升 | `corroborated` 自动提权需排除同 Session 复制（§9.2），建议基于 `traceHash` 跨日聚合 |
-| 不可信数据 | transcript 指令型内容 lint 与来源标记在消费端补齐；落盘侧已完成 secret redaction |
-| 评估预算 | 信号本身无 LLM 成本（纯本地特征提取），Phase 2B 若引入 LLM 生成需自带 per-run budget/超时 |
+| 缺口 | 建议接入 | 状态 |
+|---|---|---|
+| 治理硬化 | capability + approval receipt + promotion 强制 reason/actor | approval receipt（`self-evolve-approval.mjs`）+ skill TOCTOU fence 已做；**auto-deposit 已落地**（见上节） |
+| 跨 Run 候选索引 | 现有建议为按日 JSONL；建跨 run 事务索引（对应 `run/knowledge.ts:411` 锁外冲突检查） | **遗留**：位于 maestro2 仓库（非本包），未实现 |
+| 证据根提升 | `corroborated` 自动提权需排除同 Session 复制（§9.2），建议基于 `traceHash` 跨日聚合 | 未做（Phase 3） |
+| 不可信数据 | transcript 指令型内容 lint 与来源标记在消费端补齐；落盘侧已完成 secret redaction | 落盘侧已做；消费端遗留 |
+| 评估预算 | 信号本身无 LLM 成本（纯本地特征提取），Phase 2B 若引入 LLM 生成需自带 per-run budget/超时 | review 用 teammate analyst + 超时已限；自动触发未放开 |
 
 ## 代码结构
 
@@ -188,8 +244,9 @@ node --experimental-strip-types <(cat <<'EOF'
 ...
 EOF
 )
-# 行为回归（mock 宿主，50 断言：默认禁用零副作用 / 启用持久化 / 信号生成 /
-# 去重与冷却语义 / 状态栏 / 配置校验含 mode / dry-run 保证）
+# 行为回归（mock 宿主，84 断言：默认禁用零副作用 / 启用持久化 / 信号生成 /
+# 去重与冷却语义 / 状态栏 / 配置校验含 mode / dry-run 保证 / review 评审门 /
+# auto-deposit 自动 stage + deposit ledger / 幂等去重 / fail-closed / 跨项目守卫 / executor throw）
 cd packages/pi-maestro-flow && node --experimental-strip-types src/self-evolve/se-e2e.mts
 ```
 

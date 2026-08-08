@@ -1,10 +1,11 @@
 /**
- * Self-evolve extension entry — Phase 2A dry-run candidate signal collection.
+ * Self-evolve extension entry — dry-run candidate signals (Phase 2A) +
+ * auto-deposit (Phase 2B).
  *
  * Registered as a separate pi extension entry (`package.json` `pi.extensions`),
  * so it never touches the main maestro extension's registration surface.
  *
- * Behavior (Phase 2A, default DISABLED — zero behavior impact):
+ * Behavior (default DISABLED — zero behavior impact):
  *   1. disabled until `PI_SELF_EVOLVE=1` (env), `.pi/self-evolve.json`
  *      `{ "enabled": true }` (config), or `/self-evolve on` (writes config).
  *   2. when enabled, listens to `agent_end` (count + cooldown) and
@@ -13,12 +14,17 @@
  *      append-only JSONL under the global output root's suggestions dir
  *      (`~/.maestro/self-evolve/suggestions/<date>.jsonl`; env `SELF_EVOLVE_OUTPUT_DIR` overrides)
  *      (bounded to the most recent N daily files).
- *   3. NEVER stages, promotes, or writes knowledge — suggestions only.
- *      The `suggestion` field is a command template for a human/Phase 2B
- *      consumer; this extension never executes it.
+ *   3. `mode=dry-run` (default): suggestions only — the `suggestion` field is
+ *      a command template for a human/Phase 2B consumer; never executed.
+ *   4. `mode=auto-deposit`: after `/self-evolve review`, gate-passing signals
+ *      are automatically staged via the explicit `maestro knowledge stage`
+ *      CLI (cross-spawn, bounded output, process-tree termination on timeout),
+ *      with a full audit ledger under `~/.maestro/self-evolve/deposits/`.
+ *      Promotion stays manual (governance discipline) — auto-deposit only
+ *      creates pending candidates.
  */
 
-import { copyFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { copyFile, access, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type {
   AgentEndEvent,
@@ -34,6 +40,7 @@ import {
   buildEvidenceFromMessages,
   buildReviewPrompt,
   buildSignal,
+  buildStageCommandArgs,
   buildSuggestion,
   classifyCandidateType,
   compactDigest,
@@ -41,20 +48,27 @@ import {
   DEDUP_CAPACITY,
   DEDUP_SEED_DAYS,
   DEFAULT_SELF_EVOLVE_CONFIG,
+  depositFileName,
+  depositsDirPath,
   envOverrideForSelfEvolve,
   filterSignalLines,
   formatConfigSummary,
+  formatDepositSummary,
   formatReviewSummary,
   formatSignalLine,
+  formatStageCommandLine,
   formatStatusText,
   isNoiseTitle,
   isPathInside,
+  isValidSignalId,
   lastAssistantLine,
   makeTitle,
+  modeDescription,
   normalizeReviewVerdicts,
   normalizeSelfEvolveConfig,
   parseReviewVerdicts,
   parseSignalLines,
+  parseStagedId,
   PRIVATE_DIRECTORY_MODE,
   PRIVATE_FILE_MODE,
   projectNameFor,
@@ -75,6 +89,7 @@ import {
   SELF_EVOLVE_OUTPUT_DIR_FLAG,
   SELF_EVOLVE_SKILL_FLAG,
   type CandidateType,
+  type DepositRecord,
   type EvidenceRef,
   type FileOpsLike,
   type ReviewVerdict,
@@ -83,7 +98,10 @@ import {
   type SelfEvolveReview,
   type SelfEvolveSignal,
   type SelfEvolveSource,
+  type StageExecutionResult,
 } from "./runtime.ts";
+import crossSpawn from "cross-spawn";
+import type { ChildProcess } from "node:child_process";
 
 // ---------------------------------------------------------------------------
 // State
@@ -130,6 +148,8 @@ interface SelfEvolveRuntimeState {
   deduped: number;
   /** Signals skipped by cooldown or the per-session budget. */
   suppressed: number;
+  /** Auto-deposited candidates in `auto-deposit` mode (deposit ledger writes). */
+  deposits: number;
   /** Failed signal attempts (fs errors, path escape, …). */
   failures: number;
   lastError?: string;
@@ -137,7 +157,7 @@ interface SelfEvolveRuntimeState {
 }
 
 function createSelfEvolveRuntimeState(): SelfEvolveRuntimeState {
-  return { signals: 0, deduped: 0, suppressed: 0, failures: 0 };
+  return { signals: 0, deduped: 0, suppressed: 0, deposits: 0, failures: 0 };
 }
 
 interface PendingCompactPrep {
@@ -238,6 +258,174 @@ async function loadReviewTeammate(): Promise<ReviewTeammateRuntime | undefined> 
   }
 }
 
+// ---------------------------------------------------------------------------
+// Auto-deposit stage executor (Phase 2B): spawns the maestro CLI per deposit.
+// ---------------------------------------------------------------------------
+
+const STAGE_TIMEOUT_MS = 60_000;
+const STAGE_MAX_OUTPUT_BYTES = 1_000_000;
+const STAGE_TERMINATION_GRACE_MS = 1_000;
+
+/** Executes `maestro knowledge stage <args>` and returns the raw result. */
+type DepositExecutor = (
+  args: readonly string[],
+  opts: { cwd: string },
+) => Promise<StageExecutionResult>;
+
+let _depositExecutor: DepositExecutor | undefined;
+
+/** @internal Test seam for the auto-deposit stage executor (mirrors the review runtime seam). */
+export function setSelfEvolveDepositExecutorForTest(
+  executor: DepositExecutor | undefined,
+): void {
+  _depositExecutor = executor;
+}
+
+/**
+ * Real executor: repo-standard CLI semantics (same as `defaultRunner` in
+ * `session/cli-adapter.ts`) — cross-spawn (safe `.cmd` handling on Windows),
+ * bounded stdout/stderr buffers, process-tree termination on timeout, and
+ * stdout/stderr error handlers. Kept local to self-evolve because the e2e
+ * suite runs under `--experimental-strip-types` (cli-adapter uses parameter
+ * properties, which strip-only mode rejects). Never rejects; failures surface
+ * as a non-zero exitCode with the diagnostic in stderr.
+ */
+function defaultStageExecutor(
+  args: readonly string[],
+  opts: { cwd: string },
+): Promise<StageExecutionResult> {
+  return new Promise((resolve) => {
+    const child = crossSpawn(
+      process.platform === "win32" ? "maestro.cmd" : "maestro",
+      [...args],
+      {
+        cwd: opts.cwd,
+        detached: process.platform !== "win32",
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let outputBytes = 0;
+    let settled = false;
+    let failure: string | undefined;
+
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      child.stdout?.removeListener("data", onStdout);
+      child.stdout?.removeListener("error", onStreamError);
+      child.stderr?.removeListener("data", onStderr);
+      child.stderr?.removeListener("error", onStreamError);
+      child.removeListener("error", onError);
+      child.removeListener("close", onClose);
+    };
+    const finish = (exitCode: number, message?: string): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      const capturedStderr = Buffer.concat(stderr).toString("utf8");
+      resolve({
+        exitCode,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: message ? `${message}${capturedStderr ? `\n${capturedStderr}` : ""}` : capturedStderr,
+      });
+    };
+    const stopWith = (message: string): void => {
+      if (failure !== undefined || settled) return;
+      failure = message;
+      clearTimeout(timer);
+      void terminateStageTree(child).then(
+        () => finish(1, message),
+        () => finish(1, message),
+      );
+    };
+    const collect = (target: Buffer[], chunk: Buffer | string): void => {
+      if (failure !== undefined || settled) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
+      if (outputBytes + buffer.byteLength > STAGE_MAX_OUTPUT_BYTES) {
+        stopWith(`stage output exceeded ${STAGE_MAX_OUTPUT_BYTES} bytes`);
+        return;
+      }
+      outputBytes += buffer.byteLength;
+      target.push(buffer);
+    };
+    const onStdout = (chunk: Buffer | string): void => collect(stdout, chunk);
+    const onStderr = (chunk: Buffer | string): void => collect(stderr, chunk);
+    const onStreamError = (error: Error): void => stopWith(`stage stream failed: ${error.message}`);
+    const onError = (error: Error): void => {
+      if (child.pid) stopWith(error.message);
+      else finish(1, error.message);
+    };
+    const onClose = (code: number | null): void => {
+      if (failure === undefined) finish(code ?? 1);
+    };
+    const timer = setTimeout(
+      () => stopWith(`stage command timed out after ${STAGE_TIMEOUT_MS}ms`),
+      STAGE_TIMEOUT_MS,
+    );
+    timer.unref?.();
+
+    child.stdout?.on("data", onStdout);
+    child.stdout?.on("error", onStreamError);
+    child.stderr?.on("data", onStderr);
+    child.stderr?.on("error", onStreamError);
+    child.once("error", onError);
+    child.once("close", onClose);
+  });
+}
+
+/** Terminate the stage CLI and its whole process tree (taskkill /T on win32). */
+async function terminateStageTree(child: ChildProcess): Promise<void> {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  if (process.platform === "win32") {
+    const killer = crossSpawn(
+      "taskkill",
+      ["/pid", String(child.pid), "/T", "/F"],
+      { windowsHide: true, stdio: "ignore" },
+    );
+    await waitForStageExit(killer);
+    if (child.exitCode === null) {
+      try { child.kill("SIGKILL"); } catch { /* best-effort */ }
+    }
+    return;
+  }
+  try {
+    process.kill(-child.pid, "SIGTERM");
+  } catch {
+    try { child.kill("SIGTERM"); } catch { /* best-effort */ }
+  }
+  if (await waitForStageExit(child)) return;
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch {
+    try { child.kill("SIGKILL"); } catch { /* best-effort */ }
+  }
+}
+
+function waitForStageExit(child: ChildProcess, graceMs = STAGE_TERMINATION_GRACE_MS): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve(true);
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.removeListener("exit", onExit);
+      resolve(false);
+    }, graceMs);
+    timer.unref?.();
+    const onExit = (): void => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    child.once("exit", onExit);
+  });
+}
+
+function resolveDepositExecutor(): DepositExecutor {
+  return _depositExecutor ?? defaultStageExecutor;
+}
+
 export default function registerSelfEvolve(pi: ExtensionAPI): void {
   let config: SelfEvolveConfig = { ...DEFAULT_SELF_EVOLVE_CONFIG };
   const state = createSelfEvolveRuntimeState();
@@ -297,6 +485,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
       signals: state.signals,
       deduped: state.deduped,
       suppressed: state.suppressed,
+      deposits: state.deposits,
       failures: state.failures,
       lastError: state.lastError,
       lastSource: state.lastSource,
@@ -630,6 +819,161 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     return filePath;
   }
 
+  /** Append a deposit audit record to the global deposits dir (auto-deposit mode). */
+  async function writeDeposit(record: DepositRecord, ctx: ExtensionContext): Promise<string> {
+    const root = outputDir ?? selfEvolveOutputRoot(process.env[SELF_EVOLVE_OUTPUT_DIR_FLAG]);
+    const dir = depositsDirPath(root);
+    if (!isPathInside(root, dir)) {
+      throw new Error(`Self-evolve deposits dir escaped the output root: ${dir}`);
+    }
+    await mkdir(dir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+    const filePath = join(dir, depositFileName());
+    await writeFile(filePath, `${JSON.stringify(record)}\n`, {
+      encoding: "utf8",
+      flag: "a",
+      mode: PRIVATE_FILE_MODE,
+    });
+    state.deposits++;
+    updateStatusBar(ctx);
+    // Deposit retention mirrors review retention (independent of suggestions).
+    await pruneSignalFiles(dir, config.maxReviewFiles);
+    return filePath;
+  }
+
+  /**
+   * Auto-deposit one gate-passing signal: rebuild the stage argv (mirrors the
+   * human-facing `suggestion` template), revalidate the signal id (path
+   * safety), verify the evidence file exists, and execute
+   * `maestro knowledge stage --json`. Every attempt writes a deposit ledger
+   * record — success and failure alike (audit trail, never silent). Signals
+   * already successfully deposited are skipped (idempotency). Returns
+   * `{ path, exitCode }`, or undefined when skipped (non-actionable / dup).
+   */
+  async function depositSignal(
+    signal: SelfEvolveSignal,
+    ctx: ExtensionContext,
+  ): Promise<{ path: string; exitCode: number } | undefined> {
+    // Idempotency: never re-stage a signal that already deposited successfully.
+    if ((await seedDepositedSignalIds()).has(signal.id)) return undefined;
+    if (!isValidSignalId(signal.id)) {
+      return writeDeposit(buildDepositRecord(signal, ctx, { exitCode: -1, error: `invalid signal id: ${signal.id}` }), ctx)
+        .then((path) => ({ path, exitCode: -1 }));
+    }
+    const outputRoot = resolvedOutputRoot();
+    const evidenceFile = join(outputRoot, "evidence", `${signal.id}.md`);
+    const args = buildStageCommandArgs(signal, evidenceFile);
+    if (!args) return undefined;
+    // `--json` gives a reliable `candidate_id` for the audit record; the
+    // human-facing `suggestion` template stays as-is (execution detail only).
+    const execArgs = [...args, "--json"];
+    // Fail-closed: the evidence file must exist before executing the stage.
+    let evidenceMissing = false;
+    try {
+      await access(evidenceFile);
+    } catch {
+      evidenceMissing = true;
+    }
+    let exitCode: number;
+    let stdout = "";
+    let stderr = "";
+    let error: string | undefined;
+    if (evidenceMissing) {
+      exitCode = -1;
+      error = `evidence file missing: ${evidenceFile}`;
+    } else {
+      try {
+        const result = await resolveDepositExecutor()(execArgs, { cwd: ctx.cwd });
+        exitCode = result.exitCode;
+        stdout = result.stdout;
+        stderr = result.stderr;
+      } catch (execError) {
+        exitCode = -1;
+        error = execError instanceof Error ? execError.message : String(execError);
+      }
+    }
+    const record = buildDepositRecord(signal, ctx, { exitCode, stdout, stderr, error });
+    const path = await writeDeposit(record, ctx);
+    if (exitCode === 0) (await seedDepositedSignalIds()).add(signal.id);
+    return { path, exitCode };
+  }
+
+  /** Build the deposit audit record for one attempt (all outcomes). */
+  function buildDepositRecord(
+    signal: SelfEvolveSignal,
+    ctx: ExtensionContext,
+    outcome: { exitCode: number; stdout?: string; stderr?: string; error?: string },
+  ): DepositRecord {
+    const stdout = outcome.stdout ?? "";
+    const stderr = outcome.stderr ?? "";
+    const command = formatStageCommandLine([
+      ...(buildStageCommandArgs(signal, join(resolvedOutputRoot(), "evidence", `${signal.id}.md`)) ?? []),
+      "--json",
+    ]);
+    return {
+      schemaVersion: 1,
+      kind: "deposit",
+      createdAt: new Date().toISOString(),
+      project: signal.project ?? projectNameFor(ctx.cwd),
+      mode: config.mode,
+      signalId: signal.id,
+      title: signal.title,
+      candidateType: signal.candidateType,
+      source: signal.source,
+      ...(signal.sessionId ? { sessionId: signal.sessionId } : {}),
+      ...(signal.runId ? { runId: signal.runId } : {}),
+      command,
+      exitCode: outcome.exitCode,
+      ...(outcome.exitCode === 0 ? { stagedId: parseStagedId(stdout || stderr) } : {}),
+      ...(outcome.error || (outcome.exitCode !== 0 && stderr.trim())
+        ? { error: outcome.error ?? stderr.trim().slice(0, 300) }
+        : {}),
+    };
+  }
+
+  /**
+   * Lazy seed of already-successfully-deposited signal ids from the ledger
+   * (cross-restart idempotency; mirrors `seedSeenHashes`).
+   */
+  let _depositedSignalIds: Set<string> | undefined;
+  async function seedDepositedSignalIds(): Promise<Set<string>> {
+    if (_depositedSignalIds) return _depositedSignalIds;
+    const ids = new Set<string>();
+    for (const record of await loadRecentDeposits(200)) {
+      if (record.exitCode === 0 && record.signalId) ids.add(record.signalId);
+    }
+    _depositedSignalIds = ids;
+    return ids;
+  }
+
+  /** Load recent deposit records (oldest→newest within the retention window). */
+  async function loadRecentDeposits(limit: number): Promise<DepositRecord[]> {
+    try {
+      const dir = depositsDirPath(resolvedOutputRoot());
+      const names = (await readdir(dir))
+        .filter((name) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name))
+        .sort()
+        .slice(-config.maxReviewFiles);
+      const lines: string[] = [];
+      for (const name of names) {
+        lines.push(...(await readFile(join(dir, name), "utf8")).split("\n"));
+      }
+      const records: DepositRecord[] = [];
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const parsed = JSON.parse(trimmed) as Partial<DepositRecord>;
+          if (parsed && parsed.kind === "deposit") records.push(parsed as DepositRecord);
+        } catch {
+          // skip malformed lines
+        }
+      }
+      return records.slice(-limit);
+    } catch {
+      return [];
+    }
+  }
+
   /** Seed dedup from the most recent daily files so a restart doesn't duplicate candidates. */
   async function seedSeenHashes(): Promise<void> {
     const dir = resolvedSuggestionsDir();
@@ -795,7 +1139,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
   // -------------------------------------------------------------------------
 
   pi.registerCommand("self-evolve", {
-    description: "Self-evolve: /self-evolve (editable panel, default) | status | on | off | config [k=v ...|reset] | signals [N|delete <id>|clear|export] | review [N] | reviews [N]",
+    description: "Self-evolve: /self-evolve (editable panel, default) | status | on | off | config [k=v ...|reset] | signals [N|delete <id>|clear|export] | review [N] | reviews [N] | deposits [N]",
     async handler(args: string, ctx) {
       await ensureWorkspaceConfig(ctx);
       const trimmed = args.trim();
@@ -815,7 +1159,9 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         resetSessionState();
         updateStatusBar(ctx);
         ctx.ui.notify(
-          "Self-evolve enabled: dry-run candidate signals only — nothing is staged or promoted automatically.",
+          config.mode === "auto-deposit"
+            ? "Self-evolve enabled (auto-deposit): review gate-passing candidates are auto-staged into the pending pool — promotion stays manual."
+            : "Self-evolve enabled: dry-run candidate signals only — nothing is staged or promoted automatically.",
           "info",
         );
         return;
@@ -1083,7 +1429,8 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
           const review: SelfEvolveReview = {
             schemaVersion: 1,
             kind: "review",
-            dryRun: true,
+            dryRun: config.mode === "dry-run",
+            mode: config.mode,
             createdAt: new Date().toISOString(),
             project: projectNameFor(ctx.cwd),
             model: selectedModel,
@@ -1093,14 +1440,48 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
             downgraded: gate.downgraded,
             nonActionableSkipped,
           };
+          // Phase 2B auto-deposit: in auto-deposit mode, stage every signal
+          // that survived the review gate (`stage` verdict). Promotion stays
+          // manual — auto-deposit only creates pending candidates. Cross-project
+          // signals (from the global suggestions dir) are never deposited into
+          // the current project's knowledge base; already-deposited signals are
+          // skipped (idempotent).
+          const depositedPaths: string[] = [];
+          let depositAttempts = 0;
+          let depositedCount = 0;
+          if (config.mode === "auto-deposit") {
+            const stageVerdicts = gate.verdicts.filter((v) => v.action === "stage");
+            const staged = new Set(stageVerdicts.map((v) => v.id));
+            const currentProject = projectNameFor(ctx.cwd);
+            for (const signal of signals) {
+              if (!staged.has(signal.id)) continue;
+              if (signal.project !== currentProject) continue; // cross-project guard
+              try {
+                const result = await depositSignal(signal, ctx);
+                if (result) {
+                  depositAttempts += 1;
+                  if (result.exitCode === 0) {
+                    depositedPaths.push(result.path);
+                    depositedCount += 1;
+                  }
+                }
+              } catch (error) {
+                recordFailure(error, ctx);
+              }
+            }
+            review.deposited = depositedCount;
+          }
           const path = await writeReview(review);
           const gateNote = [
             gate.droppedInvalid > 0 ? `${gate.droppedInvalid} invalid verdict id(s) dropped` : "",
             gate.downgraded > 0 ? `${gate.downgraded} low-score stage(s) downgraded` : "",
             nonActionableSkipped > 0 ? `${nonActionableSkipped} non-actionable skipped` : "",
           ].filter(Boolean).join(" · ");
+          const depositNote = depositAttempts > 0
+            ? `\n  deposit: ${depositedCount} staged · ${depositAttempts - depositedCount} failed (auto-deposit mode)`
+            : "";
           ctx.ui.notify(
-            `${formatReviewSummary(review)}${gateNote ? `\n  gate: ${gateNote}` : ""}\n  → saved: ${path}`,
+            `${formatReviewSummary(review)}${gateNote ? `\n  gate: ${gateNote}` : ""}${depositNote}\n  → saved: ${path}`,
             "info",
           );
         } catch (error) {
@@ -1126,6 +1507,25 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         }
         ctx.ui.notify(
           `Self-evolve review history (${reviews.length}):\n${reviews.map(formatReviewSummary).join("\n\n")}`,
+          "info",
+        );
+        return;
+      }
+
+      if (cmd === "deposits") {
+        const limit = rest[0]
+          ? Math.max(1, Math.min(30, Number.parseInt(rest[0], 10) || 10))
+          : 10;
+        const records = await loadRecentDeposits(limit);
+        if (records.length === 0) {
+          ctx.ui.notify(
+            "Self-evolve: no deposit records yet. Switch with /self-evolve config mode=auto-deposit, then run /self-evolve review.",
+            "info",
+          );
+          return;
+        }
+        ctx.ui.notify(
+          `Self-evolve deposit history (${records.length}):\n${records.map(formatDepositSummary).join("\n")}`,
           "info",
         );
         return;
@@ -1170,19 +1570,19 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
         const model = resolveSelfEvolveModel(ctx);
         const lines = [
         `SELF-EVOLVE ${effectiveEnabled() ? "on" : "off"} (${source})`,
-        `  mode: ${config.mode} — candidate signals only, never stages or promotes knowledge (Phase 2A; auto-deposit arrives with Phase 2B)`,
+        `  mode: ${config.mode} — ${modeDescription(config.mode)}`,
         `  model: ${config.model ?? "auto"}${model && model !== config.model ? ` → ${model}` : ""} (Phase 2B LLM steps)`,
         `  cooldown: ${config.cooldownMs}ms · max ${config.maxSignalsPerSession} signals/session`,
         `  evidence: ${config.maxEvidence} refs · trace: ${config.maxTraceMessages} msgs / ${config.maxTraceChars} chars`,
         `  review gate: stage below score ${config.reviewScoreThreshold} downgraded to uncertain`,
         `  retention: keep ${config.maxFiles} daily signal files · ${config.maxReviewFiles} daily review files (stale archived)`,
         `  output: ${resolvedSuggestionsDir()}`,
-        `  signals: ${state.signals} written · deduped: ${state.deduped} · suppressed: ${state.suppressed}`,
+        `  signals: ${state.signals} written · deduped: ${state.deduped} · suppressed: ${state.suppressed} · deposits: ${state.deposits}`,
         `  failures: ${state.failures}${state.lastError ? ` · last: ${state.lastError.slice(0, 200)}` : ""}`,
         state.lastSource
           ? `  last: ${state.lastSource}${lastSignalBySource[state.lastSource] ? ` · ${new Date(lastSignalBySource[state.lastSource]!).toLocaleTimeString()}` : ""}`
           : "  last: (none yet)",
-        `  usage: /self-evolve panel (editable: ↑↓ Enter Ctrl+S) · config <key>=<value> (enabled, mode, model, reviewScoreThreshold, cooldownMs, maxSignalsPerSession, maxTraceChars, maxTraceMessages, maxEvidence, maxFiles, maxReviewFiles) · signals [N|--since d|--until d|--project p|delete <id>|clear|export] · review [N] · reviews [N]`,
+        `  usage: /self-evolve panel (editable: ↑↓ Enter Ctrl+S) · config <key>=<value> (enabled, mode, model, reviewScoreThreshold, cooldownMs, maxSignalsPerSession, maxTraceChars, maxTraceMessages, maxEvidence, maxFiles, maxReviewFiles) · signals [N|--since d|--until d|--project p|delete <id>|clear|export] · review [N] · reviews [N] · deposits [N]`,
       ];
       ctx.ui.notify(lines.join("\n"), "info");
       return;
@@ -1190,7 +1590,7 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
 
       // Unknown subcommand — surface usage instead of silently opening the panel.
       ctx.ui.notify(
-        "Usage: /self-evolve [panel (default)|status|on|off|config [k=v ...|reset]|signals [N|delete <id>|clear|export|--since d --until d --project p]|review [N]|reviews [N]]",
+        "Usage: /self-evolve [panel (default)|status|on|off|config [k=v ...|reset]|signals [N|delete <id>|clear|export|--since d --until d --project p]|review [N]|reviews [N]|deposits [N]]",
         "info",
       );
     },

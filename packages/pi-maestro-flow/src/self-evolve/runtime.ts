@@ -1,14 +1,17 @@
 /**
- * Self-evolve runtime — pure logic for Phase 2A dry-run candidate signals.
+ * Self-evolve runtime — pure logic for candidate signals and Phase 2B
+ * auto-deposit.
  *
  * The self-evolve extension turns runtime traces into *suggestion* records
- * only. It never stages, promotes, or writes knowledge: every signal is a
- * dry-run candidate appended to `.pi/self-evolve/suggestions/<date>.jsonl`
- * for a human/Phase 2B governance step to review (see
- * `docs/self-evolution-plugin-design.md` §9, Phase 2A).
+ * (dry-run candidates appended to `~/.maestro/self-evolve/suggestions/<date>.jsonl`)
+ * for a governance step to review (see `docs/self-evolution-plugin-design.md`
+ * §9, Phase 2A). In `auto-deposit` mode, gate-passing signals are staged via
+ * the explicit `maestro knowledge stage` CLI (wiring in `extension.ts`) —
+ * this module only builds the argv/records; it never executes anything itself
+ * and never promotes.
  *
  * This module is host-free and unit-testable; host wiring (events, config
- * persistence, filesystem writes) lives in `extension.ts`.
+ * persistence, filesystem writes, CLI execution) lives in `extension.ts`.
  */
 
 import { createHash } from "node:crypto";
@@ -46,22 +49,27 @@ export const PRIVATE_FILE_MODE = 0o600;
 // Config
 // ---------------------------------------------------------------------------
 
-/** Evolution modes. Phase 2A has a single safe mode: dry-run (candidate
- * signals only, never stages/promotes knowledge). Future phases may extend
- * this enum (e.g. auto-deposit); validation stays in `setConfigValue`. */
-export type SelfEvolveMode = "dry-run";
+/**
+ * Evolution modes. `dry-run` (default): candidate signals only — review never
+ * writes knowledge. `auto-deposit`: signals passing the review gate are
+ * automatically staged into the knowledge base (pending candidates only —
+ * promotion stays manual per governance discipline). Validation stays in
+ * `setConfigValue`.
+ */
+export type SelfEvolveMode = "dry-run" | "auto-deposit";
 
 /** All currently legal evolution modes, in display order. */
-export const SELF_EVOLVE_MODES: readonly SelfEvolveMode[] = ["dry-run"];
+export const SELF_EVOLVE_MODES: readonly SelfEvolveMode[] = ["dry-run", "auto-deposit"];
 
 export interface SelfEvolveConfig {
   /** Master switch; the extension only observes events while enabled. */
   enabled: boolean;
   /**
-   * Evolution mode. Phase 2A ships only `dry-run` (collect candidate signals,
-   * never stage/promote knowledge); the field is explicit so the panel/status
-   * show the real value instead of a hardcoded label, and so future phases
-   * can add modes without changing the config shape.
+   * Evolution mode. `dry-run` collects candidate signals and never writes
+   * knowledge; `auto-deposit` additionally stages gate-passing candidates
+   * (pending pool — never auto-promotes). The field is explicit so the
+   * panel/status show the real value instead of a hardcoded label, and so
+   * future phases can add modes without changing the config shape.
    */
   mode: SelfEvolveMode;
   /**
@@ -546,6 +554,8 @@ export interface SelfEvolveCounters {
   signals: number;
   deduped: number;
   suppressed: number;
+  /** Auto-staged candidates in `auto-deposit` mode (deposit ledger writes). */
+  deposits: number;
   failures: number;
   lastError?: string;
   lastSource?: SelfEvolveSource;
@@ -627,7 +637,7 @@ export function setConfigValue(
     }
     return {
       config,
-      error: `mode expects one of ${SELF_EVOLVE_MODES.join(" | ")} (Phase 2A ships dry-run only; auto-deposit arrives with Phase 2B), got "${raw}"`,
+      error: `mode expects one of ${SELF_EVOLVE_MODES.join(" | ")} (dry-run: review only; auto-deposit: gate-passing candidates auto-staged, never auto-promoted), got "${raw}"`,
     };
   }
   if (normalizedKey === "cooldownMs") {
@@ -681,7 +691,7 @@ export function formatConfigSummary(
   const enabled = opts.enabled ?? config.enabled;
   const lines = [
     `SELF-EVOLVE ${enabled ? "on" : "off"} (${source})`,
-    `  mode: ${config.mode} — candidate signals only, never stages or promotes knowledge`,
+    `  mode: ${config.mode} — ${modeDescription(config.mode)}`,
     `  model: ${config.model ?? "auto"}${opts.resolvedModel && opts.resolvedModel !== config.model ? ` → ${opts.resolvedModel}` : ""} (Phase 2B LLM steps)`,
     `  cooldown: ${formatDurationMs(config.cooldownMs)} (${config.cooldownMs}ms)`,
     `  budget: ${config.maxSignalsPerSession} signals/session`,
@@ -694,6 +704,13 @@ export function formatConfigSummary(
   return lines.join("\n");
 }
 
+/** One-line behavior description per evolution mode (display + hint text). */
+export function modeDescription(mode: SelfEvolveMode): string {
+  return mode === "auto-deposit"
+    ? "review gate-passing candidates are auto-staged (pending pool; never auto-promotes)"
+    : "candidate signals only, never stages or promotes knowledge";
+}
+
 /** One-line status-bar text; undefined when the indicator should be hidden. */
 export function formatStatusText(
   enabled: boolean,
@@ -701,7 +718,8 @@ export function formatStatusText(
 ): string | undefined {
   if (!enabled) return "EVOL off";
   const compact = `${counters.signals}·${counters.deduped}·${counters.suppressed}`;
-  return `EVOL ● ${compact}${counters.failures > 0 ? ` !${counters.failures}` : ""}`;
+  const deposits = counters.deposits > 0 ? `·${counters.deposits}D` : "";
+  return `EVOL ● ${compact}${deposits}${counters.failures > 0 ? ` !${counters.failures}` : ""}`;
 }
 
 /** Parse JSONL signal lines, skipping malformed entries. */
@@ -788,12 +806,14 @@ export interface ReviewVerdict {
   reason: string;
 }
 
-/** Structured review record, appended to the global reviews dir (dry-run). */
+/** Structured review record, appended to the global reviews dir. */
 export interface SelfEvolveReview {
   schemaVersion: number;
   kind: "review";
-  /** Phase 2B validation is dry-run only — never stages or promotes. */
-  dryRun: true;
+  /** True when the review ran in dry-run mode (no auto-deposit was attempted). */
+  dryRun: boolean;
+  /** Evolution mode at review time (`dry-run` or `auto-deposit`). */
+  mode: SelfEvolveMode;
   createdAt: string;
   project?: string;
   model?: string;
@@ -805,6 +825,8 @@ export interface SelfEvolveReview {
   downgraded?: number;
   /** Signals excluded from review because they carry no stage template. */
   nonActionableSkipped?: number;
+  /** Auto-deposited stage executions attempted in `auto-deposit` mode (audit count). */
+  deposited?: number;
 }
 
 /** JSON schema for the review model output (per-signal verdicts). */
@@ -907,9 +929,10 @@ export function formatReviewSummary(review: SelfEvolveReview): string {
   const skip = byAction("skip");
   const uncertain = byAction("uncertain");
   const missing = Math.max(0, review.signals - review.verdicts.length);
+  const mode = review.mode === "auto-deposit" ? "(auto-deposit)" : "(dry-run)";
   const lines = [
-    `SELF-EVOLVE REVIEW (dry-run) — ${review.signals} signals · model ${review.model ?? "auto"}`,
-    `  stage: ${stage.length} · skip: ${skip.length} · uncertain: ${uncertain.length}${missing > 0 ? ` · missing verdicts: ${missing}` : ""}`,
+    `SELF-EVOLVE REVIEW ${mode} — ${review.signals} signals · model ${review.model ?? "auto"}`,
+    `  stage: ${stage.length} · skip: ${skip.length} · uncertain: ${uncertain.length}${missing > 0 ? ` · missing verdicts: ${missing}` : ""}${review.deposited !== undefined ? ` · deposited: ${review.deposited}` : ""}`,
     ...stage.map((v) => `  → stage ${v.id} (${v.candidateType}, ${v.score}): ${v.reason}`),
     ...uncertain.map((v) => `  ? uncertain ${v.id} (${v.score}): ${v.reason}`),
     ...skip.map((v) => `  – skip ${v.id}: ${v.reason}`),
@@ -960,6 +983,111 @@ export function reviewFileName(date = new Date()): string {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${date.getFullYear()}-${month}-${day}.jsonl`;
+}
+
+// ---------------------------------------------------------------------------
+// Auto-deposit records (Phase 2B: gate-passing candidates auto-staged)
+// ---------------------------------------------------------------------------
+
+/** Result of executing one stage command (host-bound; runtime keeps the pure shape). */
+export interface StageExecutionResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+/** Audit record appended to the global deposits dir for each auto-stage. */
+export interface DepositRecord {
+  schemaVersion: number;
+  kind: "deposit";
+  createdAt: string;
+  project?: string;
+  mode: SelfEvolveMode;
+  signalId: string;
+  title: string;
+  candidateType: CandidateType;
+  source: SelfEvolveSource;
+  sessionId?: string;
+  runId?: string;
+  command: string;
+  exitCode: number;
+  /** Parsed candidate id from the stage output (`KDC-…`); present on success. */
+  stagedId?: string;
+  error?: string;
+}
+
+/** Deposits output dir under the global output root. */
+export function depositsDirPath(outputRoot: string): string {
+  return resolve(outputRoot, "deposits");
+}
+
+/** Local-time `YYYY-MM-DD` deposit file name. */
+export function depositFileName(date = new Date()): string {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}.jsonl`;
+}
+
+/**
+ * Build the structured argv for the auto-stage command, mirroring the
+ * human-facing `suggestion` template (same identity/evidence wiring —
+ * session-first, run fallback — so manual and automatic paths agree).
+ * Returns undefined for non-actionable signals (`unknown` candidate type).
+ * argv avoids shell quoting — spawn passes arguments directly.
+ */
+export function buildStageCommandArgs(
+  signal: SelfEvolveSignal,
+  evidenceFile: string,
+): string[] | undefined {
+  if (signal.candidateType === "unknown") return undefined;
+  const type = signal.candidateType === "spec" ? "spec" : "knowhow";
+  const refs = (signal.evidence ?? []).map((entry) => entry.ref).slice(0, 8).join(", ");
+  const args = ["knowledge", "stage", type, signal.title, "--content-file", evidenceFile];
+  if (signal.sessionId) {
+    args.push("--session", signal.sessionId);
+  } else if (signal.runId) {
+    args.push("--run", signal.runId);
+  }
+  if (refs) args.push("--evidence", refs);
+  return args;
+}
+
+/** True for well-formed signal ids (`se-` + 12 hex chars) — guards path building. */
+export function isValidSignalId(id: string | undefined): id is string {
+  return typeof id === "string" && /^se-[0-9a-f]{12}$/.test(id);
+}
+
+/** Rebuild the human-readable command line for the deposit audit record. */
+export function formatStageCommandLine(args: readonly string[]): string {
+  return `maestro ${args.map((arg) => (/\s/.test(arg) ? `"${arg.replace(/"/g, "\\\"")}"` : arg)).join(" ")}`;
+}
+
+/**
+ * Parse the staged candidate id (`KDC-…`) from the stage CLI output. Prefers
+ * the `--json` shape (`candidate_id`); falls back to a loose id pattern scan.
+ */
+export function parseStagedId(output: string): string | undefined {
+  const trimmed = output.trim();
+  if (!trimmed) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed) as { candidate_id?: unknown };
+    if (typeof parsed.candidate_id === "string" && parsed.candidate_id.length > 0) {
+      return parsed.candidate_id;
+    }
+  } catch {
+    // not JSON — fall through to the pattern scan
+  }
+  const match = /\b(KDC-[A-Za-z0-9-]+)\b/.exec(trimmed);
+  return match?.[1];
+}
+
+/** Human-readable deposit summary for `/self-evolve deposits`. */
+export function formatDepositSummary(record: DepositRecord): string {
+  const time = new Date(record.createdAt).toLocaleString();
+  const status = record.exitCode === 0
+    ? `staged ${record.stagedId ?? "?"}`
+    : `failed rc=${record.exitCode}${record.error ? ` · ${record.error}` : ""}`;
+  return `[${time}] ${record.signalId} · ${record.candidateType} · ${status}: ${record.title}`;
 }
 
 

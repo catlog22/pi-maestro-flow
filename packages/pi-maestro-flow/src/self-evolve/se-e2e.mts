@@ -13,7 +13,10 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import registerSelfEvolve, { setSelfEvolveReviewRuntimeForTest } from "./extension.ts";
+import registerSelfEvolve, {
+  setSelfEvolveDepositExecutorForTest,
+  setSelfEvolveReviewRuntimeForTest,
+} from "./extension.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 // ---------------------------------------------------------------------------
@@ -360,6 +363,152 @@ async function main(): Promise<void> {
   check("review 模型不可用提示", unavailableMsg.includes("model unavailable"), unavailableMsg.slice(0, 100));
   await cmd.handler("config model=auto", ctx);
   ctx.model = { provider: "test-provider", id: "test-model" };
+
+  // ---- 8f. auto-deposit mode: gate-passing signals auto-staged ----------------
+
+  const depositsDir = join(outRoot, "deposits");
+  // dry-run mode review never creates a deposit ledger.
+  let depositsExist = true;
+  try { await readdir(depositsDir); } catch { depositsExist = false; }
+  check("dry-run 模式 review 不产生 deposit ledger", !depositsExist, `depositsDir exists=${depositsExist}`);
+
+  // Switch to auto-deposit mode (persisted config).
+  await cmd.handler("config mode=auto-deposit", ctx);
+  const cfgDep = JSON.parse(await readFile(cfgPath, "utf8"));
+  check("config mode=auto-deposit 持久化", cfgDep.mode === "auto-deposit", JSON.stringify(cfgDep));
+  let badModeMsg = "";
+  ctx.ui.notify = (message, level) => { if (level === "warning") badModeMsg = message; prevNotify(message, level); };
+  await cmd.handler("config mode=live", ctx);
+  const cfgDep2 = JSON.parse(await readFile(cfgPath, "utf8"));
+  check("auto-deposit 后非法 mode 仍拒绝", cfgDep2.mode === "auto-deposit" && badModeMsg.includes("mode expects one of dry-run | auto-deposit"), badModeMsg.slice(0, 140));
+
+  // Helper: append a crafted actionable signal (with suggestion) to today's file.
+  let craftedSeq = 0;
+  async function appendSignal(partial: Record<string, unknown>): Promise<{ id: string; title: string; sessionId: string }> {
+    craftedSeq += 1;
+    const id = `se-0000000000${String(craftedSeq).padStart(2, "0")}`;
+    const signal = {
+      id,
+      schemaVersion: 1,
+      kind: "candidate",
+      source: "agent_end",
+      dryRun: true,
+      createdAt: new Date().toISOString(),
+      sessionId: "test-session-1",
+      project: "ws",
+      traceHash: "cafebabe00000000000000000000000000000000",
+      candidateType: "knowhow",
+      title: `crafted signal ${craftedSeq}`,
+      summary: `crafted deposit test signal ${craftedSeq}`,
+      evidence: [{ type: "file", ref: "src/foo.ts:1", role: "modified" }],
+      suggestion: `maestro knowledge stage knowhow \"crafted signal ${craftedSeq}\" --content-file /tmp/x.md --session test-session-1`,
+      ...partial,
+    };
+    await writeFile(join(dir, files[0]), `${JSON.stringify(signal)}\n`, { encoding: "utf8", flag: "a" });
+    return { id, title: signal.title, sessionId: signal.sessionId };
+  }
+
+  // Fake stage executor records invocations; successful run returns a staged id.
+  const executed: Array<{ args: string[]; cwd: string }> = [];
+  setSelfEvolveDepositExecutorForTest(async (args, opts) => {
+    executed.push({ args: [...args], cwd: opts.cwd });
+    return { exitCode: 0, stdout: "staged KDC-TEST-1", stderr: "" };
+  });
+  const sigLinesDep = (await readFile(join(dir, files[0]), "utf8")).trim().split("\n").filter(Boolean);
+  const depSignals = sigLinesDep.map((l) => JSON.parse(l)).filter((s) => s.suggestion !== undefined);
+  fakeVerdicts = depSignals.map((s) => ({
+    id: s.id, action: "stage", candidateType: "knowhow", score: 0.9, reason: "reusable and evidence-grounded",
+  }));
+  let depMsg = "";
+  ctx.ui.notify = (message, level) => { if (message.includes("SELF-EVOLVE REVIEW")) depMsg = message; prevNotify(message, level); };
+  await cmd.handler("review 5", ctx);
+  check("auto-deposit review 汇总含 staged/failed 计数", depMsg.includes(`deposit: ${depSignals.length} staged · 0 failed`), depMsg.slice(0, 220));
+  check("auto-deposit 对每个过门信号执行 stage", executed.length === depSignals.length, `executed=${executed.length} expected=${depSignals.length}`);
+  const firstArgs = executed[0]?.args ?? [];
+  const firstSig = depSignals[0] as { title: string; sessionId: string };
+  check(
+    "stage argv 结构化正确（knowledge stage <type> <title> --content-file <evidence> --session --json）",
+    firstArgs[0] === "knowledge" && firstArgs[1] === "stage" && firstArgs[2] === "knowhow"
+      && firstArgs[3] === firstSig.title && firstArgs.includes("--content-file")
+      && firstArgs.includes("--session") && firstArgs.includes(firstSig.sessionId)
+      && firstArgs.includes("--json"),
+    JSON.stringify(firstArgs),
+  );
+  const depFiles = await readdir(depositsDir);
+  check("deposit ledger 落盘 deposits 目录", depFiles.length === 1 && depFiles[0].endsWith(".jsonl"), depFiles.join(","));
+  const depLines = (await readFile(join(depositsDir, depFiles[0]), "utf8")).trim().split("\n").filter(Boolean);
+  const depRecord = JSON.parse(depLines.at(-1)!);
+  check(
+    "deposit 记录 stagedId 解析 + 命令审计 + mode 标记",
+    depRecord.kind === "deposit" && depRecord.stagedId === "KDC-TEST-1" && depRecord.exitCode === 0
+      && depRecord.mode === "auto-deposit" && depRecord.command.startsWith("maestro knowledge stage")
+      && depRecord.command.endsWith("--json"),
+    JSON.stringify(depRecord).slice(0, 220),
+  );
+  check("auto-deposit review 记录 dryRun=false + mode 标记", depMsg.includes("(auto-deposit)"), depMsg.slice(0, 120));
+  check("auto-deposit 后状态栏含 ·<n>D 计数", ctx.status["self-evolve"]?.includes(`·${depSignals.length}D`), ctx.status["self-evolve"]);
+
+  // Idempotency: a second review of the same signals performs no new stage.
+  await cmd.handler("review 5", ctx);
+  const depLinesAfter2 = (await readFile(join(depositsDir, depFiles[0]), "utf8")).trim().split("\n").filter(Boolean);
+  check("去重：已沉淀信号二次 review 不重复执行", executed.length === depSignals.length && depLinesAfter2.length === depLines.length, `executed=${executed.length} lines=${depLinesAfter2.length}`);
+
+  // Failure path: a fresh signal with a failing executor — ledger records the error, no stagedId.
+  const failSig = await appendSignal({ traceHash: "cafebabe00000000000000000000000000000001" });
+  // The failure path needs a real evidence file so it reaches the executor.
+  await writeFile(join(outRoot, "evidence", `${failSig.id}.md`), "evidence\n", "utf8");
+  setSelfEvolveDepositExecutorForTest(async () => ({ exitCode: 3, stdout: "", stderr: "boom: session sealed" }));
+  fakeVerdicts = [{ id: failSig.id, action: "stage", candidateType: "knowhow", score: 0.9, reason: "ok" }];
+  await cmd.handler("review 5", ctx);
+  const depAllLines = (await readFile(join(depositsDir, depFiles[0]), "utf8")).trim().split("\n").filter(Boolean);
+  const depRecordFail = JSON.parse(depAllLines.at(-1)!);
+  check("deposit 失败路径记录 exitCode+error", depRecordFail.exitCode === 3 && depRecordFail.error?.includes("boom"), JSON.stringify(depRecordFail).slice(0, 180));
+  check("deposit 失败不写 stagedId", depRecordFail.stagedId === undefined, JSON.stringify(depRecordFail).slice(0, 120));
+
+  // Fail-closed: fresh signal whose evidence file was never written — executor not called.
+  const missingSig = await appendSignal({ traceHash: "cafebabe00000000000000000000000000000002" });
+  const executedBeforeMissing = executed.length;
+  setSelfEvolveDepositExecutorForTest(async (args, opts) => {
+    executed.push({ args: [...args], cwd: opts.cwd });
+    return { exitCode: 0, stdout: "KDC-MISSING", stderr: "" };
+  });
+  fakeVerdicts = [{ id: missingSig.id, action: "stage", candidateType: "knowhow", score: 0.9, reason: "ok" }];
+  await cmd.handler("review 5", ctx);
+  check("fail-closed：evidence 缺失不执行 stage", executed.length === executedBeforeMissing, `executed=${executed.length} before=${executedBeforeMissing}`);
+  const depRecordMissing = JSON.parse((await readFile(join(depositsDir, depFiles[0]), "utf8")).trim().split("\n").filter(Boolean).at(-1)!);
+  check("fail-closed：ledger 记录 evidence missing", depRecordMissing.exitCode === -1 && depRecordMissing.error?.includes("evidence file missing"), JSON.stringify(depRecordMissing).slice(0, 180));
+
+  // Executor throw: fresh signal, throwing executor — ledger records the exception.
+  const throwSig = await appendSignal({ traceHash: "cafebabe00000000000000000000000000000003" });
+  await writeFile(join(outRoot, "evidence", `${throwSig.id}.md`), "evidence\n", "utf8");
+  setSelfEvolveDepositExecutorForTest(async () => { throw new Error("executor exploded"); });
+  fakeVerdicts = [{ id: throwSig.id, action: "stage", candidateType: "knowhow", score: 0.9, reason: "ok" }];
+  await cmd.handler("review 5", ctx);
+  const depRecordThrow = JSON.parse((await readFile(join(depositsDir, depFiles[0]), "utf8")).trim().split("\n").filter(Boolean).at(-1)!);
+  check("executor throw 路径记录 error", depRecordThrow.exitCode === -1 && depRecordThrow.error?.includes("executor exploded"), JSON.stringify(depRecordThrow).slice(0, 180));
+
+  // Cross-project guard: a signal from another project is never deposited here.
+  const otherSig = await appendSignal({ project: "other-project", traceHash: "cafebabe00000000000000000000000000000004" });
+  const executedBeforeOther = executed.length;
+  setSelfEvolveDepositExecutorForTest(async (args, opts) => {
+    executed.push({ args: [...args], cwd: opts.cwd });
+    return { exitCode: 0, stdout: "KDC-OTHER", stderr: "" };
+  });
+  fakeVerdicts = [{ id: otherSig.id, action: "stage", candidateType: "knowhow", score: 0.9, reason: "ok" }];
+  await cmd.handler("review 5", ctx);
+  check("跨项目信号不沉淀（executor 不执行）", executed.length === executedBeforeOther, `executed=${executed.length} before=${executedBeforeOther}`);
+  const depRecordOther = JSON.parse((await readFile(join(depositsDir, depFiles[0]), "utf8")).trim().split("\n").filter(Boolean).at(-1)!);
+  check("跨项目信号不产生 ledger 记录", depRecordOther.signalId !== otherSig.id, JSON.stringify(depRecordOther).slice(0, 120));
+
+  // deposits history command.
+  let depHistMsg = "";
+  ctx.ui.notify = (message, level) => { if (message.includes("deposit history")) depHistMsg = message; prevNotify(message, level); };
+  await cmd.handler("deposits 5", ctx);
+  check("deposits 命令查看历史（含成功/失败/缺失记录）", depHistMsg.includes("deposit history") && depHistMsg.includes("KDC-TEST-1") && depHistMsg.includes("failed rc=3") && depHistMsg.includes("evidence file missing"), depHistMsg.slice(0, 200));
+
+  // Restore dry-run mode and reset the executor seam.
+  await cmd.handler("config mode=dry-run", ctx);
+  setSelfEvolveDepositExecutorForTest(undefined);
 
   // ---- 8e. signal record management: delete by id prefix, clear ----
   const sigLinesBefore = (await readFile(join(dir, files[0]), "utf8")).trim().split("\n").filter(Boolean);
