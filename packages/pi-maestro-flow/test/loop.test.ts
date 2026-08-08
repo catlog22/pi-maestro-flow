@@ -161,6 +161,17 @@ test("cancel and shutdown clear timers and prevent future runs", () => {
   assert.equal(second.status, "scheduled");
 });
 
+test("reset makes a scheduler reusable after session replacement shutdown", () => {
+  const harness = createHarness();
+  harness.scheduler.create({ kind: "prompt", task: "old", intervalMs: 1_000 });
+  harness.scheduler.shutdown();
+  assert.throws(() => harness.scheduler.create({ kind: "prompt", task: "blocked", intervalMs: 1_000 }), /shut down/);
+  harness.scheduler.reset();
+  const next = harness.scheduler.create({ kind: "prompt", task: "new session", intervalMs: 1_000 });
+  assert.equal(next.status, "scheduled");
+  assert.equal(harness.scheduler.list().length, 1);
+});
+
 test("shutdown prevents an in-flight execution from reviving the loop", async () => {
   let resolveRun!: (result: LoopRunResult) => void;
   const harness = createHarness(() => new Promise((resolve) => { resolveRun = resolve; }));

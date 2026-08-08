@@ -1,4 +1,4 @@
-import { SchedulerCore } from "pi-maestro-teammate/v1/scheduler";
+import { SchedulerCore, type SchedulerCoreOptions } from "pi-maestro-teammate/v1/scheduler";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -112,18 +112,20 @@ export class LoopScheduler {
   private readonly jobs = new Map<string, LoopJob>();
   private readonly executeJob: LoopSchedulerOptions["execute"];
   private readonly now: () => number;
-  private readonly core: SchedulerCore;
+  private core: SchedulerCore;
+  private readonly coreOptions: SchedulerCoreOptions;
   private readonly onUpdate?: LoopSchedulerOptions["onUpdate"];
   private counter = 0;
 
   constructor(options: LoopSchedulerOptions) {
     this.executeJob = options.execute;
     this.now = options.now ?? Date.now;
-    this.core = new SchedulerCore({
+    this.coreOptions = {
       now: this.now,
       setTimer: options.setTimer,
       clearTimer: options.clearTimer,
-    });
+    };
+    this.core = new SchedulerCore(this.coreOptions);
     this.onUpdate = options.onUpdate;
   }
 
@@ -158,7 +160,12 @@ export class LoopScheduler {
       logDir: input.kind === "shell" ? loopLogDir(`loop-${this.counter.toString(36)}-${createdAt.toString(36)}`) : undefined,
     };
     this.jobs.set(job.id, job);
-    this.schedule(job);
+    try {
+      this.schedule(job);
+    } catch (error) {
+      this.jobs.delete(job.id);
+      throw error;
+    }
     this.emitUpdate();
     return this.snapshot(job);
   }
@@ -204,7 +211,12 @@ export class LoopScheduler {
       logDir: snapshot.kind === "shell" ? loopLogDir(snapshot.id) : undefined,
     };
     this.jobs.set(job.id, job);
-    this.schedule(job);
+    try {
+      this.schedule(job);
+    } catch (error) {
+      this.jobs.delete(job.id);
+      throw error;
+    }
     this.emitUpdate();
     return this.snapshot(job);
   }
@@ -213,6 +225,20 @@ export class LoopScheduler {
   pause(): void {
     this.core.pause();
     for (const job of this.jobs.values()) job.nextRunAt = undefined;
+  }
+
+  resume(): void {
+    this.core.resume();
+    for (const job of this.jobs.values()) {
+      if (job.status === "scheduled") job.nextRunAt = this.now() + job.intervalMs;
+    }
+    this.emitUpdate();
+  }
+
+  /** Re-arm this reusable service after a session replacement shutdown. */
+  reset(): void {
+    if (!this.core.isShutdown) return;
+    this.core = new SchedulerCore(this.coreOptions);
   }
 
   shutdown(): void {
@@ -505,6 +531,11 @@ export function registerLoop(pi: ExtensionAPI): void {
   // Restore persisted loops on session resume/reload; discover independent
   // shell loops on fresh startup.
   pi.on("session_start", (event, ctx) => {
+    if (event.reason === "reload" && scheduler.list().length > 0) {
+      scheduler.resume();
+      return;
+    }
+    scheduler.reset();
     if (event.reason === "startup") {
       // Check for independent shell loops still running from a previous session.
       const entries = readRegistry().filter((e) => isPidAlive(e.pid));
