@@ -4,6 +4,7 @@ import type {
 	TeammateStartedEvent,
 } from "pi-maestro-teammate/v1/events";
 import type { AgentProgressSnapshot } from "pi-maestro-teammate/v1/types";
+import { isAgentStalled, TEAMMATE_STALL_TIMEOUT_MS } from "pi-maestro-teammate/v1/types";
 import { sanitizeExtensionStatusText } from "./extension-status.ts";
 import type { AgentRow, AgentStatus } from "./types.ts";
 
@@ -113,13 +114,17 @@ function activityFromProgressStatus(status: unknown): "running" | "sleeping" | u
 		: "running";
 }
 
-export const AGENT_STALL_TIMEOUT_MS = 30_000;
+export const AGENT_STALL_TIMEOUT_MS = TEAMMATE_STALL_TIMEOUT_MS;
 export type AgentDisplayStatus = AgentStatus | "result-ready" | "stalled";
 
 export function effectiveAgentStatus(row: AgentRow, now: number = Date.now()): AgentDisplayStatus {
-	if (row.status !== "running") return row.status;
+	if (row.status !== "running" && row.status !== "pending") return row.status;
 	if (row.resultReadyAt !== undefined) return "result-ready";
-	return now - row.lastActivityAt >= AGENT_STALL_TIMEOUT_MS ? "stalled" : "running";
+	return isAgentStalled({
+		status: row.status,
+		phase: row.phase,
+		lastActivityAt: row.lastActivityAt,
+	}, now) ? "stalled" : row.status;
 }
 
 function normalizeStartedAt(value: number | string | undefined, fallback: number): number {

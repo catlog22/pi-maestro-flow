@@ -24,6 +24,7 @@ import {
 } from "../src/public/v1/events.ts";
 import cockpitEntry, { resolveCockpitSurfaceState } from "../src/index.ts";
 import extensionEntry from "../src/extension/index.ts";
+import { SESSION_BAR_WIDGET_KEY } from "../src/session-bar.ts";
 
 test("Cockpit defaults Todo to a one-line collapsed summary and Quiet to check symbols", () => {
 	assert.equal(DEFAULT_CONFIG.todoExpanded, false);
@@ -38,15 +39,45 @@ test("Cockpit resolves one actual surface from enablement and deferred dock visi
 });
 
 test("Cockpit loads through the standard extension path without changing its public entry", () => {
-	const packageJson = JSON.parse(
-		readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-	) as { main?: string; exports?: Record<string, string>; pi?: { extensions?: string[]; themes?: string[] } };
-	assert.deepEqual(packageJson.pi?.extensions, ["./src/extension/index.ts"]);
-	assert.deepEqual(packageJson.pi?.themes, ["./themes"]);
-	assert.equal(packageJson.main, "./src/index.ts");
-	assert.equal(packageJson.exports?.["."], "./src/index.ts");
-	assert.equal(packageJson.exports?.["./v1/events"], "./src/public/v1/events.ts");
-	assert.equal(extensionEntry, cockpitEntry);
+  const packageJson = JSON.parse(
+    readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+  ) as { main?: string; exports?: Record<string, string>; pi?: { extensions?: string[]; themes?: string[] } };
+  assert.deepEqual(packageJson.pi?.extensions, ["./src/extension/index.ts"]);
+  assert.deepEqual(packageJson.pi?.themes, ["./themes"]);
+  assert.equal(packageJson.main, "./src/index.ts");
+  assert.equal(packageJson.exports?.["."], "./src/index.ts");
+  assert.equal(packageJson.exports?.["./v1/events"], "./src/public/v1/events.ts");
+  assert.equal(extensionEntry, cockpitEntry);
+});
+
+test("Cockpit session bar, command, and shortcut contracts stay stable", () => {
+  const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+  assert.equal(SESSION_BAR_WIDGET_KEY, "cockpit-session-bar");
+  assert.deepEqual(
+    [...source.matchAll(/pi\.registerCommand\("([^"]+)"/g)].map((match) => match[1]),
+    ["theme", "maestro-settings", "cockpit", "supervision"],
+  );
+
+  const shortcutConstants = Object.fromEntries(
+    [...source.matchAll(/const (BASH_BG_OVERLAY_KEY|AGENT_OVERLAY_KEY|SIDEBAR_RESIZE_KEY|SIDEBAR_FOCUS_KEY|SESSION_DETAIL_TOGGLE_KEY) = "([^"]+)"/g)]
+      .map((match) => [match[1], match[2]]),
+  );
+  assert.deepEqual(shortcutConstants, {
+    BASH_BG_OVERLAY_KEY: "alt+j",
+    AGENT_OVERLAY_KEY: "alt+a",
+    SIDEBAR_RESIZE_KEY: "ctrl+shift+r",
+    SIDEBAR_FOCUS_KEY: "alt+shift+l",
+    SESSION_DETAIL_TOGGLE_KEY: "alt+shift+r",
+  });
+  assert.deepEqual(
+    [...source.matchAll(/pi\.registerShortcut\(([^,]+),/g)].map((match) => match[1]),
+    ["AGENT_OVERLAY_KEY", "BASH_BG_OVERLAY_KEY", "SIDEBAR_RESIZE_KEY", "SESSION_DETAIL_TOGGLE_KEY", "SIDEBAR_FOCUS_KEY"],
+  );
+
+  assert.match(source, /data !== "\\x1b\[D" && data !== "\\x1b\[C"/);
+  assert.match(source, /detailUp = "\\x1b\[1;4A"/);
+  assert.match(source, /detailDown = "\\x1b\[1;4B"/);
+  assert.match(source, /data !== "\\x1b\[1;2A" && data !== "\\x1b\[1;2B"/);
 });
 
 test("Cockpit packages complete selectable color themes", () => {

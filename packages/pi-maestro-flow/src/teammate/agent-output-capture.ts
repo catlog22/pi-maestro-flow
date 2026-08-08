@@ -13,7 +13,7 @@
  * `agent://` records exist for every settled task.
  */
 
-import { persistAgentOutput } from "./agent-output-store.ts";
+import { persistAgentOutputChecked } from "./agent-output-store.ts";
 
 interface StructuredResultLike {
   correlationId?: unknown;
@@ -51,16 +51,24 @@ function finalMessageText(messages: StructuredResultLike["messages"]): string | 
   return undefined;
 }
 
+/** Outcome summary used by the per-result publication acknowledgement. */
+export interface PersistStructuredResultsSummary {
+  stored: number;
+  skipped: number;
+  failed: number;
+}
+
 /**
- * Persist one or more settled results into `<cwd>/.pi/agents/`. Entries
- * without a correlation id or any output are skipped; persistence failures
- * are swallowed (capture must never break tool execution).
+ * Persist one or more published or settled results into `<cwd>/.pi/agents/`.
+ * Invalid entries are counted as skipped and I/O failures as failed so callers
+ * that need a durable acknowledgement do not mistake a no-op for success.
  */
 export async function persistStructuredResults(
   results: unknown,
   progress: unknown,
   fallbackCwd?: string,
-): Promise<void> {
+): Promise<PersistStructuredResultsSummary> {
+  const summary: PersistStructuredResultsSummary = { stored: 0, skipped: 0, failed: 0 };
   const namesByCid = new Map<string, string>();
   if (Array.isArray(progress)) {
     for (const entry of progress) {
@@ -71,32 +79,64 @@ export async function persistStructuredResults(
       }
     }
   }
-  if (!Array.isArray(results)) return;
+  if (!Array.isArray(results)) return summary;
   for (const raw of results) {
-    if (raw === null || typeof raw !== "object") continue;
+    if (raw === null || typeof raw !== "object") {
+      summary.skipped += 1;
+      continue;
+    }
     const result = raw as StructuredResultLike;
     const correlationId = typeof result.correlationId === "string" ? result.correlationId : "";
     const cwd = typeof result.originCwd === "string" && result.originCwd.length > 0
       ? result.originCwd
       : fallbackCwd;
-    if (!correlationId || !cwd) continue;
+    if (!correlationId || !cwd) {
+      summary.skipped += 1;
+      continue;
+    }
     let output = result.structuredOutput;
     if (output === undefined) {
       const text = typeof result.output === "string" ? result.output.trim() : "";
       output = text.length > 0 ? text : finalMessageText(result.messages);
     }
-    if (output === undefined) continue;
+    if (output === undefined) {
+      summary.skipped += 1;
+      continue;
+    }
     const name = typeof result.name === "string" ? result.name : namesByCid.get(correlationId);
     try {
-      await persistAgentOutput(
+      const stored = await persistAgentOutputChecked(
         correlationId,
         name,
         typeof result.agent === "string" ? result.agent : undefined,
         output,
         cwd,
       );
+      if (stored) summary.stored += 1;
+      else summary.skipped += 1;
     } catch (err) {
+      summary.failed += 1;
       console.warn(`[pi-maestro-flow] agent output capture failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  return summary;
+}
+
+/** Register one result's persistence promise with a teammate publication event. */
+export function capturePublishedAgentResult(event: unknown): boolean {
+  if (!event || typeof event !== "object") return false;
+  const payload = event as { result?: unknown; waitUntil?: unknown };
+  if (typeof payload.waitUntil !== "function" || !payload.result) return false;
+  const result = payload.result as { correlationId?: unknown };
+  const correlationId = typeof result.correlationId === "string" ? result.correlationId : "unknown";
+  const persistence = persistStructuredResults([payload.result], undefined).then((summary) => {
+    if (summary.stored !== 1) {
+      throw new Error(
+        `agent://${correlationId} persistence was not acknowledged `
+        + `(stored=${summary.stored}, skipped=${summary.skipped}, failed=${summary.failed})`,
+      );
+    }
+  });
+  (payload.waitUntil as (promise: Promise<unknown>) => void)(persistence);
+  return true;
 }

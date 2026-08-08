@@ -181,19 +181,16 @@ async function persistAgentOutputNow(
   await pruneAgentsDir(cwd);
 }
 
-/**
- * Persist one teammate result. Calls for the same record are serialized in
- * invocation order, so a later warm turn atomically replaces the prior value.
- */
-export function persistAgentOutput(
+/** Queue one validated record write and report whether it was accepted. */
+function enqueueAgentOutput(
   correlationId: string,
   name: string | undefined,
   agent: string | undefined,
   output: unknown,
   cwd: string,
-): Promise<void> {
-  if (!isRecordId(correlationId) || output === undefined) return Promise.resolve();
-  if (safeStringify(output) === null) return Promise.resolve();
+): Promise<boolean> {
+  if (!isRecordId(correlationId) || output === undefined) return Promise.resolve(false);
+  if (safeStringify(output) === null) return Promise.resolve(false);
 
   const key = recordFile(cwd, correlationId);
   const previous = pendingWrites.get(key) ?? Promise.resolve();
@@ -205,7 +202,32 @@ export function persistAgentOutput(
     if (pendingWrites.get(key) === tracked) pendingWrites.delete(key);
   });
   pendingWrites.set(key, tracked);
-  return tracked;
+  return tracked.then(() => true);
+}
+
+/**
+ * Persist one teammate result. Calls for the same record are serialized in
+ * invocation order, so a later warm turn atomically replaces the prior value.
+ */
+export async function persistAgentOutput(
+  correlationId: string,
+  name: string | undefined,
+  agent: string | undefined,
+  output: unknown,
+  cwd: string,
+): Promise<void> {
+  await enqueueAgentOutput(correlationId, name, agent, output, cwd);
+}
+
+/** Persist one result and expose validation skips to reliability-sensitive callers. */
+export function persistAgentOutputChecked(
+  correlationId: string,
+  name: string | undefined,
+  agent: string | undefined,
+  output: unknown,
+  cwd: string,
+): Promise<boolean> {
+  return enqueueAgentOutput(correlationId, name, agent, output, cwd);
 }
 
 function parseRecord(text: string): AgentOutputRecord | null {

@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS, TEAMMATE_STALL_TIMEOUT_MS } from "pi-maestro-teammate/v1/types";
 import { AgentsStore, AGENT_LINGER_MS, COMPLETED_TOMBSTONE_MS, FAILED_LINGER_MS, SESSION_CONTENT_MAX, SLEEPING_LINGER_MS, TERMINATED_LINGER_MS, effectiveAgentStatus, mapAgentStatus } from "../src/agents-store.ts";
 
 test("started adds a running row with derived role and label", () => {
@@ -13,6 +14,27 @@ test("started adds a running row with derived role and label", () => {
 	assert.equal(row.status, "running");
 	assert.equal(row.startedAt, 1000);
 	assert.equal(row.lastActivityAt, 1000);
+});
+
+test("expected-silence phases use the shared bounded stall deadline", () => {
+	const s = new AgentsStore();
+	const startedAt = 1_000;
+	s.applyStarted({ correlationId: "thinking", agent: "analyst", status: "running", phase: "prompting" }, startedAt);
+	const row = s.snapshot()[0];
+
+	assert.equal(effectiveAgentStatus(row, startedAt + TEAMMATE_STALL_TIMEOUT_MS), "running");
+	assert.equal(effectiveAgentStatus(row, startedAt + TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS), "stalled");
+
+	s.applyStarted({ correlationId: "queued", agent: "worker", status: "pending", phase: "starting" }, startedAt);
+	s.applyMessage({
+		correlationId: "queued",
+		status: "pending",
+		phase: "starting",
+		lastActivityAt: startedAt,
+	}, startedAt);
+	const queued = s.snapshot().find((entry) => entry.correlationId === "queued")!;
+	assert.equal(effectiveAgentStatus(queued, startedAt + TEAMMATE_STALL_TIMEOUT_MS), "pending");
+	assert.equal(effectiveAgentStatus(queued, startedAt + TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS), "stalled");
 });
 
 test("started preserves parent, source status and source start time", () => {

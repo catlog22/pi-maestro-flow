@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, before } from "node:test";
 
-const { persistStructuredResults } = await import("../src/teammate/agent-output-capture.ts");
+const { capturePublishedAgentResult, persistStructuredResults } = await import("../src/teammate/agent-output-capture.ts");
 const { readAgentOutput } = await import("../src/teammate/agent-output-store.ts");
 
 let root: string;
@@ -174,4 +174,44 @@ test("persistStructuredResults writes a private record readable by correlationId
   assert.match(raw, /"output":/);
   const record = await readAgentOutput("capture-cid-4", root);
   assert.deepEqual(record.output, { deep: { list: [1, 2, 3] } });
+});
+
+test("capturePublishedAgentResult acknowledges persistence before release", async () => {
+  let persistence: Promise<unknown> | undefined;
+  const claimed = capturePublishedAgentResult({
+    result: {
+      correlationId: "published-cid-1",
+      originCwd: root,
+      name: "published-node",
+      agent: "general",
+      structuredOutput: { ready: true },
+    },
+    waitUntil(promise: Promise<unknown>) {
+      persistence = promise;
+    },
+  });
+
+  assert.equal(claimed, true);
+  assert.ok(persistence);
+  await persistence;
+  assert.deepEqual((await readAgentOutput("published-cid-1", root)).output, { ready: true });
+});
+
+test("capturePublishedAgentResult rejects an unpersistable publication", async () => {
+  let persistence: Promise<unknown> | undefined;
+  assert.equal(capturePublishedAgentResult({
+    result: {
+      correlationId: "published-cid-oversized",
+      originCwd: root,
+      agent: "general",
+      structuredOutput: { data: "x".repeat(600_000) },
+    },
+    waitUntil(promise: Promise<unknown>) {
+      persistence = promise;
+    },
+  }), true);
+
+  assert.ok(persistence);
+  await assert.rejects(persistence, /persistence was not acknowledged/);
+  await assert.rejects(() => readAgentOutput("published-cid-oversized", root));
 });

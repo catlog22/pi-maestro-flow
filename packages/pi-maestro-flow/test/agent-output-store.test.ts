@@ -6,6 +6,7 @@ import test, { after, before } from "node:test";
 
 const {
   persistAgentOutput,
+  persistAgentOutputChecked,
   readAgentOutput,
   getAgentOutputPath,
 } = await import("../src/teammate/agent-output-store.ts");
@@ -187,7 +188,10 @@ test("readAgentOutput does not follow a linked record file", async (t) => {
 });
 
 test("persistAgentOutput skips non-serializable or oversized outputs", async () => {
-  await persistAgentOutput("run-abc-3", "big", undefined, { data: "x".repeat(600_000) }, root);
+  assert.equal(
+    await persistAgentOutputChecked("run-abc-3", "big", undefined, { data: "x".repeat(600_000) }, root),
+    false,
+  );
   await assert.rejects(
     () => readAgentOutput("run-abc-3", root),
     (err: unknown) => err instanceof Error && err.message.includes("No persisted teammate output"),
@@ -195,7 +199,10 @@ test("persistAgentOutput skips non-serializable or oversized outputs", async () 
 
   const cyclic: Record<string, unknown> = {};
   cyclic.self = cyclic;
-  await persistAgentOutput("run-abc-4", "cyclic", undefined, cyclic, root);
+  assert.equal(
+    await persistAgentOutputChecked("run-abc-4", "cyclic", undefined, cyclic, root),
+    false,
+  );
   await assert.rejects(
     () => readAgentOutput("run-abc-4", root),
     (err: unknown) => err instanceof Error && err.message.includes("No persisted teammate output"),

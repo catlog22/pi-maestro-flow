@@ -224,7 +224,7 @@ import { registerLoop } from "../tools/loop.ts";
 import { registerModelAvailability } from "../tools/model-availability.ts";
 import { registerResourceTool } from "../tools/resource.ts";
 import { registerConflictTool } from "../tools/conflict.ts";
-import { persistStructuredResults } from "../teammate/agent-output-capture.ts";
+import { capturePublishedAgentResult, persistStructuredResults } from "../teammate/agent-output-capture.ts";
 import { registerMarkdownReviewCommand } from "../tools/markdown-review-command.ts";
 import {
   proxyTeammateChildTool,
@@ -233,7 +233,12 @@ import {
   registerTeammatePermissionBroker,
   type TeammatePermissionBroker,
 } from "pi-maestro-teammate/v1/child-extensions";
-import { TEAMMATE_STARTED_EVENT, TEAMMATE_MESSAGE_EVENT, TEAMMATE_COMPLETE_EVENT } from "pi-maestro-teammate/v1/types";
+import {
+  TEAMMATE_STARTED_EVENT,
+  TEAMMATE_MESSAGE_EVENT,
+  TEAMMATE_RESULT_PUBLISHED_EVENT,
+  TEAMMATE_COMPLETE_EVENT,
+} from "pi-maestro-teammate/v1/types";
 import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
 import { sharedModelCircuitBreaker } from "pi-maestro-teammate/v1/retry";
 import { createFlowSettingsProvider, registerFlowSettingsProvider } from "../settings/flow-settings-provider.ts";
@@ -642,6 +647,9 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   pi.events.on(TEAMMATE_STARTED_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateStarted, event));
   pi.events.on(TEAMMATE_MESSAGE_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateProgress, event));
   pi.events.on(TEAMMATE_COMPLETE_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateComplete, event));
+  // Persist each published node before runGraph releases its dependents. The
+  // completion/tool-result hooks below remain compatibility fallbacks.
+  pi.events.on(TEAMMATE_RESULT_PUBLISHED_EVENT, capturePublishedAgentResult);
   // agent:// data source for background/detached runs: the root tool_result of
   // a background dispatch carries empty results, so the authoritative completion
   // event is the persistence channel for its structured outputs.
@@ -2759,6 +2767,12 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     return goalInput(event);
   });
 
+  // A hard-threshold intent must settle before the next tool executes. The
+  // guard aborts the active loop here; agent_settled owns the actual compact().
+  pi.on("tool_call", (_event, ctx) => {
+    midTurnAutoCompaction.onToolCall(ctx);
+  });
+
   // Keep the tool panel stable for prompt-cache reuse; this hook enforces the hard
   // read-only boundary until Plan approval, before the interactive permission chain.
   pi.on("tool_call", (event) => onToolCallPlan(event, approvalMode === "bypassPermissions"));
@@ -3192,6 +3206,9 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
     preserveCompletedTurnFromNativeThreshold = false;
     compactionArbiter.reset();
     autoCompaction.onSessionStart(ctx, event);
+  });
+  pi.on("tool_call", (_event, ctx) => {
+    autoCompaction.onToolCall(ctx);
   });
   pi.on("context", async (event, ctx) => {
     try {

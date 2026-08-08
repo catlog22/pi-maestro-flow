@@ -1,3 +1,4 @@
+import { SchedulerCore } from "pi-maestro-teammate/v1/scheduler";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -87,9 +88,7 @@ export interface LoopJobSnapshot {
   logDir?: string;
 }
 
-interface LoopJob extends LoopJobSnapshot {
-  timer?: ReturnType<typeof setTimeout>;
-}
+type LoopJob = LoopJobSnapshot;
 
 export interface CreateLoopInput {
   kind: LoopKind;
@@ -113,16 +112,18 @@ export class LoopScheduler {
   private readonly jobs = new Map<string, LoopJob>();
   private readonly executeJob: LoopSchedulerOptions["execute"];
   private readonly now: () => number;
-  private readonly setTimer: NonNullable<LoopSchedulerOptions["setTimer"]>;
-  private readonly clearTimer: NonNullable<LoopSchedulerOptions["clearTimer"]>;
+  private readonly core: SchedulerCore;
   private readonly onUpdate?: LoopSchedulerOptions["onUpdate"];
   private counter = 0;
 
   constructor(options: LoopSchedulerOptions) {
     this.executeJob = options.execute;
     this.now = options.now ?? Date.now;
-    this.setTimer = options.setTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs));
-    this.clearTimer = options.clearTimer ?? clearTimeout;
+    this.core = new SchedulerCore({
+      now: this.now,
+      setTimer: options.setTimer,
+      clearTimer: options.clearTimer,
+    });
     this.onUpdate = options.onUpdate;
   }
 
@@ -171,10 +172,7 @@ export class LoopScheduler {
   cancel(id: string): LoopJobSnapshot | undefined {
     const job = this.jobs.get(id);
     if (!job) return undefined;
-    if (job.timer !== undefined) {
-      this.clearTimer(job.timer);
-      job.timer = undefined;
-    }
+    this.core.cancel(id);
     if (job.status === "scheduled" || job.status === "running") {
       job.status = "cancelled";
       job.nextRunAt = undefined;
@@ -213,20 +211,15 @@ export class LoopScheduler {
 
   /** Clear all timers but keep jobs in the map (for reload teardown). */
   pause(): void {
-    for (const job of this.jobs.values()) {
-      if (job.timer !== undefined) {
-        this.clearTimer(job.timer);
-        job.timer = undefined;
-      }
-      job.nextRunAt = undefined;
-    }
+    this.core.pause();
+    for (const job of this.jobs.values()) job.nextRunAt = undefined;
   }
 
   shutdown(): void {
+    this.core.shutdown();
     for (const job of this.jobs.values()) {
       job.status = "cancelled";
       job.nextRunAt = undefined;
-      if (job.timer !== undefined) this.clearTimer(job.timer);
     }
     this.jobs.clear();
   }
@@ -235,15 +228,15 @@ export class LoopScheduler {
     if (job.status === "cancelled" || job.runCount >= job.maxRuns) return;
     job.status = "scheduled";
     job.nextRunAt = this.now() + job.intervalMs;
-    job.timer = this.setTimer(() => {
-      job.timer = undefined;
-      void this.run(job);
-    }, job.intervalMs);
-    job.timer.unref?.();
+    this.core.schedule({
+      id: job.id,
+      intervalMs: job.intervalMs,
+      run: ({ signal }) => this.run(job, signal),
+    });
   }
 
-  private async run(job: LoopJob): Promise<void> {
-    if (job.status === "cancelled") return;
+  private async run(job: LoopJob, signal: AbortSignal): Promise<void> {
+    if (signal.aborted || this.isCancelled(job) || this.jobs.get(job.id) !== job) return;
     job.status = "running";
     job.nextRunAt = undefined;
     job.lastRunAt = this.now();
@@ -255,20 +248,23 @@ export class LoopScheduler {
       result = { ok: false, summary: error instanceof Error ? error.message : String(error) };
     }
 
-    if (this.isCancelled(job)) return;
+    if (signal.aborted || this.isCancelled(job) || this.jobs.get(job.id) !== job) return;
     job.runCount++;
     job.lastResult = result.summary.slice(0, OUTPUT_LIMIT);
     if (!result.ok) {
       job.status = "failed";
+      this.core.cancel(job.id);
       this.emitUpdate();
       return;
     }
     if (job.runCount >= job.maxRuns) {
       job.status = "completed";
+      this.core.cancel(job.id);
       this.emitUpdate();
       return;
     }
-    this.schedule(job);
+    job.status = "scheduled";
+    job.nextRunAt = this.now() + job.intervalMs;
     this.emitUpdate();
   }
 
@@ -281,8 +277,7 @@ export class LoopScheduler {
   }
 
   private snapshot(job: LoopJob): LoopJobSnapshot {
-    const { timer: _timer, ...snapshot } = job;
-    return { ...snapshot };
+    return { ...job };
   }
 }
 

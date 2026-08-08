@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import {
   LoopParams,
   LoopScheduler,
+  registerLoop,
   parseLoopDuration,
   LOOP_UPDATE_EVENT,
   LOOP_QUERY_EVENT,
@@ -122,6 +123,31 @@ test("failed execution stops the loop without scheduling another run", async () 
   assert.equal(harness.timers.length, 1);
 });
 
+test("cancel during an awaited execution fences the late result", async () => {
+  let resolveRun!: (result: LoopRunResult) => void;
+  const updates: LoopJobSnapshot[][] = [];
+  const harness = createHarness(
+    () => new Promise((resolve) => { resolveRun = resolve; }),
+    (jobs) => updates.push(jobs),
+  );
+  const created = harness.scheduler.create({
+    kind: "shell", task: "slow", intervalMs: 1_000, maxRuns: 3,
+  });
+
+  harness.fire(0);
+  assert.equal(harness.scheduler.cancel(created.id)?.status, "cancelled");
+  const updateCount = updates.length;
+  resolveRun({ ok: true, summary: "too late" });
+  await flush();
+
+  const cancelled = harness.scheduler.list()[0];
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.runCount, 0);
+  assert.equal(cancelled.lastResult, undefined);
+  assert.equal(harness.timers.length, 1, "late completion must not schedule another timer");
+  assert.equal(updates.length, updateCount, "late completion must not publish a stale update");
+});
+
 test("cancel and shutdown clear timers and prevent future runs", () => {
   const harness = createHarness();
   const first = harness.scheduler.create({ kind: "prompt", task: "one", intervalMs: 1_000 });
@@ -215,6 +241,71 @@ test("onUpdate fires on failed run", async () => {
 test("event constants are exported", () => {
   assert.equal(LOOP_UPDATE_EVENT, "loop:update");
   assert.equal(LOOP_QUERY_EVENT, "loop:query");
+});
+
+test("registerLoop publishes authoritative snapshots on scheduler updates and queries", async () => {
+  type Handler = (...args: any[]) => unknown;
+  type LoopTool = {
+    execute(id: string, params: Record<string, unknown>): Promise<{ details?: { jobs?: LoopJobSnapshot[] } }>;
+  };
+  const eventHandlers = new Map<string, Handler>();
+  const lifecycleHandlers = new Map<string, Handler>();
+  const emitted: Array<{ event: string; payload: { jobs: LoopJobSnapshot[] } }> = [];
+  const entries: Array<{ type: string; data: unknown }> = [];
+  let tool: LoopTool | undefined;
+  const pi = {
+    events: {
+      on(event: string, handler: Handler) {
+        eventHandlers.set(event, handler);
+        return () => eventHandlers.delete(event);
+      },
+      emit(event: string, payload: { jobs: LoopJobSnapshot[] }) {
+        emitted.push({ event, payload });
+      },
+    },
+    appendEntry(type: string, data: unknown) {
+      entries.push({ type, data });
+    },
+    registerTool(value: LoopTool) {
+      tool = value;
+    },
+    registerCommand() {},
+    registerMessageRenderer() {},
+    on(event: string, handler: Handler) {
+      lifecycleHandlers.set(event, handler);
+      return () => lifecycleHandlers.delete(event);
+    },
+  };
+
+  registerLoop(pi as never);
+  assert.ok(tool);
+  assert.ok(eventHandlers.has(LOOP_QUERY_EVENT));
+
+  eventHandlers.get(LOOP_QUERY_EVENT)!();
+  assert.deepEqual(emitted.at(-1), { event: LOOP_UPDATE_EVENT, payload: { jobs: [] } });
+
+  const created = await tool.execute("create-loop", {
+    action: "create",
+    kind: "prompt",
+    task: "check status",
+    intervalMs: 60_000,
+    maxRuns: 2,
+  });
+  const job = created.details?.jobs?.[0];
+  assert.ok(job);
+  assert.equal(emitted.at(-1)?.event, LOOP_UPDATE_EVENT);
+  assert.equal(emitted.at(-1)?.payload.jobs[0]?.id, job.id);
+  assert.equal(emitted.at(-1)?.payload.jobs[0]?.status, "scheduled");
+  assert.equal(entries.at(-1)?.type, "loop-state");
+
+  const updateCount = emitted.length;
+  eventHandlers.get(LOOP_QUERY_EVENT)!();
+  assert.equal(emitted.length, updateCount + 1);
+  assert.deepEqual(emitted.at(-1)?.payload.jobs, emitted.at(-2)?.payload.jobs);
+
+  await tool.execute("cancel-loop", { action: "cancel", loopId: job.id });
+  assert.equal(emitted.at(-1)?.payload.jobs[0]?.status, "cancelled");
+  lifecycleHandlers.get("session_shutdown")?.({ reason: "quit" });
 });
 
 // Invariant: prompt loops MUST use pi.sendMessage (system notification), not
