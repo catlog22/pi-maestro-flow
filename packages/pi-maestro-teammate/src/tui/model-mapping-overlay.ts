@@ -1717,7 +1717,7 @@ export class TeammateControlCenter implements Component, Focusable {
     }, ...TEAMMATE_THINKING_LEVELS
       .map((thinking) => ({
         value: thinking,
-        label: thinking === "xhigh" ? "xhigh / max" : thinking,
+        label: thinking,
         detail: thinking === configured
           ? `Current ${ownerLabel} thinking depth`
           : routedModel

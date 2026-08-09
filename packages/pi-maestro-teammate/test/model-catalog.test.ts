@@ -33,7 +33,7 @@ test("model catalog is deterministic, deduplicated, and replaceable", () => {
 
   const injected = appendModelCatalog("base", first);
   assert.match(injected, /anthropic\/claude-opus/);
-  assert.match(injected, /openai\/gpt-5 \[thinking:off,minimal,low,medium,high,xhigh\]/);
+  assert.match(injected, /openai\/gpt-5 \[thinking:off,minimal,low,medium,high,xhigh,max\]/);
 
   const second = createModelCatalogSnapshot([{ provider: "google", id: "gemini-pro" }]);
   const refreshed = appendModelCatalog(injected, second);
@@ -48,13 +48,13 @@ test("model catalog advertises the full thinking range for reasoning models", ()
     id: "gpt-5",
     reasoning: true,
     thinkingLevelMap: { off: null },
-  }), ["off", "minimal", "low", "medium", "high", "xhigh"]);
+  }), ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
   assert.deepEqual(supportedThinkingLevels({
     provider: "maestro-anthropic",
     id: "claude-sonnet-4-5",
     reasoning: true,
     thinkingLevelMap: { xhigh: "high" },
-  }), ["off", "minimal", "low", "medium", "high", "xhigh"]);
+  }), ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
   assert.deepEqual(supportedThinkingLevels({
     provider: "custom",
     id: "plain",
@@ -114,7 +114,7 @@ test("session start snapshots models and before_agent_start refreshes changed re
 
     models = [{ provider: "openai", id: "gpt-5", reasoning: true, thinkingLevelMap: { off: null } }];
     const capabilityRefresh = await handlers.get("before_agent_start")![0]({ systemPrompt: "base" }, ctx);
-    assert.match(capabilityRefresh.systemPrompt, /openai\/gpt-5 \[thinking:off,minimal,low,medium,high,xhigh\]/);
+    assert.match(capabilityRefresh.systemPrompt, /openai\/gpt-5 \[thinking:off,minimal,low,medium,high,xhigh,max\]/);
 
     models = [{ provider: "anthropic", id: "claude-opus" }];
     const second = await handlers.get("before_agent_start")![0]({ systemPrompt: "base" }, ctx);
@@ -144,8 +144,8 @@ test("thinking overrides reach child Pi once", () => {
   assert.equal(fallback[fallback.indexOf("--thinking") + 1], "minimal");
   assert.equal(buildPiArgs(baseAgent, { agent: "general" }, "prompt.md").includes("--thinking"), false);
 
-  const maxAlias = buildPiArgs(baseAgent, { agent: "general", thinking: "max" }, "prompt.md");
-  assert.equal(maxAlias[maxAlias.indexOf("--thinking") + 1], "xhigh");
+  const maxLevel = buildPiArgs(baseAgent, { agent: "general", thinking: "max" }, "prompt.md");
+  assert.equal(maxLevel[maxLevel.indexOf("--thinking") + 1], "max");
 });
 
 test("thinking overrides pass through unchanged; capability is advisory", () => {

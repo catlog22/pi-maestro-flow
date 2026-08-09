@@ -195,7 +195,7 @@ test("child IPC preserves model and thinking defaults before shared normalizatio
   assert.equal(normalized.tasks[0].model, "provider/default");
   assert.equal(normalized.tasks[0].thinking, "low");
   assert.equal(normalized.tasks[1].model, "provider/task");
-  assert.equal(normalized.tasks[1].thinking, "xhigh");
+  assert.equal(normalized.tasks[1].thinking, "max");
   assert.deepEqual(normalized.tasks[0].outputSchema, { type: "object" });
 
   assert.ok(parseProxyTeammateParams({ tasks: [{ agent: "general", prompt: "inspect", taskType: "security-audit" }] }));

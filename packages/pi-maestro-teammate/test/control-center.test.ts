@@ -208,7 +208,7 @@ test("thinking routing supports inherit, all Pi levels, save errors, and narrow 
   const { center, savedThinking } = makeCenter();
   center.handleInput("\x1b[1;5C");
   const picker = center.render(90).join("\n");
-  for (const level of ["off", "minimal", "low", "medium", "high", "xhigh / max"]) assert.match(picker, new RegExp(level));
+  for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) assert.match(picker, new RegExp(level));
   assert.match(picker, /inherit \/ Pi default/);
   for (let width = 1; width <= 120; width++) {
     assert.ok(center.render(width).every((line) => visibleWidth(line) <= width));
@@ -314,7 +314,8 @@ test("thinking picker shows the full depth range and never restricts levels by m
   assert.match(openaiPicker, /minimal/);
   assert.match(openaiPicker, /medium/);
   assert.match(openaiPicker, /high/);
-  assert.match(openaiPicker, /xhigh \/ max/);
+  assert.match(openaiPicker, /xhigh/);
+  assert.match(openaiPicker, /max/);
   assert.doesNotMatch(openaiPicker, /does not support this level/);
   assert.doesNotMatch(openaiPicker, /! unavailable/);
 
@@ -324,7 +325,8 @@ test("thinking picker shows the full depth range and never restricts levels by m
   anthropic.handleInput("\x1b[1;5C");
   const anthropicPicker = anthropic.render(90).join("\n");
   assert.match(anthropicPicker, /off/);
-  assert.match(anthropicPicker, /xhigh \/ max/);
+  assert.match(anthropicPicker, /xhigh/);
+  assert.match(anthropicPicker, /max/);
 });
 
 test("persisted thinking depth beyond declared capabilities stays selectable and saves", async () => {
@@ -336,7 +338,8 @@ test("persisted thinking depth beyond declared capabilities stays selectable and
     },
   });
   center.handleInput("\x1b[1;5C");
-  assert.match(center.render(90).join("\n"), /xhigh \/ max/);
+  assert.match(center.render(90).join("\n"), /xhigh/);
+  assert.match(center.render(90).join("\n"), /max/);
   center.handleInput("\r");
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.deepEqual(savedThinking, [{ taskType: "explore", thinking: "xhigh" }]);

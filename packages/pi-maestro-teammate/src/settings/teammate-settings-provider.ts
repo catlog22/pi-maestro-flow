@@ -101,6 +101,7 @@ const BASE_CATALOGS = {
     "teammate.option.medium": "Medium",
     "teammate.option.high": "High",
     "teammate.option.xhigh": "Extra high",
+    "teammate.option.max": "Max",
   },
   "zh-CN": {
     "teammate.provider": "Teammate",
@@ -118,6 +119,7 @@ const BASE_CATALOGS = {
     "teammate.option.medium": "中",
     "teammate.option.high": "高",
     "teammate.option.xhigh": "超高",
+    "teammate.option.max": "最大",
   },
 } as const;
 

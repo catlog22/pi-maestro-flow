@@ -667,7 +667,7 @@ Max prompt.
   try {
     assert.equal(resolveAgent(project, "valid")?.thinking, "high");
     assert.equal(resolveAgent(project, "valid")?.taskType, "review");
-    assert.equal(resolveAgent(project, "max")?.thinking, "xhigh");
+    assert.equal(resolveAgent(project, "max")?.thinking, "max");
     assert.equal(resolveAgent(project, "invalid")?.thinking, undefined);
     assert.equal(resolveAgent(project, "invalid")?.taskType, undefined);
 

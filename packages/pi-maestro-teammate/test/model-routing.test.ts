@@ -479,7 +479,7 @@ test("thinking routing follows per-task, top-level, task type, then agent fallba
   }
 });
 
-test("max aliases canonicalize before routing and persisted max values migrate to xhigh", () => {
+test("max is a first-class level that survives routing and persistence", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-routing-"));
   try {
     fs.mkdirSync(path.dirname(getProjectModelRoutingPath(cwd)), { recursive: true });
@@ -488,20 +488,20 @@ test("max aliases canonicalize before routing and persisted max values migrate t
       mappings: {},
       thinkingLevels: { analysis: "max" },
     }));
-    assert.equal(loadModelRoutingConfig(cwd).thinkingLevels.analysis, "xhigh");
+    assert.equal(loadModelRoutingConfig(cwd).thinkingLevels.analysis, "max");
 
     const topLevel = applyModelRouting({
       agent: "general",
       thinking: "max",
       tasks: [{ prompt: "work" }],
     }, cwd);
-    assert.equal(topLevel.thinking, "xhigh");
+    assert.equal(topLevel.thinking, "max");
     const tasks = applyModelRouting({
       agent: "general",
       thinking: "low",
       tasks: [{ agent: "general", prompt: "work", thinking: "max" }],
     }, cwd);
-    assert.equal(tasks.tasks?.[0].thinking, "xhigh");
+    assert.equal(tasks.tasks?.[0].thinking, "max");
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
@@ -1064,7 +1064,7 @@ test("legacy project routing migrates as preserved overrides and can be promoted
     const legacy = loadModelRoutingState(cwd, globalPath);
     assert.equal(legacy.config.profileId, "default");
     assert.equal(legacy.config.mappings.analysis, "provider/project");
-    assert.equal(legacy.config.thinkingLevels.review, "xhigh");
+    assert.equal(legacy.config.thinkingLevels.review, "max");
     assert.equal(legacy.project.applyOverrides, true);
 
     const switched = setProjectActiveModelRoutingProfile(cwd, "default", globalPath);

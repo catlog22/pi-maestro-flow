@@ -50,9 +50,10 @@ test("removed public single, chain, template, and promptArgs fields are rejected
   assert.equal(Check(TeammateParams, { tasks: [{ prompt: "work" }], protocol_version: 1 }), false);
 });
 
-test("max is an input alias that canonicalizes to xhigh", () => {
-  assert.equal(parseTeammateThinkingLevel("max"), "xhigh");
+test("max is a first-class thinking level, not an xhigh alias", () => {
+  assert.equal(parseTeammateThinkingLevel("max"), "max");
   assert.equal(parseTeammateThinkingLevel("xhigh"), "xhigh");
+  assert.ok(TEAMMATE_THINKING_INPUTS.includes("max"));
 });
 
 test("teammate schema rejects unsupported thinking depths", () => {
