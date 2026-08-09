@@ -18,10 +18,43 @@ export interface SkillActivationBindingMetadata {
   contentHash: string;
   configHash: string;
   requiredReadingHash: string;
+  requiredReadingContentHashes?: string[];
   compiledKey: string;
   requiredFiles: string[];
   deferredFiles: string[];
   totalBytes: number;
+}
+
+function bindingsSemanticallyMatch(
+  restored: readonly SkillActivationBindingMetadata[],
+  loaded: readonly SkillActivationBindingMetadata[],
+): boolean {
+  return restored.length === loaded.length && restored.every((previous, index) => {
+    const current = loaded[index];
+    return current !== undefined
+      && previous.role === current.role
+      && previous.name === current.name
+      && previous.args === current.args
+      && previous.contentHash === current.contentHash
+      && previous.configHash === current.configHash
+      && requiredReadingSemanticallyMatches(previous, current);
+  });
+}
+
+function requiredReadingSemanticallyMatches(
+  previous: SkillActivationBindingMetadata,
+  current: SkillActivationBindingMetadata,
+): boolean {
+  if (previous.requiredReadingHash === current.requiredReadingHash) return true;
+  const contentHashes = current.requiredReadingContentHashes ?? [];
+  if (previous.requiredFiles.length !== contentHashes.length) return false;
+  const relocatedLegacyHash = createHash("sha256")
+    .update(JSON.stringify(previous.requiredFiles.map((path, index) => ({
+      path,
+      contentHash: contentHashes[index],
+    }))))
+    .digest("hex");
+  return previous.requiredReadingHash === relocatedLegacyHash;
 }
 
 export interface SkillActivationMetadata {
@@ -83,7 +116,6 @@ export class SkillRuntime {
         compiledKey: skill.compiledKey,
       }))))
       .digest("hex");
-    const canRestore = restored?.stackRevision === stackRevision;
     const now = Date.now();
     const metadataBindings = loaded.map(({ role, skill }, index) => ({
       role,
@@ -94,18 +126,21 @@ export class SkillRuntime {
       contentHash: skill.contentHash,
       configHash: skill.configHash,
       requiredReadingHash: skill.requiredReadingHash,
+      requiredReadingContentHashes: [...skill.requiredReadingContentHashes],
       compiledKey: skill.compiledKey,
       requiredFiles: [...skill.requiredFiles],
       deferredFiles: [...skill.deferredFiles],
       totalBytes: skill.totalBytes,
     }));
+    const canRestore = restored?.stackRevision === stackRevision
+      || (restored !== undefined && bindingsSemanticallyMatch(restored.bindings, metadataBindings));
 
     return Object.freeze({
       activationId: restored?.activationId ?? randomUUID(),
       stackRevision,
       activatedAt: restored?.activatedAt ?? now,
       validatedAt: now,
-      state: restored && (!canRestore || restored.state === "stale") ? "stale" : "active",
+      state: restored && !canRestore ? "stale" : "active",
       bindings: Object.freeze(metadataBindings) as SkillActivationBindingMetadata[],
       skills: Object.freeze(loaded) as LoadedTodoSkillBinding[],
       prompt: renderSkillStack(loaded),

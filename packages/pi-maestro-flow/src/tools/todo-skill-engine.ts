@@ -95,10 +95,8 @@ export function createActiveSkillMessage(task: TodoTask, activation: AnySkillAct
     role: "custom",
     customType: "todo-active-skill",
     content: renderActivationPrompt(task, activation),
-    // Skill prompts are injection noise, but a degraded stack is a failure the user
-    // needs to see — todo.ts has no notify channel of its own (TodoContext.ui only
-    // carries setStatus), and this message is already on its way to the transcript.
-    display: activation.state === "degraded",
+    // Active skill prompts stay hidden; degraded and stale warnings must be visible.
+    display: activation.state !== "active",
     details: {
       taskId: task.id,
       activationId: activation.activationId,
@@ -185,16 +183,6 @@ export function renderActivationPrompt(task: TodoTask, activation: AnySkillActiv
   ].join("\n");
 }
 
-export function assertActiveSkillStack(task: TodoTask, activation: AnySkillActivation): void {
-  if (activation.state === "active") return;
-  // A degraded stack already carries its own warning block in the injected content.
-  // Throwing here would defeat the fallback that produced it.
-  if (activation.state === "degraded") return;
-  throw new Error(
-    `Todo task #${task.id} skill activation is stale. Move the task back to pending and reactivate it before continuing the Run.`,
-  );
-}
-
 export function cloneActivationBinding(
   binding: SkillActivationBindingMetadata,
 ): SkillActivationBindingMetadata {
@@ -202,6 +190,9 @@ export function cloneActivationBinding(
     ...binding,
     requiredFiles: [...binding.requiredFiles],
     deferredFiles: [...binding.deferredFiles],
+    ...(binding.requiredReadingContentHashes
+      ? { requiredReadingContentHashes: [...binding.requiredReadingContentHashes] }
+      : {}),
   };
 }
 

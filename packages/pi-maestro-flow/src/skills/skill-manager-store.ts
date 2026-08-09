@@ -1,6 +1,5 @@
 import { readFile, mkdir, rename, unlink, writeFile, cp, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { createRequire } from "node:module";
 import { basename, dirname, join, relative } from "node:path";
 import {
   DefaultPackageManager,
@@ -12,6 +11,10 @@ import {
   type ResolvedResource,
 } from "@earendil-works/pi-coding-agent";
 import { loadSkillConfig } from "./skill-config.ts";
+import {
+  resolveOwnPackageJson,
+  resolvePackageOrWorkspaceResource,
+} from "../resources/maestro-package.ts";
 
 export interface ManagedSkill {
   name: string;
@@ -51,20 +54,11 @@ export interface OptionalSkill {
   installed: boolean;
 }
 
-const ownRequire = createRequire(import.meta.url);
-
-/**
- * Resolve the pi-maestro-flow package's `optional/skills/` directory.
- * package.json lives at <repo>/packages/pi-maestro-flow/package.json, so the
- * optional folder is two levels up at the repo root.
- */
-export function resolveOptionalSkillsDir(): string | undefined {
-  try {
-    const pkgJson = ownRequire.resolve("../../package.json");
-    return join(dirname(pkgJson), "..", "..", "optional", "skills");
-  } catch {
-    return undefined;
-  }
+/** Resolve optional skills from the installed package, with a workspace fallback for local development. */
+export function resolveOptionalSkillsDir(
+  packageJsonPath = resolveOwnPackageJson(),
+): string | undefined {
+  return resolvePackageOrWorkspaceResource(["optional", "skills"], packageJsonPath);
 }
 
 export class SkillManagerStore {

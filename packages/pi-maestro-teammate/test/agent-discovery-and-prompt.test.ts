@@ -535,6 +535,8 @@ test("child Pi arguments honor prompt mode and resource inheritance", () => {
   assert.equal(replaceArgs.includes("--append-system-prompt"), false);
   assert.equal(replaceArgs.includes("--no-context-files"), true);
   assert.equal(replaceArgs.includes("--no-skills"), true);
+  assert.equal(replaceArgs.includes("--no-extensions"), true);
+  assert.ok(replaceArgs.includes("--extension"), "child extensions stay explicitly loaded");
 
   const appendArgs = buildPiArgs(
     agentConfig({

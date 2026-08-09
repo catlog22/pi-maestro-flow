@@ -56,13 +56,35 @@ export function cleanPackagedSkills({
   return { targetDir };
 }
 
+export function preparePackagedOptionalSkills({
+  sourceDir = resolve(packageRoot, "..", "..", "optional"),
+  targetDir = join(packageRoot, "optional"),
+} = {}) {
+  if (!existsSync(sourceDir)) {
+    throw new Error(`Canonical optional skills directory not found: ${sourceDir}`);
+  }
+  rmSync(targetDir, { recursive: true, force: true });
+  cpSync(sourceDir, targetDir, { recursive: true });
+  return { sourceDir, targetDir };
+}
+
+export function cleanPackagedOptionalSkills({
+  targetDir = join(packageRoot, "optional"),
+} = {}) {
+  rmSync(targetDir, { recursive: true, force: true });
+  return { targetDir };
+}
+
 function run() {
   if (process.argv.includes("--clean")) {
     cleanPackagedSkills();
+    cleanPackagedOptionalSkills();
     return;
   }
-  const result = preparePackagedSkills();
-  console.log(`[pi-maestro-flow] Prepared canonical Pi directory from ${result.sourceDir}`);
+  const piResult = preparePackagedSkills();
+  const optionalResult = preparePackagedOptionalSkills();
+  console.log(`[pi-maestro-flow] Prepared canonical Pi directory from ${piResult.sourceDir}`);
+  console.log(`[pi-maestro-flow] Prepared optional skills from ${optionalResult.sourceDir}`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) run();

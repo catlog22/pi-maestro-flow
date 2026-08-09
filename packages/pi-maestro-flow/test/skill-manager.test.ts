@@ -5,12 +5,40 @@ import { join } from "node:path";
 import test from "node:test";
 import { createSyntheticSourceInfo, formatSkillsForPrompt, type Skill } from "@earendil-works/pi-coding-agent";
 import { applySkillModelInvocationConfig, registerSkillManager } from "../src/skills/skill-manager.ts";
-import { SkillManagerStore } from "../src/skills/skill-manager-store.ts";
+import {
+  resolveOptionalSkillsDir,
+  SkillManagerStore,
+} from "../src/skills/skill-manager-store.ts";
 import {
   SkillManagerOverlay,
   type SkillManagerAction,
 } from "../src/skills/skill-manager-tui.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
+
+test("optional skills resolve from npm package first and workspace during development", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-skill-resource-path-"));
+  const installedRoot = join(root, "installed");
+  const installedPackageJson = join(installedRoot, "package.json");
+  const installedOptional = join(installedRoot, "optional", "skills");
+  const workspaceRoot = join(root, "workspace");
+  const workspacePackage = join(workspaceRoot, "packages", "pi-maestro-flow");
+  const workspacePackageJson = join(workspacePackage, "package.json");
+  const workspaceOptional = join(workspaceRoot, "optional", "skills");
+
+  await mkdir(installedOptional, { recursive: true });
+  await writeFile(installedPackageJson, JSON.stringify({ name: "pi-maestro-flow" }));
+  await mkdir(workspacePackage, { recursive: true });
+  await mkdir(workspaceOptional, { recursive: true });
+  await writeFile(join(workspaceRoot, "package.json"), JSON.stringify({ workspaces: ["packages/*"] }));
+  await writeFile(workspacePackageJson, JSON.stringify({ name: "pi-maestro-flow" }));
+
+  try {
+    assert.equal(resolveOptionalSkillsDir(installedPackageJson), installedOptional);
+    assert.equal(resolveOptionalSkillsDir(workspacePackageJson), workspaceOptional);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("SkillManagerStore groups by prefix and persists group switches", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-skill-manager-"));

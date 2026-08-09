@@ -5,12 +5,56 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const require = createRequire(import.meta.url);
 
-function resolveOwnPackageJson(): string | undefined {
+export function resolveOwnPackageJson(): string | undefined {
   try {
     return require.resolve("../../package.json");
   } catch {
     return undefined;
   }
+}
+
+function resolveWorkspaceRoot(packageDir: string): string | undefined {
+  let current = dirname(packageDir);
+  while (true) {
+    try {
+      const manifest = JSON.parse(readFileSync(join(current, "package.json"), "utf8")) as {
+        workspaces?: unknown;
+      };
+      if (Array.isArray(manifest.workspaces)) return current;
+    } catch {
+      // Keep walking until the filesystem root.
+    }
+    const parent = dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
+export function resolvePackageOrWorkspaceResource(
+  segments: readonly string[],
+  packageJsonPath = resolveOwnPackageJson(),
+): string | undefined {
+  if (!packageJsonPath) return undefined;
+  const packageDir = dirname(packageJsonPath);
+  const packaged = join(packageDir, ...segments);
+  if (existsSync(packaged)) return packaged;
+
+  const workspaceRoot = resolveWorkspaceRoot(packageDir);
+  if (!workspaceRoot) return undefined;
+  const workspaceResource = join(workspaceRoot, ...segments);
+  return existsSync(workspaceResource) ? workspaceResource : undefined;
+}
+
+export function configureTeammateAgentsDiscovery(
+  packageJsonPath = resolveOwnPackageJson(),
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  if (env.PI_TEAMMATE_PACKAGE_AGENTS_DIR !== undefined) {
+    return env.PI_TEAMMATE_PACKAGE_AGENTS_DIR;
+  }
+  const agentsDir = resolvePackageOrWorkspaceResource([".pi", "agents"], packageJsonPath);
+  if (agentsDir) env.PI_TEAMMATE_PACKAGE_AGENTS_DIR = agentsDir;
+  return agentsDir;
 }
 
 export function resolveBundledAgentsPath(
@@ -39,6 +83,7 @@ export function loadBundledAgentsInstructions(
 }
 
 export function registerMaestroPackageResources(pi: ExtensionAPI): void {
+  configureTeammateAgentsDiscovery();
   const agentsPath = resolveBundledAgentsPath();
   const agentsInstructions = loadBundledAgentsInstructions(agentsPath);
 

@@ -1383,8 +1383,10 @@ export function buildPiArgs(
   modelCapabilities: readonly TeammateModelCapability[] = [],
   resumeSessionFile?: string,
 ): string[] {
-  // RPC mode: stdin stays open for bidirectional messaging (steer/follow_up/abort)
-  const args: string[] = ["--mode", "rpc"];
+  // RPC mode: stdin stays open for bidirectional messaging (steer/follow_up/abort).
+  // Child extensions are passed explicitly below; disable settings discovery so an
+  // older duplicate package registration cannot load the same tools a second time.
+  const args: string[] = ["--mode", "rpc", "--no-extensions"];
 
   // Child mode owns session identity publication, lease fencing, and proxy tools.
   // Load it explicitly because the child cwd may not discover this package.

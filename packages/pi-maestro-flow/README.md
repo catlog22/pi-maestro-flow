@@ -15,7 +15,9 @@
 
 ---
 
-**pi-maestro-flow** is the **all-in-one** entry point of the three-plugin suite. A single `pi install npm:pi-maestro-flow@0.14.2` upgrades the [Pi coding agent](https://github.com/earendil-works/pi) into a coordinated engineering team:
+**pi-maestro-flow** is the **all-in-one** entry point of the three-plugin suite. A single `pi install npm:pi-maestro-flow@0.17.1` upgrades the [Pi coding agent](https://github.com/earendil-works/pi) into a coordinated engineering team:
+
+> **v0.17.1 supersedes the withdrawn v0.17.0:** package-relative Skill and agent discovery now works after npm installation, and teammate children isolate explicitly loaded extensions.
 
 | Layer | Package | What you get |
 |-------|---------|--------------|
@@ -69,7 +71,7 @@ Skills (63, maintained by [Maestro Flow](https://github.com/catlog22/maestro-flo
 
 ```bash
 # From npm, including upgrades
-pi install npm:pi-maestro-flow@0.14.2
+pi install npm:pi-maestro-flow@0.17.1
 
 # Or from local path (development)
 pi install ./packages/pi-maestro-flow
@@ -442,10 +444,10 @@ so the normal Todo loader can re-inject the canonical skill after compaction.
 ## Project skills and teammate agents
 
 Skills are authored and maintained by the [Maestro Flow](https://github.com/catlog22/maestro-flow) project; this package bundles the canonical `.pi/skills/` tree as a Pi package resource. The npm package declares its skill set through `pi.skills`, pointing to
-the bundled `.pi/skills/` directory. In this repository the source set lives under
-`packages/pi-maestro-flow/.pi/skills`, while the root `.pi/settings.json` references
-that same directory for local development. Install the package through
-`pi install npm:pi-maestro-flow@0.14.2` (or register a local package path) and Pi discovers
+the bundled `.pi/skills/` directory. In this repository the canonical source set lives under
+the root `.pi/skills`; prepack copies it into `packages/pi-maestro-flow/.pi/skills` for npm,
+while the root `.pi/settings.json` references its local `skills` directory for development. Install the package through
+`pi install npm:pi-maestro-flow@0.17.1` (or register a local package path) and Pi discovers
 the bundled skills through its standard package resource loader.
 
 The package also publishes its Pi-only `AGENTS.md`. The extension reads that bundled
@@ -453,7 +455,7 @@ file from the installed package and appends it to Pi's system prompt through the
 `before_agent_start` event. This keeps the instructions available after npm installation
 without requiring a repository-root `AGENTS.md`, which other coding agents may discover.
 
-`pi-maestro-flow` pins `maestro-flow@0.5.65` as an associated workflow resource package.
+`pi-maestro-flow` pins `maestro-flow@0.5.67` as an associated workflow resource package.
 During postinstall it calls Maestro's workflows-only installer from the prepared registry
 artifact, which includes the complete runtime `dist` tree and canonical workflow documents.
 The installer writes to `~/.maestro/workflows`. The active Maestro CLI remains an environment

@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 import test, { after, before } from "node:test";
 import ts from "typescript";
 import {
+  cleanPackagedOptionalSkills,
   cleanPackagedSkills,
+  preparePackagedOptionalSkills,
   preparePackagedSkills,
 } from "../scripts/prepare-package-skills.mjs";
 
@@ -36,8 +38,14 @@ const teammatePublicExports = {
   "./v1/types": ["./types/public/v1/types.d.ts", "./src/public/v1/types.ts"],
 };
 
-before(() => preparePackagedSkills());
-after(() => cleanPackagedSkills());
+before(() => {
+  preparePackagedSkills();
+  preparePackagedOptionalSkills();
+});
+after(() => {
+  cleanPackagedOptionalSkills();
+  cleanPackagedSkills();
+});
 
 test("package manifest publishes the extension and canonical Pi skills", () => {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
@@ -192,6 +200,14 @@ test("package contains the canonical workflow skill set", () => {
     "team-swarm must retain the Python ACO execution contract",
   );
   assert.equal(existsSync(join(root, ".pi", "skills", "swarm", "SKILL.md")), false, "native swarm Skill must not be packaged");
+});
+
+test("package publishes optional skills from the repository root", () => {
+  assert.equal(
+    existsSync(join(root, "optional", "skills", "scholar-writing", "SKILL.md")),
+    true,
+    "prepack must materialize optional skills inside the npm package root",
+  );
 });
 
 test("package publishes the full canonical Pi directory except local-only files", () => {

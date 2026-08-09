@@ -304,6 +304,9 @@ export function readActivationBindings(value: unknown): SkillActivationBindingMe
       contentHash: typeof record.contentHash === "string" ? record.contentHash : "",
       configHash: typeof record.configHash === "string" ? record.configHash : "",
       requiredReadingHash: typeof record.requiredReadingHash === "string" ? record.requiredReadingHash : "",
+      ...(Array.isArray(record.requiredReadingContentHashes)
+        ? { requiredReadingContentHashes: stringArray(record.requiredReadingContentHashes) }
+        : {}),
       compiledKey: typeof record.compiledKey === "string" ? record.compiledKey : "",
       requiredFiles: stringArray(record.requiredFiles),
       deferredFiles: stringArray(record.deferredFiles),

@@ -8,6 +8,20 @@ import { parseFrontmatter } from "../src/agents/frontmatter.ts";
 import { findStructuredOutputSchemaHazard } from "../src/runs/execution-infra.ts";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const BUILTIN_AGENT_NAMES = ["general", "explorer", "planner", "analyst", "research", "verifier", "workflow"];
+
+test("canonical .pi includes every teammate builtin fallback definition", () => {
+  for (const name of BUILTIN_AGENT_NAMES) {
+    const canonical = path.join(REPO_ROOT, ".pi", "agents", `${name}.md`);
+    const fallback = path.join(REPO_ROOT, "packages", "pi-maestro-teammate", "agents", `${name}.md`);
+    assert.ok(fs.existsSync(canonical), `.pi/agents/${name}.md must exist`);
+    assert.equal(
+      fs.readFileSync(canonical, "utf8"),
+      fs.readFileSync(fallback, "utf8"),
+      `.pi/agents/${name}.md must match the teammate fallback`,
+    );
+  }
+});
 
 test("general-executor agent definition exists in .pi and stays valid", () => {
   const deployed = path.join(REPO_ROOT, ".pi", "agents", "general-executor.md");

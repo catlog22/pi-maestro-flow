@@ -1492,6 +1492,81 @@ test("multi-skill injection reuses duplicate required reading content", async ()
   }
 });
 
+test("active skill metadata follows a path-only move by skill identity", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-moved-skill-"));
+  const oldSkillDir = join(root, "legacy", "skills", "demo");
+  const newSkillDir = join(root, ".pi", "skills", "demo");
+  const requiredContent = "Required instructions stay unchanged.\n";
+  const content = `---\nname: demo\ndescription: demo\n---\n# Same content\n<required_reading>\n@guide.md\n</required_reading>`;
+  await mkdir(oldSkillDir, { recursive: true });
+  await writeFile(join(oldSkillDir, "SKILL.md"), content);
+  await writeFile(join(oldSkillDir, "guide.md"), requiredContent);
+  let discovered: Skill = {
+    name: "demo",
+    description: "demo",
+    filePath: join(oldSkillDir, "SKILL.md"),
+    baseDir: oldSkillDir,
+    sourceInfo: {} as Skill["sourceInfo"],
+    disableModelInvocation: false,
+  };
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [discovered], diagnostics: [] }) },
+  });
+  let persisted: unknown;
+  initTodo({ appendEntry(_type: string, data: unknown) { persisted = structuredClone(data); } } as never);
+  const context = (entries: unknown[] = []): TodoContext => ({
+    cwd: root,
+    ui: { setStatus() {} },
+    skillLoader: loader,
+    sessionManager: { getEntries: () => entries },
+  });
+  const ctx = makeExtensionContext();
+
+  try {
+    onSessionStart(context());
+    await executeTodo({
+      action: "create",
+      subject: "Move skill",
+      skills: [{ name: "demo", role: "primary" }],
+    }, ctx);
+    await executeTodo({ action: "next" }, ctx);
+    const original = structuredClone(getVisibleTasks()[0].skillActivation);
+    const restoredState = structuredClone(persisted) as {
+      tasks?: Record<string, { skillActivation?: { bindings?: Array<{ requiredReadingContentHashes?: string[] }> } }>;
+    };
+    // Simulate metadata written before per-required-file content hashes existed.
+    for (const task of Object.values(restoredState.tasks ?? {})) {
+      for (const binding of task.skillActivation?.bindings ?? []) {
+        delete binding.requiredReadingContentHashes;
+      }
+    }
+
+    onSessionShutdown(context());
+    await mkdir(newSkillDir, { recursive: true });
+    await writeFile(join(newSkillDir, "SKILL.md"), content);
+    await writeFile(join(newSkillDir, "guide.md"), requiredContent);
+    await rm(oldSkillDir, { recursive: true, force: true });
+    discovered = {
+      ...discovered,
+      filePath: join(newSkillDir, "SKILL.md"),
+      baseDir: newSkillDir,
+    };
+    onSessionStart(context([{ type: "custom", customType: "todo-state", data: restoredState }]));
+
+    const injected = await onContextTodo([]);
+    const resumed = getVisibleTasks()[0].skillActivation;
+    assert.equal(resumed?.activationId, original?.activationId);
+    assert.equal(resumed?.state, "active");
+    assert.equal(resumed?.bindings[0]?.filePath, join(newSkillDir, "SKILL.md"));
+    assert.doesNotMatch(String((injected?.messages[0] as { content?: string }).content ?? ""), /active_skill_stack_stale/);
+  } finally {
+    onSessionShutdown(context());
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("active skill metadata resumes and marks changed skill content stale", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-todo-resume-skill-"));
   const skillDir = join(root, ".pi", "skills", "demo");
@@ -1545,10 +1620,10 @@ test("active skill metadata resumes and marks changed skill content stale", asyn
     onSessionShutdown(context());
     await writeFile(skillPath, `---\nname: demo\ndescription: demo\n---\n# Changed content with a different size`);
     onSessionStart(context(entries));
-    await assert.rejects(
-      onContextTodo([]),
-      /skill activation is stale/,
-    );
+    const stale = await onContextTodo([]);
+    const warning = stale?.messages[0] as { content?: string; display?: boolean } | undefined;
+    assert.match(String(warning?.content ?? ""), /<active_skill_stack_stale>/);
+    assert.equal(warning?.display, true);
     assert.equal(getVisibleTasks()[0].skillActivation?.state, "stale");
   } finally {
     onSessionShutdown(context());

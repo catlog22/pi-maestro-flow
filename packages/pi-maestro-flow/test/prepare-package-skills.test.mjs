@@ -4,9 +4,33 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  cleanPackagedOptionalSkills,
   cleanPackagedSkills,
+  preparePackagedOptionalSkills,
   preparePackagedSkills,
 } from "../scripts/prepare-package-skills.mjs";
+
+test("package preparation copies optional skills into the package root", () => {
+  const root = join(tmpdir(), `pi-maestro-pack-optional-${process.pid}-${Date.now()}`);
+  const sourceDir = join(root, "source", "optional");
+  const targetDir = join(root, "package", "optional");
+  const skillPath = join(sourceDir, "skills", "scholar-writing", "SKILL.md");
+  mkdirSync(join(sourceDir, "skills", "scholar-writing"), { recursive: true });
+  writeFileSync(skillPath, "# Optional skill\n", "utf8");
+
+  try {
+    preparePackagedOptionalSkills({ sourceDir, targetDir });
+    assert.equal(
+      readFileSync(join(targetDir, "skills", "scholar-writing", "SKILL.md"), "utf8"),
+      "# Optional skill\n",
+    );
+    cleanPackagedOptionalSkills({ targetDir });
+    assert.equal(existsSync(targetDir), false);
+  } finally {
+    cleanPackagedOptionalSkills({ targetDir });
+    cleanPackagedSkills({ targetDir: root });
+  }
+});
 
 test("package skill preparation copies canonical skills and removes generated output", () => {
   const root = join(tmpdir(), `pi-maestro-pack-skills-${process.pid}-${Date.now()}`);

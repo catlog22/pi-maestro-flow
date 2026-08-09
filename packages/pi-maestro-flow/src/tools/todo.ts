@@ -38,7 +38,6 @@ import {
 import {
   activateTask,
   activationMetadata,
-  assertActiveSkillStack,
   clearCommittedSkillSnapshots,
   clearSkillSnapshot,
   cloneActivationBinding,
@@ -458,7 +457,6 @@ export async function onContextTodo(
   const active = findActiveTask(ROOT_TODO_ACTOR.id);
   if (!active || active.skills.length === 0) return undefined;
   const activation = await ensureSkillActivation(active);
-  assertActiveSkillStack(active, activation);
   if (runSkillInjection?.taskId === active.id
     && runSkillInjection.stackRevision === activation.stackRevision
     && runSkillInjection.channel === "system") return undefined;

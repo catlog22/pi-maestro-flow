@@ -45,6 +45,7 @@ export interface LoadedTodoSkill {
   readonly contentHash: string;
   readonly configHash: string;
   readonly requiredReadingHash: string;
+  readonly requiredReadingContentHashes: string[];
   readonly compiledKey: string;
   readonly cacheHit: boolean;
   readonly cacheStatus: SkillCacheStatus;
@@ -222,6 +223,7 @@ export class TodoSkillLoader {
         contentHash: main.contentHash,
         configHash,
         requiredReadingHash,
+        requiredReadingContentHashes: requiredBodies.map(({ contentHash }) => contentHash),
         compiledKey,
       });
     });
@@ -403,6 +405,7 @@ function freezeCompiledSkill(skill: CompiledTodoSkill): CompiledTodoSkill {
     ...skill,
     requiredFiles: Object.freeze([...skill.requiredFiles]) as string[],
     deferredFiles: Object.freeze([...skill.deferredFiles]) as string[],
+    requiredReadingContentHashes: Object.freeze([...skill.requiredReadingContentHashes]) as string[],
   });
 }
 
