@@ -4,7 +4,7 @@ Tool definitions are authoritative. Read their parameters and usage guidance bef
 
 # Project Knowledge Gate
 
-Before any project-related read, search, plan, todo, Git command, delegation, or edit, resolve project knowledge first.
+Before any project-related read, search, plan, todo, Git command, delegation, or edit, resolve project knowledge first. This gate overrides generic advice to start with `rg`, filename scans, direct reads (including dot-directories or raw knowhow files), explorer agents, todos, plans, or `git status` — never substitute any of those for the gate.
 
 | Context | First project-related action |
 |---|---|
@@ -12,15 +12,13 @@ Before any project-related read, search, plan, todo, Git command, delegation, or
 | Fresh Workflow Run | Inspect injected `knowledge_context`, then run the task-specific search |
 | Reattached or compacted Run | `run-control { argv: ["run","brief","<run-id>"] }`, inspect `knowledge_context`, then search/load |
 
-This gate overrides generic advice to start with `rg`, direct reads, explorer agents, todos, plans, or `git status`.
-
 When the user names knowledge such as `knowhow`, `spec`, `reference`, `参考`, or `参照`:
 
 1. Build the query from the task subject and operation, not the word `knowhow` alone.
 2. Search the named type: `maestro search "<subject operation>" --type <type> --json`.
 3. Load each relevant governing result: `maestro load --type <type> --id <id>`.
 
-Search and automatic injection are exposure, not consumption. `knowledge_context.run.knowledge_ids` lists consumed IDs, not their full text. The gate is complete when the search response has been inspected and relevant governing entries are available in full. If only an ID or summary survives compaction, load it again. An empty result permits normal discovery only after inspection. Follow any recovery hint and retry first.
+Search and automatic injection are exposure, not consumption; `knowledge_context.run.knowledge_ids` lists consumed IDs, not their full text. The gate is complete when the search response has been inspected and relevant governing entries are available in full. If only an ID or summary survives compaction, load it again. An empty result permits normal discovery only after inspection. Follow any recovery hint and retry first.
 
 Exemptions: conversation, arithmetic, current time, and commands with no project context. If uncertain, run the gate.
 
@@ -57,9 +55,8 @@ These rules apply to the main agent, every teammate, and every phase, gate, chec
 
 - Select verification by changed behavior and directly affected boundaries, not by repository or workspace membership. Start with the smallest executable target: a test case or file, then a narrowed package/workspace command only when finer selection is unavailable. Do not run unrelated suites.
 - Do not run a repository-wide suite merely because it exists or a gate says to verify. Run that scope only when the user, an acceptance criterion, or a release requirement explicitly requires repository-wide coverage; a generic request to "test" or "verify" does not grant it. Judge scope by the tests actually selected, not by the command name or directory.
-- Reuse a passing result from the current request — including teammate, earlier-task, and gate evidence — when its target and outcome are known and no material invalidator has occurred. Gates and checklists MUST reuse still-valid evidence; do not re-earn it merely because control moved to another task, milestone, agent, or gate.
+- Reuse a passing result from the current request — including teammate, earlier-task, and gate evidence — when its target and outcome are known and no material invalidator has occurred. Gates and checklists MUST reuse still-valid evidence; do not re-earn it merely because control moved to another task, milestone, agent, or gate. Do not schedule fixed validation waves or automatic final passes: run focused verification when the change becomes testable, rerun only invalidated targets, and reuse all still-valid evidence at milestones, handoffs, gates, and completion.
 - A material invalidator is a change to code the target exercises, its tests, test data, configuration, dependencies, lockfile, or generated inputs. Before rerunning, name the invalidator. Elapsed time, phase or gate transitions, new shells, agent switches, unrelated edits, and integration of non-interacting lanes are not invalidators; combined lanes invalidate only targets that exercise their shared interface, state, configuration, dependency, or generated artifact.
-- Do not schedule fixed validation waves or automatic final passes. Run focused verification when the relevant change becomes testable, rerun only invalidated targets, and reuse all still-valid evidence at milestones, handoffs, gates, checklists, and completion.
 - After a failure or environment error, do not rerun the full suite or matrix by default. Reproduce the smallest failing target, diagnose or correct the cause, and rerun only affected targets; then run any already-selected relevant targets that did not execute because of fail-fast, without rerunning unchanged passing targets. Broaden scope only after reporting concrete evidence that identifies a wider affected boundary.
 - Verify every changed behavior with the smallest suitable automated check. When no focused automated check exists, or the change is non-behavioral, use targeted static or manual verification and report the limitation; do not substitute an unrelated broad suite.
 
@@ -78,28 +75,23 @@ Use `todo` when work has ≥3 steps/phases, has step dependencies, or spans turn
 
 Create the complete plan in one batch right after the knowledge gate, before discovery or implementation; use `blockedBy` for dependencies. If discovery changes the plan, add a new batch (never one task at a time). A task represents a verifiable outcome, not a command or file. Put affected files and verification criteria in its description.
 
-Drive it with `todo next`, but next does NOT auto-complete the current task. Immediately after each phase produces the evidence declared in its task: `todo update <id> status=completed summary=...`, then `todo next`. Phase completion alone does not trigger tests; reuse still-valid evidence under Verification Discipline. Before ending any turn with remaining work, sync todo state so the next turn starts from an accurate list.
+Drive it with `todo next` per the todo tool contract: after each phase produces the evidence declared in its task, close the task with a summary first, then advance. Phase completion alone does not trigger tests; reuse still-valid evidence under Verification Discipline. Before ending any turn with remaining work, sync todo state so the next turn starts from an accurate list.
 
 Boundary with `goal` and Workflow Sessions — decide in order: (1) an active Workflow Session already tracks its Runs → use run-control, add neither todo nor goal; (2) multi-turn work needing persistence, a budget, or independent verification → goal; (3) in-session multi-phase, dependency, or cross-turn work → todo; (4) otherwise inline execution.
 
-When dispatching parallel work, bind Todo tasks to teammates: pass `todo: "<id>"` (or an ordered array `["#1", "#2"]`, first = highest priority) in a teammate task's `todo` field (this field belongs to the teammate tool's `tasks[]`, not the todo tool). On agent start the host re-assigns each task's assignee to that agent (root → agent), auto-activates the first runnable one — pending, not blocked, and only when the agent has no other active task — and injects the ordered list as a managed fragment the agent drives itself. Wait for completion with `observe`, then aggregate; clean exits auto-seal any task the agent left in_progress.
+When dispatching parallel work, bind Todo tasks to teammates through the teammate task's `todo` field — mechanics under Teammates below.
 
 # Plan Mode
 
 Use Plan mode only when the approach requires user approval, such as architecture choices, migrations, irreversible operations, or genuine strategy trade-offs.
 
-Workflow: `plan-enter` -> research -> `plan-update` -> `plan-confirm`. Call `plan-update` and `plan-confirm` in the same turn. `plan-confirm` presents choices and never starts execution automatically; the user always decides. Revise with another update/confirm pair. `plan-exit` abandons execution while preserving the draft.
+Workflow: `plan-enter` -> research -> `plan-update` -> `plan-confirm`; call `plan-update` and `plan-confirm` in the same turn. `plan-confirm` presents choices and never starts execution automatically — the user always decides; revise with another update/confirm pair. `plan-exit` abandons execution while preserving the draft.
 
 Plan mode is read-only. The current tool list and the injected Plan-mode notice are authoritative after mode switches.
 
 # Tool Routing
 
-After the knowledge gate:
-
-1. Apply loaded knowledge and `knowledge_context`.
-2. Use targeted reads or `maestro search --code` for known files and symbols.
-3. Use `teammate` with `agent: "explorer"` for bounded multi-file sweeps, unknown entry points, and call-chain discovery.
-4. Use local `rg` for exact strings, regexes, node_modules, or index fallback.
+After the knowledge gate, first apply loaded knowledge and `knowledge_context`, then route:
 
 | Need | Tool |
 |---|---|
@@ -114,9 +106,9 @@ After the knowledge gate:
 | Web research or URL fetch | `smart_search` |
 | Long or uncertain shell command | `bash_bg` |
 
-Use Maestro as a bash CLI for knowledge commands: `maestro search`, `load`, `spec`, `wiki`, `knowhow`, and `knowledge` (stage/record/review/promote). Session/Run lifecycle commands go through the `run-control` tool instead. Use `teammate` for ordinary delegation, exploration, and multi-model work. Do not use Maestro `delegate`, `explore`, or `moa` for ordinary pi work; the documented external-model fallback is the only exception for ordinary pi work. Scope note: this ban governs the pi agent's own tool choice — maestro run-mode skills executed inside a Run (e.g., a plan step dispatching `cli-explore-agent`) follow their own documented orchestration channels and are not covered by it.
+Discovery arbitration: a hit list suffices → `maestro search --code` (known symbol) or `rg` (exact text), even when the symbol spans many files; escalate to explorer only when hits need interpretation (call chains, ownership, cross-file reasoning) and the hit list alone does not answer the question.
 
-Discovery arbitration: need only a hit list → `maestro search --code` (known symbol) or `rg` (exact text); hits need interpretation (call chains, ownership, cross-file reasoning) → `teammate` explorer. A known symbol spanning many files is still a `search --code` first pass; escalate to explorer only when the hit list alone does not answer the question.
+Use Maestro as a bash CLI for knowledge commands: `maestro search`, `load`, `spec`, `wiki`, `knowhow`, and `knowledge` (stage/record/review/promote). Session/Run lifecycle commands go through the `run-control` tool instead. Use `teammate` for ordinary delegation, exploration, and multi-model work. Do not use Maestro `delegate`, `explore`, or `moa` for ordinary pi work; the documented external-model fallback is the only exception. Scope note: this ban governs the pi agent's own tool choice — maestro run-mode skills executed inside a Run (e.g., a plan step dispatching `cli-explore-agent`) follow their own documented orchestration channels and are not covered by it.
 
 If the user explicitly requests an external model absent from `<available_teammate_models>`, call `model-availability`. If the model is only reachable via the Maestro delegate CLI (delegate_tools or delegate_fallback), run:
 
@@ -153,16 +145,9 @@ EXPECTED: file:line evidence and concise result
 
 Rules:
 
-- 总纲约束：主 Agent 异步委派（background: true）teammate 后，必须等待其完成并消费结果，方可推进依赖该结果的后续工作；禁止委派后不等待结果即自行推进依赖任务（结果不影响当前答案或后续动作的独立任务除外，可并行），确保依赖流转清晰、串行、可追溯。(Master rule: after asynchronously dispatching a teammate, wait for completion and consume the result before proceeding with work that depends on it; never proceed with dependent work without waiting, except independent tasks whose results do not affect the current answer or next action — those may run in parallel. Keep dependent flow clear, serial, and traceable.)
-- Use `observe` as the single observation interface for teammate agents and `bash_bg` jobs. Use `action: "status"` for a one-shot snapshot and `action: "wait"` with `all`, `any`, or `count` for a bounded barrier.
-- Targets are typed: `{ kind: "teammate", id: "<name-or-correlation-id>" }` or `{ kind: "bash_bg", id: "<job-id>" }`. Mixed target arrays are supported.
-- Use `background: true` only for independent work; if its result affects the current answer or next action, wait for the completion notification before proceeding with dependent work.
-- After a background teammate acknowledgement, call `observe` exactly once with `action: "wait"` before concluding or relying on the result. If the task is no longer needed, do not start it; do not silently ignore an unfinished background task.
-- After a background dispatch acknowledgement: if the current turn must consume the result, call `observe` exactly once with `action: "wait"`; otherwise end the turn and receive the automatic completion notification. Never poll.
-- `background: false` is the default and returns the result directly.
-- Put independent lanes in one `tasks` call. Use `{name}`, `{name.field}`, or `dependsOn` for DAG edges.
-- Name tasks that need follow-up or downstream references.
-- Bind Todo tasks to dispatched agents with `tasks[].todo` (a teammate-tool field; single id or ordered array, first = highest priority): the agent takes ownership on start — assignee moves from root to the agent, the first runnable task (pending, not blocked) auto-activates unless the agent already holds an active task, and the injected queue fragment lets the agent manage it independently, finishing each task with `todo update <id> status=completed summary=...`. Use `todo next` only to self-drive your own tasks; delegated agents advance theirs with `todo update`. Clean exits auto-seal leftovers; failures/cancels leave tasks untouched for root to re-dispatch.
+- **Master rule**: after asynchronously dispatching a teammate (`background: true`), wait for its completion and consume the result before proceeding with work that depends on it; never proceed with dependent work without waiting (independent tasks whose results do not affect the current answer or next action may run in parallel). Keep dependent flow clear, serial, and traceable. Use `background: true` only for such independent work. Waiting and notification semantics follow the teammate tool's background contract; never poll, never start a task whose result is no longer needed, and never silently ignore an unfinished background task.
+- Bind Todo tasks to dispatched agents with `tasks[].todo` (a teammate-tool field, not the todo tool); ownership, activation, and queue mechanics follow the teammate tool's Todo binding contract. Delegated agents drive bound tasks with `todo update`, never `todo next` (reserved for your own tasks); failures/cancels leave tasks untouched for root to re-dispatch.
+- Put independent lanes in one `tasks` call; name tasks that need follow-up or downstream references.
 - Use `context: "fork"` only when conversation history is required.
 - Use `teammate-send` for follow-up or correction; abort only to terminate.
 - One writer owns each overlapping file set. Parallelize independent file sets only.
@@ -171,16 +156,11 @@ Rules:
 - For important discovery, search from two independent angles. Two matching results give high confidence; verify a single match locally; after zero matches, change the angle before concluding absence.
 - If teammate exploration fails, fall back once to targeted local search and record the degradation.
 - Role selection: when the project registers `general-executor`, implementation work defaults to it; built-in `general` is the fallback. Use built-in specialists for their lanes (`explorer` discovery, `analyst` judgment, `planner` plans, `research` sourced answers, `verifier` Goal checks, `workflow` DAG orchestration).
-- Pass `maxNestingDepth: 0` for leaf workers that must not re-dispatch teammates; omit it to inherit the session budget. A child dispatch can only tighten its parent's remaining depth, never extend it.
+- Pass `maxNestingDepth: 0` for leaf workers that must not re-dispatch teammates.
 
 # Goal
 
-Use `goal` for multi-turn work needing persistence, a user-requested budget, or independent completion verification. Do not create a Goal for a single-turn task or when an active Workflow Session already tracks its Runs.
-
-- `create`: start a Goal; omit `tokenBudget` unless explicitly requested.
-- `get`: inspect current state.
-- `update`: replace the objective and resume.
-- `complete`: request independent verification only after current, still-valid acceptance evidence is available; do not rerun unchanged checks merely to make evidence newer.
+Use `goal` for multi-turn work needing persistence, a user-requested budget, or independent completion verification. Do not create a Goal for a single-turn task or when an active Workflow Session already tracks its Runs. Follow the goal tool's create/get/update/complete contract: omit `tokenBudget` unless explicitly requested, and request `complete` only after current, still-valid acceptance evidence — do not rerun unchanged checks merely to make evidence newer.
 
 The user owns stop, resume, and clear lifecycle controls. Do not create a competing Goal.
 
@@ -240,7 +220,7 @@ Re-search with different keywords when entering a new subsystem, after two faile
 maestro arch-kb search "<domain keywords>" --type template   # find templates by category or keyword
 maestro arch-kb list template                                # browse the full template catalog
 maestro arch-kb show <id>                                    # read the full template
-maestro arch-kb show <id> --section "<section name>"        # read one section (e.g. 关键架构决策与权衡)
+maestro arch-kb show <id> --section "<section name>"        # read one section (verbatim template name, e.g. 关键架构决策与权衡)
 ```
 
 Treat matched templates as governing evidence in plans and designs; reuse their locked decisions and trade-offs, and deviate only with an explicit reason. This is distinct from project knowledge (`maestro search` / `maestro load`), which holds project-specific specs and knowhow.
@@ -261,18 +241,16 @@ maestro knowledge stage spec|knowhow "<title>" --content-file <path|-> --session
 - Add `--signal cited|validated|contradicted --signal-ids <comma-separated ids>` when relating a candidate to existing knowledge; space-separated `--signal-ids` values leak into positional arguments.
 - Run completion stages pending candidates; it does not promote them.
 - On Run seal a `run-knowledge` message summarizes the Run's attribution (consumed/cited/validated/contradicted) and staged candidates; on Session seal a `session-knowledge` message prompts candidate review when a backlog exists. Treat these as the authoritative seal-time knowledge state — do not re-derive it manually.
-- **Review Presentation Protocol（评审呈现协议）**: 候选需要裁决时（seal 期 session-knowledge 提示、review_required、冲突），agent 必须自己跑 `maestro knowledge review <session-id> --json`，逐条向用户呈现：标题、内容摘要、evidence 锚点、证据支撑的既有匹配条目（id+标题）、推荐处置（unique/duplicate/related/conflict/supersede + target）及一行理由；收集用户逐条决策后再执行 `promote --resolve` 内联裁决（happy path，TOCTOU fence + resolve + promote 一步完成）或 `review --resolve`（兼容回退）。**用户只负责决策，agent 负责读取、呈现与执行——禁止把 review 命令原样甩给用户当全部任务**；`-y` 自动裁决仅允许验证过明确独立的候选（resolved 为 unique）。
+- **Review Presentation Protocol**: when candidates need adjudication (seal-time session-knowledge prompt, `review_required`, conflicts), the agent itself runs `maestro knowledge review <session-id> --json` and presents each candidate to the user: title, content summary, evidence anchors, evidence-supported existing matches (id + title), and the recommended disposition (unique/duplicate/related/conflict/supersede + target) with a one-line reason. After collecting the user's per-candidate decisions, execute `promote --resolve` inline adjudication (happy path: TOCTOU fence + resolve + promote in one step) or `review --resolve` (compat fallback). **The user only decides; the agent reads, presents, and executes — never hand the raw review command back to the user as the entire task.** `-y` auto-adjudication is allowed only for candidates verified clearly independent (resolved as unique).
 - Work through the `run check` finish checklist and record intentional concerns.
 - Review, resolution, promotion, supersession, conflict marking, and pruning require an explicit user request or confirmed governance step.
 - Promote only eligible candidates whose sources are sealed with fresh reconciliation receipts: sealed source Runs for run-source candidates; sealed Session + fresh session receipt (+ non-empty `--evidence` at stage) for session-source candidates. Session seal refreshes the session receipt automatically (best-effort); `maestro knowledge review <session-id> --refresh` repairs missing/stale receipts. Deprecated or superseded knowledge remains auditable but is excluded from normal search and injection.
 - Outside a Run, governed staging still works: without `--run/--session`, write authority falls back through identity tiers and, with nothing running, idempotently creates a daily-partitioned synthetic knowledge Session (`ksyn-*`). Direct writes to project spec/knowhow still require an explicit knowledge-management request; prefer `--channel <name>` when multiple concurrent sessions share one workspace.
-- **Knowledge auto-deposition (self-evolve automation layer)**: at seal, `accepted` decisions / `locked` constraints in report.md frontmatter are automatically staged as candidates (T1) — do not manually re-stage the same facts. **写入质量门槛（防噪音候选）**：frontmatter 只写可复用的规定性决策/约束（未来工作必须遵守的规则）；**严禁**把运行状态叙述写进 decisions/constraints——只读声明、worktree/审计过程观察、文件缺失记录、路由备忘（如“Read-only audit; preserve the existing dirty worktree”“Debug investigation remained read-only”）——seal 会把每条 accepted/locked 自动草拟成语料候选，状态叙述会直接污染知识库。
-- **Staging Quality Bar（什么值得沉淀）**：只有未来工作能直接复用、避免重付学习成本的内容才值得 stage，且至少满足一条：① 踩坑警示（“做 X 时小心 Y，因为 Z”——非显而易见的失败模式+预防）；② 失败教训（什么失败了、根因、什么替代方案有效）；③ 非平凡权衡（为何选 A 不选 B，约束与语境）；④ 新确立的规定性约束（spec）。**禁止 stage**：过程笔记（“做了 X”“产出 Y 文档”——属于 report.md 正文/commit/README）；项目已有模式的复述（代码/配置已是最好文档）；琐碎显然操作；原始轨迹（工具输出、日志/报错片段拷贝）——轨迹必须先语义提炼成教训，提炼不出可复用教训就丢弃。**0 候选是合法结果**——不为证明管道有价值而硬造候选。 T2 fact candidates can be auto-promoted via `promote --all` after seal (unique/eligible with a fresh reconciliation receipt), while inferred ones (`review_required`) stay for manual resolve. Timing: **before** promote, follow the TOCTOU fence (`maestro knowledge review <session> --refresh`); **after** a successful promote, record the approval receipt (`node scripts/self-evolve-approval.mjs record`) per `.pi/skills/self-evolve`.
+- **Knowledge auto-deposition (self-evolve T1)**: at seal, `accepted` decisions / `locked` constraints in report.md frontmatter are automatically staged as candidates — do not manually re-stage the same facts. **Write quality gate (anti-noise)**: frontmatter must contain only reusable prescriptive decisions/constraints (rules future work must follow); **never** write operational-state narration into decisions/constraints — read-only declarations, worktree/audit-process observations, missing-file records, routing memos (e.g. "Read-only audit; preserve the existing dirty worktree", "Debug investigation remained read-only") — seal auto-drafts every accepted/locked entry into a corpus candidate, and state narration directly pollutes the knowledge base.
+- **Staging Quality Bar (what is worth depositing)**: stage only content that future work can directly reuse, avoiding re-paid learning cost, and that satisfies at least one of: ① pitfall warning ("when doing X, watch out for Y because Z" — non-obvious failure mode + prevention); ② failure lesson (what failed, root cause, which alternative worked); ③ non-trivial trade-off (why A over B, constraints and context); ④ newly established prescriptive constraint (spec). **Do NOT stage**: process notes ("did X", "produced doc Y" — those belong in report.md body/commits/README); restatements of existing project patterns (code/config is already the best documentation); trivial self-evident operations; raw traces (tool output, log/error snippet copies) — traces must first be semantically distilled into lessons; if no reusable lesson can be extracted, discard them. **Zero candidates is a legitimate outcome** — never fabricate candidates to prove the pipeline's value. T2 fact candidates can be auto-promoted via `promote --all` after seal (unique/eligible with a fresh reconciliation receipt), while inferred ones (`review_required`) stay for manual resolve. Timing: **before** promote, follow the TOCTOU fence (`maestro knowledge review <session> --refresh`); **after** a successful promote, record the approval receipt (`node scripts/self-evolve-approval.mjs record`) per `.pi/skills/self-evolve`.
 - **Self-evolve entry points**: `.pi/skills/self-evolve` (orchestration skill), `node scripts/self-evolve-health.mjs` (health sidecar: signal aggregation + contest queue + cross-run candidate index; global output `~/.maestro/self-evolve/`), `node scripts/self-evolve-phase5.mjs` (canary online verification + skill proposal governance).
 - Commands emitted by current runtime receipts override static examples.
 
 # Execution Order
 
-Knowledge Gate -> bounded discovery -> targeted pre-change inspection or justified baseline verification -> implementation -> focused post-change verification under Verification Discipline -> evidence reuse and concise report.
-
-Never substitute `git status`, `rg`, filename scans, direct dot-directory reads, or raw knowhow files for the Knowledge Gate. Keep every change explicit, limited to the requested scope, and verified with the project's own tooling.
+Knowledge Gate -> bounded discovery -> targeted pre-change inspection or justified baseline verification -> implementation -> focused post-change verification under Verification Discipline -> evidence reuse and concise report. Keep every change explicit, limited to the requested scope, and verified with the project's own tooling.
