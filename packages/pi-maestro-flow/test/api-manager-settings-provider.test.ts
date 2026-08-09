@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { SettingsContextV1 } from "pi-maestro-settings-core/v1";
 import { SETTINGS_SECRET_SET_PLACEHOLDER } from "pi-maestro-settings-core/v1/schema";
-import { createApiManagerSettingsProvider } from "../src/settings/api-manager-settings-provider.ts";
+import { createApiManagerSettingsProvider, AGENT_HEADER_PRESETS } from "../src/settings/api-manager-settings-provider.ts";
 
 interface Harness {
   provider: ReturnType<typeof createApiManagerSettingsProvider>;
@@ -225,4 +225,89 @@ test("api manager overview carries provider and retry rows", async () => {
   assert.ok(rows.length >= 3);
   assert.ok(rows.some((row) => String(row.label).includes("maestro-openai")));
   assert.ok(rows.some((row) => row.labelKey === "api.overview.retry"));
+});
+
+test("api manager read surfaces headerPreset and custom headers", async () => {
+  const { provider, context } = harness({
+    providers: {
+      "cc": { baseUrl: "https://a.example.com", api: "anthropic-messages", headerPreset: "claude-code", headers: { "X-Extra": "1" } },
+      "legacy": { baseUrl: "https://b.example.com", api: "openai-responses", headers: { "X-Hand-Edited": "keep" } },
+    },
+  });
+  const snapshot = await provider.read({ context });
+  const providers = snapshot.effective.values.find((entry) => entry.key === "api.providers")?.value as Array<Record<string, unknown>>;
+  const cc = providers.find((entry) => entry.id === "cc")!;
+  assert.equal(cc.headerPreset, "claude-code");
+  assert.deepEqual(cc.headers, { "X-Extra": "1" }, "custom headers surfaced for in-shell editing");
+  const legacy = providers.find((entry) => entry.id === "legacy")!;
+  assert.equal(legacy.headerPreset, "none", "providers without a preset surface none");
+  assert.deepEqual(legacy.headers, { "X-Hand-Edited": "keep" }, "hand-edited headers are not lost");
+});
+
+test("api manager commit expands an agent header preset into headers", async () => {
+  const { provider, modelsPath, context } = harness({
+    providers: { "maestro-openai": { baseUrl: "https://g/v1", api: "openai-responses", models: [{ id: "gpt-5.6" }] } },
+  });
+  const transactionId = "tx-headers";
+  await provider.prepare!({
+    context, transactionId,
+    changes: [{
+      operation: "set", key: "api.providers", scope: "global",
+      value: [
+        { id: "maestro-openai", baseUrl: "https://g/v1", api: "openai-responses", enabled: true, headerPreset: "claude-code", headers: { "User-Agent": "custom-ua/1.0" }, models: [{ id: "gpt-5.6" }] },
+      ],
+    }],
+  });
+  await provider.commit!({ context, transactionId, prepareToken: transactionId });
+  const written = (JSON.parse(readFileSync(modelsPath, "utf8")) as { providers: Record<string, any> }).providers["maestro-openai"];
+  assert.equal(written.headerPreset, "claude-code", "preset persisted for the editor");
+  assert.equal(written.headers["User-Agent"], "custom-ua/1.0", "custom header overrides the preset's same-name header");
+  assert.equal(written.headers["X-App"], "cli", "preset identity headers expanded");
+  assert.equal(written.headers["X-Stainless-Lang"], "js");
+});
+
+test("api manager commit keeps hand-edited headers when no preset is chosen", async () => {
+  const { provider, modelsPath, context } = harness({
+    providers: { "p": { baseUrl: "https://p/v1", api: "openai-completions", headers: { "X-Keep": "yes" }, models: [{ id: "m1" }] } },
+  });
+  const transactionId = "tx-keep-headers";
+  // The list-crud editor echoes back the loaded entry (headers included); a
+  // preset-less commit must keep them and must not persist a "none" preset.
+  await provider.prepare!({
+    context, transactionId,
+    changes: [{
+      operation: "set", key: "api.providers", scope: "global",
+      value: [{ id: "p", baseUrl: "https://p/v1", api: "openai-completions", enabled: true, headerPreset: "none", headers: { "X-Keep": "yes" }, models: [{ id: "m1" }] }],
+    }],
+  });
+  await provider.commit!({ context, transactionId, prepareToken: transactionId });
+  const written = (JSON.parse(readFileSync(modelsPath, "utf8")) as { providers: Record<string, any> }).providers["p"];
+  assert.deepEqual(written.headers, { "X-Keep": "yes" }, "existing headers survive a commit without a preset");
+  assert.equal(written.headerPreset, undefined, "none preset is not persisted");
+});
+
+test("api manager validate rejects non-string header values", async () => {
+  const { provider, context } = harness();
+  const invalid = await provider.validate!({
+    context, transactionId: "tx-hdr",
+    changes: [{ operation: "set", key: "api.providers", scope: "global", value: [{ id: "p", headers: { "X-Num": 42 } }] }],
+  });
+  assert.equal(invalid.valid, false);
+  assert.equal(invalid.issues[0]?.code, "invalid-headers");
+  const valid = await provider.validate!({
+    context, transactionId: "tx-hdr",
+    changes: [{ operation: "set", key: "api.providers", scope: "global", value: [{ id: "p", headers: { "X-Str": "ok" } }] }],
+  });
+  assert.equal(valid.valid, true);
+});
+
+test("agent header presets cover all sub2api agent identities", () => {
+  assert.ok("claude-code" in AGENT_HEADER_PRESETS);
+  assert.ok("codex" in AGENT_HEADER_PRESETS);
+  assert.ok("grok" in AGENT_HEADER_PRESETS);
+  assert.ok("antigravity" in AGENT_HEADER_PRESETS);
+  assert.match(AGENT_HEADER_PRESETS["claude-code"]["User-Agent"], /^claude-cli\//);
+  assert.match(AGENT_HEADER_PRESETS["codex"]["User-Agent"], /^codex-tui\//);
+  assert.match(AGENT_HEADER_PRESETS["grok"]["User-Agent"], /^xai-grok-workspace\//);
+  assert.match(AGENT_HEADER_PRESETS["antigravity"]["User-Agent"], /^antigravity\//);
 });

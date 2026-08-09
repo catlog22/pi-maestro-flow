@@ -54,6 +54,60 @@ const API_KINDS = [
   "azure-openai-responses",
 ] as const;
 
+/**
+ * Agent identity header presets, extracted from sub2api's outbound identity
+ * layer (Wei-Shaw/sub2api): each upstream gateway fingerprints the client by
+ * User-Agent (and friends) and rejects traffic that does not look like the
+ * official CLI. Selecting a preset stamps the same identity on pi's requests.
+ *
+ * - claude-code: claude.DefaultHeaders + applyClaudeCodeMimicHeaders (claude-cli/2.1.220)
+ * - codex: codexCLIUserAgent = codex-tui/0.146.0 (Ubuntu 22.4.0; x86_64) xterm-256color
+ * - grok: xai CLI identity = xai-grok-workspace/0.2.114 + x-grok-client-version + x-grok-client-identifier
+ * - antigravity: antigravity/1.23.2 windows/amd64
+ */
+export const AGENT_HEADER_PRESETS = {
+  none: {},
+  "claude-code": {
+    "User-Agent": "claude-cli/2.1.220 (external, cli)",
+    "X-Stainless-Lang": "js",
+    "X-Stainless-Package-Version": "0.94.0",
+    "X-Stainless-OS": "Linux",
+    "X-Stainless-Arch": "arm64",
+    "X-Stainless-Runtime": "node",
+    "X-Stainless-Runtime-Version": "v24.3.0",
+    "X-Stainless-Retry-Count": "0",
+    "X-Stainless-Timeout": "600",
+    "X-App": "cli",
+    "Anthropic-Dangerous-Direct-Browser-Access": "true",
+  },
+  codex: {
+    "User-Agent": "codex-tui/0.146.0 (Ubuntu 22.4.0; x86_64) xterm-256color",
+  },
+  grok: {
+    "User-Agent": "xai-grok-workspace/0.2.114",
+    "X-Grok-Client-Version": "0.2.114",
+    "X-Grok-Client-Identifier": "grok-shell",
+  },
+  antigravity: {
+    "User-Agent": "antigravity/1.23.2 windows/amd64",
+  },
+} as const;
+
+export type AgentHeaderPreset = keyof typeof AGENT_HEADER_PRESETS;
+
+export function isAgentHeaderPreset(value: unknown): value is AgentHeaderPreset {
+  return typeof value === "string" && value in AGENT_HEADER_PRESETS;
+}
+
+export function expandAgentHeaderPreset(
+  preset: AgentHeaderPreset | undefined,
+  custom: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  const presetHeaders = preset && preset !== "none" ? { ...AGENT_HEADER_PRESETS[preset] } : {};
+  const merged = { ...presetHeaders, ...(custom ?? {}) };
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
 type ApiManagerAction = (context: SettingsContextV1) => Promise<void> | void;
 
 interface SettingsEventBus {
@@ -102,6 +156,10 @@ const PROVIDER_FIELDS: readonly SettingDefinition[] = [
   }, "openai-responses"),
   field("enabled", "boolean", "api.field.enabled", {}, true),
   field("apiKey", "secret", "api.field.apiKey", { writeOnly: true }),
+  field("headerPreset", "enum", "api.field.headerPreset", {
+    options: (Object.keys(AGENT_HEADER_PRESETS) as AgentHeaderPreset[]).map((value) => ({ value, labelKey: `api.headerPreset.${value}` })),
+  }, "none"),
+  field("headers", "json", "api.field.headers", { multiline: true }),
   field("models", "json", "api.field.models", { multiline: true }),
 ];
 
@@ -255,6 +313,13 @@ const CATALOGS = {
     "api.field.api": "API protocol",
     "api.field.enabled": "Enabled",
     "api.field.apiKey": "API key",
+    "api.field.headerPreset": "Agent response headers",
+    "api.field.headers": "Custom headers (JSON)",
+    "api.headerPreset.none": "None (pi default)",
+    "api.headerPreset.claude-code": "Claude Code CLI",
+    "api.headerPreset.codex": "Codex CLI",
+    "api.headerPreset.grok": "Grok CLI",
+    "api.headerPreset.antigravity": "Antigravity CLI",
     "api.field.models": "Models (JSON)",
     "api.item.provider": "{id}",
     "api.action.addProvider": "Add provider",
@@ -301,6 +366,7 @@ const CATALOGS = {
     "api.action.list.description": "Display the effective provider, model, defaults and retry configuration",
     "api.settings.readOnly": "API Manager entries are actions and cannot be committed as draft values",
     "api.settings.invalidProviders": "Providers must be a list of objects with an id",
+    "api.settings.invalidHeaders": "Custom headers must be a JSON object with string values",
     "api.settings.invalidRetry": "Retry values are invalid",
     "api.overview.providers": "Providers",
     "api.overview.retry": "Auto-retry",
@@ -325,6 +391,13 @@ const CATALOGS = {
     "api.field.api": "API 协议",
     "api.field.enabled": "启用",
     "api.field.apiKey": "API Key",
+    "api.field.headerPreset": "Agent 响应头",
+    "api.field.headers": "自定义请求头（JSON）",
+    "api.headerPreset.none": "无（pi 默认）",
+    "api.headerPreset.claude-code": "Claude Code CLI",
+    "api.headerPreset.codex": "Codex CLI",
+    "api.headerPreset.grok": "Grok CLI",
+    "api.headerPreset.antigravity": "Antigravity CLI",
     "api.field.models": "模型（JSON）",
     "api.item.provider": "{id}",
     "api.action.addProvider": "新增 Provider",
@@ -371,6 +444,7 @@ const CATALOGS = {
     "api.action.list.description": "显示当前生效的 Provider、模型、默认值与重试配置",
     "api.settings.readOnly": "API Manager 项目是管理操作，不能作为草稿值提交",
     "api.settings.invalidProviders": "Providers 必须是含 id 的对象列表",
+    "api.settings.invalidHeaders": "自定义请求头必须是字符串值的 JSON 对象",
     "api.settings.invalidRetry": "重试配置值无效",
     "api.overview.providers": "Providers",
     "api.overview.retry": "自动重试",
@@ -389,6 +463,8 @@ interface ApiProviderEntry {
   api: string;
   enabled: boolean;
   apiKey: string | null;
+  headerPreset?: AgentHeaderPreset;
+  headers?: Record<string, string>;
   models?: JsonValue;
 }
 
@@ -396,12 +472,20 @@ function parseProviderEntry(value: unknown): ApiProviderEntry | undefined {
   if (!value || typeof value !== "object") return undefined;
   const entry = value as Record<string, unknown>;
   if (typeof entry.id !== "string" || entry.id.length === 0) return undefined;
+  const headers = entry.headers !== undefined && entry.headers !== null
+    && typeof entry.headers === "object" && !Array.isArray(entry.headers)
+    ? Object.fromEntries(
+      Object.entries(entry.headers).filter(([, headerValue]) => typeof headerValue === "string"),
+    ) as Record<string, string>
+    : undefined;
   return {
     id: entry.id,
     baseUrl: typeof entry.baseUrl === "string" ? entry.baseUrl : "",
     api: typeof entry.api === "string" ? entry.api : "openai-responses",
     enabled: entry.enabled !== false,
     apiKey: typeof entry.apiKey === "string" ? entry.apiKey : null,
+    headerPreset: isAgentHeaderPreset(entry.headerPreset) ? entry.headerPreset : "none",
+    headers,
     models: Array.isArray(entry.models) ? (entry.models as JsonValue) : undefined,
   };
 }
@@ -413,6 +497,12 @@ function providerConfig(entry: ApiProviderEntry): Record<string, unknown> {
     enabled: entry.enabled,
   };
   if (entry.apiKey && entry.apiKey !== SETTINGS_SECRET_SET_PLACEHOLDER) config.apiKey = entry.apiKey;
+  if (entry.headerPreset && entry.headerPreset !== "none") config.headerPreset = entry.headerPreset;
+  // Preset expansion wins; custom headers override same-name preset headers.
+  // Without a preset, keep any existing custom headers untouched.
+  const expandedHeaders = expandAgentHeaderPreset(entry.headerPreset, entry.headers);
+  if (expandedHeaders) config.headers = expandedHeaders;
+  else if (entry.headers) config.headers = entry.headers;
   if (Array.isArray(entry.models)) config.models = entry.models;
   return config;
 }
@@ -569,6 +659,19 @@ export function createApiManagerSettingsProvider(
               scope: change.scope,
               code: "invalid-providers",
               messageKey: "api.settings.invalidProviders",
+            });
+          } else if (Array.isArray(change.value) && change.value.some((entry) => {
+            const headers = (entry as Record<string, unknown>).headers;
+            return headers !== undefined && headers !== null && typeof headers === "object"
+              && !Array.isArray(headers)
+              && Object.values(headers).some((value) => typeof value !== "string");
+          })) {
+            issues.push({
+              severity: "error",
+              key: change.key,
+              scope: change.scope,
+              code: "invalid-headers",
+              messageKey: "api.settings.invalidHeaders",
             });
           }
         }
