@@ -115,9 +115,9 @@ export declare const SESSION_TUI_CATALOGS: {
         readonly "selector.retrying": "运行中 · 正在重试";
         readonly "selector.done": "完成";
         readonly "selector.running": "运行中";
-        readonly "selector.roots": "{roots} 个根任务 · {nested} 个嵌套任务";
-        readonly "selector.childOf": "{name} 的子任务";
-        readonly "selector.rootRun": "根任务";
+        readonly "selector.roots": "{roots} 个根 Tasks · {nested} 个嵌套 Tasks";
+        readonly "selector.childOf": "{name} 的子 Tasks";
+        readonly "selector.rootRun": "根 Tasks";
         readonly "selector.tool": "工具";
         readonly "selector.idle": "空闲";
         readonly "selector.footerNarrow": "Esc 取消 · Enter 查看 · ↑↓ 选择";
@@ -135,7 +135,7 @@ export declare const SESSION_TUI_CATALOGS: {
         readonly "widget.resultPending": "结果已返回，等待生命周期结束";
         readonly "widget.runningAction": "运行中 · {action}";
         readonly "widget.retryingAction": "重试中 · {action}";
-        readonly "widget.childOf": "@{name} 的子任务";
+        readonly "widget.childOf": "@{name} 的子 Tasks";
         readonly "widget.resultFrom": "结果来自 {names}";
         readonly "widget.inspectMore": "└─ … 还有 {count} 个 · 按 Alt+R 查看";
         readonly "widget.action.write": "正在写入文件";
