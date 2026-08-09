@@ -6,6 +6,7 @@ import {
   observeTargets,
   registerObservationProvider,
   type ObservationProvider,
+  type ObservationReadOptions,
   type ObservationSnapshot,
   type ObservationWaitOptions,
 } from "../src/public/v1/observation.ts";
@@ -30,6 +31,48 @@ function provider(kind: string, wait: (id: string, options: ObservationWaitOptio
     wait,
   };
 }
+
+test("view=turns is forwarded to provider snapshots and restricted to status", async () => {
+  let received: ObservationReadOptions | undefined;
+  const dispose = registerObservationProvider({
+    kind: "test-turns",
+    capabilities: { inspect: true, wait: true },
+    snapshot: (id, options) => {
+      received = options;
+      return snapshot("test-turns", id, "completed");
+    },
+    wait: async (id) => snapshot("test-turns", id, "completed"),
+  });
+  try {
+    const result = await observeTargets({
+      action: "status",
+      targets: [{ kind: "test-turns", id: "w" }],
+      view: "turns",
+      turn: 3,
+    });
+    assert.equal(result.reason, "snapshot");
+    assert.equal(received?.view, "turns");
+    assert.equal(received?.turn, 3);
+    await assert.rejects(
+      observeTargets({ action: "wait", targets: [{ kind: "test-turns", id: "w" }], view: "turns" }),
+      /view="turns" is supported only for the status action/,
+    );
+    await assert.rejects(
+      observeTargets({ action: "watch", targets: [{ kind: "test-turns", id: "w" }], view: "turns" }),
+      /view="turns" is supported only for the status action/,
+    );
+    await assert.rejects(
+      observeTargets({ action: "status", targets: [{ kind: "test-turns", id: "w" }], turn: 1 }),
+      /turn requires view="turns"/,
+    );
+    await assert.rejects(
+      observeTargets({ action: "status", targets: [{ kind: "test-turns", id: "w" }], view: "other" as never }),
+      /view must be "live" or "turns"/,
+    );
+  } finally {
+    dispose();
+  }
+});
 
 test("status observes mixed providers in target order", async () => {
   const disposeAgent = registerObservationProvider(provider("test-agent", async (id) => snapshot("test-agent", id, "completed")));

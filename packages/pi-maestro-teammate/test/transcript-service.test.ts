@@ -8,6 +8,7 @@ import {
   entryToRows,
   findLatestSessionFile,
   findValidSessionFile,
+  groupTranscriptTurns,
   loadTranscript,
   loadTranscriptFromMemory,
   parseTeammateSessionRecords,
@@ -20,6 +21,7 @@ import {
 import {
   TEAMMATE_SESSION_CUSTOM_TYPE,
   type HistoricalAgentRecord,
+  type TranscriptRow,
 } from "../src/shared/transcript.ts";
 
 // ---------------------------------------------------------------------------
@@ -324,6 +326,49 @@ test("loadTranscript: header-only or unreadable file falls back to memory", asyn
     sessionFile: path.join(dir, "nope.jsonl"),
   });
   assert.equal(missing.source, "memory");
+});
+
+test("groupTranscriptTurns splits on user rows with stats and a preamble turn", () => {
+  const row = (kind: TranscriptRow["kind"], text: string, extra: Partial<TranscriptRow> = {}): TranscriptRow => ({
+    kind,
+    role: kind === "tool_result" ? "toolResult" : kind === "user" ? "user" : "assistant",
+    text,
+    timestamp: 0,
+    ...extra,
+  });
+  const turns = groupTranscriptTurns([
+    row("system", "started"),
+    row("user", "first ask"),
+    row("thinking", "let me think"),
+    row("tool", "a.ts", { toolName: "Read" }),
+    row("tool_result", "ok", { toolName: "Read" }),
+    row("assistant", "answer one"),
+    row("user", "second ask"),
+    row("assistant", "answer two"),
+  ]);
+  assert.equal(turns.length, 3);
+  assert.equal(turns[0]?.index, 0);
+  assert.equal(turns[0]?.userText, "session start");
+  assert.equal(turns[0]?.rowCount, 1);
+  assert.equal(turns[1]?.index, 1);
+  assert.equal(turns[1]?.userText, "first ask");
+  assert.equal(turns[1]?.rowCount, 5);
+  assert.equal(turns[1]?.toolCallCount, 1);
+  assert.equal(turns[1]?.toolResultCount, 1);
+  assert.equal(turns[1]?.textLength, "let me think".length + "answer one".length);
+  assert.equal(turns[1]?.rows.length, 5);
+  assert.equal(turns[2]?.index, 2);
+  assert.equal(turns[2]?.userText, "second ask");
+  assert.equal(turns[2]?.rowCount, 2);
+  assert.equal(turns[2]?.toolCallCount, 0);
+});
+
+test("groupTranscriptTurns returns empty for no rows and keeps user-only turns", () => {
+  assert.deepEqual(groupTranscriptTurns([]), []);
+  const turns = groupTranscriptTurns([{ kind: "user", role: "user", text: "solo", timestamp: 1 }]);
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]?.index, 1);
+  assert.equal(turns[0]?.rowCount, 1);
 });
 
 test("loadTranscriptFromMemory: outputLog heuristic + lastResult", () => {

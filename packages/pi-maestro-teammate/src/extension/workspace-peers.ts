@@ -837,6 +837,27 @@ function uniqueTarget(query: string, candidates: WorkspaceResolvedTarget[]): Wor
   throw new WorkspaceTargetResolutionError("not_found", `Target ${JSON.stringify(query)} was not found`);
 }
 
+/**
+ * Resolve a workspace peer window by its sessionName (window title).
+ * Accepts an exact name, a unique name prefix, or the `name#ownerIdPrefix`
+ * disambiguator used elsewhere in the peer protocol.
+ */
+export function resolveWorkspaceOwnerByName(
+  owners: readonly WorkspaceOwnerSnapshot[],
+  selector: string,
+): WorkspaceOwnerSnapshot | undefined {
+  const value = selector.trim().replace(/^@/, "");
+  const marker = value.lastIndexOf("#");
+  const name = marker > 0 && marker < value.length - 1 ? value.slice(0, marker) : value;
+  const idPrefix = marker > 0 && marker < value.length - 1 ? value.slice(marker + 1) : undefined;
+  const exact = owners.filter((candidate) => candidate.sessionName === name);
+  let matches = exact.length > 0 ? exact : owners.filter(
+    (candidate) => candidate.sessionName !== undefined && candidate.sessionName.startsWith(name),
+  );
+  if (idPrefix !== undefined) matches = matches.filter((candidate) => candidate.ownerId.startsWith(idPrefix));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 export function resolveWorkspaceTarget(
   query: string,
   localIdentity: WorkspacePeerIdentity,

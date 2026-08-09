@@ -255,6 +255,12 @@ export declare function discoverWorkspacePeers(identity: WorkspacePeerIdentity, 
     cleanupStale?: boolean;
     includeSelf?: boolean;
 }): Promise<WorkspacePeerDiscovery>;
+/**
+ * Resolve a workspace peer window by its sessionName (window title).
+ * Accepts an exact name, a unique name prefix, or the `name#ownerIdPrefix`
+ * disambiguator used elsewhere in the peer protocol.
+ */
+export declare function resolveWorkspaceOwnerByName(owners: readonly WorkspaceOwnerSnapshot[], selector: string): WorkspaceOwnerSnapshot | undefined;
 export declare function resolveWorkspaceTarget(query: string, localIdentity: WorkspacePeerIdentity, localState: WorkspaceOwnerState, remoteOwners: readonly WorkspaceOwnerSnapshot[], options?: {
     includeSettled?: boolean;
 }): WorkspaceResolvedTarget;

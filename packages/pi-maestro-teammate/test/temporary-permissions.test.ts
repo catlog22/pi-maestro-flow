@@ -132,3 +132,14 @@ test("todo binding appends an assigned-task instruction to the child system prom
     fs.rmSync(bound, { force: true });
   }
 });
+
+test("child system prompt does not append taskType behavior instructions", () => {
+  const promptFile = writeSystemPromptFile(promptAgent, `tasktype-prompt-${randomUUID()}`);
+  try {
+    const promptText = fs.readFileSync(promptFile, "utf8");
+    assert.equal(promptText, "private prompt");
+    assert.doesNotMatch(promptText, /Assigned taskType|routed as `explore`/);
+  } finally {
+    fs.rmSync(promptFile, { force: true });
+  }
+});

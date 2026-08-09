@@ -1,5 +1,6 @@
 export type ObservationAction = "status" | "wait" | "watch";
 export type ObservationDetail = "summary" | "tail" | "full";
+export type ObservationView = "live" | "turns";
 export type ObservationWaitMode = "all" | "any" | "count";
 export type ObservationPhase = "pending" | "active" | "settled" | "unknown";
 export type ObservationOutcome = "success" | "failure" | "stalled" | "aborted";
@@ -49,6 +50,10 @@ export interface ObservationSnapshot {
 export interface ObservationReadOptions {
   detail: ObservationDetail;
   lines: number;
+  /** "turns" lists the target session's turn history instead of the live snapshot (status only). */
+  view?: ObservationView;
+  /** 1-based turn index to expand when view="turns"; omitted lists all turns. */
+  turn?: number;
 }
 
 export interface ObservationWaitOptions extends ObservationReadOptions {
@@ -75,6 +80,10 @@ export interface ObserveParams {
   timeoutMs?: number;
   /** Block until "result-ready" (default) or "completed" (terminal lifecycle). */
   until?: "result-ready" | "completed";
+  /** "turns" lists session turn history instead of the live snapshot (status only). */
+  view?: ObservationView;
+  /** 1-based turn index to expand when view="turns"; omitted lists all turns. */
+  turn?: number;
 }
 
 export interface ObserveResult {
@@ -181,6 +190,16 @@ function validate(params: ObserveParams): void {
       throw new Error("Observe waitCount must be between 1 and the number of targets.");
     }
   }
+  if (params.view !== undefined && params.view !== "live" && params.view !== "turns") {
+    throw new Error('Observe view must be "live" or "turns".');
+  }
+  if (params.view === "turns" && params.action !== "status") {
+    throw new Error('Observe view="turns" is supported only for the status action.');
+  }
+  if (params.turn !== undefined) {
+    if (!Number.isInteger(params.turn) || params.turn < 1) throw new Error("Observe turn must be a positive integer.");
+    if (params.view !== "turns") throw new Error('Observe turn requires view="turns".');
+  }
 }
 
 export async function observeTargets(params: ObserveParams, signal?: AbortSignal): Promise<ObserveResult> {
@@ -193,7 +212,12 @@ export async function observeTargets(params: ObserveParams, signal?: AbortSignal
       const provider = getObservationProvider(target.kind);
       if (!provider) return unavailable(target, "not-found", `No observation provider for kind \"${target.kind}\".`);
       try {
-        return await provider.snapshot(target.id, { detail: options.detail, lines: options.lines });
+        return await provider.snapshot(target.id, {
+          detail: options.detail,
+          lines: options.lines,
+          ...(params.view ? { view: params.view } : {}),
+          ...(params.turn !== undefined ? { turn: params.turn } : {}),
+        });
       } catch (error) {
         return failedObservation(target, error);
       }

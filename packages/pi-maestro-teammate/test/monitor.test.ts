@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   barrierWait,
+  appendMonitorModeContext,
   createMonitorModeState,
   formatBarrierCompact,
   formatCompact,
@@ -97,6 +98,15 @@ test("independent monitor session identity and command entry points stay stable"
   assert.match(source, /steer deferred as follow_up while foreground bash_bg is active/);
   assert.match(sessionSource, /foreground background-job entry/);
   assert.match(source, /if \(trimmed === ""\)[\s\S]*?requestWindowMode\("enter"\)/);
+  assert.match(source, /monitorInteractionModeActive \? appendMonitorModeContext\(withDepth\) : withDepth/);
+  assert.doesNotMatch(source, /guardMonitorModeToolCall/);
+  assert.match(source, /options\.view === "turns"\) return teammateTurnsSnapshot\(id, options\);/);
+  assert.match(source, /options\.view === "turns"\) return workspaceTurnsSnapshot\(owner, target, detail, lines, options\);/);
+  assert.match(source, /\.\.\.\(options\.view \? \{ view: options\.view \} : \{\}\)/);
+  assert.match(source, /async requestWindowMode\(action\)[\s\S]*?enterMonitorInteractionMode\(\)[\s\S]*?setViewMode\("windows"\)/);
+  assert.match(source, /monitorConfig\.autoResume[\s\S]*?restored > 0\) monitorRegistry\.setViewMode\("windows"\)/);
+  assert.match(source, /pi\.on\("session_start"[\s\S]*?exitMonitorInteractionMode\(\)/);
+  assert.match(source, /pi\.on\("session_shutdown"[\s\S]*?exitMonitorInteractionMode\(\)/);
   assert.match(source, /event\.source !== "interactive"[\s\S]*?event\.text\.trim\(\) !== "monitor"/);
   assert.match(source, /if \(trimmed === "exit" \|\| trimmed === "stop"\)/);
   assert.match(source, /if \(trimmed === "resume"\)/);
@@ -220,6 +230,34 @@ test("formatBarrierCompact produces compact output", () => {
   assert.match(lines[0], /BARRIER all 2\/2 settled · 5s/);
   assert.match(lines[1], /✓ a completed/);
   assert.match(lines[2], /✗ b failed/);
+});
+
+// ---------------------------------------------------------------------------
+// Monitor control context
+// ---------------------------------------------------------------------------
+
+test("monitor mode context is persistent, idempotent, and supervision-only", () => {
+  const injected = appendMonitorModeContext("base prompt");
+  assert.match(injected, /<monitor_mode>/);
+  assert.match(injected, /monitor control window/);
+  assert.match(injected, /Do not implement project work/);
+  assert.equal(appendMonitorModeContext(injected), injected);
+});
+
+test("monitor mode stays a soft constraint with no tool-call interception", async () => {
+  const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  const monitorSource = await readFile(new URL("../src/extension/monitor.ts", import.meta.url), "utf8");
+  const coreSource = await readFile(new URL("../src/extension/teammate-core.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /guardMonitorModeToolCall/);
+  assert.doesNotMatch(source, /pi\.on\("tool_call", \(event\) => \{\n\s*if \(!monitorInteractionModeActive\)/);
+  assert.match(monitorSource, /appendMonitorModeContext/);
+  assert.match(coreSource, /view="turns"/);
+  assert.match(source, /const MONITOR_ESCAPE_TAP_WINDOW_MS = 500;/);
+  assert.match(source, /matchesKey\(data, "escape"\) \|\| isKeyRelease\(data\) \|\| isKeyRepeat\(data\)/);
+  assert.match(source, /monitorEscapeTapAt <= MONITOR_ESCAPE_TAP_WINDOW_MS[\s\S]*?requestWindowMode\("exit"\)[\s\S]*?consume: true/);
+  assert.match(source, /pi\.on\("session_start"[\s\S]*?installMonitorEscapeTap\(ctx\.ui\)/);
+  assert.match(source, /pi\.on\("session_shutdown"[\s\S]*?uninstallMonitorEscapeTap\(\)/);
+  assert.match(source, /The first Esc is always passed through/);
 });
 
 // ---------------------------------------------------------------------------

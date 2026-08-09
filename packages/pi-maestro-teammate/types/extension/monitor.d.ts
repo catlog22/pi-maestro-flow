@@ -44,6 +44,9 @@ export declare const MONITOR_DEFAULT_LINES = 3;
 export declare const MONITOR_MAX_TARGETS = 15;
 /** Status-bar refresh interval while monitor mode is active. */
 export declare const MONITOR_STATUS_REFRESH_MS = 5000;
+export declare const MONITOR_MODE_CONTEXT_START = "<monitor_mode>";
+export declare const MONITOR_MODE_CONTEXT_END = "</monitor_mode>";
+export declare function appendMonitorModeContext(systemPrompt: string): string;
 export declare function statusIcon(status?: string): string;
 /** One-line-per-target compact format. Default for all output. */
 export declare function formatCompact(targets: MonitorTargetSnapshot[]): string[];

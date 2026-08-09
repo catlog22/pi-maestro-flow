@@ -426,6 +426,68 @@ export function loadTranscriptFromMemory(source: TranscriptSource): TranscriptLo
 }
 
 // ---------------------------------------------------------------------------
+// Turn grouping (observe view="turns")
+// ---------------------------------------------------------------------------
+
+export interface TranscriptTurn {
+  /** 1-based turn index; 0 is the preamble before the first user message. */
+  index: number;
+  startedAt: number;
+  /** First line of the turn's user message (preamble: "session start"). */
+  userText: string;
+  rowCount: number;
+  toolCallCount: number;
+  toolResultCount: number;
+  /** Assistant text + thinking length in characters. */
+  textLength: number;
+  rows: TranscriptRow[];
+}
+
+/**
+ * Split display rows into turns: every user row starts a new turn, and all
+ * following rows (assistant, tool calls, results, thinking, meta) stay in it.
+ * Rows before the first user message form the preamble turn (index 0).
+ */
+export function groupTranscriptTurns(rows: readonly TranscriptRow[]): TranscriptTurn[] {
+  const turns: TranscriptTurn[] = [];
+  let current: TranscriptTurn | undefined;
+  let nextIndex = 1;
+  for (const row of rows) {
+    if (row.kind === "user") {
+      current = {
+        index: nextIndex++,
+        startedAt: row.timestamp,
+        userText: firstLine(row.text),
+        rowCount: 0,
+        toolCallCount: 0,
+        toolResultCount: 0,
+        textLength: 0,
+        rows: [],
+      };
+      turns.push(current);
+    } else if (!current) {
+      current = {
+        index: 0,
+        startedAt: row.timestamp,
+        userText: "session start",
+        rowCount: 0,
+        toolCallCount: 0,
+        toolResultCount: 0,
+        textLength: 0,
+        rows: [],
+      };
+      turns.push(current);
+    }
+    current.rowCount += 1;
+    if (row.kind === "tool") current.toolCallCount += 1;
+    if (row.kind === "tool_result") current.toolResultCount += 1;
+    if (row.kind === "assistant" || row.kind === "thinking") current.textLength += row.text.length;
+    current.rows.push(row);
+  }
+  return turns;
+}
+
+// ---------------------------------------------------------------------------
 // History recovery (cold starts)
 // ---------------------------------------------------------------------------
 

@@ -85,6 +85,19 @@ test("observe schema scopes wait parameters to wait and requires count threshold
   assert.equal(Check(ObserveParams, { action: "wait", waitCount: 1, targets: target }), false);
 });
 
+test("observe schema accepts view=turns with turn and rejects misuse", () => {
+  const target = [{ kind: "teammate", id: "worker" }];
+  assert.equal(Check(ObserveParams, { action: "status", targets: target, view: "turns" }), true);
+  assert.equal(Check(ObserveParams, { action: "status", targets: target, view: "turns", turn: 2 }), true);
+  assert.equal(Check(ObserveParams, { action: "status", targets: target, view: "live" }), true);
+  assert.equal(Check(ObserveParams, { action: "wait", targets: target, view: "turns" }), false);
+  assert.equal(Check(ObserveParams, { action: "watch", targets: target, view: "turns" }), false);
+  assert.equal(Check(ObserveParams, { action: "status", targets: target, turn: 1 }), false);
+  assert.equal(Check(ObserveParams, { action: "status", targets: target, view: "live", turn: 1 }), false);
+  assert.equal(Check(ObserveParams, { action: "status", targets: target, view: "other" }), false);
+  assert.equal(Check(ObserveParams, { action: "status", targets: target, turn: 0 }), false);
+});
+
 test("legacy observation descriptions use consistent expanded-output terminology", () => {
   const watchLines = TeammateWatchParams.properties.lines as unknown as { default?: number };
   const detail = ObserveParams.properties.detail as unknown as { description?: string };

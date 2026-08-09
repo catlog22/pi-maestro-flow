@@ -2,7 +2,7 @@
  * Teammate Extension Entry Point
  *
  * Tools: teammate (dispatch), teammate-send (RPC message injection), teammate-list (status), observe
- * TUI: Alt+R composer panel, widget above editor, Alt+B foreground→background detach
+ * TUI: Alt+R mode-aware session list, widget above editor, Alt+B foreground→background detach
  * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
 
@@ -528,13 +528,16 @@ export const OBSERVE_DESCRIPTION = `Observe mixed teammate and background Bash t
 - "status": one-shot snapshot of every target
 - "wait": block on an all/any/count barrier with one request-level timeout; set until="completed" to block until agents fully terminate instead of first result
 - "watch": poll every target until the bounded timeoutMs you provide, returning the full status-transition timeline (richer than status, no barrier required); omitted timeoutMs defaults to 600000 (10 minutes)
+- view="turns" (status only): list the target's session turn history instead of the live snapshot; add turn=<n> to expand one 1-based turn into its messages, tool calls, and results
 
-Targets use { kind, id }, where kind is currently "teammate" or "bash_bg". Use detail=full (or tail) to include a settled teammate's captured result — including the structured_output value for schema tasks. Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.`;
-export const OBSERVE_SNIPPET = "Observe, wait for, or watch mixed teammate and background Bash targets.";
+Targets use { kind, id }, where kind is currently "teammate" or "bash_bg". Use detail=full (or tail) to include a settled teammate's captured result — including the structured_output value for schema tasks. kind="workspace" accepts owner:<ownerId> or a window name and returns the peer snapshot (view="turns" lists its agent runs, snapshot-limited because peers do not publish full transcripts). Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.`;
+export const OBSERVE_SNIPPET = "Observe, wait for, or watch mixed teammate and background Bash targets; view='turns' lists session turn history.";
 export const OBSERVE_GUIDELINES = [
   "Use observe for mixed or multi-target status and waits; use one bounded wait instead of polling status.",
   "Use action=watch to follow status transitions over time; always pass a bounded timeoutMs — omitted defaults to 600000 (10 minutes). Use action=wait until=completed to block until agents fully terminate.",
   "Use detail=full only when recent output is required; summary is the compact default. detail=full includes a settled agent's captured result and structured_output value.",
+  "Use view=turns with action=status to read a session's history: list all turns first, then repeat with turn=<n> to expand one turn. view=turns is not supported by wait or watch.",
+  "For a workspace window use kind=workspace with owner:<ownerId> or its window name; its turn history is snapshot-limited to the agent runs the peer publishes.",
 ];
 
 export const TEAMMATE_MONITOR_DESCRIPTION = `Observe multiple teammate targets or block on a multi-agent barrier. Monitor mode is user-controlled via /monitor; this tool only queries and waits.

@@ -62,6 +62,27 @@ export const MONITOR_MAX_TARGETS = 15;
 /** Status-bar refresh interval while monitor mode is active. */
 export const MONITOR_STATUS_REFRESH_MS = 5_000;
 
+export const MONITOR_MODE_CONTEXT_START = "<monitor_mode>";
+export const MONITOR_MODE_CONTEXT_END = "</monitor_mode>";
+
+const MONITOR_MODE_CONTEXT = [
+  MONITOR_MODE_CONTEXT_START,
+  "# Monitor Mode",
+  "This current session is the monitor control window. Its only responsibility is to supervise and coordinate other workspace windows according to their tasks and the user's monitoring instructions.",
+  "Use teammate-list with view=windows to discover peer windows, teammate-send for follow_up or steer interventions, and observe or the monitor tools for bounded status checks. Cross-window abort is unavailable.",
+  "Do not implement project work, edit files, run shell commands, or start unrelated research in this control window. Delegate or message the appropriate peer window instead.",
+  "Treat user messages in the #control tab as monitoring policy, priorities, or intervention instructions. Ask the user to run /monitor exit before handling unrelated work in this session.",
+  MONITOR_MODE_CONTEXT_END,
+].join("\n");
+
+export function appendMonitorModeContext(systemPrompt: string): string {
+  const start = systemPrompt.indexOf(MONITOR_MODE_CONTEXT_START);
+  if (start < 0) return `${systemPrompt}\n\n${MONITOR_MODE_CONTEXT}`;
+  const end = systemPrompt.indexOf(MONITOR_MODE_CONTEXT_END, start);
+  if (end < 0) return `${systemPrompt.slice(0, start).trimEnd()}\n\n${MONITOR_MODE_CONTEXT}`;
+  return `${systemPrompt.slice(0, start).trimEnd()}\n\n${MONITOR_MODE_CONTEXT}${systemPrompt.slice(end + MONITOR_MODE_CONTEXT_END.length)}`;
+}
+
 // ---------------------------------------------------------------------------
 // Status icons (matches shared/agent-status.ts)
 // ---------------------------------------------------------------------------

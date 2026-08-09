@@ -57,6 +57,25 @@ export declare function entryToRows(entry: SessionEntry): TranscriptRow[];
 export declare function projectMessage(entry: SessionMessageEntry): TranscriptRow[];
 /** Best-effort fallback when no session file exists (e.g. --no-session). */
 export declare function loadTranscriptFromMemory(source: TranscriptSource): TranscriptLoad;
+export interface TranscriptTurn {
+    /** 1-based turn index; 0 is the preamble before the first user message. */
+    index: number;
+    startedAt: number;
+    /** First line of the turn's user message (preamble: "session start"). */
+    userText: string;
+    rowCount: number;
+    toolCallCount: number;
+    toolResultCount: number;
+    /** Assistant text + thinking length in characters. */
+    textLength: number;
+    rows: TranscriptRow[];
+}
+/**
+ * Split display rows into turns: every user row starts a new turn, and all
+ * following rows (assistant, tool calls, results, thinking, meta) stay in it.
+ * Rows before the first user message form the preamble turn (index 0).
+ */
+export declare function groupTranscriptTurns(rows: readonly TranscriptRow[]): TranscriptTurn[];
 export interface WorkspaceSessionScan {
     sessionFile: string;
     sessionId?: string;

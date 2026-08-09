@@ -1,5 +1,6 @@
 export type ObservationAction = "status" | "wait" | "watch";
 export type ObservationDetail = "summary" | "tail" | "full";
+export type ObservationView = "live" | "turns";
 export type ObservationWaitMode = "all" | "any" | "count";
 export type ObservationPhase = "pending" | "active" | "settled" | "unknown";
 export type ObservationOutcome = "success" | "failure" | "stalled" | "aborted";
@@ -37,6 +38,10 @@ export interface ObservationSnapshot {
 export interface ObservationReadOptions {
     detail: ObservationDetail;
     lines: number;
+    /** "turns" lists the target session's turn history instead of the live snapshot (status only). */
+    view?: ObservationView;
+    /** 1-based turn index to expand when view="turns"; omitted lists all turns. */
+    turn?: number;
 }
 export interface ObservationWaitOptions extends ObservationReadOptions {
     deadline: number;
@@ -60,6 +65,10 @@ export interface ObserveParams {
     timeoutMs?: number;
     /** Block until "result-ready" (default) or "completed" (terminal lifecycle). */
     until?: "result-ready" | "completed";
+    /** "turns" lists session turn history instead of the live snapshot (status only). */
+    view?: ObservationView;
+    /** 1-based turn index to expand when view="turns"; omitted lists all turns. */
+    turn?: number;
 }
 export interface ObserveResult {
     action: ObservationAction;

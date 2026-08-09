@@ -382,6 +382,17 @@ export const ObserveParams = Type.Object({
       "Wait-only completion threshold: first result (default) or full terminal completion.",
   })),
   timeoutMs: Type.Optional(Type.Integer({ minimum: 1, default: 600_000, description: "Request-level wait/watch timeout in milliseconds (default: 600000, 10 minutes)." })),
+  view: Type.Optional(Type.Unsafe<"live" | "turns">({
+    type: "string",
+    enum: ["live", "turns"],
+    default: "live",
+    description:
+      '"live" shows the current snapshot (default); "turns" lists the session turn history instead (status action only).',
+  })),
+  turn: Type.Optional(Type.Integer({
+    minimum: 1,
+    description: '1-based turn index to expand when view="turns"; omitted lists all turns.',
+  })),
 }, {
   additionalProperties: false,
   allOf: [
@@ -408,6 +419,14 @@ export const ObserveParams = Type.Object({
         required: ["action", "waitMode"],
       },
       then: { required: ["waitCount"] },
+    },
+    {
+      if: { properties: { view: { const: "turns" } }, required: ["view"] },
+      then: { properties: { action: { const: "status" } }, required: ["action"] },
+    },
+    {
+      if: { required: ["turn"] },
+      then: { properties: { view: { const: "turns" } }, required: ["view"] },
     },
     {
       if: { required: ["waitCount"] },
