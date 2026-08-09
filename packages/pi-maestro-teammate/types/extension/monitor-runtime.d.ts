@@ -36,7 +36,11 @@ export interface MonitorRuntimeOptions {
     onBindingMissing?: (key: string, binding: MonitorBinding) => void;
     schedulerOptions?: SchedulerCoreOptions;
 }
-/** Scheduler-owned deterministic Monitor execution runtime. */
+/**
+ * @deprecated Legacy compatibility runtime for target-bound `/monitor` commands.
+ * Monitor control sessions are agent-operated and should choose LLM-callable
+ * tools such as `observe`, `teammate-send`, and `loop` instead.
+ */
 export declare class MonitorRuntime {
     #private;
     readonly engine: MonitorEngineState;

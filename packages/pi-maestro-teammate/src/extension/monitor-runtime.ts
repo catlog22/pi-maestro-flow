@@ -65,7 +65,11 @@ interface MonitorTickState {
   analyses: ReadonlyMap<string, import("./monitor.ts").AnalysisResult>;
 }
 
-/** Scheduler-owned deterministic Monitor execution runtime. */
+/**
+ * @deprecated Legacy compatibility runtime for target-bound `/monitor` commands.
+ * Monitor control sessions are agent-operated and should choose LLM-callable
+ * tools such as `observe`, `teammate-send`, and `loop` instead.
+ */
 export class MonitorRuntime {
   readonly engine: MonitorEngineState;
   readonly options: MonitorRuntimeOptions;

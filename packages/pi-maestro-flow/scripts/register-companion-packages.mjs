@@ -54,6 +54,14 @@ function replaceSource(entry, source) {
   return typeof entry === "string" ? source : { ...entry, source };
 }
 
+function enableManagedCompanionExtensions(entry) {
+  if (!isRecord(entry) || !Array.isArray(entry.extensions) || entry.extensions.length > 0) return entry;
+  const { extensions: _disabledExtensions, ...enabledEntry } = entry;
+  return Object.keys(enabledEntry).length === 1 && typeof enabledEntry.source === "string"
+    ? enabledEntry.source
+    : enabledEntry;
+}
+
 function readJsonObject(filePath, label) {
   let parsed;
   try {
@@ -316,8 +324,9 @@ export function registerCompanionPackages({
     if (exact.length > 0) {
       const kept = preferredManagedEntry(matches, target);
       const replacedSource = kept.source;
+      const nextEntry = kept.isTarget ? kept.entry : replaceSource(kept.entry, target.source);
+      packages[kept.index] = enableManagedCompanionExtensions(nextEntry);
       if (!kept.isTarget) {
-        packages[kept.index] = replaceSource(kept.entry, target.source);
         replaced.push({ name: target.name, from: replacedSource, to: target.source });
       }
       const removable = new Set(matches
@@ -333,7 +342,9 @@ export function registerCompanionPackages({
     const owned = matches.filter((entry) => entry.isState || entry.isLegacy);
     if (owned.length > 0) {
       const replacedEntry = owned[0];
-      packages[replacedEntry.index] = replaceSource(replacedEntry.entry, target.source);
+      packages[replacedEntry.index] = enableManagedCompanionExtensions(
+        replaceSource(replacedEntry.entry, target.source),
+      );
       packages = removeIndexes(packages, new Set(owned.slice(1).map((entry) => entry.index)));
       companions[target.name] = makeStateEntry(target);
       replaced.push({ name: target.name, from: replacedEntry.source, to: target.source });

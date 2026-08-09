@@ -54,7 +54,7 @@ Flow `0.18.0` bundles Teammate `1.11.0`, Cockpit `0.13.0`, and
 withdrawn v0.17.0: it re-introduces the v0.17.0 feature set (cross-session
 scheduler with durable monitor supervision, teammate dispatch hardening,
 shared TUI locale, self-evolve auto-deposit Phase 2B, run-loop fixes,
-api-manager model-ID rename, core engine `maestro-flow@0.5.67`) with the
+api-manager model-ID rename, core engine `maestro-flow@0.5.68`) with the
 packaged-resource restoration fix, plus:
 
 - **Packaged Pi resources restored**: the v0.17.1 packaging fix
@@ -68,6 +68,17 @@ packaged-resource restoration fix, plus:
   reload so queued peer messages are re-delivered instead of dropped; monitor
   intervention delivery acknowledgements with retry and stale detection;
   cross-session abort explicitly rejected with a clear error.
+- **Teammate Monitor loop supervision**: Monitor mode context rewritten as
+  agent-operated supervision guidance — one bounded prompt loop for the
+  complete target set, never one loop per session and never a shell loop;
+  the extension tracks active prompt loops via `loop:update` and warns on
+  Monitor exit when monitoring loops keep running (`loop list` / `loop
+  cancel` to stop); `MonitorRuntime` is marked deprecated as a legacy
+  compatibility runtime for target-bound `/monitor` commands.
+- **Flow companion registration extension enablement**: managed companion
+  entries with an empty `extensions` array are registered with extensions
+  enabled (`enableManagedCompanionExtensions` in
+  `register-companion-packages.mjs`), with new test coverage.
 - **Scholar skills suite (optional)**: `optional/skills/scholar-*` — 10
   optional academic-research skills covering ideation, experiments,
   writing, review/rebuttal, citation verification, anti-AI-writing polish,
@@ -78,8 +89,10 @@ packaged-resource restoration fix, plus:
   feature card updated, changelog carries the withdrawal record and the
   v0.18.0 entry, and all install commands point at v0.18.0.
 
-The core engine reference stays at **`maestro-flow@0.5.67`** (exact pin,
-unchanged from v0.17.0 — verified equal to the latest upstream at preflight).
+The core engine reference is bumped to **`maestro-flow@0.5.68`** (exact
+pin, up from v0.17.0's 0.5.67 — user decision at preflight: 0.5.68 was
+released after the v0.17.0 preflight; the local `maestro2` source is already
+at 0.5.68).
 
 ## Package Versions and Requirements
 
@@ -89,15 +102,15 @@ unchanged from v0.17.0 — verified equal to the latest upstream at preflight).
 | pi-maestro-teammate | 1.9.0 | 1.10.0 | **1.11.0** |
 | pi-cockpit | 0.11.0 | 0.12.0 | **0.13.0** |
 | pi-maestro-settings-core | 0.1.1 | 0.1.2 | **0.1.3** |
-| maestro-flow | 0.5.65 | 0.5.67 | **0.5.67** |
+| maestro-flow | 0.5.65 | 0.5.67 | **0.5.68** |
 
 - Requires Node.js `>=22.19.0`.
 - Pi core packages remain optional wildcard peers supplied by the host; the
   release tarballs do not bundle private SDK copies. The dev verification
   baseline stays at `@earendil-works/pi-*@0.83.0`.
-- `pi-maestro-flow` pins the core engine `maestro-flow` exactly at `0.5.67`
-  (verified `npm view maestro-flow version` = `0.5.67` at preflight — no
-  stale pin; see `TIP-20260727-exact-pin-stale-upstream-dep`).
+- `pi-maestro-flow` pins the core engine `maestro-flow` exactly at `0.5.68`
+  (bumped from 0.5.67 per preflight decision — upstream 0.5.68 released
+  2026-08-09; see `TIP-20260727-exact-pin-stale-upstream-dep`).
 - Exact workspace pins are bumped together with the closure: settings-core
   `0.1.2` → `0.1.3` (un-deprecates the pin after the withdrawal) in
   Teammate, Cockpit, and Flow; teammate `1.10.1` → `1.11.0` and cockpit
@@ -162,13 +175,19 @@ unchanged from v0.17.0 — verified equal to the latest upstream at preflight).
 - Changelog: withdrawal record for v0.17.0 plus the v0.18.0 entry.
 - All install commands in README/GUIDE/USAGE/docs-site updated to v0.18.0.
 
-## Core Engine Reference — maestro-flow@0.5.67 (unchanged)
+## Core Engine Reference — maestro-flow@0.5.68 (bumped from 0.5.67)
 
-Same exact pin as v0.17.0. Carries the run-chain fixes: projections
-registered on all session creation paths plus enum-arg validation and
-session prune, chain-file step args and explicit topic preserved in chain
-start, and `--arg` passed through chain dispatch with failed sessions kept
-canonical-reachable.
+Carries the v0.5.67 run-chain fixes (projections registered on all session
+creation paths plus enum-arg validation and session prune, chain-file step
+args and explicit topic preserved in chain start, and `--arg` passed
+through chain dispatch with failed sessions kept canonical-reachable) plus
+the v0.5.68 Run-completion path fixes: `--evidence` / `--artifact` /
+`--chain-proposal` relative paths resolve with an explicit Run-directory
+base and CWD fallback (error messages include the resolved absolute path,
+the Run base, and repair guidance), a Windows cross-drive containment
+bypass is fixed (`path.relative()` across drives returned an absolute path
+instead of `..`, defeating the old `outputs/` containment check), and
+skill-layer verification docs align with evidence-reuse discipline.
 
 ## Behavior and Upgrade Notes
 
@@ -225,7 +244,7 @@ Publication order is mandatory:
 2. Publish and verify `pi-maestro-teammate@1.11.0` (pins settings-core 0.1.3).
 3. Publish and verify `pi-cockpit@0.13.0` (pins settings-core 0.1.3).
 4. Publish and verify `pi-maestro-flow@0.18.0` with exact companion versions
-   and `maestro-flow@0.5.67`.
+   and `maestro-flow@0.5.68`.
 5. Run the fresh isolated registry install + RPC + Skill discovery smoke.
 6. Create and push `v0.18.0`, then create the GitHub Release.
 

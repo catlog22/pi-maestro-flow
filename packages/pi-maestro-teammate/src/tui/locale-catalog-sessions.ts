@@ -81,6 +81,7 @@ export const SESSION_TUI_CATALOGS = {
     "extension.messageDelivered": "Message delivered to {target}.",
     "extension.messageUndelivered": "Message could not be delivered to {target}.",
     "extension.monitorClosed": "Monitor mode closed (double Esc).",
+    "extension.monitorLoopsContinue": "{count} active prompt loop(s) continue after Monitor exit: {ids}. Use loop list and loop cancel to stop monitoring ticks.",
   },
   "zh-CN": {
     "monitor.title": "Monitor · 选择会话",
@@ -162,5 +163,6 @@ export const SESSION_TUI_CATALOGS = {
     "extension.messageDelivered": "消息已送达 {target}。",
     "extension.messageUndelivered": "消息无法送达 {target}。",
     "extension.monitorClosed": "Monitor 模式已关闭（双击 Esc）。",
+    "extension.monitorLoopsContinue": "退出 Monitor 后仍有 {count} 个 prompt loop 在运行：{ids}。请使用 loop list 和 loop cancel 停止监控 tick。",
   },
 } as const satisfies TranslationCatalogs;

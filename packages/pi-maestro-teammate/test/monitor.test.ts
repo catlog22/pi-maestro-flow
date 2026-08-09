@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   barrierWait,
+  activePromptLoopIdsFromPayload,
   appendMonitorModeContext,
   createMonitorModeState,
   formatBarrierCompact,
@@ -240,18 +241,41 @@ test("monitor mode context is persistent, idempotent, and supervision-only", () 
   const injected = appendMonitorModeContext("base prompt");
   assert.match(injected, /<monitor_mode>/);
   assert.match(injected, /monitor control window/);
+  assert.match(injected, /agent-operated session mode/);
+  assert.match(injected, /one observe call with all relevant targets as kind=workspace/);
+  assert.match(injected, /one bounded prompt loop for the complete target set/);
+  assert.match(injected, /loop with action=list/);
+  assert.match(injected, /not stopped by \/monitor exit/);
   assert.match(injected, /Do not implement project work/);
   assert.equal(appendMonitorModeContext(injected), injected);
+});
+
+test("activePromptLoopIdsFromPayload keeps only active prompt loops", () => {
+  assert.equal(activePromptLoopIdsFromPayload(undefined), undefined);
+  assert.deepEqual(activePromptLoopIdsFromPayload({ jobs: [
+    { id: "loop-monitor", kind: "prompt", status: "scheduled" },
+    { id: "loop-running", kind: "prompt", status: "running" },
+    { id: "loop-complete", kind: "prompt", status: "completed" },
+    { id: "loop-shell", kind: "shell", status: "scheduled" },
+    { id: "", kind: "prompt", status: "running" },
+    { id: "loop-monitor", kind: "prompt", status: "scheduled" },
+  ] }), ["loop-monitor", "loop-running"]);
 });
 
 test("monitor mode stays a soft constraint with no tool-call interception", async () => {
   const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   const monitorSource = await readFile(new URL("../src/extension/monitor.ts", import.meta.url), "utf8");
+  const runtimeSource = await readFile(new URL("../src/extension/monitor-runtime.ts", import.meta.url), "utf8");
   const coreSource = await readFile(new URL("../src/extension/teammate-core.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /guardMonitorModeToolCall/);
   assert.doesNotMatch(source, /pi\.on\("tool_call", \(event\) => \{\n\s*if \(!monitorInteractionModeActive\)/);
   assert.match(monitorSource, /appendMonitorModeContext/);
+  assert.match(runtimeSource, /@deprecated Legacy compatibility runtime/);
   assert.match(coreSource, /view="turns"/);
+  assert.match(source, /pi\.events\.on\("loop:update", applyLoopSnapshot\)/);
+  assert.match(source, /pi\.events\.emit\("loop:query", undefined\)/);
+  assert.match(source, /notifyMonitorModeClosed/);
+  assert.match(source, /extension\.monitorLoopsContinue/);
   assert.match(source, /const MONITOR_ESCAPE_TAP_WINDOW_MS = 500;/);
   assert.match(source, /matchesKey\(data, "escape"\) \|\| isKeyRelease\(data\) \|\| isKeyRepeat\(data\)/);
   assert.match(source, /monitorEscapeTapAt <= MONITOR_ESCAPE_TAP_WINDOW_MS[\s\S]*?requestWindowMode\("exit"\)[\s\S]*?consume: true/);

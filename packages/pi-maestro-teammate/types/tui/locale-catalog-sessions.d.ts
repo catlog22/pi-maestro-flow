@@ -79,6 +79,7 @@ export declare const SESSION_TUI_CATALOGS: {
         readonly "extension.messageDelivered": "Message delivered to {target}.";
         readonly "extension.messageUndelivered": "Message could not be delivered to {target}.";
         readonly "extension.monitorClosed": "Monitor mode closed (double Esc).";
+        readonly "extension.monitorLoopsContinue": "{count} active prompt loop(s) continue after Monitor exit: {ids}. Use loop list and loop cancel to stop monitoring ticks.";
     };
     readonly "zh-CN": {
         readonly "monitor.title": "Monitor · 选择会话";
@@ -160,5 +161,6 @@ export declare const SESSION_TUI_CATALOGS: {
         readonly "extension.messageDelivered": "消息已送达 {target}。";
         readonly "extension.messageUndelivered": "消息无法送达 {target}。";
         readonly "extension.monitorClosed": "Monitor 模式已关闭（双击 Esc）。";
+        readonly "extension.monitorLoopsContinue": "退出 Monitor 后仍有 {count} 个 prompt loop 在运行：{ids}。请使用 loop list 和 loop cancel 停止监控 tick。";
     };
 };

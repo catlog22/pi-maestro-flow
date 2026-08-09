@@ -39,6 +39,7 @@ import {
   type ObservationWaitStatus,
 } from "../public/v1/observation.ts";
 import {
+  activePromptLoopIdsFromPayload,
   appendMonitorModeContext,
   formatCompact,
   formatVerbose,
@@ -957,6 +958,7 @@ export default function registerTeammateExtension(
   let workspacePeerSessionName: string | undefined;
   let workspacePeerOwners: WorkspaceOwnerSnapshot[] = [];
   let workspaceBackgroundJobs: WorkspaceBackgroundJobSnapshot[] = [];
+  let activePromptLoopIds: string[] = [];
   let workspacePeerRefresh: Promise<WorkspaceOwnerSnapshot[]> | undefined;
   let workspacePeerLifecycle = Promise.resolve();
   let sessionHostRegistry: SessionHostRegistry | undefined;
@@ -1032,6 +1034,12 @@ export default function registerTeammateExtension(
     if (!next) return;
     workspaceBackgroundJobs = next;
     markWorkspacePeerDirty();
+  };
+
+  const applyLoopSnapshot = (payload: unknown): void => {
+    const next = activePromptLoopIdsFromPayload(payload);
+    if (!next) return;
+    activePromptLoopIds = next;
   };
 
   /** Context pressure % of this session (published to peer windows). */
@@ -3784,6 +3792,24 @@ export default function registerTeammateExtension(
     syncMonitorInteractionStatus();
   };
 
+  const notifyMonitorModeClosed = (
+    ui: ExtensionContext["ui"] | undefined,
+    message: string,
+  ): void => {
+    if (!ui) return;
+    if (activePromptLoopIds.length === 0) {
+      ui.notify(message, "info");
+      return;
+    }
+    ui.notify(
+      `${message}\n${tuiT("extension.monitorLoopsContinue", {
+        count: activePromptLoopIds.length,
+        ids: activePromptLoopIds.join(", "),
+      })}`,
+      "warning",
+    );
+  };
+
   // Double bare-Esc exits Monitor mode. The first Esc is always passed through
   // untouched (native cancel/clear semantics stay intact); only a second Esc
   // inside the window is consumed. This intentionally takes precedence over
@@ -3804,7 +3830,7 @@ export default function registerTeammateExtension(
       if (now - monitorEscapeTapAt <= MONITOR_ESCAPE_TAP_WINDOW_MS) {
         monitorEscapeTapAt = 0;
         void monitorRegistry.requestWindowMode("exit").then(() => {
-          widgetCtx?.ui.notify(tuiT("extension.monitorClosed"), "info");
+          notifyMonitorModeClosed(widgetCtx?.ui, tuiT("extension.monitorClosed"));
         });
         return { consume: true };
       }
@@ -5502,7 +5528,7 @@ export default function registerTeammateExtension(
           return;
         }
         await monitorRegistry.requestWindowMode("exit");
-        ctx.ui.notify("Monitor session stopped.", "info");
+        notifyMonitorModeClosed(ctx.ui, "Monitor session stopped.");
         return;
       }
 
@@ -5860,6 +5886,7 @@ export default function registerTeammateExtension(
   });
 
   pi.events.on("bash-bg:update", applyBashBgSnapshot);
+  pi.events.on("loop:update", applyLoopSnapshot);
 
   pi.events.on(COCKPIT_UI_OWNERSHIP_EVENT, (payload) => {
     if (!payload || typeof payload !== "object") return;
@@ -5938,6 +5965,7 @@ export default function registerTeammateExtension(
     // Query after all extensions have registered their event listeners. The
     // update is cached even if the async workspace publisher is still starting.
     pi.events.emit("bash-bg:query", undefined);
+    pi.events.emit("loop:query", undefined);
     rebuildHistory(ctx);
   });
 
@@ -5996,6 +6024,7 @@ export default function registerTeammateExtension(
     await monitorControllerInstance.shutdown();
     stopAllManagedWindows();
     workspaceBackgroundJobs = [];
+    activePromptLoopIds = [];
     workspacePeerLifecycle = workspacePeerLifecycle.then(stopWorkspacePeers);
     // Stop the mailbox consumer BEFORE killing agents so no in-flight poll can
     // inject into a dying session (previously never stopped at all).

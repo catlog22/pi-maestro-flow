@@ -123,6 +123,42 @@ test("replaces a sidecar-owned companion source while preserving object resource
   assert.equal(readState(state.stateFile).companions["pi-maestro-teammate"].source, state.teammate);
 });
 
+test("re-enables extensions for a Flow-managed companion registration", (t) => {
+  const state = fixture(t);
+  register(state, { packageDirs: [state.teammate] });
+  const disabled = {
+    source: state.teammate,
+    extensions: [],
+    skills: ["./custom-skill"],
+    custom: true,
+  };
+  writeJson(state.settingsFile, { packages: [disabled] });
+
+  const result = register(state, { packageDirs: [state.teammate] });
+
+  assert.equal(result.changed, true);
+  assert.deepEqual(readState(state.settingsFile).packages, [{
+    source: state.teammate,
+    skills: ["./custom-skill"],
+    custom: true,
+  }]);
+  assert.equal(register(state, { packageDirs: [state.teammate] }).changed, false);
+});
+
+test("restores the plain package entry when an empty extension filter is the only override", (t) => {
+  const state = fixture(t);
+  register(state, { packageDirs: [state.teammate] });
+  writeJson(state.settingsFile, {
+    packages: [{ source: state.teammate, extensions: [] }],
+  });
+
+  const result = register(state, { packageDirs: [state.teammate] });
+
+  assert.equal(result.changed, true);
+  assert.deepEqual(readState(state.settingsFile).packages, [state.teammate]);
+  assert.equal(register(state, { packageDirs: [state.teammate] }).changed, false);
+});
+
 test("migrates a legacy companion nested under an older Flow package root", (t) => {
   const state = fixture(t);
   const oldFlow = join(state.root, "old-flow");
@@ -175,17 +211,18 @@ test("preserves a local checkout nested under a Flow repository root", (t) => {
   assert.deepEqual(readState(state.settingsFile).packages, [localTeammate]);
 });
 
-test("preserves a same-name workspace override without adding a duplicate companion", (t) => {
+test("preserves a disabled same-name workspace override without adding a duplicate companion", (t) => {
   const state = fixture(t);
   const workspace = join(state.root, "workspace", "pi-maestro-teammate");
   writePackage(workspace, "pi-maestro-teammate");
-  writeJson(state.settingsFile, { packages: [workspace] });
+  const entry = { source: workspace, extensions: [], custom: true };
+  writeJson(state.settingsFile, { packages: [entry] });
 
   const result = register(state, { packageDirs: [state.teammate] });
 
   assert.equal(result.changed, false);
   assert.deepEqual(result.preservedUnowned, [{ name: "pi-maestro-teammate", source: workspace }]);
-  assert.deepEqual(readState(state.settingsFile).packages, [workspace]);
+  assert.deepEqual(readState(state.settingsFile).packages, [entry]);
   assert.equal(existsSync(state.stateFile), false);
 });
 

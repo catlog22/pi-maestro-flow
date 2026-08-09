@@ -68,13 +68,14 @@ export const MONITOR_MODE_CONTEXT_END = "</monitor_mode>";
 const MONITOR_MODE_CONTEXT = [
   MONITOR_MODE_CONTEXT_START,
   "# Monitor Mode",
-  "This current session is the monitor control window. Its only responsibility is to supervise and coordinate other workspace windows according to their tasks and the user's monitoring instructions.",
-  "Use teammate-list with view=windows to discover peer windows, teammate-send for follow_up or steer interventions, and observe or the monitor tools for bounded status checks. Cross-window abort is unavailable.",
-  "Write every teammate-send body as a concrete instruction. Routing metadata and reply instructions are added automatically; do not put routing boilerplate in the body.",
-  "For status requests, name the exact fields or evidence the peer must return. Use steer for time-sensitive coordination and follow_up for non-urgent work.",
-  "A queued or accepted receipt proves enqueueing only, not model consumption. Never evaluate intervention effectiveness until delivery is explicitly injected.",
-  "Do not implement project work, edit files, run shell commands, or start unrelated research in this control window. Delegate or message the appropriate peer window instead.",
-  "Treat user messages in the #control tab as monitoring policy, priorities, or intervention instructions. Ask the user to run /monitor exit before handling unrelated work in this session.",
+  "This session is the monitor control window. Its only responsibility is to supervise and coordinate other workspace sessions according to their tasks and the user's monitoring instructions. Monitor is an agent-operated session mode; there is no LLM-callable monitor-runtime tool.",
+  "Use teammate-list with view=windows to discover peer sessions. For one-shot or bounded checks, use one observe call with all relevant targets as kind=workspace. Use teammate-send with follow_up or steer for interventions. teammate-monitor is a legacy teammate-agent tool and must not be used for workspace sessions. Cross-window abort is unavailable.",
+  "Choose whether recurring monitoring is needed from the user's intent. Do not create a loop for a one-shot status request or a bounded observe wait/watch. When supervision must continue without user messages, use loop to create one bounded prompt loop for the complete target set; never create one loop per session and never use a shell loop for Monitor supervision.",
+  "Before creating a monitoring loop, call loop with action=list and reuse or cancel an existing monitoring loop instead of duplicating it. Each loop tick should rediscover the named workspace sessions, observe all targets in one call, compare new evidence with prior state, and intervene only when warranted. Cancel the loop when every target settles or continuous supervision is no longer requested.",
+  "Write every teammate-send body as a concrete instruction. Routing metadata and reply instructions are added automatically; do not put routing boilerplate in the body. For status requests, name the exact fields or evidence the peer must return. Use steer for time-sensitive coordination and follow_up for non-urgent work.",
+  "A queued or accepted receipt proves enqueueing only, not model consumption. Treat intervention effectiveness as unknown until target-side injection and subsequent peer state provide evidence.",
+  "Do not implement project work, edit files, run shell commands, or start unrelated research in this control window. Delegate or message the appropriate peer session instead.",
+  "Treat user messages in the #control tab as monitoring policy, priorities, or intervention instructions. Generic loops are not owned by Monitor mode and are not stopped by /monitor exit. Before asking the user to exit, list active loops and cancel monitoring loops; ask the user to run /monitor exit before handling unrelated work in this session.",
   MONITOR_MODE_CONTEXT_END,
 ].join("\n");
 
@@ -84,6 +85,21 @@ export function appendMonitorModeContext(systemPrompt: string): string {
   const end = systemPrompt.indexOf(MONITOR_MODE_CONTEXT_END, start);
   if (end < 0) return `${systemPrompt.slice(0, start).trimEnd()}\n\n${MONITOR_MODE_CONTEXT}`;
   return `${systemPrompt.slice(0, start).trimEnd()}\n\n${MONITOR_MODE_CONTEXT}${systemPrompt.slice(end + MONITOR_MODE_CONTEXT_END.length)}`;
+}
+
+/** Extract active prompt loops from the Flow loop service's event snapshot. */
+export function activePromptLoopIdsFromPayload(payload: unknown): string[] | undefined {
+  if (!plainObject(payload) || !Array.isArray(payload.jobs)) return undefined;
+  const ids = new Set<string>();
+  for (const job of payload.jobs) {
+    if (!plainObject(job)
+      || job.kind !== "prompt"
+      || (job.status !== "scheduled" && job.status !== "running")
+      || typeof job.id !== "string"
+      || !job.id.trim()) continue;
+    ids.add(job.id);
+  }
+  return [...ids];
 }
 
 // ---------------------------------------------------------------------------
