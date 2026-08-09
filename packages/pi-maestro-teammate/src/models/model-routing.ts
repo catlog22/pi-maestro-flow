@@ -11,6 +11,7 @@ import {
   type TeammateTaskType,
 } from "../shared/task-types.ts";
 import { parseTeammateThinkingLevel, type TeammateThinkingLevel } from "../shared/thinking.ts";
+import type { ModelCircuitPolicy, ModelCircuitBreaker } from "./model-circuit-breaker.ts";
 
 export { TEAMMATE_TASK_TYPES, parseTeammateTaskType } from "../shared/task-types.ts";
 export type { TeammateTaskType } from "../shared/task-types.ts";
@@ -28,10 +29,33 @@ export const TEAMMATE_TASK_TYPE_META: Record<
   testing: { label: "Testing", roles: "general / analyst", description: "Tests, coverage, and regression validation" },
 };
 
+/**
+ * Effective metadata for a task type: the user-defined `typeMeta` keywords
+ * from the routing config, if any (custom types have no built-in meta).
+ */
+export function resolveTaskTypeMeta(
+  config: ModelRoutingConfig,
+  taskType: TeammateTaskType,
+): { keywords?: string[] } | undefined {
+  const override = config.typeMeta?.[taskType];
+  if (!override || override === null || !override.keywords || override.keywords.length === 0) return undefined;
+  return { keywords: [...override.keywords] };
+}
+
 export interface ModelRoutingRoleRules {
   model?: string | null;
   fallbackModels?: string[] | null;
   thinking?: TeammateThinkingLevel | null;
+  /** Per-role circuit breaker policy applied to the role's mapped model. */
+  circuit?: ModelCircuitPolicy | null;
+  /** Assigned task type; outranks the agent's frontmatter taskType at routing time. */
+  taskType?: TeammateTaskType | null;
+}
+
+/** User-editable metadata for a task type: trigger keywords, like a skill description. */
+export interface ModelRoutingTypeMeta {
+  /** Trigger keywords defining when to use the type; `null` clears them. */
+  keywords?: string[] | null;
 }
 
 export interface ModelRoutingRules {
@@ -39,6 +63,8 @@ export interface ModelRoutingRules {
   fallbackMappings?: Partial<Record<TeammateTaskType, string[] | null>>;
   thinkingLevels: Partial<Record<TeammateTaskType, TeammateThinkingLevel | null>>;
   roleMappings?: Record<string, ModelRoutingRoleRules | null>;
+  /** Trigger-keyword metadata per task type; `null` clears an override. */
+  typeMeta?: Record<string, ModelRoutingTypeMeta | null>;
 }
 
 export interface ModelRoutingProfile extends ModelRoutingRules {
@@ -120,7 +146,17 @@ function cloneRoleMappings(roleMappings: ModelRoutingRules["roleMappings"]): Mod
         ? { fallbackModels: rules.fallbackModels === null ? null : [...(rules.fallbackModels ?? [])] }
         : {}),
       ...(hasOwn(rules, "thinking") ? { thinking: rules.thinking } : {}),
+      ...(hasOwn(rules, "circuit") ? { circuit: rules.circuit === null ? null : { ...rules.circuit } } : {}),
+      ...(hasOwn(rules, "taskType") ? { taskType: rules.taskType } : {}),
     },
+  ]));
+}
+
+function cloneTypeMeta(typeMeta: ModelRoutingRules["typeMeta"]): ModelRoutingRules["typeMeta"] {
+  if (!typeMeta) return undefined;
+  return Object.fromEntries(Object.entries(typeMeta).map(([taskType, meta]) => [
+    taskType,
+    meta === null ? null : { keywords: meta.keywords === null ? null : [...(meta.keywords ?? [])] },
   ]));
 }
 
@@ -132,11 +168,13 @@ function cloneRules(rules: ModelRoutingRules): ModelRoutingRules {
     ]))
     : undefined;
   const roleMappings = cloneRoleMappings(rules.roleMappings);
+  const typeMeta = cloneTypeMeta(rules.typeMeta);
   return {
     mappings: { ...rules.mappings },
     ...(fallbackMappings && Object.keys(fallbackMappings).length > 0 ? { fallbackMappings } : {}),
     thinkingLevels: { ...rules.thinkingLevels },
     ...(roleMappings && Object.keys(roleMappings).length > 0 ? { roleMappings } : {}),
+    ...(typeMeta && Object.keys(typeMeta).length > 0 ? { typeMeta } : {}),
   };
 }
 
@@ -182,7 +220,7 @@ function validateRoleMappings(value: unknown, label: string): void {
       throw new Error(`Invalid ${label} role mapping: ${role}`);
     }
     const rules = rawRules as Record<string, unknown>;
-    assertKnownKeys(rules, ["model", "fallbackModels", "thinking"], `Role ${role}`);
+    assertKnownKeys(rules, ["model", "fallbackModels", "thinking", "circuit", "taskType"], `Role ${role}`);
     if (rules.model !== undefined && rules.model !== null && (typeof rules.model !== "string" || !rules.model.trim())) {
       throw new Error(`Invalid ${label} role model: ${role}`);
     }
@@ -194,11 +232,29 @@ function validateRoleMappings(value: unknown, label: string): void {
     if (rules.thinking !== undefined && rules.thinking !== null && !parseTeammateThinkingLevel(rules.thinking)) {
       throw new Error(`Invalid ${label} role thinking level: ${role}`);
     }
+    if (rules.taskType !== undefined && rules.taskType !== null && !parseTeammateTaskType(rules.taskType)) {
+      throw new Error(`Invalid ${label} role task type: ${role}`);
+    }
+    if (rules.circuit !== undefined && rules.circuit !== null) {
+      if (!rules.circuit || typeof rules.circuit !== "object" || Array.isArray(rules.circuit)) {
+        throw new Error(`Invalid ${label} role circuit policy: ${role}`);
+      }
+      const circuit = rules.circuit as Record<string, unknown>;
+      assertKnownKeys(circuit, ["threshold", "cooldownMs"], `Role ${role} circuit`);
+      if (circuit.threshold !== undefined
+        && (typeof circuit.threshold !== "number" || !Number.isInteger(circuit.threshold) || circuit.threshold < 1)) {
+        throw new Error(`Invalid ${label} role circuit threshold: ${role}`);
+      }
+      if (circuit.cooldownMs !== undefined
+        && (typeof circuit.cooldownMs !== "number" || !Number.isFinite(circuit.cooldownMs) || circuit.cooldownMs < 0)) {
+        throw new Error(`Invalid ${label} role circuit cooldown: ${role}`);
+      }
+    }
   }
 }
 
 function validateV3Rules(value: Record<string, unknown>, label: string): void {
-  assertKnownKeys(value, ["mappings", "fallbackMappings", "thinkingLevels", "roleMappings"], label);
+  assertKnownKeys(value, ["mappings", "fallbackMappings", "thinkingLevels", "roleMappings", "typeMeta"], label);
   if (!value.mappings || typeof value.mappings !== "object" || Array.isArray(value.mappings)
     || !value.thinkingLevels || typeof value.thinkingLevels !== "object" || Array.isArray(value.thinkingLevels)
     || (value.fallbackMappings !== undefined
@@ -225,6 +281,25 @@ function validateV3Rules(value: Record<string, unknown>, label: string): void {
     }
   }
   validateRoleMappings(value.roleMappings, label);
+  if (value.typeMeta !== undefined) {
+    if (!value.typeMeta || typeof value.typeMeta !== "object" || Array.isArray(value.typeMeta)) {
+      throw new Error(`Invalid ${label} typeMeta`);
+    }
+    for (const [taskType, rawMeta] of Object.entries(value.typeMeta as Record<string, unknown>)) {
+      if (!parseTeammateTaskType(taskType)) throw new Error(`Invalid ${label} typeMeta type: ${taskType}`);
+      if (rawMeta === null) continue;
+      if (!rawMeta || typeof rawMeta !== "object" || Array.isArray(rawMeta)) {
+        throw new Error(`Invalid ${label} typeMeta entry: ${taskType}`);
+      }
+      const meta = rawMeta as Record<string, unknown>;
+      assertKnownKeys(meta, ["keywords"], `Type ${taskType} meta`);
+      if (meta.keywords !== undefined && meta.keywords !== null
+        && (!Array.isArray(meta.keywords)
+          || meta.keywords.some((keyword) => typeof keyword !== "string" || !keyword.trim()))) {
+        throw new Error(`Invalid ${label} typeMeta keywords: ${taskType}`);
+      }
+    }
+  }
 }
 
 function normalizeRules(value: unknown): ModelRoutingRules {
@@ -292,13 +367,58 @@ function normalizeRules(value: unknown): ModelRoutingRules {
       const normalizedThinking = parseTeammateThinkingLevel(rules.thinking);
       if (normalizedThinking) normalized.thinking = normalizedThinking;
     }
+    if (rules.taskType === null) normalized.taskType = null;
+    else {
+      const normalizedTaskType = parseTeammateTaskType(rules.taskType);
+      if (normalizedTaskType) normalized.taskType = normalizedTaskType;
+    }
+    if (rules.circuit === null) normalized.circuit = null;
+    else if (rules.circuit && typeof rules.circuit === "object" && !Array.isArray(rules.circuit)) {
+      const circuit = rules.circuit as Record<string, unknown>;
+      const normalizedCircuit: ModelCircuitPolicy = {};
+      if (typeof circuit.threshold === "number" && Number.isInteger(circuit.threshold) && circuit.threshold >= 1) {
+        normalizedCircuit.threshold = circuit.threshold;
+      }
+      if (typeof circuit.cooldownMs === "number" && Number.isFinite(circuit.cooldownMs) && circuit.cooldownMs >= 0) {
+        normalizedCircuit.cooldownMs = circuit.cooldownMs;
+      }
+      if (normalizedCircuit.threshold !== undefined || normalizedCircuit.cooldownMs !== undefined) {
+        normalized.circuit = normalizedCircuit;
+      }
+    }
     roleMappings[role] = normalized;
+  }
+  const typeMeta: Record<string, ModelRoutingTypeMeta | null> = {};
+  const rawTypeMeta = parsed.typeMeta && typeof parsed.typeMeta === "object" && !Array.isArray(parsed.typeMeta)
+    ? parsed.typeMeta as Record<string, unknown>
+    : {};
+  for (const [taskType, rawMeta] of Object.entries(rawTypeMeta)) {
+    const normalizedTaskType = parseTeammateTaskType(taskType);
+    if (!normalizedTaskType) continue;
+    if (rawMeta === null) {
+      typeMeta[normalizedTaskType] = null;
+      continue;
+    }
+    if (!rawMeta || typeof rawMeta !== "object" || Array.isArray(rawMeta)) continue;
+    const meta = rawMeta as Record<string, unknown>;
+    const normalizedMeta: ModelRoutingTypeMeta = {};
+    if (meta.keywords !== null && Array.isArray(meta.keywords)) {
+      const keywords = [...new Set(meta.keywords
+        .filter((keyword): keyword is string => typeof keyword === "string")
+        .map((keyword) => keyword.trim().toLowerCase())
+        .filter(Boolean))];
+      if (keywords.length > 0) normalizedMeta.keywords = keywords;
+    }
+    if (normalizedMeta.keywords !== undefined) {
+      typeMeta[normalizedTaskType] = normalizedMeta;
+    }
   }
   return {
     mappings,
     ...(Object.keys(fallbackMappings).length > 0 ? { fallbackMappings } : {}),
     thinkingLevels,
     ...(Object.keys(roleMappings).length > 0 ? { roleMappings } : {}),
+    ...(Object.keys(typeMeta).length > 0 ? { typeMeta } : {}),
   };
 }
 
@@ -321,11 +441,16 @@ function mergeRules(base: ModelRoutingRules, overrides: ModelRoutingRules): Mode
         : {}),
     };
   }
+  const typeMeta: Record<string, ModelRoutingTypeMeta | null> = {
+    ...(base.typeMeta ?? {}),
+    ...(overrides.typeMeta ?? {}),
+  };
   return {
     mappings: { ...base.mappings, ...overrides.mappings },
     ...(Object.keys(fallbackMappings).length > 0 ? { fallbackMappings } : {}),
     thinkingLevels: { ...base.thinkingLevels, ...overrides.thinkingLevels },
     ...(Object.keys(roleMappings).length > 0 ? { roleMappings } : {}),
+    ...(Object.keys(typeMeta).length > 0 ? { typeMeta } : {}),
   };
 }
 
@@ -333,7 +458,8 @@ function hasRules(rules: ModelRoutingRules): boolean {
   return Object.keys(rules.mappings).length > 0
     || Object.keys(rules.fallbackMappings ?? {}).length > 0
     || Object.keys(rules.thinkingLevels).length > 0
-    || Object.keys(rules.roleMappings ?? {}).length > 0;
+    || Object.keys(rules.roleMappings ?? {}).length > 0
+    || Object.keys(rules.typeMeta ?? {}).length > 0;
 }
 
 function normalizeProfileName(value: unknown, fallback: string): string {
@@ -390,13 +516,14 @@ function normalizeGlobalStore(parsed: Record<string, unknown> | undefined): Glob
         return invalidGlobalStore();
       }
       const profile = rawProfile as Record<string, unknown>;
-      assertKnownKeys(profile, ["name", "mappings", "fallbackMappings", "thinkingLevels", "roleMappings"], `Profile ${profileId}`);
+      assertKnownKeys(profile, ["name", "mappings", "fallbackMappings", "thinkingLevels", "roleMappings", "typeMeta"], `Profile ${profileId}`);
       if (typeof profile.name !== "string" || !normalizeProfileName(profile.name, "")) return invalidGlobalStore();
       validateV3Rules({
         mappings: profile.mappings,
         ...(hasOwn(profile, "fallbackMappings") ? { fallbackMappings: profile.fallbackMappings } : {}),
         thinkingLevels: profile.thinkingLevels,
         ...(hasOwn(profile, "roleMappings") ? { roleMappings: profile.roleMappings } : {}),
+        ...(hasOwn(profile, "typeMeta") ? { typeMeta: profile.typeMeta } : {}),
       }, `Profile ${profileId}`);
       profiles[profileId] = {
         name: normalizeProfileName(profile.name, profileId),
@@ -1107,6 +1234,8 @@ export function discoverRoutingTaskTypes(
     ...Object.keys(config.mappings),
     ...Object.keys(config.fallbackMappings ?? {}),
     ...Object.keys(config.thinkingLevels),
+    ...Object.keys(config.typeMeta ?? {}),
+    ...Object.values(config.roleMappings ?? {}).flatMap((rules) => rules?.taskType ? [rules.taskType] : []),
   ]) {
     const normalized = parseTeammateTaskType(taskType);
     if (normalized) taskTypes.add(normalized);
@@ -1201,6 +1330,34 @@ function normalizeRoleRulesInput(rules: ModelRoutingRoleRules | null): ModelRout
       : [...new Set(rules.fallbackModels.map((model) => model.trim()).filter(Boolean))];
   }
   if (rules.thinking !== undefined) normalized.thinking = rules.thinking;
+  if (rules.taskType !== undefined) {
+    if (rules.taskType === null) normalized.taskType = null;
+    else {
+      const taskType = parseTeammateTaskType(rules.taskType);
+      if (!taskType) throw new Error(`Invalid role task type: ${rules.taskType}`);
+      normalized.taskType = taskType;
+    }
+  }
+  if (rules.circuit !== undefined) {
+    if (rules.circuit === null) {
+      normalized.circuit = null;
+    } else {
+      const circuit: ModelCircuitPolicy = {};
+      if (rules.circuit.threshold !== undefined) {
+        if (!Number.isInteger(rules.circuit.threshold) || rules.circuit.threshold < 1) {
+          throw new Error("Role circuit threshold must be a positive integer");
+        }
+        circuit.threshold = rules.circuit.threshold;
+      }
+      if (rules.circuit.cooldownMs !== undefined) {
+        if (!Number.isFinite(rules.circuit.cooldownMs) || rules.circuit.cooldownMs < 0) {
+          throw new Error("Role circuit cooldownMs must be a non-negative number");
+        }
+        circuit.cooldownMs = rules.circuit.cooldownMs;
+      }
+      normalized.circuit = circuit;
+    }
+  }
   return normalized;
 }
 
@@ -1294,6 +1451,120 @@ export function saveGlobalProfileRoleMapping(
   return saveGlobalProfile(cwd, profileId, (profile) => {
     profile.roleMappings ??= {};
     profile.roleMappings[role] = normalized;
+  }, globalFilePath);
+}
+
+/** Atomically assign a task type to the requested roles and clear stale assignments to that type. */
+export function saveGlobalProfileTypeRoles(
+  cwd: string,
+  profileId: string,
+  taskType: TeammateTaskType,
+  roles: readonly string[],
+  globalFilePath = getGlobalModelRoutingPath(),
+): ModelRoutingState {
+  const normalizedTaskType = parseTeammateTaskType(taskType);
+  if (!normalizedTaskType) throw new Error(`Invalid teammate task type: ${taskType}`);
+  const requestedRoles = new Set(roles.map((role) => {
+    assertRoleName(role);
+    return role;
+  }));
+  return saveGlobalProfile(cwd, profileId, (profile) => {
+    profile.roleMappings ??= {};
+    for (const [role, existing] of Object.entries(profile.roleMappings)) {
+      if (existing?.taskType !== normalizedTaskType || requestedRoles.has(role)) continue;
+      profile.roleMappings[role] = { ...existing, taskType: null };
+    }
+    for (const role of requestedRoles) {
+      const existing = profile.roleMappings[role];
+      profile.roleMappings[role] = { ...(existing ?? {}), taskType: normalizedTaskType };
+    }
+  }, globalFilePath);
+}
+
+function normalizeTypeMetaInput(meta: ModelRoutingTypeMeta | null): ModelRoutingTypeMeta {
+  const normalized: ModelRoutingTypeMeta = {};
+  if (meta === null) return normalized;
+  if (meta.keywords !== undefined) {
+    if (meta.keywords === null) return normalized;
+    if (!Array.isArray(meta.keywords)) throw new Error("Type keywords must be an array");
+    const keywords = [...new Set(meta.keywords
+      .map((keyword) => keyword.trim().toLowerCase())
+      .filter(Boolean))];
+    if (keywords.length > 0) normalized.keywords = keywords;
+  }
+  return normalized;
+}
+
+/** Set, merge, or clear (null) the user-editable keywords for a task type. */
+export function saveGlobalProfileTypeMeta(
+  cwd: string,
+  profileId: string,
+  taskType: TeammateTaskType,
+  meta: ModelRoutingTypeMeta | null,
+  globalFilePath = getGlobalModelRoutingPath(),
+): ModelRoutingState {
+  const normalizedTaskType = parseTeammateTaskType(taskType);
+  if (!normalizedTaskType) throw new Error(`Invalid teammate task type: ${taskType}`);
+  return saveGlobalProfile(cwd, profileId, (profile) => {
+    profile.typeMeta ??= {};
+    const patch = normalizeTypeMetaInput(meta);
+    if (meta === null || patch.keywords === undefined) {
+      delete profile.typeMeta[normalizedTaskType];
+      return;
+    }
+    profile.typeMeta[normalizedTaskType] = patch;
+  }, globalFilePath);
+}
+
+/**
+ * Register a custom agent type in the active Profile. The type is marked by
+ * an explicit `mappings[type] = null` entry ("auto model"), which keeps it
+ * discoverable for routing configuration without forcing a model.
+ */
+export function saveGlobalProfileCustomType(
+  cwd: string,
+  profileId: string,
+  taskType: TeammateTaskType,
+  meta: ModelRoutingTypeMeta | null = null,
+  globalFilePath = getGlobalModelRoutingPath(),
+): ModelRoutingState {
+  const normalizedTaskType = parseTeammateTaskType(taskType);
+  if (!normalizedTaskType) throw new Error(`Invalid teammate task type: ${taskType}`);
+  if ((TEAMMATE_TASK_TYPES as readonly string[]).includes(normalizedTaskType)) {
+    throw new Error(`Cannot register a built-in teammate task type: ${normalizedTaskType}`);
+  }
+  const normalizedMeta = normalizeTypeMetaInput(meta);
+  return saveGlobalProfile(cwd, profileId, (profile) => {
+    profile.mappings[normalizedTaskType] = null;
+    if (normalizedMeta.keywords !== undefined) {
+      profile.typeMeta ??= {};
+      profile.typeMeta[normalizedTaskType] = normalizedMeta;
+    }
+  }, globalFilePath);
+}
+
+/** Remove a custom agent type and all of its routing entries from the active Profile. */
+export function deleteGlobalProfileCustomType(
+  cwd: string,
+  profileId: string,
+  taskType: TeammateTaskType,
+  globalFilePath = getGlobalModelRoutingPath(),
+): ModelRoutingState {
+  const normalizedTaskType = parseTeammateTaskType(taskType);
+  if (!normalizedTaskType) throw new Error(`Invalid teammate task type: ${taskType}`);
+  if ((TEAMMATE_TASK_TYPES as readonly string[]).includes(normalizedTaskType)) {
+    throw new Error(`Cannot delete a built-in teammate task type: ${normalizedTaskType}`);
+  }
+  return saveGlobalProfile(cwd, profileId, (profile) => {
+    delete profile.mappings[normalizedTaskType];
+    if (profile.fallbackMappings) delete profile.fallbackMappings[normalizedTaskType];
+    if (profile.thinkingLevels) delete profile.thinkingLevels[normalizedTaskType];
+    if (profile.typeMeta) delete profile.typeMeta[normalizedTaskType];
+    if (profile.roleMappings) {
+      for (const [role, rules] of Object.entries(profile.roleMappings)) {
+        if (rules?.taskType === normalizedTaskType) profile.roleMappings[role] = { ...rules, taskType: null };
+      }
+    }
   }, globalFilePath);
 }
 
@@ -1492,12 +1763,45 @@ function roleRules(config: ModelRoutingConfig, input: TaskTypeInput): ModelRouti
   return configured && configured !== null ? configured : undefined;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Match a task prompt against configured type keywords: the first type whose
+ * keyword appears as a whole word wins, in discovery order (built-ins first,
+ * then custom types alphabetically). Keywords are lowercased at normalize.
+ */
+export function inferTaskTypeByKeywords(
+  config: ModelRoutingConfig,
+  task: string | undefined,
+): TeammateTaskType | undefined {
+  const text = task?.toLowerCase() ?? "";
+  if (!text) return undefined;
+  for (const taskType of discoverRoutingTaskTypes("", [], config)) {
+    const meta = config.typeMeta?.[taskType];
+    if (!meta || !meta.keywords || meta.keywords.length === 0) continue;
+    for (const keyword of meta.keywords) {
+      if (new RegExp(`\\b${escapeRegExp(keyword)}\\b`).test(text)) return taskType;
+    }
+  }
+  return undefined;
+}
+
+function inferTaskTypeWithKeywords(config: ModelRoutingConfig, input: TaskTypeInput): TeammateTaskType | undefined {
+  // Explicit user-configured keywords outrank the built-in heuristic regexes:
+  // a configured trigger word is a higher-confidence signal than the generic
+  // prompt patterns, so a custom type can claim prompts the heuristics would
+  // otherwise route to a built-in type.
+  return inferTaskTypeByKeywords(config, input.task) ?? inferTaskType(input);
+}
+
 function mappedModel(
   config: ModelRoutingConfig,
   input: TaskTypeInput,
   availableModels: readonly string[],
 ): string | undefined {
-  const taskType = inferTaskType(input);
+  const taskType = inferTaskTypeWithKeywords(config, input);
   if (taskType) {
     const configured = config.mappings[taskType];
     if (configured) {
@@ -1515,7 +1819,7 @@ function mappedFallbackModels(
   input: TaskTypeInput,
   availableModels: readonly string[],
 ): string[] | undefined {
-  const taskType = inferTaskType(input);
+  const taskType = inferTaskTypeWithKeywords(config, input);
   const configured = taskType ? config.fallbackMappings?.[taskType] : undefined;
   if (configured) {
     const filtered = availableModels.length > 0
@@ -1532,7 +1836,7 @@ function mappedFallbackModels(
 }
 
 function mappedThinking(config: ModelRoutingConfig, input: TaskTypeInput): TeammateThinkingLevel | undefined {
-  const taskType = inferTaskType(input);
+  const taskType = inferTaskTypeWithKeywords(config, input);
   if (taskType) {
     const configured = config.thinkingLevels[taskType];
     if (configured) return configured;
@@ -1564,10 +1868,11 @@ export function applyModelRouting(
     const config = loadModelRoutingConfig(routingCwd, globalFilePath);
     const agent = task.agent ?? params.agent ?? "general";
     const explicitTaskType = task.taskType ?? params.taskType;
-    const roleTaskType = resolveAgent(routingCwd, agent)?.taskType;
+    const assignedRoleTaskType = roleRules(config, { agent, task: task.prompt })?.taskType;
+    const roleTaskType = assignedRoleTaskType ?? resolveAgent(routingCwd, agent)?.taskType;
     const taskType = explicitTaskType
       ?? roleTaskType
-      ?? inferTaskType({ agent, task: task.prompt });
+      ?? inferTaskTypeWithKeywords(config, { agent, task: task.prompt });
     return {
       ...task,
       ...(taskType ? { taskType } : {}),
@@ -1594,6 +1899,29 @@ export function applyModelRouting(
     tasks,
     thinking: topLevelThinking,
   };
+}
+
+/**
+ * Sync per-role circuit policies from the routing config onto a circuit
+ * breaker: each role rule with a `circuit` policy uses the assigned task
+ * type's mapped model first, then the role model when the type has no model.
+ * The breaker's policy map is rebuilt from the config on every call, so
+ * removed policies do not linger.
+ */
+export function syncModelCircuitPolicies(
+  breaker: ModelCircuitBreaker,
+  cwd: string,
+  globalFilePath = getGlobalModelRoutingPath(),
+): void {
+  breaker.clearPolicies();
+  const config = loadModelRoutingConfig(cwd, globalFilePath);
+  for (const rules of Object.values(config.roleMappings ?? {})) {
+    if (!rules || !rules.circuit) continue;
+    const typeModel = rules.taskType ? config.mappings[rules.taskType] : undefined;
+    const model = typeModel ?? rules.model;
+    if (!model) continue;
+    breaker.setPolicy(model, rules.circuit);
+  }
 }
 
 export interface ModelRegistryRefreshContext {
@@ -1640,12 +1968,55 @@ export async function refreshModelRegistry(ctx: ModelRegistryRefreshContext): Pr
 export function formatModelRoutingConfig(
   cwd: string,
   agents: readonly { taskType?: TeammateTaskType }[] = [],
+  globalFilePath = getGlobalModelRoutingPath(),
 ): string {
-  const config = loadModelRoutingConfig(cwd);
+  const config = loadModelRoutingConfig(cwd, globalFilePath);
   return discoverRoutingTaskTypes(cwd, agents, config)
     .map((taskType) => {
       const fallbacks = config.fallbackMappings?.[taskType]?.join(",") || "none";
       return `- ${taskType}: model=${config.mappings[taskType] ?? "auto/inherit main session"}, fallbacks=${fallbacks}, thinking=${config.thinkingLevels[taskType] ?? "inherit/default"}`;
     })
     .join("\n");
+}
+
+export const TASK_TYPE_ROUTING_START_MARKER = "<!-- teammate-tasktype-routing:start -->";
+export const TASK_TYPE_ROUTING_END_MARKER = "<!-- teammate-tasktype-routing:end -->";
+
+/**
+ * Inject concise taskType model-routing guidance for agents that can dispatch
+ * teammates. Replaces an existing block in place so repeated injection stays
+ * idempotent.
+ */
+export function appendTaskTypeRoutingContext(
+  systemPrompt: string,
+  cwd: string,
+  agents: readonly { taskType?: TeammateTaskType }[] = [],
+  globalFilePath = getGlobalModelRoutingPath(),
+): string {
+  const config = loadModelRoutingConfig(cwd, globalFilePath);
+  const routingTable = formatModelRoutingConfig(cwd, agents, globalFilePath);
+  const customTypes = discoverRoutingTaskTypes(cwd, agents, config)
+    .filter((taskType) => !(TEAMMATE_TASK_TYPES as readonly string[]).includes(taskType))
+    .map((taskType) => `  - ${taskType}`);
+  const lines = [
+    TASK_TYPE_ROUTING_START_MARKER,
+    "## Teammate taskType routing",
+    "`taskType` selects configured model, fallback-model, and thinking defaults; it does not change the agent role, tools, permissions, or task scope.",
+    "Set `tasks[].taskType` by the task's actual phase; top-level `taskType` is the default for all tasks. If omitted, the runtime uses the agent default or prompt inference and may inherit the parent model. Set `model` only to override routing.",
+    "",
+    "Legal task types (agents may declare more):",
+    ...TEAMMATE_TASK_TYPES.map((type) => `  - ${type}`),
+    ...(customTypes.length > 0 ? customTypes : []),
+    "",
+    "Current task-type model routing:",
+    ...routingTable.split("\n").map((line) => `  ${line}`),
+    TASK_TYPE_ROUTING_END_MARKER,
+  ];
+  const block = lines.join("\n");
+  const start = systemPrompt.indexOf(TASK_TYPE_ROUTING_START_MARKER);
+  const end = systemPrompt.indexOf(TASK_TYPE_ROUTING_END_MARKER);
+  if (start >= 0 && end >= start) {
+    return `${systemPrompt.slice(0, start)}${block}${systemPrompt.slice(end + TASK_TYPE_ROUTING_END_MARKER.length)}`;
+  }
+  return `${systemPrompt}\n\n${block}`;
 }

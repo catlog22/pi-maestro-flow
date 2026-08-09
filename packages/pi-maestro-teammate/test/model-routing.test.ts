@@ -6,7 +6,11 @@ import * as path from "node:path";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import test from "node:test";
 import {
+  ModelCircuitBreaker,
+} from "../src/models/model-circuit-breaker.ts";
+import {
   applyModelRouting,
+  appendTaskTypeRoutingContext,
   clearProjectModelRoutingOverrides,
   createAndActivateGlobalModelRoutingProfile,
   createGlobalModelRoutingProfile,
@@ -19,10 +23,15 @@ import {
   promoteProjectModelRoutingOverrides,
   refreshModelRegistry,
   renameGlobalModelRoutingProfile,
+  resolveTaskTypeMeta,
+  saveGlobalProfileCustomType,
   saveGlobalProfileFallbackMapping,
   saveGlobalProfileModelMapping,
   saveGlobalProfileRoleMapping,
+  saveGlobalProfileTypeRoles,
   saveGlobalProfileThinkingLevel,
+  saveGlobalProfileTypeMeta,
+  deleteGlobalProfileCustomType,
   saveProjectFallbackMapping,
   saveProjectModelMapping,
   saveProjectRoleMapping,
@@ -30,6 +39,7 @@ import {
   setDefaultGlobalModelRoutingProfile,
   setProjectActiveModelRoutingProfile,
   setProjectModelRoutingOverridesEnabled,
+  syncModelCircuitPolicies,
   TEAMMATE_TASK_TYPE_META,
 } from "../src/models/model-routing.ts";
 
@@ -1172,6 +1182,435 @@ test("missing project profile falls back to the global default with diagnostics"
     assert.equal(state.missingProfile, "removed");
     assert.equal(state.config.profileId, "stable");
     assert.equal(state.config.mappings.testing, "provider/stable");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("role circuit policies persist, validate, and sync onto a circuit breaker", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-role-circuit-"));
+  const globalPath = path.join(root, "home", ".pi", "agent", "teammate-models.json");
+  const cwd = path.join(root, "project");
+  fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, ".pi", "agents", "breaker-role.md"), `---
+name: breaker-role
+description: Circuit configured role
+---
+Work.
+`);
+  try {
+    saveGlobalProfileRoleMapping(cwd, "default", "breaker-role", {
+      model: "provider/strict",
+      circuit: { threshold: 2, cooldownMs: 30_000 },
+    }, globalPath);
+    const config = loadModelRoutingConfig(cwd, globalPath);
+    assert.deepEqual(config.roleMappings?.["breaker-role"]?.circuit, { threshold: 2, cooldownMs: 30_000 });
+    assert.equal(config.roleMappings?.["breaker-role"]?.model, "provider/strict");
+
+    // The role's mapped model still routes while the circuit policy is stored.
+    const routed = applyModelRouting({
+      tasks: [{ agent: "breaker-role", prompt: "Work" }],
+    }, cwd, ["provider/strict"], globalPath);
+    assert.equal(routed.tasks[0].model, "provider/strict");
+
+    // Runtime sync: the breaker adopts the role's policy for its model.
+    let now = 0;
+    const breaker = new ModelCircuitBreaker({ threshold: 3, cooldownMs: 60_000, now: () => now });
+    syncModelCircuitPolicies(breaker, cwd, globalPath);
+    for (let failure = 0; failure < 2; failure += 1) {
+      breaker.recordRetryableFailure(breaker.acquireCandidate("provider/strict") as never);
+    }
+    assert.equal(breaker.snapshot()[0]?.state, "OPEN");
+    const rejectedStrict = breaker.acquireCandidate("provider/strict");
+    assert.equal(rejectedStrict.allowed, false);
+    assert.equal((rejectedStrict as { retryAt?: number }).retryAt, 30_000);
+
+    // Removing the circuit restores the default on the next sync.
+    saveGlobalProfileRoleMapping(cwd, "default", "breaker-role", { model: "provider/strict" }, globalPath);
+    syncModelCircuitPolicies(breaker, cwd, globalPath);
+    for (let failure = 0; failure < 3; failure += 1) {
+      breaker.recordRetryableFailure(breaker.acquireCandidate("provider/strict") as never);
+    }
+    const rejectedDefault = breaker.acquireCandidate("provider/strict");
+    assert.equal(rejectedDefault.allowed, false);
+    assert.equal((rejectedDefault as { retryAt?: number }).retryAt, now + 60_000);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("invalid role circuit policies are rejected on write and read", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-role-circuit-invalid-"));
+  const globalPath = path.join(root, "home", ".pi", "agent", "teammate-models.json");
+  const cwd = path.join(root, "project");
+  fs.mkdirSync(cwd, { recursive: true });
+  try {
+    assert.throws(
+      () => saveGlobalProfileRoleMapping(cwd, "default", "breaker-role", {
+        model: "provider/model",
+        circuit: { threshold: 0 },
+      }, globalPath),
+      /positive integer/,
+    );
+    assert.throws(
+      () => saveGlobalProfileRoleMapping(cwd, "default", "breaker-role", {
+        model: "provider/model",
+        circuit: { cooldownMs: -5 },
+      }, globalPath),
+      /non-negative/,
+    );
+    // Unknown circuit keys fail strict validation on load.
+    fs.mkdirSync(path.dirname(globalPath), { recursive: true });
+    fs.writeFileSync(globalPath, JSON.stringify({
+      version: 3,
+      defaultProfile: "default",
+      profiles: {
+        default: {
+          name: "Default",
+          mappings: {},
+          thinkingLevels: {},
+          roleMappings: {
+            "breaker-role": { model: "provider/model", circuit: { threshold: 2, reset: true } },
+          },
+        },
+      },
+    }));
+    assert.throws(() => loadModelRoutingConfig(cwd, globalPath), /Unknown .*circuit field/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("custom agent types register, route-config, and delete via the active profile", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-custom-type-"));
+  const globalPath = path.join(root, "home", ".pi", "agent", "teammate-models.json");
+  const cwd = path.join(root, "project");
+  fs.mkdirSync(cwd, { recursive: true });
+  try {
+    saveGlobalProfileCustomType(cwd, "default", "security-audit", null, globalPath);
+    let config = loadModelRoutingConfig(cwd, globalPath);
+    assert.equal(config.mappings["security-audit"], null);
+
+    // The null marker does not force a model at routing time.
+    const routed = applyModelRouting({
+      tasks: [{ agent: "general", taskType: "security-audit", prompt: "Work" }],
+    }, cwd, [], globalPath);
+    assert.equal(routed.tasks[0].model, undefined);
+
+    // Configure the type across all routing sections, then delete them all.
+    saveGlobalProfileModelMapping(cwd, "default", "security-audit", "provider/review", globalPath);
+    saveGlobalProfileFallbackMapping(cwd, "default", "security-audit", ["provider/backup"], globalPath);
+    saveGlobalProfileThinkingLevel(cwd, "default", "security-audit", "high", globalPath);
+    deleteGlobalProfileCustomType(cwd, "default", "security-audit", globalPath);
+    config = loadModelRoutingConfig(cwd, globalPath);
+    assert.equal(config.mappings["security-audit"], undefined);
+    assert.equal(config.fallbackMappings?.["security-audit"], undefined);
+    assert.equal(config.thinkingLevels["security-audit"], undefined);
+
+    assert.throws(
+      () => saveGlobalProfileCustomType(cwd, "default", "explore", null, globalPath),
+      /Cannot register a built-in/,
+    );
+    assert.throws(
+      () => deleteGlobalProfileCustomType(cwd, "default", "review", globalPath),
+      /Cannot delete a built-in/,
+    );
+    assert.throws(
+      () => saveGlobalProfileCustomType(cwd, "default", "Not Valid", null, globalPath),
+      /Invalid teammate task type/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("appendTaskTypeRoutingContext injects a concise, idempotent routing contract", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mtasktype-"));
+  try {
+    const agents = [{ name: "team-worker", taskType: "development" }];
+    const first = appendTaskTypeRoutingContext("Base prompt", root, agents);
+    assert.match(first, /Base prompt/);
+    assert.match(first, /teammate-tasktype-routing:start/);
+    assert.match(first, /selects configured model, fallback-model, and thinking defaults/);
+    assert.match(first, /does not change the agent role, tools, permissions, or task scope/);
+    assert.match(first, /Set `tasks\[\]\.taskType` by the task's actual phase/);
+    assert.match(first, /Legal task types/);
+    for (const type of ["explore", "analysis", "debug", "planning", "development", "review", "testing"]) {
+      assert.match(first, new RegExp(`^  - ${type}$`, "m"));
+    }
+    assert.doesNotMatch(first, /Role guidance/);
+    assert.doesNotMatch(first, /call-chain tracing \(ant, explorer, research\)/);
+    assert.match(first, /Current task-type model routing:/);
+    assert.match(first, /^  - explore: model=/m);
+
+    // Re-injection replaces the previous block instead of appending a second one.
+    const second = appendTaskTypeRoutingContext(first, root, agents);
+    assert.equal(second.match(/teammate-tasktype-routing:start/g)?.length, 1);
+    assert.equal(second.match(/Legal task types/g)?.length, 1);
+    assert.match(second, /^Base prompt/m);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("typeMeta keywords round-trip, merge, clear, and normalize", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-type-meta-"));
+  const globalPath = path.join(root, "home", ".pi", "agent", "teammate-models.json");
+  const cwd = path.join(root, "project");
+  fs.mkdirSync(cwd, { recursive: true });
+  try {
+    // Custom keywords for a built-in type.
+    saveGlobalProfileTypeMeta(cwd, "default", "explore", { keywords: ["Codebase Scan", "definition lookup"] }, globalPath);
+    let config = loadModelRoutingConfig(cwd, globalPath);
+    assert.deepEqual(resolveTaskTypeMeta(config, "explore")?.keywords, ["codebase scan", "definition lookup"]);
+
+    // Clearing removes the override entirely.
+    saveGlobalProfileTypeMeta(cwd, "default", "explore", { keywords: null }, globalPath);
+    config = loadModelRoutingConfig(cwd, globalPath);
+    assert.equal(config.typeMeta?.explore, undefined);
+    assert.equal(resolveTaskTypeMeta(config, "explore"), undefined);
+
+    // Custom type creation carries its keywords; delete removes the meta too.
+    saveGlobalProfileCustomType(cwd, "default", "security-audit", { keywords: ["audit", "security evidence"] }, globalPath);
+    config = loadModelRoutingConfig(cwd, globalPath);
+    assert.deepEqual(resolveTaskTypeMeta(config, "security-audit")?.keywords, ["audit", "security evidence"]);
+    deleteGlobalProfileCustomType(cwd, "default", "security-audit", globalPath);
+    config = loadModelRoutingConfig(cwd, globalPath);
+    assert.equal(resolveTaskTypeMeta(config, "security-audit"), undefined);
+    assert.equal(config.typeMeta?.["security-audit"], undefined);
+
+    // Project overrides merge typeMeta over the profile.
+    saveProjectRoleMapping(cwd, "security-audit", null, globalPath); // no-op marker to enable overrides
+    fs.writeFileSync(getProjectModelRoutingPath(cwd), JSON.stringify({
+      version: 3,
+      applyOverrides: true,
+      overrides: {
+        mappings: {},
+        thinkingLevels: {},
+        typeMeta: { explore: { keywords: ["project explore"] } },
+      },
+    }));
+    config = loadModelRoutingConfig(cwd, globalPath);
+    assert.deepEqual(resolveTaskTypeMeta(config, "explore")?.keywords, ["project explore"]);
+
+    // Duplicates collapse and empty arrays clear the override.
+    saveGlobalProfileTypeMeta(cwd, "default", "security-audit", { keywords: ["audit", "Audit", ""] }, globalPath);
+    config = loadModelRoutingConfig(cwd, globalPath);
+    assert.deepEqual(resolveTaskTypeMeta(config, "security-audit")?.keywords, ["audit"]);
+    saveGlobalProfileTypeMeta(cwd, "default", "security-audit", { keywords: [] }, globalPath);
+    config = loadModelRoutingConfig(cwd, globalPath);
+    assert.equal(config.typeMeta?.["security-audit"], undefined);
+
+    // Unknown fields and bad values fail strict validation.
+    fs.mkdirSync(path.dirname(globalPath), { recursive: true });
+    fs.writeFileSync(globalPath, JSON.stringify({
+      version: 3,
+      defaultProfile: "default",
+      profiles: {
+        default: {
+          name: "Default",
+          mappings: {},
+          thinkingLevels: {},
+          typeMeta: { explore: { keywords: [42] } },
+        },
+      },
+    }));
+    assert.throws(() => loadModelRoutingConfig(cwd, globalPath), /typeMeta/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("task type keywords are configured but never auto-injected into the routing contract", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mtasktype-kw-"));
+  const globalPath = path.join(root, "home", ".pi", "agent", "teammate-models.json");
+  const cwd = path.join(root, "project");
+  fs.mkdirSync(cwd, { recursive: true });
+  try {
+    const agents = [{ name: "security-specialist", taskType: "security-audit" }];
+    saveGlobalProfileCustomType(cwd, "default", "security-audit", { keywords: ["audit", "security evidence"] }, globalPath);
+    saveGlobalProfileTypeMeta(cwd, "default", "explore", { keywords: ["codebase scan"] }, globalPath);
+
+    const injected = appendTaskTypeRoutingContext("Base prompt", cwd, agents, globalPath);
+    assert.match(injected, /^  - security-audit$/m);
+    assert.match(injected, /^  - explore: model=/m);
+    assert.doesNotMatch(injected, /keywords/);
+    assert.doesNotMatch(injected, /when to use/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("task type keywords auto-infer the type from the task prompt", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mtasktype-kw-infer-"));
+  const globalPath = path.join(root, "home", ".pi", "agent", "teammate-models.json");
+  const cwd = path.join(root, "project");
+  fs.mkdirSync(cwd, { recursive: true });
+  try {
+    saveGlobalProfileCustomType(cwd, "default", "security-audit", { keywords: ["audit", "security"] }, globalPath);
+    const config = loadModelRoutingConfig(cwd, globalPath);
+
+    // Keyword hit infers the custom type when no agent declares a taskType.
+    const routed = applyModelRouting({
+      tasks: [{ agent: "specialist-helper", prompt: "Run a security audit on the auth module" }],
+    }, cwd, ["provider/audit"], globalPath);
+    assert.equal(routed.tasks[0].taskType, "security-audit");
+    assert.equal(routed.tasks[0].model, undefined); // no mapping configured yet
+
+    // Configured keywords outrank the built-in heuristic regexes.
+    const keywordFirst = applyModelRouting({
+      tasks: [{ agent: "specialist-helper", prompt: "Review the pull request" }],
+    }, cwd, [], globalPath);
+    assert.equal(keywordFirst.tasks[0].taskType, "review");
+
+    // Word-boundary matching: "auditor" does not trigger the "audit" keyword.
+    const boundary = applyModelRouting({
+      tasks: [{ agent: "specialist-helper", prompt: "Interview the auditor about policy" }],
+    }, cwd, [], globalPath);
+    assert.notEqual(boundary.tasks[0].taskType, "security-audit");
+
+    // Explicit taskType still wins over keyword inference.
+    const explicit = applyModelRouting({
+      tasks: [{ agent: "specialist-helper", taskType: "analysis", prompt: "Run a security audit now" }],
+    }, cwd, [], globalPath);
+    assert.equal(explicit.tasks[0].taskType, "analysis");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("assigned role taskType persists and outranks the agent frontmatter type", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-role-type-"));
+  const globalPath = path.join(root, "home", ".pi", "agent", "teammate-models.json");
+  const cwd = path.join(root, "project");
+  fs.mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, ".pi", "agents", "dual-role.md"), `---
+name: dual-role
+description: Declares review but is reassigned to analysis
+taskType: review
+---
+Work.
+`);
+  try {
+    saveGlobalProfileRoleMapping(cwd, "default", "dual-role", { taskType: "analysis" }, globalPath);
+    const routed = applyModelRouting({
+      tasks: [{ agent: "dual-role", prompt: "Trace the call chain" }],
+    }, cwd, [], globalPath);
+    assert.equal(routed.tasks[0].taskType, "analysis");
+
+    saveGlobalProfileRoleMapping(cwd, "default", "dual-role", { taskType: null }, globalPath);
+    const reverted = applyModelRouting({
+      tasks: [{ agent: "dual-role", prompt: "Trace the call chain" }],
+    }, cwd, [], globalPath);
+    assert.equal(reverted.tasks[0].taskType, "review");
+
+    saveGlobalProfileRoleMapping(cwd, "default", "dual-role", { taskType: "debug" }, globalPath);
+    const explicit = applyModelRouting({
+      tasks: [{ agent: "dual-role", taskType: "planning", prompt: "Trace the call chain" }],
+    }, cwd, [], globalPath);
+    assert.equal(explicit.tasks[0].taskType, "planning");
+
+    assert.throws(
+      () => saveGlobalProfileRoleMapping(cwd, "default", "dual-role", { taskType: "Bad Type" }, globalPath),
+      /Invalid role task type/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("assigned role type supplies model, fallbacks, thinking, and circuit before role fallbacks", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-role-type-route-"));
+  const globalPath = path.join(root, "home", ".pi", "agent", "teammate-models.json");
+  const cwd = path.join(root, "project");
+  fs.mkdirSync(cwd, { recursive: true });
+  try {
+    saveGlobalProfileModelMapping(cwd, "default", "analysis", "provider/type", globalPath);
+    saveGlobalProfileFallbackMapping(cwd, "default", "analysis", ["provider/type-fallback"], globalPath);
+    saveGlobalProfileThinkingLevel(cwd, "default", "analysis", "high", globalPath);
+    saveGlobalProfileRoleMapping(cwd, "default", "specialist", {
+      taskType: "analysis",
+      model: "provider/role",
+      fallbackModels: ["provider/role-fallback"],
+      thinking: "low",
+      circuit: { threshold: 2, cooldownMs: 30_000 },
+    }, globalPath);
+
+    const available = ["provider/type", "provider/type-fallback", "provider/role", "provider/role-fallback"];
+    const routed = applyModelRouting({
+      tasks: [{ agent: "specialist", prompt: "Investigate the failure" }],
+    }, cwd, available, globalPath);
+    assert.equal(routed.tasks[0].taskType, "analysis");
+    assert.equal(routed.tasks[0].model, "provider/type");
+    assert.deepEqual(routed.tasks[0].fallbackModels, ["provider/type-fallback"]);
+    assert.equal(routed.tasks[0].thinking, "high");
+
+    const breaker = new ModelCircuitBreaker();
+    syncModelCircuitPolicies(breaker, cwd, globalPath);
+    const first = breaker.acquireCandidate("provider/type");
+    const second = breaker.acquireCandidate("provider/type");
+    assert.equal(first.allowed, true);
+    assert.equal(second.allowed, true);
+    if (first.allowed) breaker.recordRetryableFailure(first);
+    if (second.allowed) breaker.recordRetryableFailure(second);
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/type")?.state, "OPEN");
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/role"), undefined);
+
+    saveGlobalProfileModelMapping(cwd, "default", "analysis", null, globalPath);
+    saveGlobalProfileFallbackMapping(cwd, "default", "analysis", null, globalPath);
+    saveGlobalProfileThinkingLevel(cwd, "default", "analysis", null, globalPath);
+    const roleFallback = applyModelRouting({
+      tasks: [{ agent: "specialist", prompt: "Investigate the failure" }],
+    }, cwd, available, globalPath);
+    assert.equal(roleFallback.tasks[0].model, "provider/role");
+    assert.deepEqual(roleFallback.tasks[0].fallbackModels, ["provider/role-fallback"]);
+    assert.equal(roleFallback.tasks[0].thinking, "low");
+
+    const explicit = applyModelRouting({
+      tasks: [{
+        agent: "specialist",
+        taskType: "testing",
+        model: "provider/explicit",
+        fallbackModels: ["provider/explicit-fallback"],
+        thinking: "xhigh",
+        prompt: "Investigate the failure",
+      }],
+    }, cwd, available, globalPath);
+    assert.equal(explicit.tasks[0].taskType, "testing");
+    assert.equal(explicit.tasks[0].model, "provider/explicit");
+    assert.deepEqual(explicit.tasks[0].fallbackModels, ["provider/explicit-fallback"]);
+    assert.equal(explicit.tasks[0].thinking, "xhigh");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("type role assignments update atomically and custom type deletion clears references", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-type-roles-"));
+  const globalPath = path.join(root, "home", ".pi", "agent", "teammate-models.json");
+  const cwd = path.join(root, "project");
+  fs.mkdirSync(cwd, { recursive: true });
+  try {
+    saveGlobalProfileCustomType(cwd, "default", "security-audit", null, globalPath);
+    saveGlobalProfileRoleMapping(cwd, "default", "planner", { model: "provider/planner", taskType: "security-audit" }, globalPath);
+    saveGlobalProfileTypeRoles(cwd, "default", "security-audit", ["reviewer", "analyst"], globalPath);
+
+    let config = loadModelRoutingConfig(cwd, globalPath);
+    assert.deepEqual(config.roleMappings?.planner, { model: "provider/planner", taskType: null });
+    assert.deepEqual(config.roleMappings?.reviewer, { taskType: "security-audit" });
+    assert.deepEqual(config.roleMappings?.analyst, { taskType: "security-audit" });
+    assert.ok(discoverRoutingTaskTypes(cwd, [], config).includes("security-audit"));
+
+    deleteGlobalProfileCustomType(cwd, "default", "security-audit", globalPath);
+    config = loadModelRoutingConfig(cwd, globalPath);
+    assert.equal(config.roleMappings?.reviewer?.taskType, null);
+    assert.equal(config.roleMappings?.analyst?.taskType, null);
+    assert.ok(!discoverRoutingTaskTypes(cwd, [], config).includes("security-audit"));
+
+    assert.throws(
+      () => saveGlobalProfileTypeRoles(cwd, "default", "analysis", ["Bad Role"], globalPath),
+      /Invalid teammate role mapping/,
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

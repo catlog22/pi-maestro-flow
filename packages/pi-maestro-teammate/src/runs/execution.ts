@@ -27,7 +27,7 @@ import type {
   AgentTerminalStatus,
 } from "../shared/types.ts";
 import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
-import { applyModelRouting, type TeammateTaskType } from "../models/model-routing.ts";
+import { applyModelRouting, syncModelCircuitPolicies, type TeammateTaskType } from "../models/model-routing.ts";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
 import {
   rankModelsByHealth,
@@ -2413,6 +2413,10 @@ export async function runTeammate(
     undefined,
     options.inheritModel,
   );
+  // Per-role circuit policies take effect at dispatch time: the breaker used
+  // by the candidate sweep adopts the configured threshold/cooldown for each
+  // role's mapped model before any acquisition happens.
+  syncModelCircuitPolicies(options.modelCircuitBreaker ?? sharedModelCircuitBreaker, options.baseCwd);
   const normalized = normalizeTeammateParams(routed);
   if (normalized.error) throw new Error(normalized.error);
   return runGraph(normalized.tasks, params.concurrency ?? 4, options);

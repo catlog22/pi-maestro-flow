@@ -87,6 +87,7 @@ function makeCenter(overrides: Partial<ConstructorParameters<typeof TeammateCont
   const closed: unknown[] = [];
   const saved: Array<{ taskType: string; model: string | null }> = [];
   const savedThinking: Array<{ taskType: string; thinking: string | null }> = [];
+  const savedRoleRules: Array<{ role: string; rules: unknown }> = [];
   const center = new TeammateControlCenter({
     cwd: "C:\\tmp\\project",
     availableModels: [
@@ -101,9 +102,10 @@ function makeCenter(overrides: Partial<ConstructorParameters<typeof TeammateCont
     close: (value) => closed.push(value),
     saveMapping: (taskType, model) => saved.push({ taskType, model }),
     saveThinking: (taskType, thinking) => savedThinking.push({ taskType, thinking }),
+    saveRoleRules: (role, rules) => savedRoleRules.push({ role, rules }),
     ...overrides,
   });
-  return { center, closed, saved, savedThinking };
+  return { center, closed, saved, savedThinking, savedRoleRules };
 }
 
 test("control center keeps roles, routing and active collaboration visible", () => {
@@ -121,6 +123,29 @@ test("control center keeps roles, routing and active collaboration visible", () 
 
   const narrow = center.render(40).join("\n");
   assert.match(narrow, /Teammate Control Center|Teammates/);
+});
+
+test("arrow navigation switches tabs and opens settings with cursor actions", () => {
+  const { center } = makeCenter();
+  assert.match(center.render(100).join("\n"), /\[Routing 7\]/);
+  center.handleInput("\x1b[C");
+  assert.match(center.render(100).join("\n"), /\[Roles 2\]/);
+  center.handleInput("\x1b[B");
+  center.handleInput("\r");
+  assert.match(center.render(100).join("\n"), /@reviewer › Settings/);
+  center.handleInput("\x1b[B");
+  center.handleInput("\x1b[C");
+  assert.match(center.render(100).join("\n"), /@reviewer › Model/);
+  center.handleInput("\x1b");
+  assert.match(center.render(100).join("\n"), /@reviewer › Settings/);
+  center.handleInput("\x1b[C");
+  assert.match(center.render(100).join("\n"), /@reviewer › Type/);
+  center.handleInput("\x1b[D");
+  assert.match(center.render(100).join("\n"), /@reviewer › Settings/);
+  center.handleInput("\x1b");
+  assert.match(center.render(100).join("\n"), /\[Roles 2\]/);
+  center.handleInput("\x1b[D");
+  assert.match(center.render(100).join("\n"), /\[Routing 7\]/);
 });
 
 test("control center derives custom routing types from discovered agents", () => {
@@ -162,6 +187,8 @@ test("control center accepts cross-platform Enter and Escape encodings", () => {
   const kittyNavigation = makeCenter().center;
   kittyNavigation.handleInput("\x1b[1;1B");
   kittyNavigation.handleInput("\x1b[13u");
+  assert.match(kittyNavigation.render(90).join("\n"), /Analysis › Settings/);
+  kittyNavigation.handleInput("\x1b[C");
   assert.match(kittyNavigation.render(90).join("\n"), /Analysis › Model/);
 
   const kittyTabs = makeCenter().center;
@@ -329,26 +356,30 @@ test("model routing is reversible and saves inline", async () => {
   assert.match(center.render(90).join("\n"), /Routing 7/);
 
   center.handleInput("\r");
+  center.handleInput("\r");
   center.handleInput("\x1b[B");
   center.handleInput("\r");
   await new Promise((resolve) => setTimeout(resolve, 25));
-  assert.deepEqual(saved, [{ taskType: "explore", model: "anthropic/sonnet" }]);
+  assert.deepEqual(saved.slice(), [{ taskType: "explore", model: "anthropic/sonnet" }]);
   assert.match(center.render(90).join("\n"), /Saved/);
 });
 
-test("model routing continues into thinking depth for the associated model", async () => {
+test("model and thinking routing are independently selectable settings", async () => {
   const { center, saved, savedThinking } = makeCenter();
-  center.handleInput("\r");
+  center.handleInput("\r"); // Settings
+  assert.match(center.render(90).join("\n"), /Explore › Settings/);
+  center.handleInput("\r"); // Model
   center.handleInput("\x1b[B");
   center.handleInput("\r");
   await new Promise((resolve) => setTimeout(resolve, 25));
 
-  assert.deepEqual(saved, [{ taskType: "explore", model: "anthropic/sonnet" }]);
-  const thinkingPicker = center.render(90).join("\n");
-  assert.match(thinkingPicker, /Explore › Thinking/);
-  assert.match(thinkingPicker, /Saved model · choose thinking depth for anthropic\/sonnet/);
-  assert.match(thinkingPicker, /xhigh \/ max/);
+  assert.deepEqual(saved.slice(), [{ taskType: "explore", model: "anthropic/sonnet" }]);
+  const settings = center.render(90).join("\n");
+  assert.match(settings, /Explore › Settings/);
+  assert.match(settings, /Saved · explore model → anthropic\/sonnet/);
 
+  center.handleInput("\x1b[B"); // Thinking
+  center.handleInput("\r");
   center.handleInput("\x1b[B");
   center.handleInput("\r");
   await new Promise((resolve) => setTimeout(resolve, 25));
@@ -362,8 +393,12 @@ test("model routing keeps the editor open when persistence fails", async () => {
   });
   center.handleInput("\r");
   center.handleInput("\r");
+  center.handleInput("\r");
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.match(center.render(90).join("\n"), /Save failed.*read-only project/);
+  assert.match(center.render(90).join("\n"), /Explore › Model/);
+  center.handleInput("\x1b");
+  assert.match(center.render(90).join("\n"), /Explore › Settings/);
   center.handleInput("\x1b");
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.match(center.render(90).join("\n"), /Routing 7/);
@@ -392,6 +427,7 @@ test("routing edits the active global Profile while surfacing runtime project ov
   assert.match(routing, /missing\/fast/);
   assert.match(routing, /Fallbacks · none/);
   assert.match(routing, /Project overrides are active at runtime/);
+  center.handleInput("\r");
   center.handleInput("\r");
   assert.match(center.render(100).join("\n"), /missing\/fast.*active/);
 });
@@ -503,4 +539,336 @@ test("attach overlay preserves manual scroll position while new logs arrive", ()
   } finally {
     overlay.dispose();
   }
+});
+
+test("roles tab exposes independently selectable type, model, and thinking settings", async () => {
+  const { center, savedRoleRules } = makeCenter({ initialTab: "roles" });
+  center.handleInput("\r");
+  const settings = center.render(100).join("\n");
+  assert.match(settings, /@planner › Settings/);
+  assert.match(settings, /Type/);
+  assert.match(settings, /Model override/);
+  assert.match(settings, /Thinking override/);
+  for (let width = 1; width <= 120; width++) {
+    assert.ok(center.render(width).every((line) => visibleWidth(line) <= width));
+  }
+
+  center.handleInput("\x1b[B"); // Model override
+  center.handleInput("\x1b[C");
+  assert.match(center.render(100).join("\n"), /@planner › Model/);
+  center.handleInput("\x1b[B");
+  center.handleInput("\x1b[B"); // openai/gpt-5 (models sort alphabetically)
+  center.handleInput("\r");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.deepEqual(savedRoleRules, [{ role: "planner", rules: { model: "openai/gpt-5" } }]);
+  assert.match(center.render(100).join("\n"), /@planner › Settings/);
+
+  center.handleInput("\x1b[B");
+  center.handleInput("\x1b[B"); // Thinking override
+  center.handleInput("\r");
+  assert.match(center.render(100).join("\n"), /@planner › Thinking/);
+  center.handleInput("\x1b[B");
+  center.handleInput("\r");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.deepEqual(savedRoleRules, [
+    { role: "planner", rules: { model: "openai/gpt-5" } },
+    { role: "planner", rules: { model: "openai/gpt-5", thinking: "off" } },
+  ]);
+  assert.match(center.render(100).join("\n"), /Saved · @planner thinking → off/);
+});
+
+test("Ctrl+O opens the per-role circuit editor and preset Enter saves the policy", async () => {
+  const { center, savedRoleRules } = makeCenter({ initialTab: "roles" });
+  center.handleInput("\x0f"); // Ctrl+O
+  const editor = center.render(100).join("\n");
+  assert.match(editor, /@planner › Circuit/);
+  assert.match(editor, /default · 3 failures \/ 60s/);
+  assert.match(editor, /strict · 2 failures \/ 30s/);
+  assert.match(editor, /lenient · 5 failures \/ 300s/);
+  assert.match(editor, /custom/);
+  center.handleInput("\x1b[B");
+  center.handleInput("\r");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.deepEqual(savedRoleRules, [
+    { role: "planner", rules: { circuit: { threshold: 2, cooldownMs: 30_000 } } },
+  ]);
+  assert.match(center.render(100).join("\n"), /Saved · @planner circuit → 2 failures \/ 30s/);
+});
+
+test("circuit editor accepts custom threshold/cooldown input and rejects invalid drafts", async () => {
+  const { center, savedRoleRules } = makeCenter({ initialTab: "roles" });
+  center.handleInput("\x0f");
+  center.handleInput("\x1b[B");
+  center.handleInput("\x1b[B");
+  center.handleInput("\x1b[B"); // custom
+  center.handleInput("\r");
+  assert.match(center.render(100).join("\n"), /threshold\/cooldown \(e\.g\. 4\/120\)/);
+  center.handleInput("4/120");
+  center.handleInput("\r");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.deepEqual(savedRoleRules, [
+    { role: "planner", rules: { circuit: { threshold: 4, cooldownMs: 120_000 } } },
+  ]);
+
+  const invalid = makeCenter({ initialTab: "roles" }).center;
+  invalid.handleInput("\x0f");
+  invalid.handleInput("\x1b[B");
+  invalid.handleInput("\x1b[B");
+  invalid.handleInput("\x1b[B");
+  invalid.handleInput("\r");
+  invalid.handleInput("0/30");
+  invalid.handleInput("\r");
+  assert.match(invalid.render(100).join("\n"), /Invalid circuit/);
+  invalid.handleInput("\x1b");
+  assert.doesNotMatch(invalid.render(100).join("\n"), /Invalid circuit/);
+});
+
+test("Ctrl+F opens the per-role fallback editor and saves the chain as role rules", async () => {
+  const { center, savedRoleRules } = makeCenter({ initialTab: "roles" });
+  center.handleInput("\x06"); // Ctrl+F
+  assert.match(center.render(100).join("\n"), /@planner › Fallback/);
+  center.handleInput("\x1b[B"); // openai/gpt-5 (models sort alphabetically)
+  center.handleInput(" ");
+  center.handleInput("\r");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.deepEqual(savedRoleRules, [{ role: "planner", rules: { fallbackModels: ["openai/gpt-5"] } }]);
+  assert.match(center.render(100).join("\n"), /Saved fallbacks · openai\/gpt-5/);
+});
+
+test("roles tab shows configured role model and circuit policy from the active profile", () => {
+  const state = profileState();
+  state.global.profiles.fast.roleMappings = {
+    planner: { model: "openai/gpt-5", circuit: { threshold: 4, cooldownMs: 120_000 } },
+  };
+  const { center } = makeCenter({ state, initialTab: "roles" });
+  const view = center.render(100).join("\n");
+  assert.match(view, /@planner.*openai\/gpt-5/);
+  assert.match(view, /Effective model · openai\/gpt-5/);
+  assert.match(view, /Circuit · 4 failures \/ 120s/);
+  assert.match(view, /Enter settings/);
+});
+
+test("Ctrl+N creates a custom agent type, normalizes case, and selects it in routing", async () => {
+  const created: string[] = [];
+  const { center } = makeCenter({ saveCustomType: (taskType) => created.push(taskType) });
+  center.handleInput("\x0e"); // Ctrl+N
+  assert.match(center.render(100).join("\n"), /type identifier \(e\.g\. security-audit\)/);
+  for (let width = 1; width <= 120; width++) {
+    assert.ok(center.render(width).every((line) => visibleWidth(line) <= width));
+  }
+  center.handleInput("Security-Audit");
+  center.handleInput("\r");
+  assert.match(center.render(100).join("\n"), /Keywords for security-audit/);
+  center.handleInput("\r"); // empty keywords: skip
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.deepEqual(created, ["security-audit"]);
+  const view = center.render(100).join("\n");
+  assert.match(view, /Created custom type security-audit/);
+  assert.match(view, /Security Audit/);
+  assert.doesNotMatch(view, /type identifier/);
+});
+
+test("custom type creation rejects invalid, built-in, and duplicate identifiers", async () => {
+  const created: string[] = [];
+  const invalid = makeCenter({ saveCustomType: (taskType) => created.push(taskType) }).center;
+  invalid.handleInput("\x0e");
+  invalid.handleInput("no spaces");
+  invalid.handleInput("\r");
+  assert.match(invalid.render(100).join("\n"), /Invalid type/);
+
+  const builtin = makeCenter({ saveCustomType: (taskType) => created.push(taskType) }).center;
+  builtin.handleInput("\x0e");
+  builtin.handleInput("explore");
+  builtin.handleInput("\r");
+  assert.match(builtin.render(100).join("\n"), /Cannot register a built-in type/);
+  assert.deepEqual(created, [] as string[]);
+
+  const duplicate = makeCenter({
+    saveCustomType: (taskType: string) => created.push(taskType),
+    config: { version: 2, mappings: { "security-audit": null }, thinkingLevels: {} },
+  }).center;
+  duplicate.handleInput("\x0e");
+  duplicate.handleInput("security-audit");
+  duplicate.handleInput("\r");
+  assert.match(duplicate.render(100).join("\n"), /already exists/);
+  assert.deepEqual(created, [] as string[]);
+});
+
+test("Ctrl+D deletes a custom agent type and its routing entries", async () => {
+  const deleted: string[] = [];
+  const { center } = makeCenter({
+    deleteCustomType: (taskType) => deleted.push(taskType),
+    config: {
+      version: 2,
+      mappings: { "security-audit": "openai/gpt-5" },
+      fallbackMappings: { "security-audit": ["anthropic/sonnet"] },
+      thinkingLevels: { "security-audit": "high" },
+      roleMappings: { planner: { model: "openai/gpt-5", taskType: "security-audit" } },
+    },
+  });
+  center.handleInput("audit");
+  center.handleInput("\x04"); // Ctrl+D
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.deepEqual(deleted, ["security-audit"]);
+  const view = center.render(100).join("\n");
+  assert.match(view, /Deleted custom type security-audit/);
+  assert.doesNotMatch(view, /Security Audit/);
+  for (let index = 0; index < "audit".length; index++) center.handleInput("\x7f");
+  center.handleInput("\x1b[C");
+  const roleView = center.render(100).join("\n");
+  assert.match(roleView, /Type · unassigned \/ inferred/);
+  assert.match(roleView, /Role model override · openai\/gpt-5/);
+});
+
+test("Ctrl+D refuses to delete built-in types", async () => {
+  const { center } = makeCenter();
+  center.handleInput("\x04"); // Ctrl+D on the first built-in routing entry
+  assert.match(center.render(100).join("\n"), /Built-in types cannot be deleted/);
+});
+test("custom type creation accepts comma-separated trigger keywords", async () => {
+  const created: Array<{ taskType: string; meta?: unknown }> = [];
+  const { center } = makeCenter({
+    saveCustomType: (taskType, meta) => created.push({ taskType, meta }),
+  });
+  center.handleInput("\x0e"); // Ctrl+N
+  center.handleInput("security-audit");
+  center.handleInput("\r");
+  center.handleInput("audit, Security Evidence");
+  center.handleInput("\r");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.deepEqual(created, [{
+    taskType: "security-audit",
+    meta: { keywords: ["audit", "security evidence"] },
+  }]);
+  assert.match(center.render(100).join("\n"), /Keywords \u00b7 audit, security evidence/);
+});
+
+test("Ctrl+E edits and clears trigger keywords for the selected type", async () => {
+  const saved: Array<{ taskType: string; meta: unknown }> = [];
+  const { center } = makeCenter({
+    saveTypeMeta: (taskType, meta) => saved.push({ taskType, meta }),
+    config: { version: 2, mappings: {}, thinkingLevels: {} },
+  });
+  center.handleInput("\x05"); // Ctrl+E on explore
+  assert.match(center.render(100).join("\n"), /Keywords for explore/);
+  center.handleInput("definition lookup, call sites");
+  center.handleInput("\r");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.deepEqual(saved.slice(), [{ taskType: "explore", meta: { keywords: ["definition lookup", "call sites"] } }]);
+  assert.match(center.render(100).join("\n"), /Saved keywords for explore/);
+  assert.match(center.render(100).join("\n"), /Keywords \u00b7 definition lookup, call sites/);
+
+  // Empty draft clears the keywords.
+  const cleared = makeCenter({
+    saveTypeMeta: (taskType, meta) => saved.push({ taskType, meta }),
+    config: {
+      version: 2,
+      mappings: {},
+      thinkingLevels: {},
+      typeMeta: { explore: { keywords: ["definition lookup"] } },
+    },
+  }).center;
+  cleared.handleInput("\x05");
+  for (let index = 0; index < "definition lookup".length; index++) cleared.handleInput("\x7f");
+  cleared.handleInput("\r");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.deepEqual(saved[1], { taskType: "explore", meta: { keywords: null } });
+  assert.match(cleared.render(100).join("\n"), /Cleared keywords for explore/);
+  assert.doesNotMatch(cleared.render(100).join("\n"), /Keywords \u00b7/);
+});
+
+
+test("routing tab offers a visible + New custom type entry that opens creation", () => {
+  const { center } = makeCenter();
+  const view = center.render(100).join("\n");
+  assert.match(view, /\+ New custom type/);
+  assert.match(view, /Ctrl\+N/);
+  center.handleInput("\x1b[B"); // move down 7 times to reach the entry
+  for (let index = 0; index < 6; index++) center.handleInput("\x1b[B");
+  center.handleInput("\r");
+  assert.match(center.render(100).join("\n"), /type identifier \(e\.g\. security-audit\)/);
+});
+
+test("Ctrl+T assigns a task type to a role via cursor selection", async () => {
+  const savedRoleRules: Array<{ role: string; rules: unknown }> = [];
+  const { center } = makeCenter({
+    initialTab: "roles",
+    saveRoleRules: (role, rules) => savedRoleRules.push({ role, rules }),
+  });
+  center.handleInput("\x14"); // Ctrl+T
+  const picker = center.render(100).join("\n");
+  assert.match(picker, /@planner › Type/);
+  assert.match(picker, /auto \/ agent frontmatter/);
+  assert.match(picker, /Explore/);
+  center.handleInput("\x1b[B"); // explore
+  center.handleInput("\x1b[B"); // analysis
+  center.handleInput("\r");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.deepEqual(savedRoleRules, [{ role: "planner", rules: { taskType: "analysis" } }]);
+  assert.match(center.render(100).join("\n"), /Saved · @planner type → analysis/);
+});
+
+test("role detail shows the assigned type and auto restores the agent frontmatter type", async () => {
+  const savedRoleRules: Array<{ role: string; rules: unknown }> = [];
+  const { center } = makeCenter({
+    initialTab: "roles",
+    saveRoleRules: (role, rules) => savedRoleRules.push({ role, rules }),
+  });
+  assert.match(center.render(100).join("\n"), /Type · unassigned \/ inferred/);
+  center.handleInput("\x14"); // Ctrl+T
+  center.handleInput("\r"); // auto restores
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.deepEqual(savedRoleRules, [{ role: "planner", rules: { taskType: null } }]);
+});
+
+test("type settings assign multiple roles with cursor toggles", async () => {
+  const saved: Array<{ taskType: string; roles: readonly string[] }> = [];
+  const { center } = makeCenter({
+    saveTypeRoles: (taskType, roles) => saved.push({ taskType, roles: [...roles] }),
+  });
+  center.handleInput("\r"); // Explore settings
+  for (let index = 0; index < 3; index++) center.handleInput("\x1b[B"); // Roles
+  center.handleInput("\x1b[C");
+  const picker = center.render(100).join("\n");
+  assert.match(picker, /Explore › Roles/);
+  assert.match(picker, /@planner/);
+  assert.match(picker, /@reviewer/);
+  center.handleInput(" ");
+  center.handleInput("\x1b[B");
+  center.handleInput(" ");
+  center.handleInput("\r");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.deepEqual(saved, [{ taskType: "explore", roles: ["planner", "reviewer"] }]);
+  assert.match(center.render(100).join("\n"), /Saved roles · @planner, @reviewer/);
+  assert.match(center.render(100).join("\n"), /@planner, @reviewer/);
+
+  center.handleInput("\x1b");
+  center.handleInput("\x1b[C"); // Roles tab
+  const roleView = center.render(100).join("\n");
+  assert.match(roleView, /Type · explore/);
+});
+
+test("role assigned type shows the type model ahead of its role model override", () => {
+  const { center } = makeCenter({
+    initialTab: "roles",
+    config: {
+      version: 2,
+      mappings: { analysis: "openai/gpt-5" },
+      thinkingLevels: { analysis: "high" },
+      roleMappings: {
+        planner: { taskType: "analysis", model: "anthropic/sonnet", thinking: "low" },
+      },
+    },
+  });
+  const detail = center.render(100).join("\n");
+  assert.match(detail, /Type · analysis/);
+  assert.match(detail, /Effective model · openai\/gpt-5 · type analysis/);
+  assert.match(detail, /Role model override · anthropic\/sonnet/);
+
+  center.handleInput("\r");
+  const settings = center.render(100).join("\n");
+  assert.match(settings, /Type.*configured/);
+  assert.match(settings, /analysis · routes to openai\/gpt-5/);
+  center.handleInput("\x1b[B");
+  assert.match(center.render(100).join("\n"), /anthropic\/sonnet · fallback behind analysis/);
 });

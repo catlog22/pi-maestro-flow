@@ -761,7 +761,8 @@ function hasRoutingRules(rules: ProjectModelRoutingStore["overrides"]): boolean 
   return Object.keys(rules.mappings).length > 0
     || Object.keys(rules.thinkingLevels).length > 0
     || Object.keys(rules.fallbackMappings ?? {}).length > 0
-    || Object.keys(rules.roleMappings ?? {}).length > 0;
+    || Object.keys(rules.roleMappings ?? {}).length > 0
+    || Object.keys(rules.typeMeta ?? {}).length > 0;
 }
 
 function resourceConflict(actual: SettingsResourceRevision, expectedEtag: string): SettingsResourceConflict {

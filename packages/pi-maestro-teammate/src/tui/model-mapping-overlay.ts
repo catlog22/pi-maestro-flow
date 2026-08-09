@@ -11,27 +11,36 @@ import {
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { AgentConfig, AgentSource } from "../agents/agents.ts";
-import type { ModelCircuitSnapshot } from "../models/model-circuit-breaker.ts";
+import type { ModelCircuitPolicy, ModelCircuitSnapshot } from "../models/model-circuit-breaker.ts";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
 import {
+  TEAMMATE_TASK_TYPES,
   TEAMMATE_TASK_TYPE_META,
   clearProjectModelRoutingOverrides,
   createAndActivateGlobalModelRoutingProfile,
   deleteGlobalModelRoutingProfile,
+  deleteGlobalProfileCustomType,
   discoverRoutingTaskTypes,
   loadModelRoutingState,
+  parseTeammateTaskType,
   promoteProjectModelRoutingOverrides,
   renameGlobalModelRoutingProfile,
   saveGlobalProfileModelMapping,
+  saveGlobalProfileRoleMapping,
+  saveGlobalProfileTypeRoles,
   saveGlobalProfileThinkingLevel,
+  saveGlobalProfileCustomType,
+  saveGlobalProfileTypeMeta,
   saveProjectFallbackMapping,
   setDefaultGlobalModelRoutingProfile,
   setProjectActiveModelRoutingProfile,
   setProjectModelRoutingOverridesEnabled,
   type ModelRoutingConfig,
   type ModelRoutingProfile,
+  type ModelRoutingRoleRules,
   type ModelRoutingRules,
   type ModelRoutingState,
+  type ModelRoutingTypeMeta,
   type TeammateTaskType,
 } from "../models/model-routing.ts";
 import { TEAMMATE_THINKING_LEVELS, type TeammateThinkingLevel } from "../shared/thinking.ts";
@@ -100,6 +109,11 @@ interface TeammateControlCenterParams {
   saveMapping?: (taskType: TeammateTaskType, model: string | null) => void;
   saveThinking?: (taskType: TeammateTaskType, thinking: TeammateThinkingLevel | null) => void;
   saveFallbacks?: (taskType: TeammateTaskType, models: string[] | null) => void;
+  saveRoleRules?: (role: string, rules: ModelRoutingRoleRules | null) => void;
+  saveTypeRoles?: (taskType: TeammateTaskType, roles: readonly string[]) => void;
+  saveCustomType?: (taskType: TeammateTaskType, meta?: ModelRoutingTypeMeta | null) => void;
+  deleteCustomType?: (taskType: TeammateTaskType) => void;
+  saveTypeMeta?: (taskType: TeammateTaskType, meta: ModelRoutingTypeMeta | null) => void;
   modelHealth?: readonly ModelCircuitSnapshot[];
 }
 
@@ -111,6 +125,62 @@ const TAB_LABELS: Record<ControlCenterTab, string> = {
   roles: "Roles",
   active: "Active",
 };
+
+/** Sentinel routing-list entry that opens the custom-type creation flow. */
+const NEW_CUSTOM_TYPE_ENTRY = "__new_custom_type__";
+
+const CIRCUIT_DEFAULT_THRESHOLD = 3;
+const CIRCUIT_DEFAULT_COOLDOWN_MS = 60_000;
+
+interface CircuitPreset {
+  value: string;
+  label: string;
+  detail: string;
+  policy: ModelCircuitPolicy;
+}
+
+const CIRCUIT_PRESETS: readonly CircuitPreset[] = [
+  {
+    value: "strict",
+    label: "strict · 2 failures / 30s",
+    detail: "Fast-fail a degraded model",
+    policy: { threshold: 2, cooldownMs: 30_000 },
+  },
+  {
+    value: "lenient",
+    label: "lenient · 5 failures / 300s",
+    detail: "Tolerate transient provider hiccups",
+    policy: { threshold: 5, cooldownMs: 300_000 },
+  },
+];
+
+function circuitDisplayText(circuit: ModelCircuitPolicy | null | undefined): string {
+  if (!circuit) return `default (${CIRCUIT_DEFAULT_THRESHOLD} failures / ${Math.round(CIRCUIT_DEFAULT_COOLDOWN_MS / 1000)}s)`;
+  const threshold = circuit.threshold ?? CIRCUIT_DEFAULT_THRESHOLD;
+  const cooldownSeconds = Math.round((circuit.cooldownMs ?? CIRCUIT_DEFAULT_COOLDOWN_MS) / 1000);
+  return `${threshold} failures / ${cooldownSeconds}s`;
+}
+
+function circuitDraftText(circuit: ModelCircuitPolicy | null | undefined): string {
+  if (!circuit) return "";
+  const threshold = circuit.threshold ?? CIRCUIT_DEFAULT_THRESHOLD;
+  const cooldownSeconds = Math.round((circuit.cooldownMs ?? CIRCUIT_DEFAULT_COOLDOWN_MS) / 1000);
+  return `${threshold}/${cooldownSeconds}`;
+}
+
+function parseCircuitDraft(draft: string): ModelCircuitPolicy | null {
+  const match = /^(\d{1,2})(?:\/(\d{1,5}))?$/.exec(draft);
+  if (!match) return null;
+  const threshold = Number(match[1]);
+  if (threshold < 1) return null;
+  const policy: ModelCircuitPolicy = { threshold };
+  if (match[2] !== undefined) policy.cooldownMs = Number(match[2]) * 1000;
+  return policy;
+}
+
+function parseKeywordsDraft(draft: string): string[] {
+  return [...new Set(draft.split(",").map((keyword) => keyword.trim().toLowerCase()).filter(Boolean))];
+}
 
 function printableInput(data: string): string {
   // 拒绝转义序列（方向键 / 功能键），避免 sanitize 后 `[A` 等残渣混入文本。
@@ -153,6 +223,8 @@ function rulesFromProfile(profile: ModelRoutingProfile): ModelRoutingRules {
       ])),
     } : {}),
     thinkingLevels: { ...profile.thinkingLevels },
+    ...(profile.roleMappings ? { roleMappings: { ...profile.roleMappings } } : {}),
+    ...(profile.typeMeta ? { typeMeta: { ...profile.typeMeta } } : {}),
   };
 }
 
@@ -164,6 +236,8 @@ function stateFromLegacyConfig(config?: LegacyControlCenterConfig): ModelRouting
     mappings: { ...config?.mappings },
     ...(config?.fallbackMappings ? { fallbackMappings: { ...config.fallbackMappings } } : {}),
     thinkingLevels: { ...config?.thinkingLevels },
+    ...(config?.roleMappings ? { roleMappings: { ...config.roleMappings } } : {}),
+    ...(config?.typeMeta ? { typeMeta: { ...config.typeMeta } } : {}),
   };
   return {
     global: { version: 3, defaultProfile: profileId, profiles: { [profileId]: profile } },
@@ -184,20 +258,31 @@ function ruleCount(profile: ModelRoutingProfile): number {
     ...Object.keys(profile.mappings),
     ...Object.keys(profile.fallbackMappings ?? {}),
     ...Object.keys(profile.thinkingLevels),
+    ...Object.keys(profile.roleMappings ?? {}),
+    ...Object.keys(profile.typeMeta ?? {}),
   ]).size;
 }
 
 function hasRoutingRules(rules: ModelRoutingRules): boolean {
   return Object.keys(rules.mappings).length > 0
     || Object.keys(rules.fallbackMappings ?? {}).length > 0
-    || Object.keys(rules.thinkingLevels).length > 0;
+    || Object.keys(rules.thinkingLevels).length > 0
+    || Object.keys(rules.roleMappings ?? {}).length > 0
+    || Object.keys(rules.typeMeta ?? {}).length > 0;
 }
 
 export class TeammateControlCenter implements Component, Focusable {
   focused = false;
   private tab: ControlCenterTab;
   private modelTaskType: TeammateTaskType | null = null;
-  private editorKind: "model" | "thinking" | "fallback" = "model";
+  private modelRole: string | null = null;
+  private editorKind: "menu" | "model" | "thinking" | "fallback" | "circuit" | "type" | "roles" = "menu";
+  private circuitCustomMode = false;
+  private readonly roleAssignmentDraft = new Set<string>();
+  private customTypeInput = false;
+  private customTypeDraft = "";
+  private keywordsInput: { kind: "create" | "edit"; taskType: TeammateTaskType } | null = null;
+  private keywordsDraft = "";
   private readonly queries: Record<ControlCenterTab, string> = { profiles: "", routing: "", roles: "", active: "" };
   private modelQuery = "";
   private readonly selected: Record<ControlCenterTab, number> = { profiles: 0, routing: 0, roles: 0, active: 0 };
@@ -217,7 +302,7 @@ export class TeammateControlCenter implements Component, Focusable {
   private readonly health = new Map<string, ModelCircuitSnapshot>();
   private fallbackDraft: string[] = [];
   private readonly agents: AgentConfig[];
-  private readonly taskTypes: TeammateTaskType[];
+  private taskTypes: TeammateTaskType[];
   private readonly activeAgents: ControlCenterActiveAgent[];
 
   constructor(private readonly params: TeammateControlCenterParams) {
@@ -253,6 +338,8 @@ export class TeammateControlCenter implements Component, Focusable {
       ...Object.keys(activeProfile.mappings),
       ...Object.keys(activeProfile.fallbackMappings ?? {}),
       ...Object.keys(activeProfile.thinkingLevels),
+      ...Object.keys(activeProfile.typeMeta ?? {}),
+      ...Object.values(activeProfile.roleMappings ?? {}).flatMap((rules) => rules?.taskType ? [rules.taskType] : []),
     ];
     this.taskTypes = [...new Set([...discoveredTaskTypes, ...profileTaskTypes])];
     this.activeAgents = [...params.activeAgents].sort((left, right) =>
@@ -268,10 +355,10 @@ export class TeammateControlCenter implements Component, Focusable {
   }
 
   handleInput(data: string): void {
-    if (this.saving && !this.modelTaskType) return;
+    if (this.saving && !this.modelTaskType && !this.modelRole) return;
     if (this.lastWidth < 20) {
       if (matchesKey(data, Key.escape)) {
-        if (this.modelTaskType) this.handleModelInput(data);
+        if (this.modelTaskType || this.modelRole) this.handleModelInput(data);
         else this.params.close(null);
       }
       return;
@@ -295,7 +382,11 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private dispatchDecodedToken(token: DecodedInputToken): void {
     if (token.kind === "paste") {
-      if (this.modelTaskType) {
+      if (this.keywordsInput) {
+        this.keywordsDraft += token.text;
+      } else if (this.customTypeInput) {
+        this.customTypeDraft += token.text;
+      } else if (this.modelTaskType || this.modelRole) {
         this.modelQuery += token.text;
         this.modelSelected = 0;
       } else {
@@ -309,7 +400,15 @@ export class TeammateControlCenter implements Component, Focusable {
   }
 
   private handleDecodedInput(data: string): void {
-    if (this.modelTaskType) {
+    if (this.keywordsInput) {
+      this.handleKeywordsInput(data);
+      return;
+    }
+    if (this.customTypeInput) {
+      this.handleCustomTypeInput(data);
+      return;
+    }
+    if (this.modelTaskType || this.modelRole) {
       this.handleModelInput(data);
       return;
     }
@@ -356,6 +455,34 @@ export class TeammateControlCenter implements Component, Focusable {
       this.activateFallbackSelection();
       return;
     }
+    if (matchesKey(data, Key.ctrl("right")) && this.tab === "roles") {
+      this.activateRoleThinkingSelection();
+      return;
+    }
+    if (matchesKey(data, Key.ctrl("f")) && this.tab === "roles") {
+      this.activateRoleFallbackSelection();
+      return;
+    }
+    if (matchesKey(data, Key.ctrl("o")) && this.tab === "roles") {
+      this.activateRoleCircuitSelection();
+      return;
+    }
+    if (matchesKey(data, Key.ctrl("t")) && this.tab === "roles") {
+      this.activateRoleTypeSelection();
+      return;
+    }
+    if (matchesKey(data, Key.ctrl("n")) && this.tab === "routing") {
+      this.startCustomTypeInput();
+      return;
+    }
+    if (matchesKey(data, Key.ctrl("e")) && this.tab === "routing") {
+      this.startTypeMetaEdit();
+      return;
+    }
+    if (matchesKey(data, Key.ctrl("d")) && this.tab === "routing") {
+      this.deleteSelectedCustomType();
+      return;
+    }
     const input = printableInput(data);
     if (input) {
       this.queries[this.tab] += input;
@@ -368,8 +495,9 @@ export class TeammateControlCenter implements Component, Focusable {
   render(width: number): string[] {
     const w = Math.max(1, Math.min(width, 112));
     this.lastWidth = w;
-    if (w < 24 || (this.modelTaskType && w < 40)) return [this.renderCompact(w)];
-    return this.modelTaskType ? this.renderModels(w) : this.renderMain(w);
+    const editing = !this.keywordsInput && !this.customTypeInput && (this.modelTaskType ?? this.modelRole);
+    if (w < 24 || (editing && w < 40)) return [this.renderCompact(w)];
+    return editing ? this.renderModels(w) : this.renderMain(w);
   }
 
   private switchTab(direction: 1 | -1): void {
@@ -404,11 +532,27 @@ export class TeammateControlCenter implements Component, Focusable {
     if (this.tab === "routing") {
       const item = this.filteredTaskTypes()[this.selected.routing];
       if (!item) return;
+      if (item === NEW_CUSTOM_TYPE_ENTRY) {
+        this.startCustomTypeInput();
+        return;
+      }
       this.modelTaskType = item;
-      this.editorKind = "model";
+      this.modelRole = null;
+      this.editorKind = "menu";
       this.modelQuery = "";
-      this.modelSelected = this.modelItems(item).findIndex((entry) => entry.active);
-      if (this.modelSelected < 0) this.modelSelected = 0;
+      this.modelSelected = 0;
+      this.statusText = "";
+      this.params.requestRender();
+      return;
+    }
+    if (this.tab === "roles") {
+      const agent = this.filteredRoles()[this.selected.roles];
+      if (!agent) return;
+      this.modelRole = agent.name;
+      this.modelTaskType = null;
+      this.editorKind = "menu";
+      this.modelQuery = "";
+      this.modelSelected = 0;
       this.statusText = "";
       this.params.requestRender();
       return;
@@ -452,17 +596,331 @@ export class TeammateControlCenter implements Component, Focusable {
     this.params.requestRender();
   }
 
+  private activateRoleThinkingSelection(): void {
+    if (this.params.readOnly) {
+      this.params.close({ kind: "reload", tab: this.tab });
+      return;
+    }
+    const agent = this.filteredRoles()[this.selected.roles];
+    if (!agent) return;
+    this.modelRole = agent.name;
+    this.editorKind = "thinking";
+    this.modelQuery = "";
+    this.modelSelected = this.roleThinkingItems(agent.name).findIndex((entry) => entry.active);
+    if (this.modelSelected < 0) this.modelSelected = 0;
+    this.statusText = "";
+    this.params.requestRender();
+  }
+
+  private activateRoleFallbackSelection(): void {
+    if (this.params.readOnly) {
+      this.params.close({ kind: "reload", tab: this.tab });
+      return;
+    }
+    const agent = this.filteredRoles()[this.selected.roles];
+    if (!agent) return;
+    this.modelRole = agent.name;
+    this.editorKind = "fallback";
+    this.fallbackDraft = [...(this.roleRules(agent.name)?.fallbackModels ?? [])];
+    this.modelQuery = "";
+    this.modelSelected = 0;
+    this.statusText = "";
+    this.params.requestRender();
+  }
+
+  private activateRoleCircuitSelection(): void {
+    if (this.params.readOnly) {
+      this.params.close({ kind: "reload", tab: this.tab });
+      return;
+    }
+    const agent = this.filteredRoles()[this.selected.roles];
+    if (!agent) return;
+    this.modelRole = agent.name;
+    this.editorKind = "circuit";
+    this.circuitCustomMode = false;
+    this.modelQuery = "";
+    this.modelSelected = this.circuitItems(agent.name).findIndex((entry) => entry.active);
+    if (this.modelSelected < 0) this.modelSelected = 0;
+    this.statusText = "";
+    this.params.requestRender();
+  }
+
+  private activateRoleTypeSelection(): void {
+    if (this.params.readOnly) {
+      this.params.close({ kind: "reload", tab: this.tab });
+      return;
+    }
+    const agent = this.filteredRoles()[this.selected.roles];
+    if (!agent) return;
+    this.modelRole = agent.name;
+    this.editorKind = "type";
+    this.modelQuery = "";
+    this.modelSelected = this.roleTypeItems(agent.name).findIndex((entry) => entry.active);
+    if (this.modelSelected < 0) this.modelSelected = 0;
+    this.statusText = "";
+    this.params.requestRender();
+  }
+
+  private settingsMenuItems(): Array<{
+    value: string;
+    label: string;
+    detail: string;
+    active: boolean;
+    unavailable: boolean;
+  }> {
+    const role = this.modelRole;
+    const taskType = this.modelTaskType;
+    if (role) {
+      const rules = this.roleRules(role);
+      const agent = this.agents.find((candidate) => candidate.name === role);
+      const assignedType = rules?.taskType ?? agent?.taskType;
+      const typeModel = assignedType ? this.config.mappings[assignedType] : undefined;
+      return [
+        {
+          value: "type",
+          label: "Type",
+          detail: assignedType
+            ? `${assignedType}${typeModel ? ` · routes to ${typeModel}` : " · model not pinned"}`
+            : "auto · agent frontmatter or prompt inference",
+          active: Boolean(rules?.taskType),
+          unavailable: false,
+        },
+        {
+          value: "model",
+          label: "Model override",
+          detail: rules?.model
+            ? `${rules.model}${assignedType && typeModel ? ` · fallback behind ${assignedType}` : ""}`
+            : assignedType && typeModel
+              ? `inherit from type · ${typeModel}`
+              : "auto · inherit routed model",
+          active: Boolean(rules?.model),
+          unavailable: false,
+        },
+        {
+          value: "thinking",
+          label: "Thinking override",
+          detail: rules?.thinking
+            ? `${rules.thinking}${assignedType && this.config.thinkingLevels[assignedType] ? ` · fallback behind ${assignedType}` : ""}`
+            : assignedType && this.config.thinkingLevels[assignedType]
+              ? `inherit from type · ${this.config.thinkingLevels[assignedType]}`
+              : "inherit / Pi default",
+          active: Boolean(rules?.thinking),
+          unavailable: false,
+        },
+        {
+          value: "fallback",
+          label: "Fallback override",
+          detail: rules?.fallbackModels?.length
+            ? `${rules.fallbackModels.join(" → ")}${assignedType && this.config.fallbackMappings?.[assignedType]?.length ? ` · fallback behind ${assignedType}` : ""}`
+            : assignedType && this.config.fallbackMappings?.[assignedType]?.length
+              ? `inherit from type · ${this.config.fallbackMappings[assignedType]!.join(" → ")}`
+              : "none",
+          active: Boolean(rules?.fallbackModels?.length),
+          unavailable: false,
+        },
+        {
+          value: "circuit",
+          label: "Circuit",
+          detail: circuitDisplayText(rules?.circuit),
+          active: Boolean(rules?.circuit),
+          unavailable: false,
+        },
+      ];
+    }
+    if (!taskType) return [];
+    const assignedRoles = this.assignedRoles(taskType);
+    const keywords = this.config.typeMeta?.[taskType]?.keywords ?? [];
+    return [
+      {
+        value: "model",
+        label: "Model",
+        detail: this.config.mappings[taskType] ?? "auto · inherit main session model",
+        active: Boolean(this.config.mappings[taskType]),
+        unavailable: false,
+      },
+      {
+        value: "thinking",
+        label: "Thinking",
+        detail: this.config.thinkingLevels[taskType] ?? "inherit / Pi default",
+        active: Boolean(this.config.thinkingLevels[taskType]),
+        unavailable: false,
+      },
+      {
+        value: "fallback",
+        label: "Fallbacks",
+        detail: this.config.fallbackMappings?.[taskType]?.length
+          ? this.config.fallbackMappings[taskType]!.join(" → ")
+          : "none",
+        active: Boolean(this.config.fallbackMappings?.[taskType]?.length),
+        unavailable: false,
+      },
+      {
+        value: "roles",
+        label: "Roles",
+        detail: assignedRoles.length > 0 ? assignedRoles.map((name) => `@${name}`).join(", ") : "none assigned",
+        active: assignedRoles.length > 0,
+        unavailable: false,
+      },
+      {
+        value: "keywords",
+        label: "Keywords",
+        detail: keywords.length > 0 ? keywords.join(", ") : "none",
+        active: keywords.length > 0,
+        unavailable: false,
+      },
+    ];
+  }
+
+  private assignedRoles(taskType: TeammateTaskType): string[] {
+    return this.agents
+      .filter((agent) => this.roleRules(agent.name)?.taskType === taskType)
+      .map((agent) => agent.name);
+  }
+
+  private openSelectedSetting(): void {
+    const target = this.settingsMenuItems()[this.modelSelected]?.value;
+    const role = this.modelRole;
+    const taskType = this.modelTaskType;
+    if (!target || (!role && !taskType)) return;
+    this.modelQuery = "";
+    this.statusText = "";
+    if (target === "keywords" && taskType) {
+      this.keywordsInput = { kind: "edit", taskType };
+      this.keywordsDraft = (this.config.typeMeta?.[taskType]?.keywords ?? []).join(", ");
+      this.params.requestRender();
+      return;
+    }
+    this.editorKind = target as "model" | "thinking" | "fallback" | "circuit" | "type" | "roles";
+    if (target === "fallback") {
+      this.fallbackDraft = role
+        ? [...(this.roleRules(role)?.fallbackModels ?? [])]
+        : [...(this.config.fallbackMappings?.[taskType as TeammateTaskType] ?? [])];
+      this.modelSelected = 0;
+    } else if (target === "roles" && taskType) {
+      this.roleAssignmentDraft.clear();
+      for (const name of this.assignedRoles(taskType)) this.roleAssignmentDraft.add(name);
+      this.modelSelected = 0;
+    } else {
+      const items = this.filteredEditorItems();
+      this.modelSelected = items.findIndex((entry) => entry.active);
+      if (this.modelSelected < 0) this.modelSelected = 0;
+    }
+    this.params.requestRender();
+  }
+
+  private returnToSettingsMenu(): void {
+    this.editorKind = "menu";
+    this.modelQuery = "";
+    this.circuitCustomMode = false;
+    this.roleAssignmentDraft.clear();
+    this.modelSelected = 0;
+    this.params.requestRender();
+  }
+
+  private roleAssignmentItems(taskType: TeammateTaskType): Array<{
+    value: string;
+    label: string;
+    detail: string;
+    active: boolean;
+    unavailable: boolean;
+  }> {
+    return this.agents.map((agent) => {
+      const currentType = this.roleRules(agent.name)?.taskType ?? agent.taskType;
+      return {
+        value: agent.name,
+        label: `@${agent.name}`,
+        detail: currentType ? `Current type · ${currentType}` : `${agent.source} · no assigned type`,
+        active: this.roleAssignmentDraft.has(agent.name),
+        unavailable: false,
+      };
+    });
+  }
+
+  private roleTypeItems(role: string): Array<{
+    value: string;
+    label: string;
+    detail: string;
+    active: boolean;
+    unavailable: boolean;
+  }> {
+    const configured = this.roleRules(role)?.taskType;
+    const agent = this.agents.find((candidate) => candidate.name === role);
+    const declared = agent?.taskType;
+    const items: Array<{
+      value: string;
+      label: string;
+      detail: string;
+      active: boolean;
+      unavailable: boolean;
+    }> = [{
+      value: "__auto__",
+      label: "auto / agent frontmatter",
+      detail: declared ? `Use the agent's declared type · ${declared}` : "Use prompt inference when no type is declared",
+      active: !configured,
+      unavailable: false,
+    }];
+    for (const taskType of this.taskTypes) {
+      const meta = this.taskTypeMeta(taskType);
+      items.push({
+        value: taskType,
+        label: meta.label,
+        detail: taskType,
+        active: configured === taskType,
+        unavailable: false,
+      });
+    }
+    return items;
+  }
+
+  private roleRules(role: string): ModelRoutingRoleRules | undefined {
+    const rules = this.config.roleMappings?.[role];
+    return rules && rules !== null ? rules : undefined;
+  }
+
+  private editorTargetLabel(): string {
+    if (this.modelRole) return `@${this.modelRole}`;
+    if (this.modelTaskType) return this.taskTypeMeta(this.modelTaskType).label;
+    return "…";
+  }
+
   private handleModelInput(data: string): void {
     if (this.saving) return;
     if (this.editorKind === "fallback") {
       this.handleFallbackInput(data);
       return;
     }
-    if (matchesKey(data, Key.escape) || matchesKey(data, Key.left)) {
-      this.modelTaskType = null;
-      this.modelQuery = "";
-      this.statusText = "";
-      this.params.requestRender();
+    if (this.editorKind === "roles") {
+      this.handleRoleAssignmentInput(data);
+      return;
+    }
+    if (this.editorKind === "circuit" && this.circuitCustomMode) {
+      this.handleCircuitCustomInput(data);
+      return;
+    }
+    if (matchesKey(data, Key.escape)) {
+      if (this.editorKind === "menu") {
+        this.modelTaskType = null;
+        this.modelRole = null;
+        this.circuitCustomMode = false;
+        this.roleAssignmentDraft.clear();
+        this.modelQuery = "";
+        this.statusText = "";
+        this.params.requestRender();
+      } else {
+        this.returnToSettingsMenu();
+      }
+      return;
+    }
+    if (matchesKey(data, Key.left)) {
+      if (this.editorKind === "menu") {
+        this.modelTaskType = null;
+        this.modelRole = null;
+        this.modelQuery = "";
+        this.statusText = "";
+        this.params.requestRender();
+      } else {
+        this.returnToSettingsMenu();
+      }
       return;
     }
     const items = this.filteredEditorItems();
@@ -484,42 +942,77 @@ export class TeammateControlCenter implements Component, Focusable {
       }
       return;
     }
-    if (matchesKey(data, Key.enter)) {
+    if (matchesKey(data, Key.enter) || (this.editorKind === "menu" && matchesKey(data, Key.right))) {
+      if (this.editorKind === "menu") {
+        this.openSelectedSetting();
+        return;
+      }
       const taskType = this.modelTaskType;
+      const role = this.modelRole;
       const item = items[this.modelSelected];
-      if (!taskType || !item) return;
+      if ((!taskType && !role) || !item) return;
+      if (this.editorKind === "circuit" && item.value === "__custom__") {
+        this.circuitCustomMode = true;
+        this.modelQuery = circuitDraftText(role ? this.roleRules(role)?.circuit : undefined);
+        this.statusText = "";
+        this.params.requestRender();
+        return;
+      }
       this.saving = true;
       this.statusTone = "dim";
-      this.statusText = `Saving ${this.taskTypeMeta(taskType).label}…`;
+      this.statusText = `Saving ${this.editorTargetLabel()}…`;
       this.params.requestRender();
       this.persistenceTimer = setTimeout(() => {
         this.persistenceTimer = undefined;
         try {
           const editorKind = this.editorKind;
+          if (role) {
+            const existing = this.roleRules(role) ?? {};
+            let rules: ModelRoutingRoleRules;
+            let savedText: string;
+            if (editorKind === "thinking") {
+              const thinking = item.value === "__auto__" ? null : item.value as TeammateThinkingLevel;
+              rules = { ...existing, thinking };
+              savedText = thinking ?? "inherit / Pi default";
+            } else if (editorKind === "type") {
+              const taskType = item.value === "__auto__" ? null : item.value;
+              rules = { ...existing, taskType };
+              savedText = taskType ?? "auto / agent frontmatter";
+            } else if (editorKind === "circuit") {
+              const circuit = item.value === "__auto__"
+                ? null
+                : (item as { policy?: ModelCircuitPolicy }).policy ?? null;
+              rules = { ...existing, circuit };
+              savedText = circuitDisplayText(circuit);
+            } else {
+              const model = item.value === "__auto__" ? null : item.value;
+              rules = { ...existing, model };
+              savedText = model ?? "auto / inherit main session model";
+            }
+            if (this.params.saveRoleRules) this.params.saveRoleRules(role, rules);
+            else saveGlobalProfileRoleMapping(this.params.cwd, this.config.profileId, role, rules, this.params.globalFilePath);
+            this.config.roleMappings = { ...(this.config.roleMappings ?? {}), [role]: rules };
+            this.saving = false;
+            this.statusTone = "success";
+            this.statusText = `Saved · @${role} ${editorKind} → ${savedText}`;
+            this.returnToSettingsMenu();
+            return;
+          }
           const value = item.value === "__auto__" ? null : item.value;
           if (editorKind === "thinking") {
             const thinking = value as TeammateThinkingLevel | null;
-            if (this.params.saveThinking) this.params.saveThinking(taskType, thinking);
-            else saveGlobalProfileThinkingLevel(this.params.cwd, this.config.profileId, taskType, thinking, this.params.globalFilePath);
-            this.config.thinkingLevels[taskType] = thinking;
+            if (this.params.saveThinking) this.params.saveThinking(taskType as TeammateTaskType, thinking);
+            else saveGlobalProfileThinkingLevel(this.params.cwd, this.config.profileId, taskType as TeammateTaskType, thinking, this.params.globalFilePath);
+            this.config.thinkingLevels[taskType as TeammateTaskType] = thinking;
           } else {
-            if (this.params.saveMapping) this.params.saveMapping(taskType, value);
-            else saveGlobalProfileModelMapping(this.params.cwd, this.config.profileId, taskType, value, this.params.globalFilePath);
-            this.config.mappings[taskType] = value;
+            if (this.params.saveMapping) this.params.saveMapping(taskType as TeammateTaskType, value);
+            else saveGlobalProfileModelMapping(this.params.cwd, this.config.profileId, taskType as TeammateTaskType, value, this.params.globalFilePath);
+            this.config.mappings[taskType as TeammateTaskType] = value;
           }
           this.saving = false;
           this.statusTone = "success";
-          if (editorKind === "model" && value) {
-            this.editorKind = "thinking";
-            this.modelSelected = this.thinkingItems(taskType).findIndex((entry) => entry.active);
-            if (this.modelSelected < 0) this.modelSelected = 0;
-            this.statusText = `Saved model · choose thinking depth for ${value}`;
-          } else {
-            this.statusText = `Saved · ${taskType} ${editorKind} → ${value ?? (editorKind === "thinking" ? "inherit / Pi default" : "auto / inherit main session model")}`;
-            this.modelTaskType = null;
-          }
-          this.modelQuery = "";
-          this.params.requestRender();
+          this.statusText = `Saved · ${taskType as TeammateTaskType} ${editorKind} → ${value ?? (editorKind === "thinking" ? "inherit / Pi default" : "auto / inherit main session model")}`;
+          this.returnToSettingsMenu();
         } catch (error) {
           this.saving = false;
           this.statusTone = "error";
@@ -537,14 +1030,379 @@ export class TeammateControlCenter implements Component, Focusable {
     }
   }
 
-  private handleFallbackInput(data: string): void {
+  private handleRoleAssignmentInput(data: string): void {
     if (this.saving) return;
     if (matchesKey(data, Key.escape) || matchesKey(data, Key.left)) {
-      this.modelTaskType = null;
-      this.fallbackDraft = [];
+      this.returnToSettingsMenu();
+      return;
+    }
+    const items = this.filteredEditorItems();
+    if (matchesKey(data, Key.up) || (matchesKey(data, "k") && !this.modelQuery)) {
+      this.modelSelected = clampIndex(this.modelSelected - 1, items.length);
+      this.params.requestRender();
+      return;
+    }
+    if (matchesKey(data, Key.down) || (matchesKey(data, "j") && !this.modelQuery)) {
+      this.modelSelected = clampIndex(this.modelSelected + 1, items.length);
+      this.params.requestRender();
+      return;
+    }
+    if (matchesKey(data, Key.space) || data === " ") {
+      const item = items[this.modelSelected];
+      if (!item) return;
+      if (this.roleAssignmentDraft.has(item.value)) this.roleAssignmentDraft.delete(item.value);
+      else this.roleAssignmentDraft.add(item.value);
+      this.params.requestRender();
+      return;
+    }
+    if (matchesKey(data, Key.enter)) {
+      this.commitRoleAssignments();
+      return;
+    }
+    if (matchesKey(data, Key.backspace)) {
+      if (this.modelQuery) {
+        this.modelQuery = removeLastGrapheme(this.modelQuery);
+        this.modelSelected = 0;
+        this.params.requestRender();
+      }
+      return;
+    }
+    const input = printableInput(data);
+    if (input) {
+      this.modelQuery += input;
+      this.modelSelected = 0;
+      this.params.requestRender();
+    }
+  }
+
+  private commitRoleAssignments(): void {
+    const taskType = this.modelTaskType;
+    if (!taskType || this.saving) return;
+    this.saving = true;
+    this.statusTone = "dim";
+    this.statusText = `Saving roles for ${taskType}…`;
+    this.params.requestRender();
+    this.persistenceTimer = setTimeout(() => {
+      this.persistenceTimer = undefined;
+      try {
+        const roleMappings = { ...(this.config.roleMappings ?? {}) };
+        const requestedRoles = [...this.roleAssignmentDraft];
+        const changes: Array<{ role: string; rules: ModelRoutingRoleRules }> = [];
+        for (const agent of this.agents) {
+          const existing = this.roleRules(agent.name) ?? {};
+          const assigned = existing.taskType === taskType;
+          const requested = this.roleAssignmentDraft.has(agent.name);
+          if (assigned === requested) continue;
+          const rules: ModelRoutingRoleRules = { ...existing, taskType: requested ? taskType : null };
+          changes.push({ role: agent.name, rules });
+          roleMappings[agent.name] = rules;
+        }
+        if (this.params.saveTypeRoles) {
+          this.params.saveTypeRoles(taskType, requestedRoles);
+        } else if (this.params.saveRoleRules) {
+          for (const change of changes) this.params.saveRoleRules(change.role, change.rules);
+        } else {
+          saveGlobalProfileTypeRoles(this.params.cwd, this.config.profileId, taskType, requestedRoles, this.params.globalFilePath);
+        }
+        this.config.roleMappings = roleMappings;
+        this.saving = false;
+        this.statusTone = "success";
+        const assignedNames = [...this.roleAssignmentDraft];
+        this.statusText = assignedNames.length > 0
+          ? `Saved roles · ${assignedNames.map((name) => `@${name}`).join(", ")}`
+          : "Saved roles · none";
+        this.returnToSettingsMenu();
+      } catch (error) {
+        this.saving = false;
+        this.statusTone = "error";
+        this.statusText = `Save failed · ${error instanceof Error ? error.message : String(error)}`;
+        this.params.requestRender();
+      }
+    }, 16);
+  }
+
+  private handleCircuitCustomInput(data: string): void {
+    if (matchesKey(data, Key.escape) || matchesKey(data, Key.left)) {
+      this.circuitCustomMode = false;
       this.modelQuery = "";
       this.statusText = "";
       this.params.requestRender();
+      return;
+    }
+    if (matchesKey(data, Key.enter)) {
+      this.commitCircuitCustom();
+      return;
+    }
+    if (matchesKey(data, Key.backspace)) {
+      if (this.modelQuery) {
+        this.modelQuery = removeLastGrapheme(this.modelQuery);
+        this.statusText = "";
+        this.params.requestRender();
+      }
+      return;
+    }
+    const input = printableInput(data);
+    if (input && /^[0-9/]*$/.test(input)) {
+      this.modelQuery += input;
+      this.statusText = "";
+      this.params.requestRender();
+    }
+  }
+
+  private commitCircuitCustom(): void {
+    const role = this.modelRole;
+    if (!role || this.saving) return;
+    const policy = parseCircuitDraft(this.modelQuery.trim());
+    if (!policy) {
+      this.statusTone = "error";
+      this.statusText = "Invalid circuit · type threshold/cooldown (e.g. 4/120)";
+      this.params.requestRender();
+      return;
+    }
+    this.saving = true;
+    this.statusTone = "dim";
+    this.statusText = `Saving @${role} circuit…`;
+    this.params.requestRender();
+    this.persistenceTimer = setTimeout(() => {
+      this.persistenceTimer = undefined;
+      try {
+        const existing = this.roleRules(role) ?? {};
+        const rules = { ...existing, circuit: policy };
+        if (this.params.saveRoleRules) this.params.saveRoleRules(role, rules);
+        else saveGlobalProfileRoleMapping(this.params.cwd, this.config.profileId, role, rules, this.params.globalFilePath);
+        this.config.roleMappings = { ...(this.config.roleMappings ?? {}), [role]: rules };
+        this.saving = false;
+        this.statusTone = "success";
+        this.statusText = `Saved · @${role} circuit → custom (${circuitDisplayText(policy)})`;
+        this.returnToSettingsMenu();
+      } catch (error) {
+        this.saving = false;
+        this.statusTone = "error";
+        this.statusText = `Save failed · ${error instanceof Error ? error.message : String(error)}`;
+        this.params.requestRender();
+      }
+    }, 16);
+  }
+
+  private startCustomTypeInput(): void {
+    if (this.params.readOnly) {
+      this.params.close({ kind: "reload", tab: this.tab });
+      return;
+    }
+    this.customTypeInput = true;
+    this.customTypeDraft = "";
+    this.statusText = "";
+    this.params.requestRender();
+  }
+
+  private handleCustomTypeInput(data: string): void {
+    if (matchesKey(data, Key.escape)) {
+      this.customTypeInput = false;
+      this.customTypeDraft = "";
+      this.statusText = "";
+      this.params.requestRender();
+      return;
+    }
+    if (matchesKey(data, Key.enter)) {
+      this.commitCustomType();
+      return;
+    }
+    if (matchesKey(data, Key.backspace)) {
+      if (this.customTypeDraft) {
+        this.customTypeDraft = removeLastGrapheme(this.customTypeDraft);
+        this.statusText = "";
+        this.params.requestRender();
+      }
+      return;
+    }
+    const input = printableInput(data);
+    if (input) {
+      this.customTypeDraft += input;
+      this.statusText = "";
+      this.params.requestRender();
+    }
+  }
+
+  private commitCustomType(): void {
+    if (this.saving) return;
+    const taskType = parseTeammateTaskType(this.customTypeDraft);
+    if (!taskType) {
+      this.statusTone = "error";
+      this.statusText = "Invalid type · lowercase letters, digits, . _ - (e.g. security-audit)";
+      this.params.requestRender();
+      return;
+    }
+    if ((TEAMMATE_TASK_TYPES as readonly string[]).includes(taskType)) {
+      this.statusTone = "error";
+      this.statusText = `Cannot register a built-in type · ${taskType}`;
+      this.params.requestRender();
+      return;
+    }
+    if (this.taskTypes.includes(taskType)) {
+      this.statusTone = "error";
+      this.statusText = `Custom type already exists · ${taskType}`;
+      this.params.requestRender();
+      return;
+    }
+    // Step 2: optional trigger keywords (comma-separated).
+    this.customTypeInput = false;
+    this.keywordsInput = { kind: "create", taskType };
+    this.keywordsDraft = "";
+    this.statusText = "";
+    this.params.requestRender();
+  }
+
+  private handleKeywordsInput(data: string): void {
+    if (matchesKey(data, Key.escape)) {
+      this.keywordsInput = null;
+      this.keywordsDraft = "";
+      this.customTypeDraft = "";
+      this.statusText = "";
+      this.params.requestRender();
+      return;
+    }
+    if (matchesKey(data, Key.enter)) {
+      this.commitKeywords();
+      return;
+    }
+    if (matchesKey(data, Key.backspace)) {
+      if (this.keywordsDraft) {
+        this.keywordsDraft = removeLastGrapheme(this.keywordsDraft);
+        this.statusText = "";
+        this.params.requestRender();
+      }
+      return;
+    }
+    const input = printableInput(data);
+    if (input) {
+      this.keywordsDraft += input;
+      this.statusText = "";
+      this.params.requestRender();
+    }
+  }
+
+  private commitKeywords(): void {
+    const target = this.keywordsInput;
+    if (!target || this.saving) return;
+    const keywords = parseKeywordsDraft(this.keywordsDraft);
+    const meta: ModelRoutingTypeMeta = keywords.length > 0 ? { keywords } : { keywords: null };
+    this.saving = true;
+    this.statusTone = "dim";
+    this.statusText = target.kind === "create"
+      ? `Saving custom type ${target.taskType}…`
+      : `Saving keywords for ${target.taskType}…`;
+    this.params.requestRender();
+    this.persistenceTimer = setTimeout(() => {
+      this.persistenceTimer = undefined;
+      try {
+        if (target.kind === "create") {
+          if (this.params.saveCustomType) this.params.saveCustomType(target.taskType, meta);
+          else saveGlobalProfileCustomType(this.params.cwd, this.config.profileId, target.taskType, meta, this.params.globalFilePath);
+          this.config.mappings[target.taskType] = null;
+          if (keywords.length > 0) {
+            this.config.typeMeta = { ...(this.config.typeMeta ?? {}), [target.taskType]: { keywords } };
+          }
+          this.refreshTaskTypes();
+          this.queries.routing = "";
+          const index = this.taskTypes.indexOf(target.taskType);
+          if (index >= 0) this.selected.routing = index;
+          this.statusText = `Created custom type ${target.taskType}`;
+        } else {
+          if (this.params.saveTypeMeta) this.params.saveTypeMeta(target.taskType, meta);
+          else saveGlobalProfileTypeMeta(this.params.cwd, this.config.profileId, target.taskType, meta, this.params.globalFilePath);
+          const next = this.config.typeMeta ?? {};
+          if (keywords.length > 0) next[target.taskType] = { keywords };
+          else delete next[target.taskType];
+          this.config.typeMeta = next;
+          this.statusText = keywords.length > 0
+            ? `Saved keywords for ${target.taskType}`
+            : `Cleared keywords for ${target.taskType}`;
+        }
+        this.keywordsInput = null;
+        this.keywordsDraft = "";
+        this.saving = false;
+        this.statusTone = "success";
+        this.params.requestRender();
+      } catch (error) {
+        this.saving = false;
+        this.statusTone = "error";
+        this.statusText = `Save failed · ${error instanceof Error ? error.message : String(error)}`;
+        this.params.requestRender();
+      }
+    }, 16);
+  }
+
+  private startTypeMetaEdit(): void {
+    if (this.params.readOnly) {
+      this.params.close({ kind: "reload", tab: this.tab });
+      return;
+    }
+    const taskType = this.filteredTaskTypes()[this.selected.routing];
+    if (!taskType || taskType === NEW_CUSTOM_TYPE_ENTRY) return;
+    this.keywordsInput = { kind: "edit", taskType };
+    this.keywordsDraft = (this.config.typeMeta?.[taskType]?.keywords ?? []).join(", ");
+    this.statusText = "";
+    this.params.requestRender();
+  }
+
+  private deleteSelectedCustomType(): void {
+    if (this.params.readOnly) {
+      this.params.close({ kind: "reload", tab: this.tab });
+      return;
+    }
+    const taskType = this.filteredTaskTypes()[this.selected.routing];
+    if (!taskType || taskType === NEW_CUSTOM_TYPE_ENTRY) return;
+    if ((TEAMMATE_TASK_TYPES as readonly string[]).includes(taskType)) {
+      this.statusTone = "error";
+      this.statusText = "Built-in types cannot be deleted";
+      this.params.requestRender();
+      return;
+    }
+    this.saving = true;
+    this.statusTone = "dim";
+    this.statusText = `Deleting ${this.taskTypeMeta(taskType).label}…`;
+    this.params.requestRender();
+    this.persistenceTimer = setTimeout(() => {
+      this.persistenceTimer = undefined;
+      try {
+        if (this.params.deleteCustomType) this.params.deleteCustomType(taskType);
+        else deleteGlobalProfileCustomType(this.params.cwd, this.config.profileId, taskType, this.params.globalFilePath);
+        delete this.config.mappings[taskType];
+        if (this.config.fallbackMappings) delete this.config.fallbackMappings[taskType];
+        if (this.config.thinkingLevels) delete this.config.thinkingLevels[taskType];
+        if (this.config.typeMeta) delete this.config.typeMeta[taskType];
+        if (this.config.roleMappings) {
+          for (const [role, rules] of Object.entries(this.config.roleMappings)) {
+            if (rules?.taskType === taskType) this.config.roleMappings[role] = { ...rules, taskType: null };
+          }
+        }
+        const declaredByAgent = this.agents.some((agent) => agent.taskType === taskType);
+        this.refreshTaskTypes();
+        this.selected.routing = clampIndex(this.selected.routing, this.filteredTaskTypes().length);
+        this.saving = false;
+        this.statusTone = "success";
+        this.statusText = declaredByAgent
+          ? `Reset routing for agent-declared type ${taskType}`
+          : `Deleted custom type ${taskType}`;
+        this.params.requestRender();
+      } catch (error) {
+        this.saving = false;
+        this.statusTone = "error";
+        this.statusText = `Delete failed · ${error instanceof Error ? error.message : String(error)}`;
+        this.params.requestRender();
+      }
+    }, 16);
+  }
+
+  private refreshTaskTypes(): void {
+    this.taskTypes = discoverRoutingTaskTypes(this.params.cwd, this.agents, this.config);
+  }
+
+  private handleFallbackInput(data: string): void {
+    if (this.saving) return;
+    if (matchesKey(data, Key.escape) || matchesKey(data, Key.left)) {
+      this.fallbackDraft = [];
+      this.returnToSettingsMenu();
       return;
     }
     const items = this.filteredEditorItems();
@@ -590,7 +1448,7 @@ export class TeammateControlCenter implements Component, Focusable {
     }
   }
 
-  private fallbackItems(taskType: TeammateTaskType): Array<{
+  private fallbackItems(_target: string): Array<{
     value: string;
     label: string;
     detail: string;
@@ -643,19 +1501,24 @@ export class TeammateControlCenter implements Component, Focusable {
   }
 
   private editorLabel(): string {
+    if (this.editorKind === "menu") return "Settings";
     if (this.editorKind === "fallback") return "Fallback";
     if (this.editorKind === "thinking") return "Thinking";
+    if (this.editorKind === "circuit") return "Circuit";
+    if (this.editorKind === "type") return "Type";
+    if (this.editorKind === "roles") return "Roles";
     return "Model";
   }
 
   private toggleFallbackItem(): void {
     const taskType = this.modelTaskType;
+    const role = this.modelRole;
     const item = this.filteredEditorItems()[this.modelSelected];
-    if (!taskType || !item) return;
+    if ((!taskType && !role) || !item) return;
     const index = this.fallbackDraft.indexOf(item.value);
     if (index >= 0) this.fallbackDraft.splice(index, 1);
     else this.fallbackDraft.push(item.value);
-    this.modelSelected = this.fallbackItems(taskType).findIndex((entry) => entry.value === item.value);
+    this.modelSelected = this.fallbackItems(role ?? (taskType as TeammateTaskType)).findIndex((entry) => entry.value === item.value);
     if (this.modelSelected < 0) this.modelSelected = 0;
     this.statusText = "";
     this.params.requestRender();
@@ -663,39 +1526,47 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private reorderFallback(direction: -1 | 1): void {
     const taskType = this.modelTaskType;
+    const role = this.modelRole;
     const item = this.filteredEditorItems()[this.modelSelected];
-    if (!taskType || !item) return;
+    if ((!taskType && !role) || !item) return;
     const index = this.fallbackDraft.indexOf(item.value);
     if (index < 0) return;
     const target = index + direction;
     if (target < 0 || target >= this.fallbackDraft.length) return;
     [this.fallbackDraft[index], this.fallbackDraft[target]] = [this.fallbackDraft[target], this.fallbackDraft[index]];
-    this.modelSelected = this.fallbackItems(taskType).findIndex((entry) => entry.value === item.value);
+    this.modelSelected = this.fallbackItems(role ?? (taskType as TeammateTaskType)).findIndex((entry) => entry.value === item.value);
     if (this.modelSelected < 0) this.modelSelected = 0;
     this.params.requestRender();
   }
 
   private commitFallback(): void {
     const taskType = this.modelTaskType;
-    if (!taskType) return;
+    const role = this.modelRole;
+    if (!taskType && !role) return;
     this.saving = true;
     this.statusTone = "dim";
-    this.statusText = `Saving ${this.taskTypeMeta(taskType).label} fallbacks…`;
+    this.statusText = `Saving ${this.editorTargetLabel()} fallbacks…`;
     this.params.requestRender();
     this.persistenceTimer = setTimeout(() => {
       this.persistenceTimer = undefined;
       try {
         const models = this.fallbackDraft.length > 0 ? [...this.fallbackDraft] : null;
-        if (this.params.saveFallbacks) this.params.saveFallbacks(taskType, models);
-        else saveProjectFallbackMapping(this.params.cwd, taskType, models, this.params.globalFilePath);
-        this.config.fallbackMappings = { ...(this.config.fallbackMappings ?? {}), [taskType]: models };
+        if (role) {
+          const existing = this.roleRules(role) ?? {};
+          const rules = { ...existing, fallbackModels: models };
+          if (this.params.saveRoleRules) this.params.saveRoleRules(role, rules);
+          else saveGlobalProfileRoleMapping(this.params.cwd, this.config.profileId, role, rules, this.params.globalFilePath);
+          this.config.roleMappings = { ...(this.config.roleMappings ?? {}), [role]: rules };
+        } else if (taskType) {
+          if (this.params.saveFallbacks) this.params.saveFallbacks(taskType, models);
+          else saveProjectFallbackMapping(this.params.cwd, taskType, models, this.params.globalFilePath);
+          this.config.fallbackMappings = { ...(this.config.fallbackMappings ?? {}), [taskType]: models };
+        }
         this.saving = false;
         this.statusTone = "success";
         this.statusText = models ? `Saved fallbacks · ${models.join(", ")}` : "Saved fallbacks · none";
-        this.modelTaskType = null;
         this.fallbackDraft = [];
-        this.modelQuery = "";
-        this.params.requestRender();
+        this.returnToSettingsMenu();
       } catch (error) {
         this.saving = false;
         this.statusTone = "error";
@@ -739,23 +1610,28 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private filteredTaskTypes(): TeammateTaskType[] {
     const query = this.queries.routing.toLowerCase();
-    if (!query) return [...this.taskTypes];
-    return this.taskTypes.filter((taskType) => {
-      const meta = this.taskTypeMeta(taskType);
-      const mapping = this.config.mappings[taskType] ?? "auto";
-      const thinking = this.config.thinkingLevels[taskType] ?? "inherit";
-      return `${taskType} ${meta.label} ${meta.roles} ${meta.description} ${mapping} ${thinking}`.toLowerCase().includes(query);
-    });
+    const types = query
+      ? this.taskTypes.filter((taskType) => {
+        const meta = this.taskTypeMeta(taskType);
+        const mapping = this.config.mappings[taskType] ?? "auto";
+        const thinking = this.config.thinkingLevels[taskType] ?? "inherit";
+        return `${taskType} ${meta.label} ${meta.roles} ${meta.description} ${mapping} ${thinking}`.toLowerCase().includes(query);
+      })
+      : [...this.taskTypes];
+    if (!query || "new custom type".includes(query)) types.push(NEW_CUSTOM_TYPE_ENTRY as TeammateTaskType);
+    return types;
   }
 
   private filteredRoles(): AgentConfig[] {
     const query = this.queries.roles.toLowerCase();
     if (!query) return this.agents;
-    return this.agents.filter((agent) =>
-      `${agent.name} ${agent.description} ${agent.source} ${agent.model ?? ""} ${(agent.tools ?? []).join(" ")}`
+    return this.agents.filter((agent) => {
+      const rules = this.roleRules(agent.name);
+      const circuit = rules?.circuit;
+      return `${agent.name} ${agent.description} ${agent.source} ${agent.taskType ?? ""} ${agent.model ?? ""} ${rules?.taskType ?? ""} ${rules?.model ?? ""} ${(rules?.fallbackModels ?? []).join(" ")} ${rules?.thinking ?? ""} ${circuit ? `${circuit.threshold ?? CIRCUIT_DEFAULT_THRESHOLD} ${Math.round((circuit.cooldownMs ?? CIRCUIT_DEFAULT_COOLDOWN_MS) / 1000)}` : ""} ${(agent.tools ?? []).join(" ")}`
         .toLowerCase()
-        .includes(query)
-    );
+        .includes(query);
+    });
   }
 
   private filteredActiveAgents(): ControlCenterActiveAgent[] {
@@ -773,14 +1649,13 @@ export class TeammateControlCenter implements Component, Focusable {
     return this.filteredActiveAgents();
   }
 
-  private modelItems(taskType: TeammateTaskType): Array<{
+  private modelPickerItems(configured: string | undefined, ownerLabel: string): Array<{
     value: string;
     label: string;
     detail: string;
     active: boolean;
     unavailable: boolean;
   }> {
-    const configured = this.config.mappings[taskType];
     const items = [{
       value: "__auto__",
       label: "auto / inherit main session model",
@@ -793,7 +1668,7 @@ export class TeammateControlCenter implements Component, Focusable {
         value: model,
         label: model,
         detail: [
-          model === configured ? `Current ${taskType} mapping` : "Authenticated in this session",
+          model === configured ? `Current ${ownerLabel} model` : "Authenticated in this session",
           this.circuitNote(model),
         ].filter(Boolean).join(" · "),
         active: model === configured,
@@ -812,9 +1687,27 @@ export class TeammateControlCenter implements Component, Focusable {
     return items;
   }
 
-  private thinkingItems(taskType: TeammateTaskType) {
-    const configured = this.config.thinkingLevels[taskType];
-    const routedModel = this.config.mappings[taskType];
+  private modelItems(taskType: TeammateTaskType): Array<{
+    value: string;
+    label: string;
+    detail: string;
+    active: boolean;
+    unavailable: boolean;
+  }> {
+    return this.modelPickerItems(this.config.mappings[taskType] ?? undefined, taskType);
+  }
+
+  private roleModelItems(role: string): Array<{
+    value: string;
+    label: string;
+    detail: string;
+    active: boolean;
+    unavailable: boolean;
+  }> {
+    return this.modelPickerItems(this.roleRules(role)?.model ?? undefined, `@${role}`);
+  }
+
+  private thinkingPickerItems(configured: TeammateThinkingLevel | undefined, routedModel: string | undefined, ownerLabel: string) {
     const items = [{
       value: "__auto__",
       label: "inherit / Pi default",
@@ -826,7 +1719,7 @@ export class TeammateControlCenter implements Component, Focusable {
         value: thinking,
         label: thinking === "xhigh" ? "xhigh / max" : thinking,
         detail: thinking === configured
-          ? `Current ${taskType} thinking depth`
+          ? `Current ${ownerLabel} thinking depth`
           : routedModel
             ? `Applies to ${routedModel}`
             : "Applies to the routed task model",
@@ -838,13 +1731,84 @@ export class TeammateControlCenter implements Component, Focusable {
     return items;
   }
 
+  private thinkingItems(taskType: TeammateTaskType) {
+    return this.thinkingPickerItems(
+      this.config.thinkingLevels[taskType] ?? undefined,
+      this.config.mappings[taskType] ?? undefined,
+      taskType,
+    );
+  }
+
+  private roleThinkingItems(role: string) {
+    const rules = this.roleRules(role);
+    return this.thinkingPickerItems(rules?.thinking ?? undefined, rules?.model ?? undefined, `@${role}`);
+  }
+
+  private circuitItems(role: string): Array<{
+    value: string;
+    label: string;
+    detail: string;
+    active: boolean;
+    unavailable: boolean;
+    policy?: ModelCircuitPolicy;
+  }> {
+    const configured = this.roleRules(role)?.circuit;
+    const matchesPreset = (policy: ModelCircuitPolicy): boolean =>
+      (configured?.threshold ?? CIRCUIT_DEFAULT_THRESHOLD) === (policy.threshold ?? CIRCUIT_DEFAULT_THRESHOLD)
+      && (configured?.cooldownMs ?? CIRCUIT_DEFAULT_COOLDOWN_MS) === (policy.cooldownMs ?? CIRCUIT_DEFAULT_COOLDOWN_MS);
+    const items: Array<{
+      value: string;
+      label: string;
+      detail: string;
+      active: boolean;
+      unavailable: boolean;
+      policy?: ModelCircuitPolicy;
+    }> = [{
+      value: "__auto__",
+      label: `default · ${CIRCUIT_DEFAULT_THRESHOLD} failures / ${Math.round(CIRCUIT_DEFAULT_COOLDOWN_MS / 1000)}s`,
+      detail: "Use the shared circuit breaker defaults",
+      active: !configured,
+      unavailable: false,
+    }];
+    for (const preset of CIRCUIT_PRESETS) {
+      items.push({
+        value: preset.value,
+        label: preset.label,
+        detail: preset.detail,
+        active: configured !== undefined && configured !== null && matchesPreset(preset.policy),
+        unavailable: false,
+        policy: preset.policy,
+      });
+    }
+    items.push({
+      value: "__custom__",
+      label: configured
+        ? `custom · ${circuitDisplayText(configured)}`
+        : "custom …",
+      detail: "type threshold/cooldown (e.g. 4/120)",
+      active: configured !== undefined && configured !== null && !CIRCUIT_PRESETS.some((preset) => matchesPreset(preset.policy)),
+      unavailable: false,
+    });
+    return items;
+  }
+
   private filteredEditorItems() {
-    if (!this.modelTaskType) return [];
-    const items = this.editorKind === "thinking"
-      ? this.thinkingItems(this.modelTaskType)
-      : this.editorKind === "fallback"
-        ? this.fallbackItems(this.modelTaskType)
-        : this.modelItems(this.modelTaskType);
+    const role = this.modelRole;
+    const taskType = this.modelTaskType;
+    if (!role && !taskType) return [];
+    const items = this.editorKind === "menu"
+      ? this.settingsMenuItems()
+      : this.editorKind === "thinking"
+        ? (role ? this.roleThinkingItems(role) : this.thinkingItems(taskType as TeammateTaskType))
+        : this.editorKind === "fallback"
+          ? this.fallbackItems(role ?? (taskType as TeammateTaskType))
+          : this.editorKind === "circuit"
+            ? this.circuitItems(role as string)
+            : this.editorKind === "type"
+              ? this.roleTypeItems(role as string)
+              : this.editorKind === "roles"
+                ? this.roleAssignmentItems(taskType as TeammateTaskType)
+                : (role ? this.roleModelItems(role) : this.modelItems(taskType as TeammateTaskType));
     const query = this.modelQuery.toLowerCase();
     return query ? items.filter((item) => `${item.label} ${item.detail}`.toLowerCase().includes(query)) : items;
   }
@@ -856,6 +1820,38 @@ export class TeammateControlCenter implements Component, Focusable {
     const rows: string[] = [];
     rows.push(this.headerLine(inner));
     rows.push(this.tabLine(inner));
+    if (this.keywordsInput) {
+      const marker = this.focused ? CURSOR_MARKER : "";
+      const draft = this.keywordsDraft
+        ? `${displayText(this.keywordsDraft)}${marker}`
+        : `${marker}${this.params.theme.fg("dim", "comma-separated keywords (e.g. audit, security)")}`;
+      rows.push(`${this.params.theme.fg("accent", "›")} ${draft}`);
+      rows.push(this.params.theme.fg("dim", "─".repeat(inner)));
+      rows.push(this.params.theme.fg("muted", `Keywords for ${displayText(this.keywordsInput.taskType)} · when to use this type · Enter with empty text skips`));
+      if (this.statusText) rows.push(this.statusLine(inner));
+      rows.push(truncateToWidth(
+        `${this.params.theme.fg("dim", "Enter")} save ${this.params.theme.fg("dim", "· Esc")} cancel ${this.params.theme.fg("dim", "· type")} comma-separated`,
+        inner,
+        "…",
+      ));
+      return this.frame(rows, width);
+    }
+    if (this.customTypeInput) {
+      const marker = this.focused ? CURSOR_MARKER : "";
+      const draft = this.customTypeDraft
+        ? `${displayText(this.customTypeDraft)}${marker}`
+        : `${marker}${this.params.theme.fg("dim", "type identifier (e.g. security-audit)")}`;
+      rows.push(`${this.params.theme.fg("accent", "›")} ${draft}`);
+      rows.push(this.params.theme.fg("dim", "─".repeat(inner)));
+      rows.push(this.params.theme.fg("muted", "New custom agent type · lowercase letters, digits, . _ -"));
+      if (this.statusText) rows.push(this.statusLine(inner));
+      rows.push(truncateToWidth(
+        `${this.params.theme.fg("dim", "Enter")} save ${this.params.theme.fg("dim", "· Esc")} cancel ${this.params.theme.fg("dim", "· type")} identifier`,
+        inner,
+        "…",
+      ));
+      return this.frame(rows, width);
+    }
     rows.push(this.filterLine(inner, this.queries[this.tab], items.length));
     rows.push(this.params.theme.fg("dim", "─".repeat(inner)));
 
@@ -886,20 +1882,40 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private renderModels(width: number): string[] {
     const taskType = this.modelTaskType;
-    if (!taskType) return this.renderMain(width);
+    const role = this.modelRole;
+    if (!taskType && !role) return this.renderMain(width);
     const inner = width - 2;
     const items = this.filteredEditorItems();
     this.modelSelected = clampIndex(this.modelSelected, items.length);
-    const meta = this.taskTypeMeta(taskType);
+    const meta = taskType ? this.taskTypeMeta(taskType) : undefined;
+    const roleAgent = role ? this.agents.find((agent) => agent.name === role) : undefined;
+    const headerSub = role
+      ? (roleAgent?.description ?? "custom role")
+      : displayText(meta?.roles ?? "");
+    const headerLabel = role ? `@${displayText(role)}` : displayText(meta?.label ?? "");
     const rows: string[] = [
       truncateToWidth(
-        `${this.params.theme.fg("accent", this.params.theme.bold("Teammate Control Center"))} ${this.params.theme.fg("dim", "›")} ${this.params.theme.bold(displayText(meta.label))} ${this.params.theme.fg("dim", `› ${this.editorLabel()} (${displayText(meta.roles)})`)}`,
+        `${this.params.theme.fg("accent", this.params.theme.bold("Teammate Control Center"))} ${this.params.theme.fg("dim", "›")} ${this.params.theme.bold(headerLabel)} ${this.params.theme.fg("dim", `› ${this.editorLabel()} (${displayText(headerSub)})`)}`,
         inner,
         "…",
       ),
-      this.filterLine(inner, this.modelQuery, items.length),
+      this.filterLine(inner, this.modelQuery, this.editorKind === "circuit" && this.circuitCustomMode ? 0 : items.length),
       this.params.theme.fg("dim", "─".repeat(inner)),
     ];
+    if (this.editorKind === "circuit" && this.circuitCustomMode) {
+      const marker = this.focused ? CURSOR_MARKER : "";
+      const draft = this.modelQuery
+        ? `${displayText(this.modelQuery)}${marker}`
+        : `${marker}${this.params.theme.fg("dim", "threshold/cooldown (e.g. 4/120)")}`;
+      rows.push(truncateToWidth(`${this.params.theme.fg("accent", "›")} ${draft}`, inner, "…"));
+      if (this.statusText) rows.push(this.statusLine(inner));
+      rows.push(truncateToWidth(
+        `${this.params.theme.fg("dim", "Enter")} save ${this.params.theme.fg("dim", "· Esc/←")} back ${this.params.theme.fg("dim", "· type")} e.g. 4/120`,
+        inner,
+        "…",
+      ));
+      return this.frame(rows, width);
+    }
     const terminalRows = Math.max(12, process.stdout?.rows ?? 30);
     const listRows = Math.max(4, Math.min(12, terminalRows - 10));
     const start = Math.max(0, Math.min(Math.max(0, items.length - listRows), this.modelSelected - Math.floor(listRows / 2)));
@@ -908,11 +1924,19 @@ export class TeammateControlCenter implements Component, Focusable {
       const index = start + offset;
       const item = visible[offset];
       const prefix = index === this.modelSelected ? this.params.theme.fg("accent", "▸") : " ";
-      const state = item.unavailable
-        ? this.params.theme.fg("error", `! unavailable${item.active ? " · active" : ""}`)
-        : item.active
-          ? this.params.theme.fg("success", "✓ active")
-          : this.params.theme.fg("dim", "available");
+      const state = this.editorKind === "menu"
+        ? item.active
+          ? this.params.theme.fg("success", "configured")
+          : this.params.theme.fg("dim", "inherited")
+        : this.editorKind === "roles"
+          ? item.active
+            ? this.params.theme.fg("success", "✓ assigned")
+            : this.params.theme.fg("dim", "available")
+          : item.unavailable
+            ? this.params.theme.fg("error", `! unavailable${item.active ? " · active" : ""}`)
+            : item.active
+              ? this.params.theme.fg("success", "✓ active")
+              : this.params.theme.fg("dim", "available");
       rows.push(truncateToWidth(`${prefix} ${this.params.theme.bold(displayText(item.label))} ${this.params.theme.fg("dim", "·")} ${state}`, inner, "…"));
       if (index === this.modelSelected && inner >= 44) {
         rows.push(truncateToWidth(`  ${this.params.theme.fg("muted", displayText(item.detail))}`, inner, "…"));
@@ -922,13 +1946,17 @@ export class TeammateControlCenter implements Component, Focusable {
       rows.push(this.params.theme.fg("warning", "□ No matching options · Backspace clears the filter"));
     }
     if (this.statusText) rows.push(this.statusLine(inner));
-      rows.push(truncateToWidth(
-        this.editorKind === "fallback"
-          ? `${this.params.theme.fg("dim", "Esc/←")} back ${this.params.theme.fg("dim", "· Space")} toggle ${this.params.theme.fg("dim", "· Ctrl+↑↓")} order ${this.params.theme.fg("dim", "· Enter")} save ${this.params.theme.fg("dim", "· type")} filter`
-          : `${this.params.theme.fg("dim", "Esc/←")} back ${this.params.theme.fg("dim", "· Enter")} save ${this.params.theme.fg("dim", "· ↑↓")} select ${this.params.theme.fg("dim", "· type")} filter`,
-        inner,
-        "…",
-      ));
+    rows.push(truncateToWidth(
+      this.editorKind === "fallback"
+        ? `${this.params.theme.fg("dim", "Esc/←")} settings ${this.params.theme.fg("dim", "· Space")} toggle ${this.params.theme.fg("dim", "· Ctrl+↑↓")} order ${this.params.theme.fg("dim", "· Enter")} save`
+        : this.editorKind === "roles"
+          ? `${this.params.theme.fg("dim", "Esc/←")} settings ${this.params.theme.fg("dim", "· Space")} toggle ${this.params.theme.fg("dim", "· Enter")} save ${this.params.theme.fg("dim", "· ↑↓")} select`
+          : this.editorKind === "menu"
+            ? `${this.params.theme.fg("dim", "Esc/←")} back ${this.params.theme.fg("dim", "· Enter/→")} open ${this.params.theme.fg("dim", "· ↑↓")} select`
+            : `${this.params.theme.fg("dim", "Esc/←")} settings ${this.params.theme.fg("dim", "· Enter")} save ${this.params.theme.fg("dim", "· ↑↓")} select ${this.params.theme.fg("dim", "· type")} filter`,
+      inner,
+      "…",
+    ));
     return this.frame(rows, width);
   }
 
@@ -961,6 +1989,9 @@ export class TeammateControlCenter implements Component, Focusable {
     }
     if (this.tab === "routing") {
       const taskType = item as TeammateTaskType;
+      if (taskType === NEW_CUSTOM_TYPE_ENTRY) {
+        return truncateToWidth(`${prefix} ${this.params.theme.fg("accent", this.params.theme.bold("+ New custom type"))} ${this.params.theme.fg("dim", "· Ctrl+N")}`, width, "…");
+      }
       const meta = this.taskTypeMeta(taskType);
       const mapping = this.config.mappings[taskType] ?? "auto";
       const thinking = this.config.thinkingLevels[taskType] ?? "inherit";
@@ -968,7 +1999,13 @@ export class TeammateControlCenter implements Component, Focusable {
     }
     if (this.tab === "roles") {
       const agent = item as AgentConfig;
-      return truncateToWidth(`${prefix} @${this.params.theme.bold(displayText(agent.name))} ${this.params.theme.fg("dim", `[${displayText(agent.source)}]`)}`, width, "…");
+      const roleRules = this.roleRules(agent.name);
+      const taskType = roleRules?.taskType ?? agent.taskType;
+      const typeModel = taskType ? this.config.mappings[taskType] : undefined;
+      const model = typeModel ?? roleRules?.model ?? agent.model;
+      const route = [taskType, model].filter(Boolean).map(displayText).join(" → ");
+      const suffix = route ? ` · ${route}` : "";
+      return truncateToWidth(`${prefix} @${this.params.theme.bold(displayText(agent.name))} ${this.params.theme.fg("dim", `[${displayText(agent.source)}]${suffix}`)}`, width, "…");
     }
     const agent = item as ControlCenterActiveAgent;
     const status = activeStatus(agent.status);
@@ -1005,10 +2042,19 @@ export class TeammateControlCenter implements Component, Focusable {
     } else if (this.tab === "routing") {
       const taskType = this.filteredTaskTypes()[this.selected.routing];
       if (!taskType) return [this.emptyState()];
+      if (taskType === NEW_CUSTOM_TYPE_ENTRY) {
+        lines.push(this.params.theme.bold("+ New custom type"));
+        lines.push(this.params.theme.fg("muted", "Create a custom agent type with optional trigger keywords"));
+        lines.push(this.params.theme.fg("dim", "Keywords define when to use the type and auto-match task prompts"));
+        lines.push(this.params.theme.fg("dim", "Enter opens the creation flow · Esc closes the control center"));
+        return lines.map((line) => truncateToWidth(line, Math.max(1, width), "…"));
+      }
       const meta = this.taskTypeMeta(taskType);
       const mapping = this.config.mappings[taskType] ?? "auto / inherit main session model";
+      const assignedRoles = this.assignedRoles(taskType);
       lines.push(this.params.theme.bold(displayText(meta.label)));
-      lines.push(this.params.theme.fg("muted", `Roles · ${displayText(meta.roles)}`));
+      lines.push(this.params.theme.fg("muted", `Suggested roles · ${displayText(meta.roles)}`));
+      lines.push(this.params.theme.fg("dim", `Assigned roles · ${assignedRoles.length > 0 ? assignedRoles.map((name) => `@${displayText(name)}`).join(", ") : "none"}`));
       lines.push(...wrapTextWithAnsi(displayText(meta.description), Math.max(1, width)).slice(0, 3));
       lines.push(this.params.theme.fg("dim", `Model · ${displayText(mapping)}`));
       lines.push(this.params.theme.fg("dim", `Fallbacks · ${this.config.fallbackMappings?.[taskType]?.map(displayText).join(", ") || "none"}`));
@@ -1020,17 +2066,44 @@ export class TeammateControlCenter implements Component, Focusable {
         lines.push(this.params.theme.fg("warning", `Circuit · ${unhealthy.map((entry) => `${displayText(entry.model)} ${entry.health.state}`).join(", ")}`));
       }
       lines.push(this.params.theme.fg("dim", `Thinking · ${displayText(this.config.thinkingLevels[taskType] ?? "inherit / Pi default")}`));
+      const keywords = this.config.typeMeta?.[taskType]?.keywords;
+      if (keywords && keywords.length > 0) {
+        lines.push(this.params.theme.fg("dim", `Keywords · ${keywords.map(displayText).join(", ")}`));
+      }
       lines.push(this.params.theme.fg("dim", `Profile · ${displayText(this.config.profileName)} · global`));
+      if (!(TEAMMATE_TASK_TYPES as readonly string[]).includes(taskType)) {
+        const declaredByAgent = this.agents.some((agent) => agent.taskType === taskType);
+        lines.push(this.params.theme.fg("dim", declaredByAgent
+          ? "Agent-declared type · Ctrl+D resets Profile routing"
+          : "Custom type · Ctrl+D deletes its routing"));
+      }
+      lines.push(this.params.theme.fg("dim", "Ctrl+E edits keywords"));
       if (this.state.project.applyOverrides) lines.push(this.params.theme.fg("warning", "Project overrides are active at runtime"));
     } else if (this.tab === "roles") {
       const agent = this.filteredRoles()[this.selected.roles];
       if (!agent) return [this.emptyState()];
       lines.push(`@${this.params.theme.bold(displayText(agent.name))} ${this.params.theme.fg("dim", `[${displayText(agent.source)}]`)}`);
       lines.push(...wrapTextWithAnsi(normalizedText(displayText(agent.description)), Math.max(1, width)).slice(0, 3));
-      const roleRules = this.config.roleMappings?.[agent.name];
-      lines.push(this.params.theme.fg("dim", `Model · ${displayText(roleRules?.model ?? agent.model ?? "auto / routed")}`));
-      lines.push(this.params.theme.fg("dim", `Fallbacks · ${displayText(roleRules?.fallbackModels?.join(", ") ?? "inherit / none")}`));
-      lines.push(this.params.theme.fg("dim", `Thinking · ${displayText(roleRules?.thinking ?? agent.thinking ?? "inherit / Pi default")}`));
+      const roleRules = this.roleRules(agent.name);
+      const assignedType = roleRules?.taskType ?? agent.taskType;
+      const typeModel = assignedType ? this.config.mappings[assignedType] : undefined;
+      const typeFallbacks = assignedType ? this.config.fallbackMappings?.[assignedType] : undefined;
+      const typeThinking = assignedType ? this.config.thinkingLevels[assignedType] : undefined;
+      const effectiveModel = typeModel ?? roleRules?.model ?? agent.model;
+      const effectiveFallbacks = typeFallbacks ?? roleRules?.fallbackModels;
+      const effectiveThinking = typeThinking ?? roleRules?.thinking ?? agent.thinking;
+      const modelSource = typeModel ? `type ${assignedType}` : roleRules?.model ? "role override" : agent.model ? "agent frontmatter" : "runtime routing";
+      const fallbackSource = typeFallbacks ? `type ${assignedType}` : roleRules?.fallbackModels ? "role override" : "none";
+      const thinkingSource = typeThinking ? `type ${assignedType}` : roleRules?.thinking ? "role override" : agent.thinking ? "agent frontmatter" : "Pi default";
+      const modelForCircuit = effectiveModel;
+      lines.push(this.params.theme.fg("dim", `Type · ${displayText(assignedType ?? "unassigned / inferred")}`));
+      lines.push(this.params.theme.fg("dim", `Effective model · ${displayText(effectiveModel ?? "auto / routed")} · ${displayText(modelSource)}`));
+      lines.push(this.params.theme.fg("dim", `Role model override · ${displayText(roleRules?.model ?? "none")}`));
+      lines.push(this.params.theme.fg("dim", `Effective fallbacks · ${displayText(effectiveFallbacks?.join(", ") ?? "none")} · ${displayText(fallbackSource)}`));
+      lines.push(this.params.theme.fg("dim", `Effective thinking · ${displayText(effectiveThinking ?? "inherit")} · ${displayText(thinkingSource)}`));
+      const circuit = roleRules?.circuit;
+      const healthNote = modelForCircuit ? this.circuitNote(modelForCircuit) : "";
+      lines.push(this.params.theme.fg("dim", `Circuit · ${circuitDisplayText(circuit)}${healthNote ? ` · ${displayText(healthNote)}` : ""}`));
       lines.push(this.params.theme.fg("dim", `Context · ${displayText(agent.defaultContext ?? "fresh")} · prompt ${displayText(agent.systemPromptMode)}`));
       lines.push(this.params.theme.fg("dim", `Tools · ${agent.tools?.map(displayText).join(", ") ?? "default"}`));
     } else {
@@ -1099,11 +2172,13 @@ export class TeammateControlCenter implements Component, Focusable {
     const action = this.tab === "profiles"
       ? "Enter manage"
       : this.tab === "routing"
-        ? "Enter model + thinking · Ctrl+→ thinking · Ctrl+F fallback"
-        : this.tab === "active"
-          ? "Enter open"
-          : "";
-    const segments = ["Esc close", action, "↑↓ select", "Tab/←→ view", "type filter"];
+        ? "Enter settings · Ctrl+N new type"
+        : this.tab === "roles"
+          ? "Enter settings · Ctrl+T type"
+          : this.tab === "active"
+            ? "Enter open"
+            : "";
+    const segments = ["Esc close", action, "↑↓ cursor", "Tab/←→ tabs", "type filter"];
     let footer = "";
     for (const segment of segments.filter(Boolean)) {
       const next = footer ? `${footer} · ${segment}` : segment;
@@ -1125,10 +2200,27 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private renderCompact(width: number): string {
     const status = this.statusText ? `${displayText(this.statusText)} · ` : "";
-    if (this.modelTaskType) {
-      const item = this.filteredEditorItems()[this.modelSelected];
+    if (this.keywordsInput) {
       return truncateToWidth(
-        `${status}Esc back · ${displayText(this.taskTypeMeta(this.modelTaskType).label)} · ${displayText(item?.label ?? this.editorKind)}`,
+        `${status}Esc cancel · keywords for ${displayText(this.keywordsInput.taskType)} · ${displayText(this.keywordsDraft || "comma-separated")}`,
+        width,
+        "…",
+      );
+    }
+    if (this.customTypeInput) {
+      return truncateToWidth(
+        `${status}Esc cancel · new custom type · ${displayText(this.customTypeDraft || "type identifier")}`,
+        width,
+        "…",
+      );
+    }
+    if (this.modelTaskType || this.modelRole) {
+      const item = this.filteredEditorItems()[this.modelSelected];
+      const title = this.modelRole
+        ? `@${displayText(this.modelRole)}`
+        : displayText(this.taskTypeMeta(this.modelTaskType as TeammateTaskType).label);
+      return truncateToWidth(
+        `${status}Esc back · ${title} · ${displayText(item?.label ?? this.editorKind)}`,
         width,
         "…",
       );

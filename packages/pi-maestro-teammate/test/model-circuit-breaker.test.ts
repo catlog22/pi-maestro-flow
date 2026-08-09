@@ -298,3 +298,94 @@ test("rankModelsByHealth orders healthy first, OPEN last, and stays stable for t
   // Ties keep the configured order (stable sort): two never-tried candidates.
   assert.deepEqual(rankModelsByHealth(["b/second", "a/first"], breaker), ["b/second", "a/first"]);
 });
+
+test("per-model policy threshold overrides the breaker default", () => {
+  let now = 1_000;
+  const breaker = new ModelCircuitBreaker({ threshold: 5, cooldownMs: 60_000, now: () => now });
+  const strict = "provider/strict";
+  breaker.setPolicy(strict, { threshold: 2 });
+
+  // The policy's threshold (2) opens the circuit where the default (5) would not.
+  breaker.recordRetryableFailure(acquire(breaker, strict));
+  breaker.recordRetryableFailure(acquire(breaker, strict));
+  assert.equal(breaker.snapshot().find((entry) => entry.model === strict)?.state, "OPEN");
+
+  // Models without a policy keep the constructor default.
+  const relaxed = "provider/relaxed";
+  for (let failure = 0; failure < 4; failure += 1) breaker.recordRetryableFailure(acquire(breaker, relaxed));
+  assert.equal(breaker.snapshot().find((entry) => entry.model === relaxed)?.state, "CLOSED");
+});
+
+test("per-model policy cooldown controls retryAt and the half-open watchdog", () => {
+  let now = 1_000;
+  const breaker = new ModelCircuitBreaker({ threshold: 3, cooldownMs: 60_000, now: () => now });
+  const fast = "provider/fast";
+  breaker.setPolicy(fast, { cooldownMs: 1_000 });
+
+  for (let failure = 0; failure < 3; failure += 1) breaker.recordRetryableFailure(acquire(breaker, fast));
+  assert.deepEqual(breaker.acquireCandidate(fast), {
+    allowed: false,
+    model: fast,
+    state: "OPEN",
+    retryAt: now + 1_000,
+  });
+
+  // After the policy cooldown a half-open trial is allowed; the watchdog uses
+  // the policy cooldown too, so a leaked trial is reclaimed after 1s.
+  now = 2_000;
+  const trial = acquire(breaker, fast);
+  assert.equal(trial.state, "HALF_OPEN");
+  now = 3_100;
+  assert.deepEqual(breaker.acquireCandidate(fast), {
+    allowed: false,
+    model: fast,
+    state: "OPEN",
+    retryAt: now + 1_000,
+  });
+});
+
+test("setPolicy(null) and clearPolicies restore the breaker defaults", () => {
+  let now = 0;
+  const breaker = new ModelCircuitBreaker({ threshold: 2, cooldownMs: 10, now: () => now });
+  const model = "provider/model";
+  breaker.setPolicy(model, { threshold: 2, cooldownMs: 10 });
+
+  breaker.setPolicy(model, null);
+  assert.equal(breaker.acquireCandidate(model).allowed, true); // policy removal is not observable while CLOSED
+
+  breaker.setPolicy(model, { threshold: 2, cooldownMs: 10 });
+  breaker.clearPolicies();
+  for (let failure = 0; failure < 2; failure += 1) breaker.recordRetryableFailure(acquire(breaker, model));
+  assert.equal(breaker.snapshot()[0]?.state, "OPEN");
+  const rejected = breaker.acquireCandidate(model);
+  assert.equal(rejected.allowed, false);
+  assert.equal((rejected as { retryAt?: number }).retryAt, 10);
+});
+
+test("partial policies inherit the missing field from the constructor defaults", () => {
+  let now = 1_000;
+  const breaker = new ModelCircuitBreaker({ threshold: 3, cooldownMs: 60_000, now: () => now });
+  const model = "provider/model";
+  breaker.setPolicy(model, { threshold: 1 });
+
+  breaker.recordRetryableFailure(acquire(breaker, model));
+  assert.equal(breaker.snapshot()[0]?.state, "OPEN");
+  assert.deepEqual(breaker.acquireCandidate(model), {
+    allowed: false,
+    model,
+    state: "OPEN",
+    retryAt: now + 60_000,
+  });
+});
+
+test("setPolicy rejects invalid thresholds, cooldowns, and empty model keys", () => {
+  const breaker = new ModelCircuitBreaker();
+  assert.throws(() => breaker.setPolicy("", { threshold: 2 }), /must not be empty/);
+  assert.throws(() => breaker.setPolicy("provider/model", { threshold: 0 }), /positive integer/);
+  assert.throws(() => breaker.setPolicy("provider/model", { threshold: 1.5 }), /positive integer/);
+  assert.throws(() => breaker.setPolicy("provider/model", { cooldownMs: -1 }), /non-negative/);
+  assert.throws(() => breaker.setPolicy("provider/model", { cooldownMs: Number.NaN }), /non-negative/);
+  // An empty policy removes the override instead of throwing.
+  breaker.setPolicy("provider/model", {});
+  assert.doesNotThrow(() => breaker.acquireCandidate("provider/model"));
+});

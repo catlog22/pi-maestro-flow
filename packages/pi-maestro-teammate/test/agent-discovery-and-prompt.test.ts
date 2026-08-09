@@ -746,6 +746,9 @@ Proxy specialist prompt.
     const injected = beforeAgentStartHandlers[0]({ systemPrompt: "Base child prompt" }, context);
     assert.match(injected.systemPrompt, /- proxy-specialist: Specialist visible to child proxy tools/);
     assert.doesNotMatch(injected.systemPrompt, /Proxy specialist prompt/);
+    assert.match(injected.systemPrompt, /## Teammate taskType routing/);
+    assert.match(injected.systemPrompt, /does not change the agent role, tools, permissions, or task scope/);
+    assert.doesNotMatch(injected.systemPrompt, /Role guidance/);
     assert.match(injected.systemPrompt, /depth 1\/2/);
     assert.match(injected.systemPrompt, /Remaining teammate depth: 1/);
   } finally {
@@ -799,6 +802,8 @@ test("terminal depth child knows its level and has no teammate dispatch tool", (
       modelRegistry: { getAvailable: () => [] },
     };
     const injected = beforeAgentStartHandlers[0]({ systemPrompt: "Base terminal prompt" }, context);
+    assert.doesNotMatch(injected.systemPrompt, /teammate-tasktype-routing:start/);
+    assert.doesNotMatch(injected.systemPrompt, /## Teammate taskType routing/);
     assert.match(injected.systemPrompt, /depth 2\/2/);
     assert.match(injected.systemPrompt, /Remaining teammate depth: 0/);
     assert.match(injected.systemPrompt, /terminal teammate level/i);
@@ -873,6 +878,9 @@ ${name} prompt.
     assert.equal(typeof first?.execute, "function");
     const firstPrompt = beforeAgentStartHandlers[0]({ systemPrompt: "Base root prompt" }, context(firstProject));
     assert.match(firstPrompt.systemPrompt, /- root-alpha: root-alpha role/);
+    assert.match(firstPrompt.systemPrompt, /## Teammate taskType routing/);
+    assert.match(firstPrompt.systemPrompt, /does not change the agent role, tools, permissions, or task scope/);
+    assert.doesNotMatch(firstPrompt.systemPrompt, /Role guidance/);
 
     sessionStartHandlers[0]({}, context(secondProject));
     const second = tools.get("teammate");

@@ -30,6 +30,7 @@ test("control center keeps recovery and the active option visible in compact mod
   control.handleInput("\r");
   assert.doesNotMatch(control.render(32).join("\n"), /Esc back/);
   control.handleInput("\r");
+  control.handleInput("\r");
   const editor = control.render(32);
   assert.match(editor.join("\n"), /Esc back/);
   assert.match(editor.join("\n"), /auto|openai/);
@@ -72,6 +73,7 @@ test("compact editors keep persistence status visible from 20 through 39 columns
     saveMapping: () => { throw new Error("read-only compact status"); },
   });
   saving.render(80);
+  saving.handleInput("\r");
   saving.handleInput("\r");
   saving.handleInput("\r");
   for (const width of [20, 24, 32, 39]) assert.match(saving.render(width).join("\n"), /Saving/);
@@ -117,6 +119,7 @@ test("disposing an inline editor cancels a pending persistence callback", async 
   control.render(80);
   control.handleInput("\r");
   control.handleInput("\r");
+  control.handleInput("\r");
   assert.match(control.render(80).join("\n"), /Saving/);
   control.dispose();
   await new Promise((resolve) => setTimeout(resolve, 25));
@@ -139,6 +142,8 @@ test("control center resets selection after a narrowing paste filter", () => {
   control.handleInput("\x1b[200~testing\x1b[201~");
   assert.match(control.render(80).join("\n"), /Testing/);
   control.handleInput("\r");
+  assert.match(control.render(80).join("\n"), /Testing › Settings/);
+  control.handleInput("\x1b[C");
   assert.match(control.render(80).join("\n"), /Testing › Model/);
 });
 

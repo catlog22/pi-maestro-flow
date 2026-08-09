@@ -3,6 +3,16 @@ export const DEFAULT_MODEL_CIRCUIT_BREAKER_COOLDOWN_MS = 60_000;
 
 export type ModelCircuitState = "CLOSED" | "OPEN" | "HALF_OPEN";
 
+/**
+ * Per-model circuit breaker policy. Omitted fields fall back to the breaker's
+ * constructor defaults, so a partial policy like `{ threshold: 2 }` keeps the
+ * global cooldown while tightening the failure count.
+ */
+export interface ModelCircuitPolicy {
+  threshold?: number;
+  cooldownMs?: number;
+}
+
 export interface ModelCircuitBreakerOptions {
   threshold?: number;
   cooldownMs?: number;
@@ -60,6 +70,7 @@ export class ModelCircuitBreaker {
   private readonly now: () => number;
   private readonly onTransition: ((transition: ModelCircuitTransition) => void) | undefined;
   private readonly circuits = new Map<string, MutableModelCircuit>();
+  private readonly policies = new Map<string, ModelCircuitPolicy>();
 
   constructor(options: ModelCircuitBreakerOptions = {}) {
     this.threshold = options.threshold ?? DEFAULT_MODEL_CIRCUIT_BREAKER_THRESHOLD;
@@ -75,8 +86,35 @@ export class ModelCircuitBreaker {
     }
   }
 
+  /**
+   * Configure a per-model policy; `null` (or an empty policy) removes the
+   * override and restores the constructor defaults for that model.
+   */
+  setPolicy(model: string, policy: ModelCircuitPolicy | null): void {
+    if (model.length === 0) throw new TypeError("Model circuit breaker key must not be empty");
+    if (!policy || (policy.threshold === undefined && policy.cooldownMs === undefined)) {
+      this.policies.delete(model);
+      return;
+    }
+    if (policy.threshold !== undefined
+      && (!Number.isInteger(policy.threshold) || policy.threshold < 1)) {
+      throw new RangeError("Model circuit breaker threshold must be a positive integer");
+    }
+    if (policy.cooldownMs !== undefined
+      && (!Number.isFinite(policy.cooldownMs) || policy.cooldownMs < 0)) {
+      throw new RangeError("Model circuit breaker cooldownMs must be a non-negative number");
+    }
+    this.policies.set(model, { ...policy });
+  }
+
+  /** Remove every per-model policy, restoring constructor defaults for all models. */
+  clearPolicies(): void {
+    this.policies.clear();
+  }
+
   acquireCandidate(model: string): ModelCandidateAcquisition {
     const circuit = this.getOrCreateCircuit(model);
+    const cooldownMs = this.effectiveCooldownMs(model);
 
     if (circuit.state === "CLOSED") {
       return {
@@ -93,9 +131,9 @@ export class ModelCircuitBreaker {
       // OPEN → cooldown → HALF_OPEN recovery cycle can proceed.
       // Skipped when cooldownMs is 0 because the watchdog would fire
       // immediately and break the single-trial invariant.
-      if (this.cooldownMs > 0
+      if (cooldownMs > 0
         && circuit.halfOpenEnteredAt !== undefined
-        && this.now() >= circuit.halfOpenEnteredAt + this.cooldownMs) {
+        && this.now() >= circuit.halfOpenEnteredAt + cooldownMs) {
         this.open(circuit, model);
         // Fall through to the OPEN branch below (retryAt check).
       } else {
@@ -107,7 +145,7 @@ export class ModelCircuitBreaker {
       }
     }
 
-    const retryAt = this.retryAt(circuit);
+    const retryAt = this.retryAt(circuit, model);
     if (this.now() < retryAt) {
       return {
         allowed: false,
@@ -158,7 +196,7 @@ export class ModelCircuitBreaker {
 
     if (circuit.state !== "CLOSED") return;
     circuit.consecutiveFailures += 1;
-    if (circuit.consecutiveFailures >= this.threshold) this.open(circuit, acquisition.model);
+    if (circuit.consecutiveFailures >= this.effectiveThreshold(acquisition.model)) this.open(circuit, acquisition.model);
   }
 
   releaseCandidate(acquisition: AcquiredModelCandidate): void {
@@ -177,7 +215,7 @@ export class ModelCircuitBreaker {
         consecutiveFailures: circuit.consecutiveFailures,
         ...(circuit.openedAt === undefined ? {} : {
           openedAt: circuit.openedAt,
-          retryAt: this.retryAt(circuit),
+          retryAt: this.retryAt(circuit, model),
         }),
         halfOpenTrialInProgress: circuit.halfOpenTrialInProgress,
       }));
@@ -221,8 +259,16 @@ export class ModelCircuitBreaker {
     });
   }
 
-  private retryAt(circuit: MutableModelCircuit): number {
-    return (circuit.openedAt ?? this.now()) + this.cooldownMs;
+  private retryAt(circuit: MutableModelCircuit, model: string): number {
+    return (circuit.openedAt ?? this.now()) + this.effectiveCooldownMs(model);
+  }
+
+  private effectiveThreshold(model: string): number {
+    return this.policies.get(model)?.threshold ?? this.threshold;
+  }
+
+  private effectiveCooldownMs(model: string): number {
+    return this.policies.get(model)?.cooldownMs ?? this.cooldownMs;
   }
 }
 

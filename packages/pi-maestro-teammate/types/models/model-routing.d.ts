@@ -1,6 +1,7 @@
 import type { RunTeammateParams } from "../runs/execution.ts";
 import { type TeammateTaskType } from "../shared/task-types.ts";
 import { type TeammateThinkingLevel } from "../shared/thinking.ts";
+import type { ModelCircuitPolicy, ModelCircuitBreaker } from "./model-circuit-breaker.ts";
 export { TEAMMATE_TASK_TYPES, parseTeammateTaskType } from "../shared/task-types.ts";
 export type { TeammateTaskType } from "../shared/task-types.ts";
 export declare const TEAMMATE_TASK_TYPE_META: Record<string, {
@@ -8,16 +9,34 @@ export declare const TEAMMATE_TASK_TYPE_META: Record<string, {
     roles: string;
     description: string;
 }>;
+/**
+ * Effective metadata for a task type: the user-defined `typeMeta` keywords
+ * from the routing config, if any (custom types have no built-in meta).
+ */
+export declare function resolveTaskTypeMeta(config: ModelRoutingConfig, taskType: TeammateTaskType): {
+    keywords?: string[];
+} | undefined;
 export interface ModelRoutingRoleRules {
     model?: string | null;
     fallbackModels?: string[] | null;
     thinking?: TeammateThinkingLevel | null;
+    /** Per-role circuit breaker policy applied to the role's mapped model. */
+    circuit?: ModelCircuitPolicy | null;
+    /** Assigned task type; outranks the agent's frontmatter taskType at routing time. */
+    taskType?: TeammateTaskType | null;
+}
+/** User-editable metadata for a task type: trigger keywords, like a skill description. */
+export interface ModelRoutingTypeMeta {
+    /** Trigger keywords defining when to use the type; `null` clears them. */
+    keywords?: string[] | null;
 }
 export interface ModelRoutingRules {
     mappings: Partial<Record<TeammateTaskType, string | null>>;
     fallbackMappings?: Partial<Record<TeammateTaskType, string[] | null>>;
     thinkingLevels: Partial<Record<TeammateTaskType, TeammateThinkingLevel | null>>;
     roleMappings?: Record<string, ModelRoutingRoleRules | null>;
+    /** Trigger-keyword metadata per task type; `null` clears an override. */
+    typeMeta?: Record<string, ModelRoutingTypeMeta | null>;
 }
 export interface ModelRoutingProfile extends ModelRoutingRules {
     name: string;
@@ -80,6 +99,18 @@ export declare function saveGlobalProfileModelMapping(cwd: string, profileId: st
 export declare function saveGlobalProfileThinkingLevel(cwd: string, profileId: string, taskType: TeammateTaskType, thinking: TeammateThinkingLevel | null, globalFilePath?: string): ModelRoutingState;
 export declare function saveGlobalProfileFallbackMapping(cwd: string, profileId: string, taskType: TeammateTaskType, models: string[] | null, globalFilePath?: string): ModelRoutingState;
 export declare function saveGlobalProfileRoleMapping(cwd: string, profileId: string, role: string, rules: ModelRoutingRoleRules | null, globalFilePath?: string): ModelRoutingState;
+/** Atomically assign a task type to the requested roles and clear stale assignments to that type. */
+export declare function saveGlobalProfileTypeRoles(cwd: string, profileId: string, taskType: TeammateTaskType, roles: readonly string[], globalFilePath?: string): ModelRoutingState;
+/** Set, merge, or clear (null) the user-editable keywords for a task type. */
+export declare function saveGlobalProfileTypeMeta(cwd: string, profileId: string, taskType: TeammateTaskType, meta: ModelRoutingTypeMeta | null, globalFilePath?: string): ModelRoutingState;
+/**
+ * Register a custom agent type in the active Profile. The type is marked by
+ * an explicit `mappings[type] = null` entry ("auto model"), which keeps it
+ * discoverable for routing configuration without forcing a model.
+ */
+export declare function saveGlobalProfileCustomType(cwd: string, profileId: string, taskType: TeammateTaskType, meta?: ModelRoutingTypeMeta | null, globalFilePath?: string): ModelRoutingState;
+/** Remove a custom agent type and all of its routing entries from the active Profile. */
+export declare function deleteGlobalProfileCustomType(cwd: string, profileId: string, taskType: TeammateTaskType, globalFilePath?: string): ModelRoutingState;
 export declare function createGlobalModelRoutingProfile(cwd: string, name: string, sourceProfileId?: string, globalFilePath?: string): ModelRoutingState;
 export declare function createAndActivateGlobalModelRoutingProfile(cwd: string, name: string, sourceProfileId?: string, globalFilePath?: string): ModelRoutingState;
 export declare function renameGlobalModelRoutingProfile(cwd: string, profileId: string, name: string, globalFilePath?: string): ModelRoutingState;
@@ -90,7 +121,21 @@ export declare function clearProjectModelRoutingOverrides(cwd: string, globalFil
 export declare function promoteProjectModelRoutingOverrides(cwd: string, name: string, globalFilePath?: string): ModelRoutingState;
 export declare function deleteGlobalModelRoutingProfile(cwd: string, profileId: string, globalFilePath?: string): ModelRoutingState;
 export declare function inferTaskType(input: TaskTypeInput): TeammateTaskType | undefined;
+/**
+ * Match a task prompt against configured type keywords: the first type whose
+ * keyword appears as a whole word wins, in discovery order (built-ins first,
+ * then custom types alphabetically). Keywords are lowercased at normalize.
+ */
+export declare function inferTaskTypeByKeywords(config: ModelRoutingConfig, task: string | undefined): TeammateTaskType | undefined;
 export declare function applyModelRouting(params: RunTeammateParams, cwd: string, availableModels?: readonly string[], globalFilePath?: string, inheritModel?: string): RunTeammateParams;
+/**
+ * Sync per-role circuit policies from the routing config onto a circuit
+ * breaker: each role rule with a `circuit` policy uses the assigned task
+ * type's mapped model first, then the role model when the type has no model.
+ * The breaker's policy map is rebuilt from the config on every call, so
+ * removed policies do not linger.
+ */
+export declare function syncModelCircuitPolicies(breaker: ModelCircuitBreaker, cwd: string, globalFilePath?: string): void;
 export interface ModelRegistryRefreshContext {
     modelRegistry?: {
         refresh?: () => Promise<unknown>;
@@ -105,4 +150,14 @@ export interface ModelRegistryRefreshContext {
 export declare function refreshModelRegistry(ctx: ModelRegistryRefreshContext): Promise<void>;
 export declare function formatModelRoutingConfig(cwd: string, agents?: readonly {
     taskType?: TeammateTaskType;
-}[]): string;
+}[], globalFilePath?: string): string;
+export declare const TASK_TYPE_ROUTING_START_MARKER = "<!-- teammate-tasktype-routing:start -->";
+export declare const TASK_TYPE_ROUTING_END_MARKER = "<!-- teammate-tasktype-routing:end -->";
+/**
+ * Inject concise taskType model-routing guidance for agents that can dispatch
+ * teammates. Replaces an existing block in place so repeated injection stays
+ * idempotent.
+ */
+export declare function appendTaskTypeRoutingContext(systemPrompt: string, cwd: string, agents?: readonly {
+    taskType?: TeammateTaskType;
+}[], globalFilePath?: string): string;
