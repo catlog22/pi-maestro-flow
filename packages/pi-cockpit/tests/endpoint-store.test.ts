@@ -114,6 +114,32 @@ test("EndpointStore subscribes to SessionHostRegistry and projects canonical loc
 	store.disconnect();
 });
 
+test("EndpointStore excludes local agents outside the current root owner fence", () => {
+	const registry = new SessionHostRegistry({ endpoints: projectSessionEndpoints(owners()) });
+	const canonical = registry.snapshot();
+	const localAgent = canonical.endpoints.find((endpoint) => endpoint.kind === "agent" && endpoint.scope === "local");
+	assert.ok(localAgent);
+	const foreignOwner = "0".repeat(32);
+	const foreignNonce = "3".repeat(32);
+	const store = new EndpointStore({ getLegacyAgents: () => [] });
+	assert.equal(store.applyRegistrySnapshot({
+		...canonical,
+		contentRevision: "foreign-local-agent",
+		endpointContentRevision: "foreign-local-agent-endpoints",
+		endpoints: [...canonical.endpoints, {
+			...localAgent,
+			id: `${localAgent.id}-foreign`,
+			ownerId: foreignOwner,
+			ownerNonce: foreignNonce,
+			correlationId: "foreign-agent",
+			name: "foreign",
+			contentRevision: "foreign-agent",
+		}],
+	}), true);
+	assert.deepEqual(store.snapshot().endpoints.map((endpoint) => endpoint.label), ["main", "builder"]);
+	assert.equal(store.snapshot().endpoints.some((endpoint) => endpoint.correlationId === "foreign-agent"), false);
+});
+
 test("EndpointStore accepts versioned session events and keeps legacy agents during registry lag", () => {
 	const rows = [agent({ correlationId: "legacy-extra", name: "extra", startedAt: 2_000 })];
 	const events = new Events();
@@ -138,4 +164,34 @@ test("EndpointStore output revision ignores status-only churn and changes with n
 	rows = [{ ...rows[0]!, tail: "second output", lastActivityAt: 3_000 }];
 	store.refreshLegacy();
 	assert.notEqual(store.snapshot().endpoints[1]?.outputRevision, before);
+});
+
+test("EndpointStore hides internal monitor-session agents from registry projections", () => {
+	const projections = owners();
+	projections[0] = {
+		...projections[0]!,
+		agents: [...projections[0]!.agents, {
+			workspaceId: WORKSPACE,
+			ownerId: OWNER,
+			ownerNonce: NONCE,
+			correlationId: "monitor-internal",
+			status: "settled",
+			name: "monitor-session",
+			agent: "general",
+		}],
+	};
+	const registry = new SessionHostRegistry({ endpoints: projectSessionEndpoints(projections) });
+	const store = new EndpointStore({ getLegacyAgents: () => [] });
+	store.connect({ registry });
+	assert.deepEqual(store.snapshot().endpoints.map((endpoint) => endpoint.label), ["main", "builder"]);
+});
+
+test("EndpointStore numbers visible duplicate agent labels and hides legacy monitor-session rows", () => {
+	const rows = [
+		agent({ correlationId: "builder-a", name: "builder", startedAt: 10 }),
+		agent({ correlationId: "monitor-internal", name: "monitor-session", startedAt: 15 }),
+		agent({ correlationId: "builder-b", name: "builder", startedAt: 20 }),
+	];
+	const store = new EndpointStore({ getLegacyAgents: () => rows });
+	assert.deepEqual(store.snapshot().endpoints.map((endpoint) => endpoint.label), ["main", "builder·1", "builder·2"]);
 });

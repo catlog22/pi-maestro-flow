@@ -3,7 +3,10 @@ import test from "node:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerGuardedEditTool } from "../src/edit-guard.ts";
+import {
+	prepareGuardedEditArguments,
+	registerGuardedEditTool,
+} from "../src/edit-guard.ts";
 import { registerQuietTools } from "../src/quiet-tools.ts";
 import { DEFAULT_CONFIG } from "../src/types.ts";
 
@@ -34,6 +37,49 @@ test("guarded edit registers under the built-in name with the stricter descripti
 	assert.match(edit.description, /verbatim/i);
 	assert.match(edit.description, /merge them into one edit/);
 	assert.match(edit.description, /not valid UTF-8/);
+	assert.equal(edit.parameters.additionalProperties, false);
+	assert.equal(edit.parameters.properties.edits.minItems, 1);
+	assert.equal(edit.parameters.properties.edits.items.additionalProperties, false);
+});
+
+test("prepareArguments hoists one unambiguous nested path", () => {
+	assert.deepEqual(
+		prepareGuardedEditArguments({
+			edits: [{ path: "a.ts", oldText: "before", newText: "after" }],
+		}),
+		{
+			path: "a.ts",
+			edits: [{ oldText: "before", newText: "after" }],
+		},
+	);
+});
+
+test("prepareArguments explains malformed mixed edit structures", () => {
+	assert.throws(
+		() => prepareGuardedEditArguments({
+			oldText: "before",
+			edits: [{ newText: "after" }, "occurrence"],
+		}),
+		(error: Error) => {
+			assert.match(error.message, /path must be a top-level string property/);
+			assert.match(error.message, /oldText is misplaced at the top level/);
+			assert.match(error.message, /edits\[0\]\.oldText must be a string/);
+			assert.match(error.message, /edits\[1\] must be an object, received string/);
+			assert.match(error.message, /Expected shape/);
+			return true;
+		},
+	);
+});
+
+test("prepareArguments explains a non-array edits value and the optional selector", () => {
+	assert.throws(
+		() => prepareGuardedEditArguments({ path: "a.ts", edits: "not-json" }),
+		(error: Error) => {
+			assert.match(error.message, /edits must be an array, received string/);
+			assert.match(error.message, /occurrence is optional and must be a 1-based integer/);
+			return true;
+		},
+	);
 });
 
 test("guarded edit edits a valid UTF-8 file through the built-in implementation", async () => {
@@ -51,6 +97,75 @@ test("guarded edit edits a valid UTF-8 file through the built-in implementation"
 	);
 	assert.match(result.content[0].text, /Successfully replaced/);
 	assert.equal(readFileSync(file, "utf8"), "const a = 10;\nconst b = 2;\n");
+});
+
+test("missing oldText reports when the requested change is already applied", async () => {
+	const dir = tmpDir();
+	const file = join(dir, "already.ts");
+	const current = "import {\n  before,\n  added,\n  after,\n}\n";
+	writeFileSync(file, current);
+	const edit = install((pi) => registerGuardedEditTool(pi as never)).get("edit");
+	await assert.rejects(
+		edit.execute(
+			"t1",
+			{
+				path: "already.ts",
+				edits: [{
+					oldText: "import {\n  before,\n  after,\n}",
+					newText: "import {\n  before,\n  added,\n  after,\n}",
+				}],
+			},
+			undefined,
+			undefined,
+			{ cwd: dir },
+		),
+		/newText already exists at line 1.*already be applied/,
+	);
+	assert.equal(readFileSync(file, "utf8"), current);
+});
+
+test("missing oldText reports the closest current line block", async () => {
+	const dir = tmpDir();
+	const file = join(dir, "stale.ts");
+	const current = [
+		"const head = 1;",
+		"function target() {",
+		"  const shared = true;",
+		"  const current = 2;",
+		"  return current;",
+		"}",
+		"const tail = 3;",
+		"",
+	].join("\n");
+	writeFileSync(file, current);
+	const edit = install((pi) => registerGuardedEditTool(pi as never)).get("edit");
+	await assert.rejects(
+		edit.execute(
+			"t1",
+			{
+				path: "stale.ts",
+				edits: [{
+					oldText: [
+						"function target() {",
+						"  const shared = true;",
+						"  const stale = 2;",
+						"  return stale;",
+						"}",
+					].join("\n"),
+					newText: "function replacement() {}",
+				}],
+			},
+			undefined,
+			undefined,
+			{ cwd: dir },
+		),
+		(error: Error) => {
+			assert.match(error.message, /Closest current block is lines 2-6 \(3\/5 matching nonblank lines\)/);
+			assert.match(error.message, /2: function target\(\) \{/);
+			return true;
+		},
+	);
+	assert.equal(readFileSync(file, "utf8"), current);
 });
 
 test("duplicate oldText reports candidate lines and keeps the whole edit pack atomic", async () => {
@@ -84,6 +199,44 @@ test("duplicate oldText reports candidate lines and keeps the whole edit pack at
 	assert.equal(readFileSync(file, "utf8"), original, "a later duplicate must prevent every write in the pack");
 });
 
+test("overlapping exact matches require a larger unique oldText", async () => {
+	const dir = tmpDir();
+	const file = join(dir, "overlapping-exact.txt");
+	const original = "aaa";
+	writeFileSync(file, original);
+	const edit = install((pi) => registerGuardedEditTool(pi as never)).get("edit");
+	await assert.rejects(
+		edit.execute(
+			"t1",
+			{ path: "overlapping-exact.txt", edits: [{ oldText: "aa", newText: "X" }] },
+			undefined,
+			undefined,
+			{ cwd: dir },
+		),
+		/including overlapping exact matches/,
+	);
+	assert.equal(readFileSync(file, "utf8"), original);
+});
+
+test("overlapping fuzzy candidates require exact surrounding context", async () => {
+	const dir = tmpDir();
+	const file = join(dir, "overlapping-fuzzy.txt");
+	const original = "ﬀf";
+	writeFileSync(file, original);
+	const edit = install((pi) => registerGuardedEditTool(pi as never)).get("edit");
+	await assert.rejects(
+		edit.execute(
+			"t1",
+			{ path: "overlapping-fuzzy.txt", edits: [{ oldText: "ff", newText: "X" }] },
+			undefined,
+			undefined,
+			{ cwd: dir },
+		),
+		/including overlapping fuzzy-normalized matches/,
+	);
+	assert.equal(readFileSync(file, "utf8"), original);
+});
+
 test("occurrence selects one exact duplicate from the frozen original", async () => {
 	const dir = tmpDir();
 	const file = join(dir, "duplicate.ts");
@@ -100,6 +253,126 @@ test("occurrence selects one exact duplicate from the frozen original", async ()
 		{ cwd: dir },
 	);
 	assert.equal(readFileSync(file, "utf8"), "const target = 0;\nconst keep = 1;\nconst target = 20;\n");
+});
+
+test("occurrence preserves the selected overlapping substring", async () => {
+	const dir = tmpDir();
+	const file = join(dir, "overlap.txt");
+	writeFileSync(file, "aaaa");
+	const edit = install((pi) => registerGuardedEditTool(pi as never)).get("edit");
+	await edit.execute(
+		"t1",
+		{ path: "overlap.txt", edits: [{ oldText: "aa", newText: "X", occurrence: 2 }] },
+		undefined,
+		undefined,
+		{ cwd: dir },
+	);
+	assert.equal(readFileSync(file, "utf8"), "aaX");
+});
+
+test("occurrence widens until the selected range is unique after NFKC normalization", async () => {
+	const dir = tmpDir();
+	const file = join(dir, "nfkc-occurrence.txt");
+	writeFileSync(file, "①aa1aa");
+	const edit = install((pi) => registerGuardedEditTool(pi as never)).get("edit");
+	await edit.execute(
+		"t1",
+		{ path: "nfkc-occurrence.txt", edits: [{ oldText: "aa", newText: "X", occurrence: 2 }] },
+		undefined,
+		undefined,
+		{ cwd: dir },
+	);
+	assert.equal(readFileSync(file, "utf8"), "①aa1X");
+});
+
+test("an exact whitespace-only target is widened before delegation", async () => {
+	const dir = tmpDir();
+	const file = join(dir, "whitespace.txt");
+	writeFileSync(file, "a \n");
+	const edit = install((pi) => registerGuardedEditTool(pi as never)).get("edit");
+	await edit.execute(
+		"t1",
+		{ path: "whitespace.txt", edits: [{ oldText: " ", newText: "_" }] },
+		undefined,
+		undefined,
+		{ cwd: dir },
+	);
+	assert.equal(readFileSync(file, "utf8"), "a_\n");
+});
+
+test("occurrence refuses a pack containing a fuzzy-only edit", async () => {
+	const dir = tmpDir();
+	const file = join(dir, "mixed.txt");
+	const original = "same\nquote “x”\nsame\n";
+	writeFileSync(file, original);
+	const edit = install((pi) => registerGuardedEditTool(pi as never)).get("edit");
+	await assert.rejects(
+		edit.execute(
+			"t1",
+			{
+				path: "mixed.txt",
+				edits: [
+					{ oldText: "same", newText: "changed", occurrence: 2 },
+					{ oldText: "quote \"x\"", newText: "quote \"y\"" },
+				],
+			},
+			undefined,
+			undefined,
+			{ cwd: dir },
+		),
+		/Cannot combine selector-dependent edits\[0\] with fuzzy-only edits\[1\]/,
+	);
+	assert.equal(readFileSync(file, "utf8"), original);
+});
+
+test("implicit whitespace selection refuses a pack containing a fuzzy-only edit", async () => {
+	const dir = tmpDir();
+	const file = join(dir, "implicit-mixed.txt");
+	const original = "fﬀ \nquote“x”\n";
+	writeFileSync(file, original);
+	const edit = install((pi) => registerGuardedEditTool(pi as never)).get("edit");
+	await assert.rejects(
+		edit.execute(
+			"t1",
+			{
+				path: "implicit-mixed.txt",
+				edits: [
+					{ oldText: " ", newText: "_" },
+					{ oldText: "quote\"x\"", newText: "quote\"y\"" },
+				],
+			},
+			undefined,
+			undefined,
+			{ cwd: dir },
+		),
+		/Cannot combine selector-dependent edits\[0\] with fuzzy-only edits\[1\]/,
+	);
+	assert.equal(readFileSync(file, "utf8"), original);
+});
+
+test("NFKC cannot hide an exact duplicate beside a widened edit", async () => {
+	const dir = tmpDir();
+	const file = join(dir, "nfkc-range.txt");
+	const original = "x \nA\u030A\nA\n";
+	writeFileSync(file, original);
+	const edit = install((pi) => registerGuardedEditTool(pi as never)).get("edit");
+	await assert.rejects(
+		edit.execute(
+			"t1",
+			{
+				path: "nfkc-range.txt",
+				edits: [
+					{ oldText: " ", newText: "_" },
+					{ oldText: "A", newText: "Z" },
+				],
+			},
+			undefined,
+			undefined,
+			{ cwd: dir },
+		),
+		/Found 2 occurrences of edits\[1\]/,
+	);
+	assert.equal(readFileSync(file, "utf8"), original);
 });
 
 test("occurrence composes atomically with another disjoint edit", async () => {

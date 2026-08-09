@@ -18,6 +18,7 @@ import {
 import {
 	COCKPIT_INPUT_TARGET_EVENT,
 	COCKPIT_MAESTRO_QUERY_EVENT,
+	COCKPIT_SESSION_LIST_EVENT,
 	COCKPIT_TODO_TOGGLE_EVENT,
 	MAESTRO_UI_SNAPSHOT_EVENT,
 	MAESTRO_UI_SNAPSHOT_VERSION,
@@ -59,25 +60,30 @@ test("Cockpit session bar, command, and shortcut contracts stay stable", () => {
   );
 
   const shortcutConstants = Object.fromEntries(
-    [...source.matchAll(/const (BASH_BG_OVERLAY_KEY|AGENT_OVERLAY_KEY|WINDOW_MONITOR_TOGGLE_KEY|SIDEBAR_RESIZE_KEY|SIDEBAR_FOCUS_KEY|SESSION_DETAIL_TOGGLE_KEY) = "([^"]+)"/g)]
+    [...source.matchAll(/const (BASH_BG_OVERLAY_KEY|WINDOW_MONITOR_TOGGLE_KEY|SIDEBAR_RESIZE_KEY|SIDEBAR_FOCUS_KEY|SESSION_DETAIL_TOGGLE_KEY) = "([^"]+)"/g)]
       .map((match) => [match[1], match[2]]),
   );
   assert.deepEqual(shortcutConstants, {
     BASH_BG_OVERLAY_KEY: "alt+j",
-    AGENT_OVERLAY_KEY: "alt+a",
     WINDOW_MONITOR_TOGGLE_KEY: "alt+w",
     SIDEBAR_RESIZE_KEY: "ctrl+shift+r",
-    SIDEBAR_FOCUS_KEY: "alt+shift+l",
-    SESSION_DETAIL_TOGGLE_KEY: "alt+shift+r",
+    SIDEBAR_FOCUS_KEY: "alt+l",
+    SESSION_DETAIL_TOGGLE_KEY: "alt+e",
   });
   assert.deepEqual(
     [...source.matchAll(/pi\.registerShortcut\(([^,]+),/g)].map((match) => match[1]),
-    ["AGENT_OVERLAY_KEY", "WINDOW_MONITOR_TOGGLE_KEY", "BASH_BG_OVERLAY_KEY", "SIDEBAR_RESIZE_KEY", "SESSION_DETAIL_TOGGLE_KEY", "SIDEBAR_FOCUS_KEY"],
+    ["WINDOW_MONITOR_TOGGLE_KEY", "BASH_BG_OVERLAY_KEY", "SIDEBAR_RESIZE_KEY", "SESSION_DETAIL_TOGGLE_KEY", "SIDEBAR_FOCUS_KEY"],
   );
 
-  assert.match(source, /data !== "\\x1b\[D" && data !== "\\x1b\[C"/);
-  assert.match(source, /detailUp = "\\x1b\[1;4A"/);
-  assert.match(source, /detailDown = "\\x1b\[1;4B"/);
+  assert.match(source, /windowPrevious = sessionUi\.mode === "window" && matchesKey\(data, "alt\+left"\)/);
+  assert.match(source, /windowNext = sessionUi\.mode === "window" && matchesKey\(data, "alt\+right"\)/);
+  assert.match(source, /if \(!windowPrevious && !windowNext && text\.trim\(\) !== ""\) return undefined/);
+  assert.doesNotMatch(source, /sessionDetailScrollDisposer/);
+  assert.match(source, /COCKPIT_SESSION_LIST_EVENT[\s\S]*?openSessionList\(ctx\)/);
+  assert.match(source, /allEntries = mode === "window" \? \[\.\.\.snapshot\.windows\] : \[\.\.\.snapshot\.endpoints\]/);
+  assert.match(source, /ctx\.ui\.select\(mode === "window" \? "Windows" : "Agents", choices\)/);
+  assert.match(source, /sessionListOverlayActive\(\) \? undefined : "Alt\+R list"/);
+  assert.doesNotMatch(source, /alt\+shift\+(?:r|l|up|down)/);
   assert.match(source, /data !== "\\x1b\[1;2A" && data !== "\\x1b\[1;2B"/);
 });
 
@@ -126,6 +132,8 @@ test("Cockpit packages complete selectable color themes", () => {
 test("Cockpit owns native UI through events instead of clearing foreign widget keys", () => {
 	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
 	assert.match(source, /pi\.events\.emit\(COCKPIT_UI_OWNERSHIP_EVENT/);
+	assert.match(source, /agents: config\.enabled && config\.hideNativeAgents/);
+	assert.match(source, /sessionList: config\.enabled/);
 	assert.match(source, /quietSymbols: config\.quietSymbols/);
 	assert.match(source, /footer: config\.enabled/);
 	assert.match(source, /footer: false/);
@@ -136,6 +144,7 @@ test("Cockpit owns native UI through events instead of clearing foreign widget k
 	assert.match(source, /pi\.events\.on\(COCKPIT_TODO_TOGGLE_EVENT/);
 	assert.doesNotMatch(source, /teammate-agents|todo-panel/);
 	assert.equal(COCKPIT_UI_OWNERSHIP_EVENT, "cockpit:ui-ownership");
+	assert.equal(COCKPIT_SESSION_LIST_EVENT, "cockpit:open-session-list");
 	assert.equal(COCKPIT_TODO_TOGGLE_EVENT, "cockpit:toggle-todo");
 });
 
@@ -186,6 +195,8 @@ test("selected Cockpit sessions publish editor targets and route input through t
 	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
 	assert.equal(COCKPIT_INPUT_TARGET_EVENT, "cockpit:input-target");
 	assert.match(source, /pi\.events\.emit\(COCKPIT_INPUT_TARGET_EVENT, payload\)/);
+	assert.match(source, /sessionUi\.mode === "window" \? selectedWindowInputTarget\(\) : selectedAgentTarget\(\)/);
+	assert.match(source, /sigil: "#"/);
 	assert.match(source, /MAILBOX_REGISTRY_KEY[\s\S]*?routeAgentInput\(/);
 	assert.match(source, /Symbol\.for\("pi-maestro-teammate\.mailbox-registry"\)/);
 	assert.doesNotMatch(source, /import\s*\{\s*MAILBOX_REGISTRY_KEY/);
@@ -209,22 +220,23 @@ test("Cockpit sidebar controls persist only committed resize widths", () => {
 	assert.doesNotMatch(source, /onEffectiveWidthChange:[\s\S]*?saveConfig/);
 });
 
-test("Cockpit owns a fixed, toggleable and scrollable agent session region above Todo", () => {
+test("Cockpit keeps a toggleable session summary and uses the Agent overlay for full preview", () => {
 	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
-	assert.match(source, /SESSION_DETAIL_TOGGLE_KEY = "alt\+shift\+r"/);
+	assert.match(source, /SESSION_DETAIL_TOGGLE_KEY = "alt\+e"/);
 	assert.match(source, /registerShortcut\(SESSION_DETAIL_TOGGLE_KEY/);
 	assert.match(source, /setWidget\([\s\S]*?SESSION_DETAIL_WIDGET_KEY[\s\S]*?placement: "aboveEditor"[\s\S]*?syncSidebarMode\(ctx\)/);
 	assert.match(source, /reconcileSurface[\s\S]*?installWidgets\(ctx\)[\s\S]*?setWidget\(SESSION_BAR_WIDGET_KEY, undefined\)[\s\S]*?installSessionBar\(ctx\)/);
-	assert.match(source, /detailUp = "\\x1b\[1;4A"/);
-	assert.match(source, /detailDown = "\\x1b\[1;4B"/);
-	assert.match(source, /sessionUi\.setScroll\(endpoint\.id, next\.offset, next\.following\)/);
-	assert.match(source, /uninstallUi[\s\S]*?sessionDetailScrollDisposer\?\.\(\)[\s\S]*?agentScrollDisposer\?\.\(\)/);
+	assert.doesNotMatch(source, /sessionDetailScrollDisposer/);
+	assert.match(source, /previewAgent = endpoint\.kind === "agent"[\s\S]*?if \(previewAgent\) await openAgentOverlay\(ctx\)/);
 });
 
-test("Cockpit Agent modal shares the live store and repaint pipeline", () => {
+test("Cockpit Agent modal opens from the Alt+R session list and shares the live repaint pipeline", () => {
 	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
-	assert.match(source, /AGENT_OVERLAY_KEY = "alt\+a"/);
-	assert.match(source, /registerShortcut\(AGENT_OVERLAY_KEY/);
+	assert.doesNotMatch(source, /AGENT_OVERLAY_KEY|registerShortcut\("alt\+a"/);
+	assert.match(source, /const selectedId = sessionUi\.selectedId\(mode\)/);
+	assert.match(source, /selectedIndex > 0[\s\S]*?allEntries\[selectedIndex\]![\s\S]*?endpoint\.id === selectedId \? "selected"/);
+	assert.match(source, /if \(mode === "window"\) selectWindow\(endpoint\.id\)[\s\S]*?selectEndpoint\(endpoint\.id\)/);
+	assert.match(source, /previewAgent = endpoint\.kind === "agent"[\s\S]*?openAgentOverlay\(ctx\)/);
 	assert.match(source, /new AgentOverlay\(\{[\s\S]*?getAgents: \(\) => agents\.snapshot\(\)/);
 	assert.match(source, /ownedRender = \(\) => tui\.requestRender\(\)/);
 	assert.match(source, /activeAgentOverlayRender = ownedRender/);
@@ -279,6 +291,7 @@ test("Teammate's literal cockpit event constants match the public contract (CS-6
 	);
 	const cockpitEvents = await import("../src/public/v1/events.ts");
 	assert.equal(teammateEvents.COCKPIT_UI_OWNERSHIP_EVENT, "cockpit:ui-ownership");
+	assert.equal(teammateEvents.COCKPIT_SESSION_LIST_EVENT, cockpitEvents.COCKPIT_SESSION_LIST_EVENT);
 	assert.equal(teammateEvents.COCKPIT_PREEMPT_RESIZE_EVENT, cockpitEvents.COCKPIT_PREEMPT_RESIZE_EVENT);
 	assert.equal(
 		teammateEvents.COCKPIT_UI_OWNERSHIP_EVENT,

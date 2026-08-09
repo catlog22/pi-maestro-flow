@@ -1,7 +1,8 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
-import type { WindowThreadEntry } from "pi-maestro-teammate/v1/sessions";
-import type { CockpitEndpoint } from "./endpoint-store.ts";
+import type { SessionEndpoint, WindowThreadEntry } from "pi-maestro-teammate/v1/sessions";
+import { assignedAgentColor } from "./agent-bar.ts";
+import { isMonitorControlEndpoint, type CockpitEndpoint } from "./endpoint-store.ts";
 
 export interface WindowThreadScroll {
 	offset: number;
@@ -22,10 +23,23 @@ function fit(value: string, width: number): string {
 function messageLine(entry: WindowThreadEntry, width: number, theme: Theme): string {
 	const direction = entry.direction === "outgoing" ? theme.fg("accent", "→") : theme.fg("success", "←");
 	const source = entry.source === "monitor" ? theme.fg("warning", " monitor") : "";
+	const mode = theme.fg("muted", entry.mode === "steer" ? " steer" : " follow-up");
 	const status = entry.status === "accepted" ? theme.fg("success", "✓")
 		: entry.status === "pending" ? theme.fg("warning", "…")
 			: theme.fg("error", "!");
-	return fit(`${direction}${source} ${entry.body} ${status}`, width);
+	return fit(`${direction}${source}${mode} ${entry.body} ${status}`, width);
+}
+
+function remoteAgentLine(agent: SessionEndpoint, width: number, theme: Theme): string {
+	const marker = agent.status === "running" ? theme.fg("warning", "●")
+		: agent.status === "sleeping" ? theme.fg("muted", "○")
+			: theme.fg("success", "✓");
+	const label = agent.name ?? agent.agent ?? agent.correlationId?.slice(0, 8) ?? "agent";
+	const color = agent.status === "running"
+		? assignedAgentColor(agent.correlationId ?? agent.id)
+		: "muted";
+	const summary = agent.summary ? ` · ${agent.summary}` : "";
+	return fit(`  ${marker} ${theme.fg(color, `@${label}`)} · ${agent.status}${summary}`, width);
 }
 
 export function windowThreadBody(
@@ -40,10 +54,13 @@ export function windowThreadBody(
 		fit(`${theme.bold(`#${window.label}`)} · ${window.status}${pressure} · ${window.agentCount ?? agents.length} agents`, width),
 	];
 	for (const agent of agents.filter((entry) => entry.status !== "settled").slice(0, 4)) {
-		lines.push(fit(theme.fg("muted", `  @${agent.name ?? agent.agent ?? agent.correlationId?.slice(0, 8) ?? "agent"} · ${agent.status}${agent.summary ? ` · ${agent.summary}` : ""}`), width));
+		lines.push(remoteAgentLine(agent, width, theme));
 	}
 	if (entries.length === 0) {
-		lines.push(theme.fg("muted", fit("No messages in this window thread.", width)));
+		lines.push(theme.fg("muted", fit(
+			isMonitorControlEndpoint(window) ? "Current session · monitor coordination" : "No messages in this window thread.",
+			width,
+		)));
 		return lines;
 	}
 	lines.push(theme.fg("muted", fit("Messages", width)));

@@ -53,8 +53,8 @@ test("renderSessionDetail: renders the selected agent's status header and tail",
 
 test("renderSessionDetail: header explains scroll and visibility controls", () => {
 	const [header] = renderSessionDetail([agent()], "c1", 80, theme as Theme);
-	assert.match(header, /Alt\+Shift\+↑↓ scroll/);
-	assert.match(header, /Alt\+Shift\+R hide/);
+	assert.match(header, /Alt\+R preview/);
+	assert.match(header, /Alt\+E hide/);
 });
 
 test("renderSessionDetail: running agent without tail names the thinking state", () => {
@@ -109,8 +109,8 @@ test("renderSessionDetail: explicit session view keeps content and actionable st
 	assert.match(text, /streaming model prose/);
 	assert.match(text, /read/);
 	assert.match(text, /provider warning/);
-	assert.match(lines[0], /Alt\+Shift\+↑↓ scroll/);
-	assert.match(lines[0], /Alt\+Shift\+R hide/);
+	assert.match(lines[0], /Alt\+R preview/);
+	assert.match(lines[0], /Alt\+E hide/);
 	assert.equal(sessionDetailBodyLength(rows, "c1", 120), 3);
 });
 

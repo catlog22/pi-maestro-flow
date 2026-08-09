@@ -1,13 +1,20 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
-import type { TUI } from "@earendil-works/pi-tui";
+import { truncateToWidth, type TUI } from "@earendil-works/pi-tui";
 import type { CockpitEndpoint } from "./endpoint-store.ts";
+import { isMonitorControlEndpoint } from "./endpoint-store.ts";
 import type { SessionUiState } from "./session-ui-state.ts";
+import { assignedAgentColor, renderSessionBarLine } from "./agent-bar.ts";
 import { formatUnreadCount, renderSessionTabLine, type SessionTab } from "./session-tabs.ts";
 
 export interface WindowBarDeps {
 	getWindows: () => readonly CockpitEndpoint[];
 	getState: () => SessionUiState;
 	getMonitoredEndpointIds: () => readonly string[];
+	getShortcutHint?: () => string | undefined;
+}
+
+export interface WindowBarRenderOptions {
+	shortcutHint?: string;
 }
 
 interface WindowTab extends SessionTab {
@@ -15,15 +22,20 @@ interface WindowTab extends SessionTab {
 	monitored: boolean;
 }
 
-function statusColor(endpoint: CockpitEndpoint): ThemeColor {
-	if (endpoint.status === "running") return "warning";
+export function windowSessionColor(endpoint: CockpitEndpoint): ThemeColor {
+	if (isMonitorControlEndpoint(endpoint)) return "accent";
+	if (endpoint.status === "running") {
+		return assignedAgentColor(endpoint.registryEndpoint?.ownerId ?? endpoint.id);
+	}
 	if (endpoint.status === "sleeping") return "muted";
 	return "error";
 }
 
 function renderTab(tab: WindowTab, selected: boolean, theme: Theme): string {
-	const color = statusColor(tab.endpoint);
-	const marker = tab.monitored ? theme.fg("success", "●") : theme.fg("muted", "○");
+	const color = selected ? "accent" : windowSessionColor(tab.endpoint);
+	const marker = isMonitorControlEndpoint(tab.endpoint)
+		? theme.fg("accent", "◆")
+		: tab.monitored ? theme.fg("success", "●") : theme.fg("muted", "○");
 	const unread = (tab.unread ?? 0) > 0 ? theme.fg("warning", ` ${formatUnreadCount(tab.unread ?? 0)}`) : "";
 	const label = `#${tab.label}`;
 	return selected
@@ -37,6 +49,7 @@ export function renderWindowBar(
 	monitoredEndpointIds: readonly string[],
 	width: number,
 	theme: Theme,
+	options: WindowBarRenderOptions = {},
 ): string[] {
 	const monitored = new Set(monitoredEndpointIds);
 	const tabs: WindowTab[] = windows.map((endpoint) => ({
@@ -47,17 +60,19 @@ export function renderWindowBar(
 		endpoint,
 		monitored: monitored.has(endpoint.id),
 	}));
-	if (tabs.length === 0) return [theme.fg("muted", "Windows · no peer sessions")];
-	return [renderSessionTabLine(tabs, width, {
-		selectedId: state.selectedId("window"),
-		renderTab: (tab, selected) => renderTab(tab, selected, theme),
-		renderSummary: (selected) => {
-			const pressure = selected.endpoint.contextPressure;
-			const context = pressure === undefined ? "" : ` · ctx ${Math.round(pressure)}%`;
-			return theme.fg(statusColor(selected.endpoint), `■ #${selected.label}${context}`);
-		},
-		renderUnreadSummary: (total) => theme.fg("warning", `+${formatUnreadCount(total)}`),
-	})];
+	if (tabs.length === 0) {
+		return [truncateToWidth(theme.fg("muted", "Windows · no peer sessions"), Math.max(1, width), "…")];
+	}
+	return [renderSessionBarLine(
+		(availableWidth) => renderSessionTabLine(tabs, availableWidth, {
+			selectedId: state.selectedId("window"),
+			renderTab: (tab, selected) => renderTab(tab, selected, theme),
+			renderUnreadSummary: (total) => theme.fg("warning", `+${formatUnreadCount(total)}`),
+		}),
+		width,
+		theme,
+		options.shortcutHint,
+	)];
 }
 
 export function makeWindowBarWidget(deps: WindowBarDeps) {
@@ -69,6 +84,7 @@ export function makeWindowBarWidget(deps: WindowBarDeps) {
 				deps.getMonitoredEndpointIds(),
 				width,
 				theme,
+				{ shortcutHint: deps.getShortcutHint?.() },
 			);
 		},
 		invalidate(): void {},

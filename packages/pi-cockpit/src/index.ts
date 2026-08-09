@@ -40,20 +40,21 @@ import { shouldAnimateFrames, shouldAnimateSidebar, shouldRunTick, type TickPoli
 import { TodoStore } from "./todo-store.ts";
 import { makeTodoWidget, makeAgentWidget, terminalRows, visibleAgentRows } from "./stack-widget.ts";
 import { agentListWindowRows, scrollBy, type AgentScrollState } from "./agent-scroll.ts";
-import { agentSessionColor, assignedAgentColor, makeAgentBarWidget, renderAgentBar, SESSION_BAR_WIDGET_KEY } from "./session-bar.ts";
-import { makeSessionDetailWidget, SESSION_DETAIL_WIDGET_KEY, DEFAULT_SESSION_DETAIL_ROWS, sessionDetailBodyLength, sessionDetailWindowRows } from "./session-detail.ts";
+import { agentSessionColor, assignedAgentColor, makeAgentBarWidget, SESSION_BAR_WIDGET_KEY } from "./session-bar.ts";
+import { makeSessionDetailWidget, SESSION_DETAIL_WIDGET_KEY } from "./session-detail.ts";
 import {
 	EndpointStore,
 	SESSION_HOST_REGISTRY_KEY,
+	isMonitorControlEndpoint,
 	isSessionHostRegistryLike,
 	type CockpitEndpoint,
 	type SessionHostRegistryLike,
 } from "./endpoint-store.ts";
 import { SessionUiState } from "./session-ui-state.ts";
 import { nextSessionTabId } from "./session-tabs.ts";
-import { renderWindowBar } from "./window-bar.ts";
-import { makeWindowThreadWidget, windowThreadBody } from "./window-thread-view.ts";
-import { agentDetailRows, agentPanelRows } from "./viewport.ts";
+import { renderWindowBar, windowSessionColor } from "./window-bar.ts";
+import { makeWindowThreadWidget } from "./window-thread-view.ts";
+import { agentPanelRows } from "./viewport.ts";
 import { routeAgentInput } from "./input-routing.ts";
 import { activeThemeName, ThemePicker } from "./theme-picker.ts";
 import { ModelPicker, type ModelPickerEntry } from "./model-picker.ts";
@@ -71,6 +72,7 @@ import {
 	COCKPIT_INPUT_TARGET_EVENT,
 	COCKPIT_MAESTRO_QUERY_EVENT,
 	COCKPIT_PREEMPT_RESIZE_EVENT,
+	COCKPIT_SESSION_LIST_EVENT,
 	COCKPIT_TODO_TOGGLE_EVENT,
 	MAESTRO_UI_SNAPSHOT_EVENT,
 	MAESTRO_UI_SNAPSHOT_VERSION,
@@ -119,11 +121,10 @@ const MAILBOX_REGISTRY_KEY = Symbol.for("pi-maestro-teammate.mailbox-registry");
 
 const FOOTER_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 const BASH_BG_OVERLAY_KEY = "alt+j";
-const AGENT_OVERLAY_KEY = "alt+a";
 const SIDEBAR_RESIZE_KEY = "ctrl+shift+r";
 const WINDOW_MONITOR_TOGGLE_KEY = "alt+w";
-const SIDEBAR_FOCUS_KEY = "alt+shift+l";
-const SESSION_DETAIL_TOGGLE_KEY = "alt+shift+r";
+const SIDEBAR_FOCUS_KEY = "alt+l";
+const SESSION_DETAIL_TOGGLE_KEY = "alt+e";
 const COCKPIT_STATUS_KEY = "cockpit";
 // Claude Code title chrome: a static marker when idle, two braille frames while
 // a turn runs (screens/REPL.tsx TITLE_STATIC_PREFIX / TITLE_ANIMATION_FRAMES).
@@ -345,10 +346,8 @@ export default function (pi: ExtensionAPI): void {
 	let claudeEditorForeignWarned = false;
 	// Fullscreen (alternate-screen fixed editor) controller, reload-gated.
 	let fullscreenController: FullscreenController | undefined;
-	/** Disposer for the session-bar ←/→ navigation hook (per applyUi). */
+	/** Disposer for the session ←/→ navigation hook (per applyUi). */
 	let sessionBarNavDisposer: (() => void) | undefined;
-	/** Disposer for the selected-session Alt+Shift+↑/↓ scroll hook. */
-	let sessionDetailScrollDisposer: (() => void) | undefined;
 	/** Disposer for the agent-list Shift+↑/↓ scroll hook (per applyUi). */
 	let agentScrollDisposer: (() => void) | undefined;
 	/** Scroll window over the below-input agent roster (tail-following default). */
@@ -613,6 +612,7 @@ export default function (pi: ExtensionAPI): void {
 		const ownership: CockpitUiOwnershipV1 = {
 			todo: config.enabled,
 			agents: config.enabled && config.hideNativeAgents,
+			sessionList: config.enabled,
 			footer: config.enabled,
 			sidebar: ownsDock,
 			goal: ownsDock,
@@ -683,6 +683,9 @@ export default function (pi: ExtensionAPI): void {
 		attachViewportStability(tui);
 	};
 
+	const sessionListOverlayActive = (): boolean =>
+		capturingOverlayActive || ambientKeysShouldYield(capturedTui);
+
 	const clearWidgets = (ctx: ExtensionContext): void => {
 		ctx.ui.setWidget(STACK_WIDGET_KEY, undefined);
 		ctx.ui.setWidget(AGENT_WIDGET_KEY, undefined);
@@ -735,6 +738,10 @@ export default function (pi: ExtensionAPI): void {
 		const windowResult = sessionUi.reconcile("window", snapshot.windows, snapshot.windows[0]?.id);
 		const nextMode = snapshot.viewMode === "windows" ? "window" : "agent";
 		sessionUi.setMode(nextMode);
+		if (previousMode !== "window" && nextMode === "window") {
+			const control = snapshot.windows.find(isMonitorControlEndpoint);
+			if (control) sessionUi.select(control.id, "window");
+		}
 		syncViewingSelection();
 
 		const activeResult = nextMode === "window" ? windowResult : agentResult;
@@ -801,13 +808,32 @@ export default function (pi: ExtensionAPI): void {
 		};
 	};
 
+	const selectedWindowInputTarget = (): { endpoint: CockpitEndpoint; label: string; color: ThemeColor; sigil: "#" } | undefined => {
+		if (sessionUi.mode !== "window") return undefined;
+		const endpoint = selectedWindowEndpoint();
+		// #control is the current session itself — no target prompt is shown.
+		if (!endpoint || isMonitorControlEndpoint(endpoint)) return undefined;
+		return {
+			endpoint,
+			label: endpoint.label,
+			color: windowSessionColor(endpoint),
+			sigil: "#",
+		};
+	};
+
 	const publishInputTarget = (force = false): void => {
-		const target = selectedAgentTarget();
-		const fingerprint = target ? `${target.endpoint.id}:${target.label}:${target.color}` : "@main";
+		const target = sessionUi.mode === "window" ? selectedWindowInputTarget() : selectedAgentTarget();
+		const sigil = target && "sigil" in target ? target.sigil : "@";
+		const fingerprint = target ? `${target.endpoint.id}:${sigil}:${target.label}:${target.color}` : "@main";
 		if (!force && fingerprint === lastPublishedInputTarget) return;
 		lastPublishedInputTarget = fingerprint;
 		const payload: CockpitInputTargetV1 = target
-			? { version: 1, label: target.label, color: target.color }
+			? {
+				version: 1,
+				label: target.label,
+				color: target.color,
+				...(sigil === "#" ? { sigil } : {}),
+			}
 			: { version: 1 };
 		pi.events.emit(COCKPIT_INPUT_TARGET_EVENT, payload);
 	};
@@ -970,20 +996,20 @@ export default function (pi: ExtensionAPI): void {
 					getState: () => sessionUi,
 					getNow: () => nowSnapshot,
 					isMainRunning: () => running,
-					getContextPressure: () => {
-						try {
-							const percent = ctx.getContextUsage()?.percent;
-							return typeof percent === "number" && Number.isFinite(percent) ? percent : undefined;
-						} catch {
-							return undefined;
-						}
-					},
+					getShortcutHint: () => sessionListOverlayActive() ? undefined : "Alt+R list",
 				})(tui, theme);
 				return {
 					render(width: number): string[] {
 						const snapshot = endpoints.snapshot();
 						return sessionUi.mode === "window"
-							? renderWindowBar(snapshot.windows, sessionUi, snapshot.monitoredEndpointIds, width, theme)
+							? renderWindowBar(
+								snapshot.windows,
+								sessionUi,
+								snapshot.monitoredEndpointIds,
+								width,
+								theme,
+								{ shortcutHint: sessionListOverlayActive() ? undefined : "Alt+R list" },
+							)
 							: agentWidget.render(width);
 					},
 					invalidate(): void { agentWidget.invalidate(); },
@@ -1129,8 +1155,6 @@ export default function (pi: ExtensionAPI): void {
 		ctx.ui.setWidget(SESSION_DETAIL_WIDGET_KEY, undefined);
 		sessionBarNavDisposer?.();
 		sessionBarNavDisposer = undefined;
-		sessionDetailScrollDisposer?.();
-		sessionDetailScrollDisposer = undefined;
 		agentScrollDisposer?.();
 		agentScrollDisposer = undefined;
 		ctx.ui.setFooter(undefined);
@@ -1283,91 +1307,32 @@ export default function (pi: ExtensionAPI): void {
 		// Re-enabling mid-run must restart live spinner and elapsed updates.
 		syncTick();
 
-		// Session bar: the session switcher pinned directly above the input box.
-		// One line — color-coded chips (@main + every agent) on the left, the
-		// currently shown session's status (● @session, the input box's top-right
-		// corner) at the right edge. Installed on every surface (dock and
-		// widgets), inserted last so it sits closest to the editor.
+		// Agent bar: one line of session chips above the input box, selected chip
+		// highlighted (▸) and the line panning horizontally when agents overflow;
+		// window mode swaps in the window bar. Installed on every surface (dock
+		// and widgets), inserted last so it sits closest to the editor.
 		installSessionBar(ctx);
-		// ←/→ (empty composer) cycles the session bar through [main, ...agents]
-		// and selects the highlighted session. While composing, the arrows keep
-		// moving the text cursor. A capturing modal overlay (e.g. /todo, /goal,
-		// /swarm, the ask wizard) owns ←/→ while it is up; cycling the agent
-		// view must not steal them from the surface the user is on.
+		// ←/→ cycles tabs only with an empty composer. Window mode additionally
+		// accepts Alt+←/→ so drafts can be switched without losing cursor arrows.
+		// A capturing modal overlay owns navigation while it is open.
 		sessionBarNavDisposer?.();
 		sessionBarNavDisposer = ctx.ui.onTerminalInput((data) => {
-			if (data !== "\x1b[D" && data !== "\x1b[C") return undefined;
 			if (ambientKeysShouldYield(capturedTui)) return undefined;
+			const windowPrevious = sessionUi.mode === "window" && matchesKey(data, "alt+left");
+			const windowNext = sessionUi.mode === "window" && matchesKey(data, "alt+right");
+			const plainPrevious = data === "\x1b[D";
+			const plainNext = data === "\x1b[C";
+			if (!windowPrevious && !windowNext && !plainPrevious && !plainNext) return undefined;
 			const text = ctx.ui.getEditorText();
-			if (text.trim() !== "") return undefined;
+			if (!windowPrevious && !windowNext && text.trim() !== "") return undefined;
 			const snapshot = endpoints.snapshot();
-			const delta = data === "\x1b[C" ? 1 : -1;
+			const delta = windowNext || plainNext ? 1 : -1;
 			if (sessionUi.mode === "window") {
 				const next = nextSessionTabId(snapshot.windows, sessionUi.selectedId("window"), delta);
 				if (next) selectWindow(next);
 			} else {
 				const next = nextSessionTabId(snapshot.endpoints, sessionUi.selectedId("agent"), delta);
 				if (next) selectEndpoint(next);
-			}
-			return { consume: true };
-		});
-		// Alt+Shift+↑/↓ scroll the selected agent's fixed session content.
-		// Scrolling down to the bottom resumes automatic following as output grows.
-		const detailUp = "\x1b[1;4A";
-		const detailDown = "\x1b[1;4B";
-		const legacyDetailUp = "\x1b\x1b[1;2A";
-		const legacyDetailDown = "\x1b\x1b[1;2B";
-		sessionDetailScrollDisposer?.();
-		sessionDetailScrollDisposer = ctx.ui.onTerminalInput((data) => {
-			const up = data === detailUp || data === legacyDetailUp;
-			const down = data === detailDown || data === legacyDetailDown;
-			if (!up && !down) return undefined;
-			if (ambientKeysShouldYield(capturedTui)) return undefined;
-			const width = capturedTui?.terminal?.columns ?? 80;
-			const rows = capturedTui?.terminal?.rows;
-			if (sessionUi.mode === "window") {
-				const endpoint = selectedWindowEndpoint();
-				if (!endpoint) return undefined;
-				const endpointState = sessionUi.endpoint(endpoint.id);
-				const total = windowThreadBody(
-					endpoint,
-					endpoints.snapshot().thread.filter((entry) =>
-						entry.peerOwnerId === endpoint.registryEndpoint?.ownerId
-						&& entry.peerOwnerNonce === endpoint.registryEndpoint?.ownerNonce
-					),
-					width,
-					{ fg: (_color: string, value: string) => value, bold: (value: string) => value } as Theme,
-				).length;
-				const budget = Math.max(1, agentDetailRows(rows) ?? DEFAULT_SESSION_DETAIL_ROWS);
-				const next = scrollBy(
-					{ offset: endpointState.scroll, following: endpointState.followTail },
-					up ? -1 : 1,
-					total,
-					budget,
-				);
-				if (next.offset !== endpointState.scroll || next.following !== endpointState.followTail) {
-					sessionUi.setScroll(endpoint.id, next.offset, next.following);
-					req();
-				}
-				return { consume: true };
-			}
-			const endpoint = selectedEndpoint();
-			const viewingId = selectedAgentCorrelationId();
-			if (!endpoint || endpoint.kind !== "agent" || !viewingId) return undefined;
-			const endpointState = sessionUi.endpoint(endpoint.id);
-			if (!endpointState.detail) return undefined;
-			const total = sessionDetailBodyLength(agents.snapshot(), viewingId, width);
-			const maxRows = agentDetailRows(rows) ?? DEFAULT_SESSION_DETAIL_ROWS;
-			const budget = sessionDetailWindowRows(total, maxRows);
-			const next = scrollBy(
-				{ offset: endpointState.scroll, following: endpointState.followTail },
-				up ? -1 : 1,
-				total,
-				Math.max(1, budget),
-			);
-			if (next.offset !== endpointState.scroll || next.following !== endpointState.followTail) {
-				sessionUi.setScroll(endpoint.id, next.offset, next.following);
-				req();
 			}
 			return { consume: true };
 		});
@@ -1660,6 +1625,7 @@ export default function (pi: ExtensionAPI): void {
 		const released: CockpitUiOwnershipV1 = {
 			todo: false,
 			agents: false,
+			sessionList: false,
 			footer: false,
 			sidebar: false,
 			goal: false,
@@ -1770,13 +1736,23 @@ export default function (pi: ExtensionAPI): void {
 
 		if (sessionUi.mode === "window" && (interactiveText || hasImages) && !isSynthetic) {
 			const target = selectedWindowEndpoint();
-			if (hasImages) {
-				ctx.ui.notify("Image input cannot be routed to a peer window; reattach it after leaving monitor mode.", "warning");
+			if (!target) {
+				ctx.ui.notify("No monitor window is selected.", "warning");
 				ctx.ui.setEditorText(e.text);
 				return { action: "handled" as const };
 			}
-			if (!target || !registry) {
-				ctx.ui.notify("No peer window is selected.", "warning");
+			if (isMonitorControlEndpoint(target)) {
+				sessionUi.setDraft(target.id, "");
+				if (!firstUserText && interactiveText) firstUserText = e.text;
+				return { action: "continue" as const };
+			}
+			if (hasImages) {
+				ctx.ui.notify("Image input cannot be routed to a peer window; reattach it in #control or after leaving monitor mode.", "warning");
+				ctx.ui.setEditorText(e.text);
+				return { action: "handled" as const };
+			}
+			if (!registry) {
+				ctx.ui.notify("Peer window delivery is unavailable.", "warning");
 				ctx.ui.setEditorText(e.text);
 				return { action: "handled" as const };
 			}
@@ -1841,6 +1817,7 @@ export default function (pi: ExtensionAPI): void {
 
 	const enterCapturingOverlay = (): void => {
 		capturingOverlayActive = true;
+		req();
 		try {
 			sidebarController?.cancelResize();
 		} catch {
@@ -1849,6 +1826,7 @@ export default function (pi: ExtensionAPI): void {
 	};
 	const exitCapturingOverlay = (): void => {
 		capturingOverlayActive = false;
+		req();
 	};
 
 	const openAgentOverlay = async (ctx: ExtensionContext): Promise<void> => {
@@ -1899,6 +1877,65 @@ export default function (pi: ExtensionAPI): void {
 			exitCapturingOverlay();
 		}
 	};
+
+	const openSessionList = async (ctx: ExtensionContext): Promise<void> => {
+		if (!ctx.hasUI) return;
+		if (sessionListOverlayActive()) {
+			ctx.ui.notify("Close the open overlay before opening Sessions", "warning");
+			return;
+		}
+		const snapshot = endpoints.snapshot();
+		const mode = sessionUi.mode;
+		const allEntries = mode === "window" ? [...snapshot.windows] : [...snapshot.endpoints];
+		if (allEntries.length === 0) {
+			ctx.ui.notify(`No ${mode === "window" ? "windows" : "agents"} to display`, "info");
+			return;
+		}
+		const selectedId = sessionUi.selectedId(mode);
+		const selectedIndex = allEntries.findIndex((endpoint) => endpoint.id === selectedId);
+		const entries = selectedIndex > 0
+			? [allEntries[selectedIndex]!, ...allEntries.slice(0, selectedIndex), ...allEntries.slice(selectedIndex + 1)]
+			: allEntries;
+		const choices = entries.map((endpoint) => {
+			const current = endpoint.id === selectedId ? "selected" : "";
+			const monitored = mode === "window" && snapshot.monitoredEndpointIds.includes(endpoint.id)
+				? "monitored"
+				: "";
+			const agentCount = mode === "window" && endpoint.agentCount !== undefined
+				? `${endpoint.agentCount} agents`
+				: "";
+			const detail = [current, endpoint.status, monitored, agentCount].filter(Boolean).join(" · ");
+			const sigil = mode === "window" ? "#" : "@";
+			return `${sigil}${endpoint.label}${detail ? ` · ${detail}` : ""}`;
+		});
+		let previewAgent = false;
+		enterCapturingOverlay();
+		try {
+			const selected = await ctx.ui.select(mode === "window" ? "Windows" : "Agents", choices);
+			const index = selected === undefined ? -1 : choices.indexOf(selected);
+			const endpoint = index >= 0 ? entries[index] : undefined;
+			if (endpoint) {
+				if (mode === "window") selectWindow(endpoint.id);
+				else {
+					selectEndpoint(endpoint.id);
+					previewAgent = endpoint.kind === "agent"
+						&& visibleAgentRows(agents.snapshot()).some((row) => row.correlationId === endpoint.correlationId);
+				}
+			}
+		} finally {
+			exitCapturingOverlay();
+		}
+		if (previewAgent) await openAgentOverlay(ctx);
+	};
+
+	pi.events.on(COCKPIT_SESSION_LIST_EVENT, (payload) => {
+		if (!payload || typeof payload !== "object" || (payload as { version?: unknown }).version !== 1) return;
+		const ctx = lastCtx;
+		if (!config.enabled || !ctx || !isTuiContext(ctx)) return;
+		void openSessionList(ctx).catch((error) => {
+			ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+		});
+	});
 
 	const openBashBgOverlay = async (ctx: ExtensionContext): Promise<void> => {
 		if (!ctx.hasUI) return;
@@ -2106,25 +2143,19 @@ export default function (pi: ExtensionAPI): void {
 		getThemes: () => (lastCtx?.ui.getAllThemes?.() ?? []).map((theme) => theme.name),
 	});
 
-	pi.registerShortcut(AGENT_OVERLAY_KEY, {
-		description: "Open the live Agent panel",
-		async handler(ctx) {
-			if (!config.enabled) {
-				ctx.ui.notify("Cockpit is disabled", "warning");
-				return;
-			}
-			await openAgentOverlay(ctx);
-		},
-	});
-
 	pi.registerShortcut(WINDOW_MONITOR_TOGGLE_KEY, {
 		description: "Toggle supervision for the selected Window Bar session",
 		async handler(ctx) {
 			if (sessionUi.mode !== "window") return;
 			const window = selectedWindowEndpoint();
 			const registry = sessionRegistry() ?? endpoints.registry;
-			if (!window || !registry?.setMonitored) {
-				ctx.ui.notify("No monitorable peer window is selected.", "warning");
+			if (!window || !registry?.setMonitored || isMonitorControlEndpoint(window)) {
+				ctx.ui.notify(
+					isMonitorControlEndpoint(window)
+						? "#control is the current Monitor session and cannot supervise itself."
+						: "No monitorable peer window is selected.",
+					"warning",
+				);
 				return;
 			}
 			const enabled = !endpoints.snapshot().monitoredEndpointIds.includes(window.id);

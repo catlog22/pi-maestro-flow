@@ -18,6 +18,12 @@ export const SUPERVISION_EVENT = "supervision:event";
  */
 export const COCKPIT_PREEMPT_RESIZE_EVENT = "cockpit:preempt-resize";
 
+/** Ask Cockpit to open the session list for its active Agent/Window mode. */
+export const COCKPIT_SESSION_LIST_EVENT = "cockpit:open-session-list";
+export interface CockpitSessionListRequestV1 {
+	version: 1;
+}
+
 /**
  * Todo panel toggle. Emitted by pi-maestro-flow's Alt+T handler while Cockpit
  * owns the Todo surface; Cockpit applies `expanded` as a boolean and treats an
@@ -35,6 +41,8 @@ export interface CockpitInputTargetV1 {
 	label?: string;
 	/** Semantic Pi theme slot used for the immutable editor prefix. */
 	color?: import("@earendil-works/pi-coding-agent").ThemeColor;
+	/** Optional route sigil; omitted payloads retain the legacy agent `@` prefix. */
+	sigil?: "@" | "#";
 }
 
 export type MaestroJsonPrimitiveV1 = string | number | boolean | null;
@@ -165,6 +173,8 @@ export type MaestroUiSnapshotV1 = MaestroUiStateSnapshotV1 | MaestroUiClearSnaps
 export interface CockpitUiOwnershipV1 {
 	todo: boolean;
 	agents: boolean;
+	/** Cockpit owns the mode-aware Agent/Window list opened by Alt+R. */
+	sessionList: boolean;
 	footer: boolean;
 	/** True only while the split-pane dock is effectively visible. */
 	sidebar: boolean;
@@ -181,6 +191,7 @@ export interface MaestroEventMapV1 {
 	"cockpit:maestro-query": MaestroQueryV1;
 	"maestro:ui-snapshot": MaestroUiSnapshotV1;
 	"cockpit:ui-ownership": CockpitUiOwnershipV1;
+	"cockpit:open-session-list": CockpitSessionListRequestV1;
 	"cockpit:preempt-resize": undefined;
 	"cockpit:toggle-todo": CockpitTodoToggleV1 | undefined;
 	"cockpit:input-target": CockpitInputTargetV1;

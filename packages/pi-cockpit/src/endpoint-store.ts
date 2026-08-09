@@ -13,6 +13,7 @@ import type { AgentRow } from "./types.ts";
 export const SESSION_HOST_REGISTRY_EVENT = "teammate:sessions";
 export const SESSION_HOST_REGISTRY_KEY = Symbol.for("pi-maestro-teammate.session-host-registry.v1");
 export const LEGACY_MAIN_ENDPOINT_ID = "cockpit-session/v1/main";
+export const MONITOR_CONTROL_ENDPOINT_PREFIX = "cockpit-session/v1/window-control/";
 
 export interface SessionMessageRouterLike {
 	route(request: SessionMessageRequest): Promise<SessionMessageResult>;
@@ -70,6 +71,10 @@ export interface EndpointStoreSnapshot {
 
 export interface EndpointStoreOptions {
 	getLegacyAgents: () => readonly AgentRow[];
+}
+
+export function isMonitorControlEndpoint(endpoint: CockpitEndpoint | undefined): boolean {
+	return endpoint?.kind === "window" && endpoint.registryEndpoint?.scope === "local";
 }
 
 export interface EndpointStoreConnectOptions {
@@ -138,10 +143,30 @@ function sameOwner(left: SessionEndpoint, right: SessionEndpoint): boolean {
 		&& left.ownerNonce === right.ownerNonce;
 }
 
+const INTERNAL_MONITOR_SESSION_NAME = "monitor-session";
+
 function visibleLegacyRows(rows: readonly AgentRow[]): AgentRow[] {
 	return rows
-		.filter((row) => !row.agent.startsWith("graph("))
+		.filter((row) => !row.agent.startsWith("graph(") && row.name !== INTERNAL_MONITOR_SESSION_NAME)
 		.sort((left, right) => left.startedAt - right.startedAt || left.correlationId.localeCompare(right.correlationId, "en"));
+}
+
+function disambiguateAgentLabels(endpoints: CockpitEndpoint[]): void {
+	const counts = new Map<string, number>();
+	for (const endpoint of endpoints) {
+		if (endpoint.kind !== "agent") continue;
+		const key = endpoint.label.toLocaleLowerCase("en");
+		counts.set(key, (counts.get(key) ?? 0) + 1);
+	}
+	const ordinals = new Map<string, number>();
+	for (const endpoint of endpoints) {
+		if (endpoint.kind !== "agent") continue;
+		const key = endpoint.label.toLocaleLowerCase("en");
+		if ((counts.get(key) ?? 0) < 2) continue;
+		const ordinal = (ordinals.get(key) ?? 0) + 1;
+		ordinals.set(key, ordinal);
+		endpoint.label = `${endpoint.label}·${ordinal}`;
+	}
 }
 
 /**
@@ -290,7 +315,7 @@ export class EndpointStore {
 
 		const usedRows = new Set<string>();
 		for (const endpoint of registryAgents) {
-			if (!endpoint.correlationId) continue;
+			if (!endpoint.correlationId || endpoint.name === INTERNAL_MONITOR_SESSION_NAME) continue;
 			const row = rowsById.get(endpoint.correlationId);
 			if ((row?.agent ?? endpoint.agent ?? "").startsWith("graph(")) continue;
 			if (row) usedRows.add(row.correlationId);
@@ -335,39 +360,76 @@ export class EndpointStore {
 		}
 
 		endpoints.sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id, "en"));
+		disambiguateAgentLabels(endpoints);
 
 		const thread = registrySnapshot?.thread ?? [];
-		const windows: CockpitEndpoint[] = remote
-			.filter((endpoint) => endpoint.kind === "root")
-			.map((endpoint) => {
-				const remoteAgents = remote.filter((candidate) =>
-					candidate.kind === "agent" && sameOwner(endpoint, candidate)
-				);
-				const peerThread = thread.filter((entry) =>
-					entry.peerOwnerId === endpoint.ownerId && entry.peerOwnerNonce === endpoint.ownerNonce
-				);
-				return {
-					id: endpoint.id,
-					logicalKey: `window:${endpoint.ownerId}`,
-					kind: "window" as const,
-					label: cleanLabel(endpoint.sessionName, `window:${endpoint.ownerId.slice(0, 6)}`),
-					ordinal: endpoint.ordinal,
-					status: endpoint.status,
-					contentRevision: revisionOf([
-						endpoint.contentRevision,
-						remoteAgents.map((agent) => agent.contentRevision),
-						peerThread.map((entry) => entry.contentRevision),
-					]),
-					...(peerThread.length ? { outputRevision: revisionOf(peerThread.map((entry) => entry.contentRevision)) } : {}),
-					routeSelector: endpoint.id,
-					source: "registry" as const,
-					registryEndpoint: endpoint,
-					...(endpoint.contextPressure === undefined ? {} : { contextPressure: endpoint.contextPressure }),
-					agentCount: endpoint.agentCount ?? remoteAgents.filter((agent) => agent.status !== "settled").length,
-					remoteAgents: Object.freeze(remoteAgents),
-				};
-			});
 		const viewMode = registrySnapshot?.viewMode ?? "agents";
+		const remoteRoots = remote.filter((endpoint) => endpoint.kind === "root");
+		const baseWindowLabels = new Map(remoteRoots.map((endpoint) => [
+			endpoint.id,
+			cleanLabel(endpoint.sessionName, `window:${endpoint.ownerId.slice(0, 6)}`),
+		]));
+		const windowLabelCounts = new Map<string, number>();
+		for (const label of baseWindowLabels.values()) {
+			const key = label.toLocaleLowerCase("en");
+			windowLabelCounts.set(key, (windowLabelCounts.get(key) ?? 0) + 1);
+		}
+		const windows: CockpitEndpoint[] = remoteRoots.map((endpoint) => {
+			const remoteAgents = remote.filter((candidate) =>
+				candidate.kind === "agent" && sameOwner(endpoint, candidate)
+			);
+			const peerThread = thread.filter((entry) =>
+				entry.peerOwnerId === endpoint.ownerId && entry.peerOwnerNonce === endpoint.ownerNonce
+			);
+			const baseLabel = baseWindowLabels.get(endpoint.id)!;
+			const label = (windowLabelCounts.get(baseLabel.toLocaleLowerCase("en")) ?? 0) > 1
+				? `${baseLabel}·${endpoint.ownerId.slice(0, 6)}`
+				: baseLabel;
+			const activityRevision = revisionOf([
+				remoteAgents.map((agent) => agent.contentRevision),
+				peerThread.map((entry) => entry.contentRevision),
+			]);
+			return {
+				id: endpoint.id,
+				logicalKey: `window:${endpoint.ownerId}:${endpoint.ownerNonce}`,
+				kind: "window" as const,
+				label,
+				ordinal: endpoint.ordinal,
+				status: endpoint.status,
+				contentRevision: revisionOf([endpoint.contentRevision, activityRevision]),
+				...(remoteAgents.length > 0 || peerThread.length > 0 ? { outputRevision: activityRevision } : {}),
+				routeSelector: endpoint.id,
+				source: "registry" as const,
+				registryEndpoint: endpoint,
+				...(endpoint.contextPressure === undefined ? {} : { contextPressure: endpoint.contextPressure }),
+				agentCount: endpoint.agentCount ?? remoteAgents.filter((agent) => agent.status !== "settled").length,
+				remoteAgents: Object.freeze(remoteAgents),
+			};
+		});
+		if (viewMode === "windows" && root) {
+			const controlAgents = registryAgents.filter((endpoint) =>
+				endpoint.name !== INTERNAL_MONITOR_SESSION_NAME && !(endpoint.agent ?? "").startsWith("graph(")
+			);
+			const controlActivityRevision = revisionOf([
+				this.#mainOutputRevision,
+				controlAgents.map((agent) => agent.contentRevision),
+			]);
+			windows.unshift({
+				id: `${MONITOR_CONTROL_ENDPOINT_PREFIX}${encodeURIComponent(root.id)}`,
+				logicalKey: `monitor-control:${root.ownerId}:${root.ownerNonce}`,
+				kind: "window",
+				label: "control",
+				ordinal: Number.MIN_SAFE_INTEGER,
+				status: root.status,
+				contentRevision: revisionOf([root.contentRevision, controlActivityRevision]),
+				...(this.#mainOutputRevision || controlAgents.length > 0 ? { outputRevision: controlActivityRevision } : {}),
+				routeSelector: root.id,
+				source: "registry",
+				registryEndpoint: root,
+				agentCount: controlAgents.filter((agent) => agent.status !== "settled").length,
+				remoteAgents: Object.freeze(controlAgents),
+			});
+		}
 		const monitoredEndpointIds = Object.freeze([...(registrySnapshot?.monitoredEndpointIds ?? [])]);
 		const contentRevision = revisionOf([
 			viewMode,

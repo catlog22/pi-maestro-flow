@@ -9,11 +9,7 @@ import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import type { CockpitEndpoint } from "./endpoint-store.ts";
 import type { SessionUiState } from "./session-ui-state.ts";
-import {
-	formatUnreadCount,
-	renderSessionTabLine,
-	type SessionTab,
-} from "./session-tabs.ts";
+import { formatUnreadCount, type SessionTab } from "./session-tabs.ts";
 import type { AgentRow } from "./types.ts";
 import { effectiveAgentStatus, type AgentDisplayStatus } from "./agents-store.ts";
 import { visibleAgentRows } from "./stack-widget.ts";
@@ -44,7 +40,7 @@ export interface AgentBarDeps {
 	getState: () => SessionUiState;
 	getNow: () => number;
 	isMainRunning?: () => boolean;
-	getContextPressure?: () => number | undefined;
+	getShortcutHint?: () => string | undefined;
 }
 
 export const AGENT_SESSION_COLORS = [
@@ -117,35 +113,97 @@ function endpointStatus(endpoint: CockpitEndpoint, now: number, mainRunning: boo
 }
 
 function endpointColor(endpoint: CockpitEndpoint, status: AgentBarStatus, now: number, selected: boolean): ThemeColor {
-	if (endpoint.kind === "root") return selected ? "accent" : status === "running" ? "warning" : "muted";
+	if (selected) return "accent";
+	if (endpoint.kind === "root") return status === "running" ? "warning" : "muted";
 	if (endpoint.agentRow) return agentSessionColor(endpoint.agentRow, now, status === "idle" ? undefined : status);
 	if (status === "done" || status === "sleeping" || status === "terminated") return "muted";
 	if (status === "failed" || status === "stalled") return "error";
 	return assignedAgentColor(endpoint.correlationId ?? endpoint.id);
 }
 
-function endpointStatusColor(status: AgentBarStatus): ThemeColor {
-	return status === "idle" ? "muted" : statusColor(status);
-}
-
-function normalizedPressure(value: number | undefined): number | undefined {
-	if (value === undefined || !Number.isFinite(value)) return undefined;
-	return Math.max(0, Math.min(100, Math.round(value)));
-}
-
-function pressureColor(value: number): ThemeColor {
-	if (value >= 90) return "error";
-	if (value >= 70) return "warning";
-	return "muted";
-}
-
 export interface AgentBarRenderOptions {
 	mainRunning?: boolean;
-	contextPressure?: number;
 	now?: number;
+	shortcutHint?: string;
 }
 
-/** Render canonical main + local-agent tabs with status, pressure and unread. */
+/** Chip-to-chip separator in the agent bar. */
+const CHIP_SEPARATOR = "  ";
+
+/**
+ * One-line horizontal panning for the agent chip list. When the chips overflow
+ * the width, the window is anchored so the selected chip sits at the right edge
+ * with as many preceding chips as fit, and dim ◀N / N▶ markers count what stays
+ * hidden on each side — arrow-cycling always keeps the highlighted selection
+ * and its context visible no matter how many agents exist.
+ */
+function renderAgentChipLine(tabs: AgentBarTab[], selectedId: string, width: number, theme: Theme): string {
+	const w = Math.max(1, width);
+	const selectedIndex = Math.max(0, tabs.findIndex((tab) => tab.id === selectedId));
+	const chips = tabs.map((tab) => chip(tab.label, tab.id === selectedId, tab.color, theme, tab.unread));
+	const chipWidths = chips.map((text) => visibleWidth(text));
+	const sepWidth = visibleWidth(CHIP_SEPARATOR);
+	const totalWidth = chipWidths.reduce((sum, chipWidth) => sum + chipWidth + sepWidth, 0) - sepWidth;
+	if (totalWidth <= w) return chips.join(CHIP_SEPARATOR);
+
+	const selectedWidth = chipWidths[selectedIndex] ?? 0;
+	// Farthest-left start whose window [start..selectedIndex] still fits budget.
+	const fitStart = (budget: number): number => {
+		let start = selectedIndex;
+		let acc = selectedWidth;
+		while (start > 0) {
+			const next = chipWidths[start - 1] ?? 0;
+			if (acc + sepWidth + next > budget) break;
+			acc += sepWidth + next;
+			start -= 1;
+		}
+		return start;
+	};
+
+	let start = fitStart(w);
+	// Markers are sized from the window itself; a wider marker shrinks the
+	// budget, which moves the start right, which can widen the left marker.
+	// Start only ever moves right, so this converges and terminates.
+	for (;;) {
+		const leftHidden = start;
+		const rightHidden = tabs.length - selectedIndex - 1;
+		const leftMarker = leftHidden > 0 ? theme.fg("dim", `◀${leftHidden}`) : "";
+		const rightMarker = rightHidden > 0 ? theme.fg("dim", `${rightHidden}▶`) : "";
+		const markerCount = (leftMarker ? 1 : 0) + (rightMarker ? 1 : 0);
+		const budget = w - visibleWidth(leftMarker) - visibleWidth(rightMarker) - markerCount * sepWidth;
+		if (budget < selectedWidth) {
+			// Too narrow for the selected chip beside the markers: show it alone.
+			return truncateToWidth(chips[selectedIndex] ?? "", w, "…");
+		}
+		const next = fitStart(budget);
+		if (next === start) {
+			const window = chips.slice(start, selectedIndex + 1);
+			return [leftMarker, ...window, rightMarker].filter(Boolean).join(CHIP_SEPARATOR);
+		}
+		start = next;
+	}
+}
+
+/** Keep the mode-switch hint at the right edge without hiding the selected tab. */
+export function renderSessionBarLine(
+	renderContent: (width: number) => string,
+	width: number,
+	theme: Theme,
+	shortcutHint?: string,
+): string {
+	const w = Math.max(1, width);
+	if (!shortcutHint) return renderContent(w);
+	const hint = theme.fg("dim", shortcutHint);
+	const hintWidth = visibleWidth(hint);
+	const gap = 2;
+	if (w < hintWidth + gap + 8) return renderContent(w);
+	const contentWidth = w - hintWidth - gap;
+	const content = renderContent(contentWidth);
+	const padding = Math.max(gap, w - visibleWidth(content) - hintWidth);
+	return `${content}${" ".repeat(padding)}${hint}`;
+}
+
+/** Render canonical main + local-agent chips with selection highlight and horizontal panning. */
 export function renderAgentBar(
 	endpoints: readonly CockpitEndpoint[],
 	state: SessionUiState,
@@ -155,7 +213,13 @@ export function renderAgentBar(
 ): string[] {
 	if (endpoints.length === 0) return [truncateToWidth(chip(MAIN_SESSION_LABEL, true, "accent", theme), Math.max(1, width), "…")];
 	const now = options.now ?? 0;
-	const selectedId = state.selectedId("agent") ?? endpoints.find((endpoint) => endpoint.kind === "root")?.id ?? endpoints[0]?.id;
+	// A stale selection (id no longer in the endpoint list) must not leave the
+	// bar without a highlighted chip: fall back to root / first endpoint.
+	const fallbackId = endpoints.find((endpoint) => endpoint.kind === "root")?.id ?? endpoints[0]?.id;
+	const requestedId = state.selectedId("agent");
+	const selectedId = requestedId && endpoints.some((endpoint) => endpoint.id === requestedId)
+		? requestedId
+		: fallbackId;
 	const tabs: AgentBarTab[] = endpoints.map((endpoint) => {
 		const selected = endpoint.id === selectedId;
 		const status = endpointStatus(endpoint, now, options.mainRunning === true);
@@ -169,23 +233,12 @@ export function renderAgentBar(
 			color: endpointColor(endpoint, status, now, selected),
 		};
 	});
-	const pressure = normalizedPressure(options.contextPressure);
-	const line = renderSessionTabLine(tabs, width, {
-		selectedId,
-		renderTab: (tab, selected) => chip(tab.label, selected, tab.color, theme, tab.unread),
-		renderUnreadSummary: (totalUnread) => theme.fg("warning", `•${formatUnreadCount(totalUnread)}`),
-		renderSummary: (selected, totalUnread) => {
-			const color = endpointStatusColor(selected.status);
-			const parts = [
-				theme.fg(color, `● @${selected.label}`),
-				totalUnread > 0 ? theme.fg("warning", `${formatUnreadCount(totalUnread)} unread`) : "",
-				theme.fg(color, selected.status),
-				pressure === undefined ? "" : theme.fg(pressureColor(pressure), `ctx ${pressure}%`),
-			].filter(Boolean);
-			return parts.join(theme.fg("dim", " · "));
-		},
-	});
-	return [line];
+	return [renderSessionBarLine(
+		(availableWidth) => renderAgentChipLine(tabs, selectedId, availableWidth, theme),
+		width,
+		theme,
+		options.shortcutHint,
+	)];
 }
 
 export function makeAgentBarWidget(deps: AgentBarDeps) {
@@ -193,8 +246,8 @@ export function makeAgentBarWidget(deps: AgentBarDeps) {
 		render(width: number): string[] {
 			return renderAgentBar(deps.getEndpoints(), deps.getState(), width, theme, {
 				mainRunning: deps.isMainRunning?.(),
-				contextPressure: deps.getContextPressure?.(),
 				now: deps.getNow(),
+				shortcutHint: deps.getShortcutHint?.(),
 			});
 		},
 		invalidate(): void {},

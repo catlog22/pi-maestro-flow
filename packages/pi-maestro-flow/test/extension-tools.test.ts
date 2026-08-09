@@ -239,6 +239,12 @@ test("shortcut audit covers built-in, configured, and companion extension collis
     MAESTRO_GLOBAL_SHORTCUTS.find((shortcut) => shortcut.owner === "Maestro Plan mode"),
     { key: PLAN_TOGGLE_KEY, owner: "Maestro Plan mode" },
   );
+  for (const cockpitKey of ["alt+r", "alt+w", "alt+e", "alt+l", "ctrl+shift+r", "alt+j"]) {
+    assert.ok(
+      MAESTRO_GLOBAL_SHORTCUTS.some((shortcut) => shortcut.key === cockpitKey),
+      `missing Cockpit shortcut ${cockpitKey}`,
+    );
+  }
   assert.deepEqual(auditShortcutConflicts({ "app.thinking.cycle": "ctrl+shift+e" }), []);
 
   const defaults = auditShortcutConflicts({});

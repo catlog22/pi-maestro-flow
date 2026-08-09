@@ -79,7 +79,7 @@ export function renderSessionDetail(
 	theme: Theme,
 	maxRows = SESSION_DETAIL_TAIL_LINES + 1,
 	scroll: SessionDetailScrollState = { offset: 0, following: true },
-	hintText = "Alt+Shift+↑↓ scroll · Alt+Shift+R hide",
+	hintText = "Alt+R preview · Alt+E hide",
 ): string[] {
 	const row = rows.find((candidate) => candidate.correlationId === viewingId);
 	if (!row) return [];
