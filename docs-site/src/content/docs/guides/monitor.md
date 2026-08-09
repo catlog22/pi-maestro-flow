@@ -186,7 +186,7 @@ Monitor 从项目的 `.pi/settings.json` 读取 `monitor` 段：
 | `ledgerEnabled` | `true` | 是否写入持久 Monitor ledger |
 | `autoResume` | `true` | 会话启动时是否恢复有效的活动绑定 |
 
-> **v0.17.0 候选限制：** `stallIdleSeconds` 会影响 LLM 分析分支，但确定性停滞检查当前仍使用内置 60 秒；`maxInterventionLog` 与 `analysisTailLines` 已被配置加载器接受，运行时仍固定为 20。`/monitor doctor` 会显示已加载配置，不代表这三个覆盖值已经全部作用于 heuristic。
+> **v0.17.0 当前限制：** `stallIdleSeconds` 会影响 LLM 分析分支，但确定性停滞检查当前仍使用内置 60 秒；`maxInterventionLog` 与 `analysisTailLines` 已被配置加载器接受，运行时仍固定为 20。`/monitor doctor` 会显示已加载配置，不代表这三个覆盖值已经全部作用于 heuristic。
 
 数值必须是正整数。以下环境变量可覆盖对应配置：
 
@@ -263,7 +263,7 @@ Agent 需要查看窗口时，应使用 `teammate-list({ view: "windows" })` 和
 
 ### 通知过多
 
-提高 `interventionCooldownMs` 或 `escalationThreshold`，并用更具体的 `custom:` 约束减少误判。当前候选版本的确定性停滞检查固定为 60 秒，调整 `stallIdleSeconds` 不会改变该触发点。不要仅通过关闭 ledger 隐藏问题，ledger 不控制干预本身。
+提高 `interventionCooldownMs` 或 `escalationThreshold`，并用更具体的 `custom:` 约束减少误判。v0.17.0 的确定性停滞检查固定为 60 秒，调整 `stallIdleSeconds` 不会改变该触发点。不要仅通过关闭 ledger 隐藏问题，ledger 不控制干预本身。
 
 ## 11. 相关指南
 

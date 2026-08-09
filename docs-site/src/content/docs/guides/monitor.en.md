@@ -168,7 +168,7 @@ Monitor reads the `monitor` section of `.pi/settings.json`:
 | `ledgerEnabled` | `true` | append the durable Monitor ledger |
 | `autoResume` | `true` | restore valid active bindings on session start |
 
-> **v0.17.0 candidate limitation:** `stallIdleSeconds` affects the LLM analysis branch, while the deterministic stall check still uses the built-in 60 seconds. `maxInterventionLog` and `analysisTailLines` are accepted by the config loader, but runtime behavior remains fixed at 20. `/monitor doctor` reports loaded config and does not imply that these three override values are fully applied to the heuristic.
+> **Current v0.17.0 limitation:** `stallIdleSeconds` affects the LLM analysis branch, while the deterministic stall check still uses the built-in 60 seconds. `maxInterventionLog` and `analysisTailLines` are accepted by the config loader, but runtime behavior remains fixed at 20. `/monitor doctor` reports loaded config and does not imply that these three override values are fully applied to the heuristic.
 
 Numeric values must be positive integers. Environment overrides:
 
@@ -243,7 +243,7 @@ Run `/monitor doctor` and inspect dead-letter counts and warnings, then confirm 
 
 ### Too Many Notifications
 
-Increase `interventionCooldownMs` or `escalationThreshold`, and use a more precise `custom:` requirement. In the current candidate, the deterministic stall check is fixed at 60 seconds, so changing `stallIdleSeconds` does not move that trigger. Disabling the ledger does not disable interventions and should not be used to hide the signal.
+Increase `interventionCooldownMs` or `escalationThreshold`, and use a more precise `custom:` requirement. In v0.17.0, the deterministic stall check is fixed at 60 seconds, so changing `stallIdleSeconds` does not move that trigger. Disabling the ledger does not disable interventions and should not be used to hide the signal.
 
 ## 11. Related Guides
 
