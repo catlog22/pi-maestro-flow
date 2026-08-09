@@ -153,6 +153,7 @@ type EditorFactory = Parameters<InputHistoryContext["ui"]["setEditorComponent"]>
 export interface InputRouteTarget {
   label: string;
   color: ThemeColor;
+  sigil?: "@" | "#";
 }
 
 export interface InputHistory {
@@ -174,7 +175,11 @@ export function createInputHistory(storeOptions: InputHistoryStoreOptions = {}):
   let routeTarget: InputRouteTarget | undefined;
 
   const editorRouteTarget = () => routeTarget && activeTheme
-    ? { label: routeTarget.label, paint: (text: string) => activeTheme!.fg(routeTarget!.color, text) }
+    ? {
+      label: routeTarget.label,
+      sigil: routeTarget.sigil,
+      paint: (text: string) => activeTheme!.fg(routeTarget!.color, text),
+    }
     : undefined;
 
   return {

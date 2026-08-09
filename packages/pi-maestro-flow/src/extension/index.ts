@@ -2388,12 +2388,14 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
       return;
     }
     const target = payload as Partial<CockpitInputTargetV1>;
+    const sigil = target.sigil ?? "@";
     if (target.version !== 1 || typeof target.label !== "string" || !target.label.trim()
-      || typeof target.color !== "string" || !INPUT_TARGET_COLORS.has(target.color as ThemeColor)) {
+      || typeof target.color !== "string" || !INPUT_TARGET_COLORS.has(target.color as ThemeColor)
+      || (sigil !== "@" && sigil !== "#")) {
       setInputRouteTarget(undefined);
       return;
     }
-    setInputRouteTarget({ label: target.label.trim(), color: target.color as ThemeColor });
+    setInputRouteTarget({ label: target.label.trim(), color: target.color as ThemeColor, sigil });
   });
 
   pi.registerShortcut(TODO_TOGGLE_KEY, {

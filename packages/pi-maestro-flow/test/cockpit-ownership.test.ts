@@ -16,6 +16,8 @@ test("Cockpit input-target events update the immutable HistoryEditor route prefi
   const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   assert.match(source, /pi\.events\.on\(COCKPIT_INPUT_TARGET_EVENT/);
   assert.match(source, /setInputRouteTarget\(\{ label: target\.label\.trim\(\), color:/);
+  assert.match(source, /const sigil = target\.sigil \?\? "@"/);
+  assert.match(source, /sigil !== "@" && sigil !== "#"/);
   assert.match(source, /setInputRouteTarget\(undefined\)/);
 });
 

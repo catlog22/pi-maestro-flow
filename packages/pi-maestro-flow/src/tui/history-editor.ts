@@ -18,6 +18,7 @@ const DOUBLE_ESCAPE_WINDOW_MS = 500;
 
 export interface HistoryEditorRouteTarget {
   label: string;
+  sigil?: "@" | "#";
   paint: (text: string) => string;
 }
 
@@ -115,7 +116,7 @@ export class HistoryEditor extends CustomEditor {
     const paddingX = Math.min(this.getPaddingX(), Math.max(0, Math.floor((width - 1) / 2)));
     const contentWidth = Math.max(1, width - paddingX * 2);
     const layoutWidth = Math.max(1, contentWidth - (paddingX ? 0 : 1));
-    const token = truncateToWidth(`@${target.label}:`, Math.max(1, layoutWidth - 1), "…");
+    const token = truncateToWidth(`${target.sigil ?? "@"}${target.label}:`, Math.max(1, layoutWidth - 1), "…");
     const injected = `${token}${visibleWidth(token) < layoutWidth ? " " : ""}`;
 
     // Editor has no render-prefix API. Temporarily project the immutable target
@@ -132,7 +133,7 @@ export class HistoryEditor extends CustomEditor {
       if (routeLine >= 0) {
         rendered[routeLine] = rendered[routeLine]!.replace(token, target.paint(token));
       }
-      return rendered;
+      return rendered.map((line) => truncateToWidth(line, Math.max(1, width), ""));
     } finally {
       state.lines = originalLines;
       state.cursorCol = originalCursorCol;

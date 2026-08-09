@@ -216,11 +216,24 @@ test("route target renders as an immutable prefix inside the editor", async () =
     }
     assert.deepEqual(instance.getCursor(), cursorBefore, "narrow render also restores the editable cursor");
     assert.equal(instance.getText(), "run focused tests", "narrow rendering and cursor marker do not alter text");
+    history.setRouteTarget({ label: "build", color: "accent", sigil: "#" });
+    const windowLines = instance.render(60);
+    const windowRouteLine = windowLines.find((line) => line.includes("#build:"));
+    assert.ok(windowRouteLine?.includes("run focused tests"), "window target stays inline with editable text");
+    assert.ok(windowLines.every((line) => !line.includes("@build:")), "window targets use the distinct window sigil");
+    for (let width = 1; width <= 120; width++) {
+      const matrixLines = instance.render(width);
+      for (const line of matrixLines) {
+        assert.ok(visibleWidth(line) <= width, `window route editor line exceeded width ${width}: ${visibleWidth(line)}`);
+      }
+      assert.equal(instance.getText(), "run focused tests", `window route render at width ${width} preserves text`);
+    }
+    assert.equal(instance.getText(), "run focused tests", "window prefix is not editor text");
     instance.addToHistory("run focused tests");
     await history.onSessionShutdown();
     const persisted = JSON.parse(await readFile(join(rootDir, workspaceStorageId(cwd), "input-history.json"), "utf8")) as { entries: string[] };
     assert.deepEqual(persisted.entries, ["run focused tests"], "history stores only the editable body");
-    assert.ok(instance.render(60).every((line) => !line.includes("@builder:")));
+    assert.ok(instance.render(60).every((line) => !line.includes("@builder:") && !line.includes("#build:")));
   } finally {
     await cleanup();
   }
