@@ -241,6 +241,25 @@ function closestLineCandidate(content: string, oldText: string): string | undefi
 	return `Closest current block is lines ${bestStart + 1}-${bestEnd} (${bestOverlap}/${targetLines.length} matching nonblank lines):\n${preview.join("\n")}`;
 }
 
+function leakedToolCallSyntaxHint(fuzzyContent: string, oldText: string): string | undefined {
+	const withoutTrailingWhitespace = oldText.trimEnd();
+	for (const suffix of ["},{", "}],"] as const) {
+		if (!withoutTrailingWhitespace.endsWith(suffix)) continue;
+		const candidate = withoutTrailingWhitespace.slice(0, -suffix.length);
+		const fuzzyCandidate = normalizeForFuzzyMatch(candidate);
+		if (fuzzyCandidate === "") continue;
+		const indexes = occurrenceIndexes(fuzzyContent, fuzzyCandidate);
+		if (indexes.length !== 1) continue;
+		const line = lineNumberAt(fuzzyContent, indexes[0]);
+		return (
+			`oldText appears to end with leaked edit-array syntax \`${suffix}\`. ` +
+			`Removing only that suffix matches the frozen original at line ${line}. ` +
+			`Re-read that block and copy only file content into oldText; no changes were written.`
+		);
+	}
+	return undefined;
+}
+
 function notFoundError(
 	path: string,
 	editIndex: number,
@@ -264,6 +283,8 @@ function notFoundError(
 			);
 		}
 	}
+	const leakedSyntax = leakedToolCallSyntaxHint(fuzzyContent, oldText);
+	if (leakedSyntax) return new Error(`${prefix} ${leakedSyntax}`);
 	const candidate = closestLineCandidate(content, oldText);
 	return new Error(
 		`${prefix} oldText does not match the frozen original, including after fuzzy normalization. ` +
@@ -395,6 +416,12 @@ function prepareSnapshotEdits(rawContent: string, path: string, edits: GuardedRe
 	const states: SnapshotEdit[] = edits.map((edit, editIndex) => {
 		const oldText = normalizeToLF(edit.oldText);
 		const newText = normalizeToLF(edit.newText);
+		if (oldText !== "" && oldText === newText) {
+			throw new Error(
+				`edits[${editIndex}].oldText and edits[${editIndex}].newText are identical after line-ending normalization. ` +
+				`Provide the intended replacement; no changes were written.`,
+			);
+		}
 		const fuzzyOldText = normalizeForFuzzyMatch(oldText);
 		const exactIndexes = occurrenceIndexes(content, oldText);
 		const fuzzyIndexes = occurrenceIndexes(fuzzyContent, fuzzyOldText);
@@ -545,7 +572,8 @@ connect distant changes.
 On failure ("Could not find edits[N]" or "Found N occurrences of the text"),
 re-read the reported candidate lines and either add enough surrounding context
 to make oldText unique or set occurrence to the intended exact match. Never
-blindly retry the same oldText, and never guess between ambiguous candidates.
+blindly retry the same oldText, never guess between ambiguous candidates, and
+do not include edit-array delimiters such as },{ or }], in oldText.
 
 Refusal: files that are not valid UTF-8 (e.g. GBK) are rejected to prevent
 corrupting non-ASCII bytes. Convert the file to UTF-8 first (e.g.

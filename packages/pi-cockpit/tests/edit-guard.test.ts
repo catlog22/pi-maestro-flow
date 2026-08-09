@@ -168,6 +168,111 @@ test("missing oldText reports the closest current line block", async () => {
 	assert.equal(readFileSync(file, "utf8"), current);
 });
 
+test("missing oldText identifies leaked edit-array syntax", async () => {
+	const dir = tmpDir();
+	const file = join(dir, "leaked-syntax.ts");
+	const current = [
+		"const aIn = area(inner);",
+		"const aOut = area(outer);",
+		"const average = (aIn + aOut) / 2;",
+		"const length = outer - inner;",
+		"",
+	].join("\n");
+	writeFileSync(file, current);
+	const edit = install((pi) => registerGuardedEditTool(pi as never)).get("edit");
+
+	for (const suffix of ["},{", "}],"]) {
+		await assert.rejects(
+			edit.execute(
+				"t1",
+				{
+					path: "leaked-syntax.ts",
+					edits: [{ oldText: `${current.trimEnd()}${suffix}`, newText: "replacement" }],
+				},
+				undefined,
+				undefined,
+				{ cwd: dir },
+			),
+			(error: Error) => {
+				assert.ok(error.message.includes(`oldText appears to end with leaked edit-array syntax \`${suffix}\``));
+				assert.match(error.message, /Removing only that suffix matches the frozen original at line 1/);
+				assert.match(error.message, /no changes were written/);
+				return true;
+			},
+		);
+	}
+	assert.equal(readFileSync(file, "utf8"), current);
+});
+
+test("leaked syntax hint requires a unique stripped match", async () => {
+	const dir = tmpDir();
+	const file = join(dir, "ambiguous-leak.ts");
+	const original = "target\nmiddle\ntarget\n";
+	writeFileSync(file, original);
+	const edit = install((pi) => registerGuardedEditTool(pi as never)).get("edit");
+	await assert.rejects(
+		edit.execute(
+			"t1",
+			{ path: "ambiguous-leak.ts", edits: [{ oldText: "target},{", newText: "changed" }] },
+			undefined,
+			undefined,
+			{ cwd: dir },
+		),
+		(error: Error) => {
+			assert.match(error.message, /oldText does not match the frozen original/);
+			assert.doesNotMatch(error.message, /leaked edit-array syntax/);
+			return true;
+		},
+	);
+	assert.equal(readFileSync(file, "utf8"), original);
+});
+
+test("exact file content ending in delimiter-like text edits normally", async () => {
+	const dir = tmpDir();
+	const edit = install((pi) => registerGuardedEditTool(pi as never)).get("edit");
+	const cases = [
+		{ name: "object-separator.txt", oldText: '{"a":1},{', newText: '{"a":1}, {' },
+		{ name: "array-ending.txt", oldText: "const items = [{ value: 1 }],", newText: "const items = [{ value: 2 }]," },
+	];
+	for (const testCase of cases) {
+		const file = join(dir, testCase.name);
+		writeFileSync(file, `${testCase.oldText}\n`);
+		await edit.execute(
+			"t1",
+			{ path: testCase.name, edits: [{ oldText: testCase.oldText, newText: testCase.newText }] },
+			undefined,
+			undefined,
+			{ cwd: dir },
+		);
+		assert.equal(readFileSync(file, "utf8"), `${testCase.newText}\n`);
+	}
+});
+
+test("an identical replacement rejects the whole edit pack", async () => {
+	const dir = tmpDir();
+	const file = join(dir, "identical.ts");
+	const original = "first\nsecond\n";
+	writeFileSync(file, original);
+	const edit = install((pi) => registerGuardedEditTool(pi as never)).get("edit");
+	await assert.rejects(
+		edit.execute(
+			"t1",
+			{
+				path: "identical.ts",
+				edits: [
+					{ oldText: "first", newText: "FIRST" },
+					{ oldText: "second", newText: "second" },
+				],
+			},
+			undefined,
+			undefined,
+			{ cwd: dir },
+		),
+		/edits\[1\]\.oldText and edits\[1\]\.newText are identical after line-ending normalization/,
+	);
+	assert.equal(readFileSync(file, "utf8"), original);
+});
+
 test("duplicate oldText reports candidate lines and keeps the whole edit pack atomic", async () => {
 	const dir = tmpDir();
 	const file = join(dir, "duplicate.ts");
@@ -197,6 +302,31 @@ test("duplicate oldText reports candidate lines and keeps the whole edit pack at
 		},
 	);
 	assert.equal(readFileSync(file, "utf8"), original, "a later duplicate must prevent every write in the pack");
+});
+
+test("two edits targeting the same unique range remain atomic", async () => {
+	const dir = tmpDir();
+	const file = join(dir, "same-range.txt");
+	const original = "target\n";
+	writeFileSync(file, original);
+	const edit = install((pi) => registerGuardedEditTool(pi as never)).get("edit");
+	await assert.rejects(
+		edit.execute(
+			"t1",
+			{
+				path: "same-range.txt",
+				edits: [
+					{ oldText: "target", newText: "first" },
+					{ oldText: "target", newText: "second" },
+				],
+			},
+			undefined,
+			undefined,
+			{ cwd: dir },
+		),
+		/edits\[0\] and edits\[1\] overlap/,
+	);
+	assert.equal(readFileSync(file, "utf8"), original);
 });
 
 test("overlapping exact matches require a larger unique oldText", async () => {
@@ -397,6 +527,29 @@ test("occurrence composes atomically with another disjoint edit", async () => {
 		readFileSync(file, "utf8"),
 		"const target = 0;\nconst keep = 10;\nconst target = 20;\nconst tail = 2;\n",
 	);
+});
+
+test("a missing occurrence target reports not-found instead of a 1-0 range", async () => {
+	const dir = tmpDir();
+	const file = join(dir, "missing-occurrence.txt");
+	const original = "present\n";
+	writeFileSync(file, original);
+	const edit = install((pi) => registerGuardedEditTool(pi as never)).get("edit");
+	await assert.rejects(
+		edit.execute(
+			"t1",
+			{ path: "missing-occurrence.txt", edits: [{ oldText: "absent", newText: "changed", occurrence: 1 }] },
+			undefined,
+			undefined,
+			{ cwd: dir },
+		),
+		(error: Error) => {
+			assert.match(error.message, /oldText does not match the frozen original/);
+			assert.doesNotMatch(error.message, /1-0/);
+			return true;
+		},
+	);
+	assert.equal(readFileSync(file, "utf8"), original);
 });
 
 test("an out-of-range occurrence fails without modifying the file", async () => {
