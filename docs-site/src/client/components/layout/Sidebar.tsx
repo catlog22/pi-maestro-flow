@@ -41,7 +41,7 @@ export function Sidebar() {
       id: cat.id,
       titleKey: `categories.${cat.id.replace('-', '_')}`,
       guides: getAllGuideMeta().filter((g) => g.category === cat.id),
-      isOpen: cat.id === 'getting-started' || cat.id === 'configuration',
+      isOpen: cat.id === 'getting-started' || cat.id === 'configuration' || cat.id === 'changelog',
     }));
   }, []);
 

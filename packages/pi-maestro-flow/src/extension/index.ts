@@ -609,7 +609,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     return;
   }
 
-  registerTuiLocaleEvents(pi.events);
+  const disposeTuiLocaleEvents = registerTuiLocaleEvents(pi.events);
 
   // pi install's SettingsManager overwrites postinstall's settings.json writes
   // with its stale in-memory cache. Re-register companion packages at load time
@@ -2551,7 +2551,8 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     }
   });
 
-  pi.on("session_shutdown", async (_event, ctx) => {
+  pi.on("session_shutdown", async (event, ctx) => {
+    if (event.reason === "quit" || event.reason === "reload") disposeTuiLocaleEvents();
     guiLifecycleGeneration += 1;
     const closingGuiServer = guiServer;
     guiServer = null;

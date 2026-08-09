@@ -5739,7 +5739,7 @@ export default function registerTeammateExtension(
   }
 
   if (!isChild) {
-  pi.events.on(SETTINGS_LOCALE_EVENT, (payload) => {
+  const disposeTuiLocaleEvents = pi.events.on(SETTINGS_LOCALE_EVENT, (payload) => {
     if (!applySettingsLocaleEvent(payload)) return;
     updateAgentWidget();
     syncMonitorInteractionStatus();
@@ -5855,6 +5855,7 @@ export default function registerTeammateExtension(
 
   pi.on("session_shutdown", async (event) => {
     const shutdownReason = event?.reason ?? "quit";
+    if (shutdownReason === "quit" || shutdownReason === "reload") disposeTuiLocaleEvents();
     uninstallMonitorEscapeTap();
     disposeTeammateSettings();
     stopWidgetTimer();

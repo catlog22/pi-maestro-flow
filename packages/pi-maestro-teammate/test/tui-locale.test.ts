@@ -203,13 +203,15 @@ test("progress and result surfaces render both supported locales", () => {
   }
 });
 
-test("TUI catalogs are complete and extension startup consumes the shared event", async () => {
+test("TUI catalogs are complete and extension lifecycle owns the shared locale listener", async () => {
   assert.deepEqual(checkTuiCatalogCompleteness(), {
     complete: true,
     referenceLocale: "en",
     issues: [],
   });
   const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
-  assert.match(source, /pi\.events\.on\(SETTINGS_LOCALE_EVENT/);
+  assert.match(source, /const disposeTuiLocaleEvents = pi\.events\.on\(SETTINGS_LOCALE_EVENT/);
   assert.match(source, /applySettingsLocaleEvent\(payload\)/);
+  assert.match(source, /shutdownReason === "quit" \|\| shutdownReason === "reload"/);
+  assert.match(source, /disposeTuiLocaleEvents\(\)/);
 });

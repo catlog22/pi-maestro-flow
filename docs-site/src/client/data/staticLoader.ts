@@ -58,6 +58,13 @@ export const guideCategories: GuideCategory[] = [
     description: 'Detailed settings, providers, and environment variables',
     description_zh: '详细功能配置说明 — 设置、Provider、环境变量',
   },
+  {
+    id: 'changelog',
+    title: 'Changelog',
+    title_zh: '版本更新',
+    description: 'Release highlights, behavior changes, fixes, and upgrade notes',
+    description_zh: '版本亮点、行为变化、问题修复与升级说明',
+  },
 ];
 
 // Guide registry — bilingual metadata for each guide.
@@ -317,6 +324,18 @@ export const guideRegistry: Array<{
     description_zh: '套件读取的全部环境变量速查表',
     icon: 'terminal',
     category: 'configuration',
+  },
+  // ─── Changelog ────────────────────────────────────────────────────────────
+  {
+    slug: 'changelog',
+    file: 'changelog.md',
+    file_en: 'changelog.en.md',
+    title: 'Changelog',
+    description: 'Detailed release highlights, behavior changes, fixes, and upgrade notes',
+    title_zh: '版本更新日志',
+    description_zh: '从上一版本到当前版本的详细功能、行为、修复与升级说明',
+    icon: 'refresh-cw',
+    category: 'changelog',
   },
 ];
 

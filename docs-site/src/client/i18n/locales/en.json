@@ -61,7 +61,8 @@
     "core": "Core Features",
     "orchestration": "Orchestration",
     "connectivity": "Connectivity & Tools",
-    "configuration": "Configuration Reference"
+    "configuration": "Configuration Reference",
+    "changelog": "Changelog"
   },
   "toc": {
     "on_this_page": "On This Page",

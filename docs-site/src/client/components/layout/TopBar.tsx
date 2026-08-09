@@ -99,6 +99,12 @@ export function TopBar() {
           >
             {t('nav.guides')}
           </Link>
+          <Link
+            to="/guides/changelog"
+            className="text-[length:var(--font-size-sm)] font-[var(--font-weight-medium)] text-text-secondary no-underline px-[var(--spacing-3)] py-[var(--spacing-1-5)] rounded-[var(--radius-default)] transition-all duration-[var(--duration-fast)] hover:text-text-primary hover:bg-bg-hover"
+          >
+            {t('nav.changelog')}
+          </Link>
         </nav>
 
         {/* GitHub link */}

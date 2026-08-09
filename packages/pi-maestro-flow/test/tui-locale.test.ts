@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   SETTINGS_LOCALE_EVENT,
@@ -109,6 +110,13 @@ test("MCP setup renders representative English and Simplified Chinese paths", ()
     english.dispose();
     chinese.dispose();
   }
+});
+
+test("Flow extension disposes the shared locale listener on reload and quit", async () => {
+  const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  assert.match(source, /const disposeTuiLocaleEvents = registerTuiLocaleEvents\(pi\.events\)/);
+  assert.match(source, /event\.reason === "quit" \|\| event\.reason === "reload"/);
+  assert.match(source, /disposeTuiLocaleEvents\(\)/);
 });
 
 function apiEditor(locale?: SupportedSettingsLocale): ApiModelEditorOverlay {

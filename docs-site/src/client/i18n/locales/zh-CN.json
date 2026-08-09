@@ -61,7 +61,8 @@
     "core": "核心功能",
     "orchestration": "编排调度",
     "connectivity": "连接与工具",
-    "configuration": "配置参考"
+    "configuration": "配置参考",
+    "changelog": "版本更新"
   },
   "toc": {
     "on_this_page": "本页目录",

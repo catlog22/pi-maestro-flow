@@ -40,6 +40,15 @@ test("detects and resolves supported system locales deterministically", () => {
     resolvedLocale: "en-US",
   }), "zh-CN");
   assert.equal(detectSystemSettingsLocale({
+    environment: {
+      LC_ALL: "en_US.UTF-8",
+      LC_MESSAGES: "zh_CN.UTF-8",
+      LANGUAGE: "zh_CN:en_US",
+      LANG: "zh_CN.UTF-8",
+    },
+    resolvedLocale: "zh-CN",
+  }), "en");
+  assert.equal(detectSystemSettingsLocale({
     environment: { LC_MESSAGES: "zh-TW", LANG: "en_US.UTF-8" },
     resolvedLocale: "en-US",
   }), "zh-CN");
