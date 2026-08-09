@@ -8,7 +8,7 @@
  * 4. Body: Agent/AskUserQuestion/Skill references → pi equivalents
  */
 
-import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -21,9 +21,7 @@ function optionValue(name) {
   return process.argv[index + 1] || null;
 }
 
-const defaultDst = existsSync(join(repoRoot, 'flow'))
-  ? join(repoRoot, 'flow')
-  : join(repoRoot, '.pi');
+const defaultDst = join(repoRoot, '.pi-sync');
 const DST = resolve(optionValue('--dst') || process.env.PI_MAESTRO_CONVERT_DST || defaultDst);
 
 // --- Tool name mapping for allowed-tools ---

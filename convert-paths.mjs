@@ -10,7 +10,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_DST = resolve(process.env.PI_SYNC_DST || join(repoRoot, 'flow'));
+const DEFAULT_DST = resolve(process.env.PI_SYNC_DST || join(repoRoot, '.pi-sync'));
 const LEGACY_PI_PKG = '~/.pi/agent/packages/pi-maestro-flow';
 const MAESTRO_HOME = '~/.maestro';
 

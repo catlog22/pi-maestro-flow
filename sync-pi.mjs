@@ -3,23 +3,23 @@
  * sync-pi.mjs — One-shot sync of the pi-maestro-flow skill/agent mirror.
  *
  * Runs the full 3-phase conversion pipeline that ports the Claude harness
- * (D:/maestro2/.claude) into the pi build output (flow/), then verifies that
+ * (D:/maestro2/.claude) into the pi build output (.pi-sync/), then verifies that
  * every skill subfolder was carried over (the old whitelist bug dropped
  * roles/, specs/, phases/, ... — see convert.mjs).
  *
- *   Phase 1  convert.mjs        copy .claude → flow/  (full recursive copy)
+ *   Phase 1  convert.mjs        copy .claude → .pi-sync/  (full recursive copy)
  *   Phase 2  convert-pi.mjs     Claude patterns → pi  (in-place rewrite)
  *   Phase 3  convert-paths.mjs  legacy package paths → ~/.maestro paths
  *
  * Usage:
- *   node sync-pi.mjs                 # sync flow/ and verify
- *   node sync-pi.mjs --also-pi       # additionally refresh the stale .pi/
- *                                    # mirror (skills/ + agents/) from flow/
+ *   node sync-pi.mjs                 # sync .pi-sync/ and verify
+ *   node sync-pi.mjs --also-pi       # additionally deploy the converted
+ *                                    # mirror (skills/ + agents/) to .pi/
  *   node sync-pi.mjs --skip-verify   # skip the parity check
  *
  * Environment overrides (mainly for verification / phase 2):
  *   PI_SYNC_SRC   source Claude dir   (default D:/maestro2/.claude)
- *   PI_SYNC_DST   pi build output dir (default <repo>/flow)
+ *   PI_SYNC_DST   pi build output dir (default <repo>/.pi-sync)
  *
  * Exit code: 0 on success, 1 if any phase fails or verification finds a
  * mismatch.
@@ -33,7 +33,7 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = dirname(fileURLToPath(import.meta.url));
 
 const SRC = resolve(process.env.PI_SYNC_SRC || 'D:/maestro2/.claude');
-const DST = resolve(process.env.PI_SYNC_DST || join(repoRoot, 'flow'));
+const DST = resolve(process.env.PI_SYNC_DST || join(repoRoot, '.pi-sync'));
 
 const argv = process.argv.slice(2);
 const ALSO_PI = argv.includes('--also-pi');
@@ -87,7 +87,7 @@ if (!existsSync(SRC)) {
   process.exit(1);
 }
 
-// Phases 2 and 3 honour the destination override. Phase 1 still writes flow/.
+// Phases 2 and 3 honour the destination override. Phase 1 still writes .pi-sync/.
 runPhase('Phase 1 (copy .claude → flow)', 'convert.mjs');
 runPhase('Phase 2 (Claude → pi rewrite)', 'convert-pi.mjs', {
   PI_MAESTRO_CONVERT_DST: DST,
@@ -142,11 +142,11 @@ if (!SKIP_VERIFY) {
 }
 
 // ---------------------------------------------------------------------------
-// Optional: refresh the stale in-repo .pi/ mirror from flow/
+// Optional: deploy the converted mirror from .pi-sync/ to .pi/
 // ---------------------------------------------------------------------------
 
 if (ALSO_PI) {
-  log('\n══════ Refresh stale .pi/ mirror from flow/ ══════');
+  log('\n══════ Deploy converted mirror to .pi/ ══════');
   const piDir = join(repoRoot, '.pi');
   for (const sub of ['skills', 'agents']) {
     const from = join(DST, sub);
@@ -154,7 +154,7 @@ if (ALSO_PI) {
     if (!existsSync(from)) continue;
     if (existsSync(to)) rmSync(to, { recursive: true, force: true });
     cpSync(from, to, { recursive: true });
-    log(`  ✓ .pi/${sub} ← flow/${sub} (${countFiles(to)} files)`);
+    log(`  ✓ .pi/${sub} ← .pi-sync/${sub} (${countFiles(to)} files)`);
   }
   // Package mirror: the published pi-maestro-flow npm package ships its role
   // catalog at <pkgRoot>/.pi/agents. The teammate package resolver finds that
@@ -165,7 +165,7 @@ if (ALSO_PI) {
   if (existsSync(agentsFrom)) {
     if (existsSync(pkgAgentsDir)) rmSync(pkgAgentsDir, { recursive: true, force: true });
     cpSync(agentsFrom, pkgAgentsDir, { recursive: true });
-    log(`  ✓ packages/pi-maestro-flow/.pi/agents ← flow/agents (${countFiles(pkgAgentsDir)} files)`);
+    log(`  ✓ packages/pi-maestro-flow/.pi/agents ← .pi-sync/agents (${countFiles(pkgAgentsDir)} files)`);
   }
 }
 

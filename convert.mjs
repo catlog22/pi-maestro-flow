@@ -9,9 +9,10 @@
 
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync, cpSync, rmSync } from 'node:fs';
 import { join, basename, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const SRC = 'D:/maestro2/.claude';
-const DST = 'D:/pi-maestro-flow/flow';
+const DST = join(dirname(fileURLToPath(import.meta.url)), '.pi-sync');
 
 // --- Frontmatter parser ---
 function parseFrontmatter(content) {
@@ -238,7 +239,7 @@ function convertSkills() {
 }
 
 // === Execute ===
-// Prune stale skill dirs first — flow/skills must mirror the CURRENT .claude
+// Prune stale skill dirs first — .pi-sync/skills must mirror the CURRENT .claude
 // source exactly (deleted/renamed skills would otherwise linger forever).
 const skillsDst = join(DST, 'skills');
 mkdirSync(skillsDst, { recursive: true });

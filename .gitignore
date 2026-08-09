@@ -29,8 +29,11 @@ Thumbs.db
 # Runtime monitor ledger (per-session binding/supervision trace).
 .pi/monitor-ledger.jsonl
 # Materialized by prepare-package-skills/sync-pi; canonical sources live at
-# the workspace root .pi and flow/agents.
+# the workspace root .pi.
 packages/pi-maestro-flow/.pi/
+
+# Sync toolchain staging dir (replaces the old tracked flow/ mirror)
+.pi-sync/
 .maestro-lifecycle.coordinator
 .workflow/*.pid
 .workflow/.backups/
