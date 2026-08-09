@@ -62,14 +62,15 @@ test("adding a role invalidates through the directory manifest", () => {
   writeRole("auditor", "Audits things");
   const first = appendAgentCatalog("Base prompt", project);
   // Exact role-line assertion: packaged roles legitimately contain the
-  // substring "reviewer" (workflow-reviewer, cross-role-reviewer).
-  assert.doesNotMatch(first, /- reviewer:/);
+  // substring "reviewer" (workflow-reviewer, cross-role-reviewer); the added
+  // role must not collide with the packaged reviewer role.
+  assert.doesNotMatch(first, /- code-reviewer:/);
   const missesBefore = agentCatalogCacheStats.misses;
 
-  writeRole("reviewer", "Reviews things");
+  writeRole("code-reviewer", "Reviews things");
   const refreshed = appendAgentCatalog(first, project);
 
-  assert.match(refreshed, /- reviewer: Reviews things/);
+  assert.match(refreshed, /- code-reviewer: Reviews things/);
   assert.match(refreshed, /- auditor: Audits things/);
   assert.equal(agentCatalogCacheStats.misses, missesBefore + 1);
 });
