@@ -1736,6 +1736,14 @@ test("native teammate status widget yields while another surface owns agent disp
   assert.match(source, /if \(cockpitOwnsAgents \|\| interactivePanelActive \|\| foregroundToolRuns\.size > 0\) \{[\s\S]*?setWidget\("teammate-agents", undefined\)/);
 });
 
+test("Alt+R delegates the active Agent or Window session list to Cockpit ownership", () => {
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  const events = fs.readFileSync(new URL("../src/shared/cockpit-events.ts", import.meta.url), "utf-8");
+  assert.match(events, /COCKPIT_SESSION_LIST_EVENT = "cockpit:open-session-list"/);
+  assert.match(source, /registerShortcut\("alt\+r"[\s\S]*?if \(cockpitOwnsSessionList\) \{[\s\S]*?events\.emit\(COCKPIT_SESSION_LIST_EVENT, \{ version: 1 \}\)[\s\S]*?return;[\s\S]*?showAgentSelector\(ctx\)/);
+  assert.match(source, /cockpitOwnsAgents = ownership\.agents === true;[\s\S]*?cockpitOwnsSessionList = ownership\.sessionList === true/);
+});
+
 test("root and proxy graph normalization share one implementation that preserves thinking", () => {
   const indexSource = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-core.ts", import.meta.url), "utf-8");
   const executionSource = fs.readFileSync(new URL("../src/runs/execution.ts", import.meta.url), "utf-8");
@@ -3187,12 +3195,26 @@ test("background completion renderer stays compact but expands to the full resul
 
 test("Alt+R opens the native agent view without injecting a slash command", async () => {
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
+  const eventHandlers = new Map<string, Set<(payload: unknown) => void>>();
+  const emittedEvents: Array<{ event: string; payload: unknown }> = [];
+  const events = {
+    on(event: string, handler: (payload: unknown) => void) {
+      const handlers = eventHandlers.get(event) ?? new Set();
+      handlers.add(handler);
+      eventHandlers.set(event, handlers);
+      return () => handlers.delete(handler);
+    },
+    emit(event: string, payload: unknown) {
+      emittedEvents.push({ event, payload });
+      for (const handler of eventHandlers.get(event) ?? []) handler(payload);
+    },
+  };
   let shortcut: ((ctx: unknown) => Promise<void>) | undefined;
   let modelShortcut: ((ctx: unknown) => Promise<void>) | undefined;
   const sentMessages: Array<{ message: string; options?: { deliverAs?: string } }> = [];
   const notifications: Array<{ message: string; level: string }> = [];
   const pi = new Proxy({
-    events: { on: () => () => {}, emit() {} },
+    events,
     registerCommand(name: string, command: { handler: (args: string, ctx: unknown) => Promise<void> }) {
       commands.set(name, command);
     },
@@ -3229,6 +3251,15 @@ test("Alt+R opens the native agent view without injecting a slash command", asyn
     message: "No active teammates. Start one with the teammate tool.",
     level: "warning",
   }]);
+
+  notifications.length = 0;
+  events.emit("cockpit:ui-ownership", { agents: false, sessionList: true });
+  await shortcut({ ui: { notify() {} } });
+  assert.deepEqual(notifications, []);
+  assert.deepEqual(
+    emittedEvents.filter((entry) => entry.event === "cockpit:open-session-list"),
+    [{ event: "cockpit:open-session-list", payload: { version: 1 } }],
+  );
 });
 
 test("P0a: foreground wait window always resolves to a bounded deadline", () => {

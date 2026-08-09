@@ -7,6 +7,7 @@
 
 export const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
 export const COCKPIT_PREEMPT_RESIZE_EVENT = "cockpit:preempt-resize";
+export const COCKPIT_SESSION_LIST_EVENT = "cockpit:open-session-list";
 
 /**
  * Cockpit → teammate: user command against one agent. The payload carries

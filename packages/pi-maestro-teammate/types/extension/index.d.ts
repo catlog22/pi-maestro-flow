@@ -2,7 +2,7 @@
  * Teammate Extension Entry Point
  *
  * Tools: teammate (dispatch), teammate-send (RPC message injection), teammate-list (status), observe
- * TUI: Alt+R composer panel, widget above editor, Alt+B foreground→background detach
+ * TUI: Alt+R mode-aware session list, widget above editor, Alt+B foreground→background detach
  * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";

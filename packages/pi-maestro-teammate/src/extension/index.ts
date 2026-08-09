@@ -2,7 +2,7 @@
  * Teammate Extension Entry Point
  *
  * Tools: teammate (dispatch), teammate-send (RPC message injection), teammate-list (status), observe
- * TUI: Alt+R composer panel, widget above editor, Alt+B foreground→background detach
+ * TUI: Alt+R mode-aware session list, widget above editor, Alt+B foreground→background detach
  * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
 
@@ -22,20 +22,24 @@ import type {
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
-import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { loadTranscript, scanWorkspaceSessionDirs, type WorkspaceSessionScan } from "../transcript/session-transcript.ts";
+import { Text, truncateToWidth, visibleWidth, matchesKey, isKeyRelease, isKeyRepeat } from "@earendil-works/pi-tui";
+import { loadTranscript, scanWorkspaceSessionDirs, groupTranscriptTurns, type WorkspaceSessionScan } from "../transcript/session-transcript.ts";
+import type { TranscriptRow } from "../shared/transcript.ts";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams } from "./schemas.ts";
 import {
   formatObserveResult,
   observeTargets,
   registerObservationProvider,
   type ObserveParams as UnifiedObserveParams,
+  type ObservationReadOptions,
   type ObserveResult,
   type ObservationProvider,
   type ObservationSnapshot,
+  type ObservationTarget,
   type ObservationWaitStatus,
 } from "../public/v1/observation.ts";
 import {
+  appendMonitorModeContext,
   formatCompact,
   formatVerbose,
   formatHeader,
@@ -102,6 +106,7 @@ import {
   createWorkspacePeerRuntime,
   discoverWorkspacePeers,
   enqueueWorkspacePeerCommand,
+  resolveWorkspaceOwnerByName,
   resolveWorkspaceTarget,
   activeWorkspaceBackgroundJobsFromPayload,
   waitForWorkspacePeerCommandResponse,
@@ -232,6 +237,7 @@ import {
 } from "../models/model-catalog.ts";
 import {
   applyModelRouting,
+  appendTaskTypeRoutingContext,
   formatModelRoutingConfig,
   parseTeammateTaskType,
   refreshModelRegistry,
@@ -311,7 +317,11 @@ import {
   renderAgentStatusWidget,
   COCKPIT_UI_OWNERSHIP_EVENT,
 } from "./teammate-core.ts";
-import { COCKPIT_PREEMPT_RESIZE_EVENT, TEAMMATE_AGENT_COMMAND_EVENT } from "../shared/cockpit-events.ts";
+import {
+  COCKPIT_PREEMPT_RESIZE_EVENT,
+  COCKPIT_SESSION_LIST_EVENT,
+  TEAMMATE_AGENT_COMMAND_EVENT,
+} from "../shared/cockpit-events.ts";
 import type { TeammateRuntimeOptions, ProgressFlushGate, AgentWidgetTheme, AgentWidgetRow, AgentSelectorRow, PendingChildProxyRequest, ChildProxyPendingRequests, IpcSender } from "./teammate-core.ts";
 import { buildHistoryRows, historyRowKey } from "./teammate-core.ts";
 import { MailboxHost, mailboxModeFromEnv } from "./mailbox/host.ts";
@@ -416,6 +426,7 @@ export default function registerTeammateExtension(
     };
   }
   let modelCatalog: ModelCatalogSnapshot = createModelCatalogSnapshot([]);
+  let monitorInteractionModeActive = false;
 
   const refreshModelCatalog = (ctx: ExtensionContext): ModelCatalogSnapshot => {
     const next = createModelCatalogSnapshot(ctx.modelRegistry?.getAvailable?.() ?? []);
@@ -437,7 +448,11 @@ export default function registerTeammateExtension(
   ): { systemPrompt: string } => {
     const withModels = appendModelCatalog(event.systemPrompt, refreshModelCatalog(ctx));
     const withAgents = appendAgentCatalog(withModels, ctx.cwd);
-    return { systemPrompt: appendTeammateDepthContext(withAgents, currentDepth, currentMaxDispatchDepth) };
+    const withTaskType = canDispatchNestedTeammate
+      ? appendTaskTypeRoutingContext(withAgents, ctx.cwd, discoverAgents(ctx.cwd))
+      : withAgents;
+    const withDepth = appendTeammateDepthContext(withTaskType, currentDepth, currentMaxDispatchDepth);
+    return { systemPrompt: monitorInteractionModeActive ? appendMonitorModeContext(withDepth) : withDepth };
   };
 
   // =========================================================================
@@ -699,7 +714,7 @@ export default function registerTeammateExtension(
     const proxyTeammateObservation = async (
       action: "status" | "wait",
       id: string,
-      options: { detail: "summary" | "tail" | "full"; lines: number; deadline?: number },
+      options: ObservationReadOptions & { deadline?: number },
       signal?: AbortSignal,
     ): Promise<ObservationSnapshot> => {
       const response = await proxyCall<{ output: string[]; result: ObserveResult }>("observe", {
@@ -707,6 +722,8 @@ export default function registerTeammateExtension(
         targets: [{ kind: "teammate", id }],
         detail: options.detail,
         lines: options.lines,
+        ...(options.view ? { view: options.view } : {}),
+        ...(options.turn !== undefined ? { turn: options.turn } : {}),
         ...(action === "wait" ? {
           waitMode: "all",
           timeoutMs: Math.max(1, (options.deadline ?? Date.now() + MONITOR_DEFAULT_TIMEOUT_MS) - Date.now()),
@@ -727,7 +744,7 @@ export default function registerTeammateExtension(
       const proxyWorkspaceObservation = async (
         action: "status" | "wait",
         id: string,
-        options: { detail: "summary" | "tail" | "full"; lines: number; deadline?: number },
+        options: ObservationReadOptions & { deadline?: number },
         signal?: AbortSignal,
       ): Promise<ObservationSnapshot> => {
         const response = await proxyCall<{ output: string[]; result: ObserveResult }>("observe", {
@@ -735,6 +752,8 @@ export default function registerTeammateExtension(
           targets: [{ kind: "workspace", id }],
           detail: options.detail,
           lines: options.lines,
+          ...(options.view ? { view: options.view } : {}),
+          ...(options.turn !== undefined ? { turn: options.turn } : {}),
           ...(action === "wait" ? {
             waitMode: "all",
             timeoutMs: Math.max(1, (options.deadline ?? Date.now() + MONITOR_DEFAULT_TIMEOUT_MS) - Date.now()),
@@ -844,7 +863,7 @@ export default function registerTeammateExtension(
       parameters: ObserveParams,
       async execute(_id: string, params: UnifiedObserveParams, signal: AbortSignal) {
         const result = await observeTargets(params, signal);
-        const output = formatObserveResult(result, params.detail !== "summary");
+        const output = formatObserveResult(result, params.detail !== "summary" || params.view === "turns");
         const failed = result.reason === "timeout"
           || result.reason === "aborted"
           || result.observations.some((item) => !item.found || item.outcome === "failure" || item.outcome === "stalled");
@@ -3624,6 +3643,61 @@ export default function registerTeammateExtension(
   const monitorRegistry = sessionHostRegistry;
   if (!monitorRegistry) throw new Error("Session host registry must exist before Monitor initialization.");
 
+  const syncMonitorInteractionStatus = (runtimeStatus?: string): void => {
+    if (!widgetCtx?.ui || typeof widgetCtx.ui.setStatus !== "function") return;
+    widgetCtx.ui.setStatus(
+      MONITOR_STATUS_KEY,
+      monitorInteractionModeActive
+        ? runtimeStatus ?? `MONITOR · ${monitorEngine.bindings.size} window${monitorEngine.bindings.size === 1 ? "" : "s"}`
+        : undefined,
+    );
+  };
+
+  const enterMonitorInteractionMode = (): void => {
+    monitorInteractionModeActive = true;
+    syncMonitorInteractionStatus();
+  };
+
+  const exitMonitorInteractionMode = (): void => {
+    monitorInteractionModeActive = false;
+    monitorRegistry.setViewMode("agents");
+    syncMonitorInteractionStatus();
+  };
+
+  // Double bare-Esc exits Monitor mode. The first Esc is always passed through
+  // untouched (native cancel/clear semantics stay intact); only a second Esc
+  // inside the window is consumed. This intentionally takes precedence over
+  // Cockpit's double-Esc clear-input gate while Monitor mode is active — the
+  // mode owns its exit gesture — and is fully inert outside it. Key repeat
+  // and release events are filtered so holding Esc cannot fake a double tap.
+  const MONITOR_ESCAPE_TAP_WINDOW_MS = 500;
+  let monitorEscapeTapAt = 0;
+  let monitorEscapeTapDisposer: (() => void) | undefined;
+  const installMonitorEscapeTap = (ui: ExtensionContext["ui"]): void => {
+    uninstallMonitorEscapeTap();
+    if (!ui || typeof ui.onTerminalInput !== "function") return;
+    monitorEscapeTapDisposer = ui.onTerminalInput((data: string) => {
+      if (!monitorInteractionModeActive || !matchesKey(data, "escape") || isKeyRelease(data) || isKeyRepeat(data)) {
+        return undefined;
+      }
+      const now = Date.now();
+      if (now - monitorEscapeTapAt <= MONITOR_ESCAPE_TAP_WINDOW_MS) {
+        monitorEscapeTapAt = 0;
+        void monitorRegistry.requestWindowMode("exit").then(() => {
+          widgetCtx?.ui.notify("Monitor mode closed (double Esc).", "info");
+        });
+        return { consume: true };
+      }
+      monitorEscapeTapAt = now;
+      return undefined;
+    });
+  };
+  const uninstallMonitorEscapeTap = (): void => {
+    const disposer = monitorEscapeTapDisposer;
+    monitorEscapeTapDisposer = undefined;
+    disposer?.();
+  };
+
   const currentMonitorEndpoint = (endpoint: SessionEndpoint): boolean => {
     const current = monitorRegistry.directory.get(endpoint.id);
     return current?.kind === "root"
@@ -3640,6 +3714,8 @@ export default function registerTeammateExtension(
         : [];
     });
     monitorRegistry.setMonitoredEndpointIds(endpointIds);
+    if (endpointIds.length > 0) monitorInteractionModeActive = true;
+    syncMonitorInteractionStatus();
   };
 
   const monitorControllerInstance = new MonitorController({
@@ -3703,7 +3779,7 @@ export default function registerTeammateExtension(
         return context ? buildGoalContextBlock(context) : "";
       },
       onStatusUpdate(status) {
-        widgetCtx?.ui.setStatus(MONITOR_STATUS_KEY, status);
+        syncMonitorInteractionStatus(status);
       },
       notifyMain(message, target) {
         safeSendMessage(pi, {
@@ -3835,12 +3911,13 @@ export default function registerTeammateExtension(
       if (action === "enter") {
         await refreshWorkspacePeerOwners();
         refreshSessionEndpointDirectory(true);
+        enterMonitorInteractionMode();
         monitorRegistry.setViewMode("windows");
         return;
       }
       await monitorControllerInstance.exit("user-exit");
       syncMonitorRegistryBindings();
-      monitorRegistry.setViewMode("agents");
+      exitMonitorInteractionMode();
     },
     async setMonitored(endpointId, enabled, options = {}) {
       await refreshWorkspacePeerOwners();
@@ -3969,7 +4046,8 @@ export default function registerTeammateExtension(
         return;
       }
       if (monitorConfig.autoResume) {
-        await resumeMonitorBindings(ctx);
+        const restored = await resumeMonitorBindings(ctx);
+        if (restored > 0) monitorRegistry.setViewMode("windows");
       }
       const live = new Set([...monitorEngine.bindings.keys()]);
       const reconciled = await reconcileMonitorLedger(root, { liveTargets: [...live], nowMs: Date.now() });
@@ -4080,7 +4158,10 @@ export default function registerTeammateExtension(
     supervise: true,
   } as const;
 
-  function teammateSnapshot(id: string, detail: "summary" | "tail" | "full", lines: number): ObservationSnapshot {
+  async function teammateSnapshot(id: string, options: ObservationReadOptions): Promise<ObservationSnapshot> {
+    if (options.view === "turns") return teammateTurnsSnapshot(id, options);
+    const detail = options.detail;
+    const lines = options.lines;
     const monitored = resolveMonitorTarget(id, lines, detail !== "summary");
     if (!monitored.found) {
       return {
@@ -4144,6 +4225,102 @@ export default function registerTeammateExtension(
     };
   }
 
+  /** One transcript row → one flat text line for observe view="turns". */
+  function formatTurnRow(row: TranscriptRow): string {
+    const text = row.text.replace(/\r?\n/g, " ");
+    switch (row.kind) {
+      case "user": return `[user] ${text}`;
+      case "assistant": return `[assistant] ${text}`;
+      case "thinking": return `[thinking] ${text}`;
+      case "tool": return `[tool] ${row.toolName ?? "?"} ${text.slice(0, 200)}`;
+      case "tool_result": return `[result]${row.isError ? " !" : ""} ${row.toolName ?? ""} ${text.slice(0, 300)}`;
+      case "meta": return `[meta] ${text}`;
+      default: return `[${row.role}] ${text}`;
+    }
+  }
+
+  async function teammateTurnsSnapshot(
+    id: string,
+    options: ObservationReadOptions,
+  ): Promise<ObservationSnapshot> {
+    const monitored = resolveMonitorTarget(id, options.lines, options.detail !== "summary");
+    const resolved = resolveWatchTarget(state, id);
+    const liveAgent = resolved.match?.kind === "agent" ? resolved.match.agent : undefined;
+    const settledRecord = resolved.match ? undefined : findSettledAgent(state, id);
+    const agent = liveAgent ?? settledRecord;
+    if (!agent && !monitored.found) {
+      return {
+        target: { kind: "teammate", id },
+        found: false,
+        nativeStatus: "not-found",
+        phase: "unknown",
+        outcome: "failure",
+        waitStatus: "not-found",
+        summary: monitored.error ?? `Agent "${id}" not found.`,
+        updatedAt: Date.now(),
+        capabilities: teammateObservationCapabilities,
+        error: monitored.error,
+      };
+    }
+    const load = await loadTranscript({
+      correlationId: agent?.correlationId ?? id,
+      sessionFile: liveAgent?.sessionFile,
+      parentSessionFile: state.mainSessionFile ?? undefined,
+      lastResult: agent?.lastResult,
+      outputLog: liveAgent?.outputLog,
+    });
+    const turns = groupTranscriptTurns(load.rows);
+    const nativeStatus = monitored.agentStatus ?? monitored.waitStatus ?? agent?.status ?? "unknown";
+    const settled = nativeStatus === "completed"
+      || nativeStatus === "failed"
+      || nativeStatus === "terminated"
+      || nativeStatus === "sleeping";
+    if (options.turn !== undefined) {
+      const turn = turns.find((candidate) => candidate.index === options.turn);
+      if (!turn) {
+        return {
+          target: { kind: "teammate", id },
+          found: true,
+          nativeStatus,
+          phase: settled ? "settled" : "active",
+          summary: `Turn ${options.turn} not found (${turns.length} turn${turns.length === 1 ? "" : "s"}).`,
+          detail: turns.map((candidate) =>
+            `Turn ${candidate.index} · ${candidate.userText.slice(0, 60)} · ${candidate.rowCount} rows`
+          ),
+          updatedAt: Date.now(),
+          capabilities: teammateObservationCapabilities,
+        };
+      }
+      return {
+        target: { kind: "teammate", id },
+        found: true,
+        nativeStatus,
+        phase: settled ? "settled" : "active",
+        summary: `Turn ${turn.index} · ${turn.userText.slice(0, 60)} · ${turn.rowCount} rows · ${turn.toolCallCount} tools`,
+        detail: turn.rows.map(formatTurnRow),
+        updatedAt: Date.now(),
+        capabilities: teammateObservationCapabilities,
+      };
+    }
+    const listLines = turns.length === 0
+      ? ["No session turns recorded."]
+      : turns.map((turn) => {
+          const tools = turn.toolCallCount > 0 ? ` · ${turn.toolCallCount} tools` : "";
+          const chars = turn.textLength > 0 ? ` · ${turn.textLength} chars` : "";
+          return `Turn ${turn.index} · ${turn.userText.slice(0, 60)} · ${turn.rowCount} rows${tools}${chars}`;
+        });
+    return {
+      target: { kind: "teammate", id },
+      found: true,
+      nativeStatus,
+      phase: settled ? "settled" : "active",
+      summary: `${turns.length} turn${turns.length === 1 ? "" : "s"}${load.source === "memory" ? " · memory fallback" : ""}`,
+      detail: listLines,
+      updatedAt: Date.now(),
+      capabilities: teammateObservationCapabilities,
+    };
+  }
+
   function teammateWaitObservation(
     id: string,
     result: TeammateWaitResult,
@@ -4194,7 +4371,7 @@ export default function registerTeammateExtension(
   const teammateObservationProvider: ObservationProvider = {
     kind: "teammate",
     capabilities: teammateObservationCapabilities,
-    snapshot: (id, options) => teammateSnapshot(id, options.detail, options.lines),
+    snapshot: (id, options) => teammateSnapshot(id, options),
     wait: async (id, options) => teammateWaitObservation(id, await waitForTeammate(state, {
       name: id,
       timeoutMs: Math.max(1, options.deadline - Date.now()),
@@ -4207,10 +4384,12 @@ export default function registerTeammateExtension(
     id: string,
     detail: "summary" | "tail" | "full",
     lines: number,
+    options: ObservationReadOptions = { detail, lines },
   ): Promise<ObservationSnapshot> => {
     await refreshWorkspacePeerOwners();
     const ownerId = id.startsWith("owner:") ? id.slice("owner:".length) : id;
-    const owner = workspacePeerOwners.find((candidate) => candidate.ownerId === ownerId);
+    let owner = workspacePeerOwners.find((candidate) => candidate.ownerId === ownerId);
+    if (!owner) owner = resolveWorkspaceOwnerByName(workspacePeerOwners, id);
     const target = { kind: "workspace", id };
     if (!owner) {
       return {
@@ -4224,6 +4403,7 @@ export default function registerTeammateExtension(
         error: "owner-unavailable",
       };
     }
+    if (options.view === "turns") return workspaceTurnsSnapshot(owner, target, detail, lines, options);
     const backgroundJobs = owner.backgroundJobs ?? [];
     const foregroundJobs = backgroundJobs.filter((job) => !job.background);
     const activeStatus = windowRowStatus([
@@ -4258,10 +4438,92 @@ export default function registerTeammateExtension(
     };
   };
 
+  const workspaceTurnsSnapshot = (
+    owner: WorkspaceOwnerSnapshot,
+    target: ObservationTarget,
+    detail: "summary" | "tail" | "full",
+    lines: number,
+    options: ObservationReadOptions,
+  ): ObservationSnapshot => {
+    const runs: Array<{
+      index: number;
+      name: string;
+      status: string;
+      summary: string;
+      outputTail: readonly string[];
+      startedAt: number;
+    }> = [
+      ...owner.agents.map((agent, index) => ({
+        index: index + 1,
+        name: agent.name ?? agent.correlationId.slice(0, 8),
+        status: agent.status,
+        summary: agent.summary ?? "",
+        outputTail: agent.outputTail ?? [],
+        startedAt: agent.startedAt,
+      })),
+      ...owner.settled.map((record, index) => ({
+        index: owner.agents.length + index + 1,
+        name: record.name ?? record.correlationId.slice(0, 8),
+        status: record.status,
+        summary: record.summary ?? record.status,
+        outputTail: [],
+        startedAt: record.settledAt,
+      })),
+    ];
+    const windowName = owner.sessionName ?? `window:${owner.ownerId.slice(0, 8)}`;
+    if (options.turn !== undefined) {
+      const run = runs.find((candidate) => candidate.index === options.turn);
+      if (!run) {
+        return {
+          target,
+          found: true,
+          nativeStatus: "unknown",
+          phase: "unknown",
+          summary: `Run ${options.turn} not found (${runs.length} run${runs.length === 1 ? "" : "s"}).`,
+          detail: runs.map((candidate) =>
+            `Run ${candidate.index} · @${candidate.name} ${candidate.status}${candidate.summary ? ` · ${candidate.summary.slice(0, 60)}` : ""}`
+          ),
+          updatedAt: Date.now(),
+          capabilities: { inspect: true, wait: true, cancel: false, message: true, supervise: true },
+        };
+      }
+      const detailLines = [
+        `@${run.name} ${run.status} · started ${new Date(run.startedAt).toISOString()}`,
+        ...(run.summary ? [run.summary] : []),
+        ...(detail !== "summary" ? run.outputTail.slice(-lines) : []),
+      ];
+      return {
+        target,
+        found: true,
+        nativeStatus: run.status,
+        phase: run.status === "completed" || run.status === "failed" ? "settled" : "active",
+        summary: `Run ${run.index} · @${run.name} ${run.status}`,
+        ...(detail !== "summary" && detailLines.length > 1 ? { detail: detailLines } : {}),
+        updatedAt: Date.now(),
+        capabilities: { inspect: true, wait: true, cancel: false, message: true, supervise: true },
+      };
+    }
+    const listLines = runs.length === 0
+      ? ["No window activity recorded in the peer snapshot."]
+      : runs.map((run) =>
+        `Run ${run.index} · @${run.name} ${run.status}${run.summary ? ` · ${run.summary.slice(0, 80)}` : ""}`
+      );
+    return {
+      target,
+      found: true,
+      nativeStatus: "unknown",
+      phase: "unknown",
+      summary: `${windowName} · ${runs.length} run${runs.length === 1 ? "" : "s"} · snapshot-limited (workspace peers do not publish full turns)`,
+      detail: listLines,
+      updatedAt: Date.now(),
+      capabilities: { inspect: true, wait: true, cancel: false, message: true, supervise: true },
+    };
+  };
+
   registerObservationProvider({
     kind: "workspace",
     capabilities: { inspect: true, wait: true, cancel: false, message: true, supervise: true },
-    snapshot: (id, options) => workspaceObservationSnapshot(id, options.detail, options.lines),
+    snapshot: (id, options) => workspaceObservationSnapshot(id, options.detail, options.lines, options),
     wait: async (id, options) => {
       const snapshot = await workspaceObservationSnapshot(id, options.detail, options.lines);
       return {
@@ -4288,7 +4550,7 @@ export default function registerTeammateExtension(
       signal: AbortSignal,
     ): Promise<TeammateToolResult<{ output: string[]; result: ObserveResult }>> {
       const result = await observeTargets(params, signal);
-      const output = formatObserveResult(result, params.detail !== "summary");
+      const output = formatObserveResult(result, params.detail !== "summary" || params.view === "turns");
       const failed = result.reason === "timeout"
         || result.reason === "aborted"
         || result.observations.some((item) => !item.found || item.outcome === "failure" || item.outcome === "stalled");
@@ -5069,10 +5331,10 @@ export default function registerTeammateExtension(
       const trimmed = args.trim();
       await workspacePeerLifecycle;
 
-      // /monitor (no args) — enter the Window Bar mode without binding every peer.
+      // /monitor (no args) — enter the Monitor control window without binding every peer.
       if (trimmed === "") {
         await monitorRegistry.requestWindowMode("enter");
-        ctx.ui.notify("Window monitor mode opened.", "info");
+        ctx.ui.notify("Monitor mode opened. Use #control for supervision instructions or select a peer window to message it.", "info");
         return;
       }
 
@@ -5099,7 +5361,7 @@ export default function registerTeammateExtension(
         const bound = await monitorControllerInstance.bind(requests);
         syncMonitorRegistryBindings();
         if (bound.bound.length > 0) {
-          monitorRegistry.setViewMode("windows");
+          await monitorRegistry.requestWindowMode("enter");
           ctx.ui.notify(
             `Monitor session started for ${bound.bound.length} window${bound.bound.length === 1 ? "" : "s"} (${result.mode})${bound.errors.length ? ` · ${bound.errors.length} errors` : ""}`,
             "info",
@@ -5112,7 +5374,7 @@ export default function registerTeammateExtension(
 
       // /monitor exit — stop the independent monitor session and clear bindings
       if (trimmed === "exit" || trimmed === "stop") {
-        if (monitorRegistry.viewMode !== "windows" && !monitorSessionAgent() && monitorEngine.bindings.size === 0) {
+        if (!monitorInteractionModeActive && !monitorSessionAgent() && monitorEngine.bindings.size === 0) {
           ctx.ui.notify("Monitor session is not active.", "warning");
           return;
         }
@@ -5174,10 +5436,12 @@ export default function registerTeammateExtension(
       if (trimmed === "resume") {
         monitorConfig = loadMonitorConfigForRoot(monitorLedgerRoot ?? state.baseCwd ?? ctx.cwd);
         if (monitorEngine.bindings.size > 0 && await monitorControllerInstance.resume()) {
+          await monitorRegistry.requestWindowMode("enter");
           ctx.ui.notify("Resumed the independent Monitor session.", "info");
           return;
         }
         const restored = await resumeMonitorBindings(ctx);
+        if (restored > 0) await monitorRegistry.requestWindowMode("enter");
         ctx.ui.notify(
           restored > 0 ? `Resumed the independent Monitor session with ${restored} binding${restored === 1 ? "" : "s"}.` : "No active Monitor session or bindings in the monitor ledger to resume.",
           restored > 0 ? "info" : "warning",
@@ -5222,7 +5486,7 @@ export default function registerTeammateExtension(
       // /monitor status — show the independent monitor session and its bindings
       if (trimmed === "status") {
         const agent = monitorSessionAgent();
-        if (!agent && monitorEngine.bindings.size === 0) {
+        if (!monitorInteractionModeActive && !agent && monitorEngine.bindings.size === 0) {
           ctx.ui.notify("Monitor session is not active. Use /monitor <targets...> to start.", "warning");
           return;
         }
@@ -5296,7 +5560,7 @@ export default function registerTeammateExtension(
       }
 
       const modeLabel = mode === "custom" ? `custom: ${customPrompt?.slice(0, 40)}` : "auto";
-      monitorRegistry.setViewMode("windows");
+      await monitorRegistry.requestWindowMode("enter");
       ctx.ui.notify(`Monitor session started for ${result.bound.length} window${result.bound.length === 1 ? "" : "s"} (${modeLabel})${errors.length ? ` · ${errors.length} errors` : ""}`, "info");
     },
   });
@@ -5333,10 +5597,17 @@ export default function registerTeammateExtension(
   // TUI — only in parent mode (child processes have no terminal)
   // =========================================================================
 
+  let cockpitOwnsAgents = false;
+  let cockpitOwnsSessionList = false;
+
   pi.registerShortcut("alt+r", {
-    description: "Open the teammate agent view",
+    description: "Open the teammate session list",
     async handler(ctx) {
       preemptCockpitResize();
+      if (cockpitOwnsSessionList) {
+        pi.events.emit(COCKPIT_SESSION_LIST_EVENT, { version: 1 });
+        return;
+      }
       await showAgentSelector(ctx);
     },
   });
@@ -5350,8 +5621,6 @@ export default function registerTeammateExtension(
       pi.registerTool(tool);
     },
   });
-
-  let cockpitOwnsAgents = false;
 
   function updateAgentWidget(): void {
     if (!widgetCtx) return;
@@ -5465,8 +5734,14 @@ export default function registerTeammateExtension(
 
   pi.events.on(COCKPIT_UI_OWNERSHIP_EVENT, (payload) => {
     if (!payload || typeof payload !== "object") return;
-    const ownership = payload as { agents?: unknown; quiet?: unknown; quietSymbols?: unknown };
+    const ownership = payload as {
+      agents?: unknown;
+      sessionList?: unknown;
+      quiet?: unknown;
+      quietSymbols?: unknown;
+    };
     cockpitOwnsAgents = ownership.agents === true;
+    cockpitOwnsSessionList = ownership.sessionList === true;
     setQuietMode(ownership.quiet === true, ownership.quietSymbols);
     updateAgentWidget();
   });
@@ -5510,6 +5785,8 @@ export default function registerTeammateExtension(
     registerTeammateSettings();
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     widgetCtx = ctx;
+    exitMonitorInteractionMode();
+    installMonitorEscapeTap(ctx.ui);
     setPersistentUi(ctx.ui, true);
     state.baseCwd = ctx.cwd;
     // Monitor ledger + config bind to the real session cwd.
@@ -5549,6 +5826,7 @@ export default function registerTeammateExtension(
 
   pi.on("session_compact", (_event, ctx) => {
     widgetCtx = ctx;
+    installMonitorEscapeTap(ctx.ui);
     setPersistentUi(ctx.ui);
     state.baseCwd = ctx.cwd;
     // Rebind if compaction moved to a different workspace.
@@ -5556,11 +5834,13 @@ export default function registerTeammateExtension(
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
     workspacePeerSessionName = ctx.sessionManager?.getSessionName?.() ?? undefined;
     markWorkspacePeerDirty();
+    syncMonitorInteractionStatus();
     updateAgentWidget();
   });
 
   pi.on("session_shutdown", async (event) => {
     const shutdownReason = event?.reason ?? "quit";
+    uninstallMonitorEscapeTap();
     disposeTeammateSettings();
     stopWidgetTimer();
     stopWakeableEvictionTimer();
@@ -5577,7 +5857,7 @@ export default function registerTeammateExtension(
     monitorRegistry.replaceEndpoints([]);
     monitorRegistry.thread.rebuild([]);
     monitorRegistry.setMonitoredEndpointIds([]);
-    monitorRegistry.setViewMode("agents");
+    exitMonitorInteractionMode();
     if (shutdownReason === "quit" || shutdownReason === "reload") {
       if (getSessionHostRegistry(rootGlobals) === sessionHostRegistry) {
         publishSessionHostRegistry(undefined, rootGlobals);

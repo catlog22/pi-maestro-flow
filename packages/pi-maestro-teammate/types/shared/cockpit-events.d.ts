@@ -6,6 +6,7 @@
  */
 export declare const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
 export declare const COCKPIT_PREEMPT_RESIZE_EVENT = "cockpit:preempt-resize";
+export declare const COCKPIT_SESSION_LIST_EVENT = "cockpit:open-session-list";
 /**
  * Cockpit → teammate: user command against one agent. The payload carries
  * `{ correlationId, action: "interrupt" | "steer", message? }`; teammate
