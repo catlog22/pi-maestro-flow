@@ -96,6 +96,7 @@ test("API Manager provider exposes settings, retry policy and the original manag
       "api.retry.enabled",
       "api.retry.maxRetries",
       "api.retry.baseDelayMs",
+      "api.retry.maxDelayMs",
       "api.promptCache",
       "api.cacheRetention",
       "api.agentCacheRetention",
@@ -103,7 +104,7 @@ test("API Manager provider exposes settings, retry policy and the original manag
     ]);
     assert.equal(description.catalogs?.["zh-CN"]["api.group.diagnostics"], "配置概览");
     const snapshot = await provider.read({ context });
-    assert.equal(snapshot.effective.values.length, 8);
+    assert.equal(snapshot.effective.values.length, 9);
     assert.equal((await provider.validate({
       context,
       transactionId: "t1",

@@ -3,6 +3,20 @@ export declare const NETWORK_RETRY_POLICY: Readonly<{
     initialDelayMs: 1000;
     maxDelayMs: 16000;
 }>;
+/**
+ * Resolve the network retry policy, honoring the `PI_RETRY_MAX_DELAY_MS`
+ * override for the backoff cap (last retry's maximum wait).
+ */
+export declare function resolveNetworkRetryPolicy(env?: Record<string, string | undefined>): Readonly<{
+    maxRetries: number;
+    initialDelayMs: number;
+    maxDelayMs: number;
+}>;
+export declare const RESOLVED_NETWORK_RETRY_POLICY: Readonly<{
+    maxRetries: number;
+    initialDelayMs: number;
+    maxDelayMs: number;
+}>;
 export type RetryErrorKind = "network" | "provider" | "fallback-only" | "auth" | "non-retryable";
 /**
  * Classify a provider failure for retry/fallback decisions.

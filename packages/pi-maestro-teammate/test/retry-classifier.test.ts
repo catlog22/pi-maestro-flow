@@ -111,6 +111,17 @@ test("provider and quota classes keep their existing routing", () => {
   assert.equal(isFallbackProviderError("402 insufficient_quota"), true);
 });
 
+test("concurrency-limit wording without a status code classifies as retryable provider", () => {
+  assert.equal(classifyRetryError("concurrency_limit_error: Too many concurrent requests"), "provider");
+  assert.equal(classifyRetryError("maximum concurrent requests reached"), "provider");
+  assert.equal(classifyRetryError("Too many concurrent invokes"), "provider");
+  assert.equal(classifyRetryError("concurrency limit exceeded"), "provider");
+  assert.equal(classifyRetryError("too many simultaneous requests"), "provider");
+  assert.equal(classifyRetryError("You are sending requests too quickly"), "provider");
+  assert.equal(isRetryableProviderError("Too many concurrent invokes"), true);
+  assert.equal(isFallbackProviderError("concurrency limit exceeded"), true);
+});
+
 test("Python-style transport names classify as retryable", () => {
   assert.equal(classifyRetryError("requests.exceptions.ConnectionError: Max retries exceeded"), "network");
   assert.equal(classifyRetryError("ConnectionResetError: connection reset by peer"), "network");

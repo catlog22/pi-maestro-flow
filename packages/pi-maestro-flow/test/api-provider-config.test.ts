@@ -369,12 +369,13 @@ test("API Manager retry defaults are enabled and preserve explicit overrides", a
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const settingsPath = join(tempDir, "settings.json");
 
-  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 3, baseDelayMs: 2000 });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 3, baseDelayMs: 2000, maxDelayMs: 16000 });
   await ensureApiRetryDefaults(settingsPath);
   assert.deepEqual(JSON.parse(readFileSync(settingsPath, "utf8")).retry, {
     enabled: true,
     maxRetries: 3,
     baseDelayMs: 2_000,
+    maxDelayMs: 16_000,
   });
 
   writeFileSync(settingsPath, JSON.stringify({
@@ -392,6 +393,7 @@ test("API Manager retry defaults are enabled and preserve explicit overrides", a
     enabled: false,
     maxRetries: 3,
     baseDelayMs: 3_000,
+    maxDelayMs: 16_000,
     provider: { maxRetries: 0, maxRetryDelayMs: 600_000 },
   });
 });
@@ -412,6 +414,7 @@ test("API Manager retry save validates the shared cap and preserves sibling sett
     enabled: false,
     maxRetries: 4,
     baseDelayMs: 2_000,
+    maxDelayMs: 16_000,
     provider: { timeoutMs: 30_000 },
   });
   await assert.rejects(
@@ -443,13 +446,13 @@ test("/api-manager manages retry from commands and the interactive menu", async 
 
   assert.ok(sessionStart);
   await sessionStart!({}, baseContext);
-  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 3, baseDelayMs: 2000 });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 3, baseDelayMs: 2000, maxDelayMs: 16000 });
 
   const manager = commands.get("api-manager");
   await manager.handler("retry off", baseContext);
-  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: false, maxRetries: 3, baseDelayMs: 2000 });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: false, maxRetries: 3, baseDelayMs: 2000, maxDelayMs: 16000 });
   await manager.handler("retry on 4", baseContext);
-  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 4, baseDelayMs: 2000 });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 4, baseDelayMs: 2000, maxDelayMs: 16000 });
   await manager.handler("retry show", baseContext);
   assert.match(notifications.at(-1) ?? "", /Provider 自动重试：开启/);
   assert.match(notifications.at(-1) ?? "", /最大重试次数：4/);
@@ -468,7 +471,7 @@ test("/api-manager manages retry from commands and the interactive menu", async 
       notify(message: string) { notifications.push(message); },
     },
   });
-  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: false, maxRetries: 4, baseDelayMs: 2000 });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: false, maxRetries: 4, baseDelayMs: 2000, maxDelayMs: 16000 });
 
   const enableSelections = ["自动重试", "开启"];
   await manager.handler("", {
@@ -484,7 +487,7 @@ test("/api-manager manages retry from commands and the interactive menu", async 
       notify(message: string) { notifications.push(message); },
     },
   });
-  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 5, baseDelayMs: 2000 });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 5, baseDelayMs: 2000, maxDelayMs: 5 });
 });
 
 test("prompt-cache detection gates on gpt-5.6 and later only", () => {

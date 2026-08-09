@@ -20,6 +20,7 @@ import {
 } from "pi-maestro-settings-core/v1";
 import { SETTINGS_SECRET_SET_PLACEHOLDER } from "pi-maestro-settings-core/v1/schema";
 import { loadApiRetrySettings, saveApiRetrySettings } from "../providers/api-provider-config.ts";
+import { NETWORK_RETRY_POLICY } from "pi-maestro-teammate/v1/retry";
 import { readModelsRoot, writeModelsRoot } from "../providers/api-provider-ops.ts";
 import {
   AGENT_CACHE_RETENTION_DEFAULT,
@@ -161,6 +162,19 @@ const DEFINITIONS: readonly SettingDefinition[] = [
     editor: { kind: "integer", min: 0, max: 600000, step: 100 },
   },
   {
+    key: "api.retry.maxDelayMs",
+    group: "api.group.retry",
+    order: 13,
+    labelKey: "api.retry.maxDelayMs",
+    descriptionKey: "api.retry.maxDelayMs.description",
+    scopes: ["global"],
+    merge: "provider-defined",
+    activation: "next-invocation",
+    sensitivity: "public",
+    reversibility: "full",
+    editor: { kind: "integer", min: 0, max: 600000, step: 100 },
+  },
+  {
     key: "api.promptCache",
     group: "api.group.cache",
     order: 12,
@@ -252,6 +266,8 @@ const CATALOGS = {
     "api.retry.maxRetries": "Max retries",
     "api.retry.baseDelayMs": "Retry base delay (ms)",
     "api.retry.baseDelayMs.description": "Base delay for retry backoff. Applies to the next invocation.",
+    "api.retry.maxDelayMs": "Max backoff delay (ms)",
+    "api.retry.maxDelayMs.description": "Backoff cap for the last retry: exponential growth stops here. 0 waits nothing on the final retry. Applies to the next invocation.",
     "api.promptCache": "Prompt cache policy",
     "api.promptCache.description": "Whether OpenAI prompt-cache parameters (prompt_cache_options / prompt_cache_retention) are sent on OpenAI-format requests. Strict gateways reject them: off never sends them, auto sends them only for gpt-5.6+ models, on always sends them",
     "api.promptCache.auto": "Auto (gpt-5.6+ only)",
@@ -320,6 +336,8 @@ const CATALOGS = {
     "api.retry.maxRetries": "最大重试次数",
     "api.retry.baseDelayMs": "重试基础延迟（毫秒）",
     "api.retry.baseDelayMs.description": "重试退避的基础延迟。下一次调用生效。",
+    "api.retry.maxDelayMs": "最大退避延迟（毫秒）",
+    "api.retry.maxDelayMs.description": "最后一次重试的退避上限：指数增长在此封顶。0 表示最后一次重试不等待。下一次调用生效。",
     "api.promptCache": "提示缓存策略",
     "api.promptCache.description": "控制是否发送 OpenAI 提示缓存参数（prompt_cache_options / prompt_cache_retention）。部分网关会拒绝这些参数：禁止模式不发送，自动模式仅对 gpt-5.6+ 模型发送，开启模式始终发送",
     "api.promptCache.auto": "自动（仅 gpt-5.6+）",
@@ -411,7 +429,7 @@ export function createApiManagerSettingsProvider(
   const load = async (): Promise<{
     providers: ApiProviderEntry[];
     modelsRoot: Record<string, unknown>;
-    retry: { enabled: boolean; maxRetries: number; baseDelayMs?: number };
+    retry: { enabled: boolean; maxRetries: number; baseDelayMs?: number; maxDelayMs?: number };
     promptCache: PromptCachePolicy;
     cacheRetention: CacheRetentionSetting;
     agentCacheRetention: CacheRetention;
@@ -470,6 +488,9 @@ export function createApiManagerSettingsProvider(
       } else if (definition.key === "api.retry.baseDelayMs") {
         configured.push({ key: definition.key, scope: "global", state: "set", value: data.retry.baseDelayMs ?? 2000 });
         effective.push({ key: definition.key, value: data.retry.baseDelayMs ?? 2000, source: "configured", scope: "global" });
+      } else if (definition.key === "api.retry.maxDelayMs") {
+        configured.push({ key: definition.key, scope: "global", state: "set", value: data.retry.maxDelayMs ?? NETWORK_RETRY_POLICY.maxDelayMs });
+        effective.push({ key: definition.key, value: data.retry.maxDelayMs ?? NETWORK_RETRY_POLICY.maxDelayMs, source: "configured", scope: "global" });
       } else if (definition.key === "api.promptCache") {
         configured.push({ key: definition.key, scope: "global", state: "set", value: data.promptCache });
         effective.push({ key: definition.key, value: data.promptCache, source: "configured", scope: "global" });
@@ -561,6 +582,16 @@ export function createApiManagerSettingsProvider(
             messageKey: "api.settings.invalidRetry",
           });
         }
+        if ((change.key === "api.retry.baseDelayMs" || change.key === "api.retry.maxDelayMs") && change.operation === "set"
+          && (!Number.isSafeInteger(change.value) || (change.value as number) < 0 || (change.value as number) > 600000)) {
+          issues.push({
+            severity: "error",
+            key: change.key,
+            scope: change.scope,
+            code: "invalid-retry",
+            messageKey: "api.settings.invalidRetry",
+          });
+        }
         if (change.key === "api.promptCache" && change.operation === "set" && !isPromptCachePolicy(change.value)) {
           issues.push({
             severity: "error",
@@ -595,7 +626,8 @@ export function createApiManagerSettingsProvider(
       const data = await load();
       const changedKeys = request.changes.map((change) => change.key);
       if (changedKeys.includes("api.providers") || changedKeys.includes("api.retry.enabled")
-        || changedKeys.includes("api.retry.maxRetries") || changedKeys.includes("api.promptCache")
+        || changedKeys.includes("api.retry.maxRetries") || changedKeys.includes("api.retry.baseDelayMs")
+        || changedKeys.includes("api.retry.maxDelayMs") || changedKeys.includes("api.promptCache")
         || changedKeys.includes("api.cacheRetention") || changedKeys.includes("api.agentCacheRetention")) {
         originals.set(request.transactionId, { models: data.modelsContent, settings: data.settingsContent });
       }
@@ -615,6 +647,8 @@ export function createApiManagerSettingsProvider(
       const providersChange = changes.find((change) => change.key === "api.providers");
       const retryEnabled = changes.find((change) => change.key === "api.retry.enabled");
       const retryMax = changes.find((change) => change.key === "api.retry.maxRetries");
+      const retryBase = changes.find((change) => change.key === "api.retry.baseDelayMs");
+      const retryMaxDelay = changes.find((change) => change.key === "api.retry.maxDelayMs");
       const promptCacheChange = changes.find((change) => change.key === "api.promptCache");
       const cacheRetentionChange = changes.find((change) => change.key === "api.cacheRetention");
       const agentCacheRetentionChange = changes.find((change) => change.key === "api.agentCacheRetention");
@@ -643,11 +677,13 @@ export function createApiManagerSettingsProvider(
           modelsWritten = true;
         }
         const retryBase = changes.find((change) => change.key === "api.retry.baseDelayMs");
-        if (retryEnabled?.operation === "set" || retryMax?.operation === "set" || retryBase?.operation === "set") {
+        const retryMaxDelay = changes.find((change) => change.key === "api.retry.maxDelayMs");
+        if (retryEnabled?.operation === "set" || retryMax?.operation === "set" || retryBase?.operation === "set" || retryMaxDelay?.operation === "set") {
           const next = {
             enabled: retryEnabled?.operation === "set" ? retryEnabled.value as boolean : data.retry.enabled,
             maxRetries: retryMax?.operation === "set" ? retryMax.value as number : data.retry.maxRetries,
             baseDelayMs: retryBase?.operation === "set" ? retryBase.value as number : data.retry.baseDelayMs ?? 2000,
+            maxDelayMs: retryMaxDelay?.operation === "set" ? retryMaxDelay.value as number : data.retry.maxDelayMs ?? NETWORK_RETRY_POLICY.maxDelayMs,
           };
           await saveApiRetrySettings(next, settingsPath);
         }

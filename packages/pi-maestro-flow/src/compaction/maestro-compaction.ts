@@ -51,7 +51,16 @@ export const SUMMARY_PROVIDER_MAX_RETRIES = 2;
 /** Outer retries for transient provider/transport failures (5xx, upstream_error, ...). */
 export const MAX_TRANSIENT_SUMMARY_RETRIES = 2;
 export const TRANSIENT_SUMMARY_RETRY_BASE_DELAY_MS = 10_000;
-export const TRANSIENT_SUMMARY_RETRY_MAX_DELAY_MS = 30_000;
+const SUMMARY_RETRY_MAX_DELAY_ENV = "PI_SUMMARY_RETRY_MAX_DELAY_MS";
+
+function readSummaryRetryMaxDelayMs(): number {
+  const raw = process.env[SUMMARY_RETRY_MAX_DELAY_ENV];
+  if (raw === undefined || raw.trim() === "") return 30_000;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 30_000;
+}
+
+export const TRANSIENT_SUMMARY_RETRY_MAX_DELAY_MS = readSummaryRetryMaxDelayMs();
 const SUMMARY_INPUT_TRUNCATION_MARKER = "[Earlier conversation omitted to fit the compaction model. Use previousSummary and runtimeState as the authoritative earlier checkpoint.]";
 const IMAGE_PLACEHOLDER = "[image]";
 const IMAGE_ROUTE_DETAILS_KIND = "maestro-image-routing";

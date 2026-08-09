@@ -4,6 +4,36 @@ export const NETWORK_RETRY_POLICY = Object.freeze({
   maxDelayMs: 16_000,
 });
 
+const RETRY_MAX_DELAY_ENV = "PI_RETRY_MAX_DELAY_MS";
+const DEFAULT_RETRY_MAX_DELAY_MS = 16_000;
+
+function readRetryMaxDelayMs(env: Record<string, string | undefined>): number {
+  const raw = env[RETRY_MAX_DELAY_ENV];
+  if (raw === undefined || raw.trim() === "") return DEFAULT_RETRY_MAX_DELAY_MS;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : DEFAULT_RETRY_MAX_DELAY_MS;
+}
+
+/**
+ * Resolve the network retry policy, honoring the `PI_RETRY_MAX_DELAY_MS`
+ * override for the backoff cap (last retry's maximum wait).
+ */
+export function resolveNetworkRetryPolicy(
+  env: Record<string, string | undefined> = process.env,
+): Readonly<{
+  maxRetries: number;
+  initialDelayMs: number;
+  maxDelayMs: number;
+}> {
+  return Object.freeze({
+    maxRetries: 5,
+    initialDelayMs: 1_000,
+    maxDelayMs: readRetryMaxDelayMs(env),
+  });
+}
+
+export const RESOLVED_NETWORK_RETRY_POLICY = resolveNetworkRetryPolicy();
+
 export type RetryErrorKind = "network" | "provider" | "fallback-only" | "auth" | "non-retryable";
 
 /**
@@ -34,7 +64,7 @@ const NETWORK_ERROR =
   /\b(?:econnreset|econnrefused|econnaborted|enetunreach|enetdown|ehostunreach|enotfound|eai_again|etimedout|epipe|socket hang up|fetch failed|failed to fetch|getaddrinfo|network(?: ?error| request)?|connection (?:error|failed|failure|reset|refused|lost|timed out|timeout|closed|terminated)|other side closed|upstream connect|reset before headers|request timed out|timed out waiting|signal timed out|timed? out|timeout|terminated|(?:web)?socket (?:was )?(?:closed|error)|sse response headers timed out|headers timed out|stream ended (?:without|before)|http2 request did not get a response|connectionerror|connectionreseterror|connectionrefusederror|connectionabortederror|brokenpipeerror|timeouterror|remotedisconnected|read timed out|requests\.exceptions)\b/i;
 
 const PROVIDER_ERROR =
-  /\b(?:408|429|500|502|503|504|524|rate[_\s-]*limit(?:ed|[_\s-]*exceeded|[_\s-]*error)?|too many requests|capacity|overloaded(?:_error)?|service[_\s-]*unavailable|provider returned error|server[_\s-]*error|internal[_\s-]*error|resource[_\s-]*exhausted)\b/i;
+  /\b(?:408|429|500|502|503|504|524|rate[_\s-]*limit(?:ed|[_\s-]*exceeded|[_\s-]*error)?|too many (?:concurrent |simultaneous )?requests?|requests too quickly|concurr(?:ency|ent)|capacity|overloaded(?:_error)?|service[_\s-]*unavailable|provider returned error|server[_\s-]*error|internal[_\s-]*error|resource[_\s-]*exhausted)\b/i;
 
 // Mirrors the status-class guard above: a 3-digit 4xx/5xx token NOT preceded by
 // a colon/dot/word char. The trailing \b keeps 4-digit numbers ("4000") and
@@ -170,8 +200,8 @@ export function retryDelayMs(retry: number, kind?: RetryErrorKind, retryAfterMs?
   if (kind === "fallback-only" || kind === "auth" || kind === "non-retryable") return 0;
   const normalizedRetry = Math.max(1, Math.floor(retry));
   const backoff = Math.min(
-    NETWORK_RETRY_POLICY.initialDelayMs * 2 ** (normalizedRetry - 1),
-    NETWORK_RETRY_POLICY.maxDelayMs,
+    RESOLVED_NETWORK_RETRY_POLICY.initialDelayMs * 2 ** (normalizedRetry - 1),
+    RESOLVED_NETWORK_RETRY_POLICY.maxDelayMs,
   );
   if (retryAfterMs !== undefined && Number.isFinite(retryAfterMs) && retryAfterMs >= 0) {
     return Math.min(backoff, retryAfterMs);

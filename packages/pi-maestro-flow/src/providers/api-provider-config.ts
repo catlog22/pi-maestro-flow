@@ -19,8 +19,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getSupportedThinkingLevels, type ModelCost } from "@earendil-works/pi-ai";
-import { NETWORK_RETRY_POLICY } from "pi-maestro-teammate/v1/retry";
-import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
+import { NETWORK_RETRY_POLICY, RESOLVED_NETWORK_RETRY_POLICY } from "pi-maestro-teammate/v1/retry";
+import { getTuiLocale } from "../tui/locale.ts";
 import {
   EFFORT_LEVELS,
   EFFORT_STATUS_KEY,
@@ -71,10 +71,7 @@ const API_FORMAT_NAMES: Readonly<Record<string, string>> = Object.freeze({
   "google-vertex": "Google Vertex AI",
 });
 
-/**
- * UI copy for the API Manager menu/notification surface. zh-CN is the runtime
- * default until the host wires a locale signal through the command context.
- */
+/** UI copy for the API Manager menu and notification surface. */
 const CATALOGS = {
   en: {
     "effort.noModel": "No active model; cannot adjust thinking effort.",
@@ -90,6 +87,8 @@ const CATALOGS = {
     "retry.confirmTitle": "Save Provider retry settings?",
     "retry.summary": "Auto-retry: {state}",
     "retry.count": "Max retry count: {count}",
+    "retry.maxDelay": "Max backoff delay (last retry wait): {delay}ms",
+    "retry.maxDelayPrompt": "Max backoff delay in ms before the final retry (0-600000)",
     "retry.owner": "Execution owner: Pi core (exponential backoff, live status in TUI)",
     "retry.notifySummary": "Provider auto-retry: {state}",
     "retry.notifyPath": "Config: {path}",
@@ -100,6 +99,65 @@ const CATALOGS = {
     "manager.configureNeedTui": "/api-manager configure requires an interactive Pi session.",
     "manager.actionNeedTui": "/api-manager {action} requires an interactive Pi session.",
     "manager.specifyProvider": "Specify a Provider: openai, qwen, anthropic, or a user-defined Provider ID.",
+    "manager.configFailed": "API configuration failed: {message}",
+    "manager.commandDescription": "Manage API models and Provider configuration",
+    "effort.commandDescription": "Adjust thinking effort for the current model (shortcut for /api-manager effort)",
+    "retry.initFailed": "Failed to initialize default retry settings: {message}",
+    "form.title.add": "Add {name} model",
+    "form.title.edit": "Edit {name} / {model}",
+    "form.section.connection": "Connection (Provider / URL level)",
+    "form.section.compat": "Compatibility (format level)",
+    "form.section.model": "Model settings",
+    "form.label.providerName": "Provider display name",
+    "form.label.headers": "Request headers JSON",
+    "form.label.authHeader": "Authorization",
+    "form.label.developerRole": "Developer role",
+    "form.label.maxTokensField": "Output request field",
+    "form.label.reasoning": "Reasoning capability",
+    "form.label.defaultThinking": "Default thinking effort",
+    "form.label.contextWindow": "Context window",
+    "form.label.maxTokens": "Max output per response",
+    "form.label.multimodal": "Multimodal (vision)",
+    "form.help.apiKey": "The API key is masked; leave it untouched to preserve the current models.json value.",
+    "form.help.headers": "Headers may contain credentials. The form only shows a mask; enter the complete JSON object when editing.",
+    "form.help.modelAdd": "Separate multiple Model IDs with commas to add them together; the remaining fields are used as a template.",
+    "form.help.modelEdit": "Changing the Model ID renames this entry and migrates its thinking default and default-model reference; the new ID must not collide.",
+    "form.help.multimodal": "On writes input: [text, image]; off writes input: [text] for vision delegation capability checks.",
+    "form.choice.auto": "Auto",
+    "form.choice.autoUrl": "Auto (detect from URL)",
+    "form.choice.bearer": "Bearer",
+    "form.choice.noSend": "Do not send",
+    "form.choice.supported": "Supported",
+    "form.choice.unsupported": "Unsupported",
+    "form.confirm.preset": "Save {name} API configuration?",
+    "form.confirm.provider": "Save Provider {name}?",
+    "form.preview.compat": "Compat: {value}",
+    "form.preview.headers": "Headers: {value}",
+    "form.preview.authorization": "Authorization: {value}",
+    "form.value.none": "none",
+    "form.saved": "Saved {count} models: {models}; default thinking effort is {level}",
+    "preview.contextWindow": "Context window: {value} tokens (combined input and output; local registration)",
+    "preview.provider": "Provider: {value}",
+    "preview.api": "API format: {value}",
+    "preview.baseUrl": "Base URL: {value}",
+    "preview.model": "Model: {value}",
+    "preview.maxTokens": "Max output per response: {value} tokens",
+    "preview.reasoning": "Reasoning: {value}",
+    "preview.multimodal": "Multimodal (vision): {value}",
+    "preview.defaultThinking": "Default thinking (current model): {value}",
+    "preview.auth": "Auth: stored API key",
+    "preview.isolation": "Isolation: models under one Provider share the URL and API key",
+    "preview.enabled": "enabled",
+    "preview.disabled": "disabled",
+    "validation.modelRequired": "Model ID is required",
+    "validation.singleModel": "Editing an existing model requires exactly one Model ID",
+    "validation.duplicateModel": "Model ID {model} is duplicated; each model may appear only once",
+    "validation.modelExists": "Model {model} already exists; return to the list and select it for editing",
+    "validation.thinkingIncompatible": "Default thinking effort {level} is incompatible with the current API or reasoning capability",
+    "validation.fieldInvalid": "Form field {field} is invalid",
+    "validation.thinkingInvalid": "Thinking effort {level} is invalid",
+    "validation.headersJson": "Request headers JSON is invalid",
+    "validation.headersObject": "Request headers must be a JSON object with string keys and values",
   },
   "zh-CN": {
     "effort.noModel": "当前没有模型，无法调整思考强度。",
@@ -115,6 +173,8 @@ const CATALOGS = {
     "retry.confirmTitle": "保存 Provider 重试配置？",
     "retry.summary": "自动重试：{state}",
     "retry.count": "最大重试次数：{count}",
+    "retry.maxDelay": "最大退避延迟（最后一次重试等待）：{delay}ms",
+    "retry.maxDelayPrompt": "最后一次重试前的最大退避毫秒数（0-600000）",
     "retry.owner": "执行所有权：Pi core（指数退避，TUI 显示实时状态）",
     "retry.notifySummary": "Provider 自动重试：{state}",
     "retry.notifyPath": "配置：{path}",
@@ -125,19 +185,75 @@ const CATALOGS = {
     "manager.configureNeedTui": "/api-manager configure 需要交互式 Pi 会话。",
     "manager.actionNeedTui": "/api-manager {action} 需要交互式 Pi 会话。",
     "manager.specifyProvider": "请指定 Provider：openai、qwen、anthropic 或用户定义的 Provider ID。",
+    "manager.configFailed": "API 配置失败：{message}",
+    "manager.commandDescription": "管理 API 模型与 Provider 配置",
+    "effort.commandDescription": "调整当前模型的思考强度（/api-manager effort 的快捷入口）",
+    "retry.initFailed": "Retry 默认配置初始化失败：{message}",
+    "form.title.add": "新增 {name} 模型",
+    "form.title.edit": "修改 {name} / {model}",
+    "form.section.connection": "连接（Provider / URL 级）",
+    "form.section.compat": "兼容（format 级）",
+    "form.section.model": "模型（Model 级）",
+    "form.label.providerName": "Provider 显示名称",
+    "form.label.headers": "请求头 JSON",
+    "form.label.authHeader": "Authorization",
+    "form.label.developerRole": "Developer 角色",
+    "form.label.maxTokensField": "输出请求字段",
+    "form.label.reasoning": "推理能力",
+    "form.label.defaultThinking": "默认思考强度",
+    "form.label.contextWindow": "上下文窗口",
+    "form.label.maxTokens": "单次最大输出",
+    "form.label.multimodal": "多模态（视觉）",
+    "form.help.apiKey": "API key 仅显示掩码；不编辑即可保留 models.json 中的当前值。",
+    "form.help.headers": "请求头可能包含凭据，表单仅显示掩码；编辑时需输入完整 JSON 对象。",
+    "form.help.modelAdd": "多个 Model ID 用逗号分隔，一次新增多个模型（其余字段作为模板应用到每个模型）。",
+    "form.help.modelEdit": "修改 Model ID 将重命名该模型，并迁移思考强度默认值与默认模型引用；新 ID 不能与其他模型冲突。",
+    "form.help.multimodal": "开启时写入 input: [text, image]；关闭时写入 input: [text]，用于视觉委托能力判断。",
+    "form.choice.auto": "自动",
+    "form.choice.autoUrl": "自动（按 URL 识别）",
+    "form.choice.bearer": "Bearer",
+    "form.choice.noSend": "不发送",
+    "form.choice.supported": "支持",
+    "form.choice.unsupported": "不支持",
+    "form.confirm.preset": "保存 {name} API 配置？",
+    "form.confirm.provider": "保存 Provider {name}？",
+    "form.preview.compat": "Compat：{value}",
+    "form.preview.headers": "请求头：{value}",
+    "form.preview.authorization": "Authorization：{value}",
+    "form.value.none": "无",
+    "form.saved": "已保存 {count} 个模型：{models}，默认思考强度为 {level}",
+    "preview.contextWindow": "上下文窗口：{value} Token（输入+输出总量，本地注册值）",
+    "preview.provider": "Provider：{value}",
+    "preview.api": "API format：{value}",
+    "preview.baseUrl": "Base URL：{value}",
+    "preview.model": "Model：{value}",
+    "preview.maxTokens": "单次最大输出：{value} Token",
+    "preview.reasoning": "推理能力：{value}",
+    "preview.multimodal": "多模态（视觉）：{value}",
+    "preview.defaultThinking": "默认思考强度（当前 model）：{value}",
+    "preview.auth": "认证：已保存 API key",
+    "preview.isolation": "隔离：同 Provider 下所有模型共享 URL 与 API key",
+    "preview.enabled": "enabled",
+    "preview.disabled": "disabled",
+    "validation.modelRequired": "Model ID 不能为空",
+    "validation.singleModel": "修改已有模型时只能指定一个 Model ID",
+    "validation.duplicateModel": "Model ID {model} 重复；每个模型只能出现一次",
+    "validation.modelExists": "Model {model} 已存在；请返回列表选择该 model 进行修改",
+    "validation.thinkingIncompatible": "默认思考强度 {level} 与当前 API / 推理能力不兼容",
+    "validation.fieldInvalid": "表单字段 {field} 无效",
+    "validation.thinkingInvalid": "思考强度 {level} 无效",
+    "validation.headersJson": "请求头 JSON 格式无效",
+    "validation.headersObject": "请求头必须是字符串键值的 JSON 对象",
   },
 } as const;
 
-type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
+type CatalogKey = keyof (typeof CATALOGS)["en"];
 
-/** UI language for the API Manager menu/notification surface. */
-const API_UI_LOCALE: SupportedSettingsLocale = "zh-CN";
-
-/** Translate a catalog key with optional {var} substitution. */
+/** Translate a catalog key using the current shared TUI locale. */
 function t(key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
-  const catalog = CATALOGS[API_UI_LOCALE] ?? CATALOGS["zh-CN"];
+  const catalog = CATALOGS[getTuiLocale()] ?? CATALOGS.en;
   const template: unknown = catalog[key];
-  const text = typeof template === "string" ? template : CATALOGS["zh-CN"][key] as string;
+  const text = typeof template === "string" ? template : CATALOGS.en[key] as string;
   if (!vars) return text;
   return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
     vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
@@ -188,6 +304,19 @@ const THINKING_FORMAT_OPTIONS: ReadonlyArray<{ label: string; value?: string }> 
 
 const AUTO_LABEL = "自动（按 URL 识别）";
 
+function thinkingFormatOptions(): ReadonlyArray<{ label: string; value?: string }> {
+  if (getTuiLocale() === "zh-CN") return THINKING_FORMAT_OPTIONS;
+  return [
+    { label: "Auto (detect from URL, recommended)" },
+    { label: "openai (reasoning_effort)", value: "openai" },
+    { label: "openrouter (reasoning.effort)", value: "openrouter" },
+    { label: "deepseek (thinking.type; also direct api.z.ai)", value: "deepseek" },
+    { label: "zai (enable_thinking; DashScope-hosted GLM)", value: "zai" },
+    { label: "qwen (enable_thinking)", value: "qwen" },
+    { label: "qwen-chat-template (chat_template_kwargs)", value: "qwen-chat-template" },
+  ];
+}
+
 export function apiFormatLabel(api: string): string {
   const name = API_FORMAT_NAMES[api];
   return name ? `${name} (${api})` : api;
@@ -224,6 +353,8 @@ export interface ApiRetrySettings {
   maxRetries: number;
   /** Optional: saved callers preserve the existing value; loaders always resolve a default. */
   baseDelayMs?: number;
+  /** Optional: backoff cap (last retry's maximum wait); loaders resolve `RESOLVED_NETWORK_RETRY_POLICY.maxDelayMs` by default. */
+  maxDelayMs?: number;
 }
 
 export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "effort" | "enable" | "list" | "logout" | "price" | "reset" | "retry" | "show" | "toggle" | "vision";
@@ -359,19 +490,19 @@ export function registerApiProviderConfigs(
       try {
         await showApiProviderManager(pi, args, ctx, modelsPath, defaultsPath, settingsPath);
       } catch (error) {
-        ctx.ui.notify(`API 配置失败：${errorMessage(error)}`, "error");
+        ctx.ui.notify(t("manager.configFailed", { message: errorMessage(error) }), "error");
       }
     },
   };
   if (typeof pi.registerCommand !== "function") return handle;
   pi.registerCommand("api-manager", {
-    description: "管理 API 模型与 Provider 配置",
+    description: t("manager.commandDescription"),
     async handler(args, ctx) {
       await handle.openManager(ctx, args);
     },
   });
   pi.registerCommand("effort", {
-    description: "调整当前模型的思考强度（/api-manager effort 的快捷入口）",
+    description: t("effort.commandDescription"),
     async handler(_args, ctx) {
       await adjustThinkingEffort(pi, ctx, defaultsPath);
     },
@@ -381,7 +512,7 @@ export function registerApiProviderConfigs(
       try {
         await ensureApiRetryDefaults(settingsPath);
       } catch (error) {
-        ctx.ui.notify(`Retry 默认配置初始化失败：${errorMessage(error)}`, "warning");
+        ctx.ui.notify(t("retry.initFailed", { message: errorMessage(error) }), "warning");
       }
       syncEffortStatus(ctx, pi.getThinkingLevel());
     });
@@ -598,6 +729,9 @@ export async function loadApiRetrySettings(
     baseDelayMs: isPositiveInteger(retry.baseDelayMs)
       ? retry.baseDelayMs
       : API_RETRY_DEFAULT_BASE_DELAY_MS,
+    maxDelayMs: isPositiveInteger(retry.maxDelayMs)
+      ? retry.maxDelayMs
+      : RESOLVED_NETWORK_RETRY_POLICY.maxDelayMs,
   };
 }
 
@@ -610,15 +744,26 @@ export async function saveApiRetrySettings(
     const exists = await fileExists(settingsPath);
     const root = await readModelsRoot(settingsPath);
     const retry = isRecord(root.retry) ? root.retry : {};
+    // Explicit values win (settings UI / command); callers that omit a field
+    // keep the persisted value, falling back to the policy default.
+    const baseDelayMs = settings.baseDelayMs !== undefined
+      ? settings.baseDelayMs
+      : isPositiveInteger(retry.baseDelayMs)
+        ? retry.baseDelayMs
+        : API_RETRY_DEFAULT_BASE_DELAY_MS;
+    const maxDelayMs = settings.maxDelayMs !== undefined
+      ? settings.maxDelayMs
+      : isPositiveInteger(retry.maxDelayMs)
+        ? retry.maxDelayMs
+        : RESOLVED_NETWORK_RETRY_POLICY.maxDelayMs;
     await writeModelsRoot({
       ...root,
       retry: {
         ...retry,
         enabled: settings.enabled,
         maxRetries,
-        baseDelayMs: isPositiveInteger(retry.baseDelayMs)
-          ? retry.baseDelayMs
-          : API_RETRY_DEFAULT_BASE_DELAY_MS,
+        baseDelayMs,
+        maxDelayMs,
       },
     }, settingsPath, exists);
   });
@@ -668,6 +813,7 @@ async function manageRetrySettings(
   if (!enabledChoice) return;
   const enabled = enabledChoice === enabledLabel;
   let maxRetries = current.maxRetries;
+  let maxDelayMs = current.maxDelayMs;
   if (enabled) {
     const input = await ctx.ui.input(
       t("retry.countPrompt", { max: API_RETRY_MAX_RETRIES }),
@@ -675,17 +821,25 @@ async function manageRetrySettings(
     );
     if (input === undefined) return;
     maxRetries = retryCount(input);
+    const delayInput = await ctx.ui.input(
+      t("retry.maxDelayPrompt"),
+      String(current.maxDelayMs),
+    );
+    if (delayInput === undefined) return;
+    const parsed = Number(delayInput);
+    if (Number.isFinite(parsed) && parsed >= 0) maxDelayMs = Math.floor(parsed);
   }
   const confirmed = await ctx.ui.confirm(
     t("retry.confirmTitle"),
     [
       t("retry.summary", { state: enabled ? t("retry.on") : t("retry.off") }),
       t("retry.count", { count: maxRetries }),
+      t("retry.maxDelay", { delay: maxDelayMs ?? RESOLVED_NETWORK_RETRY_POLICY.maxDelayMs }),
       t("retry.owner"),
     ].join("\n"),
   );
   if (!confirmed) return;
-  const next = { enabled, maxRetries };
+  const next = { enabled, maxRetries, maxDelayMs };
   await saveApiRetrySettings(next, settingsPath);
   notifyRetrySettings(ctx, next, settingsPath);
 }
@@ -916,6 +1070,7 @@ function notifyRetrySettings(
   ctx.ui.notify([
     t("retry.notifySummary", { state: settings.enabled ? t("retry.on") : t("retry.off") }),
     t("retry.count", { count: settings.maxRetries }),
+    t("retry.maxDelay", { delay: settings.maxDelayMs ?? RESOLVED_NETWORK_RETRY_POLICY.maxDelayMs }),
     t("retry.notifyPath", { path: settingsPath }),
   ].join("\n"), "info");
 }
@@ -1177,7 +1332,7 @@ async function configurePresetModelWithSteps(
   const multimodal = multimodalChoice.startsWith("启用");
 
   const confirmed = await ctx.ui.confirm(
-    `保存 ${provider.name} API 配置？`,
+    t("form.confirm.preset", { name: provider.name }),
     [
       `Provider：${targetProviderId}`,
       `API format：${apiFormatLabel(provider.api)}`,
@@ -1524,9 +1679,12 @@ async function configurePresetModelWithForm(
       ?? currentDefaultThinkingLevel(ctx, modelsPath)
     : currentDefaultThinkingLevel(ctx, modelsPath);
   const result = await showApiModelEditor(ctx, {
-    title: adding ? `新增 ${provider.name} 模型` : `修改 ${provider.name} / ${modelId}`,
+    title: adding
+      ? t("form.title.add", { name: provider.name })
+      : t("form.title.edit", { name: provider.name, model: modelId }),
+    locale: getTuiLocale(),
     fields: [
-      { id: "connection-section", label: "连接（Provider / URL 级）", kind: "section", value: "" },
+      { id: "connection-section", label: t("form.section.connection"), kind: "section", value: "" },
       { id: "provider", label: "Provider", kind: "readonly", value: provider.id },
       { id: "api", label: "API format", kind: "readonly", value: apiFormatLabel(provider.api) },
       { id: "baseUrl", label: "Base URL", kind: "text", value: current.baseUrl },
@@ -1535,34 +1693,32 @@ async function configurePresetModelWithForm(
         label: "API key",
         kind: "secret",
         value: current.apiKey,
-        help: "API key 仅显示掩码；不编辑即可保留 models.json 中的当前值。",
+        help: t("form.help.apiKey"),
       },
-      { id: "model-section", label: "模型（Model 级）", kind: "section", value: "" },
+      { id: "model-section", label: t("form.section.model"), kind: "section", value: "" },
       {
         id: "modelId",
         label: "Model ID",
         kind: "text",
         value: adding ? (current.configured ? "" : provider.modelId) : current.modelId,
-        help: adding
-          ? "多个 Model ID 用逗号分隔，一次新增多个模型（其余字段作为模板应用到每个模型）"
-          : "修改 Model ID 将重命名该模型：条目原位更名，思考强度默认值与默认模型引用自动迁移；新 ID 不能与其他模型冲突。",
+        help: adding ? t("form.help.modelAdd") : t("form.help.modelEdit"),
       },
-      { id: "reasoning", label: "推理能力", kind: "toggle", value: current.reasoning },
+      { id: "reasoning", label: t("form.label.reasoning"), kind: "toggle", value: current.reasoning },
       {
         id: "defaultThinking",
-        label: "默认思考强度",
+        label: t("form.label.defaultThinking"),
         kind: "choice",
         value: reconcileFormThinkingLevel(provider.api, current.reasoning, currentThinking, maxThinking),
         choices: thinkingFormChoices(provider.api, maxThinking),
       },
-      { id: "contextWindow", label: "上下文窗口", kind: "number", value: String(current.contextWindow) },
-      { id: "maxTokens", label: "单次最大输出", kind: "number", value: String(current.maxTokens) },
+      { id: "contextWindow", label: t("form.label.contextWindow"), kind: "number", value: String(current.contextWindow) },
+      { id: "maxTokens", label: t("form.label.maxTokens"), kind: "number", value: String(current.maxTokens) },
       {
         id: "multimodal",
-        label: "多模态（视觉）",
+        label: t("form.label.multimodal"),
         kind: "toggle",
         value: current.multimodal !== false,
-        help: "开启时写入 input: [text, image]；关闭时写入 input: [text]，用于视觉委托能力判断。",
+        help: t("form.help.multimodal"),
       },
     ],
     validate: (values) => validateApiModelForm(
@@ -1581,12 +1737,12 @@ async function configurePresetModelWithForm(
   const reasoning = formBoolean(result.values, "reasoning");
   const multimodal = formBooleanOrDefault(result.values, "multimodal", current.multimodal !== false);
   const defaultThinkingLevel = formThinkingLevel(result.values, "defaultThinking");
-  const contextWindow = positiveInteger(formText(result.values, "contextWindow"), "上下文窗口 contextWindow");
-  const maxTokens = positiveInteger(formText(result.values, "maxTokens"), "单次最大输出 maxTokens");
+  const contextWindow = positiveInteger(formText(result.values, "contextWindow"), t("form.label.contextWindow"));
+  const maxTokens = positiveInteger(formText(result.values, "maxTokens"), t("form.label.maxTokens"));
   validateModelWindow(contextWindow, maxTokens);
   const apiKey = required(formText(result.values, "apiKey"), "API key");
   const confirmed = await ctx.ui.confirm(
-    `保存 ${provider.name} API 配置？`,
+    t("form.confirm.preset", { name: provider.name }),
     modelSavePreview({
       providerId: targetProviderId,
       api: provider.api,
@@ -1643,7 +1799,11 @@ async function configurePresetModelWithForm(
     ctx,
     provider.name,
     saveResult,
-    `已保存 ${nextModelIds.length} 个模型：${nextModelIds.map((id) => `${targetProviderId}/${id}`).join(", ")}，默认思考强度为 ${defaultThinkingLevel}`,
+    t("form.saved", {
+      count: nextModelIds.length,
+      models: nextModelIds.map((id) => `${targetProviderId}/${id}`).join(", "),
+      level: defaultThinkingLevel,
+    }),
   );
 }
 
@@ -1669,9 +1829,12 @@ async function configureCustomModelWithForm(
     : currentDefaultThinkingLevel(ctx, modelsPath);
   const compat = current.compat ?? {};
   const result = await showApiModelEditor(ctx, {
-    title: adding ? `新增 ${displayName} 模型` : `修改 ${displayName} / ${modelId}`,
+    title: adding
+      ? t("form.title.add", { name: displayName })
+      : t("form.title.edit", { name: displayName, model: modelId }),
+    locale: getTuiLocale(),
     fields: [
-      { id: "connection-section", label: "连接（Provider / URL 级）", kind: "section", value: "" },
+      { id: "connection-section", label: t("form.section.connection"), kind: "section", value: "" },
       { id: "provider", label: "Provider", kind: "readonly", value: providerId },
       {
         id: "api",
@@ -1683,34 +1846,34 @@ async function configureCustomModelWithForm(
           KNOWN_APIS.map((api) => ({ label: apiFormatLabel(api), value: api })),
         ),
       },
-      { id: "name", label: "Provider 显示名称", kind: "text", value: current.name ?? providerId },
+      { id: "name", label: t("form.label.providerName"), kind: "text", value: current.name ?? providerId },
       { id: "baseUrl", label: "Base URL", kind: "text", value: current.baseUrl },
       {
         id: "apiKey",
         label: "API key",
         kind: "secret",
         value: current.apiKey,
-        help: "API key 仅显示掩码；不编辑即可保留 models.json 中的当前值。",
+        help: t("form.help.apiKey"),
       },
       {
         id: "headers",
-        label: "请求头 JSON",
+        label: t("form.label.headers"),
         kind: "secret",
         value: JSON.stringify(current.headers ?? {}),
-        help: "请求头可能包含凭据，表单仅显示掩码；编辑时需输入完整 JSON 对象。",
+        help: t("form.help.headers"),
       },
       {
         id: "authHeader",
-        label: "Authorization",
+        label: t("form.label.authHeader"),
         kind: "choice",
         value: triStateValue(current.authHeader),
         choices: [
-          { label: "自动", value: "auto" },
-          { label: "Bearer", value: "true" },
-          { label: "不发送", value: "false" },
+          { label: t("form.choice.auto"), value: "auto" },
+          { label: t("form.choice.bearer"), value: "true" },
+          { label: t("form.choice.noSend"), value: "false" },
         ],
       },
-      { id: "compat-section", label: "兼容（format 级）", kind: "section", value: "" },
+      { id: "compat-section", label: t("form.section.compat"), kind: "section", value: "" },
       {
         id: "thinkingFormat",
         label: "Thinking format",
@@ -1718,65 +1881,63 @@ async function configureCustomModelWithForm(
         value: typeof compat.thinkingFormat === "string" ? compat.thinkingFormat : "",
         choices: formChoicesWithCurrent(
           typeof compat.thinkingFormat === "string" ? compat.thinkingFormat : "",
-          [{ label: "自动（按 URL 识别）", value: "" }, ...THINKING_FORMAT_OPTIONS.flatMap((entry) =>
+          [{ label: t("form.choice.autoUrl"), value: "" }, ...thinkingFormatOptions().flatMap((entry) =>
             entry.value ? [{ label: entry.label, value: entry.value }] : []
           )],
         ),
       },
       {
         id: "supportsDeveloperRole",
-        label: "Developer 角色",
+        label: t("form.label.developerRole"),
         kind: "choice",
         value: triStateValue(compat.supportsDeveloperRole),
-        choices: TRI_STATE_CHOICES,
+        choices: triStateChoices(),
       },
       {
         id: "supportsReasoningEffort",
         label: "Reasoning effort",
         kind: "choice",
         value: triStateValue(compat.supportsReasoningEffort),
-        choices: TRI_STATE_CHOICES,
+        choices: triStateChoices(),
       },
       {
         id: "maxTokensField",
-        label: "输出请求字段",
+        label: t("form.label.maxTokensField"),
         kind: "choice",
         value: typeof compat.maxTokensField === "string" ? compat.maxTokensField : "",
         choices: formChoicesWithCurrent(
           typeof compat.maxTokensField === "string" ? compat.maxTokensField : "",
           [
-            { label: "自动", value: "" },
+            { label: t("form.choice.auto"), value: "" },
             { label: "max_completion_tokens", value: "max_completion_tokens" },
             { label: "max_tokens", value: "max_tokens" },
           ],
         ),
       },
-      { id: "model-section", label: "模型（Model 级）", kind: "section", value: "" },
+      { id: "model-section", label: t("form.section.model"), kind: "section", value: "" },
       {
         id: "modelId",
         label: "Model ID",
         kind: "text",
         value: adding ? "" : current.modelId,
-        help: adding
-          ? "多个 Model ID 用逗号分隔，一次新增多个模型（其余字段作为模板应用到每个模型）"
-          : "修改 Model ID 将重命名该模型：条目原位更名，思考强度默认值与默认模型引用自动迁移；新 ID 不能与其他模型冲突。",
+        help: adding ? t("form.help.modelAdd") : t("form.help.modelEdit"),
       },
-      { id: "reasoning", label: "推理能力", kind: "toggle", value: current.reasoning },
+      { id: "reasoning", label: t("form.label.reasoning"), kind: "toggle", value: current.reasoning },
       {
         id: "defaultThinking",
-        label: "默认思考强度",
+        label: t("form.label.defaultThinking"),
         kind: "choice",
         value: reconcileFormThinkingLevel(currentApi, current.reasoning, currentThinking, maxThinking),
         choices: thinkingFormChoices(currentApi, maxThinking),
       },
-      { id: "contextWindow", label: "上下文窗口", kind: "number", value: String(current.contextWindow) },
-      { id: "maxTokens", label: "单次最大输出", kind: "number", value: String(current.maxTokens) },
+      { id: "contextWindow", label: t("form.label.contextWindow"), kind: "number", value: String(current.contextWindow) },
+      { id: "maxTokens", label: t("form.label.maxTokens"), kind: "number", value: String(current.maxTokens) },
       {
         id: "multimodal",
-        label: "多模态（视觉）",
+        label: t("form.label.multimodal"),
         kind: "toggle",
         value: current.multimodal !== false,
-        help: "开启时写入 input: [text, image]；关闭时写入 input: [text]，用于视觉委托能力判断。",
+        help: t("form.help.multimodal"),
       },
     ],
     validate: (values) => {
@@ -1805,8 +1966,8 @@ async function configureCustomModelWithForm(
   const reasoning = formBoolean(result.values, "reasoning");
   const multimodal = formBooleanOrDefault(result.values, "multimodal", current.multimodal !== false);
   const defaultThinkingLevel = formThinkingLevel(result.values, "defaultThinking");
-  const contextWindow = positiveInteger(formText(result.values, "contextWindow"), "上下文窗口 contextWindow");
-  const maxTokens = positiveInteger(formText(result.values, "maxTokens"), "单次最大输出 maxTokens");
+  const contextWindow = positiveInteger(formText(result.values, "contextWindow"), t("form.label.contextWindow"));
+  const maxTokens = positiveInteger(formText(result.values, "maxTokens"), t("form.label.maxTokens"));
   validateModelWindow(contextWindow, maxTokens);
   const apiKey = required(formText(result.values, "apiKey"), "API key");
   const headers = parseHeadersForm(formText(result.values, "headers"));
@@ -1818,7 +1979,7 @@ async function configureCustomModelWithForm(
   const authHeaderValue = formText(result.values, "authHeader");
   const authHeader = authHeaderValue === "auto" ? undefined : authHeaderValue === "true";
   const confirmed = await ctx.ui.confirm(
-    `保存 Provider ${nextDisplayName}？`,
+    t("form.confirm.provider", { name: nextDisplayName }),
     [
       modelSavePreview({
         providerId: targetProviderId,
@@ -1833,9 +1994,19 @@ async function configureCustomModelWithForm(
         defaultThinkingLevel,
         cwd: ctx.cwd,
       }),
-      `Compat：${nextCompat && Object.keys(nextCompat).length > 0 ? JSON.stringify(nextCompat) : "自动"}`,
-      `请求头：${Object.keys(headers).length > 0 ? Object.keys(headers).join(", ") : "无"}`,
-      `Authorization：${authHeader === undefined ? "自动" : authHeader ? "Bearer" : "关闭"}`,
+      t("form.preview.compat", {
+        value: nextCompat && Object.keys(nextCompat).length > 0
+          ? JSON.stringify(nextCompat)
+          : t("form.choice.auto"),
+      }),
+      t("form.preview.headers", {
+        value: Object.keys(headers).length > 0 ? Object.keys(headers).join(", ") : t("form.value.none"),
+      }),
+      t("form.preview.authorization", {
+        value: authHeader === undefined
+          ? t("form.choice.auto")
+          : authHeader ? t("form.choice.bearer") : t("retry.off"),
+      }),
     ].join("\n"),
   );
   if (!confirmed) return;
@@ -1886,7 +2057,11 @@ async function configureCustomModelWithForm(
     ctx,
     nextDisplayName,
     saveResult,
-    `已保存 ${nextModelIds.length} 个模型：${nextModelIds.map((id) => `${targetProviderId}/${id}`).join(", ")}，默认思考强度为 ${defaultThinkingLevel}`,
+    t("form.saved", {
+      count: nextModelIds.length,
+      models: nextModelIds.map((id) => `${targetProviderId}/${id}`).join(", "),
+      level: defaultThinkingLevel,
+    }),
   );
 }
 
@@ -1905,19 +2080,20 @@ interface ModelSavePreviewInput {
 }
 
 function modelSavePreview(input: ModelSavePreviewInput): string {
+  const state = (enabled: boolean): string => t(enabled ? "preview.enabled" : "preview.disabled");
   return [
-    `Provider：${input.providerId}`,
-    `API format：${apiFormatLabel(input.api)}`,
-    `Base URL：${input.baseUrl}`,
-    `Model：${input.modelIds.join(", ")}`,
-    `上下文窗口 contextWindow：${input.contextWindow.toLocaleString("en-US")} Token（输入+输出总量，本地注册值）`,
-    `单次最大输出 maxTokens：${input.maxTokens.toLocaleString("en-US")} Token`,
+    t("preview.provider", { value: input.providerId }),
+    t("preview.api", { value: apiFormatLabel(input.api) }),
+    t("preview.baseUrl", { value: input.baseUrl }),
+    t("preview.model", { value: input.modelIds.join(", ") }),
+    t("preview.contextWindow", { value: input.contextWindow.toLocaleString(getTuiLocale()) }),
+    t("preview.maxTokens", { value: input.maxTokens.toLocaleString(getTuiLocale()) }),
     ...compactionPreviewLines(input.cwd, input.contextWindow, input.maxTokens),
-    `Reasoning：${input.reasoning ? "enabled" : "disabled"}`,
-    `多模态（视觉）：${input.multimodal ? "enabled" : "disabled"}`,
-    `Default thinking（当前 model）：${input.defaultThinkingLevel}`,
-    "Auth：stored API key",
-    "隔离：同 Provider 下所有模型共享 URL 与 API key",
+    t("preview.reasoning", { value: state(input.reasoning) }),
+    t("preview.multimodal", { value: state(input.multimodal) }),
+    t("preview.defaultThinking", { value: input.defaultThinkingLevel }),
+    t("preview.auth"),
+    t("preview.isolation"),
   ].join("\n");
 }
 
@@ -1926,11 +2102,13 @@ function parseModelIdList(value: string): string[] {
   return value.split(",").map((id) => id.trim()).filter((id) => id.length > 0);
 }
 
-const TRI_STATE_CHOICES: readonly ApiModelFormChoice[] = [
-  { label: "自动", value: "auto" },
-  { label: "支持", value: "true" },
-  { label: "不支持", value: "false" },
-];
+function triStateChoices(): ApiModelFormChoice[] {
+  return [
+    { label: t("form.choice.auto"), value: "auto" },
+    { label: t("form.choice.supported"), value: "true" },
+    { label: t("form.choice.unsupported"), value: "false" },
+  ];
+}
 
 function supportsApiModelForm(ctx: ExtensionCommandContext): boolean {
   return typeof (ctx.ui as { custom?: unknown }).custom === "function";
@@ -1978,25 +2156,25 @@ function validateApiModelForm(
   try {
     normalizeBaseUrl(formText(values, "baseUrl"));
     const modelIds = parseModelIdList(formText(values, "modelId"));
-    if (modelIds.length === 0) throw new Error("Model ID 不能为空");
-    if (single && modelIds.length !== 1) errors.push("修改已有模型时只能指定一个 Model ID");
+    if (modelIds.length === 0) throw new Error(t("validation.modelRequired"));
+    if (single && modelIds.length !== 1) errors.push(t("validation.singleModel"));
     const seen = new Set<string>();
     for (const modelId of modelIds) {
-      if (seen.has(modelId)) errors.push(`Model ID ${modelId} 重复；每个模型只能出现一次`);
+      if (seen.has(modelId)) errors.push(t("validation.duplicateModel", { model: modelId }));
       seen.add(modelId);
       if (duplicateModelIds?.includes(modelId)) {
-        errors.push(`Model ${modelId} 已存在；请返回列表选择该 model 进行修改`);
+        errors.push(t("validation.modelExists", { model: modelId }));
       }
     }
-    const contextWindow = positiveInteger(formText(values, "contextWindow"), "上下文窗口 contextWindow");
-    const maxTokens = positiveInteger(formText(values, "maxTokens"), "单次最大输出 maxTokens");
+    const contextWindow = positiveInteger(formText(values, "contextWindow"), t("form.label.contextWindow"));
+    const maxTokens = positiveInteger(formText(values, "maxTokens"), t("form.label.maxTokens"));
     validateModelWindow(contextWindow, maxTokens);
     required(formText(values, "apiKey"), "API key");
     const reasoning = formBoolean(values, "reasoning");
     const thinking = formThinkingLevel(values, "defaultThinking");
     const supported: ApiThinkingLevel[] = reasoning ? supportedThinkingFormValues(api, maxThinking) : ["off"];
     if (!supported.includes(thinking)) {
-      errors.push(`默认思考强度 ${thinking} 与当前 API / 推理能力不兼容`);
+      errors.push(t("validation.thinkingIncompatible", { level: thinking }));
     }
   } catch (error) {
     errors.push(errorMessage(error));
@@ -2006,13 +2184,13 @@ function validateApiModelForm(
 
 function formText(values: ApiModelFormValues, id: string): string {
   const value = values[id];
-  if (typeof value !== "string") throw new Error(`表单字段 ${id} 无效`);
+  if (typeof value !== "string") throw new Error(t("validation.fieldInvalid", { field: id }));
   return value;
 }
 
 function formBoolean(values: ApiModelFormValues, id: string): boolean {
   const value = values[id];
-  if (typeof value !== "boolean") throw new Error(`表单字段 ${id} 无效`);
+  if (typeof value !== "boolean") throw new Error(t("validation.fieldInvalid", { field: id }));
   return value;
 }
 
@@ -2023,7 +2201,7 @@ function formBooleanOrDefault(values: ApiModelFormValues, id: string, fallback: 
 
 function formThinkingLevel(values: ApiModelFormValues, id: string): ApiThinkingLevel {
   const value = formText(values, id);
-  if (!isThinkingLevel(value)) throw new Error(`思考强度 ${value} 无效`);
+  if (!isThinkingLevel(value)) throw new Error(t("validation.thinkingInvalid", { level: value }));
   return value;
 }
 
@@ -2046,9 +2224,9 @@ function parseHeadersForm(value: string): Record<string, string> {
   try {
     parsed = JSON.parse(value || "{}");
   } catch {
-    throw new Error("请求头 JSON 格式无效");
+    throw new Error(t("validation.headersJson"));
   }
-  if (!isStringRecord(parsed)) throw new Error("请求头必须是字符串键值的 JSON 对象");
+  if (!isStringRecord(parsed)) throw new Error(t("validation.headersObject"));
   return { ...parsed };
 }
 

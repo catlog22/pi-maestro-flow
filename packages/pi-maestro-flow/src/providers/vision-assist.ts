@@ -25,7 +25,17 @@ export const DEFAULT_VISION_ANALYSIS_PROMPT =
 /** Vision health is intentionally isolated from the main-agent breaker domain. */
 export const sharedVisionModelCircuitBreaker = new ModelCircuitBreaker();
 
-const MAX_RETRY_BACKOFF_MS = 8_000;
+const VISION_RETRY_MAX_DELAY_ENV = "PI_VISION_RETRY_MAX_DELAY_MS";
+const DEFAULT_VISION_RETRY_MAX_DELAY_MS = 8_000;
+
+function readVisionRetryMaxDelayMs(): number {
+  const raw = process.env[VISION_RETRY_MAX_DELAY_ENV];
+  if (raw === undefined || raw.trim() === "") return DEFAULT_VISION_RETRY_MAX_DELAY_MS;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : DEFAULT_VISION_RETRY_MAX_DELAY_MS;
+}
+
+const MAX_RETRY_BACKOFF_MS = readVisionRetryMaxDelayMs();
 const SUPPORTED_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 /**
  * Image description is a bounded perceptual task: capping the delegated
@@ -47,6 +57,8 @@ export interface VisionDelegationConfig {
   fallbackModels: string[];
   maxRetries: number;
   retryBackoffMs: number;
+  /** Backoff cap for the last retry; falls back to `MAX_RETRY_BACKOFF_MS`. */
+  retryBackoffCapMs?: number;
   timeoutMs: number;
   maxImageBytes: number;
 }
@@ -121,6 +133,7 @@ export const DEFAULT_VISION_DELEGATION_CONFIG: Readonly<VisionDelegationConfig> 
   // Give one attempt a generous deadline instead; fail over on timeout.
   maxRetries: 0,
   retryBackoffMs: 500,
+  retryBackoffCapMs: MAX_RETRY_BACKOFF_MS,
   timeoutMs: 60_000,
   maxImageBytes: 20 * 1024 * 1024,
 };
@@ -189,6 +202,7 @@ export function loadVisionDelegationConfig(agentDir = getAgentDir()): VisionDele
     fallbackModels: modelReferences(parsed.fallbackModels),
     maxRetries: integer(parsed.maxRetries, defaults.maxRetries, 0, 10),
     retryBackoffMs: integer(parsed.retryBackoffMs, defaults.retryBackoffMs, 0, MAX_RETRY_BACKOFF_MS),
+    retryBackoffCapMs: integer(parsed.retryBackoffCapMs, defaults.retryBackoffCapMs ?? MAX_RETRY_BACKOFF_MS, 0, 600_000),
     timeoutMs: integer(parsed.timeoutMs, defaults.timeoutMs, 1_000, 300_000),
     maxImageBytes: integer(parsed.maxImageBytes, defaults.maxImageBytes, 1_024, 64 * 1024 * 1024),
   };
@@ -674,7 +688,7 @@ async function callCandidates(
             failures.push(`${reference}: ${message(error)}`);
             break;
           }
-          await delay(Math.min(config.retryBackoffMs * 2 ** attempt, MAX_RETRY_BACKOFF_MS), signal);
+          await delay(Math.min(config.retryBackoffMs * 2 ** attempt, config.retryBackoffCapMs ?? MAX_RETRY_BACKOFF_MS), signal);
         } finally { guard.dispose(); }
       }
     } finally {
@@ -836,7 +850,7 @@ function toolError(text: string, code: string): VisionToolResult {
 }
 
 function defaultConfig(): VisionDelegationConfig {
-  return { enabled: true, cache: { enabled: true, maxEntries: 50 }, fallbackModels: [], maxRetries: 0, retryBackoffMs: 500, timeoutMs: 60_000, maxImageBytes: 20 * 1024 * 1024 };
+  return { enabled: true, cache: { enabled: true, maxEntries: 50 }, fallbackModels: [], maxRetries: 0, retryBackoffMs: 500, retryBackoffCapMs: MAX_RETRY_BACKOFF_MS, timeoutMs: 60_000, maxImageBytes: 20 * 1024 * 1024 };
 }
 
 function normalizeConfig(config: VisionDelegationConfig): VisionDelegationConfig {
@@ -848,6 +862,7 @@ function normalizeConfig(config: VisionDelegationConfig): VisionDelegationConfig
     fallbackModels: modelReferences(config.fallbackModels),
     maxRetries: integer(config.maxRetries, 2, 0, 10),
     retryBackoffMs: integer(config.retryBackoffMs, 500, 0, MAX_RETRY_BACKOFF_MS),
+    retryBackoffCapMs: integer(config.retryBackoffCapMs, MAX_RETRY_BACKOFF_MS, 0, 600_000),
     timeoutMs: integer(config.timeoutMs, 30_000, 1_000, 300_000),
     maxImageBytes: integer(config.maxImageBytes, 20 * 1024 * 1024, 1_024, 64 * 1024 * 1024),
   };

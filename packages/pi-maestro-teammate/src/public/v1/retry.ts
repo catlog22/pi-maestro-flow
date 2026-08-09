@@ -17,6 +17,8 @@ export type {
 /** Version 1 retry policy contract shared by teammate consumers. */
 export {
   NETWORK_RETRY_POLICY,
+  RESOLVED_NETWORK_RETRY_POLICY,
+  resolveNetworkRetryPolicy,
   classifyRetryError,
   extractRetryAfterMs,
   isAuthError,

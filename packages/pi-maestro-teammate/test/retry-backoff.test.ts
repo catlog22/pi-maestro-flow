@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { retryDelayMs } from "../src/runs/retry.ts";
+import { retryDelayMs, resolveNetworkRetryPolicy } from "../src/runs/retry.ts";
 
 test("quota, auth, and permanent failures switch candidates without backoff", () => {
   assert.equal(retryDelayMs(1, "fallback-only"), 0);
@@ -30,4 +30,25 @@ test("a provider retry-after hint caps the backoff (earliest of the two)", () =>
   assert.equal(retryDelayMs(3, "network", 30_000), 4_000);
   // Hints never apply to switch-immediately kinds.
   assert.equal(retryDelayMs(2, "fallback-only", 60_000), 0);
+});
+
+test("PI_RETRY_MAX_DELAY_MS overrides the backoff cap (last retry wait)", async () => {
+  const policy = resolveNetworkRetryPolicy({ PI_RETRY_MAX_DELAY_MS: "32000" });
+  assert.equal(policy.maxDelayMs, 32_000);
+  assert.equal(policy.maxRetries, 5);
+  assert.equal(policy.initialDelayMs, 1_000);
+  assert.equal(resolveNetworkRetryPolicy({ PI_RETRY_MAX_DELAY_MS: "-5" }).maxDelayMs, 16_000);
+  assert.equal(resolveNetworkRetryPolicy({ PI_RETRY_MAX_DELAY_MS: "abc" }).maxDelayMs, 16_000);
+
+  process.env.PI_RETRY_MAX_DELAY_MS = "32000";
+  try {
+    // Query-string specifier forces a fresh module instance so the env
+    // override is re-read; a bare path would hit the ESM cache.
+    const specifier = new URL("../src/runs/retry.ts", import.meta.url).href + "?cap=32000";
+    const fresh = await import(specifier);
+    assert.equal(fresh.RESOLVED_NETWORK_RETRY_POLICY.maxDelayMs, 32_000);
+    assert.equal(fresh.retryDelayMs(9, "network"), 32_000);
+  } finally {
+    delete process.env.PI_RETRY_MAX_DELAY_MS;
+  }
 });

@@ -52,6 +52,7 @@ import {
 import type { ApiProviderAction, ApiProviderId, ApiProviderSettings, ApiThinkingLevel, ProviderDefaults, SaveApiProviderResult } from "./api-provider-config.ts";
 import { lookupBuiltinPricing } from "./cost-backfill.ts";
 import { loadVisionDelegationConfig } from "./vision-assist.ts";
+import { getTuiLocale } from "../tui/locale.ts";
 import {
   isCacheRetention,
   isOpenAIFormatApi,
@@ -63,6 +64,83 @@ import {
   type CacheRetention,
   type PromptCachePolicy,
 } from "./prompt-cache-policy.ts";
+
+const OPS_CATALOGS = {
+  en: {
+    "value.on": "On",
+    "value.off": "Off",
+    "menu.title": "Choose an action",
+    "menu.list": "View all models",
+    "menu.configure": "Add or edit a model",
+    "menu.show": "View model details",
+    "menu.vision": "Vision multimodal policy (current: {state})",
+    "menu.effort": "Adjust thinking effort",
+    "menu.toggle": "Enable or disable a Provider",
+    "menu.delete": "Delete a model",
+    "menu.retry": "Automatic retry (current: {state})",
+    "menu.cache": "Prompt cache policy (current: {value})",
+    "menu.cacheAgent": "Agent cache tier (current: {value})",
+    "menu.price": "Backfill model pricing (built-in table + OpenRouter)",
+    "menu.logout": "Sign out a Provider",
+    "menu.reset": "Reset a Provider",
+    "thinking.title": "Default thinking effort (current model)",
+    "saved.backup": "Backup: {path}",
+    "saved.config": "Config: {path}",
+    "compaction.unavailable": "Estimated hard compaction: current model window unavailable",
+    "compaction.hard": "Estimated hard compaction: context exceeds {tokens} tokens ({percent}%)",
+    "compaction.configured": "Configured threshold: {tokens} tokens; {reason}",
+    "compaction.outputWarning": "Notice: the model output limit puts the response clamp ({tokens} tokens, {percent}%) before the hard threshold; automatic pruning moves to the clamp point.",
+    "compaction.nudgeUnreachable": "Notice: the hard compaction threshold precedes the soft warning, so the warning is unreachable.",
+    "compaction.pruneUnreachable": "Notice: the hard compaction threshold precedes soft pruning, so hard compaction may run directly.",
+    "threshold.configured": "determined by the configured compaction reserve",
+    "threshold.ratioFloor": "lowered by the 5% context-window safety floor",
+    "threshold.maxOutput": "lowered by max-output protection",
+    "threshold.capped": "max output is too large; safe reserve capped at 90% of the window",
+    "validation.window": "Max output ({max}) must be smaller than the context window ({window}); otherwise no room remains for input.",
+  },
+  "zh-CN": {
+    "value.on": "开启",
+    "value.off": "关闭",
+    "menu.title": "选择操作",
+    "menu.list": "查看全部模型",
+    "menu.configure": "新增或修改模型",
+    "menu.show": "查看模型详情",
+    "menu.vision": "Vision 多模态策略（当前：{state}）",
+    "menu.effort": "调整思考强度",
+    "menu.toggle": "启用或停用 Provider",
+    "menu.delete": "删除模型",
+    "menu.retry": "自动重试（当前：{state}）",
+    "menu.cache": "提示缓存策略（当前：{value}）",
+    "menu.cacheAgent": "Agent 缓存档位（当前：{value}）",
+    "menu.price": "回填模型价格（内置表 + OpenRouter 在线）",
+    "menu.logout": "注销 Provider",
+    "menu.reset": "重置 Provider",
+    "thinking.title": "默认思考强度（当前 model）",
+    "saved.backup": "备份：{path}",
+    "saved.config": "配置：{path}",
+    "compaction.unavailable": "预计硬压缩：当前模型窗口不可用",
+    "compaction.hard": "预计实际硬压缩：上下文超过 {tokens} Token（{percent}%）",
+    "compaction.configured": "配置阈值：{tokens} Token；{reason}",
+    "compaction.outputWarning": "提醒：模型输出上限使响应钳制点（{tokens} Token，{percent}%）早于硬阈值，自动剪枝已提前至截断点。",
+    "compaction.nudgeUnreachable": "提醒：当前硬压缩阈值早于软提醒，软提醒不可达。",
+    "compaction.pruneUnreachable": "提醒：当前硬压缩阈值早于软裁剪，可能直接硬压缩。",
+    "threshold.configured": "由压缩配置预留决定",
+    "threshold.ratioFloor": "受上下文窗口 5% 安全底线下调",
+    "threshold.maxOutput": "受单次最大输出保护下调",
+    "threshold.capped": "单次最大输出过大，安全预留已封顶为窗口 90%",
+    "validation.window": "单次最大输出 maxTokens（{max}）必须小于上下文窗口 contextWindow（{window}）；否则没有空间容纳输入。",
+  },
+} as const;
+
+type OpsCatalogKey = keyof (typeof OPS_CATALOGS)["en"];
+
+function opsText(key: OpsCatalogKey, vars?: Readonly<Record<string, string | number>>): string {
+  const locale = getTuiLocale();
+  const template = OPS_CATALOGS[locale]?.[key] ?? OPS_CATALOGS.en[key];
+  if (!vars) return template;
+  return template.replace(/\{(\w+)\}/g, (_match, name: string) =>
+    vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
+}
 
 
 export async function removeProviderKey(
@@ -271,7 +349,7 @@ export async function listProviders(
     "Providers（URL / API key 级配置）：",
     ...providerLines,
     `Pi 全局默认思考强度：${currentDefaultThinkingLevel(ctx, modelsPath)}`,
-    `Provider 自动重试：${retry.enabled ? "开启" : "关闭"} · 最大 ${retry.maxRetries} 次`,
+    `Provider 自动重试：${retry.enabled ? "开启" : "关闭"} · 最大 ${retry.maxRetries} 次 · 退避上限 ${retry.maxDelayMs ?? NETWORK_RETRY_POLICY.maxDelayMs}ms`,
     `文件：${modelsPath}`,
   ].join("\n"), "info");
 }
@@ -1108,30 +1186,21 @@ export async function chooseAction(
   const retry = await loadApiRetrySettings(settingsPath);
   const vision = loadVisionDelegationConfig(visionAgentDir);
   const choices: Array<{ action: ApiProviderAction; label: string }> = [
-    { action: "list", label: "查看全部模型" },
-    { action: "configure", label: "新增或修改模型" },
-    { action: "show", label: "查看模型详情" },
-    { action: "vision", label: `Vision 多模态策略（当前：${vision.enabled ? "开启" : "关闭"}）` },
-    { action: "effort", label: "调整思考强度" },
-    { action: "toggle", label: "启用或停用 Provider" },
-    { action: "delete", label: "删除模型" },
-    {
-      action: "retry",
-      label: `自动重试（当前：${retry.enabled ? "开启" : "关闭"}）`,
-    },
-    {
-      action: "cache",
-      label: `提示缓存策略（当前：${await loadPromptCachePolicy(settingsPath)}）`,
-    },
-    {
-      action: "cache-agent",
-      label: `Agent 缓存档位（当前：${await loadAgentCacheRetention(settingsPath)}）`,
-    },
-    { action: "price", label: "回填模型价格（内置表 + OpenRouter 在线）" },
-    { action: "logout", label: "注销 Provider" },
-    { action: "reset", label: "重置 Provider" },
+    { action: "list", label: opsText("menu.list") },
+    { action: "configure", label: opsText("menu.configure") },
+    { action: "show", label: opsText("menu.show") },
+    { action: "vision", label: opsText("menu.vision", { state: opsText(vision.enabled ? "value.on" : "value.off") }) },
+    { action: "effort", label: opsText("menu.effort") },
+    { action: "toggle", label: opsText("menu.toggle") },
+    { action: "delete", label: opsText("menu.delete") },
+    { action: "retry", label: opsText("menu.retry", { state: opsText(retry.enabled ? "value.on" : "value.off") }) },
+    { action: "cache", label: opsText("menu.cache", { value: await loadPromptCachePolicy(settingsPath) }) },
+    { action: "cache-agent", label: opsText("menu.cacheAgent", { value: await loadAgentCacheRetention(settingsPath) }) },
+    { action: "price", label: opsText("menu.price") },
+    { action: "logout", label: opsText("menu.logout") },
+    { action: "reset", label: opsText("menu.reset") },
   ];
-  const choice = await ctx.ui.select("选择操作", choices.map((entry) => entry.label));
+  const choice = await ctx.ui.select(opsText("menu.title"), choices.map((entry) => entry.label));
   return choices.find((entry) => entry.label === choice)?.action;
 }
 
@@ -1186,7 +1255,7 @@ export async function chooseDefaultThinkingLevel(
     : supported[0];
   const selected = supported.includes(current) ? current : fallback;
   const options = [selected, ...supported.filter((level) => level !== selected)];
-  return await ctx.ui.select("默认思考强度（当前 model）", options) as ApiThinkingLevel | undefined;
+  return await ctx.ui.select(opsText("thinking.title"), options) as ApiThinkingLevel | undefined;
 }
 
 export function currentDefaultThinkingLevel(
@@ -1515,8 +1584,8 @@ export function notifySaved(
   result: SaveApiProviderResult,
   suffix: string,
 ): void {
-  const backup = result.backupPath ? `\n备份：${result.backupPath}` : "";
-  ctx.ui.notify(`${displayName} ${suffix}\n配置：${result.path}${backup}`, "info");
+  const backup = result.backupPath ? `\n${opsText("saved.backup", { path: result.backupPath })}` : "";
+  ctx.ui.notify(`${displayName} ${suffix}\n${opsText("saved.config", { path: result.path })}${backup}`, "info");
 }
 
 export function compactionPreviewLines(projectRoot: string, contextWindow: number, maxTokens: number): string[] {
@@ -1527,41 +1596,47 @@ export function compactionPreviewLines(projectRoot: string, contextWindow: numbe
     modelMaxTokens: maxTokens,
     soft: compaction.soft,
   });
-  if (!model.usable) return ["预计硬压缩：当前模型窗口不可用"];
+  if (!model.usable) return [opsText("compaction.unavailable")];
   const configuredThreshold = contextWindow - compaction.reserveTokens;
   const lines = [
-    `预计实际硬压缩：上下文超过 ${model.thresholdTokens.toLocaleString("en-US")} Token（${(model.thresholdPercent).toFixed(0)}%）`,
+    opsText("compaction.hard", {
+      tokens: model.thresholdTokens.toLocaleString(getTuiLocale()),
+      percent: model.thresholdPercent.toFixed(0),
+    }),
   ];
   if (configuredThreshold !== model.thresholdTokens) {
-    lines.push(
-      `配置阈值：${configuredThreshold.toLocaleString("en-US")} Token；${providerThresholdReason(model.reason)}`,
-    );
+    lines.push(opsText("compaction.configured", {
+      tokens: configuredThreshold.toLocaleString(getTuiLocale()),
+      reason: providerThresholdReason(model.reason),
+    }));
   }
   if (model.soft && model.soft.outputConstrained && model.soft.truncationPointTokens !== undefined) {
-    lines.push(
-      `提醒：模型输出上限使响应钳制点（${model.soft.truncationPointTokens.toLocaleString("en-US")} Token，${((model.soft.truncationPointTokens / contextWindow) * 100).toFixed(0)}%）早于硬阈值，自动剪枝已提前至截断点。`,
-    );
+    lines.push(opsText("compaction.outputWarning", {
+      tokens: model.soft.truncationPointTokens.toLocaleString(getTuiLocale()),
+      percent: ((model.soft.truncationPointTokens / contextWindow) * 100).toFixed(0),
+    }));
   }
   if (model.soft && !model.soft.nudgeReachable) {
-    lines.push("提醒：当前硬压缩阈值早于软提醒，软提醒不可达。");
+    lines.push(opsText("compaction.nudgeUnreachable"));
   } else if (model.soft && !model.soft.pruneReachable) {
-    lines.push("提醒：当前硬压缩阈值早于软裁剪，可能直接硬压缩。");
+    lines.push(opsText("compaction.pruneUnreachable"));
   }
   return lines;
 }
 
 export function providerThresholdReason(reason: CompactionThresholdReason): string {
-  if (reason === "configured") return "由压缩配置预留决定";
-  if (reason === "ratio-floor") return "受上下文窗口 5% 安全底线下调";
-  if (reason === "max-output") return "受单次最大输出保护下调";
-  return "单次最大输出过大，安全预留已封顶为窗口 90%";
+  if (reason === "configured") return opsText("threshold.configured");
+  if (reason === "ratio-floor") return opsText("threshold.ratioFloor");
+  if (reason === "max-output") return opsText("threshold.maxOutput");
+  return opsText("threshold.capped");
 }
 
 export function validateModelWindow(contextWindow: number, maxTokens: number): void {
   if (maxTokens >= contextWindow) {
-    throw new Error(
-      `单次最大输出 maxTokens（${maxTokens.toLocaleString("en-US")}）必须小于上下文窗口 contextWindow（${contextWindow.toLocaleString("en-US")}）；否则没有空间容纳输入。`,
-    );
+    throw new Error(opsText("validation.window", {
+      max: maxTokens.toLocaleString(getTuiLocale()),
+      window: contextWindow.toLocaleString(getTuiLocale()),
+    }));
   }
 }
 
