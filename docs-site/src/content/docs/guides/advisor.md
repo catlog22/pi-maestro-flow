@@ -124,6 +124,7 @@ Advisor 与 Monitor 的区别是：Advisor 关注主 Agent **想得是否正确*
 
 ## 6. 相关指南
 
+- [Monitor 跨会话监督](/guides/monitor) — 监督其他窗口、检测停滞与偏航、自动干预和恢复
 - [Agent 角色体系](/guides/agents) — `analyst`、`verifier` 和项目级审查角色
 - [并行多智能体调度](/guides/teammate-dispatch) — 显式派发并行分析和审查任务
 - [Goal 目标 · Plan 计划 · todo 任务](/guides/goal-plan-todo) — Goal 完成验证与任务生命周期

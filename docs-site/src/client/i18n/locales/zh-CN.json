@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow 标志"
   },
   "announcement": {
-    "title": "v0.16.0 已发布 — In-Shell 设置套件 · 会话级知识治理 · Self-Evolve M1-M5。升级：",
-    "install": "pi install npm:pi-maestro-flow@0.16.0",
+    "title": "v0.17.0 已发布 — 跨会话调度 · 持久监控监督 · 共享 TUI 语言 · 核心引擎 0.5.67。升级：",
+    "install": "pi install npm:pi-maestro-flow@0.17.0",
     "close": "关闭提示"
   },
   "accessibility": {

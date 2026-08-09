@@ -5,11 +5,11 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current status: v0.17.0 release candidate.** This entry uses the `v0.16.0` tag (`02436592`) as its baseline, covers the 37 subsequent commits through `8e4c3d38`, and includes the v0.17.0 package matrix currently staged in the working tree. npm commands and final verification data remain provisional until the release tag is published.
+> **Current status: v0.17.0 (released 2026-08-09).** This entry uses the `v0.16.0` tag (`02436592`) as its baseline, covers the 37 feature commits through the release commit `f021f083`, and matches the published npm packages and GitHub Release.
 
 ---
 
-## v0.17.0 (Release Candidate)
+## v0.17.0 (2026-08-09)
 
 **Comparison:** `v0.16.0 → v0.17.0`  
 **Code cutoff:** 2026-08-09  
@@ -17,7 +17,7 @@ This page records user-visible features, behavior changes, fixes, and upgrade re
 
 ### Version Matrix
 
-| Component | v0.16.0 | v0.17.0 candidate | Main area |
+| Component | v0.16.0 | v0.17.0 | Main area |
 |-----------|---------|-------------------|-----------|
 | `pi-maestro-flow` | `0.16.0` | `0.17.0` | orchestration, Self-Evolve, run loops, API Manager |
 | `pi-maestro-teammate` | `1.9.0` | `1.10.0` | cross-session scheduling, Monitor, routing, session UI |
@@ -39,7 +39,7 @@ Teammate now has a cross-session scheduler and session registry. Monitor workloa
 - Durable per-turn publication IDs make repeated delivery and observation idempotent.
 - Cockpit consumes endpoint-backed Agent and Window state for tabs, handoff, and independent monitoring.
 
-See [Parallel Multi-Agent Dispatch](/guides/teammate-dispatch), [Advisor Turn-Level Supervision](/guides/advisor), and [Pi Cockpit Visualization](/guides/cockpit).
+See [Monitor Cross-Session Supervision](/guides/monitor), [Parallel Multi-Agent Dispatch](/guides/teammate-dispatch), [Advisor Turn-Level Supervision](/guides/advisor), and [Pi Cockpit Visualization](/guides/cockpit).
 
 ### 2. Durable Monitor Supervision
 
@@ -171,6 +171,7 @@ pi list
 | `6bcb9fca` | observation turns and transcript grouping |
 | `afb9dbda` | `Alt+R` session-list handoff |
 | `8e4c3d38` | Cockpit edit-failure diagnostics |
+| `f021f083` | `release: v0.17.0` (release commit) |
 
 Repository maintenance moved pipeline output to `.pi-sync` and removed the tracked `flow/` mirror. This changes repository layout but not package behavior.
 

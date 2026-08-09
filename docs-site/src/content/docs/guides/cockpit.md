@@ -16,6 +16,7 @@ pi-cockpit 提供编辑器上方实时状态堆栈 + Starship 风格 Footer，�
 - **终端标题**：Claude Code 风格 Tab 标题 + 可选 LLM 生成会话摘要
 - **Sidebar Dock**：编辑器侧边停靠栏（模式/宽度/密度可配）
 - **背景任务覆盖层**：`Alt+J` 查看 bash_bg 任务实时状态
+- **跨会话监督**：Window Bar 中按 `Alt+W` 切换目标窗口的 Monitor 绑定
 
 ## 配置文件
 
@@ -112,6 +113,7 @@ pi-cockpit 提供编辑器上方实时状态堆栈 + Starship 风格 Footer，�
 
 ## 下一步
 
+- [Monitor 跨会话监督](/guides/monitor) — Window Bar、`Alt+W`、自动干预与持久 ledger
 - [Mailbox 消息队列与会话导出](/guides/mailbox-session) — 会话相关能力
 - [设置系统总览](/guides/settings-overview) — 统一设置面板结构
 - [环境变量速查](/guides/env-vars) — 主题与界面相关环境变量

@@ -184,6 +184,17 @@ export const guideRegistry: Array<{
     category: 'orchestration',
   },
   {
+    slug: 'monitor',
+    file: 'monitor.md',
+    file_en: 'monitor.en.md',
+    title: 'Monitor Cross-Session Supervision',
+    description: 'Supervise peer windows, detect stalls and drift, intervene, resume, and inspect metrics',
+    title_zh: 'Monitor 跨会话监督',
+    description_zh: '监督工作区窗口，检测停滞与偏航，自动干预、恢复并查看指标',
+    icon: 'bar-chart-2',
+    category: 'orchestration',
+  },
+  {
     slug: 'permissions',
     file: 'permissions.md',
     title: 'Permission System',

@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.16.0 released — in-shell settings suite · session-level knowledge governance · Self-Evolve M1-M5. Upgrade:",
-    "install": "pi install npm:pi-maestro-flow@0.16.0",
+    "title": "v0.17.0 released — cross-session scheduler · monitor supervision · shared TUI locale · engine 0.5.67. Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.17.0",
     "close": "Dismiss"
   },
   "accessibility": {
