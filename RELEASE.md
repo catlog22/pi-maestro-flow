@@ -233,10 +233,10 @@ running model-sensitive workflows.
 
 | Package | Files | Packed | Unpacked | SHA-1 |
 |---------|------:|-------:|---------:|-------|
-| pi-maestro-settings-core@0.1.3 |  |  |  |  |
-| pi-maestro-teammate@1.11.0 |  |  |  |  |
-| pi-cockpit@0.13.0 |  |  |  |  |
-| pi-maestro-flow@0.18.0 |  |  |  |  |
+| pi-maestro-settings-core@0.1.3 | 7 | 5,551 | 20,774 | `e572d7fd284aed7cb9de01342a57f44ac987ee62` |
+| pi-maestro-teammate@1.11.0 | 178 | 458,423 | 2,080,238 | `f8c7b9ae6feb5848423535e9a0a55b1919f95d63` |
+| pi-cockpit@0.13.0 | 82 | 218,611 | 810,488 | `03ece98a01edae47f94c31bc4ec9341e149f25fe` |
+| pi-maestro-flow@0.18.0 | 600 | 1,764,219 | 6,615,356 | `ea723dff296f6f56b9a48b3903c5355c02d986e8` |
 
 Publication order is mandatory:
 
