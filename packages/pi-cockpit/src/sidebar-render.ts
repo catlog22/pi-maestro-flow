@@ -7,6 +7,7 @@ import { composeByPriority, type PriorityGroup } from "./layout.ts";
 import type { MaestroUiStateSnapshotV1 } from "./public/v1/events.ts";
 import { formatAgentMetric, formatDuration } from "./render.ts";
 import type { AgentRow, BashBgJob, CockpitConfig, TodoItem } from "./types.ts";
+import { tuiStatus, tuiT } from "./tui-i18n.ts";
 
 export interface SidebarRenderInput {
 	maestro: MaestroUiStateSnapshotV1 | undefined;
@@ -91,7 +92,7 @@ function statusVisual(status: string, glyphs: IconGlyphs): { glyph: string; colo
 function paintedStatus(status: string, theme: Theme, glyphs: IconGlyphs): string {
 	const safeStatus = clean(status) || "unknown";
 	const visual = statusVisual(safeStatus, glyphs);
-	return `${theme.fg(visual.color, visual.glyph)} ${safeStatus}`;
+	return `${theme.fg(visual.color, visual.glyph)} ${tuiStatus(safeStatus)}`;
 }
 
 function compactCounts(values: ReadonlyArray<{ status: string }>, sep: string): string {
@@ -101,12 +102,12 @@ function compactCounts(values: ReadonlyArray<{ status: string }>, sep: string): 
 	const terminated = values.filter((item) => /terminate|cancel/i.test(item.status)).length;
 	const done = values.filter((item) => /complete|completed|done|success/i.test(item.status)).length;
 	return [
-		`${values.length} total`,
-		active > 0 ? `${active} active` : "",
-		failed > 0 ? `${failed} failed` : "",
-		stalled > 0 ? `${stalled} stalled` : "",
-		terminated > 0 ? `${terminated} terminated` : "",
-		done > 0 ? `${done} done` : "",
+		tuiT("common.total", { count: values.length }),
+		active > 0 ? tuiT("common.active", { count: active }) : "",
+		failed > 0 ? tuiT("common.failed", { count: failed }) : "",
+		stalled > 0 ? tuiT("common.stalled", { count: stalled }) : "",
+		terminated > 0 ? tuiT("common.terminated", { count: terminated }) : "",
+		done > 0 ? tuiT("common.done", { count: done }) : "",
 	].filter(Boolean).join(sep);
 }
 
@@ -121,11 +122,15 @@ function workflowRows(
 	const session = `${clean(workflow.session.label) || clean(workflow.session.id)}${glyphs.separator}${paintedStatus(workflow.session.status, theme, glyphs)}`;
 	const chain = workflow.chain;
 	const gates = workflow.gates;
-	const progress = `${finiteCount(chain.completed)}/${finiteCount(chain.total)} done`
-		+ (chain.running > 0 ? `${glyphs.separator}${finiteCount(chain.running)} running` : "")
-		+ (chain.pending > 0 ? `${glyphs.separator}${finiteCount(chain.pending)} pending` : "");
-	const gateText = `${finiteCount(gates.passed)}/${finiteCount(gates.total)} gates`
-		+ ((gates.failed ?? 0) > 0 ? `${glyphs.separator}${finiteCount(gates.failed ?? 0)} failed` : "");
+	const progress = tuiT("common.done", { count: `${finiteCount(chain.completed)}/${finiteCount(chain.total)}` })
+		+ (chain.running > 0 ? `${glyphs.separator}${tuiT("common.running", { count: finiteCount(chain.running) })}` : "")
+		+ (chain.pending > 0 ? `${glyphs.separator}${tuiT("common.pending", { count: finiteCount(chain.pending) })}` : "");
+	const gateText = tuiT("sidebar.gates", {
+		passed: finiteCount(gates.passed),
+		total: finiteCount(gates.total),
+	}) + ((gates.failed ?? 0) > 0
+		? `${glyphs.separator}${tuiT("common.failed", { count: finiteCount(gates.failed ?? 0) })}`
+		: "");
 	if (compact) {
 		const run = workflow.run
 			? `${paintedStatus(workflow.run.status, theme, glyphs)}${glyphs.separator}${clean(workflow.run.command)}`
@@ -135,7 +140,7 @@ function workflowRows(
 	const rows = [session];
 	if (workflow.run) rows.push(`${paintedStatus(workflow.run.status, theme, glyphs)}${glyphs.separator}${clean(workflow.run.command)}`);
 	rows.push(theme.fg("muted", progress), theme.fg((gates.failed ?? 0) > 0 ? "error" : "muted", gateText));
-	if (workflow.next) rows.push(`${theme.fg("dim", "Next")} ${clean(workflow.next)}`);
+	if (workflow.next) rows.push(`${theme.fg("dim", tuiT("sidebar.next"))} ${clean(workflow.next)}`);
 	return rows;
 }
 
@@ -150,14 +155,23 @@ function goalRows(
 		?? maestro.goals.find((candidate) => /running|active|progress|pause/i.test(candidate.status))
 		?? maestro.goals[0];
 	const objective = clean(goal.objective) || clean(goal.id);
-	const status = `${paintedStatus(goal.status, theme, glyphs)}${glyphs.separator}iteration ${finiteCount(goal.iteration)}`;
+	const status = `${paintedStatus(goal.status, theme, glyphs)}${glyphs.separator}${tuiT("sidebar.iteration", {
+		current: finiteCount(goal.iteration),
+	})}`;
 	if (compact) return [objective, status];
 	const tokens = goal.tokenBudget === undefined
-		? `${formatAgentMetric(goal.tokensUsed)} tokens`
-		: `${formatAgentMetric(goal.tokensUsed)}/${formatAgentMetric(goal.tokenBudget)} tokens`;
+		? tuiT("sidebar.tokens", { count: formatAgentMetric(goal.tokensUsed) })
+		: tuiT("sidebar.tokensBudget", {
+			used: formatAgentMetric(goal.tokensUsed),
+			budget: formatAgentMetric(goal.tokenBudget),
+		});
 	const rows = [theme.bold(objective), status, theme.fg("muted", `${tokens}${glyphs.separator}${formatDuration(goal.timeUsedSeconds * 1_000)}`)];
 	if (goal.pauseReason) rows.push(`${theme.fg("warning", glyphs.dotIdle)} ${clean(goal.pauseReason)}`);
-	if (maestro.goals.length > 1) rows.push(theme.fg("dim", `${maestro.goals.length} goals${glyphs.separator}current ${clean(goal.id)}`));
+	if (maestro.goals.length > 1) {
+		rows.push(theme.fg("dim", `${tuiT("common.goals", { count: maestro.goals.length })}${glyphs.separator}${tuiT("sidebar.currentGoal", {
+			id: clean(goal.id),
+		})}`));
+	}
 	return rows;
 }
 
@@ -178,9 +192,9 @@ function taskRows(
 	const done = items.filter((item) => item.status === "completed").length;
 	const active = items.filter((item) => item.status === "in_progress").length;
 	const blocked = items.filter((item) => item.status === "blocked").length;
-	const summary = `${done}/${items.length} done`
-		+ (active > 0 ? `${glyphs.separator}${active} active` : "")
-		+ (blocked > 0 ? `${glyphs.separator}${blocked} blocked` : "");
+	const summary = tuiT("common.done", { count: `${done}/${items.length}` })
+		+ (active > 0 ? `${glyphs.separator}${tuiT("common.active", { count: active })}` : "")
+		+ (blocked > 0 ? `${glyphs.separator}${tuiT("common.blocked", { count: blocked })}` : "");
 	const ordered = [...items].sort((a, b) => TODO_RANK[a.status] - TODO_RANK[b.status] || a.id.localeCompare(b.id));
 	const visible = compact ? ordered.slice(0, 1) : ordered;
 	return [theme.fg(blocked > 0 ? "warning" : "muted", summary), ...visible.map((item) => {
@@ -221,20 +235,26 @@ function agentRows(
 		const live = displayStatus === "running" || displayStatus === "retrying";
 		const elapsed = hideLiveDuration && live ? "" : formatDuration((row.finishedAt ?? now) - row.startedAt);
 		const action = row.error
-			? `error ${clean(row.error)}`
+			? tuiT("sidebar.error", { message: clean(row.error) })
 			: row.phase
 				? clean(row.phase)
 				: row.activeTool
-					? `tool ${clean(row.activeTool)}`
+					? tuiT("sidebar.tool", { name: clean(row.activeTool) })
 					: row.lastOutcome?.status === "failed"
-						? `last failed${row.lastOutcome.message ? ` ${clean(row.lastOutcome.message)}` : ""}`
+						? row.lastOutcome.message
+							? tuiT("sidebar.lastFailedMessage", { message: clean(row.lastOutcome.message) })
+							: tuiT("sidebar.lastFailed")
 						: clean(row.tail);
 		const telemetry = [
-			row.dependencies?.length ? `${row.dependencies.length} deps` : "",
-			row.toolCount !== undefined ? `${row.toolCount} tools` : "",
+			row.dependencies?.length ? tuiT("sidebar.deps", { count: row.dependencies.length }) : "",
+			row.toolCount !== undefined ? tuiT("common.tools", { count: row.toolCount }) : "",
 			row.inputTokens !== undefined || row.outputTokens !== undefined
-				? `in ${formatAgentMetric(row.inputTokens ?? 0)}/out ${formatAgentMetric(row.outputTokens ?? 0)}`
-				: row.tokens !== undefined ? `${formatAgentMetric(row.tokens)} tok` : "",
+				? tuiT("widget.agent.inputOutput", {
+					input: formatAgentMetric(row.inputTokens ?? 0),
+					separator: "/",
+					output: formatAgentMetric(row.outputTokens ?? 0),
+				})
+				: row.tokens !== undefined ? tuiT("widget.agent.tokens", { count: formatAgentMetric(row.tokens) }) : "",
 		].filter(Boolean).join(glyphs.separator);
 		let line = `${paintedStatus(displayStatus, theme, glyphs)}${glyphs.separator}${theme.fg("syntaxFunction", label)}`
 			// Action before task: on a narrow dock the whole row is truncated, and a
@@ -244,7 +264,7 @@ function agentRows(
 			+ (task ? `${glyphs.separator}${task}` : "")
 			+ (telemetry ? theme.fg("muted", `${glyphs.separator}${telemetry}`) : "")
 			// Viewing marker: this agent is the one shown in teammate's viewing view.
-			+ (row.viewing ? theme.fg("dim", `${glyphs.separator}viewing`) : "");
+			+ (row.viewing ? theme.fg("dim", `${glyphs.separator}${tuiT("sidebar.viewing")}`) : "");
 		if (elapsed !== "") line += theme.fg("dim", `${glyphs.separator}${elapsed}`);
 		return line;
 	})];
@@ -265,7 +285,7 @@ function jobRows(
 		const command = clean(job.command) || clean(job.id);
 		const live = job.status === "running" || job.status === "stopping";
 		const elapsed = hideLiveDuration && live ? "" : formatDuration((job.finishedAt ?? now) - job.startedAt);
-		const exit = job.exitCode === null ? "" : `${glyphs.separator}exit ${job.exitCode}`;
+		const exit = job.exitCode === null ? "" : `${glyphs.separator}${tuiT("sidebar.exit", { code: job.exitCode })}`;
 		let line = `${paintedStatus(job.status, theme, glyphs)}${glyphs.separator}${command}`;
 		if (elapsed !== "" || exit !== "") line += theme.fg("dim", `${glyphs.separator}${elapsed}${exit}`);
 		return line;
@@ -281,14 +301,17 @@ function swarmRows(
 	const swarm = maestro?.swarm;
 	if (!swarm) return [];
 	const objective = clean(swarm.objective) || clean(swarm.sessionId);
-	const iteration = `${paintedStatus(swarm.status, theme, glyphs)}${glyphs.separator}iteration ${finiteCount(swarm.iteration)}/${finiteCount(swarm.maxIterations)}`;
-	const workers = `${swarm.workers.length} workers`
+	const iteration = `${paintedStatus(swarm.status, theme, glyphs)}${glyphs.separator}${tuiT("sidebar.iterationTotal", {
+		current: finiteCount(swarm.iteration),
+		total: finiteCount(swarm.maxIterations),
+	})}`;
+	const workers = tuiT("common.workers", { count: swarm.workers.length })
 		+ (swarm.workers.length > 0 ? `${glyphs.separator}${compactCounts(swarm.workers, glyphs.separator)}` : "");
 	if (compact) return [objective, iteration];
 	const rows = [theme.bold(objective), iteration, theme.fg("muted", workers)];
 	if (swarm.best) {
 		const summary = clean(swarm.best.summary);
-		rows.push(`${theme.fg("success", `${glyphs.check} best ${swarm.best.score}`)}`
+		rows.push(`${theme.fg("success", `${glyphs.check} ${tuiT("sidebar.best", { score: swarm.best.score })}`)}`
 			+ (summary ? `${glyphs.separator}${summary}` : ""));
 	}
 	return rows;
@@ -299,7 +322,7 @@ function fit(value: string, width: number): string {
 }
 
 function sectionTitle(title: SidebarSectionTitle, theme: Theme, width: number): string {
-	return fit(theme.bold(theme.fg("syntaxFunction", title)), width);
+	return fit(theme.bold(theme.fg("syntaxFunction", tuiT(`sidebar.section.${title}`))), width);
 }
 
 /**
@@ -395,10 +418,10 @@ function renderScrolled(
 			output.push(group.name === focusedRowId ? highlightRow(row, theme, contentWidth) : fit(row, contentWidth));
 		}
 	}
-	if (above > 0) output.push(fit(theme.fg("dim", `${glyphs.ellipsis} ${above} above`), contentWidth));
+	if (above > 0) output.push(fit(theme.fg("dim", `${glyphs.ellipsis} ${tuiT("common.above", { count: above })}`), contentWidth));
 	const below = totalContentRows - contentIndex;
 	if (below > 0 && output.length < height) {
-		output.push(fit(theme.fg("dim", `${glyphs.ellipsis} ${below} more`), contentWidth));
+		output.push(fit(theme.fg("dim", `${glyphs.ellipsis} ${tuiT("common.more", { count: below })}`), contentWidth));
 	}
 	return output;
 }
@@ -431,7 +454,7 @@ function renderGroups(
 	}
 	if (hasOverflow && totalBudget > output.length) {
 		const hidden = totalBudget - output.length;
-		output.push(fit(theme.fg("dim", `${glyphs.ellipsis} ${hidden} more`), contentWidth));
+		output.push(fit(theme.fg("dim", `${glyphs.ellipsis} ${tuiT("common.more", { count: hidden })}`), contentWidth));
 	}
 	return output;
 }
@@ -500,7 +523,7 @@ export function renderSidebarError(
 	resizing = false,
 	iconMode: IconMode = "ascii",
 ): string[] {
-	const message = clean(error instanceof Error ? error.message : String(error)) || "render failed";
-	const rows = [theme.bold(theme.fg("error", "Cockpit sidebar")), theme.fg("error", message)];
+	const message = clean(error instanceof Error ? error.message : String(error)) || tuiT("sidebar.renderFailed");
+	const rows = [theme.bold(theme.fg("error", tuiT("sidebar.title"))), theme.fg("error", message)];
 	return dockRows(rows, width, height, theme, resizing, resolveGlyphs(iconMode));
 }

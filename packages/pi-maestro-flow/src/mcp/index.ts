@@ -1,4 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
+import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
+import { getTuiLocale } from "../tui/locale.ts";
 import type { McpExtensionState } from "./state.ts";
 import { Type } from "typebox";
 import { showStatus, showTools, reconnectServers, authenticateServer, logoutServer, openMcpAuthPanel, openMcpManager, openMcpPanel, openMcpSetup } from "./commands.ts";
@@ -14,6 +16,40 @@ import { toolErrorOverride } from "./error-signal.ts";
 
 export interface McpAdapterHandle {
   openManager(ctx: ExtensionContext): Promise<void>;
+}
+
+export interface McpAdapterOptions {
+  /** Explicit UI language; otherwise follows the shared runtime TUI locale. */
+  locale?: SupportedSettingsLocale;
+}
+
+const MCP_UI = {
+  en: {
+    description: "Manage MCP services and configuration",
+    initFailed: "MCP initialization failed: {message}",
+    notInitialized: "MCP is not initialized",
+    logoutUsage: "Usage: /mcp logout <server>",
+    changesPending: "MCP changes will apply after the extension reloads.",
+  },
+  "zh-CN": {
+    description: "管理 MCP 服务与配置",
+    initFailed: "MCP 初始化失败：{message}",
+    notInitialized: "MCP 尚未初始化",
+    logoutUsage: "用法：/mcp logout <server>",
+    changesPending: "MCP 更改将在扩展重载后生效。",
+  },
+} as const;
+
+function mcpUiText(
+  key: keyof (typeof MCP_UI)["en"],
+  vars?: Readonly<Record<string, string | number>>,
+  explicitLocale?: SupportedSettingsLocale,
+): string {
+  const locale = getTuiLocale(explicitLocale);
+  const template = MCP_UI[locale]?.[key] ?? MCP_UI.en[key];
+  if (!vars) return template;
+  return template.replace(/\{(\w+)\}/g, (_match, name: string) =>
+    vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
 }
 
 export interface McpSessionLifecycleOptions {
@@ -212,7 +248,7 @@ function normalizeDrainTimeoutMs(value: number | undefined, fallback: number): n
     : fallback;
 }
 
-export default function mcpAdapter(pi: ExtensionAPI): McpAdapterHandle {
+export default function mcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions = {}): McpAdapterHandle {
   let state: McpExtensionState | null = null;
   let initPromise: Promise<McpExtensionState> | null = null;
 
@@ -342,19 +378,19 @@ export default function mcpAdapter(pi: ExtensionAPI): McpAdapterHandle {
   pi.on("tool_result", (event) => toolErrorOverride(event.details));
 
   pi.registerCommand("mcp", {
-    description: "管理 MCP 服务与配置",
+    description: mcpUiText("description", undefined, options.locale),
     handler: async (args, ctx) => {
       if (!state && initPromise) {
         try {
           state = await awaitInitializedState();
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          if (ctx.hasUI) ctx.ui.notify(`MCP initialization failed: ${message}`, "error");
+          if (ctx.hasUI) ctx.ui.notify(mcpUiText("initFailed", { message }, options.locale), "error");
           return;
         }
       }
       if (!state) {
-        if (ctx.hasUI) ctx.ui.notify("MCP not initialized", "error");
+        if (ctx.hasUI) ctx.ui.notify(mcpUiText("notInitialized", undefined, options.locale), "error");
         return;
       }
 
@@ -371,7 +407,7 @@ export default function mcpAdapter(pi: ExtensionAPI): McpAdapterHandle {
           await showTools(state, ctx);
           break;
         case "direct": {
-          const result = await openMcpPanel(state, pi, ctx, earlyConfigPath);
+          const result = await openMcpPanel(state, pi, ctx, earlyConfigPath, options.locale);
           if (result?.configChanged) {
             await ctx.reload();
             return;
@@ -379,7 +415,7 @@ export default function mcpAdapter(pi: ExtensionAPI): McpAdapterHandle {
           break;
         }
         case "setup": {
-          const result = await openMcpSetup(state, pi, ctx, earlyConfigPath, "setup");
+          const result = await openMcpSetup(state, pi, ctx, earlyConfigPath, "setup", options.locale);
           if (result?.configChanged) {
             await ctx.reload();
             return;
@@ -388,7 +424,7 @@ export default function mcpAdapter(pi: ExtensionAPI): McpAdapterHandle {
         }
         case "manage":
         case "manager": {
-          const result = await openMcpManager(state, pi, ctx, earlyConfigPath);
+          const result = await openMcpManager(state, pi, ctx, earlyConfigPath, options.locale);
           if (result.configChanged) {
             await ctx.reload();
             return;
@@ -397,7 +433,7 @@ export default function mcpAdapter(pi: ExtensionAPI): McpAdapterHandle {
         }
         case "config":
         case "配置": {
-          const result = await openMcpManager(state, pi, ctx, earlyConfigPath);
+          const result = await openMcpManager(state, pi, ctx, earlyConfigPath, options.locale);
           if (result.configChanged) {
             await ctx.reload();
             return;
@@ -411,26 +447,26 @@ export default function mcpAdapter(pi: ExtensionAPI): McpAdapterHandle {
             return;
           }
           if (!serverName) {
-            await openMcpAuthPanel(state, pi, ctx, earlyConfigPath);
+            await openMcpAuthPanel(state, pi, ctx, earlyConfigPath, options.locale);
             break;
           }
-          await authenticateServer(serverName, state.config, ctx);
+          await authenticateServer(serverName, state.config, ctx, options.locale);
           break;
         }
         case "logout": {
           const serverName = rest;
           if (!serverName) {
-            if (ctx.hasUI) ctx.ui.notify("Usage: /mcp logout <server>", "error");
+            if (ctx.hasUI) ctx.ui.notify(mcpUiText("logoutUsage", undefined, options.locale), "error");
             return;
           }
-          await logoutServer(serverName, state, ctx);
+          await logoutServer(serverName, state, ctx, options.locale);
           break;
         }
         case "status":
         case "":
         default:
           if (ctx.hasUI) {
-            const result = await openMcpManager(state, pi, ctx, earlyConfigPath);
+            const result = await openMcpManager(state, pi, ctx, earlyConfigPath, options.locale);
             if (result?.configChanged) {
               await ctx.reload();
               return;
@@ -562,16 +598,18 @@ export default function mcpAdapter(pi: ExtensionAPI): McpAdapterHandle {
         try {
           state = await awaitInitializedState();
         } catch (error) {
-          ctx.ui.notify(`MCP initialization failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+          ctx.ui.notify(mcpUiText("initFailed", {
+            message: error instanceof Error ? error.message : String(error),
+          }, options.locale), "error");
           return;
         }
       }
       if (!state) {
-        ctx.ui.notify("MCP not initialized", "error");
+        ctx.ui.notify(mcpUiText("notInitialized", undefined, options.locale), "error");
         return;
       }
-      const result = await openMcpManager(state, pi, ctx, earlyConfigPath);
-      if (result.configChanged) ctx.ui.notify("MCP changes will apply after the extension reloads.", "info");
+      const result = await openMcpManager(state, pi, ctx, earlyConfigPath, options.locale);
+      if (result.configChanged) ctx.ui.notify(mcpUiText("changesPending", undefined, options.locale), "info");
     },
   };
 }

@@ -5,6 +5,9 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { makeAgentWidget, makeTodoWidget } from "../src/stack-widget.ts";
 import { makeSessionDetailWidget } from "../src/session-detail.ts";
 import { DEFAULT_CONFIG, type AgentRow, type TodoItem } from "../src/types.ts";
+import { cockpitTuiLocale } from "../src/tui-i18n.ts";
+
+cockpitTuiLocale.setLocale("en");
 
 const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as Theme;
 const tui = {} as TUI;

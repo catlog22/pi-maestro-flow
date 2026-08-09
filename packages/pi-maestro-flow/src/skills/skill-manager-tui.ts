@@ -14,6 +14,7 @@ import {
   rule,
   type FrameTheme,
 } from "pi-cockpit/src/settings/ui-primitives.ts";
+import { getTuiLocale } from "../tui/locale.ts";
 import type { ManagedSkill, ManagedSkillGroup, OptionalSkill } from "./skill-manager-store.ts";
 
 export type SkillManagerActionKind =
@@ -48,7 +49,7 @@ export interface SkillManagerOverlayParams {
   theme: SkillManagerTheme;
   notice?: string;
   initialState?: Partial<SkillManagerUiState>;
-  /** UI language; defaults to zh-CN when the host exposes no locale signal. */
+  /** Explicit UI language; otherwise follows the shared runtime TUI locale. */
   locale?: SupportedSettingsLocale;
   requestRender: () => void;
   done: (action: SkillManagerAction) => void;
@@ -153,7 +154,7 @@ const CATALOGS = {
   },
 } as const;
 
-type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
+type CatalogKey = keyof (typeof CATALOGS)["en"];
 
 type SkillManagerEntry =
   | { kind: "group"; key: string; group: ManagedSkillGroup }
@@ -168,7 +169,7 @@ export class SkillManagerOverlay implements Component, Focusable {
   private filterActive = false;
 
   constructor(private readonly params: SkillManagerOverlayParams) {
-    this.locale = params.locale ?? "zh-CN";
+    this.locale = getTuiLocale(params.locale);
     this.query = params.initialState?.query ?? "";
     const selectedKey = params.initialState?.selectedKey;
     if (selectedKey) {
@@ -182,9 +183,9 @@ export class SkillManagerOverlay implements Component, Focusable {
 
   /** Translate a catalog key with optional {var} substitution. */
   private t(key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
-    const catalog = CATALOGS[this.locale] ?? CATALOGS["zh-CN"];
+    const catalog = CATALOGS[this.locale] ?? CATALOGS.en;
     const template: unknown = catalog[key];
-    const text = typeof template === "string" ? template : CATALOGS["zh-CN"][key] as string;
+    const text = typeof template === "string" ? template : CATALOGS.en[key] as string;
     if (!vars) return text;
     return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
       vars[name] !== undefined ? String(vars[name]) : `{${name}}`);

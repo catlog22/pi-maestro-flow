@@ -9,16 +9,9 @@ import { findStructuredOutputSchemaHazard } from "../src/runs/execution-infra.ts
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
-test("general-executor agent definition exists in flow and .pi and stays mirrored", () => {
-  const source = path.join(REPO_ROOT, "flow", "agents", "general-executor.md");
+test("general-executor agent definition exists in .pi and stays valid", () => {
   const deployed = path.join(REPO_ROOT, ".pi", "agents", "general-executor.md");
-  assert.ok(fs.existsSync(source), "flow/agents/general-executor.md must exist");
   assert.ok(fs.existsSync(deployed), ".pi/agents/general-executor.md must exist");
-  assert.equal(
-    fs.readFileSync(source, "utf8"),
-    fs.readFileSync(deployed, "utf8"),
-    "flow/ and .pi/ copies must stay byte-identical",
-  );
 
   const { frontmatter, body } = parseFrontmatter(fs.readFileSync(deployed, "utf8"));
   assert.equal(frontmatter.name, "general-executor");
@@ -32,7 +25,7 @@ test("general-executor agent definition exists in flow and .pi and stays mirrore
 });
 
 test("general-executor dedicated report schema is valid, complete, and dispatch-safe", () => {
-  for (const dir of ["flow", ".pi"]) {
+  for (const dir of [".pi"]) {
     const schemaPath = path.join(REPO_ROOT, dir, "agents", "general-executor-report.schema.json");
     assert.ok(fs.existsSync(schemaPath), `${dir}/agents/general-executor-report.schema.json must exist`);
     const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8")) as Record<string, unknown>;

@@ -19,6 +19,7 @@ import {
   rule,
   type FrameTheme,
 } from "pi-cockpit/src/settings/ui-primitives.ts";
+import { getTuiLocale } from "./locale.ts";
 import {
   ALL_CONFIG_KEYS,
   SMART_SEARCH_CONFIG_KEYS,
@@ -120,7 +121,7 @@ const CATALOGS = {
   },
 } as const;
 
-type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
+type CatalogKey = keyof (typeof CATALOGS)["en"];
 
 // ---------------------------------------------------------------------------
 // Web Access config sync — bridges ~/.pi/web-search.json ↔ Smart Search config
@@ -265,7 +266,7 @@ export interface SmartSearchConfigOverlayParams {
   close: () => void;
   initialKey?: string;
   sync?: WebAccessConfigSyncLike;
-  /** UI language; defaults to en. */
+  /** Explicit UI language; otherwise follows the shared runtime TUI locale. */
   locale?: SupportedSettingsLocale;
 }
 
@@ -308,7 +309,7 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
   private readonly sync: WebAccessConfigSyncLike | undefined;
 
   constructor(private readonly params: SmartSearchConfigOverlayParams) {
-    this.locale = params.locale ?? "en";
+    this.locale = getTuiLocale(params.locale);
     this.config = { ...params.config };
     this.sync = params.sync;
     const known = new Set<string>(ALL_CONFIG_KEYS);
@@ -626,6 +627,7 @@ export async function showSmartSearchConfigOverlay(
   ctx: Pick<ExtensionContext, "hasUI" | "ui">,
   store: SmartSearchConfigStoreLike = new SmartSearchConfigStore(),
   sync?: WebAccessConfigSyncLike,
+  locale?: SupportedSettingsLocale,
 ): Promise<void> {
   if (!ctx.hasUI) return;
   const config = await store.load();
@@ -638,6 +640,7 @@ export async function showSmartSearchConfigOverlay(
       requestRender: () => tui.requestRender(),
       close: () => done(undefined),
       sync: resolvedSync,
+      locale,
     });
     return overlay;
   }, {

@@ -21,6 +21,7 @@ import { sanitizeExtensionStatusText } from "./extension-status.ts";
 import type { IconGlyphs } from "./icons.ts";
 import { fitLineByPriority, visibleStart, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
 import { overlayListRows } from "./viewport.ts";
+import { tuiT } from "./tui-i18n.ts";
 
 const UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 
@@ -126,7 +127,7 @@ export class ThemePicker implements Component {
 		if (!name) return;
 		const instance = this.params.loadTheme(name);
 		if (!instance) {
-			this.error = `${this.labels[this.selected]} could not be loaded`;
+			this.error = tuiT("picker.theme.loadFailed", { name: this.labels[this.selected] ?? name });
 			return;
 		}
 		this.error = undefined;
@@ -151,7 +152,7 @@ export class ThemePicker implements Component {
 		const result = this.params.commitTheme(name);
 		if (!result.success) {
 			this.error = sanitizeExtensionStatusText(
-				result.error ?? `could not apply ${this.labels[this.selected]}`,
+				result.error ?? tuiT("picker.theme.applyFailed", { name: this.labels[this.selected] ?? name }),
 			);
 			this.params.requestRender();
 			return;
@@ -202,12 +203,12 @@ export class ThemePicker implements Component {
 		const { theme: t, glyphs: g, themes } = this.params;
 		const w = Math.max(1, Math.min(width, 60));
 		const lines = [
-			t.fg("text", "theme"),
+			t.fg("text", tuiT("picker.theme.title")),
 			t.fg("borderMuted", "─".repeat(w)),
 		];
 
 		if (themes.length === 0) {
-			lines.push(t.fg("muted", "no themes registered"));
+			lines.push(t.fg("muted", tuiT("picker.theme.empty")));
 		} else {
 			const page = this.pageSize();
 			const start = visibleStart(this.selected, themes.length, page);
@@ -225,7 +226,7 @@ export class ThemePicker implements Component {
 		}
 
 		if (this.previewBlocked) {
-			lines.push(t.fg("warning", `${g.blocked} pi did not name its active theme — no preview`));
+			lines.push(t.fg("warning", `${g.blocked} ${tuiT("picker.theme.noPreview")}`));
 		}
 		if (this.error) lines.push(t.fg("error", `${g.cross} ${this.error}`));
 
@@ -235,18 +236,18 @@ export class ThemePicker implements Component {
 		// would be worse than the missing feature.
 		const hints: PrioritizedSegment[] = this.previewBlocked
 			? [
-				{ text: t.fg("dim", `${g.upDown} move`), priority: 90, clippable: false },
-				{ text: t.fg("dim", "Enter apply"), priority: 100, clippable: false },
-				{ text: t.fg("dim", "Esc close"), priority: 95, clippable: false },
+				{ text: t.fg("dim", tuiT("picker.theme.move", { keys: g.upDown })), priority: 90, clippable: false },
+				{ text: t.fg("dim", tuiT("picker.theme.apply")), priority: 100, clippable: false },
+				{ text: t.fg("dim", tuiT("picker.theme.close")), priority: 95, clippable: false },
 			]
 			: [
-				{ text: t.fg("dim", `${g.upDown} preview`), priority: 90, clippable: false },
-				{ text: t.fg("dim", "Enter save"), priority: 100, clippable: false },
-				{ text: t.fg("dim", "Esc revert"), priority: 95, clippable: false },
+				{ text: t.fg("dim", tuiT("picker.theme.preview", { keys: g.upDown })), priority: 90, clippable: false },
+				{ text: t.fg("dim", tuiT("picker.theme.save")), priority: 100, clippable: false },
+				{ text: t.fg("dim", tuiT("picker.theme.revert")), priority: 95, clippable: false },
 			];
 		lines.push(fitLineByPriority(hints, w, UTILS, t.fg("dim", " · "), g.ellipsis));
 		lines.push(truncateToWidth(
-			t.fg("dim", "/settings pairs a light and a dark theme"),
+			t.fg("dim", tuiT("picker.theme.settingsHint")),
 			w,
 			"…",
 		));

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createTranscriptSelectionController, type TranscriptSelectionController } from "../src/transcript-selection.ts";
+import { cockpitTuiLocale } from "../src/tui-i18n.ts";
+
+cockpitTuiLocale.setLocale("en");
 
 interface SelectionHarness {
 	controller: TranscriptSelectionController;

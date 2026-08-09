@@ -20,6 +20,7 @@ const theme = {
 function createOverlay(overrides: Partial<ConstructorParameters<typeof ModelFailoverOverlay>[0]> = {}) {
   return new ModelFailoverOverlay({
     cwd: "D:/workspace",
+    locale: "zh-CN",
     models: ["provider/primary", "provider/backup", "provider/last"],
     multimodalModels: ["provider/last"],
     currentModel: "provider/primary",

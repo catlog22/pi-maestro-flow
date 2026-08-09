@@ -41,6 +41,7 @@ import type {
   PermissionToolCall,
 } from "../permissions/types.ts";
 import { isTeammateChild } from "../permissions/teammate-relay.ts";
+import { getTuiLocale } from "../tui/locale.ts";
 import {
   createHookContextComponent,
   parseMaestroContext,
@@ -142,7 +143,7 @@ const HOOK_UI_CATALOGS = {
   },
 } as const;
 
-type HookCatalogKey = keyof (typeof HOOK_UI_CATALOGS)["zh-CN"];
+type HookCatalogKey = keyof (typeof HOOK_UI_CATALOGS)["en"];
 type HookTranslator = (key: HookCatalogKey, vars?: Readonly<Record<string, string | number>>) => string;
 
 /** Translate a catalog key with optional {var} substitution. */
@@ -151,9 +152,9 @@ function translateHook(
   key: HookCatalogKey,
   vars?: Readonly<Record<string, string | number>>,
 ): string {
-  const catalog = HOOK_UI_CATALOGS[locale] ?? HOOK_UI_CATALOGS["zh-CN"];
+  const catalog = HOOK_UI_CATALOGS[locale] ?? HOOK_UI_CATALOGS.en;
   const template: unknown = catalog[key];
-  const text = typeof template === "string" ? template : HOOK_UI_CATALOGS["zh-CN"][key] as string;
+  const text = typeof template === "string" ? template : HOOK_UI_CATALOGS.en[key] as string;
   if (!vars) return text;
   return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
     vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
@@ -165,7 +166,7 @@ interface AdapterOptions {
   isTeammateChild?: () => boolean;
   onCompactionCancelled?: () => void;
   shouldSkipStopHook?: () => boolean;
-  /** UI language for notices and the review overlay; defaults to zh-CN. */
+  /** Explicit UI language; otherwise follows the shared runtime TUI locale. */
   locale?: SupportedSettingsLocale;
 }
 
@@ -197,8 +198,8 @@ export interface CodexHookAdapter {
 export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptions = {}): CodexHookAdapter {
   const trustFilePath = options.trustFilePath ?? join(getAgentDir(), "hook-trust.json");
   const getPermissionMode = options.getPermissionMode ?? (() => "default");
-  const locale = options.locale ?? "zh-CN";
-  const t: HookTranslator = (key, vars) => translateHook(locale, key, vars);
+  const resolveLocale = (): SupportedSettingsLocale => getTuiLocale(options.locale);
+  const t: HookTranslator = (key, vars) => translateHook(resolveLocale(), key, vars);
   const state: HookState = {
     active: false,
     lifecycle: new AbortController(),
@@ -324,7 +325,7 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
       const hash = loaded.hash;
       if (!hash) return "close";
       const entries = buildHookReviewEntries(loaded, state.toggles);
-      const action = await showHookReviewOverlay(ctx, entries, state.active, loaded, uiState, notice, locale);
+      const action = await showHookReviewOverlay(ctx, entries, state.active, loaded, uiState, notice, resolveLocale());
       uiState = action.uiState;
       if (action.kind === "close") return "close";
       if (action.kind === "install") return "install";
@@ -387,7 +388,7 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
     let installMode = startInInstaller;
     while (true) {
       if (installMode || !state.loaded?.exists || !state.loaded.hash) {
-        const result = await runMaestroHookInstaller(ctx);
+        const result = await runMaestroHookInstaller(ctx, undefined, resolveLocale());
         if (!result.changed) return;
         await reload(ctx, false);
         installMode = false;

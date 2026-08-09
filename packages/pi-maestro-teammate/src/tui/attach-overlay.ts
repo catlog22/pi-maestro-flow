@@ -29,6 +29,14 @@ import {
   type ProgressPalette,
 } from "./progress-tree.ts";
 import type { TranscriptLoad, TranscriptRow } from "../shared/transcript.ts";
+import {
+  createTuiTranslator,
+  getTuiLocale,
+  onTuiLocaleChange,
+  translateStatusText,
+  type SupportedSettingsLocale,
+  type TuiTranslator,
+} from "./locale.ts";
 
 /** Loader injected by the extension; reads the agent's session file. */
 export type TranscriptLoader = (agent: ActiveAgent) => Promise<TranscriptLoad>;
@@ -72,6 +80,7 @@ export interface OverlayProgressUpdate {
 
 interface LogRenderCache {
   width: number;
+  locale: SupportedSettingsLocale;
   lineCount: number;
   lastLine: AgentLog["lines"][number] | undefined;
   inboxCount: number;
@@ -98,6 +107,7 @@ interface AgentLog {
   transcriptRefreshTimer?: ReturnType<typeof setTimeout>;
   transcriptCache?: {
     width: number;
+    locale: SupportedSettingsLocale;
     rows: TranscriptRow[];
     loading: boolean;
     rendered: string[];
@@ -146,26 +156,40 @@ function titleCase(text: string): string {
 }
 
 /** An idle tool row must say how long it has been idle, not just "idle". */
-function idleLabel(lastActivityAt: number | undefined, now = Date.now()): string {
+function idleLabel(
+  lastActivityAt: number | undefined,
+  now: number,
+  t: TuiTranslator,
+): string {
   const seconds = idleSeconds(lastActivityAt, now);
-  return seconds > 0 ? `Tools · idle ${seconds}s` : "Tools · idle";
+  return seconds > 0
+    ? t("attach.toolsIdleSeconds", { seconds })
+    : t("attach.toolsIdle");
 }
 
 /**
  * Status of one graph task. Derived states win: a running task that has gone
  * quiet reads `stalled 42s` instead of an indistinguishable `Running`.
  */
-function progressStatusText(entry: AgentProgressSnapshot, now = Date.now()): string {
+function progressStatusText(
+  entry: AgentProgressSnapshot,
+  now: number,
+  t: TuiTranslator,
+): string {
   const display = effectiveDisplayStatus(entry.status, entry.resultReadyAt, entry.lastActivityAt, now, entry.phase);
   const status = display === "stalled"
-    ? red(`stalled ${idleSeconds(entry.lastActivityAt, now)}s`)
+    ? red(t("status.stalled", { seconds: idleSeconds(entry.lastActivityAt, now) }))
     : display === "result-ready"
-      ? green("Result ready")
-      : toneText(progressPalette, STATUS_PRESENTATION[display].tone, titleCase(STATUS_PRESENTATION[display].text));
+      ? green(t("status.resultReady"))
+      : toneText(
+          progressPalette,
+          STATUS_PRESENTATION[display].tone,
+          titleCase(translateStatusText(STATUS_PRESENTATION[display].text, t)),
+        );
   const parts = [
     status,
-    entry.toolCount ? dim(`${entry.toolCount} tools`) : "",
-    entry.tokens ? dim(`${entry.tokens} tok`) : "",
+    entry.toolCount ? dim(t("metrics.tools", { count: entry.toolCount })) : "",
+    entry.tokens ? dim(t("metrics.tok", { count: entry.tokens })) : "",
   ].filter(Boolean);
   return parts.join(dim(" · "));
 }
@@ -175,7 +199,7 @@ function progressStatusText(entry: AgentProgressSnapshot, now = Date.now()): str
  * the widget flagged something odd, so it must expose the same derived states
  * the widget does — a 10-minute-idle agent cannot look like a fresh one.
  */
-function agentStatusText(agent: ActiveAgent, now = Date.now()): string {
+function agentStatusText(agent: ActiveAgent, now: number, t: TuiTranslator): string {
   const display = effectiveDisplayStatus(
     agent.status,
     agent.resultReadyAt,
@@ -184,11 +208,11 @@ function agentStatusText(agent: ActiveAgent, now = Date.now()): string {
     agent.phase,
     agent.pendingInteractions?.size ?? 0,
   );
-  if (display === "stalled") return red(`stalled ${idleSeconds(agent.lastActivityAt, now)}s`);
-  if (display === "result-ready") return green("Result ready");
-  if (display === "completed") return dim("Done");
+  if (display === "stalled") return red(t("status.stalled", { seconds: idleSeconds(agent.lastActivityAt, now) }));
+  if (display === "result-ready") return green(t("status.resultReady"));
+  if (display === "completed") return dim(t("common.done"));
   const presentation = STATUS_PRESENTATION[display];
-  return toneText(progressPalette, presentation.tone, titleCase(presentation.text));
+  return toneText(progressPalette, presentation.tone, titleCase(translateStatusText(presentation.text, t)));
 }
 
 export class AttachOverlay implements Component, Focusable {
@@ -219,6 +243,8 @@ export class AttachOverlay implements Component, Focusable {
   private pasteFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private lastWidth = 80;
   private readonly onSend?: (correlationId: string, message: string) => Promise<{ ok: boolean; message: string }>;
+  private readonly t: TuiTranslator;
+  private readonly localeDisposer: () => void;
 
   constructor(
     initial: ActiveAgent,
@@ -227,7 +253,15 @@ export class AttachOverlay implements Component, Focusable {
     onSend?: (correlationId: string, message: string) => Promise<{ ok: boolean; message: string }>,
     loadTranscript?: TranscriptLoader,
     initialTranscript = false,
+    private readonly locale?: SupportedSettingsLocale,
   ) {
+    this.t = createTuiTranslator(locale);
+    this.localeDisposer = locale === undefined
+      ? onTuiLocaleChange(() => {
+          this.sendStatus = "";
+          this.requestRender?.();
+        })
+      : () => {};
     this.onDone = onDone;
     this.getActiveRuns = getActiveRuns ?? (() => new Map());
     this.onSend = onSend;
@@ -433,7 +467,7 @@ export class AttachOverlay implements Component, Focusable {
       if (this.composing) {
         if (matchesKey(data, Key.escape)) {
           this.composing = false;
-          this.sendStatus = "Message cancelled";
+          this.sendStatus = this.t("attach.messageCancelled");
         }
         return;
       }
@@ -557,7 +591,7 @@ export class AttachOverlay implements Component, Focusable {
     if (matchesKey(data, Key.escape)) {
       this.composing = false;
       this.desiredCursorCol = undefined;
-      this.sendStatus = "Message cancelled";
+      this.sendStatus = this.t("attach.messageCancelled");
     } else if (
       data === "\n"
       || data === "\x1b\r"
@@ -572,11 +606,13 @@ export class AttachOverlay implements Component, Focusable {
     } else if (matchesKey(data, Key.enter)) {
       const message = this.draft.trim();
       if (!message || !this.onSend) {
-        this.sendStatus = message ? "Message cannot be sent" : "Message is empty";
+        this.sendStatus = message
+          ? this.t("attach.messageCannotSend")
+          : this.t("attach.messageEmpty");
         return;
       }
       this.sending = true;
-      this.sendStatus = "Sending…";
+      this.sendStatus = this.t("attach.sending");
       void Promise.resolve(this.onSend(this.activeId, message)).then((result) => {
         this.sending = false;
         if (result.ok) {
@@ -587,13 +623,15 @@ export class AttachOverlay implements Component, Focusable {
           this.sendStatus = result.message;
         } else {
           this.composing = true;
-          this.sendStatus = `${result.message} · Enter retry · Esc cancel`;
+          this.sendStatus = this.t("attach.retryHint", { message: result.message });
         }
         this.requestRender?.();
       }).catch((error: unknown) => {
         this.sending = false;
         this.composing = true;
-        this.sendStatus = `Send failed · ${error instanceof Error ? error.message : String(error)} · Enter retry · Esc cancel`;
+        this.sendStatus = this.t("attach.sendFailed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
         this.requestRender?.();
       });
     } else if (matchesKey(data, Key.backspace)) {
@@ -687,7 +725,7 @@ export class AttachOverlay implements Component, Focusable {
 
     if (!log) {
       this.setTickVisibility("hidden", now);
-      rows.push(dim("No agent selected"));
+      rows.push(dim(this.t("attach.noAgentSelected")));
       return this.renderFrame(rows, w);
     }
 
@@ -697,13 +735,13 @@ export class AttachOverlay implements Component, Focusable {
       : log.progress.find((entry) => entry.taskIndex === log.selectedTaskIndex);
     this.setTickVisibility("full", now);
     const uptime = Math.max(0, Math.round(activeMs(agent, now) / 1000));
-    const status = selected ? progressStatusText(selected, now) : agentStatusText(agent, now);
+    const status = selected ? progressStatusText(selected, now, this.t) : agentStatusText(agent, now, this.t);
     const title = selected
       ? `${progressIcon(selected.status, progressPalette)} ${bold(progressLabel(selected))}${dim(` (${selected.agent})`)}`
       : `${bold(agent.agent)}/${bold(agent.name ?? agent.correlationId.slice(0, 8))}`;
     const meta = selected
       ? status
-      : `${status}  ${dim(`${uptime}s`)}  ${dim(`inbox:${agent.inbox.length}`)}`;
+      : `${status}  ${dim(`${uptime}s`)}  ${dim(this.t("attach.inboxCount", { count: agent.inbox.length }))}`;
     rows.push(
       visibleWidth(title) + 2 + visibleWidth(meta) <= inner
         ? `${title}  ${meta}`
@@ -735,7 +773,7 @@ export class AttachOverlay implements Component, Focusable {
     const tailRows: string[] = [];
     if (agent.status === "sleeping") {
       tailRows.push(frameRule(inner));
-      tailRows.push(`${yellow("◉")} ${dim("Sleeping · teammate-send to wake")}`);
+      tailRows.push(`${yellow("◉")} ${dim(this.t("attach.sleepingHint"))}`);
     }
     if (this.onSend) {
       tailRows.push(frameRule(inner));
@@ -762,19 +800,19 @@ export class AttachOverlay implements Component, Focusable {
       ? ` ${log.scrollOffset + 1}-${Math.min(log.scrollOffset + logHeight, logLines.length)}/${logLines.length}`
       : "";
     const agentHint = log.progress.length > 1
-      ? `  ${dim("0")} overview  ${dim(`1-${Math.min(9, log.progress.length)}`)} view`
+      ? `  ${dim("0")} ${this.t("attach.footer.overview")}  ${dim(`1-${Math.min(9, log.progress.length)}`)} ${this.t("common.view")}`
       : "";
     const transcriptHint = this.loadTranscript
-      ? log.transcriptMode ? "t activity" : "t transcript"
+      ? log.transcriptMode ? this.t("attach.footer.activity") : this.t("attach.footer.transcript")
       : "";
     out.push(dim(fitFooter(w, [
-      "Esc back",
-      this.onSend ? (this.composing ? "Enter send" : "Enter message") : "",
-      this.composing ? "Shift+Enter newline" : "",
-      `←→ switch(${this.order.length})`,
+      this.t("attach.footer.back"),
+      this.onSend ? (this.composing ? this.t("attach.footer.send") : this.t("attach.footer.message")) : "",
+      this.composing ? this.t("attach.footer.newline") : "",
+      this.t("attach.footer.switchCount", { count: this.order.length }),
       agentHint.trim(),
       transcriptHint,
-      `↑↓ scroll${range}`,
+      this.t("attach.footer.scroll", { range }),
     ])));
     return out;
   }
@@ -787,7 +825,7 @@ export class AttachOverlay implements Component, Focusable {
     this.composerDraftWidth = draftWidth;
     if (!this.composing) {
       return [truncateToWidth(
-        this.sendStatus ? `${dim("Message ·")} ${this.sendStatus}` : `${dim("Message ·")} Enter to compose`,
+        this.sendStatus ? `${dim(this.t("attach.message.label"))} ${this.sendStatus}` : `${dim(this.t("attach.message.label"))} ${this.t("attach.message.compose")}`,
         width,
         "…",
       )];
@@ -846,15 +884,19 @@ export class AttachOverlay implements Component, Focusable {
       this.setTickVisibility("hidden", now);
       return [
         this.renderTabs(width),
-        truncateToWidth(dim("● main conversation · Enter return"), width, "…"),
-        dim(fitFooter(width, ["Esc back", "←→ switch", "Enter return"])),
+        truncateToWidth(dim(this.t("attach.mainDocked")), width, "…"),
+        dim(fitFooter(width, [
+          this.t("attach.footer.back"),
+          this.t("attach.footer.switch"),
+          this.t("attach.footer.return"),
+        ])),
       ];
     }
     if (!log) {
       this.setTickVisibility("hidden", now);
       return [
-        truncateToWidth(dim("Agents · no active session"), width, "…"),
-        truncateToWidth(dim("Esc back"), width, "…"),
+        truncateToWidth(dim(this.t("attach.noActiveSession")), width, "…"),
+        truncateToWidth(dim(this.t("attach.footer.back")), width, "…"),
       ];
     }
 
@@ -863,7 +905,7 @@ export class AttachOverlay implements Component, Focusable {
       ? undefined
       : log.progress.find((entry) => entry.taskIndex === log.selectedTaskIndex);
     this.setTickVisibility("tools", now);
-    const status = selected ? progressStatusText(selected, now) : agentStatusText(agent, now);
+    const status = selected ? progressStatusText(selected, now, this.t) : agentStatusText(agent, now, this.t);
     const title = selected
       ? `${progressIcon(selected.status, progressPalette)} ${bold(progressLabel(selected))} ${dim(`(${selected.agent})`)}`
       : `${bold(agent.agent)}/${bold(agent.name ?? agent.correlationId.slice(0, 8))}`;
@@ -873,13 +915,15 @@ export class AttachOverlay implements Component, Focusable {
     ];
 
     const footer = dim(fitFooter(width, [
-      "Esc back",
-      this.onSend ? (this.composing ? "Enter send" : "Enter message") : "",
-      this.composing ? "Shift+Enter newline" : "",
-      "←→ switch",
-      log.progress.length > 1 ? `0 overview · 1-${Math.min(9, log.progress.length)} view` : "",
-      this.loadTranscript ? (log.transcriptMode ? "t activity" : "t transcript") : "",
-      "↑↓ scroll",
+      this.t("attach.footer.back"),
+      this.onSend ? (this.composing ? this.t("attach.footer.send") : this.t("attach.footer.message")) : "",
+      this.composing ? this.t("attach.footer.newline") : "",
+      this.t("attach.footer.switch"),
+      log.progress.length > 1
+        ? `${this.t("attach.footer.overview")} · ${this.t("attach.footer.view", { max: Math.min(9, log.progress.length) })}`
+        : "",
+      this.loadTranscript ? (log.transcriptMode ? this.t("attach.footer.activity") : this.t("attach.footer.transcript")) : "",
+      this.t("attach.footer.scroll", { range: "" }),
     ]));
     const tailRows: string[] = [];
     if (this.onSend && this.composing && this.sendStatus) {
@@ -889,7 +933,7 @@ export class AttachOverlay implements Component, Focusable {
     tailRows.push(footer);
 
     if (log.progress.length > 1) {
-      const tree = buildProgressTree(log.progress, progressPalette);
+      const tree = buildProgressTree(log.progress, progressPalette, now, this.locale);
       const focus = log.selectedTaskIndex ?? focusTaskIndex(log.progress);
       const maxTreeRows = Math.max(0, Math.min(3, height - lines.length - tailRows.length - 2));
       if (maxTreeRows > 0) {
@@ -915,7 +959,7 @@ export class AttachOverlay implements Component, Focusable {
             ...this.buildLog(log, width),
             ...log.streamingText.split("\n").filter((line) => line.trim()).slice(-STREAMING_MAX_LINES),
           ];
-    if (streamLines.length === 0) streamLines.push(dim("Waiting for output…"));
+    if (streamLines.length === 0) streamLines.push(dim(this.t("attach.waitingOutput")));
 
     const contentHeight = Math.max(0, height - lines.length - tailRows.length);
     const maxOffset = Math.max(0, streamLines.length - contentHeight);
@@ -932,7 +976,7 @@ export class AttachOverlay implements Component, Focusable {
   }
 
   private renderProgressTree(log: AgentLog, width: number, maxRows = GRAPH_LIST_MAX_ROWS): string[] {
-    const tree = buildProgressTree(log.progress, progressPalette);
+    const tree = buildProgressTree(log.progress, progressPalette, Date.now(), this.locale);
     const focus = log.selectedTaskIndex ?? focusTaskIndex(log.progress);
     const window = selectProgressWindow(tree, maxRows, focus);
     const running = log.progress.filter((entry) => entry.status === "running").length;
@@ -941,7 +985,12 @@ export class AttachOverlay implements Component, Focusable {
     const range = window.total > window.rows.length
       ? `${window.start + 1}-${window.start + window.rows.length}/${window.total}`
       : `${window.total}`;
-    const header = dim(`Agents · ${running} running · ${pending} pending${failed ? ` · ${failed} failed` : ""} · ${range}`);
+    const header = dim(this.t("attach.agentsSummary", {
+      running,
+      pending,
+      failed: failed ? ` · ${this.t("progress.summary.failedCount", { count: failed })}` : "",
+      range,
+    }));
     return [
       truncateToWidth(header, width, "…"),
       ...window.rows.map((row) => truncateToWidth(
@@ -954,19 +1003,19 @@ export class AttachOverlay implements Component, Focusable {
 
   private renderSelectedTools(entry: AgentProgressSnapshot, width: number): string[] {
     const tools = entry.recentTools ?? [];
-    if (tools.length === 0) return [dim(idleLabel(entry.lastActivityAt))];
+    if (tools.length === 0) return [dim(idleLabel(entry.lastActivityAt, Date.now(), this.t))];
     const parts = tools.slice(-6).map((tool) => {
       if (tool.status === "running") return yellow(`${SPINNER[this.frame]} ${tool.name}`);
       if (tool.status === "failed") return red(`✗ ${tool.name}`);
       return dim(`✓ ${tool.name}`);
     });
     if (tools.length > 6) parts.unshift(dim(`+${tools.length - 6}`));
-    return [truncateToWidth(`${dim("Tools ·")} ${parts.join(dim("  "))}`, width, "…")];
+    return [truncateToWidth(`${dim(this.t("attach.tools"))} ${parts.join(dim("  "))}`, width, "…")];
   }
 
   private buildSelectedLog(entry: AgentProgressSnapshot, width: number): string[] {
     const message = entry.lastMessage?.trim();
-    if (!message) return [dim(entry.status === "pending" ? "Waiting for dependencies…" : "Waiting for output…")];
+    if (!message) return [dim(entry.status === "pending" ? this.t("attach.waitingDependencies") : this.t("attach.waitingOutput"))];
     const lines: string[] = [];
     for (const rawLine of message.split("\n")) {
       lines.push(...wrapTextWithAnsi(rawLine, width));
@@ -1037,15 +1086,17 @@ export class AttachOverlay implements Component, Focusable {
   private buildTranscript(log: AgentLog, width: number): string[] {
     const transcript = log.transcript;
     if (!transcript) {
-      return [dim(log.transcriptLoading ? "Loading transcript…" : "No transcript available")];
+      return [dim(log.transcriptLoading ? this.t("attach.loadingTranscript") : this.t("attach.noTranscript"))];
     }
     if (transcript.rows.length === 0) {
-      return [dim("Transcript is empty")];
+      return [dim(this.t("attach.emptyTranscript"))];
     }
+    const locale = this.locale ?? getTuiLocale();
     const cache = log.transcriptCache;
     if (
       cache
       && cache.width === width
+      && cache.locale === locale
       && cache.rows === transcript.rows
       && cache.loading === log.transcriptLoading
     ) {
@@ -1055,16 +1106,17 @@ export class AttachOverlay implements Component, Focusable {
       ? transcript.rows.length - AttachOverlay.TRANSCRIPT_MAX_ROWS
       : 0;
     const out: string[] = [];
-    if (start > 0) out.push(dim(`… ${start} older messages hidden`));
+    if (start > 0) out.push(dim(this.t("attach.olderMessages", { count: start })));
     for (let i = start; i < transcript.rows.length; i++) {
       out.push(...this.renderTranscriptRow(transcript.rows[i]!, width));
     }
-    if (log.transcriptLoading) out.push(dim("Refreshing…"));
+    if (log.transcriptLoading) out.push(dim(this.t("attach.refreshing")));
     if (transcript.source === "memory") {
-      out.push(dim("Live activity — no persisted session"));
+      out.push(dim(this.t("attach.memoryTranscript")));
     }
     log.transcriptCache = {
       width,
+      locale,
       rows: transcript.rows,
       loading: log.transcriptLoading ?? false,
       rendered: out,
@@ -1103,7 +1155,9 @@ export class AttachOverlay implements Component, Focusable {
       case "thinking": {
         const lines = row.text.trim().split("\n").filter((line) => line.trim() !== "");
         const preview = lines[0] ?? "";
-        const suffix = lines.length > 1 ? progressPalette.dim(` (${lines.length} lines)`) : "";
+        const suffix = lines.length > 1
+          ? progressPalette.dim(this.t("attach.thinkingLines", { count: lines.length }))
+          : "";
         // Truncate the preview against the width left after the suffix, so the
         // line-count hint is never cut by the outer frame truncation.
         const available = Math.max(1, contentWidth - visibleWidth(suffix));
@@ -1142,27 +1196,27 @@ export class AttachOverlay implements Component, Focusable {
 
   private renderMainTab(rows: string[], inner: number, w: number): string[] {
     rows.push(frameRule(inner));
-    rows.push(dim("● main conversation"));
-    rows.push(dim("   Enter or Esc to return to the main agent"));
+    rows.push(dim(`● ${this.t("attach.main")}`));
+    rows.push(dim(`   ${this.t("attach.mainReturn")}`));
     rows.push(frameRule(inner));
     const out = this.renderFrame(rows, w);
     out.push(dim(fitFooter(w, [
-      "Esc back",
-      `←→ switch(${this.order.length})`,
-      "Enter return",
+      this.t("attach.footer.back"),
+      this.t("attach.footer.switchCount", { count: this.order.length }),
+      this.t("attach.footer.return"),
     ])));
     return out;
   }
 
   private renderCompact(log: AgentLog | undefined, width: number): string {
     if (this.composing) {
-      const content = this.sendStatus || this.draft.replace(/\n/g, " ") || "Type message";
-      return truncateToWidth(`Esc cancel · ${content}`, width, "…");
+      const content = this.sendStatus || this.draft.replace(/\n/g, " ") || this.t("attach.typeMessage");
+      return truncateToWidth(this.t("attach.compactCancel", { content }), width, "…");
     }
     if (this.activeId === MAIN_TAB) {
-      return truncateToWidth(dim("● main · Enter return"), width, "…");
+      return truncateToWidth(dim(this.t("attach.mainCompact")), width, "…");
     }
-    if (!log) return truncateToWidth(`${dim("□")} Agents`, width, "…");
+    if (!log) return truncateToWidth(`${dim("□")} ${this.t("common.agents")}`, width, "…");
     const selected = log.selectedTaskIndex === undefined
       ? undefined
       : log.progress.find((entry) => entry.taskIndex === log.selectedTaskIndex);
@@ -1176,7 +1230,7 @@ export class AttachOverlay implements Component, Focusable {
     const agent = log.agent;
     const icon = agent.status === "sleeping" ? yellow("◉") : agent.status === "completed" ? dim("✓") : green("■");
     const name = agent.name ?? agent.correlationId.slice(0, 6);
-    return truncateToWidth(`${icon} ${agent.agent}/${name} · Enter msg · Esc`, width, "…");
+    return truncateToWidth(`${icon} ${agent.agent}/${name} · ${this.t("attach.compactMessage")}`, width, "…");
   }
 
   private renderFrame(rows: string[], width: number): string[] {
@@ -1189,11 +1243,12 @@ export class AttachOverlay implements Component, Focusable {
   }
 
   private renderTabs(width: number): string {
-    if (this.order.length === 0) return dim("Agents");
+    if (this.order.length === 0) return dim(this.t("common.agents"));
     const activeIndex = Math.max(0, this.order.indexOf(this.activeId));
     const labels = this.order.map((cid) => {
       if (cid === MAIN_TAB) {
-        return cid === this.activeId ? `${green("▸")} ${bold(green("● main"))}` : "● main";
+        const main = `● ${this.t("attach.main")}`;
+        return cid === this.activeId ? `${green("▸")} ${bold(green(main))}` : main;
       }
       const log = this.agents.get(cid);
       if (!log) return dim(cid.slice(0, 6));
@@ -1203,7 +1258,7 @@ export class AttachOverlay implements Component, Focusable {
       const label = `${icon} @${name}`;
       return cid === this.activeId ? `${green("▸")} ${bold(green(label))}` : dim(label);
     });
-    const prefix = `${dim(`Agents ${activeIndex + 1}/${this.order.length} ·`)} `;
+    const prefix = `${dim(`${this.t("common.agents")} ${activeIndex + 1}/${this.order.length} ·`)} `;
     const full = `${prefix}${labels.join(dim(" · "))}`;
     if (visibleWidth(full) <= width) return full;
     const hiddenLeft = activeIndex > 0 ? dim(`‹${activeIndex}`) : "";
@@ -1216,7 +1271,7 @@ export class AttachOverlay implements Component, Focusable {
   }
 
   private renderTools(log: AgentLog, width: number, now: number): string[] {
-    if (log.activeTools.length === 0) return [dim(idleLabel(log.agent.lastActivityAt, now))];
+    if (log.activeTools.length === 0) return [dim(idleLabel(log.agent.lastActivityAt, now, this.t))];
     const parts: string[] = [];
     const spinner = SPINNER[this.frame];
     for (const tool of log.activeTools.slice(-6)) {
@@ -1226,16 +1281,16 @@ export class AttachOverlay implements Component, Focusable {
       else parts.push(dim(`✓ ${tool.name}`));
     }
     if (log.activeTools.length > 6) parts.unshift(dim(`+${log.activeTools.length - 6}`));
-    return [truncateToWidth(`${dim("Tools ·")} ${parts.join(dim("  "))}`, width, "…")];
+    return [truncateToWidth(`${dim(this.t("attach.tools"))} ${parts.join(dim("  "))}`, width, "…")];
   }
 
   private renderStream(log: AgentLog, width: number): string[] {
-    if (!log.streamingText) return [dim("Output · waiting")];
+    if (!log.streamingText) return [dim(this.t("attach.outputWaiting"))];
     const all = log.streamingText.split("\n");
     const tail = all.slice(-STREAMING_MAX_LINES);
     const header = all.length > STREAMING_MAX_LINES
-      ? dim(`Output · ${all.length - STREAMING_MAX_LINES} earlier`)
-      : dim("Output");
+      ? dim(this.t("attach.outputEarlier", { count: all.length - STREAMING_MAX_LINES }))
+      : dim(this.t("attach.output"));
     const contentWidth = Math.max(1, width - 3);
     return [
       header,
@@ -1253,10 +1308,12 @@ export class AttachOverlay implements Component, Focusable {
     const inbox = log.agent.inbox;
     const lastLine = log.lines[log.lines.length - 1];
     const lastInbox = inbox[inbox.length - 1];
+    const locale = this.locale ?? getTuiLocale();
     const cache = log.logCache;
     if (
       cache
       && cache.width === width
+      && cache.locale === locale
       && cache.lineCount === log.lines.length
       && cache.lastLine === lastLine
       && cache.inboxCount === inbox.length
@@ -1275,7 +1332,7 @@ export class AttachOverlay implements Component, Focusable {
       }
     }
     if (inbox.length > 0) {
-      result.push(dim("Inbox"));
+      result.push(dim(this.t("attach.inbox")));
       for (const message of inbox.slice(-5)) {
         const time = new Date(message.timestamp).toISOString().slice(11, 19);
         // Payloads are capped by bytes (256KB total), never by display size —
@@ -1292,6 +1349,7 @@ export class AttachOverlay implements Component, Focusable {
     }
     log.logCache = {
       width,
+      locale,
       lineCount: log.lines.length,
       lastLine,
       inboxCount: inbox.length,
@@ -1302,6 +1360,7 @@ export class AttachOverlay implements Component, Focusable {
   }
 
   dispose(): void {
+    this.localeDisposer();
     if (this.pasteFlushTimer) clearTimeout(this.pasteFlushTimer);
     if (this.timer) {
       clearInterval(this.timer);

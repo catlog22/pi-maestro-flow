@@ -11,7 +11,7 @@
     "agents"
   ],
   "scripts": {
-    "test": "node --experimental-transform-types --test --test-concurrency=4 \"test/*.test.ts\"",
+    "test": "node --experimental-transform-types --import ./test/setup.ts --test --test-concurrency=4 \"test/*.test.ts\"",
     "typecheck": "tsc -p tsconfig.build.json",
     "build:declarations": "tsc -p tsconfig.declarations.json",
     "check:declarations": "node scripts/check-declarations.mjs",

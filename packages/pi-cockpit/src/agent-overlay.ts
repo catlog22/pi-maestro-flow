@@ -19,6 +19,7 @@ import {
 } from "./session-detail.ts";
 import { visibleAgentRows } from "./stack-widget.ts";
 import type { AgentRow } from "./types.ts";
+import { tuiT } from "./tui-i18n.ts";
 import { overlayListRows } from "./viewport.ts";
 
 export interface AgentOverlayParams {
@@ -73,7 +74,7 @@ export class AgentOverlay implements Component, Focusable {
 				// re-target another agent because the roster selection moved.
 				const target = this.entries().find((entry) => entry.row.correlationId === targetId)?.row;
 				if (!target) {
-					this.ack(`steer aborted: @${this.agentName(targetId)} is gone`, true);
+					this.ack(tuiT("overlay.agents.aborted", { agent: this.agentName(targetId) }), true);
 				} else if (draft) {
 					this.params.onCommand(targetId, "steer", draft);
 					this.ack(`steer @${target.name || target.role || target.agent || targetId}: ${draft}`);
@@ -158,7 +159,13 @@ export class AgentOverlay implements Component, Focusable {
 				return [fit(`steer @${target}: ${this.compose.draft}_ · Enter · Esc`, safeWidth)];
 			}
 			const selected = entries.find((entry) => entry.row.correlationId === this.selectedId)?.row;
-			return [fit(selected ? `Agents ${entries.length} · ${agentLabel(selected)} · Esc` : "Agents · none · Esc", safeWidth)];
+			const title = tuiT("overlay.agents.title");
+			return [fit(
+				selected
+					? `${title} ${entries.length} · ${agentLabel(selected)} · Esc`
+					: `${title} · ${tuiT("overlay.agents.none")} · Esc`,
+				safeWidth,
+			)];
 		}
 		return safeWidth < 88
 			? this.renderNarrow(safeWidth, entries.map((entry) => entry.row))
@@ -204,7 +211,7 @@ export class AgentOverlay implements Component, Focusable {
 
 	private agentLines(width: number, maxRows: number): string[] {
 		const entries = this.entries();
-		if (entries.length === 0) return [this.params.theme.fg("dim", fit("No agents", width))];
+		if (entries.length === 0) return [this.params.theme.fg("dim", fit(tuiT("overlay.agents.noAgents"), width))];
 		const selected = Math.max(0, entries.findIndex((entry) => entry.row.correlationId === this.selectedId));
 		const start = visibleStart(selected, entries.length, maxRows);
 		return entries.slice(start, start + maxRows).map(({ row, prefix }) => {
@@ -222,7 +229,7 @@ export class AgentOverlay implements Component, Focusable {
 	private detailLines(rows: AgentRow[], width: number, maxRows: number): string[] {
 		this.detailWidth = width;
 		this.detailRows = maxRows;
-		if (!this.selectedId) return [this.params.theme.fg("dim", fit("No agent selected", width))];
+		if (!this.selectedId) return [this.params.theme.fg("dim", fit(tuiT("overlay.agents.noSelection"), width))];
 		return renderSessionDetail(
 			rows,
 			this.selectedId,
@@ -230,7 +237,7 @@ export class AgentOverlay implements Component, Focusable {
 			this.params.theme,
 			maxRows,
 			this.outputScroll,
-			"PgUp/PgDn scroll output",
+			tuiT("session.previewHint"),
 		);
 	}
 
@@ -245,10 +252,10 @@ export class AgentOverlay implements Component, Focusable {
 		const failed = statuses.filter((status) => status === "failed" || status === "stalled").length;
 		const ack = this.lastAck && Date.now() - this.lastAck.at < COMMAND_ACK_MS ? this.lastAck : null;
 		return fit([
-			this.params.theme.bold("Agents"),
-			`${rows.length} total`,
-			active ? `${active} active` : "",
-			failed ? `${failed} failed` : "",
+			this.params.theme.bold(tuiT("overlay.agents.title")),
+			tuiT("common.total", { count: rows.length }),
+			active ? tuiT("common.active", { count: active }) : "",
+			failed ? tuiT("common.failed", { count: failed }) : "",
 			ack
 				? this.params.theme.fg(ack.error ? "error" : "success", ack.error ? `✗ ${ack.text}` : `${this.params.glyphs.check} ${ack.text}`)
 				: "",
@@ -257,9 +264,9 @@ export class AgentOverlay implements Component, Focusable {
 
 	private help(width: number): string {
 		if (this.compose) {
-			return this.params.theme.fg("dim", fit("Enter send · Esc cancel", width));
+			return this.params.theme.fg("dim", fit(tuiT("overlay.agents.composeHelp"), width));
 		}
-		return this.params.theme.fg("dim", fit("Esc close · ↑↓ agent · Home/End jump · PgUp/PgDn output · i interrupt · s steer", width));
+		return this.params.theme.fg("dim", fit(tuiT("overlay.agents.help"), width));
 	}
 
 	private rule(width: number): string {

@@ -8,6 +8,7 @@ import { resolveGlyphs } from "./icons.ts";
 import { agentPanelRows, panelRows } from "./viewport.ts";
 import type { AgentRow, CockpitConfig, TodoItem } from "./types.ts";
 import { agentListWindowRows, scrollWindowStart, type AgentScrollState } from "./agent-scroll.ts";
+import { tuiT } from "./tui-i18n.ts";
 
 export interface TodoWidgetDeps {
 	getTodos: () => TodoItem[];
@@ -126,16 +127,16 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 				// its own count line right underneath saying the same thing.
 				const headerSegs: PrioritizedSegment[] = [
 					{ text: dot, priority: 100, clippable: false },
-					{ text: theme.fg("muted", "Agents"), priority: 90, clippable: false },
+					{ text: theme.fg("muted", tuiT("widget.agents.title")), priority: 90, clippable: false },
 				];
 				if (failedCount) {
-					headerSegs.push({ text: theme.fg("error", `${failedCount} failed`), priority: 95, clippable: false });
+					headerSegs.push({ text: theme.fg("error", tuiT("common.failed", { count: failedCount })), priority: 95, clippable: false });
 				}
-				if (stalledCount) headerSegs.push({ text: theme.fg("error", `${stalledCount} stalled`), priority: 94, clippable: false });
-				if (terminatedCount) headerSegs.push({ text: theme.fg("warning", `${terminatedCount} terminated`), priority: 85, clippable: false });
-				if (runCount) headerSegs.push({ text: theme.fg("dim", `${runCount} running`), priority: 80, clippable: false });
-				if (pendingCount) headerSegs.push({ text: theme.fg("dim", `${pendingCount} pending`), priority: 60, clippable: false });
-				if (sleepingCount) headerSegs.push({ text: theme.fg("dim", `${sleepingCount} sleeping`), priority: 50, clippable: false });
+				if (stalledCount) headerSegs.push({ text: theme.fg("error", tuiT("common.stalled", { count: stalledCount })), priority: 94, clippable: false });
+				if (terminatedCount) headerSegs.push({ text: theme.fg("warning", tuiT("common.terminated", { count: terminatedCount })), priority: 85, clippable: false });
+				if (runCount) headerSegs.push({ text: theme.fg("dim", tuiT("common.running", { count: runCount })), priority: 80, clippable: false });
+				if (pendingCount) headerSegs.push({ text: theme.fg("dim", tuiT("common.pending", { count: pendingCount })), priority: 60, clippable: false });
+				if (sleepingCount) headerSegs.push({ text: theme.fg("dim", tuiT("common.sleeping", { count: sleepingCount })), priority: 50, clippable: false });
 				const headerLine = fitLineByPriority(headerSegs, width, UTILS, theme.fg("dim", g.separator), g.ellipsis);
 				// Focused-session priority: while a selected session's detail block is
 				// open, it owns the Agent height allowance and the roster collapses to
@@ -178,7 +179,10 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 				lines.push(headerLine);
 				const marker = above > 0 || below > 0
 					? truncateToWidth(
-						theme.fg("dim", [above > 0 ? `↑ ${above} more` : "", below > 0 ? `↓ ${below} more` : ""].filter(Boolean).join(` ${g.separator} `)),
+						theme.fg("dim", [
+							above > 0 ? `↑ ${tuiT("common.more", { count: above })}` : "",
+							below > 0 ? `↓ ${tuiT("common.more", { count: below })}` : "",
+						].filter(Boolean).join(` ${g.separator} `)),
 						width,
 						g.ellipsis,
 					)

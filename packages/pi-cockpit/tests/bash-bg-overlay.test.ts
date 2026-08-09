@@ -3,8 +3,11 @@ import test from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { BashBgOverlay, REFRESH_ACK_MS } from "../src/bash-bg-overlay.ts";
+import { cockpitTuiLocale } from "../src/tui-i18n.ts";
 import type { BashBgJob, BashBgStatus } from "../src/types.ts";
 import { resolveGlyphs } from "../src/icons.ts";
+
+cockpitTuiLocale.setLocale("en");
 
 const theme = {
 	fg: (_color: string, text: string) => text,

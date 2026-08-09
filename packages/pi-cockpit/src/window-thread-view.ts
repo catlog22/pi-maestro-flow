@@ -2,6 +2,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import type { SessionEndpoint, WindowThreadEntry } from "pi-maestro-teammate/v1/sessions";
 import { assignedAgentColor } from "./agent-bar.ts";
+import { tuiStatus, tuiT } from "./tui-i18n.ts";
 import { isMonitorControlEndpoint, type CockpitEndpoint } from "./endpoint-store.ts";
 
 export interface WindowThreadScroll {
@@ -22,8 +23,8 @@ function fit(value: string, width: number): string {
 
 function messageLine(entry: WindowThreadEntry, width: number, theme: Theme): string {
 	const direction = entry.direction === "outgoing" ? theme.fg("accent", "→") : theme.fg("success", "←");
-	const source = entry.source === "monitor" ? theme.fg("warning", " monitor") : "";
-	const mode = theme.fg("muted", entry.mode === "steer" ? " steer" : " follow-up");
+	const source = entry.source === "monitor" ? theme.fg("warning", ` ${tuiT("window.source.monitor")}`) : "";
+	const mode = theme.fg("muted", ` ${tuiT(entry.mode === "steer" ? "window.mode.steer" : "window.mode.followUp")}`);
 	const status = entry.status === "accepted" ? theme.fg("success", "✓")
 		: entry.status === "pending" ? theme.fg("warning", "…")
 			: theme.fg("error", "!");
@@ -39,7 +40,7 @@ function remoteAgentLine(agent: SessionEndpoint, width: number, theme: Theme): s
 		? assignedAgentColor(agent.correlationId ?? agent.id)
 		: "muted";
 	const summary = agent.summary ? ` · ${agent.summary}` : "";
-	return fit(`  ${marker} ${theme.fg(color, `@${label}`)} · ${agent.status}${summary}`, width);
+	return fit(`  ${marker} ${theme.fg(color, `@${label}`)} · ${tuiStatus(agent.status)}${summary}`, width);
 }
 
 export function windowThreadBody(
@@ -48,22 +49,26 @@ export function windowThreadBody(
 	width: number,
 	theme: Theme,
 ): string[] {
-	const pressure = window.contextPressure === undefined ? "" : ` · context ${Math.round(window.contextPressure)}%`;
+	const pressure = window.contextPressure === undefined
+		? ""
+		: ` · ${tuiT("window.context", { percent: Math.round(window.contextPressure) })}`;
 	const agents = window.remoteAgents ?? [];
 	const lines = [
-		fit(`${theme.bold(`#${window.label}`)} · ${window.status}${pressure} · ${window.agentCount ?? agents.length} agents`, width),
+		fit(`${theme.bold(`#${window.label}`)} · ${tuiStatus(window.status)}${pressure} · ${tuiT("common.agents", {
+			count: window.agentCount ?? agents.length,
+		})}`, width),
 	];
 	for (const agent of agents.filter((entry) => entry.status !== "settled").slice(0, 4)) {
 		lines.push(remoteAgentLine(agent, width, theme));
 	}
 	if (entries.length === 0) {
 		lines.push(theme.fg("muted", fit(
-			isMonitorControlEndpoint(window) ? "Current session · monitor coordination" : "No messages in this window thread.",
+			tuiT(isMonitorControlEndpoint(window) ? "window.currentCoordination" : "window.noMessages"),
 			width,
 		)));
 		return lines;
 	}
-	lines.push(theme.fg("muted", fit("Messages", width)));
+	lines.push(theme.fg("muted", fit(tuiT("window.messages"), width)));
 	for (const entry of entries) lines.push(messageLine(entry, width, theme));
 	return lines;
 }

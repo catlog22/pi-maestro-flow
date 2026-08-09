@@ -13,6 +13,7 @@ import type { IconGlyphs } from "./icons.ts";
 import { fitLineByPriority, visibleStart, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
 import { formatDuration } from "./render.ts";
 import type { BashBgJob, BashBgStatus } from "./types.ts";
+import { tuiStatus, tuiT } from "./tui-i18n.ts";
 import { overlayListRows } from "./viewport.ts";
 
 const WIDTH_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
@@ -124,7 +125,9 @@ export class BashBgOverlay implements Component, Focusable {
 
 	private renderCompact(width: number): string {
 		const job = this.selectedJob();
-		const text = job ? `${jobVisual(job.status, this.params.glyphs).glyph} ${this.orderOf(job)} ${job.status}${this.params.glyphs.separator}Esc` : `BG${this.params.glyphs.separator}none${this.params.glyphs.separator}Esc`;
+		const text = job
+			? `${jobVisual(job.status, this.params.glyphs).glyph} ${this.orderOf(job)} ${tuiStatus(job.status)}${this.params.glyphs.separator}Esc`
+			: `BG${this.params.glyphs.separator}${tuiT("overlay.agents.none")}${this.params.glyphs.separator}Esc`;
 		return this.params.theme.bg("customMessageBg", pad(text, width));
 	}
 
@@ -181,7 +184,10 @@ export class BashBgOverlay implements Component, Focusable {
 			this.header(inner),
 			this.separator(inner),
 			...this.detailLines(this.selectedJob(), inner, 8, 18),
-			this.helpLine(inner, ["Esc back", `${this.params.glyphs.upDown} job`, "Ctrl+R refresh"]),
+			this.helpLine(
+				inner,
+				tuiT("overlay.jobs.detailHelp", { keys: this.params.glyphs.upDown }).split("|"),
+			),
 		];
 		return this.card(rows, width);
 	}
@@ -193,11 +199,11 @@ export class BashBgOverlay implements Component, Focusable {
 		const duration = this.params.hideLiveDuration && live
 			? ""
 			: formatDuration((job.finishedAt ?? this.now) - job.startedAt);
-		const exit = job.exitCode === null ? "" : `${sep}exit ${job.exitCode}`;
+		const exit = job.exitCode === null ? "" : `${sep}${tuiT("sidebar.exit", { code: job.exitCode })}`;
 		const meta = duration !== "" || exit !== "" ? `${duration}${exit}${sep}` : "";
 		return fitLine(
 			`${selected ? this.params.glyphs.selectMarker : " "} ${this.params.theme.fg(visual.color, visual.glyph)} `
-			+ `${this.orderOf(job)}${sep}${job.status}${sep}${meta}${oneLine(job.command)}`,
+			+ `${this.orderOf(job)}${sep}${tuiStatus(job.status)}${sep}${meta}${oneLine(job.command)}`,
 			width,
 		);
 	}
@@ -209,20 +215,20 @@ export class BashBgOverlay implements Component, Focusable {
 		const live = job.status === "running" || job.status === "stopping";
 		const durationField = this.params.hideLiveDuration && live
 			? []
-			: [field("Duration", formatDuration((job.finishedAt ?? this.now) - job.startedAt), width)];
+			: [field(tuiT("overlay.jobs.field.duration"), formatDuration((job.finishedAt ?? this.now) - job.startedAt), width)];
 		const lines: string[] = [
-			fitLine(`${theme.fg(visual.color, theme.bold(`${visual.glyph} ${job.id}`))}${this.params.glyphs.separator}${job.status}`, width),
+			fitLine(`${theme.fg(visual.color, theme.bold(`${visual.glyph} ${job.id}`))}${this.params.glyphs.separator}${tuiStatus(job.status)}`, width),
 			field("PID", String(job.pid), width),
 			...durationField,
-			field("Started", formatTimestamp(job.startedAt), width),
-			field("Updated", formatTimestamp(job.updatedAt), width),
-			field("Exit", job.exitCode === null ? this.params.glyphs.dotIdle : String(job.exitCode), width),
-			field("Output", formatBytes(job.outputBytes), width),
-			field("CWD", job.cwd, width),
-			field("Log", job.logPath, width),
-			fitLine(theme.fg("dim", "Command"), width),
+			field(tuiT("overlay.jobs.field.started"), formatTimestamp(job.startedAt), width),
+			field(tuiT("overlay.jobs.field.updated"), formatTimestamp(job.updatedAt), width),
+			field(tuiT("overlay.jobs.field.exit"), job.exitCode === null ? this.params.glyphs.dotIdle : String(job.exitCode), width),
+			field(tuiT("overlay.jobs.field.output"), formatBytes(job.outputBytes), width),
+			field(tuiT("overlay.jobs.field.cwd"), job.cwd, width),
+			field(tuiT("overlay.jobs.field.log"), job.logPath, width),
+			fitLine(theme.fg("dim", tuiT("overlay.jobs.command")), width),
 			...wrappedSlice(oneLine(job.command), width, commandMax, theme),
-			fitLine(theme.fg("dim", "Output tail"), width),
+			fitLine(theme.fg("dim", tuiT("overlay.jobs.outputTail")), width),
 			...outputSlice(job.outputTail, width, outputMax, theme),
 		];
 		return lines;
@@ -230,7 +236,7 @@ export class BashBgOverlay implements Component, Focusable {
 
 	private emptyState(): string {
 		const g = this.params.glyphs;
-		return `${g.emptyMark} no background jobs${g.separator}use bash_bg action=start`;
+		return tuiT("overlay.jobs.empty", { mark: g.emptyMark, separator: g.separator });
 	}
 
 	private header(width: number): string {
@@ -247,16 +253,16 @@ export class BashBgOverlay implements Component, Focusable {
 		// a narrow overlay; without that the ack was clipped off the end and the
 		// keypress looked like it did nothing.
 		const segs: PrioritizedSegment[] = [
-			{ text: "Background jobs", priority: 60, minWidth: 6 },
-			{ text: theme.fg("dim", `${jobs.length} total`), priority: 50, clippable: false },
+			{ text: tuiT("overlay.jobs.title"), priority: 60, minWidth: 6 },
+			{ text: theme.fg("dim", tuiT("common.total", { count: jobs.length })), priority: 50, clippable: false },
 		];
 		if (this.now < this.refreshAckExpiresAt) {
-			segs.push({ text: theme.fg("dim", "refreshing…"), priority: 100, clippable: false });
+			segs.push({ text: theme.fg("dim", tuiT("overlay.jobs.refreshing")), priority: 100, clippable: false });
 		}
-		if (failed) segs.push({ text: theme.fg("error", `${failed} failed`), priority: 90, clippable: false });
-		if (stopping) segs.push({ text: theme.fg("warning", `${stopping} stopping`), priority: 80, clippable: false });
-		if (running) segs.push({ text: theme.fg("accent", `${running} running`), priority: 70, clippable: false });
-		if (done) segs.push({ text: theme.fg("success", `${done} finished`), priority: 40, clippable: false });
+		if (failed) segs.push({ text: theme.fg("error", tuiT("common.failed", { count: failed })), priority: 90, clippable: false });
+		if (stopping) segs.push({ text: theme.fg("warning", tuiT("common.stopping", { count: stopping })), priority: 80, clippable: false });
+		if (running) segs.push({ text: theme.fg("accent", tuiT("common.running", { count: running })), priority: 70, clippable: false });
+		if (done) segs.push({ text: theme.fg("success", tuiT("common.finished", { count: done })), priority: 40, clippable: false });
 		return fitLineByPriority(segs, width, WIDTH_UTILS, g.separator, g.ellipsis);
 	}
 
@@ -264,7 +270,7 @@ export class BashBgOverlay implements Component, Focusable {
 		const g = this.params.glyphs;
 		return fitSegments(
 			width,
-			segments ?? ["Esc close", "Enter detail", `${g.upDown} job`, "Ctrl+R refresh"],
+			segments ?? tuiT("overlay.jobs.help", { keys: g.upDown }).split("|"),
 			g.separator,
 		);
 	}
@@ -337,24 +343,28 @@ function formatTimestamp(ms: number): string {
 	const date = new Date(ms);
 	// parseJob only checks Number.isFinite, so an out-of-range timestamp reaches
 	// here and would throw RangeError out of the render path.
-	return Number.isNaN(date.getTime()) ? "unknown" : date.toISOString();
+	return Number.isNaN(date.getTime()) ? tuiT("overlay.jobs.unknown") : date.toISOString();
 }
 
 function wrappedSlice(value: string, width: number, max: number, theme: Theme): string[] {
-	const wrapped = wrapTextWithAnsi(value || "(empty)", Math.max(10, width));
+	const wrapped = wrapTextWithAnsi(value || tuiT("common.empty"), Math.max(10, width));
 	const lines = wrapped.slice(0, max).map((line) => fitLine(line, width));
-	if (wrapped.length > max) lines.push(fitLine(theme.fg("dim", `… +${wrapped.length - max} more line(s)`), width));
+	if (wrapped.length > max) {
+		lines.push(fitLine(theme.fg("dim", tuiT("overlay.jobs.moreLines", { count: wrapped.length - max })), width));
+	}
 	return lines;
 }
 
 function outputSlice(output: string, width: number, max: number, theme: Theme): string[] {
 	const rawLines = output.replace(/\r/g, "").split("\n").map(sanitizeExtensionStatusText);
 	while (rawLines.length > 0 && rawLines.at(-1) === "") rawLines.pop();
-	if (rawLines.length === 0) return [fitLine(theme.fg("dim", "(empty)"), width)];
+	if (rawLines.length === 0) return [fitLine(theme.fg("dim", tuiT("common.empty")), width)];
 	const wrapped = rawLines.flatMap((line) => wrapTextWithAnsi(line || " ", Math.max(10, width)));
 	const omitted = Math.max(0, wrapped.length - max);
 	const lines = wrapped.slice(-max).map((line) => fitLine(line, width));
-	if (omitted > 0) lines.unshift(fitLine(theme.fg("dim", `… ${omitted} earlier line(s) · full output at log path`), width));
+	if (omitted > 0) {
+		lines.unshift(fitLine(theme.fg("dim", tuiT("overlay.jobs.earlierLines", { count: omitted })), width));
+	}
 	return lines;
 }
 

@@ -10,6 +10,9 @@ import {
 	sessionDetailBodyLength,
 } from "../src/session-detail.ts";
 import type { AgentRow } from "../src/types.ts";
+import { cockpitTuiLocale } from "../src/tui-i18n.ts";
+
+cockpitTuiLocale.setLocale("en");
 
 const theme: Pick<Theme, "fg" | "bold"> = {
 	fg: (c, t) => `\x1b[${c === "accent" ? 36 : c === "warning" ? 33 : c === "error" ? 31 : c === "success" ? 32 : 90}m${t}\x1b[0m`,

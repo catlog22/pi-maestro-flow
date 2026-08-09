@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
 import { routeAgentInput } from "../src/input-routing.ts";
+import { cockpitTuiLocale } from "../src/tui-i18n.ts";
+
+cockpitTuiLocale.setLocale("en");
 
 function ui() {
 	const notifications: Array<{ message: string; type: string }> = [];

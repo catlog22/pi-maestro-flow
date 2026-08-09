@@ -1,5 +1,11 @@
 import { STATUS_PRESENTATION, type StatusTone } from "../shared/agent-status.ts";
 import type { AgentProgressSnapshot } from "../shared/types.ts";
+import {
+  createTuiTranslator,
+  translateStatusText,
+  type SupportedSettingsLocale,
+  type TuiTranslator,
+} from "./locale.ts";
 
 export interface ProgressPalette {
   dim(text: string): string;
@@ -62,16 +68,22 @@ export function progressLabel(entry: AgentProgressSnapshot): string {
   return entry.name ? `@${entry.name}` : entry.agent;
 }
 
-function statusText(status: AgentProgressSnapshot["status"], palette: ProgressPalette): string {
+function statusText(
+  status: AgentProgressSnapshot["status"],
+  palette: ProgressPalette,
+  t: TuiTranslator,
+): string {
   const presentation = STATUS_PRESENTATION[status];
-  return toneText(palette, presentation.tone, presentation.text);
+  return toneText(palette, presentation.tone, translateStatusText(presentation.text, t));
 }
 
 export function buildProgressTree(
   progress: AgentProgressSnapshot[],
   palette: ProgressPalette,
   now: number = Date.now(),
+  locale?: SupportedSettingsLocale,
 ): ProgressTreeRow[] {
+  const t = createTuiTranslator(locale);
   const byIndex = new Map<number, AgentProgressSnapshot>();
   for (const entry of progress) byIndex.set(entry.taskIndex, entry);
   const entries = [...byIndex.values()].sort((a, b) => a.taskIndex - b.taskIndex);
@@ -84,31 +96,34 @@ export function buildProgressTree(
       ? ""
       : palette.dim(` #${entry.correlationId.slice(0, 8)}`);
     const dependencyHint = entry.dependencies.length > 0
-      ? palette.dim(` ← result${entry.dependencies.length === 1 ? "" : "s"} ${entry.dependencies.map((dependency) => `#${dependency + 1}`).join(", ")}`)
+      ? palette.dim(` ← ${t(
+          entry.dependencies.length === 1 ? "progress.resultDependency.one" : "progress.resultDependency.many",
+          { ids: entry.dependencies.map((dependency) => `#${dependency + 1}`).join(", ") },
+        )}`)
       : "";
     const cacheRead = entry.cacheReadTokens ?? 0;
     const cacheWrite = entry.cacheWriteTokens ?? 0;
     const tokenParts = entry.inputTokens !== undefined || entry.outputTokens !== undefined
       ? [
-          `in ${formatTokens(entry.inputTokens ?? 0)}`,
-          `out ${formatTokens(entry.outputTokens ?? 0)}`,
+          t("metrics.in", { count: formatTokens(entry.inputTokens ?? 0) }),
+          t("metrics.out", { count: formatTokens(entry.outputTokens ?? 0) }),
           ...(cacheRead > 0 || cacheWrite > 0
-            ? [`cache ${formatTokens(cacheRead)}r/${formatTokens(cacheWrite)}w`]
+            ? [t("metrics.cache", { read: formatTokens(cacheRead), write: formatTokens(cacheWrite) })]
             : []),
         ]
       : entry.tokens
-        ? [`${formatTokens(entry.tokens)} tok`]
+        ? [t("metrics.tok", { count: formatTokens(entry.tokens) })]
         : [];
     const durationMs = progressDurationMs(entry, now);
     const metaParts = [
-      entry.toolCount ? `${entry.toolCount} tools` : "",
+      entry.toolCount ? t("metrics.tools", { count: entry.toolCount }) : "",
       ...tokenParts,
       durationMs !== undefined ? formatDuration(durationMs) : "",
     ].filter(Boolean);
     const meta = metaParts.length > 0 ? palette.dim(` · ${metaParts.join(" · ")}`) : "";
     return {
       taskIndex: entry.taskIndex,
-      text: `${palette.dim(flowMarker)} ${palette.accent(String(entry.taskIndex + 1))} ${progressIcon(entry.status, palette)} ${statusText(entry.status, palette)} ${palette.bold(progressLabel(entry))}${type}${id}${dependencyHint}${meta}`,
+      text: `${palette.dim(flowMarker)} ${palette.accent(String(entry.taskIndex + 1))} ${progressIcon(entry.status, palette)} ${statusText(entry.status, palette, t)} ${palette.bold(progressLabel(entry))}${type}${id}${dependencyHint}${meta}`,
     };
   });
 }

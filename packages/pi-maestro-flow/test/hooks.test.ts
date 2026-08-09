@@ -266,6 +266,7 @@ test("Maestro Hook installer TUI supports presets, filtering, actions, and narro
   const overlay = new MaestroHookInstallerOverlay({
     snapshot,
     theme,
+    locale: "zh-CN",
     requestRender() {},
     done(next) { action = next; },
   });
@@ -288,6 +289,7 @@ test("Maestro Hook installer TUI supports presets, filtering, actions, and narro
   const discard = new MaestroHookInstallerOverlay({
     snapshot,
     theme,
+    locale: "zh-CN",
     requestRender() {},
     done(next) { action = next; },
   });
@@ -329,6 +331,7 @@ test("Hook review TUI supports bounded rendering, explicit filtering, toggles, a
     configPath: ".pi/hooks.json",
     hash: "hash",
     theme,
+    locale: "zh-CN",
     requestRender() {},
     done(next) { action = next; },
   });
@@ -357,6 +360,7 @@ test("Hook review TUI supports bounded rendering, explicit filtering, toggles, a
     configPath: ".pi/hooks.json",
     hash: "hash",
     theme,
+    locale: "zh-CN",
     requestRender() {},
     done(next) { action = next; },
   });
@@ -371,6 +375,7 @@ test("Hook review TUI supports bounded rendering, explicit filtering, toggles, a
     configPath: ".pi/hooks.json",
     hash: "hash",
     theme,
+    locale: "zh-CN",
     requestRender() {},
     done(next) { action = next; },
   });
@@ -400,6 +405,7 @@ test("Hook review detail exposes the complete long command before trust", () => 
     configPath: ".pi/hooks.json",
     hash: "hash",
     theme,
+    locale: "zh-CN",
     requestRender() {},
     done(next) { action = next; },
   });
@@ -698,7 +704,7 @@ test("Hook fallback refuses to trust without a complete review TUI", async () =>
       },
     },
   } as unknown as ExtensionContext;
-  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath, locale: "zh-CN" });
 
   try {
     assert.ok(hooksCommand);
@@ -770,7 +776,7 @@ test("/hooks opens the installer for a missing config then routes to hash review
       },
     },
   } as unknown as ExtensionContext;
-  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath, locale: "zh-CN" });
 
   try {
     assert.ok(hooksCommand);
@@ -824,7 +830,7 @@ test("/hooks install explicitly opens the dedicated installer", async () => {
       },
     },
   } as unknown as ExtensionContext;
-  registerCodexHookAdapter(fakePi, { trustFilePath: join(root, "trust.json") });
+  registerCodexHookAdapter(fakePi, { trustFilePath: join(root, "trust.json"), locale: "zh-CN" });
 
   try {
     assert.ok(hooksCommand);
@@ -861,7 +867,7 @@ test("/hooks install fails closed without an interactive TUI", async () => {
       setStatus() {},
     },
   } as unknown as ExtensionContext;
-  registerCodexHookAdapter(fakePi, { trustFilePath: join(root, "trust.json") });
+  registerCodexHookAdapter(fakePi, { trustFilePath: join(root, "trust.json"), locale: "zh-CN" });
 
   try {
     assert.ok(hooksCommand);
@@ -931,7 +937,7 @@ test("/hooks opens the custom TUI by default and applies toggles immediately", a
       },
     },
   } as unknown as ExtensionContext;
-  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath, locale: "zh-CN" });
 
   try {
     assert.ok(hooksCommand);
@@ -1000,7 +1006,7 @@ test("/hooks keeps toggle persistence failures inside the review overlay", async
       },
     },
   } as unknown as ExtensionContext;
-  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath, locale: "zh-CN" });
 
   try {
     assert.ok(hooksCommand);
@@ -1060,7 +1066,7 @@ process.stdin.on("end", () => fs.writeFileSync(${JSON.stringify(markerPath)}, "r
       async confirm() { return true; },
     },
   } as unknown as ExtensionContext;
-  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath, locale: "zh-CN" });
 
   try {
     for (const handler of handlers.get("session_start") ?? []) {
@@ -1240,7 +1246,7 @@ test("Pi adapter ignores PreToolUse deny output after the Hook is trusted", asyn
       setStatus() {},
     },
   } as unknown as ExtensionContext;
-  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath, locale: "zh-CN" });
 
   try {
     for (const handler of handlers.get("session_start") ?? []) {
@@ -1335,7 +1341,7 @@ process.exitCode = 1;
       },
     },
   } as unknown as ExtensionContext;
-  const adapter = registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+  const adapter = registerCodexHookAdapter(fakePi, { trustFilePath: trustPath, locale: "zh-CN" });
 
   try {
     for (const handler of handlers.get("session_start") ?? []) {
@@ -1429,7 +1435,7 @@ test("Pi adapter absorbs hook results after session shutdown", async () => {
       setStatus: (_key: string, value: string | undefined) => statuses.push(value),
     },
   } as unknown as ExtensionContext;
-  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath, locale: "zh-CN" });
 
   try {
     for (const handler of handlers.get("session_start") ?? []) {
@@ -1495,6 +1501,7 @@ test("Pi adapter does not append a Stop continuation behind recovery ownership",
   } as unknown as ExtensionContext;
   registerCodexHookAdapter(fakePi, {
     trustFilePath: trustPath,
+    locale: "zh-CN",
     shouldSkipStopHook: () => skipStop,
   });
 
@@ -1584,7 +1591,7 @@ process.stdout.write(JSON.stringify({ hookSpecificOutput }));
       },
     },
   } as unknown as ExtensionContext;
-  const adapter = registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+  const adapter = registerCodexHookAdapter(fakePi, { trustFilePath: trustPath, locale: "zh-CN" });
   const permissionController = createPermissionController({
     userSettingsPath: join(root, "user", "settings.json"),
   });
@@ -1644,6 +1651,7 @@ process.stdout.write(JSON.stringify({ hookSpecificOutput }));
     } as unknown as ExtensionAPI;
     registerCodexHookAdapter(childPi, {
       trustFilePath: trustPath,
+      locale: "zh-CN",
       isTeammateChild: () => true,
     });
     for (const handler of childHandlers.get("session_start") ?? []) {
@@ -1713,7 +1721,7 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({
       setStatus() {},
     },
   } as unknown as ExtensionContext;
-  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath, locale: "zh-CN" });
 
   try {
     for (const handler of handlers.get("session_start") ?? []) {
@@ -1795,7 +1803,7 @@ test("Pi adapter keeps successful command hook output out of the transcript", as
       setStatus() {},
     },
   } as unknown as ExtensionContext;
-  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath, locale: "zh-CN" });
 
   try {
     for (const handler of handlers.get("session_start") ?? []) {

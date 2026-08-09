@@ -68,6 +68,7 @@ import { createNativePiSettingsProvider, registerNativePiSettingsProvider } from
 import { SettingsLocaleState, getMaestroUiPreferencesPath } from "./settings/locale-state.ts";
 import { SettingsProviderRegistry } from "./settings/registry.ts";
 import { showMaestroSettingsShell } from "./settings/settings-shell.ts";
+import { bindCockpitTuiLocale, cockpitTuiLocale, tuiStatus, tuiT } from "./tui-i18n.ts";
 import {
 	COCKPIT_INPUT_TARGET_EVENT,
 	COCKPIT_MAESTRO_QUERY_EVENT,
@@ -135,7 +136,7 @@ const WIDTH_POLL_INTERVAL_MS = 250;
 const USAGE_REFRESH_THROTTLE_MS = 10_000;
 // Quiet mode's rename of pi's hidden-thinking label. The live thinking timer
 // derives its final "thoughts · 8.4s" labels from the same word.
-const QUIET_THINKING_LABEL = "thoughts";
+const quietThinkingLabel = (): string => tuiT("thinking.thoughts");
 
 export type CockpitSurfaceState = "dock" | "widgets" | "disabled";
 
@@ -407,7 +408,7 @@ export default function (pi: ExtensionAPI): void {
 				// tui may be gone between sessions
 			}
 		},
-		getBaseLabel: () => (config.quietMode ? QUIET_THINKING_LABEL : undefined),
+		getBaseLabel: () => (config.quietMode ? quietThinkingLabel() : undefined),
 		getGlyphs: () => resolveGlyphs(config.icons.mode),
 		isThinkingHidden: () => (lastCtx ? readHideThinkingBlock(lastCtx.cwd) : false),
 		isEnabled: () => config.enabled,
@@ -651,16 +652,14 @@ export default function (pi: ExtensionAPI): void {
 				quietToolsRegistered = true;
 			}
 			try {
-				ctx.ui.setHiddenThinkingLabel(QUIET_THINKING_LABEL);
+				ctx.ui.setHiddenThinkingLabel(quietThinkingLabel());
 			} catch { /* non-TUI */ }
 			// The label only renames an already-hidden block; the fold itself
 			// rides pi's native toggle, which also persists it. Report what
 			// actually happened instead of promising a fold we could not reach.
 			const folded = ensureThinkingFolded(capturedTui, ctx.cwd, true);
 			ctx.ui.notify(
-				folded
-					? "quiet mode on — tools compressed, thinking folded"
-					: "quiet mode on — tools compressed",
+				tuiT(folded ? "notice.quietOn" : "notice.quietOnPartial"),
 				"info",
 			);
 		} else if (!now && was) {
@@ -668,9 +667,7 @@ export default function (pi: ExtensionAPI): void {
 				ctx.ui.setHiddenThinkingLabel(undefined);
 			} catch { /* non-TUI */ }
 			ctx.ui.notify(
-				quietToolsRegistered
-					? "quiet mode off — /reload to restore default tool rendering"
-					: "quiet mode off",
+				tuiT(quietToolsRegistered ? "notice.quietOff" : "notice.quietOffReady"),
 				"info",
 			);
 		}
@@ -842,7 +839,7 @@ export default function (pi: ExtensionAPI): void {
 		if (editorBottomController) return editorBottomController;
 		editorBottomController = createEditorBottomController({
 			onError: (error) => ctx.ui.notify(
-				`Bottom-pinned input disabled: ${error instanceof Error ? error.message : String(error)}`,
+				tuiT("notice.bottomPinnedDisabled", { message: error instanceof Error ? error.message : String(error) }),
 				"warning",
 			),
 		});
@@ -892,8 +889,8 @@ export default function (pi: ExtensionAPI): void {
 			if (!claudeEditorForeignWarned) {
 				claudeEditorForeignWarned = true;
 				ctx.ui.notify(
-					"Cockpit double-Escape clear / fullscreen input unavailable: another extension owns the custom editor",
-				"warning",
+					tuiT("notice.editorOwned"),
+					"warning",
 				);
 			}
 			return;
@@ -903,7 +900,7 @@ export default function (pi: ExtensionAPI): void {
 			emitEditorMarkers: config.fullscreenInput,
 			isBusy: () => running || Boolean(activeSettingsOverlay),
 			onError: (error) => ctx.ui.notify(
-				`Cockpit editor interaction error: ${error instanceof Error ? error.message : String(error)}`,
+				tuiT("notice.editorError", { message: error instanceof Error ? error.message : String(error) }),
 				"warning",
 			),
 		}));
@@ -953,14 +950,16 @@ export default function (pi: ExtensionAPI): void {
 		if (!claudeEditorInstalled) return;
 		const compatibility = detectTerminalCompatibility();
 		if (!compatibility.compatible) {
-			ctx.ui.notify(`Cockpit fullscreen input disabled: ${compatibility.reason}`, "warning");
+			ctx.ui.notify(tuiT("notice.fullscreenDisabled", {
+				message: compatibility.reason ?? tuiT("notice.unknownError"),
+			}), "warning");
 			return;
 		}
 		const controller = createFullscreenController({
 			subscribeInput: (handler) => ctx.ui.onTerminalInput(handler),
 			isCopyOnSelect: () => config.copyOnSelect,
 			onError: (error) => ctx.ui.notify(
-				`Cockpit fullscreen input disabled: ${error instanceof Error ? error.message : String(error)}`,
+				tuiT("notice.fullscreenDisabled", { message: error instanceof Error ? error.message : String(error) }),
 				"warning",
 			),
 		});
@@ -996,7 +995,7 @@ export default function (pi: ExtensionAPI): void {
 					getState: () => sessionUi,
 					getNow: () => nowSnapshot,
 					isMainRunning: () => running,
-					getShortcutHint: () => sessionListOverlayActive() ? undefined : "Alt+R list",
+					getShortcutHint: () => sessionListOverlayActive() ? undefined : tuiT("session.listHint"),
 				})(tui, theme);
 				return {
 					render(width: number): string[] {
@@ -1008,7 +1007,7 @@ export default function (pi: ExtensionAPI): void {
 								snapshot.monitoredEndpointIds,
 								width,
 								theme,
-								{ shortcutHint: sessionListOverlayActive() ? undefined : "Alt+R list" },
+								{ shortcutHint: sessionListOverlayActive() ? undefined : tuiT("session.listHint") },
 							)
 							: agentWidget.render(width);
 					},
@@ -1077,7 +1076,9 @@ export default function (pi: ExtensionAPI): void {
 				const result = saveConfig(config);
 				if (!result.ok) {
 					configProblem = `sidebar width save failed: ${result.error ?? "unknown error"}`;
-					ctx.ui.notify(`Cockpit sidebar width kept for this session; save failed: ${result.error ?? "unknown error"}`, "warning");
+					ctx.ui.notify(tuiT("notice.sidebarWidthSaveFailed", {
+						message: result.error ?? tuiT("notice.unknownError"),
+					}), "warning");
 				} else if (configProblem?.startsWith("sidebar width save failed:")) {
 					configProblem = undefined;
 				}
@@ -1085,7 +1086,9 @@ export default function (pi: ExtensionAPI): void {
 			},
 			onWarning: (message) => ctx.ui.notify(message, "warning"),
 			onError: (error) => {
-				ctx.ui.notify(`Cockpit sidebar unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
+				ctx.ui.notify(tuiT("notice.sidebarUnavailable", {
+					message: error instanceof Error ? error.message : String(error),
+				}), "warning");
 			},
 			onActivateRow: (id) => {
 				// Enter on an agent row selects it as the shown session (toggle).
@@ -1440,6 +1443,15 @@ export default function (pi: ExtensionAPI): void {
 	const subscribeBusEvents = (): void => {
 		if (busDisposers.length > 0) return;
 		busDisposers.push(
+			cockpitTuiLocale.subscribe(() => {
+				if (config.quietMode && lastCtx) {
+					try { lastCtx.ui.setHiddenThinkingLabel(quietThinkingLabel()); } catch { /* non-TUI */ }
+				}
+				req();
+			}),
+			bindCockpitTuiLocale({
+				on: (event, handler) => pi.events.on(event, handler),
+			}),
 			pi.events.on(TEAMMATE_STARTED_EVENT, (payload) => {
 				if (!isStartedPayload(payload)) return;
 				agents.applyStarted(payload);
@@ -1575,7 +1587,7 @@ export default function (pi: ExtensionAPI): void {
 		}
 		if (config.quietMode) {
 			try {
-				ctx.ui.setHiddenThinkingLabel(QUIET_THINKING_LABEL);
+				ctx.ui.setHiddenThinkingLabel(quietThinkingLabel());
 			} catch {
 				// non-TUI mode
 			}
@@ -1727,7 +1739,7 @@ export default function (pi: ExtensionAPI): void {
 
 		if (e.source === "interactive" && !hasImages && e.text.trim() === "monitor") {
 			if (!registry?.requestWindowMode) {
-				ctx.ui.notify("Window monitor mode is unavailable in this session.", "warning");
+				ctx.ui.notify(tuiT("notice.monitorUnavailable"), "warning");
 				return { action: "handled" as const };
 			}
 			await registry.requestWindowMode("enter");
@@ -1737,7 +1749,7 @@ export default function (pi: ExtensionAPI): void {
 		if (sessionUi.mode === "window" && (interactiveText || hasImages) && !isSynthetic) {
 			const target = selectedWindowEndpoint();
 			if (!target) {
-				ctx.ui.notify("No monitor window is selected.", "warning");
+				ctx.ui.notify(tuiT("notice.noMonitorWindow"), "warning");
 				ctx.ui.setEditorText(e.text);
 				return { action: "handled" as const };
 			}
@@ -1747,12 +1759,12 @@ export default function (pi: ExtensionAPI): void {
 				return { action: "continue" as const };
 			}
 			if (hasImages) {
-				ctx.ui.notify("Image input cannot be routed to a peer window; reattach it in #control or after leaving monitor mode.", "warning");
+				ctx.ui.notify(tuiT("notice.imagePeer"), "warning");
 				ctx.ui.setEditorText(e.text);
 				return { action: "handled" as const };
 			}
 			if (!registry) {
-				ctx.ui.notify("Peer window delivery is unavailable.", "warning");
+				ctx.ui.notify(tuiT("notice.peerDeliveryUnavailable"), "warning");
 				ctx.ui.setEditorText(e.text);
 				return { action: "handled" as const };
 			}
@@ -1769,7 +1781,10 @@ export default function (pi: ExtensionAPI): void {
 				source: "user",
 			}));
 			if (!delivery?.delivered) {
-				ctx.ui.notify(`Message to #${target.label} was not sent: ${delivery?.error ?? "delivery registry unavailable"}`, "error");
+				ctx.ui.notify(tuiT("notice.peerMessageFailed", {
+					label: target.label,
+					message: delivery?.error ?? tuiT("notice.deliveryRegistryUnavailable"),
+				}), "error");
 				ctx.ui.setEditorText(e.text);
 			} else {
 				sessionUi.setDraft(target.id, "");
@@ -1832,11 +1847,11 @@ export default function (pi: ExtensionAPI): void {
 	const openAgentOverlay = async (ctx: ExtensionContext): Promise<void> => {
 		if (!ctx.hasUI) return;
 		if (capturingOverlayActive) {
-			ctx.ui.notify("Close the open Cockpit overlay before opening Agents", "warning");
+			ctx.ui.notify(tuiT("notice.closeOverlayAgents"), "warning");
 			return;
 		}
 		if (visibleAgentRows(agents.snapshot()).length === 0) {
-			ctx.ui.notify("No agents to display", "info");
+			ctx.ui.notify(tuiT("notice.noAgents"), "info");
 			return;
 		}
 		let ownedOverlay: { finalize(): void } | undefined;
@@ -1881,14 +1896,14 @@ export default function (pi: ExtensionAPI): void {
 	const openSessionList = async (ctx: ExtensionContext): Promise<void> => {
 		if (!ctx.hasUI) return;
 		if (sessionListOverlayActive()) {
-			ctx.ui.notify("Close the open overlay before opening Sessions", "warning");
+			ctx.ui.notify(tuiT("notice.closeOverlaySessions"), "warning");
 			return;
 		}
 		const snapshot = endpoints.snapshot();
 		const mode = sessionUi.mode;
 		const allEntries = mode === "window" ? [...snapshot.windows] : [...snapshot.endpoints];
 		if (allEntries.length === 0) {
-			ctx.ui.notify(`No ${mode === "window" ? "windows" : "agents"} to display`, "info");
+			ctx.ui.notify(tuiT(mode === "window" ? "notice.noWindows" : "notice.noAgents"), "info");
 			return;
 		}
 		const selectedId = sessionUi.selectedId(mode);
@@ -1897,21 +1912,24 @@ export default function (pi: ExtensionAPI): void {
 			? [allEntries[selectedIndex]!, ...allEntries.slice(0, selectedIndex), ...allEntries.slice(selectedIndex + 1)]
 			: allEntries;
 		const choices = entries.map((endpoint) => {
-			const current = endpoint.id === selectedId ? "selected" : "";
+			const current = endpoint.id === selectedId ? tuiStatus("selected") : "";
 			const monitored = mode === "window" && snapshot.monitoredEndpointIds.includes(endpoint.id)
-				? "monitored"
+				? tuiStatus("monitored")
 				: "";
 			const agentCount = mode === "window" && endpoint.agentCount !== undefined
-				? `${endpoint.agentCount} agents`
+				? tuiT("common.agents", { count: endpoint.agentCount })
 				: "";
-			const detail = [current, endpoint.status, monitored, agentCount].filter(Boolean).join(" · ");
+			const detail = [current, tuiStatus(endpoint.status), monitored, agentCount].filter(Boolean).join(" · ");
 			const sigil = mode === "window" ? "#" : "@";
 			return `${sigil}${endpoint.label}${detail ? ` · ${detail}` : ""}`;
 		});
 		let previewAgent = false;
 		enterCapturingOverlay();
 		try {
-			const selected = await ctx.ui.select(mode === "window" ? "Windows" : "Agents", choices);
+			const selected = await ctx.ui.select(
+				mode === "window" ? tuiT("window.title") : tuiT("overlay.agents.title"),
+				choices,
+			);
 			const index = selected === undefined ? -1 : choices.indexOf(selected);
 			const endpoint = index >= 0 ? entries[index] : undefined;
 			if (endpoint) {
@@ -2041,12 +2059,15 @@ export default function (pi: ExtensionAPI): void {
 			}
 			const applied = ctx.ui.setTheme(name);
 			if (!applied.success) {
-				ctx.ui.notify(`theme "${name}" unavailable — ${applied.error ?? "not found"}`, "warning");
+				ctx.ui.notify(tuiT("notice.themeUnavailable", {
+					name,
+					message: applied.error ?? tuiT("notice.notFound"),
+				}), "warning");
 				return;
 			}
 			config = { ...config, theme: name };
 			saveConfig(config);
-			ctx.ui.notify(`theme: ${name}`, "info");
+			ctx.ui.notify(tuiT("notice.themeSelected", { name }), "info");
 		},
 	});
 
@@ -2055,13 +2076,15 @@ export default function (pi: ExtensionAPI): void {
 		mode: CockpitConfig["sidebar"]["mode"],
 	): void => {
 		if (config.sidebar.mode === mode) {
-			ctx.ui.notify(`Cockpit sidebar: ${mode}`, "info");
+			ctx.ui.notify(tuiT("notice.sidebarMode", { mode: tuiT(`common.value.${mode}`) }), "info");
 			return;
 		}
 		config = { ...config, sidebar: { ...config.sidebar, mode } };
 		const result = saveConfig(config);
 		if (!result.ok) {
-			ctx.ui.notify(`Cockpit sidebar mode kept for this session; save failed: ${result.error ?? "unknown error"}`, "warning");
+			ctx.ui.notify(tuiT("notice.sidebarModeSaveFailed", {
+				message: result.error ?? tuiT("notice.unknownError"),
+			}), "warning");
 		} else if (configProblem?.startsWith("sidebar width save failed:")) {
 			configProblem = undefined;
 		}
@@ -2152,8 +2175,8 @@ export default function (pi: ExtensionAPI): void {
 			if (!window || !registry?.setMonitored || isMonitorControlEndpoint(window)) {
 				ctx.ui.notify(
 					isMonitorControlEndpoint(window)
-						? "#control is the current Monitor session and cannot supervise itself."
-						: "No monitorable peer window is selected.",
+						? tuiT("notice.selectedControl")
+						: tuiT("notice.noMonitorableWindow"),
 					"warning",
 				);
 				return;
@@ -2161,7 +2184,9 @@ export default function (pi: ExtensionAPI): void {
 			const enabled = !endpoints.snapshot().monitoredEndpointIds.includes(window.id);
 			try {
 				await registry.setMonitored(window.id, enabled);
-				ctx.ui.notify(`${enabled ? "Monitoring" : "Stopped monitoring"} #${window.label}.`, "info");
+				ctx.ui.notify(tuiT(enabled ? "notice.monitoring" : "notice.monitoringStopped", {
+					label: window.label,
+				}), "info");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
 			}
@@ -2179,11 +2204,11 @@ export default function (pi: ExtensionAPI): void {
 		description: "Resize the Cockpit sidebar",
 		handler(ctx) {
 			if (!config.enabled) {
-				ctx.ui.notify("Cockpit is disabled", "warning");
+				ctx.ui.notify(tuiT("notice.cockpitDisabled"), "warning");
 				return;
 			}
 			if (capturingOverlayActive) {
-				ctx.ui.notify("Close the open Cockpit overlay before resizing the sidebar", "warning");
+				ctx.ui.notify(tuiT("notice.closeOverlayResize"), "warning");
 				return;
 			}
 			sidebarController?.beginResize();
@@ -2194,13 +2219,13 @@ export default function (pi: ExtensionAPI): void {
 		description: "Show or hide the selected teammate session above Todo",
 		handler(ctx) {
 			if (!config.enabled) {
-				ctx.ui.notify("Cockpit is disabled", "warning");
+				ctx.ui.notify(tuiT("notice.cockpitDisabled"), "warning");
 				return;
 			}
 			const endpoint = selectedEndpoint();
 			if (!endpoint) return;
 			const visible = sessionUi.toggleDetail(endpoint.id);
-			ctx.ui.notify(`Agent session detail ${visible ? "shown" : "hidden"}`, "info");
+			ctx.ui.notify(tuiT(visible ? "notice.sessionDetailShown" : "notice.sessionDetailHidden"), "info");
 			req();
 		},
 	});
@@ -2209,11 +2234,11 @@ export default function (pi: ExtensionAPI): void {
 		description: "Browse the Cockpit sidebar with the keyboard (↑↓/j/k/PageUp/PageDown/Home/End, Esc to leave)",
 		handler(ctx) {
 			if (!config.enabled) {
-				ctx.ui.notify("Cockpit is disabled", "warning");
+				ctx.ui.notify(tuiT("notice.cockpitDisabled"), "warning");
 				return;
 			}
 			if (capturingOverlayActive) {
-				ctx.ui.notify("Close the open Cockpit overlay before browsing the sidebar", "warning");
+				ctx.ui.notify(tuiT("notice.closeOverlayBrowse"), "warning");
 				return;
 			}
 			sidebarController?.beginFocus();
@@ -2224,7 +2249,7 @@ export default function (pi: ExtensionAPI): void {
 		description: "Open unified Maestro settings for Cockpit, Flow, Teammate and integrations",
 		async handler(_args, ctx) {
 			if (!ctx.hasUI) {
-				ctx.ui.notify("Maestro settings require interactive TUI mode", "warning");
+				ctx.ui.notify(tuiT("notice.settingsRequiresTui"), "warning");
 				return;
 			}
 			settingsCommandCtx = ctx;
@@ -2262,13 +2287,17 @@ export default function (pi: ExtensionAPI): void {
 			}
 			if (action === "sidebar") {
 				ctx.ui.notify(
-					`Cockpit sidebar: ${config.sidebar.mode} · ${config.sidebar.width} columns · ${config.sidebar.density}`,
+					tuiT("notice.sidebarDetails", {
+						mode: tuiT(`common.value.${config.sidebar.mode}`),
+						width: config.sidebar.width,
+						density: tuiT(`common.value.${config.sidebar.density}`),
+					}),
 					"info",
 				);
 				return;
 			}
 			if (action === "sidebar resize") {
-				if (!config.enabled) ctx.ui.notify("Cockpit is disabled", "warning");
+				if (!config.enabled) ctx.ui.notify(tuiT("notice.cockpitDisabled"), "warning");
 				else sidebarController?.beginResize();
 				return;
 			}
@@ -2278,7 +2307,7 @@ export default function (pi: ExtensionAPI): void {
 			}
 			if (action === "todo" || action === "todo toggle") {
 				setTodoExpanded(!effectiveTodoExpanded());
-				ctx.ui.notify(`TODO ${config.todoExpanded ? "expanded" : "collapsed"}`, "info");
+				ctx.ui.notify(tuiT(config.todoExpanded ? "notice.todoExpanded" : "notice.todoCollapsed"), "info");
 				return;
 			}
 			if (action === "todo expand" || action === "todo collapse") {
@@ -2307,8 +2336,8 @@ export default function (pi: ExtensionAPI): void {
 				const ok = setStaticMode(!config.staticMode);
 				ctx.ui.notify(
 					ok
-						? `Cockpit static mode ${config.staticMode ? "on — live updates reduced" : "off"}`
-						: "Cockpit static mode kept for this session; save failed",
+						? tuiT(config.staticMode ? "notice.staticOn" : "notice.staticOff")
+						: tuiT("notice.staticSaveFailed"),
 					ok ? "info" : "warning",
 				);
 				return;
@@ -2319,8 +2348,8 @@ export default function (pi: ExtensionAPI): void {
 				const ok = setStaticMode(target);
 				ctx.ui.notify(
 					ok
-						? `Cockpit static mode ${target ? "on — live updates reduced" : "off"}`
-						: "Cockpit static mode kept for this session; save failed",
+						? tuiT(target ? "notice.staticOn" : "notice.staticOff")
+						: tuiT("notice.staticSaveFailed"),
 					ok ? "info" : "warning",
 				);
 				return;
@@ -2338,9 +2367,13 @@ export default function (pi: ExtensionAPI): void {
 				const status = supervision.footerStatus();
 				ctx.ui.notify(
 					[
-						`SUPERVISION ${status ?? "idle (no events)"}`,
-						`  interventions: ${totals.interventions} · notifications: ${totals.notifications} · verdicts: ${totals.verdicts}`,
-						"  /supervision events — list recent events",
+						`SUPERVISION ${status ?? tuiT("supervision.idle")}`,
+						tuiT("supervision.counts", {
+							interventions: totals.interventions,
+							notifications: totals.notifications,
+							verdicts: totals.verdicts,
+						}),
+						tuiT("supervision.help"),
 					].join("\n"),
 					"info",
 				);
@@ -2348,7 +2381,7 @@ export default function (pi: ExtensionAPI): void {
 			}
 			const recent = supervision.recentEvents(10);
 			if (recent.length === 0) {
-				ctx.ui.notify("No supervision events observed yet.", "info");
+				ctx.ui.notify(tuiT("supervision.none"), "info");
 				return;
 			}
 			const lines = recent.map((event) => {
@@ -2357,7 +2390,7 @@ export default function (pi: ExtensionAPI): void {
 				const message = (event.message ?? event.kind).slice(0, 100);
 				return `${marker} [${event.source}] ${event.kind} ${time} — ${message}`;
 			});
-			ctx.ui.notify([`SUPERVISION recent ${recent.length}`, ...lines].join("\n"), "info");
+			ctx.ui.notify([tuiT("supervision.recent", { count: recent.length }), ...lines].join("\n"), "info");
 		},
 	});
 
@@ -2445,13 +2478,13 @@ export default function (pi: ExtensionAPI): void {
 			// exactly what title-llm can resolve at generation time.
 			const makeModelPicker = (): ModelPicker => {
 				const entries: ModelPickerEntry[] = [
-					{ kind: "model", ref: "", label: "(rule-based)" },
+					{ kind: "model", ref: "", label: tuiT("common.ruleBased") },
 					...ctx.modelRegistry.getAvailable().map((m) => ({
 						kind: "model" as const,
 						ref: `${m.provider}/${m.id}`,
 						label: `${m.provider}/${m.id}`,
 					})),
-					{ kind: "custom", label: "custom ref…" },
+					{ kind: "custom", label: tuiT("common.customRef") },
 				];
 				return new ModelPicker({
 					entries,
@@ -2554,30 +2587,30 @@ export default function (pi: ExtensionAPI): void {
 						// Cycle rows advertise their next value; the text row shows its edit
 						// affordance, and while editing the commit keys replace the hints.
 						const hint = editing
-							? paint.fg("dim", " → Enter save · Esc cancel")
+							? paint.fg("dim", tuiT("legacy.selectedEditHelp"))
 							: selected
 								? paint.fg("dim", ` → ${row.next}`)
 								: "";
 						lines.push(`${marker} ${paint.fg("dim", row.accel)} ${label}  ${value}${hint}`);
 					});
 					lines.push("");
-					if (saveState.kind === "saved") lines.push(paint.fg("success", "✓ saved"));
-					else if (saveState.kind === "saving") lines.push(paint.fg("dim", "· saving…"));
+					if (saveState.kind === "saved") lines.push(paint.fg("success", tuiT("legacy.saved")));
+					else if (saveState.kind === "saving") lines.push(paint.fg("dim", tuiT("legacy.saving")));
 					else if (saveState.kind === "failed") {
-						lines.push(paint.fg("error", `✗ save failed — ${saveState.message}`));
+						lines.push(paint.fg("error", tuiT("legacy.saveFailed", { message: saveState.message })));
 						// Scoped to cockpit's own rows: the theme is applied through pi,
 						// which persists it regardless of whether this file was written.
-						lines.push(paint.fg("dim", "cockpit rows apply for this session only"));
+						lines.push(paint.fg("dim", tuiT("legacy.sessionOnly")));
 					}
 					// The theme row opens /theme; /settings additionally pairs a light
 					// and a dark theme, which neither of cockpit's surfaces can express.
 					// Thinking fold is pi's setting too (Ctrl+T), mirrored live here.
-					lines.push(paint.fg("dim", "theme & thinking are stored by pi"));
-					lines.push(paint.fg("dim", "/settings pairs light+dark"));
+					lines.push(paint.fg("dim", tuiT("legacy.storageHint")));
+					lines.push(paint.fg("dim", tuiT("legacy.themePairHint")));
 					lines.push(
 						editingText
-							? paint.fg("dim", "type · Enter save · Esc cancel")
-							: paint.fg("dim", "↑↓ move · Enter change · letter jumps · Esc close"),
+							? paint.fg("dim", tuiT("legacy.editHelp"))
+							: paint.fg("dim", tuiT("legacy.help")),
 					);
 					return lines.map((line) => truncateToWidth(line, width, "…"));
 				},

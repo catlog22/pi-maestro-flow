@@ -1,4 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
+import { getTuiLocale } from "../tui/locale.ts";
 import type { McpExtensionState } from "./state.ts";
 import type { McpAuthResult, McpConfig, ServerEntry, McpPanelCallbacks, McpPanelResult, ImportKind } from "./types.ts";
 import {
@@ -21,6 +23,59 @@ import { loadOnboardingState, markSetupCompleted as persistSetupCompleted, markS
 import { openPath } from "./utils.ts";
 import { McpManagerStore } from "./mcp-manager-store.ts";
 import { runMcpManager } from "./mcp-manager-flow.ts";
+
+const COMMAND_CATALOGS = {
+  en: {
+    "shared.using": "Using standard MCP config from {sources}.",
+    "shared.writes": "Pi only writes compatibility imports and adapter-specific overrides into Pi-owned files when needed.",
+    "setup.repoUnavailable": "RepoPrompt is not available to add from this setup screen.",
+    "panel.directUpdated": "Direct tools updated. Pi will reload after this panel closes.",
+    "auth.none": "No OAuth-capable MCP servers are configured.",
+    "auth.instructions": "Select an OAuth MCP server and press Enter or ctrl+a to authenticate.",
+    "auth.interactive": "OAuth authentication requires an interactive session.",
+    "auth.serverMissing": "Server \"{name}\" was not found in the configuration",
+    "auth.unsupported": "Server \"{name}\" does not use OAuth authentication. Set \"auth\": \"oauth\" or omit auth for auto-detection.",
+    "auth.noUrl": "Server \"{name}\" has no URL configured (OAuth requires HTTP transport)",
+    "auth.status": "Authenticating {name}...",
+    "auth.openUrl": "Open this URL to authenticate {name}:\n\n{url}\n\nAfter approving, return to Pi; the local callback will complete automatically.",
+    "auth.success": "OAuth authentication successful for \"{name}\"! Run /mcp reconnect {name} to connect with the new token.",
+    "auth.failed": "OAuth authentication failed for \"{name}\".",
+    "auth.error": "Failed to authenticate \"{name}\": {message}",
+    "auth.cleared": "OAuth credentials cleared for \"{name}\". Run /mcp auth {name} to authenticate again.",
+  },
+  "zh-CN": {
+    "shared.using": "正在使用来自 {sources} 的标准 MCP 配置。",
+    "shared.writes": "Pi 仅在需要时将兼容导入和适配器专用覆盖写入 Pi 自有文件。",
+    "setup.repoUnavailable": "此设置界面无法添加 RepoPrompt。",
+    "panel.directUpdated": "直连工具已更新。面板关闭后 Pi 将重载。",
+    "auth.none": "未配置支持 OAuth 的 MCP 服务。",
+    "auth.instructions": "选择 OAuth MCP 服务，然后按 Enter 或 ctrl+a 认证。",
+    "auth.interactive": "OAuth 认证需要交互式会话。",
+    "auth.serverMissing": "配置中未找到服务“{name}”",
+    "auth.unsupported": "服务“{name}”未使用 OAuth 认证。请设置 \"auth\": \"oauth\"，或省略 auth 以自动检测。",
+    "auth.noUrl": "服务“{name}”未配置 URL（OAuth 需要 HTTP 传输）",
+    "auth.status": "正在认证 {name}...",
+    "auth.openUrl": "打开以下 URL 认证 {name}：\n\n{url}\n\n批准后返回 Pi；本地回调会自动完成。",
+    "auth.success": "“{name}”的 OAuth 认证成功！运行 /mcp reconnect {name} 使用新 Token 连接。",
+    "auth.failed": "“{name}”的 OAuth 认证失败。",
+    "auth.error": "认证“{name}”失败：{message}",
+    "auth.cleared": "已清除“{name}”的 OAuth 凭据。运行 /mcp auth {name} 重新认证。",
+  },
+} as const;
+
+type CommandCatalogKey = keyof (typeof COMMAND_CATALOGS)["en"];
+
+function commandText(
+  key: CommandCatalogKey,
+  vars?: Readonly<Record<string, string | number>>,
+  explicitLocale?: SupportedSettingsLocale,
+): string {
+  const locale = getTuiLocale(explicitLocale);
+  const template = COMMAND_CATALOGS[locale]?.[key] ?? COMMAND_CATALOGS.en[key];
+  if (!vars) return template;
+  return template.replace(/\{(\w+)\}/g, (_match, name: string) =>
+    vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
+}
 
 export async function showStatus(state: McpExtensionState, ctx: ExtensionContext): Promise<void> {
   if (!ctx.hasUI) return;
@@ -141,61 +196,51 @@ export async function reconnectServers(
 export async function authenticateServer(
   serverName: string,
   config: McpConfig,
-  ctx: ExtensionContext
+  ctx: ExtensionContext,
+  locale?: SupportedSettingsLocale,
 ): Promise<McpAuthResult> {
-  if (!ctx.hasUI) return { ok: false, message: "OAuth authentication requires an interactive session." };
+  if (!ctx.hasUI) return { ok: false, message: commandText("auth.interactive", undefined, locale) };
 
   const definition = config.mcpServers[serverName];
   if (!definition) {
-    const message = `Server "${serverName}" not found in config`;
+    const message = commandText("auth.serverMissing", { name: serverName }, locale);
     ctx.ui.notify(message, "error");
     return { ok: false, message };
   }
 
   if (!supportsOAuth(definition)) {
-    const message = `Server "${serverName}" does not use OAuth authentication. Set "auth": "oauth" or omit auth for auto-detection.`;
-    ctx.ui.notify(
-      `Server "${serverName}" does not use OAuth authentication.\n` +
-      `Set "auth": "oauth" or omit auth for auto-detection.`,
-      "error"
-    );
+    const message = commandText("auth.unsupported", { name: serverName }, locale);
+    ctx.ui.notify(message, "error");
     return { ok: false, message };
   }
 
   if (!definition.url) {
-    const message = `Server "${serverName}" has no URL configured (OAuth requires HTTP transport)`;
+    const message = commandText("auth.noUrl", { name: serverName }, locale);
     ctx.ui.notify(message, "error");
     return { ok: false, message };
   }
 
   try {
-    ctx.ui.setStatus("mcp-auth", `Authenticating ${serverName}...`);
+    ctx.ui.setStatus("mcp-auth", commandText("auth.status", { name: serverName }, locale));
     const status = await authenticate(serverName, definition.url, definition, {
       onAuthorizationUrl: (authorizationUrl) => {
-        ctx.ui.notify(
-          `Open this URL to authenticate ${serverName}:\n\n${authorizationUrl}\n\n` +
-          "After approving, return to Pi; the local callback will complete automatically.",
-          "info"
-        );
+        ctx.ui.notify(commandText("auth.openUrl", { name: serverName, url: authorizationUrl }, locale), "info");
       },
     });
 
     if (status === "authenticated") {
-      const message = `OAuth authentication successful for "${serverName}"! Run /mcp reconnect ${serverName} to connect with the new token.`;
-      ctx.ui.notify(
-        `OAuth authentication successful for "${serverName}"!\n` +
-        `Run /mcp reconnect ${serverName} to connect with the new token.`,
-        "info"
-      );
+      const message = commandText("auth.success", { name: serverName }, locale);
+      ctx.ui.notify(message, "info");
       return { ok: true, message };
     }
 
-    const message = `OAuth authentication failed for "${serverName}".`;
+    const message = commandText("auth.failed", { name: serverName }, locale);
     ctx.ui.notify(message, "error");
     return { ok: false, message };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    ctx.ui.notify(`Failed to authenticate "${serverName}": ${message}`, "error");
+    const failure = error instanceof Error ? error.message : String(error);
+    const message = commandText("auth.error", { name: serverName, message: failure }, locale);
+    ctx.ui.notify(message, "error");
     return { ok: false, message };
   } finally {
     ctx.ui.setStatus("mcp-auth", undefined);
@@ -205,11 +250,12 @@ export async function authenticateServer(
 export async function logoutServer(
   serverName: string,
   state: McpExtensionState,
-  ctx: ExtensionContext
+  ctx: ExtensionContext,
+  locale?: SupportedSettingsLocale,
 ): Promise<{ ok: boolean; message: string }> {
   const definition = state.config.mcpServers[serverName];
   if (!definition) {
-    const message = `Server "${serverName}" not found in config`;
+    const message = commandText("auth.serverMissing", { name: serverName }, locale);
     if (ctx.hasUI) ctx.ui.notify(message, "error");
     return { ok: false, message };
   }
@@ -218,7 +264,7 @@ export async function logoutServer(
   await state.manager.close(serverName);
   updateStatusBar(state);
 
-  const message = `OAuth credentials cleared for "${serverName}". Run /mcp auth ${serverName} to authenticate again.`;
+  const message = commandText("auth.cleared", { name: serverName }, locale);
   if (ctx.hasUI) ctx.ui.notify(message, "info");
   return { ok: true, message };
 }
@@ -227,7 +273,11 @@ export interface PanelFlowResult {
   configChanged: boolean;
 }
 
-function buildSharedConfigNoticeLines(configOverridePath: string | undefined, cwd: string): { lines: string[]; fingerprint: string | null } {
+function buildSharedConfigNoticeLines(
+  configOverridePath: string | undefined,
+  cwd: string,
+  locale?: SupportedSettingsLocale,
+): { lines: string[]; fingerprint: string | null } {
   const discovery = getMcpDiscoverySummary(configOverridePath, cwd);
   const onboardingState = loadOnboardingState();
   if (!discovery.hasSharedServers || onboardingState.sharedConfigHintShown) {
@@ -238,8 +288,8 @@ function buildSharedConfigNoticeLines(configOverridePath: string | undefined, cw
   const sourceList = sharedSources.map((source) => source.path).join(", ");
   return {
     lines: [
-      `Using standard MCP config from ${sourceList}.`,
-      "Pi only writes compatibility imports and adapter-specific overrides into Pi-owned files when needed.",
+      commandText("shared.using", { sources: sourceList }, locale),
+      commandText("shared.writes", undefined, locale),
     ],
     fingerprint: discovery.fingerprint,
   };
@@ -251,6 +301,7 @@ export async function openMcpSetup(
   ctx: ExtensionContext,
   configOverridePath?: string,
   mode: "empty" | "setup" = "setup",
+  locale?: SupportedSettingsLocale,
 ): Promise<PanelFlowResult> {
   if (!ctx.hasUI) return { configChanged: false };
 
@@ -280,7 +331,7 @@ export async function openMcpSetup(
     addRepoPrompt: async () => {
       const repoPrompt = getMcpDiscoverySummary(configOverridePath, ctx.cwd).repoPrompt;
       if (!repoPrompt.entry || !repoPrompt.targetPath || !repoPrompt.serverName) {
-        throw new Error("RepoPrompt is not available to add from this setup screen.");
+        throw new Error(commandText("setup.repoUnavailable", undefined, locale));
       }
       const path = writeSharedServerEntry(repoPrompt.targetPath, repoPrompt.serverName, repoPrompt.entry);
       configChanged = true;
@@ -297,7 +348,12 @@ export async function openMcpSetup(
   return new Promise<PanelFlowResult>((resolve) => {
     ctx.ui.custom(
       (tui, _theme, keybindings, done) => {
-        return createMcpSetupPanel(discovery, callbacks, { mode, onboardingState, keybindings }, tui, () => {
+        return createMcpSetupPanel(discovery, callbacks, {
+          mode,
+          onboardingState,
+          keybindings,
+          locale: getTuiLocale(locale),
+        }, tui, () => {
           done(undefined);
           resolve({ configChanged });
         });
@@ -311,6 +367,7 @@ function buildMcpPanelCallbacks(
   state: McpExtensionState,
   config: McpConfig,
   ctx: ExtensionContext,
+  locale?: SupportedSettingsLocale,
 ): McpPanelCallbacks {
   return {
     reconnect: (serverName: string) => lazyConnect(state, serverName),
@@ -318,7 +375,7 @@ function buildMcpPanelCallbacks(
       const definition = config.mcpServers[serverName];
       return definition ? supportsOAuth(definition) : false;
     },
-    authenticate: (serverName: string) => authenticateServer(serverName, config, ctx),
+    authenticate: (serverName: string) => authenticateServer(serverName, config, ctx, locale),
     getConnectionStatus: (serverName: string) => {
       const definition = config.mcpServers[serverName];
       const connection = state.manager.getConnection(serverName);
@@ -350,17 +407,18 @@ export async function openMcpManager(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   configOverridePath?: string,
+  locale?: SupportedSettingsLocale,
 ): Promise<PanelFlowResult> {
   if (!ctx.hasUI) return { configChanged: false };
   const configPath = pi.getFlag("mcp-config") as string | undefined ?? configOverridePath;
-  const callbacks = buildMcpPanelCallbacks(state, state.config, ctx);
+  const callbacks = buildMcpPanelCallbacks(state, state.config, ctx, locale);
   const store = new McpManagerStore(ctx.cwd, configPath);
   return runMcpManager(ctx, store, {
     status: (serverName) => callbacks.getConnectionStatus(serverName),
     toolNames: (serverName) => (state.toolMetadata.get(serverName) ?? []).map((tool) => tool.originalName),
     canAuthenticate: (serverName) => callbacks.canAuthenticate(serverName),
     authenticate: (serverName) => callbacks.authenticate(serverName),
-  });
+  }, locale);
 }
 
 export async function openMcpPanel(
@@ -368,18 +426,19 @@ export async function openMcpPanel(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   configOverridePath?: string,
+  locale?: SupportedSettingsLocale,
 ): Promise<PanelFlowResult> {
   if (Object.keys(state.config.mcpServers).length === 0) {
-    return openMcpSetup(state, pi, ctx, configOverridePath, "empty");
+    return openMcpSetup(state, pi, ctx, configOverridePath, "empty", locale);
   }
 
   const config = state.config;
   const cache = loadMetadataCache();
   const configPath = pi.getFlag("mcp-config") as string | undefined ?? configOverridePath;
   const provenanceMap = getServerProvenance(configPath, ctx.cwd);
-  const { lines: noticeLines, fingerprint } = buildSharedConfigNoticeLines(configPath, ctx.cwd);
+  const { lines: noticeLines, fingerprint } = buildSharedConfigNoticeLines(configPath, ctx.cwd, locale);
 
-  const callbacks = buildMcpPanelCallbacks(state, config, ctx);
+  const callbacks = buildMcpPanelCallbacks(state, config, ctx, locale);
 
   const { createMcpPanel } = await import("./mcp-panel.ts");
   let configChanged = false;
@@ -391,11 +450,11 @@ export async function openMcpPanel(
           if (!result.cancelled && result.changes.size > 0) {
             writeDirectToolsConfig(result.changes, provenanceMap, config);
             configChanged = true;
-            ctx.ui.notify("Direct tools updated. Pi will reload after this panel closes.", "info");
+            ctx.ui.notify(commandText("panel.directUpdated", undefined, locale), "info");
           }
           done(undefined);
           resolve();
-        }, { noticeLines, keybindings });
+        }, { noticeLines, keybindings, locale: getTuiLocale(locale) });
       },
       { overlay: true, overlayOptions: { anchor: "center", width: "94%" } },
     );
@@ -413,20 +472,21 @@ export async function openMcpAuthPanel(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   configOverridePath?: string,
+  locale?: SupportedSettingsLocale,
 ): Promise<PanelFlowResult> {
   if (!ctx.hasUI) return { configChanged: false };
 
   const config = state.config;
   const oauthServers = Object.entries(config.mcpServers).filter(([, definition]) => supportsOAuth(definition));
   if (oauthServers.length === 0) {
-    ctx.ui.notify("No OAuth-capable MCP servers are configured.", "warning");
+    ctx.ui.notify(commandText("auth.none", undefined, locale), "warning");
     return { configChanged: false };
   }
 
   const cache = loadMetadataCache();
   const configPath = pi.getFlag("mcp-config") as string | undefined ?? configOverridePath;
   const provenanceMap = getServerProvenance(configPath, ctx.cwd);
-  const callbacks = buildMcpPanelCallbacks(state, config, ctx);
+  const callbacks = buildMcpPanelCallbacks(state, config, ctx, locale);
   const { createMcpPanel } = await import("./mcp-panel.ts");
 
   await new Promise<void>((resolve) => {
@@ -438,7 +498,8 @@ export async function openMcpAuthPanel(
         }, {
           authOnly: true,
           keybindings,
-          noticeLines: ["Select an OAuth MCP server and press Enter or ctrl+a to authenticate."],
+          locale: getTuiLocale(locale),
+          noticeLines: [commandText("auth.instructions", undefined, locale)],
         });
       },
       { overlay: true, overlayOptions: { anchor: "center", width: "94%" } },

@@ -24,6 +24,9 @@ import { resolveGlyphs } from "../src/icons.ts";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { AgentRow, TodoItem } from "../src/types.ts";
 import type { WidthUtils } from "../src/layout.ts";
+import { cockpitTuiLocale } from "../src/tui-i18n.ts";
+
+cockpitTuiLocale.setLocale("en");
 
 const theme: Pick<Theme, "fg"> = { fg: (_c, t) => t };
 const utils: WidthUtils = {

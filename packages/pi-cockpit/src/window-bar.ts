@@ -4,6 +4,7 @@ import type { CockpitEndpoint } from "./endpoint-store.ts";
 import { isMonitorControlEndpoint } from "./endpoint-store.ts";
 import type { SessionUiState } from "./session-ui-state.ts";
 import { assignedAgentColor, renderSessionBarLine } from "./agent-bar.ts";
+import { tuiT } from "./tui-i18n.ts";
 import { formatUnreadCount, renderSessionTabLine, type SessionTab } from "./session-tabs.ts";
 
 export interface WindowBarDeps {
@@ -61,7 +62,7 @@ export function renderWindowBar(
 		monitored: monitored.has(endpoint.id),
 	}));
 	if (tabs.length === 0) {
-		return [truncateToWidth(theme.fg("muted", "Windows · no peer sessions"), Math.max(1, width), "…")];
+		return [truncateToWidth(theme.fg("muted", tuiT("window.empty")), Math.max(1, width), "…")];
 	}
 	return [renderSessionBarLine(
 		(availableWidth) => renderSessionTabLine(tabs, availableWidth, {

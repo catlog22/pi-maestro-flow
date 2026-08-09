@@ -3,9 +3,11 @@ import test from "node:test";
 import {
   checkCatalogCompleteness,
   createSettingsTranslator,
+  detectSystemSettingsLocale,
   interpolateTranslation,
   mergeTranslationCatalogs,
   normalizeSettingsLocale,
+  resolveSettingsLocale,
   translateSettings,
   type MissingTranslation,
   type TranslationCatalogs,
@@ -30,6 +32,38 @@ test("normalizes English, Chinese, and unsupported locales", () => {
   assert.equal(normalizeSettingsLocale("zh-Hant-TW"), "zh-CN");
   assert.equal(normalizeSettingsLocale("fr-FR"), "en");
   assert.equal(normalizeSettingsLocale(undefined), "en");
+});
+
+test("detects and resolves supported system locales deterministically", () => {
+  assert.equal(detectSystemSettingsLocale({
+    environment: { LC_ALL: "zh_CN.UTF-8", LANG: "en_US.UTF-8" },
+    resolvedLocale: "en-US",
+  }), "zh-CN");
+  assert.equal(detectSystemSettingsLocale({
+    environment: { LC_MESSAGES: "zh-TW", LANG: "en_US.UTF-8" },
+    resolvedLocale: "en-US",
+  }), "zh-CN");
+  assert.equal(detectSystemSettingsLocale({
+    environment: { LANGUAGE: "zh_CN:en_US", LANG: "en_US.UTF-8" },
+    resolvedLocale: "en-US",
+  }), "zh-CN");
+  assert.equal(detectSystemSettingsLocale({
+    environment: {},
+    resolvedLocale: "zh-Hans-CN",
+  }), "zh-CN");
+  assert.equal(detectSystemSettingsLocale({
+    environment: { LANG: "fr_FR.UTF-8" },
+    resolvedLocale: "zh-CN",
+  }), "en");
+  assert.equal(resolveSettingsLocale("en-GB", {
+    environment: { LANG: "zh_CN.UTF-8" },
+  }), "en");
+  assert.equal(resolveSettingsLocale("auto", {
+    environment: { LANG: "zh_CN.UTF-8" },
+  }), "zh-CN");
+  assert.equal(resolveSettingsLocale(undefined, {
+    environment: { LANG: "en_US.UTF-8" },
+  }), "en");
 });
 
 test("translates and interpolates parameters", () => {

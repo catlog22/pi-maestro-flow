@@ -1,5 +1,6 @@
 import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
 import type { SessionMessageRequest, SessionMessageResult } from "pi-maestro-teammate/v1/sessions";
+import { tuiT } from "./tui-i18n.ts";
 
 export interface AgentInputTarget {
 	correlationId: string;
@@ -55,7 +56,7 @@ export async function routeAgentInput(
 	if (!interactive || synthetic || !target) return "continue";
 
 	if (hasImages) {
-		ui.notify(`Image input cannot be routed to @${target.label}; attachments were not sent and must be reattached after switching to @main.`, "warning");
+		ui.notify(tuiT("notice.agentImage", { label: target.label }), "warning");
 		ui.setEditorText(event.text);
 		return "handled";
 	}
@@ -72,7 +73,7 @@ export async function routeAgentInput(
 				mode: event.streamingBehavior === "steer" ? "steer" : "follow_up",
 				source: "user",
 			});
-			if (!delivery.delivered) error = delivery.error ?? "delivery was rejected";
+			if (!delivery.delivered) error = delivery.error ?? tuiT("notice.deliveryRejected");
 		} else if (registries.mailbox) {
 			const delivery = await registries.mailbox.deliverAgentMessage({
 				recipientCorrelationId: target.correlationId,
@@ -80,15 +81,15 @@ export async function routeAgentInput(
 				message: event.text,
 				mode: event.streamingBehavior === "steer" ? "steer" : "follow_up",
 			});
-			if (!delivery.delivered) error = delivery.error ?? "delivery was rejected";
+			if (!delivery.delivered) error = delivery.error ?? tuiT("notice.deliveryRejected");
 		} else {
-			error = "teammate delivery registry is unavailable";
+			error = tuiT("notice.agentRegistryUnavailable");
 		}
 	} catch (cause) {
 		error = cause instanceof Error ? cause.message : String(cause);
 	}
 	if (error) {
-		ui.notify(`Message to @${target.label} was not sent: ${error}`, "error");
+		ui.notify(tuiT("notice.agentMessageFailed", { label: target.label, message: error }), "error");
 		ui.setEditorText(event.text);
 	}
 	return "handled";

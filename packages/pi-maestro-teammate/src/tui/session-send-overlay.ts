@@ -1,6 +1,13 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { statusIcon } from "../extension/monitor.ts";
 import type { MonitorSessionRow } from "./monitor-overlay.ts";
+import {
+  createTuiTranslator,
+  onTuiLocaleChange,
+  translateStatusIdentifier,
+  type SupportedSettingsLocale,
+  type TuiTranslator,
+} from "./locale.ts";
 
 export interface SessionSendOverlayResult {
   target: string;
@@ -23,8 +30,17 @@ export class SessionSendOverlay {
   private editingMessage = false;
   private statusText = "";
   private requestRender: () => void = () => {};
+  private readonly t: TuiTranslator;
+  private readonly localeDisposer: () => void;
 
-  constructor(private readonly cb: SessionSendOverlayCallbacks) {
+  constructor(private readonly cb: SessionSendOverlayCallbacks, locale?: SupportedSettingsLocale) {
+    this.t = createTuiTranslator(locale);
+    this.localeDisposer = locale === undefined
+      ? onTuiLocaleChange(() => {
+          this.statusText = "";
+          this.requestRender();
+        })
+      : () => {};
     this.sessions = cb.getSessions().filter((session) => session.bindable === true);
   }
 
@@ -41,8 +57,8 @@ export class SessionSendOverlay {
     const green = (value: string) => `\x1b[32m${value}\x1b[0m`;
 
     lines.push(dim(`+${"-".repeat(inner)}+`));
-    lines.push(this.frameLine(bold(" Send to another session"), inner, dim));
-    lines.push(this.frameLine(dim(" Select a window, then enter a message."), inner, dim));
+    lines.push(this.frameLine(bold(` ${this.t("sessionSend.title")}`), inner, dim));
+    lines.push(this.frameLine(dim(` ${this.t("sessionSend.intro")}`), inner, dim));
 
     const maxVisible = Math.min(this.sessions.length, 10);
     const scrollStart = Math.max(0, Math.min(this.cursor - 4, this.sessions.length - maxVisible));
@@ -53,23 +69,23 @@ export class SessionSendOverlay {
       const pointer = current ? accent(">") : " ";
       const check = selected ? green("[x]") : dim("[ ]");
       const source = session.source && session.source !== "local" ? dim(` [${session.source}]`) : "";
-      const row = ` ${pointer} ${check} ${statusIcon(session.status)} ${session.displayName}  ${dim(session.status)}  ${dim(session.agentRole)}${source}`;
+      const row = ` ${pointer} ${check} ${statusIcon(session.status)} ${session.displayName}  ${dim(translateStatusIdentifier(session.status, this.t))}  ${dim(session.agentRole)}${source}`;
       lines.push(this.frameLine(current ? accent(row) : row, inner, dim));
     }
     if (this.sessions.length === 0) {
-      lines.push(this.frameLine(dim("  No available peer sessions"), inner, dim));
+      lines.push(this.frameLine(dim(`  ${this.t("sessionSend.noPeers")}`), inner, dim));
     }
 
     lines.push(this.frameLine("", inner, dim));
     const target = this.selected ? this.sessions.find((session) => session.correlationId === this.selected) : undefined;
-    lines.push(this.frameLine(` Target: ${target?.displayName ?? dim("(select a session)")}`, inner, dim));
+    lines.push(this.frameLine(` ${this.t("sessionSend.target")} ${target?.displayName ?? dim(this.t("sessionSend.selectPlaceholder"))}`, inner, dim));
     const messageValue = this.editingMessage
       ? ` > ${this.message}\x1b[7m \x1b[0m`
-      : ` > ${this.message || dim("(Tab or Enter to edit message)")}`;
-    lines.push(this.frameLine(` Message: ${messageValue}`, inner, dim));
+      : ` > ${this.message || dim(this.t("sessionSend.editPlaceholder"))}`;
+    lines.push(this.frameLine(` ${this.t("sessionSend.message")} ${messageValue}`, inner, dim));
     if (this.statusText) lines.push(this.frameLine(dim(` ${this.statusText}`), inner, dim));
     lines.push(this.frameLine("", inner, dim));
-    lines.push(this.frameLine(dim(" Up/Down select · Space choose · Tab edit · Enter send · Esc cancel"), inner, dim));
+    lines.push(this.frameLine(dim(` ${this.t("sessionSend.footer")}`), inner, dim));
     lines.push(dim(`+${"-".repeat(inner)}+`));
     return lines;
   }
@@ -107,18 +123,18 @@ export class SessionSendOverlay {
       case "\r":
       case "\n":
         if (!this.selected) {
-          this.statusText = "Select a peer session first";
+          this.statusText = this.t("sessionSend.selectFirst");
         } else {
           this.editingMessage = true;
-          this.statusText = "Enter a message, then press Enter to send";
+          this.statusText = this.t("sessionSend.enterThenSend");
         }
         break;
       case "\t":
         if (this.selected) {
           this.editingMessage = true;
-          this.statusText = "Enter a message, then press Enter to send";
+          this.statusText = this.t("sessionSend.enterThenSend");
         } else {
-          this.statusText = "Select a peer session first";
+          this.statusText = this.t("sessionSend.selectFirst");
         }
         break;
       case " ":
@@ -142,19 +158,21 @@ export class SessionSendOverlay {
     const session = this.sessions[this.cursor];
     if (!session) return;
     this.selected = this.selected === session.correlationId ? undefined : session.correlationId;
-    this.statusText = this.selected ? `Selected ${session.displayName}` : "Session selection cleared";
+    this.statusText = this.selected
+      ? this.t("sessionSend.selected", { name: session.displayName })
+      : this.t("sessionSend.selectionCleared");
   }
 
   private confirm(): void {
     const target = this.selected;
     const message = this.message.trim();
     if (!target) {
-      this.statusText = "Select a peer session first";
+      this.statusText = this.t("sessionSend.selectFirst");
       this.requestRender();
       return;
     }
     if (!message) {
-      this.statusText = "Enter a message first";
+      this.statusText = this.t("sessionSend.enterFirst");
       this.editingMessage = true;
       this.requestRender();
       return;
@@ -163,11 +181,14 @@ export class SessionSendOverlay {
   }
 
   invalidate(): void {}
-  dispose(): void {}
+  dispose(): void {
+    this.localeDisposer();
+  }
 }
 
 export interface SessionSendOverlayDeps {
   getSessions: () => MonitorSessionRow[];
+  locale?: SupportedSettingsLocale;
 }
 
 export async function showSessionSendOverlay(
@@ -176,7 +197,7 @@ export async function showSessionSendOverlay(
 ): Promise<SessionSendOverlayResult | null> {
   return ctx.ui.custom<SessionSendOverlayResult | null>(
     (tui, _theme, _keybindings, done) => {
-      const overlay = new SessionSendOverlay({ getSessions: deps.getSessions, close: done });
+      const overlay = new SessionSendOverlay({ getSessions: deps.getSessions, close: done }, deps.locale);
       overlay.setRequestRender(() => tui.requestRender());
       return {
         render: (width: number) => overlay.render(width),

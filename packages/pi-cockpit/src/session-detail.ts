@@ -13,6 +13,7 @@ import { effectiveAgentStatus, type AgentDisplayStatus } from "./agents-store.ts
 import { scrollWindowStart } from "./agent-scroll.ts";
 import { agentDetailRows } from "./viewport.ts";
 import { formatAgentMetric, formatDuration } from "./render.ts";
+import { tuiStatus, tuiT } from "./tui-i18n.ts";
 
 function detailStatusColor(status: AgentDisplayStatus): ThemeColor {
 	switch (status) {
@@ -79,7 +80,7 @@ export function renderSessionDetail(
 	theme: Theme,
 	maxRows = SESSION_DETAIL_TAIL_LINES + 1,
 	scroll: SessionDetailScrollState = { offset: 0, following: true },
-	hintText = "Alt+R preview · Alt+E hide",
+	hintText = tuiT("session.detailHint"),
 ): string[] {
 	const row = rows.find((candidate) => candidate.correlationId === viewingId);
 	if (!row) return [];
@@ -91,16 +92,20 @@ export function renderSessionDetail(
 	const role = row.role && row.role !== label ? `(${row.role})` : "";
 	const duration = formatDuration(Math.max(0, (row.finishedAt ?? now) - row.startedAt));
 	const meta = [
-		row.toolCount !== undefined ? `${row.toolCount} tools` : "",
+		row.toolCount !== undefined ? tuiT("common.tools", { count: row.toolCount }) : "",
 		row.inputTokens !== undefined || row.outputTokens !== undefined
-			? `in ${formatAgentMetric(row.inputTokens ?? 0)}/out ${formatAgentMetric(row.outputTokens ?? 0)}`
-			: row.tokens !== undefined ? `${formatAgentMetric(row.tokens)} tok` : "",
+			? tuiT("widget.agent.inputOutput", {
+				input: formatAgentMetric(row.inputTokens ?? 0),
+				separator: "/",
+				output: formatAgentMetric(row.outputTokens ?? 0),
+			})
+			: row.tokens !== undefined ? tuiT("widget.agent.tokens", { count: formatAgentMetric(row.tokens) }) : "",
 	].filter(Boolean).join(" · ");
 	const identity = [
 		theme.fg(color, "■"),
 		theme.fg(color, theme.bold(`@${label}`)),
 		role ? theme.fg("dim", role) : "",
-		theme.fg(color, status),
+		theme.fg(color, tuiStatus(status)),
 		theme.fg("dim", duration),
 		meta ? theme.fg("dim", meta) : "",
 	].filter(Boolean).join(" · ");
@@ -128,18 +133,23 @@ export function renderSessionDetail(
 			// silence has lasted — a live agent stays distinguishable from a stuck one.
 			const idleMs = Math.max(0, now - row.lastActivityAt);
 			const idle = idleMs >= 5_000 ? ` · ${formatDuration(idleMs)}` : "";
-			body.push(theme.fg("dim", `  thinking…${idle}`));
+			body.push(theme.fg("dim", `  ${tuiT("session.thinking")}${idle}`));
 		} else {
-			body.push(theme.fg("dim", "  working…"));
+			body.push(theme.fg("dim", `  ${tuiT("session.working")}`));
 		}
 	} else if (status === "stalled") {
-		body.push(theme.fg("error", `  no activity for ${formatDuration(Math.max(0, now - row.lastActivityAt))}`));
+		body.push(theme.fg("error", `  ${tuiT("session.noActivity", {
+			duration: formatDuration(Math.max(0, now - row.lastActivityAt)),
+		})}`));
 	}
 	if (row.activeTool) {
 		body.push(truncateToWidth(theme.fg("dim", `  ${theme.fg("warning", "→")} ${row.activeTool}`), w, "…"));
 	}
 	if (row.error) {
 		body.push(theme.fg("error", `  ✗ ${truncateToWidth(row.error, Math.max(1, w - 4), "…")}`));
+	}
+	for (let index = 0; index < body.length; index++) {
+		body[index] = truncateToWidth(body[index] ?? "", w, "…");
 	}
 	if (maxRows <= 0) return [];
 	if (maxRows === 1 || body.length === 0) return lines;
@@ -150,7 +160,10 @@ export function renderSessionDetail(
 	const visible = body.slice(start, start + windowRows);
 	const marker = above > 0 || below > 0
 		? truncateToWidth(
-			theme.fg("dim", `  ${[above > 0 ? `↑ ${above} more` : "", below > 0 ? `↓ ${below} more` : ""].filter(Boolean).join(" · ")}`),
+				theme.fg("dim", `  ${[
+					above > 0 ? `↑ ${tuiT("common.more", { count: above })}` : "",
+					below > 0 ? `↓ ${tuiT("common.more", { count: below })}` : "",
+				].filter(Boolean).join(" · ")}`),
 			w,
 			"…",
 		)

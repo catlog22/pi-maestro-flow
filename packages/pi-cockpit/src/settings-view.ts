@@ -14,6 +14,7 @@ import type {
 	SidebarMode,
 	ViewMode,
 } from "./types.ts";
+import { tuiT } from "./tui-i18n.ts";
 
 export type SaveState =
 	| { kind: "idle" }
@@ -53,6 +54,27 @@ function themeLabel(theme: string): string {
 	return theme === "" ? NO_THEME_LABEL : theme;
 }
 
+const LEGACY_VALUE_KEYS: Readonly<Record<string, string>> = {
+	on: "common.value.on",
+	off: "common.value.off",
+	yes: "common.value.yes",
+	no: "common.value.no",
+	hidden: "common.value.hidden",
+	visible: "common.value.visible",
+	list: "common.value.list",
+	compact: "common.value.compact",
+	auto: "common.value.auto",
+	comfortable: "common.value.comfortable",
+	"picker…": "common.value.picker",
+	[NO_THEME_LABEL]: "legacy.piSettings",
+	"(rule-based)": "common.ruleBased",
+};
+
+function localizedLegacyValue(value: string): string {
+	const key = LEGACY_VALUE_KEYS[value];
+	return key ? tuiT(key) : value;
+}
+
 export interface LiveRowState {
 	/** pi's effective hideThinkingBlock; the thinking row is a pass-through. */
 	thinkingHidden: boolean;
@@ -60,7 +82,7 @@ export interface LiveRowState {
 
 export function buildRows(config: CockpitConfig, live?: LiveRowState): SettingsRow[] {
 	const thinkingHidden = live?.thinkingHidden ?? false;
-	return [
+	const rows: SettingsRow[] = [
 		{
 			key: "enabled",
 			accel: "e",
@@ -256,6 +278,12 @@ export function buildRows(config: CockpitConfig, live?: LiveRowState): SettingsR
 			kind: "select",
 		},
 	];
+	return rows.map((row) => ({
+		...row,
+		label: tuiT(`legacy.label.${row.key}`),
+		value: localizedLegacyValue(row.value),
+		next: localizedLegacyValue(row.next),
+	}));
 }
 
 /**

@@ -2,8 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { ThemePicker, activeThemeName, initialIndex, type ThemePickerParams } from "../src/theme-picker.ts";
+import { cockpitTuiLocale } from "../src/tui-i18n.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { resolveGlyphs } from "../src/icons.ts";
+
+cockpitTuiLocale.setLocale("en");
 
 const theme = { fg: (_c: string, t: string) => t, bg: (_c: string, t: string) => t } as unknown as Theme;
 const glyphs = resolveGlyphs("nerd");

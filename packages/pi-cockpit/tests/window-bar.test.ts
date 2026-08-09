@@ -8,7 +8,10 @@ import { SessionUiState } from "../src/session-ui-state.ts";
 import { assignedAgentColor } from "../src/agent-bar.ts";
 import { renderWindowBar, windowSessionColor } from "../src/window-bar.ts";
 import { renderWindowThreadView } from "../src/window-thread-view.ts";
+import { cockpitTuiLocale } from "../src/tui-i18n.ts";
 import type { SessionHostSnapshot } from "pi-maestro-teammate/v1/sessions";
+
+cockpitTuiLocale.setLocale("en");
 
 const theme: Pick<Theme, "fg" | "bold"> = {
 	fg: (_color, text) => text,
@@ -150,7 +153,7 @@ test("Cockpit intercepts exact monitor before agent routing and hides windows by
 	const peerImageRejection = source.indexOf("if (hasImages)", controlRoute);
 	assert.ok(controlRoute >= 0 && peerImageRejection > controlRoute);
 	assert.match(source, /isMonitorControlEndpoint\(target\)[\s\S]*?action: "continue"/);
-	assert.match(source, /Image input cannot be routed to a peer window/);
+	assert.match(source, /tuiT\("notice\.imagePeer"\)/);
 	assert.match(source, /sessionUi\.mode === "window"[\s\S]*?renderWindowBar/);
 	assert.match(source, /WINDOW_MONITOR_TOGGLE_KEY = "alt\+w"/);
 	assert.match(source, /registry\.setMonitored\(window\.id, enabled\)/);

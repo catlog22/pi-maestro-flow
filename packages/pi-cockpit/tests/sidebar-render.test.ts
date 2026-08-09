@@ -5,6 +5,9 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import type { MaestroUiStateSnapshotV1 } from "../src/public/v1/events.ts";
 import { enumerateNavRows, renderSidebar } from "../src/sidebar-render.ts";
 import { DEFAULT_CONFIG, type AgentRow, type BashBgJob, type TodoItem } from "../src/types.ts";
+import { cockpitTuiLocale } from "../src/tui-i18n.ts";
+
+cockpitTuiLocale.setLocale("en");
 
 const theme = {
 	fg: (_color: string, text: string) => text,

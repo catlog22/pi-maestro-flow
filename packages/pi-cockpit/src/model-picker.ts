@@ -17,6 +17,7 @@ import { sanitizeExtensionStatusText } from "./extension-status.ts";
 import type { IconGlyphs } from "./icons.ts";
 import { fitLineByPriority, visibleStart, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
 import { overlayListRows } from "./viewport.ts";
+import { tuiT } from "./tui-i18n.ts";
 
 const UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 
@@ -113,12 +114,12 @@ export class ModelPicker implements Component {
 		const { theme: t, glyphs: g, entries } = this.params;
 		const w = Math.max(1, Math.min(width, 60));
 		const lines = [
-			t.fg("text", "title model"),
+			t.fg("text", tuiT("picker.model.title")),
 			t.fg("borderMuted", "─".repeat(w)),
 		];
 
 		if (entries.length === 0) {
-			lines.push(t.fg("muted", "no models registered"));
+			lines.push(t.fg("muted", tuiT("picker.model.empty")));
 		} else {
 			const page = this.pageSize();
 			const start = visibleStart(this.selected, entries.length, page);
@@ -138,12 +139,12 @@ export class ModelPicker implements Component {
 		// The refs come from /api-manager's registry, and the empty ref is the
 		// offline extractor — both worth saying once rather than guessing.
 		const hints: PrioritizedSegment[] = [
-			{ text: t.fg("dim", `${g.upDown} move`), priority: 90, clippable: false },
-			{ text: t.fg("dim", "Enter save"), priority: 100, clippable: false },
-			{ text: t.fg("dim", "Esc cancel"), priority: 95, clippable: false },
+			{ text: t.fg("dim", tuiT("picker.model.move", { keys: g.upDown })), priority: 90, clippable: false },
+			{ text: t.fg("dim", tuiT("picker.model.save")), priority: 100, clippable: false },
+			{ text: t.fg("dim", tuiT("picker.model.cancel")), priority: 95, clippable: false },
 		];
 		lines.push(fitLineByPriority(hints, w, UTILS, t.fg("dim", " · "), g.ellipsis));
-		lines.push(truncateToWidth(t.fg("dim", "models come from /api-manager"), w, "…"));
+		lines.push(truncateToWidth(t.fg("dim", tuiT("picker.model.source")), w, "…"));
 		return lines.map((line) => truncateToWidth(line, width, "…"));
 	}
 }

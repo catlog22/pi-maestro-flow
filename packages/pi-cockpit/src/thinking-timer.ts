@@ -18,6 +18,7 @@
 import type { AssistantMessageEvent } from "@earendil-works/pi-ai";
 import type { TUI } from "@earendil-works/pi-tui";
 import type { IconGlyphs } from "./icons.ts";
+import { tuiT } from "./tui-i18n.ts";
 
 /**
  * Duck-typed AssistantMessageComponent: the two public setters pi gives it.
@@ -141,7 +142,7 @@ export class ThinkingFoldTimer {
 		this.#lastElapsedSecond = elapsedSecond;
 		// No spinner prefix: the thinking row shows a live elapsed without any
 		// animated indicator (the host working line is the only spinner left).
-		this.#paint(`thinking ${formatThinkingDuration(elapsed)}`);
+		this.#paint(`${tuiT("thinking.thinking")} ${formatThinkingDuration(elapsed)}`);
 	}
 
 	/** Re-evaluate the label policy after a static-mode toggle mid-run. */
@@ -150,7 +151,7 @@ export class ThinkingFoldTimer {
 		if (this.#options.isStatic?.()) {
 			this.#clearTimers();
 			this.#lastElapsedSecond = undefined;
-			this.#paint(this.#options.getBaseLabel() ?? "thinking");
+			this.#paint(this.#options.getBaseLabel() ?? tuiT("thinking.thinking"));
 			return;
 		}
 		if (!this.#ticker) {
@@ -186,7 +187,7 @@ export class ThinkingFoldTimer {
 		this.#lastElapsedSecond = undefined;
 		if (this.#options.isStatic?.()) {
 			// Static mode: a stable label, no live ticker; #finish settles the duration.
-			this.#paint(this.#options.getBaseLabel() ?? "thinking");
+			this.#paint(this.#options.getBaseLabel() ?? tuiT("thinking.thinking"));
 			return;
 		}
 		if (!this.#ticker) {
@@ -205,7 +206,7 @@ export class ThinkingFoldTimer {
 		this.#startedAt = undefined;
 		this.#lastElapsedSecond = undefined;
 		const duration = formatThinkingDuration(this.#now() - startedAt);
-		const base = this.#options.getBaseLabel() ?? "thoughts";
+		const base = this.#options.getBaseLabel() ?? tuiT("thinking.thoughts");
 		this.#paint(`${base}${this.#options.getGlyphs().separator}${duration}`, true);
 	}
 

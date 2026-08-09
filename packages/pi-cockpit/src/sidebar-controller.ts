@@ -9,6 +9,7 @@ import {
 	type SplitPaneController,
 } from "./split-pane.ts";
 import type { AgentRow, BashBgJob, CockpitConfig, TodoItem } from "./types.ts";
+import { tuiT } from "./tui-i18n.ts";
 
 /** No-op theme used only to count rows while building nav ids; never rendered. */
 const countingTheme = {
@@ -71,7 +72,7 @@ export function createSidebarComponent(options: SidebarComponentOptions): Compon
 				try {
 					return renderSidebarError(error, width, height, options.theme, resizing, options.getConfig().icons.mode);
 				} catch {
-					return [truncateToWidth("Cockpit sidebar unavailable", Math.max(1, width), "")];
+					return [truncateToWidth(tuiT("sidebar.unavailable"), Math.max(1, width), "")];
 				}
 			}
 		},
@@ -329,13 +330,13 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 	const beginFocus = (): boolean => {
 		if (focused) return true;
 		if (!enabled) {
-			if (options.onWarning) safely(() => options.onWarning?.("Cockpit sidebar is not visible"));
-			else safely(() => options.ctx.ui.notify("Cockpit sidebar is not visible", "warning"));
+			if (options.onWarning) safely(() => options.onWarning?.(tuiT("notice.sidebarNotVisible")));
+			else safely(() => options.ctx.ui.notify(tuiT("notice.sidebarNotVisible"), "warning"));
 			return false;
 		}
 		rebuildNav();
 		if (navRows.length === 0) {
-			safely(() => options.ctx.ui.notify("Nothing to browse in the Cockpit sidebar", "warning"));
+			safely(() => options.ctx.ui.notify(tuiT("notice.sidebarNothing"), "warning"));
 			return false;
 		}
 		// The browse hook mirrors the resize listener pattern; it must yield to
@@ -373,7 +374,7 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 	const show = (): void => {
 		if (disposed || enabled) return;
 		if (options.ctx.mode !== "tui") {
-			reportError(new Error("Cockpit sidebar requires TUI mode"));
+			reportError(new Error(tuiT("sidebar.requiresTui")));
 			return;
 		}
 		enabled = true;

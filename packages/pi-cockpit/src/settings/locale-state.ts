@@ -2,9 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
+	detectSystemSettingsLocale,
 	normalizeSettingsLocale,
+	resolveSettingsLocale,
 	type SupportedSettingsLocale,
+	type SystemSettingsLocaleOptions,
 } from "pi-maestro-settings-core/v1";
+import { cockpitTuiLocale, type CockpitTuiLocale } from "../tui-i18n.ts";
 import type { SettingsProviderRegistry } from "./registry.ts";
 
 export const MAESTRO_UI_PREFERENCES_VERSION = 1 as const;
@@ -27,10 +31,13 @@ export interface SaveMaestroUiPreferencesResult {
 	error?: string;
 }
 
-const DEFAULT_PREFERENCES: MaestroUiPreferences = {
-	version: MAESTRO_UI_PREFERENCES_VERSION,
-	locale: "en",
-};
+export interface SettingsLocaleDetectionOptions extends SystemSettingsLocaleOptions {
+	detectSystemLocale?: (options?: SystemSettingsLocaleOptions) => SupportedSettingsLocale;
+}
+
+export interface SettingsLocaleStateOptions extends SettingsLocaleDetectionOptions {
+	runtimeLocale?: CockpitTuiLocale;
+}
 
 export function getMaestroUiPreferencesPath(agentDir: string): string {
 	return join(agentDir, "maestro-ui.json");
@@ -40,22 +47,51 @@ function etag(content: string | undefined): string {
 	return createHash("sha256").update(content ?? "<missing>").digest("hex");
 }
 
-export function loadMaestroUiPreferences(path: string): MaestroUiPreferencesSnapshot {
+function systemOptions(options: SettingsLocaleDetectionOptions): SystemSettingsLocaleOptions {
+	return {
+		...(options.environment === undefined ? {} : { environment: options.environment }),
+		...(options.resolvedLocale === undefined ? {} : { resolvedLocale: options.resolvedLocale }),
+	};
+}
+
+function systemLocale(options: SettingsLocaleDetectionOptions): SupportedSettingsLocale {
+	return (options.detectSystemLocale ?? detectSystemSettingsLocale)(systemOptions(options));
+}
+
+function persistedLocale(value: unknown, options: SettingsLocaleDetectionOptions): SupportedSettingsLocale {
+	if (value === undefined || value === null) return systemLocale(options);
+	if (typeof value !== "string") throw new Error("locale must be a string");
+	const requested = value.trim();
+	if (requested === "" || requested.toLowerCase() === "auto") return systemLocale(options);
+	const language = requested.replaceAll("_", "-").split("-", 1)[0]?.toLowerCase();
+	if (language !== "en" && language !== "zh") {
+		throw new Error(`unsupported locale: ${requested}`);
+	}
+	return resolveSettingsLocale(requested, systemOptions(options));
+}
+
+export function loadMaestroUiPreferences(
+	path: string,
+	options: SettingsLocaleDetectionOptions = {},
+): MaestroUiPreferencesSnapshot {
 	if (!existsSync(path)) {
-		return { preferences: { ...DEFAULT_PREFERENCES }, etag: etag(undefined) };
+		return {
+			preferences: { version: MAESTRO_UI_PREFERENCES_VERSION, locale: systemLocale(options) },
+			etag: etag(undefined),
+		};
 	}
 	try {
 		const content = readFileSync(path, "utf8");
 		const raw = JSON.parse(content) as unknown;
 		if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("root must be an object");
-		const locale = normalizeSettingsLocale((raw as { locale?: unknown }).locale as string | undefined);
+		const locale = persistedLocale((raw as { locale?: unknown }).locale, options);
 		return {
 			preferences: { version: MAESTRO_UI_PREFERENCES_VERSION, locale },
 			etag: etag(content),
 		};
 	} catch (error) {
 		return {
-			preferences: { ...DEFAULT_PREFERENCES },
+			preferences: { version: MAESTRO_UI_PREFERENCES_VERSION, locale: systemLocale(options) },
 			etag: etag(readFileSafely(path)),
 			error: error instanceof Error ? error.message : String(error),
 		};
@@ -98,8 +134,14 @@ export class SettingsLocaleState {
 	constructor(
 		private readonly path: string,
 		private readonly registry: SettingsProviderRegistry,
+		private readonly options: SettingsLocaleStateOptions = {},
 	) {
-		this.snapshot = loadMaestroUiPreferences(path);
+		this.snapshot = loadMaestroUiPreferences(path, options);
+		this.runtimeLocale.setLocale(this.snapshot.preferences.locale);
+	}
+
+	private get runtimeLocale(): CockpitTuiLocale {
+		return this.options.runtimeLocale ?? cockpitTuiLocale;
 	}
 
 	get locale(): SupportedSettingsLocale {
@@ -111,7 +153,8 @@ export class SettingsLocaleState {
 	}
 
 	reload(): MaestroUiPreferencesSnapshot {
-		this.snapshot = loadMaestroUiPreferences(this.path);
+		this.snapshot = loadMaestroUiPreferences(this.path, this.options);
+		this.runtimeLocale.setLocale(this.snapshot.preferences.locale);
 		return this.snapshot;
 	}
 
@@ -123,6 +166,7 @@ export class SettingsLocaleState {
 		);
 		if (result.ok && result.snapshot) {
 			this.snapshot = result.snapshot;
+			this.runtimeLocale.setLocale(this.snapshot.preferences.locale);
 			this.registry.emitLocale(this.snapshot.preferences.locale);
 		}
 		return result;

@@ -1,4 +1,5 @@
 import type { MonitorSessionRow } from "./monitor-overlay.ts";
+import { type SupportedSettingsLocale } from "./locale.ts";
 export interface SessionSendOverlayResult {
     target: string;
     message: string;
@@ -17,7 +18,9 @@ export declare class SessionSendOverlay {
     private editingMessage;
     private statusText;
     private requestRender;
-    constructor(cb: SessionSendOverlayCallbacks);
+    private readonly t;
+    private readonly localeDisposer;
+    constructor(cb: SessionSendOverlayCallbacks, locale?: SupportedSettingsLocale);
     setRequestRender(fn: () => void): void;
     render(width: number): string[];
     private frameLine;
@@ -29,6 +32,7 @@ export declare class SessionSendOverlay {
 }
 export interface SessionSendOverlayDeps {
     getSessions: () => MonitorSessionRow[];
+    locale?: SupportedSettingsLocale;
 }
 export declare function showSessionSendOverlay(ctx: {
     ui: {

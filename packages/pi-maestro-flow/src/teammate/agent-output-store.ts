@@ -3,14 +3,19 @@
  *
  * teammate 子代理的 structured output 是临时的（完成即清理临时文件），本模块由
  * flow 的前台 tool_result 钩子和后台 teammate:complete 事件共同驱动，把输出按
- * correlationId 持久化到 <cwd>/.pi/agents/<correlationId>.json，供 resource 工具的
- * agent:// scheme 按 id 或任务 name 读取，支持 JSON 路径取值。
+ * correlationId 持久化到全局分桶目录
+ * ~/.pi/teammate-output/<cwd-hash>-<workspace-name>/<correlationId>.json，供
+ * resource 工具的 agent:// scheme 按 id 或任务 name 读取，支持 JSON 路径取值。
+ * 分桶按工作区隔离，避免不同项目同名任务互相污染；旧格式 <cwd>/.pi/agents/ 下的
+ * 历史归档仍保留只读 fallback。
  *
  * 只读消费方：src/tools/resource.ts；写入方：src/teammate/agent-output-capture.ts。
+ * 测试可用环境变量 PI_AGENT_OUTPUT_ROOT 覆盖根目录。
  */
 
 import { constants as fsConstants } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { homedir, tmpdir } from "node:os";
 import {
   chmod,
   lstat,
@@ -23,9 +28,10 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
-const AGENT_OUTPUT_DIR_NAME = ".pi/agents";
+const GLOBAL_OUTPUT_DIR_NAME = "teammate-output";
+const LEGACY_AGENTS_DIR_NAME = ".pi/agents";
 const MAX_AGENT_FILES = 100;
 const MAX_STORED_OUTPUT_CHARS = 512_000;
 const MAX_PATH_DEPTH = 10;
@@ -39,12 +45,29 @@ export interface AgentOutputRecord {
   output: unknown;
 }
 
-function agentsDir(cwd: string): string {
-  return resolve(cwd, AGENT_OUTPUT_DIR_NAME);
+function outputRootEnv(): string | undefined {
+  const value = process.env.PI_AGENT_OUTPUT_ROOT;
+  return value && value.length > 0 ? value : undefined;
 }
 
-function recordFile(cwd: string, correlationId: string): string {
-  return join(agentsDir(cwd), `${correlationId}.json`);
+function outputRootResolved(): string {
+  return resolve(outputRootEnv() ?? join(homedir(), ".pi", GLOBAL_OUTPUT_DIR_NAME));
+}
+
+function workspaceBucketName(cwd: string): string {
+  const root = resolve(cwd);
+  const hash = createHash("sha256").update(root.toLowerCase()).digest("hex").slice(0, 12);
+  const name = basename(root) || "root";
+  const sanitized = name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 40);
+  return `${hash}-${sanitized}`;
+}
+
+function legacyAgentsDir(cwd: string): string {
+  return resolve(cwd, LEGACY_AGENTS_DIR_NAME);
+}
+
+function recordFile(dir: string, correlationId: string): string {
+  return join(dir, `${correlationId}.json`);
 }
 
 function isRecordId(id: string): boolean {
@@ -75,10 +98,10 @@ async function assertDirectoryNotLinked(path: string, label: string): Promise<vo
   }
 }
 
-async function assertContainedAgentsDir(cwd: string): Promise<string> {
+async function assertContainedLegacyDir(cwd: string): Promise<string> {
   const root = resolve(cwd);
   const piDir = join(root, ".pi");
-  const dir = agentsDir(root);
+  const dir = legacyAgentsDir(root);
   await assertDirectoryNotLinked(piDir, ".pi");
   await assertDirectoryNotLinked(dir, ".pi/agents");
   const [resolvedRoot, resolvedDir] = await Promise.all([realpath(root), realpath(dir)]);
@@ -89,21 +112,40 @@ async function assertContainedAgentsDir(cwd: string): Promise<string> {
   return dir;
 }
 
-async function prepareAgentsDir(cwd: string): Promise<string> {
-  const root = resolve(cwd);
-  const piDir = join(root, ".pi");
-  const dir = agentsDir(root);
-  await mkdir(piDir, { recursive: true, mode: 0o700 });
-  await assertDirectoryNotLinked(piDir, ".pi");
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  await assertContainedAgentsDir(root);
-  if (process.platform !== "win32") await chmod(dir, 0o700);
-  return dir;
+/** 准备全局输出根目录；默认路径必须真实位于 homedir 内，且逐层防软链。 */
+async function prepareOutputRoot(): Promise<string> {
+  const root = outputRootResolved();
+  await mkdir(dirname(root), { recursive: true });
+  await mkdir(root, { recursive: true, mode: 0o700 }).catch((error) => {
+    if (fileErrorCode(error) !== "EEXIST") throw error;
+  });
+  await assertDirectoryNotLinked(root, GLOBAL_OUTPUT_DIR_NAME);
+  if (outputRootEnv() === undefined) {
+    const home = resolve(homedir());
+    const piDir = join(home, ".pi");
+    await assertDirectoryNotLinked(piDir, ".pi");
+    const resolvedRoot = await realpath(root);
+    const contained = relative(resolve(home), resolvedRoot);
+    if (contained.startsWith("..") || isAbsolute(contained)) {
+      throw new Error(`Agent output root escapes home directory: ${resolvedRoot}`);
+    }
+  }
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  return root;
+}
+
+/** 当前工作区对应的全局分桶目录（准备就绪）。 */
+async function prepareBucketDir(cwd: string): Promise<string> {
+  const root = await prepareOutputRoot();
+  const bucket = join(root, workspaceBucketName(cwd));
+  await mkdir(bucket, { recursive: true, mode: 0o700 });
+  await assertDirectoryNotLinked(bucket, "bucket");
+  return bucket;
 }
 
 /** Write a private temp file, then replace the record without following it. */
-async function writePrivateFile(filePath: string, content: string, cwd: string): Promise<void> {
-  const dir = await prepareAgentsDir(cwd);
+async function writePrivateFile(filePath: string, content: string): Promise<void> {
+  const dir = dirname(filePath);
   const tempPath = join(dir, `.${randomUUID()}.tmp`);
   await writeFile(tempPath, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
   try {
@@ -131,9 +173,14 @@ async function writePrivateFile(filePath: string, content: string, cwd: string):
   }
 }
 
-/** 保持目录内文件数不超过上限：删除最旧的（按 mtime）。 */
+/** 保持桶内文件数不超过上限：删除最旧的（按 mtime）。 */
 async function pruneAgentsDir(cwd: string): Promise<void> {
-  const dir = agentsDir(cwd);
+  let dir: string;
+  try {
+    dir = await prepareBucketDir(cwd);
+  } catch {
+    return;
+  }
   let entries;
   try {
     entries = await readdir(dir, { withFileTypes: true });
@@ -170,14 +217,15 @@ async function persistAgentOutputNow(
   output: unknown,
   cwd: string,
 ): Promise<void> {
-  const filePath = recordFile(cwd, correlationId);
+  const dir = await prepareBucketDir(cwd);
+  const filePath = recordFile(dir, correlationId);
   await writePrivateFile(filePath, JSON.stringify({
     correlationId,
     ...(name ? { name } : {}),
     ...(agent ? { agent } : {}),
     capturedAt: new Date().toISOString(),
     output,
-  }), cwd);
+  }));
   await pruneAgentsDir(cwd);
 }
 
@@ -192,7 +240,7 @@ function enqueueAgentOutput(
   if (!isRecordId(correlationId) || output === undefined) return Promise.resolve(false);
   if (safeStringify(output) === null) return Promise.resolve(false);
 
-  const key = recordFile(cwd, correlationId);
+  const key = join(resolve(cwd), correlationId);
   const previous = pendingWrites.get(key) ?? Promise.resolve();
   const current = previous.catch(() => undefined).then(() =>
     persistAgentOutputNow(correlationId, name, agent, output, cwd)
@@ -257,28 +305,41 @@ async function loadRecord(filePath: string): Promise<AgentOutputRecord | null> {
   }
 }
 
-/** 按 correlationId 或任务 name 读取已持久化的输出记录；name 有歧义时取最新（capturedAt）。 */
+/**
+ * 按 correlationId 或任务 name 读取已持久化的输出记录；name 有歧义时取最新（capturedAt）。
+ * 查找顺序：全局分桶精确 id → 旧格式 <cwd>/.pi/agents/ 精确 id → 桶 + 旧目录按 name 扫描合并。
+ */
 export async function readAgentOutput(id: string, cwd: string): Promise<AgentOutputRecord> {
-  let dir: string | undefined;
+  const dirs: string[] = [];
   try {
-    dir = await assertContainedAgentsDir(cwd);
+    dirs.push(await prepareBucketDir(cwd));
   } catch (error) {
     if (fileErrorCode(error) !== "ENOENT") throw error;
   }
-  if (dir && isRecordId(id)) {
-    const direct = await loadRecord(join(dir, `${id}.json`));
-    if (direct) return direct;
+  try {
+    dirs.push(await assertContainedLegacyDir(cwd));
+  } catch (error) {
+    if (fileErrorCode(error) !== "ENOENT") throw error;
   }
 
-  let names: string[];
-  try {
-    names = dir ? await readdir(dir) : [];
-  } catch {
-    names = [];
+  if (isRecordId(id)) {
+    for (const dir of dirs) {
+      const direct = await loadRecord(recordFile(dir, id));
+      if (direct) return direct;
+    }
   }
+
   const byName: AgentOutputRecord[] = [];
-  if (dir) {
+  const available: string[] = [];
+  for (const dir of dirs) {
+    let names: string[];
+    try {
+      names = await readdir(dir);
+    } catch {
+      continue;
+    }
     for (const name of names.filter((n) => n.endsWith(".json"))) {
+      available.push(name.replace(/\.json$/, ""));
       const record = await loadRecord(join(dir, name));
       if (record?.name === id) byName.push(record);
     }
@@ -289,7 +350,6 @@ export async function readAgentOutput(id: string, cwd: string): Promise<AgentOut
     return byName[0]!;
   }
 
-  const available = names.filter((n) => n.endsWith(".json")).map((n) => n.replace(/\.json$/, ""));
   throw new Error(
     `No persisted teammate output for "${id}". ` +
     `Available agent ids: ${available.slice(0, 20).join(", ") || "(none)"}. ` +

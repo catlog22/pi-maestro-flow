@@ -55,6 +55,7 @@ function createOverlay(initialState = {}) {
   const overlay = new McpManagerOverlay({
     servers,
     theme,
+    locale: "zh-CN",
     initialState,
     notice: "Saved · filesystem · reload pending",
     requestRender: () => { renders++; },
@@ -144,6 +145,7 @@ test("MCP 菜单为空配置保留编辑入口", () => {
   const overlay = new McpManagerOverlay({
     servers: [],
     theme,
+    locale: "zh-CN",
     requestRender() {},
     done: (next) => { action = next; },
   });

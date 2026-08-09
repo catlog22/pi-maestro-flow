@@ -1,5 +1,6 @@
 import { type StatusTone } from "../shared/agent-status.ts";
 import type { AgentProgressSnapshot } from "../shared/types.ts";
+import { type SupportedSettingsLocale } from "./locale.ts";
 export interface ProgressPalette {
     dim(text: string): string;
     accent(text: string): string;
@@ -17,7 +18,7 @@ export declare function progressDurationMs(entry: AgentProgressSnapshot, now?: n
 export declare function toneText(palette: ProgressPalette, tone: StatusTone, text: string): string;
 export declare function progressIcon(status: AgentProgressSnapshot["status"], palette: ProgressPalette): string;
 export declare function progressLabel(entry: AgentProgressSnapshot): string;
-export declare function buildProgressTree(progress: AgentProgressSnapshot[], palette: ProgressPalette, now?: number): ProgressTreeRow[];
+export declare function buildProgressTree(progress: AgentProgressSnapshot[], palette: ProgressPalette, now?: number, locale?: SupportedSettingsLocale): ProgressTreeRow[];
 export declare function focusTaskIndex(progress: AgentProgressSnapshot[]): number | undefined;
 export declare function selectProgressWindow(rows: ProgressTreeRow[], maxRows: number, focusIndex?: number): {
     rows: ProgressTreeRow[];

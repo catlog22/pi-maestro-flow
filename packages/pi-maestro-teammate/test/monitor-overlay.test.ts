@@ -41,7 +41,7 @@ function nestedAgentRow(overrides: Partial<MonitorSessionRow> = {}): MonitorSess
 function localWindowRow(agentCount: number): MonitorSessionRow {
   return {
     correlationId: "local",
-    displayName: "本窗口",
+    displayName: "Current window",
     agentRole: `window · ${agentCount} agents`,
     status: agentCount === 0 ? "idle" : "running",
     idleSeconds: 0,
@@ -94,10 +94,10 @@ test("monitor overlay renders a window → agent → sub-agent tree", () => {
     idleWindowRow(),
   ]);
   const view = stripAnsi(overlay.render(100).join("\n"));
-  assert.match(view, /\[窗口\] 本窗口/);
-  assert.match(view, /└─ . \[代理\] worker-1/);
-  assert.match(view, / {3}└─ . \[代理\] sub-1/);
-  assert.match(view, /\[窗口\] window:aaaaaa/);
+  assert.match(view, /\[Window\] Current window/);
+  assert.match(view, /└─ . \[Agent\] worker-1/);
+  assert.match(view, / {3}└─ . \[Agent\] sub-1/);
+  assert.match(view, /\[Window\] window:aaaaaa/);
   assert.match(view, /window · 0 agents/);
   assert.match(view, /idle/);
 });
@@ -117,7 +117,7 @@ test("monitor overlay selects window rows but refuses agent rows", () => {
 
   overlay.handleInput("\x1b[A"); // → local window (display-only)
   overlay.handleInput(" "); // local window must be refused
-  assert.match(stripAnsi(overlay.render(100).join("\n")), /The current window is where you are — monitor remote windows/);
+  assert.match(stripAnsi(overlay.render(100).join("\n")), /The current window is where you are · monitor remote windows/);
 
   overlay.handleInput("\x1b[B"); // → worker-1
   overlay.handleInput("\x1b[B"); // → remote window

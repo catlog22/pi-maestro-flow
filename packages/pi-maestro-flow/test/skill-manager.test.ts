@@ -74,6 +74,7 @@ test("Skill manager TUI supports group and skill actions with explicit filtering
   const overlay = new SkillManagerOverlay({
     skills,
     groups,
+    locale: "zh-CN",
     theme: {
       fg(_role, text) { return text; },
       bold(text) { return text; },
@@ -95,6 +96,7 @@ test("Skill manager TUI supports group and skill actions with explicit filtering
   const filtered = new SkillManagerOverlay({
     skills,
     groups,
+    locale: "zh-CN",
     theme: {
       fg(_role, text) { return text; },
       bold(text) { return text; },
@@ -220,6 +222,7 @@ test("Skill manager TUI surfaces optional skills and installs with I", () => {
     skills,
     groups,
     optionalSkills,
+    locale: "zh-CN",
     theme: {
       fg(_role, text) { return text; },
       bold(text) { return text; },

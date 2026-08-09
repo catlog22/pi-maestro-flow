@@ -11,28 +11,46 @@ const {
   getAgentOutputPath,
 } = await import("../src/teammate/agent-output-store.ts");
 
+/** 注入的全局输出根（PI_AGENT_OUTPUT_ROOT）下的分桶目录。 */
+function outRoot(): string {
+  return join(root, "out");
+}
+
+/** 读取注入根下唯一的分桶目录（workspaceBucketName 未导出，测试通过扫描定位）。 */
+async function bucketDir(): Promise<string> {
+  const entries = await readdir(outRoot());
+  assert.equal(entries.length, 1, "exactly one workspace bucket expected");
+  return join(outRoot(), entries[0]!);
+}
+
 let root: string;
+let previousRoot: string | undefined;
 
 before(async () => {
   root = await mkdtemp(join(tmpdir(), "pi-agent-output-"));
+  previousRoot = process.env.PI_AGENT_OUTPUT_ROOT;
+  process.env.PI_AGENT_OUTPUT_ROOT = outRoot();
 });
 
 after(async () => {
+  if (previousRoot === undefined) delete process.env.PI_AGENT_OUTPUT_ROOT;
+  else process.env.PI_AGENT_OUTPUT_ROOT = previousRoot;
   await rm(root, { recursive: true, force: true });
 });
 
-test("persistAgentOutput writes a private record readable by correlationId", async () => {
+test("persistAgentOutput writes a private record in the global bucket readable by correlationId", async () => {
   await persistAgentOutput("run-abc-1", "explorer", "explorer", { findings: [{ path: "src/a.ts" }] }, root);
   const record = await readAgentOutput("run-abc-1", root);
   assert.equal(record.correlationId, "run-abc-1");
   assert.equal(record.name, "explorer");
   assert.deepEqual(record.output, { findings: [{ path: "src/a.ts" }] });
 
-  const raw = await readFile(join(root, ".pi", "agents", "run-abc-1.json"), "utf8");
+  const bucket = await bucketDir();
+  const raw = await readFile(join(bucket, "run-abc-1.json"), "utf8");
   assert.match(raw, /"output":/);
   if (process.platform !== "win32") {
-    assert.equal((await stat(join(root, ".pi", "agents"))).mode & 0o777, 0o700);
-    assert.equal((await stat(join(root, ".pi", "agents", "run-abc-1.json"))).mode & 0o777, 0o600);
+    assert.equal((await stat(bucket)).mode & 0o777, 0o700);
+    assert.equal((await stat(join(bucket, "run-abc-1.json"))).mode & 0o777, 0o600);
   }
 });
 
@@ -49,6 +67,34 @@ test("readAgentOutput with duplicate names picks the latest capture", async () =
   const record = await readAgentOutput("shared", root);
   assert.equal(record.correlationId, "dup-b2");
   assert.deepEqual(record.output, { v: 2 });
+});
+
+test("workspace buckets isolate same-named tasks across workspaces", async () => {
+  const other = join(root, "other-workspace");
+  await persistAgentOutput("iso-1", "shared-name", "explorer", { workspace: "a" }, root);
+  await persistAgentOutput("iso-2", "shared-name", "explorer", { workspace: "b" }, other);
+  assert.deepEqual((await readAgentOutput("shared-name", root)).output, { workspace: "a" });
+  assert.deepEqual((await readAgentOutput("shared-name", other)).output, { workspace: "b" });
+  // 分桶完全隔离：跨工作区精确 correlationId 也不可见
+  await assert.rejects(
+    () => readAgentOutput("iso-2", root),
+    (err: unknown) => err instanceof Error && err.message.includes('No persisted teammate output for "iso-2"'),
+  );
+  assert.equal((await readAgentOutput("iso-2", other)).correlationId, "iso-2");
+});
+
+test("readAgentOutput falls back to legacy <cwd>/.pi/agents records", async () => {
+  const legacyDir = join(root, ".pi", "agents");
+  await mkdir(legacyDir, { recursive: true });
+  await writeFile(join(legacyDir, "legacy-1.json"), JSON.stringify({
+    correlationId: "legacy-1",
+    name: "legacy-task",
+    capturedAt: "2026-01-01T00:00:00.000Z",
+    output: { legacy: true },
+  }), "utf8");
+  const record = await readAgentOutput("legacy-1", root);
+  assert.deepEqual(record.output, { legacy: true });
+  assert.equal((await readAgentOutput("legacy-task", root)).correlationId, "legacy-1");
 });
 
 test("readAgentOutput with unknown id lists available agents", async () => {
@@ -98,7 +144,38 @@ test("persistAgentOutput replaces a repeated correlation id with the latest turn
   assert.deepEqual((await readAgentOutput("repeat-agent", root)).output, { turn: 2 });
 });
 
-test("persistAgentOutput rejects linked output directories", async (t) => {
+test("persistAgentOutput rejects a linked global output root", async (t) => {
+  const linkedRoot = await mkdtemp(join(tmpdir(), "pi-out-linked-"));
+  const external = await mkdtemp(join(tmpdir(), "pi-out-external-"));
+  const saved = process.env.PI_AGENT_OUTPUT_ROOT;
+  try {
+    const fakeRoot = join(linkedRoot, "out");
+    await mkdir(fakeRoot, { recursive: true });
+    await rm(fakeRoot, { recursive: true, force: true });
+    try {
+      await symlink(external, fakeRoot, process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if (process.platform === "win32") {
+        t.skip(`junction creation unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+      throw error;
+    }
+    process.env.PI_AGENT_OUTPUT_ROOT = fakeRoot;
+    await assert.rejects(
+      () => persistAgentOutput("linked-agent", "linked", "general", { secret: true }, root),
+      /must be a real directory/,
+    );
+    assert.deepEqual(await readdir(external), []);
+  } finally {
+    if (saved === undefined) delete process.env.PI_AGENT_OUTPUT_ROOT;
+    else process.env.PI_AGENT_OUTPUT_ROOT = saved;
+    await rm(linkedRoot, { recursive: true, force: true });
+    await rm(external, { recursive: true, force: true });
+  }
+});
+
+test("readAgentOutput rejects a legacy .pi/agents symlink directory", async (t) => {
   const linkedRoot = await mkdtemp(join(tmpdir(), "pi-agent-linked-"));
   const external = await mkdtemp(join(tmpdir(), "pi-agent-external-"));
   try {
@@ -113,10 +190,6 @@ test("persistAgentOutput rejects linked output directories", async (t) => {
       throw error;
     }
     await assert.rejects(
-      () => persistAgentOutput("linked-agent", "linked", "general", { secret: true }, linkedRoot),
-      /must be a real directory/,
-    );
-    await assert.rejects(
       () => readAgentOutput("linked-agent", linkedRoot),
       /must be a real directory/,
     );
@@ -127,7 +200,7 @@ test("persistAgentOutput rejects linked output directories", async (t) => {
   }
 });
 
-test("persistAgentOutput rejects a linked .pi directory", async (t) => {
+test("readAgentOutput rejects a linked legacy .pi directory", async (t) => {
   const linkedRoot = await mkdtemp(join(tmpdir(), "pi-root-linked-"));
   const external = await mkdtemp(join(tmpdir(), "pi-root-external-"));
   try {
@@ -140,10 +213,6 @@ test("persistAgentOutput rejects a linked .pi directory", async (t) => {
       }
       throw error;
     }
-    await assert.rejects(
-      () => persistAgentOutput("linked-pi", "linked-pi", "general", { secret: true }, linkedRoot),
-      /must be a real directory/,
-    );
     await assert.rejects(
       () => readAgentOutput("linked-pi", linkedRoot),
       /must be a real directory/,
@@ -160,7 +229,18 @@ test("readAgentOutput does not follow a linked record file", async (t) => {
   const external = join(await mkdtemp(join(tmpdir(), "pi-record-external-")), "outside.json");
   try {
     await persistAgentOutput("linked-record", "linked-record", "general", { safe: true }, linkedRoot);
-    const recordPath = join(linkedRoot, ".pi", "agents", "linked-record.json");
+    let bucket = "";
+    for (const entry of await readdir(outRoot())) {
+      try {
+        await stat(join(outRoot(), entry, "linked-record.json"));
+        bucket = join(outRoot(), entry);
+        break;
+      } catch {
+        // not this bucket
+      }
+    }
+    assert.ok(bucket, "record must exist in a workspace bucket");
+    const recordPath = join(bucket, "linked-record.json");
     await unlink(recordPath);
     await writeFile(external, JSON.stringify({
       correlationId: "linked-record",

@@ -12,6 +12,9 @@ import {
 	parseSgrMouseEvent,
 } from "../src/split-pane.ts";
 import { createDynamicTuiReference } from "./dynamic-tui-reference.ts";
+import { cockpitTuiLocale } from "../src/tui-i18n.ts";
+
+cockpitTuiLocale.setLocale("en");
 
 interface TuiHarness {
 	tui: TUI;

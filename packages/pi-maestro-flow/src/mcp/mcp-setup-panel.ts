@@ -1,4 +1,6 @@
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
+import { getTuiLocale } from "../tui/locale.ts";
 import { createPanelKeys, type PanelKeybindings, type PanelKeys } from "./panel-keys.ts";
 import type { ImportKind } from "./types.ts";
 import type { ConfigWritePreview, McpDiscoverySummary } from "./config.ts";
@@ -61,6 +63,8 @@ export interface SetupPanelOptions {
   mode: "empty" | "setup";
   onboardingState: McpOnboardingState;
   keybindings?: PanelKeybindings;
+  /** Explicit UI language; otherwise follows the shared runtime TUI locale. */
+  locale?: SupportedSettingsLocale;
 }
 
 type Screen = "empty" | "setup" | "imports" | "paths";
@@ -81,7 +85,135 @@ interface Action {
   description: string;
 }
 
+const CATALOGS = {
+  en: {
+    "action.runSetup": "Run setup",
+    "action.runSetup.desc": "Inspect detected configs, adopt imports, and scaffold a minimal `.mcp.json`.",
+    "action.adoptImports": "Adopt detected compatibility imports",
+    "action.adoptImports.desc": "Choose which host-specific MCP configs Pi should import into its own override file. {count} sources found.",
+    "action.viewExample": "View example `.mcp.json`",
+    "action.viewExample.desc": "Preview a working shared MCP config you can paste or adapt.",
+    "action.scaffold": "Scaffold project `.mcp.json`",
+    "action.scaffold.desc": "Write a minimal project config using the standard shared MCP file path, then reload Pi.",
+    "action.precedence": "Explain config precedence",
+    "action.precedence.desc": "Show the read order and where Pi writes compatibility settings.",
+    "action.openPaths": "Open detected config paths",
+    "action.openPaths.desc": "Browse the actual config files that Pi discovered on this machine.",
+    "action.addRepoPrompt": "Add RepoPrompt to shared MCP config",
+    "action.addRepoPrompt.desc": "Write a standard MCP entry for RepoPrompt to the recommended shared target, then reload MCP in-session.",
+    "action.close": "Close",
+    "action.close.desc": "Exit the onboarding flow.",
+    "notice.opened": "Opened {path}",
+    "notice.wroteStarter": "Wrote starter config to {path}. Pi will reload after this panel closes.",
+    "notice.addedRepoPrompt": "Added {name} to {path}. Pi will reload after this panel closes.",
+    "notice.review": "Review the details below. Press Enter on an action with a side effect to apply it.",
+    "notice.selectImport": "Select at least one compatibility import first.",
+    "notice.importsAdded": "Added {imports} to {path}. Pi will reload after this panel closes.",
+    "notice.noChanges": "No changes needed in {path}.",
+    "notice.working": "Working...",
+    "title": "MCP setup",
+    "footer.actions": "Enter selects, Esc goes back, Ctrl+C closes.",
+    "imports.instructions": "Select compatibility imports. Space toggles, Enter saves, Esc goes back.",
+    "imports.preview": "Compatibility import write preview",
+    "paths.instructions": "Select a detected config path to open. Enter opens it, Esc goes back.",
+    "summary.noServers": "No MCP servers are active right now.",
+    "summary.noConfig": "No MCP config is active yet.",
+    "summary.optionsInactive": "Pi found MCP-related setup options, but none are active in Pi yet.",
+    "summary.detected": "Detected {servers} configured servers across {shared} shared and {piOwned} Pi-owned sources.",
+    "secondary.create": "Create a shared `.mcp.json`, adopt host imports, or quick-add RepoPrompt from this screen.",
+    "secondary.imports": "Detected {count} compatibility import sources. Adopt them into Pi or inspect the underlying files.",
+    "secondary.shared": "Shared MCP files are preferred. Pi-owned files are only for compatibility imports and adapter-specific overrides.",
+    "preview.runSetup": "Run setup to adopt host-specific imports, inspect detected paths, and scaffold a minimal `.mcp.json` if needed.",
+    "preview.detectedImports": "Detected imports: {imports}",
+    "preview.selectedImports": "Selected imports are written into the Pi agent dir config as Pi-owned compatibility state.",
+    "preview.example": "Example shared `.mcp.json`:",
+    "preview.exampleHint": "Use Scaffold project `.mcp.json` when you want a safe empty shell instead of a live example server.",
+    "preview.readOrder": "Read order:",
+    "preview.precedenceWrite": "Pi writes compatibility imports and adapter-only overrides to Pi-owned files.",
+    "preview.detectedPaths": "Detected paths:",
+    "preview.noPaths": "No config paths were detected.",
+    "preview.repoUnavailable": "RepoPrompt is not available to add from this setup screen.",
+    "preview.repoTitle": "RepoPrompt write preview",
+    "preview.executable": "Executable: {value}",
+    "preview.target": "Target: {value}",
+    "preview.serverName": "Server name: {value}",
+    "preview.notFound": "not found",
+    "preview.notApplicable": "n/a",
+    "preview.starterTitle": "Starter project `.mcp.json` write preview",
+    "preview.starterDetail": "This writes a minimal `.mcp.json` in the current project using the shared MCP layout.",
+    "preview.starterSafe": "It intentionally avoids adding a fake placeholder server that would fail on first reload.",
+    "preview.close": "Close the setup flow.",
+    "write.existing": "Existing file detected. Showing exact before/after diff.",
+    "write.new": "New file will be created. Showing exact content diff.",
+    "write.more": "… {count} more diff lines",
+  },
+  "zh-CN": {
+    "action.runSetup": "运行设置",
+    "action.runSetup.desc": "检查检测到的配置、采用导入，并创建最小 `.mcp.json`。",
+    "action.adoptImports": "采用检测到的兼容导入",
+    "action.adoptImports.desc": "选择要导入 Pi 覆盖文件的宿主 MCP 配置。找到 {count} 个来源。",
+    "action.viewExample": "查看 `.mcp.json` 示例",
+    "action.viewExample.desc": "预览可粘贴或调整的共享 MCP 配置。",
+    "action.scaffold": "创建项目 `.mcp.json`",
+    "action.scaffold.desc": "在标准共享 MCP 路径写入最小项目配置，然后重载 Pi。",
+    "action.precedence": "说明配置优先级",
+    "action.precedence.desc": "显示读取顺序以及 Pi 写入兼容设置的位置。",
+    "action.openPaths": "打开检测到的配置路径",
+    "action.openPaths.desc": "浏览此机器上 Pi 检测到的实际配置文件。",
+    "action.addRepoPrompt": "将 RepoPrompt 添加到共享 MCP 配置",
+    "action.addRepoPrompt.desc": "将标准 RepoPrompt MCP 条目写入推荐的共享目标，并在会话内重载 MCP。",
+    "action.close": "关闭",
+    "action.close.desc": "退出设置流程。",
+    "notice.opened": "已打开 {path}",
+    "notice.wroteStarter": "已将初始配置写入 {path}。面板关闭后 Pi 将重载。",
+    "notice.addedRepoPrompt": "已将 {name} 添加到 {path}。面板关闭后 Pi 将重载。",
+    "notice.review": "查看下方详情。对会产生修改的操作按 Enter 执行。",
+    "notice.selectImport": "请先选择至少一个兼容导入。",
+    "notice.importsAdded": "已将 {imports} 添加到 {path}。面板关闭后 Pi 将重载。",
+    "notice.noChanges": "{path} 无需更改。",
+    "notice.working": "处理中...",
+    "title": "MCP 设置",
+    "footer.actions": "Enter 选择，Esc 返回，Ctrl+C 关闭。",
+    "imports.instructions": "选择兼容导入。Space 切换，Enter 保存，Esc 返回。",
+    "imports.preview": "兼容导入写入预览",
+    "paths.instructions": "选择要打开的配置路径。Enter 打开，Esc 返回。",
+    "summary.noServers": "当前没有活动的 MCP 服务。",
+    "summary.noConfig": "尚无活动的 MCP 配置。",
+    "summary.optionsInactive": "Pi 找到了 MCP 设置选项，但尚未在 Pi 中启用。",
+    "summary.detected": "检测到 {servers} 个已配置服务，来自 {shared} 个共享来源和 {piOwned} 个 Pi 自有来源。",
+    "secondary.create": "可在此创建共享 `.mcp.json`、采用宿主导入或快速添加 RepoPrompt。",
+    "secondary.imports": "检测到 {count} 个兼容导入来源。可导入 Pi 或检查底层文件。",
+    "secondary.shared": "优先使用共享 MCP 文件。Pi 自有文件仅保存兼容导入和适配器专用覆盖。",
+    "preview.runSetup": "运行设置以采用宿主导入、检查检测路径，并在需要时创建最小 `.mcp.json`。",
+    "preview.detectedImports": "检测到的导入：{imports}",
+    "preview.selectedImports": "所选导入会作为 Pi 自有兼容状态写入 Pi agent 目录配置。",
+    "preview.example": "共享 `.mcp.json` 示例：",
+    "preview.exampleHint": "需要安全空壳而非真实示例服务时，请使用“创建项目 `.mcp.json`”。",
+    "preview.readOrder": "读取顺序：",
+    "preview.precedenceWrite": "Pi 将兼容导入和适配器专用覆盖写入 Pi 自有文件。",
+    "preview.detectedPaths": "检测到的路径：",
+    "preview.noPaths": "未检测到配置路径。",
+    "preview.repoUnavailable": "此设置界面无法添加 RepoPrompt。",
+    "preview.repoTitle": "RepoPrompt 写入预览",
+    "preview.executable": "可执行文件：{value}",
+    "preview.target": "目标：{value}",
+    "preview.serverName": "服务名：{value}",
+    "preview.notFound": "未找到",
+    "preview.notApplicable": "不适用",
+    "preview.starterTitle": "项目 `.mcp.json` 初始写入预览",
+    "preview.starterDetail": "将在当前项目按共享 MCP 布局写入最小 `.mcp.json`。",
+    "preview.starterSafe": "不会添加会在首次重载时失败的虚假占位服务。",
+    "preview.close": "关闭设置流程。",
+    "write.existing": "检测到现有文件。显示精确的修改前后差异。",
+    "write.new": "将创建新文件。显示精确的内容差异。",
+    "write.more": "… 还有 {count} 行差异",
+  },
+} as const;
+
+type CatalogKey = keyof (typeof CATALOGS)["en"];
+
 export class McpSetupPanel {
+  private readonly locale: SupportedSettingsLocale;
   private screen: Screen;
   private actionCursor = 0;
   private importCursor = 0;
@@ -102,6 +234,7 @@ export class McpSetupPanel {
     tui: { requestRender(): void },
     private done: () => void,
   ) {
+    this.locale = getTuiLocale(options.locale);
     this.tui = tui;
     this.keys = createPanelKeys(options.keybindings);
     this.screen = options.mode;
@@ -109,6 +242,13 @@ export class McpSetupPanel {
       this.selectedImports.add(entry.kind);
     }
     this.resetInactivityTimeout();
+  }
+
+  private text(key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
+    const template = CATALOGS[this.locale]?.[key] ?? CATALOGS.en[key];
+    if (!vars) return template;
+    return template.replace(/\{(\w+)\}/g, (_match, name: string) =>
+      vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
   }
 
   private resetInactivityTimeout(): void {
@@ -129,23 +269,27 @@ export class McpSetupPanel {
   private getActions(): Action[] {
     const actions: Action[] = [];
     if (this.screen === "empty") {
-      actions.push({ id: "run-setup", label: "Run setup", description: "Inspect detected configs, adopt imports, and scaffold a minimal `.mcp.json`." });
+      actions.push({ id: "run-setup", label: this.text("action.runSetup"), description: this.text("action.runSetup.desc") });
     }
     if (this.discovery.imports.length > 0) {
-      actions.push({ id: "adopt-imports", label: "Adopt detected compatibility imports", description: `Choose which host-specific MCP configs Pi should import into its own override file. ${this.discovery.imports.length} source${this.discovery.imports.length === 1 ? "" : "s"} found.` });
+      actions.push({
+        id: "adopt-imports",
+        label: this.text("action.adoptImports"),
+        description: this.text("action.adoptImports.desc", { count: this.discovery.imports.length }),
+      });
     }
-    actions.push({ id: "view-example", label: "View example `.mcp.json`", description: "Preview a working shared MCP config you can paste or adapt." });
+    actions.push({ id: "view-example", label: this.text("action.viewExample"), description: this.text("action.viewExample.desc") });
     if (!this.discovery.sources.some((source) => source.id === "shared-project" && source.exists)) {
-      actions.push({ id: "scaffold-project", label: "Scaffold project `.mcp.json`", description: "Write a minimal project config using the standard shared MCP file path, then reload Pi." });
+      actions.push({ id: "scaffold-project", label: this.text("action.scaffold"), description: this.text("action.scaffold.desc") });
     }
-    actions.push({ id: "show-precedence", label: "Explain config precedence", description: "Show the read order and where Pi writes compatibility settings." });
+    actions.push({ id: "show-precedence", label: this.text("action.precedence"), description: this.text("action.precedence.desc") });
     if (this.getDetectedPaths().length > 0) {
-      actions.push({ id: "open-paths", label: "Open detected config paths", description: "Browse the actual config files that Pi discovered on this machine." });
+      actions.push({ id: "open-paths", label: this.text("action.openPaths"), description: this.text("action.openPaths.desc") });
     }
     if (!this.discovery.repoPrompt.configured && this.discovery.repoPrompt.executablePath && this.discovery.repoPrompt.targetPath && this.discovery.repoPrompt.entry && this.discovery.repoPrompt.serverName) {
-      actions.push({ id: "add-repoprompt", label: "Add RepoPrompt to shared MCP config", description: "Write a standard MCP entry for RepoPrompt to the recommended shared target, then reload MCP in-session." });
+      actions.push({ id: "add-repoprompt", label: this.text("action.addRepoPrompt"), description: this.text("action.addRepoPrompt.desc") });
     }
-    actions.push({ id: "close", label: "Close", description: "Exit the onboarding flow." });
+    actions.push({ id: "close", label: this.text("action.close"), description: this.text("action.close.desc") });
     return actions;
   }
 
@@ -256,7 +400,7 @@ export class McpSetupPanel {
       if (!selected) return;
       void this.runBusy(async () => {
         await this.callbacks.openPath(selected);
-        this.notice = { text: `Opened ${selected}`, tone: "success" };
+        this.notice = { text: this.text("notice.opened", { path: selected }), tone: "success" };
       });
     }
   }
@@ -284,7 +428,7 @@ export class McpSetupPanel {
       await this.runBusy(async () => {
         const result = await this.callbacks.scaffoldProjectConfig();
         this.callbacks.markSetupCompleted();
-        this.notice = { text: `Wrote starter config to ${result.path}. Pi will reload after this panel closes.`, tone: "success" };
+        this.notice = { text: this.text("notice.wroteStarter", { path: result.path }), tone: "success" };
       });
       return;
     }
@@ -292,7 +436,7 @@ export class McpSetupPanel {
       await this.runBusy(async () => {
         const result = await this.callbacks.addRepoPrompt();
         this.callbacks.markSetupCompleted();
-        this.notice = { text: `Added ${result.serverName} to ${result.path}. Pi will reload after this panel closes.`, tone: "success" };
+        this.notice = { text: this.text("notice.addedRepoPrompt", { name: result.serverName, path: result.path }), tone: "success" };
       });
       return;
     }
@@ -302,14 +446,14 @@ export class McpSetupPanel {
       return;
     }
 
-    this.notice = { text: "Review the details below. Press Enter on an action with a side effect to apply it.", tone: "muted" };
+    this.notice = { text: this.text("notice.review"), tone: "muted" };
     this.tui.requestRender();
   }
 
   private async applySelectedImports(): Promise<void> {
     const selected = this.discovery.imports.filter((entry) => this.selectedImports.has(entry.kind)).map((entry) => entry.kind);
     if (selected.length === 0) {
-      this.notice = { text: "Select at least one compatibility import first.", tone: "warning" };
+      this.notice = { text: this.text("notice.selectImport"), tone: "warning" };
       this.tui.requestRender();
       return;
     }
@@ -318,8 +462,8 @@ export class McpSetupPanel {
       const result = await this.callbacks.adoptImports(selected);
       this.callbacks.markSetupCompleted();
       this.notice = result.added.length > 0
-        ? { text: `Added ${result.added.join(", ")} to ${result.path}. Pi will reload after this panel closes.`, tone: "success" }
-        : { text: `No changes needed in ${result.path}.`, tone: "muted" };
+        ? { text: this.text("notice.importsAdded", { imports: result.added.join(", "), path: result.path }), tone: "success" }
+        : { text: this.text("notice.noChanges", { path: result.path }), tone: "muted" };
       this.screen = this.discovery.hasAnyConfig ? "setup" : "empty";
       this.actionCursor = 0;
     });
@@ -327,7 +471,7 @@ export class McpSetupPanel {
 
   private async runBusy(fn: () => Promise<void>): Promise<void> {
     this.busy = true;
-    this.notice = { text: "Working...", tone: "muted" };
+    this.notice = { text: this.text("notice.working"), tone: "muted" };
     this.tui.requestRender();
     try {
       await fn();
@@ -347,7 +491,7 @@ export class McpSetupPanel {
     const lines: string[] = [];
     const border = fg(this.t.border, "─".repeat(innerW));
     lines.push(`┌${border}┐`);
-    lines.push(this.padLine(fg(this.t.title, "MCP setup"), innerW));
+    lines.push(this.padLine(fg(this.t.title, this.text("title")), innerW));
     lines.push(this.padLine(this.discoverySummaryLine(), innerW));
     lines.push(this.padLine(fg(this.t.muted, this.secondarySummaryLine()), innerW));
     lines.push(this.padLine("", innerW));
@@ -390,13 +534,13 @@ export class McpSetupPanel {
       lines.push(this.padLine(line, innerW));
     }
     lines.push(this.padLine("", innerW));
-    lines.push(this.padLine(fg(this.t.muted, "Enter selects, Esc goes back, Ctrl+C closes."), innerW));
+    lines.push(this.padLine(fg(this.t.muted, this.text("footer.actions")), innerW));
     return lines;
   }
 
   private renderImports(innerW: number): string[] {
     const lines: string[] = [];
-    lines.push(this.padLine("Select compatibility imports. Space toggles, Enter saves, Esc goes back.", innerW));
+    lines.push(this.padLine(this.text("imports.instructions"), innerW));
     lines.push(this.padLine("", innerW));
     for (let index = 0; index < this.discovery.imports.length; index++) {
       const entry = this.discovery.imports[index];
@@ -407,7 +551,7 @@ export class McpSetupPanel {
     lines.push(this.padLine("", innerW));
     const selected = this.discovery.imports.filter((entry) => this.selectedImports.has(entry.kind)).map((entry) => entry.kind);
     const preview = this.callbacks.previewImports(selected);
-    for (const line of this.formatWritePreview("Compatibility import write preview", preview)) {
+    for (const line of this.formatWritePreview(this.text("imports.preview"), preview)) {
       lines.push(this.padLine(line, innerW));
     }
     return lines;
@@ -415,7 +559,7 @@ export class McpSetupPanel {
 
   private renderPaths(innerW: number): string[] {
     const lines: string[] = [];
-    lines.push(this.padLine("Select a detected config path to open. Enter opens it, Esc goes back.", innerW));
+    lines.push(this.padLine(this.text("paths.instructions"), innerW));
     lines.push(this.padLine("", innerW));
     const paths = this.getDetectedPaths();
     for (let index = 0; index < paths.length; index++) {
@@ -428,47 +572,51 @@ export class McpSetupPanel {
   private discoverySummaryLine(): string {
     if (!this.discovery.hasAnyConfig) {
       return fg(this.t.warning, this.options.onboardingState.setupCompleted
-        ? "No MCP servers are active right now."
-        : "No MCP config is active yet.");
+        ? this.text("summary.noServers")
+        : this.text("summary.noConfig"));
     }
 
     if (this.discovery.totalServerCount === 0 && (this.discovery.imports.length > 0 || !!this.discovery.repoPrompt.executablePath)) {
-      return fg(this.t.warning, "Pi found MCP-related setup options, but none are active in Pi yet.");
+      return fg(this.t.warning, this.text("summary.optionsInactive"));
     }
 
     const shared = this.discovery.sources.filter((source) => source.kind === "shared" && source.serverCount > 0).length;
     const piOwned = this.discovery.sources.filter((source) => source.kind === "pi" && source.serverCount > 0).length;
-    return fg(this.t.hint, `Detected ${this.discovery.totalServerCount} configured servers across ${shared} shared and ${piOwned} Pi-owned source${shared + piOwned === 1 ? "" : "s"}.`);
+    return fg(this.t.hint, this.text("summary.detected", {
+      servers: this.discovery.totalServerCount,
+      shared,
+      piOwned,
+    }));
   }
 
   private secondarySummaryLine(): string {
     if (!this.discovery.hasAnyConfig) {
-      return "Create a shared `.mcp.json`, adopt host imports, or quick-add RepoPrompt from this screen.";
+      return this.text("secondary.create");
     }
     if (this.discovery.totalServerCount === 0 && this.discovery.imports.length > 0) {
-      return `Detected ${this.discovery.imports.length} compatibility import source${this.discovery.imports.length === 1 ? "" : "s"}. Adopt them into Pi or inspect the underlying files.`;
+      return this.text("secondary.imports", { count: this.discovery.imports.length });
     }
-    return "Shared MCP files are preferred. Pi-owned files are only for compatibility imports and adapter-specific overrides.";
+    return this.text("secondary.shared");
   }
 
   private getActionPreview(action: ActionId): string[] {
     switch (action) {
       case "run-setup":
-        return this.formatPreview([
-          "Run setup to adopt host-specific imports, inspect detected paths, and scaffold a minimal `.mcp.json` if needed.",
-        ]);
+        return this.formatPreview([this.text("preview.runSetup")]);
       case "adopt-imports":
         return this.formatWritePreview(
-          "Compatibility import write preview",
+          this.text("imports.preview"),
           this.callbacks.previewImports(this.discovery.imports.filter((entry) => this.selectedImports.has(entry.kind)).map((entry) => entry.kind)),
           [
-            `Detected imports: ${this.discovery.imports.map((entry) => `${entry.kind} (${entry.serverCount} servers)`).join(", ")}`,
-            "Selected imports are written into the Pi agent dir config as Pi-owned compatibility state.",
+            this.text("preview.detectedImports", {
+              imports: this.discovery.imports.map((entry) => `${entry.kind} (${entry.serverCount})`).join(", "),
+            }),
+            this.text("preview.selectedImports"),
           ],
         );
       case "view-example":
         return this.formatPreview([
-          "Example shared `.mcp.json`:",
+          this.text("preview.example"),
           "{",
           '  "mcpServers": {',
           '    "chrome-devtools": {',
@@ -478,49 +626,46 @@ export class McpSetupPanel {
           "  }",
           "}",
           "",
-          "Use Scaffold project `.mcp.json` when you want a safe empty shell instead of a live example server.",
+          this.text("preview.exampleHint"),
         ]);
       case "show-precedence":
         return this.formatPreview([
-          "Read order:",
+          this.text("preview.readOrder"),
           "1. ~/.config/mcp/mcp.json",
           "2. <Pi agent dir>/mcp.json",
           "3. .mcp.json",
           "4. .pi/mcp.json",
-          "Pi writes compatibility imports and adapter-only overrides to Pi-owned files.",
+          this.text("preview.precedenceWrite"),
         ]);
       case "open-paths":
         return this.formatPreview(this.getDetectedPaths().length > 0
-          ? ["Detected paths:", ...this.getDetectedPaths()]
-          : ["No config paths were detected."]);
+          ? [this.text("preview.detectedPaths"), ...this.getDetectedPaths()]
+          : [this.text("preview.noPaths")]);
       case "add-repoprompt": {
         const repoPrompt = this.discovery.repoPrompt;
         const preview = this.callbacks.previewRepoPrompt();
         if (!preview) {
-          return this.formatPreview(["RepoPrompt is not available to add from this setup screen."]);
+          return this.formatPreview([this.text("preview.repoUnavailable")]);
         }
         return this.formatWritePreview(
-          "RepoPrompt write preview",
+          this.text("preview.repoTitle"),
           preview,
           [
-            `Executable: ${repoPrompt.executablePath ?? "not found"}`,
-            `Target: ${repoPrompt.targetPath ?? "n/a"}`,
-            `Server name: ${repoPrompt.serverName ?? "repoprompt"}`,
+            this.text("preview.executable", { value: repoPrompt.executablePath ?? this.text("preview.notFound") }),
+            this.text("preview.target", { value: repoPrompt.targetPath ?? this.text("preview.notApplicable") }),
+            this.text("preview.serverName", { value: repoPrompt.serverName ?? "repoprompt" }),
           ],
         );
       }
       case "scaffold-project":
         return this.formatWritePreview(
-          "Starter project `.mcp.json` write preview",
+          this.text("preview.starterTitle"),
           this.callbacks.previewStarterProject(),
-          [
-            "This writes a minimal `.mcp.json` in the current project using the shared MCP layout.",
-            "It intentionally avoids adding a fake placeholder server that would fail on first reload.",
-          ],
+          [this.text("preview.starterDetail"), this.text("preview.starterSafe")],
         );
       case "close":
       default:
-        return this.formatPreview(["Close the setup flow."]);
+        return this.formatPreview([this.text("preview.close")]);
     }
   }
 
@@ -539,7 +684,7 @@ export class McpSetupPanel {
     }
     if (intro.length > 0) lines.push("");
     lines.push(...wrapText(`${title}: ${preview.path}`, 74));
-    lines.push(...wrapText(preview.existed ? "Existing file detected. Showing exact before/after diff." : "New file will be created. Showing exact content diff.", 74));
+    lines.push(...wrapText(preview.existed ? this.text("write.existing") : this.text("write.new"), 74));
     lines.push("");
     const diffLines = preview.diffText.split("\n");
     const maxLines = 18;
@@ -548,7 +693,7 @@ export class McpSetupPanel {
       lines.push(...wrapText(line, 74));
     }
     if (diffLines.length > maxLines) {
-      lines.push(...wrapText(`… ${diffLines.length - maxLines} more diff line${diffLines.length - maxLines === 1 ? "" : "s"}`, 74));
+      lines.push(...wrapText(this.text("write.more", { count: diffLines.length - maxLines }), 74));
     }
     return lines;
   }

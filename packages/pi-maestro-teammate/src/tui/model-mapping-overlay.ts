@@ -50,6 +50,13 @@ import {
   sanitizeSingleLineInput,
   type DecodedInputToken,
 } from "./input-text.ts";
+import {
+  createTuiTranslator,
+  onTuiLocaleChange,
+  type SupportedSettingsLocale,
+  type TuiTranslationKey,
+  type TuiTranslator,
+} from "./locale.ts";
 
 export type ControlCenterTab = "profiles" | "routing" | "roles" | "active";
 
@@ -79,6 +86,7 @@ export interface TeammateControlCenterOptions {
   modelHealth?: readonly ModelCircuitSnapshot[];
   onOpenAgent?: (correlationId: string) => Promise<void>;
   globalFilePath?: string;
+  locale?: SupportedSettingsLocale;
 }
 
 interface LegacyControlCenterConfig extends ModelRoutingRules {
@@ -115,16 +123,15 @@ interface TeammateControlCenterParams {
   deleteCustomType?: (taskType: TeammateTaskType) => void;
   saveTypeMeta?: (taskType: TeammateTaskType, meta: ModelRoutingTypeMeta | null) => void;
   modelHealth?: readonly ModelCircuitSnapshot[];
+  locale?: SupportedSettingsLocale;
 }
 
 const SOURCE_ORDER: Record<AgentSource, number> = { package: 0, project: 1, user: 2, builtin: 3 };
 const TAB_ORDER: ControlCenterTab[] = ["profiles", "routing", "roles", "active"];
-const TAB_LABELS: Record<ControlCenterTab, string> = {
-  profiles: "Profiles",
-  routing: "Routing",
-  roles: "Roles",
-  active: "Active",
-};
+
+function tabLabel(tab: ControlCenterTab, t: TuiTranslator): string {
+  return t(`model.tab.${tab}` as TuiTranslationKey);
+}
 
 /** Sentinel routing-list entry that opens the custom-type creation flow. */
 const NEW_CUSTOM_TYPE_ENTRY = "__new_custom_type__";
@@ -134,31 +141,39 @@ const CIRCUIT_DEFAULT_COOLDOWN_MS = 60_000;
 
 interface CircuitPreset {
   value: string;
-  label: string;
-  detail: string;
+  labelKey: "model.circuit.strict" | "model.circuit.lenient";
+  detailKey: "model.circuit.strictDetail" | "model.circuit.lenientDetail";
   policy: ModelCircuitPolicy;
 }
 
 const CIRCUIT_PRESETS: readonly CircuitPreset[] = [
   {
     value: "strict",
-    label: "strict · 2 failures / 30s",
-    detail: "Fast-fail a degraded model",
+    labelKey: "model.circuit.strict",
+    detailKey: "model.circuit.strictDetail",
     policy: { threshold: 2, cooldownMs: 30_000 },
   },
   {
     value: "lenient",
-    label: "lenient · 5 failures / 300s",
-    detail: "Tolerate transient provider hiccups",
+    labelKey: "model.circuit.lenient",
+    detailKey: "model.circuit.lenientDetail",
     policy: { threshold: 5, cooldownMs: 300_000 },
   },
 ];
 
-function circuitDisplayText(circuit: ModelCircuitPolicy | null | undefined): string {
-  if (!circuit) return `default (${CIRCUIT_DEFAULT_THRESHOLD} failures / ${Math.round(CIRCUIT_DEFAULT_COOLDOWN_MS / 1000)}s)`;
+function circuitDisplayText(
+  circuit: ModelCircuitPolicy | null | undefined,
+  t: TuiTranslator,
+): string {
+  if (!circuit) {
+    return t("model.circuit.default", {
+      threshold: CIRCUIT_DEFAULT_THRESHOLD,
+      seconds: Math.round(CIRCUIT_DEFAULT_COOLDOWN_MS / 1000),
+    });
+  }
   const threshold = circuit.threshold ?? CIRCUIT_DEFAULT_THRESHOLD;
-  const cooldownSeconds = Math.round((circuit.cooldownMs ?? CIRCUIT_DEFAULT_COOLDOWN_MS) / 1000);
-  return `${threshold} failures / ${cooldownSeconds}s`;
+  const seconds = Math.round((circuit.cooldownMs ?? CIRCUIT_DEFAULT_COOLDOWN_MS) / 1000);
+  return t("model.circuit.value", { threshold, seconds });
 }
 
 function circuitDraftText(circuit: ModelCircuitPolicy | null | undefined): string {
@@ -204,13 +219,16 @@ function clampIndex(index: number, length: number): number {
   return length === 0 ? 0 : Math.max(0, Math.min(index, length - 1));
 }
 
-function activeStatus(status: ControlCenterActiveAgent["status"]): { icon: string; label: string; tone: string } {
-  if (status === "pending") return { icon: "○", label: "Pending", tone: "dim" };
-  if (status === "failed") return { icon: "✗", label: "Failed", tone: "error" };
-  if (status === "retrying") return { icon: "↻", label: "Retrying", tone: "warning" };
-  if (status === "sleeping") return { icon: "◉", label: "Sleeping", tone: "warning" };
-  if (status === "completed") return { icon: "✓", label: "Done", tone: "dim" };
-  return { icon: "■", label: "Running", tone: "success" };
+function activeStatus(
+  status: ControlCenterActiveAgent["status"],
+  t: TuiTranslator,
+): { icon: string; label: string; tone: string } {
+  if (status === "pending") return { icon: "○", label: t("model.status.pending"), tone: "dim" };
+  if (status === "failed") return { icon: "✗", label: t("model.status.failed"), tone: "error" };
+  if (status === "retrying") return { icon: "↻", label: t("model.status.retrying"), tone: "warning" };
+  if (status === "sleeping") return { icon: "◉", label: t("model.status.sleeping"), tone: "warning" };
+  if (status === "completed") return { icon: "✓", label: t("model.status.done"), tone: "dim" };
+  return { icon: "■", label: t("model.status.running"), tone: "success" };
 }
 
 function rulesFromProfile(profile: ModelRoutingProfile): ModelRoutingRules {
@@ -304,8 +322,17 @@ export class TeammateControlCenter implements Component, Focusable {
   private readonly agents: AgentConfig[];
   private taskTypes: TeammateTaskType[];
   private readonly activeAgents: ControlCenterActiveAgent[];
+  private readonly t: TuiTranslator;
+  private readonly localeDisposer: () => void;
 
   constructor(private readonly params: TeammateControlCenterParams) {
+    this.t = createTuiTranslator(params.locale);
+    this.localeDisposer = params.locale === undefined
+      ? onTuiLocaleChange(() => {
+          this.statusText = "";
+          params.requestRender();
+        })
+      : () => {};
     this.tab = params.initialTab ?? "routing";
     this.queries.profiles = sanitizeSingleLineInput(params.initialProfileQuery ?? "");
     this.saving = params.initialSaving ?? false;
@@ -350,6 +377,7 @@ export class TeammateControlCenter implements Component, Focusable {
   invalidate(): void {}
 
   dispose(): void {
+    this.localeDisposer();
     if (this.pasteFlushTimer) clearTimeout(this.pasteFlushTimer);
     if (this.persistenceTimer) clearTimeout(this.persistenceTimer);
   }
@@ -678,50 +706,56 @@ export class TeammateControlCenter implements Component, Focusable {
       return [
         {
           value: "type",
-          label: "Type",
+          label: this.t("model.setting.type"),
           detail: assignedType
-            ? `${assignedType}${typeModel ? ` · routes to ${typeModel}` : " · model not pinned"}`
-            : "auto · agent frontmatter or prompt inference",
+            ? `${assignedType}${typeModel
+                ? ` · ${this.t("model.route.routesTo", { model: typeModel })}`
+                : ` · ${this.t("model.route.notPinned")}`}`
+            : this.t("model.route.frontmatter"),
           active: Boolean(rules?.taskType),
           unavailable: false,
         },
         {
           value: "model",
-          label: "Model override",
+          label: this.t("model.setting.modelOverride"),
           detail: rules?.model
-            ? `${rules.model}${assignedType && typeModel ? ` · fallback behind ${assignedType}` : ""}`
+            ? `${rules.model}${assignedType && typeModel ? ` · ${this.t("model.route.behindType", { type: assignedType })}` : ""}`
             : assignedType && typeModel
-              ? `inherit from type · ${typeModel}`
-              : "auto · inherit routed model",
+              ? this.t("model.route.inheritType", { value: typeModel })
+              : this.t("model.route.inheritModel"),
           active: Boolean(rules?.model),
           unavailable: false,
         },
         {
           value: "thinking",
-          label: "Thinking override",
+          label: this.t("model.setting.thinkingOverride"),
           detail: rules?.thinking
-            ? `${rules.thinking}${assignedType && this.config.thinkingLevels[assignedType] ? ` · fallback behind ${assignedType}` : ""}`
+            ? `${rules.thinking}${assignedType && this.config.thinkingLevels[assignedType]
+                ? ` · ${this.t("model.route.behindType", { type: assignedType })}`
+                : ""}`
             : assignedType && this.config.thinkingLevels[assignedType]
-              ? `inherit from type · ${this.config.thinkingLevels[assignedType]}`
-              : "inherit / Pi default",
+              ? this.t("model.route.inheritType", { value: this.config.thinkingLevels[assignedType]! })
+              : this.t("model.route.inheritThinking"),
           active: Boolean(rules?.thinking),
           unavailable: false,
         },
         {
           value: "fallback",
-          label: "Fallback override",
+          label: this.t("model.setting.fallbackOverride"),
           detail: rules?.fallbackModels?.length
-            ? `${rules.fallbackModels.join(" → ")}${assignedType && this.config.fallbackMappings?.[assignedType]?.length ? ` · fallback behind ${assignedType}` : ""}`
+            ? `${rules.fallbackModels.join(" → ")}${assignedType && this.config.fallbackMappings?.[assignedType]?.length
+                ? ` · ${this.t("model.route.behindType", { type: assignedType })}`
+                : ""}`
             : assignedType && this.config.fallbackMappings?.[assignedType]?.length
-              ? `inherit from type · ${this.config.fallbackMappings[assignedType]!.join(" → ")}`
-              : "none",
+              ? this.t("model.route.inheritType", { value: this.config.fallbackMappings[assignedType]!.join(" → ") })
+              : this.t("common.none"),
           active: Boolean(rules?.fallbackModels?.length),
           unavailable: false,
         },
         {
           value: "circuit",
-          label: "Circuit",
-          detail: circuitDisplayText(rules?.circuit),
+          label: this.t("model.setting.circuit"),
+          detail: circuitDisplayText(rules?.circuit, this.t),
           active: Boolean(rules?.circuit),
           unavailable: false,
         },
@@ -733,38 +767,40 @@ export class TeammateControlCenter implements Component, Focusable {
     return [
       {
         value: "model",
-        label: "Model",
-        detail: this.config.mappings[taskType] ?? "auto · inherit main session model",
+        label: this.t("model.setting.model"),
+        detail: this.config.mappings[taskType] ?? this.t("model.route.autoMain"),
         active: Boolean(this.config.mappings[taskType]),
         unavailable: false,
       },
       {
         value: "thinking",
-        label: "Thinking",
-        detail: this.config.thinkingLevels[taskType] ?? "inherit / Pi default",
+        label: this.t("model.setting.thinking"),
+        detail: this.config.thinkingLevels[taskType] ?? this.t("model.route.inheritThinking"),
         active: Boolean(this.config.thinkingLevels[taskType]),
         unavailable: false,
       },
       {
         value: "fallback",
-        label: "Fallbacks",
+        label: this.t("model.setting.fallbacks"),
         detail: this.config.fallbackMappings?.[taskType]?.length
           ? this.config.fallbackMappings[taskType]!.join(" → ")
-          : "none",
+          : this.t("common.none"),
         active: Boolean(this.config.fallbackMappings?.[taskType]?.length),
         unavailable: false,
       },
       {
         value: "roles",
-        label: "Roles",
-        detail: assignedRoles.length > 0 ? assignedRoles.map((name) => `@${name}`).join(", ") : "none assigned",
+        label: this.t("model.setting.roles"),
+        detail: assignedRoles.length > 0
+          ? assignedRoles.map((name) => `@${name}`).join(", ")
+          : this.t("model.route.noneAssigned"),
         active: assignedRoles.length > 0,
         unavailable: false,
       },
       {
         value: "keywords",
-        label: "Keywords",
-        detail: keywords.length > 0 ? keywords.join(", ") : "none",
+        label: this.t("model.setting.keywords"),
+        detail: keywords.length > 0 ? keywords.join(", ") : this.t("common.none"),
         active: keywords.length > 0,
         unavailable: false,
       },
@@ -829,7 +865,9 @@ export class TeammateControlCenter implements Component, Focusable {
       return {
         value: agent.name,
         label: `@${agent.name}`,
-        detail: currentType ? `Current type · ${currentType}` : `${agent.source} · no assigned type`,
+        detail: currentType
+          ? this.t("model.role.currentType", { type: currentType })
+          : this.t("model.role.noType", { source: agent.source }),
         active: this.roleAssignmentDraft.has(agent.name),
         unavailable: false,
       };
@@ -854,8 +892,10 @@ export class TeammateControlCenter implements Component, Focusable {
       unavailable: boolean;
     }> = [{
       value: "__auto__",
-      label: "auto / agent frontmatter",
-      detail: declared ? `Use the agent's declared type · ${declared}` : "Use prompt inference when no type is declared",
+      label: this.t("model.role.autoFrontmatter"),
+      detail: declared
+        ? this.t("model.role.declaredType", { type: declared })
+        : this.t("model.role.promptInference"),
       active: !configured,
       unavailable: false,
     }];
@@ -960,7 +1000,7 @@ export class TeammateControlCenter implements Component, Focusable {
       }
       this.saving = true;
       this.statusTone = "dim";
-      this.statusText = `Saving ${this.editorTargetLabel()}…`;
+      this.statusText = this.t("model.saving", { target: this.editorTargetLabel() });
       this.params.requestRender();
       this.persistenceTimer = setTimeout(() => {
         this.persistenceTimer = undefined;
@@ -973,28 +1013,32 @@ export class TeammateControlCenter implements Component, Focusable {
             if (editorKind === "thinking") {
               const thinking = item.value === "__auto__" ? null : item.value as TeammateThinkingLevel;
               rules = { ...existing, thinking };
-              savedText = thinking ?? "inherit / Pi default";
+              savedText = thinking ?? this.t("model.route.inheritThinking");
             } else if (editorKind === "type") {
               const taskType = item.value === "__auto__" ? null : item.value;
               rules = { ...existing, taskType };
-              savedText = taskType ?? "auto / agent frontmatter";
+              savedText = taskType ?? this.t("model.role.autoFrontmatter");
             } else if (editorKind === "circuit") {
               const circuit = item.value === "__auto__"
                 ? null
                 : (item as { policy?: ModelCircuitPolicy }).policy ?? null;
               rules = { ...existing, circuit };
-              savedText = circuitDisplayText(circuit);
+              savedText = circuitDisplayText(circuit, this.t);
             } else {
               const model = item.value === "__auto__" ? null : item.value;
               rules = { ...existing, model };
-              savedText = model ?? "auto / inherit main session model";
+              savedText = model ?? this.t("model.route.autoMain");
             }
             if (this.params.saveRoleRules) this.params.saveRoleRules(role, rules);
             else saveGlobalProfileRoleMapping(this.params.cwd, this.config.profileId, role, rules, this.params.globalFilePath);
             this.config.roleMappings = { ...(this.config.roleMappings ?? {}), [role]: rules };
             this.saving = false;
             this.statusTone = "success";
-            this.statusText = `Saved · @${role} ${editorKind} → ${savedText}`;
+            this.statusText = this.t("model.saved", {
+              target: `@${role}`,
+              kind: this.editorSaveLabel(),
+              value: savedText,
+            });
             this.returnToSettingsMenu();
             return;
           }
@@ -1011,12 +1055,20 @@ export class TeammateControlCenter implements Component, Focusable {
           }
           this.saving = false;
           this.statusTone = "success";
-          this.statusText = `Saved · ${taskType as TeammateTaskType} ${editorKind} → ${value ?? (editorKind === "thinking" ? "inherit / Pi default" : "auto / inherit main session model")}`;
+          this.statusText = this.t("model.saved", {
+            target: taskType as TeammateTaskType,
+            kind: this.editorSaveLabel(),
+            value: value ?? (editorKind === "thinking"
+              ? this.t("model.route.inheritThinking")
+              : this.t("model.route.autoMain")),
+          });
           this.returnToSettingsMenu();
         } catch (error) {
           this.saving = false;
           this.statusTone = "error";
-          this.statusText = `Save failed · ${error instanceof Error ? error.message : String(error)}`;
+          this.statusText = this.t("model.saveFailed", {
+            message: error instanceof Error ? error.message : String(error),
+          });
           this.params.requestRender();
         }
       }, 16);
@@ -1080,7 +1132,7 @@ export class TeammateControlCenter implements Component, Focusable {
     if (!taskType || this.saving) return;
     this.saving = true;
     this.statusTone = "dim";
-    this.statusText = `Saving roles for ${taskType}…`;
+    this.statusText = this.t("model.savingRoles", { type: taskType });
     this.params.requestRender();
     this.persistenceTimer = setTimeout(() => {
       this.persistenceTimer = undefined;
@@ -1108,14 +1160,18 @@ export class TeammateControlCenter implements Component, Focusable {
         this.saving = false;
         this.statusTone = "success";
         const assignedNames = [...this.roleAssignmentDraft];
-        this.statusText = assignedNames.length > 0
-          ? `Saved roles · ${assignedNames.map((name) => `@${name}`).join(", ")}`
-          : "Saved roles · none";
+        this.statusText = this.t("model.savedRoles", {
+          roles: assignedNames.length > 0
+            ? assignedNames.map((name) => `@${name}`).join(", ")
+            : this.t("common.none"),
+        });
         this.returnToSettingsMenu();
       } catch (error) {
         this.saving = false;
         this.statusTone = "error";
-        this.statusText = `Save failed · ${error instanceof Error ? error.message : String(error)}`;
+        this.statusText = this.t("model.saveFailed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
         this.params.requestRender();
       }
     }, 16);
@@ -1155,13 +1211,13 @@ export class TeammateControlCenter implements Component, Focusable {
     const policy = parseCircuitDraft(this.modelQuery.trim());
     if (!policy) {
       this.statusTone = "error";
-      this.statusText = "Invalid circuit · type threshold/cooldown (e.g. 4/120)";
+      this.statusText = this.t("model.invalidCircuit");
       this.params.requestRender();
       return;
     }
     this.saving = true;
     this.statusTone = "dim";
-    this.statusText = `Saving @${role} circuit…`;
+    this.statusText = this.t("model.savingCircuit", { role });
     this.params.requestRender();
     this.persistenceTimer = setTimeout(() => {
       this.persistenceTimer = undefined;
@@ -1173,12 +1229,17 @@ export class TeammateControlCenter implements Component, Focusable {
         this.config.roleMappings = { ...(this.config.roleMappings ?? {}), [role]: rules };
         this.saving = false;
         this.statusTone = "success";
-        this.statusText = `Saved · @${role} circuit → custom (${circuitDisplayText(policy)})`;
+        this.statusText = this.t("model.savedCircuit", {
+          role,
+          value: circuitDisplayText(policy, this.t),
+        });
         this.returnToSettingsMenu();
       } catch (error) {
         this.saving = false;
         this.statusTone = "error";
-        this.statusText = `Save failed · ${error instanceof Error ? error.message : String(error)}`;
+        this.statusText = this.t("model.saveFailed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
         this.params.requestRender();
       }
     }, 16);
@@ -1228,19 +1289,19 @@ export class TeammateControlCenter implements Component, Focusable {
     const taskType = parseTeammateTaskType(this.customTypeDraft);
     if (!taskType) {
       this.statusTone = "error";
-      this.statusText = "Invalid type · lowercase letters, digits, . _ - (e.g. security-audit)";
+      this.statusText = this.t("model.invalidType");
       this.params.requestRender();
       return;
     }
     if ((TEAMMATE_TASK_TYPES as readonly string[]).includes(taskType)) {
       this.statusTone = "error";
-      this.statusText = `Cannot register a built-in type · ${taskType}`;
+      this.statusText = this.t("model.builtinType", { type: taskType });
       this.params.requestRender();
       return;
     }
     if (this.taskTypes.includes(taskType)) {
       this.statusTone = "error";
-      this.statusText = `Custom type already exists · ${taskType}`;
+      this.statusText = this.t("model.typeExists", { type: taskType });
       this.params.requestRender();
       return;
     }
@@ -1289,8 +1350,8 @@ export class TeammateControlCenter implements Component, Focusable {
     this.saving = true;
     this.statusTone = "dim";
     this.statusText = target.kind === "create"
-      ? `Saving custom type ${target.taskType}…`
-      : `Saving keywords for ${target.taskType}…`;
+      ? this.t("model.savingCustomType", { type: target.taskType })
+      : this.t("model.savingKeywords", { type: target.taskType });
     this.params.requestRender();
     this.persistenceTimer = setTimeout(() => {
       this.persistenceTimer = undefined;
@@ -1306,7 +1367,7 @@ export class TeammateControlCenter implements Component, Focusable {
           this.queries.routing = "";
           const index = this.taskTypes.indexOf(target.taskType);
           if (index >= 0) this.selected.routing = index;
-          this.statusText = `Created custom type ${target.taskType}`;
+          this.statusText = this.t("model.createdType", { type: target.taskType });
         } else {
           if (this.params.saveTypeMeta) this.params.saveTypeMeta(target.taskType, meta);
           else saveGlobalProfileTypeMeta(this.params.cwd, this.config.profileId, target.taskType, meta, this.params.globalFilePath);
@@ -1315,8 +1376,8 @@ export class TeammateControlCenter implements Component, Focusable {
           else delete next[target.taskType];
           this.config.typeMeta = next;
           this.statusText = keywords.length > 0
-            ? `Saved keywords for ${target.taskType}`
-            : `Cleared keywords for ${target.taskType}`;
+            ? this.t("model.savedKeywords", { type: target.taskType })
+            : this.t("model.clearedKeywords", { type: target.taskType });
         }
         this.keywordsInput = null;
         this.keywordsDraft = "";
@@ -1326,7 +1387,9 @@ export class TeammateControlCenter implements Component, Focusable {
       } catch (error) {
         this.saving = false;
         this.statusTone = "error";
-        this.statusText = `Save failed · ${error instanceof Error ? error.message : String(error)}`;
+        this.statusText = this.t("model.saveFailed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
         this.params.requestRender();
       }
     }, 16);
@@ -1354,13 +1417,13 @@ export class TeammateControlCenter implements Component, Focusable {
     if (!taskType || taskType === NEW_CUSTOM_TYPE_ENTRY) return;
     if ((TEAMMATE_TASK_TYPES as readonly string[]).includes(taskType)) {
       this.statusTone = "error";
-      this.statusText = "Built-in types cannot be deleted";
+      this.statusText = this.t("model.builtinDelete");
       this.params.requestRender();
       return;
     }
     this.saving = true;
     this.statusTone = "dim";
-    this.statusText = `Deleting ${this.taskTypeMeta(taskType).label}…`;
+    this.statusText = this.t("model.deleting", { type: this.taskTypeMeta(taskType).label });
     this.params.requestRender();
     this.persistenceTimer = setTimeout(() => {
       this.persistenceTimer = undefined;
@@ -1382,13 +1445,15 @@ export class TeammateControlCenter implements Component, Focusable {
         this.saving = false;
         this.statusTone = "success";
         this.statusText = declaredByAgent
-          ? `Reset routing for agent-declared type ${taskType}`
-          : `Deleted custom type ${taskType}`;
+          ? this.t("model.resetType", { type: taskType })
+          : this.t("model.deletedType", { type: taskType });
         this.params.requestRender();
       } catch (error) {
         this.saving = false;
         this.statusTone = "error";
-        this.statusText = `Delete failed · ${error instanceof Error ? error.message : String(error)}`;
+        this.statusText = this.t("model.deleteFailed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
         this.params.requestRender();
       }
     }, 16);
@@ -1396,6 +1461,13 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private refreshTaskTypes(): void {
     this.taskTypes = discoverRoutingTaskTypes(this.params.cwd, this.agents, this.config);
+  }
+
+  private editorSaveLabel(): string {
+    if (this.editorKind === "thinking") return this.t("model.kind.thinking");
+    if (this.editorKind === "circuit") return this.t("model.kind.circuit");
+    if (this.editorKind === "type") return this.t("model.kind.type");
+    return this.t("model.kind.model");
   }
 
   private handleFallbackInput(data: string): void {
@@ -1470,7 +1542,7 @@ export class TeammateControlCenter implements Component, Focusable {
         label: model,
         detail: authenticated
           ? this.fallbackItemDetail(model, chain.indexOf(model) + 1)
-          : "Not authenticated in this session",
+          : this.t("model.notAuthenticated"),
         active: true,
         unavailable: !authenticated,
       });
@@ -1489,25 +1561,29 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private fallbackItemDetail(model: string, priority: number): string {
     const circuit = this.circuitNote(model);
-    if (priority < 0) return ["Not in fallback chain", circuit].filter(Boolean).join(" · ");
-    return ["Fallback priority " + String(priority), circuit].filter(Boolean).join(" · ");
+    if (priority < 0) return [this.t("model.notInFallback"), circuit].filter(Boolean).join(" · ");
+    return [this.t("model.fallbackPriority", { priority }), circuit].filter(Boolean).join(" · ");
   }
 
   private circuitNote(model: string): string {
     const health = this.health.get(model);
     if (!health || health.state === "CLOSED") return "";
-    const detail = health.state === "OPEN" ? "circuit open · skipped" : "circuit half-open · probing";
-    return health.consecutiveFailures > 0 ? `${detail} (${health.consecutiveFailures} failures)` : detail;
+    const detail = health.state === "OPEN"
+      ? this.t("model.circuitOpen")
+      : this.t("model.circuitHalfOpen");
+    return health.consecutiveFailures > 0
+      ? this.t("model.circuitFailures", { detail, count: health.consecutiveFailures })
+      : detail;
   }
 
   private editorLabel(): string {
-    if (this.editorKind === "menu") return "Settings";
-    if (this.editorKind === "fallback") return "Fallback";
-    if (this.editorKind === "thinking") return "Thinking";
-    if (this.editorKind === "circuit") return "Circuit";
-    if (this.editorKind === "type") return "Type";
-    if (this.editorKind === "roles") return "Roles";
-    return "Model";
+    if (this.editorKind === "menu") return this.t("model.editor.settings");
+    if (this.editorKind === "fallback") return this.t("model.editor.fallback");
+    if (this.editorKind === "thinking") return this.t("model.editor.thinking");
+    if (this.editorKind === "circuit") return this.t("model.editor.circuit");
+    if (this.editorKind === "type") return this.t("model.editor.type");
+    if (this.editorKind === "roles") return this.t("model.editor.roles");
+    return this.t("model.editor.model");
   }
 
   private toggleFallbackItem(): void {
@@ -1545,7 +1621,7 @@ export class TeammateControlCenter implements Component, Focusable {
     if (!taskType && !role) return;
     this.saving = true;
     this.statusTone = "dim";
-    this.statusText = `Saving ${this.editorTargetLabel()} fallbacks…`;
+    this.statusText = this.t("model.savingFallbacks", { target: this.editorTargetLabel() });
     this.params.requestRender();
     this.persistenceTimer = setTimeout(() => {
       this.persistenceTimer = undefined;
@@ -1564,13 +1640,17 @@ export class TeammateControlCenter implements Component, Focusable {
         }
         this.saving = false;
         this.statusTone = "success";
-        this.statusText = models ? `Saved fallbacks · ${models.join(", ")}` : "Saved fallbacks · none";
+        this.statusText = this.t("model.savedFallbacks", {
+          models: models ? models.join(", ") : this.t("common.none"),
+        });
         this.fallbackDraft = [];
         this.returnToSettingsMenu();
       } catch (error) {
         this.saving = false;
         this.statusTone = "error";
-        this.statusText = `Save failed · ${error instanceof Error ? error.message : String(error)}`;
+        this.statusText = this.t("model.saveFailed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
         this.params.requestRender();
       }
     }, 16);
@@ -1578,7 +1658,13 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private taskTypeMeta(taskType: TeammateTaskType): { label: string; roles: string; description: string } {
     const known = TEAMMATE_TASK_TYPE_META[taskType];
-    if (known) return known;
+    if (known) {
+      return {
+        ...known,
+        label: this.t(`task.${taskType}.label` as TuiTranslationKey),
+        description: this.t(`task.${taskType}.description` as TuiTranslationKey),
+      };
+    }
     const roles = this.agents
       .filter((agent) => agent.taskType === taskType)
       .map((agent) => agent.name)
@@ -1590,8 +1676,8 @@ export class TeammateControlCenter implements Component, Focusable {
       .join(" ");
     return {
       label: label || taskType,
-      roles: roles || "custom agent",
-      description: "Custom agent task routing",
+      roles: roles || this.t("model.customAgent"),
+      description: this.t("model.customDescription"),
     };
   }
 
@@ -1618,7 +1704,8 @@ export class TeammateControlCenter implements Component, Focusable {
         return `${taskType} ${meta.label} ${meta.roles} ${meta.description} ${mapping} ${thinking}`.toLowerCase().includes(query);
       })
       : [...this.taskTypes];
-    if (!query || "new custom type".includes(query)) types.push(NEW_CUSTOM_TYPE_ENTRY as TeammateTaskType);
+    const customTypeSearch = `${this.t("model.customTypeSearch")} new custom type`.toLowerCase();
+    if (!query || customTypeSearch.includes(query)) types.push(NEW_CUSTOM_TYPE_ENTRY as TeammateTaskType);
     return types;
   }
 
@@ -1658,8 +1745,8 @@ export class TeammateControlCenter implements Component, Focusable {
   }> {
     const items = [{
       value: "__auto__",
-      label: "auto / inherit main session model",
-      detail: "Use the task/top-level model, an explicitly configured mapping, or inherit the main session's model",
+      label: this.t("model.autoPicker"),
+      detail: this.t("model.autoPickerDetail"),
       active: !configured,
       unavailable: false,
     }];
@@ -1668,7 +1755,9 @@ export class TeammateControlCenter implements Component, Focusable {
         value: model,
         label: model,
         detail: [
-          model === configured ? `Current ${ownerLabel} model` : "Authenticated in this session",
+          model === configured
+            ? this.t("model.currentModel", { owner: ownerLabel })
+            : this.t("model.authenticated"),
           this.circuitNote(model),
         ].filter(Boolean).join(" · "),
         active: model === configured,
@@ -1679,7 +1768,7 @@ export class TeammateControlCenter implements Component, Focusable {
       items.push({
         value: configured,
         label: configured,
-        detail: "Configured model is not authenticated in this session",
+        detail: this.t("model.configuredUnavailable"),
         active: true,
         unavailable: true,
       });
@@ -1710,19 +1799,19 @@ export class TeammateControlCenter implements Component, Focusable {
   private thinkingPickerItems(configured: TeammateThinkingLevel | undefined, routedModel: string | undefined, ownerLabel: string) {
     const items = [{
       value: "__auto__",
-      label: "inherit / Pi default",
-      detail: "Use explicit task, top-level, agent frontmatter, or Pi default thinking",
+      label: this.t("model.route.inheritThinking"),
+      detail: this.t("model.thinkingAutoDetail"),
       active: !configured,
       unavailable: false,
     }, ...TEAMMATE_THINKING_LEVELS
       .map((thinking) => ({
         value: thinking,
-        label: thinking,
+        label: thinking === "xhigh" ? "xhigh / max" : thinking,
         detail: thinking === configured
-          ? `Current ${ownerLabel} thinking depth`
+          ? this.t("model.currentThinking", { owner: ownerLabel })
           : routedModel
-            ? `Applies to ${routedModel}`
-            : "Applies to the routed task model",
+            ? this.t("model.appliesModel", { model: routedModel })
+            : this.t("model.appliesRouted"),
         active: thinking === configured,
         // Thinking depth is never restricted by model capability; the child
         // Pi host clamps to its provider-specific boundary if needed.
@@ -1765,16 +1854,19 @@ export class TeammateControlCenter implements Component, Focusable {
       policy?: ModelCircuitPolicy;
     }> = [{
       value: "__auto__",
-      label: `default · ${CIRCUIT_DEFAULT_THRESHOLD} failures / ${Math.round(CIRCUIT_DEFAULT_COOLDOWN_MS / 1000)}s`,
-      detail: "Use the shared circuit breaker defaults",
+      label: this.t("model.circuit.defaultPicker", {
+        threshold: CIRCUIT_DEFAULT_THRESHOLD,
+        seconds: Math.round(CIRCUIT_DEFAULT_COOLDOWN_MS / 1000),
+      }),
+      detail: this.t("model.circuitShared"),
       active: !configured,
       unavailable: false,
     }];
     for (const preset of CIRCUIT_PRESETS) {
       items.push({
         value: preset.value,
-        label: preset.label,
-        detail: preset.detail,
+        label: this.t(preset.labelKey),
+        detail: this.t(preset.detailKey),
         active: configured !== undefined && configured !== null && matchesPreset(preset.policy),
         unavailable: false,
         policy: preset.policy,
@@ -1783,9 +1875,9 @@ export class TeammateControlCenter implements Component, Focusable {
     items.push({
       value: "__custom__",
       label: configured
-        ? `custom · ${circuitDisplayText(configured)}`
-        : "custom …",
-      detail: "type threshold/cooldown (e.g. 4/120)",
+        ? this.t("model.circuitCustomValue", { value: circuitDisplayText(configured, this.t) })
+        : this.t("model.circuitCustom"),
+      detail: this.t("model.circuitPrompt"),
       active: configured !== undefined && configured !== null && !CIRCUIT_PRESETS.some((preset) => matchesPreset(preset.policy)),
       unavailable: false,
     });
@@ -1824,13 +1916,15 @@ export class TeammateControlCenter implements Component, Focusable {
       const marker = this.focused ? CURSOR_MARKER : "";
       const draft = this.keywordsDraft
         ? `${displayText(this.keywordsDraft)}${marker}`
-        : `${marker}${this.params.theme.fg("dim", "comma-separated keywords (e.g. audit, security)")}`;
+        : `${marker}${this.params.theme.fg("dim", this.t("model.keywordsPlaceholder"))}`;
       rows.push(`${this.params.theme.fg("accent", "›")} ${draft}`);
       rows.push(this.params.theme.fg("dim", "─".repeat(inner)));
-      rows.push(this.params.theme.fg("muted", `Keywords for ${displayText(this.keywordsInput.taskType)} · when to use this type · Enter with empty text skips`));
+      rows.push(this.params.theme.fg("muted", this.t("model.keywordsHelp", {
+        type: displayText(this.keywordsInput.taskType),
+      })));
       if (this.statusText) rows.push(this.statusLine(inner));
       rows.push(truncateToWidth(
-        `${this.params.theme.fg("dim", "Enter")} save ${this.params.theme.fg("dim", "· Esc")} cancel ${this.params.theme.fg("dim", "· type")} comma-separated`,
+        this.t("model.keywordsFooter"),
         inner,
         "…",
       ));
@@ -1840,13 +1934,13 @@ export class TeammateControlCenter implements Component, Focusable {
       const marker = this.focused ? CURSOR_MARKER : "";
       const draft = this.customTypeDraft
         ? `${displayText(this.customTypeDraft)}${marker}`
-        : `${marker}${this.params.theme.fg("dim", "type identifier (e.g. security-audit)")}`;
+        : `${marker}${this.params.theme.fg("dim", this.t("model.typePlaceholder"))}`;
       rows.push(`${this.params.theme.fg("accent", "›")} ${draft}`);
       rows.push(this.params.theme.fg("dim", "─".repeat(inner)));
-      rows.push(this.params.theme.fg("muted", "New custom agent type · lowercase letters, digits, . _ -"));
+      rows.push(this.params.theme.fg("muted", this.t("model.newTypeHelp")));
       if (this.statusText) rows.push(this.statusLine(inner));
       rows.push(truncateToWidth(
-        `${this.params.theme.fg("dim", "Enter")} save ${this.params.theme.fg("dim", "· Esc")} cancel ${this.params.theme.fg("dim", "· type")} identifier`,
+        this.t("model.newTypeFooter"),
         inner,
         "…",
       ));
@@ -1890,12 +1984,12 @@ export class TeammateControlCenter implements Component, Focusable {
     const meta = taskType ? this.taskTypeMeta(taskType) : undefined;
     const roleAgent = role ? this.agents.find((agent) => agent.name === role) : undefined;
     const headerSub = role
-      ? (roleAgent?.description ?? "custom role")
+      ? (roleAgent?.description ?? this.t("model.customRole"))
       : displayText(meta?.roles ?? "");
     const headerLabel = role ? `@${displayText(role)}` : displayText(meta?.label ?? "");
     const rows: string[] = [
       truncateToWidth(
-        `${this.params.theme.fg("accent", this.params.theme.bold("Teammate Control Center"))} ${this.params.theme.fg("dim", "›")} ${this.params.theme.bold(headerLabel)} ${this.params.theme.fg("dim", `› ${this.editorLabel()} (${displayText(headerSub)})`)}`,
+        `${this.params.theme.fg("accent", this.params.theme.bold(this.t("model.title")))} ${this.params.theme.fg("dim", "›")} ${this.params.theme.bold(headerLabel)} ${this.params.theme.fg("dim", `› ${this.editorLabel()} (${displayText(headerSub)})`)}`,
         inner,
         "…",
       ),
@@ -1906,11 +2000,11 @@ export class TeammateControlCenter implements Component, Focusable {
       const marker = this.focused ? CURSOR_MARKER : "";
       const draft = this.modelQuery
         ? `${displayText(this.modelQuery)}${marker}`
-        : `${marker}${this.params.theme.fg("dim", "threshold/cooldown (e.g. 4/120)")}`;
+        : `${marker}${this.params.theme.fg("dim", this.t("model.circuitPrompt"))}`;
       rows.push(truncateToWidth(`${this.params.theme.fg("accent", "›")} ${draft}`, inner, "…"));
       if (this.statusText) rows.push(this.statusLine(inner));
       rows.push(truncateToWidth(
-        `${this.params.theme.fg("dim", "Enter")} save ${this.params.theme.fg("dim", "· Esc/←")} back ${this.params.theme.fg("dim", "· type")} e.g. 4/120`,
+        this.t("model.circuitCustomFooter"),
         inner,
         "…",
       ));
@@ -1926,34 +2020,36 @@ export class TeammateControlCenter implements Component, Focusable {
       const prefix = index === this.modelSelected ? this.params.theme.fg("accent", "▸") : " ";
       const state = this.editorKind === "menu"
         ? item.active
-          ? this.params.theme.fg("success", "configured")
-          : this.params.theme.fg("dim", "inherited")
+          ? this.params.theme.fg("success", this.t("model.state.configured"))
+          : this.params.theme.fg("dim", this.t("model.state.inherited"))
         : this.editorKind === "roles"
           ? item.active
-            ? this.params.theme.fg("success", "✓ assigned")
-            : this.params.theme.fg("dim", "available")
+            ? this.params.theme.fg("success", this.t("model.state.assigned"))
+            : this.params.theme.fg("dim", this.t("model.state.available"))
           : item.unavailable
-            ? this.params.theme.fg("error", `! unavailable${item.active ? " · active" : ""}`)
+            ? this.params.theme.fg("error", this.t("model.state.unavailable", {
+                active: item.active ? ` · ${this.t("common.active")}` : "",
+              }))
             : item.active
-              ? this.params.theme.fg("success", "✓ active")
-              : this.params.theme.fg("dim", "available");
+              ? this.params.theme.fg("success", this.t("model.state.active"))
+              : this.params.theme.fg("dim", this.t("model.state.available"));
       rows.push(truncateToWidth(`${prefix} ${this.params.theme.bold(displayText(item.label))} ${this.params.theme.fg("dim", "·")} ${state}`, inner, "…"));
       if (index === this.modelSelected && inner >= 44) {
         rows.push(truncateToWidth(`  ${this.params.theme.fg("muted", displayText(item.detail))}`, inner, "…"));
       }
     }
     if (items.length === 0) {
-      rows.push(this.params.theme.fg("warning", "□ No matching options · Backspace clears the filter"));
+      rows.push(this.params.theme.fg("warning", this.t("model.noOptions")));
     }
     if (this.statusText) rows.push(this.statusLine(inner));
     rows.push(truncateToWidth(
       this.editorKind === "fallback"
-        ? `${this.params.theme.fg("dim", "Esc/←")} settings ${this.params.theme.fg("dim", "· Space")} toggle ${this.params.theme.fg("dim", "· Ctrl+↑↓")} order ${this.params.theme.fg("dim", "· Enter")} save`
+        ? this.t("model.footer.fallback")
         : this.editorKind === "roles"
-          ? `${this.params.theme.fg("dim", "Esc/←")} settings ${this.params.theme.fg("dim", "· Space")} toggle ${this.params.theme.fg("dim", "· Enter")} save ${this.params.theme.fg("dim", "· ↑↓")} select`
+          ? this.t("model.footer.roles")
           : this.editorKind === "menu"
-            ? `${this.params.theme.fg("dim", "Esc/←")} back ${this.params.theme.fg("dim", "· Enter/→")} open ${this.params.theme.fg("dim", "· ↑↓")} select`
-            : `${this.params.theme.fg("dim", "Esc/←")} settings ${this.params.theme.fg("dim", "· Enter")} save ${this.params.theme.fg("dim", "· ↑↓")} select ${this.params.theme.fg("dim", "· type")} filter`,
+            ? this.t("model.footer.menu")
+            : this.t("model.footer.editor"),
       inner,
       "…",
     ));
@@ -1983,19 +2079,27 @@ export class TeammateControlCenter implements Component, Focusable {
       const profile = this.state.global.profiles[profileId];
       const active = profileId === this.config.profileId;
       const isDefault = profileId === this.state.global.defaultProfile;
-      const states = [active ? "active" : "", isDefault ? "default" : ""].filter(Boolean).join(" · ");
-      const suffix = states ? ` · ${states}` : ` · ${ruleCount(profile)} routes`;
+      const states = [
+        active ? this.t("common.active") : "",
+        isDefault ? this.t("common.default") : "",
+      ].filter(Boolean).join(" · ");
+      const suffix = states
+        ? ` · ${states}`
+        : ` ${this.t("model.profileRoutes", { count: ruleCount(profile) })}`;
       return truncateToWidth(`${prefix} ${this.params.theme.bold(displayText(profile.name))} ${this.params.theme.fg("dim", suffix)}`, width, "…");
     }
     if (this.tab === "routing") {
       const taskType = item as TeammateTaskType;
       if (taskType === NEW_CUSTOM_TYPE_ENTRY) {
-        return truncateToWidth(`${prefix} ${this.params.theme.fg("accent", this.params.theme.bold("+ New custom type"))} ${this.params.theme.fg("dim", "· Ctrl+N")}`, width, "…");
+        return truncateToWidth(`${prefix} ${this.params.theme.fg("accent", this.params.theme.bold(this.t("model.newType")))} ${this.params.theme.fg("dim", "· Ctrl+N")}`, width, "…");
       }
       const meta = this.taskTypeMeta(taskType);
       const mapping = this.config.mappings[taskType] ?? "auto";
       const thinking = this.config.thinkingLevels[taskType] ?? "inherit";
-      return truncateToWidth(`${prefix} ${this.params.theme.bold(displayText(meta.label))} ${this.params.theme.fg("dim", `· ${displayText(mapping)} · think ${displayText(thinking)}`)}`, width, "…");
+      return truncateToWidth(`${prefix} ${this.params.theme.bold(displayText(meta.label))} ${this.params.theme.fg("dim", this.t("model.routingRow", {
+        model: displayText(mapping),
+        thinking: displayText(thinking),
+      }))}`, width, "…");
     }
     if (this.tab === "roles") {
       const agent = item as AgentConfig;
@@ -2008,7 +2112,7 @@ export class TeammateControlCenter implements Component, Focusable {
       return truncateToWidth(`${prefix} @${this.params.theme.bold(displayText(agent.name))} ${this.params.theme.fg("dim", `[${displayText(agent.source)}]${suffix}`)}`, width, "…");
     }
     const agent = item as ControlCenterActiveAgent;
-    const status = activeStatus(agent.status);
+    const status = activeStatus(agent.status, this.t);
     const name = agent.name ?? agent.correlationId.slice(0, 8);
     return truncateToWidth(
       `${prefix} ${this.params.theme.fg(status.tone, status.icon)} ${this.params.theme.bold(`${displayText(agent.agent)}/${displayText(name)}`)} ${this.params.theme.fg("dim", status.label)}`,
@@ -2025,60 +2129,97 @@ export class TeammateControlCenter implements Component, Focusable {
       const profile = this.state.global.profiles[profileId];
       const unavailable = this.unavailableModels(profile);
       lines.push(this.params.theme.bold(displayText(profile.name)));
-      lines.push(this.params.theme.fg("muted", `ID · ${displayText(profileId)}`));
-      lines.push(this.params.theme.fg("dim", `Routes · ${ruleCount(profile)} · unavailable ${unavailable.length}`));
-      lines.push(this.params.theme.fg("dim", `State · ${profileId === this.config.profileId ? "active in this project" : "inactive"}`));
-      lines.push(this.params.theme.fg("dim", `Global default · ${profileId === this.state.global.defaultProfile ? "yes" : "no"}`));
-      lines.push(this.params.theme.fg("dim", "Config · ~/.pi/agent/teammate-models.json"));
-      if (unavailable.length > 0) lines.push(this.params.theme.fg("warning", `Unavailable · ${unavailable.map(displayText).join(", ")}`));
+      lines.push(this.params.theme.fg("muted", this.t("model.profileId", { id: displayText(profileId) })));
+      lines.push(this.params.theme.fg("dim", this.t("model.profileRouteCount", {
+        count: ruleCount(profile),
+        unavailable: unavailable.length,
+      })));
+      lines.push(this.params.theme.fg("dim", this.t("model.profileState", {
+        state: profileId === this.config.profileId
+          ? this.t("model.profileActive")
+          : this.t("model.profileInactive"),
+      })));
+      lines.push(this.params.theme.fg("dim", this.t("model.globalDefault", {
+        value: profileId === this.state.global.defaultProfile ? this.t("model.yes") : this.t("model.no"),
+      })));
+      lines.push(this.params.theme.fg("dim", this.t("model.configPath")));
+      if (unavailable.length > 0) {
+        lines.push(this.params.theme.fg("warning", this.t("model.unavailableModels", {
+          models: unavailable.map(displayText).join(", "),
+        })));
+      }
       if (hasRoutingRules(this.state.project.overrides)) {
         const applied = this.state.project.applyOverrides;
         lines.push(this.params.theme.fg(
           applied ? "warning" : "dim",
-          `Project overrides · ${applied ? "● enabled" : "○ preserved / disabled"}`,
+          this.t("model.projectOverrides", {
+            state: applied ? this.t("model.overridesEnabled") : this.t("model.overridesDisabled"),
+          }),
         ));
       }
-      if (this.state.missingProfile) lines.push(this.params.theme.fg("warning", `Missing selection · ${displayText(this.state.missingProfile)}`));
+      if (this.state.missingProfile) {
+        lines.push(this.params.theme.fg("warning", this.t("model.missingSelection", {
+          profile: displayText(this.state.missingProfile),
+        })));
+      }
     } else if (this.tab === "routing") {
       const taskType = this.filteredTaskTypes()[this.selected.routing];
       if (!taskType) return [this.emptyState()];
       if (taskType === NEW_CUSTOM_TYPE_ENTRY) {
-        lines.push(this.params.theme.bold("+ New custom type"));
-        lines.push(this.params.theme.fg("muted", "Create a custom agent type with optional trigger keywords"));
-        lines.push(this.params.theme.fg("dim", "Keywords define when to use the type and auto-match task prompts"));
-        lines.push(this.params.theme.fg("dim", "Enter opens the creation flow · Esc closes the control center"));
+        lines.push(this.params.theme.bold(this.t("model.newType")));
+        lines.push(this.params.theme.fg("muted", this.t("model.newTypeDetail")));
+        lines.push(this.params.theme.fg("dim", this.t("model.newTypeKeywords")));
+        lines.push(this.params.theme.fg("dim", this.t("model.newTypeOpen")));
         return lines.map((line) => truncateToWidth(line, Math.max(1, width), "…"));
       }
       const meta = this.taskTypeMeta(taskType);
-      const mapping = this.config.mappings[taskType] ?? "auto / inherit main session model";
+      const mapping = this.config.mappings[taskType] ?? this.t("model.route.autoMain");
       const assignedRoles = this.assignedRoles(taskType);
       lines.push(this.params.theme.bold(displayText(meta.label)));
-      lines.push(this.params.theme.fg("muted", `Suggested roles · ${displayText(meta.roles)}`));
-      lines.push(this.params.theme.fg("dim", `Assigned roles · ${assignedRoles.length > 0 ? assignedRoles.map((name) => `@${displayText(name)}`).join(", ") : "none"}`));
+      lines.push(this.params.theme.fg("muted", this.t("model.suggestedRoles", {
+        roles: displayText(meta.roles),
+      })));
+      lines.push(this.params.theme.fg("dim", this.t("model.assignedRoles", {
+        roles: assignedRoles.length > 0
+          ? assignedRoles.map((name) => `@${displayText(name)}`).join(", ")
+          : this.t("common.none"),
+      })));
       lines.push(...wrapTextWithAnsi(displayText(meta.description), Math.max(1, width)).slice(0, 3));
-      lines.push(this.params.theme.fg("dim", `Model · ${displayText(mapping)}`));
-      lines.push(this.params.theme.fg("dim", `Fallbacks · ${this.config.fallbackMappings?.[taskType]?.map(displayText).join(", ") || "none"}`));
+      lines.push(this.params.theme.fg("dim", this.t("model.modelValue", { model: displayText(mapping) })));
+      lines.push(this.params.theme.fg("dim", this.t("model.fallbackValues", {
+        models: this.config.fallbackMappings?.[taskType]?.map(displayText).join(", ") || this.t("common.none"),
+      })));
       const unhealthy = (this.config.fallbackMappings?.[taskType] ?? [])
         .map((model) => ({ model, health: this.health.get(model) }))
         .filter((entry): entry is { model: string; health: ModelCircuitSnapshot } =>
           !!entry.health && entry.health.state !== "CLOSED");
       if (unhealthy.length > 0) {
-        lines.push(this.params.theme.fg("warning", `Circuit · ${unhealthy.map((entry) => `${displayText(entry.model)} ${entry.health.state}`).join(", ")}`));
+        lines.push(this.params.theme.fg("warning", this.t("model.circuitValue", {
+          value: unhealthy.map((entry) => `${displayText(entry.model)} ${entry.health.state}`).join(", "),
+        })));
       }
-      lines.push(this.params.theme.fg("dim", `Thinking · ${displayText(this.config.thinkingLevels[taskType] ?? "inherit / Pi default")}`));
+      lines.push(this.params.theme.fg("dim", this.t("model.thinkingValue", {
+        thinking: displayText(this.config.thinkingLevels[taskType] ?? this.t("model.route.inheritThinking")),
+      })));
       const keywords = this.config.typeMeta?.[taskType]?.keywords;
       if (keywords && keywords.length > 0) {
-        lines.push(this.params.theme.fg("dim", `Keywords · ${keywords.map(displayText).join(", ")}`));
+        lines.push(this.params.theme.fg("dim", this.t("model.keywordsValue", {
+          keywords: keywords.map(displayText).join(", "),
+        })));
       }
-      lines.push(this.params.theme.fg("dim", `Profile · ${displayText(this.config.profileName)} · global`));
+      lines.push(this.params.theme.fg("dim", this.t("model.profileValue", {
+        profile: displayText(this.config.profileName),
+      })));
       if (!(TEAMMATE_TASK_TYPES as readonly string[]).includes(taskType)) {
         const declaredByAgent = this.agents.some((agent) => agent.taskType === taskType);
         lines.push(this.params.theme.fg("dim", declaredByAgent
-          ? "Agent-declared type · Ctrl+D resets Profile routing"
-          : "Custom type · Ctrl+D deletes its routing"));
+          ? this.t("model.agentDeclared")
+          : this.t("model.customTypeDelete")));
       }
-      lines.push(this.params.theme.fg("dim", "Ctrl+E edits keywords"));
-      if (this.state.project.applyOverrides) lines.push(this.params.theme.fg("warning", "Project overrides are active at runtime"));
+      lines.push(this.params.theme.fg("dim", this.t("model.editKeywords")));
+      if (this.state.project.applyOverrides) {
+        lines.push(this.params.theme.fg("warning", this.t("model.overridesRuntime")));
+      }
     } else if (this.tab === "roles") {
       const agent = this.filteredRoles()[this.selected.roles];
       if (!agent) return [this.emptyState()];
@@ -2092,47 +2233,94 @@ export class TeammateControlCenter implements Component, Focusable {
       const effectiveModel = typeModel ?? roleRules?.model ?? agent.model;
       const effectiveFallbacks = typeFallbacks ?? roleRules?.fallbackModels;
       const effectiveThinking = typeThinking ?? roleRules?.thinking ?? agent.thinking;
-      const modelSource = typeModel ? `type ${assignedType}` : roleRules?.model ? "role override" : agent.model ? "agent frontmatter" : "runtime routing";
-      const fallbackSource = typeFallbacks ? `type ${assignedType}` : roleRules?.fallbackModels ? "role override" : "none";
-      const thinkingSource = typeThinking ? `type ${assignedType}` : roleRules?.thinking ? "role override" : agent.thinking ? "agent frontmatter" : "Pi default";
+      const modelSource = typeModel
+        ? this.t("model.source.type", { type: assignedType! })
+        : roleRules?.model
+          ? this.t("model.source.roleOverride")
+          : agent.model
+            ? this.t("model.source.frontmatter")
+            : this.t("model.source.runtime");
+      const fallbackSource = typeFallbacks
+        ? this.t("model.source.type", { type: assignedType! })
+        : roleRules?.fallbackModels
+          ? this.t("model.source.roleOverride")
+          : this.t("common.none");
+      const thinkingSource = typeThinking
+        ? this.t("model.source.type", { type: assignedType! })
+        : roleRules?.thinking
+          ? this.t("model.source.roleOverride")
+          : agent.thinking
+            ? this.t("model.source.frontmatter")
+            : this.t("model.source.piDefault");
       const modelForCircuit = effectiveModel;
-      lines.push(this.params.theme.fg("dim", `Type · ${displayText(assignedType ?? "unassigned / inferred")}`));
-      lines.push(this.params.theme.fg("dim", `Effective model · ${displayText(effectiveModel ?? "auto / routed")} · ${displayText(modelSource)}`));
-      lines.push(this.params.theme.fg("dim", `Role model override · ${displayText(roleRules?.model ?? "none")}`));
-      lines.push(this.params.theme.fg("dim", `Effective fallbacks · ${displayText(effectiveFallbacks?.join(", ") ?? "none")} · ${displayText(fallbackSource)}`));
-      lines.push(this.params.theme.fg("dim", `Effective thinking · ${displayText(effectiveThinking ?? "inherit")} · ${displayText(thinkingSource)}`));
+      lines.push(this.params.theme.fg("dim", this.t("model.typeValue", {
+        type: displayText(assignedType ?? this.t("model.unassignedInferred")),
+      })));
+      lines.push(this.params.theme.fg("dim", this.t("model.effectiveModel", {
+        model: displayText(effectiveModel ?? this.t("model.autoRouted")),
+        source: displayText(modelSource),
+      })));
+      lines.push(this.params.theme.fg("dim", this.t("model.roleModel", {
+        model: displayText(roleRules?.model ?? this.t("common.none")),
+      })));
+      lines.push(this.params.theme.fg("dim", this.t("model.effectiveFallbacks", {
+        models: displayText(effectiveFallbacks?.join(", ") ?? this.t("common.none")),
+        source: displayText(fallbackSource),
+      })));
+      lines.push(this.params.theme.fg("dim", this.t("model.effectiveThinking", {
+        thinking: displayText(effectiveThinking ?? this.t("model.inheritValue")),
+        source: displayText(thinkingSource),
+      })));
       const circuit = roleRules?.circuit;
       const healthNote = modelForCircuit ? this.circuitNote(modelForCircuit) : "";
-      lines.push(this.params.theme.fg("dim", `Circuit · ${circuitDisplayText(circuit)}${healthNote ? ` · ${displayText(healthNote)}` : ""}`));
-      lines.push(this.params.theme.fg("dim", `Context · ${displayText(agent.defaultContext ?? "fresh")} · prompt ${displayText(agent.systemPromptMode)}`));
-      lines.push(this.params.theme.fg("dim", `Tools · ${agent.tools?.map(displayText).join(", ") ?? "default"}`));
+      lines.push(this.params.theme.fg("dim", this.t("model.circuitValue", {
+        value: `${circuitDisplayText(circuit, this.t)}${healthNote ? ` · ${displayText(healthNote)}` : ""}`,
+      })));
+      lines.push(this.params.theme.fg("dim", this.t("model.context", {
+        context: displayText(agent.defaultContext ?? "fresh"),
+        prompt: displayText(agent.systemPromptMode),
+      })));
+      lines.push(this.params.theme.fg("dim", this.t("model.tools", {
+        tools: agent.tools?.map(displayText).join(", ") ?? this.t("common.default"),
+      })));
     } else {
       const agent = this.filteredActiveAgents()[this.selected.active];
       if (!agent) return [this.emptyState()];
-      const status = activeStatus(agent.status);
+      const status = activeStatus(agent.status, this.t);
       const uptime = Math.max(0, Math.round((Date.now() - agent.startedAt) / 1000));
       lines.push(`${this.params.theme.fg(status.tone, status.icon)} ${this.params.theme.bold(displayText(agent.name ?? agent.agent))} · ${status.label}`);
-      lines.push(this.params.theme.fg("muted", `Role · ${displayText(agent.agent)}`));
-      lines.push(this.params.theme.fg("dim", `Uptime · ${uptime}s · inbox ${agent.inboxCount} · tasks ${agent.taskCount}`));
-      lines.push(this.params.theme.fg("dim", `ID · ${displayText(agent.correlationId.slice(0, 12))}`));
-      lines.push(this.params.theme.fg("muted", "Enter opens the existing collaboration view"));
+      lines.push(this.params.theme.fg("muted", this.t("model.role", { role: displayText(agent.agent) })));
+      lines.push(this.params.theme.fg("dim", this.t("model.uptime", {
+        seconds: uptime,
+        inbox: agent.inboxCount,
+        tasks: agent.taskCount,
+      })));
+      lines.push(this.params.theme.fg("dim", this.t("model.profileId", {
+        id: displayText(agent.correlationId.slice(0, 12)),
+      })));
+      lines.push(this.params.theme.fg("muted", this.t("model.openCollaboration")));
     }
     return lines.map((line) => truncateToWidth(line, Math.max(1, width), "…"));
   }
 
   private emptyState(): string {
-    if (this.queries[this.tab]) return this.params.theme.fg("warning", "□ No matches · Backspace clears the filter");
-    if (this.tab === "profiles") return this.params.theme.fg("warning", "□ No model Profiles available");
-    if (this.tab === "roles") return this.params.theme.fg("warning", "□ No teammate roles discovered · add .pi/agents/*.md");
-    if (this.tab === "active") return this.params.theme.fg("dim", "□ No active teammates · Esc closes the control center");
-    return this.params.theme.fg("warning", "□ No routing entries available");
+    if (this.queries[this.tab]) return this.params.theme.fg("warning", this.t("model.noMatches"));
+    if (this.tab === "profiles") return this.params.theme.fg("warning", this.t("model.noProfiles"));
+    if (this.tab === "roles") return this.params.theme.fg("warning", this.t("model.noRoles"));
+    if (this.tab === "active") return this.params.theme.fg("dim", this.t("model.noActive"));
+    return this.params.theme.fg("warning", this.t("model.noRouting"));
   }
 
   private headerLine(width: number): string {
     const active = this.activeAgents.filter((agent) => agent.status !== "completed").length;
-    const override = this.state.project.applyOverrides ? " · overrides on" : "";
+    const override = this.state.project.applyOverrides ? this.t("model.overridesOn") : "";
     return truncateToWidth(
-      `${this.params.theme.fg("accent", this.params.theme.bold("Teammate Control Center"))} ${this.params.theme.fg("dim", `· ${displayText(this.config.profileName)}${override} · ${this.agents.length} roles · ${active} active`)}`,
+      `${this.params.theme.fg("accent", this.params.theme.bold(this.t("model.title")))} ${this.params.theme.fg("dim", this.t("model.headerMeta", {
+        profile: displayText(this.config.profileName),
+        override,
+        roles: this.agents.length,
+        active,
+      }))}`,
       width,
       "…",
     );
@@ -2147,7 +2335,7 @@ export class TeammateControlCenter implements Component, Focusable {
           : tab === "roles"
             ? this.agents.length
             : this.activeAgents.length;
-      const label = `${TAB_LABELS[tab]} ${count}`;
+      const label = `${tabLabel(tab, this.t)} ${count}`;
       return tab === this.tab
         ? this.params.theme.fg("accent", this.params.theme.bold(`[${label}]`))
         : this.params.theme.fg("dim", label);
@@ -2157,8 +2345,10 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private filterLine(width: number, query: string, count: number): string {
     const marker = this.focused ? CURSOR_MARKER : "";
-    const queryText = query ? `${displayText(query)}${marker}` : `${marker}${this.params.theme.fg("dim", "type to filter")}`;
-    return truncateToWidth(`${this.params.theme.fg("accent", "›")} ${queryText} ${this.params.theme.fg("dim", `· ${count} shown`)}`, width, "…");
+    const queryText = query
+      ? `${displayText(query)}${marker}`
+      : `${marker}${this.params.theme.fg("dim", this.t("model.filterPlaceholder"))}`;
+    return truncateToWidth(`${this.params.theme.fg("accent", "›")} ${queryText} ${this.params.theme.fg("dim", this.t("model.filterShown", { count }))}`, width, "…");
   }
 
   private statusLine(width: number): string {
@@ -2167,25 +2357,31 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private footerLine(width: number): string {
     if (this.params.readOnly) {
-      return this.params.theme.fg("warning", truncateToWidth("Enter retry load · Esc close · navigation is read-only", width, "…"));
+      return this.params.theme.fg("warning", truncateToWidth(this.t("model.readOnlyFooter"), width, "…"));
     }
     const action = this.tab === "profiles"
-      ? "Enter manage"
+      ? this.t("model.footer.manage")
       : this.tab === "routing"
-        ? "Enter settings · Ctrl+N new type"
+        ? this.t("model.footer.routing")
         : this.tab === "roles"
-          ? "Enter settings · Ctrl+T type"
+          ? this.t("model.footer.role")
           : this.tab === "active"
-            ? "Enter open"
+            ? this.t("model.footer.open")
             : "";
-    const segments = ["Esc close", action, "↑↓ cursor", "Tab/←→ tabs", "type filter"];
+    const segments = [
+      this.t("model.footer.close"),
+      action,
+      this.t("model.footer.cursor"),
+      this.t("model.footer.tabs"),
+      this.t("model.footer.filter"),
+    ];
     let footer = "";
     for (const segment of segments.filter(Boolean)) {
       const next = footer ? `${footer} · ${segment}` : segment;
       if (visibleWidth(next) > width) break;
       footer = next;
     }
-    return this.params.theme.fg("dim", footer || "Esc close");
+    return this.params.theme.fg("dim", footer || this.t("model.footer.close"));
   }
 
   private frame(rows: string[], width: number): string[] {
@@ -2202,14 +2398,19 @@ export class TeammateControlCenter implements Component, Focusable {
     const status = this.statusText ? `${displayText(this.statusText)} · ` : "";
     if (this.keywordsInput) {
       return truncateToWidth(
-        `${status}Esc cancel · keywords for ${displayText(this.keywordsInput.taskType)} · ${displayText(this.keywordsDraft || "comma-separated")}`,
+        `${status}${this.t("model.compactKeywords", {
+          type: displayText(this.keywordsInput.taskType),
+          keywords: displayText(this.keywordsDraft || this.t("model.commaSeparated")),
+        })}`,
         width,
         "…",
       );
     }
     if (this.customTypeInput) {
       return truncateToWidth(
-        `${status}Esc cancel · new custom type · ${displayText(this.customTypeDraft || "type identifier")}`,
+        `${status}${this.t("model.compactNewType", {
+          type: displayText(this.customTypeDraft || this.t("model.typeIdentifier")),
+        })}`,
         width,
         "…",
       );
@@ -2220,14 +2421,21 @@ export class TeammateControlCenter implements Component, Focusable {
         ? `@${displayText(this.modelRole)}`
         : displayText(this.taskTypeMeta(this.modelTaskType as TeammateTaskType).label);
       return truncateToWidth(
-        `${status}Esc back · ${title} · ${displayText(item?.label ?? this.editorKind)}`,
+        `${status}${this.t("model.compactBack", {
+          title,
+          item: displayText(item?.label ?? this.editorLabel()),
+        })}`,
         width,
         "…",
       );
     }
     const item = this.currentItems()[this.selected[this.tab]];
-    const label = item ? this.itemLine(item, true, Math.max(1, width)) : `${TAB_LABELS[this.tab]} empty`;
-    const action = this.params.readOnly ? "Enter retry · " : "Esc close · ";
+    const label = item
+      ? this.itemLine(item, true, Math.max(1, width))
+      : this.t("model.compactEmpty", { tab: tabLabel(this.tab, this.t) });
+    const action = this.params.readOnly
+      ? `${this.t("model.compactRetry")} `
+      : `${this.t("model.footer.close")} · `;
     return truncateToWidth(`${status}${action}${label}`, width, "…");
   }
 }
@@ -2259,6 +2467,7 @@ async function showProfilePersistenceStatus(
       settled = true;
       done(outcome);
     };
+    const t = createTuiTranslator(options.locale);
     const controlCenter = new TeammateControlCenter({
       cwd: ctx.cwd,
       availableModels,
@@ -2269,11 +2478,12 @@ async function showProfilePersistenceStatus(
       initialTab: "profiles",
       initialProfileId: profileId,
       initialProfileQuery: profileQuery,
-      initialStatusText: `Saving · ${savingText}`,
+      initialStatusText: t("model.savingMessage", { target: savingText }),
       initialStatusTone: "dim",
       initialSaving: true,
       modelHealth: options.modelHealth,
       globalFilePath: options.globalFilePath,
+      locale: options.locale,
       requestRender: () => tui.requestRender(),
       close: () => finish(null),
     });
@@ -2317,6 +2527,7 @@ export async function showModelMappingOverlay(
   availableModels: readonly TeammateModelCapability[],
   options: TeammateControlCenterOptions = {},
 ): Promise<void> {
+  const t = createTuiTranslator(options.locale);
   let initialTab: ControlCenterTab = "routing";
   let initialProfileId: string | undefined;
   let initialProfileQuery = "";
@@ -2334,7 +2545,9 @@ export async function showModelMappingOverlay(
       state = lastState;
       usingFallback = true;
       initialStatusTone = "error";
-      initialStatusText = `Save failed · ${displayText(error instanceof Error ? error.message : String(error))}`;
+      initialStatusText = t("model.saveFailed", {
+        message: displayText(error instanceof Error ? error.message : String(error)),
+      });
     }
     const action = await ctx.ui.custom<ControlCenterAction | null>((tui, theme, _keybindings, done) => {
       const controlCenter = new TeammateControlCenter({
@@ -2352,6 +2565,7 @@ export async function showModelMappingOverlay(
         readOnly: usingFallback,
         modelHealth: options.modelHealth,
         globalFilePath: options.globalFilePath,
+        locale: options.locale,
         requestRender: () => tui.requestRender(),
         close: done,
       });
@@ -2383,52 +2597,68 @@ export async function showModelMappingOverlay(
     initialStatusTone = "dim";
     const profile = state.global.profiles[action.profileId];
     if (!profile) {
-      ctx.ui.notify(`Profile ${displayText(action.profileId)} no longer exists.`, "warning");
+      ctx.ui.notify(t("model.profileMissing", { profile: displayText(action.profileId) }), "warning");
       continue;
     }
     const choices: Array<{ key: string; label: string }> = [];
-    if (action.profileId !== state.config.profileId) choices.push({ key: "activate", label: "Activate in this project" });
+    if (action.profileId !== state.config.profileId) {
+      choices.push({ key: "activate", label: t("model.profile.activate") });
+    }
     choices.push(
-      { key: "create", label: "Create empty Profile" },
-      { key: "duplicate", label: "Duplicate this Profile" },
-      { key: "rename", label: "Rename this Profile" },
+      { key: "create", label: t("model.profile.create") },
+      { key: "duplicate", label: t("model.profile.duplicate") },
+      { key: "rename", label: t("model.profile.rename") },
     );
     if (action.profileId !== state.global.defaultProfile) {
       choices.push(
-        { key: "default", label: "Set as global default" },
-        { key: "delete", label: "Delete this Profile" },
+        { key: "default", label: t("model.profile.default") },
+        { key: "delete", label: t("model.profile.delete") },
       );
     }
     if (hasRoutingRules(state.project.overrides)) {
       choices.push({
         key: state.project.applyOverrides ? "disable-overrides" : "restore-overrides",
-        label: state.project.applyOverrides ? "Disable project overrides" : "Restore project overrides",
+        label: state.project.applyOverrides
+          ? t("model.profile.disableOverrides")
+          : t("model.profile.restoreOverrides"),
       });
       choices.push(
-        { key: "promote-overrides", label: "Promote project overrides to a Profile" },
-        { key: "clear-overrides", label: "Clear preserved project overrides" },
+        { key: "promote-overrides", label: t("model.profile.promoteOverrides") },
+        { key: "clear-overrides", label: t("model.profile.clearOverrides") },
       );
     }
 
-    const selected = await ctx.ui.select(`Profile · ${displayText(profile.name)}`, choices.map((choice) => choice.label));
+    const selected = await ctx.ui.select(
+      t("model.profile.menuTitle", { profile: displayText(profile.name) }),
+      choices.map((choice) => choice.label),
+    );
     const operation = choices.find((choice) => choice.label === selected)?.key;
     if (!operation) continue;
 
-    let savingText = "Profile";
+    let savingText = t("model.tab.profiles");
     let persistOperation: (() => ProfileOperationResult) | undefined;
     if (operation === "activate") {
-      savingText = `Activating ${displayText(profile.name)}`;
+      savingText = t("model.profile.activating", { profile: displayText(profile.name) });
       persistOperation = () => {
         setProjectActiveModelRoutingProfile(ctx.cwd, action.profileId, options.globalFilePath);
-        return { message: `Activated ${displayText(profile.name)} for this project`, focusProfileId: action.profileId };
+        return {
+          message: t("model.profile.activated", { profile: displayText(profile.name) }),
+          focusProfileId: action.profileId,
+        };
       };
     } else if (operation === "create" || operation === "duplicate") {
       const name = await ctx.ui.input(
-        operation === "create" ? "New teammate model Profile" : `Duplicate ${displayText(profile.name)}`,
-        operation === "create" ? "Profile name" : `${displayText(profile.name)} copy`,
+        operation === "create"
+          ? t("model.profile.newTitle")
+          : t("model.profile.duplicateTitle", { profile: displayText(profile.name) }),
+        operation === "create"
+          ? t("model.profile.name")
+          : t("model.profile.copy", { profile: displayText(profile.name) }),
       );
       if (!name?.trim()) continue;
-      savingText = operation === "create" ? "Creating Profile" : `Duplicating ${displayText(profile.name)}`;
+      savingText = operation === "create"
+        ? t("model.profile.creating")
+        : t("model.profile.duplicating", { profile: displayText(profile.name) });
       persistOperation = () => {
         const created = createAndActivateGlobalModelRoutingProfile(
           ctx.cwd,
@@ -2437,63 +2667,82 @@ export async function showModelMappingOverlay(
           options.globalFilePath,
         );
         return {
-          message: `Created and activated ${displayText(name.trim())}`,
+          message: t("model.profile.created", { profile: displayText(name.trim()) }),
           focusProfileId: created.changedProfileId,
         };
       };
     } else if (operation === "rename") {
-      const name = await ctx.ui.input(`Rename ${displayText(profile.name)}`, displayText(profile.name));
+      const name = await ctx.ui.input(
+        t("model.profile.renameTitle", { profile: displayText(profile.name) }),
+        displayText(profile.name),
+      );
       if (!name?.trim()) continue;
-      savingText = `Renaming ${displayText(profile.name)}`;
+      savingText = t("model.profile.renaming", { profile: displayText(profile.name) });
       persistOperation = () => {
         renameGlobalModelRoutingProfile(ctx.cwd, action.profileId, name, options.globalFilePath);
-        return { message: `Renamed Profile to ${displayText(name.trim())}`, focusProfileId: action.profileId };
+        return {
+          message: t("model.profile.renamed", { profile: displayText(name.trim()) }),
+          focusProfileId: action.profileId,
+        };
       };
     } else if (operation === "default") {
-      savingText = `Setting ${displayText(profile.name)} as default`;
+      savingText = t("model.profile.settingDefault", { profile: displayText(profile.name) });
       persistOperation = () => {
         setDefaultGlobalModelRoutingProfile(ctx.cwd, action.profileId, options.globalFilePath);
-        return { message: `${displayText(profile.name)} is now the global default`, focusProfileId: action.profileId };
+        return {
+          message: t("model.profile.isDefault", { profile: displayText(profile.name) }),
+          focusProfileId: action.profileId,
+        };
       };
     } else if (operation === "delete") {
       const confirmed = await ctx.ui.confirm(
-        `Delete ${displayText(profile.name)}?`,
-        "Other projects using this Profile will fall back to the global default.",
+        t("model.profile.deleteTitle", { profile: displayText(profile.name) }),
+        t("model.profile.deleteDetail"),
       );
       if (!confirmed) continue;
-      savingText = `Deleting ${displayText(profile.name)}`;
+      savingText = t("model.profile.deleting", { profile: displayText(profile.name) });
       persistOperation = () => {
         deleteGlobalModelRoutingProfile(ctx.cwd, action.profileId, options.globalFilePath);
-        return { message: `Deleted ${displayText(profile.name)}`, focusProfileId: null };
+        return {
+          message: t("model.profile.deleted", { profile: displayText(profile.name) }),
+          focusProfileId: null,
+        };
       };
     } else if (operation === "disable-overrides" || operation === "restore-overrides") {
       const enabled = operation === "restore-overrides";
-      savingText = `${enabled ? "Restoring" : "Disabling"} project overrides`;
+      savingText = enabled
+        ? t("model.profile.restoringOverrides")
+        : t("model.profile.disablingOverrides");
       persistOperation = () => {
         setProjectModelRoutingOverridesEnabled(ctx.cwd, enabled, options.globalFilePath);
-        return { message: `Project overrides ${enabled ? "restored" : "disabled"}`, focusProfileId: action.profileId };
+        return {
+          message: t("model.profile.overridesState", {
+            state: enabled ? t("model.profile.restored") : t("model.profile.disabled"),
+          }),
+          focusProfileId: action.profileId,
+        };
       };
     } else if (operation === "promote-overrides") {
-      const name = await ctx.ui.input("Promote project overrides", "Profile name");
+      const name = await ctx.ui.input(t("model.profile.promoteTitle"), t("model.profile.name"));
       if (!name?.trim()) continue;
-      savingText = "Promoting project overrides";
+      savingText = t("model.profile.promoting");
       persistOperation = () => {
         const promoted = promoteProjectModelRoutingOverrides(ctx.cwd, name, options.globalFilePath);
         return {
-          message: `Promoted overrides to ${displayText(name.trim())} and activated it`,
+          message: t("model.profile.promoted", { profile: displayText(name.trim()) }),
           focusProfileId: promoted.changedProfileId,
         };
       };
     } else if (operation === "clear-overrides") {
       const confirmed = await ctx.ui.confirm(
-        "Clear project overrides?",
-        "This permanently removes the preserved project-specific routing values.",
+        t("model.profile.clearTitle"),
+        t("model.profile.clearDetail"),
       );
       if (!confirmed) continue;
-      savingText = "Clearing project overrides";
+      savingText = t("model.profile.clearing");
       persistOperation = () => {
         clearProjectModelRoutingOverrides(ctx.cwd, options.globalFilePath);
-        return { message: "Cleared project routing overrides", focusProfileId: action.profileId };
+        return { message: t("model.profile.cleared"), focusProfileId: action.profileId };
       };
     }
     if (!persistOperation) continue;
@@ -2513,11 +2762,13 @@ export async function showModelMappingOverlay(
       if (outcome.focusProfileId === null) initialProfileId = undefined;
       else if (outcome.focusProfileId) initialProfileId = outcome.focusProfileId;
       initialStatusTone = "success";
-      initialStatusText = `Saved · ${displayText(outcome.message)}`;
-      ctx.ui.notify(`${displayText(outcome.message)}.`, "info");
+      initialStatusText = t("model.savedMessage", { message: displayText(outcome.message) });
+      ctx.ui.notify(t("model.notification", { message: displayText(outcome.message) }), "info");
     } else {
       initialStatusTone = "error";
-      initialStatusText = `Save failed · ${displayText(outcome.error ?? "Unknown persistence error")}`;
+      initialStatusText = t("model.saveFailed", {
+        message: displayText(outcome.error ?? t("model.persistence.unknown")),
+      });
       ctx.ui.notify(initialStatusText, "error");
     }
   }

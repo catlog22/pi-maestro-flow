@@ -7,9 +7,16 @@
  * Pattern: follows TeammateControlCenter (ctx.ui.custom + Component).
  */
 
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { statusIcon } from "../extension/monitor.ts";
 import type { MonitorSupervisionMode } from "../extension/monitor.ts";
+import {
+  createTuiTranslator,
+  onTuiLocaleChange,
+  translateStatusIdentifier,
+  type SupportedSettingsLocale,
+  type TuiTranslator,
+} from "./locale.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -127,8 +134,17 @@ export class MonitorOverlay {
   private editingPrompt = false;
   private statusText = "";
   private requestRender: () => void = () => {};
+  private readonly t: TuiTranslator;
+  private readonly localeDisposer: () => void;
 
-  constructor(private readonly cb: OverlayCallbacks) {
+  constructor(private readonly cb: OverlayCallbacks, locale?: SupportedSettingsLocale) {
+    this.t = createTuiTranslator(locale);
+    this.localeDisposer = locale === undefined
+      ? onTuiLocaleChange(() => {
+          this.statusText = "";
+          this.requestRender();
+        })
+      : () => {};
     this.sessions = cb.getSessions();
     this.treeRows = buildTreeRows(this.sessions);
     // Pre-select already-bound sessions
@@ -155,7 +171,7 @@ export class MonitorOverlay {
 
     // Title
     lines.push(dim(`╭${"─".repeat(inner)}╮`));
-    lines.push(this.frameLine(bold(" Monitor — Select Sessions"), inner, dim));
+    lines.push(this.frameLine(bold(` ${this.t("monitor.title")}`), inner, dim));
 
     // Session list (window → agent → sub-agent tree)
     const maxVisible = Math.min(this.treeRows.length, 10);
@@ -172,28 +188,28 @@ export class MonitorOverlay {
       const idle = s.kind === "window" || s.status !== "running" ? "—" : `${s.idleSeconds}s`;
       const boundTag = s.bound ? dim(" [MON]") : "";
       const sourceTag = s.source && s.source !== "local" ? dim(` [${s.source}]`) : "";
-      const kindTag = s.kind === "window" ? dim("[窗口]") : dim("[代理]");
+      const kindTag = s.kind === "window" ? dim(this.t("monitor.tag.window")) : dim(this.t("monitor.tag.agent"));
 
-      const row = ` ${pointer} ${check} ${branch}${icon} ${kindTag} ${s.displayName}  ${dim(s.status)}  ${dim(idle)}  ${dim(s.agentRole)}${sourceTag}${boundTag}`;
+      const row = ` ${pointer} ${check} ${branch}${icon} ${kindTag} ${s.displayName}  ${dim(translateStatusIdentifier(s.status, this.t))}  ${dim(idle)}  ${dim(s.agentRole)}${sourceTag}${boundTag}`;
       lines.push(this.frameLine(isCursor ? accent(row) : row, inner, dim));
     }
 
     if (this.treeRows.length === 0) {
-      lines.push(this.frameLine(dim("  No active sessions"), inner, dim));
+      lines.push(this.frameLine(dim(`  ${this.t("monitor.noSessions")}`), inner, dim));
     }
 
     lines.push(this.frameLine("", inner, dim));
 
     // Mode selection
-    const autoLabel = this.mode === "auto" ? accent("● Auto") : dim("○ Auto");
-    const customLabel = this.mode === "custom" ? accent("● Custom") : dim("○ Custom");
-    lines.push(this.frameLine(` Mode: ${autoLabel}  ${customLabel}  ${dim("(Tab)")}`, inner, dim));
+    const autoLabel = this.mode === "auto" ? accent(`● ${this.t("common.auto")}`) : dim(`○ ${this.t("common.auto")}`);
+    const customLabel = this.mode === "custom" ? accent(`● ${this.t("common.custom")}`) : dim(`○ ${this.t("common.custom")}`);
+    lines.push(this.frameLine(` ${this.t("monitor.mode")} ${autoLabel}  ${customLabel}  ${dim("(Tab)")}`, inner, dim));
 
     // Custom prompt (only in custom mode)
     if (this.mode === "custom") {
       const promptDisplay = this.editingPrompt
         ? ` > ${this.customPrompt}\x1b[7m \x1b[0m`
-        : ` > ${this.customPrompt || dim("(press Enter to edit)")}`;
+        : ` > ${this.customPrompt || dim(this.t("monitor.editPrompt"))}`;
       lines.push(this.frameLine(promptDisplay, inner, dim));
     }
 
@@ -205,7 +221,7 @@ export class MonitorOverlay {
     // Footer
     lines.push(this.frameLine("", inner, dim));
     lines.push(this.frameLine(
-      dim(" Space select · Tab mode · Enter confirm · Esc cancel · ↑↓ navigate"),
+      dim(this.t("monitor.footer")),
       inner, dim,
     ));
     lines.push(dim(`╰${"─".repeat(inner)}╯`));
@@ -215,7 +231,7 @@ export class MonitorOverlay {
 
   private frameLine(content: string, inner: number, dim: (s: string) => string): string {
     const truncated = truncateToWidth(content, inner, "…");
-    const pad = Math.max(0, inner - visibleLen(truncated));
+    const pad = Math.max(0, inner - visibleWidth(truncated));
     return `${dim("│")} ${truncated}${" ".repeat(pad)} ${dim("│")}`;
   }
 
@@ -226,7 +242,7 @@ export class MonitorOverlay {
     if (this.editingPrompt) {
       if (data === "\x1b" || data === "\r" || data === "\n") {
         this.editingPrompt = false;
-        this.statusText = this.customPrompt ? `Prompt: ${this.customPrompt.slice(0, 40)}` : "";
+        this.statusText = this.customPrompt ? this.t("monitor.promptStatus", { prompt: this.customPrompt.slice(0, 40) }) : "";
       } else if (data === "\x7f" || data === "\b") {
         this.customPrompt = this.customPrompt.slice(0, -1);
       } else if (!data.startsWith("\x1b") && data >= " " && data.length <= 2) {
@@ -245,7 +261,7 @@ export class MonitorOverlay {
       case "\r": case "\n": // Enter
         if (this.mode === "custom" && !this.customPrompt) {
           this.editingPrompt = true;
-          this.statusText = "Type management prompt, Enter to confirm";
+          this.statusText = this.t("monitor.typePrompt");
         } else {
           this.confirm();
         }
@@ -261,8 +277,8 @@ export class MonitorOverlay {
           const s = this.treeRows[this.cursor]!.row;
           if (s.bindable === false) {
             this.statusText = s.kind === "window"
-              ? "The current window is where you are — monitor remote windows"
-              : "Sub-agents are supervised by their window's main session";
+              ? this.t("monitor.currentWindow")
+              : this.t("monitor.subagents");
           } else if (this.selected.has(s.correlationId)) {
             this.selected.delete(s.correlationId);
           } else {
@@ -288,8 +304,8 @@ export class MonitorOverlay {
             const s = this.treeRows[idx]!.row;
             if (s.bindable === false) {
               this.statusText = s.kind === "window"
-                ? "The current window is where you are — monitor remote windows"
-                : "Sub-agents are supervised by their window's main session";
+                ? this.t("monitor.currentWindow")
+                : this.t("monitor.subagents");
             } else if (this.selected.has(s.correlationId)) this.selected.delete(s.correlationId);
             else this.selected.add(s.correlationId);
           }
@@ -302,13 +318,13 @@ export class MonitorOverlay {
   private confirm(): void {
     const selected = [...this.selected];
     if (selected.length === 0) {
-      this.statusText = "Select at least one session (Space)";
+      this.statusText = this.t("monitor.selectOne");
       this.requestRender();
       return;
     }
     if (this.mode === "custom" && !this.customPrompt.trim()) {
       this.editingPrompt = true;
-      this.statusText = "Enter a management prompt first";
+      this.statusText = this.t("monitor.enterPrompt");
       this.requestRender();
       return;
     }
@@ -320,16 +336,9 @@ export class MonitorOverlay {
   }
 
   invalidate(): void {}
-  dispose(): void {}
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Rough visible length (strips ANSI escapes). */
-function visibleLen(s: string): number {
-  return s.replace(/\x1b\[[0-9;]*m/g, "").length;
+  dispose(): void {
+    this.localeDisposer();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -338,6 +347,7 @@ function visibleLen(s: string): number {
 
 export interface MonitorOverlayDeps {
   getSessions: () => MonitorSessionRow[];
+  locale?: SupportedSettingsLocale;
 }
 
 /**
@@ -353,7 +363,7 @@ export async function showMonitorOverlay(
       const overlay = new MonitorOverlay({
         getSessions: deps.getSessions,
         close: done,
-      });
+      }, deps.locale);
       overlay.setRequestRender(() => tui.requestRender());
       return {
         render: (width: number) => overlay.render(width),

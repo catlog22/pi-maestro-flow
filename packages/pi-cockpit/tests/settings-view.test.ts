@@ -2,6 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { applyRow, buildRows, rowKeyForAccel } from "../src/settings-view.ts";
 import { DEFAULT_CONFIG } from "../src/types.ts";
+import { cockpitTuiLocale } from "../src/tui-i18n.ts";
+
+cockpitTuiLocale.setLocale("en");
 
 // The theme row is a hand-off to the /theme picker, thinkingFold is a
 // pass-through to pi's native toggle, and titleGenerationModel opens the model

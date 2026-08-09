@@ -2,6 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { statusText, titleFor, workingMessage, type AmbientState } from "../src/ambient.ts";
 import type { AgentRow, BashBgJob, TodoItem } from "../src/types.ts";
+import { cockpitTuiLocale } from "../src/tui-i18n.ts";
+
+cockpitTuiLocale.setLocale("en");
 
 const MARKS = { ok: "✓", fail: "✗" };
 

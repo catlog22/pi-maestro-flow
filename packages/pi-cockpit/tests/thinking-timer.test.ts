@@ -10,6 +10,9 @@ import {
 	formatThinkingDuration,
 	type ThinkingLabelTarget,
 } from "../src/thinking-timer.ts";
+import { cockpitTuiLocale } from "../src/tui-i18n.ts";
+
+cockpitTuiLocale.setLocale("en");
 
 interface FakeTarget extends ThinkingLabelTarget {
 	labels: string[];

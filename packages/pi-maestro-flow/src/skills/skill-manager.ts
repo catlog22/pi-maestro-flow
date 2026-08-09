@@ -5,6 +5,7 @@ import {
   type Skill,
 } from "@earendil-works/pi-coding-agent";
 import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
+import { getTuiLocale } from "../tui/locale.ts";
 import { loadSkillConfig, type SkillDefaults } from "./skill-config.ts";
 import { SkillManagerStore, type ManagedSkill, type ManagedSkillGroup, type OptionalSkill } from "./skill-manager-store.ts";
 import {
@@ -100,12 +101,12 @@ const CATALOGS = {
   },
 } as const;
 
-type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
+type CatalogKey = keyof (typeof CATALOGS)["en"];
 
 function t(locale: SupportedSettingsLocale, key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
-  const catalog = CATALOGS[locale] ?? CATALOGS["zh-CN"];
+  const catalog = CATALOGS[locale] ?? CATALOGS.en;
   const template: unknown = catalog[key];
-  const text = typeof template === "string" ? template : CATALOGS["zh-CN"][key] as string;
+  const text = typeof template === "string" ? template : CATALOGS.en[key] as string;
   if (!vars) return text;
   return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
     vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
@@ -113,13 +114,14 @@ function t(locale: SupportedSettingsLocale, key: CatalogKey, vars?: Readonly<Rec
 
 export function registerSkillManager(pi: ExtensionAPI): void {
   pi.registerCommand("skills", {
-    description: t("zh-CN", "command.description"),
+    description: t(getTuiLocale(), "command.description"),
     async handler(_args, ctx) {
+      const locale = getTuiLocale();
       if (!ctx.hasUI) {
-        ctx.ui.notify(t("zh-CN", "notify.noTui"), "error");
+        ctx.ui.notify(t(locale, "notify.noTui"), "error");
         return;
       }
-      const result = await runSkillManager(ctx, new SkillManagerStore(ctx.cwd));
+      const result = await runSkillManager(ctx, new SkillManagerStore(ctx.cwd), locale);
       if (result.configChanged) {
         await ctx.reload();
         return;
@@ -148,8 +150,9 @@ export function registerSkillManager(pi: ExtensionAPI): void {
 export async function runSkillManager(
   ctx: ExtensionContext,
   store: SkillManagerStore,
-  locale: SupportedSettingsLocale = "zh-CN",
+  explicitLocale?: SupportedSettingsLocale,
 ): Promise<SkillManagerResult> {
+  const locale = getTuiLocale(explicitLocale);
   let snapshot = await store.load();
   let optionalSkills = await store.loadOptionalSkills();
   let uiState: Partial<SkillManagerUiState> = { query: "" };

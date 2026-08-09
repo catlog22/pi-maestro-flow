@@ -7,6 +7,7 @@
  * Pattern: follows TeammateControlCenter (ctx.ui.custom + Component).
  */
 import type { MonitorSupervisionMode } from "../extension/monitor.ts";
+import { type SupportedSettingsLocale } from "./locale.ts";
 export interface MonitorSessionRow {
     correlationId: string;
     displayName: string;
@@ -49,7 +50,9 @@ export declare class MonitorOverlay {
     private editingPrompt;
     private statusText;
     private requestRender;
-    constructor(cb: OverlayCallbacks);
+    private readonly t;
+    private readonly localeDisposer;
+    constructor(cb: OverlayCallbacks, locale?: SupportedSettingsLocale);
     setRequestRender(fn: () => void): void;
     render(width: number): string[];
     private frameLine;
@@ -60,6 +63,7 @@ export declare class MonitorOverlay {
 }
 export interface MonitorOverlayDeps {
     getSessions: () => MonitorSessionRow[];
+    locale?: SupportedSettingsLocale;
 }
 /**
  * Opens the monitor overlay and returns the user's selection.

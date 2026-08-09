@@ -5,6 +5,8 @@ import * as path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { lockSettingsResourceSync } from "../settings/resource-lock.ts";
+import { getTuiLocale } from "../tui/locale.ts";
+import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
 import { writeFileDurableSync } from "../settings/durable-write.ts";
 import { appendModelFailoverSettlement, listModelFailoverEvents } from "./model-failover-events.ts";
 import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
@@ -96,6 +98,24 @@ export interface ModelFailoverOptions {
   homeDir?: string;
   visionAgentDir?: string;
   visionAnalyzer?: typeof analyzeAttachedImage;
+  /** Explicit UI language; otherwise follows the shared runtime TUI locale. */
+  locale?: SupportedSettingsLocale;
+}
+
+const FAILOVER_UI = {
+  en: {
+    description: "Configure main-agent model circuit breaking and ordered fallback chains; /model-failover status shows health",
+    needTui: "Model failover settings require interactive TUI mode.",
+  },
+  "zh-CN": {
+    description: "配置主 Agent 模型熔断与有序故障转移链；/model-failover status 查看健康状态",
+    needTui: "模型故障转移设置需要交互式 TUI。",
+  },
+} as const;
+
+function failoverUiText(key: keyof (typeof FAILOVER_UI)["en"], explicitLocale?: SupportedSettingsLocale): string {
+  const locale = getTuiLocale(explicitLocale);
+  return FAILOVER_UI[locale]?.[key] ?? FAILOVER_UI.en[key];
 }
 
 const CONFIG_FILE = "model-failover.json";
@@ -383,7 +403,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
   };
 
   pi.registerCommand("model-failover", {
-    description: "Configure main-agent model circuit breaking and ordered fallback chains; /model-failover status shows health",
+    description: failoverUiText("description", options.locale),
     handler: async (args, ctx) => {
       const sub = args.trim().toLowerCase();
       if (sub === "status" || sub === "health") {
@@ -401,11 +421,11 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
         return;
       }
       if (!ctx.hasUI) {
-        ctx.ui.notify("Model failover settings require interactive TUI mode.", "warning");
+        ctx.ui.notify(failoverUiText("needTui", options.locale), "warning");
         return;
       }
       const { showModelFailoverOverlay } = await import("../tui/model-failover-settings.ts");
-      const saved = await showModelFailoverOverlay(ctx, breaker);
+      const saved = await showModelFailoverOverlay(ctx, breaker, options.locale);
       if (saved) config = loadModelFailoverConfig(ctx.cwd, options.homeDir);
     },
   });

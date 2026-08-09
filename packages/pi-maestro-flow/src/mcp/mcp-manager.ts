@@ -15,6 +15,7 @@ import {
   rule,
   type FrameTheme,
 } from "pi-cockpit/src/settings/ui-primitives.ts";
+import { getTuiLocale } from "../tui/locale.ts";
 import type { McpManagedServer } from "./mcp-manager-store.ts";
 
 export type McpManagerStatus = "connected" | "idle" | "needs-auth" | "failed" | "disabled";
@@ -52,7 +53,7 @@ export interface McpManagerParams {
   theme: McpManagerTheme;
   notice?: string;
   initialState?: Partial<McpManagerUiState>;
-  /** UI language; defaults to zh-CN when the host exposes no locale signal. */
+  /** Explicit UI language; otherwise follows the shared runtime TUI locale. */
   locale?: SupportedSettingsLocale;
   requestRender: () => void;
   done: (action: McpManagerAction) => void;
@@ -211,7 +212,7 @@ const CATALOGS = {
   },
 } as const;
 
-type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
+type CatalogKey = keyof (typeof CATALOGS)["en"];
 
 const MAX_VISIBLE = 10;
 
@@ -227,7 +228,7 @@ export class McpManagerOverlay implements Component, Focusable {
   private lastWidth = 80;
 
   constructor(private readonly params: McpManagerParams) {
-    this.locale = params.locale ?? "zh-CN";
+    this.locale = getTuiLocale(params.locale);
     this.query = params.initialState?.query ?? "";
     this.detail = params.initialState?.detail ?? false;
     this.screen = params.initialState?.screen ?? "menu";
@@ -243,9 +244,9 @@ export class McpManagerOverlay implements Component, Focusable {
 
   /** Translate a catalog key with optional {var} substitution. */
   private t(key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
-    const catalog = CATALOGS[this.locale] ?? CATALOGS["zh-CN"];
+    const catalog = CATALOGS[this.locale] ?? CATALOGS.en;
     const template: unknown = catalog[key];
-    const text = typeof template === "string" ? template : CATALOGS["zh-CN"][key] as string;
+    const text = typeof template === "string" ? template : CATALOGS.en[key] as string;
     if (!vars) return text;
     return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
       vars[name] !== undefined ? String(vars[name]) : `{${name}}`);

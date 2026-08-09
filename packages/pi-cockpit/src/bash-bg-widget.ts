@@ -3,6 +3,7 @@ import type { IconGlyphs } from "./icons.ts";
 import { fitLineByPriority, type PrioritizedSegment } from "./layout.ts";
 import { formatDuration, type PaintTheme, type WidthUtils } from "./render.ts";
 import type { BashBgJob } from "./types.ts";
+import { tuiT } from "./tui-i18n.ts";
 
 // Registered by cockpit itself (index.ts), so this hint is always accurate.
 export const DEFAULT_BASH_BG_HINT = "Alt+J";
@@ -32,8 +33,8 @@ export function renderBashBgSummary(
 	const running = active.length - stopping;
 	const g = options.glyphs;
 	const counts = [
-		running ? `${running} running` : "",
-		stopping ? `${stopping} stopping` : "",
+		running ? tuiT("common.running", { count: running }) : "",
+		stopping ? tuiT("common.stopping", { count: stopping }) : "",
 	].filter(Boolean).join(g.separator);
 	const statusColor: ThemeColor = stopping > 0 ? "warning" : "accent";
 	const segments: PrioritizedSegment[] = [
@@ -49,6 +50,10 @@ export function renderBashBgSummary(
 		const elapsed = formatDuration(options.now - current.startedAt);
 		segments.push({ text: theme.fg("dim", elapsed), priority: 80, clippable: false });
 	}
-	segments.push({ text: theme.fg("dim", `${options.hint ?? DEFAULT_BASH_BG_HINT} details`), priority: 70, clippable: false });
+	segments.push({
+		text: theme.fg("dim", tuiT("bash.details", { shortcut: options.hint ?? DEFAULT_BASH_BG_HINT })),
+		priority: 70,
+		clippable: false,
+	});
 	return [fitLineByPriority(segments, width, utils, theme.fg("dim", g.separator), g.ellipsis)];
 }

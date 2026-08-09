@@ -182,7 +182,9 @@ export class SelfEvolveOverlay implements Component, Focusable {
       return;
     }
     if (matchesKey(data, Key.space) || data === " ") {
-      if (this.selectedField() === "enabled") this.toggleEnabled();
+      const field = this.selectedField();
+      if (field === "enabled") this.toggleEnabled();
+      else if (field === "mode") this.toggleMode();
       return;
     }
     if (matchesKey(data, Key.enter) || data === "\r") {
@@ -309,7 +311,7 @@ export class SelfEvolveOverlay implements Component, Focusable {
       case "enabled":
         return "master switch · Enter/Space toggles collection on/off";
       case "mode":
-        return `${SELF_EVOLVE_MODES.join(" | ")} — dry-run: review only; auto-deposit: gate-passing candidates auto-staged (pending pool, never auto-promoted)`;
+        return `${SELF_EVOLVE_MODES.join(" | ")} — Enter/Space toggles; dry-run: review only; auto-deposit: gate-passing candidates auto-staged (pending pool, never auto-promoted)`;
       case "model":
         return 'Phase 2B LLM steps (review) · "provider/model" or "auto" to inherit the session model';
       case "cooldownMs":
@@ -448,6 +450,10 @@ export class SelfEvolveOverlay implements Component, Focusable {
       this.toggleEnabled();
       return;
     }
+    if (field === "mode") {
+      this.toggleMode();
+      return;
+    }
     this.editValue = this.editorValue(field);
     this.editing = true;
     this.notice = "";
@@ -466,6 +472,14 @@ export class SelfEvolveOverlay implements Component, Focusable {
 
   private toggleEnabled(): void {
     this.draft = { ...this.draft, enabled: !this.draft.enabled };
+    this.markDirty();
+  }
+
+  /** Cycle the collection mode (dry-run ↔ auto-deposit) — no text editing. */
+  private toggleMode(): void {
+    const modes = SELF_EVOLVE_MODES;
+    const next = modes[(modes.indexOf(this.draft.mode) + 1) % modes.length];
+    this.draft = { ...this.draft, mode: next };
     this.markDirty();
   }
 

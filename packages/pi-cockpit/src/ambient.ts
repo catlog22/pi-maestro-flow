@@ -9,6 +9,7 @@
 
 import type { AgentRow, BashBgJob, TodoItem } from "./types.ts";
 import { formatThinkingDuration } from "./thinking-timer.ts";
+import { tuiT } from "./tui-i18n.ts";
 
 export interface AmbientState {
 	todos: readonly TodoItem[];
@@ -60,7 +61,7 @@ function failedJobs(jobs: readonly BashBgJob[]): BashBgJob[] {
  * elapsed value, matching the compact folded-thinking label.
  */
 export function workingMessage(state: AmbientState, now = Date.now()): string | undefined {
-	const label = state.activeTool ?? (state.running ? "working" : undefined);
+	const label = state.activeTool ?? (state.running ? tuiT("ambient.working") : undefined);
 	if (!label) return undefined;
 	const sep = state.separator ?? " ";
 	const text = (state.hideLiveDuration || state.workingStartedAt === undefined)
@@ -98,10 +99,12 @@ export function titleFor(
 	const prefix = state.frame ? `${state.frame} ` : "";
 	let title: string;
 	if (broken > 0) {
-		title = `${marks.fail} ${base}${sep}${broken} failed`;
+		title = `${marks.fail} ${base}${sep}${tuiT("ambient.failed", { count: broken })}`;
 	} else if (state.running) {
 		const live = liveAgents(state.agents).length;
-		title = live > 0 ? `${prefix}${base}${sep}${live} agents` : `${prefix}${base}${sep}working`;
+		title = live > 0
+			? `${prefix}${base}${sep}${tuiT("ambient.agents", { count: live })}`
+			: `${prefix}${base}${sep}${tuiT("ambient.working")}`;
 	} else {
 		const jobs = state.jobs.filter((job) => job.status === "running").length;
 		title = jobs > 0 ? `${prefix}${base}${sep}${jobs} bg` : `${prefix}${base}`;

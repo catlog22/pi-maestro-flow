@@ -81,8 +81,8 @@ test("Cockpit session bar, command, and shortcut contracts stay stable", () => {
   assert.doesNotMatch(source, /sessionDetailScrollDisposer/);
   assert.match(source, /COCKPIT_SESSION_LIST_EVENT[\s\S]*?openSessionList\(ctx\)/);
   assert.match(source, /allEntries = mode === "window" \? \[\.\.\.snapshot\.windows\] : \[\.\.\.snapshot\.endpoints\]/);
-  assert.match(source, /ctx\.ui\.select\(mode === "window" \? "Windows" : "Agents", choices\)/);
-  assert.match(source, /sessionListOverlayActive\(\) \? undefined : "Alt\+R list"/);
+  assert.match(source, /ctx\.ui\.select\([\s\S]*?tuiT\("window\.title"\)[\s\S]*?tuiT\("overlay\.agents\.title"\)/);
+  assert.match(source, /sessionListOverlayActive\(\) \? undefined : tuiT\("session\.listHint"\)/);
   assert.doesNotMatch(source, /alt\+shift\+(?:r|l|up|down)/);
   assert.match(source, /data !== "\\x1b\[1;2A" && data !== "\\x1b\[1;2B"/);
 });
@@ -214,7 +214,7 @@ test("Cockpit defers settings-driven re-enable until the settings overlay is clo
 test("Cockpit sidebar controls persist only committed resize widths", () => {
 	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
 	assert.match(source, /onResizeCommit: \(width\) => \{[\s\S]*?sidebar: \{ \.\.\.config\.sidebar, width \}[\s\S]*?saveConfig\(config\)/);
-	assert.match(source, /width kept for this session; save failed/);
+	assert.match(source, /tuiT\("notice\.sidebarWidthSaveFailed"/);
 	assert.match(source, /registerShortcut\(SIDEBAR_RESIZE_KEY/);
 	assert.match(source, /"sidebar auto"[\s\S]*?"sidebar on"[\s\S]*?"sidebar off"[\s\S]*?"sidebar resize"/);
 	assert.doesNotMatch(source, /onEffectiveWidthChange:[\s\S]*?saveConfig/);
@@ -234,7 +234,7 @@ test("Cockpit Agent modal opens from the Alt+R session list and shares the live 
 	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
 	assert.doesNotMatch(source, /AGENT_OVERLAY_KEY|registerShortcut\("alt\+a"/);
 	assert.match(source, /const selectedId = sessionUi\.selectedId\(mode\)/);
-	assert.match(source, /selectedIndex > 0[\s\S]*?allEntries\[selectedIndex\]![\s\S]*?endpoint\.id === selectedId \? "selected"/);
+	assert.match(source, /selectedIndex > 0[\s\S]*?allEntries\[selectedIndex\]![\s\S]*?endpoint\.id === selectedId \? tuiStatus\("selected"\)/);
 	assert.match(source, /if \(mode === "window"\) selectWindow\(endpoint\.id\)[\s\S]*?selectEndpoint\(endpoint\.id\)/);
 	assert.match(source, /previewAgent = endpoint\.kind === "agent"[\s\S]*?openAgentOverlay\(ctx\)/);
 	assert.match(source, /new AgentOverlay\(\{[\s\S]*?getAgents: \(\) => agents\.snapshot\(\)/);

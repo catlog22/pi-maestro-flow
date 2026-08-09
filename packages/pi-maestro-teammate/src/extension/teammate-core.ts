@@ -135,6 +135,7 @@ import {
 } from "../tui/input-text.ts";
 import { showModelMappingOverlay } from "../tui/model-mapping-overlay.ts";
 import { showMonitorOverlay, type MonitorSessionRow } from "../tui/monitor-overlay.ts";
+import { tuiT } from "../tui/locale.ts";
 import type {
   Details,
   TeammateState,
@@ -1408,8 +1409,10 @@ export function historyRowKey(scan: WorkspaceSessionScan): string {
 
 export function historyLabel(scan: WorkspaceSessionScan): string {
   const id = scan.sessionId?.slice(0, 8) ?? "session";
-  const count = scan.messageCount > 0 ? ` · ${scan.messageCount} msgs` : "";
-  return `history ${id}${count}`;
+  const count = scan.messageCount > 0
+    ? tuiT("selector.historyMessages", { count: scan.messageCount })
+    : "";
+  return tuiT("selector.history", { id, count });
 }
 
 export function renderAgentSelectorPanel(
@@ -1427,19 +1430,19 @@ export function renderAgentSelectorPanel(
   const selectedIndex = Math.max(0, Math.min(cursor, Math.max(0, rows.length - 1)));
   const selected = rows[selectedIndex];
   const statusView = (row: AgentSelectorRow): { icon: string; text: string } => {
-    if (row.status === "sleeping") return { icon: yellow("◉"), text: yellow("Sleeping") };
-    if (row.status === "failed") return { icon: red("◉"), text: red("Sleeping · last run failed") };
-    if (row.status === "pending") return { icon: dim("■"), text: dim("Running · starting") };
-    if (row.status === "retrying") return { icon: yellow("■"), text: yellow("Running · retrying") };
+    if (row.status === "sleeping") return { icon: yellow("◉"), text: yellow(tuiT("selector.sleeping")) };
+    if (row.status === "failed") return { icon: red("◉"), text: red(tuiT("selector.lastRunFailed")) };
+    if (row.status === "pending") return { icon: dim("■"), text: dim(tuiT("selector.starting")) };
+    if (row.status === "retrying") return { icon: yellow("■"), text: yellow(tuiT("selector.retrying")) };
     // History rows are completed sessions — never render as runnable.
     if (row.status === "completed" || row.status === "terminated") {
-      return { icon: dim("✓"), text: dim("Done") };
+      return { icon: dim("✓"), text: dim(tuiT("selector.done")) };
     }
-    return { icon: green("■"), text: green("Running") };
+    return { icon: green("■"), text: green(tuiT("selector.running")) };
   };
 
   if (w < 20) {
-    if (!selected) return [truncateToWidth(`${dim("□")} no matches`, w, "…")];
+    if (!selected) return [truncateToWidth(`${dim("□")} ${tuiT("selector.noMatches")}`, w, "…")];
     const status = statusView(selected);
     return [truncateToWidth(
       `Esc · ${status.icon} ${selected.agent}/${selected.label} ${dim(selected.status)}`,
@@ -1463,7 +1466,7 @@ export function renderAgentSelectorPanel(
     : "";
   const nestedCount = rows.filter((row) => row.depth > 0).length;
   const scope = w >= 46 && rows.length > 0
-    ? dim(` · ${rows.length - nestedCount} root · ${nestedCount} nested`)
+    ? dim(` · ${tuiT("selector.roots", { roots: rows.length - nestedCount, nested: nestedCount })}`)
     : "";
 
   out.push(dim("╭" + "─".repeat(inner) + "╮"));
@@ -1480,30 +1483,32 @@ export function renderAgentSelectorPanel(
       `${selection} ${status.icon} ${bold(`${row.treePrefix}${row.agent}/${row.label}`)} ${status.text} ${dim(`${up}s`)}`,
     ));
   }
-  if (rows.length === 0) out.push(frameLine(dim("□ no matches · Backspace clears the filter")));
+  if (rows.length === 0) out.push(frameLine(dim(tuiT("selector.noMatchesHint"))));
 
   if (selected) {
     out.push(dim("├" + "─".repeat(inner) + "┤"));
-    const lineage = selected.parentLabel ? `child of ${selected.parentLabel}` : "root run";
+    const lineage = selected.parentLabel
+      ? tuiT("selector.childOf", { name: selected.parentLabel })
+      : tuiT("selector.rootRun");
     out.push(frameLine(`${green("»")} ${bold(`${selected.agent}/${selected.label}`)} ${dim(lineage)}`));
     const recentTool = selected.recentTools.find((tool) => tool.status === "running")
       ?? selected.recentTools.at(-1);
     if (recentTool) {
       const toolIcon = recentTool.status === "running" ? yellow("■") : recentTool.status === "failed" ? red("✗") : dim("✓");
-      out.push(frameLine(`${dim("Tool")} ${toolIcon} ${sanitizeSingleLineInput(recentTool.name)}`));
+      out.push(frameLine(`${dim(tuiT("selector.tool"))} ${toolIcon} ${sanitizeSingleLineInput(recentTool.name)}`));
     } else {
-      out.push(frameLine(`${dim("Tool")} ${dim("idle")}`));
+      out.push(frameLine(`${dim(tuiT("selector.tool"))} ${dim(tuiT("selector.idle"))}`));
     }
     const message = selected.lastMessage
       ? sanitizeSingleLineInput(selected.lastMessage.split(/\r?\n/).filter((line) => line.trim()).at(-1) ?? "")
       : "";
-    out.push(frameLine(`${dim("│")} ${message || (selected.status === "pending" ? "Waiting for dependencies…" : "Waiting for output…")}`));
+    out.push(frameLine(`${dim("│")} ${message || (selected.status === "pending" ? tuiT("attach.waitingDependencies") : tuiT("attach.waitingOutput"))}`));
   }
 
   out.push(dim("╰" + "─".repeat(inner) + "╯"));
   const footer = w < 46
-    ? " Esc cancel · Enter view · ↑↓ select"
-    : " Esc cancel · Enter view · ↑↓ select · PgUp/PgDn page · type to filter";
+    ? tuiT("selector.footerNarrow")
+    : tuiT("selector.footer");
   out.push(truncateToWidth(dim(footer), w, "…"));
   return out;
 }
@@ -1516,10 +1521,10 @@ export function compactMetric(value: number): string {
 
 export function toolAction(name: string): string {
   const normalized = name.toLowerCase();
-  if (normalized === "write" || normalized === "edit" || normalized.includes("patch")) return "writing file";
-  if (normalized === "read" || normalized === "grep" || normalized === "ls") return "reading files";
-  if (normalized === "bash" || normalized.includes("command")) return "running command";
-  return `using ${name}`;
+  if (normalized === "write" || normalized === "edit" || normalized.includes("patch")) return tuiT("widget.action.write");
+  if (normalized === "read" || normalized === "grep" || normalized === "ls") return tuiT("widget.action.read");
+  if (normalized === "bash" || normalized.includes("command")) return tuiT("widget.action.command");
+  return tuiT("widget.action.using", { name });
 }
 
 export function formatRetryDelay(delayMs: number): string {
@@ -1567,28 +1572,32 @@ export function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
       const action = runningTool
         ? toolAction(runningTool.name)
         : pendingInteractions > 0
-          ? `awaiting ${pendingInteractions} prompt${pendingInteractions === 1 ? "" : "s"}`
+          ? tuiT(pendingInteractions === 1 ? "widget.action.awaiting.one" : "widget.action.awaiting.many", {
+              count: pendingInteractions,
+            })
         : status === "running" && (progress?.resultReadyAt ?? direct?.resultReadyAt) !== undefined
-          ? "result returned; lifecycle pending"
+          ? tuiT("widget.resultPending")
         : status === "sleeping"
-          ? "sleeping"
+          ? tuiT("common.sleeping")
           : status === "retrying"
             ? direct?.retry
-              ? `retry ${direct.retry.attempt}/${direct.retry.maxRetries} in ${formatRetryDelay(
-                direct.retry.nextRetryAt - Date.now(),
-              )}`
-              : "retrying"
+              ? tuiT("widget.action.retry", {
+                  attempt: direct.retry.attempt,
+                  max: direct.retry.maxRetries,
+                  delay: formatRetryDelay(direct.retry.nextRetryAt - Date.now()),
+                })
+              : tuiT("common.retrying")
           : status === "pending"
-            ? "waiting for dependencies"
+            ? tuiT("widget.action.waitDependencies")
             : status === "failed"
-              ? "failed"
+              ? tuiT("common.failed")
               : status === "terminated"
-                ? "terminated"
+                ? tuiT("common.terminated")
               : status === "completed"
-                ? "completed"
+                ? tuiT("common.completed")
                 : progress?.lastMessage
-                  ? "streaming"
-                  : "waiting for model";
+                  ? tuiT("widget.action.streaming")
+                  : tuiT("widget.action.waitModel");
       const existing = rows.get(correlationId);
       if (!progress && existing) {
         rows.set(correlationId, {
@@ -1599,9 +1608,11 @@ export function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
           phase: direct?.phase ?? active.phase,
           pendingInteractions,
           action: status === "sleeping"
-            ? "sleeping"
+            ? tuiT("common.sleeping")
             : pendingInteractions > 0
-              ? `awaiting ${pendingInteractions} prompt${pendingInteractions === 1 ? "" : "s"}`
+              ? tuiT(pendingInteractions === 1 ? "widget.action.awaiting.one" : "widget.action.awaiting.many", {
+                  count: pendingInteractions,
+                })
               : existing.action,
           startedAt: direct?.startedAt ?? existing.startedAt,
           ...(direct?.spawnedBy ? { parentCorrelationId: direct.spawnedBy } : {}),
@@ -1713,7 +1724,7 @@ export function renderAgentStatusWidget(
       safeWidth,
       "…",
     ));
-    if (hidden > 0) compact.push(truncateToWidth(theme.fg("dim", `… ${hidden} more`), safeWidth, "…"));
+    if (hidden > 0) compact.push(truncateToWidth(theme.fg("dim", tuiT("widget.more", { count: hidden })), safeWidth, "…"));
     return compact;
   }
 
@@ -1724,15 +1735,15 @@ export function renderAgentStatusWidget(
   const failedCount = rows.filter((row) => row.status === "failed").length;
   const terminatedCount = rows.filter((row) => row.status === "terminated").length;
   const summary = [
-    runningCount ? `${runningCount} running` : "",
-    retryingCount ? `${retryingCount} retrying` : "",
-    sleeping ? `${sleeping} sleeping` : "",
-    pending ? `${pending} pending` : "",
-    failedCount ? `${failedCount} failed` : "",
-    terminatedCount ? `${terminatedCount} terminated` : "",
+    runningCount ? tuiT("widget.running", { count: runningCount }) : "",
+    retryingCount ? tuiT("widget.retrying", { count: retryingCount }) : "",
+    sleeping ? tuiT("widget.sleeping", { count: sleeping }) : "",
+    pending ? tuiT("widget.pending", { count: pending }) : "",
+    failedCount ? tuiT("widget.failed", { count: failedCount }) : "",
+    terminatedCount ? tuiT("widget.terminated", { count: terminatedCount }) : "",
   ].filter(Boolean).join(" · ");
   const lines = [truncateToWidth(
-    `${theme.bold("Agents")}  ${theme.fg("dim", `${summary} · Alt+R`)}`,
+    `${theme.bold(tuiT("widget.header"))}  ${theme.fg("dim", `${summary} · Alt+R`)}`,
     safeWidth,
     "…",
   )];
@@ -1750,34 +1761,37 @@ export function renderAgentStatusWidget(
       pendingInteractions: row.pendingInteractions,
     }, now);
     const state = row.resultReadyAt !== undefined && row.status === "running"
-      ? "result returned; lifecycle pending"
+      ? tuiT("widget.resultPending")
       : stalled
-      ? `stalled ${Math.floor(idleMs / 1000)}s`
+      ? tuiT("status.stalled", { seconds: Math.floor(idleMs / 1000) })
       : row.status === "running"
-        ? `running · ${row.action}`
+        ? tuiT("widget.runningAction", { action: row.action })
         : row.status === "retrying"
-          ? `retrying · ${row.action}`
+          ? tuiT("widget.retryingAction", { action: row.action })
         : row.action;
     const tokenMetrics = row.inputTokens !== undefined || row.outputTokens !== undefined
       ? [
-          `in ${compactMetric(row.inputTokens ?? 0)}`,
-          `out ${compactMetric(row.outputTokens ?? 0)}`,
+          tuiT("metrics.in", { count: compactMetric(row.inputTokens ?? 0) }),
+          tuiT("metrics.out", { count: compactMetric(row.outputTokens ?? 0) }),
           ...((row.cacheReadTokens ?? 0) > 0 || (row.cacheWriteTokens ?? 0) > 0
-            ? [`cache ${compactMetric(row.cacheReadTokens ?? 0)}r/${compactMetric(row.cacheWriteTokens ?? 0)}w`]
+            ? [tuiT("metrics.cache", {
+                read: compactMetric(row.cacheReadTokens ?? 0),
+                write: compactMetric(row.cacheWriteTokens ?? 0),
+              })]
             : []),
         ]
       : row.tokens
-        ? [`${row.direction} ${compactMetric(row.tokens)} tokens`]
+        ? [`${row.direction} ${tuiT("metrics.tokens", { count: compactMetric(row.tokens) })}`]
         : [];
     const metrics = [
       duration,
       ...tokenMetrics,
-      row.toolCount ? `${row.toolCount} tools` : "",
+      row.toolCount ? tuiT("metrics.tools", { count: row.toolCount }) : "",
     ].filter(Boolean).join(" · ");
     const relationship = [
-      row.parentLabel ? `child of @${row.parentLabel}` : "",
+      row.parentLabel ? tuiT("widget.childOf", { name: row.parentLabel }) : "",
       row.resultLabels?.length
-        ? `result from ${row.resultLabels.map((label) => `@${label}`).join(", ")}`
+        ? tuiT("widget.resultFrom", { names: row.resultLabels.map((label) => `@${label}`).join(", ") })
         : "",
     ].filter(Boolean).join(" · ");
     const relationshipText = relationship ? ` · ${relationship}` : "";
@@ -1792,7 +1806,7 @@ export function renderAgentStatusWidget(
     ));
   }
   if (hidden > 0) {
-    lines.push(truncateToWidth(theme.fg("dim", `└─ … ${hidden} more · Alt+R to inspect`), safeWidth, "…"));
+    lines.push(truncateToWidth(theme.fg("dim", tuiT("widget.inspectMore", { count: hidden })), safeWidth, "…"));
   }
   return lines;
 }

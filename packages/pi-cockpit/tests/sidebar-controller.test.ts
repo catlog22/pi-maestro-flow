@@ -4,6 +4,9 @@ import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component, OverlayHandle, OverlayOptions, TUI } from "@earendil-works/pi-tui";
 import { createSidebarComponent, createSidebarController } from "../src/sidebar-controller.ts";
 import { DEFAULT_CONFIG, type TodoItem } from "../src/types.ts";
+import { cockpitTuiLocale } from "../src/tui-i18n.ts";
+
+cockpitTuiLocale.setLocale("en");
 
 const theme = {
 	fg: (_color: string, text: string) => text,

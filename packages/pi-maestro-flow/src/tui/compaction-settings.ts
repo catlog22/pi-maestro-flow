@@ -20,6 +20,7 @@ import {
   rule,
   type FrameTheme,
 } from "pi-cockpit/src/settings/ui-primitives.ts";
+import { getTuiLocale } from "./locale.ts";
 import {
   COMPACTION_FIELDS,
   readCompactionSettings,
@@ -51,6 +52,8 @@ interface CompactionTheme extends FrameTheme {}
 
 const CATALOGS = {
   en: {
+    "command.description": "Configure Pi and Maestro automatic compaction thresholds",
+    "command.needTui": "Compaction settings require an interactive TUI.",
     "title": "Maestro Compaction Settings",
     "menu": "Settings menu",
     "scope.project": "Project",
@@ -188,6 +191,8 @@ const CATALOGS = {
     "model.detail.fallback": "fallback",
   },
   "zh-CN": {
+    "command.description": "配置 Pi 与 Maestro 的自动压缩阈值",
+    "command.needTui": "压缩设置需要在交互式 TUI 中打开。",
     "title": "Maestro 压缩设置",
     "menu": "设置菜单",
     "scope.project": "项目",
@@ -325,7 +330,18 @@ const CATALOGS = {
   },
 } as const;
 
-type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
+type CatalogKey = keyof (typeof CATALOGS)["en"];
+
+function translateCompaction(
+  locale: SupportedSettingsLocale,
+  key: CatalogKey,
+  vars?: Readonly<Record<string, string | number>>,
+): string {
+  const template = CATALOGS[locale]?.[key] ?? CATALOGS.en[key];
+  if (!vars) return template;
+  return template.replace(/\{(\w+)\}/g, (_match, name: string) =>
+    vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
+}
 
 interface ScopeDraft {
   enabled?: boolean;
@@ -356,7 +372,7 @@ export interface CompactionSettingsOverlayParams {
   /** Models selectable as the compaction model (`provider/id` references). */
   availableModels?: CompactionModelOption[];
   projectReadonlyReason?: string;
-  /** UI language; defaults to zh-CN when the host exposes no locale signal. */
+  /** Explicit UI language; otherwise follows the shared runtime TUI locale. */
   locale?: SupportedSettingsLocale;
   theme: CompactionTheme;
   requestRender: () => void;
@@ -434,7 +450,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
   private readonly drafts: Record<CompactionScope, ScopeDraft>;
 
   constructor(private readonly params: CompactionSettingsOverlayParams) {
-    this.locale = params.locale ?? "zh-CN";
+    this.locale = getTuiLocale(params.locale);
     this.scope = params.projectReadonlyReason ? "user" : "project";
     this.initialDrafts = {
       project: toDraft(params.snapshot.scopes.project),
@@ -451,12 +467,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
 
   /** Translate a catalog key with optional {var} substitution. */
   private t(key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
-    const catalog = CATALOGS[this.locale] ?? CATALOGS["zh-CN"];
-    const template: unknown = catalog[key];
-    const text = typeof template === "string" ? template : CATALOGS["zh-CN"][key] as string;
-    if (!vars) return text;
-    return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
-      vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
+    return translateCompaction(this.locale, key, vars);
   }
 
   render(width: number): string[] {
@@ -1165,10 +1176,10 @@ export class CompactionSettingsOverlay implements Component, Focusable {
 
 export function registerCompactionSettingsCommand(pi: ExtensionAPI): void {
   pi.registerCommand("maestro-compaction", {
-    description: "配置 Pi 与 Maestro 的自动压缩阈值",
+    description: translateCompaction(getTuiLocale(), "command.description"),
     async handler(_args, ctx) {
       if (!ctx.hasUI) {
-        ctx.ui.notify("压缩设置需要在交互式 TUI 中打开。", "error");
+        ctx.ui.notify(translateCompaction(getTuiLocale(), "command.needTui"), "error");
         return;
       }
       const result = await showCompactionSettingsOverlay(ctx);
@@ -1181,6 +1192,7 @@ export function registerCompactionSettingsCommand(pi: ExtensionAPI): void {
 
 export async function showCompactionSettingsOverlay(
   ctx: ExtensionCommandContext,
+  locale?: SupportedSettingsLocale,
 ): Promise<CompactionSettingsResult> {
   const snapshot = readCompactionSettings(ctx.cwd);
   const projectReadonlyReason = await projectWriteRestriction(ctx.cwd);
@@ -1200,6 +1212,7 @@ export async function showCompactionSettingsOverlay(
       currentModel,
       availableModels,
       projectReadonlyReason,
+      locale,
       theme,
       requestRender: () => tui.requestRender(),
       done,
@@ -1276,7 +1289,7 @@ function configFieldForItem(item: ConfigFieldItem): CompactionField {
 }
 
 function formatNumber(value: number): string {
-  return value.toLocaleString("zh-CN");
+  return value.toLocaleString(getTuiLocale());
 }
 
 function fitSegments(width: number, segments: readonly string[]): string {

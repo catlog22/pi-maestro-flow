@@ -3,8 +3,11 @@ import test from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { AgentOverlay } from "../src/agent-overlay.ts";
+import { cockpitTuiLocale } from "../src/tui-i18n.ts";
 import { resolveGlyphs } from "../src/icons.ts";
 import type { AgentRow } from "../src/types.ts";
+
+cockpitTuiLocale.setLocale("en");
 
 const theme = {
 	fg: (_color: string, text: string) => text,

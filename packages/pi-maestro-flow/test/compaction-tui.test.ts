@@ -412,6 +412,7 @@ test("compaction TUI model picker inherit entry clears the configured model", ()
 function createOverlay(overrides: Partial<ConstructorParameters<typeof CompactionSettingsOverlay>[0]> = {}) {
   return new CompactionSettingsOverlay({
     projectRoot: "D:\\repo",
+    locale: "zh-CN",
     snapshot: {
       scopes: {
         user: { enabled: false, reserveTokens: 20_000 },

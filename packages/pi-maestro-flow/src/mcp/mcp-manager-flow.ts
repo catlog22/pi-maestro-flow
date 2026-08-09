@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
+import { getTuiLocale } from "../tui/locale.ts";
 import { McpManagerOverlay, type McpManagerAction, type McpManagerServerView, type McpManagerStatus, type McpManagerUiState } from "./mcp-manager.ts";
 import {
   McpManagerStore,
@@ -87,12 +88,12 @@ const CATALOGS = {
   },
 } as const;
 
-type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
+type CatalogKey = keyof (typeof CATALOGS)["en"];
 
 function t(locale: SupportedSettingsLocale, key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
-  const catalog = CATALOGS[locale] ?? CATALOGS["zh-CN"];
+  const catalog = CATALOGS[locale] ?? CATALOGS.en;
   const template: unknown = catalog[key];
-  const text = typeof template === "string" ? template : CATALOGS["zh-CN"][key] as string;
+  const text = typeof template === "string" ? template : CATALOGS.en[key] as string;
   if (!vars) return text;
   return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
     vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
@@ -102,8 +103,9 @@ export async function runMcpManager(
   ctx: ExtensionContext,
   store: McpManagerStore,
   runtime: McpManagerRuntime,
-  locale: SupportedSettingsLocale = "zh-CN",
+  explicitLocale?: SupportedSettingsLocale,
 ): Promise<McpManagerFlowResult> {
+  const locale = getTuiLocale(explicitLocale);
   let snapshot = await store.load();
   let uiState: Partial<McpManagerUiState> = { detail: false, query: "" };
   let notice = snapshot.servers.length === 0 ? t(locale, "notice.noServers") : undefined;

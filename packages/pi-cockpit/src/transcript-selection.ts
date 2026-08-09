@@ -1,5 +1,6 @@
 import { copyToClipboard } from "@earendil-works/pi-coding-agent";
 import { sliceByColumn, visibleWidth } from "@earendil-works/pi-tui";
+import { tuiT } from "./tui-i18n.ts";
 
 /**
  * Transcript drag-selection with copy-on-release for fullscreen mode.
@@ -215,8 +216,8 @@ export function createTranscriptSelectionController(options: TranscriptSelection
 				const lineCount = text.length > 0 ? text.split("\n").length : 0;
 				options.notify(
 					lineCount > 1
-						? `Copied ${text.length} chars · ${lineCount} lines`
-						: `Copied ${text.length} chars`,
+						? tuiT("selection.copiedLines", { chars: text.length, lines: lineCount })
+						: tuiT("selection.copied", { chars: text.length }),
 					"info",
 				);
 				anchor = null;
@@ -225,7 +226,7 @@ export function createTranscriptSelectionController(options: TranscriptSelection
 				// Keep the selection so the user can retry; surface the failure.
 				options.onError?.(error);
 				options.notify(
-					`Copy failed: ${error instanceof Error ? error.message : String(error)}`,
+					tuiT("selection.copyFailed", { message: error instanceof Error ? error.message : String(error) }),
 					"warning",
 				);
 			}

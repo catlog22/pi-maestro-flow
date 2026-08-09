@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { renderBashBgSummary } from "../src/bash-bg-widget.ts";
+import { cockpitTuiLocale } from "../src/tui-i18n.ts";
 import { resolveGlyphs } from "../src/icons.ts";
 import type { PaintTheme, WidthUtils } from "../src/render.ts";
 import type { BashBgJob } from "../src/types.ts";
+
+cockpitTuiLocale.setLocale("en");
 
 const theme: PaintTheme = { fg: (_color, text) => text };
 const utils: WidthUtils = {

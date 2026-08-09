@@ -23,6 +23,7 @@ function createOverlay(
   return new ApiModelEditorOverlay({
     title: "编辑 API model",
     fields,
+    locale: "zh-CN",
     theme,
     requestRender() {},
     done: options.done ?? (() => undefined),

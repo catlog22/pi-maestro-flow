@@ -27,6 +27,7 @@ import {
   progressDurationMs,
   type ProgressPalette,
 } from "./progress-tree.ts";
+import { getTuiLocale, translateStatusText, tuiT } from "./locale.ts";
 
 type Theme = ExtensionContext["ui"]["theme"];
 
@@ -50,12 +51,15 @@ function dynamicComponent(build: (width: number) => string[]): Component {
  */
 function memoizedComponent(build: (width: number) => string[]): Component {
   let cachedWidth: number | undefined;
+  let cachedLocale = getTuiLocale();
   let cached: string[] = [];
   return {
     render(w: number) {
-      if (cachedWidth !== w) {
+      const locale = getTuiLocale();
+      if (cachedWidth !== w || cachedLocale !== locale) {
         cached = build(w);
         cachedWidth = w;
+        cachedLocale = locale;
       }
       return [...cached];
     },
@@ -70,15 +74,18 @@ function memoizedSnapshotComponent<T>(
   build: (width: number, snapshot: T) => string[],
 ): Component {
   let cachedWidth: number | undefined;
+  let cachedLocale = getTuiLocale();
   let cachedSnapshot: T;
   let cached: string[] = [];
   let hasCache = false;
   return {
     render(w: number) {
       const snapshot = getSnapshot();
-      if (!hasCache || cachedWidth !== w || cachedSnapshot !== snapshot) {
+      const locale = getTuiLocale();
+      if (!hasCache || cachedWidth !== w || cachedSnapshot !== snapshot || cachedLocale !== locale) {
         cached = build(w, snapshot);
         cachedWidth = w;
+        cachedLocale = locale;
         cachedSnapshot = snapshot;
         hasCache = true;
       }
@@ -159,11 +166,13 @@ function cacheUsageParts(
   format: (count: number) => string,
 ): string[] {
   const parts: string[] = [];
-  if (usage.cacheReadTokens > 0) parts.push(`${format(usage.cacheReadTokens)}cache-read`);
-  if (usage.cacheWriteTokens > 0) parts.push(`${format(usage.cacheWriteTokens)}cache-write`);
+  if (usage.cacheReadTokens > 0) parts.push(tuiT("metrics.cacheRead", { count: format(usage.cacheReadTokens) }));
+  if (usage.cacheWriteTokens > 0) parts.push(tuiT("metrics.cacheWrite", { count: format(usage.cacheWriteTokens) }));
   const processed = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
   if (usage.cacheReadTokens > 0 && processed > 0) {
-    parts.push(`${Math.round((usage.cacheReadTokens / processed) * 100)}% cache hit`);
+    parts.push(tuiT("metrics.cacheHit", {
+      percent: Math.round((usage.cacheReadTokens / processed) * 100),
+    }));
   }
   return parts;
 }
@@ -244,9 +253,9 @@ export function renderTeammateResult(
 function childStateText(child: ChildAgentCallSnapshot): string {
   const activityAt = child.lastActivityAt ?? child.startedAt;
   const display = effectiveDisplayStatus(child.status, child.resultReadyAt, activityAt, Date.now(), child.phase);
-  if (display === "result-ready") return "result ready; confirming terminal";
-  if (display === "stalled") return `stalled ${idleSeconds(activityAt)}s`;
-  return STATUS_PRESENTATION[display].text;
+  if (display === "result-ready") return tuiT("status.resultReadyConfirming");
+  if (display === "stalled") return tuiT("status.stalled", { seconds: idleSeconds(activityAt) });
+  return translateStatusText(STATUS_PRESENTATION[display].text);
 }
 
 function formatChildLine(child: ChildAgentCallSnapshot, theme: Theme, hideActivity = false): string {
@@ -256,14 +265,14 @@ function formatChildLine(child: ChildAgentCallSnapshot, theme: Theme, hideActivi
   const activity = hideActivity
     ? ""
     : activeTool
-      ? ` · using ${activeTool.name}`
-      : child.lastMessage ? " · streaming" : "";
+      ? ` · ${tuiT("progress.using", { tool: activeTool.name })}`
+      : child.lastMessage ? ` · ${tuiT("progress.streaming")}` : "";
   const childCacheRead = child.cacheReadTokens ?? 0;
   const childCacheWrite = child.cacheWriteTokens ?? 0;
   const tokens = child.inputTokens !== undefined || child.outputTokens !== undefined
-    ? ` · in ${child.inputTokens ?? 0} · out ${child.outputTokens ?? 0}`
+    ? ` · ${tuiT("metrics.in", { count: child.inputTokens ?? 0 })} · ${tuiT("metrics.out", { count: child.outputTokens ?? 0 })}`
       + (childCacheRead > 0 || childCacheWrite > 0
-        ? ` · cache ${childCacheRead}r/${childCacheWrite}w`
+        ? ` · ${tuiT("metrics.cache", { read: childCacheRead, write: childCacheWrite })}`
         : "")
     : "";
   const durationMs = child.status === "running" && child.startedAt
@@ -272,7 +281,7 @@ function formatChildLine(child: ChildAgentCallSnapshot, theme: Theme, hideActivi
   const duration = durationMs !== undefined
     ? ` · ${elapsed(Math.max(0, Math.floor(durationMs / 1000)))}`
     : "";
-  return `${icon} ${theme.fg("accent", `@${child.name ?? child.agent}`)} ${theme.fg("dim", `child agent · ${childStateText(child)}${duration}${activity}${tokens}`)}`;
+  return `${icon} ${theme.fg("accent", `@${child.name ?? child.agent}`)} ${theme.fg("dim", `${tuiT("progress.childLabel")} · ${childStateText(child)}${duration}${activity}${tokens}`)}`;
 }
 
 function renderChildSubtree(
@@ -330,13 +339,14 @@ function renderProgress(
         : running > 0 || runningChildren > 0
           ? theme.fg("warning", "■")
           : theme.fg("success", "✓");
+      const childCount = runningChildren || childCalls.length;
       const label = entries.length === 0
-        ? `${runningChildren || childCalls.length} child agent${childCalls.length === 1 ? "" : "s"}`
+        ? tuiT(childCount === 1 ? "progress.child.one" : "progress.child.many", { count: childCount })
         : entries.length === 1
         ? progressLabel(entries[0])
         : failed > 0
-          ? `${failed}/${entries.length} failed`
-          : `${running}/${entries.length} running`;
+          ? tuiT("progress.summary.failed", { count: failed, total: entries.length })
+          : tuiT("progress.summary.running", { count: running, total: entries.length });
       return [truncateToWidth(`${icon} ${label}`, Math.max(1, w), "…")];
     }
 
@@ -368,12 +378,12 @@ function renderProgress(
     const focusedCacheRead = focused?.cacheReadTokens ?? 0;
     const focusedCacheWrite = focused?.cacheWriteTokens ?? 0;
     const focusedTokens = focused && (focused.inputTokens !== undefined || focused.outputTokens !== undefined)
-      ? `in ${formatTokens(focused.inputTokens ?? 0)} · out ${formatTokens(focused.outputTokens ?? 0)}`
+      ? `${tuiT("metrics.in", { count: formatTokens(focused.inputTokens ?? 0) })} · ${tuiT("metrics.out", { count: formatTokens(focused.outputTokens ?? 0) })}`
         + (focusedCacheRead > 0 || focusedCacheWrite > 0
-          ? ` · cache ${formatTokens(focusedCacheRead)}r/${formatTokens(focusedCacheWrite)}w`
+          ? ` · ${tuiT("metrics.cache", { read: formatTokens(focusedCacheRead), write: formatTokens(focusedCacheWrite) })}`
           : "")
       : focused?.tokens
-        ? `${formatTokens(focused.tokens)} tokens`
+        ? tuiT("metrics.tokens", { count: formatTokens(focused.tokens) })
         : "";
     const treeRows = buildProgressTree(entries, palette);
     const entryByTaskIndex = new Map<number, AgentProgressSnapshot>();
@@ -388,15 +398,16 @@ function renderProgress(
     const taskCids = new Set(entries.map((entry) => entry.correlationId).filter(Boolean));
     const childCids = new Set(childCalls.map((child) => child.correlationId));
     const mode = snapshot?.mode ?? "single";
+    const childCount = runningChildren || childCalls.length;
     const stateText = entries.length === 0
-      ? `${runningChildren || childCalls.length} child agent${childCalls.length === 1 ? "" : "s"}`
+      ? tuiT(childCount === 1 ? "progress.child.one" : "progress.child.many", { count: childCount })
       : failed > 0
-      ? `${failed} failed`
+      ? tuiT("progress.summary.failedCount", { count: failed })
       : running > 0
-        ? `${running} running`
+        ? tuiT("progress.summary.runningCount", { count: running })
         : retrying > 0
-          ? `${retrying} retrying`
-          : `${completed}/${entries.length} completed`;
+          ? tuiT("progress.summary.retrying", { count: retrying })
+          : tuiT("progress.summary.completedCount", { count: completed, total: entries.length });
     // A retrying agent is still in flight; it must never read as a green success.
     const headerIcon = failed > 0 || failedChildren > 0
       ? theme.fg("error", "!")
@@ -407,7 +418,13 @@ function renderProgress(
     // (duration/tokens/stalled) are rendered near the bottom so a tall component does
     // not change a line above the viewport and force a full redraw (page jump) each tick.
     const lines: string[] = [
-      `${headerIcon} ${theme.bold(stateText)}  ${statusMeta([mode, pending ? `${pending} pending` : "", entries.length ? `agents ${treeRows.length}` : "", runningChildren ? `${runningChildren} delegated` : "", resultReady ? theme.fg("success", "result ready; confirming terminal") : ""], theme)}`,
+      `${headerIcon} ${theme.bold(stateText)}  ${statusMeta([
+        mode,
+        pending ? tuiT("progress.header.pending", { count: pending }) : "",
+        entries.length ? tuiT("progress.header.agents", { count: treeRows.length }) : "",
+        runningChildren ? tuiT("progress.header.delegated", { count: runningChildren }) : "",
+        resultReady ? theme.fg("success", tuiT("status.resultReadyConfirming")) : "",
+      ], theme)}`,
     ];
     // Nest each child agent under its parent task row, recursively, with no folding.
     for (const row of treeRows) {
@@ -429,7 +446,7 @@ function renderProgress(
       const liveMeta = statusMeta([
         focusedDurationMs !== undefined ? formatDuration(focusedDurationMs) : "",
         focusedTokens,
-        stalled ? theme.fg("error", `stalled ${Math.floor(idleMs / 1000)}s`) : "",
+        stalled ? theme.fg("error", tuiT("status.stalled", { seconds: Math.floor(idleMs / 1000) })) : "",
       ], theme);
       if (activeTool) {
         const toolIcon = activeTool.status === "running" ? theme.fg("warning", "■") : theme.fg("dim", "✓");
@@ -445,7 +462,9 @@ function renderProgress(
         }
       }
     }
-    if (entries.length > 1) lines.push(theme.fg("dim", `Alt+R details · 1-${Math.min(9, entries.length)} view · 0 overview`));
+    if (entries.length > 1) {
+      lines.push(theme.fg("dim", tuiT("progress.footer", { max: Math.min(9, entries.length) })));
+    }
     return lines.map((line) => truncateToWidth(line, Math.max(1, w), "…"));
   });
 }
@@ -460,16 +479,18 @@ function renderSingleResult(
   theme: Theme,
 ): Component {
   const icon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
-  const totalTokens = r.usage.inputTokens + r.usage.outputTokens;
-  const meta = statusMeta([
-    formatDuration(r.durationMs),
-    totalTokens > 0 ? `${formatTokens(totalTokens)} tokens` : "",
-    r.usage.cost > 0 ? `$${r.usage.cost.toFixed(4)}` : "",
-  ], theme);
-  const header = `${icon} ${theme.bold(r.agent)}  ${meta}`;
+  const header = (): string => {
+    const totalTokens = r.usage.inputTokens + r.usage.outputTokens;
+    const meta = statusMeta([
+      formatDuration(r.durationMs),
+      totalTokens > 0 ? tuiT("metrics.tokens", { count: formatTokens(totalTokens) }) : "",
+      r.usage.cost > 0 ? `$${r.usage.cost.toFixed(4)}` : "",
+    ], theme);
+    return `${icon} ${theme.bold(r.agent)}  ${meta}`;
+  };
 
   if (!options.expanded) {
-    return dynamicComponent((w) => [truncateToWidth(`${header}  ${theme.fg("dim", "Alt+R details")}`, Math.max(1, w), "…")]);
+    return dynamicComponent((w) => [truncateToWidth(`${header()}  ${theme.fg("dim", tuiT("progress.expand"))}`, Math.max(1, w), "…")]);
   }
 
   const proxy = { lines: [] as string[], invalidate() {}, render() { return this.lines; } };
@@ -480,13 +501,13 @@ function renderSingleResult(
   return memoizedComponent((w) => {
     const contentWidth = Math.max(1, w - 2);
     const messageWidth = Math.max(1, contentWidth - 2);
-    const lines: string[] = [truncateToWidth(header, contentWidth, "…")];
+    const lines: string[] = [truncateToWidth(header(), contentWidth, "…")];
 
     const usageParts: string[] = [];
-    if (r.usage.inputTokens > 0) usageParts.push(`${formatTokens(r.usage.inputTokens)}in`);
-    if (r.usage.outputTokens > 0) usageParts.push(`${formatTokens(r.usage.outputTokens)}out`);
+    if (r.usage.inputTokens > 0) usageParts.push(tuiT("metrics.inCompact", { count: formatTokens(r.usage.inputTokens) }));
+    if (r.usage.outputTokens > 0) usageParts.push(tuiT("metrics.outCompact", { count: formatTokens(r.usage.outputTokens) }));
     usageParts.push(...cacheUsageParts(r.usage, formatTokens));
-    if (r.usage.turns > 0) usageParts.push(`${r.usage.turns} turns`);
+    if (r.usage.turns > 0) usageParts.push(tuiT("metrics.turns", { count: r.usage.turns }));
     if (usageParts.length > 0) {
       lines.push(truncateToWidth(theme.fg("dim", usageParts.join(" · ")), contentWidth, "…"));
     }
@@ -512,11 +533,13 @@ function renderMultiResult(
   const total = results.length;
   const allOk = okCount === total;
   const icon = allOk ? theme.fg("success", "✓") : theme.fg("warning", "!");
-  const meta = statusMeta([details.mode, formatDuration(Math.max(...results.map((r) => r.durationMs), 0))], theme);
-  const header = `${icon} ${theme.bold(`${okCount}/${total} completed`)}  ${meta}`;
+  const header = (): string => {
+    const meta = statusMeta([details.mode, formatDuration(Math.max(...results.map((r) => r.durationMs), 0))], theme);
+    return `${icon} ${theme.bold(tuiT("progress.summary.completed", { count: okCount, total }))}  ${meta}`;
+  };
 
   if (!options.expanded) {
-    return dynamicComponent((w) => [truncateToWidth(`${header}  ${theme.fg("dim", "Alt+R details")}`, Math.max(1, w), "…")]);
+    return dynamicComponent((w) => [truncateToWidth(`${header()}  ${theme.fg("dim", tuiT("progress.expand"))}`, Math.max(1, w), "…")]);
   }
 
   const proxy = { lines: [] as string[], invalidate() {}, render() { return this.lines; } };
@@ -528,7 +551,7 @@ function renderMultiResult(
     const contentWidth = Math.max(1, w - 2);
     const previewWidth = Math.max(1, contentWidth - 3);
     const messageWidth = Math.max(1, previewWidth - 2);
-    const lines = [truncateToWidth(header, contentWidth, "…")];
+    const lines = [truncateToWidth(header(), contentWidth, "…")];
 
     if (details.progress?.length === results.length) {
       const palette: ProgressPalette = {
@@ -645,7 +668,7 @@ export function auxToolResultFallback(result: AgentToolResult<unknown>, theme: T
 function quietFirstError(r: SingleResult): string {
   const text = r.messages[r.messages.length - 1]?.content ?? "";
   const line = (text.split("\n").find((l) => l.trim()) ?? "").trim();
-  if (!line) return "failed";
+  if (!line) return tuiT("progress.quiet.failed");
   return line.length > 60 ? `${line.slice(0, 59)}…` : line;
 }
 
@@ -703,12 +726,14 @@ function quietResultLine(result: SingleResult, theme: Theme, fallbackName?: stri
   const label = result.name || fallbackName ? `@${displayName}` : displayName;
   const role = displayName === result.agent ? "" : `(${result.agent})`;
   const totalTokens = result.usage.inputTokens + result.usage.outputTokens;
-  const state = failed ? `failed · ${quietFirstError(result)}` : "done";
+  const state = failed
+    ? `${tuiT("progress.quiet.failed")} · ${quietFirstError(result)}`
+    : tuiT("progress.quiet.done");
   const rest = statusMeta([
     role,
     state,
     formatDuration(result.durationMs),
-    totalTokens > 0 ? `${formatTokens(totalTokens)} tokens` : "",
+    totalTokens > 0 ? tuiT("metrics.tokens", { count: formatTokens(totalTokens) }) : "",
     ...cacheUsageParts(result.usage, formatTokens),
   ], theme);
   return qLine(theme, glyph, label, rest);
@@ -764,13 +789,14 @@ function renderQuietTeammateResult(result: AgentToolResult<Details>, theme: Them
     : running > 0
       ? theme.fg("warning", quietStatusMark("running"))
       : theme.fg("success", quietStatusMark("success"));
+  const childCount = running || childCalls.length;
   const stateText = entries.length === 0
-    ? `${running || childCalls.length} child agent${(running || childCalls.length) === 1 ? "" : "s"}`
+    ? tuiT(childCount === 1 ? "progress.child.one" : "progress.child.many", { count: childCount })
     : failed > 0
-      ? `${failed}/${entries.length} failed`
+      ? tuiT("progress.summary.failed", { count: failed, total: entries.length })
       : running > 0
-        ? `${running}/${entries.length} running`
-        : `${completed}/${entries.length} done`;
+        ? tuiT("progress.summary.running", { count: running, total: entries.length })
+        : tuiT("progress.summary.done", { count: completed, total: entries.length });
 
   return dynamicComponent((w) => {
     const lines = [qLine(theme, glyph, "teammate", stateText)];

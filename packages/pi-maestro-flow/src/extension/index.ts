@@ -214,6 +214,7 @@ import {
   runObservedCompaction,
 } from "../compaction/compaction-arbiter.ts";
 import { registerCompactionSettingsCommand, showCompactionSettingsOverlay } from "../tui/compaction-settings.ts";
+import { flowTuiText, registerTuiLocaleEvents } from "../tui/locale.ts";
 import { registerMaestroPackageResources } from "../resources/maestro-package.ts";
 import { registerSkillManager, runSkillManager } from "../skills/skill-manager.ts";
 import { SkillManagerStore } from "../skills/skill-manager-store.ts";
@@ -607,6 +608,8 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     registerMaestroChildSurface(pi);
     return;
   }
+
+  registerTuiLocaleEvents(pi.events);
 
   // pi install's SettingsManager overwrites postinstall's settings.json writes
   // with its stale in-memory cache. Re-register companion packages at load time
@@ -2952,7 +2955,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
   const requireFlowSettingsContext = (surface: string): ExtensionContext | undefined => {
     const ctx = flowSettingsContext;
     if (!ctx) console.error(`[maestro] Cannot open ${surface}: no active Flow session context`);
-    else if (!ctx.hasUI) ctx.ui.notify(`${surface} requires interactive TUI mode.`, "warning");
+    else if (!ctx.hasUI) ctx.ui.notify(flowTuiText("surface.needTui", { surface }), "warning");
     return ctx?.hasUI ? ctx : undefined;
   };
   /** Run an action with a unified status-line lifecycle (set before, clear after). */
@@ -2970,25 +2973,25 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     getAgentResponseLanguage: () => chineseResponseMode.isEnabled() ? "zh-CN" : "default",
     getPermissionOverview: () => permissionController.overview(effectivePermissionMode(approvalMode)),
     actions: {
-      "compaction.manage": () => withActionStatus("打开压缩设置…", async (ctx) => {
+      "compaction.manage": () => withActionStatus(flowTuiText("compaction.opening"), async (ctx) => {
         await showCompactionSettingsOverlay(ctx as ExtensionCommandContext);
       }),
-      "failover.manage": () => withActionStatus("打开模型故障转移设置…", async (ctx) => {
+      "failover.manage": () => withActionStatus(flowTuiText("failover.opening"), async (ctx) => {
         await showModelFailoverOverlay(ctx, sharedModelCircuitBreaker);
       }),
-      "responseLanguage.manage": () => withActionStatus("切换 Agent 回复语言…", async (ctx) => {
+      "responseLanguage.manage": () => withActionStatus(flowTuiText("response.opening"), async (ctx) => {
         chineseResponseMode.toggle(ctx);
-        return chineseResponseMode.isEnabled() ? "已切换到中文回复" : "已切换到默认回复";
+        return chineseResponseMode.isEnabled() ? flowTuiText("response.zh") : flowTuiText("response.default");
       }),
-      "skills.manage": () => withActionStatus("打开 Skill 管理器…", async (ctx) => {
+      "skills.manage": () => withActionStatus(flowTuiText("skills.opening"), async (ctx) => {
         const result = await runSkillManager(ctx, new SkillManagerStore(ctx.cwd));
-        if (result.configChanged) ctx.ui.notify("Skill changes will apply after the extension reloads.", "info");
+        if (result.configChanged) ctx.ui.notify(flowTuiText("skills.reload"), "info");
       }),
-      "mcp.manage": () => withActionStatus("打开 MCP 管理器…", async (ctx) => {
+      "mcp.manage": () => withActionStatus(flowTuiText("mcp.opening"), async (ctx) => {
         if (mcpAdapterHandle) await mcpAdapterHandle.openManager(ctx);
-        else ctx.ui.notify("MCP adapter is unavailable.", "warning");
+        else ctx.ui.notify(flowTuiText("mcp.unavailable"), "warning");
       }),
-      "hooks.manage": () => withActionStatus("打开 Hooks 管理器…", async (ctx) => {
+      "hooks.manage": () => withActionStatus(flowTuiText("hooks.opening"), async (ctx) => {
         await hookAdapter.openSettings(ctx);
       }),
     },

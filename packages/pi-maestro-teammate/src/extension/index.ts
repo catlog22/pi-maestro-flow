@@ -190,6 +190,12 @@ import { normalizePiRetryErrorMessage } from "../runs/retry.ts";
 import { getPiSpawnCommand } from "../runs/execution-infra.ts";
 import { showMonitorOverlay, type MonitorSessionRow } from "../tui/monitor-overlay.ts";
 import { showSessionSendOverlay } from "../tui/session-send-overlay.ts";
+import {
+  SETTINGS_LOCALE_EVENT,
+  applySettingsLocaleEvent,
+  translateStatusIdentifier,
+  tuiT,
+} from "../tui/locale.ts";
 import { createTeammateSettingsProvider, registerTeammateSettingsProvider } from "../settings/teammate-settings-provider.ts";
 import type {
   Details,
@@ -3684,7 +3690,7 @@ export default function registerTeammateExtension(
       if (now - monitorEscapeTapAt <= MONITOR_ESCAPE_TAP_WINDOW_MS) {
         monitorEscapeTapAt = 0;
         void monitorRegistry.requestWindowMode("exit").then(() => {
-          widgetCtx?.ui.notify("Monitor mode closed (double Esc).", "info");
+          widgetCtx?.ui.notify(tuiT("extension.monitorClosed"), "info");
         });
         return { consume: true };
       }
@@ -4774,7 +4780,7 @@ export default function registerTeammateExtension(
     preemptCockpitResize();
     const agent = typeof target === "string" ? state.activeRuns.get(target) : target;
     if (!agent) {
-      ctx.ui.notify("Agent is no longer active.", "error");
+      ctx.ui.notify(tuiT("extension.agentInactive"), "error");
       return;
     }
 
@@ -4790,7 +4796,7 @@ export default function registerTeammateExtension(
           opts.readOnly ? undefined : async (cid, message) => {
             const target = state.activeRuns.get(cid);
             if (!target) {
-              return { ok: false, message: "Agent is no longer active" };
+              return { ok: false, message: tuiT("extension.agentInactiveShort") };
             }
             const delivery = await routeSessionMessage({
               selector: cid,
@@ -4799,8 +4805,8 @@ export default function registerTeammateExtension(
               source: "user",
             });
             return delivery.delivered
-              ? { ok: true, message: `Queued for ${target.name ?? cid.slice(0, 8)}` }
-              : { ok: false, message: delivery.error ?? "Send failed" };
+              ? { ok: true, message: tuiT("extension.queued", { target: target.name ?? cid.slice(0, 8) }) }
+              : { ok: false, message: delivery.error ?? tuiT("extension.sendFailed") };
           },
           (targetAgent) =>
             loadTranscript({
@@ -4935,7 +4941,7 @@ export default function registerTeammateExtension(
     const activeRows = buildAgentSelectorRows(Array.from(state.activeRuns.values()));
     const allRows = [...activeRows, ...buildHistoryRows(historyScans)];
     if (allRows.length === 0) {
-      ctx.ui.notify("No active teammates. Start one with the teammate tool.", "warning");
+      ctx.ui.notify(tuiT("extension.noActiveTeammates"), "warning");
       return;
     }
     if (allRows.length === 1) {
@@ -5198,7 +5204,10 @@ export default function registerTeammateExtension(
       const windowRow: MonitorSessionRow = {
         correlationId: `owner:${owner.ownerId}`,
         displayName: owner.sessionName ?? `window:${owner.ownerId.slice(0, 6)}`,
-        agentRole: `window · ${owner.agents.length} agents · ${owner.backgroundJobs?.length ?? 0} bash_bg`,
+        agentRole: tuiT("extension.windowSummaryJobs", {
+          agents: owner.agents.length,
+          jobs: owner.backgroundJobs?.length ?? 0,
+        }),
         status: windowRowStatus([
           ...owner.agents.map((agent) => agent.status),
           ...(owner.backgroundJobs ?? []).map(() => "running"),
@@ -5231,8 +5240,8 @@ export default function registerTeammateExtension(
     });
     const localWindowRow: MonitorSessionRow = {
       correlationId: "local",
-      displayName: workspacePeerSessionName ?? "本窗口",
-      agentRole: `window · ${localAgents.length} agents`,
+      displayName: workspacePeerSessionName ?? tuiT("extension.currentWindow"),
+      agentRole: tuiT("extension.windowSummary", { agents: localAgents.length }),
       status: windowRowStatus(localAgents.map((agent) => agent.status)),
       idleSeconds: 0,
       bound: false,
@@ -5278,7 +5287,7 @@ export default function registerTeammateExtension(
         target = trimmed.slice(0, separator);
         message = trimmed.slice(separator).trim();
         if (!message) {
-          ctx.ui.notify("A message is required.", "warning");
+          ctx.ui.notify(tuiT("extension.messageRequired"), "warning");
           return;
         }
       } else {
@@ -5299,8 +5308,8 @@ export default function registerTeammateExtension(
       });
       ctx.ui.notify(
         delivery.delivered
-          ? `Message delivered to ${target}.`
-          : delivery.error ?? `Message could not be delivered to ${target}.`,
+          ? tuiT("extension.messageDelivered", { target })
+          : delivery.error ?? tuiT("extension.messageUndelivered", { target }),
         delivery.delivered ? "info" : "warning",
       );
     },
@@ -5315,7 +5324,7 @@ export default function registerTeammateExtension(
         .map((agent) => ({
           value: agent.displayName,
           label: agent.displayName,
-          description: `${agent.agentRole} · ${agent.status}${agent.source === "local" ? "" : ` · ${agent.source}`}`,
+          description: `${agent.agentRole} · ${translateStatusIdentifier(agent.status)}${agent.source === "local" ? "" : ` · ${agent.source}`}`,
         }));
       const commands = [
         { value: "exit", label: "exit", description: "Stop monitoring and clear bindings" },
@@ -5730,6 +5739,12 @@ export default function registerTeammateExtension(
   }
 
   if (!isChild) {
+  pi.events.on(SETTINGS_LOCALE_EVENT, (payload) => {
+    if (!applySettingsLocaleEvent(payload)) return;
+    updateAgentWidget();
+    syncMonitorInteractionStatus();
+  });
+
   pi.events.on("bash-bg:update", applyBashBgSnapshot);
 
   pi.events.on(COCKPIT_UI_OWNERSHIP_EVENT, (payload) => {

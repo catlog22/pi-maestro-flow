@@ -6,11 +6,38 @@ import { toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts"
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { showSmartSearchConfigOverlay } from "../tui/smart-search-config.ts";
+import { getTuiLocale } from "../tui/locale.ts";
+import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
 import { nativeSearch } from "./web-access/search-router.ts";
 import { nativeFetch } from "./web-access/fetch-router.ts";
 
 const require = createRequire(import.meta.url);
 const DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
+
+const SMART_SEARCH_UI = {
+  en: {
+    description: "Configure the built-in Smart Search tool",
+    usage: "Usage: /smart-search [config]",
+    openFailed: "Failed to open Smart Search configuration: {message}",
+  },
+  "zh-CN": {
+    description: "配置内置 Smart Search 搜索工具",
+    usage: "用法：/smart-search [config]",
+    openFailed: "Smart Search 配置打开失败：{message}",
+  },
+} as const;
+
+function smartSearchUiText(
+  key: keyof (typeof SMART_SEARCH_UI)["en"],
+  vars?: Readonly<Record<string, string | number>>,
+  explicitLocale?: SupportedSettingsLocale,
+): string {
+  const locale = getTuiLocale(explicitLocale);
+  const template = SMART_SEARCH_UI[locale]?.[key] ?? SMART_SEARCH_UI.en[key];
+  if (!vars) return template;
+  return template.replace(/\{(\w+)\}/g, (_match, name: string) =>
+    vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
+}
 
 type SmartSearchModeValue = "search" | "research" | "fetch" | "route";
 type ValidationValue = "fast" | "balanced" | "strict";
@@ -254,6 +281,8 @@ export function registerSmartSearchTool(pi: ExtensionAPI, runner?: SmartSearchRu
 export interface RegisterSmartSearchOptions {
   runner?: SmartSearchRunner;
   showConfig?: typeof showSmartSearchConfigOverlay;
+  /** Explicit UI language; otherwise follows the shared runtime TUI locale. */
+  locale?: SupportedSettingsLocale;
 }
 
 export function registerSmartSearch(
@@ -263,17 +292,17 @@ export function registerSmartSearch(
   registerSmartSearchTool(pi, options.runner);
   const showConfig = options.showConfig ?? showSmartSearchConfigOverlay;
   pi.registerCommand("smart-search", {
-    description: "配置内置 Smart Search 搜索工具",
+    description: smartSearchUiText("description", undefined, options.locale),
     async handler(args, ctx) {
       const action = args.trim().toLowerCase();
       if (action && action !== "config") {
-        ctx.ui.notify("用法：/smart-search [config]", "warning");
+        ctx.ui.notify(smartSearchUiText("usage", undefined, options.locale), "warning");
         return;
       }
       try {
-        await showConfig(ctx);
+        await showConfig(ctx, undefined, undefined, options.locale);
       } catch (error) {
-        ctx.ui.notify(`Smart Search 配置打开失败：${errorMessage(error)}`, "error");
+        ctx.ui.notify(smartSearchUiText("openFailed", { message: errorMessage(error) }, options.locale), "error");
       }
     },
   });

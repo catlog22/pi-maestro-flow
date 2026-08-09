@@ -1,0 +1,24 @@
+import { SETTINGS_LOCALE_EVENT, type SettingsLocaleEventV1, type SupportedSettingsLocale, type SystemSettingsLocaleOptions, type TranslationParams } from "pi-maestro-settings-core/v1";
+import { CORE_TUI_CATALOGS } from "./locale-catalog-core.ts";
+import { MODEL_TUI_CATALOGS } from "./locale-catalog-model.ts";
+import { PROFILE_TUI_CATALOGS } from "./locale-catalog-profiles.ts";
+import { SESSION_TUI_CATALOGS } from "./locale-catalog-sessions.ts";
+export declare const TUI_TRANSLATION_CATALOGS: Readonly<Partial<Record<"en" | "zh-CN", Readonly<Record<string, string>>>>>;
+type CoreKey = keyof (typeof CORE_TUI_CATALOGS)["en"];
+type SessionKey = keyof (typeof SESSION_TUI_CATALOGS)["en"];
+type ModelKey = keyof (typeof MODEL_TUI_CATALOGS)["en"];
+type ProfileKey = keyof (typeof PROFILE_TUI_CATALOGS)["en"];
+export type TuiTranslationKey = CoreKey | SessionKey | ModelKey | ProfileKey;
+export type TuiTranslator = (key: TuiTranslationKey, params?: TranslationParams) => string;
+export declare function getTuiLocale(): SupportedSettingsLocale;
+export declare function initializeTuiLocale(locale?: string | null | undefined, options?: SystemSettingsLocaleOptions): SupportedSettingsLocale;
+export declare function applySettingsLocaleEvent(payload: unknown): payload is SettingsLocaleEventV1;
+export declare function onTuiLocaleChange(listener: (locale: SupportedSettingsLocale) => void): () => void;
+export declare function tuiT(key: TuiTranslationKey, params?: TranslationParams, locale?: SupportedSettingsLocale): string;
+/** Omitted locale follows runtime events; an explicit locale stays fixed. */
+export declare function createTuiTranslator(locale?: SupportedSettingsLocale): TuiTranslator;
+export declare function translateStatusText(text: string, translator?: TuiTranslator): string;
+export declare function translateStatusIdentifier(status: string, translator?: TuiTranslator): string;
+export declare function checkTuiCatalogCompleteness(): import("pi-maestro-settings-core/v1").CatalogCompletenessResult;
+export { SETTINGS_LOCALE_EVENT };
+export type { SupportedSettingsLocale };

@@ -21,6 +21,11 @@ export interface SettingsTranslatorOptions {
   onMissing?: MissingTranslationCallback;
 }
 
+export interface SystemSettingsLocaleOptions {
+  environment?: Readonly<Record<string, string | undefined>>;
+  resolvedLocale?: string | null;
+}
+
 export interface SettingsTranslator {
   readonly locale: SupportedSettingsLocale;
   setLocale(locale: string | null | undefined): SupportedSettingsLocale;
@@ -48,6 +53,50 @@ export function normalizeSettingsLocale(locale: string | null | undefined): Supp
     return "zh-CN";
   }
   return "en";
+}
+
+export function detectSystemSettingsLocale(
+  options: SystemSettingsLocaleOptions = {},
+): SupportedSettingsLocale {
+  const environment = options.environment ?? systemEnvironment();
+  const environmentLocale = [
+    environment.LC_ALL,
+    environment.LC_MESSAGES,
+    environment.LANGUAGE?.split(":", 1)[0],
+    environment.LANG,
+  ].find((value) => value?.trim());
+  if (environmentLocale) return normalizeSettingsLocale(environmentLocale);
+
+  const resolvedLocale = options.resolvedLocale === undefined
+    ? systemResolvedLocale()
+    : options.resolvedLocale;
+  return normalizeSettingsLocale(resolvedLocale);
+}
+
+export function resolveSettingsLocale(
+  locale: string | null | undefined,
+  options: SystemSettingsLocaleOptions = {},
+): SupportedSettingsLocale {
+  const requested = locale?.trim();
+  if (requested && requested.toLowerCase() !== "auto") {
+    return normalizeSettingsLocale(requested);
+  }
+  return detectSystemSettingsLocale(options);
+}
+
+function systemEnvironment(): Readonly<Record<string, string | undefined>> {
+  const processLike = (globalThis as {
+    process?: { env?: Record<string, string | undefined> };
+  }).process;
+  return processLike?.env ?? {};
+}
+
+function systemResolvedLocale(): string | undefined {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().locale;
+  } catch {
+    return undefined;
+  }
 }
 
 export function interpolateTranslation(template: string, params: TranslationParams = {}): string {

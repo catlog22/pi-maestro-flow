@@ -73,7 +73,8 @@ export interface PersistStructuredResultsSummary {
 }
 
 /**
- * Persist one or more published or settled results into `<cwd>/.pi/agents/`.
+ * Persist one or more published or settled results into the global per-workspace
+ * output bucket (~/.pi/teammate-output/<workspace>/).
  * Invalid entries are counted as skipped and I/O failures as failed so callers
  * that need a durable acknowledgement do not mistake a no-op for success.
  */

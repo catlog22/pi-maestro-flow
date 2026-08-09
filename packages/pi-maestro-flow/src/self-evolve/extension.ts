@@ -655,6 +655,10 @@ export default function registerSelfEvolve(pi: ExtensionAPI): void {
     const load = loadConfig(cwd).then((loaded) => {
       if (generation !== configGeneration || configCwd !== cwd) return;
       config = loaded;
+      // Config load is async; session_start already rendered the default
+      // (disabled) state. Refresh now so an enabled config shows EV● instead
+      // of a stale EVOL off until the first agent_end.
+      updateStatusBar(ctx);
     }).finally(() => {
       if (configLoadPromise === load) configLoadPromise = undefined;
     });

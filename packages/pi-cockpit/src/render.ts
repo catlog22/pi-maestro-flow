@@ -4,6 +4,7 @@ import type { AgentRow, TodoItem, ViewMode } from "./types.ts";
 import type { IconGlyphs } from "./icons.ts";
 import { composeByPriority, fitLineByPriority, type PriorityGroup, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
 import { AGENT_NARROW_ROW_CAP, AGENT_WIDE_ROW_CAP, fitRows } from "./viewport.ts";
+import { tuiStatus, tuiT } from "./tui-i18n.ts";
 
 // Re-exported for existing importers; the shared implementation lives in layout.ts.
 export type { WidthUtils };
@@ -204,13 +205,13 @@ function agentGlyph(
 	spin: string,
 ): { glyph: string; color: ThemeColor; label?: string } {
 	if (status === "failed") return { glyph: glyphs.cross, color: "error" };
-	if (status === "stalled") return { glyph: glyphs.cross, color: "error", label: "stalled" };
-	if (status === "terminated") return { glyph: glyphs.cross, color: "warning", label: "terminated" };
+	if (status === "stalled") return { glyph: glyphs.cross, color: "error", label: tuiStatus(status) };
+	if (status === "terminated") return { glyph: glyphs.cross, color: "warning", label: tuiStatus(status) };
 	if (status === "done") return { glyph: glyphs.check, color: "success" };
-	if (status === "pending") return { glyph: glyphs.pending, color: "dim", label: "pending" };
-	if (status === "sleeping") return { glyph: glyphs.dotIdle, color: "warning", label: "sleeping" };
-	if (status === "retrying") return { glyph: spin, color: "warning", label: "retrying" };
-	if (status === "result-ready") return { glyph: glyphs.check, color: "success", label: "result ready" };
+	if (status === "pending") return { glyph: glyphs.pending, color: "dim", label: tuiStatus(status) };
+	if (status === "sleeping") return { glyph: glyphs.dotIdle, color: "warning", label: tuiStatus(status) };
+	if (status === "retrying") return { glyph: spin, color: "warning", label: tuiStatus(status) };
+	if (status === "result-ready") return { glyph: glyphs.check, color: "success", label: tuiStatus(status) };
 	return { glyph: spin, color: "accent" };
 }
 
@@ -231,9 +232,9 @@ export function renderAgents(
 		const displayStatuses = rows.map((row) => effectiveAgentStatus(row, opts.now));
 		const active = displayStatuses.filter((status) => status === "running" || status === "retrying").length;
 		const stalled = displayStatuses.filter((status) => status === "stalled").length;
-		const head = `${theme.fg("text", String(rows.length))} ${theme.fg("muted", "agents")}`
-			+ (active ? theme.fg("dim", `${g.separator}${active} active`) : "")
-			+ (stalled ? theme.fg("error", `${g.separator}${stalled} stalled`) : "");
+		const head = `${theme.fg("text", String(rows.length))} ${theme.fg("muted", tuiT("widget.agents.noun"))}`
+			+ (active ? theme.fg("dim", `${g.separator}${tuiT("common.active", { count: active })}`) : "")
+			+ (stalled ? theme.fg("error", `${g.separator}${tuiT("common.stalled", { count: stalled })}`) : "");
 		const tails = rows
 			.filter((r) => r.tail)
 			.map((r) => `${theme.fg(roleColor(r.role), r.role)}${theme.fg("dim", ":")} ${theme.fg("dim", r.tail)}`);
@@ -296,7 +297,9 @@ export function renderAgents(
 		}
 		if (r.lastOutcome?.status === "failed") {
 			segs.push({
-				text: theme.fg("error", r.lastOutcome.message ? `last failed: ${r.lastOutcome.message}` : "last failed"),
+				text: theme.fg("error", r.lastOutcome.message
+					? tuiT("widget.agent.lastFailedMessage", { message: r.lastOutcome.message })
+					: tuiT("widget.agent.lastFailed")),
 				priority: 91,
 				minWidth: 8,
 			});
@@ -330,24 +333,37 @@ export function renderAgents(
 				minWidth: 8,
 			});
 		}
-		if (r.toolCount !== undefined) segs.push({ text: theme.fg("muted", `${r.toolCount} tools`), priority: 20, clippable: false });
+		if (r.toolCount !== undefined) {
+			segs.push({ text: theme.fg("muted", tuiT("common.tools", { count: r.toolCount })), priority: 20, clippable: false });
+		}
 		if ((r.cacheReadTokens ?? 0) > 0 || (r.cacheWriteTokens ?? 0) > 0) {
 			segs.push({
-				text: theme.fg("muted", `cache ${formatAgentMetric(r.cacheReadTokens ?? 0)}r/${formatAgentMetric(r.cacheWriteTokens ?? 0)}w`),
+				text: theme.fg("muted", tuiT("widget.agent.cache", {
+					read: formatAgentMetric(r.cacheReadTokens ?? 0),
+					write: formatAgentMetric(r.cacheWriteTokens ?? 0),
+				})),
 				priority: 15,
 				clippable: false,
 			});
 		}
 		if (r.inputTokens !== undefined || r.outputTokens !== undefined) {
-			const usage = `in ${formatAgentMetric(r.inputTokens ?? 0)}${g.separator}out ${formatAgentMetric(r.outputTokens ?? 0)}`;
+			const usage = tuiT("widget.agent.inputOutput", {
+				input: formatAgentMetric(r.inputTokens ?? 0),
+				separator: g.separator,
+				output: formatAgentMetric(r.outputTokens ?? 0),
+			});
 			segs.push({ text: theme.fg("muted", usage), priority: 10, clippable: false });
 		} else if (r.tokens !== undefined) {
-			segs.push({ text: theme.fg("muted", `${formatAgentMetric(r.tokens)} tok`), priority: 10, clippable: false });
+			segs.push({
+				text: theme.fg("muted", tuiT("widget.agent.tokens", { count: formatAgentMetric(r.tokens) })),
+				priority: 10,
+				clippable: false,
+			});
 		}
 		return fitLineByPriority(segs, width, utils, " ", g.ellipsis);
 	});
 	if (hidden > 0) {
-		lines.push(utils.clip(theme.fg("dim", `${g.treeLast} ${g.ellipsis} ${hidden} more`), width, ell));
+		lines.push(utils.clip(theme.fg("dim", `${g.treeLast} ${g.ellipsis} ${tuiT("common.more", { count: hidden })}`), width, ell));
 	}
 	return lines;
 }
@@ -444,8 +460,10 @@ export function renderTodos(
 			{ text: renderTodoBar(items, width, theme, g), priority: 60, clippable: false },
 			{ text: theme.fg("muted", `${pct}%`), priority: 90, clippable: false },
 		];
-		if (blocked > 0) segs.push({ text: theme.fg("error", `${blocked} blocked`), priority: 95, clippable: false });
-		segs.push({ text: theme.fg("dim", `(${toggleHint} expand)`), priority: 10, clippable: false });
+		if (blocked > 0) {
+			segs.push({ text: theme.fg("error", tuiT("common.blocked", { count: blocked })), priority: 95, clippable: false });
+		}
+		segs.push({ text: theme.fg("dim", tuiT("widget.todo.expand", { shortcut: toggleHint })), priority: 10, clippable: false });
 		return [fitLineByPriority(segs, width, utils, " ", g.ellipsis)];
 	}
 
@@ -458,17 +476,17 @@ export function renderTodos(
 	const sep = theme.fg("dim", g.separator.trim());
 
 	const summarySegs: PrioritizedSegment[] = [
-		{ text: theme.fg("syntaxFunction", "Todo"), priority: 40, clippable: false },
+		{ text: theme.fg("syntaxFunction", tuiT("widget.todo.title")), priority: 40, clippable: false },
 		{ text: theme.fg("dim", `${done}/${total}`), priority: 80, clippable: false },
 	];
 	if (blocked > 0) {
-		summarySegs.push({ text: theme.fg("error", `${blocked} blocked`), priority: 90, clippable: false });
+		summarySegs.push({ text: theme.fg("error", tuiT("common.blocked", { count: blocked })), priority: 90, clippable: false });
 	}
 	if (running > 0) {
-		summarySegs.push({ text: theme.fg("dim", `${running} running`), priority: 50, clippable: false });
+		summarySegs.push({ text: theme.fg("dim", tuiT("common.running", { count: running })), priority: 50, clippable: false });
 	}
 	if (members > 0) {
-		summarySegs.push({ text: theme.fg("dim", `${members} members`), priority: 30, clippable: false });
+		summarySegs.push({ text: theme.fg("dim", tuiT("common.members", { count: members })), priority: 30, clippable: false });
 	}
 	// Creation order drives both the next-task pointer and the expanded rows, so
 	// compute it once up front. The pointer is the first task the user can act on:
@@ -486,7 +504,7 @@ export function renderTodos(
 		summarySegs.push({ text: ntext, priority: 20, clippable: false });
 	}
 	summarySegs.push({
-		text: theme.fg("dim", `(${toggleHint} ${expanded ? "collapse" : "expand"})`),
+		text: theme.fg("dim", `(${toggleHint} ${tuiT(expanded ? "widget.todo.collapse" : "widget.todo.expandAction")})`),
 		priority: 10,
 		clippable: false,
 	});
@@ -536,6 +554,8 @@ export function renderTodos(
 		}
 		rows.push(utils.clip(segments.join(" "), width, ell));
 	}
-	if (hidden > 0) rows.push(utils.clip(theme.fg("dim", `  ${g.ellipsis} ${hidden} more`), width, ell));
+	if (hidden > 0) {
+		rows.push(utils.clip(theme.fg("dim", `  ${g.ellipsis} ${tuiT("common.more", { count: hidden })}`), width, ell));
+	}
 	return rows;
 }

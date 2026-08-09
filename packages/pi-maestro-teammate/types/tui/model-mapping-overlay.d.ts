@@ -5,6 +5,7 @@ import type { ModelCircuitSnapshot } from "../models/model-circuit-breaker.ts";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
 import { type ModelRoutingRoleRules, type ModelRoutingRules, type ModelRoutingState, type ModelRoutingTypeMeta, type TeammateTaskType } from "../models/model-routing.ts";
 import { type TeammateThinkingLevel } from "../shared/thinking.ts";
+import { type SupportedSettingsLocale } from "./locale.ts";
 export type ControlCenterTab = "profiles" | "routing" | "roles" | "active";
 export interface ControlCenterActiveAgent {
     correlationId: string;
@@ -38,6 +39,7 @@ export interface TeammateControlCenterOptions {
     modelHealth?: readonly ModelCircuitSnapshot[];
     onOpenAgent?: (correlationId: string) => Promise<void>;
     globalFilePath?: string;
+    locale?: SupportedSettingsLocale;
 }
 interface LegacyControlCenterConfig extends ModelRoutingRules {
     version: 2 | 3;
@@ -72,6 +74,7 @@ interface TeammateControlCenterParams {
     deleteCustomType?: (taskType: TeammateTaskType) => void;
     saveTypeMeta?: (taskType: TeammateTaskType, meta: ModelRoutingTypeMeta | null) => void;
     modelHealth?: readonly ModelCircuitSnapshot[];
+    locale?: SupportedSettingsLocale;
 }
 export declare class TeammateControlCenter implements Component, Focusable {
     private readonly params;
@@ -107,6 +110,8 @@ export declare class TeammateControlCenter implements Component, Focusable {
     private readonly agents;
     private taskTypes;
     private readonly activeAgents;
+    private readonly t;
+    private readonly localeDisposer;
     constructor(params: TeammateControlCenterParams);
     invalidate(): void;
     dispose(): void;
@@ -144,6 +149,7 @@ export declare class TeammateControlCenter implements Component, Focusable {
     private startTypeMetaEdit;
     private deleteSelectedCustomType;
     private refreshTaskTypes;
+    private editorSaveLabel;
     private handleFallbackInput;
     private fallbackItems;
     private fallbackItemDetail;

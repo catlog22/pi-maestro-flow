@@ -8,6 +8,7 @@ import { ambientKeysShouldYield } from "./capturing-overlay.ts";
 import { attachViewportStability, type ViewportStabilityPatch } from "./viewport-stability.ts";
 import { acquireMouseReporting, flushMouseReportingWrites, type MouseReportingLease } from "./mouse-reporting.ts";
 import { readStableReference } from "./stable-reference.ts";
+import { tuiT } from "./tui-i18n.ts";
 
 const SGR_MOUSE = /^\u001b\[<(\d+);(\d+);(\d+)([Mm])$/;
 // Legacy X10 mouse: ESC [ M + 3 bytes (button+32, x+32, y+32). Some terminals fall
@@ -402,11 +403,11 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 		beginResize() {
 			if (resizing) return true;
 			if (!tui || !enabled) {
-				safely(() => options.onWarning?.("Cockpit sidebar is not ready to resize"));
+				safely(() => options.onWarning?.(tuiT("notice.sidebarNotReady")));
 				return false;
 			}
 			if (!visibleAt(tui.terminal.columns)) {
-				safely(() => options.onWarning?.("Terminal is too narrow to resize the Cockpit sidebar"));
+				safely(() => options.onWarning?.(tuiT("notice.sidebarTooNarrow")));
 				return false;
 			}
 			if (!options.subscribeInput) {

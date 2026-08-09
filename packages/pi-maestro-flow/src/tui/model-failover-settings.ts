@@ -15,6 +15,7 @@ import {
   rule,
   type FrameTheme,
 } from "pi-cockpit/src/settings/ui-primitives.ts";
+import { getTuiLocale } from "./locale.ts";
 import type {
   ModelCircuitBreaker,
   ModelCircuitSnapshot,
@@ -99,7 +100,7 @@ const CATALOGS = {
   },
 } as const;
 
-type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
+type CatalogKey = keyof (typeof CATALOGS)["en"];
 
 export interface ModelFailoverOverlayParams {
   cwd: string;
@@ -112,7 +113,7 @@ export interface ModelFailoverOverlayParams {
   requestRender: () => void;
   done: (saved: boolean) => void;
   saveConfig?: (config: ModelFailoverConfig) => Promise<void> | void;
-  /** UI language; defaults to zh-CN when the host exposes no locale signal. */
+  /** Explicit UI language; otherwise follows the shared runtime TUI locale. */
   locale?: SupportedSettingsLocale;
 }
 
@@ -143,7 +144,7 @@ export class ModelFailoverOverlay implements Component, Focusable {
   private readonly multimodalModels = new Set<string>();
 
   constructor(private readonly params: ModelFailoverOverlayParams) {
-    this.locale = params.locale ?? "zh-CN";
+    this.locale = getTuiLocale(params.locale);
     this.config = {
       enabled: params.config.enabled,
       fallbackModels: Object.fromEntries(
@@ -164,9 +165,9 @@ export class ModelFailoverOverlay implements Component, Focusable {
 
   /** Translate a catalog key with optional {var} substitution. */
   private t(key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
-    const catalog = CATALOGS[this.locale] ?? CATALOGS["zh-CN"];
+    const catalog = CATALOGS[this.locale] ?? CATALOGS.en;
     const template: unknown = catalog[key];
-    const text = typeof template === "string" ? template : CATALOGS["zh-CN"][key] as string;
+    const text = typeof template === "string" ? template : CATALOGS.en[key] as string;
     if (!vars) return text;
     return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
       vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
@@ -500,6 +501,7 @@ export class ModelFailoverOverlay implements Component, Focusable {
 export async function showModelFailoverOverlay(
   ctx: ExtensionContext,
   breaker: ModelCircuitBreaker,
+  locale?: SupportedSettingsLocale,
 ): Promise<boolean> {
   const available = ctx.modelRegistry.getAvailable();
   const models = available.map((model) => `${model.provider}/${model.id}`);
@@ -514,6 +516,7 @@ export async function showModelFailoverOverlay(
     currentModel,
     config: loadModelFailoverConfig(ctx.cwd),
     health: breaker.snapshot(),
+    locale,
     theme,
     requestRender: () => tui.requestRender(),
     done,

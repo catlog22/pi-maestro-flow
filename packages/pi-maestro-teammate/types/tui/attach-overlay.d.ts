@@ -5,6 +5,7 @@
 import { type Component, type Focusable } from "@earendil-works/pi-tui";
 import type { ActiveAgent, AgentProgressSnapshot, MessageEnvelope } from "../shared/types.ts";
 import type { TranscriptLoad, TranscriptRow } from "../shared/transcript.ts";
+import { type SupportedSettingsLocale } from "./locale.ts";
 /** Loader injected by the extension; reads the agent's session file. */
 export type TranscriptLoader = (agent: ActiveAgent) => Promise<TranscriptLoad>;
 /** Tab identity for the main conversation — a switching target, not a log. */
@@ -25,6 +26,7 @@ export interface OverlayProgressUpdate {
 }
 interface LogRenderCache {
     width: number;
+    locale: SupportedSettingsLocale;
     lineCount: number;
     lastLine: AgentLog["lines"][number] | undefined;
     inboxCount: number;
@@ -53,12 +55,14 @@ interface AgentLog {
     transcriptRefreshTimer?: ReturnType<typeof setTimeout>;
     transcriptCache?: {
         width: number;
+        locale: SupportedSettingsLocale;
         rows: TranscriptRow[];
         loading: boolean;
         rendered: string[];
     };
 }
 export declare class AttachOverlay implements Component, Focusable {
+    private readonly locale?;
     focused: boolean;
     private agents;
     /** Agents whose data changed while they were not the visible tab. */
@@ -86,10 +90,12 @@ export declare class AttachOverlay implements Component, Focusable {
     private pasteFlushTimer;
     private lastWidth;
     private readonly onSend?;
+    private readonly t;
+    private readonly localeDisposer;
     constructor(initial: ActiveAgent, onDone: () => void, getActiveRuns?: () => Map<string, ActiveAgent>, onSend?: (correlationId: string, message: string) => Promise<{
         ok: boolean;
         message: string;
-    }>, loadTranscript?: TranscriptLoader, initialTranscript?: boolean);
+    }>, loadTranscript?: TranscriptLoader, initialTranscript?: boolean, locale?: SupportedSettingsLocale | undefined);
     setRequestRender(fn: () => void): void;
     private tickSignature;
     private setTickVisibility;

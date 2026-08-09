@@ -1,4 +1,6 @@
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { SupportedSettingsLocale } from "pi-maestro-settings-core/v1";
+import { getTuiLocale } from "../tui/locale.ts";
 import { createPanelKeys, type PanelKeybindings, type PanelKeys } from "./panel-keys.ts";
 import { isToolExcluded } from "./types.ts";
 import type { McpConfig, McpPanelCallbacks, McpPanelResult, ServerProvenance } from "./types.ts";
@@ -30,6 +32,101 @@ const DEFAULT_THEME: PanelTheme = {
   confirm: "32",
   cancel: "31",
 };
+
+const CATALOGS = {
+  en: {
+    "resource.read": "Read resource: {uri}",
+    "notice.imported": "Imported from {source} · will copy to user config on save",
+    "notice.reconnectFailed": "Reconnect failed for {name}: {message}",
+    "notice.noOAuth": "{name} does not use OAuth authentication.",
+    "notice.authenticating": "Authenticating {name}...",
+    "notice.authFinished": "OAuth finished for {name}. Run reconnect if it is still idle.",
+    "notice.authFailed": "OAuth failed for {name}{message}",
+    "notice.authFailureHint": ". Check the notification for details.",
+    "title.oauth": " MCP OAuth ",
+    "title.servers": " MCP Servers ",
+    "search.description": "desc:",
+    "search.placeholder": "search...",
+    "empty.oauth": "No OAuth-capable MCP servers configured.",
+    "empty.servers": "No MCP servers configured.",
+    "discard.button": "  Discard  ",
+    "discard.keep": "  Keep & Close  ",
+    "discard.question": "Discard unsaved changes?",
+    "auth.select": "select a server to authenticate",
+    "stats.direct": "{count} direct  ~{tokens} tokens",
+    "stats.none": "no direct tools",
+    "stats.unsaved": "  (unsaved)",
+    "hint.navigate": "navigate",
+    "hint.auth": "auth",
+    "hint.clearClose": "clear/close",
+    "hint.quit": "quit",
+    "hint.toggle": "toggle",
+    "hint.expandAuth": "expand/auth",
+    "hint.reconnect": "reconnect",
+    "hint.descSearch": "desc search",
+    "hint.save": "save",
+    "value.import": "import",
+    "value.external": "external",
+    "value.notCached": "(not cached)",
+    "status.authenticating": "authenticating",
+    "status.needsAuth": "needs auth",
+    "status.connecting": "connecting",
+    "status.failed": "failed",
+    "status.connected": "connected",
+    "status.idle": "idle",
+  },
+  "zh-CN": {
+    "resource.read": "读取资源：{uri}",
+    "notice.imported": "从 {source} 导入 · 保存时将复制到用户配置",
+    "notice.reconnectFailed": "重连 {name} 失败：{message}",
+    "notice.noOAuth": "{name} 未使用 OAuth 认证。",
+    "notice.authenticating": "正在认证 {name}...",
+    "notice.authFinished": "{name} 的 OAuth 已完成；若仍为空闲状态请重连。",
+    "notice.authFailed": "{name} 的 OAuth 失败{message}",
+    "notice.authFailureHint": "。详情请查看通知。",
+    "title.oauth": " MCP OAuth ",
+    "title.servers": " MCP 服务 ",
+    "search.description": "描述：",
+    "search.placeholder": "搜索...",
+    "empty.oauth": "未配置支持 OAuth 的 MCP 服务。",
+    "empty.servers": "未配置 MCP 服务。",
+    "discard.button": "  放弃  ",
+    "discard.keep": "  保留并关闭  ",
+    "discard.question": "放弃未保存的修改？",
+    "auth.select": "选择要认证的服务",
+    "stats.direct": "{count} 个直连  ~{tokens} Token",
+    "stats.none": "没有直连工具",
+    "stats.unsaved": "  （未保存）",
+    "hint.navigate": "移动",
+    "hint.auth": "认证",
+    "hint.clearClose": "清除/关闭",
+    "hint.quit": "退出",
+    "hint.toggle": "切换",
+    "hint.expandAuth": "展开/认证",
+    "hint.reconnect": "重连",
+    "hint.descSearch": "描述搜索",
+    "hint.save": "保存",
+    "value.import": "导入",
+    "value.external": "外部",
+    "value.notCached": "（无缓存）",
+    "status.authenticating": "认证中",
+    "status.needsAuth": "需要认证",
+    "status.connecting": "连接中",
+    "status.failed": "失败",
+    "status.connected": "已连接",
+    "status.idle": "空闲",
+  },
+} as const;
+
+type CatalogKey = keyof (typeof CATALOGS)["en"];
+
+export interface McpPanelOptions {
+  noticeLines?: string[];
+  authOnly?: boolean;
+  keybindings?: PanelKeybindings;
+  /** Explicit UI language; otherwise follows the shared runtime TUI locale. */
+  locale?: SupportedSettingsLocale;
+}
 
 function fg(code: string, text: string): string {
   if (!code) return text;
@@ -169,6 +266,7 @@ class McpPanel {
   private tui: { requestRender(): void };
   private t = DEFAULT_THEME;
   private authOnly: boolean;
+  private readonly locale: SupportedSettingsLocale;
   private keys: PanelKeys;
 
   private static readonly MAX_VISIBLE = 12;
@@ -181,8 +279,9 @@ class McpPanel {
     private callbacks: McpPanelCallbacks,
     tui: { requestRender(): void },
     private done: (result: McpPanelResult) => void,
-    options: { noticeLines?: string[]; authOnly?: boolean; keybindings?: PanelKeybindings } = {},
+    options: McpPanelOptions = {},
   ) {
+    this.locale = getTuiLocale(options.locale);
     this.tui = tui;
     this.noticeLines = options.noticeLines ?? [];
     this.authOnly = options.authOnly === true;
@@ -229,7 +328,7 @@ class McpPanel {
             const ct: CachedTool = { name: baseName, description: resource.description };
             tools.push({
               name: baseName,
-              description: resource.description ?? `Read resource: ${resource.uri}`,
+              description: resource.description ?? this.text("resource.read", { uri: resource.uri }),
               isDirect,
               wasDirect: isDirect,
               estimatedTokens: estimateTokens(ct),
@@ -255,6 +354,13 @@ class McpPanel {
 
     this.rebuildVisibleItems();
     this.resetInactivityTimeout();
+  }
+
+  private text(key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
+    const template = CATALOGS[this.locale]?.[key] ?? CATALOGS.en[key];
+    if (!vars) return template;
+    return template.replace(/\{(\w+)\}/g, (_match, name: string) =>
+      vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
   }
 
   private resetInactivityTimeout(): void {
@@ -437,7 +543,9 @@ class McpPanel {
         const tool = server.tools[item.toolIndex];
         tool.isDirect = !tool.isDirect;
         if (tool.isDirect && server.source === "import") {
-          this.importNotice = `Imported from ${sanitizeDisplayText(server.importKind ?? "external")} — will copy to user config on save`;
+          this.importNotice = this.text("notice.imported", {
+            source: sanitizeDisplayText(server.importKind ?? this.text("value.external")),
+          });
         }
         this.updateDirty();
       }
@@ -470,7 +578,7 @@ class McpPanel {
         server.connectionStatus = "failed";
         const message = sanitizeDisplayText(error instanceof Error ? error.message : String(error));
         const serverName = sanitizeDisplayText(server.name);
-        this.authNotice = `Reconnect failed for ${serverName}: ${message}`;
+        this.authNotice = this.text("notice.reconnectFailed", { name: serverName, message });
         this.tui.requestRender();
       });
       return;
@@ -512,26 +620,29 @@ class McpPanel {
     if (this.authInFlight) return;
     const serverName = sanitizeDisplayText(server.name);
     if (!this.callbacks.canAuthenticate(server.name)) {
-      this.authNotice = `${serverName} does not use OAuth authentication.`;
+      this.authNotice = this.text("notice.noOAuth", { name: serverName });
       return;
     }
 
     this.authInFlight = server.name;
-    this.authNotice = `Authenticating ${serverName}...`;
+    this.authNotice = this.text("notice.authenticating", { name: serverName });
     this.tui.requestRender();
 
     this.callbacks.authenticate(server.name).then((result) => {
       server.connectionStatus = this.callbacks.getConnectionStatus(server.name);
       const message = sanitizeDisplayText(result.message);
       this.authNotice = result.ok
-        ? `OAuth finished for ${serverName}. Run reconnect if it is still idle.`
-        : `OAuth failed for ${serverName}${message ? `: ${message}` : ". Check the notification for details."}`;
+        ? this.text("notice.authFinished", { name: serverName })
+        : this.text("notice.authFailed", {
+            name: serverName,
+            message: message ? `: ${message}` : this.text("notice.authFailureHint"),
+          });
       this.authInFlight = null;
       this.tui.requestRender();
     }).catch((error) => {
       const message = sanitizeDisplayText(error instanceof Error ? error.message : String(error));
       server.connectionStatus = this.callbacks.getConnectionStatus(server.name);
-      this.authNotice = `OAuth failed for ${serverName}: ${message}`;
+      this.authNotice = this.text("notice.authFailed", { name: serverName, message: `: ${message}` });
       this.authInFlight = null;
       this.tui.requestRender();
     });
@@ -543,14 +654,18 @@ class McpPanel {
     if (item.type === "server") {
       const newState = !server.tools.every((t) => t.isDirect);
       if (server.source === "import" && newState) {
-        this.importNotice = `Imported from ${sanitizeDisplayText(server.importKind ?? "external")} — will copy to user config on save`;
+        this.importNotice = this.text("notice.imported", {
+          source: sanitizeDisplayText(server.importKind ?? this.text("value.external")),
+        });
       }
       for (const t of server.tools) t.isDirect = newState;
     } else if (item.toolIndex !== undefined) {
       const tool = server.tools[item.toolIndex];
       tool.isDirect = !tool.isDirect;
       if (tool.isDirect && server.source === "import") {
-        this.importNotice = `Imported from ${sanitizeDisplayText(server.importKind ?? "external")} — will copy to user config on save`;
+        this.importNotice = this.text("notice.imported", {
+          source: sanitizeDisplayText(server.importKind ?? this.text("value.external")),
+        });
       }
     }
     this.updateDirty();
@@ -623,7 +738,7 @@ class McpPanel {
         const ct: CachedTool = { name: baseName, description: resource.description };
         newTools.push({
           name: baseName,
-          description: resource.description ?? `Read resource: ${resource.uri}`,
+          description: resource.description ?? this.text("resource.read", { uri: resource.uri }),
           isDirect,
           wasDirect: prev !== undefined ? server.tools.find((t) => t.name === baseName)?.wasDirect ?? false : false,
           estimatedTokens: estimateTokens(ct),
@@ -649,7 +764,7 @@ class McpPanel {
     const emptyRow = () => fg(t.border, "│") + " ".repeat(innerW) + fg(t.border, "│");
     const divider = () => fg(t.border, "├" + "─".repeat(innerW) + "┤");
 
-    const titleText = truncateToWidth(this.authOnly ? " MCP OAuth " : " MCP Servers ", innerW, "…", true);
+    const titleText = truncateToWidth(this.authOnly ? this.text("title.oauth") : this.text("title.servers"), innerW, "…", true);
     const borderLen = Math.max(0, innerW - visibleWidth(titleText));
     const leftB = Math.floor(borderLen / 2);
     const rightB = borderLen - leftB;
@@ -660,11 +775,11 @@ class McpPanel {
     const cursor = fg(t.selected, "│");
     const searchIcon = fg(t.border, "◎");
     if (this.descSearchActive) {
-      lines.push(row(`${searchIcon}  ${fg(t.needsAuth, "desc:")} ${this.descQuery}${cursor}`));
+      lines.push(row(`${searchIcon}  ${fg(t.needsAuth, this.text("search.description"))} ${this.descQuery}${cursor}`));
     } else if (this.nameQuery) {
       lines.push(row(`${searchIcon}  ${this.nameQuery}${cursor}`));
     } else {
-      lines.push(row(`${searchIcon}  ${fg(t.placeholder, italic("search..."))}`));
+      lines.push(row(`${searchIcon}  ${fg(t.placeholder, italic(this.text("search.placeholder")))}`));
     }
 
     lines.push(emptyRow());
@@ -678,7 +793,7 @@ class McpPanel {
 
     if (this.servers.length === 0) {
       lines.push(emptyRow());
-      lines.push(row(fg(t.hint, italic(this.authOnly ? "No OAuth-capable MCP servers configured." : "No MCP servers configured."))));
+      lines.push(row(fg(t.hint, italic(this.authOnly ? this.text("empty.oauth") : this.text("empty.servers")))));
       lines.push(emptyRow());
     } else {
       const maxVis = McpPanel.MAX_VISIBLE;
@@ -723,46 +838,47 @@ class McpPanel {
 
     if (this.confirmingDiscard) {
       const discardBtn = this.discardSelected === 0
-        ? inverse(bold(fg(t.cancel, "  Discard  ")))
-        : fg(t.hint, "  Discard  ");
+        ? inverse(bold(fg(t.cancel, this.text("discard.button"))))
+        : fg(t.hint, this.text("discard.button"));
       const keepBtn = this.discardSelected === 1
-        ? inverse(bold(fg(t.confirm, "  Keep & Close  ")))
-        : fg(t.hint, "  Keep & Close  ");
-      lines.push(row(`Discard unsaved changes?  ${discardBtn}   ${keepBtn}`));
+        ? inverse(bold(fg(t.confirm, this.text("discard.keep"))))
+        : fg(t.hint, this.text("discard.keep"));
+      lines.push(row(`${this.text("discard.question")}  ${discardBtn}   ${keepBtn}`));
     } else {
       if (this.authOnly) {
-        lines.push(row(fg(t.description, "select a server to authenticate")));
+        lines.push(row(fg(t.description, this.text("auth.select"))));
       } else {
         const directCount = this.servers.reduce((sum, s) => sum + s.tools.filter((t) => t.isDirect).length, 0);
         const totalTokens = this.servers.reduce(
           (sum, s) => sum + s.tools.filter((t) => t.isDirect).reduce((ts, t) => ts + t.estimatedTokens, 0),
           0,
         );
-        const stats =
-          directCount > 0 ? `${directCount} direct  ~${totalTokens.toLocaleString()} tokens` : "no direct tools";
-        lines.push(row(fg(t.description, stats + (this.dirty ? fg(t.needsAuth, "  (unsaved)") : ""))));
+        const stats = directCount > 0
+          ? this.text("stats.direct", { count: directCount, tokens: totalTokens.toLocaleString(this.locale) })
+          : this.text("stats.none");
+        lines.push(row(fg(t.description, stats + (this.dirty ? fg(t.needsAuth, this.text("stats.unsaved")) : ""))));
       }
     }
 
     lines.push(emptyRow());
     const hints = this.authOnly
       ? [
-          italic("↑↓") + " navigate",
-          italic("⏎") + " auth",
-          italic("ctrl+a") + " auth",
-          italic("esc") + " clear/close",
-          italic("ctrl+c") + " quit",
+          italic("↑↓") + ` ${this.text("hint.navigate")}`,
+          italic("⏎") + ` ${this.text("hint.auth")}`,
+          italic("ctrl+a") + ` ${this.text("hint.auth")}`,
+          italic("esc") + ` ${this.text("hint.clearClose")}`,
+          italic("ctrl+c") + ` ${this.text("hint.quit")}`,
         ]
       : [
-          italic("↑↓") + " navigate",
-          italic("space") + " toggle",
-          italic("⏎") + " expand/auth",
-          italic("ctrl+a") + " auth",
-          italic("ctrl+r") + " reconnect",
-          italic("?") + " desc search",
-          italic("ctrl+s") + " save",
-          italic("esc") + " clear/close",
-          italic("ctrl+c") + " quit",
+          italic("↑↓") + ` ${this.text("hint.navigate")}`,
+          italic("space") + ` ${this.text("hint.toggle")}`,
+          italic("⏎") + ` ${this.text("hint.expandAuth")}`,
+          italic("ctrl+a") + ` ${this.text("hint.auth")}`,
+          italic("ctrl+r") + ` ${this.text("hint.reconnect")}`,
+          italic("?") + ` ${this.text("hint.descSearch")}`,
+          italic("ctrl+s") + ` ${this.text("hint.save")}`,
+          italic("esc") + ` ${this.text("hint.clearClose")}`,
+          italic("ctrl+c") + ` ${this.text("hint.quit")}`,
         ];
     const gap = "  ";
     const gapW = 2;
@@ -796,13 +912,13 @@ class McpPanel {
     const prefix = isCursor ? fg(t.selected, expandIcon) : fg(t.border, server.expanded ? expandIcon : "·");
 
     const serverName = sanitizeDisplayText(server.name);
-    const importKind = sanitizeDisplayText(server.importKind ?? "import");
+    const importKind = sanitizeDisplayText(server.importKind ?? this.text("value.import"));
     const nameStr = isCursor ? bold(fg(t.selected, serverName)) : serverName;
     const importLabel = server.source === "import" ? fg(t.description, ` (${importKind})`) : "";
     const statusLabel = this.renderConnectionStatus(server);
 
     if (!server.hasCachedData && !this.authOnly) {
-      return `${prefix}   ${nameStr}${importLabel}  ${fg(t.description, "(not cached)")}${statusLabel}`;
+      return `${prefix}   ${nameStr}${importLabel}  ${fg(t.description, this.text("value.notCached"))}${statusLabel}`;
     }
 
     const directCount = server.tools.filter((t) => t.isDirect).length;
@@ -819,7 +935,7 @@ class McpPanel {
       toolInfo = `${directCount}/${totalCount}`;
       if (directCount > 0) {
         const tokens = server.tools.filter((t) => t.isDirect).reduce((s, t) => s + t.estimatedTokens, 0);
-        toolInfo += `  ~${tokens.toLocaleString()}`;
+        toolInfo += `  ~${tokens.toLocaleString(this.locale)}`;
       }
       toolInfo = fg(t.description, toolInfo);
     }
@@ -829,12 +945,12 @@ class McpPanel {
 
   private renderConnectionStatus(server: ServerState): string {
     const t = this.t;
-    if (this.authInFlight === server.name) return `  ${fg(t.needsAuth, "authenticating")}`;
-    if (server.connectionStatus === "needs-auth") return `  ${fg(t.needsAuth, "needs auth")}`;
-    if (server.connectionStatus === "connecting") return `  ${fg(t.needsAuth, "connecting")}`;
-    if (server.connectionStatus === "failed") return `  ${fg(t.cancel, "failed")}`;
-    if (this.authOnly && server.connectionStatus === "connected") return `  ${fg(t.direct, "connected")}`;
-    if (this.authOnly) return `  ${fg(t.description, "idle")}`;
+    if (this.authInFlight === server.name) return `  ${fg(t.needsAuth, this.text("status.authenticating"))}`;
+    if (server.connectionStatus === "needs-auth") return `  ${fg(t.needsAuth, this.text("status.needsAuth"))}`;
+    if (server.connectionStatus === "connecting") return `  ${fg(t.needsAuth, this.text("status.connecting"))}`;
+    if (server.connectionStatus === "failed") return `  ${fg(t.cancel, this.text("status.failed"))}`;
+    if (this.authOnly && server.connectionStatus === "connected") return `  ${fg(t.direct, this.text("status.connected"))}`;
+    if (this.authOnly) return `  ${fg(t.description, this.text("status.idle"))}`;
     return "";
   }
 
@@ -872,7 +988,7 @@ export function createMcpPanel(
   callbacks: McpPanelCallbacks,
   tui: { requestRender(): void },
   done: (result: McpPanelResult) => void,
-  options?: { noticeLines?: string[]; authOnly?: boolean; keybindings?: PanelKeybindings },
+  options?: McpPanelOptions,
 ): McpPanel & { dispose(): void } {
   return new McpPanel(config, cache, provenance, callbacks, tui, done, options ?? {});
 }

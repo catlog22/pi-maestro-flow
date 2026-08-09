@@ -17,6 +17,7 @@ import {
   rule,
   type FrameTheme,
 } from "pi-cockpit/src/settings/ui-primitives.ts";
+import { getTuiLocale } from "./locale.ts";
 import {
   BracketedPasteDecoder,
   removeLastGrapheme,
@@ -51,7 +52,7 @@ interface ApiModelEditorTheme extends FrameTheme {}
 export interface ApiModelEditorOverlayParams {
   title: string;
   fields: readonly ApiModelFormField[];
-  /** UI language; defaults to zh-CN when the host exposes no locale signal. */
+  /** Explicit UI language; otherwise follows the shared runtime TUI locale. */
   locale?: SupportedSettingsLocale;
   theme: ApiModelEditorTheme;
   requestRender: () => void;
@@ -94,7 +95,7 @@ const CATALOGS = {
   },
 } as const;
 
-type CatalogKey = keyof (typeof CATALOGS)["zh-CN"];
+type CatalogKey = keyof (typeof CATALOGS)["en"];
 
 const MAX_VISIBLE_FIELDS = 12;
 const CTRL_S = "\x13";
@@ -126,7 +127,7 @@ export class ApiModelEditorOverlay implements Component, Focusable {
   private readonly originalValues: ApiModelFormValues;
 
   constructor(private readonly params: ApiModelEditorOverlayParams) {
-    this.locale = params.locale ?? "zh-CN";
+    this.locale = getTuiLocale(params.locale);
     this.fields = params.fields.map((field) => ({
       ...field,
       choices: field.choices ? [...field.choices] : undefined,
@@ -144,9 +145,9 @@ export class ApiModelEditorOverlay implements Component, Focusable {
 
   /** Translate a catalog key with optional {var} substitution. */
   private t(key: CatalogKey, vars?: Readonly<Record<string, string | number>>): string {
-    const catalog = CATALOGS[this.locale] ?? CATALOGS["zh-CN"];
+    const catalog = CATALOGS[this.locale] ?? CATALOGS.en;
     const template: unknown = catalog[key];
-    const text = typeof template === "string" ? template : CATALOGS["zh-CN"][key] as string;
+    const text = typeof template === "string" ? template : CATALOGS.en[key] as string;
     if (!vars) return text;
     return text.replace(/\{(\w+)\}/g, (_match, name: string) =>
       vars[name] !== undefined ? String(vars[name]) : `{${name}}`);
@@ -416,7 +417,7 @@ function visibleStart(selected: number, length: number): number {
 }
 
 function maskSecret(value: string): string {
-  if (!value) return "未配置";
+  if (!value) return "";
   if (value.length <= 8) return "*".repeat(value.length);
   return `${value.slice(0, 3)}${"*".repeat(Math.min(12, value.length - 7))}${value.slice(-4)}`;
 }
