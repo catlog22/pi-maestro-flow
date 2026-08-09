@@ -48,8 +48,20 @@ Exemptions: conversation, arithmetic, current time, and commands with no project
 - Deliver the requested scope without silently narrowing, expanding, or transforming it.
 - If a better approach exists, state it briefly and continue with the requested task unless it is unsafe.
 - Inspect dirty-worktree changes before editing. Preserve unrelated changes; ask only when overlapping changes make safe progress impossible.
-- Use focused tests for changed behavior when the project has a suitable test framework.
+- Keep verification proportional to the requested scope and follow Verification Discipline.
 - Report failures and skipped verification exactly.
+
+## Verification Discipline
+
+These rules apply to the main agent, every teammate, and every phase, gate, checklist, handoff, and completion step.
+
+- Select verification by changed behavior and directly affected boundaries, not by repository or workspace membership. Start with the smallest executable target: a test case or file, then a narrowed package/workspace command only when finer selection is unavailable. Do not run unrelated suites.
+- Do not run a repository-wide suite merely because it exists or a gate says to verify. Run that scope only when the user, an acceptance criterion, or a release requirement explicitly requires repository-wide coverage; a generic request to "test" or "verify" does not grant it. Judge scope by the tests actually selected, not by the command name or directory.
+- Reuse a passing result from the current request — including teammate, earlier-task, and gate evidence — when its target and outcome are known and no material invalidator has occurred. Gates and checklists MUST reuse still-valid evidence; do not re-earn it merely because control moved to another task, milestone, agent, or gate.
+- A material invalidator is a change to code the target exercises, its tests, test data, configuration, dependencies, lockfile, or generated inputs. Before rerunning, name the invalidator. Elapsed time, phase or gate transitions, new shells, agent switches, unrelated edits, and integration of non-interacting lanes are not invalidators; combined lanes invalidate only targets that exercise their shared interface, state, configuration, dependency, or generated artifact.
+- Do not schedule fixed validation waves or automatic final passes. Run focused verification when the relevant change becomes testable, rerun only invalidated targets, and reuse all still-valid evidence at milestones, handoffs, gates, checklists, and completion.
+- After a failure or environment error, do not rerun the full suite or matrix by default. Reproduce the smallest failing target, diagnose or correct the cause, and rerun only affected targets; then run any already-selected relevant targets that did not execute because of fail-fast, without rerunning unchanged passing targets. Broaden scope only after reporting concrete evidence that identifies a wider affected boundary.
+- Verify every changed behavior with the smallest suitable automated check. When no focused automated check exists, or the change is non-behavioral, use targeted static or manual verification and report the limitation; do not substitute an unrelated broad suite.
 
 ## Communication
 
@@ -66,7 +78,7 @@ Use `todo` when work has ≥3 steps/phases, has step dependencies, or spans turn
 
 Create the complete plan in one batch right after the knowledge gate, before discovery or implementation; use `blockedBy` for dependencies. If discovery changes the plan, add a new batch (never one task at a time). A task represents a verifiable outcome, not a command or file. Put affected files and verification criteria in its description.
 
-Drive it with `todo next`, but next does NOT auto-complete the current task. Immediately after each phase's outcome is verified: `todo update <id> status=completed summary=...`, then `todo next`. Before ending any turn with remaining work, sync todo state so the next turn starts from an accurate list.
+Drive it with `todo next`, but next does NOT auto-complete the current task. Immediately after each phase produces the evidence declared in its task: `todo update <id> status=completed summary=...`, then `todo next`. Phase completion alone does not trigger tests; reuse still-valid evidence under Verification Discipline. Before ending any turn with remaining work, sync todo state so the next turn starts from an accurate list.
 
 Boundary with `goal` and Workflow Sessions — decide in order: (1) an active Workflow Session already tracks its Runs → use run-control, add neither todo nor goal; (2) multi-turn work needing persistence, a budget, or independent verification → goal; (3) in-session multi-phase, dependency, or cross-turn work → todo; (4) otherwise inline execution.
 
@@ -155,7 +167,7 @@ Rules:
 - Use `teammate-send` for follow-up or correction; abort only to terminate.
 - One writer owns each overlapping file set. Parallelize independent file sets only.
 - Synthesize research yourself before issuing an implementation specification.
-- Use an independent review or test pass for non-trivial multi-file or API/infra changes.
+- Delegation does not grant additional verification or broader test scope. For non-trivial multi-file or API/infra changes, use at most one independent review lane and, only when it adds distinct evidence, one independent test lane; both reuse still-valid evidence under Verification Discipline.
 - For important discovery, search from two independent angles. Two matching results give high confidence; verify a single match locally; after zero matches, change the angle before concluding absence.
 - If teammate exploration fails, fall back once to targeted local search and record the degradation.
 - Role selection: when the project registers `general-executor`, implementation work defaults to it; built-in `general` is the fallback. Use built-in specialists for their lanes (`explorer` discovery, `analyst` judgment, `planner` plans, `research` sourced answers, `verifier` Goal checks, `workflow` DAG orchestration).
@@ -168,7 +180,7 @@ Use `goal` for multi-turn work needing persistence, a user-requested budget, or 
 - `create`: start a Goal; omit `tokenBudget` unless explicitly requested.
 - `get`: inspect current state.
 - `update`: replace the objective and resume.
-- `complete`: request independent verification only after fresh acceptance evidence is available.
+- `complete`: request independent verification only after current, still-valid acceptance evidence is available; do not rerun unchanged checks merely to make evidence newer.
 
 The user owns stop, resume, and clear lifecycle controls. Do not create a competing Goal.
 
@@ -261,6 +273,6 @@ maestro knowledge stage spec|knowhow "<title>" --content-file <path|-> --session
 
 # Execution Order
 
-Knowledge Gate -> bounded discovery -> targeted verification -> implementation -> focused tests -> concise report.
+Knowledge Gate -> bounded discovery -> targeted pre-change inspection or justified baseline verification -> implementation -> focused post-change verification under Verification Discipline -> evidence reuse and concise report.
 
 Never substitute `git status`, `rg`, filename scans, direct dot-directory reads, or raw knowhow files for the Knowledge Gate. Keep every change explicit, limited to the requested scope, and verified with the project's own tooling.
