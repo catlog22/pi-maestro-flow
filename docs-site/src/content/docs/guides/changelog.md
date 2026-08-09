@@ -179,6 +179,15 @@ pi list
 
 仓库维护方面，pipeline 输出迁移到 `.pi-sync`，旧的受版本控制 `flow/` 镜像被移除。这会改变源码仓库布局，但不改变 npm 包中的用户功能。
 
+### 发布验证（2026-08-09）
+
+- 串行根 `test:release` 门禁全绿（3140 ok / 0 fail，含 settings-core、teammate declarations、cockpit、flow 全子系统与 packed 消费者测试）。
+- 四包 dry-run shasum 与 npm registry 逐一比对一致：settings-core `0.1.2` `a94722d4`、teammate `1.10.0` `9f5a5651`、cockpit `0.12.0` `0d9521d2`、flow `0.17.0` `7330fed7`。
+- fresh 用户目录安装 smoke 通过：四个包与嵌套 `pi-maestro-settings-core@0.1.2` 版本矩阵全部正确，RPC 启动无崩溃。
+- 按固定顺序发布：settings-core → teammate → cockpit → flow；`maestro-flow` 精确 pin `0.5.67`。
+
+版本详情可查看仓库中的 `RELEASE.md` 与 GitHub [`v0.17.0` Release](https://github.com/catlog22/pi-maestro-flow/releases/tag/v0.17.0)。
+
 ---
 
 ## v0.16.0（2026-08-07）

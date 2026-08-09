@@ -175,6 +175,15 @@ pi list
 
 Repository maintenance moved pipeline output to `.pi-sync` and removed the tracked `flow/` mirror. This changes repository layout but not package behavior.
 
+### Release verification (2026-08-09)
+
+- Serial root `test:release` gate passed (3140 ok / 0 fail: settings-core, teammate declarations, cockpit, all Flow subsystems, and packed-consumer tests).
+- Dry-run tarball shasums match npm registry one-to-one: settings-core `0.1.2` `a94722d4`, teammate `1.10.0` `9f5a5651`, cockpit `0.12.0` `0d9521d2`, flow `0.17.0` `7330fed7`.
+- Fresh user-directory install smoke passed: the version matrix of all four packages (including nested `pi-maestro-settings-core@0.1.2`) is correct and the RPC startup did not crash.
+- Published in mandatory order: settings-core → teammate → cockpit → flow; `maestro-flow` exact pin `0.5.67`.
+
+See the repository `RELEASE.md` and the GitHub [`v0.17.0` Release](https://github.com/catlog22/pi-maestro-flow/releases/tag/v0.17.0) for the archived release record.
+
 ---
 
 ## v0.16.0 (2026-08-07)
