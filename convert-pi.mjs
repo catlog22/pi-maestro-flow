@@ -773,7 +773,14 @@ function rewriteLegacyTeammateInner(inner) {
   const parts = [`agent: "${agent}"`];
   if (taskType) parts.push(`taskType: ${taskType}`);
 
+  // Team-role spawns without a taskType get a dynamic placeholder: the
+  // dispatching agent fills it at dispatch time (role/task judgment beats any
+  // static mapping). A stale placeholder is rejected by parseTeammateTaskType
+  // and degrades to prompt inference, so it never forces a wrong mapping.
+  const TEAM_TASK_TYPE_PLACEHOLDER_AGENTS = new Set(['team-worker', 'team-supervisor']);
+  const needsTaskTypePlaceholder = !taskType && TEAM_TASK_TYPE_PLACEHOLDER_AGENTS.has(agent);
   const taskParts = [];
+  if (needsTaskTypePlaceholder) taskParts.push(`taskType: "<task_type>"`);
   if (name) taskParts.push(`name: ${name}`);
   const bodyVal = task ?? prompt;
   if (bodyVal) taskParts.push(`prompt: ${bodyVal}`);

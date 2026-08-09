@@ -211,6 +211,51 @@ maestro run complete <run_id>
     },
   },
   {
+    name: "injects a dynamic taskType placeholder into team-worker spawns without one",
+    file: "D:/fixture/skills/example/SKILL.md",
+    input: [
+      "teammate({",
+      "  subagent_type: 'team-worker',",
+      "  name: 'ant-1-1',",
+      "  prompt: \\`",
+      "## Role Assignment",
+      "role: ant",
+      "\\`",
+      "})",
+    ].join("\n"),
+    verify(output) {
+      assert.match(output, /agent: "team-worker"/);
+      assert.match(output, /tasks: \[\{ taskType: "<task_type>", name: 'ant-1-1'/);
+      assert.match(output, /role: ant/);
+    },
+  },
+  {
+    name: "keeps an explicit taskType on team-worker spawns untouched",
+    file: "D:/fixture/skills/example/SKILL.md",
+    input: [
+      "teammate({",
+      "  subagent_type: 'team-worker',",
+      "  taskType: 'explore',",
+      "  name: 'ant-1-1',",
+      "  prompt: \\`role: ant\\`",
+      "})",
+    ].join("\n"),
+    verify(output) {
+      assert.match(output, /agent: "team-worker"/);
+      assert.match(output, /taskType: 'explore'/);
+      assert.doesNotMatch(output, /<task_type>/);
+    },
+  },
+  {
+    name: "does not inject a taskType placeholder into general spawns",
+    file: "D:/fixture/skills/example/SKILL.md",
+    input: `teammate({ subagent_type: 'general-purpose', name: 'job', prompt: 'inspect' })`,
+    verify(output) {
+      assert.match(output, /agent: "general"/);
+      assert.doesNotMatch(output, /taskType|<task_type>/);
+    },
+  },
+  {
     name: "strips Bash wrappers around literal teammate calls",
     file: "D:/fixture/skills/example/SKILL.md",
     input: `Bash({ command: 'teammate({ agent: "delegate", taskType: "analysis", task: "inspect" })', background: true })`,
