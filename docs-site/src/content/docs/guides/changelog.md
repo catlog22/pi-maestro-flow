@@ -5,7 +5,52 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.16.0。v0.17.0 已于 2026-08-09 撤回。** v0.17.0 的功能记录保留用于审计，但 npm `latest` 已回退，所有关联版本均已 deprecated，请勿安装。
+> **当前稳定版本：v0.18.0（2026-08-09）。** v0.18.0 是 v0.17.0（已撤回）的修复版：恢复打包 Pi 资源使 Skill 在全新安装后可发现、可调用，并带回撤回前的完整功能集。v0.17.0 的功能记录保留用于审计。
+
+## v0.18.0（2026-08-09）
+
+**比较范围：** `v0.17.0（撤回） → v0.18.0`
+**代码截止：** 2026-08-09
+
+### 1. 打包 Skill 发现修复（v0.17.1 修复并入）
+
+- 恢复打包 Pi 资源（Skills / agents / catalog 条目）在 `pi install` 后物化到已安装插件目录的路径（`prepare-package-skills.mjs`、`maestro-package.ts`、skill-loader / skill-manager / skill-runtime 接线）。
+- 新增运行时测试：`package-resources-runtime.test.ts`（资源发现）、`package-resources.test.mjs`（tarball 内容）、`prepare-package-skills.test.mjs`。
+- 发布门禁新增真正隔离的 `USERPROFILE` + `HOME` 全新安装验证：运行时 Skill 列表 + 至少一次 Skill 调用。
+
+### 2. Teammate 跨会话投递强化
+
+- WindowThread 投递日志：incoming/outgoing 消息经 `queued → injected → accepted/rejected/timeout` 状态机流转，重投幂等，线程条目跨 reload 持久。
+- workspace-peer 消息携带 `source`（user/monitor/system）、`messageKind`（message/supervision）、`traceId`、`replyTo`、`fromSessionName` 元数据；主会话投递使用格式化渲染（`formatWorkspaceRemoteRootMessage`）。
+- 入站 root 队列重放（`shouldReplayWorkspaceRootQueue`）：extension reload 后排队中的 peer 消息重新投递，不再丢失。
+- Monitor 干预投递确认：`InterventionDeliveryAck` 带重试与过期检测（`sendInterventionWithRetry`）。
+- 跨会话 `abort` 请求显式拒绝并返回明确错误，不再静默忽略。
+- 新增/更新测试：session-core、workspace-peers、monitor-runtime、monitor-supervision、session-mode。
+
+### 3. Settings-Core 0.1.3（解除 deprecated）
+
+- 代码无变更，仅版本 bump 解除撤回时留下的 deprecated 标记，闭包安装无警告。
+
+### 4. 选装 Scholar 技能套件
+
+- `optional/skills/scholar-*`：10 个选装学术技能（构思、实验、写作、评审/回复、引用验证、去 AI 痕迹、LaTeX 整理、会议发表、学位论文 Word）。
+- 默认不进入安装面；`maestro install toggle --enable <skill>` 启用，详见 `optional/skills/README.md`。
+
+### 5. 文档
+
+- 文档站新增 Self-Evolve 指南页（中/英）；Landing 功能卡更新；changelog 记录撤回与 v0.18.0。
+- 所有安装命令更新为 v0.18.0。
+
+**升级：**
+
+```bash
+pi install npm:pi-maestro-flow@0.18.0
+pi list
+```
+
+已安装 v0.17.0 的用户直接覆盖安装，不要先运行 `pi remove`。
+
+---
 
 ## v0.17.0 撤回说明（2026-08-09）
 

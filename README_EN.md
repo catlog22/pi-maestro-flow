@@ -67,13 +67,13 @@ teammate({
 
 pi-maestro-flow is a **Pi plugin** — install it with `pi install` (not a regular npm dependency).
 
-> **v0.17.0 was withdrawn:** fresh installs may not discover Skills. npm `latest` and the recommended pinned version are now `0.16.0`.
+> **v0.18.0 is out:** fixes the Skill discovery regression that caused v0.17.0 to be withdrawn. npm `latest` and the recommended pinned version are now `0.18.0`.
 
 **Prerequisites:** [Node.js](https://nodejs.org) ≥ 22.19.0 · [Pi Coding Agent](https://github.com/earendil-works/pi) ≥ 0.74.0 (required)
 
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # host runtime
-pi install npm:pi-maestro-flow@0.16.0                              # install or upgrade the plugin
+pi install npm:pi-maestro-flow@0.18.0                              # install or upgrade the plugin
 pi list                                                            # confirm Flow, Teammate, and Cockpit are listed
 ```
 

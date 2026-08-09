@@ -5,7 +5,52 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current stable release: v0.16.0. v0.17.0 was withdrawn on 2026-08-09.** The feature record remains for audit, but npm `latest` was rolled back and every associated version is deprecated. Do not install v0.17.0.
+> **Current stable release: v0.18.0 (2026-08-09).** v0.18.0 is the fixed successor of the withdrawn v0.17.0: it restores packaged Pi resources so Skills are discoverable and invocable after a clean install, and brings back the full pre-withdrawal feature set. The v0.17.0 feature record remains for audit.
+
+## v0.18.0 (2026-08-09)
+
+**Comparison:** `v0.17.0 (withdrawn) → v0.18.0`
+**Code cutoff:** 2026-08-09
+
+### 1. Packaged Skill Discovery Fix (v0.17.1 fix merged)
+
+- Packaged Pi resources (Skills / agents / catalog entries) are materialized into the installed plugin directory after `pi install` (`prepare-package-skills.mjs`, `maestro-package.ts`, skill-loader / skill-manager / skill-runtime wiring).
+- New runtime tests: `package-resources-runtime.test.ts` (discovery), `package-resources.test.mjs` (tarball content), `prepare-package-skills.test.mjs`.
+- Release gate now includes a genuinely isolated `USERPROFILE` + `HOME` fresh install: runtime Skill listing plus at least one Skill invocation.
+
+### 2. Teammate Cross-Session Delivery Hardening
+
+- WindowThread delivery journal: incoming/outgoing messages transition through `queued → injected → accepted/rejected/timeout`, idempotent re-delivery, thread entries persist across reload.
+- Workspace-peer messages carry `source` (user/monitor/system), `messageKind` (message/supervision), `traceId`, `replyTo`, `fromSessionName`; formatted root-message rendering (`formatWorkspaceRemoteRootMessage`) for main-session delivery.
+- Incoming root-queue replay (`shouldReplayWorkspaceRootQueue`): queued peer messages are re-delivered after an extension reload instead of being lost.
+- Monitor interventions: delivery acknowledgement with retry and stale detection (`InterventionDeliveryAck`, `sendInterventionWithRetry`).
+- Cross-session `abort` requests are explicitly rejected with a clear error.
+- New/updated tests: session-core, workspace-peers, monitor-runtime, monitor-supervision, session-mode.
+
+### 3. Settings-Core 0.1.3 (un-deprecate)
+
+- No code changes; version bump only to remove the deprecated marker left by the withdrawal so the closure installs cleanly.
+
+### 4. Optional Scholar Skills Suite
+
+- `optional/skills/scholar-*`: 10 optional academic-research skills (ideation, experiments, writing, review/rebuttal, citation verification, anti-AI-writing polish, LaTeX organizing, conference publication, thesis DOCX).
+- Not part of the default install surface; enable with `maestro install toggle --enable <skill>` (see `optional/skills/README.md`).
+
+### 5. Docs
+
+- New Self-Evolve guide pages (zh/en); landing feature card updated; changelog records the withdrawal and v0.18.0.
+- All install commands updated to v0.18.0.
+
+**Upgrade:**
+
+```bash
+pi install npm:pi-maestro-flow@0.18.0
+pi list
+```
+
+Users on v0.17.0 can overwrite-install directly; do not run `pi remove` first.
+
+---
 
 ## v0.17.0 Withdrawal (2026-08-09)
 

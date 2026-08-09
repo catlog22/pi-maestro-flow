@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow 标志"
   },
   "announcement": {
-    "title": "v0.17.0 已撤回 — 新安装可能无法发现 Skill。当前稳定版本：",
-    "install": "pi install npm:pi-maestro-flow@0.16.0",
+    "title": "v0.18.0 已发布 — 修复 v0.17.0 撤回的 Skill 发现回归。升级：",
+    "install": "pi install npm:pi-maestro-flow@0.18.0",
     "close": "关闭提示"
   },
   "accessibility": {
