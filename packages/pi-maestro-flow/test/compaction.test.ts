@@ -3936,8 +3936,15 @@ test("the first tool call after the hard threshold interrupts and compacts at se
     "the immediate compaction reason is visible",
   );
 
+  // The aborted tool result runs the context hook again with a new trigger key.
+  // That refresh must retain the synthetic interruption through settlement.
+  await fx.guard.evaluate(highUsageToolBatch(365_001), fx.ctx);
+  assert.equal(fx.guard.describeState().pendingIntent?.loopCritical, true);
+
   await fx.guard.onAgentEnd(fx.ctx);
   assert.equal(fx.compactCalls.length, 1, "the first settlement submits compaction without a two-turn delay");
+  fx.compactCalls[0].onComplete();
+  assert.match(fx.sent.at(-1) ?? "", /Continue the interrupted task/, "compaction resumes the interrupted tool loop");
 });
 
 test("tool-call usage creates a hard-threshold intent when the context frame could not", async () => {

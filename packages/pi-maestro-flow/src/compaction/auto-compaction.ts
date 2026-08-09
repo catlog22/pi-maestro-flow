@@ -490,6 +490,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     state.notifiedPressureKeys.add(key);
     ctx.ui.notify(message, "warning");
   }
+  function loopCriticalForReplacement(intent: PendingCompactionIntent | undefined): true | undefined {
+    return state.loopCriticalBlocked || intent?.loopCritical === true ? true : undefined;
+  }
   async function linkedThresholdFor(
     ctx: ExtensionContext,
     settings: CompactionSettings,
@@ -791,6 +794,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
               settings,
               effectiveSettings,
               contextExhausted,
+              loopCritical: loopCriticalForReplacement(state.pendingIntent),
             };
             state.lastTriggerKey = triggerKey;
             persistPendingIntent(pi, state);
@@ -864,6 +868,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         settings,
         effectiveSettings,
         contextExhausted,
+        loopCritical: loopCriticalForReplacement(state.pendingIntent),
       };
       state.lastTriggerKey = triggerKey;
       persistPendingIntent(pi, state);
@@ -1552,6 +1557,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
             settings,
             effectiveSettings,
             contextExhausted: isContextExhausted(ctx, estimate.tokens),
+            loopCritical: loopCriticalForReplacement(intent),
           };
           state.pendingIntent = intent;
           state.lastTriggerKey = triggerKey;
