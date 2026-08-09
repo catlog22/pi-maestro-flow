@@ -106,8 +106,10 @@ import {
   createWorkspacePeerRuntime,
   discoverWorkspacePeers,
   enqueueWorkspacePeerCommand,
+  formatWorkspaceRemoteRootMessage,
   resolveWorkspaceOwnerByName,
   resolveWorkspaceTarget,
+  shouldReplayWorkspaceRootQueue,
   activeWorkspaceBackgroundJobsFromPayload,
   waitForWorkspacePeerCommandResponse,
   workspaceMainSessionDeliveryDecision,
@@ -350,8 +352,8 @@ import {
   type SessionEndpoint,
   type SessionMessageRequest,
   type SessionMessageResult,
-  type SessionMessageSource,
   type SessionResolution,
+  type WindowThreadEntryInput,
   type WindowThreadStatus,
 } from "../sessions/session-core.ts";
 import { projectTeammateSessionEndpoints } from "./session-endpoints.ts";
@@ -959,6 +961,46 @@ export default function registerTeammateExtension(
   let workspacePeerLifecycle = Promise.resolve();
   let sessionHostRegistry: SessionHostRegistry | undefined;
 
+  const replayQueuedIncomingRootMessages = (ctx: ExtensionContext): void => {
+    const registry = sessionHostRegistry;
+    if (!registry) return;
+    const workspaceId = workspaceIdForCwd(ctx.cwd);
+    for (const entry of registry.thread.list()) {
+      if (entry.direction !== "incoming"
+        || (entry.status !== "pending" && entry.status !== "queued")
+        || entry.workspaceId !== workspaceId
+        || entry.targetCorrelationId !== WORKSPACE_MAIN_SESSION_MARKER) continue;
+      const effectiveAction = entry.effectiveMode ?? "follow_up";
+      const delivered = safeSendMessage(pi, {
+        customType: "teammate-message",
+        content: formatWorkspaceRemoteRootMessage({
+          messageId: entry.messageId,
+          fromOwnerId: entry.peerOwnerId,
+          message: entry.body,
+          effectiveAction,
+          source: entry.source,
+          messageKind: entry.messageKind,
+          traceId: entry.traceId,
+          replyTo: entry.replyTo,
+          fromSessionName: entry.fromSessionName,
+        }),
+        display: true,
+        details: {
+          source: "workspace-peer",
+          messageId: entry.messageId,
+          fromOwnerId: entry.peerOwnerId,
+          requestedMode: entry.mode,
+          mode: effectiveAction,
+          replayed: true,
+        },
+      }, {
+        triggerTurn: true,
+        deliverAs: "followUp",
+      });
+      if (!delivered) registry.thread.transition(entry.messageId, "incoming", "rejected", Date.now(), effectiveAction);
+    }
+  };
+
   const refreshSessionEndpointDirectory = (includeUnboundLocal = false): void => {
     const registry = sessionHostRegistry;
     const publisher = workspacePeerPublisher;
@@ -1135,12 +1177,12 @@ export default function registerTeammateExtension(
 
   const sendWorkspacePeerMessage = async (
     query: string,
-    message: string,
-    mode: "steer" | "follow_up",
-    source: SessionMessageSource = "system",
-    signal?: AbortSignal,
+    request: SessionMessageRequest,
     expectedEndpoint?: SessionEndpoint,
-  ): Promise<{ delivered: boolean; error?: string }> => {
+  ): Promise<SessionMessageResult> => {
+    const { message, mode, signal } = request;
+    const source = request.source ?? "system";
+    if (mode === "abort") return { delivered: false, error: "Cross-session abort is not supported." };
     await workspacePeerLifecycle;
     await refreshWorkspacePeerOwners();
     const publisher = workspacePeerPublisher;
@@ -1177,62 +1219,90 @@ export default function registerTeammateExtension(
     if (target.state !== "active") {
       return { delivered: false, error: `Workspace target "${query}" is settled and cannot receive commands.` };
     }
+    const registry = sessionHostRegistry;
+    if (!registry) return { delivered: false, error: "Session delivery journal is unavailable." };
+    let outgoing: WindowThreadEntryInput | undefined;
     try {
-      const command = await enqueueWorkspacePeerCommand(publisher.identity, target, mode, message);
-      sessionHostRegistry?.thread.record({
-        messageId: command.commandId,
-        workspaceId: command.workspaceId,
-        peerOwnerId: command.toOwnerId,
-        peerOwnerNonce: command.toOwnerNonce,
-        direction: "outgoing",
+      const command = await enqueueWorkspacePeerCommand(publisher.identity, target, mode, message, {
         source,
-        mode,
-        body: message,
-        status: "pending",
-        createdAt: command.createdAt,
-        updatedAt: command.createdAt,
+        messageKind: request.messageKind,
+        traceId: request.traceId,
+        replyTo: request.replyTo ?? `owner:${publisher.identity.ownerId}`,
+        fromSessionName: request.fromSessionName ?? workspacePeerSessionName,
+        beforePublish(prepared) {
+          outgoing = {
+            messageId: prepared.commandId,
+            workspaceId: prepared.workspaceId,
+            peerOwnerId: prepared.toOwnerId,
+            peerOwnerNonce: prepared.toOwnerNonce,
+            direction: "outgoing",
+            source,
+            ...(prepared.messageKind === undefined ? {} : { messageKind: prepared.messageKind }),
+            ...(prepared.traceId === undefined ? {} : { traceId: prepared.traceId }),
+            ...(prepared.replyTo === undefined ? {} : { replyTo: prepared.replyTo }),
+            ...(prepared.fromSessionName === undefined ? {} : { fromSessionName: prepared.fromSessionName }),
+            targetCorrelationId: prepared.targetCorrelationId,
+            mode,
+            body: message,
+            status: "pending",
+            createdAt: prepared.createdAt,
+            updatedAt: prepared.createdAt,
+          };
+          registry.thread.record(outgoing);
+        },
       });
+      const publishedOutgoing = outgoing;
+      if (!publishedOutgoing) throw new Error("Workspace command was published without a durable outgoing journal entry.");
       let response: Awaited<ReturnType<typeof waitForWorkspacePeerCommandResponse>>;
       try {
         response = await waitForWorkspacePeerCommandResponse(publisher.identity, command, { signal });
       } catch (error) {
-        sessionHostRegistry?.thread.record({
-          messageId: command.commandId,
-          workspaceId: command.workspaceId,
-          peerOwnerId: command.toOwnerId,
-          peerOwnerNonce: command.toOwnerNonce,
-          direction: "outgoing",
-          source,
-          mode,
-          body: message,
+        registry.thread.record({
+          ...publishedOutgoing,
           status: "rejected",
-          createdAt: command.createdAt,
           updatedAt: Math.max(command.createdAt, Date.now()),
         });
         return { delivered: false, error: error instanceof Error ? error.message : String(error) };
       }
+      const effectiveMode = response?.effectiveAction ?? mode;
+      const deliveryStage = target.agent.correlationId === WORKSPACE_MAIN_SESSION_MARKER
+        ? "queued"
+        : response?.deliveryStage ?? "queued";
       const status: WindowThreadStatus = !response || response.status === "expired"
         ? "timeout"
-        : response.status === "accepted" ? "accepted" : "rejected";
-      sessionHostRegistry?.thread.record({
-        messageId: command.commandId,
-        workspaceId: command.workspaceId,
-        peerOwnerId: command.toOwnerId,
-        peerOwnerNonce: command.toOwnerNonce,
-        direction: "outgoing",
-        source,
-        mode,
-        body: message,
+        : response.status === "accepted" ? deliveryStage : "rejected";
+      registry.thread.record({
+        ...publishedOutgoing,
+        effectiveMode,
         status,
-        createdAt: command.createdAt,
         updatedAt: Math.max(command.createdAt, response?.respondedAt ?? Date.now()),
       });
       if (!response || response.status === "expired") return { delivered: false, error: `Timed out sending to workspace target "${query}".` };
       if (response.status !== "accepted") {
         return { delivered: false, error: response.message ?? `Workspace target "${query}" rejected the message.` };
       }
-      return { delivered: true };
+      return {
+        delivered: true,
+        receipt: {
+          requestedMode: mode,
+          effectiveMode,
+          deliveryStage,
+          messageId: command.commandId,
+          ...(command.traceId === undefined ? {} : { traceId: command.traceId }),
+        },
+      };
     } catch (error) {
+      if (outgoing) {
+        try {
+          registry.thread.record({
+            ...outgoing,
+            status: "rejected",
+            updatedAt: Math.max(outgoing.createdAt, Date.now()),
+          });
+        } catch {
+          // Preserve the original journal/publication failure.
+        }
+      }
       return { delivered: false, error: error instanceof Error ? error.message : String(error) };
     }
   };
@@ -1458,7 +1528,14 @@ export default function registerTeammateExtension(
       delivered,
       endpointId: endpoint.id,
       transport: "local-root",
-      ...(delivered ? {} : { error: "The local root session rejected the message." }),
+      ...(delivered ? {
+        receipt: {
+          requestedMode: request.mode,
+          effectiveMode: request.mode,
+          deliveryStage: request.mode === "steer" ? "injected" : "queued",
+          ...(request.traceId === undefined ? {} : { traceId: request.traceId }),
+        },
+      } : { error: "The local root session rejected the message." }),
     };
   };
 
@@ -1502,12 +1579,20 @@ export default function registerTeammateExtension(
       request.message,
       request.mode,
     );
+    const effectiveMode = result.mode === "steer" ? "steer" : "follow_up";
     return {
       delivered: result.delivered,
       endpointId: endpoint.id,
       transport: "local-agent-mailbox",
       ...(result.error ? { error: result.error } : {}),
-      receipt: { ...(result.mode ? { mode: result.mode } : {}), ...(result.wasSleeping ? { wasSleeping: true } : {}) },
+      receipt: {
+        ...(result.mode ? { mode: result.mode } : {}),
+        requestedMode: request.mode,
+        effectiveMode,
+        deliveryStage: effectiveMode === "steer" ? "injected" : "queued",
+        ...(request.traceId === undefined ? {} : { traceId: request.traceId }),
+        ...(result.wasSleeping ? { wasSleeping: true } : {}),
+      },
     };
   };
 
@@ -1521,19 +1606,13 @@ export default function registerTeammateExtension(
     const target = endpoint.kind === "root"
       ? `owner:${endpoint.ownerId}`
       : `owner:${endpoint.ownerId}:${endpoint.correlationId}`;
-    const result = await sendWorkspacePeerMessage(
-      target,
-      request.message,
-      request.mode,
-      request.source ?? "system",
-      request.signal,
-      endpoint,
-    );
+    const result = await sendWorkspacePeerMessage(target, request, endpoint);
     return {
       delivered: result.delivered,
       endpointId: endpoint.id,
       transport: "workspace-peer-v1",
       ...(result.error ? { error: result.error } : {}),
+      ...(result.receipt ? { receipt: result.receipt } : {}),
     };
   };
 
@@ -1663,7 +1742,12 @@ export default function registerTeammateExtension(
             peerOwnerId: command.fromOwnerId,
             peerOwnerNonce: command.fromOwnerNonce,
             direction: "incoming" as const,
-            source: "system" as const,
+            source: command.source ?? "system",
+            messageKind: command.messageKind ?? "message",
+            traceId: command.traceId ?? command.commandId,
+            replyTo: `owner:${command.fromOwnerId}`,
+            ...(command.fromSessionName === undefined ? {} : { fromSessionName: command.fromSessionName }),
+            targetCorrelationId: command.targetCorrelationId,
             mode: command.action,
             body: command.message,
             createdAt: command.createdAt,
@@ -1674,17 +1758,33 @@ export default function registerTeammateExtension(
             updatedAt: command.createdAt,
           });
 
-          let result: { status: "accepted" | "rejected"; message: string };
+          let result: {
+            status: "accepted" | "rejected";
+            message: string;
+            effectiveAction?: "steer" | "follow_up";
+            deliveryStage?: "queued" | "injected";
+          };
           if (command.targetCorrelationId === WORKSPACE_MAIN_SESSION_MARKER) {
             const delivery = workspaceMainSessionDeliveryDecision(command.action, workspaceBackgroundJobs);
             const effectiveAction = delivery.action;
             const foregroundBash = delivery.deferred;
             const delivered = safeSendMessage(pi, {
               customType: "teammate-message",
-              content: `[workspace peer] ${command.message}`,
+              content: formatWorkspaceRemoteRootMessage({
+                messageId: command.commandId,
+                fromOwnerId: command.fromOwnerId,
+                message: command.message,
+                effectiveAction,
+                source: command.source,
+                messageKind: command.messageKind,
+                traceId: command.traceId,
+                replyTo: command.replyTo,
+                fromSessionName: command.fromSessionName,
+              }),
               display: true,
               details: {
                 source: "workspace-peer",
+                messageId: command.commandId,
                 fromOwnerId: command.fromOwnerId,
                 requestedMode: command.action,
                 mode: effectiveAction,
@@ -1698,8 +1798,10 @@ export default function registerTeammateExtension(
               ? {
                   status: "accepted",
                   message: effectiveAction === command.action
-                    ? `${effectiveAction} delivered to main session`
+                    ? `${effectiveAction} accepted by main session`
                     : "steer deferred as follow_up while foreground bash_bg is active",
+                  effectiveAction,
+                  deliveryStage: "queued",
                 }
               : { status: "rejected", message: "main session rejected the message" };
           } else {
@@ -1713,14 +1815,21 @@ export default function registerTeammateExtension(
                 command.message,
                 command.action,
               );
+              const effectiveAction = delivered.mode === "steer" ? "steer" : "follow_up";
               result = delivered.delivered
-                ? { status: "accepted", message: delivered.mode ?? command.action }
+                ? {
+                    status: "accepted",
+                    message: effectiveAction,
+                    effectiveAction,
+                    deliveryStage: effectiveAction === "steer" ? "injected" : "queued",
+                  }
                 : { status: "rejected", message: delivered.error ?? "message was not delivered" };
             }
           }
           sessionHostRegistry?.thread.record({
             ...incoming,
-            status: result.status,
+            ...(result.effectiveAction === undefined ? {} : { effectiveMode: result.effectiveAction }),
+            status: result.status === "accepted" ? result.deliveryStage ?? "queued" : "rejected",
             updatedAt: Math.max(command.createdAt, Date.now()),
           });
           return result;
@@ -3163,8 +3272,13 @@ export default function registerTeammateExtension(
       }
 
       if (!cid) {
+        const deliveryStage = delivery.receipt?.deliveryStage ?? "queued";
+        const effectiveMode = delivery.receipt?.effectiveMode ?? mode;
         return {
-          content: [{ type: "text", text: `Message delivered to workspace target "${params.to}".` }],
+          content: [{
+            type: "text",
+            text: `Message ${deliveryStage} for workspace target "${params.to}" (requested ${mode}, effective ${effectiveMode}).`,
+          }],
           isError: false,
           details: { delivered: true },
         };
@@ -5796,7 +5910,7 @@ export default function registerTeammateExtension(
   // Session lifecycle — agents live until session ends
   // =========================================================================
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", (event, ctx) => {
     registerTeammateSettings();
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     widgetCtx = ctx;
@@ -5815,6 +5929,7 @@ export default function registerTeammateExtension(
     pi.registerTool(tool);
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
     sessionHostRegistry?.thread.rebuild(ctx.sessionManager?.getEntries?.() ?? []);
+    if (shouldReplayWorkspaceRootQueue(event.reason)) replayQueuedIncomingRootMessages(ctx);
     const sessionFile = ctx.sessionManager?.getSessionFile?.();
     const isAgentSession = Array.from(state.activeRuns.values()).some((agent) => agent.sessionFile === sessionFile);
     if (sessionFile && !isAgentSession) state.mainSessionFile = sessionFile;
@@ -5824,6 +5939,24 @@ export default function registerTeammateExtension(
     // update is cached even if the async workspace publisher is still starting.
     pi.events.emit("bash-bg:query", undefined);
     rebuildHistory(ctx);
+  });
+
+  pi.on("message_end", (event) => {
+    if (event.message.role !== "custom" || event.message.customType !== "teammate-message") return;
+    const details = event.message.details as Record<string, unknown> | undefined;
+    if (details?.source !== "workspace-peer" || typeof details.messageId !== "string") return;
+    const entry = sessionHostRegistry?.thread.get(details.messageId, "incoming");
+    if (!entry
+      || details.fromOwnerId !== entry.peerOwnerId
+      || (entry.status !== "pending" && entry.status !== "queued")) return;
+    const effectiveMode = details.mode === "steer" || details.mode === "follow_up"
+      ? details.mode
+      : entry.effectiveMode;
+    sessionHostRegistry?.thread.reconcileInjected(
+      entry.messageId,
+      Math.max(entry.createdAt, Date.now()),
+      effectiveMode,
+    );
   });
 
   pi.on("input", async (event) => {

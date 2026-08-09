@@ -298,6 +298,84 @@ test("window thread store deduplicates retries and advances pending to terminal"
   assert.equal(revisions.length, 3, "initial snapshot plus two mutations");
 });
 
+test("window thread transitions pending to queued to injected without losing replay metadata", () => {
+  const persisted: unknown[] = [];
+  const store = new WindowThreadStore({ persist: (entry) => persisted.push(entry) });
+  const messageId = "8".repeat(32);
+  store.record(threadInput({
+    messageId,
+    direction: "incoming",
+    source: "monitor",
+    messageKind: "supervision",
+    traceId: "mon_trace-8",
+    replyTo: `owner:${LOCAL_OWNER}`,
+    fromSessionName: "control",
+    targetCorrelationId: "window-main-session",
+  }));
+  const queued = store.transition(messageId, "incoming", "queued", 1_100, "follow_up");
+  assert.equal(queued?.status, "queued");
+  assert.equal(queued?.traceId, "mon_trace-8");
+  assert.equal(store.transition(messageId, "incoming", "pending", 1_150), queued, "queued does not regress to pending");
+  const injected = store.reconcileInjected(messageId, 1_200, "follow_up");
+  assert.equal(injected?.status, "injected");
+  assert.equal(injected?.revision, 3);
+  assert.equal(persisted.length, 2, "injection reconciliation does not persist a crash-inverted thread receipt");
+  assert.equal(store.transition(messageId, "incoming", "rejected", 1_300), injected, "injected is terminal");
+});
+
+test("window thread persistence failure leaves the published record transition unchanged", () => {
+  let rejectPersistence = false;
+  let store!: WindowThreadStore;
+  const ordering: string[] = [];
+  store = new WindowThreadStore({
+    persist() {
+      ordering.push(`persist:${store.list().length}`);
+      if (rejectPersistence) throw new Error("journal unavailable");
+    },
+  });
+  store.subscribe((snapshot) => ordering.push(`publish:${snapshot.entries.length}`), { emitCurrent: false });
+
+  store.record(threadInput());
+  assert.deepEqual(ordering, ["persist:0", "publish:1"], "durability precedes in-memory publication");
+  rejectPersistence = true;
+  assert.throws(
+    () => store.transition("d".repeat(32), "outgoing", "queued", 1_100, "follow_up"),
+    /journal unavailable/,
+  );
+  assert.equal(store.get("d".repeat(32), "outgoing")?.status, "pending");
+  assert.equal(store.get("d".repeat(32), "outgoing")?.revision, 1);
+  assert.deepEqual(ordering, ["persist:0", "publish:1", "persist:1"]);
+});
+
+test("window thread rebuild deduplicates persisted teammate messages against queued incoming entries", () => {
+  const messageId = "9".repeat(32);
+  const journal: unknown[] = [];
+  const source = new WindowThreadStore({
+    persist: (entry) => journal.push({ type: "custom", customType: "teammate-window-thread", data: entry }),
+  });
+  source.record(threadInput({
+    messageId,
+    direction: "incoming",
+    targetCorrelationId: "window-main-session",
+  }));
+  source.transition(messageId, "incoming", "queued", 1_100, "steer");
+  journal.push({
+    type: "custom_message",
+    customType: "teammate-message",
+    details: { messageId, mode: "steer" },
+  });
+
+  const rebuilt = new WindowThreadStore();
+  rebuilt.rebuild(journal);
+  assert.equal(rebuilt.get(messageId, "incoming")?.status, "injected");
+  assert.equal(rebuilt.get(messageId, "incoming")?.effectiveMode, "steer");
+  assert.equal(
+    rebuilt.list().filter((entry) => entry.direction === "incoming" && (entry.status === "pending" || entry.status === "queued")).length,
+    0,
+    "a durable model-visible message is not eligible for replay",
+  );
+});
+
 test("window thread rebuild deduplicates revisions and enforces its bound", () => {
   const journal: Array<{ type: "custom"; customType: string; data: unknown }> = [];
   const source = new WindowThreadStore({ persist: (entry) => journal.push({ type: "custom", customType: "teammate-window-thread", data: entry }) });

@@ -421,7 +421,7 @@ test("engineTick records binding enter/exit and intervention ledger events", asy
   await engineTick(engine);
   const enters = ledger.filter((r) => r.kind === "binding" && r.action === "enter");
   assert.equal(enters.length, 1, "buffered enter flushed on first tick");
-  const sent = ledger.filter((r) => r.kind === "intervention" && r.status === "sent");
+  const sent = ledger.filter((r) => r.kind === "intervention" && r.status === "injected");
   assert.equal(sent.length, 1);
   assert.ok(sent[0]!.traceId);
 

@@ -70,6 +70,9 @@ const MONITOR_MODE_CONTEXT = [
   "# Monitor Mode",
   "This current session is the monitor control window. Its only responsibility is to supervise and coordinate other workspace windows according to their tasks and the user's monitoring instructions.",
   "Use teammate-list with view=windows to discover peer windows, teammate-send for follow_up or steer interventions, and observe or the monitor tools for bounded status checks. Cross-window abort is unavailable.",
+  "Write every teammate-send body as a concrete instruction. Routing metadata and reply instructions are added automatically; do not put routing boilerplate in the body.",
+  "For status requests, name the exact fields or evidence the peer must return. Use steer for time-sensitive coordination and follow_up for non-urgent work.",
+  "A queued or accepted receipt proves enqueueing only, not model consumption. Never evaluate intervention effectiveness until delivery is explicitly injected.",
   "Do not implement project work, edit files, run shell commands, or start unrelated research in this control window. Delegate or message the appropriate peer window instead.",
   "Treat user messages in the #control tab as monitoring policy, priorities, or intervention instructions. Ask the user to run /monitor exit before handling unrelated work in this session.",
   MONITOR_MODE_CONTEXT_END,
@@ -394,6 +397,8 @@ export interface InterventionRecord {
   mode: "steer" | "follow_up";
   traceId?: string;
   outcome?: InterventionOutcome;
+  effectiveMode?: "steer" | "follow_up";
+  deliveryStage?: "queued" | "injected";
 }
 
 /** Binding between a monitor and a single session (1:1). */
@@ -452,12 +457,25 @@ export interface EngineAgentInfo {
   kind?: "agent" | "window";
 }
 
+export interface InterventionDeliveryAck {
+  delivered: boolean;
+  requestedMode?: "steer" | "follow_up";
+  effectiveMode?: "steer" | "follow_up";
+  deliveryStage?: "queued" | "injected";
+  deferred?: boolean;
+}
+
 /** Callbacks injected from index.ts for engine operations. */
 export interface EngineCallbacks {
   /** Get current info for a monitored agent. Returns undefined if gone. */
   getAgentInfo: (correlationId: string) => EngineAgentInfo | undefined;
   /** Send an intervention message to an agent. */
-  sendIntervention: (correlationId: string, message: string, mode: "steer" | "follow_up") => boolean | Promise<boolean>;
+  sendIntervention: (
+    correlationId: string,
+    message: string,
+    mode: "steer" | "follow_up",
+    traceId?: string,
+  ) => boolean | InterventionDeliveryAck | Promise<boolean | InterventionDeliveryAck>;
   /** Exact lifecycle fence supplied by a host-owned deterministic runtime. */
   isCurrent?: (correlationId: string, binding: MonitorBinding) => boolean;
   /** Defer a missing-target removal to a quiescence-owning controller. */
@@ -958,9 +976,18 @@ export function recordIntervention(
   message: string,
   mode: "steer" | "follow_up",
   traceId?: string,
+  delivery?: InterventionDeliveryAck,
 ): void {
   binding.lastInterventionAt = Date.now();
-  binding.interventions.push({ timestamp: Date.now(), reason, message, mode, ...(traceId ? { traceId } : {}) });
+  binding.interventions.push({
+    timestamp: Date.now(),
+    reason,
+    message,
+    mode,
+    ...(traceId ? { traceId } : {}),
+    ...(delivery?.effectiveMode ? { effectiveMode: delivery.effectiveMode } : {}),
+    ...(delivery?.deliveryStage ? { deliveryStage: delivery.deliveryStage } : {}),
+  });
   // Trim log
   if (binding.interventions.length > ENGINE_MAX_INTERVENTION_LOG) {
     binding.interventions = binding.interventions.slice(-ENGINE_MAX_INTERVENTION_LOG);
@@ -981,7 +1008,10 @@ export function createTraceId(): string {
  * Backoff is linear (`backoffMs * attempt`), abortable via `signal`.
  */
 export async function sendInterventionWithRetry(
-  send: (message: string, mode: "steer" | "follow_up") => boolean | Promise<boolean>,
+  send: (
+    message: string,
+    mode: "steer" | "follow_up",
+  ) => boolean | InterventionDeliveryAck | Promise<boolean | InterventionDeliveryAck>,
   message: string,
   mode: "steer" | "follow_up",
   maxRetries: number,
@@ -991,14 +1021,19 @@ export async function sendInterventionWithRetry(
     sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>;
     isCurrent?: () => boolean;
   } = {},
-): Promise<{ delivered: boolean; attempts: number; stale?: boolean }> {
+): Promise<{ delivered: boolean; attempts: number; stale?: boolean } & Partial<InterventionDeliveryAck>> {
   const sleepFn = options.sleepFn ?? ((ms: number, signal?: AbortSignal) => sleep(ms, signal));
   let attempts = 0;
   for (;;) {
     attempts += 1;
-    const ok = await send(message, mode);
+    const raw = await send(message, mode);
+    const acknowledgement: InterventionDeliveryAck = typeof raw === "boolean" ? { delivered: raw } : raw;
     if (options.isCurrent?.() === false) return { delivered: false, attempts, stale: true };
-    if (ok) return { delivered: true, attempts };
+    if (acknowledgement.delivered) {
+      return typeof raw === "boolean"
+        ? { delivered: true, attempts }
+        : { ...acknowledgement, delivered: true, attempts };
+    }
     if (attempts > maxRetries) return { delivered: false, attempts };
     try {
       await sleepFn(backoffMs * attempts, options.signal);
@@ -1199,32 +1234,49 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
           continue;
         }
         const traceId = createTraceId();
-        const { delivered, attempts, stale } = await sendInterventionWithRetry(
-          (message, mode) => cb.sendIntervention(cid, message, mode),
+        const delivery = await sendInterventionWithRetry(
+          (message, mode) => cb.sendIntervention(cid, message, mode, traceId),
           plan.message,
           "steer",
           engine.config.maxRetries,
           engine.config.retryBackoffMs,
           { signal: engine.abortController?.signal, isCurrent: ownsBinding },
         );
+        const { delivered, attempts, stale } = delivery;
         if (!ownsBinding() || stale) continue;
         if (delivered) {
-          recordIntervention(binding, plan.reason, plan.message, "steer", traceId);
-          binding.pendingIntervention = {
-            traceId,
-            at: Date.now(),
-            reason: plan.reason,
-            mode: "steer",
-            message: plan.message,
+          const acknowledgement: InterventionDeliveryAck = {
+            delivered: true,
+            requestedMode: delivery.requestedMode ?? "steer",
+            effectiveMode: delivery.effectiveMode ?? "steer",
+            deliveryStage: delivery.deliveryStage ?? "injected",
+            deferred: delivery.deferred ?? false,
           };
+          recordIntervention(binding, plan.reason, plan.message, "steer", traceId, acknowledgement);
+          if (acknowledgement.effectiveMode === "steer"
+            && acknowledgement.deliveryStage === "injected"
+            && acknowledgement.deferred !== true) {
+            binding.pendingIntervention = {
+              traceId,
+              at: Date.now(),
+              reason: plan.reason,
+              mode: "steer",
+              message: plan.message,
+            };
+          }
           emitLedger(engine, {
             kind: "intervention",
             action: "steer",
-            status: "sent",
+            status: acknowledgement.deliveryStage,
             target: cid,
             traceId,
             reason: plan.reason,
             message: plan.message,
+            mode: acknowledgement.effectiveMode,
+            metadata: {
+              requestedMode: acknowledgement.requestedMode,
+              deferred: acknowledgement.deferred,
+            },
           });
           interventionCount++;
         } else {

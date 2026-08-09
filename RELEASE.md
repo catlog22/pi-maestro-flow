@@ -1,4 +1,39 @@
-# v0.17.0 - Cross-Session Scheduler, Monitor Supervision, Shared TUI Locale, and Core Engine 0.5.67
+# v0.17.0 [WITHDRAWN] - Cross-Session Scheduler, Monitor Supervision, Shared TUI Locale, and Core Engine 0.5.67
+
+## Withdrawal Notice (2026-08-09)
+
+**Do not install v0.17.0.** After publication, fresh npm installs were reported to
+start with no Skills available in Pi. The release was removed from every npm
+`latest` tag and the complete v0.17.0 package closure was deprecated:
+
+| Package | Withdrawn version | Restored `latest` |
+|---------|------------------:|------------------:|
+| pi-maestro-flow | 0.17.0 | **0.16.0** |
+| pi-maestro-teammate | 1.10.0 | **1.9.0** |
+| pi-cockpit | 0.12.0 | **0.11.0** |
+| pi-maestro-settings-core | 0.1.2 | **0.1.1** |
+
+A physical `npm unpublish` of Flow 0.17.0 was attempted but rejected by npm:
+the current granular token cannot perform destructive unpublish operations
+under npm's 2FA policy. The versions remain available for audit, but all four
+are deprecated and are no longer selected by `latest`.
+
+Registry tarball inspection found 194 Skill entries in both Flow 0.16.0 and
+0.17.0, so the incident is not a simple missing-file tarball. The
+install/registration/discovery path remains under investigation. No fixed
+release may be published until a fresh isolated Pi install proves that Skills
+are discovered and invocable, not merely present in the tarball.
+
+Users who installed v0.17.0 should close all Pi processes and downgrade
+directly without running `pi remove`:
+
+```bash
+pi install npm:pi-maestro-flow@0.16.0
+pi list
+```
+
+`pi remove npm:pi-maestro-flow` can remove the shared npm dependency tree and
+leave absolute Cockpit/Teammate registrations pointing to missing paths.
 
 ## Overview
 
@@ -23,7 +58,7 @@ failed sessions kept canonical-reachable.
 
 ## Package Versions and Requirements
 
-| Package | v0.16.0 | v0.17.0 |
+| Package | v0.16.0 | v0.17.0 (withdrawn) |
 |---------|---------|---------|
 | pi-maestro-flow | 0.16.0 | **0.17.0** |
 | pi-maestro-teammate | 1.9.0 | **1.10.0** |
@@ -124,18 +159,18 @@ failed sessions kept canonical-reachable.
 - Repo-level chore: pipeline output relocated to `.pi-sync` and the tracked
   flow mirror dropped (affects repository layout only, not package content).
 
-## Install / Upgrade
+## Roll Back / Install
 
 ```bash
-# Close running Pi processes first.
-pi install npm:pi-maestro-flow@0.17.0
+# Close running Pi processes first. Do not run pi remove.
+pi install npm:pi-maestro-flow@0.16.0
 pi list
 ```
 
-After restarting Pi, verify that Flow, Teammate, and Cockpit are registered at
-the versions in the table above before running model-sensitive workflows.
+After restarting Pi, verify Flow `0.16.0`, Teammate `1.9.0`, Cockpit `0.11.0`,
+and Settings-Core `0.1.1` before running model-sensitive workflows.
 
-## Release Verification
+## Pre-Withdrawal Verification and Gap
 
 The release candidate passed the serial root `test:release` gate, including
 settings-core typecheck/test, workspace version-drift and manifest-contract
@@ -146,6 +181,12 @@ intelligence, packed consumers), Teammate declarations and tests, and
 Cockpit tests. Packed tests remain intentionally serial because Flow
 prepack/postpack share `packages/pi-maestro-flow/.pi/skills`.
 
+This verification was insufficient: the fresh-user smoke checked package
+versions and RPC startup, but did not assert that Pi discovered and exposed the
+installed Skills. The withdrawal adds a mandatory release gate for the next
+patch: a genuinely isolated `USERPROFILE` + `HOME`, runtime Skill listing, and
+at least one installed Skill invocation.
+
 Dry-run tarballs from the verified candidate:
 
 | Package | Files | Packed | Unpacked | SHA-1 |
@@ -155,15 +196,16 @@ Dry-run tarballs from the verified candidate:
 | pi-cockpit@0.12.0 | 82 | 213.5 kB | 0.8 MB | `0d9521d2c89bdb969de50dfca2cafd2057ddf91d` |
 | pi-maestro-flow@0.17.0 | 521 | 1.5 MB | 5.8 MB | `7330fed7b3a73a1f69e0ae068c7d5a62e9d6ac79` |
 
-Publication order is mandatory:
+Original publication order for this withdrawn release:
 
-1. Publish and verify `pi-maestro-settings-core@0.1.2`.
-2. Publish and verify `pi-maestro-teammate@1.10.0` (pins settings-core 0.1.2).
-3. Publish and verify `pi-cockpit@0.12.0` (pins settings-core 0.1.2).
-4. Publish and verify `pi-maestro-flow@0.17.0` with exact companion versions
+1. Published and verified `pi-maestro-settings-core@0.1.2`.
+2. Published and verified `pi-maestro-teammate@1.10.0` (pins settings-core 0.1.2).
+3. Published and verified `pi-cockpit@0.12.0` (pins settings-core 0.1.2).
+4. Published and verified `pi-maestro-flow@0.17.0` with exact companion versions
    and `maestro-flow@0.5.67`.
-5. Run a fresh temporary-home registry install and Pi runtime smoke test.
-6. Create and push `v0.17.0`, then create the GitHub Release.
+5. Ran the original temporary-home registry install and RPC smoke, whose missing
+   Skill-discovery assertion is documented above.
+6. Created and pushed `v0.17.0`, then created the GitHub Release.
 
 ## Change Statistics
 

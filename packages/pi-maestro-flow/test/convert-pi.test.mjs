@@ -1,6 +1,22 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import { transformPiContent } from "../../../convert-pi.mjs";
+import { convertPiDirectory, transformPiContent } from "../../../convert-pi.mjs";
+
+test("convert-pi: missing destination roots produce an empty conversion result", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-convert-empty-"));
+  try {
+    assert.deepEqual(convertPiDirectory(join(root, "missing")), {
+      processed: 0,
+      modified: 0,
+      errors: [],
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 const cases = [
   {

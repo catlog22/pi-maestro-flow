@@ -168,7 +168,7 @@ export class MonitorRuntime {
         if (!capture || !this.isCaptureCurrent(capture)) return undefined;
         return this.#tick?.analyses.get(binding.correlationId);
       },
-      sendIntervention: async (key, message, mode) => {
+      sendIntervention: async (key, message, mode, traceId) => {
         const capture = this.#tick?.captures.get(key);
         if (!capture || !this.isCaptureCurrent(capture)) return false;
         const leaseValid = await this.options.leases.verify(capture.lease);
@@ -178,13 +178,26 @@ export class MonitorRuntime {
           message,
           mode,
           source: "monitor",
+          messageKind: "supervision",
+          ...(traceId === undefined ? {} : { traceId }),
           signal: this.engine.abortController?.signal,
         });
         if (!this.isCaptureCurrent(capture)) return false;
         const leaseStillValid = await this.options.leases.verify(capture.lease);
         if (!this.isCaptureCurrent(capture) || !leaseStillValid) return false;
         if (delivery.delivered) this.options.onIntervention?.(key, message);
-        return delivery.delivered;
+        if (!delivery.delivered) return false;
+        const effectiveMode = delivery.receipt?.effectiveMode === "steer" ? "steer" : "follow_up";
+        const deliveryStage = capture.endpoint.kind === "root" && delivery.transport === "workspace-peer-v1"
+          ? "queued"
+          : delivery.receipt?.deliveryStage;
+        return {
+          delivered: true,
+          requestedMode: mode,
+          effectiveMode,
+          ...(deliveryStage === undefined ? {} : { deliveryStage }),
+          deferred: effectiveMode !== mode || deliveryStage === "queued",
+        };
       },
       isCurrent: (key, binding) => {
         const capture = this.#tick?.captures.get(key);

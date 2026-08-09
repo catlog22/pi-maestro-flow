@@ -88,6 +88,11 @@ test("pending incoming thread entries retry while terminal entries return receip
     contentRevision: "r1",
   };
   assert.equal(windowThreadReplayReceipt({ ...base, status: "pending" }), undefined);
+  assert.equal(windowThreadReplayReceipt({ ...base, status: "queued" }), undefined);
+  assert.deepEqual(windowThreadReplayReceipt({ ...base, status: "injected" }), {
+    status: "accepted",
+    message: "workspace command was already consumed",
+  });
   assert.deepEqual(windowThreadReplayReceipt({ ...base, status: "accepted" }), {
     status: "accepted",
     message: "workspace command was already consumed",

@@ -20,6 +20,9 @@ export type WorkspaceAgentStatus = "running" | "sleeping";
 export type WorkspaceSettledStatus = "completed" | "failed" | "terminated";
 export type WorkspacePeerCommandAction = "steer" | "follow_up";
 export type WorkspacePeerResponseStatus = "accepted" | "rejected" | "error" | "expired";
+export type WorkspacePeerMessageSource = "user" | "monitor" | "system";
+export type WorkspacePeerMessageKind = "message" | "supervision";
+export type WorkspacePeerDeliveryStage = "queued" | "injected";
 export interface WorkspacePeerPaths {
     rootDir: string;
     ownersDir: string;
@@ -141,6 +144,11 @@ export interface WorkspacePeerCommand {
     targetCorrelationId: string;
     action: WorkspacePeerCommandAction;
     message: string;
+    source?: WorkspacePeerMessageSource;
+    messageKind?: WorkspacePeerMessageKind;
+    traceId?: string;
+    replyTo?: string;
+    fromSessionName?: string;
     createdAt: number;
     expiresAt: number;
 }
@@ -156,12 +164,17 @@ export interface WorkspacePeerCommandResponse {
     targetCorrelationId: string;
     status: WorkspacePeerResponseStatus;
     message?: string;
+    effectiveAction?: WorkspacePeerCommandAction;
+    deliveryStage?: WorkspacePeerDeliveryStage;
+    traceId?: string;
     respondedAt: number;
     expiresAt: number;
 }
 export interface WorkspaceCommandHandlerResult {
     status?: Exclude<WorkspacePeerResponseStatus, "expired">;
     message?: string;
+    effectiveAction?: WorkspacePeerCommandAction;
+    deliveryStage?: WorkspacePeerDeliveryStage;
 }
 export interface WorkspaceConsumedCommand {
     commandId: string;
@@ -242,6 +255,20 @@ export interface WorkspaceMainSessionDeliveryDecision {
 }
 export declare function workspaceMainSessionDeliveryDecision(requested: WorkspacePeerCommandAction, backgroundJobs: readonly WorkspaceBackgroundJobSnapshot[]): WorkspaceMainSessionDeliveryDecision;
 export declare function workspaceMainSessionDeliveryAction(requested: WorkspacePeerCommandAction, backgroundJobs: readonly WorkspaceBackgroundJobSnapshot[]): WorkspacePeerCommandAction;
+export declare function shouldReplayWorkspaceRootQueue(reason: "startup" | "reload" | "new" | "resume" | "fork"): boolean;
+export interface WorkspaceRemoteRootMessage {
+    messageId: string;
+    fromOwnerId: string;
+    message: string;
+    effectiveAction: WorkspacePeerCommandAction;
+    source?: WorkspacePeerMessageSource;
+    messageKind?: WorkspacePeerMessageKind;
+    traceId?: string;
+    replyTo?: string;
+    fromSessionName?: string;
+}
+/** Canonical model-visible envelope for all remote root messages. */
+export declare function formatWorkspaceRemoteRootMessage(input: WorkspaceRemoteRootMessage): string;
 export declare function validateWorkspaceBackgroundJobSnapshot(value: unknown): WorkspaceBackgroundJobSnapshot | undefined;
 export declare function validateWorkspaceOwnerSnapshot(value: unknown, expected?: {
     workspaceId?: string;
@@ -285,6 +312,12 @@ export declare function enqueueWorkspacePeerCommand(identity: WorkspacePeerIdent
     now?: number;
     ttlMs?: number;
     commandId?: string;
+    source?: WorkspacePeerMessageSource;
+    messageKind?: WorkspacePeerMessageKind;
+    traceId?: string;
+    replyTo?: string;
+    fromSessionName?: string;
+    beforePublish?: (command: WorkspacePeerCommand) => void | Promise<void>;
 }): Promise<WorkspacePeerCommand>;
 export declare function waitForWorkspacePeerCommandResponse(identity: WorkspacePeerIdentity, command: WorkspacePeerCommand, options?: {
     timeoutMs?: number;
@@ -296,6 +329,11 @@ export declare function sendWorkspacePeerCommand(identity: WorkspacePeerIdentity
     pollMs?: number;
     ttlMs?: number;
     signal?: AbortSignal;
+    source?: WorkspacePeerMessageSource;
+    messageKind?: WorkspacePeerMessageKind;
+    traceId?: string;
+    replyTo?: string;
+    fromSessionName?: string;
 }): Promise<{
     command: WorkspacePeerCommand;
     response?: WorkspacePeerCommandResponse;

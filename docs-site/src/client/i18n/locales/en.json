@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.17.0 released — cross-session scheduler · monitor supervision · shared TUI locale · engine 0.5.67. Upgrade:",
-    "install": "pi install npm:pi-maestro-flow@0.17.0",
+    "title": "v0.17.0 withdrawn — fresh installs may not discover Skills. Current stable release:",
+    "install": "pi install npm:pi-maestro-flow@0.16.0",
     "close": "Dismiss"
   },
   "accessibility": {

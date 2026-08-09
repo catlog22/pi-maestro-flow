@@ -69,7 +69,7 @@ maestro load --type <type> [--id <id>]
 | **模型熔断与故障转移** | 电路断路器保护 API 调用，自动切备用模型 |
 | **GUI 子系统（UCL）** | `PI_GUI=1` 启用，UCL（Unified Communication Layer，统一通信层）HTTP 工具发现/调用 + SSE 事件 |
 | **TUI 界面组件** | Goal 面板、Todo 覆盖层、进度树、状态栏等 |
-| **self-evolve 自进化层** | 运行轨迹 → 知识沉淀闭环的候选信号层（M1-M5：瘦路由器、健康侧车、提案治理、canary 验证），默认禁用（见 [新特性使用说明](https://github.com/catlog22/pi-maestro-flow/blob/main/docs/new-features-usage.md)） |
+| **self-evolve 自进化层** | 运行轨迹 → 知识沉淀闭环（M1-M5：候选信号、评审门、健康侧车、提案治理、canary 验证），默认禁用（见 [Self-Evolve 自进化](/guides/self-evolve)） |
 | **权限系统** | 5 种模式 + 细粒度 allow/ask/deny + 子进程 IPC 中继 |
 
 ## 数据与配置文件位置
@@ -90,4 +90,5 @@ maestro load --type <type> [--id <id>]
 
 - [并行多智能体调度](/guides/teammate-dispatch) — 核心执行能力
 - [Goal 目标 · Plan 计划 · todo 任务](/guides/goal-plan-todo) — 编排生命周期
+- [Self-Evolve 自进化](/guides/self-evolve) — 从运行轨迹到受治理知识候选的完整闭环
 - [知识系统](/guides/knowledge) — 跨会话持久化知识

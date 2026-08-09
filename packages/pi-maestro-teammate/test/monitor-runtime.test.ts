@@ -22,6 +22,7 @@ import {
   createWorkspacePeerV1TransportAdapter,
   projectSessionEndpoints,
   type SessionEndpoint,
+  type SessionMessageRequest,
   type SessionMessageResult,
 } from "../src/sessions/session-core.ts";
 import type { WorkspacePeerIdentity } from "../src/extension/workspace-peers.ts";
@@ -156,16 +157,16 @@ function evaluatorHost(
 
 function runtimeHarness(options: {
   waitForEvaluation: (request: MonitorEvaluationRequest, invocation: MonitorSessionInvocation) => Promise<unknown>;
-  deliver?: (endpoint: SessionEndpoint) => Promise<SessionMessageResult>;
+  deliver?: (endpoint: SessionEndpoint, request: SessionMessageRequest) => Promise<SessionMessageResult>;
 }) {
   const endpoint = remoteEndpoint();
   let deliveries = 0;
   const registry = new SessionHostRegistry({
     surface: "unified",
     endpoints: [endpoint],
-    adapters: [createWorkspacePeerV1TransportAdapter(async (target) => {
+    adapters: [createWorkspacePeerV1TransportAdapter(async (target, request) => {
       deliveries++;
-      return options.deliver?.(target) ?? {
+      return options.deliver?.(target, request) ?? {
         delivered: true,
         endpointId: target.id,
         transport: "workspace-peer-v1",
@@ -320,6 +321,66 @@ test("MonitorRuntime does not record an intervention when the lease is lost afte
   await harness.runtime.stop({ stopSession: false });
 });
 
+test("MonitorRuntime records deferred follow_up delivery without starting outcome evaluation", async () => {
+  let capturedRequest: SessionMessageRequest | undefined;
+  const harness = runtimeHarness({
+    async waitForEvaluation(request) {
+      return verdict(request, "send");
+    },
+    async deliver(endpoint, request) {
+      capturedRequest = request;
+      return {
+        delivered: true,
+        endpointId: endpoint.id,
+        transport: "workspace-peer-v1",
+        receipt: {
+          requestedMode: "steer",
+          effectiveMode: "follow_up",
+          deliveryStage: "queued",
+          traceId: request.traceId,
+        },
+      };
+    },
+  });
+  harness.runtime.start();
+  await harness.timers.runNext(harness.runtime);
+  assert.equal(capturedRequest?.source, "monitor");
+  assert.equal(capturedRequest?.messageKind, "supervision");
+  assert.match(capturedRequest?.traceId ?? "", /^mon_/);
+  assert.equal(harness.binding.interventions.length, 1);
+  assert.equal(harness.binding.interventions[0]?.deliveryStage, "queued");
+  assert.equal(harness.binding.interventions[0]?.effectiveMode, "follow_up");
+  assert.equal(harness.binding.pendingIntervention, undefined);
+  await harness.runtime.stop({ stopSession: false });
+});
+
+test("MonitorRuntime treats an accepted remote root steer as queued until target-side injection", async () => {
+  const harness = runtimeHarness({
+    async waitForEvaluation(request) {
+      return verdict(request, "send");
+    },
+    async deliver(endpoint) {
+      return {
+        delivered: true,
+        endpointId: endpoint.id,
+        transport: "workspace-peer-v1",
+        receipt: {
+          requestedMode: "steer",
+          effectiveMode: "steer",
+          deliveryStage: "injected",
+        },
+      };
+    },
+  });
+  harness.runtime.start();
+  await harness.timers.runNext(harness.runtime);
+  assert.equal(harness.binding.interventions.length, 1);
+  assert.equal(harness.binding.interventions[0]?.deliveryStage, "queued");
+  assert.equal(harness.binding.interventions[0]?.effectiveMode, "steer");
+  assert.equal(harness.binding.pendingIntervention, undefined);
+  await harness.runtime.stop({ stopSession: false });
+});
+
 test("MonitorRuntime can start again after exit shutdown", async () => {
   let evaluations = 0;
   const harness = runtimeHarness({
@@ -348,6 +409,8 @@ test("production extension instantiates the controller and routes evaluator turn
   assert.match(source, /await monitorControllerInstance\.shutdown\(\)/);
   assert.match(source, /const canonicalEndpoint = sessionHostRegistry\?\.directory\.get\(selector\)/);
   assert.match(source, /candidate\.ownerId === expectedEndpoint\.ownerId && candidate\.ownerNonce === expectedEndpoint\.ownerNonce/);
-  assert.match(source, /request\.signal,[\s\S]*?endpoint,[\s\S]*?\);/);
+  assert.match(source, /sendWorkspacePeerMessage\(target, request, endpoint\)/);
+  assert.match(source, /messageKind: request\.messageKind/);
+  assert.match(source, /traceId: request\.traceId/);
   assert.doesNotMatch(source, /You own supervision decisions; the parent session only created/);
 });

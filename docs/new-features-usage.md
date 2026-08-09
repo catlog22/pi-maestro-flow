@@ -80,9 +80,9 @@ observe({ action: "watch", targets: [{ kind: "teammate", id: "reviewer" }], time
 - `until`：`"result-ready"`（默认，出结果即返回）或 `"completed"`（终态生命周期）；
 - `wait` 的每个 target 必须提供 `name` 或 `waitMs` 之一（schema 强制）。
 
-## 5. self-evolve 自进化（dry-run 候选信号）
+## 5. self-evolve 自进化（候选信号与受控沉淀）
 
-**是什么**：运行轨迹 → 知识沉淀闭环的 **dry-run 层**。启用后监听每轮结束（`agent_end`）与会话压缩（`session_compact`）事件，把可复用经验提炼为**候选信号**（JSONL 建议文件 + 可执行 stage 命令模板），由你或后续治理步骤决定是否沉淀进知识库。它本身**绝不 stage / promote / 写知识**（dry-run 保证）。
+**是什么**：运行轨迹 → 受治理知识候选的自动化层。启用后监听每轮结束（`agent_end`）与会话压缩（`session_compact`），把可复用经验提炼为候选信号、证据文件和可执行 stage 模板。默认 `dry-run` 只评审不写知识；显式切换 `auto-deposit` 后，也只会在用户主动运行 review 时自动 stage 过门候选，**永不自动 promote**。
 
 **默认禁用**，三种启用方式任一即可：
 
@@ -96,11 +96,12 @@ observe({ action: "watch", targets: [{ kind: "teammate", id: "reviewer" }], time
 /self-evolve [panel]                    # 打开面板（默认）
 /self-evolve status                     # 完整状态（含有效状态与 env 覆盖）
 /self-evolve on|off                     # 启用 / 禁用
-/self-evolve config [k=v ...|reset]     # 查看 / 修改配置（含评审门阈值）
+/self-evolve config [k=v ...|reset]     # 查看 / 修改配置（mode、模型、评审门阈值）
 /self-evolve signals [N]                # 最近 N 条候选信号（默认 10）
 /self-evolve signals delete <id>|clear|export [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--project p]
-/self-evolve review [N]                 # dry-run 评审最近 N 条（默认 5；评分低于阈值自动降级 uncertain）
+/self-evolve review [N]                 # 评审最近 N 条；auto-deposit 下过门候选自动 stage
 /self-evolve reviews [N]                # 查历史评审记录
+/self-evolve deposits [N]               # 查自动沉淀成功/失败审计
 ```
 
 **输出位置**（全局，不污染项目 git；`SELF_EVOLVE_OUTPUT_DIR` 可覆盖根）：
@@ -108,12 +109,15 @@ observe({ action: "watch", targets: [{ kind: "teammate", id: "reviewer" }], time
 ```
 ~/.maestro/self-evolve/suggestions/<date>.jsonl   # 候选信号
 ~/.maestro/self-evolve/reviews/<date>.jsonl       # 评审记录（含评审门统计）
+~/.maestro/self-evolve/deposits/<date>.jsonl      # auto-deposit 成功/失败审计
 ~/.maestro/self-evolve/evidence/<se-id>.md        # 信号证据文件（suggestion 直接引用）
 ~/.maestro/self-evolve/archive/                   # 旧日文件归档（不删除）
 ~/.maestro/self-evolve/exports/                   # signals export 导出（signals-<ts>.jsonl）
 ```
 
-**与 maestro-knowledge skill 的关系**：self-evolve 只产出**信号 → 评审**（dry-run）；真正沉淀走 CLI：`maestro knowledge stage`（信号自带可执行 suggestion 模板，证据文件已生成）→ `maestro knowledge promote --resolve` 内联裁决+晋升（或兼容回退 `review --resolve`）→ 未来 `maestro search` 验证。全程人工确认，无自动写库。
+**模式切换**：`/self-evolve config mode=dry-run` 仅评审；`/self-evolve config mode=auto-deposit` 在评审门后调用 `maestro knowledge stage`，候选进入 pending 池。真正晋升仍走 `maestro knowledge review/promote`，必须由用户确认治理处置；自动沉淀不等于自动发布知识。
+
+完整命令、配置、数据目录、health sidecar、canary 与 skill proposal 流程见 [Self-Evolve 自进化指南](../docs-site/src/content/docs/guides/self-evolve.md)。
 
 **相关脚本**：
 

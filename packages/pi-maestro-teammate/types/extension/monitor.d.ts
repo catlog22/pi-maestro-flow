@@ -123,6 +123,8 @@ export interface InterventionRecord {
     mode: "steer" | "follow_up";
     traceId?: string;
     outcome?: InterventionOutcome;
+    effectiveMode?: "steer" | "follow_up";
+    deliveryStage?: "queued" | "injected";
 }
 /** Binding between a monitor and a single session (1:1). */
 export interface MonitorBinding {
@@ -178,12 +180,19 @@ export interface EngineAgentInfo {
     /** "agent" for sub-agents, "window" for peer windows. */
     kind?: "agent" | "window";
 }
+export interface InterventionDeliveryAck {
+    delivered: boolean;
+    requestedMode?: "steer" | "follow_up";
+    effectiveMode?: "steer" | "follow_up";
+    deliveryStage?: "queued" | "injected";
+    deferred?: boolean;
+}
 /** Callbacks injected from index.ts for engine operations. */
 export interface EngineCallbacks {
     /** Get current info for a monitored agent. Returns undefined if gone. */
     getAgentInfo: (correlationId: string) => EngineAgentInfo | undefined;
     /** Send an intervention message to an agent. */
-    sendIntervention: (correlationId: string, message: string, mode: "steer" | "follow_up") => boolean | Promise<boolean>;
+    sendIntervention: (correlationId: string, message: string, mode: "steer" | "follow_up", traceId?: string) => boolean | InterventionDeliveryAck | Promise<boolean | InterventionDeliveryAck>;
     /** Exact lifecycle fence supplied by a host-owned deterministic runtime. */
     isCurrent?: (correlationId: string, binding: MonitorBinding) => boolean;
     /** Defer a missing-target removal to a quiescence-owning controller. */
@@ -331,14 +340,14 @@ export interface HeuristicResult {
 }
 export declare function heuristicCheck(info: EngineAgentInfo, contextCompactThresholdPercent?: number): HeuristicResult;
 export declare function canIntervene(binding: MonitorBinding, now: number): boolean;
-export declare function recordIntervention(binding: MonitorBinding, reason: InterventionRecord["reason"], message: string, mode: "steer" | "follow_up", traceId?: string): void;
+export declare function recordIntervention(binding: MonitorBinding, reason: InterventionRecord["reason"], message: string, mode: "steer" | "follow_up", traceId?: string, delivery?: InterventionDeliveryAck): void;
 export declare function createTraceId(): string;
 /**
  * Send an intervention with bounded retry. Each attempt calls `send`;
  * `maxRetries` failures after the first attempt produce a dead-letter.
  * Backoff is linear (`backoffMs * attempt`), abortable via `signal`.
  */
-export declare function sendInterventionWithRetry(send: (message: string, mode: "steer" | "follow_up") => boolean | Promise<boolean>, message: string, mode: "steer" | "follow_up", maxRetries: number, backoffMs: number, options?: {
+export declare function sendInterventionWithRetry(send: (message: string, mode: "steer" | "follow_up") => boolean | InterventionDeliveryAck | Promise<boolean | InterventionDeliveryAck>, message: string, mode: "steer" | "follow_up", maxRetries: number, backoffMs: number, options?: {
     signal?: AbortSignal;
     sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>;
     isCurrent?: () => boolean;
@@ -346,7 +355,7 @@ export declare function sendInterventionWithRetry(send: (message: string, mode: 
     delivered: boolean;
     attempts: number;
     stale?: boolean;
-}>;
+} & Partial<InterventionDeliveryAck>>;
 /**
  * One engine tick: check all bindings, run heuristics, optionally run LLM
  * analysis, and intervene if needed.

@@ -46,6 +46,9 @@ export type WorkspaceAgentStatus = "running" | "sleeping";
 export type WorkspaceSettledStatus = "completed" | "failed" | "terminated";
 export type WorkspacePeerCommandAction = "steer" | "follow_up";
 export type WorkspacePeerResponseStatus = "accepted" | "rejected" | "error" | "expired";
+export type WorkspacePeerMessageSource = "user" | "monitor" | "system";
+export type WorkspacePeerMessageKind = "message" | "supervision";
+export type WorkspacePeerDeliveryStage = "queued" | "injected";
 
 export interface WorkspacePeerPaths {
   rootDir: string;
@@ -185,6 +188,11 @@ export interface WorkspacePeerCommand {
   targetCorrelationId: string;
   action: WorkspacePeerCommandAction;
   message: string;
+  source?: WorkspacePeerMessageSource;
+  messageKind?: WorkspacePeerMessageKind;
+  traceId?: string;
+  replyTo?: string;
+  fromSessionName?: string;
   createdAt: number;
   expiresAt: number;
 }
@@ -201,6 +209,9 @@ export interface WorkspacePeerCommandResponse {
   targetCorrelationId: string;
   status: WorkspacePeerResponseStatus;
   message?: string;
+  effectiveAction?: WorkspacePeerCommandAction;
+  deliveryStage?: WorkspacePeerDeliveryStage;
+  traceId?: string;
   respondedAt: number;
   expiresAt: number;
 }
@@ -208,6 +219,8 @@ export interface WorkspacePeerCommandResponse {
 export interface WorkspaceCommandHandlerResult {
   status?: Exclude<WorkspacePeerResponseStatus, "expired">;
   message?: string;
+  effectiveAction?: WorkspacePeerCommandAction;
+  deliveryStage?: WorkspacePeerDeliveryStage;
 }
 
 export interface WorkspaceConsumedCommand {
@@ -269,6 +282,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function optional<T>(value: unknown, predicate: (candidate: unknown) => candidate is T): value is T | undefined {
   return value === undefined || predicate(value);
+}
+
+function safeMetadataToken(value: unknown): value is string {
+  return boundedString(value, 128) && value.length > 0 && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value);
+}
+
+function safeReplySelector(value: unknown): value is string {
+  return boundedString(value, 192) && value.length > 0 && !/\s/.test(value);
+}
+
+function safeSessionName(value: unknown): value is string {
+  return boundedString(value, 256)
+    && value.length > 0
+    && !/[\r\n\t\u0085\u2028\u2029]/.test(value);
 }
 
 export function normalizeWorkspacePath(cwd: string, platform: NodeJS.Platform = process.platform): string {
@@ -666,6 +693,48 @@ export function workspaceMainSessionDeliveryAction(
   return workspaceMainSessionDeliveryDecision(requested, backgroundJobs).action;
 }
 
+export function shouldReplayWorkspaceRootQueue(
+  reason: "startup" | "reload" | "new" | "resume" | "fork",
+): boolean {
+  return reason === "startup" || reason === "new" || reason === "resume" || reason === "fork";
+}
+
+export interface WorkspaceRemoteRootMessage {
+  messageId: string;
+  fromOwnerId: string;
+  message: string;
+  effectiveAction: WorkspacePeerCommandAction;
+  source?: WorkspacePeerMessageSource;
+  messageKind?: WorkspacePeerMessageKind;
+  traceId?: string;
+  replyTo?: string;
+  fromSessionName?: string;
+}
+
+/** Canonical model-visible envelope for all remote root messages. */
+export function formatWorkspaceRemoteRootMessage(input: WorkspaceRemoteRootMessage): string {
+  const source = input.source ?? "system";
+  const messageKind = input.messageKind ?? "message";
+  const traceId = input.traceId ?? input.messageId;
+  const replyTo = `owner:${input.fromOwnerId}`;
+  const sender = input.fromSessionName
+    ? `${JSON.stringify(input.fromSessionName)} (owner ${input.fromOwnerId})`
+    : `owner ${input.fromOwnerId}`;
+  return [
+    "[workspace teammate message]",
+    `Source: ${source}`,
+    `Kind: ${messageKind}`,
+    `Sender: ${sender}`,
+    `Message id: ${input.messageId}`,
+    `Trace id: ${traceId}`,
+    `Effective delivery mode: ${input.effectiveAction}`,
+    `Reply route: when the body requests a response, call teammate-send with to=\"${replyTo}\".`,
+    "--- BEGIN ORIGINAL BODY ---",
+    input.message,
+    "--- END ORIGINAL BODY ---",
+  ].join("\n");
+}
+
 export function validateWorkspaceBackgroundJobSnapshot(value: unknown): WorkspaceBackgroundJobSnapshot | undefined {
   if (!isRecord(value)
     || !boundedString(value.id, 256)
@@ -1010,6 +1079,12 @@ function validateCommand(value: unknown, expectedWorkspaceId?: string): Workspac
     || (value.action !== "steer" && value.action !== "follow_up")
     || !boundedString(value.message, MAX_COMMAND_MESSAGE_BYTES)
     || Buffer.byteLength(value.message, "utf8") > MAX_COMMAND_MESSAGE_BYTES
+    || !optional(value.source, (candidate): candidate is WorkspacePeerMessageSource => candidate === "user" || candidate === "monitor" || candidate === "system")
+    || !optional(value.messageKind, (candidate): candidate is WorkspacePeerMessageKind => candidate === "message" || candidate === "supervision")
+    || !optional(value.traceId, safeMetadataToken)
+    || !optional(value.replyTo, safeReplySelector)
+    || (value.replyTo !== undefined && value.replyTo !== `owner:${value.fromOwnerId}`)
+    || !optional(value.fromSessionName, safeSessionName)
     || !boundedInteger(value.createdAt)
     || !boundedInteger(value.expiresAt)
     || value.expiresAt < value.createdAt
@@ -1040,6 +1115,9 @@ function validateResponse(value: unknown, command?: WorkspacePeerCommand): Works
     || !safeCorrelationId(value.targetCorrelationId)
     || !["accepted", "rejected", "error", "expired"].includes(String(value.status))
     || !optional(value.message, (candidate): candidate is string => boundedString(candidate, MAX_SUMMARY))
+    || !optional(value.effectiveAction, (candidate): candidate is WorkspacePeerCommandAction => candidate === "steer" || candidate === "follow_up")
+    || !optional(value.deliveryStage, (candidate): candidate is WorkspacePeerDeliveryStage => candidate === "queued" || candidate === "injected")
+    || !optional(value.traceId, safeMetadataToken)
     || !boundedInteger(value.respondedAt)
     || !boundedInteger(value.expiresAt)
     || value.expiresAt < value.respondedAt
@@ -1050,7 +1128,8 @@ function validateResponse(value: unknown, command?: WorkspacePeerCommand): Works
     || (value.fromOwnerNonce !== command.toOwnerNonce && value.status !== "rejected")
     || value.toOwnerId !== command.fromOwnerId
     || value.toOwnerNonce !== command.fromOwnerNonce
-    || value.targetCorrelationId !== command.targetCorrelationId)) return undefined;
+    || value.targetCorrelationId !== command.targetCorrelationId
+    || (value.traceId !== undefined && value.traceId !== (command.traceId ?? command.commandId)))) return undefined;
   return value as unknown as WorkspacePeerCommandResponse;
 }
 
@@ -1066,7 +1145,17 @@ export async function enqueueWorkspacePeerCommand(
   target: WorkspaceResolvedTarget,
   action: WorkspacePeerCommandAction,
   message: string,
-  options: { now?: number; ttlMs?: number; commandId?: string } = {},
+  options: {
+    now?: number;
+    ttlMs?: number;
+    commandId?: string;
+    source?: WorkspacePeerMessageSource;
+    messageKind?: WorkspacePeerMessageKind;
+    traceId?: string;
+    replyTo?: string;
+    fromSessionName?: string;
+    beforePublish?: (command: WorkspacePeerCommand) => void | Promise<void>;
+  } = {},
 ): Promise<WorkspacePeerCommand> {
   requireRoutableWorkspaceTarget(target);
   if (action !== "steer" && action !== "follow_up") throw new Error("remote command action must be steer or follow_up");
@@ -1090,10 +1179,16 @@ export async function enqueueWorkspacePeerCommand(
     targetCorrelationId: target.agent.correlationId,
     action,
     message,
+    ...(options.source === undefined ? {} : { source: options.source }),
+    ...(options.messageKind === undefined ? {} : { messageKind: options.messageKind }),
+    ...(options.traceId === undefined ? {} : { traceId: options.traceId }),
+    ...(options.replyTo === undefined ? {} : { replyTo: options.replyTo }),
+    ...(options.fromSessionName === undefined ? {} : { fromSessionName: options.fromSessionName }),
     createdAt,
     expiresAt: createdAt + ttlMs,
   };
   if (!validateCommand(command, identity.workspaceId)) throw new Error("constructed command failed protocol validation");
+  await options.beforePublish?.(command);
   await writePrivateJsonAtomic(commandPath(identity, target.ownerId, commandId), command, MAX_COMMAND_FILE_BYTES);
   return command;
 }
@@ -1155,11 +1250,28 @@ export async function sendWorkspacePeerCommand(
   target: WorkspaceResolvedTarget,
   action: WorkspacePeerCommandAction,
   message: string,
-  options: { timeoutMs?: number; pollMs?: number; ttlMs?: number; signal?: AbortSignal } = {},
+  options: {
+    timeoutMs?: number;
+    pollMs?: number;
+    ttlMs?: number;
+    signal?: AbortSignal;
+    source?: WorkspacePeerMessageSource;
+    messageKind?: WorkspacePeerMessageKind;
+    traceId?: string;
+    replyTo?: string;
+    fromSessionName?: string;
+  } = {},
 ): Promise<{ command: WorkspacePeerCommand; response?: WorkspacePeerCommandResponse; timedOut: boolean }> {
   const commandTimeoutMs = options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
   const ttlMs = options.ttlMs ?? Math.min(MAX_COMMAND_TTL_MS, commandTimeoutMs + 5_000);
-  const command = await enqueueWorkspacePeerCommand(identity, target, action, message, { ttlMs });
+  const command = await enqueueWorkspacePeerCommand(identity, target, action, message, {
+    ttlMs,
+    source: options.source,
+    messageKind: options.messageKind,
+    traceId: options.traceId,
+    replyTo: options.replyTo,
+    fromSessionName: options.fromSessionName,
+  });
   const response = await waitForWorkspacePeerCommandResponse(identity, command, options);
   return { command, ...(response ? { response } : {}), timedOut: response === undefined };
 }
@@ -1175,6 +1287,7 @@ function makeResponse(
   status: WorkspacePeerResponseStatus,
   message: string | undefined,
   now: number,
+  delivery: Pick<WorkspaceCommandHandlerResult, "effectiveAction" | "deliveryStage"> = {},
 ): WorkspacePeerCommandResponse {
   return {
     version: WORKSPACE_PEER_PROTOCOL_VERSION,
@@ -1188,6 +1301,9 @@ function makeResponse(
     targetCorrelationId: command.targetCorrelationId,
     status,
     ...(safeResponseMessage(message) === undefined ? {} : { message: safeResponseMessage(message) }),
+    ...(delivery.effectiveAction === undefined ? {} : { effectiveAction: delivery.effectiveAction }),
+    ...(delivery.deliveryStage === undefined ? {} : { deliveryStage: delivery.deliveryStage }),
+    ...(command.traceId === undefined ? {} : { traceId: command.traceId }),
     respondedAt: now,
     expiresAt: now + MAX_RESPONSE_RETENTION_MS,
   };
@@ -1229,7 +1345,17 @@ export async function consumeWorkspacePeerCommands(
       } else {
         try {
           const handled = await handler(command);
-          response = makeResponse(identity, command, handled?.status ?? "accepted", handled?.message, now);
+          response = makeResponse(
+            identity,
+            command,
+            handled?.status ?? "accepted",
+            handled?.message,
+            now,
+            handled ? {
+              effectiveAction: handled.effectiveAction,
+              deliveryStage: handled.deliveryStage,
+            } : {},
+          );
         } catch (error) {
           response = makeResponse(identity, command, "error", error instanceof Error ? error.message : String(error), now);
         }

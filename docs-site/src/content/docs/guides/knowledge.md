@@ -112,6 +112,7 @@ maestro search "旧模式" --include-deprecated       # 搜索含已废弃
 
 ## 下一步
 
+- [Self-Evolve 自进化](/guides/self-evolve) — 候选信号、评审门、auto-deposit、健康检查与 canary
 - [架构与核心概念](/guides/architecture) — 知识门在流程中的位置
 - [工作流模式](/guides/goal-plan-todo) — 门控 → 探索 → 实现的完整模式
 - [Smart Search Provider 配置](/guides/smart-search-provider-config) — 外部检索与知识检索的分工

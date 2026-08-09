@@ -5,11 +5,35 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前状态：v0.17.0（2026-08-09 发布）。** 本页以 `v0.16.0` 标签（`02436592`）为基线，覆盖至发布提交 `f021f083` 的 37 个功能提交及发布提交本身。安装命令与版本矩阵与已发布的 npm 包和 GitHub Release 一致。
+> **当前稳定版本：v0.16.0。v0.17.0 已于 2026-08-09 撤回。** v0.17.0 的功能记录保留用于审计，但 npm `latest` 已回退，所有关联版本均已 deprecated，请勿安装。
+
+## v0.17.0 撤回说明（2026-08-09）
+
+发布后发现：部分全新 npm 安装启动 Pi 后没有可用 Skill。为阻止新的故障安装，完整发布闭包已从 `latest` 回退：
+
+| 包 | 已撤回版本 | 当前 `latest` |
+|----|-----------:|--------------:|
+| `pi-maestro-flow` | `0.17.0` | **`0.16.0`** |
+| `pi-maestro-teammate` | `1.10.0` | **`1.9.0`** |
+| `pi-cockpit` | `0.12.0` | **`0.11.0`** |
+| `pi-maestro-settings-core` | `0.1.2` | **`0.1.1`** |
+
+npm 因当前 granular token 不具备 2FA 保护下的 destructive unpublish 权限而拒绝物理删除；四个版本仍保留用于审计，但均有 deprecated 警告且不再被 `latest` 解析。
+
+在线 tarball 对比显示 Flow `0.16.0` 和 `0.17.0` 都包含 194 个 Skill 条目，因此问题不是简单的包内文件缺失，安装注册/路径同步/运行时发现链仍在调查。修复版发布前必须使用真正隔离的 `USERPROFILE` 与 `HOME` 验证 Skill 列表和至少一次实际调用。
+
+已安装用户请关闭所有 Pi 进程后直接降级：
+
+```bash
+pi install npm:pi-maestro-flow@0.16.0
+pi list
+```
+
+不要先执行 `pi remove npm:pi-maestro-flow`，它可能卸载共享 npm 目录中的整个依赖树，使 Cockpit/Teammate 的绝对路径注册指向不存在位置。
 
 ---
 
-## v0.17.0（2026-08-09）
+## v0.17.0（已撤回，2026-08-09）
 
 **比较范围：** `v0.16.0 → v0.17.0`  
 **代码截止：** 2026-08-09  
@@ -101,7 +125,7 @@ Self-Evolve Phase 2B 增加 `auto-deposit` 模式，同时保留 `dry-run` 作�
 - 自动沉淀仍受知识候选质量门、证据和后续 review/promote 治理约束；开启该模式不等于自动发布知识。
 - 深度模拟和端到端验证覆盖模式切换、候选生成和失败回退。
 
-知识候选生命周期见 [知识系统](/guides/knowledge)。
+知识候选生命周期与完整操作见 [Self-Evolve 自进化](/guides/self-evolve)和[知识系统](/guides/knowledge)。
 
 ### 7. API Manager 模型迁移与请求头预设
 
@@ -152,12 +176,14 @@ Self-Evolve Phase 2B 增加 `auto-deposit` 模式，同时保留 `dry-run` 作�
 6. `auto-deposit` 只自动生成候选，不绕过 evidence、review 或 promote 治理。
 7. Core Engine 使用精确 pin；不要只升级伴随包而保留旧的 Flow 依赖闭包。
 
-正式发布后安装：
+已安装 v0.17.0 的用户请回退：
 
 ```bash
-pi install npm:pi-maestro-flow@0.17.0
+pi install npm:pi-maestro-flow@0.16.0
 pi list
 ```
+
+当前 `latest` 已解析到 0.16.0；不要先运行 `pi remove npm:pi-maestro-flow`。
 
 ## 关键提交索引
 
@@ -179,12 +205,13 @@ pi list
 
 仓库维护方面，pipeline 输出迁移到 `.pi-sync`，旧的受版本控制 `flow/` 镜像被移除。这会改变源码仓库布局，但不改变 npm 包中的用户功能。
 
-### 发布验证（2026-08-09）
+### 发布前验证与缺口（2026-08-09）
 
 - 串行根 `test:release` 门禁全绿（3140 ok / 0 fail，含 settings-core、teammate declarations、cockpit、flow 全子系统与 packed 消费者测试）。
 - 四包 dry-run shasum 与 npm registry 逐一比对一致：settings-core `0.1.2` `a94722d4`、teammate `1.10.0` `9f5a5651`、cockpit `0.12.0` `0d9521d2`、flow `0.17.0` `7330fed7`。
-- fresh 用户目录安装 smoke 通过：四个包与嵌套 `pi-maestro-settings-core@0.1.2` 版本矩阵全部正确，RPC 启动无崩溃。
-- 按固定顺序发布：settings-core → teammate → cockpit → flow；`maestro-flow` 精确 pin `0.5.67`。
+- 原 fresh 用户目录 smoke 只确认版本矩阵与 RPC 启动，没有断言安装后的 Skill 被 Pi 实际发现和可调用；该缺口导致发布门误判。
+- 下一修复版必须在隔离 `USERPROFILE` + `HOME` 中验证 Skill 列表和至少一次真实 Skill 调用。
+- 原发布顺序为 settings-core → teammate → cockpit → flow；`maestro-flow` 精确 pin `0.5.67`。
 
 版本详情可查看仓库中的 `RELEASE.md` 与 GitHub [`v0.17.0` Release](https://github.com/catlog22/pi-maestro-flow/releases/tag/v0.17.0)。
 

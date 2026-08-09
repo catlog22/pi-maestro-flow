@@ -21,6 +21,8 @@ export type SessionEndpointTransport = "local-root" | "local-agent-mailbox" | "w
 export type SessionEndpointStatus = "running" | "sleeping" | "settled";
 export type SessionMessageMode = "steer" | "follow_up" | "abort";
 export type SessionMessageSource = "user" | "monitor" | "system";
+export type SessionMessageKind = "message" | "supervision";
+export type SessionDeliveryStage = "queued" | "injected";
 export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "abort" | "wake";
 export interface SessionEndpointIdentity {
     workspaceId: string;
@@ -111,6 +113,10 @@ export interface SessionMessageRequest {
     message: string;
     mode: SessionMessageMode;
     source?: SessionMessageSource;
+    messageKind?: SessionMessageKind;
+    traceId?: string;
+    replyTo?: string;
+    fromSessionName?: string;
     signal?: AbortSignal;
 }
 export interface SessionEndpointSnapshot {
@@ -118,7 +124,7 @@ export interface SessionEndpointSnapshot {
     endpoints: readonly SessionEndpoint[];
 }
 export type WindowThreadDirection = "outgoing" | "incoming";
-export type WindowThreadStatus = "pending" | "accepted" | "rejected" | "timeout";
+export type WindowThreadStatus = "pending" | "queued" | "injected" | "accepted" | "rejected" | "timeout";
 export interface WindowThreadEntry {
     version: typeof SESSION_ENDPOINT_VERSION;
     messageId: string;
@@ -127,7 +133,13 @@ export interface WindowThreadEntry {
     peerOwnerNonce: string;
     direction: WindowThreadDirection;
     source: SessionMessageSource;
+    messageKind?: SessionMessageKind;
+    traceId?: string;
+    replyTo?: string;
+    fromSessionName?: string;
+    targetCorrelationId?: string;
     mode: Exclude<SessionMessageMode, "abort">;
+    effectiveMode?: Exclude<SessionMessageMode, "abort">;
     body: string;
     status: WindowThreadStatus;
     createdAt: number;
@@ -140,7 +152,7 @@ export interface WindowThreadSnapshot {
     entries: readonly WindowThreadEntry[];
 }
 export type WindowThreadEntryInput = Omit<WindowThreadEntry, "version" | "revision" | "contentRevision">;
-/** Terminal entries are replay receipts; pending entries must retry delivery after a crash. */
+/** Only injected/legacy-accepted entries prove model consumption; queued entries remain recoverable. */
 export declare function windowThreadReplayReceipt(entry: WindowThreadEntry | undefined): {
     status: "accepted" | "rejected";
     message: string;
@@ -157,6 +169,8 @@ export declare class WindowThreadStore {
     get contentRevision(): string;
     list(): readonly WindowThreadEntry[];
     get(messageId: string, direction?: WindowThreadDirection): WindowThreadEntry | undefined;
+    transition(messageId: string, direction: WindowThreadDirection, status: WindowThreadStatus, updatedAt?: number, effectiveMode?: Exclude<SessionMessageMode, "abort">): WindowThreadEntry | undefined;
+    reconcileInjected(messageId: string, updatedAt?: number, effectiveMode?: Exclude<SessionMessageMode, "abort">): WindowThreadEntry | undefined;
     snapshot(): WindowThreadSnapshot;
     subscribe(subscriber: (snapshot: WindowThreadSnapshot) => void, options?: {
         emitCurrent?: boolean;
@@ -176,6 +190,11 @@ export interface SessionMessageResult {
     error?: string;
     receipt?: {
         mode?: string;
+        requestedMode?: SessionMessageMode;
+        effectiveMode?: SessionMessageMode;
+        deliveryStage?: SessionDeliveryStage;
+        messageId?: string;
+        traceId?: string;
         wasSleeping?: boolean;
         terminatedCount?: number;
     };

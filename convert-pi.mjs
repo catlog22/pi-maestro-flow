@@ -8,7 +8,7 @@
  * 4. Body: Agent/AskUserQuestion/Skill references → pi equivalents
  */
 
-import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 

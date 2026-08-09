@@ -114,8 +114,9 @@ const FEATURES: Feature[] = [
   },
   {
     icon: 'sparkles',
-    zh: { title: 'self-evolve 自进化（M1-M5）', desc: '运行轨迹 → 知识沉淀闭环：候选信号、健康侧车、提案治理与 canary 验证（默认禁用）' },
-    en: { title: 'Self-Evolve Automation (M1-M5)', desc: 'Trajectory-to-knowledge loop: candidate signals, health sidecar, proposal governance, canary verification (opt-in)' },
+    zh: { title: 'self-evolve 自进化（M1-M5）', desc: '0.16.0 提供 dry-run 候选信号；含 auto-deposit 的 v0.17.0 已撤回，等待修复版' },
+    en: { title: 'Self-Evolve Automation (M1-M5)', desc: '0.16.0 provides dry-run signals; v0.17.0 auto-deposit was withdrawn pending a fix' },
+    guide: 'self-evolve',
   },
 ];
 

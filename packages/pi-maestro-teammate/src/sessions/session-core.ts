@@ -23,6 +23,8 @@ export type SessionEndpointTransport = "local-root" | "local-agent-mailbox" | "w
 export type SessionEndpointStatus = "running" | "sleeping" | "settled";
 export type SessionMessageMode = "steer" | "follow_up" | "abort";
 export type SessionMessageSource = "user" | "monitor" | "system";
+export type SessionMessageKind = "message" | "supervision";
+export type SessionDeliveryStage = "queued" | "injected";
 export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "abort" | "wake";
 
 export interface SessionEndpointIdentity {
@@ -350,6 +352,10 @@ export interface SessionMessageRequest {
   message: string;
   mode: SessionMessageMode;
   source?: SessionMessageSource;
+  messageKind?: SessionMessageKind;
+  traceId?: string;
+  replyTo?: string;
+  fromSessionName?: string;
   signal?: AbortSignal;
 }
 
@@ -359,7 +365,7 @@ export interface SessionEndpointSnapshot {
 }
 
 export type WindowThreadDirection = "outgoing" | "incoming";
-export type WindowThreadStatus = "pending" | "accepted" | "rejected" | "timeout";
+export type WindowThreadStatus = "pending" | "queued" | "injected" | "accepted" | "rejected" | "timeout";
 
 export interface WindowThreadEntry {
   version: typeof SESSION_ENDPOINT_VERSION;
@@ -369,7 +375,13 @@ export interface WindowThreadEntry {
   peerOwnerNonce: string;
   direction: WindowThreadDirection;
   source: SessionMessageSource;
+  messageKind?: SessionMessageKind;
+  traceId?: string;
+  replyTo?: string;
+  fromSessionName?: string;
+  targetCorrelationId?: string;
   mode: Exclude<SessionMessageMode, "abort">;
+  effectiveMode?: Exclude<SessionMessageMode, "abort">;
   body: string;
   status: WindowThreadStatus;
   createdAt: number;
@@ -385,12 +397,12 @@ export interface WindowThreadSnapshot {
 
 export type WindowThreadEntryInput = Omit<WindowThreadEntry, "version" | "revision" | "contentRevision">;
 
-/** Terminal entries are replay receipts; pending entries must retry delivery after a crash. */
+/** Only injected/legacy-accepted entries prove model consumption; queued entries remain recoverable. */
 export function windowThreadReplayReceipt(
   entry: WindowThreadEntry | undefined,
 ): { status: "accepted" | "rejected"; message: string } | undefined {
-  if (!entry || entry.status === "pending") return undefined;
-  return entry.status === "accepted"
+  if (!entry || entry.status === "pending" || entry.status === "queued") return undefined;
+  return entry.status === "injected" || entry.status === "accepted"
     ? { status: "accepted", message: "workspace command was already consumed" }
     : { status: "rejected", message: "workspace command was already rejected" };
 }
@@ -413,7 +425,13 @@ function semanticThreadEntry(entry: Omit<WindowThreadEntry, "contentRevision">):
     peerOwnerNonce: entry.peerOwnerNonce,
     direction: entry.direction,
     source: entry.source,
+    ...(entry.messageKind === undefined ? {} : { messageKind: entry.messageKind }),
+    ...(entry.traceId === undefined ? {} : { traceId: entry.traceId }),
+    ...(entry.replyTo === undefined ? {} : { replyTo: entry.replyTo }),
+    ...(entry.fromSessionName === undefined ? {} : { fromSessionName: entry.fromSessionName }),
+    ...(entry.targetCorrelationId === undefined ? {} : { targetCorrelationId: entry.targetCorrelationId }),
     mode: entry.mode,
+    ...(entry.effectiveMode === undefined ? {} : { effectiveMode: entry.effectiveMode }),
     body: entry.body,
     status: entry.status,
     createdAt: entry.createdAt,
@@ -432,9 +450,15 @@ function validThreadEntry(value: unknown): WindowThreadEntry | undefined {
     || typeof entry.peerOwnerNonce !== "string" || entry.peerOwnerNonce.length === 0 || entry.peerOwnerNonce.length > 128
     || (entry.direction !== "outgoing" && entry.direction !== "incoming")
     || (entry.source !== "user" && entry.source !== "monitor" && entry.source !== "system")
+    || (entry.messageKind !== undefined && entry.messageKind !== "message" && entry.messageKind !== "supervision")
+    || (entry.traceId !== undefined && (typeof entry.traceId !== "string" || entry.traceId.length === 0 || entry.traceId.length > 128 || /[\u0000-\u001f\u007f]/.test(entry.traceId)))
+    || (entry.replyTo !== undefined && (typeof entry.replyTo !== "string" || entry.replyTo.length === 0 || entry.replyTo.length > 192 || /[\u0000-\u001f\u007f]/.test(entry.replyTo)))
+    || (entry.fromSessionName !== undefined && (typeof entry.fromSessionName !== "string" || entry.fromSessionName.length === 0 || entry.fromSessionName.length > 256 || /[\u0000-\u001f\u007f]/.test(entry.fromSessionName)))
+    || (entry.targetCorrelationId !== undefined && (typeof entry.targetCorrelationId !== "string" || entry.targetCorrelationId.length === 0 || entry.targetCorrelationId.length > 128 || /[\u0000-\u001f\u007f]/.test(entry.targetCorrelationId)))
     || (entry.mode !== "steer" && entry.mode !== "follow_up")
+    || (entry.effectiveMode !== undefined && entry.effectiveMode !== "steer" && entry.effectiveMode !== "follow_up")
     || typeof entry.body !== "string"
-    || !["pending", "accepted", "rejected", "timeout"].includes(String(entry.status))
+    || !["pending", "queued", "injected", "accepted", "rejected", "timeout"].includes(String(entry.status))
     || typeof entry.createdAt !== "number" || !Number.isSafeInteger(entry.createdAt) || entry.createdAt < 0
     || typeof entry.updatedAt !== "number" || !Number.isSafeInteger(entry.updatedAt) || entry.updatedAt < entry.createdAt
     || typeof entry.revision !== "number" || !Number.isSafeInteger(entry.revision) || entry.revision < 1) return undefined;
@@ -446,7 +470,13 @@ function validThreadEntry(value: unknown): WindowThreadEntry | undefined {
     peerOwnerNonce: entry.peerOwnerNonce,
     direction: entry.direction,
     source: entry.source,
+    ...(entry.messageKind === undefined ? {} : { messageKind: entry.messageKind as SessionMessageKind }),
+    ...(entry.traceId === undefined ? {} : { traceId: entry.traceId as string }),
+    ...(entry.replyTo === undefined ? {} : { replyTo: entry.replyTo as string }),
+    ...(entry.fromSessionName === undefined ? {} : { fromSessionName: entry.fromSessionName as string }),
+    ...(entry.targetCorrelationId === undefined ? {} : { targetCorrelationId: entry.targetCorrelationId as string }),
     mode: entry.mode,
+    ...(entry.effectiveMode === undefined ? {} : { effectiveMode: entry.effectiveMode as Exclude<SessionMessageMode, "abort"> }),
     body: entry.body,
     status: entry.status,
     createdAt: entry.createdAt,
@@ -462,6 +492,17 @@ function sessionEntryData(value: unknown): unknown {
   if (!value || typeof value !== "object") return undefined;
   const entry = value as { type?: unknown; customType?: unknown; data?: unknown };
   return entry.type === "custom" && entry.customType === WINDOW_THREAD_ENTRY_TYPE ? entry.data : undefined;
+}
+
+function persistedTeammateMessage(value: unknown): { messageId: string; effectiveMode?: "steer" | "follow_up" } | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const entry = value as { type?: unknown; customType?: unknown; details?: unknown };
+  if (entry.type !== "custom_message" || entry.customType !== "teammate-message"
+    || !entry.details || typeof entry.details !== "object") return undefined;
+  const details = entry.details as { messageId?: unknown; mode?: unknown };
+  if (typeof details.messageId !== "string" || details.messageId.length === 0 || details.messageId.length > 128) return undefined;
+  const effectiveMode = details.mode === "steer" || details.mode === "follow_up" ? details.mode : undefined;
+  return { messageId: details.messageId, ...(effectiveMode === undefined ? {} : { effectiveMode }) };
 }
 
 /** Bounded local projection of cross-window command history. */
@@ -487,6 +528,42 @@ export class WindowThreadStore {
     if (direction) return this.#byKey.get(`${direction}:${messageId}`);
     return this.#byKey.get(`outgoing:${messageId}`) ?? this.#byKey.get(`incoming:${messageId}`);
   }
+  transition(
+    messageId: string,
+    direction: WindowThreadDirection,
+    status: WindowThreadStatus,
+    updatedAt = Date.now(),
+    effectiveMode?: Exclude<SessionMessageMode, "abort">,
+  ): WindowThreadEntry | undefined {
+    const previous = this.get(messageId, direction);
+    if (!previous) return undefined;
+    const { version: _version, revision: _revision, contentRevision: _contentRevision, ...input } = previous;
+    return this.record({
+      ...input,
+      status,
+      updatedAt,
+      ...(effectiveMode === undefined ? {} : { effectiveMode }),
+    });
+  }
+  reconcileInjected(
+    messageId: string,
+    updatedAt = Date.now(),
+    effectiveMode?: Exclude<SessionMessageMode, "abort">,
+  ): WindowThreadEntry | undefined {
+    const previous = this.get(messageId, "incoming");
+    if (!previous || (previous.status !== "pending" && previous.status !== "queued")) return previous;
+    const { contentRevision: _contentRevision, ...base } = previous;
+    const candidate = validThreadEntry({
+      ...base,
+      status: "injected",
+      updatedAt: Math.max(previous.updatedAt, updatedAt),
+      revision: previous.revision + 1,
+      ...(effectiveMode === undefined ? {} : { effectiveMode }),
+    });
+    if (!candidate) throw new Error("Invalid injected window thread entry.");
+    this.#apply(candidate, false);
+    return candidate;
+  }
   snapshot(): WindowThreadSnapshot {
     return Object.freeze({ contentRevision: this.#contentRevision, entries: this.#entries });
   }
@@ -499,13 +576,21 @@ export class WindowThreadStore {
   record(input: WindowThreadEntryInput): WindowThreadEntry {
     const key = threadKey(input);
     const previous = this.#byKey.get(key);
-    if (previous && previous.status !== "pending") return previous;
+    const previousTerminal = previous && ["injected", "accepted", "rejected", "timeout"].includes(previous.status);
+    if (previousTerminal) return previous;
+    if (previous?.status === "queued" && input.status === "pending") return previous;
     if (previous
       && previous.workspaceId === input.workspaceId
       && previous.peerOwnerId === input.peerOwnerId
       && previous.peerOwnerNonce === input.peerOwnerNonce
       && previous.source === input.source
+      && previous.messageKind === input.messageKind
+      && previous.traceId === input.traceId
+      && previous.replyTo === input.replyTo
+      && previous.fromSessionName === input.fromSessionName
+      && previous.targetCorrelationId === input.targetCorrelationId
       && previous.mode === input.mode
+      && previous.effectiveMode === input.effectiveMode
       && previous.body === input.body
       && previous.status === input.status
       && previous.createdAt === input.createdAt
@@ -524,7 +609,10 @@ export class WindowThreadStore {
 
   rebuild(sessionEntries: readonly unknown[]): WindowThreadSnapshot {
     const byKey = new Map<string, WindowThreadEntry>();
+    const persistedMessages = new Map<string, "steer" | "follow_up" | undefined>();
     for (const sessionEntry of sessionEntries) {
+      const message = persistedTeammateMessage(sessionEntry);
+      if (message) persistedMessages.set(message.messageId, message.effectiveMode);
       const candidate = validThreadEntry(sessionEntryData(sessionEntry));
       if (!candidate) continue;
       const key = threadKey(candidate);
@@ -534,21 +622,29 @@ export class WindowThreadStore {
         byKey.set(key, candidate);
       }
     }
+    for (const [key, entry] of byKey) {
+      if (entry.direction !== "incoming"
+        || (entry.status !== "pending" && entry.status !== "queued")
+        || !persistedMessages.has(entry.messageId)) continue;
+      const { contentRevision: _contentRevision, ...base } = entry;
+      const effectiveMode = persistedMessages.get(entry.messageId) ?? entry.effectiveMode;
+      const injected = validThreadEntry({
+        ...base,
+        status: "injected",
+        revision: entry.revision + 1,
+        ...(effectiveMode === undefined ? {} : { effectiveMode }),
+      });
+      if (injected) byKey.set(key, injected);
+    }
     this.#replace([...byKey.values()]);
     return this.snapshot();
   }
 
   #apply(entry: WindowThreadEntry, persist: boolean): void {
+    if (persist) this.#persist?.(entry);
     const next = this.#entries.filter((candidate) => threadKey(candidate) !== threadKey(entry));
     next.push(entry);
     this.#replace(next);
-    if (persist) {
-      try {
-        this.#persist?.(entry);
-      } catch {
-        // Persistence is observational and must not change physical delivery.
-      }
-    }
   }
 
   #replace(entries: WindowThreadEntry[]): void {
@@ -578,6 +674,11 @@ export interface SessionMessageResult {
   error?: string;
   receipt?: {
     mode?: string;
+    requestedMode?: SessionMessageMode;
+    effectiveMode?: SessionMessageMode;
+    deliveryStage?: SessionDeliveryStage;
+    messageId?: string;
+    traceId?: string;
     wasSleeping?: boolean;
     terminatedCount?: number;
   };

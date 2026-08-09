@@ -7,6 +7,8 @@ Monitor continuously supervises **other Pi sessions or windows in the same works
 
 Use Monitor for long-running parallel work, multi-window development, background migrations, and workflows that need closed-loop correction. For a one-time read-only status check, use `observe`; use `/monitor` when supervision should continue and may intervene.
 
+> **Version availability:** v0.17.0, which contained the cross-session Scheduler, Window Bar handoff, and durable supervision enhancements, was withdrawn. The current npm stable release is 0.16.0. This page retains current-source behavior for review before a fixed release; do not install 0.17.0 to obtain these enhancements.
+
 ---
 
 ## 1. Quick Start

@@ -195,6 +195,17 @@ export const guideRegistry: Array<{
     category: 'orchestration',
   },
   {
+    slug: 'self-evolve',
+    file: 'self-evolve.md',
+    file_en: 'self-evolve.en.md',
+    title: 'Self-Evolve Knowledge Automation',
+    description: 'Turn runtime traces into governed knowledge candidates with review, health, canary, and proposal flows',
+    title_zh: 'Self-Evolve 自进化',
+    description_zh: '把运行轨迹转为受治理的知识候选，支持评审、健康检查、canary 与提案流程',
+    icon: 'sparkles',
+    category: 'orchestration',
+  },
+  {
     slug: 'permissions',
     file: 'permissions.md',
     title: 'Permission System',

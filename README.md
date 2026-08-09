@@ -72,11 +72,13 @@ teammate({
 
 pi-maestro-flow 是 **Pi 插件**，用 `pi install` 安装（不是普通 npm 依赖）。
 
+> **v0.17.0 已撤回：** 新安装可能无法发现 Skill。当前 npm `latest` 和推荐固定版本均为 `0.16.0`。
+
 **前置条件：** [Node.js](https://nodejs.org) ≥ 22.19.0 · [Pi Coding Agent](https://github.com/earendil-works/pi) ≥ 0.74.0（必装）
 
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # 宿主运行时
-pi install npm:pi-maestro-flow@0.17.0                              # 安装或升级插件
+pi install npm:pi-maestro-flow@0.16.0                              # 安装或升级插件
 pi list                                                            # 确认 Flow、Teammate 与 Cockpit 均已列出
 ```
 

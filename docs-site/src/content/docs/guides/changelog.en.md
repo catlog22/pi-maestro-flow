@@ -5,11 +5,35 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current status: v0.17.0 (released 2026-08-09).** This entry uses the `v0.16.0` tag (`02436592`) as its baseline, covers the 37 feature commits through the release commit `f021f083`, and matches the published npm packages and GitHub Release.
+> **Current stable release: v0.16.0. v0.17.0 was withdrawn on 2026-08-09.** The feature record remains for audit, but npm `latest` was rolled back and every associated version is deprecated. Do not install v0.17.0.
+
+## v0.17.0 Withdrawal (2026-08-09)
+
+After publication, some fresh npm installs started Pi with no Skills available. The complete release closure was removed from `latest` to stop new affected installs:
+
+| Package | Withdrawn | Current `latest` |
+|---------|----------:|-----------------:|
+| `pi-maestro-flow` | `0.17.0` | **`0.16.0`** |
+| `pi-maestro-teammate` | `1.10.0` | **`1.9.0`** |
+| `pi-cockpit` | `0.12.0` | **`0.11.0`** |
+| `pi-maestro-settings-core` | `0.1.2` | **`0.1.1`** |
+
+npm rejected physical unpublish because the current granular token cannot perform destructive operations under the registry's 2FA policy. All four versions remain for audit, carry deprecation warnings, and are no longer selected by `latest`.
+
+Online tarball comparison found 194 Skill entries in both Flow `0.16.0` and `0.17.0`. The incident is therefore not a simple missing-file package; install registration, path synchronization, and runtime discovery remain under investigation. A fixed release must verify the Skill list and at least one real invocation in a genuinely isolated `USERPROFILE` and `HOME`.
+
+Users who installed v0.17.0 should close every Pi process and downgrade directly:
+
+```bash
+pi install npm:pi-maestro-flow@0.16.0
+pi list
+```
+
+Do not run `pi remove npm:pi-maestro-flow` first. It may uninstall the entire shared npm dependency tree and leave Cockpit/Teammate registrations pointing to missing paths.
 
 ---
 
-## v0.17.0 (2026-08-09)
+## v0.17.0 (Withdrawn, 2026-08-09)
 
 **Comparison:** `v0.16.0 → v0.17.0`  
 **Code cutoff:** 2026-08-09  
@@ -97,7 +121,7 @@ Self-Evolve Phase 2B introduces `auto-deposit` while retaining `dry-run` as the 
 - Auto-deposit creates candidates only; evidence, review, and promote governance still apply.
 - Deep simulation and end-to-end coverage exercise mode switching and fallback behavior.
 
-See the [Knowledge System](/guides/knowledge).
+See [Self-Evolve Knowledge Automation](/guides/self-evolve) and the [Knowledge System](/guides/knowledge).
 
 ### 7. API Manager Migration and Header Presets
 
@@ -148,12 +172,14 @@ Because this is an exact pin, an existing install does not automatically follow 
 6. `auto-deposit` does not bypass evidence, review, or promote governance.
 7. Keep the exact Flow/Core Engine dependency closure together when upgrading.
 
-After the release is published:
+Users on v0.17.0 should roll back:
 
 ```bash
-pi install npm:pi-maestro-flow@0.17.0
+pi install npm:pi-maestro-flow@0.16.0
 pi list
 ```
+
+The current `latest` resolves to 0.16.0. Do not run `pi remove npm:pi-maestro-flow` first.
 
 ## Key Commits
 
@@ -175,12 +201,13 @@ pi list
 
 Repository maintenance moved pipeline output to `.pi-sync` and removed the tracked `flow/` mirror. This changes repository layout but not package behavior.
 
-### Release verification (2026-08-09)
+### Pre-Withdrawal Verification and Gap (2026-08-09)
 
-- Serial root `test:release` gate passed (3140 ok / 0 fail: settings-core, teammate declarations, cockpit, all Flow subsystems, and packed-consumer tests).
-- Dry-run tarball shasums match npm registry one-to-one: settings-core `0.1.2` `a94722d4`, teammate `1.10.0` `9f5a5651`, cockpit `0.12.0` `0d9521d2`, flow `0.17.0` `7330fed7`.
-- Fresh user-directory install smoke passed: the version matrix of all four packages (including nested `pi-maestro-settings-core@0.1.2`) is correct and the RPC startup did not crash.
-- Published in mandatory order: settings-core → teammate → cockpit → flow; `maestro-flow` exact pin `0.5.67`.
+- The serial root `test:release` gate passed (3140 ok / 0 fail across settings-core, teammate declarations, cockpit, all Flow subsystems, and packed consumers).
+- Dry-run tarball shasums matched npm: settings-core `0.1.2` `a94722d4`, teammate `1.10.0` `9f5a5651`, cockpit `0.12.0` `0d9521d2`, flow `0.17.0` `7330fed7`.
+- The original fresh-directory smoke verified package versions and RPC startup, but did not assert that Pi actually discovered and could invoke installed Skills. That missing assertion allowed the release gate to pass.
+- The next patch must use isolated `USERPROFILE` + `HOME`, verify the Skill list, and invoke at least one installed Skill.
+- Original publication order: settings-core → teammate → cockpit → flow; exact `maestro-flow` pin `0.5.67`.
 
 See the repository `RELEASE.md` and the GitHub [`v0.17.0` Release](https://github.com/catlog22/pi-maestro-flow/releases/tag/v0.17.0) for the archived release record.
 
