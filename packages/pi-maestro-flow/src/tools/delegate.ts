@@ -15,6 +15,8 @@ export interface DelegateParams {
   prompt?: string;
   tool?: string;
   mode?: "analysis" | "write";
+  /** Optional explicit taskType; when omitted, derived from mode / experts triage. */
+  taskType?: string;
   name?: string;
   model?: string;
   rule?: string;
@@ -41,7 +43,7 @@ export async function executeDelegate(
     };
   }
 
-  // Build task with mode context
+  // Build task with mode context (text prefix stays for prompt semantics).
   let task = params.prompt;
   if (params.mode) {
     task = `MODE: ${params.mode}\n\n${task}`;
@@ -53,12 +55,22 @@ export async function executeDelegate(
   // Resolve model from tool name or explicit model
   const model = params.model ?? params.tool;
 
+  // Structured taskType for applyModelRouting / Experts Mode — not only MODE text.
+  // analysis mode → analysis; write mode → development; explicit taskType wins.
+  const taskType = params.taskType
+    ?? (params.mode === "analysis"
+      ? "analysis"
+      : params.mode === "write"
+        ? "development"
+        : undefined);
+
   try {
     const [result] = await runTeammate(
       {
         tasks: [{
           agent: "general",
           prompt: task,
+          ...(taskType ? { taskType } : {}),
           name: params.name,
           model,
           cwd: params.cwd,

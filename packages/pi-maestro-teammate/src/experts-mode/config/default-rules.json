@@ -1,0 +1,247 @@
+{
+  "version": 1,
+  "defaultTaskType": "development",
+  "defaultAgent": "general-executor",
+  "defaultPipeline": ["explore", "planning", "development", "review"],
+  "pipelines": {
+    "tiny_fix": ["development", "review"],
+    "investigation": ["explore", "analysis"],
+    "debug": ["explore", "debug", "development", "review"],
+    "full_feature": ["explore", "planning", "development", "review"]
+  },
+  "taskTypes": {
+    "explore": {
+      "agent": "explorer",
+      "heavy": true,
+      "keywords": [
+        "搜索", "查找", "定位", "调用链", "入口", "explore", "search", "find",
+        "where is", "call chain", "trace", "grep", "扫代码", "代码库"
+      ]
+    },
+    "planning": {
+      "agent": "planner",
+      "heavy": true,
+      "keywords": [
+        "计划", "方案", "设计", "架构", "拆分", "roadmap", "plan", "design",
+        "architect", "分解", "如何实现"
+      ]
+    },
+    "analysis": {
+      "agent": "analyst",
+      "heavy": true,
+      "keywords": [
+        "分析", "判断", "评估", "权衡", "root cause", "analysis", "trade-off",
+        "可行性", "对比"
+      ]
+    },
+    "debug": {
+      "agent": "analyst",
+      "heavy": true,
+      "keywords": [
+        "调试", "报错", "bug", "崩溃", "失败", "debug", "fix", "error",
+        "stack", "异常", "不工作"
+      ]
+    },
+    "development": {
+      "agent": "general-executor",
+      "heavy": true,
+      "keywords": [
+        "实现", "编写", "修改", "重构", "加上", "实现功能", "implement",
+        "code", "write", "refactor", "改代码", "开发"
+      ]
+    },
+    "review": {
+      "agent": "reviewer",
+      "heavy": true,
+      "keywords": [
+        "审查", "review", "code review", "检查改动", "收口", "质量"
+      ]
+    },
+    "testing": {
+      "agent": "general-executor",
+      "heavy": true,
+      "keywords": [
+        "测试", "单测", "补测", "test", "unit test", "coverage", "验收测试"
+      ]
+    },
+    "verification": {
+      "agent": "verifier",
+      "heavy": true,
+      "keywords": [
+        "验证", "验收", "verify", "acceptance", "回归"
+      ]
+    }
+  },
+  "lightKeywords": [
+    "你好", "谢谢", "什么是", "解释一下", "简答", "确认", "yes", "no",
+    "ok", "继续", "status", "状态"
+  ],
+  "hardGate": {
+    "default": "allow",
+    "tools": {
+      "write": "deny",
+      "edit": "deny",
+      "bash": "deny",
+      "bash_bg": "deny",
+      "read": "allow",
+      "ffgrep": "allow",
+      "fffind": "allow",
+      "teammate": "allow",
+      "observe": "allow",
+      "todo": "allow",
+      "goal": "allow",
+      "plan-enter": "allow",
+      "plan-update": "allow",
+      "plan-confirm": "allow",
+      "plan-exit": "allow",
+      "plan-status": "allow",
+      "plan-review": "allow",
+      "run-control": "allow",
+      "mcp": "allow",
+      "smart_search": "ask",
+      "browser": "ask"
+    },
+    "leaderAllowPaths": [
+      "report.md",
+      "**/report.md",
+      "outputs/**",
+      "**/outputs/**",
+      ".workflow/**",
+      "**/.workflow/**",
+      ".experts-mode.json",
+      "notes/**",
+      "**/notes/**"
+    ],
+    "bashAllowPrefixes": [
+      "maestro ",
+      "git status",
+      "git diff",
+      "git log",
+      "git show",
+      "npm test",
+      "npm run test",
+      "node --test",
+      "node --experimental-transform-types --test",
+      "rg ",
+      "ls ",
+      "pwd"
+    ]
+  },
+  "orchestrator": {
+    "disciplineReminder": true,
+    "viceLead": true
+  },
+  "stagePolicies": {
+    "analyze": {
+      "pipeline": [
+        { "name": "analyze-explore", "agent": "explorer", "taskType": "explore" },
+        { "name": "analyze-analyst", "agent": "analyst", "taskType": "analysis", "dependsOn": ["analyze-explore"] }
+      ],
+      "leaderMayWrite": ["report.md", "outputs/*.json"],
+      "forbidMain": ["broad codebase rewrite", "feature implementation"],
+      "parallelism": "serial"
+    },
+    "plan": {
+      "pipeline": [
+        { "name": "plan-primary", "agent": "planner", "taskType": "planning" }
+      ],
+      "leaderMayWrite": ["report.md", "outputs/*.json", "plan artifacts"],
+      "forbidMain": ["implement the plan in the same step"],
+      "parallelism": "serial"
+    },
+    "execute": {
+      "pipeline": [
+        { "name": "execute-dev", "agent": "general-executor", "taskType": "development" }
+      ],
+      "leaderMayWrite": ["report.md", "outputs/*.json"],
+      "forbidMain": ["feature implementation", "large multi-file business rewrites"],
+      "parallelism": "wave"
+    },
+    "review": {
+      "pipeline": [
+        { "name": "review-primary", "agent": "analyst", "taskType": "review" }
+      ],
+      "leaderMayWrite": ["report.md", "outputs/*.json"],
+      "forbidMain": ["silent drive-by fixes without review findings"],
+      "independent": true,
+      "parallelism": "serial"
+    },
+    "test": {
+      "pipeline": [
+        { "name": "test-primary", "agent": "general-executor", "taskType": "testing" }
+      ],
+      "leaderMayWrite": ["report.md", "outputs/*.json"],
+      "forbidMain": ["implement missing features instead of testing"],
+      "parallelism": "serial"
+    },
+    "debug": {
+      "pipeline": [
+        { "name": "debug-primary", "agent": "analyst", "taskType": "debug" }
+      ],
+      "leaderMayWrite": ["report.md", "outputs/*.json"],
+      "forbidMain": ["unbounded speculative rewrites"],
+      "parallelism": "serial"
+    }
+  },
+  "settle": {
+    "autoClearWaiting": true,
+    "knowledgeHarvest": true,
+    "maxSuggestions": 5,
+    "maxBodyChars": 4000,
+    "autoStage": false
+  },
+  "roster": {
+    "explorer": {
+      "agent": "explorer",
+      "defaultTaskType": "explore",
+      "label": "Code explorer",
+      "capabilities": ["explore", "search"],
+      "tools": ["read", "ffgrep", "fffind", "bash"]
+    },
+    "planner": {
+      "agent": "planner",
+      "defaultTaskType": "planning",
+      "label": "Planner",
+      "capabilities": ["planning"]
+    },
+    "analyst": {
+      "agent": "analyst",
+      "defaultTaskType": "analysis",
+      "label": "Analyst",
+      "capabilities": ["analysis", "debug", "review"]
+    },
+    "reviewer": {
+      "agent": "reviewer",
+      "defaultTaskType": "review",
+      "label": "Reviewer",
+      "capabilities": ["review"]
+    },
+    "general-executor": {
+      "agent": "general-executor",
+      "defaultTaskType": "development",
+      "label": "Implementer",
+      "capabilities": ["development", "testing"]
+    },
+    "verifier": {
+      "agent": "verifier",
+      "defaultTaskType": "verification",
+      "label": "Verifier",
+      "capabilities": ["verification"]
+    }
+  },
+  "stageAliases": {
+    "maestro-analyze": "analyze",
+    "maestro-plan": "plan",
+    "maestro-execute": "execute",
+    "maestro-review": "review",
+    "quality-review": "review",
+    "quality-test": "test",
+    "quality-debug": "debug",
+    "auto-test": "test",
+    "analyze-macro": "analyze",
+    "development": "execute",
+    "planning": "plan",
+    "testing": "test",
+    "verification": "test"
+  }
+}

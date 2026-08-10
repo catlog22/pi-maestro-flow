@@ -252,6 +252,21 @@ import {
   refreshModelRegistry,
   type TeammateTaskType,
 } from "../models/model-routing.ts";
+import {
+  ensureExpertsDispatch,
+  getMode,
+  getStatus,
+  getLeaderWaiting,
+  injectTurnReminder,
+  injectWaitingFragment,
+  loadRules,
+  noteExpertsSettled,
+  resolveMaestroStageFromWorkspace,
+  syncActiveStageFromMaestro,
+  formatStageBirthPacket,
+  EXPERTS_HARVEST_STATUS_KEY,
+  expertsHarvestStatusFromCwd,
+} from "../experts-mode/index.ts";
 import type { TeammateThinkingInput } from "../shared/thinking.ts";
 import {
   getTeammateChildToolBroker,
@@ -451,6 +466,17 @@ export default function registerTeammateExtension(
     return id.trim() ? id : undefined;
   };
 
+  /** P7b: push pending knowledgeSuggestions count into extension status for cockpit/footer. */
+  const refreshExpertsHarvestStatus = (cwd: string): void => {
+    try {
+      if (!widgetCtx?.ui || typeof widgetCtx.ui.setStatus !== "function") return;
+      const text = expertsHarvestStatusFromCwd(cwd);
+      widgetCtx.ui.setStatus(EXPERTS_HARVEST_STATUS_KEY, text || undefined);
+    } catch {
+      /* status is best-effort */
+    }
+  };
+
   const injectTeammateContext = (
     event: { systemPrompt: string },
     ctx: ExtensionContext,
@@ -461,7 +487,70 @@ export default function registerTeammateExtension(
       ? appendTaskTypeRoutingContext(withAgents, ctx.cwd, discoverAgents(ctx.cwd))
       : withAgents;
     const withDepth = appendTeammateDepthContext(withTaskType, currentDepth, currentMaxDispatchDepth);
-    return { systemPrompt: monitorInteractionModeActive ? appendMonitorModeContext(withDepth) : withDepth };
+    // Experts Mode P2/P4/P4.1: Qoder-like per-turn hard reminder + stage +
+    // waiting fragment. Stage comes from stored activeStage first (avoids a
+    // .workflow scan every turn); falls back to Maestro session.json.
+    let withExperts = withDepth;
+    try {
+      const mode = getMode(ctx.cwd);
+      const activeState = (() => {
+        try {
+          return getStatus(ctx.cwd).activeStage;
+        } catch {
+          return null;
+        }
+      })();
+      let stage = activeState?.stage;
+      let stageHint: string | undefined;
+      // P5.1: pass pipeline taskTypes/agents + rules so the reminder can
+      // add the orchestrator discipline fragment and vice-lead hint.
+      const taskTypes = activeState?.taskTypes?.filter(Boolean) || undefined;
+      const agents = activeState?.agents?.filter(Boolean) || undefined;
+      let rules: ReturnType<typeof loadRules> | undefined;
+      if (mode === "experts") {
+        try {
+          rules = loadRules();
+        } catch {
+          rules = undefined;
+        }
+        try {
+          if (!stage) {
+            // P4.1: auto-detect from Maestro session.json when not yet written.
+            const found = resolveMaestroStageFromWorkspace(ctx.cwd);
+            if (found?.stage) {
+              stage = found.stage;
+              try {
+                const plan = syncActiveStageFromMaestro(ctx.cwd);
+                if (plan) stageHint = formatStageBirthPacket(plan);
+              } catch {
+                // best-effort persist; stage is still usable
+              }
+            }
+          } else {
+            // One-line pipeline summary from stored state (no re-scan).
+            const types = (activeState?.taskTypes || []).filter(Boolean).join(" → ");
+            stageHint = `Stage \"${activeState?.stage}\" pipeline: ${types || "—"} (source=${activeState?.source || "state"}).`;
+          }
+        } catch {
+          // never break context injection
+        }
+      }
+      withExperts = injectTurnReminder(withExperts, {
+        mode,
+        cwd: ctx.cwd,
+        stage,
+        stageHint,
+        taskTypes,
+        agents,
+        rules,
+      });
+      if (mode === "experts") {
+        withExperts = injectWaitingFragment(withExperts, getLeaderWaiting(ctx.cwd));
+      }
+    } catch {
+      // never break context injection
+    }
+    return { systemPrompt: monitorInteractionModeActive ? appendMonitorModeContext(withExperts) : withExperts };
   };
 
   // =========================================================================
@@ -1896,6 +1985,16 @@ export default function registerTeammateExtension(
 
       const baseCwd = (params.cwd ?? state.baseCwd) || ctx.cwd;
       await refreshModelRegistry(ctx);
+      // Experts Mode: ensure taskType/agent before applyModelRouting (order is required).
+      // P4: pass stage from tool params / MAESTRO_STAGE so stagePolicies beat keyword triage.
+      const stageFromParams =
+        typeof (params as { stage?: unknown }).stage === "string"
+          ? String((params as { stage?: string }).stage)
+          : undefined;
+      params = ensureExpertsDispatch(params, {
+        cwd: baseCwd,
+        stage: stageFromParams,
+      }) as typeof params;
       params = applyModelRouting(
         params,
         baseCwd,
@@ -2913,10 +3012,36 @@ export default function registerTeammateExtension(
           const activeGraphMode = inferGraphMode(normalizedTasks);
           const executeGraph = async () => {
             const options = makeOptions();
-            const results = await runWithProgressFlushCleanup(
-              () => runGraph(normalizedTasks, params.concurrency ?? 4, options),
-              progressFlushGate,
-            );
+            let results: SingleResult[] | undefined;
+            try {
+              results = await runWithProgressFlushCleanup(
+                () => runGraph(normalizedTasks, params.concurrency ?? 4, options),
+                progressFlushGate,
+              );
+            } finally {
+              // P3: auto-clear leaderWaiting when multi-task graph settles (experts only).
+              // Note: runGraph path may not go through runTeammate wrapper.
+              // If runGraph throws, still settle with empty contents (best effort).
+              try {
+                if (getMode(baseCwd) === "experts" && normalizedTasks.length > 0) {
+                  noteExpertsSettled(baseCwd, {
+                    settledCount: normalizedTasks.length,
+                    reason: "extension-graph-settled",
+                    // P7: harvest from each graph result message.
+                    contents: (results ?? []).map((r) => displayMessageForResult(r)),
+                  });
+                  refreshExpertsHarvestStatus(baseCwd);
+                }
+              } catch {
+                /* ignore */
+              }
+            }
+            // runGraph threw before producing results: the exception already
+            // propagated through the finally above (waiting cleared, contents
+            // empty). This guard only satisfies the type system.
+            if (!results) {
+              throw new Error("teammate graph run failed before producing results");
+            }
 
             const hasError = results.some(resultIsError);
             const totalDur = activeGraphMode === "chain"
@@ -3112,8 +3237,23 @@ export default function registerTeammateExtension(
           if (race.done) {
             const result = race.result;
             if (!result) throw new Error("Foreground teammate finished without a result.");
-            publishSingleResult(result, false);
             const lastMessage = displayMessageForResult(result);
+            try {
+              if (getMode(baseCwd) === "experts") {
+                noteExpertsSettled(baseCwd, {
+                  settledCount: 1,
+                  agentId: result.agent || singleTask?.name || singleTask?.agent,
+                  reason: "extension-single-settled",
+                  // P7: harvest knowhow suggestions from expert RESULT (suggest-only).
+                  content: lastMessage,
+                  taskType: typeof singleTask?.taskType === "string" ? singleTask.taskType : undefined,
+                });
+                refreshExpertsHarvestStatus(baseCwd);
+              }
+            } catch {
+              /* ignore */
+            }
+            publishSingleResult(result, false);
             const details: Details = {
               mode: "single",
               results: [result],
@@ -3134,6 +3274,20 @@ export default function registerTeammateExtension(
           detached = true;
           runPromise.then((result) => {
             if (!ownsDispatchGeneration()) return;
+            try {
+              if (getMode(baseCwd) === "experts") {
+                noteExpertsSettled(baseCwd, {
+                  settledCount: 1,
+                  agentId: result.agent || singleTask?.name || singleTask?.agent,
+                  reason: "extension-single-bg-settled",
+                  content: displayMessageForResult(result),
+                  taskType: typeof singleTask?.taskType === "string" ? singleTask.taskType : undefined,
+                });
+                refreshExpertsHarvestStatus(baseCwd);
+              }
+            } catch {
+              /* ignore */
+            }
             publishSingleResult(result, true);
           }).catch((error) => {
             if (!ownsDispatchGeneration()) return;
@@ -5945,6 +6099,17 @@ export default function registerTeammateExtension(
     installMonitorEscapeTap(ctx.ui);
     setPersistentUi(ctx.ui, true);
     state.baseCwd = ctx.cwd;
+    // P7b: restore harvest status segment for cockpit footer on session start.
+    refreshExpertsHarvestStatus(ctx.cwd);
+    // P4.1: auto-inject the Maestro stage from session.json into experts state
+    // so Leaders do not need to pass stage / MAESTRO_STAGE by hand.
+    try {
+      if (getMode(ctx.cwd) === "experts") {
+        syncActiveStageFromMaestro(ctx.cwd);
+      }
+    } catch {
+      // best-effort; missing .workflow/sessions is a normal state
+    }
     // Monitor ledger + config bind to the real session cwd.
     monitorLedgerRoot = ctx.cwd;
     monitorConfig = loadMonitorConfigForRoot(ctx.cwd);

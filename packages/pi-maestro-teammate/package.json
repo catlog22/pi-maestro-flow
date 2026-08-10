@@ -53,6 +53,9 @@
       "types": "./types/public/v1/model-routing.d.ts",
       "default": "./src/public/v1/model-routing.ts"
     },
+    "./experts-mode": {
+      "default": "./src/experts-mode/index.ts"
+    },
     "./v1/mailbox": {
       "types": "./types/public/v1/mailbox.d.ts",
       "default": "./src/public/v1/mailbox.ts"

@@ -82,7 +82,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-teammate({ agent: "team-worker", tasks: [{ name: "<role>", prompt: `## Role Assignment
+teammate({ agent: "team-worker", taskType: "development", tasks: [{ name: "<role>", taskType: "development", prompt: `## Role Assignment
 role: <role>
 role_spec: <skill_root>/roles/<role>/role.md
 session: {run_dir}/work/team
@@ -104,7 +104,7 @@ Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 
 **Parallel spawn** (Batch mode, N explorer or M implementer instances):
 
 ```
-teammate({ agent: "team-worker", tasks: [{ name: "<role>-<N>", prompt: `## Role Assignment
+teammate({ agent: "team-worker", taskType: "development", tasks: [{ name: "<role>-<N>", taskType: "development", prompt: `## Role Assignment
 role: <role>
 role_spec: <skill_root>/roles/<role>/role.md
 session: {run_dir}/work/team

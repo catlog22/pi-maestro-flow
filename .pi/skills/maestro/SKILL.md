@@ -200,3 +200,10 @@ Read `ralph-amend-goal.md`, use `session status {session_id}` for the snapshot, 
 - Chain adaptation is Skill-proposed and atomically applied by the producing Run.
 - Normal output and recommendations contain only `maestro run ...` lifecycle commands.
 </success_criteria>
+
+## Experts Mode (P5.1)
+
+- When experts mode is ON: the Lead only owns maestro session/run lifecycle + teammate dispatch + synthesize RESULT into report/outputs; business write/edit/bash is delegated to experts (P5 hard gate).
+- Stage is auto-injected from session.json (P4.1) — no manual MAESTRO_STAGE; stagePolicies fill taskType before keyword triage.
+- Optional vice-lead: for multi-step stage pipelines, dispatch agent=workflow taskType=planning to decompose/dispatch the DAG; the Lead still owns session done/check/seal.
+- Continuation: prefer automatic continuation when authority=automatic (session next/done loop).
