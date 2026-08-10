@@ -762,8 +762,22 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       persistPruneManifest(pi, state);
       if (pressure.action !== "compact") {
         state.lastNoCompactableKey = undefined;
-        state.lastTriggerKey = undefined;
         state.criticalLoopStreak = 0;
+        const interruptedIntent = state.pendingIntent?.generation === generation
+          && (state.pendingIntent.contextExhausted
+            || state.pendingIntent.requestBlocked
+            || state.pendingIntent.loopCritical)
+          ? state.pendingIntent
+          : undefined;
+        if (interruptedIntent) {
+          // The request was already aborted. A smaller post-abort frame (for
+          // example the aborted tool result after pruning) cannot turn that
+          // recovery into an ordinary pressure intent: agent settlement still
+          // owns compaction and continuation of the interrupted task.
+          state.belowEscalateStreak = 0;
+          return pressure.prunedToolResults > 0 ? pressure.messages : undefined;
+        }
+        state.lastTriggerKey = undefined;
         // Escalation: pruning ran (or found nothing) yet the estimate still sits
         // within 3% of the hard trigger. Queue the intent now instead of letting
         // the next request run against a clamped output budget — the prune band

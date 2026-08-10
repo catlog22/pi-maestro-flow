@@ -3947,6 +3947,26 @@ test("the first tool call after the hard threshold interrupts and compacts at se
   assert.match(fx.sent.at(-1) ?? "", /Continue the interrupted task/, "compaction resumes the interrupted tool loop");
 });
 
+test("a tool-boundary abort survives post-abort pressure relief and resumes after compaction", async () => {
+  const fx = loopCriticalFixture();
+  await fx.guard.evaluate(highUsageToolBatch(365_000), fx.ctx);
+  assert.equal(fx.guard.onToolCall(fx.ctx), true);
+  assert.equal(fx.aborted(), 1);
+
+  // The aborted tool result can be much smaller after stable pruning. That
+  // frame must not erase the interruption before agent_settled submits it.
+  await fx.guard.evaluate(highUsageToolBatch(200_000), fx.ctx);
+  const pending = fx.guard.describeState().pendingIntent;
+  assert.ok(pending, "the aborted request remains pending below the threshold");
+  assert.equal(pending.loopCritical, true);
+
+  await fx.guard.onAgentEnd(fx.ctx);
+  assert.equal(fx.compactCalls.length, 1);
+  fx.guard.onCompact("mid-turn", fx.ctx);
+  fx.compactCalls[0].onComplete();
+  assert.match(fx.sent.at(-1) ?? "", /Continue the interrupted task/);
+});
+
 test("tool-call usage creates a hard-threshold intent when the context frame could not", async () => {
   const fx = loopCriticalFixture();
   Object.assign(fx.ctx, {
