@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   collectUnknownRefs,
   inferGraphMode,
+  MAX_TASK_PROMPT_BYTES,
   normalizeTeammateParams,
   taskDependencyNames,
   validateTaskReferences,
@@ -21,6 +22,34 @@ test("a task requires non-empty prompt text", () => {
 
   const blank = normalizeTeammateParams({ tasks: [{ prompt: "   " }] });
   assert.match(blank.error ?? "", /requires a non-empty "prompt"/);
+});
+
+test("task prompts are bounded by UTF-8 bytes at normalization", () => {
+  const atLimit = normalizeTeammateParams({ tasks: [{ prompt: "a".repeat(MAX_TASK_PROMPT_BYTES) }] });
+  assert.equal(atLimit.error, undefined);
+
+  const overLimit = normalizeTeammateParams({ tasks: [{ prompt: `${"a".repeat(MAX_TASK_PROMPT_BYTES)}b` }] });
+  assert.match(overLimit.error ?? "", /UTF-8 bytes/);
+  assert.match(overLimit.error ?? "", new RegExp(String(MAX_TASK_PROMPT_BYTES)));
+
+  const astralAtLimit = normalizeTeammateParams({
+    tasks: [{ prompt: "😀".repeat(MAX_TASK_PROMPT_BYTES / 4) }],
+  });
+  assert.equal(astralAtLimit.error, undefined);
+  const astralOverLimit = normalizeTeammateParams({
+    tasks: [{ prompt: `${"😀".repeat(MAX_TASK_PROMPT_BYTES / 4)}😀` }],
+  });
+  assert.match(astralOverLimit.error ?? "", /UTF-8 bytes/);
+});
+
+test("task prompts allow multiline text but reject terminal control characters", () => {
+  const multiline = normalizeTeammateParams({ tasks: [{ prompt: "first\tcolumn\r\nsecond line" }] });
+  assert.equal(multiline.error, undefined);
+
+  for (const [character, label] of [["\0", "U+0000"], ["\x1b", "U+001B"], ["\x7f", "U+007F"], ["\u009b", "U+009B"]] as const) {
+    const result = normalizeTeammateParams({ tasks: [{ prompt: `before${character}after` }] });
+    assert.match(result.error ?? "", new RegExp(label.replace("+", "\\+")), label);
+  }
 });
 
 test("a prompt embedded inside outputSchema is diagnosed as mislocated, not just missing", () => {

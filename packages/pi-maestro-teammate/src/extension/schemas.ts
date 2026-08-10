@@ -289,14 +289,44 @@ export const TeammateSendParams = Type.Object({
 
 export const TeammateListParams = Type.Object({
   view: Type.Optional(
-    Type.Unsafe<"active" | "named" | "all" | "roles" | "windows">({
+    Type.Unsafe<"active" | "named" | "all" | "roles" | "windows" | "inbox">({
       type: "string",
-      enum: ["active", "named", "all", "roles", "windows"],
+      enum: ["active", "named", "all", "roles", "windows", "inbox"],
       default: "active",
-      description: 'View to return: "active" live agents except completed entries, "named" addressable agents, "all" tracked live entries, "roles" builtin, project, and user-defined role definitions, or "windows" available cross-session windows.',
+      description: 'View to return: "active" live agents except completed entries, "named" addressable agents, "all" tracked live entries, "roles" role definitions, "windows" available cross-session windows, or "inbox" persisted cross-window messages.',
     }),
   ),
-}, { additionalProperties: false });
+  session: Type.Optional(Type.String({
+    minLength: 1,
+    description: 'Inbox-only session id/name/prefix. Omit to aggregate recent workspace sessions; use "current" for the active session.',
+  })),
+  peer: Type.Optional(Type.String({
+    minLength: 1,
+    description: "Inbox-only peer owner id or owner:<ownerId> target filter.",
+  })),
+  direction: Type.Optional(Type.Unsafe<"incoming" | "outgoing">({
+    type: "string",
+    enum: ["incoming", "outgoing"],
+    description: "Inbox-only message direction filter.",
+  })),
+  status: Type.Optional(Type.Unsafe<"pending" | "queued" | "injected" | "accepted" | "rejected" | "timeout">({
+    type: "string",
+    enum: ["pending", "queued", "injected", "accepted", "rejected", "timeout"],
+    description: "Inbox-only persisted delivery status filter.",
+  })),
+  limit: Type.Optional(Type.Integer({
+    minimum: 1,
+    maximum: 100,
+    default: 20,
+    description: "Inbox-only maximum number of newest messages (default: 20).",
+  })),
+}, {
+  additionalProperties: false,
+  allOf: ["session", "peer", "direction", "status", "limit"].map((field) => ({
+    if: { required: [field] },
+    then: { properties: { view: { const: "inbox" } }, required: ["view"] },
+  })),
+});
 
 export const TeammateWatchParams = Type.Object({
   name: Type.String({
@@ -494,3 +524,51 @@ export const TeammateMonitorParams = Type.Object({
     }),
   ),
 }, { additionalProperties: false });
+
+// ---------------------------------------------------------------------------
+// Workspace window — Monitor-owned worker lifecycle
+// ---------------------------------------------------------------------------
+
+export const WorkspaceWindowParams = Type.Object({
+  action: Type.Unsafe<"create" | "list" | "close">({
+    type: "string",
+    enum: ["create", "list", "close"],
+    description: "Create, list, or close worker windows owned by the active Monitor session.",
+  }),
+  name: Type.Optional(Type.String({
+    minLength: 1,
+    maxLength: 64,
+    pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+    description: "Stable worker-window name. Required for create and close.",
+  })),
+  objective: Type.Optional(Type.String({
+    minLength: 1,
+    description: "Task objective passed to the new Pi worker. Required for create.",
+  })),
+  presentation: Type.Optional(Type.Unsafe<"interactive" | "headless">({
+    type: "string",
+    enum: ["interactive", "headless"],
+    default: "interactive",
+    description: "Open a visible interactive terminal by default; use headless only when no terminal UI is needed.",
+  })),
+}, {
+  additionalProperties: false,
+  allOf: [
+    {
+      if: { properties: { action: { const: "create" } }, required: ["action"] },
+      then: { required: ["name", "objective"] },
+    },
+    {
+      if: { properties: { action: { const: "close" } }, required: ["action"] },
+      then: { required: ["name"] },
+    },
+    {
+      if: { required: ["objective"] },
+      then: { properties: { action: { const: "create" } }, required: ["action"] },
+    },
+    {
+      if: { required: ["presentation"] },
+      then: { properties: { action: { const: "create" } }, required: ["action"] },
+    },
+  ],
+});

@@ -143,7 +143,10 @@ export function renderSessionDetail(
 		})}`));
 	}
 	if (row.activeTool) {
-		body.push(truncateToWidth(theme.fg("dim", `  ${theme.fg("warning", "→")} ${row.activeTool}`), w, "…"));
+		const toolLine = row.activeToolArgs
+			? `  ${theme.fg("warning", "→")} ${row.activeTool} ${theme.fg("dim", truncateToWidth(row.activeToolArgs, Math.max(1, w - 12), "…"))}`
+			: `  ${theme.fg("warning", "→")} ${row.activeTool}`;
+		body.push(truncateToWidth(toolLine, w, "…"));
 	}
 	if (row.error) {
 		body.push(theme.fg("error", `  ✗ ${truncateToWidth(row.error, Math.max(1, w - 4), "…")}`));

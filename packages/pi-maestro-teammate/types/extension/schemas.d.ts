@@ -69,7 +69,12 @@ export declare const TeammateSendParams: Type.TObject<{
     mode: Type.TOptional<Type.TUnsafe<"steer" | "follow_up" | "abort">>;
 }>;
 export declare const TeammateListParams: Type.TObject<{
-    view: Type.TOptional<Type.TUnsafe<"active" | "windows" | "named" | "all" | "roles">>;
+    view: Type.TOptional<Type.TUnsafe<"active" | "windows" | "named" | "all" | "roles" | "inbox">>;
+    session: Type.TOptional<Type.TString>;
+    peer: Type.TOptional<Type.TString>;
+    direction: Type.TOptional<Type.TUnsafe<"outgoing" | "incoming">>;
+    status: Type.TOptional<Type.TUnsafe<"pending" | "queued" | "injected" | "accepted" | "rejected" | "timeout">>;
+    limit: Type.TOptional<Type.TInteger>;
 }>;
 export declare const TeammateWatchParams: Type.TObject<{
     name: Type.TString;
@@ -103,4 +108,10 @@ export declare const TeammateMonitorParams: Type.TObject<{
     timeoutMs: Type.TOptional<Type.TInteger>;
     lines: Type.TOptional<Type.TInteger>;
     verbose: Type.TOptional<Type.TBoolean>;
+}>;
+export declare const WorkspaceWindowParams: Type.TObject<{
+    action: Type.TUnsafe<"close" | "create" | "list">;
+    name: Type.TOptional<Type.TString>;
+    objective: Type.TOptional<Type.TString>;
+    presentation: Type.TOptional<Type.TUnsafe<"interactive" | "headless">>;
 }>;

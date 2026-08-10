@@ -7,6 +7,7 @@ import {
   TeammateParams,
   TeammateSendParams,
   TeammateWatchParams,
+  WorkspaceWindowParams,
 } from "../src/extension/schemas.ts";
 import { TEAMMATE_MONITOR_DESCRIPTION } from "../src/extension/teammate-core.ts";
 import {
@@ -108,6 +109,20 @@ test("legacy observation descriptions use consistent expanded-output terminology
   assert.doesNotMatch(verbose.description ?? "", /watch output/);
   assert.match(TEAMMATE_MONITOR_DESCRIPTION, /verbose=true for expanded output/);
   assert.match(TEAMMATE_MONITOR_DESCRIPTION, /no watch action, until threshold, or detail parameter/);
+});
+
+test("workspace-window schema scopes lifecycle fields to their actions", () => {
+  assert.equal(Check(WorkspaceWindowParams, { action: "list" }), true);
+  assert.equal(Check(WorkspaceWindowParams, { action: "create", name: "backend", objective: "Build API" }), true);
+  assert.equal(Check(WorkspaceWindowParams, { action: "create", name: "backend", objective: "Build API", presentation: "headless" }), true);
+  assert.equal(Check(WorkspaceWindowParams, { action: "close", name: "backend" }), true);
+
+  assert.equal(Check(WorkspaceWindowParams, { action: "create", name: "backend" }), false);
+  assert.equal(Check(WorkspaceWindowParams, { action: "close" }), false);
+  assert.equal(Check(WorkspaceWindowParams, { action: "list", objective: "unexpected" }), false);
+  assert.equal(Check(WorkspaceWindowParams, { action: "close", presentation: "interactive", name: "backend" }), false);
+  assert.equal(Check(WorkspaceWindowParams, { action: "create", name: "bad name", objective: "Build API" }), false);
+  assert.equal(Check(WorkspaceWindowParams, { action: "create", name: "backend", objective: "Build API", presentation: "other" }), false);
 });
 
 // ---------------------------------------------------------------------------

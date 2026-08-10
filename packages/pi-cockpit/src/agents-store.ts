@@ -63,7 +63,7 @@ export type MessagePayload = Partial<Omit<
 	"progress" | "recentTools" | "isSend" | "isInteraction"
 >> & {
 	progress?: ProgressPayload[];
-	recentTools?: Array<string | { name?: string; status?: string }>;
+	recentTools?: Array<string | { name?: string; status?: string; argsPreview?: string }>;
 	isSend?: boolean;
 	isInteraction?: boolean;
 	/** Compatibility with pre-v1 progress deltas; discriminated send events are ignored. */
@@ -164,21 +164,30 @@ function terminalTime(
 	return row.finishedAt ?? now;
 }
 
-function latestTool(tools: Array<string | { name?: string; status?: string }> | undefined): string | undefined {
+function latestTool(tools: Array<string | { name?: string; status?: string; argsPreview?: string }> | undefined): { name: string; argsPreview?: string } | undefined {
 	if (!tools?.length) return undefined;
 	const tool = tools.find((candidate) => typeof candidate === "object" && candidate?.status === "running")
 		?? tools.at(-1);
 	if (!tool) return undefined;
-	if (typeof tool === "string") return truncateStatusText(tool);
+	if (typeof tool === "string") {
+		const name = truncateStatusText(tool);
+		return name ? { name } : undefined;
+	}
 	const name = tool?.name?.trim();
 	if (!name) return undefined;
 	const status = tool.status?.trim();
 	// The active tool is by definition the one in flight, so "bash (running)"
 	// only repeats the row's own live state. Keep the suffix only for
 	// anomalies (failed/error) that the row state does not already convey.
-	return truncateStatusText(
+	const displayName = truncateStatusText(
 		status && status !== "completed" && status !== "running" ? `${name} (${status})` : name,
 	);
+	return {
+		name: displayName,
+		...(typeof tool.argsPreview === "string" && tool.argsPreview.trim()
+			? { argsPreview: truncateText(tool.argsPreview, 140) }
+			: {}),
+	};
 }
 
 // Self-accumulating roster. The teammate extension only broadcasts deltas
@@ -326,8 +335,14 @@ export class AgentsStore {
 		if (typeof tail === "string" && tail.length > 0) row.tail = truncateSessionContent(tail);
 		if (p.recentTools) {
 			const tool = latestTool(p.recentTools);
-			if (tool) row.activeTool = tool;
-			else delete row.activeTool;
+			if (tool) {
+				row.activeTool = tool.name;
+				if (tool.argsPreview) row.activeToolArgs = tool.argsPreview;
+				else delete row.activeToolArgs;
+			} else {
+				delete row.activeTool;
+				delete row.activeToolArgs;
+			}
 		}
 		if (typeof p.toolCount === "number") row.toolCount = p.toolCount;
 		if (typeof p.tokens === "number") row.tokens = p.tokens;
@@ -524,8 +539,14 @@ export class AgentsStore {
 		row.lastActivityAt = normalizeStartedAt(p.lastActivityAt, now);
 		if (p.recentTools) {
 			const tool = latestTool(p.recentTools);
-			if (tool) row.activeTool = tool;
-			else delete row.activeTool;
+			if (tool) {
+				row.activeTool = tool.name;
+				if (tool.argsPreview) row.activeToolArgs = tool.argsPreview;
+				else delete row.activeToolArgs;
+			} else {
+				delete row.activeTool;
+				delete row.activeToolArgs;
+			}
 		}
 		if (typeof p.toolCount === "number") row.toolCount = p.toolCount;
 		if (typeof p.tokens === "number") row.tokens = p.tokens;

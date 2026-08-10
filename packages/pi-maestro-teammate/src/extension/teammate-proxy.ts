@@ -193,7 +193,18 @@ import {
   getTeammatePermissionBroker,
   registerTeammateChildProxyCaller,
 } from "../runs/child-extensions.ts";
+import {
+  markPermissionRequestAuditAdmission,
+  schedulePermissionDecisionAudit,
+  schedulePermissionRequestAudit,
+} from "../runs/shared/permission-audit.ts";
 import { setQuietMode } from "../quiet-state.ts";
+import {
+  formatWorkspaceWindowInbox,
+  loadWorkspaceWindowInbox,
+  resolveWindowInboxAnchor,
+  type WindowInboxQuery,
+} from "../sessions/window-inbox.ts";
 
 import {
   AGENT_BUFFER_LIMITS,
@@ -275,7 +286,10 @@ export function createTeammateInteractionQueue(
 ): TeammateInteractionQueue {
   interface Waiter {
     correlationId?: string;
-    settle: (reason: string) => void;
+    settle: (
+      reason: string,
+      source: "queue_cancel" | "queue_timeout" | "queue_error",
+    ) => void;
   }
   let tail: Promise<void> = Promise.resolve();
   const waiting = new Map<string, Waiter>();
@@ -300,14 +314,41 @@ export function createTeammateInteractionQueue(
     fallbackCorrelationId,
   ) => {
     const key = keyFor(event);
+    const correlationId = correlationFor(event, fallbackCorrelationId);
+    const auditIdentity = {
+      correlationId,
+      agent: correlationId
+        ? state.activeRuns.get(correlationId)?.name ?? state.activeRuns.get(correlationId)?.agent
+        : undefined,
+    };
+    const auditParentSessionFile = state.mainSessionFile
+      ?? ctx?.sessionManager?.getSessionFile?.()
+      ?? null;
+    markPermissionRequestAuditAdmission(event, auditParentSessionFile);
+    schedulePermissionRequestAudit(auditParentSessionFile, event, auditIdentity);
+    const auditQueueDecision = (
+      source: "queue_cancel" | "queue_timeout" | "queue_error",
+      reason: string,
+    ): void => {
+      schedulePermissionDecisionAudit(
+        auditParentSessionFile,
+        event,
+        auditIdentity,
+        "cancel",
+        source,
+        reason,
+      );
+    };
+
     if (waiting.size >= TEAMMATE_INTERACTION_QUEUE_LIMIT) {
+      const reason =
+        `Too many teammate interactions are already waiting for an answer (${waiting.size}). `
+        + `Answer the pending prompts, then retry.`;
+      auditQueueDecision("queue_error", reason);
       replyChildRequestFailure(
         event,
         reply,
-        new Error(
-          `Too many teammate interactions are already waiting for an answer (${waiting.size}). ` +
-          `Answer the pending prompts, then retry.`,
-        ),
+        new Error(reason),
       );
       return;
     }
@@ -341,8 +382,12 @@ export function createTeammateInteractionQueue(
       }
       finishSettlement();
     };
-    const settle = (reason: string): void => {
+    const settle = (
+      reason: string,
+      source: "queue_cancel" | "queue_timeout" | "queue_error",
+    ): void => {
       if (settled) return;
+      auditQueueDecision(source, reason);
       try {
         replyChildRequestFailure(event, reply, new Error(reason));
       } catch (error) {
@@ -357,6 +402,7 @@ export function createTeammateInteractionQueue(
     // Settle the previous waiter first so its resources are cleaned up.
     waiting.get(key)?.settle(
       "Superseded by a duplicate interaction request with the same requestId.",
+      "queue_error",
     );
     waiting.set(key, { correlationId: correlationFor(event, fallbackCorrelationId), settle });
 
@@ -387,8 +433,9 @@ export function createTeammateInteractionQueue(
     // and a timer that only starts at the front would never fire for it.
     const timer = setTimeout(
       () => settle(
-        `No answer within ${Math.round(timeoutMs / 1000)}s; the teammate was told to cancel. ` +
-        `The prompt may still be open if you want to answer it.`,
+        `No answer within ${Math.round(timeoutMs / 1000)}s; the teammate was told to cancel. `
+        + `The prompt may still be open if you want to answer it.`,
+        "queue_timeout",
       ),
       timeoutMs,
     );
@@ -417,12 +464,16 @@ export function createTeammateInteractionQueue(
         // the handler, whose guardedReply is then absorbed by the settled guard.
         await Promise.race([handler, handlerCancelled]);
       } catch (error) {
-        if (!settled) replyChildRequestFailure(event, guardedReply, error);
+        if (!settled) {
+          const reason = error instanceof Error ? error.message : String(error);
+          auditQueueDecision("queue_error", reason);
+          replyChildRequestFailure(event, guardedReply, error);
+        }
       } finally {
         clearTimeout(timer);
         // A handler that returned without replying would otherwise leave the
         // child waiting forever on a request nothing will ever answer.
-        settle("The interaction handler returned without an answer.");
+        settle("The interaction handler returned without an answer.", "queue_error");
       }
     });
   };
@@ -433,7 +484,7 @@ export function createTeammateInteractionQueue(
       let cancelled = 0;
       for (const waiter of [...waiting.values()]) {
         if (waiter.correlationId !== correlationId) continue;
-        waiter.settle(reason);
+        waiter.settle(reason, "queue_cancel");
         cancelled += 1;
       }
       return cancelled;
@@ -2508,6 +2559,24 @@ export async function handleProxyRequest(
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{ type: "text", text }], isError: false, details: { agents: entries },
         }});
+        return;
+      }
+      if (view === "inbox") {
+        try {
+          const inbox = await loadWorkspaceWindowInbox(
+            resolveWindowInboxAnchor(state.mainSessionFile, undefined),
+            params as WindowInboxQuery,
+          );
+          const entries = inbox.entries.map((entry) => ({ kind: "window-message" as const, ...entry }));
+          reply({ type: "teammate_proxy_result", requestId, result: {
+            content: [{ type: "text", text: formatWorkspaceWindowInbox(inbox) }], isError: false, details: { agents: entries },
+          }});
+        } catch (error) {
+          reply({ type: "teammate_proxy_result", requestId, result: {
+            content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+            isError: true, details: { agents: [] },
+          }});
+        }
         return;
       }
       if (view === "windows") {

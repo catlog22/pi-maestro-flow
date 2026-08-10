@@ -3,6 +3,8 @@ import {
 	Key,
 	type Component,
 	type Focusable,
+	decodeKittyPrintable,
+	fuzzyFilter,
 	matchesKey,
 	truncateToWidth,
 	visibleWidth,
@@ -36,10 +38,148 @@ export interface AgentOverlayParams {
 
 const CARD_CHROME_ROWS = 5;
 const COMMAND_ACK_MS = 1_500;
+const MAX_STEER_DRAFT_CHARS = 4_096;
+const BRACKETED_PASTE_START = "\x1b[200~";
+const BRACKETED_PASTE_END = "\x1b[201~";
+const MAX_BUFFERED_PASTE_CHARS = 1_048_576;
+const graphemeSegmenter = typeof Intl.Segmenter === "function"
+	? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+	: undefined;
 
-/** Plain letters reserved for command keys stay out of the draft. */
-function isDraftInput(data: string): boolean {
-	return data.length === 1 && data >= " ";
+/** Match the repository's single-line input cleanup without importing across packages. */
+function sanitizeDraftInput(data: string): string {
+	return data.normalize("NFC").replace(/\r\n?|\n|\t/g, " ").replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+}
+
+function printableDraftInput(data: string): string {
+	const kittyPrintable = decodeKittyPrintable(data);
+	if (kittyPrintable !== undefined) return kittyPrintable;
+	// Escape/CSI-prefixed terminal input is a key sequence, not pasted text.
+	if (data.includes("\x1b") || data.includes("\x9b")) return "";
+	return sanitizeDraftInput(data);
+}
+
+function appendDraftInput(draft: string, data: string, paste = false): string {
+	const printable = paste ? sanitizeDraftInput(data) : printableDraftInput(data);
+	const remaining = MAX_STEER_DRAFT_CHARS - draft.length;
+	if (!printable || remaining <= 0) return draft;
+	if (printable.length <= remaining) return draft + printable;
+
+	let end = 0;
+	for (const segment of draftSegments(printable)) {
+		if (segment.end > remaining) break;
+		end = segment.end;
+	}
+	return draft + printable.slice(0, end);
+}
+
+interface DraftInputToken {
+	kind: "input" | "paste";
+	text: string;
+}
+
+class BracketedPasteDecoder {
+	private pasting = false;
+	private buffer = "";
+	private pending = "";
+
+	isPasting(): boolean {
+		return this.pasting;
+	}
+
+	hasPending(): boolean {
+		return this.pending.length > 0;
+	}
+
+	flushPending(): DraftInputToken[] {
+		if (!this.pending) return [];
+		const pending = this.pending;
+		this.pending = "";
+		if (this.pasting) {
+			this.appendPaste(pending);
+			return [];
+		}
+		return [{ kind: "input", text: pending }];
+	}
+
+	feed(data: string): DraftInputToken[] {
+		const tokens: DraftInputToken[] = [];
+		let rest = this.pending + data;
+		this.pending = "";
+		while (rest) {
+			if (!this.pasting) {
+				const start = rest.indexOf(BRACKETED_PASTE_START);
+				if (start < 0) {
+					const partial = partialMarkerSuffix(rest, BRACKETED_PASTE_START);
+					const input = rest.slice(0, rest.length - partial.length);
+					if (input) tokens.push({ kind: "input", text: input });
+					this.pending = partial;
+					break;
+				}
+				if (start > 0) tokens.push({ kind: "input", text: rest.slice(0, start) });
+				this.pasting = true;
+				rest = rest.slice(start + BRACKETED_PASTE_START.length);
+				continue;
+			}
+
+			const end = rest.indexOf(BRACKETED_PASTE_END);
+			if (end < 0) {
+				const partial = partialMarkerSuffix(rest, BRACKETED_PASTE_END);
+				this.appendPaste(rest.slice(0, rest.length - partial.length));
+				this.pending = partial;
+				break;
+			}
+			this.appendPaste(rest.slice(0, end));
+			tokens.push({ kind: "paste", text: this.buffer });
+			this.buffer = "";
+			this.pasting = false;
+			rest = rest.slice(end + BRACKETED_PASTE_END.length);
+		}
+		return tokens;
+	}
+
+	private appendPaste(value: string): void {
+		const remaining = MAX_BUFFERED_PASTE_CHARS - this.buffer.length;
+		if (remaining > 0) this.buffer += value.slice(0, remaining);
+	}
+}
+
+function partialMarkerSuffix(value: string, marker: string): string {
+	const limit = Math.min(value.length, marker.length - 1);
+	for (let length = limit; length >= 1; length--) {
+		const suffix = value.slice(-length);
+		if (marker.startsWith(suffix)) return suffix;
+	}
+	return "";
+}
+
+function removeLastDraftGrapheme(draft: string): string {
+	const segments = draftSegments(draft);
+	return segments.length === 0 ? draft : draft.slice(0, segments[segments.length - 1].start);
+}
+
+function draftSegments(value: string): Array<{ start: number; end: number }> {
+	if (graphemeSegmenter) {
+		const parts = [...graphemeSegmenter.segment(value)];
+		return parts.map((part, index) => ({ start: part.index, end: parts[index + 1]?.index ?? value.length }));
+	}
+
+	const segments: Array<{ start: number; end: number }> = [];
+	let start = 0;
+	for (const char of value) {
+		const end = start + char.length;
+		segments.push({ start, end });
+		start = end;
+	}
+	return segments;
+}
+
+/** Printable text for the search query: single chars, paste and CJK alike. */
+function isSearchInput(data: string): boolean {
+	return data.length > 0 && [...data].every((ch) => {
+		const code = ch.codePointAt(0)!;
+		return code >= 0x20 && code !== 0x7f && !(code >= 0x80 && code <= 0x9f);
+	});
 }
 
 export class AgentOverlay implements Component, Focusable {
@@ -48,9 +188,14 @@ export class AgentOverlay implements Component, Focusable {
 	private outputScroll: AgentScrollState = { offset: 0, following: true };
 	private detailWidth = 80;
 	private detailRows = 8;
-	private compose: { targetId: string; draft: string } | null = null;
+	private compose: { targetId: string; draft: string; input: BracketedPasteDecoder } | null = null;
+	/** Active `/` search mode; the query string may be empty while searching. */
+	private searching = false;
+	/** Current search query; empty string means no filtering. */
+	private search = "";
 	private lastAck: { text: string; at: number; error?: boolean } | null = null;
 	private ackTimer: ReturnType<typeof setTimeout> | undefined;
+	private pasteFlushTimer: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(private readonly params: AgentOverlayParams) {
 		this.selectedId = params.getViewingId();
@@ -59,36 +204,65 @@ export class AgentOverlay implements Component, Focusable {
 	invalidate(): void {}
 	dispose(): void {
 		if (this.ackTimer) clearTimeout(this.ackTimer);
+		if (this.pasteFlushTimer) clearTimeout(this.pasteFlushTimer);
 		this.ackTimer = undefined;
+		this.pasteFlushTimer = undefined;
 	}
 
 	handleInput(data: string): void {
 		if (this.compose) {
-			if (matchesKey(data, Key.escape)) {
-				this.compose = null;
-			} else if (data === "\r" || data === "\n") {
-				const targetId = this.compose.targetId;
-				const draft = this.compose.draft.trim();
-				this.compose = null;
-				// The compose target is frozen: the steer must never silently
-				// re-target another agent because the roster selection moved.
-				const target = this.entries().find((entry) => entry.row.correlationId === targetId)?.row;
-				if (!target) {
-					this.ack(tuiT("overlay.agents.aborted", { agent: this.agentName(targetId) }), true);
-				} else if (draft) {
-					this.params.onCommand(targetId, "steer", draft);
-					this.ack(`steer @${target.name || target.role || target.agent || targetId}: ${draft}`);
-				}
-			} else if (data === "\x7f" || data === "\x08") {
-				this.compose.draft = this.compose.draft.slice(0, -1);
-			} else if (isDraftInput(data)) {
-				this.compose.draft += data;
+			const input = this.compose.input;
+			if (this.pasteFlushTimer) clearTimeout(this.pasteFlushTimer);
+			this.pasteFlushTimer = undefined;
+			for (const token of input.feed(data)) this.handleComposeToken(token);
+			if (this.compose?.input === input && input.hasPending() && !input.isPasting()) {
+				this.pasteFlushTimer = setTimeout(() => {
+					this.pasteFlushTimer = undefined;
+					if (this.compose?.input !== input) return;
+					for (const token of input.flushPending()) this.handleComposeToken(token);
+					this.params.requestRender();
+				}, 16);
+				this.pasteFlushTimer.unref?.();
 			}
 			this.params.requestRender();
 			return;
 		}
+		const printableInput = decodeKittyPrintable(data);
+		const commandInput = printableInput ?? data;
+		if (this.searching) {
+			// Search mode: printable characters extend the query, backspace trims
+			// it. Esc exits and clears; Enter locks the filter so the roster
+			// commands (↑↓ / i / s) apply to the narrowed set.
+			if (matchesKey(data, Key.escape)) {
+				this.searching = false;
+				this.search = "";
+			} else if (data === "\r" || data === "\n") {
+				this.searching = false;
+			} else if (data === "\x7f" || data === "\x08") {
+				this.search = this.search.slice(0, -1);
+			} else if (isSearchInput(commandInput)) {
+				this.search += commandInput;
+			}
+			this.reconcileSelection(this.entries().map((entry) => entry.row));
+			this.params.requestRender();
+			return;
+		}
+		if (commandInput === "/") {
+			this.searching = true;
+			this.search = "";
+			this.params.requestRender();
+			return;
+		}
 		if (matchesKey(data, Key.escape)) {
-			this.params.close();
+			// A locked filter (Enter left a non-empty query) is cleared by the
+			// first Esc, the second one closes the overlay.
+			if (this.search !== "") {
+				this.search = "";
+				this.reconcileSelection(this.entries().map((entry) => entry.row));
+			} else {
+				this.params.close();
+			}
+			this.params.requestRender();
 			return;
 		}
 		if (matchesKey(data, Key.up)) {
@@ -115,19 +289,51 @@ export class AgentOverlay implements Component, Focusable {
 			this.scrollOutput(Math.max(1, this.detailRows - 2));
 			return;
 		}
-		if (data === "i" && this.selectedId) {
+		if (commandInput === "i" && this.selectedId) {
 			// Interrupt (打断): abort the current turn/tool; the agent stays alive
 			// and is told to report and continue.
 			this.params.onCommand(this.selectedId, "interrupt");
 			this.ack(`interrupt @${this.agentName(this.selectedId)}`);
 			return;
 		}
-		if (data === "s" && this.selectedId) {
+		if (commandInput === "s" && this.selectedId) {
 			// Steer (引导): interrupt + inject the drafted message. The target is
 			// frozen at compose time so later roster changes cannot re-target it.
-			this.compose = { targetId: this.selectedId, draft: "" };
+			this.compose = { targetId: this.selectedId, draft: "", input: new BracketedPasteDecoder() };
 			this.params.requestRender();
 		}
+	}
+
+	private handleComposeToken(token: DraftInputToken): void {
+		if (!this.compose) return;
+		if (token.kind === "paste") {
+			this.compose.draft = appendDraftInput(this.compose.draft, token.text, true);
+			return;
+		}
+		if (matchesKey(token.text, Key.escape)) {
+			this.compose = null;
+			return;
+		}
+		if (token.text === "\r" || token.text === "\n") {
+			const targetId = this.compose.targetId;
+			const draft = this.compose.draft.trim();
+			this.compose = null;
+			// The compose target is frozen: the steer must never silently
+			// re-target another agent because the roster selection moved.
+			const target = this.unfilteredEntries().find((entry) => entry.row.correlationId === targetId)?.row;
+			if (!target) {
+				this.ack(tuiT("overlay.agents.aborted", { agent: this.agentName(targetId) }), true);
+			} else if (draft) {
+				this.params.onCommand(targetId, "steer", draft);
+				this.ack(`steer @${target.name || target.role || target.agent || targetId}: ${draft}`);
+			}
+			return;
+		}
+		if (token.text === "\x7f" || token.text === "\x08") {
+			this.compose.draft = removeLastDraftGrapheme(this.compose.draft);
+			return;
+		}
+		this.compose.draft = appendDraftInput(this.compose.draft, token.text);
 	}
 
 	private ack(text: string, error = false): void {
@@ -143,7 +349,7 @@ export class AgentOverlay implements Component, Focusable {
 	}
 
 	private agentName(correlationId: string): string {
-		const row = this.entries().find((entry) => entry.row.correlationId === correlationId)?.row;
+		const row = this.unfilteredEntries().find((entry) => entry.row.correlationId === correlationId)?.row;
 		return row?.name || row?.role || row?.agent || correlationId.slice(0, 8);
 	}
 
@@ -157,6 +363,9 @@ export class AgentOverlay implements Component, Focusable {
 			if (this.compose) {
 				const target = this.agentName(this.compose.targetId);
 				return [fit(`steer @${target}: ${this.compose.draft}_ · Enter · Esc`, safeWidth)];
+			}
+			if (this.searching || this.search.trim() !== "") {
+				return [fit(`${tuiT("overlay.agents.searchPrompt")} ${this.search}_ (${entries.length}) · Esc`, safeWidth)];
 			}
 			const selected = entries.find((entry) => entry.row.correlationId === this.selectedId)?.row;
 			const title = tuiT("overlay.agents.title");
@@ -206,12 +415,28 @@ export class AgentOverlay implements Component, Focusable {
 	}
 
 	private entries() {
+		const entries = this.unfilteredEntries();
+		const query = this.search.trim();
+		if (!query) return entries;
+		// A search flattens the tree: the query already broke the hierarchy, so
+		// keeping dangling branch glyphs would only add noise to the results.
+		return fuzzyFilter(entries, query, (entry) =>
+			`${entry.row.name ?? ""} ${entry.row.role} ${entry.row.agent} ${entry.row.task}`,
+		).map((entry) => ({ ...entry, prefix: "" }));
+	}
+
+	private unfilteredEntries() {
 		return buildAgentTree(visibleAgentRows([...this.params.getAgents()]), this.params.glyphs);
 	}
 
 	private agentLines(width: number, maxRows: number): string[] {
 		const entries = this.entries();
-		if (entries.length === 0) return [this.params.theme.fg("dim", fit(tuiT("overlay.agents.noAgents"), width))];
+		if (entries.length === 0) {
+			return [this.params.theme.fg("dim", fit(
+				this.searching || this.search.trim() !== "" ? tuiT("overlay.agents.noMatches") : tuiT("overlay.agents.noAgents"),
+				width,
+			))];
+		}
 		const selected = Math.max(0, entries.findIndex((entry) => entry.row.correlationId === this.selectedId));
 		const start = visibleStart(selected, entries.length, maxRows);
 		return entries.slice(start, start + maxRows).map(({ row, prefix }) => {
@@ -246,6 +471,11 @@ export class AgentOverlay implements Component, Focusable {
 			const target = this.agentName(this.compose.targetId);
 			return fit(`steer @${target}: ${this.compose.draft}_`, width);
 		}
+		if (this.searching || this.search.trim() !== "") {
+			const entries = this.entries();
+			const total = buildAgentTree(visibleAgentRows([...this.params.getAgents()]), this.params.glyphs).length;
+			return fit(`${this.params.theme.fg("accent", tuiT("overlay.agents.searchPrompt"))} ${this.search}_ (${entries.length}/${total})`, width);
+		}
 		const rows = this.entries().map((entry) => entry.row);
 		const statuses = rows.map((row) => effectiveAgentStatus(row));
 		const active = statuses.filter((status) => status === "running" || status === "retrying").length;
@@ -266,7 +496,10 @@ export class AgentOverlay implements Component, Focusable {
 		if (this.compose) {
 			return this.params.theme.fg("dim", fit(tuiT("overlay.agents.composeHelp"), width));
 		}
-		return this.params.theme.fg("dim", fit(tuiT("overlay.agents.help"), width));
+		if (this.searching || this.search.trim() !== "") {
+			return this.params.theme.fg("dim", fit(tuiT("overlay.agents.searchHelp"), width));
+		}
+		return this.params.theme.fg("dim", fit(`${tuiT("overlay.agents.help")} · ${tuiT("overlay.agents.searchHint")}`, width));
 	}
 
 	private rule(width: number): string {

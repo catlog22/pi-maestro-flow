@@ -31,6 +31,7 @@ import {
   type ObservationSnapshot,
   type ObservationWaitStatus,
 } from "../public/v1/observation.ts";
+import type { RecentToolInfo } from "../shared/types.ts";
 import {
   formatCompact,
   formatVerbose,
@@ -281,6 +282,9 @@ function isStructuredOutputConfirmation(text: string): boolean {
 }
 
 export function displayMessageForResult(result: SingleResult): string {
+  const warningPrefix = result.warnings?.length
+    ? `${result.warnings.map((warning) => `[warn] ${warning}`).join("\n")}\n\n`
+    : "";
   const structured = formatStructuredOutputForDisplay(result);
   const lastMessage = result.messages.at(-1)?.content ?? structured ?? "(no output)";
   // A structured_output completion ends with the tool's generic confirmation,
@@ -292,7 +296,7 @@ export function displayMessageForResult(result: SingleResult): string {
       ? structured
       : `${lastMessage}\n\n${structured}`
     : lastMessage;
-  if (result.exitCode === 0) return effective;
+  if (result.exitCode === 0) return warningPrefix + effective;
 
   const schemaDiagnostic = result.messages
     .filter((message) => isStructuredOutputSettlementDiagnostic(message.content))
@@ -305,9 +309,9 @@ export function displayMessageForResult(result: SingleResult): string {
     ?? primaryDiagnostics.at(-1)?.content;
 
   if (primaryDiagnostic && schemaDiagnostic && primaryDiagnostic !== schemaDiagnostic) {
-    return `${primaryDiagnostic}\n\nStructured output: ${schemaDiagnostic}`;
+    return `${warningPrefix}${primaryDiagnostic}\n\nStructured output: ${schemaDiagnostic}`;
   }
-  return primaryDiagnostic ?? schemaDiagnostic ?? effective;
+  return warningPrefix + (primaryDiagnostic ?? schemaDiagnostic ?? effective);
 }
 
 export function summarizeGraphResults(results: readonly SingleResult[], tasks: readonly NormalizedTask[]): string {
@@ -494,19 +498,22 @@ export const TEAMMATE_SEND_SNIPPET = "Steer, follow up with, or send a message t
 export const TEAMMATE_SEND_GUIDELINES = [
   "Use teammate-send only for a named running or sleeping agent; steer for urgent correction, abort only to terminate work.",
   "For another Pi window, call teammate-list with view=windows first, then send to the returned target (owner:<ownerId> for the window or owner:<ownerId>:<correlationId> for one of its agents). Cross-session abort is unsupported.",
+  'To verify delivery or read the message later, use teammate-list with view="inbox"; persisted messages stay readable after the target window is closed.',
 ];
 
-export const TEAMMATE_LIST_DESCRIPTION = `List available roles, teammate agents, or cross-session windows. view defaults to "active".
+export const TEAMMATE_LIST_DESCRIPTION = `List available roles, teammate agents, cross-session windows, or persisted window messages. view defaults to "active".
 
 - "active": live agents except completed entries
 - "named": addressable agents
 - "all": all tracked live entries
 - "roles": builtin, project, and user-defined role definitions
-- "windows": available peer Pi windows; use each returned target with teammate-send`;
-export const TEAMMATE_LIST_SNIPPET = "List teammate roles, agent status, or available cross-session windows.";
+- "windows": available peer Pi windows; use each returned target with teammate-send
+- "inbox": persisted cross-window messages from current and reclaimed sessions; supports session, peer, direction, status, and limit filters`;
+export const TEAMMATE_LIST_SNIPPET = "List teammate roles, agent status, cross-session windows, or persisted window messages.";
 export const TEAMMATE_LIST_GUIDELINES = [
   'Use teammate-list with view="roles" when an available builtin, project, or user-defined agent name is needed; use active/named/all for running work.',
   'Use teammate-list with view="windows" before sending across Pi sessions; the returned owner:<ownerId> target addresses the window main session.',
+  'Use teammate-list with view="inbox" to inspect persisted cross-window messages, including messages queued in a session whose runtime was reclaimed; this is history, not proof that the window is still active.',
 ];
 
 export const TEAMMATE_WATCH_DESCRIPTION =
@@ -531,7 +538,7 @@ export const OBSERVE_DESCRIPTION = `Observe mixed teammate and background Bash t
 - "watch": poll every target until the bounded timeoutMs you provide, returning the full status-transition timeline (richer than status, no barrier required); omitted timeoutMs defaults to 600000 (10 minutes)
 - view="turns" (status only): list the target's session turn history instead of the live snapshot; add turn=<n> to expand one 1-based turn into its messages, tool calls, and results
 
-Targets use { kind, id }, where kind is currently "teammate" or "bash_bg". Use detail=full (or tail) to include a settled teammate's captured result — including the structured_output value for schema tasks. kind="workspace" accepts owner:<ownerId> or a window name and returns the peer snapshot (view="turns" lists its agent runs, snapshot-limited because peers do not publish full transcripts). Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.`;
+Targets use { kind, id }, where kind is currently "teammate" or "bash_bg". Use detail=full (or tail) to include a settled teammate's captured result — including the structured_output value for schema tasks. kind="workspace" accepts owner:<ownerId> or a window name and returns the peer snapshot (view="turns" lists its agent runs, snapshot-limited because peers do not publish full transcripts). Persisted cross-window message bodies are not published by peers; read them with teammate-list view="inbox". Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.`;
 export const OBSERVE_SNIPPET = "Observe, wait for, or watch mixed teammate and background Bash targets; view='turns' lists session turn history.";
 export const OBSERVE_GUIDELINES = [
   "Use observe for mixed or multi-target status and waits; use one bounded wait instead of polling status.",
@@ -539,6 +546,7 @@ export const OBSERVE_GUIDELINES = [
   "Use detail=full only when recent output is required; summary is the compact default. detail=full includes a settled agent's captured result and structured_output value.",
   "Use view=turns with action=status to read a session's history: list all turns first, then repeat with turn=<n> to expand one turn. view=turns is not supported by wait or watch.",
   "For a workspace window use kind=workspace with owner:<ownerId> or its window name; its turn history is snapshot-limited to the agent runs the peer publishes.",
+  'For persisted cross-window message bodies, use teammate-list with view="inbox".',
 ];
 
 export const TEAMMATE_MONITOR_DESCRIPTION = `Observe multiple teammate targets or block on a multi-agent barrier. Monitor mode is user-controlled via /monitor; this tool only queries and waits.
@@ -1091,7 +1099,7 @@ export interface AgentSelectorRow {
   startedAt: number;
   depth: number;
   treePrefix: string;
-  recentTools: Array<{ name: string; status: string }>;
+  recentTools: RecentToolInfo[];
   lastMessage?: string;
 }
 

@@ -7,6 +7,7 @@
  */
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { WorkspaceSessionScan } from "../transcript/session-transcript.ts";
+import type { RecentToolInfo } from "../shared/types.ts";
 import { type WorkspaceBackgroundJobSnapshot, type WorkspaceOwnerState } from "./workspace-peers.ts";
 import { type LeaseToken } from "../runs/session-handoff.ts";
 import type { RunTeammateOptions, RpcMessageMode, NormalizedTask } from "../runs/execution.ts";
@@ -57,8 +58,8 @@ export declare function buildTeammateToolDescription(cwd: string, options?: {
 export declare const TEAMMATE_SEND_DESCRIPTION = "Send a message to a running or sleeping teammate agent, addressed by name, @name, displayed name#id-prefix, correlation ID (or prefix), or a cross-session target from teammate-list such as owner:<ownerId> or owner:<ownerId>:<correlationId>.\n\nModes: \"steer\" | \"follow_up\" (default) | \"abort\" \u2014 per-mode semantics and the message requirement are in the mode and message parameter descriptions. Cross-session targets support only \"steer\" and \"follow_up\".";
 export declare const TEAMMATE_SEND_SNIPPET = "Steer, follow up with, or send a message to a cross-session teammate target.";
 export declare const TEAMMATE_SEND_GUIDELINES: string[];
-export declare const TEAMMATE_LIST_DESCRIPTION = "List available roles, teammate agents, or cross-session windows. view defaults to \"active\".\n\n- \"active\": live agents except completed entries\n- \"named\": addressable agents\n- \"all\": all tracked live entries\n- \"roles\": builtin, project, and user-defined role definitions\n- \"windows\": available peer Pi windows; use each returned target with teammate-send";
-export declare const TEAMMATE_LIST_SNIPPET = "List teammate roles, agent status, or available cross-session windows.";
+export declare const TEAMMATE_LIST_DESCRIPTION = "List available roles, teammate agents, cross-session windows, or persisted window messages. view defaults to \"active\".\n\n- \"active\": live agents except completed entries\n- \"named\": addressable agents\n- \"all\": all tracked live entries\n- \"roles\": builtin, project, and user-defined role definitions\n- \"windows\": available peer Pi windows; use each returned target with teammate-send\n- \"inbox\": persisted cross-window messages from current and reclaimed sessions; supports session, peer, direction, status, and limit filters";
+export declare const TEAMMATE_LIST_SNIPPET = "List teammate roles, agent status, cross-session windows, or persisted window messages.";
 export declare const TEAMMATE_LIST_GUIDELINES: string[];
 export declare const TEAMMATE_WATCH_DESCRIPTION = "Perform a one-shot inspection of a running or sleeping teammate agent's recent output, tool activity, inbox messages, and last result \u2014 including the structured_output value for schema tasks. This returns one snapshot, unlike observe action=\"watch\" which polls until its timeoutMs; it is not a completion-wait tool.";
 export declare const TEAMMATE_WATCH_SNIPPET = "Inspect a specific teammate agent's recent activity and output.";
@@ -66,7 +67,7 @@ export declare const TEAMMATE_WATCH_GUIDELINES: string[];
 export declare const TEAMMATE_WAIT_DESCRIPTION = "Wait once for a teammate result by name, or provide waitMs for a fixed delay. Named waits default to a bounded 600000 ms (10 minutes) timeout and settle on result-ready (not terminal lifecycle); they are the single-target convenience form of observe action=\"wait\" \u2014 use observe with until=\"completed\" to wait for full termination. Agent waits replace repeated teammate-watch calls.";
 export declare const TEAMMATE_WAIT_SNIPPET = "Wait once for a teammate result or for a bounded delay.";
 export declare const TEAMMATE_WAIT_GUIDELINES: string[];
-export declare const OBSERVE_DESCRIPTION = "Observe mixed teammate and background Bash targets through one status/wait/watch interface.\n\n- \"status\": one-shot snapshot of every target\n- \"wait\": block on an all/any/count barrier with one request-level timeout; set until=\"completed\" to block until agents fully terminate instead of first result\n- \"watch\": poll every target until the bounded timeoutMs you provide, returning the full status-transition timeline (richer than status, no barrier required); omitted timeoutMs defaults to 600000 (10 minutes)\n- view=\"turns\" (status only): list the target's session turn history instead of the live snapshot; add turn=<n> to expand one 1-based turn into its messages, tool calls, and results\n\nTargets use { kind, id }, where kind is currently \"teammate\" or \"bash_bg\". Use detail=full (or tail) to include a settled teammate's captured result \u2014 including the structured_output value for schema tasks. kind=\"workspace\" accepts owner:<ownerId> or a window name and returns the peer snapshot (view=\"turns\" lists its agent runs, snapshot-limited because peers do not publish full transcripts). Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.";
+export declare const OBSERVE_DESCRIPTION = "Observe mixed teammate and background Bash targets through one status/wait/watch interface.\n\n- \"status\": one-shot snapshot of every target\n- \"wait\": block on an all/any/count barrier with one request-level timeout; set until=\"completed\" to block until agents fully terminate instead of first result\n- \"watch\": poll every target until the bounded timeoutMs you provide, returning the full status-transition timeline (richer than status, no barrier required); omitted timeoutMs defaults to 600000 (10 minutes)\n- view=\"turns\" (status only): list the target's session turn history instead of the live snapshot; add turn=<n> to expand one 1-based turn into its messages, tool calls, and results\n\nTargets use { kind, id }, where kind is currently \"teammate\" or \"bash_bg\". Use detail=full (or tail) to include a settled teammate's captured result \u2014 including the structured_output value for schema tasks. kind=\"workspace\" accepts owner:<ownerId> or a window name and returns the peer snapshot (view=\"turns\" lists its agent runs, snapshot-limited because peers do not publish full transcripts). Persisted cross-window message bodies are not published by peers; read them with teammate-list view=\"inbox\". Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.";
 export declare const OBSERVE_SNIPPET = "Observe, wait for, or watch mixed teammate and background Bash targets; view='turns' lists session turn history.";
 export declare const OBSERVE_GUIDELINES: string[];
 export declare const TEAMMATE_MONITOR_DESCRIPTION = "Observe multiple teammate targets or block on a multi-agent barrier. Monitor mode is user-controlled via /monitor; this tool only queries and waits.\n\n- \"status\": one-shot compact snapshot of targets \u2014 non-blocking\n- \"wait\": block until the barrier condition (all/any/count targets reach a result; result-ready, not terminal)\n\nOutput is compact by default (one line per target). Set verbose=true for expanded output.\n\nteammate-only: targets are plain agent-name strings (not observe's { kind, id } objects). This tool has no watch action, until threshold, or detail parameter; use observe for mixed bash_bg targets, transition watching, or until=\"completed\" waits.";
@@ -232,10 +233,7 @@ export interface AgentSelectorRow {
     startedAt: number;
     depth: number;
     treePrefix: string;
-    recentTools: Array<{
-        name: string;
-        status: string;
-    }>;
+    recentTools: RecentToolInfo[];
     lastMessage?: string;
 }
 /** Walks `spawnedBy` to the top of an agent's dispatch tree. */

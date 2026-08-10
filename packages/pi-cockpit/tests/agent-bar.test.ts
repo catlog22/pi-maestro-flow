@@ -204,3 +204,170 @@ test("Agent Bar shows the Alt+R list hint only when the surface is not covered b
 	assert.match(visible, /Alt\+R list$/);
 	assert.doesNotMatch(hidden, /Alt\+R/);
 });
+
+test("Agent Bar appends the live tool to a running agent chip", () => {
+	const running = endpoints.map((endpoint) => endpoint.kind === "agent"
+		? { ...endpoint, agentRow: { ...row, activeTool: "bash" } }
+		: endpoint);
+	const state = new SessionUiState();
+	state.reconcile("agent", running, "root");
+	const plain = stripAnsi(renderAgentBar(running, state, 120, theme as Theme, { now: 10_000 })[0]);
+	assert.match(plain, /@builder · bash/);
+	// The main chip (no agentRow) stays bare.
+	assert.doesNotMatch(plain, /@main ·/);
+});
+
+test("Agent Bar appends the redacted args preview to the live tool", () => {
+	const running = endpoints.map((endpoint) => endpoint.kind === "agent"
+		? { ...endpoint, agentRow: { ...row, activeTool: "bash", activeToolArgs: "command=git diff" } }
+		: endpoint);
+	const state = new SessionUiState();
+	state.reconcile("agent", running, "root");
+	const plain = stripAnsi(renderAgentBar(running, state, 120, theme as Theme, { now: 10_000 })[0]);
+	assert.match(plain, /@builder · bash command=git diff/);
+});
+
+test("Agent Bar does not show a tool suffix on a sleeping agent", () => {
+	const sleeping = endpoints.map((endpoint) => endpoint.kind === "agent"
+		? { ...endpoint, status: "sleeping" as const, agentRow: { ...row, status: "sleeping" as const, activeTool: "bash" } }
+		: endpoint);
+	const state = new SessionUiState();
+	state.reconcile("agent", sleeping, "root");
+	const plain = stripAnsi(renderAgentBar(sleeping, state, 120, theme as Theme, { now: 10_000 })[0]);
+	assert.doesNotMatch(plain, /· bash/);
+});
+
+test("Agent Bar marks stalled chips with a leading error bang", () => {
+	// stalled: derived from a stale lastActivityAt, no terminal outcome yet.
+	const stalled = endpoints.map((endpoint) => endpoint.kind === "agent"
+		? { ...endpoint, agentRow: { ...row, status: "running" as const, lastActivityAt: -30_000 } }
+		: endpoint);
+	const state = new SessionUiState();
+	state.reconcile("agent", stalled, "root");
+	const taggedTheme: Pick<Theme, "fg" | "bold"> = {
+		fg: (color, text) => `<${color}>${text}</${color}>`,
+		bold: (text) => text,
+	};
+	const line = renderAgentBar(stalled, state, 120, taggedTheme as Theme, { now: 10_000 })[0];
+	assert.match(line, /<error>!<\/error>.*@builder/);
+});
+
+test("Agent Bar shows the completed check on a done agent", () => {
+	const done = endpoints.map((endpoint) => endpoint.kind === "agent"
+		? {
+			...endpoint,
+			agentRow: {
+				...row,
+				status: "done" as const,
+				lastOutcome: { status: "completed" as const, settledAt: 9_500 },
+			},
+		}
+		: endpoint);
+	const state = new SessionUiState();
+	state.reconcile("agent", done, "root");
+	const taggedTheme: Pick<Theme, "fg" | "bold"> = {
+		fg: (color, text) => `<${color}>${text}</${color}>`,
+		bold: (text) => text,
+	};
+	const line = renderAgentBar(done, state, 120, taggedTheme as Theme, { now: 10_000 })[0];
+	assert.match(line, /<success> ✓<\/success>/);
+	assert.doesNotMatch(line, /<error>!/);
+});
+
+test("Agent Bar shows the failed cross with a truncated reason", () => {
+	const failed = endpoints.map((endpoint) => endpoint.kind === "agent"
+		? {
+			...endpoint,
+			agentRow: {
+				...row,
+				status: "failed" as const,
+				lastOutcome: {
+					status: "failed" as const,
+					message: "provider timeout: " + "x".repeat(80),
+					settledAt: 9_500,
+				},
+			},
+		}
+		: endpoint);
+	const state = new SessionUiState();
+	state.reconcile("agent", failed, "root");
+	const taggedTheme: Pick<Theme, "fg" | "bold"> = {
+		fg: (color, text) => `<${color}>${text}</${color}>`,
+		bold: (text) => text,
+	};
+	const line = renderAgentBar(failed, state, 200, taggedTheme as Theme, { now: 10_000 })[0];
+	assert.match(line, /<error> ✗ provider timeout:/);
+	assert.match(line, /provider timeout:/);
+	// The reason is bounded; the tail beyond the 24-char window is dropped.
+	assert.doesNotMatch(line, /x{40}/);
+});
+
+test("Agent Bar shows the terminated cross without a reason", () => {
+	const terminated = endpoints.map((endpoint) => endpoint.kind === "agent"
+		? {
+			...endpoint,
+			agentRow: {
+				...row,
+				status: "terminated" as const,
+				lastOutcome: { status: "terminated" as const, settledAt: 9_500 },
+			},
+		}
+		: endpoint);
+	const state = new SessionUiState();
+	state.reconcile("agent", terminated, "root");
+	const taggedTheme: Pick<Theme, "fg" | "bold"> = {
+		fg: (color, text) => `<${color}>${text}</${color}>`,
+		bold: (text) => text,
+	};
+	const line = renderAgentBar(terminated, state, 120, taggedTheme as Theme, { now: 10_000 })[0];
+	assert.match(line, /<warning> ✗<\/warning>/);
+});
+
+test("Agent Bar hides the previous turn outcome while the agent is live again", () => {
+	// The store deliberately retains lastOutcome across a restart; a running
+	// agent must not carry the previous turn's ✓/✗ badge.
+	const restarted = endpoints.map((endpoint) => endpoint.kind === "agent"
+		? {
+			...endpoint,
+			agentRow: {
+				...row,
+				status: "running" as const,
+				lastOutcome: { status: "failed" as const, message: "old failure", settledAt: 9_000 },
+			},
+		}
+		: endpoint);
+	const state = new SessionUiState();
+	state.reconcile("agent", restarted, "root");
+	const taggedTheme: Pick<Theme, "fg" | "bold"> = {
+		fg: (color, text) => `<${color}>${text}</${color}>`,
+		bold: (text) => text,
+	};
+	const line = renderAgentBar(restarted, state, 200, taggedTheme as Theme, { now: 10_000 })[0];
+	assert.doesNotMatch(line, / ✗ old failure/);
+	assert.doesNotMatch(line, /<error> ✗/);
+	assert.match(line, /@builder/);
+});
+
+test("Agent Bar appends selected-session tool/token metrics when width allows", () => {
+	const withMetrics = endpoints.map((endpoint) => endpoint.kind === "agent"
+		? { ...endpoint, agentRow: { ...row, toolCount: 3, tokens: 1_200 } }
+		: endpoint);
+	const state = new SessionUiState();
+	state.reconcile("agent", withMetrics, "agent");
+	const plain = stripAnsi(renderAgentBar(withMetrics, state, 120, theme as Theme, { now: 10_000 })[0]);
+	assert.match(plain, /3 .*tools|3 .*工具/);
+	assert.match(plain, /1\.2k/);
+});
+
+test("Agent Bar drops the metrics summary before the chips when width is tight", () => {
+	const withMetrics = endpoints.map((endpoint) => endpoint.kind === "agent"
+		? { ...endpoint, agentRow: { ...row, toolCount: 3, tokens: 1_200 } }
+		: endpoint);
+	const state = new SessionUiState();
+	state.reconcile("agent", withMetrics, "agent");
+	// Chip-only width: metrics must yield, chips stay intact and in-bounds.
+	const plain = stripAnsi(renderAgentBar(withMetrics, state, 22, theme as Theme, { now: 10_000 })[0]);
+	assert.doesNotMatch(plain, /tools/);
+	assert.match(plain, /@builder/);
+	assert.ok(visibleWidth(renderAgentBar(withMetrics, state, 22, theme as Theme, { now: 10_000 })[0]) <= 22);
+});

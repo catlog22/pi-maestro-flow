@@ -39,6 +39,8 @@ export interface SingleResult {
   terminalStatus?: AgentTerminalStatus;
   structuredOutput?: unknown;
   attemptedModels?: string[];
+  /** Advisory dispatch diagnostics that do not change the terminal outcome. */
+  warnings?: string[];
 }
 
 export type AgentProgressStatus = "pending" | "running" | "retrying" | "completed" | "failed" | "terminated";
@@ -56,6 +58,14 @@ export type AgentRunPhase =
   | "continuing"
   | "settling";
 
+/** One recent tool call entry in progress telemetry; `argsPreview` is optional. */
+export interface RecentToolInfo {
+  name: string;
+  status: string;
+  /** Redacted one-line argument summary emitted by the child; absent when nothing informative survived. */
+  argsPreview?: string;
+}
+
 export interface AgentProgress {
   agent: string;
   name?: string;
@@ -64,7 +74,7 @@ export interface AgentProgress {
   dependencies?: number[];
   status: AgentProgressStatus;
   phase?: AgentRunPhase;
-  recentTools: Array<{ name: string; status: string }>;
+  recentTools: RecentToolInfo[];
   toolCount: number;
   tokens: number;
   inputTokens?: number;
@@ -94,7 +104,7 @@ export interface AgentProgressSnapshot {
   phase?: AgentRunPhase;
   startedAt?: string;
   completedAt?: string;
-  recentTools?: Array<{ name: string; status: string }>;
+  recentTools?: RecentToolInfo[];
   toolCount?: number;
   tokens?: number;
   inputTokens?: number;
@@ -125,7 +135,7 @@ export interface ChildAgentCallSnapshot {
   lastActivityAt?: number;
   /** Pi emitted a final no-tool assistant turn; agent_end has not necessarily arrived yet. */
   resultReadyAt?: number;
-  recentTools?: Array<{ name: string; status: string }>;
+  recentTools?: RecentToolInfo[];
   lastMessage?: string;
   inputTokens?: number;
   outputTokens?: number;

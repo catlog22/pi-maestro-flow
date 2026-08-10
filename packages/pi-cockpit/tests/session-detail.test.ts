@@ -81,6 +81,18 @@ test("renderSessionDetail: running agent with an active tool keeps the working h
 	assert.ok(lines.some((line) => line.includes("bash")));
 });
 
+test("renderSessionDetail: active tool line shows the redacted args preview", () => {
+	const lines = renderSessionDetail(
+		[agent({ status: "running", tail: "", activeTool: "bash", activeToolArgs: "command=git diff" })],
+		"c1",
+		80,
+		theme as Theme,
+	);
+	const text = lines.join("\n");
+	assert.match(text, /bash/);
+	assert.match(text, /command=git diff/);
+});
+
 test("renderSessionDetail: stalled agent without tail reports the silence instead of working", () => {
 	const lines = renderSessionDetail(
 		[agent({ status: "running", tail: "", lastActivityAt: Date.now() - 45_000 })],

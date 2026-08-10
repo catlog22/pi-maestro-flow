@@ -9,6 +9,7 @@ import {
   BUILTIN_AGENT_NAMES,
   discoverAgents,
   formatAgentCatalog,
+  formatAgentShadowWarning,
   invalidateAgentCatalogCache,
   PUBLIC_BUILTIN_AGENT_NAMES,
   listAgentSummaries,
@@ -22,6 +23,7 @@ import {
   TEAMMATE_PROMPT_GUIDELINES,
   TEAMMATE_PROMPT_SNIPPET,
 } from "../src/extension/index.ts";
+import { displayMessageForResult } from "../src/extension/teammate-core.ts";
 import { buildPiArgs, runSingleTeammate } from "../src/runs/execution.ts";
 
 function agentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
@@ -160,6 +162,132 @@ ${description} prompt.
     assert.match(appendAgentCatalog("Base prompt", nested), /- compat-only: Project dot agents role/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("discovery snapshots retain shadowed and reserved candidates with the final winner", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-shadow-snapshot-"));
+  const project = path.join(root, "project");
+  const nested = path.join(project, "src");
+  const home = path.join(root, "home");
+  const userDir = path.join(home, ".pi", "agents");
+  const projectCompatDir = path.join(project, ".agents");
+  const projectPiDir = path.join(project, ".pi", "agents");
+  const packageDir = path.join(root, "package-agents");
+  for (const dir of [nested, userDir, projectCompatDir, projectPiDir, packageDir]) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  const writeAgent = (dir: string, fileName: string, name: string, description: string) => {
+    fs.writeFileSync(path.join(dir, fileName), `---
+name: ${name}
+description: ${description}
+---
+${description} prompt.
+`);
+  };
+  writeAgent(userDir, "shadowed-role.md", "shadowed-role", "User definition");
+  writeAgent(projectCompatDir, "shadowed-role.md", "shadowed-role", "Compatible project definition");
+  writeAgent(projectPiDir, "shadowed-role.md", "shadowed-role", "Canonical project definition");
+  writeAgent(projectPiDir, "general.md", "general", "Rejected builtin override");
+
+  const previousPackageDir = process.env.PI_TEAMMATE_PACKAGE_AGENTS_DIR;
+  process.env.PI_TEAMMATE_PACKAGE_AGENTS_DIR = packageDir;
+  invalidateAgentCatalogCache();
+  try {
+    const snapshot = discoverAgents(nested, { includeDiagnostics: true, homeDir: home });
+    const winner = resolveAgent(snapshot, "shadowed-role");
+    assert.equal(winner?.description, "Canonical project definition");
+    assert.equal(winner?.filePath, path.join(projectPiDir, "shadowed-role.md"));
+    assert.equal(listAgentSummaries(snapshot).find((agent) => agent.name === "shadowed-role")?.source, "project");
+
+    const shadowed = snapshot.diagnostics.filter((entry) => entry.name === "shadowed-role");
+    assert.deepEqual(shadowed.map((entry) => entry.reason), ["shadowed", "shadowed"]);
+    assert.deepEqual(shadowed.map((entry) => entry.candidate.source), ["user", "project"]);
+    assert.ok(shadowed.every((entry) => entry.winner.filePath === winner?.filePath));
+    assert.equal(
+      formatAgentShadowWarning(snapshot, "shadowed-role"),
+      'Agent "shadowed-role" resolved to the project definition; shadowed 2 other definitions from user, project.',
+    );
+
+    const reserved = snapshot.diagnostics.filter((entry) => entry.name === "general");
+    assert.equal(resolveAgent(snapshot, "general")?.source, "builtin");
+    assert.equal(reserved.length, 1);
+    assert.equal(reserved[0]?.reason, "reserved-builtin");
+    assert.equal(reserved[0]?.candidate.filePath, path.join(projectPiDir, "general.md"));
+    assert.equal(reserved[0]?.winner.source, "builtin");
+    assert.equal(
+      formatAgentShadowWarning(snapshot, "general"),
+      'Agent "general" uses the reserved builtin definition; ignored 1 custom definition from project.',
+    );
+    assert.equal(formatAgentShadowWarning(snapshot, "explorer"), undefined);
+
+    const legacyAgents = discoverAgents(nested, home);
+    assert.ok(Array.isArray(legacyAgents));
+    assert.equal(resolveAgent(nested, "shadowed-role")?.description, "Canonical project definition");
+  } finally {
+    if (previousPackageDir === undefined) delete process.env.PI_TEAMMATE_PACKAGE_AGENTS_DIR;
+    else process.env.PI_TEAMMATE_PACKAGE_AGENTS_DIR = previousPackageDir;
+    invalidateAgentCatalogCache();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dispatch exposes warnings only for the requested agent with shadow diagnostics", async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-shadow-dispatch-"));
+  const compatDir = path.join(project, ".agents");
+  const piDir = path.join(project, ".pi", "agents");
+  const packageDir = path.join(project, "package-agents");
+  fs.mkdirSync(compatDir, { recursive: true });
+  fs.mkdirSync(piDir, { recursive: true });
+  fs.mkdirSync(packageDir, { recursive: true });
+  const writeAgent = (dir: string, name: string, description: string) => {
+    fs.writeFileSync(path.join(dir, `${name}.md`), `---
+name: ${name}
+description: ${description}
+---
+${description} prompt.
+`);
+  };
+  writeAgent(compatDir, "shadowed-role", "Compatible project definition");
+  writeAgent(piDir, "shadowed-role", "Canonical project definition");
+  writeAgent(piDir, "general", "Rejected builtin override");
+
+  const previousPackageDir = process.env.PI_TEAMMATE_PACKAGE_AGENTS_DIR;
+  process.env.PI_TEAMMATE_PACKAGE_AGENTS_DIR = packageDir;
+  invalidateAgentCatalogCache();
+  try {
+    const invalidModel = "invalid model specifier";
+    const shadowed = await runSingleTeammate(
+      { agent: "shadowed-role", task: "Do work", model: invalidModel },
+      { baseCwd: project },
+    );
+    assert.equal(shadowed.exitCode, 1);
+    assert.deepEqual(shadowed.warnings, [
+      'Agent "shadowed-role" resolved to the project definition; shadowed 1 other definition from project.',
+    ]);
+    assert.match(displayMessageForResult(shadowed), /^\[warn\] Agent "shadowed-role" resolved/);
+
+    const reserved = await runSingleTeammate(
+      { agent: "general", task: "Do work", model: invalidModel },
+      { baseCwd: project },
+    );
+    assert.deepEqual(reserved.warnings, [
+      'Agent "general" uses the reserved builtin definition; ignored 1 custom definition from project.',
+    ]);
+    assert.match(displayMessageForResult(reserved), /^\[warn\] Agent "general" uses the reserved builtin definition/);
+
+    const clean = await runSingleTeammate(
+      { agent: "explorer", task: "Do work", model: invalidModel },
+      { baseCwd: project },
+    );
+    assert.equal(clean.warnings, undefined);
+    assert.doesNotMatch(displayMessageForResult(clean), /^\[warn\]/);
+  } finally {
+    if (previousPackageDir === undefined) delete process.env.PI_TEAMMATE_PACKAGE_AGENTS_DIR;
+    else process.env.PI_TEAMMATE_PACKAGE_AGENTS_DIR = previousPackageDir;
+    invalidateAgentCatalogCache();
+    fs.rmSync(project, { recursive: true, force: true });
   }
 });
 

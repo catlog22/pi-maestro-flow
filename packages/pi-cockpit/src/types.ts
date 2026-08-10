@@ -63,11 +63,14 @@ export interface AgentRow {
 	cacheWriteTokens?: number;
 	/** Latest provider/runtime diagnostic from the authoritative progress snapshot. */
 	error?: string;
+	/** Current tool name while running, from the progress snapshot's recent tools. */
+	activeTool?: string;
+	/** Redacted one-line argument summary of the current tool call. */
+	activeToolArgs?: string;
 	requestedModel?: string;
 	resolvedModel?: string;
 	attemptedModels?: string[];
 	taskStatus?: string;
-	activeTool?: string;
 	taskIndex?: number;
 	dependencies?: number[];
 	/** Set only on a failed row that outlived its completion, so it can be pruned. */

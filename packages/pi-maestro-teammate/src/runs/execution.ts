@@ -18,8 +18,15 @@ import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { Check, Errors } from "typebox/value";
 import crossSpawn from "cross-spawn";
-import { listAgentSummaries, resolveAgent, type AgentConfig } from "../agents/agents.ts";
+import {
+  discoverAgents,
+  formatAgentShadowWarning,
+  listAgentSummaries,
+  resolveAgent,
+  type AgentConfig,
+} from "../agents/agents.ts";
 import { resolveReplyTo, type ReplyTarget } from "../shared/routing.ts";
+import { previewToolCallArgs } from "./shared/tool-preview.ts";
 import type {
   SingleResult,
   Usage,
@@ -91,6 +98,7 @@ import {
   resultFailureMessage,
   setUsageSnapshot,
   taskDependencyNames,
+  taskPromptBoundaryError,
   truncateUtf8Tail,
   validateTaskReferences,
   waitForRetryDelay,
@@ -144,6 +152,14 @@ export async function runSingleTeammate(
   const correlationId = options.correlationId ?? randomUUID();
   let resolvedRunCwd: string | undefined;
   let publicationAwaitingCompletion: { publicationId: string; originCwd: string } | undefined;
+  let agentDiscoveryWarning: string | undefined;
+
+  const attachDiscoveryWarning = (result: SingleResult): SingleResult => {
+    if (agentDiscoveryWarning && !result.warnings?.includes(agentDiscoveryWarning)) {
+      result.warnings = [...(result.warnings ?? []), agentDiscoveryWarning];
+    }
+    return result;
+  };
 
   const rejectWith = (content: string): SingleResult => ({
     agent: params.agent,
@@ -161,6 +177,7 @@ export async function runSingleTeammate(
     result: SingleResult,
     terminalStatus?: AgentTerminalStatus,
   ): void => {
+    attachDiscoveryWarning(result);
     if (resolvedRunCwd) result.originCwd ??= resolvedRunCwd;
     if (publicationAwaitingCompletion) {
       result.publicationId ??= publicationAwaitingCompletion.publicationId;
@@ -179,6 +196,7 @@ export async function runSingleTeammate(
   };
 
   const publishResult = async (result: SingleResult, originCwd: string): Promise<void> => {
+    attachDiscoveryWarning(result);
     result.publicationId ??= randomUUID();
     result.originCwd ??= originCwd;
     publicationAwaitingCompletion = {
@@ -229,13 +247,15 @@ export async function runSingleTeammate(
 
   // Resolve an exact discovered role. Silent generic fallback made misspelled
   // or out-of-project role names look successful while ignoring their prompt.
-  const agentConfig: AgentConfig | undefined = resolveAgent(cwd, params.agent);
+  const discovery = discoverAgents(cwd, { includeDiagnostics: true });
+  const agentConfig: AgentConfig | undefined = resolveAgent(discovery, params.agent);
   if (!agentConfig) {
-    const available = listAgentSummaries(cwd).map((agent) => agent.name).join(", ");
+    const available = listAgentSummaries(discovery).map((agent) => agent.name).join(", ");
     return rejectAndPublish(
       `Unknown teammate agent "${params.agent}". Available agents: ${available || "(none)"}.`,
     );
   }
+  agentDiscoveryWarning = formatAgentShadowWarning(discovery, params.agent);
 
   // Resolve routing
   const replyTo: ReplyTarget = resolveReplyTo({
@@ -373,6 +393,7 @@ export async function runSingleTeammate(
         discardCompletion();
         throw error;
       }
+      attachDiscoveryWarning(candidateResult);
       lastResult = candidateResult;
       candidateResult.originCwd ??= cwd;
       if (modelToUse === undefined) {
@@ -1535,7 +1556,10 @@ async function runSingleAttempt(
         (event.toolName as string) ?? (event.name as string) ?? "unknown",
         EXECUTION_BUFFER_LIMITS.toolNameBytes,
       );
-      progress.recentTools.push({ name: toolName, status: "running" });
+      const argsPreview = previewToolCallArgs(event.args, toolName);
+      progress.recentTools.push(argsPreview === undefined
+        ? { name: toolName, status: "running" }
+        : { name: toolName, status: "running", argsPreview });
       state.inFlightToolCount += 1;
       progress.phase = "tool-execution";
       if (progress.recentTools.length > EXECUTION_BUFFER_LIMITS.toolItems) {
@@ -2317,6 +2341,13 @@ export async function runGraph(
         idx,
         `Variable resolution failed: ${err instanceof Error ? err.message : String(err)}`,
       );
+      notifyComplete(idx);
+      return;
+    }
+
+    const resolvedTaskBoundaryError = taskPromptBoundaryError(resolvedTask);
+    if (resolvedTaskBoundaryError) {
+      publishSyntheticFailure(task, idx, `Resolved task prompt ${resolvedTaskBoundaryError}.`);
       notifyComplete(idx);
       return;
     }

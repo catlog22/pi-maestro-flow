@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import {
+  MAX_TASK_PROMPT_BYTES,
   runGraph,
   runSingleTeammate,
   type NormalizedTask,
@@ -73,6 +74,23 @@ test("dependency-skipped DAG tasks publish a synthetic terminal completion", asy
   assert.match(results[1].messages[0].content, /Skipped: upstream dependency failed/);
   assert.deepEqual(completions.map(({ result }) => result.correlationId).sort(), ["dependent-cid", "seed-cid"]);
   assert.equal(completions.find(({ result }) => result.correlationId === "dependent-cid")?.status, "failed");
+});
+
+test("runGraph rejects an oversized resolved prompt before child launch", async () => {
+  let spawns = 0;
+  const results = await runGraph([
+    { agent: "general", name: "oversized", prompt: "a".repeat(MAX_TASK_PROMPT_BYTES + 1) },
+  ], 1, {
+    baseCwd: process.cwd(),
+    spawnChildProcess: (() => {
+      spawns += 1;
+      return fakeChild();
+    }) as unknown as SpawnSeam,
+  });
+
+  assert.equal(spawns, 0);
+  assert.equal(results[0].exitCode, 1);
+  assert.match(results[0].messages[0].content, /Resolved task prompt .*UTF-8 bytes/);
 });
 
 test("child process failures do not enter an outer retry backoff", async () => {

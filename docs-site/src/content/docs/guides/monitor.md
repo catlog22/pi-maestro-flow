@@ -3,7 +3,7 @@ title: "Monitor 跨会话监督"
 icon: "📊"
 ---
 
-Monitor 用于持续监督**同一工作区中的其他 Pi 会话或窗口**。它按固定周期检查目标是否失败、等待用户输入、长时间停滞或偏离任务，并在满足条件时发送受控 `steer` 干预；监督记录持久写入 ledger，可在会话重载后恢复。
+Monitor 用于持续监督和协调**同一工作区中的其他 Pi 会话或窗口**。它既可以绑定已经打开的 peer window，也可以按用户目标创建新的可交互 worker window、自动纳入监督，并在结果回收后关闭自己创建的窗口。每个监督周期会检查目标是否失败、等待用户输入、长时间停滞或偏离任务，并在满足条件时发送受控 `steer` 干预；监督记录持久写入 ledger，可在会话重载后恢复。
 
 Monitor 适合长时间并行任务、多窗口开发、后台迁移和需要闭环纠偏的工作流。它不是普通状态查询工具：只想读取一次状态时使用 `observe`；需要持续判断并主动纠偏时使用 `/monitor`。
 
@@ -13,28 +13,31 @@ Monitor 适合长时间并行任务、多窗口开发、后台迁移和需要闭
 
 ## 1. 最短上手流程
 
-先在同一工作区启动或打开至少一个其他 Pi 窗口，并为会话使用容易识别的名称。然后在负责监督的窗口中执行：
+进入 Monitor 模式后，直接在 `#control` 中描述需要协调的工作。无需先手工打开 worker window，也不需要调用窗口创建命令：
 
 ```text
-# 打开 Monitor 控制窗口，不立即绑定目标
+# 打开 Monitor 控制窗口
 /monitor
 
-# 绑定名为 backend 的窗口，使用自动监督
-/monitor backend auto
-
-# 查看当前绑定、最近输出和 ledger 状态
-/monitor status
-
-# 查看监督效果指标
-/monitor metrics
-
-# 停止监督并清除当前绑定
-/monitor exit
+# 然后在 #control 中输入自然语言指令
+创建 backend、frontend 和 tests 三个可交互工作窗口，
+分别实现接口、页面和集成测试，持续协调到全部完成，
+收集结果后关闭不再需要的窗口。
 ```
 
-输入 `/monitor ` 后可使用命令补全查看当前可绑定的窗口名称。直接执行 `/monitor` 会进入控制窗口；在 `#control` Tab 中输入监督指令，或选择一个 peer window 向目标发消息。
+Monitor Agent 会拆分目标、创建窗口、等待 workspace peer 注册、自动绑定监督，并使用 `observe` 与 `teammate-send` 协调执行。创建成功后，每个 worker 都是独立、可交互的 Pi TUI 窗口。
 
-> Monitor 绑定的是工作区窗口端点。目标窗口关闭、切换工作区或端点已更新时，旧绑定不会被继续复用。
+对于已经手工打开的同工作区窗口，仍可显式绑定：
+
+```text
+/monitor backend auto          # 绑定已有 backend 窗口
+/monitor status                # 查看绑定、最近输出和 ledger
+/monitor metrics               # 查看监督效果指标
+```
+
+输入 `/monitor ` 后可使用命令补全查看当前可绑定的窗口名称。直接执行 `/monitor` 会进入控制窗口；在 `#control` Tab 中输入监督策略或协调指令，也可以选择一个 peer window 向目标发消息。
+
+> Monitor 绑定的是工作区窗口端点。目标窗口关闭、切换工作区或端点已更新时，旧绑定不会被继续复用。Monitor 只能关闭当前 Monitor 会话自己创建并完成所有权校验的 worker；手工打开或由其他会话创建的 peer window 只能观察、绑定和发消息。
 
 ## 2. 绑定目标与监督模式
 
@@ -110,30 +113,62 @@ Monitor 控制窗口本身不能作为监督目标。`Alt+R` 可打开 teammate 
 | `/monitor doctor` | 只读健康检查：配置、绑定数、ledger 路径、记录数和警告 |
 | `/monitor resume` | 从持久 ledger 恢复仍然有效的绑定 |
 | `/monitor exit` / `/monitor stop` | 停止 Monitor 会话并清除绑定 |
-| `/monitor spawn <name> <objective>` | 启动一个受管理的 headless Pi 工作窗口 |
-| `/monitor spawn status` | 查看当前受管理窗口 |
-| `/monitor spawn stop <name>` | 停止指定受管理窗口 |
+| `/monitor spawn <name> <objective>` | 兼容/调试入口：启动受管理的 headless Pi 工作窗口 |
+| `/monitor spawn status` | 兼容入口：查看当前受管理窗口 |
+| `/monitor spawn stop <name>` | 兼容入口：停止指定受管理窗口 |
 | `/monitor ui` | 旧版绑定 Overlay，仅为兼容保留 |
 
-## 5. 启动受管理工作窗口
+## 5. Monitor 管理的工作窗口
 
-Monitor 可以直接创建一个 headless Pi 窗口，再把它纳入监督：
+主要工作流由 Monitor Agent 完成，不需要用户执行 `/monitor spawn`。进入 `/monitor` 后，用自然语言说明任务拆分、并行度、交互窗口偏好和回收条件：
+
+```text
+创建 migration 和 verification 两个工作窗口。
+migration 完成数据库迁移，verification 独立检查兼容性；
+持续协调两者，保存最终结果后关闭窗口。
+```
+
+Monitor Agent 在内部使用 `workspace-window` 生命周期工具：
+
+1. `create` 默认打开新的可交互终端，并以目标作为 Pi 的首条消息；明确要求无头执行时可以选择 `headless`；
+2. 每次创建都会生成不可猜测的内部会话名，等待精确的 workspace owner 注册后才承认所有权；
+3. 注册成功后自动建立 `auto` 监督 binding，再通过 `observe` 和 `teammate-send` 协调 worker；
+4. `list` 只列出当前 Monitor 会话创建的窗口；
+5. `close` 会先确认进程树已经回收，再解除 binding 和 ownership 记录。无法证明进程已经退出时会保留记录并报告错误，不会把陈旧 PID 当作可关闭目标。
+
+名称必须以字母或数字开头，只能包含 `A-Z`、`a-z`、`0-9`、`.`、`_`、`-`，最长 64 个字符。单个 Monitor 会话最多同时持有 8 个 managed window。
+
+### 终端支持
+
+可交互窗口使用平台终端启动：
+
+- Windows：Windows Terminal `wt.exe`，以新窗口和新 Tab 启动；
+- macOS：Terminal，通过 `osascript` 打开；
+- Linux：优先使用 `PI_TEAMMATE_TERMINAL` 指定的终端，否则使用 `x-terminal-emulator`；自定义终端需要支持 `-e <command> <args...>`。
+
+终端程序不存在或 worker 未在 15 秒内注册时，创建操作会失败并尝试回滚。若物理回收无法确认，Monitor 会保留该窗口的记录以便后续重新发现或关闭。
+
+### 关闭与退出
+
+Monitor 只能关闭自己创建的 worker。已有 peer window、用户手工打开的窗口以及其他 Monitor 创建的窗口不具备关闭权限。
+
+在执行 `/monitor exit` 前，应先让协调 Agent 收集结果并关闭不再需要的 managed window：
+
+```text
+汇总所有 worker 的结果，关闭已完成的窗口，然后报告剩余阻塞。
+```
+
+`/monitor exit` 本身停止监督并清除 binding，不等同于关闭所有 worker。若已经退出 Monitor 模式，可重新执行 `/monitor` 后要求协调 Agent 回收窗口。Pi 根会话整体关闭或 reload 时，也会尝试回收仍由它持有的 managed window。
+
+### 兼容入口
+
+`/monitor spawn <name> <objective>` 仍保留为 headless 兼容和调试入口。它不会替代自然语言协调流程，创建后仍需按旧流程等待发现和显式绑定：
 
 ```text
 /monitor spawn migration 完成数据库迁移并运行集成测试
-/monitor spawn status
 /monitor migration auto
-```
-
-窗口名必须以字母或数字开头，只能包含 `A-Z`、`a-z`、`0-9`、`.`、`_`、`-`，最长 64 个字符。目标文本使用命令中名称之后的全部内容。
-
-停止窗口：
-
-```text
 /monitor spawn stop migration
 ```
-
-受管理窗口附着于创建它的扩展生命周期。完成后应显式停止，避免遗留不再需要的后台 Pi 进程。
 
 ## 6. Monitor 如何判断和干预
 
@@ -231,7 +266,7 @@ Monitor 从项目的 `.pi/settings.json` 读取 `monitor` 段：
 
 | 能力 | 监督对象 | 是否持续 | 是否主动干预 | 推荐用途 |
 |------|----------|----------|--------------|----------|
-| Monitor | 同工作区的其他窗口/会话 | 是，周期 tick | 是，受控 `steer` | 多窗口任务、后台执行、长期监督 |
+| Monitor | 同工作区的其他窗口/会话，以及自己创建的 worker | 是，周期 tick | 是，受控 `steer`；可创建和回收 owned worker | 多窗口任务、后台执行、长期监督与协调 |
 | Advisor | 当前主会话 | 按回合/工具检查点 | 只注入质量建议 | 检查当前 Agent 的方向和约束遵循 |
 | `observe` | 指定 Agent、后台命令或工作区 | 否，单次或有界等待 | 否 | 状态查询、等待完成、读取 turns |
 | Goal verifier | Goal 完成结果 | 完成时 | 否 | 验收 acceptance 和完成声明 |
@@ -241,6 +276,16 @@ Monitor 与 Advisor 可以同时启用：Monitor 关注其他窗口是否停滞�
 Agent 需要查看窗口时，应使用 `teammate-list({ view: "windows" })` 和 `observe`。旧的 `teammate-watch`、`teammate-wait` 及独立 legacy observation 工具默认隐藏，不应作为新工作流入口。
 
 ## 10. 排障
+
+### 无法创建可交互 worker window
+
+1. 确认当前已经通过 `/monitor` 进入 `#control`；`workspace-window` 在普通模式下会拒绝执行；
+2. Windows 检查 `wt.exe`，macOS 检查 Terminal，Linux 检查 `PI_TEAMMATE_TERMINAL` 或 `x-terminal-emulator`；
+3. 确认窗口名符合命名规则，且当前 managed window 数量未达到 8；
+4. 新终端已经打开但报告注册超时时，检查该窗口是否加载了相同工作区和最新版扩展；
+5. 运行自然语言指令“列出你创建的工作窗口”，确认状态是 `launching`、`running`、`disconnected` 还是 `failed`。
+
+如果关闭操作提示无法确认所有权或物理回收，Monitor 会故意保留记录。不要用同名外部窗口替代它；先恢复目标窗口的 workspace peer 发布，或让 Monitor 再次执行关闭。
 
 ### 找不到目标窗口
 

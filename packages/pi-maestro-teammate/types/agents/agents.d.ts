@@ -32,6 +32,24 @@ export interface AgentSummary {
     description: string;
     source: AgentSource;
 }
+export interface AgentDefinitionReference {
+    source: AgentSource;
+    filePath: string;
+}
+export interface AgentShadowDiagnostic {
+    name: string;
+    reason: "shadowed" | "reserved-builtin";
+    winner: AgentDefinitionReference;
+    candidate: AgentDefinitionReference;
+}
+export interface AgentDiscoverySnapshot {
+    agents: AgentConfig[];
+    diagnostics: AgentShadowDiagnostic[];
+}
+export interface AgentDiscoveryOptions {
+    includeDiagnostics: true;
+    homeDir?: string;
+}
 export interface AgentCatalogSnapshot {
     signature: string;
     systemPrompt: string;
@@ -41,13 +59,16 @@ export declare function isBuiltinAgentName(name: string): name is BuiltinAgentNa
  * Discover all agent definitions, merged by priority:
  * package > project > user > builtin (name collisions: higher priority wins).
  */
+export declare function discoverAgents(cwd: string, options: AgentDiscoveryOptions): AgentDiscoverySnapshot;
 export declare function discoverAgents(cwd: string, homeDir?: string): AgentConfig[];
-/**
- * Resolve a single agent by name.
- */
+/** Resolve a single agent by name, optionally from an existing discovery snapshot. */
+export declare function resolveAgent(discovery: AgentDiscoverySnapshot, agentName: string): AgentConfig | undefined;
 export declare function resolveAgent(cwd: string, agentName: string): AgentConfig | undefined;
 /** Return resolved role metadata without exposing the role prompt body. */
+export declare function listAgentSummaries(discovery: AgentDiscoverySnapshot): AgentSummary[];
 export declare function listAgentSummaries(cwd: string, homeDir?: string): AgentSummary[];
+/** Format diagnostics only for the exact role selected for dispatch. */
+export declare function formatAgentShadowWarning(discovery: AgentDiscoverySnapshot, agentName: string): string | undefined;
 /** Format a compact, deterministic role catalog for teammate tool metadata. */
 export declare function formatAgentCatalog(cwd: string, maxRoles?: number, maxDescriptionLength?: number): string;
 /**

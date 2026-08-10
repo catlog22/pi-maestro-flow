@@ -879,6 +879,28 @@ export function normalizeTodoBindings(todo: string | string[] | undefined): stri
 
 // ---------------------------------------------------------------------------
 
+/** Public task prompt budget, measured after UTF-8 encoding. */
+export const MAX_TASK_PROMPT_BYTES = 1024 * 1024;
+
+// Allow ordinary multiline text (tab, LF, CR); reject terminal/control input.
+const DISALLOWED_TASK_PROMPT_CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/;
+
+/** Return an actionable boundary error for a task prompt, if any. */
+export function taskPromptBoundaryError(prompt: unknown): string | undefined {
+  if (typeof prompt !== "string") return "requires a string prompt";
+  if (prompt.trim().length === 0) return "requires non-empty text";
+  const control = prompt.match(DISALLOWED_TASK_PROMPT_CONTROL)?.[0];
+  if (control !== undefined) {
+    const codePoint = control.codePointAt(0) ?? 0;
+    return `contains unsupported control character U+${codePoint.toString(16).toUpperCase().padStart(4, "0")}`;
+  }
+  const bytes = Buffer.byteLength(prompt, "utf8");
+  if (bytes > MAX_TASK_PROMPT_BYTES) {
+    return `is ${bytes} UTF-8 bytes; maximum is ${MAX_TASK_PROMPT_BYTES}`;
+  }
+  return undefined;
+}
+
 export interface NormalizeTeammateResult {
   tasks: NormalizedTask[];
   isMultiTask: boolean;
@@ -979,6 +1001,15 @@ export function normalizeTeammateParams(
         isMultiTask,
         warnings,
         error: `tasks[${index}]${task.name ? ` "${task.name}"` : ""} requires a non-empty "prompt".`,
+      };
+    }
+    const promptBoundaryError = taskPromptBoundaryError(task.prompt);
+    if (promptBoundaryError) {
+      return {
+        tasks: normalized,
+        isMultiTask,
+        warnings,
+        error: `tasks[${index}]${task.name ? ` "${task.name}"` : ""} prompt ${promptBoundaryError}.`,
       };
     }
     if (strayPrompt) {
@@ -1101,6 +1132,173 @@ export function getPiSpawnCommand(
   // and escapes each argv item before invoking cmd.exe internally.
   void options.platform;
   return { command: "pi", args, shell: false };
+}
+
+export interface InteractiveTerminalLaunchOptions {
+  platform?: NodeJS.Platform;
+  terminalCommand?: string;
+  title?: string;
+}
+
+export interface InteractiveTerminalLaunchSpec {
+  command: string;
+  args: string[];
+  cwd: string;
+}
+
+function quotePosixShellArg(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function quoteAppleScriptString(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+/** Build a shell-free terminal launcher where the platform supports argv forwarding. */
+export function getInteractiveTerminalLaunchSpec(
+  piCommand: { command: string; args: readonly string[] },
+  cwd: string,
+  options: InteractiveTerminalLaunchOptions = {},
+): InteractiveTerminalLaunchSpec {
+  const platform = options.platform ?? process.platform;
+  const title = options.title ?? "Pi worker";
+
+  if (platform === "win32") {
+    return {
+      command: options.terminalCommand ?? "wt.exe",
+      args: [
+        "--window",
+        "new",
+        "new-tab",
+        "--title",
+        title,
+        "--startingDirectory",
+        cwd,
+        piCommand.command,
+        ...piCommand.args,
+      ],
+      cwd,
+    };
+  }
+
+  if (platform === "darwin") {
+    const shellCommand = `cd ${quotePosixShellArg(cwd)} && exec ${[
+      piCommand.command,
+      ...piCommand.args,
+    ].map(quotePosixShellArg).join(" ")}`;
+    return {
+      command: options.terminalCommand ?? "/usr/bin/osascript",
+      args: [
+        "-e",
+        `tell application "Terminal" to activate`,
+        "-e",
+        `tell application "Terminal" to do script ${quoteAppleScriptString(shellCommand)}`,
+      ],
+      cwd,
+    };
+  }
+
+  return {
+    command: options.terminalCommand ?? process.env.PI_TEAMMATE_TERMINAL ?? "x-terminal-emulator",
+    args: ["-e", piCommand.command, ...piCommand.args],
+    cwd,
+  };
+}
+
+export interface ProcessTreeByPidOptions {
+  platform?: NodeJS.Platform;
+  spawnProcess?: typeof crossSpawn;
+  killProcess?: typeof process.kill;
+  isProcessAlive?: (pid: number) => boolean;
+  graceMs?: number;
+  pollMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Terminate an explicitly owned process tree; callers must revalidate PID ownership first. */
+export async function terminateProcessTreeByPid(
+  pid: number,
+  options: ProcessTreeByPidOptions = {},
+): Promise<void> {
+  if (!Number.isInteger(pid) || pid <= 0) throw new Error(`Invalid owned process pid: ${pid}`);
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") {
+    const spawnProcess = options.spawnProcess ?? crossSpawn;
+    await new Promise<void>((resolve, reject) => {
+      const killer = spawnProcess(
+        "taskkill",
+        ["/PID", String(pid), "/T", "/F"],
+        { windowsHide: true, stdio: "ignore", shell: false },
+      );
+      killer.once("error", reject);
+      killer.once("close", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`taskkill exited with code ${code ?? "unknown"}`));
+      });
+    });
+    return;
+  }
+
+  const killProcess = options.killProcess ?? process.kill;
+  const isAlive = options.isProcessAlive ?? processIsAlive;
+  const graceMs = options.graceMs ?? 2_000;
+  const pollMs = options.pollMs ?? 50;
+  const sleepFor = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  let signalTarget: "group" | "pid" | undefined;
+  const signalTree = (signal: NodeJS.Signals): void => {
+    if (signalTarget === "group") {
+      try {
+        killProcess(-pid, signal);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+      return;
+    }
+    if (signalTarget === "pid") {
+      try {
+        killProcess(pid, signal);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+      return;
+    }
+    try {
+      killProcess(-pid, signal);
+      signalTarget = "group";
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ESRCH") throw error;
+      try {
+        killProcess(pid, signal);
+        signalTarget = "pid";
+      } catch (directError) {
+        if ((directError as NodeJS.ErrnoException).code !== "ESRCH") throw directError;
+      }
+    }
+  };
+  const waitForExit = async (): Promise<boolean> => {
+    const deadline = Date.now() + graceMs;
+    while (Date.now() < deadline) {
+      if (!isAlive(pid)) return true;
+      await sleepFor(Math.min(pollMs, Math.max(1, deadline - Date.now())));
+    }
+    return !isAlive(pid);
+  };
+
+  signalTree("SIGTERM");
+  if (await waitForExit()) return;
+  signalTree("SIGKILL");
+  if (await waitForExit()) return;
+  throw new Error(`Owned process tree ${pid} did not exit after SIGKILL.`);
 }
 
 // ---------------------------------------------------------------------------

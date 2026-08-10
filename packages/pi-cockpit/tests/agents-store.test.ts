@@ -78,7 +78,7 @@ test("progress message projects teammate tools, tokens, status and last message"
 		lastMessage: "implementing footer",
 		recentTools: [
 			{ name: "read", status: "completed" },
-			{ name: "edit", status: "running" },
+			{ name: "edit", status: "running", argsPreview: "file_path=src/x.ts" },
 		],
 		toolCount: 4,
 		tokens: 1200,
@@ -89,6 +89,7 @@ test("progress message projects teammate tools, tokens, status and last message"
 	const row = s.snapshot()[0];
 	assert.equal(row.tail, "implementing footer");
 	assert.equal(row.activeTool, "edit");
+	assert.equal(row.activeToolArgs, "file_path=src/x.ts");
 	assert.equal(row.toolCount, 4);
 	assert.equal(row.tokens, 1200);
 	assert.equal(row.inputTokens, 1_000);
@@ -878,4 +879,43 @@ test("setViewingAgent marks the viewed row and clears on exit", () => {
 	s.setViewingAgent(undefined);
 	const cleared = s.snapshot(10).find((row) => row.correlationId === "c1");
 	assert.equal(cleared?.viewing, undefined, "exit clears the flag");
+});
+
+test("argsPreview rides along the active tool and clears when the tool ends", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
+	s.applyMessage({
+		correlationId: "c1",
+		recentTools: [{ name: "bash", status: "running", argsPreview: "command=git diff" }],
+	}, 2);
+	assert.equal(s.snapshot()[0].activeTool, "bash");
+	assert.equal(s.snapshot()[0].activeToolArgs, "command=git diff");
+	// A later snapshot without argsPreview clears the stale summary.
+	s.applyMessage({
+		correlationId: "c1",
+		recentTools: [{ name: "bash", status: "completed" }],
+	}, 3);
+	assert.equal(s.snapshot()[0].activeTool, "bash");
+	assert.equal(s.snapshot()[0].activeToolArgs, undefined);
+});
+
+test("argsPreview from legacy string tool entries is ignored gracefully", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
+	// Pre-v1 progress deltas used plain strings; they still project a name only.
+	s.applyMessage({ correlationId: "c1", recentTools: ["grep"] }, 2);
+	assert.equal(s.snapshot()[0].activeTool, "grep");
+	assert.equal(s.snapshot()[0].activeToolArgs, undefined);
+});
+
+test("argsPreview is bounded to the display budget", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
+	s.applyMessage({
+		correlationId: "c1",
+		recentTools: [{ name: "bash", status: "running", argsPreview: "x".repeat(500) }],
+	}, 2);
+	const preview = s.snapshot()[0].activeToolArgs;
+	assert.ok(preview);
+	assert.ok(preview.length <= 140, `bounded to 140 chars, got ${preview.length}`);
 });

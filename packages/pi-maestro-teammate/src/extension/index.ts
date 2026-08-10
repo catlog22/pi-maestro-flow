@@ -25,7 +25,7 @@ import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "..
 import { Text, truncateToWidth, visibleWidth, matchesKey, isKeyRelease, isKeyRepeat } from "@earendil-works/pi-tui";
 import { loadTranscript, scanWorkspaceSessionDirs, groupTranscriptTurns, type WorkspaceSessionScan } from "../transcript/session-transcript.ts";
 import type { TranscriptRow } from "../shared/transcript.ts";
-import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams } from "./schemas.ts";
+import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams, WorkspaceWindowParams } from "./schemas.ts";
 import {
   formatObserveResult,
   observeTargets,
@@ -190,7 +190,13 @@ import {
 import { showModelMappingOverlay } from "../tui/model-mapping-overlay.ts";
 import { sharedModelCircuitBreaker } from "../public/v1/retry.ts";
 import { normalizePiRetryErrorMessage } from "../runs/retry.ts";
-import { getPiSpawnCommand } from "../runs/execution-infra.ts";
+import {
+  createChildTerminationController,
+  getInteractiveTerminalLaunchSpec,
+  getPiSpawnCommand,
+  terminateProcessTreeByPid,
+  type ChildTerminationController,
+} from "../runs/execution-infra.ts";
 import { showMonitorOverlay, type MonitorSessionRow } from "../tui/monitor-overlay.ts";
 import { showSessionSendOverlay } from "../tui/session-send-overlay.ts";
 import {
@@ -357,6 +363,12 @@ import {
   type WindowThreadEntryInput,
   type WindowThreadStatus,
 } from "../sessions/session-core.ts";
+import {
+  formatWorkspaceWindowInbox,
+  loadWorkspaceWindowInbox,
+  resolveWindowInboxAnchor,
+  type WindowInboxQuery,
+} from "../sessions/window-inbox.ts";
 import { projectTeammateSessionEndpoints } from "./session-endpoints.ts";
 
 /** Shared-process bridge key: the root host publishes the live v1 mailbox registry here. */
@@ -823,7 +835,7 @@ export default function registerTeammateExtension(
       promptSnippet: TEAMMATE_LIST_SNIPPET,
       promptGuidelines: TEAMMATE_LIST_GUIDELINES,
       parameters: TeammateListParams,
-      async execute(_id: string, params: { view?: TeammateListView }, signal: AbortSignal) {
+      async execute(_id: string, params: WindowInboxQuery & { view?: TeammateListView }, signal: AbortSignal) {
         return proxyCall<{ agents: unknown[] }>("teammate-list", params, signal);
       },
       renderCall(args, theme, context) {
@@ -1066,6 +1078,17 @@ export default function registerTeammateExtension(
         workspacePeerRefresh = undefined;
       });
     return workspacePeerRefresh;
+  };
+
+  /** Destructive operations require a fresh discovery result, never the stale fallback cache. */
+  const refreshWorkspacePeerOwnersStrict = async (): Promise<WorkspaceOwnerSnapshot[]> => {
+    if (workspacePeerRefresh) await workspacePeerRefresh;
+    const publisher = workspacePeerPublisher;
+    if (!publisher) throw new Error("Workspace peer discovery is unavailable.");
+    const result = await discoverWorkspacePeers(publisher.identity, { cleanupStale: true });
+    workspacePeerOwners = result.peers;
+    refreshSessionEndpointDirectory();
+    return workspacePeerOwners;
   };
 
   const targetForWorkspaceBinding = (bindingKey: string): WorkspaceResolvedTarget | undefined => {
@@ -1812,6 +1835,15 @@ export default function registerTeammateExtension(
                   deliveryStage: "queued",
                 }
               : { status: "rejected", message: "main session rejected the message" };
+            if (delivered && effectiveAction !== "steer" && foregroundToolRuns.size > 0) {
+              const senderLabel = command.fromSessionName
+                ? JSON.stringify(command.fromSessionName)
+                : `owner ${command.fromOwnerId.slice(0, 8)}`;
+              ctx.ui.notify(
+                `[workspace] Message from ${senderLabel} queued while a tool was running; it will be injected after the current turn ends.`,
+                "info",
+              );
+            }
           } else {
             const target = state.activeRuns.get(command.targetCorrelationId);
             if (!target) {
@@ -3283,10 +3315,13 @@ export default function registerTeammateExtension(
       if (!cid) {
         const deliveryStage = delivery.receipt?.deliveryStage ?? "queued";
         const effectiveMode = delivery.receipt?.effectiveMode ?? mode;
+        const queuedHint = deliveryStage === "queued"
+          ? " The peer's reply will be injected after this turn ends; end the turn to receive it."
+          : "";
         return {
           content: [{
             type: "text",
-            text: `Message ${deliveryStage} for workspace target "${params.to}" (requested ${mode}, effective ${effectiveMode}).`,
+            text: `Message ${deliveryStage} for workspace target "${params.to}" (requested ${mode}, effective ${effectiveMode}).${queuedHint}`,
           }],
           isError: false,
           details: { delivered: true },
@@ -3345,7 +3380,7 @@ export default function registerTeammateExtension(
 
     async execute(
       _id: string,
-      params: { view?: TeammateListView },
+      params: WindowInboxQuery & { view?: TeammateListView },
       _signal: AbortSignal,
       _onUpdate: unknown,
       ctx: ExtensionContext,
@@ -3358,6 +3393,30 @@ export default function registerTeammateExtension(
           isError: false,
           details: { agents: entries },
         };
+      }
+      if (view === "inbox") {
+        try {
+          const inbox = await loadWorkspaceWindowInbox(
+            resolveWindowInboxAnchor(
+              state.mainSessionFile,
+              ctx.sessionManager?.getSessionFile?.(),
+            ),
+            params,
+          );
+          const entries = inbox.entries.map((entry) => ({ kind: "window-message" as const, ...entry }));
+          return {
+            content: [{ type: "text", text: formatWorkspaceWindowInbox(inbox) }],
+            isError: false,
+            details: { agents: entries },
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return {
+            content: [{ type: "text", text: message }],
+            isError: true,
+            details: { agents: [] },
+          };
+        }
       }
       if (view === "windows") {
         await workspacePeerLifecycle;
@@ -4097,53 +4156,262 @@ export default function registerTeammateExtension(
 
   // ---------------------------------------------------------------------------
   // Managed windows — /monitor spawn launches headless pi sessions as
-  // supervised work windows (pi-peer process-spawn pattern: children are
-  // attached to this session and SIGTERM'd on shutdown).
+  // supervised work windows (pi-peer process-spawn pattern). Headless
+  // compatibility windows keep a direct child handle; interactive windows are
+  // owned through the exact workspace owner identity published after launch.
   // ---------------------------------------------------------------------------
+
+  type ManagedWindowPresentation = "interactive" | "headless";
+
+  interface WorkspaceWindowToolParams {
+    action: "create" | "list" | "close";
+    name?: string;
+    objective?: string;
+    presentation?: ManagedWindowPresentation;
+  }
 
   interface ManagedWindow {
     name: string;
+    sessionName: string;
     child: ChildProcess;
+    termination?: ChildTerminationController;
     startedAt: number;
     cwd: string;
     objective: string;
+    presentation: ManagedWindowPresentation;
+    ownerId?: string;
+    ownerNonce?: string;
+    pid?: number;
+    launchError?: string;
   }
 
+  const MAX_MANAGED_WINDOWS = 8;
+  const MANAGED_WINDOW_HANDSHAKE_TIMEOUT_MS = 15_000;
+  const MANAGED_WINDOW_HANDSHAKE_POLL_MS = 250;
   const managedWindows = new Map<string, ManagedWindow>();
+
+  function managedWindowSessionName(name: string): string {
+    const token = randomUUID().replace(/-/g, "");
+    return `mw-${token}-${name.slice(0, 27)}`;
+  }
+
+  function managedWindowDelay(ms: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(new Error("Managed window operation aborted."));
+    return new Promise((resolve, reject) => {
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        reject(new Error("Managed window operation aborted."));
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      timer.unref?.();
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
 
   async function spawnManagedWindow(
     name: string,
     objective: string,
-    ctx: ExtensionContext,
-  ): Promise<{ ok: boolean; error?: string }> {
+    cwdFallback: string,
+    presentation: ManagedWindowPresentation = "headless",
+    sessionName = name,
+  ): Promise<{ ok: boolean; window?: ManagedWindow; error?: string }> {
     if (managedWindows.has(name)) return { ok: false, error: `window "${name}" is already spawned` };
+    if (managedWindows.size >= MAX_MANAGED_WINDOWS) {
+      return { ok: false, error: `managed window limit reached (${MAX_MANAGED_WINDOWS})` };
+    }
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name)) {
       return { ok: false, error: "window name must start alphanumeric and use [A-Za-z0-9._-]" };
     }
-    const cwd = monitorLedgerRoot ?? state.baseCwd ?? ctx.cwd;
-    const { command, args } = getPiSpawnCommand(["-p", objective, "--name", name]);
-    const child = crossSpawn(command, args, { cwd, stdio: "ignore" });
-    const window: ManagedWindow = { name, child, startedAt: Date.now(), cwd, objective };
+    if (!objective.trim()) return { ok: false, error: "window objective is required" };
+
+    const cwd = monitorLedgerRoot ?? state.baseCwd ?? cwdFallback;
+    const piArgs = presentation === "interactive"
+      ? ["--name", sessionName, objective]
+      : ["-p", objective, "--name", sessionName];
+    const piCommand = getPiSpawnCommand(piArgs);
+    const launch = presentation === "interactive"
+      ? getInteractiveTerminalLaunchSpec(piCommand, cwd, { title: `Pi worker · ${name}` })
+      : { command: piCommand.command, args: piCommand.args, cwd };
+    const child = crossSpawn(launch.command, launch.args, {
+      cwd: launch.cwd,
+      stdio: "ignore",
+      shell: false,
+      windowsHide: presentation === "interactive",
+    });
+    const window: ManagedWindow = {
+      name,
+      sessionName,
+      child,
+      ...(presentation === "headless" ? { termination: createChildTerminationController(child) } : {}),
+      startedAt: Date.now(),
+      cwd,
+      objective,
+      presentation,
+    };
     managedWindows.set(name, window);
+
+    const setup = new Promise<void>((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", reject);
+    });
     child.once("exit", (code, signal) => {
-      managedWindows.delete(name);
-      console.error(`[pi-maestro-teammate] managed window ${name} exited (code ${code ?? "?"}, signal ${signal ?? "none"})`);
+      if (presentation === "headless") {
+        window.termination?.cleanup();
+        if (managedWindows.get(name) === window) managedWindows.delete(name);
+      } else if (code !== 0 && managedWindows.get(name) === window && !window.ownerId) {
+        window.launchError = `terminal launcher exited (code ${code ?? "?"}, signal ${signal ?? "none"})`;
+      }
+      console.error(`[pi-maestro-teammate] managed window ${name} launcher exited (code ${code ?? "?"}, signal ${signal ?? "none"})`);
     });
-    child.once("error", (error) => {
-      managedWindows.delete(name);
-      console.error(`[pi-maestro-teammate] managed window ${name} failed to spawn:`, error);
-    });
-    return { ok: true };
+
+    try {
+      await setup;
+      return { ok: true, window };
+    } catch (error) {
+      window.termination?.cleanup();
+      if (managedWindows.get(name) === window) managedWindows.delete(name);
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
-  function stopAllManagedWindows(): void {
-    for (const window of managedWindows.values()) {
-      try {
-        window.child.kill("SIGTERM");
-      } catch {
-        // child already gone
-      }
+  function captureManagedWindowOwner(
+    window: ManagedWindow,
+    owners: readonly WorkspaceOwnerSnapshot[],
+  ): WorkspaceOwnerSnapshot | undefined {
+    const candidates = owners.filter((owner) =>
+      owner.pid !== process.pid && owner.sessionName === window.sessionName
+    );
+    if (candidates.length > 1) throw new Error(`multiple workspace windows registered as "${window.sessionName}"`);
+    const owner = candidates[0];
+    if (!owner) return undefined;
+    if (window.ownerId && (
+      window.ownerId !== owner.ownerId
+      || window.ownerNonce !== owner.ownerNonce
+      || window.pid !== owner.pid
+    )) {
+      throw new Error(`managed window "${window.name}" changed its authenticated owner identity`);
     }
+    window.ownerId = owner.ownerId;
+    window.ownerNonce = owner.ownerNonce;
+    window.pid = owner.pid;
+    return owner;
+  }
+
+  async function waitForManagedWindowOwner(
+    window: ManagedWindow,
+    signal: AbortSignal,
+  ): Promise<WorkspaceOwnerSnapshot> {
+    const deadline = Date.now() + MANAGED_WINDOW_HANDSHAKE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (signal.aborted) throw new Error("Managed window creation aborted while waiting for workspace registration.");
+      const owners = await refreshWorkspacePeerOwnersStrict();
+      if (managedWindows.get(window.name) !== window) throw new Error(`managed window "${window.name}" was replaced`);
+      const owner = captureManagedWindowOwner(window, owners);
+      if (owner) return owner;
+      if (window.launchError) throw new Error(window.launchError);
+      await managedWindowDelay(MANAGED_WINDOW_HANDSHAKE_POLL_MS, signal);
+    }
+    throw new Error(`window "${window.name}" did not register within ${MANAGED_WINDOW_HANDSHAKE_TIMEOUT_MS}ms`);
+  }
+
+  function exactManagedWindowOwner(window: ManagedWindow): WorkspaceOwnerSnapshot | undefined {
+    if (!window.ownerId || !window.ownerNonce || !window.pid) return undefined;
+    return workspacePeerOwners.find((owner) =>
+      owner.ownerId === window.ownerId
+      && owner.ownerNonce === window.ownerNonce
+      && owner.pid === window.pid
+      && owner.sessionName === window.sessionName
+    );
+  }
+
+  async function terminateManagedWindowProcess(window: ManagedWindow): Promise<"stopped" | "already-exited"> {
+    if (window.presentation === "headless") {
+      const termination = window.termination;
+      if (!termination) throw new Error(`Headless window "${window.name}" has no termination controller.`);
+      termination.terminate();
+      const outcome = await termination.outcome;
+      termination.cleanup();
+      if (outcome.status !== "reclaimed") {
+        throw new Error(`Headless window "${window.name}" was not reclaimed (${outcome.reason}).`);
+      }
+      return outcome.forced ? "stopped" : "already-exited";
+    }
+
+    const owner = exactManagedWindowOwner(window);
+    if (!owner) throw new Error(`Interactive window "${window.name}" has no fresh authenticated owner; ownership record retained.`);
+    await terminateProcessTreeByPid(owner.pid);
+    return "stopped";
+  }
+
+  function managedWindowPidIsAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "EPERM";
+    }
+  }
+
+  async function stopManagedWindow(name: string): Promise<{ ok: boolean; status?: string; error?: string }> {
+    const window = managedWindows.get(name);
+    if (!window) return { ok: false, error: `No managed window "${name}".` };
+
+    try {
+      if (window.presentation === "interactive") {
+        const owners = await refreshWorkspacePeerOwnersStrict();
+        if (managedWindows.get(name) !== window) throw new Error(`managed window "${name}" was replaced`);
+        const owner = captureManagedWindowOwner(window, owners);
+        if (!owner) {
+          const exited = window.pid !== undefined && !managedWindowPidIsAlive(window.pid);
+          if (window.launchError || exited) {
+            if (window.ownerId) {
+              await monitorControllerInstance.remove(`owner:${window.ownerId}`, "managed-window-gone");
+              syncMonitorRegistryBindings();
+            }
+            if (managedWindows.get(name) === window) managedWindows.delete(name);
+            return { ok: true, status: "already-exited" };
+          }
+          throw new Error(`Interactive window "${name}" has no fresh authenticated owner; ownership record retained for reconciliation.`);
+        }
+      }
+
+      // Reclamation happens while the binding is still active. This avoids a
+      // retained-but-unsupervised record if the exact-owner kill fails.
+      const status = await terminateManagedWindowProcess(window);
+      if (window.ownerId) {
+        await monitorControllerInstance.remove(`owner:${window.ownerId}`, "managed-window-close");
+        syncMonitorRegistryBindings();
+      }
+      if (managedWindows.get(name) === window) managedWindows.delete(name);
+      return { ok: true, status };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  async function stopAllManagedWindows(): Promise<void> {
+    let strictDiscoveryReady = false;
+    try {
+      await refreshWorkspacePeerOwnersStrict();
+      strictDiscoveryReady = true;
+    } catch (error) {
+      console.error("[pi-maestro-teammate] managed-window shutdown discovery failed; interactive windows will not be killed from stale PID data:", error);
+    }
+
+    const snapshot = [...managedWindows.values()];
+    await Promise.allSettled(snapshot.map(async (window) => {
+      if (window.presentation === "interactive" && !strictDiscoveryReady) return;
+      try {
+        if (window.presentation === "interactive" && !exactManagedWindowOwner(window)) return;
+        await terminateManagedWindowProcess(window);
+        if (managedWindows.get(window.name) === window) managedWindows.delete(window.name);
+      } catch (error) {
+        console.error(`[pi-maestro-teammate] managed window ${window.name} was not reclaimed during shutdown:`, error);
+      }
+    }));
   }
 
   /** Load `.pi/settings.json` → `monitor` section, merged with env. */
@@ -4698,6 +4966,18 @@ export default function registerTeammateExtension(
     ): Promise<TeammateToolResult<{ output: string[]; result: ObserveResult }>> {
       const result = await observeTargets(params, signal);
       const output = formatObserveResult(result, params.detail !== "summary" || params.view === "turns");
+      if (params.action === "watch" || params.action === "wait") {
+        const since = Date.now() - result.durationMs;
+        const queuedDuring = (sessionHostRegistry?.thread.list() ?? [])
+          .filter((entry) =>
+            entry.direction === "incoming"
+            && (entry.status === "pending" || entry.status === "queued")
+            && entry.updatedAt >= since
+          ).length;
+        if (queuedDuring > 0) {
+          output.push(`[inbox] ${queuedDuring} message(s) arrived during this ${params.action} and are queued; they will be injected after this turn ends (teammate-list view=inbox).`);
+        }
+      }
       const failed = result.reason === "timeout"
         || result.reason === "aborted"
         || result.observations.some((item) => !item.found || item.outcome === "failure" || item.outcome === "stalled");
@@ -4815,6 +5095,151 @@ export default function registerTeammateExtension(
     },
   };
 
+  interface WorkspaceWindowToolWindow {
+    name: string;
+    presentation: ManagedWindowPresentation;
+    status: "launching" | "running" | "disconnected" | "failed";
+    objective: string;
+    owner?: string;
+    pid?: number;
+  }
+
+  interface WorkspaceWindowToolDetails {
+    action: WorkspaceWindowToolParams["action"];
+    windows: WorkspaceWindowToolWindow[];
+  }
+
+  function workspaceWindowSnapshots(): WorkspaceWindowToolWindow[] {
+    return [...managedWindows.values()].map((window) => {
+      const owner = exactManagedWindowOwner(window);
+      const status: WorkspaceWindowToolWindow["status"] = window.launchError
+        ? "failed"
+        : owner || (window.presentation === "headless" && window.child.exitCode === null)
+          ? "running"
+          : window.ownerId
+            ? "disconnected"
+            : "launching";
+      return {
+        name: window.name,
+        presentation: window.presentation,
+        status,
+        objective: window.objective,
+        ...(owner ? { owner: `owner:${owner.ownerId}`, pid: owner.pid } : {}),
+      };
+    });
+  }
+
+  const workspaceWindowTool: ToolDefinition<typeof WorkspaceWindowParams, WorkspaceWindowToolDetails> = {
+    name: "workspace-window",
+    label: "Workspace Window",
+    renderShell: "self",
+    description: `Create, list, or close Pi worker windows owned by the active Monitor coordinator.
+
+This lifecycle tool is available only after the user enters Monitor mode with /monitor. Create opens an interactive terminal by default, waits for exact workspace-peer registration, and automatically binds the new window for supervision. Close is restricted to windows created by this Monitor session; discovered external peer windows can be messaged or observed but cannot be closed. Closed windows keep their persisted messages readable through teammate-list view=inbox.`,
+    promptSnippet: "Create, list, or close Monitor-owned Pi worker windows.",
+    promptGuidelines: [
+      "Use create only when the user's monitoring or coordination request requires a new worker window; do not create speculative workers.",
+      "After create, coordinate the returned owner target with observe and teammate-send.",
+      "Before close, collect needed results and close only Monitor-owned windows that no longer need to run.",
+      'After close, use teammate-list with view="inbox" to read the window\'s persisted messages if they are needed.',
+    ],
+    parameters: WorkspaceWindowParams,
+    async execute(
+      _id: string,
+      params: WorkspaceWindowToolParams,
+      signal: AbortSignal,
+    ): Promise<TeammateToolResult<WorkspaceWindowToolDetails>> {
+      const result = (
+        text: string,
+        isError = false,
+      ): TeammateToolResult<WorkspaceWindowToolDetails> => ({
+        content: [{ type: "text", text }],
+        ...(isError ? { isError: true } : {}),
+        details: { action: params.action, windows: workspaceWindowSnapshots() },
+      });
+
+      if (!monitorInteractionModeActive) {
+        return result("workspace-window is available only after the user enters Monitor mode with /monitor.", true);
+      }
+
+      if (params.action === "list") {
+        await refreshWorkspacePeerOwners();
+        for (const window of managedWindows.values()) {
+          if (window.sessionName === window.name || window.ownerId) continue;
+          try {
+            captureManagedWindowOwner(window, workspacePeerOwners);
+          } catch (error) {
+            window.launchError = error instanceof Error ? error.message : String(error);
+          }
+        }
+        const windows = workspaceWindowSnapshots();
+        if (windows.length === 0) return result("No Monitor-owned worker windows.");
+        return result(windows.map((window) =>
+          `${window.status === "running" ? "■" : window.status === "launching" ? "□" : "✗"} ${window.name} · ${window.presentation} · ${window.status}${window.owner ? ` · ${window.owner}` : ""}`
+        ).join("\n"));
+      }
+
+      const name = params.name?.trim();
+      if (!name) return result(`name is required for workspace-window ${params.action}.`, true);
+
+      if (params.action === "close") {
+        const stopped = await stopManagedWindow(name);
+        if (!stopped.ok) return result(stopped.error ?? `Failed to close ${name}.`, true);
+        return result(`Closed Monitor-owned window ${name} (${stopped.status ?? "stopped"}).`);
+      }
+
+      const objective = params.objective?.trim();
+      if (!objective) return result("objective is required for workspace-window create.", true);
+
+      const presentation = params.presentation ?? "interactive";
+      const sessionName = managedWindowSessionName(name);
+      const spawned = await spawnManagedWindow(
+        name,
+        objective,
+        state.baseCwd || process.cwd(),
+        presentation,
+        sessionName,
+      );
+      if (!spawned.ok || !spawned.window) return result(spawned.error ?? `Failed to create ${name}.`, true);
+
+      try {
+        const owner = await waitForManagedWindowOwner(spawned.window, signal);
+        if (managedWindows.get(name) !== spawned.window || !exactManagedWindowOwner(spawned.window)) {
+          throw new Error(`window "${name}" changed owner before Monitor binding.`);
+        }
+
+        const request = monitorBindingRequest(owner, "auto");
+        if (!request) throw new Error(`window "${name}" changed endpoint before Monitor binding.`);
+        const bound = await monitorControllerInstance.bind([request]);
+        syncMonitorRegistryBindings();
+        if (bound.bound.length === 0) {
+          throw new Error(bound.errors[0]?.error ?? `Failed to bind managed window "${name}".`);
+        }
+
+        await refreshWorkspacePeerOwnersStrict();
+        if (managedWindows.get(name) !== spawned.window || !exactManagedWindowOwner(spawned.window)) {
+          throw new Error(`window "${name}" changed owner after Monitor binding.`);
+        }
+        return result(`Created and bound ${presentation} worker window ${name} as owner:${owner.ownerId}.`);
+      } catch (error) {
+        const failure = error instanceof Error ? error.message : String(error);
+        const cleanup = await stopManagedWindow(name);
+        const cleanupText = cleanup.ok
+          ? `setup was rolled back (${cleanup.status ?? "stopped"})`
+          : `ownership record retained: ${cleanup.error ?? "reclamation not proven"}`;
+        return result(`${failure}; ${cleanupText}.`, true);
+      }
+    },
+    renderCall(_args, theme, context) {
+      if (context.isPartial === false) return new Text("", 0, 0);
+      return auxToolCallFallback("workspace-window", theme);
+    },
+    renderResult(result, options, theme) {
+      if (options.isPartial) return new Text("", 0, 0);
+      return auxToolResultFallback(result, theme);
+    },
+  };
+
   // =========================================================================
   // Register tools (LLM-callable)
   // =========================================================================
@@ -4823,6 +5248,7 @@ export default function registerTeammateExtension(
   pi.registerTool(sendTool);
   pi.registerTool(listTool);
   pi.registerTool(observeTool);
+  pi.registerTool(workspaceWindowTool);
   if (exposeLegacyObservationTools()) {
     pi.registerTool(watchTool);
     pi.registerTool(waitTool);
@@ -5541,26 +5967,22 @@ export default function registerTeammateExtension(
             ctx.ui.notify("No managed windows spawned.", "info");
             return;
           }
-          const lines = [...managedWindows.values()].map((window) => {
-            const seconds = Math.round((Date.now() - window.startedAt) / 1000);
-            const alive = window.child.exitCode === null && !window.child.killed;
-            return `  ${alive ? "■" : "✗"} ${window.name} · ${seconds}s · ${window.objective.slice(0, 60)}`;
-          });
+          await refreshWorkspacePeerOwners();
+          const snapshots = workspaceWindowSnapshots();
+          const lines = snapshots.map((window) =>
+            `  ${window.status === "running" ? "■" : window.status === "launching" ? "□" : "✗"} ${window.name} · ${window.presentation} · ${window.status} · ${window.objective.slice(0, 60)}`
+          );
           ctx.ui.notify(`MANAGED WINDOWS ${managedWindows.size}\n${lines.join("\n")}`, "info");
           return;
         }
         if (rest === "stop" || rest.startsWith("stop ")) {
           const name = rest.slice("stop".length).trim();
-          const window = name ? managedWindows.get(name) : undefined;
-          if (!window) {
-            ctx.ui.notify(`No managed window "${name || ""}". Use /monitor spawn status to list.`, "warning");
+          const stopped = name ? await stopManagedWindow(name) : { ok: false, error: "window name is required" };
+          if (!stopped.ok) {
+            ctx.ui.notify(`${stopped.error ?? `No managed window "${name}".`} Use /monitor spawn status to list.`, "warning");
             return;
           }
-          try {
-            window.child.kill("SIGTERM");
-          } catch { /* already gone */ }
-          managedWindows.delete(name);
-          ctx.ui.notify(`Stopped managed window ${name}.`, "info");
+          ctx.ui.notify(`Stopped managed window ${name} (${stopped.status ?? "stopped"}).`, "info");
           return;
         }
         const space = rest.indexOf(" ");
@@ -5570,7 +5992,7 @@ export default function registerTeammateExtension(
           ctx.ui.notify("Usage: /monitor spawn <name> <objective> | /monitor spawn status | /monitor spawn stop <name>", "warning");
           return;
         }
-        const result = await spawnManagedWindow(name, objective, ctx);
+        const result = await spawnManagedWindow(name, objective, ctx.cwd);
         if (!result.ok) {
           ctx.ui.notify(`Spawn failed: ${result.error}`, "warning");
           return;
@@ -6023,7 +6445,7 @@ export default function registerTeammateExtension(
     stopWidgetTimer();
     stopWakeableEvictionTimer();
     await monitorControllerInstance.shutdown();
-    stopAllManagedWindows();
+    await stopAllManagedWindows();
     workspaceBackgroundJobs = [];
     activePromptLoopIds = [];
     workspacePeerLifecycle = workspacePeerLifecycle.then(stopWorkspacePeers);

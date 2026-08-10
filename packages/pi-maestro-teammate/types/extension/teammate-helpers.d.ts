@@ -11,7 +11,7 @@ import type { RunTeammateOptions } from "../runs/execution.ts";
 import type { TeammateState, AgentActivity, AgentProgressSnapshot, AgentRunOutcome, AgentRunPhase, ActiveAgent, AgentTerminalStatus, SettledAgentRecord, StructuredResult } from "../shared/types.ts";
 import { type AgentSummary } from "../agents/agents.ts";
 export type AgentListView = "active" | "named" | "all";
-export type TeammateListView = AgentListView | "roles" | "windows";
+export type TeammateListView = AgentListView | "roles" | "windows" | "inbox";
 export type ListedAgentStatus = AgentActivity;
 export interface ListedAgent {
     agent: string;

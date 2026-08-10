@@ -728,6 +728,7 @@ export function formatWorkspaceRemoteRootMessage(input: WorkspaceRemoteRootMessa
     `Message id: ${input.messageId}`,
     `Trace id: ${traceId}`,
     `Effective delivery mode: ${input.effectiveAction}`,
+    "Delivery note: queued messages are injected at a turn boundary and may lag the peer's latest state; verify against current evidence before acting.",
     `Reply route: when the body requests a response, call teammate-send with to=\"${replyTo}\".`,
     "--- BEGIN ORIGINAL BODY ---",
     input.message,

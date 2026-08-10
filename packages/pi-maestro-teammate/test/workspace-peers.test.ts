@@ -139,7 +139,7 @@ test("workspace peer protocol version and main-session selector stay stable", as
   assert.match(extensionSource, /target: `owner:\$\{owner\.ownerId\}`/);
   assert.match(extensionSource, /const agentSelector = \/\^owner:/);
   assert.match(extensionSource, /target: `owner:\$\{owner\.ownerId\}:\$\{agent\.correlationId\}`/);
-  assert.match(schemaSource, /enum: \["active", "named", "all", "roles", "windows"\]/);
+  assert.match(schemaSource, /enum: \["active", "named", "all", "roles", "windows", "inbox"\]/);
 });
 
 test("workspace snapshots expose active bash jobs and protect foreground work from steer", async () => {
@@ -391,6 +391,7 @@ test("protocol v1 accepts legacy commands and validates optional delivery metada
   assert.match(formatted, /Sender: "control"/);
   assert.match(formatted, /Trace id: mon_trace-1/);
   assert.match(formatted, /Effective delivery mode: follow_up/);
+  assert.match(formatted, /Delivery note: queued messages are injected at a turn boundary/);
   assert.match(formatted, new RegExp(`teammate-send with to="owner:${OWNER_A}"`));
   assert.match(formatted, /--- BEGIN ORIGINAL BODY ---\nreply with status\n--- END ORIGINAL BODY ---/);
 

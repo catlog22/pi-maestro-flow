@@ -69,8 +69,21 @@ test("dependsOn and maxAgents descriptions document the runtime guards", () => {
   assert.match(maxAgents, /PI_TEAMMATE_MAX_ACTIVE_AGENTS/);
 });
 
-test("teammate-list schema exposes discovered role listing", () => {
+test("teammate-list schema exposes role, window, and persisted inbox views", () => {
   assert.equal(Check(TeammateListParams, { view: "roles" }), true);
+  assert.equal(Check(TeammateListParams, { view: "inbox" }), true);
+  assert.equal(Check(TeammateListParams, {
+    view: "inbox",
+    session: "monitor",
+    peer: `owner:${"a".repeat(32)}`,
+    direction: "incoming",
+    status: "pending",
+    limit: 10,
+  }), true);
+  assert.equal(Check(TeammateListParams, { view: "windows", session: "monitor" }), false);
+  assert.equal(Check(TeammateListParams, { session: "monitor" }), false);
+  assert.equal(Check(TeammateListParams, { view: "inbox", direction: "sideways" }), false);
+  assert.equal(Check(TeammateListParams, { view: "inbox", limit: 101 }), false);
   assert.equal(Check(TeammateListParams, { view: "unknown" }), false);
   assert.equal(Check(TeammateListParams, { view: "active", typo: true }), false);
   assert.equal((TeammateListParams.properties.view as { default?: string }).default, "active");

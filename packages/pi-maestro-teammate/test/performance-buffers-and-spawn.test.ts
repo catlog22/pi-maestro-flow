@@ -26,6 +26,7 @@ import {
   appendBoundedTranscriptMessage,
   buildPiArgs,
   createUtf8LineDecoder,
+  getInteractiveTerminalLaunchSpec,
   getPiSpawnCommand,
   isPiResultReadyTurn,
   releasePublishedTurnHistory,
@@ -33,6 +34,7 @@ import {
   runGraph,
   runSingleTeammate,
   runTeammate,
+  terminateProcessTreeByPid,
   validateModelSpecifier,
 } from "../src/runs/execution.ts";
 import { ModelCircuitBreaker } from "../src/models/model-circuit-breaker.ts";
@@ -497,6 +499,101 @@ test("Windows Pi fallback is shell-free and preserves hostile-looking argv as on
       /Invalid teammate model specifier/,
     );
   }
+});
+
+test("interactive terminal specs preserve Pi argv across supported platforms", () => {
+  const piCommand = {
+    command: "C:/Program Files/nodejs/node.exe",
+    args: ["C:/pi entry.ts", "-p", "build api & tests", "--name", "backend"],
+  };
+  const windows = getInteractiveTerminalLaunchSpec(piCommand, "C:/work tree", {
+    platform: "win32",
+    title: "Pi worker · backend",
+  });
+  assert.equal(windows.command, "wt.exe");
+  assert.deepEqual(windows.args, [
+    "--window",
+    "new",
+    "new-tab",
+    "--title",
+    "Pi worker · backend",
+    "--startingDirectory",
+    "C:/work tree",
+    piCommand.command,
+    ...piCommand.args,
+  ]);
+
+  const linux = getInteractiveTerminalLaunchSpec(piCommand, "/tmp/work tree", {
+    platform: "linux",
+    terminalCommand: "konsole",
+  });
+  assert.equal(linux.command, "konsole");
+  assert.deepEqual(linux.args, ["-e", piCommand.command, ...piCommand.args]);
+
+  const mac = getInteractiveTerminalLaunchSpec(
+    { command: "/usr/bin/pi", args: ["-p", "quote ' and & stay data"] },
+    "/tmp/work tree",
+    { platform: "darwin" },
+  );
+  assert.equal(mac.command, "/usr/bin/osascript");
+  assert.equal(mac.args[0], "-e");
+  assert.match(mac.args.at(-1) ?? "", /tell application "Terminal" to do script/);
+  assert.match(mac.args.at(-1) ?? "", /exec '\/usr\/bin\/pi'/);
+  assert.match(mac.args.at(-1) ?? "", /quote/);
+});
+
+test("owned PID tree termination uses taskkill on Windows and a process group on POSIX", async () => {
+  let windowsCall: { command: string; args: readonly string[] } | undefined;
+  await terminateProcessTreeByPid(4321, {
+    platform: "win32",
+    spawnProcess: ((command: string, args: readonly string[]) => {
+      windowsCall = { command, args };
+      const child = createFakeProcess();
+      queueMicrotask(() => child.emit("close", 0, null));
+      return child;
+    }) as never,
+  });
+  assert.deepEqual(windowsCall, {
+    command: "taskkill",
+    args: ["/PID", "4321", "/T", "/F"],
+  });
+
+  const signals: Array<[number, NodeJS.Signals | number | undefined]> = [];
+  await terminateProcessTreeByPid(77, {
+    platform: "linux",
+    killProcess: ((pid: number, signal?: NodeJS.Signals | number) => {
+      signals.push([pid, signal]);
+      return true;
+    }) as typeof process.kill,
+    isProcessAlive: () => false,
+  });
+  assert.deepEqual(signals, [[-77, "SIGTERM"]]);
+
+  const fallbackSignals: number[] = [];
+  await terminateProcessTreeByPid(88, {
+    platform: "linux",
+    killProcess: ((pid: number) => {
+      fallbackSignals.push(pid);
+      if (pid < 0) throw Object.assign(new Error("missing group"), { code: "ESRCH" });
+      return true;
+    }) as typeof process.kill,
+    isProcessAlive: () => false,
+  });
+  assert.deepEqual(fallbackSignals, [-88, 88]);
+
+  const escalated: NodeJS.Signals[] = [];
+  await terminateProcessTreeByPid(99, {
+    platform: "linux",
+    graceMs: 1,
+    pollMs: 1,
+    sleep: async () => undefined,
+    killProcess: ((_pid: number, signal?: NodeJS.Signals | number) => {
+      if (typeof signal === "string") escalated.push(signal);
+      return true;
+    }) as typeof process.kill,
+    isProcessAlive: () => !escalated.includes("SIGKILL"),
+  });
+  assert.deepEqual(escalated, ["SIGTERM", "SIGKILL"]);
 });
 
 test("cold restart loads the persisted session instead of forking it", () => {

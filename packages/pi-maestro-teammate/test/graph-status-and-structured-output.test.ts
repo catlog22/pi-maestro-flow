@@ -451,6 +451,44 @@ test("runGraph results carry the task name for agent:// persistence", async () =
   assert.deepEqual(results[0].structuredOutput, { value: 3 });
 });
 
+test("runGraph rejects a dependent prompt that resolves to empty text", async () => {
+  let spawns = 0;
+  const baseSpawn = createStructuredSpawn([{ value: "" }]);
+  const spawn = ((...args: Parameters<typeof baseSpawn>) => {
+    spawns += 1;
+    return baseSpawn(...args);
+  }) as typeof baseSpawn;
+  const tasks: NormalizedTask[] = [
+    {
+      agent: "general",
+      name: "producer",
+      prompt: "produce empty value",
+      outputSchema: {
+        type: "object",
+        properties: { value: { type: "string" } },
+        required: ["value"],
+        additionalProperties: false,
+      },
+    },
+    {
+      agent: "general",
+      name: "consumer",
+      prompt: "{producer.value}",
+      dependsOn: ["producer"],
+    },
+  ];
+
+  const results = await runGraph(tasks, 1, {
+    baseCwd: process.cwd(),
+    spawnChildProcess: spawn,
+  });
+
+  assert.equal(spawns, 1, "the dependent must fail before child launch");
+  assert.equal(results[0].exitCode, 0);
+  assert.equal(results[1].exitCode, 1);
+  assert.match(results[1].messages[0].content, /Resolved task prompt requires non-empty text/);
+});
+
 test("direct failed runs retain the resolved task cwd without a completion observer", async () => {
   const taskCwd = path.join(process.cwd(), "packages", "pi-maestro-teammate");
   const result = await runSingleTeammate({

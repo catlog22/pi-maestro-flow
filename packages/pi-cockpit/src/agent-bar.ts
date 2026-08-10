@@ -8,11 +8,13 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import type { CockpitEndpoint } from "./endpoint-store.ts";
+import { formatAgentMetric } from "./render.ts";
 import type { SessionUiState } from "./session-ui-state.ts";
 import { formatUnreadCount, type SessionTab } from "./session-tabs.ts";
 import type { AgentRow } from "./types.ts";
 import { effectiveAgentStatus, type AgentDisplayStatus } from "./agents-store.ts";
 import { visibleAgentRows } from "./stack-widget.ts";
+import { tuiT } from "./tui-i18n.ts";
 
 export const SESSION_BAR_WIDGET_KEY = "cockpit-session-bar";
 export const AGENT_BAR_WIDGET_KEY = SESSION_BAR_WIDGET_KEY;
@@ -88,12 +90,30 @@ export function statusColor(status: AgentDisplayStatus): ThemeColor {
 	}
 }
 
-function chip(label: string, active: boolean, color: ThemeColor, theme: Theme, unread = 0): string {
+function chip(
+	label: string,
+	active: boolean,
+	color: ThemeColor,
+	theme: Theme,
+	unread = 0,
+	activity?: string,
+	attention = false,
+	outcome?: { status: "completed" | "failed" | "terminated"; message?: string },
+): string {
 	const text = `@${label}`;
 	const badge = unread > 0 ? theme.fg("warning", ` •${formatUnreadCount(unread)}`) : "";
+	const activitySuffix = activity ? theme.fg("dim", ` · ${activity}`) : "";
+	const attentionPrefix = attention ? theme.fg("error", "!") : "";
+	const outcomeSuffix = outcome
+		? outcome.status === "failed"
+			? theme.fg("error", ` ✗${outcome.message ? ` ${outcome.message}` : ""}`)
+			: outcome.status === "terminated"
+				? theme.fg("warning", " ✗")
+				: theme.fg("success", " ✓")
+		: "";
 	return active
-		? `${theme.fg(color, "▸")} ${theme.fg(color, theme.bold(text))}${badge}`
-		: `${theme.fg(color, text)}${badge}`;
+		? `${attentionPrefix}${theme.fg(color, "▸")} ${theme.fg(color, theme.bold(text))}${outcomeSuffix}${activitySuffix}${badge}`
+		: `${attentionPrefix}${theme.fg(color, text)}${outcomeSuffix}${activitySuffix}${badge}`;
 }
 
 export type AgentBarStatus = AgentDisplayStatus | "idle";
@@ -102,6 +122,12 @@ interface AgentBarTab extends SessionTab {
 	endpoint: CockpitEndpoint;
 	status: AgentBarStatus;
 	color: ThemeColor;
+	/** Current tool name while the agent is live; shown after the chip label. */
+	activity?: string;
+	/** Stalled state beyond the color channel: a leading error `!`. */
+	attention?: boolean;
+	/** Terminal outcome badge: ✓ completed, ✗ failed (with reason) or terminated. */
+	outcome?: { status: "completed" | "failed" | "terminated"; message?: string };
 }
 
 function endpointStatus(endpoint: CockpitEndpoint, now: number, mainRunning: boolean): AgentBarStatus {
@@ -140,7 +166,18 @@ const CHIP_SEPARATOR = "  ";
 function renderAgentChipLine(tabs: AgentBarTab[], selectedId: string, width: number, theme: Theme): string {
 	const w = Math.max(1, width);
 	const selectedIndex = Math.max(0, tabs.findIndex((tab) => tab.id === selectedId));
-	const chips = tabs.map((tab) => chip(tab.label, tab.id === selectedId, tab.color, theme, tab.unread));
+	const chips = tabs.map((tab) => chip(
+		tab.label,
+		tab.id === selectedId,
+		tab.color,
+		theme,
+		tab.unread,
+		tab.activity,
+		tab.attention,
+		tab.outcome
+			? { status: tab.outcome.status, message: tab.outcome.message ? truncateToWidth(tab.outcome.message, 24, "…") : undefined }
+			: undefined,
+	));
 	const chipWidths = chips.map((text) => visibleWidth(text));
 	const sepWidth = visibleWidth(CHIP_SEPARATOR);
 	const totalWidth = chipWidths.reduce((sum, chipWidth) => sum + chipWidth + sepWidth, 0) - sepWidth;
@@ -223,6 +260,10 @@ export function renderAgentBar(
 	const tabs: AgentBarTab[] = endpoints.map((endpoint) => {
 		const selected = endpoint.id === selectedId;
 		const status = endpointStatus(endpoint, now, options.mainRunning === true);
+		const live = status === "running" || status === "retrying";
+		const outcome = status === "done" || status === "failed" || status === "terminated" || status === "sleeping"
+			? endpoint.agentRow?.lastOutcome
+			: undefined;
 		return {
 			id: endpoint.id,
 			label: endpoint.label,
@@ -231,10 +272,30 @@ export function renderAgentBar(
 			endpoint,
 			status,
 			color: endpointColor(endpoint, status, now, selected),
+			...(live && endpoint.agentRow?.activeTool
+				? {
+					activity: endpoint.agentRow.activeToolArgs
+						? `${endpoint.agentRow.activeTool} ${endpoint.agentRow.activeToolArgs}`
+						: endpoint.agentRow.activeTool,
+				}
+				: {}),
+			...(status === "stalled" ? { attention: true } : {}),
+			...(outcome ? { outcome } : {}),
 		};
 	});
+	// Selected-session metrics summary, appended only when the chip line leaves
+	// room for it: telemetry must never squeeze the chips that carry identity.
+	const selectedRow = tabs.find((tab) => tab.id === selectedId)?.endpoint.agentRow;
+	const metricParts: string[] = [];
+	if (selectedRow?.toolCount !== undefined) metricParts.push(tuiT("common.tools", { count: selectedRow.toolCount }));
+	if (selectedRow?.tokens !== undefined) metricParts.push(tuiT("widget.agent.tokens", { count: formatAgentMetric(selectedRow.tokens) }));
+	const metrics = metricParts.length > 0 ? theme.fg("muted", ` · ${metricParts.join(" · ")}`) : "";
 	return [renderSessionBarLine(
-		(availableWidth) => renderAgentChipLine(tabs, selectedId, availableWidth, theme),
+		(availableWidth) => {
+			const chipsLine = renderAgentChipLine(tabs, selectedId, availableWidth, theme);
+			if (!metrics || visibleWidth(chipsLine) + visibleWidth(metrics) > availableWidth) return chipsLine;
+			return chipsLine + metrics;
+		},
 		width,
 		theme,
 		options.shortcutHint,

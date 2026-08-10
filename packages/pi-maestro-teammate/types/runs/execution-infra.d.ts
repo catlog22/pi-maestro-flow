@@ -334,6 +334,10 @@ export declare function inferGraphMode(tasks: NormalizedTask[]): "parallel" | "c
  * ordered id list. The array order is the priority order (first = highest).
  */
 export declare function normalizeTodoBindings(todo: string | string[] | undefined): string[] | undefined;
+/** Public task prompt budget, measured after UTF-8 encoding. */
+export declare const MAX_TASK_PROMPT_BYTES: number;
+/** Return an actionable boundary error for a task prompt, if any. */
+export declare function taskPromptBoundaryError(prompt: unknown): string | undefined;
 export interface NormalizeTeammateResult {
     tasks: NormalizedTask[];
     isMultiTask: boolean;
@@ -354,6 +358,32 @@ export declare function getPiSpawnCommand(args: string[], options?: PiSpawnComma
     args: string[];
     shell: false;
 };
+export interface InteractiveTerminalLaunchOptions {
+    platform?: NodeJS.Platform;
+    terminalCommand?: string;
+    title?: string;
+}
+export interface InteractiveTerminalLaunchSpec {
+    command: string;
+    args: string[];
+    cwd: string;
+}
+/** Build a shell-free terminal launcher where the platform supports argv forwarding. */
+export declare function getInteractiveTerminalLaunchSpec(piCommand: {
+    command: string;
+    args: readonly string[];
+}, cwd: string, options?: InteractiveTerminalLaunchOptions): InteractiveTerminalLaunchSpec;
+export interface ProcessTreeByPidOptions {
+    platform?: NodeJS.Platform;
+    spawnProcess?: typeof crossSpawn;
+    killProcess?: typeof process.kill;
+    isProcessAlive?: (pid: number) => boolean;
+    graceMs?: number;
+    pollMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+}
+/** Terminate an explicitly owned process tree; callers must revalidate PID ownership first. */
+export declare function terminateProcessTreeByPid(pid: number, options?: ProcessTreeByPidOptions): Promise<void>;
 /** Maximum number of teammate-agent levels below the main agent. */
 export declare const MAX_DEFAULT_DEPTH = 2;
 export declare const DEFAULT_MAX_AGENTS = 15;

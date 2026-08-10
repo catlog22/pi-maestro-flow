@@ -3,7 +3,7 @@ title: "Monitor Cross-Session Supervision"
 icon: "📊"
 ---
 
-Monitor continuously supervises **other Pi sessions or windows in the same workspace**. On each tick it checks whether a target has failed, is waiting for input, has stalled, or has drifted from its objective. It can send a controlled `steer` intervention, record the outcome in a durable ledger, and restore valid bindings after reload.
+Monitor continuously supervises and coordinates **other Pi sessions or windows in the same workspace**. It can bind an existing peer window or create a new interactive worker window, enroll it in supervision automatically, and close Monitor-owned workers after their results have been collected. On each tick it checks whether a target has failed, is waiting for input, has stalled, or has drifted from its objective. It can send a controlled `steer` intervention, record the outcome in a durable ledger, and restore valid bindings after reload.
 
 Use Monitor for long-running parallel work, multi-window development, background migrations, and workflows that need closed-loop correction. For a one-time read-only status check, use `observe`; use `/monitor` when supervision should continue and may intervene.
 
@@ -13,19 +13,31 @@ Use Monitor for long-running parallel work, multi-window development, background
 
 ## 1. Quick Start
 
-Open at least one other Pi window in the same workspace and give the session a recognizable name. In the supervising window:
+Enter Monitor mode and describe the work to coordinate in `#control`. You do not need to open worker windows manually or invoke a window-creation command:
 
 ```text
-/monitor                       # open the control window without binding
-/monitor backend auto          # supervise window "backend"
-/monitor status                # bindings, recent output, ledger summary
-/monitor metrics               # supervision effectiveness metrics
-/monitor exit                  # stop and clear bindings
+# Open the Monitor control window
+/monitor
+
+# Then enter a natural-language instruction in #control
+Create interactive backend, frontend, and tests worker windows.
+Assign the API, UI, and integration-test work, coordinate them until all finish,
+collect their results, and close windows that are no longer needed.
 ```
 
-Type `/monitor ` and use completion to see bindable window names. A bare `/monitor` opens the control window; use the `#control` tab for supervision instructions or select a peer window to message it.
+The Monitor Agent decomposes the objective, creates workers, waits for exact workspace-peer registration, binds supervision automatically, and coordinates execution with `observe` and `teammate-send`. Each successful interactive worker is an independent Pi TUI window.
 
-> Monitor binds workspace window endpoints. A stale binding is not reused after a target closes, changes workspace, or publishes a replacement endpoint.
+Existing windows in the same workspace can still be bound explicitly:
+
+```text
+/monitor backend auto          # bind an existing backend window
+/monitor status                # bindings, recent output, ledger summary
+/monitor metrics               # supervision effectiveness metrics
+```
+
+Type `/monitor ` and use completion to see bindable window names. A bare `/monitor` opens the control window; use `#control` for supervision policy and coordination instructions, or select a peer window to message it.
+
+> Monitor binds workspace window endpoints. A stale binding is not reused after a target closes, changes workspace, or publishes a replacement endpoint. Monitor can close only workers created and ownership-verified by the current Monitor session. Manually opened peers and windows created by another session can be observed, bound, and messaged, but not closed.
 
 ## 2. Targets and Modes
 
@@ -94,28 +106,62 @@ Exit Monitor interaction mode with `/monitor exit`, or press bare `Esc` twice wi
 | `/monitor doctor` | read-only health check for config, bindings, ledger, and warnings |
 | `/monitor resume` | restore valid active bindings from the ledger |
 | `/monitor exit` / `/monitor stop` | stop the Monitor session and clear bindings |
-| `/monitor spawn <name> <objective>` | launch a managed headless Pi work window |
-| `/monitor spawn status` | list managed windows |
-| `/monitor spawn stop <name>` | stop a managed window |
+| `/monitor spawn <name> <objective>` | compatibility/debug entry: launch a managed headless Pi worker |
+| `/monitor spawn status` | compatibility entry: list managed windows |
+| `/monitor spawn stop <name>` | compatibility entry: stop a managed window |
 | `/monitor ui` | legacy binding overlay, retained for compatibility |
 
-## 5. Managed Work Windows
+## 5. Monitor-Managed Worker Windows
+
+The primary workflow is Agent-operated; users do not need to run `/monitor spawn`. After entering `/monitor`, describe the task split, desired parallelism, interactive-window preference, and cleanup condition in natural language:
+
+```text
+Create migration and verification worker windows.
+Have migration implement the database change and verification independently check compatibility.
+Coordinate both, preserve their final results, and close the windows when done.
+```
+
+The Monitor Agent uses the internal `workspace-window` lifecycle tool:
+
+1. `create` opens a new interactive terminal by default and supplies the objective as Pi's initial message; it can select `headless` when the user explicitly does not need a terminal UI;
+2. each creation receives an unguessable internal session name and is not admitted as owned until its exact workspace owner registers;
+3. successful registration creates an `auto` supervision binding, after which Monitor coordinates the worker through `observe` and `teammate-send`;
+4. `list` reports only windows created by the current Monitor session;
+5. `close` proves process-tree reclamation before releasing the binding and ownership record. If reclamation cannot be proven, the record is retained and the operation reports an error instead of acting on a stale PID.
+
+Names must begin with an alphanumeric character, contain only `A-Z`, `a-z`, `0-9`, `.`, `_`, or `-`, and be at most 64 characters. One Monitor session can hold at most eight managed windows.
+
+### Terminal Support
+
+Interactive workers use the platform terminal:
+
+- Windows: Windows Terminal (`wt.exe`), opened as a new window and tab;
+- macOS: Terminal through `osascript`;
+- Linux: `PI_TEAMMATE_TERMINAL` when set, otherwise `x-terminal-emulator`; a custom terminal must accept `-e <command> <args...>`.
+
+Creation fails and attempts rollback if the terminal executable is unavailable or the worker does not register within 15 seconds. When physical reclamation cannot be confirmed, Monitor retains the window record for later discovery or cleanup.
+
+### Close and Exit
+
+Monitor can close only workers it created. Existing peers, manually opened windows, and workers owned by another Monitor are outside its close authority.
+
+Before `/monitor exit`, ask the coordinator to collect results and close workers that are no longer needed:
+
+```text
+Summarize every worker result, close completed windows, and report any remaining blockers.
+```
+
+`/monitor exit` stops supervision and clears bindings; it is not equivalent to closing every worker. If Monitor mode has already been exited, enter `/monitor` again and ask the coordinator to reclaim its workers. A full Pi root-session shutdown or reload also attempts to reclaim managed windows still owned by that session.
+
+### Compatibility Entry
+
+`/monitor spawn <name> <objective>` remains available for headless compatibility and debugging. It does not replace the natural-language coordination workflow, and the old path still requires discovery and explicit binding:
 
 ```text
 /monitor spawn migration complete the database migration and run integration tests
-/monitor spawn status
 /monitor migration auto
-```
-
-Names must start with an alphanumeric character, contain only `A-Z`, `a-z`, `0-9`, `.`, `_`, or `-`, and be at most 64 characters. The objective is the full command text after the name.
-
-Stop the window explicitly when done:
-
-```text
 /monitor spawn stop migration
 ```
-
-Managed windows are attached to the extension lifecycle. Explicit cleanup avoids leaving an unnecessary Pi process running.
 
 ## 6. Detection and Intervention
 
@@ -211,7 +257,7 @@ Use `/monitor status` routinely, `/monitor metrics` to assess outcomes, and `/mo
 
 | Capability | Target | Continuous | Active intervention | Best for |
 |------------|--------|------------|---------------------|----------|
-| Monitor | other workspace windows/sessions | yes, periodic ticks | yes, controlled `steer` | multi-window and background work |
+| Monitor | other workspace windows/sessions and workers it creates | yes, periodic ticks | controlled `steer`; create and reclaim owned workers | multi-window work, background execution, long-running supervision and coordination |
 | Advisor | current main session | turn/tool checkpoints | quality guidance only | reasoning and constraint review |
 | `observe` | Agent, background command, or workspace | one-shot or bounded wait | no | status, completion wait, turns |
 | Goal verifier | Goal completion result | at completion | no | acceptance and completion audit |
@@ -221,6 +267,16 @@ Monitor and Advisor can run together. Monitor watches whether other windows have
 Agents should discover windows with `teammate-list({ view: "windows" })` and inspect them with `observe`. Legacy `teammate-watch`, `teammate-wait`, and standalone observation tools are hidden by default and should not be used for new workflows.
 
 ## 10. Troubleshooting
+
+### Interactive Worker Was Not Created
+
+1. confirm that `/monitor` has opened `#control`; `workspace-window` rejects calls outside Monitor mode;
+2. on Windows check `wt.exe`, on macOS check Terminal, and on Linux check `PI_TEAMMATE_TERMINAL` or `x-terminal-emulator`;
+3. verify the worker name and confirm that the eight-window limit has not been reached;
+4. if a terminal opens but registration times out, confirm that it uses the same workspace and loads the current extension version;
+5. ask Monitor to “list the worker windows you created” and inspect whether each is `launching`, `running`, `disconnected`, or `failed`.
+
+If close reports that ownership or physical reclamation cannot be confirmed, Monitor intentionally retains the record. Do not substitute a same-named external peer; restore workspace-peer publication for the target or ask Monitor to close it again.
 
 ### Target Not Found
 

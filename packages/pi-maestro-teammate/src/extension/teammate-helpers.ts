@@ -196,6 +196,12 @@ import {
   getTeammatePermissionBroker,
   registerTeammateChildProxyCaller,
 } from "../runs/child-extensions.ts";
+import {
+  permissionRequestAuditAdmission,
+  schedulePermissionDecisionAudit,
+  schedulePermissionRequestAudit,
+  type PermissionAuditSource,
+} from "../runs/shared/permission-audit.ts";
 import { setQuietMode } from "../quiet-state.ts";
 
 import {
@@ -236,7 +242,7 @@ import type { TeammateRuntimeOptions } from "./index.ts";
 // ===========================================================================
 
 export type AgentListView = "active" | "named" | "all";
-export type TeammateListView = AgentListView | "roles" | "windows";
+export type TeammateListView = AgentListView | "roles" | "windows" | "inbox";
 export type ListedAgentStatus = AgentActivity;
 
 export interface ListedAgent {
@@ -1814,6 +1820,15 @@ export async function handleChildInteractionRequest(
     : fallbackCorrelationId;
   const agent = correlationId ? state.activeRuns.get(correlationId) : undefined;
   const agentLabel = agent?.name ?? agent?.agent ?? correlationId?.slice(0, 8) ?? "teammate";
+  const auditAdmission = permissionRequestAuditAdmission(event);
+  const auditParentSessionFile = auditAdmission
+    ? auditAdmission.parentSessionFile
+    : state.mainSessionFile ?? ctx?.sessionManager?.getSessionFile?.() ?? null;
+  const auditIdentity = { correlationId, agent: agentLabel };
+
+  if (!auditAdmission) {
+    schedulePermissionRequestAudit(auditParentSessionFile, event, auditIdentity);
+  }
 
   if (!interaction) {
     replyInteraction(reply, requestId, { action: "cancel", error: "Unknown interaction type" });
@@ -1838,6 +1853,13 @@ export async function handleChildInteractionRequest(
       trimAgentBuffers(agent);
       agent.lastActivityAt = Date.now();
     }
+    schedulePermissionDecisionAudit(
+      auditParentSessionFile,
+      event,
+      auditIdentity,
+      "allow_once",
+      "automatic",
+    );
     replyInteraction(reply, requestId, { action: "allow_once", updatedInput: payload.input });
     return;
   }
@@ -1884,8 +1906,10 @@ export async function handleChildInteractionRequest(
   }
 
   let result: Record<string, unknown>;
+  let decisionSource: Exclude<PermissionAuditSource, "child">;
   try {
     if (interaction === "permission" && payload.authorization === "parent") {
+      decisionSource = "broker";
       const broker = getTeammatePermissionBroker();
       const toolName = typeof payload.toolName === "string" ? payload.toolName : undefined;
       const input = isRecord(payload.input) ? payload.input : undefined;
@@ -1893,13 +1917,17 @@ export async function handleChildInteractionRequest(
         ? { ...await broker({ toolName, input }, ctx) }
         : { action: "deny", reason: "No parent permission broker is available." };
     } else if (!ctx?.hasUI) {
+      decisionSource = "headless";
       result = interaction === "permission" ? { action: "deny" } : { action: "cancel" };
     } else if (interaction === "permission") {
+      decisionSource = "ui";
       result = await showRelayedPermission(ctx, agentLabel, payload, signal);
     } else {
+      decisionSource = "ui";
       result = await showRelayedQuestions(ctx, agentLabel, payload, signal);
     }
   } catch (error) {
+    decisionSource = "error";
     result = {
       action: interaction === "permission" ? "deny" : "cancel",
       error: error instanceof Error ? error.message : String(error),
@@ -1908,21 +1936,34 @@ export async function handleChildInteractionRequest(
     agent?.pendingInteractions?.delete(requestId);
   }
 
-  if (agent) {
-    const action = typeof result.action === "string" ? result.action : "cancel";
-    agent.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ◀ ${interaction} ${action}`);
-    trimAgentBuffers(agent);
-    agent.lastActivityAt = Date.now();
+  const action = typeof result.action === "string" ? result.action : "cancel";
+  schedulePermissionDecisionAudit(
+    auditParentSessionFile,
+    event,
+    auditIdentity,
+    action,
+    decisionSource,
+    result.reason ?? result.error,
+  );
+
+  try {
+    if (agent) {
+      agent.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ◀ ${interaction} ${action}`);
+      trimAgentBuffers(agent);
+      agent.lastActivityAt = Date.now();
+    }
+    pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+      correlationId,
+      agent: agentLabel,
+      interaction,
+      requestId,
+      action: result.action,
+      ...(agent ? { lastActivityAt: agent.lastActivityAt } : {}),
+      isInteraction: true,
+    });
+  } catch {
+    // Observability must not interrupt the already-decided permission reply.
   }
-  pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
-    correlationId,
-    agent: agentLabel,
-    interaction,
-    requestId,
-    action: result.action,
-    ...(agent ? { lastActivityAt: agent.lastActivityAt } : {}),
-    isInteraction: true,
-  });
   replyInteraction(reply, requestId, result);
 }
 

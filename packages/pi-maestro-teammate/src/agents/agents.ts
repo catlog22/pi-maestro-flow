@@ -62,6 +62,28 @@ export interface AgentSummary {
   source: AgentSource;
 }
 
+export interface AgentDefinitionReference {
+  source: AgentSource;
+  filePath: string;
+}
+
+export interface AgentShadowDiagnostic {
+  name: string;
+  reason: "shadowed" | "reserved-builtin";
+  winner: AgentDefinitionReference;
+  candidate: AgentDefinitionReference;
+}
+
+export interface AgentDiscoverySnapshot {
+  agents: AgentConfig[];
+  diagnostics: AgentShadowDiagnostic[];
+}
+
+export interface AgentDiscoveryOptions {
+  includeDiagnostics: true;
+  homeDir?: string;
+}
+
 export interface AgentCatalogSnapshot {
   signature: string;
   systemPrompt: string;
@@ -318,7 +340,16 @@ function resolveDiscoveryDirs(cwd: string, homeDir: string): DiscoveryDirs {
  * Discover all agent definitions, merged by priority:
  * package > project > user > builtin (name collisions: higher priority wins).
  */
-export function discoverAgents(cwd: string, homeDir = os.homedir()): AgentConfig[] {
+export function discoverAgents(cwd: string, options: AgentDiscoveryOptions): AgentDiscoverySnapshot;
+export function discoverAgents(cwd: string, homeDir?: string): AgentConfig[];
+export function discoverAgents(
+  cwd: string,
+  homeDirOrOptions: string | AgentDiscoveryOptions = os.homedir(),
+): AgentConfig[] | AgentDiscoverySnapshot {
+  const options = typeof homeDirOrOptions === "string" ? undefined : homeDirOrOptions;
+  const homeDir = typeof homeDirOrOptions === "string"
+    ? homeDirOrOptions
+    : homeDirOrOptions.homeDir ?? os.homedir();
   const {
     legacyUserAgentsDir,
     userPiAgentsDir,
@@ -330,20 +361,13 @@ export function discoverAgents(cwd: string, homeDir = os.homedir()): AgentConfig
     projectNestedAgentsDir,
   } = resolveDiscoveryDirs(cwd, homeDir);
 
-  const builtinByName = new Map(
-    loadAgentsFromDir(BUILTIN_AGENTS_DIR, "builtin")
-      .filter((agent) => isBuiltinAgentName(agent.name))
-      .map((agent) => [agent.name, agent]),
-  );
+  const builtinCandidates = loadAgentsFromDir(BUILTIN_AGENTS_DIR, "builtin")
+    .filter((agent) => isBuiltinAgentName(agent.name));
   const builtinAgents = PUBLIC_BUILTIN_AGENT_NAMES
-    .map((name) => builtinByName.get(name))
-    .filter((agent): agent is AgentConfig => agent !== undefined);
+    .flatMap((name) => builtinCandidates.filter((agent) => agent.name === name));
   const loadCustomAgents = (dir: string, source: AgentSource): AgentConfig[] =>
-    loadAgentsFromDir(dir, source)
-    .filter((agent) => !isReservedAgentName(agent.name));
+    loadAgentsFromDir(dir, source);
 
-  // Builtin names are reserved so project/user definitions cannot silently
-  // replace the stable general, exploration, and DAG orchestration roles.
   const packageAgents = packageAgentsDirs.flatMap((dir) => loadCustomAgents(dir, "package"));
   const legacyUserAgents = loadCustomAgents(legacyUserAgentsDir, "user");
   const userPiAgents = loadCustomAgents(userPiAgentsDir, "user");
@@ -360,38 +384,106 @@ export function discoverAgents(cwd: string, homeDir = os.homedir()): AgentConfig
     : [];
 
   // Merge from lowest to highest priority: builtin < user < project < package.
-  // Map replacement is the deduplication contract: each exact role name is
-  // emitted once, with the highest-priority definition as its final value.
+  // Every rejection is captured here so the winner and its diagnostics are
+  // derived from one immutable discovery pass.
   const agentMap = new Map<string, AgentConfig>();
-  for (const agent of builtinAgents) agentMap.set(agent.name, agent);
-  for (const agent of legacyUserAgents) agentMap.set(agent.name, agent);
-  for (const agent of userPiAgents) agentMap.set(agent.name, agent);
-  for (const agent of userNestedAgents) agentMap.set(agent.name, agent);
-  for (const agent of userAgents) agentMap.set(agent.name, agent);
-  for (const agent of projectNestedAgents) agentMap.set(agent.name, agent);
-  for (const agent of projectCompatAgents) agentMap.set(agent.name, agent);
-  for (const agent of projectPiAgents) agentMap.set(agent.name, agent);
-  for (const agent of packageAgents) agentMap.set(agent.name, agent);
+  const rejectedCandidates: Array<{
+    name: string;
+    reason: AgentShadowDiagnostic["reason"];
+    candidate: AgentConfig;
+  }> = [];
+  const mergeAgent = (agent: AgentConfig): void => {
+    // Builtin names are reserved so custom definitions cannot silently replace
+    // the stable general, exploration, and DAG orchestration roles.
+    if (agent.source !== "builtin" && isReservedAgentName(agent.name)) {
+      rejectedCandidates.push({ name: agent.name, reason: "reserved-builtin", candidate: agent });
+      return;
+    }
+    const previous = agentMap.get(agent.name);
+    if (previous) {
+      rejectedCandidates.push({ name: agent.name, reason: "shadowed", candidate: previous });
+    }
+    agentMap.set(agent.name, agent);
+  };
+  for (const agents of [
+    builtinAgents,
+    legacyUserAgents,
+    userPiAgents,
+    userNestedAgents,
+    userAgents,
+    projectNestedAgents,
+    projectCompatAgents,
+    projectPiAgents,
+    packageAgents,
+  ]) {
+    for (const agent of agents) mergeAgent(agent);
+  }
 
-  return Array.from(agentMap.values());
+  const agents = Array.from(agentMap.values());
+  if (!options?.includeDiagnostics) return agents;
+
+  const diagnostics = rejectedCandidates.flatMap<AgentShadowDiagnostic>((entry) => {
+    const winner = agentMap.get(entry.name);
+    if (!winner) return [];
+    return [{
+      name: entry.name,
+      reason: entry.reason,
+      winner: { source: winner.source, filePath: winner.filePath },
+      candidate: { source: entry.candidate.source, filePath: entry.candidate.filePath },
+    }];
+  });
+  return { agents, diagnostics };
 }
 
-/**
- * Resolve a single agent by name.
- */
+/** Resolve a single agent by name, optionally from an existing discovery snapshot. */
+export function resolveAgent(
+  discovery: AgentDiscoverySnapshot,
+  agentName: string,
+): AgentConfig | undefined;
 export function resolveAgent(
   cwd: string,
   agentName: string,
+): AgentConfig | undefined;
+export function resolveAgent(
+  cwdOrDiscovery: string | AgentDiscoverySnapshot,
+  agentName: string,
 ): AgentConfig | undefined {
-  const agents = discoverAgents(cwd);
+  const agents = typeof cwdOrDiscovery === "string"
+    ? discoverAgents(cwdOrDiscovery)
+    : cwdOrDiscovery.agents;
   return agents.find((agent) => agent.name === agentName);
 }
 
 /** Return resolved role metadata without exposing the role prompt body. */
-export function listAgentSummaries(cwd: string, homeDir = os.homedir()): AgentSummary[] {
-  return discoverAgents(cwd, homeDir)
+export function listAgentSummaries(discovery: AgentDiscoverySnapshot): AgentSummary[];
+export function listAgentSummaries(cwd: string, homeDir?: string): AgentSummary[];
+export function listAgentSummaries(
+  cwdOrDiscovery: string | AgentDiscoverySnapshot,
+  homeDir = os.homedir(),
+): AgentSummary[] {
+  const agents = typeof cwdOrDiscovery === "string"
+    ? discoverAgents(cwdOrDiscovery, homeDir)
+    : cwdOrDiscovery.agents;
+  return agents
     .map(({ name, description, source }) => ({ name, description, source }))
     .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+/** Format diagnostics only for the exact role selected for dispatch. */
+export function formatAgentShadowWarning(
+  discovery: AgentDiscoverySnapshot,
+  agentName: string,
+): string | undefined {
+  const diagnostics = discovery.diagnostics.filter((entry) => entry.name === agentName);
+  if (diagnostics.length === 0) return undefined;
+  const winner = diagnostics[0]?.winner;
+  if (!winner) return undefined;
+  const sources = [...new Set(diagnostics.map((entry) => entry.candidate.source))].join(", ");
+  const definition = diagnostics.length === 1 ? "definition" : "definitions";
+  if (diagnostics.every((entry) => entry.reason === "reserved-builtin")) {
+    return `Agent "${agentName}" uses the reserved builtin definition; ignored ${diagnostics.length} custom ${definition} from ${sources}.`;
+  }
+  return `Agent "${agentName}" resolved to the ${winner.source} definition; shadowed ${diagnostics.length} other ${definition} from ${sources}.`;
 }
 
 /** Format a compact, deterministic role catalog for teammate tool metadata. */
