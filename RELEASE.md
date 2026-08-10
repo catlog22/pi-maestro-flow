@@ -84,7 +84,8 @@ Settings-Core `0.1.3`. Experts Mode remains off until explicitly enabled with
 - The four stale contract assertions exposed by the merge were corrected and
   rerun as focused files; the adapter's missing `expertsCaller` public type was
   fixed before Flow typecheck passed.
-- Registry tarball and fresh isolated Pi install smoke: pending publication.
+- Fresh isolated `USERPROFILE` + `HOME` registry install passed: package/companion versions, RPC Skill discovery,
+  and a real `/skill:experts status --dry-run` invocation all succeeded without changing mode or workflow state.
 
 Dry-run tarballs from the verified candidate:
 
@@ -97,8 +98,8 @@ Dry-run tarballs from the verified candidate:
 
 ## Change Statistics
 
-Candidate compared with `v0.18.0`: 14 commits including the release commit; 137 files changed;
-13,751 insertions and 360 deletions across Teammate, Cockpit, Flow, docs, and skills.
+Candidate compared with `v0.18.0`: 15 commits including release verification; 137 files changed;
+13,752 insertions and 360 deletions across Teammate, Cockpit, Flow, docs, and skills.
 
 ---
 
