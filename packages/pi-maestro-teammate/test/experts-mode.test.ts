@@ -1169,3 +1169,69 @@ test("P5.1 mergeRules merges orchestrator shallowly", () => {
   );
   assert.equal(kept.orchestrator?.viceLead, true);
 });
+
+// --- A2 experts status panel ---
+import {
+  formatExpertsStatusPanel,
+  formatExpertsStatusPanelFromStatus,
+  recordLastDispatch,
+} from "../src/experts-mode/index.ts";
+
+test("A2 status panel renders normal mode without throwing", () => {
+  const cwd = tempCwd();
+  const panel = formatExpertsStatusPanel(cwd);
+  assert.match(panel, /Mode: normal/);
+  assert.match(panel, /LeaderWaiting: no/);
+  assert.match(panel, /ActiveStage: \(none\)/);
+  assert.match(panel, /LastDispatch: \(none\)/);
+  assert.match(panel, /InFlight: 0/);
+  assert.match(panel, /Harvest: \(none\)/);
+  assert.ok(panel.includes(".experts-mode.json"), "panel must show the state path");
+  // pure formatter path from an already-built status object
+  const direct = formatExpertsStatusPanelFromStatus(getStatus(cwd));
+  assert.match(direct, /Mode: normal/);
+  assert.match(direct, /Path:/);
+});
+
+test("A2 status panel shows experts mode and leader waiting", () => {
+  const cwd = tempCwd();
+  setMode("experts", cwd);
+  setLeaderWaiting(true, { cwd, activeDelta: 2, agentIds: ["general-executor", "explorer"] });
+  const panel = formatExpertsStatusPanel(cwd);
+  assert.match(panel, /Mode: experts/);
+  assert.match(panel, /LeaderWaiting: yes \(2\)/);
+  assert.match(panel, /agents=\[general-executor, explorer\]/);
+  assert.ok(!panel.includes("model"), "panel must never contain model ids");
+});
+
+test("A2 LastDispatch shows taskType/stage without a model line", () => {
+  const cwd = tempCwd();
+  setMode("experts", cwd);
+  clearInFlight(cwd);
+  recordLastDispatch({
+    mode: "experts",
+    taskType: "development",
+    agent: "general-executor",
+    model: "sub2-responses/gpt-5.4", // routing-only — must never render
+    forced: true,
+    stage: "execute",
+    at: "2026-08-10T00:00:00.000Z",
+    promptPreview: `preview-${"x".repeat(100)}`, // longer than 80 → truncated
+  }, cwd);
+  trackInFlight([
+    { id: "dev-1", name: "dev-1", agent: "general-executor", taskType: "development" },
+  ], { cwd });
+  const panel = formatExpertsStatusPanel(cwd);
+  assert.match(panel, /LastDispatch:/);
+  assert.match(panel, /taskType=development/);
+  assert.match(panel, /agent=general-executor/);
+  assert.match(panel, /stage=execute/);
+  assert.match(panel, /forced=true/);
+  assert.match(panel, /at=2026-08-10T00:00:00\.000Z/);
+  assert.match(panel, /prompt="preview-/);
+  assert.ok(panel.includes("…"), "over-80 preview must be truncated");
+  assert.ok(!panel.includes("model"), "panel must never leak model ids");
+  assert.match(panel, /InFlight: 1/);
+  assert.match(panel, /name=dev-1/);
+  assert.match(panel, /taskType=development/);
+});

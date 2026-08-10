@@ -207,3 +207,5 @@ Read `ralph-amend-goal.md`, use `session status {session_id}` for the snapshot, 
 - Stage is auto-injected from session.json (P4.1) — no manual MAESTRO_STAGE; stagePolicies fill taskType before keyword triage.
 - Optional vice-lead: for multi-step stage pipelines, dispatch agent=workflow taskType=planning to decompose/dispatch the DAG; the Lead still owns session done/check/seal.
 - Continuation: prefer automatic continuation when authority=automatic (session next/done loop).
+- Full experts interaction entry: `/experts` (same flags/run-loop as this skill + force experts mode + status panel).
+- This skill remains valid under mode=experts; hard-gate and stagePolicies still apply.

@@ -13,6 +13,10 @@ export type { EnsureExpertsDispatchOptions } from "./dispatch.ts";
 export { recordLastDispatch, getStatus, buildCanvasSnapshot } from "./observe.ts";
 export type { ExpertsStatus } from "./observe.ts";
 export {
+  formatExpertsStatusPanel,
+  formatExpertsStatusPanelFromStatus,
+} from "./status-panel.ts";
+export {
   getRoster,
   resolveRosterEntry,
   agentForTaskTypeFromRoster,

@@ -264,6 +264,8 @@ import {
   resolveMaestroStageFromWorkspace,
   syncActiveStageFromMaestro,
   formatStageBirthPacket,
+  setMode,
+  formatExpertsStatusPanel,
   EXPERTS_HARVEST_STATUS_KEY,
   expertsHarvestStatusFromCwd,
 } from "../experts-mode/index.ts";
@@ -5466,6 +5468,31 @@ export default function registerTeammateExtension(
       await showTeammateControlCenter(ctx);
       tool.description = buildTeammateToolDescription(ctx.cwd);
       pi.registerTool(tool);
+    },
+  });
+
+  pi.registerCommand("experts", {
+    description: "Experts Mode: on | off | status (default status)",
+    async handler(args, ctx) {
+      const cwd = ctx.cwd ?? process.cwd();
+      const raw = (args ?? "").trim().toLowerCase();
+      const sub = raw.split(/\s+/)[0] || "status";
+      try {
+        if (sub === "on") {
+          setMode("experts", cwd);
+          ctx.ui.notify("Experts Mode ON", "info");
+        } else if (sub === "off") {
+          setMode("normal", cwd);
+          ctx.ui.notify("Experts Mode OFF (normal)", "info");
+        } else if (sub !== "status" && sub !== "") {
+          ctx.ui.notify("Usage: /experts [on|off|status]", "warning");
+          return;
+        }
+        const panel = formatExpertsStatusPanel(cwd);
+        ctx.ui.notify(panel, "info");
+      } catch (e) {
+        ctx.ui.notify(String(e), "error");
+      }
     },
   });
 
