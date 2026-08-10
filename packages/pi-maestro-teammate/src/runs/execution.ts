@@ -35,6 +35,7 @@ import type {
 } from "../shared/types.ts";
 import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
 import { applyModelRouting, syncModelCircuitPolicies, type TeammateTaskType } from "../models/model-routing.ts";
+import { ensureExpertsDispatch, noteExpertsSettled, getMode } from "../experts-mode/index.ts";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
 import {
   rankModelsByHealth,
@@ -2432,13 +2433,41 @@ export async function runGraph(
   return results;
 }
 
+/** Best-effort result text for experts settle harvest (avoids teammate-core cycle). */
+function resultTextForHarvest(result: SingleResult): string {
+  const last = result.messages.at(-1)?.content;
+  if (typeof last === "string" && last.trim()) return last;
+  if (result.structuredOutput !== undefined) {
+    try {
+      return `[structured_output] ${JSON.stringify(result.structuredOutput)}`;
+    } catch {
+      // non-serializable value — fall through
+    }
+  }
+  return "(no output)";
+}
+
 /** Programmatic tasks-only entry point matching the public teammate schema. */
 export async function runTeammate(
   params: RunTeammateParams,
   options: RunTeammateOptions,
 ): Promise<SingleResult[]> {
+  // Experts Mode: force taskType/agent before model routing (never hardcode models).
+  // P4: honor params.stage / MAESTRO_STAGE for stagePolicies.
+  const stageFromParams =
+    typeof (params as { stage?: unknown }).stage === "string"
+      ? String((params as { stage?: string }).stage)
+      : undefined;
+  const prepared = ensureExpertsDispatch(params, {
+    cwd: options.baseCwd,
+    stage: stageFromParams,
+  }) as RunTeammateParams & { __experts?: { waitingDelta?: number } };
+  // HV-03: reserved waiting slots must always be settled, even on normalize failure.
+  const reservedWaiting = typeof prepared.__experts?.waitingDelta === "number"
+    ? prepared.__experts.waitingDelta
+    : 0;
   const routed = applyModelRouting(
-    params,
+    prepared,
     options.baseCwd,
     options.modelCapabilities?.map((capability) => capability.id) ?? [],
     undefined,
@@ -2449,8 +2478,26 @@ export async function runTeammate(
   // role's mapped model before any acquisition happens.
   syncModelCircuitPolicies(options.modelCircuitBreaker ?? sharedModelCircuitBreaker, options.baseCwd);
   const normalized = normalizeTeammateParams(routed);
-  if (normalized.error) throw new Error(normalized.error);
-  return runGraph(normalized.tasks, params.concurrency ?? 4, options);
+  let results: SingleResult[] | undefined;
+  try {
+    if (normalized.error) throw new Error(normalized.error);
+    results = await runGraph(normalized.tasks, params.concurrency ?? 4, options);
+    return results;
+  } finally {
+    // P3 + HV-03: settle reserved waiting (success, graph throw, or normalize error).
+    try {
+      if (getMode(options.baseCwd) === "experts" && reservedWaiting > 0) {
+        noteExpertsSettled(options.baseCwd, {
+          settledCount: reservedWaiting,
+          reason: "runTeammate-settled",
+          // P7: best-effort harvest text from each result (empty when graph throws).
+          contents: (results ?? []).map((r) => resultTextForHarvest(r)),
+        });
+      }
+    } catch {
+      // never fail the run on waiting bookkeeping
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

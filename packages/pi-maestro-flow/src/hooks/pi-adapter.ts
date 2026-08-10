@@ -36,6 +36,7 @@ import {
   type HookReviewUiState,
 } from "./review-tui.ts";
 import { runMaestroHookInstaller } from "./installer.ts";
+import { evaluateHardGate } from "pi-maestro-teammate/experts-mode";
 import type {
   PermissionMode,
   PermissionToolCall,
@@ -299,11 +300,39 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
   };
 
   const beforeToolCall = async (
-    event: PermissionToolCall & { toolCallId?: string },
+    event: PermissionToolCall & { toolCallId?: string; expertsCaller?: "leader" | "expert" },
     ctx: ExtensionContext,
   ): Promise<{ block: true; reason: string } | undefined> => {
-    if (!state.active) return;
     const names = toolMatchValues(event.toolName);
+    // CV-01 / HV-01: Lead hard-gate runs even when Codex hooks are inactive/untrusted.
+    // Expert (teammate child relay) skips the gate so workers can write business files.
+    const expertsCaller = event.expertsCaller === "expert" ? "expert" : "leader";
+    try {
+      const gate = evaluateHardGate(event.toolName, {
+        cwd: ctx.cwd,
+        toolInput: event.input,
+        caller: expertsCaller,
+      });
+      if (gate.decision === "deny") {
+        const rewrite = gate.rewriteSuggestion;
+        const rewriteLine = rewrite
+          ? ` [rewrite] teammate taskType=${rewrite.taskType} agent=${rewrite.agent}`
+            + (rewrite.stage ? ` stage=${rewrite.stage}` : "")
+          : "";
+        return { block: true, reason: `${gate.reason}${rewriteLine}` };
+      }
+      if (gate.decision === "ask" && event.toolCallId) {
+        const warn = `[experts-mode] ${gate.reason}`;
+        const prev = state.toolContext.get(event.toolCallId) ?? [];
+        state.toolContext.set(event.toolCallId, [...prev, warn]);
+      }
+    } catch {
+      // Never fail tool path if experts-mode state is unreadable.
+    }
+
+    // Remaining Codex hooks still require trusted hooks.json.
+    if (!state.active) return;
+
     const outputs = await execute("PreToolUse", names, {
       ...turnInput("PreToolUse", ctx, state, getPermissionMode()),
       tool_name: names[0],

@@ -3162,7 +3162,11 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
   const teammatePermissionBroker: TeammatePermissionBroker = async (call, ctx) => {
     const planBlock = onToolCallPlan(call, approvalMode === "bypassPermissions");
     if (planBlock) return { action: "deny", reason: planBlock.reason };
-    const hookBlock = await hookAdapter.beforeToolCall(call, ctx);
+    // CV-01: child tools must not hit Lead hard-gate — mark expertsCaller=expert.
+    const hookBlock = await hookAdapter.beforeToolCall(
+      { ...call, expertsCaller: "expert" as const },
+      ctx,
+    );
     if (hookBlock) return { action: "deny", reason: hookBlock.reason };
     const block = await permissionController.authorize(
       call,
@@ -3187,6 +3191,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
         const call = { toolName, input };
         const planBlock = onToolCallPlan(call, approvalMode === "bypassPermissions");
         if (planBlock) return { block: true, reason: planBlock.reason };
+        // GUI path is Leader-originated; keep default expertsCaller=leader.
         const hookBlock = await hookAdapter.beforeToolCall(call, ctx);
         signal.throwIfAborted();
         if (hookBlock) return { block: true, reason: hookBlock.reason };
