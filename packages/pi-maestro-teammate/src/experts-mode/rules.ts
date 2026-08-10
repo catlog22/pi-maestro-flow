@@ -88,6 +88,12 @@ export function mergeRules(base: ExpertsRules, overlay: ExpertsRules): ExpertsRu
     roster: overlay.roster
       ? { ...(base.roster || {}), ...overlay.roster }
       : base.roster,
+    channels: overlay.channels
+      ? { ...(base.channels || {}), ...overlay.channels }
+      : base.channels,
+    expertProfiles: overlay.expertProfiles
+      ? { ...(base.expertProfiles || {}), ...overlay.expertProfiles }
+      : base.expertProfiles,
     taskTypes: overlay.taskTypes
       ? { ...(base.taskTypes || {}), ...overlay.taskTypes }
       : base.taskTypes,

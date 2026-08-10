@@ -18,6 +18,14 @@ import {
   formatExpertResult,
   parseExpertResultAgentId,
   noteExpertsSettled,
+  resolveModelRef,
+  resolveChannel,
+  applyExpertProfiles,
+  resolveExpertProfile,
+  defaultRulesPath,
+  loadRules,
+  clearRulesCache,
+  EXPERTS_SKILLS_START,
   type TeammateParamsLike,
 } from "../src/experts-mode/index.ts";
 
@@ -311,7 +319,6 @@ import {
   resolveStageName,
   getStagePolicy,
   primaryStageAssignment,
-  clearRulesCache,
 } from "../src/experts-mode/index.ts";
 
 test("P4 resolveStageName aliases maestro-execute → execute", () => {
@@ -1333,4 +1340,119 @@ test("A3 formatExpertsPanelFromStatus switches views and formatExpertsPanel defa
   assert.match(formatExpertsPanel(cwd, "roster"), /Experts Roster/);
   assert.match(formatExpertsPanel(cwd, "waiting"), /Experts Waiting/);
   assert.match(formatExpertsPanel(cwd, "harvest"), /Experts Harvest/);
+});
+
+
+// ---------------------------------------------------------------------------
+// A4: expert profiles (model / channel / skills)
+// ---------------------------------------------------------------------------
+
+test("A4 resolveChannel uses aliases", () => {
+  const rules = { channels: { cpa: "cpa-responses", sub2: "sub2-responses" } };
+  assert.equal(resolveChannel("cpa", rules), "cpa-responses");
+  assert.equal(resolveChannel("sub2", rules), "sub2-responses");
+  assert.equal(resolveChannel("already-provider", rules), "already-provider");
+  assert.equal(resolveChannel(undefined, rules), undefined);
+});
+
+test("A4 resolveModelRef joins channel + bare model", () => {
+  const rules = { channels: { cpa: "cpa-responses" } };
+  assert.equal(resolveModelRef("deepseek-v4-flash", "cpa", rules), "cpa-responses/deepseek-v4-flash");
+  assert.equal(resolveModelRef("cpa-responses/grok-4.5", "cpa", rules), "cpa-responses/grok-4.5");
+  assert.equal(resolveModelRef("bare-only", undefined, rules), "bare-only");
+  assert.equal(resolveModelRef(undefined, "cpa", rules), undefined);
+});
+
+test("A4 applyExpertProfiles fills model under experts and no-ops normal", () => {
+  const rules = {
+    channels: { cpa: "cpa-responses" },
+    roster: {
+      explorer: {
+        agent: "explorer",
+        defaultTaskType: "explore",
+        channel: "cpa",
+        model: "deepseek-v4-flash",
+        skills: ["smart-search-cli"],
+      },
+    },
+  };
+  const base: TeammateParamsLike = {
+    tasks: [{ prompt: "search call chain", agent: "explorer", taskType: "explore" }],
+  };
+  const normal = applyExpertProfiles(base, { mode: "normal", rules: rules as any });
+  assert.equal(normal.tasks?.[0]?.model, undefined);
+
+  const experts = applyExpertProfiles(base, { mode: "experts", rules: rules as any });
+  assert.equal(experts.tasks?.[0]?.model, "cpa-responses/deepseek-v4-flash");
+  assert.match(String(experts.tasks?.[0]?.prompt), /experts-skills:start/);
+  assert.match(String(experts.tasks?.[0]?.prompt), /smart-search-cli/);
+});
+
+test("A4 applyExpertProfiles does not override explicit task.model", () => {
+  const rules = {
+    roster: {
+      explorer: {
+        agent: "explorer",
+        defaultTaskType: "explore",
+        model: "cpa-responses/deepseek-v4-flash",
+      },
+    },
+  };
+  const out = applyExpertProfiles({
+    tasks: [{
+      prompt: "x",
+      agent: "explorer",
+      taskType: "explore",
+      model: "sub2-responses/gpt-5.6-terra",
+    }],
+  }, { mode: "experts", rules: rules as any });
+  assert.equal(out.tasks?.[0]?.model, "sub2-responses/gpt-5.6-terra");
+});
+
+test("A4 ensureExpertsDispatch applies project roster profile", () => {
+  const cwd = tempCwd();
+  fs.writeFileSync(path.join(cwd, ".experts-rules.json"), JSON.stringify({
+    channels: { cpa: "cpa-responses" },
+    roster: {
+      explorer: {
+        agent: "explorer",
+        defaultTaskType: "explore",
+        channel: "cpa",
+        model: "deepseek-v4-flash",
+        thinking: "low",
+        skills: ["smart-search-cli"],
+      },
+    },
+  }, null, 2));
+  clearRulesCache();
+  setMode("experts", cwd);
+  const rules = loadRules(defaultRulesPath(), cwd);
+  const out = ensureExpertsDispatch({
+    tasks: [{ prompt: "搜索 PositionManager 调用链" }],
+  } as TeammateParamsLike, { cwd, mode: "experts", record: false, rules });
+  assert.equal(out.tasks?.[0]?.taskType, "explore");
+  assert.equal(out.tasks?.[0]?.agent, "explorer");
+  assert.equal(out.tasks?.[0]?.model, "cpa-responses/deepseek-v4-flash");
+  assert.equal(out.tasks?.[0]?.thinking, "low");
+  assert.match(String(out.tasks?.[0]?.prompt), new RegExp(EXPERTS_SKILLS_START));
+  clearRulesCache();
+});
+
+test("A4 resolveExpertProfile maps agent to profile", () => {
+  const rules = {
+    channels: { cpa: "cpa-responses" },
+    roster: {
+      planner: {
+        agent: "planner",
+        defaultTaskType: "planning",
+        channel: "cpa",
+        model: "grok-4.5",
+        skills: ["maestro"],
+      },
+    },
+  };
+  const p = resolveExpertProfile({ agent: "planner" }, rules as any);
+  assert.ok(p);
+  assert.equal(p!.model, "cpa-responses/grok-4.5");
+  assert.deepEqual(p!.skills, ["maestro"]);
 });

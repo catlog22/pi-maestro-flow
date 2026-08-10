@@ -198,3 +198,38 @@ While `leaderWaiting` is true: do not claim done, do not start dependent synthes
 <note>
 This is NOT the Qoder Canvas pipeline: it is the Pi-native experts pipeline with an enforced hard gate (host adapter turns a deny into a blocking pre-tool result carrying a teammate rewrite). The hard-gate enforcement is stronger than Qoder's soft reminder — treat a deny as a hard stop, rewrite the call, and dispatch.
 </note>
+
+## Expert profiles config (model / channel / skills)
+
+Project file: `<cwd>/.experts-rules.json` (merged over package defaults).
+
+### Schema (roster entry)
+
+| Field | Meaning |
+|-------|---------|
+| `agent` | Teammate role name (not a model id) |
+| `defaultTaskType` | Routing phase when stage/triage omit taskType |
+| `channel` | Provider prefix or alias key under `channels` |
+| `model` | Preferred model: `provider/model` **or** bare id (joined with channel) |
+| `fallbackModels` | Ordered fallbacks |
+| `thinking` | Preferred thinking level |
+| `skills` | Skill names injected as `skill://` guidance on dispatch |
+
+### Channels
+
+```json
+{ "channels": { "cpa": "cpa-responses", "sub2": "sub2-responses" } }
+```
+
+### Precedence (model)
+
+`explicit task.model` > **expert roster profile** > `applyModelRouting` (taskType / roleMappings / inherit)
+
+### Example
+
+See package `src/experts-mode/config/experts-rules.example.json`. Copy fields into project `.experts-rules.json`.
+
+### CLI
+
+- `/experts roster` or `/experts config` — show profiles (model/channel/skills when set)
+

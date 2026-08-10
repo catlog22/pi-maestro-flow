@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "channels": {
+    "cpa": "cpa-responses",
+    "sub2": "sub2-responses"
+  },
+  "roster": {
+    "explorer": {
+      "agent": "explorer",
+      "defaultTaskType": "explore",
+      "label": "Code explorer",
+      "channel": "cpa",
+      "model": "deepseek-v4-flash",
+      "thinking": "low",
+      "skills": ["smart-search-cli"],
+      "capabilities": ["explore"]
+    },
+    "planner": {
+      "agent": "planner",
+      "defaultTaskType": "planning",
+      "label": "Planner",
+      "channel": "cpa",
+      "model": "grok-4.5",
+      "thinking": "max",
+      "skills": ["maestro"],
+      "capabilities": ["planning"]
+    },
+    "analyst": {
+      "agent": "analyst",
+      "defaultTaskType": "analysis",
+      "channel": "cpa",
+      "model": "grok-4.5",
+      "thinking": "max",
+      "skills": [],
+      "capabilities": ["analysis", "debug"]
+    },
+    "general-executor": {
+      "agent": "general-executor",
+      "defaultTaskType": "development",
+      "channel": "cpa",
+      "model": "deepseek-v4-flash",
+      "fallbackModels": ["sub2-responses/gpt-5.6-terra"],
+      "thinking": "max",
+      "skills": [],
+      "capabilities": ["development", "testing"]
+    },
+    "reviewer": {
+      "agent": "reviewer",
+      "defaultTaskType": "review",
+      "channel": "cpa",
+      "model": "deepseek-v4-flash",
+      "fallbackModels": ["cpa-responses/grok-4.5", "sub2-responses/gpt-5.6-terra"],
+      "thinking": "max",
+      "skills": [],
+      "capabilities": ["review"]
+    }
+  },
+  "settle": {
+    "knowledgeHarvest": true,
+    "autoStage": false
+  }
+}

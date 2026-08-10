@@ -36,6 +36,8 @@ export interface TeammateTaskLike {
   agent?: string;
   taskType?: string;
   model?: string;
+  fallbackModels?: string[];
+  thinking?: string;
   name?: string;
   [key: string]: unknown;
 }
@@ -45,6 +47,8 @@ export interface TeammateParamsLike {
   agent?: string;
   taskType?: string;
   model?: string;
+  fallbackModels?: string[];
+  thinking?: string;
   prompt?: string;
   /** P4: Maestro chain stage / command for stagePolicies. */
   stage?: string;
@@ -119,6 +123,16 @@ export interface RosterEntry {
   tools?: string[];
   /** When false, role is listed but not auto-selected. */
   enabled?: boolean;
+  /** Preferred model id (provider/model or bare). Config-only mapping; not a role name. */
+  model?: string;
+  /** Ordered fallback models for this expert. */
+  fallbackModels?: string[];
+  /** Preferred thinking level for this expert. */
+  thinking?: string;
+  /** Channel / provider prefix; bare model becomes `${channel}/${model}`. */
+  channel?: string;
+  /** Skill names this expert should load (injected as skill:// guidance). */
+  skills?: string[];
 }
 
 /** P6: in-flight expert work unit for observability. */
@@ -194,10 +208,20 @@ export interface ExpertsRules {
     viceLead?: boolean;
   };
   /**
-   * P6: project experts roster (role → agent → default taskType → tools).
+   * P6: project experts roster (role → agent → default taskType → tools / model / skills).
    * Keys are role ids; values omit id (filled from key) or include id.
    */
   roster?: Record<string, Omit<RosterEntry, "id"> & { id?: string }>;
+  /**
+   * Channel aliases: short name → provider prefix (e.g. cpa → cpa-responses).
+   * Used when roster entries set channel + bare model.
+   */
+  channels?: Record<string, string>;
+  /**
+   * Optional expertProfiles: same shape as roster values.
+   * Merged over roster keys (profiles win on conflict).
+   */
+  expertProfiles?: Record<string, Omit<RosterEntry, "id"> & { id?: string }>;
   /**
    * P7: settle → knowledge harvest policy (suggest-only by default).
    */

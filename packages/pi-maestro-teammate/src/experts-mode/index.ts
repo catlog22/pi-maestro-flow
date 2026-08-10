@@ -28,6 +28,15 @@ export {
   agentForTaskTypeFromRoster,
 } from "./roster.ts";
 export {
+  resolveChannel,
+  resolveModelRef,
+  resolveExpertProfile,
+  applyExpertProfiles,
+  EXPERTS_SKILLS_START,
+  EXPERTS_SKILLS_END,
+} from "./expert-profile.ts";
+export type { ExpertProfileResolved } from "./expert-profile.ts";
+export {
   getInFlight,
   trackInFlight,
   settleInFlight,

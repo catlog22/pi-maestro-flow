@@ -98,17 +98,22 @@ export function formatExpertsRosterPanelFromStatus(status: ExpertsStatus): strin
   } else {
     for (const entry of roster) {
       const caps = (entry.capabilities ?? []).join(",");
-      lines.push([
+      const parts = [
         entry.id,
         entry.agent,
         entry.defaultTaskType,
         entry.label ?? "",
         caps,
         entry.enabled === false ? "disabled" : "enabled",
-      ].join(" | "));
+      ];
+      if (entry.channel) parts.push(`channel=${entry.channel}`);
+      if (entry.model) parts.push(`model=${truncate(entry.model, 40)}`);
+      if (entry.skills?.length) parts.push(`skills=${entry.skills.slice(0, 4).join(",")}`);
+      if (entry.thinking) parts.push(`thinking=${entry.thinking}`);
+      lines.push(parts.join(" | "));
     }
   }
-  lines.push("role ≠ model — routing owns models");
+  lines.push("role ≠ model — profile may map role→model/channel/skills via .experts-rules.json");
   return lines.join("\n");
 }
 

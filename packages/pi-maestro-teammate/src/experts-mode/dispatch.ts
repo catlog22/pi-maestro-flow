@@ -1,8 +1,9 @@
+import { applyExpertProfiles } from "./expert-profile.ts";
 import { trackInFlight } from "./inflight.ts";
 import { resolveMaestroStageFromWorkspace, setMaestroStageEnvIfUnset } from "./maestro-stage.ts";
 import { getMode } from "./mode.ts";
 import { recordLastDispatch } from "./observe.ts";
-import { loadRules } from "./rules.ts";
+import { defaultRulesPath, loadRules } from "./rules.ts";
 import { primaryStageAssignment, writeActiveStage } from "./stage-policy.ts";
 import { classifyIntent } from "./triage.ts";
 import { setLeaderWaiting } from "./waiting.ts";
@@ -37,7 +38,8 @@ export type ExpertsDispatchMeta = {
 
 /**
  * Ensure teammate-like params carry taskType/agent when Experts Mode is on.
- * Does NOT set model — leave that to applyModelRouting / teammate-models.
+ * Then applyExpertProfiles may fill model/channel/skills from roster config
+ * (explicit task.model still wins). Keyword triage never invents models.
  *
  * Call order (required):
  *   ensureExpertsDispatch(params) → applyModelRouting(params, ...)
@@ -55,7 +57,7 @@ export function ensureExpertsDispatch<T extends object>(
   const cwd = opts.cwd ?? process.cwd();
   const mode = opts.mode ?? getMode(cwd);
   const record = opts.record !== false;
-  const rules = opts.rules ?? loadRules();
+  const rules = opts.rules ?? loadRules(defaultRulesPath(), cwd);
   let stageHint =
     opts.stage
     || (typeof p.stage === "string" ? p.stage : undefined)
@@ -134,7 +136,7 @@ export function ensureExpertsDispatch<T extends object>(
     };
   });
 
-  const out = {
+  let out = {
     ...params,
     tasks: nextTasks,
   } as T & {
@@ -212,6 +214,14 @@ export function ensureExpertsDispatch<T extends object>(
     );
   } catch {
     // state write must not break dispatch
+  }
+
+  // Roster profiles: preferred model/channel/skills (config-driven only).
+  // applyModelRouting still runs after this and will not override task.model.
+  try {
+    out = applyExpertProfiles(out, { cwd, rules, mode });
+  } catch {
+    // profile apply must never break dispatch
   }
 
   return out;

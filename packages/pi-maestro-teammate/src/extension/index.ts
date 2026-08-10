@@ -5473,12 +5473,12 @@ export default function registerTeammateExtension(
   });
 
   pi.registerCommand("experts", {
-    description: "Experts Mode: on|off|status|roster|waiting|harvest (default status)",
+    description: "Experts Mode: on|off|status|roster|config|waiting|harvest (default status)",
     async handler(args, ctx) {
       const cwd = ctx.cwd ?? process.cwd();
       const raw = (args ?? "").trim().toLowerCase();
       const sub = raw.split(/\s+/)[0] || "status";
-      const usage = "Usage: /experts [on|off|status|roster|waiting|harvest]";
+      const usage = "Usage: /experts [on|off|status|roster|config|waiting|harvest]";
       try {
         if (sub === "on") {
           setMode("experts", cwd);
@@ -5486,14 +5486,16 @@ export default function registerTeammateExtension(
         } else if (sub === "off") {
           setMode("normal", cwd);
           ctx.ui.notify("Experts Mode OFF (normal)", "info");
-        } else if (!["status", "roster", "waiting", "harvest", ""].includes(sub)) {
+        } else if (!["status", "roster", "config", "waiting", "harvest", ""].includes(sub)) {
           ctx.ui.notify(usage, "warning");
           return;
         }
 
         // Normalize view after mode toggles: on/off → full status view.
+        // `config` is an alias of `roster` (shows model/channel/skills profiles).
         let view: "status" | "roster" | "waiting" | "harvest" = "status";
-        if (sub === "roster" || sub === "waiting" || sub === "harvest" || sub === "status") view = sub;
+        if (sub === "roster" || sub === "config") view = "roster";
+        else if (sub === "waiting" || sub === "harvest" || sub === "status") view = sub;
 
         const body = formatExpertsPanel(cwd, view);
 
