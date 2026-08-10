@@ -233,3 +233,19 @@ See package `src/experts-mode/config/experts-rules.example.json`. Copy fields in
 
 - `/experts roster` or `/experts config` — show profiles (model/channel/skills when set)
 
+## Preloaded Maestro skills (defaults)
+
+Package `default-rules.json` roster ships Maestro skill presets (project `.experts-rules.json` can override):
+
+| Role | Default skills | Why |
+|------|----------------|-----|
+| explorer | _(none)_ | Pure code discovery; do not auto-invoke maestro-learn |
+| planner | `maestro`, `maestro-next` | Chain classify / Session plan surface |
+| analyst | `maestro-spec` | Constraints / architecture rules awareness |
+| general-executor | `maestro-companion` | Small scoped execute with evidence |
+| reviewer | `team-review`, `maestro-knowledge` | Review pipeline + knowledge harvest |
+| verifier | `maestro-session-seal`, `maestro-knowledge` | Seal / knowledge close-out |
+| workflow | `maestro-ralph`, `team-coordinate` | Closed-loop + multi-role coordinate |
+
+Dispatch injects skills as `<!-- experts-skills -->` guidance via `applyExpertProfiles`. Skills are names only — agents load via `skill://name` / host skill loader.
+

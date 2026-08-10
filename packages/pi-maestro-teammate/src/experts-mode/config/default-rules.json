@@ -196,37 +196,51 @@
       "defaultTaskType": "explore",
       "label": "Code explorer",
       "capabilities": ["explore", "search"],
-      "tools": ["read", "ffgrep", "fffind", "bash"]
+      "tools": ["read", "ffgrep", "fffind", "bash"],
+      "skills": []
     },
     "planner": {
       "agent": "planner",
       "defaultTaskType": "planning",
       "label": "Planner",
-      "capabilities": ["planning"]
+      "capabilities": ["planning"],
+      "skills": ["maestro", "maestro-next"]
     },
     "analyst": {
       "agent": "analyst",
       "defaultTaskType": "analysis",
       "label": "Analyst",
-      "capabilities": ["analysis", "debug", "review"]
+      "capabilities": ["analysis", "debug", "review"],
+      "skills": ["maestro-spec"]
     },
     "reviewer": {
       "agent": "reviewer",
       "defaultTaskType": "review",
       "label": "Reviewer",
-      "capabilities": ["review"]
+      "capabilities": ["review"],
+      "skills": ["team-review", "maestro-knowledge"]
     },
     "general-executor": {
       "agent": "general-executor",
       "defaultTaskType": "development",
       "label": "Implementer",
-      "capabilities": ["development", "testing"]
+      "capabilities": ["development", "testing"],
+      "skills": ["maestro-companion"]
     },
     "verifier": {
       "agent": "verifier",
       "defaultTaskType": "verification",
       "label": "Verifier",
-      "capabilities": ["verification"]
+      "capabilities": ["verification"],
+      "skills": ["maestro-session-seal", "maestro-knowledge"]
+    },
+    "workflow": {
+      "agent": "workflow",
+      "defaultTaskType": "planning",
+      "label": "Vice-lead / DAG coordinator",
+      "capabilities": ["planning", "coordinate"],
+      "skills": ["maestro-ralph", "team-coordinate"],
+      "enabled": true
     }
   },
   "stageAliases": {

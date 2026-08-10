@@ -12,8 +12,9 @@
       "channel": "cpa",
       "model": "deepseek-v4-flash",
       "thinking": "low",
-      "skills": ["smart-search-cli"],
-      "capabilities": ["explore"]
+      "skills": [],
+      "capabilities": ["explore", "search"],
+      "tools": ["read", "ffgrep", "fffind", "bash"]
     },
     "planner": {
       "agent": "planner",
@@ -22,37 +23,60 @@
       "channel": "cpa",
       "model": "grok-4.5",
       "thinking": "max",
-      "skills": ["maestro"],
+      "skills": ["maestro", "maestro-next"],
       "capabilities": ["planning"]
     },
     "analyst": {
       "agent": "analyst",
       "defaultTaskType": "analysis",
+      "label": "Analyst",
       "channel": "cpa",
       "model": "grok-4.5",
       "thinking": "max",
-      "skills": [],
-      "capabilities": ["analysis", "debug"]
+      "skills": ["maestro-spec"],
+      "capabilities": ["analysis", "debug", "review"]
     },
     "general-executor": {
       "agent": "general-executor",
       "defaultTaskType": "development",
+      "label": "Implementer",
       "channel": "cpa",
       "model": "deepseek-v4-flash",
       "fallbackModels": ["sub2-responses/gpt-5.6-terra"],
       "thinking": "max",
-      "skills": [],
+      "skills": ["maestro-companion"],
       "capabilities": ["development", "testing"]
     },
     "reviewer": {
       "agent": "reviewer",
       "defaultTaskType": "review",
+      "label": "Reviewer",
       "channel": "cpa",
       "model": "deepseek-v4-flash",
       "fallbackModels": ["cpa-responses/grok-4.5", "sub2-responses/gpt-5.6-terra"],
       "thinking": "max",
-      "skills": [],
+      "skills": ["team-review", "maestro-knowledge"],
       "capabilities": ["review"]
+    },
+    "verifier": {
+      "agent": "verifier",
+      "defaultTaskType": "verification",
+      "label": "Verifier",
+      "channel": "cpa",
+      "model": "deepseek-v4-flash",
+      "thinking": "max",
+      "skills": ["maestro-session-seal", "maestro-knowledge"],
+      "capabilities": ["verification"]
+    },
+    "workflow": {
+      "agent": "workflow",
+      "defaultTaskType": "planning",
+      "label": "Vice-lead / DAG coordinator",
+      "channel": "cpa",
+      "model": "grok-4.5",
+      "thinking": "max",
+      "skills": ["maestro-ralph", "team-coordinate"],
+      "capabilities": ["planning", "coordinate"]
     }
   },
   "settle": {

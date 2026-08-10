@@ -26,6 +26,7 @@ import {
   loadRules,
   clearRulesCache,
   EXPERTS_SKILLS_START,
+  getRoster,
   type TeammateParamsLike,
 } from "../src/experts-mode/index.ts";
 
@@ -555,7 +556,6 @@ test("P5 normal mode never denies", () => {
 
 // --- P6 roster + observability ---
 import {
-  getRoster,
   resolveRosterEntry,
   agentForTaskTypeFromRoster,
   buildCanvasSnapshot,
@@ -1455,4 +1455,33 @@ test("A4 resolveExpertProfile maps agent to profile", () => {
   assert.ok(p);
   assert.equal(p!.model, "cpa-responses/grok-4.5");
   assert.deepEqual(p!.skills, ["maestro"]);
+});
+
+
+test("A5 default roster preloads Maestro skills", () => {
+  clearRulesCache();
+  const roster = getRoster(loadRules(defaultRulesPath(), tempCwd()));
+  const byId = Object.fromEntries(roster.map((e) => [e.id, e]));
+  assert.deepEqual(byId.planner?.skills, ["maestro", "maestro-next"]);
+  assert.deepEqual(byId.analyst?.skills, ["maestro-spec"]);
+  assert.deepEqual(byId["general-executor"]?.skills, ["maestro-companion"]);
+  assert.deepEqual(byId.reviewer?.skills, ["team-review", "maestro-knowledge"]);
+  assert.deepEqual(byId.verifier?.skills, ["maestro-session-seal", "maestro-knowledge"]);
+  assert.deepEqual(byId.workflow?.skills, ["maestro-ralph", "team-coordinate"]);
+  // explorer: empty array or undefined/empty — no maestro-learn
+  const ex = byId.explorer?.skills ?? [];
+  assert.ok(!ex.includes("maestro-learn"));
+});
+
+test("A5 planner dispatch injects maestro skill guidance", () => {
+  clearRulesCache();
+  const cwd = tempCwd();
+  setMode("experts", cwd);
+  const rules = loadRules(defaultRulesPath(), cwd);
+  const out = ensureExpertsDispatch({
+    tasks: [{ prompt: "制定实现 JWT 的方案与拆分", agent: "planner", taskType: "planning" }],
+  } as TeammateParamsLike, { cwd, mode: "experts", record: false, rules });
+  assert.match(String(out.tasks?.[0]?.prompt), /experts-skills:start/);
+  assert.match(String(out.tasks?.[0]?.prompt), /maestro-next|maestro/);
+  clearRulesCache();
 });
