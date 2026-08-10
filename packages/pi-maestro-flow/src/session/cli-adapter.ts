@@ -1,9 +1,21 @@
 import type { ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 import crossSpawn from "cross-spawn";
 
 const DEFAULT_RUN_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
 const TERMINATION_GRACE_MS = 1_000;
+const PI_PACKAGE_ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), "../..");
+
+function advertisedPiPackageRoot(): string {
+  if (existsSync(resolvePath(PI_PACKAGE_ROOT, ".pi", "skills"))) return PI_PACKAGE_ROOT;
+  const sourceWorkspaceRoot = resolvePath(PI_PACKAGE_ROOT, "../..");
+  return existsSync(resolvePath(sourceWorkspaceRoot, ".pi", "skills"))
+    ? sourceWorkspaceRoot
+    : PI_PACKAGE_ROOT;
+}
 
 export interface RunCliResult {
   argv: string[];
@@ -196,14 +208,17 @@ export class RunCliAdapter {
   }
 
   /**
-   * Raw argv passthrough for the run-control shell. Appends the canonical
-   * --workflow-root unless the caller already pinned it.
+   * Raw argv passthrough for the run-control shell. The runner already uses the
+   * canonical workflow root as cwd; only lifecycle command families also accept
+   * an explicit --workflow-root option.
    */
   async exec(argv: readonly string[]): Promise<RunCliResult> {
+    const family = argv[0];
+    const acceptsWorkflowRoot = family === "run" || family === "session" || family === "plan";
     return this.invoke(
-      argv.some((argument) => argument === "--workflow-root")
-        ? [...argv]
-        : [...argv, "--workflow-root", this.workflowRoot],
+      acceptsWorkflowRoot && !argv.some((argument) => argument === "--workflow-root")
+        ? [...argv, "--workflow-root", this.workflowRoot]
+        : [...argv],
     );
   }
 
@@ -259,6 +274,10 @@ export async function defaultRunner(
     const child = spawnProcess(executable, [...args], {
       cwd,
       detached: process.platform !== "win32",
+      env: {
+        ...process.env,
+        MAESTRO_PI_PACKAGE_ROOT: process.env.MAESTRO_PI_PACKAGE_ROOT ?? advertisedPiPackageRoot(),
+      },
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });

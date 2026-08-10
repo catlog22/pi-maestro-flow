@@ -49,7 +49,10 @@ export function classifyRunControlArgv(argv: readonly string[]): RunControlClass
   if (argv.length === 0 || argv.some((argument) => argument === "-h" || argument === "--help")) {
     return { write: false, sessionless: false };
   }
-  const command = argv[1] ?? argv[0] ?? "";
+  const family = argv[0] ?? "";
+  const command = family === "run" || family === "session" || family === "plan"
+    ? argv[1] ?? family
+    : family;
   if (RUN_CONTROL_READ_COMMANDS.has(command)) return { write: false, sessionless: false };
   if (SESSIONLESS_WRITE_COMMANDS.has(command)) return { write: true, sessionless: true };
   // Unknown commands default to write-conservative: mutation lease + Plan-mode block apply.
@@ -109,7 +112,10 @@ export async function executeRunControl(
     const ownership = hostSessionId && !classification.write
       ? await coordinator.ownership(hostSessionId)
       : undefined;
-    return success(readMessage(result.command.stdout, ownership), {
+    const commandMessage = result.command.stderr.trim()
+      ? [result.command.stdout.trimEnd(), result.command.stderr.trimEnd()].filter(Boolean).join("\n")
+      : result.command.stdout;
+    return success(readMessage(commandMessage, ownership), {
       argv,
       classification,
       command: result.command,

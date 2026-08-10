@@ -23,7 +23,11 @@ import {
   type WorkflowSnapshotProvider,
 } from "../src/session/coordinator.ts";
 import type { WorkflowSnapshot } from "../src/session/types.ts";
-import { executeRunControl, RunControlParams } from "../src/tools/run-control.ts";
+import {
+  classifyRunControlArgv,
+  executeRunControl,
+  RunControlParams,
+} from "../src/tools/run-control.ts";
 import {
   assertPublishedPlanSnapshot,
   requirePublishedExecutionRun,
@@ -33,6 +37,16 @@ test("run-control schema rejects unknown fields", () => {
   assert.equal(Check(RunControlParams, { argv: ["session", "status"] }), true);
   assert.equal(Check(RunControlParams, { argv: ["session", "status"], typo: true }), false);
   assert.equal(Check(RunControlParams, { argv: ["session", "status"], hostSessionId: "spoofed" }), false);
+});
+
+test("run-control classifies top-level reads by the command in argv[0]", () => {
+  assert.deepEqual(
+    classifyRunControlArgv(["skills", "--steps", "--json", "--platform", "pi"]),
+    { write: false, sessionless: false },
+  );
+  assert.deepEqual(classifyRunControlArgv(["search", "query"]), { write: false, sessionless: false });
+  assert.deepEqual(classifyRunControlArgv(["session", "create"]), { write: true, sessionless: true });
+  assert.deepEqual(classifyRunControlArgv(["session", "next"]), { write: true, sessionless: false });
 });
 
 test("public workflow errors redact lease-path fencing tokens", () => {
@@ -706,6 +720,23 @@ test("CLI adapter capability-detects and publishes an approved Plan", async () =
   ]);
 });
 
+test("CLI adapter keeps top-level passthrough commands rooted by cwd", async () => {
+  const calls: string[][] = [];
+  const adapter = new RunCliAdapter("D:/workspace", async (args) => {
+    calls.push([...args]);
+    return result(args, "ok");
+  });
+
+  await adapter.exec(["skills", "--steps", "--json", "--platform", "pi"]);
+  assert.deepEqual(calls.at(-1), ["skills", "--steps", "--json", "--platform", "pi"]);
+
+  await adapter.exec(["run", "status"]);
+  assert.deepEqual(calls.at(-1), ["run", "status", "--workflow-root", "D:/workspace"]);
+
+  await adapter.exec(["session", "status", "--workflow-root", "D:/pinned"]);
+  assert.deepEqual(calls.at(-1), ["session", "status", "--workflow-root", "D:/pinned"]);
+});
+
 test("CLI adapter maps canonical check, next, done, and edit commands", async () => {
   const calls: string[][] = [];
   const adapter = new RunCliAdapter("D:/workspace", async (args) => {
@@ -829,13 +860,20 @@ test("run-control forwards arbitrary Maestro argv through the shell", async () =
   const coordinator = {
     async exec(argv: readonly string[], classification: unknown, hostSessionId?: string) {
       calls.push(["exec", argv, classification, hostSessionId]);
-      return transition;
+      return argv[0] === "skills"
+        ? { ...transition, command: { ...command, stderr: "WARNING PI_SKILL_DIR_MISSING" } }
+        : transition;
     },
     async ownership() { return undefined; },
   } as unknown as WorkflowCoordinator;
   const context = { hostSessionId: "pi-session-1" };
 
   assert.equal((await executeRunControl({ argv: ["run", "check", "run-1"] }, coordinator, context)).ok, true);
+  const skillsResult = await executeRunControl({
+    argv: ["skills", "--steps", "--json", "--platform", "pi"],
+  }, coordinator);
+  assert.equal(skillsResult.ok, true);
+  assert.match(skillsResult.message, /WARNING PI_SKILL_DIR_MISSING/);
   assert.equal((await executeRunControl({ argv: ["session", "next", "--pick", "step-2"] }, coordinator, context)).ok, true);
   assert.equal((await executeRunControl({
     argv: ["session", "done", "run-1", "--verdict", "done-with-concerns"],
@@ -846,6 +884,7 @@ test("run-control forwards arbitrary Maestro argv through the shell", async () =
 
   assert.deepEqual(calls, [
     ["exec", ["run", "check", "run-1"], { write: false, sessionless: false }, "pi-session-1"],
+    ["exec", ["skills", "--steps", "--json", "--platform", "pi"], { write: false, sessionless: false }, undefined],
     ["exec", ["session", "next", "--pick", "step-2"], { write: true, sessionless: false }, "pi-session-1"],
     ["exec", ["session", "done", "run-1", "--verdict", "done-with-concerns"], { write: true, sessionless: false }, "pi-session-1"],
     ["exec", ["run", "edit", "review", "--after", "latest"], { write: true, sessionless: false }, "pi-session-1"],
@@ -889,6 +928,21 @@ test("run-control does not turn a completed mutation into a failure when attribu
   );
   assert.equal(resultValue.ok, true);
   assert.equal(ownershipCalls, 0);
+});
+
+test("default CLI runner advertises the Pi package root to the Maestro process", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-cli-runner-package-root-"));
+  try {
+    const execution = await defaultRunner(
+      ["-e", "process.stdout.write(process.env.MAESTRO_PI_PACKAGE_ROOT ?? '')"],
+      root,
+      { executable: process.execPath },
+    );
+    assert.equal(execution.exitCode, 0);
+    assert.match(execution.stdout.replaceAll("\\", "/"), /\/pi-maestro-flow(?:\/packages\/pi-maestro-flow)?$/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("default CLI runner times out and terminates a hung process", async () => {
