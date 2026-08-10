@@ -1998,6 +1998,18 @@ export default function registerTeammateExtension(
         cwd: baseCwd,
         stage: stageFromParams,
       }) as typeof params;
+      // HV-03: if we return before spawn, reverse the waiting +N reserved above.
+      const settleReservedWaiting = (reason: string): void => {
+        try {
+          const meta = (params as { __experts?: { waitingDelta?: number } }).__experts;
+          const delta = typeof meta?.waitingDelta === "number" ? meta.waitingDelta : 0;
+          if (delta > 0 && getMode(baseCwd) === "experts") {
+            noteExpertsSettled(baseCwd, { settledCount: delta, reason });
+          }
+        } catch {
+          /* ignore */
+        }
+      };
       params = applyModelRouting(
         params,
         baseCwd,
@@ -2009,6 +2021,7 @@ export default function registerTeammateExtension(
       // --- Normalize to task list (shared with the child proxy path) ---
       const normalization = normalizeTeammateParams(params);
       if (normalization.error) {
+        settleReservedWaiting("extension-normalize-error");
         return {
           content: [{ type: "text", text: normalization.error }],
           isError: true,
@@ -2019,6 +2032,7 @@ export default function registerTeammateExtension(
       const normalizedTasks = normalization.tasks;
       const budget = checkActiveAgentBudget(state, normalizedTasks.length);
       if (!budget.allowed) {
+        settleReservedWaiting("extension-budget-exhausted");
         return {
           content: [{
             type: "text",

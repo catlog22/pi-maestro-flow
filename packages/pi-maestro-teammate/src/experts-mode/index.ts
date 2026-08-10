@@ -8,7 +8,13 @@ export {
   mergeRosterMaps,
   PROJECT_RULES_FILENAME,
 } from "./rules.ts";
-export { writeJsonStateFile, readJsonStateFile } from "./state-io.ts";
+export {
+  writeJsonStateFile,
+  readJsonStateFile,
+  withStateLock,
+  withStateLockSync,
+  mutateJsonStateFile,
+} from "./state-io.ts";
 export { classifyIntent } from "./triage.ts";
 export { ensureExpertsDispatch } from "./dispatch.ts";
 export type { EnsureExpertsDispatchOptions } from "./dispatch.ts";

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { readJsonStateFile, writeJsonStateFile } from "./state-io.ts";
+import { mutateJsonStateFile, readJsonStateFile } from "./state-io.ts";
 import type { ExpertsMode } from "./types.ts";
 
 export function resolveStatePath(cwd = process.cwd(), explicitPath?: string): string {
@@ -25,14 +25,11 @@ export function setMode(mode: ExpertsMode, cwd = process.cwd(), statePath?: stri
     throw new Error(`Invalid mode: ${mode}. Expected normal|experts`);
   }
   const file = resolveStatePath(cwd, statePath);
-  const prev = readJsonStateFile(file);
-  const next = {
+  return mutateJsonStateFile(file, (prev) => ({
     ...prev,
     mode,
     updatedAt: new Date().toISOString(),
-  };
-  writeJsonStateFile(file, next);
-  return next;
+  }));
 }
 
 export function readState(cwd = process.cwd(), statePath?: string): {

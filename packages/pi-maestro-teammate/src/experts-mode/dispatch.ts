@@ -34,6 +34,10 @@ export type ExpertsDispatchMeta = {
   stage?: string;
   stageForced?: boolean;
   triage: Array<{ taskType?: string; agent?: string }>;
+  /** HV-03: how many leaderWaiting slots this dispatch reserved (+N). */
+  waitingDelta?: number;
+  /** Task ids/names reserved for waiting/inFlight (for early-return settle). */
+  waitingAgentIds?: string[];
 };
 
 /**
@@ -157,6 +161,8 @@ export function ensureExpertsDispatch<T extends object>(
       taskType: t.taskType ? String(t.taskType) : undefined,
       agent: t.agent ? String(t.agent) : undefined,
     })),
+    waitingDelta: 0,
+    waitingAgentIds: [],
   };
 
   if (record) {
@@ -190,13 +196,15 @@ export function ensureExpertsDispatch<T extends object>(
   }
 
   // Qoder leaderWaiting: mark leader waiting when experts mode dispatches work.
+  // HV-03: record waitingDelta on __experts so callers can settle on early return.
   try {
     const names = nextTasks
       .map((t) => (typeof t.name === "string" ? t.name : typeof t.agent === "string" ? t.agent : ""))
       .filter(Boolean);
+    const delta = nextTasks.length;
     setLeaderWaiting(true, {
       cwd,
-      activeDelta: nextTasks.length,
+      activeDelta: delta,
       agentIds: names,
     });
     // P6: track in-flight experts for getStatus / canvas snapshot.
@@ -212,6 +220,10 @@ export function ensureExpertsDispatch<T extends object>(
       })),
       { cwd, stage: stageAssignment?.stage || stageHint },
     );
+    if (out.__experts) {
+      out.__experts.waitingDelta = delta;
+      out.__experts.waitingAgentIds = names;
+    }
   } catch {
     // state write must not break dispatch
   }

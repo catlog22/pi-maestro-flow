@@ -8,6 +8,11 @@
 
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import {
+  ensureExpertsDispatch,
+  getMode,
+  noteExpertsSettled,
+} from "../experts-mode/index.ts";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -918,8 +923,29 @@ export async function handleProxyRequest(
         return parent?.resolvedModel ?? parent?.requestedModel;
       })();
       const dispatchOriginCwd = state.baseCwd || process.cwd();
+      // MV-03: mirror root path — stage/triage/profiles before model routing.
+      const stageFromParams =
+        typeof (p as { stage?: unknown }).stage === "string"
+          ? String((p as { stage?: string }).stage)
+          : undefined;
+      const prepared = ensureExpertsDispatch(p, {
+        cwd: dispatchOriginCwd,
+        stage: stageFromParams,
+      }) as typeof p & { __experts?: { waitingDelta?: number } };
+      const settleReservedWaiting = (reason: string): void => {
+        try {
+          const delta = typeof prepared.__experts?.waitingDelta === "number"
+            ? prepared.__experts.waitingDelta
+            : 0;
+          if (delta > 0 && getMode(dispatchOriginCwd) === "experts") {
+            noteExpertsSettled(dispatchOriginCwd, { settledCount: delta, reason });
+          }
+        } catch {
+          /* ignore */
+        }
+      };
       const routedParams = applyModelRouting(
-        p,
+        prepared,
         dispatchOriginCwd,
         modelCapabilities.map((model) => model.id),
         undefined,
@@ -930,6 +956,7 @@ export async function handleProxyRequest(
       // the routing authority because the child catalog can be stale or scoped.
       const normalization = normalizeTeammateParams(routedParams);
       if (normalization.error) {
+        settleReservedWaiting("proxy-normalize-error");
         abandonPendingProxyDispatch();
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{ type: "text", text: normalization.error }],
@@ -940,6 +967,7 @@ export async function handleProxyRequest(
       const allTasks = normalization.tasks;
       const budget = checkActiveAgentBudget(state, allTasks.length);
       if (!budget.allowed) {
+        settleReservedWaiting("proxy-budget-exhausted");
         abandonPendingProxyDispatch();
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{
@@ -1836,15 +1864,45 @@ export async function handleProxyRequest(
       });
       else installNestedColdRestart(activeAgent, singleTask);
 
+      const settleProxyWaiting = (
+        reason: string,
+        contents?: string[],
+        agentId?: string,
+      ): void => {
+        try {
+          const delta = typeof prepared.__experts?.waitingDelta === "number"
+            ? prepared.__experts.waitingDelta
+            : 0;
+          if (delta > 0 && getMode(dispatchOriginCwd) === "experts") {
+            noteExpertsSettled(dispatchOriginCwd, {
+              settledCount: delta,
+              reason,
+              contents,
+              agentId,
+            });
+          }
+        } catch {
+          /* ignore */
+        }
+      };
+
       const executeNested = async () => {
         if (normalizedTasks) {
           const mode = inferGraphMode(normalizedTasks);
-          let results: SingleResult[];
+          let results: SingleResult[] | undefined;
           try {
             results = await runGraph(normalizedTasks, p.concurrency ?? 4, runOpts);
           } finally {
+            // MV-03 / HV-03: settle waiting reserved by ensureExpertsDispatch.
+            settleProxyWaiting(
+              "proxy-graph-settled",
+              (results ?? []).map((r) => displayMessageForResult(r)),
+            );
             proxyProgressFlushGate?.flush();
             proxyProgressFlushGate?.dispose();
+          }
+          if (!results) {
+            throw new Error("proxy nested graph failed before producing results");
           }
           const hasError = results.some(resultIsError);
           const summaries = summarizeGraphResults(results, normalizedTasks);
@@ -1902,7 +1960,19 @@ export async function handleProxyRequest(
           };
         }
 
-        const result = await runSingleTeammate(singleRunParams, runOpts);
+        let result: SingleResult | undefined;
+        try {
+          result = await runSingleTeammate(singleRunParams, runOpts);
+        } finally {
+          settleProxyWaiting(
+            "proxy-single-settled",
+            result ? [displayMessageForResult(result)] : undefined,
+            result?.agent || singleTask?.name || singleTask?.agent,
+          );
+          proxyProgressFlushGate?.flush();
+          proxyProgressFlushGate?.dispose();
+        }
+        if (!result) throw new Error("proxy nested single run failed before producing a result");
         const lastMsg = displayMessageForResult(result);
         return {
           resultPayload: {

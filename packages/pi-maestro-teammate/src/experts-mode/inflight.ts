@@ -1,16 +1,6 @@
-import fs from "node:fs";
-import path from "node:path";
 import { getMode, resolveStatePath } from "./mode.ts";
-import { readJsonStateFile, writeJsonStateFile } from "./state-io.ts";
+import { mutateJsonStateFile, readJsonStateFile } from "./state-io.ts";
 import type { InFlightExpert } from "./types.ts";
-
-function readRaw(cwd: string, statePath?: string): Record<string, unknown> {
-  return readJsonStateFile(resolveStatePath(cwd, statePath));
-}
-
-function writeRaw(cwd: string, next: Record<string, unknown>, statePath?: string): void {
-  writeJsonStateFile(resolveStatePath(cwd, statePath), next);
-}
 
 function parseList(raw: Record<string, unknown>): InFlightExpert[] {
   if (!Array.isArray(raw.inFlight)) return [];
@@ -35,7 +25,7 @@ function parseList(raw: Record<string, unknown>): InFlightExpert[] {
 
 /** Read current in-flight experts (P6 observability). */
 export function getInFlight(cwd = process.cwd(), statePath?: string): InFlightExpert[] {
-  return parseList(readRaw(cwd, statePath));
+  return parseList(readJsonStateFile(resolveStatePath(cwd, statePath)));
 }
 
 /** Append or replace in-flight entries by id. */
@@ -44,38 +34,41 @@ export function trackInFlight(
   opts: { cwd?: string; statePath?: string; stage?: string } = {},
 ): InFlightExpert[] {
   const cwd = opts.cwd ?? process.cwd();
-  const prev = readRaw(cwd, opts.statePath);
-  const list = parseList(prev);
+  const file = resolveStatePath(cwd, opts.statePath);
   const now = new Date().toISOString();
-  for (const entry of entries) {
-    const id = String(entry.id || entry.correlationId || entry.name || entry.agent || "").trim();
-    if (!id) continue;
-    const nextEntry: InFlightExpert = {
-      id,
-      agent: entry.agent ? String(entry.agent) : undefined,
-      taskType: entry.taskType ? String(entry.taskType) : undefined,
-      name: entry.name ? String(entry.name) : undefined,
-      stage: entry.stage ? String(entry.stage) : opts.stage,
-      at: now,
-      correlationId: entry.correlationId ? String(entry.correlationId) : undefined,
+  const next = mutateJsonStateFile(file, (prev) => {
+    const list = parseList(prev);
+    for (const entry of entries) {
+      const id = String(entry.id || entry.correlationId || entry.name || entry.agent || "").trim();
+      if (!id) continue;
+      const nextEntry: InFlightExpert = {
+        id,
+        agent: entry.agent ? String(entry.agent) : undefined,
+        taskType: entry.taskType ? String(entry.taskType) : undefined,
+        name: entry.name ? String(entry.name) : undefined,
+        stage: entry.stage ? String(entry.stage) : opts.stage,
+        at: now,
+        correlationId: entry.correlationId ? String(entry.correlationId) : undefined,
+      };
+      const idx = list.findIndex((e) => e.id === id);
+      if (idx >= 0) list[idx] = { ...list[idx], ...nextEntry, at: now };
+      else list.push(nextEntry);
+    }
+    return {
+      ...prev,
+      mode: prev.mode === "experts" || prev.mode === "normal" ? prev.mode : getMode(cwd, opts.statePath),
+      inFlight: list,
+      updatedAt: now,
     };
-    const idx = list.findIndex((e) => e.id === id);
-    if (idx >= 0) list[idx] = { ...list[idx], ...nextEntry, at: now };
-    else list.push(nextEntry);
-  }
-  const next = {
-    ...prev,
-    mode: prev.mode === "experts" || prev.mode === "normal" ? prev.mode : getMode(cwd, opts.statePath),
-    inFlight: list,
-    updatedAt: now,
-  };
-  writeRaw(cwd, next, opts.statePath);
-  return list;
+  });
+  return parseList(next);
 }
 
 /**
- * Remove settled experts from in-flight.
- * Match by id, correlationId, name, or agent (first match).
+ * Remove settled experts from in-flight (MV-04).
+ * 1) Exact match: id / correlationId / name (all matching entries).
+ * 2) Agent fallback: only for keys not satisfied by exact match, remove at most
+ *    ONE entry per agent key (avoids wiping parallel same-agent tasks).
  */
 export function settleInFlight(
   keys: string | string[],
@@ -86,31 +79,57 @@ export function settleInFlight(
     (Array.isArray(keys) ? keys : [keys]).map((k) => String(k || "").trim()).filter(Boolean),
   );
   if (want.size === 0) return getInFlight(cwd, opts.statePath);
-  const prev = readRaw(cwd, opts.statePath);
-  const list = parseList(prev).filter((e) => {
-    if (want.has(e.id)) return false;
-    if (e.correlationId && want.has(e.correlationId)) return false;
-    if (e.name && want.has(e.name)) return false;
-    if (e.agent && want.has(e.agent)) return false;
-    return true;
+  const file = resolveStatePath(cwd, opts.statePath);
+  const next = mutateJsonStateFile(file, (prev) => {
+    const list = parseList(prev);
+    const removeIdx = new Set<number>();
+    const unmatched = new Set(want);
+
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i]!;
+      if (want.has(e.id)) {
+        removeIdx.add(i);
+        unmatched.delete(e.id);
+        continue;
+      }
+      if (e.correlationId && want.has(e.correlationId)) {
+        removeIdx.add(i);
+        unmatched.delete(e.correlationId);
+        continue;
+      }
+      if (e.name && want.has(e.name)) {
+        removeIdx.add(i);
+        unmatched.delete(e.name);
+        continue;
+      }
+    }
+
+    for (let i = 0; i < list.length; i++) {
+      if (removeIdx.has(i)) continue;
+      const e = list[i]!;
+      if (e.agent && unmatched.has(e.agent)) {
+        removeIdx.add(i);
+        unmatched.delete(e.agent);
+      }
+    }
+
+    return {
+      ...prev,
+      inFlight: list.filter((_, i) => !removeIdx.has(i)),
+      updatedAt: new Date().toISOString(),
+    };
   });
-  writeRaw(cwd, {
-    ...prev,
-    inFlight: list,
-    updatedAt: new Date().toISOString(),
-  }, opts.statePath);
-  return list;
+  return parseList(next);
 }
 
 export function clearInFlight(
   cwd = process.cwd(),
   opts: { statePath?: string } = {},
 ): InFlightExpert[] {
-  const prev = readRaw(cwd, opts.statePath);
-  writeRaw(cwd, {
+  mutateJsonStateFile(resolveStatePath(cwd, opts.statePath), (prev) => ({
     ...prev,
     inFlight: [],
     updatedAt: new Date().toISOString(),
-  }, opts.statePath);
+  }));
   return [];
 }

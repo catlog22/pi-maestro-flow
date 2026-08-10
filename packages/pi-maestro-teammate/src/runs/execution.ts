@@ -2430,7 +2430,11 @@ export async function runTeammate(
   const prepared = ensureExpertsDispatch(params, {
     cwd: options.baseCwd,
     stage: stageFromParams,
-  }) as RunTeammateParams;
+  }) as RunTeammateParams & { __experts?: { waitingDelta?: number } };
+  // HV-03: reserved waiting slots must always be settled, even on normalize failure.
+  const reservedWaiting = typeof prepared.__experts?.waitingDelta === "number"
+    ? prepared.__experts.waitingDelta
+    : 0;
   const routed = applyModelRouting(
     prepared,
     options.baseCwd,
@@ -2443,18 +2447,17 @@ export async function runTeammate(
   // role's mapped model before any acquisition happens.
   syncModelCircuitPolicies(options.modelCircuitBreaker ?? sharedModelCircuitBreaker, options.baseCwd);
   const normalized = normalizeTeammateParams(routed);
-  if (normalized.error) throw new Error(normalized.error);
-  const taskCount = normalized.tasks.length;
   let results: SingleResult[] | undefined;
   try {
+    if (normalized.error) throw new Error(normalized.error);
     results = await runGraph(normalized.tasks, params.concurrency ?? 4, options);
     return results;
   } finally {
-    // P3: auto-clear / decrement leaderWaiting when the graph settles (experts mode only).
+    // P3 + HV-03: settle reserved waiting (success, graph throw, or normalize error).
     try {
-      if (getMode(options.baseCwd) === "experts" && taskCount > 0) {
+      if (getMode(options.baseCwd) === "experts" && reservedWaiting > 0) {
         noteExpertsSettled(options.baseCwd, {
-          settledCount: taskCount,
+          settledCount: reservedWaiting,
           reason: "runTeammate-settled",
           // P7: best-effort harvest text from each result (empty when graph throws).
           contents: (results ?? []).map((r) => resultTextForHarvest(r)),

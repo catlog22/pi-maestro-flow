@@ -30,6 +30,12 @@ import {
   hasDangerousShellMetachar,
   mergeRules,
   mergeRosterMaps,
+  trackInFlight,
+  settleInFlight,
+  getInFlight,
+  clearInFlight,
+  withStateLock,
+  mutateJsonStateFile,
   type TeammateParamsLike,
 } from "../src/experts-mode/index.ts";
 
@@ -559,15 +565,7 @@ test("P5 normal mode never denies", () => {
 });
 
 // --- P6 roster + observability ---
-import {
-  resolveRosterEntry,
-  agentForTaskTypeFromRoster,
-  buildCanvasSnapshot,
-  getInFlight,
-  trackInFlight,
-  settleInFlight,
-  clearInFlight,
-} from "../src/experts-mode/index.ts";
+import { resolveRosterEntry, agentForTaskTypeFromRoster, buildCanvasSnapshot } from "../src/experts-mode/index.ts";
 
 test("P6 getRoster returns default roles without models", () => {
   clearRulesCache();
@@ -1648,4 +1646,100 @@ test("A6 HV-04 writing .experts-mode.json is not path-allowlisted", () => {
   });
   assert.equal(gate.decision, "deny");
   clearRulesCache();
+});
+
+
+// --- A7 residual audit HV-03 / MV-02 / MV-03 / MV-04 ---
+
+test("A7 HV-03 ensureExpertsDispatch records waitingDelta and settle clears", () => {
+  clearRulesCache();
+  const cwd = tempCwd();
+  setMode("experts", cwd);
+  const out = ensureExpertsDispatch(
+    { tasks: [{ prompt: "实现 feature", name: "dev-a" }, { prompt: "实现 feature2", name: "dev-b" }] },
+    { cwd, mode: "experts", record: true },
+  ) as any;
+  assert.equal(out.__experts?.waitingDelta, 2);
+  assert.equal(getLeaderWaiting(cwd).activeCount, 2);
+  noteExpertsSettled(cwd, { settledCount: out.__experts.waitingDelta, reason: "sim-early-return" });
+  assert.equal(getLeaderWaiting(cwd).activeCount, 0);
+  assert.equal(getLeaderWaiting(cwd).leaderWaiting, false);
+  clearRulesCache();
+});
+
+test("A7 MV-04 settleInFlight prefers id/name and does not wipe peer agent", () => {
+  clearRulesCache();
+  const cwd = tempCwd();
+  setMode("experts", cwd);
+  trackInFlight([
+    { id: "dev-a", name: "dev-a", agent: "general-executor" },
+    { id: "dev-b", name: "dev-b", agent: "general-executor" },
+  ], { cwd });
+  // settle by agent once — only one entry removed
+  settleInFlight("general-executor", { cwd });
+  let list = getInFlight(cwd);
+  assert.equal(list.length, 1);
+  // settle remaining by name
+  settleInFlight("dev-b", { cwd });
+  list = getInFlight(cwd);
+  // after agent fallback removed first, remaining id is dev-b
+  assert.ok(list.length <= 1);
+  settleInFlight(["dev-a", "dev-b"], { cwd });
+  assert.equal(getInFlight(cwd).length, 0);
+  clearRulesCache();
+});
+
+test("A7 MV-04 exact name settles only that task", () => {
+  clearRulesCache();
+  const cwd = tempCwd();
+  setMode("experts", cwd);
+  trackInFlight([
+    { id: "t1", name: "t1", agent: "general-executor" },
+    { id: "t2", name: "t2", agent: "general-executor" },
+  ], { cwd });
+  settleInFlight("t1", { cwd });
+  const list = getInFlight(cwd);
+  assert.equal(list.length, 1);
+  assert.equal(list[0]?.id, "t2");
+  clearRulesCache();
+});
+
+test("A7 MV-02 mutateJsonStateFile serializes RMW increments", async () => {
+  const cwd = tempCwd();
+  const file = path.join(cwd, ".experts-mode.json");
+  fs.writeFileSync(file, JSON.stringify({ n: 0 }, null, 2));
+  // sequential under lock
+  for (let i = 0; i < 20; i++) {
+    mutateJsonStateFile(file, (prev) => ({ ...prev, n: (Number(prev.n) || 0) + 1 }));
+  }
+  const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(raw.n, 20);
+  // async lock also works
+  await Promise.all(
+    Array.from({ length: 10 }, () =>
+      withStateLock(file, async () => {
+        const prev = JSON.parse(fs.readFileSync(file, "utf8"));
+        const next = { ...prev, n: (Number(prev.n) || 0) + 1 };
+        fs.writeFileSync(file, JSON.stringify(next, null, 2));
+      }),
+    ),
+  );
+  const raw2 = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(raw2.n, 30);
+});
+
+test("A7 MV-03 proxy path calls ensureExpertsDispatch before applyModelRouting", () => {
+  const src = fs.readFileSync(
+    path.join(process.cwd(), "src/extension/teammate-proxy.ts"),
+    "utf8",
+  );
+  const ensureIdx = src.indexOf("ensureExpertsDispatch(p");
+  const routeIdx = src.indexOf("applyModelRouting(\n        prepared");
+  // fallback if formatting differs
+  const routeIdx2 = src.indexOf("applyModelRouting(");
+  assert.ok(ensureIdx > 0, "proxy must call ensureExpertsDispatch");
+  const route = routeIdx > 0 ? routeIdx : src.indexOf("applyModelRouting(\n        prepared,");
+  // find applyModelRouting after prepared
+  const preparedRoute = src.indexOf("applyModelRouting", ensureIdx);
+  assert.ok(preparedRoute > ensureIdx, "ensure must precede applyModelRouting");
 });

@@ -1,7 +1,7 @@
 import { clearInFlight, settleInFlight } from "./inflight.ts";
 import { harvestKnowledgeOnSettle } from "./knowledge-harvest.ts";
 import { getMode, resolveStatePath } from "./mode.ts";
-import { readJsonStateFile, writeJsonStateFile } from "./state-io.ts";
+import { mutateJsonStateFile, readJsonStateFile } from "./state-io.ts";
 import type { SettleHarvestResult } from "./types.ts";
 
 export interface LeaderWaitingState {
@@ -16,8 +16,8 @@ function readRaw(cwd: string, statePath?: string): Record<string, unknown> {
 }
 
 function writeRaw(cwd: string, next: Record<string, unknown>, statePath?: string): void {
-  // M1: atomic temp+rename write for .experts-mode.json
-  writeJsonStateFile(resolveStatePath(cwd, statePath), next);
+  // M1 + MV-02: atomic write under per-file sync lock
+  mutateJsonStateFile(resolveStatePath(cwd, statePath), () => next);
 }
 
 export function getLeaderWaiting(cwd = process.cwd(), statePath?: string): LeaderWaitingState {
@@ -49,33 +49,34 @@ export function setLeaderWaiting(
   } = {},
 ): LeaderWaitingState {
   const cwd = opts.cwd ?? process.cwd();
-  const prev = readRaw(cwd, opts.statePath);
-  const prevCount = typeof prev.leaderWaitingCount === "number" ? prev.leaderWaitingCount : 0;
-  let count = prevCount;
-  if (typeof opts.activeDelta === "number") {
-    count = Math.max(0, prevCount + opts.activeDelta);
-  } else if (waiting) {
-    count = Math.max(1, prevCount || 1);
-  } else {
-    count = 0;
-  }
+  // MV-02: whole RMW under lock so concurrent dispatch/settle cannot clobber counts.
+  mutateJsonStateFile(resolveStatePath(cwd, opts.statePath), (prev) => {
+    const prevCount = typeof prev.leaderWaitingCount === "number" ? prev.leaderWaitingCount : 0;
+    let count = prevCount;
+    if (typeof opts.activeDelta === "number") {
+      count = Math.max(0, prevCount + opts.activeDelta);
+    } else if (waiting) {
+      count = Math.max(1, prevCount || 1);
+    } else {
+      count = 0;
+    }
 
-  const agentIds = opts.agentIds
-    ? opts.agentIds.map(String)
-    : Array.isArray(prev.leaderWaitingAgentIds)
-      ? (prev.leaderWaitingAgentIds as string[]).map(String)
-      : [];
+    const agentIds = opts.agentIds
+      ? opts.agentIds.map(String)
+      : Array.isArray(prev.leaderWaitingAgentIds)
+        ? (prev.leaderWaitingAgentIds as string[]).map(String)
+        : [];
 
-  const next = {
-    ...prev,
-    mode: prev.mode === "experts" || prev.mode === "normal" ? prev.mode : getMode(cwd, opts.statePath),
-    leaderWaiting: waiting || count > 0,
-    leaderWaitingCount: count,
-    leaderWaitingAgentIds: agentIds,
-    leaderWaitingUpdatedAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-  writeRaw(cwd, next, opts.statePath);
+    return {
+      ...prev,
+      mode: prev.mode === "experts" || prev.mode === "normal" ? prev.mode : getMode(cwd, opts.statePath),
+      leaderWaiting: waiting || count > 0,
+      leaderWaitingCount: count,
+      leaderWaitingAgentIds: agentIds,
+      leaderWaitingUpdatedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+  });
   return getLeaderWaiting(cwd, opts.statePath);
 }
 

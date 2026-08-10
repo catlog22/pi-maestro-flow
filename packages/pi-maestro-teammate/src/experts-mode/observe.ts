@@ -1,9 +1,7 @@
-import fs from "node:fs";
-import path from "node:path";
 import { getInFlight } from "./inflight.ts";
 import { getKnowledgeSuggestions } from "./knowledge-harvest.ts";
 import { getMode, readState, resolveStatePath } from "./mode.ts";
-import { readJsonStateFile, writeJsonStateFile } from "./state-io.ts";
+import { mutateJsonStateFile } from "./state-io.ts";
 import { getRoster } from "./roster.ts";
 import { loadRules } from "./rules.ts";
 import { readActiveStage } from "./stage-policy.ts";
@@ -23,22 +21,17 @@ export function recordLastDispatch(
   statePath?: string,
 ): DispatchRecord {
   const file = resolveStatePath(cwd, statePath);
-  let prev: Record<string, unknown> = {};
-  try {
-    if (fs.existsSync(file)) prev = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
-  } catch {
-    prev = {};
-  }
-  const mode = prev.mode === "experts" || prev.mode === "normal"
-    ? prev.mode
-    : getMode(cwd, statePath);
-  const next = {
-    ...prev,
-    mode,
-    lastDispatch: record,
-    updatedAt: new Date().toISOString(),
-  };
-  writeJsonStateFile(file, next);
+  mutateJsonStateFile(file, (prev) => {
+    const mode = prev.mode === "experts" || prev.mode === "normal"
+      ? prev.mode
+      : getMode(cwd, statePath);
+    return {
+      ...prev,
+      mode,
+      lastDispatch: record,
+      updatedAt: new Date().toISOString(),
+    };
+  });
   return record;
 }
 
