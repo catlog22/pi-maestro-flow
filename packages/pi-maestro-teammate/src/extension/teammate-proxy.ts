@@ -658,7 +658,7 @@ export async function dispatchRegisteredChildTool(
     ?? "unknown";
   const active = state?.activeRuns.get(correlationId);
   const input = isRecord(event.params) ? event.params : {};
-  const result = await broker({
+  const executeBroker = (signal?: AbortSignal) => broker({
     toolName,
     input,
     actor: {
@@ -666,10 +666,20 @@ export async function dispatchRegisteredChildTool(
       ...(active?.name ? { name: active.name } : {}),
       ...(active?.agent ? { agent: active.agent } : {}),
     },
+    ...(signal ? { signal } : {}),
   });
+  const requestId = typeof event.requestId === "string" ? event.requestId : randomUUID();
+  const result = state
+    ? await withProxyObservation(
+        state,
+        requestId,
+        active?.abortController.signal,
+        (signal) => executeBroker(signal),
+      )
+    : await executeBroker(active?.abortController.signal);
   reply({
     type: "teammate_proxy_result",
-    requestId: typeof event.requestId === "string" ? event.requestId : randomUUID(),
+    requestId,
     result,
   });
   return true;
@@ -834,6 +844,7 @@ export async function handleProxyRequest(
     error?: string;
     receipt?: { mode?: string; wasSleeping?: boolean; terminatedCount?: number };
   }>,
+  refreshModelCapabilities?: () => Promise<readonly TeammateModelCapability[]>,
 ): Promise<void> {
   let replied = false;
   const reply = (message: unknown): void => {
@@ -881,6 +892,23 @@ export async function handleProxyRequest(
       return;
     }
 
+    const effectiveModelCapabilities = refreshModelCapabilities
+      ? await refreshModelCapabilities()
+      : modelCapabilities;
+    if (!ownsDispatchGeneration()) {
+      abandonPendingProxyDispatch();
+      reply({
+        type: "teammate_proxy_result",
+        requestId,
+        result: {
+          content: [{ type: "text", text: "Parent session generation changed; stale child request rejected." }],
+          isError: true,
+          details: { mode: "single", results: [] },
+        },
+      });
+      return;
+    }
+
     switch (tool) {
     case "teammate": {
       const p = parseProxyTeammateParams(params);
@@ -921,7 +949,7 @@ export async function handleProxyRequest(
       const routedParams = applyModelRouting(
         p,
         dispatchOriginCwd,
-        modelCapabilities.map((model) => model.id),
+        effectiveModelCapabilities.map((model) => model.id),
         undefined,
         parentModel,
       );
@@ -1521,7 +1549,7 @@ export async function handleProxyRequest(
       const runOpts: RunTeammateOptions = {
         ...runtimeOptions,
         baseCwd: state.baseCwd,
-        modelCapabilities,
+        modelCapabilities: effectiveModelCapabilities,
         ...(normalizedTasks ? { taskCorrelationIds } : { correlationId: cid }),
         depth: dispatchDepth,
         maxDispatchDepth: childMaxDispatchDepth,
@@ -1671,7 +1699,7 @@ export async function handleProxyRequest(
             return;
           }
           handleProxyRequest(
-            pi, state, evt, rep, cid, modelCapabilities, onInteraction, publishNestedChildStatus, runtimeOptions,
+            pi, state, evt, rep, cid, effectiveModelCapabilities, onInteraction, publishNestedChildStatus, runtimeOptions,
             undefined,
             workspacePeerSend,
             workspacePeerList,

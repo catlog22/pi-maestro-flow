@@ -11,6 +11,7 @@ import registerMaestroExtension, {
   appendChineseResponsePrompt,
   chineseGlobalStatePath,
   isWorkflowOptInCommand,
+  MAESTRO_CHILD_TOOL_NAMES,
   registerChineseResponseMode,
   shouldActivateWorkflowSession,
   shouldAttachWorkflowSession,
@@ -538,8 +539,10 @@ test("root teammate authority is fenced on session start and disposed on shutdow
   );
   assert.match(
     source,
-    /pi\.on\("session_shutdown"[\s\S]*?disposeTeammateSessionRegistrations\(\)/,
+    /pi\.on\("session_shutdown"[\s\S]*?await disposeTeammateSessionRegistrations\(\)/,
   );
+  assert.match(source, /trackChildBrowserCleanup\(childBrowserBroker\.closeActor\(cid\)\)/);
+  assert.match(source, /async function disposeTeammateSessionRegistrations[\s\S]*?await Promise\.all/);
   assert.match(source, /generation !== teammateRegistrationGeneration/);
   assert.match(source, /pi\.events\.on\(TEAMMATE_STARTED_EVENT[\s\S]*?registerTodoActor\(actor\)/);
 });
@@ -681,7 +684,7 @@ test("teammate child registers interaction, local Bash, and parent-permission su
     else process.env.PI_TEAMMATE_CHILD = previous;
   }
 
-  assert.deepEqual(tools.map((tool) => tool.name), ["ask-user-question", "bash_bg", "todo"]);
+  assert.deepEqual(tools.map((tool) => tool.name), [...MAESTRO_CHILD_TOOL_NAMES]);
   assert.deepEqual([...handlers.keys()], [
     "session_start",
     "tool_call",

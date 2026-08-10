@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  cancelProxyDispatch,
+  dispatchRegisteredChildTool,
+  handleProxyRequest,
+} from "../src/extension/teammate-proxy.ts";
+import type { TeammateState } from "../src/shared/types.ts";
 import {
   getTeammateChildToolBroker,
   getTeammatePermissionBroker,
@@ -213,4 +220,133 @@ test("child tool broker resolution distinguishes unregistered from conflicting",
   } finally {
     dispose();
   }
+});
+
+test("registered child tool brokers receive cancellation from the requesting child", async () => {
+  let brokerSignal: AbortSignal | undefined;
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const dispose = registerTeammateChildToolBroker("cancel-probe", async (request) => {
+    brokerSignal = request.signal;
+    markStarted();
+    if (!request.signal) {
+      return { content: [{ type: "text" as const, text: "missing signal" }], isError: true };
+    }
+    return new Promise((resolve) => {
+      request.signal!.addEventListener("abort", () => resolve({
+        content: [{ type: "text" as const, text: "aborted" }],
+        isError: true,
+      }), { once: true });
+    });
+  }, { owner: "cancel-owner" });
+  const actorController = new AbortController();
+  const state = {
+    activeRuns: new Map([["actor-1", {
+      correlationId: "actor-1",
+      abortController: actorController,
+    }]]),
+  } as unknown as TeammateState;
+  const replies: unknown[] = [];
+
+  try {
+    const pending = dispatchRegisteredChildTool({
+      type: "teammate_proxy_request",
+      tool: "cancel-probe",
+      requestId: "request-1",
+      params: {},
+    }, (message) => replies.push(message), state, "actor-1");
+    await started;
+
+    assert.equal(brokerSignal?.aborted, false);
+    assert.deepEqual(cancelProxyDispatch(state, "request-1", "test cancellation"), []);
+    assert.equal(brokerSignal?.aborted, true);
+    assert.equal(await pending, true);
+    assert.equal(state.proxyObservationControllers?.size, 0);
+    assert.match(JSON.stringify(replies), /aborted/);
+  } finally {
+    dispose();
+  }
+});
+
+test("registered child tools are admitted before asynchronous model refresh", async () => {
+  let refreshCalls = 0;
+  const dispose = registerTeammateChildToolBroker("ingress-probe", async () => ({
+    content: [{ type: "text" as const, text: "started" }],
+  }), { owner: "ingress-owner" });
+  const state = {
+    sessionGeneration: 1,
+    activeRuns: new Map([["actor-1", {
+      correlationId: "actor-1",
+      abortController: new AbortController(),
+    }]]),
+  } as unknown as TeammateState;
+  const replies: unknown[] = [];
+
+  try {
+    await handleProxyRequest(
+      {} as ExtensionAPI,
+      state,
+      { type: "teammate_proxy_request", tool: "ingress-probe", requestId: "ingress-1", params: {} },
+      (message) => replies.push(message),
+      "actor-1",
+      [],
+      undefined,
+      undefined,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async () => { refreshCalls++; return []; },
+    );
+    assert.equal(refreshCalls, 0);
+    assert.match(JSON.stringify(replies), /started/);
+  } finally {
+    dispose();
+  }
+});
+
+test("model refresh continuation rejects requests from a stale session generation", async () => {
+  let markRefreshStarted!: () => void;
+  let finishRefresh!: () => void;
+  const refreshStarted = new Promise<void>((resolve) => { markRefreshStarted = resolve; });
+  const refreshGate = new Promise<void>((resolve) => { finishRefresh = resolve; });
+  const state = {
+    sessionGeneration: 4,
+    baseCwd: process.cwd(),
+    activeRuns: new Map([["actor-1", {
+      correlationId: "actor-1",
+      abortController: new AbortController(),
+      depth: 0,
+    }]]),
+  } as unknown as TeammateState;
+  const replies: unknown[] = [];
+
+  const pending = handleProxyRequest(
+    {} as ExtensionAPI,
+    state,
+    { type: "teammate_proxy_request", tool: "teammate", requestId: "stale-1", params: { tasks: [{ prompt: "noop" }] } },
+    (message) => replies.push(message),
+    "actor-1",
+    [],
+    undefined,
+    undefined,
+    {},
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    async () => {
+      markRefreshStarted();
+      await refreshGate;
+      return [];
+    },
+  );
+  await refreshStarted;
+  state.sessionGeneration = 5;
+  finishRefresh();
+  await pending;
+
+  assert.equal(state.pendingProxyDispatchRequests?.size, 0);
+  assert.match(JSON.stringify(replies), /session generation changed/i);
 });

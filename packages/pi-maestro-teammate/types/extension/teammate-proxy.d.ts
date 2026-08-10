@@ -79,4 +79,4 @@ export declare function handleProxyRequest(pi: ExtensionAPI, state: TeammateStat
         wasSleeping?: boolean;
         terminatedCount?: number;
     };
-}>): Promise<void>;
+}>, refreshModelCapabilities?: () => Promise<readonly TeammateModelCapability[]>): Promise<void>;

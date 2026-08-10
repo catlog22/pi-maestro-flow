@@ -59,6 +59,8 @@ export interface TeammateChildToolBrokerRequest {
     toolName: string;
     input: Record<string, unknown>;
     actor: TeammateChildToolActor;
+    /** Aborted when the requesting child gives up or its owning agent terminates. */
+    signal?: AbortSignal;
 }
 export interface TeammateChildToolResult {
     content: AgentToolResult<unknown>["content"];

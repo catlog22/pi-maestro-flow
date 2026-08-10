@@ -219,6 +219,10 @@ import { registerMaestroPackageResources } from "../resources/maestro-package.ts
 import { registerSkillManager, runSkillManager } from "../skills/skill-manager.ts";
 import { SkillManagerStore } from "../skills/skill-manager-store.ts";
 import { registerIntelligenceTools, shutdownIntelligenceTools } from "../tools/intelligence.ts";
+import { createLspTool } from "../tools/lsp-tool.ts";
+import { lspManager } from "../tools/lsp/manager.ts";
+import { registerSmartSearchTool } from "../tools/smart-search.ts";
+import { createSourceCheckTool } from "../tools/web-access/source-check-tool.ts";
 import { registerFff } from "../tools/fff.ts";
 import { registerBashBg } from "../tools/bash-bg.ts";
 import { registerLoop } from "../tools/loop.ts";
@@ -230,6 +234,10 @@ import {
   filterUnacknowledgedResults,
   persistStructuredResults,
 } from "../teammate/agent-output-capture.ts";
+import {
+  createTeammateChildBrowserTool,
+  TeammateBrowserBroker,
+} from "../teammate/browser-broker.ts";
 import { registerMarkdownReviewCommand } from "../tools/markdown-review-command.ts";
 import {
   proxyTeammateChildTool,
@@ -275,6 +283,17 @@ import {
   createHooksSettingsProvider,
   registerHooksSettingsProvider,
 } from "../settings/hooks-settings-provider.ts";
+
+export const MAESTRO_CHILD_TOOL_NAMES = [
+  "ask-user-question",
+  "bash_bg",
+  "smart_search",
+  "source_check",
+  "resource",
+  "lsp",
+  "browser",
+  "todo",
+] as const;
 
 interface MaestroState {
   baseCwd: string;
@@ -646,6 +665,16 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
 
   const teammateExtensionPath = fileURLToPath(import.meta.url);
   const teammateAuthorityOwner = `pi-maestro-flow:${teammateExtensionPath}`;
+  const childBrowserBroker = new TeammateBrowserBroker();
+  const childBrowserCleanups = new Set<Promise<unknown>>();
+  const trackChildBrowserCleanup = (operation: Promise<unknown>): Promise<unknown> => {
+    const contained = operation.catch((error) => {
+      console.warn(`[pi-maestro-flow] teammate browser cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    childBrowserCleanups.add(contained);
+    void contained.then(() => childBrowserCleanups.delete(contained));
+    return contained;
+  };
   let todoRootContext: ExtensionContext | undefined;
   let guiServer: GuiServerHandle | null = null;
   let guiLifecycleGeneration = 0;
@@ -686,14 +715,15 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
       console.warn(`[pi-maestro-flow] agent output capture failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   });
-  // Auto-seal: a cleanly finished agent seals any Todo task it left
-  // in_progress, so delegated tasks never dangle after their agent ends.
+  // Auto-seal delegated Todo work and reclaim browser tabs owned by the agent.
   pi.events.on(TEAMMATE_COMPLETE_EVENT, (event) => {
-    if (!todoRootContext) return;
-    const rootCtx = todoRootContext;
     const record = event as { correlationId?: unknown; agent?: unknown; exitCode?: unknown; cancelled?: unknown };
     const cid = typeof record.correlationId === "string" ? record.correlationId.trim() : "";
     if (!cid || cid === "unknown") return;
+    trackChildBrowserCleanup(childBrowserBroker.closeActor(cid));
+
+    if (!todoRootContext) return;
+    const rootCtx = todoRootContext;
     const agent = typeof record.agent === "string" && record.agent.trim() ? record.agent.trim() : undefined;
     const actor: TodoActorRef = {
       kind: "teammate",
@@ -2428,7 +2458,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     previousGuiServer?.close("session-restart");
     maestroUiPublisher.beginSession();
     maestroUiSessionActive = true;
-    disposeTeammateSessionRegistrations();
+    await disposeTeammateSessionRegistrations();
     state.baseCwd = ctx.cwd;
     // K9: inject the host session identity into the process environment so all
     // maestro CLI subprocesses can resolve knowledge write authority via the
@@ -2493,7 +2523,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     syncApprovalModeStatus(ctx, approvalMode);
     updateTodoWidget();
     publishMaestroUi();
-    activateTeammateSessionRegistrations(ctx);
+    await activateTeammateSessionRegistrations(ctx);
     if (guiEnabled()) {
       const guiSessionId =
         (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? "unknown";
@@ -2560,7 +2590,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     closingGuiServer?.close("session-shutdown");
     maestroUiSessionActive = false;
     maestroUiPublisher.clear();
-    disposeTeammateSessionRegistrations();
+    await disposeTeammateSessionRegistrations();
     // Fence callbacks and leases before the first await so teardown cannot
     // enqueue continuation work into the departing session.
     midTurnAutoCompaction.onSessionShutdown(ctx);
@@ -3168,15 +3198,15 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     };
   }
 
-  function activateTeammateSessionRegistrations(ctx: ExtensionContext): void {
-    disposeTeammateSessionRegistrations();
+  async function activateTeammateSessionRegistrations(ctx: ExtensionContext): Promise<void> {
+    await disposeTeammateSessionRegistrations();
     const generation = ++teammateRegistrationGeneration;
     const nextDisposers: Array<() => void> = [];
     try {
       // Teammates run in separate Pi processes. This registration is scoped to
       // the live root session so a reload cannot retain a stale child surface.
       nextDisposers.push(registerTeammateChildExtension(teammateExtensionPath, {
-        tools: ["ask-user-question", "todo", "bash_bg"],
+        tools: MAESTRO_CHILD_TOOL_NAMES,
       }));
       nextDisposers.push(registerTeammateChildToolBroker("todo", async (request) => {
         if (generation !== teammateRegistrationGeneration || todoRootContext !== ctx) {
@@ -3188,6 +3218,16 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
         }
         return childTodoBroker(request);
       }, { owner: `${teammateAuthorityOwner}:todo` }));
+      nextDisposers.push(registerTeammateChildToolBroker("browser", async (request) => {
+        if (generation !== teammateRegistrationGeneration || todoRootContext !== ctx) {
+          return {
+            content: [{ type: "text", text: "Root browser authority belongs to a newer session generation." }],
+            isError: true,
+            details: {},
+          };
+        }
+        return childBrowserBroker.execute(request, ctx);
+      }, { owner: `${teammateAuthorityOwner}:browser` }));
       const sessionPermissionBroker: TeammatePermissionBroker = async (call, requestCtx) => {
         if (generation !== teammateRegistrationGeneration) {
           return { action: "deny", reason: "Root permission authority belongs to a newer session generation." };
@@ -3206,11 +3246,13 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     }
   }
 
-  function disposeTeammateSessionRegistrations(): void {
+  async function disposeTeammateSessionRegistrations(): Promise<void> {
     teammateRegistrationGeneration++;
     const disposers = teammateRegistrationDisposers;
     teammateRegistrationDisposers = [];
     for (const dispose of disposers.reverse()) dispose();
+    trackChildBrowserCleanup(childBrowserBroker.closeAll());
+    await Promise.all([...childBrowserCleanups]);
   }
 
   pi.on("tool_call", async (event, ctx) => permissionController.authorize(
@@ -3366,14 +3408,20 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
     compactionArbiter.complete("success");
     autoCompaction.onCompact(completedOwner, ctx);
   });
-  pi.on("session_shutdown", (_event, ctx) => {
+  pi.on("session_shutdown", async (_event, ctx) => {
     autoCompaction.onSessionShutdown(ctx);
     preserveCompletedTurnFromNativeThreshold = false;
     compactionArbiter.reset();
+    await lspManager.shutdown();
   });
 
   registerAskUserQuestionTool(pi);
   registerBashBg(pi);
+  registerSmartSearchTool(pi);
+  pi.registerTool(createSourceCheckTool() as never);
+  registerResourceTool(pi);
+  pi.registerTool(createLspTool() as never);
+  pi.registerTool(createTeammateChildBrowserTool());
   const todoProxyTool: ToolDefinition<typeof TodoToolParams> = {
     name: "todo",
     label: "Todo",

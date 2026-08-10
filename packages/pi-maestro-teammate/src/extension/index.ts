@@ -2696,43 +2696,44 @@ export default function registerTeammateExtension(
             cancelProxyDispatch(state, event.requestId);
             return;
           }
-          void (async () => {
-            await refreshModelRegistry(ctx);
-            await handleProxyRequest(
-              pi,
-              state,
-              event,
-              reply,
-              correlationId,
-              refreshModelCatalog(ctx).models,
-              (request, respond, childId) => enqueueChildInteraction(request, respond, ctx, childId),
-              publishChildCallStatus,
-              runtimeOptions,
-              (() => {
-                const activeMailboxHost = mailboxHost && mailboxHost.mode === "authoritative" ? mailboxHost : undefined;
-                return activeMailboxHost
-                  ? (request) => activeMailboxHost.rollout.deliver(request).then((r) => ({ path: r.path, result: r.result }))
-                  : undefined;
-              })(),
-              async (target, message, mode) => (await routeSessionMessage({
-                selector: target,
-                message,
-                mode,
-                source: activeAgent.name === "monitor-session" ? "monitor" : "system",
-                signal: activeAgent.abortController.signal,
-              })).delivered,
-              async () => {
-                await workspacePeerLifecycle;
-                await refreshWorkspacePeerOwners();
-                return workspacePeerWindowListings();
-              },
-              (request) => routeSessionMessage({
-                ...request,
-                source: activeAgent.name === "monitor-session" ? "monitor" : "system",
-                signal: activeAgent.abortController.signal,
-              }),
-            );
-          })();
+          void handleProxyRequest(
+            pi,
+            state,
+            event,
+            reply,
+            correlationId,
+            refreshModelCatalog(ctx).models,
+            (request, respond, childId) => enqueueChildInteraction(request, respond, ctx, childId),
+            publishChildCallStatus,
+            runtimeOptions,
+            (() => {
+              const activeMailboxHost = mailboxHost && mailboxHost.mode === "authoritative" ? mailboxHost : undefined;
+              return activeMailboxHost
+                ? (request) => activeMailboxHost.rollout.deliver(request).then((r) => ({ path: r.path, result: r.result }))
+                : undefined;
+            })(),
+            async (target, message, mode) => (await routeSessionMessage({
+              selector: target,
+              message,
+              mode,
+              source: activeAgent.name === "monitor-session" ? "monitor" : "system",
+              signal: activeAgent.abortController.signal,
+            })).delivered,
+            async () => {
+              await workspacePeerLifecycle;
+              await refreshWorkspacePeerOwners();
+              return workspacePeerWindowListings();
+            },
+            (request) => routeSessionMessage({
+              ...request,
+              source: activeAgent.name === "monitor-session" ? "monitor" : "system",
+              signal: activeAgent.abortController.signal,
+            }),
+            async () => {
+              await refreshModelRegistry(ctx);
+              return refreshModelCatalog(ctx).models;
+            },
+          );
           },
         };
         if (runtimeOptions.spawnChildProcess) options.spawnChildProcess = runtimeOptions.spawnChildProcess;
