@@ -1,6 +1,6 @@
 {
   "name": "pi-cockpit",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Responsive Maestro operations sidebar, fallback status widgets, and footer for Pi.",
   "type": "module",
   "keywords": [
@@ -72,7 +72,7 @@
     "@earendil-works/pi-coding-agent": "0.83.0",
     "@earendil-works/pi-tui": "0.83.0",
     "@types/node": "^22.0.0",
-    "pi-maestro-teammate": "1.11.0",
+    "pi-maestro-teammate": "1.12.0",
     "typebox": "1.3.7",
     "typescript": "^5.5.0"
   },

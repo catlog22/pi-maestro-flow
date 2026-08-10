@@ -639,7 +639,14 @@ test("warm wake publishes every subsequent turn completion", async () => {
   await delay(40);
 
   assert.equal(emitted.filter(({ event }) => event === "teammate:complete").length, 2);
-  assert.ok(messages.some((message) => message.customType === "teammate-complete" && message.content === "second turn"));
+  assert.ok(
+    messages.some((message) =>
+      message.customType === "teammate-complete"
+      && typeof message.content === "string"
+      && message.content.endsWith("second turn")
+    ),
+    `expected second-turn completion message, got ${JSON.stringify(messages)}`,
+  );
 });
 
 test("closed runtime cold-resumes the same logical agent from its persisted session", async () => {

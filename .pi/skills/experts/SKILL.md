@@ -248,4 +248,3 @@ Package `default-rules.json` roster ships Maestro skill presets (project `.exper
 | workflow | `maestro-ralph`, `team-coordinate` | Closed-loop + multi-role coordinate |
 
 Dispatch injects skills as `<!-- experts-skills -->` guidance via `applyExpertProfiles`. Skills are names only — agents load via `skill://name` / host skill loader.
-

@@ -22,6 +22,8 @@ Thumbs.db
 .history/
 .pi/settings.local.json
 .pi/scratch/
+# Per-workspace Experts Mode runtime state may contain prompt previews.
+**/.experts-mode.json
 # Runtime capture records under .pi/agents stay ignored; role definitions
 # (*.md) are versioned and ship inside the npm package for global discovery.
 .pi/agents/*

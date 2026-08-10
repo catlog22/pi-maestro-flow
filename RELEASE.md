@@ -1,3 +1,107 @@
+# v0.19.0 — Experts Mode, Managed Monitor Windows, and Dispatch Hardening
+
+## Overview
+
+Flow `0.19.0` bundles Teammate `1.12.0`, Cockpit `0.14.0`, and the unchanged
+`pi-maestro-settings-core` `0.1.3`. This release adds an opt-in Experts Mode
+policy layer over the existing Teammate and Maestro Session/Run runtime, expands
+cross-session monitor/window operations, and hardens dispatch, permission audit,
+model-routing, and interrupted-run behavior.
+
+The core engine reference is updated from `maestro-flow@0.5.68` to
+`maestro-flow@0.5.69`, matching both npm latest and the local upstream source at
+release preflight.
+
+## Highlights
+
+### Experts Mode
+
+- New `/experts on|off|status|roster|config|waiting|harvest` surface with a
+  read-only TUI overlay and statusline harvest indicator.
+- Stage-aware policies map Maestro stages to typed expert pipelines before the
+  existing model router runs; explicit task models retain precedence.
+- Configurable per-role model, channel, thinking, fallback, and skill profiles
+  through `.experts-rules.json`.
+- Leader hard-gate redirects business-file writes and heavy shell work to
+  teammates while allowing child experts to execute their assigned work.
+- Durable waiting, in-flight, stage, and knowledge-suggestion state with
+  settle-time knowledge harvesting. Harvesting is suggestion-only by default;
+  automatic staging remains opt-in.
+- New packaged `experts` skill and taskType-aware team skill templates.
+
+### Teammate and Monitor Runtime
+
+- Managed monitor windows, workspace inbox views, cross-window delivery
+  reminders, and authenticated owner reconciliation.
+- Browser tool exposure to child agents through a dedicated broker.
+- Permission audit and tool-preview contracts shared across extension and run
+  execution paths.
+- Model-routing precedence is preserved when callers explicitly select a model.
+- Improved graph settle, retry, progress, waiting, and structured-output state.
+
+### Flow and Cockpit
+
+- Flow exposes child-safe tools and supports top-level skill discovery in
+  run-control paths.
+- Interrupted compaction continuations are preserved rather than silently lost.
+- Cockpit agent bar, overlay, session detail, and agents store now present the
+  expanded monitor/window state and localized controls.
+
+## Package Versions
+
+| Package | Previous | v0.19.0 closure |
+|---------|---------:|----------------:|
+| pi-maestro-flow | 0.18.0 | **0.19.0** |
+| pi-maestro-teammate | 1.11.0 | **1.12.0** |
+| pi-cockpit | 0.13.0 | **0.14.0** |
+| pi-maestro-settings-core | 0.1.3 | **0.1.3** (unchanged) |
+| maestro-flow | 0.5.68 | **0.5.69** |
+
+- Requires Node.js `>=22.19.0`.
+- Pi core packages remain optional wildcard peers supplied by the host.
+- Publication order is Teammate, Cockpit, then Flow. Flow pins the exact
+  companion versions shown above.
+
+## Install / Upgrade
+
+Close running Pi processes before upgrading, then run:
+
+```bash
+pi install npm:pi-maestro-flow@0.19.0
+pi list
+```
+
+After restart, verify Flow `0.19.0`, Teammate `1.12.0`, Cockpit `0.14.0`, and
+Settings-Core `0.1.3`. Experts Mode remains off until explicitly enabled with
+`/experts on`.
+
+## Release Verification
+
+- Serial release gate passed: Settings-Core typecheck/tests and unchanged-tarball
+  SHA check; Teammate typecheck, 1,326-test suite, declarations and declaration
+  contract; Cockpit typecheck and 687 tests; Flow typecheck and all release
+  suites, including both real packed-consumer tests.
+- The four stale contract assertions exposed by the merge were corrected and
+  rerun as focused files; the adapter's missing `expertsCaller` public type was
+  fixed before Flow typecheck passed.
+- Registry tarball and fresh isolated Pi install smoke: pending publication.
+
+Dry-run tarballs from the verified candidate:
+
+| Package | Files | Packed | Unpacked | SHA-1 |
+|---------|------:|-------:|---------:|-------|
+| pi-maestro-settings-core@0.1.3 (unchanged) | 7 | 5,551 | 20,774 | `e572d7fd284aed7cb9de01342a57f44ac987ee62` |
+| pi-maestro-teammate@1.12.0 | 230 | 540,473 | 2,375,962 | `3d1262a7fddbf26e9d885b81e99ebcca82f17b71` |
+| pi-cockpit@0.14.0 | 82 | 221,972 | 823,010 | `a6c3c1915f174477608677be0d6443a168f2a272` |
+| pi-maestro-flow@0.19.0 | 603 | 1,773,465 | 6,644,998 | `0c9e3e715733dfa3798aa2d9c65909a1fe336a4a` |
+
+## Change Statistics
+
+Candidate compared with `v0.18.0`: 14 commits including the release commit; 137 files changed;
+13,751 insertions and 360 deletions across Teammate, Cockpit, Flow, docs, and skills.
+
+---
+
 # v0.18.0 — Packaged Skill Discovery Fix, Teammate Cross-Session Delivery Hardening, and Scholar Skills Suite
 
 **supersedes v0.17.0 (withdrawn).** v0.17.0 was published and then withdrawn

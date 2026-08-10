@@ -99,7 +99,7 @@ test("independent monitor session identity and command entry points stay stable"
   assert.match(source, /steer deferred as follow_up while foreground bash_bg is active/);
   assert.match(sessionSource, /foreground background-job entry/);
   assert.match(source, /if \(trimmed === ""\)[\s\S]*?requestWindowMode\("enter"\)/);
-  assert.match(source, /monitorInteractionModeActive \? appendMonitorModeContext\(withDepth\) : withDepth/);
+  assert.match(source, /monitorInteractionModeActive \? appendMonitorModeContext\(withExperts\) : withExperts/);
   assert.doesNotMatch(source, /guardMonitorModeToolCall/);
   assert.match(source, /options\.view === "turns"\) return teammateTurnsSnapshot\(id, options\);/);
   assert.match(source, /options\.view === "turns"\) return workspaceTurnsSnapshot\(owner, target, detail, lines, options\);/);

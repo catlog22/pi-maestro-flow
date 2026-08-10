@@ -185,7 +185,10 @@ interface HookState {
 export interface CodexHookAdapter {
   openSettings(ctx: ExtensionContext): Promise<void>;
   beforeToolCall(
-    call: PermissionToolCall & { toolCallId?: string },
+    call: PermissionToolCall & {
+      toolCallId?: string;
+      expertsCaller?: "leader" | "expert";
+    },
     ctx: ExtensionContext,
   ): Promise<{ block: true; reason: string } | undefined>;
   requestPermission(
