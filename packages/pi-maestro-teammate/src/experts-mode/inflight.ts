@@ -1,22 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import { getMode, resolveStatePath } from "./mode.ts";
+import { readJsonStateFile, writeJsonStateFile } from "./state-io.ts";
 import type { InFlightExpert } from "./types.ts";
 
 function readRaw(cwd: string, statePath?: string): Record<string, unknown> {
-  const file = resolveStatePath(cwd, statePath);
-  try {
-    if (!fs.existsSync(file)) return {};
-    return JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
-  } catch {
-    return {};
-  }
+  return readJsonStateFile(resolveStatePath(cwd, statePath));
 }
 
 function writeRaw(cwd: string, next: Record<string, unknown>, statePath?: string): void {
-  const file = resolveStatePath(cwd, statePath);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  writeJsonStateFile(resolveStatePath(cwd, statePath), next);
 }
 
 function parseList(raw: Record<string, unknown>): InFlightExpert[] {

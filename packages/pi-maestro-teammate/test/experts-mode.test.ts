@@ -27,8 +27,12 @@ import {
   clearRulesCache,
   EXPERTS_SKILLS_START,
   getRoster,
+  hasDangerousShellMetachar,
+  mergeRules,
+  mergeRosterMaps,
   type TeammateParamsLike,
 } from "../src/experts-mode/index.ts";
+
 
 function tempCwd(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "experts-mode-wire-"));
@@ -1071,7 +1075,6 @@ import {
   buildOrchestratorDisciplineFragment,
   buildViceLeadDispatchHint,
   shouldSuggestViceLead,
-  mergeRules,
 } from "../src/experts-mode/index.ts";
 
 test("P5.1 discipline fragment mentions session/run and dispatch", () => {
@@ -1483,5 +1486,166 @@ test("A5 planner dispatch injects maestro skill guidance", () => {
   } as TeammateParamsLike, { cwd, mode: "experts", record: false, rules });
   assert.match(String(out.tasks?.[0]?.prompt), /experts-skills:start/);
   assert.match(String(out.tasks?.[0]?.prompt), /maestro-next|maestro/);
+  clearRulesCache();
+});
+
+
+// --- A6 audit fixes H1/H2/M5/M1 ---
+
+test("A6 H2 hasDangerousShellMetachar detects chains", () => {
+  assert.equal(hasDangerousShellMetachar("git status"), false);
+  assert.equal(hasDangerousShellMetachar("cat foo && rm -rf src"), true);
+  assert.equal(hasDangerousShellMetachar("npm test; node -e x"), true);
+  assert.equal(hasDangerousShellMetachar("echo hi | tee log"), true);
+  assert.equal(hasDangerousShellMetachar("echo $(whoami)"), true);
+});
+
+test("A6 H2 bash chain denied under experts allowlist prefix", () => {
+  clearRulesCache();
+  const cwd = tempCwd();
+  setMode("experts", cwd);
+  const chain = evaluateHardGate("bash", {
+    cwd,
+    mode: "experts",
+    toolInput: { command: "cat notes/a.md && rm -rf src" },
+  });
+  assert.equal(chain.decision, "deny");
+  const ok = evaluateHardGate("bash", {
+    cwd,
+    mode: "experts",
+    toolInput: { command: "git status" },
+  });
+  assert.equal(ok.decision, "allow");
+  clearRulesCache();
+});
+
+test("A6 H1 evaluateHardGate uses project rules from cwd", () => {
+  clearRulesCache();
+  const cwd = tempCwd();
+  setMode("experts", cwd);
+  fs.writeFileSync(
+    path.join(cwd, ".experts-rules.json"),
+    JSON.stringify({
+      hardGate: {
+        default: "allow",
+        tools: { write: "allow", edit: "allow", bash: "deny", bash_bg: "deny" },
+      },
+    }, null, 2),
+    "utf8",
+  );
+  // write to business path would be deny under package defaults; project sets write=allow
+  const gate = evaluateHardGate("write", {
+    cwd,
+    mode: "experts",
+    toolInput: { path: "src/business.ts" },
+  });
+  assert.equal(gate.decision, "allow", gate.reason);
+  clearRulesCache();
+});
+
+test("A6 M5 mergeRules deep-merges roster entries", () => {
+  const base = {
+    roster: {
+      explorer: {
+        agent: "explorer",
+        defaultTaskType: "explore",
+        capabilities: ["explore", "search"],
+        skills: [] as string[],
+      },
+    },
+  };
+  const overlay = {
+    roster: {
+      explorer: {
+        skills: ["smart-search-cli"],
+      },
+    },
+  };
+  const merged = mergeRules(base as any, overlay as any);
+  const ex = merged.roster?.explorer as any;
+  assert.equal(ex.agent, "explorer");
+  assert.equal(ex.defaultTaskType, "explore");
+  assert.deepEqual(ex.capabilities, ["explore", "search"]);
+  assert.deepEqual(ex.skills, ["smart-search-cli"]);
+  // mergeRosterMaps unit
+  const m = mergeRosterMaps(
+    { a: { agent: "x", skills: [] } },
+    { a: { skills: ["m"] } },
+  );
+  assert.equal((m.a as any).agent, "x");
+  assert.deepEqual((m.a as any).skills, ["m"]);
+});
+
+test("A6 M1 setLeaderWaiting / noteExpertsSettled keep non-negative count", () => {
+  clearRulesCache();
+  const cwd = tempCwd();
+  setMode("experts", cwd);
+  setLeaderWaiting(true, { cwd, activeDelta: 2, agentIds: ["a", "b"] });
+  noteExpertsSettled(cwd, { settledCount: 1, reason: "t1" });
+  noteExpertsSettled(cwd, { settledCount: 1, reason: "t2" });
+  noteExpertsSettled(cwd, { settledCount: 3, reason: "over" });
+  const st = getLeaderWaiting(cwd);
+  assert.ok(st.activeCount >= 0);
+  assert.equal(st.activeCount, 0);
+  assert.equal(st.leaderWaiting, false);
+  clearRulesCache();
+});
+
+
+test("A6 CV-01 expert caller skips hard-gate", () => {
+  clearRulesCache();
+  const cwd = tempCwd();
+  setMode("experts", cwd);
+  const leader = evaluateHardGate("write", {
+    cwd,
+    mode: "experts",
+    toolInput: { path: "src/evil.ts" },
+  });
+  assert.equal(leader.decision, "deny");
+  const expert = evaluateHardGate("write", {
+    cwd,
+    mode: "experts",
+    caller: "expert",
+    toolInput: { path: "src/evil.ts" },
+  });
+  assert.equal(expert.decision, "allow");
+  clearRulesCache();
+});
+
+test("A6 HV-02 bash redirect and node -e denied", () => {
+  clearRulesCache();
+  const cwd = tempCwd();
+  setMode("experts", cwd);
+  const redir = evaluateHardGate("bash", {
+    cwd,
+    mode: "experts",
+    toolInput: { command: "cat report.md > src/evil.ts" },
+  });
+  assert.equal(redir.decision, "deny");
+  const nodee = evaluateHardGate("bash", {
+    cwd,
+    mode: "experts",
+    toolInput: { command: "node --test -e \"require('fs').writeFileSync('x','y')\"" },
+  });
+  assert.equal(nodee.decision, "deny");
+  const falsePrefix = evaluateHardGate("bash", {
+    cwd,
+    mode: "experts",
+    toolInput: { command: "npm testify" },
+  });
+  assert.equal(falsePrefix.decision, "deny");
+  clearRulesCache();
+});
+
+test("A6 HV-04 writing .experts-mode.json is not path-allowlisted", () => {
+  clearRulesCache();
+  const cwd = tempCwd();
+  setMode("experts", cwd);
+  const gate = evaluateHardGate("write", {
+    cwd,
+    mode: "experts",
+    toolInput: { path: ".experts-mode.json" },
+  });
+  assert.equal(gate.decision, "deny");
   clearRulesCache();
 });

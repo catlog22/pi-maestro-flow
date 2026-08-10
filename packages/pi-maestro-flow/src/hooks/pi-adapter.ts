@@ -300,19 +300,18 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
   };
 
   const beforeToolCall = async (
-    event: PermissionToolCall & { toolCallId?: string },
+    event: PermissionToolCall & { toolCallId?: string; expertsCaller?: "leader" | "expert" },
     ctx: ExtensionContext,
   ): Promise<{ block: true; reason: string } | undefined> => {
-    if (!state.active) return;
     const names = toolMatchValues(event.toolName);
-
-    // Experts Mode P1/P5 hard-gate (before user hooks):
-    // deny blocks with teammate rewrite guidance; ask injects guidance; allowlist paths pass.
-    // State file: <cwd>/.experts-mode.json or EXPERTS_MODE_STATE.
+    // CV-01 / HV-01: Lead hard-gate runs even when Codex hooks are inactive/untrusted.
+    // Expert (teammate child relay) skips the gate so workers can write business files.
+    const expertsCaller = event.expertsCaller === "expert" ? "expert" : "leader";
     try {
       const gate = evaluateHardGate(event.toolName, {
         cwd: ctx.cwd,
         toolInput: event.input,
+        caller: expertsCaller,
       });
       if (gate.decision === "deny") {
         const rewrite = gate.rewriteSuggestion;
@@ -330,6 +329,9 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
     } catch {
       // Never fail tool path if experts-mode state is unreadable.
     }
+
+    // Remaining Codex hooks still require trusted hooks.json.
+    if (!state.active) return;
 
     const outputs = await execute("PreToolUse", names, {
       ...turnInput("PreToolUse", ctx, state, getPermissionMode()),

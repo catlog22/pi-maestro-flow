@@ -1,8 +1,7 @@
-import fs from "node:fs";
-import path from "node:path";
 import { clearInFlight, settleInFlight } from "./inflight.ts";
 import { harvestKnowledgeOnSettle } from "./knowledge-harvest.ts";
 import { getMode, resolveStatePath } from "./mode.ts";
+import { readJsonStateFile, writeJsonStateFile } from "./state-io.ts";
 import type { SettleHarvestResult } from "./types.ts";
 
 export interface LeaderWaitingState {
@@ -13,19 +12,12 @@ export interface LeaderWaitingState {
 }
 
 function readRaw(cwd: string, statePath?: string): Record<string, unknown> {
-  const file = resolveStatePath(cwd, statePath);
-  try {
-    if (!fs.existsSync(file)) return {};
-    return JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
-  } catch {
-    return {};
-  }
+  return readJsonStateFile(resolveStatePath(cwd, statePath));
 }
 
 function writeRaw(cwd: string, next: Record<string, unknown>, statePath?: string): void {
-  const file = resolveStatePath(cwd, statePath);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  // M1: atomic temp+rename write for .experts-mode.json
+  writeJsonStateFile(resolveStatePath(cwd, statePath), next);
 }
 
 export function getLeaderWaiting(cwd = process.cwd(), statePath?: string): LeaderWaitingState {

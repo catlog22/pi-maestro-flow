@@ -1,6 +1,6 @@
 import path from "node:path";
 import { getMode } from "./mode.ts";
-import { loadRules } from "./rules.ts";
+import { defaultRulesPath, loadRules } from "./rules.ts";
 import { getStagePolicy, readActiveStage, resolveStageName } from "./stage-policy.ts";
 import type {
   ExpertsMode,
@@ -18,6 +18,12 @@ export interface HardGateOptions {
   toolInput?: unknown;
   /** Optional Maestro stage override; falls back to activeStage / MAESTRO_STAGE. */
   stage?: string;
+  /**
+   * CV-01: who is calling the tool.
+   * - leader (default): hard-gate applies
+   * - expert: teammate child / relayed permission — always allow
+   */
+  caller?: "leader" | "expert";
 }
 
 const HEAVY_MUTATION_TOOLS = new Set(["write", "edit", "bash", "bash_bg"]);
@@ -29,7 +35,7 @@ const DEFAULT_LEADER_ALLOW_PATHS = [
   "**/outputs/**",
   ".workflow/**",
   "**/.workflow/**",
-  ".experts-mode.json",
+  // HV-04: do NOT allow writing .experts-mode.json (would flip mode off)
   "notes/**",
   "**/notes/**",
 ];
@@ -67,8 +73,14 @@ const DEFAULT_BASH_ALLOW_PREFIXES = [
 export function evaluateHardGate(toolName: string, opts: HardGateOptions = {}): GateResult {
   const cwd = opts.cwd ?? process.cwd();
   const mode = opts.mode ?? getMode(cwd);
-  const rules = opts.rules ?? loadRules();
+  // H1: always merge project .experts-rules.json from the tool cwd, not process.cwd().
+  const rules = opts.rules ?? loadRules(defaultRulesPath(), cwd);
   const name = normalizeToolName(toolName);
+
+  // CV-01: expert teammates must not be blocked by Lead discipline.
+  if (opts.caller === "expert") {
+    return { decision: "allow", reason: "expert caller — lead hard-gate skipped" };
+  }
 
   if (mode !== "experts") {
     return { decision: "allow", reason: "normal mode — no experts gate" };
@@ -127,10 +139,22 @@ export function buildRewriteSuggestion(
   toolName: string,
   toolInput: unknown,
   stage: string | undefined,
-  rules: ExpertsRules = loadRules(),
+  rules?: ExpertsRules,
   cwd = process.cwd(),
 ): RewriteSuggestion {
+  // H1: default rules merge project overlay from cwd.
+  const resolvedRules = rules ?? loadRules(defaultRulesPath(), cwd);
   const name = normalizeToolName(toolName);
+  return buildRewriteSuggestionWithRules(name, toolInput, stage, resolvedRules, cwd);
+}
+
+function buildRewriteSuggestionWithRules(
+  name: string,
+  toolInput: unknown,
+  stage: string | undefined,
+  rules: ExpertsRules,
+  cwd: string,
+): RewriteSuggestion {
   const stageKey = resolveStageName(stage, rules) || stage;
   const policy = stageKey ? getStagePolicy(stageKey, rules)?.policy : undefined;
   const primary = policy?.pipeline?.[0];
@@ -157,7 +181,7 @@ export function buildRewriteSuggestion(
     "Lead discipline rewrite: complete this work as an expert teammate.",
     intentBits.length ? `Context: ${intentBits.join("; ")}` : "",
     "Implement only the blocked leader action; return a concise RESULT with files touched and verification.",
-    "Do not hardcode model ids; role ≠ model.",
+    "Do not hardcode model ids; role != model.",
   ].filter(Boolean).join("\n");
 
   return {
@@ -170,6 +194,27 @@ export function buildRewriteSuggestion(
     pathHint,
     commandHint,
   };
+}
+
+/**
+ * H2: reject shell chaining / substitution that can bypass bash prefix allowlist.
+ * True means the command is unsafe for Leader allowlist even if prefix matches.
+ */
+export function hasDangerousShellMetachar(command: string): boolean {
+  const c = String(command || "");
+  if (!c) return false;
+  if (/[\r\n]/.test(c)) return true;
+  if (c.includes("&&") || c.includes("||")) return true;
+  if (c.includes(";")) return true;
+  if (c.includes("|")) return true;
+  if (c.includes("`")) return true;
+  if (c.includes("$(") || c.includes("${")) return true;
+  // HV-02: redirects can write arbitrary paths despite read-only prefixes
+  if (c.includes(">")) return true;
+  // inline code execution commonly used to bypass write gate
+  if (/(?:^|\s)-e(?:\s|$)/.test(c) || /(?:^|\s)--eval(?:\s|$)/.test(c)) return true;
+  if (/\bnode\s+-e\b/i.test(c) || /\bpython(?:3)?\s+-c\b/i.test(c)) return true;
+  return false;
 }
 
 export function formatDenyReason(toolName: string, rewrite: RewriteSuggestion): string {
@@ -231,16 +276,31 @@ function isLeaderAllowed(
   if (toolName === "bash" || toolName === "bash_bg") {
     const command = extractCommandHint(toolName, toolInput);
     if (!command) return false;
+    // H2: prefix allowlist must not accept chained / substituted commands.
+    if (hasDangerousShellMetachar(command)) return false;
     const prefixes = [
       ...(rules.hardGate?.bashAllowPrefixes || []),
       ...DEFAULT_BASH_ALLOW_PREFIXES,
     ];
     const normalized = command.replace(/^\s+/, "");
-    return prefixes.some((prefix) => {
-      const p = prefix.toLowerCase();
-      const c = normalized.toLowerCase();
-      return c === p.trim() || c.startsWith(p);
-    });
+    return prefixes.some((prefix) => bashPrefixMatches(normalized, prefix));
+  }
+  return false;
+}
+
+/** Prefix match with word boundary so "npm test" does not allow "npm testify". */
+export function bashPrefixMatches(command: string, prefix: string): boolean {
+  const c = command.replace(/^\s+/, "").toLowerCase();
+  const p = String(prefix || "").toLowerCase();
+  if (!p) return false;
+  const trimmed = p.trimEnd();
+  if (c === trimmed) return true;
+  if (c.startsWith(p)) {
+    // if prefix ends with whitespace, startsWith is enough
+    if (/\s$/.test(p)) return true;
+    // otherwise require end or whitespace after prefix (word boundary)
+    const rest = c.slice(trimmed.length);
+    return rest.length === 0 || /^\s/.test(rest);
   }
   return false;
 }

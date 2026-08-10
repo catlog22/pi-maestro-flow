@@ -5,8 +5,10 @@ export {
   defaultRulesPath,
   projectRulesPath,
   mergeRules,
+  mergeRosterMaps,
   PROJECT_RULES_FILENAME,
 } from "./rules.ts";
+export { writeJsonStateFile, readJsonStateFile } from "./state-io.ts";
 export { classifyIntent } from "./triage.ts";
 export { ensureExpertsDispatch } from "./dispatch.ts";
 export type { EnsureExpertsDispatchOptions } from "./dispatch.ts";
@@ -72,6 +74,8 @@ export {
   isHeavyMutationTool,
   formatDenyReason,
   formatAskReason,
+  hasDangerousShellMetachar,
+  bashPrefixMatches,
 } from "./hard-gate.ts";
 export type { HardGateOptions } from "./hard-gate.ts";
 export {

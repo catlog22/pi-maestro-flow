@@ -108,7 +108,6 @@
       "**/outputs/**",
       ".workflow/**",
       "**/.workflow/**",
-      ".experts-mode.json",
       "notes/**",
       "**/notes/**"
     ],

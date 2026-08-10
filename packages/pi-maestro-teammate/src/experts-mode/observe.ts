@@ -3,6 +3,7 @@ import path from "node:path";
 import { getInFlight } from "./inflight.ts";
 import { getKnowledgeSuggestions } from "./knowledge-harvest.ts";
 import { getMode, readState, resolveStatePath } from "./mode.ts";
+import { readJsonStateFile, writeJsonStateFile } from "./state-io.ts";
 import { getRoster } from "./roster.ts";
 import { loadRules } from "./rules.ts";
 import { readActiveStage } from "./stage-policy.ts";
@@ -37,8 +38,7 @@ export function recordLastDispatch(
     lastDispatch: record,
     updatedAt: new Date().toISOString(),
   };
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  writeJsonStateFile(file, next);
   return record;
 }
 

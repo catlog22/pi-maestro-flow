@@ -86,13 +86,13 @@ export function mergeRules(base: ExpertsRules, overlay: ExpertsRules): ExpertsRu
       ? { ...(base.stageAliases || {}), ...overlay.stageAliases }
       : base.stageAliases,
     roster: overlay.roster
-      ? { ...(base.roster || {}), ...overlay.roster }
+      ? mergeRosterMaps(base.roster, overlay.roster)
       : base.roster,
     channels: overlay.channels
       ? { ...(base.channels || {}), ...overlay.channels }
       : base.channels,
     expertProfiles: overlay.expertProfiles
-      ? { ...(base.expertProfiles || {}), ...overlay.expertProfiles }
+      ? mergeRosterMaps(base.expertProfiles, overlay.expertProfiles)
       : base.expertProfiles,
     taskTypes: overlay.taskTypes
       ? { ...(base.taskTypes || {}), ...overlay.taskTypes }
@@ -101,4 +101,31 @@ export function mergeRules(base: ExpertsRules, overlay: ExpertsRules): ExpertsRu
       ? { ...(base.pipelines || {}), ...overlay.pipelines }
       : base.pipelines,
   };
+}
+
+/**
+ * M5: deep-merge roster / expertProfiles maps so a project overlay that only
+ * sets skills/model does not wipe package defaults (agent, capabilities, …).
+ * Overlay field wins when defined; arrays are replaced (not concatenated).
+ */
+export function mergeRosterMaps<
+  T extends Record<string, unknown> = Record<string, unknown>,
+>(
+  base: Record<string, T> | undefined,
+  overlay: Record<string, T> | undefined,
+): Record<string, T> {
+  const out: Record<string, T> = { ...(base || {}) };
+  for (const [key, overlayEntry] of Object.entries(overlay || {})) {
+    if (!overlayEntry || typeof overlayEntry !== "object" || Array.isArray(overlayEntry)) {
+      out[key] = overlayEntry as T;
+      continue;
+    }
+    const baseEntry = out[key];
+    if (!baseEntry || typeof baseEntry !== "object" || Array.isArray(baseEntry)) {
+      out[key] = { ...overlayEntry } as T;
+      continue;
+    }
+    out[key] = { ...baseEntry, ...overlayEntry } as T;
+  }
+  return out;
 }
