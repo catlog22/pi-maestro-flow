@@ -235,6 +235,36 @@ Review security evidence.
   }
 });
 
+test("role frontmatter model outranks inherited parent model but not task-type mapping", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-role-model-routing-"));
+  const cwd = path.join(root, "project");
+  const globalPath = path.join(root, "home", "teammate-models.json");
+  const agentsDir = path.join(cwd, ".pi", "agents");
+  fs.mkdirSync(agentsDir, { recursive: true });
+  fs.writeFileSync(path.join(agentsDir, "security-specialist.md"), `---
+name: security-specialist
+description: Security review specialist
+model: provider/role
+taskType: analysis
+---
+Review security evidence.
+`);
+  try {
+    const fromRole = applyModelRouting({
+      tasks: [{ agent: "security-specialist", prompt: "Inspect the module" }],
+    }, cwd, ["provider/role", "provider/parent"], globalPath, "provider/parent");
+    assert.equal(fromRole.tasks[0].model, "provider/role");
+
+    saveProjectModelMapping(cwd, "analysis", "provider/analysis", globalPath);
+    const fromTaskType = applyModelRouting({
+      tasks: [{ agent: "security-specialist", prompt: "Inspect the module" }],
+    }, cwd, ["provider/analysis", "provider/role", "provider/parent"], globalPath, "provider/parent");
+    assert.equal(fromTaskType.tasks[0].model, "provider/analysis");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("task cwd selects that project's custom role type and routing config", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-cwd-routing-"));
   const target = path.join(root, "target");

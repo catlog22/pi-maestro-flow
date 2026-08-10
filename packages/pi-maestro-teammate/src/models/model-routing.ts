@@ -1867,9 +1867,10 @@ export function applyModelRouting(
     const routingCwd = path.resolve(cwd, task.cwd ?? params.cwd ?? ".");
     const config = loadModelRoutingConfig(routingCwd, globalFilePath);
     const agent = task.agent ?? params.agent ?? "general";
+    const agentConfig = resolveAgent(routingCwd, agent);
     const explicitTaskType = task.taskType ?? params.taskType;
     const assignedRoleTaskType = roleRules(config, { agent, task: task.prompt })?.taskType;
-    const roleTaskType = assignedRoleTaskType ?? resolveAgent(routingCwd, agent)?.taskType;
+    const roleTaskType = assignedRoleTaskType ?? agentConfig?.taskType;
     const taskType = explicitTaskType
       ?? roleTaskType
       ?? inferTaskTypeWithKeywords(config, { agent, task: task.prompt });
@@ -1880,7 +1881,7 @@ export function applyModelRouting(
         taskType,
         agent,
         task: task.prompt,
-      }, availableModels) ?? resolvedInheritModel,
+      }, availableModels) ?? agentConfig?.model ?? resolvedInheritModel,
       fallbackModels: task.fallbackModels ?? params.fallbackModels ?? mappedFallbackModels(config, {
         taskType,
         agent,
