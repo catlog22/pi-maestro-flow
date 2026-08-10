@@ -1235,3 +1235,102 @@ test("A2 LastDispatch shows taskType/stage without a model line", () => {
   assert.match(panel, /name=dev-1/);
   assert.match(panel, /taskType=development/);
 });
+
+// --- A3 /experts CLI panel views (roster|waiting|harvest) ---
+import {
+  formatExpertsPanel,
+  formatExpertsPanelFromStatus,
+  formatExpertsRosterPanelFromStatus,
+  formatExpertsWaitingPanelFromStatus,
+  formatExpertsHarvestPanelFromStatus,
+} from "../src/experts-mode/index.ts";
+
+test("A3 roster panel lists enabled-first roles with agent and taskType", () => {
+  const cwd = tempCwd();
+  setMode("experts", cwd);
+  clearRulesCache();
+  const panel = formatExpertsRosterPanelFromStatus(getStatus(cwd));
+  assert.match(panel, /Roster/);
+  assert.match(panel, /general-executor/);
+  assert.match(panel, /\| general-executor \| development \|/);
+  assert.match(panel, /role ≠ model/);
+  assert.ok(!panel.includes("model="), "rows must not carry model ids");
+});
+
+test("A3 roster panel orders enabled before disabled and shows empty fallback", () => {
+  const status = getStatus(tempCwd());
+  const mixed = formatExpertsRosterPanelFromStatus({
+    ...status,
+    roster: [
+      { id: "z-role", agent: "z-agent", defaultTaskType: "review", enabled: false },
+      { id: "a-role", agent: "a-agent", defaultTaskType: "development", enabled: true },
+    ],
+  });
+  const lines = mixed.split("\n");
+  const enabledIdx = lines.findIndex((l) => l.startsWith("a-role"));
+  const disabledIdx = lines.findIndex((l) => l.startsWith("z-role"));
+  assert.ok(enabledIdx > 0 && disabledIdx > enabledIdx, "enabled entries render first");
+  assert.match(mixed, /disabled/);
+  const empty = formatExpertsRosterPanelFromStatus({ ...status, roster: [] });
+  assert.match(empty, /\(no roster — using taskType defaults\)/);
+});
+
+test("A3 waiting panel shows waiting yes with agent ids and in-flight", () => {
+  const cwd = tempCwd();
+  setMode("experts", cwd);
+  clearRulesCache();
+  clearInFlight(cwd);
+  setLeaderWaiting(true, { cwd, activeDelta: 2, agentIds: ["general-executor", "explorer"] });
+  trackInFlight([
+    { id: "dev-1", name: "dev-1", agent: "general-executor", taskType: "development" },
+  ], { cwd });
+  const panel = formatExpertsWaitingPanelFromStatus(getStatus(cwd));
+  assert.match(panel, /LeaderWaiting: yes \(2\)/);
+  assert.match(panel, /agents=\[general-executor, explorer\]/);
+  assert.match(panel, /InFlight: 1/);
+  assert.match(panel, /name=dev-1/);
+  assert.match(panel, /taskType=development/);
+  assert.match(panel, /do not claim done while waiting/);
+  assert.ok(!panel.includes("model"), "waiting panel must not leak model ids");
+});
+
+test("A3 harvest panel empty shows none", () => {
+  const cwd = tempCwd();
+  clearKnowledgeSuggestions(cwd);
+  const panel = formatExpertsHarvestPanelFromStatus(getStatus(cwd));
+  assert.match(panel, /\(none — settle harvest is suggest-only\)/);
+  assert.match(panel, /Never auto-promote/);
+});
+
+test("A3 harvest panel lists pending suggestions with id/kind/score", () => {
+  const cwd = tempCwd();
+  setMode("experts", cwd);
+  clearRulesCache();
+  clearKnowledgeSuggestions(cwd);
+  const result = harvestKnowledgeOnSettle(
+    { content: GOOD_PITFALL, agentId: "dev", taskType: "development", force: true },
+    { cwd, record: true },
+  );
+  assert.ok(result.suggestions.length >= 1);
+  const panel = formatExpertsHarvestPanelFromStatus(getStatus(cwd));
+  assert.match(panel, /Summary: HARVEST 1/);
+  assert.match(panel, /pitfall/);
+  assert.match(panel, /score=\d/);
+  assert.match(panel, /Never auto-promote/);
+});
+
+test("A3 formatExpertsPanelFromStatus switches views and formatExpertsPanel defaults", () => {
+  const cwd = tempCwd();
+  setMode("experts", cwd);
+  clearRulesCache();
+  const status = getStatus(cwd);
+  assert.match(formatExpertsPanelFromStatus(status, "status"), /Experts Mode Status/);
+  assert.match(formatExpertsPanelFromStatus(status, "roster"), /Experts Roster/);
+  assert.match(formatExpertsPanelFromStatus(status, "waiting"), /Experts Waiting/);
+  assert.match(formatExpertsPanelFromStatus(status, "harvest"), /Experts Harvest/);
+  assert.match(formatExpertsPanelFromStatus(status), /Experts Mode Status/);
+  assert.match(formatExpertsPanel(cwd), /Experts Mode Status/);
+  assert.match(formatExpertsPanel(cwd, "roster"), /Experts Roster/);
+  assert.match(formatExpertsPanel(cwd, "waiting"), /Experts Waiting/);
+  assert.match(formatExpertsPanel(cwd, "harvest"), /Experts Harvest/);
+});

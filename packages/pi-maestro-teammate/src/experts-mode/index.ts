@@ -15,7 +15,13 @@ export type { ExpertsStatus } from "./observe.ts";
 export {
   formatExpertsStatusPanel,
   formatExpertsStatusPanelFromStatus,
+  formatExpertsRosterPanelFromStatus,
+  formatExpertsWaitingPanelFromStatus,
+  formatExpertsHarvestPanelFromStatus,
+  formatExpertsPanelFromStatus,
+  formatExpertsPanel,
 } from "./status-panel.ts";
+export type { ExpertsPanelView } from "./status-panel.ts";
 export {
   getRoster,
   resolveRosterEntry,

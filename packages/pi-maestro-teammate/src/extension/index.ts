@@ -193,6 +193,7 @@ import { normalizePiRetryErrorMessage } from "../runs/retry.ts";
 import { getPiSpawnCommand } from "../runs/execution-infra.ts";
 import { showMonitorOverlay, type MonitorSessionRow } from "../tui/monitor-overlay.ts";
 import { showSessionSendOverlay } from "../tui/session-send-overlay.ts";
+import { showExpertsStatusOverlay } from "../tui/experts-status-overlay.ts";
 import {
   SETTINGS_LOCALE_EVENT,
   applySettingsLocaleEvent,
@@ -265,7 +266,7 @@ import {
   syncActiveStageFromMaestro,
   formatStageBirthPacket,
   setMode,
-  formatExpertsStatusPanel,
+  formatExpertsPanel,
   EXPERTS_HARVEST_STATUS_KEY,
   expertsHarvestStatusFromCwd,
 } from "../experts-mode/index.ts";
@@ -5472,11 +5473,12 @@ export default function registerTeammateExtension(
   });
 
   pi.registerCommand("experts", {
-    description: "Experts Mode: on | off | status (default status)",
+    description: "Experts Mode: on|off|status|roster|waiting|harvest (default status)",
     async handler(args, ctx) {
       const cwd = ctx.cwd ?? process.cwd();
       const raw = (args ?? "").trim().toLowerCase();
       const sub = raw.split(/\s+/)[0] || "status";
+      const usage = "Usage: /experts [on|off|status|roster|waiting|harvest]";
       try {
         if (sub === "on") {
           setMode("experts", cwd);
@@ -5484,12 +5486,29 @@ export default function registerTeammateExtension(
         } else if (sub === "off") {
           setMode("normal", cwd);
           ctx.ui.notify("Experts Mode OFF (normal)", "info");
-        } else if (sub !== "status" && sub !== "") {
-          ctx.ui.notify("Usage: /experts [on|off|status]", "warning");
+        } else if (!["status", "roster", "waiting", "harvest", ""].includes(sub)) {
+          ctx.ui.notify(usage, "warning");
           return;
         }
-        const panel = formatExpertsStatusPanel(cwd);
-        ctx.ui.notify(panel, "info");
+
+        // Normalize view after mode toggles: on/off → full status view.
+        let view: "status" | "roster" | "waiting" | "harvest" = "status";
+        if (sub === "roster" || sub === "waiting" || sub === "harvest" || sub === "status") view = sub;
+
+        const body = formatExpertsPanel(cwd, view);
+
+        // Prefer the TUI overlay when available; notify is the fallback.
+        const canCustom = typeof ctx.ui?.custom === "function";
+        if (canCustom) {
+          try {
+            preemptCockpitResize?.();
+            await showExpertsStatusOverlay(ctx, body, `Experts · ${view}`);
+            return;
+          } catch {
+            // Overlay unavailable/failed — fall through to notify.
+          }
+        }
+        ctx.ui.notify(body, "info");
       } catch (e) {
         ctx.ui.notify(String(e), "error");
       }

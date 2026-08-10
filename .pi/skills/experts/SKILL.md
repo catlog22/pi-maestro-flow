@@ -57,7 +57,7 @@ The Maestro campaign itself uses only the unified Session/Run surface (identical
 - Simple command chain: `maestro run start --platform pi "<intent>" --chain analyze plan execute --no-dispatch --workflow-root .`
 - Completion: `maestro run done [run_id] --verdict done|done-with-concerns|needs-retry|blocked --workflow-root .`
 
-Mode control is in-process (no CLI subprocess): call `setMode("experts"|"normal", cwd)` and render `formatExpertsStatusPanel(cwd)` from `packages/pi-maestro-teammate/src/experts-mode/`. The `/experts` command (on|off|status) wraps exactly these two calls.
+Mode control is in-process (no CLI subprocess): call `setMode("experts"|"normal", cwd)` and render `formatExpertsStatusPanel(cwd)` from `packages/pi-maestro-teammate/src/experts-mode/`. The `/experts` command wraps these calls plus the panel views — subcommands `on|off|status|roster|waiting|harvest` (default `status`) — and shows a read-only TUI overlay (Esc/q/Enter close) when the interactive UI is available, falling back to a notify.
 
 </cli_surface>
 
