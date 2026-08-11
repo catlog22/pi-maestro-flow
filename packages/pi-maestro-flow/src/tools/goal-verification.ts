@@ -35,25 +35,54 @@ interface TeammateResult {
   correlationId?: string;
   attemptedModels?: string[];
 }
-type RunTeammateFn = (params: RunTeammateParams, options: RunTeammateOptions) => Promise<TeammateResult[] | TeammateResult>;
+export type RunTeammateFn = (params: RunTeammateParams, options: RunTeammateOptions) => Promise<TeammateResult[] | TeammateResult>;
 
 let _runTeammate: RunTeammateFn | undefined;
 let _teammateResolved = false;
 
-async function getRunTeammate(): Promise<RunTeammateFn | undefined> {
+type TeammateModuleLoader = () => Promise<{ runTeammate?: RunTeammateFn }>;
+
+async function importTeammateExecutionModule(): Promise<{ runTeammate?: RunTeammateFn }> {
+  const mod = await import("pi-maestro-teammate/v1/execution");
+  return { runTeammate: mod.runTeammate };
+}
+
+let _teammateModuleLoader: TeammateModuleLoader = importTeammateExecutionModule;
+
+/** @internal Test seam for the lazy teammate module loader. Pass undefined to restore the real import. */
+export function setGoalVerifierModuleLoaderForTest(loader: TeammateModuleLoader | undefined): void {
+  _teammateModuleLoader = loader ?? importTeammateExecutionModule;
+  _teammateResolved = false;
+  _runTeammate = undefined;
+}
+
+/** @internal Test seam: resolve the teammate runner module without caching absence. */
+export async function getRunTeammate(): Promise<RunTeammateFn | undefined> {
   if (_teammateResolved) return _runTeammate;
   try {
-    const mod = await import("pi-maestro-teammate/v1/execution");
+    const mod = await _teammateModuleLoader();
+    if (!mod.runTeammate) {
+      // Resolved but the entry point did not expose runTeammate: cache the
+      // absence only for this call so a later fix (or a different copy of the
+      // package) can take effect without a host restart.
+      return undefined;
+    }
     _runTeammate = mod.runTeammate;
     _teammateResolved = true;
+    return _runTeammate;
   } catch (err: unknown) {
     if (!isModuleNotFound(err)) {
       _teammateResolved = false;
       throw err;
     }
-    _teammateResolved = true;
+    // Module absence is deliberately NOT cached: a transient resolution
+    // failure (host startup ordering, companion-package registration) must
+    // not permanently disable completion verification; the next completion
+    // re-imports the module. Permanent absence still pauses the Goal after
+    // MAX_VERIFICATION_FAILURES consecutive infrastructure errors.
+    _teammateResolved = false;
+    return undefined;
   }
-  return _runTeammate;
 }
 
 /** @internal Test seam for the lazy teammate runner. Pass undefined to restore normal resolution. */
@@ -983,7 +1012,11 @@ export async function verifyGoalCompletion(
     bridge.updateUsage(bridge.activeGoal, ctx);
     bridge.persistGoal(bridge.activeGoal);
     bridge.updateStatusLine(ctx, bridge.activeGoal);
-    ctx.ui.notify("Goal verifier hit an infrastructure error; the attempt was not counted. Re-request completion to retry.", "warning");
+    const infraDetail = boundedSecretText(verdict.reasoning, 400);
+    ctx.ui.notify(
+      `Goal verifier hit an infrastructure error; the attempt was not counted. Re-request completion to retry.${infraDetail ? ` Reason: ${infraDetail}` : ""}`,
+      "warning",
+    );
     return { status: "continue", reason: verdict.reasoning };
   }
 
