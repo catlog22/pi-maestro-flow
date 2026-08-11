@@ -45,7 +45,7 @@ export interface SingleResult {
 }
 export type AgentProgressStatus = "pending" | "running" | "retrying" | "completed" | "failed" | "terminated";
 export type AgentActivity = "running" | "sleeping";
-export type AgentRunPhase = "starting" | "restoring" | "prompting" | "tool-execution" | "result-ready" | "retrying" | "compacting" | "continuing" | "settling";
+export type AgentRunPhase = "waiting-dependency" | "waiting-capacity" | "starting" | "restoring" | "prompting" | "tool-execution" | "result-ready" | "retrying" | "compacting" | "continuing" | "settling";
 /** One recent tool call entry in progress telemetry; `argsPreview` is optional. */
 export interface RecentToolInfo {
     name: string;

@@ -238,6 +238,7 @@ import {
   aggregateTerminalStatuses,
   emitTeammateStarted,
   foregroundWaitWindowMs,
+  concurrencyWaitWindowMs,
   formatRetryDelay,
   handleChildLifecycleEvent,
   resolveProxyParentCorrelationId,
@@ -1110,15 +1111,17 @@ export async function handleProxyRequest(
       const taskCorrelationIds: string[] = normalizedTasks?.map(() => randomUUID()) ?? [];
       const progressState = new Map<number, AgentProgressSnapshot>();
       normalizedTasks?.forEach((task, index) => {
+        const dependencies = taskDependencyNames(task, taskNames)
+          .map((name) => taskIndexByName.get(name))
+          .filter((dependency): dependency is number => dependency !== undefined);
         progressState.set(index, {
           agent: task.agent,
           ...(task.name ? { name: task.name } : {}),
           correlationId: taskCorrelationIds[index],
           taskIndex: index,
-          dependencies: taskDependencyNames(task, taskNames)
-            .map((name) => taskIndexByName.get(name))
-            .filter((dependency): dependency is number => dependency !== undefined),
+          dependencies,
           status: "pending",
+          phase: dependencies.length > 0 ? "waiting-dependency" : "waiting-capacity",
           requestedModel: task.model,
         });
       });
@@ -1151,7 +1154,9 @@ export async function handleProxyRequest(
         depth: dispatchDepth,
         maxDispatchDepth: childMaxDispatchDepth,
         status: "running",
-        phase: "starting",
+        phase: normalizedTasks
+          ? aggregateAgentRunPhase(progressSnapshot()) ?? "waiting-capacity"
+          : "starting",
         runtimeGeneration: 1,
         sleepMs: 0,
         lease: createChildLease(),
@@ -1401,7 +1406,9 @@ export async function handleProxyRequest(
           // Each task's own maxNestingDepth sets its agent's nesting budget.
           maxDispatchDepth: nestedChildMaxDispatchDepth(parentBudget, dispatchDepth, task.maxNestingDepth),
           status: "pending",
-          phase: "starting",
+          phase: (progressState.get(index)?.dependencies.length ?? 0) > 0
+            ? "waiting-dependency"
+            : "waiting-capacity",
           runtimeGeneration: 1,
           sleepMs: 0,
           lease: createChildLease(),
@@ -1642,9 +1649,12 @@ export async function handleProxyRequest(
         },
         onChildSpawned: (stdin, sendControl, sessionDir, childId) => {
           const target = childId ? state.activeRuns.get(childId) ?? activeAgent : activeAgent;
+          const startedAt = Date.now();
           target.stdin = stdin;
           target.sendControl = sendControl;
           target.sessionDir = sessionDir;
+          target.startedAt = startedAt;
+          target.lastActivityAt = startedAt;
           target.status = "running";
           target.phase = "prompting";
           target.retry = undefined;
@@ -2126,7 +2136,13 @@ export async function handleProxyRequest(
       };
 
       if (routedParams.background === false) {
-        const waitMs = foregroundWaitWindowMs(allTasks, runtimeOptions.foregroundMaxRunMs);
+        const waitMs = normalizedTasks
+          ? concurrencyWaitWindowMs(
+              allTasks,
+              routedParams.concurrencyWaitMs,
+              runtimeOptions.foregroundMaxRunMs,
+            )
+          : foregroundWaitWindowMs(allTasks, runtimeOptions.foregroundMaxRunMs);
         // Alt+B manual detach, mirroring the root single/graph foreground paths.
         let detachResolve: (() => void) | null = null;
         const detachPromise = new Promise<"manual">((resolve) => { detachResolve = () => resolve("manual"); });

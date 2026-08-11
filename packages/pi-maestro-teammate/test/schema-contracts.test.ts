@@ -55,6 +55,25 @@ test("schema accepts an optional per-task todo binding and rejects non-string va
   assert.equal(Check(TeammateParams, { tasks: [{ prompt: "work", todo: 12 }] }), false);
 });
 
+test("schema accepts a dedicated positive concurrency wait window", () => {
+  assert.equal(Check(TeammateParams, {
+    tasks: [{ prompt: "one" }, { prompt: "two" }],
+    concurrencyWaitMs: 1,
+  }), true);
+  assert.equal(Check(TeammateParams, {
+    tasks: [{ prompt: "one" }, { prompt: "two" }],
+    concurrencyWaitMs: 30_000,
+  }), true);
+  assert.equal(Check(TeammateParams, {
+    tasks: [{ prompt: "one" }, { prompt: "two" }],
+    concurrencyWaitMs: 0,
+  }), false);
+  assert.equal(Check(TeammateParams, {
+    tasks: [{ prompt: "one" }, { prompt: "two" }],
+    concurrencyWaitMs: 1.5,
+  }), false);
+});
+
 // ---------------------------------------------------------------------------
 // teammate-send message contract (P1/B4): message required unless mode is
 // explicitly "abort"; a missing mode defaults to follow_up and still demands

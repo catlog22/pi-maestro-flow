@@ -337,6 +337,7 @@ import {
   emitTeammateResultPublished,
   setAgentStructuredOutput,
   foregroundWaitWindowMs,
+  concurrencyWaitWindowMs,
   createForegroundDeadline,
   backgroundWaitGuidance,
   FOREGROUND_DETACH_HINT,
@@ -2116,15 +2117,17 @@ export default function registerTeammateExtension(
       const progressState = new Map<number, AgentProgressSnapshot>();
       if (isMultiTask) {
         normalizedTasks.forEach((task, index) => {
+          const dependencies = taskDependencyNames(task, taskNames)
+            .map((name) => taskIndexByName.get(name))
+            .filter((dependency): dependency is number => dependency !== undefined);
           progressState.set(index, {
             agent: task.agent,
             ...(task.name ? { name: task.name } : {}),
             correlationId: taskCorrelationIds[index],
             taskIndex: index,
-            dependencies: taskDependencyNames(task, taskNames)
-              .map((name) => taskIndexByName.get(name))
-              .filter((dependency): dependency is number => dependency !== undefined),
+            dependencies,
             status: "pending",
+            phase: dependencies.length > 0 ? "waiting-dependency" : "waiting-capacity",
             requestedModel: task.model,
           });
         });
@@ -2179,7 +2182,9 @@ export default function registerTeammateExtension(
         depth: 0,
         maxDispatchDepth: childMaxDispatchDepth,
         status: "running",
-        phase: "starting",
+        phase: isMultiTask
+          ? aggregateAgentRunPhase(progressSnapshot()) ?? "waiting-capacity"
+          : "starting",
         runtimeGeneration: 1,
         sleepMs: 0,
         lease: createChildLease(),
@@ -2251,7 +2256,9 @@ export default function registerTeammateExtension(
             depth: activeAgent.depth,
             maxDispatchDepth: rootChildMaxDispatchDepth(task.maxNestingDepth),
             status: "pending",
-            phase: "starting",
+            phase: (progressState.get(index)?.dependencies.length ?? 0) > 0
+              ? "waiting-dependency"
+              : "waiting-capacity",
             runtimeGeneration: 1,
             sleepMs: 0,
             lease: createChildLease(),
@@ -2511,9 +2518,12 @@ export default function registerTeammateExtension(
             childId?: string,
           ) => {
           const target = childId ? state.activeRuns.get(childId) ?? activeAgent : activeAgent;
+          const startedAt = Date.now();
           target.stdin = stdin;
           target.sendControl = sendControl;
           target.sessionDir = sessionDir;
+          target.startedAt = startedAt;
+          target.lastActivityAt = startedAt;
           target.status = "running";
           target.phase = "prompting";
           target.retry = undefined;
@@ -3173,7 +3183,11 @@ export default function registerTeammateExtension(
           };
 
           if (params.background === false) {
-            const waitMs = foregroundWaitWindowMs(normalizedTasks, runtimeOptions.foregroundMaxRunMs);
+            const waitMs = concurrencyWaitWindowMs(
+              normalizedTasks,
+              params.concurrencyWaitMs,
+              runtimeOptions.foregroundMaxRunMs,
+            );
             let detachResolve: ((reason: "manual") => void) | null = null;
             const detachPromise = new Promise<"manual">((resolve) => { detachResolve = resolve; });
             let removeListener: (() => void) | null = null;

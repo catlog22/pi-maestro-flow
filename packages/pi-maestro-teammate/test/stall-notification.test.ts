@@ -109,6 +109,27 @@ test("a foreground agent (no notifyOnStall) is never push-notified", () => {
   assert.equal(notifications.length, 0);
 });
 
+test("queued graph work never emits a stall notification", () => {
+  const state = makeState();
+  const now = Date.now();
+  addAgent(state, "dependency-queued", {
+    status: "pending",
+    phase: "waiting-dependency",
+    notifyOnStall: true,
+    lastActivityAt: now - TEAMMATE_PENDING_STALL_TIMEOUT_MS - 60_000,
+  });
+  addAgent(state, "capacity-queued", {
+    status: "pending",
+    phase: "waiting-capacity",
+    notifyOnStall: true,
+    lastActivityAt: now - TEAMMATE_PENDING_STALL_TIMEOUT_MS - 60_000,
+  });
+  const { notifications, notify } = collectNotifications();
+
+  sweepStalledAgents(state, notify, now);
+  assert.equal(notifications.length, 0);
+});
+
 // --- Episode lifecycle and notification cooldown ----------------------------
 
 test("activity between silent spells is throttled by the notification cooldown", () => {

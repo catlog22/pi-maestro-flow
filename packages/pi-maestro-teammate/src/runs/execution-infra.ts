@@ -98,6 +98,12 @@ export interface RunTeammateParams {
   timeoutMs?: number;
   outputSchema?: Record<string, unknown>;
   concurrency?: number;
+  /**
+   * Dedicated foreground detach window for parallel/DAG dispatches. This does
+   * not cancel queued or running tasks; it only bounds how long the caller
+   * stays attached before background completion delivery takes over.
+   */
+  concurrencyWaitMs?: number;
   maxAgents?: number;
   /**
    * How many levels of nested teammate dispatch the agents spawned by this
@@ -921,6 +927,18 @@ export function normalizeTeammateParams(
       isMultiTask: false,
       warnings,
       error: 'Requires a non-empty "tasks" array.',
+    };
+  }
+
+  if (
+    params.concurrencyWaitMs !== undefined
+    && (!Number.isInteger(params.concurrencyWaitMs) || params.concurrencyWaitMs < 1)
+  ) {
+    return {
+      tasks: [],
+      isMultiTask: false,
+      warnings,
+      error: `concurrencyWaitMs must be a positive integer (got ${params.concurrencyWaitMs}).`,
     };
   }
 

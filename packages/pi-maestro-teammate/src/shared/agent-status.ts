@@ -70,6 +70,11 @@ const EXPECTED_SILENCE_PHASES: ReadonlySet<AgentRunPhase> = new Set<AgentRunPhas
   "settling",
 ]);
 
+const QUEUE_WAIT_PHASES: ReadonlySet<AgentRunPhase> = new Set<AgentRunPhase>([
+  "waiting-dependency",
+  "waiting-capacity",
+]);
+
 export interface AgentStallProjection {
   status: AgentStatus | string;
   phase?: AgentRunPhase | string;
@@ -133,6 +138,9 @@ export function isAgentStalled(
 ): boolean {
   if ((projection.status !== "running" && projection.status !== "pending")
     || projection.resultReadyAt !== undefined) return false;
+  if (projection.phase !== undefined && QUEUE_WAIT_PHASES.has(projection.phase as AgentRunPhase)) {
+    return false;
+  }
   if ((projection.pendingInteractions ?? 0) > 0 || projection.lastActivityAt === undefined) return false;
   return nowSnapshot - projection.lastActivityAt >= agentStallIdleCeilingMs(
     projection.status,

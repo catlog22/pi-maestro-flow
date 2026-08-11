@@ -15,6 +15,7 @@ import registerTeammateExtension, {
   buildAgentList,
   buildAgentSelectorRows,
   buildWatchOutput,
+  concurrencyWaitWindowMs,
   correlationIdPrefix,
   emitTeammateResultPublished,
   handleProxyRequest,
@@ -1274,6 +1275,55 @@ test("foreground timeout moves single and graph dispatches to background without
   }
 });
 
+test("graph concurrencyWaitMs overrides shorter task detach windows without cancellation", async () => {
+  const stdouts: PassThrough[] = [];
+  let killed = 0;
+  const sentMessages: Array<{ customType?: string; content?: string }> = [];
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    stdouts.push(stdout);
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { killed += 1; return true; },
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+  const result = await createRootTool({ spawnChildProcess }, sentMessages).execute(
+    "graph-concurrency-wait",
+    {
+      tasks: [
+        { agent: "general", name: "left", prompt: "left", timeoutMs: 5 },
+        { agent: "general", name: "right", prompt: "right", timeoutMs: 10 },
+      ],
+      background: false,
+      concurrencyWaitMs: 40,
+    },
+    new AbortController().signal,
+    undefined,
+    rootToolContext(),
+  );
+
+  assert.match(result.content[0]?.text ?? "", /moved to background after 40ms/);
+  assert.equal(result.isError, false);
+  assert.equal(stdouts.length, 2);
+  assert.equal(killed, 0);
+
+  for (const stdout of stdouts) stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(killed, 0);
+  delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ];
+});
+
 test("explicit background ignores the foreground timeout window", async () => {
   let stdoutRef: PassThrough | undefined;
   let killed = 0;
@@ -1559,6 +1609,76 @@ test("foreground nested dispatch timeout acknowledges background work and preser
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(killed, 0);
   assert.equal(sentMessages.filter((message) => message.customType === "teammate-complete").length, 1);
+  setPersistentUi(undefined);
+});
+
+test("nested graph honors concurrencyWaitMs independently from task timeouts", async () => {
+  const stdouts: PassThrough[] = [];
+  let killed = 0;
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    stdouts.push(stdout);
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { killed += 1; return true; },
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  const state: TeammateState = {
+    baseCwd: process.cwd(),
+    currentSessionId: null,
+    activeRuns: new Map(),
+    namedAgents: new Map(),
+  };
+  let replyMessage: { result: PublicToolResult } | undefined;
+  const pi = new Proxy({
+    events: { on: () => () => {}, emit() {} },
+    sendMessage() {},
+  }, {
+    get(target, property) {
+      if (property in target) return target[property as keyof typeof target];
+      return () => {};
+    },
+  }) as unknown as ExtensionAPI;
+
+  setPersistentUi({ onTerminalInput: () => () => {} } as unknown as ExtensionUIContext);
+  await handleProxyRequest(
+    pi,
+    state,
+    {
+      tool: "teammate",
+      requestId: "nested-graph-concurrency-wait",
+      params: {
+        tasks: [
+          { agent: "general", name: "left", prompt: "left", timeoutMs: 5 },
+          { agent: "general", name: "right", prompt: "right", timeoutMs: 10 },
+        ],
+        background: false,
+        concurrencyWaitMs: 40,
+      },
+    },
+    (message) => { replyMessage = message as typeof replyMessage; },
+    undefined,
+    [],
+    undefined,
+    undefined,
+    { spawnChildProcess },
+  );
+
+  assert.ok(replyMessage);
+  assert.match(replyMessage.result.content[0]?.text ?? "", /moved to background after 40ms/);
+  assert.equal(stdouts.length, 2);
+  assert.equal(killed, 0);
+  for (const stdout of stdouts) stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(killed, 0);
   setPersistentUi(undefined);
 });
 
@@ -3300,6 +3420,17 @@ test("Alt+R opens the native agent view without injecting a slash command", asyn
   );
 });
 
+test("multi-task foreground wait uses its dedicated concurrency window", () => {
+  const tasks = [{ timeoutMs: 5_000 }, { timeoutMs: 10_000 }];
+  assert.equal(concurrencyWaitWindowMs(tasks, 30_000, 60_000), 30_000);
+  assert.equal(
+    concurrencyWaitWindowMs(tasks, undefined, 60_000),
+    5_000,
+    "legacy smallest-task behavior remains the fallback",
+  );
+  assert.equal(concurrencyWaitWindowMs([{}, {}], undefined, 60_000), 60_000);
+});
+
 test("P0a: foreground wait window always resolves to a bounded deadline", () => {
   const source = fs.readFileSync(new URL("../src/extension/teammate-core.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8");
 
@@ -3315,6 +3446,17 @@ test("P0a: foreground wait window always resolves to a bounded deadline", () => 
     source,
     /return configured\.length > 0\s*\n\s*\?\s*Math\.min\(\.\.\.configured\)\s*\n\s*:\s*\(fallbackMs \?\? TEAMMATE_FOREGROUND_DEFAULT_TIMEOUT_MS\)/,
     "an empty task timeout list must fall back to the bounded default window",
+  );
+
+  assert.match(
+    source,
+    /function concurrencyWaitWindowMs\([\s\S]*?return concurrencyWaitMs \?\? foregroundWaitWindowMs\(tasks, fallbackMs\)/,
+    "graph wait override must fall back to the existing bounded detach window",
+  );
+  assert.equal(
+    source.match(/concurrencyWaitWindowMs\(/g)?.length ?? 0,
+    3,
+    "the helper definition plus root and nested graph call sites must stay connected",
   );
 
   // The default must exist and be finite.

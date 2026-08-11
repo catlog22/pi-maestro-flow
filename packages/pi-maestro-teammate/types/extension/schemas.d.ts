@@ -52,6 +52,7 @@ export declare const TeammateParams: Type.TObject<{
         maxNestingDepth: Type.TOptional<Type.TInteger>;
     }>>;
     concurrency: Type.TOptional<Type.TInteger>;
+    concurrencyWaitMs: Type.TOptional<Type.TInteger>;
     maxAgents: Type.TOptional<Type.TInteger>;
     maxNestingDepth: Type.TOptional<Type.TInteger>;
     outputSchema: Type.TOptional<Type.TUnsafe<Record<string, unknown>>>;

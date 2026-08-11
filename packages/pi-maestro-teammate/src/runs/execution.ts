@@ -32,6 +32,7 @@ import type {
   Usage,
   AgentProgress,
   AgentTerminalStatus,
+  AgentRunPhase,
 } from "../shared/types.ts";
 import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
 import { applyModelRouting, syncModelCircuitPolicies, type TeammateTaskType } from "../models/model-routing.ts";
@@ -2268,6 +2269,34 @@ export async function runGraph(
     }
   }
 
+  function reportTaskQueue(
+    task: NormalizedTask,
+    taskIndex: number,
+    phase: Extract<AgentRunPhase, "waiting-dependency" | "waiting-capacity">,
+    queuedAt: number,
+  ): void {
+    const now = Date.now();
+    try {
+      options.onProgress?.({
+        agent: task.agent,
+        name: task.name,
+        correlationId: taskCorrelationIds[taskIndex],
+        taskIndex,
+        dependencies: deps[taskIndex],
+        status: "pending",
+        phase,
+        recentTools: [],
+        toolCount: 0,
+        tokens: 0,
+        durationMs: Math.max(0, now - queuedAt),
+        lastActivityAt: now,
+        startedAt: queuedAt,
+      });
+    } catch {
+      // Queue progress is advisory and cannot interrupt graph scheduling.
+    }
+  }
+
   function reportTaskFailure(
     task: NormalizedTask,
     taskIndex: number,
@@ -2325,6 +2354,13 @@ export async function runGraph(
   }
 
   const promises = tasks.map(async (task, idx) => {
+    const queuedAt = Date.now();
+    reportTaskQueue(
+      task,
+      idx,
+      deps[idx].length > 0 ? "waiting-dependency" : "waiting-capacity",
+      queuedAt,
+    );
     const depsOk = await waitForDeps(idx);
 
     if (!depsOk) {
@@ -2353,6 +2389,9 @@ export async function runGraph(
       return;
     }
 
+    if (deps[idx].length > 0) {
+      reportTaskQueue(task, idx, "waiting-capacity", queuedAt);
+    }
     await acquire();
 
     try {

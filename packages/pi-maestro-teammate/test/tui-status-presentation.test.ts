@@ -104,7 +104,15 @@ test("effective display status derives result-ready and stalled from the shared 
     effectiveDisplayStatus("running", now - 1_000, now - 10 * TEAMMATE_STALL_TIMEOUT_MS, now),
     "result-ready",
   );
-  // Pending work shares the bounded five-minute deadline with wait/observe.
+  // Dependency and capacity queues are scheduler-owned waits, not silent agents.
+  for (const phase of ["waiting-dependency", "waiting-capacity"] as const) {
+    assert.equal(
+      effectiveDisplayStatus("pending", undefined, now - 10 * TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS, now, phase),
+      "pending",
+      `${phase} never projects as stalled before the child is spawned`,
+    );
+  }
+  // Pending work in a real startup phase shares the bounded five-minute deadline with wait/observe.
   assert.equal(
     effectiveDisplayStatus("pending", undefined, now - TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS, now, "starting"),
     "stalled",
@@ -147,6 +155,10 @@ test("graph phase aggregation keeps tool heartbeat deadlines visible at the cont
     { status: "retrying", phase: "retrying", lastActivityAt: now },
     { status: "pending", phase: "starting", lastActivityAt: now - 1 },
   ]), "retrying");
+  assert.equal(aggregateAgentRunPhase([
+    { status: "pending", phase: "waiting-dependency", lastActivityAt: now },
+    { status: "pending", phase: "waiting-capacity", lastActivityAt: now - 1 },
+  ]), "waiting-dependency");
   assert.equal(aggregateAgentRunPhase([
     { status: "completed", phase: "settling" },
   ]), "settling");

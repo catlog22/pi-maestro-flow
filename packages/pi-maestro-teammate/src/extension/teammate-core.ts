@@ -701,6 +701,19 @@ export function foregroundWaitWindowMs(
     : (fallbackMs ?? TEAMMATE_FOREGROUND_DEFAULT_TIMEOUT_MS);
 }
 
+/**
+ * Multi-task dispatches may keep a dedicated foreground window independent of
+ * task defaults. The window is a detach boundary only: graph dependency and
+ * concurrency queues continue running after it expires.
+ */
+export function concurrencyWaitWindowMs(
+  tasks: ReadonlyArray<{ timeoutMs?: number }>,
+  concurrencyWaitMs?: number,
+  fallbackMs?: number,
+): number {
+  return concurrencyWaitMs ?? foregroundWaitWindowMs(tasks, fallbackMs);
+}
+
 export function createForegroundDeadline(timeoutMs: number): {
   promise: Promise<"timeout">;
   dispose(): void;

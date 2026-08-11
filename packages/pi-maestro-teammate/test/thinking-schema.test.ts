@@ -69,6 +69,14 @@ test("dependsOn and maxAgents descriptions document the runtime guards", () => {
   assert.match(maxAgents, /PI_TEAMMATE_MAX_ACTIVE_AGENTS/);
 });
 
+test("concurrency wait description separates graph detach from cancellation", () => {
+  const wait = (TeammateParams.properties.concurrencyWaitMs as { description?: string }).description ?? "";
+  assert.match(wait, /foreground wait window/);
+  assert.match(wait, /never cancels queued or running tasks/);
+  const timeout = (TeammateParams.properties.timeoutMs as { description?: string }).description ?? "";
+  assert.match(timeout, /graph fallback when concurrencyWaitMs is omitted/);
+});
+
 test("teammate-list schema exposes role, window, and persisted inbox views", () => {
   assert.equal(Check(TeammateListParams, { view: "roles" }), true);
   assert.equal(Check(TeammateListParams, { view: "inbox" }), true);

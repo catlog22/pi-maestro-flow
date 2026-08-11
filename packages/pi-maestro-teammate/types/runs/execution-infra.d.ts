@@ -66,6 +66,12 @@ export interface RunTeammateParams {
     timeoutMs?: number;
     outputSchema?: Record<string, unknown>;
     concurrency?: number;
+    /**
+     * Dedicated foreground detach window for parallel/DAG dispatches. This does
+     * not cancel queued or running tasks; it only bounds how long the caller
+     * stays attached before background completion delivery takes over.
+     */
+    concurrencyWaitMs?: number;
     maxAgents?: number;
     /**
      * How many levels of nested teammate dispatch the agents spawned by this

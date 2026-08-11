@@ -175,6 +175,26 @@ test("top-level defaults apply to tasks and per-task overrides win", () => {
   assert.equal(second.cwd, "D:/other");
 });
 
+test("concurrencyWaitMs validates independently from task timeoutMs", () => {
+  const valid = normalizeTeammateParams({
+    concurrencyWaitMs: 30_000,
+    timeoutMs: 5_000,
+    tasks: [{ prompt: "one" }, { prompt: "two" }],
+  });
+  assert.equal(valid.error, undefined);
+  assert.equal(valid.tasks[0].timeoutMs, 5_000);
+  assert.equal(valid.tasks[1].timeoutMs, 5_000);
+
+  assert.match(
+    normalizeTeammateParams({ concurrencyWaitMs: 0, tasks: [{ prompt: "work" }] }).error ?? "",
+    /concurrencyWaitMs must be a positive integer/,
+  );
+  assert.match(
+    normalizeTeammateParams({ concurrencyWaitMs: 1.5, tasks: [{ prompt: "work" }] }).error ?? "",
+    /concurrencyWaitMs must be a positive integer/,
+  );
+});
+
 test("per-task description is carried and per-task background warns instead of erroring", () => {
   const result = normalizeTeammateParams({
     tasks: [

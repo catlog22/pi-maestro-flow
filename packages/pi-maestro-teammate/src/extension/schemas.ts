@@ -110,7 +110,7 @@ export const TaskSpec = Type.Object({
     Type.Integer({
       minimum: 1,
       description:
-        "Foreground wait window in milliseconds. If it elapses first, the dispatch moves to background and continues running; for graphs, the shortest task window applies to the whole dispatch.",
+        "Foreground wait window in milliseconds. If it elapses first, the dispatch moves to background and continues running; for graphs, the shortest task window applies only when top-level concurrencyWaitMs is omitted.",
     }),
   ),
   background: Type.Optional(
@@ -178,6 +178,14 @@ export const TeammateParams = Type.Object({
     }),
   ),
 
+  concurrencyWaitMs: Type.Optional(
+    Type.Integer({
+      minimum: 1,
+      description:
+        "Dedicated foreground wait window for multi-task parallel/DAG dispatches. When omitted, graph calls retain the legacy smallest-task timeoutMs/default behavior. Expiry detaches the graph to background and never cancels queued or running tasks.",
+    }),
+  ),
+
   maxAgents: Type.Optional(
     Type.Integer({
       minimum: 1,
@@ -211,7 +219,7 @@ export const TeammateParams = Type.Object({
     Type.Boolean({
       default: false,
       description:
-        "Run in background (default: false). The foreground wait window is always bounded — by the smallest per-task timeoutMs or a 600000 ms (10 minutes) default — and a call that outlives it returns a background acknowledgement while the teammate continues, then delivers the result via one automatic teammate-complete notification. Explicit background calls acknowledge immediately and send that notification later. The completion is delivered automatically to the caller: for a root dispatch it arrives as a new turn in the root session; for a nested dispatch the work executes in the root process and the root forwards the same envelope over IPC, so it also arrives as a new turn in the dispatching child agent's session while that agent is still live (the root caller additionally receives it). If the dispatching agent has already ended, delivery is skipped and the result is settled and only inspectable via observe.",
+        "Run in background (default: false). The foreground wait window is always bounded — multi-task calls use concurrencyWaitMs when provided, otherwise the smallest per-task timeoutMs or a 600000 ms (10 minutes) default. A call that outlives the window returns a background acknowledgement while the teammate continues, then delivers the result via one automatic teammate-complete notification. Explicit background calls acknowledge immediately and send that notification later. The completion is delivered automatically to the caller: for a root dispatch it arrives as a new turn in the root session; for a nested dispatch the work executes in the root process and the root forwards the same envelope over IPC, so it also arrives as a new turn in the dispatching child agent's session while that agent is still live (the root caller additionally receives it). If the dispatching agent has already ended, delivery is skipped and the result is settled and only inspectable via observe.",
     }),
   ),
 
@@ -249,7 +257,7 @@ export const TeammateParams = Type.Object({
     Type.Integer({
       minimum: 1,
       description:
-        "Default foreground detach window in milliseconds for this dispatch (600000 ms / 10 minutes when omitted). Per-task timeoutMs takes precedence; when the effective window elapses, the dispatch moves to background without terminating its agents. This is NOT the observation-wait limit — observe/wait/monitor use their own timeoutMs semantics.",
+        "Default foreground detach window in milliseconds for this dispatch (600000 ms / 10 minutes when omitted). Per-task timeoutMs takes precedence for single-task calls and remains the graph fallback when concurrencyWaitMs is omitted. Expiry moves the dispatch to background without terminating its agents. This is NOT the observation-wait limit — observe/wait/monitor use their own timeoutMs semantics.",
     }),
   ),
 }, { additionalProperties: false });

@@ -48,6 +48,8 @@ export type AgentProgressStatus = "pending" | "running" | "retrying" | "complete
 export type AgentActivity = "running" | "sleeping";
 
 export type AgentRunPhase =
+  | "waiting-dependency"
+  | "waiting-capacity"
   | "starting"
   | "restoring"
   | "prompting"

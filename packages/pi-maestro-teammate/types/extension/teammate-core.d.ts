@@ -89,6 +89,14 @@ export declare function registerForegroundDetach(detach: () => void, ui?: Extens
 export declare function foregroundWaitWindowMs(tasks: ReadonlyArray<{
     timeoutMs?: number;
 }>, fallbackMs?: number): number;
+/**
+ * Multi-task dispatches may keep a dedicated foreground window independent of
+ * task defaults. The window is a detach boundary only: graph dependency and
+ * concurrency queues continue running after it expires.
+ */
+export declare function concurrencyWaitWindowMs(tasks: ReadonlyArray<{
+    timeoutMs?: number;
+}>, concurrencyWaitMs?: number, fallbackMs?: number): number;
 export declare function createForegroundDeadline(timeoutMs: number): {
     promise: Promise<"timeout">;
     dispose(): void;

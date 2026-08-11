@@ -770,6 +770,9 @@ export function watchTargetStalledAt(
 ): number {
   const status = target.kind === "agent" ? target.agent.status : target.progress.status;
   const phase = target.kind === "agent" ? target.agent.phase : target.progress.phase;
+  if (phase === "waiting-dependency" || phase === "waiting-capacity") {
+    return Number.POSITIVE_INFINITY;
+  }
   const lastActivityAt = target.kind === "agent"
     ? target.agent.lastActivityAt
     : target.progress.lastActivityAt ?? target.agent.lastActivityAt;

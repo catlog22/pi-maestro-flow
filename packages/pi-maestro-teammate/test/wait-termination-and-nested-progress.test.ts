@@ -92,6 +92,29 @@ test("a pending task inside its grace window is not yet called stalled", async (
   assert.equal(result.status, "timeout");
 });
 
+test("dependency and concurrency queues are not treated as stalled work", async () => {
+  const state = makeState();
+  addAgent(
+    state,
+    "dependency-queued",
+    "pending",
+    TEAMMATE_PENDING_STALL_TIMEOUT_MS + 60_000,
+    { phase: "waiting-dependency" },
+  );
+  addAgent(
+    state,
+    "capacity-queued",
+    "pending",
+    TEAMMATE_PENDING_STALL_TIMEOUT_MS + 60_000,
+    { phase: "waiting-capacity" },
+  );
+
+  const dependency = await waitForTeammate(state, { name: "dependency-queued", timeoutMs: 120 });
+  const capacity = await waitForTeammate(state, { name: "capacity-queued", timeoutMs: 120 });
+  assert.equal(dependency.status, "timeout");
+  assert.equal(capacity.status, "timeout");
+});
+
 test("a retrying agent that stopped reporting is treated as stalled", async () => {
   const state = makeState();
   addAgent(state, "flaky", "retrying", TEAMMATE_STALL_TIMEOUT_MS + 1_000);
