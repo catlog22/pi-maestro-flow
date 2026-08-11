@@ -3927,16 +3927,25 @@ test("the first tool call after the hard threshold interrupts and compacts at se
   assert.ok(pending.tokens > pending.thresholdTokens);
   assert.equal(fx.aborted(), 0, "the context hook only records the hard-threshold intent");
 
-  assert.equal(fx.guard.onToolCall(fx.ctx), true);
-  assert.equal(fx.guard.onToolCall(fx.ctx), false, "parallel tool-call hooks cannot interrupt twice");
-  assert.equal(fx.aborted(), 1, "the tool is interrupted before execution");
+  const gate = fx.guard.onToolCall(fx.ctx);
+  assert.deepEqual(gate, {
+    block: true,
+    terminate: true,
+    reason: "Tool execution deferred: context crossed the hard compaction threshold. Compaction will run next; the task resumes automatically.",
+  }, "the first tool is blocked+terminated instead of aborting the run");
+  assert.deepEqual(
+    fx.guard.onToolCall(fx.ctx),
+    gate,
+    "remaining tools in the same batch keep blocking so the host can terminate cleanly",
+  );
+  assert.equal(fx.aborted(), 0, "the tool boundary gate never aborts the run");
   assert.equal(fx.guard.describeState().pendingIntent?.loopCritical, true);
   assert.ok(
     fx.notifications.some(({ message }) => /hard compaction threshold at a tool boundary/.test(message)),
     "the immediate compaction reason is visible",
   );
 
-  // The aborted tool result runs the context hook again with a new trigger key.
+  // The blocked tool result runs the context hook again with a new trigger key.
   // That refresh must retain the synthetic interruption through settlement.
   await fx.guard.evaluate(highUsageToolBatch(365_001), fx.ctx);
   assert.equal(fx.guard.describeState().pendingIntent?.loopCritical, true);
@@ -3947,17 +3956,19 @@ test("the first tool call after the hard threshold interrupts and compacts at se
   assert.match(fx.sent.at(-1) ?? "", /Continue the interrupted task/, "compaction resumes the interrupted tool loop");
 });
 
-test("a tool-boundary abort survives post-abort pressure relief and resumes after compaction", async () => {
+test("a tool-boundary gate survives post-block pressure relief and resumes after compaction", async () => {
   const fx = loopCriticalFixture();
   await fx.guard.evaluate(highUsageToolBatch(365_000), fx.ctx);
-  assert.equal(fx.guard.onToolCall(fx.ctx), true);
-  assert.equal(fx.aborted(), 1);
+  const gate = fx.guard.onToolCall(fx.ctx);
+  assert.equal(gate?.block, true);
+  assert.equal(gate?.terminate, true);
+  assert.equal(fx.aborted(), 0, "tool-boundary gate does not abort the run");
 
-  // The aborted tool result can be much smaller after stable pruning. That
+  // The blocked tool result can be much smaller after stable pruning. That
   // frame must not erase the interruption before agent_settled submits it.
   await fx.guard.evaluate(highUsageToolBatch(200_000), fx.ctx);
   const pending = fx.guard.describeState().pendingIntent;
-  assert.ok(pending, "the aborted request remains pending below the threshold");
+  assert.ok(pending, "the gated request remains pending below the threshold");
   assert.equal(pending.loopCritical, true);
 
   await fx.guard.onAgentEnd(fx.ctx);
@@ -3975,12 +3986,14 @@ test("tool-call usage creates a hard-threshold intent when the context frame cou
   await fx.guard.evaluate([{ role: "user", content: "continue" }] as never, fx.ctx);
   assert.equal(fx.guard.describeState().pendingIntent, undefined, "an incomplete tool-result frame skips pressure policy");
 
-  assert.equal(fx.guard.onToolCall(fx.ctx), true);
+  const gate = fx.guard.onToolCall(fx.ctx);
+  assert.equal(gate?.block, true);
+  assert.equal(gate?.terminate, true);
   const pending = fx.guard.describeState().pendingIntent;
   assert.ok(pending);
   assert.equal(pending.tokens, 365_000);
   assert.equal(pending.thresholdTokens, 360_000);
-  assert.equal(fx.aborted(), 1);
+  assert.equal(fx.aborted(), 0, "usage-derived hard threshold blocks tools without aborting");
 
   await fx.guard.onAgentEnd(fx.ctx);
   assert.equal(fx.compactCalls.length, 1, "usage-derived pressure compacts at the same settlement");
@@ -4024,11 +4037,13 @@ test("usage-derived intent judges exhaustion against the active session window",
   } as never;
 
   await guard.evaluate([{ role: "user", content: "continue" }] as never, ctx);
-  assert.equal(guard.onToolCall(ctx), true);
+  const gate = guard.onToolCall(ctx);
+  assert.equal(gate?.block, true);
+  assert.equal(gate?.terminate, true);
   const pending = guard.describeState().pendingIntent;
   assert.ok(pending);
   assert.equal(pending.contextExhausted, false, "the smaller summary window is a trigger limiter, not the provider limit");
-  assert.equal(aborted, 1);
+  assert.equal(aborted, 0, "tool-boundary gating does not abort the run");
 });
 
 test("usage exactly at the hard threshold does not interrupt a tool call", async () => {
@@ -4038,7 +4053,7 @@ test("usage exactly at the hard threshold does not interrupt a tool call", async
   });
   await fx.guard.evaluate([{ role: "user", content: "continue" }] as never, fx.ctx);
 
-  assert.equal(fx.guard.onToolCall(fx.ctx), false);
+  assert.equal(fx.guard.onToolCall(fx.ctx), undefined);
   assert.equal(fx.aborted(), 0);
   assert.equal(fx.guard.describeState().pendingIntent, undefined);
 });
@@ -4047,7 +4062,9 @@ test("hard-threshold tool calls compact before queued messages without duplicate
   const fx = loopCriticalFixture({ hasPendingMessages: () => true });
   await fx.guard.evaluate(highUsageToolBatch(365_000), fx.ctx);
 
-  assert.equal(fx.guard.onToolCall(fx.ctx), true, "hard pressure takes priority over the queued-message shortcut");
+  const gate = fx.guard.onToolCall(fx.ctx);
+  assert.equal(gate?.block, true, "hard pressure takes priority over the queued-message shortcut");
+  assert.equal(gate?.terminate, true);
   await fx.guard.onAgentEnd(fx.ctx);
   assert.equal(fx.compactCalls.length, 1);
   fx.compactCalls[0].onComplete();
@@ -4193,7 +4210,7 @@ test("loop-critical flag survives persistence and legacy intents hydrate without
   });
   disabled.onSessionStart(disabledCtx, { reason: "resume" });
   assert.ok(disabled.describeState().pendingIntent, "the persisted intent is visible before current settings are checked");
-  assert.equal(disabled.onToolCall(disabledCtx), false);
+  assert.equal(disabled.onToolCall(disabledCtx), undefined);
   assert.equal(disabledAborts, 0, "disabled compaction cannot interrupt the resumed task");
   assert.equal(disabled.describeState().pendingIntent, undefined, "the stale intent is cleared before tool execution");
 });

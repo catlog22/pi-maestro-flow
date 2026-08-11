@@ -369,6 +369,21 @@ export function commitProjectedCompactionInput(
   event.preparation.turnPrefixMessages = projected.event.preparation.turnPrefixMessages;
 }
 
+/**
+ * Result returned to the host tool_call hook when hard-threshold pressure must
+ * stop further tool execution. `block` prevents the current tool; `terminate`
+ * ends the entire batch once every remaining call is likewise blocked, so the
+ * agent loop reaches agent_end/agent_settled without aborting the run.
+ */
+export interface ToolBoundaryGateResult {
+  block: true;
+  terminate: true;
+  reason: string;
+}
+
+const TOOL_BOUNDARY_BLOCK_REASON =
+  "Tool execution deferred: context crossed the hard compaction threshold. Compaction will run next; the task resumes automatically.";
+
 /** Snapshot of the mid-turn compaction module state for diagnostics (/compaction-status). */
 export interface MidTurnCompactionStatus {
   turnCount: number;
@@ -394,17 +409,22 @@ export interface MidTurnCompactionStatus {
 export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: AutoCompactionDependencies = {}): {
   onSessionStart(ctx: ExtensionContext, event?: { reason?: string }): void;
   evaluate(messages: AgentMessage[], ctx: ExtensionContext): Promise<AgentMessage[] | undefined>;
-  /** Interrupt a tool loop at the first tool boundary after the hard threshold is crossed. */
-  onToolCall(ctx: ExtensionContext): boolean;
+  /**
+   * Gate tool execution at the first hard-threshold boundary. Returns a
+   * ToolCallEventResult that blocks (and terminates) the batch so the agent
+   * loop settles cleanly — never abort(), which surfaces as
+   * "This operation was aborted" and can strand the resume path.
+   */
+  onToolCall(ctx: ExtensionContext): ToolBoundaryGateResult | undefined;
   projectCompactionInput(event: SessionBeforeCompactEvent, ctx: ExtensionContext): Promise<ProjectedCompactionInput>;
   beforeProviderRequest(payload: unknown, ctx: ExtensionContext): Promise<unknown | undefined>;
   shouldSkipStopHook(): boolean;
   isProviderPressureRecoveryActive(): boolean;
   /**
    * True while a synthetic interruption (provider-pressure replay or
-   * loop-critical abort) owns the current settlement. Root Goal/Stop
-   * lifecycle must treat such settlements as recovery, never as ordinary
-   * turn endings.
+   * loop-critical tool-boundary gate) owns the current settlement. Root
+   * Goal/Stop lifecycle must treat such settlements as recovery, never as
+   * ordinary turn endings.
    */
   isSyntheticCompactionInterruptionActive(): boolean;
   /**
@@ -1529,6 +1549,18 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       });
     },
     onToolCall(ctx) {
+      // Once a tool-boundary gate is live, every subsequent tool in the same
+      // batch must also block+terminate so the host ends the batch cleanly
+      // (shouldTerminateToolBatch requires every finalized result.terminate).
+      // Do not abort(): that surfaces as "This operation was aborted" and can
+      // strand the resume path if the next provider turn inherits the signal.
+      if (state.loopCriticalBlocked && state.pendingIntent?.loopCritical) {
+        return {
+          block: true as const,
+          terminate: true as const,
+          reason: TOOL_BOUNDARY_BLOCK_REASON,
+        };
+      }
       const currentSettings = settingsFor(ctx);
       const snapshot = currentSettings.enabled
         && state.latestThreshold?.generation === state.generation
@@ -1578,24 +1610,30 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         }
       }
       if (!intent || state.running || intent.requestBlocked || intent.loopCritical
-        || intent.estimate.tokens <= intent.linkedThreshold.thresholdTokens) return false;
-      // Abort at the tool boundary, then let agent_settled submit through the
+        || intent.estimate.tokens <= intent.linkedThreshold.thresholdTokens) return undefined;
+      // Block at the tool boundary, then let agent_settled submit through the
       // existing arbiter-owned compaction path. Calling compact() directly from
       // this hook would race the active agent loop and bypass recovery state.
-      if (state.zombieOwner !== undefined) return false;
-      if (dependencies.arbiter?.currentOwner()) return false;
-      if (dependencies.arbiter?.timeoutTombstone()) return false;
-      if (!compactionBreakerAllows(state.breaker, state.turnCount).allowed) return false;
+      // Prefer block+terminate over abort() so the host records a clean tool
+      // error ("Tool execution deferred…") instead of a run-level abort that
+      // surfaces as "This operation was aborted" and can strand resume.
+      if (state.zombieOwner !== undefined) return undefined;
+      if (dependencies.arbiter?.currentOwner()) return undefined;
+      if (dependencies.arbiter?.timeoutTombstone()) return undefined;
+      if (!compactionBreakerAllows(state.breaker, state.turnCount).allowed) return undefined;
       intent.loopCritical = true;
       state.loopCriticalBlocked = true;
       persistPendingIntent(pi, state);
-      ctx.abort();
       notifyPressureOnce(
         ctx,
         `tool-call-hard-threshold:${intent.linkedThreshold.thresholdTokens}`,
         `Context crossed the hard compaction threshold at a tool boundary (${intent.estimate.tokens.toLocaleString("en-US")}/${intent.linkedThreshold.thresholdTokens.toLocaleString("en-US")} tokens). Interrupting to compact before the tool runs; the task resumes automatically.`,
       );
-      return true;
+      return {
+        block: true as const,
+        terminate: true as const,
+        reason: TOOL_BOUNDARY_BLOCK_REASON,
+      };
     },
     async projectCompactionInput(event, ctx) {
       const generation = state.generation;

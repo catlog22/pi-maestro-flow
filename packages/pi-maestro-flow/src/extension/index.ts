@@ -2827,10 +2827,10 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
   });
 
   // A hard-threshold intent must settle before the next tool executes. The
-  // guard aborts the active loop here; agent_settled owns the actual compact().
-  pi.on("tool_call", (_event, ctx) => {
-    midTurnAutoCompaction.onToolCall(ctx);
-  });
+  // guard blocks (+ terminates) the tool batch here without abort(); agent_settled
+  // owns the actual compact() and CONTINUE resume. Returning block/terminate
+  // avoids the host "This operation was aborted" error that stranded recovery.
+  pi.on("tool_call", (_event, ctx) => midTurnAutoCompaction.onToolCall(ctx));
 
   // Keep the tool panel stable for prompt-cache reuse; this hook enforces the hard
   // read-only boundary until Plan approval, before the interactive permission chain.
@@ -3283,9 +3283,8 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
     compactionArbiter.reset();
     autoCompaction.onSessionStart(ctx, event);
   });
-  pi.on("tool_call", (_event, ctx) => {
-    autoCompaction.onToolCall(ctx);
-  });
+  // Child sessions share the same hard-threshold gate: block+terminate, never abort.
+  pi.on("tool_call", (_event, ctx) => autoCompaction.onToolCall(ctx));
   pi.on("context", async (event, ctx) => {
     try {
       const messages = await autoCompaction.evaluate(event.messages, ctx);
