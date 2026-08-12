@@ -30,6 +30,9 @@ Thumbs.db
 !.pi/agents/*.md
 # Runtime monitor ledger (per-session binding/supervision trace).
 .pi/monitor-ledger.jsonl
+# Runtime Monitor sessions and editable delegation drafts.
+.pi/monitor-sessions/
+.pi/delegations/
 # Materialized by prepare-package-skills/sync-pi; canonical sources live at
 # the workspace root .pi.
 packages/pi-maestro-flow/.pi/
