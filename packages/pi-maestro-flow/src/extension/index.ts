@@ -808,19 +808,6 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   };
   const compatibilityResults = (results: unknown): unknown =>
     filterUnacknowledgedResults(results, acknowledgedPublications);
-  // Capacity exhaustion silently downgrades every new teammate result to the
-  // uncapped-inline fallback (no agent:// reference), exactly when sessions are
-  // busiest — surface it once per session with a user-owned cleanup path.
-  let agentOutputCapacityWarned = false;
-  const warnAgentOutputCapacity = (): void => {
-    if (agentOutputCapacityWarned) return;
-    agentOutputCapacityWarned = true;
-    const message =
-      "Teammate output storage for this workspace is full; new results fall back to inline text without agent:// references. "
-      + "Use /data-manager to review storage and choose what to delete.";
-    if (todoRootContext?.ui?.notify) todoRootContext.ui.notify(message, "warning");
-    else console.warn(`[pi-maestro-flow] ${message}`);
-  };
   // Forward teammate lifecycle events (shared EventBus) to the GUI SSE stream.
   pi.events.on(TEAMMATE_STARTED_EVENT, (payload) => {
     guiEvents.emit(GUI_EVENTS.teammateStarted, payload as TeammateStartedEvent);
@@ -832,7 +819,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   // Persist each published node before runGraph releases its dependents. The
   // completion/tool-result hooks below remain compatibility fallbacks.
   pi.events.on(TEAMMATE_RESULT_PUBLISHED_EVENT, (event) => {
-    capturePublishedAgentResult(event, rememberPublishedResult, warnAgentOutputCapacity);
+    capturePublishedAgentResult(event, rememberPublishedResult);
   });
   // agent:// data source for background/detached runs: the root tool_result of
   // a background dispatch carries empty results, so the authoritative completion
@@ -842,9 +829,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
       const payload = event as { structuredResults?: unknown };
       const remaining = compatibilityResults(payload.structuredResults);
       if (!Array.isArray(remaining) || remaining.length === 0) return;
-      void persistStructuredResults(remaining, undefined).then((summary) => {
-        if (summary.capacity > 0) warnAgentOutputCapacity();
-      }).catch((err) => {
+      void persistStructuredResults(remaining, undefined).catch((err) => {
         console.warn(`[pi-maestro-flow] agent output capture failed: ${err instanceof Error ? err.message : String(err)}`);
       });
     } catch (err) {

@@ -5,8 +5,8 @@
  * ~/.pi/teammate-output/<cwd-hash>-<workspace-name>/<publicationId>.json。
  * correlationId 只保留一个轻量 latest alias，供 agent://<correlationId> 兼容读取；
  * canonical agent://<publicationId> 始终指向发布时的原始结果。没有 publicationId 的
- * 旧调用继续使用 correlationId 直接记录。达到容量上限时拒绝新 publication，不淘汰
- * 已被会话引用的旧记录，使调用方可以保留内联全文而不是发布死链接。
+ * 旧调用继续使用 correlationId 直接记录。达到容量上限时滚动淘汰最旧记录
+ * （优先未被 alias 引用的），新 publication 始终可写入。
  *
  * 任务 name 可能跨多次派发重名：resolveAgentOutput 返回匹配列表（id + 时间 + 内容预览），
  * readAgentOutput 在重名时抛歧义错误，不再静默取最新；精确 id / correlationId alias 不受影响。
@@ -266,6 +266,48 @@ async function canonicalRecordCount(dir: string): Promise<number> {
   return entries.filter((entry) => entry.isFile() && isCanonicalRecordName(entry.name)).length;
 }
 
+/** 所有 alias 引用的 publicationId（primary + fallback），用于优先保护最新链接。 */
+async function aliasReferencedPublicationIds(dir: string): Promise<Set<string>> {
+  const names = (await readdir(dir, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && entry.name.endsWith(ALIAS_SUFFIX))
+    .map((entry) => entry.name);
+  const referenced = new Set<string>();
+  for (const fileName of names) {
+    const alias = await loadAlias(join(dir, fileName), fileName.slice(0, -ALIAS_SUFFIX.length));
+    if (!alias) continue;
+    referenced.add(alias.publicationId);
+    if (alias.fallbackPublicationId) referenced.add(alias.fallbackPublicationId);
+  }
+  return referenced;
+}
+
+/**
+ * 滚动淘汰最旧的 count 条记录为新记录腾位：优先删未被 alias 引用的，
+ * 否则删最旧记录，并修复受影响的 alias 回退链。
+ */
+async function evictOldestRecords(dir: string, count: number): Promise<void> {
+  if (count <= 0) return;
+  const entries = await listCanonicalRecords(dir);
+  const referenced = await aliasReferencedPublicationIds(dir);
+  const candidates: AgentOutputStoreEntry[] = [];
+  const chosen = new Set<string>();
+  for (const pool of [entries.filter((entry) => !referenced.has(entry.id)), entries]) {
+    for (let index = pool.length - 1; index >= 0 && candidates.length < count; index -= 1) {
+      const entry = pool[index]!;
+      if (!chosen.has(entry.id)) {
+        chosen.add(entry.id);
+        candidates.push(entry);
+      }
+    }
+  }
+  for (const entry of candidates) {
+    await unlink(recordFile(dir, entry.id)).catch((error) => {
+      if (fileErrorCode(error) !== "ENOENT") throw error;
+    });
+    await repairAliasesAfterDeletion(dir, entry.id);
+  }
+}
+
 async function listCanonicalRecords(dir: string): Promise<AgentOutputStoreEntry[]> {
   const names = (await readdir(dir, { withFileTypes: true }))
     .filter((entry) => entry.isFile() && isCanonicalRecordName(entry.name))
@@ -354,8 +396,11 @@ async function persistAgentOutputNow(
       }
       return "stored";
     }
-    if (existing === undefined && await canonicalRecordCount(dir) >= MAX_AGENT_FILES) {
-      return "skipped-capacity";
+    if (existing === undefined) {
+      const count = await canonicalRecordCount(dir);
+      if (count >= MAX_AGENT_FILES) {
+        await evictOldestRecords(dir, count - MAX_AGENT_FILES + 1);
+      }
     }
 
     const content = JSON.stringify({
@@ -388,12 +433,11 @@ async function persistAgentOutputNow(
 }
 
 /**
- * Why a persist attempt did not store a record. "skipped-capacity" means the
- * workspace bucket is full (MAX_AGENT_FILES canonical records) — an operational
- * condition callers should surface; "skipped-invalid" covers unserializable,
- * oversized, or malformed inputs.
+ * Why a persist attempt did not store a record. "skipped-invalid" covers
+ * unserializable, oversized, or malformed inputs; capacity is handled by
+ * rolling eviction of the oldest records (see MAX_AGENT_FILES).
  */
-export type AgentOutputPersistOutcome = "stored" | "skipped-capacity" | "skipped-invalid";
+export type AgentOutputPersistOutcome = "stored" | "skipped-invalid";
 
 /** Queue one validated record write and report whether it was accepted. */
 function enqueueAgentOutput(

@@ -11,6 +11,7 @@ const {
 } = await import("../src/teammate/agent-output-capture.ts");
 const {
   MAX_AGENT_FILES,
+  getAgentOutputStoreUsage,
   persistAgentOutputChecked,
   readAgentOutput,
 } = await import("../src/teammate/agent-output-store.ts");
@@ -259,7 +260,7 @@ test("capturePublishedAgentResult rejects an unpersistable publication", async (
   await assert.rejects(() => readAgentOutput("published-cid-oversized", root));
 });
 
-test("capturePublishedAgentResult reports capacity exhaustion to the operator callback", async () => {
+test("capturePublishedAgentResult stores an overflow publication by rolling out the oldest record", async () => {
   const workspace = join(root, "capture-capacity-workspace");
   for (let index = 0; index < MAX_AGENT_FILES; index += 1) {
     assert.equal(
@@ -277,7 +278,7 @@ test("capturePublishedAgentResult reports capacity exhaustion to the operator ca
 
   let persistence: Promise<unknown> | undefined;
   let resource: string | undefined;
-  let capacityWarned = 0;
+  let storedPublication: string | undefined;
   assert.equal(capturePublishedAgentResult({
     result: {
       correlationId: "capacity-overflow-cid",
@@ -292,15 +293,17 @@ test("capturePublishedAgentResult reports capacity exhaustion to the operator ca
     acknowledgeResource(uri: string) {
       resource = uri;
     },
-  }, undefined, () => {
-    capacityWarned += 1;
+  }, (publicationId: string) => {
+    storedPublication = publicationId;
   }), true);
 
   assert.ok(persistence);
-  assert.equal(await persistence, undefined, "a capacity skip is expected, not a failure");
-  assert.equal(capacityWarned, 1, "capacity callback fires exactly once for the skip");
-  assert.equal(resource, undefined, "a capacity skip must not acknowledge the resource");
-  await assert.rejects(() => readAgentOutput("capacity-overflow-publication", workspace));
+  await persistence;
+  assert.equal(storedPublication, "capacity-overflow-publication", "overflow publication is stored");
+  assert.equal(resource, "agent://capacity-overflow-publication", "the stored resource is acknowledged");
+  assert.deepEqual((await readAgentOutput("capacity-overflow-publication", workspace)).output, { overflow: true });
+  await assert.rejects(() => readAgentOutput("capture-capacity-0", workspace), /No persisted teammate output/);
+  assert.equal((await getAgentOutputStoreUsage(workspace)).records, MAX_AGENT_FILES);
 });
 
 test("published large result is summarized only after its canonical resource is readable", async () => {

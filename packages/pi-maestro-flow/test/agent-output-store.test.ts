@@ -363,7 +363,7 @@ test("usage lists current-workspace records and deletion repairs the latest alia
   assert.equal(await deleteAgentOutput("../outside", workspace), false);
 });
 
-test("capacity rejects new publications without evicting acknowledged records", async () => {
+test("rolling capacity evicts the oldest record to make room for new publications", async () => {
   const workspace = join(root, "capacity-workspace");
   for (let index = 0; index < MAX_AGENT_FILES; index += 1) {
     assert.equal(
@@ -388,11 +388,12 @@ test("capacity rejects new publications without evicting acknowledged records", 
       workspace,
       `capacity-publication-${MAX_AGENT_FILES}`,
     ),
-    "skipped-capacity",
+    "stored",
   );
-  assert.deepEqual((await readAgentOutput("capacity-publication-0", workspace)).output, { index: 0 });
-  assert.deepEqual((await readAgentOutput("capacity-agent", workspace)).output, { index: MAX_AGENT_FILES - 1 });
-  await assert.rejects(() => readAgentOutput(`capacity-publication-${MAX_AGENT_FILES}`, workspace));
+  assert.deepEqual((await readAgentOutput(`capacity-publication-${MAX_AGENT_FILES}`, workspace)).output, { index: MAX_AGENT_FILES });
+  await assert.rejects(() => readAgentOutput("capacity-publication-0", workspace));
+  assert.deepEqual((await readAgentOutput("capacity-agent", workspace)).output, { index: MAX_AGENT_FILES });
+  assert.equal((await getAgentOutputStoreUsage(workspace)).records, MAX_AGENT_FILES);
 });
 
 test("persistAgentOutput rejects a linked global output root", async (t) => {
