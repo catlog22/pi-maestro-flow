@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -53,6 +55,7 @@ interface TabEntry {
   page: Page;
   owned: boolean;
   ownedPage: boolean;
+  profileDir?: string;
   dialogHandler?: (dialog: import("puppeteer-core").Dialog) => Promise<void>;
   elementSelectors: Map<number, string>;
   ownedTempFiles: Set<string>;
@@ -119,7 +122,7 @@ export class BrowserManager implements BrowserManagerLike {
   }
 
   async #openNew(options: BrowserOpenOptions, key: string): Promise<BrowserTabInfo> {
-    const connection = await connectBrowser(options);
+    const connection = await connectBrowser(options, key);
     let page: Page | undefined;
     let ownedPage = false;
     try {
@@ -135,6 +138,7 @@ export class BrowserManager implements BrowserManagerLike {
         page,
         owned: connection.owned,
         ownedPage,
+        profileDir: connection.profileDir,
         elementSelectors: new Map(),
         ownedTempFiles: new Set(),
         busy: false,
@@ -142,10 +146,10 @@ export class BrowserManager implements BrowserManagerLike {
       await this.#configurePage(entry, options);
       throwIfAborted(options.signal);
       this.#registerEntry(entry);
-      return this.#info(entry, false, options.signal, options.timeoutMs);
+      return this.#info(entry, connection.reused, options.signal, options.timeoutMs);
     } catch (error) {
       if (ownedPage && page && !page.isClosed()) await completesWithin(page.close(), 2_000).catch(() => false);
-      await disposeBrowser(connection.browser, connection.owned);
+      await disposeBrowser(connection.browser, connection.owned, connection.profileDir);
       throw error;
     }
   }
@@ -399,23 +403,152 @@ function createTabApi(
   return api;
 }
 
-async function connectBrowser(options: BrowserOpenOptions): Promise<{ browser: Browser; owned: boolean; kind: "headless" | "headed" | "connected" }> {
+// Managed browser profiles live in a stable per-key directory instead of a fresh
+// random temp dir per launch. Chrome (not puppeteer) owns the directory's lifecycle:
+// puppeteer only deletes auto-generated temp profiles, so an explicit userDataDir is
+// never rm'd — eliminating the EBUSY crash from lingering chrome child processes —
+// and a leftover browser from a crashed session can be detected and reused.
+const BROWSER_PROFILE_BASE = process.env.PI_BROWSER_PROFILES_DIR ?? path.join(os.homedir(), ".pi", "browser-profiles");
+
+function profileDirFor(key: string): string {
+  return path.join(BROWSER_PROFILE_BASE, createHash("sha1").update(key).digest("hex").slice(0, 16));
+}
+
+async function connectBrowser(options: BrowserOpenOptions, key: string): Promise<{ browser: Browser; owned: boolean; kind: "headless" | "headed" | "connected"; reused: boolean; profileDir?: string }> {
   if (options.cdpUrl) {
     const pending = puppeteer.connect({ browserURL: options.cdpUrl.replace(/\/$/, "") });
     const browser = await acquireResource(pending, options.signal, options.timeoutMs, (late) => late.disconnect());
-    return { browser, owned: false, kind: "connected" };
+    return { browser, owned: false, kind: "connected", reused: false };
   }
   const executablePath = await findBrowserExecutable(options.executablePath, options.cwd);
   if (!executablePath) throw new Error("No Chromium browser found. Set app.path, app.cdp_url, PUPPETEER_EXECUTABLE_PATH, or CHROME_PATH.");
-  const pending = puppeteer.launch({
+  const profileDir = profileDirFor(key);
+  // Reuse a still-running browser from this or a previous session: every puppeteer
+  // launch enables remote debugging, so a live instance leaves DevToolsActivePort.
+  const reused = await tryReuseBrowser(profileDir, options);
+  if (reused) return { ...reused, owned: true, reused: true, profileDir };
+  // A crash can orphan chrome children (e.g. the network service holding
+  // first_party_sets.db) that keep the profile locked; reclaim them before relaunching.
+  if (await staleProfileProcessesExist(profileDir)) await reclaimProfileProcesses(profileDir);
+  const launched = await launchBrowser(executablePath, options, profileDir);
+  return { ...launched, owned: true, reused: false, profileDir };
+}
+
+async function tryReuseBrowser(profileDir: string, options: BrowserOpenOptions): Promise<{ browser: Browser; kind: "headless" | "headed" } | undefined> {
+  const port = await devToolsPortFor(profileDir);
+  if (!port) return undefined;
+  const pending = puppeteer.connect({ browserURL: `http://127.0.0.1:${port}` });
+  try {
+    const browser = await acquireResource(pending, options.signal, Math.min(2_000, options.timeoutMs), (late) => late.disconnect());
+    return { browser, kind: options.visible ? "headed" : "headless" };
+  } catch {
+    return undefined;
+  }
+}
+
+async function devToolsPortFor(profileDir: string): Promise<number | undefined> {
+  try {
+    const contents = await fs.readFile(path.join(profileDir, "DevToolsActivePort"), "utf8");
+    const port = Number(contents.split(/\r?\n/, 1)[0]);
+    return Number.isInteger(port) && port > 0 ? port : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// A live instance leaves a singleton lockfile (Windows: lockfile; POSIX:
+// SingletonLock) that only a clean shutdown removes.
+async function staleProfileProcessesExist(profileDir: string): Promise<boolean> {
+  try { await fs.access(profileDir); } catch { return false; }
+  for (const name of process.platform === "win32" ? ["lockfile"] : ["SingletonLock"]) {
+    try { await fs.access(path.join(profileDir, name)); return true; } catch {}
+  }
+  return false;
+}
+
+async function reclaimProfileProcesses(profileDir: string): Promise<void> {
+  const pids = await findProcessesUsingProfile(profileDir);
+  for (const pid of pids) await killProcessTree(pid);
+  if (pids.length > 0) await abortableDelay(800, undefined); // let file handles release
+}
+
+async function findProcessesUsingProfile(profileDir: string): Promise<number[]> {
+  try {
+    if (process.platform === "win32") {
+      const script = "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress";
+      const output = await runCapture("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], 20_000);
+      const rows = JSON.parse(output) as { ProcessId: number; CommandLine: string } | Array<{ ProcessId: number; CommandLine: string }> | null;
+      const list = Array.isArray(rows) ? rows : rows ? [rows] : [];
+      return list.filter((row) => Boolean(row.CommandLine) && commandLineMentionsProfile(row.CommandLine, profileDir)).map((row) => row.ProcessId);
+    }
+    const output = await runCapture("ps", ["-axo", "pid=,args="], 10_000);
+    const pids: number[] = [];
+    for (const line of output.split(/\r?\n/)) {
+      const match = line.match(/^\s*(\d+)\s+(.*)$/);
+      if (match && commandLineMentionsProfile(match[2], profileDir)) pids.push(Number(match[1]));
+    }
+    return pids;
+  } catch {
+    return [];
+  }
+}
+
+function commandLineMentionsProfile(commandLine: string, profileDir: string): boolean {
+  const lower = process.platform === "win32";
+  const normalize = (value: string) => {
+    const cleaned = value.replace(/"/g, "").replace(/\\/g, "/").replace(/\/+$/, "");
+    return lower ? cleaned.toLowerCase() : cleaned;
+  };
+  return normalize(commandLine).includes(`--user-data-dir=${normalize(profileDir)}`);
+}
+
+async function killProcessTree(pid: number): Promise<void> {
+  try {
+    if (process.platform === "win32") await runCapture("taskkill", ["/PID", String(pid), "/T", "/F"], 15_000);
+    else process.kill(pid, "SIGKILL");
+  } catch { /* best-effort; leftover processes are reclaimed on the next open */ }
+}
+
+function runCapture(command: string, args: string[], timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const timer = setTimeout(() => { child.kill(); reject(new Error(`${command} timed out`)); }, timeoutMs);
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`${command} exited with code ${code}: ${stderr.slice(0, 200)}`));
+    });
+  });
+}
+
+async function launchBrowser(executablePath: string, options: BrowserOpenOptions, profileDir: string): Promise<{ browser: Browser; kind: "headless" | "headed" }> {
+  const launch = () => puppeteer.launch({
     executablePath,
     headless: !options.visible,
     timeout: options.timeoutMs,
+    userDataDir: profileDir,
     args: ["--no-first-run", "--no-default-browser-check", ...(options.args ?? [])],
     defaultViewport: options.viewport ? { width: options.viewport.width, height: options.viewport.height, deviceScaleFactor: options.viewport.scale } : undefined,
   });
-  const browser = await acquireResource(pending, options.signal, options.timeoutMs, async (late) => { await closeWithin(late); });
-  return { browser, owned: true, kind: options.visible ? "headed" : "headless" };
+  const kind: "headless" | "headed" = options.visible ? "headed" : "headless";
+  let pending = launch();
+  try {
+    const browser = await acquireResource(pending, options.signal, options.timeoutMs, async (late) => { await closeWithin(late, profileDir); });
+    return { browser, kind };
+  } catch (error) {
+    // A zombie instance can survive the first reclaim (process still mid-exit);
+    // reclaim again and retry once before failing.
+    if (!(error instanceof Error) || !/already running|ProcessSingleton/i.test(error.message)) throw error;
+    await reclaimProfileProcesses(profileDir);
+    pending = launch();
+    const browser = await acquireResource(pending, options.signal, options.timeoutMs, async (late) => { await closeWithin(late, profileDir); });
+    return { browser, kind };
+  }
 }
 
 async function pickPage(browser: Browser, target?: string): Promise<Page | undefined> {
@@ -432,23 +565,33 @@ async function pickPage(browser: Browser, target?: string): Promise<Page | undef
 
 async function disposeEntry(entry: TabEntry): Promise<void> {
   try { if (entry.ownedPage && !entry.page.isClosed()) await completesWithin(entry.page.close(), 2_000); } catch {}
-  await disposeBrowser(entry.browser, entry.owned);
+  await disposeBrowser(entry.browser, entry.owned, entry.profileDir);
   await Promise.allSettled([...entry.ownedTempFiles].map((file) => fs.rm(file, { force: true })));
   entry.ownedTempFiles.clear();
 }
 
-async function disposeBrowser(browser: Browser, owned: boolean): Promise<void> {
+async function disposeBrowser(browser: Browser, owned: boolean, profileDir?: string): Promise<void> {
   try {
-    if (owned) await closeWithin(browser);
+    if (owned) await closeWithin(browser, profileDir);
     else browser.disconnect();
   } catch {
-    if (owned) browser.process()?.kill();
+    if (profileDir) await reclaimProfileProcesses(profileDir).catch(() => {});
   }
 }
 
-async function closeWithin(browser: Browser): Promise<void> {
-  const closed = await completesWithin(browser.close(), 2_000);
-  if (!closed) browser.process()?.kill();
+// Graceful CDP close first; on hang, kill the whole process tree, then sweep any
+// remaining children by profile marker. Never throws: dispose runs on shutdown
+// paths where an unhandled rejection would take the whole process down.
+async function closeWithin(browser: Browser, profileDir?: string): Promise<void> {
+  try {
+    const closed = await completesWithin(browser.close(), 2_000);
+    if (closed) return;
+  } catch {}
+  try {
+    const pid = browser.process()?.pid;
+    if (pid) await killProcessTree(pid);
+  } catch {}
+  if (profileDir) await reclaimProfileProcesses(profileDir).catch(() => {});
 }
 
 function browserKey(options: BrowserOpenOptions): string {
