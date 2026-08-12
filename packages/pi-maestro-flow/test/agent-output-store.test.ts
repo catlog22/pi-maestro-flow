@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import test, { after, before } from "node:test";
 
 const {
+  MAX_AGENT_FILES,
   persistAgentOutput,
   persistAgentOutputChecked,
   readAgentOutput,
@@ -21,6 +22,20 @@ async function bucketDir(): Promise<string> {
   const entries = await readdir(outRoot());
   assert.equal(entries.length, 1, "exactly one workspace bucket expected");
   return join(outRoot(), entries[0]!);
+}
+
+/** Locate the workspace bucket containing a known record file. */
+async function bucketContaining(fileName: string): Promise<string> {
+  for (const entry of await readdir(outRoot())) {
+    const bucket = join(outRoot(), entry);
+    try {
+      await stat(join(bucket, fileName));
+      return bucket;
+    } catch {
+      // continue
+    }
+  }
+  throw new Error(`No output bucket contains ${fileName}`);
 }
 
 let root: string;
@@ -142,6 +157,175 @@ test("persistAgentOutput replaces a repeated correlation id with the latest turn
   await persistAgentOutput("repeat-agent", "repeat", "general", { turn: 1 }, root);
   await persistAgentOutput("repeat-agent", "repeat", "general", { turn: 2 }, root);
   assert.deepEqual((await readAgentOutput("repeat-agent", root)).output, { turn: 2 });
+});
+
+test("publication records remain immutable while correlation id resolves the latest turn", async () => {
+  const workspace = join(root, "publication-workspace");
+  assert.equal(
+    await persistAgentOutputChecked("versioned-agent", "versioned", "general", { turn: 1 }, workspace, "publication-turn-1"),
+    true,
+  );
+  assert.equal(
+    await persistAgentOutputChecked("versioned-agent", "versioned", "general", { turn: 2 }, workspace, "publication-turn-2"),
+    true,
+  );
+
+  assert.deepEqual((await readAgentOutput("publication-turn-1", workspace)).output, { turn: 1 });
+  assert.deepEqual((await readAgentOutput("publication-turn-2", workspace)).output, { turn: 2 });
+  assert.deepEqual((await readAgentOutput("versioned-agent", workspace)).output, { turn: 2 });
+  assert.equal((await readAgentOutput("publication-turn-1", workspace)).publicationId, "publication-turn-1");
+  await assert.rejects(
+    () => persistAgentOutputChecked("versioned-agent", "versioned", "general", { turn: 99 }, workspace, "publication-turn-1"),
+    /Immutable agent output already exists with different content/,
+  );
+});
+
+test("pending alias falls back to the prior turn and retry completes publication", async () => {
+  const workspace = join(root, "interrupted-publication-workspace");
+  await persistAgentOutputChecked(
+    "interrupted-agent",
+    "interrupted",
+    "general",
+    { turn: 1 },
+    workspace,
+    "interrupted-publication-1",
+  );
+  const bucket = await bucketContaining("interrupted-publication-1.json");
+  await writeFile(join(bucket, "interrupted-agent.alias.json"), JSON.stringify({
+    kind: "agent-output-alias",
+    correlationId: "interrupted-agent",
+    publicationId: "interrupted-publication-2",
+    fallbackPublicationId: "interrupted-publication-1",
+  }), "utf8");
+
+  assert.deepEqual((await readAgentOutput("interrupted-agent", workspace)).output, { turn: 1 });
+  assert.equal(
+    await persistAgentOutputChecked(
+      "interrupted-agent",
+      "interrupted",
+      "general",
+      { turn: 2 },
+      workspace,
+      "interrupted-publication-2",
+    ),
+    true,
+  );
+  assert.deepEqual((await readAgentOutput("interrupted-agent", workspace)).output, { turn: 2 });
+  assert.deepEqual((await readAgentOutput("interrupted-publication-1", workspace)).output, { turn: 1 });
+});
+
+test("superseding an unresolved alias preserves the last readable fallback", async () => {
+  const workspace = join(root, "repeated-interruption-workspace");
+  await persistAgentOutputChecked(
+    "repeated-interruption-agent",
+    "repeated-interruption",
+    "general",
+    { turn: 1 },
+    workspace,
+    "repeated-interruption-publication-1",
+  );
+  const bucket = await bucketContaining("repeated-interruption-publication-1.json");
+  await writeFile(join(bucket, "repeated-interruption-agent.alias.json"), JSON.stringify({
+    kind: "agent-output-alias",
+    correlationId: "repeated-interruption-agent",
+    publicationId: "repeated-interruption-publication-2",
+    fallbackPublicationId: "repeated-interruption-publication-1",
+  }), "utf8");
+  assert.equal(
+    await persistAgentOutputChecked(
+      "repeated-interruption-agent",
+      "repeated-interruption",
+      "general",
+      { turn: 3 },
+      workspace,
+      "repeated-interruption-publication-3",
+    ),
+    true,
+  );
+  await unlink(join(bucket, "repeated-interruption-publication-3.json"));
+  assert.deepEqual((await readAgentOutput("repeated-interruption-agent", workspace)).output, { turn: 1 });
+  assert.deepEqual((await readAgentOutput("repeated-interruption-publication-1", workspace)).output, { turn: 1 });
+});
+
+test("legacy aliases cannot traverse outside the workspace output directory", async () => {
+  const workspace = join(root, "alias-security-workspace");
+  const legacyDir = join(workspace, ".pi", "agents");
+  const outsideDir = join(workspace, "outside");
+  await mkdir(legacyDir, { recursive: true });
+  await mkdir(outsideDir, { recursive: true });
+  await writeFile(join(outsideDir, "secret.json"), JSON.stringify({
+    correlationId: "secret",
+    capturedAt: new Date().toISOString(),
+    output: { secret: true },
+  }), "utf8");
+  await writeFile(join(legacyDir, "probe.alias.json"), JSON.stringify({
+    kind: "agent-output-alias",
+    correlationId: "probe",
+    publicationId: "../../../outside/secret",
+  }), "utf8");
+
+  await assert.rejects(
+    () => readAgentOutput("probe", workspace),
+    /No persisted teammate output/,
+  );
+});
+
+test("global aliases reject traversal and correlation mismatches", async () => {
+  const workspace = join(root, "global-alias-security-workspace");
+  await persistAgentOutputChecked(
+    "alias-owner",
+    "alias-owner",
+    "general",
+    { safe: true },
+    workspace,
+    "alias-owner-publication",
+  );
+  const bucket = await bucketContaining("alias-owner-publication.json");
+  await writeFile(join(bucket, "probe.alias.json"), JSON.stringify({
+    kind: "agent-output-alias",
+    correlationId: "other-agent",
+    publicationId: "alias-owner-publication",
+  }), "utf8");
+  await assert.rejects(() => readAgentOutput("probe", workspace), /No persisted teammate output/);
+
+  await writeFile(join(bucket, "probe.alias.json"), JSON.stringify({
+    kind: "agent-output-alias",
+    correlationId: "probe",
+    publicationId: "../../../outside/secret",
+  }), "utf8");
+  await assert.rejects(() => readAgentOutput("probe", workspace), /No persisted teammate output/);
+});
+
+test("capacity rejects new publications without evicting acknowledged records", async () => {
+  const workspace = join(root, "capacity-workspace");
+  for (let index = 0; index < MAX_AGENT_FILES; index += 1) {
+    assert.equal(
+      await persistAgentOutputChecked(
+        "capacity-agent",
+        "capacity",
+        "general",
+        { index },
+        workspace,
+        `capacity-publication-${index}`,
+      ),
+      true,
+    );
+  }
+
+  assert.equal(
+    await persistAgentOutputChecked(
+      "capacity-agent",
+      "capacity",
+      "general",
+      { index: MAX_AGENT_FILES },
+      workspace,
+      `capacity-publication-${MAX_AGENT_FILES}`,
+    ),
+    false,
+  );
+  assert.deepEqual((await readAgentOutput("capacity-publication-0", workspace)).output, { index: 0 });
+  assert.deepEqual((await readAgentOutput("capacity-agent", workspace)).output, { index: MAX_AGENT_FILES - 1 });
+  await assert.rejects(() => readAgentOutput(`capacity-publication-${MAX_AGENT_FILES}`, workspace));
 });
 
 test("persistAgentOutput rejects a linked global output root", async (t) => {

@@ -1,14 +1,14 @@
 /**
- * agent-output-store — teammate 结构化输出持久化（agent:// 数据源）
+ * agent-output-store — teammate 输出持久化（agent:// 数据源）
  *
- * teammate 子代理的 structured output 是临时的（完成即清理临时文件），本模块由
- * flow 的前台 tool_result 钩子和后台 teammate:complete 事件共同驱动，把输出按
- * correlationId 持久化到全局分桶目录
- * ~/.pi/teammate-output/<cwd-hash>-<workspace-name>/<correlationId>.json，供
- * resource 工具的 agent:// scheme 按 id 或任务 name 读取，支持 JSON 路径取值。
- * 分桶按工作区隔离，避免不同项目同名任务互相污染；旧格式 <cwd>/.pi/agents/ 下的
- * 历史归档仍保留只读 fallback。
+ * 每个已发布 turn 以不可变 publicationId 存入全局工作区分桶：
+ * ~/.pi/teammate-output/<cwd-hash>-<workspace-name>/<publicationId>.json。
+ * correlationId 只保留一个轻量 latest alias，供 agent://<correlationId> 兼容读取；
+ * canonical agent://<publicationId> 始终指向发布时的原始结果。没有 publicationId 的
+ * 旧调用继续使用 correlationId 直接记录。达到容量上限时拒绝新 publication，不淘汰
+ * 已被会话引用的旧记录，使调用方可以保留内联全文而不是发布死链接。
  *
+ * 分桶按工作区隔离；旧格式 <cwd>/.pi/agents/ 下的历史归档仍保留只读 fallback。
  * 只读消费方：src/tools/resource.ts；写入方：src/teammate/agent-output-capture.ts。
  * 测试可用环境变量 PI_AGENT_OUTPUT_ROOT 覆盖根目录。
  */
@@ -24,25 +24,34 @@ import {
   readdir,
   realpath,
   rename,
-  stat,
   unlink,
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { lockSettingsResource } from "../settings/resource-lock.ts";
 
 const GLOBAL_OUTPUT_DIR_NAME = "teammate-output";
 const LEGACY_AGENTS_DIR_NAME = ".pi/agents";
-const MAX_AGENT_FILES = 100;
+export const MAX_AGENT_FILES = 100;
 const MAX_STORED_OUTPUT_CHARS = 512_000;
 const MAX_PATH_DEPTH = 10;
+const ALIAS_SUFFIX = ".alias.json";
 const pendingWrites = new Map<string, Promise<void>>();
 
 export interface AgentOutputRecord {
   correlationId: string;
+  publicationId?: string;
   name?: string;
   agent?: string;
   capturedAt: string;
   output: unknown;
+}
+
+interface AgentOutputAlias {
+  kind: "agent-output-alias";
+  correlationId: string;
+  publicationId: string;
+  fallbackPublicationId?: string;
 }
 
 function outputRootEnv(): string | undefined {
@@ -66,8 +75,16 @@ function legacyAgentsDir(cwd: string): string {
   return resolve(cwd, LEGACY_AGENTS_DIR_NAME);
 }
 
-function recordFile(dir: string, correlationId: string): string {
-  return join(dir, `${correlationId}.json`);
+function recordFile(dir: string, recordId: string): string {
+  return join(dir, `${recordId}.json`);
+}
+
+function aliasFile(dir: string, correlationId: string): string {
+  return join(dir, `${correlationId}${ALIAS_SUFFIX}`);
+}
+
+function isCanonicalRecordName(name: string): boolean {
+  return name.endsWith(".json") && !name.endsWith(ALIAS_SUFFIX);
 }
 
 function isRecordId(id: string): boolean {
@@ -173,41 +190,45 @@ async function writePrivateFile(filePath: string, content: string): Promise<void
   }
 }
 
-/** 保持桶内文件数不超过上限：删除最旧的（按 mtime）。 */
-async function pruneAgentsDir(cwd: string): Promise<void> {
-  let dir: string;
+/** Read one private regular file without following a symlink. */
+async function readPrivateText(filePath: string): Promise<string | undefined> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    dir = await prepareBucketDir(cwd);
-  } catch {
-    return;
+    const info = await lstat(filePath);
+    if (info.isSymbolicLink() || !info.isFile()) {
+      throw new Error(`Agent output path must be a regular file: ${filePath}`);
+    }
+    handle = await open(filePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    if (!(await handle.stat()).isFile()) {
+      throw new Error(`Agent output path must be a regular file: ${filePath}`);
+    }
+    return await handle.readFile("utf8");
+  } catch (error) {
+    if (fileErrorCode(error) === "ENOENT") return undefined;
+    throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
-  let entries;
-  try {
-    entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  const files = entries
-    .filter((e) => e.isFile() && e.name.endsWith(".json"))
-    .map((e) => e.name);
-  if (files.length <= MAX_AGENT_FILES) return;
+}
 
-  const withMtime = await Promise.all(files.map(async (name) => {
-    try {
-      const s = await stat(join(dir, name));
-      return { name, mtime: s.mtimeMs };
-    } catch {
-      return { name, mtime: 0 };
-    }
-  }));
-  withMtime.sort((a, b) => a.mtime - b.mtime);
-  for (const stale of withMtime.slice(0, withMtime.length - MAX_AGENT_FILES)) {
-    try {
-      await unlink(join(dir, stale.name));
-    } catch {
-      // best effort
-    }
+/** Create an immutable private record, accepting only byte-identical retries. */
+async function writeImmutablePrivateFile(filePath: string, content: string): Promise<void> {
+  try {
+    await writeFile(filePath, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    await chmod(filePath, 0o600);
+    return;
+  } catch (error) {
+    if (fileErrorCode(error) !== "EEXIST") throw error;
   }
+  const existing = await readPrivateText(filePath);
+  if (existing !== content) {
+    throw new Error(`Immutable agent output already exists with different content: ${filePath}`);
+  }
+}
+
+async function canonicalRecordCount(dir: string): Promise<number> {
+  const entries = await readdir(dir, { withFileTypes: true });
+  return entries.filter((entry) => entry.isFile() && isCanonicalRecordName(entry.name)).length;
 }
 
 async function persistAgentOutputNow(
@@ -216,17 +237,58 @@ async function persistAgentOutputNow(
   agent: string | undefined,
   output: unknown,
   cwd: string,
-): Promise<void> {
+  publicationId?: string,
+): Promise<boolean> {
   const dir = await prepareBucketDir(cwd);
-  const filePath = recordFile(dir, correlationId);
-  await writePrivateFile(filePath, JSON.stringify({
-    correlationId,
-    ...(name ? { name } : {}),
-    ...(agent ? { agent } : {}),
-    capturedAt: new Date().toISOString(),
-    output,
-  }));
-  await pruneAgentsDir(cwd);
+  const release = await lockSettingsResource(join(dir, ".agent-output-store"));
+  try {
+    const recordId = publicationId ?? correlationId;
+    const filePath = recordFile(dir, recordId);
+    const existing = await readPrivateText(filePath);
+    if (publicationId && existing !== undefined) {
+      if (!samePublishedRecord(existing, { correlationId, publicationId, name, agent, output })) {
+        throw new Error(`Immutable agent output already exists with different content: ${filePath}`);
+      }
+      if (!await loadAlias(aliasFile(dir, correlationId), correlationId)) {
+        await writePrivateFile(aliasFile(dir, correlationId), JSON.stringify({
+          kind: "agent-output-alias",
+          correlationId,
+          publicationId,
+        } satisfies AgentOutputAlias));
+      }
+      return true;
+    }
+    if (existing === undefined && await canonicalRecordCount(dir) >= MAX_AGENT_FILES) {
+      return false;
+    }
+
+    const content = JSON.stringify({
+      correlationId,
+      ...(publicationId ? { publicationId } : {}),
+      ...(name ? { name } : {}),
+      ...(agent ? { agent } : {}),
+      capturedAt: new Date().toISOString(),
+      output,
+    });
+    if (publicationId) {
+      const currentAlias = await loadAlias(aliasFile(dir, correlationId), correlationId);
+      const fallbackPublicationId = currentAlias
+        ? (await resolveAliasedRecord(dir, correlationId, currentAlias))?.publicationId
+        : undefined;
+      await writePrivateFile(aliasFile(dir, correlationId), JSON.stringify({
+        kind: "agent-output-alias",
+        correlationId,
+        publicationId,
+        ...(fallbackPublicationId ? { fallbackPublicationId } : {}),
+      } satisfies AgentOutputAlias));
+      await writeImmutablePrivateFile(filePath, content);
+    } else {
+      await writePrivateFile(filePath, content);
+    }
+    return true;
+  } finally {
+    await release();
+  }
 }
 
 /** Queue one validated record write and report whether it was accepted. */
@@ -236,27 +298,26 @@ function enqueueAgentOutput(
   agent: string | undefined,
   output: unknown,
   cwd: string,
+  publicationId?: string,
 ): Promise<boolean> {
   if (!isRecordId(correlationId) || output === undefined) return Promise.resolve(false);
+  if (publicationId !== undefined && !isRecordId(publicationId)) return Promise.resolve(false);
   if (safeStringify(output) === null) return Promise.resolve(false);
 
-  const key = join(resolve(cwd), correlationId);
+  const key = resolve(cwd);
   const previous = pendingWrites.get(key) ?? Promise.resolve();
   const current = previous.catch(() => undefined).then(() =>
-    persistAgentOutputNow(correlationId, name, agent, output, cwd)
+    persistAgentOutputNow(correlationId, name, agent, output, cwd, publicationId)
   );
   let tracked: Promise<void>;
-  tracked = current.finally(() => {
+  tracked = current.then(() => undefined, () => undefined).finally(() => {
     if (pendingWrites.get(key) === tracked) pendingWrites.delete(key);
   });
   pendingWrites.set(key, tracked);
-  return tracked.then(() => true);
+  return current;
 }
 
-/**
- * Persist one teammate result. Calls for the same record are serialized in
- * invocation order, so a later warm turn atomically replaces the prior value.
- */
+/** Persist a latest-value compatibility record when no publication id is available. */
 export async function persistAgentOutput(
   correlationId: string,
   name: string | undefined,
@@ -267,15 +328,16 @@ export async function persistAgentOutput(
   await enqueueAgentOutput(correlationId, name, agent, output, cwd);
 }
 
-/** Persist one result and expose validation skips to reliability-sensitive callers. */
+/** Persist one result and expose validation/capacity skips to acknowledgement callers. */
 export function persistAgentOutputChecked(
   correlationId: string,
   name: string | undefined,
   agent: string | undefined,
   output: unknown,
   cwd: string,
+  publicationId?: string,
 ): Promise<boolean> {
-  return enqueueAgentOutput(correlationId, name, agent, output, cwd);
+  return enqueueAgentOutput(correlationId, name, agent, output, cwd, publicationId);
 }
 
 function parseRecord(text: string): AgentOutputRecord | null {
@@ -285,6 +347,42 @@ function parseRecord(text: string): AgentOutputRecord | null {
       return parsed as AgentOutputRecord;
     }
     return null;
+  } catch {
+    return null;
+  }
+}
+
+function samePublishedRecord(
+  text: string,
+  expected: {
+    correlationId: string;
+    publicationId: string;
+    name: string | undefined;
+    agent: string | undefined;
+    output: unknown;
+  },
+): boolean {
+  const record = parseRecord(text);
+  return record?.correlationId === expected.correlationId
+    && record.publicationId === expected.publicationId
+    && record.name === expected.name
+    && record.agent === expected.agent
+    && safeStringify(record.output) === safeStringify(expected.output);
+}
+
+function parseAlias(text: string): AgentOutputAlias | null {
+  try {
+    const parsed = JSON.parse(text) as Partial<AgentOutputAlias>;
+    const fallbackValid = parsed.fallbackPublicationId === undefined
+      || isRecordId(parsed.fallbackPublicationId);
+    return parsed.kind === "agent-output-alias"
+      && typeof parsed.correlationId === "string"
+      && isRecordId(parsed.correlationId)
+      && typeof parsed.publicationId === "string"
+      && isRecordId(parsed.publicationId)
+      && fallbackValid
+      ? parsed as AgentOutputAlias
+      : null;
   } catch {
     return null;
   }
@@ -305,42 +403,80 @@ async function loadRecord(filePath: string): Promise<AgentOutputRecord | null> {
   }
 }
 
+async function loadAlias(
+  filePath: string,
+  expectedCorrelationId: string,
+): Promise<AgentOutputAlias | null> {
+  try {
+    const text = await readPrivateText(filePath);
+    if (text === undefined) return null;
+    const alias = parseAlias(text);
+    return alias?.correlationId === expectedCorrelationId ? alias : null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveAliasedRecord(
+  dir: string,
+  correlationId: string,
+  alias: AgentOutputAlias,
+): Promise<AgentOutputRecord | null> {
+  const target = await loadRecord(recordFile(dir, alias.publicationId));
+  if (target?.publicationId === alias.publicationId && target.correlationId === correlationId) {
+    return target;
+  }
+  if (!alias.fallbackPublicationId) return null;
+  const fallback = await loadRecord(recordFile(dir, alias.fallbackPublicationId));
+  return fallback?.publicationId === alias.fallbackPublicationId
+    && fallback.correlationId === correlationId
+    ? fallback
+    : null;
+}
+
 /**
- * 按 correlationId 或任务 name 读取已持久化的输出记录；name 有歧义时取最新（capturedAt）。
- * 查找顺序：全局分桶精确 id → 旧格式 <cwd>/.pi/agents/ 精确 id → 桶 + 旧目录按 name 扫描合并。
+ * 按 publicationId、correlationId latest alias 或任务 name 读取持久化输出。
+ * 仅受控全局桶解析 alias；旧工作区目录只支持精确 legacy 记录和 name 扫描。
  */
 export async function readAgentOutput(id: string, cwd: string): Promise<AgentOutputRecord> {
-  const dirs: string[] = [];
+  const dirs: Array<{ path: string; aliases: boolean }> = [];
   try {
-    dirs.push(await prepareBucketDir(cwd));
+    dirs.push({ path: await prepareBucketDir(cwd), aliases: true });
   } catch (error) {
     if (fileErrorCode(error) !== "ENOENT") throw error;
   }
   try {
-    dirs.push(await assertContainedLegacyDir(cwd));
+    dirs.push({ path: await assertContainedLegacyDir(cwd), aliases: false });
   } catch (error) {
     if (fileErrorCode(error) !== "ENOENT") throw error;
   }
 
   if (isRecordId(id)) {
-    for (const dir of dirs) {
-      const direct = await loadRecord(recordFile(dir, id));
-      if (direct) return direct;
+    for (const entry of dirs) {
+      if (entry.aliases) {
+        const alias = await loadAlias(aliasFile(entry.path, id), id);
+        if (alias) {
+          const target = await resolveAliasedRecord(entry.path, id, alias);
+          if (target) return target;
+        }
+      }
+      const direct = await loadRecord(recordFile(entry.path, id));
+      if (direct && (direct.publicationId === undefined || direct.publicationId === id)) return direct;
     }
   }
 
   const byName: AgentOutputRecord[] = [];
   const available: string[] = [];
-  for (const dir of dirs) {
+  for (const entry of dirs) {
     let names: string[];
     try {
-      names = await readdir(dir);
+      names = await readdir(entry.path);
     } catch {
       continue;
     }
-    for (const name of names.filter((n) => n.endsWith(".json"))) {
+    for (const name of names.filter(isCanonicalRecordName)) {
       available.push(name.replace(/\.json$/, ""));
-      const record = await loadRecord(join(dir, name));
+      const record = await loadRecord(join(entry.path, name));
       if (record?.name === id) byName.push(record);
     }
   }

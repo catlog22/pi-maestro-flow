@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, before } from "node:test";
@@ -10,6 +10,10 @@ const {
   persistStructuredResults,
 } = await import("../src/teammate/agent-output-capture.ts");
 const { readAgentOutput } = await import("../src/teammate/agent-output-store.ts");
+const {
+  displayMessageForResult,
+  emitTeammateResultPublished,
+} = await import("../../pi-maestro-teammate/src/extension/teammate-core.ts");
 
 let root: string;
 
@@ -47,19 +51,23 @@ test("persistStructuredResults uses each result origin cwd across overlapping wo
   }
 });
 
-test("persistStructuredResults keeps the latest turn for a repeated correlation id", async () => {
+test("persistStructuredResults keeps immutable publications and a latest correlation alias", async () => {
   await Promise.all([
     persistStructuredResults([{
       correlationId: "repeat-cid",
+      publicationId: "repeat-publication-1",
       name: "repeat-task",
       structuredOutput: { turn: 1 },
     }], undefined, root),
     persistStructuredResults([{
       correlationId: "repeat-cid",
+      publicationId: "repeat-publication-2",
       name: "repeat-task",
       structuredOutput: { turn: 2 },
     }], undefined, root),
   ]);
+  assert.deepEqual((await readAgentOutput("repeat-publication-1", root)).output, { turn: 1 });
+  assert.deepEqual((await readAgentOutput("repeat-publication-2", root)).output, { turn: 2 });
   assert.deepEqual((await readAgentOutput("repeat-cid", root)).output, { turn: 2 });
 });
 
@@ -168,14 +176,12 @@ test("persistStructuredResults prefers structuredOutput and skips whitespace-onl
   );
 });
 
-test("persistStructuredResults writes a private record readable by correlationId", async () => {
+test("persistStructuredResults writes a record readable by correlationId", async () => {
   await persistStructuredResults(
     [{ correlationId: "capture-cid-4", structuredOutput: { deep: { list: [1, 2, 3] } } }],
     undefined,
     root,
   );
-  const raw = await readFile(join(root, ".pi", "agents", "capture-cid-4.json"), "utf8");
-  assert.match(raw, /"output":/);
   const record = await readAgentOutput("capture-cid-4", root);
   assert.deepEqual(record.output, { deep: { list: [1, 2, 3] } });
 });
@@ -183,6 +189,7 @@ test("persistStructuredResults writes a private record readable by correlationId
 test("capturePublishedAgentResult acknowledges persistence before release", async () => {
   let persistence: Promise<unknown> | undefined;
   let acknowledged: string | undefined;
+  let resource: string | undefined;
   const claimed = capturePublishedAgentResult({
     result: {
       correlationId: "published-cid-1",
@@ -195,6 +202,9 @@ test("capturePublishedAgentResult acknowledges persistence before release", asyn
     waitUntil(promise: Promise<unknown>) {
       persistence = promise;
     },
+    acknowledgeResource(uri: string) {
+      resource = uri;
+    },
   }, (publicationId) => {
     acknowledged = publicationId;
   });
@@ -203,6 +213,8 @@ test("capturePublishedAgentResult acknowledges persistence before release", asyn
   assert.ok(persistence);
   await persistence;
   assert.equal(acknowledged, "publication-1");
+  assert.equal(resource, "agent://publication-1");
+  assert.deepEqual((await readAgentOutput("publication-1", root)).output, { ready: true });
   assert.deepEqual((await readAgentOutput("published-cid-1", root)).output, { ready: true });
 });
 
@@ -220,6 +232,7 @@ test("compatibility capture excludes only the acknowledged publication instance"
 
 test("capturePublishedAgentResult rejects an unpersistable publication", async () => {
   let persistence: Promise<unknown> | undefined;
+  let resource: string | undefined;
   assert.equal(capturePublishedAgentResult({
     result: {
       correlationId: "published-cid-oversized",
@@ -231,9 +244,50 @@ test("capturePublishedAgentResult rejects an unpersistable publication", async (
     waitUntil(promise: Promise<unknown>) {
       persistence = promise;
     },
+    acknowledgeResource(uri: string) {
+      resource = uri;
+    },
   }), true);
 
   assert.ok(persistence);
   await assert.rejects(persistence, /persistence was not acknowledged/);
+  assert.equal(resource, undefined);
   await assert.rejects(() => readAgentOutput("published-cid-oversized", root));
+});
+
+test("published large result is summarized only after its canonical resource is readable", async () => {
+  const output = "x".repeat(2_000);
+  const result = {
+    agent: "general",
+    name: "integration-result",
+    task: "produce a large result",
+    exitCode: 0,
+    messages: [{ role: "assistant", content: output }],
+    usage: {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      cost: 0,
+      turns: 1,
+    },
+    model: "test/model",
+    correlationId: "integration-correlation",
+    publicationId: "integration-publication",
+    durationMs: 1,
+  } as Parameters<typeof displayMessageForResult>[0];
+  const pi = {
+    events: {
+      emit(_name: string, event: unknown) {
+        assert.equal(capturePublishedAgentResult(event), true);
+      },
+    },
+  };
+
+  await emitTeammateResultPublished(pi as never, result, root);
+  const displayed = displayMessageForResult(result);
+  assert.equal(displayed.includes(output), false);
+  assert.match(displayed, /Full result: agent:\/\/integration-publication$/);
+  assert.equal((await readAgentOutput("integration-publication", root)).output, output);
+  assert.equal((await readAgentOutput("integration-correlation", root)).output, output);
 });

@@ -118,6 +118,7 @@ export async function persistStructuredResults(
       summary.skipped += 1;
       continue;
     }
+    const publicationId = typeof result.publicationId === "string" ? result.publicationId : undefined;
     const name = typeof result.name === "string" ? result.name : namesByCid.get(correlationId);
     try {
       const stored = await persistAgentOutputChecked(
@@ -126,6 +127,7 @@ export async function persistStructuredResults(
         typeof result.agent === "string" ? result.agent : undefined,
         output,
         cwd,
+        publicationId,
       );
       if (stored) summary.stored += 1;
       else summary.skipped += 1;
@@ -143,17 +145,21 @@ export function capturePublishedAgentResult(
   onStored?: (publicationId: string) => void,
 ): boolean {
   if (!event || typeof event !== "object") return false;
-  const payload = event as { result?: unknown; waitUntil?: unknown };
+  const payload = event as { result?: unknown; waitUntil?: unknown; acknowledgeResource?: unknown };
   if (typeof payload.waitUntil !== "function" || !payload.result) return false;
   const result = payload.result as { correlationId?: unknown; publicationId?: unknown };
   const correlationId = typeof result.correlationId === "string" ? result.correlationId : "unknown";
   const publicationId = typeof result.publicationId === "string" ? result.publicationId : undefined;
+  const resourceId = publicationId ?? correlationId;
   const persistence = persistStructuredResults([payload.result], undefined).then((summary) => {
     if (summary.stored !== 1) {
       throw new Error(
-        `agent://${correlationId} persistence was not acknowledged `
+        `agent://${resourceId} persistence was not acknowledged `
         + `(stored=${summary.stored}, skipped=${summary.skipped}, failed=${summary.failed})`,
       );
+    }
+    if (typeof payload.acknowledgeResource === "function") {
+      (payload.acknowledgeResource as (uri: string) => void)(`agent://${resourceId}`);
     }
     if (publicationId) onStored?.(publicationId);
   });

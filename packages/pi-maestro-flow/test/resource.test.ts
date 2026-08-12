@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test, { after, before } from "node:test";
 
 const { createResourceTool, parseResourceUri, parseGhTarget, resolveResource } = await import("../src/tools/resource.ts");
-const { persistAgentOutput } = await import("../src/teammate/agent-output-store.ts");
+const { persistAgentOutput, persistAgentOutputChecked } = await import("../src/teammate/agent-output-store.ts");
 
 const theme = {
 	fg: (_name: string, text: string) => text,
@@ -153,6 +153,29 @@ test("resolveResource reads agent:// output by correlationId and json path", asy
 
   const byPath = await resolveResource("agent://run-agent-1/findings/0/severity", root);
   assert.equal(byPath.content.trim(), "high");
+});
+
+test("resolveResource keeps publication ids immutable while correlation id tracks latest", async () => {
+  await persistAgentOutputChecked(
+    "resource-versioned",
+    "resource-versioned-task",
+    "general",
+    { turn: 1 },
+    root,
+    "resource-publication-1",
+  );
+  await persistAgentOutputChecked(
+    "resource-versioned",
+    "resource-versioned-task",
+    "general",
+    { turn: 2 },
+    root,
+    "resource-publication-2",
+  );
+
+  assert.match((await resolveResource("agent://resource-publication-1", root)).content, /\"turn\": 1/);
+  assert.match((await resolveResource("agent://resource-publication-2", root)).content, /\"turn\": 2/);
+  assert.match((await resolveResource("agent://resource-versioned", root)).content, /\"turn\": 2/);
 });
 
 test("resolveResource agent:// path miss reports a precise reason and a usage tip", async () => {
