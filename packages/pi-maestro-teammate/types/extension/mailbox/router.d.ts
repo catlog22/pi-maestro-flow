@@ -53,6 +53,8 @@ export declare class MailboxRouter {
      * Returns a result indicating success (message in ready state) or failure code.
      */
     enqueue(request: MailboxEnqueueRequest): Promise<MailboxEnqueueResult>;
+    /** Whether this host's authority owns the recipient (consumer "*" filtering). */
+    managesRecipient(recipientCorrelationId: string): boolean;
     /**
      * Revalidate authority for a message before dispatch.
      * Called by the consumer before injecting into the child.

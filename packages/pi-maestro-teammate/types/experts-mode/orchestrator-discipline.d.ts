@@ -9,7 +9,7 @@ import type { ExpertsRules, TeammateTaskLike } from "./types.ts";
  * dispatch DAG), while the Lead keeps session done/check/seal.
  */
 /** Stable marker for the discipline fragment (used by tests + extension). */
-export declare const ORCHESTRATOR_DISCIPLINE_MARK = "Orchestrator discipline (P5.1)";
+export declare const ORCHESTRATOR_DISCIPLINE_MARK = "Orchestrator discipline";
 export interface OrchestratorDisciplineOptions {
     stage?: string;
     /** taskTypes from active stage plan / pipeline */

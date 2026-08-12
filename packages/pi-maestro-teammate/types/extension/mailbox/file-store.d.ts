@@ -57,7 +57,9 @@ export declare class MailboxFileStore {
     markSeen(key: string): Promise<void>;
     /**
      * Atomically claim a dedup key via exclusive create ("wx"). Returns false
-     * when the key was already seen.
+     * when the key was already seen. Unlike isSeen+markSeen this is race-free
+     * across concurrent enqueues (same process or another process sharing the
+     * mailbox directory).
      */
     tryMarkSeen(key: string): Promise<boolean>;
     /** Release a dedup key claimed by tryMarkSeen (enqueue failed after claim). */

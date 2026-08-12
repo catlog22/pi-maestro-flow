@@ -85,6 +85,7 @@ export interface SessionResolution {
 export interface SessionResolveOptions {
     includeSettled?: boolean;
     localFirst?: boolean;
+    /** Pin delivery to this correlation id instead of re-resolving the selector. */
     targetCorrelationId?: string;
 }
 export declare function parseSessionSurfaceMode(value: unknown): SessionSurfaceMode;
@@ -119,7 +120,9 @@ export interface SessionMessageRequest {
     traceId?: string;
     replyTo?: string;
     fromSessionName?: string;
+    /** Pin delivery target; avoids TOCTOU when the selector is rebound between check and route. */
     targetCorrelationId?: string;
+    /** Sender correlation id for local agent envelope formatting and inbox attribution. */
     senderCorrelationId?: string;
     signal?: AbortSignal;
 }

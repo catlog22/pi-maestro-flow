@@ -69,6 +69,8 @@ export declare function handleProxyRequest(pi: ExtensionAPI, state: TeammateStat
     };
 }>, workspacePeerSend?: (target: string, message: string, mode: "steer" | "follow_up") => Promise<boolean>, workspacePeerList?: () => Promise<readonly WorkspacePeerWindowListing[]>, sessionSend?: (request: {
     selector: string;
+    targetCorrelationId?: string;
+    senderCorrelationId?: string;
     message: string;
     mode: "steer" | "follow_up" | "abort";
     messageKind?: WorkspacePeerMessageKind;

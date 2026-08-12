@@ -22,6 +22,7 @@ export interface RoutingParams {
  *   4. Explicit protocol v1 + unnamed → "caller"
  */
 export declare function resolveReplyTo(params: RoutingParams): ReplyTarget;
+/** Resolve where a background completion notification should be delivered. */
 export declare function resolveAgentCompletionTarget(agent: {
     replyTo?: string;
     name?: string;
@@ -34,4 +35,5 @@ export interface LocalAgentMessageInput {
     senderLabel: string;
     replyToSelector?: string;
 }
+/** Canonical model-visible envelope for local agent-to-agent messages. */
 export declare function formatLocalAgentMessage(input: LocalAgentMessageInput): string;

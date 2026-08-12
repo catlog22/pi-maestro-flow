@@ -10,6 +10,7 @@ import { type ChildReclamationOutcome } from "../runs/execution.ts";
 import type { RunTeammateOptions } from "../runs/execution.ts";
 import type { TeammateState, AgentActivity, AgentProgressSnapshot, AgentRunOutcome, AgentRunPhase, ActiveAgent, AgentTerminalStatus, SettledAgentRecord, StructuredResult } from "../shared/types.ts";
 import { type AgentSummary } from "../agents/agents.ts";
+import { type ReplyTarget } from "../shared/routing.ts";
 export type AgentListView = "active" | "named" | "all";
 export type TeammateListView = AgentListView | "roles" | "windows" | "inbox";
 export type ListedAgentStatus = AgentActivity;
@@ -146,6 +147,20 @@ export declare function emitComplete(pi: ExtensionAPI, id: string | undefined, a
  * settled record, it just does not arrive as a new turn.
  */
 export declare function safeSendMessage(pi: ExtensionAPI, message: Parameters<ExtensionAPI["sendMessage"]>[0], options?: Parameters<ExtensionAPI["sendMessage"]>[1]): boolean;
+/**
+ * Deliver a teammate-complete notification according to reply_to semantics.
+ * - main (or root dispatch with no parent): inject into the root session.
+ * - caller with a live parent: forward over IPC to the dispatching child only.
+ */
+export declare function deliverTeammateCompleteNotification(options: {
+    pi: ExtensionAPI;
+    state: TeammateState;
+    envelope: Parameters<ExtensionAPI["sendMessage"]>[0];
+    replyTarget: ReplyTarget;
+    parentCid?: string;
+    parentSessionId?: string;
+    sessionGeneration?: number;
+}): boolean;
 export declare function notifyBackgroundFailure(pi: ExtensionAPI, id: string, agent: string, correlationId: string, error: unknown, state?: TeammateState): void;
 /**
  * When a deferred completion notification cannot reach the model (stale
@@ -207,6 +222,7 @@ export declare function settleGraphTaskAgent(state: TeammateState, correlationId
 export declare function settleGraphContainerAgent(state: TeammateState, correlationId: string, exitCode: number, lastResult?: string, wakeable?: boolean, terminalStatus?: AgentTerminalStatus): void;
 export declare function settleAgentLifecycle(state: TeammateState, correlationId: string, exitCode: number, lastResult: string | undefined, wakeable: boolean, abortProcess: boolean, terminalStatus?: AgentTerminalStatus): void;
 export declare function resolveAgentCorrelationId(state: TeammateState, target: string): string | undefined;
+/** Resolve display label, reply selector, and inbox `from` for a local message sender. */
 export declare function resolveLocalAgentSenderContext(state: TeammateState, senderCorrelationId?: string): {
     label: string;
     replyTo: string;

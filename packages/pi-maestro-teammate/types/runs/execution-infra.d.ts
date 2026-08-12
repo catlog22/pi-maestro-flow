@@ -157,6 +157,7 @@ export interface RunTeammateOptions {
     /** Additional child-only environment values (never applied to the host). */
     childEnvironment?: Record<string, string | undefined>;
     initialLeaseToken?: LeaseToken | ((correlationId: string) => LeaseToken | undefined);
+    /** Runtime generation of the spawning run is passed as the final callback argument. */
     onChildSpawned?: (stdin: import("node:stream").Writable, sendControl: (message: Record<string, unknown>) => boolean, sessionDir?: string, correlationId?: string, generation?: number) => void;
     /** Existing persisted Pi session to load for a cold logical-agent restart. */
     resumeSessionFile?: string;
