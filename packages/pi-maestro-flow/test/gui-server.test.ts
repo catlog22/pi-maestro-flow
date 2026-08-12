@@ -390,9 +390,9 @@ test("gui extension startup keeps new discovery across reverse completion", asyn
   // generation-aware context closure owns publication plus route admission.
   const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   const start = source.slice(source.indexOf('pi.on("session_start", async'));
-  assert.ok(start.indexOf("++guiLifecycleGeneration") < start.indexOf("await inputHistorySessionStart"));
+  assert.ok(start.indexOf("++guiLifecycleGeneration") < start.indexOf("await disposeTeammateSessionRegistrations"));
   const shutdown = source.slice(source.indexOf('pi.on("session_shutdown", async'));
-  assert.ok(shutdown.indexOf("guiLifecycleGeneration += 1") < shutdown.indexOf("await inputHistorySessionShutdown"));
+  assert.ok(shutdown.indexOf("guiLifecycleGeneration += 1") < shutdown.indexOf("await disposeTeammateSessionRegistrations"));
   assert.match(source, /const getGuiCtx = \(\) => guiContextForGeneration\(/);
   assert.match(source, /getCtx:\s*getGuiCtx,\s*isCurrent:\s*\(\) => getGuiCtx\(\) !== undefined/);
 });

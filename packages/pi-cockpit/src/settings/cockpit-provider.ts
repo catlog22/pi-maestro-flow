@@ -60,6 +60,7 @@ const CONFIG_KEYS = [
 	"doubleEscapeClearInput",
 	"fullscreenInput",
 	"copyOnSelect",
+	"historyEnabled",
 	"currency",
 	"currencyRate",
 	"quietMode",
@@ -144,6 +145,8 @@ const CATALOGS = {
 		"cockpit.fullscreenInput": "Fullscreen input",
 		"cockpit.fullscreenInput.description": "Alternate screen with the editor fixed at the bottom and an application-scrolled transcript. Terminal-native scrollback/search is replaced by transcript scrolling. Requires /reload.",
 		"cockpit.copyOnSelect": "Copy on selection",
+		"cockpit.historyEnabled": "Input history",
+		"cockpit.historyEnabled.description": "Persistent ↑/↓ prompt history owned by the Cockpit editor. On by default; disable to leave the editor to pi. Requires /reload.",
 		"cockpit.copyOnSelect.description": "Copy transcript text to the clipboard when a drag selection is released. Effective only while fullscreen input is active.",
 		"cockpit.currency": "Cost currency",
 		"cockpit.currency.description": "Footer cost currency: USD ($) or CNY (¥). CNY converts the USD estimate using the rate below.",
@@ -216,6 +219,8 @@ const CATALOGS = {
 		"cockpit.fullscreenInput": "全屏输入模式",
 		"cockpit.fullscreenInput.description": "使用 alternate screen 将输入框固定到底部，历史内容由应用内滚动代替。终端原生滚动/搜索被替代。需执行 /reload 生效。",
 		"cockpit.copyOnSelect": "选中即复制",
+		"cockpit.historyEnabled": "输入历史",
+		"cockpit.historyEnabled.description": "由 Cockpit 编辑器持有的持久 ↑/↓ 输入历史。默认开启；关闭则编辑器交还 pi。执行 /reload 后生效。",
 		"cockpit.copyOnSelect.description": "在拖选 transcript 文本并松开时自动复制到剪贴板。仅在全屏输入模式开启时生效。",
 		"cockpit.currency": "花费货币",
 		"cockpit.currency.description": "状态栏花费货币：美元（$）或人民币（¥）。人民币按下方汇率换算美元估算值。",
@@ -306,6 +311,14 @@ const DEFINITIONS: readonly SettingDefinition[] = [
 		"cockpit.copyOnSelect",
 		"live",
 		"cockpit.copyOnSelect.description",
+	),
+	booleanDefinition(
+		"historyEnabled",
+		"cockpit.group.layout",
+		4,
+		"cockpit.historyEnabled",
+		"extension-reload",
+		"cockpit.historyEnabled.description",
 	),
 	enumDefinition("currency", "cockpit.group.general", 4, "cockpit.currency", ["usd", "cny"], "live", "cockpit.currency.description"),
 	{
@@ -688,7 +701,7 @@ function setTitleValue(title: CockpitConfig["title"], field: string, value: Json
 }
 
 function validValue(key: CockpitSettingKey, value: JsonValue): boolean {
-	if (["enabled", "staticMode", "pinEditorBottom", "doubleEscapeClearInput", "fullscreenInput", "copyOnSelect", "quietMode", "todoExpanded", "hideNativeAgents"].includes(key)) return typeof value === "boolean";
+	if (["enabled", "staticMode", "pinEditorBottom", "doubleEscapeClearInput", "fullscreenInput", "copyOnSelect", "historyEnabled", "quietMode", "todoExpanded", "hideNativeAgents"].includes(key)) return typeof value === "boolean";
 	if (key === "sidebar.width") return typeof value === "number" && Number.isSafeInteger(value) && value >= 32 && value <= 56;
 	if (key === "title.maxLength") return typeof value === "number" && Number.isSafeInteger(value) && value >= 20 && value <= 200;
 	if (key === "title.generationModel") return typeof value === "string";
@@ -712,7 +725,7 @@ function activationFor(
 	const reloadInteractions: string[] = [];
 	for (const change of changes) {
 		if (change.key === "quietMode" && before.quietMode && !after.quietMode) reloadQuiet.push(change.key);
-		else if (change.key === "doubleEscapeClearInput" || change.key === "fullscreenInput") reloadInteractions.push(change.key);
+		else if (change.key === "doubleEscapeClearInput" || change.key === "fullscreenInput" || change.key === "historyEnabled") reloadInteractions.push(change.key);
 		else live.push(change.key);
 	}
 	return [

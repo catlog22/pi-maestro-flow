@@ -244,6 +244,12 @@ export interface CockpitConfig {
 	 * Effective only while fullscreenInput is active; ignored otherwise.
 	 */
 	copyOnSelect: boolean;
+	/**
+	 * Persistent ↑/↓ prompt history owned by the Cockpit custom editor
+	 * (`~/.pi/workspaces/<workspace-id>/input-history.json`). On by default so
+	 * history survives sessions; disable to leave the editor to pi.
+	 */
+	historyEnabled: boolean;
 	/** Footer cost currency: USD or CNY (CNY converts the USD estimate by currencyRate). */
 	currency: CurrencyMode;
 	/** CNY per 1 USD; only used while currency is "cny". */
@@ -274,6 +280,7 @@ export const DEFAULT_CONFIG: CockpitConfig = {
 	doubleEscapeClearInput: false,
 	fullscreenInput: false,
 	copyOnSelect: false,
+	historyEnabled: true,
 	currency: "usd",
 	currencyRate: 7.2,
 	icons: { mode: "auto" },

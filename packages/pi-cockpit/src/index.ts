@@ -920,6 +920,7 @@ export default function (pi: ExtensionAPI): void {
 	};
 
 	const installClaudeEditor = (ctx: ExtensionContext): void => {
+		if (!config.doubleEscapeClearInput && !config.fullscreenInput && !config.historyEnabled) return;
 		sessionTheme = ctx.ui.theme;
 		ensureHistoryStore(ctx);
 		const current = ctx.ui.getEditorComponent();

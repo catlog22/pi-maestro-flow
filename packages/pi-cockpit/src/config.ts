@@ -54,6 +54,7 @@ const isCurrencyMode = (v: unknown): v is CurrencyMode => v === "usd" || v === "
 		doubleEscapeClearInput: typeof o.doubleEscapeClearInput === "boolean" ? o.doubleEscapeClearInput : base.doubleEscapeClearInput,
 		fullscreenInput: typeof o.fullscreenInput === "boolean" ? o.fullscreenInput : base.fullscreenInput,
 		copyOnSelect: typeof o.copyOnSelect === "boolean" ? o.copyOnSelect : base.copyOnSelect,
+		historyEnabled: typeof o.historyEnabled === "boolean" ? o.historyEnabled : base.historyEnabled,
 		currency: isCurrencyMode(o.currency) ? o.currency : base.currency,
 		currencyRate: typeof o.currencyRate === "number" && Number.isFinite(o.currencyRate) && o.currencyRate > 0
 			? Math.min(100, Math.max(0.01, Math.round(o.currencyRate * 100) / 100))
@@ -141,6 +142,7 @@ export function mergeConfigDocument(raw: unknown, config: CockpitConfig): Record
 		doubleEscapeClearInput: config.doubleEscapeClearInput,
 		fullscreenInput: config.fullscreenInput,
 		copyOnSelect: config.copyOnSelect,
+		historyEnabled: config.historyEnabled,
 		currency: config.currency,
 		currencyRate: config.currencyRate,
 		icons,
