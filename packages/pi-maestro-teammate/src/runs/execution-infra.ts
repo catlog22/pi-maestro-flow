@@ -84,8 +84,15 @@ export interface TeammateTaskSpec {
   todo?: string | string[];
 }
 
+export type TeammateMode = "default" | "expert";
+
 export interface RunTeammateParams {
   tasks: TeammateTaskSpec[];
+  /**
+   * Dispatch strategy. Expert mode turns one objective into a workflow Leader
+   * that may build and run a nested teammate DAG.
+   */
+  mode?: TeammateMode;
   agent?: string;
   taskType?: TeammateTaskType;
   reply_to?: "caller" | "main";
@@ -914,12 +921,109 @@ export interface NormalizeTeammateResult {
   error?: string;
 }
 
+export const EXPERT_MODE_LEADER_AGENT = "workflow";
+export const EXPERT_MODE_LEADER_TASK_TYPE: TeammateTaskType = "planning";
+export const EXPERT_MODE_LEADER_NAME = "expert-leader";
+export const EXPERT_MODE_PROMPT_START = "<expert-leader-contract>";
+export const EXPERT_MODE_PROMPT_END = "</expert-leader-contract>";
+const EXPERT_MODE_PREPARED = Symbol("pi-maestro-teammate.expert-mode-prepared");
+const EXPERT_MODE_OVERRIDE_ERROR = Symbol("pi-maestro-teammate.expert-mode-override-error");
+type ExpertPreparedParams = RunTeammateParams & {
+  [EXPERT_MODE_PREPARED]?: true;
+  [EXPERT_MODE_OVERRIDE_ERROR]?: string;
+};
+
+export function buildExpertLeaderPrompt(objective: string): string {
+  return `${EXPERT_MODE_PROMPT_START}
+You are the Expert Leader. Own decomposition, delegation, evidence review, and synthesis; do not perform substantive investigation or implementation yourself.
+
+Objective:
+${objective}
+
+Execution contract:
+1. Build the smallest useful DAG. Dispatch only roles required by the objective; put independent work in one call and encode ordering with dependsOn. Use named-output interpolation only when downstream work consumes that output.
+2. Use exact agent roles from the available catalog and always set taskType. Do not set model fields; model routing owns provider selection. Never use mode=expert for child dispatches.
+3. Leaf agents must use maxNestingDepth: 0. Assign implementation to general-executor when available (fallback: general); keep exploration, analysis, review, and testing read-only unless their assignment explicitly owns writes.
+4. Give each overlapping file set exactly one writer. Run independent writers only on disjoint files, and pass concrete scope, acceptance criteria, and focused verification to every implementation task.
+5. Prefer foreground dispatch for every result needed by synthesis. Use background only for independent work that does not affect the current result. If a background result must be consumed, call observe exactly once with a bounded wait; never poll observe, teammate-list, or teammate-send for completion.
+6. Treat result publication as the dependency release boundary. Do not wait for agent_end after a consumable result is available. When a child returns an agent:// publication reference, read it with resource before synthesis. Do not synthesize while required tasks are unresolved.
+7. Require the smallest behavior-relevant verification from each child and reuse valid evidence. Do not schedule broad suites, duplicate review waves, or rerun passing checks without a material invalidator.
+8. On child failure, classify it and perform at most one bounded retry or reroute. Never hide, silently skip, or endlessly retry a failed lane.
+9. If the objective is Goal-gated, do not claim Goal completion from child self-reports. Return focused workspace evidence and blockers to the root so the canonical Goal verifier can decide fail-closed.
+10. Before answering, reconcile child outputs against the objective, resolve contradictions with evidence, and report remaining uncertainty. Return one concise synthesis with outcome, evidence, changed files when any, verification, and blockers.
+${EXPERT_MODE_PROMPT_END}`;
+}
+
+function expertModeOverrideError(params: RunTeammateParams): string | undefined {
+  if (params.mode !== "expert" || !Array.isArray(params.tasks)) return undefined;
+  const conflicts: string[] = [];
+  if (params.agent !== undefined && params.agent !== EXPERT_MODE_LEADER_AGENT) {
+    conflicts.push(`top-level agent must be \"${EXPERT_MODE_LEADER_AGENT}\"`);
+  }
+  if (params.taskType !== undefined && params.taskType !== EXPERT_MODE_LEADER_TASK_TYPE) {
+    conflicts.push(`top-level taskType must be \"${EXPERT_MODE_LEADER_TASK_TYPE}\"`);
+  }
+  if (params.maxNestingDepth !== undefined && params.maxNestingDepth !== 1) {
+    conflicts.push("top-level maxNestingDepth must be 1");
+  }
+  for (const [index, task] of params.tasks.entries()) {
+    if (task.agent !== undefined && task.agent !== EXPERT_MODE_LEADER_AGENT) {
+      conflicts.push(`tasks[${index}].agent must be \"${EXPERT_MODE_LEADER_AGENT}\"`);
+    }
+    if (task.taskType !== undefined && task.taskType !== EXPERT_MODE_LEADER_TASK_TYPE) {
+      conflicts.push(`tasks[${index}].taskType must be \"${EXPERT_MODE_LEADER_TASK_TYPE}\"`);
+    }
+    if (task.maxNestingDepth !== undefined && task.maxNestingDepth !== 1) {
+      conflicts.push(`tasks[${index}].maxNestingDepth must be 1`);
+    }
+  }
+  return conflicts.length > 0
+    ? `Expert mode owns Leader routing; ${conflicts.join("; ")}. Remove conflicting overrides.`
+    : undefined;
+}
+
+/**
+ * Expand the lightweight expert strategy before model routing. The workflow
+ * agent is the Leader; its existing teammate access and nesting budget provide
+ * the expert DAG without a second execution engine or persistent mode state.
+ */
+export function prepareTeammateMode(params: RunTeammateParams): RunTeammateParams {
+  const prepared = params as ExpertPreparedParams;
+  if (params.mode !== "expert" || !Array.isArray(params.tasks) || prepared[EXPERT_MODE_PREPARED]) {
+    return params;
+  }
+  const overrideError = expertModeOverrideError(params);
+  if (overrideError) {
+    return { ...params, [EXPERT_MODE_OVERRIDE_ERROR]: overrideError } as ExpertPreparedParams;
+  }
+  return {
+    ...params,
+    [EXPERT_MODE_PREPARED]: true,
+    maxNestingDepth: 1,
+    tasks: params.tasks.map((task) => ({
+      ...task,
+      prompt: buildExpertLeaderPrompt(task.prompt),
+      name: task.name ?? EXPERT_MODE_LEADER_NAME,
+      description: task.description ?? "Expert Leader",
+      agent: EXPERT_MODE_LEADER_AGENT,
+      taskType: EXPERT_MODE_LEADER_TASK_TYPE,
+      maxNestingDepth: 1,
+    })),
+  } as ExpertPreparedParams;
+}
+
 /** Normalize the tasks-only public contract into executable graph tasks. */
 export function normalizeTeammateParams(
   params: RunTeammateParams,
 ): NormalizeTeammateResult {
-  params.background = params.background === true;
   const warnings: string[] = [];
+  const prepared = params as ExpertPreparedParams;
+  const expertOverrideError = prepared[EXPERT_MODE_OVERRIDE_ERROR] ?? expertModeOverrideError(params);
+  if (expertOverrideError) {
+    return { tasks: [], isMultiTask: false, warnings, error: expertOverrideError };
+  }
+  params = prepareTeammateMode(params);
+  params.background = params.background === true;
 
   if (!Array.isArray(params.tasks) || params.tasks.length === 0) {
     return {
@@ -927,6 +1031,15 @@ export function normalizeTeammateParams(
       isMultiTask: false,
       warnings,
       error: 'Requires a non-empty "tasks" array.',
+    };
+  }
+
+  if (params.mode === "expert" && params.tasks.length !== 1) {
+    return {
+      tasks: [],
+      isMultiTask: false,
+      warnings,
+      error: 'Expert mode requires exactly one objective task for the workflow Leader.',
     };
   }
 
@@ -958,6 +1071,14 @@ export function normalizeTeammateParams(
   }
 
   for (const [index, task] of params.tasks.entries()) {
+    if (params.mode === "expert" && (task.maxNestingDepth ?? params.maxNestingDepth ?? 0) < 1) {
+      return {
+        tasks: [],
+        isMultiTask: false,
+        warnings,
+        error: "Expert mode requires maxNestingDepth >= 1 so the workflow Leader can dispatch experts.",
+      };
+    }
     if (task.background !== undefined) {
       warnings.push(
         `tasks[${index}]${task.name ? ` "${task.name}"` : ""} "background" is a dispatch-level setting; per-task background is not supported and is ignored. Pass background at the top level instead.`,

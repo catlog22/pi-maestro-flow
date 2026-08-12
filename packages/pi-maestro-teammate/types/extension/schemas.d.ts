@@ -30,6 +30,7 @@ export declare const TaskSpec: Type.TObject<{
     maxNestingDepth: Type.TOptional<Type.TInteger>;
 }>;
 export declare const TeammateParams: Type.TObject<{
+    mode: Type.TOptional<Type.TUnsafe<"default" | "expert">>;
     agent: Type.TOptional<Type.TString>;
     taskType: Type.TOptional<Type.TString>;
     reply_to: Type.TOptional<Type.TUnsafe<"main" | "caller">>;

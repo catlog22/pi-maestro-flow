@@ -391,10 +391,13 @@ export interface StructuredResult {
 /**
  * Per-result publication boundary. Consumers register durable work synchronously
  * with `waitUntil`; DAG dependents are released after those promises settle.
+ * Persistence consumers acknowledge the canonical resource only after the
+ * result is durably readable.
  */
 export interface TeammateResultPublishedEvent {
   result: StructuredResult;
   waitUntil(promise: Promise<unknown>): void;
+  acknowledgeResource?(uri: string): void;
 }
 
 export const TEAMMATE_RESULT_PUBLISHED_EVENT = "teammate:result-published";

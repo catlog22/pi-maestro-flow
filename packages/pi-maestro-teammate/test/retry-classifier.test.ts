@@ -96,6 +96,23 @@ test("HTTP status short-circuits message text (authoritative)", () => {
   assert.equal(classifyRetryError("429 Too Many Requests"), "provider");
 });
 
+test("configured upstream model-unavailable failures switch candidates without same-model retry", () => {
+  const groupedAccountError =
+    'OpenAI API error (404): {"message":"Model \\"gpt-5.3-spark\\" is not supported by any configured account in this group","type":"model_not_found"}';
+  assert.equal(classifyRetryError(groupedAccountError), "fallback-only");
+  assert.equal(classifyRetryError("404 model_not_found", 404), "fallback-only");
+  assert.equal(
+    classifyRetryError('The model "retired-model" does not exist or you do not have access', 404),
+    "fallback-only",
+  );
+  assert.equal(
+    classifyRetryError('The model "retired-model" does not exist or you do not have access', 403),
+    "fallback-only",
+  );
+  assert.equal(isRetryableProviderError(groupedAccountError), false);
+  assert.equal(isFallbackProviderError(groupedAccountError), true);
+});
+
 test("genuine permanent errors stay non-retryable and not fallback-eligible", () => {
   assert.equal(classifyRetryError("context_length_exceeded"), "non-retryable");
   assert.equal(classifyRetryError("invalid model: gpt-9"), "non-retryable");

@@ -9,7 +9,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type Component } from "@earendil-works/pi-tui";
 import type { Details } from "../shared/types.ts";
 type Theme = ExtensionContext["ui"]["theme"];
-export declare function renderTeammateCall(_args: Record<string, unknown>, _theme: Theme, _context?: {
+export declare function renderTeammateCall(args: Record<string, unknown>, theme: Theme, _context?: {
     expanded?: boolean;
     isPartial?: boolean;
 }): Component;
@@ -23,7 +23,7 @@ export declare function renderTeammateListResult(result: AgentToolResult<{
 }, theme: Theme): Component;
 export declare function renderTeammateResult(result: AgentToolResult<Details>, options: {
     expanded: boolean;
-}, theme: Theme): Component;
+}, theme: Theme, args?: Record<string, unknown>): Component;
 export declare function renderQuietTeammateAux(name: "teammate-send" | "teammate-wait" | "teammate-watch" | "teammate-started" | "teammate-monitor" | "observe", rest: string, status: "running" | "success" | "failure", theme: Theme): Component | undefined;
 /**
  * Host-contract fallbacks for auxiliary tool renderers when quiet mode is off.

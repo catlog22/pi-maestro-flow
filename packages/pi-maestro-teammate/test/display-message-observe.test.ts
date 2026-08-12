@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   displayMessageForResult,
+  emitTeammateResultPublished,
   setAgentStructuredOutput,
   toStructuredResults,
 } from "../src/extension/teammate-core.ts";
 import { buildWatchOutput } from "../src/extension/teammate-helpers.ts";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ActiveAgent, SingleResult } from "../src/shared/types.ts";
 
 function result(overrides: Partial<SingleResult>): SingleResult {
@@ -46,6 +48,23 @@ function agentFixture(overrides: Partial<ActiveAgent>): ActiveAgent {
   };
 }
 
+async function acknowledgePersistence(value: SingleResult): Promise<void> {
+  assert.ok(value.publicationId, "test result must carry a publication id");
+  const pi = {
+    events: {
+      emit(
+        _name: string,
+        event: { waitUntil(promise: Promise<unknown>): void; acknowledgeResource?(uri: string): void },
+      ) {
+        event.waitUntil(Promise.resolve().then(() => {
+          event.acknowledgeResource?.(`agent://${value.publicationId}`);
+        }));
+      },
+    },
+  } as unknown as ExtensionAPI;
+  await emitTeammateResultPublished(pi, value, "D:/workspace");
+}
+
 test("displayMessageForResult surfaces the structured output when the transcript ends with the tool confirmation", () => {
   const out = displayMessageForResult(result({
     messages: [{ role: "tool", content: "Structured output saved." }],
@@ -66,22 +85,75 @@ test("displayMessageForResult keeps prose answers and appends the structured val
   assert.match(out, /"verdict": "ok"/);
 });
 
-test("displayMessageForResult leaves non-structured results unchanged", () => {
+test("displayMessageForResult leaves non-structured results unchanged without persistence acknowledgement", () => {
   const out = displayMessageForResult(result({
     messages: [{ role: "assistant", content: "Plain answer" }],
   }));
   assert.equal(out, "Plain answer");
 });
 
-test("displayMessageForResult delivers large structured outputs in full", () => {
+test("displayMessageForResult keeps small persisted results inline and adds the canonical id", async () => {
+  const persisted = result({
+    publicationId: "publication-small",
+    messages: [{ role: "assistant", content: "Plain answer" }],
+  });
+  await acknowledgePersistence(persisted);
+  assert.equal(displayMessageForResult(persisted), "Plain answer\n\nFull result: agent://publication-small");
+});
+
+test("displayMessageForResult delivers large structured outputs in full without persistence acknowledgement", () => {
   const data = "x".repeat(20_000);
   const out = displayMessageForResult(result({
     messages: [{ role: "tool", content: "Structured output saved." }],
     structuredOutput: { data },
   }));
   assert.doesNotMatch(out, /truncated/);
-  assert.ok(out.includes(data), "full structured value must be present");
+  assert.ok(out.includes(data), "full structured value must remain when no durable reference exists");
   assert.ok(out.endsWith(`${data}"\n}`), "value must not be cut off");
+});
+
+test("displayMessageForResult replaces large persisted structured outputs with a description and id", async () => {
+  const data = "x".repeat(20_000);
+  const persisted = result({
+    publicationId: "publication-large",
+    messages: [{ role: "tool", content: "Structured output saved." }],
+    structuredOutput: { data },
+  });
+  await acknowledgePersistence(persisted);
+  const out = displayMessageForResult(persisted);
+  assert.match(out, /^Structured result saved \(19\.6K chars; fields: data\)\./);
+  assert.match(out, /Full result: agent:\/\/publication-large$/);
+  assert.equal(out.includes(data), false);
+});
+
+test("displayMessageForResult keeps the full result when durable persistence is rejected", async () => {
+  const data = "x".repeat(20_000);
+  const rejected = result({
+    publicationId: "publication-rejected",
+    messages: [{ role: "tool", content: "Structured output saved." }],
+    structuredOutput: { data },
+  });
+  const pi = {
+    events: {
+      emit(
+        _name: string,
+        event: { waitUntil(promise: Promise<unknown>): void; acknowledgeResource?(uri: string): void },
+      ) {
+        event.acknowledgeResource?.("agent://publication-rejected");
+        event.waitUntil(Promise.reject(new Error("store unavailable")));
+      },
+    },
+  } as unknown as ExtensionAPI;
+  const originalWarn = console.warn;
+  console.warn = () => undefined;
+  try {
+    await emitTeammateResultPublished(pi, rejected, "D:/workspace");
+  } finally {
+    console.warn = originalWarn;
+  }
+  const out = displayMessageForResult(rejected);
+  assert.ok(out.includes(data));
+  assert.doesNotMatch(out, /agent:\/\//);
 });
 
 test("displayMessageForResult keeps failure diagnostics authoritative", () => {

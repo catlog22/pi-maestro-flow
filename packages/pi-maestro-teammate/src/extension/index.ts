@@ -8,11 +8,11 @@
 
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
 import crossSpawn from "cross-spawn";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -87,6 +87,24 @@ import {
   loadPeerGoalContext,
 } from "./monitor-goals.ts";
 import {
+  buildDelegatedWorkerBootstrap,
+  buildDelegationDelivery,
+  buildDelegationPlannerPrompt,
+  cancelDelegationDraft,
+  createDelegationDraft,
+  DELEGATION_TASK_SCHEMA,
+  delegationDocumentPath,
+  listDelegationRecords,
+  loadDelegationRecord,
+  parseDelegationCommand,
+  parseDelegationTaskDraft,
+  readDelegationDocument,
+  updateDelegationRecord,
+  type DelegationRecord,
+  type DelegationSourceContext,
+  type DelegationWorkerContext,
+} from "./task-delegation.ts";
+import {
   DEFAULT_ADVISOR_CONFIG,
   buildAdvisorPrompt,
   createAdvisorState,
@@ -128,6 +146,7 @@ import {
 import {
   runSingleTeammate,
   runGraph,
+  prepareTeammateMode,
   normalizeTeammateParams,
   inferGraphMode,
   taskDependencyNames,
@@ -199,7 +218,6 @@ import {
 } from "../runs/execution-infra.ts";
 import { showMonitorOverlay, type MonitorSessionRow } from "../tui/monitor-overlay.ts";
 import { showSessionSendOverlay } from "../tui/session-send-overlay.ts";
-import { showExpertsStatusOverlay } from "../tui/experts-status-overlay.ts";
 import {
   SETTINGS_LOCALE_EVENT,
   applySettingsLocaleEvent,
@@ -259,23 +277,6 @@ import {
   refreshModelRegistry,
   type TeammateTaskType,
 } from "../models/model-routing.ts";
-import {
-  ensureExpertsDispatch,
-  getMode,
-  getStatus,
-  getLeaderWaiting,
-  injectTurnReminder,
-  injectWaitingFragment,
-  loadRules,
-  noteExpertsSettled,
-  resolveMaestroStageFromWorkspace,
-  syncActiveStageFromMaestro,
-  formatStageBirthPacket,
-  setMode,
-  formatExpertsPanel,
-  EXPERTS_HARVEST_STATUS_KEY,
-  expertsHarvestStatusFromCwd,
-} from "../experts-mode/index.ts";
 import type { TeammateThinkingInput } from "../shared/thinking.ts";
 import {
   getTeammateChildToolBroker,
@@ -482,17 +483,6 @@ export default function registerTeammateExtension(
     return id.trim() ? id : undefined;
   };
 
-  /** P7b: push pending knowledgeSuggestions count into extension status for cockpit/footer. */
-  const refreshExpertsHarvestStatus = (cwd: string): void => {
-    try {
-      if (!widgetCtx?.ui || typeof widgetCtx.ui.setStatus !== "function") return;
-      const text = expertsHarvestStatusFromCwd(cwd);
-      widgetCtx.ui.setStatus(EXPERTS_HARVEST_STATUS_KEY, text || undefined);
-    } catch {
-      /* status is best-effort */
-    }
-  };
-
   const injectTeammateContext = (
     event: { systemPrompt: string },
     ctx: ExtensionContext,
@@ -503,70 +493,7 @@ export default function registerTeammateExtension(
       ? appendTaskTypeRoutingContext(withAgents, ctx.cwd, discoverAgents(ctx.cwd))
       : withAgents;
     const withDepth = appendTeammateDepthContext(withTaskType, currentDepth, currentMaxDispatchDepth);
-    // Experts Mode P2/P4/P4.1: Qoder-like per-turn hard reminder + stage +
-    // waiting fragment. Stage comes from stored activeStage first (avoids a
-    // .workflow scan every turn); falls back to Maestro session.json.
-    let withExperts = withDepth;
-    try {
-      const mode = getMode(ctx.cwd);
-      const activeState = (() => {
-        try {
-          return getStatus(ctx.cwd).activeStage;
-        } catch {
-          return null;
-        }
-      })();
-      let stage = activeState?.stage;
-      let stageHint: string | undefined;
-      // P5.1: pass pipeline taskTypes/agents + rules so the reminder can
-      // add the orchestrator discipline fragment and vice-lead hint.
-      const taskTypes = activeState?.taskTypes?.filter(Boolean) || undefined;
-      const agents = activeState?.agents?.filter(Boolean) || undefined;
-      let rules: ReturnType<typeof loadRules> | undefined;
-      if (mode === "experts") {
-        try {
-          rules = loadRules();
-        } catch {
-          rules = undefined;
-        }
-        try {
-          if (!stage) {
-            // P4.1: auto-detect from Maestro session.json when not yet written.
-            const found = resolveMaestroStageFromWorkspace(ctx.cwd);
-            if (found?.stage) {
-              stage = found.stage;
-              try {
-                const plan = syncActiveStageFromMaestro(ctx.cwd);
-                if (plan) stageHint = formatStageBirthPacket(plan);
-              } catch {
-                // best-effort persist; stage is still usable
-              }
-            }
-          } else {
-            // One-line pipeline summary from stored state (no re-scan).
-            const types = (activeState?.taskTypes || []).filter(Boolean).join(" → ");
-            stageHint = `Stage \"${activeState?.stage}\" pipeline: ${types || "—"} (source=${activeState?.source || "state"}).`;
-          }
-        } catch {
-          // never break context injection
-        }
-      }
-      withExperts = injectTurnReminder(withExperts, {
-        mode,
-        cwd: ctx.cwd,
-        stage,
-        stageHint,
-        taskTypes,
-        agents,
-        rules,
-      });
-      if (mode === "experts") {
-        withExperts = injectWaitingFragment(withExperts, getLeaderWaiting(ctx.cwd));
-      }
-    } catch {
-      // never break context injection
-    }
-    return { systemPrompt: monitorInteractionModeActive ? appendMonitorModeContext(withExperts) : withExperts };
+    return { systemPrompt: monitorInteractionModeActive ? appendMonitorModeContext(withDepth) : withDepth };
   };
 
   // =========================================================================
@@ -901,8 +828,8 @@ export default function registerTeammateExtension(
       renderCall(args, theme, context) {
         return renderTeammateCall(args, theme, context);
       },
-      renderResult(result, options, theme) {
-        return renderTeammateResult(result, options, theme);
+      renderResult(result, options, theme, context) {
+        return renderTeammateResult(result, options, theme, context?.args);
       },
     };
     if (canDispatchNestedTeammate) pi.registerTool(proxyTeammateTool);
@@ -1346,8 +1273,10 @@ export default function registerTeammateExtension(
     const registry = sessionHostRegistry;
     if (!registry) return { delivered: false, error: "Session delivery journal is unavailable." };
     let outgoing: WindowThreadEntryInput | undefined;
+    let publicationStage: "published" | "accepted" | "rejected" | undefined;
     try {
       const command = await enqueueWorkspacePeerCommand(publisher.identity, target, mode, message, {
+        commandId: request.messageId,
         source,
         messageKind: request.messageKind,
         traceId: request.traceId,
@@ -1375,6 +1304,7 @@ export default function registerTeammateExtension(
           registry.thread.record(outgoing);
         },
       });
+      publicationStage = "published";
       const publishedOutgoing = outgoing;
       if (!publishedOutgoing) throw new Error("Workspace command was published without a durable outgoing journal entry.");
       let response: Awaited<ReturnType<typeof waitForWorkspacePeerCommandResponse>>;
@@ -1383,10 +1313,14 @@ export default function registerTeammateExtension(
       } catch (error) {
         registry.thread.record({
           ...publishedOutgoing,
-          status: "rejected",
+          status: "timeout",
           updatedAt: Math.max(command.createdAt, Date.now()),
         });
-        return { delivered: false, error: error instanceof Error ? error.message : String(error) };
+        return {
+          delivered: false,
+          error: error instanceof Error ? error.message : String(error),
+          receipt: { publicationStage, messageId: command.commandId },
+        };
       }
       const effectiveMode = response?.effectiveAction ?? mode;
       const deliveryStage = target.agent.correlationId === WORKSPACE_MAIN_SESSION_MARKER
@@ -1395,15 +1329,27 @@ export default function registerTeammateExtension(
       const status: WindowThreadStatus = !response || response.status === "expired"
         ? "timeout"
         : response.status === "accepted" ? deliveryStage : "rejected";
+      if (response?.status === "accepted") publicationStage = "accepted";
+      else if (response && response.status !== "expired") publicationStage = "rejected";
       registry.thread.record({
         ...publishedOutgoing,
         effectiveMode,
         status,
         updatedAt: Math.max(command.createdAt, response?.respondedAt ?? Date.now()),
       });
-      if (!response || response.status === "expired") return { delivered: false, error: `Timed out sending to workspace target "${query}".` };
+      if (!response || response.status === "expired") {
+        return {
+          delivered: false,
+          error: `Timed out sending to workspace target "${query}".`,
+          receipt: { publicationStage, messageId: command.commandId },
+        };
+      }
       if (response.status !== "accepted") {
-        return { delivered: false, error: response.message ?? `Workspace target "${query}" rejected the message.` };
+        return {
+          delivered: false,
+          error: response.message ?? `Workspace target "${query}" rejected the message.`,
+          receipt: { publicationStage, messageId: command.commandId },
+        };
       }
       return {
         delivered: true,
@@ -1411,12 +1357,13 @@ export default function registerTeammateExtension(
           requestedMode: mode,
           effectiveMode,
           deliveryStage,
+          publicationStage,
           messageId: command.commandId,
           ...(command.traceId === undefined ? {} : { traceId: command.traceId }),
         },
       };
     } catch (error) {
-      if (outgoing) {
+      if (outgoing && publicationStage === undefined) {
         try {
           registry.thread.record({
             ...outgoing,
@@ -1427,7 +1374,13 @@ export default function registerTeammateExtension(
           // Preserve the original journal/publication failure.
         }
       }
-      return { delivered: false, error: error instanceof Error ? error.message : String(error) };
+      return {
+        delivered: false,
+        error: error instanceof Error ? error.message : String(error),
+        ...(publicationStage ? {
+          receipt: { publicationStage, ...(outgoing ? { messageId: outgoing.messageId } : {}) },
+        } : {}),
+      };
     }
   };
 
@@ -2021,28 +1974,7 @@ export default function registerTeammateExtension(
 
       const baseCwd = (params.cwd ?? state.baseCwd) || ctx.cwd;
       await refreshModelRegistry(ctx);
-      // Experts Mode: ensure taskType/agent before applyModelRouting (order is required).
-      // P4: pass stage from tool params / MAESTRO_STAGE so stagePolicies beat keyword triage.
-      const stageFromParams =
-        typeof (params as { stage?: unknown }).stage === "string"
-          ? String((params as { stage?: string }).stage)
-          : undefined;
-      params = ensureExpertsDispatch(params, {
-        cwd: baseCwd,
-        stage: stageFromParams,
-      }) as typeof params;
-      // HV-03: if we return before spawn, reverse the waiting +N reserved above.
-      const settleReservedWaiting = (reason: string): void => {
-        try {
-          const meta = (params as { __experts?: { waitingDelta?: number } }).__experts;
-          const delta = typeof meta?.waitingDelta === "number" ? meta.waitingDelta : 0;
-          if (delta > 0 && getMode(baseCwd) === "experts") {
-            noteExpertsSettled(baseCwd, { settledCount: delta, reason });
-          }
-        } catch {
-          /* ignore */
-        }
-      };
+      params = prepareTeammateMode(params);
       params = applyModelRouting(
         params,
         baseCwd,
@@ -2054,7 +1986,6 @@ export default function registerTeammateExtension(
       // --- Normalize to task list (shared with the child proxy path) ---
       const normalization = normalizeTeammateParams(params);
       if (normalization.error) {
-        settleReservedWaiting("extension-normalize-error");
         return {
           content: [{ type: "text", text: normalization.error }],
           isError: true,
@@ -2065,7 +1996,6 @@ export default function registerTeammateExtension(
       const normalizedTasks = normalization.tasks;
       const budget = checkActiveAgentBudget(state, normalizedTasks.length);
       if (!budget.allowed) {
-        settleReservedWaiting("extension-budget-exhausted");
         return {
           content: [{
             type: "text",
@@ -3072,36 +3002,10 @@ export default function registerTeammateExtension(
           const activeGraphMode = inferGraphMode(normalizedTasks);
           const executeGraph = async () => {
             const options = makeOptions();
-            let results: SingleResult[] | undefined;
-            try {
-              results = await runWithProgressFlushCleanup(
-                () => runGraph(normalizedTasks, params.concurrency ?? 4, options),
-                progressFlushGate,
-              );
-            } finally {
-              // P3: auto-clear leaderWaiting when multi-task graph settles (experts only).
-              // Note: runGraph path may not go through runTeammate wrapper.
-              // If runGraph throws, still settle with empty contents (best effort).
-              try {
-                if (getMode(baseCwd) === "experts" && normalizedTasks.length > 0) {
-                  noteExpertsSettled(baseCwd, {
-                    settledCount: normalizedTasks.length,
-                    reason: "extension-graph-settled",
-                    // P7: harvest from each graph result message.
-                    contents: (results ?? []).map((r) => displayMessageForResult(r)),
-                  });
-                  refreshExpertsHarvestStatus(baseCwd);
-                }
-              } catch {
-                /* ignore */
-              }
-            }
-            // runGraph threw before producing results: the exception already
-            // propagated through the finally above (waiting cleared, contents
-            // empty). This guard only satisfies the type system.
-            if (!results) {
-              throw new Error("teammate graph run failed before producing results");
-            }
+            const results = await runWithProgressFlushCleanup(
+              () => runGraph(normalizedTasks, params.concurrency ?? 4, options),
+              progressFlushGate,
+            );
 
             const hasError = results.some(resultIsError);
             const totalDur = activeGraphMode === "chain"
@@ -3302,21 +3206,6 @@ export default function registerTeammateExtension(
             const result = race.result;
             if (!result) throw new Error("Foreground teammate finished without a result.");
             const lastMessage = displayMessageForResult(result);
-            try {
-              if (getMode(baseCwd) === "experts") {
-                noteExpertsSettled(baseCwd, {
-                  settledCount: 1,
-                  agentId: result.agent || singleTask?.name || singleTask?.agent,
-                  reason: "extension-single-settled",
-                  // P7: harvest knowhow suggestions from expert RESULT (suggest-only).
-                  content: lastMessage,
-                  taskType: typeof singleTask?.taskType === "string" ? singleTask.taskType : undefined,
-                });
-                refreshExpertsHarvestStatus(baseCwd);
-              }
-            } catch {
-              /* ignore */
-            }
             publishSingleResult(result, false);
             const details: Details = {
               mode: "single",
@@ -3338,20 +3227,6 @@ export default function registerTeammateExtension(
           detached = true;
           runPromise.then((result) => {
             if (!ownsDispatchGeneration()) return;
-            try {
-              if (getMode(baseCwd) === "experts") {
-                noteExpertsSettled(baseCwd, {
-                  settledCount: 1,
-                  agentId: result.agent || singleTask?.name || singleTask?.agent,
-                  reason: "extension-single-bg-settled",
-                  content: displayMessageForResult(result),
-                  taskType: typeof singleTask?.taskType === "string" ? singleTask.taskType : undefined,
-                });
-                refreshExpertsHarvestStatus(baseCwd);
-              }
-            } catch {
-              /* ignore */
-            }
             publishSingleResult(result, true);
           }).catch((error) => {
             if (!ownsDispatchGeneration()) return;
@@ -3425,8 +3300,8 @@ export default function registerTeammateExtension(
       return renderTeammateCall(args, theme, context);
     },
 
-    renderResult(result, options, theme) {
-      return renderTeammateResult(result, options, theme);
+    renderResult(result, options, theme, context) {
+      return renderTeammateResult(result, options, theme, context?.args);
     },
   };
 
@@ -4364,6 +4239,7 @@ export default function registerTeammateExtension(
     cwd: string;
     objective: string;
     presentation: ManagedWindowPresentation;
+    management: "monitor" | "delegation";
     ownerId?: string;
     ownerNonce?: string;
     pid?: number;
@@ -4402,6 +4278,8 @@ export default function registerTeammateExtension(
     cwdFallback: string,
     presentation: ManagedWindowPresentation = "headless",
     sessionName = name,
+    forkSessionFile?: string,
+    management: "monitor" | "delegation" = "monitor",
   ): Promise<{ ok: boolean; window?: ManagedWindow; error?: string }> {
     if (managedWindows.has(name)) return { ok: false, error: `window "${name}" is already spawned` };
     if (managedWindows.size >= MAX_MANAGED_WINDOWS) {
@@ -4413,9 +4291,10 @@ export default function registerTeammateExtension(
     if (!objective.trim()) return { ok: false, error: "window objective is required" };
 
     const cwd = monitorLedgerRoot ?? state.baseCwd ?? cwdFallback;
+    const forkArgs = forkSessionFile ? ["--fork", forkSessionFile] : [];
     const piArgs = presentation === "interactive"
-      ? ["--name", sessionName, objective]
-      : ["-p", objective, "--name", sessionName];
+      ? [...forkArgs, "--name", sessionName, objective]
+      : [...forkArgs, "-p", objective, "--name", sessionName];
     const piCommand = getPiSpawnCommand(piArgs);
     const launch = presentation === "interactive"
       ? getInteractiveTerminalLaunchSpec(piCommand, cwd, { title: `Pi worker · ${name}` })
@@ -4435,6 +4314,7 @@ export default function registerTeammateExtension(
       cwd,
       objective,
       presentation,
+      management,
     };
     managedWindows.set(name, window);
 
@@ -4578,25 +4458,571 @@ export default function registerTeammateExtension(
   }
 
   async function stopAllManagedWindows(): Promise<void> {
-    let strictDiscoveryReady = false;
-    try {
-      await refreshWorkspacePeerOwnersStrict();
-      strictDiscoveryReady = true;
-    } catch (error) {
-      console.error("[pi-maestro-teammate] managed-window shutdown discovery failed; interactive windows will not be killed from stale PID data:", error);
+    const snapshot = [...managedWindows.values()];
+    const hasInteractiveWindows = snapshot.some((window) => window.presentation === "interactive");
+    let strictDiscoveryReady = !hasInteractiveWindows;
+    if (hasInteractiveWindows) {
+      try {
+        await refreshWorkspacePeerOwnersStrict();
+        strictDiscoveryReady = true;
+      } catch (error) {
+        console.error("[pi-maestro-teammate] managed-window shutdown discovery failed; interactive windows will not be killed from stale PID data:", error);
+      }
     }
 
-    const snapshot = [...managedWindows.values()];
     await Promise.allSettled(snapshot.map(async (window) => {
       if (window.presentation === "interactive" && !strictDiscoveryReady) return;
       try {
-        if (window.presentation === "interactive" && !exactManagedWindowOwner(window)) return;
+        if (window.presentation === "interactive") {
+          if (window.management === "delegation") {
+            try {
+              const record = await loadDelegationRecord(state.baseCwd || window.cwd, window.name);
+              const owner = delegationOwnerCandidate(record, workspacePeerOwners);
+              if (!owner) return;
+              window.ownerId = owner.ownerId;
+              window.ownerNonce = owner.ownerNonce;
+              window.pid = owner.pid;
+            } catch (error) {
+              console.error(`[pi-maestro-teammate] failed to reconcile delegation ${window.name} before shutdown:`, error);
+              if (!exactManagedWindowOwner(window)) return;
+            }
+          } else if (!exactManagedWindowOwner(window)) {
+            return;
+          }
+        }
         await terminateManagedWindowProcess(window);
+        await closeDelegationRecordAfterTermination(window);
         if (managedWindows.get(window.name) === window) managedWindows.delete(window.name);
       } catch (error) {
         console.error(`[pi-maestro-teammate] managed window ${window.name} was not reclaimed during shutdown:`, error);
       }
     }));
+  }
+
+  function delegationWorkspaceRoot(ctx: ExtensionCommandContext): string {
+    return state.baseCwd || ctx.cwd;
+  }
+
+  function canonicalDelegationForkSource(
+    source: DelegationSourceContext,
+    ctx: ExtensionCommandContext,
+    expectedGeneration = state.sessionGeneration,
+  ): string {
+    if (state.sessionGeneration !== expectedGeneration
+      || state.currentSessionId !== ctx.sessionManager.getSessionId()) {
+      throw new Error("Current Pi session changed during delegation setup.");
+    }
+    if (source.workspaceId !== workspaceIdForCwd(ctx.cwd)) {
+      throw new Error("Delegation source belongs to a different workspace.");
+    }
+    const currentSessionFile = ctx.sessionManager.getSessionFile();
+    if (!currentSessionFile) throw new Error("Current Pi session file is unavailable.");
+    try {
+      if (!lstatSync(source.sessionFile).isFile() || lstatSync(source.sessionFile).isSymbolicLink()) {
+        throw new Error("Delegation source must be a regular non-symlink session file.");
+      }
+      const currentCanonical = realpathSync(currentSessionFile);
+      const sourceCanonical = realpathSync(source.sessionFile);
+      if (!isSessionPathContained(dirname(currentCanonical), sourceCanonical)) {
+        throw new Error("Delegation fork source is not contained in the current workspace session directory.");
+      }
+      return sourceCanonical;
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function delegationSourceContext(ctx: ExtensionCommandContext): DelegationSourceContext {
+    const sessionFile = ctx.sessionManager.getSessionFile();
+    if (!sessionFile || !existsSync(sessionFile)) {
+      throw new Error("Current Pi session file is unavailable; delegation cannot fork this state.");
+    }
+    const source: DelegationSourceContext = {
+      cwd: delegationWorkspaceRoot(ctx),
+      workspaceId: workspaceIdForCwd(ctx.cwd),
+      sessionId: ctx.sessionManager.getSessionId(),
+      sessionName: ctx.sessionManager.getSessionName?.() ?? undefined,
+      sessionFile,
+    };
+    return { ...source, sessionFile: canonicalDelegationForkSource(source, ctx) };
+  }
+
+  function delegationPlannerFailure(result: SingleResult): string {
+    const finalMessage = result.messages.at(-1)?.content?.trim();
+    return finalMessage || `planner exited with code ${result.exitCode}`;
+  }
+
+  function delegationProgressTokens(tokens: number): string {
+    return tokens >= 1_000 ? `${(tokens / 1_000).toFixed(1)}k tok` : `${tokens} tok`;
+  }
+
+  function delegationPlannerProgressText(
+    progress: AgentProgress,
+    workerContext: DelegationWorkerContext,
+  ): string {
+    const phase = progress.phase ?? progress.status;
+    const elapsed = `${Math.max(0, Math.floor(progress.durationMs / 1_000))}s`;
+    const recentTool = progress.recentTools.at(-1);
+    return [
+      "delegate planner",
+      `target:${workerContext}`,
+      phase,
+      elapsed,
+      `${progress.toolCount} tool${progress.toolCount === 1 ? "" : "s"}`,
+      delegationProgressTokens(progress.tokens),
+      ...(recentTool ? [`${recentTool.name}:${recentTool.status}`] : []),
+    ].join(" | ");
+  }
+
+  async function selectDelegationWorkerContext(
+    ctx: ExtensionCommandContext,
+  ): Promise<DelegationWorkerContext | undefined> {
+    const freshOption = "New session (fresh) - task document supplies context";
+    const forkOption = "Fork current session - worker inherits the source conversation";
+    preemptCockpitResize();
+    const selected = await ctx.ui.select(
+      "Delegation worker context",
+      [freshOption, forkOption],
+    );
+    if (selected === freshOption) return "fresh";
+    if (selected === forkOption) return "fork";
+    return undefined;
+  }
+
+  async function draftDelegation(
+    request: string,
+    workerContext: DelegationWorkerContext,
+    ctx: ExtensionCommandContext,
+  ): Promise<DelegationRecord> {
+    const root = delegationWorkspaceRoot(ctx);
+    const generation = state.sessionGeneration;
+    const source = delegationSourceContext(ctx);
+    const progressKey = "teammate-delegate-planner";
+    const startedAt = Date.now();
+    let lastProgressAt = 0;
+    ctx.ui.setStatus(progressKey, `delegate planner | target:${workerContext} | preparing fork | 0s`);
+    try {
+      const forkSessionFile = canonicalDelegationForkSource(source, ctx, generation);
+      ctx.ui.setStatus(progressKey, `delegate planner | target:${workerContext} | starting | 0s`);
+      const result = await runSingleTeammate(
+        {
+          agent: "planner",
+          taskType: "planning",
+          task: buildDelegationPlannerPrompt(request, source, workerContext),
+          context: "fork",
+          thinking: "high",
+          timeoutMs: 120_000,
+          outputSchema: DELEGATION_TASK_SCHEMA,
+        },
+        {
+          baseCwd: root,
+          depth: 0,
+          parentSessionFile: forkSessionFile,
+          onProgress(progress) {
+            const now = Date.now();
+            if (now - lastProgressAt < 250 && progress.status === "running") return;
+            lastProgressAt = now;
+            ctx.ui.setStatus(progressKey, delegationPlannerProgressText(progress, workerContext));
+          },
+        },
+      );
+      if (result.exitCode !== 0 || result.structuredOutput === undefined) {
+        throw new Error(`Delegation planner failed: ${delegationPlannerFailure(result)}`);
+      }
+      ctx.ui.setStatus(
+        progressKey,
+        `delegate planner | target:${workerContext} | validating output | ${Math.max(0, Math.floor((Date.now() - startedAt) / 1_000))}s`,
+      );
+      const task = parseDelegationTaskDraft(result.structuredOutput);
+      ctx.ui.setStatus(
+        progressKey,
+        `delegate planner | target:${workerContext} | saving draft | ${Math.max(0, Math.floor((Date.now() - startedAt) / 1_000))}s`,
+      );
+      return await createDelegationDraft(root, {
+        request,
+        workerContext,
+        source: { ...source, sessionFile: forkSessionFile },
+        task,
+        planner: {
+          agent: "planner",
+          correlationId: result.correlationId,
+          model: result.model,
+          durationMs: result.durationMs,
+        },
+      });
+    } finally {
+      ctx.ui.setStatus(progressKey, undefined);
+    }
+  }
+
+  async function confirmDelegationSend(record: DelegationRecord, ctx: ExtensionCommandContext): Promise<string | undefined> {
+    const root = delegationWorkspaceRoot(ctx);
+    const document = await readDelegationDocument(root, record.id);
+    const preview = document.length > 3_200
+      ? `${document.slice(0, 3_200)}\n\n[Preview truncated; full document: ${delegationDocumentPath(root, record.id)}]`
+      : document;
+    preemptCockpitResize();
+    const targetDescription = record.workerContext === "fork"
+      ? `fork source session ${record.source.sessionName ?? record.source.sessionId}`
+      : "start a fresh session";
+    const confirmed = await ctx.ui.confirm(
+      `Send delegation ${record.id}?`,
+      `${preview}\nThe interactive worker will ${targetDescription} and receive this document.`,
+    );
+    return confirmed ? document : undefined;
+  }
+
+  async function rollbackDelegationWindow(
+    record: DelegationRecord,
+    root: string,
+    failure: string,
+  ): Promise<string> {
+    const cleanup = await stopManagedWindow(record.id);
+    const cleanupText = cleanup.ok
+      ? `setup rolled back (${cleanup.status ?? "stopped"})`
+      : `window ownership retained: ${cleanup.error ?? "reclamation not proven"}`;
+    await updateDelegationRecord(root, record.id, (current) => cleanup.ok ? {
+      ...current,
+      status: "confirmed",
+      launch: undefined,
+      window: undefined,
+      dispatchMessageId: undefined,
+      updatedAt: Date.now(),
+      lastError: failure,
+    } : {
+      ...current,
+      updatedAt: Date.now(),
+      lastError: `${failure}; ${cleanupText}`,
+    }, {
+      expectedRevision: record.revision,
+      expectedStatuses: [record.status],
+    }).catch((recordError) => {
+      console.error("[pi-maestro-teammate] failed to persist delegation rollback:", recordError);
+    });
+    return cleanupText;
+  }
+
+  async function reconcileDelegationDelivery(record: DelegationRecord, root: string): Promise<DelegationRecord> {
+    if ((record.status !== "dispatching" && record.status !== "delivery_unknown")
+      || !record.dispatchMessageId || !record.window) return record;
+    const outgoing = sessionHostRegistry?.thread.get(record.dispatchMessageId, "outgoing");
+    if (!outgoing) return record;
+    if (["queued", "injected", "accepted"].includes(outgoing.status)) {
+      const sentAt = Math.max(outgoing.updatedAt, Date.now());
+      return updateDelegationRecord(root, record.id, (current) => ({
+        ...current,
+        status: "sent",
+        updatedAt: sentAt,
+        lastError: undefined,
+        window: { ...current.window!, sentAt },
+      }), {
+        expectedRevision: record.revision,
+        expectedStatuses: [record.status],
+      });
+    }
+    if (record.status === "dispatching" && outgoing.status === "timeout") {
+      return updateDelegationRecord(root, record.id, (current) => ({
+        ...current,
+        status: "delivery_unknown",
+        updatedAt: Math.max(current.updatedAt, outgoing.updatedAt),
+        lastError: "Delegation delivery timed out after publication; do not resend until manually reconciled.",
+      }), {
+        expectedRevision: record.revision,
+        expectedStatuses: ["dispatching"],
+      });
+    }
+    return record;
+  }
+
+  async function dispatchDelegation(
+    initialRecord: DelegationRecord,
+    confirmedDocument: string,
+    ctx: ExtensionCommandContext,
+  ): Promise<{ record: DelegationRecord; owner: WorkspaceOwnerSnapshot; deliveryStage?: string }> {
+    const root = delegationWorkspaceRoot(ctx);
+    if (initialRecord.status !== "draft" && initialRecord.status !== "confirmed") {
+      throw new Error(`Delegation ${initialRecord.id} is ${initialRecord.status} and cannot be sent.`);
+    }
+    const generation = state.sessionGeneration;
+    if (initialRecord.source.workspaceId !== workspaceIdForCwd(ctx.cwd)) {
+      throw new Error("Delegation source belongs to a different workspace.");
+    }
+    if (initialRecord.workerContext === "fork") {
+      canonicalDelegationForkSource(initialRecord.source, ctx, generation);
+    }
+    await workspacePeerLifecycle;
+    const publisher = workspacePeerPublisher;
+    if (!publisher) throw new Error("Workspace peer delivery is unavailable.");
+    const replyTo = `owner:${publisher.identity.ownerId}`;
+    const confirmedAt = initialRecord.confirmedAt ?? Date.now();
+    const confirmed = await updateDelegationRecord(root, initialRecord.id, (record) => ({
+      ...record,
+      status: "confirmed",
+      confirmedAt,
+      updatedAt: Date.now(),
+      lastError: undefined,
+    }), {
+      expectedRevision: initialRecord.revision,
+      expectedStatuses: [initialRecord.status],
+    });
+    const sessionName = managedWindowSessionName(confirmed.id);
+    const startedAt = Date.now();
+    const spawning = await updateDelegationRecord(root, confirmed.id, (record) => ({
+      ...record,
+      status: "spawning",
+      updatedAt: startedAt,
+      launch: {
+        name: confirmed.id,
+        sessionName,
+        presentation: "interactive",
+        startedAt,
+      },
+    }), {
+      expectedRevision: confirmed.revision,
+      expectedStatuses: ["confirmed"],
+    });
+
+    let workerForkSessionFile: string | undefined;
+    if (spawning.workerContext === "fork") {
+      try {
+        workerForkSessionFile = canonicalDelegationForkSource(spawning.source, ctx, generation);
+      } catch (error) {
+        const failure = error instanceof Error ? error.message : String(error);
+        await updateDelegationRecord(root, spawning.id, (record) => ({
+          ...record,
+          status: "confirmed",
+          launch: undefined,
+          updatedAt: Date.now(),
+          lastError: failure,
+        }), { expectedRevision: spawning.revision, expectedStatuses: ["spawning"] });
+        throw error;
+      }
+    }
+
+    const spawned = await spawnManagedWindow(
+      spawning.id,
+      buildDelegatedWorkerBootstrap(spawning, replyTo),
+      root,
+      "interactive",
+      sessionName,
+      workerForkSessionFile,
+      "delegation",
+    );
+    if (!spawned.ok || !spawned.window) {
+      const message = spawned.error ?? `Failed to create delegation window ${spawning.id}.`;
+      await updateDelegationRecord(root, spawning.id, (record) => ({
+        ...record,
+        status: "confirmed",
+        launch: undefined,
+        updatedAt: Date.now(),
+        lastError: message,
+      }), { expectedRevision: spawning.revision, expectedStatuses: ["spawning"] });
+      throw new Error(message);
+    }
+
+    let owner: WorkspaceOwnerSnapshot;
+    try {
+      owner = await waitForManagedWindowOwner(spawned.window, new AbortController().signal);
+      if (managedWindows.get(spawning.id) !== spawned.window || !exactManagedWindowOwner(spawned.window)) {
+        throw new Error(`Delegation window ${spawning.id} changed owner before task delivery.`);
+      }
+    } catch (error) {
+      const failure = error instanceof Error ? error.message : String(error);
+      const cleanupText = await rollbackDelegationWindow(spawning, root, failure);
+      throw new Error(`${failure}; ${cleanupText}.`);
+    }
+
+    const registeredAt = Date.now();
+    const dispatchMessageId = randomUUID().replace(/-/g, "");
+    let dispatching: DelegationRecord;
+    try {
+      dispatching = await updateDelegationRecord(root, spawning.id, (record) => ({
+        ...record,
+        status: "dispatching",
+        updatedAt: registeredAt,
+        dispatchMessageId,
+        window: {
+          name: spawning.id,
+          sessionName,
+          ownerId: owner.ownerId,
+          ownerNonce: owner.ownerNonce,
+          pid: owner.pid,
+          presentation: "interactive",
+          registeredAt,
+        },
+      }), {
+        expectedRevision: spawning.revision,
+        expectedStatuses: ["spawning"],
+      });
+    } catch (error) {
+      const failure = error instanceof Error ? error.message : String(error);
+      const cleanupText = await rollbackDelegationWindow(spawning, root, failure);
+      throw new Error(`${failure}; ${cleanupText}.`);
+    }
+
+    const delivery = await routeSessionMessage({
+      selector: `owner:${owner.ownerId}`,
+      message: buildDelegationDelivery(dispatching, confirmedDocument, replyTo),
+      mode: "follow_up",
+      messageId: dispatchMessageId,
+      source: "user",
+      messageKind: "message",
+      traceId: dispatching.id,
+      replyTo,
+      fromSessionName: workspacePeerSessionName,
+    });
+    const accepted = delivery.delivered || delivery.receipt?.publicationStage === "accepted";
+    if (!accepted) {
+      const outgoing = sessionHostRegistry?.thread.get(dispatchMessageId, "outgoing");
+      const failure = delivery.error ?? "Delegation document was not delivered.";
+      const publishedWithoutRejection = delivery.receipt?.publicationStage === "published"
+        || (outgoing !== undefined && outgoing.status !== "rejected");
+      if (publishedWithoutRejection) {
+        await updateDelegationRecord(root, dispatching.id, (record) => ({
+          ...record,
+          status: "delivery_unknown",
+          updatedAt: Math.max(record.updatedAt, outgoing?.updatedAt ?? Date.now()),
+          lastError: `${failure} The command was published; do not resend it.`,
+        }), {
+          expectedRevision: dispatching.revision,
+          expectedStatuses: ["dispatching"],
+        });
+        throw new Error(`${failure} Delivery is unknown; the task is not resendable. Use /delegate list or /delegate stop ${dispatching.id}.`);
+      }
+      const cleanupText = await rollbackDelegationWindow(dispatching, root, failure);
+      throw new Error(`${failure}; ${cleanupText}.`);
+    }
+
+    const sentAt = Date.now();
+    try {
+      const record = await updateDelegationRecord(root, dispatching.id, (current) => ({
+        ...current,
+        status: "sent",
+        updatedAt: sentAt,
+        lastError: undefined,
+        window: { ...current.window!, sentAt },
+      }), {
+        expectedRevision: dispatching.revision,
+        expectedStatuses: ["dispatching"],
+      });
+      return { record, owner, deliveryStage: delivery.receipt?.deliveryStage };
+    } catch (error) {
+      const failure = error instanceof Error ? error.message : String(error);
+      throw new Error(`${failure} The task was delivered to owner:${owner.ownerId} with message ${dispatchMessageId}; do not resend it.`);
+    }
+  }
+
+  function delegationOwnerCandidate(
+    record: DelegationRecord,
+    owners: readonly WorkspaceOwnerSnapshot[],
+  ): WorkspaceOwnerSnapshot | undefined {
+    const launch = record.launch;
+    if (!launch) return undefined;
+    const exact = record.window && owners.find((owner) =>
+      owner.ownerId === record.window!.ownerId
+      && owner.ownerNonce === record.window!.ownerNonce
+      && owner.pid === record.window!.pid
+      && owner.sessionName === launch.sessionName
+    );
+    if (exact) return exact;
+    const candidates = owners.filter((owner) =>
+      owner.sessionName === launch.sessionName
+      && (!record.window || owner.pid === record.window.pid)
+    );
+    if (candidates.length > 1) throw new Error(`Multiple owners match delegation window ${record.id}.`);
+    return candidates[0];
+  }
+
+  async function stopDelegationWindow(
+    initialRecord: DelegationRecord,
+    root: string,
+  ): Promise<{ status: string; record: DelegationRecord }> {
+    let record = initialRecord;
+    if (!["spawning", "dispatching", "delivery_unknown", "sent"].includes(record.status)) {
+      throw new Error(`Delegation ${record.id} is ${record.status} and has no active managed window.`);
+    }
+    const owners = await refreshWorkspacePeerOwnersStrict();
+    const owner = delegationOwnerCandidate(record, owners);
+    if (owner && (!record.window
+      || record.window.ownerId !== owner.ownerId
+      || record.window.ownerNonce !== owner.ownerNonce)) {
+      const reboundAt = Date.now();
+      record = await updateDelegationRecord(root, record.id, (current) => ({
+        ...current,
+        updatedAt: reboundAt,
+        window: {
+          name: current.launch!.name,
+          sessionName: current.launch!.sessionName,
+          ownerId: owner.ownerId,
+          ownerNonce: owner.ownerNonce,
+          pid: owner.pid,
+          presentation: "interactive",
+          registeredAt: current.window?.registeredAt ?? reboundAt,
+          ...(current.window?.sentAt === undefined ? {} : { sentAt: current.window.sentAt }),
+        },
+      }), {
+        expectedRevision: record.revision,
+        expectedStatuses: [record.status],
+      });
+      const tracked = managedWindows.get(record.id);
+      if (tracked && tracked.sessionName === owner.sessionName && tracked.pid === owner.pid) {
+        tracked.ownerId = owner.ownerId;
+        tracked.ownerNonce = owner.ownerNonce;
+      }
+    }
+
+    let status: string;
+    if (managedWindows.has(record.id)) {
+      const stopped = await stopManagedWindow(record.id);
+      if (!stopped.ok) throw new Error(stopped.error ?? `Failed to stop ${record.id}.`);
+      status = stopped.status ?? "stopped";
+    } else if (owner) {
+      await terminateProcessTreeByPid(owner.pid);
+      try {
+        await monitorControllerInstance.remove(`owner:${owner.ownerId}`, "delegation-window-close");
+        syncMonitorRegistryBindings();
+      } catch (error) {
+        console.error("[pi-maestro-teammate] delegated window monitor cleanup failed:", error);
+      }
+      status = "stopped";
+    } else if (record.window && !managedWindowPidIsAlive(record.window.pid)) {
+      status = "already-exited";
+    } else {
+      throw new Error(`Delegation window ${record.id} has no fresh authenticated owner; refusing stale process termination.`);
+    }
+
+    const closedAt = Date.now();
+    const closed = await updateDelegationRecord(root, record.id, (current) => ({
+      ...current,
+      status: "closed",
+      closedAt,
+      updatedAt: closedAt,
+      lastError: undefined,
+    }), {
+      expectedRevision: record.revision,
+      expectedStatuses: [record.status],
+    });
+    return { status, record: closed };
+  }
+
+  async function closeDelegationRecordAfterTermination(window: ManagedWindow): Promise<void> {
+    if (window.management !== "delegation") return;
+    const root = state.baseCwd || window.cwd;
+    try {
+      await updateDelegationRecord(root, window.name, (record) => {
+        if (!["spawning", "dispatching", "delivery_unknown", "sent"].includes(record.status)) return record;
+        const closedAt = Date.now();
+        return {
+          ...record,
+          status: "closed",
+          closedAt,
+          updatedAt: closedAt,
+          lastError: undefined,
+        };
+      });
+    } catch (error) {
+      console.error(`[pi-maestro-teammate] failed to close delegation record ${window.name}:`, error);
+    }
   }
 
   /** Load `.pi/settings.json` → `monitor` section, merged with env. */
@@ -5927,51 +6353,6 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
     },
   });
 
-  pi.registerCommand("experts", {
-    description: "Experts Mode: on|off|status|roster|config|waiting|harvest (default status)",
-    async handler(args, ctx) {
-      const cwd = ctx.cwd ?? process.cwd();
-      const raw = (args ?? "").trim().toLowerCase();
-      const sub = raw.split(/\s+/)[0] || "status";
-      const usage = "Usage: /experts [on|off|status|roster|config|waiting|harvest]";
-      try {
-        if (sub === "on") {
-          setMode("experts", cwd);
-          ctx.ui.notify("Experts Mode ON", "info");
-        } else if (sub === "off") {
-          setMode("normal", cwd);
-          ctx.ui.notify("Experts Mode OFF (normal)", "info");
-        } else if (!["status", "roster", "config", "waiting", "harvest", ""].includes(sub)) {
-          ctx.ui.notify(usage, "warning");
-          return;
-        }
-
-        // Normalize view after mode toggles: on/off → full status view.
-        // `config` is an alias of `roster` (shows model/channel/skills profiles).
-        let view: "status" | "roster" | "waiting" | "harvest" = "status";
-        if (sub === "roster" || sub === "config") view = "roster";
-        else if (sub === "waiting" || sub === "harvest" || sub === "status") view = sub;
-
-        const body = formatExpertsPanel(cwd, view);
-
-        // Prefer the TUI overlay when available; notify is the fallback.
-        const canCustom = typeof ctx.ui?.custom === "function";
-        if (canCustom) {
-          try {
-            preemptCockpitResize?.();
-            await showExpertsStatusOverlay(ctx, body, `Experts · ${view}`);
-            return;
-          } catch {
-            // Overlay unavailable/failed — fall through to notify.
-          }
-        }
-        ctx.ui.notify(body, "info");
-      } catch (e) {
-        ctx.ui.notify(String(e), "error");
-      }
-    },
-  });
-
   // ---------------------------------------------------------------------------
   // /monitor — user-only monitor mode lifecycle
   // ---------------------------------------------------------------------------
@@ -6109,6 +6490,118 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
           : delivery.error ?? tuiT("extension.messageUndelivered", { target }),
         delivery.delivered ? "info" : "warning",
       );
+    },
+  });
+
+  pi.registerCommand("delegate", {
+    description: "Delegate an additive task to a fresh or forked independent window after reviewing a planner-produced document.",
+    getArgumentCompletions(prefix: string) {
+      const commands = [
+        { value: "--new ", label: "--new <instruction>", description: "Draft for a fresh worker session (default)" },
+        { value: "--fork ", label: "--fork <instruction>", description: "Draft for a worker forked from the source session" },
+        { value: "create --new ", label: "create --new <instruction>", description: "Explicit fresh-session delegation" },
+        { value: "create --fork ", label: "create --fork <instruction>", description: "Explicit forked-session delegation" },
+        { value: "list", label: "list", description: "List delegation drafts and windows" },
+        { value: "show ", label: "show <id>", description: "Show a saved task document" },
+        { value: "send ", label: "send <id>", description: "Confirm and send a saved draft" },
+        { value: "stop ", label: "stop <id>", description: "Stop an independently managed delegation window" },
+        { value: "cancel ", label: "cancel <id>", description: "Cancel an unsent delegation draft" },
+      ];
+      const matches = commands.filter((command) => command.value.startsWith(prefix.trimStart()));
+      return matches.length > 0 ? matches : null;
+    },
+    async handler(args: string, ctx) {
+      const command = parseDelegationCommand(args);
+      const root = delegationWorkspaceRoot(ctx);
+      const usage = "Usage: /delegate [--new|--fork] <instruction> | /delegate create [--new|--fork] <instruction> | /delegate list | /delegate show|send|stop|cancel <id>";
+      try {
+        if (command.action === "help") {
+          ctx.ui.notify(usage, "info");
+          return;
+        }
+        if (command.action === "invalid") {
+          ctx.ui.notify(command.error, "warning");
+          return;
+        }
+        if (command.action === "list") {
+          await refreshWorkspacePeerOwners();
+          const loaded = await listDelegationRecords(root);
+          const records = await Promise.all(loaded.map((record) =>
+            reconcileDelegationDelivery(record, root).catch(() => record)
+          ));
+          if (records.length === 0) {
+            ctx.ui.notify("No delegation drafts or windows.", "info");
+            return;
+          }
+          const lines = records.map((record) => {
+            const liveOwner = delegationOwnerCandidate(record, workspacePeerOwners);
+            const status = record.status === "sent"
+              ? (liveOwner ? "running" : "sent/offline")
+              : record.status;
+            return `${record.id} | r${record.revision} | ${record.workerContext} | ${status} | ${record.task.title}${record.window ? ` | owner:${record.window.ownerId}` : ""}`;
+          });
+          ctx.ui.notify(`DELEGATIONS ${records.length}\n${lines.join("\n")}`, "info");
+          return;
+        }
+        if (command.action === "show") {
+          const loaded = await loadDelegationRecord(root, command.id);
+          const record = await reconcileDelegationDelivery(loaded, root).catch(() => loaded);
+          const document = await readDelegationDocument(root, command.id);
+          ctx.ui.notify(`${document}\nStatus: ${record.status}\nWorker context: ${record.workerContext}\nPath: ${delegationDocumentPath(root, record.id)}`, "info");
+          return;
+        }
+        if (command.action === "cancel") {
+          if (managedWindows.has(command.id)) {
+            ctx.ui.notify(`Delegation ${command.id} still owns a window; stop it before cancelling.`, "warning");
+            return;
+          }
+          const record = await cancelDelegationDraft(root, command.id);
+          ctx.ui.notify(`Cancelled delegation ${record.id}; its task document remains at ${delegationDocumentPath(root, record.id)}.`, "info");
+          return;
+        }
+        if (command.action === "stop") {
+          const loaded = await loadDelegationRecord(root, command.id);
+          const record = await reconcileDelegationDelivery(loaded, root).catch(() => loaded);
+          if (record.status === "closed") {
+            ctx.ui.notify(`Delegation ${record.id} is already closed.`, "info");
+            return;
+          }
+          const stopped = await stopDelegationWindow(record, root);
+          ctx.ui.notify(`Stopped delegation window ${record.id} (${stopped.status}).`, "info");
+          return;
+        }
+
+        let record: DelegationRecord;
+        if (command.action === "create") {
+          const workerContext = command.workerContext ?? await selectDelegationWorkerContext(ctx);
+          if (!workerContext) {
+            ctx.ui.notify("Delegation cancelled before drafting.", "info");
+            return;
+          }
+          record = await draftDelegation(command.request, workerContext, ctx);
+          ctx.ui.notify(`Delegation draft ${record.id} (${record.workerContext}) saved to ${delegationDocumentPath(root, record.id)}.`, "info");
+        } else {
+          const loaded = await loadDelegationRecord(root, command.id);
+          record = await reconcileDelegationDelivery(loaded, root).catch(() => loaded);
+          if (record.status !== "draft" && record.status !== "confirmed") {
+            ctx.ui.notify(`Delegation ${record.id} is ${record.status} and cannot be sent.`, "warning");
+            return;
+          }
+        }
+
+        const confirmedDocument = await confirmDelegationSend(record, ctx);
+        if (confirmedDocument === undefined) {
+          ctx.ui.notify(`Delegation ${record.id} remains ${record.status}. Review ${delegationDocumentPath(root, record.id)}, then run /delegate send ${record.id}.`, "info");
+          return;
+        }
+        const dispatched = await dispatchDelegation(record, confirmedDocument, ctx);
+        ctx.ui.notify(
+          `Delegation ${record.id} (${record.workerContext}) sent to owner:${dispatched.owner.ownerId}${dispatched.deliveryStage ? ` (${dispatched.deliveryStage})` : ""}. Manage it with /delegate list or /delegate stop ${record.id}.`,
+          "info",
+        );
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+      }
     },
   });
 
@@ -6598,17 +7091,6 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
     installMonitorEscapeTap(ctx.ui);
     setPersistentUi(ctx.ui, true);
     state.baseCwd = ctx.cwd;
-    // P7b: restore harvest status segment for cockpit footer on session start.
-    refreshExpertsHarvestStatus(ctx.cwd);
-    // P4.1: auto-inject the Maestro stage from session.json into experts state
-    // so Leaders do not need to pass stage / MAESTRO_STAGE by hand.
-    try {
-      if (getMode(ctx.cwd) === "experts") {
-        syncActiveStageFromMaestro(ctx.cwd);
-      }
-    } catch {
-      // best-effort; missing .workflow/sessions is a normal state
-    }
     // Monitor ledger + config bind to the real session cwd.
     monitorLedgerRoot = ctx.cwd;
     monitorConfig = loadMonitorConfigForRoot(ctx.cwd);
@@ -6686,10 +7168,13 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
     stopWidgetTimer();
     stopWakeableEvictionTimer();
     await monitorControllerInstance.shutdown();
-    await stopAllManagedWindows();
     workspaceBackgroundJobs = [];
     activePromptLoopIds = [];
-    workspacePeerLifecycle = workspacePeerLifecycle.then(stopWorkspacePeers);
+    workspacePeerLifecycle = workspacePeerLifecycle.then(async () => {
+      await stopAllManagedWindows();
+      await stopWorkspacePeers();
+    });
+    await workspacePeerLifecycle;
     // Stop the mailbox consumer BEFORE killing agents so no in-flight poll can
     // inject into a dying session (previously never stopped at all).
     const stoppedMailbox = mailboxHost;

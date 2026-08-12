@@ -1444,6 +1444,71 @@ test("billing failures advance to fallback only after authoritative settlement",
   assert.deepEqual(launchedModels, ["provider/backup"]);
 });
 
+test("upstream model_not_found advances to a configured candidate and opens only that model circuit", async () => {
+  const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
+  const launchedModels: string[] = [];
+  const spawnChildProcess = adaptFakeSpawn((_command, args) => {
+    const modelIndex = args.indexOf("--model");
+    const model = args[modelIndex + 1];
+    launchedModels.push(model);
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return reclaimFakeProcess(child); },
+    });
+    queueMicrotask(() => {
+      if (model === "provider/retired") {
+        stdout.write(`${JSON.stringify({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            stopReason: "error",
+            errorMessage: 'OpenAI API error (404): {"message":"Model \\"retired\\" is not supported by any configured account in this group","type":"model_not_found"}',
+          },
+        })}\n`);
+        stdout.write(`${JSON.stringify({ type: "agent_end", willRetry: false })}\n`);
+        stdout.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
+      } else {
+        stdout.write(`${JSON.stringify({
+          type: "message_end",
+          message: { role: "assistant", content: [{ type: "text", text: "supported model recovered" }] },
+        })}\n`);
+        stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+      }
+    });
+    return child;
+  });
+
+  const params = {
+    agent: "general",
+    task: "Use an upstream-supported model",
+    model: "provider/retired",
+    fallbackModels: ["provider/supported"],
+    context: "fork" as const,
+  };
+  const options = {
+    baseCwd: process.cwd(),
+    modelCircuitBreaker: breaker,
+    modelCapabilities: [{ id: "provider/retired" }, { id: "provider/supported" }],
+    spawnChildProcess,
+  };
+
+  const first = await runSingleTeammate(params, options);
+  assert.equal(first.exitCode, 0);
+  assert.equal(first.messages.at(-1)?.content, "supported model recovered");
+  assert.deepEqual(first.attemptedModels, ["provider/retired", "provider/supported"]);
+  assert.deepEqual(launchedModels, ["provider/retired", "provider/supported"]);
+  assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/retired")?.state, "OPEN");
+  assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/supported")?.state, "CLOSED");
+
+  launchedModels.length = 0;
+  const second = await runSingleTeammate(params, options);
+  assert.equal(second.exitCode, 0);
+  assert.deepEqual(launchedModels, ["provider/supported"]);
+});
+
 test("authoritative candidate failure stays buffered until fallback completes", async () => {
   const launchedModels: string[] = [];
   const completions: SingleResult[] = [];

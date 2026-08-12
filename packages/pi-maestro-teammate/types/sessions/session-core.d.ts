@@ -112,6 +112,7 @@ export interface SessionMessageRequest {
     selector: string;
     message: string;
     mode: SessionMessageMode;
+    messageId?: string;
     source?: SessionMessageSource;
     messageKind?: SessionMessageKind;
     traceId?: string;
@@ -193,6 +194,7 @@ export interface SessionMessageResult {
         requestedMode?: SessionMessageMode;
         effectiveMode?: SessionMessageMode;
         deliveryStage?: SessionDeliveryStage;
+        publicationStage?: "published" | "accepted" | "rejected";
         messageId?: string;
         traceId?: string;
         wasSleeping?: boolean;

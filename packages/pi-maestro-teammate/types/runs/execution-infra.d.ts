@@ -52,8 +52,14 @@ export interface TeammateTaskSpec {
      */
     todo?: string | string[];
 }
+export type TeammateMode = "default" | "expert";
 export interface RunTeammateParams {
     tasks: TeammateTaskSpec[];
+    /**
+     * Dispatch strategy. Expert mode turns one objective into a workflow Leader
+     * that may build and run a nested teammate DAG.
+     */
+    mode?: TeammateMode;
     agent?: string;
     taskType?: TeammateTaskType;
     reply_to?: "caller" | "main";
@@ -350,6 +356,18 @@ export interface NormalizeTeammateResult {
     warnings: string[];
     error?: string;
 }
+export declare const EXPERT_MODE_LEADER_AGENT = "workflow";
+export declare const EXPERT_MODE_LEADER_TASK_TYPE: TeammateTaskType;
+export declare const EXPERT_MODE_LEADER_NAME = "expert-leader";
+export declare const EXPERT_MODE_PROMPT_START = "<expert-leader-contract>";
+export declare const EXPERT_MODE_PROMPT_END = "</expert-leader-contract>";
+export declare function buildExpertLeaderPrompt(objective: string): string;
+/**
+ * Expand the lightweight expert strategy before model routing. The workflow
+ * agent is the Leader; its existing teammate access and nesting budget provide
+ * the expert DAG without a second execution engine or persistent mode state.
+ */
+export declare function prepareTeammateMode(params: RunTeammateParams): RunTeammateParams;
 /** Normalize the tasks-only public contract into executable graph tasks. */
 export declare function normalizeTeammateParams(params: RunTeammateParams): NormalizeTeammateResult;
 export declare let resolvedPiEntryPoint: string | null | undefined;

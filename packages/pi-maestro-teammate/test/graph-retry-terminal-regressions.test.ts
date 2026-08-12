@@ -256,7 +256,7 @@ test("cancelling between fallback candidates returns terminated cancellation", a
   const originalRecordFailure = breaker.recordRetryableFailure.bind(breaker);
   breaker.recordRetryableFailure = (acquisition) => {
     originalRecordFailure(acquisition);
-    controller.abort();
+    controller.abort(new Error("parent tool deadline exceeded"));
   };
   const spawnChildProcess = ((_command: string, args: readonly string[]) => {
     launchedModels.push(args[args.indexOf("--model") + 1]);
@@ -284,12 +284,45 @@ test("cancelling between fallback candidates returns terminated cancellation", a
   });
 
   assert.deepEqual(launchedModels, ["provider/primary"]);
-  assert.match(
-    result.messages[0].content,
-    /cancelled (?:before model candidate launch|during model fallback handoff)/i,
-  );
+  assert.match(result.messages[0].content, /cancelled by its caller/i);
+  assert.match(result.messages[0].content, /parent tool deadline exceeded/i);
   assert.equal(completions.length, 1);
   assert.equal(completions[0].status, "terminated");
+});
+
+test("unprintable cancellation reasons still produce a terminated result", async () => {
+  const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
+  const controller = new AbortController();
+  const originalRecordFailure = breaker.recordRetryableFailure.bind(breaker);
+  breaker.recordRetryableFailure = (acquisition) => {
+    originalRecordFailure(acquisition);
+    controller.abort(Object.create(null));
+  };
+  const spawnChildProcess = (() => {
+    const child = fakeChild();
+    queueMicrotask(() => {
+      (child.stdout as PassThrough).write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", stopReason: "error", errorMessage: "402: Insufficient Balance" },
+      })}\n`);
+      (child.stdout as PassThrough).write(`${JSON.stringify({ type: "agent_end", willRetry: false })}\n`);
+      (child.stdout as PassThrough).write(`${JSON.stringify({ type: "agent_settled" })}\n`);
+    });
+    return child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate({
+    agent: "general", task: "cancel safely", model: "provider/primary",
+    fallbackModels: ["provider/backup"], context: "fork",
+  }, {
+    baseCwd: process.cwd(), signal: controller.signal,
+    modelCircuitBreaker: breaker,
+    modelCapabilities: [{ id: "provider/primary" }, { id: "provider/backup" }],
+    spawnChildProcess,
+  });
+
+  assert.equal(result.terminalStatus, "terminated");
+  assert.match(result.messages[0].content, /unprintable cancellation reason/i);
 });
 
 test("rate_limit_exceeded variants remain retryable provider failures", () => {

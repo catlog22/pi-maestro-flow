@@ -21,6 +21,10 @@ export interface ProgressTreeRow {
   text: string;
 }
 
+export interface ProgressTreeOptions {
+  stableInFlightRows?: boolean;
+}
+
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
   const seconds = Math.floor(ms / 1000);
@@ -82,6 +86,7 @@ export function buildProgressTree(
   palette: ProgressPalette,
   now: number = Date.now(),
   locale?: SupportedSettingsLocale,
+  options: ProgressTreeOptions = {},
 ): ProgressTreeRow[] {
   const t = createTuiTranslator(locale);
   const byIndex = new Map<number, AgentProgressSnapshot>();
@@ -101,25 +106,31 @@ export function buildProgressTree(
           { ids: entry.dependencies.map((dependency) => `#${dependency + 1}`).join(", ") },
         )}`)
       : "";
+    const inFlight = entry.status === "pending" || entry.status === "running" || entry.status === "retrying";
+    const stable = options.stableInFlightRows === true && inFlight;
     const cacheRead = entry.cacheReadTokens ?? 0;
     const cacheWrite = entry.cacheWriteTokens ?? 0;
-    const tokenParts = entry.inputTokens !== undefined || entry.outputTokens !== undefined
-      ? [
-          t("metrics.in", { count: formatTokens(entry.inputTokens ?? 0) }),
-          t("metrics.out", { count: formatTokens(entry.outputTokens ?? 0) }),
-          ...(cacheRead > 0 || cacheWrite > 0
-            ? [t("metrics.cache", { read: formatTokens(cacheRead), write: formatTokens(cacheWrite) })]
-            : []),
-        ]
-      : entry.tokens
-        ? [t("metrics.tok", { count: formatTokens(entry.tokens) })]
-        : [];
-    const durationMs = progressDurationMs(entry, now);
-    const metaParts = [
-      entry.toolCount ? t("metrics.tools", { count: entry.toolCount }) : "",
-      ...tokenParts,
-      durationMs !== undefined ? formatDuration(durationMs) : "",
-    ].filter(Boolean);
+    const tokenParts = stable
+      ? []
+      : entry.inputTokens !== undefined || entry.outputTokens !== undefined
+        ? [
+            t("metrics.in", { count: formatTokens(entry.inputTokens ?? 0) }),
+            t("metrics.out", { count: formatTokens(entry.outputTokens ?? 0) }),
+            ...(cacheRead > 0 || cacheWrite > 0
+              ? [t("metrics.cache", { read: formatTokens(cacheRead), write: formatTokens(cacheWrite) })]
+              : []),
+          ]
+        : entry.tokens
+          ? [t("metrics.tok", { count: formatTokens(entry.tokens) })]
+          : [];
+    const durationMs = stable ? undefined : progressDurationMs(entry, now);
+    const metaParts = stable
+      ? []
+      : [
+          entry.toolCount ? t("metrics.tools", { count: entry.toolCount }) : "",
+          ...tokenParts,
+          durationMs !== undefined ? formatDuration(durationMs) : "",
+        ].filter(Boolean);
     const meta = metaParts.length > 0 ? palette.dim(` · ${metaParts.join(" · ")}`) : "";
     return {
       taskIndex: entry.taskIndex,

@@ -21,10 +21,11 @@ export type RetryErrorKind = "network" | "provider" | "fallback-only" | "auth" |
 /**
  * Classify a provider failure for retry/fallback decisions.
  *
- * `status` (when known) short-circuits via {@link classifyByStatus}; otherwise
- * a 3-digit 4xx/5xx token is extracted from the message. With no status the
- * message patterns apply, in order: auth → permanent → quota/payment →
- * transport → provider overload.
+ * `status` (when known) normally short-circuits via {@link classifyByStatus};
+ * an explicit upstream model-unavailable diagnostic is the narrow exception
+ * because another configured candidate may still work. Otherwise the message
+ * patterns apply, in order: auth → model availability → permanent →
+ * quota/payment → transport → provider overload.
  */
 export declare function classifyRetryError(message: string | undefined, status?: number): RetryErrorKind;
 /**
@@ -51,9 +52,10 @@ export declare function extractRetryAfterMs(message: string | undefined, now?: n
 /**
  * Backoff delay before the next attempt, in milliseconds.
  *
- * Quota/payment, auth, and permanent failures return 0 — those conditions
- * are resolved by switching candidates, not by waiting on the same one.
- * Transient failures get the exponential backoff (1s → maxDelayMs); a
+ * Quota/payment, model-unavailable, auth, and permanent failures return 0 —
+ * those conditions are resolved by switching candidates or reporting the
+ * terminal error, not by waiting on the same model. Transient failures get
+ * the exponential backoff (1s → maxDelayMs); a
  * provider-requested `retryAfterMs` caps the delay (earliest of the two).
  */
 export declare function retryDelayMs(retry: number, kind?: RetryErrorKind, retryAfterMs?: number): number;

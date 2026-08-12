@@ -13,12 +13,15 @@ export interface ProgressTreeRow {
     taskIndex: number;
     text: string;
 }
+export interface ProgressTreeOptions {
+    stableInFlightRows?: boolean;
+}
 export declare function progressDurationMs(entry: AgentProgressSnapshot, now?: number): number | undefined;
 /** Resolve a semantic tone against the ANSI palette used by progress rows. */
 export declare function toneText(palette: ProgressPalette, tone: StatusTone, text: string): string;
 export declare function progressIcon(status: AgentProgressSnapshot["status"], palette: ProgressPalette): string;
 export declare function progressLabel(entry: AgentProgressSnapshot): string;
-export declare function buildProgressTree(progress: AgentProgressSnapshot[], palette: ProgressPalette, now?: number, locale?: SupportedSettingsLocale): ProgressTreeRow[];
+export declare function buildProgressTree(progress: AgentProgressSnapshot[], palette: ProgressPalette, now?: number, locale?: SupportedSettingsLocale, options?: ProgressTreeOptions): ProgressTreeRow[];
 export declare function focusTaskIndex(progress: AgentProgressSnapshot[]): number | undefined;
 export declare function selectProgressWindow(rows: ProgressTreeRow[], maxRows: number, focusIndex?: number): {
     rows: ProgressTreeRow[];

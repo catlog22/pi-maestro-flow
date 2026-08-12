@@ -17,6 +17,7 @@ import registerTeammateExtension, {
   type TeammateRuntimeOptions,
 } from "../src/extension/index.ts";
 import type { RunTeammateOptions } from "../src/runs/execution.ts";
+import { createWorkspacePeerPaths } from "../src/extension/workspace-peers.ts";
 import {
   confirmParked,
   createChildLease,
@@ -135,6 +136,48 @@ function resultReadyTurn(text: string): Record<string, unknown> {
 }
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("immediate reload waits for workspace peer startup before shutdown cleanup", async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-peer-reload-"));
+  const { hooks } = createHarness();
+  const sessionStart = hooks.get("session_start")?.[0];
+  const sessionShutdown = hooks.get("session_shutdown")?.[0];
+  assert.ok(sessionStart);
+  assert.ok(sessionShutdown);
+  const errors: unknown[][] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args); };
+
+  try {
+    const ctx = {
+      cwd: project,
+      hasUI: false,
+      ui: { setWidget() {} },
+      modelRegistry: { getAvailable: () => [] },
+      sessionManager: {
+        getEntries: () => [],
+        getSessionFile: () => undefined,
+        getSessionId: () => "peer-reload-session",
+        getSessionName: () => "peer-reload",
+      },
+    };
+    sessionStart({ reason: "new" }, ctx);
+    await sessionShutdown({ reason: "reload" }, ctx);
+
+    assert.equal(
+      errors.some((args) => String(args[0]).includes("managed-window shutdown discovery failed")),
+      false,
+    );
+    const ownersDir = createWorkspacePeerPaths(project).ownersDir;
+    const ownerFiles = fs.existsSync(ownersDir)
+      ? fs.readdirSync(ownersDir).filter((entry) => entry.endsWith(".json"))
+      : [];
+    assert.deepEqual(ownerFiles, []);
+  } finally {
+    console.error = originalError;
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
 
 function createProxyPi(
   emitted: Array<{ event: string; payload: Record<string, unknown> }>,

@@ -55,6 +55,12 @@ const AUTH_ERROR =
 const NON_RETRYABLE_ERROR =
   /usage[_\s-]*limit|multi-auth rotation failed|bad request|invalid request|invalid model|unknown model|context[_\s-]*length[_\s-]*exceeded|input exceeds the context window|schema[-\s]*valid|validation (?:failed|error)/i;
 
+// A configured model can exist in the local catalog while the upstream
+// account group does not actually serve it. This is candidate-specific: a
+// different model, including one from the same provider, may still work.
+const MODEL_UNAVAILABLE_ERROR =
+  /\bmodel[_\s-]*not[_\s-]*found\b|model\s+["']?[^\s"']+["']?\s+is not supported by any configured account|model\s+["']?[^\s"']+["']?\s+(?:does not exist|is unavailable)(?:\s+or\s+you\s+do\s+not\s+have\s+access)?/i;
+
 const FALLBACK_ONLY_ERROR =
   /\b(?:402|insufficient[_\s-]*(?:quota|balance|credits?)|credits? exhausted|billing quota|quota exceeded|out of budget)\b/i;
 
@@ -96,14 +102,18 @@ function classifyByStatus(status: number | undefined): RetryErrorKind | undefine
 /**
  * Classify a provider failure for retry/fallback decisions.
  *
- * `status` (when known) short-circuits via {@link classifyByStatus}; otherwise
- * a 3-digit 4xx/5xx token is extracted from the message. With no status the
- * message patterns apply, in order: auth → permanent → quota/payment →
- * transport → provider overload.
+ * `status` (when known) normally short-circuits via {@link classifyByStatus};
+ * an explicit upstream model-unavailable diagnostic is the narrow exception
+ * because another configured candidate may still work. Otherwise the message
+ * patterns apply, in order: auth → model availability → permanent →
+ * quota/payment → transport → provider overload.
  */
 export function classifyRetryError(message: string | undefined, status?: number): RetryErrorKind {
   if (!message) return "non-retryable";
   const effectiveStatus = status ?? extractHttpStatusFromMessage(message);
+  if (effectiveStatus === 401) return "auth";
+  if (MODEL_UNAVAILABLE_ERROR.test(message)) return "fallback-only";
+  if (effectiveStatus === 403) return "auth";
   const byStatus = classifyByStatus(effectiveStatus);
   if (byStatus !== undefined) return byStatus;
   if (AUTH_ERROR.test(message)) return "auth";
@@ -191,9 +201,10 @@ export function extractRetryAfterMs(message: string | undefined, now = Date.now(
 /**
  * Backoff delay before the next attempt, in milliseconds.
  *
- * Quota/payment, auth, and permanent failures return 0 — those conditions
- * are resolved by switching candidates, not by waiting on the same one.
- * Transient failures get the exponential backoff (1s → maxDelayMs); a
+ * Quota/payment, model-unavailable, auth, and permanent failures return 0 —
+ * those conditions are resolved by switching candidates or reporting the
+ * terminal error, not by waiting on the same model. Transient failures get
+ * the exponential backoff (1s → maxDelayMs); a
  * provider-requested `retryAfterMs` caps the delay (earliest of the two).
  */
 export function retryDelayMs(retry: number, kind?: RetryErrorKind, retryAfterMs?: number): number {

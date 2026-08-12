@@ -145,6 +145,15 @@ export const TaskSpec = Type.Object({
 // ---------------------------------------------------------------------------
 
 export const TeammateParams = Type.Object({
+  mode: Type.Optional(
+    Type.Unsafe<"default" | "expert">({
+      type: "string",
+      enum: ["default", "expert"],
+      default: "default",
+      description:
+        'Dispatch strategy. "default" executes the supplied tasks directly. "expert" requires exactly one objective task and runs it through the fixed workflow/planning Leader with maxNestingDepth=1; conflicting agent, taskType, or nesting overrides are rejected.',
+    }),
+  ),
   agent: Type.Optional(
     Type.String({
       description: 'Default agent for tasks that omit agent; defaults to "general"',
@@ -168,7 +177,7 @@ export const TeammateParams = Type.Object({
   tasks: Type.Array(TaskSpec, {
     minItems: 1,
     description:
-      "Tasks to execute. Dependencies come from {name}/{name.field} references in prompts plus explicit dependsOn lists; dependent tasks are awaited and independent tasks run in parallel.",
+      'Tasks to execute. Default mode runs the graph directly. Expert mode requires exactly one objective task; the fixed workflow Leader decomposes it into a nested dependency-aware graph.',
   }),
 
   concurrency: Type.Optional(

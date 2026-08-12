@@ -263,6 +263,73 @@ export function aggregateTerminalStatuses(
 }
 
 const STRUCTURED_OUTPUT_CONFIRMATION = "Structured output saved.";
+const INLINE_PERSISTED_RESULT_CHARS = 1_200;
+const PERSISTED_RESULT_PREVIEW_CHARS = 480;
+const MAX_ACKNOWLEDGED_PUBLICATIONS = 2_000;
+const acknowledgedResultPublications = new Map<string, true>();
+
+function rememberAcknowledgedPublication(publicationId: string): void {
+  acknowledgedResultPublications.delete(publicationId);
+  acknowledgedResultPublications.set(publicationId, true);
+  while (acknowledgedResultPublications.size > MAX_ACKNOWLEDGED_PUBLICATIONS) {
+    const oldest = acknowledgedResultPublications.keys().next().value as string | undefined;
+    if (!oldest) break;
+    acknowledgedResultPublications.delete(oldest);
+  }
+}
+
+function acknowledgedResultReference(result: SingleResult): string | undefined {
+  return result.publicationId && acknowledgedResultPublications.has(result.publicationId)
+    ? `agent://${result.publicationId}`
+    : undefined;
+}
+
+function compactPreview(text: string, maxChars = PERSISTED_RESULT_PREVIEW_CHARS): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  const prefix = trimmed.slice(0, maxChars);
+  const newline = prefix.lastIndexOf("\n");
+  const space = prefix.lastIndexOf(" ");
+  const cut = newline >= maxChars * 0.6
+    ? newline
+    : space >= maxChars * 0.75 ? space : maxChars;
+  return `${trimmed.slice(0, cut).trimEnd()}...`;
+}
+
+function formatChars(chars: number): string {
+  if (chars < 1_024) return `${chars} chars`;
+  return `${(chars / 1_024).toFixed(1)}K chars`;
+}
+
+function describeStructuredResult(result: SingleResult, serialized: string): string {
+  const prose = finalResultText(result);
+  if (prose && !isStructuredOutputConfirmation(prose)) return compactPreview(prose);
+  const value = result.structuredOutput;
+  if (Array.isArray(value)) {
+    return `Structured result saved (${formatChars(serialized.length)}, ${value.length} items).`;
+  }
+  if (value !== null && typeof value === "object") {
+    const keys = Object.keys(value as Record<string, unknown>);
+    const visible = keys.slice(0, 8).join(", ") || "no fields";
+    return `Structured result saved (${formatChars(serialized.length)}; fields: ${visible}${keys.length > 8 ? ", ..." : ""}).`;
+  }
+  return `Structured result saved (${formatChars(serialized.length)}; ${value === null ? "null" : typeof value}).`;
+}
+
+function formatPersistedSuccess(
+  result: SingleResult,
+  effective: string,
+  structured: string | undefined,
+  reference: string,
+): string {
+  if (effective.length <= INLINE_PERSISTED_RESULT_CHARS) {
+    return `${effective}\n\nFull result: ${reference}`;
+  }
+  const summary = structured !== undefined
+    ? describeStructuredResult(result, structured)
+    : compactPreview(effective);
+  return `${summary}\n\nFull result: ${reference}`;
+}
 
 function formatStructuredOutputForDisplay(result: SingleResult): string | undefined {
   if (result.structuredOutput === undefined) return undefined;
@@ -272,8 +339,6 @@ function formatStructuredOutputForDisplay(result: SingleResult): string | undefi
   } catch {
     return "[structured_output] (value is not JSON-serializable)";
   }
-  // Deliver the full value: the parent agent consumes this text as the
-  // authoritative result, so it must never be head-truncated.
   return `[structured_output] ${text}`;
 }
 
@@ -296,7 +361,12 @@ export function displayMessageForResult(result: SingleResult): string {
       ? structured
       : `${lastMessage}\n\n${structured}`
     : lastMessage;
-  if (result.exitCode === 0) return warningPrefix + effective;
+  const reference = acknowledgedResultReference(result);
+  if (result.exitCode === 0) {
+    return warningPrefix + (reference
+      ? formatPersistedSuccess(result, effective, structured, reference)
+      : effective);
+  }
 
   const schemaDiagnostic = result.messages
     .filter((message) => isStructuredOutputSettlementDiagnostic(message.content))
@@ -308,10 +378,10 @@ export function displayMessageForResult(result: SingleResult): string {
     ?.content
     ?? primaryDiagnostics.at(-1)?.content;
 
-  if (primaryDiagnostic && schemaDiagnostic && primaryDiagnostic !== schemaDiagnostic) {
-    return `${warningPrefix}${primaryDiagnostic}\n\nStructured output: ${schemaDiagnostic}`;
-  }
-  return warningPrefix + (primaryDiagnostic ?? schemaDiagnostic ?? effective);
+  const diagnostic = primaryDiagnostic && schemaDiagnostic && primaryDiagnostic !== schemaDiagnostic
+    ? `${primaryDiagnostic}\n\nStructured output: ${schemaDiagnostic}`
+    : primaryDiagnostic ?? schemaDiagnostic ?? effective;
+  return warningPrefix + diagnostic + (reference ? `\n\nCaptured result: ${reference}` : "");
 }
 
 export function summarizeGraphResults(results: readonly SingleResult[], tasks: readonly NormalizedTask[]): string {
@@ -402,10 +472,15 @@ export async function emitTeammateResultPublished(
   if (!projected) return;
 
   const pending: Promise<unknown>[] = [];
+  const canonicalResource = `agent://${result.publicationId ?? result.correlationId}`;
+  let acknowledgedResource: string | undefined;
   const event: TeammateResultPublishedEvent = {
     result: projected,
     waitUntil(promise) {
       pending.push(Promise.resolve(promise));
+    },
+    acknowledgeResource(uri) {
+      if (uri === canonicalResource) acknowledgedResource = uri;
     },
   };
   let emissionError: unknown;
@@ -425,6 +500,13 @@ export async function emitTeammateResultPublished(
     }
   }
   if (emissionError !== undefined) throw emissionError;
+  if (
+    result.publicationId
+    && acknowledgedResource === canonicalResource
+    && outcomes.every((outcome) => outcome.status === "fulfilled")
+  ) {
+    rememberAcknowledgedPublication(result.publicationId);
+  }
 }
 
 /** Replace the retained turn value; undefined intentionally clears stale data. */
@@ -459,22 +541,25 @@ ${nested ? `Nested dispatch: this call is proxied to the parent root process —
 ` : ""}Minimal call:
   { tasks: [{ prompt: "Inspect auth" }] }
 
-Every dispatch uses a non-empty tasks array; prompt is the only required per-task field and lives inside tasks[]. Optional per-task fields include agent, taskType, model, thinking, context, cwd, outputSchema, maxNestingDepth, name, dependsOn, description, and timeoutMs. Omit outputSchema for ordinary tasks; use it only when the caller explicitly requires machine-readable structured fields. Task-level values override the top-level defaults — except background, which is dispatch-level and belongs at the top level only. Tasks that omit agent inherit the top-level agent, then default to "general".
-The top level accepts shared defaults for all tasks — agent, taskType, model, fallbackModels, thinking, context, cwd, timeoutMs, and maxNestingDepth — plus reply_to, concurrency, maxAgents, background, and the advanced optional outputSchema default. A task field (prompt/name/dependsOn) placed at the top level is rejected as an unexpected property. background is dispatch-level: the whole call shares one foreground/background window, so it belongs at the top level only — a per-task background value is ignored with a warning.
+Expert Leader call:
+  { mode: "expert", tasks: [{ prompt: "Investigate auth, delegate the necessary expert work, and synthesize the result" }] }
+
+Every dispatch uses a non-empty tasks array; prompt is the only required per-task field and lives inside tasks[]. In default mode, named tasks and dependsOn form the graph directly. Expert mode accepts exactly one objective task and turns it into the fixed workflow/planning Leader with maxNestingDepth=1; conflicting agent, taskType, or nesting overrides are rejected, and that Leader builds any required DAG with the same teammate tool. Optional per-task fields include agent, taskType, model, thinking, context, cwd, outputSchema, maxNestingDepth, name, dependsOn, description, and timeoutMs. Omit outputSchema for ordinary tasks; use it only when the caller explicitly requires machine-readable structured fields. In default mode, task-level values override top-level defaults except background, which is dispatch-level. Tasks that omit agent inherit the top-level agent, then default to "general".
+The top level accepts mode plus shared defaults for all tasks — agent, taskType, model, fallbackModels, thinking, context, cwd, timeoutMs, and maxNestingDepth — together with reply_to, concurrency, concurrencyWaitMs, maxAgents, background, and the advanced optional outputSchema default. concurrencyWaitMs is a dedicated foreground detach window for multi-task parallel/DAG calls; it never cancels queued or running work. A task field (prompt/name/dependsOn) placed at the top level is rejected as an unexpected property. background is dispatch-level: the whole call shares one foreground/background window, so it belongs at the top level only — a per-task background value is ignored with a warning.
 Use {name} or {name.field} in a dependent task's prompt, or dependsOn: ["name"] for ordering without output injection.
 
 Nesting control: pass maxNestingDepth on the root dispatch — or per task, which overrides the top-level value — to limit how many levels of nested teammate dispatch the spawned agents may perform below themselves. Omitting it everywhere defaults to the global ceiling. The only effective values are 0 and 1 — 2 is capped to 1 by the global 2-level ceiling and anything above 2 is rejected. 0 forbids nested calls entirely — the assigned agents cannot dispatch teammates. Inside a spawned agent, maxNestingDepth can only tighten the parent's budget — pass 0 to forbid further nesting below that call; it can never extend depth beyond what the parent allowed.
 
 Use an exact role name from the Available Teammate Agents section in the active system prompt. Unknown names are rejected.
 
-Background: the foreground wait window is bounded — the smallest per-task timeoutMs, or a 600000 ms (10 minutes) default; when it elapses the call returns a background acknowledgement and the work continues, completing via one automatic teammate-complete notification that triggers a new turn. Do not poll observe or teammate-list; if the current turn must wait, call observe once with action="wait" and target { kind: "teammate", id: "<name-or-correlation-id>" }. Completion delivery details (root vs nested dispatch, skip-on-exit) are in the background parameter description.
+Background: the foreground wait window is bounded — multi-task calls use concurrencyWaitMs when provided, otherwise the smallest per-task timeoutMs or a 600000 ms (10 minutes) default. Expiry only detaches the dispatch; dependencies, concurrency queues, and running agents continue. Do not poll observe or teammate-list; if the current turn must wait, call observe once with action="wait" and targets: [{ kind: "teammate", id: "<name-or-correlation-id>" }]. Completion delivery details (root vs nested dispatch, skip-on-exit) are in the background parameter description.
 
 ## Structured output (optional)
 
 Use outputSchema only when the caller needs machine-readable fields for validation or downstream {name.field} references. The task instruction remains in tasks[].prompt:
 { "tasks": [{ "name": "audit", "agent": "analyst", "prompt": "Inspect auth", "outputSchema": { "type": "object", "properties": { "result": { "type": "string" } }, "required": ["result"] } }] }
 
-When a task (or the top-level call) sets outputSchema, the child must submit its final answer through a \`structured_output\` tool that validates the value against that JSON Schema. On completion the value is returned directly in the result content (prefixed \`[structured_output]\`) and is persisted for later reads via \`agent://<correlationId>\` (resource tool). Schema-invalid submissions are rejected by the child tool so the model can correct them within the current Pi turn; teammate does not replay validation failures. A run that ends without a valid value fails with a diagnostic naming the offending field. Without outputSchema, the teammate's final answer is returned as text.
+When a task (or the top-level call) sets outputSchema, the child must submit its final answer through a \`structured_output\` tool that validates the value against that JSON Schema. The validated value is persisted for later reads via the immutable \`agent://<publicationId>\` resource; \`agent://<correlationId>\` and task names remain latest-result aliases. After durable persistence is acknowledged, small results remain inline with the canonical reference while large results are replaced by a compact description plus that reference; without a persistence observer or when storage capacity is full, the full value remains inline. Schema-invalid submissions are rejected by the child tool so the model can correct them within the current Pi turn; teammate does not replay validation failures. A run that ends without a valid value fails with a diagnostic naming the offending field. Plain tasks follow the same persistence and reference behavior for their final answer text.
 
 ## Todo binding (todo)
 

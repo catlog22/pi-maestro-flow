@@ -181,15 +181,88 @@ function cacheUsageParts(
 // renderCall — how the tool invocation appears in conversation
 // ---------------------------------------------------------------------------
 
-// The result component owns teammate presentation for every lifecycle phase.
-// Keeping the call slot empty prevents launch summaries from duplicating live
-// progress and completed rows immediately below them.
+function renderSafeText(value: unknown): string {
+  return String(value ?? "")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isExpertRenderArgs(args: Record<string, unknown> | undefined): boolean {
+  return args?.mode === "expert";
+}
+
+function expertObjective(args: Record<string, unknown>): string {
+  const tasks = Array.isArray(args.tasks) ? args.tasks : [];
+  const first = tasks[0];
+  if (!first || typeof first !== "object") return "";
+  return renderSafeText((first as Record<string, unknown>).prompt);
+}
+
+function expertResultState(
+  result: AgentToolResult<Details>,
+  details: Details | undefined,
+): { glyph: string; tone: "warning" | "success" | "error"; label: string; delegated: number } {
+  const entries = details?.progress ?? [];
+  const children = details?.childCalls ?? [];
+  const failed = (result as { isError?: boolean }).isError === true
+    || details?.results.some((entry) => entry.exitCode !== 0) === true
+    || entries.some((entry) => entry.status === "failed" || entry.status === "terminated")
+    || children.some((entry) => entry.status === "failed" || entry.status === "terminated");
+  const finished = (details?.results.length ?? 0) > 0;
+  const coordinating = entries.some((entry) => entry.status === "running" || entry.status === "retrying")
+    || children.some((entry) => entry.status === "running" || entry.status === "retrying");
+  if (failed) return { glyph: "✗", tone: "error", label: "completed with issues", delegated: children.length };
+  if (finished) return { glyph: "✓", tone: "success", label: "synthesized", delegated: children.length };
+  if (coordinating || children.length > 0) {
+    return { glyph: "■", tone: "warning", label: "coordinating", delegated: children.length };
+  }
+  return { glyph: "■", tone: "warning", label: "preparing delegation", delegated: 0 };
+}
+
+function frameExpertResult(
+  body: Component,
+  result: AgentToolResult<Details>,
+  details: Details | undefined,
+  theme: Theme,
+): Component {
+  return {
+    render(width: number): string[] {
+      const state = expertResultState(result, details);
+      const meta = statusMeta([
+        state.delegated > 0 ? `${state.delegated} delegated` : "",
+      ], theme);
+      const header = `${theme.fg(state.tone, state.glyph)} ${theme.bold("Leader")} ${theme.fg("accent", state.label)}${meta ? `  ${meta}` : ""}`;
+      return [header, ...body.render(width)].map((line) =>
+        truncateToWidth(line, Math.max(1, width), "…")
+      );
+    },
+    invalidate(): void {
+      body.invalidate();
+    },
+  };
+}
+
+// The result component owns ordinary teammate presentation for every lifecycle
+// phase. Expert mode adds a persistent call header so the Leader strategy is
+// distinguishable from a direct single-agent dispatch.
 export function renderTeammateCall(
-  _args: Record<string, unknown>,
-  _theme: Theme,
+  args: Record<string, unknown>,
+  theme: Theme,
   _context?: { expanded?: boolean; isPartial?: boolean },
 ): Component {
-  return dynamicComponent(() => []);
+  if (!isExpertRenderArgs(args)) return dynamicComponent(() => []);
+  const objective = expertObjective(args);
+  return dynamicComponent((width) => {
+    const header = `${theme.fg("accent", "◆")} ${theme.bold("EXPERT")}`;
+    if (isQuietMode() || !objective || width < 28) {
+      return [truncateToWidth(header, Math.max(1, width), "…")];
+    }
+    const objectiveLine = `${theme.fg("dim", "└ objective")} ${objective}`;
+    return [header, objectiveLine].map((line) =>
+      truncateToWidth(line, Math.max(1, width), "…")
+    );
+  });
 }
 
 export function renderTeammateListCall(
@@ -228,22 +301,24 @@ export function renderTeammateResult(
   result: AgentToolResult<Details>,
   options: { expanded: boolean },
   theme: Theme,
+  args?: Record<string, unknown>,
 ): Component {
-  if (isQuietMode()) return renderQuietTeammateResult(result, theme);
   const details = result.details;
-
-  // No results yet — streaming progress or background ack
-  if (!details || details.results.length === 0) {
-    return renderProgress(result, details, options, theme);
+  const expert = isExpertRenderArgs(args);
+  let body: Component;
+  if (isQuietMode()) {
+    body = renderQuietTeammateResult(result, theme);
+  } else if (!details || details.results.length === 0) {
+    // No results yet — streaming progress or background ack.
+    body = renderProgress(result, details, options, theme, expert);
+  } else if (details.results.length === 1) {
+    body = renderSingleResult(details.results[0], options, theme);
+  } else {
+    body = renderMultiResult(details, options, theme);
   }
-
-  // Single result
-  if (details.results.length === 1) {
-    return renderSingleResult(details.results[0], options, theme);
-  }
-
-  // Multi-result
-  return renderMultiResult(details, options, theme);
+  return expert
+    ? frameExpertResult(body, result, details, theme)
+    : body;
 }
 
 // ---------------------------------------------------------------------------
@@ -258,9 +333,16 @@ function childStateText(child: ChildAgentCallSnapshot): string {
   return translateStatusText(STATUS_PRESENTATION[display].text);
 }
 
-function formatChildLine(child: ChildAgentCallSnapshot, theme: Theme, hideActivity = false): string {
+function formatChildLine(
+  child: ChildAgentCallSnapshot,
+  theme: Theme,
+  hideActivity = false,
+  stableInFlightRow = false,
+): string {
   const presentation = STATUS_PRESENTATION[child.status];
   const icon = theme.fg(presentation.tone, presentation.icon);
+  const inFlight = child.status === "running" || child.status === "retrying";
+  const stable = stableInFlightRow && inFlight;
   const activeTool = child.recentTools?.find((tool) => tool.status === "running");
   const activity = hideActivity
     ? ""
@@ -269,19 +351,26 @@ function formatChildLine(child: ChildAgentCallSnapshot, theme: Theme, hideActivi
       : child.lastMessage ? ` · ${tuiT("progress.streaming")}` : "";
   const childCacheRead = child.cacheReadTokens ?? 0;
   const childCacheWrite = child.cacheWriteTokens ?? 0;
-  const tokens = child.inputTokens !== undefined || child.outputTokens !== undefined
-    ? ` · ${tuiT("metrics.in", { count: child.inputTokens ?? 0 })} · ${tuiT("metrics.out", { count: child.outputTokens ?? 0 })}`
-      + (childCacheRead > 0 || childCacheWrite > 0
-        ? ` · ${tuiT("metrics.cache", { read: childCacheRead, write: childCacheWrite })}`
-        : "")
-    : "";
-  const durationMs = child.status === "running" && child.startedAt
-    ? Math.max(child.durationMs ?? 0, Date.now() - child.startedAt)
-    : child.durationMs;
+  const tokens = stable
+    ? ""
+    : child.inputTokens !== undefined || child.outputTokens !== undefined
+      ? ` · ${tuiT("metrics.in", { count: child.inputTokens ?? 0 })} · ${tuiT("metrics.out", { count: child.outputTokens ?? 0 })}`
+        + (childCacheRead > 0 || childCacheWrite > 0
+          ? ` · ${tuiT("metrics.cache", { read: childCacheRead, write: childCacheWrite })}`
+          : "")
+      : "";
+  const durationMs = stable
+    ? undefined
+    : child.status === "running" && child.startedAt
+      ? Math.max(child.durationMs ?? 0, Date.now() - child.startedAt)
+      : child.durationMs;
   const duration = durationMs !== undefined
     ? ` · ${elapsed(Math.max(0, Math.floor(durationMs / 1000)))}`
     : "";
-  return `${icon} ${theme.fg("accent", `@${child.name ?? child.agent}`)} ${theme.fg("dim", `${tuiT("progress.childLabel")} · ${childStateText(child)}${duration}${activity}${tokens}`)}`;
+  const state = stable
+    ? translateStatusText(presentation.text)
+    : childStateText(child);
+  return `${icon} ${theme.fg("accent", `@${child.name ?? child.agent}`)} ${theme.fg("dim", `${tuiT("progress.childLabel")} · ${state}${duration}${activity}${tokens}`)}`;
 }
 
 function renderChildSubtree(
@@ -291,13 +380,22 @@ function renderChildSubtree(
   theme: Theme,
   out: string[],
   hideActivity = false,
+  stableInFlightRows = false,
 ): void {
   children.forEach((child, index) => {
     const isLast = index === children.length - 1;
-    out.push(`${prefix}${theme.fg("dim", isLast ? "└─ " : "├─ ")}${formatChildLine(child, theme, hideActivity)}`);
+    out.push(`${prefix}${theme.fg("dim", isLast ? "└─ " : "├─ ")}${formatChildLine(child, theme, hideActivity, stableInFlightRows)}`);
     const grandchildren = childrenByParent.get(child.correlationId);
     if (grandchildren?.length) {
-      renderChildSubtree(grandchildren, childrenByParent, prefix + theme.fg("dim", isLast ? "   " : "│  "), theme, out, hideActivity);
+      renderChildSubtree(
+        grandchildren,
+        childrenByParent,
+        prefix + theme.fg("dim", isLast ? "   " : "│  "),
+        theme,
+        out,
+        hideActivity,
+        stableInFlightRows,
+      );
     }
   });
 }
@@ -307,6 +405,7 @@ function renderProgress(
   details: Details | undefined,
   options: { expanded: boolean },
   theme: Theme,
+  stableInFlightRows = false,
 ): Component {
   const progress = details?.progress;
   const childCalls = details?.childCalls ?? [];
@@ -385,7 +484,13 @@ function renderProgress(
       : focused?.tokens
         ? tuiT("metrics.tokens", { count: formatTokens(focused.tokens) })
         : "";
-    const treeRows = buildProgressTree(entries, palette);
+    const treeRows = buildProgressTree(
+      entries,
+      palette,
+      Date.now(),
+      undefined,
+      { stableInFlightRows },
+    );
     const entryByTaskIndex = new Map<number, AgentProgressSnapshot>();
     for (const entry of entries) entryByTaskIndex.set(entry.taskIndex, entry);
     const childrenByParent = new Map<string, ChildAgentCallSnapshot[]>();
@@ -430,14 +535,24 @@ function renderProgress(
     for (const row of treeRows) {
       lines.push(row.text);
       const cid = entryByTaskIndex.get(row.taskIndex)?.correlationId;
-      if (cid) renderChildSubtree(childrenByParent.get(cid) ?? [], childrenByParent, "  ", theme, lines);
+      if (cid) {
+        renderChildSubtree(
+          childrenByParent.get(cid) ?? [],
+          childrenByParent,
+          "  ",
+          theme,
+          lines,
+          false,
+          stableInFlightRows,
+        );
+      }
     }
     // Child agents whose parent is outside this view render as top-level roots.
     const rootOrphans = childCalls.filter((child) => {
       const parent = child.parentCorrelationId;
       return !parent || (!taskCids.has(parent) && !childCids.has(parent));
     });
-    renderChildSubtree(rootOrphans, childrenByParent, "", theme, lines);
+    renderChildSubtree(rootOrphans, childrenByParent, "", theme, lines, false, stableInFlightRows);
 
     if (focused) {
       const recentTools = focused.recentTools ?? [];
