@@ -4,6 +4,7 @@ export declare const PROJECT_RULES_FILENAME = ".experts-rules.json";
 /**
  * Load experts rules: package default-rules.json, optionally merged with
  * `<cwd>/.experts-rules.json` (shallow + settle/hardGate/stagePolicies deep-ish merge).
+ * Missing/corrupt base file falls back to BUILTIN_FALLBACK_RULES instead of throwing.
  */
 export declare function loadRules(rulesPath?: string, cwd?: string): ExpertsRules;
 export declare function clearRulesCache(): void;

@@ -13,6 +13,8 @@ export type { MailboxAuthority, MailboxEnqueueRequest } from "../../extension/ma
 export declare const MAILBOX_REGISTRY_KEY: unique symbol;
 export type AgentMessageMode = "steer" | "follow_up";
 export interface AgentMessageDeliveryRequest {
+    /** Sending agent correlation id. Omitted or "caller" means the root tool. */
+    senderId?: string;
     recipientCorrelationId: string;
     recipientLabel?: string;
     message: string;

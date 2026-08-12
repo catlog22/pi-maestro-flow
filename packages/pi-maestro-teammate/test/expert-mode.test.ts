@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -6,6 +7,8 @@ import { Check } from "typebox/value";
 import { TeammateParams } from "../src/extension/schemas.ts";
 import { parseProxyTeammateParams } from "../src/extension/teammate-proxy.ts";
 import { applyModelRouting } from "../src/models/model-routing.ts";
+import { evaluateHardGate } from "../src/experts-mode/hard-gate.ts";
+import { clearRulesCache, loadRules } from "../src/experts-mode/rules.ts";
 import {
   EXPERT_MODE_LEADER_AGENT,
   EXPERT_MODE_LEADER_NAME,
@@ -17,6 +20,41 @@ import {
   prepareTeammateMode,
   type RunTeammateParams,
 } from "../src/runs/execution.ts";
+
+test("missing or corrupt packaged rules fall back to a fail-closed leader gate", () => {
+  const cwd = fs.mkdtempSync(path.join(tmpdir(), "pi-expert-rules-fallback-"));
+  try {
+    const missing = path.join(cwd, "missing-default-rules.json");
+    clearRulesCache();
+    const missingRules = loadRules(missing, cwd);
+    assert.equal(evaluateHardGate("read", { cwd, mode: "experts", rules: missingRules }).decision, "allow");
+    assert.equal(evaluateHardGate("edit", {
+      cwd,
+      mode: "experts",
+      rules: missingRules,
+      toolInput: { path: path.join(cwd, "src", "app.ts") },
+    }).decision, "deny");
+    assert.equal(evaluateHardGate("unknown-heavy-tool", {
+      cwd,
+      mode: "experts",
+      rules: missingRules,
+    }).decision, "deny");
+
+    const corrupt = path.join(cwd, "corrupt-default-rules.json");
+    fs.writeFileSync(corrupt, "{not-json", "utf8");
+    clearRulesCache();
+    const corruptRules = loadRules(corrupt, cwd);
+    assert.equal(evaluateHardGate("bash", {
+      cwd,
+      mode: "experts",
+      rules: corruptRules,
+      toolInput: { command: "rm -rf output" },
+    }).decision, "deny");
+  } finally {
+    clearRulesCache();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
 
 test("default mode leaves the dispatch unchanged", () => {
   const params: RunTeammateParams = { tasks: [{ prompt: "inspect auth" }] };

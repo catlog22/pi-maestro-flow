@@ -91,7 +91,7 @@
     "./src/*": "Compatibility only; use the versioned ./v1/* public API."
   },
   "files": [
-    "src/**/*.ts",
+    "src/**/*.{ts,json}",
     "types/**/*.d.ts",
     "agents/",
     "README.md"

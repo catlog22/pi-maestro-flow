@@ -24,6 +24,7 @@ export interface MailboxRolloutOptions {
     config?: Partial<RolloutConfig>;
     /** Fallback delivery function for v1 direct path. */
     directDeliver: (envelope: {
+        senderId: string;
         recipientCorrelationId: string;
         payload: string;
         mode: string;

@@ -2342,7 +2342,6 @@ export async function handleProxyRequest(
         const delivered = sessionSend
           ? (await sessionSend({
             selector: to,
-            targetCorrelationId: cid,
             senderCorrelationId: parentCid,
             message,
             mode: routedMode,

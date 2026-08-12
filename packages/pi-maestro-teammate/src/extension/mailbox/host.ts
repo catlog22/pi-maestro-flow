@@ -105,7 +105,12 @@ export interface MailboxHostOptions {
   workspaceId: string;
   teamId: string;
   /** Convert a mailbox envelope back into an actual stdin injection. */
-  inject: (envelope: { recipientCorrelationId: string; payload: string; mode: string }) => Promise<void>;
+  inject: (envelope: {
+    senderId: string;
+    recipientCorrelationId: string;
+    payload: string;
+    mode: string;
+  }) => Promise<void>;
   mode?: RolloutMode;
   pollMs?: number;
   /** GC sweep interval (default 10 minutes). */
@@ -144,6 +149,7 @@ export class MailboxHost {
       ownerId: options.ownerId,
       onDispatch: async (envelope) => {
         await options.inject({
+          senderId: envelope.senderId,
           recipientCorrelationId: envelope.recipientCorrelationId,
           payload: envelope.payload,
           mode: envelope.mode,

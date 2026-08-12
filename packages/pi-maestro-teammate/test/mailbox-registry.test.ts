@@ -83,12 +83,14 @@ test("registry deliverAgentMessage forwards the versioned request and result", a
     return { delivered: true, mode: "prompt", wasSleeping: true };
   });
   const result = await registry.deliverAgentMessage({
+    senderId: "caller",
     recipientCorrelationId: "corr-child-1",
     recipientLabel: "builder",
     message: "continue with tests",
     mode: "follow_up",
   });
   assert.deepEqual(seen, [{
+    senderId: "caller",
     recipientCorrelationId: "corr-child-1",
     recipientLabel: "builder",
     message: "continue with tests",
@@ -101,7 +103,7 @@ test("registry deliverAgentMessage fails explicitly when no runtime delivery is 
   const service = makeService(() => {});
   const registry = createMailboxHostRegistry(service, "v2");
   assert.deepEqual(
-    await registry.deliverAgentMessage({ recipientCorrelationId: "missing", message: "hello" }),
+    await registry.deliverAgentMessage({ senderId: "caller", recipientCorrelationId: "missing", message: "hello" }),
     { delivered: false, error: "Agent message delivery is unavailable." },
   );
 });
@@ -109,7 +111,7 @@ test("registry deliverAgentMessage fails explicitly when no runtime delivery is 
 test("direct registry keeps agent delivery available when durable mailbox is disabled", async () => {
   const registry = createDirectAgentHostRegistry(async () => ({ delivered: true, mode: "follow_up" }));
   assert.deepEqual(
-    await registry.deliverAgentMessage({ recipientCorrelationId: "c1", message: "hello" }),
+    await registry.deliverAgentMessage({ senderId: "caller", recipientCorrelationId: "c1", message: "hello" }),
     { delivered: true, mode: "follow_up" },
   );
   assert.deepEqual(

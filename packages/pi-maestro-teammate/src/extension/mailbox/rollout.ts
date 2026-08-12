@@ -37,6 +37,7 @@ export interface MailboxRolloutOptions {
   config?: Partial<RolloutConfig>;
   /** Fallback delivery function for v1 direct path. */
   directDeliver: (envelope: {
+    senderId: string;
     recipientCorrelationId: string;
     payload: string;
     mode: string;
@@ -116,6 +117,7 @@ export class MailboxRollout {
       case "disabled": {
         // Pure v1 direct path — no durable message exists, so no messageId.
         await this.#directDeliver({
+          senderId: request.senderId,
           recipientCorrelationId: request.recipientCorrelationId,
           payload: request.payload,
           mode: request.mode,
@@ -131,6 +133,7 @@ export class MailboxRollout {
         const enqueueResult = await this.#service.enqueue(request);
         // Also deliver via direct path (shadow does NOT consume from v2)
         await this.#directDeliver({
+          senderId: request.senderId,
           recipientCorrelationId: request.recipientCorrelationId,
           payload: request.payload,
           mode: request.mode,

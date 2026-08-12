@@ -41,6 +41,8 @@ export const MAILBOX_REGISTRY_KEY = Symbol.for("pi-maestro-teammate.mailbox-regi
 
 export type AgentMessageMode = "steer" | "follow_up";
 export interface AgentMessageDeliveryRequest {
+  /** Sending agent correlation id. Omitted or "caller" means the root tool. */
+  senderId?: string;
   recipientCorrelationId: string;
   recipientLabel?: string;
   message: string;

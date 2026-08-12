@@ -39,6 +39,7 @@ export interface MailboxHostOptions {
     teamId: string;
     /** Convert a mailbox envelope back into an actual stdin injection. */
     inject: (envelope: {
+        senderId: string;
         recipientCorrelationId: string;
         payload: string;
         mode: string;

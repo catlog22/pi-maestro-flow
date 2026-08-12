@@ -13,8 +13,34 @@ let cachedRules: ExpertsRules | null = null;
 let cachedKey: string | null = null;
 
 /**
+ * Minimal built-in rules used when the packaged default-rules.json is
+ * missing or unreadable (e.g. a published tarball that excluded .json
+ * assets). The fallback denies unknown/heavy tools while preserving the
+ * read and orchestration surface needed to delegate recovery work.
+ */
+const BUILTIN_FALLBACK_RULES: ExpertsRules = {
+  version: 0,
+  defaultTaskType: "development",
+  defaultAgent: "general-executor",
+  hardGate: {
+    default: "deny",
+    tools: {
+      read: "allow",
+      ffgrep: "allow",
+      fffind: "allow",
+      teammate: "allow",
+      observe: "allow",
+      todo: "allow",
+      goal: "allow",
+      "run-control": "allow",
+    },
+  },
+};
+
+/**
  * Load experts rules: package default-rules.json, optionally merged with
  * `<cwd>/.experts-rules.json` (shallow + settle/hardGate/stagePolicies deep-ish merge).
+ * Missing/corrupt base file falls back to BUILTIN_FALLBACK_RULES instead of throwing.
  */
 export function loadRules(
   rulesPath: string = DEFAULT_RULES_PATH,
@@ -25,7 +51,12 @@ export function loadRules(
   const key = `${basePath}::${projectPath}`;
   if (cachedRules && cachedKey === key) return cachedRules;
 
-  const base = JSON.parse(fs.readFileSync(basePath, "utf8")) as ExpertsRules;
+  let base: ExpertsRules = BUILTIN_FALLBACK_RULES;
+  try {
+    base = JSON.parse(fs.readFileSync(basePath, "utf8")) as ExpertsRules;
+  } catch {
+    // packaged default missing or unreadable — degrade to built-in minimum
+  }
   let merged: ExpertsRules = base;
   try {
     if (fs.existsSync(projectPath)) {
