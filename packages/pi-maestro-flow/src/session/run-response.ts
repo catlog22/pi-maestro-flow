@@ -43,15 +43,7 @@ export type RunOperationV11 =
   | "execution-lease-status"
   | "execution-lease-heartbeat"
   | "execution-lease-release"
-  | "execution-lease-recover"
-  // The execution-operation-* kinds below belong to the deprecated
-  // distributed operation claim/drain experiment, superseded by the
-  // Session/Run minimal-state architecture
-  // (docs/session-run-minimal-state-architecture-20260812.md). Removed in v3.
-  | "execution-operation-claim"
-  | "execution-operation-heartbeat"
-  | "execution-operation-release"
-  | "execution-operation-status";
+  | "execution-lease-recover";
 
 export interface RunResponseNextAction {
   suggest_only: true;
@@ -150,17 +142,6 @@ export interface RunLeaseClaim extends Record<string, unknown> {
   lease_id: string;
 }
 
-/**
- * @deprecated Private credential of the distributed operation claim/drain
- * experiment, superseded by the Session/Run minimal-state architecture
- * (docs/session-run-minimal-state-architecture-20260812.md, section 10
- * LocalTaskRegistry). Removed in v3.
- */
-export interface RunOperationClaim extends Record<string, unknown> {
-  operation_id: string;
-  operation_token: string;
-}
-
 export type RunResponseErrorCodeV10 =
   | "COMMANDER_USAGE"
   | "SESSION_NOT_FOUND"
@@ -214,15 +195,6 @@ export type RunResponseErrorCodeV11 =
   | "LEASE_HANDOFF_TOKEN_INVALID"
   | "LEASE_STALE_RECOVERY_REQUIRED"
   | "LEASE_RELEASE_BLOCKED"
-  // The OPERATION_* codes below belong to the deprecated distributed
-  // operation claim/drain experiment, superseded by the Session/Run
-  // minimal-state architecture
-  // (docs/session-run-minimal-state-architecture-20260812.md). Removed in v3.
-  | "OPERATION_ADMISSION_CLOSED"
-  | "OPERATION_CLAIM_NOT_FOUND"
-  | "OPERATION_CLAIM_FENCE_CONFLICT"
-  | "OPERATION_REGISTRY_REVISION_CONFLICT"
-  | "OPERATION_DRAIN_BLOCKED"
   | "CAPABILITY_REQUIRED";
 
 export class RunResponseParseError extends Error {
@@ -265,7 +237,6 @@ const operationV11Schema = z.enum([
   "execution-attach", "execution-status", "execution-pause", "execution-resolve", "execution-resume",
   "execution-seal", "execution-handoff-prepare", "execution-handoff-accept", "execution-handoff-cancel",
   "execution-lease-status", "execution-lease-heartbeat", "execution-lease-release", "execution-lease-recover",
-  "execution-operation-claim", "execution-operation-heartbeat", "execution-operation-release", "execution-operation-status",
 ]);
 const errorCodeV10Schema = z.enum([
   "COMMANDER_USAGE", "SESSION_NOT_FOUND", "SESSION_AMBIGUOUS", "SESSION_NOT_RUNNING", "RESUME_REQUIRED",
@@ -282,8 +253,7 @@ const errorCodeV11Schema = z.enum([
   "EXECUTION_PAUSED", "EXECUTION_PAUSE_BLOCKED", "EXECUTION_SEAL_BLOCKED", "EXECUTION_SEALED",
   "EXECUTION_REVISION_CONFLICT", "LEASE_BUSY", "LEASE_FENCE_CONFLICT", "LEASE_HANDOFF_IN_PROGRESS",
   "LEASE_HANDOFF_TOKEN_INVALID", "LEASE_STALE_RECOVERY_REQUIRED", "LEASE_RELEASE_BLOCKED",
-  "OPERATION_ADMISSION_CLOSED", "OPERATION_CLAIM_NOT_FOUND", "OPERATION_CLAIM_FENCE_CONFLICT",
-  "OPERATION_REGISTRY_REVISION_CONFLICT", "OPERATION_DRAIN_BLOCKED", "CAPABILITY_REQUIRED",
+  "CAPABILITY_REQUIRED",
 ]);
 
 const commonV10Shape = {
@@ -370,9 +340,6 @@ const LEASE_CLAIM_OPERATIONS: ReadonlySet<RunOperationV11> = new Set([
   "execution-handoff-accept",
   "execution-lease-recover",
 ]);
-const OPERATION_CLAIM_OPERATIONS: ReadonlySet<RunOperationV11> = new Set([
-  "execution-operation-claim",
-]);
 
 export function parseRunResponse(input: string | unknown): PrivateRunResponseEnvelope {
   const value = parseInput(input);
@@ -395,7 +362,7 @@ export function parseRunResponse(input: string | unknown): PrivateRunResponseEnv
     );
   }
   validateLeaseClaim(parsed.data, version);
-  validateOperationClaim(parsed.data, version);
+  rejectOperationClaim(parsed.data, version);
   return parsed.data as PrivateRunResponseEnvelope;
 }
 
@@ -407,26 +374,6 @@ export function extractRunResponseLeaseClaim(
   if (!isRecord(envelope.result) || !("lease_claim" in envelope.result)) return null;
   const claim = envelope.result.lease_claim;
   return isRunLeaseClaim(claim) ? claim : null;
-}
-
-/**
- * Returns the private operation claim only to the host that acquired it.
- *
- * @deprecated Part of the distributed operation claim/drain experiment,
- * superseded by the Session/Run minimal-state architecture
- * (docs/session-run-minimal-state-architecture-20260812.md). Removed in v3.
- */
-export function extractRunResponseOperationClaim(
-  envelope: PrivateRunResponseEnvelope,
-): RunOperationClaim | null {
-  if (envelope.schema_version !== "run-response/1.1"
-    || !envelope.ok
-    || envelope.disposition !== "success"
-    || !OPERATION_CLAIM_OPERATIONS.has(envelope.operation)
-    || !isRecord(envelope.result)) return null;
-  return isRunOperationClaim(envelope.result.operation_claim)
-    ? envelope.result.operation_claim
-    : null;
 }
 
 /** Deep-clones an envelope while removing claims and raw lease IDs at every depth. */
@@ -499,28 +446,17 @@ function isRunLeaseClaim(value: unknown): value is RunLeaseClaim {
   return isRecord(value) && typeof value.lease_id === "string" && value.lease_id.length > 0;
 }
 
-function validateOperationClaim(envelope: Record<string, unknown>, version: RunResponseSchemaVersion): void {
+/**
+ * Fail-closed guard: the distributed operation claim experiment was removed,
+ * so no response may carry a result.operation_claim credential anymore.
+ */
+function rejectOperationClaim(envelope: Record<string, unknown>, version: RunResponseSchemaVersion): void {
   const result = envelope.result;
   if (!isRecord(result) || !("operation_claim" in result)) return;
-  if (version !== "run-response/1.1"
-    || envelope.ok !== true
-    || envelope.disposition !== "success"
-    || typeof envelope.operation !== "string"
-    || !OPERATION_CLAIM_OPERATIONS.has(envelope.operation as RunOperationV11)
-    || !isRunOperationClaim(result.operation_claim)) {
-    throw new RunResponseParseError(
-      `Malformed Maestro ${version} envelope: result.operation_claim is not permitted or invalid`,
-      version,
-    );
-  }
-}
-
-function isRunOperationClaim(value: unknown): value is RunOperationClaim {
-  return isRecord(value)
-    && typeof value.operation_id === "string"
-    && value.operation_id.length > 0
-    && typeof value.operation_token === "string"
-    && value.operation_token.length > 0;
+  throw new RunResponseParseError(
+    `Malformed Maestro ${version} envelope: result.operation_claim is not permitted`,
+    version,
+  );
 }
 
 function redactLeaseSecrets(value: unknown): unknown {

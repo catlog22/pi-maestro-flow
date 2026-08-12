@@ -284,6 +284,36 @@ test("core-execution start and resume use documented acquisition fences", async 
   }
 });
 
+test("plan-B v3 cores fail mutations closed with an actionable diagnostic until the Pi v3 adapter lands", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-v3-detected-"));
+  try {
+    const snapshot = coreWorkflowSnapshot();
+    const coordinator = testCoordinator(
+      fakeBridge(snapshot),
+      coreAdapter([], snapshot, undefined, v3CoreCapabilities()),
+      new WorkflowLeaseStore(root),
+    );
+    assert.equal(await coordinator.selectMode(), "fail-closed");
+    assert.equal(coordinator.mode(), "fail-closed");
+    // Reads stay available; only mutations are refused.
+    const read = await coordinator.exec(
+      ["execution", "status"],
+      classifyRunControlArgv(["execution", "status"]),
+    );
+    assert.equal(read.command.stdout, "read execution status");
+    await assert.rejects(
+      coordinator.exec(
+        ["session", "complete"],
+        classifyRunControlArgv(["session", "complete"]),
+        "pi-core",
+      ),
+      /Session\/Run minimal-state \(v3\) protocol.*not implemented yet/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("core-execution mutations fail closed for missing support, locator, claim, or response fence", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-workflow-core-fail-closed-"));
   try {
@@ -509,153 +539,25 @@ test("core-execution mode is sticky and run-control public results redact acquis
   }
 });
 
-test("core host operations preserve claim hierarchy and handoff prepare drains from its current tool claim", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-workflow-operation-drain-"));
-  const snapshot = coreWorkflowSnapshot();
-  const calls: string[][] = [];
-  let registryRevision = 0;
-  const activeClaims = new Map<string, { kind: string; parent_operation_id: string | null }>();
-  const coordinator = testCoordinator(
-    fakeBridge(snapshot),
-    coreAdapter(calls, snapshot, (argv) => {
-      const operation = operationForArgv(argv);
-      if (operation === "execution-attach") return coreRunResponse(operation);
-      if (operation === "execution-operation-status") {
-        return coreRunResponse(operation, {
-          result: {
-            operation_registry: {
-              revision: registryRevision,
-              admission: "open",
-              active_claims: Object.fromEntries(activeClaims),
-            },
-          },
-        });
-      }
-      if (operation === "execution-operation-claim") {
-        const operationId = flagValue(argv, "--operation-id")!;
-        registryRevision++;
-        activeClaims.set(operationId, {
-          kind: flagValue(argv, "--kind")!,
-          parent_operation_id: flagValue(argv, "--parent-operation") ?? null,
-        });
-        return coreRunResponse(operation, {
-          result: {
-            operation_registry: {
-              revision: registryRevision,
-              admission: "open",
-              active_claims: Object.fromEntries(activeClaims),
-            },
-            operation_claim: {
-              operation_id: operationId,
-              operation_token: `private-${operationId}`,
-            },
-          },
-        });
-      }
-      if (operation === "execution-operation-heartbeat" || operation === "execution-operation-release") {
-        const operationId = flagValue(argv, "--operation-id")!;
-        registryRevision++;
-        if (operation.endsWith("release")) activeClaims.delete(operationId);
-        return coreRunResponse(operation, {
-          result: {
-            operation_registry: {
-              revision: registryRevision,
-              admission: "open",
-              active_claims: Object.fromEntries(activeClaims),
-            },
-          },
-        });
-      }
-      if (operation === "execution-handoff-prepare") {
-        registryRevision++;
-        return coreRunResponse(operation, {
-          result: { operation_registry_revision: registryRevision, to_owner_id: "pi-next" },
-        });
-      }
-      return coreRunResponse(operation);
-    }),
-    new WorkflowLeaseStore(root),
-  );
-  try {
-    await coordinator.attach("pi-owner");
-    const turn = await coordinator.claimHostOperation("turn-1", "turn", "pi-owner");
-    const childTool = await coordinator.claimHostOperation("tool-1", "tool", "pi-owner", turn.operationId);
-    assert.equal(childTool.parentOperationId, "turn-1");
-    const childClaimCall = calls.find((call) => flagValue(call, "--operation-id") === "tool-1")!;
-    assert.equal(flagValue(childClaimCall, "--parent-operation-token"), "private-turn-1");
-    await coordinator.heartbeatHostOperation("tool-1", "pi-owner");
-    await coordinator.releaseHostOperation("tool-1", "pi-owner");
-
-    const drainTool = await coordinator.claimHostOperation("tool-handoff", "tool", "pi-owner");
-    const prepared = await executeRunControl(
-      { argv: ["execution", "handoff", "prepare", "--to-owner-id", "pi-next"] },
-      coordinator,
-      { hostSessionId: "pi-owner", toolOperationId: drainTool.operationId },
-    );
-    assert.equal(prepared.ok, true);
-    const prepareCall = calls.find((call) => call[2] === "handoff" && call[3] === "prepare")!;
-    assert.equal(flagValue(prepareCall, "--drain-operation"), "tool-handoff");
-    assert.equal(flagValue(prepareCall, "--drain-operation-token"), "private-tool-handoff");
-    await coordinator.releaseHostOperation("tool-handoff", "pi-owner");
-    const releaseCall = calls.findLast((call) => call[2] === "operation" && call[3] === "release")!;
-    assert.equal(flagValue(releaseCall, "--expected-operation-registry-revision"), String(registryRevision - 1));
-    assert.equal(JSON.stringify(await coordinator.operationStatus("pi-owner")).includes("private-"), false);
-  } finally {
-    await coordinator.release();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-// execution_operation_drain is an optional capability of the deprecated
-// operation drain experiment (superseded by
-// docs/session-run-minimal-state-architecture-20260812.md). A core that does
-// not advertise it must still negotiate the modern core-execution protocol,
-// with every operation claim/heartbeat/release/drain feature gated off.
-test("core coordinator keeps the modern protocol and gates drain features off without the optional capability", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-workflow-no-drain-"));
+// The distributed operation claim/drain experiment was removed; execution
+// handoff prepare is always a plain prepare without drain argument injection.
+test("core execution handoff prepare dispatches as a plain prepare without drain arguments", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-plain-handoff-prepare-"));
   const snapshot = coreWorkflowSnapshot();
   const calls: string[][] = [];
   const coordinator = testCoordinator(
     fakeBridge(snapshot),
-    coreAdapter(calls, snapshot, undefined, noDrainCoreCapabilities()),
+    coreAdapter(calls, snapshot),
     new WorkflowLeaseStore(root),
   );
   try {
-    assert.equal(await coordinator.selectMode(), "core-execution");
-    assert.equal(coordinator.supportsOperationDrain(), false);
     await coordinator.attach("pi-owner");
-
-    const callsBeforeOperations = calls.length;
-    await assert.rejects(
-      coordinator.claimHostOperation("turn-1", "turn", "pi-owner"),
-      /execution_operation_drain/,
-    );
-    await assert.rejects(coordinator.operationStatus("pi-owner"), /execution_operation_drain/);
-    await assert.rejects(
-      coordinator.heartbeatHostOperation("turn-1", "pi-owner"),
-      /execution_operation_drain/,
-    );
-    await assert.rejects(
-      coordinator.releaseHostOperation("turn-1", "pi-owner"),
-      /execution_operation_drain/,
-    );
-    assert.equal(calls.length, callsBeforeOperations, "gated operation mutations must not reach the CLI");
-
-    const passthrough = await executeRunControl(
-      { argv: ["execution", "operation", "claim", "--operation-id", "tool-1", "--kind", "tool"] },
-      coordinator,
-      { hostSessionId: "pi-owner" },
-    );
-    assert.equal(passthrough.ok, false);
-    assert.match(passthrough.message, /execution_operation_drain/);
-    assert.equal(calls.length, callsBeforeOperations, "gated passthrough must not reach the CLI");
-
     const prepared = await executeRunControl(
       { argv: ["execution", "handoff", "prepare", "--to-owner-id", "pi-next"] },
       coordinator,
       { hostSessionId: "pi-owner" },
     );
-    assert.equal(prepared.ok, true);
+    assert.equal(prepared.ok, true, prepared.message);
     const prepareCall = calls.find((call) => call[2] === "handoff" && call[3] === "prepare")!;
     assert.equal(prepareCall.includes("--drain-operation"), false);
     assert.equal(prepareCall.includes("--drain-operation-token"), false);
@@ -2248,24 +2150,19 @@ test("real Maestro CLI accepts coordinator-generated structured start and attach
     assert.equal(flagValue(attachCall, "--owner-kind"), "pi");
     assert.equal(flagValue(attachCall, "--expected-lease-epoch"), "1");
     assert.equal(flagValue(attachCall, "--expected-execution-revision"), "2");
-
-    const turn = await coordinator.claimHostOperation("turn-real", "turn", "pi-real");
-    const tool = await coordinator.claimHostOperation("tool-real", "tool", "pi-real", turn.operationId);
     const prepared = await executeRunControl(
       { argv: ["execution", "handoff", "prepare", "--to-owner-id", "pi-next"] },
       coordinator,
-      { hostSessionId: "pi-real", toolOperationId: tool.operationId },
+      { hostSessionId: "pi-real" },
     );
     assert.equal(prepared.ok, true, prepared.message);
-    assert.equal(JSON.stringify(prepared).includes(tool.operationToken), false);
-    await coordinator.releaseHostOperation(tool.operationId, "pi-real");
-    let status = await coordinator.operationStatus("pi-real");
-    assert.equal(status.admission, "draining");
-    assert.deepEqual(status.activeOperationIds, [turn.operationId]);
-    await coordinator.releaseHostOperation(turn.operationId, "pi-real");
-    status = await coordinator.operationStatus("pi-real");
-    assert.equal(status.admission, "draining");
-    assert.deepEqual(status.activeOperationIds, []);
+    const prepareCall = calls.find(
+      (call) => call[0] === "execution" && call[1] === "handoff" && call[2] === "prepare",
+    )!;
+    assert.equal(flagValue(prepareCall, "--to-owner-id"), "pi-next");
+    assert.equal(prepareCall.includes("--drain-operation"), false);
+    assert.equal(prepareCall.includes("--drain-operation-token"), false);
+    assert.equal(prepareCall.includes("--expected-operation-registry-revision"), false);
   } finally {
     await coordinator.release().catch(() => {});
     await rm(root, { recursive: true, force: true });
@@ -2955,7 +2852,7 @@ function readClassification(): ReturnType<typeof classifyRunControlArgv> {
 
 function writeClassification(
   mutation: "session" | "execution" | "execution-acquire" | "execution-lease"
-    | "execution-operation" | "compatibility-start" | "plan-publish",
+    | "compatibility-start" | "plan-publish",
   lease: "none" | "required" | "acquire" | "command-aware",
   sessionless = false,
 ): ReturnType<typeof classifyRunControlArgv> {
@@ -2970,9 +2867,9 @@ function failClosedCoreCapabilities(diagnostic: string): RunCliCapabilities {
     support: {
       execution_generation: false,
       core_execution_lease: false,
-      execution_operation_drain: false,
       "run-response/1.1": false,
     },
+    protocol: "fail-closed",
     diagnostic,
   };
 }
@@ -2981,6 +2878,46 @@ function legacyCoreCapabilities(): RunCliCapabilities {
   return {
     ...failClosedCoreCapabilities("Installed Maestro CLI has no capabilities command"),
     mode: "legacy",
+  };
+}
+
+/** Session/Run minimal-state (plan B v3) core: v2 lease/generation retired. */
+function v3CoreCapabilities(): RunCliCapabilities {
+  const capabilities = fullCoreCapabilities();
+  return {
+    ...capabilities,
+    structured: {
+      ...capabilities.structured!,
+      session_schema_writes: ["session/3.0"],
+      execution_schema_writes: [],
+      features: {
+        execution_generation: false,
+        core_execution_lease: false,
+        execution_handoff: false,
+        session_statusless: true,
+        legacy_session_aliases: false,
+        session_run_minimal_v3: true,
+        entity_revision_cas: true,
+        participant_identity: true,
+        request_receipts_v2: true,
+        execution_lease: false,
+        operation_registry: false,
+      },
+    },
+    support: {
+      execution_generation: false,
+      core_execution_lease: false,
+      "run-response/1.1": true,
+    },
+    v3: {
+      session_run_minimal_v3: true,
+      entity_revision_cas: true,
+      participant_identity: true,
+      request_receipts_v2: true,
+      execution_lease_retired: true,
+      operation_registry_retired: true,
+    },
+    protocol: "session-run-v3",
   };
 }
 
@@ -3015,7 +2952,6 @@ function fullCoreCapabilities(): RunCliCapabilities {
         execution_generation: true,
         core_execution_lease: true,
         execution_handoff: true,
-        execution_operation_drain: true,
         session_statusless: true,
         legacy_session_aliases: true,
       },
@@ -3023,23 +2959,18 @@ function fullCoreCapabilities(): RunCliCapabilities {
     support: {
       execution_generation: true,
       core_execution_lease: true,
-      execution_operation_drain: true,
       "run-response/1.1": true,
     },
+    v3: {
+      session_run_minimal_v3: false,
+      entity_revision_cas: false,
+      participant_identity: false,
+      request_receipts_v2: false,
+      execution_lease_retired: false,
+      operation_registry_retired: false,
+    },
+    protocol: "execution-v2",
     diagnostic: null,
-  };
-}
-
-// Plan-B style core: modern protocol without the optional (deprecated)
-// execution_operation_drain capability, which it does not broadcast at all.
-function noDrainCoreCapabilities(): RunCliCapabilities {
-  const full = fullCoreCapabilities();
-  const structured = full.structured!;
-  const { execution_operation_drain: _omitted, ...features } = structured.features;
-  return {
-    ...full,
-    structured: { ...structured, features },
-    support: { ...full.support, execution_operation_drain: false },
   };
 }
 
@@ -3170,8 +3101,7 @@ function coreAdapter(
     async exec(argv) {
       calls.push(["exec", ...argv]);
       const classification = classifyRunControlArgv(argv);
-      const executionOperation = argv[0] === "execution" && argv[1] === "operation";
-      if (!classification.write && !executionOperation) return result(argv, `read ${argv.join(" ")}`);
+      if (!classification.write) return result(argv, `read ${argv.join(" ")}`);
       const envelope = response?.(argv) ?? coreRunResponse(operationForArgv(argv));
       applyCoreResponseToSnapshot(snapshot, envelope, argv);
       return result(argv, JSON.stringify(envelope));
@@ -3232,7 +3162,6 @@ function applyCoreResponseToSnapshot(
 }
 
 function operationForArgv(argv: readonly string[]): string {
-  if (argv[0] === "execution" && argv[1] === "operation") return `execution-operation-${argv[2]}`;
   if (argv[0] === "execution" && argv[1] === "handoff") return `execution-handoff-${argv[2]}`;
   if (argv[0] === "execution" && argv[1] === "lease") return `execution-lease-${argv[2]}`;
   if (argv[0] === "execution") return `execution-${argv[1]}`;

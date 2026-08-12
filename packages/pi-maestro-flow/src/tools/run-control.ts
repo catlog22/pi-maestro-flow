@@ -42,12 +42,6 @@ export type RunControlMutationScope =
   | "execution"
   | "execution-acquire"
   | "execution-lease"
-  // "execution-operation" belongs to the deprecated distributed operation
-  // claim/drain experiment, superseded by the Session/Run minimal-state
-  // architecture (docs/session-run-minimal-state-architecture-20260812.md).
-  // Only usable when the core advertises the optional
-  // execution_operation_drain capability; removed in v3.
-  | "execution-operation"
   | "compatibility-start"
   | "plan-publish";
 
@@ -84,15 +78,6 @@ export function classifyRunControlArgv(argv: readonly string[]): RunControlClass
       if (leaseCommand === "status") return { ...READ_CLASSIFICATION };
       if (leaseCommand === "recover") return writeClassification("execution-lease", "acquire");
       return writeClassification("execution-lease", "required");
-    }
-    if (command === "operation") {
-      // Deprecated operation drain experiment (superseded by
-      // docs/session-run-minimal-state-architecture-20260812.md); the
-      // coordinator fails these closed when the optional
-      // execution_operation_drain capability is absent.
-      const operationCommand = argv[2] ?? "";
-      if (operationCommand === "status") return { ...READ_CLASSIFICATION };
-      return writeClassification("execution-operation", "required");
     }
     if (command === "handoff") {
       const handoffCommand = argv[2] ?? "";
@@ -176,7 +161,6 @@ export interface RunControlResult {
 
 export interface RunControlExecutionContext {
   hostSessionId: string;
-  toolOperationId?: string;
 }
 
 export async function executeRunControl(
@@ -194,7 +178,7 @@ export async function executeRunControl(
     if (classification.write && !classification.sessionless) {
       required(hostSessionId, "hostSessionId");
     }
-    const result = await coordinator.exec(argv, classification, hostSessionId, context?.toolOperationId);
+    const result = await coordinator.exec(argv, classification, hostSessionId);
     const command = projectPublicRunCliResult(result.command);
     const publicArgv = projectPublicRunCliResult({
       argv,

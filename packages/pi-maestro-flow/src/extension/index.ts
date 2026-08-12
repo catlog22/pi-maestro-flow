@@ -231,7 +231,7 @@ import { lspManager } from "../tools/lsp/manager.ts";
 import { registerSmartSearchTool } from "../tools/smart-search.ts";
 import { createSourceCheckTool } from "../tools/web-access/source-check-tool.ts";
 import { registerFff } from "../tools/fff.ts";
-import { BASH_BG_UPDATE_EVENT, registerBashBg, type BashBgSnapshotPayload } from "../tools/bash-bg.ts";
+import { registerBashBg } from "../tools/bash-bg.ts";
 import { registerLoop } from "../tools/loop.ts";
 import { registerModelAvailability } from "../tools/model-availability.ts";
 import { registerResourceTool } from "../tools/resource.ts";
@@ -823,26 +823,11 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   };
   // Forward teammate lifecycle events (shared EventBus) to the GUI SSE stream.
   pi.events.on(TEAMMATE_STARTED_EVENT, (payload) => {
-    const event = payload as TeammateStartedEvent;
-    void hostOperationLifecycle?.teammateStarted(event).catch((error) => {
-      todoRootContext?.ui.notify(
-        `Workflow operation claim failed for teammate ${event.correlationId}: ${error instanceof Error ? error.message : String(error)}`,
-        "warning",
-      );
-    });
-    guiEvents.emit(GUI_EVENTS.teammateStarted, event);
+    guiEvents.emit(GUI_EVENTS.teammateStarted, payload as TeammateStartedEvent);
   });
   pi.events.on(TEAMMATE_MESSAGE_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateProgress, event));
   pi.events.on(TEAMMATE_COMPLETE_EVENT, (payload) => {
-    const event = payload as TeammateCompleteEvent;
-    void hostOperationLifecycle?.teammateComplete(event);
-    guiEvents.emit(GUI_EVENTS.teammateComplete, event);
-  });
-  pi.events.on(BASH_BG_UPDATE_EVENT, (payload) => {
-    const jobs = payload && typeof payload === "object" && Array.isArray((payload as BashBgSnapshotPayload).jobs)
-      ? (payload as BashBgSnapshotPayload).jobs
-      : [];
-    void hostOperationLifecycle?.reconcileBashBg(jobs);
+    guiEvents.emit(GUI_EVENTS.teammateComplete, payload as TeammateCompleteEvent);
   });
   // Persist each published node before runGraph releases its dependents. The
   // completion/tool-result hooks below remain compatibility fallbacks.
@@ -949,7 +934,6 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   };
   let workflowBridge: WorkflowBridge | undefined;
   let workflowCoordinator: WorkflowCoordinator | undefined;
-  let hostOperationLifecycle: HostOperationLifecycle | undefined;
   let attachedWorkflowSessionId: string | undefined;
   let attachedWorkflowHostSessionId: string | undefined;
   let lastRunStates = new Map<string, string>();
@@ -1472,14 +1456,10 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
           if (await attachWorkflowSession(ctx, snapshot, hostSessionId)) workflowSessionOptedIn = true;
         }
       }
-      const toolOperationId = hostSessionId
-        ? hostOperationLifecycle?.toolOperationId(id)
-          ?? await hostOperationLifecycle?.toolCall(id)
-        : undefined;
       const result = await executeRunControl(
         params as RunControlInput,
         workflowCoordinator,
-        hostSessionId ? { hostSessionId, toolOperationId } : undefined,
+        hostSessionId ? { hostSessionId } : undefined,
       );
       if (result.ok) {
         await refreshWorkflow(ctx, actionOptsIn, actionOptsIn, actionOptsIn);
@@ -2752,7 +2732,6 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
-    const hasUnresolvedHostOperations = hostOperationLifecycle?.shutdown() === true;
     if (event.reason === "quit" || event.reason === "reload") disposeTuiLocaleEvents();
     guiLifecycleGeneration += 1;
     const closingGuiServer = guiServer;
@@ -2781,12 +2760,10 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     panelMode = "collapsed";
     goalSessionShutdown(ctx);
     todoSessionShutdown(ctx);
-    if (hasUnresolvedHostOperations) workflowCoordinator?.abandonCoreAuthority();
-    else await workflowCoordinator?.release();
+    await workflowCoordinator?.release();
     attachedWorkflowSessionId = undefined;
     attachedWorkflowHostSessionId = undefined;
     workflowCoordinator = undefined;
-    hostOperationLifecycle = undefined;
     workflowBridge = undefined;
     workflowSessionOptedIn = true;
     lastRunStates.clear();
@@ -3000,10 +2977,6 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     return goalInput(event);
   });
 
-  pi.on("tool_call", async (event) => {
-    await hostOperationLifecycle?.toolCall(event.toolCallId);
-  });
-
   // A hard-threshold intent must settle before the next tool executes. The
   // guard blocks (+ terminates) the tool batch here without abort(); agent_settled
   // owns the actual compact() and CONTINUE resume. Returning block/terminate
@@ -3015,7 +2988,6 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
   pi.on("tool_call", (event) => onToolCallPlan(event, approvalMode === "bypassPermissions"));
 
   pi.on("before_agent_start", async (event) => {
-    await hostOperationLifecycle?.beforeAgentStart();
     // Pick up compaction settings edited while idle; cached again within the turn.
     midTurnAutoCompaction.refreshSettings();
     // Plan owns the stable mode prompt; Goal only acknowledges continuation markers.
@@ -3117,12 +3089,10 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
       );
     } finally {
       preserveCompletedTurnFromNativeThreshold = false;
-      await hostOperationLifecycle?.agentSettled();
     }
   });
 
   pi.on("tool_execution_end", async (event, ctx) => {
-    await hostOperationLifecycle?.toolExecutionEnd(event.toolCallId);
     if (event.toolName === "todo") updateTodoWidget();
     if (event.toolName === "goal") emitGoalChanged();
     const command = event.toolName === "bash"

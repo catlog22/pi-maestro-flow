@@ -4,7 +4,6 @@ import {
   RunResponseParseError,
   UnsupportedRunResponseVersionError,
   extractRunResponseLeaseClaim,
-  extractRunResponseOperationClaim,
   parseRunResponse,
   projectPublicRunResponse,
 } from "../src/session/run-response.ts";
@@ -107,29 +106,34 @@ test("public run-response projection removes the lease claim and every raw lease
   assert.equal(JSON.stringify(projected).includes("private-"), false);
 });
 
-test("run-response parser extracts operation claims only for claim acquisition and public projection redacts them", () => {
-  const response = {
-    ...responseV11,
-    operation: "execution-operation-claim",
-    result: {
-      operation_registry: { revision: 1, admission: "open" },
-      operation_claim: {
-        operation_id: "turn-1",
-        kind: "turn",
-        operation_token: "private-operation-token",
-      },
-    },
-  };
-  const parsed = parseRunResponse(response);
-  assert.deepEqual(extractRunResponseOperationClaim(parsed), response.result.operation_claim);
-  const projected = projectPublicRunResponse(parsed);
-  assert.equal(JSON.stringify(projected).includes("private-operation-token"), false);
-  assert.equal("operation_claim" in (projected.result as Record<string, unknown>), false);
-
+// The distributed operation claim/drain experiment was removed; the parser
+// must fail closed on any envelope that still carries its private credential
+// or its retired execution-operation-* operation kinds.
+test("run-response parser rejects removed operation claim credentials and operation kinds fail-closed", () => {
   assert.throws(
-    () => parseRunResponse({ ...response, operation: "execution-operation-status" }),
-    /operation_claim is not permitted or invalid/,
+    () => parseRunResponse({
+      ...responseV11,
+      result: {
+        operation_claim: {
+          operation_id: "turn-1",
+          kind: "turn",
+          operation_token: "private-operation-token",
+        },
+      },
+    }),
+    /operation_claim is not permitted/,
   );
+  for (const operation of [
+    "execution-operation-claim",
+    "execution-operation-heartbeat",
+    "execution-operation-release",
+    "execution-operation-status",
+  ]) {
+    assert.throws(
+      () => parseRunResponse({ ...responseV11, operation, result: {} }),
+      RunResponseParseError,
+    );
+  }
 });
 
 test("run-response parser permits private claims only for authorized successful 1.1 acquisitions", async (t) => {

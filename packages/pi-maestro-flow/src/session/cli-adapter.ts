@@ -47,18 +47,32 @@ export interface MaestroCapabilitiesV10 {
 export interface RunCliNegotiatedSupport {
   execution_generation: boolean;
   core_execution_lease: boolean;
-  /**
-   * Optional capability, never a modern-protocol requirement.
-   *
-   * @deprecated Superseded by the Session/Run minimal-state architecture
-   * (docs/session-run-minimal-state-architecture-20260812.md): v3 removes the
-   * distributed operation registry/drain entirely. Kept only so the
-   * migration-period operation claim/heartbeat/drain experiment stays usable
-   * against cores that still advertise it.
-   */
-  execution_operation_drain: boolean;
   "run-response/1.1": boolean;
 }
+
+/**
+ * Session/Run minimal-state (plan B v3) capability flags, negotiated as a unit
+ * (docs/session-run-minimal-state-architecture-20260812.md section 15).
+ * All values are false unless structured negotiation succeeds.
+ */
+export interface RunCliV3Support {
+  session_run_minimal_v3: boolean;
+  entity_revision_cas: boolean;
+  participant_identity: boolean;
+  request_receipts_v2: boolean;
+  /** True only when the core explicitly advertises `execution_lease: false`. */
+  execution_lease_retired: boolean;
+  /** True only when the core explicitly advertises `operation_registry: false`. */
+  operation_registry_retired: boolean;
+}
+
+/**
+ * Mutation protocol selected from the negotiated capabilities:
+ * - `session-run-v3`: Session/Run entity-revision CAS (plan B; adapter pending).
+ * - `execution-v2`: current execution-generation + core-lease protocol.
+ * - `fail-closed`: neither protocol is complete; mutations must be refused.
+ */
+export type RunCliProtocol = "session-run-v3" | "execution-v2" | "fail-closed";
 
 export interface RunCliCapabilities {
   commands: ReadonlySet<string>;
@@ -72,6 +86,10 @@ export interface RunCliCapabilities {
   structured: MaestroCapabilitiesV10 | null;
   /** Explicit new-protocol support. All values are false unless structured negotiation succeeds. */
   support: Readonly<RunCliNegotiatedSupport>;
+  /** Session/Run minimal-state (v3) capability flags. */
+  v3: Readonly<RunCliV3Support>;
+  /** Mutation protocol derived from support/v3; the v3 branch takes precedence. */
+  protocol: RunCliProtocol;
   /** Diagnostic for legacy/fail-closed negotiation without exposing raw command output. */
   diagnostic: string | null;
 }
@@ -187,14 +205,24 @@ export class RunCliAdapter {
   }
 
   async supportsNewMutations(): Promise<boolean> {
-    // execution_operation_drain is deliberately NOT required here: plan-B v3
-    // cores never advertise it, yet they fully support the modern protocol.
-    // When absent, operation claim/heartbeat/release/drain features are
-    // disabled instead (see WorkflowCoordinator gating).
     const support = (await this.capabilities()).support;
     return support.execution_generation
       && support.core_execution_lease
       && support["run-response/1.1"];
+  }
+
+  /**
+   * Whether the core advertises the complete Session/Run minimal-state (v3)
+   * capability set. The Pi v3 adapter is delivered in phase 2 of
+   * docs/session-run-v3-action-plan-20260812.md; until then callers must
+   * fail closed on v3-only cores instead of speaking the v2 lease protocol.
+   */
+  async supportsSessionRunMinimalV3(): Promise<boolean> {
+    return (await this.capabilities()).protocol === "session-run-v3";
+  }
+
+  async protocol(): Promise<RunCliProtocol> {
+    return (await this.capabilities()).protocol;
   }
 
   async supportsPlanPublish(): Promise<boolean> {
@@ -340,7 +368,7 @@ export class RunCliAdapter {
 
   private async probeStructuredCapabilities(): Promise<Pick<
     RunCliCapabilities,
-    "mode" | "structured" | "support" | "diagnostic"
+    "mode" | "structured" | "support" | "v3" | "protocol" | "diagnostic"
   >> {
     let result: RunCliResult;
     try {
@@ -355,6 +383,8 @@ export class RunCliAdapter {
           mode: "legacy",
           structured: null,
           support: NO_NEW_PROTOCOL_SUPPORT,
+          v3: NO_V3_SUPPORT,
+          protocol: "fail-closed",
           diagnostic: "Installed Maestro CLI has no capabilities command; legacy read compatibility only",
         };
       }
@@ -374,16 +404,18 @@ export class RunCliAdapter {
     }
     const structured = parsed.data as MaestroCapabilitiesV10;
     const writesExecutionV10 = structured.execution_schema_writes.includes("execution/1.0");
+    const support = Object.freeze({
+      execution_generation: writesExecutionV10 && structured.features.execution_generation,
+      core_execution_lease: writesExecutionV10 && structured.features.core_execution_lease,
+      "run-response/1.1": structured.run_response_writes.includes("run-response/1.1"),
+    });
+    const v3 = negotiateV3Support(structured.features);
     return {
       mode: "structured",
       structured,
-      support: Object.freeze({
-        execution_generation: writesExecutionV10 && structured.features.execution_generation,
-        core_execution_lease: writesExecutionV10 && structured.features.core_execution_lease,
-        // Optional: cores aligned with plan B do not broadcast this feature at all.
-        execution_operation_drain: writesExecutionV10 && structured.features.execution_operation_drain === true,
-        "run-response/1.1": structured.run_response_writes.includes("run-response/1.1"),
-      }),
+      support,
+      v3,
+      protocol: selectProtocol(support, v3),
       diagnostic: null,
     };
   }
@@ -443,8 +475,6 @@ const maestroCapabilitiesV10Schema = z.object({
     execution_generation: z.boolean(),
     core_execution_lease: z.boolean(),
     execution_handoff: z.boolean(),
-    // Optional capability: plan-B v3 cores omit it; absence means unsupported.
-    execution_operation_drain: z.boolean().default(false),
     session_statusless: z.boolean(),
     legacy_session_aliases: z.boolean(),
   }).catchall(z.boolean()),
@@ -453,18 +483,61 @@ const maestroCapabilitiesV10Schema = z.object({
 const NO_NEW_PROTOCOL_SUPPORT: Readonly<RunCliNegotiatedSupport> = Object.freeze({
   execution_generation: false,
   core_execution_lease: false,
-  execution_operation_drain: false,
   "run-response/1.1": false,
 });
 
+const NO_V3_SUPPORT: Readonly<RunCliV3Support> = Object.freeze({
+  session_run_minimal_v3: false,
+  entity_revision_cas: false,
+  participant_identity: false,
+  request_receipts_v2: false,
+  execution_lease_retired: false,
+  operation_registry_retired: false,
+});
+
+function negotiateV3Support(features: MaestroCapabilitiesV10["features"]): Readonly<RunCliV3Support> {
+  return Object.freeze({
+    session_run_minimal_v3: features.session_run_minimal_v3 === true,
+    entity_revision_cas: features.entity_revision_cas === true,
+    participant_identity: features.participant_identity === true,
+    request_receipts_v2: features.request_receipts_v2 === true,
+    // Plan B section 15 requires v3 cores to advertise these as explicitly
+    // false; an absent key means the core predates the v3 contract.
+    execution_lease_retired: features.execution_lease === false,
+    operation_registry_retired: features.operation_registry === false,
+  });
+}
+
+function hasCompleteV3Support(v3: Readonly<RunCliV3Support>): boolean {
+  return v3.session_run_minimal_v3
+    && v3.entity_revision_cas
+    && v3.participant_identity
+    && v3.request_receipts_v2
+    && v3.execution_lease_retired
+    && v3.operation_registry_retired;
+}
+
+function selectProtocol(
+  support: Readonly<RunCliNegotiatedSupport>,
+  v3: Readonly<RunCliV3Support>,
+): RunCliProtocol {
+  if (hasCompleteV3Support(v3)) return "session-run-v3";
+  if (support.execution_generation && support.core_execution_lease && support["run-response/1.1"]) {
+    return "execution-v2";
+  }
+  return "fail-closed";
+}
+
 function failClosedCapabilities(diagnostic: string): Pick<
   RunCliCapabilities,
-  "mode" | "structured" | "support" | "diagnostic"
+  "mode" | "structured" | "support" | "v3" | "protocol" | "diagnostic"
 > {
   return {
     mode: "fail-closed",
     structured: null,
     support: NO_NEW_PROTOCOL_SUPPORT,
+    v3: NO_V3_SUPPORT,
+    protocol: "fail-closed",
     diagnostic,
   };
 }

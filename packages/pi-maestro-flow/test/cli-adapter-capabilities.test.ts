@@ -16,10 +16,51 @@ const structuredCapabilities = {
     execution_generation: true,
     core_execution_lease: true,
     execution_handoff: true,
-    execution_operation_drain: true,
     session_statusless: true,
     legacy_session_aliases: true,
   },
+};
+
+// Session/Run minimal-state (plan B v3) core: v2 lease/generation retired,
+// the v3 capability set advertised as a unit, execution_lease and
+// operation_registry explicitly false (architecture doc section 15).
+const v3StructuredCapabilities = {
+  schema_version: "maestro-capabilities/1.0",
+  cli_version: "2.0.0",
+  session_schema_writes: ["session/3.0"],
+  execution_schema_writes: [],
+  run_response_writes: ["run-response/1.1"],
+  features: {
+    execution_generation: false,
+    core_execution_lease: false,
+    execution_handoff: false,
+    session_statusless: true,
+    legacy_session_aliases: false,
+    session_run_minimal_v3: true,
+    entity_revision_cas: true,
+    participant_identity: true,
+    request_receipts_v2: true,
+    execution_lease: false,
+    operation_registry: false,
+  },
+};
+
+const COMPLETE_V3_SUPPORT = {
+  session_run_minimal_v3: true,
+  entity_revision_cas: true,
+  participant_identity: true,
+  request_receipts_v2: true,
+  execution_lease_retired: true,
+  operation_registry_retired: true,
+};
+
+const NO_V3_SUPPORT = {
+  session_run_minimal_v3: false,
+  entity_revision_cas: false,
+  participant_identity: false,
+  request_receipts_v2: false,
+  execution_lease_retired: false,
+  operation_registry_retired: false,
 };
 
 test("CLI adapter treats a validated structured capability result as authoritative", async () => {
@@ -45,7 +86,6 @@ test("CLI adapter treats a validated structured capability result as authoritati
   assert.deepEqual(capabilities.support, {
     execution_generation: true,
     core_execution_lease: true,
-    execution_operation_drain: true,
     "run-response/1.1": true,
   });
   assert.deepEqual([...capabilities.commands], ["brief", "check", "next"]);
@@ -53,7 +93,86 @@ test("CLI adapter treats a validated structured capability result as authoritati
   assert.equal(await adapter.supportsCoreExecutionLease(), true);
   assert.equal(await adapter.supportsRunResponseV11(), true);
   assert.equal(await adapter.supportsNewMutations(), true);
+  // v2-only core: no v3 keys broadcast, so the v2 protocol is selected.
+  assert.deepEqual(capabilities.v3, NO_V3_SUPPORT);
+  assert.equal(capabilities.protocol, "execution-v2");
+  assert.equal(await adapter.supportsSessionRunMinimalV3(), false);
   assert.equal(calls.filter((call) => call.join(" ") === "capabilities --json").length, 1);
+});
+
+test("CLI adapter negotiates the complete Session/Run minimal-state (v3) capability set as a unit", async () => {
+  const adapter = new RunCliAdapter("D:/workspace", async (args) => {
+    if (args.join(" ") === "capabilities --json") return ok(args, JSON.stringify(v3StructuredCapabilities));
+    if (args.join(" ") === "run --help") return ok(args, "Commands:\n  brief\n  check\n");
+    if (args.join(" ") === "session --help") return ok(args, "Commands:\n  open\n  complete\n");
+    return fail(args, "unknown command");
+  });
+
+  const capabilities = await adapter.capabilities();
+  assert.equal(capabilities.mode, "structured");
+  assert.deepEqual(capabilities.v3, COMPLETE_V3_SUPPORT);
+  assert.equal(capabilities.protocol, "session-run-v3");
+  assert.equal(await adapter.supportsSessionRunMinimalV3(), true);
+  assert.equal(await adapter.protocol(), "session-run-v3");
+  // The retired v2 protocol must not be negotiated against a v3 core.
+  assert.deepEqual(capabilities.support, {
+    execution_generation: false,
+    core_execution_lease: false,
+    "run-response/1.1": true,
+  });
+  assert.equal(await adapter.supportsNewMutations(), false);
+});
+
+test("CLI adapter fails the v3 protocol closed when any capability of the set is missing or contradictory", async (t) => {
+  const fixtures = [
+    {
+      name: "request_receipts_v2 absent",
+      features: (features: Record<string, boolean>) => {
+        const { request_receipts_v2: _, ...rest } = features;
+        return rest;
+      },
+      expectFlag: (v3: Record<string, boolean>) => assert.equal(v3.request_receipts_v2, false),
+    },
+    {
+      name: "execution_lease key absent (core predates the v3 contract)",
+      features: (features: Record<string, boolean>) => {
+        const { execution_lease: _, ...rest } = features;
+        return rest;
+      },
+      expectFlag: (v3: Record<string, boolean>) => assert.equal(v3.execution_lease_retired, false),
+    },
+    {
+      name: "execution_lease still advertised as true",
+      features: (features: Record<string, boolean>) => ({ ...features, execution_lease: true }),
+      expectFlag: (v3: Record<string, boolean>) => assert.equal(v3.execution_lease_retired, false),
+    },
+    {
+      name: "operation_registry still advertised as true",
+      features: (features: Record<string, boolean>) => ({ ...features, operation_registry: true }),
+      expectFlag: (v3: Record<string, boolean>) => assert.equal(v3.operation_registry_retired, false),
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    await t.test(fixture.name, async () => {
+      const capabilitiesJson = JSON.stringify({
+        ...v3StructuredCapabilities,
+        features: fixture.features({ ...v3StructuredCapabilities.features }),
+      });
+      const adapter = new RunCliAdapter("D:/workspace", async (args) => {
+        if (args.join(" ") === "capabilities --json") return ok(args, capabilitiesJson);
+        if (args.join(" ") === "run --help") return ok(args, "Commands:\n  brief\n");
+        return fail(args, "unknown command");
+      });
+      const capabilities = await adapter.capabilities();
+      assert.equal(capabilities.mode, "structured");
+      fixture.expectFlag(capabilities.v3 as unknown as Record<string, boolean>);
+      // Incomplete v3 set and no v2 support: mutations must fail closed.
+      assert.equal(capabilities.protocol, "fail-closed");
+      assert.equal(await adapter.supportsSessionRunMinimalV3(), false);
+      assert.equal(await adapter.supportsNewMutations(), false);
+    });
+  }
 });
 
 test("CLI adapter reports explicit legacy compatibility when capabilities is an old-CLI missing command", async () => {
@@ -79,10 +198,11 @@ test("CLI adapter reports explicit legacy compatibility when capabilities is an 
   assert.deepEqual(capabilities.support, {
     execution_generation: false,
     core_execution_lease: false,
-    execution_operation_drain: false,
     "run-response/1.1": false,
   });
   assert.deepEqual([...capabilities.commands], ["brief", "next", "complete"]);
+  assert.deepEqual(capabilities.v3, NO_V3_SUPPORT);
+  assert.equal(capabilities.protocol, "fail-closed");
   assert.equal(await adapter.supportsNewMutations(), false);
 });
 
@@ -125,6 +245,8 @@ test("CLI adapter fails new capability support closed for malformed or unsupport
       assert.equal(capabilities.support.execution_generation, false);
       assert.equal(capabilities.support.core_execution_lease, false);
       assert.equal(capabilities.support["run-response/1.1"], false);
+      assert.deepEqual(capabilities.v3, NO_V3_SUPPORT);
+      assert.equal(capabilities.protocol, "fail-closed");
       assert.deepEqual([...capabilities.commands], ["brief", "check"]);
       assert.match(capabilities.diagnostic ?? "", /capability probe returned/);
     });
@@ -139,7 +261,6 @@ test("CLI adapter fails readiness closed for contradictory structured capabiliti
       expected: {
         execution_generation: false,
         core_execution_lease: false,
-        execution_operation_drain: false,
         "run-response/1.1": true,
       },
     },
@@ -152,7 +273,6 @@ test("CLI adapter fails readiness closed for contradictory structured capabiliti
       expected: {
         execution_generation: false,
         core_execution_lease: true,
-        execution_operation_drain: true,
         "run-response/1.1": true,
       },
     },
@@ -162,7 +282,6 @@ test("CLI adapter fails readiness closed for contradictory structured capabiliti
       expected: {
         execution_generation: true,
         core_execution_lease: true,
-        execution_operation_drain: true,
         "run-response/1.1": false,
       },
     },
@@ -182,50 +301,31 @@ test("CLI adapter fails readiness closed for contradictory structured capabiliti
   }
 });
 
-// execution_operation_drain is an optional capability for the deprecated
-// operation drain experiment (superseded by
-// docs/session-run-minimal-state-architecture-20260812.md); its absence must
-// not disqualify a core from the modern protocol.
-test("CLI adapter keeps modern protocol support without the optional operation drain capability", async (t) => {
-  const fixtures = [
-    {
-      name: "drain feature advertised as false",
-      capabilities: {
-        ...structuredCapabilities,
-        features: { ...structuredCapabilities.features, execution_operation_drain: false },
-      },
+// Older cores may still broadcast retired feature keys (e.g. the removed
+// execution_operation_drain experiment); the schema catchall must tolerate
+// them without projecting them into support or affecting readiness.
+test("CLI adapter tolerates unknown broadcast feature keys without affecting negotiated support", async () => {
+  const capabilitiesWithUnknownFeatures = {
+    ...structuredCapabilities,
+    features: {
+      ...structuredCapabilities.features,
+      execution_operation_drain: true,
+      some_future_feature: false,
     },
-    {
-      name: "drain feature not broadcast at all (plan-B v3 style core)",
-      capabilities: {
-        ...structuredCapabilities,
-        features: (() => {
-          const { execution_operation_drain: _omitted, ...rest } = structuredCapabilities.features;
-          return rest;
-        })(),
-      },
-    },
-  ];
-
-  for (const fixture of fixtures) {
-    await t.test(fixture.name, async () => {
-      const adapter = new RunCliAdapter("D:/workspace", async (args) => {
-        if (args.join(" ") === "capabilities --json") return ok(args, JSON.stringify(fixture.capabilities));
-        if (args.join(" ") === "run --help") return ok(args, "Commands:\n  brief\n");
-        return fail(args, "unknown command");
-      });
-      const capabilities = await adapter.capabilities();
-      assert.equal(capabilities.mode, "structured");
-      assert.deepEqual(capabilities.support, {
-        execution_generation: true,
-        core_execution_lease: true,
-        // Drain support is gated off, but the modern protocol stays available.
-        execution_operation_drain: false,
-        "run-response/1.1": true,
-      });
-      assert.equal(await adapter.supportsNewMutations(), true);
-    });
-  }
+  };
+  const adapter = new RunCliAdapter("D:/workspace", async (args) => {
+    if (args.join(" ") === "capabilities --json") return ok(args, JSON.stringify(capabilitiesWithUnknownFeatures));
+    if (args.join(" ") === "run --help") return ok(args, "Commands:\n  brief\n");
+    return fail(args, "unknown command");
+  });
+  const capabilities = await adapter.capabilities();
+  assert.equal(capabilities.mode, "structured");
+  assert.deepEqual(capabilities.support, {
+    execution_generation: true,
+    core_execution_lease: true,
+    "run-response/1.1": true,
+  });
+  assert.equal(await adapter.supportsNewMutations(), true);
 });
 
 test("machine exec returns a parseable redacted nonzero run-response with exit parity intact", async () => {

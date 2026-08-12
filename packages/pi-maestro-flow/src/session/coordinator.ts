@@ -12,12 +12,10 @@ import type {
 import type { WorkflowBridge } from "./bridge.ts";
 import {
   extractRunResponseLeaseClaim,
-  extractRunResponseOperationClaim,
   parseRunResponse,
   projectPublicRunResponse,
   type PrivateRunResponseEnvelope,
   type RunLeaseClaim,
-  type RunOperationV11,
   type RunResponseFenceV11,
 } from "./run-response.ts";
 import { activeWorkflowRun, type WorkflowRun, type WorkflowSnapshot } from "./types.ts";
@@ -96,7 +94,7 @@ export interface WorkflowRunControlClassification {
   write: boolean;
   sessionless: boolean;
   mutation?: "read" | "session" | "execution" | "execution-acquire" | "execution-lease"
-    | "execution-operation" | "compatibility-start" | "plan-publish";
+    | "compatibility-start" | "plan-publish";
   lease?: "none" | "required" | "acquire" | "command-aware";
 }
 
@@ -106,32 +104,6 @@ interface CoreExecutionLocator {
   generation: number;
 }
 
-/**
- * @deprecated Migration-period experiment only. The distributed operation
- * claim/heartbeat/drain route is superseded by the Session/Run minimal-state
- * architecture (docs/session-run-minimal-state-architecture-20260812.md,
- * section 10 LocalTaskRegistry) and will be replaced by an in-process local
- * task registry in v3. Only available when the core CLI advertises the
- * optional execution_operation_drain capability.
- */
-export interface WorkflowCoreOperationClaim {
-  operationId: string;
-  kind: "turn" | "tool" | "process";
-  operationToken: string;
-  parentOperationId: string | null;
-  registryRevision: number;
-}
-
-/**
- * @deprecated Migration-period experiment only; superseded by the Session/Run
- * minimal-state architecture (docs/session-run-minimal-state-architecture-20260812.md).
- */
-export interface WorkflowCoreOperationStatus {
-  registryRevision: number;
-  admission: "open" | "draining";
-  activeOperationIds: string[];
-}
-
 interface CoreExecutionAuthority {
   capabilities?: RunCliCapabilities;
   locator?: CoreExecutionLocator;
@@ -139,8 +111,6 @@ interface CoreExecutionAuthority {
   fence?: RunResponseFenceV11;
   lastLeaseEpoch?: number;
   ownerId?: string;
-  operationRegistryRevision?: number;
-  operationClaims: Map<string, WorkflowCoreOperationClaim>;
 }
 
 interface CoreMutationCandidate {
@@ -508,7 +478,7 @@ export class WorkflowCoordinator {
   private coreHeartbeatGeneration = 0;
   private coreHeartbeatPending = false;
   private coreMutationWork = Promise.resolve();
-  private readonly core: CoreExecutionAuthority = { operationClaims: new Map() };
+  private readonly core: CoreExecutionAuthority = {};
 
   constructor(
     private readonly bridge: WorkflowSnapshotProvider,
@@ -587,69 +557,6 @@ export class WorkflowCoordinator {
   /** Reload canonical Workflow authority instead of returning the cached projection. */
   refreshSnapshot(): Promise<WorkflowSnapshot> {
     return this.bridge.refresh();
-  }
-
-  /**
-   * Whether the negotiated core CLI advertises the optional
-   * execution_operation_drain capability. When false, every operation
-   * claim/heartbeat/release/drain feature is disabled: host operation
-   * mutations fail closed, and handoff prepare omits the --drain-operation
-   * argument family the core would not understand.
-   *
-   * @deprecated Migration-period experiment gate only; the operation drain
-   * route is superseded by docs/session-run-minimal-state-architecture-20260812.md
-   * and is removed in v3.
-   */
-  supportsOperationDrain(): boolean {
-    return this.core.capabilities?.support.execution_operation_drain === true;
-  }
-
-  /** @deprecated Migration-period operation drain experiment; see supportsOperationDrain. */
-  async operationStatus(hostSessionId: string): Promise<WorkflowCoreOperationStatus> {
-    await this.selectMode("core-execution");
-    return this.enqueueCoreOperation(() => this.readCoreOperationStatus(requireHostSessionId(hostSessionId)));
-  }
-
-  /** @deprecated Migration-period operation drain experiment; see supportsOperationDrain. */
-  async claimHostOperation(
-    operationId: string,
-    kind: WorkflowCoreOperationClaim["kind"],
-    hostSessionId: string,
-    parentOperationId?: string,
-  ): Promise<WorkflowCoreOperationClaim> {
-    await this.selectMode("core-execution");
-    return this.enqueueCoreOperation(() => this.claimCoreOperation(
-      operationId,
-      kind,
-      requireHostSessionId(hostSessionId),
-      parentOperationId,
-    ));
-  }
-
-  /** @deprecated Migration-period operation drain experiment; see supportsOperationDrain. */
-  async heartbeatHostOperation(operationId: string, hostSessionId: string): Promise<void> {
-    await this.selectMode("core-execution");
-    await this.enqueueCoreOperation(() => this.mutateCoreOperation(
-      "heartbeat",
-      operationId,
-      requireHostSessionId(hostSessionId),
-    ));
-  }
-
-  /** @deprecated Migration-period operation drain experiment; see supportsOperationDrain. */
-  async releaseHostOperation(operationId: string, hostSessionId: string): Promise<void> {
-    await this.selectMode("core-execution");
-    await this.enqueueCoreOperation(() => this.mutateCoreOperation(
-      "release",
-      operationId,
-      requireHostSessionId(hostSessionId),
-    ));
-  }
-
-  /** @deprecated Migration-period operation drain experiment; see supportsOperationDrain. */
-  hostOperationClaim(operationId: string): WorkflowCoreOperationClaim | undefined {
-    const claim = this.core.operationClaims.get(operationId);
-    return claim ? { ...claim } : undefined;
   }
 
   async ownership(currentHostSessionId: string): Promise<WorkflowLeaseOwnership | undefined> {
@@ -870,14 +777,13 @@ export class WorkflowCoordinator {
     argv: readonly string[],
     classification: WorkflowRunControlClassification,
     hostSessionId?: string,
-    toolOperationId?: string,
   ): Promise<WorkflowTransitionResult> {
     const mode = await this.selectMode();
     if (mode === "fail-closed" && classification.write) {
       throw this.failClosedMutationError(argv.slice(0, 3).join(" ") || "mutation");
     }
     if (mode === "core-execution") {
-      return this.execCore(argv, classification, hostSessionId, toolOperationId);
+      return this.execCore(argv, classification, hostSessionId);
     }
     if (classification.write && classification.mutation === "plan-publish") {
       return this.execLegacyRawPlanPublish(argv, hostSessionId);
@@ -989,13 +895,6 @@ export class WorkflowCoordinator {
     const snapshot = await this.bridge.refresh();
     const session = requireSession(snapshot);
     await this.fenceLease(session.sessionId);
-  }
-
-  abandonCoreAuthority(): void {
-    if (this.selectedMode !== "core-execution") return;
-    this.pendingContinuation = undefined;
-    this.stopCoreHeartbeat();
-    this.clearCoreAuthority();
   }
 
   async release(): Promise<void> {
@@ -1331,10 +1230,6 @@ export class WorkflowCoordinator {
       const refreshed = await this.bridge.refresh();
       this.validateCorePostcondition(refreshed, envelope, candidate);
       this.commitCoreMutation(candidate);
-      const operationRegistryRevision = mutationOperationRegistryRevision(envelope);
-      if (operationRegistryRevision !== undefined) {
-        this.core.operationRegistryRevision = operationRegistryRevision;
-      }
       return { command, snapshot: refreshed };
     } catch (error) {
       if (commandDispatched && !await this.recoverCorePlanClaim(hostSessionId)) this.loseCoreClaim();
@@ -1370,7 +1265,6 @@ export class WorkflowCoordinator {
     argv: readonly string[],
     classification: WorkflowRunControlClassification,
     hostSessionId?: string,
-    toolOperationId?: string,
   ): Promise<WorkflowTransitionResult> {
     if (!classification.write) {
       const command = projectPublicRunCliResult(await this.adapter.exec(argv));
@@ -1378,7 +1272,7 @@ export class WorkflowCoordinator {
     }
 
     const mutation = this.coreMutationWork.then(
-      () => this.performCoreMutation(argv, classification, hostSessionId, toolOperationId),
+      () => this.performCoreMutation(argv, classification, hostSessionId),
     );
     this.coreMutationWork = mutation.then(() => undefined, () => undefined);
     const transition = await mutation;
@@ -1393,17 +1287,12 @@ export class WorkflowCoordinator {
     argv: readonly string[],
     classification: WorkflowRunControlClassification,
     hostSessionId?: string,
-    toolOperationId?: string,
   ): Promise<WorkflowTransitionResult> {
     let commandDispatched = false;
     try {
       this.requireCoreCapabilities();
       const snapshot = await this.bridge.refresh();
       const mutation = classification.mutation ?? "execution";
-      // `execution operation *` passthrough belongs to the deprecated
-      // operation drain experiment; without the optional capability the
-      // command family does not exist on the core, so fail closed here.
-      if (mutation === "execution-operation") this.requireOperationDrainCapability();
       const leaseMode = resolveCoreLeaseMode(
         argv,
         snapshot,
@@ -1416,7 +1305,6 @@ export class WorkflowCoordinator {
         mutation,
         leaseMode,
         hostSessionId,
-        toolOperationId,
       );
       commandDispatched = true;
       let privateCommand: RunCliResult;
@@ -1457,10 +1345,6 @@ export class WorkflowCoordinator {
       );
       this.validateCorePostcondition(refreshed, envelope, candidate);
       this.commitCoreMutation(candidate);
-      const operationRegistryRevision = mutationOperationRegistryRevision(envelope);
-      if (operationRegistryRevision !== undefined) {
-        this.core.operationRegistryRevision = operationRegistryRevision;
-      }
       return { command, snapshot: refreshed };
     } catch (error) {
       // After dispatch, a write may have committed even when transport,
@@ -1492,7 +1376,6 @@ export class WorkflowCoordinator {
     mutation: NonNullable<WorkflowRunControlClassification["mutation"]>,
     leaseMode: "none" | "required" | "acquire",
     hostSessionId?: string,
-    toolOperationId?: string,
   ): string[] {
     const prepared = [...argv];
     if (mutation === "session") {
@@ -1593,24 +1476,6 @@ export class WorkflowCoordinator {
         addFlag(prepared, "--lease-id", claim.lease_id);
       }
     }
-    // Drain injection belongs to the deprecated operation drain experiment
-    // (superseded by docs/session-run-minimal-state-architecture-20260812.md).
-    // Without the optional capability the core does not understand the
-    // --drain-operation argument family, so handoff prepare degrades to a
-    // plain prepare instead of failing or emitting unknown arguments.
-    if (isExecutionHandoffPrepare(argv) && this.supportsOperationDrain()) {
-      const drainClaim = toolOperationId ? this.core.operationClaims.get(toolOperationId) : undefined;
-      if (!drainClaim || drainClaim.kind !== "tool") {
-        throw new Error("Execution handoff prepare requires the current run-control tool operation claim");
-      }
-      const registryRevision = this.core.operationRegistryRevision;
-      if (registryRevision === undefined) {
-        throw new Error("Execution handoff prepare requires a current operation registry revision");
-      }
-      addFlag(prepared, "--drain-operation", drainClaim.operationId);
-      addFlag(prepared, "--drain-operation-token", drainClaim.operationToken);
-      addFlag(prepared, "--expected-operation-registry-revision", String(registryRevision));
-    }
     if (requiresExecutionAudit(argv) || (compatibilityStart && leaseMode === "acquire")) {
       addFlag(prepared, "--actor", ownerId);
       addFlagIfMissing(prepared, "--reason", `Pi coordinator ${expectedCoreOperation(argv, leaseMode) ?? "mutation"}`);
@@ -1660,182 +1525,6 @@ export class WorkflowCoordinator {
     addFlagIfMissing(prepared, "--evidence", `pi-session:${ownerId}`);
     addBooleanFlag(prepared, "--json");
     return prepared;
-  }
-
-  private enqueueCoreOperation<T>(run: () => Promise<T>): Promise<T> {
-    const operation = this.coreMutationWork.then(run);
-    this.coreMutationWork = operation.then(() => undefined, () => undefined);
-    return operation;
-  }
-
-  // Fail-closed gate for the deprecated operation drain experiment: without the
-  // optional capability the core has no `execution operation` command family.
-  private requireOperationDrainCapability(): void {
-    if (!this.supportsOperationDrain()) {
-      throw new Error(
-        "Host operation mutation refused: installed Maestro CLI does not advertise the optional "
-        + "execution_operation_drain capability, so operation claim/heartbeat/release/drain is disabled",
-      );
-    }
-  }
-
-  private async readCoreOperationStatus(hostSessionId: string): Promise<WorkflowCoreOperationStatus> {
-    this.requireCoreCapabilities();
-    this.requireOperationDrainCapability();
-    const before = await this.bridge.refresh();
-    const locator = requireCoreExecutionLocator(before);
-    this.assertCoreOperationAuthority(before, locator, hostSessionId);
-    const command = await this.adapter.exec([
-      "execution", "operation", "status",
-      "--session", locator.sessionId,
-      "--execution", locator.executionId,
-      "--json",
-    ]);
-    const envelope = parseRunResponse(command.stdout);
-    validateCoreOperationEnvelope(envelope, "execution-operation-status", locator);
-    const status = operationStatusFromEnvelope(envelope);
-    const after = await this.bridge.refresh();
-    this.assertCoreOperationAuthority(after, locator, hostSessionId);
-    this.core.operationRegistryRevision = status.registryRevision;
-    return status;
-  }
-
-  private async claimCoreOperation(
-    operationId: string,
-    kind: WorkflowCoreOperationClaim["kind"],
-    hostSessionId: string,
-    parentOperationId?: string,
-  ): Promise<WorkflowCoreOperationClaim> {
-    const normalizedId = requiredOperationId(operationId);
-    const existing = this.core.operationClaims.get(normalizedId);
-    if (existing) return { ...existing };
-    const status = await this.readCoreOperationStatus(hostSessionId);
-    if (status.admission !== "open") throw new Error("OPERATION_ADMISSION_CLOSED: Execution is draining");
-    const snapshot = await this.bridge.refresh();
-    const locator = requireCoreExecutionLocator(snapshot);
-    this.assertCoreOperationAuthority(snapshot, locator, hostSessionId);
-    const fence = requireCoreFence(this.core.fence ?? coreFenceFromSnapshot(snapshot));
-    const lease = this.requireCoreOperationLease(hostSessionId, fence);
-    const parent = parentOperationId ? this.core.operationClaims.get(parentOperationId) : undefined;
-    if (parentOperationId && !parent) throw new Error(`Parent host operation is not active: ${parentOperationId}`);
-    const requestId = operationRequestId("claim", normalizedId);
-    const argv = [
-      "execution", "operation", "claim",
-      "--operation-id", normalizedId,
-      "--kind", kind,
-      "--session", locator.sessionId,
-      "--execution", locator.executionId,
-      "--request-id", requestId,
-      "--expected-execution-revision", String(requiredRevision(fence.execution_revision, "execution revision")),
-      "--execution-owner", hostSessionId,
-      "--owner-kind", "pi",
-      "--owner-epoch", String(requiredRevision(fence.lease_epoch, "lease epoch")),
-      "--lease-id", lease.lease_id,
-      "--expected-operation-registry-revision", String(status.registryRevision),
-      ...(parent ? [
-        "--parent-operation", parent.operationId,
-        "--parent-operation-token", parent.operationToken,
-      ] : []),
-      "--json",
-    ];
-    const command = await execCoreOperationWithReplay(this.adapter, argv);
-    const envelope = parseRunResponse(command.stdout);
-    validateCoreOperationEnvelope(envelope, "execution-operation-claim", locator, requestId);
-    const privateClaim = extractRunResponseOperationClaim(envelope);
-    if (!privateClaim || privateClaim.operation_id !== normalizedId) {
-      throw new Error("Execution operation claim response returned no matching private credential");
-    }
-    const registryRevision = operationRegistryRevisionFromEnvelope(envelope);
-    const after = await this.bridge.refresh();
-    this.assertCoreOperationAuthority(after, locator, hostSessionId);
-    const claim: WorkflowCoreOperationClaim = {
-      operationId: normalizedId,
-      kind,
-      operationToken: privateClaim.operation_token,
-      parentOperationId: parent?.operationId ?? null,
-      registryRevision,
-    };
-    this.core.operationRegistryRevision = registryRevision;
-    this.core.operationClaims.set(normalizedId, claim);
-    return { ...claim };
-  }
-
-  private async mutateCoreOperation(
-    action: "heartbeat" | "release",
-    operationId: string,
-    hostSessionId: string,
-  ): Promise<void> {
-    this.requireOperationDrainCapability();
-    const claim = this.core.operationClaims.get(requiredOperationId(operationId));
-    if (!claim) {
-      if (action === "release") return;
-      throw new Error(`Host operation is not active: ${operationId}`);
-    }
-    const snapshot = await this.bridge.refresh();
-    const locator = requireCoreExecutionLocator(snapshot);
-    this.assertCoreOperationAuthority(snapshot, locator, hostSessionId);
-    const fence = requireCoreFence(this.core.fence ?? coreFenceFromSnapshot(snapshot));
-    const lease = this.requireCoreOperationLease(hostSessionId, fence);
-    const registryRevision = this.core.operationRegistryRevision
-      ?? (await this.readCoreOperationStatus(hostSessionId)).registryRevision;
-    const requestId = action === "heartbeat"
-      ? `req_pi_operation_heartbeat_${randomUUID()}`
-      : operationRequestId(action, claim.operationId);
-    const argv = [
-      "execution", "operation", action,
-      "--session", locator.sessionId,
-      "--execution", locator.executionId,
-      "--request-id", requestId,
-      "--expected-execution-revision", String(requiredRevision(fence.execution_revision, "execution revision")),
-      "--execution-owner", hostSessionId,
-      "--owner-kind", "pi",
-      "--owner-epoch", String(requiredRevision(fence.lease_epoch, "lease epoch")),
-      "--lease-id", lease.lease_id,
-      "--expected-operation-registry-revision", String(registryRevision),
-      "--operation-id", claim.operationId,
-      "--operation-token", claim.operationToken,
-      "--json",
-    ];
-    const command = await execCoreOperationWithReplay(this.adapter, argv);
-    const envelope = parseRunResponse(command.stdout);
-    validateCoreOperationEnvelope(envelope, `execution-operation-${action}`, locator, requestId);
-    const nextRevision = operationRegistryRevisionFromEnvelope(envelope);
-    const after = await this.bridge.refresh();
-    this.assertCoreOperationAuthority(after, locator, hostSessionId);
-    this.core.operationRegistryRevision = nextRevision;
-    if (action === "release") this.core.operationClaims.delete(claim.operationId);
-    else claim.registryRevision = nextRevision;
-  }
-
-  private assertCoreOperationAuthority(
-    snapshot: WorkflowSnapshot,
-    expectedLocator: CoreExecutionLocator,
-    hostSessionId: string,
-  ): void {
-    const locator = requireCoreExecutionLocator(snapshot);
-    if (!sameCoreLocator(locator, expectedLocator)) throw new Error("Execution locator changed during host operation mutation");
-    const lease = snapshot.execution?.lease;
-    const fence = coreFenceFromSnapshot(snapshot);
-    if (!lease
-      || lease.ownerId !== hostSessionId
-      || lease.epoch !== fence.lease_epoch
-      || this.core.ownerId !== hostSessionId
-      || !this.core.claim) {
-      this.core.operationClaims.clear();
-      this.core.operationRegistryRevision = undefined;
-      throw new Error("Execution lease authority changed during host operation mutation");
-    }
-    this.core.locator = locator;
-    this.core.fence = fence;
-  }
-
-  private requireCoreOperationLease(hostSessionId: string, fence: RunResponseFenceV11): RunLeaseClaim {
-    const lease = this.core.claim;
-    if (!lease || this.core.ownerId !== hostSessionId) {
-      throw new Error("No private core lease claim is held for host operation mutation");
-    }
-    validateAcquisitionClaim(lease, hostSessionId, fence);
-    return lease;
   }
 
   private stageCoreMutationResponse(
@@ -2005,8 +1694,6 @@ export class WorkflowCoordinator {
     this.core.locator = undefined;
     this.core.ownerId = undefined;
     this.core.lastLeaseEpoch = undefined;
-    this.core.operationRegistryRevision = undefined;
-    this.core.operationClaims.clear();
   }
 
   private loseCoreClaim(): void {
@@ -2015,8 +1702,6 @@ export class WorkflowCoordinator {
     this.core.claim = undefined;
     this.core.fence = undefined;
     this.core.ownerId = undefined;
-    this.core.operationRegistryRevision = undefined;
-    this.core.operationClaims.clear();
   }
 
   private async initializeAuthority(): Promise<WorkflowCoordinatorMode> {
@@ -2047,6 +1732,18 @@ export class WorkflowCoordinator {
     if (capabilities.mode === "legacy") {
       this.authorityDiagnostic ??= "installed CLI exposes legacy read compatibility only";
       this.selectedMode = this.options.legacyCompatibility ? "legacy-host" : "fail-closed";
+      return this.selectedMode;
+    }
+    if (capabilities.protocol === "session-run-v3") {
+      // Plan-B v3 core detected. The Pi Session/Run CAS adapter is phase 2 of
+      // docs/session-run-v3-action-plan-20260812.md and is not implemented
+      // yet, and the retired v2 lease protocol must never be spoken to a v3
+      // core, so mutations fail closed with an actionable diagnostic. Reads
+      // stay available through the ordinary read paths.
+      this.authorityDiagnostic =
+        "installed Maestro CLI speaks the Session/Run minimal-state (v3) protocol; "
+        + "the Pi v3 adapter is not implemented yet, so mutations are disabled";
+      this.selectedMode = "fail-closed";
       return this.selectedMode;
     }
     if (!hasCompleteCoreCapabilities(capabilities)) {
@@ -2214,84 +1911,6 @@ function runEditArgv(options: Omit<RunEditOptions, "sessionId">): string[] {
   ];
 }
 
-async function execCoreOperationWithReplay(
-  adapter: WorkflowRunAdapter,
-  argv: readonly string[],
-): Promise<RunCliResult> {
-  try {
-    return await adapter.exec(argv);
-  } catch {
-    return adapter.exec(argv);
-  }
-}
-
-function validateCoreOperationEnvelope(
-  envelope: PrivateRunResponseEnvelope,
-  operation: RunOperationV11,
-  locator: CoreExecutionLocator,
-  requestId?: string,
-): void {
-  if (envelope.schema_version !== "run-response/1.1"
-    || !envelope.ok
-    || envelope.operation !== operation
-    || (requestId !== undefined && envelope.request_id !== requestId)
-    || !envelope.locator?.session_id
-    || envelope.locator.session_id !== locator.sessionId
-    || envelope.locator.execution_id !== locator.executionId
-    || envelope.locator.generation !== locator.generation) {
-    throw new Error(`Invalid ${operation} response authority`);
-  }
-}
-
-function mutationOperationRegistryRevision(envelope: PrivateRunResponseEnvelope): number | undefined {
-  const result = recordValue(envelope.result);
-  const revision = result?.operation_registry_revision;
-  return typeof revision === "number" && Number.isSafeInteger(revision) && revision >= 0
-    ? revision
-    : undefined;
-}
-
-function operationRegistryRecord(envelope: PrivateRunResponseEnvelope): Record<string, unknown> {
-  const result = recordValue(envelope.result);
-  const registry = recordValue(result?.operation_registry);
-  if (!registry) throw new Error("Execution operation response returned no operation registry");
-  return registry;
-}
-
-function operationRegistryRevisionFromEnvelope(envelope: PrivateRunResponseEnvelope): number {
-  const registry = operationRegistryRecord(envelope);
-  return requiredRevision(
-    typeof registry.revision === "number" ? registry.revision : undefined,
-    "operation registry revision",
-  );
-}
-
-function operationStatusFromEnvelope(envelope: PrivateRunResponseEnvelope): WorkflowCoreOperationStatus {
-  const registry = operationRegistryRecord(envelope);
-  if (registry.admission !== "open" && registry.admission !== "draining") {
-    throw new Error("Execution operation response returned invalid admission state");
-  }
-  const active = recordValue(registry.active_claims);
-  if (!active) throw new Error("Execution operation response returned invalid active claims");
-  return {
-    registryRevision: operationRegistryRevisionFromEnvelope(envelope),
-    admission: registry.admission,
-    activeOperationIds: Object.keys(active).sort(),
-  };
-}
-
-function requiredOperationId(value: string): string {
-  const normalized = value.trim();
-  if (!normalized || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(normalized)) {
-    throw new Error("Host operation ID must be a safe non-empty identifier");
-  }
-  return normalized;
-}
-
-function operationRequestId(action: string, operationId: string): string {
-  return `req_pi_operation_${action}_${createHash("sha256").update(operationId, "utf8").digest("hex").slice(0, 24)}`;
-}
-
 function optionalCoreExecutionLocator(snapshot: WorkflowSnapshot): CoreExecutionLocator | undefined {
   const locator = snapshot.locator;
   const execution = snapshot.execution;
@@ -2378,10 +1997,6 @@ function hasCompleteCoreCapabilities(capabilities: RunCliCapabilities): boolean 
     && structured.features?.session_statusless === true
     && structured.features.execution_generation === true
     && structured.features.core_execution_lease === true
-    // execution_operation_drain is intentionally NOT required: it is an
-    // optional capability for the deprecated operation drain experiment
-    // (superseded by docs/session-run-minimal-state-architecture-20260812.md).
-    // Plan-B v3 cores never advertise it yet fully support the modern protocol.
     && capabilities.support?.execution_generation === true
     && capabilities.support.core_execution_lease === true
     && capabilities.support["run-response/1.1"] === true;
@@ -2401,10 +2016,6 @@ function expectedCoreOperation(
     return `execution-${argv[1]}-${argv[2] ?? ""}`;
   }
   return `execution-${argv[1] ?? ""}`;
-}
-
-function isExecutionHandoffPrepare(argv: readonly string[]): boolean {
-  return argv[0] === "execution" && argv[1] === "handoff" && argv[2] === "prepare";
 }
 
 function isCanonicalExecutionStart(argv: readonly string[]): boolean {
