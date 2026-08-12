@@ -931,7 +931,11 @@ export interface HeuristicResult {
   notifyOnly?: boolean; // true = notify main session, don't send to agent
 }
 
-export function heuristicCheck(info: EngineAgentInfo, contextCompactThresholdPercent = 80): HeuristicResult {
+export function heuristicCheck(
+  info: EngineAgentInfo,
+  contextCompactThresholdPercent = 80,
+  stallIdleSeconds = ENGINE_STALL_IDLE_SECONDS,
+): HeuristicResult {
   const windowKind = info.kind === "window";
   // Failed agent
   if (info.status === "failed") {
@@ -958,7 +962,7 @@ export function heuristicCheck(info: EngineAgentInfo, contextCompactThresholdPer
   }
 
   // Stalled (running but idle too long)
-  if (info.status === "running" && info.idleSeconds >= ENGINE_STALL_IDLE_SECONDS) {
+  if (info.status === "running" && info.idleSeconds >= stallIdleSeconds) {
     const compactHint = info.kind === "window"
       && info.contextPressure !== undefined
       && info.contextPressure >= contextCompactThresholdPercent;
@@ -980,12 +984,11 @@ export function heuristicCheck(info: EngineAgentInfo, contextCompactThresholdPer
 // Intervention with cooldown
 // ---------------------------------------------------------------------------
 
-export function canIntervene(binding: MonitorBinding, now: number): boolean {
-  return now - binding.lastInterventionAt >= INTERVENTION_COOLDOWN_MS;
-}
-
-/** Config-aware cooldown check used by the engine. */
-function canInterveneWith(binding: MonitorBinding, now: number, cooldownMs: number): boolean {
+export function canIntervene(
+  binding: MonitorBinding,
+  now: number,
+  cooldownMs = INTERVENTION_COOLDOWN_MS,
+): boolean {
   return now - binding.lastInterventionAt >= cooldownMs;
 }
 
@@ -1114,7 +1117,11 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
       binding.lastCheckAt = now;
 
       // 1. Heuristic fast check
-      const heuristic = heuristicCheck(info, engine.config.contextCompactThresholdPercent);
+      const heuristic = heuristicCheck(
+        info,
+        engine.config.contextCompactThresholdPercent,
+        engine.config.stallIdleSeconds,
+      );
 
       if (heuristic.notifyOnly && heuristic.message) {
         // Dedup: only notify on state transition, not every tick
@@ -1248,7 +1255,7 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
           : driftSignal
             ? { message: driftSignal.message, reason: binding.mode === "custom" ? "custom" : "drift" }
             : undefined;
-      if (plan && canInterveneWith(binding, now, engine.config.interventionCooldownMs)) {
+      if (plan && canIntervene(binding, now, engine.config.interventionCooldownMs)) {
         if (binding.deliveryGate.gate(cid, plan.message, "interrupt") === undefined) {
           continue;
         }

@@ -468,6 +468,18 @@ test("heuristicCheck passes healthy agent", () => {
   assert.equal(result.notifyOnly, undefined);
 });
 
+test("heuristicCheck stall threshold follows configured stallIdleSeconds", () => {
+  // Raised threshold: 120s idle is no longer stalled at 300s.
+  const relaxed = heuristicCheck(engineInfo("a", "running", 120), 80, 300);
+  assert.equal(relaxed.needsIntervention, false);
+
+  // Lowered threshold: 40s idle stalls at 30s even though it is below the
+  // 60s built-in default (regression: config was ignored by the heuristic).
+  const strict = heuristicCheck(engineInfo("a", "running", 40), 80, 30);
+  assert.equal(strict.needsIntervention, true);
+  assert.equal(strict.reason, "stalled");
+});
+
 // ===========================================================================
 // Engine: intervention cooldown
 // ===========================================================================
@@ -489,6 +501,19 @@ test("canIntervene respects cooldown", () => {
 
   // After cooldown — can intervene
   assert.equal(canIntervene(binding, Date.now() + INTERVENTION_COOLDOWN_MS + 1), true);
+});
+
+test("canIntervene honors a configured cooldown", () => {
+  const engine = createEngineState();
+  addBinding(engine, "cid-1", "a", "auto");
+  const binding = engine.bindings.get("cid-1")!;
+  recordIntervention(binding, "stalled", "continue", "steer");
+
+  // Custom 5s cooldown: blocked within, allowed after.
+  assert.equal(canIntervene(binding, Date.now(), 5_000), false);
+  assert.equal(canIntervene(binding, Date.now() + 5_001, 5_000), true);
+  // Default constant still applies when no cooldown is given.
+  assert.equal(canIntervene(binding, Date.now() + 5_001), false);
 });
 
 test("intervention log is trimmed", () => {
@@ -532,6 +557,30 @@ test("engineTick removes gone agents and intervenes on stalled", async () => {
   assert.equal(count, 1);
   assert.equal(sent.length, 1);
   assert.match(sent[0].msg, /stalled/);
+});
+
+test("engineTick stall intervention honors configured stallIdleSeconds", async () => {
+  const engine = createEngineState();
+  engine.config.stallIdleSeconds = 300;
+  const sent: string[] = [];
+
+  addBinding(engine, "cid-slow", "slow", "auto");
+  engine.callbacks = {
+    getAgentInfo: () => engineInfo("slow", "running", 120),
+    sendIntervention: (_cid, msg) => { sent.push(msg); return true; },
+    onStatusUpdate: () => {},
+    notifyMain: () => {},
+  };
+
+  // 120s idle < configured 300s threshold — no stall intervention
+  // (regression: heuristic used the 60s built-in constant instead of config).
+  assert.equal(await engineTick(engine), 0);
+  assert.equal(sent.length, 0);
+
+  engine.config.stallIdleSeconds = 90;
+  assert.equal(await engineTick(engine), 1);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /stalled/);
 });
 
 test("engineTick awaits asynchronous intervention acknowledgement", async () => {

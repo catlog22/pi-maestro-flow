@@ -340,8 +340,8 @@ export interface HeuristicResult {
     message?: string;
     notifyOnly?: boolean;
 }
-export declare function heuristicCheck(info: EngineAgentInfo, contextCompactThresholdPercent?: number): HeuristicResult;
-export declare function canIntervene(binding: MonitorBinding, now: number): boolean;
+export declare function heuristicCheck(info: EngineAgentInfo, contextCompactThresholdPercent?: number, stallIdleSeconds?: number): HeuristicResult;
+export declare function canIntervene(binding: MonitorBinding, now: number, cooldownMs?: number): boolean;
 export declare function recordIntervention(binding: MonitorBinding, reason: InterventionRecord["reason"], message: string, mode: "steer" | "follow_up", traceId?: string, delivery?: InterventionDeliveryAck): void;
 export declare function createTraceId(): string;
 /**
