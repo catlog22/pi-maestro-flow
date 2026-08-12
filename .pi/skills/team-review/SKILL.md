@@ -73,7 +73,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-teammate({ agent: "team-worker", taskType: "development", tasks: [{ name: "<role>", taskType: "development", prompt: `## Role Assignment
+teammate({ agent: "team-worker", tasks: [{ name: "<role>", prompt: `## Role Assignment
 role: <role>
 role_spec: <skill_root>/roles/<role>/role.md
 session: {run_dir}/work/team

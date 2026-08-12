@@ -1,7 +1,6 @@
 ---
 name: team-worker
 description: "Unified worker agent for team pipelines. Executes role-specific logic loaded from a role_spec file within a built-in task lifecycle (discover, execute, report)."
-taskType: development
 tools:
   - Read
   - Write

@@ -125,7 +125,7 @@ User provides task description
 When coordinator spawns workers, use `team-worker` agent with role-spec path:
 
 ```
-teammate({ agent: "team-worker", taskType: "development", tasks: [{ name: "<role>", taskType: "development", prompt: `## Role Assignment
+teammate({ agent: "team-worker", tasks: [{ name: "<role>", prompt: `## Role Assignment
 role: <role>
 role_spec: {run_dir}/work/team/role-specs/<role>.md
 session: {run_dir}/work/team
