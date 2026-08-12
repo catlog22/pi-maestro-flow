@@ -28,6 +28,8 @@ export interface AgentOverlayParams {
 	getAgents: () => readonly AgentRow[];
 	getViewingId: () => string | undefined;
 	onSelect: (correlationId: string) => void;
+	/** Set the selected agent as the editor input target without closing the overlay. */
+	onTarget?: (correlationId: string) => void;
 	onCommand: (correlationId: string, action: "interrupt" | "steer", message?: string) => void;
 	requestRender: () => void;
 	close: () => void;
@@ -287,6 +289,11 @@ export class AgentOverlay implements Component, Focusable {
 		}
 		if (matchesKey(data, Key.pageDown)) {
 			this.scrollOutput(Math.max(1, this.detailRows - 2));
+			return;
+		}
+		if (commandInput === "m" && this.selectedId && this.params.onTarget) {
+			this.params.onTarget(this.selectedId);
+			this.ack(tuiT("overlay.agents.targetAck", { agent: this.agentName(this.selectedId) }));
 			return;
 		}
 		if (commandInput === "i" && this.selectedId) {

@@ -54,7 +54,17 @@ import { SessionUiState } from "./session-ui-state.ts";
 import { nextSessionTabId } from "./session-tabs.ts";
 import { renderWindowBar, windowSessionColor } from "./window-bar.ts";
 import { makeWindowThreadWidget } from "./window-thread-view.ts";
-import { agentPanelRows } from "./viewport.ts";
+import { agentPanelRows, panelRows } from "./viewport.ts";
+import { createZenBrowseController, type ZenBrowseController } from "./zen-browse.ts";
+import { enumerateZenNavRows, renderZenStack } from "./zen-render.ts";
+import {
+	ZenSheet,
+	buildZenMissionSheet,
+	buildZenRunSheet,
+	buildZenSwarmSheet,
+	buildZenTaskSheet,
+	type ZenSheetDocument,
+} from "./zen-sheet.ts";
 import { routeAgentInput } from "./input-routing.ts";
 import { activeThemeName, ThemePicker } from "./theme-picker.ts";
 import { ModelPicker, type ModelPickerEntry } from "./model-picker.ts";
@@ -331,6 +341,7 @@ export default function (pi: ExtensionAPI): void {
 	/** Extra repaint target while the Agent modal is consuming the live store. */
 	let activeAgentOverlayRender: (() => void) | undefined;
 	let activeAgentOverlay: { finalize(): void } | undefined;
+	let activeZenSheet: { finalize(): void } | undefined;
 	let activeBashBgOverlay: BashBgOverlay | undefined;
 	/** Agent activity temporarily wins vertical space without rewriting Todo preference. */
 	let agentPriorityActive = false;
@@ -340,6 +351,8 @@ export default function (pi: ExtensionAPI): void {
 	// component.dispose() (MW-2).
 	let activeSettingsOverlay: { finalize(): void } | undefined;
 	let sidebarController: SidebarController | undefined;
+	let zenBrowseController: ZenBrowseController | undefined;
+	let zenNavRows: string[] = [];
 	let editorBottomController: EditorBottomController | undefined;
 	// Whether Cockpit installed its custom editor this session (reload-gated).
 	// Tracks ownership so teardown restores the default editor only when ours.
@@ -684,6 +697,8 @@ export default function (pi: ExtensionAPI): void {
 		capturingOverlayActive || ambientKeysShouldYield(capturedTui);
 
 	const clearWidgets = (ctx: ExtensionContext): void => {
+		zenBrowseController?.end();
+		zenNavRows = [];
 		ctx.ui.setWidget(STACK_WIDGET_KEY, undefined);
 		ctx.ui.setWidget(AGENT_WIDGET_KEY, undefined);
 	};
@@ -926,7 +941,10 @@ export default function (pi: ExtensionAPI): void {
 			capturedTui = tui;
 			ensureViewportStability(tui);
 			return makeAgentWidget({
-				getAgents: () => sessionUi.mode === "window" ? [] : agents.snapshot(),
+				// The Zen stack absorbs the roster into its ACTORS section; an empty
+				// roster makes makeAgentWidget render zero rows, so the widget slot
+				// stays registered (placement bookkeeping) without duplicating rows.
+				getAgents: () => config.stackStyle === "zen" || sessionUi.mode === "window" ? [] : agents.snapshot(),
 				getConfig: () => config,
 				isRunning: () => running,
 				isAnimating,
@@ -1019,18 +1037,63 @@ export default function (pi: ExtensionAPI): void {
 		);
 	};
 
+	const ensureZenBrowseController = (ctx: ExtensionContext): ZenBrowseController => {
+		if (zenBrowseController) return zenBrowseController;
+		zenBrowseController = createZenBrowseController({
+			getNavRows: () => zenNavRows,
+			subscribeInput: (handler) => ctx.ui.onTerminalInput(handler),
+			requestRender: () => req(),
+			onActivate: (id) => {
+				void activateZenRow(ctx, id).catch((error) => {
+					ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+				});
+			},
+			shouldYield: () => capturingOverlayActive || ambientKeysShouldYield(capturedTui),
+			onWarning: (message) => ctx.ui.notify(message, "warning"),
+			emptyNotice: () => tuiT("notice.sidebarNothing"),
+		});
+		return zenBrowseController;
+	};
+
 	const installWidgets = (ctx: ExtensionContext): void => {
+		const browseController = ensureZenBrowseController(ctx);
 		ctx.ui.setWidget(
 			STACK_WIDGET_KEY,
 			(tui, theme) => {
 				capturedTui = tui;
 				ensureViewportStability(tui);
-				return makeTodoWidget({
+				const todoWidget = makeTodoWidget({
 					getTodos: () => todos.snapshot(),
 					getConfig: () => config,
 					getExpanded: effectiveTodoExpanded,
 					isAnimating,
 				})(tui, theme);
+				// stackStyle is dispatched per render, not per install, so a settings
+				// toggle switches the projection live without re-registering widgets.
+				return {
+					render(width: number): string[] {
+						if (config.stackStyle !== "zen") {
+							zenNavRows = [];
+							return todoWidget.render(width);
+						}
+						const input = {
+							maestro: maestro.snapshot(),
+							todos: todos.snapshot(),
+							agents: sessionUi.mode === "window" ? [] : visibleAgentRows(agents.snapshot()),
+							jobs: bashBg.snapshot(),
+							config: { ...config, todoExpanded: effectiveTodoExpanded() },
+							width,
+							theme,
+							now: Date.now(),
+							maxRows: panelRows(terminalRows(tui)),
+							browse: browseController.state(),
+						};
+						zenNavRows = enumerateZenNavRows(input);
+						return renderZenStack(input);
+					},
+					invalidate(): void { todoWidget.invalidate(); },
+					dispose(): void { todoWidget.dispose(); },
+				};
 			},
 			{ placement: "aboveEditor" },
 		);
@@ -1135,6 +1198,9 @@ export default function (pi: ExtensionAPI): void {
 			sidebarController?.dispose();
 			editorBottomController?.dispose();
 		}
+		zenBrowseController?.dispose();
+		zenBrowseController = undefined;
+		zenNavRows = [];
 		sidebarController = undefined;
 		editorBottomController = undefined;
 		fullscreenController = undefined;
@@ -1148,6 +1214,12 @@ export default function (pi: ExtensionAPI): void {
 		}
 		activeAgentOverlay = undefined;
 		activeAgentOverlayRender = undefined;
+		try {
+			activeZenSheet?.finalize();
+		} catch {
+			// best effort
+		}
+		activeZenSheet = undefined;
 		dockEffectiveVisible = false;
 		clearClaudeEditor(ctx);
 		clearFullscreen(ctx);
@@ -1500,15 +1572,14 @@ export default function (pi: ExtensionAPI): void {
 			}),
 			pi.events.on(COCKPIT_PREEMPT_RESIZE_EVENT, () => {
 				// A capturing overlay opened by another extension (teammate attach,
-				// control center, model mapping) must preempt an active sidebar resize
-				// or browse mode: both are global terminal-input hooks that would
-				// otherwise swallow the overlay's first arrow/Enter/Esc.
+				// control center, model mapping) must preempt every global input hook.
 				try {
 					sidebarController?.cancelResize();
 					sidebarController?.endFocus();
-			} catch {
-				// best effort
-			}
+					zenBrowseController?.end();
+				} catch {
+					// best effort
+				}
 			}),
 		);
 	};
@@ -1832,6 +1903,7 @@ export default function (pi: ExtensionAPI): void {
 
 	const enterCapturingOverlay = (): void => {
 		capturingOverlayActive = true;
+		zenBrowseController?.end();
 		req();
 		try {
 			sidebarController?.cancelResize();
@@ -1844,7 +1916,71 @@ export default function (pi: ExtensionAPI): void {
 		req();
 	};
 
-	const openAgentOverlay = async (ctx: ExtensionContext): Promise<void> => {
+	const openZenSheet = async (
+		ctx: ExtensionContext,
+		getDocument: () => ZenSheetDocument | undefined,
+	): Promise<void> => {
+		if (!ctx.hasUI || capturingOverlayActive) return;
+		let ownedSheet: { finalize(): void } | undefined;
+		enterCapturingOverlay();
+		try {
+			await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+				let settled = false;
+				const finalize = (): void => {
+					if (settled) return;
+					settled = true;
+					done(undefined);
+				};
+				ownedSheet = { finalize };
+				activeZenSheet = ownedSheet;
+				return new ZenSheet({
+					getDocument,
+					requestRender: () => tui.requestRender(),
+					close: finalize,
+					theme,
+					glyphs: resolveGlyphs(config.icons.mode),
+					getTerminalRows: () => terminalRows(tui),
+				});
+			}, {
+				overlay: true,
+				overlayOptions: { anchor: "center", width: "72%", maxHeight: "85%" },
+			});
+		} finally {
+			if (activeZenSheet === ownedSheet) activeZenSheet = undefined;
+			exitCapturingOverlay();
+		}
+	};
+
+	const activateZenRow = async (ctx: ExtensionContext, id: string): Promise<void> => {
+		if (id === "mission") {
+			await openZenSheet(ctx, () => buildZenMissionSheet(maestro.snapshot()));
+			return;
+		}
+		if (id === "run") {
+			await openZenSheet(ctx, () => buildZenRunSheet(maestro.snapshot()));
+			return;
+		}
+		if (id === "swarm") {
+			await openZenSheet(ctx, () => buildZenSwarmSheet(maestro.snapshot()));
+			return;
+		}
+		if (id.startsWith("task:")) {
+			const taskId = id.slice("task:".length);
+			await openZenSheet(ctx, () => buildZenTaskSheet(todos.snapshot().find((item) => item.id === taskId)));
+			return;
+		}
+		if (id.startsWith("agent:")) {
+			const correlationId = id.slice("agent:".length);
+			selectAgent(correlationId);
+			await openAgentOverlay(ctx, correlationId);
+			return;
+		}
+		if (id.startsWith("job:")) {
+			await openBashBgOverlay(ctx, id.slice("job:".length));
+		}
+	};
+
+	const openAgentOverlay = async (ctx: ExtensionContext, initialCorrelationId?: string): Promise<void> => {
 		if (!ctx.hasUI) return;
 		if (capturingOverlayActive) {
 			ctx.ui.notify(tuiT("notice.closeOverlayAgents"), "warning");
@@ -1854,6 +1990,7 @@ export default function (pi: ExtensionAPI): void {
 			ctx.ui.notify(tuiT("notice.noAgents"), "info");
 			return;
 		}
+		if (initialCorrelationId) selectAgent(initialCorrelationId);
 		let ownedOverlay: { finalize(): void } | undefined;
 		let ownedRender: (() => void) | undefined;
 		enterCapturingOverlay();
@@ -1871,8 +2008,9 @@ export default function (pi: ExtensionAPI): void {
 				activeAgentOverlayRender = ownedRender;
 				return new AgentOverlay({
 					getAgents: () => agents.snapshot(),
-					getViewingId: selectedAgentCorrelationId,
+					getViewingId: () => initialCorrelationId ?? selectedAgentCorrelationId(),
 					onSelect: (correlationId) => selectAgent(correlationId),
+					onTarget: (correlationId) => selectAgent(correlationId),
 					onCommand: (correlationId, action, message) => {
 						pi.events.emit(TEAMMATE_AGENT_COMMAND_EVENT, { correlationId, action, ...(message !== undefined ? { message } : {}) });
 					},
@@ -1955,7 +2093,7 @@ export default function (pi: ExtensionAPI): void {
 		});
 	});
 
-	const openBashBgOverlay = async (ctx: ExtensionContext): Promise<void> => {
+	const openBashBgOverlay = async (ctx: ExtensionContext, initialJobId?: string): Promise<void> => {
 		if (!ctx.hasUI) return;
 		let ownedOverlay: BashBgOverlay | undefined;
 		enterCapturingOverlay();
@@ -1970,6 +2108,7 @@ export default function (pi: ExtensionAPI): void {
 					glyphs: resolveGlyphs(config.icons.mode),
 					now: Date.now(),
 					hideLiveDuration: config.staticMode,
+					...(initialJobId ? { initialJobId } : {}),
 					getTerminalRows: () => terminalRows(tui),
 				});
 				activeBashBgOverlay = ownedOverlay;
@@ -2145,6 +2284,10 @@ export default function (pi: ExtensionAPI): void {
 				else clearEditorBottom(ctx);
 			}
 			if (changedKeys.some((key) => key.startsWith("sidebar."))) syncSidebarMode(ctx);
+			if (previous.stackStyle !== nextConfig.stackStyle && nextConfig.stackStyle !== "zen") {
+				zenBrowseController?.end();
+				zenNavRows = [];
+			}
 			publishUiOwnership();
 			req();
 		},
@@ -2231,7 +2374,7 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	pi.registerShortcut(SIDEBAR_FOCUS_KEY, {
-		description: "Browse the Cockpit sidebar with the keyboard (↑↓/j/k/PageUp/PageDown/Home/End, Esc to leave)",
+		description: "Browse the visible Cockpit surface with the keyboard (↑↓/j/k/Home/End, Enter, Esc)",
 		handler(ctx) {
 			if (!config.enabled) {
 				ctx.ui.notify(tuiT("notice.cockpitDisabled"), "warning");
@@ -2239,6 +2382,10 @@ export default function (pi: ExtensionAPI): void {
 			}
 			if (capturingOverlayActive) {
 				ctx.ui.notify(tuiT("notice.closeOverlayBrowse"), "warning");
+				return;
+			}
+			if (config.stackStyle === "zen" && surfaceState === "widgets") {
+				ensureZenBrowseController(ctx).begin();
 				return;
 			}
 			sidebarController?.beginFocus();

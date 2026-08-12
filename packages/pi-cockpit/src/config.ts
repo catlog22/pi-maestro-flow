@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { type CockpitConfig, type CurrencyMode, DEFAULT_CONFIG } from "./types.ts";
+import { type CockpitConfig, type CurrencyMode, DEFAULT_CONFIG, type StackStyle } from "./types.ts";
 
 const SIDEBAR_MIN_WIDTH = 32;
 const SIDEBAR_MAX_WIDTH = 56;
@@ -19,6 +19,7 @@ export function mergeConfig(base: CockpitConfig, over: unknown): CockpitConfig {
 	const isToolPaletteMode = (v: unknown): v is "classic" | "family" | "readwrite" | "search" | "mono" =>
 		v === "classic" || v === "family" || v === "readwrite" || v === "search" || v === "mono";
 	const isIconMode = (v: unknown): v is "auto" | "nerd" | "ascii" => v === "auto" || v === "nerd" || v === "ascii";
+	const isStackStyle = (v: unknown): v is StackStyle => v === "classic" || v === "zen";
 const isCurrencyMode = (v: unknown): v is CurrencyMode => v === "usd" || v === "cny";
 	const isSidebarMode = (v: unknown): v is "auto" | "on" | "off" => v === "auto" || v === "on" || v === "off";
 	const isSidebarDensity = (v: unknown): v is "comfortable" | "compact" => v === "comfortable" || v === "compact";
@@ -47,6 +48,7 @@ const isCurrencyMode = (v: unknown): v is CurrencyMode => v === "usd" || v === "
 		agentsMode: isMode(o.agentsMode) ? o.agentsMode : base.agentsMode,
 		todoMode: isMode(o.todoMode) ? o.todoMode : base.todoMode,
 		todoExpanded: typeof o.todoExpanded === "boolean" ? o.todoExpanded : base.todoExpanded,
+		stackStyle: isStackStyle(o.stackStyle) ? o.stackStyle : base.stackStyle,
 		hideNativeAgents: typeof o.hideNativeAgents === "boolean" ? o.hideNativeAgents : base.hideNativeAgents,
 		pinEditorBottom: typeof o.pinEditorBottom === "boolean" ? o.pinEditorBottom : base.pinEditorBottom,
 		doubleEscapeClearInput: typeof o.doubleEscapeClearInput === "boolean" ? o.doubleEscapeClearInput : base.doubleEscapeClearInput,
@@ -133,6 +135,7 @@ export function mergeConfigDocument(raw: unknown, config: CockpitConfig): Record
 		agentsMode: config.agentsMode,
 		todoMode: config.todoMode,
 		todoExpanded: config.todoExpanded,
+		stackStyle: config.stackStyle,
 		hideNativeAgents: config.hideNativeAgents,
 		pinEditorBottom: config.pinEditorBottom,
 		doubleEscapeClearInput: config.doubleEscapeClearInput,

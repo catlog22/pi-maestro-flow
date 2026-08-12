@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+  "name": "cockpit-zen",
+  "vars": {
+    "accent": "#c8b273", "blue": "#77aab3", "cream": "#e7ddc4", "green": "#7fb58d",
+    "red": "#d97878", "orange": "#d69a65", "purple": "#aa91b8", "pink": "#c98b9b",
+    "text": "#e6e3dc", "muted": "#a5a39d", "dim": "#74736e", "border": "#454641",
+    "selected": "#33352f", "message": "#282a27", "pending": "#292c29", "successBg": "#273129", "errorBg": "#342829"
+  },
+  "colors": {
+    "accent": "accent", "border": "blue", "borderAccent": "accent", "borderMuted": "border",
+    "success": "green", "error": "red", "warning": "orange", "muted": "muted", "dim": "dim", "text": "text", "thinkingText": "muted",
+    "selectedBg": "selected", "userMessageBg": "message", "userMessageText": "text", "customMessageBg": "message", "customMessageText": "text", "customMessageLabel": "accent",
+    "toolPendingBg": "pending", "toolSuccessBg": "successBg", "toolErrorBg": "errorBg", "toolTitle": "cream", "toolOutput": "muted",
+    "mdHeading": "cream", "mdLink": "blue", "mdLinkUrl": "dim", "mdCode": "accent", "mdCodeBlock": "text", "mdCodeBlockBorder": "border",
+    "mdQuote": "muted", "mdQuoteBorder": "border", "mdHr": "border", "mdListBullet": "green",
+    "toolDiffAdded": "green", "toolDiffRemoved": "red", "toolDiffContext": "muted",
+    "syntaxComment": "dim", "syntaxKeyword": "purple", "syntaxFunction": "cream", "syntaxVariable": "blue", "syntaxString": "green",
+    "syntaxNumber": "orange", "syntaxType": "accent", "syntaxOperator": "text", "syntaxPunctuation": "muted",
+    "thinkingOff": "dim", "thinkingMinimal": "muted", "thinkingLow": "blue", "thinkingMedium": "accent", "thinkingHigh": "purple", "thinkingXhigh": "pink", "thinkingMax": "red",
+    "bashMode": "green"
+  },
+  "export": { "pageBg": "#1b1d1a", "cardBg": "#242622", "infoBg": "#303129" }
+}

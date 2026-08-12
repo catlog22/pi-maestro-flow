@@ -49,6 +49,22 @@ function overlay(jobs: BashBgJob[]) {
 	return { component, counts: () => ({ renders, refreshes, closes }) };
 }
 
+test("initialJobId opens with the requested Zen row selected", () => {
+	const first = job("first", "running");
+	const second = job("second", "completed");
+	const component = new BashBgOverlay({
+		getJobs: () => [first, second],
+		requestRender: () => {},
+		requestRefresh: () => {},
+		close: () => {},
+		theme,
+		glyphs: resolveGlyphs("nerd"),
+		now: Date.now(),
+		initialJobId: "second",
+	});
+	assert.match(component.render(60).join("\n"), /› ✓ 2\/2.*second/);
+});
+
 test("hideLiveDuration drops the live duration from the job row but keeps the command", () => {
 	const j = job("job-1", "running");
 	const component = new BashBgOverlay({

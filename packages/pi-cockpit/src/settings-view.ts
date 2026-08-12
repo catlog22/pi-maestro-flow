@@ -12,6 +12,7 @@ import type {
 	QuietSymbolMode,
 	SidebarDensity,
 	SidebarMode,
+	StackStyle,
 	ViewMode,
 } from "./types.ts";
 import { tuiT } from "./tui-i18n.ts";
@@ -39,6 +40,7 @@ const QUIET_SYMBOL_MODES: QuietSymbolMode[] = ["check", "dot"];
 const ICON_MODES: IconMode[] = ["auto", "nerd", "ascii"];
 const SIDEBAR_MODES: SidebarMode[] = ["auto", "on", "off"];
 const SIDEBAR_DENSITIES: SidebarDensity[] = ["comfortable", "compact"];
+const STACK_STYLES: StackStyle[] = ["classic", "zen"];
 
 function cycle<T>(values: readonly T[], current: T): T {
 	const index = values.indexOf(current);
@@ -65,6 +67,8 @@ const LEGACY_VALUE_KEYS: Readonly<Record<string, string>> = {
 	compact: "common.value.compact",
 	auto: "common.value.auto",
 	comfortable: "common.value.comfortable",
+	classic: "common.value.classic",
+	zen: "common.value.zen",
 	"picker…": "common.value.picker",
 	[NO_THEME_LABEL]: "legacy.piSettings",
 	"(rule-based)": "common.ruleBased",
@@ -169,6 +173,13 @@ export function buildRows(config: CockpitConfig, live?: LiveRowState): SettingsR
 			label: "todo expand",
 			value: config.todoExpanded ? "yes" : "no",
 			next: config.todoExpanded ? "no" : "yes",
+		},
+		{
+			key: "stackStyle",
+			accel: "p",
+			label: "stack style",
+			value: config.stackStyle,
+			next: cycle(STACK_STYLES, config.stackStyle),
 		},
 		{
 			key: "hideNativeAgents",
@@ -314,6 +325,8 @@ export function applyRow(config: CockpitConfig, key: string, textValue?: string)
 			return { ...config, todoMode: cycle(VIEW_MODES, config.todoMode) };
 		case "todoExpanded":
 			return { ...config, todoExpanded: !config.todoExpanded };
+		case "stackStyle":
+			return { ...config, stackStyle: cycle(STACK_STYLES, config.stackStyle) };
 		case "hideNativeAgents":
 			return { ...config, hideNativeAgents: !config.hideNativeAgents };
 		case "sidebarMode":

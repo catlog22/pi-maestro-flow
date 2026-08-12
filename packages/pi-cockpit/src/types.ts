@@ -137,6 +137,14 @@ export type ToolPaletteMode = "classic" | "family" | "readwrite" | "search" | "m
 
 export type IconMode = "auto" | "nerd" | "ascii";
 
+/**
+ * Above-editor stack projection style.
+ * - "classic": the existing Todo widget (+ separate Agent widget).
+ * - "zen": the unified borderless MISSION / WORK / ACTORS row stack
+ *   (design: pi-cockpit-zen.html); the separate Agent widget is absorbed.
+ */
+export type StackStyle = "classic" | "zen";
+
 export type SidebarMode = "auto" | "on" | "off";
 
 export type SidebarDensity = "comfortable" | "compact";
@@ -210,6 +218,8 @@ export interface CockpitConfig {
 	agentsMode: ViewMode;
 	todoMode: ViewMode;
 	todoExpanded: boolean;
+	/** Above-editor stack projection: classic Todo/Agents widgets or the unified Zen stack. */
+	stackStyle: StackStyle;
 	hideNativeAgents: boolean;
 	/** Experimental: keep the editor/footer block at the terminal bottom while the conversation is short. */
 	pinEditorBottom: boolean;
@@ -258,6 +268,7 @@ export const DEFAULT_CONFIG: CockpitConfig = {
 	agentsMode: "list",
 	todoMode: "list",
 	todoExpanded: false,
+	stackStyle: "classic",
 	hideNativeAgents: true,
 	pinEditorBottom: false,
 	doubleEscapeClearInput: false,

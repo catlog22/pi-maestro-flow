@@ -67,6 +67,7 @@ const CONFIG_KEYS = [
 	"agentsMode",
 	"todoMode",
 	"todoExpanded",
+	"stackStyle",
 	"hideNativeAgents",
 	"toolPalette",
 	"icons.mode",
@@ -155,6 +156,7 @@ const CATALOGS = {
 		"cockpit.agentsMode": "Agent display",
 		"cockpit.todoMode": "Todo display",
 		"cockpit.todoExpanded": "Todo expanded",
+		"cockpit.stackStyle": "Stack projection",
 		"cockpit.hideNativeAgents": "Hide native agent widget",
 		"cockpit.icons.mode": "Icon mode",
 		"cockpit.sidebar.mode": "Sidebar mode",
@@ -175,6 +177,7 @@ const CATALOGS = {
 		"cockpit.title.maxLength": "Title max length",
 		"cockpit.title.maxLength.description": "Hard cap on the composed tab title (the middle is ellided).",
 		"cockpit.option.classic": "Classic",
+		"cockpit.option.zen": "Zen",
 		"cockpit.option.family": "Family",
 		"cockpit.option.readwrite": "Read/Write",
 		"cockpit.option.search": "Search",
@@ -225,6 +228,7 @@ const CATALOGS = {
 		"cockpit.agentsMode": "Agent 显示",
 		"cockpit.todoMode": "Todo 显示",
 		"cockpit.todoExpanded": "展开 Todo",
+		"cockpit.stackStyle": "栈投影",
 		"cockpit.hideNativeAgents": "隐藏原生 Agent 面板",
 		"cockpit.icons.mode": "图标模式",
 		"cockpit.sidebar.mode": "侧边栏模式",
@@ -245,6 +249,7 @@ const CATALOGS = {
 		"cockpit.title.maxLength": "标题最大长度",
 		"cockpit.title.maxLength.description": "组合标签页标题的硬上限（中间省略）。",
 		"cockpit.option.classic": "经典",
+		"cockpit.option.zen": "Zen",
 		"cockpit.option.family": "族",
 		"cockpit.option.readwrite": "读写",
 		"cockpit.option.search": "搜索",
@@ -322,6 +327,7 @@ const DEFINITIONS: readonly SettingDefinition[] = [
 	enumDefinition("agentsMode", "cockpit.group.panels", 0, "cockpit.agentsMode", ["list", "compact"], "live"),
 	enumDefinition("todoMode", "cockpit.group.panels", 1, "cockpit.todoMode", ["list", "compact"], "live"),
 	booleanDefinition("todoExpanded", "cockpit.group.panels", 2, "cockpit.todoExpanded", "live"),
+	enumDefinition("stackStyle", "cockpit.group.layout", 4, "cockpit.stackStyle", ["classic", "zen"], "live"),
 	booleanDefinition("hideNativeAgents", "cockpit.group.panels", 3, "cockpit.hideNativeAgents", "live"),
 	enumDefinition("sidebar.mode", "cockpit.group.sidebar", 0, "cockpit.sidebar.mode", ["auto", "on", "off"], "live"),
 	{
@@ -688,6 +694,7 @@ function validValue(key: CockpitSettingKey, value: JsonValue): boolean {
 	if (key === "title.generationModel") return typeof value === "string";
 	if (key.startsWith("title.")) return typeof value === "boolean";
 	if (key === "quietSymbols") return value === "check" || value === "dot";
+	if (key === "stackStyle") return value === "classic" || value === "zen";
 	if (key === "toolPalette") return ["classic", "family", "readwrite", "search", "mono"].includes(String(value));
 	if (key === "agentsMode" || key === "todoMode") return value === "list" || value === "compact";
 	if (key === "icons.mode") return value === "auto" || value === "nerd" || value === "ascii";

@@ -70,6 +70,10 @@ test("Cockpit provider describes editable settings and host-owned actions", asyn
 		assert.equal(pinEditor?.descriptionKey, "cockpit.pinEditorBottom.description");
 		assert.ok(description.settings.some((setting) => setting.key === "staticMode" && setting.editor.kind === "boolean"));
 		assert.ok(description.settings.some((setting) => setting.key === "toolPalette" && setting.editor.kind === "enum"), "toolPalette now editable via the provider");
+		const stackStyle = description.settings.find((setting) => setting.key === "stackStyle");
+		assert.equal(stackStyle?.editor.kind, "enum");
+		assert.equal(stackStyle?.defaultValue, "classic");
+		assert.deepEqual(stackStyle?.editor.options?.map((option) => option.value), ["classic", "zen"]);
 		assert.ok(description.settings.some((setting) => setting.key === "sidebar.width" && setting.editor.kind === "integer"));
 		assert.equal(description.settings.some((setting) => setting.key === "theme"), false, "theme moved to the pi-native enum");
 		const keys = new Set(description.settings.flatMap((entry) => [
@@ -155,6 +159,35 @@ test("title.* and toolPalette are editable through the provider (P3 gap closure)
 		const snapshot = await provider.read({ context });
 		assert.equal(snapshot.effective.values.find((entry) => entry.key === "title.showModel")?.value, true);
 		assert.equal(snapshot.effective.values.find((entry) => entry.key === "toolPalette")?.value, "mono");
+	} finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("stackStyle persists, applies live and rejects unsupported projections", async () => {
+	const { directory, path } = tempConfig();
+	try {
+		writeFileSync(path, JSON.stringify(DEFAULT_CONFIG));
+		let applied: readonly string[] = [];
+		const state = providerAt(path, { apply: (_config, keys) => { applied = keys; } });
+		const before = await state.provider.read({ context });
+		const changes = [{ operation: "set" as const, key: "stackStyle", scope: "global" as const, value: "zen" }];
+		const prepared = await state.provider.prepare!({ context, transactionId: "tx-stack", changes, expectedRevisions: before.configured.resources });
+		assert.equal(prepared.prepared, true);
+		assert.deepEqual(prepared.activation, [{ boundary: "live", keys: ["stackStyle"] }]);
+		const committed = await state.provider.commit!({ context, transactionId: "tx-stack", prepareToken: prepared.prepareToken! });
+		await state.provider.applyRuntime!({ context, transactionId: "tx-stack", changes, snapshot: committed.snapshot });
+		assert.equal((JSON.parse(readFileSync(path, "utf8")) as { stackStyle: string }).stackStyle, "zen");
+		assert.equal(state.runtime.stackStyle, "zen");
+		assert.deepEqual(applied, ["stackStyle"]);
+
+		const current = await state.provider.read({ context });
+		const invalid = await state.provider.prepare!({
+			context,
+			transactionId: "tx-stack-invalid",
+			changes: [{ operation: "set", key: "stackStyle", scope: "global", value: "dense" }],
+			expectedRevisions: current.configured.resources,
+		});
+		assert.equal(invalid.prepared, false);
+		assert.ok(invalid.validation.issues.some((issue) => issue.key === "stackStyle"));
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

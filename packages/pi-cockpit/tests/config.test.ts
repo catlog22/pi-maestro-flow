@@ -3,6 +3,17 @@ import test from "node:test";
 import { mergeConfig, mergeConfigDocument } from "../src/config.ts";
 import { DEFAULT_CONFIG } from "../src/types.ts";
 
+test("stackStyle accepts classic or zen and serializes the active projection", () => {
+	assert.equal(DEFAULT_CONFIG.stackStyle, "classic");
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { stackStyle: "zen" }).stackStyle, "zen");
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { stackStyle: "classic" }).stackStyle, "classic");
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { stackStyle: "dense" }).stackStyle, "classic");
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { stackStyle: null }).stackStyle, "classic");
+	const document = mergeConfigDocument({ future: true }, { ...DEFAULT_CONFIG, stackStyle: "zen" });
+	assert.equal(document.stackStyle, "zen");
+	assert.equal(document.future, true);
+});
+
 test("staticMode merges as a boolean and keeps the default", () => {
 	assert.equal(DEFAULT_CONFIG.staticMode, false);
 	assert.equal(mergeConfig(DEFAULT_CONFIG, {}).staticMode, false);

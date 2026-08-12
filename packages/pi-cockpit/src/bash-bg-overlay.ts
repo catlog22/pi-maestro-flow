@@ -25,6 +25,8 @@ export interface BashBgOverlayParams {
 	close: () => void;
 	theme: Theme;
 	glyphs: IconGlyphs;
+	/** Select this job when the overlay first renders. */
+	initialJobId?: string;
 	/** Wall-clock snapshot supplied by the owner and advanced through tick(). */
 	now: number;
 	/** Live terminal height, so the card can use the space it already reserves. */
@@ -57,6 +59,7 @@ export class BashBgOverlay implements Component, Focusable {
 	constructor(private readonly params: BashBgOverlayParams) {
 		this.now = params.now;
 		this.liveTickKey = this.tickKey(params.now);
+		this.selectedId = params.initialJobId;
 	}
 
 	invalidate(): void {}

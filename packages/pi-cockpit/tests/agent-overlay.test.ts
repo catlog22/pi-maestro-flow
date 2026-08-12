@@ -38,6 +38,7 @@ function makeOverlay(
 	let renders = 0;
 	let closes = 0;
 	const selections: string[] = [];
+	const targets: string[] = [];
 	const commands: Array<{ id: string; action: "interrupt" | "steer"; message?: string }> = [];
 	const component = new AgentOverlay({
 		getAgents: () => rows,
@@ -46,6 +47,7 @@ function makeOverlay(
 			viewingId = id;
 			selections.push(id);
 		},
+		onTarget: (id) => { targets.push(id); },
 		onCommand: (id, action, message) => {
 			commands.push({ id, action, ...(message !== undefined ? { message } : {}) });
 		},
@@ -55,7 +57,7 @@ function makeOverlay(
 		glyphs: resolveGlyphs("nerd"),
 		getTerminalRows: () => terminalRows,
 	});
-	return { component, state: () => ({ renders, closes, selections, viewingId, commands }) };
+	return { component, state: () => ({ renders, closes, selections, targets, viewingId, commands }) };
 }
 
 test("Agent modal preserves hierarchy and renders the selected live stream", () => {
@@ -124,6 +126,14 @@ test("Agent modal stays width-bounded in compact, narrow and wide layouts", () =
 			assert.ok(visibleWidth(line) <= width, `${visibleWidth(line)} > ${width}`);
 		}
 	}
+});
+
+test("Agent modal m sets the selected agent as the editor input target", () => {
+	const rows = [row("worker")];
+	const { component, state } = makeOverlay(rows, "worker");
+	component.handleInput("m");
+	assert.deepEqual(state().targets, ["worker"]);
+	assert.match(component.render(100).join("\n"), /input target @worker/);
 });
 
 test("Agent modal i interrupts the selected agent and shows a transient ack", () => {

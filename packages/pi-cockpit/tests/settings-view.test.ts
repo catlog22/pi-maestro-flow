@@ -43,6 +43,18 @@ test("static mode row cycles on/off and is reachable by accel", () => {
 	assert.equal(applyRow(applyRow(DEFAULT_CONFIG, "staticMode"), "staticMode").staticMode, false);
 });
 
+test("stack style row cycles classic and zen through the unique p accelerator", () => {
+	const row = buildRows(DEFAULT_CONFIG).find((candidate) => candidate.key === "stackStyle");
+	assert.deepEqual(
+		{ value: row?.value, next: row?.next, accel: row?.accel },
+		{ value: "classic", next: "zen", accel: "p" },
+	);
+	assert.equal(rowKeyForAccel(buildRows(DEFAULT_CONFIG), "p"), "stackStyle");
+	const zen = applyRow(DEFAULT_CONFIG, "stackStyle");
+	assert.equal(zen.stackStyle, "zen");
+	assert.equal(applyRow(zen, "stackStyle").stackStyle, "classic");
+});
+
 test("pin editor bottom uses the layout accelerator", () => {
 	const row = buildRows(DEFAULT_CONFIG).find((candidate) => candidate.key === "pinEditorBottom");
 	assert.equal(row?.accel, "l");

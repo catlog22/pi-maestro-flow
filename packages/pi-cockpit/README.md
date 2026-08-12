@@ -66,6 +66,7 @@ Cockpit has no package dependency on `pi-maestro-flow`. It observes optional pro
   "agentsMode": "list",
   "todoMode": "list",
   "todoExpanded": false,
+  "stackStyle": "classic",
   "hideNativeAgents": true,
   "icons": { "mode": "auto" },
   "sidebar": {
@@ -91,6 +92,7 @@ Cockpit has no package dependency on `pi-maestro-flow`. It observes optional pro
 - `quietSymbols`: `"check"` (✓/✗/⋯) or `"dot"` (●/○/◌) lifecycle glyphs for quiet tool rows.
 - `agentsMode` / `todoMode`: `"list"` or `"compact"`.
 - `todoExpanded`: when `true`, expands the todo widget by default.
+- `stackStyle`: `"classic"` keeps the separate Todo/Agent widgets; `"zen"` projects MISSION, WORK, and ACTORS into one borderless stack. The default remains `"classic"`.
 - `hideNativeAgents`: when `true`, clears the teammate extension's own `teammate-agents` widget (it draws a similar list *below* the editor) so the two don't duplicate. On by default.
 - `sidebar.mode`: `"auto"` or `"on"` enables the dock when at least 72 main columns plus 32 sidebar columns fit; `"off"` always uses widgets.
 - `sidebar.width`: persisted dock width, rounded and clamped to `32..56`; default `40`.
@@ -114,11 +116,12 @@ The tab title is `frame + pi - <session> - <working state>`. The session part fo
 - `/cockpit` — opens the settings overlay.
 - `/maestro-settings` — opens the unified settings shell (Cockpit, Flow, Teammate and integrations).
 - `Alt+J` — opens the background Bash jobs overlay (live status, command, cwd, duration, output tail).
+- `Alt+L` — browses the visible Cockpit surface. In Zen widget mode, arrows or `j/k` select rows, first Enter expands inline details, second Enter opens the entity sheet/overlay, and Esc steps back. In the Agent overlay, `m` makes the selected agent the editor input target.
 - `/cockpit sidebar` — reports the current sidebar mode, width, and density.
 - `/cockpit sidebar auto|on|off` — selects dock behavior.
 - `/cockpit sidebar resize` or `Ctrl+Shift+R` — enters temporary Resize mode. Left/Right adjusts one column, Shift+Left/Shift+Right adjusts four, Enter accepts, and Escape rolls back. Mouse reporting is active only during Resize mode.
 - `/cockpit quiet` — toggles quiet mode; `/cockpit bg` shows background jobs.
-- `/theme` — switch theme with live preview; `/theme <name>` applies directly. Pi ships no standalone theme command; cockpit provides one.
+- `/theme` — switch theme with live preview; `/theme <name>` applies directly. `cockpit-zen` is the restrained warm-gold theme designed for the Zen stack; selecting it does not change `stackStyle`. Pi ships no standalone theme command; cockpit provides one.
 
 ## Sidebar compatibility
 
