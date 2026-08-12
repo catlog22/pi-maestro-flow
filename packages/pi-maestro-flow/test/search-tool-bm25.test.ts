@@ -79,36 +79,47 @@ test("search tool does not activate inactive tools outside its deferred pool", a
   assert.deepEqual(active, ["todo"]);
 });
 
-test("registered search defers once, stays sticky across reload, and consumes activation eligibility", async () => {
+test("registered search preserves consumed and pending eligibility across extension reload", async () => {
   let active = ["todo", "browser", "lsp"];
-  let registered: ReturnType<typeof createSearchToolBm25> | undefined;
-  let sessionStart: ((event: { reason?: string }) => void) | undefined;
-  const api = {
-    registerTool(tool: ReturnType<typeof createSearchToolBm25>) { registered = tool; },
-    on(event: string, handler: (event: { reason?: string }) => void) {
-      if (event === "session_start") sessionStart = handler;
-    },
-    getAllTools: () => tools,
-    getActiveTools: () => active,
-    setActiveTools: (names: string[]) => { active = names; },
+  const sessionManager = { getSessionId: () => "tool-search-session" };
+  const createApi = () => {
+    let registered: ReturnType<typeof createSearchToolBm25> | undefined;
+    const handlers = new Map<string, (event: { reason?: string }, ctx: unknown) => void>();
+    const api = {
+      registerTool(tool: ReturnType<typeof createSearchToolBm25>) { registered = tool; },
+      on(event: string, handler: (event: { reason?: string }, ctx: unknown) => void) { handlers.set(event, handler); },
+      getAllTools: () => tools,
+      getActiveTools: () => active,
+      setActiveTools: (names: string[]) => { active = names; },
+    };
+    registerSearchToolBm25(api as never);
+    return { get tool() { return registered!; }, handlers };
   };
+  const ctx = { sessionManager };
 
-  registerSearchToolBm25(api as never);
-  sessionStart?.({ reason: "new" });
+  const firstExtension = createApi();
+  firstExtension.handlers.get("session_start")?.({ reason: "new" }, ctx);
   assert.deepEqual(active, ["todo"]);
 
-  const first = await registered!.execute("call-4", { query: "browser screenshot", limit: 1 }, undefined, undefined, {} as never);
+  const first = await firstExtension.tool.execute("call-4", { query: "browser screenshot", limit: 1 }, undefined, undefined, {} as never);
   assert.deepEqual(first.details?.activated_tools, ["browser"]);
   assert.deepEqual(active, ["todo", "browser"]);
 
   active = ["todo"];
-  const afterUserDisable = await registered!.execute("call-5", { query: "browser screenshot", limit: 1 }, undefined, undefined, {} as never);
+  const afterUserDisable = await firstExtension.tool.execute("call-5", { query: "browser screenshot", limit: 1 }, undefined, undefined, {} as never);
   assert.deepEqual(afterUserDisable.details?.activated_tools, []);
   assert.deepEqual(active, ["todo"], "search must not override a later user disable");
 
-  active = ["todo", "lsp"];
-  sessionStart?.({ reason: "reload" });
-  assert.deepEqual(active, ["todo", "lsp"], "reload preserves tools already activated in the session");
+  firstExtension.handlers.get("session_shutdown")?.({ reason: "reload" }, ctx);
+  const reloadedExtension = createApi();
+  reloadedExtension.handlers.get("session_start")?.({ reason: "reload" }, ctx);
+  assert.deepEqual(active, ["todo"], "reload does not re-defer or reactivate consumed tools");
+
+  const pending = await reloadedExtension.tool.execute("call-6", { query: "diagnostics file", limit: 1 }, undefined, undefined, {} as never);
+  assert.deepEqual(pending.details?.activated_tools, ["lsp"], "unconsumed eligibility survives reload");
+  assert.deepEqual(active, ["todo", "lsp"]);
+
+  reloadedExtension.handlers.get("session_shutdown")?.({ reason: "quit" }, ctx);
 });
 
 test("search tool reports empty queries as stable tool errors", async () => {
