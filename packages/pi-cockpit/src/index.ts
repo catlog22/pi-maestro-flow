@@ -922,7 +922,7 @@ export default function (pi: ExtensionAPI): void {
 	const installClaudeEditor = (ctx: ExtensionContext): void => {
 		if (!config.doubleEscapeClearInput && !config.fullscreenInput && !config.historyEnabled) return;
 		sessionTheme = ctx.ui.theme;
-		ensureHistoryStore(ctx);
+		if (config.historyEnabled) ensureHistoryStore(ctx);
 		const current = ctx.ui.getEditorComponent();
 		if (isCockpitClaudeEditorFactory(current)) {
 			// Our own factory is already in pi's editor slot — it survives a resume
@@ -950,8 +950,8 @@ export default function (pi: ExtensionAPI): void {
 			doubleEscapeClearInput: config.doubleEscapeClearInput,
 			emitEditorMarkers: config.fullscreenInput,
 			isBusy: () => running || Boolean(activeSettingsOverlay),
-			getEntries: () => historyStore?.list() ?? [],
-			record: (text) => historyStore?.record(text),
+			getEntries: config.historyEnabled ? () => historyStore?.list() ?? [] : undefined,
+			record: config.historyEnabled ? (text) => historyStore?.record(text) : undefined,
 			getRouteTarget: () => editorRouteTarget,
 			onEditor: (editor) => {
 				activeClaudeEditor = editor;

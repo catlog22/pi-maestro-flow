@@ -267,16 +267,21 @@ test("interaction settings describe with defaults off and complete bilingual key
 			assert.equal(setting.defaultValue, false);
 			assert.ok(setting.descriptionKey);
 		}
+		const history = description.settings.find((candidate) => candidate.key === "historyEnabled");
+		assert.ok(history, "historyEnabled must be described");
+		assert.equal(history.editor.kind, "boolean");
+		assert.equal(history.defaultValue, true, "history is on by default");
 		const activationByKey = new Map(description.settings.map((setting) => [setting.key, setting.activation]));
 		assert.equal(activationByKey.get("doubleEscapeClearInput"), "extension-reload");
 		assert.equal(activationByKey.get("fullscreenInput"), "extension-reload");
 		assert.equal(activationByKey.get("copyOnSelect"), "live");
+		assert.equal(activationByKey.get("historyEnabled"), "extension-reload");
 		// Interaction matrix: the legacy pin option stays live and normal-mode only;
 		// all four defaults are off.
 		assert.equal(activationByKey.get("pinEditorBottom"), "live");
 		assert.equal(description.settings.find((s) => s.key === "pinEditorBottom")?.defaultValue, false);
-		const labelKeys = ["cockpit.doubleEscapeClearInput", "cockpit.fullscreenInput", "cockpit.copyOnSelect"];
-		const descriptionKeys = ["cockpit.doubleEscapeClearInput.description", "cockpit.fullscreenInput.description", "cockpit.copyOnSelect.description"];
+		const labelKeys = ["cockpit.doubleEscapeClearInput", "cockpit.fullscreenInput", "cockpit.copyOnSelect", "cockpit.historyEnabled"];
+		const descriptionKeys = ["cockpit.doubleEscapeClearInput.description", "cockpit.fullscreenInput.description", "cockpit.copyOnSelect.description", "cockpit.historyEnabled.description"];
 		for (const locale of ["en", "zh-CN"] as const) {
 			const catalog = description.catalogs?.[locale];
 			assert.ok(catalog);
@@ -286,6 +291,7 @@ test("interaction settings describe with defaults off and complete bilingual key
 		for (const key of ["doubleEscapeClearInput", "fullscreenInput", "copyOnSelect"]) {
 			assert.equal(snapshot.effective.values.find((value) => value.key === key)?.value, false);
 		}
+		assert.equal(snapshot.effective.values.find((value) => value.key === "historyEnabled")?.value, true);
 	} finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -301,12 +307,13 @@ test("fullscreen/double-escape changes are persisted but reported reload-require
 				{ operation: "set", key: "fullscreenInput", scope: "global", value: true },
 				{ operation: "set", key: "doubleEscapeClearInput", scope: "global", value: true },
 				{ operation: "set", key: "copyOnSelect", scope: "global", value: true },
+				{ operation: "set", key: "historyEnabled", scope: "global", value: true },
 			],
 			expectedRevisions: before.configured.resources,
 		});
 		assert.deepEqual(prepared.activation, [
 			{ boundary: "live", keys: ["copyOnSelect"] },
-			{ boundary: "extension-reload", keys: ["fullscreenInput", "doubleEscapeClearInput"], messageKey: "cockpit.runtime.reloadInteractions" },
+			{ boundary: "extension-reload", keys: ["fullscreenInput", "doubleEscapeClearInput", "historyEnabled"], messageKey: "cockpit.runtime.reloadInteractions" },
 		]);
 		await provider.abort!({ context, transactionId: "tx-interactions", prepareToken: prepared.prepareToken! });
 	} finally { rmSync(directory, { recursive: true, force: true }); }
