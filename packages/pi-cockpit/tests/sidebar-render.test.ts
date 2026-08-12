@@ -133,6 +133,23 @@ test("static mode hides live durations without trailing separators but keeps fro
 	assert.match(lines.find((line) => line.includes("npm run lint"))!, /5s/, "frozen duration on a completed job survives");
 });
 
+test("expert Leader rows carry the strategy marker in the sidebar", () => {
+	const lines = render({
+		agents: [{
+			correlationId: "leader-1",
+			agent: "workflow",
+			name: "expert-leader",
+			role: "workflow",
+			task: "expert-leader",
+			status: "running",
+			tail: "coordinating",
+			startedAt: 1_000,
+			lastActivityAt: 2_000,
+		}],
+	});
+	assert.match(lines.find((line) => line.includes("expert-leader"))!, /◆ expert/);
+});
+
 test("renders all non-empty read-only sections with one full-height left divider", () => {
 	const lines = render({ config: { ...DEFAULT_CONFIG, icons: { mode: "nerd" } } });
 	const text = lines.join("\n");

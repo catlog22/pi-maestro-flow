@@ -9,7 +9,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
-import { effectiveAgentStatus, type AgentDisplayStatus } from "./agents-store.ts";
+import { effectiveAgentStatus, isExpertLeader, type AgentDisplayStatus } from "./agents-store.ts";
 import { scrollBy, type AgentScrollState } from "./agent-scroll.ts";
 import type { IconGlyphs } from "./icons.ts";
 import { visibleStart } from "./layout.ts";
@@ -444,8 +444,11 @@ export class AgentOverlay implements Component, Focusable {
 			const visual = agentVisual(status, this.params.glyphs);
 			const marker = row.correlationId === this.selectedId ? this.params.glyphs.selectMarker : " ";
 			const task = row.task ? ` · ${row.task}` : "";
+			const expertTag = isExpertLeader(row)
+				? `${this.params.theme.fg("accent", tuiT("widget.agent.expert"))} `
+				: "";
 			return fit(
-				`${prefix}${marker} ${this.params.theme.fg(visual.color, visual.glyph)} ${this.params.theme.bold(agentLabel(row))}${task}`,
+				`${prefix}${marker} ${this.params.theme.fg(visual.color, visual.glyph)} ${expertTag}${this.params.theme.bold(agentLabel(row))}${task}`,
 				width,
 			);
 		});

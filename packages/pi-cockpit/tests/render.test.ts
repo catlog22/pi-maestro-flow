@@ -482,3 +482,32 @@ test("renderTodos clips long CJK, emoji, actor and dependency content", () => {
 test("renderTodos empty yields no lines", () => {
 	assert.deepEqual(renderTodos([], "list", 80, theme, utils, opts), []);
 });
+
+test("renderAgents list marks the expert Leader row and leaves ordinary rows unmarked", () => {
+	const leader = agent({
+		agent: "workflow",
+		name: "expert-leader",
+		role: "workflow",
+		task: "expert-leader",
+		tail: "Audit the boundary",
+	});
+	const lines = renderAgents([leader, agent({ correlationId: "zz" })], "list", 160, theme, utils, opts);
+	const leaderLine = lines.find((line) => line.includes("expert-leader"))!;
+	assert.match(leaderLine, /◆ expert/);
+	const ordinaryLine = lines.find((line) => line.includes("map auth"))!;
+	assert.doesNotMatch(ordinaryLine, /expert/);
+	for (const line of lines) assert.ok(utils.measure(line) <= 160);
+});
+
+test("renderAgents compact replaces the Leader role with the expert marker", () => {
+	const leader = agent({
+		agent: "workflow",
+		name: "expert-leader",
+		role: "workflow",
+		task: "expert-leader",
+		tail: "Audit the boundary",
+	});
+	const line = renderAgents([leader], "compact", 160, theme, utils, opts)[0];
+	assert.match(line, /◆ expert: Audit the boundary/);
+	assert.doesNotMatch(line, /workflow/);
+});

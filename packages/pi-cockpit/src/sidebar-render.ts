@@ -1,6 +1,6 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { effectiveAgentStatus } from "./agents-store.ts";
+import { effectiveAgentStatus, isExpertLeader } from "./agents-store.ts";
 import { sanitizeExtensionStatusText } from "./extension-status.ts";
 import { resolveGlyphs, type IconGlyphs, type IconMode } from "./icons.ts";
 import { composeByPriority, type PriorityGroup } from "./layout.ts";
@@ -231,6 +231,9 @@ function agentRows(
 	return [theme.fg("muted", summary), ...visible.map((row) => {
 		const displayStatus = effectiveAgentStatus(row, now);
 		const label = clean(row.name) || clean(row.role) || clean(row.agent) || "agent";
+		const expertTag = isExpertLeader(row)
+			? theme.fg("accent", tuiT("widget.agent.expert")) + glyphs.separator
+			: "";
 		const task = clean(row.task);
 		const live = displayStatus === "running" || displayStatus === "retrying";
 		const elapsed = hideLiveDuration && live ? "" : formatDuration((row.finishedAt ?? now) - row.startedAt);
@@ -256,7 +259,7 @@ function agentRows(
 				})
 				: row.tokens !== undefined ? tuiT("widget.agent.tokens", { count: formatAgentMetric(row.tokens) }) : "",
 		].filter(Boolean).join(glyphs.separator);
-		let line = `${paintedStatus(displayStatus, theme, glyphs)}${glyphs.separator}${theme.fg("syntaxFunction", label)}`
+		let line = `${paintedStatus(displayStatus, theme, glyphs)}${glyphs.separator}${expertTag}${theme.fg("syntaxFunction", label)}`
 			// Action before task: on a narrow dock the whole row is truncated, and a
 			// long task must not squeeze out the error/phase/tool a user needs to
 			// respond to (SB-5).

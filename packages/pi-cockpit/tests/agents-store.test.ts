@@ -1,7 +1,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS, TEAMMATE_STALL_TIMEOUT_MS } from "pi-maestro-teammate/v1/types";
-import { AgentsStore, AGENT_LINGER_MS, COMPLETED_TOMBSTONE_MS, FAILED_LINGER_MS, SESSION_CONTENT_MAX, SLEEPING_LINGER_MS, TERMINATED_LINGER_MS, effectiveAgentStatus, mapAgentStatus } from "../src/agents-store.ts";
+import { AgentsStore, AGENT_LINGER_MS, COMPLETED_TOMBSTONE_MS, FAILED_LINGER_MS, SESSION_CONTENT_MAX, SLEEPING_LINGER_MS, TERMINATED_LINGER_MS, effectiveAgentStatus, isExpertLeader, mapAgentStatus } from "../src/agents-store.ts";
+import { EXPERT_LEADER_NAME } from "../src/types.ts";
+
+test("expert leader name literal matches the teammate extension constant", () => {
+	// Cross-extension identity shared with pi-maestro-teammate's
+	// EXPERT_MODE_LEADER_NAME; a rename must update both literals.
+	assert.equal(EXPERT_LEADER_NAME, "expert-leader");
+
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "leader", agent: "workflow", name: EXPERT_LEADER_NAME }, 1);
+	assert.equal(isExpertLeader(s.snapshot()[0]), true);
+	s.applyStarted({ correlationId: "plain", agent: "explorer", name: "scan" }, 2);
+	assert.equal(isExpertLeader(s.snapshot().find((entry) => entry.correlationId === "plain")!), false);
+});
 
 test("started adds a running row with derived role and label", () => {
 	const s = new AgentsStore();

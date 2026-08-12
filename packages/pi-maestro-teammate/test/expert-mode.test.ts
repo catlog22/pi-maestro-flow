@@ -23,6 +23,11 @@ test("default mode leaves the dispatch unchanged", () => {
   assert.equal(prepareTeammateMode(params), params);
 });
 
+test("expert leader name literal stays the cockpit-facing identity", () => {
+  // Cockpit's EXPERT_LEADER_NAME pins this literal; a rename must update both.
+  assert.equal(EXPERT_MODE_LEADER_NAME, "expert-leader");
+});
+
 test("expert mode prepares one workflow Leader with a nested-dispatch budget", () => {
   const params: RunTeammateParams = {
     mode: "expert",

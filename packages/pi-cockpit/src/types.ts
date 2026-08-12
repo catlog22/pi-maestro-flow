@@ -23,6 +23,13 @@ export const AGENT_WIDGET_KEY = "cockpit-agents";
 
 // todo tool name registered by pi-maestro-flow (src/extension/index.ts:594).
 export const TODO_TOOL_NAME = "todo";
+
+// Role name the teammate extension gives the workflow Leader when a dispatch
+// runs in expert mode (pi-maestro-teammate EXPERT_MODE_LEADER_NAME). The name
+// travels in every started/message/progress event, so the projection can mark
+// the Leader row without a new event field; tests pin both literals so a
+// rename cannot drift silently.
+export const EXPERT_LEADER_NAME = "expert-leader";
 // appendEntry customType the todo tool persists after every mutation (tools/todo.ts:145).
 export const TODO_STATE_ENTRY_TYPE = "todo-state";
 

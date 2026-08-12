@@ -5,7 +5,7 @@ import type {
 } from "pi-maestro-teammate/v1/events";
 import type { AgentProgressSnapshot } from "pi-maestro-teammate/v1/types";
 import { sanitizeExtensionStatusText } from "./extension-status.ts";
-import type { AgentRow, AgentStatus } from "./types.ts";
+import { EXPERT_LEADER_NAME, type AgentRow, type AgentStatus } from "./types.ts";
 
 const STATUS_TEXT_MAX = 48;
 const TEAMMATE_STALL_TIMEOUT_MS = 30_000;
@@ -97,6 +97,16 @@ export const COMPLETED_TOMBSTONE_MS = 120_000;
 function deriveRole(agent: string | undefined, name: string | undefined): string {
 	if (agent && !agent.startsWith("graph(")) return clean(agent);
 	return clean(name) || "agent";
+}
+
+/**
+ * True when the row is the workflow Leader of an expert-mode dispatch
+ * (pi-maestro-teammate EXPERT_MODE_LEADER_NAME). The Leader keeps the same
+ * tree + dependency-arrow presentation as parallel/DAG runs; this only adds
+ * its strategy marker.
+ */
+export function isExpertLeader(row: { name: string | undefined }): boolean {
+	return row.name === EXPERT_LEADER_NAME;
 }
 
 export function mapAgentStatus(status: unknown): AgentStatus {

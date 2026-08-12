@@ -72,6 +72,20 @@ test("Agent modal preserves hierarchy and renders the selected live stream", () 
 	assert.match(text, /PgUp\/PgDn scroll output/);
 });
 
+test("Agent modal marks the expert Leader row", () => {
+	const { component } = makeOverlay([
+		row("leader", {
+			agent: "workflow",
+			name: "expert-leader",
+			role: "workflow",
+			task: "expert-leader",
+			tail: "coordinating evidence",
+		}),
+	], "leader");
+	const text = component.render(120).join("\n");
+	assert.match(text, /◆ expert @expert-leader/);
+});
+
 test("Agent modal rereads the same store snapshot on every stream repaint", () => {
 	const rows = [row("worker", { tail: "initial stream" })];
 	const { component } = makeOverlay(rows, "worker");
