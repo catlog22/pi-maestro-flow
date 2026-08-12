@@ -659,9 +659,19 @@ test("teammate tool_result persistence backfills graph task names from progress"
         // Unrelated tool_result hooks may require their subsystem's full ctx.
       }
     }
-    await new Promise((resolve) => setTimeout(resolve, 20));
-
-    const record = await readAgentOutput("flow-graph-task", root);
+    // Persistence is fire-and-forget inside the hook; wait elastically for the
+    // record instead of racing a fixed sleep against the loaded event loop.
+    const deadline = Date.now() + 5_000;
+    let record: Awaited<ReturnType<typeof readAgentOutput>> | undefined;
+    for (;;) {
+      try {
+        record = await readAgentOutput("flow-graph-task", root);
+        break;
+      } catch (error) {
+        if (Date.now() >= deadline) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
     assert.equal(record.correlationId, "flow-capture-cid");
     assert.deepEqual(record.output, { ok: true });
   } finally {
