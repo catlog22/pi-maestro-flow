@@ -77,9 +77,19 @@
 - 并发写保护：`SessionStoreLock` workspace 级锁（`store.ts:241`，Windows 重试）。
 - 链式推进：continuation/`next` 分配下一 Run；host 所有权由 **lease** 管理（`pi-maestro-flow/src/session/coordinator.ts:96,247,418`：epoch claim 文件 + 10s 心跳 + 30s stale，落 `.workflow/tmp/hook/<sid>.lease/`）。
 
-### 2.3 目标态对执行平面的唯一改动
+### 2.3 执行平面迁移决策（2026-08）
 
-`sealSession` 事务尾部**增加 session 级 reconciliation receipt 刷新**（失败不阻断 seal，但使 promote fail-closed 直到 `review --refresh` 补齐）。其余生命周期、状态机、链式推进、lease 语义一律不动。
+原“Session 生命周期、状态机与 lease 语义不动”的假设已被后续架构评审取代。长期 topic/intent Session 不能以一次执行结束作为永久封存时机；目标模型改为：
+
+- **Session**：长期身份与索引，不以 `running/paused/sealed/failed` 作为最终权威；
+- **Execution/Generation**：一次有界 Workflow，承载 chain、gates、active Run、lease、pause/resume/seal；
+- **Run**：一次不可变执行尝试，sealed 后拒绝修改；
+- **Lease**：由 Maestro core 按 `(session_id, execution_id)` 提供唯一单写者权威，Pi 插件只做宿主 acquire/heartbeat/handoff adapter；
+- **知识与 recall**：以 sealed Run、sealed Execution snapshot 和 revision/hash receipt 证明输入不可变，不要求长期 Session 永久 sealed。
+
+迁移必须按 `docs/session-execution-generation-migration-plan.md` 分阶段执行：先增加 Execution identity、versioned wire schema、core lease 与兼容投影，再迁移知识/recall，最后在 CLI/插件 capability 门全部满足后删除 Session status 权威。兼容期继续读取 `session/1.0-1.3`、`command-run/1.0-1.3` 和 `run-response/1.0`，禁止在 strict 旧 schema 中直接注入新字段。
+
+`sealSession` 的现有 session reconciliation receipt 行为在兼容期保留；目标态由 Execution seal 生成 execution snapshot/receipt，session-source candidate 使用 candidate version + evidence/revision/corpus receipt 门禁。promotion 仍是独立治理动作，不因任何 seal 自动执行。
 
 ---
 
