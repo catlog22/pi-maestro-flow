@@ -8,6 +8,8 @@ const {
   MAX_AGENT_FILES,
   persistAgentOutput,
   persistAgentOutputChecked,
+  getAgentOutputStoreUsage,
+  deleteAgentOutput,
   readAgentOutput,
   resolveAgentOutput,
   getAgentOutputPath,
@@ -191,11 +193,11 @@ test("publication records remain immutable while correlation id resolves the lat
   const workspace = join(root, "publication-workspace");
   assert.equal(
     await persistAgentOutputChecked("versioned-agent", "versioned", "general", { turn: 1 }, workspace, "publication-turn-1"),
-    true,
+    "stored",
   );
   assert.equal(
     await persistAgentOutputChecked("versioned-agent", "versioned", "general", { turn: 2 }, workspace, "publication-turn-2"),
-    true,
+    "stored",
   );
 
   assert.deepEqual((await readAgentOutput("publication-turn-1", workspace)).output, { turn: 1 });
@@ -236,7 +238,7 @@ test("pending alias falls back to the prior turn and retry completes publication
       workspace,
       "interrupted-publication-2",
     ),
-    true,
+    "stored",
   );
   assert.deepEqual((await readAgentOutput("interrupted-agent", workspace)).output, { turn: 2 });
   assert.deepEqual((await readAgentOutput("interrupted-publication-1", workspace)).output, { turn: 1 });
@@ -268,7 +270,7 @@ test("superseding an unresolved alias preserves the last readable fallback", asy
       workspace,
       "repeated-interruption-publication-3",
     ),
-    true,
+    "stored",
   );
   await unlink(join(bucket, "repeated-interruption-publication-3.json"));
   assert.deepEqual((await readAgentOutput("repeated-interruption-agent", workspace)).output, { turn: 1 });
@@ -324,6 +326,43 @@ test("global aliases reject traversal and correlation mismatches", async () => {
   await assert.rejects(() => readAgentOutput("probe", workspace), /No persisted teammate output/);
 });
 
+test("usage lists current-workspace records and deletion repairs the latest alias", async () => {
+  const workspace = join(root, "managed-output-workspace");
+  await persistAgentOutputChecked(
+    "managed-agent",
+    "managed-task",
+    "general",
+    { turn: 1 },
+    workspace,
+    "managed-publication-1",
+  );
+  await persistAgentOutputChecked(
+    "managed-agent",
+    "managed-task",
+    "general",
+    { turn: 2 },
+    workspace,
+    "managed-publication-2",
+  );
+
+  const usage = await getAgentOutputStoreUsage(workspace);
+  assert.equal(usage.records, 2);
+  assert.equal(usage.maxRecords, MAX_AGENT_FILES);
+  assert.ok(usage.totalBytes > 0);
+  assert.deepEqual(usage.entries.map((entry) => entry.id), [
+    "managed-publication-2",
+    "managed-publication-1",
+  ]);
+  assert.equal(usage.entries[0]?.name, "managed-task");
+  assert.equal(usage.entries[0]?.preview, '{"turn":2}');
+
+  assert.equal(await deleteAgentOutput("managed-publication-2", workspace), true);
+  assert.deepEqual((await readAgentOutput("managed-agent", workspace)).output, { turn: 1 });
+  assert.equal((await getAgentOutputStoreUsage(workspace)).records, 1);
+  assert.equal(await deleteAgentOutput("managed-publication-2", workspace), false);
+  assert.equal(await deleteAgentOutput("../outside", workspace), false);
+});
+
 test("capacity rejects new publications without evicting acknowledged records", async () => {
   const workspace = join(root, "capacity-workspace");
   for (let index = 0; index < MAX_AGENT_FILES; index += 1) {
@@ -336,7 +375,7 @@ test("capacity rejects new publications without evicting acknowledged records", 
         workspace,
         `capacity-publication-${index}`,
       ),
-      true,
+      "stored",
     );
   }
 
@@ -349,7 +388,7 @@ test("capacity rejects new publications without evicting acknowledged records", 
       workspace,
       `capacity-publication-${MAX_AGENT_FILES}`,
     ),
-    false,
+    "skipped-capacity",
   );
   assert.deepEqual((await readAgentOutput("capacity-publication-0", workspace)).output, { index: 0 });
   assert.deepEqual((await readAgentOutput("capacity-agent", workspace)).output, { index: MAX_AGENT_FILES - 1 });
@@ -482,7 +521,7 @@ test("readAgentOutput does not follow a linked record file", async (t) => {
 test("persistAgentOutput skips non-serializable or oversized outputs", async () => {
   assert.equal(
     await persistAgentOutputChecked("run-abc-3", "big", undefined, { data: "x".repeat(600_000) }, root),
-    false,
+    "skipped-invalid",
   );
   await assert.rejects(
     () => readAgentOutput("run-abc-3", root),
@@ -493,7 +532,7 @@ test("persistAgentOutput skips non-serializable or oversized outputs", async () 
   cyclic.self = cyclic;
   assert.equal(
     await persistAgentOutputChecked("run-abc-4", "cyclic", undefined, cyclic, root),
-    false,
+    "skipped-invalid",
   );
   await assert.rejects(
     () => readAgentOutput("run-abc-4", root),

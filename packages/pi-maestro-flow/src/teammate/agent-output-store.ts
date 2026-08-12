@@ -67,6 +67,24 @@ export interface AgentOutputMatch {
   preview: string;
 }
 
+export interface AgentOutputStoreEntry {
+  id: string;
+  correlationId: string;
+  publicationId?: string;
+  name?: string;
+  agent?: string;
+  capturedAt: string;
+  sizeBytes: number;
+  preview: string;
+}
+
+export interface AgentOutputStoreUsage {
+  records: number;
+  maxRecords: number;
+  totalBytes: number;
+  entries: AgentOutputStoreEntry[];
+}
+
 export type AgentOutputResolution =
   | { kind: "record"; record: AgentOutputRecord }
   | { kind: "ambiguous"; name: string; matches: AgentOutputMatch[] };
@@ -248,6 +266,67 @@ async function canonicalRecordCount(dir: string): Promise<number> {
   return entries.filter((entry) => entry.isFile() && isCanonicalRecordName(entry.name)).length;
 }
 
+async function listCanonicalRecords(dir: string): Promise<AgentOutputStoreEntry[]> {
+  const names = (await readdir(dir, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && isCanonicalRecordName(entry.name))
+    .map((entry) => entry.name);
+  const entries: AgentOutputStoreEntry[] = [];
+  for (const fileName of names) {
+    const filePath = join(dir, fileName);
+    const [record, info] = await Promise.all([loadRecord(filePath), lstat(filePath)]);
+    if (!record || info.isSymbolicLink() || !info.isFile()) continue;
+    entries.push({
+      id: record.publicationId ?? record.correlationId,
+      correlationId: record.correlationId,
+      ...(record.publicationId ? { publicationId: record.publicationId } : {}),
+      ...(record.name ? { name: record.name } : {}),
+      ...(record.agent ? { agent: record.agent } : {}),
+      capturedAt: record.capturedAt,
+      sizeBytes: info.size,
+      preview: outputPreview(record.output),
+    });
+  }
+  entries.sort((a, b) => b.capturedAt.localeCompare(a.capturedAt) || b.id.localeCompare(a.id));
+  return entries;
+}
+
+async function repairAliasesAfterDeletion(dir: string, deletedId: string): Promise<void> {
+  const aliases = (await readdir(dir, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && entry.name.endsWith(ALIAS_SUFFIX))
+    .map((entry) => entry.name);
+  for (const fileName of aliases) {
+    const correlationId = fileName.slice(0, -ALIAS_SUFFIX.length);
+    const filePath = join(dir, fileName);
+    const alias = await loadAlias(filePath, correlationId);
+    if (!alias) continue;
+    if (alias.publicationId === deletedId) {
+      if (alias.fallbackPublicationId) {
+        const fallback = await loadRecord(recordFile(dir, alias.fallbackPublicationId));
+        if (fallback?.publicationId === alias.fallbackPublicationId
+          && fallback.correlationId === correlationId) {
+          await writePrivateFile(filePath, JSON.stringify({
+            kind: "agent-output-alias",
+            correlationId,
+            publicationId: alias.fallbackPublicationId,
+          } satisfies AgentOutputAlias));
+          continue;
+        }
+      }
+      await unlink(filePath).catch((error) => {
+        if (fileErrorCode(error) !== "ENOENT") throw error;
+      });
+      continue;
+    }
+    if (alias.fallbackPublicationId === deletedId) {
+      await writePrivateFile(filePath, JSON.stringify({
+        kind: "agent-output-alias",
+        correlationId,
+        publicationId: alias.publicationId,
+      } satisfies AgentOutputAlias));
+    }
+  }
+}
+
 async function persistAgentOutputNow(
   correlationId: string,
   name: string | undefined,
@@ -255,7 +334,7 @@ async function persistAgentOutputNow(
   output: unknown,
   cwd: string,
   publicationId?: string,
-): Promise<boolean> {
+): Promise<AgentOutputPersistOutcome> {
   const dir = await prepareBucketDir(cwd);
   const release = await lockSettingsResource(join(dir, ".agent-output-store"));
   try {
@@ -273,10 +352,10 @@ async function persistAgentOutputNow(
           publicationId,
         } satisfies AgentOutputAlias));
       }
-      return true;
+      return "stored";
     }
     if (existing === undefined && await canonicalRecordCount(dir) >= MAX_AGENT_FILES) {
-      return false;
+      return "skipped-capacity";
     }
 
     const content = JSON.stringify({
@@ -302,11 +381,19 @@ async function persistAgentOutputNow(
     } else {
       await writePrivateFile(filePath, content);
     }
-    return true;
+    return "stored";
   } finally {
     await release();
   }
 }
+
+/**
+ * Why a persist attempt did not store a record. "skipped-capacity" means the
+ * workspace bucket is full (MAX_AGENT_FILES canonical records) — an operational
+ * condition callers should surface; "skipped-invalid" covers unserializable,
+ * oversized, or malformed inputs.
+ */
+export type AgentOutputPersistOutcome = "stored" | "skipped-capacity" | "skipped-invalid";
 
 /** Queue one validated record write and report whether it was accepted. */
 function enqueueAgentOutput(
@@ -316,10 +403,10 @@ function enqueueAgentOutput(
   output: unknown,
   cwd: string,
   publicationId?: string,
-): Promise<boolean> {
-  if (!isRecordId(correlationId) || output === undefined) return Promise.resolve(false);
-  if (publicationId !== undefined && !isRecordId(publicationId)) return Promise.resolve(false);
-  if (safeStringify(output) === null) return Promise.resolve(false);
+): Promise<AgentOutputPersistOutcome> {
+  if (!isRecordId(correlationId) || output === undefined) return Promise.resolve("skipped-invalid");
+  if (publicationId !== undefined && !isRecordId(publicationId)) return Promise.resolve("skipped-invalid");
+  if (safeStringify(output) === null) return Promise.resolve("skipped-invalid");
 
   const key = resolve(cwd);
   const previous = pendingWrites.get(key) ?? Promise.resolve();
@@ -353,8 +440,48 @@ export function persistAgentOutputChecked(
   output: unknown,
   cwd: string,
   publicationId?: string,
-): Promise<boolean> {
+): Promise<AgentOutputPersistOutcome> {
   return enqueueAgentOutput(correlationId, name, agent, output, cwd, publicationId);
+}
+
+/** Report current-workspace occupancy and records without exposing other workspace buckets. */
+export async function getAgentOutputStoreUsage(cwd: string): Promise<AgentOutputStoreUsage> {
+  const dir = await prepareBucketDir(cwd);
+  const entries = await listCanonicalRecords(dir);
+  return {
+    records: entries.length,
+    maxRecords: MAX_AGENT_FILES,
+    totalBytes: entries.reduce((total, entry) => total + entry.sizeBytes, 0),
+    entries,
+  };
+}
+
+/** Delete one canonical record from the current workspace and repair any latest alias that referenced it. */
+export async function deleteAgentOutput(id: string, cwd: string): Promise<boolean> {
+  if (!isRecordId(id)) return false;
+  const dir = await prepareBucketDir(cwd);
+  const release = await lockSettingsResource(join(dir, ".agent-output-store"));
+  try {
+    const filePath = recordFile(dir, id);
+    const info = await lstat(filePath).catch((error) => {
+      if (fileErrorCode(error) === "ENOENT") return undefined;
+      throw error;
+    });
+    if (!info) return false;
+    if (info.isSymbolicLink() || !info.isFile()) {
+      throw new Error(`Agent output path must be a regular file: ${filePath}`);
+    }
+    const record = await loadRecord(filePath);
+    if (!record) return false;
+    if (record.publicationId !== undefined ? record.publicationId !== id : record.correlationId !== id) {
+      return false;
+    }
+    await unlink(filePath);
+    await repairAliasesAfterDeletion(dir, id);
+    return true;
+  } finally {
+    await release();
+  }
 }
 
 function parseRecord(text: string): AgentOutputRecord | null {

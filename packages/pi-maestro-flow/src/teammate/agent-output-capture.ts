@@ -70,6 +70,8 @@ export interface PersistStructuredResultsSummary {
   stored: number;
   skipped: number;
   failed: number;
+  /** Skips caused by the workspace bucket being full (MAX_AGENT_FILES); an operational signal, not bad input. */
+  capacity: number;
 }
 
 /**
@@ -83,7 +85,7 @@ export async function persistStructuredResults(
   progress: unknown,
   fallbackCwd?: string,
 ): Promise<PersistStructuredResultsSummary> {
-  const summary: PersistStructuredResultsSummary = { stored: 0, skipped: 0, failed: 0 };
+  const summary: PersistStructuredResultsSummary = { stored: 0, skipped: 0, failed: 0, capacity: 0 };
   const namesByCid = new Map<string, string>();
   if (Array.isArray(progress)) {
     for (const entry of progress) {
@@ -121,7 +123,7 @@ export async function persistStructuredResults(
     const publicationId = typeof result.publicationId === "string" ? result.publicationId : undefined;
     const name = typeof result.name === "string" ? result.name : namesByCid.get(correlationId);
     try {
-      const stored = await persistAgentOutputChecked(
+      const outcome = await persistAgentOutputChecked(
         correlationId,
         name,
         typeof result.agent === "string" ? result.agent : undefined,
@@ -129,7 +131,8 @@ export async function persistStructuredResults(
         cwd,
         publicationId,
       );
-      if (stored) summary.stored += 1;
+      if (outcome === "stored") summary.stored += 1;
+      else if (outcome === "skipped-capacity") summary.capacity += 1;
       else summary.skipped += 1;
     } catch (err) {
       summary.failed += 1;
@@ -143,6 +146,7 @@ export async function persistStructuredResults(
 export function capturePublishedAgentResult(
   event: unknown,
   onStored?: (publicationId: string) => void,
+  onCapacityFull?: () => void,
 ): boolean {
   if (!event || typeof event !== "object") return false;
   const payload = event as { result?: unknown; waitUntil?: unknown; acknowledgeResource?: unknown };
@@ -153,9 +157,11 @@ export function capturePublishedAgentResult(
   const resourceId = publicationId ?? correlationId;
   const persistence = persistStructuredResults([payload.result], undefined).then((summary) => {
     if (summary.stored !== 1) {
+      if (summary.capacity > 0) onCapacityFull?.();
       throw new Error(
         `agent://${resourceId} persistence was not acknowledged `
-        + `(stored=${summary.stored}, skipped=${summary.skipped}, failed=${summary.failed})`,
+        + `(stored=${summary.stored}, skipped=${summary.skipped}, failed=${summary.failed}`
+        + `${summary.capacity > 0 ? `, capacity-full=${summary.capacity}` : ""})`,
       );
     }
     if (typeof payload.acknowledgeResource === "function") {

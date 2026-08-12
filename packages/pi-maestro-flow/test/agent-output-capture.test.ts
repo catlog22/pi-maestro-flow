@@ -9,7 +9,11 @@ const {
   filterUnacknowledgedResults,
   persistStructuredResults,
 } = await import("../src/teammate/agent-output-capture.ts");
-const { readAgentOutput } = await import("../src/teammate/agent-output-store.ts");
+const {
+  MAX_AGENT_FILES,
+  persistAgentOutputChecked,
+  readAgentOutput,
+} = await import("../src/teammate/agent-output-store.ts");
 const {
   displayMessageForResult,
   emitTeammateResultPublished,
@@ -253,6 +257,50 @@ test("capturePublishedAgentResult rejects an unpersistable publication", async (
   await assert.rejects(persistence, /persistence was not acknowledged/);
   assert.equal(resource, undefined);
   await assert.rejects(() => readAgentOutput("published-cid-oversized", root));
+});
+
+test("capturePublishedAgentResult reports capacity exhaustion to the operator callback", async () => {
+  const workspace = join(root, "capture-capacity-workspace");
+  for (let index = 0; index < MAX_AGENT_FILES; index += 1) {
+    assert.equal(
+      await persistAgentOutputChecked(
+        "capacity-filler",
+        "capacity-filler",
+        "general",
+        { index },
+        workspace,
+        `capture-capacity-${index}`,
+      ),
+      "stored",
+    );
+  }
+
+  let persistence: Promise<unknown> | undefined;
+  let resource: string | undefined;
+  let capacityWarned = 0;
+  assert.equal(capturePublishedAgentResult({
+    result: {
+      correlationId: "capacity-overflow-cid",
+      publicationId: "capacity-overflow-publication",
+      originCwd: workspace,
+      agent: "general",
+      structuredOutput: { overflow: true },
+    },
+    waitUntil(promise: Promise<unknown>) {
+      persistence = promise;
+    },
+    acknowledgeResource(uri: string) {
+      resource = uri;
+    },
+  }, undefined, () => {
+    capacityWarned += 1;
+  }), true);
+
+  assert.ok(persistence);
+  await assert.rejects(persistence, /capacity-full=1/);
+  assert.equal(capacityWarned, 1, "capacity callback fires exactly once for the skip");
+  assert.equal(resource, undefined, "a capacity skip must not acknowledge the resource");
+  await assert.rejects(() => readAgentOutput("capacity-overflow-publication", workspace));
 });
 
 test("published large result is summarized only after its canonical resource is readable", async () => {
