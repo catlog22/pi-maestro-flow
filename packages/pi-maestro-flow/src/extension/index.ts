@@ -110,7 +110,6 @@ import {
   type TodoActorRef,
   type TodoParams,
   type TodoResultDetails,
-  type TodoTask,
 } from "../tools/todo.ts";
 import { WorkflowBridge, buildTodoMirrorSpecs } from "../session/bridge.ts";
 import { guiEnabled, startGuiSubsystem, registerGuiTool, isGuiToolAllowed, getGuiTool, createGuiEventForwarder, GUI_EVENTS, bindGuiStartupIfCurrent, guiContextForGeneration, type GuiServerHandle, type GuiPermissionGateway } from "../gui/index.ts";
@@ -1420,9 +1419,9 @@ Contract: subject is the title; description is detail. status is update-only on 
       }
 
       const allTasks = details.tasks;
-      const done = allTasks.filter((t: TodoTask) => t.status === "completed").length;
-      const running = allTasks.filter((t: TodoTask) => t.status === "in_progress").length;
-      const open = allTasks.filter((t: TodoTask) => t.status === "pending" || t.status === "blocked").length;
+      const done = allTasks.filter((t) => t.status === "completed").length;
+      const running = allTasks.filter((t) => t.status === "in_progress").length;
+      const open = allTasks.filter((t) => t.status === "pending" || t.status === "blocked").length;
       const counts: string[] = [];
       if (done > 0) counts.push(`${done} done`);
       if (running > 0) counts.push(`${running} in progress`);

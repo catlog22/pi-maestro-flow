@@ -7,10 +7,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { getActiveGoal, getGoalById, switchCurrentGoal } from "./goal.ts";
 import { TodoSkillLoader } from "../skills/skill-loader.ts";
-import type {
-  LoadedTodoSkillBinding,
-  TodoSkillBinding,
-} from "../skills/skill-composer.ts";
+import type { TodoSkillBinding } from "../skills/skill-composer.ts";
 import {
   SkillRuntime,
   type AnySkillActivation,
@@ -118,19 +115,22 @@ export interface TodoParams {
   goalId?: string;
 }
 
-export interface InjectableContent {
-  taskId: string;
+/**
+ * Slim per-task projection carried in every Todo tool result. Deliberately
+ * excludes heavy fields (description, context, skills, activation metadata):
+ * results are rendered as status counts and may be serialized into session
+ * history or forwarded over the teammate broker, so each entry must stay
+ * cheap. Full task state is available via `getVisibleTasks()`/`get`.
+ */
+export interface TodoTaskSnapshot {
+  id: string;
   subject: string;
-  description?: string;
-  goalContext?: string;
-  context?: string;
-  skills: LoadedTodoSkillBinding[];
-  blocks: Array<{ tag: string; content: string }>;
+  status: TaskStatus;
 }
 
 export interface TodoResultDetails {
   action: string;
-  tasks: TodoTask[];
+  tasks: TodoTaskSnapshot[];
   error?: string;
 }
 
@@ -408,28 +408,6 @@ export function getTodoCompactionSnapshot(): TodoCompactionSnapshot {
     revision: todoRevision,
     ...(activeTask ? { activeTaskId: activeTask.id } : {}),
     tasks: visible,
-  };
-}
-
-export async function getInjectableContent(taskId: string): Promise<InjectableContent | null> {
-  const task = tasks.get(taskId);
-  if (!task) return null;
-
-  const activation = await ensureSkillActivation(task);
-  const blocks: Array<{ tag: string; content: string }> = [];
-  if (task.context) blocks.push({ tag: "context", content: task.context });
-  for (const binding of activation.skills) {
-    blocks.push({ tag: `skill_prompt:${binding.role}`, content: binding.skill.prompt });
-  }
-
-  return {
-    taskId: task.id,
-    subject: task.subject,
-    description: task.description,
-    goalContext: getActiveGoal()?.text,
-    context: task.context,
-    skills: activation.skills,
-    blocks,
   };
 }
 
@@ -1735,8 +1713,12 @@ function findActiveTask(assigneeId: string, excludeId?: string): TodoTask | unde
 }
 
 function snapshotDetails(action: string, error?: string): TodoResultDetails {
-  const visible = getVisibleTasks();
-  return { action, tasks: visible, ...(error ? { error } : {}) };
+  const tasks = getVisibleTasks().map((task): TodoTaskSnapshot => ({
+    id: task.id,
+    subject: task.subject,
+    status: task.status,
+  }));
+  return { action, tasks, ...(error ? { error } : {}) };
 }
 
 function ok(text: string, action = "unknown"): FlowToolResult {
