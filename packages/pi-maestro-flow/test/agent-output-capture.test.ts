@@ -297,7 +297,7 @@ test("capturePublishedAgentResult reports capacity exhaustion to the operator ca
   }), true);
 
   assert.ok(persistence);
-  await assert.rejects(persistence, /capacity-full=1/);
+  assert.equal(await persistence, undefined, "a capacity skip is expected, not a failure");
   assert.equal(capacityWarned, 1, "capacity callback fires exactly once for the skip");
   assert.equal(resource, undefined, "a capacity skip must not acknowledge the resource");
   await assert.rejects(() => readAgentOutput("capacity-overflow-publication", workspace));

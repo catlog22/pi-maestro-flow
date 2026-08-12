@@ -156,8 +156,15 @@ export function capturePublishedAgentResult(
   const publicationId = typeof result.publicationId === "string" ? result.publicationId : undefined;
   const resourceId = publicationId ?? correlationId;
   const persistence = persistStructuredResults([payload.result], undefined).then((summary) => {
+    if (summary.capacity > 0 && summary.stored === 0 && summary.skipped === 0 && summary.failed === 0) {
+      // Workspace bucket full (MAX_AGENT_FILES): an expected operational
+      // condition, not a persistence failure. Leave the resource
+      // unacknowledged so the caller keeps the inline full text instead of
+      // publishing a dead agent:// link (see agent-output-store docs).
+      onCapacityFull?.();
+      return;
+    }
     if (summary.stored !== 1) {
-      if (summary.capacity > 0) onCapacityFull?.();
       throw new Error(
         `agent://${resourceId} persistence was not acknowledged `
         + `(stored=${summary.stored}, skipped=${summary.skipped}, failed=${summary.failed}`
