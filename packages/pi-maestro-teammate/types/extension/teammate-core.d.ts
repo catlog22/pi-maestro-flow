@@ -26,6 +26,15 @@ export declare function aggregateTerminalStatus(results: readonly SingleResult[]
  * of from the publication.
  */
 export declare function aggregateTerminalStatuses(statuses: Iterable<AgentTerminalStatus | undefined>): AgentTerminalStatus;
+/**
+ * Hard ceiling for the no-reference fallback (persistence unavailable: capture
+ * extension absent, store at capacity, or I/O failure). Deliberately generous —
+ * the fallback exists so results are never lost behind a dead agent:// link —
+ * but without it a single teammate answer can dump hundreds of K chars into
+ * the parent context, where nothing can prune it (the result carries no
+ * replayable URI). ~8K tokens keeps even the degraded path bounded.
+ */
+export declare const UNPERSISTED_RESULT_INLINE_CAP_CHARS = 32000;
 export declare function displayMessageForResult(result: SingleResult): string;
 export declare function summarizeGraphResults(results: readonly SingleResult[], tasks: readonly NormalizedTask[]): string;
 export declare function aggregateGraphStructuredOutput(results: readonly SingleResult[], tasks: readonly NormalizedTask[]): Record<string, unknown> | undefined;

@@ -265,6 +265,15 @@ export function aggregateTerminalStatuses(
 const STRUCTURED_OUTPUT_CONFIRMATION = "Structured output saved.";
 const INLINE_PERSISTED_RESULT_CHARS = 1_200;
 const PERSISTED_RESULT_PREVIEW_CHARS = 480;
+/**
+ * Hard ceiling for the no-reference fallback (persistence unavailable: capture
+ * extension absent, store at capacity, or I/O failure). Deliberately generous —
+ * the fallback exists so results are never lost behind a dead agent:// link —
+ * but without it a single teammate answer can dump hundreds of K chars into
+ * the parent context, where nothing can prune it (the result carries no
+ * replayable URI). ~8K tokens keeps even the degraded path bounded.
+ */
+export const UNPERSISTED_RESULT_INLINE_CAP_CHARS = 32_000;
 const MAX_ACKNOWLEDGED_PUBLICATIONS = 2_000;
 const acknowledgedResultPublications = new Map<string, true>();
 
@@ -316,6 +325,20 @@ function describeStructuredResult(result: SingleResult, serialized: string): str
   return `Structured result saved (${formatChars(serialized.length)}; ${value === null ? "null" : typeof value}).`;
 }
 
+/** Bounded inline rendering for a result that has no agent:// reference. */
+function capUnpersistedResult(text: string): string {
+  if (text.length <= UNPERSISTED_RESULT_INLINE_CAP_CHARS) return text;
+  const prefix = text.slice(0, UNPERSISTED_RESULT_INLINE_CAP_CHARS);
+  // Prefer a clean line boundary when one falls near the cap; never trade away
+  // more than ~2% of the budget for it.
+  const newline = prefix.lastIndexOf("\n");
+  const cut = newline >= UNPERSISTED_RESULT_INLINE_CAP_CHARS * 0.98 ? newline : prefix.length;
+  return `${prefix.slice(0, cut).trimEnd()}\n\n`
+    + `[Teammate output capped at ${formatChars(cut)} of ${formatChars(text.length)}: `
+    + "result persistence was unavailable, so no agent:// reference exists and the remainder was not retained. "
+    + "Re-dispatch the task if the full output is required.]";
+}
+
 function formatPersistedSuccess(
   result: SingleResult,
   effective: string,
@@ -365,7 +388,7 @@ export function displayMessageForResult(result: SingleResult): string {
   if (result.exitCode === 0) {
     return warningPrefix + (reference
       ? formatPersistedSuccess(result, effective, structured, reference)
-      : effective);
+      : capUnpersistedResult(effective));
   }
 
   const schemaDiagnostic = result.messages
@@ -380,7 +403,7 @@ export function displayMessageForResult(result: SingleResult): string {
 
   const diagnostic = primaryDiagnostic && schemaDiagnostic && primaryDiagnostic !== schemaDiagnostic
     ? `${primaryDiagnostic}\n\nStructured output: ${schemaDiagnostic}`
-    : primaryDiagnostic ?? schemaDiagnostic ?? effective;
+    : primaryDiagnostic ?? schemaDiagnostic ?? (reference ? effective : capUnpersistedResult(effective));
   return warningPrefix + diagnostic + (reference ? `\n\nCaptured result: ${reference}` : "");
 }
 

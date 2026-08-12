@@ -5,6 +5,7 @@ import {
   emitTeammateResultPublished,
   setAgentStructuredOutput,
   toStructuredResults,
+  UNPERSISTED_RESULT_INLINE_CAP_CHARS,
 } from "../src/extension/teammate-core.ts";
 import { buildWatchOutput } from "../src/extension/teammate-helpers.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -154,6 +155,47 @@ test("displayMessageForResult keeps the full result when durable persistence is 
   const out = displayMessageForResult(rejected);
   assert.ok(out.includes(data));
   assert.doesNotMatch(out, /agent:\/\//);
+});
+
+test("displayMessageForResult caps an unpersisted result above the inline hard ceiling", () => {
+  const data = "line\n".repeat(Math.ceil((UNPERSISTED_RESULT_INLINE_CAP_CHARS * 2) / 5));
+  const out = displayMessageForResult(result({
+    messages: [{ role: "assistant", content: data }],
+  }));
+  assert.ok(
+    out.length < UNPERSISTED_RESULT_INLINE_CAP_CHARS + 500,
+    `capped output must stay near the ceiling (got ${out.length})`,
+  );
+  assert.match(out, /\[Teammate output capped at .* result persistence was unavailable/s);
+  assert.doesNotMatch(out, /Full result: agent:\/\//);
+});
+
+test("displayMessageForResult keeps an unpersisted result at the ceiling untouched", () => {
+  const data = "x".repeat(UNPERSISTED_RESULT_INLINE_CAP_CHARS);
+  const out = displayMessageForResult(result({
+    messages: [{ role: "assistant", content: data }],
+  }));
+  assert.equal(out, data);
+});
+
+test("displayMessageForResult caps the unpersisted failure fallback without touching diagnostics", () => {
+  const data = "x".repeat(UNPERSISTED_RESULT_INLINE_CAP_CHARS * 2);
+  const out = displayMessageForResult(result({
+    exitCode: 1,
+    messages: [{ role: "assistant", content: data }],
+  }));
+  assert.ok(out.length < UNPERSISTED_RESULT_INLINE_CAP_CHARS + 500);
+  assert.match(out, /\[Teammate output capped at /);
+
+  const diagnostic = displayMessageForResult(result({
+    exitCode: 1,
+    messages: [
+      { role: "system", content: "Teammate child process exited abnormally (agent=analyst)" },
+      { role: "assistant", content: data },
+    ],
+  }));
+  assert.match(diagnostic, /Teammate child process exited abnormally/);
+  assert.doesNotMatch(diagnostic, /\[Teammate output capped at /);
 });
 
 test("displayMessageForResult keeps failure diagnostics authoritative", () => {
