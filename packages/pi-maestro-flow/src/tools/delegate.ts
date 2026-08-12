@@ -55,7 +55,7 @@ export async function executeDelegate(
   // Resolve model from tool name or explicit model
   const model = params.model ?? params.tool;
 
-  // Structured taskType for applyModelRouting / Experts Mode — not only MODE text.
+  // Structured taskType for applyModelRouting — not only MODE text.
   // analysis mode → analysis; write mode → development; explicit taskType wins.
   const taskType = params.taskType
     ?? (params.mode === "analysis"

@@ -29,6 +29,6 @@ test("explicit taskType wins over mode", () => {
   assert.equal(resolveDelegateTaskType({ mode: "write", taskType: "review" }), "review");
 });
 
-test("no mode and no taskType stays undefined (experts triage may fill later)", () => {
+test("no mode and no taskType stays undefined for downstream routing", () => {
   assert.equal(resolveDelegateTaskType({}), undefined);
 });
