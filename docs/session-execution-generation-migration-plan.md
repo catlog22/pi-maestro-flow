@@ -1,6 +1,8 @@
 # Session / Execution / Run 状态模型迁移规划
 
-> 状态：已批准，分阶段实施中
+> **本文档已被整体取代（2026-08-12）**：本文描述的 Execution/Generation 实体、ExecutionLease、heartbeat、handoff 执行路线已被 `docs/session-run-minimal-state-architecture-20260812.md` 的方案 B（Session + Run、participant ID、细粒度 revision/CAS）整体取代，不再实施。全文保持原貌，仅作历史审计参考。
+
+> 状态：已被方案 B 取代（2026-08-12），仅作历史审计
 > 范围：`maestro2`（Maestro CLI）与 `pi-maestro-flow`（Pi Workflow 集成）
 > 核心提议：Session 作为长期主题身份不持久化生命周期状态；Execution/Generation 承担有界执行、lease、chain、gate 与封存；Run 继续作为不可变执行尝试。
 > 关联文档：`docs/session-run-knowledge-target-architecture.md`

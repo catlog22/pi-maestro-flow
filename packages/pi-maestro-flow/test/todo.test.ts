@@ -630,10 +630,66 @@ test("todo next loads context and skills before transitioning", async () => {
     const next = await executeTodo({ action: "next" }, ctx);
     const text = (next.content[0] as { text: string }).text;
     assert.match(text, /<context>\nCONTEXT/);
-    assert.match(text, /<skill_prompt role="primary">\n# Demo instructions/);
+    assert.match(text, /<active_skills>\n- demo \(primary\)/);
+    assert.doesNotMatch(text, /# Demo instructions/, "skill prompt text must not be duplicated into the todo next result");
     assert.equal(getVisibleTasks()[0].status, "in_progress");
     assert.match(getVisibleTasks()[0].skillActivation?.activationId ?? "", /^[0-9a-f-]{36}$/);
     assert.match(getVisibleTasks()[0].skillActivation?.stackRevision ?? "", /^[0-9a-f]{64}$/);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reassigning an active skill-bound task refreshes its activation snapshot", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-reassign-activation-"));
+  const agentDir = join(root, "agent");
+  const skillDir = join(root, ".pi", "skills", "demo");
+  await mkdir(skillDir, { recursive: true });
+  await mkdir(agentDir, { recursive: true });
+  const skillPath = join(skillDir, "SKILL.md");
+  await writeFile(skillPath, "---\nname: demo\ndescription: demo\n---\n# Demo instructions\n");
+  const skill = {
+    name: "demo",
+    description: "demo",
+    filePath: skillPath,
+    baseDir: skillDir,
+    sourceInfo: {} as Skill["sourceInfo"],
+    disableModelInvocation: false,
+  } satisfies Skill;
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir,
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [skill], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  const reviewer: TodoActorRef = { kind: "teammate", id: "review-correlation", label: "reviewer", agentType: "reviewer" };
+
+  try {
+    await executeTodo({
+      action: "create",
+      subject: "Skilled task",
+      skills: [{ name: "demo", role: "primary" }],
+    }, ctx);
+    await executeTodo({ action: "next" }, ctx);
+    // Register the reviewer so root can resolve it as an assignee selector.
+    await executeTodo({ action: "list" }, ctx, reviewer);
+
+    const before = getVisibleTasks()[0];
+    assert.equal(before.status, "in_progress");
+    const beforeActivationId = before.skillActivation?.activationId;
+    assert.match(beforeActivationId ?? "", /^[0-9a-f-]{36}$/);
+
+    const reassigned = await executeTodo({ action: "update", id: before.id, assignee: reviewer.id }, ctx);
+    assert.equal((reassigned as { isError?: boolean }).isError, undefined);
+    const after = getVisibleTasks()[0];
+    assert.equal(after.assignee.id, reviewer.id);
+    assert.notEqual(
+      after.skillActivation?.activationId,
+      beforeActivationId,
+      "active reassignment must revalidate the task's activation snapshot",
+    );
   } finally {
     onSessionShutdown(todoContext);
     await rm(root, { recursive: true, force: true });
@@ -768,7 +824,7 @@ test("todo next renders guard, primary, support while preserving order inside ro
     }, ctx);
     const next = await executeTodo({ action: "next" }, ctx);
     const text = (next.content[0] as { text: string }).text;
-    const names = [...text.matchAll(/# (guard-a|guard-b|primary|support-a|support-b)/g)]
+    const names = [...text.matchAll(/- (guard-a|guard-b|primary|support-a|support-b) \(/g)]
       .map((match) => match[1]);
     assert.deepEqual(names, ["guard-a", "guard-b", "primary", "support-a", "support-b"]);
   } finally {
@@ -1116,14 +1172,19 @@ test("root and teammates share Todo state with per-assignee active tasks and own
     assert.equal(getVisibleTasks().find((task) => task.id === apiTask.id)?.assignee.id, "root");
 
     const activeRootBeforeReassign = getVisibleTasks().find((task) => task.id === rootTask.id)!;
+    assert.equal(
+      activeRootBeforeReassign.skillActivation,
+      undefined,
+      "skill-less tasks must not carry activation metadata",
+    );
     const reassigned = await executeTodo({ action: "update", id: rootTask.id, assignee: reviewer.id }, ctx);
     assert.equal((reassigned as { isError?: boolean }).isError, undefined);
     const activeRootAfterReassign = getVisibleTasks().find((task) => task.id === rootTask.id)!;
     assert.equal(activeRootAfterReassign.assignee.id, reviewer.id);
-    assert.notEqual(
-      activeRootAfterReassign.skillActivation?.activationId,
-      activeRootBeforeReassign.skillActivation?.activationId,
-      "active reassignment must revalidate the task's activation snapshot",
+    assert.equal(
+      activeRootAfterReassign.skillActivation,
+      undefined,
+      "skill-less reassignment must not fabricate activation metadata",
     );
     const reviewerNext = await executeTodo({ action: "next" }, ctx, reviewer);
     assert.equal((reviewerNext as { isError?: boolean }).isError, true);
@@ -1411,7 +1472,7 @@ test("active skills inject through system prompt and context fallback without du
     }, ctx);
     await executeTodo({ action: "next" }, ctx);
 
-    assert.equal(await onBeforeAgentStartTodo({ systemPrompt: "base" }), undefined);
+    assert.equal(onBeforeAgentStartTodo(), undefined);
     const injected = await onContextTodo([]);
     assert.match(String((injected?.messages[0] as { content?: string }).content ?? ""), /<active_skill_stack>/);
     assert.match(String((injected?.messages[0] as { content?: string }).content ?? ""), /# Injected demo/);
@@ -1437,7 +1498,7 @@ test("active skills inject through system prompt and context fallback without du
     const active = getVisibleTasks()[0];
     await executeTodo({ action: "update", id: active.id, status: "completed" }, ctx);
     assert.equal(await onContextTodo([]), undefined);
-    assert.equal(await onBeforeAgentStartTodo({ systemPrompt: "base" }), undefined);
+    assert.equal(onBeforeAgentStartTodo(), undefined);
   } finally {
     onSessionShutdown(todoContext);
     await rm(root, { recursive: true, force: true });
@@ -1481,7 +1542,7 @@ test("multi-skill injection reuses duplicate required reading content", async ()
       ],
     }, ctx);
     await executeTodo({ action: "next" }, ctx);
-    assert.equal(await onBeforeAgentStartTodo({ systemPrompt: "base" }), undefined);
+    assert.equal(onBeforeAgentStartTodo(), undefined);
     const injected = await onContextTodo([]);
     const prompt = String((injected?.messages[0] as { content?: string }).content ?? "");
     assert.equal(prompt.split("SHARED REQUIRED CONTENT").length - 1, 1);

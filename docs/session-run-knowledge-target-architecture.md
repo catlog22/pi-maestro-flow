@@ -1,5 +1,7 @@
 # Maestro Flow × 知识治理：期望最终架构（Target Architecture）
 
+> **执行平面已被部分取代（2026-08-12）**：本文关于 `Session/Execution/Run`、长期 lease、heartbeat、handoff 和单 owner 的设计不再是目标态；新的执行平面采用 `docs/session-run-minimal-state-architecture-20260812.md` 的方案 B（Session + Run、participant ID、细粒度 revision/CAS、无 Execution/长期 lease/operation drain）。身份平面中的 fenced lease 写授权级别同样被取代，替代为 participant identity + revision CAS。知识治理部分的 "session seal" 语义迁移为方案 B 的 "session complete receipt"（方案 B 中只有 Run 保留 seal，Session 终态为 completed）。本文的知识治理、evol、来源、证据和晋升设计继续有效，但引用应迁移为 Session/Run ID。
+
 > 状态：目标态架构文档（综合稿）
 > 上游依据：
 > - `docs/self-evolution-plugin-design.md`（v2/v3，evol 机制与 T0-T3 分层自动化）
@@ -44,13 +46,15 @@
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+注：图中 fenced lease / lease（宿主所有权+心跳）为现状机制，方案 B 目标态由 participant identity + revision CAS 取代。
+
 **一句话概括目标态**：*Session 是知识治理的第一公民；Run 是受尊重的事实源之一；任何平台的任何会话都能在不依赖 run 的前提下完成"沉淀→审核→晋升→注入"的完整治理闭环，且全程对人可见。*
 
 ---
 
-## 2. 执行平面：Session/Run 生命周期（基座，目标态不变）
+## 2. 执行平面：Session/Run 生命周期（现状记录；目标态见方案 B）
 
-以下为目标态沿用的既有架构事实（实测确认）：
+以下为现状架构事实（实测确认；目标态调整见 §2.3 及方案 B）：
 
 ### 2.1 实体与状态机
 
@@ -75,9 +79,11 @@
 
 - 项目级投影：`.workflow/state.json`（`sessions[]` + `active_session_id`，`runtime.ts:580`）。
 - 并发写保护：`SessionStoreLock` workspace 级锁（`store.ts:241`，Windows 重试）。
-- 链式推进：continuation/`next` 分配下一 Run；host 所有权由 **lease** 管理（`pi-maestro-flow/src/session/coordinator.ts:96,247,418`：epoch claim 文件 + 10s 心跳 + 30s stale，落 `.workflow/tmp/hook/<sid>.lease/`）。
+- 链式推进：continuation/`next` 分配下一 Run；host 所有权由 **lease** 管理（`pi-maestro-flow/src/session/coordinator.ts:96,247,418`：epoch claim 文件 + 10s 心跳 + 30s stale，落 `.workflow/tmp/hook/<sid>.lease/`）（现状机制；方案 B 目标态删除长期 lease，改为 participant + 细粒度 revision CAS）。
 
 ### 2.3 执行平面迁移决策（2026-08）
+
+> 本节记录的是 2026-08 第一次架构修订（Session/Execution/Generation + core lease 路线），该修订已被方案 B 二次取代（见顶部提示）；保留本节仅为演进留痕。migration-plan 引用为历史引用，不再执行。
 
 原“Session 生命周期、状态机与 lease 语义不动”的假设已被后续架构评审取代。长期 topic/intent Session 不能以一次执行结束作为永久封存时机；目标模型改为：
 
@@ -89,7 +95,7 @@
 
 迁移必须按 `docs/session-execution-generation-migration-plan.md` 分阶段执行：先增加 Execution identity、versioned wire schema、core lease 与兼容投影，再迁移知识/recall，最后在 CLI/插件 capability 门全部满足后删除 Session status 权威。兼容期继续读取 `session/1.0-1.3`、`command-run/1.0-1.3` 和 `run-response/1.0`，禁止在 strict 旧 schema 中直接注入新字段。
 
-`sealSession` 的现有 session reconciliation receipt 行为在兼容期保留；目标态由 Execution seal 生成 execution snapshot/receipt，session-source candidate 使用 candidate version + evidence/revision/corpus receipt 门禁。promotion 仍是独立治理动作，不因任何 seal 自动执行。
+`sealSession` 的现有 session reconciliation receipt 行为在兼容期保留；方案 B 目标态由 Session complete receipt 作为 reconciliation 权威边界，session-source candidate 使用 candidate version + evidence/revision/corpus receipt 门禁。promotion 仍是独立治理动作，不因任何 seal 自动执行。
 
 ---
 
@@ -134,7 +140,7 @@ source_refs: [{ kind: 'run' | 'session', id: string, evidence_root: string }]
 | 源 | 门禁 |
 |---|---|
 | run 源 | 所有源 run sealed **AND** 每源有 receipt **AND** receipt 新鲜（corpus fingerprint 比对）——现状不变 |
-| session 源 | session delta 不可变（**MVP 为 seal-only 单分支**；显式 freeze 分支按 §6A.4 条件性回归——仅在实证"长开 synthetic session 不便 seal"后重新引入）**AND** 新鲜 session corpus receipt **AND** stage 时 `--evidence` 非空 |
+| session 源 | session delta 不可变（**MVP 为 seal-only 单分支**（此处 seal 为 Session 级，方案 B 下对应 session complete receipt）；显式 freeze 分支按 §6A.4 条件性回归——仅在实证"长开 synthetic session 不便 seal"后重新引入）**AND** 新鲜 session corpus receipt **AND** stage 时 `--evidence` 非空 |
 
 两源门禁强度等价："不可变"只保证候选内容冻结，"新鲜 receipt"证明候选已对当前 corpus 完成对账——缺一不可。
 
@@ -143,7 +149,7 @@ source_refs: [{ kind: 'run' | 'session', id: string, evidence_root: string }]
 无 Maestro Session 的日常会话（闲聊、轻任务、未挂 workflow）：
 
 - 首次 stage/record 时 CLI **幂等创建 synthetic knowledge session**（确定性 ID 规则，区分于 workflow session）。
-- 完整支持 stage → review → seal → promote 闭环；seal/abandon/恢复/清理均有定义。
+- 完整支持 stage → review → seal → promote 闭环（此处 seal 为 Session 级，方案 B 下对应 session complete receipt）；seal/abandon/恢复/清理均有定义。
 - **宿主会话 ID（pi hostSessionId / claude session_id）永不直接充当 session 目录权威**——它只是身份平面的映射键。
 
 ### 3.6 归因账本（inputs）
@@ -162,7 +168,7 @@ source_refs: [{ kind: 'run' | 'session', id: string, evidence_root: string }]
 | 级别 | 身份来源 | 授权范围 |
 |---|---|---|
 | **A** | 显式参数 `--run/--session/--channel` | 直接授权写 |
-| **A** | fenced lease（epoch token 校验 + 心跳未 stale） | 直接授权写 |
+| **A** | fenced lease（epoch token 校验 + 心跳未 stale） | 直接授权写（现状；方案 B 下由 participant identity + target revision CAS 取代） |
 | **A** | 宿主注入通道（Pi env `PI_HOST_SESSION_ID` / hook 注册 channel） | 直接授权写 |
 | **B** | 谱系指纹候选匹配（唯一且高置信） | 仅建议：需既有 channel 或交互确认，不单独创建写通道 |
 | **C** | 收窄唯一扫描（恰一 running session 且零 live channel） | 兜底 + warning |
@@ -174,7 +180,7 @@ source_refs: [{ kind: 'run' | 'session', id: string, evidence_root: string }]
 
 | 平台 | 宿主会话 ID 来源 | 通道建立 |
 |---|---|---|
-| Pi | 插件 `session_start` 注入 env | env → lease 反查 / channel |
+| Pi | 插件 `session_start` 注入 env | env → lease 反查（现状；方案 B 下为 participant identity） / channel |
 | Claude Code | hook stdin 载荷 `session_id`（`hooks.ts:869` 已解析） | hook 注册 + 指纹候选 |
 | Codex CLI | 官方 hooks 载荷 `session_id`（developers.openai.com/codex/hooks；本机已装 maestro Codex hooks） | 同 Claude |
 | Agy | `AGY_HOOK_DEFS`（`hooks.ts:501`）同协议 | 同上 |
@@ -228,7 +234,7 @@ checkpoint 原件迁入 **recovery-only 存储**（恢复语义不变），治�
 |---|---|---|
 | session_start / attach | 主动 notify（新增） | 待审积压计数 + `/maestro-knowledge` 入口 |
 | run seal | `run-knowledge` 消息 | consumed/cited/validated/contradicted + staged 数 + review 命令 |
-| session seal | `session-knowledge` 消息 | pending/review_required 计数 + review 命令 |
+| session seal（方案 B 下对应 session complete receipt） | `session-knowledge` 消息 | pending/review_required 计数 + review 命令 |
 | 常驻 | 状态栏 `KNOW n review·m pending`（红/绿）+ `EVOL ● s·d·p` | 积压与信号计数 |
 | 随时 | `/maestro-knowledge` 审核台 | 按源分组（run/session）resolve + promote；session-only 候选不伪造 run ID |
 | 随时 | `/self-evolve` 统一 inbox | review_required 候选 + 未消费 stage 信号 + health P1 队列，每项附下一步命令 |
@@ -251,7 +257,7 @@ checkpoint 原件迁入 **recovery-only 存储**（恢复语义不变），治�
 │       ├── knowledge-delta.json        # run-knowledge-delta/1.0 字节不动（T1 草拟 + 手动 stage）
 │       └── knowledge-reconciliation.json  # run receipt（现状）
 ├── tmp/
-│   ├── hook/<sid>.lease/<epoch>.claim.json   # lease（现状）
+│   ├── hook/<sid>.lease/<epoch>.claim.json   # lease（迁移期存在；方案 B v3 删除）
 │   └── channels/<identity>.channel.json      # [新] 身份通道
 └── recovery/compaction-checkpoints/    # [新] recovery-only（原 KNW-*-session-compact 迁此）
 
@@ -266,7 +272,7 @@ checkpoint 原件迁入 **recovery-only 存储**（恢复语义不变），治�
 
 ## 8. 不变量与铁律（目标态汇总）
 
-1. **时序铁律**：评审（stage/resolve 前置对账）在 seal 之前可行、promote 在源 seal 之后；sealed 实体拒写 sidecar。
+1. **时序铁律**：评审（stage/resolve 前置对账）在 seal 之前可行、promote 在源 seal 之后（源为 Session 级时，方案 B 下对应 session complete receipt）；sealed 实体拒写 sidecar。
 2. **双源等强度**：任何源的 promote 都必须同时满足"内容不可变 + 新鲜 corpus receipt"，不得以单一条件替代。
 3. **写授权分级**：指纹与扫描永不单独授权写操作；歧义 fail-closed 并列出存活通道。
 4. **T3 人工裁决不放宽**：review_required 未裁决 → promote fail-closed；`--reason` 非空。
@@ -287,7 +293,7 @@ checkpoint 原件迁入 **recovery-only 存储**（恢复语义不变），治�
 | 候选存储 | run sidecar 单源 | run + session 双源（独立 schema） | P1 |
 | 事务模型 | run_ids 全链 | source_refs 分派 | P2 |
 | promote 门禁 | run 单源三重 | 双源等强度双重保证 | P2 |
-| 会话归属 | findUniqueActiveRun 全盘扫描 | 写授权分级（lease/channel/指纹候选） | P1 |
+| 会话归属 | findUniqueActiveRun 全盘扫描 | 写授权分级（participant identity/channel/指纹候选） | P1 |
 | 多平台 | Pi 有插件；Claude/Codex/Agy 有 hooks 但知识管道未消费 | 三来源身份 + 通道 + 回退链 | P1 |
 | signal-id | 零校验 | 存在性校验 + validation sidecar | P1 |
 | 审核时机 | 绑 run check/seal 窗口 | session 存续期随时 + seal 刷 receipt | P2 |
@@ -305,7 +311,10 @@ checkpoint 原件迁入 **recovery-only 存储**（恢复语义不变），治�
 | Synthetic Knowledge Session | 为无 workflow 日常会话幂等创建的治理 Session |
 | source_refs | 候选来源统一模型（run/session + evidence_root） |
 | receipt | reconciliation 回执：candidate snapshot + corpus fingerprint，promote 新鲜度依据 |
-| lease | 宿主对 Session 的变更所有权（epoch claim + 心跳） |
+| lease | 宿主对 Session 的变更所有权（epoch claim + 心跳）——已被方案 B 取代（仅历史/迁移期概念） |
+| participantId / actorId | 方案 B core mutation 身份：participantId 标识请求来源客户端/窗口，actorId 标识决策/执行主体，均不表示独占所有权 |
+| identity/orchestration/activity revision | 方案 B Session 三分细粒度版本：身份元数据 / chain·decision·status·gates / 全局事件序号，各自独立 CAS |
+| request receipt | 方案 B 幂等请求回执：同 requestId + 相同 canonical payload 返回原 receipt，不同 payload 返回 REQUEST_CONFLICT |
 | channel | 身份平面临时通道（hostKind 分策略存活） |
 | T0-T3 | 分层自动化：自动抑制/自动草拟/事实型自动晋升/推断型人工 |
 | fail-closed | 条件不满足时拒绝并给出恢复指引，绝不猜测放行 |
@@ -313,4 +322,4 @@ checkpoint 原件迁入 **recovery-only 存储**（恢复语义不变），治�
 
 ---
 
-*本文档为目标态总纲；实施细节、验收标准与评审留痕见 `knowledge-session-decoupling-plan.md`（v2，附录 A 含 GPT 评审全部 10 条处置）。*
+*本文档为目标态总纲；实施细节、验收标准与评审留痕见 `knowledge-session-decoupling-plan.md`（v2.1，附录 A 含 GPT 评审全部 10 条处置）。*

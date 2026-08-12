@@ -6,14 +6,10 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { getActiveGoal, getGoalById, switchCurrentGoal } from "./goal.ts";
-import {
-  TodoSkillLoader,
-  type TodoSkillConfig,
-} from "../skills/skill-loader.ts";
+import { TodoSkillLoader } from "../skills/skill-loader.ts";
 import type {
   LoadedTodoSkillBinding,
   TodoSkillBinding,
-  TodoSkillRole,
 } from "../skills/skill-composer.ts";
 import {
   SkillRuntime,
@@ -51,6 +47,7 @@ import {
   requireSkillRuntime,
   resolveContextInjectionAnchor,
   type RunSkillInjection,
+  type TodoParamsInput,
 } from "./todo-skill-engine.ts";
 
 // ---------------------------------------------------------------------------
@@ -120,11 +117,6 @@ export interface TodoParams {
   planHandoffKey?: string;
   goalId?: string;
 }
-
-type TodoParamsInput = TodoParams & {
-  /** Legacy single-skill input accepted only at the tool normalization boundary. */
-  skill?: TodoSkillConfig | null;
-};
 
 export interface InjectableContent {
   taskId: string;
@@ -441,14 +433,12 @@ export async function getInjectableContent(taskId: string): Promise<InjectableCo
   };
 }
 
-export async function onBeforeAgentStartTodo(
-  _event: { systemPrompt: string },
-): Promise<{ systemPrompt: string } | undefined> {
+/** Turn-start housekeeping: drop the skill injection record when no task needs it. */
+export function onBeforeAgentStartTodo(): void {
   const active = findActiveTask(ROOT_TODO_ACTOR.id);
   if (!active || active.skills.length === 0) {
     runSkillInjection = undefined;
   }
-  return undefined;
 }
 
 export async function onContextTodo(
@@ -457,16 +447,11 @@ export async function onContextTodo(
   const active = findActiveTask(ROOT_TODO_ACTOR.id);
   if (!active || active.skills.length === 0) return undefined;
   const activation = await ensureSkillActivation(active);
-  if (runSkillInjection?.taskId === active.id
-    && runSkillInjection.stackRevision === activation.stackRevision
-    && runSkillInjection.channel === "system") return undefined;
   if (runSkillInjection?.taskId !== active.id
-    || runSkillInjection.stackRevision !== activation.stackRevision
-    || runSkillInjection.channel !== "context") {
+    || runSkillInjection.stackRevision !== activation.stackRevision) {
     runSkillInjection = {
       taskId: active.id,
       stackRevision: activation.stackRevision,
-      channel: "context",
       anchor: createContextInjectionAnchor(messages),
     };
   }
@@ -622,6 +607,12 @@ export async function delegateTodoTaskToAgent(
 export interface TodoSealResult {
   /** Task ids auto-sealed to `completed` on a successful agent completion. */
   sealed: string[];
+  /**
+   * Tasks that should have been sealed but were rejected by the update path
+   * (e.g. an unverified Goal quality gate). Surfaced so callers can notify
+   * instead of leaving the task silently dangling in_progress.
+   */
+  failed: Array<{ id: string; reason: string }>;
 }
 
 /**
@@ -639,7 +630,8 @@ export async function sealTodoTasksOnAgentComplete(
   ctx: ExtensionContext,
 ): Promise<TodoSealResult> {
   const sealed: string[] = [];
-  if (exitCode !== 0 || cancelled) return { sealed };
+  const failed: TodoSealResult["failed"] = [];
+  if (exitCode !== 0 || cancelled) return { sealed, failed };
   const candidates = getVisibleTasks().filter(
     (task) => task.assignee.id === actor.id && task.status === "in_progress",
   );
@@ -654,9 +646,16 @@ export async function sealTodoTasksOnAgentComplete(
       ctx,
       ROOT_TODO_ACTOR,
     );
-    if (!result.isError) sealed.push(task.id);
+    if (!result.isError) {
+      sealed.push(task.id);
+    } else {
+      const reason = result.content[0] && "text" in result.content[0]
+        ? result.content[0].text
+        : "unknown error";
+      failed.push({ id: task.id, reason });
+    }
   }
-  return { sealed };
+  return { sealed, failed };
 }
 
 async function executeTodoAction(
@@ -724,7 +723,7 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
   const subject = params.subject?.trim();
   if (!subject) return err("subject is required for create", "create");
 
-  const id = allocateTaskId();
+  const id = peekTaskId();
   const now = Date.now();
 
   const blockerResolution = resolveBlockedBy(id, params.blockedBy ?? []);
@@ -751,6 +750,7 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
 
   if (hasCycle(id, blockedBy)) return err("blockedBy would create a dependency cycle", "create");
 
+  commitTaskIds(1);
   const nextTasks = new Map(tasks);
   nextTasks.set(id, task);
   commitTodoState(nextTasks);
@@ -768,11 +768,8 @@ function handleBatchCreate(specs: TodoBatchSpec[], actor: TodoActorRef, planHand
   const nextTasks = cloneTaskMap();
 
   const ids: string[] = [];
-  const reserved = new Set<string>(nextTasks.keys());
   for (let i = 0; i < specs.length; i++) {
-    const id = allocateTaskId();
-    reserved.add(id);
-    ids.push(id);
+    ids.push(peekTaskId(i));
   }
 
   const resolvedDeps: string[][] = [];
@@ -837,6 +834,7 @@ function handleBatchCreate(specs: TodoBatchSpec[], actor: TodoActorRef, planHand
     created.push(task);
   }
 
+  commitTaskIds(specs.length);
   commitTodoState(nextTasks);
 
   const lines = created.map((t) => `#${t.id} ${t.subject} (${t.status})`);
@@ -952,21 +950,23 @@ async function handleUpdate(
   const activationInputsChanged = before.context !== draft.context
     || JSON.stringify(before.skills) !== JSON.stringify(draft.skills);
   const assigneeChanged = before.assignee.id !== draft.assignee.id;
+  // A task without skills has nothing to activate: skipping avoids the async
+  // round-trip and the concurrency window it opens, and keeps skill-less tasks
+  // free of meaningless skillActivation metadata.
   const shouldActivate = draft.status === "in_progress"
+    && draft.skills.length > 0
     && (before.status !== "in_progress" || activationInputsChanged || assigneeChanged || !draft.skillActivation);
-  const revisionBeforeActivation = todoRevision;
   const activation = shouldActivate ? await activateTask(draft) : undefined;
   if (shouldActivate) {
     revalidateAsyncTodoMutation({
       generation,
-      revision: revisionBeforeActivation,
       before,
       draft,
       actor,
     });
   }
   if (activation) draft.skillActivation = activationMetadata(activation);
-  if (draft.status === "pending") draft.skillActivation = undefined;
+  if (draft.status === "pending" || draft.skills.length === 0) draft.skillActivation = undefined;
 
   const changed = taskChanged(before, draft)
     || JSON.stringify(before.skillActivation) !== JSON.stringify(draft.skillActivation);
@@ -994,7 +994,8 @@ async function handleUpdate(
 }
 
 function handleList(params: TodoParams, actor: TodoActorRef): FlowToolResult {
-  let filtered = getVisibleTasks();
+  const visible = getVisibleTasks();
+  let filtered = visible;
 
   if (params.filter?.status) {
     filtered = filtered.filter((t) => t.status === params.filter!.status);
@@ -1017,7 +1018,7 @@ function handleList(params: TodoParams, actor: TodoActorRef): FlowToolResult {
 
   // Pre-compute reverse dependency map: taskId -> list of task IDs it blocks
   const blocksMap = new Map<string, string[]>();
-  for (const t of getVisibleTasks()) {
+  for (const t of visible) {
     for (const dep of t.blockedBy) {
       const existing = blocksMap.get(dep);
       if (existing) existing.push(`#${t.id}`);
@@ -1158,6 +1159,10 @@ async function handleNext(
   // Set when the task's quality gate is a Goal the user stopped by hand, so the notice
   // below can be appended after the header is built.
   let userStoppedGate: string | undefined;
+  // The actual Goal switch is deferred until the task commit succeeds: skill
+  // activation below can fail, and a failed `next` must not leave the active
+  // Goal switched as a stray side effect.
+  let pendingGoalSwitch = false;
   if (task.goalId) {
     const current = getActiveGoal();
     if (current?.id !== task.goalId || current?.status === "paused") {
@@ -1166,7 +1171,7 @@ async function handleNext(
       // and advancing a task is not consent to restart a Goal that was deliberately
       // halted. Every other pause reason is system-internal, so resuming is right there.
       if (gate?.status === "paused" && gate.pauseReason === "user") userStoppedGate = gate.text;
-      switchCurrentGoal(task.goalId, ctx, { resume: !userStoppedGate });
+      pendingGoalSwitch = true;
     }
   }
   const draft = cloneTodoTask(task);
@@ -1183,7 +1188,10 @@ async function handleNext(
     parts.push(`\n<prev_steps>\n${prevContext}\n</prev_steps>`);
   }
 
-  const goalText = getActiveGoal()?.text;
+  // Goal context reflects the gate that becomes active with this task (the
+  // switch itself happens after the commit below).
+  const goalText = (task.goalId ? getGoalById(task.goalId)?.text : undefined)
+    ?? getActiveGoal()?.text;
   if (goalText) {
     parts.push(`\n<goal_context>\n${goalText}\n</goal_context>`);
   }
@@ -1200,27 +1208,42 @@ async function handleNext(
     parts.push(`\n<context>\n${task.context}\n</context>`);
   }
 
-  const revisionBeforeActivation = todoRevision;
-  const activation = await activateTask(draft);
-  draft.status = "in_progress";
-  revalidateAsyncTodoMutation({
-    generation,
-    revision: revisionBeforeActivation,
-    before: task,
-    draft,
-    actor,
-  });
-  for (const binding of activation.skills) {
-    parts.push(`\n<skill_prompt role="${binding.role}">\n${binding.skill.prompt}\n</skill_prompt>`);
+  // Skill-less tasks skip activation entirely: there is nothing to load, and
+  // without an await there is no concurrency window to revalidate against.
+  let activation: SkillActivation | undefined;
+  if (draft.skills.length > 0) {
+    const before = cloneTodoTask(task);
+    activation = await activateTask(draft);
+    draft.status = "in_progress";
+    revalidateAsyncTodoMutation({
+      generation,
+      before,
+      draft,
+      actor,
+    });
+  } else {
+    draft.status = "in_progress";
+  }
+  // Skill prompts are NOT inlined here: the full text is injected once per turn
+  // as <active_skill_stack> context while the task is active (onContextTodo).
+  // Repeating them in this persistent tool result would double the token cost.
+  if (activation && activation.skills.length > 0) {
+    const bound = activation.skills
+      .map((binding) => `- ${binding.skill.name} (${binding.role})`)
+      .join("\n");
+    parts.push(`\n<active_skills>\n${bound}\nFull skill instructions arrive as <active_skill_stack> context while this task is active.\n</active_skills>`);
   }
 
-  draft.skillActivation = activationMetadata(activation);
+  draft.skillActivation = activation ? activationMetadata(activation) : undefined;
   draft.updatedAt = Date.now();
   const nextTasks = new Map(tasks);
   nextTasks.set(draft.id, draft);
   commitTodoState(nextTasks);
-  activeSkillSnapshots.set(draft.id, activation);
+  if (activation) activeSkillSnapshots.set(draft.id, activation);
   runSkillInjection = undefined;
+  if (pendingGoalSwitch && task.goalId) {
+    switchCurrentGoal(task.goalId, ctx, { resume: !userStoppedGate });
+  }
 
   return ok(parts.join("\n"), "next");
 }
@@ -1260,8 +1283,16 @@ function cloneTaskMap(state: Map<string, TodoTask> = tasks): Map<string, TodoTas
   return new Map([...state].map(([id, task]) => [id, cloneTodoTask(task)]));
 }
 
-function allocateTaskId(): string {
-  return String(nextTaskId++);
+/**
+ * Ids are peeked during validation and only committed (counter advanced) once
+ * the create is known to succeed, so failed creates do not burn id numbers.
+ */
+function peekTaskId(offset = 0): string {
+  return String(nextTaskId + offset);
+}
+
+function commitTaskIds(count: number): void {
+  nextTaskId += count;
 }
 
 function syncTaskIdCounter(state: Map<string, TodoTask> = tasks): void {
@@ -1420,7 +1451,6 @@ export function setTodoStateChangeListener(listener: (() => void) | undefined): 
 // ---------------------------------------------------------------------------
 interface AsyncTodoMutationCheck {
   generation: number;
-  revision: number;
   before: TodoTask;
   draft: TodoTask;
   actor: TodoActorRef;
@@ -1428,15 +1458,17 @@ interface AsyncTodoMutationCheck {
 
 /**
  * Async skill loading must not publish a draft derived from stale Todo state.
- * Re-check every authority and graph invariant at the await boundary even
- * though ordinary tool mutations are serialized: canonical Workflow mirrors
- * and session lifecycle hooks can still change module state independently.
+ * Re-check every task-level authority and graph invariant at the await
+ * boundary even though ordinary tool mutations are serialized: canonical
+ * Workflow mirrors and session lifecycle hooks can still change module state
+ * independently. The checks are deliberately scoped to the mutated task (deep
+ * compare, permissions, dependency graph, in_progress uniqueness, transition
+ * validity) rather than a global revision counter, so unrelated concurrent
+ * changes — e.g. a teammate updating a different task — do not force a
+ * spurious retry.
  */
 function revalidateAsyncTodoMutation(check: AsyncTodoMutationCheck): TodoTask {
   assertTodoGeneration(check.generation);
-  if (todoRevision !== check.revision) {
-    throw new Error(`Todo state changed while activating task #${check.before.id}; retry the mutation.`);
-  }
 
   const current = tasks.get(check.before.id);
   if (!current || current.status === "deleted") {
@@ -1534,7 +1566,6 @@ async function ensureSkillActivation(task: TodoTask): Promise<AnySkillActivation
     return cached;
   }
   const generation = todoGeneration;
-  const revisionBeforeActivation = todoRevision;
   const before = cloneTodoTask(task);
   let activation: SkillActivation;
   try {
@@ -1557,13 +1588,23 @@ async function ensureSkillActivation(task: TodoTask): Promise<AnySkillActivation
     if (stale) return stale;
     return degradedActivation(task, error);
   }
-  const current = revalidateAsyncTodoMutation({
-    generation,
-    revision: revisionBeforeActivation,
-    before,
-    draft: before,
-    actor: ROOT_TODO_ACTOR,
-  });
+  // The revalidation shares the fail-open constraint above: a concurrent Todo
+  // mutation during the activate await must not escape this context-hook path
+  // as an exception. On conflict the fresh activation still serves this turn,
+  // but nothing is cached or persisted — the next turn re-activates against
+  // the settled state. This also keeps the persist below from racing queued
+  // mutations: it only runs when the task provably did not change.
+  let current: TodoTask;
+  try {
+    current = revalidateAsyncTodoMutation({
+      generation,
+      before,
+      draft: before,
+      actor: ROOT_TODO_ACTOR,
+    });
+  } catch {
+    return activation;
+  }
   const nextMetadata: SkillActivationMetadata = {
     activationId: activation.activationId,
     stackRevision: activation.stackRevision,

@@ -47,6 +47,16 @@ export interface MaestroCapabilitiesV10 {
 export interface RunCliNegotiatedSupport {
   execution_generation: boolean;
   core_execution_lease: boolean;
+  /**
+   * Optional capability, never a modern-protocol requirement.
+   *
+   * @deprecated Superseded by the Session/Run minimal-state architecture
+   * (docs/session-run-minimal-state-architecture-20260812.md): v3 removes the
+   * distributed operation registry/drain entirely. Kept only so the
+   * migration-period operation claim/heartbeat/drain experiment stays usable
+   * against cores that still advertise it.
+   */
+  execution_operation_drain: boolean;
   "run-response/1.1": boolean;
 }
 
@@ -177,6 +187,10 @@ export class RunCliAdapter {
   }
 
   async supportsNewMutations(): Promise<boolean> {
+    // execution_operation_drain is deliberately NOT required here: plan-B v3
+    // cores never advertise it, yet they fully support the modern protocol.
+    // When absent, operation claim/heartbeat/release/drain features are
+    // disabled instead (see WorkflowCoordinator gating).
     const support = (await this.capabilities()).support;
     return support.execution_generation
       && support.core_execution_lease
@@ -292,7 +306,7 @@ export class RunCliAdapter {
    */
   async exec(argv: readonly string[]): Promise<RunCliResult> {
     const family = argv[0];
-    const acceptsWorkflowRoot = family === "run" || family === "session" || family === "plan";
+    const acceptsWorkflowRoot = family === "run" || family === "session" || family === "execution" || family === "plan";
     const args = acceptsWorkflowRoot && !argv.some((argument) => argument === "--workflow-root")
       ? [...argv, "--workflow-root", this.workflowRoot]
       : [...argv];
@@ -366,6 +380,8 @@ export class RunCliAdapter {
       support: Object.freeze({
         execution_generation: writesExecutionV10 && structured.features.execution_generation,
         core_execution_lease: writesExecutionV10 && structured.features.core_execution_lease,
+        // Optional: cores aligned with plan B do not broadcast this feature at all.
+        execution_operation_drain: writesExecutionV10 && structured.features.execution_operation_drain === true,
         "run-response/1.1": structured.run_response_writes.includes("run-response/1.1"),
       }),
       diagnostic: null,
@@ -427,6 +443,8 @@ const maestroCapabilitiesV10Schema = z.object({
     execution_generation: z.boolean(),
     core_execution_lease: z.boolean(),
     execution_handoff: z.boolean(),
+    // Optional capability: plan-B v3 cores omit it; absence means unsupported.
+    execution_operation_drain: z.boolean().default(false),
     session_statusless: z.boolean(),
     legacy_session_aliases: z.boolean(),
   }).catchall(z.boolean()),
@@ -435,6 +453,7 @@ const maestroCapabilitiesV10Schema = z.object({
 const NO_NEW_PROTOCOL_SUPPORT: Readonly<RunCliNegotiatedSupport> = Object.freeze({
   execution_generation: false,
   core_execution_lease: false,
+  execution_operation_drain: false,
   "run-response/1.1": false,
 });
 

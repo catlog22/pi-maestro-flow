@@ -15,7 +15,7 @@ import { MailboxService } from "./service.ts";
 import { MailboxRollout, type RolloutMode } from "./rollout.ts";
 import type { MailboxAuthority } from "./router.ts";
 import type { TeammateState } from "../../shared/types.ts";
-import { canProxySendTo } from "../teammate-core.ts";
+import { canProxySendTo, LIVE_AGENT_STATUSES } from "../teammate-core.ts";
 import type { RpcMessageMode } from "../../runs/execution.ts";
 
 // --- Env Parsing ---
@@ -71,12 +71,25 @@ export function createMailboxAuthority(context: MailboxHostContext): MailboxAuth
       const agent = context.state.activeRuns.get(recipientCorrelationId);
       if (!agent) return false;
       // Fenced when the child lease is no longer writable by the child (parking/handoff).
-      return agent.lease !== undefined && agent.lease.state !== "active";
+      if (agent.lease !== undefined && agent.lease.state !== "active") return true;
+      // Spawn/restart wiring window: a live (non-sleeping) agent whose stdin
+      // is not writable yet. Hold the message until the pipe is wired instead
+      // of dead-lettering a transient state. Sleeping agents are excluded —
+      // their injection path performs the wake/cold-restart itself.
+      return LIVE_AGENT_STATUSES.has(agent.status)
+        && agent.status !== "sleeping"
+        && !agent.stdin?.writable;
     },
     isStaleUnauthorized(recipientCorrelationId) {
       const agent = context.state.activeRuns.get(recipientCorrelationId);
       if (!agent) return false;
-      return !agent.stdin?.writable && agent.status !== "sleeping";
+      // Only a settled agent is permanently unreachable. A transient
+      // unwritable stdin on a live agent is reported as fenced (hold) above,
+      // so in-flight messages survive restarts instead of dead-lettering.
+      return !LIVE_AGENT_STATUSES.has(agent.status);
+    },
+    managesRecipient(recipientCorrelationId) {
+      return context.state.activeRuns.has(recipientCorrelationId);
     },
   };
 }

@@ -55,6 +55,13 @@ export declare class MailboxFileStore {
     isSeen(key: string): Promise<boolean>;
     /** Mark a dedup key as seen for durable deduplication. */
     markSeen(key: string): Promise<void>;
+    /**
+     * Atomically claim a dedup key via exclusive create ("wx"). Returns false
+     * when the key was already seen.
+     */
+    tryMarkSeen(key: string): Promise<boolean>;
+    /** Release a dedup key claimed by tryMarkSeen (enqueue failed after claim). */
+    unmarkSeen(key: string): Promise<void>;
     /** List all seen markers (filename + seenAt) for GC retention sweeping. */
     listSeen(): Promise<Array<{
         file: string;

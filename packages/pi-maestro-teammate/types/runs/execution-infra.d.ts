@@ -157,7 +157,7 @@ export interface RunTeammateOptions {
     /** Additional child-only environment values (never applied to the host). */
     childEnvironment?: Record<string, string | undefined>;
     initialLeaseToken?: LeaseToken | ((correlationId: string) => LeaseToken | undefined);
-    onChildSpawned?: (stdin: import("node:stream").Writable, sendControl: (message: Record<string, unknown>) => boolean, sessionDir?: string, correlationId?: string) => void;
+    onChildSpawned?: (stdin: import("node:stream").Writable, sendControl: (message: Record<string, unknown>) => boolean, sessionDir?: string, correlationId?: string, generation?: number) => void;
     /** Existing persisted Pi session to load for a cold logical-agent restart. */
     resumeSessionFile?: string;
     /** Runtime generation used to fence callbacks from a replaced child process. */
@@ -185,6 +185,8 @@ export interface RunTeammateOptions {
     resultReadyGraceMs?: number;
     /** @internal Test seam for child output-limit compaction/continuation recovery. */
     outputLimitRecoveryTimeoutMs?: number;
+    /** @internal Test seam for the corrective structured-output continuation deadline. */
+    structuredOutputRecoveryTimeoutMs?: number;
     /** @internal Test seam for the in-flight tool heartbeat interval. */
     toolExecutionHeartbeatMs?: number;
     /** @internal Test seam for the interrupting-steer acknowledgement deadline. */
@@ -227,6 +229,12 @@ export declare const STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS: {
     readonly resultReadyGrace: "The teammate published a result but did not settle with schema-valid structured_output in time.";
 };
 export declare const STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTIC_SET: Set<string>;
+/**
+ * Child-facing corrective continuation issued once when a wakeable child ends
+ * its run without schema-valid structured_output. Instructs a single bounded
+ * resubmission and explicitly forbids repeating any other work.
+ */
+export declare const STRUCTURED_OUTPUT_RECOVERY_PROMPT: string;
 export declare function isStructuredOutputSettlementDiagnostic(content: string): boolean;
 /**
  * Correlation ids are protocol identities, not filesystem-safe names.
@@ -517,6 +525,7 @@ export declare function cleanupFile(filePath: string): void;
 export declare function createProgress(agent: string, startTime: number): AgentProgress;
 export declare const CHILD_TERMINATION_GRACE_MS = 5000;
 export declare const RESULT_READY_GRACE_MS = 60000;
+export declare const STRUCTURED_OUTPUT_RECOVERY_TIMEOUT_MS = 60000;
 export declare const OUTPUT_LIMIT_RECOVERY_TIMEOUT_MS: number;
 export declare const FIRST_ACTIVITY_TIMEOUT_MS = 120000;
 /**

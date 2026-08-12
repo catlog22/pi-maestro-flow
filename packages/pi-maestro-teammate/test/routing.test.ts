@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { resolveReplyTo } from "../src/shared/routing.ts";
+import { resolveReplyTo, resolveAgentCompletionTarget, formatLocalAgentMessage } from "../src/shared/routing.ts";
 import { applyModelRouting } from "../src/models/model-routing.ts";
 
 test("reply routing defaults missing protocol versions to v2 caller semantics", () => {
@@ -13,6 +13,24 @@ test("reply routing preserves explicit v1 and explicit target behavior", () => {
   assert.equal(resolveReplyTo({ protocol_version: 1 }), "caller");
   assert.equal(resolveReplyTo({ protocol_version: 1, name: "named", reply_to: "caller" }), "caller");
   assert.equal(resolveReplyTo({ protocol_version: 2, reply_to: "main" }), "main");
+});
+
+test("resolveAgentCompletionTarget reads stored reply_to with v2 defaults", () => {
+  assert.equal(resolveAgentCompletionTarget({ replyTo: "main", name: "worker" }), "main");
+  assert.equal(resolveAgentCompletionTarget({ name: "worker" }), "caller");
+  assert.equal(resolveAgentCompletionTarget({ replyTo: "caller" }), "caller");
+});
+
+test("formatLocalAgentMessage wraps local payloads with sender identity", () => {
+  const formatted = formatLocalAgentMessage({
+    message: "please review",
+    messageKind: "coordination",
+    senderLabel: "@reviewer",
+    replyToSelector: "reviewer#abc12345",
+  });
+  assert.match(formatted, /\[teammate:coordination\] from @reviewer/);
+  assert.match(formatted, /Reply with teammate-send to "reviewer#abc12345"/);
+  assert.match(formatted, /please review$/);
 });
 
 test("applyModelRouting preserves top-level maxNestingDepth", () => {

@@ -62,6 +62,8 @@ import {
   FIRST_ACTIVITY_TIMEOUT_MS,
   OUTPUT_LIMIT_RECOVERY_TIMEOUT_MS,
   RESULT_READY_GRACE_MS,
+  STRUCTURED_OUTPUT_RECOVERY_PROMPT,
+  STRUCTURED_OUTPUT_RECOVERY_TIMEOUT_MS,
   STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS,
   addUsageSnapshot,
   appendBoundedTranscriptMessage,
@@ -622,6 +624,8 @@ interface AttemptState {
   pendingStructuredOutput?: StructuredOutputCandidate;
   capturedStructuredOutput: unknown;
   structuredOutputValidationFailure?: string;
+  /** Set when the child's structured_output tool execution itself failed. */
+  structuredOutputAttemptFailed: boolean;
   reportedRuntimeErrors: Set<string>;
   runtimeFailure?: string;
   /**
@@ -684,6 +688,7 @@ interface AttemptTimers {
   resultReadyGrace?: ReturnType<typeof setTimeout>;
   outputLimitRecovery?: ReturnType<typeof setTimeout>;
   interruptingSteer?: ReturnType<typeof setTimeout>;
+  structuredOutputRecovery?: ReturnType<typeof setTimeout>;
   toolHeartbeat?: ReturnType<typeof setInterval>;
 }
 
@@ -693,6 +698,8 @@ interface PendingInterruptingSteer {
   message: string;
   token?: LeaseToken;
   phase: "aborting" | "prompting";
+  /** Set when the interrupted turn settles; a later turn_start means the steer missed its window. */
+  turnSettledDuringAbort?: boolean;
 }
 
 /**
@@ -843,6 +850,7 @@ async function runSingleAttempt(
     turnLifecycleSettled: false,
     lastAssistantStopReason: undefined,
     outputLimitRecoveryPending: false,
+    structuredOutputAttemptFailed: false,
     resolvedModel: modelOverride ?? params.model ?? agentConfig.model ?? "unknown",
     completedInputTokens: 0,
     completedOutputTokens: 0,
@@ -991,6 +999,7 @@ async function runSingleAttempt(
       if (timers.resultReadyGrace) clearTimeout(timers.resultReadyGrace);
       if (timers.outputLimitRecovery) clearTimeout(timers.outputLimitRecovery);
       if (timers.interruptingSteer) clearTimeout(timers.interruptingSteer);
+      if (timers.structuredOutputRecovery) clearTimeout(timers.structuredOutputRecovery);
       if (timers.toolHeartbeat) clearInterval(timers.toolHeartbeat);
     };
 
@@ -1075,6 +1084,12 @@ async function runSingleAttempt(
         timers.interruptingSteer = undefined;
       }
       return pending;
+    };
+
+    const markSteerTurnSettledDuringAbort = (): void => {
+      if (pendingInterruptingSteer?.phase === "aborting") {
+        pendingInterruptingSteer.turnSettledDuringAbort = true;
+      }
     };
 
     /**
@@ -1179,7 +1194,7 @@ async function runSingleAttempt(
       interruptingSteerHandlers.set(child.stdin, requestInterruptingSteer);
       options.onChildSpawned?.(child.stdin, (message) => {
         return sendChildIpcMessage(child, message);
-      }, sessionDir, correlationId);
+      }, sessionDir, correlationId, options.runtimeGeneration);
     }
 
     function readStructuredOutput(cleanup: boolean): unknown | undefined {
@@ -1272,6 +1287,7 @@ async function runSingleAttempt(
         state.pendingStructuredOutput = undefined;
         state.capturedStructuredOutput = undefined;
         state.structuredOutputValidationFailure = undefined;
+        state.structuredOutputAttemptFailed = false;
         state.reportedRuntimeErrors.clear();
         state.runtimeFailure = undefined;
         state.lastAssistantStopReason = undefined;
@@ -1360,6 +1376,10 @@ async function runSingleAttempt(
         // output was captured instead of blocking on a missing agent_settled/close.
         const structuredOutput = readStructuredOutput(true);
         if (structuredOutput === undefined) {
+          // A corrective continuation is already in flight; the resumed turn
+          // has not produced a value yet, so keep waiting for its settlement.
+          if (structuredOutputRecoveryActive) return;
+          if (startStructuredOutputRecovery()) return;
           appendStructuredOutputFailure();
           appendBoundedTranscriptMessage(messages, {
             role: "system",
@@ -1391,6 +1411,96 @@ async function runSingleAttempt(
         });
         completeTurn(readStructuredOutput(true), true, 1);
       }, deadlineMs);
+    }
+
+    /**
+     * Bounded corrective continuation for a wakeable child that ended its run
+     * without schema-valid structured_output. The child process is still alive
+     * at agent_end/agent_settled, so resume it with one RPC prompt and wait for
+     * a fresh turn that must submit the value through the structured_output
+     * tool. This continues the same process — never a fresh replay — so the
+     * side-effect replay fence does not apply. Provider/runtime failures and
+     * non-wakeable (fork) children keep the existing immediate-failure
+     * settlement. At most one continuation per run; the recovery timer bounds
+     * a child that never responds.
+     */
+    let structuredOutputRecoveryActive = false;
+    let structuredOutputRecoveryRequestId: string | undefined;
+
+    function startStructuredOutputRecovery(): boolean {
+      if (
+        !params.outputSchema
+        || !wakeable
+        || state.terminal
+        || state.turnLifecycleSettled
+        || pendingInterruptingSteer
+        || structuredOutputRecoveryActive
+        || state.runtimeFailure
+        // An invalid submission already failed the documented reject-and-correct
+        // contract inside the turn; report it instead of prompting a resubmission.
+        || state.structuredOutputValidationFailure !== undefined
+        // A structured_output tool execution that failed is likewise a rejected
+        // attempt the child chose not to correct; never retry it blindly.
+        || state.structuredOutputAttemptFailed
+        || !child.stdin
+      ) return false;
+      const nonce = randomUUID();
+      structuredOutputRecoveryActive = true;
+      structuredOutputRecoveryRequestId = `teammate-structured-output-recovery-${nonce}`;
+      const deadlineMs = options.structuredOutputRecoveryTimeoutMs ?? STRUCTURED_OUTPUT_RECOVERY_TIMEOUT_MS;
+      const diagnostic =
+        `Teammate completed without schema-valid structured_output; issued a bounded corrective prompt `
+        + `(agent=${params.agent}, correlationId=${correlationId}, timeoutMs=${deadlineMs}).`;
+      appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
+      progress.lastMessage = diagnostic;
+      progress.status = "running";
+      progress.phase = "continuing";
+      progress.resultReadyAt = undefined;
+      options.onProgress?.(progress);
+      timers.structuredOutputRecovery = setTimeout(() => {
+        timers.structuredOutputRecovery = undefined;
+        if (!structuredOutputRecoveryActive || state.terminal || state.turnLifecycleSettled) return;
+        structuredOutputRecoveryActive = false;
+        structuredOutputRecoveryRequestId = undefined;
+        appendStructuredOutputFailure();
+        appendBoundedTranscriptMessage(messages, {
+          role: "system",
+          content:
+            "The teammate did not submit schema-valid structured_output after the corrective prompt.",
+        });
+        completeTurn(readStructuredOutput(true), true, 1);
+      }, deadlineMs);
+      // Settlement-critical deadline: like outputLimitRecovery, it must keep
+      // the event loop alive even when no child handle remains (fake-child
+      // tests, detached streams).
+      const sent = writeChildStdinLine(child.stdin, JSON.stringify({
+        id: structuredOutputRecoveryRequestId,
+        type: "prompt",
+        message: STRUCTURED_OUTPUT_RECOVERY_PROMPT,
+      }));
+      if (!sent) {
+        structuredOutputRecoveryActive = false;
+        structuredOutputRecoveryRequestId = undefined;
+        if (timers.structuredOutputRecovery) clearTimeout(timers.structuredOutputRecovery);
+        timers.structuredOutputRecovery = undefined;
+        return false;
+      }
+      return true;
+    }
+
+    /** Settle the corrective continuation as a failure when Pi rejects the prompt. */
+    function failStructuredOutputRecovery(): void {
+      if (!structuredOutputRecoveryActive || state.terminal || state.turnLifecycleSettled) return;
+      structuredOutputRecoveryActive = false;
+      structuredOutputRecoveryRequestId = undefined;
+      if (timers.structuredOutputRecovery) clearTimeout(timers.structuredOutputRecovery);
+      timers.structuredOutputRecovery = undefined;
+      appendStructuredOutputFailure();
+      appendBoundedTranscriptMessage(messages, {
+        role: "system",
+        content: STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS.agentEnd,
+      });
+      completeTurn(readStructuredOutput(true), true, 1);
     }
 
     function appendStructuredOutputFailure(): void {
@@ -1430,6 +1540,9 @@ async function runSingleAttempt(
 
     /** A new agent loop starts: the previous turn's settlement no longer applies. */
     function onTurnBoundary(): void {
+      if (pendingInterruptingSteer?.phase === "aborting" && pendingInterruptingSteer.turnSettledDuringAbort) {
+        degradeInterruptingSteerToFollowUp("turn advanced before abort was acknowledged");
+      }
       if (pendingInterruptingSteer?.phase === "prompting") {
         pendingInterruptingSteer = undefined;
         if (timers.interruptingSteer) {
@@ -1466,6 +1579,7 @@ async function runSingleAttempt(
       state.pendingStructuredOutput = undefined;
       state.capturedStructuredOutput = undefined;
       state.structuredOutputValidationFailure = undefined;
+      state.structuredOutputAttemptFailed = false;
       options.onProgress?.(progress);
     }
 
@@ -1647,6 +1761,7 @@ async function runSingleAttempt(
           state.capturedStructuredOutput = pending.value;
         } else if (event.isError === true && idsMatch) {
           state.pendingStructuredOutput = undefined;
+          state.structuredOutputAttemptFailed = true;
         }
         const structuredOutput = readStructuredOutput(false);
         if (event.isError !== true && structuredOutput !== undefined) {
@@ -1702,6 +1817,10 @@ async function runSingleAttempt(
     function settleAgentSession(): void {
       const structuredOutput = readStructuredOutput(false);
       if (params.outputSchema && structuredOutput === undefined) {
+        // A corrective continuation is already in flight; wait for the resumed
+        // turn instead of settling the run while it is still pending.
+        if (structuredOutputRecoveryActive) return;
+        if (startStructuredOutputRecovery()) return;
         appendStructuredOutputFailure();
         appendBoundedTranscriptMessage(messages, {
           role: "system",
@@ -1765,6 +1884,7 @@ async function runSingleAttempt(
     function onAgentSettled(): void {
       state.settlementCapability = "agent_settled";
       if (pendingInterruptingSteer) {
+        markSteerTurnSettledDuringAbort();
         steerSettlementSwallowed = true;
         progress.status = "running";
         progress.phase = "continuing";
@@ -1823,6 +1943,10 @@ async function runSingleAttempt(
     }
 
     function onResponse(event: JsonLineEvent): void {
+      if (structuredOutputRecoveryActive && typeof event.id === "string" && event.id === structuredOutputRecoveryRequestId) {
+        if (event.success !== true) failStructuredOutputRecovery();
+        return;
+      }
       const pending = pendingInterruptingSteer;
       if (!pending || typeof event.id !== "string") return;
       if (pending.phase === "aborting" && event.id === pending.abortRequestId) {

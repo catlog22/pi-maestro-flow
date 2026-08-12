@@ -18,6 +18,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
 import { aggregateAgentRunPhase } from "../shared/agent-status.ts";
+import { resolveAgentCompletionTarget } from "../shared/routing.ts";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams } from "./schemas.ts";
 import {
@@ -68,6 +69,7 @@ import {
   type WorkspaceOwnerState,
   type WorkspacePeerCommandConsumer,
   type WorkspacePeerPublisher,
+  type WorkspacePeerMessageKind,
   type WorkspacePeerWindowListing,
   type WorkspaceResolvedTarget,
   type WorkspaceSettledSnapshot,
@@ -259,6 +261,7 @@ import {
   applyAgentRetryState, applyAgentResultReadyState, clearAgentResultReadyState,
   markSettledResultInspectable, recordChildReclamationOutcome, hasTeammateWidgetWork,
   emitComplete, safeSendMessage, notifyBackgroundFailure, replyProxyFailure,
+  deliverTeammateCompleteNotification,
   bindAgentName, removeAgentFromRegistry, resolveAgentCorrelationId,
   agentActiveMs, ts, buildAgentList, buildRoleList,
   handleChildInteractionRequest, handleChildRpcUiRequest,
@@ -890,8 +893,11 @@ export async function handleProxyRequest(
   workspacePeerList?: () => Promise<readonly WorkspacePeerWindowListing[]>,
   sessionSend?: (request: {
     selector: string;
+    targetCorrelationId?: string;
+    senderCorrelationId?: string;
     message: string;
     mode: "steer" | "follow_up" | "abort";
+    messageKind?: WorkspacePeerMessageKind;
   }) => Promise<{
     delivered: boolean;
     error?: string;
@@ -1138,6 +1144,7 @@ export async function handleProxyRequest(
         expectsStructuredOutput: normalizedTasks
           ? p.outputSchema !== undefined
           : singleTask.outputSchema !== undefined,
+        replyTo: routedParams.reply_to,
         ...(normalizedTasks ? { progress: progressSnapshot() } : {}),
       };
       state.activeRuns.set(cid, activeAgent);
@@ -1286,39 +1293,18 @@ export async function handleProxyRequest(
               ...(nestedChildCalls.size > 0 ? { childCalls: [...nestedChildCalls.values()] } : {}),
             },
           };
-          const delivered = safeSendMessage(
+          const replyTarget = resolveAgentCompletionTarget(activeAgent);
+          const delivered = deliverTeammateCompleteNotification({
             pi,
+            state,
             envelope,
-            { triggerTurn: true },
-          );
+            replyTarget,
+            parentCid,
+            parentSessionId,
+            sessionGeneration: state.sessionGeneration ?? 0,
+          });
           if (!delivered) {
             markSettledResultInspectable(state, cid);
-          }
-          // Passive completion delivery to the dispatching child agent. Nested
-          // dispatches execute in the root process, so the child that issued
-          // this background dispatch only ever saw the immediate ack. Forward
-          // the same teammate-complete envelope over the root->child IPC
-          // channel (agent.sendControl) and let the child inject it into its
-          // own session, where it wakes the agent for a new turn. Root-owned
-          // dispatches have no parentCid and are covered by the root delivery
-          // above. Fenced: the parent must still be live (non-terminal) and
-          // own an open child channel.
-          if (parentCid) {
-            const parentAgent = state.activeRuns.get(parentCid);
-            if (parentSessionId
-              && parentAgent?.sessionId === parentSessionId
-              && parentAgent.sendControl
-              && parentAgent.status !== "completed"
-              && parentAgent.status !== "failed"
-              && parentAgent.status !== "terminated") {
-              parentAgent.sendControl({
-                type: "teammate_complete_delivery",
-                correlationId: parentCid,
-                generation: state.sessionGeneration ?? 0,
-                sessionId: parentSessionId,
-                envelope,
-              });
-            }
           }
         }
         finishProxyDispatchTracking();
@@ -1349,16 +1335,20 @@ export async function handleProxyRequest(
           terminalStatus === "terminated",
           toStructuredResults([result], dispatchOriginCwd),
         );
-        if (!safeSendMessage(
+        if (!deliverTeammateCompleteNotification({
           pi,
-          {
+          state,
+          envelope: {
             customType: "teammate-complete",
             content: displayMessageForResult(result),
             display: true,
             details: { mode: "single", results: [result] },
           },
-          { triggerTurn: true },
-        )) markSettledResultInspectable(state, result.correlationId);
+          replyTarget: resolveAgentCompletionTarget(activeAgent),
+          parentCid,
+          parentSessionId,
+          sessionGeneration: state.sessionGeneration ?? 0,
+        })) markSettledResultInspectable(state, result.correlationId);
       };
 
       normalizedTasks?.forEach((task, index) => {
@@ -1480,8 +1470,18 @@ export async function handleProxyRequest(
         }
         if (childAgent && childAgent !== activeAgent) {
           childAgent.lastActivityAt = Date.now();
-          childAgent.status = data.status === "completed" ? "sleeping" : data.status;
-          if (data.status === "running") childAgent.retry = undefined;
+          const nextStatus = data.status === "completed" ? "sleeping" : data.status;
+          // Same fence as the root dispatch path: throttled snapshots must not
+          // resurrect a settled agent nor flip a sleeping agent back to a live
+          // run state — wake/restart paths own those transitions.
+          const resurrectsSettled = !LIVE_AGENT_STATUSES.has(childAgent.status)
+            && nextStatus !== childAgent.status;
+          const wakesSleeping = childAgent.status === "sleeping"
+            && (nextStatus === "pending" || nextStatus === "running" || nextStatus === "retrying");
+          if (!resurrectsSettled && !wakesSleeping) {
+            childAgent.status = nextStatus;
+            if (data.status === "running") childAgent.retry = undefined;
+          }
           if (data.lastMessage) {
             const lastLine = data.lastMessage.split("\n").pop()?.trim();
             if (lastLine) {
@@ -1621,8 +1621,11 @@ export async function handleProxyRequest(
           const target = state.activeRuns.get(childId) ?? activeAgent;
           return target.lease ? leaseToken(target.lease) : undefined;
         },
-        onChildSpawned: (stdin, sendControl, sessionDir, childId) => {
+        onChildSpawned: (stdin, sendControl, sessionDir, childId, generation) => {
           const target = childId ? state.activeRuns.get(childId) ?? activeAgent : activeAgent;
+          // Generation fence, mirroring onChildClosed: a stale child from a
+          // superseded run must not capture the agent's stdin/sendControl.
+          if ((target.runtimeGeneration ?? 0) !== (generation ?? 0)) return;
           const startedAt = Date.now();
           target.stdin = stdin;
           target.sendControl = sendControl;
@@ -1810,8 +1813,8 @@ export async function handleProxyRequest(
             runtimeGeneration: generation,
           };
           const onChildSpawned = runOpts.onChildSpawned;
-          restartOptions.onChildSpawned = (stdin, sendControl, sessionDir, childId) => {
-            if (ownsRuntime()) onChildSpawned?.(stdin, sendControl, sessionDir, childId ?? target.correlationId);
+          restartOptions.onChildSpawned = (stdin, sendControl, sessionDir, childId, callbackGeneration) => {
+            if (ownsRuntime()) onChildSpawned?.(stdin, sendControl, sessionDir, childId ?? target.correlationId, callbackGeneration);
           };
           const onChildEvent = runOpts.onChildEvent;
           restartOptions.onChildEvent = (event) => {
@@ -1858,16 +1861,20 @@ export async function handleProxyRequest(
               status === "terminated",
               toStructuredResults([terminalResult], dispatchOriginCwd),
             );
-            safeSendMessage(
+            deliverTeammateCompleteNotification({
               pi,
-              {
+              state,
+              envelope: {
                 customType: "teammate-complete",
                 content: displayMessageForResult(terminalResult),
                 display: true,
                 details: { mode: "single", results: [terminalResult] },
               },
-              { triggerTurn: true },
-            );
+              replyTarget: resolveAgentCompletionTarget(target),
+              parentCid,
+              parentSessionId,
+              sessionGeneration: state.sessionGeneration ?? 0,
+            });
           };
           const onTurnComplete = runOpts.onTurnComplete;
           restartOptions.onTurnComplete = (result, status) => {
@@ -2306,6 +2313,7 @@ export async function handleProxyRequest(
       const to = params.to as string;
       const message = (params.message as string | undefined) ?? "";
       const requestedMode = (params.mode as RpcMessageMode) ?? "follow_up";
+      const messageKind = (params.kind as WorkspacePeerMessageKind | undefined) ?? "coordination";
       const localCid = resolveAgentCorrelationId(state, to);
 
       if (to.startsWith("owner:") && (sessionSend || workspacePeerSend) && !localCid) {
@@ -2330,9 +2338,17 @@ export async function handleProxyRequest(
           }});
           return;
         }
+        const routedMode = messageKind === "status" ? "follow_up" : requestedMode;
         const delivered = sessionSend
-          ? (await sessionSend({ selector: to, message, mode: requestedMode })).delivered
-          : await workspacePeerSend!(to, message, requestedMode);
+          ? (await sessionSend({
+            selector: to,
+            targetCorrelationId: cid,
+            senderCorrelationId: parentCid,
+            message,
+            mode: routedMode,
+            messageKind,
+          })).delivered
+          : await workspacePeerSend!(to, message, routedMode);
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{ type: "text", text: delivered ? `Message delivered to workspace target ${to}.` : `Message rejected for workspace target ${to}.` }],
           isError: !delivered,
@@ -2381,7 +2397,14 @@ export async function handleProxyRequest(
       }
       if (sessionSend) {
         const mode = requestedMode === "steer" || requestedMode === "abort" ? requestedMode : "follow_up";
-        const delivery = await sessionSend({ selector: to, message, mode });
+        const delivery = await sessionSend({
+          selector: to,
+          targetCorrelationId: cid,
+          senderCorrelationId: parentCid,
+          message,
+          mode,
+          messageKind,
+        });
         if (!delivery.delivered) {
           reply({ type: "teammate_proxy_result", requestId, result: {
             content: [{ type: "text", text: delivery.error ?? `Failed to send message to "${to}".` }],

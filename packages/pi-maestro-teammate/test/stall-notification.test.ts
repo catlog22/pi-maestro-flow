@@ -380,3 +380,29 @@ test("expected-silence phases are not shortened by wait or notification override
   sweepStalledAgents(state, notify, now);
   assert.equal(notifications.length, 1, "the extended expected-silence window is still bounded");
 });
+
+test("an agent with a child-reported in-flight tool is never reported stalled", () => {
+  const state = makeState();
+  const now = Date.now();
+  const busy = addAgent(state, "busy", {
+    notifyOnStall: true,
+    phase: "tool-execution",
+    lastActivityAt: now - 10 * TEAMMATE_STALL_TIMEOUT_MS,
+  });
+  const target = { kind: "agent" as const, agent: busy };
+  const { notifications, notify } = collectNotifications();
+
+  // The in-flight tool is the child's own liveness report; a stale clock from
+  // dropped heartbeat ticks must not turn a busy agent into a stall.
+  assert.equal(statusForWatchTarget(target, now, state), undefined);
+  assert.equal(statusForWatchTarget(target, now, state, TEAMMATE_STALL_NOTIFY_IDLE_MS), undefined);
+  assert.equal(watchTargetStalledAt(target, state), Number.POSITIVE_INFINITY);
+  sweepStalledAgents(state, notify, now);
+  assert.equal(notifications.length, 0);
+
+  // Leaving tool-execution restores the bounded stall deadline.
+  busy.phase = "continuing";
+  assert.equal(statusForWatchTarget(target, now, state), "stalled");
+  sweepStalledAgents(state, notify, now);
+  assert.equal(notifications.length, 1);
+});

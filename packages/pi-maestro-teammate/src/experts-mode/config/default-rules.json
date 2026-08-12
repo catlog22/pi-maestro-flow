@@ -1,7 +1,7 @@
 {
   "version": 1,
   "defaultTaskType": "development",
-  "defaultAgent": "general-executor",
+  "defaultAgent": "general",
   "defaultPipeline": ["explore", "planning", "development", "review"],
   "pipelines": {
     "tiny_fix": ["development", "review"],

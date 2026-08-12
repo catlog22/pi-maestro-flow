@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, Skill } from "@earendil-works/pi-coding-agent";
+import { TodoSkillLoader } from "../src/skills/skill-loader.ts";
 import { todoOriginKey, type TodoMirrorTaskSpec } from "../src/session/types.ts";
 import {
   executeTodo,
@@ -115,11 +119,17 @@ test("Todo projection generation authoritatively clears mirrors across Session i
 
 test("Todo projection replaces same-Session mirrors and activation when identity generation changes", async () => {
   initTodo({ appendEntry() {} } as never);
-  const todoContext = context([]);
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-projection-activation-"));
+  const todoContext = context([], await demoSkillLoader(root));
   const extensionContext = { cwd: "D:/workspace", ui: { setStatus() {} } } as unknown as ExtensionContext;
   onSessionStart(todoContext);
   try {
-    const specs = mirrorSpecs().slice(1);
+    // Skill-bound mirror: skill-less tasks intentionally carry no activation
+    // metadata, so the activation lifecycle needs a real skill to observe.
+    const specs = mirrorSpecs().slice(1).map((spec) => ({
+      ...spec,
+      skills: [{ name: "demo", role: "primary" as const }],
+    }));
     const generation1 = "canonical:valid:session-1:1";
     const generation2 = "canonical:valid:session-1:2";
     const first = reconcileMirrorTasks(specs, extensionContext, generation1);
@@ -145,6 +155,7 @@ test("Todo projection replaces same-Session mirrors and activation when identity
     assert.equal(replacement.skillActivation, undefined);
   } finally {
     onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -223,20 +234,26 @@ test("Todo projection publishes no mirror or generation cleanup when persistence
     appendEntry() { throw new Error("persist failed"); },
   } as never);
   useSuccessfulPersist();
-  const todoContext = context([]);
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-projection-persist-"));
+  const todoContext = context([], await demoSkillLoader(root));
   const extensionContext = { cwd: "D:/workspace", ui: { setStatus() {} } } as unknown as ExtensionContext;
   onSessionStart(todoContext);
+  // Skill-bound active mirror: skill-less tasks carry no activation metadata,
+  // and the failed-cleanup snapshot comparison below must cover activation state.
+  const skilledSpecs = () => mirrorSpecs().map((spec) => (spec.status === "in_progress"
+    ? { ...spec, skills: [{ name: "demo", role: "primary" as const }] }
+    : spec));
   try {
     useFailingPersist();
     const beforeCreate = getTodoCompactionSnapshot();
     assert.throws(
-      () => reconcileMirrorTasks(mirrorSpecs(), extensionContext, "canonical:valid:session-1:1"),
+      () => reconcileMirrorTasks(skilledSpecs(), extensionContext, "canonical:valid:session-1:1"),
       /persist failed/,
     );
     assert.deepEqual(getTodoCompactionSnapshot(), beforeCreate);
 
     useSuccessfulPersist();
-    reconcileMirrorTasks(mirrorSpecs(), extensionContext, "canonical:valid:session-1:1");
+    reconcileMirrorTasks(skilledSpecs(), extensionContext, "canonical:valid:session-1:1");
     const activeMirror = getVisibleTasks().find((task) => task.status === "in_progress")!;
     await executeTodo({ action: "update", id: activeMirror.id, status: "pending" }, extensionContext);
     await executeTodo({ action: "next" }, extensionContext);
@@ -254,6 +271,7 @@ test("Todo projection publishes no mirror or generation cleanup when persistence
   } finally {
     useSuccessfulPersist();
     onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -279,10 +297,33 @@ function mirrorSpecs(): TodoMirrorTaskSpec[] {
   ];
 }
 
-function context(entries: unknown[]): TodoContext {
+function context(entries: unknown[], skillLoader?: TodoSkillLoader): TodoContext {
   return {
     cwd: "D:/workspace",
     ui: { setStatus() {} },
     sessionManager: { getEntries: () => entries },
+    ...(skillLoader ? { skillLoader } : {}),
   };
+}
+
+async function demoSkillLoader(root: string): Promise<TodoSkillLoader> {
+  const agentDir = join(root, "agent");
+  const skillDir = join(root, ".pi", "skills", "demo");
+  await mkdir(skillDir, { recursive: true });
+  await mkdir(agentDir, { recursive: true });
+  const skillPath = join(skillDir, "SKILL.md");
+  await writeFile(skillPath, "---\nname: demo\ndescription: demo\n---\n# Demo instructions\n");
+  const skill = {
+    name: "demo",
+    description: "demo",
+    filePath: skillPath,
+    baseDir: skillDir,
+    sourceInfo: {} as Skill["sourceInfo"],
+    disableModelInvocation: false,
+  } satisfies Skill;
+  return new TodoSkillLoader({
+    cwd: root,
+    agentDir,
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [skill], diagnostics: [] }) },
+  });
 }

@@ -2002,7 +2002,7 @@ export function appendTaskTypeRoutingContext(
   const lines = [
     TASK_TYPE_ROUTING_START_MARKER,
     "## Teammate taskType routing",
-    "`taskType` selects configured model, fallback-model, and thinking defaults; it does not change the agent role, tools, permissions, or task scope.",
+    "`taskType` selects configured model, fallback-model, and thinking defaults (and, in experts mode, the default expert agent when none is given); it never changes a chosen agent's role, tools, permissions, or task scope.",
     "Set `tasks[].taskType` by the task's actual phase; top-level `taskType` is the default for all tasks. If omitted, the runtime uses the agent default or prompt inference and may inherit the parent model. Set `model` only to override routing.",
     "",
     "Legal task types (agents may declare more):",

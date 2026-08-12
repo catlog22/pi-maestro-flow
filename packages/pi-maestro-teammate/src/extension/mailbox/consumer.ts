@@ -44,9 +44,16 @@ export function selectNext(
   for (const env of candidates) {
     byPriority[env.priority].push(env);
   }
-  // FIFO within each priority lane (already sorted by senderSeq)
+  // FIFO within each priority lane. senderSeq is a per-sender in-memory
+  // counter (it resets on sender restart and collides across senders), so it
+  // cannot provide a global order; the enqueue timestamp governs, with
+  // senderSeq breaking same-millisecond ties (preserving per-sender FIFO for
+  // bursts) and messageId as a final deterministic tiebreak.
   for (const lane of PRIORITY_ORDER) {
-    byPriority[lane].sort((a, b) => a.senderSeq - b.senderSeq);
+    byPriority[lane].sort((a, b) =>
+      (a.createdAt - b.createdAt)
+      || (a.senderSeq - b.senderSeq)
+      || a.messageId.localeCompare(b.messageId));
   }
 
   // Starvation bound: after 8 consecutive high/critical, force one normal
@@ -133,8 +140,8 @@ export class MailboxConsumer extends EventEmitter {
   start(): void {
     if (this.#timer) return;
     this.#stopped = false;
-    void this.#poll();
-    this.#timer = setInterval(() => void this.#poll(), this.#pollMs);
+    void this.#pollSafe();
+    this.#timer = setInterval(() => void this.#pollSafe(), this.#pollMs);
     this.#timer.unref?.();
   }
 
@@ -143,13 +150,32 @@ export class MailboxConsumer extends EventEmitter {
     if (this.#timer) clearInterval(this.#timer);
     this.#timer = undefined;
     this.#stopRenewTimer();
-    await this.#polling;
+    await this.#polling?.catch(() => undefined);
   }
 
   /** Notify the consumer that same-process messages may be available. */
   notify(): void {
     if (this.#stopped) return;
-    void this.#poll();
+    void this.#pollSafe();
+  }
+
+  /**
+   * Poll wrapper that never rejects. The poll chain can throw before reaching
+   * the dispatch try/catch (stale-claim reclaim, listMessages, readEnvelope —
+   * any non-ENOENT fs error such as EPERM/EACCES on Windows). Escaping a
+   * `setInterval` callback as an unhandled rejection would terminate the host
+   * process, so surface it as an "error" event when a listener exists and
+   * otherwise swallow it to keep the host alive.
+   */
+  #pollSafe(): Promise<void> {
+    return this.#poll().catch((error) => {
+      if (this.listenerCount("error") > 0) {
+        this.emit("error", {
+          messageId: "",
+          error: error instanceof Error ? error.message : String(error),
+        } satisfies ConsumerErrorEvent);
+      }
+    });
   }
 
   /**
@@ -250,8 +276,12 @@ export class MailboxConsumer extends EventEmitter {
       if (this.#stopped) return;
       // Workspace isolation: never consume messages from other workspaces.
       if (envelope.workspaceId !== this.workspaceId) continue;
-      // "*" consumer matches every recipient; otherwise exact match required.
-      if (this.recipientCorrelationId !== "*" && envelope.recipientCorrelationId !== this.recipientCorrelationId) continue;
+      // "*" consumer matches every recipient owned by this host; foreign
+      // recipients are left in ready for another pi process in the workspace.
+      if (this.recipientCorrelationId !== "*"
+        && envelope.recipientCorrelationId !== this.recipientCorrelationId) continue;
+      if (this.recipientCorrelationId === "*"
+        && !this.#router.managesRecipient(envelope.recipientCorrelationId)) continue;
       // Check expiry
       if (this.#now() > envelope.expiresAt) {
         await this.#store.expire(messageId);
@@ -262,20 +292,32 @@ export class MailboxConsumer extends EventEmitter {
 
     if (candidates.length === 0) return;
 
-    // Select next based on priority scheduler
-    const next = selectNext(candidates, this.#consecutiveHigh);
-    if (!next) return;
+    // Select the next dispatchable message. A message whose recipient is
+    // fenced ("hold") must stay in ready, but it must not head-of-line block
+    // every other recipient in the workspace: skip that recipient for this
+    // round (preserving its per-recipient order) and keep selecting.
+    let pool = candidates;
+    let next: MailboxEnvelope | undefined;
+    while (pool.length > 0) {
+      const candidate = selectNext(pool, this.#consecutiveHigh);
+      if (!candidate) return;
 
-    // Revalidate authority before dispatch
-    const validation = await this.#router.revalidateForDispatch(next);
-    if (!validation.allowed) {
-      if (validation.action === "dead") {
-        await this.#store.dead(next.messageId, "ready", validation.reason ?? "revalidation failed");
+      // Revalidate authority before dispatch
+      const validation = await this.#router.revalidateForDispatch(candidate);
+      if (this.#stopped) return;
+      if (validation.allowed) {
+        next = candidate;
+        break;
       }
-      // "hold" means leave in ready for later
-      return;
+      if (validation.action === "dead") {
+        await this.#store.dead(candidate.messageId, "ready", validation.reason ?? "revalidation failed");
+        pool = pool.filter((envelope) => envelope.messageId !== candidate.messageId);
+      } else {
+        // "hold": leave in ready and skip this recipient's queue for now.
+        pool = pool.filter((envelope) => envelope.recipientCorrelationId !== candidate.recipientCorrelationId);
+      }
     }
-    if (this.#stopped) return;
+    if (!next) return;
 
     // Claim the message
     const now = this.#now();

@@ -462,6 +462,34 @@ export class MailboxFileStore {
     await writeJsonAtomic(path, { key, seenAt: this.#now() }, 512);
   }
 
+  /**
+   * Atomically claim a dedup key via exclusive create ("wx"). Returns false
+   * when the key was already seen. Unlike isSeen+markSeen this is race-free
+   * across concurrent enqueues (same process or another process sharing the
+   * mailbox directory).
+   */
+  async tryMarkSeen(key: string): Promise<boolean> {
+    const path = seenPath(this.paths, key);
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      handle = await open(path, "wx", 0o600);
+      await handle.writeFile(`${JSON.stringify({ key, seenAt: this.#now() })}\n`);
+      await handle.sync();
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw error;
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+  }
+
+  /** Release a dedup key claimed by tryMarkSeen (enqueue failed after claim). */
+  async unmarkSeen(key: string): Promise<void> {
+    await rm(seenPath(this.paths, key), { force: true }).catch(() => undefined);
+  }
+
   /** List all seen markers (filename + seenAt) for GC retention sweeping. */
   async listSeen(): Promise<Array<{ file: string; seenAt: number }>> {
     try {

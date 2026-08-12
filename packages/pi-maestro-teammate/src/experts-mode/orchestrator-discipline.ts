@@ -11,7 +11,7 @@ import type { ExpertsRules, TeammateTaskLike } from "./types.ts";
  */
 
 /** Stable marker for the discipline fragment (used by tests + extension). */
-export const ORCHESTRATOR_DISCIPLINE_MARK = "Orchestrator discipline (P5.1)";
+export const ORCHESTRATOR_DISCIPLINE_MARK = "Orchestrator discipline";
 
 export interface OrchestratorDisciplineOptions {
   stage?: string;
@@ -49,11 +49,12 @@ export function shouldSuggestViceLead(opts: {
 export function buildOrchestratorDisciplineFragment(
   opts: OrchestratorDisciplineOptions = {},
 ): string {
+  // Business-code and artifact-path constraints live in the outer experts
+  // reminder (buildTurnReminder); only list increments here to avoid repeating
+  // the same instruction inside one injected block.
   const lines = [
     `${ORCHESTRATOR_DISCIPLINE_MARK}: Lead only maestro session/run lifecycle + teammate dispatch + synthesize RESULT into report/outputs.`,
-    "NEVER implement business code yourself — rewrite as teammate+taskType (P5 hard gate).",
     "Prefer automatic continuation when authority=automatic (session next/done loop).",
-    "Artifacts only: report.md, outputs/**, .workflow/**, notes/**.",
   ];
   const viceLead =
     opts.viceLead === false

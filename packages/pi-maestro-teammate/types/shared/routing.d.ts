@@ -22,3 +22,16 @@ export interface RoutingParams {
  *   4. Explicit protocol v1 + unnamed → "caller"
  */
 export declare function resolveReplyTo(params: RoutingParams): ReplyTarget;
+export declare function resolveAgentCompletionTarget(agent: {
+    replyTo?: string;
+    name?: string;
+    protocolVersion?: number;
+}): ReplyTarget;
+export type LocalAgentMessageKind = "message" | "coordination" | "request" | "status" | "supervision";
+export interface LocalAgentMessageInput {
+    message: string;
+    messageKind?: LocalAgentMessageKind;
+    senderLabel: string;
+    replyToSelector?: string;
+}
+export declare function formatLocalAgentMessage(input: LocalAgentMessageInput): string;

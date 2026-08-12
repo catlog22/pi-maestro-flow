@@ -23,8 +23,6 @@ export interface ModelAvailabilityDetails {
   delegate_config_path: string | null;
 }
 
-const DELEGATE_USAGE_DOC = "D:\\maestro2\\workflows\\delegate-usage.md";
-
 function modelId(entry: unknown): string | null {
   if (!entry || typeof entry !== "object") return null;
   const record = entry as { provider?: unknown; id?: unknown };
@@ -157,7 +155,7 @@ Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\
             delegate_tools: filteredDelegate,
             delegate_fallback: filteredFallback,
             delegate_config_path: configPath,
-            hint: `${fallbackHint} The --to flag is mandatory; a bare \`maestro delegate codex\` treats "codex" as the prompt. Contract: ${DELEGATE_USAGE_DOC}.`,
+            hint: `${fallbackHint} The --to flag is mandatory; a bare \`maestro delegate codex\` treats "codex" as the prompt.`,
           }, null, 2),
         }],
         details,

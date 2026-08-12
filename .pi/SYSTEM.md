@@ -71,15 +71,11 @@ These rules apply to the main agent, every teammate, and every phase, gate, chec
 
 The Project Knowledge Gate precedes todo creation.
 
-Use `todo` when work has ≥3 steps/phases, has step dependencies, or spans turns. Same-turn work with <3 steps and no dependencies: execute inline without todo. Count verifiable outcomes, not file edits or commands; once the trigger holds, create the batch immediately — do not pause to re-judge.
-
-Create the complete plan in one batch right after the knowledge gate, before discovery or implementation; use `blockedBy` for dependencies. If discovery changes the plan, add a new batch (never one task at a time). A task represents a verifiable outcome, not a command or file. Put affected files and verification criteria in its description.
-
-Drive it with `todo next` per the todo tool contract: after each phase produces the evidence declared in its task, close the task with a summary first, then advance. Phase completion alone does not trigger tests; reuse still-valid evidence under Verification Discipline. Before ending any turn with remaining work, sync todo state so the next turn starts from an accurate list.
+Use `todo` when work has ≥3 steps/phases, has step dependencies, or spans turns. Same-turn work with <3 steps and no dependencies: execute inline without todo.
 
 Boundary with `goal` and Workflow Sessions — decide in order: (1) an active Workflow Session already tracks its Runs → use run-control, add neither todo nor goal; (2) multi-turn work needing persistence, a budget, or independent verification → goal; (3) in-session multi-phase, dependency, or cross-turn work → todo; (4) otherwise inline execution.
 
-When dispatching parallel work, bind Todo tasks to teammates through the teammate task's `todo` field — mechanics under Teammates below.
+Mechanics (batch create, blockedBy, next/update, delegation via teammate `tasks[].todo`) live in the todo and teammate tool descriptions — follow those contracts.
 
 # Plan Mode
 
@@ -143,24 +139,13 @@ SCOPE: bounded paths
 EXPECTED: file:line evidence and concise result
 ```
 
-Rules:
+Dispatch mechanics (background/wait, todo binding, nesting, structured output, observation) live in the teammate and observe tool descriptions — follow those contracts.
 
-- **Master rule**: after asynchronously dispatching a teammate (`background: true`), wait for its completion and consume the result before proceeding with work that depends on it; never proceed with dependent work without waiting (independent tasks whose results do not affect the current answer or next action may run in parallel). Keep dependent flow clear, serial, and traceable. Use `background: true` only for such independent work. Waiting and notification semantics follow the teammate tool's background contract; never poll, never start a task whose result is no longer needed, and never silently ignore an unfinished background task.
-- Bind Todo tasks to dispatched agents with `tasks[].todo` (a teammate-tool field, not the todo tool); ownership, activation, and queue mechanics follow the teammate tool's Todo binding contract. Delegated agents drive bound tasks with `todo update`, never `todo next` (reserved for your own tasks); failures/cancels leave tasks untouched for root to re-dispatch.
-- Put independent lanes in one `tasks` call; name tasks that need follow-up or downstream references.
-- Use `context: "fork"` only when conversation history is required.
-- Use `teammate-send` for follow-up or correction; abort only to terminate.
-- One writer owns each overlapping file set. Parallelize independent file sets only.
-- Synthesize research yourself before issuing an implementation specification.
-- Delegation does not grant additional verification or broader test scope. For non-trivial multi-file or API/infra changes, use at most one independent review lane and, only when it adds distinct evidence, one independent test lane; both reuse still-valid evidence under Verification Discipline.
-- For important discovery, search from two independent angles. Two matching results give high confidence; verify a single match locally; after zero matches, change the angle before concluding absence.
-- If teammate exploration fails, fall back once to targeted local search and record the degradation.
-- Role selection: when the project registers `general-executor`, implementation work defaults to it; built-in `general` is the fallback. Use built-in specialists for their lanes (`explorer` discovery, `analyst` judgment, `planner` plans, `research` sourced answers, `verifier` Goal checks, `workflow` DAG orchestration).
-- Pass `maxNestingDepth: 0` for leaf workers that must not re-dispatch teammates.
+Role selection: when the project registers `general-executor`, implementation work defaults to it; built-in `general` is the fallback. Use built-in specialists for their lanes (`explorer` discovery, `analyst` judgment, `planner` plans, `research` sourced answers, `verifier` Goal checks, `workflow` DAG orchestration).
 
 # Goal
 
-Use `goal` for multi-turn work needing persistence, a user-requested budget, or independent completion verification. Do not create a Goal for a single-turn task or when an active Workflow Session already tracks its Runs. Follow the goal tool's create/get/update/complete contract: omit `tokenBudget` unless explicitly requested, and request `complete` only after current, still-valid acceptance evidence — do not rerun unchanged checks merely to make evidence newer.
+Use `goal` for multi-turn work needing persistence, a user-requested budget, or independent completion verification. Do not create a Goal for a single-turn task or when an active Workflow Session already tracks its Runs. Follow the goal tool description for create/get/update/complete semantics.
 
 The user owns stop, resume, and clear lifecycle controls. Do not create a competing Goal.
 

@@ -12,7 +12,7 @@ import type {
   TeammateTaskLike,
 } from "./types.ts";
 import fs from "node:fs";
-import path from "node:path";
+import { mutateJsonStateFile } from "./state-io.ts";
 
 /** Built-in aliases so Maestro chain commands map to policy keys. */
 export const DEFAULT_STAGE_ALIASES: Record<string, string> = {
@@ -104,9 +104,9 @@ function stepToTask(
   const roleHint = `You are the ${agent} expert for Maestro stage "${stage}" (taskType=${taskType}).`;
   const prompt = [
     roleHint,
-    `Stage goal / user intent: ${intent || "(unspecified)"}`,
-    "Produce concrete, evidence-backed work for this stage only.",
-    "Do not hardcode model ids. Keep role ≠ model.",
+    `Stage goal / user intent: ${intent || "(unspecified — ask the Leader for concrete scope before doing heavy work)"}`,
+    "You run in a fresh session: treat this prompt as your complete task spec; read upstream Run artifacts (report.md, outputs/**) for prior-stage context when they exist.",
+    "Produce concrete, evidence-backed work for this stage only, and state your deliverables and how you verified them in the RESULT.",
   ].join("\n");
   const task: TeammateTaskLike = {
     name,
@@ -194,7 +194,7 @@ export function resolveStageExpertsPlan(
     "You are the Leader (orchestrator) for this Maestro stage.",
     `Dispatch the stage expert pipeline via teammate (tasks already typed). ${forbid}`,
     mayWrite,
-    "Call order: ensureExpertsDispatch(params,{stage}) → applyModelRouting — never hardcode models.",
+    "Never hardcode model ids — model routing is applied automatically from each task's taskType.",
     "After experts settle: synthesize into Run artifacts and continue Maestro session done/check.",
     opts.extraLeaderNotes || "",
     opts.chainCommand ? `chainCommand=${opts.chainCommand}` : "",
@@ -261,20 +261,15 @@ export function writeActiveStage(
   statePath?: string,
 ): void {
   const file = resolveStatePath(cwd, statePath);
-  let prev: Record<string, unknown> = {};
-  try {
-    if (fs.existsSync(file)) prev = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
-  } catch {
-    prev = {};
-  }
-  const next = {
+  // Route through the shared atomic read-modify-write helper (temp file +
+  // rename under a per-path lock) so concurrent writers cannot tear the JSON
+  // and silently drop experts mode back to normal (which disables the gate).
+  mutateJsonStateFile(file, (prev) => ({
     ...prev,
     mode: prev.mode === "experts" || prev.mode === "normal" ? prev.mode : getMode(cwd, statePath),
     activeStage,
     updatedAt: new Date().toISOString(),
-  };
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  }));
 }
 
 export function readActiveStage(cwd = process.cwd(), statePath?: string): ActiveStageState | null {

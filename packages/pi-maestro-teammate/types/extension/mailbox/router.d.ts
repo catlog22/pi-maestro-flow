@@ -22,6 +22,8 @@ export interface MailboxAuthority {
     isFenced(recipientCorrelationId: string): boolean;
     /** Whether the recipient agent is stale/unauthorized (should dead-letter). */
     isStaleUnauthorized(recipientCorrelationId: string): boolean;
+    /** Whether this host instance owns the recipient (local activeRuns). */
+    managesRecipient(recipientCorrelationId: string): boolean;
 }
 export interface MailboxEnqueueRequest {
     workspaceId: string;

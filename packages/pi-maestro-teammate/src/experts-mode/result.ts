@@ -28,16 +28,13 @@ export function formatExpertResult(input: ExpertResultInput): string {
   const lines = [
     who,
     "No need to reply to this envelope.",
-    `agentId: ${agentId} (internal ID — do not invent a different one)`,
+    `agentId: ${agentId} (verbatim)`,
   ];
   if (input.taskType) lines.push(`taskType: ${input.taskType}`);
   if (typeof input.exitCode === "number") lines.push(`exitCode: ${input.exitCode}`);
   lines.push("outputContent:");
   lines.push("--- RESULT ---");
   lines.push(body || "(no output)");
-  if (!body.endsWith("\n") && body.length > 0) {
-    /* already trimmed */
-  }
   return `${lines.join("\n")}\n`;
 }
 

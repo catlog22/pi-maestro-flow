@@ -125,7 +125,7 @@ test("todo binding appends an assigned-task instruction to the child system prom
     assert.match(boundText, /## Assigned Todo tasks/);
     assert.match(boundText, /#12, #7/);
     assert.match(boundText, /already active \(status=in_progress\)/);
-    assert.match(boundText, /without calling \`todo next\` unless it is not active/);
+    assert.match(boundText, /Drive your queue with \`todo update\` only/);
     assert.match(boundText, /private prompt/);
   } finally {
     fs.rmSync(plain, { force: true });

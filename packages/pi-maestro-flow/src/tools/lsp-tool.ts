@@ -41,7 +41,7 @@ export const LSP_READ_ONLY_ACTIONS = new Set([
 const LspActionSchema = Type.Unsafe<LspAction>({
   type: "string",
   enum: [...LSP_ACTIONS],
-  description: "LSP operation: diagnostics, definition, references, hover, symbols, rename, rename_file, code_actions, type_definition, implementation, status, reload, capabilities, request",
+  description: "LSP operation. Read-only: diagnostics/definition/references/hover/symbols/type_definition/implementation/status/capabilities; mutating or server-affecting: rename/rename_file/code_actions/reload/request",
 });
 
 export const LspParams = Type.Object({

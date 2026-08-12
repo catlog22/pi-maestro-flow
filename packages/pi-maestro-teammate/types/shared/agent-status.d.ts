@@ -45,9 +45,9 @@ export interface AgentPhaseProjection {
     }[];
 }
 /**
- * Projects a graph container from its live task phases. A running tool wins so
- * the container keeps the heartbeat-backed 30s deadline; otherwise the most
- * recently active task supplies the expected-silence phase.
+ * Projects a graph container from its live task phases. A running tool wins
+ * (the container then inherits the never-stalled tool-execution phase);
+ * otherwise the most recently active task supplies the expected-silence phase.
  */
 export declare function aggregateAgentRunPhase(entries: readonly AgentPhaseProjection[]): AgentRunPhase | undefined;
 /** Canonical idle ceiling shared by wait, notifications and every renderer. */
@@ -57,8 +57,9 @@ export declare function isAgentStalled(projection: AgentStallProjection, nowSnap
 /**
  * Normalize `(status, resultReadyAt, lastActivityAt, phase)` into the state the
  * user should see. Expected-silence phases use a bounded five-minute window;
- * tool execution keeps the normal 30s ceiling because its heartbeat is the
- * liveness signal.
+ * tool execution never projects as stalled because the in-flight tool is the
+ * child's own liveness report (the heartbeat only refreshes the clock as a
+ * secondary signal).
  */
 export declare function effectiveDisplayStatus(status: AgentStatus, resultReadyAt: number | undefined, lastActivityAt: number | undefined, nowSnapshot?: number, phase?: AgentRunPhase | string, pendingInteractions?: number): DisplayStatus;
 export declare function projectAgentActivity(agent: Pick<ActiveAgent, "status" | "restart" | "sessionFile">): AgentActivity;

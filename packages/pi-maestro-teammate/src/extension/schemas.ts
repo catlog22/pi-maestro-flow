@@ -18,7 +18,7 @@ const TaskType = Type.String({
   minLength: 1,
   maxLength: 64,
   pattern: "^[a-z][a-z0-9._-]*$",
-  description: "Task phase used only for automatic model routing; it does not change agent behavior.",
+  description: "Task phase driving automatic model routing; in experts mode it also selects the default expert agent when none is given. It never changes a chosen agent's behavior.",
 });
 
 const ThinkingLevel = StringEnum(
@@ -103,7 +103,7 @@ export const TaskSpec = Type.Object({
   ),
   outputSchema: Type.Optional(
     structuredOutputSchema(
-      "Optional JSON Schema for a machine-readable result. Use only when structured fields are required; this overrides the top-level default.",
+      "Optional JSON Schema for a machine-readable result. Use only when structured fields are required; this overrides the top-level default. The child must submit its final answer through the structured_output tool (validated against this schema; plain-text JSON is never accepted) — a run ending without a valid value fails. Validated results persist and are readable via agent://<publicationId>.",
     ),
   ),
   timeoutMs: Type.Optional(
@@ -125,7 +125,7 @@ export const TaskSpec = Type.Object({
       Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
     ], {
       description:
-        "Optional Todo task id(s) bound to this agent, in priority order (first = highest). On start the host re-assigns each task's assignee to this agent (actor changes from root to the agent), auto-activates the first runnable one, and injects the whole list as a managed fragment. Accepts `\"12\"`, `\"#12\"`, or an ordered array like `[\"#1\", \"#2\"]`.",
+        "Optional Todo task id(s) bound to this agent, in priority order (first = highest). On start the host re-assigns each task's assignee to this agent (actor changes from root to the agent), auto-activates the first runnable one, and injects the whole list as a managed fragment; the agent drives its queue with `todo update`. The tasks must exist before dispatch — missing ids produce a warning and dispatch continues. Accepts `\"12\"`, `\"#12\"`, or an ordered array like `[\"#1\", \"#2\"]`.",
     }),
   ),
   maxNestingDepth: Type.Optional(
@@ -293,6 +293,15 @@ export const TeammateSendParams = Type.Object({
       default: "follow_up",
       description:
         'Delivery mode. "steer" interrupts the current turn; if the interruption is not acknowledged promptly it degrades to a queued follow_up instead of failing the agent. "follow_up" queues after the current turn. "abort" terminates the agent.',
+    }),
+  ),
+  kind: Type.Optional(
+    Type.Unsafe<"coordination" | "request" | "status" | "supervision">({
+      type: "string",
+      enum: ["coordination", "request", "status", "supervision"],
+      default: "coordination",
+      description:
+        'Cross-session message semantics. "coordination" adds execution constraints without changing the user objective; "request" asks the peer to evaluate work without granting human authorization; "status" is informational and is always queued; "supervision" carries safety or lifecycle constraints. Local agent delivery preserves its existing direct-message behavior.',
     }),
   ),
 }, {

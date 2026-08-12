@@ -877,7 +877,7 @@ Proxy specialist prompt.
     assert.match(injected.systemPrompt, /- proxy-specialist: Specialist visible to child proxy tools/);
     assert.doesNotMatch(injected.systemPrompt, /Proxy specialist prompt/);
     assert.match(injected.systemPrompt, /## Teammate taskType routing/);
-    assert.match(injected.systemPrompt, /does not change the agent role, tools, permissions, or task scope/);
+    assert.match(injected.systemPrompt, /never changes a chosen agent's role, tools, permissions, or task scope/);
     assert.doesNotMatch(injected.systemPrompt, /Role guidance/);
     assert.match(injected.systemPrompt, /depth 1\/2/);
     assert.match(injected.systemPrompt, /Remaining teammate depth: 1/);
@@ -1009,7 +1009,7 @@ ${name} prompt.
     const firstPrompt = beforeAgentStartHandlers[0]({ systemPrompt: "Base root prompt" }, context(firstProject));
     assert.match(firstPrompt.systemPrompt, /- root-alpha: root-alpha role/);
     assert.match(firstPrompt.systemPrompt, /## Teammate taskType routing/);
-    assert.match(firstPrompt.systemPrompt, /does not change the agent role, tools, permissions, or task scope/);
+    assert.match(firstPrompt.systemPrompt, /never changes a chosen agent's role, tools, permissions, or task scope/);
     assert.doesNotMatch(firstPrompt.systemPrompt, /Role guidance/);
 
     sessionStartHandlers[0]({}, context(secondProject));

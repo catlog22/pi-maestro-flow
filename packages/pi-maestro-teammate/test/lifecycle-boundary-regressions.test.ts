@@ -1631,14 +1631,15 @@ test("nested background completion passively delivers teammate_complete_delivery
   const results = (envelope.details as { results: Array<{ messages: Array<{ role: string; content: string }> }> }).results;
   assert.equal(results.length, 1);
   assert.equal(results[0].messages.some((message) => message.content.includes("nested done")), true);
-  // The root session still receives the same envelope (backward compatible).
-  assert.equal(sentMessages.filter((message) => message.customType === "teammate-complete").length, 1);
+  // reply_to=caller: the envelope goes to the dispatching child only, never
+  // duplicated into the root session.
+  assert.equal(sentMessages.filter((message) => message.customType === "teammate-complete").length, 0);
 
   // Duplicate terminal IPC cannot create a second writer for either session.
   stdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
   await delay(40);
   assert.equal(controlMessages.length, 1);
-  assert.equal(sentMessages.filter((message) => message.customType === "teammate-complete").length, 1);
+  assert.equal(sentMessages.filter((message) => message.customType === "teammate-complete").length, 0);
 });
 
 test("foreground nested completion does not double-deliver teammate_complete_delivery", async () => {
@@ -1777,7 +1778,8 @@ test("nested background completion skips delivery when the parent session change
 
 test("child bridge consumes teammate_complete_delivery and injects it locally", () => {
   const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8")
-    + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8");
+    + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8")
+    + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8");
   assert.match(source, /type === "teammate_complete_delivery"/);
   assert.match(source, /m\.correlationId !== process\.env\.PI_TEAMMATE_CORRELATION_ID/);
   assert.match(source, /deliverySessionId !== bridge\.ctx\.sessionManager\.getSessionId\(\)/);

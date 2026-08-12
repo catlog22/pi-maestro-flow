@@ -207,6 +207,11 @@ export declare function settleGraphTaskAgent(state: TeammateState, correlationId
 export declare function settleGraphContainerAgent(state: TeammateState, correlationId: string, exitCode: number, lastResult?: string, wakeable?: boolean, terminalStatus?: AgentTerminalStatus): void;
 export declare function settleAgentLifecycle(state: TeammateState, correlationId: string, exitCode: number, lastResult: string | undefined, wakeable: boolean, abortProcess: boolean, terminalStatus?: AgentTerminalStatus): void;
 export declare function resolveAgentCorrelationId(state: TeammateState, target: string): string | undefined;
+export declare function resolveLocalAgentSenderContext(state: TeammateState, senderCorrelationId?: string): {
+    label: string;
+    replyTo: string;
+    from: string;
+};
 /** How many settled agents stay recallable after leaving `activeRuns`. */
 export declare const SETTLED_AGENT_MEMO_LIMIT = 32;
 export declare function recordSettledAgent(state: TeammateState, agent: ActiveAgent, status: SettledAgentRecord["status"]): void;

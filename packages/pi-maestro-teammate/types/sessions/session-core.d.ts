@@ -21,7 +21,7 @@ export type SessionEndpointTransport = "local-root" | "local-agent-mailbox" | "w
 export type SessionEndpointStatus = "running" | "sleeping" | "settled";
 export type SessionMessageMode = "steer" | "follow_up" | "abort";
 export type SessionMessageSource = "user" | "monitor" | "system";
-export type SessionMessageKind = "message" | "supervision";
+export type SessionMessageKind = "message" | "coordination" | "request" | "status" | "supervision";
 export type SessionDeliveryStage = "queued" | "injected";
 export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "abort" | "wake";
 export interface SessionEndpointIdentity {
@@ -85,6 +85,7 @@ export interface SessionResolution {
 export interface SessionResolveOptions {
     includeSettled?: boolean;
     localFirst?: boolean;
+    targetCorrelationId?: string;
 }
 export declare function parseSessionSurfaceMode(value: unknown): SessionSurfaceMode;
 export declare function sessionSurfaceModeFromEnv(env?: Readonly<Record<string, string | undefined>>): SessionSurfaceMode;
@@ -118,6 +119,8 @@ export interface SessionMessageRequest {
     traceId?: string;
     replyTo?: string;
     fromSessionName?: string;
+    targetCorrelationId?: string;
+    senderCorrelationId?: string;
     signal?: AbortSignal;
 }
 export interface SessionEndpointSnapshot {

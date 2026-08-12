@@ -2974,6 +2974,78 @@ test("completion summary accepts 4000 characters and rejects 4001 before verifie
   }
 });
 
+test("deferred acceptance cannot complete a Workflow Goal after canonical Execution drift", async () => {
+  let releaseAcceptance!: () => void;
+  const acceptanceStarted = new Promise<void>((resolve) => {
+    setAcceptanceRunnerForTest(async (command) => {
+      resolve();
+      await new Promise<void>((release) => { releaseAcceptance = release; });
+      return { command, exitCode: 0, output: "passed" };
+    });
+  });
+  let currentSnapshot = completionReadyWorkflowSnapshot();
+  setWorkflowCoordinator({
+    status: () => currentSnapshot,
+    async refreshSnapshot() { return currentSnapshot; },
+  } as never);
+  initGoal({ appendEntry() {}, sendMessage() {} } as never);
+  const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
+  onSessionStart(ctx);
+
+  try {
+    reconcileWorkflowGoal(currentSnapshot, ctx);
+    await executeGoal({
+      action: "update",
+      objective: getActiveGoal()!.text,
+      acceptance: ["deferred-workflow-check"],
+    }, ctx);
+    const completion = executeGoal({
+      action: "complete",
+      summary: "All checks passed against the original Execution.",
+    }, ctx);
+    await acceptanceStarted;
+
+    const drifted = structuredClone(currentSnapshot);
+    drifted.session!.activityRevision = 2;
+    drifted.session!.revision = 2;
+    drifted.revision.sessionRevision = 2;
+    drifted.revision.executionRevision = 2;
+    drifted.revision.fingerprint = "goal-workflow-execution-drift";
+    drifted.locator = { sessionId: "session-1", executionId: "execution-2", generation: 2 };
+    drifted.execution = {
+      executionId: "execution-2",
+      sessionId: "session-1",
+      generation: 2,
+      status: "active",
+      revision: 2,
+      activeRunId: null,
+      chain: [{ step: "verify-new", command: "verify", status: "pending", runId: null }],
+      decisionPoints: [],
+      gatesRef: "gates.json",
+      artifactsRef: "artifacts.json",
+      evidenceRef: "evidence.json",
+      lease: null,
+      startedAt: "2026-07-15T00:02:00.000Z",
+      sealedAt: null,
+      sealSummary: null,
+      finalOutcome: null,
+    };
+    drifted.session!.currentExecutionId = "execution-2";
+    drifted.session!.latestExecutionId = "execution-2";
+    currentSnapshot = drifted;
+    releaseAcceptance();
+
+    const result = await completion;
+    assert.match(result.text, /Execution generation, or revision changed/i);
+    assert.equal(getActiveGoal()?.status, "active");
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setWorkflowCoordinator(undefined);
+    setAcceptanceRunnerForTest(undefined);
+  }
+});
+
 test("statusless canonical Goal blockers use only current Execution work", () => {
   const pending = statuslessGoalWorkflowSnapshot();
   assert.equal("status" in pending.session!, false, "the session/2.0 fixture must be truly statusless");

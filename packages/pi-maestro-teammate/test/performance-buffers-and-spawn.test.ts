@@ -2817,7 +2817,7 @@ test("outputSchema lane settles with its published result when agent_end never a
         context: "fresh",
         outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] },
       },
-      { baseCwd: process.cwd(), spawnChildProcess, resultReadyGraceMs: 40 },
+      { baseCwd: process.cwd(), spawnChildProcess, resultReadyGraceMs: 40, structuredOutputRecoveryTimeoutMs: 100 },
     ),
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error("outputSchema lane blocked past its grace period")), 1_000)),
   ]);

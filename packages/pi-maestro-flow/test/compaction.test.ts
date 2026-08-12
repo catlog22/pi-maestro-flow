@@ -662,6 +662,81 @@ test("pressure policy protects non-replayable control tool outputs", () => {
   assert.equal(pressure.messages[1], messages[1]);
 });
 
+test("pressure policy prunes stale large resource results with a URI-carrying placeholder", () => {
+  const oldAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "old", name: "resource", arguments: { uri: "pr://owner/repo/12/diff" } }],
+    usage: { input: 700, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  } as never;
+  const oldResult = {
+    role: "toolResult",
+    toolCallId: "old",
+    toolName: "resource",
+    content: [{ type: "text", text: "o".repeat(8_000) }],
+    details: { uri: "pr://owner/repo/12/diff", scheme: "pr", resource: "PR #12 diff", cached: false, bytes: 8_000 },
+    isError: false,
+  } as never;
+  const recentAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "recent", name: "read", arguments: {} }],
+  } as never;
+  const recentResult = {
+    role: "toolResult",
+    toolCallId: "recent",
+    toolName: "read",
+    content: [{ type: "text", text: "r".repeat(8_000) }],
+    isError: false,
+  } as never;
+  const pressure = applyContextPressurePolicy(
+    [oldAssistant, oldResult, recentAssistant, recentResult],
+    4_000,
+    { enabled: true, reserveTokens: 400, keepRecentTokens: 2_000 },
+  );
+  assert.equal(pressure.prunedToolResults, 1);
+  const replaced = JSON.stringify(pressure.messages[1]);
+  assert.match(replaced, /stale large output from resource/);
+  assert.match(replaced, /pr:\/\/owner\/repo\/12\/diff/, "placeholder names the exact URI to re-read");
+  assert.equal(pressure.messages[3], recentResult, "recent frontier stays intact");
+});
+
+test("pruned resource results without a usable uri fall back to the generic replayable placeholder", () => {
+  const cases = [
+    undefined,
+    { scheme: "pr" },
+    { uri: "  " },
+    { uri: `pr://owner/repo/${"9".repeat(300)}` },
+    { uri: "pr://owner/repo/1 2" },
+  ];
+  for (const details of cases) {
+    const assistant = {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "old", name: "resource", arguments: {} }],
+      usage: { input: 700, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+    } as never;
+    const result = {
+      role: "toolResult",
+      toolCallId: "old",
+      toolName: "resource",
+      content: [{ type: "text", text: "o".repeat(8_000) }],
+      ...(details !== undefined ? { details } : {}),
+      isError: false,
+    } as never;
+    const filler = {
+      role: "assistant",
+      content: [{ type: "text", text: "f".repeat(8_000) }],
+    } as never;
+    const pressure = applyContextPressurePolicy(
+      [assistant, result, filler],
+      4_000,
+      { enabled: true, reserveTokens: 400, keepRecentTokens: 2_000 },
+    );
+    assert.equal(pressure.prunedToolResults, 1, `details=${JSON.stringify(details)}`);
+    const replaced = JSON.stringify(pressure.messages[1]);
+    assert.match(replaced, /stale large output from resource was pruned\. Re-run the tool/);
+    assert.ok(!replaced.includes("Re-read"), "no URI hint without a placeholder-safe uri");
+  }
+});
+
 test("pressure policy with soft layer disabled skips pruning but keeps the hard critical band", () => {
   const oldAssistant = {
     role: "assistant",

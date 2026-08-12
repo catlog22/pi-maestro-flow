@@ -203,6 +203,7 @@ import {
   type PermissionAuditSource,
 } from "../runs/shared/permission-audit.ts";
 import { setQuietMode } from "../quiet-state.ts";
+import { type ReplyTarget } from "../shared/routing.ts";
 
 import {
   AGENT_BUFFER_LIMITS,
@@ -1072,6 +1073,52 @@ export function safeSendMessage(
   }
 }
 
+/**
+ * Deliver a teammate-complete notification according to reply_to semantics.
+ * - main (or root dispatch with no parent): inject into the root session.
+ * - caller with a live parent: forward over IPC to the dispatching child only.
+ */
+export function deliverTeammateCompleteNotification(options: {
+  pi: ExtensionAPI;
+  state: TeammateState;
+  envelope: Parameters<ExtensionAPI["sendMessage"]>[0];
+  replyTarget: ReplyTarget;
+  parentCid?: string;
+  parentSessionId?: string;
+  sessionGeneration?: number;
+}): boolean {
+  const {
+    pi,
+    state,
+    envelope,
+    replyTarget,
+    parentCid,
+    parentSessionId,
+    sessionGeneration,
+  } = options;
+
+  if (replyTarget === "main" || !parentCid) {
+    return safeSendMessage(pi, envelope, { triggerTurn: true });
+  }
+
+  const parentAgent = state.activeRuns.get(parentCid);
+  if (parentSessionId
+    && parentAgent?.sessionId === parentSessionId
+    && parentAgent.sendControl
+    && parentAgent.status !== "completed"
+    && parentAgent.status !== "failed"
+    && parentAgent.status !== "terminated") {
+    return parentAgent.sendControl({
+      type: "teammate_complete_delivery",
+      correlationId: parentCid,
+      generation: sessionGeneration ?? 0,
+      sessionId: parentSessionId,
+      envelope,
+    });
+  }
+  return false;
+}
+
 export function notifyBackgroundFailure(
   pi: ExtensionAPI,
   id: string,
@@ -1568,6 +1615,25 @@ export function resolveAgentCorrelationId(
   return matches.length === 1 ? matches[0][0] : undefined;
 }
 
+/** Resolve display label, reply selector, and inbox `from` for a local message sender. */
+export function resolveLocalAgentSenderContext(
+  state: TeammateState,
+  senderCorrelationId?: string,
+): { label: string; replyTo: string; from: string } {
+  if (!senderCorrelationId || senderCorrelationId === "caller") {
+    return { label: "main", replyTo: "main", from: "caller" };
+  }
+  const agent = state.activeRuns.get(senderCorrelationId);
+  if (agent) {
+    const name = agent.name ?? agent.agent;
+    const prefix = senderCorrelationId.slice(0, 8);
+    const replyTo = agent.name ? `${agent.name}#${prefix}` : senderCorrelationId;
+    return { label: `@${name}`, replyTo, from: name };
+  }
+  const prefix = senderCorrelationId.slice(0, 8);
+  return { label: `agent ${prefix}`, replyTo: senderCorrelationId, from: prefix };
+}
+
 /** How many settled agents stay recallable after leaving `activeRuns`. */
 export const SETTLED_AGENT_MEMO_LIMIT = 32;
 
@@ -1708,7 +1774,12 @@ export function removeAgentFromRegistry(
   name?: string,
 ): void {
   state.activeRuns.delete(correlationId);
-  if (name) state.namedAgents.delete(name);
+  // Only clear bindings that still point at this agent. Deleting by `name`
+  // unconditionally would evict a newer agent that took the name over
+  // (bindAgentName is last-wins), leaving @name unroutable or misrouted.
+  if (name && state.namedAgents.get(name) === correlationId) {
+    state.namedAgents.delete(name);
+  }
   for (const [agentName, id] of state.namedAgents) {
     if (id === correlationId) state.namedAgents.delete(agentName);
   }

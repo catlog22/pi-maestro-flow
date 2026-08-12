@@ -94,12 +94,12 @@ test("independent monitor session identity and command entry points stay stable"
   assert.equal(source.match(/pi\.registerCommand\("teammate-send"/g)?.length, 1);
   assert.match(source, /kind: "workspace",[\s\S]*?capabilities: \{ inspect: true, wait: true, cancel: false, message: true, supervise: true \}/);
   assert.match(source, /pi\.events\.on\("bash-bg:update", applyBashBgSnapshot\)/);
-  assert.match(source, /workspaceMainSessionDeliveryDecision\(command\.action, workspaceBackgroundJobs\)/);
+  assert.match(source, /workspaceMainSessionDeliveryDecision\(\s*command\.action,\s*workspaceBackgroundJobs/);
   assert.match(source, /deliverAs: delivery\.deliverAs/);
   assert.match(source, /steer deferred as follow_up while foreground bash_bg is active/);
   assert.match(sessionSource, /foreground background-job entry/);
   assert.match(source, /if \(trimmed === ""\)[\s\S]*?requestWindowMode\("enter"\)/);
-  assert.match(source, /monitorInteractionModeActive \? appendMonitorModeContext\(withExperts\) : withExperts/);
+  assert.match(source, /monitorInteractionModeActive \? appendMonitorModeContext\(withDepth\) : withDepth/);
   assert.doesNotMatch(source, /guardMonitorModeToolCall/);
   assert.match(source, /options\.view === "turns"\) return teammateTurnsSnapshot\(id, options\);/);
   assert.match(source, /options\.view === "turns"\) return workspaceTurnsSnapshot\(owner, target, detail, lines, options\);/);
@@ -275,7 +275,7 @@ test("monitor mode stays a soft constraint with no tool-call interception", asyn
   assert.match(source, /name: "workspace-window"/);
   assert.match(source, /if \(!monitorInteractionModeActive\)[\s\S]*?available only after the user enters Monitor mode/);
   assert.match(source, /const sessionName = managedWindowSessionName\(name\)/);
-  assert.match(source, /presentation === "interactive"[\s\S]*?\["--name", sessionName, objective\][\s\S]*?\["-p", objective, "--name", sessionName\]/);
+  assert.match(source, /presentation === "interactive"[\s\S]*?"--name", sessionName, objective\][\s\S]*?"-p", objective, "--name", sessionName\]/);
   assert.match(source, /owner\.sessionName === window\.sessionName/);
   assert.match(source, /managedWindows\.get\(name\) !== spawned\.window \|\| !exactManagedWindowOwner\(spawned\.window\)/);
   assert.match(source, /owner\.ownerId === window\.ownerId[\s\S]*?owner\.ownerNonce === window\.ownerNonce[\s\S]*?owner\.pid === window\.pid/);
@@ -716,18 +716,22 @@ test("formatEngineStatusBar shows drift indicator", () => {
 // Analysis prompts and parsing
 // ===========================================================================
 
-test("buildAutoAnalysisPrompt includes objective and output", () => {
+test("buildAutoAnalysisPrompt includes objective and fenced untrusted output", () => {
   const prompt = buildAutoAnalysisPrompt("Build API", ["line 1", "line 2"]);
   assert.match(prompt, /Build API/);
   assert.match(prompt, /line 1/);
   assert.match(prompt, /JSON/);
+  assert.match(prompt, /UNTRUSTED DATA/);
+  assert.match(prompt, /<monitored_output>\nline 1\nline 2\n<\/monitored_output>/);
 });
 
-test("buildCustomAnalysisPrompt includes custom requirements", () => {
+test("buildCustomAnalysisPrompt includes custom requirements and fenced untrusted output", () => {
   const prompt = buildCustomAnalysisPrompt("Check coverage > 80%", "Build API", ["output"]);
   assert.match(prompt, /Check coverage/);
   assert.match(prompt, /Build API/);
   assert.match(prompt, /JSON/);
+  assert.match(prompt, /UNTRUSTED DATA/);
+  assert.match(prompt, /<monitored_output>\noutput\n<\/monitored_output>/);
 });
 
 test("parseAnalysisResult handles valid JSON", () => {

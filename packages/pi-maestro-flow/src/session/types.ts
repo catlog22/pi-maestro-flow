@@ -3,6 +3,9 @@ import type { TodoSkillBinding } from "../skills/skill-composer.ts";
 export type WorkflowSessionStatus = "planned" | "running" | "paused" | "sealed" | "archived" | "failed";
 export type WorkflowRunStatus = "created" | "running" | "blocked" | "failed" | "completed" | "sealed";
 export type WorkflowGateStatus = "pending" | "running" | "passed" | "failed" | "blocked" | "waived" | "skipped";
+export type WorkflowExecutionStatus = "active" | "paused" | "sealed";
+export type WorkflowExecutionOwnerKind = "pi" | "claude" | "codex" | "agy" | "manual";
+export type WorkflowLifecycleAuthority = "legacy-session" | "execution-derived";
 
 export interface WorkflowGate {
   id: string;
@@ -32,6 +35,11 @@ export interface WorkflowRun {
   gates: WorkflowGate[];
   primaryArtifactId: string | null;
   handoff: Record<string, unknown> | null;
+  /** Redacted exact-correlation metadata for canonical Plan producer Runs. */
+  planPublication?: {
+    requestId: string;
+    handoffKeyHash: string;
+  };
   startedAt: string;
   endedAt: string | null;
 }
@@ -51,10 +59,18 @@ export interface WorkflowSession {
   schemaVersion?: string;
   sessionId: string;
   intent: string;
+  /** Persisted lifecycle authority for session/1.x only; omitted at runtime for session/2.0. */
   status: WorkflowSessionStatus;
+  lifecycleAuthority?: WorkflowLifecycleAuthority;
   revision: number;
   identityRevision?: number;
   activityRevision?: number;
+  /** session/2.0 Execution/history pointers. */
+  currentExecutionId?: string | null;
+  latestExecutionId?: string | null;
+  latestCompletedRunId?: string | null;
+  archivedAt?: string | null;
+  archivedBy?: string | null;
   activeRunId: string | null;
   definitionOfDone: string;
   gates: WorkflowGate[];
@@ -64,9 +80,73 @@ export interface WorkflowSession {
   aliases: Record<string, string>;
 }
 
+export interface WorkflowDecisionPoint {
+  pointId: string;
+  afterStepId: string | null;
+  status: "pending" | "passed" | "escalated";
+  retryCount: number;
+  maxRetries: number;
+  evidenceRef: string | null;
+}
+
+/** Public Execution lease metadata. The private lease_id is never projected. */
+export interface WorkflowExecutionLease {
+  schemaVersion?: string;
+  sessionId: string;
+  executionId: string;
+  ownerId: string;
+  ownerKind: WorkflowExecutionOwnerKind;
+  epoch: number;
+  acquiredAt: string;
+  /**
+   * @deprecated Long-lived lease heartbeats are superseded by the Session/Run
+   * minimal-state architecture (docs/session-run-minimal-state-architecture-20260812.md):
+   * v3 removes leases/heartbeats in favor of participant identity and
+   * fine-grained revision CAS. Removed in v3.
+   */
+  heartbeatAt: string;
+  /**
+   * @deprecated Lease handoff is superseded by the Session/Run minimal-state
+   * architecture (docs/session-run-minimal-state-architecture-20260812.md):
+   * v3 has no handoff; other participants simply submit CAS mutations.
+   * Removed in v3.
+   */
+  handoffTo: string | null;
+}
+
+export interface WorkflowExecution {
+  schemaVersion?: string;
+  executionId: string;
+  sessionId: string;
+  generation: number;
+  status: WorkflowExecutionStatus;
+  revision: number;
+  activeRunId: string | null;
+  chain: WorkflowChainStep[];
+  decisionPoints: WorkflowDecisionPoint[];
+  gatesRef: string;
+  artifactsRef: string;
+  evidenceRef: string;
+  lease: WorkflowExecutionLease | null;
+  startedAt: string;
+  sealedAt: string | null;
+  sealSummary: string | null;
+  finalOutcome: "done" | "done_with_concerns" | "failed" | null;
+  /** True only for the deterministic compatibility projection of session/1.x. */
+  legacyProjection?: true;
+}
+
 export interface WorkflowSnapshotRevision {
   sessionRevision: number;
+  executionRevision?: number;
   fingerprint: string;
+}
+
+export interface WorkflowSnapshotLocator {
+  sessionId: string;
+  executionId?: string;
+  generation?: number;
+  runId?: string;
 }
 
 export interface WorkflowCanonicalClaim {
@@ -84,7 +164,11 @@ export interface WorkflowSnapshot {
   sessionGeneration?: string;
   /** Present whenever state.json authoritatively declares an active canonical Session. */
   canonicalClaim?: WorkflowCanonicalClaim;
+  /** Canonical Session/Execution/Run identity for execution-aware consumers. */
+  locator?: WorkflowSnapshotLocator;
   session?: WorkflowSession;
+  /** Current Execution, or a deterministic compatibility projection for session/1.x. */
+  execution?: WorkflowExecution;
   diagnostics: string[];
 }
 
@@ -116,6 +200,8 @@ export function todoOriginKey(origin: TodoTaskOrigin): string {
 }
 
 export function activeWorkflowRun(snapshot: WorkflowSnapshot): WorkflowRun | undefined {
-  const activeRunId = snapshot.session?.activeRunId;
+  const activeRunId = snapshot.execution?.legacyProjection
+    ? snapshot.session?.activeRunId
+    : snapshot.execution?.activeRunId ?? snapshot.session?.activeRunId;
   return activeRunId ? snapshot.session?.runs.find((run) => run.runId === activeRunId) : undefined;
 }

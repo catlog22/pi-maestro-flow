@@ -34,6 +34,25 @@ function makeState(): TeammateState {
   };
 }
 
+function registerMailboxRecipient(state: TeammateState, correlationId: string): void {
+  state.activeRuns.set(correlationId, {
+    agent: "worker",
+    correlationId,
+    startedAt: Date.now(),
+    abortController: new AbortController(),
+    ownsChildProcess: true,
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: Date.now(),
+    depth: 0,
+    status: "running",
+    runtimeGeneration: 1,
+    sleepMs: 0,
+    stdin: { writable: true },
+    lease: { owner: "child", state: "active", epoch: 1, nonce: "owner-1" },
+  } as never);
+}
+
 // --- Env parsing ---
 
 test("mailboxModeFromEnv defaults to authoritative", () => {
@@ -99,7 +118,7 @@ test("createMailboxAuthority treats non-active lease as fenced", () => {
   assert.equal(authority.isFenced("corr-1"), true);
 });
 
-test("createMailboxAuthority treats missing stdin on non-sleeping agent as stale", () => {
+test("createMailboxAuthority holds (fences) a live agent whose stdin is not wired yet", () => {
   const state = makeState();
   const agent = {
     correlationId: "corr-2",
@@ -108,7 +127,30 @@ test("createMailboxAuthority treats missing stdin on non-sleeping agent as stale
   };
   state.activeRuns.set("corr-2", agent as never);
   const authority = createMailboxAuthority({ state, ownerId: "owner-1" });
-  assert.equal(authority.isStaleUnauthorized("corr-2"), true);
+  // Transient spawn/restart window: hold, do not dead-letter.
+  assert.equal(authority.isStaleUnauthorized("corr-2"), false);
+  assert.equal(authority.isFenced("corr-2"), true);
+});
+
+test("createMailboxAuthority treats a settled agent as stale", () => {
+  const state = makeState();
+  const agent = {
+    correlationId: "corr-3",
+    stdin: undefined,
+    status: "failed",
+  };
+  state.activeRuns.set("corr-3", agent as never);
+  const authority = createMailboxAuthority({ state, ownerId: "owner-1" });
+  assert.equal(authority.isStaleUnauthorized("corr-3"), true);
+  assert.equal(authority.isFenced("corr-3"), false);
+});
+
+test("createMailboxAuthority managesRecipient reflects activeRuns membership", () => {
+  const state = makeState();
+  const authority = createMailboxAuthority({ state, ownerId: "owner-1" });
+  assert.equal(authority.managesRecipient("corr-local"), false);
+  registerMailboxRecipient(state, "corr-local");
+  assert.equal(authority.managesRecipient("corr-local"), true);
 });
 
 // --- MailboxHost lifecycle ---
@@ -179,6 +221,7 @@ test("MailboxHost shadow mode enqueues but does not consume", async () => {
 
 test("MailboxHost authoritative mode enqueues and consumer injects", async () => {
   const state = makeState();
+  registerMailboxRecipient(state, "corr-1");
   const injected: string[] = [];
   const host = new MailboxHost({
     rootDir: join(baseDir, "mb"),
@@ -213,6 +256,7 @@ test("MailboxHost authoritative mode enqueues and consumer injects", async () =>
 
 test("MailboxHost authoritative consumer dispatch auto-applies", async () => {
   const state = makeState();
+  registerMailboxRecipient(state, "corr-1");
   const host = new MailboxHost({
     rootDir: join(baseDir, "mb"),
     state,

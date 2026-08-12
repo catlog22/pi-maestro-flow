@@ -498,6 +498,89 @@ test("rejected steer abort degrades to follow_up instead of failing the task", a
   );
 });
 
+test("steer degrades when a new turn starts before abort acknowledgement", async () => {
+  let handle: FakeChildHandle | undefined;
+  const commands: Array<Record<string, unknown>> = [];
+  let stdinBuffer = "";
+
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    handle.child.stdin!.on("data", (chunk: Buffer) => {
+      stdinBuffer += chunk.toString();
+      while (true) {
+        const newline = stdinBuffer.indexOf("\n");
+        if (newline < 0) break;
+        const raw = stdinBuffer.slice(0, newline).trim();
+        stdinBuffer = stdinBuffer.slice(newline + 1);
+        if (!raw) continue;
+        const command = JSON.parse(raw) as Record<string, unknown>;
+        commands.push(command);
+
+        if (command.type === "prompt" && command.id === undefined) {
+          queueMicrotask(() => {
+            handle!.stdout.write(line({ type: "agent_start" }));
+            handle!.stdout.write(line({ type: "turn_start" }));
+            handle!.stdout.write(line({ type: "tool_execution_start", toolName: "bash" }));
+          });
+        } else if (command.type === "abort") {
+          queueMicrotask(() => {
+            handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+            handle!.stdout.write(line({ type: "agent_settled" }));
+            handle!.stdout.write(line({ type: "agent_start" }));
+            handle!.stdout.write(line({ type: "turn_start" }));
+            handle!.stdout.write(line({ type: "tool_execution_start", toolName: "bash" }));
+            handle!.stdout.write(line({
+              type: "response",
+              id: command.id,
+              command: "abort",
+              success: true,
+            }));
+          });
+        } else if (command.type === "follow_up") {
+          queueMicrotask(() => {
+            handle!.stdout.write(line({ type: "agent_start" }));
+            handle!.stdout.write(line({ type: "turn_start" }));
+            handle!.stdout.write(line({
+              type: "message_end",
+              message: { role: "assistant", content: [{ type: "text", text: "LATE_STEER_DEGRADED" }] },
+            }));
+            handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+            handle!.stdout.write(line({ type: "agent_settled" }));
+          });
+        }
+      }
+    });
+    return handle.child;
+  }) as unknown as SpawnSeam;
+
+  let stdin: import("node:stream").Writable | undefined;
+  let steerSent = false;
+  const result = await runSingleTeammate(
+    { agent: "general", task: "run a long tool", context: "fresh" },
+    {
+      baseCwd: process.cwd(),
+      spawnChildProcess,
+      onChildSpawned: (stream) => { stdin = stream; },
+      onProgress: (progress) => {
+        if (steerSent || progress.phase !== "tool-execution" || !stdin) return;
+        steerSent = true;
+        assert.equal(sendRpcMessage(stdin, "scope correction", "steer"), true);
+      },
+    },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(commands.map((command) => command.type), ["prompt", "abort", "follow_up"]);
+  assert.equal(commands[2].message, "scope correction");
+  assert.ok(
+    !commands.some((command) => typeof command.id === "string" && command.id.startsWith("teammate-steer-prompt-")),
+    "a late abort ack must not inject a steer correction prompt into the next turn",
+  );
+  assert.ok(
+    result.messages.some((entry) => entry.role === "system" && /turn advanced before abort was acknowledged/.test(entry.content)),
+  );
+});
+
 test("swallowed settlement during an unacknowledged steer converges on degrade", async () => {
   let handle: FakeChildHandle | undefined;
   const commands: Array<Record<string, unknown>> = [];
@@ -1154,6 +1237,229 @@ test("invalid structured_output reports the failing instance and schema paths", 
   assert.match(validationError.content, /\/count/);
   assert.match(validationError.content, /schema=#\/properties\/count/);
   assert.match(validationError.content, /must be integer/);
+});
+
+// ---------------------------------------------------------------------------
+// SO-RECOVERY — a wakeable child that ends without structured_output gets one
+// bounded corrective continuation before the run settles as failed
+// ---------------------------------------------------------------------------
+
+function createCommandCapture(child: ChildProcess): Array<Record<string, unknown>> {
+  const commands: Array<Record<string, unknown>> = [];
+  let stdinBuffer = "";
+  (child.stdin as PassThrough).on("data", (chunk: Buffer) => {
+    stdinBuffer += chunk.toString();
+    while (true) {
+      const newline = stdinBuffer.indexOf("\n");
+      if (newline < 0) break;
+      const raw = stdinBuffer.slice(0, newline).trim();
+      stdinBuffer = stdinBuffer.slice(newline + 1);
+      if (!raw) continue;
+      commands.push(JSON.parse(raw) as Record<string, unknown>);
+    }
+  });
+  return commands;
+}
+
+const recoveryId = (commands: Array<Record<string, unknown>>): Record<string, unknown> | undefined =>
+  commands.find((command) =>
+    command.type === "prompt" && /teammate-structured-output-recovery-/.test(String(command.id)));
+
+const valueSchema = {
+  type: "object",
+  properties: { value: { type: "string" } },
+  required: ["value"],
+};
+
+const structuredToolEvents = (value: unknown): Array<Record<string, unknown>> => [
+  {
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", name: "structured_output", arguments: value }],
+    },
+  },
+  { type: "tool_execution_start", toolName: "structured_output" },
+  { type: "tool_execution_end", toolName: "structured_output", isError: false },
+];
+
+test("missing structured_output resumes the child once and accepts the resubmitted value", async () => {
+  let handle: FakeChildHandle | undefined;
+  let commands: Array<Record<string, unknown>> = [];
+
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    commands = createCommandCapture(handle.child);
+    handle.child.stdin!.on("data", (chunk: Buffer) => {
+      // The capture listener consumes the stream; re-dispatch the same chunk
+      // to a handler that responds to the corrective prompt.
+      const raw = chunk.toString().trim();
+      if (!raw) return;
+      const command = JSON.parse(raw) as Record<string, unknown>;
+      if (command.type === "prompt" && typeof command.id === "string") {
+        queueMicrotask(() => {
+          handle!.stdout.write(line({
+            type: "response",
+            id: command.id,
+            command: "prompt",
+            success: true,
+          }));
+          handle!.stdout.write(line({ type: "agent_start" }));
+          handle!.stdout.write(line({ type: "turn_start" }));
+          for (const event of structuredToolEvents({ value: "recovered" })) {
+            handle!.stdout.write(line(event));
+          }
+          handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+          handle!.stdout.write(line({ type: "agent_settled" }));
+        });
+      }
+    });
+    queueMicrotask(() => {
+      handle!.stdout.write(line({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "plain json answer" }] },
+      }));
+      handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+      handle!.stdout.write(line({ type: "agent_settled" }));
+    });
+    return handle!.child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "return structured output", context: "fresh", outputSchema: valueSchema },
+    { baseCwd: process.cwd(), spawnChildProcess },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.structuredOutput, { value: "recovered" });
+  const recoveryPrompt = recoveryId(commands);
+  assert.ok(recoveryPrompt, `corrective prompt missing from ${JSON.stringify(commands)}`);
+  assert.match(String(recoveryPrompt.message), /Call the structured_output tool now/);
+  assert.match(String(recoveryPrompt.message), /Do not repeat any other work/);
+  assert.ok(
+    result.messages.some((message) => /issued a bounded corrective prompt/.test(message.content)),
+    `recovery diagnostic missing from ${JSON.stringify(result.messages)}`,
+  );
+});
+
+test("missing structured_output recovery times out and settles as failed", async () => {
+  let handle: FakeChildHandle | undefined;
+  let commands: Array<Record<string, unknown>> = [];
+
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    commands = createCommandCapture(handle.child);
+    queueMicrotask(() => {
+      handle!.stdout.write(line({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "plain json answer" }] },
+      }));
+      handle!.stdout.write(line({ type: "agent_end", willRetry: false }));
+      handle!.stdout.write(line({ type: "agent_settled" }));
+      // The child stays silent: no response to the corrective prompt.
+    });
+    return handle!.child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    {
+      agent: "general",
+      task: "return structured output",
+      context: "fresh",
+      outputSchema: valueSchema,
+    },
+    { baseCwd: process.cwd(), spawnChildProcess, structuredOutputRecoveryTimeoutMs: 50 },
+  );
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.structuredOutput, undefined);
+  assert.ok(recoveryId(commands), `corrective prompt missing from ${JSON.stringify(commands)}`);
+  assert.ok(
+    result.messages.some((message) =>
+      /did not submit schema-valid structured_output after the corrective prompt/.test(message.content)),
+    `timeout diagnostic missing from ${JSON.stringify(result.messages)}`,
+  );
+});
+
+test("structured_output recovery is skipped for runtime failures, invalid submissions and fork contexts", async () => {
+  const runScenario = async (params: {
+    context: "fresh" | "fork";
+    outputSchema?: Record<string, unknown>;
+    resumeSessionFile?: string;
+    events: (handle: FakeChildHandle) => void;
+  }): Promise<{ result: SingleResult; commands: Array<Record<string, unknown>> }> => {
+    let handle: FakeChildHandle | undefined;
+    let commands: Array<Record<string, unknown>> = [];
+    const spawnChildProcess = (() => {
+      handle = createFakeChild();
+      commands = createCommandCapture(handle.child);
+      const scripted = handle;
+      queueMicrotask(() => params.events(scripted));
+      return handle!.child;
+    }) as unknown as SpawnSeam;
+    const result = await runSingleTeammate(
+      {
+        agent: "general",
+        task: "return structured output",
+        context: params.context,
+        ...(params.outputSchema ? { outputSchema: params.outputSchema } : {}),
+      },
+      {
+        baseCwd: process.cwd(),
+        spawnChildProcess,
+        ...(params.resumeSessionFile ? { resumeSessionFile: params.resumeSessionFile } : {}),
+      },
+    );
+    return { result, commands };
+  };
+
+  // Provider failure: the run is already failed; never prompt a resubmission.
+  const runtimeFailure = await runScenario({
+    context: "fresh",
+    outputSchema: valueSchema,
+    events: (handle) => {
+      handle.stdout.write(line({ type: "error", error: "Authentication failed: token expired" }));
+      handle.stdout.write(line({ type: "agent_end" }));
+    },
+  });
+  assert.equal(runtimeFailure.result.exitCode, 1);
+  assert.equal(recoveryId(runtimeFailure.commands), undefined);
+
+  // Invalid submission: the reject-and-correct contract already failed inside
+  // the turn; report the field diagnostic instead of prompting again.
+  const invalid = await runScenario({
+    context: "fresh",
+    outputSchema: valueSchema,
+    events: (handle) => {
+      handle.stdout.write(line({
+        type: "agent_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", name: "structured_output", arguments: { value: 42 } }],
+        },
+      }));
+    },
+  });
+  assert.equal(invalid.result.exitCode, 1);
+  assert.equal(recoveryId(invalid.commands), undefined);
+
+  // Fork context: the child owns parent history; never resume it with a prompt.
+  const resumeFile = path.join(teammateTempRoot(), `recovery-guard-${process.pid}-${Date.now()}.jsonl`);
+  fs.writeFileSync(resumeFile, "", "utf8");
+  try {
+    const fork = await runScenario({
+      context: "fork",
+      outputSchema: valueSchema,
+      resumeSessionFile: resumeFile,
+      events: (handle) => {
+        handle.stdout.write(line({ type: "agent_end" }));
+      },
+    });
+    assert.equal(fork.result.exitCode, 1);
+    assert.equal(recoveryId(fork.commands), undefined);
+  } finally {
+    fs.rmSync(resumeFile, { force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

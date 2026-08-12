@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { SchedulerCore, type SchedulerCoreOptions, type SchedulerRunContext } from "../scheduler/scheduler-core.ts";
 import type { SessionEndpoint, SessionHostRegistry } from "../sessions/session-core.ts";
 import {
@@ -177,6 +178,14 @@ export class MonitorRuntime {
         if (!capture || !this.isCaptureCurrent(capture)) return false;
         const leaseValid = await this.options.leases.verify(capture.lease);
         if (!this.isCaptureCurrent(capture) || !leaseValid) return false;
+        // Stable message id across retry attempts of the same logical
+        // intervention (traceId is created once per intervention). The
+        // cross-window receiver dedups by commandId, not traceId — a fresh
+        // random id per retry would inject the same intervention twice when a
+        // slow peer answers the first attempt after our timeout.
+        const stableMessageId = traceId === undefined
+          ? undefined
+          : createHash("sha256").update(traceId, "utf8").digest("hex").slice(0, 32);
         const delivery = await this.options.registry.send({
           selector: key,
           message,
@@ -184,6 +193,7 @@ export class MonitorRuntime {
           source: "monitor",
           messageKind: "supervision",
           ...(traceId === undefined ? {} : { traceId }),
+          ...(stableMessageId === undefined ? {} : { messageId: stableMessageId }),
           signal: this.engine.abortController?.signal,
         });
         if (!this.isCaptureCurrent(capture)) return false;

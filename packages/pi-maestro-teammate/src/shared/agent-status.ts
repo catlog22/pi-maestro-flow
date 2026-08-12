@@ -75,6 +75,19 @@ const QUEUE_WAIT_PHASES: ReadonlySet<AgentRunPhase> = new Set<AgentRunPhase>([
   "waiting-capacity",
 ]);
 
+/**
+ * A child-reported in-flight tool is the agent's own liveness report: the
+ * child keeps this phase only while `inFlightToolCount > 0` and republishes
+ * it with every heartbeat. The 10s heartbeat merely refreshes `lastActivityAt`
+ * as a secondary signal, so a busy child loop (heavy tool I/O) that drops
+ * ticks must not turn a genuinely busy agent into a false stall. The tool's
+ * lifecycle events (tool end / agent_end / close) and the wait timeout remain
+ * the backstops for a tool that never completes.
+ */
+const TOOL_EXECUTION_PHASES: ReadonlySet<AgentRunPhase> = new Set<AgentRunPhase>([
+  "tool-execution",
+]);
+
 export interface AgentStallProjection {
   status: AgentStatus | string;
   phase?: AgentRunPhase | string;
@@ -91,9 +104,9 @@ export interface AgentPhaseProjection {
 }
 
 /**
- * Projects a graph container from its live task phases. A running tool wins so
- * the container keeps the heartbeat-backed 30s deadline; otherwise the most
- * recently active task supplies the expected-silence phase.
+ * Projects a graph container from its live task phases. A running tool wins
+ * (the container then inherits the never-stalled tool-execution phase);
+ * otherwise the most recently active task supplies the expected-silence phase.
  */
 export function aggregateAgentRunPhase(
   entries: readonly AgentPhaseProjection[],
@@ -124,6 +137,12 @@ export function agentStallIdleCeilingMs(
   phase?: AgentRunPhase | string,
   defaultIdleCeilingMs = TEAMMATE_STALL_TIMEOUT_MS,
 ): number {
+  if (phase !== undefined && TOOL_EXECUTION_PHASES.has(phase as AgentRunPhase)) {
+    // An in-flight tool is liveness itself, not silence: never age it into a
+    // stall, no matter how long the tool runs or how many heartbeat ticks a
+    // busy child loop drops.
+    return Number.POSITIVE_INFINITY;
+  }
   if (status === "running" && phase === "retrying") return TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS;
   return status === "pending" || (phase !== undefined && EXPECTED_SILENCE_PHASES.has(phase as AgentRunPhase))
     ? TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS
@@ -138,7 +157,8 @@ export function isAgentStalled(
 ): boolean {
   if ((projection.status !== "running" && projection.status !== "pending")
     || projection.resultReadyAt !== undefined) return false;
-  if (projection.phase !== undefined && QUEUE_WAIT_PHASES.has(projection.phase as AgentRunPhase)) {
+  if (projection.phase !== undefined && (QUEUE_WAIT_PHASES.has(projection.phase as AgentRunPhase)
+    || TOOL_EXECUTION_PHASES.has(projection.phase as AgentRunPhase))) {
     return false;
   }
   if ((projection.pendingInteractions ?? 0) > 0 || projection.lastActivityAt === undefined) return false;
@@ -152,8 +172,9 @@ export function isAgentStalled(
 /**
  * Normalize `(status, resultReadyAt, lastActivityAt, phase)` into the state the
  * user should see. Expected-silence phases use a bounded five-minute window;
- * tool execution keeps the normal 30s ceiling because its heartbeat is the
- * liveness signal.
+ * tool execution never projects as stalled because the in-flight tool is the
+ * child's own liveness report (the heartbeat only refreshes the clock as a
+ * secondary signal).
  */
 export function effectiveDisplayStatus(
   status: AgentStatus,

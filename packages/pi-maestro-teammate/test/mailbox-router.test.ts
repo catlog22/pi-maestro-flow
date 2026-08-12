@@ -47,6 +47,7 @@ function makeAuthority(): MailboxAuthority {
     currentLeaseNonce: () => authorityState.leaseNonce,
     isFenced: (cid) => authorityState.fenced.has(cid),
     isStaleUnauthorized: (cid) => authorityState.staleUnauthorized.has(cid),
+    managesRecipient: () => true,
   };
 }
 
@@ -310,4 +311,14 @@ test("senderSeq increments monotonically", async () => {
   assert.ok(e1);
   assert.ok(e2);
   assert.ok(e2.senderSeq > e1.senderSeq);
+});
+
+test("duplicate requestId is rejected before a second ready entry is written", async () => {
+  const router = makeRouter();
+  const first = await router.enqueue(makeRequest({ requestId: "task-dedup-1" }));
+  assert.ok(first.ok);
+  const second = await router.enqueue(makeRequest({ requestId: "task-dedup-1", payload: "retry" }));
+  assert.equal(second.ok, false);
+  if (!second.ok) assert.equal(second.code, "duplicate");
+  assert.equal((await store.listMessages("ready")).length, 1);
 });

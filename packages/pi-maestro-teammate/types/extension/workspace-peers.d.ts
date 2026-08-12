@@ -21,7 +21,11 @@ export type WorkspaceSettledStatus = "completed" | "failed" | "terminated";
 export type WorkspacePeerCommandAction = "steer" | "follow_up";
 export type WorkspacePeerResponseStatus = "accepted" | "rejected" | "error" | "expired";
 export type WorkspacePeerMessageSource = "user" | "monitor" | "system";
-export type WorkspacePeerMessageKind = "message" | "supervision";
+/**
+ * Model-visible semantics for cross-window messages. `message` is the v1
+ * compatibility value and is deliberately interpreted as coordination-only.
+ */
+export type WorkspacePeerMessageKind = "message" | "coordination" | "request" | "status" | "supervision";
 export type WorkspacePeerDeliveryStage = "queued" | "injected";
 export interface WorkspacePeerPaths {
     rootDir: string;
@@ -253,7 +257,7 @@ export interface WorkspaceMainSessionDeliveryDecision {
     deliverAs: "steer" | "followUp";
     deferred: boolean;
 }
-export declare function workspaceMainSessionDeliveryDecision(requested: WorkspacePeerCommandAction, backgroundJobs: readonly WorkspaceBackgroundJobSnapshot[]): WorkspaceMainSessionDeliveryDecision;
+export declare function workspaceMainSessionDeliveryDecision(requested: WorkspacePeerCommandAction, backgroundJobs: readonly WorkspaceBackgroundJobSnapshot[], messageKind?: WorkspacePeerMessageKind): WorkspaceMainSessionDeliveryDecision;
 export declare function workspaceMainSessionDeliveryAction(requested: WorkspacePeerCommandAction, backgroundJobs: readonly WorkspaceBackgroundJobSnapshot[]): WorkspacePeerCommandAction;
 export declare function shouldReplayWorkspaceRootQueue(reason: "startup" | "reload" | "new" | "resume" | "fork"): boolean;
 export interface WorkspaceRemoteRootMessage {

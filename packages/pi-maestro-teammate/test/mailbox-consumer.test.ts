@@ -40,6 +40,7 @@ function permissiveAuthority(): MailboxAuthority {
     currentLeaseNonce: () => "nonce-abc",
     isFenced: () => false,
     isStaleUnauthorized: () => false,
+    managesRecipient: () => true,
   };
 }
 
@@ -109,6 +110,24 @@ test("selectNext enforces FIFO within same priority lane", () => {
 
   const selected = selectNext([third, first, second], 0);
   assert.equal(selected?.messageId, first.messageId);
+});
+
+test("selectNext orders across senders by createdAt, not by per-sender seq", () => {
+  const laterHighSeq = makeEnvelope("00000000-0000-4000-8000-000000000010", {
+    priority: "normal",
+    senderId: "a".repeat(32),
+    senderSeq: 100,
+    createdAt: nowMs + 5_000,
+  });
+  const earlierLowSeq = makeEnvelope("00000000-0000-4000-8000-000000000011", {
+    priority: "normal",
+    senderId: "b".repeat(32),
+    senderSeq: 1,
+    createdAt: nowMs,
+  });
+
+  const selected = selectNext([laterHighSeq, earlierLowSeq], 0);
+  assert.equal(selected?.messageId, earlierLowSeq.messageId);
 });
 
 test("starvation bound: after 8 consecutive high, slot 9 is normal", () => {
@@ -246,6 +265,110 @@ test("consumer skips messages for other recipients", async () => {
   assert.equal(dispatched.length, 0);
   // Message still in ready
   assert.ok(await store.readEnvelope("ready", other.messageId));
+});
+
+test("wildcard consumer skips recipients not owned by this host", async () => {
+  const managed = new Set(["corr-owned"]);
+  const localAuthority: MailboxAuthority = {
+    canRoute: () => ({ allowed: true }),
+    currentGeneration: () => 1,
+    currentLeaseEpoch: () => 1,
+    currentLeaseNonce: () => "nonce-abc",
+    isFenced: () => false,
+    isStaleUnauthorized: () => false,
+    managesRecipient: (cid) => managed.has(cid),
+  };
+  const localRouter = new MailboxRouter({
+    store,
+    authority: localAuthority,
+    quota,
+    now: () => nowMs,
+  });
+
+  const dispatched: string[] = [];
+  const consumer = new MailboxConsumer({
+    store,
+    router: localRouter,
+    recipientCorrelationId: "*",
+    workspaceId: "a".repeat(64),
+    onDispatch: async (envelope) => { dispatched.push(envelope.recipientCorrelationId); },
+    pollMs: 10,
+    now: () => nowMs,
+  });
+
+  const foreign = makeEnvelope("00000000-0000-4000-8000-000000000040", {
+    recipientCorrelationId: "corr-foreign",
+  });
+  const owned = makeEnvelope("00000000-0000-4000-8000-000000000041", {
+    recipientCorrelationId: "corr-owned",
+  });
+  await store.writeStaging(foreign);
+  await store.promoteToReady(foreign.messageId);
+  await store.writeStaging(owned);
+  await store.promoteToReady(owned.messageId);
+
+  consumer.start();
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  await consumer.stop();
+
+  assert.deepEqual(dispatched, ["corr-owned"]);
+  assert.ok(await store.readEnvelope("ready", foreign.messageId), "foreign message stays for the owning process");
+  assert.ok(await store.readEnvelope("applied", owned.messageId));
+});
+
+test("consumer skips a fenced recipient without head-of-line blocking others", async () => {
+  const fenced = new Set<string>(["corr-fenced"]);
+  const gatedAuthority: MailboxAuthority = {
+    canRoute: () => ({ allowed: true }),
+    currentGeneration: () => 1,
+    currentLeaseEpoch: () => 1,
+    currentLeaseNonce: () => "nonce-abc",
+    isFenced: (cid) => fenced.has(cid),
+    isStaleUnauthorized: () => false,
+    managesRecipient: () => true,
+  };
+  const gatedRouter = new MailboxRouter({
+    store,
+    authority: gatedAuthority,
+    quota,
+    now: () => nowMs,
+  });
+
+  const dispatched: string[] = [];
+  const consumer = new MailboxConsumer({
+    store,
+    router: gatedRouter,
+    recipientCorrelationId: "*",
+    workspaceId: "a".repeat(64),
+    onDispatch: async (envelope) => { dispatched.push(envelope.recipientCorrelationId); },
+    pollMs: 10,
+    now: () => nowMs,
+  });
+
+  const held = makeEnvelope("00000000-0000-4000-8000-000000000030", {
+    recipientCorrelationId: "corr-fenced",
+    priority: "critical",
+    senderSeq: 1,
+    createdAt: nowMs,
+  });
+  const free = makeEnvelope("00000000-0000-4000-8000-000000000031", {
+    recipientCorrelationId: "corr-free",
+    priority: "normal",
+    senderSeq: 2,
+    createdAt: nowMs + 1,
+  });
+  await store.writeStaging(held);
+  await store.promoteToReady(held.messageId);
+  await store.writeStaging(free);
+  await store.promoteToReady(free.messageId);
+
+  consumer.start();
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  await consumer.stop();
+
+  assert.deepEqual(dispatched, ["corr-free"]);
+  assert.ok(await store.readEnvelope("ready", held.messageId), "fenced message stays queued");
+  assert.ok(await store.readEnvelope("applied", free.messageId), "non-fenced message still delivers");
 });
 
 test("consumer expires messages past their TTL", async () => {

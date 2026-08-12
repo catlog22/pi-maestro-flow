@@ -16,6 +16,7 @@ const structuredCapabilities = {
     execution_generation: true,
     core_execution_lease: true,
     execution_handoff: true,
+    execution_operation_drain: true,
     session_statusless: true,
     legacy_session_aliases: true,
   },
@@ -44,6 +45,7 @@ test("CLI adapter treats a validated structured capability result as authoritati
   assert.deepEqual(capabilities.support, {
     execution_generation: true,
     core_execution_lease: true,
+    execution_operation_drain: true,
     "run-response/1.1": true,
   });
   assert.deepEqual([...capabilities.commands], ["brief", "check", "next"]);
@@ -77,6 +79,7 @@ test("CLI adapter reports explicit legacy compatibility when capabilities is an 
   assert.deepEqual(capabilities.support, {
     execution_generation: false,
     core_execution_lease: false,
+    execution_operation_drain: false,
     "run-response/1.1": false,
   });
   assert.deepEqual([...capabilities.commands], ["brief", "next", "complete"]);
@@ -133,7 +136,12 @@ test("CLI adapter fails readiness closed for contradictory structured capabiliti
     {
       name: "features and response without execution/1.0",
       capabilities: { ...structuredCapabilities, execution_schema_writes: ["execution/2.0"] },
-      expected: { execution_generation: false, core_execution_lease: false, "run-response/1.1": true },
+      expected: {
+        execution_generation: false,
+        core_execution_lease: false,
+        execution_operation_drain: false,
+        "run-response/1.1": true,
+      },
     },
     {
       name: "schemas without execution generation",
@@ -141,12 +149,22 @@ test("CLI adapter fails readiness closed for contradictory structured capabiliti
         ...structuredCapabilities,
         features: { ...structuredCapabilities.features, execution_generation: false },
       },
-      expected: { execution_generation: false, core_execution_lease: true, "run-response/1.1": true },
+      expected: {
+        execution_generation: false,
+        core_execution_lease: true,
+        execution_operation_drain: true,
+        "run-response/1.1": true,
+      },
     },
     {
       name: "execution schema and features without run-response/1.1",
       capabilities: { ...structuredCapabilities, run_response_writes: ["run-response/1.0"] },
-      expected: { execution_generation: true, core_execution_lease: true, "run-response/1.1": false },
+      expected: {
+        execution_generation: true,
+        core_execution_lease: true,
+        execution_operation_drain: true,
+        "run-response/1.1": false,
+      },
     },
   ];
 
@@ -160,6 +178,52 @@ test("CLI adapter fails readiness closed for contradictory structured capabiliti
       const capabilities = await adapter.capabilities();
       assert.deepEqual(capabilities.support, fixture.expected);
       assert.equal(await adapter.supportsNewMutations(), false);
+    });
+  }
+});
+
+// execution_operation_drain is an optional capability for the deprecated
+// operation drain experiment (superseded by
+// docs/session-run-minimal-state-architecture-20260812.md); its absence must
+// not disqualify a core from the modern protocol.
+test("CLI adapter keeps modern protocol support without the optional operation drain capability", async (t) => {
+  const fixtures = [
+    {
+      name: "drain feature advertised as false",
+      capabilities: {
+        ...structuredCapabilities,
+        features: { ...structuredCapabilities.features, execution_operation_drain: false },
+      },
+    },
+    {
+      name: "drain feature not broadcast at all (plan-B v3 style core)",
+      capabilities: {
+        ...structuredCapabilities,
+        features: (() => {
+          const { execution_operation_drain: _omitted, ...rest } = structuredCapabilities.features;
+          return rest;
+        })(),
+      },
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    await t.test(fixture.name, async () => {
+      const adapter = new RunCliAdapter("D:/workspace", async (args) => {
+        if (args.join(" ") === "capabilities --json") return ok(args, JSON.stringify(fixture.capabilities));
+        if (args.join(" ") === "run --help") return ok(args, "Commands:\n  brief\n");
+        return fail(args, "unknown command");
+      });
+      const capabilities = await adapter.capabilities();
+      assert.equal(capabilities.mode, "structured");
+      assert.deepEqual(capabilities.support, {
+        execution_generation: true,
+        core_execution_lease: true,
+        // Drain support is gated off, but the modern protocol stays available.
+        execution_operation_drain: false,
+        "run-response/1.1": true,
+      });
+      assert.equal(await adapter.supportsNewMutations(), true);
     });
   }
 });

@@ -157,6 +157,7 @@ export interface GoalVerificationBridge {
   get verificationInFlight(): VerificationInFlight | undefined;
   set verificationInFlight(value: VerificationInFlight | undefined);
   getWorkflowSnapshot(): WorkflowSnapshot | undefined;
+  refreshWorkflowSnapshot(): Promise<WorkflowSnapshot | undefined>;
   pauseGoal(goal: ActiveGoal): ActiveGoal;
   updateUsage(goal: ActiveGoal, ctx: GoalContext): void;
   persistGoal(goal: ActiveGoal): void;
@@ -955,6 +956,68 @@ function shouldApplyCompletionBlockers(
   );
 }
 
+interface CanonicalCompletionFence {
+  sessionId: string;
+  sessionGeneration: string;
+  identityRevision: number;
+  activityRevision: number;
+  executionId: string | null;
+  generation: number | null;
+  executionRevision: number | null;
+}
+
+function canonicalCompletionFence(
+  goal: Pick<ActiveGoal, "workflowSessionId" | "workflowSessionGeneration">,
+  snapshot: WorkflowSnapshot | undefined,
+): CanonicalCompletionFence | undefined {
+  if (!hasMatchingWorkflowBinding(goal, snapshot) || !snapshot?.session) return undefined;
+  const session = snapshot.session;
+  const execution = snapshot.execution?.legacyProjection ? undefined : snapshot.execution;
+  return {
+    sessionId: session.sessionId,
+    sessionGeneration: snapshot.sessionGeneration!,
+    identityRevision: session.identityRevision ?? session.revision,
+    activityRevision: session.activityRevision ?? session.revision,
+    executionId: execution?.executionId ?? null,
+    generation: execution?.generation ?? null,
+    executionRevision: execution?.revision ?? snapshot.revision.executionRevision ?? null,
+  };
+}
+
+function completionFenceDrift(
+  goal: Pick<ActiveGoal, "workflowSessionId" | "workflowSessionGeneration">,
+  before: CanonicalCompletionFence | undefined,
+  after: WorkflowSnapshot | undefined,
+): string | undefined {
+  if (!goal.workflowSessionId) return undefined;
+  if (!before) {
+    return goal.workflowSessionGeneration?.startsWith("canonical:")
+      ? "The bound canonical Workflow authority could not be established for completion; the Goal remains active."
+      : undefined;
+  }
+  if (!hasMatchingWorkflowBinding(goal, after) || !after?.session) {
+    return "The canonical Workflow binding changed while completion verification was running; the Goal remains active.";
+  }
+  const current = canonicalCompletionFence(goal, after);
+  if (!current) {
+    return "The canonical Workflow binding changed while completion verification was running; the Goal remains active.";
+  }
+  const changed = before.sessionId !== current.sessionId
+    || before.sessionGeneration !== current.sessionGeneration
+    || before.identityRevision !== current.identityRevision
+    || before.activityRevision !== current.activityRevision
+    || before.executionId !== current.executionId
+    || before.generation !== current.generation
+    || before.executionRevision !== current.executionRevision;
+  if (changed) {
+    return "The canonical Workflow Session, Execution generation, or revision changed while completion verification was running; the Goal remains active.";
+  }
+  const blockers = canonicalCompletionBlockers(after);
+  return blockers.length > 0
+    ? `The canonical Workflow became blocked while completion verification was running: ${blockers.join("; ")}.`
+    : undefined;
+}
+
 export function buildCanonicalEvidence(snapshot: WorkflowSnapshot | undefined): string {
   if (snapshot?.canonicalClaim?.status === "invalid") {
     return boundedSecretText(canonicalCompletionBlockers(snapshot)[0] ?? "", MAX_VERIFIER_EVIDENCE_CHARS);
@@ -1066,6 +1129,7 @@ export async function verifyGoalCompletion(
   }
 
   const workflowSnapshot = bridge.getWorkflowSnapshot();
+  const completionFence = canonicalCompletionFence(bridge.activeGoal, workflowSnapshot);
   const canonicalBlockers = shouldApplyCompletionBlockers(bridge.activeGoal, workflowSnapshot)
     ? canonicalCompletionBlockers(workflowSnapshot)
     : [];
@@ -1170,6 +1234,45 @@ export async function verifyGoalCompletion(
       ? ""
       : " Provide concrete verification evidence (run the relevant checks and include their output) before re-requesting completion.";
     return { status: "continue", reason: `${verdict.reasoning}${unmet}${evidenceDetail}${acceptanceHint}` };
+  }
+
+  if (goalSnapshot.workflowSessionId) {
+    let refreshedWorkflowSnapshot: WorkflowSnapshot | undefined;
+    try {
+      refreshedWorkflowSnapshot = await bridge.refreshWorkflowSnapshot();
+    } catch {
+      bridge.updateUsage(bridge.activeGoal, ctx);
+      bridge.persistGoal(bridge.activeGoal);
+      bridge.updateStatusLine(ctx, bridge.activeGoal);
+      return {
+        status: "continue",
+        reason: "The canonical Workflow could not be refreshed after verification; the Goal remains active.",
+      };
+    }
+    if (!bridge.activeGoal
+      || verification.epoch !== bridge.goalLifecycleEpoch
+      || bridge.activeGoal.id !== goalSnapshot.id
+      || bridge.activeGoal.status !== "active"
+      || bridge.activeGoal.updatedAt !== goalSnapshot.updatedAt) {
+      return {
+        status: "hold",
+        reason: "The active Goal changed while canonical completion authority was being refreshed.",
+      };
+    }
+    const workflowDrift = completionFenceDrift(
+      goalSnapshot,
+      completionFence,
+      refreshedWorkflowSnapshot,
+    );
+    if (workflowDrift) {
+      bridge.updateUsage(bridge.activeGoal, ctx);
+      bridge.persistGoal(bridge.activeGoal);
+      bridge.updateStatusLine(ctx, bridge.activeGoal);
+      return {
+        status: "continue",
+        reason: workflowDrift,
+      };
+    }
   }
 
   const goalText = bridge.activeGoal.text;

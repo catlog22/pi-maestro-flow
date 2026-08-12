@@ -28,8 +28,8 @@ export function buildTurnReminder(
 ): string {
   if (mode !== "experts") return "";
   const stageLine = opts.stage
-    ? `Current Maestro stage: "${opts.stage}". Prefer resolveStageExpertsPlan / ensureExpertsDispatch({ stage }) so stagePolicies fill taskType before keyword triage.`
-    : "When executing a Maestro chain step, pass stage=analyze|plan|execute|review|test|debug into ensureExpertsDispatch so stagePolicies apply.";
+    ? `Current Maestro stage: "${opts.stage}". Give every dispatched task an explicit taskType; the stage policy supplies defaults for this stage.`
+    : "When executing a Maestro chain step, give every dispatched task an explicit taskType; the host resolves the stage automatically.";
   const extra = opts.stageHint ? opts.stageHint : "";
   const discipline =
     opts.discipline !== false && opts.rules?.orchestrator?.disciplineReminder !== false
@@ -45,11 +45,11 @@ export function buildTurnReminder(
     "<experts_mode_reminder>",
     "Experts Mode is ON. You are the Leader (orchestrator).",
     stageLine,
-    "For any non-trivial work: dispatch teammate with an explicit taskType (explore|analysis|debug|planning|development|review|testing|verification).",
-    "Do NOT hardcode model ids — routing applies models from taskType via teammate-models.",
-    "Prefer agent/role for capability profile (explorer, general-executor, reviewer, …); never use role name as a model id.",
-    "While experts are running: wait for completion (observe/wait or completion notification) before synthesizing; do not package the heavy work yourself with write/edit/bash.",
-    "Lead discipline (P5): business write/edit/bash are DENIED for the Leader. Rewrite as teammate+taskType. Orchestration paths only: report.md, outputs/**, .workflow/**, notes/**; bash allowlist: maestro/git-read/tests.",
+    "For any non-trivial work: dispatch teammate with an explicit taskType (explore|analysis|debug|planning|development|review|testing).",
+    "Do NOT hardcode model ids — routing applies models from taskType automatically.",
+    "Prefer agent/role for capability profile (explorer, planner, analyst, …; fallback: general when a role is unavailable); never use a role name as a model id.",
+    "While experts are running: wait for completion (observe/wait or completion notification) before synthesizing.",
+    "Lead discipline: never perform business write/edit/bash yourself — rewrite the work as a teammate dispatch with a taskType. The Leader writes orchestration artifacts only (report.md, outputs/**, .workflow/**, notes/**) and uses bash only for maestro/git-read/tests.",
     "When summarizing an expert result, keep agentId/name and a clear RESULT body.",
     extra,
     discipline,

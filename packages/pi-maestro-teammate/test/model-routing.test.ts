@@ -1362,7 +1362,7 @@ test("appendTaskTypeRoutingContext injects a concise, idempotent routing contrac
     assert.match(first, /Base prompt/);
     assert.match(first, /teammate-tasktype-routing:start/);
     assert.match(first, /selects configured model, fallback-model, and thinking defaults/);
-    assert.match(first, /does not change the agent role, tools, permissions, or task scope/);
+    assert.match(first, /never changes a chosen agent's role, tools, permissions, or task scope/);
     assert.match(first, /Set `tasks\[\]\.taskType` by the task's actual phase/);
     assert.match(first, /Legal task types/);
     for (const type of ["explore", "analysis", "debug", "planning", "development", "review", "testing"]) {

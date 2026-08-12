@@ -118,7 +118,13 @@ import { loadLatestTeamSwarmProjection, type TeamSwarmProjection } from "../swar
 import { RunCliAdapter } from "../session/cli-adapter.ts";
 import { publicWorkflowErrorMessage, WorkflowCoordinator } from "../session/coordinator.ts";
 import { activeWorkflowRun, type WorkflowSnapshot } from "../session/types.ts";
-import { deriveWorkflowViewModel, workflowStatusLabel, type WorkflowSnapshotLike, type WorkflowViewModel } from "../session/view-model.ts";
+import {
+  deriveWorkflowStatus,
+  deriveWorkflowViewModel,
+  workflowStatusLabel,
+  type WorkflowSnapshotLike,
+  type WorkflowViewModel,
+} from "../session/view-model.ts";
 import { createRunEventComponent, type RunEventDetails } from "../session/run-event.ts";
 import {
   exportSessionHistory,
@@ -139,6 +145,8 @@ import {
 } from "../tools/run-control.ts";
 import {
   assertPublishedPlanSnapshot,
+  derivePlanPublishRequestId,
+  parseProjectedPublishedPlanIdentity,
   requirePublishedExecutionRun,
 } from "../tools/plan-workflow.ts";
 import { SessionOverlay, type SessionOverlayAction } from "../tui/session-overlay.ts";
@@ -224,7 +232,7 @@ import { lspManager } from "../tools/lsp/manager.ts";
 import { registerSmartSearchTool } from "../tools/smart-search.ts";
 import { createSourceCheckTool } from "../tools/web-access/source-check-tool.ts";
 import { registerFff } from "../tools/fff.ts";
-import { registerBashBg } from "../tools/bash-bg.ts";
+import { BASH_BG_UPDATE_EVENT, registerBashBg, type BashBgSnapshotPayload } from "../tools/bash-bg.ts";
 import { registerLoop } from "../tools/loop.ts";
 import { registerModelAvailability } from "../tools/model-availability.ts";
 import { registerResourceTool } from "../tools/resource.ts";
@@ -252,6 +260,7 @@ import {
   TEAMMATE_RESULT_PUBLISHED_EVENT,
   TEAMMATE_COMPLETE_EVENT,
 } from "pi-maestro-teammate/v1/types";
+import type { TeammateCompleteEvent, TeammateStartedEvent } from "pi-maestro-teammate/v1/events";
 import type { MailboxHostRegistry } from "pi-maestro-teammate/v1/mailbox";
 import { sharedModelCircuitBreaker } from "pi-maestro-teammate/v1/retry";
 import { createFlowSettingsProvider, registerFlowSettingsProvider } from "../settings/flow-settings-provider.ts";
@@ -360,12 +369,50 @@ export function shouldRestoreWorkflowGoal(
     && Boolean(goal?.workflowSessionId && goal.workflowSessionId === canonicalSessionId);
 }
 
+export function isWorkflowSessionMatchable(
+  snapshot: WorkflowSnapshot | undefined,
+): boolean {
+  if (
+    snapshot?.source !== "canonical"
+    || snapshot.canonicalClaim?.status === "invalid"
+    || !snapshot.session
+  ) return false;
+  const derived = deriveWorkflowStatus(snapshot);
+  return derived.authority === "execution-derived"
+    ? derived.lifecycle !== "archived"
+    : snapshot.session.status === "running";
+}
+
 export function shouldAttachWorkflowSession(
   snapshot: WorkflowSnapshot | undefined,
 ): boolean {
-  return snapshot?.source === "canonical"
-    && snapshot.canonicalClaim?.status !== "invalid"
-    && snapshot.session?.status === "running";
+  if (!isWorkflowSessionMatchable(snapshot)) return false;
+  const derived = deriveWorkflowStatus(snapshot!);
+  return derived.authority === "execution-derived"
+    ? snapshot?.execution?.status === "active"
+    : snapshot?.session?.status === "running";
+}
+
+export function sealedWorkflowExecutionTransition(
+  previous: WorkflowSnapshot | undefined,
+  next: WorkflowSnapshot,
+): { sessionId: string; executionId: string } | undefined {
+  const previousExecution = previous?.execution;
+  const nextSession = next.session;
+  if (
+    !previousExecution
+    || previousExecution.legacyProjection
+    || !nextSession
+    || nextSession.lifecycleAuthority !== "execution-derived"
+    || previousExecution.sessionId !== nextSession.sessionId
+    || previousExecution.status === "sealed"
+  ) return undefined;
+  const sealed = next.execution?.executionId === previousExecution.executionId
+    && next.execution.status === "sealed";
+  const cleared = !next.execution && nextSession.latestExecutionId === previousExecution.executionId;
+  return sealed || cleared
+    ? { sessionId: nextSession.sessionId, executionId: previousExecution.executionId }
+    : undefined;
 }
 
 /**
@@ -378,7 +425,90 @@ export function shouldActivateWorkflowSession(
   snapshot: WorkflowSnapshot | undefined,
   workflowSessionOptedIn: boolean,
 ): boolean {
-  return workflowSessionOptedIn && shouldAttachWorkflowSession(snapshot);
+  return workflowSessionOptedIn && isWorkflowSessionMatchable(snapshot);
+}
+
+export function currentWorkflowPlanTarget(
+  snapshot: WorkflowSnapshot,
+): { available: boolean; hasActiveWork: boolean; reason?: string } {
+  const session = snapshot.session;
+  if (snapshot.source !== "canonical" || snapshot.canonicalClaim?.status === "invalid" || !session) {
+    return { available: false, hasActiveWork: false, reason: "No valid canonical Workflow Session to bind" };
+  }
+
+  const derived = deriveWorkflowStatus(snapshot);
+  if (derived.authority === "legacy-session") {
+    const active = activeWorkflowRun(snapshot);
+    const firstPendingStep = session.chain.find((step) => step.status === "pending");
+    if (session.status !== "running") {
+      return { available: false, hasActiveWork: Boolean(active), reason: `Workflow Session is ${session.status}` };
+    }
+    if (active) {
+      return {
+        available: false,
+        hasActiveWork: true,
+        reason: `Workflow Session has active Run ${active.runId}`,
+      };
+    }
+    if (!firstPendingStep) {
+      return { available: false, hasActiveWork: false, reason: "Workflow Session has no pending execution step" };
+    }
+    if (firstPendingStep.command !== "execute") {
+      return {
+        available: false,
+        hasActiveWork: false,
+        reason: `Next Workflow step is ${firstPendingStep.command}, not execute`,
+      };
+    }
+    return { available: true, hasActiveWork: false };
+  }
+
+  const execution = snapshot.execution;
+  if (derived.lifecycle === "archived") {
+    return { available: false, hasActiveWork: false, reason: "Workflow Session is archived" };
+  }
+  if (!execution) {
+    return { available: false, hasActiveWork: false, reason: "Workflow Session has no pending execution step" };
+  }
+  const hasActiveWork = Boolean(
+    execution.activeRunId || execution.chain.some((step) => step.status === "running"),
+  );
+  if (execution.status === "paused") {
+    return { available: false, hasActiveWork, reason: "Workflow Execution is paused" };
+  }
+  if (execution.status === "sealed") {
+    return { available: false, hasActiveWork: false, reason: "Workflow Execution is sealed" };
+  }
+  if (derived.lifecycle === "blocked") {
+    return { available: false, hasActiveWork, reason: "Workflow Execution is blocked" };
+  }
+  if (execution.activeRunId) {
+    return {
+      available: false,
+      hasActiveWork: true,
+      reason: `Workflow Execution has active Run ${execution.activeRunId}`,
+    };
+  }
+  const runningStep = execution.chain.find((step) => step.status === "running");
+  if (runningStep) {
+    return {
+      available: false,
+      hasActiveWork: true,
+      reason: `Workflow Execution step ${runningStep.step} is running`,
+    };
+  }
+  const firstPendingStep = execution.chain.find((step) => step.status === "pending");
+  if (!firstPendingStep) {
+    return { available: false, hasActiveWork: false, reason: "Workflow Session has no pending execution step" };
+  }
+  if (firstPendingStep.command !== "execute") {
+    return {
+      available: false,
+      hasActiveWork: false,
+      reason: `Next Workflow step is ${firstPendingStep.command}, not execute`,
+    };
+  }
+  return { available: true, hasActiveWork: false };
 }
 
 /**
@@ -469,18 +599,6 @@ const CHINESE_RESPONSE_STATE_ENTRY = "maestro-chinese-response-mode";
 const CHINESE_GLOBAL_STATE_FILE = "maestro-chinese-response-mode.json";
 const CHINESE_RESPONSE_PROMPT_MARKER = "<chinese_response_mode>";
 
-// Disambiguate the resource tool contract: the built-in read tool handles only
-// local files; protocol resources (pr:// issue:// skill:// rule://) go through resource.
-const RESOURCE_TOOL_GUIDANCE = [
-  "Protocol resources are read via the resource tool, not read:",
-  "  - pr://owner/repo/N[/diff|/files] or pr://N — GitHub pull requests (requires gh CLI)",
-  "  - issue://owner/repo/N or issue://N — GitHub issues (requires gh CLI)",
-  "  - skill://name — installed skill's SKILL.md",
-  "  - rule://name — project rule files (agents/rules/cursor/cline)",
-  "  - agent://<id>[/key[/index[/field]]] — structured output of a completed teammate subagent (bare agent://<id> returns the full JSON; path segments are object keys / array indices, no /json prefix)",
-  "The built-in read tool handles only local files and ordinary URLs.",
-].join("\n");
-
 export function chineseGlobalStatePath(homeDir: string): string {
   return join(homeDir, ".pi", CHINESE_GLOBAL_STATE_FILE);
 }
@@ -530,9 +648,8 @@ export const CHINESE_RESPONSE_PROMPT = `<chinese_response_mode>
 
 ## Git Commit
 
-- 使用中文提交信息
-- 格式：\`类型: 简短描述\`
-- 类型：feat/fix/refactor/docs/test/chore
+- 若项目已有提交信息规范（CONTRIBUTING、git log 惯例），遵循项目规范
+- 否则使用中文提交信息，格式：\`类型: 简短描述\`（feat/fix/refactor/docs/test/chore）
 
 ## 保持英文
 
@@ -692,9 +809,28 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   const compatibilityResults = (results: unknown): unknown =>
     filterUnacknowledgedResults(results, acknowledgedPublications);
   // Forward teammate lifecycle events (shared EventBus) to the GUI SSE stream.
-  pi.events.on(TEAMMATE_STARTED_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateStarted, event));
+  pi.events.on(TEAMMATE_STARTED_EVENT, (payload) => {
+    const event = payload as TeammateStartedEvent;
+    void hostOperationLifecycle?.teammateStarted(event).catch((error) => {
+      todoRootContext?.ui.notify(
+        `Workflow operation claim failed for teammate ${event.correlationId}: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    });
+    guiEvents.emit(GUI_EVENTS.teammateStarted, event);
+  });
   pi.events.on(TEAMMATE_MESSAGE_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateProgress, event));
-  pi.events.on(TEAMMATE_COMPLETE_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateComplete, event));
+  pi.events.on(TEAMMATE_COMPLETE_EVENT, (payload) => {
+    const event = payload as TeammateCompleteEvent;
+    void hostOperationLifecycle?.teammateComplete(event);
+    guiEvents.emit(GUI_EVENTS.teammateComplete, event);
+  });
+  pi.events.on(BASH_BG_UPDATE_EVENT, (payload) => {
+    const jobs = payload && typeof payload === "object" && Array.isArray((payload as BashBgSnapshotPayload).jobs)
+      ? (payload as BashBgSnapshotPayload).jobs
+      : [];
+    void hostOperationLifecycle?.reconcileBashBg(jobs);
+  });
   // Persist each published node before runGraph releases its dependents. The
   // completion/tool-result hooks below remain compatibility fallbacks.
   pi.events.on(TEAMMATE_RESULT_PUBLISHED_EVENT, (event) => {
@@ -733,9 +869,16 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     };
     void sealTodoTasksOnAgentComplete(actor, Number(record.exitCode ?? 1), record.cancelled === true, rootCtx)
       .then((result) => {
-        if (result.sealed.length === 0) return;
+        if (result.sealed.length === 0 && result.failed.length === 0) return;
         updateTodoWidget();
-        rootCtx.ui?.notify?.(`Todo: sealed ${result.sealed.length} task(s) for @${actor.label} on completion`, "info");
+        if (result.sealed.length > 0) {
+          rootCtx.ui?.notify?.(`Todo: sealed ${result.sealed.length} task(s) for @${actor.label} on completion`, "info");
+        }
+        // A rejected seal (typically an unverified Goal quality gate) leaves the
+        // task in_progress; without a warning it dangles silently.
+        for (const failure of result.failed) {
+          rootCtx.ui?.notify?.(`Todo: task #${failure.id} for @${actor.label} was not auto-sealed: ${failure.reason}`, "warning");
+        }
       });
   });
   const emitGoalChanged = (): void => {
@@ -791,6 +934,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   };
   let workflowBridge: WorkflowBridge | undefined;
   let workflowCoordinator: WorkflowCoordinator | undefined;
+  let hostOperationLifecycle: HostOperationLifecycle | undefined;
   let attachedWorkflowSessionId: string | undefined;
   let attachedWorkflowHostSessionId: string | undefined;
   let lastRunStates = new Map<string, string>();
@@ -845,6 +989,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     }
   }
   let lastSessionStatus: string | undefined;
+  let lastWorkflowLifecycleSnapshot: WorkflowSnapshot | undefined;
   let workflowSessionOptedIn = true;
   let approvalMode: PermissionMode = DEFAULT_PERMISSION_MODE;
   let currentSwarmProjection: TeamSwarmProjection | undefined;
@@ -945,7 +1090,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     label: "Maestro",
     description: `Maestro flow command tool with three actions:
 
-- **explore**: Parallel code search via teammate agents. Each prompt spawns an independent search agent.
+- **explore**: Parallel code search via independent external-CLI search processes. Each prompt spawns one search process.
   { action: "explore", prompts: ["FIND: auth middleware\\nSCOPE: src/"], model: "..." }
 
 - **delegate**: Delegate a task to a specific model/provider for analysis or implementation.
@@ -960,7 +1105,7 @@ This tool is NOT the Maestro Session/Run lifecycle CLI: use the **run-control** 
 
 Progressive fallback: when a user explicitly requests an external model (codex, gemini, claude, opencode) NOT in <available_teammate_models>, call **model-availability** first, then route via bash:
   maestro delegate "<PROMPT>" --to <tool> --mode analysis
-The --to flag is MANDATORY. A bare \`maestro delegate codex\` treats "codex" as the prompt and falls back to the first enabled tool. Contract: D:\\maestro2\\workflows\\delegate-usage.md.`,
+The --to flag is MANDATORY. A bare \`maestro delegate codex\` treats "codex" as the prompt and falls back to the first enabled tool.`,
 
     promptSnippet: "External-CLI-endpoint routing (explore/delegate/moa) with a delegate-as-teammate-fallback path. Prefer teammate; fall back to maestro delegate --to <tool> for explicit external models missing from the teammate catalog.",
     promptGuidelines: [
@@ -1182,37 +1327,24 @@ Only request completion after all work is done; the extension verifies it indepe
   const todoTool: ToolDefinition<typeof TodoToolParams> = {
     name: "todo",
     label: "Todo",
-    description: `Task management with plain-text context and optional Pi skill execution — 7 actions.
+    description: `Task management with plain-text context and optional Pi skill execution.
 
-- create (single): { action: "create", subject: "...", assignee: "self|root|id|unique-id-prefix|label|@label|label#id-prefix", context: "...", skills: [{ name: "maestro-execute", role: "primary", args: "..." }] }
-- create (batch — lay out a whole plan in ONE call): { action: "create", tasks: [{ subject: "Step 1", context: "..." }, { subject: "Step 2", blockedBy: [0] }, { subject: "Step 3", blockedBy: [1] }] }
-- update: { action: "update", id: "...", updateFields: ["status", "summary"], status: "completed", summary: "..." }
-- clear context/skills: { action: "update", id: "...", updateFields: ["context", "skills"], context: "", skills: [] }
-- list: { action: "list", filter: { status: "pending", memberId: "self|root|correlation-id|unique-id-prefix|label|@label|label#id-prefix" } }
-- get: { action: "get", id: "..." }
-- delete: { action: "delete", id: "..." }
-- clear: { action: "clear" }
-- next: { action: "next" } — activate the oldest runnable pending task assigned to the caller and return its resolved context; ERRORS if you already hold an in_progress task — close it first with update status=completed (+ summary), then call next
+Actions:
+- create (single): { action: "create", subject: "...", assignee: "self|root|id|unique-id-prefix|label|@label|label#id-prefix", context: "...", skills: [{ name, role: "primary|guard|support", args?: "..." }] }
+- create (batch): { action: "create", tasks: [{ subject, description?, context?, blockedBy?, skills?, goalId? }, ...] } — blockedBy integer N means the earlier array item tasks[N] (0-based), e.g. blockedBy: [0]
+- update: { action: "update", id, updateFields: [...], ... } — list changed fields; empty string/array clears clearable fields
+- list / get / delete / clear / next
 
-Parallel delegation: pass todo task id(s) to a teammate dispatch via the teammate tool's tasks[].todo field — the agent takes ownership on start (assignee root → agent, first runnable task auto-activates unless the agent is already busy), manages the injected ordered queue itself, and clean exits auto-seal leftovers. Self-drive your own tasks with todo next; delegated agents advance theirs with todo update.
+Parallel delegation: bind todo ids via teammate \`tasks[].todo\`; delegated agents advance with \`todo update\`, root self-drives with \`todo next\`.
 
-Rules:
-- Use todo when the work has ≥3 steps/phases, has step dependencies, or spans turns; otherwise (same-turn, <3 steps, no dependencies) skip it. Count verifiable outcomes, not file edits or commands.
-- For multi-step work, create the ENTIRE plan up front in ONE batch create (the tasks array) — never create tasks one at a time as you go.
-- In a batch, each blockedBy integer N means the earlier array item tasks[N]. For tasks[i], every dependency must satisfy 0 <= N < i. Example: tasks[1] depends on tasks[0] with blockedBy: [0].
-- subject is the title; description is the detail — do not swap. Set summary on completion; the next action consumes prior summaries.
-- Each actor may have at most one in_progress task.
-- Skill binding requires exactly one primary; guard/support are optional. Skill file changes after activation mark the binding stale — re-activate.
-- status is update-only: create derives it from dependencies and rejects an explicit status. create takes either subject (single) or tasks (batch) — never both.
-- In update: list changed fields in updateFields. Unlisted fields are preserved; empty strings or arrays clear fields that support clearing. Always use updateFields; legacy presence-based updates (top-level fields without updateFields) are deprecated.`,
+Contract: subject is the title; description is detail. status is update-only on create (never pass status to create). Each actor has at most one in_progress task. Skill binding requires exactly one primary.`,
 
     promptSnippet: "Lay out a whole multi-step plan in one batch create (≥3 steps), then drive it step by step with resolved context and optional skill guidance.",
     promptGuidelines: [
-      "Use todo whenever the request has ≥3 steps/phases, step dependencies, or cross-turn context — create the COMPLETE plan in a single batch create (action=create with a tasks array) BEFORE executing. This trigger is mandatory — do not pause to judge whether tracking is needed.",
-      "A todo task is a meaningful unit of work — a feature, a logical phase, a component, or an independently verifiable outcome — not a single edit or command. Multiple related edits that serve one logical change belong in ONE task (e.g. \"Implement JWT middleware\" touching 3 files = 1 task, not 3). Use description and context to make each task rich: affected files, expected changes, verification criteria.",
-      "Always lay out the full plan up front with one batch create. Do NOT create a single task, finish it, then create the next — a one-at-a-time list hides the overall plan and provides no tracking value. Discover new sub-steps mid-work? Add them with another batch create so the whole remaining plan stays visible.",
-      "For batch dependencies, use earlier zero-based integer indexes: tasks[i].blockedBy = [N] means tasks[i] depends on tasks[N], where 0 <= N < i.",
-      "Drive each step with todo action=next — next errors while a task is in_progress, so close each step first with todo update status=completed plus a concise summary before calling it.",
+      "Use todo when work has ≥3 steps/phases, step dependencies, or cross-turn context — create the COMPLETE plan in one batch create BEFORE executing.",
+      "A task is a verifiable outcome (feature, phase, component), not a single edit or command; put affected files and verification criteria in description/context.",
+      "Batch blockedBy: tasks[i].blockedBy = [N] means tasks[i] depends on tasks[N], where 0 <= N < i.",
+      "Drive with todo next; it errors while a task is in_progress — close each step with todo update status=completed (+ summary) first.",
     ],
 
     parameters: TodoToolParams,
@@ -1292,7 +1424,7 @@ Rules:
     name: "run-control",
     label: "Run Control",
     description: `Transparent shell over the canonical Maestro CLI for the Session/Run lifecycle. Pass argv exactly as the CLI takes it (without the leading \`maestro\` executable), e.g. { argv: ["session","next","--json"] } or { argv: ["run","check","run-abc","--json"] }.
-Read commands (status/brief/prepare/check/recall/evidence/list/show/graph/skills/search/load/review) need no mutation lease; write commands (next/done/decide/seal/edit/...) require the current Pi session to own the Workflow mutation lease and are blocked in Plan mode. Entry commands (session/run create|start) may mint a Session without a held lease.
+Read-only query commands (status, brief, check, list, show, search, load, ...) need no workflow mutation lease; write commands (next/done/decide/seal/edit/...) require the current Pi session to own the workflow mutation lease and are blocked in Plan mode. Entry commands (session/run create|start) may mint a Session without a held lease.
 This is the single LLM surface for the lifecycle: do not hand-write \`maestro\` run/session calls in bash. Read results report mutation-lease ownership so a Pi session can distinguish its Run from another session's workspace-wide Run.
 
 When to use:
@@ -1305,7 +1437,7 @@ When NOT to use:
 Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--verdict","done"] }, { argv: ["run","edit","verify","--after","latest"] }.`,
     promptSnippet: "Maestro CLI passthrough shell for Session/Run lifecycle",
     parameters: RunControlParams,
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(id, params, _signal, _onUpdate, ctx) {
       if (!workflowCoordinator) {
         return {
           content: [{ type: "text", text: "Workflow Coordinator is not attached." }],
@@ -1325,10 +1457,14 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
           if (await attachWorkflowSession(ctx, snapshot, hostSessionId)) workflowSessionOptedIn = true;
         }
       }
+      const toolOperationId = hostSessionId
+        ? hostOperationLifecycle?.toolOperationId(id)
+          ?? await hostOperationLifecycle?.toolCall(id)
+        : undefined;
       const result = await executeRunControl(
         params as RunControlInput,
         workflowCoordinator,
-        hostSessionId ? { hostSessionId } : undefined,
+        hostSessionId ? { hostSessionId, toolOperationId } : undefined,
       );
       if (result.ok) {
         await refreshWorkflow(ctx, actionOptsIn, actionOptsIn, actionOptsIn);
@@ -1508,14 +1644,16 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     allowLeaseMutation = false,
   ): Promise<WorkflowSnapshot | undefined> {
     if (!workflowBridge) return undefined;
+    const previous = lastWorkflowLifecycleSnapshot ?? workflowBridge.getSnapshot();
     const next = await workflowBridge.refresh();
-    if (!workflowSessionOptedIn && allowOptIn && next.session?.status === "running") {
+    if (!workflowSessionOptedIn && allowOptIn && isWorkflowSessionMatchable(next)) {
       workflowSessionOptedIn = true;
     }
 
     const activateWorkflowSession = shouldActivateWorkflowSession(next, workflowSessionOptedIn);
     const nextSession = activateWorkflowSession ? next.session : undefined;
-    const nextAttachSessionId = nextSession?.sessionId;
+    const attachableSession = shouldAttachWorkflowSession(next) ? next.session : undefined;
+    const nextAttachSessionId = attachableSession?.sessionId;
     if (allowLeaseMutation
       && attachedWorkflowSessionId
       && attachedWorkflowSessionId !== nextAttachSessionId) {
@@ -1524,8 +1662,8 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
       attachedWorkflowSessionId = undefined;
       attachedWorkflowHostSessionId = undefined;
     }
-    if (allowLeaseMutation && emitEvents && nextSession
-      && attachedWorkflowSessionId !== nextSession.sessionId) {
+    if (allowLeaseMutation && emitEvents && attachableSession
+      && attachedWorkflowSessionId !== attachableSession.sessionId) {
       await attachWorkflowSession(ctx, next);
     }
     reconcileMirrorTasks(
@@ -1534,7 +1672,25 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
       next.sessionGeneration,
     );
     if (workflowSessionOptedIn) reconcileWorkflowGoal(next, ctx);
-    if (nextSession?.status && nextSession.status !== lastSessionStatus) {
+    const sealedExecution = sealedWorkflowExecutionTransition(previous, next);
+    if (sealedExecution) {
+      const summary = await new KnowledgeCliAdapter(ctx.cwd).review(sealedExecution.sessionId).catch(() => null);
+      const pending = summary?.candidates.filter(candidate => candidate.status === "pending").length ?? 0;
+      const reviewRequired = summary?.candidates.filter(
+        candidate => candidate.reconciliation?.promotion_eligibility === "review_required",
+      ).length ?? 0;
+      updateKnowledgePendingStatus(ctx, { pending, reviewRequired });
+      const message = pending > 0 || reviewRequired > 0
+        ? `Workflow Execution ${sealedExecution.executionId} sealed in Session ${sealedExecution.sessionId} — `
+          + `${pending} candidate(s) pending, ${reviewRequired} review required. `
+          + `Run "maestro knowledge review ${sealedExecution.sessionId}" before promotion.`
+        : `Workflow Execution ${sealedExecution.executionId} sealed in Session ${sealedExecution.sessionId}.`;
+      ctx.ui.notify(message, "info");
+      pi.sendMessage({ customType: "execution-knowledge", content: message, display: true });
+    }
+    if (nextSession?.lifecycleAuthority !== "execution-derived"
+      && nextSession?.status
+      && nextSession.status !== lastSessionStatus) {
       if (nextSession.status === "sealed" && lastSessionStatus !== undefined) {
         const sealedSessionId = nextSession.sessionId;
         const summary = await new KnowledgeCliAdapter(ctx.cwd).review(sealedSessionId).catch(() => null);
@@ -1554,6 +1710,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     }
     if (emitEvents && activateWorkflowSession) emitRunTransitions(next, ctx);
     else lastRunStates = new Map(next.session?.runs.map((run) => [run.runId, run.status]) ?? []);
+    lastWorkflowLifecycleSnapshot = next;
     updateTodoWidget();
     publishMaestroUi();
     return next;
@@ -1565,13 +1722,14 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
       return { allowNew: false };
     }
     try {
-      if (!await workflowCoordinator.supportsPlanPublish()) {
+      if (!await workflowCoordinator.supportsPlanPublish()
+        || !await workflowCoordinator.supportsNewPlanSession()) {
         return { allowNew: false };
       }
       const snapshot = await workflowBridge.refresh();
       const session = snapshot.session;
       if (!session) return { allowNew: true };
-      const active = activeWorkflowRun(snapshot);
+      const target = currentWorkflowPlanTarget(snapshot);
       const ownership = await workflowCoordinator.ownership(hostSessionId);
       // stale leases are reclaimable (WorkflowLeaseStore.acquire treats a
       // heartbeat past staleAfterMs as unowned), so they never block binding
@@ -1579,15 +1737,8 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
       const ownedHere = ownership?.state === "unowned"
         || ownership?.state === "stale"
         || (ownership?.isOwner === true && ownership.isAttached === true);
-      const firstPendingStep = session.chain.find((step) => step.status === "pending");
-      let reason: string | undefined;
-      if (session.status !== "running") reason = `Workflow Session is ${session.status}`;
-      else if (active) reason = `Workflow Session has active Run ${active.runId}`;
-      else if (!firstPendingStep) reason = "Workflow Session has no pending execution step";
-      else if (firstPendingStep.command !== "execute") {
-        reason = `Next Workflow step is ${firstPendingStep.command}, not execute`;
-      }
-      else if (!ownedHere) {
+      let reason = target.reason;
+      if (!reason && !ownedHere) {
         reason = ownership?.ownerHostSessionId
           ? `Workflow Session is owned by Pi session ${ownership.ownerHostSessionId}`
           : "Workflow Session mutation lease is unavailable";
@@ -1599,7 +1750,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
           available: reason === undefined,
           ...(reason ? { reason } : {}),
         },
-        allowNew: !active && (ownership?.state === "unowned" || ownedHere),
+        allowNew: !target.hasActiveWork && (ownership?.state === "unowned" || ownedHere),
       };
     } catch (error) {
       return {
@@ -1642,13 +1793,10 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     if (execution.workflowTarget === "current") {
       const snapshot = await workflowBridge.refresh();
       const session = snapshot.session;
-      if (!session || session.status !== "running") throw new Error("No running canonical Workflow Session to bind");
-      const active = activeWorkflowRun(snapshot);
-      const firstPendingStep = session.chain.find((step) => step.status === "pending");
-      if (!active && firstPendingStep?.command !== "execute") {
-        throw new Error(firstPendingStep
-          ? `Next Workflow step is ${firstPendingStep.command}, not execute`
-          : "Current Workflow Session has no pending execute step");
+      if (!session) throw new Error("No canonical Workflow Session to bind");
+      const target = currentWorkflowPlanTarget(snapshot);
+      if (!target.available) {
+        throw new Error(target.reason ?? "Current Workflow Session cannot bind an approved Plan");
       }
       workflowSessionOptedIn = true;
       if (!await attachWorkflowSession(ctx as ExtensionContext, snapshot, hostSessionId)) {
@@ -1662,6 +1810,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     }
 
     const sourcePath = join(approved.plansDir, approvedPath);
+    const expectedRequestId = derivePlanPublishRequestId(handoffKey);
     const publication = await workflowCoordinator.publishPlan({
       sourcePath,
       sourceRoot: approved.plansDir,
@@ -1672,8 +1821,13 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
       sourcePiSession: hostSessionId,
       planRevision: approved.manifest.revision,
       approvedAt,
+      requestId: expectedRequestId,
     }, { hostSessionId });
-    const published = parsePlanPublishResult(publication.command.stdout);
+    const published = parsePlanPublishResult(
+      publication.command.stdout,
+      handoffKey,
+      expectedRequestId,
+    );
     if (published.source_checksum !== `sha256:${approvedChecksum}`) {
       throw new Error("Published Plan source checksum does not match the approved revision");
     }
@@ -1683,7 +1837,12 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     if (!await attachWorkflowSession(ctx as ExtensionContext, publication.snapshot, hostSessionId)) {
       throw new Error(`Published Workflow Session ${published.session_id} could not be attached`);
     }
-    const existingExecution = activeWorkflowRun(publication.snapshot);
+    const publicationStatus = deriveWorkflowStatus(publication.snapshot);
+    const existingExecution = publicationStatus.authority === "execution-derived"
+      ? publication.snapshot.session?.runs.find(
+        (run) => run.runId === publication.snapshot.execution?.activeRunId,
+      )
+      : activeWorkflowRun(publication.snapshot);
     if (existingExecution) {
       requirePublishedExecutionRun(publication.snapshot, published);
     }
@@ -1719,41 +1878,30 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
   function planIntent(markdown: string, handoffKey: string): string {
     const heading = markdown.match(/^#\s+(.+)$/m)?.[1]?.trim();
     const firstLine = markdown.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
-    return (heading || firstLine || `Approved Plan ${handoffKey.slice(0, 12)}`).slice(0, 240);
+    return (heading || firstLine || `Approved Plan request ${derivePlanPublishRequestId(handoffKey)}`).slice(0, 240);
   }
 
-  function parsePlanPublishResult(stdout: string): {
-    session_id: string;
-    run_id: string;
-    artifact_id: string;
-    source_checksum: string;
-    request_id: string;
-  } {
+  function parsePlanPublishResult(
+    stdout: string,
+    expectedHandoffKey: string,
+    expectedRequestId: string,
+  ): import("../tools/plan-workflow.ts").PublishedPlanIdentity {
     let envelope: unknown;
     try {
       envelope = JSON.parse(stdout.trim());
     } catch {
       throw new Error("Maestro plan publisher returned invalid JSON");
     }
-    if (!envelope || typeof envelope !== "object") throw new Error("Maestro plan publisher returned an invalid envelope");
+    if (!envelope || typeof envelope !== "object") {
+      throw new Error("Maestro plan publisher returned an invalid envelope");
+    }
     const record = envelope as Record<string, unknown>;
-    const payload = record.result;
-    if (record.ok !== true || !payload || typeof payload !== "object") {
-      throw new Error("Maestro plan publisher did not return a successful result");
-    }
-    const result = payload as Record<string, unknown>;
-    for (const field of ["session_id", "run_id", "artifact_id", "source_checksum", "request_id"] as const) {
-      if (typeof result[field] !== "string" || !(result[field] as string).trim()) {
-        throw new Error(`Maestro plan publisher result is missing ${field}`);
-      }
-    }
-    return result as {
-      session_id: string;
-      run_id: string;
-      artifact_id: string;
-      source_checksum: string;
-      request_id: string;
-    };
+    return parseProjectedPublishedPlanIdentity({
+
+      ok: record.ok === true,
+      request_id: typeof record.request_id === "string" ? record.request_id : null,
+      result: record.result,
+    }, expectedHandoffKey, expectedRequestId);
   }
 
   async function withPublicWorkflowErrors<T>(operation: () => Promise<T>): Promise<T> {
@@ -1800,6 +1948,12 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     const sessionId = snapshot.session!.sessionId;
     if (attachedWorkflowSessionId === sessionId && attachedWorkflowHostSessionId === hostSessionId) return true;
     try {
+      const ownership = await workflowCoordinator.ownership(hostSessionId);
+      if (ownership?.sessionId === sessionId && ownership.isOwner && ownership.isAttached) {
+        attachedWorkflowSessionId = sessionId;
+        attachedWorkflowHostSessionId = hostSessionId;
+        return true;
+      }
       await workflowCoordinator.attach(hostSessionId, sessionId);
       attachedWorkflowSessionId = sessionId;
       attachedWorkflowHostSessionId = hostSessionId;
@@ -2582,6 +2736,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
+    const hasUnresolvedHostOperations = hostOperationLifecycle?.shutdown() === true;
     if (event.reason === "quit" || event.reason === "reload") disposeTuiLocaleEvents();
     guiLifecycleGeneration += 1;
     const closingGuiServer = guiServer;
@@ -2610,13 +2765,16 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     panelMode = "collapsed";
     goalSessionShutdown(ctx);
     todoSessionShutdown(ctx);
-    await workflowCoordinator?.release();
+    if (hasUnresolvedHostOperations) workflowCoordinator?.abandonCoreAuthority();
+    else await workflowCoordinator?.release();
     attachedWorkflowSessionId = undefined;
     attachedWorkflowHostSessionId = undefined;
     workflowCoordinator = undefined;
+    hostOperationLifecycle = undefined;
     workflowBridge = undefined;
     workflowSessionOptedIn = true;
     lastRunStates.clear();
+    lastWorkflowLifecycleSnapshot = undefined;
     setWorkflowCoordinator(undefined);
     onSessionShutdownPlan(ctx);
     ctx.ui.setStatus("approval-mode", undefined);
@@ -2826,6 +2984,10 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     return goalInput(event);
   });
 
+  pi.on("tool_call", async (event) => {
+    await hostOperationLifecycle?.toolCall(event.toolCallId);
+  });
+
   // A hard-threshold intent must settle before the next tool executes. The
   // guard blocks (+ terminates) the tool batch here without abort(); agent_settled
   // owns the actual compact() and CONTINUE resume. Returning block/terminate
@@ -2837,16 +2999,14 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
   pi.on("tool_call", (event) => onToolCallPlan(event, approvalMode === "bypassPermissions"));
 
   pi.on("before_agent_start", async (event) => {
+    await hostOperationLifecycle?.beforeAgentStart();
     // Pick up compaction settings edited while idle; cached again within the turn.
     midTurnAutoCompaction.refreshSettings();
     // Plan owns the stable mode prompt; Goal only acknowledges continuation markers.
     const planResult = onBeforeAgentStartPlan(event);
     goalBeforeAgentStart(event);
-    const todoResult = await onBeforeAgentStartTodo({
-      systemPrompt: planResult?.systemPrompt ?? event.systemPrompt,
-    });
-    const base = todoResult?.systemPrompt ?? planResult?.systemPrompt ?? event.systemPrompt;
-    return { systemPrompt: `${base}\n\n${RESOURCE_TOOL_GUIDANCE}` };
+    onBeforeAgentStartTodo();
+    return planResult;
   });
 
   pi.on("context", async (event, ctx) => {
@@ -2941,10 +3101,12 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
       );
     } finally {
       preserveCompletedTurnFromNativeThreshold = false;
+      await hostOperationLifecycle?.agentSettled();
     }
   });
 
   pi.on("tool_execution_end", async (event, ctx) => {
+    await hostOperationLifecycle?.toolExecutionEnd(event.toolCallId);
     if (event.toolName === "todo") updateTodoWidget();
     if (event.toolName === "goal") emitGoalChanged();
     const command = event.toolName === "bash"
@@ -3162,11 +3324,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
   const teammatePermissionBroker: TeammatePermissionBroker = async (call, ctx) => {
     const planBlock = onToolCallPlan(call, approvalMode === "bypassPermissions");
     if (planBlock) return { action: "deny", reason: planBlock.reason };
-    // CV-01: child tools must not hit Lead hard-gate — mark expertsCaller=expert.
-    const hookBlock = await hookAdapter.beforeToolCall(
-      { ...call, expertsCaller: "expert" as const },
-      ctx,
-    );
+    const hookBlock = await hookAdapter.beforeToolCall(call, ctx);
     if (hookBlock) return { action: "deny", reason: hookBlock.reason };
     const block = await permissionController.authorize(
       call,
@@ -3191,7 +3349,6 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
         const call = { toolName, input };
         const planBlock = onToolCallPlan(call, approvalMode === "bypassPermissions");
         if (planBlock) return { block: true, reason: planBlock.reason };
-        // GUI path is Leader-originated; keep default expertsCaller=leader.
         const hookBlock = await hookAdapter.beforeToolCall(call, ctx);
         signal.throwIfAborted();
         if (hookBlock) return { block: true, reason: hookBlock.reason };
@@ -3434,7 +3591,7 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
 Tasks created here are attributed to this teammate and assigned to self by default.
 Use assignee="root" to hand work back to root. Teammates can update tasks they created or were assigned; only root can clear the shared list.
 
-If root delegated a task to you (spawned with todo: "<id>"), it is usually already active (in_progress) — check with \`todo list\`, work on the in_progress one, and finish it with \`todo update <id> status=completed summary=<one-line result>\`. Only call \`todo next\` when you have no active task. Leave a task pending only if you could not complete it.`,
+If root delegated a task to you (spawned with todo: "<id>"), it is usually already active (in_progress) — check with \`todo list\`, work on the in_progress one, and finish it with \`todo update <id> status=completed summary=<one-line result>\`. Then activate your next assigned task with \`todo update <id> status=in_progress\` (\`todo update\` is the delegated-agent channel; \`todo next\` is root's self-drive channel). Leave a task pending only if you could not complete it.`,
     promptSnippet: "Create and update teammate-owned tasks in the shared root Todo list.",
     promptGuidelines: [
       "Use todo for newly discovered follow-up work, explicit blockers, and resumable steps.",
@@ -3485,14 +3642,14 @@ function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 
 Users may add supplementary details to any option (including a free-form answer for "None of the above"); these come back in each answer's details map and text field.
 
-The tool returns structured answers only. Plan mode owns proposed-plan Markdown; /plan approve is the explicit confirmation command.
+The tool returns structured answers only.
 
 When to use:
 - A genuine decision fork the user must own (approach A vs B, which features, naming) that you cannot resolve by reading code or docs.
 
 When NOT to use:
 - Questions you could answer yourself with a grep or a doc read — investigate first, then ask only a specific question.
-- Confirming a proposed plan — that is owned by /plan approve, not this tool.`,
+- Confirming a proposed plan — plan confirmation is owned by the plan-confirm flow; never use this tool to approve a plan.`,
 
     promptSnippet: "Collect a structured user decision via a keyboard-first TUI wizard (up to 4 questions)",
     promptGuidelines: [

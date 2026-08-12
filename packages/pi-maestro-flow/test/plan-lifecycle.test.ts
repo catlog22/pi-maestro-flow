@@ -775,8 +775,10 @@ test("Plan confirmation exits intentionally and injects the Act transition once 
     assert.match(confirmed.content[0]?.text ?? "", /Act mode is now active/);
     assert.equal(harness.messages.length, 0);
     assert.equal(harness.aborts, 0);
-    const exitPrompt = onBeforeAgentStartPlan({ systemPrompt: "base" })?.systemPrompt ?? "";
-    assert.match(exitPrompt, /^base/);
+    const exitResult = onBeforeAgentStartPlan({ systemPrompt: "base" });
+    const exitPrompt = exitResult?.message?.content ?? "";
+    assert.equal(exitResult?.message?.customType, "plan-mode-reminder");
+    assert.equal(exitResult?.message?.display, false);
     assert.match(exitPrompt, /## Exited Plan Mode/);
     assert.match(exitPrompt, /intentionally exited Plan mode without approving/);
     assert.match(exitPrompt, /Act mode is now active/);
@@ -862,7 +864,9 @@ test("Plan hooks preserve read-only discovery and block mutations before approva
   try {
     await onSessionStartPlan(harness.ctx);
     await execute(harness, "plan-enter");
-    const planPrompt = onBeforeAgentStartPlan({ systemPrompt: "base" })?.systemPrompt ?? "";
+    const planResult = onBeforeAgentStartPlan({ systemPrompt: "base" });
+    const planPrompt = planResult?.message?.content ?? "";
+    assert.equal(planResult?.message?.customType, "plan-mode-reminder");
     assert.match(planPrompt, /Align every user requirement/);
     assert.match(planPrompt, /verifiable acceptance check/);
     for (const role of ["analyst", "research", "explorer", "planner"]) {

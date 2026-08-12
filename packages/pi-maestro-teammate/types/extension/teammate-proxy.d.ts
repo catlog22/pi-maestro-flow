@@ -6,7 +6,7 @@
  * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { type WorkspacePeerWindowListing } from "./workspace-peers.ts";
+import { type WorkspacePeerMessageKind, type WorkspacePeerWindowListing } from "./workspace-peers.ts";
 import type { RunTeammateParams } from "../runs/execution.ts";
 import type { TeammateState, ChildAgentCallSnapshot } from "../shared/types.ts";
 import { type TeammateModelCapability } from "../models/model-catalog.ts";
@@ -71,6 +71,7 @@ export declare function handleProxyRequest(pi: ExtensionAPI, state: TeammateStat
     selector: string;
     message: string;
     mode: "steer" | "follow_up" | "abort";
+    messageKind?: WorkspacePeerMessageKind;
 }) => Promise<{
     delivered: boolean;
     error?: string;

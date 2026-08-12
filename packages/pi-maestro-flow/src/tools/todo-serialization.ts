@@ -1,10 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getGoalById } from "./goal.ts";
 import type { TodoSkillConfig } from "../skills/skill-loader.ts";
-import type {
-  TodoSkillBinding,
-  TodoSkillRole,
-} from "../skills/skill-composer.ts";
+import type { TodoSkillBinding } from "../skills/skill-composer.ts";
 import type {
   SkillActivationBindingMetadata,
   SkillActivationMetadata,
@@ -18,9 +15,12 @@ import type {
   TodoTask,
 } from "./todo.ts";
 import {
+  isSkillRole,
   normalizeSkillBinding,
   normalizeSkillConfig,
 } from "./todo-skill-engine.ts";
+
+export { isSkillRole };
 
 export const TODO_STATE_ENTRY_TYPE = "todo-state";
 export const TODO_STATE_VERSION = 5;
@@ -361,10 +361,6 @@ export function stringArray(value: unknown): string[] {
 
 export function isTaskStatus(value: unknown): value is TaskStatus {
   return ["pending", "in_progress", "completed", "blocked", "deleted"].includes(String(value));
-}
-
-export function isSkillRole(value: unknown): value is TodoSkillRole {
-  return ["primary", "guard", "support"].includes(String(value));
 }
 
 export function asRecord(value: unknown): Record<string, unknown> | undefined {

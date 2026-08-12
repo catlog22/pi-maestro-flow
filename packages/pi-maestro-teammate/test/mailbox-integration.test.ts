@@ -40,6 +40,7 @@ function makeAuthority(): MailboxAuthority {
     currentLeaseNonce: () => authorityState.leaseNonce,
     isFenced: (cid) => authorityState.fenced.has(cid),
     isStaleUnauthorized: (cid) => authorityState.staleUnauthorized.has(cid),
+    managesRecipient: () => true,
   };
 }
 

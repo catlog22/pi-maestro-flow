@@ -8,6 +8,7 @@ import {
   findSettledAgent,
   handleProxyRequest,
   hasTeammateWidgetWork,
+  killAgent,
   renderAgentSelectorPanel,
   renderAgentStatusWidget,
   recordSettledAgent,
@@ -369,6 +370,21 @@ test("rebinding a name whose holder is gone is not a collision", () => {
   const second = addAgent(state, undefined);
   bindAgentName(state, "reviewer", second.correlationId);
   assert.doesNotMatch(second.outputLog.join("\n"), /already held/);
+});
+
+test("retiring the previous name holder does not unbind the current holder", () => {
+  const state = makeState();
+  const first = addAgent(state, "worker");
+  const second = addAgent(state, undefined);
+  bindAgentName(state, "worker", second.correlationId);
+  assert.equal(state.namedAgents.get("worker"), second.correlationId);
+
+  // onChildClosed / session teardown pass the displaced agent's display name
+  // into killAgent. That must not wipe @worker off the current holder.
+  killAgent(state, first.correlationId, first.name, "completed", false);
+  assert.equal(state.namedAgents.get("worker"), second.correlationId);
+  assert.equal(state.activeRuns.has(second.correlationId), true);
+  assert.equal(state.activeRuns.has(first.correlationId), false);
 });
 
 // --- REL-6: a failed cohort member blocked every sibling from retiring -----

@@ -237,5 +237,12 @@ test("child proxy routes local teammate-send through the session host callback",
   const result = envelope.result as { isError?: boolean; details?: { delivered?: boolean } };
   assert.equal(result.isError, false);
   assert.equal(result.details?.delivered, true);
-  assert.deepEqual(routed, [{ selector: "worker", message: "use the registry", mode: "follow_up" }]);
+  assert.deepEqual(routed, [{
+    selector: "worker",
+    targetCorrelationId: "local-worker",
+    senderCorrelationId: undefined,
+    message: "use the registry",
+    mode: "follow_up",
+    messageKind: "coordination",
+  }]);
 });

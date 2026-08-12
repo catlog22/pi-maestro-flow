@@ -241,7 +241,7 @@ test("compaction recovery reads only the Run bound to the current Goal", async (
     assert.deepEqual(events, ["brief"], "queued continuation must still be fenced by a fresh Run brief");
     hasPendingMessages = false;
 
-    assert.equal(await onBeforeAgentStartTodo({ systemPrompt: "base" }), undefined);
+    assert.equal(onBeforeAgentStartTodo(), undefined);
     const injected = await onContextTodo([]);
     const injectedContent = String((injected?.messages[0] as { content?: string } | undefined)?.content ?? "");
     assert.equal(injectedContent.match(/<active_skill_stack>/g)?.length, 1);

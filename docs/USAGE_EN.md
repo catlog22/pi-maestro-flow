@@ -670,7 +670,7 @@ Intelligent context window management preventing long session overflow:
 | **Auto-prune** | Automatically prunes large tool results (≥4KB) when context hits threshold (~70%) |
 | **Keep recent** | Always preserves ~20K tokens of recent conversation |
 | **Reserve space** | Reserves ~16K tokens for model response |
-| **Replayable tools** | `read`, `grep`, `glob`, `search`, `find` results safely prunable (re-executable on demand) |
+| **Replayable tools** | `read`, `grep`, `glob`, `search`, `find`, `resource` results safely prunable (re-executable on demand; pruned `resource` results keep their URI for re-reading) |
 | **Compaction continue** | Auto-injects continuation prompt after compaction, agent resumes from checkpoint |
 | **State persistence** | Prune state persisted across sessions |
 

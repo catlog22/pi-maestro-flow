@@ -48,6 +48,7 @@ function permissiveAuthority(): MailboxAuthority {
     currentLeaseNonce: () => "nonce-abc",
     isFenced: () => false,
     isStaleUnauthorized: () => false,
+    managesRecipient: () => true,
   };
 }
 
@@ -468,6 +469,7 @@ test("lease handoff invalidates in-flight envelopes (epoch/nonce bound to recipi
     currentLeaseNonce: () => lease.nonce,
     isFenced: () => false,
     isStaleUnauthorized: () => false,
+    managesRecipient: () => true,
   };
   const localStore = new MailboxFileStore({ paths, now: () => nowMs });
   const localRouter = new MailboxRouter({ store: localStore, authority, quota: new QuotaAdmission({ store: localStore }), now: () => nowMs });
@@ -558,6 +560,23 @@ test("GC sweeps stale seen markers after receipt retention", async () => {
 test("MailboxHost schedules periodic GC that sweeps applied receipts", async () => {
   let clock = nowMs;
   const state = makeState();
+  // The "*" host consumer only dispatches to recipients it owns (activeRuns).
+  state.activeRuns.set("corr-1", {
+    agent: "worker",
+    correlationId: "corr-1",
+    startedAt: Date.now(),
+    abortController: new AbortController(),
+    ownsChildProcess: true,
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: Date.now(),
+    depth: 0,
+    status: "running",
+    runtimeGeneration: 1,
+    sleepMs: 0,
+    stdin: { writable: true },
+    lease: { owner: "child", state: "active", epoch: 1, nonce: "owner-1" },
+  } as never);
   const host = new MailboxHost({
     rootDir: join(baseDir, "mb"),
     state,

@@ -37,6 +37,8 @@ export interface MailboxAuthority {
   isFenced(recipientCorrelationId: string): boolean;
   /** Whether the recipient agent is stale/unauthorized (should dead-letter). */
   isStaleUnauthorized(recipientCorrelationId: string): boolean;
+  /** Whether this host instance owns the recipient (local activeRuns). */
+  managesRecipient(recipientCorrelationId: string): boolean;
 }
 
 // --- Enqueue Request ---
@@ -171,22 +173,33 @@ export class MailboxRouter {
     const hash = computeEnvelopeHash(envelopeBase);
     const envelope: MailboxEnvelope = { ...envelopeBase, hash };
 
-    // 5. Deduplication check — keyed on the caller-provided request id so a
-    // retried logical message (e.g. taskId via the v1 registry) is not
-    // injected twice. Without a request id there is nothing meaningful to
-    // deduplicate against, so no marker is written (the messageId is a fresh
-    // UUID every time and would make the seen-set both unbounded and useless).
+    // 5. Deduplication — keyed on the caller-provided request id so a retried
+    // logical message (e.g. taskId via the v1 registry) is not injected twice.
+    // The key is claimed atomically (exclusive create) BEFORE any file write:
+    // a check-then-mark-after-promote sequence would let two concurrent
+    // enqueues with the same request id both pass and double-deliver. Without
+    // a request id there is nothing meaningful to deduplicate against, so no
+    // marker is written (the messageId is a fresh UUID every time and would
+    // make the seen-set both unbounded and useless).
     const dedupKey = request.requestId ?? request.correlationId;
     if (dedupKey) {
-      if (await this.#store.isSeen(dedupKey)) {
+      const claimed = await this.#store.tryMarkSeen(dedupKey);
+      if (!claimed) {
         return { ok: false, code: "duplicate", message: `message ${dedupKey} already processed` };
       }
     }
+
+    // Failed enqueues must release the dedup claim, or a legitimate retry of
+    // the same logical message would be rejected as a duplicate.
+    const releaseDedup = async (): Promise<void> => {
+      if (dedupKey) await this.#store.unmarkSeen(dedupKey);
+    };
 
     // 6. Write to staging
     try {
       await this.#store.writeStaging(envelope);
     } catch (error) {
+      await releaseDedup();
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes("payload exceeds")) {
         return { ok: false, code: "payload_too_large", message };
@@ -200,15 +213,16 @@ export class MailboxRouter {
     // 7. Promote to ready
     const promoted = await this.#store.promoteToReady(messageId);
     if (!promoted) {
+      await releaseDedup();
       return { ok: false, code: "route_invalid", message: "failed to promote staging to ready" };
     }
 
-    // 8. Mark the dedup key as seen (only when one was provided)
-    if (dedupKey) {
-      await this.#store.markSeen(dedupKey);
-    }
-
     return { ok: true, messageId, state: "ready" };
+  }
+
+  /** Whether this host's authority owns the recipient (consumer "*" filtering). */
+  managesRecipient(recipientCorrelationId: string): boolean {
+    return this.#authority.managesRecipient(recipientCorrelationId);
   }
 
   /**

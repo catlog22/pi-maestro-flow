@@ -27,6 +27,7 @@ function permissiveAuthority(): MailboxAuthority {
     currentLeaseNonce: () => "nonce-abc",
     isFenced: () => false,
     isStaleUnauthorized: () => false,
+    managesRecipient: () => true,
   };
 }
 

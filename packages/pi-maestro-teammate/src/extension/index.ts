@@ -285,6 +285,7 @@ import {
 } from "../runs/child-extensions.ts";
 import { setQuietMode } from "../quiet-state.ts";
 import { aggregateAgentRunPhase } from "../shared/agent-status.ts";
+import { formatLocalAgentMessage } from "../shared/routing.ts";
 export * from "./teammate-core.ts";
 import {
   appendTeammateDepthContext,
@@ -379,6 +380,7 @@ import {
   type SessionEndpoint,
   type SessionMessageRequest,
   type SessionMessageResult,
+  type SessionMessageKind,
   type SessionResolution,
   type WindowThreadEntryInput,
   type WindowThreadStatus,
@@ -842,7 +844,7 @@ export default function registerTeammateExtension(
       promptSnippet: TEAMMATE_SEND_SNIPPET,
       promptGuidelines: TEAMMATE_SEND_GUIDELINES,
       parameters: TeammateSendParams,
-      async execute(_id: string, params: { to: string; message?: string; mode?: RpcMessageMode }, signal: AbortSignal) {
+      async execute(_id: string, params: { to: string; message?: string; mode?: RpcMessageMode; kind?: SessionMessageKind }, signal: AbortSignal) {
         return proxyCall<{ delivered: boolean }>("teammate-send", params, signal);
       },
     });
@@ -1025,6 +1027,7 @@ export default function registerTeammateExtension(
           fromOwnerId: entry.peerOwnerId,
           requestedMode: entry.mode,
           mode: effectiveAction,
+          ...(entry.messageKind === undefined ? {} : { messageKind: entry.messageKind }),
           replayed: true,
         },
       }, {
@@ -1384,12 +1387,30 @@ export default function registerTeammateExtension(
     }
   };
 
+  const prepareLocalAgentDelivery = (
+    rawMessage: string,
+    options?: { senderCorrelationId?: string; messageKind?: SessionMessageKind },
+  ): { body: string; from: string } => {
+    const sender = resolveLocalAgentSenderContext(state, options?.senderCorrelationId);
+    return {
+      body: formatLocalAgentMessage({
+        message: rawMessage,
+        messageKind: options?.messageKind,
+        senderLabel: sender.label,
+        replyToSelector: sender.replyTo,
+      }),
+      from: sender.from,
+    };
+  };
+
   const injectLocalAgentMessage = (
     correlationId: string,
     targetLabel: string,
-    message: string,
+    delivery: { body: string; from: string },
     requestedMode: "steer" | "follow_up",
   ): { delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean } => {
+    const message = delivery.body;
+    const messageFrom = delivery.from;
     const agent = state.activeRuns.get(correlationId);
     if (!agent) return { delivered: false, error: `Agent "${targetLabel}" is no longer available.` };
     if (!agent.stdin?.writable) {
@@ -1401,7 +1422,7 @@ export default function registerTeammateExtension(
       agent.promptSeq = (agent.promptSeq ?? 0) + 1;
       agent.inbox.push({
         id: randomUUID(),
-        from: "caller",
+        from: messageFrom,
         to: targetLabel,
         kind: "task",
         payload: message,
@@ -1412,7 +1433,7 @@ export default function registerTeammateExtension(
       emitTeammateStarted(pi, agent);
       pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
         correlationId,
-        from: "caller",
+        from: messageFrom,
         to: targetLabel,
         mode: "prompt",
         message,
@@ -1426,7 +1447,11 @@ export default function registerTeammateExtension(
       const ownership = agent.lease ? `${agent.lease.owner} (${agent.lease.state})` : "an unavailable lease";
       return { delivered: false, error: `Agent "${targetLabel}" is currently owned by ${ownership}.` };
     }
-    const mode: RpcMessageMode = agent.status === "sleeping" ? "prompt" : requestedMode;
+    const mode: RpcMessageMode = agent.status === "sleeping"
+      ? "prompt"
+      : requestedMode === "follow_up" && agent.resultReadyAt !== undefined
+        ? "prompt"
+        : requestedMode;
     const sent = sendRpcMessage(agent.stdin, message, mode, leaseToken(agent.lease));
     if (!sent) return { delivered: false, error: `Failed to send message to "${targetLabel}".` };
 
@@ -1435,7 +1460,7 @@ export default function registerTeammateExtension(
     const wasSleeping = wakeSleepingAgent(pi, agent, now);
     agent.inbox.push({
       id: randomUUID(),
-      from: "caller",
+      from: messageFrom,
       to: targetLabel,
       kind: "task",
       payload: message,
@@ -1446,7 +1471,7 @@ export default function registerTeammateExtension(
     agent.lastActivityAt = now;
     pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
       correlationId,
-      from: "caller",
+      from: messageFrom,
       to: targetLabel,
       mode,
       message,
@@ -1483,7 +1508,16 @@ export default function registerTeammateExtension(
         const target = state.activeRuns.get(envelope.recipientCorrelationId);
         if (!target) throw new Error(`Agent "${envelope.recipientCorrelationId}" is no longer available.`);
         const mode: "steer" | "follow_up" = envelope.mode === "steer" ? "steer" : "follow_up";
-        const delivery = injectLocalAgentMessage(envelope.recipientCorrelationId, target.name ?? target.correlationId, envelope.payload, mode);
+        const sender = resolveLocalAgentSenderContext(
+          state,
+          envelope.senderId === "caller" ? undefined : envelope.senderId,
+        );
+        const delivery = injectLocalAgentMessage(
+          envelope.recipientCorrelationId,
+          target.name ?? target.correlationId,
+          { body: envelope.payload, from: sender.from },
+          mode,
+        );
         if (!delivery.delivered) throw new Error(delivery.error ?? `Failed to inject message into "${target.name ?? target.correlationId}".`);
       },
       mode: mailboxMode,
@@ -1494,10 +1528,13 @@ export default function registerTeammateExtension(
       host.service,
       "v2",
       async (request) => {
+        const prepared = prepareLocalAgentDelivery(request.message, {
+          senderCorrelationId: request.senderId === "caller" ? undefined : request.senderId,
+        });
         const delivery = injectLocalAgentMessage(
           request.recipientCorrelationId,
           request.recipientLabel ?? request.recipientCorrelationId,
-          request.message,
+          prepared,
           request.mode === "steer" ? "steer" : "follow_up",
         );
         const mode = delivery.mode === "steer" || delivery.mode === "follow_up" || delivery.mode === "prompt"
@@ -1514,10 +1551,13 @@ export default function registerTeammateExtension(
     if (isChild) return;
     if (mailboxMode === "disabled") {
       rootGlobals[MAILBOX_REGISTRY_KEY] = createDirectAgentHostRegistry(async (request) => {
+        const prepared = prepareLocalAgentDelivery(request.message, {
+          senderCorrelationId: request.senderId === "caller" ? undefined : request.senderId,
+        });
         const delivery = injectLocalAgentMessage(
           request.recipientCorrelationId,
           request.recipientLabel ?? request.recipientCorrelationId,
-          request.message,
+          prepared,
           request.mode === "steer" ? "steer" : "follow_up",
         );
         const mode = delivery.mode === "steer" || delivery.mode === "follow_up" || delivery.mode === "prompt"
@@ -1542,7 +1582,10 @@ export default function registerTeammateExtension(
     targetLabel: string,
     message: string,
     requestedMode: "steer" | "follow_up",
+    options?: { senderCorrelationId?: string; messageKind?: SessionMessageKind },
   ): Promise<{ delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean }> => {
+    const prepared = prepareLocalAgentDelivery(message, options);
+    const senderId = options?.senderCorrelationId ?? "caller";
     // Durable mailbox authoritative path: enqueue and let the consumer inject.
     // Only for live agents with a writable stdin; sleeping agents needing
     // cold-resume (restart) keep the synchronous direct path so restart fires
@@ -1552,12 +1595,12 @@ export default function registerTeammateExtension(
     if (host && host.mode === "authoritative" && requestedMode !== "steer" && agent?.stdin?.writable) {
       try {
         const enqueued = await host.rollout.deliver({
-          senderId: "caller",
+          senderId,
           recipientId: agent?.name ?? targetLabel,
           recipientCorrelationId: correlationId,
           kind: "follow_up",
           mode: "follow_up",
-          payload: message,
+          payload: prepared.body,
         });
         if (enqueued.result && !enqueued.result.ok) {
           // Surface the failure — never silently fall back to direct stdin.
@@ -1568,10 +1611,10 @@ export default function registerTeammateExtension(
           // instead of mis-rendering it as agent progress (CS-1).
           pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
             correlationId,
-            from: "caller",
+            from: prepared.from,
             to: targetLabel,
             mode: "follow_up",
-            message,
+            message: prepared.body,
             lastActivityAt: Date.now(),
             isSend: true,
           });
@@ -1585,7 +1628,7 @@ export default function registerTeammateExtension(
         return { delivered: false, error: error instanceof Error ? error.message : String(error), mode: "follow_up" };
       }
     }
-    return injectLocalAgentMessage(correlationId, targetLabel, message, requestedMode);
+    return injectLocalAgentMessage(correlationId, targetLabel, prepared, requestedMode);
   };
 
   const deliverLocalRootEndpoint = async (
@@ -1655,6 +1698,10 @@ export default function registerTeammateExtension(
       endpoint.name ?? correlationId,
       request.message,
       request.mode,
+      {
+        senderCorrelationId: request.senderCorrelationId,
+        messageKind: request.messageKind,
+      },
     );
     const effectiveMode = result.mode === "steer" ? "steer" : "follow_up";
     return {
@@ -1695,6 +1742,12 @@ export default function registerTeammateExtension(
 
   const legacyResolution = (request: SessionMessageRequest): SessionResolution => {
     const selector = request.selector;
+    if (request.targetCorrelationId) {
+      const pinned = sessionHostRegistry?.listEndpoints().find((candidate) =>
+        candidate.correlationId === request.targetCorrelationId
+      );
+      if (pinned) return { code: "resolved", selector, endpoint: pinned, candidates: [pinned] };
+    }
     const correlationId = resolveAgentCorrelationId(state, selector);
     if (correlationId) {
       const endpoint = sessionHostRegistry?.listEndpoints().find((candidate) =>
@@ -1842,9 +1895,15 @@ export default function registerTeammateExtension(
             deliveryStage?: "queued" | "injected";
           };
           if (command.targetCorrelationId === WORKSPACE_MAIN_SESSION_MARKER) {
-            const delivery = workspaceMainSessionDeliveryDecision(command.action, workspaceBackgroundJobs);
+            const delivery = workspaceMainSessionDeliveryDecision(
+              command.action,
+              workspaceBackgroundJobs,
+              command.messageKind,
+            );
             const effectiveAction = delivery.action;
-            const foregroundBash = delivery.deferred;
+            const deferredFor = delivery.deferred
+              ? command.messageKind === "status" ? "status-policy" : "foreground-bash-bg"
+              : undefined;
             const delivered = safeSendMessage(pi, {
               customType: "teammate-message",
               content: formatWorkspaceRemoteRootMessage({
@@ -1865,7 +1924,8 @@ export default function registerTeammateExtension(
                 fromOwnerId: command.fromOwnerId,
                 requestedMode: command.action,
                 mode: effectiveAction,
-                ...(foregroundBash && command.action === "steer" ? { deferredFor: "foreground-bash-bg" } : {}),
+                ...(command.messageKind === undefined ? {} : { messageKind: command.messageKind }),
+                ...(deferredFor ? { deferredFor } : {}),
               },
             }, {
               triggerTurn: true,
@@ -1876,7 +1936,9 @@ export default function registerTeammateExtension(
                   status: "accepted",
                   message: effectiveAction === command.action
                     ? `${effectiveAction} accepted by main session`
-                    : "steer deferred as follow_up while foreground bash_bg is active",
+                    : command.messageKind === "status"
+                      ? "status queued as follow_up by message policy"
+                      : "steer deferred as follow_up while foreground bash_bg is active",
                   effectiveAction,
                   deliveryStage: "queued",
                 }
@@ -1895,10 +1957,21 @@ export default function registerTeammateExtension(
             if (!target) {
               result = { status: "rejected", message: "target agent is not owned by this session" };
             } else {
+              const workspaceMessage = formatWorkspaceRemoteRootMessage({
+                messageId: command.commandId,
+                fromOwnerId: command.fromOwnerId,
+                message: command.message,
+                effectiveAction: command.action,
+                source: command.source,
+                messageKind: command.messageKind,
+                traceId: command.traceId,
+                replyTo: command.replyTo,
+                fromSessionName: command.fromSessionName,
+              });
               const delivered = await deliverLocalAgentMessage(
                 command.targetCorrelationId,
                 target.name ?? command.targetCorrelationId.slice(0, 8),
-                command.message,
+                workspaceMessage,
                 command.action,
               );
               const effectiveAction = delivered.mode === "steer" ? "steer" : "follow_up";
@@ -2446,8 +2519,13 @@ export default function registerTeammateExtension(
             sendControl: (message: Record<string, unknown>) => boolean,
             sessionDir?: string,
             childId?: string,
+            generation?: number,
           ) => {
           const target = childId ? state.activeRuns.get(childId) ?? activeAgent : activeAgent;
+          // Generation fence, mirroring onChildClosed: a child spawned by a
+          // superseded run (e.g. a model-fallback candidate racing a cold
+          // restart) must not capture the agent's stdin/sendControl.
+          if ((target.runtimeGeneration ?? 0) !== (generation ?? 0)) return;
           const startedAt = Date.now();
           target.stdin = stdin;
           target.sendControl = sendControl;
@@ -2608,8 +2686,21 @@ export default function registerTeammateExtension(
             }
             if (childAgent && childAgent !== activeAgent) {
               childAgent.lastActivityAt = Date.now();
-              childAgent.status = entry.status === "completed" ? "sleeping" : entry.status;
-              if (entry.status === "running") childAgent.retry = undefined;
+              const nextStatus = entry.status === "completed" ? "sleeping" : entry.status;
+              // Snapshots are applied through a throttled queue, so they can
+              // arrive after the agent settled or went to sleep. A stale
+              // snapshot must not resurrect a terminal agent, nor flip a
+              // sleeping agent back to a live run state — the wake/restart
+              // paths own those transitions and messages routed on a wrongly
+              // "running" status get silently dropped by the child.
+              const resurrectsSettled = !LIVE_AGENT_STATUSES.has(childAgent.status)
+                && nextStatus !== childAgent.status;
+              const wakesSleeping = childAgent.status === "sleeping"
+                && (nextStatus === "pending" || nextStatus === "running" || nextStatus === "retrying");
+              if (!resurrectsSettled && !wakesSleeping) {
+                childAgent.status = nextStatus;
+                if (entry.status === "running") childAgent.retry = undefined;
+              }
             }
 
             const shortId = entry.correlationId.slice(0, 8);
@@ -2871,9 +2962,9 @@ export default function registerTeammateExtension(
           options.runtimeGeneration = generation;
 
           const onChildSpawned = options.onChildSpawned;
-          options.onChildSpawned = (stdin, sendControl, sessionDir, childId) => {
+          options.onChildSpawned = (stdin, sendControl, sessionDir, childId, callbackGeneration) => {
             if (!ownsRuntime()) return;
-            onChildSpawned?.(stdin, sendControl, sessionDir, childId ?? target.correlationId);
+            onChildSpawned?.(stdin, sendControl, sessionDir, childId ?? target.correlationId, callbackGeneration);
           };
           const onChildEvent = options.onChildEvent;
           options.onChildEvent = (event) => {
@@ -3321,10 +3412,11 @@ export default function registerTeammateExtension(
 
     async execute(
       id: string,
-      params: { to: string; message?: string; mode?: RpcMessageMode },
+      params: { to: string; message?: string; mode?: RpcMessageMode; kind?: SessionMessageKind },
       signal: AbortSignal,
     ): Promise<TeammateToolResult<{ delivered: boolean }>> {
       const requestedMode = params.mode ?? "follow_up";
+      const messageKind = params.kind ?? "coordination";
       const message = params.message ?? "";
       if (!message && requestedMode !== "abort") {
         return {
@@ -3353,15 +3445,28 @@ export default function registerTeammateExtension(
       }
 
       const mode = requestedMode === "steer" || requestedMode === "abort" ? requestedMode : "follow_up";
+      const routedMode = !cid && messageKind === "status" ? "follow_up" : mode;
       const delivery = await routeSessionMessage({
         selector: params.to,
+        targetCorrelationId: cid,
         message,
-        mode,
+        mode: routedMode,
         source: id.startsWith("monitor-") ? "monitor" : "system",
+        messageKind,
         signal,
       });
       if (!delivery.delivered) {
-        if (cid && !state.activeRuns.get(cid)?.stdin?.writable) state.namedAgents.delete(params.to);
+        // Unbind names only for agents that are genuinely gone. A transient
+        // delivery failure to a sleeping (cold-restartable) agent must keep its
+        // name bound, and the cleanup must match by value: `params.to` may be
+        // decorated ("@name", "name#prefix") and the name may have been taken
+        // over by a different agent since resolution.
+        const failedAgent = cid ? state.activeRuns.get(cid) : undefined;
+        if (cid && (!failedAgent || !LIVE_AGENT_STATUSES.has(failedAgent.status))) {
+          for (const [agentName, boundId] of state.namedAgents) {
+            if (boundId === cid) state.namedAgents.delete(agentName);
+          }
+        }
         const error = !cid && delivery.error?.startsWith("Session selector ")
           ? `Workspace target "${params.to}" was not found. Use teammate-list with view=windows.`
           : delivery.error;
@@ -3381,7 +3486,7 @@ export default function registerTeammateExtension(
         return {
           content: [{
             type: "text",
-            text: `Message ${deliveryStage} for workspace target "${params.to}" (requested ${mode}, effective ${effectiveMode}).${queuedHint}`,
+            text: `Message ${deliveryStage} for workspace target "${params.to}" (kind ${messageKind}, requested ${mode}, effective ${effectiveMode}).${queuedHint}`,
           }],
           isError: false,
           details: { delivered: true },
@@ -4866,7 +4971,7 @@ export default function registerTeammateExtension(
       mode: "follow_up",
       messageId: dispatchMessageId,
       source: "user",
-      messageKind: "message",
+      messageKind: "request",
       traceId: dispatching.id,
       replyTo,
       fromSessionName: workspacePeerSessionName,
@@ -7224,6 +7329,7 @@ import {
   progressDurationMs,
   reclaimResultReadyAgents,
   resolveAgentCorrelationId,
+  resolveLocalAgentSenderContext,
   resolveWatchTarget,
   safeSendMessage,
   settleAgent,

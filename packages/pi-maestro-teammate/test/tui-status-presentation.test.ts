@@ -99,6 +99,16 @@ test("effective display status derives result-ready and stalled from the shared 
     "running",
     "pending human interaction outranks the idle deadline",
   );
+  // A child-reported in-flight tool is liveness itself, not silence: dropped
+  // heartbeat ticks (busy child loop) must never age a busy agent into a
+  // stall, no matter how long the tool runs.
+  for (const idle of [TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS, 10 * TEAMMATE_EXPECTED_SILENCE_TIMEOUT_MS] as const) {
+    assert.equal(
+      effectiveDisplayStatus("running", undefined, now - idle, now, "tool-execution"),
+      "running",
+      `tool-execution never projects as stalled (idle ${idle}ms)`,
+    );
+  }
   // result-ready outranks stalled: the agent is not stuck, it is confirming.
   assert.equal(
     effectiveDisplayStatus("running", now - 1_000, now - 10 * TEAMMATE_STALL_TIMEOUT_MS, now),

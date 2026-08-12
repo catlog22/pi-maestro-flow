@@ -271,6 +271,16 @@ test("markSeen is idempotent", async () => {
   assert.equal(await store.isSeen(id), true);
 });
 
+test("tryMarkSeen claims exclusively and rejects a concurrent claim", async () => {
+  const key = "dedup-task-001";
+  assert.equal(await store.tryMarkSeen(key), true);
+  assert.equal(await store.isSeen(key), true);
+  assert.equal(await store.tryMarkSeen(key), false, "second claim must lose");
+  await store.unmarkSeen(key);
+  assert.equal(await store.isSeen(key), false);
+  assert.equal(await store.tryMarkSeen(key), true, "released key can be claimed again");
+});
+
 // --- Listing and Counting ---
 
 test("listMessages returns sorted IDs excluding state records and tmp files", async () => {

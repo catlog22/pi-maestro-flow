@@ -154,12 +154,14 @@ test("proxy admission preserves expert mode for shared preparation", () => {
 
 test("workflow Leader prompt has the tools and read-only boundaries it claims", () => {
   const source = fs.readFileSync(path.resolve("agents/workflow.md"), "utf8");
-  assert.match(source, /^tools: .*bash.*resource.*teammate/m);
-  assert.match(source, /Bash is restricted to `maestro search\/load` and read-only inspection commands/);
-  assert.match(source, /never as a completion probe/);
-  assert.match(source, /one bounded observe wait/);
-  assert.match(source, /Read canonical `agent:\/\/` publication references with resource/);
-  assert.match(source, /Do not edit any workspace file directly/);
+  const toolsLine = source.match(/^tools: (.*)$/m)?.[1] ?? "";
+  assert.match(toolsLine, /\bteammate\b/);
+  assert.match(toolsLine, /\bobserve\b/);
+  // Read-only Leader: no shell and no file-mutation tools.
+  assert.doesNotMatch(toolsLine, /\bbash\b/);
+  assert.doesNotMatch(toolsLine, /\bedit\b|\bwrite\b/);
+  assert.match(source, /Do not edit business files directly/);
+  assert.match(source, /`general-executor`/);
 });
 
 test("root, proxy, and programmatic paths prepare expert mode before routing", () => {

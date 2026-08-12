@@ -544,44 +544,24 @@ ${nested ? `Nested dispatch: this call is proxied to the parent root process —
 Expert Leader call:
   { mode: "expert", tasks: [{ prompt: "Investigate auth, delegate the necessary expert work, and synthesize the result" }] }
 
-Every dispatch uses a non-empty tasks array; prompt is the only required per-task field and lives inside tasks[]. In default mode, named tasks and dependsOn form the graph directly. Expert mode accepts exactly one objective task and turns it into the fixed workflow/planning Leader with maxNestingDepth=1; conflicting agent, taskType, or nesting overrides are rejected, and that Leader builds any required DAG with the same teammate tool. Optional per-task fields include agent, taskType, model, thinking, context, cwd, outputSchema, maxNestingDepth, name, dependsOn, description, and timeoutMs. Omit outputSchema for ordinary tasks; use it only when the caller explicitly requires machine-readable structured fields. In default mode, task-level values override top-level defaults except background, which is dispatch-level. Tasks that omit agent inherit the top-level agent, then default to "general".
-The top level accepts mode plus shared defaults for all tasks — agent, taskType, model, fallbackModels, thinking, context, cwd, timeoutMs, and maxNestingDepth — together with reply_to, concurrency, concurrencyWaitMs, maxAgents, background, and the advanced optional outputSchema default. concurrencyWaitMs is a dedicated foreground detach window for multi-task parallel/DAG calls; it never cancels queued or running work. A task field (prompt/name/dependsOn) placed at the top level is rejected as an unexpected property. background is dispatch-level: the whole call shares one foreground/background window, so it belongs at the top level only — a per-task background value is ignored with a warning.
-Use {name} or {name.field} in a dependent task's prompt, or dependsOn: ["name"] for ordering without output injection.
-
-Nesting control: pass maxNestingDepth on the root dispatch — or per task, which overrides the top-level value — to limit how many levels of nested teammate dispatch the spawned agents may perform below themselves. Omitting it everywhere defaults to the global ceiling. The only effective values are 0 and 1 — 2 is capped to 1 by the global 2-level ceiling and anything above 2 is rejected. 0 forbids nested calls entirely — the assigned agents cannot dispatch teammates. Inside a spawned agent, maxNestingDepth can only tighten the parent's budget — pass 0 to forbid further nesting below that call; it can never extend depth beyond what the parent allowed.
+Every dispatch uses a non-empty tasks array; prompt is the only required per-task field and lives inside tasks[]. In default mode, named tasks and dependsOn form the graph directly. Expert mode accepts exactly one objective task and turns it into the fixed workflow/planning Leader with maxNestingDepth=1; conflicting agent, taskType, or nesting overrides are rejected, and that Leader builds any required DAG with the same teammate tool. Optional per-task fields include agent, taskType, model, thinking, context, cwd, outputSchema, maxNestingDepth, name, dependsOn, description, todo, and timeoutMs. Omit outputSchema for ordinary tasks. In default mode, task-level values override top-level defaults except background, which is dispatch-level only. Use {name} or {name.field} in a dependent task's prompt, or dependsOn: ["name"] for ordering without output injection.
 
 Use an exact role name from the Available Teammate Agents section in the active system prompt. Unknown names are rejected.
 
-Background: the foreground wait window is bounded — multi-task calls use concurrencyWaitMs when provided, otherwise the smallest per-task timeoutMs or a 600000 ms (10 minutes) default. Expiry only detaches the dispatch; dependencies, concurrency queues, and running agents continue. Do not poll observe or teammate-list; if the current turn must wait, call observe once with action="wait" and targets: [{ kind: "teammate", id: "<name-or-correlation-id>" }]. Completion delivery details (root vs nested dispatch, skip-on-exit) are in the background parameter description.
-
-## Structured output (optional)
-
-Use outputSchema only when the caller needs machine-readable fields for validation or downstream {name.field} references. The task instruction remains in tasks[].prompt:
-{ "tasks": [{ "name": "audit", "agent": "analyst", "prompt": "Inspect auth", "outputSchema": { "type": "object", "properties": { "result": { "type": "string" } }, "required": ["result"] } }] }
-
-When a task (or the top-level call) sets outputSchema, the child must submit its final answer through a \`structured_output\` tool that validates the value against that JSON Schema. The validated value is persisted for later reads via the immutable \`agent://<publicationId>\` resource; \`agent://<correlationId>\` and task names remain latest-result aliases. After durable persistence is acknowledged, small results remain inline with the canonical reference while large results are replaced by a compact description plus that reference; without a persistence observer or when storage capacity is full, the full value remains inline. Schema-invalid submissions are rejected by the child tool so the model can correct them within the current Pi turn; teammate does not replay validation failures. A run that ends without a valid value fails with a diagnostic naming the offending field. Plain tasks follow the same persistence and reference behavior for their final answer text.
-
-## Todo binding (todo)
-
-A task may carry an optional per-task \`todo\` field — a single Todo task id (\"12\" or \"#12\") or an ordered array of ids (\"[\"#1\", \"#2\"]\", first = highest priority). On agent start the host re-assigns each task's assignee to the agent (actor changes from root to the agent), auto-activates the first runnable one (pending, not blocked, and only when the agent has no other active task; blocked/done bindings are skipped), and injects the whole ordered list into the agent's system prompt as a managed fragment: the agent finishes the active task with \`todo update <id> status=completed summary=...\`, then activates the next with \`todo update <id> status=in_progress\`. The tasks must exist before dispatch; missing ids produce a warning and dispatch continues.
-
-## Observation
-
-Use observe for teammate and background Bash status, barrier waits, or transition watching:
-- { action: "status", targets: [{ kind: "teammate", id: "reviewer" }] } — one-shot snapshot
-- { action: "wait", targets: [{ kind: "teammate", id: "reviewer" }, { kind: "bash_bg", id: "bg-id" }], waitMode: "all" } — mixed barrier wait
-- { action: "wait", until: "completed", targets: [{ kind: "teammate", id: "reviewer" }] } — block until the agent fully terminates (not just first result)
-- { action: "watch", targets: [{ kind: "teammate", id: "reviewer" }], timeoutMs: 30000 } — follow status transitions until timeout
+Nesting, background, structured output, todo binding, and observation semantics are defined in the corresponding parameter descriptions and the observe tool — follow those contracts instead of polling.
 
 ${modelRoutingSection}`;
 }
 
-export const TEAMMATE_SEND_DESCRIPTION = `Send a message to a running or sleeping teammate agent, addressed by name, @name, displayed name#id-prefix, correlation ID (or prefix), or a cross-session target from teammate-list such as owner:<ownerId> or owner:<ownerId>:<correlationId>.
+export const TEAMMATE_SEND_DESCRIPTION = `Send a typed message to a running or sleeping teammate agent, addressed by name, @name, displayed name#id-prefix, correlation ID (or prefix), or a cross-session target from teammate-list such as owner:<ownerId> or owner:<ownerId>:<correlationId>.
 
-Modes: "steer" | "follow_up" (default) | "abort" — per-mode semantics and the message requirement are in the mode and message parameter descriptions. Cross-session targets support only "steer" and "follow_up".`;
-export const TEAMMATE_SEND_SNIPPET = "Steer, follow up with, or send a message to a cross-session teammate target.";
+Modes: "steer" | "follow_up" (default) | "abort" — per-mode semantics and the message requirement are in the mode and message parameter descriptions. Cross-session targets support only "steer" and "follow_up".
+
+Cross-session kinds: "coordination" (default, execution constraints only), "request" (a peer request without human authorization), "status" (informational and always queued), or "supervision" (safety/lifecycle constraints). The kind does not alter local-agent direct-message behavior.`;
+export const TEAMMATE_SEND_SNIPPET = "Send a typed coordination, request, status, or supervision message to a teammate target.";
 export const TEAMMATE_SEND_GUIDELINES = [
   "Use teammate-send only for a named running or sleeping agent; steer for urgent correction, abort only to terminate work.",
+  "For cross-session messages, use kind=coordination for execution constraints, request for work the peer must evaluate, status for information only, and supervision for safety/lifecycle constraints. Internal messages never replace the human user's active objective.",
   "For another Pi window, call teammate-list with view=windows first, then send to the returned target (owner:<ownerId> for the window or owner:<ownerId>:<correlationId> for one of its agents). Cross-session abort is unsupported.",
   'To verify delivery or read the message later, use teammate-list with view="inbox"; persisted messages stay readable after the target window is closed.',
 ];

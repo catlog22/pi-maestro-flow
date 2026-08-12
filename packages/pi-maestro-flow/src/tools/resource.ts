@@ -31,7 +31,7 @@ import { getAgentOutputPath, formatAgentMatchListing, resolveAgentOutput } from 
 export const ResourceParams = Type.Object({
   uri: Type.String({
     description:
-      "协议资源 URI：pr://owner/repo/N（或 pr://N 当前仓库，可加 /diff /files）、issue://owner/repo/N、skill://name、rule://name、agent://<id>（已完成 teammate 子代理的输出；publicationId 是不可变 canonical ID，correlationId 解析到最新结果；任务名命中多个输出时返回 id/时间/预览列表，请按 agent://<id> 精确查询）。agent://<id> 直接返回完整输出：带 outputSchema 的任务返回其结构化 JSON，普通任务返回最终答案文本；可选路径段按对象 key / 数组下标取值，如 agent://reviewer-1/findings/0/path。注意：不要追加 /json —— 裸 agent://<id> 已返回完整输出。",
+      "Protocol resource URI: pr://owner/repo/N (or pr://N, optional /diff or /files), issue://owner/repo/N (or issue://N), skill://name, rule://name, agent://<id>[/key[/index]]. See the tool description for scheme semantics.",
   }),
 });
 
@@ -359,7 +359,7 @@ export async function resolveResource(uri: string, cwd: string, signal?: AbortSi
   const parsed = parseResourceUri(uri);
   if (!parsed) {
     throw new Error(
-      `Unsupported URI format: "${uri}". Supported schemes: pr://, issue://, skill://, rule://. ` +
+      `Unsupported URI format: "${uri}". Supported schemes: pr://, issue://, skill://, rule://, agent://. ` +
       "For local files use the read tool.",
     );
   }
@@ -430,7 +430,7 @@ export async function resolveResource(uri: string, cwd: string, signal?: AbortSi
         "Use the knowledge system (maestro knowledge) for memory today.",
       );
     default:
-      throw new Error(`Unsupported scheme "${scheme}://" in "${uri}". Supported: pr://, issue://, skill://, rule://.`);
+      throw new Error(`Unsupported scheme "${scheme}://" in "${uri}". Supported: pr://, issue://, skill://, rule://, agent://.`);
   }
 }
 
@@ -451,7 +451,7 @@ Read local files with the built-in read tool — resource is for protocol resour
     promptSnippet: "Use resource for pr://, issue://, skill://, rule://, agent:// protocol resources; use read for local files.",
     promptGuidelines: [
       "pr://, issue://, skill://, rule://, agent:// protocol resources are read via the resource tool — do not pass them to the built-in read tool (read is for local files).",
-      "After a teammate task finishes, prefer the returned canonical agent://<publicationId>: schema tasks return the validated structured output (fields via agent://<id>/<key>, object keys / array indices, no /json prefix), plain tasks return the final answer text; correlationId URIs are latest-result aliases, and a task-name URI matching multiple outputs returns a list of ids with timestamps and previews — re-query by id.",
+      "After a teammate task finishes, read its output via the returned canonical agent://<publicationId> URI (semantics in the resource tool description).",
     ],
     parameters: ResourceParams,
     async execute(_id, params, signal, _onUpdate, ctx): Promise<AgentToolResult<ResourceDetails>> {

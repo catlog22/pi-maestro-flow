@@ -23,7 +23,7 @@ export type SessionEndpointTransport = "local-root" | "local-agent-mailbox" | "w
 export type SessionEndpointStatus = "running" | "sleeping" | "settled";
 export type SessionMessageMode = "steer" | "follow_up" | "abort";
 export type SessionMessageSource = "user" | "monitor" | "system";
-export type SessionMessageKind = "message" | "supervision";
+export type SessionMessageKind = "message" | "coordination" | "request" | "status" | "supervision";
 export type SessionDeliveryStage = "queued" | "injected";
 export type SessionEndpointCapability = "inspect" | "message" | "steer" | "follow_up" | "abort" | "wake";
 
@@ -104,6 +104,8 @@ export interface SessionResolution {
 export interface SessionResolveOptions {
   includeSettled?: boolean;
   localFirst?: boolean;
+  /** Pin delivery to this correlation id instead of re-resolving the selector. */
+  targetCorrelationId?: string;
 }
 
 export function parseSessionSurfaceMode(value: unknown): SessionSurfaceMode {
@@ -292,6 +294,13 @@ export class EndpointDirectory {
       return { code: "invalid", selector: rawSelector, candidates: [], message: "Session selector must be a non-empty bounded identifier." };
     }
     const endpoints = this.#endpoints.filter((endpoint) => options.includeSettled !== false || endpoint.status !== "settled");
+    if (options.targetCorrelationId) {
+      const pinned = endpoints.filter((endpoint) => endpoint.correlationId === options.targetCorrelationId);
+      if (pinned.length === 1) return resolved(selector, "correlation-id", pinned);
+      if (pinned.length > 1) {
+        return { code: "ambiguous", selector, selectorKind: "correlation-id", candidates: pinned, message: `Multiple endpoints match correlation id ${JSON.stringify(options.targetCorrelationId)}.` };
+      }
+    }
     const exact = this.#byId.get(selector);
     if (exact && (options.includeSettled !== false || exact.status !== "settled")) return resolved(selector, "endpoint-id", [exact]);
 
@@ -357,6 +366,10 @@ export interface SessionMessageRequest {
   traceId?: string;
   replyTo?: string;
   fromSessionName?: string;
+  /** Pin delivery target; avoids TOCTOU when the selector is rebound between check and route. */
+  targetCorrelationId?: string;
+  /** Sender correlation id for local agent envelope formatting and inbox attribution. */
+  senderCorrelationId?: string;
   signal?: AbortSignal;
 }
 
@@ -451,7 +464,12 @@ function validThreadEntry(value: unknown): WindowThreadEntry | undefined {
     || typeof entry.peerOwnerNonce !== "string" || entry.peerOwnerNonce.length === 0 || entry.peerOwnerNonce.length > 128
     || (entry.direction !== "outgoing" && entry.direction !== "incoming")
     || (entry.source !== "user" && entry.source !== "monitor" && entry.source !== "system")
-    || (entry.messageKind !== undefined && entry.messageKind !== "message" && entry.messageKind !== "supervision")
+    || (entry.messageKind !== undefined
+      && entry.messageKind !== "message"
+      && entry.messageKind !== "coordination"
+      && entry.messageKind !== "request"
+      && entry.messageKind !== "status"
+      && entry.messageKind !== "supervision")
     || (entry.traceId !== undefined && (typeof entry.traceId !== "string" || entry.traceId.length === 0 || entry.traceId.length > 128 || /[\u0000-\u001f\u007f]/.test(entry.traceId)))
     || (entry.replyTo !== undefined && (typeof entry.replyTo !== "string" || entry.replyTo.length === 0 || entry.replyTo.length > 192 || /[\u0000-\u001f\u007f]/.test(entry.replyTo)))
     || (entry.fromSessionName !== undefined && (typeof entry.fromSessionName !== "string" || entry.fromSessionName.length === 0 || entry.fromSessionName.length > 256 || /[\u0000-\u001f\u007f]/.test(entry.fromSessionName)))
@@ -740,7 +758,10 @@ export class MessageRouter {
   get surface(): SessionSurfaceMode { return this.#surface; }
   setSurface(surface: SessionSurfaceMode): void { this.#surface = surface; }
 
-  classify(request: SessionMessageRequest, resolution = this.directory.resolve(request.selector, { includeSettled: true })): SessionRouteClassification {
+  classify(request: SessionMessageRequest, resolution = this.directory.resolve(request.selector, {
+    includeSettled: true,
+    targetCorrelationId: request.targetCorrelationId,
+  })): SessionRouteClassification {
     if (resolution.code !== "resolved" || !resolution.endpoint) return { transport: "local-agent-mailbox", routable: false, reason: resolution.message ?? resolution.code };
     const adapter = this.#adapters.get(resolution.endpoint.transport);
     return adapter?.classify(resolution.endpoint, request) ?? { transport: resolution.endpoint.transport, routable: false, reason: `No ${resolution.endpoint.transport} adapter is registered.` };
@@ -750,7 +771,10 @@ export class MessageRouter {
     if (!this.#legacy) return undefined;
     const legacyResolution = this.#legacy.resolve(request);
     const legacyClassification = this.#legacy.classify(request, legacyResolution);
-    const unifiedResolution = this.directory.resolve(request.selector, { includeSettled: true });
+    const unifiedResolution = this.directory.resolve(request.selector, {
+      includeSettled: true,
+      targetCorrelationId: request.targetCorrelationId,
+    });
     const unifiedClassification = this.classify(request, unifiedResolution);
     const legacy = summary(legacyResolution, legacyClassification);
     const unified = summary(unifiedResolution, unifiedClassification);
@@ -774,7 +798,10 @@ export class MessageRouter {
       const resolution = this.#legacy.resolve(request);
       return this.#legacy.deliver(request, resolution);
     }
-    const resolution = this.directory.resolve(request.selector, { includeSettled: true });
+    const resolution = this.directory.resolve(request.selector, {
+      includeSettled: true,
+      targetCorrelationId: request.targetCorrelationId,
+    });
     if (resolution.code !== "resolved" || !resolution.endpoint) return { delivered: false, error: resolution.message ?? resolution.code };
     const classification = this.classify(request, resolution);
     if (!classification.routable) return { delivered: false, endpointId: resolution.endpoint.id, transport: classification.transport, error: classification.reason };

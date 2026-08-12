@@ -22,16 +22,11 @@ export interface ContextInjectionAnchor {
   previousFingerprint?: string;
 }
 
-export type RunSkillInjection = {
+export interface RunSkillInjection {
   taskId: string;
   stackRevision: string;
-  channel: "system";
-} | {
-  taskId: string;
-  stackRevision: string;
-  channel: "context";
   anchor: ContextInjectionAnchor;
-};
+}
 
 export interface TodoSkillEngineContext {
   getSkillRuntime: () => SkillRuntime | undefined;
@@ -212,7 +207,7 @@ export function normalizeSkillBindings(skills: readonly TodoSkillBinding[]): Tod
   return composeSkillBindings(skills.map(normalizeSkillBinding));
 }
 
-type TodoParamsInput = TodoParams & {
+export type TodoParamsInput = TodoParams & {
   /** Legacy single-skill input accepted only at the tool normalization boundary. */
   skill?: TodoSkillConfig | null;
 };
@@ -241,6 +236,6 @@ export function formatSkillBinding(binding: TodoSkillBinding): string {
   return `${binding.role}:${binding.name}${binding.args ? ` ${binding.args}` : ""}`;
 }
 
-function isSkillRole(value: unknown): value is TodoSkillRole {
+export function isSkillRole(value: unknown): value is TodoSkillRole {
   return ["primary", "guard", "support"].includes(String(value));
 }

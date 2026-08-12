@@ -58,7 +58,11 @@ import { scoreRelevanceBatch, type RelevanceMode } from "./relevance.ts";
 import { dedupBlocks, type DedupBlock } from "./dedup.ts";
 
 const PROTECTED_THRESHOLD_CHARS = 500;
-const REPLAYABLE_TOOL_NAMES = new Set(["read", "grep", "glob", "search", "find"]);
+// `resource` is URI-addressable (pr://, issue://, skill://, rule://, agent://):
+// the paired toolCall keeps the uri argument in context and the placeholder
+// below names it explicitly, so its large outputs are the cheapest results to
+// replay (agent:// is even backed by an immutable on-disk store).
+const REPLAYABLE_TOOL_NAMES = new Set(["read", "grep", "glob", "search", "find", "resource"]);
 // Bulk data tools whose large non-error output is transient and safe to evict
 // under sustained pressure. Control tools (e.g. todo) are deliberately absent so
 // their state-bearing output is never pruned.
@@ -353,6 +357,7 @@ export interface MessageRecord {
   isError?: unknown;
   usage?: unknown;
   stopReason?: unknown;
+  details?: unknown;
 }
 
 export interface ProjectedCompactionInput {
@@ -3634,14 +3639,39 @@ function replaceableToolResult(message: AgentMessage): AgentMessage | undefined 
   if (record.role !== "toolResult" || record.isError === true) return undefined;
   if (typeof record.toolName !== "string" || !REPLAYABLE_TOOL_NAMES.has(record.toolName.toLowerCase())) return undefined;
   if (extractTextContent(message).length < SPILL_THRESHOLD_CHARS) return undefined;
-  const toolName = typeof record.toolName === "string" ? record.toolName : "tool";
   return {
     ...message,
-    content: [{
-      type: "text",
-      text: `[Maestro context pressure: stale large output from ${toolName} was pruned. Re-run the tool if the full payload is needed.]`,
-    }],
+    content: [{ type: "text", text: replayablePruneText(record) }],
   } as AgentMessage;
+}
+
+/**
+ * Placeholder for a pruned replayable result. Derived only from stable message
+ * fields (toolName + details.uri), so recomputing it for a restored prune
+ * yields byte-identical text. resource results name the exact URI to re-read —
+ * self-describing even when the paired toolCall is no longer nearby; other
+ * replayable tools keep the generic re-run hint.
+ */
+function replayablePruneText(record: MessageRecord): string {
+  const toolName = typeof record.toolName === "string" ? record.toolName : "tool";
+  const uri = toolName.toLowerCase() === "resource" ? prunedResourceUri(record) : undefined;
+  if (uri) {
+    return `[Maestro context pressure: stale large output from resource was pruned. Re-read ${uri} with the resource tool if the full payload is needed; pr:// and issue:// re-reads may return updated state.]`;
+  }
+  return `[Maestro context pressure: stale large output from ${toolName} was pruned. Re-run the tool if the full payload is needed.]`;
+}
+
+/** details.uri of a resource tool result, when present and placeholder-safe. */
+function prunedResourceUri(record: MessageRecord): string | undefined {
+  const details = record.details;
+  if (typeof details !== "object" || details === null || Array.isArray(details)) return undefined;
+  const uri = (details as { uri?: unknown }).uri;
+  if (typeof uri !== "string") return undefined;
+  const trimmed = uri.trim();
+  // Whitespace or brackets would break the one-line bracketed placeholder;
+  // real resource URIs contain neither. Fall back to the generic hint then.
+  if (!trimmed || trimmed.length > 256 || /[\s\][]/.test(trimmed)) return undefined;
+  return trimmed;
 }
 
 function evictableBulkToolResult(message: AgentMessage): AgentMessage | undefined {

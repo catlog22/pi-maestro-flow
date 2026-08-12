@@ -193,6 +193,9 @@ configureGoalVerification({
   get verificationInFlight() { return verificationInFlight; },
   set verificationInFlight(value) { verificationInFlight = value; },
   getWorkflowSnapshot() { return workflowCoordinator?.status(); },
+  refreshWorkflowSnapshot() {
+    return workflowCoordinator?.refreshSnapshot?.() ?? Promise.resolve(workflowCoordinator?.status());
+  },
   pauseGoal,
   updateUsage,
   persistGoal,

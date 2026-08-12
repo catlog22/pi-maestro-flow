@@ -197,6 +197,8 @@ export interface RunTeammateOptions {
     sendControl: (message: Record<string, unknown>) => boolean,
     sessionDir?: string,
     correlationId?: string,
+    /** Runtime generation of the spawning run, mirroring onChildClosed. */
+    generation?: number,
   ) => void;
   /** Existing persisted Pi session to load for a cold logical-agent restart. */
   resumeSessionFile?: string;
@@ -228,6 +230,8 @@ export interface RunTeammateOptions {
   resultReadyGraceMs?: number;
   /** @internal Test seam for child output-limit compaction/continuation recovery. */
   outputLimitRecoveryTimeoutMs?: number;
+  /** @internal Test seam for the corrective structured-output continuation deadline. */
+  structuredOutputRecoveryTimeoutMs?: number;
   /** @internal Test seam for the in-flight tool heartbeat interval. */
   toolExecutionHeartbeatMs?: number;
   /** @internal Test seam for the interrupting-steer acknowledgement deadline. */
@@ -288,6 +292,16 @@ export const STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS = {
 export const STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTIC_SET = new Set<string>(
   Object.values(STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS),
 );
+
+/**
+ * Child-facing corrective continuation issued once when a wakeable child ends
+ * its run without schema-valid structured_output. Instructs a single bounded
+ * resubmission and explicitly forbids repeating any other work.
+ */
+export const STRUCTURED_OUTPUT_RECOVERY_PROMPT =
+  "You ended your run without submitting the required structured_output tool call. "
+  + "Call the structured_output tool now with a single argument: the schema-valid JSON value of your final answer. "
+  + "Plain-text JSON is never accepted. Do not repeat any other work.";
 
 export function isStructuredOutputSettlementDiagnostic(content: string): boolean {
   return STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTIC_SET.has(content);
@@ -1930,7 +1944,7 @@ export function writeSystemPromptFile(
     ? "\n\n## Required structured output\nYou must finish by calling the structured_output tool exactly once with a value that satisfies its JSON Schema. A prose-only final answer is invalid. Do not emit any answer after that tool call."
     : "";
   const todoInstruction = todos && todos.length > 0
-    ? `\n\n## Assigned Todo tasks\nYour assigned Todo tasks, in priority order (you manage them yourself): ${todos.map((id) => `#${id.replace(/^#/, "")}`).join(", ")}.\nCheck \`todo list\` for their current states: the first runnable task (pending, not blocked, and no other active task for you) is already active (status=in_progress) — work on it without calling \`todo next\` unless it is not active.\nFinish each task with \`todo update <id> status=completed summary=<one-line result>\`, then activate the next one with \`todo update <id> status=in_progress\` and continue in order.\nIf a task is blocked by a dependency or you cannot complete it, leave it pending and explain why in your final answer.`
+    ? `\n\n## Assigned Todo tasks\nYour assigned Todo tasks, in priority order (you manage them yourself): ${todos.map((id) => `#${id.replace(/^#/, "")}`).join(", ")}.\nCheck \`todo list\` for their current states: the first runnable task (pending, not blocked, and no other active task for you) is already active (status=in_progress); if it is not active yet, activate it with \`todo update <id> status=in_progress\`.\nFinish each task with \`todo update <id> status=completed summary=<one-line result>\`, then activate the next one with \`todo update <id> status=in_progress\` and continue in order. Drive your queue with \`todo update\` only — \`todo next\` is root's self-drive channel.\nIf a task is blocked by a dependency or you cannot complete it, leave it pending and explain why in your final answer.`
     : "";
   writePrivateTextFile(promptFile, `${agentConfig.systemPrompt}${structuredOutputInstruction}${todoInstruction}`);
   return promptFile;
@@ -1981,6 +1995,11 @@ export const CHILD_TERMINATION_GRACE_MS = 5_000;
 // lifecycle confirmation (agent_settled/close) is this late, so aggregation never
 // blocks indefinitely on a missing terminal event.
 export const RESULT_READY_GRACE_MS = 60_000;
+
+// A corrective structured-output continuation is one model round-trip, but
+// still bounded so a child that never responds settles as a failure instead of
+// holding the run open indefinitely.
+export const STRUCTURED_OUTPUT_RECOVERY_TIMEOUT_MS = 60_000;
 
 // Output-limit recovery includes a summary provider round-trip and may outlive
 // the short result-publication grace window. It is still bounded so a child

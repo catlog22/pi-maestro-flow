@@ -93,6 +93,13 @@ test("teammate-send allows omitting message only for explicit abort", () => {
   assert.equal(Check(TeammateSendParams, { to: "a", mode: "unknown" }), false);
 });
 
+test("teammate-send accepts typed cross-session message kinds", () => {
+  for (const kind of ["coordination", "request", "status", "supervision"] as const) {
+    assert.equal(Check(TeammateSendParams, { to: "owner:abc", message: "hi", kind }), true);
+  }
+  assert.equal(Check(TeammateSendParams, { to: "owner:abc", message: "hi", kind: "instruction" }), false);
+});
+
 test("observe schema scopes wait parameters to wait and requires count thresholds", () => {
   const target = [{ kind: "teammate", id: "worker" }];
   assert.equal(Check(ObserveParams, { action: "status", targets: target }), true);

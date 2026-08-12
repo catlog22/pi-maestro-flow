@@ -204,7 +204,10 @@ export function hasDangerousShellMetachar(command: string): boolean {
   const c = String(command || "");
   if (!c) return false;
   if (/[\r\n]/.test(c)) return true;
-  if (c.includes("&&") || c.includes("||")) return true;
+  // HV-05: a single "&" is an unconditional command separator in cmd.exe
+  // (git status & <cmd> would bypass the read-only prefix allowlist). Covers
+  // "&&" as well. "||" is already caught by the "|" check below.
+  if (c.includes("&")) return true;
   if (c.includes(";")) return true;
   if (c.includes("|")) return true;
   if (c.includes("`")) return true;
@@ -221,11 +224,11 @@ export function formatDenyReason(toolName: string, rewrite: RewriteSuggestion): 
   return [
     `experts mode DENIES tool "${toolName}" for Leader — do not implement with ${toolName}.`,
     `Rewrite: dispatch teammate with taskType=${rewrite.taskType} agent=${rewrite.agent}`
-      + (rewrite.stage ? ` stage=${rewrite.stage}` : "")
+      + (rewrite.stage ? ` (Maestro stage: ${rewrite.stage})` : "")
       + ".",
     rewrite.pathHint ? `Blocked path: ${rewrite.pathHint}.` : "",
     rewrite.commandHint ? `Blocked command: ${rewrite.commandHint}.` : "",
-    "Example: teammate({ tasks:[{ prompt, taskType, agent, stage }], ... }) then wait/settle.",
+    "Example: teammate({ tasks:[{ prompt, taskType, agent }] }) then wait for completion.",
   ].filter(Boolean).join(" ");
 }
 
@@ -233,7 +236,7 @@ export function formatAskReason(toolName: string, rewrite: RewriteSuggestion): s
   return [
     `experts mode: tool "${toolName}" is heavy-side; prefer teammate+taskType or confirm.`,
     `Suggested rewrite: taskType=${rewrite.taskType} agent=${rewrite.agent}`
-      + (rewrite.stage ? ` stage=${rewrite.stage}` : "")
+      + (rewrite.stage ? ` (Maestro stage: ${rewrite.stage})` : "")
       + ".",
   ].join(" ");
 }

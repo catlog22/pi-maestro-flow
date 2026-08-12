@@ -41,9 +41,17 @@ export type RunControlMutationScope =
   | "session"
   | "execution"
   | "execution-acquire"
-  | "execution-lease";
+  | "execution-lease"
+  // "execution-operation" belongs to the deprecated distributed operation
+  // claim/drain experiment, superseded by the Session/Run minimal-state
+  // architecture (docs/session-run-minimal-state-architecture-20260812.md).
+  // Only usable when the core advertises the optional
+  // execution_operation_drain capability; removed in v3.
+  | "execution-operation"
+  | "compatibility-start"
+  | "plan-publish";
 
-export type RunControlLeaseIntent = "none" | "required" | "acquire";
+export type RunControlLeaseIntent = "none" | "required" | "acquire" | "command-aware";
 
 export interface RunControlClassification {
   write: boolean;
@@ -77,6 +85,15 @@ export function classifyRunControlArgv(argv: readonly string[]): RunControlClass
       if (leaseCommand === "recover") return writeClassification("execution-lease", "acquire");
       return writeClassification("execution-lease", "required");
     }
+    if (command === "operation") {
+      // Deprecated operation drain experiment (superseded by
+      // docs/session-run-minimal-state-architecture-20260812.md); the
+      // coordinator fails these closed when the optional
+      // execution_operation_drain capability is absent.
+      const operationCommand = argv[2] ?? "";
+      if (operationCommand === "status") return { ...READ_CLASSIFICATION };
+      return writeClassification("execution-operation", "required");
+    }
     if (command === "handoff") {
       const handoffCommand = argv[2] ?? "";
       if (handoffCommand === "accept") return writeClassification("execution-acquire", "acquire");
@@ -96,7 +113,9 @@ export function classifyRunControlArgv(argv: readonly string[]): RunControlClass
     if (command === "create") return writeClassification("session", "none", true);
     if (["archive", "unarchive"].includes(command)) return writeClassification("session", "none");
     if (["start", "attach", "resume"].includes(command)) {
-      return writeClassification("execution-acquire", "acquire", command === "start");
+      return command === "start"
+        ? writeClassification("compatibility-start", "command-aware", true)
+        : writeClassification("execution-acquire", "acquire");
     }
     if (command === "resolve") return writeClassification("execution", "none");
     return writeClassification("execution", "required");
@@ -105,24 +124,24 @@ export function classifyRunControlArgv(argv: readonly string[]): RunControlClass
   if (family === "run") {
     if (RUN_CONTROL_READ_COMMANDS.has(command)) return { ...READ_CLASSIFICATION };
     if (command === "start") {
-      return writeClassification("execution-acquire", "acquire", true);
+      return writeClassification("compatibility-start", "command-aware", true);
     }
     if (command === "create") return writeClassification("execution", "required", true);
     return writeClassification("execution", "required");
   }
 
   if (family === "plan" && command === "publish") {
-    return writeClassification("session", "none");
+    return writeClassification("plan-publish", "required");
   }
   if (RUN_CONTROL_READ_COMMANDS.has(family)) return { ...READ_CLASSIFICATION };
-  if (family === "start") return writeClassification("execution-acquire", "acquire", true);
+  if (family === "start") return writeClassification("compatibility-start", "command-aware", true);
   if (family === "create") return writeClassification("execution", "required", true);
   return writeClassification("execution", "required");
 }
 
 function writeClassification(
   mutation: Exclude<RunControlMutationScope, "read">,
-  lease: Exclude<RunControlLeaseIntent, "none"> | "none",
+  lease: RunControlLeaseIntent,
   sessionless = false,
 ): RunControlClassification {
   return { write: true, sessionless, mutation, lease };
@@ -140,9 +159,7 @@ export const RunControlParams = Type.Object({
   argv: Type.Array(Type.String(), {
     description:
       "Maestro CLI arguments without the leading executable, e.g. [\"session\",\"next\",\"--json\"] "
-      + "or [\"run\",\"check\",\"run-123\"]. Reads and Session identity/CAS writes need no "
-      + "Execution lease. Execution acquisitions obtain the core lease; other Execution mutations "
-      + "require the current Pi session's negotiated locator, fence, and lease claim.",
+      + "or [\"run\",\"check\",\"run-123\"].",
   }),
 }, { additionalProperties: false });
 
@@ -159,6 +176,7 @@ export interface RunControlResult {
 
 export interface RunControlExecutionContext {
   hostSessionId: string;
+  toolOperationId?: string;
 }
 
 export async function executeRunControl(
@@ -176,7 +194,7 @@ export async function executeRunControl(
     if (classification.write && !classification.sessionless) {
       required(hostSessionId, "hostSessionId");
     }
-    const result = await coordinator.exec(argv, classification, hostSessionId);
+    const result = await coordinator.exec(argv, classification, hostSessionId, context?.toolOperationId);
     const command = projectPublicRunCliResult(result.command);
     const publicArgv = projectPublicRunCliResult({
       argv,

@@ -634,16 +634,32 @@ export function projectPlanContextForCompaction(messages: AgentMessage[]): {
   };
 }
 
-export function onBeforeAgentStartPlan(event: { systemPrompt: string }): { systemPrompt: string } | undefined {
+export const PLAN_MODE_REMINDER_TYPE = "plan-mode-reminder";
+
+export function onBeforeAgentStartPlan(_event: { systemPrompt: string }): {
+  message: { customType: string; content: string; display: boolean };
+} | undefined {
   if (pendingPlanEnterNote) {
     const note = pendingPlanEnterNote;
     pendingPlanEnterNote = undefined;
-    return { systemPrompt: `${event.systemPrompt}\n\n${note}` };
+    return {
+      message: {
+        customType: PLAN_MODE_REMINDER_TYPE,
+        content: note,
+        display: false,
+      },
+    };
   }
   if (!pendingPlanExitReminder) return;
   const reminder = pendingPlanExitReminder;
   pendingPlanExitReminder = undefined;
-  return { systemPrompt: `${event.systemPrompt}\n\n${reminder}` };
+  return {
+    message: {
+      customType: PLAN_MODE_REMINDER_TYPE,
+      content: reminder,
+      display: false,
+    },
+  };
 }
 
 export function onToolCallPlan(event: {
@@ -1409,7 +1425,7 @@ function currentDetails(action: PlanToolDetails["action"]): PlanToolDetails {
  * Detached Plan state for compaction metadata and prompts, mirroring
  * getTodoCompactionSnapshot.
  *
- * Only one-shot notes reach the per-turn prompt (onBeforeAgentStartPlan), so after a
+ * Only one-shot notes reach the model via before_agent_start.message, so after a
  * compaction the model's only trace of an approved Plan is whatever prose survived the
  * summary — including the handoff key, which nothing injects and which the todo tool
  * needs verbatim. The plan body is deliberately left out: it lives at `path` and is
@@ -1695,7 +1711,8 @@ function buildPlanEnterNote(): string {
     "- Ground every decision in codebase evidence, not assumption.",
     "- Align every user requirement with a planned outcome and a verifiable acceptance check.",
     "- Use the teammate tool to dispatch the built-in `planner` role for every final Plan, including",
-    "  small Plans. Pass it the resolved requirements, evidence, constraints, and user-owned decisions.",
+    "  small Plans (in Plan mode this overrides the general guideline against dispatching trivial work).",
+    "  Pass it the resolved requirements, evidence, constraints, and user-owned decisions.",
     "  The planner owns the document and may call `analyst` for technical analysis and pressure review,",
     "  `research` for project knowledge or external research, and `explorer` for codebase discovery and",
     "  call-chain tracing. Require the planner to follow its role-level Plan document contract.",
@@ -1715,8 +1732,9 @@ function buildPlanEnterNote(): string {
     "- Approval decomposes the locked Plan into an ordered Todo graph; attach Goals as",
     "  quality gates to key Todos (overall acceptance Goal last) before implementation.",
     "",
-    "This is a one-time notification. Subsequent turns will not modify the system prompt for plan mode,",
-    "and nothing else will re-announce the mode — this reminder is the only signal you get.",
+    // Injected as a one-time custom message (before_agent_start.message) so the
+    // system prompt prefix stays stable for prompt-cache reuse.
+    "This is a one-time notification injected at the next turn boundary. Subsequent turns will not re-announce Plan mode — this reminder is the only signal you get.",
     "</system-reminder>",
   ].join("\n");
 }
