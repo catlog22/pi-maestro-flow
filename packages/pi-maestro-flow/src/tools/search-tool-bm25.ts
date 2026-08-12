@@ -11,6 +11,21 @@ import {
 
 const DEFAULT_LIMIT = 8;
 
+/**
+ * Low-frequency tools whose full schemas are loaded only after discovery.
+ * Keep workflow, filesystem, shell, MCP, and resource tools eager because they
+ * are common control/data paths and should never require a search round-trip.
+ */
+export const DEFAULT_DEFERRED_TOOL_NAMES = new Set([
+  "browser",
+  "conflict",
+  "loop",
+  "lsp",
+  "model-availability",
+  "smart_search",
+  "source_check",
+]);
+
 export const SearchToolBm25Params = Type.Object({
   query: Type.String({ minLength: 1, description: "Natural-language tool search query" }),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Maximum matches" })),
@@ -31,12 +46,15 @@ export interface SearchToolBm25Details {
   }>;
 }
 
-export function createSearchToolBm25(pi: Pick<ExtensionAPI, "getAllTools" | "getActiveTools" | "setActiveTools">): ToolDefinition<typeof SearchToolBm25Params, SearchToolBm25Details> {
+export function createSearchToolBm25(
+  pi: Pick<ExtensionAPI, "getAllTools" | "getActiveTools" | "setActiveTools">,
+  options: { canActivate?: (name: string) => boolean } = {},
+): ToolDefinition<typeof SearchToolBm25Params, SearchToolBm25Details> {
   return {
     name: "search_tool_bm25",
     label: "Search Tools",
     description: "Search all registered tools by name, description, and parameter names using weighted BM25 ranking. Matching inactive tools are activated for subsequent calls.",
-    promptSnippet: "Use search_tool_bm25 when you need to discover a registered tool by capability.",
+    promptSnippet: "Use search_tool_bm25 when a capability may exist but its tool is not currently available. Search by capability; matching tools become callable on the next request.",
     parameters: SearchToolBm25Params,
     async execute(_id, params, signal): Promise<AgentToolResult<SearchToolBm25Details>> {
       if (signal?.aborted) throw abortError();
@@ -53,7 +71,7 @@ export function createSearchToolBm25(pi: Pick<ExtensionAPI, "getAllTools" | "get
         const activeSet = new Set(active);
         const activated = ranked
           .map((result) => result.tool.name)
-          .filter((name) => !activeSet.has(name));
+          .filter((name) => !activeSet.has(name) && (options.canActivate?.(name) ?? true));
         if (activated.length > 0) pi.setActiveTools([...active, ...activated]);
 
         const details: SearchToolBm25Details = {
@@ -110,8 +128,25 @@ export function createSearchToolBm25(pi: Pick<ExtensionAPI, "getAllTools" | "get
   };
 }
 
+export function deferLowFrequencyTools(
+  pi: Pick<ExtensionAPI, "getActiveTools" | "setActiveTools">,
+  deferredNames: ReadonlySet<string> = DEFAULT_DEFERRED_TOOL_NAMES,
+): string[] {
+  const active = pi.getActiveTools();
+  const next = active.filter((name) => !deferredNames.has(name));
+  if (next.length !== active.length) pi.setActiveTools(next);
+  return active.filter((name) => deferredNames.has(name));
+}
+
 export function registerSearchToolBm25(pi: ExtensionAPI): void {
-  pi.registerTool(createSearchToolBm25(pi));
+  const deferredThisSession = new Set<string>();
+  pi.registerTool(createSearchToolBm25(pi, {
+    canActivate: (name) => deferredThisSession.has(name),
+  }));
+  pi.on("session_start", () => {
+    deferredThisSession.clear();
+    for (const name of deferLowFrequencyTools(pi)) deferredThisSession.add(name);
+  });
 }
 
 function abortError(): Error {

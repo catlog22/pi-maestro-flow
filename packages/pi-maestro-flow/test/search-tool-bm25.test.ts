@@ -3,7 +3,7 @@ import test from "node:test";
 import { Type } from "typebox";
 import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 import { buildToolSearchIndex, searchTools, toDiscoverableTool } from "../src/tools/tool-discovery.ts";
-import { createSearchToolBm25 } from "../src/tools/search-tool-bm25.ts";
+import { createSearchToolBm25, deferLowFrequencyTools } from "../src/tools/search-tool-bm25.ts";
 
 const tools: ToolInfo[] = [
   {
@@ -34,6 +34,17 @@ test("weighted BM25 ranks names and schema keys ahead of unrelated descriptions"
   assert.throws(() => searchTools(index, "browser", 0), /positive integer/);
 });
 
+test("session startup defers only low-frequency tools and keeps core tools eager", () => {
+  let active = ["read", "todo", "mcp", "resource", "browser", "lsp", "smart_search"];
+  const deferred = deferLowFrequencyTools({
+    getActiveTools: () => active,
+    setActiveTools: (names) => { active = names; },
+  });
+
+  assert.deepEqual(deferred, ["browser", "lsp", "smart_search"]);
+  assert.deepEqual(active, ["read", "todo", "mcp", "resource"]);
+});
+
 test("search tool returns ranked details and activates only inactive matches", async () => {
   let active = ["todo"];
   const tool = createSearchToolBm25({
@@ -48,6 +59,24 @@ test("search tool returns ranked details and activates only inactive matches", a
   assert.match(result.details?.tools[0]?.summary ?? "", /headless browser/);
   assert.deepEqual(result.details?.activated_tools, ["browser"]);
   assert.deepEqual(active, ["todo", "browser"]);
+
+  const repeated = await tool.execute("call-2", { query: "browser screenshot", limit: 1 }, undefined, undefined, {} as never);
+  assert.deepEqual(repeated.details?.activated_tools, []);
+  assert.deepEqual(active, ["todo", "browser"], "activated tools stay sticky for the session");
+});
+
+test("search tool does not activate inactive tools outside its deferred pool", async () => {
+  let active = ["todo"];
+  const tool = createSearchToolBm25({
+    getAllTools: () => tools,
+    getActiveTools: () => active,
+    setActiveTools: (names) => { active = names; },
+  }, { canActivate: (name) => name === "lsp" });
+
+  const result = await tool.execute("call-3", { query: "browser screenshot", limit: 1 }, undefined, undefined, {} as never);
+  assert.equal(result.details?.tools[0]?.name, "browser");
+  assert.deepEqual(result.details?.activated_tools, []);
+  assert.deepEqual(active, ["todo"]);
 });
 
 test("search tool reports empty queries as stable tool errors", async () => {
