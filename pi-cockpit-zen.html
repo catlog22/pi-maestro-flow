@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pi-cockpit · Zen 深化设计（全插件面）</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;0,800;1,400&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0d0d0b; --frame:#232320; --panel:#111110;
+    --tx:#d6d3c8; --hi:#efede4; --mut:#8d8a7f; --dim:#57554c; --faint:#2b2a25; --ghost:#1c1b18;
+    --ac:#c8b273; --gn:#9db877; --rd:#c98a80;
+    --mono:"JetBrains Mono",ui-monospace,"Cascadia Code",Consolas,Menlo,monospace;
+    --disp:"Space Grotesk","Segoe UI Variable Display",system-ui,sans-serif;
+    --cjk:"JetBrains Mono","Microsoft YaHei UI","PingFang SC",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:var(--bg);color:var(--tx);font-family:var(--cjk);font-size:13.5px;line-height:1.7;-webkit-font-smoothing:antialiased}
+  .page{max-width:1160px;margin:0 auto;padding:36px 30px 70px}
+  .mono{font-family:var(--mono)} .tnum{font-variant-numeric:tabular-nums}
+  .ac{color:var(--ac)} .gn{color:var(--gn)} .rd{color:var(--rd)} .mut{color:var(--mut)} .dim{color:var(--dim)} .hi{color:var(--hi)}
+  kbd{font-family:var(--mono);font-size:11px;background:var(--ghost);border:1px solid var(--frame);border-bottom-width:2px;border-radius:4px;padding:0 5px;color:var(--mut)}
+  h1{font-family:var(--disp);font-size:23px;color:var(--hi);margin:0 0 4px;font-weight:600}
+  .sub{color:var(--mut);margin:0 0 26px;font-size:13px;max-width:900px}
+  .sub .tag{display:inline-block;border:1px solid var(--frame);border-radius:4px;padding:0 7px;margin-right:8px;color:var(--mut);font-size:11px;font-family:var(--disp);letter-spacing:1px}
+
+  /* principles — typographic, not cards */
+  .prin{margin:0 0 30px;max-width:960px;columns:2;column-gap:44px}
+  .prin .p{break-inside:avoid;margin:0 0 13px;padding-left:26px;position:relative;font-size:12.8px;color:var(--mut)}
+  .prin .p::before{content:attr(data-n);position:absolute;left:0;top:0;color:var(--ac);font-family:var(--mono);font-size:11px}
+  .prin .p b{color:var(--hi);font-weight:600;display:block;font-size:13px}
+
+  /* demo controls */
+  .demobar{display:flex;align-items:center;gap:14px;margin:0 0 10px;flex-wrap:wrap}
+  .demobar .lbl{font-family:var(--disp);font-size:10px;letter-spacing:2px;color:var(--dim);text-transform:uppercase}
+  .segctl{display:inline-flex;border:1px solid var(--frame);border-radius:6px;overflow:hidden}
+  .segctl button{background:transparent;border:none;color:var(--mut);font:inherit;font-size:12px;padding:3px 14px;cursor:pointer;transition:.15s}
+  .segctl button:hover{color:var(--tx)}
+  .segctl button.on{color:var(--ac);background:rgba(200,178,115,.09)}
+  .demobar .hint{color:var(--dim);font-size:12px;margin-left:auto}
+  #palCtl button{padding:3px 9px}
+  #palCtl .pdot{display:inline-block;width:11px;height:11px;border-radius:50%;vertical-align:-1px;opacity:.55;transition:.15s}
+  #palCtl button.on .pdot{opacity:1;box-shadow:0 0 7px currentColor}
+
+  /* terminal frame */
+  .term{position:relative;border:1px solid var(--frame);border-radius:12px;background:var(--bg);overflow:hidden;box-shadow:0 20px 60px -30px rgba(0,0,0,.9)}
+  .tbar{display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--panel);border-bottom:1px solid var(--ghost)}
+  .tbar .d{width:11px;height:11px;border-radius:50%;background:#2e2d29}
+  .tbar .tt{margin:0 auto;color:var(--dim);font-size:12px;font-family:var(--mono)}
+  .tbar .tt .fr{color:var(--ac)}
+  .zwrap{max-width:880px;margin:0 auto;padding:4px 36px 0;font-family:var(--mono);font-size:12.8px;line-height:1.9}
+
+  .zwin{color:var(--dim);font-size:11.5px;padding:5px 0 2px;border-top:1px solid var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .zwin .sel{color:var(--ac)}
+  .zsep{color:var(--faint);margin:0 8px}
+  .zzone{color:var(--faint);font-size:10px;letter-spacing:1px;text-align:center;padding:6px 0 2px;user-select:none}
+
+  .zmission{padding:8px 0 9px;border-top:1px solid var(--faint)}
+  .zmission .obj{color:var(--hi);font-size:14.5px;font-weight:600}
+  .zmission .meta{color:var(--mut);font-size:12px;margin-top:1px}
+  .zmission .meta .dod{color:var(--dim);font-style:italic}
+  .zmission .paused{color:var(--ac);font-size:12px;margin-top:2px}
+
+  .zstream{padding:13px 0 4px;min-height:150px}
+  .zu{color:var(--hi);font-weight:600;margin:2px 0 9px}
+  .zu::before{content:"❯ ";color:var(--ac)}
+  .zq{color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .zq .nm{color:var(--tx)}
+  .zprose{margin:8px 0;color:var(--tx)}
+  .zerr{color:var(--rd)}
+
+  /* zen rows (work + actors) */
+  .zsec{padding:10px 0 9px;border-top:1px solid var(--faint)}
+  .zsec:empty{display:none;border:none;padding:0}
+  .zrow{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:1px 0;color:var(--mut);cursor:default;margin:0 -10px;padding-left:10px;padding-right:10px;border-radius:4px}
+  .term.browsing .zrow{cursor:pointer}
+  .term.browsing .zrow:hover{background:rgba(255,255,255,.025)}
+  .zrow.sel{background:rgba(200,178,115,.08)}
+  .zrow.sel::before{content:"▸ ";color:var(--ac)}
+  .zrow .g{display:inline-block;width:17px}
+  .zrow b{color:var(--hi);font-weight:600}
+  .zrow .who{color:var(--ac)}
+  .zrow .tm{color:var(--dim);font-size:11px}
+  .zexp{color:var(--dim);font-size:12px;padding:0 10px 1px 37px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;animation:fadein .18s ease}
+  .zexp b{color:var(--mut);font-weight:500}
+  @keyframes fadein{from{opacity:0}to{opacity:1}}
+
+  .zalert{padding:8px 0;border-top:1px solid var(--faint);color:var(--rd);font-size:12.3px}
+  .zalert .k{color:var(--dim);font-size:11px}
+  .zalert:empty{display:none;border:none;padding:0}
+
+  .zconsole{display:flex;align-items:center;gap:10px;padding:12px 0;border-top:1px solid var(--faint)}
+  .zconsole .pfx{color:var(--ac);font-size:15px;white-space:nowrap}
+  .zconsole .pfx .tgt{color:var(--ac);font-size:12.5px;background:rgba(200,178,115,.1);border-radius:4px;padding:0 6px;margin-right:7px}
+  .zconsole .ph{color:var(--dim)}
+  .zhint{color:var(--faint);font-size:11px;padding:0 0 10px}
+  .zhint b{color:var(--dim);font-weight:500}
+  .zhint .on{color:var(--ac)}
+  .zfoot{display:flex;color:var(--dim);font-size:11.5px;padding:0 0 4px;flex-wrap:wrap}
+  .zfoot span+span::before{content:"·";margin:0 9px;color:var(--faint)}
+  .zfoot .em{color:var(--mut)}
+  .zfoot2{color:var(--faint);font-size:11px;padding:0 0 16px}
+  .zfoot2 .live{color:var(--mut)}
+
+  /* L3 zen sheet — borderless typographic overlay */
+  .overlay{position:absolute;inset:0;display:none;align-items:flex-start;justify-content:center;background:rgba(8,8,6,.82);z-index:5;padding-top:52px}
+  .overlay.open{display:flex}
+  .sheet{width:min(600px,86%);font-family:var(--mono);font-size:12.6px;line-height:1.85;animation:fadein .16s ease;border-left:2px solid var(--ac);padding:6px 26px 14px;background:linear-gradient(90deg,rgba(17,17,16,.6),transparent)}
+  .sheet .crumb{color:var(--dim);font-size:11px;letter-spacing:.5px;margin-bottom:6px}
+  .sheet .crumb .here{color:var(--ac)}
+  .sheet h3{font-family:var(--cjk);font-size:15px;color:var(--hi);margin:0 0 8px;font-weight:600}
+  .sheet .fl{display:flex;gap:12px;padding:1px 0}
+  .sheet .fl .fk{flex:0 0 118px;color:var(--dim)}
+  .sheet .fl .fv{color:var(--tx);min-width:0}
+  .sheet h4{font-size:10px;letter-spacing:2px;color:var(--dim);text-transform:uppercase;margin:13px 0 3px;font-family:var(--disp);font-weight:600}
+  .sheet .tail{color:var(--mut);font-size:12px;padding-left:12px;border-left:1px solid var(--faint);margin:4px 0;white-space:pre-wrap}
+  .sheet .keys{margin-top:14px;padding-top:8px;border-top:1px solid var(--faint);color:var(--dim);font-size:11.5px;display:flex;gap:18px;flex-wrap:wrap}
+  .sheet .keys b{color:var(--mut);font-weight:500}
+  .sheet .keys .danger{color:var(--rd)}
+  .sheet .keys .actbtn{cursor:pointer;border-bottom:1px dotted var(--dim)}
+  .sheet .keys .actbtn:hover{color:var(--ac)}
+  .sheet .zrowline{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--mut);padding:1px 0}
+  .sheet .zrowline .g{display:inline-block;width:17px}
+  .sheet .zrowline b{color:var(--hi);font-weight:600}
+  .sheet .zrowline .who{color:var(--ac)} .sheet .zrowline .tm{color:var(--dim);font-size:11px}
+
+  /* ── spec sections ── */
+  h2{font-family:var(--disp);font-size:16px;color:var(--hi);margin:46px 0 10px;font-weight:600}
+  h2 .no{color:var(--dim);font-weight:500;margin-right:9px;font-family:var(--mono);font-size:13px}
+  .note{color:var(--mut);font-size:13px;max-width:880px}
+  table.spec{border-collapse:collapse;width:100%;margin:12px 0;font-size:12.4px}
+  table.spec th{font-family:var(--disp);font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim);text-align:left;padding:6px 12px;border-bottom:1px solid var(--frame);font-weight:600}
+  table.spec td{padding:6px 12px;border-bottom:1px solid var(--ghost);color:var(--mut);vertical-align:top}
+  table.spec td .mono{color:var(--tx)}
+  table.spec td:first-child{white-space:nowrap;color:var(--tx)}
+  .cols2{display:grid;grid-template-columns:1fr 1fr;gap:30px;max-width:1080px}
+  .glyphgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:3px 22px;margin:10px 0;font-family:var(--mono);font-size:12.5px}
+  .glyphgrid .gi{color:var(--mut)} .glyphgrid .gi .g{display:inline-block;width:22px;color:var(--tx)}
+  .glyphgrid .gi .g.a{color:var(--ac)} .glyphgrid .gi .g.g2{color:var(--gn)} .glyphgrid .gi .g.r{color:var(--rd)}
+  .lineanat{font-family:var(--mono);font-size:12.8px;background:var(--panel);border:1px solid var(--ghost);border-radius:8px;padding:12px 18px;margin:10px 0;overflow-x:auto}
+  .lineanat .lbl{color:var(--faint);font-size:10px;letter-spacing:1px}
+  ul.pts{margin:8px 0;padding-left:20px;color:var(--mut);font-size:12.6px;max-width:880px}
+  ul.pts li{margin:5px 0}
+  ul.pts b{color:var(--hi);font-weight:600}
+  @media (max-width:980px){.prin{columns:1}.cols2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <h1>pi-cockpit · Zen 深化设计</h1>
+  <p class="sub">
+    <span class="tag">STATIC MOCK v2 · 2026-08-12</span>
+    在 Zen 风格（零边框 · 排版驱动 · 单强调色）下，覆盖全部插件面：teammate（状态全谱 / 输入路由 / 专家模式 / attach）、
+    todo（收展 / 受阻 / 指派）、goal（预算 / 暂停）、bash_bg、monitor 监督、swarm 汇总，以及 Zen 化的 L3 详情页。
+    心智模型不变：MISSION / WORK / ACTORS / VITALS，L0–L3 缩放轴。
+  </p>
+
+  <div class="prin">
+    <div class="p" data-n="01"><b>一切皆行</b>无框无底色，缩进即层级。一行 = 字形柱(2格) + 主体 + 细节 + 遥测 + 时间，全部实体（run/task/agent/job/window）同一语法。</div>
+    <div class="p" data-n="02"><b>金色预算</b>唯一强调色（暖金）同屏最多 3 处：当前焦点 · 输入路由目标 · 需要人的暂停点。绿只说「好」，红只说「要处理」，其余灰阶。</div>
+    <div class="p" data-n="03"><b>静默出场</b>段落只在有内容时存在：无任务则无 WORK 段，无参与者则无 ACTORS 段，空闲时终端近乎素文本。出问题时相关行才浮现。</div>
+    <div class="p" data-n="04"><b>焦点即展开</b>L2 浏览态选中一行，细节在原地展开 1–3 行（缩进灰字），不弹窗；Enter 才进 L3。信息跟着注意力走。</div>
+    <div class="p" data-n="05"><b>打字优先</b>浏览态不锁输入：直接打字立即回到编辑器。任何 sheet 内 Esc 一步回浏览、再 Esc 回编辑。</div>
+    <div class="p" data-n="06"><b>排版化 L3</b>详情页不是对话框：无边框 sheet，仅左侧一条金线 + 面包屑，行语法与 L1 完全一致，学一次到处适用。</div>
+    <div class="p" data-n="07"><b>视口纪律</b>常驻 UI 全部锚定在编辑器上方的底部栈（视口内，只走差分更新）；流区上方零变化行，滚离视口的行立即定格。这是对 pi-tui 置顶 bug（fullRender 分支）的结构性规避，详见第 08 节。</div>
+  </div>
+
+  <div class="demobar">
+    <span class="lbl">场景</span>
+    <div class="segctl" id="scnCtl">
+      <button data-s="deep" class="on">深度工作</button>
+      <button data-s="collab">多人协作</button>
+      <button data-s="trouble">出问题了</button>
+      <button data-s="restore">重启恢复</button>
+      <button data-s="idle">空闲</button>
+    </div>
+    <span class="lbl">演示</span>
+    <div class="segctl" id="browseCtl">
+      <button data-b="edit" class="on">编辑态</button>
+      <button data-b="browse">浏览态 (Alt+L)</button>
+    </div>
+    <div class="segctl" id="todoCtl">
+      <button data-t="0" class="on">任务收起</button>
+      <button data-t="1">任务展开 (Alt+T)</button>
+    </div>
+    <span class="lbl">配色</span>
+    <div class="segctl" id="palCtl">
+      <button data-c="#c8b273" class="on" title="zen 暖金"><span class="pdot" style="background:#c8b273"></span></button>
+      <button data-c="#e6b566" title="minimal-amber"><span class="pdot" style="background:#e6b566"></span></button>
+      <button data-c="#72d5d1" title="minimal-cyan"><span class="pdot" style="background:#72d5d1"></span></button>
+      <button data-c="#79d49a" title="minimal-green"><span class="pdot" style="background:#79d49a"></span></button>
+      <button data-c="#c3a6ff" title="minimal-purple"><span class="pdot" style="background:#c3a6ff"></span></button>
+      <button data-c="#e7a2b6" title="minimal-rose"><span class="pdot" style="background:#e7a2b6"></span></button>
+      <button data-c="#79b8ff" title="minimal"><span class="pdot" style="background:#79b8ff"></span></button>
+    </div>
+    <span class="hint">键盘：<kbd>Tab</kbd>/<kbd>Alt+L</kbd> 浏览 · <kbd>↑↓</kbd> 选行（原地展开） · <kbd>Enter</kbd> 详情 · <kbd>Esc</kbd> 逐级返回</span>
+  </div>
+
+  <!-- ══════════ 终端 ══════════ -->
+  <div class="term" id="term" tabindex="0">
+    <div class="tbar"><span class="d"></span><span class="d"></span><span class="d"></span><span class="tt"><span class="fr" data-spin>⠂</span> <span id="ttl">pi - auth 刷新令牌修复 - implement · R3</span></span></div>
+    <div class="zwrap">
+      <div class="zstream" id="zstream"></div>
+      <div class="zzone">── 底部常驻栈 · 视口内差分更新，永不触发置顶 ──</div>
+      <div class="zmission" id="zmission"></div>
+      <div class="zsec" id="zwork"></div>
+      <div class="zsec" id="zactors"></div>
+      <div class="zalert" id="zalert"></div>
+      <div class="zwin" id="zwin"></div>
+      <div class="zconsole"><span class="pfx" id="pfx">❯</span><span class="ph" id="ph">输入消息，@file 引用，/ 命令 …</span></div>
+      <div class="zhint" id="hintEdit"><b>tab</b> 浏览 · <b>alt+t</b> 任务 · <b>alt+j</b> jobs · <b>alt+w</b> 监督 · <b>←→</b> 空编辑器时切换 agent · <b>/cockpit</b> 设置</div>
+      <div class="zhint" id="hintBrowse" style="display:none"><span class="on">◈ 浏览</span> · <b>↑↓</b> 选行即展开 · <b>enter</b> 详情 · <b>esc / 打字</b> 回编辑器</div>
+      <div class="zfoot" id="zfoot"></div>
+      <div class="zfoot2" id="zfoot2"></div>
+    </div>
+    <div class="overlay" id="overlay"><div class="sheet" id="sheet"></div></div>
+  </div>
+
+  <!-- ══════════ 规格 ══════════ -->
+  <h2><span class="no">01</span>行语法与字形词汇</h2>
+  <div class="lineanat">
+    <span class="dim">⠙</span>  <span class="hi" style="font-weight:600">补充轮换失效测试</span> <span class="ac">@rev-1</span> <span class="mut">— 正在写 rotate.spec.ts</span> <span class="dim">· 2 tools · 1m02</span><br>
+    <span class="lbl">└glyph  └subject（主体，高亮=焦点）   └who（路由/指派）  └detail（细节，选中时展开更多）  └telemetry · time</span>
+  </div>
+  <div class="glyphgrid">
+    <span class="gi"><span class="g a" data-spin>⠋</span>running 运行中</span>
+    <span class="gi"><span class="g g2">✓</span>done 完成</span>
+    <span class="gi"><span class="g">·</span>pending 待办</span>
+    <span class="gi"><span class="g r">!</span>blocked 受阻</span>
+    <span class="gi"><span class="g r">✗</span>failed 失败</span>
+    <span class="gi"><span class="g a">↻</span>retrying 重试中</span>
+    <span class="gi"><span class="g r">~</span>stalled 停滞（派生）</span>
+    <span class="gi"><span class="g a">‖</span>paused 暂停（等人）</span>
+    <span class="gi"><span class="g">○</span>sleeping / idle</span>
+    <span class="gi"><span class="g">†</span>terminated 已终止</span>
+    <span class="gi"><span class="g a">☆</span>expert leader</span>
+    <span class="gi"><span class="g a">◆</span>monitor 窗口</span>
+  </div>
+  <p class="note">与 <span class="mono">AgentStatus</span>（pending/running/retrying/sleeping/done/failed/terminated + 派生 stalled）一一对应；todo 四态与 bash_bg 状态共用同一词汇。字形在 <span class="mono">icons.ts</span> 的 nerd/ascii 双模式下各有映射。</p>
+
+  <div class="cols2">
+    <div>
+      <h2><span class="no">02</span>teammate 面深化</h2>
+      <ul class="pts">
+        <li><b>状态全谱一行说完</b>：<span class="mono">⠋ reviewer-1 — review diff · ↑8k/↓2k · 1m02</span>。retry 显示 <span class="mono ac">↻ 第2次</span>，stalled 显示 <span class="mono rd">~ 停滞 5m</span> 并自动上浮到段首（问题行优先于运行行）。</li>
+        <li><b>输入路由是金色契约</b>：浏览态选中 agent 按 <kbd>m</kbd>（或 sheet 内选「发消息」），编辑器前缀变 <span class="mono"><span class="ac">@rev-1</span> ❯</span>——金色前缀 = 此刻打字发给谁。Esc 清除回主会话。复用现有 <span class="mono">cockpit:input-target</span> 事件与 <span class="mono">routeAgentInput</span>（steer/follow_up 两种投递已支持）。</li>
+        <li><b>专家模式即缩进</b>：☆ leader 一行，子 agent 缩进两格挂其下；蜂群（swarm）workers 同理，只显 <span class="mono">迭代 3/8 · best 0.87</span> 汇总，Enter 进 sheet 看全体。</li>
+        <li><b>attach / 进度树 → L3 sheet</b>：agent sheet 内 <kbd>a</kbd> attach、<kbd>enter</kbd> 查看线程（复用 window-thread-view），不再是独立 overlay 体系。</li>
+        <li><b>ambient 键保留</b>：空编辑器 ←/→ 循环 agent、Shift+↑↓ 滚动 roster（现有 ambient.ts 逻辑，Zen 下不变）。</li>
+      </ul>
+    </div>
+    <div>
+      <h2><span class="no">03</span>todo 面深化</h2>
+      <ul class="pts">
+        <li><b>默认极简</b>：WORK 段 = 1 行 chain + 最多 3 行任务（进行中 &gt; 受阻 &gt; 下一个待办），其余折进 <span class="mono dim">… 还有 2 项</span>。</li>
+        <li><b>Alt+T 展开</b>：原地展开全部任务（非弹窗），再按收回——映射现有 <span class="mono">cockpit:toggle-todo</span> 事件。</li>
+        <li><b>受阻要说原因</b>：<span class="mono"><span class="rd">!</span> 清理 allow-list — 等 task 02</span>，选中展开显示 blocked-by 链；解阻后该行自动褪回灰阶。</li>
+        <li><b>指派即链接</b>：<span class="mono ac">@rev-1</span> 是到 ACTORS 的引用，task sheet 内 Enter 跳到该 agent 的 sheet（同一面包屑体系 work › task 02 → actors › rev-1）。</li>
+        <li><b>完成不喧哗</b>：done 行灰字加删除线，超过 3 条折叠为 <span class="mono dim">✓ 2 done</span> 计数——Zen 只为「还没完成的事」花墨水。</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2><span class="no">04</span>其余插件面（同一语法的落位）</h2>
+  <table class="spec">
+    <tr><th>面</th><th>L0/L1 呈现（Zen）</th><th>L3 sheet</th><th>数据源（现有）</th></tr>
+    <tr><td>goal</td><td>并入 MISSION meta 行：<span class="mono">tokens 48k/120k · iter 3</span>；暂停时金色整行 <span class="mono ac">‖ 等待预算确认 — enter 处理</span></td><td>objective / 预算 / 迭代史 / 暂停原因</td><td>MaestroGoalV1（v1 已够）</td></tr>
+    <tr><td>bash_bg</td><td>footer 第二行：<span class="mono">⠴ npm test 12/48 · 0m41</span>；多任务只显计数</td><td>Alt+J → 任务列表 sheet：命令/cwd/时长/尾部输出/kill</td><td>bash-bg-store（已有）</td></tr>
+    <tr><td>monitor</td><td>window bar 字形（◆ 控制 / ● 已监督 / ○ 未监督）；异常时 ALERT 行浮现 <span class="mono rd">~ #docs 停滞 5m</span></td><td>window sheet：线程尾部 / 绑定开关（Alt+W）/ 未读</td><td>endpoint-store + supervision:event</td></tr>
+    <tr><td>swarm</td><td>ACTORS 段一行汇总：<span class="mono">swarm 迭代 3/8 · 5 workers · best 0.87</span></td><td>workers 全列 + 拓扑 + best 摘要</td><td>MaestroSwarmV1（v1 已够）</td></tr>
+    <tr><td>settings</td><td>不常驻。<span class="mono">/cockpit</span> → Zen sheet：分组字段行，Enter 编辑、Space 开关、Ctrl+S 存</td><td>maestro-settings 全量沿用，仅换壳</td><td>settings registry（已有）</td></tr>
+    <tr><td>compaction / failover</td><td>只在发生时出一行事件：<span class="mono dim">◦ 压缩了 31k tokens · 剩 42%</span> / <span class="mono ac">↻ 已切换 fallback 模型</span></td><td>各自 manage TUI 沿用</td><td>flow 事件（已有）</td></tr>
+  </table>
+
+  <h2><span class="no">05</span>工具行与流内显示（quiet 模式）</h2>
+  <p class="note">对话流由 Pi 原生渲染，Zen 不重画它——quiet 模式把 7 个内置工具（read / bash / edit / write / grep / find / ls）压缩为与 widget 区同语法的单行，思考块折叠为一行计时。这是「一切皆行」延伸进流内的方式。</p>
+  <table class="spec">
+    <tr><th>工具状态</th><th>流内显示</th><th>说明</th></tr>
+    <tr><td>运行中</td><td class="mono"><span class="ac">⋯</span> bash npm test -- jwt · 12s</td><td>生命周期字形 ⋯ → ✓/✗；耗时实时累计——但<b class="hi">仅当该行仍是最后活动行</b>，被新输出顶上去后立即定格（滚离即定格，防置顶）</td></tr>
+    <tr><td>成功</td><td class="mono"><span class="gn">✓</span> edit src/auth/jwt.ts · +18 −4</td><td>结果摘要跟在参数后（行数 / diff 数 / 匹配数）</td></tr>
+    <tr><td>失败</td><td class="mono"><span class="rd">✗</span> bash npm test · exit 1<br><span class="rd">&nbsp;&nbsp;FAIL rotate.spec.ts — expected …</span></td><td>失败额外给一行红色首错，不淹没在灰阶里</td></tr>
+    <tr><td>思考块</td><td class="mono"><span class="dim">thinking · 8.4s</span></td><td>折叠计时行；运行中显示 spinner + 实时秒数（thinking-timer）</td></tr>
+    <tr><td>字形集</td><td class="mono">check ✓/✗/⋯ 或 dot ●/○/◌</td><td><span class="mono">quietSymbols</span> 配置；配色族 <span class="mono">toolPalette</span>（classic/family/readwrite/search/mono）</td></tr>
+  </table>
+  <p class="note">约束（诚实声明）：内置工具的原生渲染只能整体替换、不能逐行接管，因此 L2 浏览态不进入流区——工具详情的展开/收起仍由 Pi 处理（<kbd>ctrl+o</kbd> 展开工具输出）。</p>
+
+  <h2><span class="no">06</span>持久状态与冷启动</h2>
+  <p class="note">「重启恢复」场景演示的规则：<b class="hi">持久的立即回填，事件累积的静默缺席，进程绑定的如实消失</b>——Zen 不用占位符假装数据还在。</p>
+  <table class="spec">
+    <tr><th>状态</th><th>持久载体</th><th>重启后</th><th>Zen 呈现</th></tr>
+    <tr><td>todo</td><td>todo-state 快照（每次变更写入 session entry）</td><td>session_start 回读最近快照</td><td>WORK 任务行立即回填，含指派</td></tr>
+    <tr><td>goal</td><td>goal 状态文件（会话外）</td><td>自动恢复迭代/预算/暂停原因</td><td>◎ goal 行回填，计时预算连续累计</td></tr>
+    <tr><td>workflow chain / run</td><td>maestro 会话存储 + 版本化快照</td><td><span class="mono">cockpit:maestro-query</span> 冷启动查询，generation 围栏丢弃旧代</td><td>chain 行回填并标注 revision</td></tr>
+    <tr><td>agents 名册</td><td><b class="rd">不持久</b>（teammate 事件增量累积）</td><td>为空，新事件到达才重建</td><td>ACTORS 段静默缺席（原则 03）</td></tr>
+    <tr><td>bash_bg jobs</td><td><b class="rd">进程内</b>（随 Pi 进程结束）</td><td>任务已终止</td><td>footer 第二行消失；流内一行 ◦ 提示需重跑</td></tr>
+    <tr><td>配置 / 主题</td><td>cockpit.json 等配置文件</td><td>立即生效</td><td>无感</td></tr>
+    <tr><td>会话标题</td><td>session_info（/session name 或 LLM 生成）</td><td>沿用</td><td>终端 tab 标题连续</td></tr>
+  </table>
+
+  <h2><span class="no">07</span>配色：单强调色 × 主题族</h2>
+  <p class="note">Zen 的「金色预算」原则与配色解耦：强调色是一个可替换的槽位，直接对接现有 <span class="mono">cockpit-minimal-*</span> 主题族的 accent 值（页面顶部可切换预览）。绿（成功）与红（问题）语义色恒定不随主题走，保证状态语言稳定。</p>
+  <table class="spec">
+    <tr><th>主题</th><th>accent</th><th>说明</th></tr>
+    <tr><td>zen 暖金（新增）</td><td class="mono">#c8b273</td><td>本方案默认；低饱和暖色，长时间注视不疲劳</td></tr>
+    <tr><td>cockpit-minimal-amber</td><td class="mono">#e6b566</td><td rowspan="6">现有主题族，<span class="mono">/theme</span> 实时预览切换；Zen 仅读取 accent/success/error 三个语义槽</td></tr>
+    <tr><td>cockpit-minimal-cyan</td><td class="mono">#72d5d1</td></tr>
+    <tr><td>cockpit-minimal-green</td><td class="mono">#79d49a</td></tr>
+    <tr><td>cockpit-minimal-purple</td><td class="mono">#c3a6ff</td></tr>
+    <tr><td>cockpit-minimal-rose</td><td class="mono">#e7a2b6</td></tr>
+    <tr><td>cockpit-minimal</td><td class="mono">#79b8ff</td></tr>
+  </table>
+
+  <h2><span class="no">08</span>渲染纪律（防「回弹顶部」）</h2>
+  <p class="note">
+    pi-tui <span class="mono">doRender()</span> 存在上游缺陷：当首个变化行位于视口上方时无条件
+    <span class="mono">fullRender(true)</span>（清屏 + 光标 home + 清 scrollback）= 整页置顶。
+    触发条件 = 视口上方存在<b class="hi">频繁变化的行</b>（每秒耗时 / spinner 是典型元凶，teammate 进度树曾踩中，
+    见 <span class="mono">TIP-20260725-pi-viewport-jump-fullredraw</span>）。Zen 用四条纪律做结构性规避：
+  </p>
+  <table class="spec">
+    <tr><th>纪律</th><th>规则</th><th>对应设计元素</th></tr>
+    <tr><td>① 布局不变量</td><td>常驻 UI 只存在于 aboveEditor/belowEditor 栈与 footer（永在视口内，差分更新）；<span class="mono">setHeader</span> 只放一次性静态内容；「顶部横幅」形态仅允许出现在 opt-in fullscreen 交替屏模式（交替屏无 scrollback 可清）</td><td>MISSION 是底部栈第一行而非流顶横幅；栈序 = MISSION → WORK → ACTORS → ALERT → 窗口条 → 编辑器（对齐现有 detail → Todo → session bar → editor 不变量）</td></tr>
+    <tr><td>② 滚离即定格</td><td>流内任何带实时计时/spinner 的行，只在其仍是最后活动行时更新；被新输出推离后立即冻结为最终值，此后一个字节都不再变</td><td>quiet 工具行的运行秒数、thinking 计时行（thinking-timer 已实现此行为，工具行照抄）</td></tr>
+    <tr><td>③ 滞回与高度预算</td><td>底部栈高度变化不触发置顶，但会推挤编辑器；段落消失先降为 1 行摘要、延迟一拍再移除；展开（Alt+T / L2 原地展开）在固定 N 行窗口内进行，超出折叠为 <span class="mono">… n more</span></td><td>静默出场的段落增删、任务展开、L2 选中展开</td></tr>
+    <tr><td>④ 双保险</td><td>运行时挂 <span class="mono">viewport-stability.ts</span> 补丁（镜像上游修复，widget 安装时已调用）；<span class="mono">staticMode</span> 一键冻结全部 tick；usage 计数 500ms 节流；根治补丁落在用户 fork 的 <span class="mono">tui.ts</span>（TIP 内已验证 693/693）</td><td>全局</td></tr>
+  </table>
+  <p class="note">
+    这也是 Zen 相对另两案的结构优势：无 dock、不包装 renderer，全部复用 stack-widget 已验证的底部栈管线——
+    方案 C（全高左列布满 spinner）最贴近触发形态，建议仅作为 fullscreen 模式下的形态保留。
+  </p>
+
+  <h2><span class="no">09</span>键位与降级</h2>
+  <div class="cols2">
+    <div>
+      <table class="spec">
+        <tr><th>键</th><th>语义（全局不变量）</th></tr>
+        <tr><td class="mono">alt+l / tab*</td><td>进入浏览态（*tab 仅在空编辑器时，非空时归补全）</td></tr>
+        <tr><td class="mono">↑↓ / j k</td><td>浏览态选行，选中即原地展开</td></tr>
+        <tr><td class="mono">enter</td><td>深入一层（行 → sheet → 关联实体）</td></tr>
+        <tr><td class="mono">esc / 打字</td><td>逐级返回；打字直接回编辑器</td></tr>
+        <tr><td class="mono">m</td><td>（agent 行/sheet）设为输入路由目标</td></tr>
+        <tr><td class="mono">alt+t · alt+j · alt+w</td><td>直达：任务展开 · jobs sheet · 监督绑定</td></tr>
+        <tr><td class="mono">space · ctrl+s</td><td>sheet 内开关 · 保存（沿用设置面规约）</td></tr>
+      </table>
+    </div>
+    <div>
+      <ul class="pts">
+        <li><b>降级阶梯</b>：Zen 本就无 dock，宽窄屏同构；极窄时 WORK/ACTORS 各折叠为 1 行摘要；<span class="mono">TERM=dumb</span> 只剩 footer。</li>
+        <li><b>接口依据</b>：全部行走 <span class="mono">setWidget(aboveEditor)</span>（无需 split-pane）；sheet 走 <span class="mono">ctx.ui.custom({overlay:true})</span>；前缀走现有 input-target 事件；浏览态复用 <span class="mono">onTerminalInput</span> 钩子——Zen 是三案中<b>实现增量最小</b>的（不动渲染器包装）。</li>
+        <li><b>协议依赖</b>：chain 有名步骤与 run attempt 仍需快照 v2；v1 下 chain 行退化为 <span class="mono">step 2/4</span> 计数（其余全部可跑）。</li>
+        <li><b>金色预算的实现</b>：投影层做一次「accent 配额」裁决——焦点行、输入目标、暂停点按优先级取前 3，其余强制降灰，防止多产者把界面染黄。</li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+<script>
+"use strict";
+const $=(s,r=document)=>r.querySelector(s);
+const $$=(s,r=document)=>[...r.querySelectorAll(s)];
+const SPIN="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"; let fr=0;
+setInterval(()=>{fr++;$$("[data-spin]").forEach(e=>e.textContent=SPIN[fr%SPIN.length]);},110);
+
+/* ── row model: {g,gc,html,tm,sheet,exp:[..]} ── */
+const S=(x)=>x; // template passthrough
+const SCN={
+deep:{
+  ttl:"pi - auth 刷新令牌修复 - implement · R3",
+  win:`◆ monitor <span class="zsep">·</span> <span class="sel">▸ auth-fix</span> <span class="zsep">·</span> docs <span class="ac">+2</span> <span class="zsep">·</span> spike`,
+  mission:{obj:"auth 刷新令牌修复",meta:`open <span class="zsep">·</span> gates <span class="gn">✓✓✓</span><span style="color:var(--faint)">✓</span> 3/4 <span class="zsep">·</span> tokens 48k/120k <span class="zsep">·</span> <span class="dod">done = jwt 全绿，无安全回归</span>`},
+  stream:`<div class="zu">修复刷新令牌轮换后旧 token 未失效的问题</div>
+    <div class="zq"><span class="dim">thinking · 8.4s</span></div>
+    <div class="zq"><span class="gn">✓</span> <span class="nm">read</span> src/auth/jwt.ts</div>
+    <div class="zq"><span class="gn">✓</span> <span class="nm">edit</span> src/auth/jwt.ts · +18 −4</div>
+    <div class="zprose">旧 token 在轮换后仍留在 allow-list。已加入失效标记并补充回归测试，正在验证。</div>
+    <div class="zq"><span class="ac" data-spin>⠋</span> <span class="nm">bash</span> npm test -- jwt · 12s</div>`,
+  work:[
+    {g:"◎",gc:"ac",html:`goal <b>让 jwt 套件全绿</b> <span class="dim">— 迭代 3 · ▰▰▰▰▱ 48k/120k tokens</span>`,tm:"12m",sheet:"goal",
+     exp:[`验证循环运行中 · 每迭代跑 npm test -- jwt`,`持久于 goal 状态文件 — 重启自动恢复（enter 详情）`]},
+    {g:"⠋",gc:"ac",spin:1,html:`plan <span class="gn">✓</span><span class="zsep">·</span><b>implement</b><span class="zsep">·</span><span class="dim">review · ship</span> <span class="dim">— R3 attempt 2 · retry R1</span>`,tm:"4m12",sheet:"run",
+     exp:[`R1 失败原因：测试超时（evidence 3 条）`,`gate 待过：security-review（review 步）`]},
+    {g:"⠙",gc:"ac",spin:1,html:`<b>补充轮换失效测试</b> <span class="who">@rev-1</span> <span class="dim">— 正在写 rotate.spec.ts</span>`,tm:"1m02",sheet:"task-run",
+     exp:[`属于 R3 · implement · 前置已完成`,`enter 打开 · 再 enter 跳到 @rev-1`]},
+    {g:"·",gc:"dim",html:`清理旧 allow-list 迁移 <span class="dim">— 排在测试之后</span>`,tm:"",sheet:"task-pend",exp:[`前置：task 02`]},
+    {g:"…",gc:"dim",html:`<span class="dim">todo 2/5 · 1 running · ✓ 2 done 已折叠 — alt+t 展开</span>`,tm:"",sheet:"todo-all",exp:[]},
+  ],
+  workX:[
+    {g:"◎",gc:"ac",html:`goal <b>让 jwt 套件全绿</b> <span class="dim">— 迭代 3 · ▰▰▰▰▱ 48k/120k tokens</span>`,tm:"12m",sheet:"goal",exp:[]},
+    {g:"⠋",gc:"ac",spin:1,html:`plan <span class="gn">✓</span><span class="zsep">·</span><b>implement</b><span class="zsep">·</span><span class="dim">review · ship</span> <span class="dim">— R3 attempt 2</span>`,tm:"4m12",sheet:"run",exp:[]},
+    {g:"⠙",gc:"ac",spin:1,html:`<b>补充轮换失效测试</b> <span class="who">@rev-1</span> <span class="dim">— 正在写 rotate.spec.ts</span>`,tm:"1m02",sheet:"task-run",exp:[]},
+    {g:"·",gc:"dim",html:`清理旧 allow-list 迁移 <span class="dim">— 前置 task 02</span>`,tm:"",sheet:"task-pend",exp:[]},
+    {g:"·",gc:"dim",html:`回归全套 auth 测试`,tm:"",sheet:"task-pend",exp:[]},
+    {g:"✓",gc:"gn",html:`<span class="dim" style="text-decoration:line-through">梳理 token 轮换入口</span> <span class="dim">by explorer</span>`,tm:"",sheet:"task-done",exp:[]},
+    {g:"✓",gc:"gn",html:`<span class="dim" style="text-decoration:line-through">复现旧 token 未失效</span>`,tm:"",sheet:"task-done",exp:[]},
+    {g:" ",gc:"dim",html:`<span class="dim">2/5 done · 1 running · 2 pending — alt+t 收起</span>`,tm:"",sheet:"todo-all",exp:[]},
+  ],
+  actors:[
+    {g:"⠸",gc:"ac",spin:1,html:`<b>reviewer-1</b> <span class="dim">— review diff · ↑8k/↓2k</span>`,tm:"1m02",sheet:"agent",exp:[`工具 6 次 · 正在 lsp references rotateRefreshToken`,`m 设为输入目标 · a attach`]},
+    {g:"✓",gc:"gn",html:`explorer <span class="dim">— 已产出 auth 入口地图</span>`,tm:"3m18",sheet:"agent-done",exp:[]},
+  ],
+  alert:"",
+  foot:`<span class="em">act</span><span>pi/stream-70b · high</span><span>ctx 42%</span><span>↑15k ↓2.9k · $0.52</span><span>⎇ fix/token-rotation</span><span class="tnum">01:23</span>`,
+  foot2:`<span class="live"><span data-spin>⠴</span> npm test 12/48 · 0m41</span> · alt+j`,
+},
+collab:{
+  ttl:"pi - auth 刷新令牌修复 - implement · R3 · 5 actors",
+  win:`◆ monitor <span class="zsep">·</span> <span class="sel">▸ auth-fix</span> <span class="zsep">·</span> docs <span class="ac">+2</span> <span class="zsep">·</span> spike`,
+  mission:{obj:"auth 刷新令牌修复",meta:`open <span class="zsep">·</span> gates <span class="gn">✓✓✓</span><span style="color:var(--faint)">✓</span> 3/4 <span class="zsep">·</span> <span class="dod">done = jwt 全绿，无安全回归</span>`},
+  stream:`<div class="zu">让专家组并行处理测试与迁移</div>
+    <div class="zprose">已派发专家组：leader 拆解并分派中。</div>
+    <div class="zq"><span class="ac" data-spin>⠋</span> <span class="nm">teammate</span> spawn expert-leader +3 workers</div>`,
+  work:[
+    {g:"⠋",gc:"ac",spin:1,html:`plan <span class="gn">✓</span><span class="zsep">·</span><b>implement</b><span class="zsep">·</span><span class="dim">review · ship</span> <span class="dim">— R3 attempt 2</span>`,tm:"6m40",sheet:"run",exp:[]},
+    {g:"⠙",gc:"ac",spin:1,html:`<b>补充轮换失效测试</b> <span class="who">@rev-1</span>`,tm:"2m11",sheet:"task-run",exp:[]},
+    {g:"⠹",gc:"ac",spin:1,html:`<b>清理旧 allow-list 迁移</b> <span class="who">@mig-1</span>`,tm:"0m48",sheet:"task-run",exp:[]},
+  ],
+  actors:[
+    {g:"☆",gc:"ac",html:`<b>expert-leader</b> <span class="dim">— 分派 & 汇总 · 3 workers</span>`,tm:"2m30",sheet:"expert",exp:[`worker 全绿 · 下一汇总点：测试完成后`]},
+    {g:"⠸",gc:"ac",spin:1,html:`&nbsp;&nbsp;reviewer-1 <span class="dim">— rotate.spec.ts</span>`,tm:"2m11",sheet:"agent",exp:[]},
+    {g:"⠼",gc:"ac",spin:1,html:`&nbsp;&nbsp;mig-1 <span class="dim">— allow-list 迁移脚本</span>`,tm:"0m48",sheet:"agent",exp:[]},
+    {g:"↻",gc:"ac",html:`&nbsp;&nbsp;doc-1 <span class="dim">— 重试第 2 次 · 上次超时</span>`,tm:"1m05",sheet:"agent-retry",exp:[`失败原因：provider 超时 · failover 链生效中`]},
+    {g:"○",gc:"dim",html:`#docs 窗口 <span class="dim">— 空闲 · 2 未读</span>`,tm:"",sheet:"window",exp:[]},
+  ],
+  alert:"",
+  foot:`<span class="em">act</span><span>pi/stream-70b · high</span><span>ctx 51%</span><span>↑42k ↓9k · $1.18</span><span>⎇ fix/token-rotation</span><span class="tnum">08:02</span>`,
+  foot2:`<span class="live"><span data-spin>⠴</span> npm test 30/48 · 2m03</span> · alt+j`,
+  target:"@rev-1",
+},
+trouble:{
+  ttl:"pi - auth 刷新令牌修复 - ✗ 2 项需要处理",
+  win:`◆ monitor <span class="zsep">·</span> <span class="sel">▸ auth-fix</span> <span class="zsep">·</span> <span class="rd">docs ~5m</span> <span class="zsep">·</span> spike`,
+  mission:{obj:"auth 刷新令牌修复",meta:`open <span class="zsep">·</span> gates <span class="gn">✓✓</span><span class="rd">✗</span><span style="color:var(--faint)">✓</span> <span class="rd">1 failed</span> <span class="zsep">·</span> tokens 96k/120k`,
+    paused:`‖ goal 暂停 — token 预算剩 20%，enter 决定追加或收尾`},
+  stream:`<div class="zu">继续修复</div>
+    <div class="zq"><span class="rd">✗</span> <span class="nm">bash</span> npm test -- jwt · exit 1</div>
+    <div class="zerr">FAIL test/auth/rotate.spec.ts — expected token to be invalidated</div>
+    <div class="zprose">断言失败：轮换后旧 token 仍可通过校验。正在定位 allow-list 写入时序。</div>`,
+  work:[
+    {g:"✗",gc:"rd",html:`plan <span class="gn">✓</span><span class="zsep">·</span><b>implement</b><span class="zsep">·</span><span class="dim">review · ship</span> <span class="dim">—</span> <span class="rd">R3 失败 · gate unit ✗</span>`,tm:"9m30",sheet:"run-fail",
+     exp:[`R4 将以 attempt 3 重试（retry of R3）`,`enter 看失败 evidence`]},
+    {g:"!",gc:"rd",html:`<b>补充轮换失效测试</b> <span class="dim">— 断言失败，等修复</span>`,tm:"",sheet:"task-blocked",exp:[`blocked by：allow-list 写入时序缺陷`]},
+  ],
+  actors:[
+    {g:"~",gc:"rd",html:`<b>reviewer-1</b> <span class="rd">— 停滞 4m · 无输出</span>`,tm:"6m12",sheet:"agent-stalled",exp:[`最后活动：lsp definition verify() · m 催一下 · x 终止`]},
+    {g:"✗",gc:"rd",html:`mig-1 <span class="dim">— exit 1 · 迁移脚本语法错误</span>`,tm:"3m40",sheet:"agent-failed",exp:[]},
+  ],
+  alert:`<span class="rd">~</span> #docs 窗口停滞 5m <span class="k">— enter 查看线程 · alt+w 介入</span>`,
+  foot:`<span class="em">act</span><span>pi/stream-70b · high</span><span class="rd">ctx 80%</span><span>↑96k ↓18k · $2.90</span><span>⎇ fix/token-rotation</span><span class="tnum">21:47</span>`,
+  foot2:`<span class="rd">✗ npm test exit 1 · 9m30</span> · alt+j`,
+},
+restore:{
+  ttl:"pi - auth 刷新令牌修复 - 已恢复",
+  win:`◆ monitor <span class="zsep">·</span> <span class="sel">▸ auth-fix</span> <span class="zsep">·</span> docs <span class="zsep">·</span> spike`,
+  mission:{obj:"auth 刷新令牌修复",meta:`open <span class="zsep">·</span> gates <span class="gn">✓✓✓</span><span style="color:var(--faint)">✓</span> 3/4 <span class="zsep">·</span> tokens 48k/120k <span class="zsep">·</span> <span class="dod">done = jwt 全绿，无安全回归</span>`},
+  stream:`<div class="zprose dim">— 会话已重启 —</div>
+    <div class="zq"><span class="ac">◦</span> 持久状态已回填 <span class="dim">— todo 2/5（todo-state 快照）· goal 迭代 3（goal 文件）· chain 2/4（maestro-query 冷启动查询）</span></div>
+    <div class="zq"><span class="dim">◦ agents 名册不持久 — 由事件累积，待新事件重建（ACTORS 段静默缺席）</span></div>
+    <div class="zq"><span class="dim">◦ 后台 job 随进程结束 — npm test 已终止，需重跑（footer 第二行消失）</span></div>`,
+  work:[
+    {g:"◎",gc:"ac",html:`goal <b>让 jwt 套件全绿</b> <span class="dim">— 迭代 3 · ▰▰▰▰▱ 48k/120k · 已恢复</span>`,tm:"",sheet:"goal",
+     exp:[`来自 goal 状态文件 · 计时与预算连续累计`]},
+    {g:"⠋",gc:"ac",spin:1,html:`plan <span class="gn">✓</span><span class="zsep">·</span><b>implement</b><span class="zsep">·</span><span class="dim">review · ship</span> <span class="dim">— chain 由快照回填</span>`,tm:"",sheet:"run",
+     exp:[`revision 17 · generation 校验通过（旧代 tombstone 已丢弃）`]},
+    {g:"⠙",gc:"ac",spin:1,html:`<b>补充轮换失效测试</b> <span class="who">@rev-1</span> <span class="dim">— 状态来自 todo-state</span>`,tm:"",sheet:"task-run",exp:[]},
+    {g:"·",gc:"dim",html:`清理旧 allow-list 迁移`,tm:"",sheet:"task-pend",exp:[]},
+  ],
+  actors:[],
+  alert:"",
+  foot:`<span class="em">act</span><span>pi/stream-70b · high</span><span>ctx 8%</span><span>Σ $2.90（跨重启累计）</span><span>⎇ fix/token-rotation</span>`,
+  foot2:``,
+},
+idle:{
+  ttl:"pi - auth 刷新令牌修复 - ✳ 待命",
+  win:`◆ monitor <span class="zsep">·</span> <span class="sel">▸ auth-fix</span> <span class="zsep">·</span> docs <span class="zsep">·</span> spike`,
+  mission:{obj:"auth 刷新令牌修复",meta:`<span class="gn">✓ 完成</span> <span class="zsep">·</span> gates <span class="gn">✓✓✓✓</span> 4/4 <span class="zsep">·</span> <span class="dod">R4 通过全部测试 · 21:47 总耗时 · $3.12</span>`},
+  stream:`<div class="zprose dim">会话安静。上一轮：R4 implement 通过 → review 通过 → 已 ship。</div>`,
+  work:[],
+  actors:[],
+  alert:"",
+  foot:`<span class="em">act</span><span>pi/stream-70b</span><span>ctx 12%</span><span>Σ $3.12</span><span>⎇ master</span>`,
+  foot2:``,
+},
+};
+
+/* ── L3 sheets ── */
+const SHEETS={
+  goal:{crumb:`mission › <span class="here">goal</span>`,title:"goal · 让 jwt 套件全绿",body:`
+    <div class="fl"><span class="fk">状态</span><span class="fv"><span class="ac">⠋ running</span> · 迭代 3</span></div>
+    <div class="fl"><span class="fk">tokens</span><span class="fv">48k / 120k 预算 <span class="dim">▰▰▰▰▱▱▱▱▱▱ 40%</span></span></div>
+    <div class="fl"><span class="fk">用时</span><span class="fv">12m（跨重启累计）</span></div>
+    <div class="fl"><span class="fk">验证</span><span class="fv">每迭代 npm test -- jwt · 全绿即完成</span></div>
+    <h4>持久化</h4>
+    <div class="fl"><span class="fk">载体</span><span class="fv">goal 状态文件（会话外持久）</span></div>
+    <div class="fl"><span class="fk">重启后</span><span class="fv">自动恢复：迭代计数 / 预算消耗 / 暂停原因</span></div>
+    <h4>迭代史</h4><div class="tail">1 ✗ 测试超时 → 2 ✗ 断言失败 → 3 ⠋ 运行中</div>`,
+    keys:[`<b>p</b> 暂停`,`<b>b</b> 调整预算`,`<b>esc</b> 返回`]},
+  "todo-all":{crumb:`work › <span class="here">todo 全景</span>`,title:"todo · 5 项 · 2/5 done",body:`
+    <div class="zrowline"><span class="g gn">✓</span><span class="dim" style="text-decoration:line-through">梳理 token 轮换入口</span> <span class="dim">by explorer</span></div>
+    <div class="zrowline"><span class="g gn">✓</span><span class="dim" style="text-decoration:line-through">复现旧 token 未失效</span></div>
+    <div class="zrowline"><span class="g ac" data-spin>⠙</span><b>补充轮换失效测试</b> <span class="who">@rev-1</span> <span class="tm">1m02</span></div>
+    <div class="zrowline"><span class="g">·</span>清理旧 allow-list 迁移 <span class="dim">— 前置 task 03</span></div>
+    <div class="zrowline"><span class="g">·</span>回归全套 auth 测试</div>
+    <h4>持久化</h4>
+    <div class="fl"><span class="fk">载体</span><span class="fv">todo-state 快照（todo 工具每次变更后写入 session entry）</span></div>
+    <div class="fl"><span class="fk">重启后</span><span class="fv">session_start 回读最近快照，WORK 行立即回填</span></div>`,
+    keys:[`<b>↑↓</b> 选任务`,`<b>enter</b> 任务详情`,`<b>alt+t</b> 收起`,`<b>esc</b> 返回`]},
+  run:{crumb:`mission › work › <span class="here">run R3</span>`,title:"implement · R3 · attempt 2",body:`
+    <div class="fl"><span class="fk">retry of</span><span class="fv">R1 — 测试超时失败</span></div>
+    <div class="fl"><span class="fk">participant</span><span class="fv">本窗（window A）</span></div>
+    <div class="fl"><span class="fk">状态</span><span class="fv"><span class="ac">⠋ running</span> · 4m12</span></div>
+    <h4>evidence</h4><div class="tail">edit src/auth/jwt.ts +18 −4
+add  test/auth/rotate.spec.ts
+bash npm test -- jwt · running</div>`,
+    keys:[`<b>enter</b> R1 失败详情`,`<b>esc</b> 返回`]},
+  "run-fail":{crumb:`mission › work › <span class="here">run R3 ✗</span>`,title:"implement · R3 · 失败",body:`
+    <div class="fl"><span class="fk">失败 gate</span><span class="fv"><span class="rd">unit ✗</span> — rotate.spec.ts 断言失败</span></div>
+    <div class="fl"><span class="fk">下一步</span><span class="fv">R4 = attempt 3 · retry of R3</span></div>
+    <h4>失败输出</h4><div class="tail">FAIL test/auth/rotate.spec.ts
+  expected token to be invalidated after rotation</div>`,
+    keys:[`<b>r</b> 立即重试（发起 R4）`,`<b>esc</b> 返回`]},
+  "task-run":{crumb:`work › <span class="here">task 02</span>`,title:"补充轮换失效测试",body:`
+    <div class="fl"><span class="fk">状态</span><span class="fv"><span class="ac">⠙ in_progress</span></span></div>
+    <div class="fl"><span class="fk">指派</span><span class="fv"><span class="ac">@rev-1</span>（enter 跳到该 actor）</span></div>
+    <div class="fl"><span class="fk">属于</span><span class="fv">R3 · implement</span></div>`,
+    keys:[`<b>enter</b> 跳到 @rev-1`,`<b>esc</b> 返回`]},
+  "task-pend":{crumb:`work › <span class="here">task 03</span>`,title:"清理旧 allow-list 迁移",body:`
+    <div class="fl"><span class="fk">状态</span><span class="fv">· pending</span></div>
+    <div class="fl"><span class="fk">前置</span><span class="fv">task 02（测试先行）</span></div>`,
+    keys:[`<b>esc</b> 返回`]},
+  "task-done":{crumb:`work › <span class="here">task 01</span>`,title:"梳理 token 轮换入口",body:`
+    <div class="fl"><span class="fk">状态</span><span class="fv"><span class="gn">✓ completed</span> · by explorer</span></div>`,
+    keys:[`<b>esc</b> 返回`]},
+  "task-blocked":{crumb:`work › <span class="here">task 02 !</span>`,title:"补充轮换失效测试 — 受阻",body:`
+    <div class="fl"><span class="fk">blocked by</span><span class="fv"><span class="rd">allow-list 写入时序缺陷</span>（R3 失败根因）</span></div>
+    <div class="fl"><span class="fk">建议</span><span class="fv">修复时序后由 R4 重跑</span></div>`,
+    keys:[`<b>u</b> 手动解阻`,`<b>esc</b> 返回`]},
+  agent:{crumb:`actors › <span class="here">reviewer-1</span>`,title:"agent · reviewer-1",body:`
+    <div class="fl"><span class="fk">role / model</span><span class="fv">reviewer · pi/stream-70b</span></div>
+    <div class="fl"><span class="fk">task</span><span class="fv">补充轮换失效测试</span></div>
+    <div class="fl"><span class="fk">状态</span><span class="fv"><span class="ac">⠸ running</span> · 6 tools · ↑8k/↓2k</span></div>
+    <h4>live tail</h4><div class="tail">read src/auth/jwt.ts
+lsp references rotateRefreshToken
+正在写 rotate.spec.ts …</div>`,
+    keys:[`<b class="actbtn" id="actMsg">m 设为输入目标</b>`,`<b>a</b> attach`,`<b>enter</b> 线程`,`<b class="danger">x</b> 终止`,`<b>esc</b> 返回`]},
+  "agent-done":{crumb:`actors › <span class="here">explorer</span>`,title:"agent · explorer · 完成",body:`
+    <div class="fl"><span class="fk">outcome</span><span class="fv"><span class="gn">✓</span> auth 入口地图（3 文件 · 12 引用）· 3m18</span></div>`,
+    keys:[`<b>enter</b> 查看产出`,`<b>esc</b> 返回`]},
+  "agent-retry":{crumb:`actors › <span class="here">doc-1 ↻</span>`,title:"agent · doc-1 · 重试中",body:`
+    <div class="fl"><span class="fk">attempt</span><span class="fv">2 — 上次 provider 超时</span></div>
+    <div class="fl"><span class="fk">failover</span><span class="fv"><span class="ac">↻</span> 已切换 fallback 模型链</span></div>`,
+    keys:[`<b>esc</b> 返回`]},
+  "agent-stalled":{crumb:`actors › <span class="here">reviewer-1 ~</span>`,title:"agent · reviewer-1 · 停滞",body:`
+    <div class="fl"><span class="fk">停滞</span><span class="fv"><span class="rd">4m 无输出</span>（阈值 3m）</span></div>
+    <div class="fl"><span class="fk">最后活动</span><span class="fv">lsp definition verify()</span></div>
+    <div class="fl"><span class="fk">monitor</span><span class="fv">已记录 · 未自动干预</span></div>`,
+    keys:[`<b class="actbtn" id="actMsg">m 催一下</b>`,`<b class="danger">x</b> 终止`,`<b>esc</b> 返回`]},
+  "agent-failed":{crumb:`actors › <span class="here">mig-1 ✗</span>`,title:"agent · mig-1 · 失败",body:`
+    <div class="fl"><span class="fk">exit</span><span class="fv"><span class="rd">1</span> — 迁移脚本语法错误</span></div>
+    <h4>tail</h4><div class="tail">SyntaxError: unexpected token in migrate-allowlist.ts:42</div>`,
+    keys:[`<b>r</b> 重派`,`<b>esc</b> 返回`]},
+  expert:{crumb:`actors › <span class="here">expert-leader ☆</span>`,title:"专家组 · 3 workers",body:`
+    <div class="zrowline"><span class="g ac">☆</span><b>expert-leader</b> <span class="dim">— 分派 & 汇总</span></div>
+    <div class="zrowline"><span class="g ac" data-spin>⠸</span>&nbsp;&nbsp;reviewer-1 <span class="dim">— rotate.spec.ts</span> <span class="tm">2m11</span></div>
+    <div class="zrowline"><span class="g ac" data-spin>⠼</span>&nbsp;&nbsp;mig-1 <span class="dim">— 迁移脚本</span> <span class="tm">0m48</span></div>
+    <div class="zrowline"><span class="g ac">↻</span>&nbsp;&nbsp;doc-1 <span class="dim">— 重试第 2 次</span> <span class="tm">1m05</span></div>
+    <div class="fl" style="margin-top:8px"><span class="fk">汇总点</span><span class="fv">测试完成后 leader 收敛结论</span></div>`,
+    keys:[`<b>↑↓</b> 选 worker`,`<b>enter</b> 进入`,`<b>esc</b> 返回`]},
+  window:{crumb:`actors › <span class="here">#docs</span>`,title:"window · #docs",body:`
+    <div class="fl"><span class="fk">状态</span><span class="fv">○ 空闲 · 2 未读</span></div>
+    <div class="fl"><span class="fk">monitor</span><span class="fv"><span class="gn">●</span> 已绑定（alt+w 解绑）</span></div>
+    <h4>线程尾部</h4><div class="tail">✓ docs 构建完成 · 12m 前</div>`,
+    keys:[`<b>enter</b> 完整线程`,`<b>alt+w</b> 绑定/解绑`,`<b>esc</b> 返回`]},
+};
+
+/* ── render ── */
+const term=$("#term");
+let scn="deep", browsing=false, sel=-1, rows=[], ovOpen=false, target="", todoExpanded=false;
+
+function rowHtml(r,i){
+  const spin=r.spin?` data-spin`:"";
+  const tm=r.tm?` <span class="tm">${r.tm}</span>`:"";
+  return `<div class="zrow" data-i="${i}"><span class="g ${r.gc}"${spin}>${r.g}</span>${r.html}${tm}</div>`;
+}
+function render(){
+  const d=SCN[scn];
+  $("#ttl").textContent=d.ttl;
+  $("#zwin").innerHTML=d.win;
+  $("#zmission").innerHTML=`<div class="obj">${d.mission.obj}</div><div class="meta">${d.mission.meta}</div>`+(d.mission.paused?`<div class="paused">${d.mission.paused}</div>`:"");
+  $("#zstream").innerHTML=d.stream;
+  const work=(todoExpanded&&d.workX)?d.workX:d.work;
+  const all=[...work,...d.actors];
+  $("#zwork").innerHTML=work.map((r,i)=>rowHtml(r,i)).join("");
+  $("#zactors").innerHTML=d.actors.map((r,i)=>rowHtml(r,work.length+i)).join("");
+  $("#zalert").innerHTML=d.alert;
+  $("#zfoot").innerHTML=d.foot;
+  $("#zfoot2").innerHTML=d.foot2;
+  rows=all;
+  target=d.target??"";
+  paintTarget();
+  sel=-1;
+  $$(".zrow",term).forEach(el=>el.addEventListener("click",()=>{
+    if(!browsing)enterBrowse();
+    select(Number(el.dataset.i));
+    openSheet(rows[Number(el.dataset.i)]?.sheet);
+  }));
+}
+function paintTarget(){
+  $("#pfx").innerHTML=target?`<span class="tgt">${target}</span>❯`:"❯";
+  $("#ph").textContent=target?`发给 ${target}（steer）… esc 回主会话`:"输入消息，@file 引用，/ 命令 …";
+}
+function select(i){
+  if(rows.length===0)return;
+  sel=Math.max(0,Math.min(rows.length-1,i));
+  $$(".zexp",term).forEach(e=>e.remove());
+  $$(".zrow",term).forEach(el=>{
+    const on=Number(el.dataset.i)===sel;
+    el.classList.toggle("sel",on);
+    if(on){
+      const r=rows[sel];
+      (r.exp??[]).forEach(line=>{
+        const div=document.createElement("div");
+        div.className="zexp"; div.innerHTML=line;
+        el.after(div);
+      });
+    }
+  });
+}
+function enterBrowse(){
+  if(rows.length===0)return;
+  browsing=true; term.classList.add("browsing");
+  if(sel<0)select(0);
+  $("#hintEdit").style.display="none"; $("#hintBrowse").style.display="block";
+  syncBrowseCtl();
+}
+function exitBrowse(){
+  browsing=false; term.classList.remove("browsing"); sel=-1;
+  $$(".zexp",term).forEach(e=>e.remove());
+  $$(".zrow",term).forEach(el=>el.classList.remove("sel"));
+  $("#hintEdit").style.display="block"; $("#hintBrowse").style.display="none";
+  syncBrowseCtl();
+}
+function syncBrowseCtl(){$$("#browseCtl button").forEach(x=>x.classList.toggle("on",(x.dataset.b==="browse")===browsing));}
+
+/* sheets */
+const overlay=$("#overlay"), sheet=$("#sheet");
+function openSheet(key){
+  const d=SHEETS[key]; if(!d)return;
+  sheet.innerHTML=`<div class="crumb">${d.crumb}</div><h3>${d.title}</h3>${d.body}<div class="keys">${d.keys.map(k=>`<span>${k}</span>`).join("")}</div>`;
+  overlay.classList.add("open"); ovOpen=true;
+  const act=$("#actMsg");
+  if(act)act.addEventListener("click",()=>{target="@rev-1";paintTarget();closeSheet();exitBrowse();});
+}
+function closeSheet(){overlay.classList.remove("open");ovOpen=false;}
+overlay.addEventListener("click",e=>{if(e.target===overlay)closeSheet();});
+
+/* controls */
+$("#scnCtl").addEventListener("click",e=>{
+  const b=e.target.closest("button"); if(!b)return;
+  $$("#scnCtl button").forEach(x=>x.classList.toggle("on",x===b));
+  scn=b.dataset.s; closeSheet(); exitBrowse(); render();
+});
+$("#browseCtl").addEventListener("click",e=>{
+  const b=e.target.closest("button"); if(!b)return;
+  b.dataset.b==="browse"?enterBrowse():exitBrowse();
+});
+function setTodoExpanded(on){
+  todoExpanded=on;
+  $$("#todoCtl button").forEach(x=>x.classList.toggle("on",(x.dataset.t==="1")===on));
+  const wasBrowsing=browsing; exitBrowse(); render();
+  if(wasBrowsing)enterBrowse();
+}
+$("#todoCtl").addEventListener("click",e=>{
+  const b=e.target.closest("button"); if(!b)return;
+  setTodoExpanded(b.dataset.t==="1");
+});
+$("#palCtl").addEventListener("click",e=>{
+  const b=e.target.closest("button"); if(!b)return;
+  $$("#palCtl button").forEach(x=>x.classList.toggle("on",x===b));
+  term.style.setProperty("--ac",b.dataset.c);
+});
+term.addEventListener("keydown",e=>{
+  if(ovOpen){
+    if(e.key==="Escape"){e.preventDefault();closeSheet();}
+    else if(e.key==="m"){const r=rows[sel];if(r&&/agent/.test(r.sheet)){target="@rev-1";paintTarget();closeSheet();exitBrowse();}}
+    return;
+  }
+  if(e.key==="Tab"){e.preventDefault();browsing?exitBrowse():enterBrowse();return;}
+  if(e.key==="Escape"&&target&&!browsing){target="";paintTarget();return;}
+  if(!browsing)return;
+  if(e.key==="ArrowDown"||e.key==="j"){e.preventDefault();select(sel+1);}
+  else if(e.key==="ArrowUp"||e.key==="k"){e.preventDefault();select(sel-1);}
+  else if(e.key==="Enter"){e.preventDefault();openSheet(rows[sel]?.sheet);}
+  else if(e.key==="Escape"){e.preventDefault();exitBrowse();}
+  else if(e.key==="m"){const r=rows[sel];if(r&&/agent/.test(r.sheet)){target="@rev-1";paintTarget();exitBrowse();}}
+  else if(e.key==="t"){setTodoExpanded(!todoExpanded);}
+});
+term.addEventListener("mousedown",()=>term.focus());
+render();
+</script>
+</body>
+</html>

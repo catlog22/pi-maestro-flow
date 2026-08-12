@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pi-cockpit · 三种风格方案（同一心智模型）</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;0,800;1,400&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0b0b0d; --fg:#f1f1f3; --text:#d2d2d5; --list:#9a9aa1; --muted:#6c6c74; --dim:#47474e; --faint:#26262c;
+    --hair:#1c1c22; --hair2:#2a2a31;
+    --mono:"JetBrains Mono",ui-monospace,"Cascadia Code",Consolas,Menlo,monospace;
+    --disp:"Space Grotesk","Segoe UI Variable Display",system-ui,sans-serif;
+    --cjk:"JetBrains Mono","Microsoft YaHei UI","PingFang SC",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:var(--cjk);font-size:13.5px;line-height:1.65;-webkit-font-smoothing:antialiased}
+  body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+    background-image:linear-gradient(var(--faint) 1px,transparent 1px),linear-gradient(90deg,var(--faint) 1px,transparent 1px);
+    background-size:52px 52px;opacity:.1;-webkit-mask-image:radial-gradient(140% 100% at 50% 0%,#000 20%,transparent 90%);mask-image:radial-gradient(140% 100% at 50% 0%,#000 20%,transparent 90%)}
+  .page{position:relative;z-index:1;max-width:1280px;margin:0 auto;padding:34px 30px 70px}
+  h1{font-family:var(--disp);font-size:24px;color:var(--fg);margin:0 0 4px}
+  .sub{color:var(--muted);margin:0 0 24px;font-size:13px;max-width:920px}
+  .sub .tag{display:inline-block;border:1px solid var(--hair2);border-radius:4px;padding:0 7px;margin-right:8px;color:var(--list);font-size:11px;font-family:var(--disp);letter-spacing:1px}
+  .tnum{font-variant-numeric:tabular-nums}
+  kbd{font-family:var(--mono);font-size:11px;background:#16161b;border:1px solid var(--hair2);border-bottom-width:2px;border-radius:4px;padding:0 5px;color:var(--list)}
+
+  /* switcher */
+  .switch{position:sticky;top:0;z-index:10;display:flex;gap:8px;padding:12px 0;background:linear-gradient(180deg,var(--bg) 75%,transparent);margin-bottom:8px}
+  .switch button{font:inherit;font-family:var(--disp);font-size:13px;font-weight:600;padding:7px 18px;border-radius:8px;border:1px solid var(--hair2);background:#101014;color:var(--muted);cursor:pointer;transition:.15s}
+  .switch button:hover{color:var(--list)}
+  .switch button.on{color:var(--fg);border-color:#3a3a44;background:#17171d}
+  .switch button .sw{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;vertical-align:0}
+  .switch button[data-v="a"] .sw{background:#38b6ff} .switch button[data-v="b"] .sw{background:#d8d8d2} .switch button[data-v="c"] .sw{background:#c792ea}
+
+  .variant{display:none}
+  .variant.on{display:block;animation:rise .3s ease}
+  @keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+  /* annotation card */
+  .brief{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:14px;margin:0 0 16px}
+  .bcard{border:1px solid var(--hair2);border-radius:10px;background:#0e0e12;padding:12px 16px}
+  .bcard .bt{font-family:var(--disp);font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--dim);margin-bottom:4px}
+  .bcard .bd{font-size:12.5px;color:var(--list);line-height:1.6}
+  .bcard .bd b{color:var(--fg);font-weight:600}
+
+  /* shared terminal chrome */
+  .shellframe{border:1px solid var(--hair2);border-radius:12px;overflow:hidden;box-shadow:0 20px 60px -30px rgba(0,0,0,.9)}
+  .tbar{display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1px solid var(--hair)}
+  .tbar .d{width:11px;height:11px;border-radius:50%;background:#3a3a40}
+  .tbar .tt{margin:0 auto;font-size:12px;font-family:var(--mono)}
+  .mono{font-family:var(--mono)}
+
+  /* ══════════ 方案 A · OPS 密度优先 ══════════ */
+  .va{--a-bg:#070b12; --a-panel:#0a1019; --a-line:#1b2740; --a-line2:#27395c;
+      --a-cy:#38b6ff; --a-gn:#3ddc84; --a-am:#ffb454; --a-rd:#ff5f56; --a-pu:#b58cff;
+      --a-tx:#c9d4e6; --a-mut:#61708c; --a-dim:#3b4763}
+  .va .shellframe{background:var(--a-bg);border-color:var(--a-line2)}
+  .va .tbar{background:var(--a-panel);border-color:var(--a-line)}
+  .va .tbar .tt{color:var(--a-mut)} .va .tbar .tt .fr{color:var(--a-cy)}
+  .va .body{font-family:var(--mono);font-size:12.3px;line-height:1.62;color:var(--a-tx)}
+  .va .missionbar{display:flex;align-items:center;gap:14px;padding:7px 16px;background:linear-gradient(90deg,rgba(56,182,255,.09),transparent 60%);border-bottom:1px solid var(--a-line);white-space:nowrap;overflow:hidden}
+  .va .missionbar .mlabel{font-family:var(--disp);font-size:9px;letter-spacing:2.5px;color:var(--a-cy);border:1px solid var(--a-line2);border-radius:3px;padding:0 6px}
+  .va .missionbar .obj{color:#eaf2ff;font-weight:700}
+  .va .missionbar .st{color:var(--a-gn)}
+  .va .missionbar .gates{display:inline-flex;gap:2px;margin:0 4px}
+  .va .missionbar .gates i{width:10px;height:10px;border-radius:2px;background:#152238;border:1px solid var(--a-line2)}
+  .va .missionbar .gates i.p{background:var(--a-gn);border-color:var(--a-gn)}
+  .va .missionbar .spacer{margin-left:auto;color:var(--a-dim);font-size:11px}
+  .va .winrow{display:flex;gap:16px;padding:4px 16px;border-bottom:1px solid var(--a-line);color:var(--a-mut);font-size:11.5px}
+  .va .winrow .sel{color:var(--a-cy);font-weight:700}
+  .va .winrow .un{color:var(--a-am)}
+  .va .winrow .hint{margin-left:auto;color:var(--a-dim)}
+  .va .split{display:flex;min-height:400px}
+  .va .stream{flex:1 1 auto;min-width:0;padding:10px 16px}
+  .va .stream .u{border:1px solid var(--a-line2);border-left:3px solid var(--a-cy);background:rgba(56,182,255,.06);border-radius:4px;padding:5px 12px;display:inline-block;margin:2px 0 10px;color:#dbe7fa}
+  .va .qrow{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--a-mut)}
+  .va .qrow .ok{color:var(--a-gn)} .va .qrow .run{color:var(--a-cy)} .va .qrow .nm{color:var(--a-tx);font-weight:600}
+  .va .prose{color:var(--a-tx);margin:6px 0}
+  .va .dock{flex:0 0 400px;border-left:1px solid var(--a-line2);background:var(--a-panel);padding:8px 10px;display:flex;flex-direction:column;gap:8px}
+  .va .panel{border:1px solid var(--a-line);border-radius:6px;background:var(--a-bg)}
+  .va .panel .ph{display:flex;align-items:center;gap:8px;padding:3px 10px;border-bottom:1px solid var(--a-line);background:linear-gradient(180deg,rgba(56,182,255,.05),transparent)}
+  .va .panel .ph .pt{font-family:var(--disp);font-size:9px;letter-spacing:2.5px;text-transform:uppercase;font-weight:700}
+  .va .panel.work .ph .pt{color:var(--a-cy)} .va .panel.actors .ph .pt{color:var(--a-pu)} .va .panel.vit .ph .pt{color:var(--a-am)}
+  .va .panel .ph .pr{margin-left:auto;color:var(--a-dim);font-size:10px}
+  .va .panel .pb{padding:4px 10px 6px;font-size:11.8px}
+  .va .chain{display:flex;align-items:center;white-space:nowrap;overflow:hidden;padding:1px 0 3px;font-size:11px}
+  .va .chain .cs{color:var(--a-dim)} .va .chain .cs.done{color:var(--a-mut)} .va .chain .cs.done .g{color:var(--a-gn)}
+  .va .chain .cs.cur{color:#eaf2ff;font-weight:700} .va .chain .cs.cur .g{color:var(--a-cy)}
+  .va .chain .lk{color:var(--a-line2);margin:0 6px}
+  .va .r{display:flex;gap:8px;align-items:baseline;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:1px 0}
+  .va .r .g{flex:0 0 12px;text-align:center}
+  .va .r .k{color:var(--a-dim);font-size:10px;flex:0 0 40px;text-transform:uppercase;letter-spacing:.5px}
+  .va .r .m{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--a-mut)}
+  .va .r .m b{color:var(--a-tx);font-weight:600}
+  .va .r .t{color:var(--a-dim);font-size:10.5px}
+  .va .r.hot{background:rgba(56,182,255,.07);margin:0 -10px;padding:1px 10px;border-left:2px solid var(--a-cy)}
+  .va .barwrap{display:flex;align-items:center;gap:8px;padding:2px 0}
+  .va .bar{flex:1;height:7px;border-radius:2px;background:#0d1626;overflow:hidden;position:relative}
+  .va .bar i{position:absolute;inset:0;width:42%;background:linear-gradient(90deg,#1d5f8f,var(--a-cy))}
+  .va .cy{color:var(--a-cy)} .va .gn{color:var(--a-gn)} .va .am{color:var(--a-am)} .va .rd{color:var(--a-rd)} .va .pu{color:var(--a-pu)}
+  .va .console{display:flex;align-items:center;gap:10px;padding:9px 16px;border-top:1px solid var(--a-line2);background:var(--a-panel)}
+  .va .console .pr{color:var(--a-cy);font-weight:700}
+  .va .console .ph2{color:var(--a-dim)}
+  .va .foot{display:flex;gap:0;padding:5px 16px;border-top:1px solid var(--a-line);color:var(--a-mut);font-size:11px;flex-wrap:wrap}
+  .va .foot .seg{padding:0 11px;border-right:1px solid var(--a-line)}
+  .va .foot .seg:first-child{padding-left:0} .va .foot .seg:last-child{border-right:none;margin-left:auto;padding-right:0}
+  .va .hints{padding:2px 16px 7px;color:var(--a-dim);font-size:10.5px;background:var(--a-panel)}
+  .va .hints b{color:var(--a-mut);font-weight:500}
+
+  /* ══════════ 方案 B · ZEN 极简 ══════════ */
+  .vb{--b-bg:#0d0d0b; --b-tx:#d6d3c8; --b-mut:#8d8a7f; --b-dim:#57554c; --b-faint:#2b2a25;
+      --b-ac:#c8b273; --b-gn:#9db877; --b-rd:#c98a80}
+  .vb .shellframe{background:var(--b-bg);border-color:#232320}
+  .vb .tbar{background:#111110;border-color:#1d1d1a}
+  .vb .tbar .tt{color:var(--b-dim)} .vb .tbar .tt .fr{color:var(--b-ac)}
+  .vb .body{font-family:var(--mono);font-size:12.8px;line-height:1.9;color:var(--b-tx);letter-spacing:.1px}
+  .vb .zwrap{max-width:860px;margin:0 auto;padding:6px 34px 0}
+  .vb .zwin{color:var(--b-dim);font-size:11.5px;padding:8px 0 2px}
+  .vb .zwin .sel{color:var(--b-ac)}
+  .vb .zmission{padding:14px 0 12px;border-bottom:1px solid var(--b-faint)}
+  .vb .zmission .obj{color:#efede4;font-size:14.5px;font-weight:600}
+  .vb .zmission .meta{color:var(--b-mut);font-size:12px;margin-top:2px}
+  .vb .zmission .meta .dod{color:var(--b-dim);font-style:italic}
+  .vb .zgate{color:var(--b-gn)} .vb .zgate.off{color:var(--b-faint)}
+  .vb .zstream{padding:14px 0 4px;min-height:220px}
+  .vb .zu{color:#efede4;font-weight:600;margin:2px 0 10px}
+  .vb .zu::before{content:"❯ ";color:var(--b-ac)}
+  .vb .zq{color:var(--b-mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .vb .zq .ok{color:var(--b-gn)} .vb .zq .run{color:var(--b-ac)}
+  .vb .zq .nm{color:var(--b-tx)}
+  .vb .zprose{margin:8px 0;color:var(--b-tx)}
+  .vb .zwork{padding:12px 0;border-top:1px solid var(--b-faint);color:var(--b-mut);font-size:12.3px}
+  .vb .zwork .zline{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:1px 0}
+  .vb .zwork .cur{color:#efede4;font-weight:600}
+  .vb .zwork .zg{display:inline-block;width:16px;color:var(--b-ac)}
+  .vb .zwork .dimg{color:var(--b-dim)}
+  .vb .zwork .gng{color:var(--b-gn)} .vb .zwork .rdg{color:var(--b-rd)}
+  .vb .zsep{color:var(--b-faint);margin:0 7px}
+  .vb .zconsole{display:flex;align-items:center;gap:10px;padding:12px 0;border-top:1px solid var(--b-faint)}
+  .vb .zconsole .pr{color:var(--b-ac);font-size:15px}
+  .vb .zconsole .ph2{color:var(--b-dim)}
+  .vb .zfoot{display:flex;gap:0;color:var(--b-dim);font-size:11.5px;padding:0 0 16px;flex-wrap:wrap}
+  .vb .zfoot span+span::before{content:"·";margin:0 9px;color:var(--b-faint)}
+  .vb .zfoot .em{color:var(--b-mut)}
+  .vb .zhint{color:var(--b-faint);font-size:11px;padding:0 0 12px}
+  .vb .zhint b{color:var(--b-dim);font-weight:500}
+
+  /* ══════════ 方案 C · 时间轴脊柱 ══════════ */
+  .vc{--c-bg:#12101a; --c-panel:#171422; --c-line:#262138; --c-line2:#352d4e;
+      --c-pu:#c792ea; --c-rose:#ed7ea8; --c-cy:#7fd7e8; --c-gn:#8fd6a5; --c-am:#e8c27a; --c-rd:#ef6b78;
+      --c-tx:#d8d2e8; --c-mut:#79718f; --c-dim:#4c4560}
+  .vc .shellframe{background:var(--c-bg);border-color:var(--c-line2)}
+  .vc .tbar{background:var(--c-panel);border-color:var(--c-line)}
+  .vc .tbar .tt{color:var(--c-mut)} .vc .tbar .tt .fr{color:var(--c-pu)}
+  .vc .body{font-family:var(--mono);font-size:12.4px;line-height:1.7;color:var(--c-tx)}
+  .vc .cmission{display:flex;align-items:baseline;gap:14px;padding:10px 20px 8px;border-bottom:1px solid var(--c-line);flex-wrap:wrap}
+  .vc .cmission .obj{font-size:14px;color:#efeaff;font-weight:700}
+  .vc .cmission .dod{color:var(--c-mut);font-size:11.5px}
+  .vc .cmission .pill{margin-left:auto;border:1px solid var(--c-line2);border-radius:20px;padding:0 11px;color:var(--c-gn);font-size:11px}
+  .vc .cwin{display:flex;gap:14px;padding:4px 20px;border-bottom:1px solid var(--c-line);color:var(--c-mut);font-size:11.5px}
+  .vc .cwin .sel{color:var(--c-pu);font-weight:700} .vc .cwin .un{color:var(--c-am)}
+  .vc .cwin .hint{margin-left:auto;color:var(--c-dim)}
+  .vc .csplit{display:flex;min-height:410px}
+  .vc .rail{flex:0 0 430px;border-right:1px solid var(--c-line);padding:16px 0 12px 0;background:linear-gradient(180deg,rgba(199,146,234,.04),transparent 40%)}
+  .vc .node{position:relative;padding:0 18px 14px 52px}
+  .vc .node::before{content:"";position:absolute;left:27px;top:20px;bottom:-2px;width:2px;background:var(--c-line2)}
+  .vc .node:last-child::before{display:none}
+  .vc .node .dot{position:absolute;left:19px;top:2px;width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;background:var(--c-panel);border:2px solid var(--c-line2);color:var(--c-dim)}
+  .vc .node.done .dot{border-color:var(--c-gn);color:var(--c-gn)}
+  .vc .node.cur .dot{border-color:var(--c-pu);color:var(--c-pu);box-shadow:0 0 12px -2px var(--c-pu)}
+  .vc .node .nt{font-family:var(--disp);font-size:12.5px;font-weight:700;color:var(--c-mut)}
+  .vc .node.cur .nt{color:#efeaff}
+  .vc .node .nt .tag{font-family:var(--mono);font-weight:400;font-size:10.5px;color:var(--c-dim);margin-left:8px}
+  .vc .node.cur .nt .tag{color:var(--c-pu)}
+  .vc .node .sub{font-size:11.6px;color:var(--c-mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:1px 0}
+  .vc .node .sub .g{display:inline-block;width:15px}
+  .vc .node .sub .gng{color:var(--c-gn)} .vc .node .sub .cyg{color:var(--c-cy)} .vc .node .sub .rdg{color:var(--c-rd)} .vc .node .sub .dimg{color:var(--c-dim)}
+  .vc .node .sub b{color:var(--c-tx);font-weight:600}
+  .vc .node .sub .who{color:var(--c-rose)}
+  .vc .node .sub .tm{color:var(--c-dim);font-size:10.5px}
+  .vc .node .actorbox{margin-top:5px;border:1px solid var(--c-line);border-radius:7px;background:rgba(23,20,34,.7);padding:4px 10px}
+  .vc .node .abt{font-family:var(--disp);font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--c-dim);margin-bottom:1px}
+  .vc .cstream{flex:1 1 auto;min-width:0;padding:12px 20px}
+  .vc .cu{background:#221d33;border-radius:8px;padding:6px 13px;display:inline-block;margin:2px 0 10px;color:#e9e4f5;font-weight:500}
+  .vc .cq{color:var(--c-mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .vc .cq .ok{color:var(--c-gn)} .vc .cq .run{color:var(--c-cy)} .vc .cq .nm{color:var(--c-tx);font-weight:600}
+  .vc .cprose{color:var(--c-tx);margin:7px 0}
+  .vc .cconsole{display:flex;align-items:center;gap:10px;padding:10px 20px;border-top:2px solid var(--c-pu)}
+  .vc .cconsole .pr{color:var(--c-pu);font-weight:700;font-size:15px}
+  .vc .cconsole .ph2{color:var(--c-dim)}
+  .vc .cfoot{display:flex;padding:6px 20px 10px;color:var(--c-mut);font-size:11.5px;gap:0;flex-wrap:wrap}
+  .vc .cfoot .seg{padding:0 12px;border-right:1px solid var(--c-line)}
+  .vc .cfoot .seg:first-child{padding-left:0} .vc .cfoot .seg:last-child{border-right:none;margin-left:auto;padding-right:0}
+  .vc .chintline{padding:0 20px 8px;color:var(--c-dim);font-size:10.5px}
+  .vc .chintline b{color:var(--c-mut);font-weight:500}
+  .vc .cyc{color:var(--c-cy)} .vc .gnc{color:var(--c-gn)} .vc .amc{color:var(--c-am)} .vc .puc{color:var(--c-pu)}
+
+  /* comparison table */
+  h2{font-family:var(--disp);font-size:17px;color:var(--fg);margin:40px 0 10px}
+  table.cmp{border-collapse:collapse;width:100%;font-size:12.5px}
+  table.cmp th{font-family:var(--disp);font-size:10.5px;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim);text-align:left;padding:7px 12px;border-bottom:1px solid var(--hair2)}
+  table.cmp td{padding:7px 12px;border-bottom:1px solid var(--hair);color:var(--list);vertical-align:top}
+  table.cmp td:first-child{white-space:nowrap;color:var(--fg);font-weight:600}
+  @media (max-width:980px){.brief{grid-template-columns:1fr}.va .dock{flex-basis:320px}.vc .rail{flex-basis:340px}}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <h1>pi-cockpit · 三种风格方案</h1>
+  <p class="sub">
+    <span class="tag">STATIC MOCK · 2026-08-12</span>
+    同一统一心智模型（MISSION / WORK / ACTORS / VITALS，L0–L3 缩放轴）、同一场景（auth 刷新令牌修复 · Run R3 · reviewer-1 + npm test），
+    三种完全不同的视觉与布局哲学。信息架构不变，变的是<b style="color:var(--fg)">密度、装饰量与空间组织</b>。
+  </p>
+
+  <div class="switch" id="switch">
+    <button data-v="a" class="on"><span class="sw"></span>方案 A · OPS 密度优先</button>
+    <button data-v="b"><span class="sw"></span>方案 B · Zen 极简</button>
+    <button data-v="c"><span class="sw"></span>方案 C · 时间轴脊柱</button>
+  </div>
+
+  <!-- ════════════════ 方案 A ════════════════ -->
+  <section class="variant va on" data-v="a">
+    <div class="brief">
+      <div class="bcard"><div class="bt">哲学</div><div class="bd"><b>全信息在场，边框即结构。</b>k9s / mission-control 血统：MISSION 是顶部横贯条，dock 是三块带框面板，运行行有高亮泳道。给重度并发用户——扫一眼就要看到所有仪表。</div></div>
+      <div class="bcard"><div class="bt">取舍</div><div class="bd">密度最高、字号最小；边框消耗 2 列宽度；窄屏降级最激进（面板逐块折叠为单行）。</div></div>
+      <div class="bcard"><div class="bt">适用</div><div class="bd">≥140 列宽屏 · 多 agent / swarm 并发 · 监督者角色（monitor 窗口常驻）。</div></div>
+    </div>
+    <div class="shellframe">
+      <div class="tbar"><span class="d"></span><span class="d"></span><span class="d"></span><span class="tt"><span class="fr" data-spin>⠂</span> pi - auth 刷新令牌修复 - implement · R3</span></div>
+      <div class="body">
+        <!-- MISSION：横贯条 -->
+        <div class="missionbar">
+          <span class="mlabel">MISSION</span>
+          <span class="obj">auth 刷新令牌修复</span>
+          <span class="st">● open</span>
+          <span><span class="gates"><i class="p"></i><i class="p"></i><i class="p"></i><i></i></span><span style="color:var(--a-mut)">gates 3/4</span></span>
+          <span style="color:var(--a-mut)">DoD: jwt 全绿 · 无回归</span>
+          <span class="spacer tnum">S1 · rev 17 · 2 decisions</span>
+        </div>
+        <div class="winrow">
+          <span class="pu">◆ #monitor</span>
+          <span class="sel">▸ ● #auth-fix</span>
+          <span>● #docs <span class="un">+2</span></span>
+          <span style="color:var(--a-dim)">○ #spike</span>
+          <span class="hint">Alt+W 监督 · Alt+1..9 切窗</span>
+        </div>
+        <div class="split">
+          <div class="stream">
+            <div class="u">修复刷新令牌轮换后旧 token 未失效的问题</div>
+            <div class="qrow"><span style="color:var(--a-dim)">▸ thinking · 8.4s</span></div>
+            <div class="qrow"><span class="ok">✓</span> <span class="nm">read</span> src/auth/jwt.ts <span style="color:var(--a-dim)">· 214 行</span></div>
+            <div class="qrow"><span class="ok">✓</span> <span class="nm">grep</span> rotateRefreshToken <span style="color:var(--a-dim)">· 6 处</span></div>
+            <div class="qrow"><span class="ok">✓</span> <span class="nm">edit</span> src/auth/jwt.ts <span style="color:var(--a-dim)">· +18 −4</span></div>
+            <div class="prose">旧 token 在轮换后仍留在 allow-list。已加入失效标记并补充回归测试，正在验证。</div>
+            <div class="qrow"><span class="run" data-spin>⠋</span> <span class="nm">bash</span> npm test -- jwt <span style="color:var(--a-dim)">· 12s</span></div>
+          </div>
+          <!-- dock：三块面板 -->
+          <div class="dock">
+            <div class="panel work">
+              <div class="ph"><span class="pt">WORK</span><span class="pr tnum">chain 2/4 · R3 · 4m12</span></div>
+              <div class="pb">
+                <div class="chain">
+                  <span class="cs done"><span class="g">✓</span> plan</span><span class="lk">━━</span>
+                  <span class="cs cur"><span class="g" data-spin>⠋</span> implement</span><span class="lk">━━</span>
+                  <span class="cs"><span class="g">·</span> review</span><span class="lk">━━</span>
+                  <span class="cs"><span class="g">·</span> ship</span>
+                </div>
+                <div class="r hot"><span class="g cy" data-spin>⠋</span><span class="m"><b>R3</b> attempt 2 <span style="color:var(--a-dim)">retry of R1</span></span><span class="t tnum">4m12</span></div>
+                <div class="barwrap"><span style="color:var(--a-dim);font-size:10px">tasks</span><div class="bar"><i style="width:40%"></i></div><span class="tnum" style="color:var(--a-mut);font-size:10.5px">2/5</span></div>
+                <div class="r"><span class="g gn">✓</span><span class="m">梳理 token 轮换入口</span></div>
+                <div class="r"><span class="g cy" data-spin>⠙</span><span class="m"><b>补充轮换失效测试</b></span><span class="t">@rev-1</span></div>
+                <div class="r"><span class="g rd">!</span><span class="m">清理旧 allow-list 迁移</span><span class="t rd">blocked</span></div>
+              </div>
+            </div>
+            <div class="panel actors">
+              <div class="ph"><span class="pt">ACTORS</span><span class="pr tnum">4 · 2 running</span></div>
+              <div class="pb">
+                <div class="r hot"><span class="g cy" data-spin>⠋</span><span class="k">agent</span><span class="m"><b>reviewer-1</b> review diff · ↑8k/↓2k</span><span class="t tnum">1m02</span></div>
+                <div class="r hot"><span class="g cy" data-spin>⠸</span><span class="k">job</span><span class="m"><b>npm test</b> vitest 12/48</span><span class="t tnum">0m41</span></div>
+                <div class="r"><span class="g" style="color:var(--a-dim)">○</span><span class="k">win</span><span class="m">#docs 空闲 · 2 未读</span><span class="t">Alt+W</span></div>
+                <div class="r"><span class="g gn">✓</span><span class="k">agent</span><span class="m">explorer 完成</span><span class="t tnum">3m18</span></div>
+              </div>
+            </div>
+            <div class="panel vit">
+              <div class="ph"><span class="pt">VITALS</span><span class="pr">live</span></div>
+              <div class="pb">
+                <div class="barwrap"><span style="color:var(--a-dim);font-size:10px">ctx</span><div class="bar"><i></i></div><span class="tnum" style="color:var(--a-mut);font-size:10.5px">42%</span></div>
+                <div class="r"><span class="m"><span class="cy">↑15k</span> <span class="gn">↓2.9k</span> <span class="am">⚡52%</span> <span style="color:var(--a-tx)">$0.52</span></span><span class="t tnum">01:23</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="console"><span class="pr">❯</span><span class="ph2">输入消息，@file 引用，/ 命令 …</span></div>
+        <div class="hints"><b>Alt+L</b> 浏览 dock · <b>↑↓</b> 选行 · <b>Enter</b> 详情 · <b>Alt+J</b> jobs · <b>Alt+Shift+P</b> Plan/Act</div>
+        <div class="foot tnum">
+          <span class="seg"><span class="gn">ACT</span>/default</span>
+          <span class="seg cy">pi/stream-70b · high</span>
+          <span class="seg"><span class="am">⎇</span> fix/token-rotation</span>
+          <span class="seg" style="color:var(--a-dim)">S1 · R3 · rev 17</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════ 方案 B ════════════════ -->
+  <section class="variant vb" data-v="b">
+    <div class="brief">
+      <div class="bcard"><div class="bt">哲学</div><div class="bd"><b>没有面板，只有排版。</b>零边框零底色，靠缩进、留白与一种强调色（暖金）分层；MISSION 是一段文字，WORK 是编辑器上方四行，ACTORS 只在有动静时浮现一行。信息按需展开，默认近乎素文本。</div></div>
+      <div class="bcard"><div class="bt">取舍</div><div class="bd">L1 常驻信息最少（细节全靠 L2/L3 下钻）；无 dock，不占列宽；依赖 quiet 模式让流保持干净。</div></div>
+      <div class="bcard"><div class="bt">适用</div><div class="bd">单 agent 深度工作 · 小窗口 / 笔记本 · 反感仪表盘的用户；心流优先。</div></div>
+    </div>
+    <div class="shellframe">
+      <div class="tbar"><span class="d"></span><span class="d"></span><span class="d"></span><span class="tt"><span class="fr" data-spin>⠂</span> pi - auth 刷新令牌修复</span></div>
+      <div class="body">
+        <div class="zwrap">
+          <div class="zwin">◆ monitor <span class="zsep">·</span> <span class="sel">▸ auth-fix</span> <span class="zsep">·</span> docs <span style="color:var(--b-ac)">+2</span> <span class="zsep">·</span> spike</div>
+          <!-- MISSION：一段文字 -->
+          <div class="zmission">
+            <div class="obj">auth 刷新令牌修复</div>
+            <div class="meta">
+              open <span class="zsep">·</span> gates <span class="zgate">✓✓✓</span><span class="zgate off">✓</span> 3/4 <span class="zsep">·</span>
+              <span class="dod">done = jwt 全绿，无安全回归</span>
+            </div>
+          </div>
+          <div class="zstream">
+            <div class="zu">修复刷新令牌轮换后旧 token 未失效的问题</div>
+            <div class="zq"><span style="color:var(--b-dim)">thinking · 8.4s</span></div>
+            <div class="zq"><span class="ok">✓</span> <span class="nm">read</span> src/auth/jwt.ts</div>
+            <div class="zq"><span class="ok">✓</span> <span class="nm">grep</span> rotateRefreshToken · 6</div>
+            <div class="zq"><span class="ok">✓</span> <span class="nm">edit</span> src/auth/jwt.ts · +18 −4</div>
+            <div class="zprose">旧 token 在轮换后仍留在 allow-list。已加入失效标记并补充回归测试，正在验证。</div>
+            <div class="zq"><span class="run" data-spin>⠋</span> <span class="nm">bash</span> npm test -- jwt · 12s</div>
+          </div>
+          <!-- WORK + ACTORS：编辑器上方几行素文本 -->
+          <div class="zwork">
+            <div class="zline">plan <span class="gng">✓</span><span class="zsep">·</span><span class="cur">implement</span> <span class="zg" data-spin>⠋</span><span class="zsep">·</span><span class="dimg">review</span><span class="zsep">·</span><span class="dimg">ship</span>
+              <span class="zsep">·</span><span class="dimg">R3 attempt 2 · retry R1 · 4m12</span></div>
+            <div class="zline"><span class="zg gng">✓</span>梳理 token 轮换入口</div>
+            <div class="zline"><span class="zg" data-spin>⠙</span><span class="cur">补充轮换失效测试</span> <span class="dimg">@rev-1</span></div>
+            <div class="zline"><span class="zg rdg">!</span>清理旧 allow-list 迁移 <span class="dimg">blocked · task 02 先行</span></div>
+            <div class="zline" style="margin-top:6px"><span class="zg" data-spin>⠸</span>reviewer-1 review diff <span class="dimg">1m02</span><span class="zsep">·</span><span class="zg" style="width:auto" data-spin>⠴</span> npm test 12/48 <span class="dimg">0m41</span><span class="zsep">·</span><span class="dimg">explorer ✓ · #docs 空闲</span></div>
+          </div>
+          <div class="zconsole"><span class="pr">❯</span><span class="ph2">输入消息，@file 引用，/ 命令 …</span></div>
+          <div class="zhint"><b>alt+l</b> 浏览 · <b>enter</b> 详情 · <b>alt+t</b> 展开任务 · <b>alt+j</b> jobs</div>
+          <div class="zfoot">
+            <span class="em">act</span><span>pi/stream-70b · high</span><span>ctx 42%</span><span>↑15k ↓2.9k · $0.52</span><span>⎇ fix/token-rotation</span><span class="tnum">01:23</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════ 方案 C ════════════════ -->
+  <section class="variant vc" data-v="c">
+    <div class="brief">
+      <div class="bcard"><div class="bt">哲学</div><div class="bd"><b>chain 是空间的主轴。</b>左侧垂直时间轴即 Session chain，每个 step 是一个节点；Run、tasks、actors 全部挂在自己所属的节点下——「谁在干活」不再是独立清单，而是「正在为哪一步干活」。对话流退居右侧。</div></div>
+      <div class="bcard"><div class="bt">取舍</div><div class="bd">空间结构最强、因果最直观；rail 占左侧 ~54 列，主流区最窄；无 chain 的裸会话退化为单节点（等同普通侧栏）。</div></div>
+      <div class="bcard"><div class="bt">适用</div><div class="bd">多步工作流（/maestro、/maestro-ralph）· 评审/交接场景——看一眼就知道每步谁做的、卡在哪。</div></div>
+    </div>
+    <div class="shellframe">
+      <div class="tbar"><span class="d"></span><span class="d"></span><span class="d"></span><span class="tt"><span class="fr" data-spin>⠂</span> pi - auth 刷新令牌修复 - implement · R3</span></div>
+      <div class="body">
+        <!-- MISSION：顶部横幅 -->
+        <div class="cmission">
+          <span class="obj">auth 刷新令牌修复</span>
+          <span class="dod">done = jwt 全绿 · 无安全回归 · gates 3/4</span>
+          <span class="pill">● open · S1</span>
+        </div>
+        <div class="cwin">
+          <span class="puc">◆ #monitor</span>
+          <span class="sel">▸ ● #auth-fix</span>
+          <span>● #docs <span class="un">+2</span></span>
+          <span style="color:var(--c-dim)">○ #spike</span>
+          <span class="hint">Alt+W 监督 · Alt+1..9 切窗</span>
+        </div>
+        <div class="csplit">
+          <!-- WORK+ACTORS：左侧脊柱 -->
+          <div class="rail">
+            <div class="node done">
+              <span class="dot">✓</span>
+              <div class="nt">plan <span class="tag">R1·R2 · 12m</span></div>
+              <div class="sub"><span class="g gng">✓</span>计划已定 · 5 tasks · <span class="who">explorer</span> 勘察完成 <span class="tm">3m18</span></div>
+            </div>
+            <div class="node cur">
+              <span class="dot" data-spin>⠋</span>
+              <div class="nt">implement <span class="tag">R3 · attempt 2 · retry R1 · 4m12</span></div>
+              <div class="sub"><span class="g gng">✓</span>梳理 token 轮换入口</div>
+              <div class="sub"><span class="g cyg" data-spin>⠙</span><b>补充轮换失效测试</b> → <span class="who">@rev-1</span></div>
+              <div class="sub"><span class="g rdg">!</span>清理旧 allow-list 迁移 <span class="tm">blocked</span></div>
+              <div class="actorbox">
+                <div class="abt">acting here · 3</div>
+                <div class="sub"><span class="g cyg" data-spin>⠋</span><b>本窗</b> edit + test 驱动 <span class="tm">4m12</span></div>
+                <div class="sub"><span class="g cyg" data-spin>⠸</span>job <b>npm test</b> vitest 12/48 <span class="tm">0m41</span></div>
+                <div class="sub"><span class="g cyg" data-spin>⠇</span>agent <span class="who">reviewer-1</span> review diff · ↑8k/↓2k <span class="tm">1m02</span></div>
+              </div>
+            </div>
+            <div class="node">
+              <span class="dot">·</span>
+              <div class="nt">review <span class="tag">待 implement 完成 · gate: security-review</span></div>
+            </div>
+            <div class="node">
+              <span class="dot">·</span>
+              <div class="nt">ship <span class="tag">—</span></div>
+            </div>
+          </div>
+          <div class="cstream">
+            <div class="cu">修复刷新令牌轮换后旧 token 未失效的问题</div>
+            <div class="cq"><span style="color:var(--c-dim)">▸ thinking · 8.4s</span></div>
+            <div class="cq"><span class="ok">✓</span> <span class="nm">read</span> src/auth/jwt.ts</div>
+            <div class="cq"><span class="ok">✓</span> <span class="nm">grep</span> rotateRefreshToken · 6 处</div>
+            <div class="cq"><span class="ok">✓</span> <span class="nm">edit</span> src/auth/jwt.ts · +18 −4</div>
+            <div class="cprose">旧 token 在轮换后仍留在 allow-list。已加入失效标记并补充回归测试，正在验证。</div>
+            <div class="cq"><span class="run" data-spin>⠋</span> <span class="nm">bash</span> npm test -- jwt · 12s</div>
+          </div>
+        </div>
+        <div class="cconsole"><span class="pr">›</span><span class="ph2">输入消息，@file 引用，/ 命令 …</span></div>
+        <div class="chintline"><b>Alt+L</b> 浏览 rail · <b>↑↓</b> 沿时间轴移动 · <b>Enter</b> 节点详情（step 的 runs / gates / evidence） · <b>Esc</b> 返回</div>
+        <div class="cfoot tnum">
+          <span class="seg"><span class="gnc">ACT</span>/default</span>
+          <span class="seg cyc">pi/stream-70b · high</span>
+          <span class="seg">ctx 42% · ↑15k ↓2.9k · $0.52</span>
+          <span class="seg"><span class="amc">⎇</span> fix/token-rotation</span>
+          <span class="seg" style="color:var(--c-dim)">01:23</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════ 对比 ════════════════ -->
+  <h2>三案对比（同一心智模型，不同投影）</h2>
+  <table class="cmp">
+    <tr><th>维度</th><th>A · OPS 密度优先</th><th>B · Zen 极简</th><th>C · 时间轴脊柱</th></tr>
+    <tr><td>MISSION 位置</td><td>顶部横贯条（常驻整行）</td><td>流顶部一段文字</td><td>顶部横幅 + 状态 pill</td></tr>
+    <tr><td>WORK 呈现</td><td>右侧面板：横向 chain + 进度条</td><td>编辑器上方 1 行 chain + 3 行任务</td><td>左侧垂直 rail，step 即节点</td></tr>
+    <tr><td>ACTORS 呈现</td><td>独立面板，kind 列对齐</td><td>单行滚动摘要，有动静才出现</td><td>挂在所属 step 节点下（acting here）</td></tr>
+    <tr><td>占用列宽</td><td>右 dock ~42 列</td><td>0（无 dock）</td><td>左 rail ~54 列</td></tr>
+    <tr><td>视觉装饰</td><td>边框 + 底色 + 泳道，最重</td><td>零边框，单强调色，最轻</td><td>节点/连线 + 圆角卡片，居中</td></tr>
+    <tr><td>L2 浏览态</td><td>面板内选行</td><td>选中即临时展开该段</td><td>沿时间轴上下移动，节点整体高亮</td></tr>
+    <tr><td>窄屏降级</td><td>面板逐块折叠为单行</td><td>天然适配（本就无 dock）</td><td>rail 折叠为顶部横向 chain 条</td></tr>
+    <tr><td>实现增量（相对现 dock）</td><td>小：section→panel 包框</td><td>小：widget 通道复用</td><td>中：split-pane 需支持左侧停靠 + 节点分组渲染</td></tr>
+    <tr><td>数据依赖</td><td>协议 v1 可跑（计数即可）</td><td>协议 v1 可跑</td><td>强依赖 v2（有名 step 序列 + run 归属）</td></tr>
+  </table>
+  <p class="sub" style="margin-top:14px">
+    建议：默认风格取 <b style="color:var(--fg)">A 与 B 之间的中间档</b>（即上一版 pi-cockpit-unified.html 的形态），把 A/B/C 作为
+    <span class="mono">sidebar.style = "ops" | "zen" | "rail"</span> 主题化配置暴露——三案共享同一投影数据与浏览态代码，仅替换 render 层，符合现有 <span class="mono">sidebar-render.ts</span> 纯函数边界。
+  </p>
+
+</div>
+<script>
+"use strict";
+const SPIN="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"; let fr=0;
+setInterval(()=>{fr++;document.querySelectorAll("[data-spin]").forEach(e=>e.textContent=SPIN[fr%SPIN.length]);},110);
+document.getElementById("switch").addEventListener("click",e=>{
+  const b=e.target.closest("button"); if(!b)return;
+  document.querySelectorAll("#switch button").forEach(x=>x.classList.toggle("on",x===b));
+  document.querySelectorAll(".variant").forEach(v=>v.classList.toggle("on",v.dataset.v===b.dataset.v));
+});
+</script>
+</body>
+</html>
