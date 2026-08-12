@@ -3,7 +3,7 @@ import test from "node:test";
 import { Type } from "typebox";
 import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 import { buildToolSearchIndex, searchTools, toDiscoverableTool } from "../src/tools/tool-discovery.ts";
-import { createSearchToolBm25, deferLowFrequencyTools } from "../src/tools/search-tool-bm25.ts";
+import { createSearchToolBm25, deferLowFrequencyTools, registerSearchToolBm25 } from "../src/tools/search-tool-bm25.ts";
 
 const tools: ToolInfo[] = [
   {
@@ -77,6 +77,38 @@ test("search tool does not activate inactive tools outside its deferred pool", a
   assert.equal(result.details?.tools[0]?.name, "browser");
   assert.deepEqual(result.details?.activated_tools, []);
   assert.deepEqual(active, ["todo"]);
+});
+
+test("registered search defers once, stays sticky across reload, and consumes activation eligibility", async () => {
+  let active = ["todo", "browser", "lsp"];
+  let registered: ReturnType<typeof createSearchToolBm25> | undefined;
+  let sessionStart: ((event: { reason?: string }) => void) | undefined;
+  const api = {
+    registerTool(tool: ReturnType<typeof createSearchToolBm25>) { registered = tool; },
+    on(event: string, handler: (event: { reason?: string }) => void) {
+      if (event === "session_start") sessionStart = handler;
+    },
+    getAllTools: () => tools,
+    getActiveTools: () => active,
+    setActiveTools: (names: string[]) => { active = names; },
+  };
+
+  registerSearchToolBm25(api as never);
+  sessionStart?.({ reason: "new" });
+  assert.deepEqual(active, ["todo"]);
+
+  const first = await registered!.execute("call-4", { query: "browser screenshot", limit: 1 }, undefined, undefined, {} as never);
+  assert.deepEqual(first.details?.activated_tools, ["browser"]);
+  assert.deepEqual(active, ["todo", "browser"]);
+
+  active = ["todo"];
+  const afterUserDisable = await registered!.execute("call-5", { query: "browser screenshot", limit: 1 }, undefined, undefined, {} as never);
+  assert.deepEqual(afterUserDisable.details?.activated_tools, []);
+  assert.deepEqual(active, ["todo"], "search must not override a later user disable");
+
+  active = ["todo", "lsp"];
+  sessionStart?.({ reason: "reload" });
+  assert.deepEqual(active, ["todo", "lsp"], "reload preserves tools already activated in the session");
 });
 
 test("search tool reports empty queries as stable tool errors", async () => {

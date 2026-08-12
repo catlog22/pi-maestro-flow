@@ -10,6 +10,26 @@ import {
 } from "./tool-discovery.ts";
 
 const DEFAULT_LIMIT = 8;
+const deferredSessionsKey = Symbol.for("pi-maestro.tool-search.deferred-sessions");
+
+interface DeferredSessionRegistry {
+  sessions: Map<string, Set<string>>;
+}
+
+function deferredSessionRegistry(): DeferredSessionRegistry {
+  const host = globalThis as Record<symbol, DeferredSessionRegistry | undefined>;
+  let registry = host[deferredSessionsKey];
+  if (!registry) {
+    registry = { sessions: new Map() };
+    host[deferredSessionsKey] = registry;
+  }
+  return registry;
+}
+
+function sessionIdOf(ctx: { sessionManager?: { getSessionId?: () => string } }): string | undefined {
+  const sessionId = ctx.sessionManager?.getSessionId?.();
+  return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : undefined;
+}
 
 /**
  * Low-frequency tools whose full schemas are loaded only after discovery.
@@ -48,7 +68,10 @@ export interface SearchToolBm25Details {
 
 export function createSearchToolBm25(
   pi: Pick<ExtensionAPI, "getAllTools" | "getActiveTools" | "setActiveTools">,
-  options: { canActivate?: (name: string) => boolean } = {},
+  options: {
+    canActivate?: (name: string) => boolean;
+    onActivated?: (names: readonly string[]) => void;
+  } = {},
 ): ToolDefinition<typeof SearchToolBm25Params, SearchToolBm25Details> {
   return {
     name: "search_tool_bm25",
@@ -72,7 +95,10 @@ export function createSearchToolBm25(
         const activated = ranked
           .map((result) => result.tool.name)
           .filter((name) => !activeSet.has(name) && (options.canActivate?.(name) ?? true));
-        if (activated.length > 0) pi.setActiveTools([...active, ...activated]);
+        if (activated.length > 0) {
+          pi.setActiveTools([...active, ...activated]);
+          options.onActivated?.(activated);
+        }
 
         const details: SearchToolBm25Details = {
           query,
@@ -139,13 +165,31 @@ export function deferLowFrequencyTools(
 }
 
 export function registerSearchToolBm25(pi: ExtensionAPI): void {
-  const deferredThisSession = new Set<string>();
+  let deferredThisSession = new Set<string>();
+  let activeSessionId: string | undefined;
+  const registry = deferredSessionRegistry();
   pi.registerTool(createSearchToolBm25(pi, {
     canActivate: (name) => deferredThisSession.has(name),
+    onActivated: (names) => {
+      for (const name of names) deferredThisSession.delete(name);
+    },
   }));
-  pi.on("session_start", () => {
-    deferredThisSession.clear();
-    for (const name of deferLowFrequencyTools(pi)) deferredThisSession.add(name);
+  pi.on("session_start", (event, ctx) => {
+    activeSessionId = sessionIdOf(ctx);
+    if (event.reason === "reload" && activeSessionId) {
+      const restored = registry.sessions.get(activeSessionId);
+      if (restored) {
+        deferredThisSession = restored;
+        return;
+      }
+    }
+    deferredThisSession = new Set(deferLowFrequencyTools(pi));
+    if (activeSessionId) registry.sessions.set(activeSessionId, deferredThisSession);
+  });
+  pi.on("session_shutdown", (event, ctx) => {
+    const sessionId = sessionIdOf(ctx) ?? activeSessionId;
+    if (event.reason !== "reload" && sessionId) registry.sessions.delete(sessionId);
+    activeSessionId = undefined;
   });
 }
 
