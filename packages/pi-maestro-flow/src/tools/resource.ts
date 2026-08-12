@@ -7,7 +7,8 @@
  * - skill://name — 已安装 skill 的 SKILL.md
  * - rule://name — 项目规则文件（AGENTS.md / RULES.md / .pi/rules/* / docs/*）
  * - agent://<publicationId-or-correlationId-or-name>[/key[/index[/field]]] — 已完成 teammate 子代理的输出
- *   （publicationId 是不可变 canonical 结果；correlationId 和任务名解析到最新结果；
+ *   （publicationId 是不可变 canonical 结果；correlationId 解析到最新结果；
+ *   任务名重名时返回匹配列表（id + 时间 + 内容预览），按 id 精确查询；
  *   带 outputSchema 的任务记录其校验后的结构化输出，普通任务记录最终答案文本；裸 agent://<id> 返回完整输出）
  * - memory://… — 预留（返回明确的未实现提示，避免模型猜测）
  *
@@ -25,12 +26,12 @@ import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts";
 import { checkGhAvailable, showGhHint } from "./web-access/github-api.ts";
-import { getAgentOutputPath, readAgentOutput } from "../teammate/agent-output-store.ts";
+import { getAgentOutputPath, formatAgentMatchListing, resolveAgentOutput } from "../teammate/agent-output-store.ts";
 
 export const ResourceParams = Type.Object({
   uri: Type.String({
     description:
-      "协议资源 URI：pr://owner/repo/N（或 pr://N 当前仓库，可加 /diff /files）、issue://owner/repo/N、skill://name、rule://name、agent://<id>（已完成 teammate 子代理的输出；publicationId 是不可变 canonical ID，correlationId 或任务名解析到最新结果）。agent://<id> 直接返回完整输出：带 outputSchema 的任务返回其结构化 JSON，普通任务返回最终答案文本；可选路径段按对象 key / 数组下标取值，如 agent://reviewer-1/findings/0/path。注意：不要追加 /json —— 裸 agent://<id> 已返回完整输出。",
+      "协议资源 URI：pr://owner/repo/N（或 pr://N 当前仓库，可加 /diff /files）、issue://owner/repo/N、skill://name、rule://name、agent://<id>（已完成 teammate 子代理的输出；publicationId 是不可变 canonical ID，correlationId 解析到最新结果；任务名命中多个输出时返回 id/时间/预览列表，请按 agent://<id> 精确查询）。agent://<id> 直接返回完整输出：带 outputSchema 的任务返回其结构化 JSON，普通任务返回最终答案文本；可选路径段按对象 key / 数组下标取值，如 agent://reviewer-1/findings/0/path。注意：不要追加 /json —— 裸 agent://<id> 已返回完整输出。",
   }),
 });
 
@@ -399,7 +400,15 @@ export async function resolveResource(uri: string, cwd: string, signal?: AbortSi
     case "agent": {
       const [id, ...pathSegments] = segments;
       if (!id) throw new Error('Invalid agent:// URI. Expected agent://<correlationId-or-name>[/key[/index[/field]]].');
-      const record = await readAgentOutput(id, cwd);
+      const resolved = await resolveAgentOutput(id, cwd);
+      if (resolved.kind === "ambiguous") {
+        return {
+          content: trimOutput(formatAgentMatchListing(resolved.name, resolved.matches)),
+          title: `agent://${id}`,
+          cached: false,
+        };
+      }
+      const record = resolved.record;
       const value = pathSegments.length === 0
         ? record.output
         : (() => {
@@ -435,14 +444,14 @@ export function createResourceTool(): ToolDefinition<typeof ResourceParams, Reso
 - \`issue://owner/repo/N\` — GitHub issue (body + comments). \`issue://N\` uses the current repository.
 - \`skill://name\` — installed skill's SKILL.md (project .pi/skills, .agents/skills, then home).
 - \`rule://name\` — project rule files (agents → AGENTS.md, rules → RULES.md, cursor → .cursorrules, cline → .clinerules, plus .pi/rules/ and docs/).
-- \`agent://<publicationId-or-correlationId-or-name>[/key[/index[/field]]]\` — output of a completed teammate subagent. A publicationId is an immutable canonical result; correlationId and task name are latest-result aliases. Bare \`agent://<id>\` returns the whole output; optional path segments pull one nested field by object key / array index, e.g. \`agent://reviewer-1/findings/0/path\`. Do NOT append \`/json\` — the bare URI already returns the output.
+- \`agent://<publicationId-or-correlationId-or-name>[/key[/index[/field]]]\` — output of a completed teammate subagent. A publicationId is an immutable canonical result; correlationId is a latest-result alias. A task name matching multiple outputs returns a disambiguation list of ids, timestamps and previews — query by id to select one. Bare \`agent://<id>\` returns the whole output; optional path segments pull one nested field by object key / array index, e.g. \`agent://reviewer-1/findings/0/path\`. Do NOT append \`/json\` — the bare URI already returns the output.
 
 pr:// and issue:// require the gh CLI (https://cli.github.com). Results are cached in memory for 5 minutes — re-reads within the window return the cached copy, so refetch after state changes only when the window has expired.
 Read local files with the built-in read tool — resource is for protocol resources only.`,
     promptSnippet: "Use resource for pr://, issue://, skill://, rule://, agent:// protocol resources; use read for local files.",
     promptGuidelines: [
       "pr://, issue://, skill://, rule://, agent:// protocol resources are read via the resource tool — do not pass them to the built-in read tool (read is for local files).",
-      "After a teammate task finishes, prefer the returned canonical agent://<publicationId>: schema tasks return the validated structured output (fields via agent://<id>/<key>, object keys / array indices, no /json prefix), plain tasks return the final answer text; correlationId and task-name URIs are latest-result aliases.",
+      "After a teammate task finishes, prefer the returned canonical agent://<publicationId>: schema tasks return the validated structured output (fields via agent://<id>/<key>, object keys / array indices, no /json prefix), plain tasks return the final answer text; correlationId URIs are latest-result aliases, and a task-name URI matching multiple outputs returns a list of ids with timestamps and previews — re-query by id.",
     ],
     parameters: ResourceParams,
     async execute(_id, params, signal, _onUpdate, ctx): Promise<AgentToolResult<ResourceDetails>> {

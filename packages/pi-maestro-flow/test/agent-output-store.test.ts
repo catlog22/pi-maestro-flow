@@ -9,6 +9,7 @@ const {
   persistAgentOutput,
   persistAgentOutputChecked,
   readAgentOutput,
+  resolveAgentOutput,
   getAgentOutputPath,
 } = await import("../src/teammate/agent-output-store.ts");
 
@@ -75,13 +76,40 @@ test("readAgentOutput resolves by task name", async () => {
   assert.equal(record.correlationId, "run-abc-2");
 });
 
-test("readAgentOutput with duplicate names picks the latest capture", async () => {
-  // 同名历史任务：写入两个不同 correlationId 的记录，读取应返回较新（按 capturedAt，平手按 correlationId 降序）
+test("readAgentOutput with duplicate names lists matches instead of silently picking the latest", async () => {
+  // 同名历史任务：写入两个不同 correlationId 的记录，按 name 查询必须给出列表而非静默取最新
   await persistAgentOutput("dup-a1", "shared", "explorer", { v: 1 }, root);
   await persistAgentOutput("dup-b2", "shared", "explorer", { v: 2 }, root);
-  const record = await readAgentOutput("shared", root);
-  assert.equal(record.correlationId, "dup-b2");
-  assert.deepEqual(record.output, { v: 2 });
+  await assert.rejects(
+    () => readAgentOutput("shared", root),
+    (err: unknown) => err instanceof Error
+      && err.message.includes('Multiple outputs match agent name "shared" (2)')
+      && err.message.includes("agent://dup-b2")
+      && err.message.includes("agent://dup-a1")
+      && err.message.includes('{"v":2}')
+      && err.message.includes('{"v":1}'),
+  );
+});
+
+test("resolveAgentOutput with duplicate names returns newest-first matches with ids, times and previews", async () => {
+  await persistAgentOutputChecked("dup-c1", "shared-pub", "explorer", { v: 1 }, root, "dup-pub-1");
+  await persistAgentOutputChecked("dup-c2", "shared-pub", "explorer", { v: 2 }, root, "dup-pub-2");
+  const resolved = await resolveAgentOutput("shared-pub", root);
+  assert.equal(resolved.kind, "ambiguous");
+  if (resolved.kind !== "ambiguous") return;
+  assert.equal(resolved.name, "shared-pub");
+  assert.equal(resolved.matches.length, 2);
+  assert.equal(resolved.matches[0]!.id, "dup-pub-2");
+  assert.equal(resolved.matches[1]!.id, "dup-pub-1");
+  assert.match(resolved.matches[0]!.capturedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(resolved.matches[0]!.preview, '{"v":2}');
+  // 精确 publicationId / correlationId 仍解析为单条记录
+  const exact = await resolveAgentOutput("dup-pub-1", root);
+  assert.equal(exact.kind, "record");
+  if (exact.kind === "record") assert.deepEqual(exact.record.output, { v: 1 });
+  const alias = await resolveAgentOutput("dup-c2", root);
+  assert.equal(alias.kind, "record");
+  if (alias.kind === "record") assert.deepEqual(alias.record.output, { v: 2 });
 });
 
 test("workspace buckets isolate same-named tasks across workspaces", async () => {

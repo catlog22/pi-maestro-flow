@@ -178,6 +178,22 @@ test("resolveResource keeps publication ids immutable while correlation id track
   assert.match((await resolveResource("agent://resource-versioned", root)).content, /\"turn\": 2/);
 });
 
+test("resolveResource agent:// name with duplicates lists ids, times and previews", async () => {
+  await persistAgentOutputChecked("res-dup-cid-1", "res-dup-agent", "explorer", { turn: 1 }, root, "res-dup-pub-1");
+  await persistAgentOutputChecked("res-dup-cid-2", "res-dup-agent", "explorer", { turn: 2 }, root, "res-dup-pub-2");
+
+  const listed = await resolveResource("agent://res-dup-agent", root);
+  assert.match(listed.content, /Multiple outputs match agent name "res-dup-agent" \(2\)/);
+  assert.match(listed.content, /agent:\/\/res-dup-pub-2/);
+  assert.match(listed.content, /agent:\/\/res-dup-pub-1/);
+  assert.match(listed.content, /\{"turn":2\}/);
+  assert.match(listed.content, /query by id/);
+
+  // 按 publicationId 精确查询得到对应记录
+  assert.match((await resolveResource("agent://res-dup-pub-1", root)).content, /"turn": 1/);
+  assert.match((await resolveResource("agent://res-dup-pub-2", root)).content, /"turn": 2/);
+});
+
 test("resolveResource agent:// path miss reports a precise reason and a usage tip", async () => {
   await persistAgentOutput("run-agent-2", "scanner", "explorer", { findings: [{ path: "a.ts" }] }, root);
   await assert.rejects(

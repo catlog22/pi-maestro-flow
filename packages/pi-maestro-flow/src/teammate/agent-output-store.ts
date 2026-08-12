@@ -8,6 +8,9 @@
  * 旧调用继续使用 correlationId 直接记录。达到容量上限时拒绝新 publication，不淘汰
  * 已被会话引用的旧记录，使调用方可以保留内联全文而不是发布死链接。
  *
+ * 任务 name 可能跨多次派发重名：resolveAgentOutput 返回匹配列表（id + 时间 + 内容预览），
+ * readAgentOutput 在重名时抛歧义错误，不再静默取最新；精确 id / correlationId alias 不受影响。
+ *
  * 分桶按工作区隔离；旧格式 <cwd>/.pi/agents/ 下的历史归档仍保留只读 fallback。
  * 只读消费方：src/tools/resource.ts；写入方：src/teammate/agent-output-capture.ts。
  * 测试可用环境变量 PI_AGENT_OUTPUT_ROOT 覆盖根目录。
@@ -53,6 +56,20 @@ interface AgentOutputAlias {
   publicationId: string;
   fallbackPublicationId?: string;
 }
+
+export interface AgentOutputMatch {
+  /** 查询用稳定 id（publicationId ?? correlationId），可直接 agent://<id>。 */
+  id: string;
+  correlationId: string;
+  publicationId?: string;
+  capturedAt: string;
+  /** 单行内容预览。 */
+  preview: string;
+}
+
+export type AgentOutputResolution =
+  | { kind: "record"; record: AgentOutputRecord }
+  | { kind: "ambiguous"; name: string; matches: AgentOutputMatch[] };
 
 function outputRootEnv(): string | undefined {
   const value = process.env.PI_AGENT_OUTPUT_ROOT;
@@ -434,11 +451,63 @@ async function resolveAliasedRecord(
     : null;
 }
 
+/** 列表项内容预览：字符串压缩空白截断，结构化输出 JSON 序列化后截断。 */
+function outputPreview(output: unknown, maxChars = 140): string {
+  let text: string;
+  if (typeof output === "string") text = output;
+  else {
+    try {
+      text = JSON.stringify(output) ?? String(output);
+    } catch {
+      text = String(output);
+    }
+  }
+  const single = text.replace(/\s+/g, " ").trim();
+  return single.length <= maxChars ? single : `${single.slice(0, maxChars - 1)}…`;
+}
+
+/** 重名匹配列表：id（可 agent://<id> 直接查询）+ 捕获时间 + 内容预览，新在前。 */
+export function formatAgentMatchListing(name: string, matches: AgentOutputMatch[]): string {
+  return [
+    `Multiple outputs match agent name "${name}" (${matches.length}) — query by id to select one:`,
+    "",
+    ...matches.map((match) => `- agent://${match.id} — ${match.capturedAt} — ${match.preview}`),
+    "",
+    "Newest first. A publicationId is immutable; a correlationId always resolves to the latest result of that task.",
+  ].join("\n");
+}
+
+/** 扫描桶内 name 匹配的记录（capturedAt 降序、平手按 correlationId 降序），并收集可用记录 id。 */
+async function scanByName(
+  id: string,
+  dirs: Array<{ path: string; aliases: boolean }>,
+): Promise<{ records: AgentOutputRecord[]; available: string[] }> {
+  const records: AgentOutputRecord[] = [];
+  const available: string[] = [];
+  for (const entry of dirs) {
+    let names: string[];
+    try {
+      names = await readdir(entry.path);
+    } catch {
+      continue;
+    }
+    for (const name of names.filter(isCanonicalRecordName)) {
+      available.push(name.replace(/\.json$/, ""));
+      const record = await loadRecord(join(entry.path, name));
+      if (record?.name === id) records.push(record);
+    }
+  }
+  records.sort((a, b) => String(b.capturedAt).localeCompare(String(a.capturedAt))
+    || String(b.correlationId).localeCompare(String(a.correlationId)));
+  return { records, available };
+}
+
 /**
- * 按 publicationId、correlationId latest alias 或任务 name 读取持久化输出。
+ * 按 publicationId、correlationId latest alias 或任务 name 解析持久化输出。
+ * 任务 name 命中多条记录时返回歧义列表（id + 时间 + 预览），不静默取最新。
  * 仅受控全局桶解析 alias；旧工作区目录只支持精确 legacy 记录和 name 扫描。
  */
-export async function readAgentOutput(id: string, cwd: string): Promise<AgentOutputRecord> {
+export async function resolveAgentOutput(id: string, cwd: string): Promise<AgentOutputResolution> {
   const dirs: Array<{ path: string; aliases: boolean }> = [];
   try {
     dirs.push({ path: await prepareBucketDir(cwd), aliases: true });
@@ -457,33 +526,30 @@ export async function readAgentOutput(id: string, cwd: string): Promise<AgentOut
         const alias = await loadAlias(aliasFile(entry.path, id), id);
         if (alias) {
           const target = await resolveAliasedRecord(entry.path, id, alias);
-          if (target) return target;
+          if (target) return { kind: "record", record: target };
         }
       }
       const direct = await loadRecord(recordFile(entry.path, id));
-      if (direct && (direct.publicationId === undefined || direct.publicationId === id)) return direct;
+      if (direct && (direct.publicationId === undefined || direct.publicationId === id)) {
+        return { kind: "record", record: direct };
+      }
     }
   }
 
-  const byName: AgentOutputRecord[] = [];
-  const available: string[] = [];
-  for (const entry of dirs) {
-    let names: string[];
-    try {
-      names = await readdir(entry.path);
-    } catch {
-      continue;
-    }
-    for (const name of names.filter(isCanonicalRecordName)) {
-      available.push(name.replace(/\.json$/, ""));
-      const record = await loadRecord(join(entry.path, name));
-      if (record?.name === id) byName.push(record);
-    }
-  }
-  if (byName.length > 0) {
-    byName.sort((a, b) => String(b.capturedAt).localeCompare(String(a.capturedAt))
-      || String(b.correlationId).localeCompare(String(a.correlationId)));
-    return byName[0]!;
+  const { records, available } = await scanByName(id, dirs);
+  if (records.length === 1) return { kind: "record", record: records[0]! };
+  if (records.length > 1) {
+    return {
+      kind: "ambiguous",
+      name: id,
+      matches: records.map((record) => ({
+        id: record.publicationId ?? record.correlationId,
+        correlationId: record.correlationId,
+        ...(record.publicationId ? { publicationId: record.publicationId } : {}),
+        capturedAt: record.capturedAt,
+        preview: outputPreview(record.output),
+      })),
+    };
   }
 
   throw new Error(
@@ -491,6 +557,19 @@ export async function readAgentOutput(id: string, cwd: string): Promise<AgentOut
     `Available agent ids: ${available.slice(0, 20).join(", ") || "(none)"}. ` +
     "Outputs are captured when a teammate task finishes (its final answer, or the validated outputSchema value).",
   );
+}
+
+/**
+ * 按 publicationId、correlationId latest alias 或任务 name 读取持久化输出。
+ * 任务 name 命中多条记录时抛出含匹配列表（id + 时间 + 预览）的歧义错误；
+ * 需要区分处理时使用 resolveAgentOutput。
+ */
+export async function readAgentOutput(id: string, cwd: string): Promise<AgentOutputRecord> {
+  const resolved = await resolveAgentOutput(id, cwd);
+  if (resolved.kind === "ambiguous") {
+    throw new Error(formatAgentMatchListing(resolved.name, resolved.matches));
+  }
+  return resolved.record;
 }
 
 export interface PathHit {
