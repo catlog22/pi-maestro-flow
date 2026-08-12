@@ -58,6 +58,7 @@ import {
   endsWithCompleteToolResultBatch,
   effectiveReserveTokens,
   estimateContextTokens,
+  isOutputLimitContextConstrained,
   MAX_CONSECUTIVE_COMPACTION_FAILURES,
   LOOP_CRITICAL_PERSIST_EVALUATIONS,
   MAX_OFF_BRANCH_PRUNE_BYTES,
@@ -3612,6 +3613,25 @@ test("shouldCompactMidTurn treats model max output as a dynamic ceiling", () => 
   assert.equal(shouldCompactMidTurn({ messages: highUsageToolBatch(350_000), contextWindow: 400_000, settings, modelMaxTokens: 64_000 }), false);
 });
 
+test("output-limit context constraint distinguishes fixed caps from context clamps", () => {
+  assert.equal(isOutputLimitContextConstrained(
+    { tokens: 200_000, contextWindow: 400_000, percent: 50 },
+    32_000,
+  ), false);
+  assert.equal(isOutputLimitContextConstrained(
+    { tokens: 376_000, contextWindow: 400_000, percent: 94 },
+    32_000,
+  ), true);
+  assert.equal(isOutputLimitContextConstrained(
+    { tokens: null, contextWindow: 400_000, percent: null },
+    32_000,
+  ), undefined);
+  assert.equal(isOutputLimitContextConstrained(
+    { tokens: 200_000, contextWindow: 400_000, percent: 50 },
+    undefined,
+  ), undefined);
+});
+
 test("output-limit guard compacts and continues when a length stop hits high context pressure", async () => {
   const sent: string[] = [];
   let complete: (() => void) | undefined;
@@ -3726,9 +3746,8 @@ test("exhausted pre-submission failure queues recovery", async () => {
   assert.match(sent[0] ?? "", /context was exhausted/);
 });
 
-test("output-limit guard compacts and continues on a length stop even below the pressure threshold", async () => {
+test("output-limit guard continues directly when a fixed cap is hit below context pressure", async () => {
   const sent: string[] = [];
-  let complete: (() => void) | undefined;
   let compactCalls = 0;
   const guard = createMidTurnAutoCompaction({ sendUserMessage(message: string) { sent.push(message); } } as never, {
     loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
@@ -3736,21 +3755,21 @@ test("output-limit guard compacts and continues on a length stop even below the 
   });
   const ctx = {
     cwd: "D:\\repo",
-    model: { contextWindow: 400_000 },
+    model: { contextWindow: 400_000, maxTokens: 32_000 },
     getContextUsage: () => ({ tokens: 200_000, contextWindow: 400_000, percent: 50 }),
     hasPendingMessages: () => false,
-    compact(options: { onComplete(): void }) { compactCalls++; complete = options.onComplete; },
+    compact() { compactCalls++; },
     sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: { setStatus() {}, notify() {} },
   } as never;
   await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
   assert.equal(compactCalls, 0, "agent_end only records the output-limit intent");
   await guard.onAgentEnd(ctx);
-  assert.equal(compactCalls, 1, "a low-pressure length stop still submits the recovery compaction");
-  guard.onCompact();
-  complete?.();
+  assert.equal(compactCalls, 0, "fixed output caps do not benefit from conversation summarization");
   assert.equal(sent.length, 1);
+  assert.match(sent[0] ?? "", /output token limit/);
   assert.match(sent[0] ?? "", /Continue/);
+  assert.doesNotMatch(sent[0] ?? "", /compacted/);
 });
 
 test("output-limit guard recovers even when context usage is unavailable", async () => {

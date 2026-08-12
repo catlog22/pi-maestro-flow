@@ -90,6 +90,7 @@ const CONTINUE_PROMPT = "Continue the interrupted task from the compacted sessio
 const COMPACTION_RETRY_PROMPT = "Automatic compaction failed after the request was stopped because the context was exhausted. Retry compaction, then continue the interrupted task. Do not restart or wait for another user request.";
 const OUTPUT_LIMIT_RETRY_PROMPT = "Automatic compaction failed after the previous response was cut off at the model output token limit. Retry compaction, then continue exactly where the interrupted response stopped. Do not restart or wait for another user request.";
 const OUTPUT_LIMIT_CONTINUE_PROMPT = "Your previous response was cut off at the model output token limit, and the context was just compacted to free room. Continue exactly from where the interrupted response stopped and complete it. Do not restart or wait for another user request.";
+const OUTPUT_LIMIT_DIRECT_CONTINUE_PROMPT = "Your previous response was cut off at the model output token limit. Continue exactly from where the interrupted response stopped and complete it. Do not restart or wait for another user request.";
 const DEFAULT_OUTPUT_LIMIT_RATIO = 0.8;
 export const MAX_OUTPUT_LIMIT_COMPACTIONS = 2;
 /**
@@ -1363,17 +1364,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     const clearPending = () => {
       if (state.pendingOutputLimitIntent === intent) state.pendingOutputLimitIntent = undefined;
     };
-
-    let internals: PiCompactionInternals;
-    try {
-      internals = await loadInternals();
-    } catch (error) {
-      if (intent.generation !== state.generation) return false;
-      clearPending();
-      ctx.ui.notify(`Output-limit compaction disabled: ${error instanceof Error ? error.message : String(error)}`, "warning");
-      return false;
-    }
-    if (intent.generation !== state.generation || state.running) return false;
+    if (dependencies.arbiter?.currentOwner()) return true;
 
     let linkedThreshold: LinkedCompactionThresholdModel;
     try {
@@ -1386,6 +1377,36 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     }
     if (intent.generation !== state.generation || state.running) return false;
     if (dependencies.arbiter?.currentOwner()) return true;
+
+    const contextConstrained = isOutputLimitContextConstrained(intent.usage, ctx.model?.maxTokens);
+    const usageTokens = intent.usage.tokens ?? (intent.usage.percent != null
+      ? Math.floor((intent.usage.percent / 100) * intent.usage.contextWindow)
+      : undefined);
+    const linkedThresholdExceeded = linkedThreshold.usable
+      && usageTokens !== undefined
+      && usageTokens > linkedThreshold.thresholdTokens;
+    if (contextConstrained === false && !linkedThresholdExceeded) {
+      clearPending();
+      state.outputLimitCompactions += 1;
+      if (ctx.hasPendingMessages?.()) return true;
+      try {
+        pi.sendUserMessage(OUTPUT_LIMIT_DIRECT_CONTINUE_PROMPT, { deliverAs: "followUp" });
+      } catch (error) {
+        ctx.ui.notify(`Output-limit continuation failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+      }
+      return true;
+    }
+
+    let internals: PiCompactionInternals;
+    try {
+      internals = await loadInternals();
+    } catch (error) {
+      if (intent.generation !== state.generation) return false;
+      clearPending();
+      ctx.ui.notify(`Output-limit compaction disabled: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      return false;
+    }
+    if (intent.generation !== state.generation || state.running) return false;
 
     const branch = ctx.sessionManager.getBranch();
     let preparation: unknown;
@@ -1887,7 +1908,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         if (!state.outputLimitBreakerNotified) {
           state.outputLimitBreakerNotified = true;
           ctx.ui.notify(
-            `Output-limit compaction stopped after ${state.outputLimitCompactions} attempts; the response keeps hitting the model output token limit. Raise maxTokens or reduce per-response size.`,
+            `Output-limit recovery stopped after ${state.outputLimitCompactions} attempts; the response keeps hitting the model output token limit. Raise maxTokens or reduce per-response size.`,
             "warning",
           );
         }
@@ -2046,6 +2067,23 @@ export type {
   CompactionThresholdReason, LinkedCompactionThresholdInput, LinkedCompactionThresholdModel,
   SoftThresholdDerivation, UnusableContextThreshold,
 } from "./compaction-threshold.ts";
+
+export function isOutputLimitContextConstrained(
+  usage: ContextUsage,
+  modelMaxTokens: number | undefined,
+): boolean | undefined {
+  if (typeof modelMaxTokens !== "number" || !Number.isFinite(modelMaxTokens) || modelMaxTokens <= 0) {
+    return undefined;
+  }
+  const contextWindow = usage.contextWindow;
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return undefined;
+  const usageTokens = usage.tokens ?? (usage.percent != null
+    ? Math.floor((usage.percent / 100) * contextWindow)
+    : undefined);
+  if (usageTokens === undefined || !Number.isFinite(usageTokens) || usageTokens < 0) return undefined;
+  const availableOutputTokens = Math.max(0, contextWindow - usageTokens - OUTPUT_CLAMP_SAFETY_TOKENS);
+  return availableOutputTokens < modelMaxTokens;
+}
 
 export function applyContextPressurePolicy(
   messages: AgentMessage[],
