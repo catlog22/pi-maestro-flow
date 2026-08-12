@@ -99,6 +99,61 @@ test("WorkflowViewModel derives one status projection for Session, Run, Goal and
   assert.equal(view.goal?.glyph, "⏸");
 });
 
+test("WorkflowViewModel derives statusless session/2.0 lifecycle from Execution facts", () => {
+  const executing = statuslessSnapshot("active", "run-1", "running");
+  assert.deepEqual(
+    pickLifecycle(deriveWorkflowViewModel(executing)),
+    { lifecycle: "executing", status: "running", activeRunId: "run-1" },
+  );
+
+  const blocked = statuslessSnapshot("paused", null, "pending");
+  assert.deepEqual(
+    pickLifecycle(deriveWorkflowViewModel(blocked)),
+    { lifecycle: "blocked", status: "blocked", activeRunId: undefined },
+  );
+
+  const runnable = statuslessSnapshot("active", null, "pending");
+  assert.deepEqual(
+    pickLifecycle(deriveWorkflowViewModel(runnable)),
+    { lifecycle: "runnable", status: "pending", activeRunId: undefined },
+  );
+
+  const gated = statuslessSnapshot("active", null, "pending");
+  gated.session!.gates = [{ id: "execution-gate", blocking: true, status: "failed" }];
+  assert.equal(deriveWorkflowViewModel(gated)?.lifecycle, "blocked");
+
+  const awaitingDecision = statuslessSnapshot("active", null, "pending");
+  awaitingDecision.execution!.decisionPoints = [{
+    pointId: "decision-1",
+    afterStepId: null,
+    status: "pending",
+    retryCount: 0,
+    maxRetries: 1,
+    evidenceRef: null,
+  }];
+  assert.equal(deriveWorkflowViewModel(awaitingDecision)?.lifecycle, "blocked");
+
+  const idle = statuslessSnapshot();
+  assert.deepEqual(
+    pickLifecycle(deriveWorkflowViewModel(idle)),
+    { lifecycle: "idle", status: "completed", activeRunId: undefined },
+  );
+
+  const sealed = statuslessSnapshot("sealed", null, "completed");
+  assert.deepEqual(
+    pickLifecycle(deriveWorkflowViewModel(sealed)),
+    { lifecycle: "idle", status: "completed", activeRunId: undefined },
+  );
+
+  const archived = statuslessSnapshot();
+  archived.session!.archivedAt = "2026-07-18T03:00:00.000Z";
+  archived.session!.archivedBy = "pi-owner";
+  assert.deepEqual(
+    pickLifecycle(deriveWorkflowViewModel(archived)),
+    { lifecycle: "archived", status: "completed", activeRunId: undefined },
+  );
+});
+
 test("WorkflowViewModel never promotes a Todo title into the statusline action", () => {
   const withoutWorkflowAction = structuredClone(snapshot);
   withoutWorkflowAction.nextAction = undefined;
@@ -220,6 +275,83 @@ test("Session overlay accepts keypad Enter and protocol Escape encodings", () =>
   overlay.handleInput("\x1b[27;1;27~");
   assert.equal(closed, 1);
 });
+
+function statuslessSnapshot(
+  executionStatus?: "active" | "paused" | "sealed",
+  activeRunId: string | null = null,
+  stepStatus = "pending",
+): WorkflowSnapshotLike {
+  const sessionId = "statusless-session";
+  const executionId = "execution-1";
+  const runRecord = run("run-1", "execute", activeRunId ? "running" : stepStatus);
+  return {
+    source: "canonical",
+    projectRoot: "D:/workspace",
+    loadedAt: "2026-07-18T00:00:00.000Z",
+    revision: {
+      sessionRevision: 5,
+      ...(executionStatus ? { executionRevision: 3 } : {}),
+      fingerprint: `statusless-${executionStatus ?? "idle"}`,
+    },
+    diagnostics: [],
+    locator: {
+      sessionId,
+      ...(executionStatus ? { executionId, generation: 1 } : {}),
+      ...(activeRunId ? { runId: activeRunId } : {}),
+    },
+    session: {
+      schemaVersion: "session/2.0",
+      sessionId,
+      intent: "Derive lifecycle",
+      lifecycleAuthority: "execution-derived",
+      revision: 5,
+      identityRevision: 2,
+      activityRevision: 5,
+      currentExecutionId: executionStatus ? executionId : null,
+      latestExecutionId: executionStatus ? executionId : null,
+      latestCompletedRunId: null,
+      archivedAt: null,
+      archivedBy: null,
+      activeRunId: null,
+      definitionOfDone: "",
+      gates: [],
+      chain: [],
+      runs: [runRecord],
+      artifacts: [],
+      aliases: {},
+    },
+    ...(executionStatus ? {
+      execution: {
+        schemaVersion: "execution/1.0",
+        executionId,
+        sessionId,
+        generation: 1,
+        status: executionStatus,
+        revision: 3,
+        activeRunId,
+        chain: [{ step: "execute", command: "execute", status: stepStatus, runId: "run-1" }],
+        decisionPoints: [],
+        gatesRef: "gates.json",
+        artifactsRef: "artifacts.json",
+        evidenceRef: "evidence.json",
+        lease: null,
+        startedAt: "2026-07-18T00:00:00.000Z",
+        sealedAt: executionStatus === "sealed" ? "2026-07-18T01:00:00.000Z" : null,
+        sealSummary: executionStatus === "sealed" ? "done" : null,
+        finalOutcome: executionStatus === "sealed" ? "done" : null,
+      },
+    } : {}),
+  };
+}
+
+function pickLifecycle(view: ReturnType<typeof deriveWorkflowViewModel>) {
+  assert.ok(view);
+  return {
+    lifecycle: view.lifecycle,
+    status: view.status,
+    activeRunId: view.activeRun?.id,
+  };
+}
 
 async function flushAsync(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));

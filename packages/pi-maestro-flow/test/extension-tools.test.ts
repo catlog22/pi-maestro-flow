@@ -10,9 +10,12 @@ import registerMaestroExtension, {
   CHINESE_RESPONSE_PROMPT,
   appendChineseResponsePrompt,
   chineseGlobalStatePath,
+  currentWorkflowPlanTarget,
   isWorkflowOptInCommand,
+  isWorkflowSessionMatchable,
   MAESTRO_CHILD_TOOL_NAMES,
   registerChineseResponseMode,
+  sealedWorkflowExecutionTransition,
   shouldActivateWorkflowSession,
   shouldAttachWorkflowSession,
   shouldRestoreWorkflowGoal,
@@ -231,6 +234,70 @@ test("Workflow writer attachment and Todo projection require local Workflow opt-
   for (const action of ["status", "brief", "prepare", "list", "show"]) {
     assert.equal(isRunControlReadAction(action), true, action);
   }
+});
+
+test("statusless Workflow lifecycle separates Session matching, Execution attachment, and seal release", () => {
+  const active = statuslessWorkflowAttachSnapshot("active");
+  assert.equal(isWorkflowSessionMatchable(active), true);
+  assert.equal(shouldAttachWorkflowSession(active), true);
+  assert.equal(shouldActivateWorkflowSession(active, true), true);
+
+  const paused = statuslessWorkflowAttachSnapshot("paused");
+  assert.equal(isWorkflowSessionMatchable(paused), true);
+  assert.equal(shouldAttachWorkflowSession(paused), false);
+  assert.equal(shouldActivateWorkflowSession(paused, true), true);
+
+  const idle = statuslessWorkflowAttachSnapshot();
+  idle.session!.latestExecutionId = "execution-2";
+  assert.equal(isWorkflowSessionMatchable(idle), true, "idle Session identity remains matchable");
+  assert.equal(shouldAttachWorkflowSession(idle), false, "no current Execution has no attachable lease");
+  assert.equal(shouldActivateWorkflowSession(idle, true), true);
+
+  const sealed = statuslessWorkflowAttachSnapshot("sealed");
+  assert.equal(shouldAttachWorkflowSession(sealed), false);
+  assert.deepEqual(sealedWorkflowExecutionTransition(active, sealed), {
+    sessionId: "session-2",
+    executionId: "execution-2",
+  });
+  assert.deepEqual(sealedWorkflowExecutionTransition(active, idle), {
+    sessionId: "session-2",
+    executionId: "execution-2",
+  }, "clearing current_execution_id on seal still releases the observed Execution");
+
+  idle.session!.archivedAt = "2026-07-18T03:00:00.000Z";
+  idle.session!.archivedBy = "pi-owner";
+  assert.equal(isWorkflowSessionMatchable(idle), false);
+  assert.equal(shouldActivateWorkflowSession(idle, true), false);
+});
+
+test("statusless Plan current target uses Execution lifecycle and chain authority", () => {
+  const pending = statuslessWorkflowAttachSnapshot("active");
+  pending.session!.chain = [{ step: "stale-review", command: "review", status: "pending", runId: null }];
+  pending.execution!.chain = [{ step: "execute", command: "execute", status: "pending", runId: null }];
+  assert.deepEqual(currentWorkflowPlanTarget(pending), { available: true, hasActiveWork: false });
+
+  const paused = structuredClone(pending);
+  paused.execution!.status = "paused";
+  assert.match(currentWorkflowPlanTarget(paused).reason ?? "", /Execution is paused/);
+
+  const blocked = structuredClone(pending);
+  blocked.execution!.chain[0]!.status = "blocked";
+  assert.match(currentWorkflowPlanTarget(blocked).reason ?? "", /Execution is blocked/);
+
+  const sealed = structuredClone(pending);
+  sealed.execution!.status = "sealed";
+  assert.match(currentWorkflowPlanTarget(sealed).reason ?? "", /Execution is sealed/);
+
+  const idle = statuslessWorkflowAttachSnapshot("active");
+  assert.match(currentWorkflowPlanTarget(idle).reason ?? "", /no pending execution step/);
+
+  const archived = structuredClone(pending);
+  archived.session!.archivedAt = "2026-07-18T03:00:00.000Z";
+  assert.match(currentWorkflowPlanTarget(archived).reason ?? "", /Session is archived/);
+
+  const legacy = workflowAttachSnapshot();
+  legacy.session!.chain = [{ step: "execute", command: "execute", status: "pending", runId: null }];
+  assert.deepEqual(currentWorkflowPlanTarget(legacy), { available: true, hasActiveWork: false });
 });
 
 test("shortcut audit covers built-in, configured, and companion extension collisions", () => {
@@ -798,6 +865,55 @@ test("intelligence shutdown awaits both managers and contains cleanup failures",
   }, 100);
   assert.deepEqual(calls.sort(), ["browser", "lsp"]);
 });
+
+function statuslessWorkflowAttachSnapshot(
+  executionStatus?: "active" | "paused" | "sealed",
+): WorkflowSnapshot {
+  const snapshot = workflowAttachSnapshot();
+  const executionId = "execution-2";
+  snapshot.session = {
+    ...snapshot.session!,
+    schemaVersion: "session/2.0",
+    lifecycleAuthority: "execution-derived",
+    sessionId: "session-2",
+    intent: "Statusless attachment",
+    identityRevision: 2,
+    activityRevision: 4,
+    currentExecutionId: executionStatus ? executionId : null,
+    latestExecutionId: executionStatus ? executionId : null,
+    latestCompletedRunId: null,
+    archivedAt: null,
+    archivedBy: null,
+    activeRunId: null,
+    chain: [],
+  };
+  delete (snapshot.session as { status?: string }).status;
+  snapshot.canonicalClaim = { activeSessionId: "session-2", status: "valid" };
+  snapshot.locator = {
+    sessionId: "session-2",
+    ...(executionStatus ? { executionId, generation: 2 } : {}),
+  };
+  snapshot.execution = executionStatus ? {
+    schemaVersion: "execution/1.0",
+    executionId,
+    sessionId: "session-2",
+    generation: 2,
+    status: executionStatus,
+    revision: 3,
+    activeRunId: null,
+    chain: [],
+    decisionPoints: [],
+    gatesRef: "gates.json",
+    artifactsRef: "artifacts.json",
+    evidenceRef: "evidence.json",
+    lease: null,
+    startedAt: "2026-07-18T00:00:00.000Z",
+    sealedAt: executionStatus === "sealed" ? "2026-07-18T01:00:00.000Z" : null,
+    sealSummary: executionStatus === "sealed" ? "done" : null,
+    finalOutcome: executionStatus === "sealed" ? "done" : null,
+  } : undefined;
+  return snapshot;
+}
 
 function workflowAttachSnapshot(): WorkflowSnapshot {
   return {

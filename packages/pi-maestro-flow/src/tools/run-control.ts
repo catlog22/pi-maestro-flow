@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import {
+  projectPublicRunCliResult,
   publicWorkflowErrorMessage,
   type WorkflowCoordinator,
   type WorkflowLeaseOwnership,
@@ -20,15 +21,14 @@ export const RUN_CONTROL_READ_ACTIONS: ReadonlySet<string> = new Set([
   "mutations",
   "list",
   "show",
+  "capabilities",
 ]);
 
 /** Maestro CLI subcommands classified as read-only by the passthrough shell. */
 const RUN_CONTROL_READ_COMMANDS: ReadonlySet<string> = new Set([
   ...RUN_CONTROL_READ_ACTIONS,
-  // session family read-only
   "evidence",
   "graph",
-  // top-level read-only surfaces
   "skills",
   "search",
   "load",
@@ -36,27 +36,96 @@ const RUN_CONTROL_READ_COMMANDS: ReadonlySet<string> = new Set([
   "help",
 ]);
 
-/** Entry commands that mint a Session; allowed without a held mutation lease. */
-const SESSIONLESS_WRITE_COMMANDS: ReadonlySet<string> = new Set(["create", "start"]);
+export type RunControlMutationScope =
+  | "read"
+  | "session"
+  | "execution"
+  | "execution-acquire"
+  | "execution-lease";
+
+export type RunControlLeaseIntent = "none" | "required" | "acquire";
 
 export interface RunControlClassification {
   write: boolean;
-  /** Write that mints a new Session; allowed without an attached lease (entry commands). */
+  /** Compatibility field: legacy entry command that may run without a held host lease. */
   sessionless: boolean;
+  mutation: RunControlMutationScope;
+  lease: RunControlLeaseIntent;
 }
+
+const READ_CLASSIFICATION: RunControlClassification = {
+  write: false,
+  sessionless: false,
+  mutation: "read",
+  lease: "none",
+};
 
 export function classifyRunControlArgv(argv: readonly string[]): RunControlClassification {
   if (argv.length === 0 || argv.some((argument) => argument === "-h" || argument === "--help")) {
-    return { write: false, sessionless: false };
+    return { ...READ_CLASSIFICATION };
   }
+
   const family = argv[0] ?? "";
-  const command = family === "run" || family === "session" || family === "plan"
-    ? argv[1] ?? family
-    : family;
-  if (RUN_CONTROL_READ_COMMANDS.has(command)) return { write: false, sessionless: false };
-  if (SESSIONLESS_WRITE_COMMANDS.has(command)) return { write: true, sessionless: true };
-  // Unknown commands default to write-conservative: mutation lease + Plan-mode block apply.
-  return { write: true, sessionless: false };
+  const command = argv[1] ?? "";
+  if (family === "capabilities") return { ...READ_CLASSIFICATION };
+
+  if (family === "execution") {
+    if (["status", "show", "list"].includes(command)) return { ...READ_CLASSIFICATION };
+    if (command === "lease") {
+      const leaseCommand = argv[2] ?? "";
+      if (leaseCommand === "status") return { ...READ_CLASSIFICATION };
+      if (leaseCommand === "recover") return writeClassification("execution-lease", "acquire");
+      return writeClassification("execution-lease", "required");
+    }
+    if (command === "handoff") {
+      const handoffCommand = argv[2] ?? "";
+      if (handoffCommand === "accept") return writeClassification("execution-acquire", "acquire");
+      return writeClassification("execution", "required");
+    }
+    if (["start", "attach", "resume"].includes(command)) {
+      return writeClassification("execution-acquire", "acquire");
+    }
+    if (command === "resolve") return writeClassification("execution", "none");
+    return writeClassification("execution", "required");
+  }
+
+  if (family === "session") {
+    if (["status", "show", "list", "evidence", "graph"].includes(command)) {
+      return { ...READ_CLASSIFICATION };
+    }
+    if (command === "create") return writeClassification("session", "none", true);
+    if (["archive", "unarchive"].includes(command)) return writeClassification("session", "none");
+    if (["start", "attach", "resume"].includes(command)) {
+      return writeClassification("execution-acquire", "acquire", command === "start");
+    }
+    if (command === "resolve") return writeClassification("execution", "none");
+    return writeClassification("execution", "required");
+  }
+
+  if (family === "run") {
+    if (RUN_CONTROL_READ_COMMANDS.has(command)) return { ...READ_CLASSIFICATION };
+    if (command === "start") {
+      return writeClassification("execution-acquire", "acquire", true);
+    }
+    if (command === "create") return writeClassification("execution", "required", true);
+    return writeClassification("execution", "required");
+  }
+
+  if (family === "plan" && command === "publish") {
+    return writeClassification("session", "none");
+  }
+  if (RUN_CONTROL_READ_COMMANDS.has(family)) return { ...READ_CLASSIFICATION };
+  if (family === "start") return writeClassification("execution-acquire", "acquire", true);
+  if (family === "create") return writeClassification("execution", "required", true);
+  return writeClassification("execution", "required");
+}
+
+function writeClassification(
+  mutation: Exclude<RunControlMutationScope, "read">,
+  lease: Exclude<RunControlLeaseIntent, "none"> | "none",
+  sessionless = false,
+): RunControlClassification {
+  return { write: true, sessionless, mutation, lease };
 }
 
 export function isRunControlReadAction(action: string): boolean {
@@ -71,10 +140,9 @@ export const RunControlParams = Type.Object({
   argv: Type.Array(Type.String(), {
     description:
       "Maestro CLI arguments without the leading executable, e.g. [\"session\",\"next\",\"--json\"] "
-      + "or [\"run\",\"check\",\"run-123\"]. Read commands (status/brief/prepare/check/recall/"
-      + "evidence/list/show/graph/skills/search/load/review) need no mutation lease; write commands "
-      + "(next/done/decide/seal/edit/...) require the current Pi session to own the Workflow "
-      + "mutation lease. Entry commands (session/run create|start) may run without a lease.",
+      + "or [\"run\",\"check\",\"run-123\"]. Reads and Session identity/CAS writes need no "
+      + "Execution lease. Execution acquisitions obtain the core lease; other Execution mutations "
+      + "require the current Pi session's negotiated locator, fence, and lease claim.",
   }),
 }, { additionalProperties: false });
 
@@ -109,19 +177,28 @@ export async function executeRunControl(
       required(hostSessionId, "hostSessionId");
     }
     const result = await coordinator.exec(argv, classification, hostSessionId);
+    const command = projectPublicRunCliResult(result.command);
+    const publicArgv = projectPublicRunCliResult({
+      argv,
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+    }).argv;
     const ownership = hostSessionId && !classification.write
       ? await coordinator.ownership(hostSessionId)
       : undefined;
-    const commandMessage = result.command.stderr.trim()
-      ? [result.command.stdout.trimEnd(), result.command.stderr.trimEnd()].filter(Boolean).join("\n")
-      : result.command.stdout;
-    return success(readMessage(commandMessage, ownership), {
-      argv,
+    const commandMessage = command.stderr.trim()
+      ? [command.stdout.trimEnd(), command.stderr.trimEnd()].filter(Boolean).join("\n")
+      : command.stdout;
+    const details = {
+      argv: publicArgv,
       classification,
-      command: result.command,
+      command,
       snapshot: result.snapshot,
       ...(ownership ? { ownership } : {}),
-    });
+    };
+    const message = readMessage(commandMessage, ownership);
+    return command.exitCode === 0 ? success(message, details) : failure(message, details);
   } catch (error) {
     return failure(publicWorkflowErrorMessage(error));
   }
@@ -175,6 +252,6 @@ function success(message: string, details?: unknown): RunControlResult {
   return { ok: true, action: "exec", message, ...(details === undefined ? {} : { details }) };
 }
 
-function failure(message: string): RunControlResult {
-  return { ok: false, action: "exec", message };
+function failure(message: string, details?: unknown): RunControlResult {
+  return { ok: false, action: "exec", message, ...(details === undefined ? {} : { details }) };
 }

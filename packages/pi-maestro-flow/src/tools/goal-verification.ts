@@ -7,7 +7,15 @@ import {
   SUPERVISION_EVENT,
 } from "pi-maestro-teammate/v1/supervision";
 import type { SingleResult } from "pi-maestro-teammate/v1/types";
-import { activeWorkflowRun, type WorkflowSnapshot } from "../session/types.ts";
+import {
+  activeWorkflowRun,
+  type WorkflowChainStep,
+  type WorkflowDecisionPoint,
+  type WorkflowGate,
+  type WorkflowRun,
+  type WorkflowSnapshot,
+} from "../session/types.ts";
+import { deriveWorkflowStatus, type DerivedWorkflowStatus } from "../session/view-model.ts";
 import { createDirectTeammateRunOptions } from "./direct-teammate.ts";
 import type { ActiveGoal, GoalContext } from "./goal.ts";
 
@@ -806,6 +814,65 @@ function redactSecrets(value: string): string {
     .replace(/\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b/g, "[REDACTED]");
 }
 
+interface CanonicalCompletionScope {
+  chain: WorkflowChainStep[];
+  runs: WorkflowRun[];
+  gates: WorkflowGate[];
+  decisions: WorkflowDecisionPoint[];
+}
+
+function canonicalCompletionScope(
+  snapshot: WorkflowSnapshot,
+  derived: DerivedWorkflowStatus,
+): CanonicalCompletionScope {
+  const session = snapshot.session!;
+  if (derived.authority === "legacy-session") {
+    return {
+      chain: session.chain,
+      runs: session.runs,
+      gates: [...session.gates, ...session.runs.flatMap((run) => run.gates)],
+      decisions: [],
+    };
+  }
+
+  const execution = snapshot.execution;
+  if (!execution) return { chain: [], runs: [], gates: [], decisions: [] };
+  const runIds = new Set(execution.chain.flatMap((step) => step.runId ? [step.runId] : []));
+  if (execution.activeRunId) runIds.add(execution.activeRunId);
+  const runs = session.runs.filter((run) => runIds.has(run.runId));
+  return {
+    chain: execution.chain,
+    runs,
+    gates: [
+      ...session.gates.filter((gate) => !gate.runId || runIds.has(gate.runId)),
+      ...runs.flatMap((run) => run.gates),
+    ],
+    decisions: execution.decisionPoints,
+  };
+}
+
+function statuslessExecutionPointerBlocker(snapshot: WorkflowSnapshot): string | undefined {
+  const session = snapshot.session!;
+  const pointer = session.currentExecutionId;
+  if (pointer === null) return undefined;
+  if (typeof pointer !== "string" || pointer.trim().length === 0) {
+    return "Statusless Workflow Session has no valid current Execution pointer; set currentExecutionId to null only when the Session is idle, or repair the canonical pointer";
+  }
+  const execution = snapshot.execution;
+  if (!execution) {
+    return `Current Execution ${pointer} is missing or invalid; reload or repair the canonical Session/Execution state`;
+  }
+  const locator = snapshot.locator;
+  if (execution.executionId !== pointer
+    || execution.sessionId !== session.sessionId
+    || locator?.sessionId !== session.sessionId
+    || locator.executionId !== pointer
+    || locator.generation !== execution.generation) {
+    return `Current Execution ${pointer} does not match the loaded Execution locator; reload or repair the canonical Session/Execution state`;
+  }
+  return undefined;
+}
+
 export function canonicalCompletionBlockers(snapshot: WorkflowSnapshot | undefined): string[] {
   if (snapshot?.canonicalClaim?.status === "invalid") {
     const claim = snapshot.canonicalClaim;
@@ -814,21 +881,48 @@ export function canonicalCompletionBlockers(snapshot: WorkflowSnapshot | undefin
     ];
   }
   const session = snapshot?.session;
-  if (!session) return [];
+  if (!snapshot || !session) return [];
+  const derived = deriveWorkflowStatus(snapshot);
+  if (derived.authority === "execution-derived") {
+    if (derived.lifecycle === "archived") return [];
+    const pointerBlocker = statuslessExecutionPointerBlocker(snapshot);
+    if (pointerBlocker) return [pointerBlocker];
+    if (session.currentExecutionId === null || snapshot.execution?.status === "sealed") return [];
+  }
+
+  const scope = canonicalCompletionScope(snapshot, derived);
   const blockers: string[] = [];
-  if (["paused", "failed"].includes(session.status)) blockers.push(`Session is ${session.status}`);
-  for (const step of session.chain) {
+  if (derived.authority === "legacy-session") {
+    if (["paused", "failed"].includes(session.status)) blockers.push(`Session is ${session.status}`);
+  } else if (snapshot.execution?.status === "paused") {
+    blockers.push("Execution is paused");
+  }
+  for (const step of scope.chain) {
     if (!["completed", "sealed", "skipped"].includes(step.status)) {
       blockers.push(`Step ${step.step} (${step.command}) is ${step.status}`);
     }
   }
-  const activeRun = activeWorkflowRun(snapshot);
-  if (activeRun && !["completed", "sealed"].includes(activeRun.status)) {
-    blockers.push(`Active Run ${activeRun.runId} is ${activeRun.status}`);
+  if (derived.authority === "legacy-session") {
+    const activeRun = activeWorkflowRun(snapshot);
+    if (activeRun && !["completed", "sealed"].includes(activeRun.status)) {
+      blockers.push(`Active Run ${activeRun.runId} is ${activeRun.status}`);
+    }
+  } else {
+    for (const run of scope.runs) {
+      if (!["completed", "sealed"].includes(run.status)) {
+        const prefix = run.runId === snapshot.execution?.activeRunId ? "Active Run" : "Run";
+        blockers.push(`${prefix} ${run.runId} is ${run.status}`);
+      }
+    }
   }
-  for (const gate of [...session.gates, ...session.runs.flatMap((run) => run.gates)]) {
+  for (const gate of scope.gates) {
     if (gate.blocking && !["passed", "waived", "skipped"].includes(gate.status)) {
       blockers.push(`Gate ${gate.id} is ${gate.status}`);
+    }
+  }
+  for (const decision of scope.decisions) {
+    if (decision.status !== "passed") {
+      blockers.push(`Decision ${decision.pointId} is ${decision.status}`);
     }
   }
   return [...new Set(blockers)];
@@ -866,25 +960,46 @@ export function buildCanonicalEvidence(snapshot: WorkflowSnapshot | undefined): 
     return boundedSecretText(canonicalCompletionBlockers(snapshot)[0] ?? "", MAX_VERIFIER_EVIDENCE_CHARS);
   }
   const session = snapshot?.session;
-  if (!session) return "";
+  if (!snapshot || !session) return "";
+  const derived = deriveWorkflowStatus(snapshot);
+  const scope = canonicalCompletionScope(snapshot, derived);
+  const lifecycleStatus = derived.authority === "execution-derived" ? derived.status : session.status;
+  const pointerBlocker = derived.authority === "execution-derived"
+    && derived.lifecycle !== "archived"
+    ? statuslessExecutionPointerBlocker(snapshot)
+    : undefined;
   const lines = [
-    `Session ${boundedSecretText(session.sessionId, 300)}: ${session.status} (revision ${session.revision})`,
+    `Session ${boundedSecretText(session.sessionId, 300)}: ${lifecycleStatus} (revision ${session.revision})`,
+    ...(derived.authority === "execution-derived"
+      ? [`Current Execution pointer: ${session.currentExecutionId === null
+        ? "null (idle)"
+        : boundedSecretText(String(session.currentExecutionId ?? "invalid"), 300)}`]
+      : []),
+    ...(derived.authority === "execution-derived" && snapshot.execution
+      ? [`Execution ${boundedSecretText(snapshot.execution.executionId, 300)}: ${snapshot.execution.status}`]
+      : []),
+    ...(pointerBlocker ? [`Blocker: ${boundedSecretText(pointerBlocker, MAX_VERIFIER_EVIDENCE_ITEM_CHARS)}`] : []),
     `Intent: ${boundedSecretText(session.intent, MAX_VERIFIER_EVIDENCE_ITEM_CHARS)}`,
-    `Chain: ${session.chain.length === 0
+    `Chain: ${scope.chain.length === 0
       ? "(empty)"
-      : session.chain
+      : scope.chain
         .map((step) => boundedSecretText(`${step.step}:${step.status}`, 300))
         .join(", ")}`,
-    `Gates: ${[...session.gates, ...session.runs.flatMap((run) => run.gates)]
+    `Gates: ${scope.gates
       .map((gate) => boundedSecretText(`${gate.id}:${gate.status}`, 300))
       .join(", ") || "(none)"}`,
+    ...(scope.decisions.length > 0
+      ? [`Decisions: ${scope.decisions
+        .map((decision) => boundedSecretText(`${decision.pointId}:${decision.status}`, 300))
+        .join(", ")}`]
+      : []),
     `Artifacts: ${session.artifacts
       .map((artifact) =>
         boundedSecretText(`${artifact.artifactId}:${artifact.status}:${artifact.path}`, MAX_VERIFIER_EVIDENCE_ITEM_CHARS)
       )
       .join(", ") || "(none)"}`,
   ];
-  for (const run of session.runs) {
+  for (const run of scope.runs) {
     const verdict = typeof run.handoff?.verdict === "string"
       ? boundedSecretText(run.handoff.verdict, 300)
       : "none";

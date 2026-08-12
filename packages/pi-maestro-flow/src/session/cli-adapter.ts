@@ -3,6 +3,8 @@ import { existsSync } from "node:fs";
 import { dirname, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import crossSpawn from "cross-spawn";
+import { z } from "zod";
+import { parseRunResponse, projectPublicRunResponse } from "./run-response.ts";
 
 const DEFAULT_RUN_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -24,12 +26,44 @@ export interface RunCliResult {
   exitCode: number;
 }
 
+export type RunCliCapabilityMode = "structured" | "legacy" | "fail-closed";
+
+export interface MaestroCapabilitiesV10 {
+  schema_version: "maestro-capabilities/1.0";
+  cli_version: string;
+  session_schema_writes: string[];
+  execution_schema_writes: string[];
+  run_response_writes: string[];
+  features: {
+    execution_generation: boolean;
+    core_execution_lease: boolean;
+    execution_handoff: boolean;
+    session_statusless: boolean;
+    legacy_session_aliases: boolean;
+    [feature: string]: boolean;
+  };
+}
+
+export interface RunCliNegotiatedSupport {
+  execution_generation: boolean;
+  core_execution_lease: boolean;
+  "run-response/1.1": boolean;
+}
+
 export interface RunCliCapabilities {
   commands: ReadonlySet<string>;
   /** Commands parsed from `session --help`; empty when the CLI has no session subcommand. */
   sessionCommands: ReadonlySet<string>;
   /** Commands parsed from `plan --help`; used for approved Plan publication capability detection. */
   planCommands: ReadonlySet<string>;
+  /** Source and safety posture of the structured capability negotiation. */
+  mode: RunCliCapabilityMode;
+  /** Validated structured response; absent for legacy and fail-closed CLIs. */
+  structured: MaestroCapabilitiesV10 | null;
+  /** Explicit new-protocol support. All values are false unless structured negotiation succeeds. */
+  support: Readonly<RunCliNegotiatedSupport>;
+  /** Diagnostic for legacy/fail-closed negotiation without exposing raw command output. */
+  diagnostic: string | null;
 }
 
 export interface RunPlanPublishOptions {
@@ -44,6 +78,17 @@ export interface RunPlanPublishOptions {
   approvedAt: string;
   expectedIdentityRevision?: number;
   expectedActivityRevision?: number;
+  requestId?: string;
+  executionId?: string;
+  generation?: number;
+  expectedExecutionRevision?: number;
+  executionOwner?: string;
+  ownerKind?: "pi" | "claude" | "codex" | "agy" | "manual";
+  ownerEpoch?: number;
+  leaseId?: string;
+  actor?: string;
+  reason?: string;
+  evidence?: readonly string[];
 }
 
 export type RunCompletionVerdict = "done" | "done-with-concerns" | "needs-retry" | "blocked";
@@ -88,6 +133,7 @@ export class RunCliAdapter {
 
   async capabilities(refresh = false): Promise<RunCliCapabilities> {
     if (this.detected && !refresh) return this.detected;
+    const negotiated = await this.probeStructuredCapabilities();
     const commands = new Set<string>();
     // Detect run-level commands (brief, check, prepare, create, ...)
     const runHelp = await this.invoke(["run", "--help"]);
@@ -114,8 +160,27 @@ export class RunCliAdapter {
     } catch {
       // Older CLIs have no approved Plan publisher; the confirmation UI disables Workflow execution.
     }
-    this.detected = { commands, sessionCommands, planCommands };
+    this.detected = { commands, sessionCommands, planCommands, ...negotiated };
     return this.detected;
+  }
+
+  async supportsExecutionGeneration(): Promise<boolean> {
+    return (await this.capabilities()).support.execution_generation;
+  }
+
+  async supportsCoreExecutionLease(): Promise<boolean> {
+    return (await this.capabilities()).support.core_execution_lease;
+  }
+
+  async supportsRunResponseV11(): Promise<boolean> {
+    return (await this.capabilities()).support["run-response/1.1"];
+  }
+
+  async supportsNewMutations(): Promise<boolean> {
+    const support = (await this.capabilities()).support;
+    return support.execution_generation
+      && support.core_execution_lease
+      && support["run-response/1.1"];
   }
 
   async supportsPlanPublish(): Promise<boolean> {
@@ -140,6 +205,19 @@ export class RunCliAdapter {
       ...(options.expectedActivityRevision !== undefined
         ? ["--expected-activity-revision", String(options.expectedActivityRevision)]
         : []),
+      ...(options.requestId ? ["--request-id", options.requestId] : []),
+      ...(options.executionId ? ["--execution", options.executionId] : []),
+      ...(options.generation !== undefined ? ["--generation", String(options.generation)] : []),
+      ...(options.expectedExecutionRevision !== undefined
+        ? ["--expected-execution-revision", String(options.expectedExecutionRevision)]
+        : []),
+      ...(options.executionOwner ? ["--execution-owner", options.executionOwner] : []),
+      ...(options.ownerKind ? ["--owner-kind", options.ownerKind] : []),
+      ...(options.ownerEpoch !== undefined ? ["--owner-epoch", String(options.ownerEpoch)] : []),
+      ...(options.leaseId ? ["--lease-id", options.leaseId] : []),
+      ...(options.actor ? ["--actor", options.actor] : []),
+      ...(options.reason ? ["--reason", options.reason] : []),
+      ...(options.evidence ?? []).flatMap((reference) => ["--evidence", reference]),
       "--json",
       "--workflow-root", this.workflowRoot,
     ]);
@@ -215,11 +293,10 @@ export class RunCliAdapter {
   async exec(argv: readonly string[]): Promise<RunCliResult> {
     const family = argv[0];
     const acceptsWorkflowRoot = family === "run" || family === "session" || family === "plan";
-    return this.invoke(
-      acceptsWorkflowRoot && !argv.some((argument) => argument === "--workflow-root")
-        ? [...argv, "--workflow-root", this.workflowRoot]
-        : [...argv],
-    );
+    const args = acceptsWorkflowRoot && !argv.some((argument) => argument === "--workflow-root")
+      ? [...argv, "--workflow-root", this.workflowRoot]
+      : [...argv];
+    return argv.includes("--json") ? this.invokeRunResponse(args) : this.invoke(args);
   }
 
   async edit(commands: readonly string[], options: RunEditOptions): Promise<RunCliResult> {
@@ -247,13 +324,140 @@ export class RunCliAdapter {
     throw new UnsupportedRunCapabilityError(command);
   }
 
-  private async invoke(args: readonly string[]): Promise<RunCliResult> {
-    const result = await this.runner(args, this.workflowRoot);
+  private async probeStructuredCapabilities(): Promise<Pick<
+    RunCliCapabilities,
+    "mode" | "structured" | "support" | "diagnostic"
+  >> {
+    let result: RunCliResult;
+    try {
+      result = await this.runner(["capabilities", "--json"], this.workflowRoot);
+    } catch (error) {
+      return failClosedCapabilities(`capability probe failed: ${redactSensitiveText(errorMessage(error))}`);
+    }
     if (result.exitCode !== 0) {
-      throw new Error(`maestro ${args.join(" ")} failed (${result.exitCode}): ${result.stderr || result.stdout}`);
+      const output = `${result.stderr}\n${result.stdout}`;
+      if (isMissingCapabilitiesCommand(output)) {
+        return {
+          mode: "legacy",
+          structured: null,
+          support: NO_NEW_PROTOCOL_SUPPORT,
+          diagnostic: "Installed Maestro CLI has no capabilities command; legacy read compatibility only",
+        };
+      }
+      return failClosedCapabilities(`capability probe exited with code ${result.exitCode}`);
+    }
+    let input: unknown;
+    try {
+      input = JSON.parse(result.stdout) as unknown;
+    } catch {
+      return failClosedCapabilities("capability probe returned invalid JSON");
+    }
+    const parsed = maestroCapabilitiesV10Schema.safeParse(input);
+    if (!parsed.success) {
+      return failClosedCapabilities(
+        `capability probe returned an unsupported or malformed response: ${parsed.error.issues.map(issueText).join("; ")}`,
+      );
+    }
+    const structured = parsed.data as MaestroCapabilitiesV10;
+    const writesExecutionV10 = structured.execution_schema_writes.includes("execution/1.0");
+    return {
+      mode: "structured",
+      structured,
+      support: Object.freeze({
+        execution_generation: writesExecutionV10 && structured.features.execution_generation,
+        core_execution_lease: writesExecutionV10 && structured.features.core_execution_lease,
+        "run-response/1.1": structured.run_response_writes.includes("run-response/1.1"),
+      }),
+      diagnostic: null,
+    };
+  }
+
+  private async invoke(args: readonly string[]): Promise<RunCliResult> {
+    let result: RunCliResult;
+    try {
+      result = await this.runner(args, this.workflowRoot);
+    } catch (error) {
+      throw commandFailure(args, null, errorMessage(error));
+    }
+    if (result.exitCode !== 0) {
+      throw commandFailure(args, result.exitCode, result.stderr || result.stdout);
     }
     return result;
   }
+
+  private async invokeRunResponse(args: readonly string[]): Promise<RunCliResult> {
+    let result: RunCliResult;
+    try {
+      result = await this.runner(args, this.workflowRoot);
+    } catch (error) {
+      throw commandFailure(args, null, errorMessage(error));
+    }
+    if (result.exitCode === 0) return result;
+
+    try {
+      const envelope = parseRunResponse(result.stdout);
+      if (envelope.ok || envelope.exit_code !== result.exitCode) {
+        throw new Error("run-response exit parity mismatch");
+      }
+      const publicEnvelope = JSON.stringify(projectPublicRunResponse(envelope));
+      return {
+        ...result,
+        argv: redactPrivateArgv(result.argv),
+        stdout: redactPrivateArgvValues(publicEnvelope, args),
+        stderr: redactPrivateArgvValues(redactSensitiveText(result.stderr), args),
+      };
+    } catch {
+      throw commandFailure(args, result.exitCode, result.stderr || result.stdout);
+    }
+  }
+}
+
+const semver = z.string().regex(
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/,
+  "must be a semantic version",
+);
+const schemaVersionList = z.array(z.string().min(1));
+const maestroCapabilitiesV10Schema = z.object({
+  schema_version: z.literal("maestro-capabilities/1.0"),
+  cli_version: semver,
+  session_schema_writes: schemaVersionList,
+  execution_schema_writes: schemaVersionList,
+  run_response_writes: schemaVersionList,
+  features: z.object({
+    execution_generation: z.boolean(),
+    core_execution_lease: z.boolean(),
+    execution_handoff: z.boolean(),
+    session_statusless: z.boolean(),
+    legacy_session_aliases: z.boolean(),
+  }).catchall(z.boolean()),
+}).strict();
+
+const NO_NEW_PROTOCOL_SUPPORT: Readonly<RunCliNegotiatedSupport> = Object.freeze({
+  execution_generation: false,
+  core_execution_lease: false,
+  "run-response/1.1": false,
+});
+
+function failClosedCapabilities(diagnostic: string): Pick<
+  RunCliCapabilities,
+  "mode" | "structured" | "support" | "diagnostic"
+> {
+  return {
+    mode: "fail-closed",
+    structured: null,
+    support: NO_NEW_PROTOCOL_SUPPORT,
+    diagnostic,
+  };
+}
+
+function isMissingCapabilitiesCommand(output: string): boolean {
+  return /(?:unknown|unrecognized|invalid)\s+(?:command|subcommand)[^\r\n]*["'`]?capabilities["'`]?/i.test(output)
+    || /(?:command|subcommand)[^\r\n]*["'`]?capabilities["'`]?(?:[^\r\n]*)not found/i.test(output);
+}
+
+function issueText(issue: { path: PropertyKey[]; message: string }): string {
+  const path = issue.path.length > 0 ? issue.path.join(".") : "response";
+  return `${path}: ${issue.message}`;
 }
 
 export async function defaultRunner(
@@ -438,4 +642,67 @@ function required(value: string, label: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function commandFailure(args: readonly string[], exitCode: number | null, output: string): Error {
+  const code = exitCode === null ? "" : ` (${exitCode})`;
+  const diagnostic = redactPrivateArgvValues(redactSensitiveText(output), args);
+  return new Error(`maestro ${redactPrivateArgv(args).join(" ")} failed${code}${diagnostic ? `: ${diagnostic}` : ""}`);
+}
+
+function redactPrivateArgv(argv: readonly string[]): string[] {
+  let redactNext = false;
+  const positionalHandoffToken = argv[0] === "execution" && argv[1] === "handoff" && argv[2] === "accept";
+  return argv.map((argument, index) => {
+    if (redactNext) {
+      redactNext = false;
+      return "<redacted>";
+    }
+    if (positionalHandoffToken && index === 3 && !argument.startsWith("-")) return "<redacted>";
+    const equalsAt = argument.indexOf("=");
+    const flag = equalsAt >= 0 ? argument.slice(0, equalsAt) : argument;
+    if (isPrivateFlag(flag)) {
+      if (equalsAt >= 0) return `${flag}=<redacted>`;
+      redactNext = true;
+      return argument;
+    }
+    return redactSensitiveText(argument);
+  });
+}
+
+function isPrivateFlag(flag: string): boolean {
+  return flag === "--lease-id" || flag === "--handoff-key" || /^--[a-z0-9-]*token[a-z0-9-]*$/i.test(flag);
+}
+
+function redactPrivateArgvValues(text: string, argv: readonly string[]): string {
+  let redacted = text;
+  for (const secret of privateArgvValues(argv).sort((left, right) => right.length - left.length)) {
+    redacted = redacted.split(secret).join("<redacted>");
+    const jsonEscaped = JSON.stringify(secret).slice(1, -1);
+    if (jsonEscaped !== secret) redacted = redacted.split(jsonEscaped).join("<redacted>");
+  }
+  return redacted;
+}
+
+function privateArgvValues(argv: readonly string[]): string[] {
+  const values: string[] = [];
+  const positionalHandoffToken = argv[0] === "execution" && argv[1] === "handoff" && argv[2] === "accept";
+  for (let index = 0; index < argv.length; index++) {
+    const argument = argv[index]!;
+    if (positionalHandoffToken && index === 3 && !argument.startsWith("-")) values.push(argument);
+    const equalsAt = argument.indexOf("=");
+    const flag = equalsAt >= 0 ? argument.slice(0, equalsAt) : argument;
+    if (!isPrivateFlag(flag)) continue;
+    const value = equalsAt >= 0 ? argument.slice(equalsAt + 1) : argv[index + 1];
+    if (value) values.push(value);
+  }
+  return [...new Set(values.filter((value) => value.length > 0))];
+}
+
+function redactSensitiveText(text: string): string {
+  return text
+    .replace(/\blease_claim\s*[:=]\s*\{[^\r\n}]*\}/gi, "lease_claim=<redacted>")
+    .replace(/("(?:lease_id|[^"\\]*(?:token|handoff[_-]?key)[^"\\]*)"\s*:\s*)("(?:\\.|[^"\\])*"|[^,\s}\]]+)/gi, "$1\"<redacted>\"")
+    .replace(/\b(lease_id|[a-z0-9_-]*(?:token|handoff[_-]?key)[a-z0-9_-]*)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;}\]]+)/gi, "$1=<redacted>")
+    .replace(/(--(?:lease-id|handoff-key|[a-z0-9-]*token[a-z0-9-]*)(?:=|\s+))\S+/gi, "$1<redacted>");
 }

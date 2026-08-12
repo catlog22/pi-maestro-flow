@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -123,6 +123,8 @@ test("bridge reads canonical Session/Run/Artifact state and changes revision by 
     const first = await loadCanonicalSnapshot(root, { now: () => new Date("2026-07-15T01:00:00Z") });
     assert.equal(first.source, "canonical");
     assert.equal(first.session?.revision, 7);
+    assert.equal(first.execution?.executionId, `legacy:${sessionId}`);
+    assert.equal(first.execution?.generation, 1);
     assert.equal(first.session?.runs[0]?.runId, runId);
     assert.equal(first.session?.artifacts[0]?.artifactId, "artifact-1");
     assert.equal(first.session?.aliases["current-analysis"], "artifact-1");
@@ -149,6 +151,272 @@ test("bridge reads canonical Session/Run/Artifact state and changes revision by 
     const changed = await bridge.refresh();
     assert.notEqual(changed.revision.fingerprint, cached.revision.fingerprint);
     assert.equal(changed.revision.sessionRevision, 8);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bridge projects the current Execution with locators, revisions, and redacted lease metadata", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-session-execution-"));
+  const sessionId = "20260718-execution";
+  const sessionDir = join(root, ".workflow", "sessions", sessionId);
+  const executionId = "execution-0002";
+  const runId = "20260718-002-execute";
+  const leaseId = "private-lease-token-must-not-escape";
+  try {
+    await mkdir(join(sessionDir, "executions", "execution-0001"), { recursive: true });
+    await mkdir(join(sessionDir, "executions", executionId), { recursive: true });
+    await mkdir(join(sessionDir, "executions", `2-${executionId}`), { recursive: true });
+    await writeJson(join(root, ".workflow", "state.json"), {
+      version: "2.0",
+      active_session_id: sessionId,
+      sessions: [],
+    });
+    await writeJson(join(sessionDir, "session.json"), {
+      schema_version: "session/1.3",
+      session_id: sessionId,
+      intent: "Project the current Execution",
+      status: "running",
+      revision: 12,
+      identity_revision: 4,
+      activity_revision: 12,
+      active_run_id: null,
+      orchestration: { chain: [] },
+    });
+    await writeJson(join(sessionDir, "executions", "execution-0001", "execution.json"), {
+      schema_version: "execution/1.0",
+      execution_id: "execution-0001",
+      session_id: sessionId,
+      generation: 1,
+      status: "sealed",
+      revision: 8,
+      active_run_id: null,
+      chain: [],
+      decision_points: [],
+      gates_ref: "gates.json",
+      artifacts_ref: "artifacts.json",
+      evidence_ref: "evidence.json",
+      lease: null,
+      started_at: "2026-07-18T00:00:00.000Z",
+      sealed_at: "2026-07-18T00:10:00.000Z",
+      seal_summary: "First generation complete",
+      final_outcome: "done",
+    });
+    const executionPath = join(sessionDir, "executions", executionId, "execution.json");
+    await writeJson(executionPath, {
+      schema_version: "execution/1.0",
+      execution_id: executionId,
+      session_id: sessionId,
+      generation: 2,
+      status: "active",
+      revision: 3,
+      active_run_id: runId,
+      chain: [{ step_id: "execute", command: "execute", status: "running", run_id: runId }],
+      decision_points: [{
+        point_id: "decision-1",
+        after_step_id: null,
+        status: "pending",
+        retry_count: 0,
+        max_retries: 2,
+        evidence_ref: null,
+      }],
+      gates_ref: "gates.json",
+      artifacts_ref: "artifacts.json",
+      evidence_ref: "evidence.json",
+      lease: {
+        schema_version: "execution-lease/1.0",
+        session_id: sessionId,
+        execution_id: executionId,
+        owner_id: "pi-session-owner",
+        owner_kind: "pi",
+        epoch: 7,
+        lease_id: leaseId,
+        acquired_at: "2026-07-18T00:20:00.000Z",
+        heartbeat_at: "2026-07-18T00:21:00.000Z",
+        handoff_to: null,
+      },
+      started_at: "2026-07-18T00:20:00.000Z",
+      sealed_at: null,
+      seal_summary: null,
+      final_outcome: null,
+    });
+    await writeJson(join(sessionDir, "executions", `2-${executionId}`, "execution.json"), {
+      schema_version: "execution/1.0",
+      execution_id: executionId,
+      session_id: sessionId,
+      generation: 2,
+      status: "paused",
+      revision: 999,
+      active_run_id: null,
+      chain: [],
+      decision_points: [],
+      gates_ref: "gates.json",
+      artifacts_ref: "artifacts.json",
+      evidence_ref: "evidence.json",
+      lease: null,
+      started_at: "2026-07-18T00:20:00.000Z",
+      sealed_at: null,
+      seal_summary: null,
+      final_outcome: null,
+    });
+
+    const first = await loadCanonicalSnapshot(root);
+    assert.equal(first.session?.status, "running", "Execution projection must not replace Session.status");
+    assert.equal(first.sessionGeneration, `canonical:valid:${sessionId}:4`);
+    assert.deepEqual(first.locator, { sessionId, executionId, generation: 2, runId });
+    assert.equal(first.revision.sessionRevision, 12);
+    assert.equal(first.revision.executionRevision, 3);
+    assert.equal(first.execution?.executionId, executionId);
+    assert.equal(first.execution?.generation, 2);
+    assert.equal(first.execution?.chain[0]?.step, "execute");
+    assert.equal(first.execution?.decisionPoints[0]?.pointId, "decision-1");
+    assert.deepEqual(first.execution?.lease, {
+      schemaVersion: "execution-lease/1.0",
+      sessionId,
+      executionId,
+      ownerId: "pi-session-owner",
+      ownerKind: "pi",
+      epoch: 7,
+      acquiredAt: "2026-07-18T00:20:00.000Z",
+      heartbeatAt: "2026-07-18T00:21:00.000Z",
+      handoffTo: null,
+    });
+    assert.ok(!JSON.stringify(first).includes(leaseId), "the raw lease token must be redacted deeply");
+    assert.ok(!JSON.stringify(first).includes("lease_id"), "the private lease field must not be projected");
+
+    await writeJson(executionPath, {
+      schema_version: "execution/1.0",
+      execution_id: executionId,
+      session_id: sessionId,
+      generation: 2,
+      status: "paused",
+      revision: 4,
+      active_run_id: null,
+      chain: [],
+      decision_points: [],
+      gates_ref: "gates.json",
+      artifacts_ref: "artifacts.json",
+      evidence_ref: "evidence.json",
+      lease: null,
+      started_at: "2026-07-18T00:20:00.000Z",
+      sealed_at: null,
+      seal_summary: null,
+      final_outcome: null,
+    });
+    const changed = await loadCanonicalSnapshot(root);
+    assert.equal(changed.revision.executionRevision, 4);
+    assert.notEqual(changed.revision.fingerprint, first.revision.fingerprint);
+    assert.equal(changed.sessionGeneration, first.sessionGeneration, "Execution activity must not redefine Session identity");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session/2.0 with a null current_execution_id does not select the highest Execution generation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-session-v2-missing-execution-pointer-"));
+  const sessionId = "20260718-v2-missing-pointer";
+  try {
+    await writeExecutionSelectionFixture(root, sessionId);
+
+    const snapshot = await loadCanonicalSnapshot(root);
+    assert.equal(snapshot.execution, undefined);
+    assert.deepEqual(snapshot.locator, { sessionId });
+    assert.equal(snapshot.revision.executionRevision, undefined);
+    assert.equal(snapshot.session?.lifecycleAuthority, "execution-derived");
+    assert.equal(Object.prototype.hasOwnProperty.call(snapshot.session, "status"), false);
+    assert.equal(snapshot.session?.currentExecutionId, null);
+    assert.equal(snapshot.session?.latestExecutionId, "execution-0002");
+    assert.equal(snapshot.session?.latestCompletedRunId, "20260718-001-analyze");
+
+    const idleGeneration = snapshot.sessionGeneration;
+    await writeExecutionSelectionFixture(root, sessionId, {
+      activity_revision: 10,
+      current_execution_id: "execution-0002",
+    });
+    const active = await loadCanonicalSnapshot(root);
+    assert.equal(active.sessionGeneration, idleGeneration, "Execution activity must not redefine Session identity");
+    assert.deepEqual(active.locator, {
+      sessionId,
+      executionId: "execution-0002",
+      generation: 2,
+    });
+    assert.equal(active.revision.executionRevision, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session/2.0 retains latest pointers while selecting only current_execution_id", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-session-v2-latest-pointer-"));
+  const sessionId = "20260718-v2-latest-pointer";
+  try {
+    await writeExecutionSelectionFixture(root, sessionId, {
+      current_execution_id: "execution-0001",
+      latest_execution_id: "execution-0002",
+      archived_at: "2026-07-18T03:00:00.000Z",
+      archived_by: "pi-owner",
+    });
+
+    const snapshot = await loadCanonicalSnapshot(root);
+    assert.equal(snapshot.execution?.executionId, "execution-0001");
+    assert.equal(snapshot.execution?.generation, 1);
+    assert.deepEqual(snapshot.locator, {
+      sessionId,
+      executionId: "execution-0001",
+      generation: 1,
+    });
+    assert.equal(snapshot.session?.latestExecutionId, "execution-0002");
+    assert.equal(snapshot.session?.latestCompletedRunId, "20260718-001-analyze");
+    assert.equal(snapshot.session?.archivedAt, "2026-07-18T03:00:00.000Z");
+    assert.equal(snapshot.session?.archivedBy, "pi-owner");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session/2.0 rejects invalid Execution pointers and pointed Execution records", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-session-v2-invalid-execution-pointer-"));
+  const sessionId = "20260718-v2-invalid-pointer";
+  const executionId = "execution-0002";
+  const executionPath = join(
+    root,
+    ".workflow",
+    "sessions",
+    sessionId,
+    "executions",
+    executionId,
+    "execution.json",
+  );
+  try {
+    for (const currentExecutionId of ["../execution-0002", "execution-missing"]) {
+      await writeExecutionSelectionFixture(root, sessionId, { current_execution_id: currentExecutionId });
+
+      const snapshot = await loadCanonicalSnapshot(root);
+      assert.equal(snapshot.execution, undefined, currentExecutionId);
+      assert.deepEqual(snapshot.locator, { sessionId }, currentExecutionId);
+      assert.equal(snapshot.revision.executionRevision, undefined, currentExecutionId);
+      assert.match(snapshot.diagnostics.join("\n"), /current_execution_id|Current Execution .* missing or invalid/);
+    }
+
+    await writeExecutionSelectionFixture(root, sessionId, { current_execution_id: executionId });
+    const valid = JSON.parse(await readFile(executionPath, "utf8")) as Record<string, unknown>;
+    const fixtures: Array<{ name: string; override: Record<string, unknown> }> = [
+      { name: "schema", override: { schema_version: "execution/2.0" } },
+      { name: "status", override: { status: "running" } },
+      { name: "revision", override: { revision: -1 } },
+      { name: "execution identity", override: { execution_id: "execution-other" } },
+      { name: "session identity", override: { session_id: "session-other" } },
+      { name: "generation identity", override: { generation: 0 } },
+    ];
+
+    for (const fixture of fixtures) {
+      await writeJson(executionPath, { ...valid, ...fixture.override });
+      const snapshot = await loadCanonicalSnapshot(root);
+      assert.equal(snapshot.execution, undefined, fixture.name);
+      assert.deepEqual(snapshot.locator, { sessionId }, fixture.name);
+      assert.equal(snapshot.revision.executionRevision, undefined, fixture.name);
+      assert.match(snapshot.diagnostics.join("\n"), /invalid Execution projection|missing or invalid/, fixture.name);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -322,6 +590,7 @@ test("bridge falls back to legacy status without writing canonical files", async
     assert.equal(snapshot.source, "legacy");
     assert.equal(snapshot.session?.sessionId, "legacy-ralph");
     assert.equal(snapshot.session?.chain[0]?.command, "analyze");
+    assert.equal(snapshot.execution, undefined, "the pre-Session legacy fallback keeps its historical shape");
     assert.match(snapshot.diagnostics.join("\n"), /legacy workflow projection/i);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -419,6 +688,8 @@ test("bridge normalizes live Maestro 0.5.50 session/1.0 records", async () => {
     await writeJson(join(sessionDir, "session.json"), {
       schema_version: "session/1.0",
       session_id: sessionId,
+      execution_id: "legacy-execution-4",
+      generation: 4,
       intent: "Exercise the live schema",
       status: "running",
       revision: 2,
@@ -498,6 +769,18 @@ test("bridge normalizes live Maestro 0.5.50 session/1.0 records", async () => {
     assert.equal(session.identityRevision, 11);
     assert.equal(session.activityRevision, 17);
     assert.equal(session.revision, 17);
+    assert.equal(snapshot.execution?.legacyProjection, true);
+    assert.equal(snapshot.execution?.executionId, "legacy-execution-4");
+    assert.equal(snapshot.execution?.generation, 4);
+    assert.equal(snapshot.execution?.revision, 17);
+    assert.equal(snapshot.execution?.status, "active");
+    assert.deepEqual(snapshot.locator, {
+      sessionId,
+      executionId: "legacy-execution-4",
+      generation: 4,
+      runId,
+    });
+    assert.equal(snapshot.revision.executionRevision, 17);
     assert.deepEqual(session.gates.map((gate) => gate.id), ["GATE-S-01"]);
     assert.equal(run.schemaVersion, "command-run/1.0");
     assert.equal(run.command, "execute");
@@ -673,6 +956,49 @@ function deferred<T>(): {
 
 async function settleAsyncWork(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+async function writeExecutionSelectionFixture(
+  root: string,
+  sessionId: string,
+  sessionOverrides: Record<string, unknown> = {},
+): Promise<void> {
+  const sessionDir = join(root, ".workflow", "sessions", sessionId);
+  await mkdir(join(sessionDir, "executions", "execution-0001"), { recursive: true });
+  await mkdir(join(sessionDir, "executions", "execution-0002"), { recursive: true });
+  await writeJson(join(root, ".workflow", "state.json"), {
+    version: "2.0",
+    active_session_id: sessionId,
+    sessions: [],
+  });
+  await writeJson(join(sessionDir, "session.json"), {
+    schema_version: "session/2.0",
+    session_id: sessionId,
+    intent: "Require an explicit current Execution pointer",
+    identity_revision: 4,
+    activity_revision: 9,
+    current_execution_id: null,
+    latest_execution_id: "execution-0002",
+    latest_completed_run_id: "20260718-001-analyze",
+    archived_at: null,
+    archived_by: null,
+    ...sessionOverrides,
+  });
+  for (const generation of [1, 2]) {
+    const executionId = `execution-000${generation}`;
+    await writeJson(join(sessionDir, "executions", executionId, "execution.json"), {
+      schema_version: "execution/1.0",
+      execution_id: executionId,
+      session_id: sessionId,
+      generation,
+      status: generation === 1 ? "sealed" : "active",
+      revision: generation,
+      active_run_id: null,
+      chain: [],
+      decision_points: [],
+      lease: null,
+    });
+  }
 }
 
 async function writeJson(path: string, value: unknown): Promise<void> {

@@ -1,14 +1,23 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmod, link, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   RunCliAdapter,
+  RunCliCapabilities,
   RunCliResult,
   RunDoneOptions,
   RunEditOptions,
   RunPlanPublishOptions,
 } from "./cli-adapter.ts";
 import type { WorkflowBridge } from "./bridge.ts";
+import {
+  extractRunResponseLeaseClaim,
+  parseRunResponse,
+  projectPublicRunResponse,
+  type PrivateRunResponseEnvelope,
+  type RunLeaseClaim,
+  type RunResponseFenceV11,
+} from "./run-response.ts";
 import { activeWorkflowRun, type WorkflowRun, type WorkflowSnapshot } from "./types.ts";
 
 export interface WorkflowSnapshotProvider {
@@ -17,6 +26,7 @@ export interface WorkflowSnapshotProvider {
 }
 
 export interface WorkflowRunAdapter {
+  capabilities?(): Promise<RunCliCapabilities>;
   prepare(step: string): Promise<RunCliResult>;
   brief(runId: string, sessionId?: string): Promise<RunCliResult>;
   check(runId: string, sessionId?: string): Promise<RunCliResult>;
@@ -60,12 +70,54 @@ export interface WorkflowHostContext {
 export interface WorkflowAttachResult {
   snapshot: WorkflowSnapshot;
   brief?: RunCliResult;
-  lease: WorkflowLeaseMetadata;
+  lease: WorkflowLeaseMetadata | WorkflowCoreLeaseMetadata;
 }
 
 export interface WorkflowTransitionResult {
   command: RunCliResult;
   snapshot: WorkflowSnapshot;
+}
+
+export type WorkflowCoordinatorMode = "legacy-host" | "core-execution" | "fail-closed";
+
+export interface WorkflowCoreLeaseMetadata {
+  sessionId: string;
+  executionId: string;
+  generation: number;
+  ownerId: string;
+  epoch: number;
+  executionRevision: number;
+}
+
+export interface WorkflowRunControlClassification {
+  write: boolean;
+  sessionless: boolean;
+  mutation?: "read" | "session" | "execution" | "execution-acquire" | "execution-lease"
+    | "compatibility-start" | "plan-publish";
+  lease?: "none" | "required" | "acquire" | "command-aware";
+}
+
+interface CoreExecutionLocator {
+  sessionId: string;
+  executionId: string;
+  generation: number;
+}
+
+interface CoreExecutionAuthority {
+  capabilities?: RunCliCapabilities;
+  locator?: CoreExecutionLocator;
+  claim?: RunLeaseClaim;
+  fence?: RunResponseFenceV11;
+  lastLeaseEpoch?: number;
+  ownerId?: string;
+}
+
+interface CoreMutationCandidate {
+  locator: CoreExecutionLocator;
+  fence: RunResponseFenceV11;
+  claim?: RunLeaseClaim;
+  ownerId?: string;
+  releasesLease: boolean;
 }
 
 export class WorkflowLeaseBusyError extends Error {
@@ -406,24 +458,70 @@ interface ContinuationMarker {
   nonce: string;
 }
 
+export interface WorkflowCoordinatorOptions {
+  /** Explicit compatibility boundary for the old plugin/runtime only. */
+  legacyCompatibility?: boolean;
+}
+
 export class WorkflowCoordinator {
   private heartbeatTimer?: ReturnType<typeof setInterval>;
   private heartbeatWork = Promise.resolve();
   private heartbeatGeneration = 0;
   private pendingContinuation?: ContinuationMarker;
+  // The first authority-sensitive entry point negotiates once, then the
+  // selected authority remains sticky for this coordinator instance.
+  private selectedMode: WorkflowCoordinatorMode = "fail-closed";
+  private authoritySelection?: Promise<WorkflowCoordinatorMode>;
+  private authorityDiagnostic?: string;
+  private coreHeartbeatTimer?: ReturnType<typeof setInterval>;
+  private coreHeartbeatGeneration = 0;
+  private coreHeartbeatPending = false;
+  private coreMutationWork = Promise.resolve();
+  private readonly core: CoreExecutionAuthority = {};
 
   constructor(
     private readonly bridge: WorkflowSnapshotProvider,
     private readonly adapter: WorkflowRunAdapter,
     private readonly leases: WorkflowLeaseStore,
     private readonly heartbeatEveryMs = 10_000,
+    private readonly options: WorkflowCoordinatorOptions = {},
   ) {}
 
   static create(bridge: WorkflowBridge, adapter: RunCliAdapter, workflowRoot: string): WorkflowCoordinator {
     return new WorkflowCoordinator(bridge, adapter, new WorkflowLeaseStore(workflowRoot));
   }
 
+  static legacyCompatible(
+    bridge: WorkflowSnapshotProvider,
+    adapter: WorkflowRunAdapter,
+    leases: WorkflowLeaseStore,
+    heartbeatEveryMs = 10_000,
+  ): WorkflowCoordinator {
+    return new WorkflowCoordinator(bridge, adapter, leases, heartbeatEveryMs, { legacyCompatibility: true });
+  }
+
+  mode(): WorkflowCoordinatorMode {
+    return this.selectedMode;
+  }
+
+  /** Negotiate authority once, optionally asserting the selected mode. */
+  async selectMode(expectedMode?: WorkflowCoordinatorMode): Promise<WorkflowCoordinatorMode> {
+    this.authoritySelection ??= this.initializeAuthority();
+    const selected = await this.authoritySelection;
+    if (expectedMode && expectedMode !== selected) {
+      throw new Error(
+        `Workflow coordinator cannot select ${expectedMode}; capability negotiation selected ${selected}`,
+      );
+    }
+    return selected;
+  }
+
   async attach(hostSessionId: string, explicitSessionId?: string): Promise<WorkflowAttachResult> {
+    const mode = await this.selectMode();
+    if (mode === "fail-closed") throw this.failClosedMutationError("attach");
+    if (mode === "core-execution") {
+      return this.attachCore(hostSessionId, explicitSessionId);
+    }
     const snapshot = await this.bridge.refresh();
     const session = snapshot.session;
     if (!session) throw new Error("No active canonical Workflow Session");
@@ -440,7 +538,9 @@ export class WorkflowCoordinator {
     this.startHeartbeat(lease);
     try {
       const run = activeWorkflowRun(snapshot);
-      const brief = run ? await this.adapter.brief(run.runId, session.sessionId) : undefined;
+      const brief = run
+        ? projectPublicRunCliResult(await this.adapter.brief(run.runId, session.sessionId))
+        : undefined;
       return { snapshot, ...(brief ? { brief } : {}), lease: leaseMetadata(lease) };
     } catch (error) {
       await this.stopHeartbeat();
@@ -453,21 +553,62 @@ export class WorkflowCoordinator {
     return this.bridge.getSnapshot();
   }
 
+  /** Reload canonical Workflow authority instead of returning the cached projection. */
+  refreshSnapshot(): Promise<WorkflowSnapshot> {
+    return this.bridge.refresh();
+  }
+
   async ownership(currentHostSessionId: string): Promise<WorkflowLeaseOwnership | undefined> {
-    const session = this.bridge.getSnapshot()?.session;
-    return session
-      ? this.leases.ownership(session.sessionId, requireHostSessionId(currentHostSessionId))
-      : undefined;
+    const mode = await this.selectMode();
+    const hostSessionId = requireHostSessionId(currentHostSessionId);
+    const snapshot = this.bridge.getSnapshot();
+    const session = snapshot?.session;
+    if (!session) return undefined;
+    if (mode !== "legacy-host") {
+      const lease = snapshot?.execution?.lease;
+      if (!lease) {
+        return {
+          sessionId: session.sessionId,
+          currentHostSessionId: hostSessionId,
+          state: "unowned",
+          isOwner: false,
+          isAttached: false,
+        };
+      }
+      const isOwner = lease.ownerId === hostSessionId;
+      return {
+        sessionId: session.sessionId,
+        currentHostSessionId: hostSessionId,
+        state: "owned",
+        ownerHostSessionId: lease.ownerId,
+        epoch: lease.epoch,
+        heartbeatAt: lease.heartbeatAt,
+        isOwner,
+        isAttached: Boolean(isOwner && this.core.claim && this.core.ownerId === hostSessionId),
+      };
+    }
+    return this.leases.ownership(session.sessionId, hostSessionId);
   }
 
   async supportsPlanPublish(): Promise<boolean> {
-    return this.adapter.supportsPlanPublish();
+    return await this.selectMode() !== "fail-closed" && this.adapter.supportsPlanPublish();
+  }
+
+  /** New-Session Plan publication is available only after authority negotiation succeeds. */
+  async supportsNewPlanSession(): Promise<boolean> {
+    const mode = await this.selectMode();
+    return mode === "core-execution" || mode === "legacy-host";
   }
 
   async publishPlan(
     options: RunPlanPublishOptions,
     context: WorkflowHostContext,
   ): Promise<WorkflowTransitionResult> {
+    const mode = await this.selectMode();
+    if (mode === "fail-closed") throw this.failClosedMutationError("plan publish");
+    if (mode === "core-execution") {
+      return this.publishPlanCore(options, context);
+    }
     const currentHostSessionId = requireHostSessionId(context.hostSessionId);
     let publishOptions = options;
     if (options.sessionId) {
@@ -512,42 +653,56 @@ export class WorkflowCoordinator {
         }
       }
     }
-    const command = await this.adapter.publishPlan(publishOptions);
+    const privateCommand = await this.adapter.publishPlan(publishOptions);
+    validatePlanPublishCommand(privateCommand, publishOptions);
+    const command = projectPublicRunCliResult(privateCommand);
     return { command, snapshot: await this.bridge.refresh() };
   }
 
   async prepare(step: string): Promise<RunCliResult> {
-    return this.adapter.prepare(step);
+    return projectPublicRunCliResult(await this.adapter.prepare(step));
   }
 
   async brief(runId?: string): Promise<RunCliResult> {
     const snapshot = await this.bridge.refresh();
     const session = requireSession(snapshot);
-    const target = runId ?? session.activeRunId;
+    const target = runId ?? activeWorkflowRun(snapshot)?.runId;
     if (!target) throw new Error("Workflow Session has no active Run");
-    return this.adapter.brief(target, session.sessionId);
+    return projectPublicRunCliResult(await this.adapter.brief(target, session.sessionId));
   }
 
   async check(runId?: string): Promise<RunCliResult> {
     const snapshot = await this.bridge.refresh();
     const session = requireSession(snapshot);
-    const target = runId ?? session.activeRunId;
+    const target = runId ?? activeWorkflowRun(snapshot)?.runId;
     if (!target) throw new Error("Workflow Session has no active Run");
     requireRun(session.runs, target);
-    return this.adapter.check(target, session.sessionId);
+    return projectPublicRunCliResult(await this.adapter.check(target, session.sessionId));
   }
 
   async next(pick?: string, context?: WorkflowHostContext): Promise<WorkflowTransitionResult> {
+    const mode = await this.selectMode();
+    if (mode === "fail-closed") throw this.failClosedMutationError("next");
+    if (mode === "core-execution") {
+      return this.exec(
+        ["run", "next", ...(pick ? ["--pick", pick] : []), "--json"],
+        { write: true, sessionless: false, mutation: "execution", lease: "required" },
+        context?.hostSessionId,
+      );
+    }
     const currentHostSessionId = requireHostSessionId(context?.hostSessionId);
     const snapshot = await this.bridge.refresh();
     const session = requireSession(snapshot);
     await this.requireMutationLease(session.sessionId, currentHostSessionId);
     const active = activeWorkflowRun(snapshot);
     if (active && ["created", "running", "blocked"].includes(active.status)) {
-      return { command: await this.adapter.brief(active.runId, session.sessionId), snapshot };
+      return {
+        command: projectPublicRunCliResult(await this.adapter.brief(active.runId, session.sessionId)),
+        snapshot,
+      };
     }
     await this.fenceLease(session.sessionId, currentHostSessionId);
-    const result = await this.adapter.next(session.sessionId, pick);
+    const result = projectPublicRunCliResult(await this.adapter.next(session.sessionId, pick));
     return { command: result, snapshot: await this.bridge.refresh() };
   }
 
@@ -556,13 +711,30 @@ export class WorkflowCoordinator {
     options: RunDoneOptions = {},
     context?: WorkflowHostContext,
   ): Promise<WorkflowTransitionResult> {
+    const mode = await this.selectMode();
+    if (mode === "fail-closed") throw this.failClosedMutationError("complete");
+    if (mode === "core-execution") {
+      const argv = ["run", "complete", runId, "--verdict", options.verdict ?? "done"];
+      if (options.summary) argv.push("--summary", options.summary);
+      if (options.reason) argv.push("--reason", options.reason);
+      for (const note of options.notes ?? []) argv.push("--note", note);
+      for (const decision of options.decisions ?? []) argv.push("--decision", decision);
+      for (const evidence of options.evidence ?? []) argv.push("--evidence", evidence);
+      for (const artifact of options.artifacts ?? []) argv.push("--artifact", artifact);
+      argv.push("--json");
+      return this.exec(
+        argv,
+        { write: true, sessionless: false, mutation: "execution", lease: "required" },
+        context?.hostSessionId,
+      );
+    }
     const currentHostSessionId = requireHostSessionId(context?.hostSessionId);
     const snapshot = await this.bridge.refresh();
     const session = requireSession(snapshot);
     await this.requireMutationLease(session.sessionId, currentHostSessionId);
     requireRun(session.runs, runId);
     await this.fenceLease(session.sessionId, currentHostSessionId);
-    const result = await this.adapter.done(runId, session.sessionId, options);
+    const result = projectPublicRunCliResult(await this.adapter.done(runId, session.sessionId, options));
     return { command: result, snapshot: await this.bridge.refresh() };
   }
 
@@ -571,11 +743,22 @@ export class WorkflowCoordinator {
     options: Omit<RunEditOptions, "sessionId"> = {},
     context?: WorkflowHostContext,
   ): Promise<WorkflowTransitionResult> {
+    const mode = await this.selectMode();
+    if (mode === "fail-closed") throw this.failClosedMutationError("edit");
+    if (mode === "core-execution") {
+      return this.exec(
+        ["run", "edit", ...commands, ...runEditArgv(options), "--json"],
+        { write: true, sessionless: false, mutation: "execution", lease: "required" },
+        context?.hostSessionId,
+      );
+    }
     const currentHostSessionId = requireHostSessionId(context?.hostSessionId);
     const snapshot = await this.bridge.refresh();
     const session = requireSession(snapshot);
     await this.fenceLease(session.sessionId, currentHostSessionId);
-    const result = await this.adapter.edit(commands, { ...options, sessionId: session.sessionId });
+    const result = projectPublicRunCliResult(
+      await this.adapter.edit(commands, { ...options, sessionId: session.sessionId }),
+    );
     return { command: result, snapshot: await this.bridge.refresh() };
   }
 
@@ -587,19 +770,26 @@ export class WorkflowCoordinator {
    */
   async exec(
     argv: readonly string[],
-    classification: { write: boolean; sessionless: boolean },
+    classification: WorkflowRunControlClassification,
     hostSessionId?: string,
   ): Promise<WorkflowTransitionResult> {
+    const mode = await this.selectMode();
+    if (mode === "fail-closed" && classification.write) {
+      throw this.failClosedMutationError(argv.slice(0, 3).join(" ") || "mutation");
+    }
+    if (mode === "core-execution") {
+      return this.execCore(argv, classification, hostSessionId);
+    }
     if (classification.write) {
       if (classification.sessionless) {
         this.requireSessionlessWrite(argv);
-      } else {
+      } else if (classification.lease !== "none") {
         const snapshot = await this.bridge.refresh();
         const session = requireSession(snapshot);
         await this.fenceLease(session.sessionId, hostSessionId);
       }
     }
-    const command = await this.adapter.exec(argv);
+    const command = projectPublicRunCliResult(await this.adapter.exec(argv));
     return { command, snapshot: await this.bridge.refresh() };
   }
 
@@ -612,13 +802,14 @@ export class WorkflowCoordinator {
     if (hasBlockingFailure(session.gates) || hasBlockingFailure(run.gates)) {
       throw new Error("Blocking gate failure prevents continuation");
     }
-    const lease = this.leases.current();
-    if (!lease || lease.sessionId !== session.sessionId) throw new Error("Workflow continuation lease is not held");
+    const epoch = this.selectedMode === "core-execution"
+      ? this.requireCoreContinuationEpoch(session.sessionId)
+      : this.requireLegacyContinuationEpoch(session.sessionId);
     const marker: ContinuationMarker = {
       sessionId: session.sessionId,
       runId: run.runId,
       iteration,
-      epoch: lease.epoch,
+      epoch,
       nonce: randomUUID(),
     };
     this.pendingContinuation = marker;
@@ -628,29 +819,33 @@ export class WorkflowCoordinator {
   acceptsContinuation(markerText: string): boolean {
     const marker = parseMarker(markerText);
     const expected = this.pendingContinuation;
-    const lease = this.leases.current();
+    const currentEpoch = this.selectedMode === "core-execution"
+      ? this.core.fence?.lease_epoch ?? undefined
+      : this.leases.current()?.epoch;
     const snapshot = this.bridge.getSnapshot();
     const run = snapshot ? activeWorkflowRun(snapshot) : undefined;
     const accepted = Boolean(
       marker
       && expected
-      && lease
+      && currentEpoch !== undefined
       && snapshot?.session
       && run
       && run.status === "running"
       && !hasBlockingFailure(snapshot.session.gates)
       && !hasBlockingFailure(run.gates)
       && sameMarker(marker, expected)
-      && marker.sessionId === lease.sessionId
       && marker.sessionId === snapshot.session.sessionId
       && marker.runId === run.runId
-      && marker.epoch === lease.epoch,
+      && marker.epoch === currentEpoch,
     );
     if (accepted) this.pendingContinuation = undefined;
     return accepted;
   }
 
   async fenceContinuation(): Promise<void> {
+    this.pendingContinuation = undefined;
+    if (this.selectedMode === "fail-closed") throw this.failClosedMutationError("continuation fence");
+    if (this.selectedMode === "core-execution") return;
     const snapshot = await this.bridge.refresh();
     const session = requireSession(snapshot);
     await this.fenceLease(session.sessionId);
@@ -658,12 +853,783 @@ export class WorkflowCoordinator {
 
   async release(): Promise<void> {
     this.pendingContinuation = undefined;
+    if (this.selectedMode === "fail-closed") return;
+    if (this.selectedMode === "core-execution") {
+      this.stopCoreHeartbeat();
+      try {
+        if (this.core.claim && this.core.locator && this.core.fence) {
+          await this.execCore(
+            ["execution", "lease", "release", "--json"],
+            { write: true, sessionless: false, mutation: "execution-lease", lease: "required" },
+            this.core.ownerId,
+          );
+        }
+      } finally {
+        this.clearCoreAuthority();
+      }
+      return;
+    }
     await this.stopHeartbeat();
     try {
       await this.leases.release();
     } catch (error) {
       throw new Error(publicWorkflowErrorMessage(error));
     }
+  }
+
+  private async attachCore(hostSessionId: string, explicitSessionId?: string): Promise<WorkflowAttachResult> {
+    const ownerId = requireHostSessionId(hostSessionId);
+    this.requireCoreCapabilities();
+    const snapshot = await this.bridge.refresh();
+    const session = requireSession(snapshot);
+    if (explicitSessionId && explicitSessionId !== session.sessionId) {
+      throw new Error(`Active Workflow Session is ${session.sessionId}, not ${explicitSessionId}`);
+    }
+    const locator = requireCoreExecutionLocator(snapshot);
+    const transition = await this.execCore(
+      ["execution", "attach", "--json"],
+      { write: true, sessionless: false, mutation: "execution-acquire", lease: "acquire" },
+      ownerId,
+    );
+    const run = activeWorkflowRun(transition.snapshot);
+    const brief = run
+      ? projectPublicRunCliResult(await this.adapter.brief(run.runId, session.sessionId))
+      : undefined;
+    const fence = requireCoreFence(this.core.fence);
+    return {
+      snapshot: transition.snapshot,
+      ...(brief ? { brief } : {}),
+      lease: {
+        sessionId: locator.sessionId,
+        executionId: locator.executionId,
+        generation: locator.generation,
+        ownerId,
+        epoch: requiredRevision(fence.lease_epoch, "lease epoch"),
+        executionRevision: requiredRevision(fence.execution_revision, "execution revision"),
+      },
+    };
+  }
+
+  private async publishPlanCore(
+    options: RunPlanPublishOptions,
+    context: WorkflowHostContext,
+  ): Promise<WorkflowTransitionResult> {
+    this.requireCoreCapabilities();
+    const hostSessionId = requireHostSessionId(context.hostSessionId);
+    if (!options.sessionId) {
+      const mutation = this.coreMutationWork.then(
+        () => this.performCoreNewPlanPublish(options, hostSessionId),
+      );
+      this.coreMutationWork = mutation.then(() => undefined, () => undefined);
+      return mutation;
+    }
+    let snapshot = await this.bridge.refresh();
+    const session = requireSession(snapshot);
+    if (options.sessionId && session.sessionId !== options.sessionId) {
+      throw new Error(
+        `Approved Plan targets Workflow Session ${options.sessionId}, but the active canonical Session is ${session.sessionId}`,
+      );
+    }
+
+    if (!optionalCoreExecutionLocator(snapshot)) {
+      if (snapshot.execution || snapshot.locator?.executionId) {
+        throw new Error("Core Plan publication refused: canonical Execution locator is incomplete");
+      }
+      await this.execCore(
+        ["execution", "start", "--reason", "Publish approved Pi Plan", "--evidence", `pi-plan:${options.handoffKey}`],
+        { write: true, sessionless: false, mutation: "execution-acquire", lease: "acquire" },
+        hostSessionId,
+      );
+      snapshot = await this.bridge.refresh();
+      requireSession(snapshot);
+    }
+
+    const publishOptions = this.corePlanPublishOptions(options, hostSessionId, snapshot);
+
+    const mutation = this.coreMutationWork.then(() => this.performCorePlanPublish(publishOptions, hostSessionId));
+    this.coreMutationWork = mutation.then(() => undefined, () => undefined);
+    return mutation;
+  }
+
+  private async performCoreNewPlanPublish(
+    options: RunPlanPublishOptions,
+    hostSessionId: string,
+  ): Promise<WorkflowTransitionResult> {
+    this.requireCoreCapabilities();
+    const requestId = options.requestId || derivePlanPublishRequestId(options.handoffKey);
+    const sessionId = derivePlanSessionId(options.handoffKey);
+    const startRequestId = derivePlanExecutionStartRequestId(options.handoffKey);
+    const intent = requiredPlanIntent(options.intent ?? options.topic, options.handoffKey);
+
+    let snapshot = await this.bridge.refresh();
+    if (snapshot.session?.sessionId !== sessionId) {
+      try {
+        const created = await this.adapter.exec([
+          "session", "create", intent,
+          "--id", sessionId,
+          "--intent", intent,
+          "--json",
+        ]);
+        const envelope = parseRunResponse(created.stdout);
+        if (created.exitCode === 0) {
+          validateCorePlanSessionCreate(envelope, sessionId);
+        } else if (!isRecoverablePlanSessionCreate(envelope, sessionId)) {
+          throw new Error(
+            `${envelope.error?.code ?? "UNKNOWN"}: ${envelope.error?.message ?? "unknown failure"}`,
+          );
+        }
+        snapshot = await this.bridge.refresh();
+        validateCorePlanSessionSnapshot(snapshot, sessionId, intent);
+      } catch (error) {
+        throw new Error(
+          `Core Plan identity step for deterministic Session ${sessionId} can be retried with the same approved Plan: `
+          + publicWorkflowErrorMessage(error),
+        );
+      }
+    } else {
+      validateCorePlanSessionSnapshot(snapshot, sessionId, intent);
+    }
+
+    if (!this.hasCorePlanClaim(snapshot, sessionId, hostSessionId)) {
+      await this.acquireCorePlanExecution(sessionId, startRequestId, hostSessionId);
+      snapshot = await this.bridge.refresh();
+    }
+    const locator = requireCoreExecutionLocator(snapshot);
+    if (locator.sessionId !== sessionId || locator.generation !== 1) {
+      throw new Error(
+        `Core Plan recovery expected Session ${sessionId} generation 1, but canonical authority is `
+        + `${locator.sessionId} generation ${locator.generation}`,
+      );
+    }
+
+    try {
+      const publishOptions = this.corePlanPublishOptions(
+        { ...options, sessionId, requestId },
+        hostSessionId,
+        snapshot,
+      );
+      return await this.performCorePlanPublish(publishOptions, hostSessionId);
+    } catch (error) {
+      if (this.core.claim) this.startCoreHeartbeat();
+      throw new Error(
+        `Core Plan publication for deterministic Session ${sessionId} can be retried with the same approved Plan: `
+        + publicWorkflowErrorMessage(error),
+      );
+    }
+  }
+
+  private async acquireCorePlanExecution(
+    sessionId: string,
+    requestId: string,
+    hostSessionId: string,
+  ): Promise<void> {
+    let commandDispatched = false;
+    try {
+      commandDispatched = true;
+      const privateCommand = await this.adapter.exec([
+        "execution", "start",
+        "--session", sessionId,
+        "--request-id", requestId,
+        "--execution-owner", hostSessionId,
+        "--owner-kind", "pi",
+        "--expected-lease-epoch", "0",
+        "--expected-identity-revision", "1",
+        "--expected-activity-revision", "0",
+        "--actor", hostSessionId,
+        "--reason", "Start generation 1 for approved Pi Plan",
+        "--evidence", `pi-session:${hostSessionId}`,
+        "--json",
+      ]);
+      const envelope = parseRunResponse(privateCommand.stdout);
+      if (privateCommand.exitCode !== 0 || envelope.schema_version !== "run-response/1.1"
+        || envelope.operation !== "execution-start") {
+        throw new Error(
+          `${envelope.error?.code ?? "EXECUTION_START_FAILED"}: `
+          + `${envelope.error?.message ?? "generation-1 acquisition failed"}`,
+        );
+      }
+      const candidate = this.stageCoreMutationResponse(
+        envelope,
+        "execution-acquire",
+        "acquire",
+        hostSessionId,
+        true,
+      );
+      validateCorePlanExecutionStart(envelope, sessionId, requestId, candidate);
+      const refreshed = await this.bridge.refresh();
+      this.validateCorePostcondition(refreshed, envelope, candidate);
+      this.commitCoreMutation(candidate);
+      if (this.core.claim) this.startCoreHeartbeat();
+    } catch (error) {
+      if (commandDispatched) this.loseCoreClaim();
+      throw new Error(
+        `Core Plan Execution start for deterministic Session ${sessionId} is recoverable with request_id ${requestId}: `
+        + publicWorkflowErrorMessage(error),
+      );
+    }
+  }
+
+  private hasCorePlanClaim(
+    snapshot: WorkflowSnapshot,
+    sessionId: string,
+    hostSessionId: string,
+  ): boolean {
+    const locator = optionalCoreExecutionLocator(snapshot);
+    if (!locator || locator.sessionId !== sessionId || locator.generation !== 1) return false;
+    const fence = this.core.fence;
+    const lease = snapshot.execution?.lease;
+    return Boolean(
+      this.core.claim
+      && this.core.ownerId === hostSessionId
+      && fence
+      && lease
+      && lease.sessionId === sessionId
+      && lease.executionId === locator.executionId
+      && lease.ownerId === hostSessionId
+      && lease.epoch === fence.lease_epoch,
+    );
+  }
+
+  private corePlanPublishOptions(
+    options: RunPlanPublishOptions,
+    hostSessionId: string,
+    snapshot: WorkflowSnapshot,
+  ): RunPlanPublishOptions {
+    const session = requireSession(snapshot);
+    const locator = requireCoreExecutionLocator(snapshot);
+    if (options.sessionId && locator.sessionId !== options.sessionId) {
+      throw new Error("Core Plan publication refused: current Execution belongs to a different Session");
+    }
+    const claim = this.core.claim;
+    const fence = requireCoreFence(this.core.fence ?? coreFenceFromSnapshot(snapshot));
+    if (!claim || this.core.ownerId !== hostSessionId) {
+      throw new Error("Core Plan publication refused: no valid transient core lease claim is held");
+    }
+    const lease = snapshot.execution?.lease;
+    const leaseEpoch = requiredRevision(fence.lease_epoch, "lease epoch");
+    if (!lease
+      || lease.sessionId !== locator.sessionId
+      || lease.executionId !== locator.executionId
+      || lease.ownerId !== hostSessionId
+      || lease.epoch !== leaseEpoch) {
+      throw new Error("Core Plan publication refused: canonical snapshot does not confirm the held core lease");
+    }
+    if (snapshot.execution?.status !== "active" || snapshot.execution.activeRunId) {
+      throw new Error(
+        `Core Plan publication requires an idle active Execution; current Run is ${snapshot.execution?.activeRunId ?? "<none>"}`,
+      );
+    }
+    if (snapshot.execution.chain.length > 0
+      && !snapshot.execution.chain.some((step) => step.command === "execute" && step.status === "pending")) {
+      throw new Error("Core Plan publication requires an empty chain or a pending execute step in the current Execution");
+    }
+
+    return {
+      ...options,
+      sessionId: locator.sessionId,
+      sourcePiSession: options.sourcePiSession || hostSessionId,
+      expectedIdentityRevision: session.identityRevision ?? session.revision,
+      expectedActivityRevision: session.activityRevision ?? session.revision,
+      requestId: options.requestId || derivePlanPublishRequestId(options.handoffKey),
+      executionId: locator.executionId,
+      generation: locator.generation,
+      expectedExecutionRevision: requiredRevision(fence.execution_revision, "execution revision"),
+      executionOwner: hostSessionId,
+      ownerKind: "pi",
+      ownerEpoch: leaseEpoch,
+      leaseId: claim.lease_id,
+      actor: hostSessionId,
+      reason: options.reason || "Publish approved Pi Plan into current Execution",
+      evidence: options.evidence?.length ? options.evidence : [`pi-session:${hostSessionId}`],
+    };
+  }
+
+  private async performCorePlanPublish(
+    options: RunPlanPublishOptions,
+    hostSessionId: string,
+  ): Promise<WorkflowTransitionResult> {
+    let commandDispatched = false;
+    try {
+      const snapshot = await this.bridge.refresh();
+      const locator = requireCoreExecutionLocator(snapshot);
+      this.assertCoreLocatorBinding(locator);
+      if (!this.core.claim || this.core.ownerId !== hostSessionId) {
+        throw new Error("Core Plan publication refused: no valid transient core lease claim is held");
+      }
+      commandDispatched = true;
+      const privateCommand = await this.adapter.publishPlan(options);
+      const envelope = parseRunResponse(privateCommand.stdout);
+      validatePlanPublishEnvelope(
+        envelope,
+        options.handoffKey,
+        requiredPlanPublishRequestId(options),
+      );
+      if (envelope.schema_version !== "run-response/1.1" || envelope.operation !== "plan-publish") {
+        throw new Error("Core Plan publication requires a plan-publish run-response/1.1 result");
+      }
+      const candidate = this.stageCoreMutationResponse(
+        envelope,
+        "execution",
+        "required",
+        hostSessionId,
+      );
+      const command = projectPublicRunCliResult({
+        ...privateCommand,
+        stdout: JSON.stringify(projectPublicRunResponse(envelope)),
+      });
+      const refreshed = await this.bridge.refresh();
+      this.validateCorePostcondition(refreshed, envelope, candidate);
+      this.commitCoreMutation(candidate);
+      return { command, snapshot: refreshed };
+    } catch (error) {
+      if (commandDispatched && !await this.recoverCorePlanClaim(hostSessionId)) this.loseCoreClaim();
+      throw new Error(publicWorkflowErrorMessage(error));
+    }
+  }
+
+  private async recoverCorePlanClaim(hostSessionId: string): Promise<boolean> {
+    const claim = this.core.claim;
+    const previousLocator = this.core.locator;
+    if (!claim || !previousLocator || this.core.ownerId !== hostSessionId) return false;
+    try {
+      const snapshot = await this.bridge.refresh();
+      const locator = requireCoreExecutionLocator(snapshot);
+      const lease = snapshot.execution?.lease;
+      if (!sameCoreLocator(locator, previousLocator)
+        || !lease
+        || lease.sessionId !== locator.sessionId
+        || lease.executionId !== locator.executionId
+        || lease.ownerId !== hostSessionId
+        || lease.epoch < 1) return false;
+      this.core.locator = locator;
+      this.core.fence = coreFenceFromSnapshot(snapshot);
+      this.core.lastLeaseEpoch = Math.max(this.core.lastLeaseEpoch ?? 0, lease.epoch);
+      this.startCoreHeartbeat();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async execCore(
+    argv: readonly string[],
+    classification: WorkflowRunControlClassification,
+    hostSessionId?: string,
+  ): Promise<WorkflowTransitionResult> {
+    if (!classification.write) {
+      const command = projectPublicRunCliResult(await this.adapter.exec(argv));
+      return { command, snapshot: await this.bridge.refresh() };
+    }
+
+    const mutation = this.coreMutationWork.then(
+      () => this.performCoreMutation(argv, classification, hostSessionId),
+    );
+    this.coreMutationWork = mutation.then(() => undefined, () => undefined);
+    const transition = await mutation;
+    if (classification.lease === "acquire" && this.core.claim) this.startCoreHeartbeat();
+    if (!this.core.claim) this.stopCoreHeartbeat();
+    return transition;
+  }
+
+  private async performCoreMutation(
+    argv: readonly string[],
+    classification: WorkflowRunControlClassification,
+    hostSessionId?: string,
+  ): Promise<WorkflowTransitionResult> {
+    let commandDispatched = false;
+    try {
+      this.requireCoreCapabilities();
+      const snapshot = await this.bridge.refresh();
+      const mutation = classification.mutation ?? "execution";
+      const leaseMode = classification.lease ?? "required";
+      const prepared = this.prepareCoreMutationArgv(argv, snapshot, mutation, leaseMode, hostSessionId);
+      commandDispatched = true;
+      const privateCommand = await this.adapter.exec(prepared);
+      const envelope = parseRunResponse(privateCommand.stdout);
+      if (envelope.schema_version !== "run-response/1.1") {
+        throw new Error("Core-execution mutation requires a run-response/1.1 result");
+      }
+      const expectedOperation = expectedCoreOperation(argv);
+      if (expectedOperation && envelope.operation !== expectedOperation) {
+        throw new Error(
+          `Core-execution mutation returned operation ${envelope.operation}, expected ${expectedOperation}`,
+        );
+      }
+      const candidate = this.stageCoreMutationResponse(
+        envelope,
+        mutation,
+        leaseMode,
+        hostSessionId,
+        isExecutionStart(argv),
+      );
+      const command = projectPublicRunCliResult({
+        ...privateCommand,
+        stdout: JSON.stringify(projectPublicRunResponse(envelope)),
+      });
+      const refreshed = await this.bridge.refresh();
+      this.validateCorePostcondition(refreshed, envelope, candidate);
+      this.commitCoreMutation(candidate);
+      return { command, snapshot: refreshed };
+    } catch (error) {
+      // After dispatch, a write may have committed even when transport,
+      // parsing, or canonical reload failed. Preflight refusal is known not to
+      // have mutated authority, so the current claim remains valid.
+      if (commandDispatched) this.loseCoreClaim();
+      throw new Error(publicWorkflowErrorMessage(error));
+    }
+  }
+
+  private prepareCoreMutationArgv(
+    argv: readonly string[],
+    snapshot: WorkflowSnapshot,
+    mutation: NonNullable<WorkflowRunControlClassification["mutation"]>,
+    leaseMode: NonNullable<WorkflowRunControlClassification["lease"]>,
+    hostSessionId?: string,
+  ): string[] {
+    const prepared = [...argv];
+    if (mutation === "session") {
+      const command = argv[1] ?? argv[0];
+      if (command !== "create") {
+        const session = requireSession(snapshot);
+        addFlag(prepared, "--session", session.sessionId);
+        addFlag(prepared, "--expected-identity-revision", String(session.identityRevision ?? session.revision));
+        addFlag(prepared, "--expected-activity-revision", String(session.activityRevision ?? session.revision));
+      }
+      addFlagIfMissing(prepared, "--request-id", randomUUID());
+      if (hostSessionId) {
+        const actor = requireHostSessionId(hostSessionId);
+        addFlag(prepared, "--actor", actor);
+        if (command !== "create") {
+          addFlagIfMissing(prepared, "--reason", `Pi coordinator session-${command}`);
+          addFlagIfMissing(prepared, "--evidence", `pi-session:${actor}`);
+        }
+      }
+      addBooleanFlag(prepared, "--json");
+      return prepared;
+    }
+
+    const ownerId = requireHostSessionId(hostSessionId);
+    const starting = mutation === "execution-acquire" && isExecutionStart(argv);
+    const locator = starting
+      ? { sessionId: requireSession(snapshot).sessionId }
+      : requireCoreExecutionLocator(snapshot);
+    if ("executionId" in locator) this.assertCoreLocatorBinding(locator);
+    addFlag(prepared, "--session", locator.sessionId);
+    if ("executionId" in locator) addFlag(prepared, "--execution", locator.executionId);
+    addFlagIfMissing(prepared, "--request-id", randomUUID());
+
+    const snapshotFence = coreFenceFromSnapshot(snapshot);
+    const observedFence = this.core.fence ?? snapshotFence;
+    if (requiresActivityRevision(argv)) {
+      addFlag(
+        prepared,
+        "--expected-activity-revision",
+        String(requiredRevision(observedFence.session_activity_revision, "session activity revision")),
+      );
+    }
+    if (leaseMode === "acquire") {
+      addFlag(prepared, "--execution-owner", ownerId);
+      addFlag(prepared, "--owner-kind", "pi");
+      addFlag(prepared, "--expected-lease-epoch", String(this.core.lastLeaseEpoch ?? observedFence.lease_epoch ?? 0));
+      if (observedFence.execution_revision !== null) {
+        addFlag(prepared, "--expected-execution-revision", String(observedFence.execution_revision));
+      }
+      if (isExecutionStart(argv)) {
+        addFlag(
+          prepared,
+          "--expected-identity-revision",
+          String(requiredRevision(observedFence.session_identity_revision, "session identity revision")),
+        );
+      }
+    } else {
+      const fence = requireCoreFence(this.core.fence ?? snapshotFence);
+      addFlag(
+        prepared,
+        "--expected-execution-revision",
+        String(requiredRevision(fence.execution_revision, "execution revision")),
+      );
+      if (leaseMode === "required") {
+        const claim = this.core.claim;
+        if (!claim) throw new Error("Core-execution mutation refused: no transient core lease claim is held");
+        if (this.core.ownerId !== ownerId) {
+          throw new Error(
+            `Core-execution mutation claim belongs to Pi session ${this.core.ownerId ?? "unknown"}, `
+            + `but this call came from Pi session ${ownerId}`,
+          );
+        }
+        addFlag(prepared, "--execution-owner", ownerId);
+        addFlag(prepared, "--owner-kind", "pi");
+        addFlag(prepared, "--owner-epoch", String(requiredRevision(fence.lease_epoch, "lease epoch")));
+        addFlag(prepared, "--lease-id", claim.lease_id);
+      }
+    }
+    if (requiresExecutionAudit(argv)) {
+      addFlag(prepared, "--actor", ownerId);
+      addFlagIfMissing(prepared, "--reason", `Pi coordinator ${expectedCoreOperation(argv) ?? "mutation"}`);
+      addFlagIfMissing(prepared, "--evidence", `pi-session:${ownerId}`);
+    }
+    addBooleanFlag(prepared, "--json");
+    return prepared;
+  }
+
+  private stageCoreMutationResponse(
+    envelope: PrivateRunResponseEnvelope,
+    mutation: NonNullable<WorkflowRunControlClassification["mutation"]>,
+    leaseMode: NonNullable<WorkflowRunControlClassification["lease"]>,
+    hostSessionId?: string,
+    allowsNewLocator = false,
+  ): CoreMutationCandidate | undefined {
+    if (envelope.schema_version !== "run-response/1.1") {
+      throw new Error("Core-execution mutation requires a run-response/1.1 result");
+    }
+    if (!envelope.ok) {
+      const code = envelope.error?.code ?? "UNKNOWN";
+      const message = envelope.error?.message ?? "Core-execution mutation failed";
+      throw new Error(`${code}: ${message}`);
+    }
+    if (mutation === "session") return undefined;
+    const locator = runResponseCoreLocator(envelope);
+    const fence = requireCoreFence(envelope.fence);
+    if (!allowsNewLocator && this.core.locator && !sameCoreLocator(this.core.locator, locator)) {
+      throw new Error("Core-execution mutation returned a different Execution locator");
+    }
+    let claim: RunLeaseClaim | undefined;
+    let ownerId: string | undefined;
+    if (leaseMode === "acquire") {
+      claim = extractRunResponseLeaseClaim(envelope) ?? undefined;
+      if (!claim) throw new Error("Core-execution acquisition returned no private lease claim");
+      ownerId = requireHostSessionId(hostSessionId);
+    }
+    return {
+      locator,
+      fence,
+      ...(claim ? { claim } : {}),
+      ...(ownerId ? { ownerId } : {}),
+      releasesLease: releasesCoreLease(envelope.operation),
+    };
+  }
+
+  private commitCoreMutation(candidate: CoreMutationCandidate | undefined): void {
+    if (!candidate) return;
+    this.core.locator = candidate.locator;
+    this.core.fence = candidate.fence;
+    if (candidate.fence.lease_epoch !== null) {
+      this.core.lastLeaseEpoch = Math.max(this.core.lastLeaseEpoch ?? 0, candidate.fence.lease_epoch);
+    }
+    if (candidate.claim) {
+      this.core.claim = candidate.claim;
+      this.core.ownerId = candidate.ownerId;
+    }
+    if (candidate.releasesLease) {
+      this.core.claim = undefined;
+      this.core.ownerId = undefined;
+    }
+  }
+
+  private requireCoreCapabilities(): RunCliCapabilities {
+    const capabilities = this.core.capabilities;
+    if (!capabilities || !hasCompleteCoreCapabilities(capabilities)) {
+      throw new Error(
+        "Core-execution mutation refused: structured session_statusless, execution_generation, "
+        + "core_execution_lease, and run-response/1.1 support are all required",
+      );
+    }
+    return capabilities;
+  }
+
+  private observeCoreSnapshot(snapshot: WorkflowSnapshot): void {
+    const locator = optionalCoreExecutionLocator(snapshot);
+    if (!locator) {
+      if (snapshot.locator?.executionId || snapshot.execution) {
+        throw new Error("Canonical Workflow snapshot contains an incomplete core Execution locator");
+      }
+      return;
+    }
+    this.assertCoreLocatorBinding(locator);
+    this.core.locator = locator;
+    if (!this.core.fence) this.core.fence = coreFenceFromSnapshot(snapshot);
+    const observedEpoch = snapshot.execution?.lease?.epoch;
+    if (observedEpoch !== undefined) {
+      this.core.lastLeaseEpoch = Math.max(this.core.lastLeaseEpoch ?? 0, observedEpoch);
+    }
+  }
+
+  private validateCorePostcondition(
+    snapshot: WorkflowSnapshot,
+    envelope: PrivateRunResponseEnvelope,
+    candidate: CoreMutationCandidate | undefined,
+  ): void {
+    if (!candidate || envelope.schema_version !== "run-response/1.1") return;
+    const operation = envelope.operation;
+    if (operation === "execution-seal") {
+      const session = requireSession(snapshot);
+      if (
+        session.sessionId !== candidate.locator.sessionId
+        || snapshot.locator?.executionId
+        || snapshot.execution
+      ) {
+        throw new Error("Canonical Workflow snapshot does not prove the sealed Execution was cleared");
+      }
+      return;
+    }
+
+    const locator = requireCoreExecutionLocator(snapshot);
+    if (!sameCoreLocator(locator, candidate.locator)) {
+      throw new Error("Canonical Workflow Execution locator does not match the core mutation response");
+    }
+    const execution = snapshot.execution!;
+    const responseRevision = requiredRevision(candidate.fence.execution_revision, "execution revision");
+    if (execution.revision !== responseRevision) {
+      throw new Error("Canonical Workflow Execution revision does not match the core mutation response");
+    }
+    if (operation === "execution-pause") {
+      if (execution.status !== "paused" || execution.lease !== null) {
+        throw new Error("Canonical Workflow snapshot does not prove pause released the core lease");
+      }
+      return;
+    }
+    if (operation === "execution-lease-release") {
+      if (execution.lease !== null) {
+        throw new Error("Canonical Workflow snapshot does not prove the core lease was released");
+      }
+      return;
+    }
+    if (!candidate.releasesLease) {
+      const claimOwner = candidate.ownerId ?? this.core.ownerId;
+      const claim = candidate.claim ?? this.core.claim;
+      if (claim) {
+        const lease = execution.lease;
+        const epoch = requiredRevision(candidate.fence.lease_epoch, "lease epoch");
+        if (
+          !lease
+          || lease.sessionId !== locator.sessionId
+          || lease.executionId !== locator.executionId
+          || lease.ownerId !== claimOwner
+          || lease.epoch !== epoch
+        ) {
+          throw new Error("Canonical Workflow snapshot does not confirm the current core lease owner and epoch");
+        }
+      }
+    }
+  }
+
+  private assertCoreLocatorBinding(locator: CoreExecutionLocator): void {
+    if (this.core.locator && !sameCoreLocator(this.core.locator, locator)) {
+      throw new Error("Canonical Workflow Execution changed while a core lease claim is held");
+    }
+  }
+
+  private requireCoreContinuationEpoch(sessionId: string): number {
+    if (this.core.locator?.sessionId !== sessionId || !this.core.claim) {
+      throw new Error("Workflow continuation core lease claim is not held");
+    }
+    return requiredRevision(this.core.fence?.lease_epoch ?? null, "lease epoch");
+  }
+
+  private requireLegacyContinuationEpoch(sessionId: string): number {
+    const lease = this.leases.current();
+    if (!lease || lease.sessionId !== sessionId) throw new Error("Workflow continuation lease is not held");
+    return lease.epoch;
+  }
+
+  private clearCoreAuthority(): void {
+    this.core.claim = undefined;
+    this.core.fence = undefined;
+    this.core.locator = undefined;
+    this.core.ownerId = undefined;
+    this.core.lastLeaseEpoch = undefined;
+  }
+
+  private loseCoreClaim(): void {
+    this.stopCoreHeartbeat();
+    this.pendingContinuation = undefined;
+    this.core.claim = undefined;
+    this.core.fence = undefined;
+    this.core.ownerId = undefined;
+  }
+
+  private async initializeAuthority(): Promise<WorkflowCoordinatorMode> {
+    this.pendingContinuation = undefined;
+    await this.stopHeartbeat();
+    try {
+      await this.leases.release();
+    } catch (error) {
+      this.authorityDiagnostic = `legacy authority teardown failed: ${publicWorkflowErrorMessage(error)}`;
+      this.selectedMode = "fail-closed";
+      return this.selectedMode;
+    }
+    if (!this.adapter.capabilities) {
+      this.authorityDiagnostic = "adapter exposes no structured core authority capabilities";
+      this.selectedMode = this.options.legacyCompatibility ? "legacy-host" : "fail-closed";
+      return this.selectedMode;
+    }
+    let capabilities: RunCliCapabilities;
+    try {
+      capabilities = await this.adapter.capabilities();
+    } catch (error) {
+      this.authorityDiagnostic = `capability negotiation failed: ${publicWorkflowErrorMessage(error)}`;
+      this.selectedMode = "fail-closed";
+      return this.selectedMode;
+    }
+    this.core.capabilities = capabilities;
+    this.authorityDiagnostic = capabilities.diagnostic ?? undefined;
+    if (capabilities.mode === "legacy") {
+      this.authorityDiagnostic ??= "installed CLI exposes legacy read compatibility only";
+      this.selectedMode = this.options.legacyCompatibility ? "legacy-host" : "fail-closed";
+      return this.selectedMode;
+    }
+    if (!hasCompleteCoreCapabilities(capabilities)) {
+      this.authorityDiagnostic ??= "installed CLI does not expose complete core-execution capabilities";
+      this.selectedMode = "fail-closed";
+      return this.selectedMode;
+    }
+    try {
+      this.observeCoreSnapshot(await this.bridge.refresh());
+    } catch (error) {
+      this.authorityDiagnostic = `canonical Execution negotiation failed: ${publicWorkflowErrorMessage(error)}`;
+      this.selectedMode = "fail-closed";
+      return this.selectedMode;
+    }
+    this.selectedMode = "core-execution";
+    return this.selectedMode;
+  }
+
+  private failClosedMutationError(operation: string): Error {
+    const diagnostic = this.authorityDiagnostic ? ` (${this.authorityDiagnostic})` : "";
+    return new Error(
+      `Workflow mutation refused for ${operation}: coordinator authority mode is fail-closed${diagnostic}`,
+    );
+  }
+
+  private startCoreHeartbeat(): void {
+    this.stopCoreHeartbeat();
+    const generation = ++this.coreHeartbeatGeneration;
+    const timer = setInterval(() => {
+      if (
+        this.coreHeartbeatGeneration !== generation
+        || this.coreHeartbeatPending
+        || !this.core.claim
+        || !this.core.ownerId
+      ) return;
+      this.coreHeartbeatPending = true;
+      void this.execCore(
+        ["execution", "lease", "heartbeat", "--json"],
+        { write: true, sessionless: false, mutation: "execution-lease", lease: "required" },
+        this.core.ownerId,
+      ).catch(() => {
+        if (this.coreHeartbeatGeneration === generation) this.loseCoreClaim();
+      }).finally(() => {
+        this.coreHeartbeatPending = false;
+      });
+    }, this.heartbeatEveryMs);
+    timer.unref?.();
+    this.coreHeartbeatTimer = timer;
+  }
+
+  private stopCoreHeartbeat(): void {
+    this.coreHeartbeatGeneration += 1;
+    if (this.coreHeartbeatTimer) clearInterval(this.coreHeartbeatTimer);
+    this.coreHeartbeatTimer = undefined;
   }
 
   private async fenceLease(sessionId: string, currentHostSessionId?: string): Promise<void> {
@@ -759,6 +1725,259 @@ export class WorkflowCoordinator {
   }
 }
 
+function runEditArgv(options: Omit<RunEditOptions, "sessionId">): string[] {
+  return [
+    ...(options.after ? ["--after", options.after] : []),
+    ...(options.replace ? ["--replace", options.replace] : []),
+    ...(options.remove ? ["--remove", options.remove] : []),
+    ...(options.args ? ["--args", options.args] : []),
+    ...(options.stage ? ["--stage", options.stage] : []),
+    ...(options.goalRef ? ["--goal-ref", options.goalRef] : []),
+    ...(options.insertedBy ? ["--inserted-by", options.insertedBy] : []),
+  ];
+}
+
+function optionalCoreExecutionLocator(snapshot: WorkflowSnapshot): CoreExecutionLocator | undefined {
+  const locator = snapshot.locator;
+  const execution = snapshot.execution;
+  if (
+    snapshot.source !== "canonical"
+    || !locator?.executionId
+    || locator.generation === undefined
+    || !execution
+    || execution.legacyProjection
+    || execution.executionId !== locator.executionId
+    || execution.sessionId !== locator.sessionId
+    || execution.generation !== locator.generation
+  ) return undefined;
+  return {
+    sessionId: locator.sessionId,
+    executionId: locator.executionId,
+    generation: locator.generation,
+  };
+}
+
+function requireCoreExecutionLocator(snapshot: WorkflowSnapshot): CoreExecutionLocator {
+  const locator = optionalCoreExecutionLocator(snapshot);
+  if (!locator) {
+    throw new Error(
+      "Core-execution mutation refused: a current non-legacy Session/Execution/generation locator is required",
+    );
+  }
+  return locator;
+}
+
+function coreFenceFromSnapshot(snapshot: WorkflowSnapshot): RunResponseFenceV11 {
+  const session = requireSession(snapshot);
+  return {
+    session_identity_revision: session.identityRevision ?? session.revision,
+    session_activity_revision: session.activityRevision ?? session.revision,
+    execution_revision: snapshot.revision.executionRevision ?? snapshot.execution?.revision ?? null,
+    lease_epoch: snapshot.execution?.lease?.epoch ?? null,
+  };
+}
+
+function requireCoreFence(fence: RunResponseFenceV11 | null | undefined): RunResponseFenceV11 {
+  if (!fence) throw new Error("Core-execution mutation refused: a current core fence is required");
+  return fence;
+}
+
+function runResponseCoreLocator(envelope: PrivateRunResponseEnvelope): CoreExecutionLocator {
+  if (envelope.schema_version !== "run-response/1.1") {
+    throw new Error("Core-execution mutation requires a run-response/1.1 locator");
+  }
+  const locator = envelope.locator;
+  if (!locator?.session_id || !locator.execution_id || locator.generation === null) {
+    throw new Error("Core-execution mutation returned no complete Session/Execution/generation locator");
+  }
+  return {
+    sessionId: locator.session_id,
+    executionId: locator.execution_id,
+    generation: locator.generation,
+  };
+}
+
+function requiredRevision(value: number | null | undefined, name: string): number {
+  if (!Number.isSafeInteger(value) || (value ?? -1) < 0) {
+    throw new Error(`Core-execution mutation refused: ${name} is required`);
+  }
+  return value as number;
+}
+
+function sameCoreLocator(left: CoreExecutionLocator, right: CoreExecutionLocator): boolean {
+  return left.sessionId === right.sessionId
+    && left.executionId === right.executionId
+    && left.generation === right.generation;
+}
+
+function hasCompleteCoreCapabilities(capabilities: RunCliCapabilities): boolean {
+  const structured = capabilities.structured;
+  return capabilities.mode === "structured"
+    && structured?.schema_version === "maestro-capabilities/1.0"
+    && Array.isArray(structured.session_schema_writes)
+    && structured.session_schema_writes.includes("session/2.0")
+    && Array.isArray(structured.execution_schema_writes)
+    && structured.execution_schema_writes.includes("execution/1.0")
+    && Array.isArray(structured.run_response_writes)
+    && structured.run_response_writes.includes("run-response/1.1")
+    && structured.features?.session_statusless === true
+    && structured.features.execution_generation === true
+    && structured.features.core_execution_lease === true
+    && capabilities.support?.execution_generation === true
+    && capabilities.support.core_execution_lease === true
+    && capabilities.support["run-response/1.1"] === true;
+}
+
+function expectedCoreOperation(argv: readonly string[]): string | undefined {
+  if (argv[0] !== "execution") return undefined;
+  if (argv[1] === "lease" || argv[1] === "handoff") {
+    return `execution-${argv[1]}-${argv[2] ?? ""}`;
+  }
+  return `execution-${argv[1] ?? ""}`;
+}
+
+function isExecutionStart(argv: readonly string[]): boolean {
+  return (argv[0] === "execution" || argv[0] === "session" || argv[0] === "run")
+    && argv[1] === "start";
+}
+
+function requiresActivityRevision(argv: readonly string[]): boolean {
+  return isExecutionStart(argv)
+    || (argv[0] === "execution" || argv[0] === "session")
+      && (argv[1] === "resume" || argv[1] === "seal");
+}
+
+function requiresExecutionAudit(argv: readonly string[]): boolean {
+  if (argv[0] !== "execution") return false;
+  if (["start", "pause", "resolve", "resume", "seal"].includes(argv[1] ?? "")) return true;
+  if (argv[1] === "handoff") return ["prepare", "accept", "cancel"].includes(argv[2] ?? "");
+  return argv[1] === "lease" && argv[2] === "recover";
+}
+
+function releasesCoreLease(operation: string): boolean {
+  return ["execution-pause", "execution-seal", "execution-lease-release"].includes(operation);
+}
+
+function addFlag(argv: string[], flag: string, value: string): void {
+  const matches: string[] = [];
+  for (let index = 0; index < argv.length; index++) {
+    const argument = argv[index]!;
+    if (argument === flag) {
+      matches.push(argv[index + 1] ?? "");
+    } else if (argument.startsWith(`${flag}=`)) {
+      matches.push(argument.slice(flag.length + 1));
+    }
+  }
+  if (matches.length === 0) {
+    argv.push(flag, value);
+    return;
+  }
+  if (matches.length !== 1 || matches[0] !== value) {
+    throw new Error(`Core-execution mutation refused: ${flag} conflicts with coordinator authority`);
+  }
+}
+
+function addFlagIfMissing(argv: string[], flag: string, value: string): void {
+  if (argv.some((argument) => argument === flag || argument.startsWith(`${flag}=`))) return;
+  argv.push(flag, value);
+}
+
+function addBooleanFlag(argv: string[], flag: string): void {
+  if (!argv.includes(flag)) argv.push(flag);
+}
+
+/** Public projection for coordinator and run-control result surfaces. */
+export function projectPublicRunCliResult(result: RunCliResult): RunCliResult {
+  let stdout: string;
+  try {
+    stdout = JSON.stringify(redactPublicSecrets(projectPublicRunResponse(parseRunResponse(result.stdout))));
+  } catch {
+    try {
+      stdout = JSON.stringify(redactPublicSecrets(JSON.parse(result.stdout) as unknown));
+    } catch {
+      stdout = redactSensitiveText(result.stdout);
+    }
+  }
+  const secrets = privateArgvValues(result.argv);
+  return {
+    ...result,
+    argv: redactLeaseArgv(result.argv),
+    stdout: redactPrivateValues(stdout, secrets),
+    stderr: redactPrivateValues(redactSensitiveText(result.stderr), secrets),
+  };
+}
+
+function redactLeaseArgv(argv: readonly string[]): string[] {
+  let redactNext = false;
+  const positionalHandoffToken = argv[0] === "execution" && argv[1] === "handoff" && argv[2] === "accept";
+  return argv.map((argument, index) => {
+    if (redactNext) {
+      redactNext = false;
+      return "<redacted>";
+    }
+    if (positionalHandoffToken && index === 3 && !argument.startsWith("-")) return "<redacted>";
+    const equalsAt = argument.indexOf("=");
+    const flag = equalsAt >= 0 ? argument.slice(0, equalsAt) : argument;
+    if (isSecretFlag(flag)) {
+      if (equalsAt >= 0) return `${flag}=<redacted>`;
+      redactNext = true;
+      return argument;
+    }
+    return redactSensitiveText(argument);
+  });
+}
+
+function isSecretFlag(flag: string): boolean {
+  return flag === "--lease-id"
+    || flag === "--handoff-key"
+    || /^--[a-z0-9-]*token[a-z0-9-]*$/i.test(flag);
+}
+
+function privateArgvValues(argv: readonly string[]): string[] {
+  const values: string[] = [];
+  const positionalHandoffToken = argv[0] === "execution" && argv[1] === "handoff" && argv[2] === "accept";
+  for (let index = 0; index < argv.length; index++) {
+    const argument = argv[index]!;
+    if (positionalHandoffToken && index === 3 && !argument.startsWith("-")) values.push(argument);
+    const equalsAt = argument.indexOf("=");
+    const flag = equalsAt >= 0 ? argument.slice(0, equalsAt) : argument;
+    if (!isSecretFlag(flag)) continue;
+    const value = equalsAt >= 0 ? argument.slice(equalsAt + 1) : argv[index + 1];
+    if (value) values.push(value);
+  }
+  return values;
+}
+
+function redactPrivateValues(text: string, secrets: readonly string[]): string {
+  let redacted = text;
+  for (const secret of [...secrets].sort((left, right) => right.length - left.length)) {
+    redacted = redacted.split(secret).join("<redacted>");
+    const jsonEscaped = JSON.stringify(secret).slice(1, -1);
+    if (jsonEscaped !== secret) redacted = redacted.split(jsonEscaped).join("<redacted>");
+  }
+  return redacted;
+}
+
+function redactSensitiveText(text: string): string {
+  return text
+    .replace(/\blease_claim\s*[:=]\s*\{[^\r\n}]*\}/gi, "lease_claim=<redacted>")
+    .replace(/("(?:lease_id|[^"\\]*(?:token|handoff[_-]?key)[^"\\]*)"\s*:\s*)("(?:\\.|[^"\\])*"|[^,\s}\]]+)/gi, "$1\"<redacted>\"")
+    .replace(/\b(lease_id|[a-z0-9_-]*(?:token|handoff[_-]?key)[a-z0-9_-]*)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;}\]]+)/gi, "$1=<redacted>")
+    .replace(/(--(?:lease-id|handoff-key|[a-z0-9-]*token[a-z0-9-]*)(?:=|\s+))\S+/gi, "$1<redacted>");
+}
+
+function redactPublicSecrets(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactPublicSecrets);
+  if (typeof value === "string") return redactSensitiveText(value);
+  if (typeof value !== "object" || value === null) return value;
+  const projected: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(value)) {
+    if (key === "lease_claim" || key === "lease_id" || /token|handoff[_-]?key/i.test(key)) continue;
+    projected[key] = redactPublicSecrets(nested);
+  }
+  return projected;
+}
+
 /** Extract --session/--id (or = form) from a Maestro argv list, if present. */
 function extractSessionId(argv: readonly string[]): string | undefined {
   for (let index = 0; index < argv.length; index++) {
@@ -803,7 +2022,7 @@ function sameMarker(left: ContinuationMarker, right: ContinuationMarker): boolea
 const LEASE_PATH_UUID_PATTERN = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi;
 
 export function publicWorkflowErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = redactSensitiveText(error instanceof Error ? error.message : String(error));
   return message.includes(".workflow") && message.includes(".lease")
     ? message.replace(LEASE_PATH_UUID_PATTERN, "<redacted>")
     : message;
@@ -828,6 +2047,140 @@ function sameLease(left: WorkflowLease, right: WorkflowLease): boolean {
 function requireSession(snapshot: WorkflowSnapshot) {
   if (!snapshot.session) throw new Error("No active canonical Workflow Session");
   return snapshot.session;
+}
+
+function derivePlanPublishRequestId(handoffKey: string): string {
+  const normalized = handoffKey.trim();
+  if (!normalized) throw new Error("Plan handoff key must be non-empty");
+  return `req_plan_publish_${createHash("sha256").update(normalized, "utf8").digest("hex").slice(0, 32)}`;
+}
+
+function derivePlanSessionId(handoffKey: string): string {
+  const normalized = handoffKey.trim();
+  if (!normalized) throw new Error("Plan handoff key must be non-empty");
+  const digest = createHash("sha256").update(normalized, "utf8").digest("hex").slice(0, 24);
+  // Maestro preserves explicit IDs with a timestamp-shaped suffix. The fixed
+  // suffix makes identity allocation stable across transport failures/restarts.
+  return `pi-plan-${digest}-00000000-000000`;
+}
+
+function derivePlanExecutionStartRequestId(handoffKey: string): string {
+  const normalized = handoffKey.trim();
+  if (!normalized) throw new Error("Plan handoff key must be non-empty");
+  const digest = createHash("sha256").update(`execution-start\0${normalized}`, "utf8").digest("hex").slice(0, 32);
+  return `req_plan_execution_start_${digest}`;
+}
+
+function requiredPlanIntent(value: string | undefined, handoffKey: string): string {
+  const normalized = value?.trim();
+  return (normalized || `Approved Plan ${handoffKey.trim().slice(0, 12)}`).slice(0, 240);
+}
+
+function validateCorePlanSessionCreate(
+  envelope: PrivateRunResponseEnvelope,
+  sessionId: string,
+): void {
+  if (envelope.schema_version !== "run-response/1.1"
+    || envelope.operation !== "session-create"
+    || !envelope.ok
+    || envelope.exit_code !== 0
+    || envelope.request_id !== null
+    || envelope.replay !== null) {
+    throw new Error("Core Plan Session creation requires a successful non-replay run-response/1.1 result");
+  }
+  const locator = envelope.locator;
+  if (!locator
+    || locator.session_id !== sessionId
+    || locator.execution_id !== null
+    || locator.generation !== null
+    || locator.run_id !== null) {
+    throw new Error("Core Plan Session creation returned an invalid Session-only locator");
+  }
+  const fence = requireCoreFence(envelope.fence);
+  if (fence.session_identity_revision !== 1
+    || fence.session_activity_revision !== 0
+    || fence.execution_revision !== null
+    || fence.lease_epoch !== null) {
+    throw new Error("Core Plan Session creation returned an invalid initial identity fence");
+  }
+  const result = recordValue(envelope.result);
+  if (result?.session_id !== sessionId
+    || result.schema_version !== "session/2.0"
+    || result.current_execution_id !== null
+    || result.latest_execution_id !== null) {
+    throw new Error("Core Plan Session creation did not return the expected session/2.0 identity");
+  }
+}
+
+function isRecoverablePlanSessionCreate(
+  envelope: PrivateRunResponseEnvelope,
+  sessionId: string,
+): boolean {
+  return envelope.schema_version === "run-response/1.1"
+    && envelope.operation === "session-create"
+    && !envelope.ok
+    && envelope.locator?.session_id === sessionId
+    && /Session already exists/i.test(envelope.error?.message ?? "");
+}
+
+function validateCorePlanSessionSnapshot(
+  snapshot: WorkflowSnapshot,
+  sessionId: string,
+  intent: string,
+): void {
+  const session = requireSession(snapshot);
+  if (snapshot.source !== "canonical"
+    || snapshot.canonicalClaim?.status !== "valid"
+    || snapshot.canonicalClaim.activeSessionId !== sessionId
+    || session.sessionId !== sessionId
+    || session.schemaVersion !== "session/2.0"
+    || session.lifecycleAuthority !== "execution-derived"
+    || session.intent !== intent
+    || session.identityRevision !== 1
+    || session.archivedAt !== null) {
+    throw new Error(`Canonical recovery did not confirm deterministic session/2.0 identity ${sessionId}`);
+  }
+  if (!snapshot.execution) {
+    if (session.activityRevision !== 0 || session.currentExecutionId !== null || session.latestExecutionId !== null) {
+      throw new Error(`Deterministic Session ${sessionId} is not an unused identity shell`);
+    }
+    return;
+  }
+  const locator = requireCoreExecutionLocator(snapshot);
+  if (locator.sessionId !== sessionId || locator.generation !== 1) {
+    throw new Error(`Deterministic Session ${sessionId} contains unrelated Execution authority`);
+  }
+}
+
+function validateCorePlanExecutionStart(
+  envelope: PrivateRunResponseEnvelope,
+  sessionId: string,
+  requestId: string,
+  candidate: CoreMutationCandidate | undefined,
+): void {
+  if (envelope.schema_version !== "run-response/1.1"
+    || envelope.operation !== "execution-start"
+    || !envelope.ok
+    || envelope.exit_code !== 0
+    || envelope.request_id !== requestId
+    || !candidate
+    || candidate.locator.sessionId !== sessionId
+    || candidate.locator.generation !== 1
+    || envelope.locator?.run_id !== null) {
+    throw new Error("Core Plan generation-1 acquisition returned an invalid locator or request binding");
+  }
+  if (candidate.fence.session_identity_revision !== 1
+    || candidate.fence.session_activity_revision !== 1
+    || candidate.fence.execution_revision !== 1
+    || candidate.fence.lease_epoch !== 1) {
+    throw new Error("Core Plan generation-1 acquisition returned an invalid initial authority fence");
+  }
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
 }
 
 function requireHostSessionId(value: string | undefined): string {

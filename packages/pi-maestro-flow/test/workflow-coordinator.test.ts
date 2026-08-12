@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { chmod, lstat, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -9,11 +9,13 @@ import { Check } from "typebox/value";
 import {
   defaultRunner,
   RunCliAdapter,
+  type RunCliCapabilities,
   type RunCliResult,
   type RunDoneOptions,
   type RunEditOptions,
   type RunPlanPublishOptions,
 } from "../src/session/cli-adapter.ts";
+import { WorkflowBridge } from "../src/session/bridge.ts";
 import {
   publicWorkflowErrorMessage,
   WorkflowCoordinator,
@@ -39,14 +41,51 @@ test("run-control schema rejects unknown fields", () => {
   assert.equal(Check(RunControlParams, { argv: ["session", "status"], hostSessionId: "spoofed" }), false);
 });
 
-test("run-control classifies top-level reads by the command in argv[0]", () => {
-  assert.deepEqual(
-    classifyRunControlArgv(["skills", "--steps", "--json", "--platform", "pi"]),
-    { write: false, sessionless: false },
-  );
-  assert.deepEqual(classifyRunControlArgv(["search", "query"]), { write: false, sessionless: false });
-  assert.deepEqual(classifyRunControlArgv(["session", "create"]), { write: true, sessionless: true });
-  assert.deepEqual(classifyRunControlArgv(["session", "next"]), { write: true, sessionless: false });
+test("run-control classification covers reads, Session CAS, Execution acquisition, and lease writes", () => {
+  const cases: Array<{
+    argv: string[];
+    expected: ReturnType<typeof classifyRunControlArgv>;
+  }> = [
+    { argv: ["capabilities", "--json"], expected: readClassification() },
+    { argv: ["skills", "--steps"], expected: readClassification() },
+    { argv: ["run", "status"], expected: readClassification() },
+    { argv: ["run", "brief"], expected: readClassification() },
+    { argv: ["run", "check"], expected: readClassification() },
+    { argv: ["session", "status"], expected: readClassification() },
+    { argv: ["session", "show"], expected: readClassification() },
+    { argv: ["session", "list"], expected: readClassification() },
+    { argv: ["execution", "status"], expected: readClassification() },
+    { argv: ["execution", "show"], expected: readClassification() },
+    { argv: ["execution", "list"], expected: readClassification() },
+    { argv: ["execution", "lease", "status"], expected: readClassification() },
+    { argv: ["session", "create"], expected: writeClassification("session", "none", true) },
+    { argv: ["session", "archive"], expected: writeClassification("session", "none") },
+    { argv: ["session", "unarchive"], expected: writeClassification("session", "none") },
+    { argv: ["session", "start"], expected: writeClassification("execution-acquire", "acquire", true) },
+    { argv: ["run", "start"], expected: writeClassification("execution-acquire", "acquire", true) },
+    { argv: ["run", "create"], expected: writeClassification("execution", "required", true) },
+    { argv: ["run", "next"], expected: writeClassification("execution", "required") },
+    { argv: ["run", "complete"], expected: writeClassification("execution", "required") },
+    { argv: ["run", "decide"], expected: writeClassification("execution", "required") },
+    { argv: ["execution", "start"], expected: writeClassification("execution-acquire", "acquire") },
+    { argv: ["execution", "attach"], expected: writeClassification("execution-acquire", "acquire") },
+    { argv: ["execution", "pause"], expected: writeClassification("execution", "required") },
+    { argv: ["execution", "resolve"], expected: writeClassification("execution", "none") },
+    { argv: ["execution", "resume"], expected: writeClassification("execution-acquire", "acquire") },
+    { argv: ["execution", "seal"], expected: writeClassification("execution", "required") },
+    { argv: ["execution", "handoff", "prepare"], expected: writeClassification("execution", "required") },
+    { argv: ["execution", "handoff", "accept"], expected: writeClassification("execution-acquire", "acquire") },
+    { argv: ["execution", "handoff", "cancel"], expected: writeClassification("execution", "required") },
+    { argv: ["execution", "lease", "heartbeat"], expected: writeClassification("execution-lease", "required") },
+    { argv: ["execution", "lease", "release"], expected: writeClassification("execution-lease", "required") },
+    { argv: ["execution", "lease", "recover"], expected: writeClassification("execution-lease", "acquire") },
+    { argv: ["session", "next"], expected: writeClassification("execution", "required") },
+    { argv: ["future", "command"], expected: writeClassification("execution", "required") },
+  ];
+
+  for (const fixture of cases) {
+    assert.deepEqual(classifyRunControlArgv(fixture.argv), fixture.expected, fixture.argv.join(" "));
+  }
 });
 
 test("public workflow errors redact lease-path fencing tokens", () => {
@@ -56,7 +95,445 @@ test("public workflow errors redact lease-path fencing tokens", () => {
   ));
   assert.doesNotMatch(message, new RegExp(token));
   assert.match(message, /<redacted>/);
+  const coreMessage = publicWorkflowErrorMessage(new Error(
+    'maestro execution pause --lease-id private-lease --handoff-token private-handoff '
+    + 'failed: {"lease_id":"private-json-lease","token":"private-json-token"}',
+  ));
+  for (const secret of ["private-lease", "private-handoff", "private-json-lease", "private-json-token"]) {
+    assert.equal(coreMessage.includes(secret), false, `public errors must redact ${secret}`);
+  }
   assert.equal(publicWorkflowErrorMessage(new Error("ordinary workflow failure")), "ordinary workflow failure");
+});
+
+test("old CLI is read-only and fail-closed unless legacy compatibility is explicit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-old-cli-"));
+  const snapshot = workflowSnapshot("running");
+  const calls: string[][] = [];
+  const store = new WorkflowLeaseStore(root);
+  const defaultCoordinator = new WorkflowCoordinator(fakeBridge(snapshot), fakeAdapter(calls), store);
+  try {
+    assert.equal(await defaultCoordinator.selectMode(), "fail-closed");
+    const read = await defaultCoordinator.exec(["session", "status"], readClassification());
+    assert.equal(read.command.stdout, "exec session status");
+    await assert.rejects(defaultCoordinator.attach("pi-old"), /authority mode is fail-closed/);
+    assert.equal(store.current(), undefined);
+
+    const compatible = WorkflowCoordinator.legacyCompatible(
+      fakeBridge(snapshot),
+      fakeAdapter([]),
+      new WorkflowLeaseStore(root),
+    );
+    try {
+      assert.equal(await compatible.selectMode(), "legacy-host");
+      await compatible.attach("pi-old");
+      assert.equal(compatible.mode(), "legacy-host");
+    } finally {
+      await compatible.release();
+    }
+  } finally {
+    await defaultCoordinator.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("core-execution selection negotiates full support and never uses the legacy host lease store", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-core-mode-"));
+  const calls: string[][] = [];
+  const store = new WorkflowLeaseStore(root);
+  const snapshot = coreWorkflowSnapshot();
+  const coordinator = testCoordinator(
+    fakeBridge(snapshot),
+    coreAdapter(calls, snapshot),
+    store,
+  );
+  try {
+    await coordinator.selectMode("core-execution");
+    assert.equal(coordinator.mode(), "core-execution");
+    const attached = await coordinator.attach("pi-core");
+    assert.equal(store.current(), undefined, "core mode must not acquire the legacy host lease");
+    assert.deepEqual(attached.lease, {
+      sessionId: "session-1",
+      executionId: "execution-1",
+      generation: 1,
+      ownerId: "pi-core",
+      epoch: 4,
+      executionRevision: 8,
+    });
+    assert.equal("lease_id" in attached.lease, false);
+
+    const callsBeforeSpoof = calls.length;
+    await assert.rejects(
+      coordinator.exec(
+        ["execution", "pause", "--execution", "execution-other", "--reason", "spoof"],
+        classifyRunControlArgv(["execution", "pause"]),
+        "pi-core",
+      ),
+      /--execution conflicts with coordinator authority/,
+    );
+    assert.equal(calls.length, callsBeforeSpoof, "conflicting locators must be rejected before raw CLI execution");
+
+    const paused = await coordinator.exec(
+      ["execution", "pause", "--reason", "checkpoint"],
+      classifyRunControlArgv(["execution", "pause"]),
+      "pi-core",
+    );
+    const internalPause = calls.find((call) => call[0] === "exec" && call[1] === "execution" && call[2] === "pause")!;
+    assert.equal(flagValue(internalPause, "--session"), "session-1");
+    assert.equal(flagValue(internalPause, "--execution"), "execution-1");
+    assert.equal(flagValue(internalPause, "--expected-execution-revision"), "8");
+    assert.equal(flagValue(internalPause, "--execution-owner"), "pi-core");
+    assert.equal(flagValue(internalPause, "--owner-kind"), "pi");
+    assert.equal(flagValue(internalPause, "--owner-epoch"), "4");
+    assert.equal(flagValue(internalPause, "--actor"), "pi-core");
+    assert.equal(flagValue(internalPause, "--evidence"), "pi-session:pi-core");
+    assert.equal(flagValue(internalPause, "--lease-id"), "private-core-lease");
+    assert.equal(JSON.stringify(paused).includes("private-core-lease"), false);
+    assert.equal(JSON.stringify(paused).includes("lease_claim"), false);
+    await assert.rejects(
+      coordinator.done("run-1", {}, { hostSessionId: "pi-core" }),
+      /no transient core lease claim is held/,
+    );
+  } finally {
+    await coordinator.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("core-execution start and resume use documented acquisition fences", async () => {
+  const startRoot = await mkdtemp(join(tmpdir(), "pi-workflow-core-start-"));
+  const startSnapshot = coreWorkflowSnapshot();
+  const futureExecution = startSnapshot.execution!;
+  startSnapshot.locator = { sessionId: "session-1" };
+  startSnapshot.execution = undefined;
+  startSnapshot.revision.executionRevision = undefined;
+  startSnapshot.session!.activeRunId = null;
+  const startCalls: string[][] = [];
+  const startCoordinator = testCoordinator(
+    fakeBridge(startSnapshot),
+    coreAdapter(startCalls, startSnapshot, (argv) => {
+      const response = coreRunResponse(operationForArgv(argv));
+      if (argv[0] === "execution" && argv[1] === "start") {
+        startSnapshot.locator = {
+          sessionId: "session-1",
+          executionId: "execution-1",
+          generation: 1,
+          runId: "run-1",
+        };
+        startSnapshot.execution = { ...futureExecution, revision: 8 };
+        startSnapshot.revision.executionRevision = 8;
+      }
+      return response;
+    }),
+    new WorkflowLeaseStore(startRoot),
+  );
+  try {
+    await startCoordinator.exec(
+      ["execution", "start"],
+      classifyRunControlArgv(["execution", "start"]),
+      "pi-owner",
+    );
+    const start = startCalls.find((call) => call[1] === "execution" && call[2] === "start")!;
+    assert.equal(flagValue(start, "--session"), "session-1");
+    assert.equal(start.includes("--execution"), false);
+    assert.equal(flagValue(start, "--expected-identity-revision"), "3");
+    assert.equal(flagValue(start, "--expected-activity-revision"), "5");
+    assert.equal(flagValue(start, "--expected-lease-epoch"), "0");
+    assert.equal(flagValue(start, "--execution-owner"), "pi-owner");
+    assert.equal(flagValue(start, "--owner-kind"), "pi");
+  } finally {
+    await startCoordinator.release();
+    await rm(startRoot, { recursive: true, force: true });
+  }
+
+  const resumeRoot = await mkdtemp(join(tmpdir(), "pi-workflow-core-resume-"));
+  const resumeCalls: string[][] = [];
+  const resumeSnapshot = coreWorkflowSnapshot();
+  const resumeCoordinator = testCoordinator(
+    fakeBridge(resumeSnapshot),
+    coreAdapter(resumeCalls, resumeSnapshot),
+    new WorkflowLeaseStore(resumeRoot),
+  );
+  try {
+    await resumeCoordinator.attach("pi-owner");
+    await resumeCoordinator.exec(
+      ["execution", "pause", "--reason", "checkpoint", "--evidence", "ART-1"],
+      classifyRunControlArgv(["execution", "pause"]),
+      "pi-owner",
+    );
+    await resumeCoordinator.exec(
+      ["execution", "resume", "--reason", "continue", "--evidence", "ART-2"],
+      classifyRunControlArgv(["execution", "resume"]),
+      "pi-owner",
+    );
+    const resume = resumeCalls.find((call) => call[1] === "execution" && call[2] === "resume")!;
+    assert.equal(flagValue(resume, "--session"), "session-1");
+    assert.equal(flagValue(resume, "--execution"), "execution-1");
+    assert.equal(flagValue(resume, "--expected-execution-revision"), "8");
+    assert.equal(flagValue(resume, "--expected-activity-revision"), "5");
+    assert.equal(flagValue(resume, "--expected-lease-epoch"), "4");
+    assert.equal(flagValue(resume, "--execution-owner"), "pi-owner");
+    assert.equal(flagValue(resume, "--owner-kind"), "pi");
+    assert.equal(resume.includes("--lease-id"), false, "acquisition must not send an existing lease token");
+  } finally {
+    await resumeCoordinator.release();
+    await rm(resumeRoot, { recursive: true, force: true });
+  }
+});
+
+test("core-execution mutations fail closed for missing support, locator, claim, or response fence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-core-fail-closed-"));
+  try {
+    const missingSupportCalls: string[][] = [];
+    const missingSupportSnapshot = coreWorkflowSnapshot();
+    const missingSupport = testCoordinator(
+      fakeBridge(missingSupportSnapshot),
+      coreAdapter(missingSupportCalls, missingSupportSnapshot, undefined, {
+        ...fullCoreCapabilities(),
+        support: {
+          ...fullCoreCapabilities().support,
+          core_execution_lease: false,
+        },
+      }),
+      new WorkflowLeaseStore(root),
+    );
+    assert.equal(await missingSupport.selectMode(), "fail-closed");
+    assert.equal(await missingSupport.supportsNewPlanSession(), false);
+    assert.equal(missingSupport.mode(), "fail-closed");
+    const read = await missingSupport.exec(
+      ["execution", "status"],
+      classifyRunControlArgv(["execution", "status"]),
+    );
+    assert.equal(read.command.stdout, "read execution status");
+    await assert.rejects(
+      missingSupport.exec(
+        ["execution", "attach"],
+        classifyRunControlArgv(["execution", "attach"]),
+        "pi-core",
+      ),
+      /authority mode is fail-closed/,
+    );
+
+    const missingSessionWriterCapabilities = fullCoreCapabilities();
+    missingSessionWriterCapabilities.structured!.session_schema_writes = ["session/1.3"];
+    const missingSessionWriter = testCoordinator(
+      fakeBridge(coreWorkflowSnapshot()),
+      coreAdapter([], coreWorkflowSnapshot(), undefined, missingSessionWriterCapabilities),
+      new WorkflowLeaseStore(root),
+    );
+    assert.equal(await missingSessionWriter.selectMode(), "fail-closed");
+    assert.equal(await missingSessionWriter.supportsNewPlanSession(), false);
+
+    const missingStatuslessCapabilities = fullCoreCapabilities();
+    missingStatuslessCapabilities.structured!.features.session_statusless = false;
+    const missingStatusless = testCoordinator(
+      fakeBridge(coreWorkflowSnapshot()),
+      coreAdapter([], coreWorkflowSnapshot(), undefined, missingStatuslessCapabilities),
+      new WorkflowLeaseStore(root),
+    );
+    assert.equal(await missingStatusless.selectMode(), "fail-closed");
+    await assert.rejects(
+      missingStatusless.exec(
+        ["execution", "attach"],
+        classifyRunControlArgv(["execution", "attach"]),
+        "pi-core",
+      ),
+      /authority mode is fail-closed/,
+    );
+
+    const legacySnapshot = workflowSnapshot("running");
+    const legacyStore = new WorkflowLeaseStore(root);
+    const legacy = new WorkflowCoordinator(
+      fakeBridge(legacySnapshot),
+      coreAdapter([], legacySnapshot, undefined, legacyCoreCapabilities()),
+      legacyStore,
+      10_000,
+      { legacyCompatibility: true },
+    );
+    try {
+      await legacy.attach("pi-legacy");
+      assert.equal(legacy.mode(), "legacy-host");
+      assert.equal(await legacy.supportsNewPlanSession(), true);
+      assert.equal(legacyStore.current()?.hostSessionId, "pi-legacy");
+    } finally {
+      await legacy.release();
+    }
+
+    const malformedSnapshot = coreWorkflowSnapshot();
+    const malformed = testCoordinator(
+      fakeBridge(malformedSnapshot),
+      coreAdapter([], malformedSnapshot, undefined, failClosedCoreCapabilities("malformed capabilities response")),
+      new WorkflowLeaseStore(root),
+    );
+    assert.equal(await malformed.selectMode(), "fail-closed");
+    assert.equal((await malformed.exec(
+      ["execution", "status"],
+      classifyRunControlArgv(["execution", "status"]),
+    )).command.stdout, "read execution status");
+    await assert.rejects(
+      malformed.exec(
+        ["execution", "attach"],
+        classifyRunControlArgv(["execution", "attach"]),
+        "pi-core",
+      ),
+      /malformed capabilities response/,
+    );
+
+    const missingLocatorSnapshot = workflowSnapshot("running");
+    const missingLocator = testCoordinator(
+      fakeBridge(missingLocatorSnapshot),
+      coreAdapter([], missingLocatorSnapshot),
+      new WorkflowLeaseStore(root),
+    );
+    await missingLocator.selectMode("core-execution");
+    await assert.rejects(
+      missingLocator.exec(
+        ["execution", "attach"],
+        classifyRunControlArgv(["execution", "attach"]),
+        "pi-core",
+      ),
+      /non-legacy Session\/Execution\/generation locator is required/,
+    );
+
+    const missingClaimSnapshot = coreWorkflowSnapshot();
+    const missingClaim = testCoordinator(
+      fakeBridge(missingClaimSnapshot),
+      coreAdapter([], missingClaimSnapshot),
+      new WorkflowLeaseStore(root),
+    );
+    await missingClaim.selectMode("core-execution");
+    await assert.rejects(
+      missingClaim.exec(
+        ["execution", "pause"],
+        classifyRunControlArgv(["execution", "pause"]),
+        "pi-core",
+      ),
+      /no transient core lease claim is held/,
+    );
+
+    const missingFenceSnapshot = coreWorkflowSnapshot();
+    const missingFence = testCoordinator(
+      fakeBridge(missingFenceSnapshot),
+      coreAdapter([], missingFenceSnapshot, () => coreRunResponse("execution-attach", { fence: null })),
+      new WorkflowLeaseStore(root),
+    );
+    await missingFence.selectMode("core-execution");
+    await assert.rejects(
+      missingFence.exec(
+        ["execution", "attach"],
+        classifyRunControlArgv(["execution", "attach"]),
+        "pi-core",
+      ),
+      /current core fence is required/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("core-execution mode is sticky and run-control public results redact acquisition claims", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-core-redaction-"));
+  const snapshot = coreWorkflowSnapshot();
+  const coordinator = testCoordinator(
+    fakeBridge(snapshot),
+    coreAdapter([], snapshot),
+    new WorkflowLeaseStore(root),
+  );
+  try {
+    await coordinator.selectMode("core-execution");
+    await assert.rejects(coordinator.selectMode("legacy-host"), /cannot select legacy-host/);
+    assert.equal(coordinator.mode(), "core-execution");
+
+    const acquired = await executeRunControl(
+      { argv: ["execution", "attach"] },
+      coordinator,
+      { hostSessionId: "pi-core" },
+    );
+    assert.equal(acquired.ok, true);
+    const serialized = JSON.stringify(acquired);
+    assert.equal(serialized.includes("private-core-lease"), false);
+    assert.equal(serialized.includes("private-nested-token"), false);
+    assert.equal(serialized.includes("lease_claim"), false);
+    assert.equal(serialized.includes('"lease_id"'), false);
+    assert.equal(serialized.includes('"token"'), false);
+  } finally {
+    await coordinator.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("core-execution rejects response locator drift before retaining a lease claim", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-core-locator-"));
+  const snapshot = coreWorkflowSnapshot();
+  const coordinator = testCoordinator(
+    fakeBridge(snapshot),
+    coreAdapter([], snapshot, (argv) => {
+      const response = coreRunResponse(operationForArgv(argv));
+      return {
+        ...response,
+        locator: {
+          ...(response.locator as Record<string, unknown>),
+          execution_id: "execution-other",
+        },
+      };
+    }),
+    new WorkflowLeaseStore(root),
+  );
+  try {
+    await assert.rejects(
+      coordinator.attach("pi-core"),
+      /returned a different Execution locator/,
+    );
+    assert.equal(coordinator.mode(), "core-execution");
+  } finally {
+    await coordinator.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("core-execution heartbeats and releases the exact private lease tuple with public attribution", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-core-heartbeat-"));
+  const snapshot = coreWorkflowSnapshot();
+  const calls: string[][] = [];
+  const coordinator = testCoordinator(
+    fakeBridge(snapshot),
+    coreAdapter(calls, snapshot),
+    new WorkflowLeaseStore(root),
+    5,
+  );
+  try {
+    await coordinator.attach("pi-owner");
+    snapshot.execution!.lease = {
+      sessionId: "session-1",
+      executionId: "execution-1",
+      ownerId: "pi-owner",
+      ownerKind: "pi",
+      epoch: 4,
+      acquiredAt: "2026-07-15T00:00:00.000Z",
+      heartbeatAt: "2026-07-15T00:00:01.000Z",
+      handoffTo: null,
+    };
+    const owner = await coordinator.ownership("pi-owner");
+    const reader = await coordinator.ownership("pi-reader");
+    assert.equal(owner?.isOwner, true);
+    assert.equal(owner?.isAttached, true);
+    assert.equal(reader?.ownerHostSessionId, "pi-owner");
+    assert.equal(reader?.isOwner, false);
+    assert.equal(JSON.stringify({ owner, reader }).includes("lease_id"), false);
+
+    await waitUntil(() => calls.some((call) => call[1] === "execution" && call[2] === "lease" && call[3] === "heartbeat"));
+    const heartbeat = calls.find((call) => call[1] === "execution" && call[3] === "heartbeat")!;
+    assertCoreLeaseTuple(heartbeat);
+
+    await coordinator.release();
+    const release = calls.find((call) => call[1] === "execution" && call[3] === "release")!;
+    assertCoreLeaseTuple(release);
+    const callCount = calls.length;
+    await delay(20);
+    assert.equal(calls.length, callCount, "release must stop core lease heartbeat scheduling");
+  } finally {
+    await coordinator.release();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("coordinator attaches brief-first and fences old continuation markers across done and next", async () => {
@@ -84,9 +561,10 @@ test("coordinator attaches brief-first and fences old continuation markers acros
       snapshot.session!.chain[0]!.runId = "run-2";
     },
   });
-  const coordinator = new WorkflowCoordinator(bridge, adapter, new WorkflowLeaseStore(root));
+  const coordinator = testCoordinator(bridge, adapter, new WorkflowLeaseStore(root));
   try {
     const attached = await coordinator.attach("host-1");
+    assert.equal(coordinator.mode(), "legacy-host");
     assert.equal("token" in attached.lease, false, "attach results must not expose the fencing token");
     assert.equal(attached.brief?.stdout, "brief run-1");
     assert.deepEqual(calls[0], ["brief", "run-1", "session-1"]);
@@ -297,7 +775,7 @@ test("heartbeat publication failure clears ownership and blocks continuation and
       throw new Error("injected heartbeat publication failure");
     },
   });
-  const coordinator = new WorkflowCoordinator(
+  const coordinator = testCoordinator(
     fakeBridge(snapshot),
     fakeAdapter(calls),
     store,
@@ -336,7 +814,7 @@ test("every run-control mutation rejects a different Pi session before fencing o
     const root = await mkdtemp(join(tmpdir(), `pi-workflow-host-${scenario.name}-`));
     const calls: string[][] = [];
     const store = new WorkflowLeaseStore(root);
-    const coordinator = new WorkflowCoordinator(
+    const coordinator = testCoordinator(
       fakeBridge(workflowSnapshot("running")),
       fakeAdapter(calls),
       store,
@@ -390,7 +868,7 @@ test("every coordinator mutation rejects a canonical Session switch after attach
     };
     const calls: string[][] = [];
     const store = new WorkflowLeaseStore(root);
-    const coordinator = new WorkflowCoordinator(
+    const coordinator = testCoordinator(
       bridge,
       fakeAdapter(calls),
       store,
@@ -431,7 +909,7 @@ test("coordinator mutation fails closed when the canonical Session disappears af
     getSnapshot() { return refreshCount <= 1 ? attachedSnapshot : missingSnapshot; },
   };
   const calls: string[][] = [];
-  const coordinator = new WorkflowCoordinator(
+  const coordinator = testCoordinator(
     bridge,
     fakeAdapter(calls),
     new WorkflowLeaseStore(root),
@@ -452,7 +930,7 @@ test("coordinator mutation fails closed when the canonical Session disappears af
 test("reattaching the same Workflow Session under a new Pi session rotates ownership", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-workflow-host-reattach-"));
   const snapshot = workflowSnapshot("running");
-  const coordinator = new WorkflowCoordinator(
+  const coordinator = testCoordinator(
     fakeBridge(snapshot),
     fakeAdapter([]),
     new WorkflowLeaseStore(root),
@@ -478,7 +956,7 @@ test("attach heartbeats its token and safely stops on Session switch and release
   const root = await mkdtemp(join(tmpdir(), "pi-workflow-heartbeat-"));
   const snapshot = workflowSnapshot("running");
   const store = new WorkflowLeaseStore(root, 1_000);
-  const coordinator = new WorkflowCoordinator(
+  const coordinator = testCoordinator(
     fakeBridge(snapshot),
     fakeAdapter([]),
     store,
@@ -513,7 +991,7 @@ test("attach heartbeats its token and safely stops on Session switch and release
 test("continuation rejects failed and blocked gates at issue and consume boundaries", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-workflow-gates-"));
   const snapshot = workflowSnapshot("running");
-  const coordinator = new WorkflowCoordinator(
+  const coordinator = testCoordinator(
     fakeBridge(snapshot),
     fakeAdapter([]),
     new WorkflowLeaseStore(root),
@@ -564,7 +1042,13 @@ test("published Plan correlation rejects Session switches and unrelated active R
     args: [],
     gates: [],
     primaryArtifactId: "ART-PLAN",
-    handoff: null,
+    handoff: {
+      producer_run_id: "run-plan-publish",
+      command: "plan-publish",
+      verdict: "ready",
+      artifact_refs: ["ART-PLAN"],
+      next: [],
+    },
     startedAt: "2026-07-14T23:58:00.000Z",
     endedAt: "2026-07-14T23:59:00.000Z",
   });
@@ -579,6 +1063,55 @@ test("published Plan correlation rejects Session switches and unrelated active R
   const unrelated = structuredClone(snapshot);
   unrelated.session!.runs.find((run) => run.runId === "run-1")!.command = "review";
   assert.throws(() => requirePublishedExecutionRun(unrelated, published), /not correlated/);
+
+  const statusless = structuredClone(snapshot);
+  const currentRun = statusless.session!.runs.find((run) => run.runId === "run-1")!;
+  const staleRun = structuredClone(currentRun);
+  staleRun.runId = "run-stale";
+  staleRun.startedAt = "2026-07-15T00:01:00.000Z";
+  statusless.session!.schemaVersion = "session/2.0";
+  statusless.session!.lifecycleAuthority = "execution-derived";
+  statusless.session!.currentExecutionId = "execution-1";
+  statusless.session!.latestExecutionId = "execution-1";
+  statusless.session!.archivedAt = null;
+  statusless.session!.activeRunId = "run-stale";
+  statusless.session!.chain = [{ step: "stale-execute", command: "execute", status: "running", runId: "run-stale" }];
+  statusless.session!.runs.push(staleRun);
+  delete (statusless.session as { status?: string }).status;
+  statusless.locator = { sessionId: "session-1", executionId: "execution-1", generation: 1, runId: "run-1" };
+  statusless.execution = {
+    schemaVersion: "execution/1.0",
+    executionId: "execution-1",
+    sessionId: "session-1",
+    generation: 1,
+    status: "active",
+    revision: 1,
+    activeRunId: "run-1",
+    chain: [{ step: "execute", command: "execute", status: "running", runId: "run-1" }],
+    decisionPoints: [],
+    gatesRef: "gates.json",
+    artifactsRef: "artifacts.json",
+    evidenceRef: "evidence.json",
+    lease: null,
+    startedAt: "2026-07-15T00:00:00.000Z",
+    sealedAt: null,
+    sealSummary: null,
+    finalOutcome: null,
+  };
+  assert.doesNotThrow(() => assertPublishedPlanSnapshot(statusless, published, "session-1"));
+  assert.equal(requirePublishedExecutionRun(statusless, published).runId, "run-1");
+
+  const staleFallback = structuredClone(statusless);
+  staleFallback.execution!.activeRunId = null;
+  assert.throws(() => requirePublishedExecutionRun(staleFallback, published), /no execution Run was allocated/);
+
+  const mismatchedStep = structuredClone(statusless);
+  mismatchedStep.execution!.chain[0]!.runId = "run-stale";
+  assert.throws(() => requirePublishedExecutionRun(mismatchedStep, published), /not correlated/);
+
+  const invalidHandoff = structuredClone(statusless);
+  invalidHandoff.session!.runs.find((run) => run.runId === published.run_id)!.handoff = null;
+  assert.throws(() => assertPublishedPlanSnapshot(invalidHandoff, published), /producer Run.*not canonical/);
 });
 
 test("Workflow Plan publication is host-fenced for current Sessions and requires release for new Sessions", async () => {
@@ -587,7 +1120,7 @@ test("Workflow Plan publication is host-fenced for current Sessions and requires
   const store = new WorkflowLeaseStore(root);
   const snapshot = workflowSnapshot("running");
   let currentPublish: RunPlanPublishOptions | undefined;
-  const coordinator = new WorkflowCoordinator(
+  const coordinator = testCoordinator(
     fakeBridge(snapshot),
     fakeAdapter(calls, { onPublish: (options) => { currentPublish = options; } }),
     store,
@@ -623,7 +1156,7 @@ test("Workflow Plan publication is host-fenced for current Sessions and requires
     const contenderCalls: string[][] = [];
     const contenderSnapshot = workflowSnapshot("running");
     contenderSnapshot.session!.activeRunId = null;
-    const contender = new WorkflowCoordinator(
+    const contender = testCoordinator(
       fakeBridge(contenderSnapshot),
       fakeAdapter(contenderCalls),
       new WorkflowLeaseStore(root),
@@ -651,7 +1184,7 @@ test("a stale foreign lease never blocks binding the current Session or creating
   const calls: string[][] = [];
   const snapshot = workflowSnapshot("running");
   snapshot.session!.activeRunId = null;
-  const coordinator = new WorkflowCoordinator(
+  const coordinator = testCoordinator(
     fakeBridge(snapshot),
     fakeAdapter(calls),
     freshStore,
@@ -802,12 +1335,12 @@ test("CLI adapter uses session next/done when the session subcommand is detected
 test("run-control read results expose owner and non-owner Pi session attribution", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-run-control-ownership-"));
   const snapshot = workflowSnapshot("running");
-  const owner = new WorkflowCoordinator(
+  const owner = testCoordinator(
     fakeBridge(snapshot),
     fakeAdapter([]),
     new WorkflowLeaseStore(root),
   );
-  const reader = new WorkflowCoordinator(
+  const reader = testCoordinator(
     fakeBridge(snapshot),
     fakeAdapter([]),
     new WorkflowLeaseStore(root),
@@ -883,11 +1416,11 @@ test("run-control forwards arbitrary Maestro argv through the shell", async () =
   }, coordinator, context)).ok, true);
 
   assert.deepEqual(calls, [
-    ["exec", ["run", "check", "run-1"], { write: false, sessionless: false }, "pi-session-1"],
-    ["exec", ["skills", "--steps", "--json", "--platform", "pi"], { write: false, sessionless: false }, undefined],
-    ["exec", ["session", "next", "--pick", "step-2"], { write: true, sessionless: false }, "pi-session-1"],
-    ["exec", ["session", "done", "run-1", "--verdict", "done-with-concerns"], { write: true, sessionless: false }, "pi-session-1"],
-    ["exec", ["run", "edit", "review", "--after", "latest"], { write: true, sessionless: false }, "pi-session-1"],
+    ["exec", ["run", "check", "run-1"], readClassification(), "pi-session-1"],
+    ["exec", ["skills", "--steps", "--json", "--platform", "pi"], readClassification(), undefined],
+    ["exec", ["session", "next", "--pick", "step-2"], writeClassification("execution", "required"), "pi-session-1"],
+    ["exec", ["session", "done", "run-1", "--verdict", "done-with-concerns"], writeClassification("execution", "required"), "pi-session-1"],
+    ["exec", ["run", "edit", "review", "--after", "latest"], writeClassification("execution", "required"), "pi-session-1"],
   ]);
 });
 
@@ -910,7 +1443,7 @@ test("run-control reads pass through but mutations fail closed without host iden
   assert.equal(execCalls, 1);
 });
 
-test("run-control does not turn a completed mutation into a failure when attribution is unavailable", async () => {
+test("run-control preserves success semantics and returns failure for a sanitized nonzero response", async () => {
   const transition = { command: result([], "ok"), snapshot: workflowSnapshot("running") };
   let ownershipCalls = 0;
   const coordinator = {
@@ -928,6 +1461,680 @@ test("run-control does not turn a completed mutation into a failure when attribu
   );
   assert.equal(resultValue.ok, true);
   assert.equal(ownershipCalls, 0);
+
+  const envelope = {
+    schema_version: "run-response/1.1",
+    operation: "execution-pause",
+    ok: false,
+    exit_code: 3,
+    disposition: "control_flow",
+    request_id: "request-nonzero",
+    locator: { session_id: "session-1", execution_id: "execution-1", generation: 1, run_id: "run-1" },
+    fence: {
+      session_identity_revision: 3,
+      session_activity_revision: 5,
+      execution_revision: 8,
+      lease_epoch: 4,
+    },
+    result: null,
+    next: null,
+    continuation: null,
+    replay: null,
+    warnings: [],
+    error: {
+      code: "LEASE_BUSY",
+      message: "lease_id=private-message",
+      retryable: true,
+      details: { visible: true, lease_id: "private-detail" },
+      recovery_command: null,
+    },
+  };
+  const command = {
+    argv: ["execution", "pause", "--lease-id", "private-argv", "--json"],
+    stdout: JSON.stringify(envelope),
+    stderr: "",
+    exitCode: 3,
+  };
+  const failureCoordinator = {
+    async exec() { return { command, snapshot: workflowSnapshot("running") }; },
+  } as unknown as WorkflowCoordinator;
+
+  const failureValue = await executeRunControl(
+    { argv: ["execution", "pause", "--json"] },
+    failureCoordinator,
+    { hostSessionId: "pi-session-1" },
+  );
+  assert.equal(failureValue.ok, false);
+  const details = failureValue.details as { command: RunCliResult };
+  const projected = JSON.parse(details.command.stdout) as typeof envelope;
+  assert.equal(details.command.exitCode, 3);
+  assert.equal(projected.ok, false);
+  assert.equal(projected.exit_code, 3);
+  assert.equal(projected.disposition, "control_flow");
+  assert.equal(projected.error.code, "LEASE_BUSY");
+  assert.equal(projected.error.details.visible, true);
+  assert.equal(JSON.stringify(failureValue).includes("private-"), false);
+});
+
+test("real Maestro CLI accepts coordinator-generated structured start and attach arguments", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-real-maestro-"));
+  const maestroBin = "D:/maestro2/bin/maestro.js";
+  const calls: string[][] = [];
+  const runner = async (args: readonly string[], cwd: string): Promise<RunCliResult> => {
+    calls.push([...args]);
+    return defaultRunner([maestroBin, ...args], cwd, {
+      executable: process.execPath,
+      timeoutMs: 30_000,
+      maxOutputBytes: 1024 * 1024,
+    });
+  };
+  const adapter = new RunCliAdapter(root, runner);
+  const bridge = new WorkflowBridge(root);
+  const coordinator = new WorkflowCoordinator(bridge, adapter, new WorkflowLeaseStore(root));
+  try {
+    assert.equal((await lstat(maestroBin)).isFile(), true);
+    await mkdir(join(root, ".workflow"), { recursive: true });
+    await writeFile(join(root, ".workflow", "config.json"), JSON.stringify({
+      session_schema: {
+        schema_version: "session-schema-selection/1.0",
+        writer: "session/2.0",
+        features: { session_statusless: true },
+      },
+    }), "utf8");
+    const created = await adapter.exec([
+      "session", "create", "real coordinator integration",
+      "--id", "real-coordinator", "--intent", "real coordinator integration", "--json",
+    ]);
+    assert.equal(created.exitCode, 0, created.stderr || created.stdout);
+    const createdEnvelope = JSON.parse(created.stdout) as { locator?: { session_id?: string | null } };
+    const sessionId = createdEnvelope.locator?.session_id;
+    assert.equal(typeof sessionId, "string");
+    await writeFile(join(root, ".workflow", "state.json"), JSON.stringify({
+      active_session_id: sessionId,
+    }), "utf8");
+    await bridge.refresh();
+    assert.equal(await coordinator.selectMode(), "core-execution");
+
+    const started = await coordinator.exec(
+      ["execution", "start"],
+      classifyRunControlArgv(["execution", "start"]),
+      "pi-real",
+    );
+    const startEnvelope = JSON.parse(started.command.stdout) as {
+      schema_version: string; operation: string; ok: boolean;
+    };
+    assert.equal(startEnvelope.schema_version, "run-response/1.1");
+    assert.equal(startEnvelope.operation, "execution-start");
+    assert.equal(startEnvelope.ok, true);
+    const startCall = calls.find((call) => call[0] === "execution" && call[1] === "start")!;
+    assert.equal(startCall.includes("--chain"), false);
+    assert.equal(flagValue(startCall, "--execution-owner"), "pi-real");
+    assert.equal(flagValue(startCall, "--expected-lease-epoch"), "0");
+    assert.equal(flagValue(startCall, "--expected-identity-revision"), "1");
+    assert.equal(flagValue(startCall, "--expected-activity-revision"), "0");
+
+    await coordinator.exec(
+      ["execution", "lease", "release"],
+      classifyRunControlArgv(["execution", "lease", "release"]),
+      "pi-real",
+    );
+    const attached = await coordinator.attach("pi-real");
+    assert.equal(attached.lease.ownerId, "pi-real");
+    const attachCall = calls.find((call) => call[0] === "execution" && call[1] === "attach")!;
+    assert.equal(flagValue(attachCall, "--execution-owner"), "pi-real");
+    assert.equal(flagValue(attachCall, "--owner-kind"), "pi");
+    assert.equal(flagValue(attachCall, "--expected-lease-epoch"), "1");
+    assert.equal(flagValue(attachCall, "--expected-execution-revision"), "2");
+  } finally {
+    await coordinator.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("core new-Session Plan publication creates and replays one deterministic authority chain", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-core-new-plan-"));
+  const snapshot: WorkflowSnapshot = {
+    source: "none",
+    projectRoot: root,
+    loadedAt: "2026-08-12T00:00:00.000Z",
+    revision: { fingerprint: "none" },
+    diagnostics: [],
+  };
+  const calls: string[][] = [];
+  let publishAttempts = 0;
+  let failFirstPublish = true;
+  const applyPublishedSnapshot = (): void => {
+    snapshot.execution!.revision = 4;
+    snapshot.execution!.chain = [
+      { step: "step-000-execute", command: "execute", status: "pending", runId: null },
+      { step: "step-001-verify", command: "verify", status: "pending", runId: null },
+    ];
+    snapshot.revision.executionRevision = 4;
+    snapshot.session!.activityRevision = 4;
+    snapshot.session!.chain = structuredClone(snapshot.execution!.chain);
+  };
+  const adapter: WorkflowRunAdapter = {
+    ...coreAdapter(calls, snapshot, (argv) => {
+      if (argv[0] === "session" && argv[1] === "create") {
+        const sessionId = flagValue(argv, "--id")!;
+        setCorePlanIdentitySnapshot(snapshot, sessionId, flagValue(argv, "--intent")!);
+        return corePlanSessionCreateResponse(sessionId);
+      }
+      if (argv[0] === "execution" && argv[1] === "start") {
+        const sessionId = flagValue(argv, "--session")!;
+        setCorePlanExecutionSnapshot(snapshot, sessionId, flagValue(argv, "--execution-owner")!);
+        return corePlanExecutionStartResponse(sessionId, flagValue(argv, "--request-id")!);
+      }
+      const operation = operationForArgv(argv);
+      const executionId = snapshot.execution?.executionId ?? "execution-001";
+      return coreRunResponse(operation, {
+        locator: {
+          session_id: snapshot.session?.sessionId ?? flagValue(argv, "--session"),
+          execution_id: executionId,
+          generation: snapshot.execution?.generation ?? 1,
+          run_id: snapshot.execution?.activeRunId ?? null,
+        },
+        fence: {
+          session_identity_revision: snapshot.session?.identityRevision ?? 1,
+          session_activity_revision: snapshot.session?.activityRevision ?? 1,
+          execution_revision: snapshot.execution?.revision ?? 1,
+          lease_epoch: snapshot.execution?.lease?.epoch ?? 1,
+        },
+      });
+    }),
+    async publishPlan(options) {
+      calls.push(["plan-publish", options.sessionId ?? "new", options.requestId ?? ""]);
+      publishAttempts++;
+      applyPublishedSnapshot();
+      if (publishAttempts > 1) {
+        assert.equal(options.expectedExecutionRevision, 4);
+        assert.equal(options.expectedActivityRevision, 4);
+      }
+      if (failFirstPublish) {
+        failFirstPublish = false;
+        throw new Error("injected publish transport failure lease_id=publish-private");
+      }
+      return result([], JSON.stringify(coreRunResponse("plan-publish", {
+        request_id: options.requestId,
+        locator: {
+          session_id: options.sessionId,
+          execution_id: options.executionId,
+          generation: options.generation,
+          run_id: "run-plan-publish",
+        },
+        fence: {
+          session_identity_revision: 1,
+          session_activity_revision: 4,
+          execution_revision: 4,
+          lease_epoch: 1,
+        },
+        result: { visible: true, lease_id: "publish-private" },
+        replay: {
+          status: publishAttempts > 1 ? "replayed" : "applied",
+          transition_id: "transition-plan-publish",
+        },
+      })));
+    },
+  };
+  const coordinator = new WorkflowCoordinator(
+    fakeBridge(snapshot),
+    adapter,
+    new WorkflowLeaseStore(root),
+  );
+  const options: RunPlanPublishOptions = {
+    sourcePath: "D:/plans/approved.md",
+    sourceRoot: "D:/plans",
+    intent: "Execute deterministic approved Plan",
+    topic: "Execute deterministic approved Plan",
+    handoffKey: "handoff-core-new-session",
+    sourcePiSession: "pi-new-plan",
+    planRevision: 1,
+    approvedAt: "2026-08-12T00:00:00.000Z",
+  };
+  try {
+    assert.equal(await coordinator.supportsNewPlanSession(), true);
+    await assert.rejects(
+      coordinator.publishPlan(options, { hostSessionId: "pi-new-plan" }),
+      (error: unknown) => {
+        const message = String((error as Error).message);
+        assert.match(message, /can be retried with the same approved Plan/);
+        assert.equal(message.includes("publish-private"), false);
+        return true;
+      },
+    );
+
+    const recovered = await coordinator.publishPlan(options, { hostSessionId: "pi-new-plan" });
+    const replay = await coordinator.publishPlan(options, { hostSessionId: "pi-new-plan" });
+    const createCalls = calls.filter((call) => call[1] === "session" && call[2] === "create");
+    const startCalls = calls.filter((call) => call[1] === "execution" && call[2] === "start");
+    assert.equal(createCalls.length, 1, "identity recovery must not allocate another Session");
+    assert.equal(startCalls.length, 1, "recovery must retain the canonically revalidated in-memory claim");
+    assert.equal(flagValue(createCalls[0]!, "--request-id"), undefined);
+    assert.equal(flagValue(createCalls[0]!, "--actor"), undefined);
+    const deterministicSessionId = flagValue(createCalls[0]!, "--id")!;
+    assert.match(deterministicSessionId, /^pi-plan-[a-f0-9]{24}-00000000-000000$/);
+    assert.equal(flagValue(startCalls[0]!, "--session"), deterministicSessionId);
+    assert.equal(flagValue(startCalls[0]!, "--expected-identity-revision"), "1");
+    assert.equal(flagValue(startCalls[0]!, "--expected-activity-revision"), "0");
+    assert.equal(flagValue(startCalls[0]!, "--expected-lease-epoch"), "0");
+    assert.equal(JSON.parse(recovered.command.stdout).replay.status, "replayed");
+    assert.equal(JSON.parse(replay.command.stdout).replay.status, "replayed");
+    assert.equal(JSON.stringify({ recovered, replay }).includes("private"), false);
+    assert.equal(calls.filter((call) => call[0] === "plan-publish").length, 3);
+  } finally {
+    await coordinator.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("real Maestro CLI publishes and replays a new statusless Plan Session after response loss", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-real-new-plan-"));
+  const maestroBin = "D:/maestro2/bin/maestro.js";
+  const calls: string[][] = [];
+  let discardFirstPlanResponse = true;
+  let privateLeaseId = "";
+  let firstFailureMessage = "";
+  const runner = async (args: readonly string[], cwd: string): Promise<RunCliResult> => {
+    calls.push([...args]);
+    const completed = await defaultRunner([maestroBin, ...args], cwd, {
+      executable: process.execPath,
+      timeoutMs: 30_000,
+      maxOutputBytes: 1024 * 1024,
+    });
+    if (discardFirstPlanResponse
+      && args[0] === "plan"
+      && args[1] === "publish"
+      && completed.exitCode === 0) {
+      discardFirstPlanResponse = false;
+      privateLeaseId = flagValue(args, "--lease-id") ?? "";
+      throw new Error(`injected response loss lease_id=${privateLeaseId}`);
+    }
+    return completed;
+  };
+  const adapter = new RunCliAdapter(root, runner);
+  const bridge = new WorkflowBridge(root);
+  const coordinator = new WorkflowCoordinator(bridge, adapter, new WorkflowLeaseStore(root));
+  try {
+    await mkdir(join(root, "prepare"), { recursive: true });
+    await mkdir(join(root, ".workflow"), { recursive: true });
+    await writeFile(join(root, "prepare", "plan-publish.md"), `---
+name: plan-publish
+session-mode: run
+contract:
+  contract_version: 2.1
+  arguments: []
+  consumes: []
+  produces:
+    - path: outputs/plan.json
+      kind: plan
+      alias: current-plan
+      role: primary
+      required: true
+      schema: plan/1.0
+  gates:
+    entry: []
+    exit: []
+---
+`, "utf8");
+    await writeFile(join(root, ".workflow", "config.json"), JSON.stringify({
+      session_schema: {
+        schema_version: "session-schema-selection/1.0",
+        writer: "session/2.0",
+        features: { session_statusless: true },
+      },
+    }), "utf8");
+    await writeFile(join(root, ".workflow", "state.json"), JSON.stringify({
+      version: "2.0",
+      active_session_id: null,
+      sessions: [],
+    }), "utf8");
+    const sourcePath = join(root, "approved.md");
+    await writeFile(sourcePath, "# New statusless Plan\n\nExecute with canonical authority.\n", "utf8");
+    const options: RunPlanPublishOptions = {
+      sourcePath,
+      sourceRoot: root,
+      intent: "Execute a new approved Plan",
+      topic: "Execute a new approved Plan",
+      handoffKey: "handoff-real-new-statusless",
+      sourcePiSession: "pi-real-new-plan",
+      planRevision: 1,
+      approvedAt: "2026-08-12T02:00:00.000Z",
+    };
+
+    assert.equal(await coordinator.supportsNewPlanSession(), true);
+    await assert.rejects(
+      coordinator.publishPlan(options, { hostSessionId: "pi-real-new-plan" }),
+      (error: unknown) => {
+        const message = String((error as Error).message);
+        firstFailureMessage = message;
+        assert.match(message, /can be retried with the same approved Plan/);
+        assert.equal(privateLeaseId.length > 0 && message.includes(privateLeaseId), false);
+        return true;
+      },
+    );
+    assert.notEqual(privateLeaseId, "", firstFailureMessage);
+
+    const recovered = await coordinator.publishPlan(options, { hostSessionId: "pi-real-new-plan" });
+    const replay = await coordinator.publishPlan(options, { hostSessionId: "pi-real-new-plan" });
+    const recoveredEnvelope = JSON.parse(recovered.command.stdout) as Record<string, any>;
+    const replayEnvelope = JSON.parse(replay.command.stdout) as Record<string, any>;
+    assert.equal(recoveredEnvelope.schema_version, "run-response/1.1");
+    assert.equal(recoveredEnvelope.operation, "plan-publish");
+    assert.equal(recoveredEnvelope.replay.status, "replayed");
+    assert.equal(replayEnvelope.replay.status, "replayed");
+    assert.equal(replayEnvelope.replay.transition_id, recoveredEnvelope.replay.transition_id);
+    assert.equal(recoveredEnvelope.fence.execution_revision, 4);
+    assert.equal(recoveredEnvelope.fence.session_activity_revision, 4);
+    assert.equal(JSON.stringify({ recovered, replay }).includes(privateLeaseId), false);
+
+    const createCalls = calls.filter((call) => call[0] === "session" && call[1] === "create");
+    const startCalls = calls.filter((call) => call[0] === "execution" && call[1] === "start");
+    const publishCalls = calls.filter((call) => call[0] === "plan" && call[1] === "publish");
+    assert.equal(createCalls.length, 1);
+    assert.equal(startCalls.length, 1);
+    assert.equal(publishCalls.length, 3);
+    const sessionId = flagValue(createCalls[0]!, "--id")!;
+    assert.match(sessionId, /^pi-plan-[a-f0-9]{24}-00000000-000000$/);
+    assert.equal(flagValue(startCalls[0]!, "--session"), sessionId);
+    assert.equal(flagValue(publishCalls[0]!, "--expected-execution-revision"), "1");
+    assert.equal(flagValue(publishCalls[1]!, "--expected-execution-revision"), "4");
+    assert.equal(flagValue(publishCalls[1]!, "--expected-activity-revision"), "4");
+
+    const sessionsRoot = join(root, ".workflow", "sessions");
+    const sessionDirectories = (await readdir(sessionsRoot, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory() && entry.name !== ".backups");
+    assert.deepEqual(sessionDirectories.map((entry) => entry.name), [sessionId]);
+    const sessionDir = join(sessionsRoot, sessionId);
+    const identity = JSON.parse(await readFile(join(sessionDir, "session.json"), "utf8")) as Record<string, any>;
+    assert.equal(identity.schema_version, "session/2.0");
+    assert.equal(identity.activity_revision, 4);
+
+    const executionDirectories = (await readdir(join(sessionDir, "executions"), { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory());
+    assert.equal(executionDirectories.length, 1);
+    const executionId = executionDirectories[0]!.name;
+    assert.equal(identity.current_execution_id, executionId);
+    assert.equal(identity.latest_execution_id, executionId);
+    const executionDir = join(sessionDir, "executions", executionId);
+    const execution = JSON.parse(await readFile(join(executionDir, "execution.json"), "utf8")) as Record<string, any>;
+    assert.equal(execution.schema_version, "execution/1.0");
+    assert.equal(execution.generation, 1);
+    assert.equal(execution.revision, 4);
+    assert.equal(execution.active_run_id, null);
+    assert.deepEqual(
+      execution.chain.map((step: Record<string, unknown>) => ({
+        command: step.command, status: step.status, run_id: step.run_id,
+      })),
+      [
+        { command: "execute", status: "pending", run_id: null },
+        { command: "verify", status: "pending", run_id: null },
+      ],
+    );
+    const compatibility = JSON.parse(
+      await readFile(join(sessionDir, ".compat", "session-1.3.json"), "utf8"),
+    ) as Record<string, any>;
+    assert.equal(compatibility.orchestration.engine, "manual");
+    assert.deepEqual(compatibility.orchestration.chain, execution.chain);
+
+    const runDirectories = (await readdir(join(sessionDir, "runs"), { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory());
+    assert.equal(runDirectories.length, 1);
+    const runId = runDirectories[0]!.name;
+    const run = JSON.parse(await readFile(join(sessionDir, "runs", runId, "run.json"), "utf8")) as Record<string, any>;
+    assert.equal(run.schema_version, "command-run/1.4");
+    assert.equal(run.status, "sealed");
+    assert.equal(run.command.name, "plan-publish");
+    assert.equal(run.execution_id, executionId);
+    assert.equal(run.generation, 1);
+    assert.equal(run.handoff.producer_run_id, runId);
+    assert.equal(run.handoff.command, "plan-publish");
+    assert.equal(recoveredEnvelope.locator.session_id, sessionId);
+    assert.equal(recoveredEnvelope.locator.execution_id, executionId);
+    assert.equal(recoveredEnvelope.locator.generation, 1);
+    assert.equal(recoveredEnvelope.locator.run_id, runId);
+
+    const artifacts = JSON.parse(await readFile(join(sessionDir, "artifacts.json"), "utf8")) as Record<string, any>;
+    const artifactId = artifacts.aliases["current-plan"] as string;
+    assert.equal(Object.keys(artifacts.artifacts).length, 1);
+    assert.equal(artifacts.artifacts[artifactId].producer_run_id, runId);
+    const published = recoveredEnvelope.result as { session_id: string; run_id: string; artifact_id: string };
+    assert.equal(published.session_id, sessionId);
+    assert.equal(published.run_id, runId);
+    assert.equal(published.artifact_id, artifactId);
+    assert.doesNotThrow(() => assertPublishedPlanSnapshot(recovered.snapshot, published, sessionId));
+
+    const bootstrapRequestId = `${recoveredEnvelope.request_id}__bootstrap`;
+    const bootstrapBytes = await readFile(join(executionDir, "transitions", `${bootstrapRequestId}.json`), "utf8");
+    const bootstrapReceipt = JSON.parse(bootstrapBytes) as Record<string, any>;
+    assert.equal(bootstrapReceipt.payload.operation, "execution-chain-bootstrap");
+    assert.equal(bootstrapReceipt.payload.preconditions.execution_revision, 1);
+    assert.equal(bootstrapReceipt.outcome.postconditions.execution_revision, 2);
+    assert.equal(bootstrapBytes.includes(privateLeaseId), false);
+  } finally {
+    await coordinator.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("real Maestro CLI publishes a statusless current Plan with Execution fences and replay", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-real-plan-publish-"));
+  const maestroBin = "D:/maestro2/bin/maestro.js";
+  const calls: string[][] = [];
+  const runner = async (args: readonly string[], cwd: string): Promise<RunCliResult> => {
+    calls.push([...args]);
+    return defaultRunner([maestroBin, ...args], cwd, {
+      executable: process.execPath,
+      timeoutMs: 30_000,
+      maxOutputBytes: 1024 * 1024,
+    });
+  };
+  const adapter = new RunCliAdapter(root, runner);
+  const bridge = new WorkflowBridge(root);
+  const coordinator = new WorkflowCoordinator(bridge, adapter, new WorkflowLeaseStore(root));
+  try {
+    await mkdir(join(root, "prepare"), { recursive: true });
+    await writeFile(join(root, "prepare", "plan-publish.md"), `---
+name: plan-publish
+session-mode: run
+contract:
+  contract_version: 2.1
+  arguments: []
+  consumes: []
+  produces:
+    - path: outputs/plan.json
+      kind: plan
+      alias: current-plan
+      role: primary
+      required: true
+      schema: plan/1.0
+  gates:
+    entry: []
+    exit: []
+---
+`, "utf8");
+    const sourcePath = join(root, "approved.md");
+    await writeFile(sourcePath, "# Statusless current Plan\n\nExecute through current authority.\n", "utf8");
+
+    const created = await adapter.exec([
+      "session", "create", "statusless current plan", "--id", "statusless-plan",
+      "--intent", "Execute approved Plan", "--chain", "execute", "verify", "--engine", "manual", "--json",
+    ]);
+    const createdEnvelope = JSON.parse(created.stdout) as { locator?: { session_id?: string | null } };
+    const sessionId = createdEnvelope.locator?.session_id;
+    assert.equal(typeof sessionId, "string");
+    await writeFile(join(root, ".workflow", "state.json"), JSON.stringify({
+      active_session_id: sessionId,
+    }), "utf8");
+    await bridge.refresh();
+
+    await writeFile(join(root, ".workflow", "config.json"), JSON.stringify({
+      session_schema: {
+        schema_version: "session-schema-selection/1.0",
+        writer: "session/2.0",
+        features: { session_statusless: true },
+      },
+    }), "utf8");
+    await adapter.exec(["session", "migrate", "--session", sessionId!, "--to", "session/2.0"]);
+    await bridge.refresh();
+    assert.equal(await coordinator.selectMode(), "core-execution");
+    await coordinator.attach("pi-plan-real");
+
+    const publishOptions: RunPlanPublishOptions = {
+      sourcePath,
+      sourceRoot: root,
+      sessionId,
+      handoffKey: "handoff-real-statusless",
+      sourcePiSession: "pi-plan-real",
+      planRevision: 1,
+      approvedAt: "2026-08-11T21:00:00.000Z",
+    };
+    const first = await coordinator.publishPlan(publishOptions, { hostSessionId: "pi-plan-real" });
+    const replay = await coordinator.publishPlan(publishOptions, { hostSessionId: "pi-plan-real" });
+    const firstEnvelope = JSON.parse(first.command.stdout) as Record<string, any>;
+    const replayEnvelope = JSON.parse(replay.command.stdout) as Record<string, any>;
+    assert.equal(firstEnvelope.schema_version, "run-response/1.1");
+    assert.equal(firstEnvelope.operation, "plan-publish");
+    assert.equal(firstEnvelope.ok, true);
+    assert.equal(firstEnvelope.locator.session_id, sessionId);
+    assert.equal(firstEnvelope.locator.execution_id, replayEnvelope.locator.execution_id);
+    assert.equal(firstEnvelope.locator.generation, 1);
+    assert.equal(typeof firstEnvelope.locator.run_id, "string");
+    assert.equal(firstEnvelope.replay.status, "applied");
+    assert.equal(replayEnvelope.replay.status, "replayed");
+    assert.equal(replayEnvelope.replay.transition_id, firstEnvelope.replay.transition_id);
+    assert.equal(firstEnvelope.fence.execution_revision, replayEnvelope.fence.execution_revision);
+
+    const planCall = calls.find((call) => call[0] === "plan" && call[1] === "publish")!;
+    const privateLeaseId = flagValue(planCall, "--lease-id")!;
+    assert.equal(JSON.stringify(first).includes('"lease_id":'), false);
+    assert.equal(JSON.stringify(first).includes(privateLeaseId), false);
+    assert.equal(JSON.stringify(first).includes("private-core"), false);
+    assert.equal(flagValue(planCall, "--session"), sessionId);
+    assert.equal(flagValue(planCall, "--execution"), firstEnvelope.locator.execution_id);
+    assert.equal(flagValue(planCall, "--generation"), "1");
+    assert.equal(flagValue(planCall, "--request-id"), firstEnvelope.request_id);
+    assert.equal(flagValue(planCall, "--execution-owner"), "pi-plan-real");
+    assert.equal(flagValue(planCall, "--owner-kind"), "pi");
+    assert.equal(flagValue(planCall, "--actor"), "pi-plan-real");
+    assert.equal(flagValue(planCall, "--reason"), "Publish approved Pi Plan into current Execution");
+    assert.equal(flagValue(planCall, "--evidence"), "pi-session:pi-plan-real");
+    assert.equal(typeof flagValue(planCall, "--lease-id"), "string");
+
+    const currentFence = replayEnvelope.fence as Record<string, number>;
+    const directAuthority = {
+      sourcePath,
+      sourceRoot: root,
+      sessionId,
+      sourcePiSession: "pi-plan-real",
+      planRevision: 1,
+      approvedAt: "2026-08-11T21:01:00.000Z",
+      expectedIdentityRevision: currentFence.session_identity_revision,
+      expectedActivityRevision: currentFence.session_activity_revision,
+      executionId: replayEnvelope.locator.execution_id as string,
+      generation: replayEnvelope.locator.generation as number,
+      expectedExecutionRevision: currentFence.execution_revision,
+      executionOwner: "pi-plan-real",
+      ownerKind: "pi" as const,
+      ownerEpoch: currentFence.lease_epoch,
+      leaseId: privateLeaseId,
+      actor: "pi-plan-real",
+      reason: "Exercise Plan publication fences",
+      evidence: ["TEST:real-plan-fences"],
+    };
+    await assert.rejects(
+      adapter.publishPlan({
+        ...directAuthority,
+        handoffKey: "handoff-real-stale-revision",
+        requestId: "req-real-stale-revision",
+        expectedExecutionRevision: currentFence.execution_revision - 1,
+      }),
+      /execution revision conflict/,
+    );
+    await assert.rejects(
+      adapter.publishPlan({
+        ...directAuthority,
+        handoffKey: "handoff-real-stale-lease",
+        requestId: "req-real-stale-lease",
+        leaseId: `${privateLeaseId}-stale`,
+      }),
+      /lease fence conflict/,
+    );
+
+    await writeFile(sourcePath, "# Changed after approval\n", "utf8");
+    await assert.rejects(
+      coordinator.publishPlan(publishOptions, { hostSessionId: "pi-plan-real" }),
+      /source bytes changed/,
+    );
+  } finally {
+    await coordinator.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("real Maestro CLI preserves legacy Plan publication through the Pi adapter", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-real-plan-legacy-"));
+  const maestroBin = "D:/maestro2/bin/maestro.js";
+  const calls: string[][] = [];
+  const runner = async (args: readonly string[], cwd: string): Promise<RunCliResult> => {
+    calls.push([...args]);
+    return defaultRunner([maestroBin, ...args], cwd, {
+      executable: process.execPath,
+      timeoutMs: 30_000,
+      maxOutputBytes: 1024 * 1024,
+    });
+  };
+  const adapter = new RunCliAdapter(root, runner);
+  try {
+    await mkdir(join(root, "prepare"), { recursive: true });
+    await writeFile(join(root, "prepare", "plan-publish.md"), `---
+name: plan-publish
+session-mode: run
+contract:
+  contract_version: 2.1
+  arguments: []
+  consumes: []
+  produces:
+    - path: outputs/plan.json
+      kind: plan
+      alias: current-plan
+      role: primary
+      required: true
+      schema: plan/1.0
+  gates:
+    entry: []
+    exit: []
+---
+`, "utf8");
+    const sourcePath = join(root, "approved.md");
+    await writeFile(sourcePath, "# Legacy Plan\n", "utf8");
+    const created = await adapter.exec([
+      "session", "create", "legacy plan", "--id", "legacy-plan", "--intent", "Legacy Plan", "--json",
+    ]);
+    const createdEnvelope = JSON.parse(created.stdout) as { locator?: { session_id?: string | null } };
+    const options: RunPlanPublishOptions = {
+      sourcePath,
+      sourceRoot: root,
+      sessionId: createdEnvelope.locator?.session_id ?? undefined,
+      handoffKey: "handoff-real-legacy",
+      sourcePiSession: "pi-legacy",
+      planRevision: 1,
+      approvedAt: "2026-08-11T21:10:00.000Z",
+    };
+    const first = JSON.parse((await adapter.publishPlan(options)).stdout) as Record<string, any>;
+    const replay = JSON.parse((await adapter.publishPlan(options)).stdout) as Record<string, any>;
+    assert.equal(first.schema_version, "run-response/1.0");
+    assert.equal(first.operation, "plan-publish");
+    assert.equal(first.locator.session_id, options.sessionId);
+    assert.equal(first.locator.execution_id, undefined);
+    assert.equal(first.replay.status, "applied");
+    assert.equal(replay.replay.status, "replayed");
+    const planCall = calls.find((call) => call[0] === "plan" && call[1] === "publish")!;
+    assert.equal(planCall.includes("--execution"), false);
+    assert.equal(planCall.includes("--expected-execution-revision"), false);
+    assert.equal(planCall.includes("--lease-id"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("default CLI runner advertises the Pi package root to the Maestro process", async () => {
@@ -1013,6 +2220,366 @@ test("default CLI runner settles once and removes listeners when error races clo
   assert.equal(child.stdout.listenerCount("data"), 0);
   assert.equal(child.stderr.listenerCount("data"), 0);
 });
+
+function testCoordinator(
+  bridge: WorkflowSnapshotProvider,
+  adapter: WorkflowRunAdapter,
+  leases: WorkflowLeaseStore,
+  heartbeatEveryMs = 10_000,
+): WorkflowCoordinator {
+  return new WorkflowCoordinator(
+    bridge,
+    adapter,
+    leases,
+    heartbeatEveryMs,
+    { legacyCompatibility: !adapter.capabilities },
+  );
+}
+
+function readClassification(): ReturnType<typeof classifyRunControlArgv> {
+  return { write: false, sessionless: false, mutation: "read", lease: "none" };
+}
+
+function writeClassification(
+  mutation: "session" | "execution" | "execution-acquire" | "execution-lease",
+  lease: "none" | "required" | "acquire",
+  sessionless = false,
+): ReturnType<typeof classifyRunControlArgv> {
+  return { write: true, sessionless, mutation, lease };
+}
+
+function failClosedCoreCapabilities(diagnostic: string): RunCliCapabilities {
+  return {
+    ...fullCoreCapabilities(),
+    mode: "fail-closed",
+    structured: null,
+    support: {
+      execution_generation: false,
+      core_execution_lease: false,
+      "run-response/1.1": false,
+    },
+    diagnostic,
+  };
+}
+
+function legacyCoreCapabilities(): RunCliCapabilities {
+  return {
+    ...failClosedCoreCapabilities("Installed Maestro CLI has no capabilities command"),
+    mode: "legacy",
+  };
+}
+
+function flagValue(argv: readonly string[], flag: string): string | undefined {
+  const index = argv.indexOf(flag);
+  return index >= 0 ? argv[index + 1] : undefined;
+}
+
+function assertCoreLeaseTuple(argv: readonly string[]): void {
+  assert.equal(flagValue(argv, "--session"), "session-1");
+  assert.equal(flagValue(argv, "--execution"), "execution-1");
+  assert.equal(flagValue(argv, "--expected-execution-revision"), "8");
+  assert.equal(flagValue(argv, "--execution-owner"), "pi-owner");
+  assert.equal(flagValue(argv, "--owner-kind"), "pi");
+  assert.equal(flagValue(argv, "--owner-epoch"), "4");
+  assert.equal(flagValue(argv, "--lease-id"), "private-core-lease");
+}
+
+function fullCoreCapabilities(): RunCliCapabilities {
+  return {
+    commands: new Set(["brief", "check", "next", "complete", "edit"]),
+    sessionCommands: new Set(),
+    planCommands: new Set(["publish"]),
+    mode: "structured",
+    structured: {
+      schema_version: "maestro-capabilities/1.0",
+      cli_version: "2.0.0",
+      session_schema_writes: ["session/2.0"],
+      execution_schema_writes: ["execution/1.0"],
+      run_response_writes: ["run-response/1.1"],
+      features: {
+        execution_generation: true,
+        core_execution_lease: true,
+        execution_handoff: true,
+        session_statusless: true,
+        legacy_session_aliases: true,
+      },
+    },
+    support: {
+      execution_generation: true,
+      core_execution_lease: true,
+      "run-response/1.1": true,
+    },
+    diagnostic: null,
+  };
+}
+
+function corePlanSessionCreateResponse(sessionId: string): Record<string, unknown> {
+  return {
+    schema_version: "run-response/1.1",
+    operation: "session-create",
+    ok: true,
+    exit_code: 0,
+    disposition: "success",
+    request_id: null,
+    locator: { session_id: sessionId, execution_id: null, generation: null, run_id: null },
+    fence: {
+      session_identity_revision: 1,
+      session_activity_revision: 0,
+      execution_revision: null,
+      lease_epoch: null,
+    },
+    result: {
+      session_id: sessionId,
+      schema_version: "session/2.0",
+      current_execution_id: null,
+      latest_execution_id: null,
+    },
+    next: null,
+    continuation: null,
+    replay: null,
+    warnings: [],
+    error: null,
+  };
+}
+
+function corePlanExecutionStartResponse(sessionId: string, requestId: string): Record<string, unknown> {
+  return coreRunResponse("execution-start", {
+    request_id: requestId,
+    locator: {
+      session_id: sessionId,
+      execution_id: "execution-001",
+      generation: 1,
+      run_id: null,
+    },
+    fence: {
+      session_identity_revision: 1,
+      session_activity_revision: 1,
+      execution_revision: 1,
+      lease_epoch: 1,
+    },
+    result: { lease_claim: { lease_id: "private-new-plan-lease" } },
+    replay: { status: "applied", transition_id: "transition-plan-execution-start" },
+  });
+}
+
+function setCorePlanIdentitySnapshot(snapshot: WorkflowSnapshot, sessionId: string, intent: string): void {
+  const identity = coreWorkflowSnapshot();
+  snapshot.source = "canonical";
+  snapshot.canonicalClaim = { activeSessionId: sessionId, status: "valid" };
+  snapshot.sessionGeneration = `canonical:valid:${sessionId}:1`;
+  snapshot.session = {
+    ...identity.session!,
+    sessionId,
+    intent,
+    identityRevision: 1,
+    activityRevision: 0,
+    currentExecutionId: null,
+    latestExecutionId: null,
+    activeRunId: null,
+    chain: [],
+    runs: [],
+  };
+  snapshot.locator = { sessionId };
+  snapshot.execution = undefined;
+  snapshot.revision = { sessionRevision: 1, fingerprint: `identity:${sessionId}` };
+}
+
+function setCorePlanExecutionSnapshot(snapshot: WorkflowSnapshot, sessionId: string, ownerId: string): void {
+  snapshot.session!.activityRevision = 1;
+  snapshot.session!.currentExecutionId = "execution-001";
+  snapshot.session!.latestExecutionId = "execution-001";
+  snapshot.locator = { sessionId, executionId: "execution-001", generation: 1 };
+  snapshot.revision.executionRevision = 1;
+  snapshot.execution = {
+    schemaVersion: "execution/1.0",
+    executionId: "execution-001",
+    sessionId,
+    generation: 1,
+    status: "active",
+    revision: 1,
+    activeRunId: null,
+    chain: [],
+    decisionPoints: [],
+    gatesRef: "gates.json",
+    artifactsRef: "artifacts.json",
+    evidenceRef: "evidence.json",
+    lease: {
+      sessionId,
+      executionId: "execution-001",
+      ownerId,
+      ownerKind: "pi",
+      epoch: 1,
+      acquiredAt: "2026-08-12T00:00:00.000Z",
+      heartbeatAt: "2026-08-12T00:00:00.000Z",
+      handoffTo: null,
+    },
+    startedAt: "2026-08-12T00:00:00.000Z",
+    sealedAt: null,
+    sealSummary: null,
+    finalOutcome: null,
+  };
+}
+
+function coreAdapter(
+  calls: string[][],
+  snapshot: WorkflowSnapshot,
+  response?: (argv: readonly string[]) => Record<string, unknown>,
+  capabilities: RunCliCapabilities = fullCoreCapabilities(),
+): WorkflowRunAdapter {
+  const adapter = fakeAdapter(calls);
+  return {
+    ...adapter,
+    async capabilities() { return capabilities; },
+    async exec(argv) {
+      calls.push(["exec", ...argv]);
+      const classification = classifyRunControlArgv(argv);
+      if (!classification.write) return result(argv, `read ${argv.join(" ")}`);
+      const envelope = response?.(argv) ?? coreRunResponse(operationForArgv(argv));
+      applyCoreResponseToSnapshot(snapshot, envelope, argv);
+      return result(argv, JSON.stringify(envelope));
+    },
+  };
+}
+
+function applyCoreResponseToSnapshot(
+  snapshot: WorkflowSnapshot,
+  envelope: Record<string, unknown>,
+  argv: readonly string[],
+): void {
+  if (envelope.ok !== true) return;
+  const locator = envelope.locator as Record<string, unknown> | null;
+  const fence = envelope.fence as Record<string, unknown> | null;
+  if (!locator || !fence || typeof locator.execution_id !== "string") return;
+  const revision = fence.execution_revision;
+  const generation = locator.generation;
+  if (!Number.isSafeInteger(revision) || !Number.isSafeInteger(generation)) return;
+  const operation = String(envelope.operation);
+  if (operation === "execution-seal") {
+    snapshot.locator = { sessionId: String(locator.session_id) };
+    snapshot.execution = undefined;
+    snapshot.revision.executionRevision = undefined;
+    return;
+  }
+  if (!snapshot.execution) return;
+  snapshot.execution.revision = revision as number;
+  snapshot.revision.executionRevision = revision as number;
+  if (["execution-start", "execution-attach", "execution-resume", "execution-lease-recover"].includes(operation)) {
+    snapshot.execution.status = "active";
+    snapshot.execution.lease = {
+      sessionId: String(locator.session_id),
+      executionId: locator.execution_id,
+      ownerId: flagValue(argv, "--execution-owner") ?? "pi-owner",
+      ownerKind: "pi",
+      epoch: fence.lease_epoch as number,
+      acquiredAt: "2026-07-15T00:00:00.000Z",
+      heartbeatAt: "2026-07-15T00:00:01.000Z",
+      handoffTo: null,
+    };
+  } else if (operation === "execution-pause") {
+    snapshot.execution.status = "paused";
+    snapshot.execution.lease = null;
+  } else if (operation === "execution-lease-release") {
+    snapshot.execution.lease = null;
+  }
+}
+
+function operationForArgv(argv: readonly string[]): string {
+  if (argv[0] === "execution" && argv[1] === "handoff") return `execution-handoff-${argv[2]}`;
+  if (argv[0] === "execution" && argv[1] === "lease") return `execution-lease-${argv[2]}`;
+  if (argv[0] === "execution") return `execution-${argv[1]}`;
+  if (argv[0] === "session") return `session-${argv[1]}`;
+  if (argv[0] === "run" && argv[1] === "complete") return "complete";
+  return argv[1] ?? argv[0] ?? "check";
+}
+
+function coreRunResponse(
+  operation: string,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const acquisition = [
+    "execution-start",
+    "execution-attach",
+    "execution-resume",
+    "execution-handoff-accept",
+    "execution-lease-recover",
+  ].includes(operation);
+  return {
+    schema_version: "run-response/1.1",
+    operation,
+    ok: true,
+    exit_code: 0,
+    disposition: "success",
+    request_id: "request-core",
+    locator: {
+      session_id: "session-1",
+      execution_id: "execution-1",
+      generation: 1,
+      run_id: "run-1",
+    },
+    fence: {
+      session_identity_revision: 3,
+      session_activity_revision: 5,
+      execution_revision: 8,
+      lease_epoch: 4,
+    },
+    result: acquisition
+      ? {
+          lease_claim: { lease_id: "private-core-lease" },
+          nested: { token: "private-nested-token", visible: true },
+          visible: true,
+        }
+      : { visible: true },
+    next: null,
+    continuation: null,
+    replay: { status: "applied", transition_id: `transition-${operation}` },
+    warnings: [],
+    error: null,
+    ...overrides,
+  };
+}
+
+function coreWorkflowSnapshot(): WorkflowSnapshot {
+  const snapshot = workflowSnapshot("running");
+  const executionChain = snapshot.session!.chain;
+  snapshot.session!.schemaVersion = "session/2.0";
+  snapshot.session!.lifecycleAuthority = "execution-derived";
+  delete (snapshot.session as { status?: string }).status;
+  snapshot.session!.identityRevision = 3;
+  snapshot.session!.activityRevision = 5;
+  snapshot.session!.currentExecutionId = "execution-1";
+  snapshot.session!.latestExecutionId = "execution-1";
+  snapshot.session!.latestCompletedRunId = null;
+  snapshot.session!.archivedAt = null;
+  snapshot.session!.archivedBy = null;
+  snapshot.session!.activeRunId = null;
+  snapshot.session!.chain = [];
+  snapshot.locator = {
+    sessionId: "session-1",
+    executionId: "execution-1",
+    generation: 1,
+    runId: "run-1",
+  };
+  snapshot.revision.executionRevision = 7;
+  snapshot.execution = {
+    executionId: "execution-1",
+    sessionId: "session-1",
+    generation: 1,
+    status: "active",
+    revision: 7,
+    activeRunId: "run-1",
+    chain: executionChain,
+    decisionPoints: [],
+    gatesRef: "gates.json",
+    artifactsRef: "artifacts.json",
+    evidenceRef: "evidence.json",
+    lease: null,
+    startedAt: "2026-07-15T00:00:00.000Z",
+    sealedAt: null,
+    sealSummary: null,
+    finalOutcome: null,
+  };
+  return snapshot;
+}
 
 function fakeBridge(snapshot: WorkflowSnapshot): WorkflowSnapshotProvider {
   return {

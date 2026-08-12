@@ -2974,6 +2974,119 @@ test("completion summary accepts 4000 characters and rejects 4001 before verifie
   }
 });
 
+test("statusless canonical Goal blockers use only current Execution work", () => {
+  const pending = statuslessGoalWorkflowSnapshot();
+  assert.equal("status" in pending.session!, false, "the session/2.0 fixture must be truly statusless");
+  assert.deepEqual(canonicalCompletionBlockers(pending), [
+    "Step execute (execute) is pending",
+    "Run run-current is created",
+    "Gate gate-current is pending",
+    "Decision approve-current is pending",
+  ]);
+  const evidence = buildCanonicalEvidence(pending);
+  assert.match(evidence, /Execution execution-1: active/);
+  assert.match(evidence, /execute:pending/);
+  assert.doesNotMatch(evidence, /run-history|gate-history|stale-session-step/);
+
+  for (const status of ["running", "failed", "blocked"] as const) {
+    const snapshot = statuslessGoalWorkflowSnapshot();
+    snapshot.execution!.chain[0]!.status = status;
+    snapshot.session!.runs.find((run) => run.runId === "run-current")!.status = status;
+    assert.match(canonicalCompletionBlockers(snapshot).join("\n"), new RegExp(`is ${status}`));
+  }
+
+  const paused = statuslessGoalWorkflowSnapshot();
+  paused.execution!.status = "paused";
+  assert.match(canonicalCompletionBlockers(paused).join("\n"), /Execution is paused/);
+
+  const terminal = statuslessGoalWorkflowSnapshot();
+  terminal.execution!.chain[0]!.status = "completed";
+  terminal.execution!.decisionPoints[0]!.status = "passed";
+  terminal.session!.runs.find((run) => run.runId === "run-current")!.status = "completed";
+  terminal.session!.runs.find((run) => run.runId === "run-current")!.gates[0]!.status = "passed";
+  assert.deepEqual(canonicalCompletionBlockers(terminal), []);
+
+  const sealed = statuslessGoalWorkflowSnapshot();
+  sealed.execution!.status = "sealed";
+  sealed.execution!.sealedAt = "2026-07-18T02:00:00.000Z";
+  sealed.execution!.finalOutcome = "done";
+  assert.deepEqual(canonicalCompletionBlockers(sealed), []);
+});
+
+test("statusless Goal completion fails closed for missing, dangling, and invalid Execution pointers", () => {
+  const missingPointer = statuslessGoalWorkflowSnapshot();
+  delete missingPointer.session!.currentExecutionId;
+  assert.match(canonicalCompletionBlockers(missingPointer).join("\n"), /no valid current Execution pointer/i);
+
+  const dangling = statuslessGoalWorkflowSnapshot();
+  dangling.execution = undefined;
+  dangling.locator = { sessionId: dangling.session!.sessionId };
+  assert.match(canonicalCompletionBlockers(dangling).join("\n"), /Current Execution execution-1 is missing or invalid/);
+  assert.match(buildCanonicalEvidence(dangling), /Blocker: Current Execution execution-1 is missing or invalid/);
+
+  const invalid = statuslessGoalWorkflowSnapshot();
+  invalid.execution!.executionId = "execution-other";
+  assert.match(canonicalCompletionBlockers(invalid).join("\n"), /does not match the loaded Execution locator/);
+  assert.match(buildCanonicalEvidence(invalid), /reload or repair the canonical Session\/Execution state/);
+
+  const idle = statuslessGoalWorkflowSnapshot();
+  idle.session!.currentExecutionId = null;
+  idle.execution = undefined;
+  idle.locator = { sessionId: idle.session!.sessionId };
+  assert.deepEqual(canonicalCompletionBlockers(idle), []);
+  assert.match(buildCanonicalEvidence(idle), /Current Execution pointer: null \(idle\)/);
+
+  const archived = structuredClone(dangling);
+  archived.session!.archivedAt = "2026-07-18T03:00:00.000Z";
+  archived.session!.archivedBy = "operator";
+  assert.deepEqual(canonicalCompletionBlockers(archived), []);
+
+  const legacy = completionReadyWorkflowSnapshot();
+  assert.deepEqual(canonicalCompletionBlockers(legacy), []);
+});
+
+test("statusless Execution blockers prevent Goal verifier startup", async () => {
+  let verifierCalls = 0;
+  let currentSnapshot = workflowSnapshot();
+  const statuslessSnapshot = statuslessGoalWorkflowSnapshot();
+  setGoalVerifierRunnerForTest(async () => {
+    verifierCalls++;
+    return { exitCode: 0, messages: [] };
+  });
+  setWorkflowCoordinator({ status: () => currentSnapshot } as never);
+  initGoal({ appendEntry() {} } as never);
+  const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
+  onSessionStart(ctx);
+
+  try {
+    reconcileWorkflowGoal(currentSnapshot, ctx);
+    currentSnapshot = statuslessSnapshot;
+    const result = await executeGoal({
+      action: "complete",
+      summary: "Attempt completion while Execution work remains pending.",
+    }, ctx);
+    assert.match(result.text, /canonical Workflow is blocked/i);
+    assert.equal(verifierCalls, 0);
+    assert.equal(getActiveGoal()?.status, "active");
+
+    currentSnapshot = structuredClone(statuslessSnapshot);
+    currentSnapshot.execution = undefined;
+    currentSnapshot.locator = { sessionId: currentSnapshot.session!.sessionId };
+    const danglingResult = await executeGoal({
+      action: "complete",
+      summary: "Attempt completion with a dangling current Execution pointer.",
+    }, ctx);
+    assert.match(danglingResult.text, /Current Execution execution-1 is missing or invalid/);
+    assert.equal(verifierCalls, 0);
+    assert.equal(getActiveGoal()?.status, "active");
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setWorkflowCoordinator(undefined);
+    setGoalVerifierRunnerForTest(undefined);
+  }
+});
+
 test("canonical Workflow state rebuilds Goal projection and blocks premature completion", async () => {
   const ctx = createContext({ sessionManager: { getEntries: () => [] } });
   initGoal({ appendEntry() {} } as never);
@@ -3690,6 +3803,57 @@ test("active Goal does not rewrite the per-turn system prompt", () => {
     onSessionShutdown(ctx);
   }
 });
+
+function statuslessGoalWorkflowSnapshot(): WorkflowSnapshot {
+  const snapshot = workflowSnapshot();
+  const session = snapshot.session!;
+  session.schemaVersion = "session/2.0";
+  session.lifecycleAuthority = "execution-derived";
+  session.currentExecutionId = "execution-1";
+  session.latestExecutionId = "execution-1";
+  session.archivedAt = null;
+  session.activeRunId = "run-history";
+  session.chain = [{ step: "stale-session-step", command: "review", status: "pending", runId: "run-history" }];
+  const historyRun = session.runs[0]!;
+  historyRun.runId = "run-history";
+  historyRun.status = "failed";
+  historyRun.gates = [{ id: "gate-history", runId: "run-history", blocking: true, status: "blocked" }];
+  const currentRun = structuredClone(historyRun);
+  currentRun.runId = "run-current";
+  currentRun.status = "created";
+  currentRun.gates = [{ id: "gate-current", runId: "run-current", blocking: true, status: "pending" }];
+  session.runs = [historyRun, currentRun];
+  session.gates = [{ id: "gate-history", runId: "run-history", blocking: true, status: "blocked" }];
+  delete (session as { status?: string }).status;
+  snapshot.locator = { sessionId: session.sessionId, executionId: "execution-1", generation: 1 };
+  snapshot.execution = {
+    schemaVersion: "execution/1.0",
+    executionId: "execution-1",
+    sessionId: session.sessionId,
+    generation: 1,
+    status: "active",
+    revision: 1,
+    activeRunId: null,
+    chain: [{ step: "execute", command: "execute", status: "pending", runId: "run-current" }],
+    decisionPoints: [{
+      pointId: "approve-current",
+      afterStepId: null,
+      status: "pending",
+      retryCount: 0,
+      maxRetries: 1,
+      evidenceRef: null,
+    }],
+    gatesRef: "gates.json",
+    artifactsRef: "artifacts.json",
+    evidenceRef: "evidence.json",
+    lease: null,
+    startedAt: "2026-07-18T00:00:00.000Z",
+    sealedAt: null,
+    sealSummary: null,
+    finalOutcome: null,
+  };
+  return snapshot;
+}
 
 function workflowSnapshot(): WorkflowSnapshot {
   return {
