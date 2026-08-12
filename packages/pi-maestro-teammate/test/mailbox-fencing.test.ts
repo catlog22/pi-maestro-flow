@@ -245,7 +245,12 @@ test("rollout downgrade to disabled stops the consumer before republishing the m
     senderId: "caller", recipientId: "r", recipientCorrelationId: "corr-1",
     kind: "follow_up", mode: "follow_up", payload: "one",
   });
-  await new Promise((resolve) => setTimeout(resolve, 600));
+  // The 500ms poll tick lands whenever the loaded event loop lets it; wait
+  // elastically instead of racing a fixed sleep against the interval.
+  const firstDispatchDeadline = Date.now() + 10_000;
+  while (dispatched.length === 0 && Date.now() < firstDispatchDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
   assert.deepEqual(dispatched, ["one"]);
 
   // Second message lands in ready; downgrade must stop the consumer so the

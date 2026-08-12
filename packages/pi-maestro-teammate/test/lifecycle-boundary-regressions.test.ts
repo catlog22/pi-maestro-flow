@@ -137,6 +137,14 @@ function resultReadyTurn(text: string): Record<string, unknown> {
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Elastic wait: fixed sleeps race the loaded event loop under --test-concurrency. */
+async function waitFor(condition: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition() && Date.now() < deadline) {
+    await delay(10);
+  }
+}
+
 test("immediate reload waits for workspace peer startup before shutdown cleanup", async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-peer-reload-"));
   const { hooks } = createHarness();
@@ -665,7 +673,7 @@ test("warm wake publishes every subsequent turn completion", async () => {
     undefined,
     ctx,
   );
-  await delay(20);
+  await waitFor(() => emitted.filter(({ event }) => event === "teammate:complete").length >= 1);
   assert.equal(emitted.filter(({ event }) => event === "teammate:complete").length, 1);
 
   const sent = await teammateSend.execute(
@@ -679,7 +687,7 @@ test("warm wake publishes every subsequent turn completion", async () => {
   stdout!.write(`${JSON.stringify({ type: "turn_start" })}\n`);
   stdout!.write(`${JSON.stringify(resultReadyTurn("second turn"))}\n`);
   stdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
-  await delay(40);
+  await waitFor(() => emitted.filter(({ event }) => event === "teammate:complete").length >= 2);
 
   assert.equal(emitted.filter(({ event }) => event === "teammate:complete").length, 2);
   assert.ok(
@@ -762,11 +770,11 @@ test("closed runtime cold-resumes the same logical agent from its persisted sess
     Object.assign(children[0], { exitCode: 0 });
     children[0].emit("exit", 0, null);
     children[0].emit("close", 0, null);
-    await delay(30);
 
     const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
       Symbol.for("pi-maestro-teammate.root-registry")
     ] as TeammateState;
+    await waitFor(() => state.activeRuns.get(logicalId)?.status === "sleeping");
     const cold = state.activeRuns.get(logicalId);
     assert.equal(cold?.status, "sleeping");
     assert.equal(cold?.stdin, undefined);
