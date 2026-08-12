@@ -29,12 +29,11 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
-  ThemeColor,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { buildSessionContext, copyToClipboard } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { COCKPIT_INPUT_TARGET_EVENT, COCKPIT_TODO_TOGGLE_EVENT, type CockpitInputTargetV1, type CockpitUiOwnershipV1 } from "pi-cockpit/v1/events";
+import { COCKPIT_TODO_TOGGLE_EVENT, type CockpitUiOwnershipV1 } from "pi-cockpit/v1/events";
 import type { FlowToolResult } from "../tools/tool-result.ts";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
@@ -156,11 +155,6 @@ import { KnowledgeCliAdapter, resolveLatestSessionId } from "../knowledge/cli-ad
 import { stageWindowKnowledgeCandidate } from "../knowledge/extractor.ts";
 import { SkillCliAdapter, type SkillCliListOptions } from "../skills/skill-cli-adapter.ts";
 import { buildKnowledgeCenterView, type KnowledgeCenterView } from "../knowledge/view-model.ts";
-import {
-  onSessionStart as inputHistorySessionStart,
-  onSessionShutdown as inputHistorySessionShutdown,
-  setInputRouteTarget,
-} from "../tui/input-history.ts";
 import {
   initPlan,
   PLAN_TOGGLE_KEY,
@@ -349,9 +343,6 @@ export function effectivePermissionMode(approvalMode: PermissionMode): Permissio
 const TODO_TOGGLE_KEY = "alt+t";
 const TODO_TOGGLE_LABEL = altKey("T");
 const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
-const INPUT_TARGET_COLORS = new Set<ThemeColor>([
-  "accent", "warning", "success", "mdLink", "thinkingLow", "thinkingMedium", "thinkingHigh", "muted", "error",
-]);
 const TEAMMATE_ATTACH_ENTRY = "maestro-teammate-attach";
 const GOAL_OVERLAY_KEY = "alt+g";
 const GOAL_OVERLAY_LABEL = altKey("G");
@@ -2550,21 +2541,6 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     updateTodoWidget();
   });
 
-  pi.events.on(COCKPIT_INPUT_TARGET_EVENT, (payload) => {
-    if (!payload || typeof payload !== "object") {
-      setInputRouteTarget(undefined);
-      return;
-    }
-    const target = payload as Partial<CockpitInputTargetV1>;
-    const sigil = target.sigil ?? "@";
-    if (target.version !== 1 || typeof target.label !== "string" || !target.label.trim()
-      || typeof target.color !== "string" || !INPUT_TARGET_COLORS.has(target.color as ThemeColor)
-      || (sigil !== "@" && sigil !== "#")) {
-      setInputRouteTarget(undefined);
-      return;
-    }
-    setInputRouteTarget({ label: target.label.trim(), color: target.color as ThemeColor, sigil });
-  });
 
   pi.registerShortcut(TODO_TOGGLE_KEY, {
     description: "Toggle the inline Todo panel (collapsed ↔ expanded); use /maestro-todo for the full center",
@@ -2606,7 +2582,6 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     } catch {
       // Identity injection is best-effort; resolution falls back to other tiers.
     }
-    await inputHistorySessionStart(ctx);
     compactionArbiter.reset();
     preserveCompletedTurnFromNativeThreshold = false;
     teammateAttachTodoIsolated = false;
@@ -2732,7 +2707,6 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     preserveCompletedTurnFromNativeThreshold = false;
     lastCompactionCancel = undefined;
     compactionArbiter.reset();
-    await inputHistorySessionShutdown();
     // Non-destructive: preserve the prune manifest and spill resources so a
     // resumed session replays the identical transformed prefix. Destructive
     // teardown stays with reset()/onCompact().

@@ -12,15 +12,6 @@ test("Alt+T delegates Todo disclosure to Cockpit when Cockpit owns the panel", (
   );
 });
 
-test("Cockpit input-target events update the immutable HistoryEditor route prefix", () => {
-  const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
-  assert.match(source, /pi\.events\.on\(COCKPIT_INPUT_TARGET_EVENT/);
-  assert.match(source, /setInputRouteTarget\(\{ label: target\.label\.trim\(\), color:/);
-  assert.match(source, /const sigil = target\.sigil \?\? "@"/);
-  assert.match(source, /sigil !== "@" && sigil !== "#"/);
-  assert.match(source, /setInputRouteTarget\(undefined\)/);
-});
-
 test("Cockpit ownership also withdraws and restores Flow's live Goal panel", () => {
   const extensionSource = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   const goalSource = readFileSync(new URL("../src/tools/goal.ts", import.meta.url), "utf8");

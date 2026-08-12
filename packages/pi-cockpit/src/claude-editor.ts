@@ -1,6 +1,7 @@
 import { CustomEditor, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
-import { isKeyRelease, isKeyRepeat, matchesKey, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
+import { isKeyRelease, isKeyRepeat, matchesKey, getKeybindings, truncateToWidth, visibleWidth, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 import { readAutocompleteState } from "./autocomplete-probe.ts";
+import { tuiT } from "./tui-i18n.ts";
 
 /** Invisible editor start marker consumed by the fullscreen controller (fullscreenInput only). */
 export const EDITOR_START_SENTINEL = "\u2063\u2064\u2063\u2064cockpit:editor:start";
@@ -8,6 +9,15 @@ export const EDITOR_START_SENTINEL = "\u2063\u2064\u2063\u2064cockpit:editor:sta
 export const EDITOR_END_SENTINEL = "\u2063\u2064\u2063\u2064cockpit:editor:end";
 
 export const DEFAULT_DOUBLE_ESCAPE_WINDOW_MS = 500;
+
+/** Cursor state when the user is typing rather than browsing history. */
+const NOT_BROWSING = -1;
+
+export interface CockpitEditorRouteTarget {
+  label: string;
+  sigil?: "@" | "#";
+  paint: (text: string) => string;
+}
 
 export interface CockpitClaudeEditorOptions {
 	/** Enable the double bare-Escape clear-input state machine. */
@@ -22,6 +32,14 @@ export interface CockpitClaudeEditorOptions {
 	onError?: (error: unknown) => void;
 	/** Double-Escape window in ms (default 500). */
 	doubleEscapeWindowMs?: number;
+	/** Persistent prompt history, newest first. Read on every keystroke. */
+	getEntries?: () => readonly string[];
+	/** Called for every submitted prompt (including slash commands and `!` lines). */
+	record?: (text: string) => void;
+	/** Immutable route prefix painted inside the editor, never included in text. */
+	getRouteTarget?: () => CockpitEditorRouteTarget | undefined;
+	/** Called with the constructed editor so the host can push route updates. */
+	onEditor?: (editor: CockpitClaudeEditor) => void;
 }
 
 export interface DoubleEscapeDecision {
@@ -85,13 +103,18 @@ export class DoubleEscapeGate {
 }
 
 /**
- * Cockpit's CustomEditor: owns the double-Escape state machine and the editor
- * markers the fullscreen controller uses to split transcript / editor / chrome.
- * Installed at session start (reload-gated) via createCockpitClaudeEditorFactory.
+ * Cockpit's unified CustomEditor: owns the double-Escape state machine, the
+ * editor markers the fullscreen controller uses, the persistent ↑/↓ prompt
+ * history, and the input route-target prefix. Installed at session start
+ * (reload-gated) via createCockpitClaudeEditorFactory.
  */
 export class CockpitClaudeEditor extends CustomEditor {
 	private readonly editorOptions: CockpitClaudeEditorOptions;
 	private readonly doubleEscapeGate = new DoubleEscapeGate();
+	/** History browsing cursor: NOT_BROWSING while typing, else an index into getEntries(). */
+	private index = NOT_BROWSING;
+	/** What the user had typed before browsing started, restored on the way back down. */
+	private draft = "";
 
 	constructor(
 		tui: TUI,
@@ -102,17 +125,34 @@ export class CockpitClaudeEditor extends CustomEditor {
 		super(tui, theme, keybindings);
 		this.editorOptions = options;
 		if (options.doubleEscapeWindowMs !== undefined) this.doubleEscapeGate.windowMs = options.doubleEscapeWindowMs;
+		options.onEditor?.(this);
+	}
+
+	/** Submitted prompts go to the persistent store, never to the base in-memory list. */
+	override addToHistory(text: string): void {
+		this.editorOptions.record?.(text);
+	}
+
+	/** Programmatic writes (submit clears, `ui.setEditorText`) end history browsing. */
+	override setText(text: string): void {
+		this.index = NOT_BROWSING;
+		super.setText(text);
 	}
 
 	override render(width: number): string[] {
-		const lines = super.render(width);
-		if (!this.editorOptions.emitEditorMarkers) return lines;
-		return [EDITOR_START_SENTINEL, ...lines, EDITOR_END_SENTINEL];
+		const target = this.editorOptions.getRouteTarget?.();
+		const lines = target ? this.renderWithRouteTarget(width, target) : super.render(width);
+		const marked = this.editorOptions.emitEditorMarkers
+			? [EDITOR_START_SENTINEL, ...lines, EDITOR_END_SENTINEL]
+			: lines;
+		const total = this.editorOptions.getEntries?.().length ?? 0;
+		if (!this.browsing() || total === 0) return marked;
+		return [...marked, historyBanner(this.index + 1, total, width, this.getPaddingX(), this.borderColor)];
 	}
 
 	override handleInput(data: string): void {
-		const enabled = this.editorOptions.doubleEscapeClearInput;
 		if (this.isBareEscape(data)) {
+			const enabled = this.editorOptions.doubleEscapeClearInput;
 			if (enabled) {
 				const probe = readAutocompleteState(this);
 				const autocomplete: DoubleEscapeGateInput["autocomplete"] = probe.unknown
@@ -133,8 +173,26 @@ export class CockpitClaudeEditor extends CustomEditor {
 			super.handleInput(data);
 			return;
 		}
-		if (enabled) this.doubleEscapeGate.onAnyOtherInput();
+		if (this.editorOptions.doubleEscapeClearInput) this.doubleEscapeGate.onAnyOtherInput();
+		const keys = getKeybindings();
+		if (keys.matches(data, "tui.editor.cursorUp") && this.canBrowseOlder()) {
+			this.step(1);
+			return;
+		}
+		if (keys.matches(data, "tui.editor.cursorDown") && this.canBrowseNewer()) {
+			this.step(-1);
+			return;
+		}
 		super.handleInput(data);
+		// Editing the recalled text means the user left history behind.
+		if (this.browsing() && this.getText() !== this.editorOptions.getEntries?.()[this.index]) {
+			this.index = NOT_BROWSING;
+		}
+	}
+
+	/** Repaint after a cross-extension input-target change. */
+	refreshRouteTarget(): void {
+		this.tui.requestRender();
 	}
 
 	private isBareEscape(data: string): boolean {
@@ -149,9 +207,90 @@ export class CockpitClaudeEditor extends CustomEditor {
 			this.editorOptions.onError?.(error);
 		}
 	}
+
+	private renderWithRouteTarget(width: number, target: CockpitEditorRouteTarget): string[] {
+		const paddingX = Math.min(this.getPaddingX(), Math.max(0, Math.floor((width - 1) / 2)));
+		const contentWidth = Math.max(1, width - paddingX * 2);
+		const layoutWidth = Math.max(1, contentWidth - (paddingX ? 0 : 1));
+		const token = truncateToWidth(`${target.sigil ?? "@"}${target.label}:`, Math.max(1, layoutWidth - 1), "…");
+		const injected = `${token}${visibleWidth(token) < layoutWidth ? " " : ""}`;
+
+		// Editor has no render-prefix API. Temporarily project the immutable target
+		// into its layout state so native wrapping and cursor placement stay correct,
+		// then restore the real editable state before returning.
+		const state = (this as unknown as EditorWithRenderState).state;
+		const originalLines = state.lines;
+		const originalCursorCol = state.cursorCol;
+		state.lines = [`${injected}${originalLines[0] ?? ""}`, ...originalLines.slice(1)];
+		if (state.cursorLine === 0) state.cursorCol += injected.length;
+		try {
+			const rendered = super.render(width);
+			const routeLine = rendered.findIndex((line) => line.includes(token));
+			if (routeLine >= 0) {
+				rendered[routeLine] = rendered[routeLine]!.replace(token, target.paint(token));
+			}
+			return rendered.map((line) => truncateToWidth(line, Math.max(1, width), ""));
+		} finally {
+			state.lines = originalLines;
+			state.cursorCol = originalCursorCol;
+		}
+	}
+
+	private browsing(): boolean {
+		return this.index > NOT_BROWSING;
+	}
+
+	/**
+	 * Mirrors the base editor's own gating: on the first line, and either already
+	 * browsing or with the cursor at the very start (which includes an empty editor) —
+	 * anywhere else Up is a plain cursor move.
+	 */
+	private canBrowseOlder(): boolean {
+		if (this.isShowingAutocomplete() || this.getCursor().line !== 0) return false;
+		return this.browsing() || this.getCursor().col === 0;
+	}
+
+	private canBrowseNewer(): boolean {
+		if (!this.browsing() || this.isShowingAutocomplete()) return false;
+		return this.getCursor().line === this.getLines().length - 1;
+	}
+
+	private step(delta: number): void {
+		const entries = this.editorOptions.getEntries?.() ?? [];
+		const next = this.index + delta;
+		if (next < NOT_BROWSING || next >= entries.length) return;
+		if (!this.browsing()) this.draft = this.getText();
+		// super.setText, so the index we are about to record survives.
+		super.setText(next === NOT_BROWSING ? this.draft : entries[next] ?? "");
+		this.index = next;
+	}
 }
 
-/** Build the editor factory Cockpit installs when a gated feature is on. */
+/** Compact history position label, indented to the editor's content. */
+export function historyBanner(
+	position: number,
+	total: number,
+	width: number,
+	paddingX: number,
+	paint: (value: string) => string,
+): string {
+	const indent = " ".repeat(Math.max(0, paddingX));
+	const inner = Math.max(1, width - indent.length * 2);
+	const label = tuiT("editor.historyBanner", { position, total });
+	return indent + paint(truncateToWidth(label, inner, "…"));
+}
+
+interface EditorRenderState {
+	lines: string[];
+	cursorLine: number;
+	cursorCol: number;
+}
+
+interface EditorWithRenderState {
+	state: EditorRenderState;
+}
+
+/** Build the editor factory Cockpit installs for its gated editor features. */
 export function createCockpitClaudeEditorFactory(options: CockpitClaudeEditorOptions) {
 	const factory = (tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) =>
 		new CockpitClaudeEditor(tui, theme, keybindings, options);

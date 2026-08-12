@@ -1,5 +1,5 @@
 /**
- * Per-workspace input history.
+ * Per-workspace input history, owned by Cockpit's unified editor.
  *
  * The prompt history Pi's editor offers on up/down lives in memory only, so it is
  * gone the moment the session ends. This store mirrors it to
@@ -7,14 +7,10 @@
  * so a brand new session picks up where the previous one left off.
  */
 
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
-
-import type { ExtensionContext, ThemeColor } from "@earendil-works/pi-coding-agent";
-
-import { workspaceStorageId } from "../tools/plan-store.ts";
-import { HistoryEditor } from "./history-editor.ts";
+import { basename, join, resolve } from "node:path";
 
 const FILE_NAME = "input-history.json";
 /** Matches the built-in editor's in-memory cap, so the list feels the same. */
@@ -29,6 +25,25 @@ export interface InputHistoryStoreOptions {
   maxEntries?: number;
   debounceMs?: number;
   onError?: (error: unknown) => void;
+}
+
+/**
+ * Stable per-workspace storage id, byte-identical to the historical
+ * pi-maestro-flow implementation so persisted history keeps resolving to the
+ * same file across the module move.
+ */
+export function workspaceStorageId(cwd: string): string {
+  const normalized = normalizeWorkspacePath(cwd);
+  const slug = basename(resolve(cwd))
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "workspace";
+  return `${slug}-${createHash("sha256").update(normalized).digest("hex").slice(0, 8)}`;
+}
+
+function normalizeWorkspacePath(cwd: string): string {
+  const normalized = resolve(cwd).replaceAll("\\", "/").replace(/\/$/, "");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
 export class InputHistoryStore {
@@ -141,115 +156,4 @@ function parseEntries(raw: unknown): string[] {
 
 function capped(entries: string[], maxEntries: number): string[] {
   return entries.length > maxEntries ? entries.slice(0, maxEntries) : entries;
-}
-
-/** The subset of the extension context this feature touches. */
-export type InputHistoryContext = Pick<ExtensionContext, "cwd" | "hasUI"> & {
-  ui: Pick<ExtensionContext["ui"], "notify" | "getEditorComponent" | "setEditorComponent" | "theme">;
-};
-
-type EditorFactory = Parameters<InputHistoryContext["ui"]["setEditorComponent"]>[0];
-
-export interface InputRouteTarget {
-  label: string;
-  color: ThemeColor;
-  sigil?: "@" | "#";
-}
-
-export interface InputHistory {
-  onSessionStart(ctx: InputHistoryContext): Promise<void>;
-  onSessionShutdown(): Promise<void>;
-  setRouteTarget(target: InputRouteTarget | undefined): void;
-}
-
-/**
- * One instance per extension load. `storeOptions` exists so tests can point the
- * history somewhere other than the real `~/.pi/workspaces`.
- */
-export function createInputHistory(storeOptions: InputHistoryStoreOptions = {}): InputHistory {
-  let store: InputHistoryStore | undefined;
-  let ourFactory: EditorFactory | undefined;
-  let errorReported = false;
-  let activeEditor: HistoryEditor | undefined;
-  let activeTheme: ExtensionContext["ui"]["theme"] | undefined;
-  let routeTarget: InputRouteTarget | undefined;
-
-  const editorRouteTarget = () => routeTarget && activeTheme
-    ? {
-      label: routeTarget.label,
-      sigil: routeTarget.sigil,
-      paint: (text: string) => activeTheme!.fg(routeTarget!.color, text),
-    }
-    : undefined;
-
-  return {
-    /** Load this workspace's history, and claim the editor slot whenever it is free. */
-    async onSessionStart(ctx: InputHistoryContext): Promise<void> {
-      if (!ctx.hasUI) return;
-      const next = new InputHistoryStore(ctx.cwd, {
-        ...storeOptions,
-        onError: (error) => {
-          if (errorReported) return;
-          errorReported = true;
-          ctx.ui.notify(`Input history unavailable: ${errorMessage(error)}`, "warning");
-        },
-      });
-      await next.load();
-      activeTheme = ctx.ui.theme;
-      // A later session in another cwd gets its own store behind the same editor.
-      store = next;
-      // pi restores the default editor on every session switch (/new, /resume, /fork,
-      // quit-rebind) via resetExtensionUI in teardownCurrent, so a one-shot latch would
-      // silently lose the persistent editor after the first switch. Compare the slot
-      // identity instead: keep an editor we installed, defer to a foreign one, and
-      // re-claim when pi reset the slot to undefined.
-      const owner = ctx.ui.getEditorComponent();
-      if (ourFactory !== undefined && owner === ourFactory) {
-        activeEditor?.refreshRouteTarget();
-        return;
-      }
-      if (owner !== undefined) return;
-      ourFactory = (tui, theme, keybindings) => {
-        activeEditor = new HistoryEditor(tui, theme, keybindings, {
-          getEntries: () => store?.list() ?? [],
-          record: (text) => store?.record(text),
-          getRouteTarget: editorRouteTarget,
-        });
-        return activeEditor;
-      };
-      ctx.ui.setEditorComponent(ourFactory);
-    },
-
-    /** Only the pending write has to land; the editor re-claims itself next session start. */
-    async onSessionShutdown(): Promise<void> {
-      await store?.flush();
-      activeEditor = undefined;
-      activeTheme = undefined;
-      routeTarget = undefined;
-    },
-
-    setRouteTarget(target): void {
-      routeTarget = target;
-      activeEditor?.refreshRouteTarget();
-    },
-  };
-}
-
-/** The instance the extension runs on; `createInputHistory` is the seam tests use. */
-const defaultInputHistory = createInputHistory();
-
-export function onSessionStart(ctx: InputHistoryContext): Promise<void> {
-  return defaultInputHistory.onSessionStart(ctx);
-}
-
-export function setInputRouteTarget(target: InputRouteTarget | undefined): void {
-  defaultInputHistory.setRouteTarget(target);
-}
-
-export function onSessionShutdown(): Promise<void> {
-  return defaultInputHistory.onSessionShutdown();
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

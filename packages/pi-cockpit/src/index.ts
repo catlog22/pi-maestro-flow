@@ -21,7 +21,8 @@ import {
 	createEditorBottomSentinel,
 	type EditorBottomController,
 } from "./editor-bottom.ts";
-import { createCockpitClaudeEditorFactory, isCockpitClaudeEditorFactory } from "./claude-editor.ts";
+import { createCockpitClaudeEditorFactory, isCockpitClaudeEditorFactory, type CockpitClaudeEditor, type CockpitEditorRouteTarget } from "./claude-editor.ts";
+import { InputHistoryStore } from "./editor/input-history-store.ts";
 import { detectTerminalCompatibility } from "./terminal-capability.ts";
 import {
 	COCKPIT_FULLSCREEN_MARKER,
@@ -166,6 +167,10 @@ function isTuiContext(ctx: ExtensionContext): boolean {
 	} catch {
 		return false;
 	}
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
 function formatCwd(cwd: string): string {
@@ -359,6 +364,11 @@ export default function (pi: ExtensionAPI): void {
 	// Tracks ownership so teardown restores the default editor only when ours.
 	let claudeEditorInstalled = false;
 	let claudeEditorForeignWarned = false;
+	let historyStore: InputHistoryStore | undefined;
+	let historyErrorReported = false;
+	let activeClaudeEditor: CockpitClaudeEditor | undefined;
+	let editorRouteTarget: CockpitEditorRouteTarget | undefined;
+	let sessionTheme: Theme | undefined;
 	// Fullscreen (alternate-screen fixed editor) controller, reload-gated.
 	let fullscreenController: FullscreenController | undefined;
 	/** Disposer for the session ←/→ navigation hook (per applyUi). */
@@ -841,6 +851,16 @@ export default function (pi: ExtensionAPI): void {
 		const fingerprint = target ? `${target.endpoint.id}:${sigil}:${target.label}:${target.color}` : "@main";
 		if (!force && fingerprint === lastPublishedInputTarget) return;
 		lastPublishedInputTarget = fingerprint;
+		if (target && sessionTheme) {
+			editorRouteTarget = {
+				label: target.label,
+				sigil,
+				paint: (text: string) => sessionTheme!.fg(target.color, text),
+			};
+		} else {
+			editorRouteTarget = undefined;
+		}
+		activeClaudeEditor?.refreshRouteTarget();
 		const payload: CockpitInputTargetV1 = target
 			? {
 				version: 1,
@@ -887,8 +907,21 @@ export default function (pi: ExtensionAPI): void {
 	// preserved, in-memory history is not), so it only runs at session start and
 	// is never hot-toggled. If another extension owns the editor factory, fail
 	// closed with one warning and leave both gated features inert.
+	const ensureHistoryStore = (ctx: ExtensionContext): void => {
+		const next = new InputHistoryStore(ctx.cwd, {
+			onError: (error) => {
+				if (historyErrorReported) return;
+				historyErrorReported = true;
+				ctx.ui.notify(tuiT("editor.historyUnavailable", { message: errorMessage(error) }), "warning");
+			},
+		});
+		historyStore = next;
+		void next.load().catch(() => undefined);
+	};
+
 	const installClaudeEditor = (ctx: ExtensionContext): void => {
-		if (!config.doubleEscapeClearInput && !config.fullscreenInput) return;
+		sessionTheme = ctx.ui.theme;
+		ensureHistoryStore(ctx);
 		const current = ctx.ui.getEditorComponent();
 		if (isCockpitClaudeEditorFactory(current)) {
 			// Our own factory is already in pi's editor slot — it survives a resume
@@ -916,6 +949,12 @@ export default function (pi: ExtensionAPI): void {
 			doubleEscapeClearInput: config.doubleEscapeClearInput,
 			emitEditorMarkers: config.fullscreenInput,
 			isBusy: () => running || Boolean(activeSettingsOverlay),
+			getEntries: () => historyStore?.list() ?? [],
+			record: (text) => historyStore?.record(text),
+			getRouteTarget: () => editorRouteTarget,
+			onEditor: (editor) => {
+				activeClaudeEditor = editor;
+			},
 			onError: (error) => ctx.ui.notify(
 				tuiT("notice.editorError", { message: error instanceof Error ? error.message : String(error) }),
 				"warning",
@@ -1224,6 +1263,11 @@ export default function (pi: ExtensionAPI): void {
 		activeZenSheet = undefined;
 		dockEffectiveVisible = false;
 		clearClaudeEditor(ctx);
+		void historyStore?.flush();
+		historyStore = undefined;
+		historyErrorReported = false;
+		activeClaudeEditor = undefined;
+		editorRouteTarget = undefined;
 		clearFullscreen(ctx);
 		clearEditorBottom(ctx);
 		disposeLayoutControllers();
