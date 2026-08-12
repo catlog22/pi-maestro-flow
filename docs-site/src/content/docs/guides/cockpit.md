@@ -28,6 +28,7 @@ pi-cockpit 提供编辑器上方实时状态堆栈 + Starship 风格 Footer，�
   "agentsMode": "list",
   "todoMode": "list",
   "todoExpanded": false,
+  "stackStyle": "classic",
   "hideNativeAgents": true,
   "icons": { "mode": "auto" },
   "sidebar": {
@@ -60,6 +61,7 @@ pi-cockpit 提供编辑器上方实时状态堆栈 + Starship 风格 Footer，�
 | `quietSymbols` | `"check"` | 工具行生命周期字形：`check`（✓/✗/⋯）或 `dot`（●/○/◌） |
 | `agentsMode` / `todoMode` | `"list"` | 状态列表密度：`list` 或 `compact` |
 | `todoExpanded` | `false` | 默认展开 todo 组件 |
+| `stackStyle` | `"classic"` | `classic` 保留 Todo/Agent 独立组件；`zen` 合并为 MISSION / WORK / ACTORS 无边框栈 |
 | `hideNativeAgents` | `true` | 清除 teammate 扩展自带的 `teammate-agents` 组件，避免重复绘制 |
 | `theme` | `""` | 命名主题覆盖；空字符串跟随 Pi 会话主题 |
 
@@ -107,8 +109,9 @@ pi-cockpit 提供编辑器上方实时状态堆栈 + Starship 风格 Footer，�
 | `/cockpit sidebar auto\|on\|off` | 选择停靠行为 |
 | `/cockpit sidebar resize` / `Ctrl+Shift+R` | 临时 Resize 模式（方向键调整，Enter 接受，Esc 回滚） |
 | `/cockpit sidebar` | 报告当前侧栏模式/宽度/密度 |
-| `/theme <name>` | 切换主题（带实时预览） |
+| `/theme <name>` | 切换主题（带实时预览）；`cockpit-zen` 是 Zen 栈配套的可选暖金主题，不会自动修改 `stackStyle` |
 | `Alt+J` | 打开后台 Bash 任务覆盖层 |
+| `Alt+L` | 浏览当前 Cockpit 表面；Zen 模式下首次 Enter 展开行内详情，第二次 Enter 打开实体详情，Esc 逐级返回；Agent 详情中 `m` 设置输入目标 |
 | `Alt+Shift+P` | 切换 Plan/Act 模式 |
 
 ## 下一步
