@@ -3772,6 +3772,50 @@ test("output-limit guard continues directly when a fixed cap is hit below contex
   assert.doesNotMatch(sent[0] ?? "", /compacted/);
 });
 
+test("direct output-limit continuation has an independent bound and counts only delivered follow-ups", async () => {
+  const sent: string[] = [];
+  let pending = false;
+  let throwSend = false;
+  const guard = createMidTurnAutoCompaction({
+    sendUserMessage(message: string) {
+      if (throwSend) throw new Error("queue unavailable");
+      sent.push(message);
+    },
+  } as never, {
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 400_000, maxTokens: 32_000 },
+    getContextUsage: () => ({ tokens: 200_000, contextWindow: 400_000, percent: 50 }),
+    hasPendingMessages: () => pending,
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+    await guard.onAgentEnd(ctx);
+  }
+  assert.equal(sent.length, 3, "direct continuation is not capped by the two-compaction breaker");
+
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  pending = true;
+  await guard.onAgentEnd(ctx);
+  pending = false;
+  assert.equal(sent.length, 3, "a newly pending message consumes no direct-continuation attempt");
+
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  throwSend = true;
+  await guard.onAgentEnd(ctx);
+  throwSend = false;
+  assert.equal(sent.length, 3, "a failed enqueue consumes no direct-continuation attempt");
+
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(sent.length, 4);
+});
+
 test("output-limit guard recovers even when context usage is unavailable", async () => {
   const sent: string[] = [];
   let complete: (() => void) | undefined;

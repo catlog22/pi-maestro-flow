@@ -93,6 +93,7 @@ const OUTPUT_LIMIT_CONTINUE_PROMPT = "Your previous response was cut off at the 
 const OUTPUT_LIMIT_DIRECT_CONTINUE_PROMPT = "Your previous response was cut off at the model output token limit. Continue exactly from where the interrupted response stopped and complete it. Do not restart or wait for another user request.";
 const DEFAULT_OUTPUT_LIMIT_RATIO = 0.8;
 export const MAX_OUTPUT_LIMIT_COMPACTIONS = 2;
+export const MAX_OUTPUT_LIMIT_CONTINUATIONS = 8;
 /**
  * Consecutive compact-action evaluations at/above the loop-critical band an
  * active tool loop must hold before it is interrupted for compaction. A run
@@ -322,7 +323,9 @@ export interface AutoCompactionState {
   /** Pressure notifications already emitted in the current compaction cycle. */
   notifiedPressureKeys: Set<string>;
   outputLimitCompactions: number;
+  outputLimitContinuations: number;
   outputLimitBreakerNotified: boolean;
+  outputLimitContinuationNotified: boolean;
   /** Last context frame passed toward the provider, including stable prune replacements. */
   lastProviderMessages?: AgentMessage[];
   /** One reactive provider-pressure compaction is allowed until a valid replay succeeds. */
@@ -477,7 +480,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     criticalLoopStreak: 0,
     notifiedPressureKeys: new Set(),
     outputLimitCompactions: 0,
+    outputLimitContinuations: 0,
     outputLimitBreakerNotified: false,
+    outputLimitContinuationNotified: false,
     providerPressureAttempted: false,
     providerPressureBlocked: false,
     providerPressureTerminal: false,
@@ -634,7 +639,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     state.criticalLoopStreak = 0;
     state.notifiedPressureKeys.clear();
     state.outputLimitCompactions = 0;
+    state.outputLimitContinuations = 0;
     state.outputLimitBreakerNotified = false;
+    state.outputLimitContinuationNotified = false;
     state.cacheEpoch = undefined;
     state.cacheRatio = undefined;
     state.prunedDuringEpoch = undefined;
@@ -1387,12 +1394,34 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       && usageTokens > linkedThreshold.thresholdTokens;
     if (contextConstrained === false && !linkedThresholdExceeded) {
       clearPending();
-      state.outputLimitCompactions += 1;
       if (ctx.hasPendingMessages?.()) return true;
+      if (state.outputLimitContinuations >= MAX_OUTPUT_LIMIT_CONTINUATIONS) {
+        if (!state.outputLimitContinuationNotified) {
+          state.outputLimitContinuationNotified = true;
+          ctx.ui.notify(
+            `Output-limit continuation stopped after ${state.outputLimitContinuations} attempts; the response keeps hitting the model output token limit. Raise maxTokens or reduce per-response size.`,
+            "warning",
+          );
+        }
+        return true;
+      }
       try {
         pi.sendUserMessage(OUTPUT_LIMIT_DIRECT_CONTINUE_PROMPT, { deliverAs: "followUp" });
+        state.outputLimitContinuations += 1;
       } catch (error) {
         ctx.ui.notify(`Output-limit continuation failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+      }
+      return true;
+    }
+
+    if (state.outputLimitCompactions >= MAX_OUTPUT_LIMIT_COMPACTIONS) {
+      clearPending();
+      if (!state.outputLimitBreakerNotified) {
+        state.outputLimitBreakerNotified = true;
+        ctx.ui.notify(
+          `Output-limit compaction stopped after ${state.outputLimitCompactions} attempts; the response keeps hitting the model output token limit. Raise maxTokens or reduce per-response size.`,
+          "warning",
+        );
       }
       return true;
     }
@@ -1899,21 +1928,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       if (!settings.enabled || !ctx.model || finalStopReason !== "length") {
         state.pendingOutputLimitIntent = undefined;
         state.outputLimitCompactions = 0;
+        state.outputLimitContinuations = 0;
         state.outputLimitBreakerNotified = false;
+        state.outputLimitContinuationNotified = false;
         return;
       }
       if (generation !== state.generation) return;
-      if (state.outputLimitCompactions >= MAX_OUTPUT_LIMIT_COMPACTIONS) {
-        state.pendingOutputLimitIntent = undefined;
-        if (!state.outputLimitBreakerNotified) {
-          state.outputLimitBreakerNotified = true;
-          ctx.ui.notify(
-            `Output-limit recovery stopped after ${state.outputLimitCompactions} attempts; the response keeps hitting the model output token limit. Raise maxTokens or reduce per-response size.`,
-            "warning",
-          );
-        }
-        return;
-      }
       if (ctx.hasPendingMessages?.()) {
         state.pendingOutputLimitIntent = undefined;
         return;
