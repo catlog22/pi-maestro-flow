@@ -744,12 +744,17 @@ function buildChildSpawnEnv(
   return spawnEnv;
 }
 
+/** Child IPC events that only publish identity and cannot cause external work. */
+function isReplayNeutralChildIpcMessage(message: Record<string, unknown>): boolean {
+  return message.type === "teammate_session_ready";
+}
+
 /** Proxy requests and lifecycle events raised by extensions inside the child. */
 function bindChildIpcRelay(
   child: ChildProcess,
   correlationId: string,
   options: RunTeammateOptions,
-  onActivity?: () => void,
+  onActivity?: (message: Record<string, unknown>) => void,
 ): void {
   child.on("message", (msg: unknown) => {
     // PERFSEC-001: process.send(null) or malformed envelopes must not crash
@@ -759,8 +764,8 @@ function bindChildIpcRelay(
     // GEN-001: After teardown aborts the signal, a dying child's in-flight
     // IPC messages must not re-enter the parent and spawn new nested agents.
     if (options.signal?.aborted) return;
-    onActivity?.();
     const m = msg as Record<string, unknown>;
+    onActivity?.(m);
     dispatchChildIpcMessage(
       m,
       options.onChildRequest
@@ -956,13 +961,13 @@ async function runSingleAttempt(
       sendRpcMessage(child.stdin, params.task, "prompt", initialLeaseToken);
     }
 
-    // IPC message listener — proxy requests from child extensions. Any valid
-    // child envelope disqualifies a fresh-process replay because it may have
-    // already caused work in the parent process.
+    // Identity publication is observational only. Request/control envelopes
+    // and unknown lifecycle events remain replay-risking until explicitly
+    // proven side-effect free.
     if (useIpc) {
-      bindChildIpcRelay(child, correlationId, options, () => {
+      bindChildIpcRelay(child, correlationId, options, (message) => {
         state.receivedFirstActivity = true;
-        state.externalReplayRisk = true;
+        if (!isReplayNeutralChildIpcMessage(message)) state.externalReplayRisk = true;
       });
     }
 

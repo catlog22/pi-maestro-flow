@@ -1383,6 +1383,65 @@ test("teammate leaves an exhausted modern candidate once, falls back, and skips 
   assert.equal(breakerCharges, 1);
 });
 
+test("quota failures still fallback after replay-neutral session identity IPC", async () => {
+  const launchedModels: string[] = [];
+  const spawnChildProcess = adaptFakeSpawn((_command, args) => {
+    const model = args[args.indexOf("--model") + 1];
+    launchedModels.push(model);
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return reclaimFakeProcess(child); },
+    });
+    queueMicrotask(() => {
+      child.emit("message", {
+        type: "teammate_session_ready",
+        sessionId: `session-${model}`,
+        sessionFile: `session-${model}.jsonl`,
+      });
+      if (model === "provider/qwen") {
+        stdout.write(`${JSON.stringify({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            stopReason: "error",
+            errorMessage: '429: {"message":"Your token-plan 1-week quota has been exhausted.","type":"insufficient_quota","code":"insufficient_quota"}',
+          },
+        })}\n`);
+        stdout.write(`${JSON.stringify({ type: "agent_end", willRetry: false })}\n`);
+        stdout.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
+      } else {
+        stdout.write(`${JSON.stringify({
+          type: "message_end",
+          message: { role: "assistant", content: [{ type: "text", text: "openai recovered" }] },
+        })}\n`);
+        stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+      }
+    });
+    return child;
+  });
+
+  const result = await runSingleTeammate({
+    agent: "general",
+    task: "Recover across providers",
+    model: "provider/qwen",
+    fallbackModels: ["provider/openai"],
+    context: "fork",
+  }, {
+    baseCwd: process.cwd(),
+    modelCapabilities: [{ id: "provider/qwen" }, { id: "provider/openai" }],
+    modelCircuitBreaker: new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 }),
+    spawnChildProcess,
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.messages.at(-1)?.content, "openai recovered");
+  assert.deepEqual(result.attemptedModels, ["provider/qwen", "provider/openai"]);
+  assert.deepEqual(launchedModels, ["provider/qwen", "provider/openai"]);
+});
+
 test("billing failures advance to fallback only after authoritative settlement", async () => {
   const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
   const launchedModels: string[] = [];
