@@ -5,7 +5,12 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.21.0（2026-08-13）。** Flow 0.21.0 搭配 Teammate 1.13.0、Cockpit 0.16.0 与 Settings-Core 0.1.3，带来 API Manager 结构化模型列表与 Cockpit 统一编辑器输入历史。
+> **当前稳定版本：v0.21.1（2026-08-13）。** Flow 0.21.1 同步引擎 `maestro-flow@0.5.70`（supersedes v0.21.0），与 run-response/1.1、session v3 protocol 的运行时配套；搭配 Teammate 1.13.0、Cockpit 0.16.0 与 Settings-Core 0.1.3。
+
+## v0.21.1（2026-08-13）
+
+- 引擎 pin 升级：`maestro-flow` 0.5.69 → **0.5.70**（supersedes v0.21.0）。0.5.70 承载 run-response/1.1、session/run v3 schemas 与 execution lifecycle，与本套件 execution-generation 会话模型配套；v0.21.0 的 API Manager `api.models` 与 Cockpit 输入历史功能不变。
+- 安装：`pi install npm:pi-maestro-flow@0.21.1`。
 
 ## v0.21.0（2026-08-13）
 

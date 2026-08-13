@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.21.0 is out — structured model list in API Manager and input history in the Cockpit unified editor. Upgrade:",
-    "install": "pi install npm:pi-maestro-flow@0.21.0",
+    "title": "v0.21.1 is out — engine sync to maestro-flow 0.5.70 (supersedes v0.21.0). Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.21.1",
     "close": "Dismiss"
   },
   "accessibility": {

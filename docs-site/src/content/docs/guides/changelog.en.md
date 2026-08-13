@@ -5,7 +5,12 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current stable release: v0.21.0 (2026-08-13).** Flow 0.21.0 bundles Teammate 1.13.0, Cockpit 0.16.0, and Settings-Core 0.1.3, adding the structured `api.models` list in API Manager and input history in the Cockpit unified editor.
+> **Current stable release: v0.21.1 (2026-08-13).** Flow 0.21.1 syncs the engine to `maestro-flow@0.5.70` (supersedes v0.21.0) so the run-response/1.1 and session v3 protocol runtimes match the suite's execution-generation session model; bundles Teammate 1.13.0, Cockpit 0.16.0, and Settings-Core 0.1.3.
+
+## v0.21.1 (2026-08-13)
+
+- Engine pin bump: `maestro-flow` 0.5.69 → **0.5.70** (supersedes v0.21.0). 0.5.70 carries run-response/1.1, session/run v3 schemas, and the execution lifecycle, matching the suite's execution-generation session model; the v0.21.0 API Manager `api.models` and Cockpit input-history features are unchanged.
+- Install with `pi install npm:pi-maestro-flow@0.21.1`.
 
 ## v0.21.0 (2026-08-13)
 
