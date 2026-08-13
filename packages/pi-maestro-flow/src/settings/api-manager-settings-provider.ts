@@ -598,17 +598,10 @@ function flattenModels(providers: readonly ApiProviderEntry[]): JsonValue {
     if (!Array.isArray(provider.models)) continue;
     for (const model of provider.models) {
       if (!model || typeof model !== "object" || Array.isArray(model)) continue;
-      const record = model as Record<string, unknown>;
-      items.push({
-        providerId: provider.id,
-        id: typeof record.id === "string" ? record.id : "",
-        name: typeof record.name === "string" ? record.name : "",
-        reasoning: record.reasoning,
-        input: record.input,
-        contextWindow: record.contextWindow,
-        maxTokens: record.maxTokens,
-        thinkingLevelMap: record.thinkingLevelMap,
-      });
+      // Carry the full model record: the list-crud shell only edits declared
+      // itemFields and preserves unknown keys, so unmanaged fields (cost,
+      // headers, compat, model-level url/api, extensions) survive the round trip.
+      items.push({ providerId: provider.id, ...(model as Record<string, unknown>) });
     }
   }
   return items as unknown as JsonValue;
@@ -620,28 +613,21 @@ function unflattenModels(items: JsonValue, providers: Record<string, unknown>): 
   if (Array.isArray(items)) {
     for (const item of items) {
       if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-      const record = item as Record<string, unknown>;
-      if (typeof record.providerId !== "string" || typeof record.id !== "string" || !record.id.trim()) continue;
-      const model: Record<string, unknown> = { id: record.id };
-      for (const key of ["name", "reasoning", "input", "contextWindow", "maxTokens", "thinkingLevelMap"]) {
-        if (record[key] !== undefined && record[key] !== null) model[key] = record[key];
-      }
-      const list = byProvider.get(record.providerId) ?? [];
-      list.push(model);
-      byProvider.set(record.providerId, list);
+      const record = { ...(item as Record<string, unknown>) };
+      const providerId = record.providerId;
+      if (typeof providerId !== "string" || typeof record.id !== "string" || !record.id.trim()) continue;
+      delete record.providerId;
+      const list = byProvider.get(providerId) ?? [];
+      list.push(record);
+      byProvider.set(providerId, list);
     }
   }
-  for (const [providerId, models] of byProvider) {
-    const existing = providers[providerId];
-    if (existing && typeof existing === "object") {
-      (existing as Record<string, unknown>).models = models;
-    }
-  }
-  // Providers absent from the flat list own no models (single source of truth).
-  for (const config of Object.values(providers)) {
+  // Single source of truth: every provider's models[] equals its grouped flat
+  // items (empty when the flat list holds no item for it), so deleting the
+  // last model of a provider really clears it instead of leaving the old array.
+  for (const [providerId, config] of Object.entries(providers)) {
     if (config && typeof config === "object" && !Array.isArray(config)) {
-      const record = config as Record<string, unknown>;
-      if (!record.models) record.models = [];
+      (config as Record<string, unknown>).models = byProvider.get(providerId) ?? [];
     }
   }
 }
@@ -807,6 +793,15 @@ export function createApiManagerSettingsProvider(
               code: "invalid-providers",
               messageKey: "api.settings.invalidProviders",
             });
+          } else if (Array.isArray(change.value)
+            && new Set(change.value.map((entry) => (entry as Record<string, unknown>).id)).size !== change.value.length) {
+            issues.push({
+              severity: "error",
+              key: change.key,
+              scope: change.scope,
+              code: "invalid-providers",
+              messageKey: "api.settings.invalidProviders",
+            });
           } else if (Array.isArray(change.value) && change.value.some((entry) => {
             const headers = (entry as Record<string, unknown>).headers;
             return headers !== undefined && headers !== null && typeof headers === "object"
@@ -825,10 +820,17 @@ export function createApiManagerSettingsProvider(
         if (change.key === "api.models" && change.operation === "set") {
           const providerIds = readProviderIdsSync(getModelsPath);
           const items = Array.isArray(change.value) ? change.value : [];
+          const seen = new Set<string>();
           const invalid = !Array.isArray(change.value) || items.some((item) => {
+            // Reject non-object entries (null, strings, ...) before field access.
+            if (!item || typeof item !== "object" || Array.isArray(item)) return true;
             const record = item as Record<string, unknown>;
-            return typeof record.providerId !== "string" || !providerIds.includes(record.providerId)
-              || typeof record.id !== "string" || !record.id.trim();
+            if (typeof record.providerId !== "string" || !providerIds.includes(record.providerId)
+              || typeof record.id !== "string" || !record.id.trim()) return true;
+            const identity = `${record.providerId}/${record.id.trim()}`;
+            if (seen.has(identity)) return true;
+            seen.add(identity);
+            return false;
           });
           if (invalid) {
             issues.push({
@@ -929,8 +931,9 @@ export function createApiManagerSettingsProvider(
             : {};
           const nextProviders: Record<string, unknown> = {};
           if (providersChange?.operation === "set" && Array.isArray(providersChange.value)) {
-            const entries = providersChange.value.map((entry) => parseProviderEntry(entry)).filter((entry): entry is ApiProviderEntry => entry !== undefined);
-            for (const entry of entries) {
+            for (const raw of providersChange.value) {
+              const entry = parseProviderEntry(raw);
+              if (!entry) continue;
               const previous = typeof existing[entry.id] === "object" && existing[entry.id] !== null
                 ? existing[entry.id] as Record<string, unknown>
                 : undefined;
@@ -944,6 +947,13 @@ export function createApiManagerSettingsProvider(
                 // preserve provider fields the editor does not manage (compat, name, ...)
                 for (const [key, value] of Object.entries(previous)) {
                   if (!(key in config)) config[key] = value;
+                }
+                // Explicitly cleared managed fields must not be resurrected from
+                // the previous record: "none" clears the preset, null clears headers.
+                if (entry.headerPreset === "none") delete config.headerPreset;
+                if (raw !== null && typeof raw === "object" && !Array.isArray(raw)
+                  && (raw as Record<string, unknown>).headers == null) {
+                  delete config.headers;
                 }
               }
               nextProviders[entry.id] = config;
@@ -989,7 +999,7 @@ export function createApiManagerSettingsProvider(
       }
       originals.delete(request.transactionId);
       preparedChanges.delete(request.transactionId);
-      const snapshot = snapshotFor(instanceId, await load(), DEFINITIONS);
+      const snapshot = snapshotFor(instanceId, await load(), allDefinitions(readProviderIdsSync(getModelsPath)));
       return {
         snapshot,
         revisions: [{

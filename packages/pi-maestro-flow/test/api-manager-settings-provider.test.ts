@@ -111,6 +111,111 @@ test("api.models add persists a model onto an existing provider reusing its url 
   ], "new model written onto the provider, old model kept");
 });
 
+test("api.models round-trip preserves unmanaged model fields when editing another model", async () => {
+  const { provider, modelsPath, context } = harness({
+    providers: {
+      "maestro-openai": {
+        baseUrl: "https://gateway.example.com/v1",
+        api: "openai-responses",
+        apiKey: "sk-live",
+        models: [
+          { id: "gpt-5.6", cost: { input: 1, output: 2 }, headers: { "X-Model": "gpt" }, compat: { unknownFlag: "keep" } },
+          { id: "grok-4.5", name: "Grok 4.5", reasoning: true },
+        ],
+      },
+    },
+  });
+  // Simulate the list-crud shell: read the flat list, edit one field of one item.
+  const snapshot = await provider.read({ context });
+  const flat = snapshot.effective.values.find((entry) => entry.key === "api.models")?.value as Array<Record<string, unknown>>;
+  const edited = flat.map((item) => item.id === "gpt-5.6" ? { ...item, name: "GPT-5.6 renamed" } : item);
+  const transactionId = "tx-models-preserve";
+  const prepared = await provider.prepare!({ context, transactionId, changes: [{ operation: "set" as const, key: "api.models", scope: "global" as const, value: edited }] });
+  assert.equal(prepared.prepared, true);
+  await provider.commit!({ context, transactionId, prepareToken: prepared.prepareToken! });
+  const written = JSON.parse(readFileSync(modelsPath, "utf8")) as Record<string, any>;
+  assert.deepEqual(written.providers["maestro-openai"].models, [
+    { id: "gpt-5.6", name: "GPT-5.6 renamed", cost: { input: 1, output: 2 }, headers: { "X-Model": "gpt" }, compat: { unknownFlag: "keep" } },
+    { id: "grok-4.5", name: "Grok 4.5", reasoning: true },
+  ], "unmanaged model fields survive an unrelated edit");
+});
+
+test("api.models deleting the last model of a provider clears it", async () => {
+  const { provider, modelsPath, context } = harness({
+    providers: {
+      "maestro-openai": { baseUrl: "https://gateway.example.com/v1", api: "openai-responses", apiKey: "sk-live", models: [{ id: "gpt-5.6" }] },
+    },
+  });
+  const transactionId = "tx-models-clear";
+  const prepared = await provider.prepare!({ context, transactionId, changes: [{ operation: "set" as const, key: "api.models", scope: "global" as const, value: [] }] });
+  assert.equal(prepared.prepared, true);
+  await provider.commit!({ context, transactionId, prepareToken: prepared.prepareToken! });
+  const written = JSON.parse(readFileSync(modelsPath, "utf8")) as Record<string, any>;
+  assert.deepEqual(written.providers["maestro-openai"].models, [], "last model deletion really persists");
+});
+
+test("api.models commit snapshot keeps the models baseline for the next edit", async () => {
+  const { provider, context } = harness({
+    providers: {
+      "maestro-openai": { baseUrl: "https://gateway.example.com/v1", api: "openai-responses", apiKey: "sk-live", models: [{ id: "gpt-5.6" }] },
+    },
+  });
+  const transactionId = "tx-models-baseline";
+  const prepared = await provider.prepare!({
+    context,
+    transactionId,
+    changes: [{
+      operation: "set" as const,
+      key: "api.providers",
+      scope: "global" as const,
+      value: [{ id: "maestro-openai", baseUrl: "https://gateway.example.com/v1", api: "openai-responses", enabled: true, apiKey: SETTINGS_SECRET_SET_PLACEHOLDER }],
+    }],
+  });
+  const committed = await provider.commit!({ context, transactionId, prepareToken: prepared.prepareToken! });
+  const baseline = committed.snapshot.configured.values.find((entry) => entry.key === "api.models");
+  assert.ok(baseline, "post-commit baseline carries api.models");
+  assert.deepEqual(baseline.value, [{ providerId: "maestro-openai", id: "gpt-5.6" }]);
+});
+
+test("api.models validate rejects non-object items and duplicate identities", async () => {
+  const { provider, context } = harness({
+    providers: {
+      "maestro-openai": { baseUrl: "https://gateway.example.com/v1", api: "openai-responses", apiKey: "sk-live" },
+    },
+  });
+  const nonObject = await provider.validate!({ context, changes: [{ operation: "set" as const, key: "api.models", scope: "global" as const, value: ["nope"] }] });
+  assert.equal(nonObject.valid, false);
+  assert.equal(nonObject.issues[0]?.code, "invalid-models");
+  const duplicates = await provider.validate!({ context, changes: [{
+    operation: "set" as const,
+    key: "api.models",
+    scope: "global" as const,
+    value: [
+      { providerId: "maestro-openai", id: "gpt-5.6" },
+      { providerId: "maestro-openai", id: "gpt-5.6" },
+    ],
+  }] });
+  assert.equal(duplicates.valid, false);
+  assert.equal(duplicates.issues[0]?.code, "invalid-models");
+  const valid = await provider.validate!({ context, changes: [{ operation: "set" as const, key: "api.models", scope: "global" as const, value: [{ providerId: "maestro-openai", id: "gpt-5.6" }] }] });
+  assert.equal(valid.valid, true);
+});
+
+test("api.providers validate rejects duplicate ids", async () => {
+  const { provider, context } = harness();
+  const duplicate = await provider.validate!({ context, changes: [{
+    operation: "set" as const,
+    key: "api.providers",
+    scope: "global" as const,
+    value: [
+      { id: "dup", baseUrl: "https://a.example.com/v1", api: "openai-responses" },
+      { id: "dup", baseUrl: "https://b.example.com/v1", api: "openai-responses" },
+    ],
+  }] });
+  assert.equal(duplicate.valid, false);
+  assert.equal(duplicate.issues[0]?.code, "invalid-providers");
+});
+
 test("api manager read surfaces the prompt cache policy and defaults to off", async () => {
   const { provider, context } = harness();
   const snapshot = await provider.read({ context });

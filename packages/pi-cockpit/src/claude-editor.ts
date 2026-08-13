@@ -128,9 +128,10 @@ export class CockpitClaudeEditor extends CustomEditor {
 		options.onEditor?.(this);
 	}
 
-	/** Submitted prompts go to the persistent store, never to the base in-memory list. */
+	/** Submitted prompts go to the persistent store when enabled, else to the base in-memory history. */
 	override addToHistory(text: string): void {
-		this.editorOptions.record?.(text);
+		if (this.editorOptions.record) this.editorOptions.record(text);
+		else super.addToHistory(text);
 	}
 
 	/** Programmatic writes (submit clears, `ui.setEditorText`) end history browsing. */
@@ -179,13 +180,17 @@ export class CockpitClaudeEditor extends CustomEditor {
 		}
 		if (this.editorOptions.doubleEscapeClearInput) this.doubleEscapeGate.onAnyOtherInput();
 		const keys = getKeybindings();
-		if (keys.matches(data, "tui.editor.cursorUp") && this.canBrowseOlder()) {
-			this.step(1);
-			return;
-		}
-		if (keys.matches(data, "tui.editor.cursorDown") && this.canBrowseNewer()) {
-			this.step(-1);
-			return;
+		// History browsing only exists when persistent history is enabled; without
+		// getEntries, Up/Down keep their plain cursor-move meaning.
+		if (this.editorOptions.getEntries) {
+			if (keys.matches(data, "tui.editor.cursorUp") && this.canBrowseOlder()) {
+				this.step(1);
+				return;
+			}
+			if (keys.matches(data, "tui.editor.cursorDown") && this.canBrowseNewer()) {
+				this.step(-1);
+				return;
+			}
 		}
 		super.handleInput(data);
 		// Editing the recalled text means the user left history behind.

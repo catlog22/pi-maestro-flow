@@ -10,6 +10,11 @@ import {
   type CockpitEditorRouteTarget,
   type CockpitClaudeEditorOptions,
 } from "../src/claude-editor.ts";
+import { cockpitTuiLocale } from "../src/tui-i18n.ts";
+
+// The history banner uses the process-global locale; pin English so the
+// assertions below are environment-independent.
+cockpitTuiLocale.setLocale("en");
 
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
@@ -60,6 +65,17 @@ test("submitted prompts reach the store instead of the built-in history", () => 
   assert.deepEqual(recorded, ["delegate the review"]);
   editor.handleInput(UP);
   assert.equal(editor.getText(), "");
+});
+
+test("without persistent history the editor delegates to the base in-memory history", () => {
+  const { editor } = makeEditor([], { getEntries: undefined, record: undefined });
+  // addToHistory falls back to the base editor instead of dropping the prompt.
+  editor.addToHistory("kept by the base editor");
+  // Up/Down keep their plain cursor meaning: no custom history to browse.
+  editor.setText("draft");
+  editor.handleInput(UP);
+  assert.equal(editor.getText(), "draft");
+  assert.ok(!editor.render(40).at(-1)?.includes("History"), "no banner without a custom history");
 });
 
 test("up and down walk the persisted history and stop at both ends", () => {

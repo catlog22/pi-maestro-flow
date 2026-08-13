@@ -20,6 +20,13 @@ const DEFAULT_SAVE_DEBOUNCE_MS = 250;
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 
+/**
+ * Serializes every save across store instances so a fresh store's load() never
+ * races an older store's pending flush (reload/new/resume in the same process):
+ * the next load waits for the previous store's save to land before reading.
+ */
+let pendingWrites: Promise<void> = Promise.resolve();
+
 export interface InputHistoryStoreOptions {
   rootDir?: string;
   maxEntries?: number;
@@ -71,7 +78,14 @@ export class InputHistoryStore {
   }
 
   async load(): Promise<readonly string[]> {
-    this.entries = capped(await this.readFromDisk(), this.maxEntries);
+    // Let any older store's pending save land first, so a session that starts
+    // right after a shutdown sees the previous session's last prompt.
+    await pendingWrites;
+    const disk = await this.readFromDisk();
+    // Entries recorded before the first load settled (an immediate submit right
+    // after startup) must survive: keep them ahead of the disk entries.
+    const known = new Set(this.entries);
+    this.entries = capped([...this.entries, ...disk.filter((value) => !known.has(value))], this.maxEntries);
     return this.entries;
   }
 
@@ -102,11 +116,11 @@ export class InputHistoryStore {
   }
 
   private enqueueSave(): void {
-    this.writes = this.writes
-      .then(() => this.save())
-      .catch((error: unknown) => {
-        this.onError?.(error);
-      });
+    const save = pendingWrites.then(() => this.save());
+    pendingWrites = save.catch(() => undefined);
+    this.writes = save.catch((error: unknown) => {
+      this.onError?.(error);
+    });
   }
 
   private async save(): Promise<void> {

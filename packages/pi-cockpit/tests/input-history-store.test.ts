@@ -90,6 +90,28 @@ test("history is capped at the newest entries", async () => {
   }
 });
 
+test("entries recorded before load settles are kept ahead of the disk entries", async () => {
+  const { cwd, rootDir, file, cleanup } = await workspace();
+  try {
+    // Long debounce keeps the scheduled save from firing before load() settles,
+    // isolating the load/record race from the save timer.
+    const store = new InputHistoryStore(cwd, { rootDir, debounceMs: 10_000 });
+    // Immediate submit before the initial load resolves (startup race).
+    store.record("typed before load");
+    await mkdir(join(rootDir, workspaceStorageId(cwd)), { recursive: true });
+    await writeFile(file, JSON.stringify({ version: 1, entries: ["older entry"] }), "utf8");
+
+    await store.load();
+    assert.deepEqual(store.list(), ["typed before load", "older entry"]);
+    await store.flush();
+
+    const reopened = new InputHistoryStore(cwd, { rootDir, debounceMs: 0 });
+    assert.deepEqual(await reopened.load(), ["typed before load", "older entry"]);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("a save keeps entries another pi window wrote after we loaded", async () => {
   const { cwd, rootDir, file, cleanup } = await workspace();
   try {
