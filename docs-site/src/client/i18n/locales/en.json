@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.18.0 is out — fixes the Skill discovery regression behind the v0.17.0 withdrawal. Upgrade:",
-    "install": "pi install npm:pi-maestro-flow@0.18.0",
+    "title": "v0.20.0 is out — Execution Generations, Teammate output management, and the Cockpit Zen Stack. Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.20.0",
     "close": "Dismiss"
   },
   "accessibility": {

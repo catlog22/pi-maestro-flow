@@ -25,7 +25,7 @@ pi-maestro-flow 是 **Pi 插件**，用 `pi install` 安装（不是普通 npm �
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
 # 2. 安装或升级插件（pi-maestro-teammate 作为依赖自动安装）
-pi install npm:pi-maestro-flow@0.18.0
+pi install npm:pi-maestro-flow@0.20.0
 
 # 3. 验证 Flow、Teammate 和 Cockpit 均已列出
 pi list
@@ -87,7 +87,7 @@ npm install pi-maestro-teammate@1.9.0 pi-cockpit@0.11.0
 
 # 方式 B：删除本地覆盖，交给 flow 统一管理
 rm -rf node_modules/pi-maestro-teammate node_modules/pi-cockpit
-pi install npm:pi-maestro-flow@0.18.0
+pi install npm:pi-maestro-flow@0.20.0
 ```
 
 升级的 companion 包与核心版本不匹配时同样会导致该崩溃（旧版扩展分离调用核心 `refresh()` 方法，`this` 绑定丢失）。确保 teammate ≥ 1.7.1 或直接使用最新版。

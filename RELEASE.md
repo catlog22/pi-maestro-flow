@@ -1,3 +1,138 @@
+# v0.20.0 — Execution-Generation Model, Teammate Output Management, and Cockpit Zen Stack
+
+## Overview
+
+Flow `0.20.0` bundles Teammate `1.13.0`, Cockpit `0.15.0`, and the unchanged
+`pi-maestro-settings-core` `0.1.3`. This release lands the execution-generation
+session model with run-response/1.1 and v3 capability negotiation, teammate
+output data management with capacity rollover, agent:// publication-id
+persistence, compaction hardening at hard tool boundaries, the Cockpit zen
+stack projection, and the in-flight viewport-stability detach refactor that was
+committed as part of this release.
+
+The core engine reference stays at `maestro-flow@0.5.69` — release preflight
+verified it matches both npm latest and the local upstream source
+(`D:/maestro2`), so no pin change was needed.
+
+## Highlights
+
+### Session Model — Execution Generations and v3 Capability Negotiation
+
+- New execution-generation session model with `run-response/1.1` and a
+  statusless projection; session/run architecture analysis and migration docs
+  are included (`docs: add session-run architecture analysis`,
+  `docs: plan session/execution/run model migration`).
+- Session capability negotiation migrated to v3.
+- Todo task-result snapshots slimmed to cut context overhead.
+
+### Teammate — Output Management and Dispatch Hardening
+
+- Teammate output data management wired into Flow: capacity accounting with
+  oldest-record rollover and graceful fallback for skipped output; unpersisted
+  inline results are capped.
+- Per-dispatch mode, delegation drafts, publication acknowledgements, and
+  observe/retry hardening.
+- Multi-agent messaging identity and delivery hardened: expert rules packaged
+  with sender identity preserved, replay-neutral child IPC fallback, monitor
+  stall/cooldown thresholds now honor configured values, graph wait and queue
+  stall separated, delivery routing declarations synced, and lifecycle tests
+  moved off fixed waits.
+
+### Flow — agent:// Publication IDs, Compaction, and Tool Activation
+
+- agent:// outputs persist under immutable publication ids; duplicate name
+  queries return id/time/preview lists instead of ambiguity.
+- Compaction: hard tool boundary blocks and terminates instead of `abort()`,
+  output-limit continuation attempts are bounded, and continuation proceeds
+  directly below context pressure.
+- Deferred tool activation choices survive reload; low-frequency tool schemas
+  are deferred for startup performance.
+- Browser tool reuses or launches managed Chrome profiles, eliminating the
+  EBUSY exit crash; goal verification recovers transient verifier
+  module-load failures and surfaces the infra error cause.
+
+### Cockpit — Zen Stack Projection and Viewport Stability
+
+- Zen stack projection added with design prototypes and docs-site pages.
+- Expert-mode Leader rows marked with the strategy indicator.
+- Viewport-stability patch is now detachable across TUI swaps and released
+  cleanly on shutdown (committed as release scope).
+
+### Pi Mirror and Packaged Skills
+
+- Pi mirror deploy tooling (`deploy-pi-mirror.mjs` + tests, `.pi-mirror-managed.json`).
+- Packaged skill contracts synchronized (`convert-pi.mjs` / `sync-pi.mjs`):
+  the Maestro `--dry-run` interface is stabilized against source drift with a
+  generated action block and transition, and the generated package
+  `AGENTS.md` is committed with test coverage.
+
+## Package Versions
+
+| Package | Previous | v0.20.0 closure |
+|---------|---------:|----------------:|
+| pi-maestro-flow | 0.19.0 | **0.20.0** |
+| pi-maestro-teammate | 1.12.0 | **1.13.0** |
+| pi-cockpit | 0.14.0 | **0.15.0** |
+| pi-maestro-settings-core | 0.1.3 | **0.1.3** (unchanged) |
+| maestro-flow | 0.5.69 | **0.5.69** (unchanged) |
+
+- Requires Node.js `>=22.19.0`.
+- Pi core packages remain optional wildcard peers supplied by the host.
+- Publication order is Teammate, Cockpit, then Flow. Flow pins the exact
+  companion versions shown above; Cockpit's devDependency on Teammate moves to
+  `1.13.0` and its peer range `^1.6.0` still covers `1.13.0` and is
+  intentionally left unchanged.
+
+## Install / Upgrade
+
+Close running Pi processes before upgrading, then run:
+
+```bash
+pi install npm:pi-maestro-flow@0.20.0
+pi list
+```
+
+After restart, verify Flow `0.20.0`, Teammate `1.13.0`, Cockpit `0.15.0`, and
+Settings-Core `0.1.3`.
+
+## Release Verification
+
+- Serial release gate passed: Settings-Core typecheck/tests and unchanged-tarball
+  SHA check (local dry-run shasum equals registry `dist.shasum`); Teammate
+  typecheck, 1,302-test suite (one intermittent failure on the first full-gate
+  run did not reproduce across two dedicated reruns, both 1,300/1,300), build
+  and check declarations; Cockpit typecheck and tests; Flow typecheck and all
+  release suites including both packed-consumer tests. The manifest contract
+  (three consumers pin `pi-maestro-settings-core` exactly at `0.1.3`; Flow pins
+  teammate/cockpit at their local versions) was re-run after the version bump.
+- Fresh isolated `USERPROFILE` + `HOME` registry install passed: Flow `0.20.0`,
+  Teammate `1.13.0`, Cockpit `0.15.0`, and each consumer's exact
+  Settings-Core `0.1.3` dependency resolved from the registry. Fresh Pi RPC
+  startup loaded Flow/Teammate/Cockpit and discovered 33 packaged Skills,
+  including `skill:maestro`. A prompt-level Skill invocation reached model
+  authentication and was blocked only because the deliberately isolated HOME
+  contains no API credentials.
+
+Dry-run tarballs from the verified candidate:
+
+| Package | Files | Packed | Unpacked | SHA-1 |
+|---------|------:|-------:|---------:|-------|
+| pi-maestro-settings-core@0.1.3 (unchanged) | 7 | 5,551 | 20,774 | `e572d7fd284aed7cb9de01342a57f44ac987ee62` |
+| pi-maestro-teammate@1.13.0 | 232 | 567,257 | 2,494,207 | `60176cafefd0790ab147f0a928944608719afe54` |
+| pi-cockpit@0.15.0 | 86 | 235,911 | 881,497 | `4039a4d40b5074a8e54e60b16d0c3ed3612d2156` |
+| pi-maestro-flow@0.20.0 | 637 | 1,840,213 | 7,015,929 | `61fc3429d66afd4265e77ec16d526d33e27294ee` |
+
+Publication order is mandatory: publish and verify Teammate, then Cockpit,
+then Flow; registry smoke, tag, and GitHub Release follow.
+
+## Change Statistics
+
+Candidate compared with `v0.19.0`: 38 commits (35 since the v0.19.0 tag plus 3
+release-scope WIP-collection commits for the viewport-stability refactor, the
+pi-mirror tooling and skill contract sync, and the dry-run/generated-AGENTS
+test coverage); 267 files changed; 23,259 insertions and 4,299 deletions.
+
+---
 # v0.19.0 — Experts Mode, Managed Monitor Windows, and Dispatch Hardening
 
 ## Overview

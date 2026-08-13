@@ -5,7 +5,15 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current stable release: v0.18.0 (2026-08-09).** v0.18.0 is the fixed successor of the withdrawn v0.17.0: it restores packaged Pi resources so Skills are discoverable and invocable after a clean install, and brings back the full pre-withdrawal feature set. The v0.17.0 feature record remains for audit.
+> **Current stable release: v0.20.0 (2026-08-13).** Flow 0.20.0 bundles Teammate 1.13.0, Cockpit 0.15.0, and Settings-Core 0.1.3, adding the execution-generation session model, Teammate output management, agent:// publication ids, compaction hardening, and the Cockpit Zen Stack.
+
+## v0.20.0 (2026-08-13)
+
+- Execution-generation sessions with `run-response/1.1`, v3 capability negotiation, and statusless projection.
+- Teammate output capacity management, immutable publication ids, and hardened dispatch, delivery, observe, and retry paths.
+- Hard tool-boundary compaction, deferred tool activation, managed Chrome profiles, and Goal verifier recovery.
+- Cockpit Zen Stack and a detachable viewport-stability patch.
+- Install with `pi install npm:pi-maestro-flow@0.20.0`.
 
 ## v0.18.0 (2026-08-09)
 

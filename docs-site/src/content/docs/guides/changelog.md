@@ -5,7 +5,15 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.18.0（2026-08-09）。** v0.18.0 是 v0.17.0（已撤回）的修复版：恢复打包 Pi 资源使 Skill 在全新安装后可发现、可调用，并带回撤回前的完整功能集。v0.17.0 的功能记录保留用于审计。
+> **当前稳定版本：v0.20.0（2026-08-13）。** Flow 0.20.0 搭配 Teammate 1.13.0、Cockpit 0.15.0 与 Settings-Core 0.1.3，带来 execution-generation 会话模型、Teammate 输出治理、agent:// publication id、compaction 加固和 Cockpit Zen Stack。
+
+## v0.20.0（2026-08-13）
+
+- Execution-generation 会话模型：`run-response/1.1`、v3 capability negotiation 与 statusless projection。
+- Teammate 输出容量治理、immutable publication id、dispatch/消息投递与 observe/retry 加固。
+- Compaction hard tool boundary、延迟工具激活、managed Chrome profile 与 Goal verifier 修复。
+- Cockpit Zen Stack、可 detach 的 viewport-stability patch。
+- 安装：`pi install npm:pi-maestro-flow@0.20.0`。
 
 ## v0.18.0（2026-08-09）
 

@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow 标志"
   },
   "announcement": {
-    "title": "v0.18.0 已发布 — 修复 v0.17.0 撤回的 Skill 发现回归。升级：",
-    "install": "pi install npm:pi-maestro-flow@0.18.0",
+    "title": "v0.20.0 已发布 — Execution Generation、Teammate 输出治理与 Cockpit Zen Stack。升级：",
+    "install": "pi install npm:pi-maestro-flow@0.20.0",
     "close": "关闭提示"
   },
   "accessibility": {
