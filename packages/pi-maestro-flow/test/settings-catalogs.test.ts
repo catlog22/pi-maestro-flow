@@ -17,6 +17,9 @@ function referencedKeys(settings: readonly SettingDefinition[]): Set<string> {
     if (entry.descriptionKey) keys.add(entry.descriptionKey);
     if (entry.editor.options) {
       for (const option of entry.editor.options) {
+        // Dynamic options (theme names, provider ids) use the value as their own
+        // labelKey and render via the key-fallback; they are not catalog keys.
+        if (option.labelKey === String(option.value)) continue;
         keys.add(option.labelKey);
         if (option.descriptionKey) keys.add(option.descriptionKey);
       }

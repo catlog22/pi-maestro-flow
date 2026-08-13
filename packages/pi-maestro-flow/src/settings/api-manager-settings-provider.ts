@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   SETTINGS_ANNOUNCE_EVENT,
   SETTINGS_DISCOVER_EVENT,
@@ -160,8 +161,51 @@ const PROVIDER_FIELDS: readonly SettingDefinition[] = [
     options: (Object.keys(AGENT_HEADER_PRESETS) as AgentHeaderPreset[]).map((value) => ({ value, labelKey: `api.headerPreset.${value}` })),
   }, "none"),
   field("headers", "json", "api.field.headers", { multiline: true }),
-  field("models", "json", "api.field.models", { multiline: true }),
 ];
+
+/** Item fields for the flat api.models list; providerId reuses an existing provider's url+key. */
+function modelItemFields(providerIds: readonly string[]): readonly SettingDefinition[] {
+  // labelKey falls back to the key itself, so a provider id renders verbatim.
+  const providerOptions = providerIds.map((id) => ({ value: id, labelKey: id }));
+  return [
+    field("providerId", "enum", "api.field.providerId", {
+      options: providerOptions,
+    }, providerIds[0]),
+    field("id", "text", "api.field.modelId"),
+    field("name", "text", "api.field.modelName"),
+    field("reasoning", "boolean", "api.field.reasoning", {}, true),
+    field("input", "string-list", "api.field.input", {}, ["text", "image"]),
+    field("contextWindow", "integer", "api.field.contextWindow", {}, 800000),
+    field("maxTokens", "integer", "api.field.maxTokens", {}, 128000),
+    field("thinkingLevelMap", "json", "api.field.thinkingLevelMap", { multiline: true }, { off: null, xhigh: "max" }),
+  ];
+}
+
+function modelsDefinition(providerIds: readonly string[]): SettingDefinition {
+  return {
+    key: "api.models",
+    group: "api.group.models",
+    order: 1,
+    labelKey: "api.models",
+    descriptionKey: "api.models.description",
+    scopes: ["global"],
+    merge: "provider-defined",
+    activation: "next-invocation",
+    sensitivity: "public",
+    reversibility: "full",
+    editor: {
+      kind: "list-crud",
+      itemLabelKey: "api.item.model",
+      addLabelKey: "api.models.add",
+      itemFields: modelItemFields(providerIds),
+    },
+  };
+}
+
+function allDefinitions(providerIds: readonly string[]): readonly SettingDefinition[] {
+  // Models slot in right after Providers (order 1) so the setting list stays grouped.
+  return [DEFINITIONS[0], modelsDefinition(providerIds), ...DEFINITIONS.slice(1)];
+}
 
 const DEFINITIONS: readonly SettingDefinition[] = [
   {
@@ -302,7 +346,8 @@ const CATALOGS = {
   en: {
     "api.provider": "API Manager",
     "api.provider.description": "Providers, models, endpoints, credentials, defaults and retry policy",
-    "api.group.providers": "Providers and models",
+    "api.group.providers": "Providers",
+    "api.group.models": "Models",
     "api.group.retry": "Retry policy",
     "api.group.cache": "Prompt cache policy",
     "api.group.diagnostics": "Configuration overview",
@@ -320,9 +365,20 @@ const CATALOGS = {
     "api.headerPreset.codex": "Codex CLI",
     "api.headerPreset.grok": "Grok CLI",
     "api.headerPreset.antigravity": "Antigravity CLI",
-    "api.field.models": "Models (JSON)",
+    "api.field.providerId": "Provider",
+    "api.field.modelId": "Model id",
+    "api.field.modelName": "Name",
+    "api.field.reasoning": "Reasoning",
+    "api.field.input": "Input modalities",
+    "api.field.contextWindow": "Context window",
+    "api.field.maxTokens": "Max tokens",
+    "api.field.thinkingLevelMap": "Thinking level map (JSON)",
     "api.item.provider": "{id}",
     "api.action.addProvider": "Add provider",
+    "api.models": "Models",
+    "api.models.description": "Every model across providers. Adding a model to an existing provider reuses its base URL and API key — only the model part needs setting.",
+    "api.item.model": "{providerId} / {id}",
+    "api.models.add": "Add model",
     "api.apiKind.openai-responses": "OpenAI Responses",
     "api.apiKind.openai-completions": "OpenAI Completions",
     "api.apiKind.anthropic-messages": "Anthropic Messages",
@@ -366,9 +422,11 @@ const CATALOGS = {
     "api.action.list.description": "Display the effective provider, model, defaults and retry configuration",
     "api.settings.readOnly": "API Manager entries are actions and cannot be committed as draft values",
     "api.settings.invalidProviders": "Providers must be a list of objects with an id",
+    "api.settings.invalidModels": "Each model needs an existing provider and a non-empty model id",
     "api.settings.invalidHeaders": "Custom headers must be a JSON object with string values",
     "api.settings.invalidRetry": "Retry values are invalid",
     "api.overview.providers": "Providers",
+    "api.overview.models": "Models",
     "api.overview.retry": "Auto-retry",
     "api.overview.retryOn": "On · max {count} · base {delay}ms",
     "api.overview.retryOff": "Off",
@@ -380,7 +438,8 @@ const CATALOGS = {
   "zh-CN": {
     "api.provider": "API Manager",
     "api.provider.description": "管理 Provider、模型、端点、凭据、默认值与重试策略",
-    "api.group.providers": "Provider 与模型",
+    "api.group.providers": "Providers",
+    "api.group.models": "模型",
     "api.group.retry": "API 重试策略",
     "api.group.cache": "提示缓存策略",
     "api.group.diagnostics": "配置概览",
@@ -398,9 +457,20 @@ const CATALOGS = {
     "api.headerPreset.codex": "Codex CLI",
     "api.headerPreset.grok": "Grok CLI",
     "api.headerPreset.antigravity": "Antigravity CLI",
-    "api.field.models": "模型（JSON）",
+    "api.field.providerId": "Provider",
+    "api.field.modelId": "模型 ID",
+    "api.field.modelName": "名称",
+    "api.field.reasoning": "推理",
+    "api.field.input": "输入模态",
+    "api.field.contextWindow": "上下文窗口",
+    "api.field.maxTokens": "最大 Tokens",
+    "api.field.thinkingLevelMap": "思考等级映射（JSON）",
     "api.item.provider": "{id}",
     "api.action.addProvider": "新增 Provider",
+    "api.models": "模型",
+    "api.models.description": "所有 Provider 下的全部模型。向已有 Provider 添加模型会自动复用其 Base URL 与 API Key —— 只需配置模型部分。",
+    "api.item.model": "{providerId} / {id}",
+    "api.models.add": "添加模型",
     "api.apiKind.openai-responses": "OpenAI Responses",
     "api.apiKind.openai-completions": "OpenAI Completions",
     "api.apiKind.anthropic-messages": "Anthropic Messages",
@@ -444,9 +514,11 @@ const CATALOGS = {
     "api.action.list.description": "显示当前生效的 Provider、模型、默认值与重试配置",
     "api.settings.readOnly": "API Manager 项目是管理操作，不能作为草稿值提交",
     "api.settings.invalidProviders": "Providers 必须是含 id 的对象列表",
+    "api.settings.invalidModels": "每个模型需要已存在的 Provider 与不为空的模型 id",
     "api.settings.invalidHeaders": "自定义请求头必须是字符串值的 JSON 对象",
     "api.settings.invalidRetry": "重试配置值无效",
     "api.overview.providers": "Providers",
+    "api.overview.models": "模型",
     "api.overview.retry": "自动重试",
     "api.overview.retryOn": "开启 · 最大 {count} 次 · 基础 {delay}ms",
     "api.overview.retryOff": "关闭",
@@ -503,8 +575,75 @@ function providerConfig(entry: ApiProviderEntry): Record<string, unknown> {
   const expandedHeaders = expandAgentHeaderPreset(entry.headerPreset, entry.headers);
   if (expandedHeaders) config.headers = expandedHeaders;
   else if (entry.headers) config.headers = entry.headers;
-  if (Array.isArray(entry.models)) config.models = entry.models;
   return config;
+}
+
+/** Existing provider ids from models.json, for the api.models provider enum. */
+function readProviderIdsSync(getModelsPath: () => string): string[] {
+  try {
+    const parsed = JSON.parse(readFileSync(getModelsPath(), "utf8")) as { providers?: unknown };
+    if (parsed?.providers && typeof parsed.providers === "object" && !Array.isArray(parsed.providers)) {
+      return Object.keys(parsed.providers);
+    }
+  } catch {
+    // Missing or invalid config is the normal unconfigured state.
+  }
+  return [];
+}
+
+/** Flatten every provider's models[] into a flat [{providerId, ...model}] list. */
+function flattenModels(providers: readonly ApiProviderEntry[]): JsonValue {
+  const items: Array<Record<string, unknown>> = [];
+  for (const provider of providers) {
+    if (!Array.isArray(provider.models)) continue;
+    for (const model of provider.models) {
+      if (!model || typeof model !== "object" || Array.isArray(model)) continue;
+      const record = model as Record<string, unknown>;
+      items.push({
+        providerId: provider.id,
+        id: typeof record.id === "string" ? record.id : "",
+        name: typeof record.name === "string" ? record.name : "",
+        reasoning: record.reasoning,
+        input: record.input,
+        contextWindow: record.contextWindow,
+        maxTokens: record.maxTokens,
+        thinkingLevelMap: record.thinkingLevelMap,
+      });
+    }
+  }
+  return items as unknown as JsonValue;
+}
+
+/** Rebuild each provider's models[] from the flat list, grouped by providerId. */
+function unflattenModels(items: JsonValue, providers: Record<string, unknown>): void {
+  const byProvider = new Map<string, Array<Record<string, unknown>>>();
+  if (Array.isArray(items)) {
+    for (const item of items) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const record = item as Record<string, unknown>;
+      if (typeof record.providerId !== "string" || typeof record.id !== "string" || !record.id.trim()) continue;
+      const model: Record<string, unknown> = { id: record.id };
+      for (const key of ["name", "reasoning", "input", "contextWindow", "maxTokens", "thinkingLevelMap"]) {
+        if (record[key] !== undefined && record[key] !== null) model[key] = record[key];
+      }
+      const list = byProvider.get(record.providerId) ?? [];
+      list.push(model);
+      byProvider.set(record.providerId, list);
+    }
+  }
+  for (const [providerId, models] of byProvider) {
+    const existing = providers[providerId];
+    if (existing && typeof existing === "object") {
+      (existing as Record<string, unknown>).models = models;
+    }
+  }
+  // Providers absent from the flat list own no models (single source of truth).
+  for (const config of Object.values(providers)) {
+    if (config && typeof config === "object" && !Array.isArray(config)) {
+      const record = config as Record<string, unknown>;
+      if (!record.models) record.models = [];
+    }
+  }
 }
 
 export function createApiManagerSettingsProvider(
@@ -590,6 +729,9 @@ export function createApiManagerSettingsProvider(
       } else if (definition.key === "api.agentCacheRetention") {
         configured.push({ key: definition.key, scope: "global", state: "set", value: data.agentCacheRetention });
         effective.push({ key: definition.key, value: data.agentCacheRetention, source: "configured", scope: "global" });
+      } else if (definition.key === "api.models") {
+        configured.push({ key: definition.key, scope: "global", state: "set", value: flattenModels(data.providers) as unknown as JsonValue });
+        effective.push({ key: definition.key, value: flattenModels(data.providers) as unknown as JsonValue, source: "configured", scope: "global" });
       } else if (definition.key === "api.overview") {
         const rows: SettingsOverviewRow[] = [
           ...(data.providers.length === 0
@@ -599,6 +741,11 @@ export function createApiManagerSettingsProvider(
               value: entry.enabled ? `${entry.api} · ${entry.baseUrl || "no base URL"}` : "disabled",
               status: (entry.enabled ? "ok" : "warn") as "ok" | "warn",
             }))),
+          {
+            labelKey: "api.overview.models",
+            value: String((flattenModels(data.providers) as Array<Record<string, unknown>>).length),
+            status: "ok",
+          },
           {
             labelKey: "api.overview.retry",
             value: data.retry.enabled
@@ -644,10 +791,10 @@ export function createApiManagerSettingsProvider(
       descriptionKey: "api.provider.description",
       order: 15,
       capabilities: { read: true, write: true, prepareCommit: true, rollback: "compensating", hotUpdate: true },
-      settings: DEFINITIONS,
+      settings: allDefinitions(readProviderIdsSync(getModelsPath)),
       catalogs: CATALOGS,
     }),
-    read: async (request) => snapshotFor(instanceId, await load(), DEFINITIONS),
+    read: async () => snapshotFor(instanceId, await load(), allDefinitions(readProviderIdsSync(getModelsPath))),
     validate: (request) => {
       const issues: SettingsValidationIssue[] = [];
       for (const change of request.changes) {
@@ -672,6 +819,24 @@ export function createApiManagerSettingsProvider(
               scope: change.scope,
               code: "invalid-headers",
               messageKey: "api.settings.invalidHeaders",
+            });
+          }
+        }
+        if (change.key === "api.models" && change.operation === "set") {
+          const providerIds = readProviderIdsSync(getModelsPath);
+          const items = Array.isArray(change.value) ? change.value : [];
+          const invalid = !Array.isArray(change.value) || items.some((item) => {
+            const record = item as Record<string, unknown>;
+            return typeof record.providerId !== "string" || !providerIds.includes(record.providerId)
+              || typeof record.id !== "string" || !record.id.trim();
+          });
+          if (invalid) {
+            issues.push({
+              severity: "error",
+              key: change.key,
+              scope: change.scope,
+              code: "invalid-models",
+              messageKey: "api.settings.invalidModels",
             });
           }
         }
@@ -728,7 +893,7 @@ export function createApiManagerSettingsProvider(
     prepare: async (request) => {
       const data = await load();
       const changedKeys = request.changes.map((change) => change.key);
-      if (changedKeys.includes("api.providers") || changedKeys.includes("api.retry.enabled")
+      if (changedKeys.includes("api.providers") || changedKeys.includes("api.models") || changedKeys.includes("api.retry.enabled")
         || changedKeys.includes("api.retry.maxRetries") || changedKeys.includes("api.retry.baseDelayMs")
         || changedKeys.includes("api.retry.maxDelayMs") || changedKeys.includes("api.promptCache")
         || changedKeys.includes("api.cacheRetention") || changedKeys.includes("api.agentCacheRetention")) {
@@ -757,23 +922,37 @@ export function createApiManagerSettingsProvider(
       const agentCacheRetentionChange = changes.find((change) => change.key === "api.agentCacheRetention");
       let modelsWritten = false;
       try {
-        if (providersChange?.operation === "set" && Array.isArray(providersChange.value)) {
-          const entries = providersChange.value.map((entry) => parseProviderEntry(entry)).filter((entry): entry is ApiProviderEntry => entry !== undefined);
+        const modelsChange = changes.find((change) => change.key === "api.models");
+        if ((providersChange?.operation === "set" && Array.isArray(providersChange.value)) || modelsChange?.operation === "set") {
           const existing = data.modelsRoot.providers !== undefined && typeof data.modelsRoot.providers === "object"
             ? data.modelsRoot.providers as Record<string, unknown>
             : {};
           const nextProviders: Record<string, unknown> = {};
-          for (const entry of entries) {
-            const previous = typeof existing[entry.id] === "object" && existing[entry.id] !== null
-              ? existing[entry.id] as Record<string, unknown>
-              : undefined;
-            const config = providerConfig(entry);
-            if (previous && (entry.apiKey === null || entry.apiKey === SETTINGS_SECRET_SET_PLACEHOLDER)) {
-              if (typeof previous.apiKey === "string") config.apiKey = previous.apiKey;
+          if (providersChange?.operation === "set" && Array.isArray(providersChange.value)) {
+            const entries = providersChange.value.map((entry) => parseProviderEntry(entry)).filter((entry): entry is ApiProviderEntry => entry !== undefined);
+            for (const entry of entries) {
+              const previous = typeof existing[entry.id] === "object" && existing[entry.id] !== null
+                ? existing[entry.id] as Record<string, unknown>
+                : undefined;
+              const config = providerConfig(entry);
+              if (previous && typeof previous === "object") {
+                if ((entry.apiKey === null || entry.apiKey === SETTINGS_SECRET_SET_PLACEHOLDER) && typeof previous.apiKey === "string") {
+                  config.apiKey = previous.apiKey;
+                }
+                // models are owned by api.models; preserve whatever is already there
+                if (Array.isArray(previous.models)) config.models = previous.models;
+                // preserve provider fields the editor does not manage (compat, name, ...)
+                for (const [key, value] of Object.entries(previous)) {
+                  if (!(key in config)) config[key] = value;
+                }
+              }
+              nextProviders[entry.id] = config;
             }
-            if (Array.isArray(entry.models)) config.models = entry.models;
-            else if (previous && Array.isArray(previous.models)) config.models = previous.models;
-            nextProviders[entry.id] = config;
+          } else {
+            Object.assign(nextProviders, existing);
+          }
+          if (modelsChange?.operation === "set") {
+            unflattenModels(modelsChange.value as JsonValue, nextProviders);
           }
           const nextRoot = { ...data.modelsRoot, providers: nextProviders };
           await writeModelsRoot(nextRoot, modelsPath, await existsFile(modelsPath));

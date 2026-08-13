@@ -93,6 +93,7 @@ test("API Manager provider exposes settings, retry policy and the original manag
     assert.equal(description.capabilities.write, true);
     assert.deepEqual(description.settings.map((entry) => entry.key), [
       "api.providers",
+      "api.models",
       "api.retry.enabled",
       "api.retry.maxRetries",
       "api.retry.baseDelayMs",
@@ -104,7 +105,7 @@ test("API Manager provider exposes settings, retry policy and the original manag
     ]);
     assert.equal(description.catalogs?.["zh-CN"]["api.group.diagnostics"], "配置概览");
     const snapshot = await provider.read({ context });
-    assert.equal(snapshot.effective.values.length, 9);
+    assert.equal(snapshot.effective.values.length, 10);
     assert.equal((await provider.validate({
       context,
       transactionId: "t1",

@@ -45,11 +45,20 @@ test("api manager read surfaces providers with a masked apiKey placeholder", asy
   assert.equal(qwen.enabled, false);
 });
 
-test("api manager commit writes edited provider models back to models.json", async () => {
+test("api manager provider edits preserve existing models and unmanaged fields", async () => {
   const { provider, modelsPath, context } = harness({
-    providers: { "maestro-openai": { baseUrl: "https://gateway.example.com/v1", api: "openai-responses", models: [{ id: "gpt-5.6" }] } },
+    providers: {
+      "maestro-openai": {
+        baseUrl: "https://gateway.example.com/v1",
+        api: "openai-responses",
+        apiKey: "sk-live",
+        models: [{ id: "gpt-5.6" }],
+        compat: { supportsDeveloperRole: true },
+        name: "openai",
+      },
+    },
   });
-  const transactionId = "tx-models";
+  const transactionId = "tx-providers";
   const prepared = await provider.prepare!({
     context,
     transactionId,
@@ -57,17 +66,49 @@ test("api manager commit writes edited provider models back to models.json", asy
       operation: "set" as const,
       key: "api.providers",
       scope: "global" as const,
+      value: [{ id: "maestro-openai", baseUrl: "https://gateway.example.com/v2", api: "openai-responses", enabled: true, apiKey: SETTINGS_SECRET_SET_PLACEHOLDER }],
+    }],
+  });
+  assert.equal(prepared.prepared, true);
+  await provider.commit!({ context, transactionId, prepareToken: prepared.prepareToken! });
+  const written = JSON.parse(readFileSync(modelsPath, "utf8")) as Record<string, any>;
+  assert.equal(written.providers["maestro-openai"].baseUrl, "https://gateway.example.com/v2", "url edited");
+  assert.deepEqual(written.providers["maestro-openai"].models, [{ id: "gpt-5.6" }], "existing models preserved (owned by api.models)");
+  assert.equal(written.providers["maestro-openai"].compat.supportsDeveloperRole, true, "unmanaged compat field preserved");
+  assert.equal(written.providers["maestro-openai"].name, "openai", "unmanaged name field preserved");
+  assert.equal(written.providers["maestro-openai"].apiKey, "sk-live", "masked key resolved to the existing key");
+});
+
+test("api.models add persists a model onto an existing provider reusing its url and key", async () => {
+  const { provider, modelsPath, context } = harness({
+    providers: {
+      "maestro-openai": { baseUrl: "https://gateway.example.com/v1", api: "openai-responses", apiKey: "sk-live", models: [{ id: "gpt-5.6" }] },
+    },
+  });
+  const transactionId = "tx-models";
+  const prepared = await provider.prepare!({
+    context,
+    transactionId,
+    changes: [{
+      operation: "set" as const,
+      key: "api.models",
+      scope: "global" as const,
       value: [
-        { id: "maestro-openai", baseUrl: "https://gateway.example.com/v1", api: "openai-responses", enabled: true, models: [{ id: "gpt-5.6" }, { id: "grok-4.5" }] },
-        { id: "qwen", baseUrl: "https://q.example.com/v1", api: "openai-completions", enabled: true, models: [{ id: "qwen3.8-max" }] },
+        { providerId: "maestro-openai", id: "gpt-5.6", name: "gpt-5.6", reasoning: true },
+        { providerId: "maestro-openai", id: "grok-4.5", name: "grok-4.5", reasoning: true, input: ["text", "image"], contextWindow: 450000, maxTokens: 128000, thinkingLevelMap: { off: null, xhigh: "max" } },
       ],
     }],
   });
   assert.equal(prepared.prepared, true);
   await provider.commit!({ context, transactionId, prepareToken: prepared.prepareToken! });
   const written = JSON.parse(readFileSync(modelsPath, "utf8")) as Record<string, any>;
-  assert.deepEqual(written.providers["maestro-openai"].models, [{ id: "gpt-5.6" }, { id: "grok-4.5" }], "edited models persisted");
-  assert.deepEqual(written.providers["qwen"].models, [{ id: "qwen3.8-max" }], "new provider models persisted");
+  const writtenProvider = written.providers["maestro-openai"];
+  assert.equal(writtenProvider.baseUrl, "https://gateway.example.com/v1", "existing url reused, not rewritten");
+  assert.equal(writtenProvider.apiKey, "sk-live", "existing key reused, not rewritten");
+  assert.deepEqual(writtenProvider.models, [
+    { id: "gpt-5.6", name: "gpt-5.6", reasoning: true },
+    { id: "grok-4.5", name: "grok-4.5", reasoning: true, input: ["text", "image"], contextWindow: 450000, maxTokens: 128000, thinkingLevelMap: { off: null, xhigh: "max" } },
+  ], "new model written onto the provider, old model kept");
 });
 
 test("api manager read surfaces the prompt cache policy and defaults to off", async () => {
