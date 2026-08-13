@@ -142,12 +142,16 @@ export class CockpitClaudeEditor extends CustomEditor {
 	override render(width: number): string[] {
 		const target = this.editorOptions.getRouteTarget?.();
 		const lines = target ? this.renderWithRouteTarget(width, target) : super.render(width);
-		const marked = this.editorOptions.emitEditorMarkers
-			? [EDITOR_START_SENTINEL, ...lines, EDITOR_END_SENTINEL]
-			: lines;
 		const total = this.editorOptions.getEntries?.().length ?? 0;
-		if (!this.browsing() || total === 0) return marked;
-		return [...marked, historyBanner(this.index + 1, total, width, this.getPaddingX(), this.borderColor)];
+		const banner = this.browsing() && total > 0
+			? historyBanner(this.index + 1, total, width, this.getPaddingX(), this.borderColor)
+			: undefined;
+		if (!this.editorOptions.emitEditorMarkers) {
+			return banner ? [...lines, banner] : lines;
+		}
+		// The fullscreen controller treats everything between the sentinels as the
+		// editor region, so the banner must sit before the END marker to stay visible.
+		return [EDITOR_START_SENTINEL, ...lines, ...(banner ? [banner] : []), EDITOR_END_SENTINEL];
 	}
 
 	override handleInput(data: string): void {

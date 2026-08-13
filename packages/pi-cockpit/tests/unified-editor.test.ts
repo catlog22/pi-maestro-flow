@@ -4,6 +4,8 @@ import type { KeybindingsManager as AppKeybindingsManager } from "@earendil-work
 import { KeybindingsManager, TUI_KEYBINDINGS, visibleWidth, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 import {
   CockpitClaudeEditor,
+  EDITOR_END_SENTINEL,
+  EDITOR_START_SENTINEL,
   historyBanner,
   type CockpitEditorRouteTarget,
   type CockpitClaudeEditorOptions,
@@ -162,6 +164,18 @@ test("double Escape clears a nonempty draft while empty input stays delegated to
   editor.handleInput(ESCAPE);
   editor.handleInput(ESCAPE);
   assert.equal(hostEscapes, 3);
+});
+
+test("the history banner renders inside the fullscreen editor region", () => {
+  const { editor } = makeEditor(["newest"], { emitEditorMarkers: true });
+  editor.handleInput(UP);
+  const lines = editor.render(40);
+  const start = lines.findIndex((line) => line.includes(EDITOR_START_SENTINEL));
+  const end = lines.findIndex((line, index) => index > start && line.includes(EDITOR_END_SENTINEL));
+  assert.ok(start >= 0 && end > start, "markers must surround the editor");
+  const editorBlock = lines.slice(start + 1, end);
+  assert.ok(editorBlock.some((line) => line.includes("History 1/1")), "banner must live inside the editor region");
+  assert.ok(!lines.slice(end + 1).some((line) => line.includes("History")), "no banner in trailing chrome");
 });
 
 test("history banner truncates on narrow terminals without a horizontal rule", () => {
