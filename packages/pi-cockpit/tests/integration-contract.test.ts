@@ -148,6 +148,19 @@ test("Cockpit owns native UI through events instead of clearing foreign widget k
 	assert.equal(COCKPIT_TODO_TOGGLE_EVENT, "cockpit:toggle-todo");
 });
 
+test("Cockpit owns and releases the viewport-stability patch across TUI lifecycles", () => {
+	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	assert.match(source, /let viewportStabilityPatch: ViewportStabilityPatch \| undefined/);
+	assert.match(
+		source,
+		/const ensureViewportStability[^]*?viewportStabilityPatch\?\.detach\(\);[^]*?viewportStabilityPatch = attachViewportStability\(tui\);[^]*?stabilityTui = tui;/,
+	);
+	assert.match(
+		source,
+		/const uninstallUi[^]*?viewportStabilityPatch\?\.detach\(\);[^]*?viewportStabilityPatch = undefined;[^]*?stabilityTui = undefined;/,
+	);
+});
+
 test("Cockpit acquires the footer before installing and releases it before deferred re-enable", () => {
 	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
 	assert.match(

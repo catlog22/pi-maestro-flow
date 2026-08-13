@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { TUI, type Component, type Terminal } from "@earendil-works/pi-tui";
 import { attachViewportStability } from "../src/viewport-stability.ts";
-import { createDynamicTuiReference } from "./dynamic-tui-reference.ts";
+import { createDynamicTuiReference, createSwitchingDynamicTuiReference } from "./dynamic-tui-reference.ts";
 
 class FakeTerminal implements Terminal {
 	columns = 40;
@@ -153,10 +153,13 @@ test("overlapping attachments retain the hook until the last detach", () => {
 test("detach restores the exact prior hook and preserves later replacements", () => {
 	const h = renderHarness(["zero"]);
 	const original = h.internals.applyLineResets;
+	assert.equal(Object.hasOwn(h.tui, "applyLineResets"), false);
 	const patch = attachViewportStability(h.tui);
 	assert.notEqual(h.internals.applyLineResets, original);
+	assert.equal(Object.hasOwn(h.tui, "applyLineResets"), true);
 	patch.detach();
 	assert.equal(h.internals.applyLineResets, original);
+	assert.equal(Object.hasOwn(h.tui, "applyLineResets"), false, "detach removes the temporary own method slot");
 
 	const second = attachViewportStability(h.tui);
 	const replacement = (lines: string[]): string[] => lines;
@@ -165,14 +168,98 @@ test("detach restores the exact prior hook and preserves later replacements", ()
 	assert.equal(h.internals.applyLineResets, replacement);
 });
 
-test("dynamic TUI references fail closed instead of wrapping their dispatch closure", () => {
-	const h = renderHarness(["zero", "one", "two"]);
-	const original = h.internals.applyLineResets;
+test("detach restores an existing instance descriptor exactly", () => {
+	const h = renderHarness(["zero"]);
+	const inherited = h.internals.applyLineResets;
+	Object.defineProperty(h.tui, "applyLineResets", {
+		configurable: true,
+		enumerable: true,
+		writable: true,
+		value: inherited,
+	});
+	const before = Object.getOwnPropertyDescriptor(h.tui, "applyLineResets");
+	const patch = attachViewportStability(h.tui);
+	patch.detach();
+	assert.deepEqual(Object.getOwnPropertyDescriptor(h.tui, "applyLineResets"), before);
+});
+
+test("dynamic TUI references patch the stable renderer prototype without wrapping dispatch closures", () => {
+	const h = renderHarness(["zero", "one", "two", "three", "four"]);
+	const owner = Object.getPrototypeOf(h.tui) as object;
+	const original = Object.getOwnPropertyDescriptor(owner, "applyLineResets")?.value;
 	const reference = createDynamicTuiReference(h.tui);
 
 	const patch = attachViewportStability(reference);
+	assert.equal(patch.active, true);
+	assert.notEqual(Object.getOwnPropertyDescriptor(owner, "applyLineResets")?.value, original);
 
-	assert.equal(patch.active, false);
-	assert.equal(h.internals.applyLineResets, original);
-	assert.doesNotThrow(() => h.render());
+	h.render();
+	assert.equal(h.internals.previousViewportTop, 2);
+	h.terminal.writes.length = 0;
+	h.setLines(["ZERO", "ONE", "two", "three", "four"]);
+	h.render();
+	assert.equal(h.tui.fullRedraws, 1, "dynamic references receive the same hidden-line fast path");
+	assert.equal(h.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
+
+	patch.detach();
+	assert.equal(Object.getOwnPropertyDescriptor(owner, "applyLineResets")?.value, original);
+});
+
+test("dynamic TUI prototype attachments stay installed until every owner detaches", () => {
+	const h = renderHarness(["zero"]);
+	const owner = Object.getPrototypeOf(h.tui) as object;
+	const original = Object.getOwnPropertyDescriptor(owner, "applyLineResets")?.value;
+	const first = attachViewportStability(createDynamicTuiReference(h.tui));
+	const wrapped = Object.getOwnPropertyDescriptor(owner, "applyLineResets")?.value;
+	const second = attachViewportStability(createDynamicTuiReference(h.tui));
+
+	first.detach();
+	assert.equal(Object.getOwnPropertyDescriptor(owner, "applyLineResets")?.value, wrapped);
+	second.detach();
+	assert.equal(Object.getOwnPropertyDescriptor(owner, "applyLineResets")?.value, original);
+});
+
+test("dynamic TUI probing fails closed for throwing, cyclic, or shadowed methods", () => {
+	const throwing = new Proxy({} as TUI, {
+		get() { throw new Error("blocked"); },
+		getPrototypeOf() { throw new Error("blocked"); },
+	});
+	assert.equal(attachViewportStability(throwing).active, false);
+
+	let cyclic: TUI;
+	cyclic = new Proxy({} as TUI, {
+		get() { return () => undefined; },
+		getPrototypeOf() { return cyclic; },
+	});
+	assert.equal(attachViewportStability(cyclic).active, false);
+
+	const shadowed = renderHarness(["zero"]);
+	const owner = Object.getPrototypeOf(shadowed.tui) as object;
+	const original = Object.getOwnPropertyDescriptor(owner, "applyLineResets")?.value;
+	Object.defineProperty(shadowed.tui, "applyLineResets", {
+		configurable: true,
+		writable: true,
+		value: (lines: string[]) => lines,
+	});
+	assert.equal(attachViewportStability(createDynamicTuiReference(shadowed.tui)).active, false);
+	assert.equal(Object.getOwnPropertyDescriptor(owner, "applyLineResets")?.value, original);
+});
+
+test("dynamic TUI references retain viewport stability when the renderer instance changes", () => {
+	const first = renderHarness(["zero", "one", "two", "three", "four"]);
+	const second = renderHarness(["zero", "one", "two", "three", "four"]);
+	let current = first.tui;
+	const reference = createSwitchingDynamicTuiReference(() => current);
+	const patch = attachViewportStability(reference);
+	assert.equal(patch.active, true);
+
+	current = second.tui;
+	second.render();
+	second.terminal.writes.length = 0;
+	second.setLines(["ZERO", "ONE", "two", "three", "four"]);
+	second.render();
+	assert.equal(second.tui.fullRedraws, 1);
+	assert.equal(second.terminal.writes.some((value) => value.includes("\x1b[3J")), false);
+
+	patch.detach();
 });

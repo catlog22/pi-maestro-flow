@@ -13,7 +13,7 @@ import { SupervisionStore } from "./supervision-store.ts";
 import { MaestroStore } from "./maestro-store.ts";
 import { createSidebarController, type SidebarController } from "./sidebar-controller.ts";
 import { COCKPIT_SPLIT_PANE_MARKER } from "./split-pane.ts";
-import { attachViewportStability } from "./viewport-stability.ts";
+import { attachViewportStability, type ViewportStabilityPatch } from "./viewport-stability.ts";
 import {
 	COCKPIT_EDITOR_BOTTOM_MARKER,
 	EDITOR_BOTTOM_WIDGET_KEY,
@@ -333,6 +333,7 @@ export default function (pi: ExtensionAPI): void {
 	// Independent of the split-pane attach: the sidebar can be off while the
 	// thinking label / teammate tree still stream above the visible viewport.
 	let stabilityTui: TUI | undefined;
+	let viewportStabilityPatch: ViewportStabilityPatch | undefined;
 	// True while Cockpit owns a capturing overlay (bash jobs, theme picker,
 	// settings panel). Split-pane resize must yield to the overlay's focus and
 	// refuse to start while one is open; otherwise the resize listener — a
@@ -689,8 +690,9 @@ export default function (pi: ExtensionAPI): void {
 
 	const ensureViewportStability = (tui: TUI): void => {
 		if (stabilityTui === tui) return;
+		viewportStabilityPatch?.detach();
+		viewportStabilityPatch = attachViewportStability(tui);
 		stabilityTui = tui;
-		attachViewportStability(tui);
 	};
 
 	const sessionListOverlayActive = (): boolean =>
@@ -1244,6 +1246,9 @@ export default function (pi: ExtensionAPI): void {
 			// ambient surfaces are best-effort
 		}
 		stopTick();
+		viewportStabilityPatch?.detach();
+		viewportStabilityPatch = undefined;
+		stabilityTui = undefined;
 		lastPublishedInputTarget = "@main";
 		pi.events.emit(COCKPIT_INPUT_TARGET_EVENT, { version: 1 } satisfies CockpitInputTargetV1);
 		capturedTui = undefined;
