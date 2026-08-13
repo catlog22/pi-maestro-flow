@@ -5,7 +5,14 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current stable release: v0.20.0 (2026-08-13).** Flow 0.20.0 bundles Teammate 1.13.0, Cockpit 0.15.0, and Settings-Core 0.1.3, adding the execution-generation session model, Teammate output management, agent:// publication ids, compaction hardening, and the Cockpit Zen Stack.
+> **Current stable release: v0.21.0 (2026-08-13).** Flow 0.21.0 bundles Teammate 1.13.0, Cockpit 0.16.0, and Settings-Core 0.1.3, adding the structured `api.models` list in API Manager and input history in the Cockpit unified editor.
+
+## v0.21.0 (2026-08-13)
+
+- API Manager gains `api.models`: a structured model list that reuses each provider's url/key.
+- Cockpit's unified editor now owns input history (the Flow `history-editor` is removed): a `historyEnabled` config and settings toggle (on by default, requires /reload) and a history banner inside the fullscreen editor region.
+- Claude editor hardening with `unified-editor` and `input-history-store` test coverage plus review-finding fixes.
+- Install with `pi install npm:pi-maestro-flow@0.21.0`.
 
 ## v0.20.0 (2026-08-13)
 

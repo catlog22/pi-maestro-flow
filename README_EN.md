@@ -73,7 +73,7 @@ pi-maestro-flow is a **Pi plugin** — install it with `pi install` (not a regul
 
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # host runtime
-pi install npm:pi-maestro-flow@0.20.0                              # install or upgrade the plugin
+pi install npm:pi-maestro-flow@0.21.0                              # install or upgrade the plugin
 pi list                                                            # confirm Flow, Teammate, and Cockpit are listed
 ```
 

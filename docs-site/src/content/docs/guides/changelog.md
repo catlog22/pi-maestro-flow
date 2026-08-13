@@ -5,7 +5,14 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.20.0（2026-08-13）。** Flow 0.20.0 搭配 Teammate 1.13.0、Cockpit 0.15.0 与 Settings-Core 0.1.3，带来 execution-generation 会话模型、Teammate 输出治理、agent:// publication id、compaction 加固和 Cockpit Zen Stack。
+> **当前稳定版本：v0.21.0（2026-08-13）。** Flow 0.21.0 搭配 Teammate 1.13.0、Cockpit 0.16.0 与 Settings-Core 0.1.3，带来 API Manager 结构化模型列表与 Cockpit 统一编辑器输入历史。
+
+## v0.21.0（2026-08-13）
+
+- API Manager 新增 `api.models`：结构化模型列表，复用各 Provider 的 url/key 配置。
+- Cockpit 统一编辑器接管输入历史（原 Flow `history-editor` 移除）：新增 `historyEnabled` 配置与设置开关（默认开启，需 /reload），全屏编辑器区域显示历史 banner。
+- Claude 编辑器增强：`unified-editor`、`input-history-store` 测试覆盖与 review findings 修正。
+- 安装：`pi install npm:pi-maestro-flow@0.21.0`。
 
 ## v0.20.0（2026-08-13）
 
