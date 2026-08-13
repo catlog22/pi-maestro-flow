@@ -56,6 +56,8 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   assert.equal(pkg.files.includes(".pi/"), true);
   assert.equal(pkg.files.includes("workflows/"), false);
   assert.equal(pkg.files.includes("AGENTS.md"), true);
+  assert.equal(existsSync(join(root, "AGENTS.md")), true, "generated package agent instructions must exist");
+  assert.match(readFileSync(join(root, "AGENTS.md"), "utf8"), /# Maestro/);
   assert.deepEqual(pkg.pi.skills, ["./.pi/skills"]);
   assert.match(pkg.scripts.postinstall, /install-workflows\.mjs/);
   assert.ok(pkg.files.includes("!.pi/**/__pycache__/**"));

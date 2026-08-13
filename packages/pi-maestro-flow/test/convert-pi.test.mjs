@@ -70,6 +70,33 @@ description: Example skill
     },
   },
   {
+    name: "stabilizes the Pi maestro dry-run interface across source drift",
+    file: "D:/fixture/skills/maestro/SKILL.md",
+    input: `---
+name: maestro
+description: "Coordinator Arguments: <intent> [-y] [-c] [--amend]"
+---
+<interface>
+- \`--amend\` — amend that Session's goal; remaining text is the change request.
+</interface>
+<transitions>
+S_PARSE:
+  → S_AMEND WHEN: \`--amend\`
+</transitions>
+<actions>
+</actions>
+<success_criteria>
+- Public flags are \`-y\`, \`-c\`, \`--amend\`.
+</success_criteria>
+`,
+    verify(output) {
+      assert.match(output, /Arguments: <intent> \[-y\] \[-c\] \[--amend\] \[--dry-run\]/);
+      assert.match(output, /A_DRY_RUN/);
+      assert.match(output, /Do not call any Session\/Run mutation command/);
+      assert.match(output, /performs no Session\/Run mutation or executor dispatch/);
+    },
+  },
+  {
     name: "rewrites maestro-next legacy lifecycle examples",
     file: "D:/fixture/skills/maestro-next/SKILL.md",
     input: `1. \`maestro run prepare --platform pi <step> --workflow-root .\`。
@@ -98,6 +125,33 @@ maestro run prepare   # check if prepare command works
     },
   },
   {
+    name: "collapses evolved prepare and create pairs with argument tails",
+    file: "D:/fixture/skills/maestro-fork/SKILL.md",
+    input: 'step `analyze` (`maestro run prepare analyze` + `maestro run create analyze --session YYYYMMDD-analyze-{topic} --intent "{goal}" --arg "{goal}"`)',
+    verify(output) {
+      assert.match(output, /maestro run start "\{goal\}" --cmd analyze --session YYYYMMDD-analyze-\{topic\} --platform pi --arg "\{goal\}"/);
+      assert.doesNotMatch(output, /maestro run prepare|maestro run create/);
+    },
+  },
+  {
+    name: "rewrites standalone prepare protocol fetches to installed prepare assets",
+    file: "D:/fixture/skills/maestro/SKILL.md",
+    input: 'Fetch via read-only `maestro run prepare maestro --json` before creating a Session.',
+    verify(output) {
+      assert.match(output, /read ~\/\.maestro\/prepare\/maestro\.md/);
+      assert.doesNotMatch(output, /maestro run prepare/);
+    },
+  },
+  {
+    name: "upgrades residual generic create prose to the unified start entry",
+    file: "D:/fixture/skills/skill-generator/SKILL.md",
+    input: 'then create `skill-generator` with the complete fenced `maestro run create` option set.',
+    verify(output) {
+      assert.match(output, /maestro run start/);
+      assert.doesNotMatch(output, /maestro run create/);
+    },
+  },
+  {
     name: "rewrites the session-start compatibility alias",
     file: "D:/fixture/skills/maestro-odyssey/SKILL.md",
     input: "Compatibility: `maestro session start` is an alias for `maestro run create` (see companion.md). Both resolve the same lifecycle.",
@@ -122,8 +176,8 @@ maestro run check run-1 --session demo
       assert.match(output, /maestro session create --platform pi "topic"/);
       assert.match(output, /maestro session start --platform pi "topic"/);
       assert.match(output, /maestro run start --platform pi "goal"/);
-      assert.match(output, /maestro run create --platform pi plan/);
-      assert.match(output, /maestro run prepare --platform pi analyze/);
+      assert.match(output, /maestro run start --platform pi plan/);
+      assert.match(output, /read ~\/\.maestro\/prepare\/analyze\.md/);
       assert.match(output, /maestro run skill --platform pi analyze/);
       assert.match(output, /maestro run brief --platform pi run-1/);
       assert.match(output, /maestro session next --session demo/);
