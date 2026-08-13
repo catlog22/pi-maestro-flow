@@ -1,7 +1,7 @@
 ---
 name: maestro-merge
 description: "Merge session worktree branch back to main Arguments: --session <session_id> [--force] [--dry-run] [--no-cleanup] [--continue]"
-allowed-tools: Read Write Edit Bash Glob Grep teammate maestro observe
+allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro
 disable-model-invocation: true
 session-mode: none
 ---
@@ -79,7 +79,7 @@ User selects "记录经验" → prompt for title/insight, then recommend `/maest
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Next dep-ready session | `maestro run start "{goal}" --cmd analyze --session {next-dep-ready-slug} --platform pi --workflow-root .` |
+| Next dep-ready session | step `analyze` for session (`maestro run start "{goal}" --cmd analyze --session {next-dep-ready-slug} --platform pi --arg "{goal}"`) |
 </completion>
 
 <error_codes>

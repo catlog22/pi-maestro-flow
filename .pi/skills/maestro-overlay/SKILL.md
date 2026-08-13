@@ -112,7 +112,7 @@ After confirming the injection point, ask whether this overlay should recommend 
 
 Use [@ask] user prompt:
 - **"No chain"** — standard overlay, no skill handoff
-- **"Chain to skill"** → ask for the target skill name (e.g., a step like `review`, `execute`, `test` invoked via `maestro run start "{goal}" --cmd <step> --topic "{topic}" --platform pi --workflow-root .`, or via `maestro run edit <step> --after latest --workflow-root .` inside an existing chain)
+- **"Chain to skill"** → ask for the target skill name (e.g., a step like `review`, `execute`, `test` invoked via `maestro run start "{goal}" --cmd <step> --session YYYYMMDD-<step>-{topic} --platform pi --arg "{goal}"`)
 - **"Chain with alternatives"** → ask for primary skill + 1-2 alternative skills
 
 If chain is selected, record the skill name(s) for use in Step 3.
@@ -152,13 +152,13 @@ Build a slug from the user's intent (kebab-case, lowercase). Write to `~/.maestr
 **Skill Handoff** (overlay)
 
 After the above step completes, use [@ask] user prompt:
-- "Proceed to review" — Hand off to step `review` (`maestro run edit review --after latest --workflow-root .`, or `maestro run start "{goal}" --cmd review --topic "{topic}" --platform pi --workflow-root .` when no chain exists)
+- "Proceed to review" — Hand off to step `review` (`maestro run start "{goal}" --cmd review --session YYYYMMDD-review-{topic} --platform pi --arg "{goal}"`)
 - "Skip" — Continue with current command flow
 - "Alternative: execute" — Run step `execute` with built-in verification instead
 
 On user selection:
-- Proceed → run step `review` (`maestro run edit review --after latest --workflow-root .`, or `maestro run start "{goal}" --cmd review --topic "{topic}" --platform pi --workflow-root .` when no chain exists)
-- Alternative → run step `execute` (`maestro run edit execute --after latest --workflow-root .`, or `maestro run start "{goal}" --cmd execute --topic "{topic}" --platform pi --workflow-root .` when no chain exists)
+- Proceed → run step `review` (`maestro run start "{goal}" --cmd review --session YYYYMMDD-review-{topic} --platform pi --arg "{goal}"`)
+- Alternative → run step `execute` (`maestro run start "{goal}" --cmd execute --session YYYYMMDD-execute-{topic} --platform pi --arg "{goal}"`)
 - Skip → continue normally
 ```
 

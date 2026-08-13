@@ -1,7 +1,7 @@
 ---
 name: maestro-impeccable
 description: "Use when designing, auditing, polishing, improving, or codifying frontend UI — websites, dashboards, landing pages, components, design systems Arguments: build|redesign|improve|enhance|launch|harden|foundation|live [target] [--codify <path>]"
-allowed-tools: Read Write Edit Bash Glob Grep teammate maestro observe
+allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro
 disable-model-invocation: true
 session-mode: none
 ---
@@ -263,7 +263,7 @@ Extract a design system from existing source code into tokens, a reference packa
 - `--output-dir <path>`: Output directory for reference package (default: `.workflow/reference_style`)
 - `--overwrite`: Allow overwriting existing package directory
 
-**Output boundary**: ALL file writes MUST target the `--output-dir` path (default: `.workflow/reference_style/`) for reference packages, and `.workflow/knowhow/` for knowledge assets (via `codify-to-knowhow`). NEVER modify the source directory being analyzed.
+**Output boundary**: ALL file writes MUST target the `--output-dir` path (default: `.workflow/reference_style/`) for reference packages, and `.workflow/knowhow/` for knowledge assets (manifest-driven direct writes per ui-codify-knowhow). NEVER modify the source directory being analyzed.
 
 ### Codify Invariants
 1. **Source read-only** — the source path being analyzed MUST NOT be modified; extraction is purely read-only
@@ -300,15 +300,15 @@ Route to `~/.maestro/workflows/ui-codify.md` and follow completely. The workflow
   question: "Preview 生成完成。是否继续将设计系统持久化为 knowhow 知识资产？"
   options:
     - label: "继续生成 knowhow"
-      description: "调用 codify-to-knowhow 写入 AST/DCS assets 和 spec entries"
+      description: "按 knowhow-manifest.json 写入 AST/DCS assets 和 spec entries"
     - label: "仅保留 preview，跳过 knowhow"
       description: "保留 preview.html + preview.css，不写入知识库"
   ```
 
 **GATE Phase 4 → Completion: Knowhow → Done**
 - REQUIRED: knowhow-manifest.json created with AST/DCS assets and spec entries.
-- REQUIRED: codify-to-knowhow called and completed (only after user confirmation at Phase 3→4 gate).
-- BLOCKED if missing: knowhow-manifest.json absent or codify-to-knowhow not invoked — knowledge assets not persisted.
+- REQUIRED: knowledge assets persisted — knowhow files + spec entries written to `.workflow/knowhow/` and `.workflow/specs/` per ui-codify-knowhow Step 4.4 (after user confirmation at Phase 3→4 gate).
+- BLOCKED if missing: knowhow-manifest.json absent or knowledge assets not persisted.
 
 ### Artifact Verification (before completion)
 ```
@@ -407,7 +407,7 @@ Codify mode:
 - [ ] animation-tokens.json generated (optional, W004 if missing)
 - [ ] preview.html + preview.css generated as interactive showcase
 - [ ] knowhow-manifest.json created with AST/DCS assets and spec entries
-- [ ] codify-to-knowhow called and completed successfully (after Phase 3→4 confirmation)
+- [ ] knowledge assets persisted (knowhow + spec entries written per ui-codify-knowhow Step 4.4, after Phase 3→4 confirmation)
 - [ ] Temporary workspace cleaned up
 </success_criteria>
 

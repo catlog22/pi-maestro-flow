@@ -34,7 +34,7 @@ Read("{run_dir}/outputs/solutions/solution-<issueId>.json")
 **CLI invocation**:
 
 ```
-Bash("teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: Form execution queue for <count> issues with conflict detection and optimal ordering; success = DAG-based queue…" }] }) { background: false })
+Bash("teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: Form execution queue for <count> issues with conflict detection and optimal ordering; success = DAG-based queue with parallel groups written to execution-queue.json\n\nTASK: • Load all bound solutions from .workflow/issues/solutions/ • Analyze file conflicts between solutions • Build dependency graph • Determine optimal execution order (DAG-based) • Identify parallel execution groups • Write queue JSON\n\nMODE: analysis\n\nCONTEXT: @.workflow/issues/solutions/**/*.json | Memory: Issues to queue: <issueIds>\n\nEXPECTED: Queue JSON with: ordered issue list, conflict analysis, parallel_groups (issues that can run concurrently), depends_on relationships\nWrite to: {run_dir}/outputs/queue/execution-queue.json\n\nCONSTRAINTS: Resolve file conflicts | Optimize for parallelism | Maintain dependency order" }] }) { background: false })
 ```
 
 **Parse queue result**:

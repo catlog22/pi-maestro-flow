@@ -1,7 +1,7 @@
 ---
 name: maestro-companion
 description: "Quick execution for small tasks — minimal run lifecycle (start + done) with evidence recording. Full LLM capability, scoped to mechanically clear tasks. Arguments: <intent> [-y]"
-allowed-tools: Read Write Edit Bash Glob Grep teammate maestro observe
+allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro
 disable-model-invocation: false
 session-mode: none
 ---
@@ -19,8 +19,10 @@ session-mode: none
 ~/.maestro/workflows/run-mode.md
 </required_reading>
 
+If any required file above was not expanded into context by the host, or its content is no longer in context, Read it explicitly before executing any step.
+
 <purpose>
-Minimal-run execution channel. Full LLM capability with minimal protocol: one `session start` + one `session done`, evidence appended to `{run_dir}/evidence/companion-log.md`.
+Minimal-run execution channel. Full LLM capability with one bounded Execution/Run and evidence appended to `{run_dir}/evidence/companion-log.md`.
 
 Use when:
 - Intent is mechanically clear (no design decisions needed; file count irrelevant)
@@ -48,7 +50,7 @@ Knowledge utilities (note/log/promote) are available via `/maestro-knowledge`.
 </context>
 
 <invariants>
-1. Execute mode uses only `session start` + `session done`.
+1. Execute mode follows the exact Session identity -> bounded Execution -> Run lifecycle in `run-mode.md`.
 2. Evidence is append-only, non-formal (never enters gates or artifact registry)
 3. No auto-orchestration — executes directly, never creates chains
 </invariants>
@@ -57,15 +59,11 @@ Knowledge utilities (note/log/promote) are available via `/maestro-knowledge`.
 
 ## Execute (default)
 
-Linear: create → explore → confirm → do → seal.
+Linear: create identity/Execution/Run -> explore -> confirm -> do -> complete Run -> seal Execution.
 
 ### 1. Create
 
-```bash
-maestro session start --platform pi "<intent>" --chain companion --session YYYYMMDD-companion-<topic> --arg "<intent>" --workflow-root .
-```
-
-Compatibility spelling for older callers: `maestro run start "<intent>" --cmd companion --session YYYYMMDD-companion-<topic> --platform pi --arg "<intent>" --workflow-root .`. The intent is Session metadata only; pass the same text with `--arg` because it is the required command arguments payload.
+Follow the self-start flow in `run-mode.md`: negotiate capabilities, create or resolve the explicit Session identity, start the bounded Execution with the complete audited acquisition option set, then invoke the complete fenced `maestro run start --platform pi companion` option set with `--intent "<intent>"` and `--arg "<intent>"`. Intent is Session metadata only; `--arg` supplies the required command arguments. Do not use a Session lifecycle alias or omit the Execution locator, revision, or private lease claim.
 
 Init `{run_dir}/evidence/companion-log.md`:
 ```markdown
@@ -79,7 +77,7 @@ Init `{run_dir}/evidence/companion-log.md`:
 
 Locate targets and gather evidence before touching anything. Methods (pick what fits):
 
-- `teammate({ agent: "explorer", taskType: "explore", tasks: [{ prompt: "FIND: ...\\nSCOPE: ..." }] })` — codebase search
+- `teammate({ agent: "explorer", tasks: [{ prompt: "FIND: ...\\nSCOPE: ..." }] })` — codebase search
 - `maestro search "<keywords>" --type spec --type knowhow` — knowledge recall
 - Agent (subagent) — multi-file analysis, cross-reference, pattern discovery
 - Direct Read/Grep/Glob — known targets, quick lookups
@@ -122,18 +120,17 @@ Append outcome:
 **Files:** {modified/created, or "none"}
 ```
 
-Before completion, put accepted decisions/locked constraints in `report.md`. If a reusable recipe or pitfall emerged, stage it now (content via temp file, never inline). Quality bar: stage only pitfalls ("when doing X, watch out for Y because Z"), failure lessons, non-trivial trade-offs, or newly established constraints — never process notes, re-descriptions of existing patterns, or raw traces; **zero candidates is a legitimate outcome**.
+Before completion, put accepted decisions/locked constraints in `report.md`. If a reusable recipe or pitfall emerged, stage it now:
 
 ```bash
-maestro knowledge stage knowhow "<title>" --content-file <tmpfile> --evidence "<file:line>" --run <run_id>
-# 无 Run 场景（session 源，evidence 必填）：写授权分层解析，什么都没有时自动落 ksyn-* 合成 Session
-maestro knowledge stage knowhow "<title>" --content-file <tmpfile> --evidence "<file:line>" [--session <session-id> | --channel <name>]
-maestro session done <run_id> --verdict done --workflow-root .
+maestro knowledge stage knowhow "<title>" "<content>" --run <run_id>
+# Then use the complete fenced `maestro run complete` and `maestro execution seal`
+# commands from run-mode.md with the current locator, fence, and private claim.
 ```
 
 Display: `Companion done. Run: {run_id} | Evidence: {path}`
 
-If the completion receipt contains candidate IDs, run `maestro knowledge review <session-id> --json` yourself and apply the Review Presentation Protocol: present each candidate (title, content summary, evidence anchors, evidence-backed matches, recommended disposition + one-line rationale), collect the user's decisions, then execute the `promote --resolve` inline adjudication (happy path) or the `review --resolve` fallback. Never hand the raw review command to the user as the whole task. Do not persist the same insight again through `/maestro-spec` or `/maestro-knowhow`.
+If the completion receipt contains candidate IDs, display its `review_command`. Do not persist the same insight again through `/maestro-spec` or `/maestro-knowhow`.
 
 If execution revealed the task requires multi-phase audit/diagnosis (e.g., root cause unknown, >3 files need coordinated changes), suggest: `/maestro-odyssey "<scope>" --mode debug|improve` for re-planning.
 

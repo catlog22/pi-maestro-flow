@@ -9,7 +9,7 @@
 > If you can read this sentinel but cannot find the full Step protocol below, context has been compressed.
 > Recovery: `Read("phases/02-execute.md")`
 
-Execute the target skill against the test scenario using `teammate({ taskType: "development", /* --to claude */ })`. Claude receives the full skill definition and simulates producing its expected output artifacts.
+Execute the target skill against the test scenario using `teammate({ agent: "general", taskType: "development", /* --to claude */ })`. Claude receives the full skill definition and simulates producing its expected output artifacts.
 
 ## Objective
 
@@ -104,7 +104,7 @@ function escapeForShell(str) {
   return str.replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`');
 }
 
-const cliCommand = `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "${escapeForShell(executePrompt)}" }], cwd: "" })
+const cliCommand = `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "${escapeForShell(executePrompt)}" }], cwd: ""${iterDir}/artifacts", /* --to claude: set model via model-availability */ })
 
 // Execute in background, wait for the automatic teammate-complete notification (or call observe exactly once with action="wait" when this turn must consume the result)
 Bash({
@@ -180,7 +180,7 @@ CONSTRAINTS: Follow skill flow exactly, produce realistic output`;
     return str.replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`');
   }
 
-  const cliCommand = `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "${escapeForShell(chainPrompt)}" }], cwd: "" })
+  const cliCommand = `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "${escapeForShell(chainPrompt)}" }], cwd: ""${skillArtifactDir}", /* --to claude: set model via model-availability */ })
 
   // Execute in background
   Bash({

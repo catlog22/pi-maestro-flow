@@ -25,7 +25,7 @@ Save full report to `{run_dir}/outputs/swarm-report.json` (raw data for analyst)
 ### Step 2: Spawn analyst worker
 
 ```
-teammate({ agent: "team-worker", tasks: [{ name: "analyst", prompt: `## Role Assignment
+teammate({ agent: "team-worker", tasks: [{ taskType: "<task_type>", name: "analyst", prompt: `## Role Assignment
 role: analyst
 role_spec: <skill_root>/roles/analyst/role.md
 session: <session_path>
@@ -58,8 +58,8 @@ If missing -> AskUserQuestion (skip synthesis / retry analyst).
 ```
   +- Run lifecycle completion:
   |   - Read run_id from team-session.json.run.run_id
-  |   - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
-  |   - Run `maestro session done <run_id>`
+  |   - Write {run_dir}/report.md with frontmatter per run-mode-lite.md Complete §1 (verdict/summary/constraints/decisions/concerns; constraints/decisions = {text,status} objects, id auto-derived)
+  |   - If self-started, use the complete fenced `maestro run complete` and `maestro execution seal` commands from run-mode-lite.md; if dispatched, return to the claim-holding orchestrator
   |   - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
 ```
 

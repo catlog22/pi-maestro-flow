@@ -50,7 +50,7 @@ Build prompt per group requesting 6 enrichment fields per finding:
 - `fix_complexity`: low / medium / high
 - `fix_dependencies`: finding IDs that must be fixed first
 
-Execute via `teammate({ taskType: "analysis", prompt: "analysis-diagnose-bug-root-cause" })`. Parse JSON array responses, merge with originals (CLI-enriched replace originals, unenriched get defaults). Write `{run_dir}/outputs/review/enriched-findings.json`.
+Execute via `teammate({ agent: "general", taskType: "analysis", /* --rule analysis-diagnose-bug-root-cause */ })`. Parse JSON array responses, merge with originals (CLI-enriched replace originals, unenriched get defaults). Write `{run_dir}/outputs/review/enriched-findings.json`.
 
 ## Phase 4: Report Generation
 

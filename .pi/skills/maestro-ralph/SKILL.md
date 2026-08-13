@@ -1,7 +1,7 @@
 ---
 name: maestro-ralph
 description: "Closed-loop policy over the canonical Session/Run chain Arguments: <intent> [-y] [-c] [--amend]"
-allowed-tools: Read Write Edit Bash Glob Grep teammate maestro observe
+allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro
 disable-model-invocation: false
 session-mode: none
 ---
@@ -31,12 +31,14 @@ Pi mirrors canonical Session/Run state automatically:
 
 </host_mirror>
 
+If any required file above was not expanded into context by the host, or its content is no longer in context, Read it explicitly before executing the state machine.
+
 <deferred_reading>
 - [ralph-amend-goal.md](~/.maestro/workflows/ralph-amend-goal.md) — read only for `--amend`
 </deferred_reading>
 
 <purpose>
-Apply retry, confidence, drift, goal-audit and stopping policy over any compatible canonical Session. Ralph does not own a CLI driver, private Session type or second state store; it calls only `maestro run ...` and follows the shared Run loop. Primary path: locate and drive an existing Session. Session creation is a fallback when no compatible Session exists.
+Apply retry, confidence, drift, goal-audit and stopping policy over the exact current Execution of a durable topic Session. Ralph does not own a CLI driver, private Session type, host-only lease, or second state store; it follows the shared Execution-aware Run loop. Primary path: locate and drive an existing Execution. Creating Session identity plus a bounded Execution is a fallback when no compatible identity exists.
 </purpose>
 
 <pi_context_contract>
@@ -66,27 +68,28 @@ Advanced coordinator chains use `maestro run start --platform pi "<intent>" --ch
 Only these user flags are accepted:
 
 - `-y` — skip all confirmation/clarification interactions, use default choices. Does NOT change data semantics (no auto-deferred decisions). Never bypasses: high-risk classification, confidence <60, ambiguity requiring user input, failed gates, or drift escalation.
-- `-c` — continue the unique live compatible Session; paused state enters audited recovery.
-- `--amend` — amend the live Session goal; remaining text is the change request.
+- `-c` — continue the unique compatible Session's exact current Execution; paused Execution enters audited recovery.
+- `--amend` — amend the exact current Execution goal; remaining text is the change request.
 
 All remaining text is intent. No engine, roadmap, script, depth, role, tier, platform, resume or dry-run flags are parsed. Those choices belong to Skill contracts and Runtime.
 </interface>
 
 <invariants>
-1. **Ralph owns the policy loop** — locate → allocate → brief → dispatch → check → drift/proposal evaluation → done/decide → next → seal.
+1. **Ralph owns policy, not authority** — locate Session identity -> bind exact Execution/generation/claim -> dispatch -> check -> drift/proposal evaluation -> complete/decide -> next -> seal Execution.
 2. **One executor per Run** — dispatch one unnamed `run-executor`; nested execution strategy belongs to the Skill.
-3. **Thin executor** — executor executes and checks one Run but never completes it.
-4. **Sessions are topic grouping/indexes** — execution, handoff, anchor and immutable outputs belong to Runs.
-5. **canonical upstream map** — same-Session sealed outputs enter only through birth/brief; no manual context reconstruction.
-6. **Runtime mutation authority** — session.json/run.json are never written directly; normal flow uses only `maestro run ...`.
-7. **Proposal governance** — Skill proposes, Ralph evaluates budget/confidence/intent, Runtime applies atomically with the producing Run.
+3. **Thin executor** — executor executes and checks one Run but never receives the private claim or completes it.
+4. **Session is identity; Execution is lifecycle** — Session is a durable topic grouping/index; Execution owns chain, gates, decisions, revision, pause/resume/seal, and core lease; Runs own immutable attempts and outputs.
+5. **Canonical upstream map** — same-Session sealed outputs enter only through birth/brief; no manual context reconstruction.
+6. **Runtime mutation authority** — protocol JSON is never written directly; canonical mutation uses exact Execution-aware `maestro execution ...` / `maestro run ...` commands and `run-response/1.1`.
+7. **Proposal governance** — Skill proposes, Ralph evaluates budget/confidence/intent, Runtime applies atomically inside the current Execution.
 8. **No prompt fix templates** — fix/review/goal gaps dispatch a Skill that may emit a proposal.
-9. **Decision receipts are single-source** — decisions land through `session decide`, never direct append.
+9. **Decision receipts are single-source** — decisions land through fenced `maestro run decide`, never direct append.
 10. **Auto is bounded** — `-y` cannot bypass high risk, confidence <60, ambiguity, escalation, failed gates or reground halt.
-11. **Compatibility commands are out of band** — no Ralph/Session CLI is called or recommended.
-12. **Terminal means terminal** — sealed/archived returns `CHAIN_COMPLETE`, never resume.
-13. **Decision is mandatory** — every Ralph-created chain contains at least one formal decision node before Session seal; Run completion never substitutes for `session decide`.
-14. **Completion and decision both continue** — after successful `session done --json` or `session decide --json`, immediately execute any satisfiable `continuation.authority=automatic` action in the same turn.
+11. **Legacy compatibility is out of band** — Session lifecycle aliases are allowed only by the labeled `session/1.x` branch in the shared loop.
+12. **Generation terminality** — a sealed Execution never resumes; the Session identity may host a later higher generation.
+13. **Decision is mandatory** — every Ralph-created Execution chain contains at least one formal decision node before Execution seal; Run completion never substitutes for `run decide`.
+14. **Completion and decision both continue** — after successful Execution-aware `run complete --json` or `run decide --json`, consume the fresh fence and immediately execute any satisfiable automatic continuation in the same turn.
+15. **Capability negotiation is mandatory** — before mutation, call `maestro capabilities --json`; require `session/2.0`, `execution/1.0`, `core_execution_lease`, and `run-response/1.1`, otherwise fail closed or enter the explicitly selected legacy branch.
 </invariants>
 
 <state_machine>
@@ -98,14 +101,14 @@ S_INFER — infer lifecycle position and roadmap need
 S_DECOMPOSE — derive boundary and observable goals for a new Session
 S_ASSESS — classify creation risk and evidence confidence
 S_BUILD — build initial Skill chain
-S_CREATE — `session create --chain-file`
+S_CREATE — create/resolve Session identity, start Execution, bootstrap its chain
 S_CONFIRM — confirm unless `-y`
-S_RUN_LOOP — shared Run lifecycle
+S_RUN_LOOP — shared Execution-aware Run lifecycle
 S_EVALUATE — quality/goal/scope/reground decision
 S_AMEND — audited goal amendment
-S_RECOVER — audited paused recovery
-S_FAIL — retry or pause; retry budget exhausted implies Session auto-paused. (Distinct from maestro's S_FALLBACK, which requests missing intent/disambiguation before any Session exists; S_FAIL operates on an already-created Session.)
-S_DONE — seal Session
+S_RECOVER — audited paused-Execution recovery
+S_FAIL — retry or pause; retry exhaustion pauses the current Execution
+S_DONE — seal current Execution
 </states>
 
 <transitions>
@@ -115,11 +118,11 @@ S_PARSE:
   → S_FAIL OTHERWISE
 
 S_RESOLVE:
-  → S_RECOVER WHEN: exact compatible Session is paused and `-c`
-  → S_RUN_LOOP WHEN: exact compatible Session is running with a chain
-  → S_INFER WHEN: only paused Session exists and no `-c` (treat as new intent; paused Session remains untouched)
-  → S_INFER WHEN: no live Session and intent present
-  → S_FAIL WHEN: multiple candidates or incompatible terminal Session
+  -> S_RECOVER WHEN: exact current Execution is paused and `-c`
+  -> S_RUN_LOOP WHEN: exact current Execution is active with a chain and valid/acquirable core authority
+  -> S_INFER WHEN: only a paused Execution exists and no `-c` (treat as new intent; do not mutate it)
+  -> S_INFER WHEN: no current Execution and intent present
+  -> S_FAIL WHEN: multiple identities/Executions or archived identity
 
 S_INFER → S_DECOMPOSE → S_ASSESS → S_BUILD → S_CREATE
 S_CREATE → S_RUN_LOOP WHEN: `-y` AND risk ≠ high AND confidence_score ≥ 60
@@ -138,24 +141,24 @@ S_RUN_LOOP:
   → S_RUN_LOOP WHEN: Run sealed and another pending step exists
 
 S_EVALUATE:
-  → S_RUN_LOOP WHEN: proceed or accepted fix proposal
-  → S_RECOVER WHEN: escalate pauses Session
-  → S_FAIL WHEN: escalate but Session not paused (user declined pause)
-  → S_RUN_LOOP WHEN: post-goal-audit AND has_unmet (fix loop; insert repair step at `target_stage`)
-  → S_DONE WHEN: post-goal-audit AND all_met AND INTENT_ALIGNED
-  → END WHEN: post-goal-audit AND all_met AND NOT INTENT_ALIGNED (REGROUND_HALT)
-  → S_RUN_LOOP WHEN: post-analyze-scope (apply `scope_verdict` to the chain path)
-  → S_DONE WHEN: post-session AND preflight passed (decide then seal)
-  → S_RUN_LOOP WHEN: post-session AND preflight failed (fix loop)
-  → END WHEN: post-debug-escalate (always pauses)
-  → END WHEN: post-reground AND drifted AND confidence ≥ 60 (REGROUND_HALT; `-y` does not bypass)
-  → S_RUN_LOOP WHEN: post-reground AND aligned
-  → S_RUN_LOOP WHEN: post-reground AND drifted AND confidence < 60 (proceed, mark LOW CONFIDENCE)
+  -> S_RUN_LOOP WHEN: proceed or accepted fix proposal
+  -> S_RECOVER WHEN: escalate pauses Execution
+  -> S_FAIL WHEN: escalation cannot be committed
+  -> S_RUN_LOOP WHEN: post-goal-audit AND has_unmet (fix loop; insert repair step at `target_stage`)
+  -> S_DONE WHEN: post-goal-audit AND all_met AND INTENT_ALIGNED
+  -> END WHEN: post-goal-audit AND all_met AND NOT INTENT_ALIGNED (REGROUND_HALT)
+  -> S_RUN_LOOP WHEN: post-analyze-scope (apply `scope_verdict` to the Execution chain path)
+  -> S_DONE WHEN: post-execution AND preflight passed (decide then Execution seal)
+  -> S_RUN_LOOP WHEN: post-execution AND preflight failed (fix loop)
+  -> END WHEN: post-debug-escalate (always pauses Execution)
+  -> END WHEN: post-reground AND drifted AND confidence >= 60 (REGROUND_HALT; `-y` does not bypass)
+  -> S_RUN_LOOP WHEN: post-reground AND aligned
+  -> S_RUN_LOOP WHEN: post-reground AND drifted AND confidence < 60 (proceed, mark LOW CONFIDENCE)
 
 S_FAIL:
-  → S_RUN_LOOP WHEN: retry budget remains
-  → END WHEN: retry budget exhausted (Session auto-paused)
-  → END WHEN: Session paused or user aborts
+  -> S_RUN_LOOP WHEN: retry budget remains
+  -> END WHEN: retry budget exhausted (Execution paused)
+  -> END WHEN: Execution paused or user aborts
 
 S_AMEND → S_RUN_LOOP WHEN: shared amend protocol committed
 S_RECOVER → S_RUN_LOOP WHEN: blockers resolved and resume committed
@@ -171,7 +174,7 @@ All command syntax and lifecycle mechanics follow `orchestrator-run-loop.md` and
 
 ### A_RESOLVE
 
-Read-only lookup via `run recall`. Explicit birth `session_id/run_id` wins. Multiple live candidates require user selection; historical similarity never grants authority.
+Read-only lookup via `run recall`. Explicit birth `session_id + execution_id + generation + run_id` wins. Multiple candidates require user selection; historical similarity never grants authority.
 
 ### A_INFER
 
@@ -236,7 +239,7 @@ Confidence maps to low `<60`, medium `60–79`, high `≥80`. High risk always r
 
 Consume the outputs of A_INFER, A_DECOMPOSE and A_ASSESS; do not re-infer them while assembling the chain. Quality is quick/standard/full based on specs and observable risk, not a user flag. Quality criteria: quick = single-file + existing tests; standard = multi-file + new logic; full = cross-module + no existing coverage.
 
-Build the chain from `prepare/ralph.md` Stage Mapping, propagate goal references, map the current host to the Skill scanner's `target_platform` (`claude|codex|agent|agy|pi`), and prevalidate every command with `maestro skills --steps --json --platform pi`. Never default a non-Claude host to `claude`; `pi` resolves Skills from the installed `pi-maestro-flow` npm package's `package.json#pi.skills` directories. Every chain includes at least one final quality/goal/scope decision node before seal; long chains also include periodic reground decision nodes. Step execution strategy is defined by each Skill, never by Ralph flags.
+Build the chain from `prepare/ralph.md` Stage Mapping. If the Stage Mapping or Build Rules are not in context, fetch them first via read-only `read ~/.maestro/prepare/ralph.md` (no Session required; `prepare.content` carries the full protocol). Propagate goal references, map the current host to the Skill scanner's `target_platform` (`claude|codex|agent|agy|pi`), and prevalidate every command with `maestro skills --steps --json --platform pi`. Never default a non-Claude host to `claude`; `pi` resolves Skills from the installed `pi-maestro-flow` npm package's `package.json#pi.skills` directories. Every chain includes at least one final quality/goal/scope decision node before seal; long chains also include periodic reground decision nodes. Step execution strategy is defined by each Skill, never by Ralph flags.
 
 ### A_EXECUTE
 
@@ -244,7 +247,7 @@ Follow `orchestrator-run-loop.md` exactly. Display identity may use stage prefix
 
 ### A_EVALUATE
 
-Follow `orchestrator-run-loop.md` §6 Decision step; the VERDICT format is defined in `prepare/ralph.md`. Ralph policy thresholds:
+Follow `orchestrator-run-loop.md` "4. Decision Step"; the VERDICT format is defined in `prepare/ralph.md`. Ralph policy thresholds:
 
 - Confidence mapping: low = <60, medium = 60-79, high = ≥80.
 - Confidence below 60 → cannot proceed.
@@ -255,12 +258,12 @@ Follow `orchestrator-run-loop.md` §6 Decision step; the VERDICT format is defin
 ### A_FAIL
 
 - Repairable failure → verdict `needs-retry`; re-dispatch only after Runtime returns the step to pending.
-- External or exhausted blocker → verdict `blocked`; Session pauses.
+- External or exhausted blocker -> verdict `blocked`; current Execution pauses and releases its claim.
 - Never allocate a new Run while the previous Run is running or gate-blocked.
 
 ### A_RECOVER
 
-Only explicit `-c` enters recovery. Follow `orchestrator-run-loop.md` §7 exactly.
+Only explicit `-c` enters recovery. Follow `orchestrator-run-loop.md` "5. Recovery and Amend" exactly.
 
 ### A_AMEND
 
@@ -268,7 +271,7 @@ Read `ralph-amend-goal.md`. High risk always asks. Pending-tail changes come fro
 
 ### A_DONE
 
-When every execution Run is sealed, every decision is terminal, every goal is done and Session gates are clean → seal.
+When every Run is sealed, every decision is terminal, every goal is done, no request is claimed, and Execution gates are clean -> `maestro execution seal` with the exact locator/revision/core claim. Session identity remains reusable.
 
 </actions>
 
@@ -277,7 +280,8 @@ When every execution Run is sealed, every decision is terminal, every goal is do
 <success_criteria>
 - Public flags are exactly `-y`, `-c`, `--amend`.
 - No legacy Ralph driver, private Session type, or independent Skills CLI appears in normal flow.
-- Each Run follows `session next --inline-brief` → execute → `run check` → `session done --verdict`; backtracking uses `run brief`. Every decision uses `session decide`.
+- Each Run follows Execution-aware `run next` -> execute -> `run check` -> fenced `run complete --verdict`; backtracking uses `run brief`. Every decision uses fenced `run decide`.
+- Final completion uses `maestro execution seal`; Session identity is never permanently sealed in the canonical branch.
 - Proposal acceptance is pathless from Ralph's perspective and atomic with Run completion.
 - Retry, confidence, drift, goal audit, recovery and terminal semantics remain explicit.
 </success_criteria>

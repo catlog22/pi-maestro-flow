@@ -1,7 +1,7 @@
 ---
 name: maestro-session-seal
 description: "Seal current session with knowledge candidate review and DAG progression Arguments: [--session <session_id>] [-y] [--skip-knowledge]"
-allowed-tools: Read Write Edit Bash Glob Grep teammate maestro observe
+allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro
 disable-model-invocation: true
 session-mode: none
 ---
@@ -29,8 +29,10 @@ Pi mirrors canonical Session/Run state automatically:
 
 </host_mirror>
 
+If any required file above was not expanded into context by the host, or its content is no longer in context, Read it explicitly before executing any step.
+
 <purpose>
-Seal a completed session: verify all Runs are sealed, review the durable knowledge candidate backlog, mark the Session as sealed, and recommend the next dep-ready Session from the DAG.
+Seal a completed bounded Execution after verifying all Runs are immutable and terminal, review the durable knowledge candidate backlog, and recommend the next dep-ready Session from the DAG.
 
 Run completion already stages accepted decisions, locked constraints, and explicit `maestro knowledge stage` entries. This command reviews those receipts; it does not re-extract the same artifacts or write project knowledge through a second path.
 </purpose>
@@ -60,12 +62,11 @@ Note: maestro-next suggests session-seal when 'Tests green + active session'. Th
 
 ### Step 2: Knowledge Reconciliation
 
-1. Run `maestro knowledge review {session_id} --json`. Treat its Run/Session ledgers, reconciliation policies, diversified matches, and candidate IDs as authoritative; do not rescan outputs to recreate candidates. Use `--refresh` only when the review reports missing or stale source receipts (session seal refreshes the session receipt automatically on a best-effort basis).
-   Review Presentation Protocol: present each candidate needing disposition to the user (title, content summary, evidence anchors, evidence-backed matches, recommended disposition + one-line rationale), collect the user's decisions, then execute the `promote --resolve` inline adjudication (happy path) or the `review --resolve` fallback yourself. Never hand the user the raw review command as the whole task.
+1. Run `maestro knowledge review {session_id} --json`. Treat its Run ledgers, reconciliation policies, diversified matches, and candidate IDs as authoritative; do not rescan outputs to recreate candidates. Use `--refresh` only when the review reports missing or stale source receipts.
 2. Explain signal semantics when relevant: search/injection is exposure only; explicit loads are consumed; `cited`, `validated`, and `contradicted` are explicit Run relations.
 3. Report exact/semantic duplicates, related/extends candidates, potential conflicts, supersession candidates, missing receipts, and promotion eligibility separately. Exact duplicates are suppressed automatically; unresolved `review_required` candidates cannot be promoted.
 4. If `--skip-knowledge`, report the pending/promoting/review-required/suppressed counts and continue. The backlog and reconciliation receipts remain durable after seal.
-5. Otherwise resolve review-required candidates with inline adjudication: `maestro knowledge promote {session_id} --resolve <candidate-id> --as duplicate|related|conflict|supersede|unique [--target <knowledge-id>] --reason "<reason>"` (TOCTOU fence + resolve + promote in one step); `maestro knowledge review {session_id} --resolve <candidate-id> --as <choice> [--target <knowledge-id>] --reason "<reason>"` remains a compatible fallback. A target must come from that candidate's evidence-backed matches.
+5. Otherwise resolve review-required candidates before promotion with `maestro knowledge review {session_id} --resolve <candidate-id> --as duplicate|related|conflict|supersede|unique [--target <knowledge-id>] --reason "<reason>"`. A target must come from that candidate's evidence-backed matches.
 6. Present eligible pending candidates via `[@ask] user prompt`:
    ```
    question: "以下知识候选项值得晋升到项目知识库吗？"
@@ -74,17 +75,17 @@ Note: maestro-next suggests session-seal when 'Tests green + active session'. Th
      - "逐个选择" (review each candidate)
      - "暂不晋升" (leave backlog pending)
    ```
-7. Promote only through the receipt-aware CLI (dual-source gates, equally strong: run-source = sealed source Runs + fresh run receipts; session-source = sealed Session + fresh session receipt + non-empty `--evidence` given at stage):
+7. Promote only through the receipt-aware CLI:
    - Bulk selection → `maestro knowledge promote {session_id} --all`
    - Explicit selection → repeat `maestro knowledge promote {session_id} --candidate <candidate-id>` for each selection (comma-separated compatibility remains supported)
    - `-y` may run `--all`, which promotes all eligible candidates (observed-only emits a warning) and skips review-required and suppressed candidates. It MUST NOT auto-resolve a candidate without explicit user selection.
 8. For a replacement candidate, confirm `--as supersede` and then promote it; promotion creates the successor and links the evolution chain. For coexisting valid rules, confirm `related` or `conflict` as appropriate. Never direct-write a candidate that was already promoted successfully.
 
-### Step 3: Seal Session
+### Step 3: Seal Execution
 
-1. Call `maestro session seal {session_id}` (`--json` emits the canonical machine envelope)
-2. CLI writes `session.json.lifecycle.sealed_at` and `seal_summary`
-3. CLI updates `state.json.sessions[].status` to `sealed`
+1. Resolve the exact current Execution and private claim from the retained `run-response/1.1` state.
+2. Call the complete `maestro execution seal` command from `run-mode.md`, supplying the exact Session/Execution locator, request ID, Execution and activity revisions, owner/epoch/lease claim, audit actor/reason/evidence, outcome, summary, and `--json`.
+3. Verify `execution-seal-receipt/1.0`; never mutate Session lifecycle state or edit runtime-owned protocol JSON.
 
 ### Step 4: DAG Progression
 
@@ -130,7 +131,7 @@ Status: DONE
 | W001 | warning | No knowledge candidates found | Proceed to seal |
 | W002 | warning | No verify/review run in session — gate check skipped | Consider running verify before seal |
 | W003 | warning | Candidate backlog left pending | Review later with `maestro knowledge review {session_id}` |
-| W004 | warning | Reconciliation review remains unresolved | Seal may continue; promotion stays blocked until `maestro knowledge promote --resolve` |
+| W004 | warning | Reconciliation review remains unresolved | Seal may continue; promotion stays blocked until `maestro knowledge review --resolve` |
 </error_codes>
 
 <success_criteria>

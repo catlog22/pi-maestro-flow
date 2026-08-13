@@ -67,7 +67,7 @@ You implement a single task from the execution plan. Each task is executed atomi
 - Codebase access for implementation
 - **Codebase docs** (if `.workflow/codebase/` exists) — Read `ARCHITECTURE.md` for module boundaries and component relationships before implementing cross-module changes
 - **Wiki prior knowledge** (if `maestro wiki` available) — `maestro wiki search "<task keywords>"` for related decisions/constraints that may affect implementation approach
-- **Codebase search** — prefer `teammate({ agent: "explorer", taskType: "explore", tasks: [{ prompt: "FIND: <pattern> SCOPE: src/ EXCLUDE: tests" }] })` over raw Grep when searching for implementation patterns or integration points
+- **Codebase search** — prefer `teammate({ agent: "explorer", tasks: [{ prompt: "FIND: <pattern> SCOPE: src/ EXCLUDE: tests" }] })` over raw Grep when searching for implementation patterns or integration points
 
 ## Output
 - Code changes (the actual implementation)

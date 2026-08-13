@@ -32,7 +32,7 @@ message_types:
 4. If topic references file (@path or .md/.txt) → read it
 5. CLI seed analysis:
    ```
-   teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: Analyze topic, extract structured seed info.\n   TASK: • Extract problem statement • Identify target users • De…" }] }) background: false })
+   teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: Analyze topic, extract structured seed info.\n   TASK: • Extract problem statement • Identify target users • Determine domain\n   • List constraints • Identify 3-5 exploration dimensions\n   TOPIC: <topic-content>\n   MODE: analysis\n   EXPECTED: JSON with: problem_statement, target_users[], domain, constraints[], exploration_dimensions[]" }] }) background: false })
    ```
 6. Parse result JSON
 

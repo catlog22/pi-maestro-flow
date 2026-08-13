@@ -35,7 +35,7 @@ Read("{run_dir}/work/team/explorations/context-<issueId>.json")
 **CLI invocation**:
 
 ```
-Bash("teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: Design solution for issue <issueId> and decompose into implementation tasks; success = canonical Run solution a…" }] })Solution: {run_dir}/outputs/solutions/solution-<issueId>.json\" --note \"Solution artifact created\" --json")`
+Bash("teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: Design solution for issue <issueId> and decompose into implementation tasks; success = canonical Run solution artifact with task breakdown\n\nTASK: • Load issue details via Maestro maestro-issue status • Analyze explorer context • Design solution approach • Break down into implementation tasks • Generate solution JSON • Record the Run artifact path on the issue\n\nMODE: analysis\n\nCONTEXT: @**/* | Memory: Issue <issueId> - <issue.title> (Priority: <issue.priority>)\nExplorer findings: <explorerContext.key_findings>\nRelevant files: <explorerContext.relevant_files>\nComplexity: <explorerContext.complexity_assessment>\n\nEXPECTED: Solution JSON with: issue_id, solution_id, approach, tasks (ordered list with descriptions), estimated_files, dependencies\nWrite to: {run_dir}/outputs/solutions/solution-<issueId>.json\nThen record: `Bash(\"maestro issue update <issueId> --fix-direction" }] })Solution: {run_dir}/outputs/solutions/solution-<issueId>.json\" --note \"Solution artifact created\" --json")`
 
 CONSTRAINTS: Follow existing patterns | Minimal changes | Address reviewer feedback if SOLVE-fix task
 \" --tool agy --mode analysis", { background: false })

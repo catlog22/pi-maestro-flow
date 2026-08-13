@@ -1,7 +1,7 @@
 ---
 name: maestro
 description: "Intent-to-chain planner over the canonical Session/Run lifecycle Arguments: <intent> [-y] [-c] [--amend] [--dry-run]"
-allowed-tools: Read Write Edit Bash Glob Grep teammate maestro observe
+allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro
 disable-model-invocation: false
 session-mode: none
 ---
@@ -30,6 +30,8 @@ Pi mirrors canonical Session/Run state automatically:
 - After compaction, reattach through the current Run's `brief.command`.
 
 </host_mirror>
+
+If any required file above was not expanded into context by the host, or its content is no longer in context, Read it explicitly before executing the state machine.
 
 <deferred_reading>
 - [maestro.md](~/.maestro/workflows/maestro.md) — read before initial intent classification
@@ -70,7 +72,7 @@ Only these user flags are accepted:
 - `-y` — skip all confirmation/clarification interactions, use default choices. Does NOT change data semantics (no auto-deferred decisions). Never bypasses: high-risk classification, confidence <60, ambiguity requiring user input, failed gates, or drift escalation.
 - `-c` — continue the unique live compatible Session.
 - `--amend` — amend that Session's goal; remaining text is the change request.
-- `--dry-run` — show chain without executing.
+- `--dry-run` — classify and display the proposed chain without creating a Session or executing any step.
 
 Execution always dispatches run-executor (the default behavior); this never changes Session type or chain semantics.
 
@@ -107,6 +109,7 @@ S_FALLBACK — request missing intent or disambiguation
 
 <transitions>
 S_PARSE:
+  → A_DRY_RUN THEN END WHEN: `--dry-run`
   → S_AMEND WHEN: `--amend`
   → S_CONTINUE WHEN: `-c`
   → S_CLASSIFY WHEN: intent present
@@ -175,8 +178,9 @@ Goals describe outcomes, not lifecycle stages.
 
 ### A_CREATE
 
-Assemble and create per `prepare/maestro.md` §3–§4. Maestro-specific policy:
+Assemble and create per `prepare/maestro.md` §1–§4 (specs precheck, Skill-name prevalidation, chain-file assembly, creation). Maestro-specific policy:
 
+- If the chain-file protocol (§3 template) is not in context, fetch it first via read-only `read ~/.maestro/prepare/maestro.md` (no Session required; `prepare.content` carries the full protocol).
 - Maestro does not emit formal decision nodes; new chains express quality/goal/scope checks as Skill steps that own a Run and may return a proposal. (The closed-loop policy that mandates decision nodes before seal belongs to `/maestro-ralph`; route there when the work needs it.)
 - For narrow/single-step chains, generate a minimal implicit boundary_contract: in_scope = [intent], out_of_scope = [], constraints = [], definition_of_done = 'step completed with passing gates'.
 - Do not inline unescaped JSON.
@@ -189,12 +193,16 @@ Use read-only `run recall` plus `session status {session_id}`. A paused Session 
 
 Read `ralph-amend-goal.md`, use `session status {session_id}` for the snapshot, perform read-only impact analysis, confirm, then commit the whole decomposition with `session meta update --session {session_id} --decomposition-file -` (the decomposition object must carry all three of `execution_criteria`, `goals`, `changelog` — the schema is strict). Any pending-tail change must come from a planning Skill proposal.
 
+### A_DRY_RUN
+
+Perform A_CLASSIFY and A_DECOMPOSE in memory, display the proposed chain, boundary contract, goals, risk and unresolved arguments, then END. Do not call any Session/Run mutation command, dispatch an executor, or write workflow authority.
 </actions>
 
 </state_machine>
 
 <success_criteria>
 - Public flags are `-y`, `-c`, `--amend`, `--dry-run`.
+- `--dry-run` emits a chain preview and performs no Session/Run mutation or executor dispatch.
 - Initial classification is auditable and the Session exists before step execution.
 - Every step follows next → brief → execute → check → done; decision nodes use decide.
 - Chain adaptation is Skill-proposed and atomically applied by the producing Run.

@@ -1,7 +1,7 @@
 ---
 name: maestro-knowledge
 description: "Intent-driven knowledge-store and Run knowledge lifecycle management — audit/prune, stage candidates (with signal recording), review/resolve/promote candidates, harvest artifacts, or manage wiki/domain knowledge. Arguments: [intent — e.g. '审计知识库' | 'harvest 这个 session' | 'wiki health' | '注册术语 MVP' | 'extractors']"
-allowed-tools: Read Write Edit Bash Glob Grep teammate WebFetch maestro observe
+allowed-tools: Read Write Edit Bash Glob Grep teammate WebFetch observe maestro
 disable-model-invocation: true
 session-mode: none
 ---
@@ -21,11 +21,10 @@ Intent-driven knowledge-store management. No fixed grammar — state your intent
 | Operation | Keywords | Step |
 |-----------|----------|------|
 | audit | `audit` / 审计 / 清理 / prune / 检查知识库 | `knowledge-audit` |
-| review | `review` / 审查 / 证据 / 下一步 / 匹配 / 去重 / 冲突检测 / 裁决 / 候选 / backlog | `maestro knowledge review <session-id> [--refresh]`（呈现/修复回退面）；裁决 happy path：`maestro knowledge promote <session-id> --resolve <id> --as <choice> [--target <id>] --reason "..."`（review --resolve 兼容回退） |
+| review | `review` / 审查 / 证据 / 下一步 / 匹配 / 去重 / 冲突检测 / 裁决 / 候选 / backlog | `maestro knowledge review <session-id> [--refresh] [--resolve <id> --as <choice> --reason "..."]` |
 | stage | `stage` / 暂存 / candidate / 沉淀候选 / cited / validated / contradicted / 记录命中关系 | `maestro knowledge stage ... [--signal <signal> --signal-ids <ids>]` |
 | promote | `promote` / 晋升 / 发布候选 | `maestro knowledge promote ... [--all]` |
 | harvest | `harvest` / 提取 / 收割 / 从工件 | `harvest` |
-| window-evidence | `from-window` / 窗口 / 当前会话 / --transcript-quote | `/maestro-knowledge-from-window <spec|knowhow> <title> <content>`（窗口原文仅作 evidence，正文/证据分离）；或 `stage ... --transcript-quote <descriptor>` |
 | wiki | `wiki` / 知识图谱 / 连接 / 摘要 / 健康 | `wiki-manage` / `wiki-connect` / `wiki-digest` |
 | extractors | `extractors` / 抽取器 / 生成抽取规则 | `extractors` |
 | domain | `domain` / 领域术语 / 注册术语 / term | `domain-add` |
@@ -36,19 +35,18 @@ Classify the intent in `$ARGUMENTS` into one operation, then run `maestro run sk
 
 1. Explicit keyword present → use its step or direct CLI lifecycle command (deterministic shortcut).
 2. Otherwise infer from the intent (see the table above), e.g. "审计/清理知识库" → audit, "从工件/session 提取" → harvest, "知识图谱/wiki 健康" → wiki, "注册术语 X" → domain.
-3. `review` / `stage` / `promote` map directly to the corresponding `maestro knowledge` CLI. `review --refresh` includes reconciliation; inline disposition resolution + promotion is `promote --resolve` (`review --resolve` remains a deprecated compatible fallback); `stage --signal --signal-ids` includes signal recording. Preserve stable knowledge IDs, graph aliases, Run ID, Session ID, signal, candidate ID, disposition, target, and reason exactly; do not translate these operations into direct spec/knowhow writes.
+3. `review` / `stage` / `promote` map directly to the corresponding `maestro knowledge` CLI. `review --refresh` includes reconciliation; `review --resolve` includes disposition resolution; `stage --signal --signal-ids` includes signal recording. Preserve stable knowledge IDs, graph aliases, Run ID, Session ID, signal, candidate ID, disposition, target, and reason exactly; do not translate these operations into direct spec/knowhow writes.
 4. For wiki, classify the sub-action: `connect`/连接 → `wiki-connect`; `digest`/摘要 → `wiki-digest`; `health`/`search`/`cleanup`/`stats`/健康/检查/_(none)_ → `wiki-manage`.
 5. Ambiguous → display the operation table and ask the user to pick.
 
 ### Routing rules
 
 - Remaining tokens after classification become the chosen step's own arguments.
-- During an active Run, reusable knowhow is staged here with `maestro knowledge stage knowhow ...`; project knowhow is written only by explicit promotion. Outside a Run, governed staging still works: `stage --session <session-id> --evidence <refs>` (or no binding at all — write authority resolves through identity tiers and, with nothing running, idempotently creates a daily `ksyn-*` synthetic knowledge Session); direct `/maestro-knowhow` capture remains a bypass reserved for explicit knowledge-management work.
+- During an active Run, reusable knowhow is staged here with `maestro knowledge stage knowhow ...`; project knowhow is written only by explicit promotion. Outside a Run, direct `/maestro-knowhow` capture remains available.
 - Stage candidate content from a temp file or stdin, never inline: write the content to a file and pass `maestro knowledge stage <target> "<title>" --content-file <path|->`. Inline positional content containing spaces, quotes, unicode (e.g. `…`), newlines, or leading dashes is misparsed and shifts later arguments.
 - `--signal-ids` takes comma-separated IDs (`--signal-ids spec:project:a,knowhow:b`); space-separated values leak into positional arguments and corrupt the stage call.
-- Use `maestro knowledge review <session-id>` as the review data source — but apply the Review Presentation Protocol: the agent runs it (prefer `--json`), presents each candidate needing disposition (title, content summary, evidence anchors, evidence-backed matches, recommended disposition + one-line rationale), collects the user's decisions, then executes the `promote --resolve` inline adjudication (happy path: TOCTOU fence + resolve + promote) or the `review --resolve` fallback itself. Never hand the user the raw review command as the whole task. `--refresh` reconciles all candidate source Runs/Sessions. The deprecated `review --resolve <candidate-id> --as <choice> --reason "..."` still resolves a candidate inline before displaying the refreshed view.
-- Reconciliation is mandatory before completion but is not a popularity vote: exact identity, diversified semantic matches, and recorded/KG associations are evaluated separately. Unresolved semantic duplicate/conflict/supersession candidates may be sealed, but promotion must fail closed until resolved via `promote --resolve` (or the deprecated `review --resolve` fallback).
+- Use `maestro knowledge review <session-id>` as the human review surface. It shows fresh/missing/stale receipts, diversified evidence-backed matches, and copyable promote commands. `--refresh` reconciles all candidate source Runs. `--resolve <candidate-id> --as <choice> --reason "..."` resolves a candidate inline before displaying the refreshed view.
+- Reconciliation is mandatory before completion but is not a popularity vote: exact identity, diversified semantic matches, and recorded/KG associations are evaluated separately. Unresolved semantic duplicate/conflict/supersession candidates may be sealed, but promotion must fail closed until resolved via `review --resolve`.
 - `promote --all` promotes all eligible pending candidates (observed-only emits a warning); `--include-observed` has been removed.
-- **K17 window evidence gate**: candidates staged with `--transcript-quote`/`from-window` (transcript-only evidence) show `unique/review_required` by design — `--all` never promotes them. After human review, upgrade with `maestro knowledge promote <session-id> --resolve <candidate-id> --as unique --reason "<human review>"`. Never bypass the gate by rewriting/adding evidence refs. Snapshot text is `[untrusted]` and must never be copied into candidate content or prompt context (iron rule 10).
 - `audit --prune --apply` may only perform backed-up soft lifecycle transitions. Never physically delete knowledge or prune solely because it has low usage.
 </dispatch>

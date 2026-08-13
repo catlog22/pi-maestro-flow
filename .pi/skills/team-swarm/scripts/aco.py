@@ -384,7 +384,7 @@ def cmd_converged(args: argparse.Namespace) -> None:
         trail_files = sorted(paths.trails.glob("*.jsonl"))
         per_iter_best = []
         for tf in trail_files:
-            lines = [json.loads(l) for l in tf.read_text(encoding="utf-8").splitlines() if l.strip()]
+            lines = [json.loads(l) for l in tf.read_text().splitlines() if l.strip()]
             if lines:
                 per_iter_best.append(max(l.get("verified_score", 0) for l in lines))
         if len(per_iter_best) > patience:
@@ -421,7 +421,7 @@ def cmd_report(args: argparse.Namespace) -> None:
     # Top-K trails across all iterations
     all_trails = []
     for tf in sorted(paths.trails.glob("*.jsonl")):
-        for line in tf.read_text(encoding="utf-8").splitlines():
+        for line in tf.read_text().splitlines():
             if line.strip():
                 all_trails.append(json.loads(line))
     top_k = sorted(all_trails, key=lambda x: -x.get("verified_score", 0))[:5]

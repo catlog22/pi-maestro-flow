@@ -20,13 +20,9 @@ Initialize the skill-tuning session by collecting target skill information, crea
 
 ## Execution
 
-**Establish the Run first (see run-mode.md).** If an orchestrator injected `run_id` / `run_dir` in the birth packet, use them and do NOT call `maestro run create --platform pi`. Otherwise self-start before collecting input:
+**Establish the Run first (see run-mode.md).** If an orchestrator injected `run_id` / `run_dir` in the birth packet, use them directly. Otherwise follow the complete self-start flow before collecting input: negotiate capabilities, create or resolve the explicit Session identity, start the bounded Execution, and create `skill-tuning` with the full locator, fence, private claim, intent, and `--json` option set.
 
-```bash
-maestro run start "<short phrase>" --cmd skill-tuning --session <YYYYMMDD-skill-tuning-{topic}> --platform pi
-```
-
-Session slug is ASCII-only, ≤64 chars. The `workDir` passed to `execute()` is `{run_dir}/outputs/skill-tuning-{ts}/`.
+The Session slug is ASCII-only and <=64 chars. The `workDir` passed to `execute()` is `{run_dir}/outputs/skill-tuning-{ts}/`.
 
 ```javascript
 async function execute(state, workDir) {

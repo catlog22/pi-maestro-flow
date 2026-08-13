@@ -40,7 +40,7 @@ You perform structured multi-dimensional analysis of technical topics, proposals
 - Comparison alternatives (if applicable)
 - **Codebase docs** (if `.workflow/codebase/` exists) — `ARCHITECTURE.md` and `CONCERNS.md` as evidence sources for feasibility/risk/dependency dimensions
 - **Wiki prior knowledge** (if `maestro wiki` available) — `maestro wiki search "<subject keywords>"` for prior decisions and analyses on related topics
-- **Codebase search** — prefer `teammate({ agent: "explorer", taskType: "explore", tasks: [{ prompt: "FIND: <analysis target> SCOPE: src/ EXPECTED: file:line evidence" }] })` over raw Grep for gathering multi-file evidence across dimensions
+- **Codebase search** — prefer `teammate({ agent: "explorer", tasks: [{ prompt: "FIND: <analysis target> SCOPE: src/ EXPECTED: file:line evidence" }] })` over raw Grep for gathering multi-file evidence across dimensions
 
 ## Output
 `analysis.md`:

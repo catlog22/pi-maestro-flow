@@ -1,7 +1,7 @@
 ---
 name: maestro-learn
 description: "User-invoked learning toolkit — guided reading, investigation, pattern extraction, or second opinions. Manual `/maestro-learn` only; NEVER auto-invoke for code exploration or analysis — route those intents to the analyze step via /maestro-next Arguments: follow|investigate|decompose|consult [args...]"
-allowed-tools: Read Write Bash Glob Grep teammate maestro observe
+allowed-tools: Read Write Bash Glob Grep teammate observe maestro
 disable-model-invocation: true
 session-mode: none
 ---
@@ -282,7 +282,7 @@ S_HYPOTHESIZE:
   → S_TEST        WHEN: no CLI tools OR trivial hypotheses (answerable by local Grep/Read)    DO: A_FORM_HYPOTHESES
 
 S_CLI_EXPLORE:
-  → S_TEST        DO: A_CLI_SUPPLEMENT (teammate({ taskType: "analysis", /* --to <first-enabled-tool> */ }), run_in_background, STOP)
+  → S_TEST        DO: A_CLI_SUPPLEMENT (teammate({ agent: "general", taskType: "analysis", /* --to <first-enabled-tool> */ }), run_in_background, STOP)
 
 S_TEST:
   → S_REPORT      WHEN: hypothesis confirmed                  DO: A_TEST_HYPOTHESIS
@@ -327,7 +327,7 @@ Rank by plausibility (evidence strength). Write to understanding.md:
 ### A_CLI_SUPPLEMENT
 
 ```
-teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: Gather evidence for hypotheses\nTASK: Trace call chains and data flows per hypothesis | Find corroborating/cont…" }] })
+teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: Gather evidence for hypotheses\nTASK: Trace call chains and data flows per hypothesis | Find corroborating/contradicting patterns\nEXPECTED: JSON [{hypothesis_rank, evidence: [{file, line, supports: bool, explanation}]}]" }], /* --to <first-enabled-tool>: set model via model-availability */ })
 ```
 Run_in_background, STOP, wait. On teammate-complete notification: append to evidence.ndjson.
 

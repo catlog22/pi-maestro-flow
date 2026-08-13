@@ -62,7 +62,7 @@ For revision mode:
 
 ```
 Bash({
-  command: `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "PURPOSE: Generate <layer> tests using <framework> to achieve coverage target; success = all priority files covered with …" }], cwd: "{run_dir}/work/team" })
+  command: `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "PURPOSE: Generate <layer> tests using <framework> to achieve coverage target; success = all priority files covered with quality tests\nTASK: • Analyze source files • Generate test cases (happy path, edge cases, errors) • Write test files with proper structure • Ensure import resolution\nMODE: write\nCONTEXT: @<source-files> @{run_dir}/outputs/strategy/test-strategy.md | Memory: Framework: <framework>, Layer: <layer>, Round: <round>\n<if-revision: Previous failures: <failure-details>\nEffective patterns: <patterns-from-meta>>\nEXPECTED: Test files in {run_dir}/outputs/tests/<layer>/ with: proper test structure, comprehensive coverage, correct imports, framework conventions\nCONSTRAINTS: Follow test strategy priorities | Use framework best practices | <layer>-appropriate assertions\nSource files to test:\n<file-list-with-content>" }], cwd: "{run_dir}/work/team" })
   background: false
 })
 ```

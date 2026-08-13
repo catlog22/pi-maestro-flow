@@ -1,7 +1,7 @@
 ---
 name: team-perf-opt
 description: "Unified team skill for performance optimization. Coordinator orchestrates pipeline, workers are team-worker agents. Supports single/fan-out/independent parallel modes. Triggers on \"team perf-opt\"."
-allowed-tools: teammate Read Write Edit Bash Glob Grep maestro observe
+allowed-tools: teammate Read Write Edit Bash Glob Grep observe maestro
 disable-model-invocation: true
 session-mode: none
 ---
@@ -84,7 +84,7 @@ Parse `$ARGUMENTS`:
 - **Session prefix**: `PERF-OPT`
 - **Session path**: `{run_dir}/work/team/`
 - **Team name**: `perf-opt`
-- **CLI tools**: `teammate({ taskType: "analysis" })` (read-only), `teammate({ taskType: "development" })` (modifications)
+- **CLI tools**: `teammate({ agent: "general", taskType: "analysis" })` (read-only), `teammate({ agent: "general", taskType: "development" })` (modifications)
 - **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Worker Spawn Template
@@ -92,7 +92,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-teammate({ agent: "team-worker", tasks: [{ name: "<role>", prompt: `## Role Assignment
+teammate({ agent: "team-worker", tasks: [{ taskType: "<task_type>", name: "<role>", prompt: `## Role Assignment
 role: <role>
 role_spec: <skill_root>/roles/<role>/role.md
 session: {run_dir}/work/team

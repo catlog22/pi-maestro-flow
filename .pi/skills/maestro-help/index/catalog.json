@@ -1,8 +1,9 @@
 {
   "_metadata": {
     "version": "3.0.0",
-    "generated": "2026-07-26",
-    "description": "Maestro Flow command/step/skill/agent catalog — single source of truth for maestro-help. type=step 的条目为 first-tier step：经 /maestro 自动路由，或 maestro run start --platform pi --cmd 执行"
+    "generated": "2026-07-28",
+    "description": "Maestro Flow command/step/skill/agent catalog — single source of truth for maestro-help. type=step 的条目为 first-tier step：经 /maestro 自动路由，或 maestro run start --platform pi --cmd 执行",
+    "note": "scholar-* 为选装 (optional)：源码位于 optional/skills/，maestro install toggle --enable <name> 安装"
   },
   "commands": [
     {
@@ -264,12 +265,6 @@
       "source": "../skill-iter-tune/SKILL.md"
     },
     {
-      "name": "prompt-generator",
-      "category": "meta",
-      "description": "生成或转换 Claude Code prompt 文件 — 命令编排器、skill 文件、agent 角色定义",
-      "source": "../prompt-generator/SKILL.md"
-    },
-    {
       "name": "skill-generator",
       "category": "meta",
       "description": "Meta-skill: 创建新 Claude Code skill，支持 sequential/autonomous 模式",
@@ -294,22 +289,10 @@
       "source": "../team-coordinate/SKILL.md"
     },
     {
-      "name": "team-executor",
-      "category": "team",
-      "description": "团队执行: 恢复会话执行任务",
-      "source": "../team-executor/SKILL.md"
-    },
-    {
       "name": "team-lifecycle-v4",
       "category": "team",
       "description": "完整生命周期: plan/develop/test/review 流水线",
       "source": "../team-lifecycle-v4/SKILL.md"
-    },
-    {
-      "name": "team-quality-assurance",
-      "category": "team",
-      "description": "QA 团队: 闭环质量保障（issue 发现 + 软件测试）",
-      "source": "../team-quality-assurance/SKILL.md"
     },
     {
       "name": "team-review",
@@ -318,22 +301,10 @@
       "source": "../team-review/SKILL.md"
     },
     {
-      "name": "team-tech-debt",
-      "category": "team",
-      "description": "技术债务团队: 债务识别、评估和修复",
-      "source": "../team-tech-debt/SKILL.md"
-    },
-    {
       "name": "team-testing",
       "category": "team",
       "description": "测试团队: Generator-Critic 循环的渐进式测试覆盖",
       "source": "../team-testing/SKILL.md"
-    },
-    {
-      "name": "team-adversarial-swarm",
-      "category": "team",
-      "description": "ACO 群智能 + 对抗决策门 — 模块化 Workflow 组合",
-      "source": "../team-adversarial-swarm/SKILL.md"
     },
     {
       "name": "team-arch-opt",
@@ -342,46 +313,10 @@
       "source": "../team-arch-opt/SKILL.md"
     },
     {
-      "name": "team-brainstorm",
-      "category": "team",
-      "description": "头脑风暴团队 — team-worker 角色架构",
-      "source": "../team-brainstorm/SKILL.md"
-    },
-    {
-      "name": "team-designer",
-      "category": "team",
-      "description": "团队 skill 生成器 — 按 v4 架构模式产出完整 skill 包",
-      "source": "../team-designer/SKILL.md"
-    },
-    {
-      "name": "team-frontend",
-      "category": "team",
-      "description": "前端开发团队 — 内置 ui-ux-pro-max 设计智能",
-      "source": "../team-frontend/SKILL.md"
-    },
-    {
-      "name": "team-frontend-debug",
-      "category": "team",
-      "description": "前端调试团队 — Chrome DevTools MCP 双模式",
-      "source": "../team-frontend-debug/SKILL.md"
-    },
-    {
-      "name": "team-interactive-craft",
-      "category": "team",
-      "description": "交互组件制作 — Vanilla JS + CSS 零依赖",
-      "source": "../team-interactive-craft/SKILL.md"
-    },
-    {
       "name": "team-issue",
       "category": "team",
       "description": "Issue 解决团队 — team-worker 角色架构",
       "source": "../team-issue/SKILL.md"
-    },
-    {
-      "name": "team-motion-design",
-      "category": "team",
-      "description": "动效设计团队 — 动画 Token 系统、滚动编排、GPU 加速",
-      "source": "../team-motion-design/SKILL.md"
     },
     {
       "name": "team-perf-opt",
@@ -390,130 +325,80 @@
       "source": "../team-perf-opt/SKILL.md"
     },
     {
-      "name": "team-planex",
-      "category": "team",
-      "description": "Plan-and-Execute 团队管线",
-      "source": "../team-planex/SKILL.md"
-    },
-    {
-      "name": "team-roadmap-dev",
-      "category": "team",
-      "description": "路线图驱动开发 — 协调器讨论路线图后调度执行管线",
-      "source": "../team-roadmap-dev/SKILL.md"
-    },
-    {
       "name": "team-swarm",
       "category": "team",
       "description": "群智能团队 — ACO 驱动多 agent 探索 + 混合 LLM/Python 控制器",
       "source": "../team-swarm/SKILL.md"
     },
     {
-      "name": "team-ui-polish",
-      "category": "team",
-      "description": "UI 打磨团队 — Impeccable 设计标准自动发现和修复",
-      "source": "../team-ui-polish/SKILL.md"
-    },
-    {
-      "name": "team-uidesign",
-      "category": "team",
-      "description": "UI 设计团队 — 研究→设计 Token→审计→实现",
-      "source": "../team-uidesign/SKILL.md"
-    },
-    {
-      "name": "team-ultra-analyze",
-      "category": "team",
-      "description": "深度协作分析团队 — 多角色调查 + 协调器驱动综合",
-      "source": "../team-ultra-analyze/SKILL.md"
-    },
-    {
-      "name": "team-ux-improve",
-      "category": "team",
-      "description": "UX 改进团队 — 系统性发现和修复 UI/UX 交互问题",
-      "source": "../team-ux-improve/SKILL.md"
-    },
-    {
-      "name": "team-visual-a11y",
-      "category": "team",
-      "description": "视觉无障碍 QA — OKLCH 对比度、排版可读性、WCAG AA/AAA",
-      "source": "../team-visual-a11y/SKILL.md"
-    },
-    {
-      "name": "codify-to-knowhow",
-      "category": "knowledge",
-      "description": "Manifest 驱动的知识资产生成器",
-      "source": "../codify-to-knowhow/SKILL.md"
-    },
-    {
-      "name": "insight-challenge",
-      "category": "quality",
-      "description": "对抗性审查 — 质疑发现、验证声明、产出结构化裁决",
-      "source": "../insight-challenge/SKILL.md"
-    },
-    {
-      "name": "delegation-check",
-      "category": "quality",
-      "description": "委派提示词 vs agent 角色定义的内容分离违规检查",
-      "source": "../delegation-check/SKILL.md"
-    },
-    {
       "name": "scholar-anti-ai-writing",
       "category": "scholar",
       "description": "去除 AI 写作痕迹 — 检测和修复学术散文中的 AI 模式",
-      "source": "../scholar-anti-ai-writing/SKILL.md"
+      "source": "../../../../optional/skills/scholar-anti-ai-writing/SKILL.md",
+      "optional": true
     },
     {
       "name": "scholar-citation-verify",
       "category": "scholar",
       "description": "四层引用验证 — 扫描 LaTeX/BibTeX、WebSearch 验证、修复建议",
-      "source": "../scholar-citation-verify/SKILL.md"
+      "source": "../../../../optional/skills/scholar-citation-verify/SKILL.md",
+      "optional": true
     },
     {
       "name": "scholar-experiment",
       "category": "scholar",
       "description": "实验结果分析 — 统计验证、可视化、出版级 Results 章节",
-      "source": "../scholar-experiment/SKILL.md"
+      "source": "../../../../optional/skills/scholar-experiment/SKILL.md",
+      "optional": true
     },
     {
       "name": "scholar-ideation",
       "category": "scholar",
       "description": "研究构思 — 文献搜索到研究规划",
-      "source": "../scholar-ideation/SKILL.md"
+      "source": "../../../../optional/skills/scholar-ideation/SKILL.md",
+      "optional": true
     },
     {
       "name": "scholar-latex-organizer",
       "category": "scholar",
       "description": "LaTeX 模板整理 — 会议模板 .zip 清理为 Overleaf 就绪结构",
-      "source": "../scholar-latex-organizer/SKILL.md"
+      "source": "../../../../optional/skills/scholar-latex-organizer/SKILL.md",
+      "optional": true
     },
     {
       "name": "scholar-publish",
       "category": "scholar",
       "description": "会议发表准备 — 演示文稿、学术海报、推广内容",
-      "source": "../scholar-publish/SKILL.md"
+      "source": "../../../../optional/skills/scholar-publish/SKILL.md",
+      "optional": true
     },
     {
       "name": "scholar-rebuttal-pro",
       "category": "scholar",
       "description": "审稿回复 — Agy/CLI 协作分析 + 多视角讨论 + 证据策略",
-      "source": "../scholar-rebuttal-pro/SKILL.md"
+      "source": "../../../../optional/skills/scholar-rebuttal-pro/SKILL.md",
+      "optional": true
     },
     {
       "name": "scholar-review",
       "category": "scholar",
       "description": "学术论文审查 — 投稿前自审 + 收到评审后的回复写作",
-      "source": "../scholar-review/SKILL.md"
+      "source": "../../../../optional/skills/scholar-review/SKILL.md",
+      "optional": true
     },
     {
       "name": "scholar-thesis-docx",
       "category": "scholar",
       "description": "学位论文 Word 文档 — 生成、修订、格式化严格学术排版",
-      "source": "../scholar-thesis-docx/SKILL.md"
+      "source": "../../../../optional/skills/scholar-thesis-docx/SKILL.md",
+      "optional": true
     },
     {
       "name": "scholar-writing",
       "category": "scholar",
       "description": "端到端学术论文写作 — 从研究仓库到出版级 LaTeX 手稿",
-      "source": "../scholar-writing/SKILL.md"
+      "source": "../../../../optional/skills/scholar-writing/SKILL.md",
+      "optional": true
     }
   ],
   "agents": [
@@ -751,7 +636,7 @@
     },
     {
       "command": "maestro arch-kb",
-      "description": "架构知识库查询（隔离，关键词触发）：match/checklist/patterns/framework/show/search",
+      "description": "架构知识库查询（隔离，关键词触发）：search/show/list",
       "category": "knowledge"
     },
     {
@@ -787,8 +672,6 @@
     "skills": [
       "meta",
       "team",
-      "knowledge",
-      "quality",
       "scholar"
     ],
     "agents": [

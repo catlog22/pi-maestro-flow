@@ -73,7 +73,7 @@ RULES:
 - 如果用户描述非常模糊，至少提取一个 "general" 维度
 `;
 
-  const cliCommand = `teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "${escapeForShell(prompt)}" }], cwd: "" })
+  const cliCommand = `teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "${escapeForShell(prompt)}" }], cwd: ""${state.target_skill.path}", /* --to agy: set model via model-availability */ })
 
   console.log('Phase 1: 执行 Agy 维度拆解分析...');
 

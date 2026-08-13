@@ -55,7 +55,7 @@ Implementation backend selection:
 
 | Backend | Condition | Method |
 |---------|-----------|--------|
-| CLI | Multi-file refactoring with clear plan | teammate({ taskType: "development", /* --to agy */ }) |
+| CLI | Multi-file refactoring with clear plan | teammate({ agent: "general", taskType: "development", /* --to agy */ }) |
 | Direct | Single-file changes or targeted fixes | Inline Edit/Write tools |
 
 For REFACTOR tasks:

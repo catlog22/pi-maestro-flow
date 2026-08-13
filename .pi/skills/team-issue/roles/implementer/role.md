@@ -11,9 +11,9 @@ message_types: [impl_complete, impl_failed, error]
 
 | Backend | Condition | Method |
 |---------|-----------|--------|
-| codex | task_count > 3 or explicit | `teammate({ taskType: "development", /* --to codex */, name: "issue-<issueId>" })` |
-| agy | task_count <= 3 or explicit | `teammate({ taskType: "development", /* --to agy */, name: "issue-<issueId>" })` |
-| qwen | explicit | `teammate({ taskType: "development", /* --to qwen */, name: "issue-<issueId>" })` |
+| codex | task_count > 3 or explicit | `teammate({ agent: "general", taskType: "development", /* --to codex */, /* --id issue-<issueId> */ })` |
+| agy | task_count <= 3 or explicit | `teammate({ agent: "general", taskType: "development", /* --to agy */, /* --id issue-<issueId> */ })` |
+| qwen | explicit | `teammate({ agent: "general", taskType: "development", /* --to qwen */, /* --id issue-<issueId> */ })` |
 
 ## Phase 2: Load Solution & Resolve Executor
 
@@ -65,11 +65,11 @@ Dependencies: <explorerContext.dependencies>
 ```
 
 Route by executor:
-- **codex**: `Bash("teammate({ agent: "general", taskType: "development", tasks: [{ name: "issue-<issueId>", prompt: "<prompt>" }] }) { background: false })`
-- **agy**: `Bash("teammate({ agent: "general", taskType: "development", tasks: [{ name: "issue-<issueId>", prompt: "<prompt>" }] }) { background: false })`
-- **qwen**: `Bash("teammate({ agent: "general", taskType: "development", tasks: [{ name: "issue-<issueId>", prompt: "<prompt>" }] }) { background: false })`
+- **codex**: `Bash("teammate({ agent: "general", taskType: "development", tasks: [{ name: "issue-<issueId>", prompt: "<prompt>" }], /* --to codex: set model via model-availability */ }) { background: false })`
+- **agy**: `Bash("teammate({ agent: "general", taskType: "development", tasks: [{ name: "issue-<issueId>", prompt: "<prompt>" }], /* --to agy: set model via model-availability */ }) { background: false })`
+- **qwen**: `Bash("teammate({ agent: "general", taskType: "development", tasks: [{ name: "issue-<issueId>", prompt: "<prompt>" }], /* --to qwen: set model via model-availability */ }) { background: false })`
 
-On CLI failure, resume: `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "Continue" }] })
+On CLI failure, resume: `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "Continue" }], /* --to <tool>: set model via model-availability */, /* --resume: no teammate equivalent; re-dispatch or use resident agent */ })
 
 ## Phase 4: Verify & Commit
 

@@ -123,10 +123,9 @@ cp -r "${state.backup_dir}/${targetSkill.name}-backup"/* "${targetSkill.path}/"
 
   Write(`${workDir}/tuning-summary.md`, summary);
 
-  // Close the Run before declaring completion (see run-mode.md):
-  //   maestro run check {run_id}     → repair any reported gate
-  //   maestro session done {run_id}
-  // Mark status 'completed' only after `session done` succeeds.
+  // Close per run-mode.md: check the Run, then either return to the claim-holding
+  // orchestrator or use complete fenced Run completion and Execution seal commands.
+  // Mark status 'completed' only after the authoritative completion path succeeds.
 
   // Update final state
   return {

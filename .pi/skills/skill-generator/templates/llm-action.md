@@ -119,7 +119,7 @@ async function callLLM(tool, prompt, mode, timeout) {
   const modeFlag = mode === 'write' ? '--mode write' : '--mode analysis';
 
   // Use teammate unified interface
-  const command = \`teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "\\${escapePrompt(prompt)}" }] }) \${modeFlag}\`;
+  const command = \`teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "\\${escapePrompt(prompt)}" }], /* --to \${tool}: set model via model-availability */ }) \${modeFlag}\`;
 
   const result = Bash({
     command,

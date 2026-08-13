@@ -1,7 +1,7 @@
 ---
 name: team-swarm
 description: "Swarm intelligence team skill — ACO-driven multi-agent exploration with hybrid LLM coordinator + Python optimization controller. Coordinator generates swarm-config from user task, then runs K iterations of N parallel ants guided by pheromone state. Universal task space via config (nodes + scoring rule). Triggers on \"team swarm\", \"swarm intelligence\", \"蚁群\"."
-allowed-tools: teammate Read Write Edit Bash Glob Grep maestro observe
+allowed-tools: teammate Read Write Edit Bash Glob Grep observe maestro
 disable-model-invocation: true
 session-mode: none
 ---
@@ -81,7 +81,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-teammate({ agent: "team-worker", tasks: [{ name: "<role>", prompt: `## Role Assignment
+teammate({ agent: "team-worker", tasks: [{ taskType: "<task_type>", name: "<role>", prompt: `## Role Assignment
 role: <role>
 role_spec: <skill_root>/roles/<role>/role.md
 session: {run_dir}/work/team

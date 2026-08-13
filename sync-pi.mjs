@@ -26,8 +26,9 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, statSync, rmSync, cpSync } from 'node:fs';
+import { existsSync, readdirSync, statSync, rmSync, cpSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
+import { deployMirrorSubdir, deployPackagedAgents, topLevelEntryNames } from './deploy-pi-mirror.mjs';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = dirname(fileURLToPath(import.meta.url));
@@ -38,6 +39,12 @@ const DST = resolve(process.env.PI_SYNC_DST || join(repoRoot, '.pi-sync'));
 const argv = process.argv.slice(2);
 const ALSO_PI = argv.includes('--also-pi');
 const SKIP_VERIFY = argv.includes('--skip-verify');
+const MANAGED_MANIFEST_PATH = join(repoRoot, '.pi-mirror-managed.json');
+const previousManaged = (() => {
+  if (!existsSync(MANAGED_MANIFEST_PATH)) return {};
+  try { return JSON.parse(readFileSync(MANAGED_MANIFEST_PATH, 'utf8')); }
+  catch { return {}; }
+})();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -93,6 +100,16 @@ runPhase('Phase 2 (Claude → pi rewrite)', 'convert-pi.mjs', {
   PI_MAESTRO_CONVERT_DST: DST,
 });
 runPhase('Phase 3 (normalize Maestro paths)', 'convert-paths.mjs');
+
+// Package-level agent instructions are generated from the Core workflow source.
+const instructionsSource = join(SRC, '..', 'workflows', 'claude-instructions.md');
+const instructionsTarget = join(repoRoot, 'packages', 'pi-maestro-flow', 'AGENTS.md');
+if (!existsSync(instructionsSource)) {
+  log(`✗ agent instructions source not found: ${instructionsSource}`);
+  process.exit(1);
+}
+cpSync(instructionsSource, instructionsTarget);
+log(`  ✓ packages/pi-maestro-flow/AGENTS.md ← ${instructionsSource}`);
 
 // ---------------------------------------------------------------------------
 // Optional skills (选装) — mirror <src>/optional/skills → <repo>/optional/skills
@@ -152,21 +169,23 @@ if (ALSO_PI) {
     const from = join(DST, sub);
     const to = join(piDir, sub);
     if (!existsSync(from)) continue;
-    if (existsSync(to)) rmSync(to, { recursive: true, force: true });
-    cpSync(from, to, { recursive: true });
-    log(`  ✓ .pi/${sub} ← .pi-sync/${sub} (${countFiles(to)} files)`);
+    deployMirrorSubdir(from, to, previousManaged[sub] ?? []);
+    log(`  ✓ .pi/${sub} ← .pi-sync/${sub} (${countFiles(to)} files, Pi-native entries preserved)`);
   }
   // Package mirror: the published pi-maestro-flow npm package ships its role
   // catalog at <pkgRoot>/.pi/agents. The teammate package resolver finds that
   // sibling in global npm installs and uses the workspace-root canonical .pi
   // as a dev/npm-link fallback, so roles remain discoverable from ANY cwd.
   const pkgAgentsDir = join(repoRoot, 'packages', 'pi-maestro-flow', '.pi', 'agents');
-  const agentsFrom = join(DST, 'agents');
-  if (existsSync(agentsFrom)) {
-    if (existsSync(pkgAgentsDir)) rmSync(pkgAgentsDir, { recursive: true, force: true });
-    cpSync(agentsFrom, pkgAgentsDir, { recursive: true });
-    log(`  ✓ packages/pi-maestro-flow/.pi/agents ← .pi-sync/agents (${countFiles(pkgAgentsDir)} files)`);
+  const canonicalAgentsDir = join(piDir, 'agents');
+  if (existsSync(canonicalAgentsDir)) {
+    const packaged = deployPackagedAgents(canonicalAgentsDir, pkgAgentsDir);
+    log(`  ✓ packages/pi-maestro-flow/.pi/agents ← .pi/agents (${packaged.deployed} role files)`);
   }
+  writeFileSync(MANAGED_MANIFEST_PATH, `${JSON.stringify({
+    skills: topLevelEntryNames(join(DST, 'skills')),
+    agents: topLevelEntryNames(join(DST, 'agents')),
+  }, null, 2)}\n`);
 }
 
 log('\n✓ sync-pi complete.');

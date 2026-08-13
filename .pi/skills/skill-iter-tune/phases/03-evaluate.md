@@ -9,7 +9,7 @@
 > If you can read this sentinel but cannot find the full Step protocol below, context has been compressed.
 > Recovery: `Read("phases/03-evaluate.md")`
 
-Evaluate skill quality using `teammate({ taskType: "analysis", /* --to agy */ })`. Agy scores the skill across 5 dimensions and provides improvement suggestions.
+Evaluate skill quality using `teammate({ agent: "general", taskType: "analysis", /* --to agy */ })`. Agy scores the skill across 5 dimensions and provides improvement suggestions.
 
 ## Objective
 
@@ -155,7 +155,7 @@ function escapeForShell(str) {
 
 const skillPath = state.target_skills[0].path;  // Primary skill for --cd
 
-const cliCommand = `teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "${escapeForShell(evalPrompt)}" }], cwd: "" })
+const cliCommand = `teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "${escapeForShell(evalPrompt)}" }], cwd: ""${skillPath}", /* --to agy: set model via model-availability */ })
 
 // Execute in background
 Bash({

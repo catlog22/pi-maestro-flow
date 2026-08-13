@@ -62,7 +62,7 @@ Set the task ID to match `ANT-<k>-<i>` (or record mapping in `.msg/meta.json` if
 For each assignment, spawn one team-worker:
 
 ```
-teammate({ agent: "team-worker", tasks: [{ name: "ant-<k>-<i>", prompt: `## Role Assignment
+teammate({ agent: "team-worker", tasks: [{ taskType: "<task_type>", name: "ant-<k>-<i>", prompt: `## Role Assignment
 role: ant
 role_spec: <skill_root>/roles/ant/role.md
 session: <session_path>
@@ -119,7 +119,7 @@ If all completed -> proceed.
 If `config.scoring.mode == "llm"`:
 
 ```
-teammate({ agent: "team-worker", tasks: [{ name: "scorer-<k>", prompt: `## Role Assignment
+teammate({ agent: "team-worker", tasks: [{ taskType: "<task_type>", name: "scorer-<k>", prompt: `## Role Assignment
 role: scorer
 role_spec: <skill_root>/roles/scorer/role.md
 session: <session_path>

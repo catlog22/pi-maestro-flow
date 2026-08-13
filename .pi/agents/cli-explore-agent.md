@@ -60,7 +60,7 @@ Phase 4: Output Generation → agent report + file output
 **Quick-scan** — single targeted prompt:
 
 ```bash
-teammate({ agent: "explorer", taskType: "explore", tasks: [{ prompt: "FIND: <target from prompt>\nSCOPE: src/\nEXCLUDE: test files, node_modules, generated code\nEXPECTED: file:line evidence list" }] })
+teammate({ agent: "explorer", tasks: [{ prompt: "FIND: <target from prompt>\nSCOPE: src/\nEXCLUDE: test files, node_modules, generated code\nEXPECTED: file:line evidence list" }] })
 ```
 
 **Deep-scan** — multi-prompt parallel for multi-angle coverage:
@@ -79,7 +79,7 @@ EXPECTED: pattern descriptions with file evidence" \
 **Dependency-map** — combine explore + Bash:
 
 ```bash
-teammate({ agent: "explorer", taskType: "explore", tasks: [{ prompt: "FIND: import/export relationships\nSCOPE: src/\nATTENTION: circular dependencies, tight coupling\nEXPECTED: dependency pairs with file:line" }] })
+teammate({ agent: "explorer", tasks: [{ prompt: "FIND: import/export relationships\nSCOPE: src/\nATTENTION: circular dependencies, tight coupling\nEXPECTED: dependency pairs with file:line" }] })
 
 ### Secondary: Bash structural scan (supplement only)
 

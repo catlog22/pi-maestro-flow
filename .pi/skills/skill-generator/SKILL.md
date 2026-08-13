@@ -1,7 +1,7 @@
 ---
 name: skill-generator
 description: "Meta-skill for creating new Claude Code skills with configurable execution modes. Supports sequential (fixed order) and autonomous (stateless) phase patterns. Use for skill scaffolding, skill creation, or building new workflows. Triggers on \"create skill\", \"new skill\", \"skill generator\"."
-allowed-tools: teammate Read Bash Glob Grep Write maestro observe
+allowed-tools: teammate Read Bash Glob Grep Write observe maestro
 disable-model-invocation: true
 session-mode: none
 ---
@@ -25,13 +25,7 @@ Meta-skill for creating new Claude Code skills with configurable execution modes
 
 ## Run Lifecycle
 
-Follow `~/.maestro/workflows/run-mode.md`. If an orchestrator injected `run_id` / `run_dir` in the birth packet, use them and do NOT call `maestro run create --platform pi`. Otherwise self-start before Phase 1:
-
-```bash
-maestro run start "<short phrase>" --cmd skill-generator --session <YYYYMMDD-skill-generator-{topic}> --platform pi
-```
-
-Session slug is ASCII-only, ≤64 chars. Retain the returned `run_id` and `run_dir`; all `{run_dir}/...` paths below refer to it. Close per Phase 5.
+Follow `~/.maestro/workflows/run-mode.md`. If an orchestrator injected `run_id` / `run_dir` in the birth packet, use them directly. Otherwise negotiate capabilities, create or resolve the explicit Session identity, start the bounded Execution with its complete audited option set, then create `skill-generator` with the complete fenced `maestro run start --platform pi` option set. Retain the exact locator, revisions, private claim, `run_id`, and `run_dir`; all `{run_dir}/...` paths below refer to it. Close per Phase 5.
 
 ## Pre-load (before execution)
 
@@ -232,7 +226,7 @@ Phase 5: Validation & Documentation
    - Generate: README.md (usage instructions)
    - Generate: validation-report.json (completeness check)
    - Output: Final documentation
-   - Close the Run: `maestro run check {run_id}` → repair any reported gate → `maestro session done {run_id}`. Report success only after completion.
+   - Close the Run: `maestro run check {run_id}` -> repair any reported gate -> if self-started, use the complete fenced `maestro run complete` and `maestro execution seal` commands from `run-mode.md`; if dispatched, return to the claim-holding orchestrator. Report success only after the authoritative completion path succeeds.
 ```
 
 **Execution Protocol**:

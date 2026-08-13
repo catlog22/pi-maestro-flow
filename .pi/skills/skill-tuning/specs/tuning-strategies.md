@@ -374,5 +374,5 @@ For issues in these categories, use Agy CLI for custom analysis:
 
 **Agy CLI Template**:
 ```bash
-teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: [optimization goal for skill at ${skillPath}]\nTASK: • [specific analysis steps]\nMODE: analysis\nCONTEXT: @${s…" }] })
+teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: [optimization goal for skill at ${skillPath}]\nTASK: • [specific analysis steps]\nMODE: analysis\nCONTEXT: @${skillPath}/**/*\nEXPECTED: [specific deliverable]" }] })
 ```

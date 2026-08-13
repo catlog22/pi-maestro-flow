@@ -1,7 +1,7 @@
 ---
 name: maestro-odyssey
-description: "Long-running iterative cycle — one entry, six modes (debug|improve|planex|review|security|ui). Shared archaeology/audit → fix → verify → generalize → discover → persist skeleton with mode-specific dimensions. User-invoked campaign entry; single-step fixes route via /maestro-next Arguments: <intent> --mode debug|improve|planex|review|security|ui [--auto] [-y] [-c]"
-allowed-tools: Read Write Edit Bash Glob Grep teammate maestro observe
+description: "Long-running iterative cycle — one entry, six modes (debug|improve|planex|review|security|ui). Shared archaeology/audit → fix → verify → generalize → discover → persist skeleton with mode-specific dimensions. User-invoked campaign entry; single-step fixes route via /maestro-next Arguments: <intent> --mode debug|improve|planex|review|security|ui [-y] [-c]"
+allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro
 disable-model-invocation: true
 session-mode: none
 ---
@@ -18,6 +18,8 @@ session-mode: none
 <required_reading>
 ~/.maestro/workflows/run-mode.md
 </required_reading>
+
+If any required file above was not expanded into context by the host, or its content is no longer in context, Read it explicitly before executing any step.
 
 <deferred_reading>
 - [odyssey-base.md](~/.maestro/workflows/odyssey-base.md) — read after mode resolved for shared back-half (A_INTAKE, A_RESUME, GENERALIZE → DISCOVER → RECORD → END)
@@ -76,7 +78,7 @@ On mode resolved: read the deferred workflow file for that mode + odyssey-base.m
 <context>
 $ARGUMENTS
 
-**Universal flags:** `--mode <name>` mode selector | `--skip-fix` audit/diagnose only, skip fix+verify | `--skip-generalize` skip GENERALIZE+DISCOVER | `--auto` skip delegate/agent confirmation in execution phases only (decisions → `deferred`); does NOT affect mode selection or INTAKE interactions — mode ambiguity still triggers [@ask] or E000 | `-y` skip all confirmation interactions, use default choices; does NOT auto-mark decisions as deferred (use `--auto` for delegate confirmation skip); never bypasses mode ambiguity (E000), INTAKE gate blockers, escalation | `-c` resume most recent unfinished session of the SAME mode; if --mode conflicts with resumed session's mode → E003 (mode mismatch); no history → ignore -c, create new session | `--heartbeat` /loop periodic progress
+**Universal flags:** `--mode <name>` mode selector | `--skip-fix` audit/diagnose only, skip fix+verify | `--skip-generalize` skip GENERALIZE+DISCOVER | `-y` skip all confirmation interactions (including delegate/agent confirmations in execution phases), use default choices; decisions skipped this way are recorded as `deferred`; never bypasses mode ambiguity (E000), INTAKE gate blockers, escalation | `-c` resume most recent unfinished session of the SAME mode; if --mode conflicts with resumed session's mode → E003 (mode mismatch); no history → ignore -c, create new session | `--heartbeat` /loop periodic progress
 
 **Mode-scoped flags:**
 
@@ -95,23 +97,12 @@ $ARGUMENTS
 
 Mode-scoped flags passed to inapplicable mode: emit W008 warning and ignore the flag.
 
-**Run creation** (per run-mode.md §Start or Continue a Run):
-```bash
-# command-name is odyssey-{mode} — resolves the mode's own prepare contract and workflow.
-# The intent phrase is Session metadata only (may contain Chinese) and does NOT enter
-# Run input.args or satisfy the command contract.
-maestro session start "<short goal phrase>" \
-  --chain odyssey-<mode> \
-  --session "YYYYMMDD-odyssey-<mode>-<topic>" \
-  [--arg "<command input>"]
-```
-
-`--arg` carries the command input required by the mode's prepare contract / `argument-hint` — for odyssey-review and odyssey-ui this is the **target** (`<target: file|dir|HEAD|staged|phase#|PR#>`), e.g. `--arg "."` for the whole project or `--arg "HEAD"` for the diff; for odyssey-planex/debug/improve it is the requirement/intent text. Do NOT pass the bare intent phrase as `--arg` for review/ui — a non-path value fails argument validation (`ARGUMENT_REQUIRED`).
+**Run creation**: follow `run-mode.md` exactly. Negotiate capabilities, create or resolve the explicit Session identity, start a bounded Execution with the complete audited acquisition options, then invoke the complete fenced `maestro run start --platform pi odyssey-<mode>` option set with the mode arguments. Never abbreviate or omit the Execution locator, revision, or private lease claim in an executable command.
 
 **Session**: `{run_dir}/outputs/`
 **Output**: `session.json` | `evidence.ndjson` | `understanding.md` | `explore.json` (debug/review only)
 
-**Output boundary**: ALL session artifacts MUST target the session directory (`{run_dir}/outputs/`) or `.workflow/state.json` only. Source code modifications during fix/execute phases are in-scope but MUST be committed per action. NEVER write session artifacts outside these paths.
+**Output boundary**: ALL session artifacts MUST target the run outputs directory (`{run_dir}/outputs/`) only. `.workflow/state.json` and all `sessions/<sid>/` protocol files are runtime-owned — a workflow never writes them. Source code modifications during fix/execute phases are in-scope but MUST be committed per action. NEVER write session artifacts outside `{run_dir}/outputs/`.
 
 **session.json — shared core + mode fields:**
 ```json

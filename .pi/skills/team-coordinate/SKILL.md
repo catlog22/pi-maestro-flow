@@ -1,7 +1,7 @@
 ---
 name: team-coordinate
 description: "Universal team coordination skill with dynamic role generation. Uses team-worker agent architecture with role-spec files. Only coordinator is built-in -- all worker roles are generated at runtime as role-specs and spawned via team-worker agent. Beat/cadence model for orchestration. Triggers on \"Team Coordinate \"."
-allowed-tools: teammate Read Write Edit Bash Glob Grep maestro observe
+allowed-tools: teammate Read Write Edit Bash Glob Grep observe maestro
 disable-model-invocation: true
 session-mode: none
 ---
@@ -43,8 +43,8 @@ Universal team coordination skill: analyze task -> generate role-specs -> dispat
   (roles generated at runtime from task analysis)
 
   CLI Tools (callable by any worker):
-    teammate({ taskType: "analysis" })  - analysis and exploration
-    teammate({ taskType: "development" })     - code generation and modification
+    teammate({ agent: "general", taskType: "analysis" })  - analysis and exploration
+    teammate({ agent: "general", taskType: "development" })     - code generation and modification
 ```
 
 ## Shared Constants
@@ -55,8 +55,8 @@ Universal team coordination skill: analyze task -> generate role-specs -> dispat
 | Session path | `{run_dir}/work/team/` |
 | Worker agent | `team-worker` |
 | Message bus | `mcp__maestro__team_msg(session_id=<run-id>, ...)` |
-| CLI analysis | `teammate({ taskType: "analysis" })` |
-| CLI write | `teammate({ taskType: "development" })` |
+| CLI analysis | `teammate({ agent: "general", taskType: "analysis" })` |
+| CLI write | `teammate({ agent: "general", taskType: "development" })` |
 | Max roles | 5 |
 
 ## Role Router
@@ -82,8 +82,8 @@ Workers can use CLI tools for analysis and code operations:
 
 | Tool | Purpose |
 |------|---------|
-| teammate({ taskType: "analysis" }) | Analysis, exploration, pattern discovery |
-| teammate({ taskType: "development" }) | Code generation, modification, refactoring |
+| teammate({ agent: "general", taskType: "analysis" }) | Analysis, exploration, pattern discovery |
+| teammate({ agent: "general", taskType: "development" }) | Code generation, modification, refactoring |
 
 ### Dispatch
 
@@ -125,7 +125,7 @@ User provides task description
 When coordinator spawns workers, use `team-worker` agent with role-spec path:
 
 ```
-teammate({ agent: "team-worker", tasks: [{ name: "<role>", prompt: `## Role Assignment
+teammate({ agent: "team-worker", tasks: [{ taskType: "<task_type>", name: "<role>", prompt: `## Role Assignment
 role: <role>
 role_spec: {run_dir}/work/team/role-specs/<role>.md
 session: {run_dir}/work/team

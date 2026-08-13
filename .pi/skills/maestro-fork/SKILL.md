@@ -1,7 +1,7 @@
 ---
 name: maestro-fork
 description: "Create or sync session worktree for parallel dev Arguments: --session <session_id> [--base <ref>] [--sync]"
-allowed-tools: Read Write Edit Bash Glob Grep teammate maestro observe
+allowed-tools: Read Write Edit Bash Glob Grep teammate observe maestro
 disable-model-invocation: true
 session-mode: none
 ---
@@ -80,7 +80,7 @@ Fork and sync algorithm steps are defined in workflow `fork.md`.
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Fork complete | `cd {wt.path}` then `maestro run start "{goal}" --cmd analyze --topic "{topic}" --platform pi --workflow-root .` |
+| Fork complete | `cd {wt.path}` then step `analyze` (`maestro run start "{goal}" --cmd analyze --session YYYYMMDD-analyze-{topic} --platform pi --arg "{goal}"`) |
 | Fork + automated | `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "run full lifecycle for session" }], cwd: "{wt.path}" }) |
 | Sync complete | Resume work in worktree |
 | Sync conflicts found | Resolve manually, then retry |
@@ -90,10 +90,10 @@ Fork and sync algorithm steps are defined in workflow `fork.md`.
 | Code | Severity | Condition | Recovery |
 |------|----------|-----------|----------|
 | E001 | error | Project not initialized | Run maestro-init first |
-| E002 | error | No roadmap found | Run step `roadmap` first (`maestro run start "{goal}" --cmd roadmap --topic "{topic}" --platform pi --workflow-root .`) |
+| E002 | error | No roadmap found | Run step `roadmap` first (`maestro run start "{goal}" --cmd roadmap --session YYYYMMDD-roadmap-{topic} --platform pi --arg "{goal}"`) |
 | E003 | error | Running inside a worktree | Run from main worktree |
 | E004 | error | No session ID provided | Provide `--session <session_id>` |
-| E005 | error | No sessions defined in state.json | Run step `roadmap` first (`maestro run start "{goal}" --cmd roadmap --topic "{topic}" --platform pi --workflow-root .`) |
+| E005 | error | No sessions defined in state.json | Run step `roadmap` first (`maestro run start "{goal}" --cmd roadmap --session YYYYMMDD-roadmap-{topic} --platform pi --arg "{goal}"`) |
 | E006 | error | Session not found in state.json.sessions[] | Check available sessions |
 | E007 | error | No active worktree for session (--sync) | Check worktrees.json |
 | E008 | error | Session already has active worktree | Merge or cleanup first |

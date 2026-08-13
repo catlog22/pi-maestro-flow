@@ -251,6 +251,38 @@ function ensurePiTeammateContract(content, filePath) {
   return `${parts.frontmatter}${newline}${block}${newline}${newline}${body}`;
 }
 
+const maestroDryRunActionBlock = `
+### A_DRY_RUN
+
+Perform A_CLASSIFY and A_DECOMPOSE in memory, display the proposed chain, boundary contract, goals, risk and unresolved arguments, then END. Do not call any Session/Run mutation command, dispatch an executor, or write workflow authority.
+`;
+
+function ensureMaestroDryRunContract(content, filePath) {
+  const path = normalizePath(filePath);
+  if (!path.endsWith('/skills/maestro/SKILL.md')) return content;
+  let result = content;
+  if (!result.includes('- `--dry-run` — classify and display the proposed chain')) {
+    result = result.replace(
+      '- `--amend` — amend that Session\'s goal; remaining text is the change request.',
+      '- `--amend` — amend that Session\'s goal; remaining text is the change request.\n- `--dry-run` — classify and display the proposed chain without creating a Session or executing any step.',
+    );
+  }
+  if (!result.includes('→ A_DRY_RUN THEN END WHEN: `--dry-run`')) {
+    result = result.replace(
+      'S_PARSE:\n  → S_AMEND WHEN: `--amend`',
+      'S_PARSE:\n  → A_DRY_RUN THEN END WHEN: `--dry-run`\n  → S_AMEND WHEN: `--amend`',
+    );
+  }
+  result = insertBefore(result, '</actions>', maestroDryRunActionBlock);
+  if (!result.includes('- `--dry-run` emits a chain preview')) {
+    result = result.replace(
+      '- Public flags are `-y`, `-c`, `--amend`.',
+      '- Public flags are `-y`, `-c`, `--amend`, `--dry-run`.\n- `--dry-run` emits a chain preview and performs no Session/Run mutation or executor dispatch.',
+    );
+  }
+  return result;
+}
+
 const maestroCliSurface = `
 <cli_surface>
 
@@ -576,6 +608,23 @@ maestro run start "<short goal>" --cmd <step> --platform pi --workflow-root . [-
     '$1\n',
   );
 
+  // Source command docs evolve faster than the literal compatibility table.
+  // Collapse any legacy prepare + converted start pair after the specific
+  // semantic rewrites above have had first choice.
+  result = result.replace(
+    /`maestro run prepare (?:--platform pi )?[^\s`]+(?: --session [^\s`]+)?` \+ `(maestro run start [^`]*)`/g,
+    '`$1`',
+  );
+  // `run prepare` has no Pi CLI equivalent. The installed prepare asset is the
+  // read-only protocol source used before a Run exists.
+  result = result.replace(
+    /maestro run prepare (?:--platform pi )?([^\s`]+)(?: --session [^\s`]+)?(?: --json)?/g,
+    'read ~/.maestro/prepare/$1.md',
+  );
+  // Remaining generic prose references use the unified human entry command.
+  result = result.replace(/\bmaestro run create\b/g, 'maestro run start');
+
+  result = ensureMaestroDryRunContract(result, filePath);
   return bindPiPlatformToLifecycleCalls(result);
 }
 
@@ -939,6 +988,13 @@ export function transformBody(body, filePath) {
 export function transformPiContent(content, filePath) {
   let modified = restoreFrontmatterToolAliases(content);
   const normalizedPath = normalizePath(filePath);
+  if (normalizedPath.endsWith('/skills/maestro/SKILL.md')
+    && !modified.includes('Arguments: <intent> [-y] [-c] [--amend] [--dry-run]')) {
+    modified = modified.replace(
+      'Arguments: <intent> [-y] [-c] [--amend]',
+      'Arguments: <intent> [-y] [-c] [--amend] [--dry-run]',
+    );
+  }
 
   // Check if it's an agent file (tools: list format)
   if (filePath.endsWith('.md') && normalizedPath.includes('/agents/')) {

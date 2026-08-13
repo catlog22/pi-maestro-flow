@@ -54,7 +54,7 @@ Implementation backend selection:
 
 | Backend | Condition | Method |
 |---------|-----------|--------|
-| CLI | Multi-file optimization with clear plan | teammate({ taskType: "development", /* --to agy */ }) |
+| CLI | Multi-file optimization with clear plan | teammate({ agent: "general", taskType: "development", /* --to agy */ }) |
 | Direct | Single-file changes or targeted fixes | Inline Edit/Write tools |
 
 For IMPL tasks:

@@ -1,7 +1,7 @@
 ---
 name: maestro-init
 description: "Initialize project with auto state detection Arguments: [-y] [--from <source>] [--from-brainstorm SESSION-ID]"
-allowed-tools: Read Write Bash Glob Grep teammate maestro observe
+allowed-tools: Read Write Bash Glob Grep teammate observe maestro
 disable-model-invocation: true
 session-mode: none
 ---
@@ -132,11 +132,11 @@ Verdicts:
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Roadmap needed (default light) | step `roadmap` (`maestro run start "{goal}" --cmd roadmap --topic "{topic}" --platform pi --workflow-root .`) |
+| Roadmap needed (default light) | step `roadmap` (`maestro run start "{goal}" --cmd roadmap --session YYYYMMDD-roadmap-{topic} --platform pi --arg "{goal}"`) |
 
 Note: roadmap step is responsible for creating `state.json.sessions[]` entries and setting the first `active_session_id`.
-| Full spec package | step `blueprint` (`maestro run start "{goal}" --cmd blueprint --topic "{topic}" --platform pi --workflow-root .`) |
-| Explore ideas first | step `brainstorm` (`maestro run start "{goal}" --cmd brainstorm --topic "{topic}" --platform pi --workflow-root .`) |
+| Full spec package | step `blueprint` (`maestro run start "{goal}" --cmd blueprint --session YYYYMMDD-blueprint-{topic} --platform pi --arg "{goal}"`) |
+| Explore ideas first | step `brainstorm` (`maestro run start "{goal}" --cmd brainstorm --session YYYYMMDD-brainstorm-{topic} --platform pi --arg "{goal}"`) |
 | Quick ad-hoc task | `/maestro-companion "{goal}"` |
 </completion>
 

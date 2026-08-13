@@ -60,7 +60,7 @@ Bash("<test-command> 2>&1 || true")
 
 ```
 Bash({
-  command: `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "PURPOSE: Fix test failures to achieve pass rate >= 0.95; success = all tests pass\nTASK: • Analyze test failure output •…" }], cwd: "{run_dir}/work/team" })
+  command: `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "PURPOSE: Fix test failures to achieve pass rate >= 0.95; success = all tests pass\nTASK: • Analyze test failure output • Identify root causes • Fix test code only (not source) • Preserve test intent\nMODE: write\nCONTEXT: @{run_dir}/outputs/<test-dir>/**/* | Memory: Test framework: <framework>, iteration <N>/3\nEXPECTED: Fixed test files with: corrected assertions, proper async handling, fixed imports, maintained coverage\nCONSTRAINTS: Only modify test files | Preserve test structure | No source code changes\nTest failures:\n<test-output>" }], cwd: "{run_dir}/work/team" })
   background: false
 })
 ```

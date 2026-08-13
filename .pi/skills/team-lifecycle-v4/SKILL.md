@@ -1,7 +1,7 @@
 ---
 name: team-lifecycle-v4
 description: "Full lifecycle team skill — plan, develop, test, review in one coordinated session. Role-based architecture with coordinator-driven beat model. Triggers on \"team lifecycle v4\"."
-allowed-tools: teammate Read Write Edit Bash Glob Grep maestro observe
+allowed-tools: teammate Read Write Edit Bash Glob Grep observe maestro
 disable-model-invocation: true
 session-mode: none
 ---
@@ -70,7 +70,7 @@ Parse `$ARGUMENTS`:
 
 - **Session prefix**: `TLV4`
 - **Session path**: `{run_dir}/work/team/`
-- **CLI tools**: `teammate({ taskType: "analysis" })` (read-only), `teammate({ taskType: "development" })` (modifications)
+- **CLI tools**: `teammate({ agent: "general", taskType: "analysis" })` (read-only), `teammate({ agent: "general", taskType: "development" })` (modifications)
 - **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Worker Spawn Template
@@ -78,7 +78,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-teammate({ agent: "team-worker", tasks: [{ name: "<role>", prompt: `## Role Assignment
+teammate({ agent: "team-worker", tasks: [{ taskType: "<task_type>", name: "<role>", prompt: `## Role Assignment
 role: <role>
 role_spec: <skill_root>/roles/<role>/role.md
 session: {run_dir}/work/team
@@ -105,7 +105,7 @@ Supervisor is a **resident agent** (independent from team-worker). Spawned once 
 ### Spawn (Phase 2 — once per session)
 
 ```
-teammate({ agent: "team-supervisor", tasks: [{ name: "supervisor", prompt: `## Role Assignment
+teammate({ agent: "team-supervisor", tasks: [{ taskType: "<task_type>", name: "supervisor", prompt: `## Role Assignment
 role: supervisor
 role_spec: <skill_root>/roles/supervisor/role.md
 session: {run_dir}/work/team

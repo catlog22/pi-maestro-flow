@@ -1,7 +1,7 @@
 ---
 name: skill-iter-tune
 description: "Iterative skill tuning via execute-evaluate-improve feedback loop. Uses maestro delegate Claude to execute skill, Agy to evaluate quality, and Agent to apply improvements. Iterates until quality threshold or max iterations. Triggers on \"skill iter tune\", \"iterative skill tuning\", \"tune skill\"."
-allowed-tools: teammate Read Write Edit Bash Glob Grep maestro observe
+allowed-tools: teammate Read Write Edit Bash Glob Grep observe maestro
 disable-model-invocation: true
 session-mode: none
 ---
@@ -181,12 +181,12 @@ while (true) {
   // Read: phases/02-execute.md
   // Single mode: one teammate call for all skills
   // Chain mode: sequential teammate per skill in chain_order, passing artifacts
-  // Snapshot skill → construct prompt → teammate({ taskType: "development", /* --to claude */ })
+  // Snapshot skill → construct prompt → teammate({ agent: "general", taskType: "development", /* --to claude */ })
   // Collect artifacts
 
   // === Phase 3: Evaluate ===
   // Read: phases/03-evaluate.md
-  // Construct eval prompt → teammate({ taskType: "analysis", /* --to agy */ })
+  // Construct eval prompt → teammate({ agent: "general", taskType: "analysis", /* --to agy */ })
   // Parse score → write iteration-N-eval.md → check termination
 
   // Check termination
@@ -209,7 +209,7 @@ Read and execute: `Ref: phases/02-execute.md`
 
 - Snapshot skill → `iteration-{N}/skill-snapshot/`
 - Build execution prompt from skill content + test scenario
-- Execute: `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "..." }], cwd: "" })
+- Execute: `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "..." }], cwd: ""${iterDir}/artifacts", /* --to claude: set model via model-availability */ })
 - Collect artifacts
 
 ### Phase 3: Evaluate Quality (per iteration)
@@ -217,7 +217,7 @@ Read and execute: `Ref: phases/02-execute.md`
 Read and execute: `Ref: phases/03-evaluate.md`
 
 - Build evaluation prompt with skill + artifacts + criteria + history
-- Execute: `teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "..." }] })
+- Execute: `teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "..." }], /* --to agy: set model via model-availability */ })
 - Parse 5-dimension score (Clarity, Completeness, Correctness, Effectiveness, Efficiency)
 - Write `iteration-{N}-eval.md`
 - Check termination: score >= threshold | iter >= max | convergence | error limit

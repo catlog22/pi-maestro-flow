@@ -16,13 +16,9 @@
 
 ### Step 1.0: Establish Run (see run-mode.md)
 
-If an orchestrator injected `run_id` / `run_dir` in the birth packet, use them and do NOT call `maestro run create --platform pi`. Otherwise self-start:
+If an orchestrator injected `run_id` / `run_dir` in the birth packet, use them directly. Otherwise follow the complete self-start flow in `run-mode.md`: negotiate capabilities, create or resolve the explicit Session identity, start the bounded Execution, and create `skill-iter-tune` with the full locator, fence, private claim, intent, and `--json` option set.
 
-```bash
-maestro run start "<short phrase>" --cmd skill-iter-tune --session <YYYYMMDD-skill-iter-tune-{topic}> --platform pi
-```
-
-Session slug is ASCII-only, ≤64 chars (topic derived from the target skill name). Retain the returned `run_id` and `run_dir`; the `{run_dir}/outputs/...` workspace below is created under it.
+The Session slug is ASCII-only and <=64 chars (topic derived from the target skill name). Retain the returned exact locator, `run_id`, and `run_dir`; the `{run_dir}/outputs/...` workspace below is created under it.
 
 ### Step 1.1: Parse Input
 

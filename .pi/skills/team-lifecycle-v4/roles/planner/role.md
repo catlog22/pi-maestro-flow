@@ -31,7 +31,7 @@ message_types:
 2. Check {run_dir}/work/team/explorations/cache-index.json for cached explorations
 3. Explore codebase (cache-aware):
    ```
-   Bash({ command: `teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: Explore codebase to inform planning\n   TASK: • Search for relevant patterns • Identify files to modify • Docum…" }] }) background: false })
+   Bash({ command: `teammate({ agent: "general", taskType: "analysis", tasks: [{ prompt: "PURPOSE: Explore codebase to inform planning\n   TASK: • Search for relevant patterns • Identify files to modify • Document integration points\n   MODE: analysis\n   CONTEXT: @**/*\n   EXPECTED: JSON with: relevant_files[], patterns[], integration_points[], recommendations[]" }] }) background: false })
    ```
 4. Store results in {run_dir}/work/team/explorations/
 
@@ -48,7 +48,7 @@ After exploration, supplement upstream tech_profile with planning-phase signals 
 
 Generate plan.json + .task/TASK-*.json:
 ```
-Bash({ command: `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "PURPOSE: Generate implementation plan from exploration results\nTASK: • Create plan.json overview • Generate TASK-*.json…" }] }) background: false })
+Bash({ command: `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "PURPOSE: Generate implementation plan from exploration results\nTASK: • Create plan.json overview • Generate TASK-*.json files (2-7 tasks) • Define dependencies • Set convergence criteria\nMODE: write\nCONTEXT: @{run_dir}/work/team/explorations/*.json\nEXPECTED: Files: plan.json + .task/TASK-*.json\nCONSTRAINTS: 2-7 tasks, include id/title/files[]/convergence.criteria/depends_on" }] }) background: false })
 ```
 
 Output files:
