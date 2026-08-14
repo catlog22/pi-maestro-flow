@@ -57,7 +57,6 @@ export type RunOperationV12 =
   | "session-chain-insert"
   | "session-chain-skip"
   | "session-chain-replace"
-  | "session-chain-audit"
   | "run-cancel"
   | "run-seal"
   | "run-transition"
@@ -80,9 +79,6 @@ export type RunOperationV12 =
   | "execution-operation-heartbeat"
   | "execution-operation-release"
   | "execution-operation-status"
-  | "participant-register"
-  | "participant-status"
-  | "participant-unregister"
   | "artifact-inspect"
   | "artifact-republish";
 
@@ -137,7 +133,6 @@ export interface RunResponseErrorV11 {
 }
 
 export type RunResponseRevisionTargetV12 =
-  | "session-identity"
   | "orchestration"
   | "run"
   | "artifact"
@@ -340,14 +335,13 @@ const operationV12Schema = z.enum([
   ...operationV10Schema.options,
   "capabilities", "session-open", "session-migrate",
   "session-complete", "session-archive", "session-status", "session-resume-view",
-  "session-chain-insert", "session-chain-skip", "session-chain-replace", "session-chain-audit",
+  "session-chain-insert", "session-chain-skip", "session-chain-replace",
   "run-cancel", "run-seal", "run-transition", "run-decide", "execution-start", "execution-attach",
   "execution-status", "execution-pause", "execution-resolve", "execution-resume", "execution-seal",
   "execution-handoff-prepare", "execution-handoff-accept", "execution-handoff-cancel",
   "execution-lease-status", "execution-lease-heartbeat", "execution-lease-release", "execution-lease-recover",
   "execution-operation-claim", "execution-operation-heartbeat", "execution-operation-release",
-  "execution-operation-status", "participant-register", "participant-status", "participant-unregister",
-  "artifact-inspect", "artifact-republish",
+  "execution-operation-status", "artifact-inspect", "artifact-republish",
 ]);
 const errorCodeV10Schema = z.enum([
   "COMMANDER_USAGE", "SESSION_NOT_FOUND", "SESSION_AMBIGUOUS", "SESSION_NOT_RUNNING", "RESUME_REQUIRED",
@@ -452,7 +446,7 @@ const errorV11Schema = z.object({
 const responseV11Schema = z.union([successV11Schema, errorV11Schema]);
 
 const revisionTargetV12Schema = z.enum([
-  "session-identity", "orchestration", "run", "artifact", "evidence",
+  "orchestration", "run", "artifact", "evidence",
 ]);
 const commonV12Shape = {
   schema_version: z.literal("run-response/1.2"),

@@ -345,7 +345,7 @@ test("artifact republish injects inspect-derived CAS and host identity for execu
           assert.equal(flagValue(argv, "--actor"), "pi-artifact");
           assert.equal(flagValue(argv, "--assessment-hash"), `sha256:${"a".repeat(64)}`);
           assert.equal(flagValue(argv, "--expected-artifact-revision"), "7");
-          assert.equal(flagValue(argv, "--expected-session-revision"), "4");
+          assert.equal(flagValue(argv, "--expected-orchestration-revision"), "4");
           assert.equal(flagValue(argv, "--request-id")?.length! > 0, true);
           assert.equal(flagValue(argv, "--reason")?.length! > 0, true);
           assert.equal(flagValue(argv, "--evidence"), "pi-session:pi-artifact");
@@ -4450,7 +4450,6 @@ function v3ResumeMapResponse(
   const body: Record<string, unknown> = {
     sessionId: "session-1",
     sessionStatus: "open",
-    identityRevision: 1,
     orchestrationRevision: 7,
     activityRevision: 1,
     activeRuns: [{ runId: "run-1", stepId: "execute", status: "running", revision: 2 }],

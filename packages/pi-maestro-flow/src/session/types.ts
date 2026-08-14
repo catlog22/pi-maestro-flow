@@ -22,6 +22,8 @@ export interface WorkflowChainStep {
   status: string;
   runId: string | null;
   skill?: string;
+  /** session/3.0 decision gate: the decision id that must resolve before the chain advances past this step. */
+  decisionRef?: string | null;
 }
 
 export interface WorkflowRun {
@@ -29,7 +31,12 @@ export interface WorkflowRun {
   /** Run entity revision for session/3.0 CAS mutations (run.json revision). */
   revision?: number;
   runId: string;
-  parentRunId: string | null;
+  /** v2 command-run lineage only; run/3.0 expresses lineage via retryOfRunId/attempt instead. */
+  parentRunId?: string | null;
+  /** run/3.0 retry lineage: the run id this run retries (null when it is not a retry). */
+  retryOfRunId?: string | null;
+  /** run/3.0 attempt ordinal (positive). */
+  attempt?: number;
   command: string;
   status: WorkflowRunStatus;
   goal: string | null;

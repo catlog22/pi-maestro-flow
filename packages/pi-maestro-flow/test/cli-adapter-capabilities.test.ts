@@ -16,7 +16,7 @@ const structuredCapabilities = {
     execution_generation: true,
     core_execution_lease: true,
     execution_handoff: true,
-    session_statusless: true,
+    session_statusless: false,
     legacy_session_aliases: true,
     artifact_compatibility_v1: true,
     atomic_run_complete_seal: true,
@@ -37,7 +37,7 @@ const v3StructuredCapabilities = {
     execution_generation: false,
     core_execution_lease: false,
     execution_handoff: false,
-    session_statusless: true,
+    session_statusless: false,
     legacy_session_aliases: false,
     session_run_minimal_v3: true,
     entity_revision_cas: true,
@@ -58,6 +58,10 @@ const COMPLETE_V3_SUPPORT = {
   request_receipts_v2: true,
   execution_lease_retired: true,
   operation_registry_retired: true,
+  session_3_writer: true,
+  no_execution_writes: true,
+  response_12: true,
+  v2_features_retired: true,
 };
 
 const NO_V3_SUPPORT = {
@@ -67,6 +71,10 @@ const NO_V3_SUPPORT = {
   request_receipts_v2: false,
   execution_lease_retired: false,
   operation_registry_retired: false,
+  session_3_writer: false,
+  no_execution_writes: false,
+  response_12: false,
+  v2_features_retired: false,
 };
 
 test("CLI adapter treats a validated structured capability result as authoritative", async () => {
@@ -106,7 +114,8 @@ test("CLI adapter treats a validated structured capability result as authoritati
   assert.equal(await adapter.supportsArtifactCompatibility(), true);
   assert.equal(await adapter.supportsNewMutations(), true);
   // v2-only core: no v3 keys broadcast, so the v2 protocol is selected.
-  assert.deepEqual(capabilities.v3, NO_V3_SUPPORT);
+  // It still declares run-response/1.2 (a shared response schema).
+  assert.deepEqual(capabilities.v3, { ...NO_V3_SUPPORT, response_12: true });
   assert.equal(capabilities.protocol, "execution-v2");
   assert.equal(await adapter.supportsSessionRunMinimalV3(), false);
   assert.equal(calls.filter((call) => call.join(" ") === "capabilities --json").length, 1);

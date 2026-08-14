@@ -823,12 +823,14 @@ test("bridge projects a session/3.0 layout with chain/activeRun and no Execution
       command: "analyze",
       status: "completed",
       runId: runAnalyze,
+      decisionRef: null,
     });
     assert.deepEqual(session.chain[1], {
       step: "implement",
       command: "implement",
       status: "running",
       runId: runImplement,
+      decisionRef: "decision-1",
     });
     const implementRun = session.runs.find((run) => run.runId === runImplement)!;
     assert.equal(implementRun.schemaVersion, "run/3.0");
@@ -837,7 +839,13 @@ test("bridge projects a session/3.0 layout with chain/activeRun and no Execution
     assert.equal(implementRun.status, "running");
     assert.equal(implementRun.goal, "Implement the migration");
     assert.equal(implementRun.primaryArtifactId, "artifact-v3");
-    assert.equal(implementRun.parentRunId, runAnalyze);
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(implementRun, "parentRunId"),
+      false,
+      "run/3.0 no longer projects the retired parent_run_id field",
+    );
+    assert.equal(implementRun.retryOfRunId, null, "run/3.0 projects retry_of_run_id");
+    assert.equal(implementRun.attempt, 1, "run/3.0 projects the retry attempt ordinal");
     assert.deepEqual(implementRun.gates, [], "run/3.0 carries no gate registry after gates.json retirement");
     assert.equal(session.artifacts[0]?.artifactId, "artifact-v3");
     assert.equal(session.artifacts[0]?.path, "outputs/implementation.json");
@@ -876,6 +884,14 @@ test("bridge v3 fingerprint and status mapping track session state changes", asy
     await writeV30Fixture(root, sessionId, { status: "failed" });
     const failed = await loadCanonicalSnapshot(root);
     assert.equal(failed.session?.status, "failed");
+
+    // The retired `paused` status is read strip-tolerantly as open by the core
+    // (batch B dropped paused from the v3 state machine), so a legacy v3 file
+    // must surface as running, never as planned.
+    await writeV30Fixture(root, sessionId, { status: "paused" });
+    const paused = await loadCanonicalSnapshot(root);
+    assert.equal(paused.session?.status, "running", "legacy session/3.0 paused maps to running via open");
+    assert.notEqual(paused.revision.fingerprint, failed.revision.fingerprint);
 
     // Run state changes must also move the fingerprint (run.json feeds it).
     await writeV30Fixture(root, sessionId, { status: "open" }, {
@@ -1223,6 +1239,7 @@ async function writeV30Fixture(
         status: "completed",
         run_ids: [runAnalyze],
         goal_ref: null,
+        decision_ref: null,
         decision_refs: [],
       },
       {
@@ -1232,7 +1249,8 @@ async function writeV30Fixture(
         status: "running",
         run_ids: [runImplement],
         goal_ref: null,
-        decision_refs: ["decision-1"],
+        decision_ref: "decision-1",
+        decision_refs: [],
       },
     ],
     decisions: [{

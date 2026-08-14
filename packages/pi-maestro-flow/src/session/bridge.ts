@@ -799,11 +799,17 @@ function normalizeRun(
       : stringArray(raw.args);
   const planPublication = commandName === "plan-publish" ? planPublicationIdentity(args) : undefined;
   const runRevision = nonnegativeIntegerValue(raw.revision);
+  const isRunV30 = stringValue(raw.schema_version) === "run/3.0";
+  const attempt = positiveIntegerValue(raw.attempt);
   const normalized: WorkflowRun = {
     ...(stringValue(raw.schema_version) ? { schemaVersion: stringValue(raw.schema_version) } : {}),
     ...(includeRunRevision && runRevision !== undefined ? { revision: runRevision } : {}),
     runId,
-    parentRunId: nullableString(raw.parent_run_id),
+    // parent_run_id is a v2 command-run lineage field; run/3.0 dropped it in
+    // favor of retry_of_run_id/attempt, so it is never projected for v3 runs.
+    ...(isRunV30 ? {} : { parentRunId: nullableString(raw.parent_run_id) }),
+    ...(isRunV30 ? { retryOfRunId: nullableString(raw.retry_of_run_id) } : {}),
+    ...(isRunV30 && attempt !== undefined ? { attempt } : {}),
     command: commandName,
     status: runStatus(raw.status),
     goal: nullableString(raw.goal),
@@ -962,6 +968,7 @@ function chainV30Array(value: unknown): WorkflowChainStep[] {
       command: stringValue(raw.command) ?? stringValue(raw.step_id) ?? "unknown",
       status: stringValue(raw.status) ?? "pending",
       runId: runIds.length > 0 ? runIds[runIds.length - 1]! : null,
+      decisionRef: nullableString(raw.decision_ref),
     };
   });
 }
@@ -1069,10 +1076,15 @@ function sessionStatus(value: unknown): WorkflowSessionStatus {
     : "planned";
 }
 
-/** session/3.0 statuses have no direct v2 counterpart: open->running, completed->sealed. */
+/**
+ * session/3.0 statuses have no direct v2 counterpart: open->running, completed->sealed.
+ * The retired `paused` status (removed in v3) is read strip-tolerantly as `open` by the
+ * core, so legacy pre-simplification files project as running, never as planned.
+ */
 function sessionStatusV30(value: unknown): WorkflowSessionStatus {
   switch (value) {
     case "open": return "running";
+    case "paused": return "running";
     case "completed": return "sealed";
     case "archived": return "archived";
     case "failed": return "failed";

@@ -69,6 +69,14 @@ export interface RunCliV3Support {
   execution_lease_retired: boolean;
   /** True only when the core explicitly advertises `operation_registry: false`. */
   operation_registry_retired: boolean;
+  /** Audit #2: the writer-scoped session_schema_writes declares session/3.0. */
+  session_3_writer: boolean;
+  /** Audit #2: execution_schema_writes is empty (v3 writes no Execution). */
+  no_execution_writes: boolean;
+  /** Audit #2: run_response_writes declares run-response/1.2. */
+  response_12: boolean;
+  /** Audit #2: every v2 feature (generation/lease/handoff/statusless/aliases) is explicitly false. */
+  v2_features_retired: boolean;
 }
 
 /**
@@ -428,7 +436,7 @@ export class RunCliAdapter {
       atomic_run_complete_seal: structured.features.atomic_run_complete_seal === true,
       generation_scoped_seal_receipts: structured.features.generation_scoped_seal_receipts === true,
     });
-    const v3 = negotiateV3Support(structured.features);
+    const v3 = negotiateV3Support(structured);
     return {
       mode: "structured",
       structured,
@@ -516,9 +524,14 @@ const NO_V3_SUPPORT: Readonly<RunCliV3Support> = Object.freeze({
   request_receipts_v2: false,
   execution_lease_retired: false,
   operation_registry_retired: false,
+  session_3_writer: false,
+  no_execution_writes: false,
+  response_12: false,
+  v2_features_retired: false,
 });
 
-function negotiateV3Support(features: MaestroCapabilitiesV10["features"]): Readonly<RunCliV3Support> {
+function negotiateV3Support(structured: MaestroCapabilitiesV10): Readonly<RunCliV3Support> {
+  const features = structured.features;
   return Object.freeze({
     session_run_minimal_v3: features.session_run_minimal_v3 === true,
     entity_revision_cas: features.entity_revision_cas === true,
@@ -528,6 +541,18 @@ function negotiateV3Support(features: MaestroCapabilitiesV10["features"]): Reado
     // false; an absent key means the core predates the v3 contract.
     execution_lease_retired: features.execution_lease === false,
     operation_registry_retired: features.operation_registry === false,
+    // Audit #2 (cross-repo): a v3 core must also be writer-scoped — the
+    // negotiated Session schema writes declare session/3.0, no Execution
+    // schema is writable, run-response/1.2 is declared, and every v2 feature
+    // is explicitly retired. A mixed/v2-shaped capability set never selects v3.
+    session_3_writer: structured.session_schema_writes.includes("session/3.0"),
+    no_execution_writes: structured.execution_schema_writes.length === 0,
+    response_12: structured.run_response_writes.includes("run-response/1.2"),
+    v2_features_retired: features.execution_generation === false
+      && features.core_execution_lease === false
+      && features.execution_handoff === false
+      && features.session_statusless === false
+      && features.legacy_session_aliases === false,
   });
 }
 
@@ -537,7 +562,11 @@ function hasCompleteV3Support(v3: Readonly<RunCliV3Support>): boolean {
     && v3.participant_identity
     && v3.request_receipts_v2
     && v3.execution_lease_retired
-    && v3.operation_registry_retired;
+    && v3.operation_registry_retired
+    && v3.session_3_writer
+    && v3.no_execution_writes
+    && v3.response_12
+    && v3.v2_features_retired;
 }
 
 function selectProtocol(

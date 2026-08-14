@@ -11,6 +11,7 @@ import type {
 } from "./cli-adapter.ts";
 import type { WorkflowBridge } from "./bridge.ts";
 import {
+  RunResponseParseError,
   extractRunResponseLeaseClaim,
   parseRunResponse,
   projectPublicRunResponse,
@@ -76,7 +77,6 @@ export interface WorkflowHostContext {
 export interface ResumeMapV1 {
   sessionId: string;
   sessionStatus: "open" | "completed" | "archived" | "failed";
-  identityRevision: number;
   orchestrationRevision: number;
   activityRevision: number;
   activeRuns: Array<{
@@ -742,6 +742,15 @@ export class WorkflowCoordinator {
   async next(pick?: string, context?: WorkflowHostContext): Promise<WorkflowTransitionResult> {
     const mode = await this.selectMode();
     if (mode === "fail-closed") throw this.failClosedMutationError("next");
+    if (mode === "session-v3") {
+      // v3 allocates the next chain-bound Run through the CAS envelope; there
+      // is no lease and no --pick (the chain defines the candidate).
+      return this.execV3(
+        ["run", "next", "--json"],
+        { write: true, sessionless: false, mutation: "session", lease: "none" },
+        context?.hostSessionId,
+      );
+    }
     if (mode === "core-execution") {
       return this.exec(
         ["run", "next", ...(pick ? ["--pick", pick] : []), "--json"],
@@ -772,6 +781,26 @@ export class WorkflowCoordinator {
   ): Promise<WorkflowTransitionResult> {
     const mode = await this.selectMode();
     if (mode === "fail-closed") throw this.failClosedMutationError("complete");
+    if (mode === "session-v3") {
+      // v3 completes atomically with --advance; needs-retry/blocked are v2
+      // verdicts — v3 failed attempts go through run transition + retry.
+      if (options.verdict === "needs-retry" || options.verdict === "blocked") {
+        throw new Error(
+          `verdict ${options.verdict} is retired for session/3.0; use run transition failed + run create --retry-of-run`,
+        );
+      }
+      const argv = ["run", "complete", runId, "--advance",
+        "--verdict", options.verdict === "done-with-concerns" ? "done_with_concerns" : "done"];
+      if (options.summary) argv.push("--summary", options.summary);
+      if (options.reason) argv.push("--reason", options.reason);
+      for (const evidence of options.evidence ?? []) argv.push("--evidence", evidence);
+      argv.push("--json");
+      return this.execV3(
+        argv,
+        { write: true, sessionless: false, mutation: "run", lease: "none" },
+        context?.hostSessionId,
+      );
+    }
     if (mode === "core-execution") {
       const argv = ["run", "complete", runId, "--verdict", options.verdict ?? "done"];
       if (options.summary) argv.push("--summary", options.summary);
@@ -804,6 +833,14 @@ export class WorkflowCoordinator {
   ): Promise<WorkflowTransitionResult> {
     const mode = await this.selectMode();
     if (mode === "fail-closed") throw this.failClosedMutationError("edit");
+    if (mode === "session-v3") {
+      // run edit is retired for session/3.0: chain editing is the explicit
+      // session chain insert|skip|replace command family (core v3). Refuse
+      // loudly instead of falling into the v2 lease path.
+      throw new Error(
+        "run edit is retired for session/3.0 workspaces; use session chain insert|skip|replace",
+      );
+    }
     if (mode === "core-execution") {
       return this.exec(
         ["run", "edit", ...commands, ...runEditArgv(options), "--json"],
@@ -884,6 +921,22 @@ export class WorkflowCoordinator {
     const prepared = await this.prepareV3MutationArgv(argv, hostSessionId);
     const privateCommand = await this.adapter.exec(prepared);
     let envelope = parseRunResponse(privateCommand.stdout);
+    if (envelope.ok) {
+      // Audit #4: bind the response to the dispatched request — operation and
+      // request-id must match the injected v3 mutation envelope.
+      const expectedOperation = expectedV3Operation(argv);
+      const injectedRequestId = flagValue(prepared, "--request-id");
+      if (expectedOperation && envelope.operation !== expectedOperation) {
+        throw new RunResponseParseError(
+          `v3 envelope operation mismatch: expected ${expectedOperation}, got ${envelope.operation}`,
+        );
+      }
+      if (injectedRequestId && envelope.request_id !== injectedRequestId) {
+        throw new RunResponseParseError(
+          `v3 envelope request_id mismatch: expected ${injectedRequestId}, got ${envelope.request_id}`,
+        );
+      }
+    }
     if (
       !envelope.ok
       && envelope.schema_version === "run-response/1.2"
@@ -1118,7 +1171,7 @@ export class WorkflowCoordinator {
     assertArtifactWriterMode(capabilities, assessment.sessionSchemaVersion);
     addFlag(prepared, "--assessment-hash", assessment.assessmentHash);
     addFlag(prepared, "--expected-artifact-revision", String(assessment.artifactRevision));
-    addFlag(prepared, "--expected-session-revision", String(assessment.sessionRevision));
+    addFlag(prepared, "--expected-orchestration-revision", String(assessment.sessionRevision));
 
     const privateCommand = await this.adapter.exec(prepared);
     const envelope = parseRunResponse(privateCommand.stdout);
@@ -3077,7 +3130,16 @@ function resumeMapFingerprintMatches(value: Record<string, unknown>): boolean {
 }
 
 /** Minimal manual shape guard for the identity fields the coordinator caches. */
+const RESUME_MAP_ALLOWED_KEYS = new Set([
+  "sessionId", "sessionStatus", "orchestrationRevision", "activityRevision",
+  "activeRuns", "blockingGates", "openDecisions", "pendingPublications",
+  "nextActions", "fingerprint",
+]);
+
 function resumeMapShapeValid(value: Record<string, unknown>): boolean {
+  // Strict: any key outside the core ResumeMapV1 contract (including the
+  // retired identityRevision) fails the shape check.
+  if (Object.keys(value).some(key => !RESUME_MAP_ALLOWED_KEYS.has(key))) return false;
   return typeof value.sessionId === "string"
     && value.sessionId.length > 0
     && Number.isSafeInteger(value.orchestrationRevision)
@@ -3089,6 +3151,35 @@ function requireHostSessionId(value: string | undefined): string {
   const normalized = value?.trim();
   if (!normalized) throw new Error("Current Pi host does not expose a stable session id; Workflow mutation is refused");
   return normalized;
+}
+
+/** Extract the value of --flag <value> from a prepared argv (audit #4 binding). */
+function flagValue(argv: readonly string[], flag: string): string | undefined {
+  const index = argv.indexOf(flag);
+  if (index < 0 || index + 1 >= argv.length) return undefined;
+  return argv[index + 1];
+}
+
+/** Infer the expected v3 envelope operation from the requested command argv. */
+const V3_RUN_OPERATION_CODES: Record<string, string> = {
+  next: "next", create: "create", complete: "complete", brief: "brief",
+  check: "check", recall: "recall", decide: "run-decide",
+  transition: "run-transition", cancel: "run-cancel", seal: "run-seal",
+};
+
+function expectedV3Operation(argv: readonly string[]): string | null {
+  const command = argv[0];
+  const sub = argv[1];
+  if (command === "run") return V3_RUN_OPERATION_CODES[sub ?? ""] ?? null;
+  if (command === "session") {
+    if (sub === "chain") {
+      const chainIndex = argv.indexOf("chain");
+      const action = argv.slice(chainIndex + 1).find(token => !token.startsWith("-"));
+      return action ? `session-chain-${action}` : null;
+    }
+    return sub ? `session-${sub}` : null;
+  }
+  return null;
 }
 
 function requireRun(runs: WorkflowRun[], runId: string): WorkflowRun {

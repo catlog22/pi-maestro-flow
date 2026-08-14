@@ -13,7 +13,6 @@ test("run-control classifies session/3.0-only commands", () => {
   }> = [
     // Session family: v3-only mutations (no v2 counterpart on the maestro CLI).
     { argv: ["session", "open", "migrate to session/3.0"], expected: writeClassification("session", "none", true) },
-    { argv: ["session", "pause"], expected: writeClassification("session", "none") },
     { argv: ["session", "complete"], expected: writeClassification("session", "none") },
     // Shared names keep v2 classification: the coordinator interprets scope/lease by mode
     // (session migrate/resume also exist on the v2 CLI and must not lose their lease fence).
@@ -23,16 +22,18 @@ test("run-control classifies session/3.0-only commands", () => {
     // Session family: v3-only reads.
     { argv: ["session", "resume-view"], expected: readClassification() },
     { argv: ["session", "resume-view", "--json"], expected: readClassification() },
-    { argv: ["session", "chain", "audit"], expected: readClassification() },
-    { argv: ["session", "chain", "audit", "--json"], expected: readClassification() },
     // Run family: v3-only Run mutations carry the dedicated run scope and no lease.
     { argv: ["run", "transition", "run-1", "running"], expected: writeClassification("run", "none") },
     { argv: ["run", "cancel", "run-1"], expected: writeClassification("run", "none") },
     { argv: ["run", "seal", "run-1"], expected: writeClassification("run", "none") },
-    // Participant family: v3-only management surface.
-    { argv: ["participant", "status"], expected: readClassification() },
-    { argv: ["participant", "register", "--participant-id", "win-1"], expected: writeClassification("session", "none") },
-    { argv: ["participant", "unregister", "--participant-id", "win-1"], expected: writeClassification("session", "none") },
+    // Core batch A/B removed session pause/chain audit and the participant family
+    // entirely; those argv fall through to the shared/default classifications below
+    // (fail closed at the core) instead of a dedicated v3 classification.
+    { argv: ["session", "pause"], expected: writeClassification("execution", "required") },
+    { argv: ["session", "chain", "audit"], expected: writeClassification("execution", "required") },
+    { argv: ["participant", "status"], expected: writeClassification("execution", "required") },
+    { argv: ["participant", "register", "--participant-id", "win-1"], expected: writeClassification("execution", "required") },
+    { argv: ["participant", "unregister", "--participant-id", "win-1"], expected: writeClassification("execution", "required") },
   ];
 
   for (const fixture of cases) {
@@ -42,10 +43,12 @@ test("run-control classifies session/3.0-only commands", () => {
 
 test("run-control read helpers recognize v3 read-only commands", () => {
   assert.equal(isRunControlReadArgv(["session", "resume-view"]), true);
-  assert.equal(isRunControlReadArgv(["session", "chain", "audit"]), true);
-  assert.equal(isRunControlReadArgv(["participant", "status"]), true);
   assert.equal(isRunControlReadArgv(["session", "open", "objective"]), false);
   assert.equal(isRunControlReadArgv(["run", "transition", "run-1", "running"]), false);
+  // Retired v3 commands are no longer classified as read-only (fail closed).
+  assert.equal(isRunControlReadArgv(["session", "chain", "audit"]), false);
+  assert.equal(isRunControlReadArgv(["session", "pause"]), false);
+  assert.equal(isRunControlReadArgv(["participant", "status"]), false);
   assert.equal(isRunControlReadArgv(["participant", "register", "win-1"]), false);
 });
 

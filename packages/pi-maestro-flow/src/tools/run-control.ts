@@ -106,12 +106,11 @@ export function classifyRunControlArgv(argv: readonly string[]): RunControlClass
     // session/3.0-only Session commands (docs/session-run-minimal-state-architecture-20260812.md).
     // Shared v2/v3 commands (create/start/attach/resume/migrate/resolve/next/chain insert|skip|replace/...)
     // keep their existing classification below; the coordinator interprets scope/lease by mode.
+    // v3 has no pause/chain-audit/participant surface (core batch A/B removed them), so those
+    // argv fall through to the shared/default classifications below and fail closed at the core.
     if (command === "open") return writeClassification("session", "none", true);
-    if (["pause", "complete"].includes(command)) {
-      return writeClassification("session", "none");
-    }
+    if (command === "complete") return writeClassification("session", "none");
     if (command === "resume-view") return { ...READ_CLASSIFICATION };
-    if (command === "chain" && argv[2] === "audit") return { ...READ_CLASSIFICATION };
     if (command === "create") return writeClassification("session", "none", true);
     if (["archive", "unarchive"].includes(command)) return writeClassification("session", "none");
     if (["start", "attach", "resume"].includes(command)) {
@@ -134,11 +133,6 @@ export function classifyRunControlArgv(argv: readonly string[]): RunControlClass
       return writeClassification("run", "none");
     }
     return writeClassification("execution", "required");
-  }
-
-  if (family === "participant") {
-    if (command === "status") return { ...READ_CLASSIFICATION };
-    if (["register", "unregister"].includes(command)) return writeClassification("session", "none");
   }
 
   if (family === "plan" && command === "publish") {

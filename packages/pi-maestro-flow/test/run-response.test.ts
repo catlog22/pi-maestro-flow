@@ -235,6 +235,29 @@ test("run-response/1.2 enforces strict conflict and public credential boundaries
   );
 });
 
+test("run-response/1.2 fails closed for retired v3 operations and revision targets", () => {
+  // Core batch A/B removed session chain audit, the participant command family,
+  // and the session-identity revision target from the v3 operation surface.
+  for (const operation of [
+    "session-chain-audit",
+    "participant-register",
+    "participant-status",
+    "participant-unregister",
+  ]) {
+    assert.throws(
+      () => parseRunResponse({ ...responseV12, operation }),
+      RunResponseParseError,
+    );
+  }
+  assert.throws(
+    () => parseRunResponse({
+      ...responseV12,
+      revision: { target_type: "session-identity", target_id: "session-1", revision: 4 },
+    }),
+    RunResponseParseError,
+  );
+});
+
 test("public run-response projection removes the lease claim and every raw lease_id recursively", () => {
   const parsed = parseRunResponse(responseV11);
   const projected = projectPublicRunResponse(parsed);
