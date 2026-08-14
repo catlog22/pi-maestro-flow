@@ -5,12 +5,13 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.21.1（2026-08-13）。** Flow 0.21.1 同步引擎 `maestro-flow@0.5.70`（supersedes v0.21.0），与 run-response/1.1、session v3 protocol 的运行时配套；搭配 Teammate 1.13.0、Cockpit 0.16.0 与 Settings-Core 0.1.3。
+> **当前稳定版本：v0.21.2（2026-08-14）。** Flow 0.21.2 同步引擎 `maestro-flow@0.5.71`（v3 简化：决策门、移除 participant 预注册与 identity/paused/gates 状态）；搭配 Teammate 1.13.0、Cockpit 0.16.0 与 Settings-Core 0.1.3。
 
-## v0.21.1（2026-08-13）
+## v0.21.2（2026-08-14）
 
-- 引擎 pin 升级：`maestro-flow` 0.5.69 → **0.5.70**（supersedes v0.21.0）。0.5.70 承载 run-response/1.1、session/run v3 schemas 与 execution lifecycle，与本套件 execution-generation 会话模型配套；v0.21.0 的 API Manager `api.models` 与 Cockpit 输入历史功能不变。
-- 安装：`pi install npm:pi-maestro-flow@0.21.1`。
+- 引擎 pin 升级：`maestro-flow` 0.5.70 → **0.5.71**。0.5.71 为 v3 简化版本：新增决策门（chain step `decision_ref`，未决门阻断 `run next`/`session complete`，escalated 以 concerns 通过，`decide escalate` 不再暂停 Session）；移除 chain-proposal/TC-P0-3 附加输入/22 条退役 stub/resume-map 截断/每次 check 知识对账；移除 participant 实体与命令族（`--participant` 兼容接收）、`identity_revision`、`paused`、gates 系统（receipt 存 `participant_id = actorId`，旧 v3 文件兼容读取）。
+- v3 适配更新：删除 participant 预注册预检、bridge 的 identity revision 解析与 gates 投影、`session-pause/resume` 操作面；capability 六键协商不变。
+- 安装：`pi install npm:pi-maestro-flow@0.21.2`。
 
 ## v0.21.0（2026-08-13）
 

@@ -5,12 +5,15 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current stable release: v0.21.1 (2026-08-13).** Flow 0.21.1 syncs the engine to `maestro-flow@0.5.70` (supersedes v0.21.0) so the run-response/1.1 and session v3 protocol runtimes match the suite's execution-generation session model; bundles Teammate 1.13.0, Cockpit 0.16.0, and Settings-Core 0.1.3.
+> **Current stable release: v0.21.2 (2026-08-14).** Flow 0.21.2 syncs the engine to `maestro-flow@0.5.71` (v3 simplification: decision gates, no participant pre-registration, no identity/paused/gates state in v3); bundles Teammate 1.13.0, Cockpit 0.16.0, and Settings-Core 0.1.3.
 
-## v0.21.1 (2026-08-13)
+## v0.21.2 (2026-08-14)
 
-- Engine pin bump: `maestro-flow` 0.5.69 → **0.5.70** (supersedes v0.21.0). 0.5.70 carries run-response/1.1, session/run v3 schemas, and the execution lifecycle, matching the suite's execution-generation session model; the v0.21.0 API Manager `api.models` and Cockpit input-history features are unchanged.
-- Install with `pi install npm:pi-maestro-flow@0.21.1`.
+- Engine pin: `maestro-flow` 0.5.70 → **0.5.71**. 0.5.71 is the v3 simplification release: decision gates (chain step `decision_ref`, unresolved gates block `run next`/`session complete`, escalated gates pass with concerns, `decide escalate` no longer pauses the Session); removed chain-proposal/TC-P0-3 extra inputs/22 retired stubs/resume-map truncation/per-check knowledge reconciliation; dropped the participant entity and command family (`--participant` still accepted), `identity_revision`, `paused`, and the gates system (receipts store `participant_id = actorId`, legacy v3 files stay readable).
+- v3 adapter updates: removed participant pre-registration preflight, bridge identity-revision parsing and gates projection, and the `session-pause/resume` operation surface; the six-key capability negotiation is unchanged.
+
+- Engine pin bump: `maestro-flow` 0.5.69 → **0.5.71** (supersedes v0.21.0). 0.5.71 carries run-response/1.1, session/run v3 schemas, and the execution lifecycle, matching the suite's execution-generation session model; the v0.21.0 API Manager `api.models` and Cockpit input-history features are unchanged.
+- Install with `pi install npm:pi-maestro-flow@0.21.2`.
 
 ## v0.21.0 (2026-08-13)
 

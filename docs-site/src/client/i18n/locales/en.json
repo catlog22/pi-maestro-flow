@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.21.1 is out — engine sync to maestro-flow 0.5.70 (supersedes v0.21.0). Upgrade:",
-    "install": "pi install npm:pi-maestro-flow@0.21.1",
+    "title": "v0.21.2 is out — v3 simplification sync to maestro-flow 0.5.71. Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.21.2",
     "close": "Dismiss"
   },
   "accessibility": {
