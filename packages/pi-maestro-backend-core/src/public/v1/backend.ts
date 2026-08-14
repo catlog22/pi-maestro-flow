@@ -29,25 +29,43 @@ import type {
 export type CapabilitySupport = "native" | "emulated" | "unsupported";
 
 /**
- * The capability set, derived from orchestrator-visible surface only.
+ * The capability set, derived exhaustively from orchestrator-visible surface.
  *
- * Each member corresponds to a `TaskSpec` field or a teammate-send control
- * mode. Adding a member requires a matching orchestrator-visible input;
- * a purely internal concern does not belong here.
+ * Every `TaskSpec` field and teammate-send control mode that a backend could
+ * fail to honour has a member here. The set is exhaustive by construction: a
+ * field with no member would be one a backend could ignore without the
+ * orchestrator ever learning of it, which is the exact failure this table
+ * exists to prevent.
+ *
+ * Declaring a capability is not a restriction. A backend that serves the whole
+ * surface declares every member `native` and loses nothing; the table's purpose
+ * is to force a backend that *cannot* serve one to say so.
  */
 export interface BackendCapabilities {
   /** `TaskSpec.outputSchema` — a validated machine-readable result. */
   outputSchema: CapabilitySupport;
   /** `TaskSpec.context: "fork"` — the child inherits parent conversation history. */
   forkContext: CapabilitySupport;
+  /** `TaskSpec.model` — honour the requested provider/model route. */
+  modelSelection: CapabilitySupport;
+  /** `TaskSpec.fallbackModels` — ordered failover after a route fails. */
+  modelFallback: CapabilitySupport;
+  /** `TaskSpec.thinking` — per-task reasoning depth. */
+  thinkingLevel: CapabilitySupport;
+  /** `TaskSpec.maxNestingDepth` — enforce the child's own delegation budget. */
+  nestingBudget: CapabilitySupport;
+  /** `TaskSpec.todo` — bind Todo ids and inject them into the child's context. */
+  todoBinding: CapabilitySupport;
+  /** `TaskSpec.cwd` — run in the requested working directory. */
+  workdir: CapabilitySupport;
+  /** Restrict the child's visible tool set. */
+  toolFilter: CapabilitySupport;
   /** teammate-send `steer` — interrupt the current turn and inject. */
   steer: CapabilitySupport;
   /** teammate-send `follow_up` — queue for the next turn. */
   followUp: CapabilitySupport;
   /** Cancel a running task. */
   abort: CapabilitySupport;
-  /** Restrict the child's visible tool set. */
-  toolFilter: CapabilitySupport;
 }
 
 /** Capability names, for diagnostics that must name the failing member. */
@@ -84,7 +102,17 @@ export interface BackendRunOptions {
   /** Advisory progress sink; a throwing observer must never interrupt the run. */
   onProgress?: (data: Record<string, unknown>) => void;
   host: BackendHostCapabilities;
-  /** Backend-specific settings, opaque to the registry and to every other backend. */
+  /**
+   * Backend-specific settings, opaque to the registry and to every other
+   * backend.
+   *
+   * Provider credentials are deliberately not modelled here and are not the
+   * host's concern: a backend that drives an external runtime lets that runtime
+   * resolve its own credentials through its own configuration. Reading a
+   * provider key in this process to hand it downward would duplicate a
+   * resolution the child already owns and would put a secret on a path that has
+   * no reason to carry one.
+   */
   config?: Record<string, unknown>;
 }
 
