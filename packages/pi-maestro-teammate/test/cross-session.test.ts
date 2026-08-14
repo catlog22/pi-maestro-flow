@@ -47,20 +47,44 @@ test("session send overlay selects a peer window and submits the message", () =>
   });
 });
 
-test("session send overlay refuses an empty message and supports cancellation", () => {
+test("session send overlay refuses an empty message and accepts portable Escape encodings", () => {
+  for (const escape of ["\x1b", "\x1b[27u", "\x1b[27;1;27~"]) {
+    let result: SessionSendOverlayResult | null | undefined;
+    const overlay = new SessionSendOverlay({ getSessions: () => [row()], close: (value) => { result = value; } });
+    overlay.setRequestRender(() => {});
+
+    overlay.handleInput(" ");
+    overlay.handleInput("\r");
+    overlay.handleInput("\r");
+    assert.equal(result, undefined, "empty message must not close the overlay");
+    assert.match(overlay.render(100).join("\n"), /Enter a message first/);
+
+    overlay.handleInput(escape);
+    assert.equal(result, undefined, "editing Escape must return to the session picker");
+    overlay.handleInput(escape);
+    assert.equal(result, null, "top-level Escape must close the overlay");
+  }
+});
+
+test("session send overlay accepts Kitty navigation, editing, and printable input", () => {
   let result: SessionSendOverlayResult | null | undefined;
-  const overlay = new SessionSendOverlay({ getSessions: () => [row()], close: (value) => { result = value; } });
+  const overlay = new SessionSendOverlay({
+    getSessions: () => [row(), row({ correlationId: "owner:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", displayName: "second-window" })],
+    close: (value) => { result = value; },
+  });
   overlay.setRequestRender(() => {});
 
-  overlay.handleInput(" ");
-  overlay.handleInput("\r");
-  overlay.handleInput("\r");
-  assert.equal(result, undefined, "empty message must not close the overlay");
-  assert.match(overlay.render(100).join("\n"), /Enter a message first/);
+  overlay.handleInput("\x1b[1;1B");
+  overlay.handleInput("\x1b[32u");
+  overlay.handleInput("\x1b[9u");
+  overlay.handleInput("\x1b[104u");
+  overlay.handleInput("\x1b[105u");
+  overlay.handleInput("\x1b[13u");
 
-  overlay.handleInput("\x1b");
-  overlay.handleInput("\x1b");
-  assert.equal(result, null);
+  assert.deepEqual(result, {
+    target: "owner:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    message: "hi",
+  });
 });
 
 test("session send overlay keeps wide labels inside the frame", () => {

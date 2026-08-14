@@ -22,7 +22,7 @@ import type {
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
-import { Text, truncateToWidth, visibleWidth, matchesKey, isKeyRelease, isKeyRepeat } from "@earendil-works/pi-tui";
+import { Key, Text, decodeKittyPrintable, isKeyRelease, isKeyRepeat, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { loadTranscript, scanWorkspaceSessionDirs, groupTranscriptTurns, type WorkspaceSessionScan } from "../transcript/session-transcript.ts";
 import type { TranscriptRow } from "../shared/transcript.ts";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams, WorkspaceWindowParams } from "./schemas.ts";
@@ -6283,35 +6283,34 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
 
         function handleDecodedInput(data: string): void {
           const matches = filtered();
-          if (data === "\r" || data === "\n") {
+          const commandInput = decodeKittyPrintable(data) ?? data;
+          if (matchesKey(data, Key.enter)) {
             done(matches[cursor]?.correlationId ?? null);
-          } else if (data === "\x1b") {
+          } else if (matchesKey(data, Key.escape)) {
             done(null);
-          } else if (data === "\x1b[A" || (data === "k" && !query)) {
+          } else if (matchesKey(data, Key.up) || (commandInput === "k" && !query)) {
             cursor = Math.max(0, cursor - 1);
             requestRender();
-          } else if (data === "\x1b[B" || (data === "j" && !query)) {
+          } else if (matchesKey(data, Key.down) || (commandInput === "j" && !query)) {
             cursor = Math.min(Math.max(0, matches.length - 1), cursor + 1);
             requestRender();
-          } else if (data === "\x1b[5~" || data === "\x1b[5;5~") {
-            // PageUp — jump up a page of the selection list.
+          } else if (matchesKey(data, Key.pageUp)) {
             cursor = Math.max(0, cursor - 8);
             requestRender();
-          } else if (data === "\x1b[6~" || data === "\x1b[6;5~") {
-            // PageDown.
+          } else if (matchesKey(data, Key.pageDown)) {
             cursor = Math.min(Math.max(0, matches.length - 1), cursor + 8);
             requestRender();
-          } else if (data === "\x1b[H") {
+          } else if (matchesKey(data, Key.home)) {
             cursor = 0;
             requestRender();
-          } else if (data === "\x1b[F") {
+          } else if (matchesKey(data, Key.end)) {
             cursor = Math.max(0, matches.length - 1);
             requestRender();
-          } else if (data === "\x7f" || data === "\b") {
+          } else if (matchesKey(data, Key.backspace)) {
             if (query.length > 0) { query = removeLastGrapheme(query); cursor = 0; requestRender(); }
-          } else if (!data.startsWith("\x1b")) {
-            // 忽略导航/功能键转义序列，避免残渣混入搜索文本。
-            const input = sanitizeSingleLineInput(data);
+          } else {
+            const input = decodeKittyPrintable(data)
+              ?? (!data.startsWith("\x1b") ? sanitizeSingleLineInput(data) : "");
             if (input) {
               query += input;
               cursor = 0;
@@ -6338,7 +6337,7 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
 
           handleInput(data: string) {
             if (lastWidth < 20) {
-              if (data === "\x1b") done(null);
+              if (matchesKey(data, Key.escape)) done(null);
               return;
             }
             if (pasteFlushTimer) clearTimeout(pasteFlushTimer);

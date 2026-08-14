@@ -7,7 +7,7 @@
  * Pattern: follows TeammateControlCenter (ctx.ui.custom + Component).
  */
 
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Key, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { statusIcon } from "../extension/monitor.ts";
 import type { MonitorSupervisionMode } from "../extension/monitor.ts";
 import {
@@ -240,77 +240,63 @@ export class MonitorOverlay {
   handleInput(data: string): void {
     // Editing custom prompt
     if (this.editingPrompt) {
-      if (data === "\x1b" || data === "\r" || data === "\n") {
+      if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter)) {
         this.editingPrompt = false;
         this.statusText = this.customPrompt ? this.t("monitor.promptStatus", { prompt: this.customPrompt.slice(0, 40) }) : "";
-      } else if (data === "\x7f" || data === "\b") {
+      } else if (matchesKey(data, Key.backspace)) {
         this.customPrompt = this.customPrompt.slice(0, -1);
-      } else if (!data.startsWith("\x1b") && data >= " " && data.length <= 2) {
-        // 拒绝以 ESC 开头的序列（方向键 / 功能键），避免 `[A` 等残渣混入文本。
-        this.customPrompt += data;
+      } else {
+        const printable = decodeKittyPrintable(data) ?? (!data.startsWith("\x1b") ? data : "");
+        if (printable >= " " && printable.length <= 2) this.customPrompt += printable;
       }
       this.requestRender();
       return;
     }
 
-    switch (data) {
-      case "\x1b": // Esc
-        this.cb.close(null);
-        return;
-
-      case "\r": case "\n": // Enter
-        if (this.mode === "custom" && !this.customPrompt) {
-          this.editingPrompt = true;
-          this.statusText = this.t("monitor.typePrompt");
+    const commandInput = decodeKittyPrintable(data) ?? data;
+    if (matchesKey(data, Key.escape)) {
+      this.cb.close(null);
+      return;
+    }
+    if (matchesKey(data, Key.enter)) {
+      if (this.mode === "custom" && !this.customPrompt) {
+        this.editingPrompt = true;
+        this.statusText = this.t("monitor.typePrompt");
+      } else {
+        this.confirm();
+      }
+    } else if (matchesKey(data, Key.tab)) {
+      this.mode = this.mode === "auto" ? "custom" : "auto";
+      this.statusText = "";
+    } else if (matchesKey(data, Key.space)) {
+      if (this.treeRows.length > 0) {
+        const s = this.treeRows[this.cursor]!.row;
+        if (s.bindable === false) {
+          this.statusText = s.kind === "window"
+            ? this.t("monitor.currentWindow")
+            : this.t("monitor.subagents");
+        } else if (this.selected.has(s.correlationId)) {
+          this.selected.delete(s.correlationId);
         } else {
-          this.confirm();
+          this.selected.add(s.correlationId);
         }
-        break;
-
-      case "\t": // Tab — toggle mode
-        this.mode = this.mode === "auto" ? "custom" : "auto";
-        this.statusText = "";
-        break;
-
-      case " ": // Space — toggle selection
-        if (this.treeRows.length > 0) {
-          const s = this.treeRows[this.cursor]!.row;
-          if (s.bindable === false) {
-            this.statusText = s.kind === "window"
-              ? this.t("monitor.currentWindow")
-              : this.t("monitor.subagents");
-          } else if (this.selected.has(s.correlationId)) {
-            this.selected.delete(s.correlationId);
-          } else {
-            this.selected.add(s.correlationId);
-          }
-        }
-        break;
-
-      case "\x1b[A": case "k": // Up
-        this.cursor = Math.max(0, this.cursor - 1);
-        break;
-
-      case "\x1b[B": case "j": // Down
-        this.cursor = Math.min(this.treeRows.length - 1, this.cursor + 1);
-        break;
-
-      default:
-        // Number keys for quick select
-        if (/^[1-9]$/.test(data)) {
-          const idx = Number(data) - 1;
-          if (idx < this.treeRows.length) {
-            this.cursor = idx;
-            const s = this.treeRows[idx]!.row;
-            if (s.bindable === false) {
-              this.statusText = s.kind === "window"
-                ? this.t("monitor.currentWindow")
-                : this.t("monitor.subagents");
-            } else if (this.selected.has(s.correlationId)) this.selected.delete(s.correlationId);
-            else this.selected.add(s.correlationId);
-          }
-        }
-        break;
+      }
+    } else if (matchesKey(data, Key.up) || commandInput === "k") {
+      this.cursor = Math.max(0, this.cursor - 1);
+    } else if (matchesKey(data, Key.down) || commandInput === "j") {
+      this.cursor = Math.min(this.treeRows.length - 1, this.cursor + 1);
+    } else if (/^[1-9]$/.test(commandInput)) {
+      const idx = Number(commandInput) - 1;
+      if (idx < this.treeRows.length) {
+        this.cursor = idx;
+        const s = this.treeRows[idx]!.row;
+        if (s.bindable === false) {
+          this.statusText = s.kind === "window"
+            ? this.t("monitor.currentWindow")
+            : this.t("monitor.subagents");
+        } else if (this.selected.has(s.correlationId)) this.selected.delete(s.correlationId);
+        else this.selected.add(s.correlationId);
+      }
     }
     this.requestRender();
   }

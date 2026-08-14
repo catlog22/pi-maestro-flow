@@ -1,4 +1,4 @@
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Key, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { statusIcon } from "../extension/monitor.ts";
 import type { MonitorSessionRow } from "./monitor-overlay.ts";
 import {
@@ -98,16 +98,17 @@ export class SessionSendOverlay {
 
   handleInput(data: string): void {
     if (this.editingMessage) {
-      if (data === "\x1b") {
+      if (matchesKey(data, Key.escape)) {
         this.editingMessage = false;
-      } else if (data === "\r" || data === "\n") {
+      } else if (matchesKey(data, Key.enter)) {
         this.editingMessage = false;
         this.confirm();
         return;
-      } else if (data === "\x7f" || data === "\b") {
+      } else if (matchesKey(data, Key.backspace)) {
         this.message = this.message.slice(0, -1);
-      } else if (!data.startsWith("\x1b")) {
-        const printable = data.replace(/[\u0000-\u001f\u007f]/g, "");
+      } else {
+        const printable = decodeKittyPrintable(data)
+          ?? (!data.startsWith("\x1b") ? data.replace(/[\u0000-\u001f\u007f]/g, "") : "");
         if (printable && this.message.length + printable.length <= MAX_MESSAGE_LENGTH) {
           this.message += printable;
         }
@@ -116,40 +117,31 @@ export class SessionSendOverlay {
       return;
     }
 
-    switch (data) {
-      case "\x1b":
-        this.cb.close(null);
-        return;
-      case "\r":
-      case "\n":
-        if (!this.selected) {
-          this.statusText = this.t("sessionSend.selectFirst");
-        } else {
-          this.editingMessage = true;
-          this.statusText = this.t("sessionSend.enterThenSend");
-        }
-        break;
-      case "\t":
-        if (this.selected) {
-          this.editingMessage = true;
-          this.statusText = this.t("sessionSend.enterThenSend");
-        } else {
-          this.statusText = this.t("sessionSend.selectFirst");
-        }
-        break;
-      case " ":
-        this.toggleSelection();
-        break;
-      case "\x1b[A":
-      case "k":
-        this.cursor = Math.max(0, this.cursor - 1);
-        break;
-      case "\x1b[B":
-      case "j":
-        this.cursor = Math.min(Math.max(0, this.sessions.length - 1), this.cursor + 1);
-        break;
-      default:
-        break;
+    const commandInput = decodeKittyPrintable(data) ?? data;
+    if (matchesKey(data, Key.escape)) {
+      this.cb.close(null);
+      return;
+    }
+    if (matchesKey(data, Key.enter)) {
+      if (!this.selected) {
+        this.statusText = this.t("sessionSend.selectFirst");
+      } else {
+        this.editingMessage = true;
+        this.statusText = this.t("sessionSend.enterThenSend");
+      }
+    } else if (matchesKey(data, Key.tab)) {
+      if (this.selected) {
+        this.editingMessage = true;
+        this.statusText = this.t("sessionSend.enterThenSend");
+      } else {
+        this.statusText = this.t("sessionSend.selectFirst");
+      }
+    } else if (matchesKey(data, Key.space)) {
+      this.toggleSelection();
+    } else if (matchesKey(data, Key.up) || commandInput === "k") {
+      this.cursor = Math.max(0, this.cursor - 1);
+    } else if (matchesKey(data, Key.down) || commandInput === "j") {
+      this.cursor = Math.min(Math.max(0, this.sessions.length - 1), this.cursor + 1);
     }
     this.requestRender();
   }

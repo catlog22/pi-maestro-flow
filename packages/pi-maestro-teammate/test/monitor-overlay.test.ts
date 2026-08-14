@@ -129,6 +129,29 @@ test("monitor overlay selects window rows but refuses agent rows", () => {
   assert.equal(result.mode, "auto");
 });
 
+test("monitor overlay accepts Kitty input and unwinds editing before closing", () => {
+  const selected = makeOverlay([idleWindowRow()]);
+  selected.overlay.handleInput("\x1b[32u");
+  selected.overlay.handleInput("\x1b[13u");
+  assert.deepEqual(selected.lastResult(), {
+    selected: ["owner:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+    mode: "auto",
+    customPrompt: undefined,
+  });
+
+  for (const escape of ["\x1b[27u", "\x1b[27;1;27~"]) {
+    const editing = makeOverlay([idleWindowRow()]);
+    editing.overlay.handleInput("\x1b[9u");
+    editing.overlay.handleInput("\x1b[13u");
+    editing.overlay.handleInput("\x1b[111u");
+    editing.overlay.handleInput("\x1b[107u");
+    editing.overlay.handleInput(escape);
+    assert.equal(editing.lastResult(), undefined, "editing Escape must return to the monitor form");
+    editing.overlay.handleInput(escape);
+    assert.equal(editing.lastResult(), null, "top-level Escape must close the monitor form");
+  }
+});
+
 test("standalone agents without a window root are not monitor targets", () => {
   const { overlay } = makeOverlay([
     agentRow({ ownerId: "ghost-owner" }),
