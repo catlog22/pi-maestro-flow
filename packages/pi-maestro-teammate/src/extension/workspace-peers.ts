@@ -409,7 +409,12 @@ export async function ensureWorkspacePeerDirectories(identity: WorkspacePeerIden
   ]);
 }
 
-export async function writePrivateJsonAtomic(path: string, value: unknown, maximumBytes: number): Promise<void> {
+export async function writePrivateJsonAtomic(
+  path: string,
+  value: unknown,
+  maximumBytes: number,
+  options: { beforeCommit?: () => void } = {},
+): Promise<void> {
   const payload = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
   if (payload.byteLength > maximumBytes) throw new Error(`JSON payload exceeds ${maximumBytes} bytes`);
   await makePrivateDirectory(dirname(path));
@@ -421,6 +426,7 @@ export async function writePrivateJsonAtomic(path: string, value: unknown, maxim
     await handle.sync();
     await handle.close();
     handle = undefined;
+    options.beforeCommit?.();
     await rename(temporary, path);
     try {
       await chmod(path, 0o600);
@@ -707,8 +713,18 @@ export function workspaceMainSessionDeliveryAction(
 
 export function shouldReplayWorkspaceRootQueue(
   reason: "startup" | "reload" | "new" | "resume" | "fork",
+  targetSessionId?: string,
+  currentSessionId?: string,
 ): boolean {
-  return reason === "startup" || reason === "new" || reason === "resume" || reason === "fork";
+  const replayable = reason === "startup" || reason === "new" || reason === "resume" || reason === "fork";
+  if (!replayable) return false;
+  if (reason === "fork") {
+    return targetSessionId !== undefined
+      && currentSessionId !== undefined
+      && targetSessionId === currentSessionId;
+  }
+  if (targetSessionId === undefined) return true;
+  return currentSessionId !== undefined && targetSessionId === currentSessionId;
 }
 
 export interface WorkspaceRemoteRootMessage {
@@ -1180,6 +1196,8 @@ export async function enqueueWorkspacePeerCommand(
     replyTo?: string;
     fromSessionName?: string;
     beforePublish?: (command: WorkspacePeerCommand) => void | Promise<void>;
+    /** Synchronous ownership check at the atomic rename boundary. */
+    beforeCommit?: (command: WorkspacePeerCommand) => void;
   } = {},
 ): Promise<WorkspacePeerCommand> {
   requireRoutableWorkspaceTarget(target);
@@ -1214,7 +1232,12 @@ export async function enqueueWorkspacePeerCommand(
   };
   if (!validateCommand(command, identity.workspaceId)) throw new Error("constructed command failed protocol validation");
   await options.beforePublish?.(command);
-  await writePrivateJsonAtomic(commandPath(identity, target.ownerId, commandId), command, MAX_COMMAND_FILE_BYTES);
+  await writePrivateJsonAtomic(
+    commandPath(identity, target.ownerId, commandId),
+    command,
+    MAX_COMMAND_FILE_BYTES,
+    { beforeCommit: () => options.beforeCommit?.(command) },
+  );
   return command;
 }
 

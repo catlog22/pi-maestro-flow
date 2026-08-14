@@ -831,7 +831,7 @@ function canonicalCompletionScope(
     return {
       chain: session.chain,
       runs: session.runs,
-      gates: [...session.gates, ...session.runs.flatMap((run) => run.gates)],
+      gates: session.runs.flatMap((run) => run.gates),
       decisions: [],
     };
   }
@@ -844,10 +844,7 @@ function canonicalCompletionScope(
   return {
     chain: execution.chain,
     runs,
-    gates: [
-      ...session.gates.filter((gate) => !gate.runId || runIds.has(gate.runId)),
-      ...runs.flatMap((run) => run.gates),
-    ],
+    gates: runs.flatMap((run) => run.gates),
     decisions: execution.decisionPoints,
   };
 }
@@ -976,7 +973,7 @@ function canonicalCompletionFence(
   return {
     sessionId: session.sessionId,
     sessionGeneration: snapshot.sessionGeneration!,
-    identityRevision: session.identityRevision ?? session.revision,
+    identityRevision: session.revision,
     activityRevision: session.activityRevision ?? session.revision,
     executionId: execution?.executionId ?? null,
     generation: execution?.generation ?? null,

@@ -310,17 +310,37 @@ test("window thread transitions pending to queued to injected without losing rep
     traceId: "mon_trace-8",
     replyTo: `owner:${LOCAL_OWNER}`,
     fromSessionName: "control",
+    targetSessionId: "session-a",
     targetCorrelationId: "window-main-session",
   }));
   const queued = store.transition(messageId, "incoming", "queued", 1_100, "follow_up");
   assert.equal(queued?.status, "queued");
   assert.equal(queued?.traceId, "mon_trace-8");
+  assert.equal(queued?.targetSessionId, "session-a");
   assert.equal(store.transition(messageId, "incoming", "pending", 1_150), queued, "queued does not regress to pending");
   const injected = store.reconcileInjected(messageId, 1_200, "follow_up");
   assert.equal(injected?.status, "injected");
   assert.equal(injected?.revision, 3);
   assert.equal(persisted.length, 2, "injection reconciliation does not persist a crash-inverted thread receipt");
   assert.equal(store.transition(messageId, "incoming", "rejected", 1_300), injected, "injected is terminal");
+});
+
+test("window thread ownership changes advance the semantic revision", () => {
+  const persisted: unknown[] = [];
+  const store = new WindowThreadStore({ persist: (entry) => persisted.push(entry) });
+  const first = store.record(threadInput({
+    direction: "incoming",
+    targetSessionId: "session-a",
+  }));
+  const second = store.record(threadInput({
+    direction: "incoming",
+    targetSessionId: "session-b",
+  }));
+
+  assert.equal(first.revision, 1);
+  assert.equal(second.revision, 2);
+  assert.equal(second.targetSessionId, "session-b");
+  assert.equal(persisted.length, 2);
 });
 
 test("window thread persistence failure leaves the published record transition unchanged", () => {

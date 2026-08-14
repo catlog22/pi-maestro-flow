@@ -1797,3 +1797,68 @@ test("child bridge consumes teammate_complete_delivery and injects it locally", 
   assert.match(source, /parentAgent\?\.sessionId === parentSessionId/);
   assert.match(source, /sessionId: parentSessionId/);
 });
+
+test("workspace delivery paths retain the originating root session fence", () => {
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  const sender = source.slice(
+    source.indexOf("const sendWorkspacePeerMessage"),
+    source.indexOf("const prepareLocalAgentDelivery"),
+  );
+  assert.match(sender, /const fence = captureRootSessionFence\(\)/);
+  assert.match(sender, /await workspacePeerLifecycle;\s+if \(!ownsRootSessionFence\(fence\)\)/);
+  assert.match(sender, /await refreshWorkspacePeerOwners\(\);\s+if \(!ownsRootSessionFence\(fence\)\)/);
+  assert.match(sender, /beforePublish\(prepared\) \{\s+if \(!ownsRootSessionFence\(fence\)\)/);
+  assert.match(sender, /beforeCommit\(\) \{\s+if \(!ownsRootSessionFence\(fence\)\)/);
+  assert.match(sender, /await waitForWorkspacePeerCommandResponse[\s\S]+if \(!ownsRootSessionFence\(fence\)\)/);
+
+  const peers = source.slice(
+    source.indexOf("const startWorkspacePeers"),
+    source.indexOf("const enqueueChildInteraction"),
+  );
+  assert.match(peers, /const fence = captureRootSessionFence\(\)/);
+  assert.match(peers, /const registry = sessionHostRegistry/);
+  assert.match(peers, /targetSessionId: fence\.sessionId/);
+  assert.match(peers, /await deliverLocalAgentMessage[\s\S]+if \(!ownsRootSessionFence\(fence\)\)/);
+  assert.doesNotMatch(peers, /sessionHostRegistry\?\.thread/);
+
+  const discovery = source.slice(
+    source.indexOf("const refreshWorkspacePeerOwners ="),
+    source.indexOf("const targetForWorkspaceBinding"),
+  );
+  assert.match(discovery, /reservation = \{ publisher, fence, promise \}/);
+  assert.match(discovery, /workspacePeerPublisher !== publisher \|\| !ownsRootSessionFence\(fence\)/);
+  assert.match(discovery, /if \(workspacePeerRefresh === reservation\) workspacePeerRefresh = undefined/);
+
+  const localAgent = source.slice(
+    source.indexOf("const deliverLocalAgentMessage"),
+    source.indexOf("const deliverLocalRootEndpoint"),
+  );
+  assert.match(localAgent, /await host\.rollout\.deliver[\s\S]+if \(!ownsRootSessionFence\(fence\)\)/);
+
+  const localRoot = source.slice(
+    source.indexOf("const deliverLocalRootEndpoint"),
+    source.indexOf("const deliverLocalAgentEndpoint"),
+  );
+  assert.match(localRoot, /endpoint\.sessionId !== state\.currentSessionId/);
+
+  const route = source.slice(
+    source.indexOf("const routeSessionMessage"),
+    source.indexOf("const stopWorkspacePeers"),
+  );
+  assert.match(route, /const result = await registry\.send\(request\);\s+if \(!ownsRootSessionFence\(fence\)\)/);
+
+  const advisor = source.slice(
+    source.indexOf("async function runAdvisorReview"),
+    source.indexOf("const monitorBindingRequest"),
+  );
+  assert.match(advisor, /const fence = captureRootSessionFence\(\)/);
+  assert.match(advisor, /const evaluation = await runSupervisedEvaluation[\s\S]+if \(!ownsRootSessionFence\(fence\)\) return;/);
+  assert.ok(
+    advisor.indexOf("if (!ownsRootSessionFence(fence)) return;") < advisor.indexOf("advisorState.lastReviewAt"),
+    "a stale advisor result must be rejected before shared state or message delivery",
+  );
+
+  const shutdown = source.slice(source.lastIndexOf('pi.on("session_shutdown"'));
+  assert.ok(shutdown.indexOf("state.sessionGeneration =") < shutdown.indexOf("await "));
+  assert.ok(shutdown.indexOf("state.currentSessionId = null") < shutdown.indexOf("await "));
+});

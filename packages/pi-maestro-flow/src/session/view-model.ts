@@ -122,6 +122,12 @@ export interface WorkflowViewModel {
   decisionPending: boolean;
   nextAction?: string;
   recoveryAction?: string;
+  /** session/3.0 minimal-state projection (no Execution/lease): orchestration CAS revision. */
+  orchestrationRevision?: number;
+  /** session/3.0 minimal-state projection (no Execution/lease): active Run identity. */
+  activeRunId?: string | null;
+  /** session/3.0 minimal-state projection: count of pending decision points. */
+  pendingDecisions?: number;
   knowledge?: {
     consumed: number;
     cited: number;
@@ -196,7 +202,8 @@ export function workflowStatusLabel(status: WorkflowStatus, attempt?: number): s
 /**
  * The sole Session/Execution lifecycle projection. session/1.x keeps its
  * persisted Session status; session/2.0 is derived only from archive metadata
- * and the pointed Execution.
+ * and the pointed Execution; session/3.0 keeps its persisted Session status
+ * and has no Execution/lease entity.
  */
 export function deriveWorkflowStatus(
   snapshot: WorkflowSnapshotLike,
@@ -236,6 +243,7 @@ export function deriveWorkflowViewModel(
   const session = snapshot?.session;
   if (!snapshot || !session) return null;
 
+  const v3 = isV3Projection(snapshot);
   const workflowStatus = deriveWorkflowStatus(snapshot);
   const chain = workflowStatus.authority === "execution-derived"
     ? snapshot.execution?.chain ?? []
@@ -282,10 +290,14 @@ export function deriveWorkflowViewModel(
   const decisionPending = decisionPoints.some(
     (point) => normalizeWorkflowStatus(point.status) === "pending",
   );
+  const pendingDecisions = v3
+    ? decisionPoints.filter((point) => normalizeWorkflowStatus(point.status) === "pending").length
+    : undefined;
   const nextAction = snapshot.nextAction
     ?? activeRun?.nextAction;
-  const totalGates = session.gates.length;
-  const passedGates = session.gates.filter((gate) =>
+  const sessionGates = session.runs.flatMap((run) => run.gates);
+  const totalGates = sessionGates.length;
+  const passedGates = sessionGates.filter((gate) =>
     gate.status === "passed" || gate.status === "waived" || gate.status === "skipped",
   ).length;
 
@@ -316,7 +328,27 @@ export function deriveWorkflowViewModel(
     decisionPending,
     nextAction,
     recoveryAction: snapshot.recoveryAction ?? inferRecoveryAction(sessionStatus, activeRun),
+    // session/3.0 minimal-state authority: the projection never carries
+    // executionId/generation/lease epoch/lease owner fields; it exposes the
+    // orchestration revision, active Run identity, and decision count instead.
+    ...(v3 ? {
+      orchestrationRevision: session.orchestrationRevision,
+      activeRunId: session.activeRunId,
+      pendingDecisions,
+    } : {}),
   };
+}
+
+/**
+ * session/3.0 minimal-state projection: schemaVersion session/3.0, or a
+ * snapshot with no Execution field that carries the v3 orchestration revision
+ * marker. The v3 layout has no Execution/lease entity, so the v3 branch never
+ * projects executionId/generation/lease epoch/lease owner fields.
+ */
+function isV3Projection(snapshot: WorkflowSnapshotLike): boolean {
+  const session = snapshot.session;
+  return session?.schemaVersion === "session/3.0"
+    || (session?.orchestrationRevision !== undefined && !snapshot.execution);
 }
 
 function executionHasBlocker(
@@ -328,10 +360,7 @@ function executionHasBlocker(
   );
   if (execution.activeRunId) executionRunIds.add(execution.activeRunId);
   const executionRuns = session.runs.filter((run) => executionRunIds.has(run.runId));
-  const gates = [
-    ...session.gates.filter((gate) => !gate.runId || executionRunIds.has(gate.runId)),
-    ...executionRuns.flatMap((run) => run.gates),
-  ];
+  const gates = executionRuns.flatMap((run) => run.gates);
   return execution.chain.some((step) => ["blocked", "failed"].includes(step.status))
     || executionRuns.some((run) => ["blocked", "failed"].includes(run.status))
     || gates.some((gate) => gate.blocking && ["blocked", "failed"].includes(gate.status))

@@ -80,7 +80,7 @@ Fork and sync algorithm steps are defined in workflow `fork.md`.
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Fork complete | `cd {wt.path}` then step `analyze` (`maestro run start "{goal}" --cmd analyze --session YYYYMMDD-analyze-{topic} --platform pi --arg "{goal}"`) |
+| Fork complete | `cd {wt.path}` then step `analyze` (`maestro run start "{goal}" --cmd analyze --session YYYYMMDD-analyze-{topic} --platform pi --arg "{goal}"`（v2 legacy；session/3.0 workspace 见 run-mode.md v3 章节）) |
 | Fork + automated | `teammate({ agent: "general", taskType: "development", tasks: [{ prompt: "run full lifecycle for session" }], cwd: "{wt.path}" }) |
 | Sync complete | Resume work in worktree |
 | Sync conflicts found | Resolve manually, then retry |
@@ -90,10 +90,10 @@ Fork and sync algorithm steps are defined in workflow `fork.md`.
 | Code | Severity | Condition | Recovery |
 |------|----------|-----------|----------|
 | E001 | error | Project not initialized | Run maestro-init first |
-| E002 | error | No roadmap found | Run step `roadmap` first (`maestro run start "{goal}" --cmd roadmap --session YYYYMMDD-roadmap-{topic} --platform pi --arg "{goal}"`) |
+| E002 | error | No roadmap found | Run step `roadmap` first (`maestro run start "{goal}" --cmd roadmap --session YYYYMMDD-roadmap-{topic} --platform pi --arg "{goal}"`（v2 legacy；session/3.0 workspace 见 run-mode.md v3 章节）) |
 | E003 | error | Running inside a worktree | Run from main worktree |
 | E004 | error | No session ID provided | Provide `--session <session_id>` |
-| E005 | error | No sessions defined in state.json | Run step `roadmap` first (`maestro run start "{goal}" --cmd roadmap --session YYYYMMDD-roadmap-{topic} --platform pi --arg "{goal}"`) |
+| E005 | error | No sessions defined in state.json | Run step `roadmap` first (`maestro run start "{goal}" --cmd roadmap --session YYYYMMDD-roadmap-{topic} --platform pi --arg "{goal}"`（v2 legacy；session/3.0 workspace 见 run-mode.md v3 章节）) |
 | E006 | error | Session not found in state.json.sessions[] | Check available sessions |
 | E007 | error | No active worktree for session (--sync) | Check worktrees.json |
 | E008 | error | Session already has active worktree | Merge or cleanup first |

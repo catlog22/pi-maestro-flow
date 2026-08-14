@@ -119,6 +119,7 @@ Created:
 End the step by calling the CLI (no text block output):
 ```
 maestro session done --session {session_id} --verdict {VERDICT} [--evidence {path}]
+# （v2 legacy；session/3.0 workspace 见 run-mode.md v3 章节）
 ```
 (run-id 可省略 — 自动解析当前 running 步)
 
@@ -132,11 +133,11 @@ Verdicts:
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Roadmap needed (default light) | step `roadmap` (`maestro run start "{goal}" --cmd roadmap --session YYYYMMDD-roadmap-{topic} --platform pi --arg "{goal}"`) |
+| Roadmap needed (default light) | step `roadmap` (`maestro run start "{goal}" --cmd roadmap --session YYYYMMDD-roadmap-{topic} --platform pi --arg "{goal}"`（v2 legacy；session/3.0 workspace 见 run-mode.md v3 章节）) |
 
 Note: roadmap step is responsible for creating `state.json.sessions[]` entries and setting the first `active_session_id`.
-| Full spec package | step `blueprint` (`maestro run start "{goal}" --cmd blueprint --session YYYYMMDD-blueprint-{topic} --platform pi --arg "{goal}"`) |
-| Explore ideas first | step `brainstorm` (`maestro run start "{goal}" --cmd brainstorm --session YYYYMMDD-brainstorm-{topic} --platform pi --arg "{goal}"`) |
+| Full spec package | step `blueprint` (`maestro run start "{goal}" --cmd blueprint --session YYYYMMDD-blueprint-{topic} --platform pi --arg "{goal}"`（v2 legacy；session/3.0 workspace 见 run-mode.md v3 章节）) |
+| Explore ideas first | step `brainstorm` (`maestro run start "{goal}" --cmd brainstorm --session YYYYMMDD-brainstorm-{topic} --platform pi --arg "{goal}"`（v2 legacy；session/3.0 workspace 见 run-mode.md v3 章节）) |
 | Quick ad-hoc task | `/maestro-companion "{goal}"` |
 </completion>
 

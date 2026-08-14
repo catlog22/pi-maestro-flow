@@ -79,7 +79,7 @@ User selects "记录经验" → prompt for title/insight, then recommend `/maest
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Next dep-ready session | step `analyze` for session (`maestro run start "{goal}" --cmd analyze --session {next-dep-ready-slug} --platform pi --arg "{goal}"`) |
+| Next dep-ready session | step `analyze` for session (`maestro run start "{goal}" --cmd analyze --session {next-dep-ready-slug} --platform pi --arg "{goal}"`（v2 legacy；session/3.0 workspace 见 run-mode.md v3 章节）) |
 </completion>
 
 <error_codes>

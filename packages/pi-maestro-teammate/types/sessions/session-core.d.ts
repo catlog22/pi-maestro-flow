@@ -144,6 +144,8 @@ export interface WindowThreadEntry {
     traceId?: string;
     replyTo?: string;
     fromSessionName?: string;
+    /** Receiving Pi session; prevents inherited fork entries from replaying into the child. */
+    targetSessionId?: string;
     targetCorrelationId?: string;
     mode: Exclude<SessionMessageMode, "abort">;
     effectiveMode?: Exclude<SessionMessageMode, "abort">;

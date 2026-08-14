@@ -393,6 +393,8 @@ export interface WindowThreadEntry {
   traceId?: string;
   replyTo?: string;
   fromSessionName?: string;
+  /** Receiving Pi session; prevents inherited fork entries from replaying into the child. */
+  targetSessionId?: string;
   targetCorrelationId?: string;
   mode: Exclude<SessionMessageMode, "abort">;
   effectiveMode?: Exclude<SessionMessageMode, "abort">;
@@ -443,6 +445,7 @@ function semanticThreadEntry(entry: Omit<WindowThreadEntry, "contentRevision">):
     ...(entry.traceId === undefined ? {} : { traceId: entry.traceId }),
     ...(entry.replyTo === undefined ? {} : { replyTo: entry.replyTo }),
     ...(entry.fromSessionName === undefined ? {} : { fromSessionName: entry.fromSessionName }),
+    ...(entry.targetSessionId === undefined ? {} : { targetSessionId: entry.targetSessionId }),
     ...(entry.targetCorrelationId === undefined ? {} : { targetCorrelationId: entry.targetCorrelationId }),
     mode: entry.mode,
     ...(entry.effectiveMode === undefined ? {} : { effectiveMode: entry.effectiveMode }),
@@ -473,6 +476,7 @@ function validThreadEntry(value: unknown): WindowThreadEntry | undefined {
     || (entry.traceId !== undefined && (typeof entry.traceId !== "string" || entry.traceId.length === 0 || entry.traceId.length > 128 || /[\u0000-\u001f\u007f]/.test(entry.traceId)))
     || (entry.replyTo !== undefined && (typeof entry.replyTo !== "string" || entry.replyTo.length === 0 || entry.replyTo.length > 192 || /[\u0000-\u001f\u007f]/.test(entry.replyTo)))
     || (entry.fromSessionName !== undefined && (typeof entry.fromSessionName !== "string" || entry.fromSessionName.length === 0 || entry.fromSessionName.length > 256 || /[\u0000-\u001f\u007f]/.test(entry.fromSessionName)))
+    || (entry.targetSessionId !== undefined && (typeof entry.targetSessionId !== "string" || entry.targetSessionId.length === 0 || entry.targetSessionId.length > 256 || /[\u0000-\u001f\u007f]/.test(entry.targetSessionId)))
     || (entry.targetCorrelationId !== undefined && (typeof entry.targetCorrelationId !== "string" || entry.targetCorrelationId.length === 0 || entry.targetCorrelationId.length > 128 || /[\u0000-\u001f\u007f]/.test(entry.targetCorrelationId)))
     || (entry.mode !== "steer" && entry.mode !== "follow_up")
     || (entry.effectiveMode !== undefined && entry.effectiveMode !== "steer" && entry.effectiveMode !== "follow_up")
@@ -493,6 +497,7 @@ function validThreadEntry(value: unknown): WindowThreadEntry | undefined {
     ...(entry.traceId === undefined ? {} : { traceId: entry.traceId as string }),
     ...(entry.replyTo === undefined ? {} : { replyTo: entry.replyTo as string }),
     ...(entry.fromSessionName === undefined ? {} : { fromSessionName: entry.fromSessionName as string }),
+    ...(entry.targetSessionId === undefined ? {} : { targetSessionId: entry.targetSessionId as string }),
     ...(entry.targetCorrelationId === undefined ? {} : { targetCorrelationId: entry.targetCorrelationId as string }),
     mode: entry.mode,
     ...(entry.effectiveMode === undefined ? {} : { effectiveMode: entry.effectiveMode as Exclude<SessionMessageMode, "abort"> }),
@@ -607,6 +612,7 @@ export class WindowThreadStore {
       && previous.traceId === input.traceId
       && previous.replyTo === input.replyTo
       && previous.fromSessionName === input.fromSessionName
+      && previous.targetSessionId === input.targetSessionId
       && previous.targetCorrelationId === input.targetCorrelationId
       && previous.mode === input.mode
       && previous.effectiveMode === input.effectiveMode

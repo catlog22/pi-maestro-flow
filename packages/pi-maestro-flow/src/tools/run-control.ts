@@ -39,6 +39,7 @@ const RUN_CONTROL_READ_COMMANDS: ReadonlySet<string> = new Set([
 export type RunControlMutationScope =
   | "read"
   | "session"
+  | "run"
   | "execution"
   | "execution-acquire"
   | "execution-lease"
@@ -102,6 +103,15 @@ export function classifyRunControlArgv(argv: readonly string[]): RunControlClass
     if (["status", "show", "list", "evidence", "graph"].includes(command)) {
       return { ...READ_CLASSIFICATION };
     }
+    // session/3.0-only Session commands (docs/session-run-minimal-state-architecture-20260812.md).
+    // Shared v2/v3 commands (create/start/attach/resume/migrate/resolve/next/chain insert|skip|replace/...)
+    // keep their existing classification below; the coordinator interprets scope/lease by mode.
+    if (command === "open") return writeClassification("session", "none", true);
+    if (["pause", "complete"].includes(command)) {
+      return writeClassification("session", "none");
+    }
+    if (command === "resume-view") return { ...READ_CLASSIFICATION };
+    if (command === "chain" && argv[2] === "audit") return { ...READ_CLASSIFICATION };
     if (command === "create") return writeClassification("session", "none", true);
     if (["archive", "unarchive"].includes(command)) return writeClassification("session", "none");
     if (["start", "attach", "resume"].includes(command)) {
@@ -119,7 +129,16 @@ export function classifyRunControlArgv(argv: readonly string[]): RunControlClass
       return writeClassification("compatibility-start", "command-aware", true);
     }
     if (command === "create") return writeClassification("execution", "required", true);
+    // session/3.0-only Run mutations; the v2 CLI surface has no run transition/cancel/seal.
+    if (["transition", "cancel", "seal"].includes(command)) {
+      return writeClassification("run", "none");
+    }
     return writeClassification("execution", "required");
+  }
+
+  if (family === "participant") {
+    if (command === "status") return { ...READ_CLASSIFICATION };
+    if (["register", "unregister"].includes(command)) return writeClassification("session", "none");
   }
 
   if (family === "plan" && command === "publish") {

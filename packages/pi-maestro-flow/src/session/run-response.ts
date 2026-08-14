@@ -50,8 +50,6 @@ export type RunOperationV12 =
   | "capabilities"
   | "session-open"
   | "session-migrate"
-  | "session-pause"
-  | "session-resume"
   | "session-complete"
   | "session-archive"
   | "session-status"
@@ -63,6 +61,7 @@ export type RunOperationV12 =
   | "run-cancel"
   | "run-seal"
   | "run-transition"
+  | "run-decide"
   | "execution-start"
   | "execution-attach"
   | "execution-status"
@@ -339,10 +338,10 @@ const operationV11Schema = z.enum([
 ]);
 const operationV12Schema = z.enum([
   ...operationV10Schema.options,
-  "capabilities", "session-open", "session-migrate", "session-pause", "session-resume",
+  "capabilities", "session-open", "session-migrate",
   "session-complete", "session-archive", "session-status", "session-resume-view",
   "session-chain-insert", "session-chain-skip", "session-chain-replace", "session-chain-audit",
-  "run-cancel", "run-seal", "run-transition", "execution-start", "execution-attach",
+  "run-cancel", "run-seal", "run-transition", "run-decide", "execution-start", "execution-attach",
   "execution-status", "execution-pause", "execution-resolve", "execution-resume", "execution-seal",
   "execution-handoff-prepare", "execution-handoff-accept", "execution-handoff-cancel",
   "execution-lease-status", "execution-lease-heartbeat", "execution-lease-release", "execution-lease-recover",

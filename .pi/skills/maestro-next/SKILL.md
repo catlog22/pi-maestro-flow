@@ -23,7 +23,7 @@ Pi mirrors canonical Session/Run state automatically:
 <purpose>
 Unified interactive entry for all development intents. Pure router: parse intent + project state → classify → assess complexity → route to the appropriate channel:
 - **Companion** (lightweight): route to `/maestro-companion "<intent>"` — minimal run lifecycle, continuous evidence recording
-- **Standard** (single run): recommend a step → confirm → execute via `maestro run start --platform pi --cmd`
+- **Standard** (single run): recommend a step → confirm → execute (v3: `session open --chain <step> --id <slug>` then `run next --run <id>`; v2 legacy: `maestro run start --platform pi --cmd`)
 - **Multi-step**: route to `/maestro "<intent>"` (manual stepwise control) or `/maestro-ralph "<intent>"` (orchestrated closed-loop)
 
 This command is the single entry point. It classifies and routes. Multi-step execution loops live in `/maestro` (manual) and `/maestro-ralph` (orchestrated).
@@ -68,8 +68,8 @@ $ARGUMENTS — intent text + optional flags.
 9. **Multi-step routes to the orchestrators** — when intent spans ≥2 steps or needs orchestration, output `/maestro "<intent>"` (manual stepwise) or `/maestro-ralph "<intent>"` (orchestrated closed-loop). This command never creates sessions or manages chains itself
 10. **Cross-category keyword priority** — when an intent keyword matches both a first-tier step and a retained command, the first-tier step wins for candidate selection; complexity assessment still applies independently. Auxiliary clusters are advisory grouping for display, never routing overrides
 11. **`-y` means skip-confirmation, not auto-execute** — for standard channel, skipping confirmation proceeds to S_EXECUTE (this command runs the step). For companion/multi-step channels, this command is a router: skipping confirmation means outputting the target invocation text directly. The target command owns its own execution semantics
-9. simple chain 只通过 `maestro run start --platform pi --chain ... --no-dispatch` 创建；不得为同一任务的每个 skill 新建独立 Session。
-10. 中途新增下一步用 `maestro run edit <cmd...>` 修改未来 chain，不调用新的 `run start` 制造第二个 Topic Session。
+9. simple chain 通过 v3 `session open --chain <cmds...> --id <slug>`（run-control）或 v2 legacy `maestro run start --platform pi --chain ... --no-dispatch` 创建；不得为同一任务的每个 skill 新建独立 Session。
+10. 中途新增下一步用 v3 `session chain insert|skip|replace` 或 v2 legacy `maestro run edit <cmd...>` 修改未来 chain，不调用新的 `run start`/`session open` 制造第二个 Topic Session。
 </invariants>
 
 <state_machine>
@@ -255,6 +255,8 @@ For first-tier steps (those with prepare/ + workflows/ files):
 
 ```bash
 # Create one Run through the friendly unified entry.
+# v3 (session/3.0 workspace): session open --chain <step> --id <slug> ... -> run next --run <run-id> ...
+# v2 legacy:
 maestro run start "<short goal>" --cmd <step> --platform pi --workflow-root . [--arg "<required command input>"]
 # Returns run_id, run_dir, authoritative upstream refs, entry gates/blockers, and brief.command.
 ```
@@ -282,6 +284,8 @@ maestro run start "<short goal>" --cmd <step> --platform pi --workflow-root . [-
 # 5. LLM executes the workflow (core process)
 
 # 6. Complete the run
+# v3: run complete <run-id> --advance --verdict done --summary "..."
+# v2 legacy:
 maestro run done <run_id>
 ```
 

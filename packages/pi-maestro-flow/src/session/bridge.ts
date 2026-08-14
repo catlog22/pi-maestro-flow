@@ -103,21 +103,43 @@ export async function loadCanonicalSnapshot(
       });
     }
 
-    const gateResult = await readJson(join(sessionDir, "gates.json"), true);
-    if (gateResult.raw) fingerprintParts.push(gateResult.raw);
-    if (gateResult.error) diagnostics.push(gateResult.error);
-    const gateRecords = gateRegistry(gateResult.value);
+    // session/3.0 minimal-state layout: the Session owns chain/active runs/gates
+    // directly and there is no Execution entity (no executions/ directory, no
+    // executionId/generation locator). Detect by schema_version and project
+    // through the v3 path; the v2 layout below is left untouched.
+    if (stringValue(sessionResult.value.schema_version) === "session/3.0") {
+      const v3Session = await projectSessionV30(
+        canonicalSessionId,
+        sessionDir,
+        sessionResult.value,
+        diagnostics,
+        fingerprintParts,
+      );
+      if (!v3Session) {
+        const error = `Canonical Workflow Session ${canonicalSessionId} has an invalid session/3.0 record`;
+        diagnostics.push(error);
+        return snapshot("canonical", projectRoot, undefined, fingerprintParts, diagnostics, options.now, {
+          activeSessionId: canonicalSessionId,
+          status: "invalid",
+          error,
+        });
+      }
+      return snapshot("canonical", projectRoot, v3Session, fingerprintParts, diagnostics, options.now, {
+        activeSessionId: canonicalSessionId,
+        status: "valid",
+      });
+    }
+
     const artifactResult = await readJson(join(sessionDir, "artifacts.json"), true);
     if (artifactResult.raw) fingerprintParts.push(artifactResult.raw);
     if (artifactResult.error) diagnostics.push(artifactResult.error);
-    const runResults = await readRuns(join(sessionDir, "runs"), diagnostics, gateRecords);
+    const runResults = await readRuns(join(sessionDir, "runs"), diagnostics);
     fingerprintParts.push(...runResults.raw);
     const session = normalizeSession(
       canonicalSessionId,
       sessionResult.value,
       runResults.runs,
       artifactResult.value,
-      gateRecords,
       diagnostics,
     );
     if (!session) {
@@ -147,6 +169,73 @@ export async function loadCanonicalSnapshot(
   const legacy = await loadLegacySnapshot(projectRoot, workflowDir, diagnostics, fingerprintParts, options.now);
   if (legacy) return legacy;
   return snapshot("none", projectRoot, undefined, fingerprintParts, diagnostics, options.now);
+}
+
+/**
+ * Projects a session/3.0 minimal-state Session
+ * (docs/session-run-minimal-state-architecture-20260812.md).
+ *
+ * The v3 layout has no Execution entity: the Session record owns the chain,
+ * active Run ids, artifacts ref, and evidence ref directly, and every Run
+ * lives under runs/<run_id>/run.json. The projection therefore produces a
+ * WorkflowSession with no WorkflowExecution and a locator without
+ * executionId/generation. session.json and every run.json raw payload feed the
+ * snapshot fingerprint so the fingerprint tracks state changes.
+ */
+async function projectSessionV30(
+  sessionId: string,
+  sessionDir: string,
+  raw: Record<string, unknown>,
+  diagnostics: string[],
+  fingerprintParts: string[],
+): Promise<WorkflowSession | undefined> {
+  if (stringValue(raw.schema_version) !== "session/3.0") return undefined;
+  const orchestrationRevision = nonnegativeIntegerValue(raw.orchestration_revision);
+  const activityRevision = nonnegativeIntegerValue(raw.activity_revision);
+  if (orchestrationRevision === undefined || activityRevision === undefined) {
+    diagnostics.push("session/3.0 requires nonnegative orchestration/activity revisions");
+    return undefined;
+  }
+
+  const artifactsRef = stringValue(raw.artifacts_ref) ?? "artifacts.json";
+  const evidenceRef = stringValue(raw.evidence_ref) ?? "evidence.json";
+
+  const artifactResult = await readJson(join(sessionDir, artifactsRef), true);
+  if (artifactResult.raw) fingerprintParts.push(artifactResult.raw);
+  if (artifactResult.error) diagnostics.push(artifactResult.error);
+  const artifactsRecord = recordValue(artifactResult.value?.artifacts)
+    ?? recordValue(artifactResult.value?.records)
+    ?? {};
+  const aliasesRecord = recordValue(artifactResult.value?.aliases) ?? {};
+
+  const evidenceResult = await readJson(join(sessionDir, evidenceRef), true);
+  if (evidenceResult.raw) fingerprintParts.push(evidenceResult.raw);
+  if (evidenceResult.error) diagnostics.push(evidenceResult.error);
+
+  const runResults = await readRuns(join(sessionDir, "runs"), diagnostics, true);
+  fingerprintParts.push(...runResults.raw);
+
+  const activeRunIds = stringArray(raw.active_run_ids);
+  return {
+    schemaVersion: "session/3.0",
+    sessionId,
+    intent: stringValue(raw.objective) ?? "",
+    status: sessionStatusV30(stringValue(raw.status)),
+    lifecycleAuthority: "legacy-session",
+    revision: Math.max(orchestrationRevision, activityRevision),
+    orchestrationRevision,
+    activityRevision,
+    // v3 allows multiple concurrently active Runs; the projection exposes the
+    // first for consumers that expect a single active Run id.
+    activeRunId: activeRunIds[0] ?? null,
+    definitionOfDone: stringValue(raw.definition_of_done) ?? "",
+    chain: chainV30Array(raw.chain),
+    runs: runResults.runs,
+    artifacts: Object.entries(artifactsRecord).map(([artifactId, value]) => normalizeArtifact(artifactId, value)),
+    aliases: Object.fromEntries(
+      Object.entries(aliasesRecord).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    ),
+  };
 }
 
 export class WorkflowBridge {
@@ -237,11 +326,9 @@ export function buildTodoMirrorSpecs(snapshot: WorkflowSnapshot): TodoMirrorTask
     const previous = index > 0 ? chain[index - 1] : undefined;
     const status = todoStatus(
       run,
-      session.gates,
       step.status,
       index,
       previous,
-      run?.runId === activeRunId,
     );
     const summary = stringValue(run?.handoff?.summary);
     const skill = step.skill?.trim();
@@ -277,9 +364,9 @@ function snapshot(
   execution?: WorkflowExecution,
 ): WorkflowSnapshot {
   const sessionGeneration = canonicalClaim
-    ? `canonical:${canonicalClaim.status}:${canonicalClaim.activeSessionId ?? "unknown"}:${session?.identityRevision ?? 0}`
+    ? `canonical:${canonicalClaim.status}:${canonicalClaim.activeSessionId ?? "unknown"}:${session?.revision ?? 0}`
     : session
-      ? `${source}:${session.sessionId}:${session.identityRevision ?? 0}`
+      ? `${source}:${session.sessionId}:${session.revision ?? 0}`
       : source;
   return {
     source,
@@ -578,7 +665,7 @@ function legacyExecutionProjection(
 async function readRuns(
   runsDir: string,
   diagnostics: string[],
-  gateRecords: WorkflowGate[] = [],
+  includeRunRevision = false,
 ): Promise<{ runs: WorkflowRun[]; raw: string[] }> {
   let directories: string[];
   try {
@@ -597,7 +684,7 @@ async function readRuns(
     const result = await readJson(join(runsDir, directory, "run.json"));
     if (result.raw) raw.push(result.raw);
     if (result.error) diagnostics.push(result.error);
-    if (result.value) runs.push(normalizeRun(directory, result.value, gateRecords));
+    if (result.value) runs.push(normalizeRun(directory, result.value, includeRunRevision));
   }
   return { runs, raw };
 }
@@ -607,7 +694,6 @@ function normalizeSession(
   raw: Record<string, unknown>,
   runs: WorkflowRun[],
   artifactRegistry?: Record<string, unknown>,
-  gateRecords: WorkflowGate[] = [],
   diagnostics: string[] = [],
 ): WorkflowSession | undefined {
   const schemaVersion = stringValue(raw.schema_version);
@@ -620,13 +706,8 @@ function normalizeSession(
     ?? recordValue(artifactRegistry?.records)
     ?? {};
   const aliasesRecord = recordValue(artifactRegistry?.aliases) ?? {};
-  const identityRevision = optionalNumber(raw.identity_revision);
   const activityRevision = optionalNumber(raw.activity_revision);
-  const revision = Math.max(numberValue(raw.revision), identityRevision ?? 0, activityRevision ?? 0);
-  const sessionGateIds = stringArray(raw.gate_ids);
-  const externalSessionGates = gateRecords.filter((gate) =>
-    sessionGateIds.includes(gate.id) || !gate.runId
-  );
+  const revision = Math.max(numberValue(raw.revision), activityRevision ?? 0);
   return {
     ...(schemaVersion ? { schemaVersion } : {}),
     sessionId: stringValue(raw.session_id) ?? activeSessionId,
@@ -639,11 +720,9 @@ function normalizeSession(
       ...statuslessFields,
     }),
     revision,
-    ...(identityRevision !== undefined ? { identityRevision } : {}),
     ...(activityRevision !== undefined ? { activityRevision } : {}),
     activeRunId: statusless ? null : nullableString(raw.active_run_id),
     definitionOfDone: stringValue(boundary?.definition_of_done) ?? "",
-    gates: mergeGates(gateArray(raw.gates, "session"), externalSessionGates),
     chain: statusless ? [] : chainArray(orchestration?.chain),
     runs,
     artifacts: Object.entries(artifactsRecord).map(([artifactId, value]) => normalizeArtifact(artifactId, value)),
@@ -706,29 +785,33 @@ function strictNullableString(
 function normalizeRun(
   fallbackId: string,
   raw: Record<string, unknown>,
-  gateRecords: WorkflowGate[] = [],
+  includeRunRevision = false,
 ): WorkflowRun {
   const input = recordValue(raw.input);
   const command = recordValue(raw.command);
   const output = recordValue(raw.output);
   const runId = stringValue(raw.run_id) ?? fallbackId;
-  const gateIds = stringArray(raw.gate_ids);
-  const externalGates = gateRecords.filter((gate) =>
-    gate.runId === runId || gateIds.includes(gate.id)
-  );
   const commandName = stringValue(raw.command) ?? stringValue(command?.name) ?? "unknown";
-  const args = stringArray(input?.args).length > 0 ? stringArray(input?.args) : stringArray(command?.args);
+  const args = stringArray(input?.args).length > 0
+    ? stringArray(input?.args)
+    : stringArray(command?.args).length > 0
+      ? stringArray(command?.args)
+      : stringArray(raw.args);
   const planPublication = commandName === "plan-publish" ? planPublicationIdentity(args) : undefined;
+  const runRevision = nonnegativeIntegerValue(raw.revision);
   const normalized: WorkflowRun = {
     ...(stringValue(raw.schema_version) ? { schemaVersion: stringValue(raw.schema_version) } : {}),
+    ...(includeRunRevision && runRevision !== undefined ? { revision: runRevision } : {}),
     runId,
     parentRunId: nullableString(raw.parent_run_id),
     command: commandName,
     status: runStatus(raw.status),
     goal: nullableString(raw.goal),
     args: commandName === "plan-publish" ? [] : args,
-    gates: mergeGates(gateArray(raw.gates), externalGates),
-    primaryArtifactId: nullableString(raw.primary) ?? nullableString(output?.primary_artifact_id),
+    gates: gateArray(raw.gates),
+    primaryArtifactId: nullableString(raw.primary)
+      ?? nullableString(output?.primary_artifact_id)
+      ?? nullableString(raw.primary_artifact_id),
     handoff: publicRunHandoff(recordValue(raw.handoff) ?? null, commandName),
     startedAt: stringValue(raw.started_at) ?? "",
     endedAt: nullableString(raw.ended_at)
@@ -824,7 +907,6 @@ async function loadLegacySnapshot(
       revision: numberValue(result.value.revision),
       activeRunId: null,
       definitionOfDone: "",
-      gates: [],
       chain: rawChain.map((entry, index) => normalizeLegacyStep(entry, index)),
       runs: [],
       artifacts: [],
@@ -865,6 +947,25 @@ function chainArray(value: unknown): WorkflowChainStep[] {
   });
 }
 
+/**
+ * session/3.0 chain steps carry run_ids (a step may retry through multiple
+ * Runs); the projection exposes the latest Run id for consumers that expect a
+ * single chain runId, mirroring the v3 active_run_ids rule of first-wins.
+ */
+function chainV30Array(value: unknown): WorkflowChainStep[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry, index) => {
+    const raw = recordValue(entry) ?? {};
+    const runIds = stringArray(raw.run_ids);
+    return {
+      step: stringValue(raw.step_id) ?? String(index + 1),
+      command: stringValue(raw.command) ?? stringValue(raw.step_id) ?? "unknown",
+      status: stringValue(raw.status) ?? "pending",
+      runId: runIds.length > 0 ? runIds[runIds.length - 1]! : null,
+    };
+  });
+}
+
 function normalizeLegacyStep(value: unknown, index: number): WorkflowChainStep {
   const raw = recordValue(value) ?? {};
   return {
@@ -880,14 +981,6 @@ function gateArray(value: unknown, defaultPhase?: WorkflowGate["phase"]): Workfl
   return value.map((entry, index) => normalizeGate(`gate-${index + 1}`, entry, defaultPhase));
 }
 
-function gateRegistry(value: Record<string, unknown> | undefined): WorkflowGate[] {
-  if (!value) return [];
-  const records = recordValue(value.records) ?? recordValue(value.gates) ?? value;
-  return Object.entries(records)
-    .filter(([key, entry]) => !["schema_version", "revision"].includes(key) && recordValue(entry))
-    .map(([key, entry]) => normalizeGate(key, entry));
-}
-
 function normalizeGate(
   fallbackId: string,
   value: unknown,
@@ -895,7 +988,7 @@ function normalizeGate(
 ): WorkflowGate {
   const raw = recordValue(value) ?? {};
   const runId = stringValue(raw.run_id);
-  const phase = phaseValue(raw.phase) ?? defaultPhase;
+  const phase = phaseValue(raw.phase) ?? phaseValue(raw.scope) ?? defaultPhase;
   return {
     id: stringValue(raw.id) ?? fallbackId,
     ...(runId ? { runId } : {}),
@@ -906,28 +999,17 @@ function normalizeGate(
   };
 }
 
-function mergeGates(left: WorkflowGate[], right: WorkflowGate[]): WorkflowGate[] {
-  const merged = new Map<string, WorkflowGate>();
-  for (const gate of [...left, ...right]) merged.set(gate.id, gate);
-  return [...merged.values()];
-}
-
 function todoStatus(
   run: WorkflowRun | undefined,
-  sessionGates: WorkflowGate[],
   chainStatus: string,
   index: number,
   previous?: WorkflowChainStep,
-  isActiveRun = false,
 ): TodoMirrorTaskSpec["status"] {
   const runFailures = (run?.gates ?? []).filter((gate) =>
     gate.blocking && ["failed", "blocked"].includes(gate.status)
   );
   const completed = run?.status === "completed" || run?.status === "sealed" || chainStatus === "completed";
-  const sessionFailures = completed && !isActiveRun
-    ? []
-    : sessionGates.filter((gate) => gate.blocking && ["failed", "blocked"].includes(gate.status));
-  const blockingFailures = [...sessionFailures, ...runFailures];
+  const blockingFailures = runFailures;
   if (blockingFailures.some((gate) => gate.phase !== "entry")) return "blocked";
   if (blockingFailures.some((gate) => gate.phase === "entry")) return "pending";
   const runStatusValue = run?.status;
@@ -958,7 +1040,7 @@ function strictExecutionStatus(value: unknown): WorkflowExecution["status"] | un
 }
 
 function legacyExecutionStatus(value: WorkflowSessionStatus): WorkflowExecution["status"] {
-  if (value === "paused" || value === "failed") return "paused";
+  if (value === "failed") return "paused";
   if (value === "sealed" || value === "archived") return "sealed";
   return "active";
 }
@@ -982,15 +1064,32 @@ function decisionPointStatus(value: unknown): WorkflowDecisionPoint["status"] {
 }
 
 function sessionStatus(value: unknown): WorkflowSessionStatus {
-  return ["planned", "running", "paused", "sealed", "archived", "failed"].includes(String(value))
+  return ["planned", "running", "sealed", "archived", "failed"].includes(String(value))
     ? value as WorkflowSessionStatus
     : "planned";
 }
 
+/** session/3.0 statuses have no direct v2 counterpart: open->running, completed->sealed. */
+function sessionStatusV30(value: unknown): WorkflowSessionStatus {
+  switch (value) {
+    case "open": return "running";
+    case "completed": return "sealed";
+    case "archived": return "archived";
+    case "failed": return "failed";
+    default: return "planned";
+  }
+}
+
 function runStatus(value: unknown): WorkflowRunStatus {
-  return ["created", "running", "blocked", "failed", "completed", "sealed"].includes(String(value))
-    ? value as WorkflowRunStatus
-    : "created";
+  const status = String(value);
+  if (["created", "running", "blocked", "failed", "completed", "sealed"].includes(status)) {
+    return status as WorkflowRunStatus;
+  }
+  // run/3.0 statuses with no v2 counterpart: pending maps to created (allocated
+  // but not started), cancelled maps to sealed (terminal, never completed).
+  if (status === "pending") return "created";
+  if (status === "cancelled") return "sealed";
+  return "created";
 }
 
 function gateStatus(value: unknown): WorkflowGate["status"] {

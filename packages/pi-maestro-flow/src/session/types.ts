@@ -1,6 +1,6 @@
 import type { TodoSkillBinding } from "../skills/skill-composer.ts";
 
-export type WorkflowSessionStatus = "planned" | "running" | "paused" | "sealed" | "archived" | "failed";
+export type WorkflowSessionStatus = "planned" | "running" | "sealed" | "archived" | "failed";
 export type WorkflowRunStatus = "created" | "running" | "blocked" | "failed" | "completed" | "sealed";
 export type WorkflowGateStatus = "pending" | "running" | "passed" | "failed" | "blocked" | "waived" | "skipped";
 export type WorkflowExecutionStatus = "active" | "paused" | "sealed";
@@ -26,6 +26,8 @@ export interface WorkflowChainStep {
 
 export interface WorkflowRun {
   schemaVersion?: string;
+  /** Run entity revision for session/3.0 CAS mutations (run.json revision). */
+  revision?: number;
   runId: string;
   parentRunId: string | null;
   command: string;
@@ -63,7 +65,7 @@ export interface WorkflowSession {
   status: WorkflowSessionStatus;
   lifecycleAuthority?: WorkflowLifecycleAuthority;
   revision: number;
-  identityRevision?: number;
+  orchestrationRevision?: number;
   activityRevision?: number;
   /** session/2.0 Execution/history pointers. */
   currentExecutionId?: string | null;
@@ -73,7 +75,6 @@ export interface WorkflowSession {
   archivedBy?: string | null;
   activeRunId: string | null;
   definitionOfDone: string;
-  gates: WorkflowGate[];
   chain: WorkflowChainStep[];
   runs: WorkflowRun[];
   artifacts: WorkflowArtifact[];

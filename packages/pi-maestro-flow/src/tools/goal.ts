@@ -415,7 +415,7 @@ export function reconcileWorkflowGoal(snapshot: WorkflowSnapshot, ctx: GoalConte
   }
 
   if (session.status === "sealed" || session.status === "archived") return activeGoal;
-  const failedGate = [...session.gates, ...session.runs.flatMap((run) => run.gates)]
+  const failedGate = session.runs.flatMap((run) => run.gates)
     .some((gate) => gate.blocking && ["failed", "blocked"].includes(gate.status));
   if (!activeGoal) {
     const created = createWorkflowGoal(session, ctx, snapshot.sessionGeneration, failedGate);
@@ -1029,7 +1029,7 @@ function createWorkflowGoal(
   sessionGeneration: string | undefined,
   failedGate?: boolean,
 ): ActiveGoal {
-  const blocked = failedGate ?? [...session.gates, ...session.runs.flatMap((run) => run.gates)]
+  const blocked = failedGate ?? session.runs.flatMap((run) => run.gates)
     .some((gate) => gate.blocking && ["failed", "blocked"].includes(gate.status));
   const definition = session.definitionOfDone.trim();
   const objective = definition ? `${session.intent}\n\nDefinition of done: ${definition}` : session.intent;
@@ -1037,7 +1037,7 @@ function createWorkflowGoal(
     ...createGoal(objective, undefined, currentTokenTotal(ctx) ?? 0),
     workflowSessionId: session.sessionId,
     ...(sessionGeneration ? { workflowSessionGeneration: sessionGeneration } : {}),
-    ...(blocked || session.status === "paused" ? { status: "paused" as const, pauseReason: "gate" as const } : {}),
+    ...(blocked ? { status: "paused" as const, pauseReason: "gate" as const } : {}),
   };
 }
 

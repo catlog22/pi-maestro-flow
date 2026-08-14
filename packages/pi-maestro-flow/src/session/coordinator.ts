@@ -18,7 +18,7 @@ import {
   type RunLeaseClaim,
   type RunResponseFenceV11,
 } from "./run-response.ts";
-import { activeWorkflowRun, type WorkflowRun, type WorkflowSnapshot } from "./types.ts";
+import { activeWorkflowRun, type WorkflowRun, type WorkflowSession, type WorkflowSnapshot } from "./types.ts";
 
 export interface WorkflowSnapshotProvider {
   refresh(): Promise<WorkflowSnapshot>;
@@ -68,10 +68,41 @@ export interface WorkflowHostContext {
   hostSessionId: string;
 }
 
+/**
+ * session/3.0 resume projection (mirror of the core ResumeMapV1 contract in
+ * maestro/src/run/protocol-schemas.ts). Defined locally with minimal manual
+ * validation so the coordinator never depends on core packages.
+ */
+export interface ResumeMapV1 {
+  sessionId: string;
+  sessionStatus: "open" | "completed" | "archived" | "failed";
+  identityRevision: number;
+  orchestrationRevision: number;
+  activityRevision: number;
+  activeRuns: Array<{
+    runId: string;
+    stepId: string;
+    status: "pending" | "running" | "blocked" | "completed" | "failed" | "cancelled" | "sealed";
+    revision: number;
+  }>;
+  blockingGates: string[];
+  openDecisions: string[];
+  pendingPublications: Array<{ publicationId: string; resourceUri?: string }>;
+  nextActions: Array<{
+    action: string;
+    targetId: string;
+    expectedRevision: number;
+  }>;
+  fingerprint: string;
+}
+
 export interface WorkflowAttachResult {
   snapshot: WorkflowSnapshot;
   brief?: RunCliResult;
-  lease: WorkflowLeaseMetadata | WorkflowCoreLeaseMetadata;
+  /** Lease metadata when the authority model holds one; session-v3 has no lease. */
+  lease?: WorkflowLeaseMetadata | WorkflowCoreLeaseMetadata;
+  /** session/3.0 resume projection consumed at restore; present only when it validates. */
+  resumeMap?: ResumeMapV1;
 }
 
 export interface WorkflowTransitionResult {
@@ -79,7 +110,7 @@ export interface WorkflowTransitionResult {
   snapshot: WorkflowSnapshot;
 }
 
-export type WorkflowCoordinatorMode = "legacy-host" | "core-execution" | "fail-closed";
+export type WorkflowCoordinatorMode = "legacy-host" | "core-execution" | "fail-closed" | "session-v3";
 
 export interface WorkflowCoreLeaseMetadata {
   sessionId: string;
@@ -93,7 +124,7 @@ export interface WorkflowCoreLeaseMetadata {
 export interface WorkflowRunControlClassification {
   write: boolean;
   sessionless: boolean;
-  mutation?: "read" | "session" | "execution" | "execution-acquire" | "execution-lease"
+  mutation?: "read" | "session" | "run" | "execution" | "execution-acquire" | "execution-lease"
     | "compatibility-start" | "plan-publish" | "artifact-republish";
   lease?: "none" | "required" | "acquire" | "command-aware";
 }
@@ -479,6 +510,11 @@ export class WorkflowCoordinator {
   private coreHeartbeatPending = false;
   private coreMutationWork = Promise.resolve();
   private readonly core: CoreExecutionAuthority = {};
+  // session/3.0 resume-map restore authority: the orchestration revision cached
+  // from `session resume-view` is the expected-orchestration-revision fallback
+  // when the bridge snapshot omits session.orchestrationRevision.
+  private v3ResumeRevisionCache: number | null = null;
+  private readonly v3ResumeMapDiagnostics: string[] = [];
 
   constructor(
     private readonly bridge: WorkflowSnapshotProvider,
@@ -505,6 +541,11 @@ export class WorkflowCoordinator {
     return this.selectedMode;
   }
 
+  /** Validation diagnostics from the last session/3.0 resume-map consumption. */
+  resumeMapDiagnostics(): readonly string[] {
+    return this.v3ResumeMapDiagnostics;
+  }
+
   /** Negotiate authority once, optionally asserting the selected mode. */
   async selectMode(expectedMode?: WorkflowCoordinatorMode): Promise<WorkflowCoordinatorMode> {
     this.authoritySelection ??= this.initializeAuthority();
@@ -522,6 +563,9 @@ export class WorkflowCoordinator {
     if (mode === "fail-closed") throw this.failClosedMutationError("attach");
     if (mode === "core-execution") {
       return this.attachCore(hostSessionId, explicitSessionId);
+    }
+    if (mode === "session-v3") {
+      return this.attachV3(hostSessionId, explicitSessionId);
     }
     const snapshot = await this.bridge.refresh();
     const session = snapshot.session;
@@ -565,6 +609,16 @@ export class WorkflowCoordinator {
     const snapshot = this.bridge.getSnapshot();
     const session = snapshot?.session;
     if (!session) return undefined;
+    if (mode === "session-v3") {
+      // session/3.0 has no lease: every host observes an unowned authority.
+      return {
+        sessionId: session.sessionId,
+        currentHostSessionId: hostSessionId,
+        state: "unowned",
+        isOwner: false,
+        isAttached: false,
+      };
+    }
     if (mode !== "legacy-host") {
       const lease = snapshot?.execution?.lease;
       if (!lease) {
@@ -629,7 +683,7 @@ export class WorkflowCoordinator {
       }
       publishOptions = {
         ...options,
-        expectedIdentityRevision: fenced.identityRevision ?? fenced.revision,
+        expectedIdentityRevision: fenced.revision,
         expectedActivityRevision: fenced.activityRevision ?? fenced.revision,
       };
     } else {
@@ -788,6 +842,9 @@ export class WorkflowCoordinator {
     if (mode === "fail-closed" && classification.write) {
       throw this.failClosedMutationError(argv.slice(0, 3).join(" ") || "mutation");
     }
+    if (mode === "session-v3") {
+      return this.execV3(argv, classification, hostSessionId);
+    }
     if (mode === "core-execution") {
       return this.execCore(argv, classification, hostSessionId);
     }
@@ -805,6 +862,209 @@ export class WorkflowCoordinator {
     }
     const command = projectPublicRunCliResult(await this.adapter.exec(argv));
     return { command, snapshot: await this.bridge.refresh() };
+  }
+
+  /**
+   * session/3.0 raw Maestro argv passthrough (run-control shell surface).
+   * Reads pass through unchanged; writes get the v3 mutation envelope
+   * (participant/actor/request-id/reason/json and expected entity revisions)
+   * injected by the coordinator, mirroring addV3MutationOptions in the core.
+   * There is no mutation lease in v3: the core relies on participant identity
+   * and entity-revision CAS instead.
+   */
+  private async execV3(
+    argv: readonly string[],
+    classification: WorkflowRunControlClassification,
+    hostSessionId?: string,
+  ): Promise<WorkflowTransitionResult> {
+    if (!classification.write) {
+      const command = projectPublicRunCliResult(await this.adapter.exec(argv));
+      return { command, snapshot: await this.bridge.refresh() };
+    }
+    const prepared = await this.prepareV3MutationArgv(argv, hostSessionId);
+    const privateCommand = await this.adapter.exec(prepared);
+    let envelope = parseRunResponse(privateCommand.stdout);
+    if (
+      !envelope.ok
+      && envelope.schema_version === "run-response/1.2"
+      && envelope.error
+      && isV3RevisionConflictCode(envelope.error.code)
+    ) {
+      // D3 constraint: a revision conflict is never replayed with a replaced
+      // revision. Re-read authority so the hint can report the current CAS
+      // revision, then surface the envelope's next_actions for the caller.
+      const reReadHint = await this.v3ConflictReReadHint(argv);
+      envelope = {
+        ...envelope,
+        error: { ...envelope.error, message: `${envelope.error.message} ${reReadHint}` },
+      };
+    }
+    const command = projectPublicRunCliResult({
+      ...privateCommand,
+      stdout: JSON.stringify(projectPublicRunResponse(envelope)),
+    });
+    return { command, snapshot: await this.bridge.refresh() };
+  }
+
+  private async prepareV3MutationArgv(
+    argv: readonly string[],
+    hostSessionId?: string,
+  ): Promise<string[]> {
+    const participantId = requireHostSessionId(hostSessionId);
+    const prepared = [...argv];
+    addFlag(prepared, "--participant", participantId);
+    addFlag(prepared, "--actor", participantId);
+    // session migrate accepts participant/actor/json only (no request-id/reason).
+    if (!isV3MigrateCommand(argv)) {
+      addFlagIfMissing(prepared, "--request-id", randomUUID());
+      addFlagIfMissing(prepared, "--reason", "Pi run-control v3 mutation");
+    }
+    addBooleanFlag(prepared, "--json");
+    if (isV3OpenCommand(argv) || isV3MigrateCommand(argv)) {
+      // Entry/migration commands mint or convert a Session: no CAS expected.
+      return prepared;
+    }
+    const session = await this.requireV3Session();
+    if (isV3OrchestrationTarget(argv)) {
+      const revision = session.orchestrationRevision ?? this.v3ResumeRevisionCache;
+      if (revision === undefined) {
+        throw new Error("cannot determine expected orchestration revision; read session status first");
+      }
+      addFlag(prepared, "--expected-orchestration-revision", String(revision));
+    }
+    if (isV3RunTarget(argv)) {
+      const runId = v3TargetRunId(argv);
+      const run = session.runs.find((candidate) => candidate.runId === runId);
+      if (!run || run.revision === undefined) {
+        throw new Error("cannot determine expected run revision; read run brief first");
+      }
+      addFlag(prepared, "--expected-run-revision", String(run.revision));
+    }
+    return prepared;
+  }
+
+  private async requireV3Session(): Promise<WorkflowSession> {
+    let snapshot = this.bridge.getSnapshot();
+    if (!snapshot?.session) snapshot = await this.bridge.refresh();
+    const session = snapshot.session;
+    if (!session) {
+      throw new Error("cannot determine expected orchestration revision; read session status first");
+    }
+    return session;
+  }
+
+  /**
+   * Re-reads the CAS authority the failed v3 mutation targeted (session status
+   * for orchestration targets, run brief for run targets) and returns a hint
+   * that reports the current revision and explicitly refuses auto-replay.
+   */
+  private async v3ConflictReReadHint(argv: readonly string[]): Promise<string> {
+    if (isV3RunTarget(argv)) {
+      const runId = v3TargetRunId(argv);
+      try {
+        const command = await this.adapter.exec(["run", "brief", runId, "--json"]);
+        const envelope = parseRunResponse(command.stdout);
+        const revision = v3ReReadRevision(envelope, true);
+        return `Re-read authority via 'maestro run brief ${runId} --json' `
+          + `(current Run revision ${revision}); the mutation was not replayed — `
+          + "re-read the Run brief and retry with the current --expected-run-revision.";
+      } catch {
+        return `Re-read authority via 'maestro run brief ${runId} --json'; `
+          + "the mutation was not replayed — re-read the Run brief and retry with "
+          + "the current --expected-run-revision.";
+      }
+    }
+    try {
+      const command = await this.adapter.exec(["session", "status", "--json"]);
+      const envelope = parseRunResponse(command.stdout);
+      const revision = v3ReReadRevision(envelope, false);
+      return `Re-read authority via 'maestro session status --json' `
+        + `(current orchestration revision ${revision}); the mutation was not replayed — `
+        + "re-read session status and retry with the current --expected-orchestration-revision.";
+    } catch {
+      return `Re-read authority via 'maestro session status --json'; `
+        + "the mutation was not replayed — re-read session status and retry with "
+        + "the current --expected-orchestration-revision.";
+    }
+  }
+
+  private async attachV3(hostSessionId: string, explicitSessionId?: string): Promise<WorkflowAttachResult> {
+    requireHostSessionId(hostSessionId);
+    const snapshot = await this.bridge.refresh();
+    const session = snapshot.session;
+    if (!session) throw new Error("No active canonical Workflow Session");
+    if (explicitSessionId && explicitSessionId !== session.sessionId) {
+      throw new Error(`Active Workflow Session is ${session.sessionId}, not ${explicitSessionId}`);
+    }
+    const run = activeWorkflowRun(snapshot);
+    const brief = run
+      ? projectPublicRunCliResult(await this.adapter.brief(run.runId, session.sessionId))
+      : undefined;
+    // session/3.0 has no lease to acquire or heartbeat: return the projected
+    // snapshot (and active Run brief) without lease metadata. The core's
+    // ResumeMapV1 (`session resume-view --json`) is the v3 restore entry
+    // point; its orchestration revision is cached for CAS fallback. A failed
+    // resume-map validation never blocks the attach.
+    const resumeMap = await this.v3ResumeMap();
+    if (resumeMap) {
+      this.v3ResumeRevisionCache = resumeMap.orchestrationRevision;
+    }
+    return {
+      snapshot,
+      ...(brief ? { brief } : {}),
+      ...(resumeMap ? { resumeMap } : {}),
+    };
+  }
+
+  /**
+   * Consumes the session/3.0 resume projection (`session resume-view --json`).
+   * The v3 core returns a run-response/1.2 envelope whose result is the core
+   * ResumeMapV1. Validation mirrors the core guards: no forbidden
+   * execution/lease/operation field names, fingerprint matches the stable-JSON
+   * body hash, and the map fits RESUME_MAP_MAX_UTF8_BYTES. Any failure records
+   * a diagnostic and returns null so recovery never blocks on a bad resume map.
+   */
+  private async v3ResumeMap(): Promise<ResumeMapV1 | null> {
+    this.v3ResumeMapDiagnostics.length = 0;
+    try {
+      const command = await this.adapter.exec(["session", "resume-view", "--json"]);
+      const envelope = parseRunResponse(command.stdout);
+      if (!envelope.ok || envelope.schema_version !== "run-response/1.2") {
+        this.v3ResumeMapDiagnostics.push(
+          `session resume-view returned ${envelope.schema_version} ${envelope.ok ? "success" : "error"} envelope`,
+        );
+        return null;
+      }
+      const result = recordValue(envelope.result);
+      if (!result) {
+        this.v3ResumeMapDiagnostics.push("session resume-view result is not a ResumeMapV1 record");
+        return null;
+      }
+      if (resumeMapHasForbiddenFields(result)) {
+        this.v3ResumeMapDiagnostics.push("ResumeMapV1 contains forbidden execution/lease/operation field names");
+        return null;
+      }
+      if (!resumeMapFingerprintMatches(result)) {
+        this.v3ResumeMapDiagnostics.push("ResumeMapV1 fingerprint does not match the resume body");
+        return null;
+      }
+      if (resumeMapUtf8Bytes(result) > RESUME_MAP_MAX_UTF8_BYTES) {
+        this.v3ResumeMapDiagnostics.push(
+          `ResumeMapV1 exceeds ${RESUME_MAP_MAX_UTF8_BYTES} UTF-8 bytes`,
+        );
+        return null;
+      }
+      if (!resumeMapShapeValid(result)) {
+        this.v3ResumeMapDiagnostics.push("ResumeMapV1 is missing required identity fields");
+        return null;
+      }
+      return result as unknown as ResumeMapV1;
+    } catch (error) {
+      this.v3ResumeMapDiagnostics.push(
+        `session resume-view consumption failed: ${publicWorkflowErrorMessage(error)}`,
+      );
+      return null;
+    }
   }
 
   private async execArtifactRepublish(
@@ -894,7 +1154,7 @@ export class WorkflowCoordinator {
     const handoffKey = requireSingleFlag(prepared, "--handoff-key");
     const requestId = optionalSingleFlag(prepared, "--request-id") ?? derivePlanPublishRequestId(handoffKey);
     addFlag(prepared, "--session", fenced.sessionId);
-    addFlag(prepared, "--expected-identity-revision", String(fenced.identityRevision ?? fenced.revision));
+    addFlag(prepared, "--expected-identity-revision", String(fenced.revision));
     addFlag(prepared, "--expected-activity-revision", String(fenced.activityRevision ?? fenced.revision));
     addFlag(prepared, "--request-id", requestId);
     addBooleanFlag(prepared, "--json");
@@ -919,12 +1179,14 @@ export class WorkflowCoordinator {
     const session = requireSession(snapshot);
     const run = activeWorkflowRun(snapshot);
     if (!run || run.status !== "running") throw new Error("No running Run owns continuation");
-    if (hasBlockingFailure(session.gates) || hasBlockingFailure(run.gates)) {
+    if (hasBlockingFailure(run.gates)) {
       throw new Error("Blocking gate failure prevents continuation");
     }
     const epoch = this.selectedMode === "core-execution"
       ? this.requireCoreContinuationEpoch(session.sessionId)
-      : this.requireLegacyContinuationEpoch(session.sessionId);
+      : this.selectedMode === "session-v3"
+        ? session.orchestrationRevision ?? 0
+        : this.requireLegacyContinuationEpoch(session.sessionId);
     const marker: ContinuationMarker = {
       sessionId: session.sessionId,
       runId: run.runId,
@@ -941,7 +1203,9 @@ export class WorkflowCoordinator {
     const expected = this.pendingContinuation;
     const currentEpoch = this.selectedMode === "core-execution"
       ? this.core.fence?.lease_epoch ?? undefined
-      : this.leases.current()?.epoch;
+      : this.selectedMode === "session-v3"
+        ? this.bridge.getSnapshot()?.session?.orchestrationRevision ?? undefined
+        : this.leases.current()?.epoch;
     const snapshot = this.bridge.getSnapshot();
     const run = snapshot ? activeWorkflowRun(snapshot) : undefined;
     const accepted = Boolean(
@@ -951,7 +1215,6 @@ export class WorkflowCoordinator {
       && snapshot?.session
       && run
       && run.status === "running"
-      && !hasBlockingFailure(snapshot.session.gates)
       && !hasBlockingFailure(run.gates)
       && sameMarker(marker, expected)
       && marker.sessionId === snapshot.session.sessionId
@@ -966,6 +1229,8 @@ export class WorkflowCoordinator {
     this.pendingContinuation = undefined;
     if (this.selectedMode === "fail-closed") throw this.failClosedMutationError("continuation fence");
     if (this.selectedMode === "core-execution") return;
+    // session/3.0 has no lease to fence; continuation acceptance is revision-based.
+    if (this.selectedMode === "session-v3") return;
     const snapshot = await this.bridge.refresh();
     const session = requireSession(snapshot);
     await this.fenceLease(session.sessionId);
@@ -974,6 +1239,8 @@ export class WorkflowCoordinator {
   async release(): Promise<void> {
     this.pendingContinuation = undefined;
     if (this.selectedMode === "fail-closed") return;
+    // session/3.0 holds no local lease to release.
+    if (this.selectedMode === "session-v3") return;
     if (this.selectedMode === "core-execution") {
       this.stopCoreHeartbeat();
       try {
@@ -1252,7 +1519,7 @@ export class WorkflowCoordinator {
       ...options,
       sessionId: locator.sessionId,
       sourcePiSession: options.sourcePiSession || hostSessionId,
-      expectedIdentityRevision: session.identityRevision ?? session.revision,
+      expectedIdentityRevision: session.revision,
       expectedActivityRevision: session.activityRevision ?? session.revision,
       requestId: options.requestId || derivePlanPublishRequestId(options.handoffKey),
       executionId: locator.executionId,
@@ -1457,7 +1724,7 @@ export class WorkflowCoordinator {
       if (command !== "create") {
         const session = requireSession(snapshot);
         addFlag(prepared, "--session", session.sessionId);
-        addFlag(prepared, "--expected-identity-revision", String(session.identityRevision ?? session.revision));
+        addFlag(prepared, "--expected-identity-revision", String(session.revision));
         addFlag(prepared, "--expected-activity-revision", String(session.activityRevision ?? session.revision));
       }
       addFlagIfMissing(prepared, "--request-id", randomUUID());
@@ -1583,7 +1850,7 @@ export class WorkflowCoordinator {
     addFlag(prepared, "--execution", locator.executionId);
     addFlag(prepared, "--generation", String(locator.generation));
     addFlag(prepared, "--request-id", requestId);
-    addFlag(prepared, "--expected-identity-revision", String(session.identityRevision ?? session.revision));
+    addFlag(prepared, "--expected-identity-revision", String(session.revision));
     addFlag(prepared, "--expected-activity-revision", String(session.activityRevision ?? session.revision));
     addFlag(
       prepared,
@@ -1809,15 +2076,10 @@ export class WorkflowCoordinator {
       return this.selectedMode;
     }
     if (capabilities.protocol === "session-run-v3") {
-      // Plan-B v3 core detected. The Pi Session/Run CAS adapter is phase 2 of
-      // docs/session-run-v3-action-plan-20260812.md and is not implemented
-      // yet, and the retired v2 lease protocol must never be spoken to a v3
-      // core, so mutations fail closed with an actionable diagnostic. Reads
-      // stay available through the ordinary read paths.
-      this.authorityDiagnostic =
-        "installed Maestro CLI speaks the Session/Run minimal-state (v3) protocol; "
-        + "the Pi v3 adapter is not implemented yet, so mutations are disabled";
-      this.selectedMode = "fail-closed";
+      // Plan-B v3 core detected. The Pi Session/Run CAS adapter is implemented:
+      // session-v3 mode speaks the v3 protocol directly and never touches the
+      // retired v2 lease/generation machinery.
+      this.selectedMode = "session-v3";
       return this.selectedMode;
     }
     if (!hasCompleteCoreCapabilities(capabilities)) {
@@ -2018,7 +2280,7 @@ function requireCoreExecutionLocator(snapshot: WorkflowSnapshot): CoreExecutionL
 function coreFenceFromSnapshot(snapshot: WorkflowSnapshot): RunResponseFenceV11 {
   const session = requireSession(snapshot);
   return {
-    session_identity_revision: session.identityRevision ?? session.revision,
+    session_identity_revision: session.revision,
     session_activity_revision: session.activityRevision ?? session.revision,
     execution_revision: snapshot.revision.executionRevision ?? snapshot.execution?.revision ?? null,
     lease_epoch: snapshot.execution?.lease?.epoch ?? null,
@@ -2208,6 +2470,63 @@ function compatibilityStartCreatesRun(argv: readonly string[]): boolean {
     ? argv[chainIndex]!.slice("--chain=".length)
     : argv[chainIndex + 1];
   return Boolean(inline?.trim());
+}
+
+/** session/3.0 entry command that mints a new Session with no CAS expected revision. */
+function isV3OpenCommand(argv: readonly string[]): boolean {
+  return argv[0] === "session" && argv[1] === "open";
+}
+
+/** session migrate accepts participant/actor/json but not request-id/reason or CAS. */
+function isV3MigrateCommand(argv: readonly string[]): boolean {
+  return argv[0] === "session" && argv[1] === "migrate";
+}
+
+/** Run-target v3 mutations carry --expected-run-revision (run complete also needs orchestration). */
+function isV3RunTarget(argv: readonly string[]): boolean {
+  return argv[0] === "run" && ["complete", "transition", "cancel", "seal"].includes(argv[1] ?? "");
+}
+
+/**
+ * Orchestration-target v3 mutations carry --expected-orchestration-revision:
+ * session chain insert/skip/replace, run next/create/decide, session
+ * complete/archive, and run complete (which advances the chain).
+ * session open is handled before this check (no CAS for a brand-new Session).
+ */
+function isV3OrchestrationTarget(argv: readonly string[]): boolean {
+  if (argv[0] === "run") {
+    return ["next", "create", "decide", "complete"].includes(argv[1] ?? "");
+  }
+  if (argv[0] !== "session") return false;
+  const command = argv[1] ?? "";
+  if (["complete", "archive"].includes(command)) return true;
+  return command === "chain" && ["insert", "skip", "replace"].includes(argv[2] ?? "");
+}
+
+function v3TargetRunId(argv: readonly string[]): string {
+  const flagged = optionalSingleFlag(argv, "--run");
+  if (flagged) return flagged;
+  const runId = argv[2]?.trim();
+  if (!runId || runId.startsWith("-")) {
+    throw new Error("cannot determine expected run revision; read run brief first");
+  }
+  return runId;
+}
+
+function isV3RevisionConflictCode(code: string): boolean {
+  return code === "ORCHESTRATION_REVISION_CONFLICT" || code === "RUN_REVISION_CONFLICT";
+}
+
+/** Extracts the current CAS revision from a re-read 1.2 envelope result. */
+function v3ReReadRevision(envelope: PrivateRunResponseEnvelope, runTarget: boolean): string {
+  if (envelope.schema_version !== "run-response/1.2") return "unknown";
+  const result = recordValue(envelope.result);
+  if (envelope.revision?.revision !== undefined) return String(envelope.revision.revision);
+  if (result && runTarget && typeof result.revision === "number") return String(result.revision);
+  if (result && !runTarget && typeof result.orchestration_revision === "number") {
+    return String(result.orchestration_revision);
+  }
+  return "unknown";
 }
 
 function resolveCoreLeaseMode(
@@ -2646,7 +2965,6 @@ function validateCorePlanSessionSnapshot(
     || session.schemaVersion !== "session/2.0"
     || session.lifecycleAuthority !== "execution-derived"
     || session.intent !== intent
-    || session.identityRevision !== 1
     || session.archivedAt !== null) {
     throw new Error(`Canonical recovery did not confirm deterministic session/2.0 identity ${sessionId}`);
   }
@@ -2691,6 +3009,80 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
+}
+
+const RESUME_MAP_MAX_UTF8_BYTES = 2048;
+const RESUME_MAP_FINGERPRINT_PATTERN = /^sha256:[a-f0-9]{64}$/;
+
+/** Mirrors core stableJsonUtf8: recursive key-sorted JSON with undefined dropped. */
+function stableJsonUtf8(value: unknown): string {
+  const normalize = (item: unknown): unknown => {
+    if (Array.isArray(item)) return item.map(normalize);
+    if (item && typeof item === "object") {
+      return Object.fromEntries(
+        Object.entries(item as Record<string, unknown>)
+          .filter(([, child]) => child !== undefined)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, child]) => [key, normalize(child)]),
+      );
+    }
+    return item;
+  };
+  return JSON.stringify(normalize(value));
+}
+
+function resumeMapUtf8Bytes(map: Record<string, unknown>): number {
+  return Buffer.byteLength(JSON.stringify(map), "utf8");
+}
+
+/** Mirrors core computeResumeMapFingerprint: sha256 of the stable-JSON body. */
+function computeResumeMapFingerprint(body: Record<string, unknown>): string {
+  return `sha256:${createHash("sha256").update(stableJsonUtf8(body), "utf8").digest("hex")}`;
+}
+
+/**
+ * Mirrors core assertResumeMapHasNoForbiddenFields semantics: a key whose
+ * normalized form is executionId or contains generation/lease/operation is
+ * forbidden at any depth. Returns true when a forbidden key is present.
+ */
+function resumeMapHasForbiddenFields(value: Record<string, unknown>): boolean {
+  const seen = new WeakSet<object>();
+  const forbidden = (key: string): boolean => {
+    const normalized = key.replaceAll("_", "").replaceAll("-", "").toLowerCase();
+    return normalized === "executionid"
+      || normalized.includes("generation")
+      || normalized.includes("lease")
+      || normalized.includes("operation");
+  };
+  const visit = (item: unknown): boolean => {
+    if (item === null || typeof item !== "object" || seen.has(item)) return false;
+    seen.add(item);
+    if (Array.isArray(item)) return item.some((child) => visit(child));
+    return Object.entries(item as Record<string, unknown>).some(([key, child]) =>
+      forbidden(key) || visit(child),
+    );
+  };
+  return visit(value);
+}
+
+/** The fingerprint must be a sha256 digest of the body minus the fingerprint. */
+function resumeMapFingerprintMatches(value: Record<string, unknown>): boolean {
+  const fingerprint = value.fingerprint;
+  if (typeof fingerprint !== "string" || !RESUME_MAP_FINGERPRINT_PATTERN.test(fingerprint)) return false;
+  const body: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (key !== "fingerprint") body[key] = child;
+  }
+  return fingerprint === computeResumeMapFingerprint(body);
+}
+
+/** Minimal manual shape guard for the identity fields the coordinator caches. */
+function resumeMapShapeValid(value: Record<string, unknown>): boolean {
+  return typeof value.sessionId === "string"
+    && value.sessionId.length > 0
+    && Number.isSafeInteger(value.orchestrationRevision)
+    && (value.orchestrationRevision as number) >= 0
+    && Array.isArray(value.nextActions);
 }
 
 function requireHostSessionId(value: string | undefined): string {

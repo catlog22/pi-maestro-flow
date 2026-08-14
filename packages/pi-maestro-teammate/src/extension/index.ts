@@ -950,6 +950,20 @@ export default function registerTeammateExtension(
     namedAgents: new Map(),
   };
   rootGlobals[registryKey] = state;
+
+  type RootSessionFence = Readonly<{ generation: number; sessionId: string | null }>;
+  const captureRootSessionFence = (): RootSessionFence => Object.freeze({
+    generation: state.sessionGeneration ?? 0,
+    sessionId: state.currentSessionId,
+  });
+  const ownsRootSessionFence = (fence: RootSessionFence): boolean =>
+    (state.sessionGeneration ?? 0) === fence.generation
+    && state.currentSessionId === fence.sessionId;
+  const staleRootSessionResult = (): SessionMessageResult => ({
+    delivered: false,
+    error: "The originating Pi session changed before delivery completed.",
+  });
+
   const interactionQueue = createTeammateInteractionQueue(pi, state);
   const foregroundToolRuns = new Set<string>();
   state.cancelInteractions = (correlationId, reason) =>
@@ -993,19 +1007,28 @@ export default function registerTeammateExtension(
   let workspacePeerOwners: WorkspaceOwnerSnapshot[] = [];
   let workspaceBackgroundJobs: WorkspaceBackgroundJobSnapshot[] = [];
   let activePromptLoopIds: string[] = [];
-  let workspacePeerRefresh: Promise<WorkspaceOwnerSnapshot[]> | undefined;
+  let workspacePeerRefresh: {
+    publisher: WorkspacePeerPublisher;
+    fence: RootSessionFence;
+    promise: Promise<WorkspaceOwnerSnapshot[]>;
+  } | undefined;
   let workspacePeerLifecycle = Promise.resolve();
   let sessionHostRegistry: SessionHostRegistry | undefined;
 
-  const replayQueuedIncomingRootMessages = (ctx: ExtensionContext): void => {
+  const replayQueuedIncomingRootMessages = (
+    ctx: ExtensionContext,
+    reason: "startup" | "reload" | "new" | "resume" | "fork",
+  ): void => {
     const registry = sessionHostRegistry;
     if (!registry) return;
     const workspaceId = workspaceIdForCwd(ctx.cwd);
+    const currentSessionId = ctx.sessionManager?.getSessionId?.();
     for (const entry of registry.thread.list()) {
       if (entry.direction !== "incoming"
         || (entry.status !== "pending" && entry.status !== "queued")
         || entry.workspaceId !== workspaceId
-        || entry.targetCorrelationId !== WORKSPACE_MAIN_SESSION_MARKER) continue;
+        || entry.targetCorrelationId !== WORKSPACE_MAIN_SESSION_MARKER
+        || !shouldReplayWorkspaceRootQueue(reason, entry.targetSessionId, currentSessionId)) continue;
       const effectiveAction = entry.effectiveMode ?? "follow_up";
       const delivered = safeSendMessage(pi, {
         customType: "teammate-message",
@@ -1084,31 +1107,53 @@ export default function registerTeammateExtension(
   };
 
   const refreshWorkspacePeerOwners = async (): Promise<WorkspaceOwnerSnapshot[]> => {
-    if (workspacePeerRefresh) return workspacePeerRefresh;
     const publisher = workspacePeerPublisher;
     if (!publisher) return [];
-    workspacePeerRefresh = discoverWorkspacePeers(publisher.identity, { cleanupStale: true })
+    const fence = captureRootSessionFence();
+    const existing = workspacePeerRefresh;
+    if (existing
+      && existing.publisher === publisher
+      && existing.fence.generation === fence.generation
+      && existing.fence.sessionId === fence.sessionId) return existing.promise;
+
+    let reservation!: NonNullable<typeof workspacePeerRefresh>;
+    const promise = discoverWorkspacePeers(publisher.identity, { cleanupStale: true })
       .then((result) => {
+        if (workspacePeerPublisher !== publisher || !ownsRootSessionFence(fence)) return workspacePeerOwners;
         workspacePeerOwners = result.peers;
         refreshSessionEndpointDirectory();
         return workspacePeerOwners;
       })
       .catch((error) => {
-        console.error("[pi-maestro-teammate] workspace peer discovery failed:", error);
+        if (workspacePeerPublisher === publisher && ownsRootSessionFence(fence)) {
+          console.error("[pi-maestro-teammate] workspace peer discovery failed:", error);
+        }
         return workspacePeerOwners;
       })
       .finally(() => {
-        workspacePeerRefresh = undefined;
+        if (workspacePeerRefresh === reservation) workspacePeerRefresh = undefined;
       });
-    return workspacePeerRefresh;
+    reservation = { publisher, fence, promise };
+    workspacePeerRefresh = reservation;
+    return promise;
   };
 
   /** Destructive operations require a fresh discovery result, never the stale fallback cache. */
   const refreshWorkspacePeerOwnersStrict = async (): Promise<WorkspaceOwnerSnapshot[]> => {
-    if (workspacePeerRefresh) await workspacePeerRefresh;
     const publisher = workspacePeerPublisher;
     if (!publisher) throw new Error("Workspace peer discovery is unavailable.");
+    const fence = captureRootSessionFence();
+    const pending = workspacePeerRefresh;
+    if (pending?.publisher === publisher
+      && pending.fence.generation === fence.generation
+      && pending.fence.sessionId === fence.sessionId) await pending.promise;
+    if (workspacePeerPublisher !== publisher || !ownsRootSessionFence(fence)) {
+      throw new Error("Workspace peer discovery session changed before refresh.");
+    }
     const result = await discoverWorkspacePeers(publisher.identity, { cleanupStale: true });
+    if (workspacePeerPublisher !== publisher || !ownsRootSessionFence(fence)) {
+      throw new Error("Workspace peer discovery session changed during refresh.");
+    }
     workspacePeerOwners = result.peers;
     refreshSessionEndpointDirectory();
     return workspacePeerOwners;
@@ -1234,11 +1279,14 @@ export default function registerTeammateExtension(
     request: SessionMessageRequest,
     expectedEndpoint?: SessionEndpoint,
   ): Promise<SessionMessageResult> => {
+    const fence = captureRootSessionFence();
     const { message, mode, signal } = request;
     const source = request.source ?? "system";
     if (mode === "abort") return { delivered: false, error: "Cross-session abort is not supported." };
     await workspacePeerLifecycle;
+    if (!ownsRootSessionFence(fence)) return staleRootSessionResult();
     await refreshWorkspacePeerOwners();
+    if (!ownsRootSessionFence(fence)) return staleRootSessionResult();
     const publisher = workspacePeerPublisher;
     if (!publisher) return { delivered: false, error: "Cross-session messaging is unavailable in this session." };
     let target: WorkspaceResolvedTarget | undefined;
@@ -1286,6 +1334,9 @@ export default function registerTeammateExtension(
         replyTo: request.replyTo ?? `owner:${publisher.identity.ownerId}`,
         fromSessionName: request.fromSessionName ?? workspacePeerSessionName,
         beforePublish(prepared) {
+          if (!ownsRootSessionFence(fence)) {
+            throw new Error("The originating Pi session changed before command publication.");
+          }
           outgoing = {
             messageId: prepared.commandId,
             workspaceId: prepared.workspaceId,
@@ -1306,7 +1357,13 @@ export default function registerTeammateExtension(
           };
           registry.thread.record(outgoing);
         },
+        beforeCommit() {
+          if (!ownsRootSessionFence(fence)) {
+            throw new Error("The originating Pi session changed before command commit.");
+          }
+        },
       });
+      if (!ownsRootSessionFence(fence)) return staleRootSessionResult();
       publicationStage = "published";
       const publishedOutgoing = outgoing;
       if (!publishedOutgoing) throw new Error("Workspace command was published without a durable outgoing journal entry.");
@@ -1314,6 +1371,7 @@ export default function registerTeammateExtension(
       try {
         response = await waitForWorkspacePeerCommandResponse(publisher.identity, command, { signal });
       } catch (error) {
+        if (!ownsRootSessionFence(fence)) return staleRootSessionResult();
         registry.thread.record({
           ...publishedOutgoing,
           status: "timeout",
@@ -1325,6 +1383,7 @@ export default function registerTeammateExtension(
           receipt: { publicationStage, messageId: command.commandId },
         };
       }
+      if (!ownsRootSessionFence(fence)) return staleRootSessionResult();
       const effectiveMode = response?.effectiveAction ?? mode;
       const deliveryStage = target.agent.correlationId === WORKSPACE_MAIN_SESSION_MARKER
         ? "queued"
@@ -1366,7 +1425,7 @@ export default function registerTeammateExtension(
         },
       };
     } catch (error) {
-      if (outgoing && publicationStage === undefined) {
+      if (outgoing && publicationStage === undefined && ownsRootSessionFence(fence)) {
         try {
           registry.thread.record({
             ...outgoing,
@@ -1584,6 +1643,7 @@ export default function registerTeammateExtension(
     requestedMode: "steer" | "follow_up",
     options?: { senderCorrelationId?: string; messageKind?: SessionMessageKind },
   ): Promise<{ delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean }> => {
+    const fence = captureRootSessionFence();
     const prepared = prepareLocalAgentDelivery(message, options);
     const senderId = options?.senderCorrelationId ?? "caller";
     // Durable mailbox authoritative path: enqueue and let the consumer inject.
@@ -1602,6 +1662,9 @@ export default function registerTeammateExtension(
           mode: "follow_up",
           payload: prepared.body,
         });
+        if (!ownsRootSessionFence(fence)) {
+          return { delivered: false, error: "The originating Pi session changed during local agent delivery.", mode: "follow_up" };
+        }
         if (enqueued.result && !enqueued.result.ok) {
           // Surface the failure — never silently fall back to direct stdin.
           const reason = "message" in enqueued.result ? (enqueued.result as { message?: string }).message : "unknown error";
@@ -1624,6 +1687,9 @@ export default function registerTeammateExtension(
         // injectLocalAgentMessage when the consumer actually injects.
         return { delivered: true, mode: "follow_up" };
       } catch (error) {
+        if (!ownsRootSessionFence(fence)) {
+          return { delivered: false, error: "The originating Pi session changed during local agent delivery.", mode: "follow_up" };
+        }
         console.error(`[pi-maestro-teammate] mailbox delivery failed for ${targetLabel}:`, error);
         return { delivered: false, error: error instanceof Error ? error.message : String(error), mode: "follow_up" };
       }
@@ -1635,6 +1701,9 @@ export default function registerTeammateExtension(
     endpoint: SessionEndpoint,
     request: SessionMessageRequest,
   ): Promise<SessionMessageResult> => {
+    if (!state.currentSessionId || endpoint.sessionId !== state.currentSessionId) {
+      return { delivered: false, endpointId: endpoint.id, transport: "local-root", error: "The local root session endpoint is stale." };
+    }
     const delivered = safeSendMessage(pi, {
       customType: "teammate-message",
       content: request.message,
@@ -1827,16 +1896,23 @@ export default function registerTeammateExtension(
   refreshSessionEndpointDirectory();
 
   const routeSessionMessage = async (request: SessionMessageRequest): Promise<SessionMessageResult> => {
+    const fence = captureRootSessionFence();
     await workspacePeerLifecycle;
+    if (!ownsRootSessionFence(fence)) return staleRootSessionResult();
     await refreshWorkspacePeerOwners();
+    if (!ownsRootSessionFence(fence)) return staleRootSessionResult();
     refreshSessionEndpointDirectory(true);
-    return sessionHostRegistry?.send(request)
-      ?? { delivered: false, error: "Session delivery authority is unavailable." };
+    const registry = sessionHostRegistry;
+    if (!registry) return { delivered: false, error: "Session delivery authority is unavailable." };
+    const result = await registry.send(request);
+    if (!ownsRootSessionFence(fence)) return staleRootSessionResult();
+    return result;
   };
 
   const stopWorkspacePeers = async (): Promise<void> => {
     const consumer = workspacePeerConsumer;
     const publisher = workspacePeerPublisher;
+    if (workspacePeerRefresh?.publisher === publisher) workspacePeerRefresh = undefined;
     workspacePeerConsumer = undefined;
     workspacePeerPublisher = undefined;
     workspacePeerOwners = [];
@@ -1847,23 +1923,39 @@ export default function registerTeammateExtension(
 
   const startWorkspacePeers = (ctx: ExtensionContext): void => {
     const cwd = ctx.cwd;
-    workspacePeerSessionName = ctx.sessionManager?.getSessionName?.() ?? undefined;
+    const fence = captureRootSessionFence();
+    const sessionName = ctx.sessionManager?.getSessionName?.() ?? undefined;
+    workspacePeerSessionName = sessionName;
     workspacePeerLifecycle = workspacePeerLifecycle
       .then(async () => {
         await stopWorkspacePeers();
+        if (!ownsRootSessionFence(fence)) return;
         const publisher = createWorkspacePeerRuntime({
           cwd,
           getState: () => buildWorkspaceOwnerState(
             state,
-            workspacePeerSessionName,
+            sessionName,
             currentContextPressure(),
             workspaceBackgroundJobs,
           ),
         });
         await publisher.start();
+        if (!ownsRootSessionFence(fence)) {
+          await publisher.stop().catch(() => undefined);
+          return;
+        }
         workspacePeerPublisher = publisher;
+        const registry = sessionHostRegistry;
+        if (!registry) {
+          await publisher.stop().catch(() => undefined);
+          workspacePeerPublisher = undefined;
+          return;
+        }
         const consumer = createWorkspacePeerCommandConsumer(publisher.identity, async (command) => {
-          const existing = sessionHostRegistry?.thread.get(command.commandId, "incoming");
+          if (!ownsRootSessionFence(fence)) {
+            return { status: "rejected", message: "destination session changed before command delivery" };
+          }
+          const existing = registry.thread.get(command.commandId, "incoming");
           const replayReceipt = windowThreadReplayReceipt(existing);
           if (replayReceipt) return replayReceipt;
           const incoming = {
@@ -1877,12 +1969,13 @@ export default function registerTeammateExtension(
             traceId: command.traceId ?? command.commandId,
             replyTo: `owner:${command.fromOwnerId}`,
             ...(command.fromSessionName === undefined ? {} : { fromSessionName: command.fromSessionName }),
+            ...(fence.sessionId === null ? {} : { targetSessionId: fence.sessionId }),
             targetCorrelationId: command.targetCorrelationId,
             mode: command.action,
             body: command.message,
             createdAt: command.createdAt,
           };
-          sessionHostRegistry?.thread.record({
+          registry.thread.record({
             ...incoming,
             status: "pending",
             updatedAt: command.createdAt,
@@ -1974,6 +2067,9 @@ export default function registerTeammateExtension(
                 workspaceMessage,
                 command.action,
               );
+              if (!ownsRootSessionFence(fence)) {
+                return { status: "rejected", message: "destination session changed during command delivery" };
+              }
               const effectiveAction = delivered.mode === "steer" ? "steer" : "follow_up";
               result = delivered.delivered
                 ? {
@@ -1985,7 +2081,10 @@ export default function registerTeammateExtension(
                 : { status: "rejected", message: delivered.error ?? "message was not delivered" };
             }
           }
-          sessionHostRegistry?.thread.record({
+          if (!ownsRootSessionFence(fence)) {
+            return { status: "rejected", message: "destination session changed before command acknowledgement" };
+          }
+          registry.thread.record({
             ...incoming,
             ...(result.effectiveAction === undefined ? {} : { effectiveMode: result.effectiveAction }),
             status: result.status === "accepted" ? result.deliveryStage ?? "queued" : "rejected",
@@ -1994,8 +2093,20 @@ export default function registerTeammateExtension(
           return result;
         });
         consumer.start();
+        if (!ownsRootSessionFence(fence)) {
+          await consumer.stop().catch(() => undefined);
+          if (workspacePeerPublisher === publisher) workspacePeerPublisher = undefined;
+          await publisher.stop().catch(() => undefined);
+          return;
+        }
         workspacePeerConsumer = consumer;
         await refreshWorkspacePeerOwners();
+        if (!ownsRootSessionFence(fence)) {
+          if (workspacePeerConsumer === consumer) workspacePeerConsumer = undefined;
+          if (workspacePeerPublisher === publisher) workspacePeerPublisher = undefined;
+          await consumer.stop().catch(() => undefined);
+          await publisher.stop().catch(() => undefined);
+        }
       })
       .catch((error) => console.error("[pi-maestro-teammate] workspace peer runtime failed:", error));
   };
@@ -4196,6 +4307,7 @@ export default function registerTeammateExtension(
 
   /** Low-frequency turn review on agent_end (best-effort, never blocks). */
   async function runAdvisorReview(event: { messages?: unknown[] }, ctx: ExtensionContext): Promise<void> {
+    const fence = captureRootSessionFence();
     const root = monitorLedgerRoot ?? state.baseCwd ?? ctx.cwd;
     advisorConfig = loadAdvisorConfigForRoot(root);
     if (!shouldReview(advisorState, advisorConfig, Date.now())) return;
@@ -4222,6 +4334,7 @@ export default function registerTeammateExtension(
       },
     );
 
+    if (!ownsRootSessionFence(fence)) return;
     advisorState.lastReviewAt = Date.now();
     advisorState.reviews += 1;
     const verdict = evaluation.ok && evaluation.verdict ? evaluation.verdict : undefined;
@@ -6367,10 +6480,8 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
   }
 
   function teardownRootSession(): void {
-    // Fence every continuation admitted by the outgoing session before any
-    // visible registry or process cleanup. Late promises may release their own
-    // request records, but cannot publish events or turns into the next session.
-    state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
+    // The shutdown hook has already fenced the outgoing generation. This phase
+    // reclaims its requests, processes, and UI state without advancing it twice.
     for (const controller of state.proxyObservationControllers?.values() ?? []) {
       controller.abort("teammate session ended");
     }
@@ -7190,6 +7301,7 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
   pi.on("session_start", (event, ctx) => {
     registerTeammateSettings();
     state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
+    state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
     widgetCtx = ctx;
     exitMonitorInteractionMode();
     installMonitorEscapeTap(ctx.ui);
@@ -7204,9 +7316,8 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
     void refreshModelRegistry(ctx);
     tool.description = buildTeammateToolDescription(ctx.cwd);
     pi.registerTool(tool);
-    state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
     sessionHostRegistry?.thread.rebuild(ctx.sessionManager?.getEntries?.() ?? []);
-    if (shouldReplayWorkspaceRootQueue(event.reason)) replayQueuedIncomingRootMessages(ctx);
+    replayQueuedIncomingRootMessages(ctx, event.reason);
     const sessionFile = ctx.sessionManager?.getSessionFile?.();
     const isAgentSession = Array.from(state.activeRuns.values()).some((agent) => agent.sessionFile === sessionFile);
     if (sessionFile && !isAgentSession) state.mainSessionFile = sessionFile;
@@ -7265,6 +7376,8 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
   });
 
   pi.on("session_shutdown", async (event) => {
+    state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
+    state.currentSessionId = null;
     const shutdownReason = event?.reason ?? "quit";
     if (shutdownReason === "quit" || shutdownReason === "reload") disposeTuiLocaleEvents();
     uninstallMonitorEscapeTap();

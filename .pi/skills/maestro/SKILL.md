@@ -39,7 +39,7 @@ If any required file above was not expanded into context by the host, or its con
 </deferred_reading>
 
 <purpose>
-Turn a user intent into the initial Skill chain, create one canonical topic Session through `maestro run start --platform pi --chain-file`, then execute the shared Run loop. Static versus dynamic is not a Session or command mode: each Skill contract decides whether it emits a typed chain proposal. For new intents, use this command. For policy-driven execution over existing Sessions, use `/maestro-ralph`.
+Turn a user intent into the initial Skill chain, create one canonical topic Session (v3: `session open --chain <cmds...> --id <slug>`; v2 legacy: `maestro run start --platform pi --chain-file`), then execute the shared Run loop. Static versus dynamic is not a Session or command mode: each Skill contract decides whether it emits a typed chain proposal. For new intents, use this command. For policy-driven execution over existing Sessions, use `/maestro-ralph`.
 </purpose>
 
 <pi_context_contract>
@@ -54,7 +54,15 @@ Turn a user intent into the initial Skill chain, create one canonical topic Sess
 
 <cli_surface>
 
-Human-facing orchestration uses the unified Run surface:
+Human-facing orchestration uses the unified Run surface, dual-mode:
+
+**session/3.0 branch (canonical new runtime; no Execution/lease)**
+
+- Create a Session and bootstrap its chain: `session open "<intent>" --chain <cmds...> --id <slug> --participant <hostSessionId> --actor <hostSessionId> --request-id <uuid> --reason "..."` (no `--chain-file`/`--cmd`); then allocate each step with `run next --run <run-id> ...`.
+- Chain edits: `session chain insert|skip|replace|list|fail`; decisions: `run decide <point-id> --verdict proceed|fix|escalate`; completion: `session complete ...`.
+- All v3 mutations require `--participant/--actor/--request-id/--expected-*-revision` (injected automatically by run-control/coordinator).
+
+**execution-v2 branch (legacy; current default workspace protocol)**
 
 - Single step: `maestro run start "<intent>" --cmd <step> --arg "<step input>" --platform pi --workflow-root .`
 - Simple command chain: `maestro run start --platform pi "<intent>" --chain analyze plan execute --no-dispatch --workflow-root .`
@@ -62,7 +70,7 @@ Human-facing orchestration uses the unified Run surface:
 - Completion: `maestro run done [run_id] --verdict done|done-with-concerns|needs-retry|blocked --workflow-root .`
 - Mid-task changes: `maestro run edit <cmd...> --after latest --workflow-root .`
 
-`--chain-file -` is reserved for advanced coordinator chains that need structured JSON fields such as `decision_points`, `decomposition`, `argument_requirements`, retry budgets, or executor metadata.
+`--chain-file -` is reserved for advanced v2 coordinator chains that need structured JSON fields such as `decision_points`, `decomposition`, `argument_requirements`, retry budgets, or executor metadata.
 
 </cli_surface>
 
@@ -81,11 +89,11 @@ All other text is intent. Unknown flags are not silently reinterpreted. Platform
 
 <invariants>
 1. **One chain** — every task uses the same Session/Run protocol; no static/dynamic, Maestro/Ralph, or executor-specific Session type.
-2. **Session before execution** — create via `session create --chain-file` before allocating a step Run.
+2. **Session before execution** — create before allocating a step Run: v3 `session open --chain <cmds...> --id <slug>`; v2 legacy `session create --chain-file`.
 3. **Creator owns decomposition** — Maestro creates `boundary_contract` and outcome-oriented goals; later orchestrators consume rather than overwrite them.
 4. **Runtime owns mutation** — prompt never writes session.json/run.json and never auto-uses admin chain commands.
 5. **Skill owns domain adaptation** — optional chain changes come only from the current Skill's validated `chain-proposal/1.0`.
-6. **Verdict advances** — execution steps advance only through `session done --verdict`; decision steps only through `session decide`.
+6. **Verdict advances** — execution steps advance only through a fenced completion/decision command: v3 `run complete --advance` + `run decide`（v2 legacy：`session done --verdict` / `session decide`）。
 7. **Historical similarity remains read-only evidence** — it never selects a Session or binds outputs.
 8. **Compatibility commands are out of band** — normal orchestration calls only `maestro run ...`.
 9. **Auto is bounded** — `-y` never bypasses high risk, low confidence, ambiguity, failed gates or drift escalation.
@@ -101,7 +109,7 @@ S_CONTINUE — locate the unique live Session
 S_AMEND — audited goal amendment
 S_CLASSIFY — select the smallest sufficient initial chain
 S_DECOMPOSE — derive boundary, criteria and observable goals
-S_CREATE — create via `session create --chain-file`
+S_CREATE — create via `session open --chain` (v3) / `session create --chain-file` (v2 legacy)
 S_CONFIRM — confirm classification unless `-y`
 S_RUN_LOOP — execute `orchestrator-run-loop.md`
 S_FALLBACK — request missing intent or disambiguation
@@ -178,9 +186,9 @@ Goals describe outcomes, not lifecycle stages.
 
 ### A_CREATE
 
-Assemble and create per `prepare/maestro.md` §1–§4 (specs precheck, Skill-name prevalidation, chain-file assembly, creation). Maestro-specific policy:
+Assemble and create per `prepare/maestro.md` §1–§4 (specs precheck, Skill-name prevalidation, chain assembly, creation). Creation path is dual-mode: v3 assembles the chain inline with `session open "<intent>" --chain <cmds...> --id <slug>` (no `--chain-file`/`--cmd`; `--participant/--actor/--request-id/--expected-*-revision` injected by run-control/coordinator); v2 legacy uses `session create --chain-file` / `maestro run start --chain-file`. Maestro-specific policy:
 
-- If the chain-file protocol (§3 template) is not in context, fetch it first via read-only `read ~/.maestro/prepare/maestro.md` (no Session required; `prepare.content` carries the full protocol).
+- If the chain-file protocol (§3 template, v2 legacy) is not in context, fetch it first via read-only `read ~/.maestro/prepare/maestro.md` (no Session required; `prepare.content` carries the full protocol).
 - Maestro does not emit formal decision nodes; new chains express quality/goal/scope checks as Skill steps that own a Run and may return a proposal. (The closed-loop policy that mandates decision nodes before seal belongs to `/maestro-ralph`; route there when the work needs it.)
 - For narrow/single-step chains, generate a minimal implicit boundary_contract: in_scope = [intent], out_of_scope = [], constraints = [], definition_of_done = 'step completed with passing gates'.
 - Do not inline unescaped JSON.
@@ -206,5 +214,5 @@ Perform A_CLASSIFY and A_DECOMPOSE in memory, display the proposed chain, bounda
 - Initial classification is auditable and the Session exists before step execution.
 - Every step follows next → brief → execute → check → done; decision nodes use decide.
 - Chain adaptation is Skill-proposed and atomically applied by the producing Run.
-- Normal output and recommendations contain only `maestro run ...` lifecycle commands.
+- Normal output and recommendations contain only lifecycle commands of the negotiated branch: v3 `session ...` / `run ...` (run-control), v2 `maestro run ...`.
 </success_criteria>

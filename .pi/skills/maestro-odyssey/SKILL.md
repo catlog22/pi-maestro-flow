@@ -97,7 +97,7 @@ $ARGUMENTS
 
 Mode-scoped flags passed to inapplicable mode: emit W008 warning and ignore the flag.
 
-**Run creation**: follow `run-mode.md` exactly. Negotiate capabilities, create or resolve the explicit Session identity, start a bounded Execution with the complete audited acquisition options, then invoke the complete fenced `maestro run start --platform pi odyssey-<mode>` option set with the mode arguments. Never abbreviate or omit the Execution locator, revision, or private lease claim in an executable command.
+**Run creation**: follow `run-mode.md` exactly. Negotiate capabilities, create or resolve the explicit Session identity, start a bounded Execution with the complete audited acquisition options, then invoke the complete fenced `maestro run start --platform pi odyssey-<mode>` option set with the mode arguments（v2 legacy；session/3.0 workspace 见 run-mode.md v3 章节）. Never abbreviate or omit the Execution locator, revision, or private lease claim in an executable command.
 
 **Session**: `{run_dir}/outputs/`
 **Output**: `session.json` | `evidence.ndjson` | `understanding.md` | `explore.json` (debug/review only)

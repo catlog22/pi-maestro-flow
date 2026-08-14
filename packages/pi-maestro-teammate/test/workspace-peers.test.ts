@@ -197,9 +197,16 @@ test("workspace snapshots expose active bash jobs and protect foreground work fr
   assert.equal(workspaceMainSessionDeliveryAction("follow_up", snapshot.backgroundJobs ?? []), "follow_up");
   assert.equal(workspaceMainSessionDeliveryAction("steer", [background]), "steer");
   assert.equal(shouldReplayWorkspaceRootQueue("reload"), false, "reload retains Pi's in-memory delivery queue");
-  for (const reason of ["startup", "new", "resume", "fork"] as const) {
+  for (const reason of ["startup", "new", "resume"] as const) {
     assert.equal(shouldReplayWorkspaceRootQueue(reason), true, `${reason} replaces or may lose the in-memory queue`);
   }
+  assert.equal(shouldReplayWorkspaceRootQueue("fork"), false, "fork replay requires exact session ownership");
+  assert.equal(shouldReplayWorkspaceRootQueue("fork", "session-a", "session-a"), true);
+  assert.equal(shouldReplayWorkspaceRootQueue("resume", "session-a", "session-a"), true);
+  assert.equal(shouldReplayWorkspaceRootQueue("resume", "session-a", "session-b"), false);
+  assert.equal(shouldReplayWorkspaceRootQueue("fork", "parent-session", "child-session"), false);
+  assert.equal(shouldReplayWorkspaceRootQueue("fork", undefined, "child-session"), false, "legacy fork entries have ambiguous ownership");
+  assert.equal(shouldReplayWorkspaceRootQueue("resume", undefined, "session-a"), true, "legacy entries remain resumable");
   assert.equal(
     validateWorkspaceBackgroundJobSnapshot({ ...foreground, background: "no" }),
     undefined,
@@ -515,6 +522,25 @@ test("command journal hook completes before mailbox publication", async () => {
   );
   await assert.rejects(
     stat(join(commandMailboxPath(sender, OWNER_B), `${failedId}.json`)),
+    { code: "ENOENT" },
+  );
+
+  const fencedId = "f".repeat(32);
+  let ownsSession = true;
+  await assert.rejects(
+    enqueueWorkspacePeerCommand(sender, target, "follow_up", "fence at commit", {
+      commandId: fencedId,
+      beforePublish() {
+        ownsSession = false;
+      },
+      beforeCommit() {
+        if (!ownsSession) throw new Error("session changed before command commit");
+      },
+    }),
+    /session changed before command commit/,
+  );
+  await assert.rejects(
+    stat(join(commandMailboxPath(sender, OWNER_B), `${fencedId}.json`)),
     { code: "ENOENT" },
   );
 });

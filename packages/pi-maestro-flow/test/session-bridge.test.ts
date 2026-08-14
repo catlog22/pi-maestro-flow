@@ -262,7 +262,7 @@ test("bridge projects the current Execution with locators, revisions, and redact
 
     const first = await loadCanonicalSnapshot(root);
     assert.equal(first.session?.status, "running", "Execution projection must not replace Session.status");
-    assert.equal(first.sessionGeneration, `canonical:valid:${sessionId}:4`);
+    assert.equal(first.sessionGeneration, `canonical:valid:${sessionId}:12`);
     assert.deepEqual(first.locator, { sessionId, executionId, generation: 2, runId });
     assert.equal(first.revision.sessionRevision, 12);
     assert.equal(first.revision.executionRevision, 3);
@@ -334,7 +334,8 @@ test("session/2.0 with a null current_execution_id does not select the highest E
       current_execution_id: "execution-0002",
     });
     const active = await loadCanonicalSnapshot(root);
-    assert.equal(active.sessionGeneration, idleGeneration, "Execution activity must not redefine Session identity");
+    assert.equal(active.sessionGeneration, `canonical:valid:${sessionId}:10`,
+      "the projected session revision tracks activity now that identity_revision is retired");
     assert.deepEqual(active.locator, {
       sessionId,
       executionId: "execution-0002",
@@ -667,7 +668,7 @@ test("an active canonical claim is authoritative when its Session is missing, ma
     const valid = await loadCanonicalSnapshot(root);
     assert.equal(valid.canonicalClaim?.status, "valid");
     assert.equal(valid.session?.sessionId, sessionId);
-    assert.equal(valid.sessionGeneration, `canonical:valid:${sessionId}:3`);
+    assert.equal(valid.sessionGeneration, `canonical:valid:${sessionId}:0`);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -766,7 +767,6 @@ test("bridge normalizes live Maestro 0.5.50 session/1.0 records", async () => {
     const artifact = session.artifacts[0]!;
     assert.equal(snapshot.source, "canonical");
     assert.equal(session.schemaVersion, "session/1.0");
-    assert.equal(session.identityRevision, 11);
     assert.equal(session.activityRevision, 17);
     assert.equal(session.revision, 17);
     assert.equal(snapshot.execution?.legacyProjection, true);
@@ -781,16 +781,207 @@ test("bridge normalizes live Maestro 0.5.50 session/1.0 records", async () => {
       runId,
     });
     assert.equal(snapshot.revision.executionRevision, 17);
-    assert.deepEqual(session.gates.map((gate) => gate.id), ["GATE-S-01"]);
     assert.equal(run.schemaVersion, "command-run/1.0");
     assert.equal(run.command, "execute");
     assert.deepEqual(run.args, ["--scope", "core"]);
     assert.equal(run.primaryArtifactId, "artifact-live");
     assert.equal(run.endedAt, "2026-07-15T02:11:00.000Z");
-    assert.deepEqual(run.gates.map((gate) => gate.id), ["GATE-004-01", "GATE-004-02"]);
+    assert.deepEqual(run.gates, [], "registry-linked gate_ids no longer resolve after gates.json retirement");
     assert.equal(artifact.runId, runId);
     assert.equal(artifact.path, "outputs/implementation.json");
     assert.equal(artifact.hash, "live-hash");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bridge projects a session/3.0 layout with chain/activeRun and no Execution", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-session-v3-projection-"));
+  const sessionId = "20260812-v3-session";
+  const runAnalyze = "20260812-001-analyze";
+  const runImplement = "20260812-002-implement";
+  const sessionDir = join(root, ".workflow", "sessions", sessionId);
+  try {
+    await writeV30Fixture(root, sessionId);
+
+    const snapshot = await loadCanonicalSnapshot(root);
+    assert.equal(snapshot.source, "canonical");
+    assert.equal(snapshot.canonicalClaim?.status, "valid");
+    const session = snapshot.session!;
+    assert.equal(session.schemaVersion, "session/3.0");
+    assert.equal(session.sessionId, sessionId);
+    assert.equal(session.intent, "Migrate to session/3.0");
+    assert.equal(session.status, "running", "session/3.0 open maps to running");
+    assert.equal(session.definitionOfDone, "All gates pass");
+    assert.equal(session.activityRevision, 9);
+    assert.equal(session.revision, 9, "revision is the max of orchestration/activity revisions");
+    assert.equal(session.activeRunId, runImplement, "the first active_run_ids entry wins");
+    assert.equal(session.runs.length, 2);
+    assert.equal(session.chain.length, 2);
+    assert.deepEqual(session.chain[0], {
+      step: "analyze",
+      command: "analyze",
+      status: "completed",
+      runId: runAnalyze,
+    });
+    assert.deepEqual(session.chain[1], {
+      step: "implement",
+      command: "implement",
+      status: "running",
+      runId: runImplement,
+    });
+    const implementRun = session.runs.find((run) => run.runId === runImplement)!;
+    assert.equal(implementRun.schemaVersion, "run/3.0");
+    assert.equal(implementRun.command, "implement");
+    assert.deepEqual(implementRun.args, ["--scope", "core"]);
+    assert.equal(implementRun.status, "running");
+    assert.equal(implementRun.goal, "Implement the migration");
+    assert.equal(implementRun.primaryArtifactId, "artifact-v3");
+    assert.equal(implementRun.parentRunId, runAnalyze);
+    assert.deepEqual(implementRun.gates, [], "run/3.0 carries no gate registry after gates.json retirement");
+    assert.equal(session.artifacts[0]?.artifactId, "artifact-v3");
+    assert.equal(session.artifacts[0]?.path, "outputs/implementation.json");
+    assert.equal(session.aliases["current-implementation"], "artifact-v3");
+    assert.equal(snapshot.execution, undefined, "session/3.0 must not produce an Execution projection");
+    assert.deepEqual(snapshot.locator, { sessionId, runId: runImplement });
+    assert.equal(snapshot.revision.executionRevision, undefined);
+    assert.equal(snapshot.sessionGeneration, `canonical:valid:${sessionId}:9`);
+    const specs = buildTodoMirrorSpecs(snapshot);
+    assert.equal(specs[0]?.status, "completed");
+    assert.equal(specs[1]?.status, "in_progress");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bridge v3 fingerprint and status mapping track session state changes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-session-v3-fingerprint-"));
+  const sessionId = "20260812-v3-fingerprint";
+  const sessionDir = join(root, ".workflow", "sessions", sessionId);
+  try {
+    await writeV30Fixture(root, sessionId, { status: "open" });
+    const open = await loadCanonicalSnapshot(root);
+    assert.equal(open.session?.status, "running", "session/3.0 open maps to running");
+
+    await writeV30Fixture(root, sessionId, { status: "completed" });
+    const completed = await loadCanonicalSnapshot(root);
+    assert.equal(completed.session?.status, "sealed", "session/3.0 completed maps to sealed");
+    assert.notEqual(completed.revision.fingerprint, open.revision.fingerprint);
+    assert.equal(completed.revision.sessionRevision, 9);
+
+    await writeV30Fixture(root, sessionId, { status: "archived" });
+    const archived = await loadCanonicalSnapshot(root);
+    assert.equal(archived.session?.status, "archived");
+
+    await writeV30Fixture(root, sessionId, { status: "failed" });
+    const failed = await loadCanonicalSnapshot(root);
+    assert.equal(failed.session?.status, "failed");
+
+    // Run state changes must also move the fingerprint (run.json feeds it).
+    await writeV30Fixture(root, sessionId, { status: "open" }, {
+      [runKey(sessionId, "20260812-001-analyze")]: { status: "cancelled" },
+    });
+    const cancelled = await loadCanonicalSnapshot(root);
+    assert.equal(cancelled.session?.runs[0]?.status, "sealed", "run/3.0 cancelled maps to sealed");
+    assert.notEqual(cancelled.revision.fingerprint, failed.revision.fingerprint);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bridge discriminates session/3.0 from the v2 layout by schema_version", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-session-v3-discrimination-"));
+  const sessionId = "20260812-v3-discrimination";
+  const sessionDir = join(root, ".workflow", "sessions", sessionId);
+  try {
+    await mkdir(join(sessionDir, "runs", "20260812-001-v2run"), { recursive: true });
+    await writeJson(join(root, ".workflow", "state.json"), {
+      version: "2.0",
+      active_session_id: sessionId,
+      sessions: [],
+    });
+    const base = {
+      session_id: sessionId,
+      intent: "Discriminate layouts",
+      identity_revision: 1,
+      activity_revision: 1,
+    };
+
+    // session/2.0 (statusless, execution-derived) stays on the v2 read path.
+    await writeJson(join(sessionDir, "session.json"), {
+      schema_version: "session/2.0",
+      ...base,
+      current_execution_id: null,
+      latest_execution_id: null,
+      latest_completed_run_id: null,
+      archived_at: null,
+      archived_by: null,
+    });
+    const v2 = await loadCanonicalSnapshot(root);
+    assert.equal(v2.session?.schemaVersion, "session/2.0");
+    assert.equal(Object.prototype.hasOwnProperty.call(v2.session, "status"), false);
+    assert.equal(v2.session?.lifecycleAuthority, "execution-derived");
+
+    // session/3.0 in the same directory diverts to the v3 projection.
+    await writeJson(join(sessionDir, "session.json"), {
+      schema_version: "session/3.0",
+      session_id: sessionId,
+      objective: "Discriminate layouts",
+      definition_of_done: "",
+      status: "open",
+      identity_revision: 1,
+      orchestration_revision: 1,
+      activity_revision: 1,
+      chain: [],
+      decisions: [],
+      active_run_ids: [],
+      artifacts_ref: "artifacts.json",
+      evidence_ref: "evidence.json",
+      created_at: "2026-08-12T00:00:00.000Z",
+      updated_at: "2026-08-12T00:00:00.000Z",
+      completed_at: null,
+      archived_at: null,
+    });
+    const v3 = await loadCanonicalSnapshot(root);
+    assert.equal(v3.session?.schemaVersion, "session/3.0");
+    assert.equal(v3.session?.status, "running");
+    assert.equal(v3.execution, undefined);
+    assert.deepEqual(v3.locator, { sessionId });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bridge reports an invalid session/3.0 record without an Execution fallback", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-session-v3-invalid-"));
+  const sessionId = "20260812-v3-invalid";
+  const sessionDir = join(root, ".workflow", "sessions", sessionId);
+  try {
+    await mkdir(sessionDir, { recursive: true });
+    await writeJson(join(root, ".workflow", "state.json"), {
+      version: "3.0",
+      active_session_id: sessionId,
+      sessions: [],
+    });
+    await writeJson(join(sessionDir, "session.json"), {
+      schema_version: "session/3.0",
+      session_id: sessionId,
+      objective: "Invalid v3",
+      status: "open",
+      identity_revision: 1,
+      orchestration_revision: 1,
+      activity_revision: -1,
+      chain: [],
+      active_run_ids: [],
+      artifacts_ref: "artifacts.json",
+      evidence_ref: "evidence.json",
+    });
+    const snapshot = await loadCanonicalSnapshot(root);
+    assert.equal(snapshot.source, "canonical");
+    assert.equal(snapshot.canonicalClaim?.status, "invalid");
+    assert.equal(snapshot.session, undefined);
+    assert.equal(snapshot.execution, undefined);
+    assert.match(snapshot.diagnostics.join("\n"), /invalid session\/3\.0 record/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -807,15 +998,6 @@ test("entry gate failures keep the canonical Todo mirror pending", async () => {
 
     assert.equal(buildTodoMirrorSpecs(snapshot)[0]?.status, "pending", gateStatus);
   }
-
-  const sessionGate = mirrorSnapshot({
-    runStatus: "blocked",
-    chainStatus: "blocked",
-    gatePhase: "entry",
-    gateStatus: "failed",
-  });
-  sessionGate.session!.gates = sessionGate.session!.runs[0]!.gates.splice(0);
-  assert.equal(buildTodoMirrorSpecs(sessionGate)[0]?.status, "pending", "session entry gate");
 
   const unphasedLegacyGate = mirrorSnapshot({
     runStatus: "blocked",
@@ -866,7 +1048,7 @@ test("an active canonical Run without an orchestration chain still gets a recove
   assert.deepEqual(chainMirror?.origin, mirror?.origin, "the same Run keeps one mirror identity when the chain catches up");
 });
 
-test("session gate failure leaves historical completed Todo mirrors completed", () => {
+test("exit gate failure on the active Run leaves historical completed Todo mirrors completed", () => {
   const snapshot = mirrorSnapshot({
     runStatus: "completed",
     chainStatus: "completed",
@@ -875,8 +1057,6 @@ test("session gate failure leaves historical completed Todo mirrors completed", 
   });
   const session = snapshot.session!;
   const active = session.runs[0]!;
-  active.gates = [];
-  session.gates = [{ id: "gate-session-exit", phase: "exit", blocking: true, status: "failed" }];
   session.runs.unshift({ ...active, runId: "run-history", status: "sealed", gates: [] });
   session.chain.unshift({ step: "analyze", command: "analyze", status: "completed", runId: "run-history" });
 
@@ -962,8 +1142,7 @@ async function writeExecutionSelectionFixture(
   root: string,
   sessionId: string,
   sessionOverrides: Record<string, unknown> = {},
-): Promise<void> {
-  const sessionDir = join(root, ".workflow", "sessions", sessionId);
+): Promise<void> {  const sessionDir = join(root, ".workflow", "sessions", sessionId);
   await mkdir(join(sessionDir, "executions", "execution-0001"), { recursive: true });
   await mkdir(join(sessionDir, "executions", "execution-0002"), { recursive: true });
   await writeJson(join(root, ".workflow", "state.json"), {
@@ -999,6 +1178,167 @@ async function writeExecutionSelectionFixture(
       lease: null,
     });
   }
+}
+
+function runKey(sessionId: string, runId: string): string {
+  return `${sessionId}:${runId}`;
+}
+
+/**
+ * Writes a session/3.0 layout fixture: state.json + session.json
+ * (session/3.0) + runs/<run_id>/run.json (run/3.0) + artifacts.json
+ * (artifacts/1.0) + evidence.json (evidence/1.0). sessionOverrides replace
+ * session.json fields; runOverrides are keyed by `${sessionId}:${runId}` and
+ * replace run.json fields.
+ */
+async function writeV30Fixture(
+  root: string,
+  sessionId: string,
+  sessionOverrides: Record<string, unknown> = {},
+  runOverrides: Record<string, Record<string, unknown>> = {},
+): Promise<void> {
+  const sessionDir = join(root, ".workflow", "sessions", sessionId);
+  const runAnalyze = "20260812-001-analyze";
+  const runImplement = "20260812-002-implement";
+  await mkdir(join(sessionDir, "runs", runAnalyze), { recursive: true });
+  await mkdir(join(sessionDir, "runs", runImplement), { recursive: true });
+  await writeJson(join(root, ".workflow", "state.json"), {
+    version: "3.0",
+    active_session_id: sessionId,
+    sessions: [],
+  });
+  await writeJson(join(sessionDir, "session.json"), {
+    schema_version: "session/3.0",
+    session_id: sessionId,
+    objective: "Migrate to session/3.0",
+    definition_of_done: "All gates pass",
+    status: "open",
+    orchestration_revision: 5,
+    activity_revision: 9,
+    chain: [
+      {
+        step_id: "analyze",
+        command: "analyze",
+        args: [],
+        status: "completed",
+        run_ids: [runAnalyze],
+        goal_ref: null,
+        decision_refs: [],
+      },
+      {
+        step_id: "implement",
+        command: "implement",
+        args: ["--scope", "core"],
+        status: "running",
+        run_ids: [runImplement],
+        goal_ref: null,
+        decision_refs: ["decision-1"],
+      },
+    ],
+    decisions: [{
+      decision_id: "decision-1",
+      after_step_id: "analyze",
+      status: "open",
+      evidence_refs: [],
+    }],
+    active_run_ids: [runImplement, "20260812-003-extra"],
+    artifacts_ref: "artifacts.json",
+    evidence_ref: "evidence.json",
+    created_at: "2026-08-12T00:00:00.000Z",
+    updated_at: "2026-08-12T01:00:00.000Z",
+    completed_at: null,
+    archived_at: null,
+    ...sessionOverrides,
+  });
+  await writeJson(join(sessionDir, "runs", runAnalyze, "run.json"), {
+    schema_version: "run/3.0",
+    run_id: runAnalyze,
+    session_id: sessionId,
+    step_id: "analyze",
+    parent_run_id: null,
+    retry_of_run_id: null,
+    attempt: 1,
+    command: "analyze",
+    args: [],
+    goal: "Analyze the migration",
+    status: "completed",
+    revision: 2,
+    actor_id: "pi-actor",
+    input_refs: [],
+    output_refs: [],
+    primary_artifact_id: null,
+    verdict: "done",
+    summary: "Analysis complete",
+    created_at: "2026-08-12T00:05:00.000Z",
+    started_at: "2026-08-12T00:06:00.000Z",
+    ended_at: "2026-08-12T00:20:00.000Z",
+    sealed_at: "2026-08-12T00:21:00.000Z",
+    ...(runOverrides[runKey(sessionId, runAnalyze)] ?? {}),
+  });
+  await writeJson(join(sessionDir, "runs", runImplement, "run.json"), {
+    schema_version: "run/3.0",
+    run_id: runImplement,
+    session_id: sessionId,
+    step_id: "implement",
+    parent_run_id: runAnalyze,
+    retry_of_run_id: null,
+    attempt: 1,
+    command: "implement",
+    args: ["--scope", "core"],
+    goal: "Implement the migration",
+    status: "running",
+    revision: 4,
+    actor_id: "pi-actor",
+    input_refs: [],
+    output_refs: [],
+    primary_artifact_id: "artifact-v3",
+    verdict: null,
+    summary: null,
+    created_at: "2026-08-12T00:30:00.000Z",
+    started_at: "2026-08-12T00:31:00.000Z",
+    ended_at: null,
+    sealed_at: null,
+    ...(runOverrides[runKey(sessionId, runImplement)] ?? {}),
+  });
+  await writeJson(join(sessionDir, "artifacts.json"), {
+    schema_version: "artifacts/1.0",
+    revision: 1,
+    artifacts: {
+      "artifact-v3": {
+        kind: "implementation",
+        role: "primary",
+        producer_run_id: runImplement,
+        relative_path: "outputs/implementation.json",
+        media_type: "application/json",
+        schema_version: "artifact/1.0",
+        content_hash: "v3-hash",
+        size: 128,
+        status: "draft",
+        derived_from: [],
+        replaces: null,
+      },
+    },
+    aliases: { "current-implementation": "artifact-v3" },
+  });
+  await writeJson(join(sessionDir, "evidence.json"), {
+    schema_version: "evidence/1.0",
+    revision: 1,
+    records: {
+      "evidence-1": {
+        run_id: runAnalyze,
+        command: "analyze",
+        kind: "analysis",
+        point: "analyze",
+        claim: "Migration analyzed",
+        outcome: "passed",
+        rationale: "Fixture evidence",
+        status: "accepted",
+        artifact_refs: [],
+        gate_refs: ["GATE-001-01"],
+        source_refs: [],
+      },
+    },
+  });
 }
 
 async function writeJson(path: string, value: unknown): Promise<void> {

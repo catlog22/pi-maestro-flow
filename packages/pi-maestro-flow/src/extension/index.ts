@@ -1399,8 +1399,8 @@ Contract: subject is the title; description is detail. status is update-only on 
     name: "run-control",
     label: "Run Control",
     description: `Transparent shell over the canonical Maestro CLI for Session/Run lifecycle and Artifact compatibility authority. Pass argv exactly as the CLI takes it (without the leading \`maestro\` executable), e.g. { argv: ["session","next","--json"] }, { argv: ["run","check","run-abc","--json"] }, or { argv: ["artifact","inspect","ART-1","--session","session-1","--consumer","review","--alias","current-review","--json"] }.
-Read-only query commands (status, brief, check, list, show, artifact inspect, search, load, ...) need no workflow mutation lease; lifecycle writes (next/done/decide/seal/edit/...) require the current Pi session to own the workflow mutation lease and are blocked in Plan mode. Entry commands (session/run create|start) may mint a Session without a held lease. Artifact republish is a capability-gated registry mutation: the coordinator injects the current Pi host identity and a fresh inspect-derived CAS fence for either legacy/execution or session/3.0 writers.
-This is the single LLM surface for the lifecycle and Artifact compatibility commands: do not hand-write \`maestro\` run/session/execution/artifact calls in bash. Read results report mutation-lease ownership so a Pi session can distinguish its Run from another session's workspace-wide Run.
+Read-only query commands (status, brief, check, list, show, artifact inspect, search, load, ...) need no workflow mutation lease; lifecycle writes require the current Pi session identity (participant/actor) and are blocked in Plan mode. Under session/3.0 workspaces the coordinator injects participant/request-id/expected-revision and no lease exists; under legacy/execution workspaces lifecycle writes fence the current Pi session's workflow mutation lease. Entry commands (session/run create|start|open) may mint a Session without a held lease. Artifact republish is a capability-gated registry mutation: the coordinator injects the current Pi host identity and a fresh inspect-derived CAS fence for either legacy/execution or session/3.0 writers.
+This is the single LLM surface for the lifecycle and Artifact compatibility commands: do not hand-write \`maestro\` run/session/execution/artifact calls in bash. Read results report lifecycle ownership so a Pi session can distinguish its Run from another session's workspace-wide Run.
 
 When to use:
 - Inside an active Maestro Workflow Session: any session/run lifecycle operation.
@@ -1589,7 +1589,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     if (!run) return undefined;
     const task = getVisibleTasks().find((candidate) => candidate.origin?.runId === run.runId)
       ?? getVisibleTasks().find((candidate) => candidate.status === "in_progress" && candidate.origin);
-    const gates = [...session.gates, ...(run?.gates ?? [])];
+    const gates = run?.gates ?? [];
     const next = Array.isArray(run?.handoff?.next) ? run?.handoff?.next[0] : undefined;
     const handoffAction = next && typeof next === "object" && typeof (next as { command?: unknown }).command === "string"
       ? (next as { command: string }).command

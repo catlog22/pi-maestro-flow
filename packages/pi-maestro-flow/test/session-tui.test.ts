@@ -119,7 +119,7 @@ test("WorkflowViewModel derives statusless session/2.0 lifecycle from Execution 
   );
 
   const gated = statuslessSnapshot("active", null, "pending");
-  gated.session!.gates = [{ id: "execution-gate", blocking: true, status: "failed" }];
+  gated.session!.runs[0]!.gates = [{ id: "execution-gate", blocking: true, status: "failed" }];
   assert.equal(deriveWorkflowViewModel(gated)?.lifecycle, "blocked");
 
   const awaitingDecision = statuslessSnapshot("active", null, "pending");
@@ -305,7 +305,6 @@ function statuslessSnapshot(
       intent: "Derive lifecycle",
       lifecycleAuthority: "execution-derived",
       revision: 5,
-      identityRevision: 2,
       activityRevision: 5,
       currentExecutionId: executionStatus ? executionId : null,
       latestExecutionId: executionStatus ? executionId : null,
@@ -314,7 +313,6 @@ function statuslessSnapshot(
       archivedBy: null,
       activeRunId: null,
       definitionOfDone: "",
-      gates: [],
       chain: [],
       runs: [runRecord],
       artifacts: [],

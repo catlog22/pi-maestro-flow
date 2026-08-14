@@ -211,7 +211,9 @@ export declare function ownerSnapshotPath(identity: WorkspacePeerIdentity, owner
 export declare function commandMailboxPath(identity: WorkspacePeerIdentity, ownerId: string): string;
 export declare function responseMailboxPath(identity: WorkspacePeerIdentity, ownerId: string): string;
 export declare function ensureWorkspacePeerDirectories(identity: WorkspacePeerIdentity): Promise<void>;
-export declare function writePrivateJsonAtomic(path: string, value: unknown, maximumBytes: number): Promise<void>;
+export declare function writePrivateJsonAtomic(path: string, value: unknown, maximumBytes: number, options?: {
+    beforeCommit?: () => void;
+}): Promise<void>;
 /**
  * Lease file declaring that `monitorOwnerId` supervises `targetOwnerId`.
  * Lives next to the target's owner snapshot in the shared workspace root, so
@@ -259,7 +261,7 @@ export interface WorkspaceMainSessionDeliveryDecision {
 }
 export declare function workspaceMainSessionDeliveryDecision(requested: WorkspacePeerCommandAction, backgroundJobs: readonly WorkspaceBackgroundJobSnapshot[], messageKind?: WorkspacePeerMessageKind): WorkspaceMainSessionDeliveryDecision;
 export declare function workspaceMainSessionDeliveryAction(requested: WorkspacePeerCommandAction, backgroundJobs: readonly WorkspaceBackgroundJobSnapshot[]): WorkspacePeerCommandAction;
-export declare function shouldReplayWorkspaceRootQueue(reason: "startup" | "reload" | "new" | "resume" | "fork"): boolean;
+export declare function shouldReplayWorkspaceRootQueue(reason: "startup" | "reload" | "new" | "resume" | "fork", targetSessionId?: string, currentSessionId?: string): boolean;
 export interface WorkspaceRemoteRootMessage {
     messageId: string;
     fromOwnerId: string;
@@ -322,6 +324,8 @@ export declare function enqueueWorkspacePeerCommand(identity: WorkspacePeerIdent
     replyTo?: string;
     fromSessionName?: string;
     beforePublish?: (command: WorkspacePeerCommand) => void | Promise<void>;
+    /** Synchronous ownership check at the atomic rename boundary. */
+    beforeCommit?: (command: WorkspacePeerCommand) => void;
 }): Promise<WorkspacePeerCommand>;
 export declare function waitForWorkspacePeerCommandResponse(identity: WorkspacePeerIdentity, command: WorkspacePeerCommand, options?: {
     timeoutMs?: number;
