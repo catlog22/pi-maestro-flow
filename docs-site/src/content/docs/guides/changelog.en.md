@@ -5,7 +5,13 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current stable release: v0.21.2 (2026-08-14).** Flow 0.21.2 syncs the engine to `maestro-flow@0.5.71` (v3 simplification: decision gates, no participant pre-registration, no identity/paused/gates state in v3); bundles Teammate 1.13.0, Cockpit 0.16.0, and Settings-Core 0.1.3.
+> **Current stable release: v0.21.3 (2026-08-15).** Flow 0.21.3 syncs the engine to `maestro-flow@0.5.72` (cross-repo audit fixes: atomic knowledge staging, deterministic Run-ID replay, canonical orchestration flag); bundles Teammate 1.13.0, Cockpit 0.16.0, and Settings-Core 0.1.3.
+
+## v0.21.3 (2026-08-15)
+
+- Engine pin upgrade: `maestro-flow` 0.5.71 → **0.5.72**. 0.5.72 carries the cross-repo audit fixes: `run complete` persists knowledge candidates atomically with the receipt (immediately visible to `knowledge review`), `run next` derives the default Run ID deterministically from the request ID (retries replay the original mutation), artifact republish uses the canonical `--expected-orchestration-revision`, transition receipts force `participant_id = actor_id`, ResumeMap drops `identityRevision`/`paused`, resolved/escalated decisions can no longer be bound as new gates, and all 30 release-machine proofs pass.
+- v3 adapter updates (8 cross-repo findings): `next/done` delegate to the lease-free CAS `execV3` path, `edit` refuses loudly under v3 and points to `session chain insert|skip|replace`; capability v3 selection is writer-strict (`session_schema_writes` declares `session/3.0`, no execution writes, `run-response/1.2` declared, all v2 features false); execV3 binds the response envelope (operation + request-id); ResumeMap validation is allowlist-strict (unknown keys incl. `identityRevision` rejected); bridge maps `paused`→running explicitly and projects decisions/retry lineage; the v3 operation surface of run-control/run-response is trimmed.
+- Install: `pi install npm:pi-maestro-flow@0.21.3`.
 
 ## v0.21.2 (2026-08-14)
 

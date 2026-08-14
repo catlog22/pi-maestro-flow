@@ -5,7 +5,13 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.21.2（2026-08-14）。** Flow 0.21.2 同步引擎 `maestro-flow@0.5.71`（v3 简化：决策门、移除 participant 预注册与 identity/paused/gates 状态）；搭配 Teammate 1.13.0、Cockpit 0.16.0 与 Settings-Core 0.1.3。
+> **当前稳定版本：v0.21.3（2026-08-15）。** Flow 0.21.3 同步引擎 `maestro-flow@0.5.72`（跨仓审查修复：原子知识闭环、确定性 Run ID 重放、canonical orchestration flag）；搭配 Teammate 1.13.0、Cockpit 0.16.0 与 Settings-Core 0.1.3。
+
+## v0.21.3（2026-08-15）
+
+- 引擎 pin 升级：`maestro-flow` 0.5.71 → **0.5.72**。0.5.72 承载跨仓审查修复：run complete 在 receipt 同一事务内原子写入知识候选（`knowledge review` 立即可见）、`run next` 缺省 Run ID 从 request ID 确定性派生（同 request 重试可 replay 原 mutation）、artifact republish 改用 canonical `--expected-orchestration-revision`、transition receipt 强制 `participant_id = actor_id`、ResumeMap 移除 `identityRevision`/`paused`、resolved/escalated 决策不可再绑为新门、release 门禁 30 项证明全绿。
+- v3 适配更新（跨仓审查 8 条）：`next/done` 委托无 lease CAS 的 `execV3`，`edit` 在 v3 下显式拒绝并指引 `session chain insert|skip|replace`；capability v3 选择增加 writer-scoped 严格校验（`session_schema_writes` 声明 `session/3.0`、无 execution writes、声明 `run-response/1.2`、v2 features 全 false 才选 v3）；execV3 响应绑定 operation/request-id 校验；ResumeMap 白名单严格校验（拒绝未知键含 `identityRevision`）；bridge 的 paused→running 显式映射与 decisions/retry lineage 投影；run-control/run-response v3 操作面收敛。
+- 安装：`pi install npm:pi-maestro-flow@0.21.3`。
 
 ## v0.21.2（2026-08-14）
 
