@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export type RunResponseSchemaVersion = "run-response/1.0" | "run-response/1.1";
+export type RunResponseSchemaVersion = "run-response/1.0" | "run-response/1.1" | "run-response/1.2";
 export type RunResponseExitCode = 0 | 1 | 2 | 3;
 export type RunReplayStatus = "applied" | "replayed";
 
@@ -44,6 +44,48 @@ export type RunOperationV11 =
   | "execution-lease-heartbeat"
   | "execution-lease-release"
   | "execution-lease-recover";
+
+export type RunOperationV12 =
+  | RunOperationV10
+  | "capabilities"
+  | "session-open"
+  | "session-migrate"
+  | "session-pause"
+  | "session-resume"
+  | "session-complete"
+  | "session-archive"
+  | "session-status"
+  | "session-resume-view"
+  | "session-chain-insert"
+  | "session-chain-skip"
+  | "session-chain-replace"
+  | "session-chain-audit"
+  | "run-cancel"
+  | "run-seal"
+  | "run-transition"
+  | "execution-start"
+  | "execution-attach"
+  | "execution-status"
+  | "execution-pause"
+  | "execution-resolve"
+  | "execution-resume"
+  | "execution-seal"
+  | "execution-handoff-prepare"
+  | "execution-handoff-accept"
+  | "execution-handoff-cancel"
+  | "execution-lease-status"
+  | "execution-lease-heartbeat"
+  | "execution-lease-release"
+  | "execution-lease-recover"
+  | "execution-operation-claim"
+  | "execution-operation-heartbeat"
+  | "execution-operation-release"
+  | "execution-operation-status"
+  | "participant-register"
+  | "participant-status"
+  | "participant-unregister"
+  | "artifact-inspect"
+  | "artifact-republish";
 
 export interface RunResponseNextAction {
   suggest_only: true;
@@ -95,6 +137,37 @@ export interface RunResponseErrorV11 {
   recovery_command: string | null;
 }
 
+export type RunResponseRevisionTargetV12 =
+  | "session-identity"
+  | "orchestration"
+  | "run"
+  | "artifact"
+  | "evidence";
+
+export interface RunResponseLocatorV12 {
+  session_id: string | null;
+  run_id: string | null;
+}
+
+export interface RunResponseRevisionV12 {
+  target_type: RunResponseRevisionTargetV12;
+  target_id: string;
+  revision: number;
+}
+
+export interface RunResponseErrorV12 {
+  code: RunResponseErrorCodeV12;
+  message: string;
+  retryable: boolean;
+  details: Record<string, unknown>;
+  target_type: RunResponseRevisionTargetV12 | null;
+  target_id: string | null;
+  expected_revision: number | null;
+  current_revision: number | null;
+  changed_by: string | null;
+  next_actions: string[];
+}
+
 export interface RunResponseV10 {
   schema_version: "run-response/1.0";
   operation: RunOperationV10;
@@ -132,8 +205,23 @@ export interface RunResponseV11 {
   error: RunResponseErrorV11 | null;
 }
 
+export interface RunResponseV12 {
+  schema_version: "run-response/1.2";
+  operation: RunOperationV12;
+  ok: boolean;
+  exit_code: RunResponseExitCode;
+  disposition: RunResponseDispositionV11;
+  request_id: string | null;
+  locator: RunResponseLocatorV12 | null;
+  revision: RunResponseRevisionV12 | null;
+  result: unknown;
+  replay: RunResponseReplay | null;
+  warnings: RunResponseWarningV11[];
+  error: RunResponseErrorV12 | null;
+}
+
 /** Private because it may transiently contain result.lease_claim. */
-export type PrivateRunResponseEnvelope = RunResponseV10 | RunResponseV11;
+export type PrivateRunResponseEnvelope = RunResponseV10 | RunResponseV11 | RunResponseV12;
 
 /** Safe projection type for logging, status, Cockpit, and transcript paths. */
 export type PublicRunResponseEnvelope = PrivateRunResponseEnvelope;
@@ -197,6 +285,17 @@ export type RunResponseErrorCodeV11 =
   | "LEASE_RELEASE_BLOCKED"
   | "CAPABILITY_REQUIRED";
 
+export type RunResponseErrorCodeV12 =
+  | RunResponseErrorCodeV10
+  | "SESSION_SCHEMA_UNSUPPORTED"
+  | "SESSION_ARCHIVED"
+  | "SESSION_ARCHIVE_BLOCKED"
+  | "RUN_REVISION_CONFLICT"
+  | "ORCHESTRATION_REVISION_CONFLICT"
+  | "STORE_BUSY"
+  | "PARTICIPANT_REQUIRED"
+  | "INVALID_STATE_TRANSITION";
+
 export class RunResponseParseError extends Error {
   constructor(message: string, readonly schemaVersion?: string) {
     super(message);
@@ -238,6 +337,19 @@ const operationV11Schema = z.enum([
   "execution-seal", "execution-handoff-prepare", "execution-handoff-accept", "execution-handoff-cancel",
   "execution-lease-status", "execution-lease-heartbeat", "execution-lease-release", "execution-lease-recover",
 ]);
+const operationV12Schema = z.enum([
+  ...operationV10Schema.options,
+  "capabilities", "session-open", "session-migrate", "session-pause", "session-resume",
+  "session-complete", "session-archive", "session-status", "session-resume-view",
+  "session-chain-insert", "session-chain-skip", "session-chain-replace", "session-chain-audit",
+  "run-cancel", "run-seal", "run-transition", "execution-start", "execution-attach",
+  "execution-status", "execution-pause", "execution-resolve", "execution-resume", "execution-seal",
+  "execution-handoff-prepare", "execution-handoff-accept", "execution-handoff-cancel",
+  "execution-lease-status", "execution-lease-heartbeat", "execution-lease-release", "execution-lease-recover",
+  "execution-operation-claim", "execution-operation-heartbeat", "execution-operation-release",
+  "execution-operation-status", "participant-register", "participant-status", "participant-unregister",
+  "artifact-inspect", "artifact-republish",
+]);
 const errorCodeV10Schema = z.enum([
   "COMMANDER_USAGE", "SESSION_NOT_FOUND", "SESSION_AMBIGUOUS", "SESSION_NOT_RUNNING", "RESUME_REQUIRED",
   "LEASE_CONFLICT", "RUNNING_STEP", "DECISION_REQUIRED", "CHAIN_COMPLETE", "PICK_NOT_FOUND",
@@ -254,6 +366,12 @@ const errorCodeV11Schema = z.enum([
   "EXECUTION_REVISION_CONFLICT", "LEASE_BUSY", "LEASE_FENCE_CONFLICT", "LEASE_HANDOFF_IN_PROGRESS",
   "LEASE_HANDOFF_TOKEN_INVALID", "LEASE_STALE_RECOVERY_REQUIRED", "LEASE_RELEASE_BLOCKED",
   "CAPABILITY_REQUIRED",
+]);
+const errorCodeV12Schema = z.enum([
+  ...errorCodeV10Schema.options,
+  "SESSION_SCHEMA_UNSUPPORTED", "SESSION_ARCHIVED", "SESSION_ARCHIVE_BLOCKED",
+  "RUN_REVISION_CONFLICT", "ORCHESTRATION_REVISION_CONFLICT", "STORE_BUSY", "PARTICIPANT_REQUIRED",
+  "INVALID_STATE_TRANSITION",
 ]);
 
 const commonV10Shape = {
@@ -333,6 +451,93 @@ const errorV11Schema = z.object({
   }).strict(),
 }).strict();
 const responseV11Schema = z.union([successV11Schema, errorV11Schema]);
+
+const revisionTargetV12Schema = z.enum([
+  "session-identity", "orchestration", "run", "artifact", "evidence",
+]);
+const commonV12Shape = {
+  schema_version: z.literal("run-response/1.2"),
+  operation: operationV12Schema,
+  request_id: nonEmptyString.nullable(),
+  locator: z.object({
+    session_id: nonEmptyString.nullable(),
+    run_id: nonEmptyString.nullable(),
+  }).strict().nullable(),
+  revision: z.object({
+    target_type: revisionTargetV12Schema,
+    target_id: nonEmptyString,
+    revision: z.number().int().nonnegative(),
+  }).strict().nullable(),
+  replay: replaySchema.nullable(),
+  warnings: z.array(z.object({
+    code: nonEmptyString,
+    message: nonEmptyString,
+    replacement_command: nullableString,
+  }).strict()),
+};
+const successV12Schema = z.object({
+  ...commonV12Shape,
+  ok: z.literal(true),
+  exit_code: z.literal(0),
+  disposition: z.literal("success"),
+  result: z.unknown(),
+  error: z.null(),
+}).strict();
+const errorDetailV12Schema = z.object({
+  code: errorCodeV12Schema,
+  message: nonEmptyString,
+  retryable: z.boolean(),
+  details: detailsSchema,
+  target_type: revisionTargetV12Schema.nullable(),
+  target_id: nonEmptyString.nullable(),
+  expected_revision: nullableRevision,
+  current_revision: nullableRevision,
+  changed_by: nonEmptyString.nullable(),
+  next_actions: z.array(nonEmptyString),
+}).strict().superRefine((error, ctx) => {
+  if (error.code !== "RUN_REVISION_CONFLICT" && error.code !== "ORCHESTRATION_REVISION_CONFLICT") return;
+  for (const field of [
+    "target_type", "target_id", "expected_revision", "current_revision", "changed_by",
+  ] as const) {
+    if (error[field] === null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `${field} is required for revision conflicts` });
+    }
+  }
+  if (error.next_actions.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["next_actions"],
+      message: "next_actions is required for revision conflicts",
+    });
+  }
+});
+const errorV12Schema = z.union([
+  z.object({
+    ...commonV12Shape,
+    ok: z.literal(false),
+    exit_code: z.literal(1),
+    disposition: z.literal("domain_error"),
+    result: z.null(),
+    error: errorDetailV12Schema,
+  }).strict(),
+  z.object({
+    ...commonV12Shape,
+    ok: z.literal(false),
+    exit_code: z.union([z.literal(2), z.literal(3)]),
+    disposition: z.literal("control_flow"),
+    result: z.null(),
+    error: errorDetailV12Schema,
+  }).strict(),
+  z.object({
+    ...commonV12Shape,
+    ok: z.literal(false),
+    exit_code: z.literal(2),
+    disposition: z.literal("usage_error"),
+    result: z.null(),
+    error: errorDetailV12Schema,
+  }).strict(),
+]);
+const responseV12Schema = z.union([successV12Schema, errorV12Schema]);
 const LEASE_CLAIM_OPERATIONS: ReadonlySet<RunOperationV11> = new Set([
   "execution-start",
   "execution-attach",
@@ -348,13 +553,15 @@ export function parseRunResponse(input: string | unknown): PrivateRunResponseEnv
   if (typeof version !== "string") {
     throw new RunResponseParseError("Maestro run response must include a string schema_version");
   }
-  if (version !== "run-response/1.0" && version !== "run-response/1.1") {
+  if (version !== "run-response/1.0" && version !== "run-response/1.1" && version !== "run-response/1.2") {
     throw new UnsupportedRunResponseVersionError(version);
   }
   requireEnvelopeKeys(value, version);
   const parsed = version === "run-response/1.0"
     ? responseV10Schema.safeParse(value)
-    : responseV11Schema.safeParse(value);
+    : version === "run-response/1.1"
+      ? responseV11Schema.safeParse(value)
+      : responseV12Schema.safeParse(value);
   if (!parsed.success) {
     throw new RunResponseParseError(
       `Malformed Maestro ${version} envelope: ${parsed.error.issues.map(issueText).join("; ")}`,
@@ -399,9 +606,12 @@ function requireEnvelopeKeys(value: Record<string, unknown>, version: RunRespons
         "schema_version", "operation", "ok", "exit_code", "request_id", "locator", "result", "next",
         "continuation", "replay", "error",
       ]
-    : [
+    : version === "run-response/1.1" ? [
         "schema_version", "operation", "ok", "exit_code", "disposition", "request_id", "locator", "fence",
         "result", "next", "continuation", "replay", "warnings", "error",
+      ] : [
+        "schema_version", "operation", "ok", "exit_code", "disposition", "request_id", "locator", "revision",
+        "result", "replay", "warnings", "error",
       ];
   const missing = required.filter((key) => !Object.prototype.hasOwnProperty.call(value, key));
   if (missing.length > 0) {

@@ -436,6 +436,9 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.match(runControl?.description ?? "", /do not hand-write/);
   assert.match(runControl?.description ?? "", /mutation lease and are blocked in Plan mode/);
   assert.match(runControl?.description ?? "", /session\/run create\|start/);
+  assert.match(runControl?.description ?? "", /artifact inspect/);
+  assert.match(runControl?.description ?? "", /Artifact republish is a capability-gated registry mutation/);
+  assert.match(runControl?.description ?? "", /fresh inspect-derived CAS fence/);
   assert.match(argvSchema?.description ?? "", /without the leading executable/);
   assert.equal(runControlProperties?.step, undefined, "typed per-action params are removed in the shell surface");
   assert.equal(runControlProperties?.verdict, undefined);
@@ -600,6 +603,9 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
 
 test("root teammate authority is fenced on session start and disposed on shutdown", () => {
   const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  assert.match(source, /Artifact republish is a capability-gated registry mutation/);
+  assert.match(source, /fresh inspect-derived CAS fence/);
+  assert.match(source, /maestro\\s\+\(\?:run\|session\|execution\|artifact\|ralph\)/);
   assert.match(
     source,
     /pi\.on\("session_start"[\s\S]*?disposeTeammateSessionRegistrations\(\)[\s\S]*?activateTeammateSessionRegistrations\(ctx\)/,

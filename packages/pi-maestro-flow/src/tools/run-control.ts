@@ -43,7 +43,8 @@ export type RunControlMutationScope =
   | "execution-acquire"
   | "execution-lease"
   | "compatibility-start"
-  | "plan-publish";
+  | "plan-publish"
+  | "artifact-republish";
 
 export type RunControlLeaseIntent = "none" | "required" | "acquire" | "command-aware";
 
@@ -70,6 +71,12 @@ export function classifyRunControlArgv(argv: readonly string[]): RunControlClass
   const family = argv[0] ?? "";
   const command = argv[1] ?? "";
   if (family === "capabilities") return { ...READ_CLASSIFICATION };
+
+  if (family === "artifact") {
+    if (["inspect", "list", "show"].includes(command)) return { ...READ_CLASSIFICATION };
+    if (command === "republish") return writeClassification("artifact-republish", "none");
+    return writeClassification("artifact-republish", "none");
+  }
 
   if (family === "execution") {
     if (["status", "show", "list"].includes(command)) return { ...READ_CLASSIFICATION };

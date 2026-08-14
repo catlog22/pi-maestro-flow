@@ -42,12 +42,17 @@ export interface MaestroCapabilitiesV10 {
     legacy_session_aliases: boolean;
     [feature: string]: boolean;
   };
+  [field: string]: unknown;
 }
 
 export interface RunCliNegotiatedSupport {
   execution_generation: boolean;
   core_execution_lease: boolean;
   "run-response/1.1": boolean;
+  "run-response/1.2": boolean;
+  artifact_compatibility_v1: boolean;
+  atomic_run_complete_seal: boolean;
+  generation_scoped_seal_receipts: boolean;
 }
 
 /**
@@ -204,6 +209,15 @@ export class RunCliAdapter {
     return (await this.capabilities()).support["run-response/1.1"];
   }
 
+  async supportsRunResponseV12(): Promise<boolean> {
+    return (await this.capabilities()).support["run-response/1.2"];
+  }
+
+  async supportsArtifactCompatibility(): Promise<boolean> {
+    const support = (await this.capabilities()).support;
+    return support["run-response/1.2"] && support.artifact_compatibility_v1;
+  }
+
   async supportsNewMutations(): Promise<boolean> {
     const support = (await this.capabilities()).support;
     return support.execution_generation
@@ -334,7 +348,8 @@ export class RunCliAdapter {
    */
   async exec(argv: readonly string[]): Promise<RunCliResult> {
     const family = argv[0];
-    const acceptsWorkflowRoot = family === "run" || family === "session" || family === "execution" || family === "plan";
+    const acceptsWorkflowRoot = family === "run" || family === "session" || family === "execution"
+      || family === "plan" || family === "artifact";
     const args = acceptsWorkflowRoot && !argv.some((argument) => argument === "--workflow-root")
       ? [...argv, "--workflow-root", this.workflowRoot]
       : [...argv];
@@ -408,6 +423,10 @@ export class RunCliAdapter {
       execution_generation: writesExecutionV10 && structured.features.execution_generation,
       core_execution_lease: writesExecutionV10 && structured.features.core_execution_lease,
       "run-response/1.1": structured.run_response_writes.includes("run-response/1.1"),
+      "run-response/1.2": structured.run_response_writes.includes("run-response/1.2"),
+      artifact_compatibility_v1: structured.features.artifact_compatibility_v1 === true,
+      atomic_run_complete_seal: structured.features.atomic_run_complete_seal === true,
+      generation_scoped_seal_receipts: structured.features.generation_scoped_seal_receipts === true,
     });
     const v3 = negotiateV3Support(structured.features);
     return {
@@ -478,12 +497,16 @@ const maestroCapabilitiesV10Schema = z.object({
     session_statusless: z.boolean(),
     legacy_session_aliases: z.boolean(),
   }).catchall(z.boolean()),
-}).strict();
+}).passthrough();
 
 const NO_NEW_PROTOCOL_SUPPORT: Readonly<RunCliNegotiatedSupport> = Object.freeze({
   execution_generation: false,
   core_execution_lease: false,
   "run-response/1.1": false,
+  "run-response/1.2": false,
+  artifact_compatibility_v1: false,
+  atomic_run_complete_seal: false,
+  generation_scoped_seal_receipts: false,
 });
 
 const NO_V3_SUPPORT: Readonly<RunCliV3Support> = Object.freeze({

@@ -11,13 +11,16 @@ const structuredCapabilities = {
   cli_version: "1.4.0",
   session_schema_writes: ["session/1.3", "session/2.0"],
   execution_schema_writes: ["execution/1.0"],
-  run_response_writes: ["run-response/1.0", "run-response/1.1"],
+  run_response_writes: ["run-response/1.0", "run-response/1.1", "run-response/1.2"],
   features: {
     execution_generation: true,
     core_execution_lease: true,
     execution_handoff: true,
     session_statusless: true,
     legacy_session_aliases: true,
+    artifact_compatibility_v1: true,
+    atomic_run_complete_seal: true,
+    generation_scoped_seal_receipts: true,
   },
 };
 
@@ -29,7 +32,7 @@ const v3StructuredCapabilities = {
   cli_version: "2.0.0",
   session_schema_writes: ["session/3.0"],
   execution_schema_writes: [],
-  run_response_writes: ["run-response/1.1"],
+  run_response_writes: ["run-response/1.1", "run-response/1.2"],
   features: {
     execution_generation: false,
     core_execution_lease: false,
@@ -42,6 +45,9 @@ const v3StructuredCapabilities = {
     request_receipts_v2: true,
     execution_lease: false,
     operation_registry: false,
+    artifact_compatibility_v1: true,
+    atomic_run_complete_seal: true,
+    generation_scoped_seal_receipts: true,
   },
 };
 
@@ -87,11 +93,17 @@ test("CLI adapter treats a validated structured capability result as authoritati
     execution_generation: true,
     core_execution_lease: true,
     "run-response/1.1": true,
+    "run-response/1.2": true,
+    artifact_compatibility_v1: true,
+    atomic_run_complete_seal: true,
+    generation_scoped_seal_receipts: true,
   });
   assert.deepEqual([...capabilities.commands], ["brief", "check", "next"]);
   assert.equal(await adapter.supportsExecutionGeneration(), true);
   assert.equal(await adapter.supportsCoreExecutionLease(), true);
   assert.equal(await adapter.supportsRunResponseV11(), true);
+  assert.equal(await adapter.supportsRunResponseV12(), true);
+  assert.equal(await adapter.supportsArtifactCompatibility(), true);
   assert.equal(await adapter.supportsNewMutations(), true);
   // v2-only core: no v3 keys broadcast, so the v2 protocol is selected.
   assert.deepEqual(capabilities.v3, NO_V3_SUPPORT);
@@ -119,6 +131,10 @@ test("CLI adapter negotiates the complete Session/Run minimal-state (v3) capabil
     execution_generation: false,
     core_execution_lease: false,
     "run-response/1.1": true,
+    "run-response/1.2": true,
+    artifact_compatibility_v1: true,
+    atomic_run_complete_seal: true,
+    generation_scoped_seal_receipts: true,
   });
   assert.equal(await adapter.supportsNewMutations(), false);
 });
@@ -199,6 +215,10 @@ test("CLI adapter reports explicit legacy compatibility when capabilities is an 
     execution_generation: false,
     core_execution_lease: false,
     "run-response/1.1": false,
+    "run-response/1.2": false,
+    artifact_compatibility_v1: false,
+    atomic_run_complete_seal: false,
+    generation_scoped_seal_receipts: false,
   });
   assert.deepEqual([...capabilities.commands], ["brief", "next", "complete"]);
   assert.deepEqual(capabilities.v3, NO_V3_SUPPORT);
@@ -218,6 +238,13 @@ test("CLI adapter fails new capability support closed for malformed or unsupport
       stdout: JSON.stringify({
         ...structuredCapabilities,
         features: { ...structuredCapabilities.features, core_execution_lease: undefined },
+      }),
+    },
+    {
+      name: "non-boolean additive feature",
+      stdout: JSON.stringify({
+        ...structuredCapabilities,
+        features: { ...structuredCapabilities.features, future_feature: "yes" },
       }),
     },
   ];
@@ -245,6 +272,8 @@ test("CLI adapter fails new capability support closed for malformed or unsupport
       assert.equal(capabilities.support.execution_generation, false);
       assert.equal(capabilities.support.core_execution_lease, false);
       assert.equal(capabilities.support["run-response/1.1"], false);
+      assert.equal(capabilities.support["run-response/1.2"], false);
+      assert.equal(capabilities.support.artifact_compatibility_v1, false);
       assert.deepEqual(capabilities.v3, NO_V3_SUPPORT);
       assert.equal(capabilities.protocol, "fail-closed");
       assert.deepEqual([...capabilities.commands], ["brief", "check"]);
@@ -262,6 +291,10 @@ test("CLI adapter fails readiness closed for contradictory structured capabiliti
         execution_generation: false,
         core_execution_lease: false,
         "run-response/1.1": true,
+        "run-response/1.2": true,
+        artifact_compatibility_v1: true,
+        atomic_run_complete_seal: true,
+        generation_scoped_seal_receipts: true,
       },
     },
     {
@@ -274,6 +307,10 @@ test("CLI adapter fails readiness closed for contradictory structured capabiliti
         execution_generation: false,
         core_execution_lease: true,
         "run-response/1.1": true,
+        "run-response/1.2": true,
+        artifact_compatibility_v1: true,
+        atomic_run_complete_seal: true,
+        generation_scoped_seal_receipts: true,
       },
     },
     {
@@ -283,6 +320,10 @@ test("CLI adapter fails readiness closed for contradictory structured capabiliti
         execution_generation: true,
         core_execution_lease: true,
         "run-response/1.1": false,
+        "run-response/1.2": false,
+        artifact_compatibility_v1: true,
+        atomic_run_complete_seal: true,
+        generation_scoped_seal_receipts: true,
       },
     },
   ];
@@ -307,6 +348,8 @@ test("CLI adapter fails readiness closed for contradictory structured capabiliti
 test("CLI adapter tolerates unknown broadcast feature keys without affecting negotiated support", async () => {
   const capabilitiesWithUnknownFeatures = {
     ...structuredCapabilities,
+    selected_writer: "session/2.0",
+    public_extensions: { artifact_contract: "1.0" },
     features: {
       ...structuredCapabilities.features,
       execution_operation_drain: true,
@@ -320,10 +363,16 @@ test("CLI adapter tolerates unknown broadcast feature keys without affecting neg
   });
   const capabilities = await adapter.capabilities();
   assert.equal(capabilities.mode, "structured");
+  assert.equal(capabilities.structured?.selected_writer, "session/2.0");
+  assert.deepEqual(capabilities.structured?.public_extensions, { artifact_contract: "1.0" });
   assert.deepEqual(capabilities.support, {
     execution_generation: true,
     core_execution_lease: true,
     "run-response/1.1": true,
+    "run-response/1.2": true,
+    artifact_compatibility_v1: true,
+    atomic_run_complete_seal: true,
+    generation_scoped_seal_receipts: true,
   });
   assert.equal(await adapter.supportsNewMutations(), true);
 });

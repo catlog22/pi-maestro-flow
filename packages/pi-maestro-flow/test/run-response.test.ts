@@ -22,6 +22,34 @@ const responseV10 = {
   error: null,
 };
 
+const responseV12 = {
+  schema_version: "run-response/1.2",
+  operation: "artifact-inspect",
+  ok: true,
+  exit_code: 0,
+  disposition: "success",
+  request_id: null,
+  locator: { session_id: "session-1", run_id: "run-source" },
+  revision: { target_type: "artifact", target_id: "ART-source", revision: 7 },
+  result: {
+    schema_version: "artifact-compatibility/1.0",
+    assessment_hash: `sha256:${"a".repeat(64)}`,
+    source: {
+      session_schema_version: "session/3.0",
+      session_revision: 4,
+      artifact_registry_revision: 7,
+    },
+    diagnostics: {
+      lease_id: "private-v12-lease",
+      participant_token: "private-v12-token",
+      visible: true,
+    },
+  },
+  replay: null,
+  warnings: [],
+  error: null,
+};
+
 const responseV11 = {
   schema_version: "run-response/1.1",
   operation: "execution-attach",
@@ -88,6 +116,125 @@ test("run-response parser extracts 1.1 execution locators, fences, warnings, rep
   assert.equal(extractRunResponseLeaseClaim(parsed)?.lease_id, "private-top-level");
 });
 
+test("run-response parser accepts and publicly projects artifact inspect run-response/1.2", () => {
+  const parsed = parseRunResponse(responseV12);
+  assert.equal(parsed.schema_version, "run-response/1.2");
+  assert.equal(parsed.operation, "artifact-inspect");
+  assert.equal(parsed.locator?.session_id, "session-1");
+  assert.deepEqual(parsed.revision, { target_type: "artifact", target_id: "ART-source", revision: 7 });
+
+  const projected = projectPublicRunResponse(parsed);
+  assert.deepEqual((projected.result as Record<string, unknown>).diagnostics, { visible: true });
+  assert.equal(JSON.stringify(projected).includes("private-v12"), false);
+  assert.equal(extractRunResponseLeaseClaim(parsed), null);
+});
+
+test("run-response parser accepts artifact republish success, domain error, and revision conflict", async (t) => {
+  await t.test("success", () => {
+    const parsed = parseRunResponse({
+      ...responseV12,
+      operation: "artifact-republish",
+      request_id: "request-republish",
+      revision: { target_type: "artifact", target_id: "ART-derived", revision: 8 },
+      replay: { status: "applied", transition_id: "transition-republish" },
+      result: {
+        source_artifact_id: "ART-source",
+        artifact_id: "ART-derived",
+        receipt: { schema_version: "artifact-republish/1.0" },
+      },
+    });
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.replay?.status, "applied");
+  });
+
+  await t.test("domain error", () => {
+    const parsed = parseRunResponse({
+      ...responseV12,
+      operation: "artifact-republish",
+      ok: false,
+      exit_code: 1,
+      disposition: "domain_error",
+      result: null,
+      error: {
+        code: "INVALID_STATE_TRANSITION",
+        message: "assessment changed",
+        retryable: false,
+        details: { visible: true },
+        target_type: null,
+        target_id: null,
+        expected_revision: null,
+        current_revision: null,
+        changed_by: null,
+        next_actions: ["inspect-artifact-compatibility"],
+      },
+    });
+    assert.equal(parsed.ok, false);
+    assert.equal(parsed.error?.code, "INVALID_STATE_TRANSITION");
+  });
+
+  await t.test("revision conflict", () => {
+    const parsed = parseRunResponse({
+      ...responseV12,
+      operation: "artifact-republish",
+      ok: false,
+      exit_code: 3,
+      disposition: "control_flow",
+      result: null,
+      error: {
+        code: "ORCHESTRATION_REVISION_CONFLICT",
+        message: "stale orchestration revision",
+        retryable: true,
+        details: {},
+        target_type: "orchestration",
+        target_id: "session-1",
+        expected_revision: 4,
+        current_revision: 5,
+        changed_by: "participant-other",
+        next_actions: ["inspect-artifact-compatibility", "resubmit-with-new-request-id"],
+      },
+    });
+    assert.equal(parsed.error?.current_revision, 5);
+    assert.deepEqual(parsed.error?.next_actions, [
+      "inspect-artifact-compatibility",
+      "resubmit-with-new-request-id",
+    ]);
+  });
+});
+
+test("run-response/1.2 enforces strict conflict and public credential boundaries", () => {
+  assert.throws(
+    () => parseRunResponse({ ...responseV12, extra: true }),
+    RunResponseParseError,
+  );
+  assert.throws(
+    () => parseRunResponse({ ...responseV12, result: { lease_claim: { lease_id: "private-v12" } } }),
+    /lease_claim is not permitted/,
+  );
+  assert.throws(
+    () => parseRunResponse({
+      ...responseV12,
+      operation: "artifact-republish",
+      ok: false,
+      exit_code: 3,
+      disposition: "control_flow",
+      result: null,
+      error: {
+        code: "RUN_REVISION_CONFLICT",
+        message: "conflict",
+        retryable: true,
+        details: {},
+        target_type: "run",
+        target_id: "run-1",
+        expected_revision: 1,
+        current_revision: 2,
+        changed_by: null,
+        next_actions: [],
+      },
+    }),
+    RunResponseParseError,
+  );
+});
+
 test("public run-response projection removes the lease claim and every raw lease_id recursively", () => {
   const parsed = parseRunResponse(responseV11);
   const projected = projectPublicRunResponse(parsed);
@@ -106,9 +253,8 @@ test("public run-response projection removes the lease claim and every raw lease
   assert.equal(JSON.stringify(projected).includes("private-"), false);
 });
 
-// The distributed operation claim/drain experiment was removed; the parser
-// must fail closed on any envelope that still carries its private credential
-// or its retired execution-operation-* operation kinds.
+// The distributed operation claim/drain credential experiment was removed.
+// V1.1 operation enums remain fail-closed for its retired operation kinds.
 test("run-response parser rejects removed operation claim credentials and operation kinds fail-closed", () => {
   assert.throws(
     () => parseRunResponse({

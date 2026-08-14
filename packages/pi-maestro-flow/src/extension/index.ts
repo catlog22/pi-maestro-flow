@@ -1398,9 +1398,9 @@ Contract: subject is the title; description is detail. status is update-only on 
   const runControlTool: ToolDefinition<typeof RunControlParams> = {
     name: "run-control",
     label: "Run Control",
-    description: `Transparent shell over the canonical Maestro CLI for the Session/Run lifecycle. Pass argv exactly as the CLI takes it (without the leading \`maestro\` executable), e.g. { argv: ["session","next","--json"] } or { argv: ["run","check","run-abc","--json"] }.
-Read-only query commands (status, brief, check, list, show, search, load, ...) need no workflow mutation lease; write commands (next/done/decide/seal/edit/...) require the current Pi session to own the workflow mutation lease and are blocked in Plan mode. Entry commands (session/run create|start) may mint a Session without a held lease.
-This is the single LLM surface for the lifecycle: do not hand-write \`maestro\` run/session calls in bash. Read results report mutation-lease ownership so a Pi session can distinguish its Run from another session's workspace-wide Run.
+    description: `Transparent shell over the canonical Maestro CLI for Session/Run lifecycle and Artifact compatibility authority. Pass argv exactly as the CLI takes it (without the leading \`maestro\` executable), e.g. { argv: ["session","next","--json"] }, { argv: ["run","check","run-abc","--json"] }, or { argv: ["artifact","inspect","ART-1","--session","session-1","--consumer","review","--alias","current-review","--json"] }.
+Read-only query commands (status, brief, check, list, show, artifact inspect, search, load, ...) need no workflow mutation lease; lifecycle writes (next/done/decide/seal/edit/...) require the current Pi session to own the workflow mutation lease and are blocked in Plan mode. Entry commands (session/run create|start) may mint a Session without a held lease. Artifact republish is a capability-gated registry mutation: the coordinator injects the current Pi host identity and a fresh inspect-derived CAS fence for either legacy/execution or session/3.0 writers.
+This is the single LLM surface for the lifecycle and Artifact compatibility commands: do not hand-write \`maestro\` run/session/execution/artifact calls in bash. Read results report mutation-lease ownership so a Pi session can distinguish its Run from another session's workspace-wide Run.
 
 When to use:
 - Inside an active Maestro Workflow Session: any session/run lifecycle operation.
@@ -1410,7 +1410,7 @@ When NOT to use:
 - Knowledge writes (knowledge stage/record/promote) and explore/delegate/moa belong to the bash \`maestro\` CLI and the \`maestro\` tool respectively; read-only knowledge lookups (search/load/review) may pass through this shell (they are classified as read commands above).
 
 Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--verdict","done"] }, { argv: ["run","edit","verify","--after","latest"] }.`,
-    promptSnippet: "Maestro CLI passthrough shell for Session/Run lifecycle",
+    promptSnippet: "Maestro CLI passthrough shell for Session/Run lifecycle and Artifact compatibility authority",
     parameters: RunControlParams,
     async execute(id, params, _signal, _onUpdate, ctx) {
       if (!workflowCoordinator) {
@@ -3064,7 +3064,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
       guiEvents.emit(GUI_EVENTS.stateChanged, { subsystem: "knowledge", at: Date.now() });
       publishMaestroUi();
     }
-    if (event.toolName === "run-control" || /\bmaestro\s+(?:run|ralph)\b/.test(command)) {
+    if (event.toolName === "run-control" || /\bmaestro\s+(?:run|session|execution|artifact|ralph)\b/.test(command)) {
       const runControlArgv = event.toolName === "run-control"
         ? Array.isArray((event as { input?: { argv?: unknown } }).input?.argv)
           ? ((event as { input?: { argv?: unknown } }).input!.argv as unknown[]).map(String)

@@ -94,7 +94,7 @@ export interface WorkflowRunControlClassification {
   write: boolean;
   sessionless: boolean;
   mutation?: "read" | "session" | "execution" | "execution-acquire" | "execution-lease"
-    | "compatibility-start" | "plan-publish";
+    | "compatibility-start" | "plan-publish" | "artifact-republish";
   lease?: "none" | "required" | "acquire" | "command-aware";
 }
 
@@ -779,6 +779,12 @@ export class WorkflowCoordinator {
     hostSessionId?: string,
   ): Promise<WorkflowTransitionResult> {
     const mode = await this.selectMode();
+    if (classification.write && classification.mutation === "artifact-republish") {
+      if (argv[0] !== "artifact" || argv[1] !== "republish") {
+        throw new Error(`Unknown Maestro artifact mutation: ${argv.slice(1).join(" ") || "(missing subcommand)"}`);
+      }
+      return this.execArtifactRepublish(argv, hostSessionId);
+    }
     if (mode === "fail-closed" && classification.write) {
       throw this.failClosedMutationError(argv.slice(0, 3).join(" ") || "mutation");
     }
@@ -798,6 +804,74 @@ export class WorkflowCoordinator {
       }
     }
     const command = projectPublicRunCliResult(await this.adapter.exec(argv));
+    return { command, snapshot: await this.bridge.refresh() };
+  }
+
+  private async execArtifactRepublish(
+    argv: readonly string[],
+    hostSessionId?: string,
+  ): Promise<WorkflowTransitionResult> {
+    const mutation = this.coreMutationWork.then(
+      () => this.performArtifactRepublish(argv, hostSessionId),
+    );
+    this.coreMutationWork = mutation.then(() => undefined, () => undefined);
+    return mutation;
+  }
+
+  private async performArtifactRepublish(
+    argv: readonly string[],
+    hostSessionId?: string,
+  ): Promise<WorkflowTransitionResult> {
+    const ownerId = requireHostSessionId(hostSessionId);
+    const capabilities = this.core.capabilities;
+    if (
+      capabilities?.mode !== "structured"
+      || capabilities.support["run-response/1.2"] !== true
+      || capabilities.support.artifact_compatibility_v1 !== true
+    ) {
+      throw new Error(
+        "Artifact republish refused: structured artifact_compatibility_v1 and run-response/1.2 support are required",
+      );
+    }
+
+    const artifactId = requiredArtifactId(argv);
+    const sessionId = requireSingleFlag(argv, "--session");
+    const consumer = requireSingleFlag(argv, "--consumer");
+    const alias = requireSingleFlag(argv, "--alias");
+    const prepared = [...argv];
+    addFlag(prepared, "--participant", ownerId);
+    addFlag(prepared, "--actor", ownerId);
+    addFlagIfMissing(prepared, "--request-id", randomUUID());
+    addFlagIfMissing(prepared, "--reason", "Republish Artifact compatibility through Pi run-control");
+    addFlagIfMissing(prepared, "--evidence", `pi-session:${ownerId}`);
+    addBooleanFlag(prepared, "--json");
+
+    const inspectedCommand = await this.adapter.exec([
+      "artifact", "inspect", artifactId,
+      "--session", sessionId,
+      "--consumer", consumer,
+      "--alias", alias,
+      "--json",
+    ]);
+    const inspected = parseRunResponse(inspectedCommand.stdout);
+    const assessment = artifactInspectionAuthority(inspected, artifactId, sessionId);
+    assertArtifactWriterMode(capabilities, assessment.sessionSchemaVersion);
+    addFlag(prepared, "--assessment-hash", assessment.assessmentHash);
+    addFlag(prepared, "--expected-artifact-revision", String(assessment.artifactRevision));
+    addFlag(prepared, "--expected-session-revision", String(assessment.sessionRevision));
+
+    const privateCommand = await this.adapter.exec(prepared);
+    const envelope = parseRunResponse(privateCommand.stdout);
+    validateArtifactRepublishEnvelope(
+      envelope,
+      artifactId,
+      sessionId,
+      requireSingleFlag(prepared, "--request-id"),
+    );
+    const command = projectPublicRunCliResult({
+      ...privateCommand,
+      stdout: JSON.stringify(projectPublicRunResponse(envelope)),
+    });
     return { command, snapshot: await this.bridge.refresh() };
   }
 
@@ -1976,6 +2050,106 @@ function requiredRevision(value: number | null | undefined, name: string): numbe
     throw new Error(`Core-execution mutation refused: ${name} is required`);
   }
   return value as number;
+}
+
+interface ArtifactInspectionAuthority {
+  assessmentHash: string;
+  artifactRevision: number;
+  sessionRevision: number;
+  sessionSchemaVersion: string;
+}
+
+function artifactInspectionAuthority(
+  envelope: PrivateRunResponseEnvelope,
+  artifactId: string,
+  sessionId: string,
+): ArtifactInspectionAuthority {
+  if (envelope.schema_version !== "run-response/1.2" || envelope.operation !== "artifact-inspect") {
+    throw new Error("Artifact republish preflight requires an artifact-inspect run-response/1.2 result");
+  }
+  if (!envelope.ok) {
+    throw new Error(`${envelope.error?.code ?? "ARTIFACT_INSPECT_FAILED"}: ${envelope.error?.message ?? "Artifact inspection failed"}`);
+  }
+  if (
+    envelope.locator?.session_id !== sessionId
+    || envelope.revision?.target_type !== "artifact"
+    || envelope.revision.target_id !== artifactId
+  ) {
+    throw new Error("Artifact inspect response does not match the requested Session and Artifact authority");
+  }
+  const result = recordValue(envelope.result);
+  const source = recordValue(result?.source);
+  const assessmentHash = typeof result?.assessment_hash === "string" ? result.assessment_hash : "";
+  const artifactRevision = source?.artifact_registry_revision;
+  const sessionRevision = source?.session_revision;
+  const sessionSchemaVersion = typeof source?.session_schema_version === "string"
+    ? source.session_schema_version
+    : "";
+  if (
+    !assessmentHash
+    || !Number.isSafeInteger(artifactRevision)
+    || (artifactRevision as number) < 0
+    || !Number.isSafeInteger(sessionRevision)
+    || (sessionRevision as number) < 0
+    || !sessionSchemaVersion
+    || envelope.revision.revision !== artifactRevision
+  ) {
+    throw new Error("Artifact inspect response does not contain a complete assessment and CAS authority");
+  }
+  return {
+    assessmentHash,
+    artifactRevision: artifactRevision as number,
+    sessionRevision: sessionRevision as number,
+    sessionSchemaVersion,
+  };
+}
+
+function assertArtifactWriterMode(capabilities: RunCliCapabilities, sessionSchemaVersion: string): void {
+  const v3Writer = sessionSchemaVersion === "session/3.0";
+  if (v3Writer && capabilities.protocol !== "session-run-v3") {
+    throw new Error("Artifact republish refused: session/3.0 requires negotiated Session/Run v3 writer support");
+  }
+  if (!v3Writer && capabilities.protocol === "session-run-v3") {
+    throw new Error(
+      `Artifact republish refused: negotiated Session/Run v3 writer does not match ${sessionSchemaVersion} authority`,
+    );
+  }
+  if (!/^session\/(?:1\.[0-3]|2\.0|3\.0)$/.test(sessionSchemaVersion)) {
+    throw new Error(`Artifact republish refused: unsupported Session writer ${sessionSchemaVersion}`);
+  }
+}
+
+function validateArtifactRepublishEnvelope(
+  envelope: PrivateRunResponseEnvelope,
+  sourceArtifactId: string,
+  sessionId: string,
+  requestId: string,
+): void {
+  if (envelope.schema_version !== "run-response/1.2" || envelope.operation !== "artifact-republish") {
+    throw new Error("Artifact republish requires an artifact-republish run-response/1.2 result");
+  }
+  if (envelope.request_id !== requestId || envelope.locator?.session_id !== sessionId) {
+    throw new Error("Artifact republish response does not match the dispatched request and Session authority");
+  }
+  if (!envelope.ok) return;
+  const result = recordValue(envelope.result);
+  const receipt = recordValue(result?.receipt);
+  if (
+    result?.source_artifact_id !== sourceArtifactId
+    || receipt?.schema_version !== "artifact-republish/1.0"
+    || envelope.revision?.target_type !== "artifact"
+    || envelope.replay === null
+  ) {
+    throw new Error("Artifact republish response does not contain complete applied Artifact authority");
+  }
+}
+
+function requiredArtifactId(argv: readonly string[]): string {
+  const artifactId = argv[2]?.trim();
+  if (!artifactId || artifactId.startsWith("-")) {
+    throw new Error("Artifact republish requires a positional Artifact ID");
+  }
+  return artifactId;
 }
 
 function sameCoreLocator(left: CoreExecutionLocator, right: CoreExecutionLocator): boolean {

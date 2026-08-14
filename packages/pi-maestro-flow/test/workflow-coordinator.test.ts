@@ -61,6 +61,11 @@ test("run-control classification covers reads, Session CAS, Execution acquisitio
     { argv: ["execution", "show"], expected: readClassification() },
     { argv: ["execution", "list"], expected: readClassification() },
     { argv: ["execution", "lease", "status"], expected: readClassification() },
+    { argv: ["artifact", "inspect", "ART-1"], expected: readClassification() },
+    { argv: ["artifact", "list"], expected: readClassification() },
+    { argv: ["artifact", "show", "ART-1"], expected: readClassification() },
+    { argv: ["artifact", "republish", "ART-1"], expected: writeClassification("artifact-republish", "none") },
+    { argv: ["artifact", "future", "ART-1"], expected: writeClassification("artifact-republish", "none") },
     { argv: ["session", "create"], expected: writeClassification("session", "none", true) },
     { argv: ["session", "archive"], expected: writeClassification("session", "none") },
     { argv: ["session", "unarchive"], expected: writeClassification("session", "none") },
@@ -309,6 +314,167 @@ test("plan-B v3 cores fail mutations closed with an actionable diagnostic until 
       ),
       /Session\/Run minimal-state \(v3\) protocol.*not implemented yet/,
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("artifact republish injects inspect-derived CAS and host identity for execution and v3 writers", async (t) => {
+  for (const writer of ["session/2.0", "session/3.0"] as const) {
+    await t.test(writer, async () => {
+      const root = await mkdtemp(join(tmpdir(), "pi-workflow-artifact-republish-"));
+      const calls: string[][] = [];
+      const capabilities = writer === "session/3.0" ? v3CoreCapabilities() : fullCoreCapabilities();
+      const snapshot = coreWorkflowSnapshot();
+      const adapter: WorkflowRunAdapter = {
+        ...fakeAdapter(calls),
+        async capabilities() { return capabilities; },
+        async exec(argv) {
+          calls.push(["exec", ...argv]);
+          if (argv[0] === "artifact" && argv[1] === "inspect") {
+            return result(argv, JSON.stringify(artifactInspectResponse(writer)));
+          }
+          assert.equal(argv[0], "artifact");
+          assert.equal(argv[1], "republish");
+          assert.equal(flagValue(argv, "--session"), "session-1");
+          assert.equal(flagValue(argv, "--participant"), "pi-artifact");
+          assert.equal(flagValue(argv, "--actor"), "pi-artifact");
+          assert.equal(flagValue(argv, "--assessment-hash"), `sha256:${"a".repeat(64)}`);
+          assert.equal(flagValue(argv, "--expected-artifact-revision"), "7");
+          assert.equal(flagValue(argv, "--expected-session-revision"), "4");
+          assert.equal(flagValue(argv, "--request-id")?.length! > 0, true);
+          assert.equal(flagValue(argv, "--reason")?.length! > 0, true);
+          assert.equal(flagValue(argv, "--evidence"), "pi-session:pi-artifact");
+          return result(argv, JSON.stringify(artifactRepublishResponse(flagValue(argv, "--request-id")!)));
+        },
+      };
+      const coordinator = testCoordinator(fakeBridge(snapshot), adapter, new WorkflowLeaseStore(root));
+      try {
+        const transition = await coordinator.exec(
+          [
+            "artifact", "republish", "ART-source",
+            "--session", "session-1",
+            "--consumer", "review",
+            "--alias", "current-review",
+          ],
+          classifyRunControlArgv(["artifact", "republish", "ART-source"]),
+          "pi-artifact",
+        );
+        assert.equal(transition.command.exitCode, 0);
+        assert.equal(JSON.parse(transition.command.stdout).operation, "artifact-republish");
+        assert.equal(calls.filter((call) => call[1] === "artifact" && call[2] === "inspect").length, 1);
+        assert.equal(calls.filter((call) => call[1] === "artifact" && call[2] === "republish").length, 1);
+        if (writer === "session/3.0") {
+          assert.equal(coordinator.mode(), "fail-closed", "full v3 lifecycle mutation adapter remains disabled");
+        } else {
+          assert.equal(coordinator.mode(), "core-execution");
+        }
+      } finally {
+        await coordinator.release();
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("artifact republish fails closed for missing capability, spoofed identity, and unknown subcommands", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-artifact-closed-"));
+  try {
+    const capabilities = fullCoreCapabilities();
+    capabilities.support = { ...capabilities.support, artifact_compatibility_v1: false };
+    const calls: string[][] = [];
+    const coordinator = testCoordinator(
+      fakeBridge(coreWorkflowSnapshot()),
+      coreAdapter(calls, coreWorkflowSnapshot(), undefined, capabilities),
+      new WorkflowLeaseStore(root),
+    );
+    await assert.rejects(
+      coordinator.exec(
+        ["artifact", "republish", "ART-source", "--session", "session-1", "--consumer", "review", "--alias", "slot"],
+        classifyRunControlArgv(["artifact", "republish", "ART-source"]),
+        "pi-artifact",
+      ),
+      /artifact_compatibility_v1.*run-response\/1\.2/,
+    );
+    assert.equal(calls.some((call) => call.includes("artifact")), false);
+
+    const capableCalls: string[][] = [];
+    const capable = testCoordinator(
+      fakeBridge(coreWorkflowSnapshot()),
+      {
+        ...fakeAdapter(capableCalls),
+        async capabilities() { return fullCoreCapabilities(); },
+      },
+      new WorkflowLeaseStore(root),
+    );
+    await assert.rejects(
+      capable.exec(
+        [
+          "artifact", "republish", "ART-source", "--session", "session-1", "--consumer", "review",
+          "--alias", "slot", "--participant", "spoofed",
+        ],
+        classifyRunControlArgv(["artifact", "republish", "ART-source"]),
+        "pi-artifact",
+      ),
+      /--participant conflicts with coordinator authority/,
+    );
+    assert.equal(capableCalls.some((call) => call[0] === "exec"), false);
+    await assert.rejects(
+      capable.exec(
+        ["artifact", "future", "ART-source"],
+        classifyRunControlArgv(["artifact", "future", "ART-source"]),
+        "pi-artifact",
+      ),
+      /Unknown Maestro artifact mutation/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("artifact republish preserves a projected run-response/1.2 conflict", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-artifact-conflict-"));
+  const adapter: WorkflowRunAdapter = {
+    ...fakeAdapter([]),
+    async capabilities() { return v3CoreCapabilities(); },
+    async exec(argv) {
+      if (argv[1] === "inspect") return result(argv, JSON.stringify(artifactInspectResponse("session/3.0")));
+      const requestId = flagValue(argv, "--request-id")!;
+      const envelope = {
+        ...artifactRepublishResponse(requestId),
+        ok: false,
+        exit_code: 3,
+        disposition: "control_flow",
+        result: null,
+        replay: null,
+        error: {
+          code: "ORCHESTRATION_REVISION_CONFLICT",
+          message: "stale orchestration revision",
+          retryable: true,
+          details: { participant_token: "private-conflict-token", visible: true },
+          target_type: "orchestration",
+          target_id: "session-1",
+          expected_revision: 4,
+          current_revision: 5,
+          changed_by: "participant-other",
+          next_actions: ["inspect-artifact-compatibility", "resubmit-with-new-request-id"],
+        },
+      };
+      return { argv: [...argv], stdout: JSON.stringify(envelope), stderr: "", exitCode: 3 };
+    },
+  };
+  const coordinator = testCoordinator(fakeBridge(coreWorkflowSnapshot()), adapter, new WorkflowLeaseStore(root));
+  try {
+    const transition = await coordinator.exec(
+      ["artifact", "republish", "ART-source", "--session", "session-1", "--consumer", "review", "--alias", "slot"],
+      classifyRunControlArgv(["artifact", "republish", "ART-source"]),
+      "pi-artifact",
+    );
+    const response = JSON.parse(transition.command.stdout);
+    assert.equal(transition.command.exitCode, 3);
+    assert.equal(response.error.code, "ORCHESTRATION_REVISION_CONFLICT");
+    assert.deepEqual(response.error.details, { visible: true });
+    assert.equal(JSON.stringify(transition.command).includes("private-conflict-token"), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1433,6 +1599,9 @@ test("CLI adapter keeps top-level passthrough commands rooted by cwd", async () 
 
   await adapter.exec(["session", "status", "--workflow-root", "D:/pinned"]);
   assert.deepEqual(calls.at(-1), ["session", "status", "--workflow-root", "D:/pinned"]);
+
+  await adapter.exec(["artifact", "inspect", "ART-1", "--json"]);
+  assert.deepEqual(calls.at(-1), ["artifact", "inspect", "ART-1", "--json", "--workflow-root", "D:/workspace"]);
 });
 
 test("CLI adapter maps canonical check, next, done, and edit commands", async () => {
@@ -2868,6 +3037,10 @@ function failClosedCoreCapabilities(diagnostic: string): RunCliCapabilities {
       execution_generation: false,
       core_execution_lease: false,
       "run-response/1.1": false,
+      "run-response/1.2": false,
+      artifact_compatibility_v1: false,
+      atomic_run_complete_seal: false,
+      generation_scoped_seal_receipts: false,
     },
     protocol: "fail-closed",
     diagnostic,
@@ -2902,12 +3075,19 @@ function v3CoreCapabilities(): RunCliCapabilities {
         request_receipts_v2: true,
         execution_lease: false,
         operation_registry: false,
+        artifact_compatibility_v1: true,
+        atomic_run_complete_seal: true,
+        generation_scoped_seal_receipts: true,
       },
     },
     support: {
       execution_generation: false,
       core_execution_lease: false,
       "run-response/1.1": true,
+      "run-response/1.2": true,
+      artifact_compatibility_v1: true,
+      atomic_run_complete_seal: true,
+      generation_scoped_seal_receipts: true,
     },
     v3: {
       session_run_minimal_v3: true,
@@ -2947,19 +3127,26 @@ function fullCoreCapabilities(): RunCliCapabilities {
       cli_version: "2.0.0",
       session_schema_writes: ["session/2.0"],
       execution_schema_writes: ["execution/1.0"],
-      run_response_writes: ["run-response/1.1"],
+      run_response_writes: ["run-response/1.1", "run-response/1.2"],
       features: {
         execution_generation: true,
         core_execution_lease: true,
         execution_handoff: true,
         session_statusless: true,
         legacy_session_aliases: true,
+        artifact_compatibility_v1: true,
+        atomic_run_complete_seal: true,
+        generation_scoped_seal_receipts: true,
       },
     },
     support: {
       execution_generation: true,
       core_execution_lease: true,
       "run-response/1.1": true,
+      "run-response/1.2": true,
+      artifact_compatibility_v1: true,
+      atomic_run_complete_seal: true,
+      generation_scoped_seal_receipts: true,
     },
     v3: {
       session_run_minimal_v3: false,
@@ -3168,6 +3355,52 @@ function operationForArgv(argv: readonly string[]): string {
   if (argv[0] === "session") return `session-${argv[1]}`;
   if (argv[0] === "run" && argv[1] === "complete") return "complete";
   return argv[1] ?? argv[0] ?? "check";
+}
+
+function artifactInspectResponse(sessionSchemaVersion: "session/2.0" | "session/3.0"): Record<string, unknown> {
+  return {
+    schema_version: "run-response/1.2",
+    operation: "artifact-inspect",
+    ok: true,
+    exit_code: 0,
+    disposition: "success",
+    request_id: null,
+    locator: { session_id: "session-1", run_id: "run-source" },
+    revision: { target_type: "artifact", target_id: "ART-source", revision: 7 },
+    result: {
+      schema_version: "artifact-compatibility/1.0",
+      assessment_hash: `sha256:${"a".repeat(64)}`,
+      source: {
+        session_schema_version: sessionSchemaVersion,
+        session_revision: 4,
+        artifact_registry_revision: 7,
+      },
+    },
+    replay: null,
+    warnings: [],
+    error: null,
+  };
+}
+
+function artifactRepublishResponse(requestId: string): Record<string, unknown> {
+  return {
+    schema_version: "run-response/1.2",
+    operation: "artifact-republish",
+    ok: true,
+    exit_code: 0,
+    disposition: "success",
+    request_id: requestId,
+    locator: { session_id: "session-1", run_id: "run-compatibility" },
+    revision: { target_type: "artifact", target_id: "ART-derived", revision: 8 },
+    result: {
+      source_artifact_id: "ART-source",
+      artifact_id: "ART-derived",
+      receipt: { schema_version: "artifact-republish/1.0" },
+    },
+    replay: { status: "applied", transition_id: "transition-artifact-republish" },
+    warnings: [],
+    error: null,
+  };
 }
 
 function coreRunResponse(
