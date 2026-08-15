@@ -985,7 +985,7 @@ export class WorkflowCoordinator {
       // Entry/migration commands mint or convert a Session: no CAS expected.
       return prepared;
     }
-    const session = await this.requireV3Session();
+    const session = await this.requireV3Session(prepared);
     if (isV3OrchestrationTarget(argv)) {
       const revision = session.orchestrationRevision ?? this.v3ResumeRevisionCache;
       if (revision === undefined) {
@@ -1004,9 +1004,25 @@ export class WorkflowCoordinator {
     return prepared;
   }
 
-  private async requireV3Session(): Promise<WorkflowSession> {
+  /**
+   * Target-aware v3 Session resolution: an explicit `--session` in the prepared
+   * argv wins over the state.json-derived active Session. Without it the
+   * cached/active snapshot is used (legacy state.json semantics). This fixes
+   * mutations targeting a different Session than the stale active one — the
+   * CAS revision was previously derived from the wrong Session.
+   */
+  private async requireV3Session(argv?: readonly string[]): Promise<WorkflowSession> {
+    const explicitSessionId = argv ? optionalSingleFlag(argv, "--session") : undefined;
     let snapshot = this.bridge.getSnapshot();
-    if (!snapshot?.session) snapshot = await this.bridge.refresh();
+    if (explicitSessionId && explicitSessionId !== snapshot?.session?.sessionId) {
+      if (this.bridge.refreshSession) {
+        snapshot = await this.bridge.refreshSession(explicitSessionId);
+      } else {
+        snapshot = await this.bridge.refresh();
+      }
+    } else if (!snapshot?.session) {
+      snapshot = await this.bridge.refresh();
+    }
     const session = snapshot.session;
     if (!session) {
       throw new Error("cannot determine expected orchestration revision; read session status first");
@@ -1366,13 +1382,22 @@ export class WorkflowCoordinator {
     const requestId = requiredPlanPublishRequestId(options);
     const sessionId = options.sessionId?.trim()
       || `plan-${createHash("sha256").update(requestId).digest("hex").slice(0, 12)}`;
-    // 1. Open the v3 Session. Idempotent: the core derives the session id and
-    //    replays the original receipt when the same request-id is retried.
-    await this.execV3(
-      ["session", "open", options.intent ?? "Execute approved Plan", "--id", sessionId, "--json"],
+    // 1. Open the v3 Session with a stable derived request id. Idempotent: the
+    //    core replays the original receipt when the same request-id is retried,
+    //    and re-opening an existing Session is a no-op receipt.
+    const openResult = await this.execV3(
+      ["session", "open", options.intent ?? "Execute approved Plan", "--id", sessionId,
+        "--request-id", `req_plan_open_${createHash("sha256").update(requestId).digest("hex").slice(0, 32)}`,
+        "--json"],
       { write: true, sessionless: false, mutation: "session", lease: "none" },
       context.hostSessionId,
     );
+    const openEnvelope = parseRunResponse(openResult.command.stdout);
+    if (!openEnvelope.ok) {
+      throw new Error(`v3 Plan Session open failed: ${publicWorkflowErrorMessage(
+        new Error(openEnvelope.error?.message ?? "session open rejected"),
+      )}`);
+    }
     // 2. Persist the approved Plan document under .workflow/plans/ (Pi-side
     //    convention; the core v3 surface has no plan command).
     const planDir = join(this.leases.root(), ".workflow", "plans");
@@ -1380,14 +1405,24 @@ export class WorkflowCoordinator {
     const planFile = join(planDir, `${sessionId}-${options.planRevision}.md`);
     const source = await readFile(options.sourcePath, "utf8");
     await writeFile(planFile, source);
-    // 3. Insert the plan chain step; the executor reaches the document via the
-    //    birth packet's goal_ref resolution.
-    await this.execV3(
-      ["session", "chain", "insert", "--step-id", `plan-${options.planRevision}`,
-        "--command", "plan", "--goal-ref", planFile, "--json"],
+    // 3. Insert the plan chain step with an explicit target: the bridge has no
+    //    state.json active Session under v3, so the CAS revision must resolve
+    //    through the explicit --session (target-aware refreshSession).
+    const insertResult = await this.execV3(
+      ["session", "chain", "insert", "--session", sessionId,
+        "--step-id", `plan-${options.planRevision}`,
+        "--command", "plan", "--goal-ref", planFile,
+        "--request-id", `req_plan_insert_${createHash("sha256").update(requestId).digest("hex").slice(0, 32)}`,
+        "--json"],
       { write: true, sessionless: false, mutation: "session", lease: "none" },
       context.hostSessionId,
     );
+    const insertEnvelope = parseRunResponse(insertResult.command.stdout);
+    if (!insertEnvelope.ok) {
+      throw new Error(`v3 Plan chain step insert failed: ${publicWorkflowErrorMessage(
+        new Error(insertEnvelope.error?.message ?? "chain insert rejected"),
+      )}`);
+    }
     // 4. Synthetic plan-publish envelope for the Pi plan-workflow consumers
     //    (PublishedPlanIdentity shape) backed by the persisted document.
     const checksum = `sha256:${createHash("sha256").update(source).digest("hex")}`;
@@ -2627,7 +2662,7 @@ function isV3OrchestrationTarget(argv: readonly string[]): boolean {
   }
   if (argv[0] !== "session") return false;
   const command = argv[1] ?? "";
-  if (["complete", "archive"].includes(command)) return true;
+  if (["complete", "archive", "unarchive"].includes(command)) return true;
   return command === "chain" && ["insert", "skip", "replace"].includes(argv[2] ?? "");
 }
 

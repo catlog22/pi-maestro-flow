@@ -100,20 +100,28 @@ test("registered search preserves consumed and pending eligibility across extens
   const firstExtension = createApi();
   firstExtension.handlers.get("session_start")?.({ reason: "new" }, ctx);
   assert.deepEqual(active, ["todo"]);
+  const sessionDescription = firstExtension.tool.description;
+  assert.match(sessionDescription, /Tools hidden at session start and discoverable here:/);
+  assert.match(sessionDescription, /- browser: Control a headless browser and capture screenshots/);
+  assert.match(sessionDescription, /- lsp: Query language servers for diagnostics and symbol definitions/);
+  assert.doesNotMatch(sessionDescription, /- todo:/);
 
   const first = await firstExtension.tool.execute("call-4", { query: "browser screenshot", limit: 1 }, undefined, undefined, {} as never);
   assert.deepEqual(first.details?.activated_tools, ["browser"]);
   assert.deepEqual(active, ["todo", "browser"]);
+  assert.equal(firstExtension.tool.description, sessionDescription, "activation does not change the session-start description");
 
   active = ["todo"];
   const afterUserDisable = await firstExtension.tool.execute("call-5", { query: "browser screenshot", limit: 1 }, undefined, undefined, {} as never);
   assert.deepEqual(afterUserDisable.details?.activated_tools, []);
   assert.deepEqual(active, ["todo"], "search must not override a later user disable");
+  assert.equal(firstExtension.tool.description, sessionDescription, "later active-tool changes do not change the description");
 
   firstExtension.handlers.get("session_shutdown")?.({ reason: "reload" }, ctx);
   const reloadedExtension = createApi();
   reloadedExtension.handlers.get("session_start")?.({ reason: "reload" }, ctx);
   assert.deepEqual(active, ["todo"], "reload does not re-defer or reactivate consumed tools");
+  assert.equal(reloadedExtension.tool.description, sessionDescription, "reload reuses the original session description");
 
   const pending = await reloadedExtension.tool.execute("call-6", { query: "diagnostics file", limit: 1 }, undefined, undefined, {} as never);
   assert.deepEqual(pending.details?.activated_tools, ["lsp"], "unconsumed eligibility survives reload");

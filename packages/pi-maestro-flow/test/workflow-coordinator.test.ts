@@ -3027,6 +3027,41 @@ test("session-v3 exec injects participant/actor/request-id/reason/json and expec
   }
 });
 
+test("session-v3 CAS derives from the explicit --session target, not the stale state.json active Session", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-v3-target-aware-"));
+  const calls: string[][] = [];
+  // state.json-derived active Session (stale, orchestration revision 2) vs the
+  // explicit mutation target session-B (revision 4).
+  const staleSession = { ...v3SessionSnapshot("session-A").session!, orchestrationRevision: 2, revision: 2 };
+  const targetSession = { ...v3SessionSnapshot("session-B").session!, orchestrationRevision: 4, revision: 4 };
+  const staleSnapshot = { ...v3SessionSnapshot("session-A"), session: staleSession };
+  const targetSnapshot = { ...v3SessionSnapshot("session-B"), session: targetSession };
+  const bridge: WorkflowSnapshotProvider = {
+    async refresh() { return staleSnapshot; },
+    getSnapshot() { return staleSnapshot; },
+    async refreshSession(sessionId) {
+      return sessionId === "session-B" ? targetSnapshot : staleSnapshot;
+    },
+  };
+  const coordinator = new WorkflowCoordinator(bridge, v3Adapter(calls, targetSnapshot), new WorkflowLeaseStore(root));
+  try {
+    await coordinator.selectMode("session-v3");
+    await coordinator.exec(
+      ["session", "chain", "insert", "--session", "session-B", "--step-id", "s1", "--command", "execute"],
+      classifyRunControlArgv(["session", "chain", "insert", "--session", "session-B", "--step-id", "s1", "--command", "execute"]),
+      "pi-target",
+    );
+    const insertCall = calls.find((call) => call[0] === "exec" && call[1] === "session" && call[2] === "chain" && call[3] === "insert")!;
+    assert.equal(flagValue(insertCall, "--session"), "session-B");
+    // The CAS revision must come from the explicit target (4), not the stale
+    // active Session (2) — a stale revision would be rejected by the core.
+    assert.equal(flagValue(insertCall, "--expected-orchestration-revision"), "4");
+  } finally {
+    await coordinator.release().catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("session-v3 full lifecycle open -> chain insert -> run next -> check -> complete -> decide -> session complete", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-workflow-v3-chain-"));
   const calls: string[][] = [];

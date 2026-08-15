@@ -334,7 +334,7 @@ const operationV11Schema = z.enum([
 const operationV12Schema = z.enum([
   ...operationV10Schema.options,
   "capabilities", "session-open", "session-migrate",
-  "session-complete", "session-archive", "session-status", "session-resume-view",
+  "session-complete", "session-archive", "session-unarchive", "session-status", "session-resume-view",
   "session-chain-insert", "session-chain-skip", "session-chain-replace",
   "run-cancel", "run-seal", "run-transition", "run-decide", "execution-start", "execution-attach",
   "execution-status", "execution-pause", "execution-resolve", "execution-resume", "execution-seal",

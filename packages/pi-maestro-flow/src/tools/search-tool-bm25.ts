@@ -10,18 +10,22 @@ import {
 } from "./tool-discovery.ts";
 
 const DEFAULT_LIMIT = 8;
+const BASE_DESCRIPTION = "Search all registered tools by name, description, and parameter names using weighted BM25 ranking. Matching inactive tools are activated for subsequent calls.";
 const deferredSessionsKey = Symbol.for("pi-maestro.tool-search.deferred-sessions");
 
 interface DeferredSessionRegistry {
   sessions: Map<string, Set<string>>;
+  descriptions: Map<string, string>;
 }
 
 function deferredSessionRegistry(): DeferredSessionRegistry {
   const host = globalThis as Record<symbol, DeferredSessionRegistry | undefined>;
   let registry = host[deferredSessionsKey];
   if (!registry) {
-    registry = { sessions: new Map() };
+    registry = { sessions: new Map(), descriptions: new Map() };
     host[deferredSessionsKey] = registry;
+  } else if (!(registry.descriptions instanceof Map)) {
+    registry.descriptions = new Map();
   }
   return registry;
 }
@@ -76,7 +80,7 @@ export function createSearchToolBm25(
   return {
     name: "search_tool_bm25",
     label: "Search Tools",
-    description: "Search all registered tools by name, description, and parameter names using weighted BM25 ranking. Matching inactive tools are activated for subsequent calls.",
+    description: BASE_DESCRIPTION,
     promptSnippet: "Use search_tool_bm25 when a capability may exist but its tool is not currently available. Search by capability; matching tools become callable on the next request.",
     parameters: SearchToolBm25Params,
     async execute(_id, params, signal): Promise<AgentToolResult<SearchToolBm25Details>> {
@@ -168,29 +172,54 @@ export function registerSearchToolBm25(pi: ExtensionAPI): void {
   let deferredThisSession = new Set<string>();
   let activeSessionId: string | undefined;
   const registry = deferredSessionRegistry();
-  pi.registerTool(createSearchToolBm25(pi, {
+  const searchTool = createSearchToolBm25(pi, {
     canActivate: (name) => deferredThisSession.has(name),
     onActivated: (names) => {
       for (const name of names) deferredThisSession.delete(name);
     },
-  }));
+  });
+  pi.registerTool(searchTool);
   pi.on("session_start", (event, ctx) => {
     activeSessionId = sessionIdOf(ctx);
     if (event.reason === "reload" && activeSessionId) {
       const restored = registry.sessions.get(activeSessionId);
       if (restored) {
         deferredThisSession = restored;
+        searchTool.description = registry.descriptions.get(activeSessionId)
+          ?? describeDeferredTools(pi, deferredThisSession);
+        registry.descriptions.set(activeSessionId, searchTool.description);
         return;
       }
     }
     deferredThisSession = new Set(deferLowFrequencyTools(pi));
-    if (activeSessionId) registry.sessions.set(activeSessionId, deferredThisSession);
+    searchTool.description = describeDeferredTools(pi, deferredThisSession);
+    if (activeSessionId) {
+      registry.sessions.set(activeSessionId, deferredThisSession);
+      registry.descriptions.set(activeSessionId, searchTool.description);
+    }
   });
   pi.on("session_shutdown", (event, ctx) => {
     const sessionId = sessionIdOf(ctx) ?? activeSessionId;
-    if (event.reason !== "reload" && sessionId) registry.sessions.delete(sessionId);
+    if (event.reason !== "reload" && sessionId) {
+      registry.sessions.delete(sessionId);
+      registry.descriptions.delete(sessionId);
+    }
     activeSessionId = undefined;
   });
+}
+
+function describeDeferredTools(
+  pi: Pick<ExtensionAPI, "getAllTools">,
+  deferredNames: ReadonlySet<string>,
+): string {
+  const tools = pi.getAllTools()
+    .map(toDiscoverableTool)
+    .filter((tool) => deferredNames.has(tool.name))
+    .sort((left, right) => left.name.localeCompare(right.name));
+  if (tools.length === 0) return BASE_DESCRIPTION;
+
+  const entries = tools.map((tool) => `- ${tool.name}: ${tool.summary}`);
+  return `${BASE_DESCRIPTION}\n\nTools hidden at session start and discoverable here:\n${entries.join("\n")}`;
 }
 
 function abortError(): Error {
