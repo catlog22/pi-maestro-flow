@@ -3470,6 +3470,7 @@ export default function registerTeammateExtension(
           const restartParams = {
             agent: task.agent,
             name: task.name,
+            backend: task.backend,
             task: message,
             taskType: task.taskType,
             context: "fresh" as const,

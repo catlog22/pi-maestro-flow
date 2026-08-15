@@ -1082,6 +1082,7 @@ export async function handleProxyRequest(
         task: singleTask.prompt,
         taskType: singleTask.taskType,
         name: singleTask.name,
+        backend: singleTask.backend,
         reply_to: routedParams.reply_to,
         context: singleTask.context,
         model: singleTask.model,
@@ -1913,6 +1914,7 @@ export async function handleProxyRequest(
             {
               agent: task.agent,
               name: task.name,
+              backend: task.backend,
               task: message,
               taskType: task.taskType,
               context: "fresh",
