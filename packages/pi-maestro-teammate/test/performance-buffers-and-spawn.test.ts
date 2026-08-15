@@ -1282,7 +1282,7 @@ test("teammate leaves transient provider retry inside the child Pi process", asy
   assert.equal(result.exitCode, 1);
   assert.equal(attempts, 1);
   assert.deepEqual(retryDelays, []);
-  assert.match(result.messages.at(-1)?.content ?? "", /authoritative agent_settled failure/);
+  assert.match(result.messages.at(-1)?.content ?? "", /authoritative settlement/);
 });
 
 test("first-activity timeout remains a failure when the terminated child closes cleanly", async () => {
@@ -1974,7 +1974,7 @@ test("legacy child failure reports degraded capability and does not fresh-replay
   });
 
   assert.deepEqual(launchedModels, ["provider/primary"]);
-  assert.match(result.messages.at(-1)?.content ?? "", /capability=legacy/);
+  assert.match(result.messages.at(-1)?.content ?? "", /settlementAuthority=inferred/);
   assert.match(result.messages.at(-1)?.content ?? "", /degraded recovery capability/);
 });
 
@@ -2322,7 +2322,7 @@ test("abnormal child exit cannot fresh-replay fallback without authoritative set
   assert.equal(result.exitCode, 1);
   assert.equal(attempts, 1);
   assert.deepEqual(retryErrors, []);
-  assert.match(result.messages.at(-1)?.content ?? "", /authoritative agent_settled failure/);
+  assert.match(result.messages.at(-1)?.content ?? "", /authoritative settlement/);
 });
 
 test("fresh agents publish follow-up turns while fork agents terminate after their first result", async () => {

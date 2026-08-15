@@ -123,11 +123,13 @@ import type {
 // The Pi subprocess backend implementation. Orchestration here decides *which*
 // model runs; the module below decides how a Pi child runs it. Its previously
 // public surface is re-exported unchanged so no consumer import path moves.
-import {
-  attemptReclamations,
-  attemptRecoveryFacts,
-  runSingleAttempt,
-} from "./pi-subprocess-attempt.ts";
+import { outcomeOf } from "../backends/pi-subprocess.ts";
+import { runSingleAttempt } from "./pi-subprocess-attempt.ts";
+import type {
+  AttemptOutcome,
+  BackendRunOptions,
+} from "pi-maestro-backend-core/v1/backend";
+import type { TeammateRunSpec } from "pi-maestro-backend-core/v1/spec";
 
 export {
   TOOL_EXECUTION_HEARTBEAT_MS,
@@ -147,6 +149,67 @@ function providerOf(model: string): string | undefined {
 // ---------------------------------------------------------------------------
 // Core: run a single teammate agent
 // ---------------------------------------------------------------------------
+
+/**
+ * Project the orchestrator request into the backend contract.
+ *
+ * Host-resolved fields stay behind: `taskType` has already become a model,
+ * `fallbackModels` is sequenced across attempts by the sweep below, and
+ * `background` is host scheduling.
+ *
+ * @param params - the teammate request.
+ * @param cwd - resolved task cwd.
+ * @param model - the single model this attempt runs.
+ * @returns the contract-shaped run spec.
+ */
+function backendSpecOf(
+  params: RunSingleTeammateParams,
+  cwd: string,
+  model: string | undefined,
+): TeammateRunSpec {
+  return {
+    agent: params.agent,
+    task: params.task ?? "",
+    ...(params.name === undefined ? {} : { name: params.name }),
+    ...(params.context === undefined ? {} : { context: params.context }),
+    ...(model === undefined ? {} : { model }),
+    ...(params.thinking === undefined ? {} : { thinking: params.thinking as TeammateRunSpec["thinking"] }),
+    ...(params.outputSchema === undefined ? {} : { outputSchema: params.outputSchema }),
+    ...(params.todos === undefined ? {} : { todos: params.todos }),
+    cwd,
+  };
+}
+
+/**
+ * Build the run options a backend receives.
+ *
+ * @param correlationId - identity of this attempt.
+ * @param baseCwd - resolved task cwd.
+ * @param options - host run options supplying the observer callbacks.
+ * @returns the contract-shaped run options.
+ */
+function backendOptionsOf(
+  correlationId: string,
+  baseCwd: string,
+  options: RunTeammateOptions,
+): BackendRunOptions {
+  return {
+    correlationId,
+    baseCwd,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+    // onProgress is deliberately not forwarded. The host observer is typed for
+    // Pi's own AgentProgress, so handing it a backend-shaped payload would be a
+    // cast rather than a conversion. Pi reports progress through its own host
+    // options; a non-Pi backend needs a generic progress projection that does
+    // not exist yet, and omitting it keeps that gap visible instead of mistyped.
+    ...(options.onChildEvent === undefined ? {} : { onChildEvent: options.onChildEvent }),
+    ...(options.onTurnComplete === undefined ? {} : { onTurnComplete: options.onTurnComplete }),
+    // Pi resolves permission and host tools through its own IPC relay, so it
+    // borrows neither closure. A remote backend registers its own.
+    host: {},
+    config: {},
+  };
+}
 
 export async function runSingleTeammate(
   params: RunSingleTeammateParams,
@@ -405,15 +468,21 @@ export async function runSingleTeammate(
     };
 
     try {
-      let candidateResult: SingleResult;
+      let attempt: AttemptOutcome;
       try {
-        candidateResult = await runSingleAttempt(
-          params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, attemptOptions,
-        );
+        attempt = options.backend === undefined
+          ? outcomeOf(await runSingleAttempt(
+            params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, attemptOptions,
+          ))
+          : await (await options.backend.start(
+            backendSpecOf(params, cwd, modelToUse),
+            backendOptionsOf(correlationId, cwd, attemptOptions),
+          )).outcome;
       } catch (error) {
         discardCompletion();
         throw error;
       }
+      const candidateResult = attempt.result;
       attachDiscoveryWarning(candidateResult);
       lastResult = candidateResult;
       candidateResult.originCwd ??= cwd;
@@ -451,9 +520,9 @@ export async function runSingleTeammate(
 
       const error = resultFailureMessage(candidateResult.messages);
       const fallbackFailure = isFallbackProviderError(error);
-      const recoveryFacts = attemptRecoveryFacts.get(candidateResult);
-      const authoritativeFailure = recoveryFacts?.settlementCapability === "agent_settled";
-      const preActivityInfrastructureExit = recoveryFacts?.preActivityInfrastructureExit === true;
+      const recoveryFacts = attempt.recovery;
+      const authoritativeFailure = recoveryFacts.settlementAuthority === "authoritative";
+      const preActivityInfrastructureExit = recoveryFacts.preActivityInfrastructureExit;
       // ⑤ Shared replay-fence semantics: blocked when any tool completed or
       // its effect is unknown. The executor tracks counts (not names), so the
       // reason string carries the counts explicitly.
@@ -472,14 +541,14 @@ export async function runSingleTeammate(
         candidateResult.messages.push({
           role: "system",
           content:
-            `Model fallback blocked because the child did not provide an authoritative agent_settled failure `
-            + `(capability=${recoveryFacts?.settlementCapability ?? "unknown"}). `
+            `Model fallback blocked because the child did not provide an authoritative settlement `
+            + `(settlementAuthority=${recoveryFacts.settlementAuthority}). `
             + `Legacy or interrupted child streams have degraded recovery capability and cannot be fresh-replayed safely.`,
         });
       } else if ((fallbackFailure || preActivityInfrastructureExit) && !replayFenceClear) {
-        const completedTools = recoveryFacts?.completedToolCount ?? 0;
-        const inFlightTools = recoveryFacts?.inFlightToolCount ?? 0;
-        const externalReplayRisk = recoveryFacts?.externalReplayRisk ?? false;
+        const completedTools = recoveryFacts.completedToolCount;
+        const inFlightTools = recoveryFacts.inFlightToolCount;
+        const externalReplayRisk = recoveryFacts.externalReplayRisk;
         candidateResult.messages.push({
           role: "system",
           content:
@@ -492,12 +561,10 @@ export async function runSingleTeammate(
       }
 
       if (fallbackEligible) {
-        const reclamation = await attemptReclamations.get(candidateResult);
-        if (
-          reclamation
-          && typeof reclamation === "object"
-          && (reclamation as { status?: string }).status === "unreaped"
-        ) {
+        // Awaiting here serialises attempts: the replacement must not start
+        // while the failed runtime may still deliver callbacks.
+        const reclamation = await attempt.reclamation;
+        if (reclamation.status === "unreaped") {
           candidateResult.messages.push({
             role: "system",
             content:

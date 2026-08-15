@@ -279,14 +279,16 @@ export interface BackendRunOptions {
   onTurnComplete?: (result: SingleResult, terminalStatus?: AgentTerminalStatus) => void;
   host: BackendHostCapabilities;
   /**
-   * The complete system prompt for this run.
+   * The complete system prompt, when the host assembled it.
    *
-   * Assembled entirely by the host. Pi additionally appends model and agent
-   * catalogues from inside the child through an extension event, which no other
-   * runtime has; a backend receiving only the outer prompt would start a child
+   * Omitted only for a backend that assembles its own from the agent definition.
+   * Prompt assembly currently happens in two places: the host writes a prompt
+   * file, and Pi appends model and agent catalogues from inside the child
+   * through an extension event no other runtime has. Until that second half
+   * moves up, an external runtime given only the outer prompt starts a child
    * that cannot see the model catalogue and therefore cannot delegate further.
    */
-  systemPrompt: string;
+  systemPrompt?: string;
   /**
    * This backend's own settings, already validated and defaulted by
    * `resolveConfig`, so `start()` reads concrete values and never re-derives an

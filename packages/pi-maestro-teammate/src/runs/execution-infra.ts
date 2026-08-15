@@ -142,6 +142,15 @@ export interface RunSingleTeammateParams {
 
 export interface RunTeammateOptions {
   baseCwd: string;
+  /**
+   * Backend serving this dispatch.
+   *
+   * Omitted keeps the legacy path: the orchestrator calls the Pi attempt
+   * directly. Supplying one routes through the backend contract instead, which
+   * is what the `backend-registry` execution mode does. Both paths settle into
+   * the same outcome, so nothing downstream branches on which ran.
+   */
+  backend?: import("pi-maestro-backend-core/v1/backend").TeammateBackend;
   modelCapabilities?: readonly TeammateModelCapability[];
   modelCircuitBreaker?: ModelCircuitBreaker;
   /**

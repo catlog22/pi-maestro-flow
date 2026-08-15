@@ -119,10 +119,14 @@ function reclamationOf(outcome: unknown): AttemptReclamation {
 /**
  * Read the facts an attempt recorded about itself.
  *
+ * Exported so the legacy dispatch path yields the same shape as the backend
+ * path: with both producing an outcome, the orchestrator reads recovery facts
+ * from a value instead of from a side channel it can forget to consult.
+ *
  * @param result - the settled result the attempt keyed its facts on.
  * @returns the settled attempt, in contract shape.
  */
-function outcomeOf(result: SingleResult): AttemptOutcome {
+export function outcomeOf(result: SingleResult): AttemptOutcome {
   const facts = attemptRecoveryFacts.get(result);
   const reclamation = attemptReclamations.get(result);
   return {
