@@ -97,22 +97,23 @@ export interface BackendCapabilities {
 export type CapabilityName = keyof BackendCapabilities;
 
 /**
- * How a backend recovers after an attempt fails, which decides whether the
- * host's side-effect replay fence applies to it.
+ * How a backend recovers after an attempt fails.
  *
  * `replay` — recovery re-runs the task from its original prompt. Side effects of
  * the failed attempt are invisible to the retry, so a completed tool call can be
- * repeated. The fence applies: recovery is unsafe once tools have completed or
- * their effects are unknown.
+ * repeated.
  *
- * `in-context-continuation` — recovery resumes the interrupted conversation in
- * place, so completed tool calls remain in history and are not re-executed. The
- * fence does not apply; it may still be recorded for diagnostics.
+ * `in-context-continuation` — the backend can resume an interrupted conversation
+ * in place, keeping completed tool calls in history rather than re-executing
+ * them.
  *
- * This distinction is the seam's real parameter. Treating the fence as a
- * property of backend identity rather than of recovery shape forces every
- * backend into the replay assumption and then rejects the ones the fence cannot
- * clear — demoting a backend that was never unsafe.
+ * This describes the backend, not the recovery the host performs. The host's
+ * only recovery is a fresh attempt under the next model candidate, which starts
+ * a new run with a new correlation id — a replay whichever value a backend
+ * declares. The side-effect fence therefore gates every backend, and declaring
+ * `in-context-continuation` neither clears it nor may be read as clearing it.
+ * Honouring the declaration requires a host path that resumes the failed run's
+ * own session; until one exists this value is descriptive only.
  */
 export type RecoveryShape = "replay" | "in-context-continuation";
 
@@ -346,7 +347,7 @@ export interface TeammateBackend {
   /** Protocol version this backend implements; the registry rejects a mismatch. */
   readonly protocolVersion: 1;
   readonly capabilities: BackendCapabilities;
-  /** Decides whether the host's replay fence gates this backend's failover. */
+  /** How this backend would recover; descriptive, and never clears the host fence. */
   readonly recoveryShape: RecoveryShape;
   /** Settings this backend accepts; omitted means it takes none. */
   readonly configFields?: readonly BackendConfigField[];

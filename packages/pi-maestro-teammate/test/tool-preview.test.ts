@@ -4,9 +4,10 @@ import test from "node:test";
 import { previewToolCallArgs } from "../src/runs/shared/tool-preview.ts";
 
 test("onToolStart forwards the redacted args preview into progress", () => {
-	// The child-event forwarding path lives in the Pi subprocess attempt module.
-	const source = fs.readFileSync(new URL("../src/runs/execution.ts", import.meta.url), "utf-8")
-		+ fs.readFileSync(new URL("../src/runs/pi-subprocess-attempt.ts", import.meta.url), "utf-8");
+	// Read only the module that owns child-event forwarding. Concatenating it
+	// with execution.ts would let the same assertion pass if the forwarding
+	// moved back into orchestration, which is the arrangement the split ended.
+	const source = fs.readFileSync(new URL("../src/runs/pi-subprocess-attempt.ts", import.meta.url), "utf-8");
 	assert.match(source, /previewToolCallArgs\(event\.args, toolName\)/);
 	assert.match(source, /argsPreview === undefined/);
 	assert.match(source, /\{ name: toolName, status: "running", argsPreview \}\);/);

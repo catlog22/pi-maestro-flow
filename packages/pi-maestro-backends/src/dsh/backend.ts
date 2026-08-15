@@ -111,12 +111,24 @@ const CONFIG_FIELDS: readonly BackendConfigField[] = [
     default: "deepseek-v4-flash",
   },
   {
+    // Read by the settings layer, not by this backend: it names the variable
+    // written into the runtime's own env file, which the runtime then resolves
+    // for itself. Nothing here ever reads the value.
     key: "apiKeyEnv",
     kind: "credential-ref",
     credentialLocation: "env-var",
     labelKey: "dsh.apiKeyEnv",
     descriptionKey: "dsh.apiKeyEnv.description",
     default: "DEEPSEEK_API_KEY",
+  },
+  {
+    // The child is given a minimal environment, so a deployment whose runtime
+    // needs a host variable — a proxy setting, a CA bundle path — names it
+    // rather than being handed everything this process holds.
+    key: "envPassthrough",
+    kind: "string-list",
+    labelKey: "dsh.envPassthrough",
+    descriptionKey: "dsh.envPassthrough.description",
   },
   {
     key: "maxTokens",
@@ -210,9 +222,11 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
     name: "dsh",
     protocolVersion: 1,
     capabilities: CAPABILITIES,
-    // A dsh session has a stable id and accepts further prompts, so recovery
-    // continues the interrupted conversation instead of replaying it. The
-    // host's side-effect fence therefore does not gate this backend.
+    // A dsh session has a stable id and accepts further prompts, so this
+    // backend could resume an interrupted conversation. The host does not: its
+    // failover starts a fresh attempt under a new correlation id, which opens a
+    // new session and replays the prompt. The fence gates this backend exactly
+    // as it gates Pi, and this declaration does not change that.
     recoveryShape: "in-context-continuation",
     configFields: CONFIG_FIELDS,
 

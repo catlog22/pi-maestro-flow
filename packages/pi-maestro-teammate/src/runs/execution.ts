@@ -26,7 +26,6 @@ import {
   type AgentConfig,
 } from "../agents/agents.ts";
 import { resolveReplyTo, type ReplyTarget } from "../shared/routing.ts";
-import { previewToolCallArgs } from "./shared/tool-preview.ts";
 import type {
   SingleResult,
   Usage,
@@ -124,7 +123,7 @@ import type {
 // The Pi subprocess backend implementation. Orchestration here decides *which*
 // model runs; the module below decides how a Pi child runs it. Its previously
 // public surface is re-exported unchanged so no consumer import path moves.
-import { validateBackendCapabilities } from "pi-maestro-backends";
+import { adjudicateTask, validateBackendCapabilities } from "pi-maestro-backends";
 import { outcomeOf } from "../backends/pi-subprocess.ts";
 import { dispatchRegistrySync } from "../backends/registry-host.ts";
 import { runSingleAttempt } from "./pi-subprocess-attempt.ts";
@@ -589,6 +588,23 @@ export async function runSingleTeammate(
           // forgot to name itself would otherwise be indistinguishable from the
           // legacy path, which names nothing because no backend served it.
           attempt.result.backend = backend.name;
+          // Emulation is recorded per run, so a consumer reading a structured
+          // value can tell whether it came from a native contract or from
+          // host-side extraction. Derived from the same adjudication the graph
+          // ran, against the backend that actually served this attempt.
+          const emulated = adjudicateTask(
+            { spec, ...(spec.name === undefined ? {} : { name: spec.name }) },
+            0,
+            backend.name,
+            backend.capabilities,
+          ).emulated;
+          if (emulated.length > 0) {
+            attempt.result.capabilityDeliveries = emulated.map((capability) => ({
+              capability,
+              support: "emulated" as const,
+              note: `served by host-side compensation in backend "${backend.name}"`,
+            }));
+          }
         }
       } catch (error) {
         discardCompletion();
@@ -661,6 +677,19 @@ export async function runSingleTeammate(
         const completedTools = recoveryFacts.completedToolCount;
         const inFlightTools = recoveryFacts.inFlightToolCount;
         const externalReplayRisk = recoveryFacts.externalReplayRisk;
+        // The remaining candidates were never tried, and not because no backend
+        // could serve them. Without this a fenced run is indistinguishable from
+        // one that simply had nothing left to fall back to.
+        candidateResult.capabilityDeliveries = [
+          ...(candidateResult.capabilityDeliveries ?? []),
+          {
+            capability: "modelSelection",
+            support: "withheld",
+            note:
+              `the side-effect replay fence stopped failover after completedTools=${completedTools}, `
+              + `inFlightTools=${inFlightTools}, externalReplayRisk=${externalReplayRisk}`,
+          },
+        ];
         candidateResult.messages.push({
           role: "system",
           content:

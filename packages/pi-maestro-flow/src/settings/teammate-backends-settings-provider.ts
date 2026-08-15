@@ -58,6 +58,15 @@ const GROUP_DISPATCH = "teammateBackends.group.dispatch";
 const DEFAULT_MODE: TeammateExecutionMode = "legacy";
 const DEFAULT_BACKEND = "pi-subprocess";
 
+/**
+ * How long a prepared-but-unresolved transaction may hold a secret in memory.
+ *
+ * Generous relative to a settings dialog and short relative to a session: the
+ * point is that an abandoned prepare stops being a resident credential, not
+ * that a slow operator loses their edit.
+ */
+const STAGED_TRANSACTION_TTL_MS = 10 * 60 * 1000;
+
 /** What the provider needs to know about a backend; not the backend itself. */
 export interface BackendDescriptor {
   name: string;
@@ -126,18 +135,26 @@ function editorFor(field: BackendConfigField): SettingDefinition["editor"] {
   }
 }
 
-/** Read the document, treating an absent or unreadable file as empty. */
-function readDocument(path: string): { document: Document; raw: string } {
-  if (!existsSync(path)) return { document: {}, raw: "" };
+/**
+ * Read the document, treating an absent file as empty.
+ *
+ * A malformed file yields empty values plus `malformed: true` rather than
+ * throwing: the shell still has to render so the operator can see the settings
+ * and the reason. Writing is what must not proceed — a commit rebuilt from the
+ * empty parse would replace the operator's broken file with a plausible one,
+ * destroying the content they were about to repair.
+ */
+function readDocument(path: string): { document: Document; raw: string; malformed: boolean } {
+  if (!existsSync(path)) return { document: {}, raw: "", malformed: false };
   const raw = readFileSync(path, "utf-8");
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null) return { document: {}, raw };
-    return { document: parsed as Document, raw };
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return { document: {}, raw, malformed: true };
+    }
+    return { document: parsed as Document, raw, malformed: false };
   } catch {
-    // A malformed document is reported through validation rather than thrown
-    // here; the shell still needs to render so the operator can repair it.
-    return { document: {}, raw };
+    return { document: {}, raw, malformed: true };
   }
 }
 
@@ -268,7 +285,24 @@ export function createTeammateBackendsSettingsProvider(
     secrets: Map<string, EnvDocument>;
     /** Etag of the document this transaction was prepared against. */
     etag: string;
+    /** When this transaction was prepared, for expiry. */
+    preparedAt: number;
   }>();
+
+  /**
+   * Drop transactions the shell prepared and never resolved.
+   *
+   * A staged transaction holds credential values in plaintext. Commit and abort
+   * both clear it, but neither is guaranteed to arrive — a shell that crashes
+   * or a dialog the operator walks away from leaves the secret resident for the
+   * rest of the process's life.
+   */
+  const expireStaged = (): void => {
+    const deadline = Date.now() - STAGED_TRANSACTION_TTL_MS;
+    for (const [token, pending] of staged) {
+      if (pending.preparedAt < deadline) staged.delete(token);
+    }
+  };
 
   const credentialPath = (backend: string): string => join(credentialRoot, backend, ".env");
 
@@ -427,10 +461,19 @@ export function createTeammateBackendsSettingsProvider(
     issues: SettingsValidationIssue[];
     etag: string;
   } => {
-    const { document, raw } = readDocument(documentPath);
+    const { document, raw, malformed } = readDocument(documentPath);
     const etag = etagOf(raw);
     const secrets = new Map<string, EnvDocument>();
     const issues: SettingsValidationIssue[] = [];
+    if (malformed) {
+      issues.push({
+        severity: "error",
+        code: "document-malformed",
+        messageKey: "teammateBackends.error.documentMalformed",
+        params: { path: DOCUMENT_ID },
+      });
+      return { document, secrets, issues, etag };
+    }
     const known = new Map(definitions().map((definition) => [definition.key, definition]));
 
     for (const change of changes) {
@@ -596,9 +639,12 @@ export function createTeammateBackendsSettingsProvider(
     },
 
     prepare(request) {
+      expireStaged();
       const { document, secrets, issues, etag } = apply(request.changes);
       const valid = issues.every((issue) => issue.severity !== "error");
-      if (valid) staged.set(request.transactionId, { document, secrets, etag });
+      if (valid) {
+        staged.set(request.transactionId, { document, secrets, etag, preparedAt: Date.now() });
+      }
       return {
         prepared: valid,
         ...(valid ? { prepareToken: request.transactionId } : {}),
@@ -608,6 +654,7 @@ export function createTeammateBackendsSettingsProvider(
     },
 
     commit(request) {
+      expireStaged();
       const pending = staged.get(request.prepareToken);
       if (pending === undefined) {
         throw new Error(`teammate backends settings: no prepared transaction ${request.prepareToken}`);

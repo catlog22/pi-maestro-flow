@@ -274,6 +274,32 @@ test("the credential directory is owner-only, not just the file", async () => {
   assert.equal(statSync(join(p.credentialRoot, "dsh")).mode & 0o777, 0o700);
 });
 
+test("a malformed document is left alone rather than replaced with a plausible one", async () => {
+  const p = provider();
+  mkdirSync(join(p.workspaceRoot, ".pi"), { recursive: true });
+  const broken = '{ "mode": "backend-registry", "backends": { "dsh": }\n';
+  writeFileSync(p.documentPath, broken, "utf-8");
+  const result = await commit(p, [
+    { operation: "set", key: "teammateBackends.mode", scope: "project", value: "legacy" },
+  ]);
+  assert.equal(result.valid, false);
+  assert.equal(result.issues[0]?.code, "document-malformed");
+  // The operator's file is what they are about to repair; a commit rebuilt
+  // from the empty parse would silently destroy it.
+  assert.equal(readFileSync(p.documentPath, "utf-8"), broken);
+});
+
+test("the shell still renders over a malformed document", async () => {
+  const p = provider();
+  mkdirSync(join(p.workspaceRoot, ".pi"), { recursive: true });
+  writeFileSync(p.documentPath, "{ not json", "utf-8");
+  const snapshot = await p.instance.read({ context });
+  assert.equal(
+    snapshot.effective.values.find((v) => v.key === "teammateBackends.mode")?.value,
+    "legacy",
+  );
+});
+
 test("a document edited after prepare is refused rather than overwritten", async () => {
   const p = provider();
   const prepared = await p.instance.prepare!({

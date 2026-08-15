@@ -8,9 +8,11 @@
  * model runs. This module owns what one specific runtime does with an
  * already-chosen model.
  *
- * The recovery WeakMaps stay module-private: their writer and their reader now
- * live together, so a backend cannot silently omit the facts that failover
- * depends on.
+ * The recovery WeakMaps are written here and read only by this package's Pi
+ * backend adapter, which turns them into the contract's `AttemptOutcome`. They
+ * are deliberately absent from the package's public surface: outside this pair
+ * of modules, recovery facts travel as a value on the outcome rather than as a
+ * side channel a caller can forget to consult.
  */
 
 import {
