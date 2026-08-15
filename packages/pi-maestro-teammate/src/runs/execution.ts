@@ -125,6 +125,7 @@ import type {
 // The Pi subprocess backend implementation. Orchestration here decides *which*
 // model runs; the module below decides how a Pi child runs it. Its previously
 // public surface is re-exported unchanged so no consumer import path moves.
+import { validateBackendCapabilities } from "pi-maestro-backends";
 import { outcomeOf } from "../backends/pi-subprocess.ts";
 import { runSingleAttempt } from "./pi-subprocess-attempt.ts";
 import type {
@@ -550,14 +551,19 @@ export async function runSingleTeammate(
     try {
       let attempt: AttemptOutcome;
       try {
-        attempt = options.backend === undefined
-          ? outcomeOf(await runSingleAttempt(
+        if (options.backendRegistry === undefined) {
+          attempt = outcomeOf(await runSingleAttempt(
             params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, attemptOptions,
-          ))
-          : await (await options.backend.start(
-            backendSpecOf(params, cwd, modelToUse),
+          ));
+        } else {
+          const spec = backendSpecOf(params, cwd, modelToUse);
+          const { backend } = await options.backendRegistry.resolve(spec);
+          const run = await backend.start(
+            spec,
             backendOptionsOf(correlationId, cwd, attemptOptions, params.agent, startTime),
-          )).outcome;
+          );
+          attempt = await run.outcome;
+        }
       } catch (error) {
         discardCompletion();
         throw error;
@@ -795,6 +801,38 @@ export async function runGraph(
 
   if (hasCycle(deps)) {
     return publishGraphRejection("Circular dependency detected in task graph", deps);
+  }
+
+  // Capability adjudication sits beside the structural checks, not at dispatch.
+  // A task whose backend cannot produce structured output would otherwise burn
+  // a full model turn before its downstream sibling's {name.field} read failed.
+  if (options.backendRegistry !== undefined) {
+    const registry = options.backendRegistry;
+    const adjudicated = tasks.map((task) => ({
+      spec: backendSpecOf(task, task.cwd ?? options.baseCwd, task.model),
+      ...(task.name === undefined ? {} : { name: task.name }),
+    }));
+    const backends = await Promise.all(adjudicated.map(async ({ spec }) => {
+      const { backend } = await registry.resolve(spec);
+      return { name: backend.name, capabilities: backend.capabilities };
+    }));
+    const verdict = validateBackendCapabilities(adjudicated, (_task, index) => backends[index]!);
+    if (verdict.errors.length > 0) {
+      return publishGraphRejection(verdict.errors.join("\n"), deps);
+    }
+    for (const warning of verdict.warnings) {
+      options.onProgress?.({
+        agent: "teammate",
+        status: "running",
+        recentTools: [],
+        toolCount: 0,
+        tokens: 0,
+        durationMs: 0,
+        lastActivityAt: Date.now(),
+        startedAt: Date.now(),
+        lastMessage: warning,
+      });
+    }
   }
 
   // Validate unique names
