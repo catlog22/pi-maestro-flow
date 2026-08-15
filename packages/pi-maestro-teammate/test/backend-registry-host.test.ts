@@ -22,13 +22,43 @@ const extras = (): never => {
   throw new Error("no run is started in these tests");
 };
 
-test("legacy mode builds no registry at all", async () => {
-  const registry = await createTeammateBackendRegistry("legacy", await workspace(), extras);
-  assert.equal(registry, undefined);
+test("a project with no document stays on the legacy path", async () => {
+  assert.equal(await createTeammateBackendRegistry(await workspace(), extras), undefined);
 });
 
-test("a project with no document gets Pi under its ordinary name", async () => {
+test("registrations alone do not switch the dispatch path", async () => {
+  const root = await workspace(JSON.stringify({
+    default: PI_SUBPROCESS,
+    backends: { dsh: { module: "some-dsh-backend" } },
+  }));
+  assert.equal(await createTeammateBackendRegistry(root, extras), undefined);
+});
+
+test("the document's mode is what switches it, and switching back is the same edit", async () => {
+  const root = await workspace(JSON.stringify({
+    mode: "backend-registry",
+    default: PI_SUBPROCESS,
+    backends: {},
+  }));
+  assert.notEqual(await createTeammateBackendRegistry(root, extras), undefined);
+  assert.equal(await createTeammateBackendRegistry(root, extras, "legacy"), undefined);
+});
+
+test("an unknown mode fails at load with the modes it accepts", async () => {
+  const root = await workspace(JSON.stringify({
+    mode: "registry",
+    default: PI_SUBPROCESS,
+    backends: {},
+  }));
+  await assert.rejects(
+    readBackendRegistryConfig(root),
+    /names mode "registry"; expected one of legacy \| backend-registry/,
+  );
+});
+
+test("a project with no document gets Pi under its ordinary name, on the legacy path", async () => {
   const config = await readBackendRegistryConfig(await workspace());
+  assert.equal(config.mode, "legacy");
   assert.equal(config.default, PI_SUBPROCESS);
   assert.deepEqual(Object.keys(config.backends), [PI_SUBPROCESS]);
 });
@@ -66,7 +96,12 @@ test("a document may redefine the built-in registration", async () => {
 });
 
 test("Pi resolves to the in-process backend rather than a second import", async () => {
-  const registry = await createTeammateBackendRegistry("backend-registry", await workspace(), extras);
+  const root = await workspace(JSON.stringify({
+    mode: "backend-registry",
+    default: PI_SUBPROCESS,
+    backends: {},
+  }));
+  const registry = await createTeammateBackendRegistry(root, extras);
   assert.notEqual(registry, undefined);
   const resolved = await registry!.resolve({ agent: "general", task: "t" });
   assert.equal(resolved.backend.name, PI_SUBPROCESS);
@@ -74,9 +109,13 @@ test("Pi resolves to the in-process backend rather than a second import", async 
 });
 
 test("a default naming an unregistered backend fails while the operator is looking at the file", async () => {
-  const root = await workspace(JSON.stringify({ default: "dsh", backends: {} }));
+  const root = await workspace(JSON.stringify({
+    mode: "backend-registry",
+    default: "dsh",
+    backends: {},
+  }));
   await assert.rejects(
-    createTeammateBackendRegistry("backend-registry", root, extras),
+    createTeammateBackendRegistry(root, extras),
     /names "dsh" as its default/,
   );
 });

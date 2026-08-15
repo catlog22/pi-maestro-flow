@@ -32,9 +32,13 @@ export const PI_SUBPROCESS = "pi-subprocess";
  * routed through the interface rather than around it.
  */
 const BUILT_IN: BackendRegistryConfig = {
+  mode: "legacy",
   default: PI_SUBPROCESS,
   backends: { [PI_SUBPROCESS]: { module: PI_SUBPROCESS } },
 };
+
+/** The modes a document may name; anything else is a load-time error. */
+const MODES: readonly TeammateExecutionMode[] = ["legacy", "backend-registry"];
 
 /**
  * Read the project's registration document.
@@ -69,6 +73,12 @@ export async function readBackendRegistryConfig(
   }
 
   const document = parsed as Partial<BackendRegistryConfig>;
+  if (document.mode !== undefined && !MODES.includes(document.mode)) {
+    throw new Error(
+      `teammate backend registry at ${path} names mode "${String(document.mode)}"; `
+      + `expected one of ${MODES.join(" | ")}`,
+    );
+  }
   if (typeof document.default !== "string") {
     throw new Error(`teammate backend registry at ${path} must name a "default" backend`);
   }
@@ -78,6 +88,7 @@ export async function readBackendRegistryConfig(
   // The built-in stays registered unless the document redefines it, so a
   // document that only adds a remote backend does not lose Pi.
   return {
+    mode: document.mode ?? "legacy",
     default: document.default,
     backends: { ...BUILT_IN.backends, ...document.backends },
   };
@@ -86,18 +97,18 @@ export async function readBackendRegistryConfig(
 /**
  * Build the registry for one dispatch.
  *
- * @param mode - the configured execution mode.
  * @param workspaceRoot - directory holding `.pi/`.
  * @param extrasOf - per-run host wiring handed to the Pi backend.
+ * @param modeOverride - forces a mode regardless of what the document says.
  * @returns the registry, or undefined when the mode keeps the legacy path.
  */
 export async function createTeammateBackendRegistry(
-  mode: TeammateExecutionMode,
   workspaceRoot: string,
   extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras,
+  modeOverride?: TeammateExecutionMode,
 ): Promise<TeammateBackendRegistry | undefined> {
-  if (mode === "legacy") return undefined;
   const config = await readBackendRegistryConfig(workspaceRoot);
+  if ((modeOverride ?? config.mode ?? "legacy") === "legacy") return undefined;
   const pi = createPiSubprocessBackend(extrasOf);
   return new TeammateBackendRegistry(config, async (module): Promise<TeammateBackend> => {
     // Pi is in this process already; importing it by specifier would load a

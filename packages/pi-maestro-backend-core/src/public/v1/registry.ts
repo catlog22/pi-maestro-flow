@@ -47,6 +47,14 @@ export interface BackendRegistration {
 
 /** The backend registration document (`.pi/teammate-backends.json`). */
 export interface BackendRegistryConfig {
+  /**
+   * Which dispatch path teammate takes.
+   *
+   * Absent means `legacy`: writing backend registrations does not by itself
+   * change how anything runs, so a half-finished document cannot surprise a
+   * deployment. Switching is one edit, and switching back is the same edit.
+   */
+  mode?: TeammateExecutionMode;
   /** Backend used when a task names none. */
   default: string;
   backends: Record<string, BackendRegistration>;
