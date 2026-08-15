@@ -1393,7 +1393,9 @@ export class WorkflowCoordinator {
       context.hostSessionId,
     );
     const openEnvelope = parseRunResponse(openResult.command.stdout);
-    if (!openEnvelope.ok) {
+    const openAlreadyExists = !openEnvelope.ok
+      && (openEnvelope.error?.message?.includes("already exists") ?? false);
+    if (!openEnvelope.ok && !openAlreadyExists) {
       throw new Error(`v3 Plan Session open failed: ${publicWorkflowErrorMessage(
         new Error(openEnvelope.error?.message ?? "session open rejected"),
       )}`);
@@ -1412,13 +1414,14 @@ export class WorkflowCoordinator {
       ["session", "chain", "insert", "--session", sessionId,
         "--step-id", `plan-${options.planRevision}`,
         "--command", "plan", "--goal-ref", planFile,
-        "--request-id", `req_plan_insert_${createHash("sha256").update(requestId).digest("hex").slice(0, 32)}`,
         "--json"],
       { write: true, sessionless: false, mutation: "session", lease: "none" },
       context.hostSessionId,
     );
     const insertEnvelope = parseRunResponse(insertResult.command.stdout);
-    if (!insertEnvelope.ok) {
+    const insertAlreadyExists = !insertEnvelope.ok
+      && (insertEnvelope.error?.message?.includes("already exists") ?? false);
+    if (!insertEnvelope.ok && !insertAlreadyExists) {
       throw new Error(`v3 Plan chain step insert failed: ${publicWorkflowErrorMessage(
         new Error(insertEnvelope.error?.message ?? "chain insert rejected"),
       )}`);
