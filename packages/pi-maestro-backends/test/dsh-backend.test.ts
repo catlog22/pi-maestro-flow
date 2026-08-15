@@ -1,0 +1,196 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import type { BackendRunOptions } from "pi-maestro-backend-core/v1/backend";
+import { resolveBackendConfig } from "pi-maestro-backends";
+import { createDshBackend, type DshHarnessDriver } from "pi-maestro-backends/dsh";
+
+const CONFIG = {
+  command: "dsh-jsonrpc-agent",
+  cordisConfig: "/etc/dsh/cordis.yml",
+  provider: "deepseek-official",
+  model: "deepseek-v4-flash",
+  apiKeyEnv: "DEEPSEEK_API_KEY",
+  requestTimeoutMs: 300_000,
+};
+
+interface FakeDriver extends DshHarnessDriver {
+  prompts: string[];
+  closed: number;
+}
+
+function fakeDriver(overrides: Partial<{
+  finalResponse: string;
+  events: Record<string, unknown>[];
+  fail: Error;
+  closeFails: boolean;
+}> = {}): FakeDriver {
+  const prompts: string[] = [];
+  let closed = 0;
+  return {
+    prompts,
+    get closed() { return closed; },
+    async run(input) {
+      prompts.push(input);
+      if (overrides.fail) throw overrides.fail;
+      return {
+        sessionId: "s-1",
+        finalResponse: overrides.finalResponse ?? "SEAM",
+        events: overrides.events ?? [{ type: "turn/start" }, { type: "turn/end" }],
+      };
+    },
+    async close() {
+      closed += 1;
+      if (overrides.closeFails) throw new Error("child would not die");
+    },
+  } as FakeDriver;
+}
+
+function runOptions(config: Record<string, string | number> = CONFIG): BackendRunOptions {
+  return { correlationId: "c-1", baseCwd: "/work", host: {}, config };
+}
+
+const SPEC = { agent: "general", task: "do the thing" };
+
+test("dsh declares only the capabilities its SDK actually serves", () => {
+  const backend = createDshBackend(async () => fakeDriver());
+  assert.equal(backend.capabilities.forkContext, "unsupported");
+  assert.equal(backend.capabilities.thinkingLevel, "unsupported");
+  assert.equal(backend.capabilities.toolFilter, "unsupported");
+  assert.equal(backend.capabilities.steer, "unsupported");
+  assert.equal(backend.capabilities.outputSchema, "emulated");
+  assert.equal(backend.capabilities.modelSelection, "native");
+  assert.equal(backend.capabilities.followUp, "native");
+});
+
+test("dsh recovers in place, so the host replay fence does not gate it", () => {
+  assert.equal(createDshBackend(async () => fakeDriver()).recoveryShape, "in-context-continuation");
+});
+
+test("the credential field rejects a pasted key instead of storing it", () => {
+  const backend = createDshBackend(async () => fakeDriver());
+  const resolved = resolveBackendConfig(backend, {
+    ...CONFIG,
+    apiKeyEnv: "sk-0123456789abcdef",
+  });
+  assert.equal(resolved.errors.length, 1);
+  assert.match(resolved.errors[0]!, /names the environment variable holding the key, not the key itself/);
+});
+
+test("a conventional variable name is accepted", () => {
+  const backend = createDshBackend(async () => fakeDriver());
+  assert.deepEqual(resolveBackendConfig(backend, CONFIG).errors, []);
+});
+
+test("cordisConfig is required because the runtime has no built-in fallback", () => {
+  const backend = createDshBackend(async () => fakeDriver());
+  const { cordisConfig: _omitted, ...rest } = CONFIG;
+  const resolved = resolveBackendConfig(backend, rest);
+  assert.equal(resolved.errors.length, 1);
+  assert.match(resolved.errors[0]!, /requires setting "cordisConfig"/);
+});
+
+test("a settled turn reports the runtime's own turn-end as authoritative", async () => {
+  const backend = createDshBackend(async () => fakeDriver());
+  const run = await backend.start(SPEC, runOptions());
+  const outcome = await run.outcome;
+  assert.equal(outcome.result.messages[0]?.content, "SEAM");
+  assert.equal(outcome.result.terminalStatus, "completed");
+  assert.equal(outcome.recovery.settlementAuthority, "authoritative");
+  assert.deepEqual(await outcome.reclamation, { status: "reclaimed" });
+});
+
+test("a turn ending without the runtime's marker is only inferred", async () => {
+  const backend = createDshBackend(async () => fakeDriver({ events: [{ type: "turn/start" }] }));
+  const outcome = await (await backend.start(SPEC, runOptions())).outcome;
+  assert.equal(outcome.recovery.settlementAuthority, "inferred");
+});
+
+test("completed tool calls are counted for the host's fence", async () => {
+  const backend = createDshBackend(async () => fakeDriver({
+    events: [{ type: "tool/end" }, { type: "tool/end" }, { type: "turn/end" }],
+  }));
+  const outcome = await (await backend.start(SPEC, runOptions())).outcome;
+  assert.equal(outcome.result.toolCount, 2);
+  assert.equal(outcome.recovery.completedToolCount, 2);
+});
+
+test("a transport failure reports its effects as unobserved rather than clean", async () => {
+  const backend = createDshBackend(async () => fakeDriver({ fail: new Error("stream died") }));
+  const outcome = await (await backend.start(SPEC, runOptions())).outcome;
+  assert.equal(outcome.result.terminalStatus, "failed");
+  assert.equal(outcome.recovery.settlementAuthority, "unknown");
+  assert.equal(outcome.recovery.externalReplayRisk, true);
+});
+
+test("a runtime that will not close is reported unreaped, not silently reclaimed", async () => {
+  const backend = createDshBackend(async () => fakeDriver({ closeFails: true }));
+  const outcome = await (await backend.start(SPEC, runOptions())).outcome;
+  const reclamation = await outcome.reclamation;
+  assert.equal(reclamation.status, "unreaped");
+  assert.match((reclamation as { reason: string }).reason, /child would not die/);
+});
+
+test("steering is refused rather than delivered late under its name", async () => {
+  const backend = createDshBackend(async () => fakeDriver());
+  const run = await backend.start(SPEC, runOptions());
+  assert.equal(run.send("stop that", "steer"), false);
+  await run.outcome;
+});
+
+test("a follow-up arriving mid-turn is answered on the same session", async () => {
+  const prompts: string[] = [];
+  let releaseFirstTurn!: () => void;
+  const firstTurnRunning = new Promise<void>((resolve) => { releaseFirstTurn = resolve; });
+  let firstTurnStarted!: () => void;
+  const started = new Promise<void>((resolve) => { firstTurnStarted = resolve; });
+
+  const backend = createDshBackend(async () => ({
+    async run(input) {
+      prompts.push(input);
+      if (prompts.length === 1) {
+        firstTurnStarted();
+        await firstTurnRunning;
+      }
+      return { sessionId: "s", finalResponse: "ok", events: [{ type: "turn/end" }] };
+    },
+    async close() {},
+  }));
+
+  const run = await backend.start(SPEC, runOptions());
+  await started;
+  assert.equal(run.send("and also this", "follow_up"), true);
+  releaseFirstTurn();
+  await run.outcome;
+  assert.deepEqual(prompts, ["do the thing", "and also this"]);
+});
+
+test("a message arriving after settlement is refused, never silently dropped", async () => {
+  const backend = createDshBackend(async () => fakeDriver());
+  const run = await backend.start(SPEC, runOptions());
+  await run.outcome;
+  assert.equal(run.send("too late", "follow_up"), false);
+});
+
+test("the system prompt the host assembled is prepended when supplied", async () => {
+  const driver = fakeDriver();
+  const backend = createDshBackend(async () => driver);
+  await (await backend.start(SPEC, { ...runOptions(), systemPrompt: "You are terse." })).outcome;
+  assert.equal(driver.prompts[0], "You are terse.\n\ndo the thing");
+});
+
+test("child events reach the host observer", async () => {
+  const seen: Record<string, unknown>[] = [];
+  const backend = createDshBackend(async () => ({
+    async run(_input, options) {
+      options.onNotification?.({ method: "session.event", params: { type: "turn/start" } });
+      options.onNotification?.({ method: "other.method", params: { ignored: true } });
+      return { sessionId: "s", finalResponse: "ok", events: [{ type: "turn/end" }] };
+    },
+    async close() {},
+  }));
+  await (await backend.start(SPEC, {
+    ...runOptions(),
+    onChildEvent: (event) => { seen.push(event); },
+  })).outcome;
+  assert.deepEqual(seen, [{ type: "turn/start" }]);
+});

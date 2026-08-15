@@ -1,0 +1,336 @@
+/**
+ * The DeepSeek Harness backend: drive a `dsh` runtime subprocess over stdio
+ * JSON-RPC through the published SDK client.
+ *
+ * Every capability verdict below was read off the SDK's own declarations rather
+ * than inferred, and the notes name where. What the runtime can be told splits
+ * in two: the SDK carries the session route (provider, model, token cap), while
+ * the endpoint, credential reference, and model catalogue live in the runtime's
+ * own `cordis.yml`. Fields here therefore describe the launch and the route,
+ * and point at the config file for the rest instead of pretending to own it.
+ */
+
+import type {
+  AttemptOutcome,
+  BackendCapabilities,
+  BackendConfigField,
+  BackendRun,
+  BackendRunOptions,
+  ConfigValue,
+  ResolvedBackendConfig,
+  TeammateBackend,
+} from "pi-maestro-backend-core/v1/backend";
+import type {
+  ControlMode,
+  SingleResult,
+  TeammateRunSpec,
+  Usage,
+} from "pi-maestro-backend-core/v1/spec";
+
+/**
+ * What the SDK surface actually supports.
+ *
+ * `outputSchema` — no schema parameter exists; `RunResult.finalResponse` is
+ * text, so a structured value must be prompted for and extracted.
+ * `forkContext` — permanently unsupported, and semantically so: a Pi history
+ * entry records what a different runtime did with a different tool set.
+ * `modelSelection` — `DeepSeekHarnessOptions.model` fixes the route per harness
+ * instance; a different model means a new instance, which matches the host
+ * starting a fresh attempt per model candidate anyway.
+ * `thinkingLevel` — absent from `RunOptions`, so it cannot vary per task. The
+ * runtime's own config sets a deployment-wide default, which is a different
+ * thing from the per-task control the orchestrator asks for here.
+ * `todoBinding` — the prompt fragment is reproducible, but the `todo` tool is
+ * host-implemented and reaches the child only through `host.proxyToolCall`.
+ * `toolFilter` — the child's tool set comes from its `cordis.yml`.
+ * `steer` — `HarnessClient` states plainly that there is no wire-level cancel.
+ * Boundary-queued emulation is buildable but is not built here, so this reads
+ * `unsupported`: the table records what the backend does, and claiming
+ * emulation it lacks would route steering tasks here only to fail.
+ * `followUp` — a session id stays addressable, so a later message is simply
+ * another run on the same session, with the agent's context intact.
+ * `abort` — no per-run cancel either; stopping one run means closing the
+ * runtime, which is coarser than asked but does stop the work.
+ */
+const CAPABILITIES: BackendCapabilities = {
+  outputSchema: "emulated",
+  forkContext: "unsupported",
+  modelSelection: "native",
+  thinkingLevel: "unsupported",
+  todoBinding: "emulated",
+  toolFilter: "unsupported",
+  steer: "unsupported",
+  followUp: "native",
+  abort: "emulated",
+};
+
+const CONFIG_FIELDS: readonly BackendConfigField[] = [
+  {
+    key: "command",
+    kind: "text",
+    labelKey: "dsh.command",
+    descriptionKey: "dsh.command.description",
+    default: "dsh-jsonrpc-agent",
+  },
+  {
+    key: "cordisConfig",
+    kind: "path",
+    labelKey: "dsh.cordisConfig",
+    descriptionKey: "dsh.cordisConfig.description",
+    required: true,
+  },
+  {
+    key: "cwd",
+    kind: "path",
+    labelKey: "dsh.cwd",
+    descriptionKey: "dsh.cwd.description",
+  },
+  {
+    key: "provider",
+    kind: "text",
+    labelKey: "dsh.provider",
+    default: "deepseek-official",
+  },
+  {
+    key: "model",
+    kind: "text",
+    labelKey: "dsh.model",
+    descriptionKey: "dsh.model.description",
+    default: "deepseek-v4-flash",
+  },
+  {
+    key: "apiKeyEnv",
+    kind: "credential-ref",
+    credentialLocation: "env-var",
+    labelKey: "dsh.apiKeyEnv",
+    descriptionKey: "dsh.apiKeyEnv.description",
+    default: "DEEPSEEK_API_KEY",
+  },
+  {
+    key: "maxTokens",
+    kind: "integer",
+    labelKey: "dsh.maxTokens",
+  },
+  {
+    key: "requestTimeoutMs",
+    kind: "integer",
+    labelKey: "dsh.requestTimeoutMs",
+    default: 300_000,
+  },
+];
+
+/** The SDK surface this backend drives; injected so tests need no subprocess. */
+export interface DshHarnessDriver {
+  run(input: string, options: {
+    sessionId: string;
+    onNotification?: (notification: { method: string; params: Record<string, unknown> }) => void;
+  }): Promise<{
+    sessionId: string;
+    finalResponse: string;
+    events: readonly Record<string, unknown>[];
+  }>;
+  close(): Promise<void>;
+}
+
+/** Builds a driver for one run from the resolved configuration. */
+export type DshDriverFactory = (
+  config: Record<string, ConfigValue>,
+  options: BackendRunOptions,
+) => Promise<DshHarnessDriver>;
+
+/** Read a string setting, or undefined when unset. */
+function text(config: Record<string, ConfigValue>, key: string): string | undefined {
+  const value = config[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * Count the tool calls an event stream reports as finished.
+ *
+ * @param events - the run's session events in wire order.
+ * @returns how many tool calls completed.
+ */
+function completedTools(events: readonly Record<string, unknown>[]): number {
+  return events.filter((event) => {
+    const type = event.type ?? event.kind;
+    return type === "tool/end" || type === "tool_result";
+  }).length;
+}
+
+/**
+ * Whether the runtime declared the turn finished.
+ *
+ * The smoke transcript ends `step/end` then `turn/end`, so its presence is the
+ * runtime's own settlement statement rather than an inference from exit codes.
+ *
+ * @param events - the run's session events in wire order.
+ * @returns true when the runtime emitted its turn-end marker.
+ */
+function sawTurnEnd(events: readonly Record<string, unknown>[]): boolean {
+  return events.some((event) => (event.type ?? event.kind) === "turn/end");
+}
+
+/** Usage is not reported through the SDK's run result; zeros say so honestly. */
+const NO_USAGE: Usage = {
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  cost: 0,
+  turns: 1,
+};
+
+/**
+ * Create the DeepSeek Harness backend.
+ *
+ * @param driverOf - builds the SDK driver; the default spawns a real runtime.
+ * @returns the backend, ready for registration.
+ */
+export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
+  return {
+    name: "dsh",
+    protocolVersion: 1,
+    capabilities: CAPABILITIES,
+    // A dsh session has a stable id and accepts further prompts, so recovery
+    // continues the interrupted conversation instead of replaying it. The
+    // host's side-effect fence therefore does not gate this backend.
+    recoveryShape: "in-context-continuation",
+    configFields: CONFIG_FIELDS,
+
+    resolveConfig(config: Record<string, ConfigValue>): ResolvedBackendConfig {
+      const errors: string[] = [];
+      for (const key of ["maxTokens", "requestTimeoutMs"]) {
+        const value = config[key];
+        if (value === undefined) continue;
+        if (typeof value === "number" && value > 0) continue;
+        errors.push(`"${key}" must be a positive number, got ${String(value)}`);
+      }
+      // The credential field names a lookup; a value that looks like a key
+      // means someone pasted the secret into a field built to hold a name.
+      const apiKeyEnv = text(config, "apiKeyEnv");
+      if (apiKeyEnv !== undefined && /[^A-Z0-9_]/.test(apiKeyEnv)) {
+        errors.push(
+          `"apiKeyEnv" names the environment variable holding the key, not the key itself; `
+          + `"${apiKeyEnv}" is not a variable name`,
+        );
+      }
+      return { values: config, errors };
+    },
+
+    async start(spec: TeammateRunSpec, options: BackendRunOptions): Promise<BackendRun> {
+      const startedAt = Date.now();
+      const driver = await driverOf(options.config, options);
+      const sessionId = options.correlationId;
+      const followUps: string[] = [];
+      // A message accepted after the last turn has settled would never be
+      // delivered, so the window is tracked explicitly and `send` reports its
+      // closure instead of returning a success the orchestrator cannot verify.
+      let acceptingFollowUps = true;
+      let aborted = false;
+
+      const outcome = (async (): Promise<AttemptOutcome> => {
+        const prompt = options.systemPrompt === undefined
+          ? spec.task
+          : `${options.systemPrompt}\n\n${spec.task}`;
+        try {
+          const observe = (notification: { method: string; params: Record<string, unknown> }): void => {
+            if (notification.method !== "session.event") return;
+            options.onChildEvent?.(notification.params);
+          };
+          let run = await driver.run(prompt, { sessionId, onNotification: observe });
+          // A follow-up queued while the turn was running is answered on the
+          // same session, so the agent keeps its context instead of restarting.
+          while (followUps.length > 0 && !aborted) {
+            run = await driver.run(followUps.shift()!, { sessionId, onNotification: observe });
+          }
+          acceptingFollowUps = false;
+          const result: SingleResult = {
+            agent: spec.agent,
+            ...(spec.name === undefined ? {} : { name: spec.name }),
+            task: spec.task,
+            exitCode: aborted ? 1 : 0,
+            messages: [{ role: "assistant", content: run.finalResponse }],
+            usage: NO_USAGE,
+            model: text(options.config, "model") ?? spec.model ?? "",
+            correlationId: options.correlationId,
+            durationMs: Date.now() - startedAt,
+            toolCount: completedTools(run.events),
+            // The session id stays addressable, so a later teammate-send can
+            // reach this agent again.
+            wakeable: !aborted,
+            terminalStatus: aborted ? "terminated" : "completed",
+          };
+          options.onTurnComplete?.(result, result.terminalStatus);
+          return {
+            result,
+            recovery: {
+              settlementAuthority: sawTurnEnd(run.events) ? "authoritative" : "inferred",
+              completedToolCount: result.toolCount ?? 0,
+              inFlightToolCount: 0,
+              preActivityInfrastructureExit: false,
+              externalReplayRisk: false,
+            },
+            reclamation: driver.close().then(
+              () => ({ status: "reclaimed" as const }),
+              (cause: unknown) => ({
+                status: "unreaped" as const,
+                reason: `dsh runtime close failed: ${String(cause)}`,
+              }),
+            ),
+          };
+        } catch (cause) {
+          const result: SingleResult = {
+            agent: spec.agent,
+            ...(spec.name === undefined ? {} : { name: spec.name }),
+            task: spec.task,
+            exitCode: 1,
+            messages: [{ role: "system", content: `dsh run failed: ${String(cause)}` }],
+            usage: NO_USAGE,
+            model: text(options.config, "model") ?? spec.model ?? "",
+            correlationId: options.correlationId,
+            durationMs: Date.now() - startedAt,
+            wakeable: false,
+            terminalStatus: "failed",
+          };
+          return {
+            result,
+            recovery: {
+              settlementAuthority: "unknown",
+              completedToolCount: 0,
+              // A transport failure hides whatever the runtime already did, so
+              // the host must treat the attempt's effects as unobserved.
+              inFlightToolCount: 0,
+              preActivityInfrastructureExit: false,
+              externalReplayRisk: true,
+            },
+            reclamation: driver.close().then(
+              () => ({ status: "reclaimed" as const }),
+              (closeCause: unknown) => ({
+                status: "unreaped" as const,
+                reason: `dsh runtime close failed after run failure: ${String(closeCause)}`,
+              }),
+            ),
+          };
+        }
+      })();
+
+      return {
+        outcome,
+        send(message: string, mode: ControlMode): boolean {
+          // Mid-turn interruption has no wire representation here, so steering
+          // is refused outright rather than delivered late under its name.
+          if (mode === "steer") return false;
+          if (aborted || !acceptingFollowUps) return false;
+          followUps.push(message);
+          return true;
+        },
+        abort(): void {
+          aborted = true;
+          void driver.close().catch(() => {
+            // Close failures surface through the reclamation outcome instead.
+          });
+        },
+      };
+    },
+  };
+}
