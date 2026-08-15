@@ -7,13 +7,12 @@
  */
 
 import { readFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   BackendRegistryConfig,
   TeammateExecutionMode,
 } from "pi-maestro-backend-core/v1/registry";
-import type { TeammateBackend } from "pi-maestro-backend-core/v1/backend";
+
 import type { TeammateRunSpec } from "pi-maestro-backend-core/v1/spec";
 import { TeammateBackendRegistry } from "pi-maestro-backends";
 import { createPiSubprocessBackend, type PiSubprocessRunExtras } from "./pi-subprocess.ts";
@@ -40,31 +39,6 @@ const BUILT_IN: BackendRegistryConfig = {
 
 /** The modes a document may name; anything else is a load-time error. */
 const MODES: readonly TeammateExecutionMode[] = ["legacy", "backend-registry"];
-
-/**
- * Read the project's registration document.
- *
- * A missing file is the documented default, not a failure. Malformed JSON is a
- * failure: silently running the built-in registration would hide a document the
- * operator believes is in effect.
- *
- * @param workspaceRoot - directory holding `.pi/`.
- * @returns the registration document, or the built-in one when none exists.
- */
-export async function readBackendRegistryConfig(
-  workspaceRoot: string,
-): Promise<BackendRegistryConfig> {
-  const path = join(workspaceRoot, REGISTRY_FILE);
-  let raw: string;
-  try {
-    raw = await readFile(path, "utf-8");
-  } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return BUILT_IN;
-    throw new Error(`teammate backend registry at ${path} could not be read`, { cause });
-  }
-
-  return parseBackendRegistryDocument(raw, path);
-}
 
 /**
  * Validate one registration document.
@@ -120,89 +94,6 @@ function parseBackendRegistryDocument(raw: string, path: string): BackendRegistr
   };
 }
 
-/**
- * Build the registry for one dispatch.
- *
- * @param workspaceRoot - directory holding `.pi/`.
- * @param extrasOf - per-run host wiring handed to the Pi backend.
- * @param modeOverride - forces a mode regardless of what the document says.
- * @returns the registry, or undefined when the mode keeps the legacy path.
- */
-export async function createTeammateBackendRegistry(
-  workspaceRoot: string,
-  extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras,
-  modeOverride?: TeammateExecutionMode,
-): Promise<TeammateBackendRegistry | undefined> {
-  const config = await readBackendRegistryConfig(workspaceRoot);
-  if ((modeOverride ?? config.mode ?? "legacy") === "legacy") return undefined;
-  const pi = createPiSubprocessBackend(extrasOf);
-  return new TeammateBackendRegistry(config, async (module): Promise<TeammateBackend> => {
-    // Pi is in this process already; importing it by specifier would load a
-    // second copy with its own module state.
-    if (module === PI_SUBPROCESS) return pi;
-    return (await import(module)) as TeammateBackend;
-  });
-}
-
-/**
- * Documents already read, keyed by workspace root.
- *
- * The registration document is deployment configuration, not per-run state, so
- * re-reading it on every dispatch would charge a synchronous file read per task
- * for a value that changes when an operator edits a file. A rejected read is
- * evicted so a transient failure does not wedge the workspace permanently.
- */
-const documentReads = new Map<string, Promise<BackendRegistryConfig>>();
-
-/**
- * Read the registration document, reusing an earlier read of the same root.
- *
- * @param workspaceRoot - directory holding `.pi/`.
- * @returns the registration document.
- */
-export function cachedBackendRegistryConfig(
-  workspaceRoot: string,
-): Promise<BackendRegistryConfig> {
-  const hit = documentReads.get(workspaceRoot);
-  if (hit !== undefined) return hit;
-  const read = readBackendRegistryConfig(workspaceRoot).catch((cause: unknown) => {
-    documentReads.delete(workspaceRoot);
-    throw cause;
-  });
-  documentReads.set(workspaceRoot, read);
-  return read;
-}
-
-/** Forget a cached document; an operator edit takes effect on the next dispatch. */
-export function forgetBackendRegistryConfig(workspaceRoot?: string): void {
-  if (workspaceRoot === undefined) documentReads.clear();
-  else documentReads.delete(workspaceRoot);
-}
-
-/**
- * Resolve the registry a dispatch should use, or undefined for the legacy path.
- *
- * This is what makes the seam live: without it `RunTeammateOptions.backendRegistry`
- * is never populated by anything but a test, and every dispatch takes the legacy
- * branch regardless of what the document says.
- *
- * @param workspaceRoot - directory holding `.pi/`.
- * @param extrasOf - per-run host wiring handed to the Pi backend.
- * @returns the registry, or undefined when the document keeps the legacy path.
- */
-export async function resolveDispatchRegistry(
-  workspaceRoot: string,
-  extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras,
-): Promise<TeammateBackendRegistry | undefined> {
-  const config = await cachedBackendRegistryConfig(workspaceRoot);
-  if ((config.mode ?? "legacy") === "legacy") return undefined;
-  const pi = createPiSubprocessBackend(extrasOf);
-  return new TeammateBackendRegistry(config, async (module): Promise<TeammateBackend> => {
-    if (module === PI_SUBPROCESS) return pi;
-    return (await import(module)) as TeammateBackend;
-  });
-}
-
 /** Synchronously resolved documents, keyed by workspace root. */
 const syncDocuments = new Map<string, BackendRegistryConfig>();
 
@@ -250,11 +141,27 @@ export function dispatchRegistrySync(
 ): TeammateBackendRegistry | undefined {
   const config = backendRegistryConfigSync(workspaceRoot);
   if ((config.mode ?? "legacy") === "legacy") return undefined;
+  return new TeammateBackendRegistry(config, backendLoader(extrasOf));
+}
+
+/**
+ * Resolve a registration's module to something the registry can narrow.
+ *
+ * The return type is `unknown` rather than `TeammateBackend`: a module
+ * namespace is not a backend, and asserting that it is defeats the registry's
+ * own check — which is exactly how a backend with no default export came to be
+ * unregisterable while the loader compiled cleanly.
+ *
+ * @param extrasOf - per-run host wiring handed to the Pi backend.
+ * @returns the loader.
+ */
+function backendLoader(
+  extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras,
+): (module: string) => Promise<unknown> {
+  // Pi is in this process already; importing it by specifier would load a
+  // second copy with its own module state.
   const pi = createPiSubprocessBackend(extrasOf);
-  return new TeammateBackendRegistry(config, async (module): Promise<TeammateBackend> => {
-    if (module === PI_SUBPROCESS) return pi;
-    return (await import(module)) as TeammateBackend;
-  });
+  return async (module) => (module === PI_SUBPROCESS ? pi : await import(module));
 }
 
 /** Forget synchronously cached documents so an operator edit takes effect. */

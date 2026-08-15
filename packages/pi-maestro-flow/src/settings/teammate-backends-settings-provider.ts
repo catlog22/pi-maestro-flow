@@ -376,6 +376,12 @@ export function createTeammateBackendsSettingsProvider(
         });
 
         if (field.kind !== "credential-ref") continue;
+        // This provider writes into the runtime's own env file and nothing
+        // else. A field asking for a process environment variable would need
+        // the host to construct the child's environment around a provider
+        // credential, which is exactly the custody this design refuses — so it
+        // gets no editor rather than an editor that writes somewhere else.
+        if (field.credentialLocation === "env-var") continue;
         order += 1;
         list.push({
           key: secretKey(backend.name, field.key),

@@ -116,7 +116,10 @@ const CONFIG_FIELDS: readonly BackendConfigField[] = [
     // for itself. Nothing here ever reads the value.
     key: "apiKeyEnv",
     kind: "credential-ref",
-    credentialLocation: "env-var",
+    // The runtime loads its own env file from beside its cordis.yml, so the
+    // host writes a key there. Declaring "env-var" would ask the host to build
+    // the child's environment around a provider credential it must never hold.
+    credentialLocation: "env-file-key",
     labelKey: "dsh.apiKeyEnv",
     descriptionKey: "dsh.apiKeyEnv.description",
     default: "DEEPSEEK_API_KEY",

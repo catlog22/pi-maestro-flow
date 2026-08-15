@@ -213,12 +213,20 @@ export interface BackendConfigField {
   /** A missing value with no default is a load-time error. */
   required?: boolean;
   /**
-   * For `kind: "credential-ref"`, where the runtime looks the secret up.
+   * For `kind: "credential-ref"`, where the host must put the secret.
    *
-   * The field holds the name of that location, never the secret itself, so a
+   * The field itself holds the name of that location, never the secret, so a
    * registration document can be committed and a settings editor can display
    * the value in full. Masking a stored secret only hides it on screen; storing
    * a reference means there is nothing to hide.
+   *
+   * `env-file-key` — a key in the runtime's own env file, which the runtime
+   * loads for itself. This is the only location a host can serve without taking
+   * custody of a provider credential.
+   *
+   * `env-var` — a variable in the runtime process's environment. A host that
+   * does not construct that environment cannot serve it, and must reject the
+   * registration rather than write the secret somewhere else.
    */
   credentialLocation?: "env-var" | "env-file-key";
 }

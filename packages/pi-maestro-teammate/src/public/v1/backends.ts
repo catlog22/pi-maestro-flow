@@ -10,10 +10,8 @@
 export {
   PI_SUBPROCESS,
   backendRegistryConfigSync,
-  createTeammateBackendRegistry,
   dispatchRegistrySync,
   forgetBackendRegistryConfigSync,
-  readBackendRegistryConfig,
 } from "../../backends/registry-host.ts";
 export { PI_SUBPROCESS_CONFIG_FIELDS } from "../../backends/pi-subprocess.ts";
 export type { PiSubprocessRunExtras } from "../../backends/pi-subprocess.ts";

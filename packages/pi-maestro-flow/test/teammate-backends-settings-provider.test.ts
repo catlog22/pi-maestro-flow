@@ -19,7 +19,7 @@ const BACKENDS = [
     {
       key: "apiKeyEnv",
       kind: "credential-ref" as const,
-      credentialLocation: "env-var" as const,
+      credentialLocation: "env-file-key" as const,
       labelKey: "dsh.apiKeyEnv",
       default: "DEEPSEEK_API_KEY",
     },
@@ -272,6 +272,29 @@ test("the credential directory is owner-only, not just the file", async () => {
     { operation: "set", key: "teammateBackends.dsh.apiKeyEnv.value", scope: "global", value: "sk-x" },
   ]);
   assert.equal(statSync(join(p.credentialRoot, "dsh")).mode & 0o777, 0o700);
+});
+
+test("a credential the host cannot place gets no editor rather than a misplaced write", async () => {
+  const workspaceRoot = mkdtempSync(join(tmpdir(), "tb-ws-"));
+  const credentialRoot = mkdtempSync(join(tmpdir(), "tb-cred-"));
+  const instance = createTeammateBackendsSettingsProvider({
+    workspaceRoot,
+    credentialRoot,
+    backends: [{
+      name: "envvar", module: "some-backend", configFields: [{
+        key: "token",
+        kind: "credential-ref" as const,
+        credentialLocation: "env-var" as const,
+        labelKey: "envvar.token",
+      }],
+    }],
+  });
+  const keys = (await instance.describe({ context })).settings.map((s) => s.key);
+  // The reference name is still editable; only the secret value is refused,
+  // because this provider writes into the runtime's own env file and nothing
+  // would ever read a process variable it cannot set.
+  assert.ok(keys.includes("teammateBackends.envvar.token"));
+  assert.equal(keys.includes("teammateBackends.envvar.token.value"), false);
 });
 
 test("a malformed document is left alone rather than replaced with a plausible one", async () => {
