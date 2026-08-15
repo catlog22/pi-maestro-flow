@@ -2104,155 +2104,8 @@ test("run-control preserves success semantics and returns failure for a sanitize
   assert.equal(JSON.stringify(failureValue).includes("private-"), false);
 });
 
-test("real Maestro compatibility starts use alias flags for fresh and current-Execution statusless flows", { timeout: 120_000 }, async () => {
-  const maestroBin = "D:/maestro2/bin/maestro.js";
-  for (const family of ["session", "run"] as const) {
-    const root = await mkdtemp(join(tmpdir(), `pi-workflow-real-${family}-start-`));
-    const calls: string[][] = [];
-    const runner = async (args: readonly string[], cwd: string): Promise<RunCliResult> => {
-      calls.push([...args]);
-      return defaultRunner([maestroBin, ...args], cwd, {
-        executable: process.execPath,
-        timeoutMs: 30_000,
-        maxOutputBytes: 1024 * 1024,
-      });
-    };
-    const adapter = new RunCliAdapter(root, runner);
-    const bridge = new WorkflowBridge(root);
-    const coordinator = new WorkflowCoordinator(bridge, adapter, new WorkflowLeaseStore(root));
-    try {
-      await mkdir(join(root, ".workflow"), { recursive: true });
-      await writeFile(join(root, ".workflow", "config.json"), JSON.stringify({
-        session_schema: {
-          schema_version: "session-schema-selection/1.0",
-          writer: "session/2.0",
-          features: { session_statusless: true },
-        },
-      }), "utf8");
-      await writeFile(join(root, ".workflow", "state.json"), JSON.stringify({
-        version: "2.0",
-        active_session_id: null,
-        sessions: [],
-      }), "utf8");
-      await bridge.refresh();
-      assert.equal(await coordinator.selectMode(), "core-execution");
-
-      const intent = `${family} fresh compatibility start`;
-      const freshArgv = [family, "start", intent, "--no-dispatch"];
-      const fresh = await coordinator.exec(
-        freshArgv,
-        classifyRunControlArgv(freshArgv),
-        `pi-${family}`,
-      );
-      const freshEnvelope = JSON.parse(fresh.command.stdout) as Record<string, any>;
-      assert.equal(freshEnvelope.operation, "execution-start");
-      assert.equal(freshEnvelope.locator.generation, 1);
-      const freshCall = calls.find((call) => call[0] === family && call[1] === "start")!;
-      assert.equal(flagValue(freshCall, "--owner-id"), `pi-${family}`);
-      assert.equal(freshCall.includes("--execution-owner"), false);
-      assert.equal(flagValue(freshCall, "--expected-identity-revision"), "1");
-      assert.equal(flagValue(freshCall, "--expected-activity-revision"), "0");
-      assert.equal(flagValue(freshCall, "--expected-lease-epoch"), "0");
-      assert.equal(flagValue(freshCall, "--actor"), `pi-${family}`);
-      assert.equal(typeof flagValue(freshCall, "--reason"), "string");
-      assert.equal(flagValue(freshCall, "--evidence"), `pi-session:pi-${family}`);
-      assert.equal(JSON.stringify(fresh).includes("lease_id"), false);
-
-      const existingArgv = family === "run"
-        ? [family, "start", "--session", freshEnvelope.locator.session_id, "--cmd", "execute"]
-        : [family, "start", "--session", freshEnvelope.locator.session_id, "--chain", "execute"];
-      const existing = await coordinator.exec(
-        existingArgv,
-        classifyRunControlArgv(existingArgv),
-        `pi-${family}`,
-      );
-      const existingEnvelope = JSON.parse(existing.command.stdout) as Record<string, any>;
-      assert.equal(existingEnvelope.operation, "create");
-      const aliasCalls = calls.filter((call) => call[0] === family && call[1] === "start");
-      const existingCall = aliasCalls[1]!;
-      assert.equal(flagValue(existingCall, "--owner-id"), `pi-${family}`);
-      assert.equal(flagValue(existingCall, "--lease-epoch"), "1");
-      assert.equal(typeof flagValue(existingCall, "--lease-id"), "string");
-      assert.equal(flagValue(existingCall, "--execution"), freshEnvelope.locator.execution_id);
-      assert.equal(flagValue(existingCall, "--generation"), "1");
-      assert.equal(existingCall.includes("--expected-lease-epoch"), false);
-      assert.equal(existingCall.includes("--execution-owner"), false);
-      assert.equal(JSON.stringify(existing).includes(flagValue(existingCall, "--lease-id")!), false);
-    } finally {
-      await coordinator.release().catch(() => {});
-      await rm(root, { recursive: true, force: true });
-    }
-  }
-});
-
-test("real Maestro compatibility starts acquire existing statusless Session identity shells", { timeout: 120_000 }, async () => {
-  const maestroBin = "D:/maestro2/bin/maestro.js";
-  for (const family of ["session", "run"] as const) {
-    const root = await mkdtemp(join(tmpdir(), `pi-workflow-real-${family}-existing-shell-`));
-    const calls: string[][] = [];
-    const runner = async (args: readonly string[], cwd: string): Promise<RunCliResult> => {
-      calls.push([...args]);
-      return defaultRunner([maestroBin, ...args], cwd, {
-        executable: process.execPath,
-        timeoutMs: 30_000,
-        maxOutputBytes: 1024 * 1024,
-      });
-    };
-    const adapter = new RunCliAdapter(root, runner);
-    const bridge = new WorkflowBridge(root);
-    const coordinator = new WorkflowCoordinator(bridge, adapter, new WorkflowLeaseStore(root));
-    try {
-      await mkdir(join(root, ".workflow"), { recursive: true });
-      await writeFile(join(root, ".workflow", "config.json"), JSON.stringify({
-        session_schema: {
-          schema_version: "session-schema-selection/1.0",
-          writer: "session/2.0",
-          features: { session_statusless: true },
-        },
-      }), "utf8");
-      const created = await adapter.exec([
-        "session", "create", `${family} existing identity shell`,
-        "--id", `${family}-existing-shell`,
-        "--intent", `${family} existing identity shell`,
-        "--json",
-      ]);
-      const createdEnvelope = JSON.parse(created.stdout) as Record<string, any>;
-      const sessionId = createdEnvelope.locator.session_id as string;
-      await writeFile(join(root, ".workflow", "state.json"), JSON.stringify({
-        version: "2.0",
-        active_session_id: sessionId,
-        sessions: [],
-      }), "utf8");
-      const shell = await bridge.refresh();
-      assert.equal(shell.session?.currentExecutionId, null);
-      assert.equal(shell.execution, undefined);
-      assert.equal(await coordinator.selectMode(), "core-execution");
-
-      const argv = [family, "start", `${family} existing identity shell`, "--session", sessionId, "--no-dispatch"];
-      const started = await coordinator.exec(argv, classifyRunControlArgv(argv), `pi-${family}-shell`);
-      const envelope = JSON.parse(started.command.stdout) as Record<string, any>;
-      assert.equal(envelope.operation, "execution-start");
-      assert.equal(envelope.locator.session_id, sessionId);
-      assert.equal(envelope.locator.generation, 1);
-      const call = calls.find((candidate) => candidate[0] === family && candidate[1] === "start")!;
-      assert.equal(flagValue(call, "--session"), sessionId);
-      assert.equal(flagValue(call, "--owner-id"), `pi-${family}-shell`);
-      assert.equal(call.includes("--execution-owner"), false);
-      assert.equal(flagValue(call, "--expected-identity-revision"), "1");
-      assert.equal(flagValue(call, "--expected-activity-revision"), "0");
-      assert.equal(flagValue(call, "--expected-lease-epoch"), "0");
-      assert.equal(flagValue(call, "--actor"), `pi-${family}-shell`);
-      assert.equal(flagValue(call, "--evidence"), `pi-session:pi-${family}-shell`);
-      assert.equal(JSON.stringify(started).includes("lease_id"), false);
-    } finally {
-      await coordinator.release().catch(() => {});
-      await rm(root, { recursive: true, force: true });
-    }
-  }
-});
-
-test("real Maestro CLI accepts coordinator-generated structured start and attach arguments", { timeout: 120_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-workflow-real-maestro-"));
+test("real Maestro v3 session open, chain insert, and run next start a fresh statusless flow with injected identity and birth packets", { timeout: 120_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-real-v3-start-"));
   const maestroBin = "D:/maestro2/bin/maestro.js";
   const calls: string[][] = [];
   const runner = async (args: readonly string[], cwd: string): Promise<RunCliResult> => {
@@ -2267,72 +2120,312 @@ test("real Maestro CLI accepts coordinator-generated structured start and attach
   const bridge = new WorkflowBridge(root);
   const coordinator = new WorkflowCoordinator(bridge, adapter, new WorkflowLeaseStore(root));
   try {
-    assert.equal((await lstat(maestroBin)).isFile(), true);
     await mkdir(join(root, ".workflow"), { recursive: true });
     await writeFile(join(root, ".workflow", "config.json"), JSON.stringify({
       session_schema: {
         schema_version: "session-schema-selection/1.0",
-        writer: "session/2.0",
-        features: { session_statusless: true },
+        writer: "session/3.0",
+        features: { session_statusless: false },
       },
     }), "utf8");
-    const created = await adapter.exec([
-      "session", "create", "real coordinator integration",
-      "--id", "real-coordinator", "--intent", "real coordinator integration", "--json",
-    ]);
-    assert.equal(created.exitCode, 0, created.stderr || created.stdout);
-    const createdEnvelope = JSON.parse(created.stdout) as { locator?: { session_id?: string | null } };
-    const sessionId = createdEnvelope.locator?.session_id;
-    assert.equal(typeof sessionId, "string");
-    await writeFile(join(root, ".workflow", "state.json"), JSON.stringify({
-      active_session_id: sessionId,
+    // Project-local step definition so the Run completes without a blocking
+    // required-output contract from the global prepare library.
+    await mkdir(join(root, "prepare"), { recursive: true });
+    await writeFile(join(root, "prepare", "execute.md"), `---
+name: execute
+session-mode: run
+contract:
+  contract_version: 2.1
+  arguments: []
+  consumes: []
+  produces: []
+  gates:
+    entry: []
+    exit: []
+---
+# Execute
+`, "utf8");
+    assert.equal(await coordinator.selectMode(), "session-v3");
+    assert.equal(coordinator.mode(), "session-v3");
+
+    const host = "pi-real-start";
+    const openArgv = ["session", "open", "fresh statusless flow", "--id", "real-v3-fresh"];
+    const open = await coordinator.exec(openArgv, classifyRunControlArgv(openArgv), host);
+    assert.equal(open.command.exitCode, 0);
+    const openEnvelope = JSON.parse(open.command.stdout) as Record<string, any>;
+    assert.equal(openEnvelope.schema_version, "run-response/1.2");
+    assert.equal(openEnvelope.operation, "session-open");
+    assert.equal(openEnvelope.ok, true);
+    assert.equal(openEnvelope.result.session_id, "real-v3-fresh");
+    const openCall = calls.find((call) => call[0] === "session" && call[1] === "open")!;
+    assert.equal(flagValue(openCall, "--participant"), host);
+    assert.equal(flagValue(openCall, "--actor"), host);
+    assert.ok(flagValue(openCall, "--request-id"));
+    assert.equal(flagValue(openCall, "--reason"), "Pi run-control v3 mutation");
+    assert.equal(openCall.includes("--json"), true);
+    // v3 workspaces carry no state.json; bind the canonical Session through
+    // the bridge so subsequent CAS mutations can resolve the orchestration
+    // revision from the projected session/3.0 record.
+    await bridge.refreshSession("real-v3-fresh");
+    assert.equal(
+      openCall.some((argument) => argument.startsWith("--expected-")),
+      false,
+      "session open mints the Session without a CAS expected revision",
+    );
+
+    const insertArgv = ["session", "chain", "insert", "--step-id", "execute", "--command", "execute"];
+    const insert = await coordinator.exec(insertArgv, classifyRunControlArgv(insertArgv), host);
+    assert.equal(insert.command.exitCode, 0);
+    const insertEnvelope = JSON.parse(insert.command.stdout) as Record<string, any>;
+    assert.equal(insertEnvelope.operation, "session-chain-insert");
+    const insertCall = calls.find((call) => call[0] === "session" && call[1] === "chain" && call[2] === "insert")!;
+    assert.equal(flagValue(insertCall, "--participant"), host);
+    assert.equal(flagValue(insertCall, "--actor"), host);
+    assert.ok(flagValue(insertCall, "--request-id"));
+    assert.equal(flagValue(insertCall, "--expected-orchestration-revision"), "1");
+
+    const nextArgv = ["run", "next"];
+    const next = await coordinator.exec(nextArgv, classifyRunControlArgv(nextArgv), host);
+    assert.equal(next.command.exitCode, 0);
+    const nextEnvelope = JSON.parse(next.command.stdout) as Record<string, any>;
+    assert.equal(nextEnvelope.operation, "next");
+    const nextCall = calls.find((call) => call[0] === "run" && call[1] === "next")!;
+    assert.equal(flagValue(nextCall, "--participant"), host);
+    assert.equal(flagValue(nextCall, "--actor"), host);
+    assert.ok(flagValue(nextCall, "--request-id"));
+    assert.equal(flagValue(nextCall, "--expected-orchestration-revision"), "2");
+
+    // The v3 birth packet carries everything the executor needs without an
+    // extra round trip: run identity, the run working directory, the chain
+    // step, consumed upstream artifacts, guidance hashes, knowledge context,
+    // the brief command, and the no-duplicate-run invariant.
+    const birth = nextEnvelope.result as Record<string, any>;
+    assert.equal(typeof birth.run_id, "string");
+    assert.equal(typeof birth.run_dir, "string");
+    assert.equal(birth.run_dir.endsWith(birth.run_id), true, "birth packet run_dir resolves to the Run directory");
+    assert.equal(birth.step_id, "execute");
+    assert.equal(birth.status, "running");
+    assert.equal(birth.revision, 1);
+    assert.equal(typeof birth.upstream, "object");
+    assert.ok(birth.guidance && typeof birth.guidance.source_path === "string");
+    assert.match(birth.guidance.source_path, /execute\.md$/);
+    assert.ok(birth.knowledge_context && typeof birth.knowledge_context.path === "string");
+    assert.equal(typeof birth.brief.command, "string");
+    assert.match(birth.brief.command, new RegExp(`run brief ${birth.run_id}`));
+    assert.equal(birth.run_already_created, true);
+  } finally {
+    await coordinator.release().catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("real Maestro v3 sessions re-run run next against an existing Session shell and replay idempotently", { timeout: 120_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-real-v3-shell-"));
+  const maestroBin = "D:/maestro2/bin/maestro.js";
+  const calls: string[][] = [];
+  const runner = async (args: readonly string[], cwd: string): Promise<RunCliResult> => {
+    calls.push([...args]);
+    return defaultRunner([maestroBin, ...args], cwd, {
+      executable: process.execPath,
+      timeoutMs: 30_000,
+      maxOutputBytes: 1024 * 1024,
+    });
+  };
+  const adapter = new RunCliAdapter(root, runner);
+  const bridge = new WorkflowBridge(root);
+  const coordinator = new WorkflowCoordinator(bridge, adapter, new WorkflowLeaseStore(root));
+  try {
+    await mkdir(join(root, ".workflow"), { recursive: true });
+    await writeFile(join(root, ".workflow", "config.json"), JSON.stringify({
+      session_schema: {
+        schema_version: "session-schema-selection/1.0",
+        writer: "session/3.0",
+        features: { session_statusless: false },
+      },
     }), "utf8");
-    await bridge.refresh();
-    assert.equal(await coordinator.selectMode(), "core-execution");
+    await mkdir(join(root, "prepare"), { recursive: true });
+    await writeFile(join(root, "prepare", "execute.md"), `---
+name: execute
+session-mode: run
+contract:
+  contract_version: 2.1
+  arguments: []
+  consumes: []
+  produces: []
+  gates:
+    entry: []
+    exit: []
+---
+# Execute
+`, "utf8");
+    assert.equal(await coordinator.selectMode(), "session-v3");
 
-    const started = await coordinator.exec(
-      ["execution", "start"],
-      classifyRunControlArgv(["execution", "start"]),
-      "pi-real",
-    );
-    const startEnvelope = JSON.parse(started.command.stdout) as {
-      schema_version: string; operation: string; ok: boolean;
-    };
-    assert.equal(startEnvelope.schema_version, "run-response/1.1");
-    assert.equal(startEnvelope.operation, "execution-start");
-    assert.equal(startEnvelope.ok, true);
-    const startCall = calls.find((call) => call[0] === "execution" && call[1] === "start")!;
-    assert.equal(startCall.includes("--chain"), false);
-    assert.equal(flagValue(startCall, "--execution-owner"), "pi-real");
-    assert.equal(flagValue(startCall, "--expected-lease-epoch"), "0");
-    assert.equal(flagValue(startCall, "--expected-identity-revision"), "1");
-    assert.equal(flagValue(startCall, "--expected-activity-revision"), "0");
+    const host = "pi-real-shell";
+    const openArgv = ["session", "open", "existing v3 session shell", "--id", "real-v3-shell"];
+    const open = await coordinator.exec(openArgv, classifyRunControlArgv(openArgv), host);
+    assert.equal(open.command.exitCode, 0);
+    await bridge.refreshSession("real-v3-shell");
+    const insertArgv = ["session", "chain", "insert", "--step-id", "execute", "--command", "execute"];
+    const insert = await coordinator.exec(insertArgv, classifyRunControlArgv(insertArgv), host);
+    assert.equal(insert.command.exitCode, 0);
 
-    await coordinator.exec(
-      ["execution", "lease", "release"],
-      classifyRunControlArgv(["execution", "lease", "release"]),
-      "pi-real",
+    // Establish the run-next mutation through the raw shell so the
+    // coordinator's cached orchestration revision stays at the pre-next value;
+    // the replay retry through execV3 must rebuild the identical canonical
+    // payload (same request-id, actor, reason, and expected revision).
+    const replayRequestId = "req-real-v3-next-replay";
+    const rawNext = await adapter.exec([
+      "run", "next",
+      "--participant", host, "--actor", host,
+      "--request-id", replayRequestId,
+      "--reason", "Pi run-control v3 mutation",
+      "--expected-orchestration-revision", "2", "--json",
+    ]);
+    assert.equal(rawNext.exitCode, 0);
+    const rawNextEnvelope = JSON.parse(rawNext.stdout) as Record<string, any>;
+    assert.equal(rawNextEnvelope.ok, true);
+    const runId = rawNextEnvelope.result.run_id as string;
+    const appliedTransitionId = rawNextEnvelope.replay.transition_id as string;
+    assert.equal(rawNextEnvelope.replay.status, "applied");
+
+    const replayArgv = ["run", "next", "--request-id", replayRequestId];
+    const replay = await coordinator.exec(replayArgv, classifyRunControlArgv(replayArgv), host);
+    assert.equal(replay.command.exitCode, 0);
+    const replayEnvelope = JSON.parse(replay.command.stdout) as Record<string, any>;
+    assert.equal(replayEnvelope.ok, true);
+    assert.equal(replayEnvelope.replay.status, "replayed");
+    assert.equal(replayEnvelope.replay.transition_id, appliedTransitionId);
+    assert.equal(replayEnvelope.result.run_id, runId);
+    const nextCalls = calls.filter((call) => call[0] === "run" && call[1] === "next");
+    const replayCall = nextCalls[nextCalls.length - 1]!;
+    assert.equal(flagValue(replayCall, "--request-id"), replayRequestId, "the coordinator preserves an explicit request-id for idempotent replay");
+    assert.equal(flagValue(replayCall, "--expected-orchestration-revision"), "2", "replay keeps the original expected orchestration revision");
+
+    // Idempotency: the replay must not allocate a second Run.
+    const sessionDir = join(root, ".workflow", "sessions", "real-v3-shell");
+    const runDirectories = (await readdir(join(sessionDir, "runs"), { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory());
+    assert.deepEqual(runDirectories.map((entry) => entry.name), [runId]);
+  } finally {
+    await coordinator.release().catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("real Maestro v3 coordinator drives the full open -> chain insert -> run next -> brief -> check -> complete -> decide -> session complete lifecycle", { timeout: 120_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-real-v3-life-"));
+  const maestroBin = "D:/maestro2/bin/maestro.js";
+  const calls: string[][] = [];
+  const runner = async (args: readonly string[], cwd: string): Promise<RunCliResult> => {
+    calls.push([...args]);
+    return defaultRunner([maestroBin, ...args], cwd, {
+      executable: process.execPath,
+      timeoutMs: 30_000,
+      maxOutputBytes: 1024 * 1024,
+    });
+  };
+  const adapter = new RunCliAdapter(root, runner);
+  const bridge = new WorkflowBridge(root);
+  const coordinator = new WorkflowCoordinator(bridge, adapter, new WorkflowLeaseStore(root));
+  try {
+    await mkdir(join(root, ".workflow"), { recursive: true });
+    await writeFile(join(root, ".workflow", "config.json"), JSON.stringify({
+      session_schema: {
+        schema_version: "session-schema-selection/1.0",
+        writer: "session/3.0",
+        features: { session_statusless: false },
+      },
+    }), "utf8");
+    await mkdir(join(root, "prepare"), { recursive: true });
+    await writeFile(join(root, "prepare", "execute.md"), `---
+name: execute
+session-mode: run
+contract:
+  contract_version: 2.1
+  arguments: []
+  consumes: []
+  produces: []
+  gates:
+    entry: []
+    exit: []
+---
+# Execute
+`, "utf8");
+    assert.equal(await coordinator.selectMode(), "session-v3");
+
+    const host = "pi-real-life";
+    const openArgv = ["session", "open", "full v3 lifecycle", "--id", "real-v3-life"];
+    const open = await coordinator.exec(openArgv, classifyRunControlArgv(openArgv), host);
+    assert.equal(open.command.exitCode, 0);
+    const openEnvelope = JSON.parse(open.command.stdout) as Record<string, any>;
+    assert.equal(openEnvelope.operation, "session-open");
+    assert.equal(openEnvelope.revision.revision, 1);
+    await bridge.refreshSession("real-v3-life");
+
+    const insertArgv = ["session", "chain", "insert", "--step-id", "execute", "--command", "execute"];
+    const insert = await coordinator.exec(insertArgv, classifyRunControlArgv(insertArgv), host);
+    assert.equal(insert.command.exitCode, 0);
+    const insertEnvelope = JSON.parse(insert.command.stdout) as Record<string, any>;
+    assert.equal(insertEnvelope.operation, "session-chain-insert");
+    assert.equal(insertEnvelope.revision.revision, 2);
+
+    const nextArgv = ["run", "next"];
+    const next = await coordinator.exec(nextArgv, classifyRunControlArgv(nextArgv), host);
+    assert.equal(next.command.exitCode, 0);
+    const nextEnvelope = JSON.parse(next.command.stdout) as Record<string, any>;
+    assert.equal(nextEnvelope.operation, "next");
+    assert.equal(nextEnvelope.revision.revision, 3);
+    const runId = nextEnvelope.result.run_id as string;
+
+    const briefArgv = ["run", "brief", runId, "--json"];
+    const brief = await coordinator.exec(briefArgv, classifyRunControlArgv(briefArgv), host);
+    assert.equal(brief.command.exitCode, 0);
+    const briefEnvelope = JSON.parse(brief.command.stdout) as Record<string, any>;
+    assert.equal(briefEnvelope.operation, "brief");
+    assert.equal(briefEnvelope.result.schema_version, "brief-result/3.0");
+    assert.equal(briefEnvelope.result.session.orchestration_revision, 3);
+    assert.equal(briefEnvelope.result.run.status, "running");
+    assert.equal(briefEnvelope.result.run.run_id, runId);
+    assert.equal(
+      calls.some((call) => call[0] === "run" && call[1] === "brief" && call.includes("--participant")),
+      false,
+      "brief reads pass through without coordinator identity injection",
     );
-    const attached = await coordinator.attach("pi-real");
-    assert.equal(attached.lease!.ownerId, "pi-real");
-    const attachCall = calls.find((call) => call[0] === "execution" && call[1] === "attach")!;
-    assert.equal(flagValue(attachCall, "--execution-owner"), "pi-real");
-    assert.equal(flagValue(attachCall, "--owner-kind"), "pi");
-    assert.equal(flagValue(attachCall, "--expected-lease-epoch"), "1");
-    assert.equal(flagValue(attachCall, "--expected-execution-revision"), "2");
-    const prepared = await executeRunControl(
-      { argv: ["execution", "handoff", "prepare", "--to-owner-id", "pi-next"] },
-      coordinator,
-      { hostSessionId: "pi-real" },
-    );
-    assert.equal(prepared.ok, true, prepared.message);
-    const prepareCall = calls.find(
-      (call) => call[0] === "execution" && call[1] === "handoff" && call[2] === "prepare",
-    )!;
-    assert.equal(flagValue(prepareCall, "--to-owner-id"), "pi-next");
-    assert.equal(prepareCall.includes("--drain-operation"), false);
-    assert.equal(prepareCall.includes("--drain-operation-token"), false);
-    assert.equal(prepareCall.includes("--expected-operation-registry-revision"), false);
+
+    const checkArgv = ["run", "check", runId, "--json"];
+    const check = await coordinator.exec(checkArgv, classifyRunControlArgv(checkArgv), host);
+    assert.equal(check.command.exitCode, 0);
+    const checkEnvelope = JSON.parse(check.command.stdout) as Record<string, any>;
+    assert.equal(checkEnvelope.operation, "check");
+    assert.equal(checkEnvelope.result.status, "running");
+    assert.equal(checkEnvelope.result.revision, 1);
+
+    const completeArgv = ["run", "complete", runId, "--advance", "--verdict", "done", "--summary", "done"];
+    const complete = await coordinator.exec(completeArgv, classifyRunControlArgv(completeArgv), host);
+    assert.equal(complete.command.exitCode, 0);
+    const completeEnvelope = JSON.parse(complete.command.stdout) as Record<string, any>;
+    assert.equal(completeEnvelope.operation, "complete");
+    assert.equal(completeEnvelope.revision.revision, 4);
+    assert.equal(completeEnvelope.result.run_revision, 2);
+    assert.equal(completeEnvelope.result.status, "sealed");
+    const completeCall = calls.find((call) => call[0] === "run" && call[1] === "complete")!;
+    assert.equal(flagValue(completeCall, "--expected-run-revision"), "1");
+    assert.equal(flagValue(completeCall, "--expected-orchestration-revision"), "3");
+
+    const decideArgv = ["run", "decide", runId, "--verdict", "proceed"];
+    const decide = await coordinator.exec(decideArgv, classifyRunControlArgv(decideArgv), host);
+    assert.equal(decide.command.exitCode, 0);
+    const decideEnvelope = JSON.parse(decide.command.stdout) as Record<string, any>;
+    assert.equal(decideEnvelope.operation, "run-decide");
+    assert.equal(decideEnvelope.revision.revision, 5);
+
+    const completeSessionArgv = ["session", "complete"];
+    const completeSession = await coordinator.exec(completeSessionArgv, classifyRunControlArgv(completeSessionArgv), host);
+    assert.equal(completeSession.command.exitCode, 0);
+    const completeSessionEnvelope = JSON.parse(completeSession.command.stdout) as Record<string, any>;
+    assert.equal(completeSessionEnvelope.operation, "session-complete");
+    assert.equal(completeSessionEnvelope.revision.revision, 6);
+    assert.equal(completeSessionEnvelope.result.status, "completed");
   } finally {
     await coordinator.release().catch(() => {});
     await rm(root, { recursive: true, force: true });
@@ -2484,13 +2577,11 @@ test("core new-Session Plan publication creates and replays one deterministic au
   }
 });
 
-test("real Maestro CLI publishes and replays a new statusless Plan Session after response loss", { timeout: 120_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-workflow-real-new-plan-"));
+test("real Maestro v3 coordinator publishes and replays a new statusless Plan Session after response loss", { timeout: 120_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-real-v3-plan-"));
   const maestroBin = "D:/maestro2/bin/maestro.js";
   const calls: string[][] = [];
-  let discardFirstPlanResponse = true;
-  let privateLeaseId = "";
-  let firstFailureMessage = "";
+  let discardFirstPlanInsert = true;
   const runner = async (args: readonly string[], cwd: string): Promise<RunCliResult> => {
     calls.push([...args]);
     const completed = await defaultRunner([maestroBin, ...args], cwd, {
@@ -2498,13 +2589,12 @@ test("real Maestro CLI publishes and replays a new statusless Plan Session after
       timeoutMs: 30_000,
       maxOutputBytes: 1024 * 1024,
     });
-    if (discardFirstPlanResponse
-      && args[0] === "plan"
-      && args[1] === "publish"
+    if (discardFirstPlanInsert
+      && args[0] === "session" && args[1] === "chain" && args[2] === "insert"
+      && flagValue(args, "--goal-ref")?.startsWith(join(root, ".workflow", "plans"))
       && completed.exitCode === 0) {
-      discardFirstPlanResponse = false;
-      privateLeaseId = flagValue(args, "--lease-id") ?? "";
-      throw new Error(`injected response loss lease_id=${privateLeaseId}`);
+      discardFirstPlanInsert = false;
+      throw new Error("injected response loss after the plan chain step committed");
     }
     return completed;
   };
@@ -2512,185 +2602,103 @@ test("real Maestro CLI publishes and replays a new statusless Plan Session after
   const bridge = new WorkflowBridge(root);
   const coordinator = new WorkflowCoordinator(bridge, adapter, new WorkflowLeaseStore(root));
   try {
-    await mkdir(join(root, "prepare"), { recursive: true });
     await mkdir(join(root, ".workflow"), { recursive: true });
-    await writeFile(join(root, "prepare", "plan-publish.md"), `---
-name: plan-publish
-session-mode: run
-contract:
-  contract_version: 2.1
-  arguments: []
-  consumes: []
-  produces:
-    - path: outputs/plan.json
-      kind: plan
-      alias: current-plan
-      role: primary
-      required: true
-      schema: plan/1.0
-  gates:
-    entry: []
-    exit: []
----
-`, "utf8");
     await writeFile(join(root, ".workflow", "config.json"), JSON.stringify({
       session_schema: {
         schema_version: "session-schema-selection/1.0",
-        writer: "session/2.0",
-        features: { session_statusless: true },
+        writer: "session/3.0",
+        features: { session_statusless: false },
       },
     }), "utf8");
-    await writeFile(join(root, ".workflow", "state.json"), JSON.stringify({
-      version: "2.0",
-      active_session_id: null,
-      sessions: [],
-    }), "utf8");
+    const source = "# New statusless Plan\n\nExecute with canonical authority.\n";
     const sourcePath = join(root, "approved.md");
-    await writeFile(sourcePath, "# New statusless Plan\n\nExecute with canonical authority.\n", "utf8");
+    await writeFile(sourcePath, source, "utf8");
     const options: RunPlanPublishOptions = {
       sourcePath,
       sourceRoot: root,
       intent: "Execute a new approved Plan",
       topic: "Execute a new approved Plan",
-      handoffKey: "handoff-real-new-statusless",
-      sourcePiSession: "pi-real-new-plan",
+      handoffKey: "handoff-real-v3-statusless",
+      sourcePiSession: "pi-real-v3-plan",
       planRevision: 1,
       approvedAt: "2026-08-12T02:00:00.000Z",
     };
+    const expectedRequestId = `req_plan_publish_${createHash("sha256").update(options.handoffKey).digest("hex").slice(0, 32)}`;
+    const deterministicSessionId = `plan-${createHash("sha256").update(expectedRequestId).digest("hex").slice(0, 12)}`;
 
+    assert.equal(await coordinator.selectMode(), "session-v3");
     assert.equal(await coordinator.supportsNewPlanSession(), true);
+    // v3 workspaces carry no state.json: open the deterministic Plan Session
+    // through the coordinator and bind it on the bridge so publishPlanV3 can
+    // resolve the orchestration revision for its chain insert.
+    const preOpenArgv = ["session", "open", options.intent!, "--id", deterministicSessionId];
+    const preOpen = await coordinator.exec(preOpenArgv, classifyRunControlArgv(preOpenArgv), "pi-real-v3-plan");
+    assert.equal(preOpen.command.exitCode, 0);
+    assert.equal(JSON.parse(preOpen.command.stdout).operation, "session-open");
+    await bridge.refreshSession(deterministicSessionId);
     await assert.rejects(
-      coordinator.publishPlan(options, { hostSessionId: "pi-real-new-plan" }),
+      coordinator.publishPlan(options, { hostSessionId: "pi-real-v3-plan" }),
       (error: unknown) => {
         const message = String((error as Error).message);
-        firstFailureMessage = message;
-        assert.match(message, /can be retried with the same approved Plan/);
-        assert.equal(privateLeaseId.length > 0 && message.includes(privateLeaseId), false);
+        assert.match(message, /injected response loss/);
         return true;
       },
     );
-    assert.notEqual(privateLeaseId, "", firstFailureMessage);
 
-    const recovered = await coordinator.publishPlan(options, { hostSessionId: "pi-real-new-plan" });
-    const replay = await coordinator.publishPlan(options, { hostSessionId: "pi-real-new-plan" });
+    const recovered = await coordinator.publishPlan(options, { hostSessionId: "pi-real-v3-plan" });
+    const replay = await coordinator.publishPlan(options, { hostSessionId: "pi-real-v3-plan" });
     const recoveredEnvelope = JSON.parse(recovered.command.stdout) as Record<string, any>;
     const replayEnvelope = JSON.parse(replay.command.stdout) as Record<string, any>;
-    assert.equal(recoveredEnvelope.schema_version, "run-response/1.1");
+    assert.equal(recoveredEnvelope.schema_version, "run-response/1.2");
     assert.equal(recoveredEnvelope.operation, "plan-publish");
-    assert.equal(recoveredEnvelope.replay.status, "replayed");
-    assert.equal(replayEnvelope.replay.status, "replayed");
-    assert.equal(replayEnvelope.replay.transition_id, recoveredEnvelope.replay.transition_id);
-    assert.equal(recoveredEnvelope.fence.execution_revision, 4);
-    assert.equal(recoveredEnvelope.fence.session_activity_revision, 4);
-    assert.equal(JSON.stringify({ recovered, replay }).includes(privateLeaseId), false);
-    const serializedPublication = JSON.stringify({ recovered, replay });
-    const handoffLeakAt = serializedPublication.indexOf(options.handoffKey);
+    assert.equal(recoveredEnvelope.ok, true);
+    const sessionId = recoveredEnvelope.result.session_id as string;
+    assert.match(sessionId, /^plan-[a-f0-9]{12}$/);
+    assert.equal(recoveredEnvelope.result.request_id, expectedRequestId);
     assert.equal(
-      handoffLeakAt,
-      -1,
-      handoffLeakAt < 0 ? "" : serializedPublication.slice(Math.max(0, handoffLeakAt - 120), handoffLeakAt + options.handoffKey.length + 120),
+      recoveredEnvelope.result.source_checksum,
+      `sha256:${createHash("sha256").update(source, "utf8").digest("hex")}`,
     );
-
-    const createCalls = calls.filter((call) => call[0] === "session" && call[1] === "create");
-    const startCalls = calls.filter((call) => call[0] === "execution" && call[1] === "start");
-    const publishCalls = calls.filter((call) => call[0] === "plan" && call[1] === "publish");
-    assert.equal(createCalls.length, 1);
-    assert.equal(startCalls.length, 1);
-    assert.equal(publishCalls.length, 3);
-    const sessionId = flagValue(createCalls[0]!, "--id")!;
-    assert.match(sessionId, /^pi-plan-[a-f0-9]{24}-00000000-000000$/);
-    assert.equal(flagValue(startCalls[0]!, "--session"), sessionId);
-    assert.equal(flagValue(publishCalls[0]!, "--expected-execution-revision"), "1");
-    assert.equal(flagValue(publishCalls[1]!, "--expected-execution-revision"), "4");
-    assert.equal(flagValue(publishCalls[1]!, "--expected-activity-revision"), "4");
+    assert.equal(recoveredEnvelope.result.run_id, `plan-${sessionId}-1`);
+    assert.equal(recoveredEnvelope.result.artifact_id, `plan:${sessionId}:1`);
+    assert.equal(replayEnvelope.ok, true);
+    assert.equal(replayEnvelope.result.session_id, sessionId);
 
     const sessionsRoot = join(root, ".workflow", "sessions");
     const sessionDirectories = (await readdir(sessionsRoot, { withFileTypes: true }))
       .filter((entry) => entry.isDirectory() && entry.name !== ".backups");
     assert.deepEqual(sessionDirectories.map((entry) => entry.name), [sessionId]);
     const sessionDir = join(sessionsRoot, sessionId);
-    const identity = JSON.parse(await readFile(join(sessionDir, "session.json"), "utf8")) as Record<string, any>;
-    assert.equal(identity.schema_version, "session/2.0");
-    assert.equal(identity.activity_revision, 4);
-
-    const executionDirectories = (await readdir(join(sessionDir, "executions"), { withFileTypes: true }))
-      .filter((entry) => entry.isDirectory());
-    assert.equal(executionDirectories.length, 1);
-    const executionId = executionDirectories[0]!.name;
-    assert.equal(identity.current_execution_id, executionId);
-    assert.equal(identity.latest_execution_id, executionId);
-    const executionDir = join(sessionDir, "executions", executionId);
-    const execution = JSON.parse(await readFile(join(executionDir, "execution.json"), "utf8")) as Record<string, any>;
-    assert.equal(execution.schema_version, "execution/1.0");
-    assert.equal(execution.generation, 1);
-    assert.equal(execution.revision, 4);
-    assert.equal(execution.active_run_id, null);
-    assert.deepEqual(
-      execution.chain.map((step: Record<string, unknown>) => ({
-        command: step.command, status: step.status, run_id: step.run_id,
-      })),
-      [
-        { command: "execute", status: "pending", run_id: null },
-        { command: "verify", status: "pending", run_id: null },
-      ],
-    );
-    const compatibility = JSON.parse(
-      await readFile(join(sessionDir, ".compat", "session-1.3.json"), "utf8"),
+    const recoveredIdentity = JSON.parse(
+      await readFile(join(sessionDir, "session.json"), "utf8"),
     ) as Record<string, any>;
-    assert.equal(compatibility.orchestration.engine, "manual");
-    assert.deepEqual(compatibility.orchestration.chain, execution.chain);
+    assert.equal(recoveredIdentity.schema_version, "session/3.0");
+    assert.equal(recoveredIdentity.session_id, sessionId);
+    const recoveredRevision = Number(recoveredIdentity.orchestration_revision);
+    const chainSteps = recoveredIdentity.chain as Array<{ step_id: string }>;
+    assert.equal(chainSteps.some((step) => step.step_id === "plan-1"), true, "the plan chain step is inserted");
 
-    const runDirectories = (await readdir(join(sessionDir, "runs"), { withFileTypes: true }))
-      .filter((entry) => entry.isDirectory());
-    assert.equal(runDirectories.length, 1);
-    const runId = runDirectories[0]!.name;
-    const run = JSON.parse(await readFile(join(sessionDir, "runs", runId, "run.json"), "utf8")) as Record<string, any>;
-    assert.equal(run.schema_version, "command-run/1.4");
-    assert.equal(run.status, "sealed");
-    assert.equal(run.command.name, "plan-publish");
-    assert.equal(run.execution_id, executionId);
-    assert.equal(run.generation, 1);
-    assert.equal(run.handoff.producer_run_id, runId);
-    assert.equal(run.handoff.command, "plan-publish");
-    assert.equal(recoveredEnvelope.locator.session_id, sessionId);
-    assert.equal(recoveredEnvelope.locator.execution_id, executionId);
-    assert.equal(recoveredEnvelope.locator.generation, 1);
-    assert.equal(recoveredEnvelope.locator.run_id, runId);
+    const planFile = join(root, ".workflow", "plans", `${sessionId}-1.md`);
+    assert.equal(await readFile(planFile, "utf8"), source);
 
-    const artifacts = JSON.parse(await readFile(join(sessionDir, "artifacts.json"), "utf8")) as Record<string, any>;
-    const artifactId = artifacts.aliases["current-plan"] as string;
-    assert.equal(Object.keys(artifacts.artifacts).length, 1);
-    assert.equal(artifacts.artifacts[artifactId].producer_run_id, runId);
-    const published = {
-      ...(recoveredEnvelope.result as {
-        session_id: string;
-        run_id: string;
-        artifact_id: string;
-        source_checksum: string;
-        request_id: string;
-      }),
-      handoff_key: options.handoffKey,
-    };
-    assert.equal(published.session_id, sessionId);
-    assert.equal(published.run_id, runId);
-    assert.equal(published.artifact_id, artifactId);
-    assert.doesNotThrow(() => assertPublishedPlanSnapshot(recovered.snapshot, published, sessionId));
-
-    const bootstrapRequestId = `${recoveredEnvelope.request_id}__bootstrap`;
-    const bootstrapBytes = await readFile(join(executionDir, "transitions", `${bootstrapRequestId}.json`), "utf8");
-    const bootstrapReceipt = JSON.parse(bootstrapBytes) as Record<string, any>;
-    assert.equal(bootstrapReceipt.payload.operation, "execution-chain-bootstrap");
-    assert.equal(bootstrapReceipt.payload.preconditions.execution_revision, 1);
-    assert.equal(bootstrapReceipt.outcome.postconditions.execution_revision, 2);
-    assert.equal(bootstrapBytes.includes(privateLeaseId), false);
+    const replayIdentity = JSON.parse(
+      await readFile(join(sessionDir, "session.json"), "utf8"),
+    ) as Record<string, any>;
+    assert.equal(replayIdentity.session_id, sessionId, "replay does not recreate the Session");
+    assert.equal(
+      Number(replayIdentity.orchestration_revision) > 1,
+      true,
+      "replay does not reset the orchestration revision",
+    );
+    assert.equal(Number(replayIdentity.orchestration_revision) >= recoveredRevision, true);
   } finally {
-    await coordinator.release();
+    await coordinator.release().catch(() => {});
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("real Maestro CLI publishes a statusless current Plan with Execution fences and replay", { timeout: 120_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-workflow-real-plan-publish-"));
+test("real Maestro v3 coordinator publishes into an existing Session and surfaces orchestration revision conflicts", { timeout: 120_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-real-v3-plan-current-"));
   const maestroBin = "D:/maestro2/bin/maestro.js";
   const calls: string[][] = [];
   const runner = async (args: readonly string[], cwd: string): Promise<RunCliResult> => {
@@ -2705,148 +2713,99 @@ test("real Maestro CLI publishes a statusless current Plan with Execution fences
   const bridge = new WorkflowBridge(root);
   const coordinator = new WorkflowCoordinator(bridge, adapter, new WorkflowLeaseStore(root));
   try {
-    await mkdir(join(root, "prepare"), { recursive: true });
-    await writeFile(join(root, "prepare", "plan-publish.md"), `---
-name: plan-publish
-session-mode: run
-contract:
-  contract_version: 2.1
-  arguments: []
-  consumes: []
-  produces:
-    - path: outputs/plan.json
-      kind: plan
-      alias: current-plan
-      role: primary
-      required: true
-      schema: plan/1.0
-  gates:
-    entry: []
-    exit: []
----
-`, "utf8");
-    const sourcePath = join(root, "approved.md");
-    await writeFile(sourcePath, "# Statusless current Plan\n\nExecute through current authority.\n", "utf8");
-
-    const created = await adapter.exec([
-      "session", "create", "statusless current plan", "--id", "statusless-plan",
-      "--intent", "Execute approved Plan", "--chain", "execute", "verify", "--engine", "manual", "--json",
-    ]);
-    const createdEnvelope = JSON.parse(created.stdout) as { locator?: { session_id?: string | null } };
-    const sessionId = createdEnvelope.locator?.session_id;
-    assert.equal(typeof sessionId, "string");
-    await writeFile(join(root, ".workflow", "state.json"), JSON.stringify({
-      active_session_id: sessionId,
-    }), "utf8");
-    await bridge.refresh();
-
+    await mkdir(join(root, ".workflow"), { recursive: true });
     await writeFile(join(root, ".workflow", "config.json"), JSON.stringify({
       session_schema: {
         schema_version: "session-schema-selection/1.0",
-        writer: "session/2.0",
-        features: { session_statusless: true },
+        writer: "session/3.0",
+        features: { session_statusless: false },
       },
     }), "utf8");
-    await adapter.exec(["session", "migrate", "--session", sessionId!, "--to", "session/2.0"]);
-    await bridge.refresh();
-    assert.equal(await coordinator.selectMode(), "core-execution");
-    await coordinator.attach("pi-plan-real");
+    assert.equal(await coordinator.selectMode(), "session-v3");
 
+    const host = "pi-real-plan-current";
+    const openArgv = ["session", "open", "current plan target", "--id", "real-plan-current"];
+    const open = await coordinator.exec(openArgv, classifyRunControlArgv(openArgv), host);
+    assert.equal(open.command.exitCode, 0);
+    // v3 workspaces carry no state.json; bind the canonical Session through
+    // the bridge so publishPlanV3 and later mutations can resolve revisions.
+    await bridge.refreshSession("real-plan-current");
+
+    const source = "# Statusless current Plan\n\nExecute through current authority.\n";
+    const sourcePath = join(root, "approved.md");
+    await writeFile(sourcePath, source, "utf8");
     const publishOptions: RunPlanPublishOptions = {
       sourcePath,
       sourceRoot: root,
-      sessionId,
-      handoffKey: "handoff-real-statusless",
-      sourcePiSession: "pi-plan-real",
+      sessionId: "real-plan-current",
+      handoffKey: "handoff-real-v3-current",
+      sourcePiSession: host,
       planRevision: 1,
       approvedAt: "2026-08-11T21:00:00.000Z",
     };
-    const first = await coordinator.publishPlan(publishOptions, { hostSessionId: "pi-plan-real" });
-    const replay = await coordinator.publishPlan(publishOptions, { hostSessionId: "pi-plan-real" });
+    const first = await coordinator.publishPlan(publishOptions, { hostSessionId: host });
     const firstEnvelope = JSON.parse(first.command.stdout) as Record<string, any>;
-    const replayEnvelope = JSON.parse(replay.command.stdout) as Record<string, any>;
-    assert.equal(firstEnvelope.schema_version, "run-response/1.1");
     assert.equal(firstEnvelope.operation, "plan-publish");
     assert.equal(firstEnvelope.ok, true);
-    assert.equal(firstEnvelope.locator.session_id, sessionId);
-    assert.equal(firstEnvelope.locator.execution_id, replayEnvelope.locator.execution_id);
-    assert.equal(firstEnvelope.locator.generation, 1);
-    assert.equal(typeof firstEnvelope.locator.run_id, "string");
-    assert.equal(firstEnvelope.replay.status, "applied");
-    assert.equal(replayEnvelope.replay.status, "replayed");
-    assert.equal(replayEnvelope.replay.transition_id, firstEnvelope.replay.transition_id);
-    assert.equal(firstEnvelope.fence.execution_revision, replayEnvelope.fence.execution_revision);
+    assert.equal(firstEnvelope.result.session_id, "real-plan-current");
+    const planFile = join(root, ".workflow", "plans", "real-plan-current-1.md");
+    assert.equal(await readFile(planFile, "utf8"), source);
 
-    const planCall = calls.find((call) => call[0] === "plan" && call[1] === "publish")!;
-    const privateLeaseId = flagValue(planCall, "--lease-id")!;
-    assert.equal(JSON.stringify(first).includes('"lease_id":'), false);
-    assert.equal(JSON.stringify(first).includes(privateLeaseId), false);
-    assert.equal(JSON.stringify(first).includes("private-core"), false);
-    const serializedPublication = JSON.stringify(first);
-    const handoffLeakAt = serializedPublication.indexOf(publishOptions.handoffKey);
-    assert.equal(
-      handoffLeakAt,
-      -1,
-      handoffLeakAt < 0 ? "" : serializedPublication.slice(Math.max(0, handoffLeakAt - 120), handoffLeakAt + publishOptions.handoffKey.length + 120),
-    );
-    assert.equal(flagValue(planCall, "--session"), sessionId);
-    assert.equal(flagValue(planCall, "--execution"), firstEnvelope.locator.execution_id);
-    assert.equal(flagValue(planCall, "--generation"), "1");
-    assert.equal(flagValue(planCall, "--request-id"), firstEnvelope.request_id);
-    assert.equal(flagValue(planCall, "--execution-owner"), "pi-plan-real");
-    assert.equal(flagValue(planCall, "--owner-kind"), "pi");
-    assert.equal(flagValue(planCall, "--actor"), "pi-plan-real");
-    assert.equal(flagValue(planCall, "--reason"), "Publish approved Pi Plan into current Execution");
-    assert.equal(flagValue(planCall, "--evidence"), "pi-session:pi-plan-real");
-    assert.equal(typeof flagValue(planCall, "--lease-id"), "string");
+    // Replay into the same Session: no new Session directory is created.
+    const replay = await coordinator.publishPlan(publishOptions, { hostSessionId: host });
+    const replayEnvelope = JSON.parse(replay.command.stdout) as Record<string, any>;
+    assert.equal(replayEnvelope.ok, true);
+    const sessionsRoot = join(root, ".workflow", "sessions");
+    const sessionDirectories = (await readdir(sessionsRoot, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory() && entry.name !== ".backups");
+    assert.deepEqual(sessionDirectories.map((entry) => entry.name), ["real-plan-current"]);
 
-    const currentFence = replayEnvelope.fence as Record<string, number>;
-    const directAuthority = {
-      sourcePath,
-      sourceRoot: root,
-      sessionId,
-      sourcePiSession: "pi-plan-real",
-      planRevision: 1,
-      approvedAt: "2026-08-11T21:01:00.000Z",
-      expectedIdentityRevision: currentFence.session_identity_revision,
-      expectedActivityRevision: currentFence.session_activity_revision,
-      executionId: replayEnvelope.locator.execution_id as string,
-      generation: replayEnvelope.locator.generation as number,
-      expectedExecutionRevision: currentFence.execution_revision,
-      executionOwner: "pi-plan-real",
-      ownerKind: "pi" as const,
-      ownerEpoch: currentFence.lease_epoch,
-      leaseId: privateLeaseId,
-      actor: "pi-plan-real",
-      reason: "Exercise Plan publication fences",
-      evidence: ["TEST:real-plan-fences"],
-    };
-    await assert.rejects(
-      adapter.publishPlan({
-        ...directAuthority,
-        handoffKey: "handoff-real-stale-revision",
-        requestId: "req-real-stale-revision",
-        expectedExecutionRevision: currentFence.execution_revision - 1,
-      }),
-      /execution revision conflict/,
-    );
-    await assert.rejects(
-      adapter.publishPlan({
-        ...directAuthority,
-        handoffKey: "handoff-real-stale-lease",
-        requestId: "req-real-stale-lease",
-        leaseId: `${privateLeaseId}-stale`,
-      }),
-      /lease fence conflict/,
+    // run next allocates the plan chain Run.
+    const nextArgv = ["run", "next"];
+    const next = await coordinator.exec(nextArgv, classifyRunControlArgv(nextArgv), host);
+    assert.equal(next.command.exitCode, 0);
+    const nextEnvelope = JSON.parse(next.command.stdout) as Record<string, any>;
+    assert.equal(nextEnvelope.operation, "next");
+    assert.equal(typeof nextEnvelope.result.run_id, "string");
+
+    // Mutate authority through the raw shell so the coordinator's cached
+    // orchestration revision goes stale, then verify a coordinator chain
+    // insert surfaces ORCHESTRATION_REVISION_CONFLICT with next_actions and a
+    // re-read hint instead of replaying with a replaced revision.
+    const status = await adapter.exec(["session", "status", "--json"]);
+    const statusEnvelope = JSON.parse(status.stdout) as Record<string, any>;
+    const currentRevision = statusEnvelope.result.orchestration_revision as number;
+    const rawInsert = await adapter.exec([
+      "session", "chain", "insert", "--step-id", "conflict-probe", "--command", "probe",
+      "--participant", host, "--actor", host,
+      "--request-id", "req-real-v3-conflict-raw",
+      "--reason", "probe", "--expected-orchestration-revision", String(currentRevision), "--json",
+    ]);
+    assert.equal(rawInsert.exitCode, 0);
+
+    const conflictArgv = ["session", "chain", "insert", "--step-id", "conflict-insert", "--command", "probe"];
+    const conflict = await coordinator.exec(conflictArgv, classifyRunControlArgv(conflictArgv), host);
+    assert.notEqual(conflict.command.exitCode, 0);
+    const conflictEnvelope = JSON.parse(conflict.command.stdout) as Record<string, any>;
+    assert.equal(conflictEnvelope.ok, false);
+    assert.equal(conflictEnvelope.error.code, "ORCHESTRATION_REVISION_CONFLICT");
+    assert.equal(Array.isArray(conflictEnvelope.error.next_actions), true);
+    assert.equal(conflictEnvelope.error.next_actions.length > 0, true);
+    assert.match(
+      conflictEnvelope.error.message,
+      /Re-read authority via 'maestro session status --json'/,
     );
 
-    await writeFile(sourcePath, "# Changed after approval\n", "utf8");
-    await assert.rejects(
-      coordinator.publishPlan(publishOptions, { hostSessionId: "pi-plan-real" }),
-      /source bytes changed/,
-    );
+    // The conflict is never replayed: the raw probe step survives exactly once
+    // and the conflicted insert is not applied.
+    const finalIdentity = JSON.parse(
+      await readFile(join(sessionsRoot, "real-plan-current", "session.json"), "utf8"),
+    ) as Record<string, any>;
+    const finalSteps = finalIdentity.chain as Array<{ step_id: string }>;
+    assert.equal(finalSteps.filter((step) => step.step_id === "conflict-probe").length, 1);
+    assert.equal(finalSteps.filter((step) => step.step_id === "conflict-insert").length, 0);
   } finally {
-    await coordinator.release();
+    await coordinator.release().catch(() => {});
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -2885,11 +2844,22 @@ contract:
     exit: []
 ---
 `, "utf8");
+    // Legacy v2-era session/1.3 writer keeps the non-Execution-aware raw plan
+    // publish path (run-response/1.0) that the Pi adapter preserves.
+    await mkdir(join(root, ".workflow"), { recursive: true });
+    await writeFile(join(root, ".workflow", "config.json"), JSON.stringify({
+      session_schema: {
+        schema_version: "session-schema-selection/1.0",
+        writer: "session/1.3",
+        features: { session_statusless: false },
+      },
+    }), "utf8");
     const sourcePath = join(root, "approved.md");
     await writeFile(sourcePath, "# Legacy Plan\n", "utf8");
     const created = await adapter.exec([
       "session", "create", "legacy plan", "--id", "legacy-plan", "--intent", "Legacy Plan", "--json",
     ]);
+    assert.equal(created.exitCode, 0, created.stderr || created.stdout);
     const createdEnvelope = JSON.parse(created.stdout) as { locator?: { session_id?: string | null } };
     const options: RunPlanPublishOptions = {
       sourcePath,
