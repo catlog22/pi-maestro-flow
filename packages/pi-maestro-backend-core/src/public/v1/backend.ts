@@ -75,7 +75,13 @@ export interface BackendCapabilities {
   thinkingLevel: CapabilitySupport;
   /** `TaskSpec.todo` — bind Todo ids and expose the `todo` tool to the child. */
   todoBinding: CapabilitySupport;
-  /** Restrict the child's visible tool set. */
+  /**
+   * Restrict the child's visible tool set.
+   *
+   * Declared but not yet adjudicated: no orchestrator-visible field asks for a
+   * tool filter, so nothing requires it. A backend still states the truth here,
+   * and the day a task can request one, requiring it is a one-line change.
+   */
   toolFilter: CapabilitySupport;
   /**
    * teammate-send `steer` — interrupt the current turn and inject.
@@ -85,9 +91,14 @@ export interface BackendCapabilities {
    * real behavioural difference — the injection lands later than asked — which
    * is exactly why it is recorded on the result instead of being silently
    * indistinguishable from native steering.
+   *
+   * Enforced when a message is delivered, not during graph validation: whether
+   * a task will be steered is unknowable until the model sends one, so
+   * requiring it up front would reject addressable tasks for a message that
+   * almost never arrives. A backend declaring `unsupported` refuses the send.
    */
   steer: CapabilitySupport;
-  /** teammate-send `follow_up` — queue for the next turn. */
+  /** teammate-send `follow_up` — queue for the next turn; enforced at send, like {@link steer}. */
   followUp: CapabilitySupport;
   /** Cancel a running task. */
   abort: CapabilitySupport;

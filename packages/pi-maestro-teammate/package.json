@@ -19,7 +19,8 @@
     "build:declarations": "tsc -p tsconfig.declarations.json",
     "check:declarations": "node scripts/check-declarations.mjs",
     "prepack": "npm run build:declarations && node ../../scripts/bundle-settings-core.mjs",
-    "postpack": "node ../../scripts/bundle-settings-core.mjs --clean"
+    "postpack": "node ../../scripts/bundle-settings-core.mjs --clean",
+    "test:e2e": "node --experimental-transform-types --import ./test/setup.ts --test --test-timeout=300000 test/backend-registry-dsh.e2e.test.ts"
   },
   "main": "./src/index.ts",
   "types": "./types/index.d.ts",

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { BackendCapabilities } from "pi-maestro-backend-core/v1/backend";
 import {
+  adjudicateTask,
   requiredCapabilities,
   validateBackendCapabilities,
   type AdjudicatedTask,
@@ -44,18 +45,26 @@ test("a task requires only what it asked for", () => {
 test("every orchestrator-visible request maps to one capability", () => {
   const required = requiredCapabilities(task(
     { ...BARE, outputSchema: {}, context: "fork", model: "m", thinking: "high", todos: ["t1"] },
-    { toolFilter: true, controlModes: ["steer", "follow_up"] },
   ));
+  // `toolFilter`, `steer`, and `followUp` are absent by construction: no spec
+  // field asks for a tool filter, and whether a task will be steered is not
+  // knowable until the model sends the message.
   assert.deepEqual(required, [
     "outputSchema",
     "forkContext",
     "modelSelection",
     "thinkingLevel",
     "todoBinding",
-    "toolFilter",
-    "steer",
-    "followUp",
   ]);
+});
+
+test("a control mode is not adjudicated up front, so an addressable task is not rejected", () => {
+  // DSH steers only by emulation and cannot filter tools; neither shows up as a
+  // requirement, because requiring them would reject a task over a message that
+  // may never be sent.
+  const verdict = adjudicateTask(task(BARE), 0, "dsh", DSH);
+  assert.deepEqual(verdict.unsupported, []);
+  assert.deepEqual(verdict.emulated, []);
 });
 
 test("an empty todo list is not a todo binding request", () => {
@@ -97,11 +106,11 @@ test("fork degrades with a warning instead of rejecting the graph", () => {
 
 test("emulated capabilities warn and are recorded, never silent", () => {
   const result = validateBackendCapabilities(
-    [task({ ...BARE, outputSchema: {} }, { controlModes: ["steer"] })],
+    [task({ ...BARE, outputSchema: {}, todos: ["t1"] })],
     () => ({ name: "dsh", capabilities: DSH }),
   );
   assert.deepEqual(result.errors, []);
-  assert.deepEqual(result.verdicts[0]?.emulated, ["outputSchema", "steer"]);
+  assert.deepEqual(result.verdicts[0]?.emulated, ["outputSchema", "todoBinding"]);
   assert.equal(result.warnings.length, 2);
 });
 

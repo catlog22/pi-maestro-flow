@@ -27,14 +27,20 @@ import type { ControlMode, TeammateRunSpec } from "pi-maestro-backend-core/v1/sp
  */
 const DEGRADABLE: ReadonlySet<CapabilityName> = new Set<DegradableCapability>(["forkContext"]);
 
-/** One task as graph validation sees it, before any backend has been started. */
+/**
+ * One task as graph validation sees it, before any backend has been started.
+ *
+ * Carries only what the orchestrator has already decided. `steer` and
+ * `followUp` are deliberately absent: a teammate-send arrives later, from the
+ * model, and nothing at validation time can say whether one will. Requiring
+ * them up front would reject every addressable task on a backend that cannot
+ * steer, almost always for a message that never comes — so those two are
+ * enforced where they are actually known, when the message is delivered and
+ * the backend refuses it.
+ */
 export interface AdjudicatedTask {
   spec: TeammateRunSpec;
-  /** Control modes this dispatch may use; `prompt` is implicit and not listed. */
-  controlModes?: readonly ControlMode[];
   name?: string;
-  /** Restricts the child's visible tool set. */
-  toolFilter?: boolean;
 }
 
 /**
@@ -55,11 +61,9 @@ export function requiredCapabilities(task: AdjudicatedTask): CapabilityName[] {
   if (task.spec.model !== undefined) required.push("modelSelection");
   if (task.spec.thinking !== undefined) required.push("thinkingLevel");
   if (task.spec.todos !== undefined && task.spec.todos.length > 0) required.push("todoBinding");
-  if (task.toolFilter === true) required.push("toolFilter");
-  for (const mode of task.controlModes ?? []) {
-    if (mode === "steer") required.push("steer");
-    if (mode === "follow_up") required.push("followUp");
-  }
+  // `toolFilter`, `steer`, and `followUp` are absent by construction: no
+  // orchestrator-visible field expresses the first, and the other two are not
+  // knowable until a message is sent. See AdjudicatedTask.
   return required;
 }
 
