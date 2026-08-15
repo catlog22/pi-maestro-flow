@@ -30,17 +30,29 @@ import type {
   TeammateBackend,
 } from "pi-maestro-backend-core/v1/backend";
 import type {
+  AgentTerminalStatus,
   ControlMode,
   SingleResult,
   TeammateRunSpec,
   Usage,
 } from "pi-maestro-backend-core/v1/spec";
+import {
+  resolveStructuredOutput,
+  structuredOutputInstruction,
+  structuredOutputRecovery,
+  type StructuredOutcome,
+} from "./structured-output.ts";
 
 /**
  * What the SDK surface actually supports.
  *
- * `outputSchema` — no schema parameter exists; `RunResult.finalResponse` is
- * text, so a structured value must be prompted for and extracted.
+ * `outputSchema` — no schema parameter exists and `RunResult.finalResponse` is
+ * text, so this is served by host-side compensation: the schema is appended to
+ * the prompt, the value is extracted from the final message, and it is
+ * validated here. Validation is not optional — the host interpolates
+ * `structuredOutput` into a downstream task's prompt and validates nothing
+ * itself. A value that still fails after one recovery turn fails the task
+ * rather than settling as completed with nothing to interpolate.
  * `forkContext` — permanently unsupported, and semantically so: a Pi history
  * entry records what a different runtime did with a different tool set.
  * `modelSelection` — `DeepSeekHarnessOptions.model` fixes the route per harness
@@ -49,11 +61,12 @@ import type {
  * `thinkingLevel` — absent from `RunOptions`, so it cannot vary per task. The
  * runtime's own config sets a deployment-wide default, which is a different
  * thing from the per-task control the orchestrator asks for here.
- * `outputSchema` / `todoBinding` — both were declared `emulated` while nothing
- * implemented the emulation, which is worse than declaring neither: adjudication
- * lets an `emulated` capability through with an advisory warning, so a task
- * needing structured output routed here and got none. They stay `unsupported`
- * until the extraction and the host tool relay actually exist.
+ * `todoBinding` — still `unsupported`, and for the reason `outputSchema` was
+ * until its extraction existed: declaring `emulated` while nothing implements
+ * the emulation is worse than declaring neither, because adjudication lets an
+ * `emulated` capability through with only a warning. Binding todos needs the
+ * host's tool relay, which is callback-shaped and states no guarantee that its
+ * reply always arrives.
  * `toolFilter` — the child's tool set comes from its `cordis.yml`.
  * `steer` — `HarnessClient` states plainly that there is no wire-level cancel.
  * Boundary-queued emulation is buildable but is not built here, so this reads
@@ -67,7 +80,7 @@ import type {
  * runtime, which is coarser than asked but does stop the work.
  */
 const CAPABILITIES: BackendCapabilities = {
-  outputSchema: "unsupported",
+  outputSchema: "emulated",
   forkContext: "unsupported",
   modelSelection: "native",
   thinkingLevel: "unsupported",
@@ -279,9 +292,13 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
       let aborted = false;
 
       const outcome = (async (): Promise<AttemptOutcome> => {
-        const prompt = options.systemPrompt === undefined
+        const schema = spec.outputSchema;
+        const task = schema === undefined
           ? spec.task
-          : `${options.systemPrompt}\n\n${spec.task}`;
+          : `${spec.task}\n${structuredOutputInstruction(schema)}`;
+        const prompt = options.systemPrompt === undefined
+          ? task
+          : `${options.systemPrompt}\n\n${task}`;
         try {
           const observe = (notification: { method: string; params: Record<string, unknown> }): void => {
             if (notification.method !== "session.event") return;
@@ -297,14 +314,39 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
           while (followUps.length > 0 && !aborted) {
             turns.push(await driver.run(followUps.shift()!, { sessionId, onNotification: observe }));
           }
+          // Structured output is emulated: the runtime has no schema parameter,
+          // so the value is extracted from the final message and validated
+          // here. One recovery turn, because a model that returned prose is
+          // usually one instruction away from returning the value, while a
+          // second failure means it cannot satisfy the schema and looping would
+          // only spend turns.
+          let structured: StructuredOutcome | undefined;
+          if (schema !== undefined && !aborted) {
+            structured = resolveStructuredOutput(turns[turns.length - 1]!.finalResponse, schema);
+            if (structured.status === "invalid") {
+              turns.push(await driver.run(
+                structuredOutputRecovery(schema, structured.failure),
+                { sessionId, onNotification: observe },
+              ));
+              structured = resolveStructuredOutput(turns[turns.length - 1]!.finalResponse, schema);
+            }
+          }
           acceptingFollowUps = false;
           const toolCount = turns.reduce((sum, turn) => sum + completedTools(turn.events), 0);
           const lastTurn = turns[turns.length - 1]!;
+          // A schema the run could not satisfy fails the task rather than
+          // settling as completed with nothing to interpolate: a downstream
+          // sibling reading `{name.field}` would otherwise read undefined from
+          // a run the transcript called successful.
+          const schemaUnmet = structured?.status === "invalid";
+          const terminalStatus: AgentTerminalStatus = aborted
+            ? "terminated"
+            : schemaUnmet ? "failed" : "completed";
           const result: SingleResult = {
             agent: spec.agent,
             ...(spec.name === undefined ? {} : { name: spec.name }),
             task: spec.task,
-            exitCode: aborted ? 1 : 0,
+            exitCode: terminalStatus === "completed" ? 0 : 1,
             messages: turns.map((turn) => ({ role: "assistant", content: turn.finalResponse })),
             usage: NO_USAGE,
             model: text(options.config, "model") ?? spec.model ?? "",
@@ -314,7 +356,11 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
             // The session id stays addressable, so a later teammate-send can
             // reach this agent again.
             wakeable: !aborted,
-            terminalStatus: aborted ? "terminated" : "completed",
+            ...(structured?.status === "valid" ? { structuredOutput: structured.value } : {}),
+            ...(schemaUnmet
+              ? { warnings: [`structured output was requested but ${(structured as { failure: string }).failure}`] }
+              : {}),
+            terminalStatus,
           };
           options.onTurnComplete?.(result, result.terminalStatus);
           return {

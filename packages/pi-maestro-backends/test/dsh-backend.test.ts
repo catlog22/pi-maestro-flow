@@ -57,10 +57,11 @@ test("dsh declares only the capabilities its SDK actually serves", () => {
   assert.equal(backend.capabilities.thinkingLevel, "unsupported");
   assert.equal(backend.capabilities.toolFilter, "unsupported");
   assert.equal(backend.capabilities.steer, "unsupported");
-  // Declared unsupported rather than emulated: nothing implements the schema
-  // extraction or the host tool relay, and adjudication lets an "emulated"
-  // capability through with only a warning.
-  assert.equal(backend.capabilities.outputSchema, "unsupported");
+  // outputSchema is emulated now that the extraction and validation exist;
+  // todoBinding stays unsupported because adjudication lets an "emulated"
+  // capability through with only a warning, and nothing implements the host
+  // tool relay it would need.
+  assert.equal(backend.capabilities.outputSchema, "emulated");
   assert.equal(backend.capabilities.todoBinding, "unsupported");
   assert.equal(backend.capabilities.modelSelection, "native");
   assert.equal(backend.capabilities.followUp, "native");

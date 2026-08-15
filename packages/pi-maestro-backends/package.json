@@ -1,7 +1,7 @@
 {
   "name": "pi-maestro-backends",
   "version": "0.1.0",
-  "description": "Teammate execution backends. Every backend here implements the same pi-maestro-backend-core contract \u2014 including the Pi subprocess, which is an ordinary member rather than a bypass.",
+  "description": "Teammate execution backends. Every backend here implements the same pi-maestro-backend-core contract — including the Pi subprocess, which is an ordinary member rather than a bypass.",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
@@ -15,7 +15,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./dsh": "./src/dsh/index.ts",
-    "./dsh/driver": "./src/dsh/driver.ts"
+    "./dsh/driver": "./src/dsh/driver.ts",
+    "./dsh/structured-output": "./src/dsh/structured-output.ts"
   },
   "files": [
     "src/**/*.ts"
@@ -28,7 +29,8 @@
   ],
   "license": "ISC",
   "dependencies": {
+    "@deepseek-ai/dsh-sdk-client": "next",
     "pi-maestro-backend-core": "*",
-    "@deepseek-ai/dsh-sdk-client": "next"
+    "typebox": "1.3.7"
   }
 }

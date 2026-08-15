@@ -149,6 +149,33 @@ test("a tool-using turn reports the tool calls the replay fence counts", { skip 
   assert.equal(outcome.recovery.completedToolCount, outcome.result.toolCount);
 });
 
+test("a real model produces a schema-valid structured value", { skip }, async () => {
+  const run = await backend().start(
+    {
+      agent: "general",
+      task: "Rate the sentence \"the build is green\" for optimism.",
+      outputSchema: {
+        type: "object",
+        properties: {
+          verdict: { type: "string" },
+          score: { type: "number" },
+        },
+        required: ["verdict", "score"],
+        additionalProperties: false,
+      },
+    },
+    options(),
+  );
+  const outcome = await run.outcome;
+  assert.equal(outcome.result.terminalStatus, "completed", outcome.result.messages.at(-1)?.content);
+  // Emulation is only worth declaring if a real model actually satisfies it;
+  // a scripted driver can only prove the mapping, never that the instruction
+  // is one a model follows.
+  const value = outcome.result.structuredOutput as { verdict?: unknown; score?: unknown };
+  assert.equal(typeof value?.verdict, "string");
+  assert.equal(typeof value?.score, "number");
+});
+
 test("aborting a live runtime settles as terminated and reaps the process", { skip }, async () => {
   const run = await backend().start(
     { agent: "general", task: "Count slowly from 1 to 200, one number per line." },
