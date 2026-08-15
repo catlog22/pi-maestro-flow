@@ -1904,7 +1904,10 @@ test("Alt+R delegates the active Agent or Window session list to Cockpit ownersh
 
 test("root and proxy graph normalization share one implementation that preserves thinking", () => {
   const indexSource = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-core.ts", import.meta.url), "utf-8");
-  const executionSource = fs.readFileSync(new URL("../src/runs/execution.ts", import.meta.url), "utf-8");
+  // Orchestration and the Pi subprocess attempt live in sibling modules; the
+  // guarded invariants are properties of the dispatch path, not of a filename.
+  const executionSource = fs.readFileSync(new URL("../src/runs/execution.ts", import.meta.url), "utf-8")
+    + fs.readFileSync(new URL("../src/runs/pi-subprocess-attempt.ts", import.meta.url), "utf-8");
   const executionInfraSource = fs.readFileSync(new URL("../src/runs/execution-infra.ts", import.meta.url), "utf-8");
 
   // The shared normalizer parses task thinking after applying the top-level default.
