@@ -174,6 +174,12 @@ export type ConfigValue = string | number | boolean | readonly string[];
 /**
  * One configuration field a backend declares for itself.
  *
+ * A field that selects a credential uses `kind: "credential-ref"` and carries
+ * the lookup name rather than the value. That is not host policy imposed on
+ * backends: the DeepSeek adapter already models its key as a credential
+ * reference for the same reason, so that one request can never pair one
+ * generation's endpoint with another generation's secret.
+ *
  * Backends differ in what they need to be told — a subprocess runtime needs an
  * executable and a config path, a remote peer needs an endpoint, a
  * profile-based runtime needs a profile name. Rather than widen the seam with
@@ -187,7 +193,15 @@ export type ConfigValue = string | number | boolean | readonly string[];
 export interface BackendConfigField {
   /** Key under `BackendRegistration.config`. */
   key: string;
-  kind: "text" | "integer" | "number" | "boolean" | "enum" | "string-list" | "path";
+  kind:
+    | "text"
+    | "integer"
+    | "number"
+    | "boolean"
+    | "enum"
+    | "string-list"
+    | "path"
+    | "credential-ref";
   /** i18n key for the field label; the host owns presentation. */
   labelKey: string;
   descriptionKey?: string;
@@ -197,8 +211,15 @@ export interface BackendConfigField {
   default?: ConfigValue;
   /** A missing value with no default is a load-time error. */
   required?: boolean;
-  /** The value is a credential; the host masks it and never logs it. */
-  secret?: boolean;
+  /**
+   * For `kind: "credential-ref"`, where the runtime looks the secret up.
+   *
+   * The field holds the name of that location, never the secret itself, so a
+   * registration document can be committed and a settings editor can display
+   * the value in full. Masking a stored secret only hides it on screen; storing
+   * a reference means there is nothing to hide.
+   */
+  credentialLocation?: "env-var" | "env-file-key";
 }
 
 /**

@@ -26,6 +26,7 @@ function validateField(field: BackendConfigField, value: ConfigValue): string | 
   switch (field.kind) {
     case "text":
     case "path":
+    case "credential-ref":
       return typeof value === "string" ? undefined : `expected a string, got ${typeof value}`;
     case "integer":
       if (typeof value !== "number") return `expected a number, got ${typeof value}`;
