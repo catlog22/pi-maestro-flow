@@ -143,6 +143,7 @@ import {
 } from "../tools/run-control.ts";
 import {
   assertPublishedPlanSnapshot,
+  assertPublishedPlanSnapshotV3,
   derivePlanPublishRequestId,
   parseProjectedPublishedPlanIdentity,
   requirePublishedExecutionRun,
@@ -404,6 +405,94 @@ export function sealedWorkflowExecutionTransition(
   return sealed || cleared
     ? { sessionId: nextSession.sessionId, executionId: previousExecution.executionId }
     : undefined;
+}
+
+/**
+ * v3 complete receipts: `session complete` (operation session-complete) and
+ * `run complete <run_id> --advance` (operation run-complete-and-seal) seal a
+ * Session/Run and fire the knowledge pipeline. session/3.0 has no
+ * Execution/lease entity, so these replace the v2 execution-seal projection
+ * transition (sealedWorkflowExecutionTransition) as the seal detector.
+ */
+interface V3CompleteReceipt {
+  operation: "session-complete" | "run-complete-and-seal";
+  sessionId?: string;
+  runId?: string;
+}
+
+function v3CompleteReceipt(command: string, argv: readonly string[]): V3CompleteReceipt | undefined {
+  const tokens = argv.length > 0
+    ? [...argv]
+    : command.trim().split(/\s+/).filter((token) => token && token !== "maestro" && token !== "maestro.cmd");
+  if (tokens[0] === "session" && tokens[1] === "complete") {
+    return { operation: "session-complete", sessionId: flagValue(tokens, "--session") };
+  }
+  if (tokens[0] === "run" && tokens[1] === "complete" && tokens.includes("--advance")) {
+    return {
+      operation: "run-complete-and-seal",
+      runId: tokens[2] && !tokens[2].startsWith("-") ? tokens[2] : undefined,
+      sessionId: flagValue(tokens, "--session"),
+    };
+  }
+  return undefined;
+}
+
+function flagValue(tokens: readonly string[], flag: string): string | undefined {
+  const index = tokens.indexOf(flag);
+  return index >= 0 && index + 1 < tokens.length ? tokens[index + 1] : undefined;
+}
+
+/** Knowledge summary shape surfaced from a run's own knowledge-delta.json. */
+interface RunKnowledgeDeltaView {
+  inputs: Array<{ run_id: string; signal: string; count: number }>;
+  candidates: Array<{
+    run_ids: string[];
+    status: string;
+    reconciliation: { promotion_eligibility: string } | null;
+  }>;
+}
+
+/**
+ * session/3.0 run knowledge delta (run-knowledge-delta/1.0) written by
+ * `run complete` at runs/<run_id>/knowledge-delta.json. Read-only projection
+ * of the raw ledger: delta inputs carry no per-item run_id (the file owns its
+ * run) and delta candidates carry no reconciliation (added by `knowledge
+ * review`), so both are derived here. Returns undefined when the delta is
+ * missing or unreadable (run had no knowledge activity).
+ */
+function readRunKnowledgeDelta(workflowRoot: string, sessionId: string, runId: string): RunKnowledgeDeltaView | undefined {
+  try {
+    const raw = readFileSync(
+      join(workflowRoot, ".workflow", "sessions", sessionId, "runs", runId, "knowledge-delta.json"),
+      "utf8",
+    );
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    const inputs = Array.isArray(value.inputs) ? value.inputs : [];
+    const candidates = Array.isArray(value.candidates) ? value.candidates : [];
+    return {
+      inputs: inputs.map((input) => {
+        const record = (input ?? {}) as Record<string, unknown>;
+        return {
+          run_id: runId,
+          signal: String(record.signal ?? "consumed"),
+          count: typeof record.count === "number" ? record.count : 0,
+        };
+      }),
+      candidates: candidates.map((candidate) => {
+        const record = (candidate ?? {}) as Record<string, unknown>;
+        const reconciliation = (record.reconciliation ?? null) as Record<string, unknown> | null;
+        return {
+          run_ids: [runId],
+          status: String(record.status ?? "pending"),
+          reconciliation: reconciliation
+            ? { promotion_eligibility: String(reconciliation.promotion_eligibility ?? "") }
+            : null,
+        };
+      }),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -914,6 +1003,11 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   let attachedWorkflowHostSessionId: string | undefined;
   let lastRunStates = new Map<string, string>();
 
+  /** v3 `session complete` / `run complete --advance` receipts captured at
+   * tool_execution_end; consumed by the next refreshWorkflow to fire the
+   * knowledge pipeline (session/3.0 has no Execution-seal transition). */
+  let pendingV3CompleteReceipts: V3CompleteReceipt[] = [];
+
   // Knowledge-pending UI indicator: persistent status-bar segment + 0→N
   // notify so manual resolve (review_required) is surfaced without opening
   // the knowledge center.
@@ -1398,8 +1492,8 @@ Contract: subject is the title; description is detail. status is update-only on 
   const runControlTool: ToolDefinition<typeof RunControlParams> = {
     name: "run-control",
     label: "Run Control",
-    description: `Transparent shell over the canonical Maestro CLI for Session/Run lifecycle and Artifact compatibility authority. Pass argv exactly as the CLI takes it (without the leading \`maestro\` executable), e.g. { argv: ["session","next","--json"] }, { argv: ["run","check","run-abc","--json"] }, or { argv: ["artifact","inspect","ART-1","--session","session-1","--consumer","review","--alias","current-review","--json"] }.
-Read-only query commands (status, brief, check, list, show, artifact inspect, search, load, ...) need no workflow mutation lease; lifecycle writes require the current Pi session identity (participant/actor) and are blocked in Plan mode. Under session/3.0 workspaces the coordinator injects participant/request-id/expected-revision and no lease exists; under legacy/execution workspaces lifecycle writes fence the current Pi session's workflow mutation lease. Entry commands (session/run create|start|open) may mint a Session without a held lease. Artifact republish is a capability-gated registry mutation: the coordinator injects the current Pi host identity and a fresh inspect-derived CAS fence for either legacy/execution or session/3.0 writers.
+    description: `Transparent shell over the canonical Maestro CLI for the v3 Session/Run lifecycle and Artifact compatibility authority. Pass argv exactly as the CLI takes it (without the leading \`maestro\` executable), e.g. { argv: ["run","next","--json"] }, { argv: ["run","check","run-abc","--json"] }, { argv: ["session","chain","insert","step-3","--after","latest","--json"] }, or { argv: ["artifact","inspect","ART-1","--session","session-1","--consumer","review","--alias","current-review","--json"] }.
+Read-only query commands (status, brief, check, list, show, resume-view, artifact inspect, search, load, ...) need no workflow mutation lease; lifecycle writes require the current Pi session identity (participant/actor) and are blocked in Plan mode. Under session/3.0 workspaces the coordinator injects --actor/--request-id/--expected-orchestration-revision (run mutations also add --expected-run-revision) and no lease exists; legacy/execution workspaces are accepted for compatibility only. Entry commands (session open|create, run next) may mint a Session or Run without a held lease. Artifact republish is a capability-gated registry mutation: the coordinator injects the current Pi host identity and a fresh inspect-derived CAS fence for session/3.0 writers.
 This is the single LLM surface for the lifecycle and Artifact compatibility commands: do not hand-write \`maestro\` run/session/execution/artifact calls in bash. Read results report lifecycle ownership so a Pi session can distinguish its Run from another session's workspace-wide Run.
 
 When to use:
@@ -1409,7 +1503,7 @@ When NOT to use:
 - No active workflow or coordinator not attached — the call errors; do not invoke it.
 - Knowledge writes (knowledge stage/record/promote) and explore/delegate/moa belong to the bash \`maestro\` CLI and the \`maestro\` tool respectively; read-only knowledge lookups (search/load/review) may pass through this shell (they are classified as read commands above).
 
-Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--verdict","done"] }, { argv: ["run","edit","verify","--after","latest"] }.`,
+Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","--advance","--verdict","done"] }, { argv: ["session","chain","insert","step-3","--after","latest"] }.`,
     promptSnippet: "Maestro CLI passthrough shell for Session/Run lifecycle and Artifact compatibility authority",
     parameters: RunControlParams,
     async execute(id, params, _signal, _onUpdate, ctx) {
@@ -1645,26 +1739,44 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     );
     if (workflowSessionOptedIn) reconcileWorkflowGoal(next, ctx);
     const sealedExecution = sealedWorkflowExecutionTransition(previous, next);
-    if (sealedExecution) {
-      const summary = await new KnowledgeCliAdapter(ctx.cwd).review(sealedExecution.sessionId).catch(() => null);
-      const pending = summary?.candidates.filter(candidate => candidate.status === "pending").length ?? 0;
-      const reviewRequired = summary?.candidates.filter(
-        candidate => candidate.reconciliation?.promotion_eligibility === "review_required",
-      ).length ?? 0;
-      updateKnowledgePendingStatus(ctx, { pending, reviewRequired });
-      const message = pending > 0 || reviewRequired > 0
-        ? `Workflow Execution ${sealedExecution.executionId} sealed in Session ${sealedExecution.sessionId} — `
-          + `${pending} candidate(s) pending, ${reviewRequired} review required. `
-          + `Run "maestro knowledge review ${sealedExecution.sessionId}" before promotion.`
-        : `Workflow Execution ${sealedExecution.executionId} sealed in Session ${sealedExecution.sessionId}.`;
-      ctx.ui.notify(message, "info");
-      pi.sendMessage({ customType: "execution-knowledge", content: message, display: true });
+    // session/3.0 has no Execution entity to transition, so `session complete`
+    // and `run complete --advance` (operation session-complete /
+    // run-complete-and-seal) arrive as tool_execution_end receipts and seal
+    // the knowledge pipeline exactly like the legacy execution-seal projection.
+    const v3CompleteReceipt = pendingV3CompleteReceipts.length > 0 ? pendingV3CompleteReceipts.splice(0).pop() : undefined;
+    if (sealedExecution || v3CompleteReceipt) {
+      const sealedSessionId = v3CompleteReceipt?.sessionId
+        ?? sealedExecution?.sessionId
+        ?? nextSession?.sessionId;
+      if (sealedSessionId) {
+        const summary = await new KnowledgeCliAdapter(ctx.cwd).review(sealedSessionId).catch(() => null);
+        const pending = summary?.candidates.filter(candidate => candidate.status === "pending").length ?? 0;
+        const reviewRequired = summary?.candidates.filter(
+          candidate => candidate.reconciliation?.promotion_eligibility === "review_required",
+        ).length ?? 0;
+        updateKnowledgePendingStatus(ctx, { pending, reviewRequired });
+        const sealedBy = v3CompleteReceipt
+          ? `Session ${sealedSessionId} sealed by v3 ${v3CompleteReceipt.operation}`
+            + (v3CompleteReceipt.runId ? ` (run ${v3CompleteReceipt.runId})` : "")
+          : `Workflow Execution ${sealedExecution!.executionId} sealed in Session ${sealedSessionId}`;
+        const message = pending > 0 || reviewRequired > 0
+          ? `${sealedBy} — ${pending} candidate(s) pending, ${reviewRequired} review required. `
+            + `Run "maestro knowledge review ${sealedSessionId}" before promotion.`
+          : `${sealedBy}.`;
+        ctx.ui.notify(message, "info");
+        pi.sendMessage({ customType: "execution-knowledge", content: message, display: true });
+      }
     }
+    // Session sealed notification: legacy session/1.x keeps its persisted sealed
+    // status; session/3.0 maps `session complete` receipts to the same sealed
+    // transition (completed -> sealed projection). Both fire the knowledge
+    // review hint; v3 sessions are labelled with their receipt origin.
     if (nextSession?.lifecycleAuthority !== "execution-derived"
       && nextSession?.status
       && nextSession.status !== lastSessionStatus) {
       if (nextSession.status === "sealed" && lastSessionStatus !== undefined) {
         const sealedSessionId = nextSession.sessionId;
+        const v3Session = nextSession.schemaVersion === "session/3.0";
         const summary = await new KnowledgeCliAdapter(ctx.cwd).review(sealedSessionId).catch(() => null);
         const pending = summary?.candidates.filter(candidate => candidate.status === "pending").length ?? 0;
         const reviewRequired = summary?.candidates.filter(
@@ -1672,7 +1784,10 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
         ).length ?? 0;
         updateKnowledgePendingStatus(ctx, { pending, reviewRequired });
         if (pending > 0 || reviewRequired > 0) {
-          const message = `Workflow Session ${sealedSessionId} sealed — ${pending} candidate(s) pending, `
+          const sealedBy = v3Session
+            ? `Workflow Session ${sealedSessionId} completed (v3 session complete)`
+            : `Workflow Session ${sealedSessionId} sealed (legacy session/1.x)`;
+          const message = `${sealedBy} — ${pending} candidate(s) pending, `
             + `${reviewRequired} review required. Run \"maestro knowledge review ${sealedSessionId}\" before promotion.`;
           ctx.ui.notify(message, "info");
           pi.sendMessage({ customType: "session-knowledge", content: message, display: true });
@@ -1803,7 +1918,10 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
     if (published.source_checksum !== `sha256:${approvedChecksum}`) {
       throw new Error("Published Plan source checksum does not match the approved revision");
     }
-    assertPublishedPlanSnapshot(publication.snapshot, published, targetSessionId);
+    const assertPlanSnapshot = await workflowCoordinator.mode() === "session-v3"
+      ? assertPublishedPlanSnapshotV3
+      : assertPublishedPlanSnapshot;
+    assertPlanSnapshot(publication.snapshot, published, targetSessionId);
 
     workflowSessionOptedIn = true;
     if (!await attachWorkflowSession(ctx as ExtensionContext, publication.snapshot, hostSessionId)) {
@@ -1824,7 +1942,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
           snapshot: await workflowBridge.refresh(),
         }
       : await workflowCoordinator.next(undefined, { hostSessionId });
-    assertPublishedPlanSnapshot(executionRun.snapshot, published, published.session_id);
+    assertPlanSnapshot(executionRun.snapshot, published, published.session_id);
     const active = requirePublishedExecutionRun(executionRun.snapshot, published);
     await refreshWorkflow(ctx as ExtensionContext, true, true, true);
 
@@ -1972,12 +2090,19 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
       guiEvents.emit(GUI_EVENTS.stateChanged, { subsystem: GUI_EVENTS.runTransition, runId: run.runId });
       // Run seal completes the knowledge pipeline for this step: surface the
       // attribution and staged-candidate summary without blocking the refresh.
+      // session/3.0 runs own a per-run knowledge-delta.json written by
+      // `run complete` (runs/<run_id>/knowledge-delta.json); legacy
+      // (execution-derived) sessions fall back to the session-level
+      // `knowledge review` aggregation.
       if (previous !== "sealed" && run.status === "sealed") {
         const sealedSessionId = snapshot.session?.sessionId;
         if (sealedSessionId) {
           void (async () => {
-            const adapter = new KnowledgeCliAdapter(flowSettingsContext?.cwd ?? process.cwd());
-            const summary = await adapter.review(sealedSessionId).catch(() => null);
+            const cwd = flowSettingsContext?.cwd ?? process.cwd();
+            const v3 = snapshot.session?.schemaVersion === "session/3.0";
+            const summary = v3
+              ? readRunKnowledgeDelta(cwd, sealedSessionId, run.runId)
+              : await new KnowledgeCliAdapter(cwd).review(sealedSessionId).catch(() => null);
             if (!summary) return;
             const signals: Record<string, number> = { consumed: 0, cited: 0, validated: 0, contradicted: 0 };
             for (const input of summary.inputs ?? []) {
@@ -3064,6 +3189,13 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
       guiEvents.emit(GUI_EVENTS.stateChanged, { subsystem: "knowledge", at: Date.now() });
       publishMaestroUi();
     }
+    // Session/Run lifecycle writes (run/session/execution/artifact/ralph) refresh
+    // the canonical Workflow snapshot. The v3 surface (run next/complete,
+    // session complete/chain, ...) carries no v2 mutation-lease semantics; the
+    // refresh below re-projects session/run state and the v3 complete receipts
+    // captured here fire the knowledge pipeline (session complete /
+    // run complete --advance -> knowledge review), mirroring the legacy
+    // execution-seal transition detector.
     if (event.toolName === "run-control" || /\bmaestro\s+(?:run|session|execution|artifact|ralph)\b/.test(command)) {
       const runControlArgv = event.toolName === "run-control"
         ? Array.isArray((event as { input?: { argv?: unknown } }).input?.argv)
@@ -3073,6 +3205,8 @@ Examples: { argv: ["session","status"] }, { argv: ["run","done","run-abc","--ver
       const allowOptIn = event.toolName === "run-control"
         ? Boolean(runControlArgv.length && !isRunControlReadArgv(runControlArgv))
         : isWorkflowOptInCommand(command);
+      const completeReceipt = v3CompleteReceipt(command, runControlArgv);
+      if (completeReceipt && workflowBridge) pendingV3CompleteReceipts.push(completeReceipt);
       await refreshWorkflow(ctx, true, allowOptIn, allowOptIn);
     }
   });

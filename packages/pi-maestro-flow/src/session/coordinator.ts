@@ -187,6 +187,11 @@ export class WorkflowLeaseStore {
     private readonly hooks: WorkflowLeaseStoreHooks = {},
   ) {}
 
+  /** Root directory of the workflow workspace (read-only surface). */
+  root(): string {
+    return this.workflowRoot;
+  }
+
   async acquire(sessionId: string, hostSessionId: string): Promise<WorkflowLease> {
     if (this.held?.sessionId === sessionId && this.held.hostSessionId === hostSessionId) {
       return this.heartbeat();
@@ -649,10 +654,10 @@ export class WorkflowCoordinator {
     return await this.selectMode() !== "fail-closed" && this.adapter.supportsPlanPublish();
   }
 
-  /** New-Session Plan publication is available only after authority negotiation succeeds. */
+  /** New-Session Plan publication is available after authority negotiation; session-v3 allocates the plan chain step instead of a v2 Execution. */
   async supportsNewPlanSession(): Promise<boolean> {
     const mode = await this.selectMode();
-    return mode === "core-execution" || mode === "legacy-host";
+    return mode === "core-execution" || mode === "legacy-host" || mode === "session-v3";
   }
 
   async publishPlan(
@@ -661,6 +666,9 @@ export class WorkflowCoordinator {
   ): Promise<WorkflowTransitionResult> {
     const mode = await this.selectMode();
     if (mode === "fail-closed") throw this.failClosedMutationError("plan publish");
+    if (mode === "session-v3") {
+      return this.publishPlanV3(options, context);
+    }
     if (mode === "core-execution") {
       return this.publishPlanCore(options, context);
     }
@@ -1347,6 +1355,73 @@ export class WorkflowCoordinator {
         epoch: requiredRevision(fence.lease_epoch, "lease epoch"),
         executionRevision: requiredRevision(fence.execution_revision, "execution revision"),
       },
+    };
+  }
+
+  private async publishPlanV3(
+    options: RunPlanPublishOptions,
+    context: WorkflowHostContext,
+  ): Promise<WorkflowTransitionResult> {
+    requireHostSessionId(context.hostSessionId);
+    const requestId = requiredPlanPublishRequestId(options);
+    const sessionId = options.sessionId?.trim()
+      || `plan-${createHash("sha256").update(requestId).digest("hex").slice(0, 12)}`;
+    // 1. Open the v3 Session. Idempotent: the core derives the session id and
+    //    replays the original receipt when the same request-id is retried.
+    await this.execV3(
+      ["session", "open", options.intent ?? "Execute approved Plan", "--id", sessionId, "--json"],
+      { write: true, sessionless: false, mutation: "session", lease: "none" },
+      context.hostSessionId,
+    );
+    // 2. Persist the approved Plan document under .workflow/plans/ (Pi-side
+    //    convention; the core v3 surface has no plan command).
+    const planDir = join(this.leases.root(), ".workflow", "plans");
+    await mkdir(planDir, { recursive: true });
+    const planFile = join(planDir, `${sessionId}-${options.planRevision}.md`);
+    const source = await readFile(options.sourcePath, "utf8");
+    await writeFile(planFile, source);
+    // 3. Insert the plan chain step; the executor reaches the document via the
+    //    birth packet's goal_ref resolution.
+    await this.execV3(
+      ["session", "chain", "insert", "--step-id", `plan-${options.planRevision}`,
+        "--command", "plan", "--goal-ref", planFile, "--json"],
+      { write: true, sessionless: false, mutation: "session", lease: "none" },
+      context.hostSessionId,
+    );
+    // 4. Synthetic plan-publish envelope for the Pi plan-workflow consumers
+    //    (PublishedPlanIdentity shape) backed by the persisted document.
+    const checksum = `sha256:${createHash("sha256").update(source).digest("hex")}`;
+    const envelope = {
+      schema_version: "run-response/1.2",
+      operation: "plan-publish",
+      request_id: requestId,
+      locator: { session_id: sessionId, run_id: null },
+      revision: null,
+      replay: null,
+      warnings: [],
+      ok: true,
+      exit_code: 0,
+      disposition: "success",
+      result: {
+        session_id: sessionId,
+        run_id: `plan-${sessionId}-${options.planRevision}`,
+        artifact_id: `plan:${sessionId}:${options.planRevision}`,
+        source_checksum: checksum,
+        handoff_key: options.handoffKey,
+        request_id: requestId,
+      },
+      error: null,
+      next: null,
+      continuation: null,
+    };
+    return {
+      command: {
+        argv: ["plan", "publish", "--json"],
+        stdout: JSON.stringify(envelope),
+        stderr: "",
+        exitCode: 0,
+      },
+      snapshot: await this.bridge.refresh(),
     };
   }
 

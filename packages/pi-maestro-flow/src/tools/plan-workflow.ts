@@ -100,6 +100,37 @@ export function assertPublishedPlanSnapshot(
   }
 }
 
+export function assertPublishedPlanSnapshotV3(
+  snapshot: WorkflowSnapshot,
+  published: PublishedPlanIdentity,
+  expectedSessionId?: string,
+): void {
+  if (expectedSessionId && published.session_id !== expectedSessionId) {
+    throw new Error(
+      `Published Plan belongs to Workflow Session ${published.session_id}, expected ${expectedSessionId}`,
+    );
+  }
+  if (snapshot.source !== "canonical"
+    || snapshot.canonicalClaim?.status !== "valid"
+    || snapshot.canonicalClaim.activeSessionId !== published.session_id
+    || snapshot.session?.sessionId !== published.session_id) {
+    throw new Error(
+      `Canonical Workflow Session does not match published Plan Session ${published.session_id}`,
+    );
+  }
+  // session/3.0 has no Execution producer Run or plan artifact: the Plan is
+  // represented by the persisted plan document (goal_ref) on the chain step
+  // published by publishPlanV3 (step id `plan-<revision>`).
+  const session = snapshot.session;
+  const planStep = session.chain.find((step) => step.step.startsWith("plan-"));
+  if (!planStep) {
+    throw new Error(`Published Plan chain step is missing in Session ${published.session_id}`);
+  }
+  if (!published.artifact_id.startsWith("plan:")) {
+    throw new Error(`Published Plan artifact identity ${published.artifact_id} is not a v3 plan publication`);
+  }
+}
+
 export function requirePublishedExecutionRun(
   snapshot: WorkflowSnapshot,
   published: PublishedPlanIdentity,
