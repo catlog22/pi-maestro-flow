@@ -88,7 +88,6 @@ import {
   extractStructuredOutputCandidate,
   extractTextContent,
   findStructuredOutputSchemaHazard,
-  getPiSpawnCommand,
   getTeammateDepth,
   getTeammateSessionRoot,
   hasCycle,
