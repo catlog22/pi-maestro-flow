@@ -36,6 +36,10 @@
       "types": "./types/public/v1/agents.d.ts",
       "default": "./src/public/v1/agents.ts"
     },
+    "./v1/backends": {
+      "types": "./types/public/v1/backends.d.ts",
+      "default": "./src/public/v1/backends.ts"
+    },
     "./v1/child-extensions": {
       "types": "./types/public/v1/child-extensions.d.ts",
       "default": "./src/public/v1/child-extensions.ts"

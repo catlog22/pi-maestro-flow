@@ -53,7 +53,10 @@ function extrasOf(root: string) {
       throw new Error("SPAWN REACHED");
     }) as unknown as RunTeammateOptions["spawnChildProcess"],
   } as RunTeammateOptions;
-  return { spawned, extras: () => ({ hostOptions, cwd: root }) };
+  return {
+    spawned,
+    extras: () => ({ hostOptions, cwd: root, replyTo: "caller" as const }),
+  };
 }
 
 test("the Pi backend resolves a real agent, so a swapped resolveAgent argument fails here", async () => {

@@ -54,6 +54,16 @@ export interface TeammateTaskSpec {
   agent?: string;
   taskType?: TeammateTaskType;
   name?: string;
+  /**
+   * Registered backend serving this task; the registry's default when absent.
+   *
+   * Deliberately absent from the model-facing tool schema. Which backends exist
+   * is per-workspace registration, and a static schema cannot enumerate them,
+   * so a model setting this field would be guessing at names it has never been
+   * shown. Deployment-authored task specs — expert-mode rules and programmatic
+   * callers — know the registration document and may set it.
+   */
+  backend?: string;
   dependsOn?: string[];
   context?: "fresh" | "fork";
   model?: string;
@@ -95,6 +105,8 @@ export interface RunTeammateParams {
   mode?: TeammateMode;
   agent?: string;
   taskType?: TeammateTaskType;
+  /** Default registered backend for tasks that name none; see TeammateTaskSpec.backend. */
+  backend?: string;
   reply_to?: "caller" | "main";
   background?: boolean;
   context?: "fresh" | "fork";
@@ -126,6 +138,8 @@ export interface RunSingleTeammateParams {
   task?: string;
   taskType?: TeammateTaskType;
   name?: string;
+  /** Registered backend serving this task; the registry's default when absent. */
+  backend?: string;
   reply_to?: "caller" | "main";
   protocol_version?: number;
   background?: boolean;
@@ -261,6 +275,8 @@ export interface NormalizedTask {
   description?: string;
   taskType?: TeammateTaskType;
   name?: string;
+  /** Registered backend serving this task; the registry's default when absent. */
+  backend?: string;
   dependsOn?: string[];
   context?: "fresh" | "fork";
   model?: string;
@@ -1130,6 +1146,7 @@ export function normalizeTeammateParams(
     description: task.description,
     taskType: task.taskType ?? params.taskType,
     name: task.name,
+    backend: task.backend ?? params.backend,
     dependsOn: task.dependsOn,
     context: task.context ?? params.context,
     model: task.model ?? params.model,

@@ -13,6 +13,7 @@ import type {
   TeammateBackend,
 } from "pi-maestro-backend-core/v1/backend";
 import type {
+  BackendRegistry,
   BackendRegistryConfig,
   ResolvedBackend,
 } from "pi-maestro-backend-core/v1/registry";
@@ -57,7 +58,7 @@ function asBackend(loaded: unknown): TeammateBackend | undefined {
  * Loading is lazy per backend but memoized: a backend named by several tasks is
  * imported and configuration-checked once.
  */
-export class TeammateBackendRegistry {
+export class TeammateBackendRegistry implements BackendRegistry {
   private readonly loaded = new Map<string, Promise<RegisteredBackend>>();
 
   /**
@@ -137,19 +138,30 @@ export class TeammateBackendRegistry {
       return { backend, config: resolved.values };
     })();
 
-    this.loaded.set(name, task);
-    return task;
+    // A rejected load is evicted: memoizing the rejection would make an
+    // operator's repair of the registration document take effect only after a
+    // restart, while every later task kept reporting the original failure.
+    this.loaded.set(name, task.catch((cause: unknown) => {
+      this.loaded.delete(name);
+      throw cause;
+    }));
+    return this.loaded.get(name)!;
   }
 
   /**
    * Resolve the backend serving one task.
    *
-   * @param _spec - the run spec; reserved for routing rules that read it.
-   * @param requestedBackend - an explicitly requested backend name.
+   * The spec's own selector is read here rather than at each call site: a call
+   * site that forgot to forward it would silently run the default, which is the
+   * one failure mode a routing decision must not have.
+   *
+   * @param spec - the run spec, whose `backend` names its registration.
+   * @param requestedBackend - host override taking precedence over the spec.
    * @returns the backend plus its resolved configuration.
    */
-  async resolve(_spec: TeammateRunSpec, requestedBackend?: string): Promise<ResolvedBackend> {
-    const { backend, config } = await this.registered(requestedBackend ?? this.config.default);
+  async resolve(spec: TeammateRunSpec, requestedBackend?: string): Promise<ResolvedBackend> {
+    const name = requestedBackend ?? spec.backend ?? this.config.default;
+    const { backend, config } = await this.registered(name);
     return { backend, config };
   }
 

@@ -175,6 +175,7 @@ function backendSpecOf(
     agent: params.agent,
     task: params.task ?? "",
     ...(params.name === undefined ? {} : { name: params.name }),
+    ...(params.backend === undefined ? {} : { backend: params.backend }),
     ...(params.context === undefined ? {} : { context: params.context }),
     ...(model === undefined ? {} : { model }),
     ...(params.thinking === undefined ? {} : { thinking: params.thinking as TeammateRunSpec["thinking"] }),
@@ -563,14 +564,14 @@ export async function runSingleTeammate(
         // "backend-registry"` in `.pi/teammate-backends.json` actually switch
         // the dispatch path rather than only describe an intent.
         const registry = options.backendRegistry
-          ?? dispatchRegistrySync(options.baseCwd, () => ({ hostOptions: attemptOptions, cwd }));
+          ?? dispatchRegistrySync(options.baseCwd, () => ({ hostOptions: attemptOptions, cwd, replyTo }));
         if (registry === undefined) {
           attempt = outcomeOf(await runSingleAttempt(
             params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, attemptOptions,
           ));
         } else {
           const spec = backendSpecOf(params, cwd, modelToUse);
-          const { backend, config } = await registry.resolve(spec);
+          const { backend, config } = await registry.resolve(spec, spec.backend);
           const run = await backend.start(
             spec,
             backendOptionsOf(correlationId, cwd, attemptOptions, params.agent, startTime, config),
@@ -584,6 +585,10 @@ export async function runSingleTeammate(
           } finally {
             options.signal?.removeEventListener("abort", abortRun);
           }
+          // Recorded by the dispatch rather than by the backend: a backend that
+          // forgot to name itself would otherwise be indistinguishable from the
+          // legacy path, which names nothing because no backend served it.
+          attempt.result.backend = backend.name;
         }
       } catch (error) {
         discardCompletion();
@@ -830,7 +835,7 @@ export async function runGraph(
   let graphRegistry;
   try {
     graphRegistry = options.backendRegistry
-      ?? await dispatchRegistrySync(options.baseCwd, () => {
+      ?? dispatchRegistrySync(options.baseCwd, () => {
         throw new Error("capability adjudication never starts a run");
       });
   } catch (cause) {
@@ -858,7 +863,9 @@ export async function runGraph(
     let backends;
     try {
       backends = await Promise.all(adjudicated.map(async ({ spec }) => {
-        const { backend } = await registry.resolve(spec);
+        // Same selector dispatch will use; adjudicating the default while
+        // dispatch runs a task-named backend would check the wrong table.
+        const { backend } = await registry.resolve(spec, spec.backend);
         return { name: backend.name, capabilities: backend.capabilities };
       }));
     } catch (cause) {
@@ -1105,6 +1112,7 @@ export async function runGraph(
         {
           agent: task.agent,
           name: task.name,
+          backend: task.backend,
           task: resolvedTask,
           context: task.context,
           model: task.model,

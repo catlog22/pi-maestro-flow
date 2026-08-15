@@ -41,6 +41,17 @@ export interface TeammateRunSpec {
   agent: string;
   task: string;
   name?: string;
+  /**
+   * Registered backend name serving this task; the registry's default when
+   * absent.
+   *
+   * Per-task rather than per-deployment because backends differ in what they
+   * can do, not only in where they run: a deployment registering one backend
+   * for code edits and another for long research picks between them the same
+   * way it picks a model. A name that is not registered fails the dispatch
+   * rather than falling back, so a typo cannot silently route elsewhere.
+   */
+  backend?: string;
   context?: RunContext;
   /** The single model for this attempt; the host owns the fallback sequence. */
   model?: string;

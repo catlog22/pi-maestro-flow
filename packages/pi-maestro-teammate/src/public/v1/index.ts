@@ -9,6 +9,7 @@
  * this barrel, and pay for only what they use.
  */
 export * from "./agents.ts";
+export * from "./backends.ts";
 export * from "./child-extensions.ts";
 export * from "./cli-tools.ts";
 export * from "./events.ts";

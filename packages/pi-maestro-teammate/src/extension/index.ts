@@ -2503,6 +2503,7 @@ export default function registerTeammateExtension(
         task: singleTask.prompt,
         taskType: singleTask.taskType,
         name: singleTask.name,
+        backend: singleTask.backend,
         reply_to: params.reply_to,
         context: singleTask.context,
         model: singleTask.model,

@@ -1,19 +1,21 @@
 {
   "name": "pi-maestro-backends",
   "version": "0.1.0",
-  "description": "Teammate execution backends. Every backend here implements the same pi-maestro-backend-core contract — including the Pi subprocess, which is an ordinary member rather than a bypass.",
+  "description": "Teammate execution backends. Every backend here implements the same pi-maestro-backend-core contract \u2014 including the Pi subprocess, which is an ordinary member rather than a bypass.",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --experimental-transform-types --test \"test/*.test.ts\""
+    "test": "node --experimental-transform-types --test \"test/*.test.ts\"",
+    "test:e2e": "node --experimental-transform-types --test --test-timeout=300000 test/dsh-runtime.e2e.test.ts"
   },
   "main": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./dsh": "./src/dsh/index.ts"
+    "./dsh": "./src/dsh/index.ts",
+    "./dsh/driver": "./src/dsh/driver.ts"
   },
   "files": [
     "src/**/*.ts"

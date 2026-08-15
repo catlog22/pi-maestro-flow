@@ -88,9 +88,9 @@ test("tool calls from every turn are counted, not just the last", async () => {
       if (turn === 1) {
         started();
         await held;
-        return { sessionId: "s", finalResponse: "first", events: [{ type: "tool/end" }, { type: "tool/end" }, { type: "tool/end" }] };
+        return { sessionId: "s", finalResponse: "first", events: [{ type: "tool/result" }, { type: "tool/result" }, { type: "tool/result" }] };
       }
-      return { sessionId: "s", finalResponse: "second", events: [{ type: "tool/end" }, { type: "turn/end" }] };
+      return { sessionId: "s", finalResponse: "second", events: [{ type: "tool/result" }, { type: "turn/end" }] };
     },
     async close() {},
   }));
@@ -184,7 +184,7 @@ test("a turn ending without the runtime's marker is only inferred", async () => 
 
 test("completed tool calls are counted for the host's fence", async () => {
   const backend = createDshBackend(async () => fakeDriver({
-    events: [{ type: "tool/end" }, { type: "tool/end" }, { type: "turn/end" }],
+    events: [{ type: "tool/result" }, { type: "tool/result" }, { type: "turn/end" }],
   }));
   const outcome = await (await backend.start(SPEC, runOptions())).outcome;
   assert.equal(outcome.result.toolCount, 2);

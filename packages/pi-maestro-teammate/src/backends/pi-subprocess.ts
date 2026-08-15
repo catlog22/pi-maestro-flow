@@ -25,7 +25,7 @@ import type {
 import type { ControlMode, SingleResult, TeammateRunSpec } from "pi-maestro-backend-core/v1/spec";
 import type { Writable } from "node:stream";
 import { resolveAgent } from "../agents/agents.ts";
-import { resolveReplyTo } from "../shared/routing.ts";
+import type { ReplyTarget } from "../shared/routing.ts";
 import type { RunSingleTeammateParams, RunTeammateOptions } from "../runs/execution-infra.ts";
 import {
   attemptReclamations,
@@ -66,11 +66,19 @@ const TUNABLE_KEYS = [
 
 type TunableKey = (typeof TUNABLE_KEYS)[number];
 
-const CONFIG_FIELDS: readonly BackendConfigField[] = TUNABLE_KEYS.map((key) => ({
+/**
+ * Pi's own configuration fields.
+ *
+ * Exported so a settings shell renders the same list the backend validates
+ * against. A host that restated them would drift the moment a tunable is added.
+ */
+export const PI_SUBPROCESS_CONFIG_FIELDS: readonly BackendConfigField[] = TUNABLE_KEYS.map((key) => ({
   key,
   kind: "integer",
   labelKey: `piSubprocess.${key}`,
 }));
+
+const CONFIG_FIELDS = PI_SUBPROCESS_CONFIG_FIELDS;
 
 /**
  * Facts reported when an attempt settles without recording any.
@@ -152,6 +160,15 @@ export interface PiSubprocessRunExtras {
   hostOptions: RunTeammateOptions;
   /** Resolved task cwd; already absolute. */
   cwd: string;
+  /**
+   * Where this run's completion is delivered.
+   *
+   * Supplied by the host because it owns the routing decision and holds the
+   * `reply_to` the spec does not carry. Recomputing it here from the spec would
+   * see only `name`, so a task addressed to `main` would silently reply to its
+   * caller on this path and to `main` on the legacy one.
+   */
+  replyTo: ReplyTarget;
 }
 
 /**
@@ -222,7 +239,7 @@ export function createPiSubprocessBackend(
     },
 
     async start(spec: TeammateRunSpec, options: BackendRunOptions): Promise<BackendRun> {
-      const { hostOptions, cwd } = extrasOf(spec, options);
+      const { hostOptions, cwd, replyTo } = extrasOf(spec, options);
       // Both overloads of resolveAgent take (string, string), so a swapped
       // argument order compiles cleanly and only fails at run time.
       const agentConfig = await resolveAgent(cwd, spec.agent);
@@ -251,7 +268,7 @@ export function createPiSubprocessBackend(
         agentConfig,
         cwd,
         options.correlationId,
-        resolveReplyTo({ ...(spec.name === undefined ? {} : { name: spec.name }) }),
+        replyTo,
         Date.now(),
         spec.model,
         wired,

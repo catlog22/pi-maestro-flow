@@ -14,17 +14,23 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { writeFileDurableSync } from "./durable-write.ts";
 import {
+  SETTINGS_ANNOUNCE_EVENT,
+  SETTINGS_DISCOVER_EVENT,
+  SETTINGS_PROTOCOL_VERSION,
   SETTINGS_SECRET_SET_PLACEHOLDER,
   type ConfiguredSettingValue,
   type EffectiveSettingValue,
   type JsonValue,
   type SettingDefinition,
+  type SettingsAnnounceEventV1,
   type SettingsChange,
   type SettingsContextV1,
+  type SettingsDiscoverEventV1,
   type SettingsProviderV1,
   type SettingsResource,
   type SettingsResourceRevision,
@@ -42,9 +48,28 @@ const MODE_KEY = "teammateBackends.mode";
 const DEFAULT_KEY = "teammateBackends.default";
 const GROUP_DISPATCH = "teammateBackends.group.dispatch";
 
+/**
+ * Registration the document falls back to.
+ *
+ * A written document must always name a mode and a default: the registry reader
+ * rejects one that does not, so committing a document containing only the field
+ * the operator edited would make the very next dispatch fail to load it.
+ */
+const DEFAULT_MODE: TeammateExecutionMode = "legacy";
+const DEFAULT_BACKEND = "pi-subprocess";
+
 /** What the provider needs to know about a backend; not the backend itself. */
 export interface BackendDescriptor {
   name: string;
+  /**
+   * Module specifier the registry loader resolves for this backend.
+   *
+   * Required because the registration name and the module are different things:
+   * writing the name here produced documents naming `"dsh"` as a module, which
+   * no loader can resolve, so every document this provider wrote for a
+   * non-built-in backend failed at load.
+   */
+  module: string;
   configFields?: readonly BackendConfigField[];
 }
 
@@ -121,31 +146,110 @@ function etagOf(raw: string): string {
   return createHash("sha256").update(raw).digest("hex").slice(0, 16);
 }
 
-/** Write a file atomically, creating parent directories. */
-function writeAtomic(path: string, content: string, mode?: number): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, content, mode === undefined ? "utf-8" : { encoding: "utf-8", mode });
-  renameSync(temporary, path);
-}
+/**
+ * Environment variable names a credential reference may take.
+ *
+ * Enforced here rather than left to each backend: the name is interpolated into
+ * a dotenv file this provider writes, so a value containing a newline or an `=`
+ * would inject an unrelated variable into the runtime's environment. The rule
+ * is the POSIX portable name set, which every backend that reads an env var
+ * needs anyway.
+ */
+const ENV_VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-/** Parse a dotenv-style file into its key/value pairs. */
-function readEnvFile(path: string): Map<string, string> {
-  const entries = new Map<string, string>();
-  if (!existsSync(path)) return entries;
-  for (const line of readFileSync(path, "utf-8").split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed === "" || trimmed.startsWith("#")) continue;
-    const eq = trimmed.indexOf("=");
-    if (eq <= 0) continue;
-    entries.set(trimmed.slice(0, eq).trim(), trimmed.slice(eq + 1));
+/**
+ * Write a credential file, creating its directory owner-only.
+ *
+ * `mkdir` inside the durable writer uses the process umask, which commonly
+ * yields a world-readable directory. The file is 0600 either way, but a
+ * traversable parent still tells everyone on the host which backends have
+ * credentials configured.
+ */
+function writeCredentialFile(path: string, content: string): void {
+  const directory = dirname(path);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  // mkdir applies the umask to `mode`, and does nothing at all when the
+  // directory already exists from an earlier release.
+  try {
+    chmodSync(directory, 0o700);
+  } catch {
+    // A directory owned by another user cannot be tightened from here; the
+    // 0600 file mode below is the guarantee that does not depend on this.
   }
-  return entries;
+  writeFileDurableSync(path, content);
 }
 
-/** Serialize env entries back to a dotenv file body. */
-function formatEnvFile(entries: ReadonlyMap<string, string>): string {
-  return [...entries].map(([key, value]) => `${key}=${value}`).join("\n") + "\n";
+/**
+ * A dotenv file as its original lines plus the assignments found in them.
+ *
+ * The lines are kept because this provider owns only the variables the backends
+ * declare. The same file routinely holds an operator's comments and unrelated
+ * variables, and rewriting it from the parsed assignments alone would delete
+ * both — a settings edit must not silently rewrite a file it shares.
+ */
+interface EnvDocument {
+  lines: string[];
+  /** Assignment key to the index in `lines` that sets it; last assignment wins. */
+  index: Map<string, number>;
+}
+
+/** Split one dotenv line into its key and value, or undefined when it sets nothing. */
+function envAssignment(line: string): { key: string; value: string } | undefined {
+  const trimmed = line.trim();
+  if (trimmed === "" || trimmed.startsWith("#")) return undefined;
+  const eq = trimmed.indexOf("=");
+  if (eq <= 0) return undefined;
+  return { key: trimmed.slice(0, eq).trim(), value: trimmed.slice(eq + 1) };
+}
+
+/** Read a dotenv file, keeping every line so unrelated content survives a write. */
+function readEnvDocument(path: string): EnvDocument {
+  const index = new Map<string, number>();
+  if (!existsSync(path)) return { lines: [], index };
+  const body = readFileSync(path, "utf-8");
+  // A trailing newline yields a final empty element; dropping it keeps a
+  // round-trip from growing the file by one blank line per write.
+  const lines = body.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  for (const [position, line] of lines.entries()) {
+    const assignment = envAssignment(line);
+    if (assignment !== undefined) index.set(assignment.key, position);
+  }
+  return { lines, index };
+}
+
+/** Read one variable's value, or undefined when the file does not set it. */
+function envValue(document: EnvDocument, key: string): string | undefined {
+  const position = document.index.get(key);
+  if (position === undefined) return undefined;
+  return envAssignment(document.lines[position]!)?.value;
+}
+
+/** Set or replace one variable in place, appending when it is new. */
+function setEnvValue(document: EnvDocument, key: string, value: string): void {
+  const position = document.index.get(key);
+  if (position === undefined) {
+    document.index.set(key, document.lines.length);
+    document.lines.push(`${key}=${value}`);
+    return;
+  }
+  document.lines[position] = `${key}=${value}`;
+}
+
+/** Remove one variable, leaving every other line untouched. */
+function deleteEnvValue(document: EnvDocument, key: string): void {
+  const position = document.index.get(key);
+  if (position === undefined) return;
+  document.lines.splice(position, 1);
+  document.index.delete(key);
+  for (const [other, at] of document.index) {
+    if (at > position) document.index.set(other, at - 1);
+  }
+}
+
+/** Serialize a dotenv document back to a file body. */
+function formatEnvDocument(document: EnvDocument): string {
+  return document.lines.length === 0 ? "" : `${document.lines.join("\n")}\n`;
 }
 
 /**
@@ -159,7 +263,12 @@ export function createTeammateBackendsSettingsProvider(
 ): SettingsProviderV1 {
   const documentPath = join(options.workspaceRoot, ".pi", "teammate-backends.json");
   const credentialRoot = options.credentialRoot ?? join(homedir(), ".dsh");
-  const staged = new Map<string, { document: Document; secrets: Map<string, Map<string, string>> }>();
+  const staged = new Map<string, {
+    document: Document;
+    secrets: Map<string, EnvDocument>;
+    /** Etag of the document this transaction was prepared against. */
+    etag: string;
+  }>();
 
   const credentialPath = (backend: string): string => join(credentialRoot, backend, ".env");
 
@@ -274,7 +383,7 @@ export function createTeammateBackendsSettingsProvider(
 
     for (const backend of options.backends) {
       const stored = document.backends?.[backend.name]?.config ?? {};
-      const envEntries = readEnvFile(credentialPath(backend.name));
+      const envDocument = readEnvDocument(credentialPath(backend.name));
       for (const field of backend.configFields ?? []) {
         record(
           fieldKey(backend.name, field.key),
@@ -287,7 +396,7 @@ export function createTeammateBackendsSettingsProvider(
         const key = secretKey(backend.name, field.key);
         // The value itself never leaves the env file; the shell learns only
         // whether one is present.
-        if (variable !== undefined && envEntries.has(variable)) {
+        if (variable !== undefined && envValue(envDocument, variable) !== undefined) {
           configured.push({ key, scope: "global", state: "set", value: SETTINGS_SECRET_SET_PLACEHOLDER });
           effective.push({ key, value: SETTINGS_SECRET_SET_PLACEHOLDER, source: "configured", scope: "global" });
         } else {
@@ -314,11 +423,13 @@ export function createTeammateBackendsSettingsProvider(
   /** Apply changes onto an in-memory document plus per-backend secret files. */
   const apply = (changes: readonly SettingsChange[]): {
     document: Document;
-    secrets: Map<string, Map<string, string>>;
+    secrets: Map<string, EnvDocument>;
     issues: SettingsValidationIssue[];
+    etag: string;
   } => {
-    const { document } = readDocument(documentPath);
-    const secrets = new Map<string, Map<string, string>>();
+    const { document, raw } = readDocument(documentPath);
+    const etag = etagOf(raw);
+    const secrets = new Map<string, EnvDocument>();
     const issues: SettingsValidationIssue[] = [];
     const known = new Map(definitions().map((definition) => [definition.key, definition]));
 
@@ -376,11 +487,48 @@ export function createTeammateBackendsSettingsProvider(
       if (field === undefined) continue;
 
       if (!isSecret) {
+        // A credential reference names a lookup. Rejecting anything that is not
+        // a variable name is what keeps a pasted secret out of the committable
+        // document, and it belongs here rather than in each backend: this is the
+        // code that writes the name into a dotenv file.
+        if (field.kind === "credential-ref" && change.operation !== "unset") {
+          if (typeof change.value !== "string" || !ENV_VARIABLE_NAME.test(change.value)) {
+            issues.push({
+              severity: "error",
+              code: "credential-name-invalid",
+              messageKey: "teammateBackends.error.credentialNameInvalid",
+              // The rejected value is deliberately absent from the message: the
+              // most likely reason it was rejected is that it is the key.
+              params: { field: fieldName },
+              key: change.key,
+            });
+            continue;
+          }
+        }
         document.backends ??= {};
-        document.backends[owner.name] ??= { module: owner.name };
+        document.backends[owner.name] ??= { module: owner.module };
+        // An entry written by an earlier release recorded the backend name as
+        // its module; repair it instead of leaving a document that cannot load.
+        document.backends[owner.name]!.module = owner.module;
         const config = (document.backends[owner.name]!.config ??= {});
+        // The default when the document never recorded one: that is the name a
+        // stored value is actually under, so a rename away from it must carry.
+        const previous = config[fieldName] ?? (field.default as JsonValue | undefined);
+        const renamed = change.operation === "unset" ? undefined : change.value;
         if (change.operation === "unset") delete config[fieldName];
         else config[fieldName] = change.value;
+        // Renaming the variable moves its value. Leaving it under the old name
+        // would strand a live credential in the runtime's env file while the
+        // shell reports the new name as unset.
+        if (field.kind === "credential-ref" && typeof previous === "string" && previous !== renamed) {
+          const entries = secrets.get(owner.name) ?? readEnvDocument(credentialPath(owner.name));
+          const carried = envValue(entries, previous);
+          deleteEnvValue(entries, previous);
+          if (carried !== undefined && typeof renamed === "string") {
+            setEnvValue(entries, renamed, carried);
+          }
+          secrets.set(owner.name, entries);
+        }
         continue;
       }
 
@@ -395,15 +543,30 @@ export function createTeammateBackendsSettingsProvider(
         });
         continue;
       }
-      const entries = secrets.get(owner.name) ?? readEnvFile(credentialPath(owner.name));
-      if (change.operation === "unset") entries.delete(variable);
+      if (!ENV_VARIABLE_NAME.test(variable)) {
+        issues.push({
+          severity: "error",
+          code: "credential-name-invalid",
+          messageKey: "teammateBackends.error.credentialNameInvalid",
+          params: { field: fieldName },
+          key: change.key,
+        });
+        continue;
+      }
+      const entries = secrets.get(owner.name) ?? readEnvDocument(credentialPath(owner.name));
+      if (change.operation === "unset") deleteEnvValue(entries, variable);
       else if (typeof change.value === "string" && change.value !== SETTINGS_SECRET_SET_PLACEHOLDER) {
-        entries.set(variable, change.value);
+        setEnvValue(entries, variable, change.value);
       }
       secrets.set(owner.name, entries);
     }
 
-    return { document, secrets, issues };
+    // The reader rejects a document without a mode and a default, so completing
+    // it here is what makes a partial edit produce a loadable file.
+    document.mode ??= DEFAULT_MODE;
+    document.default ??= DEFAULT_BACKEND;
+
+    return { document, secrets, issues, etag };
   };
 
   return {
@@ -433,9 +596,9 @@ export function createTeammateBackendsSettingsProvider(
     },
 
     prepare(request) {
-      const { document, secrets, issues } = apply(request.changes);
+      const { document, secrets, issues, etag } = apply(request.changes);
       const valid = issues.every((issue) => issue.severity !== "error");
-      if (valid) staged.set(request.transactionId, { document, secrets });
+      if (valid) staged.set(request.transactionId, { document, secrets, etag });
       return {
         prepared: valid,
         ...(valid ? { prepareToken: request.transactionId } : {}),
@@ -451,11 +614,22 @@ export function createTeammateBackendsSettingsProvider(
       }
       staged.delete(request.prepareToken);
 
-      writeAtomic(documentPath, `${JSON.stringify(pending.document, null, 2)}\n`);
+      // The document is read at prepare and rewritten whole at commit, so an
+      // edit made between the two would be erased. Refusing is the only honest
+      // answer: this provider cannot merge two concurrent edits.
+      const current = etagOf(readDocument(documentPath).raw);
+      if (current !== pending.etag) {
+        throw new Error(
+          `teammate backends settings: ${DOCUMENT_ID} changed since this transaction was prepared; `
+          + "re-read the settings and apply the change again",
+        );
+      }
+
+      writeFileDurableSync(documentPath, `${JSON.stringify(pending.document, null, 2)}\n`);
       for (const [backend, entries] of pending.secrets) {
-        // Mode 0600 and a path outside the repository: the value is the one
-        // thing here that must never become a committable artifact.
-        writeAtomic(credentialPath(backend), formatEnvFile(entries), 0o600);
+        // Mode 0600 in an owner-only directory outside the repository: the value
+        // is the one thing here that must never become a committable artifact.
+        writeCredentialFile(credentialPath(backend), formatEnvDocument(entries));
       }
 
       const snapshot = read();
@@ -471,4 +645,48 @@ export function createTeammateBackendsSettingsProvider(
       staged.delete(request.prepareToken);
     },
   };
+}
+
+/** The subset of the host event bus this provider announces itself on. */
+interface SettingsEventBus {
+  on(event: string, handler: (payload: unknown) => void): void | (() => void);
+  emit(event: string, payload: unknown): void;
+}
+
+/** Whether a payload is a well-formed discovery request. */
+function isDiscover(payload: unknown): payload is SettingsDiscoverEventV1 {
+  return Boolean(payload && typeof payload === "object"
+    && (payload as Partial<SettingsDiscoverEventV1>).version === SETTINGS_PROTOCOL_VERSION
+    && typeof (payload as Partial<SettingsDiscoverEventV1>).requestId === "string");
+}
+
+/**
+ * Announce this provider to the settings shell.
+ *
+ * Without this the provider is complete and unreachable: nothing emits it, so
+ * the execution-mode toggle and every backend field exist only in tests.
+ *
+ * @param events - the host event bus.
+ * @param provider - the provider to announce.
+ * @returns a disposer that stops answering discovery.
+ */
+export function registerTeammateBackendsSettingsProvider(
+  events: SettingsEventBus,
+  provider: SettingsProviderV1,
+): () => void {
+  const announce = (requestId?: string): void => {
+    const payload: SettingsAnnounceEventV1 = {
+      version: SETTINGS_PROTOCOL_VERSION,
+      requestId,
+      providerId: PROVIDER_ID,
+      instanceId: PROVIDER_ID,
+      provider,
+    };
+    events.emit(SETTINGS_ANNOUNCE_EVENT, payload);
+  };
+  const result = events.on(SETTINGS_DISCOVER_EVENT, (payload) => {
+    if (isDiscover(payload)) announce(payload.requestId);
+  });
+  announce();
+  return () => { if (typeof result === "function") result(); };
 }

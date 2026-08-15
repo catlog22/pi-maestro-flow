@@ -157,16 +157,23 @@ function text(config: Record<string, ConfigValue>, key: string): string | undefi
 }
 
 /**
+ * Marker a finished tool call carries.
+ *
+ * `tool/result` is what a real runtime emits — a live transcript pairs one
+ * `tool/call` with one `tool/result`. The earlier guess of `tool/end` matched
+ * nothing, so every tool-using run reported zero completed calls and the host's
+ * replay fence saw a turn that had touched nothing.
+ */
+const TOOL_COMPLETED_EVENT = "tool/result";
+
+/**
  * Count the tool calls an event stream reports as finished.
  *
  * @param events - the run's session events in wire order.
  * @returns how many tool calls completed.
  */
 function completedTools(events: readonly Record<string, unknown>[]): number {
-  return events.filter((event) => {
-    const type = event.type ?? event.kind;
-    return type === "tool/end" || type === "tool_result";
-  }).length;
+  return events.filter((event) => (event.type ?? event.kind) === TOOL_COMPLETED_EVENT).length;
 }
 
 /**
@@ -218,12 +225,14 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
         errors.push(`"${key}" must be a positive number, got ${String(value)}`);
       }
       // The credential field names a lookup; a value that looks like a key
-      // means someone pasted the secret into a field built to hold a name.
+      // means someone pasted the secret into a field built to hold a name. The
+      // rejected value is never quoted back: the likeliest reason it failed is
+      // that it is the key, and this message reaches logs and transcripts.
       const apiKeyEnv = text(config, "apiKeyEnv");
-      if (apiKeyEnv !== undefined && /[^A-Z0-9_]/.test(apiKeyEnv)) {
+      if (apiKeyEnv !== undefined && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyEnv)) {
         errors.push(
           `"apiKeyEnv" names the environment variable holding the key, not the key itself; `
-          + `"${apiKeyEnv}" is not a variable name`,
+          + "the configured value is not a variable name",
         );
       }
       return { values: config, errors };
