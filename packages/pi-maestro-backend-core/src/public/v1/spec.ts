@@ -32,21 +32,24 @@ export type RunContext = "fresh" | "fork";
  * the model may set. Transport details (stdio layout, wire format, extension
  * loading, IPC channels) are deliberately absent — those belong to whichever
  * backend serves the request.
+ *
+ * Host-enforced fields are absent too. `fallbackModels`, `maxNestingDepth`, and
+ * `cwd` are resolved and enforced by the orchestrator before any backend is
+ * reached, so a backend neither declares support for them nor implements them.
  */
 export interface TeammateRunSpec {
   agent: string;
   task: string;
   name?: string;
   context?: RunContext;
+  /** The single model for this attempt; the host owns the fallback sequence. */
   model?: string;
-  fallbackModels?: string[];
   thinking?: ThinkingLevel;
+  /** Working directory, already resolved against the host's base cwd. */
   cwd?: string;
   outputSchema?: Record<string, unknown>;
   /** Todo task ids bound to this agent; injected into the child's prompt. */
   todos?: string[];
-  /** Nesting budget for the agent this task spawns. */
-  maxNestingDepth?: number;
 }
 
 /**
@@ -55,11 +58,16 @@ export interface TeammateRunSpec {
  * `emulated` is recorded per run rather than inferred from the backend name, so
  * a consumer reading a result can always tell whether a structured value came
  * from a native contract or from host-side extraction.
+ *
+ * `withheld` records a capability the backend can serve but did not exercise on
+ * this run because a host fence stopped it — the model-fallback replay fence is
+ * the current instance. Without this state a fenced run is indistinguishable
+ * from one whose backend simply never needed the capability.
  */
 export interface CapabilityDelivery {
   capability: string;
-  support: "native" | "emulated";
-  /** Why the emulated path was taken, when it was. */
+  support: "native" | "emulated" | "withheld";
+  /** Why the emulated or withheld path was taken. */
   note?: string;
 }
 
@@ -95,8 +103,9 @@ export interface SingleResult {
   warnings?: string[];
   /**
    * Which backend served this run, and every capability it satisfied by
-   * emulation rather than natively. Populated by the registry, never by the
-   * backend alone, so an omitted entry cannot silently mean "native".
+   * emulation, or withheld under a fence, rather than natively. Populated by the
+   * registry, never by the backend alone, so an omitted entry cannot silently
+   * mean "native".
    */
   backend?: string;
   capabilityDeliveries?: CapabilityDelivery[];

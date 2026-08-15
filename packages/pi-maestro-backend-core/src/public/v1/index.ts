@@ -18,12 +18,17 @@ export type {
 } from "./spec.ts";
 
 export type {
+  AttemptOutcome,
+  AttemptReclamation,
+  AttemptRecoveryFacts,
   BackendCapabilities,
   BackendHostCapabilities,
   BackendRun,
   BackendRunOptions,
   CapabilityName,
   CapabilitySupport,
+  RecoveryShape,
+  SettlementAuthority,
   TeammateBackend,
 } from "./backend.ts";
 
@@ -33,6 +38,7 @@ export type {
   BackendRegistryConfig,
   CapabilityValidation,
   CapabilityVerdict,
+  DegradableCapability,
   RequiredCapabilities,
   ResolvedBackend,
 } from "./registry.ts";

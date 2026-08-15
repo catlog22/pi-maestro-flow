@@ -42,6 +42,23 @@ export interface RequiredCapabilities {
   required: CapabilityName[];
 }
 
+/**
+ * Capabilities whose absence degrades the run instead of rejecting the graph.
+ *
+ * `forkContext` is the only member: a task that asked to inherit parent history
+ * still runs correctly from a fresh context, so refusing the whole graph would
+ * be a harsher answer than the request warrants. Every other capability either
+ * changes the result the orchestrator will read or has no meaningful fallback.
+ *
+ * Degradation is never silent. The existing fork degradation path fires on
+ * "parent session file unavailable" and writes a transcript notice; that trigger
+ * cannot detect this case, because a backend-capability degradation happens
+ * while the parent session file exists and is perfectly readable — by a runtime
+ * that cannot interpret it. Backend-capability degradation therefore needs its
+ * own branch reaching the same transcript exit.
+ */
+export type DegradableCapability = "forkContext";
+
 /** One task's capability adjudication against its resolved backend. */
 export interface CapabilityVerdict {
   taskIndex: number;
@@ -49,6 +66,8 @@ export interface CapabilityVerdict {
   backendName: string;
   /** Capabilities the backend cannot serve at all — these reject the graph. */
   unsupported: CapabilityName[];
+  /** Unsupported but degradable — the run proceeds with a recorded notice. */
+  degraded: DegradableCapability[];
   /** Capabilities served by host-side compensation — allowed, and recorded. */
   emulated: CapabilityName[];
 }
@@ -65,7 +84,7 @@ export interface CapabilityValidation {
   verdicts: CapabilityVerdict[];
   /** Non-empty when at least one task requires an unsupported capability. */
   errors: string[];
-  /** Advisory notices for emulated capabilities; these never reject. */
+  /** Advisory notices for emulated and degraded capabilities; these never reject. */
   warnings: string[];
 }
 
