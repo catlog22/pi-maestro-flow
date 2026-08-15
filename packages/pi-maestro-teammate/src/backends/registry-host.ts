@@ -6,6 +6,7 @@
  * of importing it by module specifier.
  */
 
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
@@ -62,13 +63,27 @@ export async function readBackendRegistryConfig(
     throw new Error(`teammate backend registry at ${path} could not be read`, { cause });
   }
 
+  return parseBackendRegistryDocument(raw, path);
+}
+
+/**
+ * Validate one registration document.
+ *
+ * Shared by the async and synchronous readers so a rule can never hold on one
+ * path and not the other.
+ *
+ * @param raw - the document text.
+ * @param path - the document path, for diagnostics that must name it.
+ * @returns the validated document with the built-in registration merged in.
+ */
+function parseBackendRegistryDocument(raw: string, path: string): BackendRegistryConfig {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (cause) {
     throw new Error(`teammate backend registry at ${path} is not valid JSON`, { cause });
   }
-  if (typeof parsed !== "object" || parsed === null) {
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error(`teammate backend registry at ${path} must contain a JSON object`);
   }
 
@@ -82,8 +97,19 @@ export async function readBackendRegistryConfig(
   if (typeof document.default !== "string") {
     throw new Error(`teammate backend registry at ${path} must name a "default" backend`);
   }
-  if (typeof document.backends !== "object" || document.backends === null) {
+  if (typeof document.backends !== "object" || document.backends === null || Array.isArray(document.backends)) {
     throw new Error(`teammate backend registry at ${path} must map "backends" to registrations`);
+  }
+  // Each entry must name a loadable module; an entry without one reaches the
+  // loader as import(undefined) and fails with a message about "undefined"
+  // rather than about the entry the operator wrote.
+  for (const [name, registration] of Object.entries(document.backends)) {
+    if (typeof registration !== "object" || registration === null || Array.isArray(registration)) {
+      throw new Error(`teammate backend registry at ${path}: registration "${name}" must be an object`);
+    }
+    if (typeof (registration as { module?: unknown }).module !== "string") {
+      throw new Error(`teammate backend registry at ${path}: registration "${name}" must name a "module"`);
+    }
   }
   // The built-in stays registered unless the document redefines it, so a
   // document that only adds a remote backend does not lose Pi.
@@ -116,4 +142,123 @@ export async function createTeammateBackendRegistry(
     if (module === PI_SUBPROCESS) return pi;
     return (await import(module)) as TeammateBackend;
   });
+}
+
+/**
+ * Documents already read, keyed by workspace root.
+ *
+ * The registration document is deployment configuration, not per-run state, so
+ * re-reading it on every dispatch would charge a synchronous file read per task
+ * for a value that changes when an operator edits a file. A rejected read is
+ * evicted so a transient failure does not wedge the workspace permanently.
+ */
+const documentReads = new Map<string, Promise<BackendRegistryConfig>>();
+
+/**
+ * Read the registration document, reusing an earlier read of the same root.
+ *
+ * @param workspaceRoot - directory holding `.pi/`.
+ * @returns the registration document.
+ */
+export function cachedBackendRegistryConfig(
+  workspaceRoot: string,
+): Promise<BackendRegistryConfig> {
+  const hit = documentReads.get(workspaceRoot);
+  if (hit !== undefined) return hit;
+  const read = readBackendRegistryConfig(workspaceRoot).catch((cause: unknown) => {
+    documentReads.delete(workspaceRoot);
+    throw cause;
+  });
+  documentReads.set(workspaceRoot, read);
+  return read;
+}
+
+/** Forget a cached document; an operator edit takes effect on the next dispatch. */
+export function forgetBackendRegistryConfig(workspaceRoot?: string): void {
+  if (workspaceRoot === undefined) documentReads.clear();
+  else documentReads.delete(workspaceRoot);
+}
+
+/**
+ * Resolve the registry a dispatch should use, or undefined for the legacy path.
+ *
+ * This is what makes the seam live: without it `RunTeammateOptions.backendRegistry`
+ * is never populated by anything but a test, and every dispatch takes the legacy
+ * branch regardless of what the document says.
+ *
+ * @param workspaceRoot - directory holding `.pi/`.
+ * @param extrasOf - per-run host wiring handed to the Pi backend.
+ * @returns the registry, or undefined when the document keeps the legacy path.
+ */
+export async function resolveDispatchRegistry(
+  workspaceRoot: string,
+  extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras,
+): Promise<TeammateBackendRegistry | undefined> {
+  const config = await cachedBackendRegistryConfig(workspaceRoot);
+  if ((config.mode ?? "legacy") === "legacy") return undefined;
+  const pi = createPiSubprocessBackend(extrasOf);
+  return new TeammateBackendRegistry(config, async (module): Promise<TeammateBackend> => {
+    if (module === PI_SUBPROCESS) return pi;
+    return (await import(module)) as TeammateBackend;
+  });
+}
+
+/** Synchronously resolved documents, keyed by workspace root. */
+const syncDocuments = new Map<string, BackendRegistryConfig>();
+
+/**
+ * Read the registration document synchronously, reusing an earlier read.
+ *
+ * Synchronous on purpose. Dispatch resolves the registry immediately before
+ * spawning, and inserting an awaited read there delays the child by an I/O tick
+ * — enough to break callers that address the child's stdin as soon as dispatch
+ * returns. The file is small deployment configuration read once per root, in a
+ * path that already performs synchronous file work.
+ *
+ * @param workspaceRoot - directory holding `.pi/`.
+ * @returns the registration document.
+ */
+export function backendRegistryConfigSync(workspaceRoot: string): BackendRegistryConfig {
+  const hit = syncDocuments.get(workspaceRoot);
+  if (hit !== undefined) return hit;
+  const path = join(workspaceRoot, REGISTRY_FILE);
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf-8");
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+      syncDocuments.set(workspaceRoot, BUILT_IN);
+      return BUILT_IN;
+    }
+    throw new Error(`teammate backend registry at ${path} could not be read`, { cause });
+  }
+  const config = parseBackendRegistryDocument(raw, path);
+  syncDocuments.set(workspaceRoot, config);
+  return config;
+}
+
+/**
+ * Resolve the registry a dispatch should use, without an awaited read.
+ *
+ * @param workspaceRoot - directory holding `.pi/`.
+ * @param extrasOf - per-run host wiring handed to the Pi backend.
+ * @returns the registry, or undefined when the document keeps the legacy path.
+ */
+export function dispatchRegistrySync(
+  workspaceRoot: string,
+  extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras,
+): TeammateBackendRegistry | undefined {
+  const config = backendRegistryConfigSync(workspaceRoot);
+  if ((config.mode ?? "legacy") === "legacy") return undefined;
+  const pi = createPiSubprocessBackend(extrasOf);
+  return new TeammateBackendRegistry(config, async (module): Promise<TeammateBackend> => {
+    if (module === PI_SUBPROCESS) return pi;
+    return (await import(module)) as TeammateBackend;
+  });
+}
+
+/** Forget synchronously cached documents so an operator edit takes effect. */
+export function forgetBackendRegistryConfigSync(workspaceRoot?: string): void {
+  if (workspaceRoot === undefined) syncDocuments.clear();
+  else syncDocuments.delete(workspaceRoot);
 }

@@ -126,6 +126,7 @@ import type {
 // public surface is re-exported unchanged so no consumer import path moves.
 import { validateBackendCapabilities } from "pi-maestro-backends";
 import { outcomeOf } from "../backends/pi-subprocess.ts";
+import { dispatchRegistrySync } from "../backends/registry-host.ts";
 import { runSingleAttempt } from "./pi-subprocess-attempt.ts";
 import type {
   AttemptOutcome,
@@ -557,13 +558,19 @@ export async function runSingleTeammate(
     try {
       let attempt: AttemptOutcome;
       try {
-        if (options.backendRegistry === undefined) {
+        // An injected registry wins (tests and embedders supply one); otherwise
+        // the workspace document decides, which is what makes `mode:
+        // "backend-registry"` in `.pi/teammate-backends.json` actually switch
+        // the dispatch path rather than only describe an intent.
+        const registry = options.backendRegistry
+          ?? dispatchRegistrySync(options.baseCwd, () => ({ hostOptions: attemptOptions, cwd }));
+        if (registry === undefined) {
           attempt = outcomeOf(await runSingleAttempt(
             params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, attemptOptions,
           ));
         } else {
           const spec = backendSpecOf(params, cwd, modelToUse);
-          const { backend, config } = await options.backendRegistry.resolve(spec);
+          const { backend, config } = await registry.resolve(spec);
           const run = await backend.start(
             spec,
             backendOptionsOf(correlationId, cwd, attemptOptions, params.agent, startTime, config),
@@ -820,16 +827,46 @@ export async function runGraph(
   // Capability adjudication sits beside the structural checks, not at dispatch.
   // A task whose backend cannot produce structured output would otherwise burn
   // a full model turn before its downstream sibling's {name.field} read failed.
-  if (options.backendRegistry !== undefined) {
-    const registry = options.backendRegistry;
+  let graphRegistry;
+  try {
+    graphRegistry = options.backendRegistry
+      ?? await dispatchRegistrySync(options.baseCwd, () => {
+        throw new Error("capability adjudication never starts a run");
+      });
+  } catch (cause) {
+    // A malformed or unloadable registration is a graph-level rejection, not a
+    // throw out of runGraph: every other validation failure settles each task
+    // so the caller and the UI see a result rather than a pending row.
+    return publishGraphRejection(
+      `Teammate backend registry could not be loaded: ${String(cause)}`,
+      deps,
+    );
+  }
+  if (graphRegistry !== undefined) {
+    const registry = graphRegistry;
     const adjudicated = tasks.map((task) => ({
-      spec: backendSpecOf(task, task.cwd ?? options.baseCwd, task.model),
+      // NormalizedTask holds the prompt in `prompt`; without this the
+      // adjudicated spec would carry an empty task while dispatch sends the
+      // real one, and any routing rule reading it would disagree with dispatch.
+      spec: backendSpecOf(
+        { ...task, task: task.prompt },
+        task.cwd ?? options.baseCwd,
+        task.model,
+      ),
       ...(task.name === undefined ? {} : { name: task.name }),
     }));
-    const backends = await Promise.all(adjudicated.map(async ({ spec }) => {
-      const { backend } = await registry.resolve(spec);
-      return { name: backend.name, capabilities: backend.capabilities };
-    }));
+    let backends;
+    try {
+      backends = await Promise.all(adjudicated.map(async ({ spec }) => {
+        const { backend } = await registry.resolve(spec);
+        return { name: backend.name, capabilities: backend.capabilities };
+      }));
+    } catch (cause) {
+      return publishGraphRejection(
+        `Teammate backend could not be resolved for this graph: ${String(cause)}`,
+        deps,
+      );
+    }
     const verdict = validateBackendCapabilities(adjudicated, (_task, index) => backends[index]!);
     if (verdict.errors.length > 0) {
       return publishGraphRejection(verdict.errors.join("\n"), deps);
