@@ -31,8 +31,10 @@ import type {
   SingleResult,
   Usage,
   AgentProgress,
+  AgentProgressStatus,
   AgentTerminalStatus,
   AgentRunPhase,
+  RecentToolInfo,
 } from "../shared/types.ts";
 import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
 import { applyModelRouting, syncModelCircuitPolicies, type TeammateTaskType } from "../models/model-routing.ts";
@@ -186,22 +188,100 @@ function backendSpecOf(
  * @param correlationId - identity of this attempt.
  * @param baseCwd - resolved task cwd.
  * @param options - host run options supplying the observer callbacks.
+ * @param agent - the agent this attempt runs, for progress projection.
+ * @param startedAt - attempt start, for progress projection.
  * @returns the contract-shaped run options.
  */
+const PROGRESS_STATUSES: readonly AgentProgressStatus[] = [
+  "pending", "running", "retrying", "completed", "failed", "terminated",
+];
+
+/**
+ * Read one number out of an untyped backend payload.
+ *
+ * @param value - the raw field.
+ * @param fallback - used when the backend reported nothing usable.
+ * @returns a finite non-negative number.
+ */
+function progressNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+/**
+ * Read the recent-tool list out of an untyped backend payload.
+ *
+ * @param value - the raw field.
+ * @returns the entries that carry both a name and a status.
+ */
+function progressTools(value: unknown): RecentToolInfo[] {
+  if (!Array.isArray(value)) return [];
+  const tools: RecentToolInfo[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { name, status, argsPreview } = entry as Record<string, unknown>;
+    if (typeof name !== "string" || typeof status !== "string") continue;
+    tools.push({ name, status, ...(typeof argsPreview === "string" ? { argsPreview } : {}) });
+  }
+  return tools;
+}
+
+/**
+ * Convert a backend's progress payload into the host's progress record.
+ *
+ * A backend reports whatever its runtime knows, so this is a real conversion
+ * rather than a cast: the host supplies the identity and timing it owns, the
+ * payload supplies what the runtime observed, and anything the backend cannot
+ * report falls back to a value that reads as "not observed" instead of as a
+ * measurement. Validation belongs here because the payload crosses a module
+ * boundary untyped.
+ *
+ * @param data - the backend's payload.
+ * @param agent - the agent this attempt runs, known to the host.
+ * @param startedAt - attempt start, known to the host.
+ * @returns the host-shaped progress record.
+ *
+ * @internal Exported for backend-seam regression tests.
+ */
+export function projectBackendProgress(
+  data: Record<string, unknown>,
+  agent: string,
+  startedAt: number,
+): AgentProgress {
+  const now = Date.now();
+  const status = PROGRESS_STATUSES.find((candidate) => candidate === data.status) ?? "running";
+  return {
+    agent,
+    status,
+    recentTools: progressTools(data.recentTools),
+    toolCount: progressNumber(data.toolCount, 0),
+    tokens: progressNumber(data.tokens, 0),
+    startedAt: progressNumber(data.startedAt, startedAt),
+    durationMs: progressNumber(data.durationMs, now - startedAt),
+    lastActivityAt: progressNumber(data.lastActivityAt, now),
+    ...(typeof data.name === "string" ? { name: data.name } : {}),
+    ...(typeof data.correlationId === "string" ? { correlationId: data.correlationId } : {}),
+    ...(typeof data.lastMessage === "string" ? { lastMessage: data.lastMessage } : {}),
+    ...(typeof data.resolvedModel === "string" ? { resolvedModel: data.resolvedModel } : {}),
+    ...(typeof data.requestedModel === "string" ? { requestedModel: data.requestedModel } : {}),
+  };
+}
+
 function backendOptionsOf(
   correlationId: string,
   baseCwd: string,
   options: RunTeammateOptions,
+  agent: string,
+  startedAt: number,
 ): BackendRunOptions {
   return {
     correlationId,
     baseCwd,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
-    // onProgress is deliberately not forwarded. The host observer is typed for
-    // Pi's own AgentProgress, so handing it a backend-shaped payload would be a
-    // cast rather than a conversion. Pi reports progress through its own host
-    // options; a non-Pi backend needs a generic progress projection that does
-    // not exist yet, and omitting it keeps that gap visible instead of mistyped.
+    ...(options.onProgress === undefined ? {} : {
+      onProgress: (data: Record<string, unknown>): void => {
+        options.onProgress?.(projectBackendProgress(data, agent, startedAt));
+      },
+    }),
     ...(options.onChildEvent === undefined ? {} : { onChildEvent: options.onChildEvent }),
     ...(options.onTurnComplete === undefined ? {} : { onTurnComplete: options.onTurnComplete }),
     // Pi resolves permission and host tools through its own IPC relay, so it
@@ -476,7 +556,7 @@ export async function runSingleTeammate(
           ))
           : await (await options.backend.start(
             backendSpecOf(params, cwd, modelToUse),
-            backendOptionsOf(correlationId, cwd, attemptOptions),
+            backendOptionsOf(correlationId, cwd, attemptOptions, params.agent, startTime),
           )).outcome;
       } catch (error) {
         discardCompletion();
