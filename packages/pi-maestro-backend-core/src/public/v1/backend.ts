@@ -167,6 +167,61 @@ export interface AttemptOutcome {
   reclamation: Promise<AttemptReclamation>;
 }
 
+/** Value kinds a backend configuration field may hold. */
+export type ConfigValue = string | number | boolean | readonly string[];
+
+/**
+ * One configuration field a backend declares for itself.
+ *
+ * Backends differ in what they need to be told — a subprocess runtime needs an
+ * executable and a config path, a remote peer needs an endpoint, a
+ * profile-based runtime needs a profile name. Rather than widen the seam with
+ * a union of every backend's settings, each backend publishes its own fields
+ * and the host renders and validates them generically.
+ *
+ * Declaring fields is what makes a backend's configuration checkable at load
+ * and editable in the settings shell. An undeclared key in a registration is a
+ * load-time error, not a value the backend silently ignores.
+ */
+export interface BackendConfigField {
+  /** Key under `BackendRegistration.config`. */
+  key: string;
+  kind: "text" | "integer" | "number" | "boolean" | "enum" | "string-list" | "path";
+  /** i18n key for the field label; the host owns presentation. */
+  labelKey: string;
+  descriptionKey?: string;
+  /** Allowed values for `kind: "enum"`. */
+  options?: readonly { value: string; labelKey: string }[];
+  /** Applied by `resolveConfig` when the registration omits the key. */
+  default?: ConfigValue;
+  /** A missing value with no default is a load-time error. */
+  required?: boolean;
+  /** The value is a credential; the host masks it and never logs it. */
+  secret?: boolean;
+}
+
+/**
+ * A backend's configuration after validation and defaulting.
+ *
+ * Resolution is a distinct step rather than a `?? default` inside `start()`, so
+ * an `auto` mode resolves to a concrete choice that the host can log, display,
+ * and reproduce. A run whose effective mode is only knowable by re-deriving it
+ * inside the backend is a run nobody can explain afterwards.
+ */
+export interface ResolvedBackendConfig {
+  /** Every declared key, with defaults applied. */
+  values: Record<string, ConfigValue>;
+  /** Load-time rejections; a non-empty list stops registration. */
+  errors: readonly string[];
+  /**
+   * What an `auto`-valued field resolved to, and why.
+   *
+   * Keyed by field key. Present only for fields the backend resolved rather
+   * than read verbatim.
+   */
+  resolutions?: Record<string, { value: ConfigValue; reason: string }>;
+}
+
 /**
  * Host-owned abilities a backend may borrow.
  *
@@ -216,8 +271,9 @@ export interface BackendRunOptions {
    */
   systemPrompt: string;
   /**
-   * Backend-specific settings, opaque to the registry and to every other
-   * backend.
+   * This backend's own settings, already validated and defaulted by
+   * `resolveConfig`, so `start()` reads concrete values and never re-derives an
+   * `auto` choice.
    *
    * Provider credentials are deliberately not modelled here and are not the
    * host's concern: a backend that drives an external runtime lets that runtime
@@ -226,7 +282,7 @@ export interface BackendRunOptions {
    * resolution the child already owns and would put a secret on a path that has
    * no reason to carry one.
    */
-  config?: Record<string, unknown>;
+  config: Record<string, ConfigValue>;
 }
 
 /**
@@ -252,5 +308,16 @@ export interface TeammateBackend {
   readonly capabilities: BackendCapabilities;
   /** Decides whether the host's replay fence gates this backend's failover. */
   readonly recoveryShape: RecoveryShape;
+  /** Settings this backend accepts; omitted means it takes none. */
+  readonly configFields?: readonly BackendConfigField[];
+  /**
+   * Validate a registration's config and apply defaults.
+   *
+   * Called once at registration, never per run. A backend declaring
+   * `configFields` must implement this; the registry treats a missing
+   * implementation alongside declared fields as a registration error rather
+   * than skipping validation.
+   */
+  resolveConfig?(config: Record<string, ConfigValue>): ResolvedBackendConfig;
   start(spec: TeammateRunSpec, options: BackendRunOptions): Promise<BackendRun>;
 }

@@ -8,7 +8,12 @@
  * Types only; this module contains no runtime code.
  */
 
-import type { BackendCapabilities, CapabilityName, TeammateBackend } from "./backend.ts";
+import type {
+  BackendCapabilities,
+  CapabilityName,
+  ConfigValue,
+  TeammateBackend,
+} from "./backend.ts";
 import type { TeammateRunSpec } from "./spec.ts";
 
 /**
@@ -30,8 +35,14 @@ export type TeammateExecutionMode = "legacy" | "backend-registry";
 export interface BackendRegistration {
   /** Module specifier resolved by the loader. */
   module: string;
-  /** Passed verbatim to the backend; the registry never inspects it. */
-  config?: Record<string, unknown>;
+  /**
+   * Values for the backend's own {@link BackendConfigField}s.
+   *
+   * Validated against the declaring backend at load, not at dispatch: a typo in
+   * a mode name must fail while the operator is still looking at the file, not
+   * three tasks into a graph.
+   */
+  config?: Record<string, ConfigValue>;
 }
 
 /** The backend registration document (`.pi/teammate-backends.json`). */
@@ -41,10 +52,10 @@ export interface BackendRegistryConfig {
   backends: Record<string, BackendRegistration>;
 }
 
-/** Resolved backend plus the opaque config its registration carried. */
+/** Resolved backend plus its validated, defaults-applied configuration. */
 export interface ResolvedBackend {
   backend: TeammateBackend;
-  config?: Record<string, unknown>;
+  config: Record<string, ConfigValue>;
 }
 
 /**
