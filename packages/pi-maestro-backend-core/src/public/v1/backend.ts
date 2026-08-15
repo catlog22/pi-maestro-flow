@@ -18,6 +18,7 @@
  */
 
 import type {
+  AgentTerminalStatus,
   ControlMode,
   SingleResult,
   TeammateRunSpec,
@@ -260,6 +261,22 @@ export interface BackendRunOptions {
   signal?: AbortSignal;
   /** Advisory progress sink; a throwing observer must never interrupt the run. */
   onProgress?: (data: Record<string, unknown>) => void;
+  /**
+   * The child runtime's own event stream, forwarded verbatim.
+   *
+   * Distinct from `onProgress`: progress is advisory display, while these are
+   * the events the host records and replays. A backend that emits no event
+   * stream simply never calls it.
+   */
+  onChildEvent?: (event: Record<string, unknown>) => void;
+  /**
+   * The turn settled, before the outcome is returned.
+   *
+   * The host buffers completions across a model-candidate sweep and publishes
+   * only the surviving one, so it must learn of settlement while it can still
+   * discard it — which the returned outcome is too late for.
+   */
+  onTurnComplete?: (result: SingleResult, terminalStatus?: AgentTerminalStatus) => void;
   host: BackendHostCapabilities;
   /**
    * The complete system prompt for this run.
