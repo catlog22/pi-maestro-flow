@@ -125,6 +125,7 @@ import type {
 // public surface is re-exported unchanged so no consumer import path moves.
 import { adjudicateTask, validateBackendCapabilities } from "pi-maestro-backends";
 import { outcomeOf } from "../backends/pi-subprocess.ts";
+import { closeBackendControlStdin, createBackendControlStdin } from "../backends/control-shim.ts";
 import { dispatchRegistrySync } from "../backends/registry-host.ts";
 import { runSingleAttempt } from "./pi-subprocess-attempt.ts";
 import type {
@@ -571,23 +572,58 @@ export async function runSingleTeammate(
         } else {
           const spec = backendSpecOf(params, cwd, modelToUse);
           const { backend, config } = await registry.resolve(spec, spec.backend);
-          const run = await backend.start(
-            spec,
+          // Whether the backend published a channel of its own. Tracked rather
+          // than decided by backend name: a backend that spawns a child hands
+          // the host a real pipe carrying lease control and a session dir, and
+          // replacing that with a translation would lose both.
+          let publishedOwnChannel = false;
+          const hostOnChildSpawned = attemptOptions.onChildSpawned;
+          const backendOptions = backendOptionsOf(
+            correlationId,
             // The host base, not `cwd`: the resolved task directory is on the
             // spec, and sending it twice leaves a backend unable to tell which
             // channel a task-level cwd actually arrived on.
-            backendOptionsOf(
-              correlationId, options.baseCwd, attemptOptions, params.agent, startTime, config,
-            ),
+            options.baseCwd,
+            {
+              ...attemptOptions,
+              onChildSpawned: (stdin, sendControl, sessionDir, childId, generation) => {
+                publishedOwnChannel = true;
+                hostOnChildSpawned?.(stdin, sendControl, sessionDir, childId, generation);
+              },
+            },
+            params.agent,
+            startTime,
+            config,
           );
+          const run = await backend.start(spec, backendOptions);
           // Cancellation reaches the seam only through the control channel; a
           // host that merely stops awaiting leaves the runtime alive.
           const abortRun = (): void => { run.abort(); };
           options.signal?.addEventListener("abort", abortRun, { once: true });
+          // Give the host a pipe it can address when the backend has none, so
+          // teammate-send reaches a live runtime instead of reporting that it
+          // cannot be restored. A backend that publishes its own later simply
+          // replaces this one.
+          const shim = publishedOwnChannel ? undefined : createBackendControlStdin(run);
+          if (shim !== undefined) {
+            hostOnChildSpawned?.(
+              shim,
+              // No IPC control channel exists for a backend addressed this way;
+              // reporting that honestly beats accepting a lease update nothing
+              // will ever deliver.
+              () => false,
+              undefined,
+              correlationId,
+              attemptOptions.runtimeGeneration,
+            );
+          }
           try {
             attempt = await run.outcome;
           } finally {
             options.signal?.removeEventListener("abort", abortRun);
+            // A settled run can no longer deliver, and the host checks
+            // `writable` before writing.
+            if (shim !== undefined) closeBackendControlStdin(shim);
           }
           // Recorded by the dispatch rather than by the backend: a backend that
           // forgot to name itself would otherwise be indistinguishable from the

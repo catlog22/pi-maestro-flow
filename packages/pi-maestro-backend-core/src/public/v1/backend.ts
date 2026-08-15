@@ -349,13 +349,11 @@ export interface BackendRun {
   /**
    * Deliver a live control message; false when the backend cannot.
    *
-   * Not yet reachable in the teammate host. That host addresses a running agent
-   * through a Pi child's stdin, captured when the child spawns, so a backend
-   * with no child stdin gets no route — `teammate-send` to one reports
-   * "no restorable runtime" for a runtime that is running and able to take the
-   * message. Closing the gap means giving the host's agent record a control
-   * channel instead of a pipe; until then a backend's `followUp` and `steer`
-   * declarations describe the backend, not what the deployment can ask of it.
+   * The teammate host addresses a running agent by writing control lines to a
+   * pipe. A backend that publishes no pipe of its own is handed one that
+   * translates those lines into this call, so implementing this method is all a
+   * backend needs to be addressable — and returning false is how it declines a
+   * message the host would otherwise report as delivered.
    */
   send(message: string, mode: ControlMode): boolean;
   abort(): void;
