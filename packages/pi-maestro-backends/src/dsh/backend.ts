@@ -49,8 +49,11 @@ import type {
  * `thinkingLevel` — absent from `RunOptions`, so it cannot vary per task. The
  * runtime's own config sets a deployment-wide default, which is a different
  * thing from the per-task control the orchestrator asks for here.
- * `todoBinding` — the prompt fragment is reproducible, but the `todo` tool is
- * host-implemented and reaches the child only through `host.proxyToolCall`.
+ * `outputSchema` / `todoBinding` — both were declared `emulated` while nothing
+ * implemented the emulation, which is worse than declaring neither: adjudication
+ * lets an `emulated` capability through with an advisory warning, so a task
+ * needing structured output routed here and got none. They stay `unsupported`
+ * until the extraction and the host tool relay actually exist.
  * `toolFilter` — the child's tool set comes from its `cordis.yml`.
  * `steer` — `HarnessClient` states plainly that there is no wire-level cancel.
  * Boundary-queued emulation is buildable but is not built here, so this reads
@@ -62,11 +65,11 @@ import type {
  * runtime, which is coarser than asked but does stop the work.
  */
 const CAPABILITIES: BackendCapabilities = {
-  outputSchema: "emulated",
+  outputSchema: "unsupported",
   forkContext: "unsupported",
   modelSelection: "native",
   thinkingLevel: "unsupported",
-  todoBinding: "emulated",
+  todoBinding: "unsupported",
   toolFilter: "unsupported",
   steer: "unsupported",
   followUp: "native",
@@ -231,6 +234,11 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
       const driver = await driverOf(options.config, options);
       const sessionId = options.correlationId;
       const followUps: string[] = [];
+      // abort() and both settlement paths all want the runtime gone. Closing
+      // once and sharing the settlement keeps a second close from reporting
+      // "unreaped" for a runtime the first close already reaped.
+      let closing: Promise<void> | undefined;
+      const closeOnce = (): Promise<void> => (closing ??= driver.close());
       // A message accepted after the last turn has settled would never be
       // delivered, so the window is tracked explicitly and `send` reports its
       // closure instead of returning a success the orchestrator cannot verify.
@@ -246,24 +254,30 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
             if (notification.method !== "session.event") return;
             options.onChildEvent?.(notification.params);
           };
-          let run = await driver.run(prompt, { sessionId, onNotification: observe });
+          // Every turn contributes: the host's replay fence reads the tool
+          // count, so keeping only the final turn's would understate how much
+          // work a retry would repeat.
+          const turns: { finalResponse: string; events: readonly Record<string, unknown>[] }[] = [];
+          turns.push(await driver.run(prompt, { sessionId, onNotification: observe }));
           // A follow-up queued while the turn was running is answered on the
           // same session, so the agent keeps its context instead of restarting.
           while (followUps.length > 0 && !aborted) {
-            run = await driver.run(followUps.shift()!, { sessionId, onNotification: observe });
+            turns.push(await driver.run(followUps.shift()!, { sessionId, onNotification: observe }));
           }
           acceptingFollowUps = false;
+          const toolCount = turns.reduce((sum, turn) => sum + completedTools(turn.events), 0);
+          const lastTurn = turns[turns.length - 1]!;
           const result: SingleResult = {
             agent: spec.agent,
             ...(spec.name === undefined ? {} : { name: spec.name }),
             task: spec.task,
             exitCode: aborted ? 1 : 0,
-            messages: [{ role: "assistant", content: run.finalResponse }],
+            messages: turns.map((turn) => ({ role: "assistant", content: turn.finalResponse })),
             usage: NO_USAGE,
             model: text(options.config, "model") ?? spec.model ?? "",
             correlationId: options.correlationId,
             durationMs: Date.now() - startedAt,
-            toolCount: completedTools(run.events),
+            toolCount,
             // The session id stays addressable, so a later teammate-send can
             // reach this agent again.
             wakeable: !aborted,
@@ -273,13 +287,13 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
           return {
             result,
             recovery: {
-              settlementAuthority: sawTurnEnd(run.events) ? "authoritative" : "inferred",
+              settlementAuthority: sawTurnEnd(lastTurn.events) ? "authoritative" : "inferred",
               completedToolCount: result.toolCount ?? 0,
               inFlightToolCount: 0,
               preActivityInfrastructureExit: false,
               externalReplayRisk: false,
             },
-            reclamation: driver.close().then(
+            reclamation: closeOnce().then(
               () => ({ status: "reclaimed" as const }),
               (cause: unknown) => ({
                 status: "unreaped" as const,
@@ -288,18 +302,25 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
             ),
           };
         } catch (cause) {
+          // A close() triggered by abort() makes the in-flight run reject, so
+          // the failure path must read the abort flag too; otherwise the same
+          // user action settles as "terminated" or "failed" depending on a race.
+          acceptingFollowUps = false;
           const result: SingleResult = {
             agent: spec.agent,
             ...(spec.name === undefined ? {} : { name: spec.name }),
             task: spec.task,
             exitCode: 1,
-            messages: [{ role: "system", content: `dsh run failed: ${String(cause)}` }],
+            messages: [{
+              role: "system",
+              content: aborted ? `dsh run aborted: ${String(cause)}` : `dsh run failed: ${String(cause)}`,
+            }],
             usage: NO_USAGE,
             model: text(options.config, "model") ?? spec.model ?? "",
             correlationId: options.correlationId,
             durationMs: Date.now() - startedAt,
             wakeable: false,
-            terminalStatus: "failed",
+            terminalStatus: aborted ? "terminated" : "failed",
           };
           return {
             result,
@@ -312,7 +333,7 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
               preActivityInfrastructureExit: false,
               externalReplayRisk: true,
             },
-            reclamation: driver.close().then(
+            reclamation: closeOnce().then(
               () => ({ status: "reclaimed" as const }),
               (closeCause: unknown) => ({
                 status: "unreaped" as const,
@@ -335,7 +356,7 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
         },
         abort(): void {
           aborted = true;
-          void driver.close().catch(() => {
+          void closeOnce().catch(() => {
             // Close failures surface through the reclamation outcome instead.
           });
         },

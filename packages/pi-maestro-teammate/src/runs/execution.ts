@@ -130,6 +130,7 @@ import { runSingleAttempt } from "./pi-subprocess-attempt.ts";
 import type {
   AttemptOutcome,
   BackendRunOptions,
+  ConfigValue,
 } from "pi-maestro-backend-core/v1/backend";
 import type { TeammateRunSpec } from "pi-maestro-backend-core/v1/spec";
 
@@ -272,6 +273,7 @@ function backendOptionsOf(
   options: RunTeammateOptions,
   agent: string,
   startedAt: number,
+  config: Record<string, ConfigValue>,
 ): BackendRunOptions {
   return {
     correlationId,
@@ -284,10 +286,15 @@ function backendOptionsOf(
     }),
     ...(options.onChildEvent === undefined ? {} : { onChildEvent: options.onChildEvent }),
     ...(options.onTurnComplete === undefined ? {} : { onTurnComplete: options.onTurnComplete }),
-    // Pi resolves permission and host tools through its own IPC relay, so it
-    // borrows neither closure. A remote backend registers its own.
+    // Empty on purpose, and a known gap rather than a design choice. Pi reaches
+    // permission and host-implemented tools through its own IPC relay and needs
+    // neither closure. A non-Pi backend has no route to them: the host relay is
+    // callback-shaped (onChildRequest(event, reply)) with no stated guarantee
+    // that reply is always called, so adapting it to a promise here would risk
+    // a hang. Until that relay exposes a settled contract, any backend needing
+    // host tools must declare todoBinding unsupported.
     host: {},
-    config: {},
+    config,
   };
 }
 
@@ -556,12 +563,20 @@ export async function runSingleTeammate(
           ));
         } else {
           const spec = backendSpecOf(params, cwd, modelToUse);
-          const { backend } = await options.backendRegistry.resolve(spec);
+          const { backend, config } = await options.backendRegistry.resolve(spec);
           const run = await backend.start(
             spec,
-            backendOptionsOf(correlationId, cwd, attemptOptions, params.agent, startTime),
+            backendOptionsOf(correlationId, cwd, attemptOptions, params.agent, startTime, config),
           );
-          attempt = await run.outcome;
+          // Cancellation reaches the seam only through the control channel; a
+          // host that merely stops awaiting leaves the runtime alive.
+          const abortRun = (): void => { run.abort(); };
+          options.signal?.addEventListener("abort", abortRun, { once: true });
+          try {
+            attempt = await run.outcome;
+          } finally {
+            options.signal?.removeEventListener("abort", abortRun);
+          }
         }
       } catch (error) {
         discardCompletion();

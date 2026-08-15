@@ -57,9 +57,86 @@ test("dsh declares only the capabilities its SDK actually serves", () => {
   assert.equal(backend.capabilities.thinkingLevel, "unsupported");
   assert.equal(backend.capabilities.toolFilter, "unsupported");
   assert.equal(backend.capabilities.steer, "unsupported");
-  assert.equal(backend.capabilities.outputSchema, "emulated");
+  // Declared unsupported rather than emulated: nothing implements the schema
+  // extraction or the host tool relay, and adjudication lets an "emulated"
+  // capability through with only a warning.
+  assert.equal(backend.capabilities.outputSchema, "unsupported");
+  assert.equal(backend.capabilities.todoBinding, "unsupported");
   assert.equal(backend.capabilities.modelSelection, "native");
   assert.equal(backend.capabilities.followUp, "native");
+});
+
+test("a message arriving after a FAILED run is refused, like one after success", async () => {
+  const backend = createDshBackend(async () => fakeDriver({ fail: new Error("stream died") }));
+  const run = await backend.start(SPEC, runOptions());
+  await run.outcome;
+  assert.equal(run.send("too late", "follow_up"), false);
+});
+
+test("tool calls from every turn are counted, not just the last", async () => {
+  // The follow-up has to arrive while turn 1 is still running, so turn 1 blocks
+  // until the test releases it. Queueing after settlement is a different case,
+  // covered by the "refused" tests above.
+  let turn = 0;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const begun = new Promise<void>((resolve) => { started = resolve; });
+  const backend = createDshBackend(async () => ({
+    async run() {
+      turn += 1;
+      if (turn === 1) {
+        started();
+        await held;
+        return { sessionId: "s", finalResponse: "first", events: [{ type: "tool/end" }, { type: "tool/end" }, { type: "tool/end" }] };
+      }
+      return { sessionId: "s", finalResponse: "second", events: [{ type: "tool/end" }, { type: "turn/end" }] };
+    },
+    async close() {},
+  }));
+  const run = await backend.start(SPEC, runOptions());
+  await begun;
+  assert.equal(run.send("more", "follow_up"), true);
+  release();
+  const outcome = await run.outcome;
+  assert.equal(outcome.result.toolCount, 4);
+  assert.equal(outcome.recovery.completedToolCount, 4);
+  assert.deepEqual(outcome.result.messages.map((m) => m.content), ["first", "second"]);
+});
+
+test("an aborted run settles as terminated even when the close makes the turn reject", async () => {
+  let release!: () => void;
+  const running = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const begun = new Promise<void>((resolve) => { started = resolve; });
+  const backend = createDshBackend(async () => ({
+    async run() {
+      started();
+      await running;
+      throw new Error("client closed");
+    },
+    async close() { release(); },
+  }));
+  const run = await backend.start(SPEC, runOptions());
+  await begun;
+  run.abort();
+  const outcome = await run.outcome;
+  assert.equal(outcome.result.terminalStatus, "terminated");
+  assert.equal(outcome.result.wakeable, false);
+  assert.match(outcome.result.messages[0]!.content, /dsh run aborted/);
+});
+
+test("abort plus settlement close the runtime exactly once", async () => {
+  let closes = 0;
+  const backend = createDshBackend(async () => ({
+    async run() { return { sessionId: "s", finalResponse: "ok", events: [{ type: "turn/end" }] }; },
+    async close() { closes += 1; },
+  }));
+  const run = await backend.start(SPEC, runOptions());
+  const outcome = await run.outcome;
+  run.abort();
+  await outcome.reclamation;
+  assert.equal(closes, 1);
 });
 
 test("dsh recovers in place, so the host replay fence does not gate it", () => {

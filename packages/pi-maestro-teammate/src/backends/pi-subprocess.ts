@@ -223,7 +223,9 @@ export function createPiSubprocessBackend(
 
     async start(spec: TeammateRunSpec, options: BackendRunOptions): Promise<BackendRun> {
       const { hostOptions, cwd } = extrasOf(spec, options);
-      const agentConfig = await resolveAgent(spec.agent, cwd);
+      // Both overloads of resolveAgent take (string, string), so a swapped
+      // argument order compiles cleanly and only fails at run time.
+      const agentConfig = await resolveAgent(cwd, spec.agent);
       if (agentConfig === undefined) {
         throw new Error(`teammate backend "pi-subprocess" cannot resolve agent "${spec.agent}"`);
       }
