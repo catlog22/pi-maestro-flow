@@ -346,7 +346,17 @@ export interface BackendRunOptions {
 export interface BackendRun {
   /** Settles with the attempt outcome; rejects only on backend-internal faults. */
   readonly outcome: Promise<AttemptOutcome>;
-  /** Returns false when the backend cannot deliver the message. */
+  /**
+   * Deliver a live control message; false when the backend cannot.
+   *
+   * Not yet reachable in the teammate host. That host addresses a running agent
+   * through a Pi child's stdin, captured when the child spawns, so a backend
+   * with no child stdin gets no route — `teammate-send` to one reports
+   * "no restorable runtime" for a runtime that is running and able to take the
+   * message. Closing the gap means giving the host's agent record a control
+   * channel instead of a pipe; until then a backend's `followUp` and `steer`
+   * declarations describe the backend, not what the deployment can ask of it.
+   */
   send(message: string, mode: ControlMode): boolean;
   abort(): void;
 }

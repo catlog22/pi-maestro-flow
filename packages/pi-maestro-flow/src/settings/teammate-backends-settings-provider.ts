@@ -109,6 +109,24 @@ function secretKey(backend: string, field: string): string {
   return `${fieldKey(backend, field)}.value`;
 }
 
+/**
+ * Whether this provider can store the secret a field asks for.
+ *
+ * One home for the rule, because `describe`, `read`, and `apply` each act on it
+ * and any two of them disagreeing is a defect: declaring a setting nobody can
+ * write, reporting a value for a setting nobody declared, or accepting a write
+ * the shell never offered.
+ *
+ * @param field - the backend's declared field.
+ * @returns true when the value belongs in the runtime's own env file.
+ */
+function servesCredential(field: BackendConfigField): boolean {
+  // This provider writes a key into the runtime's own env file and nothing
+  // else. `env-var` would need the host to construct the child's environment
+  // around a provider credential, which is the custody this design refuses.
+  return field.kind === "credential-ref" && field.credentialLocation !== "env-var";
+}
+
 /** Map a backend field kind onto a shell editor. */
 function editorFor(field: BackendConfigField): SettingDefinition["editor"] {
   switch (field.kind) {
@@ -375,13 +393,7 @@ export function createTeammateBackendsSettingsProvider(
           editor: editorFor(field),
         });
 
-        if (field.kind !== "credential-ref") continue;
-        // This provider writes into the runtime's own env file and nothing
-        // else. A field asking for a process environment variable would need
-        // the host to construct the child's environment around a provider
-        // credential, which is exactly the custody this design refuses — so it
-        // gets no editor rather than an editor that writes somewhere else.
-        if (field.credentialLocation === "env-var") continue;
+        if (!servesCredential(field)) continue;
         order += 1;
         list.push({
           key: secretKey(backend.name, field.key),
@@ -431,7 +443,7 @@ export function createTeammateBackendsSettingsProvider(
           field.default as JsonValue | undefined,
           "project",
         );
-        if (field.kind !== "credential-ref") continue;
+        if (!servesCredential(field)) continue;
         const variable = (stored[field.key] ?? field.default) as string | undefined;
         const key = secretKey(backend.name, field.key);
         // The value itself never leaves the env file; the shell learns only
@@ -569,7 +581,9 @@ export function createTeammateBackendsSettingsProvider(
         // Renaming the variable moves its value. Leaving it under the old name
         // would strand a live credential in the runtime's env file while the
         // shell reports the new name as unset.
-        if (field.kind === "credential-ref" && typeof previous === "string" && previous !== renamed) {
+        // Only for a credential this provider actually stores; renaming a
+        // reference it never wrote has no value to carry and no file to touch.
+        if (servesCredential(field) && typeof previous === "string" && previous !== renamed) {
           const entries = secrets.get(owner.name) ?? readEnvDocument(credentialPath(owner.name));
           const carried = envValue(entries, previous);
           deleteEnvValue(entries, previous);

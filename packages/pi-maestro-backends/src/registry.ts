@@ -55,8 +55,17 @@ function asBackend(loaded: unknown): TeammateBackend | undefined {
 /**
  * Registry over one registration document.
  *
- * Loading is lazy per backend but memoized: a backend named by several tasks is
- * imported and configuration-checked once.
+ * Loading is lazy per backend and memoized for the lifetime of this instance,
+ * which the host decides. The teammate host builds one per dispatch, because
+ * the Pi backend it registers closes over that dispatch's run wiring — so in
+ * that deployment "memoized" means once per dispatch, not once per process.
+ * The cost is one narrowing plus one `resolveConfig` per task; the module
+ * import behind it is already cached by the module system.
+ *
+ * A misconfigured registration therefore does not fail once at startup. It
+ * fails at every resolution, and the graph path resolves every task's backend
+ * during validation, before any of them runs — that adjudication, not this
+ * instance's lifetime, is what keeps a typo from surfacing three tasks in.
  */
 export class TeammateBackendRegistry implements BackendRegistry {
   private readonly loaded = new Map<string, Promise<RegisteredBackend>>();

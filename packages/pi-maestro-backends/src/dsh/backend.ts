@@ -60,7 +60,10 @@ import type {
  * `unsupported`: the table records what the backend does, and claiming
  * emulation it lacks would route steering tasks here only to fail.
  * `followUp` — a session id stays addressable, so a later message is simply
- * another run on the same session, with the agent's context intact.
+ * another run on the same session, with the agent's context intact. True of
+ * this backend and not yet reachable through the teammate host, which routes
+ * `teammate-send` to a Pi child's stdin and has no channel for a backend that
+ * exposes one only through {@link BackendRun.send}.
  * `abort` — no per-run cancel either; stopping one run means closing the
  * runtime, which is coarser than asked but does stop the work.
  */

@@ -297,6 +297,30 @@ test("a credential the host cannot place gets no editor rather than a misplaced 
   assert.equal(keys.includes("teammateBackends.envvar.token.value"), false);
 });
 
+test("a refused credential is absent from read() too, not just from describe()", async () => {
+  const workspaceRoot = mkdtempSync(join(tmpdir(), "tb-ws-"));
+  const credentialRoot = mkdtempSync(join(tmpdir(), "tb-cred-"));
+  const instance = createTeammateBackendsSettingsProvider({
+    workspaceRoot,
+    credentialRoot,
+    backends: [{
+      name: "envvar", module: "some-backend", configFields: [{
+        key: "token",
+        kind: "credential-ref" as const,
+        credentialLocation: "env-var" as const,
+        labelKey: "envvar.token",
+      }],
+    }],
+  });
+  const snapshot = await instance.read({ context });
+  // Reporting a value for a setting describe() does not declare leaves the
+  // shell holding a key it cannot render, edit, or explain.
+  const declared = new Set((await instance.describe({ context })).settings.map((s) => s.key));
+  for (const value of snapshot.configured.values) {
+    assert.ok(declared.has(value.key), `read() reported undeclared setting ${value.key}`);
+  }
+});
+
 test("a malformed document is left alone rather than replaced with a plausible one", async () => {
   const p = provider();
   mkdirSync(join(p.workspaceRoot, ".pi"), { recursive: true });
