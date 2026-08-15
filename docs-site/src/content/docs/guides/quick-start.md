@@ -16,7 +16,7 @@ icon: "🚀"
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
 # 2. 安装或升级插件（teammate 与 cockpit 自动随附）
-pi install npm:pi-maestro-flow@0.21.3
+pi install npm:pi-maestro-flow@0.21.4
 
 # 3. 验证 Flow、Teammate 与 Cockpit 均已列出
 pi list

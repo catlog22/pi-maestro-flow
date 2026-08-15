@@ -5,7 +5,14 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.21.3（2026-08-15）。** Flow 0.21.3 同步引擎 `maestro-flow@0.5.72`（跨仓审查修复：原子知识闭环、确定性 Run ID 重放、canonical orchestration flag）；搭配 Teammate 1.13.0、Cockpit 0.16.0 与 Settings-Core 0.1.3。
+> **当前稳定版本：v0.21.4（2026-08-15）。** Flow 0.21.4 同步引擎 `maestro-flow@0.5.73`（canonical v3 收敛：默认 session/3.0 writer、birth/brief Resume Packet、v3 文档/门禁/镜像）；搭配 Teammate 1.13.0、Cockpit 0.16.0 与 Settings-Core 0.1.3。
+
+## v0.21.4（2026-08-15）
+
+- 引擎 pin 升级：`maestro-flow` 0.5.72 → **0.5.73**。0.5.73 为 canonical v3 收敛版本：默认 workspace writer 改为 `session/3.0`（六键能力集、无 Execution writes）；`run next`/`run create` 输出完整 birth packet（run_dir/step_id/upstream/guidance/knowledge_context/brief.command/run_already_created，同 request 重放返回相同 packet）；`run brief` 返回 `brief-result/3.0` Resume Packet（含 orchestration_revision 与 suggest-only next）；canonical 文档/门禁/mirrors 全面 v3 化（v2 移入带标签的 Legacy 分支）。
+- v3 适配更新：Pi 侧执行链全面 v3 化——`next/done` 走无 lease CAS 的 execV3、`run brief` 消费 v3 Resume Packet、`run complete --advance` 完成 Run；`publishPlan` 在 session-v3 模式打开 Session、持久化 plan 文档（`.workflow/plans/`）、插入 plan chain step 并返回合成 envelope；extension 的 v3 receipt（session-complete/run-complete-and-seal）驱动知识 review、Run-sealed 管线读取 run knowledge-delta；run-executor 角色全面 v3（无 session next/done/ralph-meta）。
+- 真实 CLI 集成测试迁移到 v3 fixture（4 个既有 v2 基线失败消除）；新增 v3 全链路用例（open→chain→run next→brief→check→complete→decide→session complete）。
+- 安装：`pi install npm:pi-maestro-flow@0.21.4`。
 
 ## v0.21.3（2026-08-15）
 

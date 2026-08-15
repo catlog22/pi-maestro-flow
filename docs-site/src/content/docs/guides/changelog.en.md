@@ -5,7 +5,14 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current stable release: v0.21.3 (2026-08-15).** Flow 0.21.3 syncs the engine to `maestro-flow@0.5.72` (cross-repo audit fixes: atomic knowledge staging, deterministic Run-ID replay, canonical orchestration flag); bundles Teammate 1.13.0, Cockpit 0.16.0, and Settings-Core 0.1.3.
+> **Current stable release: v0.21.4 (2026-08-15).** Flow 0.21.4 syncs the engine to `maestro-flow@0.5.73` (canonical v3 convergence: default session/3.0 writer, birth/Resume Packet, v3 prompts/gates/mirrors); bundles Teammate 1.13.0, Cockpit 0.16.0, and Settings-Core 0.1.3.
+
+## v0.21.4 (2026-08-15)
+
+- Engine pin upgrade: `maestro-flow` 0.5.72 → **0.5.73**. 0.5.73 is the canonical v3 convergence release: the default workspace writer is `session/3.0` (six-key capability set, no Execution writes); `run next`/`run create` emit a full birth packet (run_dir/step_id/upstream/guidance/knowledge_context/brief.command/run_already_created; replays return the identical packet); `run brief` returns a `brief-result/3.0` Resume Packet (orchestration_revision + suggest-only next); canonical prompts/gates/mirrors are v3-ified (v2 moved into labeled Legacy branches).
+- v3 adapter updates: the Pi execution chain is fully v3 — next/done via the lease-free CAS execV3, run brief consumes the v3 Resume Packet, run complete --advance seals Runs; publishPlan in session-v3 mode opens the Session, persists the plan document (`.workflow/plans/`), inserts the plan chain step and returns a synthetic envelope; extension v3 receipts (session-complete/run-complete-and-seal) drive knowledge review, the Run-sealed pipeline reads the run knowledge-delta; the run-executor role is fully v3 (no session next/done/ralph-meta).
+- Real-CLI integration suites migrated to v3 fixtures (all 4 pre-existing v2 baseline failures eliminated); new v3 full-lifecycle case (open→chain→run next→brief→check→complete→decide→session complete).
+- Install: `pi install npm:pi-maestro-flow@0.21.4`.
 
 ## v0.21.3 (2026-08-15)
 
