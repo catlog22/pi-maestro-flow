@@ -236,13 +236,6 @@ export interface ResolvedBackendConfig {
   values: Record<string, ConfigValue>;
   /** Load-time rejections; a non-empty list stops registration. */
   errors: readonly string[];
-  /**
-   * What an `auto`-valued field resolved to, and why.
-   *
-   * Keyed by field key. Present only for fields the backend resolved rather
-   * than read verbatim.
-   */
-  resolutions?: Record<string, { value: ConfigValue; reason: string }>;
 }
 
 /**
@@ -279,6 +272,15 @@ export interface BackendHostCapabilities {
 /** Everything a backend needs beyond the run spec itself. */
 export interface BackendRunOptions {
   correlationId: string;
+  /**
+   * The host's base working directory.
+   *
+   * The directory a task's own `cwd` was resolved against, not the run's
+   * effective directory: a backend runs in `spec.cwd` when the task named one
+   * and falls back to this. Passing the resolved task cwd here as well would
+   * give the same fact two homes, and a backend author no way to tell which one
+   * a task-level `cwd` actually reached.
+   */
   baseCwd: string;
   signal?: AbortSignal;
   /** Advisory progress sink; a throwing observer must never interrupt the run. */

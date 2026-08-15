@@ -188,7 +188,7 @@ function backendSpecOf(
  * Build the run options a backend receives.
  *
  * @param correlationId - identity of this attempt.
- * @param baseCwd - resolved task cwd.
+ * @param baseCwd - the host's base cwd; the task's own cwd travels on the spec.
  * @param options - host run options supplying the observer callbacks.
  * @param agent - the agent this attempt runs, for progress projection.
  * @param startedAt - attempt start, for progress projection.
@@ -573,7 +573,12 @@ export async function runSingleTeammate(
           const { backend, config } = await registry.resolve(spec, spec.backend);
           const run = await backend.start(
             spec,
-            backendOptionsOf(correlationId, cwd, attemptOptions, params.agent, startTime, config),
+            // The host base, not `cwd`: the resolved task directory is on the
+            // spec, and sending it twice leaves a backend unable to tell which
+            // channel a task-level cwd actually arrived on.
+            backendOptionsOf(
+              correlationId, options.baseCwd, attemptOptions, params.agent, startTime, config,
+            ),
           );
           // Cancellation reaches the seam only through the control channel; a
           // host that merely stops awaiting leaves the runtime alive.

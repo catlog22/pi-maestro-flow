@@ -48,16 +48,10 @@ const DSH_FIELDS = [
   { key: "cordisConfig", kind: "path" as const, labelKey: "dsh.cordisConfig", required: true },
 ];
 
-/** Resolves `auto` to a concrete profile, recording why. */
+/** Resolves `auto` to a concrete profile. */
 function resolveDsh(values: Record<string, string | number | boolean | readonly string[]>): ResolvedBackendConfig {
   if (values.profile !== "auto") return { values, errors: [] };
-  return {
-    values: { ...values, profile: "jsonrpc" },
-    errors: [],
-    resolutions: {
-      profile: { value: "jsonrpc", reason: "the SDK client drives the runtime over stdio JSON-RPC" },
-    },
-  };
+  return { values: { ...values, profile: "jsonrpc" }, errors: [] };
 }
 
 test("a backend accepting no configuration rejects any key it is given", () => {
@@ -101,28 +95,25 @@ test("a required field with no value and no default is rejected", () => {
   assert.deepEqual(resolved.errors, ['backend "dsh" requires setting "cordisConfig"']);
 });
 
-test("defaults apply and auto resolves to a concrete value with a recorded reason", () => {
+test("defaults apply and auto resolves to a concrete value at registration", () => {
   const resolved = resolveBackendConfig(
     backend({ configFields: DSH_FIELDS, resolveConfig: resolveDsh }),
     { cordisConfig: "/etc/dsh/cordis.yml" },
   );
   assert.deepEqual(resolved.errors, []);
   assert.equal(resolved.values.command, "dsh-jsonrpc-agent");
+  // Resolution happens once, here — not as a `?? default` inside start(), which
+  // would leave the effective mode knowable only by re-deriving it.
   assert.equal(resolved.values.profile, "jsonrpc");
-  assert.equal(
-    resolved.resolutions?.profile?.reason,
-    "the SDK client drives the runtime over stdio JSON-RPC",
-  );
 });
 
-test("an explicit profile is passed through without a resolution note", () => {
+test("an explicit profile is passed through unresolved", () => {
   const resolved = resolveBackendConfig(
     backend({ configFields: DSH_FIELDS, resolveConfig: resolveDsh }),
     { cordisConfig: "/etc/dsh/cordis.yml", profile: "headless" },
   );
   assert.deepEqual(resolved.errors, []);
   assert.equal(resolved.values.profile, "headless");
-  assert.equal(resolved.resolutions, undefined);
 });
 
 test("type mismatches are reported per field", () => {

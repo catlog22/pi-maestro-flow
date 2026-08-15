@@ -89,6 +89,8 @@ export async function createDshDriver(
     throw new Error('dsh backend requires "cordisConfig"; the runtime has no built-in fallback');
   }
   const command = text(config, "command") ?? "dsh-jsonrpc-agent";
+  // Deployment override, then the run's effective directory, which `start()`
+  // has already resolved from the task's own `cwd`.
   const cwd = text(config, "cwd") ?? options.baseCwd;
   const requestTimeoutMs = count(config, "requestTimeoutMs");
   const maxTokens = count(config, "maxTokens");

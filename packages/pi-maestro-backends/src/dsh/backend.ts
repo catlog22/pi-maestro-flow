@@ -254,7 +254,12 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
 
     async start(spec: TeammateRunSpec, options: BackendRunOptions): Promise<BackendRun> {
       const startedAt = Date.now();
-      const driver = await driverOf(options.config, options);
+      // The task's own directory wins over the host base, and is resolved once
+      // here so the driver never has to know a task-level cwd exists.
+      const driver = await driverOf(options.config, {
+        ...options,
+        ...(spec.cwd === undefined ? {} : { baseCwd: spec.cwd }),
+      });
       const sessionId = options.correlationId;
       const followUps: string[] = [];
       // abort() and both settlement paths all want the runtime gone. Closing

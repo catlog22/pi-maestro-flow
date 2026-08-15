@@ -114,9 +114,5 @@ export function resolveBackendConfig(
   // own resolution, so a backend never has to defend against shapes the
   // declaration already rejects.
   const resolved = backend.resolveConfig(values);
-  return {
-    values: resolved.values,
-    errors: resolved.errors,
-    ...(resolved.resolutions === undefined ? {} : { resolutions: resolved.resolutions }),
-  };
+  return { values: resolved.values, errors: resolved.errors };
 }

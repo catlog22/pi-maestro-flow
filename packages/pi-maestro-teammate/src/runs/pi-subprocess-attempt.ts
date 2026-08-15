@@ -103,7 +103,7 @@ import { loadCliToolsConfig } from "../cli-tools/cli-tools-config.ts";
 // reuses their correlation identity for a replacement child.
 export const attemptReclamations = new WeakMap<SingleResult, Promise<unknown>>();
 
-type AttemptSettlementCapability = "agent_settled" | "legacy" | "unknown";
+export type AttemptSettlementCapability = "agent_settled" | "legacy" | "unknown";
 
 interface AttemptRecoveryFacts {
   settlementCapability: AttemptSettlementCapability;

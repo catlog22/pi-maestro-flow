@@ -32,6 +32,7 @@ import {
   attemptRecoveryFacts,
   runSingleAttempt,
   sendRpcMessage,
+  type AttemptSettlementCapability,
 } from "../runs/pi-subprocess-attempt.ts";
 
 /** Pi serves every orchestrator-requestable capability natively. */
@@ -98,13 +99,25 @@ const UNOBSERVED: AttemptRecoveryFacts = {
 /**
  * Translate Pi's internal settlement vocabulary to the contract's.
  *
+ * The parameter is the closed union rather than `string`: widening it would
+ * turn a new Pi marker into a silent `unknown`, which reads as "the attempt
+ * observed nothing" and fences a failover that may not need fencing.
+ *
  * @param capability - Pi's own settlement marker.
  * @returns how authoritatively the turn end was established.
  */
-function settlementAuthorityOf(capability: string): SettlementAuthority {
-  if (capability === "agent_settled") return "authoritative";
-  if (capability === "legacy") return "inferred";
-  return "unknown";
+function settlementAuthorityOf(capability: AttemptSettlementCapability): SettlementAuthority {
+  switch (capability) {
+    case "agent_settled": return "authoritative";
+    case "legacy": return "inferred";
+    case "unknown": return "unknown";
+    default: return assertNever(capability);
+  }
+}
+
+/** Refuse to compile when a settlement marker is added without a mapping. */
+function assertNever(value: never): never {
+  throw new Error(`unhandled settlement capability: ${String(value)}`);
 }
 
 /**
