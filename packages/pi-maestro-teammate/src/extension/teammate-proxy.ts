@@ -62,6 +62,7 @@ import {
   createWorkspacePeerCommandConsumer,
   createWorkspacePeerRuntime,
   discoverWorkspacePeers,
+  formatWorkspacePeerWindowListings,
   resolveWorkspaceTarget,
   sendWorkspacePeerCommand,
   type WorkspaceAgentSnapshot,
@@ -208,6 +209,7 @@ import {
   resolveWindowInboxAnchor,
   type WindowInboxQuery,
 } from "../sessions/window-inbox.ts";
+import type { SessionMessageResult } from "../sessions/session-core.ts";
 
 import {
   AGENT_BUFFER_LIMITS,
@@ -898,11 +900,7 @@ export async function handleProxyRequest(
     message: string;
     mode: "steer" | "follow_up" | "abort";
     messageKind?: WorkspacePeerMessageKind;
-  }) => Promise<{
-    delivered: boolean;
-    error?: string;
-    receipt?: { mode?: string; wasSleeping?: boolean; terminatedCount?: number };
-  }>,
+  }) => Promise<SessionMessageResult>,
   refreshModelCapabilities?: () => Promise<readonly TeammateModelCapability[]>,
 ): Promise<void> {
   let replied = false;
@@ -2339,19 +2337,43 @@ export async function handleProxyRequest(
           return;
         }
         const routedMode = messageKind === "status" ? "follow_up" : requestedMode;
-        const delivered = sessionSend
-          ? (await sessionSend({
+        const delivery: SessionMessageResult = sessionSend
+          ? await sessionSend({
             selector: to,
             senderCorrelationId: parentCid,
             message,
             mode: routedMode,
             messageKind,
-          })).delivered
-          : await workspacePeerSend!(to, message, routedMode);
+          })
+          : { delivered: await workspacePeerSend!(to, message, routedMode) };
+        if (!delivery.delivered) {
+          const baseError = delivery.error ?? `Message rejected for workspace target ${to}.`;
+          const ambiguous = delivery.receipt?.publicationStage === "published"
+            && !/may still have been delivered/i.test(baseError)
+            ? " The message may still have been delivered; inspect teammate-list with view=inbox before retrying."
+            : "";
+          reply({ type: "teammate_proxy_result", requestId, result: {
+            content: [{ type: "text", text: `${baseError}${ambiguous}` }],
+            isError: true,
+            details: { delivered: false, ...(delivery.receipt ? { receipt: delivery.receipt } : {}) },
+          }});
+          return;
+        }
+        const deliveryStage = delivery.receipt?.deliveryStage ?? "queued";
+        const effectiveMode = delivery.receipt?.effectiveMode ?? routedMode;
+        const queuedHint = deliveryStage === "queued"
+          ? " The message may not yet be consumed; do not resend it."
+          : "";
         reply({ type: "teammate_proxy_result", requestId, result: {
-          content: [{ type: "text", text: delivered ? `Message delivered to workspace target ${to}.` : `Message rejected for workspace target ${to}.` }],
-          isError: !delivered,
-          details: { delivered },
+          content: [{
+            type: "text",
+            text: `Message ${deliveryStage} for workspace target ${to} (kind ${messageKind}, requested ${requestedMode}, effective ${effectiveMode}).${queuedHint}`,
+          }],
+          isError: false,
+          details: {
+            delivered: true,
+            ...(delivery.receipt ? { receipt: delivery.receipt } : {}),
+          },
         }});
         return;
       }
@@ -2632,12 +2654,7 @@ export async function handleProxyRequest(
       if (view === "windows") {
         const windows = workspacePeerList ? await workspacePeerList() : [];
         const entries = windows.map((window) => ({ kind: "window" as const, ...window }));
-        const text = entries.length === 0
-          ? "No available peer sessions."
-          : entries.map((window) => {
-            const label = window.sessionName ?? `window:${window.ownerId.slice(0, 8)}`;
-            return `● [window] ${label} · ${window.status} · agents=${window.agentCount} · target=${window.target}`;
-          }).join("\n");
+        const text = formatWorkspacePeerWindowListings(entries);
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{ type: "text", text }], isError: false, details: { agents: entries },
         }});

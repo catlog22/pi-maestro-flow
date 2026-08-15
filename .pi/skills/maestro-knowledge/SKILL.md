@@ -31,7 +31,7 @@ Intent-driven knowledge-store management. No fixed grammar — state your intent
 </purpose>
 
 <dispatch>
-Classify the intent in `$ARGUMENTS` into one operation, then run `maestro run skill --platform pi <step>` and follow it completely.
+Classify the intent in `$ARGUMENTS` into one operation, then execute the chosen step (or the direct `maestro knowledge` CLI) and follow it completely. Step-based operations run inside a v3 Session: open one with `maestro session open "<objective>" --id <slug> --chain <step> --participant {p} --actor {a} --request-id {r} --reason "<reason>" --json` and dispatch with fenced `maestro run next --session {session_id} ... --expected-orchestration-revision {rev} --json` (or self-start with `maestro run create <step> [args...] --session {session_id} ... --json`); read context read-only with `maestro session status` / `maestro session resume-view`, and `maestro run complete {run_id} ... --advance` publishes outputs and auto-stages knowledge candidates. (v2's `run skill` dispatcher is removed from the v3 surface.)
 
 1. Explicit keyword present → use its step or direct CLI lifecycle command (deterministic shortcut).
 2. Otherwise infer from the intent (see the table above), e.g. "审计/清理知识库" → audit, "从工件/session 提取" → harvest, "知识图谱/wiki 健康" → wiki, "注册术语 X" → domain.

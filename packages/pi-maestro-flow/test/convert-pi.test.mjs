@@ -56,17 +56,17 @@ description: Example skill
     },
   },
   {
-    name: "rewrites the core coordinator toward simple chains and run edit",
+    name: "passes v3 coordinator sources through without v2 re-introduction",
     file: "D:/fixture/skills/maestro/SKILL.md",
     input: `<purpose>Coordinator</purpose>
 5. required missing 依次尝试 known args、default、LLM 明确推断、AskUserQuestion；仍 missing 则 BLOCK。
-- \`ReuseAssessment=fresh\`：通过 \`maestro session create ... --engine ralph --chain-file -\` 创建 Session。
+- \`ReuseAssessment=fresh\`：简单链使用 \`maestro session open "<intent>" --id <slug> --chain <cmd...>\`；高级链使用 \`maestro session open "<intent>" --id <session-slug> --chain-file -\`。
 `,
     verify(output) {
-      assert.match(output, /maestro run start/);
-      assert.match(output, /maestro run edit/);
+      assert.match(output, /maestro session open/);
       assert.match(output, /简单链使用/);
       assert.match(output, /高级链/);
+      assert.doesNotMatch(output, /maestro run start|maestro run edit|maestro session create/);
     },
   },
   {
@@ -97,120 +97,120 @@ S_PARSE:
     },
   },
   {
-    name: "rewrites maestro-next legacy lifecycle examples",
+    name: "keeps v3 run next / run complete lifecycle examples intact",
     file: "D:/fixture/skills/maestro-next/SKILL.md",
-    input: `1. \`maestro run prepare --platform pi <step> --workflow-root .\`。
+    input: `1. \`maestro run next --session {session_id} --participant {p} --actor {a} --request-id {r} --reason "<reason>" --expected-orchestration-revision {rev} --workflow-root .\`。
 2. 使用已解析的 \`argument_requirements\` 创建当前 step 的 Run；不得用路径扫描补 upstream。
-3. 按 create result 的 \`brief.command\` 加载完整执行指南。
+3. 按 birth packet 的 \`brief.command\` 加载完整执行指南。
 4. 执行 workflow，写正式 deliverables，运行 gates。
-5. \`maestro run complete <run_id> --verdict done --workflow-root .\`。
+5. \`maestro run complete <run_id> --session {session_id} --verdict done --advance --expected-run-revision {run_rev} --expected-orchestration-revision {rev} --workflow-root .\`。
 `,
     verify(output) {
-      assert.match(output, /maestro run start "<intent>" --cmd <step>/);
-      assert.match(output, /maestro run done <run_id>/);
+      assert.match(output, /maestro run next --session/);
+      assert.match(output, /maestro run complete <run_id> --session/);
       assert.doesNotMatch(output, /maestro run prepare/);
-      assert.doesNotMatch(output, /maestro run create/);
+      assert.doesNotMatch(output, /maestro run done/);
     },
   },
   {
-    name: "rewrites current generated lifecycle leftovers",
+    name: "passes current generated lifecycle text through without v2 injection",
     file: "D:/fixture/skills/maestro-next/SKILL.md",
-    input: `- **Standard** (single run): recommend a step → confirm → execute via \`maestro run prepare\` + \`maestro run start\`
-maestro run prepare   # check if prepare command works
+    input: `- **Standard** (single run): recommend a step → confirm → execute via \`maestro run create <step> [args...] --session {session_id}\`
+maestro run create companion --session demo   # self-start entry
 `,
     verify(output) {
-      assert.match(output, /maestro run start --platform pi --cmd/);
-      assert.match(output, /maestro run status --workflow-root/);
-      assert.doesNotMatch(output, /maestro run prepare/);
+      assert.match(output, /maestro run create companion --session demo/);
+      assert.doesNotMatch(output, /maestro run prepare|maestro run start --platform pi/);
     },
   },
   {
-    name: "collapses evolved prepare and create pairs with argument tails",
+    name: "keeps v3 run create invocations intact",
     file: "D:/fixture/skills/maestro-fork/SKILL.md",
-    input: 'step `analyze` (`maestro run prepare analyze` + `maestro run create analyze --session YYYYMMDD-analyze-{topic} --intent "{goal}" --arg "{goal}"`)',
+    input: 'step `analyze` (`maestro run create analyze --session YYYYMMDD-analyze-{topic} --intent "{goal}" --arg "{goal}"`)',
     verify(output) {
-      assert.match(output, /maestro run start "\{goal\}" --cmd analyze --session YYYYMMDD-analyze-\{topic\} --platform pi --arg "\{goal\}"/);
-      assert.doesNotMatch(output, /maestro run prepare|maestro run create/);
+      assert.match(output, /maestro run create analyze --session YYYYMMDD-analyze-\{topic\}/);
+      assert.doesNotMatch(output, /maestro run prepare|maestro run start/);
     },
   },
   {
-    name: "rewrites standalone prepare protocol fetches to installed prepare assets",
+    name: "does not synthesize prepare assets in v3",
     file: "D:/fixture/skills/maestro/SKILL.md",
-    input: 'Fetch via read-only `maestro run prepare maestro --json` before creating a Session.',
+    input: 'Fetch execution guidance via the birth packet `brief.command` before executing a step.',
     verify(output) {
-      assert.match(output, /read ~\/\.maestro\/prepare\/maestro\.md/);
-      assert.doesNotMatch(output, /maestro run prepare/);
+      assert.match(output, /brief\.command/);
+      assert.doesNotMatch(output, /maestro run prepare|~\/\.maestro\/prepare/);
     },
   },
   {
-    name: "upgrades residual generic create prose to the unified start entry",
+    name: "keeps residual generic create prose as-is in v3",
     file: "D:/fixture/skills/skill-generator/SKILL.md",
     input: 'then create `skill-generator` with the complete fenced `maestro run create` option set.',
     verify(output) {
-      assert.match(output, /maestro run start/);
-      assert.doesNotMatch(output, /maestro run create/);
+      assert.match(output, /maestro run create/);
+      assert.doesNotMatch(output, /maestro run start/);
     },
   },
   {
-    name: "rewrites the session-start compatibility alias",
+    name: "passes v3 odyssey lifecycle text through unchanged",
     file: "D:/fixture/skills/maestro-odyssey/SKILL.md",
-    input: "Compatibility: `maestro session start` is an alias for `maestro run create` (see companion.md). Both resolve the same lifecycle.",
+    input: "Dispatch the mode step with fenced `maestro run next --session {session_id} ... --json` or self-start with `maestro run create odyssey-<mode> [args...] --session {session_id} ... --json`.",
     verify(output) {
-      assert.equal(output, "Use `maestro run start --platform pi` as the only lifecycle entry; no compatibility alias is required.");
+      assert.match(output, /maestro run next --session/);
+      assert.match(output, /maestro run create odyssey-<mode>/);
+      assert.doesNotMatch(output, /session start|run start/);
     },
   },
   {
-    name: "binds Pi on every platform-aware Session and Run call",
+    name: "binds Pi on platform-aware Skills calls and leaves v3 lifecycle calls untouched",
     file: "D:/fixture/skills/example/SKILL.md",
-    input: `maestro session create "topic" --id demo --chain analyze
-maestro session start "topic" --chain analyze
-maestro run start "goal" --cmd companion
+    input: `maestro skills --steps --json --platform claude
 maestro run create plan --session demo
-maestro run prepare analyze --session demo
-maestro run skill analyze
 maestro run brief run-1 --session demo
-maestro session next --session demo
+maestro run next --session demo --expected-orchestration-revision 3
 maestro run check run-1 --session demo
+maestro run complete run-1 --session demo --advance
+maestro session open "topic" --id demo --chain analyze
 `,
     verify(output) {
-      assert.match(output, /maestro session create --platform pi "topic"/);
-      assert.match(output, /maestro session start --platform pi "topic"/);
-      assert.match(output, /maestro run start --platform pi "goal"/);
-      assert.match(output, /maestro run start --platform pi plan/);
-      assert.match(output, /read ~\/\.maestro\/prepare\/analyze\.md/);
-      assert.match(output, /maestro run skill --platform pi analyze/);
-      assert.match(output, /maestro run brief --platform pi run-1/);
-      assert.match(output, /maestro session next --session demo/);
+      assert.match(output, /maestro skills --steps --json --platform pi/);
+      assert.match(output, /maestro run create plan --session demo/);
+      assert.match(output, /maestro run brief run-1 --session demo/);
+      assert.match(output, /maestro run next --session demo/);
       assert.match(output, /maestro run check run-1 --session demo/);
-      assert.doesNotMatch(output, /maestro session next --platform/);
-      assert.doesNotMatch(output, /maestro run check --platform/);
+      assert.match(output, /maestro run complete run-1 --session demo --advance/);
+      assert.match(output, /maestro session open "topic" --id demo --chain analyze/);
+      assert.doesNotMatch(output, /maestro run brief --platform/);
+      assert.doesNotMatch(output, /maestro run next --platform/);
+      assert.doesNotMatch(output, /maestro run complete --platform/);
+      assert.doesNotMatch(output, /maestro session open --platform/);
     },
   },
   {
-    name: "normalizes canonical placeholders and Claude bindings to Pi",
+    name: "normalizes Skills platform placeholders and Claude bindings to Pi only",
     file: "D:/fixture/skills/example/SKILL.md",
     input: `maestro skills --steps --json --platform {target_platform}
-maestro session create "topic" --platform {target_platform} --chain analyze
-maestro session start "topic" --platform claude --chain analyze
+maestro skills --steps --json --platform claude
 maestro run create plan --platform {target_platform} --session demo
 maestro run brief run-1 --platform claude
 `,
     verify(output) {
-      assert.doesNotMatch(output, /\{target_platform\}/);
-      assert.doesNotMatch(output, /--platform claude/);
-      assert.equal(output.match(/--platform pi/g)?.length, 5);
+      // v3 binds the platform only on Skills catalog calls; lifecycle calls
+      // (run create/brief/...) keep their source text untouched.
+      assert.equal(output.match(/maestro skills --steps --json --platform pi/g)?.length, 2);
+      assert.equal(output.match(/maestro run create plan --platform \{target_platform\} --session demo/g)?.length, 1);
+      assert.equal(output.match(/maestro run brief run-1 --platform claude/g)?.length, 1);
     },
   },
   {
-    name: "rewrites team coordinator creation and completion aliases",
+    name: "keeps v3 coordinator creation and completion commands intact",
     file: "D:/fixture/skills/team-review/roles/coordinator/role.md",
     input: `Otherwise: \`maestro run create team-review --session <slug> --intent "<task summary>"\`
-maestro run complete <run_id>
+maestro run complete <run_id> --session <slug> --advance
 `,
     verify(output) {
-      assert.match(output, /maestro run start "<task summary>" --cmd team-review --session <slug>/);
-      assert.match(output, /maestro run done <run_id>/);
-      assert.doesNotMatch(output, /maestro run create/);
+      assert.match(output, /maestro run create team-review --session <slug>/);
+      assert.match(output, /maestro run complete <run_id> --session <slug> --advance/);
+      assert.doesNotMatch(output, /maestro run start|maestro run done/);
     },
   },
   {
@@ -218,8 +218,8 @@ maestro run complete <run_id>
     file: "D:/fixture/agents/catalog.json",
     input: '{"instruction":"Otherwise: `maestro run create execute --session <slug> --intent \\"<task summary>\\"`"}',
     verify(output) {
-      assert.match(output, /maestro run start/);
-      assert.doesNotMatch(output, /maestro run create/);
+      assert.match(output, /maestro run create execute --session <slug>/);
+      assert.doesNotMatch(output, /maestro run start/);
       assert.doesNotThrow(() => JSON.parse(output));
     },
   },

@@ -125,7 +125,9 @@ import {
   createWorkspacePeerRuntime,
   discoverWorkspacePeers,
   enqueueWorkspacePeerCommand,
+  formatWorkspacePeerWindowListings,
   formatWorkspaceRemoteRootMessage,
+  projectWorkspacePeerWindow,
   resolveWorkspaceOwnerByName,
   resolveWorkspaceTarget,
   shouldReplayWorkspaceRootQueue,
@@ -1211,18 +1213,8 @@ export default function registerTeammateExtension(
     return byPrefix.length === 1 ? byPrefix[0] : undefined;
   };
 
-  const workspacePeerWindowListings = (): WorkspacePeerWindowListing[] => workspacePeerOwners.map((owner) => ({
-    target: `owner:${owner.ownerId}`,
-    ownerId: owner.ownerId,
-    ...(owner.sessionId ? { sessionId: owner.sessionId } : {}),
-    ...(owner.sessionName ? { sessionName: owner.sessionName } : {}),
-    status: owner.agents.some((agent) => agent.status === "running") || (owner.backgroundJobs?.length ?? 0) > 0
-      ? "running"
-      : "sleeping",
-    agentCount: owner.agents.length,
-    publishedAt: owner.publishedAt,
-    ...(owner.contextPressure === undefined ? {} : { contextPressure: owner.contextPressure }),
-  }));
+  const workspacePeerWindowListings = (): WorkspacePeerWindowListing[] =>
+    workspacePeerOwners.map(projectWorkspacePeerWindow);
 
   const workspaceMainTarget = (owner: WorkspaceOwnerSnapshot): WorkspaceResolvedTarget => ({
     scope: "remote",
@@ -1402,7 +1394,7 @@ export default function registerTeammateExtension(
       if (!response || response.status === "expired") {
         return {
           delivered: false,
-          error: `Timed out sending to workspace target "${query}".`,
+          error: `Timed out sending to workspace target "${query}". The message may still have been delivered; inspect teammate-list with view=inbox before retrying.`,
           receipt: { publicationStage, messageId: command.commandId },
         };
       }
@@ -3592,7 +3584,7 @@ export default function registerTeammateExtension(
         const deliveryStage = delivery.receipt?.deliveryStage ?? "queued";
         const effectiveMode = delivery.receipt?.effectiveMode ?? mode;
         const queuedHint = deliveryStage === "queued"
-          ? " The peer's reply will be injected after this turn ends; end the turn to receive it."
+          ? " The message is queued and may not yet be consumed; do not resend it. The peer's reply will be injected after this turn ends; end the turn to receive it."
           : "";
         return {
           content: [{
@@ -3701,12 +3693,7 @@ export default function registerTeammateExtension(
           kind: "window" as const,
           ...window,
         }));
-        const text = entries.length === 0
-          ? "No available peer sessions."
-          : entries.map((window) => {
-            const label = window.sessionName ?? `window:${window.ownerId.slice(0, 8)}`;
-            return `● [window] ${label} · ${window.status} · agents=${window.agentCount} · target=${window.target}`;
-          }).join("\n");
+        const text = formatWorkspacePeerWindowListings(entries);
         return {
           content: [{ type: "text", text }],
           isError: false,
@@ -5968,7 +5955,7 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
     promptSnippet: "Create, list, or close Monitor-owned Pi worker windows.",
     promptGuidelines: [
       "Use create only when the user's monitoring or coordination request requires a new worker window; do not create speculative workers.",
-      "After create, coordinate the returned owner target with observe and teammate-send.",
+      "The create call already delivers its objective to the worker. After create, do not resend that objective; use the returned owner target only for later corrections, new constraints, explicit response requests, or safety/lifecycle instructions.",
       "Before close, collect needed results and close only Monitor-owned windows that no longer need to run.",
       'After close, use teammate-list with view="inbox" to read the window\'s persisted messages if they are needed.',
     ],

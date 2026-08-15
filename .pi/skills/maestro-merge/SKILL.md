@@ -79,7 +79,7 @@ User selects "记录经验" → prompt for title/insight, then recommend `/maest
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Next dep-ready session | step `analyze` for session (`maestro run start "{goal}" --cmd analyze --session {next-dep-ready-slug} --platform pi --arg "{goal}"`（v2 legacy；session/3.0 workspace 见 run-mode.md v3 章节）) |
+| Next dep-ready session | step `analyze` for session — open a v3 Session (`maestro session open "<goal>" --id YYYYMMDD-analyze-{next-dep-ready-slug} --chain analyze --participant {p} --actor {a} --request-id {r} --reason "<reason>" --json` → fenced `maestro run next --session {session_id} ... --json`), or route via `/maestro-next` |
 </completion>
 
 <error_codes>

@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { handleProxyRequest } from "../src/extension/index.ts";
+import type { SessionMessageResult } from "../src/sessions/session-core.ts";
+import {
+  formatWorkspacePeerWindowListings,
+  type WorkspacePeerWindowListing,
+} from "../src/extension/workspace-peers.ts";
 import { SessionSendOverlay, type SessionSendOverlayResult } from "../src/tui/session-send-overlay.ts";
 import type { MonitorSessionRow } from "../src/tui/monitor-overlay.ts";
 import type { TeammateState } from "../src/shared/types.ts";
@@ -115,16 +121,29 @@ const pi = new Proxy({
   },
 }) as unknown as ExtensionAPI;
 
+const WORKSPACE_LISTING: WorkspacePeerWindowListing = {
+  target: "owner:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  ownerId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  sessionName: "mw-dddddddddddddddddddddddddddddddd-review-window",
+  displayName: "review-window",
+  status: "running",
+  agentCount: 1,
+  activeAgents: [{
+    role: "reviewer",
+    name: "audit",
+    status: "running",
+    objective: "Check the release boundary",
+    summary: "Reviewing delivery semantics",
+  }],
+  publishedAt: 1_000,
+};
+
 async function proxyWorkspace(
   tool: string,
   params: Record<string, unknown>,
   send?: (target: string, message: string, mode: "steer" | "follow_up") => Promise<boolean>,
   stateValue: TeammateState = proxyState(),
-  sessionSend?: (request: { selector: string; message: string; mode: "steer" | "follow_up" | "abort" }) => Promise<{
-    delivered: boolean;
-    error?: string;
-    receipt?: { mode?: string; wasSleeping?: boolean; terminatedCount?: number };
-  }>,
+  sessionSend?: (request: { selector: string; message: string; mode: "steer" | "follow_up" | "abort" }) => Promise<SessionMessageResult>,
 ): Promise<Record<string, unknown>> {
   let response: Record<string, unknown> | undefined;
   await handleProxyRequest(
@@ -139,26 +158,81 @@ async function proxyWorkspace(
     {},
     undefined,
     send,
-    async () => [{
-      target: "owner:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      ownerId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      sessionName: "review-window",
-      status: "running" as const,
-      agentCount: 1,
-      publishedAt: Date.now(),
-    }],
+    async () => [WORKSPACE_LISTING],
     sessionSend,
   );
   assert.ok(response);
   return response;
 }
 
-test("child proxy lists peer windows and sends from a regular agent", async () => {
+test("root and child proxy window views share bounded contextual formatting", async () => {
   const listed = await proxyWorkspace("teammate-list", { view: "windows" });
   const listResult = listed.result as { isError?: boolean; content?: Array<{ text?: string }> };
   assert.equal(listResult.isError, false);
+  assert.equal(listResult.content?.[0]?.text, formatWorkspacePeerWindowListings([WORKSPACE_LISTING]));
+  assert.match(listResult.content?.[0]?.text ?? "", /name="review-window"/);
+  assert.match(listResult.content?.[0]?.text ?? "", /name="audit" role="reviewer" status=running/);
+  assert.match(listResult.content?.[0]?.text ?? "", /objective="Check the release boundary"/);
+  assert.match(listResult.content?.[0]?.text ?? "", /summary="Reviewing delivery semantics"/);
   assert.match(listResult.content?.[0]?.text ?? "", /target=owner:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/);
 
+  const [rootSource, proxySource] = await Promise.all([
+    readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(rootSource, /formatWorkspacePeerWindowListings\(entries\)/);
+  assert.match(proxySource, /formatWorkspacePeerWindowListings\(entries\)/);
+});
+
+test("child proxy preserves queued delivery receipts and timeout ambiguity", async () => {
+  const target = "owner:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const queued = await proxyWorkspace(
+    "teammate-send",
+    { to: target, message: "report status", mode: "steer", kind: "status" },
+    undefined,
+    proxyState(),
+    async (request) => {
+      assert.equal(request.mode, "follow_up");
+      return {
+        delivered: true,
+        receipt: {
+          requestedMode: "follow_up",
+          effectiveMode: "follow_up",
+          deliveryStage: "queued",
+          publicationStage: "accepted",
+          messageId: "queued-message",
+        },
+      };
+    },
+  );
+  const queuedResult = queued.result as {
+    isError?: boolean;
+    content?: Array<{ text?: string }>;
+    details?: { receipt?: { messageId?: string } };
+  };
+  assert.equal(queuedResult.isError, false);
+  assert.match(queuedResult.content?.[0]?.text ?? "", /requested steer, effective follow_up/);
+  assert.match(queuedResult.content?.[0]?.text ?? "", /may not yet be consumed; do not resend/);
+  assert.equal(queuedResult.details?.receipt?.messageId, "queued-message");
+
+  const timedOut = await proxyWorkspace(
+    "teammate-send",
+    { to: target, message: "correct the task", mode: "follow_up" },
+    undefined,
+    proxyState(),
+    async () => ({
+      delivered: false,
+      error: "Timed out waiting for the peer.",
+      receipt: { publicationStage: "published", messageId: "maybe-delivered" },
+    }),
+  );
+  const timeoutResult = timedOut.result as { isError?: boolean; content?: Array<{ text?: string }> };
+  assert.equal(timeoutResult.isError, true);
+  assert.match(timeoutResult.content?.[0]?.text ?? "", /may still have been delivered/);
+  assert.match(timeoutResult.content?.[0]?.text ?? "", /view=inbox before retrying/);
+});
+
+test("child proxy sends from a regular agent", async () => {
   const sent: Array<{ target: string; message: string; mode: string }> = [];
   const sendResult = await proxyWorkspace(
     "teammate-send",

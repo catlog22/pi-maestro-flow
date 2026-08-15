@@ -22,7 +22,7 @@ session-mode: none
 If any required file above was not expanded into context by the host, or its content is no longer in context, Read it explicitly before executing any step.
 
 <deferred_reading>
-- [odyssey-base.md](~/.maestro/workflows/odyssey-base.md) — read after mode resolved for shared back-half (A_INTAKE, A_RESUME, GENERALIZE → DISCOVER → RECORD → END)
+- [odyssey-base.md](~/.maestro/workflows/odyssey-base.md) — read after mode resolved for shared back-half (INTAKE gate → GENERALIZE → DISCOVER → RECORD → END)
 - [odyssey-debug.md](~/.maestro/workflows/odyssey-debug.md) — read when mode=debug
 - [odyssey-improve.md](~/.maestro/workflows/odyssey-improve.md) — read when mode=improve
 - [odyssey-planex.md](~/.maestro/workflows/odyssey-planex.md) — read when mode=planex
@@ -78,7 +78,7 @@ On mode resolved: read the deferred workflow file for that mode + odyssey-base.m
 <context>
 $ARGUMENTS
 
-**Universal flags:** `--mode <name>` mode selector | `--skip-fix` audit/diagnose only, skip fix+verify | `--skip-generalize` skip GENERALIZE+DISCOVER | `-y` skip all confirmation interactions (including delegate/agent confirmations in execution phases), use default choices; decisions skipped this way are recorded as `deferred`; never bypasses mode ambiguity (E000), INTAKE gate blockers, escalation | `-c` resume most recent unfinished session of the SAME mode; if --mode conflicts with resumed session's mode → E003 (mode mismatch); no history → ignore -c, create new session | `--heartbeat` /loop periodic progress
+**Universal flags:** `--mode <name>` mode selector | `--skip-fix` audit/diagnose only, skip fix+verify | `--skip-generalize` skip GENERALIZE+DISCOVER | `-y` skip all confirmation interactions (including delegate/agent confirmations in execution phases), use default choices; decisions skipped this way are recorded as `deferred`; never bypasses mode ambiguity (E000), INTAKE gate blockers, escalation | `-c` resume the most recent unfinished Session of the SAME mode via exact Session resolution: locate it with `maestro session list --json` + `maestro session status --session {session_id} --json` (both read-only), re-attach context with `maestro session resume-view` and the `brief-result/3.0` Resume Packet via `run brief` (exact invocation per run-mode.md), then continue the chain with fenced `maestro run next` / `run check` / `run complete --advance`. If `--mode` conflicts with the resumed Session's mode → E003 (mode mismatch); no history → ignore -c, create new Session | `--heartbeat` /loop periodic progress
 
 **Mode-scoped flags:**
 
@@ -97,7 +97,7 @@ $ARGUMENTS
 
 Mode-scoped flags passed to inapplicable mode: emit W008 warning and ignore the flag.
 
-**Run creation**: follow `run-mode.md` exactly. Negotiate capabilities, create or resolve the explicit Session identity, start a bounded Execution with the complete audited acquisition options, then invoke the complete fenced `maestro run start --platform pi odyssey-<mode>` option set with the mode arguments（v2 legacy；session/3.0 workspace 见 run-mode.md v3 章节）. Never abbreviate or omit the Execution locator, revision, or private lease claim in an executable command.
+**Session creation**: follow `run-mode.md` exactly. Negotiate capabilities, then open a new Session with `maestro session open "<objective>" --id {slug} --chain odyssey-<mode> --participant {participant_id} --actor {actor_id} --request-id {request_id} --reason "<reason>" [--evidence <ref> ...] --json` (or resolve an existing compatible Session read-only via `session status`), then dispatch the mode step with fenced `maestro run next --session {session_id} ... --json` (chain) or self-start with `maestro run create odyssey-<mode> [args...] --session {session_id} ... --json` passing the mode arguments. Never abbreviate or omit the Session locator, the `orchestration_revision`/Run `revision` fence, or the `--participant`/`--actor` identity in an executable command.
 
 **Session**: `{run_dir}/outputs/`
 **Output**: `session.json` | `evidence.ndjson` | `understanding.md` | `explore.json` (debug/review only)

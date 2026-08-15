@@ -345,7 +345,8 @@ export function formatWorkspaceWindowInbox(result: WindowInboxResult): string {
   const rows = result.entries.map((entry) => {
     const session = entry.sessionName ?? entry.sessionId.slice(0, 8);
     const time = new Date(entry.updatedAt).toISOString();
-    const metadata = `${time} | session=${session} | ${entry.direction}/${entry.status} | peer=owner:${entry.peerOwnerId} | id=${entry.messageId}`;
+    const effectiveMode = entry.effectiveMode ?? "unknown";
+    const metadata = `${time} | session=${session} | ${entry.direction}/${entry.status} | source=${entry.source} | kind=${entry.messageKind ?? "message"} | requested=${entry.mode} | effective=${effectiveMode} | peer=owner:${entry.peerOwnerId} | id=${entry.messageId}`;
     return `${metadata}\n${indentBody(entry.body)}`;
   });
   return [header, ...rows].join("\n");

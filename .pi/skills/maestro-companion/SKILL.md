@@ -22,7 +22,7 @@ session-mode: none
 If any required file above was not expanded into context by the host, or its content is no longer in context, Read it explicitly before executing any step.
 
 <purpose>
-Minimal-run execution channel. Full LLM capability with one bounded generation/Run (v3: Session + Run, no Execution; v2 legacy: Execution/Run) and evidence appended to `{run_dir}/evidence/companion-log.md`.
+Minimal-run execution channel. Full LLM capability with one bounded Run and evidence appended to `{run_dir}/evidence/companion-log.md`.
 
 Use when:
 - Intent is mechanically clear (no design decisions needed; file count irrelevant)
@@ -50,7 +50,7 @@ Knowledge utilities (note/log/promote) are available via `/maestro-knowledge`.
 </context>
 
 <invariants>
-1. Execute mode follows the exact Session identity -> bounded generation -> Run lifecycle in `run-mode.md`, dual-mode: v3 `session open` + `run next` (companion single step; no Execution/lease), v2 legacy bounded Execution + `maestro run start --platform pi companion`.
+1. Execute mode follows the exact Session identity -> bounded Run lifecycle in `run-mode.md`.
 2. Evidence is append-only, non-formal (never enters gates or artifact registry)
 3. No auto-orchestration — executes directly, never creates chains
 </invariants>
@@ -59,11 +59,11 @@ Knowledge utilities (note/log/promote) are available via `/maestro-knowledge`.
 
 ## Execute (default)
 
-Linear: create identity/Execution/Run -> explore -> confirm -> do -> complete Run -> seal Execution.
+Linear: resolve Session identity -> dispatch Run -> explore -> confirm -> do -> check -> complete Run -> complete Session when the chain is terminal.
 
 ### 1. Create
 
-Follow the self-start flow in `run-mode.md` — dual-mode: **v3** negotiate the v3 capability set, open the Session and bootstrap the companion single-step chain with `session open "<intent>" --id <slug> --participant <hostSessionId> --actor <hostSessionId> --request-id <uuid> --reason "..." --chain companion` (mutation flags injected automatically by run-control/coordinator), then allocate the Run with `run next --run <run-id> ...`; **v2 legacy** create or resolve the explicit Session identity, start the bounded Execution with the complete audited acquisition option set, then invoke the complete fenced `maestro run start --platform pi companion` option set with `--intent "<intent>"` and `--arg "<intent>"`. Intent is Session metadata only; `--arg` supplies the required command arguments. Do not use a Session lifecycle alias or omit the Execution locator, revision, or private lease claim (v2).
+Follow the self-start flow in `run-mode.md`: negotiate capabilities, open or resolve the explicit Session identity (`maestro session open "<objective>" --id <slug> ... --json` / `maestro session status --session {session_id} --json`), then invoke the complete fenced `maestro run create companion` option set with `--intent "<intent>"` and `--arg "<intent>"`. Intent is Session metadata only; `--arg` supplies the required command arguments. Do not use a Session lifecycle alias or omit the Session locator, the `orchestration_revision`/Run `revision` fence, or the `--participant`/`--actor` identity.
 
 Init `{run_dir}/evidence/companion-log.md`:
 ```markdown
@@ -124,9 +124,9 @@ Before completion, put accepted decisions/locked constraints in `report.md`. If 
 
 ```bash
 maestro knowledge stage knowhow "<title>" "<content>" --run <run_id>
-# Then use the complete fenced `maestro run complete` and `maestro execution seal`
-# commands from run-mode.md with the current locator, fence, and private claim
-# (v2 legacy); v3 completes with `run complete <run-id> --advance --verdict done` + `session complete`.
+# Then use the complete fenced `maestro run complete ... --advance` and, when the
+# chain is terminal, `maestro session complete` from run-mode.md with the current
+# locator, orchestration_revision, and identity.
 ```
 
 Display: `Companion done. Run: {run_id} | Evidence: {path}`
@@ -140,7 +140,7 @@ If execution revealed the task requires multi-phase audit/diagnosis (e.g., root 
 <error_codes>
 | Code | Severity | Condition | Recovery |
 |------|----------|-----------|----------|
-| E001 | error | `session start` failed (CLI unavailable, invalid args) | Check maestro CLI installation |
+| E001 | error | `session open` failed (CLI unavailable, invalid args) | Check maestro CLI installation |
 | E003 | error | Evidence log creation failed | Check run_dir permissions |
 | W001 | warning | Explore tools unavailable (teammate({ agent: "explorer" })/search) | Degrade to direct Read/Grep |
 </error_codes>

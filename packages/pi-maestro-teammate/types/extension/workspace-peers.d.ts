@@ -7,6 +7,7 @@ export declare const WORKSPACE_MAIN_SESSION_MARKER: "window-main-session";
 export declare const DEFAULT_PEER_STALE_MS = 20000;
 export declare const DEFAULT_PEER_HEARTBEAT_MS = 5000;
 export declare const DEFAULT_PEER_PUBLISH_THROTTLE_MS = 200;
+export declare const DEFAULT_PEER_MAILBOX_CLEANUP_INTERVAL_MS: number;
 export declare const DEFAULT_COMMAND_TIMEOUT_MS = 5000;
 export declare const MAX_OWNER_AGENTS = 256;
 export declare const MAX_OWNER_SETTLED = 256;
@@ -15,6 +16,7 @@ export declare const MAX_OWNER_FILE_BYTES: number;
 export declare const MAX_COMMAND_FILE_BYTES: number;
 export declare const MAX_RESPONSE_FILE_BYTES: number;
 export declare const MAX_COMMAND_MESSAGE_BYTES: number;
+export declare const MAX_WINDOW_LISTING_ACTIVE_AGENTS = 8;
 export declare const MONITOR_LEASE_STALE_MS = 60000;
 export type WorkspaceAgentStatus = "running" | "sleeping";
 export type WorkspaceSettledStatus = "completed" | "failed" | "terminated";
@@ -112,11 +114,22 @@ export interface WorkspacePeerWindowListing {
     ownerId: string;
     sessionId?: string;
     sessionName?: string;
+    displayName?: string;
     status: "running" | "sleeping";
     agentCount: number;
+    activeAgents?: Array<{
+        role: string;
+        name?: string;
+        status: WorkspaceAgentStatus;
+        objective?: string;
+        summary?: string;
+    }>;
     publishedAt: number;
     contextPressure?: number;
 }
+export declare function workspacePeerDisplayName(sessionName: string | undefined, ownerId: string): string;
+export declare function projectWorkspacePeerWindow(owner: WorkspaceOwnerSnapshot): WorkspacePeerWindowListing;
+export declare function formatWorkspacePeerWindowListings(windows: readonly WorkspacePeerWindowListing[]): string;
 /** Peer discovery result retained for existing callers and ledger reconciliation. */
 export interface WorkspacePeerDiscovery {
     peers: WorkspaceOwnerSnapshot[];
@@ -192,7 +205,10 @@ export interface WorkspacePeerRuntimeOptions {
     ownerNonce?: string;
     heartbeatMs?: number;
     publishThrottleMs?: number;
+    mailboxCleanupIntervalMs?: number;
     now?: () => number;
+    /** @internal Test hook for deterministic cleanup failure coverage. */
+    cleanupMailboxes?: typeof cleanupWorkspacePeerMailboxes;
     getState: () => WorkspaceOwnerState;
 }
 export interface StopWorkspacePeerRuntimeOptions {
@@ -305,6 +321,7 @@ export declare class WorkspacePeerPublisher {
     readonly identity: WorkspacePeerIdentity;
     readonly heartbeatMs: number;
     readonly publishThrottleMs: number;
+    readonly mailboxCleanupIntervalMs: number;
     constructor(options: WorkspacePeerRuntimeOptions);
     start(): Promise<void>;
     markDirty(): void;

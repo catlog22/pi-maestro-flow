@@ -188,11 +188,12 @@ function auditRunSessionPrompt(file: string): ContractFinding[] {
   const findings: ContractFinding[] = [];
 
   for (const [index, line] of content.split(/\r?\n/).entries()) {
-    if (/\bmaestro\s+run\s+(?:prepare|create)\b/i.test(line) && !isNegativeExample(line)) {
+    // v3 surface: run prepare is gone, but run create is a legal self-start command.
+    if (/\bmaestro\s+run\s+prepare\b/i.test(line) && !isNegativeExample(line)) {
       findings.push({ file: displayPath, rule: "legacy-run-entry", detail: `line ${index + 1}: ${line.trim()}` });
     }
     if (/\bmaestro\s+session\s+create\b[^\n]*--chain-file\b/i.test(line)
-      && !/(?:advanced|高级|internal|machine|decision_points|decomposition|argument_requirements|retry)/i.test(line)) {
+      && !/(?:advanced|高级|internal|machine|decision_points|decomposition|argument_requirements|retry|deprecated|compatibility|legacy)/i.test(line)) {
       findings.push({ file: displayPath, rule: "chain-file-default", detail: `line ${index + 1}: ${line.trim()}` });
     }
   }

@@ -99,11 +99,13 @@ test("window inbox rebuilds persisted revisions and infers injected messages", a
       store.record(threadInput({
         messageId: "message-2",
         direction: "outgoing",
+        mode: "steer",
         body: "monitor request",
       }));
       store.record(threadInput({
         messageId: "message-2",
         direction: "outgoing",
+        mode: "steer",
         body: "monitor request",
         status: "queued",
         updatedAt: 2_000,
@@ -123,8 +125,22 @@ test("window inbox rebuilds persisted revisions and infers injected messages", a
     assert.equal(result.entries.find((entry) => entry.messageId === "message-1")?.status, "injected");
     assert.equal(result.entries.find((entry) => entry.messageId === "message-2")?.status, "queued");
     assert.equal(result.entries.find((entry) => entry.messageId === "message-2")?.revision, 2);
-    assert.match(formatWorkspaceWindowInbox(result), /incoming\/injected/);
-    assert.match(formatWorkspaceWindowInbox(result), /worker reply/);
+    const formatted = formatWorkspaceWindowInbox(result);
+    assert.match(formatted, /incoming\/injected/);
+    assert.match(formatted, /worker reply/);
+    assert.match(formatted, /source=monitor/);
+    assert.match(formatted, /kind=message/);
+    assert.match(formatted, /requested=steer \| effective=follow_up/);
+    const pendingWithoutReceipt = formatWorkspaceWindowInbox({
+      ...result,
+      entries: [{
+        ...result.entries[0]!,
+        status: "pending",
+        mode: "steer",
+        effectiveMode: undefined,
+      }],
+    });
+    assert.match(pendingWithoutReceipt, /requested=steer \| effective=unknown/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

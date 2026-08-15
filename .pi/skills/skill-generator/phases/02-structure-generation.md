@@ -136,7 +136,7 @@ ${generateExecutionFlow(config)}
 
 ## Directory Setup
 
-${sessionMode === 'run' ? `> **Run lifecycle** (see \`~/.maestro/workflows/run-mode.md\`): use an injected \`run_id\` / \`run_dir\` directly. Otherwise follow the complete self-start flow: negotiate capabilities, create or resolve the Session identity, start the bounded Execution, and create \`${config.skill_name}\` with the full locator/fence/claim option set. Write formal artifacts under \`{run_dir}/outputs/\`. After \`maestro run check {run_id}\`, a self-started coordinator uses the complete fenced \`maestro run complete\` and \`maestro execution seal\` commands; a dispatched executor returns to its claim-holding orchestrator.\n\n` : ''}\`\`\`javascript
+${sessionMode === 'run' ? `> **Run lifecycle** (see \`~/.maestro/workflows/run-mode.md\`): use an injected \`run_id\` / \`run_dir\` directly. Otherwise follow the complete self-start flow: negotiate capabilities, create or resolve the Session identity, open the session/3.0 Session chain, and create \`${config.skill_name}\` with the full locator/fence/claim option set. Write formal artifacts under \`{run_dir}/outputs/\`. After \`maestro run check {run_id}\`, a self-started coordinator uses the complete fenced \`maestro run complete ... --advance\` (and \`maestro session complete\` when the chain is terminal); a dispatched executor returns to its orchestrator.\n\n` : ''}\`\`\`javascript
 const workDir = \`\${run_dir}/outputs\`;
 
 Bash(\`mkdir -p "\${workDir}"\`);

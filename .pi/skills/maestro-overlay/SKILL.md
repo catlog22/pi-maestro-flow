@@ -112,7 +112,7 @@ After confirming the injection point, ask whether this overlay should recommend 
 
 Use [@ask] user prompt:
 - **"No chain"** — standard overlay, no skill handoff
-- **"Chain to skill"** → ask for the target skill name (e.g., a step like `review`, `execute`, `test` invoked via `maestro run start "{goal}" --cmd <step> --session YYYYMMDD-<step>-{topic} --platform pi --arg "{goal}"`（v2 legacy；session/3.0 workspace 见 run-mode.md v3 章节）)
+- **"Chain to skill"** → ask for the target skill name (e.g., a step like `review`, `execute`, `test` invoked via a v3 Session: `maestro session open "<goal>" --id YYYYMMDD-<step>-{topic} --chain <step> ... --json` → fenced `maestro run next --session {session_id} ... --json`)
 - **"Chain with alternatives"** → ask for primary skill + 1-2 alternative skills
 
 If chain is selected, record the skill name(s) for use in Step 3.
@@ -152,13 +152,13 @@ Build a slug from the user's intent (kebab-case, lowercase). Write to `~/.maestr
 **Skill Handoff** (overlay)
 
 After the above step completes, use [@ask] user prompt:
-- "Proceed to review" — Hand off to step `review` (`maestro run start "{goal}" --cmd review --session YYYYMMDD-review-{topic} --platform pi --arg "{goal}"`（v2 legacy；session/3.0 workspace 见 run-mode.md v3 章节）)
+- "Proceed to review" — Hand off to step `review` (open a v3 Session: `maestro session open "<goal>" --id YYYYMMDD-review-{topic} --chain review ... --json` → fenced `maestro run next`)
 - "Skip" — Continue with current command flow
 - "Alternative: execute" — Run step `execute` with built-in verification instead
 
 On user selection:
-- Proceed → run step `review` (`maestro run start "{goal}" --cmd review --session YYYYMMDD-review-{topic} --platform pi --arg "{goal}"`（v2 legacy；session/3.0 workspace 见 run-mode.md v3 章节）)
-- Alternative → run step `execute` (`maestro run start "{goal}" --cmd execute --session YYYYMMDD-execute-{topic} --platform pi --arg "{goal}"`（v2 legacy；session/3.0 workspace 见 run-mode.md v3 章节）)
+- Proceed → run step `review` (open a v3 Session: `maestro session open "<goal>" --id YYYYMMDD-review-{topic} --chain review ... --json` → fenced `maestro run next`)
+- Alternative → run step `execute` (open a v3 Session: `maestro session open "<goal>" --id YYYYMMDD-execute-{topic} --chain execute ... --json` → fenced `maestro run next`)
 - Skip → continue normally
 ```
 
@@ -264,7 +264,7 @@ Classify: command deficiency → proceed; code bug → skip (suggest `/maestro-c
 
 **Classification decision tree**:
 - Signal points to 'command file missing a section/gate/step/routing rule' → **command deficiency** → proceed with overlay
-- Signal points to 'code implementation does not match existing command requirements' → **code bug** → skip, route to `/maestro-companion` or step `plan --gaps`
+- Signal points to 'code implementation does not match existing command requirements' → **code bug** → skip, route to `/maestro-companion` or step `plan` via `/maestro-next`
 - Signal involves both → split: deficiency part → overlay; bug part → route to companion
 - Uncertain → default to [@ask] user prompt for user classification
 
@@ -291,7 +291,7 @@ On validation failure: fix JSON, retry (max 2).
 
 ### G. Report
 
-Display summary: signals collected/applied/skipped, overlay details, skipped code-bug routing (to `/maestro-companion` or step `plan --gaps`).
+Display summary: signals collected/applied/skipped, overlay details, skipped code-bug routing (to `/maestro-companion` or step `plan` via `/maestro-next`).
 </amend_mode>
 </execution>
 
@@ -302,7 +302,7 @@ Amend mode only:
 |------|-----------|----------|
 | E001 | No signals from any source | Verify artifact paths or provide description |
 | E002 | Signal source path invalid or unreadable | Check `--from-*` path; ensure artifact exists |
-| E003 | All signals are code bugs, not command gaps | Use `/maestro-companion` or step `plan --gaps` |
+| E003 | All signals are code bugs, not command gaps | Use `/maestro-companion` or step `plan` via `/maestro-next` |
 | E004 | Overlay validation failed after 2 retries | Review JSON manually |
 | W001 | Some signals skipped (code bugs) | Route to appropriate fix command |
 | W002 | Target command has >= 3 existing overlays | Consider consolidating |

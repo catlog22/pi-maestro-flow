@@ -11,6 +11,7 @@ import type { RunTeammateParams } from "../runs/execution.ts";
 import type { TeammateState, ChildAgentCallSnapshot } from "../shared/types.ts";
 import { type TeammateModelCapability } from "../models/model-catalog.ts";
 import type { TeammateThinkingInput } from "../shared/thinking.ts";
+import type { SessionMessageResult } from "../sessions/session-core.ts";
 import type { TeammateRuntimeOptions } from "./index.ts";
 import type { RelayedQuestion, RelayedQuestionOption, TeammateInteractionQueue } from "./teammate-helpers.ts";
 /**
@@ -74,12 +75,4 @@ export declare function handleProxyRequest(pi: ExtensionAPI, state: TeammateStat
     message: string;
     mode: "steer" | "follow_up" | "abort";
     messageKind?: WorkspacePeerMessageKind;
-}) => Promise<{
-    delivered: boolean;
-    error?: string;
-    receipt?: {
-        mode?: string;
-        wasSleeping?: boolean;
-        terminatedCount?: number;
-    };
-}>, refreshModelCapabilities?: () => Promise<readonly TeammateModelCapability[]>): Promise<void>;
+}) => Promise<SessionMessageResult>, refreshModelCapabilities?: () => Promise<readonly TeammateModelCapability[]>): Promise<void>;

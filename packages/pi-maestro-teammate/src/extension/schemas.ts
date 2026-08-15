@@ -292,7 +292,7 @@ export const TeammateSendParams = Type.Object({
       enum: ["steer", "follow_up", "abort"],
       default: "follow_up",
       description:
-        'Delivery mode. "steer" interrupts the current turn; if the interruption is not acknowledged promptly it degrades to a queued follow_up instead of failing the agent. "follow_up" queues after the current turn. "abort" terminates the agent.',
+        'Delivery mode. "steer" interrupts the current turn; if the interruption is not acknowledged promptly it degrades to a queued follow_up instead of failing the agent. "follow_up" queues after the current turn. "abort" terminates the agent. For cross-session delivery, queued or accepted means persisted/enqueued but not necessarily consumed by the target model; do not resend without new evidence.',
     }),
   ),
   kind: Type.Optional(
@@ -338,7 +338,7 @@ export const TeammateListParams = Type.Object({
   status: Type.Optional(Type.Unsafe<"pending" | "queued" | "injected" | "accepted" | "rejected" | "timeout">({
     type: "string",
     enum: ["pending", "queued", "injected", "accepted", "rejected", "timeout"],
-    description: "Inbox-only persisted delivery status filter.",
+    description: "Inbox-only persisted delivery status filter. Queued or accepted records confirm persistence/enqueueing, not target-model consumption.",
   })),
   limit: Type.Optional(Type.Integer({
     minimum: 1,

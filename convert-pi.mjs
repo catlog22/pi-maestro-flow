@@ -286,15 +286,15 @@ function ensureMaestroDryRunContract(content, filePath) {
 const maestroCliSurface = `
 <cli_surface>
 
-Human-facing orchestration uses the unified Run surface:
+Human-facing orchestration uses the v3 Session/Run surface:
 
-- Single step: \`maestro run start "<intent>" --cmd <step> --arg "<step input>" --platform pi --workflow-root .\`
-- Simple command chain: \`maestro run start --platform pi "<intent>" --chain analyze plan execute --no-dispatch --workflow-root .\`
-- Advanced chain: \`maestro run start --platform pi "<intent>" --chain-file - --id <session-slug> --no-dispatch --workflow-root .\`
-- Completion: \`maestro run done [run_id] --verdict done|done-with-concerns|needs-retry|blocked --workflow-root .\`
-- Mid-task changes: \`maestro run edit <cmd...> --after latest --workflow-root .\`
-
-\`--chain-file -\` is reserved for advanced coordinator chains that need structured JSON fields such as \`decision_points\`, \`decomposition\`, \`argument_requirements\`, retry budgets, or executor metadata.
+- Single step: \`maestro run next --session {session_id} --participant {p} --actor {a} --request-id {r} --reason "<reason>" --expected-orchestration-revision {rev} --workflow-root .\` (birth packet carries run_id/run_dir/guidance/knowledge_context/brief.command)
+- Open a Session: \`maestro session open "<intent>" --id <slug> [--chain <cmd...>] --participant {p} --actor {a} --request-id {r} --reason "<reason>" --workflow-root .\`
+- Re-attach: \`maestro run brief <run_id> --session {session_id} --workflow-root .\` (brief-result/3.0 Resume Packet)
+- Complete a step: \`maestro run complete <run_id> --session {session_id} --verdict done|done_with_concerns --advance --expected-run-revision {run_rev} --expected-orchestration-revision {rev} --workflow-root .\`
+- Decide a gate: \`maestro run decide <point-id> --session {session_id} --verdict proceed|fix|escalate --workflow-root .\`
+- Seal the Session: \`maestro session complete --session {session_id} --participant {p} --actor {a} --request-id {r} --reason "<reason>" --expected-orchestration-revision {rev} --workflow-root .\`
+- Chain adjustments: \`maestro session chain insert|replace|skip --session {session_id} ... --workflow-root .\`
 
 </cli_surface>`;
 
@@ -303,12 +303,12 @@ const ralphCliSurface = `
 
 Human-facing orchestration should stay on one topic Session:
 
-- Start one step with \`maestro run start "<intent>" --cmd <step> --arg "<step input>" --platform pi --workflow-root .\`
-- Start a simple chain with \`maestro run start --platform pi "<intent>" --chain analyze plan execute --no-dispatch --workflow-root .\`
-- Complete the active Run with \`maestro run done [run_id] --verdict done|done-with-concerns|needs-retry|blocked --workflow-root .\`
-- Add or change future simple steps with \`maestro run edit <cmd...> --after latest --workflow-root .\`
+- Start one step with \`maestro run next --session {session_id} --participant {p} --actor {a} --request-id {r} --reason "<reason>" --expected-orchestration-revision {rev} --workflow-root .\`
+- Start a simple chain with \`maestro session open "<intent>" --id <slug> --chain analyze plan execute --participant {p} --actor {a} --request-id {r} --reason "<reason>" --workflow-root .\`
+- Complete the active Run with \`maestro run complete <run_id> --session {session_id} --verdict done|done_with_concerns --advance --expected-run-revision {run_rev} --expected-orchestration-revision {rev} --workflow-root .\`
+- Add or change future simple steps with \`maestro session chain insert|replace|skip --session {session_id} ... --workflow-root .\`
 
-Advanced coordinator chains use \`maestro run start --platform pi "<intent>" --chain-file - --id <session-slug> --no-dispatch\`. Ralph has no separate CLI driver or Session type.
+Advanced coordinator chains use \`maestro session open "<intent>" --id <session-slug> --chain-file - --participant {p} --actor {a} --request-id {r} --reason "<reason>" --workflow-root .\`. Ralph has no separate CLI driver or Session type.
 
 </cli_surface>`;
 
@@ -334,7 +334,7 @@ const piCoordinatorContextBlock = `
 
 </pi_context_contract>`;
 
-const maestroNextInvariantBlock = '9. simple chain 只通过 `maestro run start --platform pi --chain ... --no-dispatch` 创建；不得为同一任务的每个 skill 新建独立 Session。\n10. 中途新增下一步用 `maestro run edit <cmd...>` 修改未来 chain，不调用新的 `run start` 制造第二个 Topic Session。';
+const maestroNextInvariantBlock = '9. simple chain 只通过 `maestro session open --chain ...` 创建；不得为同一任务的每个 skill 新建独立 Session。\n10. 中途新增下一步用 `maestro session chain insert|replace|skip` 修改未来 chain，不调用新的 `session open` 制造第二个 Topic Session。';
 
 function normalizePath(filePath) {
   return filePath.replaceAll('\\', '/');
@@ -347,18 +347,10 @@ function bindPiPlatformToLifecycleCalls(content) {
     /\b(maestro skills\b[^\n`]*?--platform)\s+(?:claude|\{target_platform\})/g,
     '$1 pi',
   );
-  result = result.replace(
-    /\b(maestro (?:run (?:start|create|prepare|skill|brief)|session (?:start|create)))\b([^\n`]*?--platform)\s+(?:claude|\{target_platform\})/g,
-    '$1$2 pi',
-  );
-  result = result.replace(
-    /\bmaestro run (start|create|prepare|skill|brief)\b(?![^\n`]*--platform)/g,
-    'maestro run $1 --platform pi',
-  );
-  result = result.replace(
-    /\bmaestro session (start|create)\b(?![^\n`]*--platform)/g,
-    'maestro session $1 --platform pi',
-  );
+  // v3 removed the --platform option on lifecycle calls (run next/create/
+  // brief/complete, session open/complete). Only the skills catalog keeps a
+  // platform selector. v2 dispatchers (run start/prepare/skill, session
+  // start/create) no longer exist and must not be re-introduced.
 
   return result;
 }
@@ -388,11 +380,11 @@ export function transformSessionRunCli(body, filePath) {
     result = insertAfter(
       result,
       '5. required missing 依次尝试 known args、default、LLM 明确推断、AskUserQuestion；仍 missing 则 BLOCK。',
-      '6. 中途新增或替换未来步骤时，使用 `maestro run edit` 的 insert/replace/remove 与 position/decomposition file 选项。',
+      '6. 中途新增或替换未来步骤时，使用 `maestro session chain insert|replace|skip` 的 insert/replace/remove 与 position/decomposition file 选项。',
     );
     result = result.replace(
       '- `ReuseAssessment=fresh`：通过 `maestro session create ... --engine ralph --chain-file -` 创建 Session。',
-      '- `ReuseAssessment=fresh`：简单链使用 `maestro run start "<intent>" --chain <cmd...> --no-dispatch`；高级链使用 `maestro run start "<intent>" --chain-file - --id <session-slug> --no-dispatch`。',
+      '- `ReuseAssessment=fresh`：简单链使用 `maestro session open "<intent>" --id <slug> --chain <cmd...>`；高级链使用 `maestro session open "<intent>" --id <session-slug> --chain-file -`。',
     );
     result = result.replace(
       'Turn a user intent into the initial Skill chain, create one canonical topic Session through `maestro session create --chain-file`, then execute the shared Run loop.',
@@ -460,20 +452,20 @@ export function transformSessionRunCli(body, filePath) {
     );
     result = result.replace(
       '1. `maestro run prepare --platform pi <step> --workflow-root .`。\n2. 使用已解析的 `argument_requirements` 创建当前 step 的 Run；不得用路径扫描补 upstream。\n3. 按 create result 的 `brief.command` 加载完整执行指南。\n4. 执行 workflow，写正式 deliverables，运行 gates。\n5. `maestro run complete <run_id> --verdict done --workflow-root .`。',
-      '1. 使用已解析的 `argument_requirements` 创建当前 step 的 Run：\n   `maestro run start "<intent>" --cmd <step> --arg "<resolved step input>" --platform pi --workflow-root .`。\n2. 不得用路径扫描补 upstream；artifact 输入必须来自 authoritative same-Session sealed refs。\n3. 按 start result 的 `brief.command` 加载完整执行指南。\n4. 执行 workflow，写正式 deliverables，运行 gates。\n5. `maestro run done <run_id> --verdict done --workflow-root .`。',
+      '1. 使用已解析的 `argument_requirements` 创建当前 step 的 Run：\n   `maestro run next --session {session_id} --participant {p} --actor {a} --request-id {r} --reason "<reason>" --expected-orchestration-revision {rev} --workflow-root .`。\n2. 不得用路径扫描补 upstream；artifact 输入必须来自 authoritative same-Session sealed refs。\n3. 按 birth packet 的 `brief.command` 加载完整执行指南。\n4. 执行 workflow，写正式 deliverables，运行 gates。\n5. `maestro run complete <run_id> --session {session_id} --verdict done --advance --expected-run-revision {run_rev} --expected-orchestration-revision {rev} --workflow-root .`。',
     );
     result = result.replace(
       '4. 完成当前 step 后调用 `maestro run complete <run_id> --verdict done --workflow-root .`。',
-      '4. 完成当前 step 后调用 `maestro run done <run_id> --verdict done --workflow-root .`。',
+      '4. 完成当前 step 后调用 `maestro run complete <run_id> --session {session_id} --verdict done --advance --expected-run-revision {run_rev} --expected-orchestration-revision {rev} --workflow-root .`。',
     );
     result = insertAfter(
       result,
-      '4. 完成当前 step 后调用 `maestro run done <run_id> --verdict done --workflow-root .`。',
+      '4. 完成当前 step 后调用 `maestro run complete <run_id> --session {session_id} --verdict done --advance --expected-run-revision {run_rev} --expected-orchestration-revision {rev} --workflow-root .`。',
       'Multi-step simple chain：\n\n1. 仅当用户明确选择 `--chain` 或在确认界面选择 simple chain 时进入。\n2. 将 2-5 个 first-tier step 排成命令名列表，展示 topic、chain、argument gaps。\n3. 用户确认后调用：\n   `maestro run start "<intent>" --chain <cmd...> --no-dispatch --platform pi --workflow-root .`。\n4. 展示返回的 `session_id` 与 `maestro run next --session <session_id>`，然后停止；后续每次推进都必须重新由用户确认。\n5. 如果用户在同一任务中追加 step，使用 `maestro run edit <cmd...> --after latest --workflow-root .`，不要创建第二个 Session。',
     );
     result = result.replace(
       /maestro run prepare(?: --platform pi)? <step> --workflow-root \.\n[\s\S]*?maestro run complete <run_id> --workflow-root \./,
-      'maestro run start "<short goal>" --cmd <step> --platform pi --workflow-root . [--arg "<required command input>"]\n# Returns run_id, run_dir, authoritative upstream refs, and brief.command.\nmaestro run brief --platform pi <run_id> --workflow-root .\nmaestro run done <run_id> --workflow-root .',
+      'maestro session open "<short goal>" --id <slug> --chain <step> --participant {p} --actor {a} --request-id {r} --reason "<reason>" --workflow-root .\n# Returns session_id; the birth packet of run next carries run_id, run_dir, authoritative upstream refs, guidance and brief.command.\nmaestro run next --session {session_id} --participant {p} --actor {a} --request-id {r} --reason "<reason>" --expected-orchestration-revision {rev} --workflow-root .\nmaestro run complete <run_id> --session {session_id} --verdict done --advance --expected-run-revision {run_rev} --expected-orchestration-revision {rev} --workflow-root .',
     );
     result = result.replace(
       /For first-tier steps \(those with prepare\/ \+ workflows\/ files\):[\s\S]*?# 3a\. Entry blocker degradation/,
@@ -481,13 +473,12 @@ export function transformSessionRunCli(body, filePath) {
 
 \`\`\`bash
 # Create one Run through the friendly unified entry.
-maestro run start "<short goal>" --cmd <step> --platform pi --workflow-root . [--arg "<required command input>"]
+maestro session open "<short goal>" --id <slug> --chain <step> --participant {p} --actor {a} --request-id {r} --reason "<reason>" --workflow-root .
 # Returns run_id, run_dir, authoritative upstream refs, entry gates/blockers, and brief.command.
 \`\`\`
 
 # Entry blocker degradation`,
     );
-    result = result.replaceAll('maestro run complete <run_id>', 'maestro run done <run_id>');
   }
 
   if (path.endsWith('/skills/maestro-odyssey/SKILL.md')) {
@@ -541,24 +532,6 @@ maestro run start "<short goal>" --cmd <step> --platform pi --workflow-root . [-
   ]);
 
   result = result.replace(
-    /maestro run create odyssey-<mode> \\\n  --session YYYYMMDD-odyssey-\{mode\}-\{topic\} \\\n  --intent "<short goal phrase>" \\\n  \[-- flags\.\.\.\]/,
-    'maestro run start "<short goal phrase>" \\\n  --cmd odyssey-<mode> \\\n  --topic "odyssey-{mode}-{topic}" \\\n  --platform pi \\\n  [--arg "<flags...>"]',
-  );
-
-  result = result.replace(
-    /Otherwise: `maestro run create ([^`\s]+) --session <slug> --intent (\\?"|')<task summary>(?:\\?"|')`/g,
-    'Otherwise: `maestro run start $2<task summary>$2 --cmd $1 --session <slug> --platform pi --workflow-root .`',
-  );
-
-  result = result.replace(
-    /maestro run create ([^\s`]+) --session ([^\s`]+) --intent "([^"\n]*)"/g,
-    'maestro run start "$3" --cmd $1 --session $2 --platform pi',
-  );
-  result = result.replace(
-    /maestro run create ([^\s`]+) --session ([^\s`]+) --intent '([^'\n]*)'/g,
-    "maestro run start '$3' --cmd $1 --session $2 --platform pi",
-  );
-  result = result.replace(
     /todo\(\{\s*action:\s*"create",\s*subject:\s*("[^"]*"),\s*activeForm:\s*"[^"]*"\s*\}\)/g,
     'todo({ action: "create", subject: $1 })',
   );
@@ -574,24 +547,11 @@ maestro run start "<short goal>" --cmd <step> --platform pi --workflow-root . [-
     /(9\. simple chain 只通过 `maestro run start --chain \.\.\. --no-dispatch` 创建；不得为同一任务的每个 skill 新建独立 Session。\n10\. 中途新增下一步用 `maestro run edit <cmd\.\.\.>` 修改未来 chain，不调用新的 `run start` 制造第二个 Topic Session。\n)\1/g,
     '$1',
   );
-  result = result.replaceAll(
-    '// maestro run create return value when self-starting. See run-mode.md.',
-    '// maestro run start return value when self-starting. See run-mode.md.',
-  );
-  result = result.replaceAll(
-    "coordinatorMd.includes('maestro run create')",
-    "coordinatorMd.includes('maestro run start')",
-  );
-  result = result.replaceAll(
-    'Run Lifecycle Integration (maestro run create)',
-    'Run Lifecycle Integration (maestro run start)',
-  );
 
   const shouldUseDoneAlias =
     path.includes('/skills/team-') &&
     (path.endsWith('/SKILL.md') || path.includes('/roles/coordinator/commands/monitor.md') || path.includes('/roles/coordinator/commands/converge.md') || path.includes('/roles/coordinator/role.md'));
   if (shouldUseDoneAlias) {
-    result = result.replaceAll('maestro run complete <run_id>', 'maestro run done <run_id>');
   }
 
   for (const block of [
@@ -615,14 +575,8 @@ maestro run start "<short goal>" --cmd <step> --platform pi --workflow-root . [-
     /`maestro run prepare (?:--platform pi )?[^\s`]+(?: --session [^\s`]+)?` \+ `(maestro run start [^`]*)`/g,
     '`$1`',
   );
-  // `run prepare` has no Pi CLI equivalent. The installed prepare asset is the
-  // read-only protocol source used before a Run exists.
-  result = result.replace(
-    /maestro run prepare (?:--platform pi )?([^\s`]+)(?: --session [^\s`]+)?(?: --json)?/g,
-    'read ~/.maestro/prepare/$1.md',
-  );
-  // Remaining generic prose references use the unified human entry command.
-  result = result.replace(/\bmaestro run create\b/g, 'maestro run start');
+  // v3 embeds prepare guidance in the birth packet (guidance-snapshot/1.0);
+  // there is no standalone run prepare command and no prepare asset to read.
 
   result = ensureMaestroDryRunContract(result, filePath);
   return bindPiPlatformToLifecycleCalls(result);

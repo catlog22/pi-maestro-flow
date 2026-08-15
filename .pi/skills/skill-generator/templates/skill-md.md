@@ -73,7 +73,7 @@ session-mode: {{session_mode}}
 
 \`\`\`javascript
 // run_dir comes from the birth packet (orchestrator-injected) or the
-// maestro run start --platform pi return value when self-starting. See run-mode.md.
+// maestro run create return value when self-starting. See run-mode.md.
 const workDir = \`${runStart.run_dir}/outputs\`;
 {{additional_dirs}}
 \`\`\`

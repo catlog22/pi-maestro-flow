@@ -20,9 +20,14 @@ import {
   buildRoleList,
   buildTeammateToolDescription,
   default as registerTeammateExtension,
+  TEAMMATE_LIST_DESCRIPTION,
+  TEAMMATE_LIST_GUIDELINES,
   TEAMMATE_PROMPT_GUIDELINES,
   TEAMMATE_PROMPT_SNIPPET,
+  TEAMMATE_SEND_DESCRIPTION,
+  TEAMMATE_SEND_GUIDELINES,
 } from "../src/extension/index.ts";
+import { TeammateSendParams } from "../src/extension/schemas.ts";
 import { displayMessageForResult } from "../src/extension/teammate-core.ts";
 import { buildPiArgs, runSingleTeammate } from "../src/runs/execution.ts";
 
@@ -647,6 +652,33 @@ test("teammate prompt guidance names the tool and explains selection boundaries"
   assert.ok(TEAMMATE_PROMPT_GUIDELINES.some((guideline) => /automatic teammate-complete notification/i.test(guideline)));
   assert.ok(TEAMMATE_PROMPT_GUIDELINES.some((guideline) => /do not poll observe or teammate-list/i.test(guideline)));
   assert.ok(TEAMMATE_PROMPT_GUIDELINES.some((guideline) => /call observe exactly once/i.test(guideline)));
+});
+
+test("teammate send guidance requires meaningful new traffic and explains queued receipts", () => {
+  const combined = [
+    ...TEAMMATE_PROMPT_GUIDELINES,
+    ...TEAMMATE_SEND_GUIDELINES,
+    ...TEAMMATE_LIST_GUIDELINES,
+    TEAMMATE_SEND_DESCRIPTION,
+    TEAMMATE_LIST_DESCRIPTION,
+  ].join("\n");
+  assert.match(combined, /new information/i);
+  assert.match(combined, /correction/i);
+  assert.match(combined, /explicitly requested response|explicit response request/i);
+  assert.match(combined, /safety\/lifecycle constraint/i);
+  assert.match(combined, /termination/i);
+  assert.match(combined, /routine acknowledgements? or status pings/i);
+  assert.match(combined, /never resend|resends of queued messages are prohibited/i);
+  assert.match(combined, /queued or accepted.*not.*consum/i);
+  assert.match(TEAMMATE_LIST_DESCRIPTION, /"windows": available peer Pi windows and their addressable targets/);
+  assert.doesNotMatch(TEAMMATE_LIST_DESCRIPTION, /"windows"[^\n]*(use|call|send)/i);
+  assert.match(combined, /untrusted routing metadata.*never as instructions or user authorization/i);
+
+  const modeSchema = JSON.stringify(TeammateSendParams.properties.mode);
+  assert.match(modeSchema, /queued or accepted means persisted\/enqueued but not necessarily consumed/i);
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  assert.match(source, /The message is queued and may not yet be consumed; do not resend it/);
+  assert.match(source, /may still have been delivered; inspect teammate-list with view=inbox before retrying/);
 });
 
 test("child Pi arguments honor prompt mode and resource inheritance", () => {

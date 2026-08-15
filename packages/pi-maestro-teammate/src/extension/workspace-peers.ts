@@ -21,6 +21,7 @@ export const WORKSPACE_MAIN_SESSION_MARKER = "window-main-session" as const;
 export const DEFAULT_PEER_STALE_MS = 20_000;
 export const DEFAULT_PEER_HEARTBEAT_MS = 5_000;
 export const DEFAULT_PEER_PUBLISH_THROTTLE_MS = 200;
+export const DEFAULT_PEER_MAILBOX_CLEANUP_INTERVAL_MS = 10 * 60_000;
 export const DEFAULT_COMMAND_TIMEOUT_MS = 5_000;
 export const MAX_OWNER_AGENTS = 256;
 export const MAX_OWNER_SETTLED = 256;
@@ -29,6 +30,7 @@ export const MAX_OWNER_FILE_BYTES = 256 * 1024;
 export const MAX_COMMAND_FILE_BYTES = 96 * 1024;
 export const MAX_RESPONSE_FILE_BYTES = 32 * 1024;
 export const MAX_COMMAND_MESSAGE_BYTES = 64 * 1024;
+export const MAX_WINDOW_LISTING_ACTIVE_AGENTS = 8;
 
 export const MONITOR_LEASE_STALE_MS = 60_000;
 
@@ -150,10 +152,85 @@ export interface WorkspacePeerWindowListing {
   ownerId: string;
   sessionId?: string;
   sessionName?: string;
+  displayName?: string;
   status: "running" | "sleeping";
   agentCount: number;
+  activeAgents?: Array<{
+    role: string;
+    name?: string;
+    status: WorkspaceAgentStatus;
+    objective?: string;
+    summary?: string;
+  }>;
   publishedAt: number;
   contextPressure?: number;
+}
+
+const MAX_WINDOW_LISTING_LABEL_CHARS = 64;
+const MAX_WINDOW_LISTING_CONTEXT_CHARS = 160;
+
+function boundedListingText(value: string, maximum: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > maximum ? `${normalized.slice(0, maximum - 3)}...` : normalized;
+}
+
+export function workspacePeerDisplayName(sessionName: string | undefined, ownerId: string): string {
+  const managed = sessionName?.match(/^mw-[a-f0-9]{32}-(.+)$/);
+  const label = managed?.[1] || sessionName || `window:${ownerId.slice(0, 8)}`;
+  return boundedListingText(label, MAX_WINDOW_LISTING_LABEL_CHARS);
+}
+
+export function projectWorkspacePeerWindow(owner: WorkspaceOwnerSnapshot): WorkspacePeerWindowListing {
+  return {
+    target: `owner:${owner.ownerId}`,
+    ownerId: owner.ownerId,
+    ...(owner.sessionId ? { sessionId: owner.sessionId } : {}),
+    ...(owner.sessionName ? { sessionName: owner.sessionName } : {}),
+    displayName: workspacePeerDisplayName(owner.sessionName, owner.ownerId),
+    status: owner.agents.some((agent) => agent.status === "running") || (owner.backgroundJobs?.length ?? 0) > 0
+      ? "running"
+      : "sleeping",
+    agentCount: owner.agents.length,
+    activeAgents: owner.agents.slice(0, MAX_WINDOW_LISTING_ACTIVE_AGENTS).map((agent) => ({
+      role: boundedListingText(agent.agent, MAX_WINDOW_LISTING_LABEL_CHARS),
+      ...(agent.name ? { name: boundedListingText(agent.name, MAX_WINDOW_LISTING_LABEL_CHARS) } : {}),
+      status: agent.status,
+      ...(agent.objective ? { objective: boundedListingText(agent.objective, MAX_WINDOW_LISTING_CONTEXT_CHARS) } : {}),
+      ...(agent.summary ? { summary: boundedListingText(agent.summary, MAX_WINDOW_LISTING_CONTEXT_CHARS) } : {}),
+    })),
+    publishedAt: owner.publishedAt,
+    ...(owner.contextPressure === undefined ? {} : { contextPressure: owner.contextPressure }),
+  };
+}
+
+export function formatWorkspacePeerWindowListings(windows: readonly WorkspacePeerWindowListing[]): string {
+  if (windows.length === 0) return "No available peer sessions.";
+  return windows.map((window) => {
+    const activeAgents = (window.activeAgents ?? []).slice(0, MAX_WINDOW_LISTING_ACTIVE_AGENTS);
+    const labels = activeAgents.map((agent) => {
+      const role = boundedListingText(agent.role, MAX_WINDOW_LISTING_LABEL_CHARS);
+      const name = agent.name ? boundedListingText(agent.name, MAX_WINDOW_LISTING_LABEL_CHARS) : undefined;
+      return name
+        ? `name=${JSON.stringify(name)} role=${JSON.stringify(role)} status=${agent.status}`
+        : `role=${JSON.stringify(role)} status=${agent.status}`;
+    });
+    const contextAgent = activeAgents.find((agent) => agent.objective || agent.summary);
+    const context = contextAgent
+      ? [
+          contextAgent.objective
+            ? `objective=${JSON.stringify(boundedListingText(contextAgent.objective, MAX_WINDOW_LISTING_CONTEXT_CHARS))}`
+            : undefined,
+          contextAgent.summary
+            ? `summary=${JSON.stringify(boundedListingText(contextAgent.summary, MAX_WINDOW_LISTING_CONTEXT_CHARS))}`
+            : undefined,
+        ].filter(Boolean).join(" · ")
+      : "";
+    const displayName = window.displayName
+      ? boundedListingText(window.displayName, MAX_WINDOW_LISTING_LABEL_CHARS)
+      : workspacePeerDisplayName(window.sessionName, window.ownerId);
+    const target = boundedListingText(window.target, 192);
+    return `● [window] name=${JSON.stringify(displayName)} · ${window.status} · agents=${window.agentCount}${labels.length > 0 ? ` [${labels.join(", ")}]` : ""}${context ? ` · ${context}` : ""} · target=${target}`;
+  }).join("\n");
 }
 
 /** Peer discovery result retained for existing callers and ledger reconciliation. */
@@ -245,7 +322,10 @@ export interface WorkspacePeerRuntimeOptions {
   ownerNonce?: string;
   heartbeatMs?: number;
   publishThrottleMs?: number;
+  mailboxCleanupIntervalMs?: number;
   now?: () => number;
+  /** @internal Test hook for deterministic cleanup failure coverage. */
+  cleanupMailboxes?: typeof cleanupWorkspacePeerMailboxes;
   getState: () => WorkspaceOwnerState;
 }
 
@@ -885,6 +965,8 @@ export async function publishWorkspaceOwner(
 
 async function listJsonFiles(path: string): Promise<string[]> {
   try {
+    const metadata = await lstat(path);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) return [];
     const entries = await readdir(path, { withFileTypes: true });
     return entries
       .filter((entry) => entry.isFile() && !entry.isSymbolicLink() && OWNER_ID_PATTERN.test(entry.name.slice(0, -5)) && entry.name.endsWith(".json"))
@@ -1021,12 +1103,15 @@ export class WorkspacePeerPublisher {
   readonly identity: WorkspacePeerIdentity;
   readonly heartbeatMs: number;
   readonly publishThrottleMs: number;
+  readonly mailboxCleanupIntervalMs: number;
   readonly #getState: () => WorkspaceOwnerState;
   readonly #now: () => number;
+  readonly #cleanupMailboxes: typeof cleanupWorkspacePeerMailboxes;
   #heartbeat: ReturnType<typeof setInterval> | undefined;
   #scheduled: ReturnType<typeof setTimeout> | undefined;
   #publishing: Promise<void> = Promise.resolve();
   #lastPublishedAt = 0;
+  #lastMailboxCleanupAt: number | undefined;
   #dirty = true;
   #stopped = true;
 
@@ -1034,11 +1119,15 @@ export class WorkspacePeerPublisher {
     this.identity = createWorkspacePeerIdentity(options.cwd, options);
     this.heartbeatMs = options.heartbeatMs ?? DEFAULT_PEER_HEARTBEAT_MS;
     this.publishThrottleMs = options.publishThrottleMs ?? DEFAULT_PEER_PUBLISH_THROTTLE_MS;
-    if (!boundedInteger(this.heartbeatMs, 1) || !boundedInteger(this.publishThrottleMs, 0)) {
-      throw new Error("heartbeatMs and publishThrottleMs must be bounded non-negative integers");
+    this.mailboxCleanupIntervalMs = options.mailboxCleanupIntervalMs ?? DEFAULT_PEER_MAILBOX_CLEANUP_INTERVAL_MS;
+    if (!boundedInteger(this.heartbeatMs, 1)
+      || !boundedInteger(this.publishThrottleMs, 0)
+      || !boundedInteger(this.mailboxCleanupIntervalMs, 0)) {
+      throw new Error("heartbeatMs, publishThrottleMs, and mailboxCleanupIntervalMs must be bounded non-negative integers");
     }
     this.#getState = options.getState;
     this.#now = options.now ?? Date.now;
+    this.#cleanupMailboxes = options.cleanupMailboxes ?? cleanupWorkspacePeerMailboxes;
   }
 
   async start(): Promise<void> {
@@ -1063,6 +1152,16 @@ export class WorkspacePeerPublisher {
     this.#publishing = this.#publishing.catch(() => undefined).then(async () => {
       await publishWorkspaceOwner(this.identity, this.#getState(), publishedAt);
       this.#lastPublishedAt = publishedAt;
+      if (this.#lastMailboxCleanupAt === undefined
+        || publishedAt < this.#lastMailboxCleanupAt
+        || publishedAt - this.#lastMailboxCleanupAt >= this.mailboxCleanupIntervalMs) {
+        this.#lastMailboxCleanupAt = publishedAt;
+        try {
+          await this.#cleanupMailboxes(this.identity, { now: publishedAt });
+        } catch (error) {
+          console.error("[pi-maestro-teammate] workspace peer mailbox cleanup failed:", error);
+        }
+      }
     });
     await this.#publishing;
     if (this.#dirty && !this.#stopped) this.#schedule(false);
@@ -1495,12 +1594,20 @@ export async function cleanupWorkspacePeerMailboxes(
   for (const [directory, maximumBytes] of mailboxes) {
     for (const file of await listJsonFiles(directory)) {
       const path = containedPath(directory, file);
+      const before = await lstat(path).catch(() => undefined);
+      if (!before?.isFile() || before.isSymbolicLink()) continue;
       const raw = await readBoundedJson(path, maximumBytes);
       const expiresAt = isRecord(raw) && boundedInteger(raw.expiresAt) ? raw.expiresAt : undefined;
-      if (expiresAt !== undefined && expiresAt < now) {
-        await rm(path, { force: true });
-        removed += 1;
-      }
+      if (expiresAt === undefined || expiresAt >= now) continue;
+      const current = await lstat(path).catch(() => undefined);
+      if (!current?.isFile()
+        || current.isSymbolicLink()
+        || current.dev !== before.dev
+        || current.ino !== before.ino
+        || current.size !== before.size
+        || current.mtimeMs !== before.mtimeMs) continue;
+      await rm(path, { force: true });
+      removed += 1;
     }
   }
   return removed;

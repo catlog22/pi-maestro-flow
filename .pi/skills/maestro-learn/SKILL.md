@@ -524,7 +524,7 @@ Arguments — target and optional mode flag.
 
 `-y` in consult mode: skips the final write confirmation only. The interactive Q&A loop is NOT affected by `-y` (it is the core interaction, not a confirmation). Use `--mode review` for non-interactive alternative.
 
-**Pre-load** (optional): recommend `maestro run skill --platform pi specs-load` for conventions + `maestro search "<target topic>"` for related entries.
+**Pre-load** (optional): recommend `maestro load --type spec` for conventions + `maestro search "<target topic>"` for related entries.
 
 **Output**: `.workflow/knowhow/KNW-opinion-{slug}-{YYYY-MM-DD}.md`
 

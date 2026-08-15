@@ -14,7 +14,9 @@ Scopes: `project` (default) · `global` · `team` · `personal`
 </purpose>
 
 <dispatch>
-Run `maestro run skill --platform pi specs-add` with the full `$ARGUMENTS` passed through as the user's intent (the `add` keyword is implied). The step infers category + scope + content and appends the entry.
+Execute the `specs-add` step inside a v3 Session: open one with `maestro session open "<objective>" --id <slug> --chain specs-add --participant {p} --actor {a} --request-id {r} --reason "<reason>" --json` and dispatch with fenced `maestro run next --session {session_id} ... --expected-orchestration-revision {rev} --json` (or self-start with `maestro run create specs-add [args...] --session {session_id} ... --json`), passing the full `$ARGUMENTS` as the step input (repeatable `--arg` / positional passthrough per the command contract; the `add` keyword is implied). Read context read-only with `maestro session status` / `maestro session resume-view`; `maestro run complete {run_id} ... --advance` publishes outputs and auto-stages knowledge candidates. (v2's `run skill` dispatcher is removed from the v3 surface.)
+
+The step infers category + scope + content and appends the entry.
 
 - Explicit positional form `<category> <content>` and `--scope`/`--uid` flags still work and override inference.
 - Otherwise the step infers the category from the intent (e.g. "禁止用 any/命名规范" → coding, "服务间/依赖方向" → arch, "覆盖率/质量标准" → quality, "测试约定" → test).
