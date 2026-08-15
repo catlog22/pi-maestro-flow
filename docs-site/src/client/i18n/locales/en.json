@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow Logo"
   },
   "announcement": {
-    "title": "v0.21.4 is out — canonical v3 convergence synced to maestro-flow 0.5.73. Upgrade:",
-    "install": "pi install npm:pi-maestro-flow@0.21.4",
+    "title": "v0.21.5 is out — v3 hardening synced to maestro-flow 0.5.74 (migration deadlock removed, knowledge stage on session/3.0, fully v3 skills). Upgrade:",
+    "install": "pi install npm:pi-maestro-flow@0.21.5",
     "close": "Dismiss"
   },
   "accessibility": {

@@ -5,7 +5,14 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.21.4（2026-08-15）。** Flow 0.21.4 同步引擎 `maestro-flow@0.5.73`（canonical v3 收敛：默认 session/3.0 writer、birth/brief Resume Packet、v3 文档/门禁/镜像）；搭配 Teammate 1.13.0、Cockpit 0.16.0 与 Settings-Core 0.1.3。
+> **当前稳定版本：v0.21.5（2026-08-15）。** Flow 0.21.5 同步引擎 `maestro-flow@0.5.74`（v3 加固：迁移死锁消除、knowledge stage 支持 session/3.0、目标感知 CAS、skill/agent 源全面 v3）；搭配 Teammate 1.13.0、Cockpit 0.16.0 与 Settings-Core 0.1.3。
+
+## v0.21.5（2026-08-15）
+
+- 引擎 pin 升级：`maestro-flow` 0.5.73 → **0.5.74**。0.5.74 为 v3 加固版本：`session migrate --to-v3` 接受 running Run（投影 run/3.0 running + active run 绑定）与 orphaned running/failed step（投影 pending），迁移不再死锁；`knowledge stage` 对 session/3.0 可用（sidecar v3 分支 + artifact 证据经 registry 解析）；`requireV3Session` CAS fence 从显式 `--session` 目标派生（stale state.json active 不再干扰）；`session unarchive` 成为 v3 orchestration target；publishPlanV3 重放幂等（open/insert already-exists 视为成功）。
+- Pi skills 转换管线 v3 化：`sync-pi.mjs --also-pi` 重新生成 `.pi/skills`（194 文件）与 `.pi/agents`（35 文件）——convert-pi 移除全部活 v2 重写规则（run brief/next/complete 不再注入 `--platform pi`；`run create` 作为合法 v3 self-start 保留；run prepare/session create/start/done/run start/done/edit/skill 改写与 prepare 资产合成删除）；run-executor 角色与 skill-iter-tune/maestro-help 源 v2 残留清零；Pi-native `self-evolve` 改用 `run complete --advance` / `session complete`。
+- 转换契约测试与 prompt 审计同步 v3 语义（convert-pi 33 用例 + skill-contract-lint 全绿）；teammate 包 window-inbox/listing 重构随附。
+- 安装：`pi install npm:pi-maestro-flow@0.21.5`。
 
 ## v0.21.4（2026-08-15）
 

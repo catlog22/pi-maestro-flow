@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow 标志"
   },
   "announcement": {
-    "title": "v0.21.4 已发布 — 同步引擎 maestro-flow 0.5.73（canonical v3 收敛）。升级：",
-    "install": "pi install npm:pi-maestro-flow@0.21.4",
+    "title": "v0.21.5 已发布 — 同步引擎 maestro-flow 0.5.74（v3 加固：迁移死锁消除、knowledge stage 支持 session/3.0、skills 全面 v3）。升级：",
+    "install": "pi install npm:pi-maestro-flow@0.21.5",
     "close": "关闭提示"
   },
   "accessibility": {

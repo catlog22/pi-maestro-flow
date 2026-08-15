@@ -5,7 +5,14 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current stable release: v0.21.4 (2026-08-15).** Flow 0.21.4 syncs the engine to `maestro-flow@0.5.73` (canonical v3 convergence: default session/3.0 writer, birth/Resume Packet, v3 prompts/gates/mirrors); bundles Teammate 1.13.0, Cockpit 0.16.0, and Settings-Core 0.1.3.
+> **Current stable release: v0.21.5 (2026-08-15).** Flow 0.21.5 syncs the engine to `maestro-flow@0.5.74` (v3 hardening: migration deadlock removed, knowledge stage on session/3.0, target-aware CAS, fully v3 skill/agent sources); bundles Teammate 1.13.0, Cockpit 0.16.0, and Settings-Core 0.1.3.
+
+## v0.21.5 (2026-08-15)
+
+- Engine pin: `maestro-flow` 0.5.73 → **0.5.74**. 0.5.74 hardens v3: `session migrate --to-v3` accepts running Runs (projected run/3.0 running with the active run bound) and orphaned running/failed steps (projected pending) — migration can no longer deadlock; `knowledge stage` works on session/3.0 (sidecar v3 branch + artifact evidence via the registry); `requireV3Session` derives the CAS fence from the explicit `--session` target; `session unarchive` is a v3 orchestration target; publishPlanV3 replays are idempotent (already-exists is success).
+- Pi skills conversion pipeline v3-ified: `sync-pi.mjs --also-pi` regenerated `.pi/skills` (194 files) and `.pi/agents` (35 files) — convert-pi drops all live v2 rewrite rules (no `--platform pi` on run brief/next/complete; `run create` stays as the legal v3 self-start; run prepare/session create/start/done/run start/done/edit/skill rewrites and prepare-asset synthesis removed); v2 residue zeroed in the run-executor agent and skill-iter-tune/maestro-help sources; Pi-native `self-evolve` uses `run complete --advance` / `session complete`.
+- Conversion contract tests and prompt audit updated to v3 semantics (convert-pi 33 cases + skill-contract-lint all green); teammate window-inbox/listing refactor included.
+- Install: `pi install npm:pi-maestro-flow@0.21.5`.
 
 ## v0.21.4 (2026-08-15)
 
