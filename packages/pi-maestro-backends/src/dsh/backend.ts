@@ -8,6 +8,15 @@
  * the endpoint, credential reference, and model catalogue live in the runtime's
  * own `cordis.yml`. Fields here therefore describe the launch and the route,
  * and point at the config file for the rest instead of pretending to own it.
+ *
+ * Agent presets — the runtime's named compositions, each supplying its own tool
+ * set and persona — are deliberately absent from this table. The SDK server
+ * states that it performs no preset composition and reads model-facing rows
+ * from the global layer, so a preset cannot be selected per session over this
+ * transport. A deployment that wants several presets registers this backend
+ * several times, once per composition, and a task picks one by naming that
+ * registration. Modelling a preset field here would advertise a selector the
+ * transport cannot honour.
  */
 
 import type {
