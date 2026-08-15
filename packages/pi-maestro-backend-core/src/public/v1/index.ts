@@ -41,4 +41,5 @@ export type {
   DegradableCapability,
   RequiredCapabilities,
   ResolvedBackend,
+  TeammateExecutionMode,
 } from "./registry.ts";

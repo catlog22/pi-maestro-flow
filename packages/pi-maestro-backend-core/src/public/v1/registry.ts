@@ -11,6 +11,21 @@
 import type { BackendCapabilities, CapabilityName, TeammateBackend } from "./backend.ts";
 import type { TeammateRunSpec } from "./spec.ts";
 
+/**
+ * Which dispatch path teammate takes.
+ *
+ * `legacy` — the historical path, unchanged and unaware of backends. It stays
+ * the default so installing the registry cannot alter behaviour on its own;
+ * opting in is an explicit act, and reverting is a settings change rather than
+ * a downgrade.
+ *
+ * `backend-registry` — dispatch resolves a backend per task through
+ * {@link BackendRegistry}. The Pi subprocess is registered as an ordinary
+ * backend here, not as a bypass, so the seam is exercised by the default
+ * deployment instead of only by third parties.
+ */
+export type TeammateExecutionMode = "legacy" | "backend-registry";
+
 /** One entry of the backend registration document. */
 export interface BackendRegistration {
   /** Module specifier resolved by the loader. */
