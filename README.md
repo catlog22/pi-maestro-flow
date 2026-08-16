@@ -78,7 +78,7 @@ pi-maestro-flow 是 **Pi 插件**，用 `pi install` 安装（不是普通 npm �
 
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # 宿主运行时
-pi install npm:pi-maestro-flow@0.21.2                              # 安装或升级插件
+pi install npm:pi-maestro-flow@0.21.6                              # 安装或升级插件
 pi list                                                            # 确认 Flow、Teammate 与 Cockpit 均已列出
 ```
 
