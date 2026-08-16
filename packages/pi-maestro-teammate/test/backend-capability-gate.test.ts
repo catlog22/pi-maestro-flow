@@ -3,10 +3,11 @@ import test from "node:test";
 import type { BackendCapabilities, TeammateBackend } from "pi-maestro-backend-core/v1/backend";
 import type { BackendRegistry } from "pi-maestro-backend-core/v1/registry";
 import type { SingleResult } from "pi-maestro-backend-core/v1/spec";
-import { runSingleTeammate } from "../src/runs/execution.ts";
+import type { NormalizedTask } from "../src/runs/execution-infra.ts";
+import { runGraph, runSingleTeammate } from "../src/runs/execution.ts";
 
 /**
- * Capability adjudication on the single-dispatch path.
+ * Capability adjudication on the single-dispatch and graph paths.
  *
  * `runGraph` has always rejected a task whose backend cannot serve a required
  * capability, but five production call sites dispatch a single teammate
@@ -17,6 +18,11 @@ import { runSingleTeammate } from "../src/runs/execution.ts";
  * The gate must fire on the requirement, not on the backend, so the cases
  * below drive both directions — a backend that cannot serve is rejected, and
  * the same backend serving a task that asks for nothing is not.
+ *
+ * The graph cases drive the same gate through a registry, because the graph
+ * reads its capability table from `registry.resolve` rather than from a
+ * backend handed to it: a graph adjudicated against the wrong table, or one
+ * that never consulted the registry at all, would gate on stale capabilities.
  */
 
 const ALL_NATIVE: BackendCapabilities = {
@@ -80,6 +86,23 @@ function registryOf(backend: TeammateBackend): BackendRegistry {
   };
 }
 
+/** What one task looked like when the graph asked the registry to resolve it. */
+interface ResolveRequest {
+  task: string;
+  selector: string | undefined;
+}
+
+/** `registryOf`, plus a record of every resolve request it served. */
+function recordingRegistryOf(backend: TeammateBackend, requests: ResolveRequest[]): BackendRegistry {
+  return {
+    ...registryOf(backend),
+    resolve: async (spec, requestedBackend) => {
+      requests.push({ task: spec.task, selector: requestedBackend });
+      return { backend, config: {}, capabilities: backend.capabilities({}) };
+    },
+  };
+}
+
 /** Dispatch one task and report what the backend saw. */
 async function dispatch(
   todoBinding: BackendCapabilities["todoBinding"],
@@ -120,4 +143,70 @@ test("a single dispatch asking for no todos runs on a backend that cannot bind t
   // gate keyed on the capability table alone would ground every task here.
   assert.equal(result.exitCode, 0);
   assert.deepEqual(started, ["work the queue"], "a task requiring nothing was gated");
+});
+
+const queueTask: NormalizedTask = {
+  agent: "general",
+  name: "queue-worker",
+  prompt: "work the queue",
+  todos: ["#12"],
+};
+
+test("a graph task needing todos is rejected by the registry table of its backend", async () => {
+  const started: string[] = [];
+  const requests: ResolveRequest[] = [];
+  const results = await runGraph([queueTask], 1, {
+    baseCwd: process.cwd(),
+    backendRegistry: recordingRegistryOf(probeBackend("unsupported", started), requests),
+  });
+
+  assert.equal(results[0].exitCode, 1);
+  assert.equal(results[0].terminalStatus, "failed");
+  assert.match(results[0].messages[0]?.content ?? "", /todoBinding/);
+  assert.match(results[0].messages[0]?.content ?? "", /capability-probe/);
+  assert.deepEqual(started, [], "the backend was started despite serving no queue binding");
+  // Adjudication must carry the task's own prompt and selector into the
+  // registry: resolving an empty task, or always resolving the default, would
+  // read a table that dispatch never uses.
+  assert.deepEqual(requests, [{ task: "work the queue", selector: undefined }]);
+});
+
+test("a graph task needing todos runs on a registry backend that binds them", async () => {
+  const started: string[] = [];
+  const requests: ResolveRequest[] = [];
+  const results = await runGraph([queueTask], 1, {
+    baseCwd: process.cwd(),
+    backendRegistry: recordingRegistryOf(probeBackend("native", started), requests),
+  });
+
+  assert.equal(results[0].exitCode, 0);
+  assert.deepEqual(started, ["work the queue"], "a capable backend was gated anyway");
+  assert.deepEqual(requests[0], { task: "work the queue", selector: undefined });
+});
+
+test("a graph whose backend cannot be resolved settles every task instead of throwing", async () => {
+  const started: string[] = [];
+  const failing: BackendRegistry = {
+    ...registryOf(probeBackend("native", started)),
+    resolve: async () => {
+      throw new Error("registration \"ghost\" names no loadable module");
+    },
+  };
+  const tasks: NormalizedTask[] = [
+    { agent: "general", name: "first", prompt: "one" },
+    { agent: "general", name: "second", prompt: "two" },
+  ];
+
+  const results = await runGraph(tasks, 1, { baseCwd: process.cwd(), backendRegistry: failing });
+
+  // A registry that cannot answer is a graph-level rejection: every task
+  // settles as failed, so no row is left pending in the caller or the UI.
+  assert.equal(results.length, 2);
+  for (const result of results) {
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.terminalStatus, "failed");
+    assert.match(result.messages[0]?.content ?? "", /Teammate backend could not be resolved for this graph/);
+    assert.match(result.messages[0]?.content ?? "", /names no loadable module/);
+  }
+  assert.deepEqual(started, []);
 });
