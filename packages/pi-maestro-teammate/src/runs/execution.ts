@@ -43,7 +43,7 @@ import {
   sharedModelCircuitBreaker,
   type ModelCircuitBreaker,
 } from "../models/model-circuit-breaker.ts";
-import { getTeammateChildExtensions } from "./child-extensions.ts";
+import { getTeammateChildExtensions, getTeammateChildToolBroker } from "./child-extensions.ts";
 import {
   parseTeammateThinkingLevel,
   type TeammateThinkingInput,
@@ -288,14 +288,39 @@ function backendOptionsOf(
     }),
     ...(options.onChildEvent === undefined ? {} : { onChildEvent: options.onChildEvent }),
     ...(options.onTurnComplete === undefined ? {} : { onTurnComplete: options.onTurnComplete }),
-    // Empty on purpose, and a known gap rather than a design choice. Pi reaches
-    // permission and host-implemented tools through its own IPC relay and needs
-    // neither closure. A non-Pi backend has no route to them: the host relay is
-    // callback-shaped (onChildRequest(event, reply)) with no stated guarantee
-    // that reply is always called, so adapting it to a promise here would risk
-    // a hang. Until that relay exposes a settled contract, any backend needing
-    // host tools must declare todoBinding unsupported.
-    host: {},
+    // The broker registry is in-process and Promise-shaped: it lives on a
+    // globalThis symbol the child cannot see, and a backend is only ever
+    // dispatched from the root session, so this closure resolves against the
+    // same registry `dispatchRegisteredChildTool` already awaits directly. The
+    // callback-shaped relay this used to warn about is
+    // `onChildRequest(event, reply)`, a different mechanism that no backend
+    // reaches. An absent broker is a configuration failure, not a hang, so it
+    // is reported by name rather than waited on.
+    host: {
+      async proxyToolCall(request: {
+        toolName: string;
+        args: unknown;
+        correlationId: string;
+      }): Promise<unknown> {
+        const broker = getTeammateChildToolBroker(request.toolName);
+        if (broker === undefined) {
+          throw new Error(
+            `no host tool broker is registered for "${request.toolName}"; the backend `
+            + "declares a host-tool binding this root session cannot serve",
+          );
+        }
+        return broker({
+          toolName: request.toolName,
+          input: request.args as Record<string, unknown>,
+          // This attempt's own identity, taken from the parameters rather than
+          // from anything the call carried: together with the endpoint's
+          // per-run token binding, it is what makes a backend unable to act as
+          // a teammate other than itself.
+          actor: { correlationId, agent },
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+        });
+      },
+    },
     config,
   };
 }
