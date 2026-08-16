@@ -7,12 +7,27 @@
  * where the seam's remaining risk sits: a capability table can be verified by
  * reading, a transport cannot.
  *
+ * This file owns the wire-vocabulary assertions. The public name a bridged host
+ * tool reaches the model under is decided by the runtime's own mcp-client, so
+ * `mcp__` names are asserted here and nowhere else: a fake driver can prove the
+ * host-side mapping and never that the runtime publishes what the host expects.
+ * The precedent is `completedTools`, which once filtered `tool/end` while the
+ * runtime emitted `tool/result` — every unit test green, every real run
+ * counting zero.
+ *
  * Self-skips unless a runtime is configured, so the ordinary suite stays keyless
  * and offline. Point it at a deployment with:
  *
  *   DSH_E2E_CORDIS=~/.dsh/smoke/cordis.yml \
  *   DSH_E2E_COMMAND=~/.dsh/smoke/node_modules/.bin/dsh-jsonrpc-agent \
  *   node --experimental-transform-types --test test/dsh-runtime.e2e.test.ts
+ *
+ * The bridged cases need more. `DSH_E2E_CORDIS` must name a deployment whose
+ * cordis.yml carries the mcp-client entry from
+ * `docs/dsh-todo-bridge-deployment.md`, and the fail-loud case needs
+ * `DSH_E2E_CORDIS_NO_BRIDGE` pointing at a copy of that file with the entry
+ * removed. Without the second variable that case skips, and the half of the
+ * contract it covers goes unproven while the suite still reads green.
  *
  * The runtime resolves its own credential from its own configuration; this test
  * neither reads nor forwards a key, which is the property the credential
@@ -78,6 +93,56 @@ function options(overrides: Partial<BackendRunOptions> = {}): BackendRunOptions 
     config: CONFIG,
     ...overrides,
   };
+}
+
+/** The public name the runtime's mcp-client gives this endpoint's only tool. */
+const PUBLIC_TOOL_NAME = "mcp__maestro_todo__todo";
+
+/** The runtime config for a deployment that mounted the bridge. */
+const BRIDGED_CONFIG = { ...CONFIG, todoBridge: true };
+
+const noBridgeConfig = process.env.DSH_E2E_CORDIS_NO_BRIDGE === undefined
+  ? undefined
+  : expand(process.env.DSH_E2E_CORDIS_NO_BRIDGE);
+
+/** Why the fail-loud case is skipping, or undefined when it can run. */
+const skipNoBridge = ((): string | undefined => {
+  if (skip !== undefined) return skip;
+  if (noBridgeConfig === undefined) return "DSH_E2E_CORDIS_NO_BRIDGE is unset";
+  if (!existsSync(noBridgeConfig)) return `no bridge-less runtime config at ${noBridgeConfig}`;
+  return undefined;
+})();
+
+/**
+ * One `session.event` notification as the host observer receives it.
+ *
+ * The backend forwards the notification params verbatim, so the session-log
+ * event sits one level in, under `event`, beside the session it belongs to.
+ */
+interface ChildEvent {
+  sessionId?: string;
+  event?: { type?: string; data?: Record<string, unknown> };
+}
+
+/** How many events of one session-log type the runtime emitted. */
+function countOfType(events: readonly ChildEvent[], type: string): number {
+  return events.filter((entry) => entry.event?.type === type).length;
+}
+
+/**
+ * The names the model actually invoked.
+ *
+ * Read off `tool/call`, which is the only event carrying one: `tool/result`
+ * records the turn, step, and message, and no name at all. Comparing the name
+ * field rather than searching the serialized event matters — a failure event
+ * quoting the tool name in its error text would satisfy a substring search
+ * while proving the opposite of what is claimed here.
+ */
+function invokedToolNames(events: readonly ChildEvent[]): string[] {
+  return events
+    .filter((entry) => entry.event?.type === "tool/call")
+    .map((entry) => entry.event?.data?.name)
+    .filter((name): name is string => typeof name === "string");
 }
 
 /** The backend as a deployment gets it: real driver, real subprocess. */
@@ -191,4 +256,83 @@ test("aborting a live runtime settles as terminated and reaps the process", { sk
   assert.equal(outcome.result.wakeable, false);
   assert.equal(run.send("too late", "follow_up"), false);
   assert.deepEqual(await outcome.reclamation, { status: "reclaimed" });
+});
+
+test("a bridged turn calls the host todo tool under its public MCP name", { skip }, async () => {
+  const calls: { toolName: string; args: unknown; correlationId: string }[] = [];
+  const events: ChildEvent[] = [];
+  const run = await backend().start(
+    {
+      agent: "general",
+      // The bridged tool is asked for on a follow-up, not on the opening turn.
+      // The runtime accepts its first prompt before the mcp-client's tool
+      // generation is published: the endpoint serves `initialize` and
+      // `tools/list` on every run, and the model still reports no MCP tool for
+      // turn one, then finds it later in the same session. Asking on turn one
+      // would fail this on a runtime startup race rather than on anything the
+      // bridge does, and the deployment note records the hazard.
+      task: "Reply with exactly the word READY and nothing else.",
+      todos: ["probe-1"],
+    },
+    options({
+      config: BRIDGED_CONFIG,
+      host: {
+        proxyToolCall: async (request) => {
+          calls.push(request);
+          return { content: [{ type: "text", text: "[{\"id\":\"probe-1\",\"status\":\"pending\"}]" }] };
+        },
+      },
+      onChildEvent: (event) => { events.push(event); },
+    }),
+  );
+  assert.equal(
+    run.send(
+      "Now call the mcp__maestro_todo__todo tool with action \"list\" "
+      + "and reply with how many items it returned.",
+      "follow_up",
+    ),
+    true,
+    "the runtime would not accept the follow-up carrying the tool request",
+  );
+  const outcome = await run.outcome;
+
+  assert.equal(outcome.result.terminalStatus, "completed", outcome.result.messages.at(-1)?.content);
+  assert.ok(calls.length >= 1, "the runtime never reached the host broker");
+  assert.equal(calls[0]!.toolName, "todo");
+  // The whole point of running this for real: the host publishes the raw name
+  // `todo`, and only the runtime's mcp-client decides what the model sees.
+  assert.ok(
+    invokedToolNames(events).includes(PUBLIC_TOOL_NAME),
+    `the runtime invoked [${invokedToolNames(events).join(", ")}], none of them ${PUBLIC_TOOL_NAME}`,
+  );
+  assert.ok((outcome.result.toolCount ?? 0) >= 1, "a bridged tool call counted as no work at all");
+  assert.equal(outcome.recovery.completedToolCount, outcome.result.toolCount);
+  // The count the fence reads comes from `tool/result`; asserting the runtime
+  // emitted some keeps the count anchored to the runtime's own vocabulary
+  // rather than to whatever the backend happened to tally.
+  assert.ok(countOfType(events, "tool/result") >= 1, "the runtime reported no completed tool call");
+});
+
+test("a bridged run against a cordis.yml without the mcp-client entry fails loud", { skip: skipNoBridge }, async () => {
+  const outcome = await (await backend().start(
+    {
+      agent: "general",
+      task: "Reply with exactly the word SEAM and nothing else.",
+      todos: ["probe-1"],
+    },
+    options({
+      config: { ...BRIDGED_CONFIG, cordisConfig: noBridgeConfig ?? "" },
+      host: { proxyToolCall: async () => ({ content: [{ type: "text", text: "[]" }] }) },
+    }),
+  )).outcome;
+
+  // A deployment that never mounted the bridge is the case the runtime itself
+  // cannot report: the child simply has no such tool and works around it.
+  assert.equal(outcome.result.terminalStatus, "failed");
+  assert.ok(
+    outcome.result.warnings?.some((warning) => warning.includes(
+      "add an mcp-client entry with transport: streamable-http, serverName: maestro_todo",
+    )),
+    `no warning named the missing entry; warnings were: ${(outcome.result.warnings ?? []).join(" | ")}`,
+  );
 });

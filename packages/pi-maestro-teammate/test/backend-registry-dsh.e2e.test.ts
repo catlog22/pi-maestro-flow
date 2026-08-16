@@ -5,6 +5,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { runSingleTeammate, sendRpcMessage } from "../src/runs/execution.ts";
+import {
+  registerTeammateChildToolBroker,
+  type TeammateChildToolBrokerRequest,
+} from "../src/runs/child-extensions.ts";
 import { forgetBackendRegistryConfigSync } from "../src/backends/registry-host.ts";
 
 /**
@@ -50,7 +54,7 @@ const skip = cordisConfig === undefined
  * this exercises the loader and the module's default export — the two things
  * that made dsh unregisterable while every unit test passed.
  */
-function workspace(): string {
+function workspace(extraConfig: Record<string, unknown> = {}): string {
   const root = mkdtempSync(join(tmpdir(), "dsh-registry-e2e-"));
   mkdirSync(join(root, ".pi", "agents"), { recursive: true });
   writeFileSync(
@@ -71,6 +75,7 @@ function workspace(): string {
             cordisConfig,
             cwd: resolve(cordisConfig!, ".."),
             requestTimeoutMs: 120_000,
+            ...extraConfig,
           },
         },
       },
@@ -130,4 +135,51 @@ test("the host is handed a control channel it can address mid-run", { skip }, as
   // 42 is only derivable from the first turn's context, so this also proves the
   // follow-up continued the same session rather than starting a new one.
   assert.match(result.messages[1]?.content ?? "", /42/);
+});
+
+test("a real dsh run reaches the host todo broker through the product path", { skip }, async () => {
+  // Nothing is injected here, and that is the whole point: the backends-side
+  // e2e supplies its own `host.proxyToolCall` and therefore never walks
+  // `runSingleTeammate` → `backendOptionsOf` → `getTeammateChildToolBroker`.
+  // That closure is built by the host, and only this path builds it.
+  const root = workspace({ todoBridge: true });
+  const seen: TeammateChildToolBrokerRequest[] = [];
+  const release = registerTeammateChildToolBroker("todo", async (request) => {
+    seen.push(request);
+    return { content: [{ type: "text", text: JSON.stringify([{ id: "probe-1", status: "pending" }]) }] };
+  });
+  try {
+    const result = await runSingleTeammate(
+      {
+        agent: "prober",
+        // Asked for on a follow-up for the same reason as the backends-side
+        // case: the runtime accepts its opening prompt before the mcp-client's
+        // tools are published, so a turn-one request would fail this on a
+        // runtime startup race rather than on the host closure under test.
+        task: "Reply with exactly the word READY and nothing else.",
+        todos: ["probe-1"],
+      },
+      {
+        baseCwd: root,
+        runtimeGeneration: 1,
+        onChildSpawned: (stdin) => {
+          sendRpcMessage(
+            stdin,
+            "Now call the mcp__maestro_todo__todo tool with action \"list\" "
+            + "and reply with how many items it returned.",
+            "follow_up",
+          );
+        },
+      },
+    );
+
+    assert.equal(result.terminalStatus, "completed", result.messages.at(-1)?.content ?? "");
+    assert.ok(seen.length >= 1, "the runtime never reached the host broker through the product path");
+    assert.equal(seen[0]!.toolName, "todo");
+    // Identity, not merely arrival: the broker must see this attempt, because
+    // the host's edit check decides what a teammate may write from the actor.
+    assert.equal(seen[0]!.actor.correlationId, result.correlationId);
+  } finally {
+    release();
+  }
 });
