@@ -301,16 +301,26 @@ test("a bridged turn calls the host todo tool under its public MCP name", { skip
   assert.equal(calls[0]!.toolName, "todo");
   // The whole point of running this for real: the host publishes the raw name
   // `todo`, and only the runtime's mcp-client decides what the model sees.
+  const names = invokedToolNames(events);
   assert.ok(
-    invokedToolNames(events).includes(PUBLIC_TOOL_NAME),
-    `the runtime invoked [${invokedToolNames(events).join(", ")}], none of them ${PUBLIC_TOOL_NAME}`,
+    names.includes(PUBLIC_TOOL_NAME),
+    `the runtime invoked [${names.join(", ")}], none of them ${PUBLIC_TOOL_NAME}`,
   );
-  assert.ok((outcome.result.toolCount ?? 0) >= 1, "a bridged tool call counted as no work at all");
+  // Bind the count to that call rather than asserting it separately. The count
+  // comes from `tool/result`, which carries no tool name, so `toolCount >= 1`
+  // beside the name check above are two independent facts: a runtime that
+  // published no `tool/result` for MCP tools would still satisfy both as long
+  // as the model also ran one built-in tool, and this deployment ships `bash`
+  // and `todo_write`. Requiring every reported call to have completed leaves no
+  // unattributed slack — withhold the bridged call's result and the counts
+  // diverge.
+  assert.equal(
+    outcome.result.toolCount,
+    countOfType(events, "tool/call"),
+    `the runtime invoked [${names.join(", ")}] but counted ${outcome.result.toolCount} completed;`
+    + ` some call went uncounted, so ${PUBLIC_TOOL_NAME} need not be among the counted ones`,
+  );
   assert.equal(outcome.recovery.completedToolCount, outcome.result.toolCount);
-  // The count the fence reads comes from `tool/result`; asserting the runtime
-  // emitted some keeps the count anchored to the runtime's own vocabulary
-  // rather than to whatever the backend happened to tally.
-  assert.ok(countOfType(events, "tool/result") >= 1, "the runtime reported no completed tool call");
 });
 
 test("a bridged run against a cordis.yml without the mcp-client entry fails loud", { skip: skipNoBridge }, async () => {
