@@ -5,6 +5,11 @@ import { resolveBackendConfig } from "pi-maestro-backends";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createDshBackend, type DshDriverFactory, type DshHarnessDriver } from "pi-maestro-backends/dsh";
+import {
+  TODO_ENDPOINT_ENV,
+  TODO_PUBLIC_TOOL_NAME,
+  TODO_SERVER_NAME,
+} from "pi-maestro-backends/dsh/todo-endpoint";
 
 const CONFIG = {
   command: "dsh-jsonrpc-agent",
@@ -327,7 +332,7 @@ test("two concurrent bridged attempts each carry their own endpoint URL", async 
   await Promise.all(runs.map(async (run) => { await run.outcome; }));
 
   assert.equal(seen.length, 2);
-  const [first, second] = seen.map((extras) => extras?.PI_MAESTRO_TODO_MCP_URL);
+  const [first, second] = seen.map((extras) => extras?.[TODO_ENDPOINT_ENV]);
   assert.ok(first !== undefined && second !== undefined, "an attempt was told no endpoint");
   // The URL carries the token an attempt acts under, so sharing one would let
   // either attempt act as the other.
@@ -346,7 +351,7 @@ test("an unbridged run is given no endpoint at all", async () => {
   const seen: (NodeJS.ProcessEnv | undefined)[] = [];
   const backend = createDshBackend(envRecordingDriver(seen));
   await (await backend.start(SPEC, runOptions())).outcome;
-  assert.equal(seen[0]?.PI_MAESTRO_TODO_MCP_URL, undefined);
+  assert.equal(seen[0]?.[TODO_ENDPOINT_ENV], undefined);
 });
 
 test("the endpoint is closed on both settlement and abort", async () => {
@@ -358,7 +363,7 @@ test("the endpoint is closed on both settlement and abort", async () => {
   });
   const settledOutcome = await settledRun.outcome;
   await settledOutcome.reclamation;
-  assert.equal(await stillListening(settled[0]!.PI_MAESTRO_TODO_MCP_URL!), false);
+  assert.equal(await stillListening(settled[0]![TODO_ENDPOINT_ENV]!), false);
 
   const aborted: (NodeJS.ProcessEnv | undefined)[] = [];
   const abortedBackend = createDshBackend(envRecordingDriver(aborted));
@@ -368,7 +373,7 @@ test("the endpoint is closed on both settlement and abort", async () => {
   });
   abortedRun.abort();
   await (await abortedRun.outcome).reclamation;
-  assert.equal(await stillListening(aborted[0]!.PI_MAESTRO_TODO_MCP_URL!), false);
+  assert.equal(await stillListening(aborted[0]![TODO_ENDPOINT_ENV]!), false);
 });
 
 /** A bridged registration naming a cordis.yml the diagnostic must quote back. */
@@ -402,7 +407,7 @@ test("a bridged run whose runtime did connect is not failed by the bridge assert
   // and the assertion is evaluated as soon as the first turn settles — so the
   // handshake has to happen inside the turn, not after `start()` resolves.
   const backend = createDshBackend(async (_config, options) => {
-    const url = options.envExtras?.PI_MAESTRO_TODO_MCP_URL;
+    const url = options.envExtras?.[TODO_ENDPOINT_ENV];
     assert.ok(url !== undefined, "a bridged run was given no endpoint");
     const driver = fakeDriver();
     return {
@@ -438,4 +443,83 @@ test("an unbridged registration with todos is left to graph validation, not fail
   const backend = createDshBackend(async () => fakeDriver());
   const outcome = await (await backend.start(WITH_TODOS, runOptions())).outcome;
   assert.equal(outcome.result.terminalStatus, "completed");
+});
+
+/**
+ * dsh's own scrub of the environment it hands a child process.
+ *
+ * Copied from `packages/subprocess/subprocess/src/index.ts` in deepseek-harness
+ * (`SENSITIVE_ENV_PATTERN`), which is what every harness spawner filters a
+ * child's environment through. This host cannot import it, so the pattern is
+ * restated and the assertion below is what keeps the two in step: a variable
+ * name that stops matching stops being scrubbed, silently.
+ */
+const DSH_SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN/i;
+
+test("the endpoint variable is named so the runtime's own scrub keeps it from grandchildren", () => {
+  // The URL embeds this run's bearer token, and the runtime spawns model-driven
+  // `bash` calls. Anything the scrub does not match is inherited by every one
+  // of them, so a single `env` would put this teammate's credential in a
+  // transcript and let whoever reads it act as this teammate.
+  assert.match(TODO_ENDPOINT_ENV, DSH_SENSITIVE_ENV_PATTERN);
+});
+
+test("a bridged run carrying todos is told what its queue is and which tool reaches it", async () => {
+  const driver = fakeDriver();
+  const backend = createDshBackend(async () => driver);
+  await (await backend.start(WITH_TODOS, {
+    ...runOptions(BRIDGED_PROBE),
+    host: bridgedHost(),
+  })).outcome;
+
+  const prompt = driver.prompts[0] ?? "";
+  assert.ok(prompt.startsWith(WITH_TODOS.task), "the task itself was displaced by the instruction");
+  // The public name, not the raw one: the raw `todo` is what the host publishes
+  // and what no model ever sees, so an instruction naming it sends the agent
+  // looking for a tool that does not exist under that name.
+  assert.ok(
+    prompt.includes(TODO_PUBLIC_TOOL_NAME),
+    `the prompt never named ${TODO_PUBLIC_TOOL_NAME}: ${prompt}`,
+  );
+  assert.ok(prompt.includes("#t1"), "the prompt never named the item the run was given");
+  // The Pi path phrases the same protocol as shell commands. A runtime with no
+  // such command reads that as a reason to go hunting through `bash`.
+  assert.equal(/todo update <id>|`todo list`/.test(prompt), false, prompt);
+});
+
+test("a bridged run carrying no todos is told nothing about a queue", async () => {
+  const driver = fakeDriver();
+  const backend = createDshBackend(async () => driver);
+  await (await backend.start(SPEC, {
+    ...runOptions(BRIDGED_PROBE),
+    host: bridgedHost(),
+  })).outcome;
+
+  assert.equal(driver.prompts[0], SPEC.task);
+});
+
+test("an unbridged run carrying todos is told nothing about a tool it has no route to", async () => {
+  // Adjudication rejects this combination upstream; if it ever reaches here,
+  // describing a tool the runtime cannot have is worse than silence.
+  const driver = fakeDriver();
+  const backend = createDshBackend(async () => driver);
+  await (await backend.start(WITH_TODOS, runOptions())).outcome;
+
+  assert.equal(driver.prompts[0], WITH_TODOS.task);
+});
+
+test("the missing-entry diagnostic names the server the instruction assumes", async () => {
+  // Two facts that must not drift: the instruction tells the model to call
+  // `mcp__<serverName>__todo`, and this diagnostic tells the operator which
+  // serverName to configure. One constant owns both.
+  const backend = createDshBackend(async () => fakeDriver());
+  const outcome = await (await backend.start(WITH_TODOS, {
+    ...runOptions(BRIDGED_PROBE),
+    host: bridgedHost(),
+  })).outcome;
+
+  const diagnostic = outcome.result.warnings?.find((warning) => warning.includes(MISSING_ENTRY)) ?? "";
+  assert.ok(diagnostic.includes(`serverName: ${TODO_SERVER_NAME}`), diagnostic);
+  assert.ok(diagnostic.includes(`process.env.${TODO_ENDPOINT_ENV}`), diagnostic);
+  assert.ok(TODO_PUBLIC_TOOL_NAME.includes(TODO_SERVER_NAME));
 });

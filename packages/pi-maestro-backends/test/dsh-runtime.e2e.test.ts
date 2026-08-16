@@ -41,6 +41,7 @@ import { resolve } from "node:path";
 import type { BackendRunOptions } from "pi-maestro-backend-core/v1/backend";
 import { createDshBackend } from "pi-maestro-backends/dsh";
 import { createDshDriver } from "pi-maestro-backends/dsh/driver";
+import { TODO_ENDPOINT_ENV, TODO_PUBLIC_TOOL_NAME } from "pi-maestro-backends/dsh/todo-endpoint";
 
 /** Expand a leading `~` so the documented invocation works from a shell. */
 function expand(path: string): string {
@@ -95,8 +96,15 @@ function options(overrides: Partial<BackendRunOptions> = {}): BackendRunOptions 
   };
 }
 
-/** The public name the runtime's mcp-client gives this endpoint's only tool. */
-const PUBLIC_TOOL_NAME = "mcp__maestro_todo__todo";
+/**
+ * The public name the runtime's mcp-client gives this endpoint's only tool.
+ *
+ * Taken from the host constant the todo instruction is written from, so this
+ * case fails rather than drifts if the two ever stop agreeing — the instruction
+ * tells the model to call this exact name, and only a real runtime can say
+ * whether that name is the one it published.
+ */
+const PUBLIC_TOOL_NAME = TODO_PUBLIC_TOOL_NAME;
 
 /** The runtime config for a deployment that mounted the bridge. */
 const BRIDGED_CONFIG = { ...CONFIG, todoBridge: true };
@@ -321,6 +329,47 @@ test("a bridged turn calls the host todo tool under its public MCP name", { skip
     + ` some call went uncounted, so ${PUBLIC_TOOL_NAME} need not be among the counted ones`,
   );
   assert.equal(outcome.recovery.completedToolCount, outcome.result.toolCount);
+});
+
+test("the endpoint URL never reaches a shell the model can run", { skip }, async () => {
+  // The URL carries this run's bearer token. The runtime hands its own children
+  // a scrubbed copy of its environment, and the variable is named to be caught
+  // by that scrub — a property only a real runtime spawning a real shell can
+  // demonstrate, because the scrub belongs to the runtime and not to this host.
+  let endpointUrl: string | undefined;
+  const observing = createDshBackend(async (config, driverOptions) => {
+    endpointUrl = driverOptions.envExtras?.[TODO_ENDPOINT_ENV];
+    return createDshDriver(config, driverOptions);
+  });
+  const events: ChildEvent[] = [];
+  const run = await observing.start(
+    {
+      agent: "general",
+      // No todos: this run needs the endpoint to exist, not to be used, and a
+      // queue instruction would compete with the shell command under test.
+      task: "Run the shell command `env` and reply with every line whose variable name starts with "
+        + "PI_MAESTRO, or with exactly NONE if there are none.",
+    },
+    options({
+      config: BRIDGED_CONFIG,
+      host: { proxyToolCall: async () => ({ content: [{ type: "text", text: "[]" }] }) },
+      onChildEvent: (event) => { events.push(event); },
+    }),
+  );
+  const outcome = await run.outcome;
+
+  assert.ok(endpointUrl !== undefined, "the bridged run was given no endpoint to leak");
+  const token = new URL(endpointUrl).searchParams.get("token");
+  assert.ok(token !== null && token.length > 0, "the endpoint URL carries no token to protect");
+  // Non-vacuous: a model that answered without running anything would satisfy
+  // the absence check while proving nothing about what a shell can see.
+  const names = invokedToolNames(events);
+  assert.ok(
+    names.some((name) => name.includes("bash") || name.includes("shell")),
+    `no shell tool ran, so nothing observed the child environment; tools were [${names.join(", ")}]`,
+  );
+  const transcript = JSON.stringify(events) + outcome.result.messages.map((m) => m.content).join("\n");
+  assert.equal(transcript.includes(token), false, "this run's endpoint token reached the transcript");
 });
 
 test("a bridged run against a cordis.yml without the mcp-client entry fails loud", { skip: skipNoBridge }, async () => {

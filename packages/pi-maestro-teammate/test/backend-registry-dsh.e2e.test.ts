@@ -4,7 +4,13 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Writable } from "node:stream";
-import { runSingleTeammate, sendRpcMessage } from "../src/runs/execution.ts";
+import {
+  normalizeTeammateParams,
+  runSingleTeammate,
+  sendRpcMessage,
+  singleRunParamsOf,
+  type RunSingleTeammateParams,
+} from "../src/runs/execution.ts";
 import {
   registerTeammateChildToolBroker,
   type TeammateChildToolBrokerRequest,
@@ -86,6 +92,21 @@ function workspace(extraConfig: Record<string, unknown> = {}): string {
   return root;
 }
 
+/**
+ * Turn a request into run params the way the extension does.
+ *
+ * The two cases below that carry todos go through this rather than naming
+ * `todos` themselves. Handing `runSingleTeammate` a field the product's own
+ * projection never set is what let `spec.todos` stay undefined on every real
+ * dispatch while these very cases passed.
+ */
+function requested(task: { agent: string; prompt: string; todo?: string | string[] }): RunSingleTeammateParams {
+  const normalization = normalizeTeammateParams({ tasks: [task] });
+  assert.equal(normalization.error, undefined, "the request did not survive normalization");
+  const single = normalization.tasks[0]!;
+  return singleRunParamsOf(single, { task: single.prompt });
+}
+
 test("a registration document routes a real task to a real dsh runtime", { skip }, async () => {
   const root = workspace();
   const result = await runSingleTeammate(
@@ -142,6 +163,12 @@ test("a real dsh run reaches the host todo broker through the product path", { s
   // e2e supplies its own `host.proxyToolCall` and therefore never walks
   // `runSingleTeammate` → `backendOptionsOf` → `getTeammateChildToolBroker`.
   // That closure is built by the host, and only this path builds it.
+  //
+  // Nothing tells the model what the tool is called, either. The follow-up
+  // below names no tool, so the only place the model can learn the name is the
+  // instruction the product generates for a task carrying todos — which is the
+  // half that did not exist while both real cases on this seam passed by
+  // spelling `mcp__maestro_todo__todo` out in their own follow-up text.
   const root = workspace({ todoBridge: true });
   const seen: TeammateChildToolBrokerRequest[] = [];
   const release = registerTeammateChildToolBroker("todo", async (request) => {
@@ -150,23 +177,22 @@ test("a real dsh run reaches the host todo broker through the product path", { s
   });
   try {
     const result = await runSingleTeammate(
-      {
+      requested({
         agent: "prober",
-        // Asked for on a follow-up for the same reason as the backends-side
-        // case: the runtime accepts its opening prompt before the mcp-client's
-        // tools are published, so a turn-one request would fail this on a
-        // runtime startup race rather than on the host closure under test.
-        task: "Reply with exactly the word READY and nothing else.",
-        todos: ["probe-1"],
-      },
+        // The work is asked for on a follow-up because the runtime accepts its
+        // opening prompt before the mcp-client's tools are published, so a
+        // turn-one request would fail this on a startup race rather than on
+        // anything under test. The instruction itself rides the opening prompt.
+        prompt: "Reply with exactly the word READY and nothing else.",
+        todo: "probe-1",
+      }),
       {
         baseCwd: root,
         runtimeGeneration: 1,
         onChildSpawned: (stdin) => {
           sendRpcMessage(
             stdin,
-            "Now call the mcp__maestro_todo__todo tool with action \"list\" "
-            + "and reply with how many items it returned.",
+            "Now work the queue you were assigned, then reply with how many items it holds.",
             "follow_up",
           );
         },
@@ -174,7 +200,11 @@ test("a real dsh run reaches the host todo broker through the product path", { s
     );
 
     assert.equal(result.terminalStatus, "completed", result.messages.at(-1)?.content ?? "");
-    assert.ok(seen.length >= 1, "the runtime never reached the host broker through the product path");
+    assert.ok(
+      seen.length >= 1,
+      "the runtime never reached the host broker: with no tool name in the follow-up, "
+      + "the model had only the product's own todo instruction to go on",
+    );
     assert.equal(seen[0]!.toolName, "todo");
     // Identity, not merely arrival: the broker must see this attempt, because
     // the host's edit check decides what a teammate may write from the actor.
@@ -198,7 +228,11 @@ test("a real registration without todoBridge refuses a task carrying todos", { s
   });
   try {
     const result = await runSingleTeammate(
-      { agent: "prober", task: "Reply with exactly the word SEAM and nothing else.", todos: ["probe-1"] },
+      requested({
+        agent: "prober",
+        prompt: "Reply with exactly the word SEAM and nothing else.",
+        todo: "probe-1",
+      }),
       { baseCwd: root, runtimeGeneration: 1 },
     );
 

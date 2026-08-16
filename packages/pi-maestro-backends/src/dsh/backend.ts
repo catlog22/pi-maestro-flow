@@ -42,7 +42,13 @@ import {
   structuredOutputRecovery,
   type StructuredOutcome,
 } from "./structured-output.ts";
-import { startTodoEndpoint, type TodoEndpoint } from "./todo-endpoint.ts";
+import {
+  assignedTodoInstruction,
+  startTodoEndpoint,
+  TODO_ENDPOINT_ENV,
+  TODO_SERVER_NAME,
+  type TodoEndpoint,
+} from "./todo-endpoint.ts";
 
 /**
  * What the SDK surface actually supports.
@@ -326,7 +332,7 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
         driver = await driverOf(options.config, {
           ...options,
           ...(spec.cwd === undefined ? {} : { baseCwd: spec.cwd }),
-          ...(endpoint === undefined ? {} : { envExtras: { PI_MAESTRO_TODO_MCP_URL: endpoint.url } }),
+          ...(endpoint === undefined ? {} : { envExtras: { [TODO_ENDPOINT_ENV]: endpoint.url } }),
         });
       } catch (cause) {
         // A driver that never started has no `closeOnce` to reach, and the
@@ -360,9 +366,19 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
         const task = schema === undefined
           ? spec.task
           : `${spec.task}\n${structuredOutputInstruction(schema)}`;
-        const prompt = options.systemPrompt === undefined
+        // A queue the agent is never told about is a queue it never touches:
+        // the runtime is handed the tool through its mcp-client and nothing
+        // else, so without this the model saw an unexplained extra tool beside
+        // a bare task and settled the run as a success that had ignored its
+        // items. Emitted only where the route exists — an unbridged
+        // registration is refused by capability adjudication long before here,
+        // and a run with no items has nothing to be told.
+        const withTodos = endpoint === undefined || spec.todos === undefined || spec.todos.length === 0
           ? task
-          : `${options.systemPrompt}\n\n${task}`;
+          : `${task}\n\n${assignedTodoInstruction(spec.todos)}`;
+        const prompt = options.systemPrompt === undefined
+          ? withTodos
+          : `${options.systemPrompt}\n\n${withTodos}`;
         try {
           const observe = (notification: { method: string; params: Record<string, unknown> }): void => {
             if (notification.method !== "session.event") return;
@@ -429,8 +445,8 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
             warnings.push(
               "dsh todoBridge is enabled for this registration and the task carries todos, "
               + "but the runtime never connected to the todo endpoint; "
-              + "add an mcp-client entry with transport: streamable-http, serverName: maestro_todo, "
-              + "url: !!js process.env.PI_MAESTRO_TODO_MCP_URL to the cordis.yml at "
+              + `add an mcp-client entry with transport: streamable-http, serverName: ${TODO_SERVER_NAME}, `
+              + `url: !!js process.env.${TODO_ENDPOINT_ENV} to the cordis.yml at `
               + `${text(options.config, "cordisConfig") ?? "the configured path"}`,
             );
           }

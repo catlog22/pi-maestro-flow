@@ -129,6 +129,41 @@ test("the endpoint stops listening once closed", async () => {
   );
 });
 
+test("the published updateFields is the list of field names the host tool reads", async () => {
+  // The host's `TodoParams.updateFields` is a `TodoUpdateField[]` and reaches
+  // `new Set(params.updateFields)` with no try/catch around it, so publishing
+  // this as an object sent every schema-obeying model into a TypeError that
+  // surfaced as an internal error rather than as a parameter error. The enum
+  // lists only what this endpoint forwards: naming a field it drops would
+  // publish a write the host is then told to make and given no value for.
+  const { endpoint, calls } = await probe();
+  try {
+    await withClient(endpoint, async (client) => {
+      const listed = await client.listTools();
+      const schema = listed.tools.find((entry) => entry.name === "todo")?.inputSchema as {
+        properties: { updateFields: { type: string; items?: { enum?: string[] } } };
+      };
+      assert.equal(schema.properties.updateFields.type, "array");
+      assert.deepEqual(schema.properties.updateFields.items?.enum, ["status", "summary"]);
+
+      await client.callTool({
+        name: "todo",
+        arguments: { action: "update", id: "t1", status: "completed", updateFields: ["status"] },
+      });
+    });
+    // Arrives as an array, not as whatever the model made of an object schema:
+    // this is the value the host iterates.
+    assert.deepEqual(calls[0]!.args, {
+      action: "update",
+      id: "t1",
+      status: "completed",
+      updateFields: ["status"],
+    });
+  } finally {
+    await endpoint.close();
+  }
+});
+
 test("a host error reaches the model as an error rather than as a successful write", async () => {
   const { endpoint } = await probe({
     content: [{ type: "text", text: "you do not own that item" }],

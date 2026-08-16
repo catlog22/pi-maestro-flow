@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { childEnv } from "pi-maestro-backends/dsh/driver";
+import { TODO_ENDPOINT_ENV } from "pi-maestro-backends/dsh/todo-endpoint";
 
 /**
  * What the dsh runtime subprocess is allowed to see.
@@ -53,16 +54,16 @@ test("a named variable the host does not set is omitted rather than blanked", ()
 
 test("a per-run value is handed over by the caller, not looked up in this process", () => {
   const url = "http://127.0.0.1:1/mcp?token=a";
-  assert.equal(process.env.PI_MAESTRO_TODO_MCP_URL, undefined);
-  const child = childEnv({}, { PI_MAESTRO_TODO_MCP_URL: url });
-  assert.equal(child.PI_MAESTRO_TODO_MCP_URL, url);
+  assert.equal(process.env[TODO_ENDPOINT_ENV], undefined);
+  const child = childEnv({}, { [TODO_ENDPOINT_ENV]: url });
+  assert.equal(child[TODO_ENDPOINT_ENV], url);
   // The host's own environment is not a channel for this: two attempts running
   // at once would read each other's URL, and the URL names an actor.
-  assert.equal(process.env.PI_MAESTRO_TODO_MCP_URL, undefined);
+  assert.equal(process.env[TODO_ENDPOINT_ENV], undefined);
 });
 
 test("two attempts handed different per-run values do not share one", () => {
-  const first = childEnv({}, { PI_MAESTRO_TODO_MCP_URL: "http://127.0.0.1:1/mcp?token=one" });
-  const second = childEnv({}, { PI_MAESTRO_TODO_MCP_URL: "http://127.0.0.1:2/mcp?token=two" });
-  assert.notEqual(first.PI_MAESTRO_TODO_MCP_URL, second.PI_MAESTRO_TODO_MCP_URL);
+  const first = childEnv({}, { [TODO_ENDPOINT_ENV]: "http://127.0.0.1:1/mcp?token=one" });
+  const second = childEnv({}, { [TODO_ENDPOINT_ENV]: "http://127.0.0.1:2/mcp?token=two" });
+  assert.notEqual(first[TODO_ENDPOINT_ENV], second[TODO_ENDPOINT_ENV]);
 });
