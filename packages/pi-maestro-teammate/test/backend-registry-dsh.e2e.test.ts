@@ -183,3 +183,34 @@ test("a real dsh run reaches the host todo broker through the product path", { s
     release();
   }
 });
+
+test("a real registration without todoBridge refuses a task carrying todos", { skip }, async () => {
+  // The other half of the fail-loud promise, on the path that skipped it. The
+  // registration above only differs by `todoBridge`, so the capability table
+  // this one publishes says `todoBinding: "unsupported"` — and a single
+  // dispatch used to run it anyway, dropping the field in silence and settling
+  // as a clean success that had never touched the queue.
+  const root = workspace();
+  const seen: TeammateChildToolBrokerRequest[] = [];
+  const release = registerTeammateChildToolBroker("todo", async (request) => {
+    seen.push(request);
+    return { content: [{ type: "text", text: "[]" }] };
+  });
+  try {
+    const result = await runSingleTeammate(
+      { agent: "prober", task: "Reply with exactly the word SEAM and nothing else.", todos: ["probe-1"] },
+      { baseCwd: root, runtimeGeneration: 1 },
+    );
+
+    assert.equal(result.terminalStatus, "failed", result.messages.at(-1)?.content ?? "");
+    assert.match(result.messages[0]?.content ?? "", /todoBinding/);
+    assert.match(result.messages[0]?.content ?? "", /dsh/);
+    // Rejected before the runtime was ever spawned: this case costs no model
+    // call, which is the practical difference between adjudicating up front
+    // and reporting the gap after a turn has already been paid for.
+    assert.deepEqual(seen, [], "the run reached the host broker despite declaring no binding");
+    assert.equal(result.usage.turns, 0, "a turn was paid for before the capability gap surfaced");
+  } finally {
+    release();
+  }
+});

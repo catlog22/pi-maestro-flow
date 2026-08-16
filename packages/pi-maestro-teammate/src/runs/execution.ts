@@ -597,6 +597,25 @@ export async function runSingleTeammate(
         } else {
           const spec = backendSpecOf(params, cwd, modelToUse);
           const { backend, config, capabilities } = await registry.resolve(spec, spec.backend);
+          // Adjudicate here too, not only in `runGraph`. Five production call
+          // sites dispatch a single teammate directly, and a task whose backend
+          // cannot serve a required capability was reaching the model anyway:
+          // the field was dropped in silence, so the transcript looked like a
+          // successful run that simply never used the queue. Rejecting before
+          // `backend.start` keeps the promise adjudication makes — the missing
+          // capability surfaces without burning a model turn.
+          const capabilityErrors = validateBackendCapabilities(
+            [{ spec, ...(spec.name === undefined ? {} : { name: spec.name }) }],
+            () => ({ name: backend.name, capabilities }),
+          ).errors;
+          if (capabilityErrors.length > 0) {
+            // The resolved backend does not vary with the model candidate, so
+            // no later candidate can serve this task either. Release the trial
+            // permit the way the abort path does: the candidate was never
+            // exercised, so nothing was learned about its health.
+            if (acquisition?.allowed) breaker.releaseCandidate(acquisition);
+            return rejectAndPublish(capabilityErrors.join("\n"));
+          }
           // Whether the backend published a channel of its own. Tracked rather
           // than decided by backend name: a backend that spawns a child hands
           // the host a real pipe carrying lease control and a session dir, and
