@@ -47,6 +47,8 @@ export declare const PROFILE_TUI_CATALOGS: {
         readonly "model.tools": "Tools · {tools}";
         readonly "model.role": "Role · {role}";
         readonly "model.uptime": "Uptime · {seconds}s · inbox {inbox} · tasks {tasks}";
+        readonly "model.location": "Location · {location}";
+        readonly "model.locationDefault": "current workspace";
         readonly "model.openCollaboration": "Enter opens the existing collaboration view";
         readonly "model.noMatches": "□ No matches · Backspace clears the filter";
         readonly "model.noProfiles": "□ No model Profiles available";
@@ -59,7 +61,7 @@ export declare const PROFILE_TUI_CATALOGS: {
         readonly "model.filterShown": "· {count} shown";
         readonly "model.readOnlyFooter": "Enter retry load · Esc close · navigation is read-only";
         readonly "model.footer.manage": "Enter manage";
-        readonly "model.footer.routing": "Enter settings · Ctrl+N new type";
+        readonly "model.footer.routing": "Enter settings · Ctrl+N new type · Ctrl+A ask model";
         readonly "model.footer.role": "Enter settings · Ctrl+T type";
         readonly "model.footer.open": "Enter open";
         readonly "model.footer.close": "Esc close";
@@ -167,6 +169,8 @@ export declare const PROFILE_TUI_CATALOGS: {
         readonly "model.tools": "工具 · {tools}";
         readonly "model.role": "Role · {role}";
         readonly "model.uptime": "运行时间 · {seconds}秒 · 收件箱 {inbox} · Tasks {tasks}";
+        readonly "model.location": "位置 · {location}";
+        readonly "model.locationDefault": "当前工作区";
         readonly "model.openCollaboration": "Enter 打开现有协作视图";
         readonly "model.noMatches": "□ 没有匹配项 · Backspace 清除筛选";
         readonly "model.noProfiles": "□ 没有可用的模型配置方案";
@@ -179,7 +183,7 @@ export declare const PROFILE_TUI_CATALOGS: {
         readonly "model.filterShown": "· 显示 {count} 项";
         readonly "model.readOnlyFooter": "Enter 重试加载 · Esc 关闭 · 导航为只读";
         readonly "model.footer.manage": "Enter 管理";
-        readonly "model.footer.routing": "Enter 设置 · Ctrl+N 新建 Type";
+        readonly "model.footer.routing": "Enter 设置 · Ctrl+N 新建 Type · Ctrl+A 询问 Model";
         readonly "model.footer.role": "Enter 设置 · Ctrl+T Type";
         readonly "model.footer.open": "Enter 打开";
         readonly "model.footer.close": "Esc 关闭";

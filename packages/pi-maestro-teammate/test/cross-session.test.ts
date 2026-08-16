@@ -144,6 +144,7 @@ async function proxyWorkspace(
   send?: (target: string, message: string, mode: "steer" | "follow_up") => Promise<boolean>,
   stateValue: TeammateState = proxyState(),
   sessionSend?: (request: { selector: string; message: string; mode: "steer" | "follow_up" | "abort" }) => Promise<SessionMessageResult>,
+  allowCrossSession = true,
 ): Promise<Record<string, unknown>> {
   let response: Record<string, unknown> | undefined;
   await handleProxyRequest(
@@ -160,10 +161,49 @@ async function proxyWorkspace(
     send,
     async () => [WORKSPACE_LISTING],
     sessionSend,
+    undefined,
+    { authorizeCrossSession: () => allowCrossSession },
   );
   assert.ok(response);
   return response;
 }
+
+test("regular child proxy rejects cross-window list, send, and observe", async () => {
+  const deniedList = await proxyWorkspace(
+    "teammate-list",
+    { view: "windows" },
+    undefined,
+    proxyState(),
+    undefined,
+    false,
+  );
+  assert.equal((deniedList.result as { isError?: boolean }).isError, true);
+
+  let sendCalled = false;
+  const deniedSend = await proxyWorkspace(
+    "teammate-send",
+    { to: "owner:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", message: "hello" },
+    async () => {
+      sendCalled = true;
+      return true;
+    },
+    proxyState(),
+    undefined,
+    false,
+  );
+  assert.equal(sendCalled, false);
+  assert.equal((deniedSend.result as { isError?: boolean }).isError, true);
+
+  const deniedObserve = await proxyWorkspace(
+    "observe",
+    { action: "status", targets: [{ kind: "workspace", id: "review-window" }] },
+    undefined,
+    proxyState(),
+    undefined,
+    false,
+  );
+  assert.equal((deniedObserve.result as { isError?: boolean }).isError, true);
+});
 
 test("root and child proxy window views share bounded contextual formatting", async () => {
   const listed = await proxyWorkspace("teammate-list", { view: "windows" });

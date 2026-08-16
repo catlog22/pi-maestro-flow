@@ -16,6 +16,7 @@ import {
   createGlobalModelRoutingProfile,
   deleteGlobalModelRoutingProfile,
   discoverRoutingTaskTypes,
+  getGlobalAskBeforeDispatch,
   getProjectModelRoutingPath,
   inferTaskType,
   loadModelRoutingConfig,
@@ -37,6 +38,7 @@ import {
   saveProjectRoleMapping,
   saveProjectThinkingLevel,
   setDefaultGlobalModelRoutingProfile,
+  setGlobalAskBeforeDispatch,
   setProjectActiveModelRoutingProfile,
   setProjectModelRoutingOverridesEnabled,
   syncModelCircuitPolicies,
@@ -1641,6 +1643,31 @@ test("type role assignments update atomically and custom type deletion clears re
       () => saveGlobalProfileTypeRoles(cwd, "default", "analysis", ["Bad Role"], globalPath),
       /Invalid teammate role mapping/,
     );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ask-before-dispatch flag defaults off and persists on the global config", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-ask-flag-"));
+  const globalPath = path.join(root, "home", "teammate-models.json");
+  const cwd = path.join(root, "project");
+  fs.mkdirSync(cwd, { recursive: true });
+  try {
+    assert.equal(getGlobalAskBeforeDispatch(globalPath), false);
+    assert.equal(loadModelRoutingState(cwd, globalPath).askBeforeDispatch, false);
+
+    setGlobalAskBeforeDispatch(true, globalPath);
+    assert.equal(getGlobalAskBeforeDispatch(globalPath), true);
+    assert.equal(loadModelRoutingState(cwd, globalPath).askBeforeDispatch, true);
+
+    // Unrelated writers round-trip the flag (no silent reset).
+    saveGlobalProfileModelMapping(cwd, "default", "explore", "provider/explore", globalPath);
+    assert.equal(getGlobalAskBeforeDispatch(globalPath), true);
+
+    setGlobalAskBeforeDispatch(false, globalPath);
+    assert.equal(getGlobalAskBeforeDispatch(globalPath), false);
+    assert.equal(loadModelRoutingState(cwd, globalPath).askBeforeDispatch, false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

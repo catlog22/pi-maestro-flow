@@ -44,40 +44,95 @@ function fakeProvider(kind: string): ObservationProvider {
   };
 }
 
-async function proxy(tool: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function proxy(
+  tool: string,
+  params: Record<string, unknown>,
+  allowCrossSession = false,
+): Promise<Record<string, unknown>> {
   let response: Record<string, unknown> | undefined;
   await handleProxyRequest(
     pi,
     state(),
     { tool, requestId: `${tool}-request`, params },
     (message) => { response = message as Record<string, unknown>; },
+    undefined,
+    [],
+    undefined,
+    undefined,
+    {},
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { authorizeCrossSession: () => allowCrossSession },
   );
   assert.ok(response);
   return response;
 }
 
+test("child proxy rejects the reserved Monitor evaluator name", async () => {
+  const response = await proxy("teammate", {
+    tasks: [{ agent: "general", name: "monitor-session", prompt: "claim authority" }],
+  });
+  const result = response.result as { isError?: boolean; content?: Array<{ text?: string }> };
+  assert.equal(result.isError, true);
+  assert.match(result.content?.[0]?.text ?? "", /reserved for the host-owned Monitor evaluator/);
+});
+
 test("child proxy executes mixed observe requests", async () => {
   const disposeTeammate = registerObservationProvider(fakeProvider("teammate"));
   const disposeJob = registerObservationProvider(fakeProvider("bash_bg"));
+  const disposeRemote = registerObservationProvider(fakeProvider("remote"));
   try {
     const response = await proxy("observe", {
       action: "status",
       targets: [
         { kind: "teammate", id: "reviewer" },
         { kind: "bash_bg", id: "build" },
+        { kind: "remote", id: "remote:run-1234" },
       ],
-    });
+    }, true);
     const result = response.result as { isError?: boolean; details?: { result?: { observations?: unknown[] } } };
     assert.equal(result.isError, false);
-    assert.equal(result.details?.result?.observations?.length, 2);
+    assert.equal(result.details?.result?.observations?.length, 3);
   } finally {
     disposeTeammate();
     disposeJob();
+    disposeRemote();
+  }
+});
+
+test("ordinary child proxy rejects aliased providers before execution", async () => {
+  let calls = 0;
+  const kind = "workspace-alias";
+  const dispose = registerObservationProvider({
+    ...fakeProvider(kind),
+    snapshot(id) {
+      calls++;
+      return fakeProvider(kind).snapshot(id, { detail: "summary", lines: 20 });
+    },
+    async wait(id, options) {
+      calls++;
+      return fakeProvider(kind).wait(id, options);
+    },
+  });
+  try {
+    const response = await proxy("observe", {
+      action: "status",
+      targets: [{ kind, id: "peer" }],
+    });
+    const result = response.result as { isError?: boolean; content?: Array<{ text?: string }> };
+    assert.equal(result.isError, true);
+    assert.match(result.content?.[0]?.text ?? "", /only local teammate and bash_bg targets/);
+    assert.equal(calls, 0);
+  } finally {
+    dispose();
   }
 });
 
 test("child proxy cancellation aborts an in-flight observe wait", async () => {
-  const kind = "slow-observation";
+  const kind = "teammate";
   const dispose = registerObservationProvider({
     kind,
     capabilities: { inspect: true, wait: true },

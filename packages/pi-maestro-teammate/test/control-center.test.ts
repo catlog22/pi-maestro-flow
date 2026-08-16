@@ -8,6 +8,8 @@ import {
 } from "../src/tui/model-mapping-overlay.ts";
 import type { AgentConfig } from "../src/agents/agents.ts";
 import type { ModelRoutingState } from "../src/models/model-routing.ts";
+import type { RemoteConfigState } from "../src/remote/config.ts";
+import { REMOTE_CONFIG_VERSION } from "../src/remote/types.ts";
 
 const theme = {
   fg: (_role: string, text: string) => text,
@@ -79,6 +81,7 @@ function profileState(overridesEnabled = false): ModelRoutingState {
       mappings: { explore: overridesEnabled ? "anthropic/sonnet" : "missing/fast" },
       thinkingLevels: { explore: "low" },
     },
+    askBeforeDispatch: false,
     requestedProfile: "fast",
   };
 }
@@ -107,6 +110,93 @@ function makeCenter(overrides: Partial<ConstructorParameters<typeof TeammateCont
   });
   return { center, closed, saved, savedThinking, savedRoleRules };
 }
+
+function remoteState(): RemoteConfigState {
+  return {
+    global: {
+      version: REMOTE_CONFIG_VERSION,
+      hosts: {
+        "linux-a": {
+          host: "linux-a.example",
+          user: "dev",
+          port: 22,
+          hostKeySha256: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        },
+      },
+      targets: {
+        "linux-a/pi": {
+          host: "linux-a",
+          cwd: "/srv/project",
+          driver: "pi-rpc",
+          command: ["pi"],
+        },
+      },
+    },
+    project: { version: REMOTE_CONFIG_VERSION, hosts: {}, targets: {} },
+    config: {
+      version: REMOTE_CONFIG_VERSION,
+      hosts: {
+        "linux-a": {
+          host: "linux-a.example",
+          user: "dev",
+          port: 22,
+          hostKeySha256: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        },
+      },
+      targets: {
+        "linux-a/pi": {
+          host: "linux-a",
+          cwd: "/srv/project",
+          driver: "pi-rpc",
+          command: ["pi"],
+        },
+      },
+    },
+  };
+}
+
+test("remotes tab renders the pane and forwards pane actions with scope", () => {
+  const { center, closed } = makeCenter({ initialTab: "remotes", remoteState: remoteState() });
+  const wide = center.render(100).join("\n");
+  assert.match(wide, /Remote targets/);
+  assert.match(wide, /\[global ●\]/);
+  assert.match(wide, /\[H\] linux-a/);
+  assert.match(wide, /\[T\] linux-a\/pi/);
+  assert.match(wide, /pi-rpc · \/srv\/project/);
+
+  center.handleInput("n");
+  assert.deepEqual(closed[0], { kind: "remote-new-host", scope: "global" });
+
+  center.handleInput("N");
+  assert.deepEqual(closed[1], { kind: "remote-new-target", scope: "global" });
+
+  center.handleInput("\t");
+  const afterTab = center.render(100).join("\n");
+  assert.match(afterTab, /Remotes 2/);
+  assert.match(afterTab, /\[Active 2\]/);
+});
+
+test("remotes tab without remote state falls back to the standard list view", () => {
+  const { center } = makeCenter({ initialTab: "remotes" });
+  const wide = center.render(100).join("\n");
+  assert.match(wide, /Remotes 0/);
+  assert.match(wide, /Active/);
+});
+
+test("active detail shows the resolved working location", () => {
+  const { center } = makeCenter({
+    initialTab: "active",
+    activeAgents: [{ ...active("worker-1"), cwd: "D:/workspace/project" }],
+  });
+  const wide = center.render(100).join("\n");
+  assert.match(wide, /Location · D:\/workspace\/project/);
+});
+
+test("active detail defaults the location label for agents without a cwd", () => {
+  const { center } = makeCenter({ initialTab: "active", activeAgents: [active("worker-1")] });
+  const wide = center.render(100).join("\n");
+  assert.match(wide, /Location · current workspace/);
+});
 
 test("control center keeps roles, routing and active collaboration visible", () => {
   const { center } = makeCenter({ initialTab: "roles" });

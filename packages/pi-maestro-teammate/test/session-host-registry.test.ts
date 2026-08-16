@@ -70,7 +70,7 @@ test("session replacement keeps the canonical registry published for the followi
       handlers.set(event, list);
       return () => {};
     },
-    registerTool() {}, registerCommand() {}, registerShortcut() {}, registerMessageRenderer() {},
+    registerTool() {}, registerCommand() {}, registerShortcut() {}, registerMessageRenderer() {}, getActiveTools() { return []; },
   }, {
     get(target, property) {
       if (property in target) return target[property as keyof typeof target];

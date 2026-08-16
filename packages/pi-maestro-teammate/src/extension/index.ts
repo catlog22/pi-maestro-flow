@@ -12,7 +12,7 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
 import crossSpawn from "cross-spawn";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -25,7 +25,20 @@ import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "..
 import { Key, Text, decodeKittyPrintable, isKeyRelease, isKeyRepeat, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { loadTranscript, scanWorkspaceSessionDirs, groupTranscriptTurns, type WorkspaceSessionScan } from "../transcript/session-transcript.ts";
 import type { TranscriptRow } from "../shared/transcript.ts";
-import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams, WorkspaceWindowParams } from "./schemas.ts";
+import {
+  LocalObserveParams,
+  LocalTeammateListParams,
+  LocalTeammateSendParams,
+  ObserveParams,
+  RemoteWorkerParams,
+  TeammateListParams,
+  TeammateMonitorParams,
+  TeammateParams,
+  TeammateSendParams,
+  TeammateWaitParams,
+  TeammateWatchParams,
+  WorkspaceWindowParams,
+} from "./schemas.ts";
 import {
   formatObserveResult,
   observeTargets,
@@ -40,7 +53,7 @@ import {
 } from "../public/v1/observation.ts";
 import {
   activePromptLoopIdsFromPayload,
-  appendMonitorModeContext,
+  applyMonitorModeContext,
   formatCompact,
   formatVerbose,
   formatHeader,
@@ -62,6 +75,10 @@ import {
   type MonitorSupervisionMode,
 } from "./monitor.ts";
 import { MonitorController, type MonitorControllerBindingRequest } from "./monitor-controller.ts";
+import {
+  MonitorToolExposureController,
+  type MonitorCommunicationCapture,
+} from "./monitor-tool-exposure.ts";
 import { MonitorLeaseAdapter } from "./monitor-lease.ts";
 import {
   MONITOR_SESSION_ENV_VAR,
@@ -209,6 +226,7 @@ import {
   type DecodedInputToken,
 } from "../tui/input-text.ts";
 import { showModelMappingOverlay } from "../tui/model-mapping-overlay.ts";
+import { showModelAskOverlay } from "../tui/model-ask-overlay.ts";
 import { sharedModelCircuitBreaker } from "../public/v1/retry.ts";
 import { normalizePiRetryErrorMessage } from "../runs/retry.ts";
 import {
@@ -219,6 +237,16 @@ import {
   type ChildTerminationController,
 } from "../runs/execution-infra.ts";
 import { showMonitorOverlay, type MonitorSessionRow } from "../tui/monitor-overlay.ts";
+import { loadRemoteConfig, loadRemoteConfigState } from "../remote/config.ts";
+import { SshRemoteConnectionFactory } from "../remote/ssh.ts";
+import { RemoteWorkerManager } from "../remote/worker-manager.ts";
+import {
+  RemoteMonitorSession,
+  sanitizeRemoteMonitorError,
+  type RemoteMonitorRunListing,
+  type RemoteMonitorTargetListing,
+} from "./remote-monitor.ts";
+import { REMOTE_HISTORY_ENTRY_TYPE } from "../sessions/remote-history.ts";
 import { showSessionSendOverlay } from "../tui/session-send-overlay.ts";
 import {
   SETTINGS_LOCALE_EVENT,
@@ -275,6 +303,7 @@ import {
   applyModelRouting,
   appendTaskTypeRoutingContext,
   formatModelRoutingConfig,
+  loadModelRoutingState,
   parseTeammateTaskType,
   refreshModelRegistry,
   type TeammateTaskType,
@@ -299,9 +328,15 @@ import {
   CHILD_PROXY_TIMEOUT_MS,
   TEAMMATE_PROMPT_SNIPPET,
   TEAMMATE_PROMPT_GUIDELINES,
+  LOCAL_TEAMMATE_SEND_DESCRIPTION,
+  LOCAL_TEAMMATE_SEND_SNIPPET,
+  LOCAL_TEAMMATE_SEND_GUIDELINES,
   TEAMMATE_SEND_DESCRIPTION,
   TEAMMATE_SEND_SNIPPET,
   TEAMMATE_SEND_GUIDELINES,
+  LOCAL_TEAMMATE_LIST_DESCRIPTION,
+  LOCAL_TEAMMATE_LIST_SNIPPET,
+  LOCAL_TEAMMATE_LIST_GUIDELINES,
   TEAMMATE_LIST_DESCRIPTION,
   TEAMMATE_LIST_SNIPPET,
   TEAMMATE_LIST_GUIDELINES,
@@ -312,6 +347,9 @@ import {
   TEAMMATE_WAIT_DESCRIPTION,
   TEAMMATE_WAIT_SNIPPET,
   TEAMMATE_WAIT_GUIDELINES,
+  LOCAL_OBSERVE_DESCRIPTION,
+  LOCAL_OBSERVE_SNIPPET,
+  LOCAL_OBSERVE_GUIDELINES,
   OBSERVE_DESCRIPTION,
   OBSERVE_SNIPPET,
   OBSERVE_GUIDELINES,
@@ -399,6 +437,17 @@ import { projectTeammateSessionEndpoints } from "./session-endpoints.ts";
 export { MAILBOX_REGISTRY_KEY } from "../public/v1/mailbox.ts";
 
 
+function resolvedRunLocation(requested: string | undefined, base: string): string {
+  if (!requested) return base;
+  if (requested.startsWith("remote:")) return requested;
+  return isAbsolute(requested) ? normalize(requested) : resolve(base, requested);
+}
+
+function graphRunLocations(tasks: readonly { cwd?: string }[], base: string): string {
+  const locations = [...new Set(tasks.map((task) => resolvedRunLocation(task.cwd, base)))];
+  return locations.length === 1 ? locations[0]! : `graph · ${locations.length} locations`;
+}
+
 export default function registerTeammateExtension(
   pi: ExtensionAPI,
   runtimeOptions: TeammateRuntimeOptions = {},
@@ -436,6 +485,7 @@ export default function registerTeammateExtension(
   );
 
   const isChild = process.env.PI_TEAMMATE_CHILD === "1";
+  const isMonitorChild = isChild && process.env[MONITOR_SESSION_ENV_VAR] === "1";
   const currentDepth = isChild ? getTeammateDepth() : 0;
   // Child env depth is record depth + 1; the child may dispatch iff its record
   // depth stays under its budget, i.e. envDepth <= maxDispatchDepth. A budget
@@ -472,6 +522,14 @@ export default function registerTeammateExtension(
   }
   let modelCatalog: ModelCatalogSnapshot = createModelCatalogSnapshot([]);
   let monitorInteractionModeActive = false;
+  let monitorInteractionExitInProgress = false;
+  let monitorToolExposure: MonitorToolExposureController | undefined;
+
+  const captureMonitorCommunication = (): MonitorCommunicationCapture | undefined =>
+    monitorInteractionModeActive ? monitorToolExposure?.capture() : undefined;
+
+  const ownsMonitorCommunication = (capture: MonitorCommunicationCapture | undefined): boolean =>
+    monitorInteractionModeActive && monitorToolExposure?.isCurrent(capture) === true;
 
   const refreshModelCatalog = (ctx: ExtensionContext): ModelCatalogSnapshot => {
     const next = createModelCatalogSnapshot(ctx.modelRegistry?.getAvailable?.() ?? []);
@@ -497,7 +555,8 @@ export default function registerTeammateExtension(
       ? appendTaskTypeRoutingContext(withAgents, ctx.cwd, discoverAgents(ctx.cwd))
       : withAgents;
     const withDepth = appendTeammateDepthContext(withTaskType, currentDepth, currentMaxDispatchDepth);
-    return { systemPrompt: monitorInteractionModeActive ? appendMonitorModeContext(withDepth) : withDepth };
+    if (!monitorInteractionModeActive) monitorToolExposure?.syncInactive();
+    return { systemPrompt: applyMonitorModeContext(withDepth, monitorInteractionModeActive) };
   };
 
   // =========================================================================
@@ -785,7 +844,7 @@ export default function registerTeammateExtension(
       wait: (id, options) => proxyTeammateObservation("wait", id, options, options.signal),
     });
 
-    if (process.env.PI_TEAMMATE_MONITOR === "1") {
+    if (isMonitorChild) {
       const proxyWorkspaceObservation = async (
         action: "status" | "wait",
         id: string,
@@ -842,10 +901,10 @@ export default function registerTeammateExtension(
       name: "teammate-send",
       label: "Teammate Send",
       renderShell: "self",
-      description: TEAMMATE_SEND_DESCRIPTION,
-      promptSnippet: TEAMMATE_SEND_SNIPPET,
-      promptGuidelines: TEAMMATE_SEND_GUIDELINES,
-      parameters: TeammateSendParams,
+      description: isMonitorChild ? TEAMMATE_SEND_DESCRIPTION : LOCAL_TEAMMATE_SEND_DESCRIPTION,
+      promptSnippet: isMonitorChild ? TEAMMATE_SEND_SNIPPET : LOCAL_TEAMMATE_SEND_SNIPPET,
+      promptGuidelines: isMonitorChild ? TEAMMATE_SEND_GUIDELINES : LOCAL_TEAMMATE_SEND_GUIDELINES,
+      parameters: isMonitorChild ? TeammateSendParams : LocalTeammateSendParams,
       async execute(_id: string, params: { to: string; message?: string; mode?: RpcMessageMode; kind?: SessionMessageKind }, signal: AbortSignal) {
         return proxyCall<{ delivered: boolean }>("teammate-send", params, signal);
       },
@@ -855,10 +914,10 @@ export default function registerTeammateExtension(
       name: "teammate-list",
       label: "Teammate List",
       renderShell: "self",
-      description: TEAMMATE_LIST_DESCRIPTION,
-      promptSnippet: TEAMMATE_LIST_SNIPPET,
-      promptGuidelines: TEAMMATE_LIST_GUIDELINES,
-      parameters: TeammateListParams,
+      description: isMonitorChild ? TEAMMATE_LIST_DESCRIPTION : LOCAL_TEAMMATE_LIST_DESCRIPTION,
+      promptSnippet: isMonitorChild ? TEAMMATE_LIST_SNIPPET : LOCAL_TEAMMATE_LIST_SNIPPET,
+      promptGuidelines: isMonitorChild ? TEAMMATE_LIST_GUIDELINES : LOCAL_TEAMMATE_LIST_GUIDELINES,
+      parameters: isMonitorChild ? TeammateListParams : LocalTeammateListParams,
       async execute(_id: string, params: WindowInboxQuery & { view?: TeammateListView }, signal: AbortSignal) {
         return proxyCall<{ agents: unknown[] }>("teammate-list", params, signal);
       },
@@ -902,11 +961,25 @@ export default function registerTeammateExtension(
       name: "observe",
       label: "Observe",
       renderShell: "self",
-      description: OBSERVE_DESCRIPTION,
-      promptSnippet: OBSERVE_SNIPPET,
-      promptGuidelines: OBSERVE_GUIDELINES,
-      parameters: ObserveParams,
+      description: isMonitorChild ? OBSERVE_DESCRIPTION : LOCAL_OBSERVE_DESCRIPTION,
+      promptSnippet: isMonitorChild ? OBSERVE_SNIPPET : LOCAL_OBSERVE_SNIPPET,
+      promptGuidelines: isMonitorChild ? OBSERVE_GUIDELINES : LOCAL_OBSERVE_GUIDELINES,
+      parameters: isMonitorChild ? ObserveParams : LocalObserveParams,
       async execute(_id: string, params: UnifiedObserveParams, signal: AbortSignal) {
+        if (!isMonitorChild && params.targets.some((target) => target.kind !== "teammate" && target.kind !== "bash_bg")) {
+          const message = "Non-Monitor observe accepts only local teammate and bash_bg targets.";
+          const denied: ObserveResult = {
+            action: params.action,
+            reason: params.action === "status" ? "snapshot" : "aborted",
+            observations: [],
+            durationMs: 0,
+          };
+          return {
+            content: [{ type: "text", text: message }],
+            isError: true,
+            details: { output: [message], result: denied },
+          };
+        }
         const result = await observeTargets(params, signal);
         const output = formatObserveResult(result, params.detail !== "summary" || params.view === "turns");
         const failed = result.reason === "timeout"
@@ -965,6 +1038,74 @@ export default function registerTeammateExtension(
     delivered: false,
     error: "The originating Pi session changed before delivery completed.",
   });
+
+  interface RootRemoteMonitorBinding {
+    fence: RootSessionFence;
+    monitorCapture: MonitorCommunicationCapture;
+    session: RemoteMonitorSession;
+  }
+
+  let remoteMonitorBinding: RootRemoteMonitorBinding | undefined;
+  const remoteMonitorShutdowns = new Set<Promise<void>>();
+
+  const currentRemoteMonitorBinding = (
+    binding: RootRemoteMonitorBinding | undefined = remoteMonitorBinding,
+  ): binding is RootRemoteMonitorBinding => Boolean(
+    binding
+    && remoteMonitorBinding === binding
+    && ownsRootSessionFence(binding.fence)
+    && ownsMonitorCommunication(binding.monitorCapture),
+  );
+
+  const ensureRemoteMonitorBinding = (): RootRemoteMonitorBinding => {
+    const existing = remoteMonitorBinding;
+    if (currentRemoteMonitorBinding(existing)) return existing;
+    if (existing) throw new Error("The previous remote Monitor owner has not finished shutting down.");
+    const fence = captureRootSessionFence();
+    const monitorCapture = captureMonitorCommunication();
+    if (!fence.sessionId) throw new Error("Remote workers require an active root Pi session.");
+    if (!monitorCapture || !ownsMonitorCommunication(monitorCapture)) {
+      throw new Error("Remote workers require active Monitor communication authority.");
+    }
+    const config = loadRemoteConfig(state.baseCwd || process.cwd());
+    let session: RemoteMonitorSession | undefined;
+    let binding: RootRemoteMonitorBinding | undefined;
+    const manager = new RemoteWorkerManager({
+      config,
+      connectionFactory: new SshRemoteConnectionFactory(),
+      onEvent: (capture, event) => session?.recordEvent(capture, event),
+      onSnapshot: (capture, snapshot) => session?.recordSnapshot(capture, snapshot),
+    });
+    session = new RemoteMonitorSession({
+      config,
+      manager,
+      isCurrent: () => currentRemoteMonitorBinding(binding),
+      persist: (entry) => {
+        if (!currentRemoteMonitorBinding(binding)) return;
+        try {
+          pi.appendEntry(REMOTE_HISTORY_ENTRY_TYPE, entry);
+        } catch (error) {
+          console.error("[pi-maestro-teammate] failed to persist bounded remote Monitor history:", error);
+        }
+      },
+    });
+    const createdBinding: RootRemoteMonitorBinding = { fence, monitorCapture, session };
+    binding = createdBinding;
+    remoteMonitorBinding = createdBinding;
+    return createdBinding;
+  };
+
+  const shutdownRemoteMonitorBinding = async (): Promise<void> => {
+    const binding = remoteMonitorBinding;
+    remoteMonitorBinding = undefined;
+    if (binding) {
+      const shutdown = binding.session.shutdown().finally(() => remoteMonitorShutdowns.delete(shutdown));
+      remoteMonitorShutdowns.add(shutdown);
+      await shutdown;
+      return;
+    }
+    if (remoteMonitorShutdowns.size > 0) await Promise.allSettled([...remoteMonitorShutdowns]);
+  };
 
   const interactionQueue = createTeammateInteractionQueue(pi, state);
   const foregroundToolRuns = new Set<string>();
@@ -1274,11 +1415,21 @@ export default function registerTeammateExtension(
     const fence = captureRootSessionFence();
     const { message, mode, signal } = request;
     const source = request.source ?? "system";
+    const authorized = (): boolean => request.source === "monitor"
+      ? request.authorize?.() === true
+      : request.authorize?.() !== false;
+    const authorityRevoked = (): SessionMessageResult => ({
+      delivered: false,
+      error: "Monitor communication authority was revoked before workspace publication.",
+    });
+    if (!authorized()) return authorityRevoked();
     if (mode === "abort") return { delivered: false, error: "Cross-session abort is not supported." };
     await workspacePeerLifecycle;
     if (!ownsRootSessionFence(fence)) return staleRootSessionResult();
+    if (!authorized()) return authorityRevoked();
     await refreshWorkspacePeerOwners();
     if (!ownsRootSessionFence(fence)) return staleRootSessionResult();
+    if (!authorized()) return authorityRevoked();
     const publisher = workspacePeerPublisher;
     if (!publisher) return { delivered: false, error: "Cross-session messaging is unavailable in this session." };
     let target: WorkspaceResolvedTarget | undefined;
@@ -1326,6 +1477,9 @@ export default function registerTeammateExtension(
         replyTo: request.replyTo ?? `owner:${publisher.identity.ownerId}`,
         fromSessionName: request.fromSessionName ?? workspacePeerSessionName,
         beforePublish(prepared) {
+          if (!authorized()) {
+            throw new Error("Monitor communication authority was revoked before command publication.");
+          }
           if (!ownsRootSessionFence(fence)) {
             throw new Error("The originating Pi session changed before command publication.");
           }
@@ -1350,6 +1504,9 @@ export default function registerTeammateExtension(
           registry.thread.record(outgoing);
         },
         beforeCommit() {
+          if (!authorized()) {
+            throw new Error("Monitor communication authority was revoked before command commit.");
+          }
           if (!ownsRootSessionFence(fence)) {
             throw new Error("The originating Pi session changed before command commit.");
           }
@@ -2113,6 +2270,8 @@ export default function registerTeammateExtension(
   };
 
   let bindMonitorSessionDispatch: ((toolCallId: string, agent: ActiveAgent) => void) | undefined;
+  let authorizeMonitorSessionDispatch: ((toolCallId: string) => boolean) | undefined;
+  let ownsMonitorSessionAuthority: ((agent: ActiveAgent) => boolean) | undefined;
   let publishMonitorSessionTurn: ((agent: ActiveAgent, result: SingleResult) => void) | undefined;
 
   // =========================================================================
@@ -2170,6 +2329,145 @@ export default function registerTeammateExtension(
       }
       const { isMultiTask } = normalization;
       const normalizedTasks = normalization.tasks;
+      const monitorSessionDispatch = !isMultiTask
+        && normalizedTasks[0]?.name === MONITOR_SESSION_NAME
+        && authorizeMonitorSessionDispatch?.(id) === true;
+      if (normalizedTasks.some((task) => task.name === MONITOR_SESSION_NAME) && !monitorSessionDispatch) {
+        return {
+          content: [{ type: "text", text: `Task name "${MONITOR_SESSION_NAME}" is reserved for the host-owned Monitor evaluator.` }],
+          isError: true,
+          details: { mode: isMultiTask ? inferGraphMode(normalizedTasks) : "single", results: [] },
+        };
+      }
+
+      // Ask-before-dispatch (configurable in /teammate-models · Ctrl+A): when
+      // enabled, the root tool call pauses for the user to confirm or pick the
+      // model provider/thinking per task before any agent is spawned. Nested
+      // dispatches proxied from child processes never ask — the gate only runs
+      // on the root execute path with an interactive UI.
+      let askBeforeDispatch = false;
+      try {
+        askBeforeDispatch = loadModelRoutingState(baseCwd).askBeforeDispatch;
+      } catch {
+        askBeforeDispatch = false;
+      }
+      if (askBeforeDispatch && ctx.hasUI && typeof ctx.ui?.custom === "function") {
+        const remoteLocations = (() => {
+          try {
+            const config = loadRemoteConfigState(baseCwd);
+            return Object.entries(config.config.targets).map(([id, target]) => ({
+              id,
+              driver: target.driver,
+              host: target.host,
+              cwd: target.cwd,
+            }));
+          } catch {
+            return [];
+          }
+        })();
+        const askResult = await showModelAskOverlay(ctx, {
+          tasks: normalizedTasks.map((task) => ({
+            agent: task.agent,
+            ...(task.name ? { name: task.name } : {}),
+            ...(task.model ? { model: task.model } : {}),
+            ...(task.thinking ? { thinking: task.thinking } : {}),
+            ...(task.cwd ? { cwd: task.cwd } : {}),
+            prompt: task.prompt,
+          })),
+          availableModels: refreshModelCatalog(ctx).models,
+          sessionModel: sessionModelId(ctx),
+          defaultCwd: ctx.cwd,
+          remoteLocations,
+          monitorActive: ownsMonitorCommunication(captureMonitorCommunication()),
+        });
+        if (askResult === null || !askResult.confirmed) {
+          return {
+            content: [{ type: "text", text: "Teammate dispatch cancelled by the user (ask-before-dispatch is enabled; disable it in /teammate-models · Ctrl+A)." }],
+            isError: true,
+            details: { mode: isMultiTask ? inferGraphMode(normalizedTasks) : "single", results: [] },
+          };
+        }
+        for (const [index, override] of askResult.overrides.entries()) {
+          if (!override) continue;
+          const task = normalizedTasks[index];
+          if (!task) continue;
+          if (override.model !== undefined) task.model = override.model ?? undefined;
+          if (override.thinking !== undefined) task.thinking = override.thinking ?? undefined;
+          if (override.cwd !== undefined) task.cwd = override.cwd ?? undefined;
+        }
+      }
+      const remoteLocatedTasks = normalizedTasks.filter((task) =>
+        typeof task.cwd === "string" && task.cwd.startsWith("remote:"),
+      );
+      if (remoteLocatedTasks.length > 0) {
+        if (isMultiTask || remoteLocatedTasks.length !== normalizedTasks.length) {
+          return {
+            content: [{ type: "text", text: "Remote working locations support only single-task dispatches; use a local location for graph tasks." }],
+            isError: true,
+            details: { mode: isMultiTask ? inferGraphMode(normalizedTasks) : "single", results: [] },
+          };
+        }
+        const targetId = remoteLocatedTasks[0]!.cwd!.slice("remote:".length);
+        const remoteSingleTask = normalizedTasks[0]!;
+        const monitorCapture = captureMonitorCommunication();
+        if (!ownsMonitorCommunication(monitorCapture)) {
+          return {
+            content: [{ type: "text", text: "Remote working locations require active Monitor mode." }],
+            isError: true,
+            details: { mode: "single", results: [] },
+          };
+        }
+        let binding: RootRemoteMonitorBinding;
+        try {
+          binding = ensureRemoteMonitorBinding();
+        } catch (error) {
+          return {
+            content: [{ type: "text", text: sanitizeRemoteMonitorError(error, "remote binding") }],
+            isError: true,
+            details: { mode: "single", results: [] },
+          };
+        }
+        try {
+          const run = await binding.session.create({
+            targetId,
+            name: remoteSingleTask.name ?? remoteSingleTask.agent,
+            objective: remoteSingleTask.prompt,
+            signal,
+          });
+          if (!ownsMonitorCommunication(monitorCapture)) {
+            return {
+              content: [{ type: "text", text: "Monitor mode ended before the remote dispatch could be admitted." }],
+              isError: true,
+              details: { mode: "single", results: [] },
+            };
+          }
+          syncMonitorInteractionStatus();
+          return {
+            content: [{
+              type: "text",
+              text: `Dispatched remote worker ${run.target} on ${run.targetId}. Track it with observe kind=remote id ${run.target}; use teammate-list view=remote or remote-worker close to manage it.`,
+            }],
+            isError: false,
+            details: {
+              mode: "single",
+              results: [{
+                agent: "remote",
+                name: remoteSingleTask.name ?? "remote",
+                task: remoteSingleTask.prompt,
+                correlationId: run.target,
+                exitCode: 0,
+                messages: [],
+              } as unknown as SingleResult],
+            },
+          };
+        } catch (error) {
+          return {
+            content: [{ type: "text", text: sanitizeRemoteMonitorError(error, "remote dispatch") }],
+            isError: true,
+            details: { mode: "single", results: [] },
+          };
+        }
+      }
       const budget = checkActiveAgentBudget(state, normalizedTasks.length);
       if (!budget.allowed) {
         return {
@@ -2298,7 +2596,9 @@ export default function registerTeammateExtension(
         expectsStructuredOutput: isMultiTask
           ? params.outputSchema !== undefined
           : singleTask.outputSchema !== undefined,
-        ...(isMultiTask ? { progress: progressSnapshot() } : {}),
+        ...(isMultiTask
+          ? { progress: progressSnapshot(), cwd: graphRunLocations(normalizedTasks, state.baseCwd || ctx.cwd) }
+          : { cwd: resolvedRunLocation(singleTask.cwd ?? params.cwd, state.baseCwd || ctx.cwd) }),
       };
       state.activeRuns.set(correlationId, activeAgent);
 
@@ -2388,7 +2688,7 @@ export default function registerTeammateExtension(
       if (!isMultiTask && singleTask.name) {
         bindAgentName(state, singleTask.name, correlationId);
       }
-      if (!isMultiTask && singleTask.name === MONITOR_SESSION_NAME) {
+      if (monitorSessionDispatch) {
         bindMonitorSessionDispatch?.(id, activeAgent);
       }
 
@@ -2609,7 +2909,7 @@ export default function registerTeammateExtension(
           runtimeGeneration: activeAgent.runtimeGeneration,
           ...(isMultiTask ? { taskSignals: taskAbortControllers.map((controller) => controller.signal) } : {}),
           parentSessionFile,
-          ...(singleTask.name === MONITOR_SESSION_NAME ? {
+          ...(monitorSessionDispatch ? {
             sessionDir: join(state.baseCwd || ctx.cwd, MONITOR_SESSION_RELATIVE_DIR, correlationId),
             childEnvironment: { [MONITOR_SESSION_ENV_VAR]: "1" },
           } : {}),
@@ -2978,6 +3278,14 @@ export default function registerTeammateExtension(
             cancelProxyDispatch(state, event.requestId);
             return;
           }
+          const proxyMonitorIdentityCurrent = (): boolean =>
+            ownsMonitorSessionAuthority?.(activeAgent) === true;
+          const proxyMonitorCapture = proxyMonitorIdentityCurrent()
+            ? captureMonitorCommunication()
+            : undefined;
+          const proxyCanCrossSession = (): boolean =>
+            proxyMonitorIdentityCurrent()
+            && ownsMonitorCommunication(proxyMonitorCapture);
           void handleProxyRequest(
             pi,
             state,
@@ -2994,27 +3302,39 @@ export default function registerTeammateExtension(
                 ? (request) => activeMailboxHost.rollout.deliver(request).then((r) => ({ path: r.path, result: r.result }))
                 : undefined;
             })(),
-            async (target, message, mode) => (await routeSessionMessage({
-              selector: target,
-              message,
-              mode,
-              source: activeAgent.name === "monitor-session" ? "monitor" : "system",
-              signal: activeAgent.abortController.signal,
-            })).delivered,
+            async (target, message, mode) => {
+              if (!proxyCanCrossSession()) return false;
+              const delivered = await routeSessionMessage({
+                selector: target,
+                message,
+                mode,
+                source: "monitor",
+                signal: activeAgent.abortController.signal,
+              });
+              return proxyCanCrossSession() && delivered.delivered;
+            },
             async () => {
+              if (!proxyCanCrossSession()) return [];
               await workspacePeerLifecycle;
               await refreshWorkspacePeerOwners();
-              return workspacePeerWindowListings();
+              return proxyCanCrossSession() ? workspacePeerWindowListings() : [];
             },
-            (request) => routeSessionMessage({
-              ...request,
-              source: activeAgent.name === "monitor-session" ? "monitor" : "system",
-              signal: activeAgent.abortController.signal,
-            }),
+            (request) => proxyCanCrossSession()
+              ? routeSessionMessage({
+                ...request,
+                source: "monitor",
+                authorize: proxyCanCrossSession,
+                signal: activeAgent.abortController.signal,
+              })
+              : Promise.resolve({
+                delivered: false,
+                error: "Cross-window communication requires an active Monitor session.",
+              }),
             async () => {
               await refreshModelRegistry(ctx);
               return refreshModelCatalog(ctx).models;
             },
+            { authorizeCrossSession: proxyCanCrossSession },
           );
           },
         };
@@ -3529,7 +3849,71 @@ export default function registerTeammateExtension(
         };
       }
 
+      const mode = requestedMode === "steer" || requestedMode === "abort" ? requestedMode : "follow_up";
       const cid = resolveAgentCorrelationId(state, params.to);
+      const monitorCapture = cid ? undefined : captureMonitorCommunication();
+      if (!cid && !ownsMonitorCommunication(monitorCapture)) {
+        return {
+          content: [{
+            type: "text",
+            text: `Agent "${params.to}" was not found among local teammates. Enter Monitor mode with /monitor before addressing another window or remote worker.`,
+          }],
+          isError: true,
+          details: { delivered: false },
+        };
+      }
+      if (!cid && params.to.startsWith("remote:")) {
+        if (mode === "abort") {
+          return {
+            content: [{ type: "text", text: "Cross-target teammate-send does not support abort for remote workers; use remote-worker close." }],
+            isError: true,
+            details: { delivered: false },
+          };
+        }
+        const binding = currentRemoteMonitorBinding() ? remoteMonitorBinding : undefined;
+        if (!binding || !binding.session.capture(params.to)) {
+          return {
+            content: [{ type: "text", text: `Remote target "${params.to}" is not owned by this Monitor session.` }],
+            isError: true,
+            details: { delivered: false },
+          };
+        }
+        const routedMode = messageKind === "status" ? "follow_up" : mode;
+        try {
+          const receipt = await binding.session.send(params.to, routedMode, message, messageKind, id, mode);
+          if (!ownsMonitorCommunication(monitorCapture)) {
+            return {
+              content: [{ type: "text", text: "Monitor mode ended during remote message delivery; the stale receipt was not published." }],
+              isError: true,
+              details: { delivered: false },
+            };
+          }
+          if (!receipt.accepted) {
+            return {
+              content: [{ type: "text", text: `Remote target "${params.to}" rejected the message.` }],
+              isError: true,
+              details: { delivered: false },
+            };
+          }
+          const queuedHint = receipt.receipt === "queued" || receipt.receipt === "accepted"
+            ? " Receipt confirms enqueueing only, not model consumption; do not resend without new evidence."
+            : "";
+          return {
+            content: [{
+              type: "text",
+              text: `Message ${receipt.receipt} for remote target "${params.to}" (kind ${messageKind}, requested ${mode}, effective ${receipt.effectiveMode}).${queuedHint}`,
+            }],
+            isError: false,
+            details: { delivered: true },
+          };
+        } catch (error) {
+          return {
+            content: [{ type: "text", text: sanitizeRemoteMonitorError(error, "message delivery") }],
+            isError: true,
+            details: { delivered: false },
+          };
+        }
+      }
       if (!cid && requestedMode === "abort") {
         return {
           content: [{ type: "text", text: "Cross-session targets support only steer and follow_up; abort is local-only." }],
@@ -3547,15 +3931,15 @@ export default function registerTeammateExtension(
         };
       }
 
-      const mode = requestedMode === "steer" || requestedMode === "abort" ? requestedMode : "follow_up";
       const routedMode = !cid && messageKind === "status" ? "follow_up" : mode;
       const delivery = await routeSessionMessage({
         selector: params.to,
         targetCorrelationId: cid,
         message,
         mode: routedMode,
-        source: id.startsWith("monitor-") ? "monitor" : "system",
+        source: cid ? "system" : "monitor",
         messageKind,
+        ...(!cid ? { authorize: () => ownsMonitorCommunication(monitorCapture) } : {}),
         signal,
       });
       if (!delivery.delivered) {
@@ -3632,6 +4016,14 @@ export default function registerTeammateExtension(
     },
   };
 
+  const localSendTool: ToolDefinition<typeof LocalTeammateSendParams, { delivered: boolean }> = {
+    ...sendTool,
+    description: LOCAL_TEAMMATE_SEND_DESCRIPTION,
+    promptSnippet: LOCAL_TEAMMATE_SEND_SNIPPET,
+    promptGuidelines: LOCAL_TEAMMATE_SEND_GUIDELINES,
+    parameters: LocalTeammateSendParams,
+  };
+
   // =========================================================================
   // Tool 3: teammate-list — list active agents
   // =========================================================================
@@ -3662,7 +4054,14 @@ export default function registerTeammateExtension(
           details: { agents: entries },
         };
       }
+      const monitorCapture = captureMonitorCommunication();
+      const monitorOnly = (): TeammateToolResult<{ agents: unknown[] }> => ({
+        content: [{ type: "text", text: "Cross-window teammate-list views are available only after the user enters Monitor mode with /monitor." }],
+        isError: true,
+        details: { agents: [] },
+      });
       if (view === "inbox") {
+        if (!ownsMonitorCommunication(monitorCapture)) return monitorOnly();
         try {
           const inbox = await loadWorkspaceWindowInbox(
             resolveWindowInboxAnchor(
@@ -3671,7 +4070,11 @@ export default function registerTeammateExtension(
             ),
             params,
           );
-          const entries = inbox.entries.map((entry) => ({ kind: "window-message" as const, ...entry }));
+          if (!ownsMonitorCommunication(monitorCapture)) return monitorOnly();
+          const entries = inbox.entries.map((entry) => ({
+            kind: entry.source === "remote" ? "remote-history" as const : "window-message" as const,
+            ...entry,
+          }));
           return {
             content: [{ type: "text", text: formatWorkspaceWindowInbox(inbox) }],
             isError: false,
@@ -3687,8 +4090,10 @@ export default function registerTeammateExtension(
         }
       }
       if (view === "windows") {
+        if (!ownsMonitorCommunication(monitorCapture)) return monitorOnly();
         await workspacePeerLifecycle;
         await refreshWorkspacePeerOwners();
+        if (!ownsMonitorCommunication(monitorCapture)) return monitorOnly();
         const entries = workspacePeerWindowListings().map((window) => ({
           kind: "window" as const,
           ...window,
@@ -3700,9 +4105,17 @@ export default function registerTeammateExtension(
           details: { agents: entries },
         };
       }
+      const local = buildAgentList(state, view as "active" | "named" | "all");
+      if (!ownsMonitorCommunication(monitorCapture)) {
+        return {
+          content: [{ type: "text", text: local.text }],
+          isError: false,
+          details: { agents: local.entries },
+        };
+      }
       await workspacePeerLifecycle;
       await refreshWorkspacePeerOwners();
-      const local = buildAgentList(state, view as "active" | "named" | "all");
+      if (!ownsMonitorCommunication(monitorCapture)) return monitorOnly();
       const remoteEntries = workspacePeerOwners.flatMap((owner) => {
         const active = owner.agents
           .filter((agent) => view !== "named" || Boolean(agent.name))
@@ -3761,6 +4174,25 @@ export default function registerTeammateExtension(
       return renderTeammateListCall(args, theme, context);
     },
 
+    renderResult(result, options, theme) {
+      return renderTeammateListResult(result, options, theme);
+    },
+  };
+
+  const localListTool: ToolDefinition<typeof LocalTeammateListParams, { agents: unknown[] }> = {
+    name: "teammate-list",
+    label: "Teammate List",
+    renderShell: "self",
+    description: LOCAL_TEAMMATE_LIST_DESCRIPTION,
+    promptSnippet: LOCAL_TEAMMATE_LIST_SNIPPET,
+    promptGuidelines: LOCAL_TEAMMATE_LIST_GUIDELINES,
+    parameters: LocalTeammateListParams,
+    async execute(id, params, signal, onUpdate, ctx) {
+      return listTool.execute(id, params, signal, onUpdate, ctx);
+    },
+    renderCall(args, theme, context) {
+      return renderTeammateListCall(args, theme, context);
+    },
     renderResult(result, options, theme) {
       return renderTeammateListResult(result, options, theme);
     },
@@ -3923,7 +4355,33 @@ export default function registerTeammateExtension(
     rejectResult: (error: Error) => void;
   }
 
+  interface MonitorSessionAuthority {
+    correlationId: string;
+    runtimeGeneration: number;
+    rootFence: RootSessionFence;
+  }
+
   const pendingMonitorTurns = new Map<string, PendingMonitorTurn>();
+  const monitorSessionAuthorities = new WeakMap<ActiveAgent, MonitorSessionAuthority>();
+
+  authorizeMonitorSessionDispatch = (toolCallId) => {
+    const pending = pendingMonitorTurns.get(toolCallId);
+    return pending !== undefined && pending.invocation === undefined;
+  };
+
+  ownsMonitorSessionAuthority = (agent) => {
+    const authority = monitorSessionAuthorities.get(agent);
+    return authority !== undefined
+      && authority.correlationId === agent.correlationId
+      && authority.runtimeGeneration === (agent.runtimeGeneration ?? 0)
+      && authority.rootFence.sessionId !== null
+      && ownsRootSessionFence(authority.rootFence)
+      && state.activeRuns.get(agent.correlationId) === agent
+      && [...pendingMonitorTurns.values()].some((pending) =>
+        pending.invocation?.correlationId === authority.correlationId
+        && pending.invocation.sessionIdentity === agent,
+      );
+  };
 
   const createPendingMonitorTurn = (requestId: string): PendingMonitorTurn => {
     let resolveInvocation!: (invocation: MonitorSessionInvocation) => void;
@@ -3960,6 +4418,11 @@ export default function registerTeammateExtension(
   bindMonitorSessionDispatch = (toolCallId, agent) => {
     const pending = pendingMonitorTurns.get(toolCallId);
     if (!pending || pending.invocation) return;
+    monitorSessionAuthorities.set(agent, {
+      correlationId: agent.correlationId,
+      runtimeGeneration: agent.runtimeGeneration ?? 0,
+      rootFence: captureRootSessionFence(),
+    });
     const invocation: MonitorSessionInvocation = {
       requestId: toolCallId,
       correlationId: agent.correlationId,
@@ -4094,23 +4557,36 @@ export default function registerTeammateExtension(
   const monitorRegistry = sessionHostRegistry;
   if (!monitorRegistry) throw new Error("Session host registry must exist before Monitor initialization.");
 
+  const currentRemoteMonitorRuns = (): RemoteMonitorRunListing[] => {
+    if (!monitorInteractionModeActive || monitorToolExposure?.active !== true) return [];
+    const binding = remoteMonitorBinding;
+    if (!currentRemoteMonitorBinding(binding)) return [];
+    return binding.session.list();
+  };
+
   const syncMonitorInteractionStatus = (runtimeStatus?: string): void => {
     if (!widgetCtx?.ui || typeof widgetCtx.ui.setStatus !== "function") return;
+    const remoteCount = currentRemoteMonitorRuns().length;
     widgetCtx.ui.setStatus(
       MONITOR_STATUS_KEY,
       monitorInteractionModeActive
-        ? runtimeStatus ?? `MONITOR · ${monitorEngine.bindings.size} window${monitorEngine.bindings.size === 1 ? "" : "s"}`
+        ? runtimeStatus ?? `MONITOR · ${monitorEngine.bindings.size} window${monitorEngine.bindings.size === 1 ? "" : "s"} · ${remoteCount} remote`
         : undefined,
     );
   };
 
   const enterMonitorInteractionMode = (): void => {
+    monitorToolExposure?.enter();
     monitorInteractionModeActive = true;
     syncMonitorInteractionStatus();
   };
 
   const exitMonitorInteractionMode = (): void => {
     monitorInteractionModeActive = false;
+    monitorToolExposure?.exit();
+    void shutdownRemoteMonitorBinding().catch((error) => {
+      console.error("[pi-maestro-teammate] remote Monitor generation shutdown failed:", sanitizeRemoteMonitorError(error, "shutdown"));
+    });
     monitorRegistry.setViewMode("agents");
     syncMonitorInteractionStatus();
   };
@@ -4183,7 +4659,7 @@ export default function registerTeammateExtension(
         : [];
     });
     monitorRegistry.setMonitoredEndpointIds(endpointIds);
-    if (endpointIds.length > 0) monitorInteractionModeActive = true;
+    if (endpointIds.length > 0 && !monitorInteractionExitInProgress) enterMonitorInteractionMode();
     syncMonitorInteractionStatus();
   };
 
@@ -4386,9 +4862,14 @@ export default function registerTeammateExtension(
         monitorRegistry.setViewMode("windows");
         return;
       }
-      await monitorControllerInstance.exit("user-exit");
-      syncMonitorRegistryBindings();
+      monitorInteractionExitInProgress = true;
       exitMonitorInteractionMode();
+      try {
+        await monitorControllerInstance.exit("user-exit");
+        syncMonitorRegistryBindings();
+      } finally {
+        monitorInteractionExitInProgress = false;
+      }
     },
     async setMonitored(endpointId, enabled, options = {}) {
       await refreshWorkspacePeerOwners();
@@ -5611,17 +6092,50 @@ export default function registerTeammateExtension(
   };
   registerObservationProvider(teammateObservationProvider);
 
+  const unavailableMonitorObservation = (
+    kind: "workspace" | "remote",
+    id: string,
+    message = `${kind === "workspace" ? "Workspace" : "Remote"} observation requires active Monitor mode.`,
+  ): ObservationSnapshot => ({
+    target: { kind, id },
+    found: false,
+    nativeStatus: "monitor-required",
+    phase: "unknown",
+    outcome: "aborted",
+    waitStatus: "aborted",
+    summary: message,
+    updatedAt: Date.now(),
+    error: "monitor-mode-required",
+  });
+
   const workspaceObservationSnapshot = async (
     id: string,
     detail: "summary" | "tail" | "full",
     lines: number,
     options: ObservationReadOptions = { detail, lines },
+    fence: RootSessionFence = captureRootSessionFence(),
+    monitorCapture: MonitorCommunicationCapture | undefined = captureMonitorCommunication(),
   ): Promise<ObservationSnapshot> => {
+    const target = { kind: "workspace", id };
+    if (!ownsMonitorCommunication(monitorCapture)) return unavailableMonitorObservation("workspace", id);
     await refreshWorkspacePeerOwners();
+    if (!ownsRootSessionFence(fence)) {
+      return {
+        target,
+        found: false,
+        nativeStatus: "stale-session",
+        phase: "unknown",
+        outcome: "aborted",
+        waitStatus: "aborted",
+        summary: `Workspace observation for ${id} was fenced because the root session changed.`,
+        updatedAt: Date.now(),
+        error: "stale-root-session",
+      };
+    }
+    if (!ownsMonitorCommunication(monitorCapture)) return unavailableMonitorObservation("workspace", id);
     const ownerId = id.startsWith("owner:") ? id.slice("owner:".length) : id;
     let owner = workspacePeerOwners.find((candidate) => candidate.ownerId === ownerId);
     if (!owner) owner = resolveWorkspaceOwnerByName(workspacePeerOwners, id);
-    const target = { kind: "workspace", id };
     if (!owner) {
       return {
         target,
@@ -5641,8 +6155,15 @@ export default function registerTeammateExtension(
       ...owner.agents.map((agent) => agent.status),
       ...backgroundJobs.map(() => "running"),
     ]);
+    const lifecycleSettled = backgroundJobs.length === 0
+      && owner.agents.every((agent) => agent.status !== "running");
+    const resultReady = !lifecycleSettled
+      && backgroundJobs.length === 0
+      && owner.agents.length > 0
+      && owner.agents.every((agent) => agent.status !== "running" || agent.resultReadyAt !== undefined);
+    const observationStatus = lifecycleSettled ? "completed" : resultReady ? "result-ready" : activeStatus;
     const output = [
-      `${owner.sessionName ?? `window:${owner.ownerId.slice(0, 8)}`} · ${activeStatus} · ${owner.agents.length} agents`
+      `${owner.sessionName ?? `window:${owner.ownerId.slice(0, 8)}`} · ${observationStatus} · ${owner.agents.length} agents`
         + ` · ${backgroundJobs.length} bash_bg${foregroundJobs.length ? ` (${foregroundJobs.length} foreground)` : ""}`,
       ...owner.agents.map((agent) => {
         const idle = Math.max(0, Math.round((Date.now() - agent.lastActivityAt) / 1000));
@@ -5660,9 +6181,14 @@ export default function registerTeammateExtension(
     return {
       target,
       found: true,
-      nativeStatus: activeStatus,
-      phase: "active",
-      summary: output[0] ?? activeStatus,
+      nativeStatus: observationStatus,
+      phase: lifecycleSettled ? "settled" : "active",
+      ...(lifecycleSettled ? {
+        outcome: "success" as const,
+        waitStatus: "completed" as const,
+        terminalStatus: "completed",
+      } : {}),
+      summary: output[0] ?? observationStatus,
       ...(detail === "summary" ? {} : { detail: output.slice(-Math.max(lines, 1) * 4) }),
       updatedAt: Date.now(),
       capabilities: { inspect: true, wait: true, cancel: false, message: true, supervise: true },
@@ -5751,17 +6277,105 @@ export default function registerTeammateExtension(
     };
   };
 
+  const waitForWorkspaceObservation = async (
+    id: string,
+    options: Parameters<ObservationProvider["wait"]>[1],
+  ): Promise<ObservationSnapshot> => {
+    const fence = captureRootSessionFence();
+    const monitorCapture = captureMonitorCommunication();
+    if (!ownsMonitorCommunication(monitorCapture)) return unavailableMonitorObservation("workspace", id);
+    let last = await workspaceObservationSnapshot(id, options.detail, options.lines, options, fence, monitorCapture);
+    while (true) {
+      if (last.waitStatus === "aborted" || !last.found) return last;
+      if (last.phase === "settled") {
+        return {
+          ...last,
+          outcome: "success",
+          waitStatus: "completed",
+          terminalStatus: last.terminalStatus ?? "completed",
+        };
+      }
+      if (options.until !== "completed" && last.nativeStatus === "result-ready") {
+        return { ...last, outcome: "success", waitStatus: "result-ready" };
+      }
+      if (options.signal.aborted) {
+        return { ...last, outcome: "aborted", waitStatus: "aborted", summary: `${last.summary} · observation aborted` };
+      }
+      const remaining = options.deadline - Date.now();
+      if (remaining <= 0) return { ...last, waitStatus: "timeout", summary: `${last.summary} · observation timed out` };
+      const pause = Math.min(100, remaining);
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = (): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          options.signal.removeEventListener("abort", finish);
+          resolve();
+        };
+        const timer = setTimeout(finish, pause);
+        if (options.signal.aborted) finish();
+        else options.signal.addEventListener("abort", finish, { once: true });
+      });
+      if (!ownsRootSessionFence(fence)) {
+        return {
+          target: { kind: "workspace", id },
+          found: false,
+          nativeStatus: "stale-session",
+          phase: "unknown",
+          outcome: "aborted",
+          waitStatus: "aborted",
+          summary: `Workspace observation for ${id} was fenced because the root session changed.`,
+          updatedAt: Date.now(),
+          error: "stale-root-session",
+        };
+      }
+      if (!ownsMonitorCommunication(monitorCapture)) return unavailableMonitorObservation("workspace", id);
+      last = await workspaceObservationSnapshot(id, options.detail, options.lines, options, fence, monitorCapture);
+    }
+  };
+
   registerObservationProvider({
     kind: "workspace",
     capabilities: { inspect: true, wait: true, cancel: false, message: true, supervise: true },
     snapshot: (id, options) => workspaceObservationSnapshot(id, options.detail, options.lines, options),
+    wait: waitForWorkspaceObservation,
+  });
+
+  const unavailableRemoteObservation = (id: string): ObservationSnapshot => ({
+    target: { kind: "remote", id },
+    found: false,
+    nativeStatus: "not-found",
+    phase: "unknown",
+    outcome: "failure",
+    waitStatus: "not-found",
+    summary: `Remote run ${id} is not owned by the current Monitor session.`,
+    updatedAt: Date.now(),
+    error: "remote-owner-unavailable",
+    capabilities: { inspect: true, wait: true, cancel: true, message: true, supervise: true },
+  });
+
+  registerObservationProvider({
+    kind: "remote",
+    capabilities: { inspect: true, wait: true, cancel: true, message: true, supervise: true },
+    snapshot: (id, options) => {
+      const monitorCapture = captureMonitorCommunication();
+      if (!ownsMonitorCommunication(monitorCapture)) return unavailableMonitorObservation("remote", id);
+      const binding = remoteMonitorBinding;
+      return currentRemoteMonitorBinding(binding)
+        ? binding.session.observation(id, options)
+        : unavailableRemoteObservation(id);
+    },
     wait: async (id, options) => {
-      const snapshot = await workspaceObservationSnapshot(id, options.detail, options.lines);
-      return {
-        ...snapshot,
-        waitStatus: snapshot.found ? "completed" : "not-found",
-        ...(snapshot.found ? { outcome: "success" as const } : {}),
-      };
+      const monitorCapture = captureMonitorCommunication();
+      if (!ownsMonitorCommunication(monitorCapture)) return unavailableMonitorObservation("remote", id);
+      const binding = remoteMonitorBinding;
+      const observation = currentRemoteMonitorBinding(binding)
+        ? await binding.session.waitObservation(id, options)
+        : unavailableRemoteObservation(id);
+      return ownsMonitorCommunication(monitorCapture)
+        ? observation
+        : unavailableMonitorObservation("remote", id);
     },
   });
 
@@ -5780,9 +6394,28 @@ export default function registerTeammateExtension(
       params: UnifiedObserveParams,
       signal: AbortSignal,
     ): Promise<TeammateToolResult<{ output: string[]; result: ObserveResult }>> {
+      const monitorCapture = captureMonitorCommunication();
+      const hasCrossWindowTarget = params.targets.some((target) => target.kind === "workspace" || target.kind === "remote");
+      const monitorOnly = (): TeammateToolResult<{ output: string[]; result: ObserveResult }> => {
+        const message = "Workspace and remote observation targets are available only after the user enters Monitor mode with /monitor.";
+        const denied: ObserveResult = {
+          action: params.action,
+          reason: params.action === "status" ? "snapshot" : "aborted",
+          observations: [],
+          durationMs: 0,
+        };
+        return {
+          content: [{ type: "text", text: message }],
+          isError: true,
+          details: { output: [message], result: denied },
+        };
+      };
+      if (hasCrossWindowTarget && !ownsMonitorCommunication(monitorCapture)) return monitorOnly();
       const result = await observeTargets(params, signal);
+      if (hasCrossWindowTarget && !ownsMonitorCommunication(monitorCapture)) return monitorOnly();
       const output = formatObserveResult(result, params.detail !== "summary" || params.view === "turns");
-      if (params.action === "watch" || params.action === "wait") {
+      if ((params.action === "watch" || params.action === "wait")
+        && ownsMonitorCommunication(monitorCapture)) {
         const since = Date.now() - result.durationMs;
         const queuedDuring = (sessionHostRegistry?.thread.list() ?? [])
           .filter((entry) =>
@@ -5822,6 +6455,33 @@ export default function registerTeammateExtension(
         : failed ? "failed" : "completed";
       return renderQuietTeammateAux("observe", rest, failed ? "failure" : "success", theme)
         ?? auxToolResultFallback(result, theme);
+    },
+  };
+
+  const localObserveTool: ToolDefinition<typeof LocalObserveParams, { output: string[]; result: ObserveResult }> = {
+    ...observeTool,
+    description: LOCAL_OBSERVE_DESCRIPTION,
+    promptSnippet: LOCAL_OBSERVE_SNIPPET,
+    promptGuidelines: LOCAL_OBSERVE_GUIDELINES,
+    parameters: LocalObserveParams,
+    async execute(id, params, signal, onUpdate, ctx) {
+      if (params.targets.some((target) => target.kind !== "teammate" && target.kind !== "bash_bg")) {
+        const message = "Non-Monitor observe accepts only local teammate and bash_bg targets.";
+        return {
+          content: [{ type: "text", text: message }],
+          isError: true,
+          details: {
+            output: [message],
+            result: {
+              action: params.action,
+              reason: params.action === "status" ? "snapshot" : "aborted",
+              observations: [],
+              durationMs: 0,
+            },
+          },
+        };
+      }
+      return observeTool.execute(id, params, signal, onUpdate, ctx);
     },
   };
 
@@ -5974,12 +6634,16 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
         details: { action: params.action, windows: workspaceWindowSnapshots() },
       });
 
-      if (!monitorInteractionModeActive) {
+      const monitorCapture = captureMonitorCommunication();
+      if (!ownsMonitorCommunication(monitorCapture)) {
         return result("workspace-window is available only after the user enters Monitor mode with /monitor.", true);
       }
 
       if (params.action === "list") {
         await refreshWorkspacePeerOwners();
+        if (!ownsMonitorCommunication(monitorCapture)) {
+          return result("Monitor mode ended during workspace-window list.", true);
+        }
         for (const window of managedWindows.values()) {
           if (window.sessionName === window.name || window.ownerId) continue;
           try {
@@ -6000,6 +6664,9 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
 
       if (params.action === "close") {
         const stopped = await stopManagedWindow(name);
+        if (!ownsMonitorCommunication(monitorCapture)) {
+          return result("Monitor mode ended during workspace-window close.", true);
+        }
         if (!stopped.ok) return result(stopped.error ?? `Failed to close ${name}.`, true);
         return result(`Closed Monitor-owned window ${name} (${stopped.status ?? "stopped"}).`);
       }
@@ -6020,6 +6687,9 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
 
       try {
         const owner = await waitForManagedWindowOwner(spawned.window, signal);
+        if (!ownsMonitorCommunication(monitorCapture)) {
+          throw new Error(`Monitor mode ended before window "${name}" could be admitted.`);
+        }
         if (managedWindows.get(name) !== spawned.window || !exactManagedWindowOwner(spawned.window)) {
           throw new Error(`window "${name}" changed owner before Monitor binding.`);
         }
@@ -6027,12 +6697,18 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
         const request = monitorBindingRequest(owner, "auto");
         if (!request) throw new Error(`window "${name}" changed endpoint before Monitor binding.`);
         const bound = await monitorControllerInstance.bind([request]);
+        if (!ownsMonitorCommunication(monitorCapture)) {
+          throw new Error(`Monitor mode ended while window "${name}" was being bound.`);
+        }
         syncMonitorRegistryBindings();
         if (bound.bound.length === 0) {
           throw new Error(bound.errors[0]?.error ?? `Failed to bind managed window "${name}".`);
         }
 
         await refreshWorkspacePeerOwnersStrict();
+        if (!ownsMonitorCommunication(monitorCapture)) {
+          throw new Error(`Monitor mode ended before window "${name}" binding was published.`);
+        }
         if (managedWindows.get(name) !== spawned.window || !exactManagedWindowOwner(spawned.window)) {
           throw new Error(`window "${name}" changed owner after Monitor binding.`);
         }
@@ -6056,15 +6732,125 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
     },
   };
 
+  interface RemoteWorkerToolParams {
+    action: "targets" | "create" | "list" | "close";
+    targetId?: string;
+    name?: string;
+    objective?: string;
+    runId?: string;
+  }
+
+  interface RemoteWorkerToolDetails {
+    action: RemoteWorkerToolParams["action"];
+    targets: RemoteMonitorTargetListing[];
+    runs: RemoteMonitorRunListing[];
+  }
+
+  const remoteWorkerTool: ToolDefinition<typeof RemoteWorkerParams, RemoteWorkerToolDetails> = {
+    name: "remote-worker",
+    label: "Remote Worker",
+    renderShell: "self",
+    description: `Create, list, or close SSH-backed remote runs owned by the active root Monitor session.
+
+This Monitor-only lifecycle tool loads configured target ids without exposing SSH credentials or trusted commands. Create returns only after the SSH gateway handshake, capability negotiation, remote start, and local ownership admission succeed. Runs are addressed by stable remote:<runId> targets. Close performs owner-fenced lifecycle cancellation; teammate-send abort remains unavailable for remote targets.`,
+    promptSnippet: "List configured remote targets or manage Monitor-owned remote runs.",
+    promptGuidelines: [
+      "Call targets before create when the configured target id is unknown.",
+      "Do not resend the create objective. Use teammate-send only for later corrections, constraints, explicit response requests, or safety instructions.",
+      "Observe remote runs with kind=remote and the returned remote:<runId> id.",
+      "Collect required results before close; close is restricted to runs admitted under this Monitor owner nonce.",
+    ],
+    parameters: RemoteWorkerParams,
+    async execute(
+      _id: string,
+      params: RemoteWorkerToolParams,
+      signal: AbortSignal,
+    ): Promise<TeammateToolResult<RemoteWorkerToolDetails>> {
+      const details = (): RemoteWorkerToolDetails => {
+        if (!ownsMonitorCommunication(captureMonitorCommunication())) {
+          return { action: params.action, targets: [], runs: [] };
+        }
+        const binding = remoteMonitorBinding;
+        if (!currentRemoteMonitorBinding(binding)) return { action: params.action, targets: [], runs: [] };
+        return { action: params.action, targets: binding.session.targets(), runs: binding.session.list() };
+      };
+      const result = (text: string, isError = false): TeammateToolResult<RemoteWorkerToolDetails> => ({
+        content: [{ type: "text", text }],
+        ...(isError ? { isError: true } : {}),
+        details: details(),
+      });
+
+      const monitorCapture = captureMonitorCommunication();
+      if (!ownsMonitorCommunication(monitorCapture)) {
+        return result("remote-worker is available only after the user enters Monitor mode with /monitor.", true);
+      }
+
+      try {
+        const binding = ensureRemoteMonitorBinding();
+        if (params.action === "targets") {
+          const targets = binding.session.targets();
+          if (targets.length === 0) return result("No configured remote worker targets.");
+          return result(targets.map((target) =>
+            `${target.id} · host=${target.hostId} · driver=${target.driver} · cwd=${target.cwd}`
+          ).join("\n"));
+        }
+        if (params.action === "list") {
+          const runs = binding.session.list();
+          if (runs.length === 0) return result("No remote runs owned by this Monitor session.");
+          return result(runs.map((run) =>
+            `${run.status === "completed" ? "✓" : run.status === "failed" || run.status === "lost" ? "✗" : "■"} ${run.target} · ${run.name ?? "remote"} · ${run.status} · target=${run.targetId}`
+          ).join("\n"));
+        }
+        if (params.action === "close") {
+          if (!params.runId) return result("runId is required for remote-worker close.", true);
+          const closed = await binding.session.closeRun(params.runId);
+          if (!ownsMonitorCommunication(monitorCapture)) {
+            return result("Monitor mode ended during remote-worker close.", true);
+          }
+          syncMonitorInteractionStatus();
+          if (!closed.accepted) return result(`Remote worker ${params.runId} rejected lifecycle cancellation.`, true);
+          return result(`Closed Monitor-owned remote worker ${params.runId} (${closed.status}).`);
+        }
+        if (!params.targetId || !params.name || !params.objective) {
+          return result("targetId, name, and objective are required for remote-worker create.", true);
+        }
+        const run = await binding.session.create({
+          targetId: params.targetId,
+          name: params.name,
+          objective: params.objective,
+          signal,
+        });
+        if (!ownsMonitorCommunication(monitorCapture)) {
+          return result("Monitor mode ended before the remote worker could be admitted.", true);
+        }
+        syncMonitorInteractionStatus();
+        return result(`Created remote worker ${run.target} on ${run.targetId} after SSH handshake and ownership admission.`);
+      } catch (error) {
+        return result(sanitizeRemoteMonitorError(error, "worker operation"), true);
+      }
+    },
+    renderCall(_args, theme, context) {
+      if (context.isPartial === false) return new Text("", 0, 0);
+      return auxToolCallFallback("remote-worker", theme);
+    },
+    renderResult(result, options, theme) {
+      if (options.isPartial) return new Text("", 0, 0);
+      return auxToolResultFallback(result, theme);
+    },
+  };
+
   // =========================================================================
   // Register tools (LLM-callable)
   // =========================================================================
 
   pi.registerTool(tool);
-  pi.registerTool(sendTool);
-  pi.registerTool(listTool);
-  pi.registerTool(observeTool);
+  monitorToolExposure = new MonitorToolExposureController(pi, {
+    local: [localSendTool, localListTool, localObserveTool],
+    monitor: [sendTool, listTool, observeTool],
+    exclusiveNames: ["workspace-window", "remote-worker"],
+  });
   pi.registerTool(workspaceWindowTool);
+  pi.registerTool(remoteWorkerTool);
   if (exposeLegacyObservationTools()) {
     pi.registerTool(watchTool);
     pi.registerTool(waitTool);
@@ -6490,6 +7276,21 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
   }
 
 
+  const testRemoteTarget = async (targetId: string, signal: AbortSignal): Promise<string> => {
+    let manager: RemoteWorkerManager | undefined;
+    try {
+      const config = loadRemoteConfig(state.baseCwd || process.cwd());
+      manager = new RemoteWorkerManager({ config, connectionFactory: new SshRemoteConnectionFactory() });
+      const view = await manager.connect(targetId, signal);
+      return `hello ${view.workerId} (${[...view.capabilities].join(", ")})`;
+    } catch (error) {
+      if (signal.aborted) return "timed out after the configured probe window";
+      return sanitizeRemoteMonitorError(error, "connection test");
+    } finally {
+      if (manager) await manager.close().catch(() => {});
+    }
+  };
+
   async function showTeammateControlCenter(ctx: ExtensionContext): Promise<void> {
     const activeAgents = Array.from(state.activeRuns.values())
       .filter((agent) => agent.status !== "completed")
@@ -6501,12 +7302,22 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
         startedAt: agent.startedAt,
         inboxCount: agent.inbox.length,
         taskCount: agent.progress?.length ?? 0,
+        cwd: agent.cwd,
       }));
     await showModelMappingOverlay(ctx, refreshModelCatalog(ctx).models, {
       agents: discoverAgents(ctx.cwd),
       activeAgents,
       modelHealth: sharedModelCircuitBreaker.snapshot(),
       onOpenAgent: async (correlationId) => showAttachOverlay(correlationId, ctx),
+      remoteState: (() => {
+        try {
+          return loadRemoteConfigState(ctx.cwd);
+        } catch {
+          return undefined;
+        }
+      })(),
+      onTestRemote: testRemoteTarget,
+      remoteTestTimeoutMs: 10_000,
     });
   }
 
@@ -6618,6 +7429,18 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
       });
       return [windowRow, ...agentRows];
     });
+    const remoteWorkerRows: MonitorSessionRow[] = currentRemoteMonitorRuns().map((run) => ({
+      correlationId: run.target,
+      displayName: run.name ?? run.target,
+      agentRole: `remote worker · ${run.targetId}`,
+      status: run.status,
+      idleSeconds: Math.max(0, Math.round((Date.now() - run.updatedAt) / 1000)),
+      bound: false,
+      source: run.target,
+      kind: "remote",
+      ownerId: run.target,
+      bindable: false,
+    }));
     const localWindowRow: MonitorSessionRow = {
       correlationId: "local",
       displayName: workspacePeerSessionName ?? tuiT("extension.currentWindow"),
@@ -6630,7 +7453,7 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
       ownerId: "local",
       bindable: false,
     };
-    return [localWindowRow, ...localAgents, ...remoteRows];
+    return [localWindowRow, ...localAgents, ...remoteRows, ...remoteWorkerRows];
   }
 
   // ---------------------------------------------------------------------------
@@ -6638,8 +7461,9 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
   // ---------------------------------------------------------------------------
 
   pi.registerCommand("teammate-send", {
-    description: "Send a message to another Pi session; without arguments, choose a session and enter the message.",
+    description: "Send a message to another Pi session while Monitor mode is active; without arguments, choose a session and enter the message.",
     getArgumentCompletions(prefix: string) {
+      if (!ownsMonitorCommunication(captureMonitorCommunication())) return null;
       void refreshWorkspacePeerOwners();
       const matches = monitorSessionRows()
         .filter((row) => row.kind === "window" && row.bindable === true)
@@ -6652,8 +7476,17 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
       return matches.length > 0 ? matches : null;
     },
     async handler(args: string, ctx) {
+      const monitorCapture = captureMonitorCommunication();
+      if (!ownsMonitorCommunication(monitorCapture)) {
+        ctx.ui.notify("/teammate-send is available only after entering Monitor mode with /monitor.", "warning");
+        return;
+      }
       await workspacePeerLifecycle;
       await refreshWorkspacePeerOwners();
+      if (!ownsMonitorCommunication(monitorCapture)) {
+        ctx.ui.notify("Monitor mode ended before cross-window messaging was ready.", "warning");
+        return;
+      }
 
       const trimmed = args.trim();
       let target: string | undefined;
@@ -6684,7 +7517,8 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
         selector: target,
         message,
         mode: "follow_up",
-        source: "user",
+        source: "monitor",
+        authorize: () => ownsMonitorCommunication(monitorCapture),
       });
       ctx.ui.notify(
         delivery.delivered
@@ -6983,20 +7817,25 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
       // /monitor status — show the independent monitor session and its bindings
       if (trimmed === "status") {
         const agent = monitorSessionAgent();
-        if (!monitorInteractionModeActive && !agent && monitorEngine.bindings.size === 0) {
+        const remoteRuns = currentRemoteMonitorRuns();
+        if (!monitorInteractionModeActive && !agent && monitorEngine.bindings.size === 0 && remoteRuns.length === 0) {
           ctx.ui.notify("Monitor session is not active. Use /monitor <targets...> to start.", "warning");
           return;
         }
         const targetLines = [...monitorEngine.bindings.values()].map((binding) =>
           `  ✓ ${binding.displayName} ${binding.mode}${binding.resumed ? " · resumed" : ""}`,
         );
+        const remoteLines = remoteRuns.map((run) =>
+          `  ${run.status === "completed" ? "✓" : run.status === "failed" || run.status === "lost" ? "✗" : "■"} ${run.target} ${run.status} · ${run.targetId}`,
+        );
         const outputTail = agent?.outputLog.slice(-3) ?? [];
         const ledgerLine = monitorLedgerState
           ? `ledger: ${monitorLedgerState.activeBindings.length} active · ${monitorLedgerState.disconnectedBindings.length} disconnected · ${monitorLedgerState.deadLetters.length} dead-letter`
           : "ledger: not loaded";
         const lines = [
-          `MONITOR SESSION ${monitorSessionStatus()} · ${monitorEngine.bindings.size} targets · ${ledgerLine}`,
+          `MONITOR SESSION ${monitorSessionStatus()} · ${monitorEngine.bindings.size} windows · ${remoteRuns.length} remote · ${ledgerLine}`,
           ...targetLines,
+          ...remoteLines,
           ...(outputTail.length ? ["  recent:", ...outputTail.map((line) => `    ${line}`)] : []),
         ];
         ctx.ui.notify(lines.join("\n"), "info");
@@ -7371,7 +8210,16 @@ This lifecycle tool is available only after the user enters Monitor mode with /m
     disposeTeammateSettings();
     stopWidgetTimer();
     stopWakeableEvictionTimer();
-    await monitorControllerInstance.shutdown();
+    const [localMonitorShutdown, remoteMonitorShutdown] = await Promise.allSettled([
+      monitorControllerInstance.shutdown(),
+      shutdownRemoteMonitorBinding(),
+    ]);
+    if (localMonitorShutdown.status === "rejected") {
+      console.error("[pi-maestro-teammate] local Monitor shutdown failed:", localMonitorShutdown.reason);
+    }
+    if (remoteMonitorShutdown.status === "rejected") {
+      console.error("[pi-maestro-teammate] remote Monitor shutdown failed:", sanitizeRemoteMonitorError(remoteMonitorShutdown.reason, "shutdown"));
+    }
     workspaceBackgroundJobs = [];
     activePromptLoopIds = [];
     workspacePeerLifecycle = workspacePeerLifecycle.then(async () => {

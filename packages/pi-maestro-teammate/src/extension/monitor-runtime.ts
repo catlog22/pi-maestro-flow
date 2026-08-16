@@ -194,6 +194,7 @@ export class MonitorRuntime {
           messageKind: "supervision",
           ...(traceId === undefined ? {} : { traceId }),
           ...(stableMessageId === undefined ? {} : { messageId: stableMessageId }),
+          authorize: () => this.isCaptureCurrent(capture),
           signal: this.engine.abortController?.signal,
         });
         if (!this.isCaptureCurrent(capture)) return false;

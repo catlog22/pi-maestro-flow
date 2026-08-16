@@ -18,8 +18,8 @@ export interface MonitorSessionRow {
     source?: string;
     /** Whether this session already has a monitor binding. */
     bound: boolean;
-    /** Row kind: "agent" (live sub-agent) or "window" (peer window). */
-    kind?: "agent" | "window";
+    /** Row kind: local agent, Pi workspace window, or owned remote worker. */
+    kind?: "agent" | "window" | "remote";
     /** Whether this row can be selected as a monitor target (windows only). */
     bindable?: boolean;
     /** Owner (window) key this row belongs to; groups rows into window trees. */

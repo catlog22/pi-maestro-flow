@@ -32,8 +32,8 @@ export interface MonitorSessionRow {
   source?: string;
   /** Whether this session already has a monitor binding. */
   bound: boolean;
-  /** Row kind: "agent" (live sub-agent) or "window" (peer window). */
-  kind?: "agent" | "window";
+  /** Row kind: local agent, Pi workspace window, or owned remote worker. */
+  kind?: "agent" | "window" | "remote";
   /** Whether this row can be selected as a monitor target (windows only). */
   bindable?: boolean;
   /** Owner (window) key this row belongs to; groups rows into window trees. */
@@ -95,12 +95,12 @@ function flattenTree(root: TreeNode, depth: number, isLast: boolean, continuatio
   return nodes;
 }
 
-/** Build a display tree: window roots → agents → nested sub-agents. */
+/** Build a display tree: window roots and remote workers, with nested local agents. */
 function buildTreeRows(sessions: MonitorSessionRow[]): FlatTreeNode[] {
-  const windowRoots = sessions.filter((row) => row.kind === "window");
+  const windowRoots = sessions.filter((row) => row.kind === "window" || row.kind === "remote");
   const agentsByOwner = new Map<string, MonitorSessionRow[]>();
   for (const row of sessions) {
-    if (row.kind === "window") continue;
+    if (row.kind === "window" || row.kind === "remote") continue;
     const ownerKey = row.ownerId ?? "local";
     let bucket = agentsByOwner.get(ownerKey);
     if (!bucket) {
@@ -185,10 +185,12 @@ export class MonitorOverlay {
       const pointer = isCursor ? accent("▸") : " ";
       const check = isSelected ? green("✓") : dim("○");
       const icon = statusIcon(s.status);
-      const idle = s.kind === "window" || s.status !== "running" ? "—" : `${s.idleSeconds}s`;
+      const idle = s.kind === "window" || s.kind === "remote" || s.status !== "running" ? "—" : `${s.idleSeconds}s`;
       const boundTag = s.bound ? dim(" [MON]") : "";
       const sourceTag = s.source && s.source !== "local" ? dim(` [${s.source}]`) : "";
-      const kindTag = s.kind === "window" ? dim(this.t("monitor.tag.window")) : dim(this.t("monitor.tag.agent"));
+      const kindTag = s.kind === "window"
+        ? dim(this.t("monitor.tag.window"))
+        : s.kind === "remote" ? dim("[Remote]") : dim(this.t("monitor.tag.agent"));
 
       const row = ` ${pointer} ${check} ${branch}${icon} ${kindTag} ${s.displayName}  ${dim(translateStatusIdentifier(s.status, this.t))}  ${dim(idle)}  ${dim(s.agentRole)}${sourceTag}${boundTag}`;
       lines.push(this.frameLine(isCursor ? accent(row) : row, inner, dim));
@@ -274,7 +276,9 @@ export class MonitorOverlay {
         if (s.bindable === false) {
           this.statusText = s.kind === "window"
             ? this.t("monitor.currentWindow")
-            : this.t("monitor.subagents");
+            : s.kind === "remote"
+              ? "Remote workers use remote-worker for lifecycle control."
+              : this.t("monitor.subagents");
         } else if (this.selected.has(s.correlationId)) {
           this.selected.delete(s.correlationId);
         } else {
@@ -293,7 +297,9 @@ export class MonitorOverlay {
         if (s.bindable === false) {
           this.statusText = s.kind === "window"
             ? this.t("monitor.currentWindow")
-            : this.t("monitor.subagents");
+            : s.kind === "remote"
+              ? "Remote workers use remote-worker for lifecycle control."
+              : this.t("monitor.subagents");
         } else if (this.selected.has(s.correlationId)) this.selected.delete(s.correlationId);
         else this.selected.add(s.correlationId);
       }

@@ -370,6 +370,8 @@ export interface SessionMessageRequest {
   targetCorrelationId?: string;
   /** Sender correlation id for local agent envelope formatting and inbox attribution. */
   senderCorrelationId?: string;
+  /** In-process authority fence checked immediately before external publication; never serialized. */
+  authorize?: () => boolean;
   signal?: AbortSignal;
 }
 

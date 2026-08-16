@@ -825,13 +825,9 @@ export function formatWorkspaceRemoteRootMessage(input: WorkspaceRemoteRootMessa
   const sender = input.fromSessionName
     ? JSON.stringify(input.fromSessionName)
     : `peer ${input.fromOwnerId.slice(0, 8)}`;
-  const replyTo = `owner:${input.fromOwnerId}`;
   return [
     `[workspace:${messageKind}] from ${sender}`,
     workspaceMessageBehavior(messageKind),
-    ...(messageKind === "request"
-      ? [`Reply with teammate-send to ${JSON.stringify(replyTo)} when the request needs a response.`]
-      : []),
     "---",
     input.message,
   ].join("\n");

@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Check } from "typebox/value";
 import {
+  LocalObserveParams,
+  LocalTeammateListParams,
+  LocalTeammateSendParams,
   ObserveParams,
+  RemoteWorkerParams,
+  TeammateListParams,
   TeammateMonitorParams,
   TeammateParams,
   TeammateSendParams,
@@ -100,6 +105,41 @@ test("teammate-send accepts typed cross-session message kinds", () => {
   assert.equal(Check(TeammateSendParams, { to: "owner:abc", message: "hi", kind: "instruction" }), false);
 });
 
+test("local teammate communication schemas exclude cross-window parameters", () => {
+  for (const view of ["active", "named", "all", "roles"] as const) {
+    assert.equal(Check(LocalTeammateListParams, { view }), true);
+  }
+  assert.equal(Check(LocalTeammateListParams, { view: "windows" }), false);
+  assert.equal(Check(LocalTeammateListParams, { view: "inbox" }), false);
+  assert.equal(Check(LocalTeammateListParams, { view: "active", peer: "owner:abc" }), false);
+
+  assert.equal(Check(LocalTeammateSendParams, { to: "worker", message: "hi" }), true);
+  assert.equal(Check(LocalTeammateSendParams, { to: "worker", mode: "abort" }), true);
+  assert.equal(Check(LocalTeammateSendParams, {
+    to: "owner:abc",
+    message: "hi",
+    kind: "coordination",
+  }), false);
+
+  assert.equal(Check(TeammateListParams, { view: "windows" }), true);
+  assert.equal(Check(TeammateListParams, { view: "inbox", limit: 10 }), true);
+});
+
+test("local observe schema accepts only local provider kinds", () => {
+  for (const kind of ["teammate", "bash_bg"] as const) {
+    assert.equal(Check(LocalObserveParams, {
+      action: "status",
+      targets: [{ kind, id: "worker" }],
+    }), true);
+  }
+  for (const kind of ["workspace", "remote", "workspace-alias", "custom-provider"] as const) {
+    assert.equal(Check(LocalObserveParams, {
+      action: "status",
+      targets: [{ kind, id: "worker" }],
+    }), false);
+  }
+});
+
 test("observe schema scopes wait parameters to wait and requires count thresholds", () => {
   const target = [{ kind: "teammate", id: "worker" }];
   assert.equal(Check(ObserveParams, { action: "status", targets: target }), true);
@@ -149,6 +189,25 @@ test("workspace-window schema scopes lifecycle fields to their actions", () => {
   assert.equal(Check(WorkspaceWindowParams, { action: "close", presentation: "interactive", name: "backend" }), false);
   assert.equal(Check(WorkspaceWindowParams, { action: "create", name: "bad name", objective: "Build API" }), false);
   assert.equal(Check(WorkspaceWindowParams, { action: "create", name: "backend", objective: "Build API", presentation: "other" }), false);
+});
+
+test("remote-worker schema scopes configured targets, creation, and owner-fenced close", () => {
+  assert.equal("target" in RemoteWorkerParams.properties, false);
+  assert.equal(Check(RemoteWorkerParams, { action: "targets" }), true);
+  assert.equal(Check(RemoteWorkerParams, { action: "list" }), true);
+  assert.equal(Check(RemoteWorkerParams, {
+    action: "create",
+    targetId: "linux/pi",
+    name: "review",
+    objective: "Review API",
+  }), true);
+  assert.equal(Check(RemoteWorkerParams, { action: "close", runId: "remote:run-1234" }), true);
+
+  assert.equal(Check(RemoteWorkerParams, { action: "create", name: "review", objective: "Review API" }), false);
+  assert.equal(Check(RemoteWorkerParams, { action: "close", runId: "run-1234" }), false);
+  assert.equal(Check(RemoteWorkerParams, { action: "list", targetId: "linux/pi" }), false);
+  assert.equal(Check(RemoteWorkerParams, { action: "targets", runId: "remote:run-1234" }), false);
+  assert.equal(Check(RemoteWorkerParams, { action: "create", targetId: "bad target", name: "review", objective: "Review API" }), false);
 });
 
 // ---------------------------------------------------------------------------

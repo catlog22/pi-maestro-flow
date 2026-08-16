@@ -15,6 +15,10 @@ import {
   loadWorkspaceWindowInbox,
   resolveWindowInboxAnchor,
 } from "../src/sessions/window-inbox.ts";
+import {
+  createRemoteHistoryEntry,
+  type RemoteHistoryEntry,
+} from "../src/sessions/remote-history.ts";
 import type { TeammateState } from "../src/shared/types.ts";
 
 const WORKSPACE_ID = "a".repeat(64);
@@ -58,6 +62,7 @@ function writeSession(
     id: string;
     name?: string;
     threads?: readonly WindowThreadEntry[];
+    remoteHistory?: readonly RemoteHistoryEntry[];
     injectedMessageIds?: readonly string[];
     extraLines?: readonly string[];
   },
@@ -70,6 +75,14 @@ function writeSession(
       customType: "teammate-window-thread",
       data: entry,
       id: `thread-${index}`,
+      parentId: null,
+      timestamp: new Date(entry.updatedAt).toISOString(),
+    })),
+    ...(options.remoteHistory ?? []).map((entry, index) => JSON.stringify({
+      type: "custom",
+      customType: "teammate-remote-history",
+      data: entry,
+      id: `remote-${index}`,
       parentId: null,
       timestamp: new Date(entry.updatedAt).toISOString(),
     })),
@@ -194,6 +207,87 @@ test("window inbox rejects ambiguous archived session aliases and skips malforme
   }
 });
 
+test("window inbox merges bounded remote messages, receipts, lifecycle, and results as history", async () => {
+  const dir = tmpDir();
+  try {
+    const base = {
+      target: "remote:run-1234",
+      runId: "run-1234",
+      targetId: "linux/pi",
+      source: "remote" as const,
+      requestedMode: "follow_up" as const,
+      createdAt: 1_000,
+    };
+    const remoteHistory = [
+      createRemoteHistoryEntry({
+        ...base,
+        entryId: "send-1",
+        kind: "message",
+        direction: "outgoing",
+        messageKind: "request",
+        body: "check remote build",
+        status: "pending",
+        updatedAt: 1_000,
+        revision: 1,
+      }),
+      createRemoteHistoryEntry({
+        ...base,
+        entryId: "send-1",
+        kind: "receipt",
+        direction: "outgoing",
+        messageKind: "request",
+        effectiveMode: "follow_up",
+        body: "check remote build",
+        status: "queued",
+        updatedAt: 1_100,
+        revision: 2,
+      }),
+      createRemoteHistoryEntry({
+        ...base,
+        entryId: "lifecycle-1",
+        kind: "lifecycle",
+        direction: "incoming",
+        messageKind: "status",
+        effectiveMode: "follow_up",
+        body: "Remote run transitioned to running.",
+        status: "accepted",
+        updatedAt: 1_200,
+        revision: 1,
+      }),
+      createRemoteHistoryEntry({
+        ...base,
+        entryId: "result-1",
+        kind: "result",
+        direction: "incoming",
+        messageKind: "status",
+        effectiveMode: "follow_up",
+        body: "remote build complete",
+        status: "accepted",
+        updatedAt: 1_300,
+        revision: 1,
+      }),
+    ];
+    const current = writeSession(dir, "current.jsonl", {
+      id: "current-session",
+      name: "monitor-root",
+      remoteHistory,
+    });
+
+    const result = await loadWorkspaceWindowInbox(current, { session: "current", peer: "remote:run-1234" });
+    assert.equal(result.entries.length, 3);
+    assert.equal(result.entries.find((entry) => entry.messageId === "send-1")?.status, "queued");
+    assert.deepEqual(new Set(result.entries.map((entry) => entry.remoteKind)), new Set(["receipt", "lifecycle", "result"]));
+    assert.equal(result.entries.every((entry) => entry.source === "remote" && entry.target === "remote:run-1234"), true);
+    const formatted = formatWorkspaceWindowInbox(result);
+    assert.match(formatted, /source=remote/);
+    assert.match(formatted, /peer=remote:run-1234/);
+    assert.match(formatted, /remote build complete/);
+    assert.doesNotMatch(formatted, /running=true|live=true/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("window inbox anchor prefers the root-owned session across context switches", () => {
   assert.equal(resolveWindowInboxAnchor("/root/main.jsonl", "/agent/checkpoint.jsonl"), "/root/main.jsonl");
   assert.equal(resolveWindowInboxAnchor(undefined, "/context/current.jsonl"), "/context/current.jsonl");
@@ -280,6 +374,17 @@ test("child proxy exposes the same persisted inbox view as the root tool", async
       state,
       { tool: "teammate-list", requestId: "inbox-proxy", params: { view: "inbox", session: "monitor" } },
       (message) => { response = message as Record<string, unknown>; },
+      undefined,
+      [],
+      undefined,
+      undefined,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { authorizeCrossSession: () => true },
     );
 
     const result = response?.result as {

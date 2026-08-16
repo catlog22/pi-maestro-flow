@@ -46,6 +46,8 @@ export interface GlobalModelRoutingStore {
     defaultProfile: string;
     profiles: Record<string, ModelRoutingProfile>;
     retiredProfileIds?: string[];
+    /** Ask the user to confirm/pick model provider + thinking before each root dispatch. */
+    askBeforeDispatch?: boolean;
 }
 export interface ProjectModelRoutingStore {
     version: 3;
@@ -63,6 +65,8 @@ export interface ModelRoutingState {
     global: GlobalModelRoutingStore;
     project: ProjectModelRoutingStore;
     config: ModelRoutingConfig;
+    /** Effective ask-before-dispatch flag (global store, default off). */
+    askBeforeDispatch: boolean;
     requestedProfile?: string;
     missingProfile?: string;
     changedProfileId?: string;
@@ -74,6 +78,15 @@ export interface TaskTypeInput {
 }
 export declare function getGlobalModelRoutingPath(): string;
 export declare function getProjectModelRoutingPath(cwd: string): string;
+/**
+ * Persist the ask-before-dispatch flag on the global teammate model config.
+ * The flag is user-level (not per profile/project): it controls whether the
+ * root teammate tool asks the user to confirm or pick model provider/thinking
+ * before every dispatch.
+ */
+export declare function setGlobalAskBeforeDispatch(enabled: boolean, globalFilePath?: string): boolean;
+/** Effective ask-before-dispatch flag without a cwd (global store only). */
+export declare function getGlobalAskBeforeDispatch(globalFilePath?: string): boolean;
 export declare function loadModelRoutingState(cwd: string, globalFilePath?: string): ModelRoutingState;
 export declare function loadModelRoutingConfig(cwd: string, globalFilePath?: string): ModelRoutingConfig;
 export interface ModelRoutingStorePair {

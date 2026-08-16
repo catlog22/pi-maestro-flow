@@ -76,9 +76,20 @@ test("model catalog signature changes when the same model capability changes", (
 
 test("session start snapshots models and before_agent_start refreshes changed registries", async () => {
   const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
+  const tools = new Map<string, { name: string; description?: string }>();
+  const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> | void }>();
+  let activeTools: string[] = [];
   const pi = new Proxy({
     events: { on: () => () => {}, emit() {} },
-    registerTool() {},
+    registerTool(tool: { name: string; description?: string }) {
+      tools.set(tool.name, tool);
+      if (!activeTools.includes(tool.name)) activeTools.push(tool.name);
+    },
+    registerCommand(name: string, command: { handler: (args: string, ctx: any) => Promise<void> | void }) {
+      commands.set(name, command);
+    },
+    getActiveTools() { return [...activeTools]; },
+    setActiveTools(names: string[]) { activeTools = [...names]; },
     on(event: string, handler: (event: any, ctx: any) => any) {
       const existing = handlers.get(event) ?? [];
       existing.push(handler);
@@ -96,10 +107,19 @@ test("session start snapshots models and before_agent_start refreshes changed re
   let models: AvailableModelEntry[] = [{ provider: "openai", id: "gpt-5" }];
   const ctx = {
     cwd: process.cwd(),
+    hasUI: true,
+    ui: {
+      notify() {},
+      setStatus() {},
+      setWidget() {},
+      onTerminalInput: () => () => {},
+    },
     modelRegistry: { getAvailable: () => models },
     sessionManager: {
       getSessionId: () => "session",
       getSessionFile: () => "session.jsonl",
+      getSessionName: () => "session",
+      getEntries: () => [],
     },
   };
 
@@ -111,6 +131,26 @@ test("session start snapshots models and before_agent_start refreshes changed re
     await handlers.get("session_start")![0]({}, ctx);
     const first = await handlers.get("before_agent_start")![0]({ systemPrompt: "base" }, ctx);
     assert.match(first.systemPrompt, /openai\/gpt-5/);
+    assert.doesNotMatch(first.systemPrompt, /<monitor_mode>/);
+    assert.match(tools.get("teammate-list")?.description ?? "", /owned by this Pi process/);
+    assert.equal(activeTools.includes("workspace-window"), false);
+    assert.equal(activeTools.includes("remote-worker"), false);
+
+    const monitorCommand = commands.get("monitor");
+    assert.ok(monitorCommand);
+    await monitorCommand.handler("", ctx);
+    assert.match(tools.get("teammate-list")?.description ?? "", /cross-session windows/);
+    assert.equal(activeTools.includes("workspace-window"), true);
+    assert.equal(activeTools.includes("remote-worker"), true);
+    const monitorPrompt = await handlers.get("before_agent_start")![0]({ systemPrompt: first.systemPrompt }, ctx);
+    assert.match(monitorPrompt.systemPrompt, /<monitor_mode>/);
+
+    await monitorCommand.handler("exit", ctx);
+    assert.match(tools.get("teammate-list")?.description ?? "", /owned by this Pi process/);
+    assert.equal(activeTools.includes("workspace-window"), false);
+    assert.equal(activeTools.includes("remote-worker"), false);
+    const restoredPrompt = await handlers.get("before_agent_start")![0]({ systemPrompt: monitorPrompt.systemPrompt }, ctx);
+    assert.doesNotMatch(restoredPrompt.systemPrompt, /<monitor_mode>/);
 
     models = [{ provider: "openai", id: "gpt-5", reasoning: true, thinkingLevelMap: { off: null } }];
     const capabilityRefresh = await handlers.get("before_agent_start")![0]({ systemPrompt: "base" }, ctx);

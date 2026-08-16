@@ -6,7 +6,9 @@ import type { TeammateModelCapability } from "../models/model-catalog.ts";
 import { type ModelRoutingRoleRules, type ModelRoutingRules, type ModelRoutingState, type ModelRoutingTypeMeta, type TeammateTaskType } from "../models/model-routing.ts";
 import { type TeammateThinkingLevel } from "../shared/thinking.ts";
 import { type SupportedSettingsLocale } from "./locale.ts";
-export type ControlCenterTab = "profiles" | "routing" | "roles" | "active";
+import { type RemotePaneAction } from "./remote-config-pane.ts";
+import { type RemoteConfigState } from "../remote/config.ts";
+export type ControlCenterTab = "profiles" | "routing" | "roles" | "remotes" | "active";
 export interface ControlCenterActiveAgent {
     correlationId: string;
     agent: string;
@@ -15,6 +17,8 @@ export interface ControlCenterActiveAgent {
     startedAt: number;
     inboxCount: number;
     taskCount: number;
+    /** Resolved working directory of the run, when known. */
+    cwd?: string;
 }
 interface ControlCenterTheme {
     fg(role: string, text: string): string;
@@ -32,12 +36,17 @@ export type ControlCenterAction = {
     profileId: string;
     profileQuery: string;
     tab: ControlCenterTab;
-};
+} | RemotePaneAction;
 export interface TeammateControlCenterOptions {
     agents?: readonly AgentConfig[];
     activeAgents?: readonly ControlCenterActiveAgent[];
     modelHealth?: readonly ModelCircuitSnapshot[];
     onOpenAgent?: (correlationId: string) => Promise<void>;
+    /** Remote configuration state for the Remotes tab. */
+    remoteState?: RemoteConfigState;
+    /** Probe a remote target (SSH handshake + protocol initialize); result text is already redacted. */
+    onTestRemote?: (targetId: string, signal: AbortSignal) => Promise<string>;
+    remoteTestTimeoutMs?: number;
     globalFilePath?: string;
     locale?: SupportedSettingsLocale;
 }
@@ -54,6 +63,9 @@ interface TeammateControlCenterParams {
     activeAgents: readonly ControlCenterActiveAgent[];
     state?: ModelRoutingState;
     config?: LegacyControlCenterConfig;
+    remoteState?: RemoteConfigState;
+    onTestRemote?: (targetId: string, signal: AbortSignal) => Promise<string>;
+    remoteTestTimeoutMs?: number;
     theme: ControlCenterTheme;
     initialTab?: ControlCenterTab;
     initialProfileId?: string;
@@ -110,6 +122,7 @@ export declare class TeammateControlCenter implements Component, Focusable {
     private readonly agents;
     private taskTypes;
     private readonly activeAgents;
+    private readonly remotePane;
     private readonly t;
     private readonly localeDisposer;
     constructor(params: TeammateControlCenterParams);
@@ -181,8 +194,12 @@ export declare class TeammateControlCenter implements Component, Focusable {
     private emptyState;
     private headerLine;
     private tabLine;
+    private remoteCount;
     private filterLine;
     private statusLine;
+    /** Routing tab toggle row: ask the user to pick model provider before dispatch. */
+    private askToggleLine;
+    private toggleAskBeforeDispatch;
     private footerLine;
     private frame;
     private renderCompact;

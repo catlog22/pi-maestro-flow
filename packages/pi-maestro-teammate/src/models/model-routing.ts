@@ -76,6 +76,8 @@ export interface GlobalModelRoutingStore {
   defaultProfile: string;
   profiles: Record<string, ModelRoutingProfile>;
   retiredProfileIds?: string[];
+  /** Ask the user to confirm/pick model provider + thinking before each root dispatch. */
+  askBeforeDispatch?: boolean;
 }
 
 export interface ProjectModelRoutingStore {
@@ -105,6 +107,8 @@ export interface ModelRoutingState {
   global: GlobalModelRoutingStore;
   project: ProjectModelRoutingStore;
   config: ModelRoutingConfig;
+  /** Effective ask-before-dispatch flag (global store, default off). */
+  askBeforeDispatch: boolean;
   requestedProfile?: string;
   missingProfile?: string;
   changedProfileId?: string;
@@ -506,7 +510,7 @@ function invalidGlobalStore(): never {
 
 function normalizeGlobalStore(parsed: Record<string, unknown> | undefined): GlobalModelRoutingStore {
   if (parsed?.version === 3) {
-    assertKnownKeys(parsed, ["version", "defaultProfile", "profiles", "retiredProfileIds"], "v3 global config");
+    assertKnownKeys(parsed, ["version", "defaultProfile", "profiles", "retiredProfileIds", "askBeforeDispatch"], "v3 global config");
     if (!parsed.profiles || typeof parsed.profiles !== "object" || Array.isArray(parsed.profiles)) {
       return invalidGlobalStore();
     }
@@ -542,11 +546,15 @@ function normalizeGlobalStore(parsed: Record<string, unknown> | undefined): Glob
         )
         ? [...new Set(parsed.retiredProfileIds as string[])]
         : invalidGlobalStore();
+    if (parsed.askBeforeDispatch !== undefined && typeof parsed.askBeforeDispatch !== "boolean") {
+      return invalidGlobalStore();
+    }
     return {
       version: 3,
       defaultProfile: requestedDefault,
       profiles,
       ...(retiredProfileIds.length > 0 ? { retiredProfileIds } : {}),
+      ...(parsed.askBeforeDispatch === true ? { askBeforeDispatch: true } : {}),
     };
   }
   if (parsed?.version !== undefined && parsed.version !== 1 && parsed.version !== 2) {
@@ -1093,9 +1101,44 @@ function resolvedState(
       projectOverridesEnabled: project.applyOverrides,
       ...rules,
     },
+    askBeforeDispatch: global.askBeforeDispatch === true,
     requestedProfile,
     ...(missingProfile ? { missingProfile } : {}),
   };
+}
+
+/**
+ * Persist the ask-before-dispatch flag on the global teammate model config.
+ * The flag is user-level (not per profile/project): it controls whether the
+ * root teammate tool asks the user to confirm or pick model provider/thinking
+ * before every dispatch.
+ */
+export function setGlobalAskBeforeDispatch(
+  enabled: boolean,
+  globalFilePath = getGlobalModelRoutingPath(),
+): boolean {
+  return withGlobalConfigLock(globalFilePath, () => {
+    const store = readGlobalStore(globalFilePath);
+    const next: GlobalModelRoutingStore = enabled
+      ? { ...store, askBeforeDispatch: true }
+      : (() => {
+        const { askBeforeDispatch: _dropped, ...rest } = store;
+        return rest;
+      })();
+    writeJson(globalFilePath, next);
+    return enabled;
+  });
+}
+
+/** Effective ask-before-dispatch flag without a cwd (global store only). */
+export function getGlobalAskBeforeDispatch(
+  globalFilePath = getGlobalModelRoutingPath(),
+): boolean {
+  try {
+    return readGlobalStore(globalFilePath).askBeforeDispatch === true;
+  } catch {
+    return false;
+  }
 }
 
 function fileSignature(filePath: string): string {

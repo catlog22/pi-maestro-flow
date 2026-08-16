@@ -378,6 +378,9 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     assert.match(toolText, /Prefer the teammate tool/);
     assert.doesNotMatch(toolText, /# Approved/);
     assert.match(toolText, /already in the current context/);
+    assert.match(toolText, /Knowledge Gate/);
+    assert.match(toolText, /maestro search/);
+    assert.match(toolText, /maestro load/);
     assert.match(toolText, /Todo dependency graph/);
     assert.match(toolText, /quality gate/);
     assert.match(toolText, /acceptance criteria/);

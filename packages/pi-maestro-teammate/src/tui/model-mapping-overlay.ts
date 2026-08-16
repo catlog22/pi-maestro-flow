@@ -33,6 +33,7 @@ import {
   saveGlobalProfileTypeMeta,
   saveProjectFallbackMapping,
   setDefaultGlobalModelRoutingProfile,
+  setGlobalAskBeforeDispatch,
   setProjectActiveModelRoutingProfile,
   setProjectModelRoutingOverridesEnabled,
   type ModelRoutingConfig,
@@ -57,8 +58,21 @@ import {
   type TuiTranslationKey,
   type TuiTranslator,
 } from "./locale.ts";
+import {
+  RemoteConfigPane,
+  type RemotePaneAction,
+  type RemotePaneScope,
+} from "./remote-config-pane.ts";
+import {
+  loadRemoteConfigState,
+  replaceRemoteConfigStores,
+  validateRemoteHostDraft,
+  validateRemoteTargetDraft,
+  type RemoteConfigState,
+} from "../remote/config.ts";
+import type { RemoteHostConfig, RemoteTargetConfig } from "../remote/types.ts";
 
-export type ControlCenterTab = "profiles" | "routing" | "roles" | "active";
+export type ControlCenterTab = "profiles" | "routing" | "roles" | "remotes" | "active";
 
 export interface ControlCenterActiveAgent {
   correlationId: string;
@@ -68,6 +82,8 @@ export interface ControlCenterActiveAgent {
   startedAt: number;
   inboxCount: number;
   taskCount: number;
+  /** Resolved working directory of the run, when known. */
+  cwd?: string;
 }
 
 interface ControlCenterTheme {
@@ -78,13 +94,19 @@ interface ControlCenterTheme {
 export type ControlCenterAction =
   | { kind: "open-agent"; correlationId: string; tab: ControlCenterTab }
   | { kind: "reload"; tab: ControlCenterTab }
-  | { kind: "manage-profile"; profileId: string; profileQuery: string; tab: ControlCenterTab };
+  | { kind: "manage-profile"; profileId: string; profileQuery: string; tab: ControlCenterTab }
+  | RemotePaneAction;
 
 export interface TeammateControlCenterOptions {
   agents?: readonly AgentConfig[];
   activeAgents?: readonly ControlCenterActiveAgent[];
   modelHealth?: readonly ModelCircuitSnapshot[];
   onOpenAgent?: (correlationId: string) => Promise<void>;
+  /** Remote configuration state for the Remotes tab. */
+  remoteState?: RemoteConfigState;
+  /** Probe a remote target (SSH handshake + protocol initialize); result text is already redacted. */
+  onTestRemote?: (targetId: string, signal: AbortSignal) => Promise<string>;
+  remoteTestTimeoutMs?: number;
   globalFilePath?: string;
   locale?: SupportedSettingsLocale;
 }
@@ -103,6 +125,9 @@ interface TeammateControlCenterParams {
   activeAgents: readonly ControlCenterActiveAgent[];
   state?: ModelRoutingState;
   config?: LegacyControlCenterConfig;
+  remoteState?: RemoteConfigState;
+  onTestRemote?: (targetId: string, signal: AbortSignal) => Promise<string>;
+  remoteTestTimeoutMs?: number;
   theme: ControlCenterTheme;
   initialTab?: ControlCenterTab;
   initialProfileId?: string;
@@ -127,7 +152,7 @@ interface TeammateControlCenterParams {
 }
 
 const SOURCE_ORDER: Record<AgentSource, number> = { package: 0, project: 1, user: 2, builtin: 3 };
-const TAB_ORDER: ControlCenterTab[] = ["profiles", "routing", "roles", "active"];
+const TAB_ORDER: ControlCenterTab[] = ["profiles", "routing", "roles", "remotes", "active"];
 
 function tabLabel(tab: ControlCenterTab, t: TuiTranslator): string {
   return t(`model.tab.${tab}` as TuiTranslationKey);
@@ -267,6 +292,7 @@ function stateFromLegacyConfig(config?: LegacyControlCenterConfig): ModelRouting
       projectOverridesEnabled: config?.projectOverridesEnabled ?? false,
       ...rulesFromProfile(profile),
     },
+    askBeforeDispatch: false,
     requestedProfile: profileId,
   };
 }
@@ -301,9 +327,9 @@ export class TeammateControlCenter implements Component, Focusable {
   private customTypeDraft = "";
   private keywordsInput: { kind: "create" | "edit"; taskType: TeammateTaskType } | null = null;
   private keywordsDraft = "";
-  private readonly queries: Record<ControlCenterTab, string> = { profiles: "", routing: "", roles: "", active: "" };
+  private readonly queries: Record<ControlCenterTab, string> = { profiles: "", routing: "", roles: "", remotes: "", active: "" };
   private modelQuery = "";
-  private readonly selected: Record<ControlCenterTab, number> = { profiles: 0, routing: 0, roles: 0, active: 0 };
+  private readonly selected: Record<ControlCenterTab, number> = { profiles: 0, routing: 0, roles: 0, remotes: 0, active: 0 };
   private modelSelected = 0;
   private saving = false;
   private statusText = "";
@@ -322,6 +348,7 @@ export class TeammateControlCenter implements Component, Focusable {
   private readonly agents: AgentConfig[];
   private taskTypes: TeammateTaskType[];
   private readonly activeAgents: ControlCenterActiveAgent[];
+  private readonly remotePane: RemoteConfigPane | undefined;
   private readonly t: TuiTranslator;
   private readonly localeDisposer: () => void;
 
@@ -372,6 +399,17 @@ export class TeammateControlCenter implements Component, Focusable {
     this.activeAgents = [...params.activeAgents].sort((left, right) =>
       left.status.localeCompare(right.status) || left.startedAt - right.startedAt
     );
+    this.remotePane = params.remoteState
+      ? new RemoteConfigPane({
+          state: params.remoteState,
+          theme: params.theme as unknown as { fg(role: string, text: string): string; bold(text: string): string },
+          t: this.t,
+          requestRender: () => params.requestRender(),
+          close: (action) => params.close(action),
+          onTest: params.onTestRemote ?? (() => Promise.resolve("")),
+          ...(params.remoteTestTimeoutMs === undefined ? {} : { testTimeoutMs: params.remoteTestTimeoutMs }),
+        })
+      : undefined;
   }
 
   invalidate(): void {}
@@ -380,6 +418,7 @@ export class TeammateControlCenter implements Component, Focusable {
     this.localeDisposer();
     if (this.pasteFlushTimer) clearTimeout(this.pasteFlushTimer);
     if (this.persistenceTimer) clearTimeout(this.persistenceTimer);
+    this.remotePane?.dispose();
   }
 
   handleInput(data: string): void {
@@ -409,6 +448,20 @@ export class TeammateControlCenter implements Component, Focusable {
   }
 
   private dispatchDecodedToken(token: DecodedInputToken): void {
+    if (this.tab === "remotes" && this.remotePane) {
+      const text = token.kind === "paste" ? token.text : token.text;
+      if (matchesKey(text, Key.tab)
+        || matchesKey(text, Key.shift("tab"))
+        || matchesKey(text, Key.left)
+        || matchesKey(text, Key.right)) {
+        this.handleDecodedInput(text);
+        return;
+      }
+      this.remotePane.handleInput(text);
+      this.statusText = "";
+      this.params.requestRender();
+      return;
+    }
     if (token.kind === "paste") {
       if (this.keywordsInput) {
         this.keywordsDraft += token.text;
@@ -428,6 +481,19 @@ export class TeammateControlCenter implements Component, Focusable {
   }
 
   private handleDecodedInput(data: string): void {
+    if (this.tab === "remotes" && this.remotePane) {
+      if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
+        this.switchTab(1);
+        return;
+      }
+      if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
+        this.switchTab(-1);
+        return;
+      }
+      this.remotePane.handleInput(data);
+      this.params.requestRender();
+      return;
+    }
     if (this.keywordsInput) {
       this.handleKeywordsInput(data);
       return;
@@ -511,6 +577,10 @@ export class TeammateControlCenter implements Component, Focusable {
       this.deleteSelectedCustomType();
       return;
     }
+    if (matchesKey(data, Key.ctrl("a")) && this.tab === "routing") {
+      this.toggleAskBeforeDispatch();
+      return;
+    }
     const input = printableInput(data);
     if (input) {
       this.queries[this.tab] += input;
@@ -523,6 +593,7 @@ export class TeammateControlCenter implements Component, Focusable {
   render(width: number): string[] {
     const w = Math.max(1, Math.min(width, 112));
     this.lastWidth = w;
+    if (this.tab === "remotes" && this.remotePane) return this.remotePane.render(w);
     const editing = !this.keywordsInput && !this.customTypeInput && (this.modelTaskType ?? this.modelRole);
     if (w < 24 || (editing && w < 40)) return [this.renderCompact(w)];
     return editing ? this.renderModels(w) : this.renderMain(w);
@@ -1948,6 +2019,10 @@ export class TeammateControlCenter implements Component, Focusable {
     }
     rows.push(this.filterLine(inner, this.queries[this.tab], items.length));
     rows.push(this.params.theme.fg("dim", "─".repeat(inner)));
+    if (this.tab === "routing") {
+      rows.push(this.askToggleLine(inner));
+      rows.push(this.params.theme.fg("dim", "─".repeat(inner)));
+    }
 
     const terminalRows = Math.max(14, process.stdout?.rows ?? 30);
     const listRows = Math.max(4, Math.min(10, terminalRows - 12));
@@ -2295,6 +2370,9 @@ export class TeammateControlCenter implements Component, Focusable {
         inbox: agent.inboxCount,
         tasks: agent.taskCount,
       })));
+      lines.push(this.params.theme.fg("dim", this.t("model.location", {
+        location: displayText(agent.cwd ?? this.t("model.locationDefault")),
+      })));
       lines.push(this.params.theme.fg("dim", this.t("model.profileId", {
         id: displayText(agent.correlationId.slice(0, 12)),
       })));
@@ -2334,13 +2412,24 @@ export class TeammateControlCenter implements Component, Focusable {
           ? this.taskTypes.length
           : tab === "roles"
             ? this.agents.length
-            : this.activeAgents.length;
+            : tab === "remotes"
+              ? this.remoteCount()
+              : this.activeAgents.length;
       const label = `${tabLabel(tab, this.t)} ${count}`;
       return tab === this.tab
         ? this.params.theme.fg("accent", this.params.theme.bold(`[${label}]`))
         : this.params.theme.fg("dim", label);
     });
     return truncateToWidth(labels.join("  "), width, "…");
+  }
+
+  private remoteCount(): number {
+    const state = this.params.remoteState;
+    if (!state) return 0;
+    return Object.keys(state.global.hosts).length
+      + Object.keys(state.global.targets).length
+      + Object.keys(state.project.hosts).length
+      + Object.keys(state.project.targets).length;
   }
 
   private filterLine(width: number, query: string, count: number): string {
@@ -2353,6 +2442,37 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private statusLine(width: number): string {
     return truncateToWidth(this.params.theme.fg(this.statusTone, displayText(this.statusText)), width, "…");
+  }
+
+  /** Routing tab toggle row: ask the user to pick model provider before dispatch. */
+  private askToggleLine(width: number): string {
+    const enabled = this.state.askBeforeDispatch;
+    const check = enabled
+      ? this.params.theme.fg("success", "✓")
+      : this.params.theme.fg("dim", " ");
+    const label = enabled ? this.t("model.askToggleOn") : this.t("model.askToggleOff");
+    const hint = this.params.theme.fg("dim", this.t("model.askToggleHint"));
+    return truncateToWidth(`${check} ${label} ${hint}`, width, "…");
+  }
+
+  private toggleAskBeforeDispatch(): void {
+    if (this.params.readOnly) {
+      this.params.close({ kind: "reload", tab: this.tab });
+      return;
+    }
+    const enabled = !this.state.askBeforeDispatch;
+    try {
+      setGlobalAskBeforeDispatch(enabled, this.params.globalFilePath);
+      this.state.askBeforeDispatch = enabled;
+      this.statusTone = "success";
+      this.statusText = this.t(enabled ? "model.askToggleEnabled" : "model.askToggleDisabled");
+    } catch (error) {
+      this.statusTone = "error";
+      this.statusText = this.t("model.saveFailed", {
+        message: displayText(error instanceof Error ? error.message : String(error)),
+      });
+    }
+    this.params.requestRender();
   }
 
   private footerLine(width: number): string {
@@ -2534,6 +2654,17 @@ export async function showModelMappingOverlay(
   let initialStatusText = "";
   let initialStatusTone: "dim" | "success" | "error" = "dim";
   let lastState: ModelRoutingState | undefined;
+  let remoteState: RemoteConfigState | undefined;
+  if (options.remoteState) {
+    try {
+      remoteState = loadRemoteConfigState(ctx.cwd, options.globalFilePath);
+    } catch (error) {
+      initialStatusTone = "error";
+      initialStatusText = t("remote.loadFailed", {
+        message: displayText(error instanceof Error ? error.message : String(error)),
+      });
+    }
+  }
   while (true) {
     let state: ModelRoutingState;
     let usingFallback = false;
@@ -2556,6 +2687,9 @@ export async function showModelMappingOverlay(
         agents: options.agents ?? [],
         activeAgents: options.activeAgents ?? [],
         state,
+        remoteState,
+        onTestRemote: options.onTestRemote,
+        remoteTestTimeoutMs: options.remoteTestTimeoutMs,
         theme,
         initialTab,
         initialProfileId,
@@ -2584,6 +2718,23 @@ export async function showModelMappingOverlay(
     });
 
     if (!action) return;
+    if (isRemotePaneAction(action)) {
+      initialTab = "remotes";
+      const outcome = await handleRemotePaneAction(ctx, options, remoteState, action, t);
+      initialStatusText = outcome.message;
+      initialStatusTone = outcome.ok ? "success" : "error";
+      if (outcome.reloadRemote) {
+        try {
+          remoteState = loadRemoteConfigState(ctx.cwd, options.globalFilePath);
+        } catch (error) {
+          initialStatusTone = "error";
+          initialStatusText = t("remote.loadFailed", {
+            message: displayText(error instanceof Error ? error.message : String(error)),
+          });
+        }
+      }
+      continue;
+    }
     initialTab = action.tab;
     if (action.kind === "open-agent") {
       if (options.onOpenAgent) await options.onOpenAgent(action.correlationId);
@@ -2772,4 +2923,221 @@ export async function showModelMappingOverlay(
       ctx.ui.notify(initialStatusText, "error");
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Remote configuration actions (Remotes tab)
+// ---------------------------------------------------------------------------
+
+interface RemotePaneOutcome {
+  ok: boolean;
+  message: string;
+  reloadRemote: boolean;
+}
+
+const REMOTE_ACTION_KINDS = new Set([
+  "remote-new-host",
+  "remote-edit-host",
+  "remote-new-target",
+  "remote-edit-target",
+  "remote-delete-host",
+  "remote-delete-target",
+]);
+
+function isRemotePaneAction(action: ControlCenterAction): action is RemotePaneAction {
+  return REMOTE_ACTION_KINDS.has(action.kind);
+}
+
+function remoteScopeStores(state: RemoteConfigState, scope: RemotePaneScope) {
+  if (scope === "global") {
+    return {
+      global: {
+        version: state.global.version,
+        hosts: { ...state.global.hosts },
+        targets: { ...state.global.targets },
+      },
+      project: state.project,
+    };
+  }
+  return {
+    global: state.global,
+    project: {
+      version: state.project.version,
+      hosts: { ...state.project.hosts },
+      targets: { ...state.project.targets },
+    },
+  };
+}
+
+function findHostInState(state: RemoteConfigState, hostId: string) {
+  return state.global.hosts[hostId] ?? (state.project.hosts[hostId] ?? undefined);
+}
+
+function findTargetInState(state: RemoteConfigState, targetId: string) {
+  return state.global.targets[targetId] ?? (state.project.targets[targetId] ?? undefined);
+}
+
+async function handleRemotePaneAction(
+  ctx: ExtensionContext,
+  options: TeammateControlCenterOptions,
+  state: RemoteConfigState | undefined,
+  action: RemotePaneAction,
+  t: TuiTranslator,
+): Promise<RemotePaneOutcome> {
+  if (!state) {
+    return { ok: false, message: t("remote.loadFailed", { message: "state unavailable" }), reloadRemote: false };
+  }
+  try {
+    switch (action.kind) {
+      case "remote-new-host":
+        return await wizardRemoteHost(ctx, state, action.scope, undefined, undefined, t);
+      case "remote-edit-host":
+        return await wizardRemoteHost(ctx, state, action.scope, action.hostId, findHostInState(state, action.hostId), t);
+      case "remote-new-target":
+        return await wizardRemoteTarget(ctx, state, action.scope, undefined, undefined, t);
+      case "remote-edit-target":
+        return await wizardRemoteTarget(ctx, state, action.scope, action.targetId, findTargetInState(state, action.targetId), t);
+      case "remote-delete-host": {
+        const confirmed = await ctx.ui.confirm(t("remote.deleteHostTitle", { id: displayText(action.hostId) }), "");
+        if (!confirmed) return { ok: true, message: "", reloadRemote: false };
+        const stores = remoteScopeStores(state, action.scope);
+        if (action.scope === "project") stores.project.hosts[action.hostId] = null;
+        else delete stores.global.hosts[action.hostId];
+        await persistRemoteStores(ctx, options, state, stores);
+        return { ok: true, message: t("remote.hostDeleted", { id: displayText(action.hostId) }), reloadRemote: true };
+      }
+      case "remote-delete-target": {
+        const confirmed = await ctx.ui.confirm(t("remote.deleteTargetTitle", { id: displayText(action.targetId) }), "");
+        if (!confirmed) return { ok: true, message: "", reloadRemote: false };
+        const stores = remoteScopeStores(state, action.scope);
+        if (action.scope === "project") stores.project.targets[action.targetId] = null;
+        else delete stores.global.targets[action.targetId];
+        await persistRemoteStores(ctx, options, state, stores);
+        return { ok: true, message: t("remote.targetDeleted", { id: displayText(action.targetId) }), reloadRemote: true };
+      }
+      default:
+        return { ok: false, message: t("remote.saveFailed", { message: `Unknown action ${action.kind}` }), reloadRemote: false };
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      message: t("remote.saveFailed", { message: displayText(error instanceof Error ? error.message : String(error)) }),
+      reloadRemote: false,
+    };
+  }
+}
+
+function remoteScopeTarget(stores: { global: RemoteConfigState["global"]; project: RemoteConfigState["project"] }, scope: RemotePaneScope) {
+  return scope === "global" ? stores.global : stores.project;
+}
+
+async function persistRemoteStores(
+  ctx: ExtensionContext,
+  options: TeammateControlCenterOptions | undefined,
+  state: RemoteConfigState,
+  stores: { global: RemoteConfigState["global"]; project: RemoteConfigState["project"] },
+): Promise<void> {
+  const expected = {
+    global: { ...state.global, hosts: { ...state.global.hosts }, targets: { ...state.global.targets } },
+    project: { ...state.project, hosts: { ...state.project.hosts }, targets: { ...state.project.targets } },
+  };
+  replaceRemoteConfigStores(ctx.cwd, expected, stores, options?.globalFilePath);
+}
+
+async function wizardRemoteHost(
+  ctx: ExtensionContext,
+  state: RemoteConfigState,
+  scope: RemotePaneScope,
+  id: string | undefined,
+  current: RemoteHostConfig | undefined,
+  t: TuiTranslator,
+): Promise<RemotePaneOutcome> {
+  const freshId = id ?? await ctx.ui.input(t("remote.hostId"), "");
+  if (freshId === undefined) return { ok: true, message: "", reloadRemote: false };
+  if (!freshId.trim()) return { ok: false, message: t("remote.hostIdRequired"), reloadRemote: false };
+  const host = await ctx.ui.input(t("remote.hostAddress"), current?.host ?? "");
+  if (host === undefined) return { ok: true, message: "", reloadRemote: false };
+  const user = await ctx.ui.input(t("remote.hostUser"), current?.user ?? "");
+  if (user === undefined) return { ok: true, message: "", reloadRemote: false };
+  const port = await ctx.ui.input(t("remote.hostPort"), String(current?.port ?? 22));
+  if (port === undefined) return { ok: true, message: "", reloadRemote: false };
+  const hostKey = await ctx.ui.input(t("remote.hostKey"), current?.hostKeySha256 ?? "");
+  if (hostKey === undefined) return { ok: true, message: "", reloadRemote: false };
+  const identityFile = await ctx.ui.input(t("remote.identityFile"), current?.identityFile ?? "");
+  if (identityFile === undefined) return { ok: true, message: "", reloadRemote: false };
+  const draft: unknown = {
+    host,
+    user,
+    port: Number(port),
+    hostKeySha256: hostKey,
+    ...(identityFile.trim() ? { identityFile: identityFile.trim() } : {}),
+  };
+  const validation = validateRemoteHostDraft(freshId.trim(), draft);
+  if (!validation.ok) {
+    return { ok: false, message: t("remote.validationFailed", { error: validation.error }), reloadRemote: false };
+  }
+  const stores = remoteScopeStores(state, scope);
+  const target = remoteScopeTarget(stores, scope);
+  target.hosts[freshId.trim()] = draft as RemoteHostConfig;
+  await persistRemoteStores(ctx, undefined, state, stores);
+  return { ok: true, message: t("remote.hostSaved", { id: displayText(freshId.trim()) }), reloadRemote: true };
+}
+
+async function wizardRemoteTarget(
+  ctx: ExtensionContext,
+  state: RemoteConfigState,
+  scope: RemotePaneScope,
+  id: string | undefined,
+  current: RemoteTargetConfig | undefined,
+  t: TuiTranslator,
+): Promise<RemotePaneOutcome> {
+  const freshId = id ?? await ctx.ui.input(t("remote.targetId"), "");
+  if (freshId === undefined) return { ok: true, message: "", reloadRemote: false };
+  if (!freshId.trim()) return { ok: false, message: t("remote.targetIdRequired"), reloadRemote: false };
+  const hostIds = [
+    ...Object.keys(state.global.hosts),
+    ...Object.keys(state.project.hosts).filter((hostId) => state.project.hosts[hostId] !== null),
+  ];
+  const host = await ctx.ui.select(t("remote.targetHost"), hostIds);
+  if (host === undefined || !hostIds.includes(host)) return { ok: true, message: "", reloadRemote: false };
+  const cwd = await ctx.ui.input(t("remote.targetCwd"), current?.cwd ?? "");
+  if (cwd === undefined) return { ok: true, message: "", reloadRemote: false };
+  const driver = await ctx.ui.select(t("remote.targetDriver"), ["pi-rpc", "acp"]);
+  if (driver === undefined || (driver !== "pi-rpc" && driver !== "acp")) return { ok: true, message: "", reloadRemote: false };
+  const command = await ctx.ui.input(t("remote.targetCommand"), JSON.stringify(current?.command ?? ["pi"]));
+  if (command === undefined) return { ok: true, message: "", reloadRemote: false };
+  let parsedCommand: string[];
+  try {
+    const parsed = JSON.parse(command);
+    if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) throw new Error("not argv");
+    parsedCommand = parsed;
+  } catch {
+    return { ok: false, message: t("remote.commandInvalid"), reloadRemote: false };
+  }
+  const env = await ctx.ui.input(t("remote.targetEnv"), JSON.stringify(current?.env ?? []));
+  if (env === undefined) return { ok: true, message: "", reloadRemote: false };
+  let parsedEnv: string[];
+  try {
+    const parsed = JSON.parse(env);
+    if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) throw new Error("not env");
+    parsedEnv = parsed;
+  } catch {
+    return { ok: false, message: t("remote.envInvalid"), reloadRemote: false };
+  }
+  const draft: unknown = {
+    host,
+    cwd,
+    driver,
+    command: parsedCommand,
+    ...(parsedEnv.length === 0 ? {} : { env: parsedEnv }),
+  };
+  const validation = validateRemoteTargetDraft(freshId.trim(), draft);
+  if (!validation.ok) {
+    return { ok: false, message: t("remote.validationFailed", { error: validation.error }), reloadRemote: false };
+  }
+  const stores = remoteScopeStores(state, scope);
+  const target = remoteScopeTarget(stores, scope);
+  target.targets[freshId.trim()] = draft as RemoteTargetConfig;
+  await persistRemoteStores(ctx, undefined, state, stores);
+  return { ok: true, message: t("remote.targetSaved", { id: displayText(freshId.trim()) }), reloadRemote: true };
 }

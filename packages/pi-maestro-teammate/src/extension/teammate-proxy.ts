@@ -6,6 +6,7 @@
  * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
 
+import { MONITOR_SESSION_NAME } from "./monitor-session.ts";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import type {
@@ -20,7 +21,7 @@ import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "..
 import { aggregateAgentRunPhase } from "../shared/agent-status.ts";
 import { resolveAgentCompletionTarget } from "../shared/routing.ts";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
-import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams } from "./schemas.ts";
+import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams, LocalObserveParams } from "./schemas.ts";
 import {
   formatObserveResult,
   observeTargets,
@@ -869,6 +870,10 @@ export function parseOutputSchema(value: unknown): Record<string, unknown> | und
   return value as Record<string, unknown>;
 }
 
+export interface TeammateProxyAuthority {
+  authorizeCrossSession?: () => boolean;
+}
+
 export async function handleProxyRequest(
   pi: ExtensionAPI,
   state: TeammateState,
@@ -902,6 +907,7 @@ export async function handleProxyRequest(
     messageKind?: WorkspacePeerMessageKind;
   }) => Promise<SessionMessageResult>,
   refreshModelCapabilities?: () => Promise<readonly TeammateModelCapability[]>,
+  authority: TeammateProxyAuthority = {},
 ): Promise<void> {
   let replied = false;
   const reply = (message: unknown): void => {
@@ -912,6 +918,18 @@ export async function handleProxyRequest(
   const tool = event.tool as string;
   const requestId = event.requestId as string;
   const params = event.params as Record<string, unknown>;
+  const crossSessionAuthorized = (): boolean => authority.authorizeCrossSession?.() === true;
+  const crossSessionError = (capability: string): Record<string, unknown> => ({
+    type: "teammate_proxy_result",
+    requestId,
+    result: {
+      content: [{ type: "text", text: `${capability} is available only to an active Monitor session.` }],
+      isError: true,
+      details: capability === "teammate-list" ? { agents: [] }
+        : capability === "observe" ? { output: [] }
+          : { delivered: false },
+    },
+  });
   const dispatchGeneration = state.sessionGeneration ?? 0;
   const ownsDispatchGeneration = (): boolean =>
     (state.sessionGeneration ?? 0) === dispatchGeneration;
@@ -1024,6 +1042,15 @@ export async function handleProxyRequest(
         return;
       }
       const allTasks = normalization.tasks;
+      if (allTasks.some((task) => task.name === MONITOR_SESSION_NAME)) {
+        abandonPendingProxyDispatch();
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Task name "${MONITOR_SESSION_NAME}" is reserved for the host-owned Monitor evaluator.` }],
+          isError: true,
+          details: { mode: normalization.isMultiTask ? inferGraphMode(allTasks) : "single", results: [] },
+        }});
+        return;
+      }
       const budget = checkActiveAgentBudget(state, allTasks.length);
       if (!budget.allowed) {
         abandonPendingProxyDispatch();
@@ -2236,20 +2263,35 @@ export async function handleProxyRequest(
     }
 
     case "observe": {
-      if (!Check(ObserveParams, params)) {
+      const crossSession = crossSessionAuthorized();
+      if (!Check(crossSession ? ObserveParams : LocalObserveParams, params)) {
         reply({ type: "teammate_proxy_result", requestId, result: {
-          content: [{ type: "text", text: "Invalid observe parameters received from child IPC." }],
+          content: [{ type: "text", text: crossSession
+            ? "Invalid observe parameters received from child IPC."
+            : "Non-Monitor child observe accepts only local teammate and bash_bg targets." }],
           isError: true,
           details: { output: [] },
         }});
+        return;
+      }
+      const observeParams = params as UnifiedObserveParams;
+      const requiresMonitor = observeParams.targets.some((target) =>
+        target.kind !== "teammate" && target.kind !== "bash_bg",
+      );
+      if (requiresMonitor && !crossSessionAuthorized()) {
+        reply(crossSessionError("observe"));
         return;
       }
       const result = await withProxyObservation(
         state,
         requestId,
         parentCid ? state.activeRuns.get(parentCid)?.abortController.signal : undefined,
-        (proxySignal) => observeTargets(params as UnifiedObserveParams, proxySignal),
+        (proxySignal) => observeTargets(observeParams, proxySignal),
       );
+      if (requiresMonitor && !crossSessionAuthorized()) {
+        reply(crossSessionError("observe"));
+        return;
+      }
       const output = formatObserveResult(result, params.detail !== "summary");
       const failed = result.reason === "timeout"
         || result.reason === "aborted"
@@ -2313,6 +2355,11 @@ export async function handleProxyRequest(
       const requestedMode = (params.mode as RpcMessageMode) ?? "follow_up";
       const messageKind = (params.kind as WorkspacePeerMessageKind | undefined) ?? "coordination";
       const localCid = resolveAgentCorrelationId(state, to);
+
+      if (to.startsWith("owner:") && !localCid && !crossSessionAuthorized()) {
+        reply(crossSessionError("Cross-window teammate-send"));
+        return;
+      }
 
       if (to.startsWith("owner:") && (sessionSend || workspacePeerSend) && !localCid) {
         if (!message && requestedMode !== "abort") {
@@ -2634,11 +2681,19 @@ export async function handleProxyRequest(
         return;
       }
       if (view === "inbox") {
+        if (!crossSessionAuthorized()) {
+          reply(crossSessionError("teammate-list"));
+          return;
+        }
         try {
           const inbox = await loadWorkspaceWindowInbox(
             resolveWindowInboxAnchor(state.mainSessionFile, undefined),
             params as WindowInboxQuery,
           );
+          if (!crossSessionAuthorized()) {
+            reply(crossSessionError("teammate-list"));
+            return;
+          }
           const entries = inbox.entries.map((entry) => ({ kind: "window-message" as const, ...entry }));
           reply({ type: "teammate_proxy_result", requestId, result: {
             content: [{ type: "text", text: formatWorkspaceWindowInbox(inbox) }], isError: false, details: { agents: entries },
@@ -2652,7 +2707,15 @@ export async function handleProxyRequest(
         return;
       }
       if (view === "windows") {
+        if (!crossSessionAuthorized()) {
+          reply(crossSessionError("teammate-list"));
+          return;
+        }
         const windows = workspacePeerList ? await workspacePeerList() : [];
+        if (!crossSessionAuthorized()) {
+          reply(crossSessionError("teammate-list"));
+          return;
+        }
         const entries = windows.map((window) => ({ kind: "window" as const, ...window }));
         const text = formatWorkspacePeerWindowListings(entries);
         reply({ type: "teammate_proxy_result", requestId, result: {

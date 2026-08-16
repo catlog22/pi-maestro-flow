@@ -177,6 +177,8 @@ export interface ActiveAgent {
     sessionId?: string;
     sessionFile?: string;
     sessionDir?: string;
+    /** Resolved working directory of the run (local path or remote:<targetId>). */
+    cwd?: string;
     promptSeq?: number;
     lastParkNonce?: string;
     lease?: import("../runs/session-handoff.ts").SessionLease;

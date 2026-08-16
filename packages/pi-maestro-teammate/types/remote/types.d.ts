@@ -1,0 +1,153 @@
+/** Canonical public data model for the Maestro Remote Worker Protocol. */
+export declare const REMOTE_PROTOCOL_VERSION: "remote/1";
+export declare const REMOTE_CONFIG_VERSION: 2;
+export type RemoteProtocolVersion = typeof REMOTE_PROTOCOL_VERSION;
+export type RemoteConfigVersion = typeof REMOTE_CONFIG_VERSION;
+export declare const REMOTE_STATUSES: readonly ["connecting", "ready", "running", "waiting", "completed", "failed", "cancelled", "disconnected", "lost"];
+export type RemoteStatus = (typeof REMOTE_STATUSES)[number];
+export type RemoteTerminalStatus = Extract<RemoteStatus, "completed" | "failed" | "cancelled" | "lost">;
+export declare function isRemoteStatus(value: unknown): value is RemoteStatus;
+export declare function isRemoteTerminalStatus(status: RemoteStatus): status is RemoteTerminalStatus;
+export type RemoteDriverId = "pi-rpc" | "acp";
+export type RemoteInputMode = "follow_up" | "steer";
+export type RemoteCommandArgv = readonly [string, ...string[]];
+export interface RemoteHostConfig {
+    host: string;
+    user: string;
+    port: number;
+    hostKeySha256: string;
+    /** Local identity-file reference. Omit to use ssh-agent authentication. */
+    identityFile?: string;
+}
+export interface RemoteAcpFileSystemPolicy {
+    read?: boolean;
+    write?: boolean;
+    maxReadBytes?: number;
+    maxWriteBytes?: number;
+}
+/** A terminal command an ACP agent may start, bound to a canonical executable. */
+export interface RemoteAcpTerminalCommand {
+    /** Canonical absolute path to the executable on the remote bridge host. */
+    executable: string;
+    /** Exact argv after the executable. Requests must match this list byte-for-byte. */
+    args: readonly string[];
+    /** Exact environment variable names this profile permits the ACP agent to set. */
+    environment: readonly string[];
+}
+export interface RemoteAcpTerminalPolicy {
+    /** Explicit command profiles accepted from ACP terminal/create. */
+    commands: readonly RemoteAcpTerminalCommand[];
+    maxOutputBytes?: number;
+    timeoutMs?: number;
+    maxProcesses?: number;
+}
+export interface RemoteAcpPolicy {
+    /** Permission requests are denied unless allow-once is explicitly configured and tool-scoped. */
+    permissionMode?: "deny" | "allow-once";
+    /** Tool names that may receive allow-once grants; unknown tools default to deny. */
+    permissionTools?: readonly string[];
+    fs?: RemoteAcpFileSystemPolicy;
+    terminal?: RemoteAcpTerminalPolicy;
+}
+export interface RemoteTargetConfig {
+    host: string;
+    cwd: string;
+    driver: RemoteDriverId;
+    /** Trusted argv; never populated from a task or model request. */
+    command: RemoteCommandArgv;
+    /**
+     * Trusted environment-variable names to forward from the daemon process to
+     * the spawned CLI (e.g. CODEX_API_KEY). Explicit opt-in only; launch-policy
+     * variables (PATH, LD_PRELOAD, …) are always rejected.
+     */
+    env?: readonly string[];
+    /** Default-deny ACP client operations. Valid only for ACP targets. */
+    acp?: RemoteAcpPolicy;
+}
+export interface ResolvedRemoteTarget extends RemoteTargetConfig {
+    id: string;
+    hostConfig: RemoteHostConfig;
+}
+export interface RemoteWorkerIdentity {
+    workerId: string;
+    instanceNonce: string;
+}
+export interface RemoteRunIdentity extends RemoteWorkerIdentity {
+    runId: string;
+    generation: number;
+}
+/** Exact ownership fence captured by the local Monitor. */
+export interface RemoteRunCapture extends RemoteRunIdentity {
+    monitorOwnerNonce: string;
+    targetId: string;
+}
+export interface RemoteRunSnapshot extends RemoteRunIdentity {
+    targetId?: string;
+    status: RemoteStatus;
+    lastSequence: number;
+    updatedAt: number;
+    nativeStatus?: string;
+    degradedReason?: string;
+    summary?: string;
+}
+export interface RemoteUsage {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    costUsd?: number;
+}
+export interface RemoteToolEvent {
+    toolCallId: string;
+    toolName: string;
+    phase: "start" | "end";
+    isError?: boolean;
+    summary?: string;
+}
+export type RemoteDriverEvent = {
+    type: "text";
+    text: string;
+} | {
+    type: "tool";
+    tool: RemoteToolEvent;
+} | {
+    type: "usage";
+    usage: RemoteUsage;
+} | {
+    type: "native";
+    name: string;
+    data?: unknown;
+};
+export interface RemoteRunStateEvent extends RemoteRunIdentity {
+    type: "run/state";
+    sequence: number;
+    status: RemoteStatus;
+    updatedAt: number;
+    nativeStatus?: string;
+    degradedReason?: string;
+    summary?: string;
+}
+export interface RemoteRunProgressEvent extends RemoteRunIdentity {
+    type: "run/event";
+    sequence: number;
+    event: RemoteDriverEvent;
+    updatedAt: number;
+}
+export interface RemoteRunResultEvent extends RemoteRunIdentity {
+    type: "run/result";
+    sequence: number;
+    status: Extract<RemoteStatus, "completed" | "failed" | "cancelled" | "lost">;
+    updatedAt: number;
+    result?: string;
+    structuredOutput?: unknown;
+    error?: string;
+    nativeStatus?: string;
+    degradedReason?: string;
+}
+export type RemoteRunEvent = RemoteRunStateEvent | RemoteRunProgressEvent | RemoteRunResultEvent;
+export interface RemoteWorkerHeartbeat extends RemoteWorkerIdentity {
+    type: "worker/heartbeat";
+    status: Extract<RemoteStatus, "ready" | "running" | "waiting" | "disconnected">;
+    activeRuns: number;
+    concurrency: number;
+    timestamp: number;
+}

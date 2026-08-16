@@ -321,14 +321,49 @@ test("MonitorRuntime does not record an intervention when the lease is lost afte
   await harness.runtime.stop({ stopSession: false });
 });
 
+test("MonitorRuntime revokes automatic publication authority before a delayed commit", async () => {
+  let releasePublish!: () => void;
+  let publishEntered!: () => void;
+  const publishGate = new Promise<void>((resolve) => { releasePublish = resolve; });
+  const entered = new Promise<void>((resolve) => { publishEntered = resolve; });
+  let committed = 0;
+  const harness = runtimeHarness({
+    async waitForEvaluation(request) {
+      return verdict(request, "send");
+    },
+    async deliver(endpoint, request) {
+      publishEntered();
+      await publishGate;
+      if (request.authorize?.() !== true) {
+        return { delivered: false, endpointId: endpoint.id, transport: "workspace-peer-v1", error: "authority revoked" };
+      }
+      committed++;
+      return { delivered: true, endpointId: endpoint.id, transport: "workspace-peer-v1" };
+    },
+  });
+  harness.runtime.start();
+  const tick = harness.timers.runNext(harness.runtime);
+  await entered;
+
+  const stopping = harness.runtime.stop({ stopSession: false });
+  assert.equal(harness.runtime.running, false);
+  releasePublish();
+  await Promise.all([tick, stopping]);
+
+  assert.equal(committed, 0);
+  assert.equal(harness.binding.interventions.length, 0);
+});
+
 test("MonitorRuntime records deferred follow_up delivery without starting outcome evaluation", async () => {
   let capturedRequest: SessionMessageRequest | undefined;
+  let authorizedDuringDelivery = false;
   const harness = runtimeHarness({
     async waitForEvaluation(request) {
       return verdict(request, "send");
     },
     async deliver(endpoint, request) {
       capturedRequest = request;
+      authorizedDuringDelivery = request.authorize?.() === true;
       return {
         delivered: true,
         endpointId: endpoint.id,
@@ -344,6 +379,8 @@ test("MonitorRuntime records deferred follow_up delivery without starting outcom
   });
   harness.runtime.start();
   await harness.timers.runNext(harness.runtime);
+  assert.equal(typeof capturedRequest?.authorize, "function");
+  assert.equal(authorizedDuringDelivery, true);
   assert.equal(capturedRequest?.source, "monitor");
   assert.equal(capturedRequest?.messageKind, "supervision");
   assert.match(capturedRequest?.traceId ?? "", /^mon_/);
@@ -406,7 +443,7 @@ test("production extension instantiates the controller and routes evaluator turn
   assert.match(source, /publishMonitorSessionTurn =/);
   assert.match(source, /monitorControllerInstance\.bind\(/);
   assert.match(source, /await monitorControllerInstance\.exit\("user-exit"\)/);
-  assert.match(source, /await monitorControllerInstance\.shutdown\(\)/);
+  assert.match(source, /Promise\.allSettled\(\[[\s\S]*?monitorControllerInstance\.shutdown\(\)[\s\S]*?shutdownRemoteMonitorBinding\(\)/);
   assert.match(source, /const canonicalEndpoint = sessionHostRegistry\?\.directory\.get\(selector\)/);
   assert.match(source, /candidate\.ownerId === expectedEndpoint\.ownerId && candidate\.ownerNonce === expectedEndpoint\.ownerNonce/);
   assert.match(source, /sendWorkspacePeerMessage\(target, request, endpoint\)/);

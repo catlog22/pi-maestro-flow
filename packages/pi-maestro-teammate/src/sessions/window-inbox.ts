@@ -7,6 +7,11 @@ import {
   type WindowThreadEntry,
   type WindowThreadStatus,
 } from "./session-core.ts";
+import {
+  REMOTE_HISTORY_ENTRY_TYPE,
+  rebuildRemoteHistory,
+  type RemoteHistoryEntry,
+} from "./remote-history.ts";
 
 const MAX_ARCHIVE_SESSION_FILES = 500;
 const MAX_ARCHIVE_FILE_BYTES = 32 * 1024 * 1024;
@@ -30,10 +35,12 @@ export interface WindowInboxEntry {
   messageId: string;
   peerOwnerId: string;
   direction: WindowThreadDirection;
-  source: WindowThreadEntry["source"];
+  source: WindowThreadEntry["source"] | "remote";
   messageKind?: WindowThreadEntry["messageKind"];
   mode: WindowThreadEntry["mode"];
   effectiveMode?: WindowThreadEntry["effectiveMode"];
+  target?: string;
+  remoteKind?: RemoteHistoryEntry["kind"];
   body: string;
   bodyTruncated: boolean;
   status: WindowThreadStatus;
@@ -57,7 +64,8 @@ interface ArchivedWindowThreadSession {
   sessionFile: string;
   current: boolean;
   mtimeMs: number;
-  entries: readonly WindowThreadEntry[];
+  windowEntries: readonly WindowThreadEntry[];
+  remoteEntries: readonly RemoteHistoryEntry[];
 }
 
 interface ArchiveCandidate {
@@ -105,7 +113,7 @@ function selectSessions(
   sessions: readonly ArchivedWindowThreadSession[],
   selector: string | undefined,
 ): ArchivedWindowThreadSession[] {
-  if (!selector) return sessions.filter((session) => session.entries.length > 0);
+  if (!selector) return sessions.filter((session) => session.windowEntries.length > 0 || session.remoteEntries.length > 0);
   const normalized = normalizeSessionSelector(selector);
   if (!normalized) throw new Error("Inbox session selector cannot be empty.");
   if (normalized === "current") {
@@ -134,6 +142,7 @@ function shouldParseLine(line: string, lineIndex: number): boolean {
   return lineIndex === 0
     || line.includes("session_info")
     || line.includes("teammate-window-thread")
+    || line.includes("teammate-remote-history")
     || line.includes("teammate-message");
 }
 
@@ -166,14 +175,16 @@ async function loadArchivedSession(
     const metadata = sessionMetadata(entries);
     if (!metadata.sessionId) return undefined;
     const store = new WindowThreadStore({ limit: 10_000 });
-    const threadEntries = store.rebuild(entries).entries;
+    const windowEntries = store.rebuild(entries).entries;
+    const remoteEntries = rebuildRemoteHistory(entries);
     return {
       sessionId: metadata.sessionId,
       ...(metadata.sessionName ? { sessionName: metadata.sessionName } : {}),
       sessionFile,
       current: path.resolve(sessionFile) === currentSessionFile,
       mtimeMs,
-      entries: threadEntries,
+      windowEntries,
+      remoteEntries,
     };
   } catch {
     return undefined;
@@ -284,6 +295,31 @@ function projectInboxEntry(session: ArchivedWindowThreadSession, entry: WindowTh
   };
 }
 
+function projectRemoteInboxEntry(session: ArchivedWindowThreadSession, entry: RemoteHistoryEntry): WindowInboxEntry {
+  const bodyTruncated = entry.bodyTruncated || entry.body.length > MAX_INBOX_BODY_CHARS;
+  return {
+    sessionId: session.sessionId,
+    ...(session.sessionName ? { sessionName: session.sessionName } : {}),
+    sessionFile: session.sessionFile,
+    current: session.current,
+    messageId: entry.entryId,
+    peerOwnerId: entry.target,
+    direction: entry.direction,
+    source: "remote",
+    ...(entry.messageKind ? { messageKind: entry.messageKind } : {}),
+    mode: entry.requestedMode,
+    ...(entry.effectiveMode ? { effectiveMode: entry.effectiveMode } : {}),
+    target: entry.target,
+    remoteKind: entry.kind,
+    body: entry.body.length > MAX_INBOX_BODY_CHARS ? `${entry.body.slice(0, MAX_INBOX_BODY_CHARS)}...` : entry.body,
+    bodyTruncated,
+    status: entry.status,
+    createdAt: entry.createdAt,
+    updatedAt: entry.updatedAt,
+    revision: entry.revision,
+  };
+}
+
 export function resolveWindowInboxAnchor(
   mainSessionFile: string | null | undefined,
   contextSessionFile: string | null | undefined,
@@ -305,11 +341,18 @@ export async function loadWorkspaceWindowInbox(
 
   const archive = await archivedSessions(currentSessionFile, query.session);
   const selected = selectSessions(archive.sessions, query.session);
-  const entries = selected.flatMap((session) => session.entries
-    .filter((entry) => query.direction === undefined || entry.direction === query.direction)
-    .filter((entry) => query.status === undefined || entry.status === query.status)
-    .filter((entry) => peer === undefined || entry.peerOwnerId === peer || entry.peerOwnerId.startsWith(peer))
-    .map((entry) => projectInboxEntry(session, entry)))
+  const entries = selected.flatMap((session) => [
+    ...session.windowEntries
+      .filter((entry) => query.direction === undefined || entry.direction === query.direction)
+      .filter((entry) => query.status === undefined || entry.status === query.status)
+      .filter((entry) => peer === undefined || entry.peerOwnerId === peer || entry.peerOwnerId.startsWith(peer))
+      .map((entry) => projectInboxEntry(session, entry)),
+    ...session.remoteEntries
+      .filter((entry) => query.direction === undefined || entry.direction === query.direction)
+      .filter((entry) => query.status === undefined || entry.status === query.status)
+      .filter((entry) => peer === undefined || entry.target === peer || entry.target.startsWith(peer))
+      .map((entry) => projectRemoteInboxEntry(session, entry)),
+  ])
     .sort((left, right) =>
       right.updatedAt - left.updatedAt
       || right.createdAt - left.createdAt
@@ -337,16 +380,18 @@ export function formatWorkspaceWindowInbox(result: WindowInboxResult): string {
     : "";
   if (result.entries.length === 0) {
     const empty = result.selector
-      ? `No persisted window messages matched session ${JSON.stringify(result.selector)}.`
-      : "No persisted window messages matched the inbox filters.";
+      ? `No persisted Monitor messages matched session ${JSON.stringify(result.selector)}.`
+      : "No persisted Monitor messages matched the inbox filters.";
     return `${empty}${warning}`;
   }
-  const header = `Window inbox: ${result.entries.length} message${result.entries.length === 1 ? "" : "s"} across ${result.matchedSessionCount} session${result.matchedSessionCount === 1 ? "" : "s"}.${warning}`;
+  const header = `Monitor inbox: ${result.entries.length} message${result.entries.length === 1 ? "" : "s"} across ${result.matchedSessionCount} session${result.matchedSessionCount === 1 ? "" : "s"}.${warning}`;
   const rows = result.entries.map((entry) => {
     const session = entry.sessionName ?? entry.sessionId.slice(0, 8);
     const time = new Date(entry.updatedAt).toISOString();
     const effectiveMode = entry.effectiveMode ?? "unknown";
-    const metadata = `${time} | session=${session} | ${entry.direction}/${entry.status} | source=${entry.source} | kind=${entry.messageKind ?? "message"} | requested=${entry.mode} | effective=${effectiveMode} | peer=owner:${entry.peerOwnerId} | id=${entry.messageId}`;
+    const peer = entry.source === "remote" ? entry.target ?? entry.peerOwnerId : `owner:${entry.peerOwnerId}`;
+    const kind = entry.remoteKind ?? entry.messageKind ?? "message";
+    const metadata = `${time} | session=${session} | ${entry.direction}/${entry.status} | source=${entry.source} | kind=${kind} | requested=${entry.mode} | effective=${effectiveMode} | peer=${peer} | id=${entry.messageId}`;
     return `${metadata}\n${indentBody(entry.body)}`;
   });
   return [header, ...rows].join("\n");

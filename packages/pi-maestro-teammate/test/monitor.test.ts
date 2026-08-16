@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   barrierWait,
   activePromptLoopIdsFromPayload,
+  applyMonitorModeContext,
   appendMonitorModeContext,
   createMonitorModeState,
   formatBarrierCompact,
@@ -13,6 +14,7 @@ import {
   formatVerbose,
   startMonitorMode,
   stopMonitorMode,
+  stripMonitorModeContext,
   validateMonitorParams,
   // Engine
   createEngineState,
@@ -88,7 +90,12 @@ test("independent monitor session identity and command entry points stay stable"
   assert.match(sessionSource, /export const MONITOR_SESSION_RELATIVE_DIR = "\.pi\/monitor-sessions"/);
   assert.match(source, /name: MONITOR_SESSION_NAME,[\s\S]*?context: "fresh"/);
   assert.match(source, /background: true,[\s\S]*?maxNestingDepth: 0/);
-  assert.match(source, /singleTask\.name === MONITOR_SESSION_NAME[\s\S]*?MONITOR_SESSION_RELATIVE_DIR, correlationId/);
+  assert.match(source, /const monitorSessionDispatch = !isMultiTask[\s\S]*?authorizeMonitorSessionDispatch\?\.\(id\) === true/);
+  assert.match(source, /normalizedTasks\.some\(\(task\) => task\.name === MONITOR_SESSION_NAME\)[\s\S]*?reserved for the host-owned Monitor evaluator/);
+  assert.match(source, /monitorSessionDispatch \? \{[\s\S]*?MONITOR_SESSION_RELATIVE_DIR, correlationId/);
+  assert.match(source, /const monitorSessionAuthorities = new WeakMap<ActiveAgent, MonitorSessionAuthority>\(\)/);
+  assert.match(source, /authority\.runtimeGeneration === \(agent\.runtimeGeneration \?\? 0\)[\s\S]*?ownsRootSessionFence\(authority\.rootFence\)[\s\S]*?state\.activeRuns\.get\(agent\.correlationId\) === agent/);
+  assert.match(source, /proxyMonitorIdentityCurrent\(\)[\s\S]*?ownsMonitorCommunication\(proxyMonitorCapture\)/);
   assert.match(source, /childEnvironment: \{ \[MONITOR_SESSION_ENV_VAR\]: "1" \}/);
   assert.equal(source.match(/pi\.registerCommand\("monitor"/g)?.length, 1);
   assert.equal(source.match(/pi\.registerCommand\("teammate-send"/g)?.length, 1);
@@ -99,7 +106,7 @@ test("independent monitor session identity and command entry points stay stable"
   assert.match(source, /steer deferred as follow_up while foreground bash_bg is active/);
   assert.match(sessionSource, /foreground background-job entry/);
   assert.match(source, /if \(trimmed === ""\)[\s\S]*?requestWindowMode\("enter"\)/);
-  assert.match(source, /monitorInteractionModeActive \? appendMonitorModeContext\(withDepth\) : withDepth/);
+  assert.match(source, /applyMonitorModeContext\(withDepth, monitorInteractionModeActive\)/);
   assert.doesNotMatch(source, /guardMonitorModeToolCall/);
   assert.match(source, /options\.view === "turns"\) return teammateTurnsSnapshot\(id, options\);/);
   assert.match(source, /options\.view === "turns"\) return workspaceTurnsSnapshot\(owner, target, detail, lines, options\);/);
@@ -108,6 +115,9 @@ test("independent monitor session identity and command entry points stay stable"
   assert.match(source, /monitorConfig\.autoResume[\s\S]*?restored > 0\) monitorRegistry\.setViewMode\("windows"\)/);
   assert.match(source, /pi\.on\("session_start"[\s\S]*?exitMonitorInteractionMode\(\)/);
   assert.match(source, /pi\.on\("session_shutdown"[\s\S]*?exitMonitorInteractionMode\(\)/);
+  assert.match(source, /pi\.on\("session_shutdown"[\s\S]*?Promise\.allSettled\(\[[\s\S]*?monitorControllerInstance\.shutdown\(\)[\s\S]*?shutdownRemoteMonitorBinding\(\)/);
+  assert.match(source, /workspaceObservationSnapshot[\s\S]*?const target = \{ kind: "workspace", id \};[\s\S]*?await refreshWorkspacePeerOwners\(\);[\s\S]*?if \(!ownsRootSessionFence\(fence\)\)/);
+  assert.match(source, /waitForWorkspaceObservation[\s\S]*?options\.until !== "completed"[\s\S]*?last\.nativeStatus === "result-ready"/);
   assert.match(source, /event\.source !== "interactive"[\s\S]*?event\.text\.trim\(\) !== "monitor"/);
   assert.match(source, /if \(trimmed === "exit" \|\| trimmed === "stop"\)/);
   assert.match(source, /if \(trimmed === "resume"\)/);
@@ -241,11 +251,13 @@ test("monitor mode context is persistent, idempotent, and supervision-only", () 
   const injected = appendMonitorModeContext("base prompt");
   assert.match(injected, /<monitor_mode>/);
   assert.match(injected, /monitor control window/);
-  assert.match(injected, /workspace-window create/);
+  assert.match(injected, /workspace-window only for local Pi worker windows/);
+  assert.match(injected, /remote-worker targets/);
+  assert.match(injected, /remote:<runId>/);
   assert.match(injected, /Never attempt to close discovered external peer windows/);
-  assert.match(injected, /one observe call with all relevant targets as kind=workspace/);
-  assert.match(injected, /view=inbox to read persisted cross-window messages/);
-  assert.match(injected, /objective is delivered to the worker by create/);
+  assert.match(injected, /observe local peers as kind=workspace and remote runs as kind=remote/);
+  assert.match(injected, /view=inbox to read persisted cross-window and remote messages/);
+  assert.match(injected, /objective is delivered by create/);
   assert.match(injected, /intervene only on new evidence of stall, drift, or failure/);
   assert.match(injected, /at most one intervention per target per tick/);
   assert.match(injected, /Do not send routine acknowledgements or status pings/);
@@ -256,6 +268,14 @@ test("monitor mode context is persistent, idempotent, and supervision-only", () 
   assert.match(injected, /not stopped by \/monitor exit/);
   assert.match(injected, /Do not implement project work/);
   assert.equal(appendMonitorModeContext(injected), injected);
+});
+
+test("monitor mode context can be removed without disturbing surrounding prompt content", () => {
+  const injected = appendMonitorModeContext("before\n\nafter");
+  assert.equal(stripMonitorModeContext(injected), "before\n\nafter");
+  assert.equal(applyMonitorModeContext(injected, false), "before\n\nafter");
+  assert.equal(applyMonitorModeContext("base", true), appendMonitorModeContext("base"));
+  assert.equal(stripMonitorModeContext("base"), "base");
 });
 
 test("activePromptLoopIdsFromPayload keeps only active prompt loops", () => {
@@ -270,15 +290,32 @@ test("activePromptLoopIdsFromPayload keeps only active prompt loops", () => {
   ] }), ["loop-monitor", "loop-running"]);
 });
 
-test("monitor mode stays a soft constraint with no tool-call interception", async () => {
+test("monitor communication uses tool-local capability gates without global interception", async () => {
   const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   const monitorSource = await readFile(new URL("../src/extension/monitor.ts", import.meta.url), "utf8");
   const runtimeSource = await readFile(new URL("../src/extension/monitor-runtime.ts", import.meta.url), "utf8");
   const coreSource = await readFile(new URL("../src/extension/teammate-core.ts", import.meta.url), "utf8");
+  const proxySource = await readFile(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf8");
+  const peerSource = await readFile(new URL("../src/extension/workspace-peers.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /guardMonitorModeToolCall/);
   assert.doesNotMatch(source, /pi\.on\("tool_call", \(event\) => \{\n\s*if \(!monitorInteractionModeActive\)/);
+  assert.match(source, /new MonitorToolExposureController\(pi/);
+  assert.match(source, /local: \[localSendTool, localListTool, localObserveTool\]/);
+  assert.match(source, /monitor: \[sendTool, listTool, observeTool\]/);
+  assert.match(source, /exclusiveNames: \["workspace-window", "remote-worker"\]/);
+  assert.match(source, /monitorToolExposure\?\.enter\(\)[\s\S]*?monitorInteractionModeActive = true/);
+  assert.match(source, /monitorInteractionModeActive = false[\s\S]*?monitorToolExposure\?\.exit\(\)/);
+  assert.match(source, /Agent .* was not found among local teammates/);
+  assert.match(source, /hasCrossWindowTarget[\s\S]*?ownsMonitorCommunication\(monitorCapture\)/);
+  assert.match(source, /\/teammate-send is available only after entering Monitor mode/);
+  assert.match(proxySource, /authorizeCrossSession\?\.\(\) === true/);
+  assert.match(proxySource, /crossSessionError\("teammate-list"\)/);
+  assert.doesNotMatch(peerSource, /Reply with teammate-send/);
+  assert.match(coreSource, /LOCAL_TEAMMATE_LIST_DESCRIPTION/);
+  assert.match(coreSource, /LOCAL_TEAMMATE_SEND_DESCRIPTION/);
+  assert.match(coreSource, /LOCAL_OBSERVE_DESCRIPTION/);
   assert.match(source, /name: "workspace-window"/);
-  assert.match(source, /if \(!monitorInteractionModeActive\)[\s\S]*?available only after the user enters Monitor mode/);
+  assert.match(source, /const monitorCapture = captureMonitorCommunication\(\);[\s\S]*?workspace-window is available only after the user enters Monitor mode/);
   assert.match(source, /const sessionName = managedWindowSessionName\(name\)/);
   assert.match(source, /presentation === "interactive"[\s\S]*?"--name", sessionName, objective\][\s\S]*?"-p", objective, "--name", sessionName\]/);
   assert.match(source, /owner\.sessionName === window\.sessionName/);
@@ -291,8 +328,17 @@ test("monitor mode stays a soft constraint with no tool-call interception", asyn
   assert.match(source, /termination\.outcome/);
   assert.match(source, /terminateProcessTreeByPid\(owner\.pid\)/);
   assert.match(source, /pi\.registerTool\(workspaceWindowTool\)/);
-  assert.match(monitorSource, /workspace-window create only when the user's coordination request requires a new worker/);
-  assert.match(monitorSource, /objective is delivered to the worker by create/);
+  assert.match(source, /name: "remote-worker"/);
+  assert.match(source, /pi\.registerTool\(remoteWorkerTool\)/);
+  assert.match(source, /kind: "remote",[\s\S]*?capabilities: \{ inspect: true, wait: true, cancel: true, message: true, supervise: true \}/);
+  assert.match(source, /params\.to\.startsWith\("remote:"\)/);
+  assert.match(source, /use remote-worker close/);
+  assert.match(source, /shutdownRemoteMonitorBinding\(\)/);
+  assert.match(source, /agentRole: `remote worker[\s\S]*?kind: "remote"/);
+  assert.match(source, /remoteRuns\.length} remote/);
+  assert.match(monitorSource, /workspace-window only for local Pi worker windows/);
+  assert.match(monitorSource, /remote-worker targets/);
+  assert.match(monitorSource, /objective is delivered by create/);
   assert.match(monitorSource, /at most one intervention per target per tick/);
   assert.match(monitorSource, /Never repeat that message while it remains queued or accepted/);
   assert.match(monitorSource, /Never attempt to close discovered external peer windows/);

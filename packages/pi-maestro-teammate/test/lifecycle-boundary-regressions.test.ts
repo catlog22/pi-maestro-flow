@@ -17,7 +17,8 @@ import registerTeammateExtension, {
   type TeammateRuntimeOptions,
 } from "../src/extension/index.ts";
 import type { RunTeammateOptions } from "../src/runs/execution.ts";
-import { createWorkspacePeerPaths } from "../src/extension/workspace-peers.ts";
+import { createWorkspacePeerPaths, createWorkspacePeerRuntime } from "../src/extension/workspace-peers.ts";
+import { getObservationProvider, registerObservationProvider } from "../src/public/v1/observation.ts";
 import {
   confirmParked,
   createChildLease,
@@ -80,6 +81,7 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
   const messages: Array<Record<string, unknown>> = [];
   const hooks = new Map<string, Array<(...args: any[]) => unknown>>();
   const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> | void }>();
+  let activeTools: string[] = [];
   const pi = new Proxy({
     events: {
       on() { return () => {}; },
@@ -92,12 +94,15 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
       return () => {};
     },
     registerTool(tool: RegisteredTool & { name: string }) {
+      if (!activeTools.includes(tool.name)) activeTools.push(tool.name);
       if (tool.name === "teammate") teammate = tool;
       if (tool.name === "teammate-send") teammateSend = tool;
       if (tool.name === "observe") {
         observeTool = tool as unknown as { execute(...args: unknown[]): Promise<Record<string, any>> };
       }
     },
+    getActiveTools() { return [...activeTools]; },
+    setActiveTools(names: string[]) { activeTools = [...names]; },
     registerCommand(name: string, command: { handler: (args: string, ctx: any) => Promise<void> | void }) {
       commands.set(name, command);
     },
@@ -183,6 +188,135 @@ test("immediate reload waits for workspace peer startup before shutdown cleanup"
     assert.deepEqual(ownerFiles, []);
   } finally {
     console.error = originalError;
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("workspace observation wait honors result-ready, completion, timeout, abort, and root fences", async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-workspace-observe-"));
+  const { hooks, commands } = createHarness();
+  const sessionStart = hooks.get("session_start")?.[0];
+  const sessionShutdown = hooks.get("session_shutdown")?.[0];
+  assert.ok(sessionStart);
+  assert.ok(sessionShutdown);
+  const now = Date.now();
+  const worker = {
+    correlationId: "workspace-observe-worker",
+    name: "observer-worker",
+    agent: "general",
+    status: "running" as "running" | "sleeping",
+    startedAt: now,
+    lastActivityAt: now,
+    resultReadyAt: undefined as number | undefined,
+  };
+  const peer = createWorkspacePeerRuntime({
+    cwd: project,
+    publishThrottleMs: 0,
+    getState: () => ({ sessionName: "workspace-observe-peer", agents: [worker], settled: [] }),
+  });
+  const ctx = {
+    cwd: project,
+    hasUI: false,
+    ui: {
+      setWidget() {},
+      setStatus() {},
+      notify() {},
+      onTerminalInput: () => () => {},
+    },
+    modelRegistry: { getAvailable: () => [] },
+    sessionManager: {
+      getEntries: () => [],
+      getSessionFile: () => undefined,
+      getSessionId: () => "workspace-observe-root",
+      getSessionName: () => "workspace-observe-root",
+    },
+  };
+
+  let rootShutdown = false;
+  try {
+    sessionStart({ reason: "new" }, ctx);
+    const monitorCommand = commands.get("monitor");
+    assert.ok(monitorCommand);
+    await monitorCommand.handler("", ctx);
+    await peer.start();
+    const provider = getObservationProvider("workspace");
+    assert.ok(provider);
+    const discoveryDeadline = Date.now() + 2_000;
+    let discovered = await provider.snapshot(`owner:${peer.identity.ownerId}`, { detail: "summary", lines: 20 });
+    while (!discovered.found && Date.now() < discoveryDeadline) {
+      await delay(20);
+      discovered = await provider.snapshot(`owner:${peer.identity.ownerId}`, { detail: "summary", lines: 20 });
+    }
+    assert.equal(discovered.found, true);
+
+    const readyWait = provider.wait(`owner:${peer.identity.ownerId}`, {
+      detail: "summary",
+      lines: 20,
+      deadline: Date.now() + 2_000,
+      until: "result-ready",
+      signal: new AbortController().signal,
+    });
+    await delay(25);
+    worker.resultReadyAt = Date.now();
+    await peer.publishNow();
+    const ready = await readyWait;
+    assert.equal(ready.waitStatus, "result-ready");
+    assert.equal(ready.phase, "active");
+
+    worker.resultReadyAt = undefined;
+    await peer.publishNow();
+    const completedWait = provider.wait(`owner:${peer.identity.ownerId}`, {
+      detail: "summary",
+      lines: 20,
+      deadline: Date.now() + 2_000,
+      until: "completed",
+      signal: new AbortController().signal,
+    });
+    await delay(25);
+    worker.status = "sleeping";
+    await peer.publishNow();
+    const completed = await completedWait;
+    assert.equal(completed.waitStatus, "completed");
+    assert.equal(completed.phase, "settled");
+
+    worker.status = "running";
+    await peer.publishNow();
+    const timedOut = await provider.wait(`owner:${peer.identity.ownerId}`, {
+      detail: "summary",
+      lines: 20,
+      deadline: Date.now() + 40,
+      until: "completed",
+      signal: new AbortController().signal,
+    });
+    assert.equal(timedOut.waitStatus, "timeout");
+    assert.equal(timedOut.phase, "active");
+
+    const abortController = new AbortController();
+    const abortedWait = provider.wait(`owner:${peer.identity.ownerId}`, {
+      detail: "summary",
+      lines: 20,
+      deadline: Date.now() + 2_000,
+      until: "completed",
+      signal: abortController.signal,
+    });
+    abortController.abort();
+    assert.equal((await abortedWait).waitStatus, "aborted");
+
+    const staleWait = provider.wait(`owner:${peer.identity.ownerId}`, {
+      detail: "summary",
+      lines: 20,
+      deadline: Date.now() + 2_000,
+      until: "completed",
+      signal: new AbortController().signal,
+    });
+    await sessionShutdown({ reason: "reload" }, ctx);
+    rootShutdown = true;
+    const stale = await staleWait;
+    assert.equal(stale.waitStatus, "aborted");
+    assert.equal(stale.error, "stale-root-session");
+  } finally {
+    if (!rootShutdown) await sessionShutdown({ reason: "reload" }, ctx);
+    await peer.stop();
     fs.rmSync(project, { recursive: true, force: true });
   }
 });
@@ -282,6 +416,115 @@ test("failed graph tombstone does not pin sleeping sibling eviction", () => {
   assert.deepEqual(enforceWakeableAgentBudget(state, now), [sleeping.correlationId]);
   assert.equal(state.activeRuns.has(failed.correlationId), true);
   assert.equal(state.activeRuns.has(sleeping.correlationId), false);
+});
+
+test("remote working locations are rejected without Monitor mode", async () => {
+  const { teammate } = createHarness();
+  const single = await teammate.execute(
+    "remote-location",
+    { tasks: [{ agent: "general", cwd: "remote:linux-a/pi", prompt: "run remotely" }] },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  assert.equal(single.isError, true);
+  assert.match(single.content[0].text, /require active Monitor mode/);
+});
+
+test("graph tasks reject remote working locations", async () => {
+  let spawns = 0;
+  const { teammate } = createHarness({
+    spawnChildProcess: (() => { spawns += 1; throw new Error("must not spawn"); }) as never,
+  });
+  const graph = await teammate.execute(
+    "graph-remote-location",
+    { tasks: [
+      { agent: "general", cwd: "remote:linux-a/pi", prompt: "one" },
+      { agent: "general", prompt: "two" },
+    ] },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  assert.equal(graph.isError, true);
+  assert.match(graph.content[0].text, /only single-task dispatches/);
+  assert.equal(spawns, 0);
+});
+
+test("generic teammate dispatch rejects the reserved Monitor evaluator name", async () => {
+  let spawns = 0;
+  const { teammate } = createHarness({
+    spawnChildProcess: (() => { spawns += 1; throw new Error("must not spawn"); }) as never,
+  });
+
+  const direct = await teammate.execute(
+    "ordinary-monitor-name",
+    { tasks: [{ agent: "general", name: "monitor-session", prompt: "claim authority" }] },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  assert.equal(direct.isError, true);
+  assert.match(direct.content[0].text, /reserved for the host-owned Monitor evaluator/);
+
+  const graph = await teammate.execute(
+    "graph-monitor-name",
+    { tasks: [
+      { agent: "general", name: "worker", prompt: "ordinary" },
+      { agent: "general", name: "monitor-session", prompt: "claim authority" },
+    ] },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  assert.equal(graph.isError, true);
+  assert.match(graph.content[0].text, /reserved for the host-owned Monitor evaluator/);
+  assert.equal(spawns, 0);
+});
+
+test("non-Monitor observe rejects aliased providers before provider execution", async () => {
+  let calls = 0;
+  const unregister = registerObservationProvider({
+    kind: "workspace-alias",
+    capabilities: { inspect: true, wait: true },
+    snapshot(id) {
+      calls++;
+      return {
+        target: { kind: "workspace-alias", id },
+        found: true,
+        nativeStatus: "running",
+        phase: "active",
+        summary: "must not execute",
+        updatedAt: Date.now(),
+      };
+    },
+    async wait(id) {
+      calls++;
+      return {
+        target: { kind: "workspace-alias", id },
+        found: true,
+        nativeStatus: "running",
+        phase: "active",
+        summary: "must not execute",
+        updatedAt: Date.now(),
+      };
+    },
+  });
+  try {
+    const { observeTool } = createHarness();
+    const result = await observeTool.execute(
+      "local-observe-alias",
+      { action: "status", targets: [{ kind: "workspace-alias", id: "peer" }] },
+      new AbortController().signal,
+      undefined,
+      context(),
+    );
+    assert.equal(result.isError, true);
+    assert.match(result.content[0]?.text ?? "", /only local teammate and bash_bg targets/);
+    assert.equal(calls, 0);
+  } finally {
+    unregister();
+  }
 });
 
 test("root teammate rejects a pre-aborted dispatch before registration or spawn", async () => {
@@ -1804,11 +2047,12 @@ test("workspace delivery paths retain the originating root session fence", () =>
     source.indexOf("const sendWorkspacePeerMessage"),
     source.indexOf("const prepareLocalAgentDelivery"),
   );
+  assert.match(sender, /const authorized = \(\): boolean => request\.source === "monitor"[\s\S]*?request\.authorize\?\.\(\) === true/);
   assert.match(sender, /const fence = captureRootSessionFence\(\)/);
   assert.match(sender, /await workspacePeerLifecycle;\s+if \(!ownsRootSessionFence\(fence\)\)/);
   assert.match(sender, /await refreshWorkspacePeerOwners\(\);\s+if \(!ownsRootSessionFence\(fence\)\)/);
-  assert.match(sender, /beforePublish\(prepared\) \{\s+if \(!ownsRootSessionFence\(fence\)\)/);
-  assert.match(sender, /beforeCommit\(\) \{\s+if \(!ownsRootSessionFence\(fence\)\)/);
+  assert.match(sender, /beforePublish\(prepared\) \{[\s\S]*?if \(!authorized\(\)\)[\s\S]*?if \(!ownsRootSessionFence\(fence\)\)/);
+  assert.match(sender, /beforeCommit\(\) \{[\s\S]*?if \(!authorized\(\)\)[\s\S]*?if \(!ownsRootSessionFence\(fence\)\)/);
   assert.match(sender, /await waitForWorkspacePeerCommandResponse[\s\S]+if \(!ownsRootSessionFence\(fence\)\)/);
 
   const peers = source.slice(

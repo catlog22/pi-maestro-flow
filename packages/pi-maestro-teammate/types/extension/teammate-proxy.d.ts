@@ -56,6 +56,9 @@ export declare function trackProxyDispatch(state: TeammateState, requestId: stri
 export declare function parseProxyTeammateParams(params: Record<string, unknown>): RunTeammateParams | undefined;
 export declare function parseThinkingInput(value: unknown): TeammateThinkingInput | undefined;
 export declare function parseOutputSchema(value: unknown): Record<string, unknown> | undefined;
+export interface TeammateProxyAuthority {
+    authorizeCrossSession?: () => boolean;
+}
 export declare function handleProxyRequest(pi: ExtensionAPI, state: TeammateState, event: Record<string, unknown>, rawReply: (msg: unknown) => void, spawnedBy?: string, modelCapabilities?: readonly TeammateModelCapability[], onInteraction?: (event: Record<string, unknown>, reply: (message: unknown) => void, correlationId: string) => void, onChildStatus?: (child: ChildAgentCallSnapshot) => void, runtimeOptions?: TeammateRuntimeOptions, mailboxDeliver?: (request: {
     senderId: string;
     recipientId: string;
@@ -75,4 +78,4 @@ export declare function handleProxyRequest(pi: ExtensionAPI, state: TeammateStat
     message: string;
     mode: "steer" | "follow_up" | "abort";
     messageKind?: WorkspacePeerMessageKind;
-}) => Promise<SessionMessageResult>, refreshModelCapabilities?: () => Promise<readonly TeammateModelCapability[]>): Promise<void>;
+}) => Promise<SessionMessageResult>, refreshModelCapabilities?: () => Promise<readonly TeammateModelCapability[]>, authority?: TeammateProxyAuthority): Promise<void>;

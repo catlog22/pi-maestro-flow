@@ -68,10 +68,11 @@ export const MONITOR_MODE_CONTEXT_END = "</monitor_mode>";
 const MONITOR_MODE_CONTEXT = [
   MONITOR_MODE_CONTEXT_START,
   "# Monitor Mode",
-  "This session is the monitor control window. Its responsibility is to supervise and coordinate other workspace sessions according to their tasks and the user's monitoring instructions. It may create and close Monitor-owned worker windows through workspace-window, but it must delegate project implementation to those workers instead of doing the work itself.",
-  "Use workspace-window create only when the user's coordination request requires a new worker; interactive is the default presentation. The objective is delivered to the worker by create, so do not send it again afterward; send only later corrections, new constraints, explicit response requests, or safety/lifecycle instructions. The tool waits for workspace registration and binds the worker automatically. Use workspace-window list for owned lifecycle state, and close only after required results are collected. Never attempt to close discovered external peer windows.",
-  "Use teammate-list with view=windows to discover peer sessions. For one-shot or bounded checks, use one observe call with all relevant targets as kind=workspace. Use teammate-send with follow_up or steer for interventions. teammate-monitor is a legacy teammate-agent tool and must not be used for workspace sessions. Cross-window abort is unavailable.",
-  "Use teammate-list with view=inbox to read persisted cross-window messages, including messages queued before a window was closed; the inbox is history and does not prove a window is still running.",
+  "This session is the monitor control window. Its responsibility is to supervise and coordinate other workspace sessions and remote workers according to their tasks and the user's monitoring instructions. It may create and close Monitor-owned Pi windows through workspace-window and configured SSH-backed runs through remote-worker, but it must delegate project implementation to those workers instead of doing the work itself.",
+  "Use workspace-window only for local Pi worker windows. Create only when the user's coordination request requires a new local worker; interactive is the default presentation. The objective is delivered by create, so do not resend it afterward. The tool waits for workspace registration and binds the worker automatically. Never attempt to close discovered external peer windows.",
+  "Use remote-worker targets to inspect configured SSH targets, create to start only after the SSH bridge handshake and admission, list to inspect runs owned by this Monitor session, and close with the returned remote:<runId> target for lifecycle cancellation. Never treat a remote worker as a workspace owner or pass it to workspace-window.",
+  "Use teammate-list with view=windows to discover local Pi peer sessions. For one-shot or bounded checks, observe local peers as kind=workspace and remote runs as kind=remote using their remote:<runId> targets. Use teammate-send with follow_up or steer for interventions. teammate-monitor is a legacy teammate-agent tool and must not be used for workspace sessions or remote runs. Cross-target abort is unavailable; use remote-worker close for remote lifecycle cancellation.",
+  "Use teammate-list with view=inbox to read persisted cross-window and remote messages, receipts, lifecycle transitions, and final results, including history from closed workers. Inbox history never proves that a workspace window or remote run is still live; use observe for liveness.",
   "Messages arriving while a tool call is running are queued and injected only at the next turn boundary. If you expect a reply, end your turn after observing instead of chaining more tool calls; the reply is not lost, it is waiting for the turn to end.",
   "Choose whether recurring monitoring is needed from the user's intent. Do not create a loop for a one-shot status request or a bounded observe wait/watch. When supervision must continue without user messages, use loop to create one bounded prompt loop for the complete target set; never create one loop per session and never use a shell loop for Monitor supervision.",
   "Before creating a monitoring loop, call loop with action=list and reuse or cancel an existing monitoring loop instead of duplicating it. Each loop tick should rediscover the named workspace sessions, observe all targets in one call, compare new evidence with prior state, and intervene only on new evidence of stall, drift, or failure. Send at most one intervention per target per tick, and cancel the loop when every target settles or continuous supervision is no longer requested.",
@@ -82,12 +83,26 @@ const MONITOR_MODE_CONTEXT = [
   MONITOR_MODE_CONTEXT_END,
 ].join("\n");
 
+export function stripMonitorModeContext(systemPrompt: string): string {
+  const start = systemPrompt.indexOf(MONITOR_MODE_CONTEXT_START);
+  if (start < 0) return systemPrompt;
+  const end = systemPrompt.indexOf(MONITOR_MODE_CONTEXT_END, start);
+  if (end < 0) return systemPrompt.slice(0, start).trimEnd();
+  const before = systemPrompt.slice(0, start).trimEnd();
+  const after = systemPrompt.slice(end + MONITOR_MODE_CONTEXT_END.length).trimStart();
+  return before && after ? `${before}\n\n${after}` : before || after;
+}
+
 export function appendMonitorModeContext(systemPrompt: string): string {
   const start = systemPrompt.indexOf(MONITOR_MODE_CONTEXT_START);
   if (start < 0) return `${systemPrompt}\n\n${MONITOR_MODE_CONTEXT}`;
   const end = systemPrompt.indexOf(MONITOR_MODE_CONTEXT_END, start);
   if (end < 0) return `${systemPrompt.slice(0, start).trimEnd()}\n\n${MONITOR_MODE_CONTEXT}`;
   return `${systemPrompt.slice(0, start).trimEnd()}\n\n${MONITOR_MODE_CONTEXT}${systemPrompt.slice(end + MONITOR_MODE_CONTEXT_END.length)}`;
+}
+
+export function applyMonitorModeContext(systemPrompt: string, active: boolean): string {
+  return active ? appendMonitorModeContext(systemPrompt) : stripMonitorModeContext(systemPrompt);
 }
 
 /** Extract active prompt loops from the Flow loop service's event snapshot. */

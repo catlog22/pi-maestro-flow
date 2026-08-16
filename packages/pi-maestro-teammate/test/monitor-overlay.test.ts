@@ -69,6 +69,22 @@ function idleWindowRow(overrides: Partial<MonitorSessionRow> = {}): MonitorSessi
   };
 }
 
+function remoteWorkerRow(overrides: Partial<MonitorSessionRow> = {}): MonitorSessionRow {
+  return {
+    correlationId: "remote:run-1234",
+    displayName: "remote-review",
+    agentRole: "remote worker · linux/pi",
+    status: "running",
+    idleSeconds: 4,
+    bound: false,
+    source: "remote:run-1234",
+    kind: "remote",
+    ownerId: "remote:run-1234",
+    bindable: false,
+    ...overrides,
+  };
+}
+
 function makeOverlay(rows: MonitorSessionRow[]) {
   let result: unknown;
   const overlay = new MonitorOverlay({
@@ -127,6 +143,18 @@ test("monitor overlay selects window rows but refuses agent rows", () => {
   assert.ok(result, "confirm() should close with a result");
   assert.deepEqual(result.selected, ["owner:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
   assert.equal(result.mode, "auto");
+});
+
+test("monitor overlay lists remote workers beside workspace sessions without binding impersonation", () => {
+  const { overlay } = makeOverlay([idleWindowRow(), remoteWorkerRow()]);
+  const view = stripAnsi(overlay.render(100).join("\n"));
+  assert.match(view, /\[Window\] window:aaaaaa/);
+  assert.match(view, /\[Remote\] remote-review/);
+  assert.match(view, /remote worker · linux\/pi/);
+
+  overlay.handleInput("\x1b[B");
+  overlay.handleInput(" ");
+  assert.match(stripAnsi(overlay.render(100).join("\n")), /Remote workers use remote-worker for lifecycle control/);
 });
 
 test("monitor overlay accepts Kitty input and unwinds editing before closing", () => {

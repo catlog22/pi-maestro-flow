@@ -592,11 +592,15 @@ Custom reviewer prompt.
 
   const tools = new Map<string, Record<string, unknown>>();
   const sessionStartHandlers: Array<(event: unknown, ctx: unknown) => void> = [];
+  let activeTools: string[] = [];
   const pi = new Proxy({
     events: { on: () => () => {}, emit() {} },
     registerTool(tool: Record<string, unknown>) {
       tools.set(tool.name as string, tool);
+      if (!activeTools.includes(tool.name as string)) activeTools.push(tool.name as string);
     },
+    getActiveTools() { return [...activeTools]; },
+    setActiveTools(names: string[]) { activeTools = [...names]; },
     on(event: string, handler: (event: unknown, ctx: unknown) => void) {
       if (event === "session_start") sessionStartHandlers.push(handler);
     },
@@ -888,6 +892,11 @@ Proxy specialist prompt.
     const teammate = tools.get("teammate");
     assert.ok(teammate);
     assert.deepEqual(teammate.promptGuidelines, TEAMMATE_PROMPT_GUIDELINES);
+    assert.match(String(tools.get("teammate-send")?.description), /owned by this Pi process/);
+    assert.match(String(tools.get("teammate-list")?.description), /owned by this Pi process/);
+    assert.match(String(tools.get("observe")?.description), /local teammate and background Bash/);
+    assert.doesNotMatch(String(tools.get("teammate-send")?.description), /cross-session/);
+    assert.doesNotMatch(String(tools.get("teammate-list")?.description), /cross-session windows/);
 
     assert.equal(sessionStartHandlers.length, 1);
     const context = {
@@ -919,6 +928,42 @@ Proxy specialist prompt.
     if (previousDepth === undefined) delete process.env.PI_TEAMMATE_DEPTH;
     else process.env.PI_TEAMMATE_DEPTH = previousDepth;
     fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("controlled Monitor child receives cross-window tool contracts", () => {
+  const tools = new Map<string, Record<string, unknown>>();
+  const pi = new Proxy({
+    events: { on: () => () => {}, emit() {} },
+    registerTool(tool: Record<string, unknown>) {
+      tools.set(tool.name as string, tool);
+    },
+    on() {},
+  }, {
+    get(target, property) {
+      if (property in target) return target[property as keyof typeof target];
+      return () => {};
+    },
+  });
+
+  const previousChild = process.env.PI_TEAMMATE_CHILD;
+  const previousDepth = process.env.PI_TEAMMATE_DEPTH;
+  const previousMonitor = process.env.PI_TEAMMATE_MONITOR;
+  process.env.PI_TEAMMATE_CHILD = "1";
+  process.env.PI_TEAMMATE_DEPTH = "2";
+  process.env.PI_TEAMMATE_MONITOR = "1";
+  try {
+    registerTeammateExtension(pi as unknown as ExtensionAPI);
+    assert.match(String(tools.get("teammate-send")?.description), /cross-session target/);
+    assert.match(String(tools.get("teammate-list")?.description), /cross-session windows/);
+    assert.match(String(tools.get("observe")?.description), /kind="workspace"/);
+  } finally {
+    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previousChild;
+    if (previousDepth === undefined) delete process.env.PI_TEAMMATE_DEPTH;
+    else process.env.PI_TEAMMATE_DEPTH = previousDepth;
+    if (previousMonitor === undefined) delete process.env.PI_TEAMMATE_MONITOR;
+    else process.env.PI_TEAMMATE_MONITOR = previousMonitor;
   }
 });
 
@@ -996,11 +1041,15 @@ ${name} prompt.
   const tools = new Map<string, Record<string, unknown>>();
   const sessionStartHandlers: Array<(event: unknown, ctx: unknown) => void> = [];
   const beforeAgentStartHandlers: Array<(event: { systemPrompt: string }, ctx: unknown) => { systemPrompt: string }> = [];
+  let activeTools: string[] = [];
   const pi = new Proxy({
     events: { on: () => () => {}, emit() {} },
     registerTool(tool: Record<string, unknown>) {
       tools.set(tool.name as string, tool);
+      if (!activeTools.includes(tool.name as string)) activeTools.push(tool.name as string);
     },
+    getActiveTools() { return [...activeTools]; },
+    setActiveTools(names: string[]) { activeTools = [...names]; },
     on(event: string, handler: (event: unknown, ctx: unknown) => void) {
       if (event === "session_start") sessionStartHandlers.push(handler);
       if (event === "before_agent_start") {

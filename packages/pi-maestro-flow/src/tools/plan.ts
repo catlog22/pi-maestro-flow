@@ -1315,14 +1315,18 @@ function buildPlanExecutionContract(planPath: string, handoffKey?: string): stri
     "The approved Plan is already in the current context.",
     `Plan source: ${planPath}`,
     "Before modifying the project:",
-    "1. Reconcile the Plan with every user requirement; do not shrink or reinterpret the approved scope.",
-    "2. Decompose the Plan into an ordered Todo dependency graph before implementation.",
+    "1. Load the knowledge/spec system (Knowledge Gate) before any project-related work:",
+    "   - Make `maestro search \"<1-3 task keywords from this Plan>\" [--type spec|knowhow] --json` the first project-related call.",
+    "   - Load every relevant governing hit with `maestro load --type <type> --id <id>`; search is exposure only, loading records consumption.",
+    "   - Follow the injected knowledge_context; re-search when entering a new subsystem or before an architecture decision.",
+    "2. Reconcile the Plan with every user requirement; do not shrink or reinterpret the approved scope.",
+    "3. Decompose the Plan into an ordered Todo dependency graph before implementation.",
     ...(handoffKey
       ? [`   Pass planHandoffKey: "${handoffKey}" on those todo create calls so they are bound to this approval.`]
       : []),
-    "3. Attach a Goal as the quality gate only to key Todos that carry verifiable acceptance criteria; do NOT create a Goal for every Todo. Goals are flat and time-ordered — put the overall acceptance Goal on the last Todo when an overall sign-off is needed.",
-    "4. Prefer the teammate tool to delegate independent Todo work; use direct execution only when delegation would not help.",
-    "5. Execute the Todo sequence; activating a Todo auto-switches to its quality-gate Goal, and a Todo completes only after its Goal verifies.",
+    "4. Attach a Goal as the quality gate only to key Todos that carry verifiable acceptance criteria; do NOT create a Goal for every Todo. Goals are flat and time-ordered — put the overall acceptance Goal on the last Todo when an overall sign-off is needed.",
+    "5. Prefer the teammate tool to delegate independent Todo work; use direct execution only when delegation would not help.",
+    "6. Execute the Todo sequence; activating a Todo auto-switches to its quality-gate Goal, and a Todo completes only after its Goal verifies.",
   ].join("\n");
 }
 

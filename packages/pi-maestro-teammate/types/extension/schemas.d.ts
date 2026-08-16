@@ -65,6 +65,14 @@ export declare const TeammateParams: Type.TObject<{
     cwd: Type.TOptional<Type.TString>;
     timeoutMs: Type.TOptional<Type.TInteger>;
 }>;
+export declare const LocalTeammateSendParams: Type.TObject<{
+    to: Type.TString;
+    message: Type.TOptional<Type.TString>;
+    mode: Type.TOptional<Type.TUnsafe<"steer" | "follow_up" | "abort">>;
+}>;
+export declare const LocalTeammateListParams: Type.TObject<{
+    view: Type.TOptional<Type.TUnsafe<"active" | "named" | "all" | "roles">>;
+}>;
 export declare const TeammateSendParams: Type.TObject<{
     to: Type.TString;
     message: Type.TOptional<Type.TString>;
@@ -103,6 +111,21 @@ export declare const ObserveParams: Type.TObject<{
     view: Type.TOptional<Type.TUnsafe<"turns" | "live">>;
     turn: Type.TOptional<Type.TInteger>;
 }>;
+export declare const LocalObserveParams: Type.TUnsafe<{
+    timeoutMs?: number | undefined;
+    view?: "turns" | "live" | undefined;
+    lines?: number | undefined;
+    detail?: "summary" | "tail" | "full" | undefined;
+    waitMode?: "count" | "all" | "any" | undefined;
+    waitCount?: number | undefined;
+    until?: "completed" | "result-ready" | undefined;
+    turn?: number | undefined;
+    action: "status" | "wait" | "watch";
+    targets: {
+        id: string;
+        kind: string;
+    }[];
+}>;
 export declare const TeammateMonitorParams: Type.TObject<{
     action: Type.TUnsafe<"status" | "wait">;
     targets: Type.TArray<Type.TString>;
@@ -117,4 +140,11 @@ export declare const WorkspaceWindowParams: Type.TObject<{
     name: Type.TOptional<Type.TString>;
     objective: Type.TOptional<Type.TString>;
     presentation: Type.TOptional<Type.TUnsafe<"interactive" | "headless">>;
+}>;
+export declare const RemoteWorkerParams: Type.TObject<{
+    action: Type.TUnsafe<"close" | "targets" | "create" | "list">;
+    targetId: Type.TOptional<Type.TString>;
+    name: Type.TOptional<Type.TString>;
+    objective: Type.TOptional<Type.TString>;
+    runId: Type.TOptional<Type.TString>;
 }>;

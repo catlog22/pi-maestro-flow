@@ -337,8 +337,8 @@ test("started, send, observe, wait, watch, and monitor are wired to the shared q
 
 test("auxiliary teammate renderers make call and result phases mutually exclusive", () => {
   const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
-  assert.equal((source.match(/if \(context\.isPartial === false\) return new Text\("", 0, 0\);/g) ?? []).length, 6);
-  assert.equal((source.match(/if \(options\.isPartial\) return new Text\("", 0, 0\);/g) ?? []).length, 6);
+  assert.equal((source.match(/if \(context\.isPartial === false\) return new Text\("", 0, 0\);/g) ?? []).length, 7);
+  assert.equal((source.match(/if \(options\.isPartial\) return new Text\("", 0, 0\);/g) ?? []).length, 7);
 });
 
 test("auxiliary teammate tools use a self render shell in root and nested registrations", () => {
@@ -356,8 +356,8 @@ test("root and nested self-rendered teammate tools share renderers", () => {
   const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
   assert.equal((source.match(/return renderTeammateCall\(/g) ?? []).length, 2);
   assert.equal((source.match(/return renderTeammateResult\(/g) ?? []).length, 3);
-  assert.equal((source.match(/return renderTeammateListCall\(/g) ?? []).length, 2);
-  assert.equal((source.match(/return renderTeammateListResult\(/g) ?? []).length, 2);
+  assert.equal((source.match(/return renderTeammateListCall\(/g) ?? []).length, 3);
+  assert.equal((source.match(/return renderTeammateListResult\(/g) ?? []).length, 3);
 });
 
 // Uniqueness guard (not a behaviour test): the ownership event is the single

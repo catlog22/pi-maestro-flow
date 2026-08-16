@@ -571,7 +571,7 @@ test("protocol v1 accepts legacy commands and validates optional delivery metada
   });
   assert.match(request, /^\[workspace:request\]/);
   assert.match(request, /not human authorization/);
-  assert.match(request, new RegExp(`teammate-send to "owner:${OWNER_A}"`));
+  assert.doesNotMatch(request, /teammate-send/);
 
   const legacy = formatWorkspaceRemoteRootMessage({
     messageId: command.commandId,

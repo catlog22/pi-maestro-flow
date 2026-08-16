@@ -576,6 +576,26 @@ Nesting, background, structured output, todo binding, and observation semantics 
 ${modelRoutingSection}`;
 }
 
+export const LOCAL_TEAMMATE_SEND_DESCRIPTION = `Send a message to a running or sleeping teammate agent owned by this Pi process, addressed by name, @name, displayed name#id-prefix, or correlation ID (or prefix).
+
+Modes: "steer" interrupts the current turn, "follow_up" queues after it, and "abort" terminates the local agent subtree.`;
+export const LOCAL_TEAMMATE_SEND_SNIPPET = "Send a correction, follow-up, or termination command to a local teammate agent.";
+export const LOCAL_TEAMMATE_SEND_GUIDELINES = [
+  "Use teammate-send only for new information, a correction, an explicitly requested response, a safety/lifecycle constraint, or termination; steer for urgent correction and abort only to terminate work.",
+  "Do not send routine acknowledgements or status pings, and do not resend a message without new evidence.",
+];
+
+export const LOCAL_TEAMMATE_LIST_DESCRIPTION = `List roles or teammate agents owned by this Pi process. view defaults to "active".
+
+- "active": live local agents except completed entries
+- "named": addressable local agents
+- "all": all tracked local agents
+- "roles": builtin, project, and user-defined role definitions`;
+export const LOCAL_TEAMMATE_LIST_SNIPPET = "List local teammate roles or agent status.";
+export const LOCAL_TEAMMATE_LIST_GUIDELINES = [
+  'Use teammate-list with view="roles" when an available builtin, project, or user-defined agent name is needed; use active/named/all for local running work.',
+];
+
 export const TEAMMATE_SEND_DESCRIPTION = `Send a typed message to a running or sleeping teammate agent, addressed by name, @name, displayed name#id-prefix, correlation ID (or prefix), or a cross-session target from teammate-list such as owner:<ownerId> or owner:<ownerId>:<correlationId>.
 
 Modes: "steer" | "follow_up" (default) | "abort" — per-mode semantics and the message requirement are in the mode and message parameter descriptions. Cross-session targets support only "steer" and "follow_up".
@@ -618,6 +638,22 @@ export const TEAMMATE_WAIT_SNIPPET = "Wait once for a teammate result or for a b
 export const TEAMMATE_WAIT_GUIDELINES = [
   "Call teammate-wait exactly once with a returned name or correlation ID and a bounded timeout instead of repeatedly calling teammate-watch.",
   "Treat result-ready as a usable teammate result; do not continue waiting only for agent_end lifecycle confirmation.",
+];
+
+export const LOCAL_OBSERVE_DESCRIPTION = `Observe local teammate and background Bash targets through one status/wait/watch interface.
+
+- "status": one-shot snapshot of every target
+- "wait": block on an all/any/count barrier with one request-level timeout
+- "watch": poll targets until a bounded timeout and return status transitions
+- view="turns" with status lists local teammate session turns
+
+Targets use { kind, id }, where the supported local kinds are "teammate" and "bash_bg". Use detail=full only when recent output or a settled result is required.`;
+export const LOCAL_OBSERVE_SNIPPET = "Observe, wait for, or watch local teammate and background Bash targets.";
+export const LOCAL_OBSERVE_GUIDELINES = [
+  "Use observe for mixed or multi-target local status and waits; use one bounded wait instead of polling status.",
+  "Use action=watch only with a bounded timeoutMs, and action=wait until=completed only when full termination is required.",
+  "Use detail=full only when recent output is required; summary is the compact default.",
+  "Use view=turns with action=status to inspect a local teammate session history.",
 ];
 
 export const OBSERVE_DESCRIPTION = `Observe mixed teammate and background Bash targets through one status/wait/watch interface.

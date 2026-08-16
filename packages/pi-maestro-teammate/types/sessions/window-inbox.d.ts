@@ -1,4 +1,5 @@
 import { type WindowThreadDirection, type WindowThreadEntry, type WindowThreadStatus } from "./session-core.ts";
+import { type RemoteHistoryEntry } from "./remote-history.ts";
 export interface WindowInboxQuery {
     session?: string;
     peer?: string;
@@ -14,10 +15,12 @@ export interface WindowInboxEntry {
     messageId: string;
     peerOwnerId: string;
     direction: WindowThreadDirection;
-    source: WindowThreadEntry["source"];
+    source: WindowThreadEntry["source"] | "remote";
     messageKind?: WindowThreadEntry["messageKind"];
     mode: WindowThreadEntry["mode"];
     effectiveMode?: WindowThreadEntry["effectiveMode"];
+    target?: string;
+    remoteKind?: RemoteHistoryEntry["kind"];
     body: string;
     bodyTruncated: boolean;
     status: WindowThreadStatus;

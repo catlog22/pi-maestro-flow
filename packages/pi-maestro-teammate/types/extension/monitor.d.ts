@@ -46,7 +46,9 @@ export declare const MONITOR_MAX_TARGETS = 15;
 export declare const MONITOR_STATUS_REFRESH_MS = 5000;
 export declare const MONITOR_MODE_CONTEXT_START = "<monitor_mode>";
 export declare const MONITOR_MODE_CONTEXT_END = "</monitor_mode>";
+export declare function stripMonitorModeContext(systemPrompt: string): string;
 export declare function appendMonitorModeContext(systemPrompt: string): string;
+export declare function applyMonitorModeContext(systemPrompt: string, active: boolean): string;
 /** Extract active prompt loops from the Flow loop service's event snapshot. */
 export declare function activePromptLoopIdsFromPayload(payload: unknown): string[] | undefined;
 export declare function statusIcon(status?: string): string;

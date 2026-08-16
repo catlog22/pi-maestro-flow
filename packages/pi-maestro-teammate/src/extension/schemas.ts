@@ -11,7 +11,7 @@
  *   - reply_to: result routing (caller | main)
  */
 
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 import { TEAMMATE_THINKING_INPUTS } from "../shared/thinking.ts";
 
 const TaskType = Type.String({
@@ -272,7 +272,47 @@ export const TeammateParams = Type.Object({
 }, { additionalProperties: false });
 
 // ---------------------------------------------------------------------------
-// Other tool schemas (unchanged)
+// Local teammate communication — current process only
+// ---------------------------------------------------------------------------
+
+export const LocalTeammateSendParams = Type.Object({
+  to: Type.String({
+    description: "Local agent name, @name, displayed name#id-prefix, or correlation ID (or prefix)",
+  }),
+  message: Type.Optional(
+    Type.String({
+      description:
+        'Message content. Required for "steer" and "follow_up" (the default mode); optional only for "abort".',
+    }),
+  ),
+  mode: Type.Optional(
+    Type.Unsafe<"steer" | "follow_up" | "abort">({
+      type: "string",
+      enum: ["steer", "follow_up", "abort"],
+      default: "follow_up",
+      description:
+        'Delivery mode for a local teammate. "steer" interrupts the current turn, "follow_up" queues after it, and "abort" terminates the agent subtree.',
+    }),
+  ),
+}, {
+  additionalProperties: false,
+  if: { not: { required: ["mode"], properties: { mode: { const: "abort" } } } },
+  then: { required: ["message"] },
+});
+
+export const LocalTeammateListParams = Type.Object({
+  view: Type.Optional(
+    Type.Unsafe<"active" | "named" | "all" | "roles">({
+      type: "string",
+      enum: ["active", "named", "all", "roles"],
+      default: "active",
+      description: 'Local view to return: "active" live agents, "named" addressable agents, "all" tracked agents, or "roles" available role definitions.',
+    }),
+  ),
+}, { additionalProperties: false });
+
+// ---------------------------------------------------------------------------
+// Monitor teammate communication — includes cross-window capabilities
 // ---------------------------------------------------------------------------
 
 export const TeammateSendParams = Type.Object({
@@ -494,6 +534,24 @@ export const ObserveParams = Type.Object({
   ],
 });
 
+export const LocalObserveParams = Type.Unsafe<Static<typeof ObserveParams>>({
+  ...ObserveParams,
+  properties: {
+    ...ObserveParams.properties,
+    targets: Type.Array(
+      Type.Object({
+        kind: Type.Unsafe<"teammate" | "bash_bg">({
+          type: "string",
+          enum: ["teammate", "bash_bg"],
+          description: "Local observation provider kind.",
+        }),
+        id: Type.String({ minLength: 1, description: "Provider-specific target name or id." }),
+      }, { additionalProperties: false }),
+      { minItems: 1, maxItems: 15, description: "Local teammate or background Bash targets." },
+    ),
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Monitor — teammate-compatible multi-agent observation and barrier wait
 // ---------------------------------------------------------------------------
@@ -595,6 +653,60 @@ export const WorkspaceWindowParams = Type.Object({
     {
       if: { required: ["presentation"] },
       then: { properties: { action: { const: "create" } }, required: ["action"] },
+    },
+  ],
+});
+
+// ---------------------------------------------------------------------------
+// Remote worker — Monitor-owned SSH worker lifecycle
+// ---------------------------------------------------------------------------
+
+export const RemoteWorkerParams = Type.Object({
+  action: Type.Unsafe<"targets" | "create" | "list" | "close">({
+    type: "string",
+    enum: ["targets", "create", "list", "close"],
+    description: "List configured remote targets, create a remote run, list owned runs, or close an owned run.",
+  }),
+  targetId: Type.Optional(Type.String({
+    minLength: 1,
+    maxLength: 128,
+    pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$",
+    description: "Configured remote target id. Required for create.",
+  })),
+  name: Type.Optional(Type.String({
+    minLength: 1,
+    maxLength: 128,
+    pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+    description: "Remote run name. Required for create.",
+  })),
+  objective: Type.Optional(Type.String({
+    minLength: 1,
+    description: "Task objective sent during remote run creation. Required for create.",
+  })),
+  runId: Type.Optional(Type.String({
+    minLength: 8,
+    maxLength: 135,
+    pattern: "^remote:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    description: "Stable remote:<runId> target returned by create/list. Required for close.",
+  })),
+}, {
+  additionalProperties: false,
+  allOf: [
+    {
+      if: { properties: { action: { const: "create" } }, required: ["action"] },
+      then: { required: ["targetId", "name", "objective"] },
+    },
+    {
+      if: { properties: { action: { const: "close" } }, required: ["action"] },
+      then: { required: ["runId"] },
+    },
+    ...["targetId", "name", "objective"].map((field) => ({
+      if: { required: [field] },
+      then: { properties: { action: { const: "create" } }, required: ["action"] },
+    })),
+    {
+      if: { required: ["runId"] },
+      then: { properties: { action: { const: "close" } }, required: ["action"] },
     },
   ],
 });
