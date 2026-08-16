@@ -116,6 +116,34 @@ test("a request without the per-run token is refused before any tool runs", asyn
   }
 });
 
+test("one run's token opens only that run's endpoint", async () => {
+  // The token is what makes an attempt unable to act as another one, and two
+  // attempts run concurrently often. Distinct URLs alone do not prove that:
+  // an endpoint that accepted any well-formed token would still hand out
+  // distinct ones, and the actor is bound per endpoint.
+  const first = await probe();
+  const second = await probe();
+  try {
+    const crossed = new URL(second.endpoint.url);
+    crossed.searchParams.set("token", new URL(first.endpoint.url).searchParams.get("token")!);
+    const response = await fetch(crossed, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "tools/call",
+        params: { name: "todo", arguments: { action: "list" } },
+      }),
+    });
+    assert.equal(response.status, 403);
+    await response.text();
+    assert.deepEqual(second.calls, [], "the second run's endpoint served the first run's token");
+    assert.deepEqual(first.calls, [], "the call reached the wrong endpoint's broker");
+  } finally {
+    await first.endpoint.close();
+    await second.endpoint.close();
+  }
+});
+
 test("the endpoint stops listening once closed", async () => {
   const { endpoint } = await probe();
   const url = endpoint.url;

@@ -164,11 +164,18 @@ test("a real dsh run reaches the host todo broker through the product path", { s
   // `runSingleTeammate` → `backendOptionsOf` → `getTeammateChildToolBroker`.
   // That closure is built by the host, and only this path builds it.
   //
-  // Nothing tells the model what the tool is called, either. The follow-up
-  // below names no tool, so the only place the model can learn the name is the
-  // instruction the product generates for a task carrying todos — which is the
-  // half that did not exist while both real cases on this seam passed by
-  // spelling `mcp__maestro_todo__todo` out in their own follow-up text.
+  // Nothing tells the model what to do, either. Both real cases on this seam
+  // used to spell `mcp__maestro_todo__todo` out in their own follow-up text,
+  // and the follow-up below carries no tool name, no queue, and no task — so
+  // the only thing that can produce the calls asserted at the end is the
+  // instruction the product generates for a task carrying todos.
+  //
+  // Naming the work in the follow-up is not enough to make this load-bearing:
+  // measured against a build with the instruction removed, "work the queue you
+  // were assigned" still reached the broker, because the published tool
+  // describes itself as holding the items assigned to the caller and the model
+  // finds it from its own tool list. The status protocol is what nothing else
+  // supplies, so that is what this asserts.
   const root = workspace({ todoBridge: true });
   const seen: TeammateChildToolBrokerRequest[] = [];
   const release = registerTeammateChildToolBroker("todo", async (request) => {
@@ -190,11 +197,7 @@ test("a real dsh run reaches the host todo broker through the product path", { s
         baseCwd: root,
         runtimeGeneration: 1,
         onChildSpawned: (stdin) => {
-          sendRpcMessage(
-            stdin,
-            "Now work the queue you were assigned, then reply with how many items it holds.",
-            "follow_up",
-          );
+          sendRpcMessage(stdin, "Go ahead and continue.", "follow_up");
         },
       },
     );
@@ -202,13 +205,23 @@ test("a real dsh run reaches the host todo broker through the product path", { s
     assert.equal(result.terminalStatus, "completed", result.messages.at(-1)?.content ?? "");
     assert.ok(
       seen.length >= 1,
-      "the runtime never reached the host broker: with no tool name in the follow-up, "
-      + "the model had only the product's own todo instruction to go on",
+      "the runtime never reached the host broker: nothing but the product's own todo "
+      + "instruction told this run it had anything to do",
     );
     assert.equal(seen[0]!.toolName, "todo");
     // Identity, not merely arrival: the broker must see this attempt, because
     // the host's edit check decides what a teammate may write from the actor.
     assert.equal(seen[0]!.actor.correlationId, result.correlationId);
+    // The protocol, not merely the tool: activating the item before working it
+    // is stated in the instruction and nowhere else — not in the tool
+    // description, not in the schema, and not in the follow-up.
+    assert.ok(
+      seen.some((request) => request.input.action === "update"
+        && request.input.id === "probe-1"
+        && request.input.status === "in_progress"),
+      "no call activated the assigned item; the broker saw "
+      + `${JSON.stringify(seen.map((request) => request.input))}`,
+    );
   } finally {
     release();
   }
