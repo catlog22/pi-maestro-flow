@@ -403,9 +403,40 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
           // sibling reading `{name.field}` would otherwise read undefined from
           // a run the transcript called successful.
           const schemaUnmet = structured?.status === "invalid";
+          // The half of the bridge contract the runtime cannot report. A
+          // `cordis.yml` that declares the mcp-client entry but cannot reach it
+          // fails the runtime's own startup check; one that never declares it
+          // produces no signal at all — the child simply has no todo tool, works
+          // around its absence, and settles looking successful while the host's
+          // capability table still says the binding is native.
+          //
+          // Evaluated after the first turn settled, because a client that will
+          // handshake does so before the runtime accepts a prompt. A task with
+          // no todos is not asserted on: it never needed this route. Neither is
+          // an unbridged registration, which is a supported deployment.
+          const bridgeUnreached = endpoint !== undefined
+            && spec.todos !== undefined
+            && spec.todos.length > 0
+            && !endpoint.sawClientConnect();
+          const warnings: string[] = [];
+          if (schemaUnmet) {
+            warnings.push(`structured output was requested but ${(structured as { failure: string }).failure}`);
+          }
+          if (bridgeUnreached) {
+            // Names the file and the entry to add, and nothing else: the URL and
+            // its token identify the actor this run acts as, and this string
+            // reaches logs and transcripts.
+            warnings.push(
+              "dsh todoBridge is enabled for this registration and the task carries todos, "
+              + "but the runtime never connected to the todo endpoint; "
+              + "add an mcp-client entry with transport: streamable-http, serverName: maestro_todo, "
+              + "url: !!js process.env.PI_MAESTRO_TODO_MCP_URL to the cordis.yml at "
+              + `${text(options.config, "cordisConfig") ?? "the configured path"}`,
+            );
+          }
           const terminalStatus: AgentTerminalStatus = aborted
             ? "terminated"
-            : schemaUnmet ? "failed" : "completed";
+            : (schemaUnmet || bridgeUnreached) ? "failed" : "completed";
           const result: SingleResult = {
             agent: spec.agent,
             ...(spec.name === undefined ? {} : { name: spec.name }),
@@ -421,9 +452,10 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
             // reach this agent again.
             wakeable: !aborted,
             ...(structured?.status === "valid" ? { structuredOutput: structured.value } : {}),
-            ...(schemaUnmet
-              ? { warnings: [`structured output was requested but ${(structured as { failure: string }).failure}`] }
-              : {}),
+            // Collected rather than expanded from one condition, so a run that
+            // hit both diagnostics reports both instead of the later one
+            // replacing the earlier.
+            ...(warnings.length > 0 ? { warnings } : {}),
             terminalStatus,
           };
           options.onTurnComplete?.(result, result.terminalStatus);

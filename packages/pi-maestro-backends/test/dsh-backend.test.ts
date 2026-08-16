@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { BackendRunOptions } from "pi-maestro-backend-core/v1/backend";
 import { resolveBackendConfig } from "pi-maestro-backends";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createDshBackend, type DshDriverFactory, type DshHarnessDriver } from "pi-maestro-backends/dsh";
 
 const CONFIG = {
@@ -367,4 +369,73 @@ test("the endpoint is closed on both settlement and abort", async () => {
   abortedRun.abort();
   await (await abortedRun.outcome).reclamation;
   assert.equal(await stillListening(aborted[0]!.PI_MAESTRO_TODO_MCP_URL!), false);
+});
+
+/** A bridged registration naming a cordis.yml the diagnostic must quote back. */
+const PROBE_CORDIS = "/tmp/probe/cordis.yml";
+const BRIDGED_PROBE = { ...CONFIG, cordisConfig: PROBE_CORDIS, todoBridge: true };
+const WITH_TODOS = { agent: "general", task: "do the thing", todos: ["t1"] };
+const MISSING_ENTRY = "add an mcp-client entry with transport: streamable-http, serverName: maestro_todo";
+
+test("a bridged run whose runtime never connected fails with the cordis.yml entry it is missing", async () => {
+  const backend = createDshBackend(async () => fakeDriver());
+  const run = await backend.start(WITH_TODOS, {
+    ...runOptions(BRIDGED_PROBE),
+    host: bridgedHost(),
+  });
+  const outcome = await run.outcome;
+
+  assert.equal(outcome.result.terminalStatus, "failed");
+  const diagnostic = outcome.result.warnings?.find((warning) => warning.includes(MISSING_ENTRY));
+  assert.ok(diagnostic !== undefined, "no warning named the missing cordis.yml entry");
+  assert.ok(diagnostic.includes(PROBE_CORDIS), "the diagnostic does not say which cordis.yml");
+  // The token in the endpoint URL is what an attempt acts under; a diagnostic
+  // reaches logs and transcripts, so it must not carry one.
+  assert.equal(diagnostic.includes("token="), false);
+  // `messages` is the model transcript. A host diagnostic placed there would
+  // read as something the agent said.
+  assert.ok(outcome.result.messages.every((message) => !message.content.includes(MISSING_ENTRY)));
+});
+
+test("a bridged run whose runtime did connect is not failed by the bridge assertion", async () => {
+  // The only handle on this attempt's endpoint is the URL its driver was given,
+  // and the assertion is evaluated as soon as the first turn settles — so the
+  // handshake has to happen inside the turn, not after `start()` resolves.
+  const backend = createDshBackend(async (_config, options) => {
+    const url = options.envExtras?.PI_MAESTRO_TODO_MCP_URL;
+    assert.ok(url !== undefined, "a bridged run was given no endpoint");
+    const driver = fakeDriver();
+    return {
+      ...driver,
+      async run(input: string) {
+        const client = new Client({ name: "runtime-stand-in", version: "1" });
+        await client.connect(new StreamableHTTPClientTransport(new URL(url)));
+        await client.callTool({ name: "todo", arguments: { action: "list" } });
+        await client.close();
+        return driver.run(input);
+      },
+    };
+  });
+  const outcome = await (await backend.start(WITH_TODOS, {
+    ...runOptions(BRIDGED_PROBE),
+    host: bridgedHost(),
+  })).outcome;
+
+  assert.equal(outcome.result.terminalStatus, "completed");
+  assert.equal(outcome.result.warnings?.some((warning) => warning.includes(MISSING_ENTRY)) ?? false, false);
+});
+
+test("a bridged task carrying no todos never needed the route and is not failed", async () => {
+  const backend = createDshBackend(async () => fakeDriver());
+  const outcome = await (await backend.start(SPEC, {
+    ...runOptions(BRIDGED_PROBE),
+    host: bridgedHost(),
+  })).outcome;
+  assert.equal(outcome.result.terminalStatus, "completed");
+});
+
+test("an unbridged registration with todos is left to graph validation, not failed here", async () => {
+  const backend = createDshBackend(async () => fakeDriver());
+  const outcome = await (await backend.start(WITH_TODOS, runOptions())).outcome;
+  assert.equal(outcome.result.terminalStatus, "completed");
 });
