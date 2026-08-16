@@ -8,6 +8,15 @@ import { RequestError } from "@agentclientprotocol/sdk";
 import { AcpClientOperations, type AcpClientOperationsOptions } from "../src/remote/acp-client-operations.ts";
 import type { RemoteAcpPolicy } from "../src/remote/types.ts";
 
+/**
+ * macOS resolves `os.tmpdir()` through the `/var` -> `/private/var` symlink, while the remote
+ * surfaces reject non-canonical roots and compare a child's `process.cwd()` against the configured
+ * root. Tests must hand them the canonical path production callers already receive.
+ */
+function canonicalTempRoot(prefix: string): string {
+  return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+}
+
 function operations(
   root: string,
   policy: RemoteAcpPolicy,
@@ -56,7 +65,7 @@ function removeSwappedTree(root: string, link: string): void {
 }
 
 test("ACP filesystem capabilities are advertised only with descriptor containment", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-auth-capabilities-"));
+  const root = canonicalTempRoot("pi-acp-auth-capabilities-");
   const instance = operations(root, { fs: { read: true, write: true } });
   try {
     const descriptorContainmentAvailable = process.platform === "linux" && fs.existsSync("/proc/self/fd");
@@ -70,7 +79,7 @@ test("ACP filesystem capabilities are advertised only with descriptor containmen
 });
 
 test("ACP permissions are tool-specific and unknown tools default deny", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-auth-permission-"));
+  const root = canonicalTempRoot("pi-acp-auth-permission-");
   const instance = operations(root, {
     permissionMode: "allow-once",
     permissionTools: ["terminal/create"],
@@ -114,7 +123,7 @@ test("ACP permissions are tool-specific and unknown tools default deny", () => {
 });
 
 test("ACP terminal profiles reject code evaluation, git execution, and PATH replacement", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-auth-terminal-"));
+  const root = canonicalTempRoot("pi-acp-auth-terminal-");
   const script = path.join(root, "print-env.mjs");
   fs.writeFileSync(script, "process.stdout.write(process.env.SAFE_VALUE ?? 'missing')");
 
@@ -174,8 +183,8 @@ test("ACP terminal profiles reject code evaluation, git execution, and PATH repl
 });
 
 test("ACP descriptor read remains contained across a parent symlink swap", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-auth-read-root-"));
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-auth-read-outside-"));
+  const root = canonicalTempRoot("pi-acp-auth-read-root-");
+  const outside = canonicalTempRoot("pi-acp-auth-read-outside-");
   const parent = path.join(root, "parent");
   const captured = path.join(root, "captured-parent");
   fs.mkdirSync(parent);
@@ -212,8 +221,8 @@ test("ACP descriptor read remains contained across a parent symlink swap", async
 });
 
 test("ACP descriptor write validates the opened handle before truncating after a parent swap", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-auth-write-root-"));
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-auth-write-outside-"));
+  const root = canonicalTempRoot("pi-acp-auth-write-root-");
+  const outside = canonicalTempRoot("pi-acp-auth-write-outside-");
   const parent = path.join(root, "parent");
   const captured = path.join(root, "captured-parent");
   fs.mkdirSync(parent);

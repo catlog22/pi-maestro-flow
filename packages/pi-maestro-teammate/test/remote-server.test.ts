@@ -279,6 +279,10 @@ test("bridge disconnects a non-reading client when queued egress exceeds the byt
         event: { type: "text", text: `${sequence}:${"x".repeat(600 * 1024)}` },
       });
     }
+    // The bridge charges every queued envelope before any write drains, so the budget is already
+    // blown by the time the loop above returns. Resume only to observe the teardown: a paused
+    // socket never reads the peer's EOF, so it would stay open no matter how long the wait is.
+    socket.resume();
     await Promise.race([
       closed,
       new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Slow client was not disconnected")), 2_000)),
