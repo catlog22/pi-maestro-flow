@@ -376,6 +376,50 @@ test("the endpoint is closed on both settlement and abort", async () => {
   assert.equal(await stillListening(aborted[0]![TODO_ENDPOINT_ENV]!), false);
 });
 
+test("a driver that fails to start takes its endpoint's socket with it", async () => {
+  // The endpoint is opened before the driver, because the runtime reads its URL
+  // while booting. A driver that then throws never reaches `closeOnce`, so the
+  // rejection path is the only thing that closes the listening socket: without
+  // it, every failed start leaves a port, an MCP server, and a live bearer
+  // token behind for the life of the host process.
+  const live: (NodeJS.ProcessEnv | undefined)[] = [];
+  let release = (): void => undefined;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const liveRun = await createDshBackend(async (_config, options) => {
+    live.push(options.envExtras);
+    // Held mid-turn on purpose: a driver that settles immediately closes the
+    // endpoint on the first microtask, so the control below would observe a
+    // closed socket and read as a failure of the thing it is controlling for.
+    const held_: DshHarnessDriver = {
+      async run() {
+        await held;
+        return { sessionId: "s-1", finalResponse: "SEAM", events: [{ type: "turn/end" }] };
+      },
+      async close() { /* nothing to reap behind a promise */ },
+    };
+    return held_;
+  }).start(SPEC, { ...runOptions(BRIDGED), host: bridgedHost() });
+  // The positive control the negative assertions on this seam otherwise lack:
+  // an endpoint that had never opened would satisfy `stillListening === false`
+  // while proving nothing about closing.
+  assert.equal(await stillListening(live[0]![TODO_ENDPOINT_ENV]!), true);
+  release();
+  await (await liveRun.outcome).reclamation;
+
+  const failed: (NodeJS.ProcessEnv | undefined)[] = [];
+  const failing = createDshBackend(async (_config, options) => {
+    failed.push(options.envExtras);
+    throw new Error("the runtime would not spawn");
+  });
+  await assert.rejects(
+    failing.start(SPEC, { ...runOptions(BRIDGED), host: bridgedHost() }),
+    /the runtime would not spawn/,
+  );
+  const leaked = failed[0]?.[TODO_ENDPOINT_ENV];
+  assert.ok(leaked !== undefined, "the failing driver was handed no endpoint to leak");
+  assert.equal(await stillListening(leaked), false);
+});
+
 /** A bridged registration naming a cordis.yml the diagnostic must quote back. */
 const PROBE_CORDIS = "/tmp/probe/cordis.yml";
 const BRIDGED_PROBE = { ...CONFIG, cordisConfig: PROBE_CORDIS, todoBridge: true };
