@@ -61,38 +61,33 @@ mcp-todo-bridge (@deepseek-ai/dsh-mcp-client): invalid config:
 
 **7. endpoint 只暴露 `list` / `get` / `update`。** `create` / `delete` / `clear` 与自驱取任务面向 root，teammate 调不到 —— 宿主的编辑检查本来就把 teammate 限制在自己拥有的条目上，暴露那些动作只会多烧 token 并给出一条注定被拒的路径。
 
-## 本地跑三条真实运行时用例
+## 本地跑真实运行时用例
 
-参考部署在仓外，CI 无法回归守护公共工具名，所以合并前请本机跑一遍并在 PR 里记录实际执行过的用例。
+参考部署在仓外，CI 无法回归守护公共工具名，所以合并前请本机跑一遍并在 PR 里记录退出码与完整计数。
+
+**跑整份文件，不要按用例名逐条跑。** 两个包各一条命令：
 
 ```sh
-# 1. backends 侧：公共工具名 + toolCount
-cd packages/pi-maestro-backends
-DSH_E2E_CORDIS=~/.dsh/smoke/cordis.yml \
-DSH_E2E_COMMAND=~/.dsh/smoke/node_modules/.bin/dsh-jsonrpc-agent \
-node --experimental-transform-types --test --test-timeout=300000 \
-  --test-name-pattern 'a bridged turn calls the host todo tool under its public MCP name' \
-  test/dsh-runtime.e2e.test.ts
-
-# 2. backends 侧：漏配 mcp-client 条目的部署 fail loud
+# backends 侧：8 条真实用例（含公共工具名 + toolCount + fail loud）
 cd packages/pi-maestro-backends
 DSH_E2E_CORDIS=~/.dsh/smoke/cordis.yml \
 DSH_E2E_COMMAND=~/.dsh/smoke/node_modules/.bin/dsh-jsonrpc-agent \
 DSH_E2E_CORDIS_NO_BRIDGE=~/.dsh/smoke/cordis-no-bridge.yml \
-node --experimental-transform-types --test --test-timeout=300000 \
-  --test-name-pattern 'a bridged run against a cordis.yml without the mcp-client entry fails loud' \
-  test/dsh-runtime.e2e.test.ts
+npm run test:e2e
 
-# 3. teammate 侧：runSingleTeammate 到宿主 broker 的整条产品链路
+# teammate 侧：3 条真实用例（含 runSingleTeammate 到宿主 broker 的整条产品链路）
 cd packages/pi-maestro-teammate
 DSH_E2E_CORDIS=~/.dsh/smoke/cordis.yml \
 DSH_E2E_COMMAND=~/.dsh/smoke/node_modules/.bin/dsh-jsonrpc-agent \
-node --experimental-transform-types --import ./test/setup.ts --test --test-timeout=300000 \
-  --test-name-pattern 'a real dsh run reaches the host todo broker through the product path' \
-  test/backend-registry-dsh.e2e.test.ts
+npm run test:e2e
 ```
 
-判定要看 `pass 1 / fail 0 / **skipped 0**`，并确认输出里逐字出现了用例名。`node --test --test-name-pattern` 在一条都没匹配上时照样打印 `✔ <文件路径>` 并汇报 `tests 1 / pass 1 / fail 0 / skipped 0` 且退出 0 —— 只看计数与退出码是个永真门。另外 `npm test -- --test-name-pattern ...` 会把该 flag 追加到 glob 位置参数之后而被静默忽略（跑满全部用例），不能作为判定手段。
+判定要看整份的**退出码 0** 与 `fail 0 / skipped 0`。
+
+按用例名单独跑只能作为定位手段，不能作为验收证据，有两个独立原因：
+
+- **它看不见同一份部署对其他用例的影响。** 挂桥这类改动动的是整份 `cordis.yml`，只跑被改动直接针对的那条，剩下的用例在新部署下是什么状态从未被观察 —— 本文第 2 条那个 bridge-only 缺陷正是这样漏过去的：三条 bridged 用例条条绿，同一份配置下另外 6 条非 bridged 用例全部启动期崩掉。
+- **`--test-name-pattern` 自己是个永真门。** 一条都没匹配上时它照样打印 `✔ <文件路径>` 并汇报 `tests 1 / pass 1 / fail 0 / skipped 0` 且退出 0。真要用它定位，必须同时确认输出里逐字出现了用例名。另外 `npm test -- --test-name-pattern ...` 会把该 flag 追加到 glob 位置参数之后而被静默忽略（跑满全部用例），不能作为判定手段。
 
 ## 两项仓外前置
 
@@ -105,7 +100,7 @@ cp ~/.dsh/smoke/cordis.yml ~/.dsh/smoke/cordis.yml.bak-pre-todo-bridge
 cd ~/.dsh/smoke && npm install @deepseek-ai/dsh-mcp-client
 ```
 
-**(b) 另存一份去掉该条目的副本，供 `DSH_E2E_CORDIS_NO_BRIDGE` 指向。** 缺它，第 2 条用例永远 skip，而 fail-loud 的真实运行时那一半就会看起来「通过」。
+**(b) 另存一份去掉该条目的副本，供 `DSH_E2E_CORDIS_NO_BRIDGE` 指向。** 缺它，fail-loud 那条用例永远 skip，而 fail-loud 的真实运行时那一半就会看起来「通过」。
 
 ```sh
 # 在补条目之前先复制，得到的副本天然不含它
