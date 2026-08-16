@@ -610,10 +610,13 @@ export async function runSingleTeammate(
           ).errors;
           if (capabilityErrors.length > 0) {
             // The resolved backend does not vary with the model candidate, so
-            // no later candidate can serve this task either. Release the trial
-            // permit the way the abort path does: the candidate was never
-            // exercised, so nothing was learned about its health.
-            if (acquisition?.allowed) breaker.releaseCandidate(acquisition);
+            // no later candidate can serve this task either. Settling the trial
+            // permit is left to the `finally` below, which is reached with
+            // `settled` still false and releases a HALF_OPEN acquisition
+            // exactly once. Releasing here as well called `releaseCandidate`
+            // twice, and that method re-opens the circuit rather than handing
+            // an unspent permit back — a backend whose capabilities do not
+            // match the task was charging a model's health for it.
             return rejectAndPublish(capabilityErrors.join("\n"));
           }
           // Whether the backend published a channel of its own. Tracked rather
