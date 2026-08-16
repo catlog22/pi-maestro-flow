@@ -239,7 +239,7 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
   return {
     name: "dsh",
     protocolVersion: 1,
-    capabilities: CAPABILITIES,
+    capabilities: () => CAPABILITIES,
     // A dsh session has a stable id and accepts further prompts, so this
     // backend could resume an interrupted conversation. The host does not: its
     // failover starts a fresh attempt under a new correlation id, which opens a

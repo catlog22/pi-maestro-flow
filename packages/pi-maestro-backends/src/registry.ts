@@ -30,6 +30,7 @@ export type BackendLoader = (module: string) => Promise<unknown>;
 interface RegisteredBackend {
   backend: TeammateBackend;
   config: Record<string, ConfigValue>;
+  capabilities: BackendCapabilities;
 }
 
 /**
@@ -48,7 +49,7 @@ function asBackend(loaded: unknown): TeammateBackend | undefined {
   const shape = candidate as Partial<TeammateBackend>;
   if (typeof shape.name !== "string") return undefined;
   if (typeof shape.start !== "function") return undefined;
-  if (typeof shape.capabilities !== "object" || shape.capabilities === null) return undefined;
+  if (typeof shape.capabilities !== "function") return undefined;
   return candidate as TeammateBackend;
 }
 
@@ -144,7 +145,12 @@ export class TeammateBackendRegistry implements BackendRegistry {
           `teammate backend "${name}" is misconfigured:\n  - ${resolved.errors.join("\n  - ")}`,
         );
       }
-      return { backend, config: resolved.values };
+      // Evaluated here, once, against this registration's own resolved values:
+      // the same module registered twice with different configs must be able to
+      // report different capabilities, and a table read after this point would
+      // have no config to read it against.
+      const capabilities = backend.capabilities(resolved.values);
+      return { backend, config: resolved.values, capabilities };
     })();
 
     // A rejected load is evicted: memoizing the rejection would make an
@@ -170,15 +176,15 @@ export class TeammateBackendRegistry implements BackendRegistry {
    */
   async resolve(spec: TeammateRunSpec, requestedBackend?: string): Promise<ResolvedBackend> {
     const name = requestedBackend ?? spec.backend ?? this.config.default;
-    const { backend, config } = await this.registered(name);
-    return { backend, config };
+    const { backend, config, capabilities } = await this.registered(name);
+    return { backend, config, capabilities };
   }
 
   /**
    * @param backendName - registered backend name.
-   * @returns that backend's declared capability table.
+   * @returns that registration's capability table, as evaluated against its config.
    */
   async capabilitiesOf(backendName: string): Promise<BackendCapabilities> {
-    return (await this.registered(backendName)).backend.capabilities;
+    return (await this.registered(backendName)).capabilities;
   }
 }

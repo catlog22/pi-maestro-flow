@@ -234,7 +234,7 @@ export function createPiSubprocessBackend(
   return {
     name: "pi-subprocess",
     protocolVersion: 1,
-    capabilities: CAPABILITIES,
+    capabilities: () => CAPABILITIES,
     // A failed Pi attempt is replaced by a fresh child that replays the original
     // prompt, so the host's side-effect fence governs its recovery.
     recoveryShape: "replay" satisfies RecoveryShape,

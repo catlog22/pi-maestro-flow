@@ -53,18 +53,18 @@ const SPEC = { agent: "general", task: "do the thing" };
 
 test("dsh declares only the capabilities its SDK actually serves", () => {
   const backend = createDshBackend(async () => fakeDriver());
-  assert.equal(backend.capabilities.forkContext, "unsupported");
-  assert.equal(backend.capabilities.thinkingLevel, "unsupported");
-  assert.equal(backend.capabilities.toolFilter, "unsupported");
-  assert.equal(backend.capabilities.steer, "unsupported");
+  assert.equal(backend.capabilities({}).forkContext, "unsupported");
+  assert.equal(backend.capabilities({}).thinkingLevel, "unsupported");
+  assert.equal(backend.capabilities({}).toolFilter, "unsupported");
+  assert.equal(backend.capabilities({}).steer, "unsupported");
   // outputSchema is emulated now that the extraction and validation exist;
   // todoBinding stays unsupported because adjudication lets an "emulated"
   // capability through with only a warning, and nothing implements the host
   // tool relay it would need.
-  assert.equal(backend.capabilities.outputSchema, "emulated");
-  assert.equal(backend.capabilities.todoBinding, "unsupported");
-  assert.equal(backend.capabilities.modelSelection, "native");
-  assert.equal(backend.capabilities.followUp, "native");
+  assert.equal(backend.capabilities({}).outputSchema, "emulated");
+  assert.equal(backend.capabilities({}).todoBinding, "unsupported");
+  assert.equal(backend.capabilities({}).modelSelection, "native");
+  assert.equal(backend.capabilities({}).followUp, "native");
 });
 
 test("a message arriving after a FAILED run is refused, like one after success", async () => {

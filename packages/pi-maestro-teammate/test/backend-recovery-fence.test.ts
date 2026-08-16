@@ -36,7 +36,7 @@ function probeBackend(
   const backend: TeammateBackend = {
     name: "probe",
     protocolVersion: 1,
-    capabilities: {
+    capabilities: () => ({
       outputSchema: "native",
       forkContext: "native",
       modelSelection: "native",
@@ -46,7 +46,7 @@ function probeBackend(
       steer: "native",
       followUp: "native",
       abort: "native",
-    },
+    }),
     recoveryShape,
     resolveConfig: (config) => ({ values: config, errors: [] }),
     async start(spec: TeammateRunSpec, options: BackendRunOptions) {
@@ -91,8 +91,8 @@ function probeBackend(
 
 function registryOf(backend: TeammateBackend): BackendRegistry {
   return {
-    resolve: async () => ({ backend, config: {} }),
-    capabilitiesOf: async () => backend.capabilities,
+    resolve: async () => ({ backend, config: {}, capabilities: backend.capabilities({}) }),
+    capabilitiesOf: async () => backend.capabilities({}),
     listBackendNames: () => [backend.name],
     defaultBackendName: () => backend.name,
   };

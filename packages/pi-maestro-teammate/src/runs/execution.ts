@@ -571,7 +571,7 @@ export async function runSingleTeammate(
           ));
         } else {
           const spec = backendSpecOf(params, cwd, modelToUse);
-          const { backend, config } = await registry.resolve(spec, spec.backend);
+          const { backend, config, capabilities } = await registry.resolve(spec, spec.backend);
           // Whether the backend published a channel of its own. Tracked rather
           // than decided by backend name: a backend that spawns a child hands
           // the host a real pipe carrying lease control and a session dir, and
@@ -637,7 +637,7 @@ export async function runSingleTeammate(
             { spec, ...(spec.name === undefined ? {} : { name: spec.name }) },
             0,
             backend.name,
-            backend.capabilities,
+            capabilities,
           ).emulated;
           if (emulated.length > 0) {
             attempt.result.capabilityDeliveries = emulated.map((capability) => ({
@@ -935,8 +935,8 @@ export async function runGraph(
       backends = await Promise.all(adjudicated.map(async ({ spec }) => {
         // Same selector dispatch will use; adjudicating the default while
         // dispatch runs a task-named backend would check the wrong table.
-        const { backend } = await registry.resolve(spec, spec.backend);
-        return { name: backend.name, capabilities: backend.capabilities };
+        const { backend, capabilities } = await registry.resolve(spec, spec.backend);
+        return { name: backend.name, capabilities };
       }));
     } catch (cause) {
       return publishGraphRejection(

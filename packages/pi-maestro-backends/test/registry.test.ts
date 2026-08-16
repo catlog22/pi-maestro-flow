@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { BackendCapabilities, TeammateBackend } from "pi-maestro-backend-core/v1/backend";
-import { TeammateBackendRegistry } from "pi-maestro-backends";
+import { TeammateBackendRegistry, validateBackendCapabilities } from "pi-maestro-backends";
 
 const CAPABILITIES: BackendCapabilities = {
   outputSchema: "native",
@@ -19,7 +19,7 @@ function backend(name: string, overrides: Partial<TeammateBackend> = {}): Teamma
   return {
     name,
     protocolVersion: 1,
-    capabilities: CAPABILITIES,
+    capabilities: () => CAPABILITIES,
     recoveryShape: "replay",
     start: () => {
       throw new Error("not started in these tests");
@@ -119,4 +119,49 @@ test("the registry reports what it knows", () => {
   );
   assert.deepEqual(registry.listBackendNames(), ["pi-subprocess", "dsh"]);
   assert.equal(registry.defaultBackendName(), "pi-subprocess");
+});
+
+test("one backend module registered twice with different configs adjudicates differently", async () => {
+  // The point of a capability function: the same module, registered for two
+  // deployments, must be able to report different tables. A static table can
+  // only describe one of them, and whichever it describes, the other lies.
+  const bridgeAware: TeammateBackend = {
+    name: "probe",
+    protocolVersion: 1,
+    capabilities: (config) => ({
+      ...CAPABILITIES,
+      todoBinding: config.bridge === true ? "native" : "unsupported",
+    }),
+    recoveryShape: "replay",
+    configFields: [{ key: "bridge", kind: "boolean", labelKey: "probe.bridge", default: false }],
+    resolveConfig: (config) => ({ values: config, errors: [] }),
+    start: () => {
+      throw new Error("not started in these tests");
+    },
+  };
+  const registry = new TeammateBackendRegistry(
+    {
+      default: "bridged",
+      backends: {
+        bridged: { module: "m", config: { bridge: true } },
+        plain: { module: "m", config: { bridge: false } },
+      },
+    },
+    async () => bridgeAware,
+  );
+
+  const spec = { agent: "a", task: "t", todos: ["t1"] };
+  const bridged = await registry.resolve(spec, "bridged");
+  const plain = await registry.resolve(spec, "plain");
+
+  const accepted = validateBackendCapabilities(
+    [{ spec }],
+    () => ({ name: "probe", capabilities: bridged.capabilities }),
+  );
+  const rejected = validateBackendCapabilities(
+    [{ spec }],
+    () => ({ name: "probe", capabilities: plain.capabilities }),
+  );
+  assert.equal(accepted.errors.length, 0);
+  assert.equal(rejected.errors.length, 1);
 });

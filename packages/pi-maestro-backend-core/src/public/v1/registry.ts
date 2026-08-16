@@ -64,6 +64,15 @@ export interface BackendRegistryConfig {
 export interface ResolvedBackend {
   backend: TeammateBackend;
   config: Record<string, ConfigValue>;
+  /**
+   * This registration's capability table, evaluated once against `config`.
+   *
+   * Every consumer reads this rather than calling `backend.capabilities` again.
+   * Two call sites evaluating the function themselves could pass different
+   * configs and reach different verdicts for the same registration, which is
+   * precisely the drift the per-registration evaluation exists to remove.
+   */
+  capabilities: BackendCapabilities;
 }
 
 /**

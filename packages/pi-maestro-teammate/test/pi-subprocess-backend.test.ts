@@ -15,7 +15,7 @@ test("Pi reaches the orchestrator through the ordinary backend contract", () => 
 });
 
 test("Pi serves every orchestrator-requestable capability natively", () => {
-  const supports: CapabilitySupport[] = Object.values(backend.capabilities);
+  const supports: CapabilitySupport[] = Object.values(backend.capabilities({}));
   assert.equal(supports.length, 9);
   assert.deepEqual([...new Set(supports)], ["native"]);
 });

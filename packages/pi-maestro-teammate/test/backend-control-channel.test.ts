@@ -29,8 +29,8 @@ interface Delivered { message: string; mode: ControlMode }
 
 function registryOf(backend: TeammateBackend): BackendRegistry {
   return {
-    resolve: async () => ({ backend, config: {} }),
-    capabilitiesOf: async () => backend.capabilities,
+    resolve: async () => ({ backend, config: {}, capabilities: backend.capabilities({}) }),
+    capabilitiesOf: async () => backend.capabilities({}),
     listBackendNames: () => [backend.name],
     defaultBackendName: () => backend.name,
   };
@@ -49,11 +49,11 @@ async function withChannel(
   const backend: TeammateBackend = {
     name: "channel-probe",
     protocolVersion: 1,
-    capabilities: {
+    capabilities: () => ({
       outputSchema: "native", forkContext: "native", modelSelection: "native",
       thinkingLevel: "native", todoBinding: "native", toolFilter: "native",
       steer: "native", followUp: "native", abort: "native",
-    },
+    }),
     recoveryShape: "in-context-continuation",
     resolveConfig: (config) => ({ values: config, errors: [] }),
     async start(spec, runOptions) {

@@ -23,7 +23,7 @@ function backend(overrides: Partial<TeammateBackend> = {}): TeammateBackend {
   return {
     name: "dsh",
     protocolVersion: 1,
-    capabilities: CAPABILITIES,
+    capabilities: () => CAPABILITIES,
     recoveryShape: "in-context-continuation",
     start: () => {
       throw new Error("not started in these tests");

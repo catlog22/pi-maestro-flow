@@ -375,7 +375,25 @@ export interface TeammateBackend {
   readonly name: string;
   /** Protocol version this backend implements; the registry rejects a mismatch. */
   readonly protocolVersion: 1;
-  readonly capabilities: BackendCapabilities;
+  /**
+   * What this registration can do, derived from its own resolved config.
+   *
+   * A function rather than a table because capability is a property of a
+   * deployment, not of a module: the same backend registered twice — once with
+   * a host bridge configured, once without — supports different things, and a
+   * shared static table can only describe one of them. The registry evaluates
+   * this exactly once per registration, after `resolveConfig` has applied
+   * defaults, and carries the result on `ResolvedBackend`.
+   *
+   * Must be a pure function of the argument: no `process.env`, no I/O. Its
+   * result is memoized for the registration's lifetime, so anything read here
+   * that later changes would leave the host adjudicating against a table no
+   * longer true.
+   *
+   * @param config - this registration's validated, defaults-applied config.
+   * @returns the capability table for this registration.
+   */
+  readonly capabilities: (config: Record<string, ConfigValue>) => BackendCapabilities;
   /** How this backend would recover; descriptive, and never clears the host fence. */
   readonly recoveryShape: RecoveryShape;
   /** Settings this backend accepts; omitted means it takes none. */
