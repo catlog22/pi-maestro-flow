@@ -72,14 +72,14 @@ mcp-todo-bridge (@deepseek-ai/dsh-mcp-client): invalid config:
 **跑整份文件，不要按用例名逐条跑。** 两个包各一条命令：
 
 ```sh
-# backends 侧：8 条真实用例（含公共工具名 + toolCount + fail loud）
+# backends 侧：9 条真实用例（含公共工具名 + toolCount + 环境擦除 + fail loud）
 cd packages/pi-maestro-backends
 DSH_E2E_CORDIS=~/.dsh/smoke/cordis.yml \
 DSH_E2E_COMMAND=~/.dsh/smoke/node_modules/.bin/dsh-jsonrpc-agent \
 DSH_E2E_CORDIS_NO_BRIDGE=~/.dsh/smoke/cordis-no-bridge.yml \
 npm run test:e2e
 
-# teammate 侧：3 条真实用例（含 runSingleTeammate 到宿主 broker 的整条产品链路）
+# teammate 侧：4 条真实用例（含从工具请求装配到宿主 broker 的整条产品链路）
 cd packages/pi-maestro-teammate
 DSH_E2E_CORDIS=~/.dsh/smoke/cordis.yml \
 DSH_E2E_COMMAND=~/.dsh/smoke/node_modules/.bin/dsh-jsonrpc-agent \
@@ -87,6 +87,8 @@ npm run test:e2e
 ```
 
 判定要看整份的**退出码 0** 与 `fail 0 / skipped 0`。
+
+`DSH_E2E_CORDIS_NO_BRIDGE` 在 `DSH_E2E_CORDIS` 在场时不是可选项：漏掉它，fail-loud 那条用例现在直接判 fail 并把该设的变量写进断言消息，而不是静默 skip 让整份继续读绿 —— 只跑 bridged 的一半正是当年 bridge-only 缺陷漏过去的形状。
 
 按用例名单独跑只能作为定位手段，不能作为验收证据，有两个独立原因：
 

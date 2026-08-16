@@ -26,8 +26,9 @@
  * cordis.yml carries the mcp-client entry from
  * `docs/dsh-todo-bridge-deployment.md`, and the fail-loud case needs
  * `DSH_E2E_CORDIS_NO_BRIDGE` pointing at a copy of that file with the entry
- * removed. Without the second variable that case skips, and the half of the
- * contract it covers goes unproven while the suite still reads green.
+ * removed. That second variable is not optional once the first is set: running
+ * only the bridged half is how the bridge-only defect passed review, so the
+ * case fails on a missing config rather than skipping past it.
  *
  * The runtime resolves its own credential from its own configuration; this test
  * neither reads nor forwards a key, which is the property the credential
@@ -113,13 +114,30 @@ const noBridgeConfig = process.env.DSH_E2E_CORDIS_NO_BRIDGE === undefined
   ? undefined
   : expand(process.env.DSH_E2E_CORDIS_NO_BRIDGE);
 
-/** Why the fail-loud case is skipping, or undefined when it can run. */
-const skipNoBridge = ((): string | undefined => {
-  if (skip !== undefined) return skip;
-  if (noBridgeConfig === undefined) return "DSH_E2E_CORDIS_NO_BRIDGE is unset";
-  if (!existsSync(noBridgeConfig)) return `no bridge-less runtime config at ${noBridgeConfig}`;
-  return undefined;
-})();
+/**
+ * The bridge-less deployment, or the reason this run cannot judge that half.
+ *
+ * Only `DSH_E2E_CORDIS` decides whether this file runs. Once it is set, a
+ * missing second config is a misconfigured run rather than an absent
+ * capability, so the case below fails on it instead of skipping: skipping is
+ * what let a run cover the bridged half, leave the unbridged half unobserved,
+ * and still print `fail 0` and exit 0 — the exact reading that hid the
+ * bridge-only defect. Nothing in CI runs these files, so the exit code of a
+ * local run is the only signal there is.
+ *
+ * @returns the config path, or the message explaining why there is none.
+ */
+function bridgeLessConfig(): { path: string } | { missing: string } {
+  if (noBridgeConfig === undefined) {
+    return {
+      missing: "DSH_E2E_CORDIS_NO_BRIDGE is unset. With DSH_E2E_CORDIS set, this file judges both "
+        + "halves of the bridge contract, and the unbridged half needs a copy of that cordis.yml "
+        + "with the mcp-client entry removed. See docs/dsh-todo-bridge-deployment.md.",
+    };
+  }
+  if (!existsSync(noBridgeConfig)) return { missing: `no bridge-less runtime config at ${noBridgeConfig}` };
+  return { path: noBridgeConfig };
+}
 
 /**
  * One `session.event` notification as the host observer receives it.
@@ -372,7 +390,9 @@ test("the endpoint URL never reaches a shell the model can run", { skip }, async
   assert.equal(transcript.includes(token), false, "this run's endpoint token reached the transcript");
 });
 
-test("a bridged run against a cordis.yml without the mcp-client entry fails loud", { skip: skipNoBridge }, async () => {
+test("a bridged run against a cordis.yml without the mcp-client entry fails loud", { skip }, async () => {
+  const bridgeLess = bridgeLessConfig();
+  if ("missing" in bridgeLess) assert.fail(bridgeLess.missing);
   const outcome = await (await backend().start(
     {
       agent: "general",
@@ -380,7 +400,7 @@ test("a bridged run against a cordis.yml without the mcp-client entry fails loud
       todos: ["probe-1"],
     },
     options({
-      config: { ...BRIDGED_CONFIG, cordisConfig: noBridgeConfig ?? "" },
+      config: { ...BRIDGED_CONFIG, cordisConfig: bridgeLess.path },
       host: { proxyToolCall: async () => ({ content: [{ type: "text", text: "[]" }] }) },
     }),
   )).outcome;
