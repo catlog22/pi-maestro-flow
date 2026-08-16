@@ -93,6 +93,7 @@ import {
   MAX_DEFAULT_DEPTH,
   resolveMaxActiveAgents,
   isStructuredOutputSettlementDiagnostic,
+  singleRunParamsOf,
 } from "../runs/execution.ts";
 import {
   confirmChildReloaded,
@@ -1077,20 +1078,10 @@ export async function handleProxyRequest(
       const childMaxDispatchDepth = normalizedTasks
         ? Math.min(...allTasks.map((task) => nestedChildMaxDispatchDepth(parentBudget, dispatchDepth, task.maxNestingDepth)))
         : nestedChildMaxDispatchDepth(parentBudget, dispatchDepth, singleTask.maxNestingDepth);
-      const singleRunParams = {
-        agent: singleTask.agent,
+      const singleRunParams = singleRunParamsOf(singleTask, {
         task: singleTask.prompt,
-        taskType: singleTask.taskType,
-        name: singleTask.name,
-        backend: singleTask.backend,
         reply_to: routedParams.reply_to,
-        context: singleTask.context,
-        model: singleTask.model,
-        fallbackModels: singleTask.fallbackModels,
-        thinking: singleTask.thinking,
-        cwd: singleTask.cwd,
-        outputSchema: singleTask.outputSchema,
-      };
+      });
       const warningPrefix = normalization.warnings.length
         ? normalization.warnings.map((w) => `[warn] ${w}`).join("\n") + "\n\n"
         : "";
@@ -1911,21 +1902,12 @@ export async function handleProxyRequest(
           };
 
           target.restartPending = runSingleTeammate(
-            {
-              agent: task.agent,
-              name: task.name,
-              backend: task.backend,
+            singleRunParamsOf(task, {
               task: message,
-              taskType: task.taskType,
               context: "fresh",
-              model: task.model,
-              fallbackModels: task.fallbackModels,
-              thinking: task.thinking,
-              cwd: task.cwd,
-              outputSchema: task.outputSchema,
               timeoutMs: task.timeoutMs,
               reply_to: p.reply_to,
-            },
+            }),
             restartOptions,
           ).then((result) => {
             if (!ownsRuntime()) return;

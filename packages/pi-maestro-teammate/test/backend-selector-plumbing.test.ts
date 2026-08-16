@@ -1,38 +1,85 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
-import { normalizeTeammateParams } from "../src/runs/execution-infra.ts";
+import { normalizeTeammateParams, singleRunParamsOf } from "../src/runs/execution-infra.ts";
 
 /**
  * The task-level backend selector, from the request down to the run spec.
  *
- * The selector is only meaningful if every builder that turns a task into
- * `RunSingleTeammateParams` carries it. There are four, in three modules, and a
- * builder that forgets it does not fail — it silently runs the default backend,
- * which is the one failure mode a routing decision must not have. Dropping it
- * on the nested-dispatch path is exactly what happened once already.
+ * The selector is only meaningful if the projection from a normalized task to
+ * `RunSingleTeammateParams` carries it. That projection used to be written out
+ * four times across two extension modules, and a copy that forgot a field did
+ * not fail — it silently ran the default backend, which is the one failure mode
+ * a routing decision must not have. Dropping the selector on the
+ * nested-dispatch path happened once; dropping `todos` on all four happened
+ * next. The projection now has one home, so these cases pin that home down and
+ * assert no module has grown a second one.
  */
 
-/** Every module that builds params handed to `runSingleTeammate`. */
-const BUILDERS: readonly { module: string; label: string }[] = [
+/** Every extension module that dispatches a single teammate. */
+const DISPATCHERS: readonly { module: string; label: string }[] = [
   { module: "../src/extension/index.ts", label: "root dispatch and restart" },
   { module: "../src/extension/teammate-proxy.ts", label: "nested dispatch and restart" },
 ];
 
-test("every task-to-params builder carries the backend selector", () => {
-  for (const { module, label } of BUILDERS) {
+test("the shared projection is the only builder, and it carries every task field", () => {
+  const task = {
+    agent: "prober",
+    prompt: "do the thing",
+    taskType: "coding" as const,
+    name: "one",
+    backend: "dsh",
+    context: "fork" as const,
+    model: "m",
+    fallbackModels: ["n"],
+    thinking: "high" as const,
+    cwd: "/tmp",
+    outputSchema: { type: "object" },
+    timeoutMs: 5,
+    todos: ["t1"],
+  };
+  const params = singleRunParamsOf(task, { task: task.prompt, reply_to: "main" });
+  // Every field a request can declare on a task, checked as a set rather than
+  // one assertion each: a field added to NormalizedTask and forgotten here is
+  // the defect this file exists for.
+  assert.deepEqual(params, {
+    agent: "prober",
+    task: "do the thing",
+    taskType: "coding",
+    name: "one",
+    backend: "dsh",
+    reply_to: "main",
+    context: "fork",
+    model: "m",
+    fallbackModels: ["n"],
+    thinking: "high",
+    cwd: "/tmp",
+    outputSchema: { type: "object" },
+    todos: ["t1"],
+  });
+  // A restart replays a different prompt under a fixed context and adds the
+  // task's own timeout; nothing else about the task changes.
+  assert.deepEqual(
+    singleRunParamsOf(task, { task: "woke up", context: "fresh", timeoutMs: task.timeoutMs }),
+    { ...params, task: "woke up", context: "fresh", timeoutMs: 5, reply_to: undefined },
+  );
+
+  for (const { module, label } of DISPATCHERS) {
     const source = fs.readFileSync(new URL(module, import.meta.url), "utf-8");
-    // `taskType` is the anchor: only objects destined for `runSingleTeammate`
-    // read it off a task. Anchoring on `name` instead also matches the active
-    // agent registry record, which is not a params object.
-    const builders = source.match(/taskType: (?:singleTask|task)\.taskType,/g) ?? [];
-    const selectors = source.match(/backend: (?:singleTask|task)\.backend,/g) ?? [];
-    assert.ok(builders.length > 0, `${label} (${module}) builds no params — has the anchor moved?`);
-    assert.equal(
-      selectors.length,
-      builders.length,
-      `${label} (${module}) builds ${builders.length} param objects from a task `
-      + `but forwards the backend selector in ${selectors.length} of them`,
+    // `taskType` was the anchor of the old inline builders: only an object
+    // destined for `runSingleTeammate` reads it off a task. A match here means
+    // a second projection has grown back, and the next field will be dropped
+    // from it rather than from the one under test above.
+    const inline = source.match(/taskType: (?:singleTask|task)\.taskType,/g) ?? [];
+    assert.deepEqual(
+      inline,
+      [],
+      `${label} (${module}) builds run params inline again instead of through singleRunParamsOf`,
+    );
+    assert.match(
+      source,
+      /singleRunParamsOf\(/,
+      `${label} (${module}) no longer dispatches through the shared projection`,
     );
   }
 });

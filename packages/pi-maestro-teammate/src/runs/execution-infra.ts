@@ -291,6 +291,55 @@ export interface NormalizedTask {
   todos?: string[];
 }
 
+/**
+ * Project one normalized task into the params `runSingleTeammate` takes.
+ *
+ * The single home for that projection. Four call sites across the two extension
+ * modules built this object inline — root dispatch, nested dispatch, and their
+ * two cold-restart paths — and a field left out of one of them does not fail:
+ * the run simply proceeds without it. `todos` reached only the graph builder
+ * for exactly that reason, so `spec.todos` was undefined on every single
+ * dispatch, and both the capability gate and the dsh bridge assertion that key
+ * off it could never fire. One builder is what gives that projection an owner.
+ *
+ * The prompt is an argument rather than `source.prompt` because a cold restart
+ * replays the message that woke the agent, not the prompt it was dispatched
+ * with; `context` and `timeoutMs` are arguments for the same reason.
+ *
+ * @param source - the normalized task carrying what the request declared.
+ * @param overrides - what the call site owns: the prompt text, the reply
+ *   target, and, on a restart, the fixed context and the task's timeout.
+ * @returns the params object for one `runSingleTeammate` call.
+ */
+export function singleRunParamsOf(
+  source: NormalizedTask,
+  overrides: {
+    task: string;
+    reply_to?: "caller" | "main";
+    context?: "fresh" | "fork";
+    timeoutMs?: number;
+  },
+): RunSingleTeammateParams {
+  return {
+    agent: source.agent,
+    task: overrides.task,
+    taskType: source.taskType,
+    name: source.name,
+    backend: source.backend,
+    reply_to: overrides.reply_to,
+    context: overrides.context ?? source.context,
+    model: source.model,
+    fallbackModels: source.fallbackModels,
+    thinking: source.thinking,
+    cwd: source.cwd,
+    outputSchema: source.outputSchema,
+    // Copied rather than aliased: the roster record keeps its own array of the
+    // same ids, and a run must not be able to reorder what the roster shows.
+    ...(source.todos === undefined ? {} : { todos: [...source.todos] }),
+    ...(overrides.timeoutMs === undefined ? {} : { timeoutMs: overrides.timeoutMs }),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------

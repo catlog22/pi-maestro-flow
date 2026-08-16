@@ -232,6 +232,7 @@ import {
   createChildTerminationController,
   getInteractiveTerminalLaunchSpec,
   getPiSpawnCommand,
+  singleRunParamsOf,
   terminateProcessTreeByPid,
   type ChildTerminationController,
 } from "../runs/execution-infra.ts";
@@ -2498,20 +2499,10 @@ export default function registerTeammateExtension(
       const childMaxDispatchDepth = isMultiTask
         ? Math.min(...normalizedTasks.map((task) => rootChildMaxDispatchDepth(task.maxNestingDepth)))
         : rootChildMaxDispatchDepth(singleTask.maxNestingDepth);
-      const singleRunParams = {
-        agent: singleTask.agent,
+      const singleRunParams = singleRunParamsOf(singleTask, {
         task: singleTask.prompt,
-        taskType: singleTask.taskType,
-        name: singleTask.name,
-        backend: singleTask.backend,
         reply_to: params.reply_to,
-        context: singleTask.context,
-        model: singleTask.model,
-        fallbackModels: singleTask.fallbackModels,
-        thinking: singleTask.thinking,
-        cwd: singleTask.cwd,
-        outputSchema: singleTask.outputSchema,
-      };
+      });
       let foregroundUpdateOpen = params.background === false;
       const warningPrefix = normalization.warnings.length
         ? normalization.warnings.map((w) => `[warn] ${w}`).join("\n") + "\n\n"
@@ -3467,21 +3458,12 @@ export default function registerTeammateExtension(
             deliverRestartCompletion();
           };
 
-          const restartParams = {
-            agent: task.agent,
-            name: task.name,
-            backend: task.backend,
+          const restartParams = singleRunParamsOf(task, {
             task: message,
-            taskType: task.taskType,
-            context: "fresh" as const,
-            model: task.model,
-            fallbackModels: task.fallbackModels,
-            thinking: task.thinking,
-            cwd: task.cwd,
-            outputSchema: task.outputSchema,
+            context: "fresh",
             timeoutMs: task.timeoutMs,
             reply_to: params.reply_to,
-          };
+          });
           target.restartPending = runWithProgressFlushCleanup(
             () => runSingleTeammate(restartParams, options),
             progressFlushGate,
