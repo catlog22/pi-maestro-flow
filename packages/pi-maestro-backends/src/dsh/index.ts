@@ -15,7 +15,12 @@
 
 import { createDshBackend } from "./backend.ts";
 
-export { createDshBackend, type DshDriverFactory, type DshHarnessDriver } from "./backend.ts";
+export {
+  createDshBackend,
+  type DshDriverFactory,
+  type DshDriverOptions,
+  type DshHarnessDriver,
+} from "./backend.ts";
 
 /** The registerable backend: capability table plus the SDK-backed driver. */
 export default createDshBackend(async (config, options) => {

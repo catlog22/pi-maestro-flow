@@ -42,6 +42,7 @@ import {
   structuredOutputRecovery,
   type StructuredOutcome,
 } from "./structured-output.ts";
+import { startTodoEndpoint, type TodoEndpoint } from "./todo-endpoint.ts";
 
 /**
  * What the SDK surface actually supports.
@@ -61,12 +62,12 @@ import {
  * `thinkingLevel` — absent from `RunOptions`, so it cannot vary per task. The
  * runtime's own config sets a deployment-wide default, which is a different
  * thing from the per-task control the orchestrator asks for here.
- * `todoBinding` — still `unsupported`, and for the reason `outputSchema` was
- * until its extraction existed: declaring `emulated` while nothing implements
- * the emulation is worse than declaring neither, because adjudication lets an
- * `emulated` capability through with only a warning. Binding todos needs the
- * host's tool relay, which is callback-shaped and states no guarantee that its
- * reply always arrives.
+ * `todoBinding` — the one entry this table cannot settle, because it is a
+ * property of the deployment rather than of the runtime: a registration with
+ * `todoBridge` set carries the host's todo tool over a per-run MCP endpoint and
+ * serves it natively, and one without it has no route to the tool at all. The
+ * value below is the unbridged case, and the capability function overrides it
+ * for a registration that mounted the bridge.
  * `toolFilter` — the child's tool set comes from its `cordis.yml`.
  * `steer` — `HarnessClient` states plainly that there is no wire-level cancel.
  * Boundary-queued emulation is buildable but is not built here, so this reads
@@ -149,6 +150,17 @@ const CONFIG_FIELDS: readonly BackendConfigField[] = [
     descriptionKey: "dsh.envPassthrough.description",
   },
   {
+    // Whether this registration carries the host's todo tool into the runtime.
+    // A deployment setting must decide it, because the answer differs per
+    // deployment: it is true only when this registration's `cordis.yml` also
+    // names the matching mcp-client entry.
+    key: "todoBridge",
+    kind: "boolean",
+    labelKey: "dsh.todoBridge",
+    descriptionKey: "dsh.todoBridge.description",
+    default: false,
+  },
+  {
     key: "maxTokens",
     kind: "integer",
     labelKey: "dsh.maxTokens",
@@ -174,10 +186,23 @@ export interface DshHarnessDriver {
   close(): Promise<void>;
 }
 
+/**
+ * Run options this backend adds for its own driver.
+ *
+ * `envExtras` stays here rather than on `BackendRunOptions`: it carries a wire
+ * detail — a URL and its token — that only this backend and its driver have any
+ * business knowing. Putting it on the shared seam would make every backend
+ * declare a field about a transport it does not use.
+ */
+export interface DshDriverOptions extends BackendRunOptions {
+  /** Variables belonging to this one run; never read from `process.env`. */
+  envExtras?: NodeJS.ProcessEnv;
+}
+
 /** Builds a driver for one run from the resolved configuration. */
 export type DshDriverFactory = (
   config: Record<string, ConfigValue>,
-  options: BackendRunOptions,
+  options: DshDriverOptions,
 ) => Promise<DshHarnessDriver>;
 
 /** Read a string setting, or undefined when unset. */
@@ -239,7 +264,13 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
   return {
     name: "dsh",
     protocolVersion: 1,
-    capabilities: () => CAPABILITIES,
+    // The one capability this backend cannot state from the module alone: a
+    // todo binding exists only where the deployment mounted the bridge, so the
+    // table is completed from this registration's own setting.
+    capabilities: (config) => ({
+      ...CAPABILITIES,
+      todoBinding: config.todoBridge === true ? "native" : "unsupported",
+    }),
     // A dsh session has a stable id and accepts further prompts, so this
     // backend could resume an interrupted conversation. The host does not: its
     // failover starts a fresh attempt under a new correlation id, which opens a
@@ -272,19 +303,52 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
 
     async start(spec: TeammateRunSpec, options: BackendRunOptions): Promise<BackendRun> {
       const startedAt = Date.now();
+      // Started before the driver, because the runtime reads the URL out of its
+      // environment as it boots: an endpoint opened afterwards would be one the
+      // child had already decided did not exist.
+      let endpoint: TodoEndpoint | undefined;
+      if (options.config.todoBridge === true) {
+        if (options.host.proxyToolCall === undefined) {
+          throw new Error(
+            "dsh backend has todoBridge enabled but the host supplied no proxyToolCall; "
+            + "the registration declares a host-tool binding this host cannot serve",
+          );
+        }
+        endpoint = await startTodoEndpoint({
+          correlationId: options.correlationId,
+          proxyToolCall: options.host.proxyToolCall,
+        });
+      }
       // The task's own directory wins over the host base, and is resolved once
       // here so the driver never has to know a task-level cwd exists.
-      const driver = await driverOf(options.config, {
-        ...options,
-        ...(spec.cwd === undefined ? {} : { baseCwd: spec.cwd }),
-      });
+      let driver: DshHarnessDriver;
+      try {
+        driver = await driverOf(options.config, {
+          ...options,
+          ...(spec.cwd === undefined ? {} : { baseCwd: spec.cwd }),
+          ...(endpoint === undefined ? {} : { envExtras: { PI_MAESTRO_TODO_MCP_URL: endpoint.url } }),
+        });
+      } catch (cause) {
+        // A driver that never started has no `closeOnce` to reach, and the
+        // endpoint is already listening.
+        await endpoint?.close();
+        throw cause;
+      }
       const sessionId = options.correlationId;
       const followUps: string[] = [];
       // abort() and both settlement paths all want the runtime gone. Closing
       // once and sharing the settlement keeps a second close from reporting
       // "unreaped" for a runtime the first close already reaped.
       let closing: Promise<void> | undefined;
-      const closeOnce = (): Promise<void> => (closing ??= driver.close());
+      const closeOnce = (): Promise<void> => (closing ??= (async () => {
+        try {
+          await driver.close();
+        } finally {
+          // In `finally`, so a runtime that failed to close still takes its
+          // endpoint's listening socket down with it.
+          await endpoint?.close();
+        }
+      })());
       // A message accepted after the last turn has settled would never be
       // delivered, so the window is tracked explicitly and `send` reports its
       // closure instead of returning a success the orchestrator cannot verify.

@@ -7,8 +7,7 @@
 
 import { DeepSeekHarness } from "@deepseek-ai/dsh-sdk-client";
 import type { ConfigValue } from "pi-maestro-backend-core/v1/backend";
-import type { BackendRunOptions } from "pi-maestro-backend-core/v1/backend";
-import type { DshHarnessDriver } from "./backend.ts";
+import type { DshDriverOptions, DshHarnessDriver } from "./backend.ts";
 
 /** Read a string setting, or undefined when unset. */
 function text(config: Record<string, ConfigValue>, key: string): string | undefined {
@@ -54,16 +53,26 @@ const PROCESS_ESSENTIAL_ENV: readonly string[] = process.platform === "win32"
  * the runtime needs, because it reads its own key from its own configuration.
  *
  * @param config - the backend's resolved configuration.
+ * @param extras - per-run variables, passed by value.
  * @returns the variables the child is given, and nothing else.
+ *
+ * A per-run value belongs in `extras` and nowhere else. Routing one through
+ * this process's own environment would make it visible to every concurrent
+ * attempt, and the values that need this path — an endpoint URL carrying an
+ * actor-bound token — would then let one attempt act as another. Nothing in
+ * `extras` is looked up again here; the caller's value is the value.
  *
  * @internal Exported so the scrub can be asserted without spawning a runtime.
  */
-export function childEnv(config: Record<string, ConfigValue>): NodeJS.ProcessEnv {
+export function childEnv(config: Record<string, ConfigValue>, extras: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const child: NodeJS.ProcessEnv = {};
   for (const name of [...PROCESS_ESSENTIAL_ENV, ...names(config, "envPassthrough")]) {
     const value = process.env[name];
     if (value !== undefined) child[name] = value;
   }
+  // After the allow-list, so a per-run value is never shadowed by a passthrough
+  // name that happens to collide with it.
+  Object.assign(child, extras);
   return child;
 }
 
@@ -82,7 +91,7 @@ export function childEnv(config: Record<string, ConfigValue>): NodeJS.ProcessEnv
  */
 export async function createDshDriver(
   config: Record<string, ConfigValue>,
-  options: BackendRunOptions,
+  options: DshDriverOptions,
 ): Promise<DshHarnessDriver> {
   const cordisConfig = text(config, "cordisConfig");
   if (cordisConfig === undefined) {
@@ -100,7 +109,7 @@ export async function createDshDriver(
       command,
       args: [cordisConfig],
       cwd,
-      env: childEnv(config),
+      env: childEnv(config, options.envExtras ?? {}),
       ...(requestTimeoutMs === undefined ? {} : { requestTimeoutMs }),
     },
     cwd,

@@ -50,3 +50,19 @@ test("a named variable the host does not set is omitted rather than blanked", ()
   const child = childEnv({ envPassthrough: ["DEFINITELY_UNSET_FOR_THIS_TEST"] });
   assert.equal("DEFINITELY_UNSET_FOR_THIS_TEST" in child, false);
 });
+
+test("a per-run value is handed over by the caller, not looked up in this process", () => {
+  const url = "http://127.0.0.1:1/mcp?token=a";
+  assert.equal(process.env.PI_MAESTRO_TODO_MCP_URL, undefined);
+  const child = childEnv({}, { PI_MAESTRO_TODO_MCP_URL: url });
+  assert.equal(child.PI_MAESTRO_TODO_MCP_URL, url);
+  // The host's own environment is not a channel for this: two attempts running
+  // at once would read each other's URL, and the URL names an actor.
+  assert.equal(process.env.PI_MAESTRO_TODO_MCP_URL, undefined);
+});
+
+test("two attempts handed different per-run values do not share one", () => {
+  const first = childEnv({}, { PI_MAESTRO_TODO_MCP_URL: "http://127.0.0.1:1/mcp?token=one" });
+  const second = childEnv({}, { PI_MAESTRO_TODO_MCP_URL: "http://127.0.0.1:2/mcp?token=two" });
+  assert.notEqual(first.PI_MAESTRO_TODO_MCP_URL, second.PI_MAESTRO_TODO_MCP_URL);
+});

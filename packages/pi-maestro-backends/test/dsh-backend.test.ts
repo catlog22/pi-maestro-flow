@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { BackendRunOptions } from "pi-maestro-backend-core/v1/backend";
 import { resolveBackendConfig } from "pi-maestro-backends";
-import { createDshBackend, type DshHarnessDriver } from "pi-maestro-backends/dsh";
+import { createDshBackend, type DshDriverFactory, type DshHarnessDriver } from "pi-maestro-backends/dsh";
 
 const CONFIG = {
   command: "dsh-jsonrpc-agent",
@@ -45,7 +45,7 @@ function fakeDriver(overrides: Partial<{
   } as FakeDriver;
 }
 
-function runOptions(config: Record<string, string | number> = CONFIG): BackendRunOptions {
+function runOptions(config: Record<string, string | number | boolean> = CONFIG): BackendRunOptions {
   return { correlationId: "c-1", baseCwd: "/work", host: {}, config };
 }
 
@@ -57,12 +57,10 @@ test("dsh declares only the capabilities its SDK actually serves", () => {
   assert.equal(backend.capabilities({}).thinkingLevel, "unsupported");
   assert.equal(backend.capabilities({}).toolFilter, "unsupported");
   assert.equal(backend.capabilities({}).steer, "unsupported");
-  // outputSchema is emulated now that the extraction and validation exist;
-  // todoBinding stays unsupported because adjudication lets an "emulated"
-  // capability through with only a warning, and nothing implements the host
-  // tool relay it would need.
+  // outputSchema is emulated now that the extraction and validation exist.
+  // todoBinding is not stated here at all: it varies per registration, and the
+  // case that both settings decide it correctly is its own test below.
   assert.equal(backend.capabilities({}).outputSchema, "emulated");
-  assert.equal(backend.capabilities({}).todoBinding, "unsupported");
   assert.equal(backend.capabilities({}).modelSelection, "native");
   assert.equal(backend.capabilities({}).followUp, "native");
 });
@@ -271,4 +269,102 @@ test("child events reach the host observer", async () => {
     onChildEvent: (event) => { seen.push(event); },
   })).outcome;
   assert.deepEqual(seen, [{ type: "turn/start" }]);
+});
+
+/** Config for a registration that mounted the bridge. */
+const BRIDGED = { ...CONFIG, todoBridge: true };
+
+/** A host that can serve the todo tool, recording what it was asked for. */
+function bridgedHost(calls: unknown[] = []): BackendRunOptions["host"] {
+  return {
+    proxyToolCall: async (request) => {
+      calls.push(request);
+      return { content: [{ type: "text", text: "[]" }] };
+    },
+  };
+}
+
+/** A driver that reports the per-run variables it was handed. */
+function envRecordingDriver(seen: (NodeJS.ProcessEnv | undefined)[]): DshDriverFactory {
+  return async (_config, options) => {
+    seen.push(options.envExtras);
+    return fakeDriver();
+  };
+}
+
+/** Whether anything still answers on that endpoint's port. */
+async function stillListening(url: string): Promise<boolean> {
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    return true;
+  } catch {
+    // Connection refused is the only outcome that distinguishes a closed
+    // endpoint from a live one; a rejected request would still be an answer.
+    return false;
+  }
+}
+
+test("todoBridge decides todoBinding per registration", () => {
+  const backend = createDshBackend(async () => fakeDriver());
+  assert.equal(backend.capabilities({ todoBridge: true }).todoBinding, "native");
+  assert.equal(backend.capabilities({}).todoBinding, "unsupported");
+  assert.equal(backend.capabilities({ todoBridge: false }).todoBinding, "unsupported");
+});
+
+test("two concurrent bridged attempts each carry their own endpoint URL", async () => {
+  const seen: (NodeJS.ProcessEnv | undefined)[] = [];
+  const backend = createDshBackend(envRecordingDriver(seen));
+  const runs = await Promise.all([
+    backend.start(SPEC, { ...runOptions(BRIDGED), correlationId: "a", host: bridgedHost() }),
+    backend.start(SPEC, { ...runOptions(BRIDGED), correlationId: "b", host: bridgedHost() }),
+  ]);
+  await Promise.all(runs.map(async (run) => { await run.outcome; }));
+
+  assert.equal(seen.length, 2);
+  const [first, second] = seen.map((extras) => extras?.PI_MAESTRO_TODO_MCP_URL);
+  assert.ok(first !== undefined && second !== undefined, "an attempt was told no endpoint");
+  // The URL carries the token an attempt acts under, so sharing one would let
+  // either attempt act as the other.
+  assert.notEqual(first, second);
+});
+
+test("a bridged run with no host proxyToolCall refuses to start", async () => {
+  const backend = createDshBackend(async () => fakeDriver());
+  await assert.rejects(
+    backend.start(SPEC, runOptions(BRIDGED)),
+    /supplied no proxyToolCall/,
+  );
+});
+
+test("an unbridged run is given no endpoint at all", async () => {
+  const seen: (NodeJS.ProcessEnv | undefined)[] = [];
+  const backend = createDshBackend(envRecordingDriver(seen));
+  await (await backend.start(SPEC, runOptions())).outcome;
+  assert.equal(seen[0]?.PI_MAESTRO_TODO_MCP_URL, undefined);
+});
+
+test("the endpoint is closed on both settlement and abort", async () => {
+  const settled: (NodeJS.ProcessEnv | undefined)[] = [];
+  const settledBackend = createDshBackend(envRecordingDriver(settled));
+  const settledRun = await settledBackend.start(SPEC, {
+    ...runOptions(BRIDGED),
+    host: bridgedHost(),
+  });
+  const settledOutcome = await settledRun.outcome;
+  await settledOutcome.reclamation;
+  assert.equal(await stillListening(settled[0]!.PI_MAESTRO_TODO_MCP_URL!), false);
+
+  const aborted: (NodeJS.ProcessEnv | undefined)[] = [];
+  const abortedBackend = createDshBackend(envRecordingDriver(aborted));
+  const abortedRun = await abortedBackend.start(SPEC, {
+    ...runOptions(BRIDGED),
+    host: bridgedHost(),
+  });
+  abortedRun.abort();
+  await (await abortedRun.outcome).reclamation;
+  assert.equal(await stillListening(aborted[0]!.PI_MAESTRO_TODO_MCP_URL!), false);
 });
