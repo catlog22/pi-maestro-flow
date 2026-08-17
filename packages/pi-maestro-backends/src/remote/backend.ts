@@ -27,10 +27,16 @@
  *
  * Streaming, tool events, and usage reporting are deliberately absent from that
  * list. None of them is named by a `TaskSpec` field or a teammate-send mode, so
- * none is a capability: they are run-level facts. A target that reports no tool
- * events produces a run whose settlement authority degrades and whose replay
- * risk rises — which the fold already records — rather than a task the host
- * refuses to dispatch.
+ * none is a capability: they are run-level facts, and a target that reports none
+ * of them is dispatched rather than refused.
+ *
+ * What the fold does with under-reported tool activity is a known gap, not a
+ * protection: `foldRemoteOutcome` derives settlement authority and replay risk
+ * from the final `run/result` alone, and tool events feed only the counts. A
+ * target that did real work but reported no tool event therefore folds into a
+ * run that reads as tool-free and authoritative, which the host's replay fence
+ * clears as having nothing to repeat. Both remote drivers do report tool events,
+ * so this bites only a target whose agent under-reports them.
  */
 
 import type {
