@@ -96,6 +96,7 @@ import {
   readRegularTextFile,
   releasePublishedTurnHistory,
   resetUsage,
+  remoteLocationRouting,
   resolveContainedCwd,
   resolveModelSpecifier,
   resolveVariables,
@@ -112,6 +113,7 @@ import {
 import type {
   JsonLineEvent,
   NormalizedTask,
+  RemoteLocationRouting,
   RunSingleTeammateParams,
   RunTeammateOptions,
   RunTeammateParams,
@@ -126,7 +128,7 @@ import type {
 import { adjudicateTask, validateBackendCapabilities } from "pi-maestro-backends";
 import { outcomeOf } from "../backends/pi-subprocess.ts";
 import { closeBackendControlStdin, createBackendControlStdin } from "../backends/control-shim.ts";
-import { dispatchRegistrySync } from "../backends/registry-host.ts";
+import { backendRegistryConfigSync, dispatchRegistrySync } from "../backends/registry-host.ts";
 import { runSingleAttempt } from "./pi-subprocess-attempt.ts";
 import type {
   AttemptOutcome,
@@ -164,24 +166,32 @@ function providerOf(model: string): string | undefined {
  * @param params - the teammate request.
  * @param cwd - resolved task cwd.
  * @param model - the single model this attempt runs.
+ * @param remote - the remote target this task was located at, when it named one.
  * @returns the contract-shaped run spec.
  */
 function backendSpecOf(
   params: RunSingleTeammateParams,
   cwd: string,
   model: string | undefined,
+  remote?: RemoteLocationRouting,
 ): TeammateRunSpec {
   return {
     agent: params.agent,
     task: params.task ?? "",
     ...(params.name === undefined ? {} : { name: params.name }),
-    ...(params.backend === undefined ? {} : { backend: params.backend }),
+    ...(remote === undefined
+      ? (params.backend === undefined ? {} : { backend: params.backend })
+      : { backend: remote.backend }),
     ...(params.context === undefined ? {} : { context: params.context }),
     ...(model === undefined ? {} : { model }),
     ...(params.thinking === undefined ? {} : { thinking: params.thinking as TeammateRunSpec["thinking"] }),
     ...(params.outputSchema === undefined ? {} : { outputSchema: params.outputSchema }),
     ...(params.todos === undefined ? {} : { todos: params.todos }),
-    cwd,
+    // A remote location is a target, not a directory: the working directory a
+    // remote run uses comes from that target's own configuration, and passing
+    // the literal `remote:beta` down as a path is what made the old bypass
+    // resolve it against the local base.
+    ...(remote === undefined ? { cwd } : {}),
   };
 }
 
@@ -408,7 +418,36 @@ export async function runSingleTeammate(
     return rejectAndPublish("Teammate run aborted before launch.", "terminated");
   }
 
-  const containedCwd = resolveContainedCwd(params.cwd, options.baseCwd);
+  const remoteRouting = remoteLocationRouting(params.cwd);
+  if (remoteRouting !== undefined) {
+    if (params.backend !== undefined && params.backend !== remoteRouting.backend) {
+      return rejectAndPublish(
+        `Teammate task names backend "${params.backend}" and remote location "${params.cwd}"; `
+        + "a remote location already selects its backend, so these two cannot both be set",
+      );
+    }
+    // Legacy mode resolves no registry at all, so there is no registration to
+    // route this to. Falling through would run on this machine a task that
+    // named another one, so it is refused by name instead. `rejectAndPublish`
+    // rather than a throw: the dispatch below has no catch, and the caller must
+    // receive a settled result rather than an exception.
+    if (options.backendRegistry === undefined
+      && (backendRegistryConfigSync(options.baseCwd).mode ?? "legacy") === "legacy") {
+      return rejectAndPublish(
+        `Teammate task requests remote location "${params.cwd}", but .pi/teammate-backends.json is in `
+        + `legacy execution mode; set mode "backend-registry" and register "${remoteRouting.backend}" — `
+        + "refusing to run a remote task on this machine",
+      );
+    }
+  }
+
+  // A remote task still needs a real local directory: agent discovery and
+  // result publication both read one. The remote location itself is a target
+  // name, so it never reaches the path resolver.
+  const containedCwd = resolveContainedCwd(
+    remoteRouting === undefined ? params.cwd : undefined,
+    options.baseCwd,
+  );
   if ("error" in containedCwd) return rejectAndPublish(containedCwd.error);
   const cwd = containedCwd.cwd;
   resolvedRunCwd = cwd;
@@ -589,13 +628,17 @@ export async function runSingleTeammate(
         // "backend-registry"` in `.pi/teammate-backends.json` actually switch
         // the dispatch path rather than only describe an intent.
         const registry = options.backendRegistry
-          ?? dispatchRegistrySync(options.baseCwd, () => ({ hostOptions: attemptOptions, cwd, replyTo }));
+          ?? dispatchRegistrySync(
+            options.baseCwd,
+            () => ({ hostOptions: attemptOptions, cwd, replyTo }),
+            options.remoteManagerOf,
+          );
         if (registry === undefined) {
           attempt = outcomeOf(await runSingleAttempt(
             params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, attemptOptions,
           ));
         } else {
-          const spec = backendSpecOf(params, cwd, modelToUse);
+          const spec = backendSpecOf(params, cwd, modelToUse, remoteRouting);
           const { backend, config, capabilities } = await registry.resolve(spec, spec.backend);
           // Adjudicate here too, not only in `runGraph`. Five production call
           // sites dispatch a single teammate directly, and a task whose backend
@@ -687,11 +730,17 @@ export async function runSingleTeammate(
             capabilities,
           ).emulated;
           if (emulated.length > 0) {
-            attempt.result.capabilityDeliveries = emulated.map((capability) => ({
-              capability,
-              support: "emulated" as const,
-              note: `served by host-side compensation in backend "${backend.name}"`,
-            }));
+            // Appended, not assigned: a backend records its own emulations on
+            // the result it returns, and overwriting the list here would erase
+            // them without a trace. The withheld branch below already appends.
+            attempt.result.capabilityDeliveries = [
+              ...(attempt.result.capabilityDeliveries ?? []),
+              ...emulated.map((capability) => ({
+                capability,
+                support: "emulated" as const,
+                note: `served by host-side compensation in backend "${backend.name}"`,
+              })),
+            ];
           }
         }
       } catch (error) {
@@ -952,9 +1001,13 @@ export async function runGraph(
   let graphRegistry;
   try {
     graphRegistry = options.backendRegistry
-      ?? dispatchRegistrySync(options.baseCwd, () => {
-        throw new Error("capability adjudication never starts a run");
-      });
+      ?? dispatchRegistrySync(
+        options.baseCwd,
+        () => {
+          throw new Error("capability adjudication never starts a run");
+        },
+        options.remoteManagerOf,
+      );
   } catch (cause) {
     // A malformed or unloadable registration is a graph-level rejection, not a
     // throw out of runGraph: every other validation failure settles each task
@@ -974,6 +1027,7 @@ export async function runGraph(
         { ...task, task: task.prompt },
         task.cwd ?? options.baseCwd,
         task.model,
+        remoteLocationRouting(task.cwd),
       ),
       ...(task.name === undefined ? {} : { name: task.name }),
     }));

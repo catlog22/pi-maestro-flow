@@ -166,6 +166,14 @@ export interface RunTeammateOptions {
    * outcome, so nothing downstream branches on which ran.
    */
   backendRegistry?: import("pi-maestro-backend-core/v1/registry").BackendRegistry;
+  /**
+   * The host's remote Monitor wiring.
+   *
+   * Omitted by a dispatch that owns no Monitor term, which makes a remote
+   * registration fail to load and the dispatch refuse the task by name rather
+   * than run it on this machine.
+   */
+  remoteManagerOf?: () => import("pi-maestro-backends/remote").RemoteWorkerManagerLike;
   modelCapabilities?: readonly TeammateModelCapability[];
   modelCircuitBreaker?: ModelCircuitBreaker;
   /**
@@ -2111,6 +2119,35 @@ export function resolveContainedCwd(
 ): { cwd: string } | { error: string } {
   if (requested === undefined) return { cwd: baseCwd };
   return { cwd: canonicalDirectoryPath(path.resolve(baseCwd, requested)) };
+}
+
+/** Prefix marking a working location as a configured remote target. */
+export const REMOTE_LOCATION_PREFIX = "remote:";
+
+/** A remote working location, read as a backend selection. */
+export interface RemoteLocationRouting {
+  readonly backend: string;
+  readonly targetId: string;
+}
+
+/**
+ * Read a working location as a backend selector.
+ *
+ * The whole string, prefix included, is the registration name, so a bare
+ * `remote:` with no target still names one — and the registry rejects it as
+ * unregistered, which is the failure this should have.
+ *
+ * This is the single projection point for the rule. Every dispatch path resolves
+ * its location through it, so a nested or proxied dispatch is routed by the same
+ * rule rather than falling through to `resolveContainedCwd`, which would read
+ * `remote:beta` as a directory named `remote:beta` under the base.
+ *
+ * @param cwd - the task's requested working location.
+ * @returns the routing, or undefined when the location is an ordinary directory.
+ */
+export function remoteLocationRouting(cwd: string | undefined): RemoteLocationRouting | undefined {
+  if (cwd === undefined || !cwd.startsWith(REMOTE_LOCATION_PREFIX)) return undefined;
+  return { backend: cwd, targetId: cwd.slice(REMOTE_LOCATION_PREFIX.length) };
 }
 
 // ---------------------------------------------------------------------------

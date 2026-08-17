@@ -15,6 +15,8 @@ import type {
 
 import type { TeammateRunSpec } from "pi-maestro-backend-core/v1/spec";
 import { TeammateBackendRegistry } from "pi-maestro-backends";
+import { createRemoteBackend } from "pi-maestro-backends/remote";
+import type { RemoteWorkerManagerLike as RemoteManagerPort } from "pi-maestro-backends/remote";
 import { createPiSubprocessBackend, type PiSubprocessRunExtras } from "./pi-subprocess.ts";
 import type { BackendRunOptions } from "pi-maestro-backend-core/v1/backend";
 
@@ -23,6 +25,14 @@ const REGISTRY_FILE = join(".pi", "teammate-backends.json");
 
 /** Name under which Pi registers itself; it holds no privilege beyond the name. */
 export const PI_SUBPROCESS = "pi-subprocess";
+
+/**
+ * Module name a remote-target registration names.
+ *
+ * One registration per target, conventionally named `remote:<targetId>`, all
+ * resolving to this one module: the target is a config field, not a module.
+ */
+export const REMOTE_WORKERS = "remote-workers";
 
 /**
  * The registration used when the project ships no document.
@@ -133,15 +143,19 @@ export function backendRegistryConfigSync(workspaceRoot: string): BackendRegistr
  *
  * @param workspaceRoot - directory holding `.pi/`.
  * @param extrasOf - per-run host wiring handed to the Pi backend.
+ * @param remoteManagerOf - the host's remote Monitor wiring; omitted by a
+ * dispatch that has none, which makes a remote registration unloadable rather
+ * than silently local.
  * @returns the registry, or undefined when the document keeps the legacy path.
  */
 export function dispatchRegistrySync(
   workspaceRoot: string,
   extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras,
+  remoteManagerOf?: () => RemoteManagerPort,
 ): TeammateBackendRegistry | undefined {
   const config = backendRegistryConfigSync(workspaceRoot);
   if ((config.mode ?? "legacy") === "legacy") return undefined;
-  return new TeammateBackendRegistry(config, backendLoader(extrasOf));
+  return new TeammateBackendRegistry(config, backendLoader(extrasOf, remoteManagerOf));
 }
 
 /**
@@ -153,15 +167,35 @@ export function dispatchRegistrySync(
  * unregisterable while the loader compiled cleanly.
  *
  * @param extrasOf - per-run host wiring handed to the Pi backend.
+ * @param remoteManagerOf - the host's remote Monitor wiring, when it has any.
  * @returns the loader.
  */
 function backendLoader(
   extrasOf: (spec: TeammateRunSpec, options: BackendRunOptions) => PiSubprocessRunExtras,
+  remoteManagerOf?: () => RemoteManagerPort,
 ): (module: string) => Promise<unknown> {
   // Pi is in this process already; importing it by specifier would load a
   // second copy with its own module state.
   const pi = createPiSubprocessBackend(extrasOf);
-  return async (module) => (module === PI_SUBPROCESS ? pi : await import(module));
+  return async (module) => {
+    if (module === PI_SUBPROCESS) return pi;
+    if (module === REMOTE_WORKERS) {
+      // Same reason Pi resolves in-process, one step stronger: a second
+      // `RemoteWorkerManager` would open a second SSH connection under a second
+      // ownership nonce, and every run dispatched through it would be invisible
+      // to `observe kind=remote` and `teammate-list view=remote`. A dispatch
+      // without the wiring is refused by name rather than served by a stand-in.
+      if (remoteManagerOf === undefined) {
+        throw new Error(
+          `teammate backend module "${REMOTE_WORKERS}" needs the host's remote Monitor wiring, `
+          + "but this dispatch supplied no remote Monitor wiring; "
+          + "remote locations are dispatchable only from a root session running Monitor mode",
+        );
+      }
+      return createRemoteBackend(remoteManagerOf);
+    }
+    return await import(module);
+  };
 }
 
 /** Forget synchronously cached documents so an operator edit takes effect. */

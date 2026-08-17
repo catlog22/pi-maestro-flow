@@ -18,7 +18,8 @@
     "./dsh": "./src/dsh/index.ts",
     "./dsh/driver": "./src/dsh/driver.ts",
     "./dsh/todo-endpoint": "./src/dsh/todo-endpoint.ts",
-    "./dsh/structured-output": "./src/dsh/structured-output.ts"
+    "./dsh/structured-output": "./src/dsh/structured-output.ts",
+    "./remote": "./src/remote/index.ts"
   },
   "files": [
     "src/**/*.ts"
