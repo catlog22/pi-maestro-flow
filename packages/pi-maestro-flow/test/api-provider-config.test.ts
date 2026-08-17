@@ -498,7 +498,6 @@ test("prompt-cache detection gates on gpt-5.6 and later only", () => {
     assert.equal(supportsOpenAIPromptCacheOptions(unsupported), false, unsupported);
   }
 });
-
 test("prompt-cache policy maps to pi compat flags", () => {
   assert.deepEqual(promptCacheCompatFlags("off", "gpt-5.6-sol"), { supportsExplicitPromptCacheMode: false, supportsLongCacheRetention: false });
   assert.deepEqual(promptCacheCompatFlags("on", "gpt-5.5"), { supportsExplicitPromptCacheMode: true, supportsLongCacheRetention: true });
@@ -3411,4 +3410,240 @@ test("/api-manager no-arg delete removes only the globally selected model", asyn
   assert.equal(settings.defaultModel, undefined);
   assert.equal(settings.defaultThinkingLevel, "high");
   assert.ok(refreshes >= 1);
+});
+
+test("/api-manager exports and imports Provider configuration round-trip", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-export-import-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
+  const settingsPath = join(tempDir, "settings.json");
+  const exportPath = join(tempDir, "backups", "api-manager-export.json");
+
+  await saveApiProviderSettings({
+    provider: "maestro-openai",
+    baseUrl: "https://gateway.example.com/v1",
+    modelId: "model-a",
+    reasoning: true,
+    apiKey: "openai-secret",
+  }, modelsPath);
+  await saveApiProviderSettings({
+    provider: "maestro-openai",
+    baseUrl: "https://gateway.example.com/v1",
+    modelId: "model-b",
+    reasoning: false,
+    apiKey: "openai-secret",
+  }, modelsPath);
+  await saveApiProviderSettings({
+    provider: "advanced-proxy",
+    api: "openai-completions",
+    baseUrl: "https://proxy.example.com/v1",
+    modelId: "proxy-model",
+    reasoning: true,
+    apiKey: "proxy-secret",
+    name: "Advanced Proxy",
+  }, modelsPath);
+  writeFileSync(defaultsPath, JSON.stringify({ version: 1, managedProviders: ["advanced-proxy"] }));
+  await saveModelThinkingDefault("maestro-openai", "model-a", "high", defaultsPath);
+  await saveModelThinkingDefault("advanced-proxy", "proxy-model", "low", defaultsPath);
+  // A provider not owned by the API Manager must stay outside the export
+  // and survive the import untouched.
+  const deepseekEntry = {
+    api: "openai-completions",
+    baseUrl: "https://api.deepseek.com/v1",
+    apiKey: "deepseek-secret",
+    models: [{ id: "deepseek-chat", reasoning: true, input: ["text"], contextWindow: 65536, maxTokens: 8192 }],
+  };
+  const withDeepSeek = JSON.parse(readFileSync(modelsPath, "utf8"));
+  withDeepSeek.providers.deepseek = deepseekEntry;
+  writeFileSync(modelsPath, JSON.stringify(withDeepSeek));
+
+  const commands = new Map<string, any>();
+  const registered: string[] = [];
+  let refreshes = 0;
+  registerApiProviderConfigs({
+    registerProvider(name: string) { registered.push(name); },
+    unregisterProvider() {},
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+  } as any, { modelsPath, defaultsPath, settingsPath });
+  const notifications: string[] = [];
+  const ctx = {
+    cwd: tempDir,
+    hasUI: false,
+    modelRegistry: { getAll: () => [], refresh() { refreshes += 1; } },
+    ui: { notify(message: string) { notifications.push(message); } },
+  };
+
+  await commands.get("api-manager").handler(`export ${exportPath}`, ctx);
+  assert.match(notifications.at(-1) ?? "", /已导出 2 个 Provider（3 个模型）/);
+  const exported = JSON.parse(readFileSync(exportPath, "utf8"));
+  assert.equal(exported.kind, "pi-maestro-api-manager");
+  assert.equal(exported.version, 1);
+  assert.deepEqual(Object.keys(exported.providers).sort(), ["advanced-proxy", "maestro-openai"]);
+  assert.equal(exported.providers["maestro-openai"].apiKey, "openai-secret");
+  assert.deepEqual(
+    exported.providers["maestro-openai"].models.map((model: any) => model.id),
+    ["model-a", "model-b"],
+  );
+  assert.equal(exported.providers["advanced-proxy"].name, "Advanced Proxy");
+  assert.deepEqual(exported.modelDefaults, {
+    "maestro-openai/model-a": "high",
+    "advanced-proxy/proxy-model": "low",
+  });
+
+  // Simulate a fresh machine: only the foreign Provider remains.
+  writeFileSync(modelsPath, JSON.stringify({ providers: { deepseek: deepseekEntry } }));
+  rmSync(defaultsPath, { force: true });
+
+  await commands.get("api-manager").handler(`import ${exportPath}`, ctx);
+  assert.match(notifications.at(-1) ?? "", /导入 2 个 Provider（3 个模型）/);
+  const importedRoot = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.deepEqual(Object.keys(importedRoot.providers).sort(), ["advanced-proxy", "deepseek", "maestro-openai"]);
+  assert.deepEqual(importedRoot.providers.deepseek, deepseekEntry);
+  assert.equal(importedRoot.providers["maestro-openai"].apiKey, "openai-secret");
+  assert.equal(importedRoot.providers["maestro-openai"].baseUrl, "https://gateway.example.com/v1");
+  assert.deepEqual(
+    importedRoot.providers["maestro-openai"].models.map((model: any) => model.id),
+    ["model-a", "model-b"],
+  );
+  assert.equal(importedRoot.providers["advanced-proxy"].api, "openai-completions");
+  const importedDefaults = JSON.parse(readFileSync(defaultsPath, "utf8"));
+  assert.deepEqual(importedDefaults.managedProviders, ["advanced-proxy"]);
+  assert.equal(importedDefaults.modelDefaults["maestro-openai/model-a"], "high");
+  assert.equal(importedDefaults.modelDefaults["advanced-proxy/proxy-model"], "low");
+  assert.ok(registered.includes("maestro-openai"));
+  assert.ok(registered.includes("advanced-proxy"));
+  assert.ok(refreshes >= 2);
+});
+
+test("/api-manager export uses the default path and import keeps local keys plus merges new Providers", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-import-merge-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
+  const settingsPath = join(tempDir, "settings.json");
+
+  await saveApiProviderSettings({
+    provider: "custom-x",
+    api: "openai-completions",
+    baseUrl: "https://x.example.com/v1",
+    modelId: "m1",
+    reasoning: true,
+    apiKey: "local-secret",
+  }, modelsPath);
+  writeFileSync(defaultsPath, JSON.stringify({ version: 1, managedProviders: ["custom-x"] }));
+
+  const commands = new Map<string, any>();
+  registerApiProviderConfigs({
+    registerProvider() {},
+    unregisterProvider() {},
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+  } as any, { modelsPath, defaultsPath, settingsPath });
+  const notifications: string[] = [];
+  const ctx = {
+    cwd: tempDir,
+    hasUI: false,
+    modelRegistry: { getAll: () => [], refresh() {} },
+    ui: { notify(message: string) { notifications.push(message); } },
+  };
+
+  // Export without a path writes next to models.json.
+  await commands.get("api-manager").handler("export", ctx);
+  const defaultExportPath = join(tempDir, "api-manager-export.json");
+  const exported = JSON.parse(readFileSync(defaultExportPath, "utf8"));
+  assert.deepEqual(Object.keys(exported.providers), ["custom-x"]);
+  assert.equal(exported.providers["custom-x"].apiKey, "local-secret");
+
+  // Import an entry without apiKey: the local key survives; new Providers merge in.
+  const importPath = join(tempDir, "incoming.json");
+  writeFileSync(importPath, JSON.stringify({
+    kind: "pi-maestro-api-manager",
+    version: 1,
+    providers: {
+      "custom-x": {
+        api: "openai-completions",
+        baseUrl: "https://x2.example.com/v1",
+        models: [{ id: "m1-next", reasoning: true, input: ["text"], contextWindow: 8192, maxTokens: 4096 }],
+      },
+      "custom-y": {
+        api: "anthropic-messages",
+        baseUrl: "https://y.example.com",
+        apiKey: "y-secret",
+        models: [{ id: "m2", reasoning: false, input: ["text"], contextWindow: 8192, maxTokens: 4096 }],
+      },
+    },
+    modelDefaults: { "custom-y/m2": "low" },
+  }));
+  await commands.get("api-manager").handler(`import ${importPath}`, ctx);
+  assert.match(notifications.at(-1) ?? "", /导入 2 个 Provider（2 个模型）/);
+
+  const importedRoot = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.equal(importedRoot.providers["custom-x"].apiKey, "local-secret");
+  assert.equal(importedRoot.providers["custom-x"].baseUrl, "https://x2.example.com/v1");
+  assert.deepEqual(importedRoot.providers["custom-x"].models.map((model: any) => model.id), ["m1-next"]);
+  assert.equal(importedRoot.providers["custom-y"].apiKey, "y-secret");
+  const importedDefaults = JSON.parse(readFileSync(defaultsPath, "utf8"));
+  assert.deepEqual(importedDefaults.managedProviders, ["custom-x", "custom-y"]);
+  assert.equal(importedDefaults.modelDefaults["custom-y/m2"], "low");
+  // The replaced model list drops the stale local default.
+  assert.equal(importedDefaults.modelDefaults["custom-x/m1"], undefined);
+});
+
+test("/api-manager import rejects invalid files without touching models.json", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-import-invalid-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
+  const settingsPath = join(tempDir, "settings.json");
+  await saveApiProviderSettings({
+    provider: "maestro-openai",
+    baseUrl: "https://gateway.example.com/v1",
+    modelId: "model-a",
+    reasoning: true,
+    apiKey: "openai-secret",
+  }, modelsPath);
+  const before = readFileSync(modelsPath, "utf8");
+
+  const commands = new Map<string, any>();
+  registerApiProviderConfigs({
+    registerProvider() {},
+    unregisterProvider() {},
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+  } as any, { modelsPath, defaultsPath, settingsPath });
+  const notifications: string[] = [];
+  const ctx = {
+    cwd: tempDir,
+    hasUI: false,
+    modelRegistry: { getAll: () => [], refresh() {} },
+    ui: { notify(message: string) { notifications.push(message); } },
+  };
+
+  await commands.get("api-manager").handler(`import ${join(tempDir, "missing.json")}`, ctx);
+  assert.match(notifications.at(-1) ?? "", /导入文件不存在/);
+
+  const malformedPath = join(tempDir, "malformed.json");
+  writeFileSync(malformedPath, "{ not json");
+  await commands.get("api-manager").handler(`import ${malformedPath}`, ctx);
+  assert.match(notifications.at(-1) ?? "", /导入文件.*无效/);
+
+  const missingApiPath = join(tempDir, "missing-api.json");
+  writeFileSync(missingApiPath, JSON.stringify({
+    providers: { "custom-z": { baseUrl: "https://z.example.com/v1", models: [] } },
+  }));
+  await commands.get("api-manager").handler(`import ${missingApiPath}`, ctx);
+  assert.match(notifications.at(-1) ?? "", /requires an api field/);
+
+  const wrongKindPath = join(tempDir, "wrong-kind.json");
+  writeFileSync(wrongKindPath, JSON.stringify({ kind: "other", providers: {} }));
+  await commands.get("api-manager").handler(`import ${wrongKindPath}`, ctx);
+  assert.match(notifications.at(-1) ?? "", /kind must be pi-maestro-api-manager/);
+
+  // Extra operands are rejected with the usage message.
+  await commands.get("api-manager").handler("export a b", ctx);
+  assert.match(notifications.at(-1) ?? "", /用法：\/api-manager/);
+
+  assert.equal(readFileSync(modelsPath, "utf8"), before);
+  for (const message of notifications) {
+    assert.ok(!/导入 \d+ 个 Provider/.test(message));
+  }
 });

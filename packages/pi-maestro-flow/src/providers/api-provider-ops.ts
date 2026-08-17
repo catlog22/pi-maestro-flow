@@ -83,6 +83,15 @@ const OPS_CATALOGS = {
     "menu.price": "Backfill model pricing (built-in table + OpenRouter)",
     "menu.logout": "Sign out a Provider",
     "menu.reset": "Reset a Provider",
+    "menu.export": "Export API configuration to a file",
+    "menu.import": "Import API configuration from a file",
+    "export.empty": "No API Manager managed Provider is configured; nothing to export.",
+    "export.done": "Exported {providers} Providers ({models} models)",
+    "export.saved": "Export file: {path}",
+    "export.secretNote": "The export contains API keys; keep the file safe.",
+    "import.notFound": "Import file not found: {path}",
+    "import.invalid": "Invalid import file {path}: {message}",
+    "import.done": "Imported {providers} Providers ({models} models) from {path}",
     "thinking.title": "Default thinking effort (current model)",
     "saved.backup": "Backup: {path}",
     "saved.config": "Config: {path}",
@@ -115,6 +124,15 @@ const OPS_CATALOGS = {
     "menu.price": "回填模型价格（内置表 + OpenRouter 在线）",
     "menu.logout": "注销 Provider",
     "menu.reset": "重置 Provider",
+    "menu.export": "导出 API 配置到文件",
+    "menu.import": "从文件导入 API 配置",
+    "export.empty": "尚未配置 API Manager 管理的 Provider，无可导出内容。",
+    "export.done": "已导出 {providers} 个 Provider（{models} 个模型）",
+    "export.saved": "导出文件：{path}",
+    "export.secretNote": "导出文件包含 API key，请妥善保管。",
+    "import.notFound": "导入文件不存在：{path}",
+    "import.invalid": "导入文件 {path} 无效：{message}",
+    "import.done": "已从 {path} 导入 {providers} 个 Provider（{models} 个模型）",
     "thinking.title": "默认思考强度（当前 model）",
     "saved.backup": "备份：{path}",
     "saved.config": "配置：{path}",
@@ -856,6 +874,8 @@ export interface CacheAgentManagerArgs {
 export interface ParsedManagerArgs {
   action?: ApiProviderAction;
   target?: ChannelTarget;
+  /** File path operand for export/import; preserved with original casing. */
+  filePath?: string;
   retry?: RetryManagerArgs;
   cache?: CacheManagerArgs;
   cacheAgent?: CacheAgentManagerArgs;
@@ -908,6 +928,11 @@ export function parseManagerArgs(args: string): ParsedManagerArgs {
     }
     throw usageError();
   }
+  if (normalized[0] === "export" || normalized[0] === "import") {
+    if (values.length === 1) return { action: normalized[0] };
+    if (values.length === 2) return { action: normalized[0], filePath: values[1] };
+    throw usageError();
+  }
   if (values.length === 1) {
     const action = actionFromArg(normalized[0]);
     if (action) return { action };
@@ -933,7 +958,7 @@ export function resolveTargetToken(value: string): ChannelTarget | undefined {
 
 export function usageError(): Error {
   return new Error(
-    `用法：/api-manager list | retry [show|on [1-${API_RETRY_MAX_RETRIES}]|off] | cache [show|auto|off|on] | cache agent [show|short|long|none] | price [openai|qwen|anthropic|<Provider ID>] | show|set|delete|enable|disable|logout|reset [openai|qwen|anthropic|<Provider ID>|new]`,
+    `用法：/api-manager list | retry [show|on [1-${API_RETRY_MAX_RETRIES}]|off] | cache [show|auto|off|on] | cache agent [show|short|long|none] | price [openai|qwen|anthropic|<Provider ID>] | show|set|delete|enable|disable|logout|reset [openai|qwen|anthropic|<Provider ID>|new] | export [path] | import [path]`,
   );
 }
 
@@ -1197,6 +1222,8 @@ export async function chooseAction(
     { action: "cache", label: opsText("menu.cache", { value: await loadPromptCachePolicy(settingsPath) }) },
     { action: "cache-agent", label: opsText("menu.cacheAgent", { value: await loadAgentCacheRetention(settingsPath) }) },
     { action: "price", label: opsText("menu.price") },
+    { action: "export", label: opsText("menu.export") },
+    { action: "import", label: opsText("menu.import") },
     { action: "logout", label: opsText("menu.logout") },
     { action: "reset", label: opsText("menu.reset") },
   ];
@@ -1719,5 +1746,269 @@ export async function fileExists(path: string): Promise<boolean> {
     if (isErrno(error, "ENOENT")) return false;
     throw error;
   }
+}
+
+// --- Configuration export / import -----------------------------------------
+
+export const API_MANAGER_EXPORT_KIND = "pi-maestro-api-manager";
+export const API_MANAGER_EXPORT_VERSION = 1;
+
+export function defaultApiManagerExportPath(modelsPath: string): string {
+  return join(dirname(modelsPath), "api-manager-export.json");
+}
+
+/** Provider ids owned by the API Manager: configured presets plus managed user-defined Providers. */
+function apiManagerOwnedIds(modelsRoot: Record<string, unknown>, defaultsPath: string): string[] {
+  const providers = isRecord(modelsRoot.providers) ? modelsRoot.providers : {};
+  const ids: string[] = [];
+  for (const preset of PROVIDERS) {
+    if (isRecord(providers[preset.id])) ids.push(preset.id);
+  }
+  for (const id of managedProviderIdsSync(defaultsPath)) {
+    if (!findPreset(id) && !ids.includes(id) && isRecord(providers[id])) ids.push(id);
+  }
+  return ids;
+}
+
+function countProviderModels(providers: Record<string, Record<string, unknown>>): number {
+  let count = 0;
+  for (const entry of Object.values(providers)) {
+    if (Array.isArray(entry.models)) count += entry.models.filter(isRecord).length;
+  }
+  return count;
+}
+
+/** Export payload: owned Provider entries verbatim from models.json plus their per-model thinking defaults. */
+export async function buildApiManagerExport(
+  modelsPath: string,
+  defaultsPath: string,
+): Promise<Record<string, unknown>> {
+  const root = await readModelsRoot(modelsPath);
+  const providers = isRecord(root.providers) ? root.providers : {};
+  const ids = apiManagerOwnedIds(root, defaultsPath);
+  const exported: Record<string, Record<string, unknown>> = {};
+  for (const id of ids) {
+    const entry = providers[id];
+    if (isRecord(entry)) exported[id] = entry;
+  }
+  const defaultsRoot = await readModelsRoot(defaultsPath);
+  const modelDefaults = isRecord(defaultsRoot.modelDefaults) ? defaultsRoot.modelDefaults : {};
+  const exportedDefaults: Record<string, unknown> = {};
+  for (const id of ids) {
+    const prefixes = [`${encodeURIComponent(id)}/`, `${id}/`];
+    for (const [key, value] of Object.entries(modelDefaults)) {
+      if (typeof value === "string" && prefixes.some((prefix) => key.startsWith(prefix))) {
+        exportedDefaults[key] = value;
+      }
+    }
+  }
+  return {
+    kind: API_MANAGER_EXPORT_KIND,
+    version: API_MANAGER_EXPORT_VERSION,
+    exportedAt: new Date().toISOString(),
+    providers: exported,
+    ...(Object.keys(exportedDefaults).length > 0 ? { modelDefaults: exportedDefaults } : {}),
+  };
+}
+
+export async function exportApiManagerConfig(
+  ctx: ExtensionCommandContext,
+  exportPath: string,
+  modelsPath: string,
+  defaultsPath: string,
+): Promise<void> {
+  const payload = await buildApiManagerExport(modelsPath, defaultsPath);
+  const providers = payload.providers as Record<string, Record<string, unknown>>;
+  const providerCount = Object.keys(providers).length;
+  if (providerCount === 0) {
+    ctx.ui.notify(opsText("export.empty"), "info");
+    return;
+  }
+  const result = await writeModelsRoot(payload, exportPath, await fileExists(exportPath));
+  ctx.ui.notify([
+    opsText("export.done", { providers: providerCount, models: countProviderModels(providers) }),
+    opsText("export.saved", { path: result.path }),
+    ...(result.backupPath ? [opsText("saved.backup", { path: result.backupPath })] : []),
+    opsText("export.secretNote"),
+  ].join("\n"), "info");
+}
+
+export async function importApiManagerConfig(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  importPath: string,
+  modelsPath: string,
+  defaultsPath: string,
+  settingsPath: string,
+): Promise<void> {
+  if (!await fileExists(importPath)) {
+    ctx.ui.notify(opsText("import.notFound", { path: importPath }), "warning");
+    return;
+  }
+  let payload: Record<string, unknown>;
+  let imported: Record<string, Record<string, unknown>>;
+  try {
+    const parsed = JSON.parse(await readFile(importPath, "utf8")) as unknown;
+    if (!isRecord(parsed)) throw new Error("root must be a JSON object");
+    if (parsed.kind !== undefined && parsed.kind !== API_MANAGER_EXPORT_KIND) {
+      throw new Error(`kind must be ${API_MANAGER_EXPORT_KIND}`);
+    }
+    if (parsed.version !== undefined && parsed.version !== API_MANAGER_EXPORT_VERSION) {
+      throw new Error(`unsupported version: ${String(parsed.version)}`);
+    }
+    payload = parsed;
+    imported = validateImportedProviders(parsed.providers);
+  } catch (error) {
+    ctx.ui.notify(opsText("import.invalid", { path: importPath, message: errorMessage(error) }), "error");
+    return;
+  }
+  const importedIds = Object.keys(imported);
+  const removedModels: Array<[string, string]> = [];
+  let result: SaveApiProviderResult | undefined;
+  await serializeMutation(modelsPath, async () => {
+    const exists = await fileExists(modelsPath);
+    const root = await readModelsRoot(modelsPath);
+    const providers = isRecord(root.providers) ? { ...root.providers } : {};
+    for (const id of importedIds) {
+      const entry = { ...imported[id] };
+      const current = providers[id];
+      // An export may omit the API key (e.g. a redacted copy); keep the local
+      // key so an already configured Provider stays usable after the merge.
+      if ((typeof entry.apiKey !== "string" || entry.apiKey === "")
+        && isRecord(current) && typeof current.apiKey === "string" && current.apiKey !== "") {
+        entry.apiKey = current.apiKey;
+      }
+      if (isRecord(current) && Array.isArray(current.models)) {
+        const importedModelIds = new Set(
+          Array.isArray(entry.models) ? entry.models.filter(isRecord).map((model) => model.id) : [],
+        );
+        for (const model of current.models.filter(isRecord)) {
+          if (typeof model.id === "string" && !importedModelIds.has(model.id)) {
+            removedModels.push([id, model.id]);
+          }
+        }
+      }
+      providers[id] = entry;
+    }
+    result = await writeModelsRoot({ ...root, providers }, modelsPath, exists);
+  });
+  if (!result) throw new Error("API Manager import was not written");
+  await applyImportedDefaults(importedIds, payload.modelDefaults, defaultsPath);
+  for (const [providerId, modelId] of removedModels) {
+    await clearDeletedDefaultModel(settingsPath, providerId, modelId);
+  }
+  for (const id of importedIds) {
+    reloadProviderRegistration(pi, ctx, id, modelsPath);
+  }
+  ctx.ui.notify([
+    opsText("import.done", {
+      providers: importedIds.length,
+      models: countProviderModels(imported),
+      path: importPath,
+    }),
+    opsText("saved.config", { path: result.path }),
+    ...(result.backupPath ? [opsText("saved.backup", { path: result.backupPath })] : []),
+  ].join("\n"), "info");
+}
+
+function validateImportedProviders(value: unknown): Record<string, Record<string, unknown>> {
+  if (!isRecord(value)) throw new Error("providers must be a JSON object");
+  const ids = Object.keys(value);
+  if (ids.length === 0) throw new Error("providers is empty");
+  const result: Record<string, Record<string, unknown>> = {};
+  for (const id of ids) {
+    const entry = value[id];
+    if (!isRecord(entry)) throw new Error(`Provider ${id} must be an object`);
+    normalizeChannelId(id);
+    if (entry.api !== undefined && typeof entry.api !== "string") {
+      throw new Error(`Provider ${id} api must be a string`);
+    }
+    if (!findPreset(id) && typeof entry.api !== "string") {
+      throw new Error(`Provider ${id} requires an api field`);
+    }
+    if (entry.baseUrl !== undefined && typeof entry.baseUrl !== "string") {
+      throw new Error(`Provider ${id} baseUrl must be a string`);
+    }
+    if (entry.apiKey !== undefined && typeof entry.apiKey !== "string") {
+      throw new Error(`Provider ${id} apiKey must be a string`);
+    }
+    if (entry.name !== undefined && typeof entry.name !== "string") {
+      throw new Error(`Provider ${id} name must be a string`);
+    }
+    if (entry.authHeader !== undefined && typeof entry.authHeader !== "boolean") {
+      throw new Error(`Provider ${id} authHeader must be a boolean`);
+    }
+    if (entry.enabled !== undefined && typeof entry.enabled !== "boolean") {
+      throw new Error(`Provider ${id} enabled must be a boolean`);
+    }
+    if (entry.headers !== undefined && !isStringRecord(entry.headers)) {
+      throw new Error(`Provider ${id} headers must be a string map`);
+    }
+    if (entry.compat !== undefined && !isRecord(entry.compat)) {
+      throw new Error(`Provider ${id} compat must be an object`);
+    }
+    if (entry.models !== undefined) {
+      if (!Array.isArray(entry.models)) throw new Error(`Provider ${id} models must be an array`);
+      const seen = new Set<string>();
+      for (const model of entry.models) {
+        if (!isRecord(model) || typeof model.id !== "string" || model.id.length === 0) {
+          throw new Error(`Provider ${id} has a model entry without a string id`);
+        }
+        if (seen.has(model.id)) throw new Error(`Provider ${id} duplicates model ${model.id}`);
+        seen.add(model.id);
+        if (model.contextWindow !== undefined && !isPositiveInteger(model.contextWindow)) {
+          throw new Error(`Provider ${id} model ${model.id} contextWindow must be a positive integer`);
+        }
+        if (model.maxTokens !== undefined && !isPositiveInteger(model.maxTokens)) {
+          throw new Error(`Provider ${id} model ${model.id} maxTokens must be a positive integer`);
+        }
+        if (model.reasoning !== undefined && typeof model.reasoning !== "boolean") {
+          throw new Error(`Provider ${id} model ${model.id} reasoning must be a boolean`);
+        }
+      }
+    }
+    result[id] = entry;
+  }
+  return result;
+}
+
+/** Replace the thinking defaults of imported Providers with the exported values and track managed ids. */
+async function applyImportedDefaults(
+  importedIds: string[],
+  incomingDefaults: unknown,
+  defaultsPath: string,
+): Promise<void> {
+  await serializeMutation(defaultsPath, async () => {
+    const exists = await fileExists(defaultsPath);
+    const root = await readModelsRoot(defaultsPath);
+    const modelDefaults = isRecord(root.modelDefaults) ? { ...root.modelDefaults } : {};
+    for (const id of importedIds) {
+      const prefixes = [`${encodeURIComponent(id)}/`, `${id}/`];
+      for (const key of Object.keys(modelDefaults)) {
+        if (prefixes.some((prefix) => key.startsWith(prefix))) delete modelDefaults[key];
+      }
+    }
+    const ownerParts = new Set<string>();
+    for (const id of importedIds) {
+      ownerParts.add(id);
+      ownerParts.add(encodeURIComponent(id));
+    }
+    const incoming = isRecord(incomingDefaults) ? incomingDefaults : {};
+    for (const [key, value] of Object.entries(incoming)) {
+      const providerPart = key.split("/")[0];
+      if (!ownerParts.has(providerPart) || !isThinkingLevel(value)) continue;
+      modelDefaults[key] = value;
+    }
+    const managed = managedProviderIds(root);
+    for (const id of importedIds) {
+      if (!findPreset(id) && !managed.includes(id)) managed.push(id);
+    }
+    await writeModelsRoot({
+      ...withoutLegacyManagedChannels(root),
+      version: 1,
+      modelDefaults,
+      managedProviders: managed,
+    }, defaultsPath, exists);
+  });
 }
 

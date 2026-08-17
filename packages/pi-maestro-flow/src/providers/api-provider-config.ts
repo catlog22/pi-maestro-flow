@@ -100,6 +100,8 @@ const CATALOGS = {
     "manager.actionNeedTui": "/api-manager {action} requires an interactive Pi session.",
     "manager.specifyProvider": "Specify a Provider: openai, qwen, anthropic, or a user-defined Provider ID.",
     "manager.configFailed": "API configuration failed: {message}",
+    "manager.exportPathPrompt": "Export file path",
+    "manager.importPathPrompt": "Import file path",
     "manager.commandDescription": "Manage API models and Provider configuration",
     "effort.commandDescription": "Adjust thinking effort for the current model (shortcut for /api-manager effort)",
     "retry.initFailed": "Failed to initialize default retry settings: {message}",
@@ -186,6 +188,8 @@ const CATALOGS = {
     "manager.actionNeedTui": "/api-manager {action} 需要交互式 Pi 会话。",
     "manager.specifyProvider": "请指定 Provider：openai、qwen、anthropic 或用户定义的 Provider ID。",
     "manager.configFailed": "API 配置失败：{message}",
+    "manager.exportPathPrompt": "导出文件路径",
+    "manager.importPathPrompt": "导入文件路径",
     "manager.commandDescription": "管理 API 模型与 Provider 配置",
     "effort.commandDescription": "调整当前模型的思考强度（/api-manager effort 的快捷入口）",
     "retry.initFailed": "Retry 默认配置初始化失败：{message}",
@@ -357,7 +361,7 @@ export interface ApiRetrySettings {
   maxDelayMs?: number;
 }
 
-export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "effort" | "enable" | "list" | "logout" | "price" | "reset" | "retry" | "show" | "toggle" | "vision";
+export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "effort" | "enable" | "export" | "import" | "list" | "logout" | "price" | "reset" | "retry" | "show" | "toggle" | "vision";
 export type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
@@ -1120,6 +1124,20 @@ async function showApiProviderManager(
   }
   if (action === "cache-agent") {
     await manageAgentCacheRetention(ctx, settingsPath, parsed.cacheAgent);
+    return;
+  }
+  if (action === "export" || action === "import") {
+    const fallbackPath = defaultApiManagerExportPath(modelsPath);
+    const promptKey = action === "export" ? "manager.exportPathPrompt" : "manager.importPathPrompt";
+    const input = parsed.filePath
+      ?? (ctx.hasUI ? await ctx.ui.input(t(promptKey), fallbackPath) : fallbackPath);
+    const targetPath = input?.trim();
+    if (!targetPath) return;
+    if (action === "export") {
+      await exportApiManagerConfig(ctx, targetPath, modelsPath, defaultsPath);
+    } else {
+      await importApiManagerConfig(pi, ctx, targetPath, modelsPath, defaultsPath, settingsPath);
+    }
     return;
   }
   if (action === "price") {
@@ -2246,12 +2264,15 @@ import {
   configuredProviderIds,
   configuredProviderRegistration,
   currentDefaultThinkingLevel,
+  defaultApiManagerExportPath,
   deleteProvider,
   dispatchGlobalModelPick,
   errorMessage,
+  exportApiManagerConfig,
   fileExists,
   findPreset,
   hasEnabledProviderSync,
+  importApiManagerConfig,
   isPositiveInteger,
   isProviderConfigured,
   isProviderEnabled,
