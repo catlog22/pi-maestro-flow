@@ -8,9 +8,9 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
-  loadCliToolsConfig,
+  loadMaestroDelegateConfig,
   getEnabledTools,
-  type CliToolConfig,
+  type MaestroDelegateToolConfig as CliToolConfig,
 } from "./cli-tools-loader.ts";
 
 /**
@@ -95,7 +95,7 @@ function mapToolToProviderConfig(
  * and calls pi.registerProvider() for each.
  */
 export function registerMaestroProviders(pi: ExtensionAPI): void {
-  const cliConfig = loadCliToolsConfig();
+  const cliConfig = loadMaestroDelegateConfig();
   if (!cliConfig) {
     // No cli-tools.json — silently skip provider registration
     return;

@@ -1,7 +1,7 @@
 import type { AgentToolResult, AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { getEnabledTools, loadCliToolsConfig } from "../providers/cli-tools-loader.ts";
+import { getEnabledTools, loadCliToolsConfig, probeCliToolCommand } from "../providers/cli-tools-loader.ts";
 import { Text } from "@earendil-works/pi-tui";
 import { toolCallLine, toolResultLine } from "../quiet-render.ts";
 import { refreshModelRegistry } from "pi-maestro-teammate/v1/model-routing";
@@ -12,8 +12,13 @@ export const ModelAvailabilityParams = Type.Object({
 
 interface DelegateToolView {
   name: string;
-  primaryModel: string;
-  tags: string[];
+  /** local: spawned on this machine; ssh: exec'd on the configured host. */
+  mode: "local" | "ssh";
+  /** ssh mode host; empty for local tools. */
+  host: string;
+  /** Backend reachability (probe). */
+  status: "ok" | "missing";
+  command: string;
 }
 
 export interface ModelAvailabilityDetails {
@@ -45,26 +50,33 @@ function listTeammateModels(ctx: ExtensionContext): string[] {
 function listDelegateTools(): { tools: DelegateToolView[]; path: string | null } {
   const config = loadCliToolsConfig();
   if (!config) return { tools: [], path: null };
-  const tools = getEnabledTools(config).map(({ name, config: toolConfig }) => ({
-    name,
-    primaryModel: toolConfig.primaryModel ?? "",
-    tags: toolConfig.tags ?? [],
-  }));
-  return { tools, path: "~/.maestro/cli-tools.json" };
+  const tools = getEnabledTools(config).map(({ name, config: toolConfig }) => {
+    const command = toolConfig.command?.trim() || name;
+    const probe = probeCliToolCommand(name, toolConfig);
+    return {
+      name,
+      mode: toolConfig.mode ?? "local",
+      host: toolConfig.host?.trim() ?? "",
+      status: (probe.ok ? "ok" : "missing") as "ok" | "missing",
+      command,
+    };
+  });
+  return { tools, path: getCliToolsConfigHint() };
 }
 
-// A delegate tool is directly covered by a teammate model when some teammate
-// id is namespaced under the tool name or matches its primaryModel. Anything
-// else is only reachable through `maestro delegate --to <name>`.
+function getCliToolsConfigHint(): string | null {
+  return "~/.pi/agent/teammate-cli-tools.json (+ project .pi/teammate-cli-tools.json)";
+}
+
+// A delegate tool is directly covered by a teammate model when the catalog
+// exposes `cli/<tool>` for it (reachable local tools or complete ssh configs).
+// Anything else is only reachable through `maestro delegate --to <name>`.
 function computeFallback(teammateModels: string[], delegateTools: DelegateToolView[]): DelegateToolView[] {
-  const lowerModels = teammateModels.map((model) => model.toLowerCase());
-  return delegateTools.filter((tool) => {
-    const prefix = `${tool.name.toLowerCase()}/`;
-    const primary = tool.primaryModel.toLowerCase();
-    return !lowerModels.some(
-      (model) => model.startsWith(prefix) || (primary !== "" && model.includes(primary)),
-    );
-  });
+  const cliToolIds = new Set<string>();
+  for (const model of teammateModels) {
+    if (model.startsWith("cli/")) cliToolIds.add(model.slice("cli/".length));
+  }
+  return delegateTools.filter((tool) => !cliToolIds.has(tool.name));
 }
 
 function matchesFilter(value: string, filter: string): boolean {
@@ -78,8 +90,8 @@ export function createModelAvailabilityTool(): ToolDefinition<typeof ModelAvaila
     description: `Check which models are reachable for delegated work, across three sources:
 
 - **teammate_models**: pi's own authenticated models (the same set shown in <available_teammate_models>), selectable via the teammate tool's model field.
-- **delegate_tools**: CLI tools enabled in the Maestro delegate config (~/.maestro/cli-tools.json), reachable via \`maestro delegate "<PROMPT>" --to <tool>\`.
-- **delegate_fallback**: enabled delegate tools NOT available as teammate models — route these through \`maestro delegate --to <name>\`.
+- **delegate_tools**: CLI tools enabled in teammate-cli-tools.json (~/.pi/agent + project .pi), reachable as \`cli/<tool>\` teammate models. Each entry reports backend reachability (status ok/missing): local tools are checked via which/where, ssh-mode tools run on the configured remote host. Select \`cli/<tool>\` through the teammate model field (or task-type/role routing); dispatch executes the CLI over the Agent Client Protocol (local spawn, or direct ssh exec for ssh mode).
+- **delegate_fallback**: enabled delegate tools NOT available as teammate models.
 
 Call this before routing to a specific external model (codex, gemini, claude, opencode) to confirm availability. For ordinary delegation, use the teammate tool directly.
 
@@ -110,7 +122,7 @@ Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\
       emit({ teammate_models: teammateModels });
       if (signal?.aborted) throw new Error("Tool execution aborted.");
 
-      steps.push("Reading Maestro delegate config (~/.maestro/cli-tools.json)…");
+      steps.push("Reading teammate CLI tool config (teammate-cli-tools.json)…");
       emit({ teammate_models: teammateModels });
       const { tools: delegateTools, path: configPath } = listDelegateTools();
       steps.push(configPath
@@ -130,10 +142,10 @@ Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\
         ? teammateModels.filter((model) => matchesFilter(model, filter))
         : teammateModels;
       const filteredDelegate = filter
-        ? delegateTools.filter((tool) => matchesFilter(tool.name, filter) || matchesFilter(tool.primaryModel, filter))
+        ? delegateTools.filter((tool) => matchesFilter(tool.name, filter) || matchesFilter(tool.command, filter))
         : delegateTools;
       const filteredFallback = filter
-        ? fallback.filter((tool) => matchesFilter(tool.name, filter) || matchesFilter(tool.primaryModel, filter))
+        ? fallback.filter((tool) => matchesFilter(tool.name, filter) || matchesFilter(tool.command, filter))
         : fallback;
 
       const details: ModelAvailabilityDetails = {
@@ -146,6 +158,10 @@ Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\
       const fallbackHint = fallback.length > 0
         ? `Delegate-only (route via \`maestro delegate --to <name>\`): ${fallback.map((tool) => tool.name).join(", ")}.`
         : "All enabled delegate tools are covered by teammate models.";
+      const cliTools = delegateTools.filter((tool) => tool.status === "ok");
+      const cliHint = cliTools.length > 0
+        ? `Reachable CLI tools are selectable as teammate models via \`cli/<tool>\` (local spawn / ssh exec over ACP): ${cliTools.map((tool) => `cli/${tool.name}`).join(", ")}.`
+        : "No reachable CLI tool backends — \`cli/<tool>\` models are unavailable until the tools are enabled in teammate-cli-tools.json.";
 
       return {
         content: [{
@@ -155,7 +171,7 @@ Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\
             delegate_tools: filteredDelegate,
             delegate_fallback: filteredFallback,
             delegate_config_path: configPath,
-            hint: `${fallbackHint} The --to flag is mandatory; a bare \`maestro delegate codex\` treats "codex" as the prompt.`,
+            hint: `${fallbackHint} The --to flag is mandatory; a bare \`maestro delegate codex\` treats "codex" as the prompt. ${cliHint}`,
           }, null, 2),
         }],
         details,
@@ -191,7 +207,7 @@ function renderProgress(steps: string[], details: Partial<ModelAvailabilityDetai
     lines.push(`   teammate_models: ${details.teammate_models.join(", ")}`);
   }
   if (details.delegate_tools?.length) {
-    lines.push(`   delegate_tools: ${details.delegate_tools.map((tool) => `${tool.name}${tool.primaryModel ? ` (${tool.primaryModel})` : ""}`).join(", ")}`);
+    lines.push(`   delegate_tools: ${details.delegate_tools.map((tool) => `${tool.name} (${tool.mode}${tool.host ? ` ${tool.host}` : ""})${tool.status === "missing" ? " missing" : ""}`).join(", ")}`);
   }
   if (details.delegate_fallback?.length) {
     lines.push(`   delegate_fallback: ${details.delegate_fallback.map((tool) => tool.name).join(", ")}`);
