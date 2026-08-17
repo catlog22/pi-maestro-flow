@@ -164,6 +164,16 @@ test("a conventional variable name is accepted", () => {
   assert.deepEqual(resolveBackendConfig(backend, CONFIG).errors, []);
 });
 
+test("a registration that passes a secret-bearing variable through is refused at load", () => {
+  const resolveConfig = createDshBackend(async () => fakeDriver()).resolveConfig!;
+  const refused = resolveConfig({ envPassthrough: ["DEEPSEEK_API_KEY"] });
+  assert.equal(refused.errors.length, 1);
+  assert.match(refused.errors[0]!, /which is secret-bearing/);
+  // The other direction: an ordinary deployment variable is exactly what this
+  // setting is for, so the gate must not swallow it too.
+  assert.deepEqual(resolveConfig({ envPassthrough: ["HTTPS_PROXY"] }).errors, []);
+});
+
 test("cordisConfig is required because the runtime has no built-in fallback", () => {
   const backend = createDshBackend(async () => fakeDriver());
   const { cordisConfig: _omitted, ...rest } = CONFIG;

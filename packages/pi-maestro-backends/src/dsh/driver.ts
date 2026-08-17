@@ -7,6 +7,7 @@
 
 import { DeepSeekHarness } from "@deepseek-ai/dsh-sdk-client";
 import type { ConfigValue } from "pi-maestro-backend-core/v1/backend";
+import { targetChildEnvironment } from "../child-env.ts";
 import type { DshDriverOptions, DshHarnessDriver } from "./backend.ts";
 
 /** Read a string setting, or undefined when unset. */
@@ -62,18 +63,20 @@ const PROCESS_ESSENTIAL_ENV: readonly string[] = process.platform === "win32"
  * actor-bound token — would then let one attempt act as another. Nothing in
  * `extras` is looked up again here; the caller's value is the value.
  *
+ * Both `envPassthrough` and `extras` travel the shared model's `additions`
+ * channel, so both get the launch-policy gate and the NUL gate. The secret gate
+ * is open on that channel — `allowSecretAdditions: true` is inherent to
+ * `targetChildEnvironment` — and this backend depends on it: the todo endpoint
+ * URL is carried in `PI_MAESTRO_TODO_MCP_SECRET_URL`, whose name matches
+ * `SECRET_ENV_NAME`'s `(?:^|_)SECRET(?:_|$)`, so closing that gate would make
+ * every dsh task carrying todos throw `is secret-bearing` from `start()`. A
+ * secret-bearing `envPassthrough` name is refused at `resolveConfig` instead,
+ * where an operator can still read the rejection.
+ *
  * @internal Exported so the scrub can be asserted without spawning a runtime.
  */
 export function childEnv(config: Record<string, ConfigValue>, extras: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  const child: NodeJS.ProcessEnv = {};
-  for (const name of [...PROCESS_ESSENTIAL_ENV, ...names(config, "envPassthrough")]) {
-    const value = process.env[name];
-    if (value !== undefined) child[name] = value;
-  }
-  // After the allow-list, so a per-run value is never shadowed by a passthrough
-  // name that happens to collide with it.
-  Object.assign(child, extras);
-  return child;
+  return targetChildEnvironment(names(config, "envPassthrough"), extras, PROCESS_ESSENTIAL_ENV);
 }
 
 /**

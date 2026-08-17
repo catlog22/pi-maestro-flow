@@ -14,6 +14,20 @@ import { TODO_ENDPOINT_ENV } from "pi-maestro-backends/dsh/todo-endpoint";
 
 const ESSENTIAL = process.platform === "win32" ? "SystemRoot" : "PATH";
 
+/**
+ * The baseline the dsh child is entitled to, copied rather than imported.
+ *
+ * Deliberate duplication: it pins the source list, so a change there that no
+ * one meant to make fails here instead of shipping.
+ */
+const DSH_ESSENTIALS = process.platform === "win32"
+  ? [
+    "APPDATA", "COMSPEC", "LOCALAPPDATA", "OS", "PATH", "PATHEXT", "ProgramData",
+    "ProgramFiles", "ProgramFiles(x86)", "SystemDrive", "SystemRoot", "TEMP",
+    "TMP", "USERPROFILE", "windir",
+  ]
+  : ["HOME", "LANG", "LC_ALL", "LOGNAME", "PATH", "SHELL", "TMPDIR", "TZ", "USER"];
+
 test("a host credential the runtime never needs does not reach the child", () => {
   const before = process.env.OTHER_PROVIDER_TOKEN;
   process.env.OTHER_PROVIDER_TOKEN = "sk-host-only";
@@ -66,4 +80,39 @@ test("two attempts handed different per-run values do not share one", () => {
   const first = childEnv({}, { [TODO_ENDPOINT_ENV]: "http://127.0.0.1:1/mcp?token=one" });
   const second = childEnv({}, { [TODO_ENDPOINT_ENV]: "http://127.0.0.1:2/mcp?token=two" });
   assert.notEqual(first[TODO_ENDPOINT_ENV], second[TODO_ENDPOINT_ENV]);
+});
+
+test("a per-run extra that names a launch-policy variable is refused", () => {
+  assert.throws(
+    () => childEnv({}, { NODE_OPTIONS: "--require ./evil.js" }),
+    /cannot replace launch policy/,
+  );
+});
+
+test("the todo endpoint URL survives the secret gate because the host handed it over", () => {
+  // The name really is secret-shaped, so this run exercises the gate rather
+  // than passing because nothing was gated.
+  assert.match(TODO_ENDPOINT_ENV, /(?:^|_)SECRET(?:_|$)/);
+  const url = "http://127.0.0.1:1/mcp?token=a";
+  assert.equal(childEnv({}, { [TODO_ENDPOINT_ENV]: url })[TODO_ENDPOINT_ENV], url);
+});
+
+test("a per-run extra carrying a NUL byte is refused", () => {
+  assert.throws(() => childEnv({}, { PI_X: "a\u0000b" }), /cannot contain NUL bytes/);
+});
+
+test("the dsh child sees exactly the dsh essentials and nothing the remote default allowlist adds", () => {
+  // TERM belongs to the remote bridge's default allowlist and not to this
+  // one, so borrowing that list would show up here as an extra key.
+  const before = process.env.TERM;
+  process.env.TERM = "xterm-lock";
+  try {
+    assert.deepEqual(
+      Object.keys(childEnv({})).sort(),
+      DSH_ESSENTIALS.filter((name) => process.env[name] !== undefined).sort(),
+    );
+  } finally {
+    if (before === undefined) delete process.env.TERM;
+    else process.env.TERM = before;
+  }
 });

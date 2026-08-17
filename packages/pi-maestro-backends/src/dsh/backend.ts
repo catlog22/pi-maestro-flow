@@ -36,6 +36,7 @@ import type {
   TeammateRunSpec,
   Usage,
 } from "pi-maestro-backend-core/v1/spec";
+import { IMMUTABLE_ENV_NAMES, SECRET_ENV_NAME } from "../child-env.ts";
 import {
   resolveStructuredOutput,
   structuredOutputInstruction,
@@ -303,6 +304,28 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
           `"apiKeyEnv" names the environment variable holding the key, not the key itself; `
           + "the configured value is not a variable name",
         );
+      }
+      // The child's environment lets an explicitly handed-over secret through,
+      // because the todo endpoint URL needs that path. A passthrough name is a
+      // different thing: it makes this process read one of its own credentials
+      // and forward it, so it is refused here, while an operator can still read
+      // why. Only the name is quoted back — the value may be the key itself,
+      // and this text reaches logs and transcripts.
+      const passthrough = config.envPassthrough;
+      if (Array.isArray(passthrough)) {
+        for (const name of passthrough) {
+          if (typeof name !== "string") continue;
+          if (SECRET_ENV_NAME.test(name)) {
+            errors.push(
+              `"envPassthrough" names ${name}, which is secret-bearing; the runtime resolves its own `
+              + "credentials from its own configuration, so this process must not forward one",
+            );
+          } else if (IMMUTABLE_ENV_NAMES.has(name.toUpperCase())) {
+            errors.push(
+              `"envPassthrough" names ${name}, which cannot replace launch policy`,
+            );
+          }
+        }
       }
       return { values: config, errors };
     },
