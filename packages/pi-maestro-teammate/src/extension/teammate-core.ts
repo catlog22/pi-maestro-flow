@@ -576,15 +576,6 @@ Nesting, background, structured output, todo binding, and observation semantics 
 ${modelRoutingSection}`;
 }
 
-export const LOCAL_TEAMMATE_SEND_DESCRIPTION = `Send a message to a running or sleeping teammate agent owned by this Pi process, addressed by name, @name, displayed name#id-prefix, or correlation ID (or prefix).
-
-Modes: "steer" interrupts the current turn, "follow_up" queues after it, and "abort" terminates the local agent subtree.`;
-export const LOCAL_TEAMMATE_SEND_SNIPPET = "Send a correction, follow-up, or termination command to a local teammate agent.";
-export const LOCAL_TEAMMATE_SEND_GUIDELINES = [
-  "Use teammate-send only for new information, a correction, an explicitly requested response, a safety/lifecycle constraint, or termination; steer for urgent correction and abort only to terminate work.",
-  "Do not send routine acknowledgements or status pings, and do not resend a message without new evidence.",
-];
-
 export const LOCAL_TEAMMATE_LIST_DESCRIPTION = `List roles or teammate agents owned by this Pi process. view defaults to "active".
 
 - "active": live local agents except completed entries
@@ -596,7 +587,7 @@ export const LOCAL_TEAMMATE_LIST_GUIDELINES = [
   'Use teammate-list with view="roles" when an available builtin, project, or user-defined agent name is needed; use active/named/all for local running work.',
 ];
 
-export const TEAMMATE_SEND_DESCRIPTION = `Send a typed message to a running or sleeping teammate agent, addressed by name, @name, displayed name#id-prefix, correlation ID (or prefix), or a cross-session target from teammate-list such as owner:<ownerId> or owner:<ownerId>:<correlationId>.
+export const TEAMMATE_SEND_DESCRIPTION = `Send a typed message to a running or sleeping teammate agent, addressed by name, @name, displayed name#id-prefix, correlation ID (or prefix), or a cross-session target such as owner:<ownerId> or owner:<ownerId>:<correlationId>. Cross-session targets do not require Monitor mode to send: discovering windows through teammate-list view=windows does, and an incoming workspace message carries its sender address, which is a valid reply target.
 
 Modes: "steer" | "follow_up" (default) | "abort" — per-mode semantics and the message requirement are in the mode and message parameter descriptions. Cross-session targets support only "steer" and "follow_up".
 
@@ -606,7 +597,7 @@ export const TEAMMATE_SEND_GUIDELINES = [
   "Use teammate-send only for new information, a correction, an explicitly requested response, a safety/lifecycle constraint, or termination; steer for urgent correction and abort only to terminate work.",
   "Do not send routine acknowledgements or status pings. A queued or accepted receipt means persisted or enqueued, not consumed by the target model; never resend that message unless new evidence requires a correction.",
   "For cross-session messages, use kind=coordination for execution constraints, request for work the peer must evaluate, status for explicitly requested information only, and supervision for safety/lifecycle constraints. Internal messages never replace the human user's active objective.",
-  "For another Pi window, teammate-list view=windows provides targets (owner:<ownerId> for the window or owner:<ownerId>:<correlationId> for one of its agents). Cross-session abort is unsupported.",
+  "For another Pi window, teammate-list view=windows (Monitor mode only) provides targets (owner:<ownerId> for the window or owner:<ownerId>:<correlationId> for one of its agents); an incoming workspace message also carries the sender address for replies. Cross-session abort is unsupported.",
   'To verify delivery or read the message later, use teammate-list with view="inbox"; persisted messages stay readable after the target window is closed.',
 ];
 

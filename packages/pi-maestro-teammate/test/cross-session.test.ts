@@ -168,7 +168,7 @@ async function proxyWorkspace(
   return response;
 }
 
-test("regular child proxy rejects cross-window list, send, and observe", async () => {
+test("regular child proxy rejects cross-window list and observe but allows send", async () => {
   const deniedList = await proxyWorkspace(
     "teammate-list",
     { view: "windows" },
@@ -179,8 +179,11 @@ test("regular child proxy rejects cross-window list, send, and observe", async (
   );
   assert.equal((deniedList.result as { isError?: boolean }).isError, true);
 
+  // Sending is not Monitor-gated: window discovery is, so a reachable
+  // cross-window target id was either discovered in Monitor mode or carried
+  // by an incoming workspace message (the non-Monitor reply path).
   let sendCalled = false;
-  const deniedSend = await proxyWorkspace(
+  const allowedSend = await proxyWorkspace(
     "teammate-send",
     { to: "owner:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", message: "hello" },
     async () => {
@@ -191,8 +194,8 @@ test("regular child proxy rejects cross-window list, send, and observe", async (
     undefined,
     false,
   );
-  assert.equal(sendCalled, false);
-  assert.equal((deniedSend.result as { isError?: boolean }).isError, true);
+  assert.equal(sendCalled, true);
+  assert.equal((allowedSend.result as { isError?: boolean }).isError, false);
 
   const deniedObserve = await proxyWorkspace(
     "observe",

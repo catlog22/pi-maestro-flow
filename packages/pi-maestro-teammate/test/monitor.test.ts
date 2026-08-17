@@ -300,19 +300,21 @@ test("monitor communication uses tool-local capability gates without global inte
   assert.doesNotMatch(source, /guardMonitorModeToolCall/);
   assert.doesNotMatch(source, /pi\.on\("tool_call", \(event\) => \{\n\s*if \(!monitorInteractionModeActive\)/);
   assert.match(source, /new MonitorToolExposureController\(pi/);
-  assert.match(source, /local: \[localSendTool, localListTool, localObserveTool\]/);
+  assert.match(source, /local: \[sendTool, localListTool, localObserveTool\]/);
   assert.match(source, /monitor: \[sendTool, listTool, observeTool\]/);
   assert.match(source, /exclusiveNames: \["workspace-window", "remote-worker"\]/);
   assert.match(source, /monitorToolExposure\?\.enter\(\)[\s\S]*?monitorInteractionModeActive = true/);
   assert.match(source, /monitorInteractionModeActive = false[\s\S]*?monitorToolExposure\?\.exit\(\)/);
-  assert.match(source, /Agent .* was not found among local teammates/);
+  // Sending is not Monitor-gated; window discovery (teammate-list) is.
+  assert.doesNotMatch(source, /before addressing another window/);
+  assert.doesNotMatch(proxySource, /crossSessionError\("Cross-window teammate-send"\)/);
+  assert.match(source, /Cross-window teammate-list views are available only after the user enters Monitor mode/);
   assert.match(source, /hasCrossWindowTarget[\s\S]*?ownsMonitorCommunication\(monitorCapture\)/);
   assert.match(source, /\/teammate-send is available only after entering Monitor mode/);
   assert.match(proxySource, /authorizeCrossSession\?\.\(\) === true/);
   assert.match(proxySource, /crossSessionError\("teammate-list"\)/);
   assert.doesNotMatch(peerSource, /Reply with teammate-send/);
   assert.match(coreSource, /LOCAL_TEAMMATE_LIST_DESCRIPTION/);
-  assert.match(coreSource, /LOCAL_TEAMMATE_SEND_DESCRIPTION/);
   assert.match(coreSource, /LOCAL_OBSERVE_DESCRIPTION/);
   assert.match(source, /name: "workspace-window"/);
   assert.match(source, /const monitorCapture = captureMonitorCommunication\(\);[\s\S]*?workspace-window is available only after the user enters Monitor mode/);

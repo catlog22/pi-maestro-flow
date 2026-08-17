@@ -196,13 +196,13 @@ function normalizeOptions(options: SshRemoteConnectionFactoryOptions): Normalize
   };
 }
 
-function expandIdentityPath(filePath: string): string {
+export function expandIdentityPath(filePath: string): string {
   if (filePath === "~") return os.homedir();
   if (filePath.startsWith("~/") || filePath.startsWith("~\\")) return path.join(os.homedir(), filePath.slice(2));
   return path.resolve(filePath);
 }
 
-function readPrivateIdentityFile(filePath: string): Buffer {
+export function readPrivateIdentityFile(filePath: string): Buffer {
   const resolved = expandIdentityPath(filePath);
   const stat = fs.lstatSync(resolved);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 1 || stat.size > 1024 * 1024) {

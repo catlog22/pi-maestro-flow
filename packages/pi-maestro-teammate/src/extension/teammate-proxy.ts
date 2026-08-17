@@ -2356,11 +2356,6 @@ export async function handleProxyRequest(
       const messageKind = (params.kind as WorkspacePeerMessageKind | undefined) ?? "coordination";
       const localCid = resolveAgentCorrelationId(state, to);
 
-      if (to.startsWith("owner:") && !localCid && !crossSessionAuthorized()) {
-        reply(crossSessionError("Cross-window teammate-send"));
-        return;
-      }
-
       if (to.startsWith("owner:") && (sessionSend || workspacePeerSend) && !localCid) {
         if (!message && requestedMode !== "abort") {
           reply({ type: "teammate_proxy_result", requestId, result: {

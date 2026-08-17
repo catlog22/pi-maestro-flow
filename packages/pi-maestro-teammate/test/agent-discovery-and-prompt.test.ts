@@ -892,10 +892,12 @@ Proxy specialist prompt.
     const teammate = tools.get("teammate");
     assert.ok(teammate);
     assert.deepEqual(teammate.promptGuidelines, TEAMMATE_PROMPT_GUIDELINES);
-    assert.match(String(tools.get("teammate-send")?.description), /owned by this Pi process/);
+    // Sending is never Monitor-gated, even for child proxies; window
+    // discovery (teammate-list) and observe stay local-only outside Monitor.
+    assert.match(String(tools.get("teammate-send")?.description), /owner:<ownerId>/);
+    assert.match(String(tools.get("teammate-send")?.description), /Cross-session targets do not require Monitor mode to send/);
     assert.match(String(tools.get("teammate-list")?.description), /owned by this Pi process/);
     assert.match(String(tools.get("observe")?.description), /local teammate and background Bash/);
-    assert.doesNotMatch(String(tools.get("teammate-send")?.description), /cross-session/);
     assert.doesNotMatch(String(tools.get("teammate-list")?.description), /cross-session windows/);
 
     assert.equal(sessionStartHandlers.length, 1);

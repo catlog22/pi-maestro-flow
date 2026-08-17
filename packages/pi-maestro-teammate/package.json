@@ -56,6 +56,10 @@
       "types": "./types/public/v1/model-routing.d.ts",
       "default": "./src/public/v1/model-routing.ts"
     },
+    "./v1/cli-tools": {
+      "types": "./types/public/v1/cli-tools.d.ts",
+      "default": "./src/public/v1/cli-tools.ts"
+    },
     "./v1/mailbox": {
       "types": "./types/public/v1/mailbox.d.ts",
       "default": "./src/public/v1/mailbox.ts"

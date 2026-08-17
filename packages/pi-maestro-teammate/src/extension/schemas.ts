@@ -275,31 +275,6 @@ export const TeammateParams = Type.Object({
 // Local teammate communication — current process only
 // ---------------------------------------------------------------------------
 
-export const LocalTeammateSendParams = Type.Object({
-  to: Type.String({
-    description: "Local agent name, @name, displayed name#id-prefix, or correlation ID (or prefix)",
-  }),
-  message: Type.Optional(
-    Type.String({
-      description:
-        'Message content. Required for "steer" and "follow_up" (the default mode); optional only for "abort".',
-    }),
-  ),
-  mode: Type.Optional(
-    Type.Unsafe<"steer" | "follow_up" | "abort">({
-      type: "string",
-      enum: ["steer", "follow_up", "abort"],
-      default: "follow_up",
-      description:
-        'Delivery mode for a local teammate. "steer" interrupts the current turn, "follow_up" queues after it, and "abort" terminates the agent subtree.',
-    }),
-  ),
-}, {
-  additionalProperties: false,
-  if: { not: { required: ["mode"], properties: { mode: { const: "abort" } } } },
-  then: { required: ["message"] },
-});
-
 export const LocalTeammateListParams = Type.Object({
   view: Type.Optional(
     Type.Unsafe<"active" | "named" | "all" | "roles">({
@@ -312,7 +287,8 @@ export const LocalTeammateListParams = Type.Object({
 }, { additionalProperties: false });
 
 // ---------------------------------------------------------------------------
-// Monitor teammate communication — includes cross-window capabilities
+// Cross-window teammate communication — sending never requires Monitor mode;
+// window discovery (teammate-list views) and remote workers still do
 // ---------------------------------------------------------------------------
 
 export const TeammateSendParams = Type.Object({

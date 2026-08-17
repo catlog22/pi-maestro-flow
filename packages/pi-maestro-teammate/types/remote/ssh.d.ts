@@ -61,6 +61,8 @@ export interface SshRemoteConnectionFactoryOptions {
     maxStderrBytes?: number;
     maxBufferedOutputBytes?: number;
 }
+export declare function expandIdentityPath(filePath: string): string;
+export declare function readPrivateIdentityFile(filePath: string): Buffer;
 /** Creates a fail-closed verifier for the OpenSSH SHA256 host-key fingerprint form. */
 export declare function createPinnedHostKeyVerifier(expectedFingerprint: string): (presentedKey: Buffer) => boolean;
 /** Pooled SSH factory for configured POSIX remote targets. */

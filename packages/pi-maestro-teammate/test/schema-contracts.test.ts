@@ -4,7 +4,6 @@ import { Check } from "typebox/value";
 import {
   LocalObserveParams,
   LocalTeammateListParams,
-  LocalTeammateSendParams,
   ObserveParams,
   RemoteWorkerParams,
   TeammateListParams,
@@ -105,21 +104,13 @@ test("teammate-send accepts typed cross-session message kinds", () => {
   assert.equal(Check(TeammateSendParams, { to: "owner:abc", message: "hi", kind: "instruction" }), false);
 });
 
-test("local teammate communication schemas exclude cross-window parameters", () => {
+test("local teammate list schema excludes cross-window views", () => {
   for (const view of ["active", "named", "all", "roles"] as const) {
     assert.equal(Check(LocalTeammateListParams, { view }), true);
   }
   assert.equal(Check(LocalTeammateListParams, { view: "windows" }), false);
   assert.equal(Check(LocalTeammateListParams, { view: "inbox" }), false);
   assert.equal(Check(LocalTeammateListParams, { view: "active", peer: "owner:abc" }), false);
-
-  assert.equal(Check(LocalTeammateSendParams, { to: "worker", message: "hi" }), true);
-  assert.equal(Check(LocalTeammateSendParams, { to: "worker", mode: "abort" }), true);
-  assert.equal(Check(LocalTeammateSendParams, {
-    to: "owner:abc",
-    message: "hi",
-    kind: "coordination",
-  }), false);
 
   assert.equal(Check(TeammateListParams, { view: "windows" }), true);
   assert.equal(Check(TeammateListParams, { view: "inbox", limit: 10 }), true);

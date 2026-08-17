@@ -65,26 +65,21 @@ export declare const TeammateParams: Type.TObject<{
     cwd: Type.TOptional<Type.TString>;
     timeoutMs: Type.TOptional<Type.TInteger>;
 }>;
-export declare const LocalTeammateSendParams: Type.TObject<{
-    to: Type.TString;
-    message: Type.TOptional<Type.TString>;
-    mode: Type.TOptional<Type.TUnsafe<"steer" | "follow_up" | "abort">>;
-}>;
 export declare const LocalTeammateListParams: Type.TObject<{
     view: Type.TOptional<Type.TUnsafe<"active" | "named" | "all" | "roles">>;
 }>;
 export declare const TeammateSendParams: Type.TObject<{
     to: Type.TString;
     message: Type.TOptional<Type.TString>;
-    mode: Type.TOptional<Type.TUnsafe<"steer" | "follow_up" | "abort">>;
-    kind: Type.TOptional<Type.TUnsafe<"coordination" | "request" | "status" | "supervision">>;
+    mode: Type.TOptional<Type.TUnsafe<"follow_up" | "steer" | "abort">>;
+    kind: Type.TOptional<Type.TUnsafe<"status" | "coordination" | "request" | "supervision">>;
 }>;
 export declare const TeammateListParams: Type.TObject<{
     view: Type.TOptional<Type.TUnsafe<"active" | "windows" | "named" | "all" | "roles" | "inbox">>;
     session: Type.TOptional<Type.TString>;
     peer: Type.TOptional<Type.TString>;
     direction: Type.TOptional<Type.TUnsafe<"outgoing" | "incoming">>;
-    status: Type.TOptional<Type.TUnsafe<"pending" | "queued" | "injected" | "accepted" | "rejected" | "timeout">>;
+    status: Type.TOptional<Type.TUnsafe<"queued" | "accepted" | "injected" | "pending" | "rejected" | "timeout">>;
     limit: Type.TOptional<Type.TInteger>;
 }>;
 export declare const TeammateWatchParams: Type.TObject<{

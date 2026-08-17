@@ -28,7 +28,6 @@ import type { TranscriptRow } from "../shared/transcript.ts";
 import {
   LocalObserveParams,
   LocalTeammateListParams,
-  LocalTeammateSendParams,
   ObserveParams,
   RemoteWorkerParams,
   TeammateListParams,
@@ -300,6 +299,10 @@ import {
   type TeammateModelCapability,
 } from "../models/model-catalog.ts";
 import {
+  loadCliToolsConfig,
+  toCliToolModelEntries,
+} from "../cli-tools/cli-tools-config.ts";
+import {
   applyModelRouting,
   appendTaskTypeRoutingContext,
   formatModelRoutingConfig,
@@ -328,9 +331,6 @@ import {
   CHILD_PROXY_TIMEOUT_MS,
   TEAMMATE_PROMPT_SNIPPET,
   TEAMMATE_PROMPT_GUIDELINES,
-  LOCAL_TEAMMATE_SEND_DESCRIPTION,
-  LOCAL_TEAMMATE_SEND_SNIPPET,
-  LOCAL_TEAMMATE_SEND_GUIDELINES,
   TEAMMATE_SEND_DESCRIPTION,
   TEAMMATE_SEND_SNIPPET,
   TEAMMATE_SEND_GUIDELINES,
@@ -532,7 +532,12 @@ export default function registerTeammateExtension(
     monitorInteractionModeActive && monitorToolExposure?.isCurrent(capture) === true;
 
   const refreshModelCatalog = (ctx: ExtensionContext): ModelCatalogSnapshot => {
-    const next = createModelCatalogSnapshot(ctx.modelRegistry?.getAvailable?.() ?? []);
+    const cliConfig = loadCliToolsConfig();
+    const cliEntries = cliConfig ? toCliToolModelEntries(cliConfig) : [];
+    const next = createModelCatalogSnapshot([
+      ...(ctx.modelRegistry?.getAvailable?.() ?? []),
+      ...cliEntries,
+    ]);
     if (next.signature !== modelCatalog.signature) modelCatalog = next;
     return modelCatalog;
   };
@@ -901,10 +906,14 @@ export default function registerTeammateExtension(
       name: "teammate-send",
       label: "Teammate Send",
       renderShell: "self",
-      description: isMonitorChild ? TEAMMATE_SEND_DESCRIPTION : LOCAL_TEAMMATE_SEND_DESCRIPTION,
-      promptSnippet: isMonitorChild ? TEAMMATE_SEND_SNIPPET : LOCAL_TEAMMATE_SEND_SNIPPET,
-      promptGuidelines: isMonitorChild ? TEAMMATE_SEND_GUIDELINES : LOCAL_TEAMMATE_SEND_GUIDELINES,
-      parameters: isMonitorChild ? TeammateSendParams : LocalTeammateSendParams,
+      // Cross-window sending is not Monitor-gated: window targets are only
+      // discoverable through teammate-list (Monitor mode) or the sender
+      // address carried by an incoming workspace message, so the send tool
+      // always exposes the full cross-session contract.
+      description: TEAMMATE_SEND_DESCRIPTION,
+      promptSnippet: TEAMMATE_SEND_SNIPPET,
+      promptGuidelines: TEAMMATE_SEND_GUIDELINES,
+      parameters: TeammateSendParams,
       async execute(_id: string, params: { to: string; message?: string; mode?: RpcMessageMode; kind?: SessionMessageKind }, signal: AbortSignal) {
         return proxyCall<{ delivered: boolean }>("teammate-send", params, signal);
       },
@@ -1459,7 +1468,7 @@ export default function registerTeammateExtension(
       target = resolveWorkspacePeerSendTarget(query);
     }
     if (!target) {
-      return { delivered: false, error: `Workspace target "${query}" was not found. Use teammate-list with view=windows.` };
+      return { delivered: false, error: `Workspace target "${query}" was not found. Use teammate-list with view=windows in Monitor mode, or the sender address from a received workspace message.` };
     }
     if (target.state !== "active") {
       return { delivered: false, error: `Workspace target "${query}" is settled and cannot receive commands.` };
@@ -3303,15 +3312,15 @@ export default function registerTeammateExtension(
                 : undefined;
             })(),
             async (target, message, mode) => {
-              if (!proxyCanCrossSession()) return false;
+              const monitorAuthority = proxyCanCrossSession();
               const delivered = await routeSessionMessage({
                 selector: target,
                 message,
                 mode,
-                source: "monitor",
+                source: monitorAuthority ? "monitor" : "system",
                 signal: activeAgent.abortController.signal,
               });
-              return proxyCanCrossSession() && delivered.delivered;
+              return delivered.delivered && (!monitorAuthority || proxyCanCrossSession());
             },
             async () => {
               if (!proxyCanCrossSession()) return [];
@@ -3319,17 +3328,15 @@ export default function registerTeammateExtension(
               await refreshWorkspacePeerOwners();
               return proxyCanCrossSession() ? workspacePeerWindowListings() : [];
             },
-            (request) => proxyCanCrossSession()
-              ? routeSessionMessage({
+            (request) => {
+              const monitorAuthority = proxyCanCrossSession();
+              return routeSessionMessage({
                 ...request,
-                source: "monitor",
-                authorize: proxyCanCrossSession,
+                source: monitorAuthority ? "monitor" : "system",
+                ...(monitorAuthority ? { authorize: proxyCanCrossSession } : {}),
                 signal: activeAgent.abortController.signal,
-              })
-              : Promise.resolve({
-                delivered: false,
-                error: "Cross-window communication requires an active Monitor session.",
-              }),
+              });
+            },
             async () => {
               await refreshModelRegistry(ctx);
               return refreshModelCatalog(ctx).models;
@@ -3852,16 +3859,6 @@ export default function registerTeammateExtension(
       const mode = requestedMode === "steer" || requestedMode === "abort" ? requestedMode : "follow_up";
       const cid = resolveAgentCorrelationId(state, params.to);
       const monitorCapture = cid ? undefined : captureMonitorCommunication();
-      if (!cid && !ownsMonitorCommunication(monitorCapture)) {
-        return {
-          content: [{
-            type: "text",
-            text: `Agent "${params.to}" was not found among local teammates. Enter Monitor mode with /monitor before addressing another window or remote worker.`,
-          }],
-          isError: true,
-          details: { delivered: false },
-        };
-      }
       if (!cid && params.to.startsWith("remote:")) {
         if (mode === "abort") {
           return {
@@ -3932,14 +3929,19 @@ export default function registerTeammateExtension(
       }
 
       const routedMode = !cid && messageKind === "status" ? "follow_up" : mode;
+      // Cross-window sending is not Monitor-gated: window discovery is
+      // restricted to teammate-list, so a reachable target id was either
+      // discovered in Monitor mode or carried by an incoming workspace
+      // message (the reply path for non-Monitor windows).
+      const monitorAuthority = !cid && ownsMonitorCommunication(monitorCapture);
       const delivery = await routeSessionMessage({
         selector: params.to,
         targetCorrelationId: cid,
         message,
         mode: routedMode,
-        source: cid ? "system" : "monitor",
+        source: monitorAuthority ? "monitor" : "system",
         messageKind,
-        ...(!cid ? { authorize: () => ownsMonitorCommunication(monitorCapture) } : {}),
+        ...(!cid && monitorCapture ? { authorize: () => ownsMonitorCommunication(monitorCapture) } : {}),
         signal,
       });
       if (!delivery.delivered) {
@@ -3955,7 +3957,7 @@ export default function registerTeammateExtension(
           }
         }
         const error = !cid && delivery.error?.startsWith("Session selector ")
-          ? `Workspace target "${params.to}" was not found. Use teammate-list with view=windows.`
+          ? `Workspace target "${params.to}" was not found. Use teammate-list with view=windows in Monitor mode, or the sender address from the received workspace message.`
           : delivery.error;
         return {
           content: [{ type: "text", text: error ?? `Failed to send message to "${params.to}".` }],
@@ -4014,14 +4016,6 @@ export default function registerTeammateExtension(
       return renderQuietTeammateAux("teammate-send", failed ? "delivery failed" : "delivered", failed ? "failure" : "success", theme)
         ?? auxToolResultFallback(result, theme);
     },
-  };
-
-  const localSendTool: ToolDefinition<typeof LocalTeammateSendParams, { delivered: boolean }> = {
-    ...sendTool,
-    description: LOCAL_TEAMMATE_SEND_DESCRIPTION,
-    promptSnippet: LOCAL_TEAMMATE_SEND_SNIPPET,
-    promptGuidelines: LOCAL_TEAMMATE_SEND_GUIDELINES,
-    parameters: LocalTeammateSendParams,
   };
 
   // =========================================================================
@@ -6845,7 +6839,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
 
   pi.registerTool(tool);
   monitorToolExposure = new MonitorToolExposureController(pi, {
-    local: [localSendTool, localListTool, localObserveTool],
+    local: [sendTool, localListTool, localObserveTool],
     monitor: [sendTool, listTool, observeTool],
     exclusiveNames: ["workspace-window", "remote-worker"],
   });
