@@ -15,7 +15,7 @@ export type KnowledgeDisposition =
 
 export type KnowledgePromotionEligibility = "eligible" | "suppressed" | "review_required";
 
-export type KnowledgeFreshness = "fresh" | "stale" | "missing";
+export type KnowledgeFreshness = "fresh" | "stale" | "missing" | "blocked";
 
 export type KnowledgeCandidateAction = "propose" | "reaffirm" | "supersede" | "contest";
 
@@ -72,6 +72,8 @@ export interface ReviewCandidate {
     freshness: KnowledgeFreshness;
     reconcile_commands: string[];
     resolution_commands: string[];
+    /** Present when the candidate failed immutable-source revalidation. */
+    blocked_reason?: string;
   };
 }
 

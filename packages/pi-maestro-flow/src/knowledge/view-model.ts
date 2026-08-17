@@ -30,6 +30,7 @@ const FRESHNESS_RANK: Record<KnowledgeFreshness, number> = {
   missing: 2,
   stale: 1,
   fresh: 0,
+  blocked: 3,
 };
 
 export const STALE_OBSERVED_DAYS = 14;
@@ -254,6 +255,7 @@ export function canPromote(summary: CandidateSummary): boolean {
 }
 
 export function promoteBlockReason(summary: CandidateSummary): string | null {
+  if (summary.freshness === "blocked") return "blocked — invalid candidate source";
   if (summary.freshness === "missing") return "receipt missing — press r to refresh";
   if (summary.freshness === "stale") return "receipt stale — press r to refresh";
   if (summary.eligibility === "review_required") return "resolution required first — press x";

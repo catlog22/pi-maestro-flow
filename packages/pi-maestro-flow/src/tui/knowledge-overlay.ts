@@ -529,6 +529,9 @@ export class KnowledgeOverlay implements Component, Focusable {
       + `eligibility: ${eligibilityLabel(summary.eligibility)} · freshness: ${freshnessTag(summary.freshness)}`,
       inner,
     ));
+    if (summary.candidate.review.blocked_reason) {
+      rows.push(fitLine(fg("35", `blocked: ${summary.candidate.review.blocked_reason}`), inner));
+    }
     if (summary.staleObserved) rows.push(fitLine(fg("33", "⏰ stale observed-only candidate"), inner));
     if (summary.canonicalId) rows.push(fitLine(`canonical: ${summary.canonicalId}`, inner));
     rows.push(rule(inner));
@@ -707,7 +710,8 @@ export class KnowledgeOverlay implements Component, Focusable {
   }
 }
 
-function freshnessTag(freshness: "fresh" | "stale" | "missing"): string {
+function freshnessTag(freshness: "fresh" | "stale" | "missing" | "blocked"): string {
+  if (freshness === "blocked") return fg("35", "blocked");
   if (freshness === "missing") return fg("31", "missing");
   if (freshness === "stale") return fg("33", "stale");
   return fg("32", "fresh");
