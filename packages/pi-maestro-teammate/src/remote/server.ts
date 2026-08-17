@@ -74,6 +74,32 @@ export interface RemoteBridgeServerOptions {
   concurrency?: number;
   heartbeatMs?: number;
   clientEgressBytes?: number;
+  /**
+   * Where a quarantined run is reported, for a journal this server constructs itself.
+   * Defaults to one line on the daemon's stderr; ignored when `journal` is supplied, since that
+   * journal already carries whatever observer its owner gave it.
+   */
+  onQuarantine?: (directory: string, error: unknown) => void;
+}
+
+/**
+ * Report one quarantined run directory on the daemon's stderr.
+ *
+ * The daemon is the only process that watches a run directory move into `corrupt-runs/`. Without a
+ * line here the move is silent and the host meets it later as an unrelated ownership mismatch on the
+ * next run/attach, so the operator debugs the wrong failure.
+ *
+ * @param directory Absolute path the run occupied under `runs/` before the move.
+ * @param error Parse or reconciliation failure that condemned the run.
+ */
+function reportQuarantineToStderr(directory: string, error: unknown): void {
+  // The cause, not just the message: every condemnation arrives wrapped as `Corrupt remote run
+  // journal`, and only the cause separates a stale record version from a truncated write.
+  const cause = error instanceof Error ? error.cause : undefined;
+  const reason = error instanceof Error
+    ? (cause instanceof Error ? `${error.message}: ${cause.message}` : error.message)
+    : String(error);
+  process.stderr.write(`pi-teammate-remote: quarantined corrupt run ${directory}: ${redactRemoteError(reason)}\n`);
 }
 
 function plainObject(value: unknown): value is Record<string, unknown> {
@@ -176,7 +202,8 @@ export class RemoteBridgeServer {
   #socketIdentity?: { dev: number; ino: number };
 
   constructor(options: RemoteBridgeServerOptions) {
-    this.journal = options.journal ?? new RemoteRunJournal(options.stateDirectory);
+    this.journal = options.journal
+      ?? new RemoteRunJournal(options.stateDirectory, { onQuarantine: options.onQuarantine ?? reportQuarantineToStderr });
     this.socketPath = getRemoteSocketPath(this.journal.stateDirectory);
     this.#targets = new Map(options.targets.map((target) => [target.id, target]));
     const drivers = options.drivers ?? [

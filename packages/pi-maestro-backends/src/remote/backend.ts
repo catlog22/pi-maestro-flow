@@ -231,13 +231,15 @@ export function createRemoteBackend(managerOf: RemoteManagerFactory): TeammateBa
           snapshot = await manager.wait(capture, {
             ...(options.signal ? { signal: options.signal } : {}),
           });
-          // Settling without the remote's own statement means the stream ended
-          // before the result did; the fold reads this as an unreaped run.
-          if (!events.some((event) => event.type === "run/result")) disconnectedBeforeResult = true;
+          // A wait that settles leaves the channel intact, so the flag stays
+          // false even when no `run/result` arrived. The fold still answers
+          // `unreaped` in that case — it reads the absent result from `events`
+          // — and the flag is what lets it say the channel is why, rather than
+          // reporting a dropped connection on a channel that never dropped.
         } catch {
           // The manager closed, the run was aborted, or the wait timed out.
-          // Which one does not change the fact the fold needs: no terminal
-          // result was observed on this channel.
+          // Which one does not change the fact the fold needs: this channel
+          // stopped answering before any terminal result reached it.
           disconnectedBeforeResult = true;
           try {
             snapshot = manager.snapshot(capture);

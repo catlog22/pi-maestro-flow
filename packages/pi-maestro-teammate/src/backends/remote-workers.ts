@@ -50,6 +50,15 @@ export interface RemoteManagerPortBinding {
    * @param event - the event, as the manager published it.
    */
   publish(capture: RemoteRunCapture, event: RemoteRunEvent): void;
+  /**
+   * How many subscriptions the binding is holding.
+   *
+   * Retention is the only externally visible difference a leaked subscription
+   * makes: a still-nameless one buffers instead of delivering, so an observer
+   * watching what arrives cannot tell a released subscription from one that
+   * stayed in the Set and grows its `buffered` array on every publish.
+   */
+  readonly subscriptionCount: number;
 }
 
 /**
@@ -75,6 +84,9 @@ export function createRemoteManagerPort(manager: RemoteWorkerManager): RemoteMan
     }
   };
   return {
+    get subscriptionCount() {
+      return subscriptions.size;
+    },
     publish(capture, event) {
       for (const subscription of subscriptions) {
         // Still nameless: its run's identity has not come back yet, so the

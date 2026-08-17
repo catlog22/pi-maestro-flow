@@ -350,6 +350,40 @@ test("a run whose stream ended without a result is not reported as reclaimed", a
   assert.equal(outcome.result.terminalStatus, "failed");
   const reclamation = await outcome.reclamation;
   assert.equal(reclamation.status, "unreaped");
+  // The wait settled with a terminal snapshot, so this channel never dropped —
+  // the daemon answered everything except the one question that mattered.
+  // Reporting a dropped connection here sends the operator to inspect a
+  // transport that was working, and is what the backend did while it folded the
+  // absent result and a dead channel into the same flag.
+  const reason = reclamation.status === "unreaped" ? reclamation.reason : "";
+  assert.doesNotMatch(
+    reason,
+    /connection dropped/,
+    "a stream that ended under a live wait was reported as a dropped connection",
+  );
+  assert.match(reason, /stream ended without a result/);
+});
+
+test("a wait that fails is still reported as a dropped connection", async () => {
+  const manager = new FakeRemoteManager("pi-rpc");
+  manager.feed = [{ type: "run/event", event: { type: "text", text: "partial" } }];
+  manager.settleStatus = "lost";
+  // Same absent `run/result` as the case above, and the same folded status. Only
+  // the channel differs, so the reason is the sole thing that can carry the
+  // difference, and it is the caller's flag — not the event stream — that knows
+  // it.
+  manager.waitFailure = new Error("the ssh connection dropped");
+  const run = await createRemoteBackend(() => manager)
+    .start(SPEC, optionsOf({ targetId: "beta", driver: "pi-rpc" }));
+  const outcome = await run.outcome;
+
+  const reclamation = await outcome.reclamation;
+  assert.equal(reclamation.status, "unreaped");
+  assert.match(
+    reclamation.status === "unreaped" ? reclamation.reason : "",
+    /connection dropped/,
+    "a wait that failed was reported as a stream that simply ended",
+  );
 });
 
 test("a manager that throws while waiting still folds a snapshot it can still read", async () => {

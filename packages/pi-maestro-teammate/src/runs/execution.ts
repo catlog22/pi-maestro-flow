@@ -807,11 +807,18 @@ export async function runSingleTeammate(
             `Fresh replay blocked after completedTools=${recoveryFacts.completedToolCount}, `
             + `inFlightTools=${recoveryFacts.inFlightToolCount}, externalReplayRisk=${recoveryFacts.externalReplayRisk}.`,
         }).blocked;
-      // A backend that cannot select models serves every remaining candidate
-      // with the model it just failed on, so no candidate can change this
-      // outcome. Failover also costs the run its own diagnosis: every candidate
-      // after the first carries an explicit model, so the capability gate above
-      // rejects it and that rejection replaces the failure this run produced.
+      // Failover here would cost the run its diagnosis and buy nothing. Every
+      // candidate after the first carries an explicit model, so the capability
+      // gate above refuses the task before any of them starts — no remote
+      // process and no tokens are saved, because none would have been spent.
+      // What is saved is the diagnosis: without this, a capability refusal
+      // about a candidate that never ran replaces the failure this run actually
+      // observed.
+      //
+      // Only reachable when the caller named no model. A caller-named model
+      // puts `spec.model` on the first candidate, so the gate refuses the whole
+      // task outright and this path is never entered — which leaves exactly the
+      // runs that produced a real provider diagnosis worth keeping.
       const modelSelectionUnsupported = resolvedCapabilities?.modelSelection === "unsupported";
       const failoverConditionsMet = replayFenceClear
         && ((fallbackFailure && authoritativeFailure) || preActivityInfrastructureExit);
@@ -861,15 +868,17 @@ export async function runSingleTeammate(
             support: "withheld",
             note:
               `backend "${candidateResult.backend}" declares modelSelection is unsupported, `
-              + `so every remaining model candidate would run on the same model`,
+              + `so capability adjudication would refuse every remaining model candidate before it started `
+              + `and that refusal would replace this run's own failure`,
           },
         ];
         candidateResult.messages.push({
           role: "system",
           content:
             `Model fallback blocked because backend "${candidateResult.backend}" declares `
-            + `modelSelection is unsupported. Every remaining candidate would run on the model `
-            + `this attempt already used, so a second run cannot change the outcome.`,
+            + `modelSelection is unsupported. Each remaining candidate names a model this backend `
+            + `cannot select, so capability adjudication would refuse it before it started and you `
+            + `would be shown that refusal instead of the failure reported above.`,
         });
       }
 

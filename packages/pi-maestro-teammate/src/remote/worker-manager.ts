@@ -162,6 +162,17 @@ const LEGACY_REMOTE_PROTOCOL_VERSION = "remote/1";
 // `-32602 Invalid capabilities` instead of the `-32002` refusal that names both
 // versions. Read both codes as version skew — `-32002` is the same failure once
 // the daemon is new enough to diagnose itself.
+//
+// The literal `Invalid capabilities` belongs to an external build, so verify it
+// at its source of record rather than re-deriving it: `git show
+// 6a8b6ca9^:packages/pi-maestro-teammate/src/remote/server.ts` validates
+// `remote/initialize` with `normalizeCapabilities(raw.capabilities,
+// "capabilities")`, which throws `RemoteRpcError(-32602, "Invalid capabilities")`.
+//
+// Everything else that reaches the handshake catch — request timeouts, transport
+// faults, `Remote worker manager closed during setup`, `validateHello` refusals —
+// must pass through untouched. Telling an operator whose connection timed out to
+// upgrade the daemon is a worse message than the one they already had.
 function isVersionSkewRefusal(error: unknown): error is Error {
   if (!(error instanceof Error)) return false;
   const code = (error as { code?: unknown }).code;

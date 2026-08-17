@@ -323,6 +323,17 @@ test("a start that the manager rejects unsubscribes before rethrowing", async ()
     },
   );
 
+  // Retention, not delivery: a subscription the failure path left behind is
+  // still nameless, so `publish` buffers for it instead of delivering and the
+  // events an observer sees are identical either way. What a leak does produce
+  // is a Set entry that outlives its run and a `buffered` array that grows on
+  // every publish for the lifetime of the binding.
+  assert.equal(
+    binding.subscriptionCount,
+    1,
+    "the refused start left its subscription in the binding, where it buffers every later event forever",
+  );
+
   binding.publish(CAPTURE, {
     workerId: CAPTURE.workerId,
     instanceNonce: CAPTURE.instanceNonce,
@@ -334,9 +345,8 @@ test("a start that the manager rejects unsubscribes before rethrowing", async ()
     status: "running",
   });
 
-  // The refused run gets nothing, and the run that did start still gets
-  // everything: the cleanup on the failure path removes its own subscription
-  // and leaves the pump intact for the subscribers it shares the binding with.
+  // The run that did start still gets everything: removing one subscription on
+  // the failure path must not disturb the pump it shares with the others.
   assert.deepEqual(refused, [], "a run the manager refused still receives events");
   assert.equal(live.length, 1, "the surviving subscriber stopped receiving events");
 });
@@ -533,7 +543,7 @@ function capabilityRegistry(backend: TeammateBackend): BackendRegistry {
   };
 }
 
-test("a backend that cannot select models is not retried with another model candidate", async () => {
+test("a backend that cannot select models keeps its own failure instead of a capability refusal", async () => {
   const root = workspace();
   const started: (string | undefined)[] = [];
 
@@ -550,14 +560,18 @@ test("a backend that cannot select models is not retried with another model cand
     },
   );
 
-  assert.deepEqual(
-    started,
-    [undefined],
-    "a backend that cannot select models was made to run a second model candidate",
+  // A precondition, not this gate's proof: the second candidate carries an
+  // explicit model, so capability adjudication refuses it whether or not the
+  // failover gate held. Removing the gate leaves this assertion green.
+  assert.deepEqual(started, [undefined], "the scenario never reached a second model candidate");
+  // The gate's actual effect, and the only assertion here that reddens without
+  // it: the refusal about the candidate that never ran carries no backend and
+  // no provider text, so it overwrites what this run diagnosed.
+  assert.equal(
+    result.backend,
+    "capability-probe",
+    "a capability refusal about a candidate that never ran replaced this run's own result",
   );
-  // The settled failure is still what the caller reads, rather than a verdict
-  // about a candidate that never ran.
-  assert.equal(result.backend, "capability-probe");
   assert.ok(
     result.messages.some((message) => /503 Service Unavailable/.test(message.content)),
     "the failure the backend actually settled was replaced",

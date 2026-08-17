@@ -657,7 +657,59 @@ test("a hello whose protocol version differs is refused by validateHello", async
   };
   const manager = managerFor(new FakeConnectionFactory(connection));
 
-  await assert.rejects(manager.connect("linux-a/pi"), /Invalid remote worker hello/);
+  await assert.rejects(manager.connect("linux-a/pi"), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    // Equality, not a substring match: the skew diagnostic appends the original
+    // text as `Remote reply: ...`, so a wrapped message satisfies any regex
+    // written against the original and this case would pass for the wrong
+    // reason.
+    assert.equal(error.message, "Invalid remote worker hello");
+    return true;
+  });
   assert.equal(connection.closed, true, "the refused connection is still closed");
   await manager.close();
+});
+
+/**
+ * Assert one handshake failure reaches `connect`'s caller exactly as thrown.
+ *
+ * Object identity is the only assertion a wrapper cannot satisfy: the skew
+ * diagnostic constructs a new Error, appends the original message as `Remote
+ * reply: ...` and carries the original as `cause`, so a substring regex, a
+ * `cause` check and an `instanceof` check all still pass under a wrap.
+ *
+ * @param original - the error `remote/initialize` throws.
+ */
+async function assertHandshakeFailurePassesThrough(original: Error): Promise<void> {
+  const connection = new FakeConnection();
+  connection.onInitialize = () => { throw original; };
+  const manager = managerFor(new FakeConnectionFactory(connection));
+
+  await assert.rejects(manager.connect("linux-a/pi"), (error: unknown) => {
+    assert.equal(error, original, "the handshake failure was rewritten on its way to the caller");
+    assert.doesNotMatch(
+      (error as Error).message,
+      /Upgrade pi-teammate-remote/,
+      "a failure that is not version skew was diagnosed as one",
+    );
+    return true;
+  });
+  assert.equal(connection.closed, true, "the refused connection is still closed");
+  await manager.close();
+}
+
+// The two counter-examples for the diagnostic's selectivity. Its existence is
+// already pinned by the v1 case above; without these, widening the predicate to
+// anything the handshake catch sees — up to an unconditional wrap — passes every
+// gate, and every operator whose handshake failed for any other reason is told
+// to upgrade a daemon that was never the problem.
+test("a transport fault with no JSON-RPC code reaches the caller undiagnosed", async () => {
+  await assertHandshakeFailurePassesThrough(new Error("connect ETIMEDOUT 10.0.0.4:22"));
+});
+
+test("an invalid-parameter refusal about another field reaches the caller undiagnosed", async () => {
+  const refusal: Error & { code?: number } = new Error("Invalid monitorOwnerNonce");
+  refusal.name = "RemoteRpcResponseError";
+  refusal.code = -32602;
+  await assertHandshakeFailurePassesThrough(refusal);
 });

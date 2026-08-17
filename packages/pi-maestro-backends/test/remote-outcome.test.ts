@@ -138,6 +138,26 @@ test("a connection that dropped before the terminal result is not reported as re
   assert.notEqual(unreapedReason(reclamation), LOST_REASON);
 });
 
+test("a stream that ended under a live channel is told apart from one that dropped", async () => {
+  // Byte-identical inputs to the dropped case above except for the flag, so the
+  // flag is the only thing that can produce a different reason. That is the
+  // whole reason it is a parameter: an absent `run/result` looks the same from
+  // inside the fold whether the channel died or merely went quiet.
+  const outcome = foldRemoteOutcome(input({
+    events: events({ type: "run/state", status: "running" }),
+    snapshot: snapshot("running", 1),
+    disconnectedBeforeResult: false,
+  }));
+  const reclamation = await outcome.reclamation;
+  assert.equal(reclamation.status, "unreaped");
+  assert.notEqual(
+    unreapedReason(reclamation),
+    DROPPED_REASON,
+    "a run whose channel stayed up was reported as a dropped connection",
+  );
+  assert.notEqual(unreapedReason(reclamation), LOST_REASON);
+});
+
 test("reclamation is decided per run rather than answered once", async () => {
   const completed = foldRemoteOutcome(input({
     events: events({ type: "run/result", status: "completed", result: "the answer" }),

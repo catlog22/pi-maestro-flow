@@ -17,7 +17,12 @@ import {
 } from "../src/remote/protocol.ts";
 import { connectRemoteSocket, RemoteBridgeServer } from "../src/remote/server.ts";
 import { createRemoteRunSnapshot } from "../src/remote/state.ts";
-import { REMOTE_PROTOCOL_VERSION, type RemoteRunEvent, type ResolvedRemoteTarget } from "../src/remote/types.ts";
+import {
+  REMOTE_PROTOCOL_VERSION,
+  type RemoteRunCapture,
+  type RemoteRunEvent,
+  type ResolvedRemoteTarget,
+} from "../src/remote/types.ts";
 
 const HOST_KEY = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
@@ -342,6 +347,98 @@ test("a remote/1 client is refused and the error names both protocol versions", 
   } finally {
     socket.destroy();
     await server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Create one run through a server's own journal, then corrupt it so the next read condemns it.
+ *
+ * @param server - the server whose journal owns the run.
+ * @param runId - the run to create and condemn.
+ * @returns the absolute run directory the journal will quarantine.
+ */
+function condemnRun(server: RemoteBridgeServer, runId: string): string {
+  const capture: RemoteRunCapture = {
+    ...server.journal.identity,
+    runId,
+    generation: 1,
+    monitorOwnerNonce: "owner-quarantine",
+    targetId: "linux-a/pi",
+  };
+  server.journal.createRun(capture, {
+    commandId: `start-${runId}`,
+    targetId: "linux-a/pi",
+    monitorOwnerNonce: capture.monitorOwnerNonce,
+    name: runId,
+    objective: "exercise daemon quarantine reporting",
+    cwd: "/srv/project",
+    driver: "pi-rpc",
+    command: ["/usr/bin/pi", "--mode", "rpc"],
+  });
+  const runs = path.join(server.journal.stateDirectory, "runs");
+  const entry = fs.readdirSync(runs).find((name) => {
+    const metadata = path.join(runs, name, "metadata.json");
+    return fs.existsSync(metadata)
+      && (JSON.parse(fs.readFileSync(metadata, "utf8")) as { capture?: { runId?: string } }).capture?.runId === runId;
+  });
+  assert.ok(entry, `the journal never stored a directory for ${runId}`);
+  const directory = path.join(runs, entry);
+  const metadataPath = path.join(directory, "metadata.json");
+  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as { version: number };
+  // A record version the current journal refuses, so loading it throws where quarantine catches.
+  metadata.version = 1;
+  fs.writeFileSync(metadataPath, JSON.stringify(metadata), "utf8");
+  return directory;
+}
+
+test("a journal the server builds itself reports quarantine to the server's observer", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-srv-qobs-"));
+  try {
+    const observed: { directory: string; error: unknown }[] = [];
+    // No `journal` option: this is the shape `pi-teammate-remote serve` constructs, so the wiring
+    // under test is the server's own, not one a caller supplied along with a ready-made journal.
+    const server = new RemoteBridgeServer({
+      stateDirectory: path.join(root, "state"),
+      targets: [target()],
+      onQuarantine: (directory, error) => observed.push({ directory, error }),
+    });
+    const directory = condemnRun(server, "observed-run");
+
+    assert.deepEqual(server.journal.listRuns(), []);
+
+    assert.equal(observed.length, 1, "the run was quarantined without the server's observer hearing about it");
+    assert.equal(observed[0]?.directory, directory);
+    assert.ok(observed[0]?.error instanceof Error, "the observer was told which run but not what condemned it");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a daemon given no observer still reports a quarantined run on stderr", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-srv-qerr-"));
+  const write = process.stderr.write;
+  try {
+    // Exactly what cli.ts serve constructs. This is the only configuration that ships, so a default
+    // that reports nowhere leaves the released daemon's quarantine as silent as it was before.
+    const server = new RemoteBridgeServer({ stateDirectory: path.join(root, "state"), targets: [target()] });
+    const directory = condemnRun(server, "unwatched-run");
+    const written: string[] = [];
+    process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+      written.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      assert.deepEqual(server.journal.listRuns(), []);
+    } finally {
+      process.stderr.write = write;
+    }
+
+    const reported = written.join("");
+    assert.ok(reported.includes(directory), `the quarantined run directory is missing from: ${reported || "(nothing)"}`);
+    assert.match(reported, /Unsupported remote run metadata version 1/);
+  } finally {
+    process.stderr.write = write;
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

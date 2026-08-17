@@ -8,8 +8,14 @@
 
 ### 修复
 
-- **隔离不再无声**：`RemoteRunJournal` 构造函数接受可选的 `onQuarantine(directory, error)`，在 run 目录被移进 `corrupt-runs/` 之后触发，调用方能知道哪个 run 因为什么被移走。回调抛出的异常被吞掉——隔离发生在 `getRun` / `listRuns` 的错误恢复路径上，此时 rename 与两次 fsync 已经落盘，观测失败既不能把恢复变成崩溃，也无法回退隔离。
+- **隔离不再无声**：`RemoteRunJournal` 构造函数接受可选的 `onQuarantine(directory, error)`，在 run 目录被移进 `corrupt-runs/` 之后触发；`RemoteBridgeServer` 自建 journal 时默认把它接到守护进程的 stderr，写一行点名被隔离的 run 目录与条件它的错误（含 cause，用以区分记录版本过期与写入截断）。`pi-teammate-remote serve` 不传 journal，走的正是这条默认路径，所以发布出去的守护进程也不再静默隔离。回调抛出的异常被吞掉——隔离发生在 `getRun` / `listRuns` 的错误恢复路径上，此时 rename 与两次 fsync 已经落盘，观测失败既不能把恢复变成崩溃，也无法回退隔离。
 - **v1 拒绝消息点名整个状态目录**并给出正确补救动作，而不是只点名 `worker.json`。旧文本会诱导操作员删掉标识文件：守护进程随即在旧目录上启动，其余 v1 run 记录被逐条移进 `corrupt-runs/`，宿主 run/attach 撞上的是与真因无关的 `-32003 Remote run ownership capture mismatch`。
+
+- **v1 守护进程的握手拒绝被诊断为版本偏斜**。`remote/1` 守护进程在自己的版本检查之前就先做参数校验，因缺少 `capabilities` 数组以 `-32602 Invalid capabilities` 拒绝 `remote/2` 握手，操作员原本只拿到这句话。现在 `-32602 + capabilities` 与 `-32002` 一起读作版本偏斜，消息点名本地的 `remote/2`、对端疑似的 `remote/1`、目标主机与补救动作。判据是选择性的：握手 catch 同样看得到请求超时、传输故障、`Remote worker manager closed during setup` 与 `validateHello` 拒绝，这些原对象原样透传，不加诊断。
+
+- **`modelSelection` 声明为 unsupported 的后端不再触发模型 failover**。省下的不是远端进程也不是 token——后续候选一个都不会启动，本就不花。省下的是诊断：每个后续候选都带显式模型，能力裁决会在启动前拒掉它，而那条「关于从未运行的候选」的拒绝会顶掉本次运行自己观测到的失败。该分支只在调用方没点名模型时可达（调用方点名时第一个候选就带模型，整个任务在能力门被当场拒绝），恰是那些有真实 provider 诊断值得保住的运行。被拦下的 failover 以 `capabilityDeliveries` 的 `modelSelection: withheld` 记录，结果因此与「无候选可试」区分得开。
+
+- **远端 reclamation 区分「流结束但通道还在」与「通道断了」**。`wait` 正常返回终态快照、而事件流里始终没有 `run/result` 时，理由不再声称连接断开——那条通道从未断过。两种形态与「远端自报 run lost」共三条理由各自独立，操作员据此知道该查传输还是查远端运行时。
 
 ### 更正 be0871e6 记录的前提
 
