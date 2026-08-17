@@ -16,6 +16,7 @@ export type {
   RemoteRunEvent,
   RemoteRunInputResult,
   RemoteRunSnapshot,
+  RemoteStartedRun,
   RemoteStatus,
   RemoteWorkerManagerLike,
   RemoteWorkerStartRequest,

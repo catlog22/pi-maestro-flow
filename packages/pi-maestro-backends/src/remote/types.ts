@@ -95,6 +95,13 @@ export interface RemoteWorkerStartRequest {
   commandId?: string; outputSchema?: unknown; signal?: AbortSignal;
 }
 
+/** One started run: its ownership capture, plus the handle that detaches the listener started with it. */
+export interface RemoteStartedRun {
+  readonly capture: RemoteRunCapture;
+  /** Stop delivering this run's events to the listener `start` attached. Idempotent. */
+  unsubscribe(): void;
+}
+
 /**
  * Structural port over the host's `RemoteWorkerManager`.
  *
@@ -104,12 +111,12 @@ export interface RemoteWorkerStartRequest {
  * teammate side, where the dependency already points this way and no cycle
  * forms.
  *
- * The member set is exactly what a backend calls. `subscribe` and
+ * The member set is exactly what a backend calls. `start` and
  * `resolveTargetDriver` have no one-to-one method on the real manager and are
  * served by the host adapter, but neither can be dropped: the manager publishes
- * events only through its constructor's `onEvent` callback, so without a
- * per-capture subscription a backend has no event stream and could only report
- * a constant `completedToolCount`; and `resolveRemoteTarget` lives in
+ * events only through its constructor's `onEvent` callback, so without the
+ * adapter's per-capture routing a backend has no event stream and could only
+ * report a constant `completedToolCount`; and `resolveRemoteTarget` lives in
  * teammate's config module, so without `resolveTargetDriver` a backend cannot
  * check a registration's declared driver against the target's real one.
  */
@@ -118,9 +125,24 @@ export interface RemoteWorkerManagerLike {
   readonly monitorOwnerNonce: string;
   /** The driver the remote configuration really resolves for a target, so a registration's declaration can be checked against it. */
   resolveTargetDriver(targetId: string): RemoteDriverId;
-  start(request: RemoteWorkerStartRequest): Promise<RemoteRunCapture>;
-  /** Subscribe to one captured run's event stream; the returned function unsubscribes. */
-  subscribe(capture: RemoteRunCapture, listener: (event: RemoteRunEvent) => void): () => void;
+  /**
+   * Start one run with its event listener already attached.
+   *
+   * The listener is a parameter rather than a later `subscribe(capture, ...)`
+   * call because there is no instant between the two at which a listener could
+   * attach without loss. A worker's `run/*` notifications and its start reply
+   * can arrive in the same transport chunk; the manager then buffers those
+   * notifications as orphans and replays them while it admits the run, which
+   * happens inside this call. A run short enough to fit entirely in that chunk
+   * would lose its `run/result` as well, and the fold reads a result-less
+   * stream as a completed run with no messages and exit code 0 — a failure
+   * reported as a success.
+   *
+   * @param request - the run to start.
+   * @param onEvent - receives every event of this run, replayed ones first, in wire order.
+   * @returns the ownership capture and the handle that detaches `onEvent`.
+   */
+  start(request: RemoteWorkerStartRequest, onEvent: (event: RemoteRunEvent) => void): Promise<RemoteStartedRun>;
   send(capture: RemoteRunCapture, mode: RemoteInputMode, message: string, commandId?: string): Promise<RemoteRunInputResult>;
   cancel(capture: RemoteRunCapture, reason?: string, commandId?: string): Promise<RemoteRunCancelResult>;
   wait(capture: RemoteRunCapture, options?: RemoteWorkerWaitOptions): Promise<RemoteRunSnapshot>;

@@ -12,6 +12,7 @@ import type {
   RemoteRunEvent,
   RemoteRunInputResult,
   RemoteRunSnapshot,
+  RemoteStartedRun,
   RemoteTerminalStatus,
   RemoteWorkerManagerLike,
   RemoteWorkerStartRequest,
@@ -53,8 +54,19 @@ class FakeRemoteManager implements RemoteWorkerManagerLike {
   feed: readonly EventSeed[] = [];
   settleStatus: RemoteRunSnapshot["status"] = "completed";
   sendResult: RemoteRunInputResult | Error = { accepted: true, effectiveMode: "follow_up", receipt: "queued" };
+  /**
+   * Events this manager publishes from inside `start`, before it resolves.
+   *
+   * This is the timing a real worker produces whenever its first notifications
+   * share a transport chunk with the start reply: the manager replays them
+   * while admitting the run, so they are published before any caller can hold
+   * the capture. A fake that only ever publishes after `start` settled would
+   * let a backend that subscribes from the returned capture pass.
+   */
+  admitFeed: readonly EventSeed[] = [];
   #listener: ((event: RemoteRunEvent) => void) | undefined;
   #settle: ((snapshot: RemoteRunSnapshot) => void) | undefined;
+  #published = 0;
 
   constructor(private readonly driver: RemoteDriverId) {}
 
@@ -62,15 +74,18 @@ class FakeRemoteManager implements RemoteWorkerManagerLike {
     return this.driver;
   }
 
-  start(request: RemoteWorkerStartRequest): Promise<RemoteRunCapture> {
+  async start(
+    request: RemoteWorkerStartRequest,
+    onEvent: (event: RemoteRunEvent) => void,
+  ): Promise<RemoteStartedRun> {
     this.starts.push(request);
-    return Promise.resolve(CAPTURE);
-  }
-
-  subscribe(_capture: RemoteRunCapture, listener: (event: RemoteRunEvent) => void): () => void {
-    this.#listener = listener;
-    return () => {
-      this.#listener = undefined;
+    this.#listener = onEvent;
+    this.#publish(this.admitFeed);
+    return {
+      capture: CAPTURE,
+      unsubscribe: () => {
+        this.#listener = undefined;
+      },
     };
   }
 
@@ -101,18 +116,28 @@ class FakeRemoteManager implements RemoteWorkerManagerLike {
 
   /** Deliver the programmed stream, then let `wait` settle. */
   settle(): void {
-    for (const [index, seed] of this.feed.entries()) {
+    this.#publish(this.feed);
+    this.#settle?.(this.snapshot());
+  }
+
+  /**
+   * Publish one scripted batch, continuing this run's sequence numbering.
+   *
+   * @param seeds - the payloads to publish, in order.
+   */
+  #publish(seeds: readonly EventSeed[]): void {
+    for (const seed of seeds) {
+      this.#published += 1;
       this.#listener?.({
         workerId: CAPTURE.workerId,
         instanceNonce: CAPTURE.instanceNonce,
         runId: CAPTURE.runId,
         generation: CAPTURE.generation,
-        sequence: index + 1,
-        updatedAt: 1_000 + index,
+        sequence: this.#published,
+        updatedAt: 1_000 + this.#published,
         ...seed,
       } as RemoteRunEvent);
     }
-    this.#settle?.(this.snapshot());
   }
 
   snapshot(): RemoteRunSnapshot {
@@ -123,7 +148,7 @@ class FakeRemoteManager implements RemoteWorkerManagerLike {
       generation: CAPTURE.generation,
       targetId: CAPTURE.targetId,
       status: this.settleStatus,
-      lastSequence: this.feed.length,
+      lastSequence: this.admitFeed.length + this.feed.length,
       updatedAt: 2_000,
     };
   }
@@ -308,6 +333,38 @@ test("a run whose stream ended without a result is not reported as reclaimed", a
   assert.equal(outcome.result.terminalStatus, "failed");
   const reclamation = await outcome.reclamation;
   assert.equal(reclamation.status, "unreaped");
+});
+
+test("a whole run published during admission still folds into the settled outcome", async () => {
+  const seen: Record<string, unknown>[] = [];
+  const manager = new FakeRemoteManager("pi-rpc");
+  // Every event of this run reaches the manager before the start reply does —
+  // the shape a worker produces when its notifications and the reply share one
+  // transport chunk, and the manager replays them while admitting the run.
+  manager.admitFeed = [
+    { type: "run/event", event: { type: "tool", tool: { toolCallId: "a", toolName: "read", phase: "start" } } },
+    { type: "run/event", event: { type: "tool", tool: { toolCallId: "a", toolName: "read", phase: "end" } } },
+    { type: "run/event", event: { type: "usage", usage: { inputTokens: 11, outputTokens: 4 } } },
+    { type: "run/result", status: "completed", result: "the deploy is clean" },
+  ];
+  const backend = createRemoteBackend(() => manager);
+  const run = await backend.start(
+    SPEC,
+    { ...optionsOf({ targetId: "beta", driver: "pi-rpc" }), onChildEvent: (event) => seen.push(event) },
+  );
+  manager.settle();
+  const outcome = await run.outcome;
+
+  // Each of these reads a different field of the fold, and a listener attached
+  // after the capture came back loses all four at once: the run reports no
+  // tools, no tokens, no messages, and — because the terminal statement is
+  // gone with the rest — a failure-shaped run that settled as completed.
+  assert.equal(outcome.recovery.completedToolCount, 1);
+  assert.equal(outcome.result.usage?.inputTokens, 11);
+  assert.equal(outcome.result.messages[0]?.content, "the deploy is clean");
+  assert.equal(outcome.recovery.settlementAuthority, "authoritative");
+  assert.equal((await outcome.reclamation).status, "reclaimed");
+  assert.equal(seen.length, 4, "the host never saw the events replayed during admission");
 });
 
 test("the backend names the run it started and forwards every event to the host", async () => {

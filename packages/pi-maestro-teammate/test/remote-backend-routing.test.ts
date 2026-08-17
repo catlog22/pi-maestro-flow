@@ -10,6 +10,7 @@ import type {
   RemoteInputMode,
   RemoteRunCancelResult,
   RemoteRunInputResult,
+  RemoteStartedRun,
   RemoteWorkerManagerLike,
   RemoteWorkerStartRequest,
 } from "pi-maestro-backends/remote";
@@ -71,15 +72,17 @@ class FakeRemoteManager implements RemoteWorkerManagerLike {
     return this.driver;
   }
 
-  start(request: RemoteWorkerStartRequest): Promise<RemoteRunCapture> {
+  async start(
+    request: RemoteWorkerStartRequest,
+    onEvent: (event: RemoteRunEvent) => void,
+  ): Promise<RemoteStartedRun> {
     this.starts.push(request);
-    return Promise.resolve(CAPTURE);
-  }
-
-  subscribe(_capture: RemoteRunCapture, listener: (event: RemoteRunEvent) => void): () => void {
-    this.#listener = listener;
-    return () => {
-      this.#listener = undefined;
+    this.#listener = onEvent;
+    return {
+      capture: CAPTURE,
+      unsubscribe: () => {
+        this.#listener = undefined;
+      },
     };
   }
 
@@ -95,8 +98,10 @@ class FakeRemoteManager implements RemoteWorkerManagerLike {
   /**
    * Publish the scripted stream, then settle.
    *
-   * Deferred to a later tick so the backend's subscription is already in place,
-   * which is also the order a real manager delivers in.
+   * Deferred to a later tick, which is the ordinary case: a run whose events
+   * arrive while it is running rather than all at once during admission. The
+   * admission-time ordering is a real manager's job to reproduce, and the test
+   * that covers it drives one.
    *
    * @returns the terminal snapshot.
    */
@@ -194,16 +199,25 @@ test("a task located at remote beta resolves the remote registration and settles
   assert.equal(result.messages[0]?.content, "the deploy is clean");
 });
 
-test("a monitor event reaches both the session recorder and the backend subscriber", () => {
-  const manager = new FakeRemoteManager("pi-rpc");
-  const binding = createRemoteManagerPort(manager as unknown as RemoteWorkerManager);
+test("a monitor event reaches both the session recorder and the backend subscriber", async () => {
+  // The real manager's shape, not the port's: `createRemoteManagerPort` adapts
+  // one into the other, so handing it a port-shaped fake would have it read a
+  // `{ capture, unsubscribe }` pair where a capture belongs.
+  const manager = {
+    monitorOwnerNonce: CAPTURE.monitorOwnerNonce,
+    start: async () => CAPTURE,
+  } as unknown as RemoteWorkerManager;
+  const binding = createRemoteManagerPort(manager);
   const recorded: [RemoteRunCapture, RemoteRunEvent][] = [];
   const delivered: RemoteRunEvent[] = [];
   const onEvent = remoteMonitorEventSink(
     (capture, event) => binding.publish(capture, event),
     (capture, event) => recorded.push([capture, event]),
   );
-  binding.port.subscribe(CAPTURE, (event) => delivered.push(event));
+  await binding.port.start(
+    { targetId: "beta", name: "prober", objective: "audit" },
+    (event) => delivered.push(event),
+  );
 
   const event: RemoteRunEvent = {
     workerId: CAPTURE.workerId,

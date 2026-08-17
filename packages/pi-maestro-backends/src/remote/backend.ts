@@ -193,7 +193,12 @@ export function createRemoteBackend(managerOf: RemoteManagerFactory): TeammateBa
         ? `${base}\n${structuredOutputInstruction(spec.outputSchema)}`
         : base;
 
-      const capture = await manager.start({
+      // Collected outside the outcome closure because the listener that fills
+      // it is attached by `start` itself: the manager replays a worker's
+      // buffered notifications while admitting the run, so a listener the
+      // backend attached from the returned capture would already be too late.
+      const events: RemoteRunEvent[] = [];
+      const { capture, unsubscribe } = await manager.start({
         targetId,
         name: spec.name ?? spec.agent,
         objective,
@@ -201,6 +206,9 @@ export function createRemoteBackend(managerOf: RemoteManagerFactory): TeammateBa
           ? { outputSchema: spec.outputSchema }
           : {}),
         ...(options.signal ? { signal: options.signal } : {}),
+      }, (event) => {
+        events.push(event);
+        options.onChildEvent?.({ ...event });
       });
 
       let settled = false;
@@ -211,15 +219,6 @@ export function createRemoteBackend(managerOf: RemoteManagerFactory): TeammateBa
       let turns = 1;
 
       const outcome = (async (): Promise<AttemptOutcome> => {
-        const events: RemoteRunEvent[] = [];
-        // The whole capture tuple stays in this closure. A `BackendRun` carries
-        // only a correlation id, but the manager's ownership fence is the six
-        // fields below, and a subscription keyed on anything less would accept a
-        // stale reply from a superseded Monitor term.
-        const unsubscribe = manager.subscribe(capture, (event) => {
-          events.push(event);
-          options.onChildEvent?.({ ...event });
-        });
         let snapshot: RemoteRunSnapshot;
         let disconnectedBeforeResult = false;
         try {

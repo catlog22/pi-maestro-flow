@@ -27,6 +27,7 @@ import {
 import {
   REMOTE_CONFIG_VERSION,
   REMOTE_PROTOCOL_VERSION,
+  type RemoteDriverEvent,
   type RemoteRunCapture,
   type RemoteRunEvent,
   type RemoteRunSnapshot,
@@ -35,6 +36,11 @@ import {
   type ResolvedRemoteTarget,
 } from "../src/remote/types.ts";
 import type { RemoteConfig } from "../src/remote/config.ts";
+import { createRemoteBackend } from "pi-maestro-backends/remote";
+import {
+  createRemoteManagerPort,
+  type RemoteManagerPortBinding,
+} from "../src/backends/remote-workers.ts";
 
 const HOST_KEY = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
@@ -533,5 +539,78 @@ test("failed local admission rolls back the exact remote run once", async () => 
   assert.equal(connection.cancels[0].runId, "rollback-run");
   assert.equal(connection.cancels[0].generation, 4);
   assert.equal(manager.snapshots().length, 0);
+  await manager.close();
+});
+
+test("a run whose events shared a chunk with the start reply still folds into the backend outcome", async () => {
+  const connection = new FakeConnection();
+  const capture: RemoteRunCapture = {
+    workerId: "worker-a",
+    instanceNonce: "instance-a",
+    runId: "run-1",
+    generation: 1,
+    monitorOwnerNonce: "monitor-owner",
+    targetId: "linux-a/pi",
+  };
+  const driverEvent = (sequence: number, event: RemoteDriverEvent): RemoteRunEvent => ({
+    type: "run/event",
+    workerId: capture.workerId,
+    instanceNonce: capture.instanceNonce,
+    runId: capture.runId,
+    generation: capture.generation,
+    sequence,
+    event,
+    updatedAt: sequence * 10,
+  });
+  // The whole run arrives before its own start reply does. A gateway writes the
+  // reply and the notifications that follow it into the same SSH chunk, and the
+  // line decoder dispatches every record in that chunk synchronously, so the
+  // pump has already buffered these as orphans by the time `run/start` settles
+  // — and the manager replays them while admitting the run, inside `start`.
+  connection.onStart = async () => {
+    connection.emit(driverEvent(1, { type: "tool", tool: { toolCallId: "a", toolName: "read", phase: "start" } }));
+    connection.emit(driverEvent(2, { type: "tool", tool: { toolCallId: "a", toolName: "read", phase: "end" } }));
+    connection.emit({
+      type: "run/result",
+      workerId: capture.workerId,
+      instanceNonce: capture.instanceNonce,
+      runId: capture.runId,
+      generation: capture.generation,
+      sequence: 3,
+      status: "completed",
+      updatedAt: 30,
+      result: "the deploy is clean",
+    });
+    await eventually(() => connection.queue.items.length === 0);
+  };
+
+  let binding: RemoteManagerPortBinding;
+  const manager = managerFor(new FakeConnectionFactory(connection), {
+    onEvent: (published, event) => binding.publish(published, event),
+  });
+  binding = createRemoteManagerPort(manager);
+  const backend = createRemoteBackend(() => binding.port);
+  const seen: Record<string, unknown>[] = [];
+
+  const run = await backend.start(
+    { agent: "prober", task: "audit the deploy" },
+    {
+      correlationId: "corr-1",
+      baseCwd: process.cwd(),
+      host: {},
+      config: { targetId: "linux-a/pi", driver: "pi-rpc" },
+      onChildEvent: (event) => seen.push(event),
+    },
+  );
+  const outcome = await run.outcome;
+
+  assert.equal(outcome.result.messages[0]?.content, "the deploy is clean");
+  assert.equal(outcome.result.toolCount, 1);
+  assert.equal(outcome.recovery.completedToolCount, 1);
+  assert.equal(outcome.recovery.settlementAuthority, "authoritative");
+  assert.equal(outcome.result.terminalStatus, "completed");
+  assert.equal(outcome.result.exitCode, 0);
+  assert.deepEqual(await outcome.reclamation, { status: "reclaimed" });
+  assert.equal(seen.length, 3, "the host never saw the events replayed during admission");
   await manager.close();
 });
