@@ -33,7 +33,7 @@ export declare const TeammateParams: Type.TObject<{
     mode: Type.TOptional<Type.TUnsafe<"default" | "expert">>;
     agent: Type.TOptional<Type.TString>;
     taskType: Type.TOptional<Type.TString>;
-    reply_to: Type.TOptional<Type.TUnsafe<"main" | "caller">>;
+    reply_to: Type.TOptional<Type.TUnsafe<"caller" | "main">>;
     tasks: Type.TArray<Type.TObject<{
         prompt: Type.TString;
         description: Type.TOptional<Type.TString>;
@@ -117,8 +117,8 @@ export declare const LocalObserveParams: Type.TUnsafe<{
     turn?: number | undefined;
     action: "status" | "wait" | "watch";
     targets: {
-        id: string;
         kind: string;
+        id: string;
     }[];
 }>;
 export declare const TeammateMonitorParams: Type.TObject<{
