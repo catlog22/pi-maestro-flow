@@ -20,7 +20,6 @@ import type {
 import {
   REMOTE_MAX_LINE_BYTES,
   REMOTE_MAX_OBJECTIVE_BYTES,
-  type RemoteRunAttachParams,
   type RemoteRunCancelParams,
   type RemoteRunCancelResult,
   type RemoteRunInputParams,
@@ -728,24 +727,6 @@ export class PiRpcDriver implements RemoteDriver {
       }, { once: true });
     }
     return handle;
-  }
-
-  async attach(request: RemoteRunAttachParams, context: RemoteDriverContext): Promise<RemoteRunHandle> {
-    const handle = this.#handles.get(request.runId);
-    if (!handle
-      || handle.capture.generation !== request.generation
-      || handle.capture.monitorOwnerNonce !== request.monitorOwnerNonce
-      || handle.capture.workerId !== context.workerId
-      || handle.capture.instanceNonce !== context.instanceNonce) {
-      throw new Error("Pi RPC run is not owned by this driver instance");
-    }
-    return handle;
-  }
-
-  async list(context: RemoteDriverContext): Promise<readonly RemoteRunSnapshot[]> {
-    return [...this.#handles.values()]
-      .filter((handle) => handle.capture.workerId === context.workerId && handle.capture.instanceNonce === context.instanceNonce)
-      .map((handle) => handle.snapshot());
   }
 
   async close(): Promise<void> {

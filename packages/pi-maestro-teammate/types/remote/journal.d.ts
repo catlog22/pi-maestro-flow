@@ -1,6 +1,6 @@
 import type { RemoteRunStartParams } from "./protocol.ts";
 import { type RemoteRunCapture, type RemoteRunEvent, type RemoteRunSnapshot, type RemoteWorkerIdentity } from "./types.ts";
-export declare const REMOTE_JOURNAL_VERSION: 1;
+export declare const REMOTE_JOURNAL_VERSION: 2;
 export declare const REMOTE_MAX_JOURNAL_EVENTS = 50000;
 export declare const REMOTE_MAX_JOURNAL_BYTES: number;
 export declare const REMOTE_MAX_COMMAND_RECORDS = 4096;
@@ -10,7 +10,6 @@ export interface RemoteJournalRunRecord {
     version: typeof REMOTE_JOURNAL_VERSION;
     capture: RemoteRunCapture;
     request: RemoteRunStartParams;
-    capabilities: readonly string[];
     snapshot: RemoteRunSnapshot;
     createdAt: number;
     updatedAt: number;
@@ -40,7 +39,7 @@ export declare class RemoteRunJournal {
     readonly identity: RemoteWorkerIdentity;
     constructor(stateDirectory?: string);
     static fingerprint(method: string, params: unknown): string;
-    createRun(capture: RemoteRunCapture, request: RemoteRunStartParams, capabilities?: readonly string[], now?: number): RemoteJournalRunRecord;
+    createRun(capture: RemoteRunCapture, request: RemoteRunStartParams, now?: number): RemoteJournalRunRecord;
     getRun(runId: string): RemoteJournalRunRecord | undefined;
     listRuns(monitorOwnerNonce?: string): RemoteJournalRunRecord[];
     appendEvent(capture: RemoteRunCapture, event: RemoteRunEvent): RemoteJournalRunRecord;

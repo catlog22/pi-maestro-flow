@@ -16,7 +16,7 @@ import {
   type RemoteWorkerIdentity,
 } from "./types.ts";
 
-export const REMOTE_JOURNAL_VERSION = 1 as const;
+export const REMOTE_JOURNAL_VERSION = 2 as const;
 export const REMOTE_MAX_JOURNAL_EVENTS = 50_000;
 export const REMOTE_MAX_JOURNAL_BYTES = 64 * 1024 * 1024;
 export const REMOTE_MAX_COMMAND_RECORDS = 4096;
@@ -32,7 +32,6 @@ export interface RemoteJournalRunRecord {
   version: typeof REMOTE_JOURNAL_VERSION;
   capture: RemoteRunCapture;
   request: RemoteRunStartParams;
-  capabilities: readonly string[];
   snapshot: RemoteRunSnapshot;
   createdAt: number;
   updatedAt: number;
@@ -163,20 +162,6 @@ function parseCapture(value: unknown): RemoteRunCapture {
     monitorOwnerNonce: requiredString(record.monitorOwnerNonce, "capture monitorOwnerNonce", 128),
     targetId: requiredString(record.targetId, "capture targetId", 128),
   };
-}
-
-/**
- * A persistence residue left by remote/1.
- *
- * Kept only so an existing version-1 record still parses, until the field is
- * removed together with the journal version bump.
- *
- * @param value - the raw field read off disk.
- * @returns the stored strings, bounded in count and length.
- */
-function parsePersistedCapabilityResidue(value: unknown): string[] {
-  if (!Array.isArray(value) || value.length > 32) throw new Error("Invalid remote run capabilities");
-  return value.map((entry) => requiredString(entry, "remote run capability", 128));
 }
 
 function parseStartRequest(value: unknown): RemoteRunStartParams {
@@ -371,7 +356,12 @@ function sanitizeEvent(event: RemoteRunEvent): RemoteRunEvent {
 
 function parseRunRecord(value: unknown): RemoteJournalRunRecord {
   const record = objectRecord(value, "remote run metadata");
-  if (record.version !== REMOTE_JOURNAL_VERSION) throw new Error("Invalid remote run metadata version");
+  if (record.version !== REMOTE_JOURNAL_VERSION) {
+    throw new Error(
+      `Unsupported remote run metadata version ${String(record.version)}; `
+      + `this daemon writes remote journal version ${REMOTE_JOURNAL_VERSION}`,
+    );
+  }
   const capture = parseCapture(record.capture);
   const request = parseStartRequest(record.request);
   const snapshot = parseSnapshot(record.snapshot);
@@ -384,7 +374,6 @@ function parseRunRecord(value: unknown): RemoteJournalRunRecord {
     version: REMOTE_JOURNAL_VERSION,
     capture,
     request,
-    capabilities: parsePersistedCapabilityResidue(record.capabilities),
     snapshot,
     createdAt: safeInteger(record.createdAt, "run createdAt"),
     updatedAt: safeInteger(record.updatedAt, "run updatedAt"),
@@ -393,7 +382,12 @@ function parseRunRecord(value: unknown): RemoteJournalRunRecord {
 
 function parseCommandRecord(value: unknown): RemoteStoredCommand {
   const record = objectRecord(value, "remote command record");
-  if (record.version !== REMOTE_JOURNAL_VERSION) throw new Error("Invalid remote command version");
+  if (record.version !== REMOTE_JOURNAL_VERSION) {
+    throw new Error(
+      `Unsupported remote command version ${String(record.version)}; `
+      + `this daemon writes remote journal version ${REMOTE_JOURNAL_VERSION}`,
+    );
+  }
   if (record.state !== "pending" && record.state !== "completed") throw new Error("Invalid remote command state");
   const base = {
     version: REMOTE_JOURNAL_VERSION,
@@ -443,7 +437,12 @@ export class RemoteRunJournal {
     let workerId: string;
     try {
       const value = objectRecord(readBoundedJson(workerFile), "remote worker identity");
-      if (value.version !== REMOTE_JOURNAL_VERSION) throw new Error("Invalid remote worker identity version");
+      if (value.version !== REMOTE_JOURNAL_VERSION) {
+        throw new Error(
+          `Unsupported remote worker identity version ${String(value.version)}; `
+          + `this daemon writes remote journal version ${REMOTE_JOURNAL_VERSION}`,
+        );
+      }
       workerId = requiredString(value.workerId, "remote worker id", 128);
     } catch (error) {
       if (!isMissing(error)) throw error;
@@ -461,7 +460,6 @@ export class RemoteRunJournal {
   createRun(
     capture: RemoteRunCapture,
     request: RemoteRunStartParams,
-    capabilities: readonly string[] = [],
     now = Date.now(),
   ): RemoteJournalRunRecord {
     if (capture.workerId !== this.identity.workerId || capture.instanceNonce !== this.identity.instanceNonce) {
@@ -476,7 +474,6 @@ export class RemoteRunJournal {
       version: REMOTE_JOURNAL_VERSION,
       capture: { ...capture },
       request: { ...request, command: [...request.command] as [string, ...string[]] },
-      capabilities: [...capabilities],
       snapshot: createRemoteRunSnapshot(capture, "connecting", now),
       createdAt: now,
       updatedAt: now,

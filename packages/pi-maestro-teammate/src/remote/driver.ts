@@ -44,8 +44,6 @@ export interface RemoteRunHandle {
 export interface RemoteDriver {
   readonly id: RemoteDriverId;
   start(request: RemoteRunStartParams, context: RemoteDriverContext): Promise<RemoteRunHandle>;
-  attach(request: RemoteRunAttachParams, context: RemoteDriverContext): Promise<RemoteRunHandle>;
-  list(context: RemoteDriverContext): Promise<readonly RemoteRunSnapshot[]>;
   close(): Promise<void>;
 }
 

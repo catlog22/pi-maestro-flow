@@ -28,7 +28,7 @@ function createRun(journal: RemoteRunJournal, runId: string): RemoteRunCapture {
     monitorOwnerNonce: "owner-a",
     targetId: "linux-a/pi",
   };
-  journal.createRun(capture, request(`start-${runId}`, runId), []);
+  journal.createRun(capture, request(`start-${runId}`, runId));
   return capture;
 }
 
@@ -174,6 +174,55 @@ test("journal validates metadata and removes environment secret markers from per
   } finally {
     if (previous === undefined) delete process.env[name];
     else process.env[name] = previous;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a version-1 remote state directory refuses to open and the error names both journal versions", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-journal-v1-worker-"));
+  try {
+    fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(
+      path.join(root, "worker.json"),
+      JSON.stringify({ version: 1, workerId: "legacy-worker" }),
+      "utf8",
+    );
+
+    assert.throws(
+      () => new RemoteRunJournal(root),
+      (error: unknown) => error instanceof Error
+        && error.message.includes("version 1")
+        && error.message.includes("version 2"),
+    );
+    // The identity file is read before anything else and its rejection escapes
+    // the constructor, so the interrupted-run sweep never runs: an operator who
+    // sees this error still has every byte of the old directory to move aside.
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(path.join(root, "worker.json"), "utf8")),
+      { version: 1, workerId: "legacy-worker" },
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a version-1 run record is quarantined instead of silently dropped", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-journal-v1-run-"));
+  try {
+    const first = new RemoteRunJournal(root);
+    createRun(first, "legacy-run");
+    const metadataPath = path.join(runDirectory(root, "legacy-run"), "metadata.json");
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as { version: number };
+    metadata.version = 1;
+    fs.writeFileSync(metadataPath, JSON.stringify(metadata), "utf8");
+
+    const second = new RemoteRunJournal(root);
+
+    assert.equal(second.listRuns().some((record) => record.capture.runId === "legacy-run"), false);
+    assert.equal(second.getRun("legacy-run"), undefined);
+    // Moved aside rather than deleted: the refusal keeps its evidence.
+    assert.equal(fs.readdirSync(path.join(root, "corrupt-runs")).length, 1);
+  } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

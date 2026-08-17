@@ -321,7 +321,7 @@ test("ACP driver forwards declared target env names from the daemon environment"
   }
 });
 
-test("ACP driver uses stable v1 init/new/prompt, streams normalized events, and cleans up", async () => {
+test("ACP driver uses stable v1 init/new/prompt and streams normalized events", async () => {
   const root = canonicalTempRoot("pi-acp-normal-");
   const script = writeFakeAgent(root);
   const configured = target(root, script, "normal");
@@ -330,12 +330,6 @@ test("ACP driver uses stable v1 init/new/prompt, streams normalized events, and 
     const handle = await start(driver, configured);
     const events = await collectEvents(handle);
     await handle.close();
-    assert.equal((await driver.list({
-      workerId: "worker-1",
-      instanceNonce: "instance-1",
-      target: configured,
-      signal: new AbortController().signal,
-    })).length, 0);
     assert.equal(events.at(-1).status, "completed");
     assert.equal(events.at(-1).result, "hello done");
     assert.equal(events.at(-1).nativeStatus, "end_turn");

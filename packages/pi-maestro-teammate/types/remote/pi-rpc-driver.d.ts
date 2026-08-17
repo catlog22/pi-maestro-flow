@@ -1,7 +1,6 @@
 import { type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from "node:child_process";
 import type { RemoteDriver, RemoteDriverContext, RemoteRunHandle } from "./driver.ts";
-import { type RemoteRunAttachParams, type RemoteRunStartParams } from "./protocol.ts";
-import type { RemoteRunSnapshot } from "./types.ts";
+import { type RemoteRunStartParams } from "./protocol.ts";
 export declare const PI_RPC_STDERR_LIMIT: number;
 export declare const PI_RPC_EVENT_TEXT_LIMIT: number;
 export declare const PI_RPC_RESULT_LIMIT: number;
@@ -23,8 +22,6 @@ export declare class PiRpcDriver implements RemoteDriver {
     readonly id: "pi-rpc";
     constructor(options?: PiRpcDriverOptions);
     start(request: RemoteRunStartParams, context: RemoteDriverContext): Promise<RemoteRunHandle>;
-    attach(request: RemoteRunAttachParams, context: RemoteDriverContext): Promise<RemoteRunHandle>;
-    list(context: RemoteDriverContext): Promise<readonly RemoteRunSnapshot[]>;
     close(): Promise<void>;
 }
 export {};

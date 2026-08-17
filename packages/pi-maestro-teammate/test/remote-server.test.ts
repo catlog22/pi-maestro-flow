@@ -121,14 +121,6 @@ class TestDriver implements RemoteDriver {
     return handle;
   }
 
-  async attach(): Promise<RemoteRunHandle> {
-    throw new Error("Attach is not used by this test driver");
-  }
-
-  async list() {
-    return [];
-  }
-
   async close(): Promise<void> {
     await Promise.all(this.handles.map((handle) => handle.close()));
   }
