@@ -117,6 +117,7 @@ class FakeConnection implements RemoteConnection {
   hello: RemoteInitializeResult;
   listResult: RemoteRunListResult = { runs: [] };
   nextStart?: RemoteRunStartResult;
+  onInitialize?: (params: RemoteInitializeParams) => Promise<void> | void;
   onStart?: (params: RemoteRunStartParams) => Promise<void> | void;
   onAttach?: (params: RemoteRunAttachParams) => Promise<void> | void;
   onList?: () => Promise<void> | void;
@@ -134,6 +135,7 @@ class FakeConnection implements RemoteConnection {
 
   async initialize(params: RemoteInitializeParams): Promise<RemoteInitializeResult> {
     this.initializeCalls.push(params);
+    await this.onInitialize?.(params);
     this.identity = { workerId: this.hello.workerId, instanceNonce: this.hello.instanceNonce };
     this.status = this.hello.status;
     return this.hello;
@@ -612,5 +614,50 @@ test("a run whose events shared a chunk with the start reply still folds into th
   assert.equal(outcome.result.exitCode, 0);
   assert.deepEqual(await outcome.reclamation, { status: "reclaimed" });
   assert.equal(seen.length, 3, "the host never saw the events replayed during admission");
+  await manager.close();
+});
+
+test("a v1 daemon handshake failure names both protocol versions and the target host", async () => {
+  const connection = new FakeConnection();
+  // Exactly what a remote/1 daemon answers a remote/2 host: its parameter
+  // validation rejects the absent `capabilities` array before the version check
+  // that would have named remote/1 ever runs, so -32602 is all the operator gets.
+  connection.onInitialize = () => {
+    const refusal: Error & { code?: number } = new Error("Invalid capabilities");
+    refusal.name = "RemoteRpcResponseError";
+    refusal.code = -32602;
+    throw refusal;
+  };
+  const manager = managerFor(new FakeConnectionFactory(connection));
+
+  await assert.rejects(manager.connect("linux-a/pi"), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    const { message } = error;
+    assert.ok(message.includes("linux-a"), `the target host is missing from: ${message}`);
+    assert.ok(message.includes("remote/2"), `the local monitor's version is missing from: ${message}`);
+    assert.ok(message.includes("remote/1"), `the daemon's suspected version is missing from: ${message}`);
+    assert.ok(
+      message.includes("Upgrade pi-teammate-remote on linux-a and restart serve"),
+      `the remediation is missing from: ${message}`,
+    );
+    assert.equal((error.cause as Error | undefined)?.message, "Invalid capabilities");
+    return true;
+  });
+  assert.equal(connection.closed, true, "the refused connection is still closed");
+  await manager.close();
+});
+
+test("a hello whose protocol version differs is refused by validateHello", async () => {
+  const connection = new FakeConnection();
+  // Every other field stays valid, so the version disjunct is the only thing in
+  // validateHello that can refuse this hello.
+  connection.hello = {
+    ...connection.hello,
+    protocolVersion: "remote/1" as unknown as typeof REMOTE_PROTOCOL_VERSION,
+  };
+  const manager = managerFor(new FakeConnectionFactory(connection));
+
+  await assert.rejects(manager.connect("linux-a/pi"), /Invalid remote worker hello/);
+  assert.equal(connection.closed, true, "the refused connection is still closed");
   await manager.close();
 });

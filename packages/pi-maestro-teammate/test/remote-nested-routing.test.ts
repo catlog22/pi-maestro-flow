@@ -174,33 +174,35 @@ test("a nested dispatch to a remote location is refused by name instead of runni
   // does not open nested remote dispatch, and a task that named another machine
   // must fail rather than run on this one.
   let spawned = 0;
-  let text: string;
   try {
-    const result = await runSingleTeammate(
-      { agent: "prober", task: "nested work", cwd: "remote:beta" },
-      {
-        baseCwd: root,
-        spawnChildProcess: ((): never => {
-          spawned += 1;
-          throw new Error("a remote task must never spawn a local child");
-        }) as never,
+    // The refusal is a rejection, not a failed `SingleResult`: the registry
+    // cannot load the registration at all, so no run exists to report an exit
+    // code. Accepting either shape would let that regress unnoticed.
+    await assert.rejects(
+      runSingleTeammate(
+        { agent: "prober", task: "nested work", cwd: "remote:beta" },
+        {
+          baseCwd: root,
+          spawnChildProcess: ((): never => {
+            spawned += 1;
+            throw new Error("a remote task must never spawn a local child");
+          }) as never,
+        },
+      ),
+      (error: unknown) => {
+        // The whole cause chain counts as the refusal's text: the registry wraps
+        // a load failure and names the registration, while the reason it could
+        // not be loaded travels on `cause`.
+        const text = errorChain(error);
+        assert.match(text, /remote-workers/);
+        assert.match(text, /remote Monitor wiring/);
+        return true;
       },
     );
-    assert.equal(result.exitCode, 1);
-    text = result.messages.map((message) => message.content).join("\n");
-  } catch (error) {
-    // Both shapes are acceptable — a rejection and a failed result say the same
-    // thing — so the assertion below reads whichever arrived. The whole cause
-    // chain counts as the refusal's text: the registry wraps a load failure and
-    // names the registration, while the reason it could not be loaded travels
-    // on `cause`.
-    text = errorChain(error);
   } finally {
     forgetBackendRegistryConfigSync(root);
   }
 
-  assert.match(text, /remote-workers/);
-  assert.match(text, /remote Monitor wiring/);
   assert.equal(spawned, 0, "a remote task started a local child instead of failing by name");
 });
 

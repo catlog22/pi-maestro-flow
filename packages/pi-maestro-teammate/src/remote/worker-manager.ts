@@ -153,6 +153,31 @@ function validateHello(value: RemoteInitializeResult): void {
   }
 }
 
+/** The protocol version an unupgraded `pi-teammate-remote` daemon still speaks. */
+const LEGACY_REMOTE_PROTOCOL_VERSION = "remote/1";
+
+// A `remote/1` daemon refuses a `remote/2` handshake before it ever reaches its
+// own version check: parameter validation runs first and demands the
+// `capabilities` array this host stopped sending, so the operator is handed
+// `-32602 Invalid capabilities` instead of the `-32002` refusal that names both
+// versions. Read both codes as version skew — `-32002` is the same failure once
+// the daemon is new enough to diagnose itself.
+function isVersionSkewRefusal(error: unknown): error is Error {
+  if (!(error instanceof Error)) return false;
+  const code = (error as { code?: unknown }).code;
+  return code === -32002 || (code === -32602 && error.message.includes("capabilities"));
+}
+
+function versionSkewDiagnostic(host: string, error: Error): Error {
+  return new Error(
+    `Remote handshake with ${host} failed: the local monitor speaks ${REMOTE_PROTOCOL_VERSION}`
+    + ` and the daemon on ${host} answered like a ${LEGACY_REMOTE_PROTOCOL_VERSION} daemon.`
+    + ` Upgrade pi-teammate-remote on ${host} and restart serve, then retry.`
+    + ` Remote reply: ${error.message}`,
+    { cause: error },
+  );
+}
+
 function validateStartResult(value: RemoteRunStartResult): void {
   if (!validIdentity(value.workerId)
     || !validIdentity(value.instanceNonce)
@@ -672,7 +697,7 @@ export class RemoteWorkerManager {
       return binding;
     } catch (error) {
       await connection.close();
-      throw error;
+      throw isVersionSkewRefusal(error) ? versionSkewDiagnostic(target.host, error) : error;
     }
   }
 

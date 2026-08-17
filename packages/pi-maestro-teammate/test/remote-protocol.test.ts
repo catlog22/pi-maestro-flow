@@ -29,7 +29,7 @@ test("remote/2 exposes the approved status contract", () => {
   assert.equal(isRemoteTerminalStatus("disconnected"), false);
 });
 
-test("remote/1 JSON-RPC requests round-trip as one NDJSON record", () => {
+test("remote/2 JSON-RPC requests round-trip as one NDJSON record", () => {
   const request = createRemoteRequest("command-1", "run/input", {
     commandId: "input-1",
     runId: "run-1",
@@ -45,7 +45,7 @@ test("remote/1 JSON-RPC requests round-trip as one NDJSON record", () => {
   assert.equal(request.jsonrpc, REMOTE_JSONRPC_VERSION);
 });
 
-test("remote/1 rejects malformed, multiline, and oversized records", () => {
+test("remote/2 rejects malformed, multiline, and oversized records", () => {
   assert.throws(
     () => parseRemoteEnvelopeLine('{"jsonrpc":"1.0","id":1,"result":{}}'),
     /JSON-RPC 2\.0/,

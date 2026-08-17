@@ -64,6 +64,16 @@ class FakeRemoteManager implements RemoteWorkerManagerLike {
    * let a backend that subscribes from the returned capture pass.
    */
   admitFeed: readonly EventSeed[] = [];
+  /**
+   * When set, `wait` publishes `feed` and then rejects with this error.
+   *
+   * The one shape a closed manager, a dropped connection, and a timed-out wait
+   * share: whatever the stream already delivered stands, and no terminal
+   * snapshot ever arrives on this channel.
+   */
+  waitFailure: Error | undefined = undefined;
+  /** When set, `snapshot` throws it — the manager disowned the run along with its connection. */
+  snapshotFailure: Error | undefined = undefined;
   #listener: ((event: RemoteRunEvent) => void) | undefined;
   #settle: ((snapshot: RemoteRunSnapshot) => void) | undefined;
   #published = 0;
@@ -107,8 +117,14 @@ class FakeRemoteManager implements RemoteWorkerManagerLike {
    * A wait that resolved immediately would close the run's input window before
    * the caller of `start` ever got its `BackendRun`, so every `send` assertion
    * would read a refusal that no product rule produced.
+   *
+   * @returns the terminal snapshot, or a rejection when `waitFailure` is set.
    */
   wait(): Promise<RemoteRunSnapshot> {
+    if (this.waitFailure !== undefined) {
+      this.#publish(this.feed);
+      return Promise.reject(this.waitFailure);
+    }
     return new Promise((resolve) => {
       this.#settle = resolve;
     });
@@ -141,6 +157,7 @@ class FakeRemoteManager implements RemoteWorkerManagerLike {
   }
 
   snapshot(): RemoteRunSnapshot {
+    if (this.snapshotFailure !== undefined) throw this.snapshotFailure;
     return {
       workerId: CAPTURE.workerId,
       instanceNonce: CAPTURE.instanceNonce,
@@ -333,6 +350,107 @@ test("a run whose stream ended without a result is not reported as reclaimed", a
   assert.equal(outcome.result.terminalStatus, "failed");
   const reclamation = await outcome.reclamation;
   assert.equal(reclamation.status, "unreaped");
+});
+
+test("a manager that throws while waiting still folds a snapshot it can still read", async () => {
+  // The remote stated its own settlement on the notification channel, and only
+  // then did the wait fail. A terminal statement is not a release: nothing
+  // confirmed the daemon let the run go, so the attempt stays unreaped and the
+  // host's failover keeps treating the remote runtime as possibly alive.
+  const dropped = new FakeRemoteManager("pi-rpc");
+  dropped.feed = [{ type: "run/result", status: "completed", result: "done" }];
+  dropped.waitFailure = new Error("the remote worker manager is closed");
+  const droppedRun = await createRemoteBackend(() => dropped)
+    .start(SPEC, optionsOf({ targetId: "beta", driver: "pi-rpc" }));
+  const droppedOutcome = await droppedRun.outcome;
+
+  assert.equal(droppedOutcome.result.terminalStatus, "completed");
+  assert.equal(
+    (await droppedOutcome.reclamation).status,
+    "unreaped",
+    "a wait that threw still let the attempt pass as reclaimed",
+  );
+
+  // No terminal statement at all this time, so the snapshot alone decides the
+  // status — and the one the manager can still produce says `cancelled`, which
+  // folds to `terminated`. The synthesized fallback is hardcoded to `lost` and
+  // folds to `failed`, so this value can only have come from the manager.
+  const readable = new FakeRemoteManager("pi-rpc");
+  readable.feed = [{ type: "run/event", event: { type: "text", text: "halfway through" } }];
+  readable.settleStatus = "cancelled";
+  readable.waitFailure = new Error("the wait timed out");
+  const readableRun = await createRemoteBackend(() => readable)
+    .start(SPEC, optionsOf({ targetId: "beta", driver: "pi-rpc" }));
+  const readableOutcome = await readableRun.outcome;
+
+  assert.equal(readableOutcome.result.terminalStatus, "terminated");
+  assert.equal(readableOutcome.result.messages[0]?.content, "halfway through");
+  assert.equal((await readableOutcome.reclamation).status, "unreaped");
+});
+
+test("a manager that disowns the run reports it as lost rather than inventing a result", async () => {
+  const manager = new FakeRemoteManager("pi-rpc");
+  manager.feed = [{ type: "run/event", event: { type: "text", text: "halfway through" } }];
+  manager.waitFailure = new Error("the ssh connection dropped");
+  manager.snapshotFailure = new Error("no such owned run");
+  const run = await createRemoteBackend(() => manager)
+    .start(SPEC, optionsOf({ targetId: "beta", driver: "pi-rpc" }));
+  const outcome = await run.outcome;
+
+  // Nothing is left but the run's identity, and the synthesized snapshot says
+  // `lost`: the attempt settles as a failure that keeps the words the stream
+  // did deliver. The two failure modes this rules out are the dangerous ones —
+  // an outcome that rejects and leaves the host with no attempt at all, and a
+  // fabricated success that would clear the replay fence.
+  assert.equal(outcome.result.terminalStatus, "failed");
+  assert.equal(outcome.result.exitCode, 1);
+  assert.deepEqual(outcome.result.messages, [{ role: "assistant", content: "halfway through" }]);
+  assert.equal(outcome.recovery.settlementAuthority, "unknown");
+  assert.equal(outcome.recovery.externalReplayRisk, true);
+  assert.equal((await outcome.reclamation).status, "unreaped");
+
+  // The same disowning, except the remote had already said it lost the run
+  // itself. Its own statement is the one the verdict reads, and the two
+  // unreaped reasons stay apart: a runtime that may still be acting on the
+  // remote host is a different fault from a channel we stopped watching.
+  const stated = new FakeRemoteManager("pi-rpc");
+  stated.feed = [{ type: "run/result", status: "lost" }];
+  stated.waitFailure = new Error("the ssh connection dropped");
+  stated.snapshotFailure = new Error("no such owned run");
+  const statedRun = await createRemoteBackend(() => stated)
+    .start(SPEC, optionsOf({ targetId: "beta", driver: "pi-rpc" }));
+  const statedOutcome = await statedRun.outcome;
+
+  assert.equal(statedOutcome.result.terminalStatus, "failed");
+  assert.deepEqual(statedOutcome.result.messages, []);
+  const verdict = await statedOutcome.reclamation;
+  assert.equal(verdict.status, "unreaped");
+  assert.match(verdict.status === "unreaped" ? verdict.reason : "", /remote run lost/);
+});
+
+test("a host abort reaches the manager as a cancel and is recorded as native", async () => {
+  const config: Record<string, ConfigValue> = { targetId: "beta", driver: "pi-rpc" };
+  const manager = new FakeRemoteManager("pi-rpc");
+  manager.feed = [{ type: "run/result", status: "cancelled" }];
+  manager.settleStatus = "cancelled";
+  const backend = createRemoteBackend(() => manager);
+  const run = await backend.start(SPEC, optionsOf(config));
+
+  run.abort();
+
+  // The declared capability and the chain that has to back it, in one place:
+  // `native` says the host's abort reaches the manager itself, carrying the
+  // reason the remote records against the cancelled run.
+  assert.equal(backend.capabilities(config).abort, "native");
+  assert.deepEqual(manager.cancels, ["host abort"]);
+  // An aborted run declines further input rather than queueing it behind a
+  // cancel already on the wire.
+  assert.equal(run.send("one more thing", "follow_up"), false);
+  assert.deepEqual(manager.sends, []);
+
+  manager.settle();
+  const outcome = await run.outcome;
+  assert.equal(outcome.result.terminalStatus, "terminated");
 });
 
 test("a whole run published during admission still folds into the settled outcome", async () => {

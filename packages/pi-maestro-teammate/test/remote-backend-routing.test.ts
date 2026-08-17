@@ -243,6 +243,102 @@ test("a monitor event reaches both the session recorder and the backend subscrib
   assert.equal(recorded.length, 2, "the recorder stopped seeing events it must still record");
 });
 
+test("the host port forwards send cancel and snapshot to the manager verbatim", async () => {
+  // The real manager's shape again: these three port members are pure
+  // delegation, so a fake that records its arguments is the only way to see
+  // whether anything was added, dropped, or answered locally.
+  const calls: { method: string; args: readonly unknown[] }[] = [];
+  const sendResult: RemoteRunInputResult = { accepted: true, effectiveMode: "steer", receipt: "injected" };
+  const cancelResult: RemoteRunCancelResult = { accepted: false, status: "running" };
+  const snapshotResult: RemoteRunSnapshot = {
+    workerId: CAPTURE.workerId,
+    instanceNonce: CAPTURE.instanceNonce,
+    runId: CAPTURE.runId,
+    generation: CAPTURE.generation,
+    targetId: CAPTURE.targetId,
+    status: "waiting",
+    lastSequence: 7,
+    updatedAt: 3_000,
+  };
+  const manager = {
+    monitorOwnerNonce: CAPTURE.monitorOwnerNonce,
+    send: (...args: readonly unknown[]) => {
+      calls.push({ method: "send", args });
+      return Promise.resolve(sendResult);
+    },
+    cancel: (...args: readonly unknown[]) => {
+      calls.push({ method: "cancel", args });
+      return Promise.resolve(cancelResult);
+    },
+    snapshot: (...args: readonly unknown[]) => {
+      calls.push({ method: "snapshot", args });
+      return snapshotResult;
+    },
+  } as unknown as RemoteWorkerManager;
+  const { port } = createRemoteManagerPort(manager);
+
+  // Identity, not deep equality: the backend folds the object the manager
+  // returned, so an adapter that rebuilt one would be answering for it.
+  assert.equal(await port.send(CAPTURE, "steer", "change course", "cmd-1"), sendResult);
+  assert.equal(await port.cancel(CAPTURE, "host abort", "cmd-2"), cancelResult);
+  assert.equal(port.snapshot(CAPTURE), snapshotResult);
+
+  assert.deepEqual(calls, [
+    { method: "send", args: [CAPTURE, "steer", "change course", "cmd-1"] },
+    { method: "cancel", args: [CAPTURE, "host abort", "cmd-2"] },
+    { method: "snapshot", args: [CAPTURE] },
+  ]);
+});
+
+test("a start that the manager rejects unsubscribes before rethrowing", async () => {
+  const failure = new Error("the remote host refused the connection");
+  let started = 0;
+  const manager = {
+    monitorOwnerNonce: CAPTURE.monitorOwnerNonce,
+    start: () => {
+      started += 1;
+      return started === 1 ? Promise.resolve(CAPTURE) : Promise.reject(failure);
+    },
+  } as unknown as RemoteWorkerManager;
+  const binding = createRemoteManagerPort(manager);
+  const live: RemoteRunEvent[] = [];
+  const refused: RemoteRunEvent[] = [];
+
+  await binding.port.start(
+    { targetId: "beta", name: "prober", objective: "audit" },
+    (event) => live.push(event),
+  );
+  await assert.rejects(
+    () => binding.port.start(
+      { targetId: "beta", name: "prober", objective: "audit again" },
+      (event) => refused.push(event),
+    ),
+    (error: unknown) => {
+      // The manager's own error object, not a wrapper: the host reports this
+      // text, and rethrowing a new one would lose what the manager said.
+      assert.equal(error, failure);
+      return true;
+    },
+  );
+
+  binding.publish(CAPTURE, {
+    workerId: CAPTURE.workerId,
+    instanceNonce: CAPTURE.instanceNonce,
+    runId: CAPTURE.runId,
+    generation: CAPTURE.generation,
+    sequence: 1,
+    updatedAt: 1_000,
+    type: "run/state",
+    status: "running",
+  });
+
+  // The refused run gets nothing, and the run that did start still gets
+  // everything: the cleanup on the failure path removes its own subscription
+  // and leaves the pump intact for the subscribers it shares the binding with.
+  assert.deepEqual(refused, [], "a run the manager refused still receives events");
+  assert.equal(live.length, 1, "the surviving subscriber stopped receiving events");
+});
+
 test("the remote location becomes the backend selector and clears the spec cwd", async () => {
   const root = workspace();
   const manager = new FakeRemoteManager("pi-rpc");

@@ -80,16 +80,7 @@ export interface RemoteRunCancelResult { accepted: boolean; status: RemoteStatus
 
 export interface RemoteWorkerWaitOptions { statuses?: readonly RemoteStatus[]; timeoutMs?: number; signal?: AbortSignal }
 
-/**
- * What a backend asks the manager to start.
- *
- * The manager's capability-requirement field is deliberately absent. On the
- * production path it is always the empty array, and the `RemoteCapability`
- * vocabulary itself is being retired; a field no backend will ever fill would
- * only be one more call site to unpick later. Method parameters are bivariant
- * in TypeScript, so the real `RemoteWorkerManager.start` carrying one extra
- * optional parameter still satisfies this port.
- */
+/** What a backend asks the manager to start; every member reaches the real manager verbatim. */
 export interface RemoteWorkerStartRequest {
   targetId: string; name: string; objective: string;
   commandId?: string; outputSchema?: unknown; signal?: AbortSignal;
