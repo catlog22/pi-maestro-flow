@@ -3,6 +3,7 @@ import test from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { BackendCapabilities, TeammateBackend } from "pi-maestro-backend-core/v1/backend";
 import type { BackendRegistry } from "pi-maestro-backend-core/v1/registry";
 import type { TeammateRunSpec } from "pi-maestro-backend-core/v1/spec";
 import type {
@@ -21,6 +22,7 @@ import {
   forgetBackendRegistryConfigSync,
 } from "../src/backends/registry-host.ts";
 import { createRemoteManagerPort, remoteMonitorEventSink } from "../src/backends/remote-workers.ts";
+import { ModelCircuitBreaker } from "../src/models/model-circuit-breaker.ts";
 import type {
   RemoteDriverEvent,
   RemoteRunCapture,
@@ -441,6 +443,158 @@ test("a backend written capability delivery survives the host emulation record",
     "the host never recorded its emulation verdict",
   );
   assert.deepEqual(result.structuredOutput, { ok: true });
+});
+
+/**
+ * A backend that fails every run the way a provider outage does.
+ *
+ * The capability table is the only thing the two cases below vary, and the
+ * failure it settles satisfies every other condition the failover decision
+ * reads: an authoritative settlement, a provider-shaped error, and no tool
+ * whose effect a replay could repeat. A difference in how many runs it starts
+ * can therefore only come from the capability table.
+ *
+ * @param modelSelection - declared support for choosing the model.
+ * @param started - records the model each started run was given.
+ * @returns the backend, for {@link capabilityRegistry}.
+ */
+function outageBackend(
+  modelSelection: BackendCapabilities["modelSelection"],
+  started: (string | undefined)[],
+): TeammateBackend {
+  return {
+    name: "capability-probe",
+    protocolVersion: 1,
+    recoveryShape: "replay",
+    capabilities: () => ({
+      outputSchema: "native",
+      forkContext: "unsupported",
+      modelSelection,
+      thinkingLevel: "unsupported",
+      todoBinding: "unsupported",
+      toolFilter: "unsupported",
+      steer: "native",
+      followUp: "native",
+      abort: "native",
+    }),
+    start: (spec) => {
+      started.push(spec.model);
+      return Promise.resolve({
+        outcome: Promise.resolve({
+          result: {
+            agent: spec.agent,
+            task: spec.task,
+            exitCode: 1,
+            messages: [{ role: "system", content: "the provider returned 503 Service Unavailable" }],
+            usage: {
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              cost: 0,
+              turns: 1,
+            },
+            // Whatever the target chose, which is not one of the host's
+            // candidates — a match would make the host skip that candidate as
+            // already attempted and hide the decision under test.
+            model: "probe/target-default",
+            correlationId: "corr-probe",
+            durationMs: 1,
+          },
+          recovery: {
+            settlementAuthority: "authoritative",
+            completedToolCount: 0,
+            inFlightToolCount: 0,
+            preActivityInfrastructureExit: false,
+            externalReplayRisk: false,
+          },
+          reclamation: Promise.resolve({ status: "reclaimed" }),
+        }),
+        send: () => false,
+        abort: () => {},
+      });
+    },
+  };
+}
+
+/**
+ * A registry that resolves every task to one backend.
+ *
+ * @param backend - the backend under test.
+ * @returns the registry, for `backendRegistry`.
+ */
+function capabilityRegistry(backend: TeammateBackend): BackendRegistry {
+  const capabilities = backend.capabilities({});
+  return {
+    resolve: () => Promise.resolve({ backend, config: {}, capabilities }),
+    capabilitiesOf: () => Promise.resolve(capabilities),
+    listBackendNames: () => [backend.name],
+    defaultBackendName: () => backend.name,
+  };
+}
+
+test("a backend that cannot select models is not retried with another model candidate", async () => {
+  const root = workspace();
+  const started: (string | undefined)[] = [];
+
+  const result = await runSingleTeammate(
+    { agent: "prober", task: "audit the deploy" },
+    {
+      baseCwd: root,
+      backendRegistry: capabilityRegistry(outageBackend("unsupported", started)),
+      // Two candidates: the target's own default first, then one the host could
+      // name. The second is what the capability table has to stop.
+      modelCapabilities: [{ id: "acme/spare" }],
+      modelCircuitBreaker: new ModelCircuitBreaker(),
+      enableRetryBackoff: false,
+    },
+  );
+
+  assert.deepEqual(
+    started,
+    [undefined],
+    "a backend that cannot select models was made to run a second model candidate",
+  );
+  // The settled failure is still what the caller reads, rather than a verdict
+  // about a candidate that never ran.
+  assert.equal(result.backend, "capability-probe");
+  assert.ok(
+    result.messages.some((message) => /503 Service Unavailable/.test(message.content)),
+    "the failure the backend actually settled was replaced",
+  );
+  assert.ok(
+    (result.capabilityDeliveries ?? []).some((delivery) =>
+      delivery.capability === "modelSelection"
+      && delivery.support === "withheld"
+      && (delivery.note ?? "").includes("modelSelection is unsupported")),
+    "the withheld failover was never recorded, so the run looks like one with nothing left to try",
+  );
+});
+
+test("a backend with native model selection still gets the second model candidate", async () => {
+  const root = workspace();
+  const started: (string | undefined)[] = [];
+
+  const result = await runSingleTeammate(
+    { agent: "prober", task: "audit the deploy" },
+    {
+      baseCwd: root,
+      backendRegistry: capabilityRegistry(outageBackend("native", started)),
+      modelCapabilities: [{ id: "acme/spare" }],
+      modelCircuitBreaker: new ModelCircuitBreaker(),
+      enableRetryBackoff: false,
+    },
+  );
+
+  // Same failure, same recovery facts, same candidate list — only the
+  // capability table differs. Without this, the case above cannot tell a gate
+  // that fired from a failover that was never eligible here anyway.
+  assert.deepEqual(started, [undefined, "acme/spare"], "the second model candidate never ran");
+  assert.deepEqual(
+    result.capabilityDeliveries ?? [],
+    [],
+    "a backend that can select models still reported a withheld failover",
+  );
 });
 
 test("the root dispatch hands the run its remote Monitor wiring", () => {

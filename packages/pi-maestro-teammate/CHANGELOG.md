@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.14.0
+
+### 行为变化（Breaking）
+
+- **远端 journal 格式 `REMOTE_JOURNAL_VERSION` 1 → 2，不提供迁移代码。** worker 标识、run 记录、command 记录三处版本硬拒同时指名记录版本与本守护进程版本；持久化的 `capabilities` 字段一并移除。守护进程读到 v1 的 `worker.json` 时在构造函数里直接抛错，`markInterruptedRunsLost` 尚未执行，旧数据一个字节都不会被改写。
+
+### 修复
+
+- **隔离不再无声**：`RemoteRunJournal` 构造函数接受可选的 `onQuarantine(directory, error)`，在 run 目录被移进 `corrupt-runs/` 之后触发，调用方能知道哪个 run 因为什么被移走。回调抛出的异常被吞掉——隔离发生在 `getRun` / `listRuns` 的错误恢复路径上，此时 rename 与两次 fsync 已经落盘，观测失败既不能把恢复变成崩溃，也无法回退隔离。
+- **v1 拒绝消息点名整个状态目录**并给出正确补救动作，而不是只点名 `worker.json`。旧文本会诱导操作员删掉标识文件：守护进程随即在旧目录上启动，其余 v1 run 记录被逐条移进 `corrupt-runs/`，宿主 run/attach 撞上的是与真因无关的 `-32003 Remote run ownership capture mismatch`。
+
+### 更正 be0871e6 记录的前提
+
+be0871e6 以「本 fork 不发布包」为「不写迁移代码」作论据，该前提不成立：
+
+- `pi-maestro-teammate` 是已发布包——`package.json` 无 `private: true`，声明了 `exports`、`files` 与 `bin`（`pi-teammate-remote`），版本 1.14.0。
+- 远端 journal 默认落在 `~/.pi/agent/remote`（可由 `PI_TEAMMATE_REMOTE_STATE_DIR` 覆盖），属于远端主机而非宿主仓库，不随宿主一起升级。
+- upstream 1.14.0 的发布早于本 fork 的版本 bump 约 15 小时，远端主机上完全可能存在 upstream 守护进程写下的 v1 journal。
+
+决策本身不变：仍然拒绝启动而不是写迁移代码——半懂旧格式的风险高于拒绝启动，且拒绝发生在任何写入之前。变的是论据与操作员看到的补救文本。
+
+### 操作员补救步骤
+
+守护进程报 `Unsupported remote worker identity version 1` 时：
+
+1. 停掉远端的 `pi-teammate-remote serve`。
+2. 整体移走或备份状态目录（默认 `~/.pi/agent/remote`，或 `PI_TEAMMATE_REMOTE_STATE_DIR` 指向的目录），例如 `mv ~/.pi/agent/remote ~/.pi/agent/remote.v1.bak`。
+3. 重新启动 serve；新的 v2 目录从空开始，备份里保留着全部 v1 证据。
+
+不要只删 `worker.json`：守护进程会在旧目录上启动，其余 v1 run 记录逐条进 `corrupt-runs/`，故障现场变成一个与真因无关的所有权错配错误。
+
 ## 1.0.0
 
 ### Breaking

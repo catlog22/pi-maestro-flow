@@ -226,3 +226,81 @@ test("a version-1 run record is quarantined instead of silently dropped", () => 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a version-1 command record is refused and the error names both journal versions", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-journal-v1-command-"));
+  try {
+    const journal = new RemoteRunJournal(root);
+    const fingerprint = RemoteRunJournal.fingerprint("run/start", { legacy: true });
+    journal.beginCommand("legacy-command", fingerprint);
+    const commandsDirectory = path.join(root, "commands");
+    const commandFile = fs.readdirSync(commandsDirectory)[0]!;
+    const commandPath = path.join(commandsDirectory, commandFile);
+    const record = JSON.parse(fs.readFileSync(commandPath, "utf8")) as { version: number };
+    record.version = 1;
+    fs.writeFileSync(commandPath, JSON.stringify(record), "utf8");
+
+    // getCommand is the only public route into parseCommandRecord, and it rethrows anything but ENOENT.
+    assert.throws(
+      () => journal.getCommand("legacy-command"),
+      (error: unknown) => error instanceof Error
+        && error.message.includes("version 1")
+        && error.message.includes("version 2"),
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a quarantined run is reported to the observer instead of vanishing", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-journal-quarantine-observer-"));
+  try {
+    const first = new RemoteRunJournal(root);
+    createRun(first, "observed-run");
+    const directory = runDirectory(root, "observed-run");
+    const metadataPath = path.join(directory, "metadata.json");
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as { version: number };
+    metadata.version = 1;
+    fs.writeFileSync(metadataPath, JSON.stringify(metadata), "utf8");
+
+    const observed: { directory: string; error: unknown }[] = [];
+    // The observer throws on purpose: quarantine runs on the recovery paths of getRun and listRuns, so a
+    // failing observer must not turn recovery into a crash.
+    const second = new RemoteRunJournal(root, {
+      onQuarantine: (quarantinedDirectory, error) => {
+        observed.push({ directory: quarantinedDirectory, error });
+        throw new Error("observer failure");
+      },
+    });
+
+    assert.deepEqual(second.listRuns(), []);
+    assert.equal(observed.length, 1);
+    assert.equal(observed[0]!.directory, directory);
+    assert.equal(observed[0]!.error instanceof Error, true);
+    const quarantined = fs.readdirSync(path.join(root, "corrupt-runs"));
+    assert.equal(quarantined.length, 1);
+    assert.equal(quarantined[0]!.startsWith(path.basename(directory)), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the version-1 refusal names the state directory and the corrupt runs remedy", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-journal-v1-remedy-"));
+  try {
+    fs.writeFileSync(
+      path.join(root, "worker.json"),
+      JSON.stringify({ version: 1, workerId: "legacy-worker" }),
+      "utf8",
+    );
+
+    assert.throws(
+      () => new RemoteRunJournal(root),
+      (error: unknown) => error instanceof Error
+        && error.message.includes(root)
+        && error.message.includes("corrupt-runs"),
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

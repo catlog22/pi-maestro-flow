@@ -132,6 +132,7 @@ import { backendRegistryConfigSync, dispatchRegistrySync } from "../backends/reg
 import { runSingleAttempt } from "./pi-subprocess-attempt.ts";
 import type {
   AttemptOutcome,
+  BackendCapabilities,
   BackendRunOptions,
   ConfigValue,
 } from "pi-maestro-backend-core/v1/backend";
@@ -622,6 +623,12 @@ export async function runSingleTeammate(
 
     try {
       let attempt: AttemptOutcome;
+      // Hoisted out of the registry branch below because the failover decision
+      // at the end of this iteration reads it, and the branch's own binding
+      // dies with the `try` that resolves it. Left `undefined` by the legacy
+      // path and by a resolution that throws before reaching the assignment,
+      // which is what keeps both of those decisions exactly as they were.
+      let resolvedCapabilities: BackendCapabilities | undefined;
       try {
         // An injected registry wins (tests and embedders supply one); otherwise
         // the workspace document decides, which is what makes `mode:
@@ -640,6 +647,7 @@ export async function runSingleTeammate(
         } else {
           const spec = backendSpecOf(params, cwd, modelToUse, remoteRouting);
           const { backend, config, capabilities } = await registry.resolve(spec, spec.backend);
+          resolvedCapabilities = capabilities;
           // Adjudicate here too, not only in `runGraph`. Five production call
           // sites dispatch a single teammate directly, and a task whose backend
           // cannot serve a required capability was reaching the model anyway:
@@ -799,8 +807,15 @@ export async function runSingleTeammate(
             `Fresh replay blocked after completedTools=${recoveryFacts.completedToolCount}, `
             + `inFlightTools=${recoveryFacts.inFlightToolCount}, externalReplayRisk=${recoveryFacts.externalReplayRisk}.`,
         }).blocked;
-      let fallbackEligible = replayFenceClear
+      // A backend that cannot select models serves every remaining candidate
+      // with the model it just failed on, so no candidate can change this
+      // outcome. Failover also costs the run its own diagnosis: every candidate
+      // after the first carries an explicit model, so the capability gate above
+      // rejects it and that rejection replaces the failure this run produced.
+      const modelSelectionUnsupported = resolvedCapabilities?.modelSelection === "unsupported";
+      const failoverConditionsMet = replayFenceClear
         && ((fallbackFailure && authoritativeFailure) || preActivityInfrastructureExit);
+      let fallbackEligible = failoverConditionsMet && !modelSelectionUnsupported;
 
       if (fallbackFailure && !authoritativeFailure && !preActivityInfrastructureExit) {
         candidateResult.messages.push({
@@ -835,6 +850,26 @@ export async function runSingleTeammate(
             + `externalReplayRisk=${externalReplayRisk}). `
             + `A fresh model process could repeat a completed tool, a tool whose effect is unknown, `
             + `or external work observed through child IPC/runtime diagnostics.`,
+        });
+      } else if (modelSelectionUnsupported && failoverConditionsMet) {
+        // Every other condition for failover held, so without this record the
+        // result is indistinguishable from one that had no candidate left.
+        candidateResult.capabilityDeliveries = [
+          ...(candidateResult.capabilityDeliveries ?? []),
+          {
+            capability: "modelSelection",
+            support: "withheld",
+            note:
+              `backend "${candidateResult.backend}" declares modelSelection is unsupported, `
+              + `so every remaining model candidate would run on the same model`,
+          },
+        ];
+        candidateResult.messages.push({
+          role: "system",
+          content:
+            `Model fallback blocked because backend "${candidateResult.backend}" declares `
+            + `modelSelection is unsupported. Every remaining candidate would run on the model `
+            + `this attempt already used, so a second run cannot change the outcome.`,
         });
       }
 

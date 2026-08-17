@@ -31,13 +31,24 @@ export interface RemoteStoredCommand {
         data?: unknown;
     };
 }
+/** Optional wiring handed to a {@link RemoteRunJournal} on top of its state directory. */
+export interface RemoteJournalOptions {
+    /**
+     * Called after a run directory has been moved into `corrupt-runs/`, with the run directory that was
+     * quarantined and the error that condemned it. Without it quarantine is silent, and the host only sees
+     * the unrelated ownership mismatch that a missing run produces on the next run/attach.
+     * @param directory Absolute path the run occupied under `runs/` before the move.
+     * @param error Parse or reconciliation failure that condemned the run.
+     */
+    onQuarantine?: (directory: string, error: unknown) => void;
+}
 export declare function getRemoteStateDirectory(): string;
 export declare function ensurePrivateRemoteDirectory(directoryPath: string): void;
 export declare class RemoteRunJournal {
     #private;
     readonly stateDirectory: string;
     readonly identity: RemoteWorkerIdentity;
-    constructor(stateDirectory?: string);
+    constructor(stateDirectory?: string, options?: RemoteJournalOptions);
     static fingerprint(method: string, params: unknown): string;
     createRun(capture: RemoteRunCapture, request: RemoteRunStartParams, now?: number): RemoteJournalRunRecord;
     getRun(runId: string): RemoteJournalRunRecord | undefined;

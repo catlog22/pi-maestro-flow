@@ -47,6 +47,18 @@ export interface RemoteStoredCommand {
   outcome?: { ok: true; result: unknown } | { ok: false; code: number; message: string; data?: unknown };
 }
 
+/** Optional wiring handed to a {@link RemoteRunJournal} on top of its state directory. */
+export interface RemoteJournalOptions {
+  /**
+   * Called after a run directory has been moved into `corrupt-runs/`, with the run directory that was
+   * quarantined and the error that condemned it. Without it quarantine is silent, and the host only sees
+   * the unrelated ownership mismatch that a missing run produces on the next run/attach.
+   * @param directory Absolute path the run occupied under `runs/` before the move.
+   * @param error Parse or reconciliation failure that condemned the run.
+   */
+  onQuarantine?: (directory: string, error: unknown) => void;
+}
+
 class CorruptRunJournalError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -422,9 +434,11 @@ export class RemoteRunJournal {
   readonly #runsDirectory: string;
   readonly #commandsDirectory: string;
   readonly #corruptRunsDirectory: string;
+  readonly #onQuarantine: ((directory: string, error: unknown) => void) | undefined;
 
-  constructor(stateDirectory = getRemoteStateDirectory()) {
+  constructor(stateDirectory = getRemoteStateDirectory(), options: RemoteJournalOptions = {}) {
     this.stateDirectory = path.resolve(stateDirectory);
+    this.#onQuarantine = options.onQuarantine;
     ensurePrivateRemoteDirectory(this.stateDirectory);
     this.#runsDirectory = path.join(this.stateDirectory, "runs");
     this.#commandsDirectory = path.join(this.stateDirectory, "commands");
@@ -440,7 +454,11 @@ export class RemoteRunJournal {
       if (value.version !== REMOTE_JOURNAL_VERSION) {
         throw new Error(
           `Unsupported remote worker identity version ${String(value.version)}; `
-          + `this daemon writes remote journal version ${REMOTE_JOURNAL_VERSION}`,
+          + `this daemon writes remote journal version ${REMOTE_JOURNAL_VERSION}. `
+          + `The whole state directory ${this.stateDirectory} is in the older format and there is no migration. `
+          + "Deleting worker.json only lets the daemon start on top of it: every remaining run record is then "
+          + "moved into corrupt-runs/ and hosts see an unrelated ownership mismatch instead of this error. "
+          + `Move or back up ${this.stateDirectory} as a whole, then start the daemon again.`,
         );
       }
       workerId = requiredString(value.workerId, "remote worker id", 128);
@@ -707,6 +725,14 @@ export class RemoteRunJournal {
     fs.renameSync(directory, destination);
     fsyncDirectory(this.#runsDirectory);
     fsyncDirectory(this.#corruptRunsDirectory);
+    try {
+      this.#onQuarantine?.(directory, error);
+    } catch {
+      // Swallows whatever the observer throws. Both callers reach here while recovering from a corrupt
+      // run — getRun and listRuns turn the failure into "no such run" — so a throwing observer would
+      // convert recovery into a crash. The rename and both fsyncs are already durable at this point, so
+      // the quarantine cannot be rolled back to match an observer that failed to record it either.
+    }
   }
 
   #pruneCommands(): void {
