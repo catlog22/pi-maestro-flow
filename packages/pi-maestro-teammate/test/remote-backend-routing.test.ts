@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BackendRegistry } from "pi-maestro-backend-core/v1/registry";
@@ -345,4 +345,18 @@ test("a backend written capability delivery survives the host emulation record",
     "the host never recorded its emulation verdict",
   );
   assert.deepEqual(result.structuredOutput, { ok: true });
+});
+
+test("the root dispatch hands the run its remote Monitor wiring", () => {
+  // Every case above supplies `remoteManagerOf` itself, and the option is
+  // optional, so deleting the one production injection leaves the compiler and
+  // this file green while every remote dispatch fails. The injection sits inside
+  // a closure no test can reach, so it is guarded as source text — the same
+  // reason backend-selector-plumbing.test.ts guards the projection that way.
+  const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  assert.match(
+    source,
+    /remoteManagerOf: \(\) => ensureRemoteMonitorBinding\(\)/,
+    "the root dispatch no longer passes remoteManagerOf, so a remote registration refuses every task by naming a missing Monitor term while the host is in Monitor mode",
+  );
 });
