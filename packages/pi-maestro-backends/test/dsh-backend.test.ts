@@ -25,6 +25,33 @@ interface FakeDriver extends DshHarnessDriver {
   closed: number;
 }
 
+/**
+ * A `turn/end` event in the shape the runtime really emits.
+ *
+ * The loop writes this marker in a `finally`, always carrying the
+ * `TurnEndReason` that closed the turn, so a marker literal carrying only a
+ * `type` describes an event no runtime produces. That fixture is what hid the
+ * failure this file now covers: a turn the runtime refused carries a marker
+ * too, and a scan that only looked for the marker read it as a clean turn.
+ *
+ * @param reason - the `TurnEndReason`; a completed turn by default.
+ * @returns the event as the SDK delivers it.
+ */
+function turnEnd(reason: Record<string, unknown> = { kind: "completed" }): Record<string, unknown> {
+  return { type: "turn/end", seq: 2, time: 1_000, data: { turn: 1, reason } };
+}
+
+/**
+ * The reason a DeepSeek account with no balance produces.
+ *
+ * Taken from a real session log: the provider answers 402, the adapter raises
+ * `LlmError`, and the loop records that error's own facts verbatim.
+ */
+const QUOTA_REFUSAL = {
+  kind: "error",
+  error: { message: "Insufficient Balance", code: "QUOTA", status: 402 },
+};
+
 function fakeDriver(overrides: Partial<{
   finalResponse: string;
   events: Record<string, unknown>[];
@@ -42,7 +69,7 @@ function fakeDriver(overrides: Partial<{
       return {
         sessionId: "s-1",
         finalResponse: overrides.finalResponse ?? "SEAM",
-        events: overrides.events ?? [{ type: "turn/start" }, { type: "turn/end" }],
+        events: overrides.events ?? [{ type: "turn/start" }, turnEnd()],
       };
     },
     async close() {
@@ -96,7 +123,7 @@ test("tool calls from every turn are counted, not just the last", async () => {
         await held;
         return { sessionId: "s", finalResponse: "first", events: [{ type: "tool/result" }, { type: "tool/result" }, { type: "tool/result" }] };
       }
-      return { sessionId: "s", finalResponse: "second", events: [{ type: "tool/result" }, { type: "turn/end" }] };
+      return { sessionId: "s", finalResponse: "second", events: [{ type: "tool/result" }, turnEnd()] };
     },
     async close() {},
   }));
@@ -135,7 +162,7 @@ test("an aborted run settles as terminated even when the close makes the turn re
 test("abort plus settlement close the runtime exactly once", async () => {
   let closes = 0;
   const backend = createDshBackend(async () => ({
-    async run() { return { sessionId: "s", finalResponse: "ok", events: [{ type: "turn/end" }] }; },
+    async run() { return { sessionId: "s", finalResponse: "ok", events: [turnEnd()] }; },
     async close() { closes += 1; },
   }));
   const run = await backend.start(SPEC, runOptions());
@@ -192,6 +219,92 @@ test("a settled turn reports the runtime's own turn-end as authoritative", async
   assert.deepEqual(await outcome.reclamation, { status: "reclaimed" });
 });
 
+test("a turn the provider refused fails the run instead of settling it as completed", async () => {
+  // What a quota-exhausted account really produces: the loop catches the
+  // provider's error, records it on the turn's own marker, ends the turn, and
+  // returns an empty final response. Nothing throws.
+  const backend = createDshBackend(async () => fakeDriver({
+    finalResponse: "",
+    events: [{ type: "turn/start" }, turnEnd(QUOTA_REFUSAL)],
+  }));
+  const outcome = await (await backend.start(SPEC, runOptions())).outcome;
+
+  assert.equal(outcome.result.terminalStatus, "failed");
+  assert.notEqual(outcome.result.exitCode, 0);
+  // The reason has to be readable, not just the verdict: the empty assistant
+  // message is exactly the symptom that sent a reader looking for a model bug
+  // when the account had simply run out of balance.
+  const failure = outcome.result.messages.find((message) => message.role === "system");
+  assert.match(failure?.content ?? "", /Insufficient Balance/);
+  assert.match(failure?.content ?? "", /402/);
+  assert.ok(
+    (outcome.result.warnings ?? []).some((warning) => /Insufficient Balance/.test(warning)),
+    "the refusal never reached the warnings the orchestrator reads",
+  );
+  // The runtime named the reason itself, so the failure stays authoritative:
+  // the host clears model failover only for an authoritative failure, and a
+  // 402 is precisely the failure another candidate can still serve.
+  assert.equal(outcome.recovery.settlementAuthority, "authoritative");
+});
+
+test("a refusal in an earlier turn is not erased by a later turn that ended cleanly", async () => {
+  let turn = 0;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const begun = new Promise<void>((resolve) => { started = resolve; });
+  const backend = createDshBackend(async () => ({
+    async run() {
+      turn += 1;
+      if (turn === 1) {
+        started();
+        await held;
+        return { sessionId: "s", finalResponse: "", events: [turnEnd(QUOTA_REFUSAL)] };
+      }
+      return { sessionId: "s", finalResponse: "second", events: [turnEnd()] };
+    },
+    async close() {},
+  }));
+  const run = await backend.start(SPEC, runOptions());
+  await begun;
+  assert.equal(run.send("more", "follow_up"), true);
+  release();
+  const outcome = await run.outcome;
+
+  // A run that lost a turn to the provider did not do all the work it was
+  // asked to, whatever the turns after it managed.
+  assert.equal(outcome.result.terminalStatus, "failed");
+  assert.match(
+    outcome.result.messages.find((message) => message.role === "system")?.content ?? "",
+    /Insufficient Balance/,
+  );
+});
+
+test("a turn ending for a reason that is not a failure still settles as completed", async () => {
+  // `max-tokens` is the runtime saying a step hit its output ceiling, not that
+  // the provider refused; folding it into the failure branch would fail runs
+  // that produced their answer.
+  const backend = createDshBackend(async () => fakeDriver({
+    events: [turnEnd({ kind: "max-tokens" })],
+  }));
+  const outcome = await (await backend.start(SPEC, runOptions())).outcome;
+
+  assert.equal(outcome.result.terminalStatus, "completed");
+  assert.equal(outcome.result.exitCode, 0);
+  assert.equal(outcome.result.messages.filter((message) => message.role === "system").length, 0);
+});
+
+test("a turn closed by a reload rather than by the loop is only inferred", async () => {
+  // `interrupted` is written by a persistence backend closing a crash-orphaned
+  // turn; the loop never emits it, so the marker's presence is not the runtime
+  // stating how the turn ended.
+  const backend = createDshBackend(async () => fakeDriver({
+    events: [turnEnd({ kind: "interrupted" })],
+  }));
+  const outcome = await (await backend.start(SPEC, runOptions())).outcome;
+  assert.equal(outcome.recovery.settlementAuthority, "inferred");
+});
+
 test("a turn ending without the runtime's marker is only inferred", async () => {
   const backend = createDshBackend(async () => fakeDriver({ events: [{ type: "turn/start" }] }));
   const outcome = await (await backend.start(SPEC, runOptions())).outcome;
@@ -200,7 +313,7 @@ test("a turn ending without the runtime's marker is only inferred", async () => 
 
 test("completed tool calls are counted for the host's fence", async () => {
   const backend = createDshBackend(async () => fakeDriver({
-    events: [{ type: "tool/result" }, { type: "tool/result" }, { type: "turn/end" }],
+    events: [{ type: "tool/result" }, { type: "tool/result" }, turnEnd()],
   }));
   const outcome = await (await backend.start(SPEC, runOptions())).outcome;
   assert.equal(outcome.result.toolCount, 2);
@@ -244,7 +357,7 @@ test("a follow-up arriving mid-turn is answered on the same session", async () =
         firstTurnStarted();
         await firstTurnRunning;
       }
-      return { sessionId: "s", finalResponse: "ok", events: [{ type: "turn/end" }] };
+      return { sessionId: "s", finalResponse: "ok", events: [turnEnd()] };
     },
     async close() {},
   }));
@@ -277,7 +390,7 @@ test("child events reach the host observer", async () => {
     async run(_input, options) {
       options.onNotification?.({ method: "session.event", params: { type: "turn/start" } });
       options.onNotification?.({ method: "other.method", params: { ignored: true } });
-      return { sessionId: "s", finalResponse: "ok", events: [{ type: "turn/end" }] };
+      return { sessionId: "s", finalResponse: "ok", events: [turnEnd()] };
     },
     async close() {},
   }));
@@ -403,7 +516,7 @@ test("a driver that fails to start takes its endpoint's socket with it", async (
     const held_: DshHarnessDriver = {
       async run() {
         await held;
-        return { sessionId: "s-1", finalResponse: "SEAM", events: [{ type: "turn/end" }] };
+        return { sessionId: "s-1", finalResponse: "SEAM", events: [turnEnd()] };
       },
       async close() { /* nothing to reap behind a promise */ },
     };

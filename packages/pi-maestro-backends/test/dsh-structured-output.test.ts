@@ -42,7 +42,9 @@ function scripted(responses: readonly string[]) {
         return {
           sessionId: "s",
           finalResponse: responses[Math.min(turn++, responses.length - 1)] ?? "",
-          events: [{ type: "turn/end" }],
+          // The marker the runtime really emits: always with the reason that
+          // closed the turn, never bare.
+          events: [{ type: "turn/end", seq: 2, time: 1_000, data: { turn: 1, reason: { kind: "completed" } } }],
         };
       },
       async close() {},

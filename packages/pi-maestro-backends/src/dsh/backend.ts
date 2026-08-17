@@ -27,6 +27,7 @@ import type {
   BackendRunOptions,
   ConfigValue,
   ResolvedBackendConfig,
+  SettlementAuthority,
   TeammateBackend,
 } from "pi-maestro-backend-core/v1/backend";
 import type {
@@ -239,16 +240,112 @@ function completedTools(events: readonly Record<string, unknown>[]): number {
 }
 
 /**
- * Whether the runtime declared the turn finished.
+ * The provider facts a failed turn carries.
  *
- * The smoke transcript ends `step/end` then `turn/end`, so its presence is the
- * runtime's own settlement statement rather than an inference from exit codes.
+ * Mirrors the runtime's `LlmFailure`: an `LlmError`'s own fields verbatim, or
+ * `{ message, code: "UNKNOWN" }` flattened from any other error. Never widened
+ * beyond what the host reads — `message` and `status` are what the retry
+ * classifier needs to tell a quota failure from a rate limit from a bad
+ * request, and `code` is what an operator reads in the transcript.
+ */
+interface ProviderFailure {
+  message: string;
+  code: string;
+  status?: number;
+}
+
+/** What a turn's own `turn/end` marker recorded about how it ended. */
+interface TurnEnd {
+  /**
+   * The `TurnEndReason` discriminant of the last marker in the stream, or
+   * undefined when the runtime emitted no marker at all.
+   */
+  reason?: string;
+  /** The first failure the stream reported; absent when no turn ended in error. */
+  failure?: ProviderFailure;
+}
+
+/**
+ * Read the provider failure out of one `turn/end` reason.
+ *
+ * The events cross a process boundary as JSON, so the fields are checked here
+ * rather than trusted: a marker whose reason says `error` without usable facts
+ * still has to fail the run, and inventing a message for it would put a
+ * sentence in the transcript that no provider said.
+ *
+ * @param reason - the marker's `reason` member, as it arrived.
+ * @returns the provider's facts, or undefined when the reason is not an error.
+ */
+function failureOf(reason: Record<string, unknown>): ProviderFailure | undefined {
+  if (reason.kind !== "error") return undefined;
+  const error = reason.error as Record<string, unknown> | undefined;
+  const message = typeof error?.message === "string" && error.message.length > 0
+    ? error.message
+    : "the runtime reported no failure message";
+  const code = typeof error?.code === "string" && error.code.length > 0 ? error.code : "UNKNOWN";
+  const status = typeof error?.status === "number" ? error.status : undefined;
+  return { message, code, ...(status === undefined ? {} : { status }) };
+}
+
+/**
+ * What the runtime's own `turn/end` markers said about a turn.
+ *
+ * One scan answers both questions the settled result asks, so the two can never
+ * disagree: whether the runtime stated how the turn ended, and whether that
+ * statement was a failure. Scanning for the marker alone is what let a turn the
+ * runtime had explicitly failed settle as a completed run — the marker is
+ * emitted in a `finally`, so a quota-refused turn has one too.
+ *
+ * The last marker names the reason because it is the one the turn ended on,
+ * while the first failure is kept because a run that hit a provider failure
+ * anywhere did not do all the work it was asked to.
  *
  * @param events - the run's session events in wire order.
- * @returns true when the runtime emitted its turn-end marker.
+ * @returns the marker facts; an empty object when the runtime emitted none.
  */
-function sawTurnEnd(events: readonly Record<string, unknown>[]): boolean {
-  return events.some((event) => (event.type ?? event.kind) === "turn/end");
+function readTurnEnd(events: readonly Record<string, unknown>[]): TurnEnd {
+  const end: TurnEnd = {};
+  for (const event of events) {
+    if ((event.type ?? event.kind) !== "turn/end") continue;
+    const reason = (event.data as { reason?: Record<string, unknown> } | undefined)?.reason;
+    if (reason === undefined) continue;
+    end.reason = typeof reason.kind === "string" ? reason.kind : undefined;
+    end.failure ??= failureOf(reason);
+  }
+  return end;
+}
+
+/**
+ * How authoritatively the runtime established that the turn ended.
+ *
+ * `interrupted` is written by a persistence backend closing a crash-orphaned
+ * turn on reload; the loop never emits it, so a turn carrying it ended without
+ * the runtime ever stating how. Every other reason is the loop's own live
+ * statement — including `error`, which is exactly as authoritative as
+ * `completed`. That matters: the host clears model failover only for an
+ * authoritative failure, so downgrading a named provider failure would disable
+ * failover for the quota and rate-limit refusals failover exists to serve.
+ *
+ * @param end - the turn's marker facts.
+ * @returns the settlement authority to report.
+ */
+function settlementAuthorityOf(end: TurnEnd): SettlementAuthority {
+  return end.reason === undefined || end.reason === "interrupted" ? "inferred" : "authoritative";
+}
+
+/**
+ * One line naming a provider failure, for a reader and for the retry classifier.
+ *
+ * The status is spelled out because the host classifies from message text
+ * alone: without it a 402 refusal and a 429 overload read the same, and the
+ * first must switch candidates while the second must back off.
+ *
+ * @param failure - the provider's facts.
+ * @returns the diagnostic line.
+ */
+function describeFailure(failure: ProviderFailure): string {
+  const status = failure.status === undefined ? "" : `, status=${failure.status}`;
+  return `dsh provider failure: ${failure.message} (code=${failure.code}${status})`;
 }
 
 /** Usage is not reported through the SDK's run result; zeros say so honestly. */
@@ -436,7 +533,13 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
           }
           acceptingFollowUps = false;
           const toolCount = turns.reduce((sum, turn) => sum + completedTools(turn.events), 0);
-          const lastTurn = turns[turns.length - 1]!;
+          const turnEnds = turns.map((turn) => readTurnEnd(turn.events));
+          // The runtime does not throw a provider refusal: it records the
+          // failure on the turn's own marker, ends the turn, and returns an
+          // empty `finalResponse`. Read only from the driver's return value, a
+          // quota-exhausted account is indistinguishable from a model that
+          // answered with nothing.
+          const providerFailure = turnEnds.find((end) => end.failure !== undefined)?.failure;
           // A schema the run could not satisfy fails the task rather than
           // settling as completed with nothing to interpolate: a downstream
           // sibling reading `{name.field}` would otherwise read undefined from
@@ -458,6 +561,7 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
             && spec.todos.length > 0
             && !endpoint.sawClientConnect();
           const warnings: string[] = [];
+          if (providerFailure !== undefined) warnings.push(describeFailure(providerFailure));
           if (schemaUnmet) {
             warnings.push(`structured output was requested but ${(structured as { failure: string }).failure}`);
           }
@@ -475,13 +579,22 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
           }
           const terminalStatus: AgentTerminalStatus = aborted
             ? "terminated"
-            : (schemaUnmet || bridgeUnreached) ? "failed" : "completed";
+            : (schemaUnmet || bridgeUnreached || providerFailure !== undefined) ? "failed" : "completed";
           const result: SingleResult = {
             agent: spec.agent,
             ...(spec.name === undefined ? {} : { name: spec.name }),
             task: spec.task,
             exitCode: terminalStatus === "completed" ? 0 : 1,
-            messages: turns.map((turn) => ({ role: "assistant", content: turn.finalResponse })),
+            // The failure is a `system` message, not a warning only: the host
+            // reads its failover class out of the newest system message, so a
+            // refusal recorded anywhere else leaves the transcript showing an
+            // assistant that answered with an empty string and no reason.
+            messages: [
+              ...turns.map((turn) => ({ role: "assistant", content: turn.finalResponse })),
+              ...(providerFailure === undefined
+                ? []
+                : [{ role: "system", content: describeFailure(providerFailure) }]),
+            ],
             usage: NO_USAGE,
             model: text(options.config, "model") ?? spec.model ?? "",
             correlationId: options.correlationId,
@@ -501,7 +614,7 @@ export function createDshBackend(driverOf: DshDriverFactory): TeammateBackend {
           return {
             result,
             recovery: {
-              settlementAuthority: sawTurnEnd(lastTurn.events) ? "authoritative" : "inferred",
+              settlementAuthority: settlementAuthorityOf(turnEnds[turnEnds.length - 1]!),
               completedToolCount: result.toolCount ?? 0,
               inFlightToolCount: 0,
               preActivityInfrastructureExit: false,
