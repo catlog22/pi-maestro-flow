@@ -2,7 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isRemoteCapability, type RemoteCapability } from "./capabilities.ts";
 import { redactRemoteError } from "./child-security.ts";
 import type { RemoteRunStartParams } from "./protocol.ts";
 import { captureMatches, REMOTE_MAX_LINE_BYTES } from "./protocol.ts";
@@ -33,7 +32,7 @@ export interface RemoteJournalRunRecord {
   version: typeof REMOTE_JOURNAL_VERSION;
   capture: RemoteRunCapture;
   request: RemoteRunStartParams;
-  capabilities: readonly RemoteCapability[];
+  capabilities: readonly string[];
   snapshot: RemoteRunSnapshot;
   createdAt: number;
   updatedAt: number;
@@ -166,14 +165,18 @@ function parseCapture(value: unknown): RemoteRunCapture {
   };
 }
 
-function parseCapabilities(value: unknown): RemoteCapability[] {
+/**
+ * A persistence residue left by remote/1.
+ *
+ * Kept only so an existing version-1 record still parses, until the field is
+ * removed together with the journal version bump.
+ *
+ * @param value - the raw field read off disk.
+ * @returns the stored strings, bounded in count and length.
+ */
+function parsePersistedCapabilityResidue(value: unknown): string[] {
   if (!Array.isArray(value) || value.length > 32) throw new Error("Invalid remote run capabilities");
-  const capabilities: RemoteCapability[] = [];
-  for (const entry of value) {
-    if (!isRemoteCapability(entry)) throw new Error("Invalid remote run capability");
-    if (!capabilities.includes(entry)) capabilities.push(entry);
-  }
-  return capabilities;
+  return value.map((entry) => requiredString(entry, "remote run capability", 128));
 }
 
 function parseStartRequest(value: unknown): RemoteRunStartParams {
@@ -186,9 +189,6 @@ function parseStartRequest(value: unknown): RemoteRunStartParams {
   if (!executable) throw new Error("Invalid remote start executable");
   const driver = record.driver;
   if (driver !== "pi-rpc" && driver !== "acp") throw new Error("Invalid remote start driver");
-  const requiredCapabilities = record.requiredCapabilities === undefined
-    ? undefined
-    : parseCapabilities(record.requiredCapabilities);
   return {
     commandId: requiredString(record.commandId, "remote start commandId", 128),
     targetId: requiredString(record.targetId, "remote start targetId", 128),
@@ -198,7 +198,6 @@ function parseStartRequest(value: unknown): RemoteRunStartParams {
     cwd: requiredString(record.cwd, "remote start cwd", 4096),
     driver,
     command: [executable, ...command.slice(1)],
-    ...(requiredCapabilities === undefined ? {} : { requiredCapabilities }),
     ...(record.outputSchema === undefined ? {} : { outputSchema: record.outputSchema }),
   };
 }
@@ -385,7 +384,7 @@ function parseRunRecord(value: unknown): RemoteJournalRunRecord {
     version: REMOTE_JOURNAL_VERSION,
     capture,
     request,
-    capabilities: parseCapabilities(record.capabilities),
+    capabilities: parsePersistedCapabilityResidue(record.capabilities),
     snapshot,
     createdAt: safeInteger(record.createdAt, "run createdAt"),
     updatedAt: safeInteger(record.updatedAt, "run updatedAt"),
@@ -462,7 +461,7 @@ export class RemoteRunJournal {
   createRun(
     capture: RemoteRunCapture,
     request: RemoteRunStartParams,
-    capabilities: readonly RemoteCapability[],
+    capabilities: readonly string[] = [],
     now = Date.now(),
   ): RemoteJournalRunRecord {
     if (capture.workerId !== this.identity.workerId || capture.instanceNonce !== this.identity.instanceNonce) {

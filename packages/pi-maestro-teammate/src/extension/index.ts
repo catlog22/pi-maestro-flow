@@ -7249,7 +7249,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       const config = loadRemoteConfig(state.baseCwd || process.cwd());
       manager = new RemoteWorkerManager({ config, connectionFactory: new SshRemoteConnectionFactory() });
       const view = await manager.connect(targetId, signal);
-      return `hello ${view.workerId} (${[...view.capabilities].join(", ")})`;
+      return `hello ${view.workerId} (${view.status}, ${view.activeRuns}/${view.concurrency} runs)`;
     } catch (error) {
       if (signal.aborted) return "timed out after the configured probe window";
       return sanitizeRemoteMonitorError(error, "connection test");

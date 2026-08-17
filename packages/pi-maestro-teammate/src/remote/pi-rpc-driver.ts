@@ -5,7 +5,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { RemoteCapability } from "./capabilities.ts";
 import {
   captureProcessTree,
   redactRemoteError,
@@ -48,17 +47,6 @@ export const PI_RPC_CANCEL_GRACE_MS = 2_000;
 export const PI_RPC_EVENT_QUEUE_BYTES = 4 * 1024 * 1024;
 export const PI_RPC_PENDING_INPUT_LIMIT = 64;
 export const PI_RPC_PENDING_INPUT_BYTES = 1024 * 1024;
-
-export const PI_RPC_CAPABILITIES = Object.freeze([
-  "streaming",
-  "follow-up",
-  "steer",
-  "cancel",
-  "usage",
-  "tool-events",
-  "structured-output",
-  "session-resume",
-] satisfies readonly RemoteCapability[]);
 
 type SpawnChild = (
   command: string,
@@ -242,7 +230,6 @@ function extractUsage(value: unknown): RemoteUsage | undefined {
 
 class PiRpcRunHandle implements RemoteRunHandle {
   readonly capture: RemoteRunCapture;
-  readonly capabilities = PI_RPC_CAPABILITIES;
   readonly #child: ChildProcessWithoutNullStreams;
   readonly #queue: AsyncEventQueue<RemoteRunEvent>;
   readonly #scratchDirectory: string;
@@ -652,7 +639,6 @@ class PiRpcRunHandle implements RemoteRunHandle {
 
 export class PiRpcDriver implements RemoteDriver {
   readonly id = "pi-rpc" as const;
-  readonly capabilities = PI_RPC_CAPABILITIES;
   readonly #scratchRoot: string;
   readonly #cancelGraceMs: number;
   readonly #eventQueueBytes: number;

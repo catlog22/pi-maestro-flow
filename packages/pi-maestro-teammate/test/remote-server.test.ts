@@ -66,7 +66,6 @@ class EventFeed implements AsyncIterable<RemoteRunEvent> {
 }
 
 class TestHandle implements RemoteRunHandle {
-  readonly capabilities = ["cancel", "follow-up"] as const;
   readonly feed = new EventFeed();
   readonly capture;
   cancelled = false;
@@ -112,7 +111,6 @@ class TestHandle implements RemoteRunHandle {
 
 class TestDriver implements RemoteDriver {
   readonly id = "pi-rpc" as const;
-  readonly capabilities = ["cancel", "follow-up"] as const;
   readonly handles: TestHandle[] = [];
   failure?: string;
 
@@ -140,7 +138,6 @@ function initialize(owner: string, id = "initialize") {
   return createRemoteRequest(id, "remote/initialize", {
     commandId: id,
     protocolVersions: [REMOTE_PROTOCOL_VERSION],
-    capabilities: ["cancel", "follow-up"],
     monitorOwnerNonce: owner,
   });
 }
@@ -324,6 +321,35 @@ test("bridge redacts remote failures before transmission and command journaling"
     await server.close();
     if (previous === undefined) delete process.env[name];
     else process.env[name] = previous;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a remote/1 client is refused and the error names both protocol versions", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-server-version-"));
+  const driver = new TestDriver();
+  const { server, socket } = await openServer(root, driver);
+  const owner = "owner-version";
+  try {
+    const responses = readEnvelopes(socket, 1);
+    socket.write(encodeRemoteEnvelope(createRemoteRequest("stale", "remote/initialize", {
+      commandId: "stale",
+      protocolVersions: ["remote/1" as unknown as typeof REMOTE_PROTOCOL_VERSION],
+      monitorOwnerNonce: owner,
+    })));
+    const [refusal] = await responses;
+
+    assert.equal("error" in refusal, true);
+    // Read back off the socket rather than from the throw site: the message
+    // passes through redaction on its way out, and an operator only ever sees
+    // what survives that.
+    assert.equal("error" in refusal ? refusal.error.code : 0, -32002);
+    const message = "error" in refusal ? refusal.error.message : "";
+    assert.ok(message.includes("remote/2"), `the daemon's own version is missing from: ${message}`);
+    assert.ok(message.includes("remote/1"), `the client's offer is missing from: ${message}`);
+  } finally {
+    socket.destroy();
+    await server.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

@@ -1,11 +1,4 @@
 import { randomUUID } from "node:crypto";
-import {
-  REMOTE_CAPABILITIES,
-  isRemoteCapability,
-  negotiateRemoteCapabilities,
-  requireRemoteCapabilities,
-  type RemoteCapability,
-} from "./capabilities.ts";
 import { resolveRemoteTarget, type RemoteConfig } from "./config.ts";
 import type { RemoteConnection, RemoteConnectionFactory } from "./driver.ts";
 import {
@@ -60,8 +53,6 @@ export interface RemoteWorkerManagerOptions {
   config: RemoteConfig;
   connectionFactory: RemoteConnectionFactory;
   monitorOwnerNonce?: string;
-  capabilities?: readonly RemoteCapability[];
-  requiredWorkerCapabilities?: readonly RemoteCapability[];
   maxRunsPerHost?: number;
   maxOwnedRuns?: number;
   maxStartCommands?: number;
@@ -77,7 +68,6 @@ export interface RemoteWorkerStartRequest {
   name: string;
   objective: string;
   commandId?: string;
-  requiredCapabilities?: readonly RemoteCapability[];
   outputSchema?: unknown;
   signal?: AbortSignal;
 }
@@ -99,7 +89,6 @@ export interface RemoteWorkerView {
   targetHostId: string;
   workerId: string;
   instanceNonce: string;
-  capabilities: readonly RemoteCapability[];
   concurrency: number;
   activeRuns: number;
   status: RemoteStatus;
@@ -110,7 +99,6 @@ interface WorkerBinding {
   target: ResolvedRemoteTarget;
   connection: RemoteConnection;
   hello?: RemoteInitializeResult;
-  capabilities: readonly RemoteCapability[];
   status: RemoteStatus;
   remoteActiveRuns: number;
   startedSinceHeartbeat: number;
@@ -125,7 +113,6 @@ interface WorkerBinding {
 interface OwnedRun {
   capture: RemoteRunCapture;
   target: ResolvedRemoteTarget;
-  capabilities: readonly RemoteCapability[];
   snapshot: RemoteRunSnapshot;
   quotaBinding?: WorkerBinding;
   quotaEpoch?: number;
@@ -151,18 +138,6 @@ function validIdentity(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 128;
 }
 
-function validateCapabilities(value: unknown): RemoteCapability[] {
-  if (!Array.isArray(value) || value.length > REMOTE_CAPABILITIES.length) {
-    throw new Error("Invalid remote worker capabilities");
-  }
-  const result: RemoteCapability[] = [];
-  for (const capability of value) {
-    if (!isRemoteCapability(capability)) throw new Error("Invalid remote worker capabilities");
-    if (!result.includes(capability)) result.push(capability);
-  }
-  return result;
-}
-
 function validateHello(value: RemoteInitializeResult): void {
   if (!validIdentity(value.workerId)
     || !validIdentity(value.instanceNonce)
@@ -176,7 +151,6 @@ function validateHello(value: RemoteInitializeResult): void {
     || (value.status !== "ready" && value.status !== "running" && value.status !== "waiting")) {
     throw new Error("Invalid remote worker hello");
   }
-  validateCapabilities(value.capabilities);
 }
 
 function validateStartResult(value: RemoteRunStartResult): void {
@@ -190,7 +164,6 @@ function validateStartResult(value: RemoteRunStartResult): void {
     || value.firstSequence < 1) {
     throw new Error("Invalid remote run start result");
   }
-  validateCapabilities(value.capabilities);
 }
 
 function snapshotMatchesCapture(snapshot: RemoteRunSnapshot, capture: RemoteRunCapture): boolean {
@@ -241,7 +214,6 @@ function startFingerprint(request: RemoteWorkerStartRequest): string {
     targetId: request.targetId,
     name: request.name,
     objective: request.objective,
-    requiredCapabilities: request.requiredCapabilities ?? [],
     outputSchema: request.outputSchema,
   });
 }
@@ -251,8 +223,6 @@ export class RemoteWorkerManager {
   readonly monitorOwnerNonce: string;
   readonly #config: RemoteConfig;
   readonly #connectionFactory: RemoteConnectionFactory;
-  readonly #capabilities: readonly RemoteCapability[];
-  readonly #requiredWorkerCapabilities: readonly RemoteCapability[];
   readonly #maxRunsPerHost: number;
   readonly #maxOwnedRuns: number;
   readonly #maxStartCommands: number;
@@ -273,8 +243,6 @@ export class RemoteWorkerManager {
     this.#connectionFactory = options.connectionFactory;
     this.monitorOwnerNonce = options.monitorOwnerNonce ?? randomUUID();
     if (!validIdentity(this.monitorOwnerNonce)) throw new Error("Invalid monitor owner nonce");
-    this.#capabilities = Object.freeze(validateCapabilities(options.capabilities ?? REMOTE_CAPABILITIES));
-    this.#requiredWorkerCapabilities = Object.freeze(validateCapabilities(options.requiredWorkerCapabilities ?? ["streaming", "cancel", "session-resume"]));
     this.#maxRunsPerHost = positiveLimit(options.maxRunsPerHost, 128, "Remote runs per host");
     this.#maxOwnedRuns = positiveLimit(options.maxOwnedRuns, REMOTE_MANAGER_MAX_OWNED_RUNS, "Remote owned runs");
     this.#maxStartCommands = positiveLimit(options.maxStartCommands, REMOTE_MANAGER_MAX_START_COMMANDS, "Remote start commands");
@@ -362,7 +330,6 @@ export class RemoteWorkerManager {
     const record: OwnedRun = {
       capture: { ...request.capture },
       target,
-      capabilities: binding.capabilities,
       snapshot,
       waiters: new Set(),
     };
@@ -400,7 +367,6 @@ export class RemoteWorkerManager {
     this.#assertManagerOpen();
     const record = this.#requireOwned(capture);
     if (isRemoteTerminalStatus(record.snapshot.status)) throw new Error("Cannot send input to a terminal remote run");
-    requireRemoteCapabilities(record.capabilities, [mode === "steer" ? "steer" : "follow-up"]);
     const binding = this.#connectedBinding(record.target.host);
     return binding.connection.input({
       commandId,
@@ -427,7 +393,6 @@ export class RemoteWorkerManager {
   ): Promise<RemoteRunCancelResult> {
     this.#assertManagerOpen();
     const record = this.#requireOwned(capture);
-    requireRemoteCapabilities(record.capabilities, ["cancel"]);
     const binding = this.#connectedBinding(record.target.host);
     return binding.connection.cancel({
       commandId,
@@ -566,7 +531,6 @@ export class RemoteWorkerManager {
     const target = this.resolveTarget(request.targetId);
     const binding = await this.#workerFor(target, request.signal);
     this.#assertManagerOpen();
-    requireRemoteCapabilities(binding.capabilities, request.requiredCapabilities ?? []);
     if (this.#ownedRuns.size >= this.#maxOwnedRuns) throw new RemoteWorkerQuotaError("Remote owned-run registry limit reached");
     const capacity = Math.min(binding.hello!.concurrency, this.#maxRunsPerHost);
     const occupied = binding.remoteActiveRuns + binding.startedSinceHeartbeat + binding.reservations;
@@ -583,7 +547,6 @@ export class RemoteWorkerManager {
         cwd: target.cwd,
         driver: target.driver,
         command: target.command,
-        ...(request.requiredCapabilities ? { requiredCapabilities: request.requiredCapabilities } : {}),
         ...(request.outputSchema === undefined ? {} : { outputSchema: request.outputSchema }),
       });
       this.#assertManagerOpen();
@@ -592,8 +555,6 @@ export class RemoteWorkerManager {
       if (result.workerId !== binding.hello!.workerId || result.instanceNonce !== binding.hello!.instanceNonce) {
         throw new RemoteOwnershipError("Remote start returned a stale worker identity");
       }
-      const capabilities = validateCapabilities(result.capabilities);
-      requireRemoteCapabilities(capabilities, request.requiredCapabilities ?? []);
       const capture: RemoteRunCapture = {
         workerId: result.workerId,
         instanceNonce: result.instanceNonce,
@@ -605,7 +566,6 @@ export class RemoteWorkerManager {
       const record: OwnedRun = {
         capture,
         target,
-        capabilities: Object.freeze(capabilities),
         snapshot: createRemoteRunSnapshot(capture, result.status, this.#now()),
         quotaBinding: binding,
         quotaEpoch: binding.heartbeatEpoch,
@@ -687,7 +647,6 @@ export class RemoteWorkerManager {
       hostId: target.host,
       target,
       connection,
-      capabilities: [],
       status: "connecting",
       remoteActiveRuns: 0,
       startedSinceHeartbeat: 0,
@@ -701,14 +660,10 @@ export class RemoteWorkerManager {
       const hello = await connection.initialize({
         commandId: this.#commandIdFactory(),
         protocolVersions: [REMOTE_PROTOCOL_VERSION],
-        capabilities: this.#capabilities,
         monitorOwnerNonce: this.monitorOwnerNonce,
       });
       validateHello(hello);
-      const negotiated = negotiateRemoteCapabilities(this.#capabilities, hello.capabilities, this.#requiredWorkerCapabilities);
-      if (negotiated.missing.length > 0) requireRemoteCapabilities(negotiated.capabilities, this.#requiredWorkerCapabilities);
-      binding.hello = { ...hello, capabilities: Object.freeze(validateCapabilities(hello.capabilities)) };
-      binding.capabilities = Object.freeze([...negotiated.capabilities]);
+      binding.hello = hello;
       binding.status = hello.status;
       binding.remoteActiveRuns = hello.activeRuns;
       if (binding.earlyHeartbeat) this.#handleHeartbeat(binding, binding.earlyHeartbeat.params);
@@ -846,7 +801,6 @@ export class RemoteWorkerManager {
       targetHostId: binding.hostId,
       workerId: hello.workerId,
       instanceNonce: hello.instanceNonce,
-      capabilities: [...binding.capabilities],
       concurrency: hello.concurrency,
       activeRuns: binding.remoteActiveRuns + binding.startedSinceHeartbeat,
       status: binding.status,

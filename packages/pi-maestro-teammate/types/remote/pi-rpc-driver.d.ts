@@ -9,7 +9,6 @@ export declare const PI_RPC_CANCEL_GRACE_MS = 2000;
 export declare const PI_RPC_EVENT_QUEUE_BYTES: number;
 export declare const PI_RPC_PENDING_INPUT_LIMIT = 64;
 export declare const PI_RPC_PENDING_INPUT_BYTES: number;
-export declare const PI_RPC_CAPABILITIES: readonly ("steer" | "usage" | "streaming" | "follow-up" | "cancel" | "tool-events" | "structured-output" | "session-resume")[];
 type SpawnChild = (command: string, args: readonly string[], options: SpawnOptionsWithoutStdio & {
     stdio: ["pipe", "pipe", "pipe"];
 }) => ChildProcessWithoutNullStreams;
@@ -22,7 +21,6 @@ export interface PiRpcDriverOptions {
 export declare class PiRpcDriver implements RemoteDriver {
     #private;
     readonly id: "pi-rpc";
-    readonly capabilities: readonly ("steer" | "usage" | "streaming" | "follow-up" | "cancel" | "tool-events" | "structured-output" | "session-resume")[];
     constructor(options?: PiRpcDriverOptions);
     start(request: RemoteRunStartParams, context: RemoteDriverContext): Promise<RemoteRunHandle>;
     attach(request: RemoteRunAttachParams, context: RemoteDriverContext): Promise<RemoteRunHandle>;

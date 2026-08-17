@@ -3,7 +3,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Client } from "ssh2";
-import type { RemoteCapability } from "./capabilities.ts";
 import type { RemoteConnection, RemoteConnectionFactory } from "./driver.ts";
 import {
   REMOTE_MAX_LINE_BYTES,
@@ -561,7 +560,6 @@ class SshRemoteConnection implements RemoteConnection {
   readonly #decoder: BoundedLineDecoder;
   #status: RemoteStatus = "connecting";
   #identity?: RemoteWorkerIdentity;
-  #capabilities: readonly RemoteCapability[] = [];
   #stderrBytes = 0;
   #exitCode?: number;
   #closed = false;
@@ -603,12 +601,10 @@ class SshRemoteConnection implements RemoteConnection {
 
   get status(): RemoteStatus { return this.#status; }
   get identity(): RemoteWorkerIdentity | undefined { return this.#identity; }
-  get capabilities(): readonly RemoteCapability[] { return this.#capabilities; }
 
   async initialize(params: RemoteInitializeParams): Promise<RemoteInitializeResult> {
     const result = await this.request("remote/initialize", params);
     this.#identity = Object.freeze({ workerId: result.workerId, instanceNonce: result.instanceNonce });
-    this.#capabilities = Object.freeze([...result.capabilities]);
     this.#status = result.status;
     return result;
   }

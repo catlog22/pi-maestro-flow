@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { REMOTE_CAPABILITIES, type RemoteCapability } from "../src/remote/capabilities.ts";
 import type { RemoteConnection, RemoteConnectionFactory } from "../src/remote/driver.ts";
 import {
   REMOTE_JSONRPC_VERSION,
@@ -102,7 +101,6 @@ class NotificationQueue implements AsyncIterable<RemoteProtocolNotification> {
 class FakeConnection implements RemoteConnection {
   status: RemoteStatus = "connecting";
   identity?: RemoteWorkerIdentity;
-  capabilities: readonly RemoteCapability[] = [];
   readonly queue = new NotificationQueue();
   readonly initializeCalls: RemoteInitializeParams[] = [];
   readonly starts: RemoteRunStartParams[] = [];
@@ -122,7 +120,6 @@ class FakeConnection implements RemoteConnection {
     this.hello = {
       ...identity,
       protocolVersion: REMOTE_PROTOCOL_VERSION,
-      capabilities: [...REMOTE_CAPABILITIES],
       concurrency,
       activeRuns: 0,
       status: "ready",
@@ -132,7 +129,6 @@ class FakeConnection implements RemoteConnection {
   async initialize(params: RemoteInitializeParams): Promise<RemoteInitializeResult> {
     this.initializeCalls.push(params);
     this.identity = { workerId: this.hello.workerId, instanceNonce: this.hello.instanceNonce };
-    this.capabilities = [...this.hello.capabilities];
     this.status = this.hello.status;
     return this.hello;
   }
@@ -164,7 +160,6 @@ class FakeConnection implements RemoteConnection {
       runId: `run-${this.starts.length}`,
       generation: 1,
       status: "running",
-      capabilities: [...REMOTE_CAPABILITIES],
       firstSequence: 1,
     };
   }
@@ -500,7 +495,6 @@ test("close joins an in-flight start and rolls back its late remote run before t
     runId: "late-run",
     generation: 7,
     status: "running",
-    capabilities: [...REMOTE_CAPABILITIES],
     firstSequence: 1,
   };
   const manager = managerFor(new FakeConnectionFactory(connection));
@@ -528,7 +522,6 @@ test("failed local admission rolls back the exact remote run once", async () => 
     runId: "rollback-run",
     generation: 4,
     status: "running",
-    capabilities: [...REMOTE_CAPABILITIES],
     firstSequence: 1,
   };
   const manager = managerFor(new FakeConnectionFactory(connection));

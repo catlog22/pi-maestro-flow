@@ -8,11 +8,9 @@ import test from "node:test";
 import { RequestError } from "@agentclientprotocol/sdk";
 import { AcpClientOperations } from "../src/remote/acp-client-operations.ts";
 import {
-  ACP_CAPABILITIES,
   ACP_PENDING_INPUT_LIMIT,
   AcpDriver,
 } from "../src/remote/acp-driver.ts";
-import { REMOTE_CAPABILITIES, requireRemoteCapabilities } from "../src/remote/capabilities.ts";
 import type { RemoteRunHandle } from "../src/remote/driver.ts";
 import { createRemoteRequest, parseRemoteEnvelopeLine, type RemoteJsonRpcEnvelope } from "../src/remote/protocol.ts";
 import { connectRemoteSocket, RemoteBridgeServer } from "../src/remote/server.ts";
@@ -282,22 +280,13 @@ test("bridge defaults register the ACP driver", async () => {
     const initialized = await peer.request("init", "remote/initialize", {
       commandId: "init-command",
       protocolVersions: [REMOTE_PROTOCOL_VERSION],
-      capabilities: REMOTE_CAPABILITIES,
       monitorOwnerNonce: owner,
     });
     assert.equal("result" in initialized, true);
-    const unsupported = await peer.request("steer", "run/start", {
-      ...startRequest(configured),
-      commandId: "steer-command",
-      monitorOwnerNonce: owner,
-      requiredCapabilities: ["steer"],
-    });
-    assert.equal("error" in unsupported, true);
     const started = await peer.request("start", "run/start", {
       ...startRequest(configured),
       commandId: "start-command",
       monitorOwnerNonce: owner,
-      requiredCapabilities: ["session-resume"],
     });
     assert.equal("result" in started, true);
     const result = await peer.notification("run/result");
@@ -339,7 +328,6 @@ test("ACP driver uses stable v1 init/new/prompt, streams normalized events, and 
   const driver = new AcpDriver({ cancelGraceMs: 50, startupTimeoutMs: 1_000 });
   try {
     const handle = await start(driver, configured);
-    assert.deepEqual(handle.capabilities, [...ACP_CAPABILITIES, "session-resume"]);
     const events = await collectEvents(handle);
     await handle.close();
     assert.equal((await driver.list({
@@ -525,7 +513,7 @@ test("ACP event floods exceed a byte bound and terminate with one bounded failur
   }
 });
 
-test("ACP refusal fails and session-resume is omitted when the agent does not advertise it", async (t) => {
+test("ACP refusal fails and a non-resuming agent still completes", async (t) => {
   for (const mode of ["refusal", "noresume"] as const) {
     await t.test(mode, async () => {
       const root = canonicalTempRoot(`pi-acp-${mode}-`);
@@ -534,7 +522,6 @@ test("ACP refusal fails and session-resume is omitted when the agent does not ad
       const driver = new AcpDriver({ cancelGraceMs: 50, startupTimeoutMs: 1_000 });
       try {
         const handle = await start(driver, configured);
-        if (mode === "noresume") assert.deepEqual(handle.capabilities, ACP_CAPABILITIES);
         const events = await collectEvents(handle);
         await handle.close();
         assert.equal(events.at(-1).status, mode === "refusal" ? "failed" : "completed");
@@ -595,12 +582,6 @@ test("ACP driver fails closed on mismatch, malformed, oversize, hanging, and non
       }
     });
   }
-});
-
-test("ACP refuses steer and structured-output capabilities", async () => {
-  assert.deepEqual(ACP_CAPABILITIES, ["streaming", "follow-up", "cancel", "tool-events"]);
-  assert.throws(() => requireRemoteCapabilities(ACP_CAPABILITIES, ["steer"]), /does not support/);
-  assert.throws(() => requireRemoteCapabilities(ACP_CAPABILITIES, ["structured-output"]), /does not support/);
 });
 
 test("in-process ACP operations default deny and honor AbortSignal", async () => {

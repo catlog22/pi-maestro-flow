@@ -1,5 +1,4 @@
 /** Driver-neutral boundaries implemented by bridge, SSH, Pi RPC, and ACP layers. */
-import type { RemoteCapability } from "./capabilities.ts";
 import type { RemoteInitializeParams, RemoteInitializeResult, RemoteProtocolNotification, RemoteRequestMethod, RemoteRequestParamsByMethod, RemoteResultByMethod, RemoteRunAttachParams, RemoteRunAttachResult, RemoteRunCancelParams, RemoteRunCancelResult, RemoteRunInputParams, RemoteRunInputResult, RemoteRunListResult, RemoteRunStartParams, RemoteRunStartResult } from "./protocol.ts";
 import type { RemoteDriverId, RemoteRunCapture, RemoteRunEvent, RemoteRunSnapshot, RemoteStatus, ResolvedRemoteTarget, RemoteWorkerIdentity } from "./types.ts";
 export interface RemoteDriverContext extends RemoteWorkerIdentity {
@@ -8,7 +7,6 @@ export interface RemoteDriverContext extends RemoteWorkerIdentity {
 }
 export interface RemoteRunHandle {
     readonly capture: RemoteRunCapture;
-    readonly capabilities: readonly RemoteCapability[];
     snapshot(): RemoteRunSnapshot;
     events(): AsyncIterable<RemoteRunEvent>;
     input(request: RemoteRunInputParams): Promise<RemoteRunInputResult>;
@@ -17,7 +15,6 @@ export interface RemoteRunHandle {
 }
 export interface RemoteDriver {
     readonly id: RemoteDriverId;
-    readonly capabilities: readonly RemoteCapability[];
     start(request: RemoteRunStartParams, context: RemoteDriverContext): Promise<RemoteRunHandle>;
     attach(request: RemoteRunAttachParams, context: RemoteDriverContext): Promise<RemoteRunHandle>;
     list(context: RemoteDriverContext): Promise<readonly RemoteRunSnapshot[]>;
@@ -26,7 +23,6 @@ export interface RemoteDriver {
 export interface RemoteConnection {
     readonly status: RemoteStatus;
     readonly identity?: RemoteWorkerIdentity;
-    readonly capabilities: readonly RemoteCapability[];
     initialize(params: RemoteInitializeParams): Promise<RemoteInitializeResult>;
     request<Method extends RemoteRequestMethod>(method: Method, params: RemoteRequestParamsByMethod[Method]): Promise<RemoteResultByMethod[Method]>;
     start(params: RemoteRunStartParams): Promise<RemoteRunStartResult>;

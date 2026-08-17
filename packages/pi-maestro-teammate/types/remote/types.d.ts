@@ -1,5 +1,5 @@
 /** Canonical public data model for the Maestro Remote Worker Protocol. */
-export declare const REMOTE_PROTOCOL_VERSION: "remote/1";
+export declare const REMOTE_PROTOCOL_VERSION: "remote/2";
 export declare const REMOTE_CONFIG_VERSION: 2;
 export type RemoteProtocolVersion = typeof REMOTE_PROTOCOL_VERSION;
 export type RemoteConfigVersion = typeof REMOTE_CONFIG_VERSION;
