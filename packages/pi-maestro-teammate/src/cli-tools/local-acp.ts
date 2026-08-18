@@ -45,7 +45,39 @@ export function cliToolNameFromModel(model: string): string {
   return model.slice(CLI_TOOL_MODEL_PREFIX.length);
 }
 
-export interface CliToolRunResult {
+/**
+ * What one run's ACP event stream revealed about tool activity.
+ *
+ * The host's replay fence reads these: a failed run that already completed a
+ * tool call has side effects a fresh replay would repeat, so the run must
+ * report what it saw rather than leaving the fence to assume nothing happened.
+ */
+export interface AcpToolObservation {
+  /** Names of tool calls that reached `phase: "end"`, deduplicated by call id. */
+  completedTools: readonly string[];
+  /** Tool calls that started and never ended; their effects are unknown. */
+  inFlightToolCount: number;
+  /** At least one run event arrived, so the run got further than launching. */
+  sawActivity: boolean;
+  /**
+   * How the run established that the turn ended.
+   *
+   * `authoritative` once an ACP protocol result arrived; `unknown` when the
+   * event stream ended without one, which is also the value every pre-launch
+   * failure reports.
+   */
+  settlementAuthority: "authoritative" | "unknown";
+}
+
+/** Reported by every run that ended before its ACP event stream produced anything. */
+const UNOBSERVED_RUN: AcpToolObservation = {
+  completedTools: [],
+  inFlightToolCount: 0,
+  sawActivity: false,
+  settlementAuthority: "unknown",
+};
+
+export interface CliToolRunResult extends AcpToolObservation {
   exitCode: number;
   messages: Array<{ role: string; content: string }>;
   usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number; costUsd?: number };
@@ -170,11 +202,12 @@ export async function runSshCliTool(
         usage: result.usage,
         durationMs,
         terminalStatus: "completed",
+        ...observationOf(result),
       };
     }
     const reason = result.error
       ?? (result.status === "cancelled" ? "CLI tool run was cancelled" : "CLI tool run did not complete");
-    return failedResult(startedAt, reason, result.usage, durationMs, result.status);
+    return failedResult(startedAt, reason, result.usage, durationMs, result.status, observationOf(result));
   } finally {
     await driver.close();
   }
@@ -268,31 +301,64 @@ export async function runLocalCliTool(
         usage: result.usage,
         durationMs,
         terminalStatus: "completed",
+        ...observationOf(result),
       };
     }
     const reason = result.error
       ?? (result.status === "cancelled" ? "CLI tool run was cancelled" : "CLI tool run did not complete");
-    return failedResult(startedAt, reason, result.usage, durationMs, result.status);
+    return failedResult(startedAt, reason, result.usage, durationMs, result.status, observationOf(result));
   } finally {
     await driver.close();
   }
 }
 
-interface SettledAcpRun {
+export interface SettledAcpRun extends AcpToolObservation {
   status: RemoteRunResultEvent["status"];
   result?: string;
   error?: string;
   usage: CliToolRunResult["usage"];
 }
 
-async function settleAcpRun(
+/** Lift the observation half of a settled run, for callers that carry both. */
+function observationOf(run: SettledAcpRun): AcpToolObservation {
+  return {
+    completedTools: run.completedTools,
+    inFlightToolCount: run.inFlightToolCount,
+    sawActivity: run.sawActivity,
+    settlementAuthority: run.settlementAuthority,
+  };
+}
+
+/**
+ * Drain one ACP run's event stream into its terminal status, usage, and tool
+ * accounting.
+ *
+ * Tool events are counted here rather than discarded because they are the only
+ * evidence the host's replay fence has: a run that completed a tool call and
+ * then failed did work a replay would repeat, and a run whose tools are still
+ * outstanding did work nobody can describe. Exported so that accounting is
+ * testable without a real CLI subprocess.
+ *
+ * @param handle - the started run, whose events are consumed to completion.
+ * @param params - the originating request; its signal drives cancellation.
+ * @returns the settled run, including what its tool events revealed.
+ */
+export async function settleAcpRun(
   handle: RemoteRunHandle,
   params: RunLocalCliToolParams,
 ): Promise<SettledAcpRun> {
   const usage: CliToolRunResult["usage"] = {};
+  // Ended ids are tracked separately from the driver's own `#endedTools`
+  // deduplication so the count stays right when a stream is stitched from more
+  // than one driver instance.
+  const startedToolIds = new Set<string>();
+  const endedToolIds = new Set<string>();
+  const completedTools: string[] = [];
+  let sawActivity = false;
   let settled: RemoteRunResultEvent | undefined;
 
   for await (const event of handle.events()) {
+    sawActivity = true;
     if (params.signal.aborted) {
       await handle.cancel({
         commandId: `timeout-${randomUUID()}`,
@@ -301,6 +367,16 @@ async function settleAcpRun(
         monitorOwnerNonce: handle.capture.monitorOwnerNonce,
         reason: "local-cli-aborted",
       });
+    }
+    if (event.type === "run/event" && event.event.type === "tool") {
+      const tool = event.event.tool;
+      if (tool.phase === "start") {
+        startedToolIds.add(tool.toolCallId);
+      } else if (!endedToolIds.has(tool.toolCallId)) {
+        endedToolIds.add(tool.toolCallId);
+        completedTools.push(tool.toolName);
+      }
+      continue;
     }
     if (event.type === "run/event" && event.event.type === "usage") {
       const value = event.event.usage;
@@ -316,18 +392,27 @@ async function settleAcpRun(
     }
   }
 
+  const observed = {
+    completedTools,
+    inFlightToolCount: Math.max(0, startedToolIds.size - endedToolIds.size),
+    sawActivity,
+  };
   if (settled) {
     return {
       status: settled.status,
       result: settled.result,
       error: settled.error,
       usage,
+      ...observed,
+      settlementAuthority: "authoritative",
     };
   }
   return {
     status: params.signal.aborted ? "cancelled" : "lost",
     error: "Local CLI tool run ended without a protocol result",
     usage,
+    ...observed,
+    settlementAuthority: "unknown",
   };
 }
 
@@ -356,6 +441,7 @@ function failedResult(
   usage: CliToolRunResult["usage"] = {},
   durationMs: number = Date.now() - startedAt,
   terminalStatus: CliToolRunResult["terminalStatus"] = "failed",
+  observed: AcpToolObservation = UNOBSERVED_RUN,
 ): CliToolRunResult {
   return {
     exitCode: 1,
@@ -363,6 +449,7 @@ function failedResult(
     usage,
     durationMs,
     terminalStatus,
+    ...observed,
   };
 }
 
