@@ -47,7 +47,7 @@ the Knowledge Gate and syncs the core engine pin to `maestro-flow@0.5.75`.
 
 | Package | Version | Change |
 |---------|---------|--------|
-| pi-maestro-teammate | 1.14.0 | minor — remote workers + monitor control |
+| pi-maestro-teammate | 2.0.0 | major — 破坏性远端 journal 格式（REMOTE_JOURNAL_VERSION 1 → 2，无迁移） |
 | pi-maestro-flow | 0.21.6 | patch — plan Knowledge Gate, engine sync |
 | pi-cockpit | 0.16.0 | unchanged |
 | pi-maestro-settings-core | 0.1.3 | unchanged |
