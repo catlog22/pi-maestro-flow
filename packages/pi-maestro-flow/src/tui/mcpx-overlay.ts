@@ -60,6 +60,7 @@ export interface McpxOverlayParams {
   requestRender: () => void;
   close: () => void;
   onRegisterWorkspace?: (path: string) => Promise<string>;
+  onOpenWizard?: () => void;
 }
 
 type OverlayMode = "list" | "detail";
@@ -353,6 +354,11 @@ export class McpxOverlay implements Component, Focusable {
     }
     if (data === "e" || data === "E") {
       void this.registerWorkspace();
+      return;
+    }
+    if (data === "c" || data === "C") {
+      if (this.params.onOpenWizard) this.params.onOpenWizard();
+      return;
     }
   }
 
@@ -415,7 +421,7 @@ export class McpxOverlay implements Component, Focusable {
     }
     if (this.status) rows.push(fitLine(this.status, inner));
     if (this.snapshot.error) rows.push(fitLine(fg("31", `! ${this.snapshot.error}`), inner));
-    rows.push(fitSegments(inner, ["Enter detail", "r refresh", "e register cwd", "Esc close"]));
+    rows.push(fitSegments(inner, ["Enter detail", "r refresh", "e register cwd", "c wizard", "Esc close"]));
     return frame(rows, width);
   }
 

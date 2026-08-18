@@ -152,6 +152,7 @@ import {
 } from "../tools/plan-workflow.ts";
 import { SessionOverlay, type SessionOverlayAction } from "../tui/session-overlay.ts";
 import { McpxOverlay } from "../tui/mcpx-overlay.ts";
+import { McpxWizardOverlay } from "../tui/mcpx-wizard.ts";
 import { TodoOverlay } from "../tui/todo-overlay.ts";
 import { GoalOverlay, type GoalOverlayAction } from "../tui/goal-overlay.ts";
 import { KnowledgeOverlay, type KnowledgeOverlayAction } from "../tui/knowledge-overlay.ts";
@@ -2168,8 +2169,26 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
   }
 
   async function openMcpxOverlay(ctx: ExtensionContext): Promise<void> {
+    let reopenWizard = false;
     await ctx.ui.custom<void>((tui, _theme, _keybindings, done) =>
       new McpxOverlay({
+        cwd: ctx.cwd,
+        requestRender: () => tui.requestRender(),
+        close: () => done(undefined),
+        onOpenWizard: () => {
+          reopenWizard = true;
+          done(undefined);
+        },
+      }), {
+      overlay: true,
+      overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%" },
+    });
+    if (reopenWizard) await openMcpxWizard(ctx);
+  }
+
+  async function openMcpxWizard(ctx: ExtensionContext): Promise<void> {
+    await ctx.ui.custom<void>((tui, _theme, _keybindings, done) =>
+      new McpxWizardOverlay({
         cwd: ctx.cwd,
         requestRender: () => tui.requestRender(),
         close: () => done(undefined),
@@ -2411,8 +2430,11 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
     async handler(_args, ctx) { await openSessionOverlay(ctx); },
   });
   pi.registerCommand("mcpx", {
-    description: "Open the MCPX connection monitor — binary/endpoint status, registered workspaces, discoverable Pi windows and cross-window message history (r refresh · e register current workspace)",
-    async handler(_args, ctx) { await openMcpxOverlay(ctx); },
+    description: "Open the MCPX connection monitor — binary/endpoint status, registered workspaces, discoverable Pi windows and cross-window message history (r refresh · e register current workspace · c config wizard). Usage: /mcpx [wizard]",
+    async handler(args, ctx) {
+      if (args.trim().toLowerCase() === "wizard") await openMcpxWizard(ctx);
+      else await openMcpxOverlay(ctx);
+    },
   });
   pi.registerCommand("maestro-knowledge", {
     description: "Open the Knowledge center — review session candidates, reconciliation matches, and corpus health",
