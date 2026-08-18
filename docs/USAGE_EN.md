@@ -482,7 +482,7 @@ The plugin implements full tool-call permission control with multiple modes and 
 |------|----------|
 | `default` | Default mode, dangerous operations require user confirmation |
 | `acceptEdits` | Auto-accept file edits, other operations still require confirmation |
-| `plan` | Plan mode, only read-only operations allowed |
+| `plan` | Plan mode, mutating operations blocked |
 | `dontAsk` | Never ask, auto-allow all operations |
 | `bypassPermissions` | YOLO mode, skip all permission checks (can be disabled by config) |
 
@@ -615,6 +615,7 @@ plan-enter()
 
 **Plan mode behavior:**
 - Edit/write tools and file-mutating commands are blocked
+- Bash stays enabled; read-only commands pass and only mutating shell commands (file writes/redirection, package installs, git writes) are blocked
 - Read/search/explore tools remain available
 - Draft Markdown plans with `plan-update`
 - Inspect plan status with `plan-status`

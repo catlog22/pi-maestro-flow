@@ -188,7 +188,7 @@ export { COCKPIT_UI_OWNERSHIP_EVENT } from "../shared/cockpit-events.ts";
  * only "Waiting for model capacity or first activity…".
  */
 export declare function appendAgentProgressLine(agent: ActiveAgent, data: AgentProgress, correlationId: string): void;
-export declare function buildWorkspaceOwnerState(state: TeammateState, sessionName?: string, contextPressure?: number, backgroundJobs?: readonly WorkspaceBackgroundJobSnapshot[]): WorkspaceOwnerState;
+export declare function buildWorkspaceOwnerState(state: TeammateState, sessionName?: string, contextPressure?: number, backgroundJobs?: readonly WorkspaceBackgroundJobSnapshot[], mainActivityAt?: number): WorkspaceOwnerState;
 /** Compatibility vocabulary for legacy internal status checks. */
 export declare const LIVE_AGENT_STATUSES: ReadonlySet<AgentStatus>;
 /** Resource admission is independent of the externally projected activity. */

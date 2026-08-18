@@ -22,14 +22,18 @@ import {
   discoverWorkspacePeers,
   enqueueWorkspacePeerCommand,
   ensureWorkspacePeerDirectories,
+  finalizeWorkspacePeerResponse,
   formatWorkspacePeerWindowListings,
   formatWorkspaceRemoteRootMessage,
+  loadPersistedOwnerIdentity,
   normalizeWorkspacePath,
   ownerSnapshotPath,
   projectWorkspacePeerWindow,
   publishWorkspaceOwner,
+  readWorkspacePeerResponse,
   releaseMonitorLease,
   requireRoutableWorkspaceTarget,
+  resolveWorkspaceOwnerIdentity,
   resolveWorkspaceTarget,
   responseMailboxPath,
   sendWorkspacePeerCommand,
@@ -42,12 +46,16 @@ import {
   workspaceIdForCwd,
   workspaceMainSessionDeliveryAction,
   workspaceMainSessionDeliveryDecision,
+  workspaceWindowLifecycle,
   writePrivateJsonAtomic,
+  SETTLED_RESULT_BYTES,
   type WorkspaceAgentSnapshot,
   type WorkspaceOwnerSnapshot,
   type WorkspaceOwnerState,
   type WorkspaceResolvedTarget,
 } from "../src/extension/workspace-peers.ts";
+import { buildWorkspaceOwnerState } from "../src/extension/teammate-core.ts";
+import type { ActiveAgent, TeammateState } from "../src/shared/types.ts";
 
 const OWNER_A = "a".repeat(32);
 const NONCE_A = "1".repeat(32);
@@ -57,6 +65,28 @@ const OWNER_C = "c".repeat(32);
 const NONCE_C = "3".repeat(32);
 const COMMAND_ID = "d".repeat(32);
 const temporaryDirectories: string[] = [];
+async function fileExists(path: string): Promise<boolean> {
+  return readFile(path, "utf8").then(() => true, () => false);
+}
+
+function lifecycleOwner(
+  partial: Partial<Pick<WorkspaceOwnerSnapshot, "agents" | "backgroundJobs" | "mainActivityAt">>,
+): WorkspaceOwnerSnapshot {
+  return {
+    version: WORKSPACE_PEER_PROTOCOL_VERSION,
+    kind: "owner",
+    workspaceId: "0".repeat(64),
+    normalizedCwd: "d:/project",
+    ownerId: OWNER_A,
+    ownerNonce: NONCE_A,
+    pid: 1,
+    publishedAt: 1,
+    agents: partial.agents ?? [],
+    settled: [],
+    ...(partial.backgroundJobs === undefined ? {} : { backgroundJobs: partial.backgroundJobs }),
+    ...(partial.mainActivityAt === undefined ? {} : { mainActivityAt: partial.mainActivityAt }),
+  };
+}
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -287,7 +317,7 @@ test("stale and implausibly future owners are filtered and stale files can be cl
   await publishWorkspaceOwner(stale, state(agent("cid-stale")), 1_000);
   await publishWorkspaceOwner(future, state(agent("cid-future")), 100_000);
 
-  const discovery = await discoverWorkspacePeers(local, { now: 10_000, staleAfterMs: 2_000, cleanupStale: true });
+  const discovery = await discoverWorkspacePeers(local, { now: 10_000, staleAfterMs: 2_000, cleanupStale: true, cleanupStaleAfterMs: 2_000 });
   assert.deepEqual(discovery.peers, []);
   assert.deepEqual(discovery.staleOwnerIds.sort(), [OWNER_B, OWNER_C]);
   await assert.rejects(readFile(ownerSnapshotPath(stale)), { code: "ENOENT" });
@@ -1051,4 +1081,277 @@ test("contextPressure is clamped and rounded on the publish path", async () => {
   // Absent pressure is omitted entirely.
   const none = await publishWorkspaceOwner(identity, { agents: [], settled: [] });
   assert.equal(none.contextPressure, undefined);
+});
+
+// ===========================================================================
+// Per-session owner identity (stable ownerId across process restarts)
+// ===========================================================================
+
+test("per-session owner identity persists and is reused across starts", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const project = join(rootDir, "project");
+  const sessionKey = join(rootDir, "sessions", "main.jsonl");
+  const first = await resolveWorkspaceOwnerIdentity(project, { rootDir, sessionKey });
+  assert.match(first, /^[a-f0-9]{32}$/);
+  const identity = createWorkspacePeerIdentity(project, { rootDir, ownerId: first, ownerNonce: NONCE_A });
+  const persisted = await loadPersistedOwnerIdentity(identity, sessionKey);
+  assert.equal(persisted?.ownerId, first);
+  const second = await resolveWorkspaceOwnerIdentity(project, { rootDir, sessionKey });
+  assert.equal(second, first, "same session reuses the persisted ownerId");
+  const other = await resolveWorkspaceOwnerIdentity(project, {
+    rootDir,
+    sessionKey: join(rootDir, "sessions", "other.jsonl"),
+  });
+  assert.notEqual(other, first, "different session keys mint distinct ownerIds");
+});
+
+test("a live foreign process holding the persisted ownerId forces a new identity", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const project = join(rootDir, "project");
+  const sessionKey = join(rootDir, "sessions", "main.jsonl");
+  const ownerId = await resolveWorkspaceOwnerIdentity(project, { rootDir, sessionKey });
+  const holder = createWorkspacePeerIdentity(project, { rootDir, ownerId, ownerNonce: NONCE_A });
+  await publishWorkspaceOwner(holder, state(agent("cid-foreign", "foreign")));
+  const now = Date.now();
+  const adopted = await resolveWorkspaceOwnerIdentity(project, {
+    rootDir,
+    sessionKey,
+    pid: process.pid + 1,
+    now,
+  });
+  assert.notEqual(adopted, ownerId, "a fresh foreign snapshot blocks reuse");
+  const later = await resolveWorkspaceOwnerIdentity(project, {
+    rootDir,
+    sessionKey,
+    pid: process.pid + 1,
+    now: now + 25_000,
+  });
+  assert.equal(later, adopted, "a stale foreign snapshot is reusable");
+});
+
+// ===========================================================================
+// Receipt finalization (target-side rewrite after actual injection)
+// ===========================================================================
+
+test("finalized responses flip deliveryStage to injected in place", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const project = join(rootDir, "project");
+  const sender = createWorkspacePeerIdentity(project, { rootDir, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  const target = createWorkspacePeerIdentity(project, { rootDir, ownerId: OWNER_B, ownerNonce: NONCE_B });
+  await ensureWorkspacePeerDirectories(sender);
+  await ensureWorkspacePeerDirectories(target);
+  await enqueueWorkspacePeerCommand(
+    sender,
+    remoteTarget(target),
+    "follow_up",
+    "hello",
+    { commandId: COMMAND_ID, now: 1_000 },
+  );
+  const consumed = await consumeWorkspacePeerCommands(target, () => ({
+    status: "accepted",
+    message: "accepted by main session",
+    effectiveAction: "follow_up",
+    deliveryStage: "queued",
+  }), { now: 1_100 });
+  assert.equal(consumed.length, 1);
+  const queued = await readWorkspacePeerResponse(sender, COMMAND_ID);
+  assert.equal(queued?.status, "accepted");
+  assert.equal(queued?.deliveryStage, "queued");
+  // The target finalizes once the message is actually injected.
+  assert.equal(await finalizeWorkspacePeerResponse(target, OWNER_A, COMMAND_ID, "injected", { now: 2_000 }), true);
+  const injected = await readWorkspacePeerResponse(sender, COMMAND_ID);
+  assert.equal(injected?.deliveryStage, "injected");
+  assert.equal(injected?.status, "accepted");
+  assert.equal(injected?.fromOwnerId, OWNER_B);
+  assert.equal(injected?.toOwnerId, OWNER_A);
+  assert.equal(injected?.commandId, COMMAND_ID);
+  // Idempotent: an already-finalized response is a no-op.
+  assert.equal(await finalizeWorkspacePeerResponse(target, OWNER_A, COMMAND_ID, "injected", { now: 3_000 }), false);
+  // Rejected responses are never finalized.
+  const rejectedCommandId = "e".repeat(32);
+  await enqueueWorkspacePeerCommand(sender, remoteTarget(target), "steer", "do x", { commandId: rejectedCommandId, now: 5_000 });
+  await consumeWorkspacePeerCommands(target, () => ({ status: "rejected", message: "nope" }), { now: 5_100 });
+  assert.equal(await finalizeWorkspacePeerResponse(target, OWNER_A, rejectedCommandId, "injected", { now: 6_000 }), false);
+  assert.equal((await readWorkspacePeerResponse(sender, rejectedCommandId))?.status, "rejected");
+});
+
+// ===========================================================================
+// Liveness classification (main-session activity vs completed / 0 agents)
+// ===========================================================================
+
+test("workspaceWindowLifecycle classifies liveness from main-session activity", () => {
+  const now = 100_000;
+  const empty = (mainActivityAt?: number) => lifecycleOwner(
+    mainActivityAt === undefined ? {} : { mainActivityAt },
+  );
+  assert.equal(workspaceWindowLifecycle(empty(now - 5_000), now).busy, true);
+  assert.equal(workspaceWindowLifecycle(empty(now - 5_000), now).status, "running");
+  assert.equal(workspaceWindowLifecycle(empty(now - 120_000), now).settled, true);
+  assert.equal(workspaceWindowLifecycle(empty(now - 120_000), now).status, "completed");
+  assert.equal(workspaceWindowLifecycle(empty(undefined), now).status, "completed");
+  const running = lifecycleOwner({ agents: [agent("cid-a", "a")] });
+  assert.equal(workspaceWindowLifecycle(running, now).busy, true);
+  assert.equal(workspaceWindowLifecycle(running, now).settled, false);
+  const sleeping = lifecycleOwner({ agents: [{ ...agent("cid-a", "a"), status: "sleeping" }] });
+  assert.equal(workspaceWindowLifecycle(sleeping, now).settled, true);
+  const ready = lifecycleOwner({
+    agents: [{ ...agent("cid-a", "a"), resultReadyAt: 50_000 }],
+  });
+  assert.equal(workspaceWindowLifecycle(ready, now).resultReady, true);
+  assert.equal(workspaceWindowLifecycle(ready, now).status, "result-ready");
+  const withBg = lifecycleOwner({
+    agents: [],
+    backgroundJobs: [{
+      id: "job-1",
+      command: "npm test",
+      status: "running" as const,
+      background: true,
+      startedAt: 1,
+      updatedAt: 2,
+    }],
+  });
+  assert.equal(workspaceWindowLifecycle(withBg, now).busy, true);
+});
+
+test("window listings report a main-session-active window as running", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const identity = createWorkspacePeerIdentity(join(rootDir, "project"), {
+    rootDir: join(rootDir, "runtime"),
+    ownerId: OWNER_A,
+    ownerNonce: NONCE_A,
+  });
+  const active = await publishWorkspaceOwner(identity, {
+    agents: [],
+    settled: [],
+    sessionName: "mw-aaaa-worker",
+    mainActivityAt: Date.now(),
+  });
+  assert.equal(projectWorkspacePeerWindow(active).status, "running");
+  const idle = await publishWorkspaceOwner(identity, {
+    agents: [],
+    settled: [],
+    sessionName: "mw-aaaa-worker",
+    mainActivityAt: Date.now() - 120_000,
+  });
+  assert.equal(projectWorkspacePeerWindow(idle).status, "sleeping");
+});
+
+// ===========================================================================
+// Owner snapshot new fields (mainActivityAt + settled results)
+// ===========================================================================
+
+test("owner snapshots validate mainActivityAt and settled results", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const identity = createWorkspacePeerIdentity(join(rootDir, "project"), {
+    rootDir: join(rootDir, "runtime"),
+    ownerId: OWNER_A,
+    ownerNonce: NONCE_A,
+  });
+  const published = await publishWorkspaceOwner(identity, {
+    agents: [],
+    settled: [{
+      correlationId: "settled-0001",
+      agent: "general",
+      status: "completed",
+      settledAt: 1_000,
+      summary: "done",
+      result: "the final result body",
+    }],
+    mainActivityAt: 1_500,
+  });
+  assert.equal(published.mainActivityAt, 1_500);
+  assert.equal(published.settled[0]?.result, "the final result body");
+  const oversized = {
+    ...published,
+    settled: [{ ...published.settled[0]!, result: "x".repeat(SETTLED_RESULT_BYTES + 1) }],
+  };
+  assert.equal(validateWorkspaceOwnerSnapshot(oversized), undefined, "oversized results are rejected");
+});
+
+// ===========================================================================
+// Stale cleanup threshold (separate from listing staleness)
+// ===========================================================================
+
+test("stale cleanup respects a longer deletion threshold than listing staleness", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const runtime = join(rootDir, "runtime");
+  const project = join(rootDir, "project");
+  const peer = createWorkspacePeerIdentity(project, { rootDir: runtime, ownerId: OWNER_B, ownerNonce: NONCE_B });
+  const self = createWorkspacePeerIdentity(project, { rootDir: runtime, ownerId: OWNER_A, ownerNonce: NONCE_A });
+  await ensureWorkspacePeerDirectories(peer);
+  await publishWorkspaceOwner(peer, state(agent("cid-stale", "stale")), 100_000);
+  const discovery = await discoverWorkspacePeers(self, { now: 130_000, cleanupStale: true, includeSelf: true });
+  assert.deepEqual(discovery.staleOwnerIds, [OWNER_B]);
+  assert.equal(discovery.peers.length, 0);
+  assert.equal(await fileExists(ownerSnapshotPath(peer)), true, "brief staleness does not delete the owner file");
+  await discoverWorkspacePeers(self, { now: 230_000, cleanupStale: true, includeSelf: true });
+  assert.equal(await fileExists(ownerSnapshotPath(peer)), false, "long staleness deletes the owner file");
+});
+
+// ===========================================================================
+// Settled result bodies (bounded, most-recent-only)
+// ===========================================================================
+
+test("buildWorkspaceOwnerState attaches bounded results to the most recent settled agents", () => {
+  const activeRuns = new Map<string, ActiveAgent>();
+  const now = Date.now();
+  for (let index = 0; index < 12; index += 1) {
+    const correlationId = `settled-${String(index).padStart(4, "0")}`;
+    activeRuns.set(correlationId, {
+      agent: "general",
+      correlationId,
+      startedAt: now - 60_000,
+      abortController: new AbortController(),
+      inbox: [],
+      outputLog: [],
+      lastActivityAt: now - (11 - index),
+      lastResult: `result body ${index}`,
+      status: "completed" as const,
+      depth: 0,
+      sleepMs: 0,
+    });
+  }
+  const state: TeammateState = {
+    baseCwd: "d:/project",
+    currentSessionId: "session-1",
+    activeRuns,
+    namedAgents: new Map(),
+  };
+  const built = buildWorkspaceOwnerState(state, "window", undefined, undefined, 5_000);
+  assert.equal(built.mainActivityAt, 5_000);
+  const settled = built.settled ?? [];
+  const withResult = settled.filter((record) => record.result !== undefined);
+  assert.equal(withResult.length, 8, "only the most recent 8 settled records carry results");
+  // The settled array keeps map insertion order; the newest 8 (0011..0004) carry results.
+  assert.equal(withResult[0]!.correlationId, "settled-0004");
+  assert.equal(withResult[7]!.correlationId, "settled-0011", "newest settled record keeps its result");
+  assert.equal(settled.find((record) => record.correlationId === "settled-0001")?.result, undefined);
+});
+
+test("buildWorkspaceOwnerState truncates oversized settled results to bytes", () => {
+  const correlationId = "settled-0001";
+  const activeRuns = new Map<string, ActiveAgent>();
+  activeRuns.set(correlationId, {
+    agent: "general",
+    correlationId,
+    startedAt: 1_000,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: 2_000,
+    lastResult: "好".repeat(50_000),
+    status: "completed" as const,
+    depth: 0,
+    sleepMs: 0,
+  });
+  const state: TeammateState = {
+    baseCwd: "d:/project",
+    currentSessionId: "session-1",
+    activeRuns,
+    namedAgents: new Map(),
+  };
+  const built = buildWorkspaceOwnerState(state);
+  const result = (built.settled ?? [])[0]!.result;
+  assert.ok(result !== undefined);
+  assert.ok(Buffer.byteLength(result, "utf8") <= SETTLED_RESULT_BYTES);
 });

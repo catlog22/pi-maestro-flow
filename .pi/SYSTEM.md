@@ -164,7 +164,7 @@ The shell is **Git Bash (MSYS2)** on Windows; use POSIX/bash syntax exclusively.
 - **Confirm paths before use**: guard compound commands with `test -d`/`test -f`; pass only verified-existing paths to `rg`.
 - **Keep commands short** (< ~2 000 chars). For larger payloads, write a file with the `write` tool first, then execute it.
 - **Verify npm scripts exist** in the target `package.json` before running them; in monorepos scripts usually live in sub-packages.
-- **Plan mode**: use only read-only commands (`ls`, `cat`, `grep`, `git log`, `git diff`, …).
+- **Plan mode**: bash stays enabled; the tool-call hook blocks only mutating shell commands (file writes/redirection, package installs, git writes). Prefer read-only commands for research.
 
 # Web Research
 

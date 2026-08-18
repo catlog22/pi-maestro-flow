@@ -898,13 +898,60 @@ test("Plan hooks preserve read-only discovery and block mutations before approva
     for (const toolName of ["Write", "Edit", "NotebookEdit"]) {
       assert.match(onToolCallPlan({ toolName, input: {} })?.reason ?? "", /read-only before approval/);
     }
-    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "rg -n Plan src" } }), undefined);
+    // Bash is default-allow in Plan mode: read-only discovery stays available...
+    for (const command of [
+      "rg -n Plan src",
+      "find . -name '*.ts'",
+      "du -sh .",
+      "ls -la | head -20",
+      "ls -la && git status --short",
+      "git log --oneline -5",
+      "git -C src status",
+      "git --no-pager diff HEAD~1",
+      "git grep -n foo src",
+      "git branch -a",
+      "git rev-parse HEAD",
+      "node --version",
+      "npm ls --depth=0",
+      "curl -sI https://example.com",
+      "sed -n '1,5p' file.txt",
+      "grep -rn \"rm -rf\" docs",
+      "cat file > /dev/null",
+      "cd /tmp && ls -la",
+      "maestro search \"plan mode\" --json",
+      "maestro knowledge review --json",
+      "maestro run status --json",
+      "$(date)",
+    ]) {
+      assert.equal(
+        onToolCallPlan({ toolName: "bash", input: { command } }),
+        undefined,
+        command,
+      );
+    }
+    // ... only clearly mutating commands are blocked.
     for (const command of [
       "rm -rf src",
       "sed -i 's/a/b/' src/app.ts",
       "git diff --output=review.patch",
       "git show --ext-diff HEAD",
       "rg --pre 'touch modified.txt' Plan src",
+      "echo hi > f.txt",
+      "git add .",
+      "git commit -m x",
+      "git push origin main",
+      "git branch -d old",
+      "git config user.name me",
+      "npm install lodash",
+      "npm run build",
+      "bash -c \"rm -rf src\"",
+      "find . -name '*.tmp' -delete",
+      "tee out.txt",
+      "curl -o f https://x",
+      "wget https://x",
+      "mkdir -p dist",
+      "maestro knowledge stage spec x",
+      "maestro run next",
     ]) {
       assert.match(onToolCallPlan({ toolName: "bash", input: { command } })?.reason ?? "", /blocked/, command);
     }

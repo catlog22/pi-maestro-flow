@@ -34,6 +34,19 @@ export const MAX_WINDOW_LISTING_ACTIVE_AGENTS = 8;
 
 export const MONITOR_LEASE_STALE_MS = 60_000;
 
+/** A window whose main session was active within this window is busy even with zero sub-agents. */
+export const MAIN_SESSION_ACTIVE_MS = 60_000;
+/** Per-settled-agent result payload cap (keeps owner snapshots under MAX_OWNER_FILE_BYTES). */
+export const SETTLED_RESULT_BYTES = 32 * 1024;
+/** Max settled records that carry a result body in the owner snapshot. */
+export const SETTLED_RESULT_MAX = 8;
+/** Owner snapshot deletion threshold for stale cleanup (listing staleness stays at DEFAULT_PEER_STALE_MS). */
+export const CLEANUP_STALE_DEFAULT_MS = 120_000;
+/** Version of the per-session owner identity file. */
+export const IDENTITY_FILE_VERSION = 1 as const;
+
+const IDENTITY_FILE_MAX_BYTES = 8 * 1024;
+
 const MAX_STRING = 4_096;
 const MAX_SUMMARY = 8_192;
 const MAX_MAILBOX_ENTRIES = 512;
@@ -66,6 +79,7 @@ export interface WorkspacePeerPaths {
   ownersDir: string;
   commandsDir: string;
   responsesDir: string;
+  identitiesDir: string;
 }
 
 export interface WorkspacePeerIdentity {
@@ -106,6 +120,8 @@ export interface WorkspaceSettledSnapshot {
   status: WorkspaceSettledStatus;
   settledAt: number;
   summary?: string;
+  /** Final result body of the settled agent (bounded, most-recent SETTLED_RESULT_MAX only). */
+  result?: string;
 }
 
 export interface WorkspaceBackgroundJobSnapshot {
@@ -126,6 +142,8 @@ export interface WorkspaceOwnerState {
   sessionName?: string;
   /** Context pressure as percentage of the window's context window (0-100). */
   contextPressure?: number;
+  /** Last main-session activity timestamp — liveness signal when no sub-agents are running. */
+  mainActivityAt?: number;
 }
 
 export interface WorkspaceOwnerSnapshot {
@@ -141,6 +159,8 @@ export interface WorkspaceOwnerSnapshot {
   sessionName?: string;
   /** Context pressure as percentage of the window's context window (0-100). */
   contextPressure?: number;
+  /** Last main-session activity timestamp — liveness signal when no sub-agents are running. */
+  mainActivityAt?: number;
   agents: WorkspaceAgentSnapshot[];
   settled: WorkspaceSettledSnapshot[];
   backgroundJobs?: WorkspaceBackgroundJobSnapshot[];
@@ -180,6 +200,43 @@ export function workspacePeerDisplayName(sessionName: string | undefined, ownerI
   return boundedListingText(label, MAX_WINDOW_LISTING_LABEL_CHARS);
 }
 
+export interface WorkspaceWindowLifecycle {
+  /** Live work: running sub-agents, bash_bg jobs, or a recently active main session. */
+  busy: boolean;
+  /** All work settled — safe to report the window as completed. */
+  settled: boolean;
+  /** Agents exist, none running without a result, and no background jobs — results are readable. */
+  resultReady: boolean;
+  status: "running" | "result-ready" | "completed" | "sleeping";
+}
+
+/**
+ * Liveness classification of a workspace window from its owner snapshot.
+ * The main-session activity signal prevents `completed / 0 agents` misreports
+ * while a window's main session is itself working (no teammate sub-agents).
+ */
+export function workspaceWindowLifecycle(
+  owner: Pick<WorkspaceOwnerSnapshot, "agents" | "backgroundJobs" | "mainActivityAt">,
+  now = Date.now(),
+  options: { mainActiveMs?: number } = {},
+): WorkspaceWindowLifecycle {
+  const mainActiveMs = options.mainActiveMs ?? MAIN_SESSION_ACTIVE_MS;
+  const mainRecentlyActive = owner.mainActivityAt !== undefined
+    && owner.mainActivityAt >= 0
+    && now - owner.mainActivityAt <= mainActiveMs;
+  const backgroundJobs = owner.backgroundJobs ?? [];
+  const busy = owner.agents.some((agent) => agent.status === "running")
+    || backgroundJobs.length > 0
+    || mainRecentlyActive;
+  const settled = !busy && owner.agents.every((agent) => agent.status !== "running");
+  const resultReady = !settled
+    && backgroundJobs.length === 0
+    && owner.agents.length > 0
+    && owner.agents.every((agent) => agent.status !== "running" || agent.resultReadyAt !== undefined);
+  const status = settled ? "completed" : resultReady ? "result-ready" : busy ? "running" : "sleeping";
+  return { busy, settled, resultReady, status };
+}
+
 export function projectWorkspacePeerWindow(owner: WorkspaceOwnerSnapshot): WorkspacePeerWindowListing {
   return {
     target: `owner:${owner.ownerId}`,
@@ -187,9 +244,7 @@ export function projectWorkspacePeerWindow(owner: WorkspaceOwnerSnapshot): Works
     ...(owner.sessionId ? { sessionId: owner.sessionId } : {}),
     ...(owner.sessionName ? { sessionName: owner.sessionName } : {}),
     displayName: workspacePeerDisplayName(owner.sessionName, owner.ownerId),
-    status: owner.agents.some((agent) => agent.status === "running") || (owner.backgroundJobs?.length ?? 0) > 0
-      ? "running"
-      : "sleeping",
+    status: workspaceWindowLifecycle(owner).busy ? "running" : "sleeping",
     agentCount: owner.agents.length,
     activeAgents: owner.agents.slice(0, MAX_WINDOW_LISTING_ACTIVE_AGENTS).map((agent) => ({
       role: boundedListingText(agent.agent, MAX_WINDOW_LISTING_LABEL_CHARS),
@@ -410,6 +465,7 @@ export function createWorkspacePeerPaths(cwd: string, rootDir?: string): Workspa
     ownersDir: join(root, "owners"),
     commandsDir: join(root, "commands"),
     responsesDir: join(root, "responses"),
+    identitiesDir: join(root, "identities"),
   };
 }
 
@@ -484,6 +540,7 @@ export async function ensureWorkspacePeerDirectories(identity: WorkspacePeerIden
     makePrivateDirectory(identity.paths.ownersDir),
     makePrivateDirectory(identity.paths.commandsDir),
     makePrivateDirectory(identity.paths.responsesDir),
+    makePrivateDirectory(identity.paths.identitiesDir),
     makePrivateDirectory(commandMailboxPath(identity, identity.ownerId)),
     makePrivateDirectory(responseMailboxPath(identity, identity.ownerId)),
   ]);
@@ -731,7 +788,8 @@ function validateSettled(value: unknown): WorkspaceSettledSnapshot | undefined {
     || !["completed", "failed", "terminated"].includes(String(value.status))
     || !boundedInteger(value.settledAt)
     || !optional(value.name, (candidate): candidate is string => boundedString(candidate, 256))
-    || !optional(value.summary, (candidate): candidate is string => boundedString(candidate, MAX_SUMMARY))) return undefined;
+    || !optional(value.summary, (candidate): candidate is string => boundedString(candidate, MAX_SUMMARY))
+    || !optional(value.result, (candidate): candidate is string => boundedString(candidate, SETTLED_RESULT_BYTES))) return undefined;
   return {
     correlationId: value.correlationId,
     ...(value.name === undefined ? {} : { name: value.name }),
@@ -739,6 +797,7 @@ function validateSettled(value: unknown): WorkspaceSettledSnapshot | undefined {
     status: value.status as WorkspaceSettledStatus,
     settledAt: value.settledAt,
     ...(value.summary === undefined ? {} : { summary: value.summary }),
+    ...(value.result === undefined ? {} : { result: value.result }),
   };
 }
 
@@ -885,6 +944,7 @@ export function validateWorkspaceOwnerSnapshot(
     || !optional(value.sessionId, (candidate): candidate is string => boundedString(candidate, 256))
     || !optional(value.sessionName, (candidate): candidate is string => boundedString(candidate, 256))
     || !optional(value.contextPressure, (candidate): candidate is number => boundedInteger(candidate) && candidate >= 0 && candidate <= 100)
+    || !optional(value.mainActivityAt, boundedInteger)
     || !Array.isArray(value.agents)
     || value.agents.length > MAX_OWNER_AGENTS
     || !Array.isArray(value.settled)
@@ -915,6 +975,7 @@ export function validateWorkspaceOwnerSnapshot(
     ...(value.sessionId === undefined ? {} : { sessionId: value.sessionId }),
     ...(value.sessionName === undefined ? {} : { sessionName: value.sessionName }),
     ...(value.contextPressure === undefined ? {} : { contextPressure: value.contextPressure }),
+    ...(value.mainActivityAt === undefined ? {} : { mainActivityAt: value.mainActivityAt }),
     agents: agents as WorkspaceAgentSnapshot[],
     settled: settled as WorkspaceSettledSnapshot[],
     ...(backgroundJobs === undefined ? {} : { backgroundJobs: backgroundJobs as WorkspaceBackgroundJobSnapshot[] }),
@@ -939,6 +1000,7 @@ export function buildWorkspaceOwnerSnapshot(
     ...(state.sessionName === undefined ? {} : { sessionName: state.sessionName }),
     // Protocol boundary: clamp/round pressure so publish never rejects.
     ...(state.contextPressure === undefined ? {} : { contextPressure: Math.max(0, Math.min(100, Math.round(state.contextPressure))) }),
+    ...(state.mainActivityAt === undefined ? {} : { mainActivityAt: state.mainActivityAt }),
     agents: [...state.agents],
     settled: [...(state.settled ?? [])],
     ...(state.backgroundJobs === undefined ? {} : { backgroundJobs: [...state.backgroundJobs] }),
@@ -977,11 +1039,13 @@ async function listJsonFiles(path: string): Promise<string[]> {
 
 export async function discoverWorkspacePeers(
   identity: WorkspacePeerIdentity,
-  options: { now?: number; staleAfterMs?: number; cleanupStale?: boolean; includeSelf?: boolean } = {},
+  options: { now?: number; staleAfterMs?: number; cleanupStale?: boolean; cleanupStaleAfterMs?: number; includeSelf?: boolean } = {},
 ): Promise<WorkspacePeerDiscovery> {
   const now = options.now ?? Date.now();
   const staleAfterMs = options.staleAfterMs ?? DEFAULT_PEER_STALE_MS;
   if (!boundedInteger(staleAfterMs, 1)) throw new Error("staleAfterMs must be a positive integer");
+  const cleanupStaleAfterMs = options.cleanupStaleAfterMs ?? CLEANUP_STALE_DEFAULT_MS;
+  if (!boundedInteger(cleanupStaleAfterMs, 1)) throw new Error("cleanupStaleAfterMs must be a positive integer");
   const peers: WorkspaceOwnerSnapshot[] = [];
   const staleOwnerIds: string[] = [];
   const corruptFiles: string[] = [];
@@ -998,12 +1062,83 @@ export async function discoverWorkspacePeers(
     }
     if (snapshot.publishedAt > now + staleAfterMs || now - snapshot.publishedAt > staleAfterMs) {
       staleOwnerIds.push(ownerId);
-      if (options.cleanupStale) await rm(path, { force: true }).catch(() => undefined);
+      if (options.cleanupStale
+        && (snapshot.publishedAt > now + cleanupStaleAfterMs || now - snapshot.publishedAt > cleanupStaleAfterMs)) {
+        await rm(path, { force: true }).catch(() => undefined);
+      }
       continue;
     }
     if (options.includeSelf || ownerId !== identity.ownerId) peers.push(snapshot);
   }
   return { peers, staleOwnerIds, corruptFiles };
+}
+
+// ---------------------------------------------------------------------------
+// Per-session owner identity — stable ownerId across process restarts
+// ---------------------------------------------------------------------------
+
+export interface PersistedOwnerIdentity {
+  version: typeof IDENTITY_FILE_VERSION;
+  ownerId: string;
+}
+
+export function workspacePeerIdentityPath(identity: WorkspacePeerIdentity, sessionKey: string): string {
+  const key = createHash("sha256").update(normalizeWorkspacePath(sessionKey), "utf8").digest("hex");
+  return containedPath(identity.paths.identitiesDir, `${key}.json`);
+}
+
+export async function loadPersistedOwnerIdentity(
+  identity: WorkspacePeerIdentity,
+  sessionKey: string,
+): Promise<PersistedOwnerIdentity | undefined> {
+  const raw = await readBoundedJson(workspacePeerIdentityPath(identity, sessionKey), IDENTITY_FILE_MAX_BYTES);
+  if (!isRecord(raw) || raw.version !== IDENTITY_FILE_VERSION || !assertOwnerIdSafe(raw.ownerId)) return undefined;
+  return { version: IDENTITY_FILE_VERSION, ownerId: raw.ownerId as string };
+}
+
+export async function persistOwnerIdentity(
+  identity: WorkspacePeerIdentity,
+  sessionKey: string,
+  ownerId: string,
+): Promise<void> {
+  assertOwnerId(ownerId, "ownerId");
+  await writePrivateJsonAtomic(
+    workspacePeerIdentityPath(identity, sessionKey),
+    { version: IDENTITY_FILE_VERSION, ownerId },
+    IDENTITY_FILE_MAX_BYTES,
+  );
+}
+
+/**
+ * Resolve the ownerId for a window's workspace-peer incarnation. Reuses the
+ * persisted per-session ownerId unless a live foreign process already holds it
+ * (double-attach guard); otherwise mints and persists a fresh one. The
+ * ownerNonce still rotates every start, so commands sent to a previous
+ * incarnation are rejected with a definitive response instead of orphaned.
+ */
+export async function resolveWorkspaceOwnerIdentity(
+  cwd: string,
+  options: { rootDir?: string; sessionKey?: string; pid?: number; now?: number; staleMs?: number } = {},
+): Promise<string> {
+  const provisional = createWorkspacePeerIdentity(cwd, { rootDir: options.rootDir });
+  const sessionKey = options.sessionKey;
+  if (!sessionKey) return provisional.ownerId;
+  const persisted = await loadPersistedOwnerIdentity(provisional, sessionKey);
+  if (persisted) {
+    const now = options.now ?? Date.now();
+    const staleMs = options.staleMs ?? DEFAULT_PEER_STALE_MS;
+    const pid = options.pid ?? process.pid;
+    const raw = await readBoundedJson(ownerSnapshotPath(provisional, persisted.ownerId), MAX_OWNER_FILE_BYTES);
+    const snapshot = validateWorkspaceOwnerSnapshot(raw, {
+      workspaceId: provisional.workspaceId,
+      ownerId: persisted.ownerId,
+    });
+    const foreignLive = snapshot !== undefined && snapshot.pid !== pid && now - snapshot.publishedAt <= staleMs;
+    if (!foreignLive) return persisted.ownerId;
+  }
+  const ownerId = randomProtocolId();
+  await persistOwnerIdentity(provisional, sessionKey, ownerId);
+  return ownerId;
 }
 
 function targetLabel(target: WorkspaceResolvedTarget): string {
@@ -1345,6 +1480,47 @@ async function readResponse(
     await readBoundedJson(responsePath(identity, ownerId, command.commandId), MAX_RESPONSE_FILE_BYTES),
     command,
   );
+}
+
+/** Self-consistency read of a response file addressed to this owner (receipt reconciliation). */
+export async function readWorkspacePeerResponse(
+  identity: WorkspacePeerIdentity,
+  commandId: string,
+): Promise<WorkspacePeerCommandResponse | undefined> {
+  const raw = await readBoundedJson(responsePath(identity, identity.ownerId, commandId), MAX_RESPONSE_FILE_BYTES);
+  const response = validateResponse(raw);
+  if (!response || response.toOwnerId !== identity.ownerId || response.commandId !== commandId) return undefined;
+  return response;
+}
+
+/**
+ * Finalize a command response after the message is actually injected. The
+ * claim-time response is written with deliveryStage "queued"; this rewrites it
+ * in place (preserving the envelope fields a sender validates against) once
+ * the target-side injection is confirmed. Returns false when there is nothing
+ * to finalize (missing file, non-accepted status, or already finalized).
+ */
+export async function finalizeWorkspacePeerResponse(
+  identity: WorkspacePeerIdentity,
+  fromOwnerId: string,
+  commandId: string,
+  deliveryStage: WorkspacePeerDeliveryStage,
+  options: { now?: number } = {},
+): Promise<boolean> {
+  const path = responsePath(identity, fromOwnerId, commandId);
+  const raw = await readBoundedJson(path, MAX_RESPONSE_FILE_BYTES);
+  const response = validateResponse(raw);
+  if (!response || response.status !== "accepted" || response.deliveryStage === deliveryStage) return false;
+  const now = options.now ?? Date.now();
+  const updated: WorkspacePeerCommandResponse = {
+    ...response,
+    deliveryStage,
+    respondedAt: now,
+    expiresAt: now + MAX_RESPONSE_RETENTION_MS,
+  };
+  if (!validateResponse(updated)) return false;
+  await writePrivateJsonAtomic(path, updated, MAX_RESPONSE_FILE_BYTES);
+  return true;
 }
 
 function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {

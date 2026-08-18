@@ -65,6 +65,8 @@ import {
   discoverWorkspacePeers,
   resolveWorkspaceTarget,
   sendWorkspacePeerCommand,
+  SETTLED_RESULT_BYTES,
+  SETTLED_RESULT_MAX,
   type WorkspaceAgentSnapshot,
   type WorkspaceBackgroundJobSnapshot,
   type WorkspaceOwnerSnapshot,
@@ -951,21 +953,27 @@ export function buildWorkspaceOwnerState(
   sessionName?: string,
   contextPressure?: number,
   backgroundJobs?: readonly WorkspaceBackgroundJobSnapshot[],
+  mainActivityAt?: number,
 ): WorkspaceOwnerState {
   const agents: WorkspaceAgentSnapshot[] = [];
   const settledById = new Map<string, WorkspaceSettledSnapshot>();
+  const resultCandidates: Array<{ correlationId: string; settledAt: number; result: string }> = [];
   for (const agent of state.activeRuns.values()) {
     const summary = agent.lastResult?.split("\n", 1)[0]
       ?? [...agent.outputLog].reverse().find((line) => typeof line === "string" && line.trim().length > 0);
     if (agent.status === "completed" || agent.status === "failed" || agent.status === "terminated") {
+      const settledAt = agent.failedAt ?? agent.sleptAt ?? agent.lastActivityAt;
       settledById.set(agent.correlationId, {
         correlationId: agent.correlationId,
         ...(agent.name ? { name: agent.name } : {}),
         agent: agent.agent,
         status: agent.status,
-        settledAt: agent.failedAt ?? agent.sleptAt ?? agent.lastActivityAt,
+        settledAt,
         ...(summary ? { summary: truncateUtf8Tail(summary, 8_192) } : {}),
       });
+      if (agent.lastResult) {
+        resultCandidates.push({ correlationId: agent.correlationId, settledAt, result: agent.lastResult });
+      }
       continue;
     }
     agents.push({
@@ -997,6 +1005,18 @@ export function buildWorkspaceOwnerState(
       settledAt: record.settledAt,
       ...(record.lastResult ? { summary: truncateUtf8Tail(record.lastResult.split("\n", 1)[0], 8_192) } : {}),
     });
+    if (record.lastResult) {
+      resultCandidates.push({ correlationId: record.correlationId, settledAt: record.settledAt, result: record.lastResult });
+    }
+  }
+  // Bound the result bodies: most recent SETTLED_RESULT_MAX records, each
+  // truncated to SETTLED_RESULT_BYTES (byte-based) so a CJK-heavy payload
+  // cannot push the owner snapshot past MAX_OWNER_FILE_BYTES.
+  for (const candidate of resultCandidates
+    .sort((left, right) => right.settledAt - left.settledAt)
+    .slice(0, SETTLED_RESULT_MAX)) {
+    const record = settledById.get(candidate.correlationId);
+    if (record) settledById.set(candidate.correlationId, { ...record, result: truncateUtf8Tail(candidate.result, SETTLED_RESULT_BYTES) });
   }
   return {
     agents,
@@ -1005,6 +1025,7 @@ export function buildWorkspaceOwnerState(
     ...(state.currentSessionId ? { sessionId: state.currentSessionId } : {}),
     ...(sessionName ? { sessionName } : {}),
     ...(contextPressure !== undefined && Number.isFinite(contextPressure) ? { contextPressure: Math.max(0, Math.min(100, Math.round(contextPressure))) } : {}),
+    ...(mainActivityAt === undefined ? {} : { mainActivityAt }),
   };
 }
 

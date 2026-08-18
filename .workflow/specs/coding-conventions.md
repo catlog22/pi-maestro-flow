@@ -34,7 +34,7 @@ plan hooks 在 index.ts 中与 goal hooks 链式调用: tool_call 中 plan 先�
 
 </spec-entry>
 
-<spec-entry category="coding" keywords="plan,bash,safety,patterns" date="2026-07-08" sid="S-20260708-5489" title="Pi Plan Mode — bash 命令安全过滤" source="master@709f5b7">
+<spec-entry category="coding" keywords="plan,bash,safety,patterns" date="2026-07-08" sid="S-20260708-5489" title="Pi Plan Mode — bash 命令安全过滤" source="master@709f5b7" status="deprecated" superseded-by="S-20260818-502eb464fdd85d64">
 
 ### Pi Plan Mode — bash 命令安全过滤
 
@@ -219,5 +219,33 @@ Skill 管理 TUI 必须从 Pi DefaultPackageManager 的完整 ResolvedResource �
 
 本轮实例：`runSingleAttempt` 的 14 分支事件 switch 重构为派发表时首版用了对象字面量，键来自子进程 stdout 的 `event.type`。
 @
+
+</spec-entry>
+
+<spec-entry category="coding" keywords="session-knowledge,manual" date="2026-08-18" sid="S-20260818-502eb464fdd85d64" title="Pi Plan Mode — bash 默认放行,黑名单拦截写命令" description="Promoted from session:ksyn-d9ca40a9205d2fe3, packages/pi-maestro-flow/src/tools/plan.ts:755, packages/pi-maestro-flow/src/tools/plan.ts:778, packages/pi-maestro-flow/test/plan-lifecycle.test.ts:901" source="session:ksyn-d9ca40a9205d2fe3:KDC-502eb464fdd85d64" supersedes="S-20260708-5489">
+
+### Pi Plan Mode — bash 默认放行,黑名单拦截写命令
+
+## Pi Plan Mode — bash 默认放行,黑名单拦截写命令
+
+Plan 模式下 bash 工具保持启用且默认放行:常规只读研究命令(find/du/df/管道/&& 链/git 只读子命令/maestro 只读命令/sed -n 过滤等)全部可用。仅拦截明确的写操作(见拦截清单),其余一律放行。这是对旧策略 S-20260708-5489(「只读白名单 + 默认阻止」)的推翻:白名单过窄导致 find/du/df/ls | head/node --version 等只读用法被拦,正是「plan 模式禁用 bash」的体感来源(20260713 误拦 maestro load 属同源缺陷)。
+
+### 拦截清单(isMutatingPlanShell,命令级词法扫描)
+
+- 文件重定向:`>` / `>>` / `&>` / `2>`(`>&` fd 复制与 `/dev/null` 除外)
+- 写动词(全命令词边界):rm/rmdir/unlink/mv/mkdir/touch/truncate/ln/cp/dd/shred/tee/install/chmod/chown/chgrp/mkfs*/mount/umount/kill/pkill/killall/systemctl/service/reboot/halt/poweroff/shutdown/scp/rsync/sftp/vim/vi/nano/make/ninja/mvn/gradle/docker/kubectl/terraform/eval/tar/gzip/gunzip/bzip2/xz/zstd/zip/unzip/7z/rar
+- sed/perl/awk 就地编辑(-i 或 -pi 等,无 -i 时是只读过滤器,放行)
+- shell -c / cmd /c 脚本执行:整段拦截而不是信任内容(兜住 bash -c "rm -rf x")
+- git 写子命令:仅放行 status/diff/log/show/grep/ls-files/ls-tree/ls-remote/rev-parse/rev-list/blame/describe/shortlog/branch/tag/help/version/range-diff/cherry/whatchanged/merge-base/cat-file/check-ignore/diff-tree/name-rev;branch/tag 仅在裸列出时放行,-d/-D/-m/-M/-c/-C(branch)与 -a/-f/-t/-d/-m(tag)拦;--output=/--ext-diff/--textconv 拦
+- 包管理器写操作:npm/npx/yarn/pnpm/bun 的 install/add/remove/update/run/exec/publish/init/create/set/pack/link/dedupe/prune/rebuild/ci;pip 的 install/uninstall/download/wheel/build;apt/dnf/yum/brew/scoop/choco/winget 的 install/remove/update/upgrade/purge/clean 等
+- curl/wget 落盘:-o/-O/-d/-F/-T/--output/--data/--upload-file/--cookie-jar、-X POST|PUT|PATCH|DELETE;wget 无 -O-/-O - 时默认写文件拦
+- maestro CLI 写命令:只放行 search/load/wiki/explore/arch-kb/help/version 及 run status|brief|check|prepare、session status、spec history、knowledge review|search,其余(run next、knowledge stage/promote 等)拦
+- 执行钩子与替换:`--pre`、`find -delete`;`$(...)` 与反引号内容递归套用本规则
+
+### 陷阱与取舍
+
+- 引号内文本不参与动词匹配(避免 `grep -rn "rm" .` / `git log -S "install"` 误拦),代价是 shell -c 需要整段拦截。
+- 解释器绕行(node -e / python -c 写文件)不在拦截范围:本策略是「意外写操作护栏」,不是安全沙箱,刻意绕过视为越界行为。
+- 拦截消息带 (the command modifies files or system state) 细节,与 tool-call 层其他只读拦截消息区分。
 
 </spec-entry>

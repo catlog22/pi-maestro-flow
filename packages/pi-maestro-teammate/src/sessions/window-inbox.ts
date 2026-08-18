@@ -389,7 +389,11 @@ export function formatWorkspaceWindowInbox(result: WindowInboxResult): string {
     const session = entry.sessionName ?? entry.sessionId.slice(0, 8);
     const time = new Date(entry.updatedAt).toISOString();
     const effectiveMode = entry.effectiveMode ?? "unknown";
-    const peer = entry.source === "remote" ? entry.target ?? entry.peerOwnerId : `owner:${entry.peerOwnerId}`;
+    const peer = entry.source === "remote"
+      ? entry.target ?? entry.peerOwnerId
+      : entry.direction === "outgoing"
+        ? `to=owner:${entry.peerOwnerId}`
+        : `from=owner:${entry.peerOwnerId}`;
     const kind = entry.remoteKind ?? entry.messageKind ?? "message";
     const metadata = `${time} | session=${session} | ${entry.direction}/${entry.status} | source=${entry.source} | kind=${kind} | requested=${entry.mode} | effective=${effectiveMode} | peer=${peer} | id=${entry.messageId}`;
     return `${metadata}\n${indentBody(entry.body)}`;

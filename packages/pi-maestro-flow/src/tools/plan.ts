@@ -697,7 +697,9 @@ export function onToolCallPlan(event: {
     const command = typeof event.input.command === "string"
       ? event.input.command
       : typeof event.input.task === "string" ? event.input.task : "";
-    return isReadOnlyPlanShell(command) ? undefined : planMutationBlock(event.toolName);
+    return isMutatingPlanShell(command)
+      ? planMutationBlock(event.toolName, "the command modifies files or system state")
+      : undefined;
   }
   if (toolName === "browser") {
     return action === "open" || action === "close" ? undefined : planMutationBlock(`browser ${action || "run"}`);
@@ -735,38 +737,130 @@ export function onToolCallPlan(event: {
   return planMutationBlock(event.toolName);
 }
 
-function planMutationBlock(operation: string): { block: true; reason: string } {
+function planMutationBlock(operation: string, detail?: string): { block: true; reason: string } {
   return {
     block: true,
-    reason: `Plan mode is read-only before approval; ${operation} is blocked. Approve or exit the Plan first.`,
+    reason: `Plan mode is read-only before approval; ${operation} is blocked${detail ? ` (${detail})` : ""}. Approve or exit the Plan first.`,
   };
 }
 
-function isReadOnlyPlanShell(command: string): boolean {
+/**
+ * Default-allow bash in Plan mode: only clearly mutating commands are blocked.
+ * The scan is lexical over the whole command; quoted strings are excluded from
+ * verb matching (so `rg -rn "rm" .` is not a false positive) while `bash -c
+ * "rm -rf src"` is still caught by the shell -c rule. Deliberate evasion via
+ * interpreters (`node -e`, `python -c`) is out of scope: this is an
+ * accidental-mutation guard, not a sandbox.
+ */
+const MUTATING_SHELL_VERBS = /\b(?:rm|rmdir|unlink|mv|mkdir|touch|truncate|ln|cp|dd|shred|tee|install|chmod|chown|chgrp|mkfs\w*|mount|umount|kill|pkill|killall|systemctl|service|reboot|halt|poweroff|shutdown|scp|rsync|sftp|vim|vi|nano|make|ninja|mvn|gradle|docker|kubectl|terraform|eval|tar|gzip|gunzip|bzip2|bunzip2|xz|unxz|zstd|unzstd|zip|unzip|7z|7za|rar|unrar)\b/;
+const IN_PLACE_EDIT = /(?:^|\s)-[a-z]*i(?:[a-z]|\.|\s|$)/i;
+const SHELL_EXEC_FLAG = /(?:^|\s)-(?:[a-zA-Z]*c|Command)(?:\s|$)|(?:^|\s)\/c(?:\s|$)/;
+const SHELL_FAMILY = /\b(?:bash|sh|zsh|ksh|dash|fish|pwsh|powershell|cmd|command)\b/;
+const GIT_READ_SUBCOMMANDS = new Set([
+  "status", "diff", "log", "show", "grep", "ls-files", "ls-tree", "ls-remote",
+  "rev-parse", "rev-list", "blame", "describe", "shortlog", "branch", "tag",
+  "help", "version", "range-diff", "cherry", "whatchanged", "merge-base",
+  "cat-file", "check-ignore", "diff-tree", "name-rev",
+]);
+const NPM_WRITE_VERBS = /(?:^|\s)(?:install|add|remove|uninstall|update|upgrade|run|exec|publish|init|create|set|pack|link|unlink|dedupe|prune|rebuild|ci)(?=\s|$)/;
+const PIP_WRITE_VERBS = /(?:^|\s)(?:install|uninstall|download|wheel|build)(?=\s|$)/;
+const APT_WRITE_VERBS = /(?:^|\s)(?:install|uninstall|remove|update|upgrade|purge|autoremove|clean|dist-upgrade|full-upgrade|tap|untap|link|unlink|build|rebuild|reinstall)(?=\s|$)/;
+const CURL_WRITE_FLAGS = /(?:^|\s)-(?:[A-Za-z]*[oOD]|-d|-F|-T)(?:\s|$|=)|(?:^|\s)--(?:output(?:-document)?|data(?:-raw|-url)?|form|upload-file|cookie-jar)(?:\s|=)|(?:^|\s)-(?:X|--request)(?:\s|=)(?:POST|PUT|PATCH|DELETE)\b/i;
+// Maestro CLI read commands; everything else mutates the workflow ledger.
+const MAESTRO_READ_TOP = new Set(["search", "load", "wiki", "explore", "arch-kb", "help", "version"]);
+const MAESTRO_READ_SUB = new Map<string, Set<string>>([
+  ["run", new Set(["status", "brief", "check", "prepare"])],
+  ["session", new Set(["status"])],
+  ["spec", new Set(["history"])],
+  ["knowledge", new Set(["review", "search"])],
+]);
+
+function isMutatingPlanShell(command: string): boolean {
   const normalized = command.trim();
-  const shellOperators = normalized.replaceAll("&&", "");
-  if (!normalized || /[;`|&<>]|\$\(/.test(shellOperators)) return false;
-  const segments = normalized.split(/\s*&&\s*/);
-  if (segments[0]?.startsWith("cd ")) segments.shift();
-  if (segments.length !== 1) return false;
-  const executable = segments[0]!.match(/^([\w./-]+)/)?.[1]?.toLowerCase();
-  if (!executable) return false;
-  if (["grep", "ls", "pwd", "cat", "head", "tail", "wc"].includes(executable)) return true;
-  if (executable === "rg") {
-    return !/(?:^|\s)--pre(?:=|\s|$)/i.test(segments[0]!);
+  if (!normalized) return false;
+  // Command substitution and backticks run arbitrary code: scan their payload.
+  for (const segment of normalized.match(/\$\([^()]*\)|`[^`]*`/g) ?? []) {
+    const payload = segment.startsWith("$(") ? segment.slice(2, -1) : segment.slice(1, -1);
+    if (isMutatingPlanShell(payload)) return true;
   }
-  if (executable === "git") {
-    return /^git\s+(status|diff|log|show)(?:\s|$)/i.test(segments[0]!)
-      && !/(?:^|\s)(?:--output(?:=|\s)|--ext-diff(?:\s|$)|--textconv(?:\s|$))/i.test(segments[0]!);
-  }
-  if (executable === "maestro") {
-    return /^maestro\s+(search|load)(?:\s|$)/i.test(segments[0]!)
-      || /^maestro\s+wiki\s+(backlinks|forward)(?:\s|$)/i.test(segments[0]!)
-      || /^maestro\s+spec\s+history(?:\s|$)/i.test(segments[0]!)
-      || /^maestro\s+run\s+(status|brief|check|prepare)(?:\s|$)/i.test(segments[0]!)
-      || /^maestro\s+session\s+status(?:\s|$)/i.test(segments[0]!);
+  // Quoted strings are data, not commands: drop them before the lexical scan.
+  const unquoted = normalized.replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"/g, "");
+  // File-write redirection (`>`, `>>`, `&>`, `2>`); `>&` is fd duplication, not a write.
+  if (/>(?![&<])(?!\s*\/dev\/null\b)/.test(unquoted)) return true;
+  if (MUTATING_SHELL_VERBS.test(unquoted)) return true;
+  // In-place editing rewrites files; sed/perl/awk without -i is a read filter.
+  if (/\b(?:sed|perl|awk)\b/.test(unquoted) && IN_PLACE_EDIT.test(unquoted)) return true;
+  // Exec hooks can run arbitrary programs.
+  if (/(?:^|\s)--pre(?:=|\s|$)/.test(unquoted)) return true;
+  if (/(?:^|\s)-delete(?:\s|$)/.test(unquoted)) return true;
+  // Shell -c / cmd /c executes a script string; block rather than trust its content.
+  if (SHELL_FAMILY.test(unquoted) && SHELL_EXEC_FLAG.test(unquoted)) return true;
+  if (hasMutatingGitCall(unquoted)) return true;
+  if (hasMutatingMaestroCall(unquoted)) return true;
+  if (/\b(?:npm|npx|yarn|pnpm|bun)\b/.test(unquoted) && NPM_WRITE_VERBS.test(unquoted)) return true;
+  if (/\b(?:pip|pip3)\b/.test(unquoted) && PIP_WRITE_VERBS.test(unquoted)) return true;
+  if (/\b(?:apt|apt-get|dnf|yum|brew|scoop|choco|winget|port)\b/.test(unquoted) && APT_WRITE_VERBS.test(unquoted)) return true;
+  if (/\bcurl\b/.test(unquoted) && CURL_WRITE_FLAGS.test(unquoted)) return true;
+  // wget writes a file unless output goes to stdout (-O- / -O -).
+  if (/\bwget\b/.test(unquoted) && !/(?:-O-|-O\s+-)/.test(unquoted)) return true;
+  return false;
+}
+
+function hasMutatingGitCall(command: string): boolean {
+  const sub = gitSubcommand(command);
+  if (sub?.verb === undefined) return false;
+  if (/(?:^|\s)--(?:output(?:=|\s)|ext-diff(?:\s|$)|textconv(?:\s|$))/.test(sub.rest)) return true;
+  if (!GIT_READ_SUBCOMMANDS.has(sub.verb)) return true;
+  // branch/tag are read as bare listing but write with delete/rename/annotate flags.
+  if (sub.verb === "branch" || sub.verb === "tag") {
+    const writeFlags = sub.verb === "branch" ? "dDmMcC" : "aftdm";
+    if (new RegExp(`\\b${sub.verb}\\s+-[${writeFlags}](?:\\s|$)`).test(sub.rest)) return true;
   }
   return false;
+}
+
+function hasMutatingMaestroCall(command: string): boolean {
+  const sub = maestroSubcommand(command);
+  if (sub?.verb === undefined) return false;
+  if (MAESTRO_READ_TOP.has(sub.verb)) return false;
+  const readVerbs = MAESTRO_READ_SUB.get(sub.verb);
+  return !readVerbs || !readVerbs.has(sub.rest.trim().split(/\s+/)[0] ?? "");
+}
+
+function gitSubcommand(command: string): { verb: string | undefined; rest: string } | undefined {
+  const tokens = command.split(/\s+/);
+  const index = tokens.findIndex((token) => token === "git");
+  if (index < 0) return undefined;
+  let cursor = index + 1;
+  while (cursor < tokens.length) {
+    const token = tokens[cursor]!;
+    if (["-C", "--git-dir", "--work-tree", "--namespace", "-c", "--config-env"].includes(token)) {
+      cursor += 2;
+      continue;
+    }
+    if (token.startsWith("-")) {
+      cursor += 1;
+      continue;
+    }
+    return { verb: token, rest: tokens.slice(cursor).join(" ") };
+  }
+  return { verb: undefined, rest: "" };
+}
+
+function maestroSubcommand(command: string): { verb: string | undefined; rest: string } | undefined {
+  const tokens = command.split(/\s+/);
+  const index = tokens.findIndex((token) => token === "maestro");
+  if (index < 0) return undefined;
+  let cursor = index + 1;
+  while (cursor < tokens.length) {
+    const token = tokens[cursor]!;
+    if (token.startsWith("-")) {
+      cursor += 1;
+      continue;
+    }
+    return { verb: token, rest: tokens.slice(cursor + 1).join(" ") };
+  }
+  return { verb: undefined, rest: "" };
 }
 
 

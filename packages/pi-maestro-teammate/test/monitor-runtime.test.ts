@@ -46,6 +46,7 @@ function identity(): WorkspacePeerIdentity {
       ownersDir: "runtime/owners",
       commandsDir: "runtime/commands",
       responsesDir: "runtime/responses",
+      identitiesDir: "runtime/identities",
     },
   };
 }

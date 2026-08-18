@@ -141,15 +141,19 @@ import {
   createWorkspacePeerRuntime,
   discoverWorkspacePeers,
   enqueueWorkspacePeerCommand,
+  finalizeWorkspacePeerResponse,
   formatWorkspacePeerWindowListings,
   formatWorkspaceRemoteRootMessage,
   projectWorkspacePeerWindow,
+  readWorkspacePeerResponse,
   resolveWorkspaceOwnerByName,
+  resolveWorkspaceOwnerIdentity,
   resolveWorkspaceTarget,
   shouldReplayWorkspaceRootQueue,
   activeWorkspaceBackgroundJobsFromPayload,
   waitForWorkspacePeerCommandResponse,
   workspaceMainSessionDeliveryDecision,
+  workspaceWindowLifecycle,
   WORKSPACE_MAIN_SESSION_MARKER,
   type WorkspaceAgentSnapshot,
   type WorkspaceBackgroundJobSnapshot,
@@ -1159,6 +1163,8 @@ export default function registerTeammateExtension(
   let workspacePeerOwners: WorkspaceOwnerSnapshot[] = [];
   let workspaceBackgroundJobs: WorkspaceBackgroundJobSnapshot[] = [];
   let activePromptLoopIds: string[] = [];
+  let workspaceMainSessionActivityAt: number | undefined;
+  let workspaceReceiptReconcileTimer: ReturnType<typeof setInterval> | undefined;
   let workspacePeerRefresh: {
     publisher: WorkspacePeerPublisher;
     fence: RootSessionFence;
@@ -1330,7 +1336,7 @@ export default function registerTeammateExtension(
         agent,
       };
     }
-    const localState = buildWorkspaceOwnerState(state, workspacePeerSessionName, currentContextPressure());
+    const localState = buildWorkspaceOwnerState(state, workspacePeerSessionName, currentContextPressure(), undefined, workspaceMainSessionActivityAt);
     const agent = localState.agents.find((candidate) => candidate.correlationId === bindingKey)
       ?? localState.settled?.find((candidate) => candidate.correlationId === bindingKey);
     if (!agent) return undefined;
@@ -1406,7 +1412,7 @@ export default function registerTeammateExtension(
       const resolved = resolveWorkspaceTarget(
         requested,
         publisher.identity,
-        buildWorkspaceOwnerState(state, workspacePeerSessionName, currentContextPressure()),
+        buildWorkspaceOwnerState(state, workspacePeerSessionName, currentContextPressure(), undefined, workspaceMainSessionActivityAt),
         workspacePeerOwners,
         { includeSettled: true },
       );
@@ -2079,6 +2085,43 @@ export default function registerTeammateExtension(
     await publisher?.stop().catch(() => undefined);
   };
 
+  const RECONCILE_RECEIPT_INTERVAL_MS = 5_000;
+  const RECONCILE_RECEIPT_MAX_AGE_MS = 10 * 60_000;
+  const RECONCILE_RECEIPT_SKIP_AFTER_MS = 2_000;
+
+  /**
+   * Background receipt reconciliation: keeps polling response files for
+   * non-terminal outgoing journal entries so a receipt that finalizes after
+   * the synchronous 5s send window (target-side injection) still lands as
+   * outgoing/injected (or rejected/timeout) instead of freezing at queued.
+   */
+  const reconcileWorkspacePeerReceipts = async (): Promise<void> => {
+    const publisher = workspacePeerPublisher;
+    const registry = sessionHostRegistry;
+    if (!publisher || !registry) return;
+    const now = Date.now();
+    for (const entry of registry.thread.list()) {
+      if (entry.direction !== "outgoing"
+        || (entry.status !== "pending" && entry.status !== "queued")) continue;
+      // Skip entries still inside the synchronous send window.
+      if (entry.updatedAt > now - RECONCILE_RECEIPT_SKIP_AFTER_MS) continue;
+      if (now - entry.updatedAt > RECONCILE_RECEIPT_MAX_AGE_MS) {
+        registry.thread.transition(entry.messageId, "outgoing", "timeout", now);
+        continue;
+      }
+      const response = await readWorkspacePeerResponse(publisher.identity, entry.messageId).catch(() => undefined);
+      if (!response) continue;
+      if (response.status === "accepted" && response.deliveryStage === "injected") {
+        registry.thread.transition(entry.messageId, "outgoing", "injected", response.respondedAt, response.effectiveAction);
+      } else if (response.status === "rejected" || response.status === "error") {
+        registry.thread.transition(entry.messageId, "outgoing", "rejected", response.respondedAt, response.effectiveAction);
+      } else if (response.status === "expired") {
+        registry.thread.transition(entry.messageId, "outgoing", "timeout", response.respondedAt);
+      }
+      // accepted + queued: the target may still finalize; keep waiting.
+    }
+  };
+
   const startWorkspacePeers = (ctx: ExtensionContext): void => {
     const cwd = ctx.cwd;
     const fence = captureRootSessionFence();
@@ -2088,13 +2131,21 @@ export default function registerTeammateExtension(
       .then(async () => {
         await stopWorkspacePeers();
         if (!ownsRootSessionFence(fence)) return;
+        // Stable per-session ownerId across process restarts: response files
+        // keep their mailbox key and in-flight receipts stay readable.
+        const ownerId = await resolveWorkspaceOwnerIdentity(cwd, {
+          sessionKey: ctx.sessionManager?.getSessionFile?.(),
+        });
+        if (!ownsRootSessionFence(fence)) return;
         const publisher = createWorkspacePeerRuntime({
           cwd,
+          ownerId,
           getState: () => buildWorkspaceOwnerState(
             state,
             sessionName,
             currentContextPressure(),
             workspaceBackgroundJobs,
+            workspaceMainSessionActivityAt,
           ),
         });
         await publisher.start();
@@ -6145,17 +6196,8 @@ export default function registerTeammateExtension(
     if (options.view === "turns") return workspaceTurnsSnapshot(owner, target, detail, lines, options);
     const backgroundJobs = owner.backgroundJobs ?? [];
     const foregroundJobs = backgroundJobs.filter((job) => !job.background);
-    const activeStatus = windowRowStatus([
-      ...owner.agents.map((agent) => agent.status),
-      ...backgroundJobs.map(() => "running"),
-    ]);
-    const lifecycleSettled = backgroundJobs.length === 0
-      && owner.agents.every((agent) => agent.status !== "running");
-    const resultReady = !lifecycleSettled
-      && backgroundJobs.length === 0
-      && owner.agents.length > 0
-      && owner.agents.every((agent) => agent.status !== "running" || agent.resultReadyAt !== undefined);
-    const observationStatus = lifecycleSettled ? "completed" : resultReady ? "result-ready" : activeStatus;
+    const lifecycle = workspaceWindowLifecycle(owner);
+    const observationStatus = lifecycle.status;
     const output = [
       `${owner.sessionName ?? `window:${owner.ownerId.slice(0, 8)}`} · ${observationStatus} · ${owner.agents.length} agents`
         + ` · ${backgroundJobs.length} bash_bg${foregroundJobs.length ? ` (${foregroundJobs.length} foreground)` : ""}`,
@@ -6176,8 +6218,8 @@ export default function registerTeammateExtension(
       target,
       found: true,
       nativeStatus: observationStatus,
-      phase: lifecycleSettled ? "settled" : "active",
-      ...(lifecycleSettled ? {
+      phase: lifecycle.settled ? "settled" : "active",
+      ...(lifecycle.settled ? {
         outcome: "success" as const,
         waitStatus: "completed" as const,
         terminalStatus: "completed",
@@ -6203,6 +6245,7 @@ export default function registerTeammateExtension(
       summary: string;
       outputTail: readonly string[];
       startedAt: number;
+      result?: string;
     }> = [
       ...owner.agents.map((agent, index) => ({
         index: index + 1,
@@ -6219,6 +6262,7 @@ export default function registerTeammateExtension(
         summary: record.summary ?? record.status,
         outputTail: [],
         startedAt: record.settledAt,
+        ...(record.result === undefined ? {} : { result: record.result }),
       })),
     ];
     const windowName = owner.sessionName ?? `window:${owner.ownerId.slice(0, 8)}`;
@@ -6242,6 +6286,9 @@ export default function registerTeammateExtension(
         `@${run.name} ${run.status} · started ${new Date(run.startedAt).toISOString()}`,
         ...(run.summary ? [run.summary] : []),
         ...(detail !== "summary" ? run.outputTail.slice(-lines) : []),
+        ...(detail !== "summary" && run.result
+          ? [`-- result --`, ...run.result.split("\n").slice(0, Math.max(lines, 1))]
+          : []),
       ];
       return {
         target,
@@ -7393,10 +7440,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
           agents: owner.agents.length,
           jobs: owner.backgroundJobs?.length ?? 0,
         }),
-        status: windowRowStatus([
-          ...owner.agents.map((agent) => agent.status),
-          ...(owner.backgroundJobs ?? []).map(() => "running"),
-        ]),
+        status: workspaceWindowLifecycle(owner).busy ? "running" : "sleeping",
         idleSeconds: 0,
         bound: false,
         source: owner.sessionName ?? `remote:${owner.ownerId.slice(0, 6)}`,
@@ -8141,7 +8185,11 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     const sessionFile = ctx.sessionManager?.getSessionFile?.();
     const isAgentSession = Array.from(state.activeRuns.values()).some((agent) => agent.sessionFile === sessionFile);
     if (sessionFile && !isAgentSession) state.mainSessionFile = sessionFile;
+    workspaceMainSessionActivityAt = undefined;
     startWorkspacePeers(ctx);
+    if (workspaceReceiptReconcileTimer) clearInterval(workspaceReceiptReconcileTimer);
+    workspaceReceiptReconcileTimer = setInterval(() => void reconcileWorkspacePeerReceipts(), RECONCILE_RECEIPT_INTERVAL_MS);
+    workspaceReceiptReconcileTimer.unref?.();
     void workspacePeerLifecycle.then(() => reconcileMonitorLedgerAtStart(ctx));
     // Query after all extensions have registered their event listeners. The
     // update is cached even if the async workspace publisher is still starting.
@@ -8151,6 +8199,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   });
 
   pi.on("message_end", (event) => {
+    workspaceMainSessionActivityAt = Date.now();
     if (event.message.role !== "custom" || event.message.customType !== "teammate-message") return;
     const details = event.message.details as Record<string, unknown> | undefined;
     if (details?.source !== "workspace-peer" || typeof details.messageId !== "string") return;
@@ -8166,6 +8215,19 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       Math.max(entry.createdAt, Date.now()),
       effectiveMode,
     );
+    // Finalize the claim-time receipt so the sender's ledger can reach
+    // outgoing/injected instead of staying queued forever.
+    if (typeof details.fromOwnerId === "string") {
+      const publisher = workspacePeerPublisher;
+      if (publisher) {
+        void finalizeWorkspacePeerResponse(
+          publisher.identity,
+          details.fromOwnerId,
+          entry.messageId,
+          "injected",
+        ).catch(() => undefined);
+      }
+    }
   });
 
   pi.on("input", async (event) => {
@@ -8178,6 +8240,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
 
   // Turn-level advisor: low-frequency quality review of this session's turns.
   pi.on("agent_end", (event, ctx) => {
+    workspaceMainSessionActivityAt = Date.now();
     void runAdvisorReview(event, ctx);
   });
 
@@ -8221,6 +8284,10 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       await stopWorkspacePeers();
     });
     await workspacePeerLifecycle;
+    if (workspaceReceiptReconcileTimer) {
+      clearInterval(workspaceReceiptReconcileTimer);
+      workspaceReceiptReconcileTimer = undefined;
+    }
     // Stop the mailbox consumer BEFORE killing agents so no in-flight poll can
     // inject into a dying session (previously never stopped at all).
     const stoppedMailbox = mailboxHost;
