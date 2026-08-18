@@ -86,7 +86,12 @@ test("the shared projection is the only builder, and it carries every task field
 
 test("graph dispatch projects the selector into the run spec", () => {
   const source = fs.readFileSync(new URL("../src/runs/execution.ts", import.meta.url), "utf-8");
-  assert.match(source, /params\.backend === undefined \? \{\} : \{ backend: params\.backend \}/);
+  // The selector's two halves: `backendNameOf` reads the task's own choice, and
+  // `backendSpecOf` puts the result on the spec. They are separate lines because
+  // a `cli/<tool>` model derives a name too, and only one of the three sources
+  // may win — a single conditional could not say which.
+  assert.match(source, /if \(params\.backend !== undefined\) return params\.backend;/);
+  assert.match(source, /\.\.\.\(backend === undefined \? \{\} : \{ backend \}\),/);
   assert.match(source, /backend: task\.backend,/);
 });
 

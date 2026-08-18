@@ -92,12 +92,6 @@ import type {
   RunTeammateOptions,
   StructuredOutputCandidate,
 } from "./execution-infra.ts";
-import {
-  isCliToolModel,
-  cliToolNameFromModel,
-  runCliTool,
-} from "../cli-tools/local-acp.ts";
-import { loadCliToolsConfig } from "../cli-tools/cli-tools-config.ts";
 
 // Failed candidate processes must be physically reclaimed before a fallback
 // reuses their correlation identity for a replacement child.
@@ -449,92 +443,6 @@ export async function runSingleAttempt(
     progress.cacheWriteTokens = Math.max(progress.cacheWriteTokens ?? 0, cacheWriteTokens);
     progress.tokens = progress.inputTokens + progress.outputTokens;
   };
-
-  // `cli/<tool>` models run through the local ACP backend instead of a pi
-  // subprocess: the external CLI is spawned directly and driven over the
-  // Agent Client Protocol. Failures before any side effect are marked as
-  // pre-activity infrastructure exits so the candidate sweep can fall back.
-  const resolvedModel = modelOverride ?? params.model ?? agentConfig.model;
-  if (resolvedModel && isCliToolModel(resolvedModel)) {
-    const tool = cliToolNameFromModel(resolvedModel);
-    const cliFailure = (message: string, terminalStatus: SingleResult["terminalStatus"] = "failed"): SingleResult => {
-      const result: SingleResult = {
-        agent: params.agent,
-        name: params.name,
-        task: params.task ?? "",
-        exitCode: 1,
-        messages: [{ role: "system", content: message }],
-        usage: emptyUsage(),
-        model: resolvedModel!,
-        correlationId,
-        originCwd: cwd,
-        durationMs: Date.now() - startTime,
-        terminalStatus,
-      };
-      attemptRecoveryFacts.set(result, {
-        settlementCapability: "legacy",
-        completedToolCount: 0,
-        inFlightToolCount: 0,
-        preActivityInfrastructureExit: true,
-        externalReplayRisk: false,
-      });
-      return result;
-    };
-
-    const cliConfig = loadCliToolsConfig();
-    const toolConfig = cliConfig?.tools?.[tool];
-    if (!toolConfig || !toolConfig.enabled) {
-      return cliFailure(`Unknown CLI tool model ${JSON.stringify(resolvedModel)}: tool "${tool}" is not enabled in teammate-cli-tools.json`);
-    }
-    if (params.outputSchema) {
-      return cliFailure(`CLI tool model ${JSON.stringify(resolvedModel)} does not support structured output`);
-    }
-
-    try {
-      const run = await runCliTool({
-        tool,
-        config: toolConfig,
-        prompt: params.task ?? "",
-        cwd,
-        signal: options.signal ?? new AbortController().signal,
-        timeoutMs: params.timeoutMs,
-      });
-      const result: SingleResult = {
-        agent: params.agent,
-        name: params.name,
-        task: params.task ?? "",
-        exitCode: run.exitCode,
-        messages: run.messages,
-        usage: {
-          inputTokens: run.usage.inputTokens ?? 0,
-          outputTokens: run.usage.outputTokens ?? 0,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-          cost: run.usage.costUsd ?? 0,
-          turns: 1,
-        },
-        model: resolvedModel,
-        correlationId,
-        originCwd: cwd,
-        durationMs: run.durationMs,
-        terminalStatus: run.terminalStatus === "completed"
-          ? "completed"
-          : run.terminalStatus === "cancelled"
-            ? "terminated"
-            : "failed",
-      };
-      attemptRecoveryFacts.set(result, {
-        settlementCapability: "legacy",
-        completedToolCount: 0,
-        inFlightToolCount: 0,
-        preActivityInfrastructureExit: run.exitCode !== 0,
-        externalReplayRisk: false,
-      });
-      return result;
-    } catch (error) {
-      return cliFailure(`CLI tool model ${JSON.stringify(resolvedModel)} failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
 
   return new Promise<SingleResult>((resolve) => {
     let child: ChildProcess;

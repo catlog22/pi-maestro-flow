@@ -56,6 +56,7 @@ import {
   retryDelayMs,
 } from "./retry.ts";
 import { buildReplayFence } from "./recovery-protocol.ts";
+import { cliToolNameFromModel, isCliToolModel } from "../cli-tools/local-acp.ts";
 
 export * from "./execution-infra.ts";
 import {
@@ -158,6 +159,32 @@ function providerOf(model: string): string | undefined {
 // ---------------------------------------------------------------------------
 
 /**
+ * Decide which registration serves this attempt.
+ *
+ * A remote location already selected its backend and a task that named one
+ * meant it, so the model-derived mapping is the last word rather than the first.
+ *
+ * @param params - the teammate request.
+ * @param model - the single model this attempt runs.
+ * @param remote - the remote target this task was located at, when it named one.
+ * @returns the registered backend name, or undefined to take the registry default.
+ */
+function backendNameOf(
+  params: RunSingleTeammateParams,
+  model: string | undefined,
+  remote?: RemoteLocationRouting,
+): string | undefined {
+  if (remote !== undefined) return remote.backend;
+  if (params.backend !== undefined) return params.backend;
+  // A `cli/<tool>` model names its own registration: the tool is the registered
+  // backend, so a deployment adds a CLI by registering one and changes no host
+  // source. An unregistered tool is refused by name by the registry, which is
+  // the same outcome the inline dispatch produced for an unconfigured tool.
+  if (model !== undefined && isCliToolModel(model)) return cliToolNameFromModel(model);
+  return undefined;
+}
+
+/**
  * Project the orchestrator request into the backend contract.
  *
  * Host-resolved fields stay behind: `taskType` has already become a model,
@@ -176,13 +203,12 @@ function backendSpecOf(
   model: string | undefined,
   remote?: RemoteLocationRouting,
 ): TeammateRunSpec {
+  const backend = backendNameOf(params, model, remote);
   return {
     agent: params.agent,
     task: params.task ?? "",
     ...(params.name === undefined ? {} : { name: params.name }),
-    ...(remote === undefined
-      ? (params.backend === undefined ? {} : { backend: params.backend })
-      : { backend: remote.backend }),
+    ...(backend === undefined ? {} : { backend }),
     ...(params.context === undefined ? {} : { context: params.context }),
     ...(model === undefined ? {} : { model }),
     ...(params.thinking === undefined ? {} : { thinking: params.thinking as TeammateRunSpec["thinking"] }),
@@ -641,6 +667,18 @@ export async function runSingleTeammate(
             options.remoteManagerOf,
           );
         if (registry === undefined) {
+          // A `cli/<tool>` model is served by a registered backend and by
+          // nothing else. Legacy mode resolves no registry, so falling through
+          // would hand the model id to a pi subprocess, which would ask a
+          // provider for a model literally named `cli/<tool>` and fail with a
+          // message about an unknown model rather than about the mode.
+          if (modelToUse !== undefined && isCliToolModel(modelToUse)) {
+            return rejectAndPublish(
+              `Teammate task requests model "${modelToUse}", but .pi/teammate-backends.json is in legacy `
+              + `execution mode; set mode "backend-registry" and register "${cliToolNameFromModel(modelToUse)}" `
+              + "— refusing to run a CLI tool model on the pi subprocess path",
+            );
+          }
           attempt = outcomeOf(await runSingleAttempt(
             params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, attemptOptions,
           ));
