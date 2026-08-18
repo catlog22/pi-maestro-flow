@@ -46,6 +46,7 @@ import { altKey } from "../key-labels.ts";
 import { setQuietMode } from "../quiet-state.ts";
 import { toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts";
 import { registerKeybindingsCommand } from "../keybindings-command.ts";
+import { ensureMcpxWorkspace } from "../mcpx-bridge.ts";
 import { executeExplore, type ExploreParams } from "../tools/explore.ts";
 import { executeDelegate, type DelegateParams } from "../tools/delegate.ts";
 import { executeMoa, type MoaParams } from "../tools/moa.ts";
@@ -150,6 +151,7 @@ import {
   requirePublishedExecutionRun,
 } from "../tools/plan-workflow.ts";
 import { SessionOverlay, type SessionOverlayAction } from "../tui/session-overlay.ts";
+import { McpxOverlay } from "../tui/mcpx-overlay.ts";
 import { TodoOverlay } from "../tui/todo-overlay.ts";
 import { GoalOverlay, type GoalOverlayAction } from "../tui/goal-overlay.ts";
 import { KnowledgeOverlay, type KnowledgeOverlayAction } from "../tui/knowledge-overlay.ts";
@@ -848,6 +850,15 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     }
   } catch (error) {
     console.warn(`[pi-maestro-flow] Companion package registration skipped: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  // MCPX workspace auto-registration: register the current project with the
+  // local MCPX runtime on startup so remote MCP clients can bind sessions to
+  // it. Fire-and-forget; failures are logged and never break activation.
+  try {
+    ensureMcpxWorkspace();
+  } catch {
+    // Bridge must never break extension activation.
   }
 
   // UCL: capture only the locked extension-tool surface. pi.getAllTools() exposes
@@ -2156,6 +2167,18 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
     lastRunStates = nextStates;
   }
 
+  async function openMcpxOverlay(ctx: ExtensionContext): Promise<void> {
+    await ctx.ui.custom<void>((tui, _theme, _keybindings, done) =>
+      new McpxOverlay({
+        cwd: ctx.cwd,
+        requestRender: () => tui.requestRender(),
+        close: () => done(undefined),
+      }), {
+      overlay: true,
+      overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%" },
+    });
+  }
+
   async function openSessionOverlay(ctx: ExtensionContext): Promise<void> {
     const view = deriveWorkflowViewModel(workflowSnapshotForUi());
     if (!view || !workflowCoordinator) {
@@ -2386,6 +2409,10 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
   pi.registerCommand("maestro-session", {
     description: "Open the canonical Workflow Session control center",
     async handler(_args, ctx) { await openSessionOverlay(ctx); },
+  });
+  pi.registerCommand("mcpx", {
+    description: "Open the MCPX connection monitor — binary/endpoint status, registered workspaces, discoverable Pi windows and cross-window message history (r refresh · e register current workspace)",
+    async handler(_args, ctx) { await openMcpxOverlay(ctx); },
   });
   pi.registerCommand("maestro-knowledge", {
     description: "Open the Knowledge center — review session candidates, reconciliation matches, and corpus health",
