@@ -33,6 +33,10 @@
       "types": "./types/public/v1/index.d.ts",
       "default": "./src/public/v1/index.ts"
     },
+    "./v1/acp-cli": {
+      "types": "./types/backends/acp-cli.d.ts",
+      "default": "./src/backends/acp-cli.ts"
+    },
     "./v1/agents": {
       "types": "./types/public/v1/agents.d.ts",
       "default": "./src/public/v1/agents.ts"
