@@ -432,6 +432,7 @@ import {
   type SessionMessageResult,
   type SessionMessageKind,
   type SessionResolution,
+  type WindowThreadEntry,
   type WindowThreadEntryInput,
   type WindowThreadStatus,
 } from "../sessions/session-core.ts";
@@ -1195,22 +1196,18 @@ export default function registerTeammateExtension(
   let workspacePeerLifecycle = Promise.resolve();
   let sessionHostRegistry: SessionHostRegistry | undefined;
 
-  const replayQueuedIncomingRootMessages = (
-    ctx: ExtensionContext,
-    reason: "startup" | "reload" | "new" | "resume" | "fork",
-  ): void => {
-    const registry = sessionHostRegistry;
-    if (!registry) return;
-    const workspaceId = workspaceIdForCwd(ctx.cwd);
-    const currentSessionId = ctx.sessionManager?.getSessionId?.();
-    for (const entry of registry.thread.list()) {
-      if (entry.direction !== "incoming"
-        || (entry.status !== "pending" && entry.status !== "queued")
-        || entry.workspaceId !== workspaceId
-        || entry.targetCorrelationId !== WORKSPACE_MAIN_SESSION_MARKER
-        || !shouldReplayWorkspaceRootQueue(reason, entry.targetSessionId, currentSessionId)) continue;
-      const effectiveAction = entry.effectiveMode ?? "follow_up";
-      const delivered = safeSendMessage(pi, {
+  /**
+   * Canonical envelope for re-injecting a persisted incoming root message
+   * (session-start replay and stale-queued re-drive). `details.mode` must
+   * survive so message_end can finalize the thread entry and sender receipt.
+   */
+  const workspaceRootMessageEnvelope = (
+    entry: WindowThreadEntry,
+    options: { replayed?: boolean; redriven?: boolean } = {},
+  ) => {
+    const effectiveAction: "steer" | "follow_up" = entry.effectiveMode ?? "follow_up";
+    return {
+      envelope: {
         customType: "teammate-message",
         content: formatWorkspaceRemoteRootMessage({
           messageId: entry.messageId,
@@ -1231,13 +1228,75 @@ export default function registerTeammateExtension(
           requestedMode: entry.mode,
           mode: effectiveAction,
           ...(entry.messageKind === undefined ? {} : { messageKind: entry.messageKind }),
-          replayed: true,
+          ...(options.replayed ? { replayed: true } : {}),
+          ...(options.redriven ? { redriven: true } : {}),
         },
-      }, {
+      },
+      effectiveAction,
+    };
+  };
+
+  const replayQueuedIncomingRootMessages = (
+    ctx: ExtensionContext,
+    reason: "startup" | "reload" | "new" | "resume" | "fork",
+  ): void => {
+    const registry = sessionHostRegistry;
+    if (!registry) return;
+    const workspaceId = workspaceIdForCwd(ctx.cwd);
+    const currentSessionId = ctx.sessionManager?.getSessionId?.();
+    for (const entry of registry.thread.list()) {
+      if (entry.direction !== "incoming"
+        || (entry.status !== "pending" && entry.status !== "queued")
+        || entry.workspaceId !== workspaceId
+        || entry.targetCorrelationId !== WORKSPACE_MAIN_SESSION_MARKER
+        || !shouldReplayWorkspaceRootQueue(reason, entry.targetSessionId, currentSessionId)) continue;
+      const { envelope, effectiveAction } = workspaceRootMessageEnvelope(entry, { replayed: true });
+      const delivered = safeSendMessage(pi, envelope, {
         triggerTurn: true,
         deliverAs: "followUp",
       });
       if (!delivered) registry.thread.transition(entry.messageId, "incoming", "rejected", Date.now(), effectiveAction);
+    }
+  };
+
+  const QUEUED_ROOT_REDRIVE_DELAY_MS = 60_000;
+  const QUEUED_ROOT_REDRIVE_COOLDOWN_MS = 60_000;
+  const QUEUED_ROOT_REDRIVE_MAX = 2;
+  const redrivenIncoming = new Map<string, { count: number; at: number }>();
+
+  /**
+   * Delivery recovery for accepted-but-never-injected root messages. The pi
+   * host can drop a followUp/triggerTurn send (aborted turns, cleared follow-up
+   * queues, run-state races), leaving the thread entry and the sender receipt
+   * at "queued" forever. Re-drive stale entries with a bounded per-message
+   * budget; message_end finalizes the entry and receipt once the message
+   * actually lands.
+   */
+  const redriveStaleIncomingRootMessages = (): void => {
+    const registry = sessionHostRegistry;
+    if (!registry) return;
+    const fence = captureRootSessionFence();
+    if (!ownsRootSessionFence(fence)) return;
+    const workspaceId = workspaceIdForCwd(state.baseCwd);
+    const now = Date.now();
+    for (const entry of registry.thread.list()) {
+      if (entry.direction !== "incoming"
+        || entry.status !== "queued"
+        || entry.targetCorrelationId !== WORKSPACE_MAIN_SESSION_MARKER
+        || entry.workspaceId !== workspaceId
+        || entry.updatedAt > now - QUEUED_ROOT_REDRIVE_DELAY_MS) continue;
+      const previous = redrivenIncoming.get(entry.messageId);
+      if (previous
+        && (previous.count >= QUEUED_ROOT_REDRIVE_MAX
+          || now - previous.at < QUEUED_ROOT_REDRIVE_COOLDOWN_MS)) continue;
+      const { envelope, effectiveAction } = workspaceRootMessageEnvelope(entry, { redriven: true });
+      const delivered = safeSendMessage(pi, envelope, {
+        triggerTurn: true,
+        deliverAs: effectiveAction === "steer" ? "steer" : "followUp",
+      });
+      if (!delivered) continue;
+      redrivenIncoming.set(entry.messageId, { count: (previous?.count ?? 0) + 1, at: now });
+      registry.thread.transition(entry.messageId, "incoming", "queued", now, effectiveAction);
     }
   };
 
@@ -1301,6 +1360,7 @@ export default function registerTeammateExtension(
       .then((result) => {
         if (workspacePeerPublisher !== publisher || !ownsRootSessionFence(fence)) return workspacePeerOwners;
         workspacePeerOwners = result.peers;
+        reconcileManagedWindowOwners();
         refreshSessionEndpointDirectory();
         return workspacePeerOwners;
       })
@@ -4951,7 +5011,10 @@ export default function registerTeammateExtension(
   }
 
   const MAX_MANAGED_WINDOWS = 8;
-  const MANAGED_WINDOW_HANDSHAKE_TIMEOUT_MS = 15_000;
+  /** Headless admission window — a cold pi process usually publishes within this. */
+  const MANAGED_WINDOW_HANDSHAKE_TIMEOUT_MS = 30_000;
+  /** Interactive admission window — terminal launch + cold start regularly exceeds 15s. */
+  const MANAGED_WINDOW_HANDSHAKE_TIMEOUT_INTERACTIVE_MS = 60_000;
   const MANAGED_WINDOW_HANDSHAKE_POLL_MS = 250;
   const managedWindows = new Map<string, ManagedWindow>();
 
@@ -5069,11 +5132,31 @@ export default function registerTeammateExtension(
     return owner;
   }
 
+  /**
+   * Late-registration recovery: a window admitted after the create handshake
+   * timeout still publishes its owner snapshot; capture it into the managed
+   * record so the window can be listed, bound, and closed instead of staying
+   * orphaned. Mirrors the list tool's owner capture.
+   */
+  function reconcileManagedWindowOwners(): void {
+    for (const window of managedWindows.values()) {
+      if (window.ownerId || window.launchError) continue;
+      try {
+        captureManagedWindowOwner(window, workspacePeerOwners);
+      } catch (error) {
+        window.launchError = error instanceof Error ? error.message : String(error);
+      }
+    }
+  }
+
   async function waitForManagedWindowOwner(
     window: ManagedWindow,
     signal: AbortSignal,
   ): Promise<WorkspaceOwnerSnapshot> {
-    const deadline = Date.now() + MANAGED_WINDOW_HANDSHAKE_TIMEOUT_MS;
+    const timeoutMs = window.presentation === "interactive"
+      ? MANAGED_WINDOW_HANDSHAKE_TIMEOUT_INTERACTIVE_MS
+      : MANAGED_WINDOW_HANDSHAKE_TIMEOUT_MS;
+    const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (signal.aborted) throw new Error("Managed window creation aborted while waiting for workspace registration.");
       const owners = await refreshWorkspacePeerOwnersStrict();
@@ -5083,7 +5166,7 @@ export default function registerTeammateExtension(
       if (window.launchError) throw new Error(window.launchError);
       await managedWindowDelay(MANAGED_WINDOW_HANDSHAKE_POLL_MS, signal);
     }
-    throw new Error(`window "${window.name}" did not register within ${MANAGED_WINDOW_HANDSHAKE_TIMEOUT_MS}ms`);
+    throw new Error(`window "${window.name}" did not register within ${timeoutMs}ms`);
   }
 
   function exactManagedWindowOwner(window: ManagedWindow): WorkspaceOwnerSnapshot | undefined {
@@ -7762,13 +7845,30 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
           ctx.ui.notify("Usage: /monitor spawn <name> <objective> | /monitor spawn status | /monitor spawn stop <name>", "warning");
           return;
         }
-        const result = await spawnManagedWindow(name, objective, ctx.cwd);
-        if (!result.ok) {
-          ctx.ui.notify(`Spawn failed: ${result.error}`, "warning");
+        const spawned = await spawnManagedWindow(name, objective, ctx.cwd);
+        if (!spawned.ok || !spawned.window) {
+          ctx.ui.notify(`Spawn failed: ${spawned.error}`, "warning");
+          return;
+        }
+        let owner: WorkspaceOwnerSnapshot;
+        try {
+          // Block until the new session registers as a workspace peer, then
+          // return its owner id directly (same admission as workspace-window create).
+          owner = await waitForManagedWindowOwner(spawned.window, new AbortController().signal);
+          if (managedWindows.get(name) !== spawned.window || !exactManagedWindowOwner(spawned.window)) {
+            throw new Error(`window "${name}" changed owner before spawn completed.`);
+          }
+        } catch (error) {
+          const failure = error instanceof Error ? error.message : String(error);
+          const cleanup = await stopManagedWindow(name);
+          const cleanupText = cleanup.ok
+            ? `setup was rolled back (${cleanup.status ?? "stopped"})`
+            : `ownership record retained: ${cleanup.error ?? "reclamation not proven"}`;
+          ctx.ui.notify(`${failure}; ${cleanupText}.`, "warning");
           return;
         }
         ctx.ui.notify(
-          `Spawned managed window ${name}. Wait for it to appear in /monitor status, then bind with /monitor ${name} [--goal <id>].`,
+          `Spawned managed window ${name} as owner:${owner.ownerId}. Bind with /monitor owner:${owner.ownerId} [--goal <id>].`,
           "info",
         );
         return;
@@ -8161,7 +8261,10 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     workspaceMainSessionActivityAt = undefined;
     startWorkspacePeers(ctx);
     if (workspaceReceiptReconcileTimer) clearInterval(workspaceReceiptReconcileTimer);
-    workspaceReceiptReconcileTimer = setInterval(() => void reconcileWorkspacePeerReceipts(), RECONCILE_RECEIPT_INTERVAL_MS);
+    workspaceReceiptReconcileTimer = setInterval(() => {
+      void reconcileWorkspacePeerReceipts();
+      redriveStaleIncomingRootMessages();
+    }, RECONCILE_RECEIPT_INTERVAL_MS);
     workspaceReceiptReconcileTimer.unref?.();
     void workspacePeerLifecycle.then(() => reconcileMonitorLedgerAtStart(ctx));
     // Query after all extensions have registered their event listeners. The
@@ -8261,6 +8364,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       clearInterval(workspaceReceiptReconcileTimer);
       workspaceReceiptReconcileTimer = undefined;
     }
+    redrivenIncoming.clear();
     // Stop the mailbox consumer BEFORE killing agents so no in-flight poll can
     // inject into a dying session (previously never stopped at all).
     const stoppedMailbox = mailboxHost;

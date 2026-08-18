@@ -356,6 +356,10 @@ export const TeammateListParams = Type.Object({
     enum: ["pending", "queued", "injected", "accepted", "rejected", "timeout"],
     description: "Inbox-only persisted delivery status filter. Queued or accepted records confirm persistence/enqueueing, not target-model consumption.",
   })),
+  since: Type.Optional(Type.String({
+    minLength: 1,
+    description: 'Inbox-only time window cutoff: an ISO 8601 timestamp, a relative duration like "24h", "7d", or "30m", or "all" to disable time filtering. Default: the last 24h.',
+  })),
   limit: Type.Optional(Type.Integer({
     minimum: 1,
     maximum: 100,
@@ -364,7 +368,7 @@ export const TeammateListParams = Type.Object({
   })),
 }, {
   additionalProperties: false,
-  allOf: ["session", "peer", "direction", "status", "limit"].map((field) => ({
+  allOf: ["session", "peer", "direction", "status", "since", "limit"].map((field) => ({
     if: { required: [field] },
     then: { properties: { view: { const: "inbox" } }, required: ["view"] },
   })),

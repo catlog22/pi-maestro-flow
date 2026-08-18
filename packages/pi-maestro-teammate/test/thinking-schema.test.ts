@@ -86,8 +86,11 @@ test("teammate-list schema exposes role, window, and persisted inbox views", () 
     peer: `owner:${"a".repeat(32)}`,
     direction: "incoming",
     status: "pending",
+    since: "7d",
     limit: 10,
   }), true);
+  assert.equal(Check(TeammateListParams, { view: "inbox", since: "all" }), true);
+  assert.equal(Check(TeammateListParams, { view: "active", since: "24h" }), false);
   assert.equal(Check(TeammateListParams, { view: "windows", session: "monitor" }), false);
   assert.equal(Check(TeammateListParams, { session: "monitor" }), false);
   assert.equal(Check(TeammateListParams, { view: "inbox", direction: "sideways" }), false);

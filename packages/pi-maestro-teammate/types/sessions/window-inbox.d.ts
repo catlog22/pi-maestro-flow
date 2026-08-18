@@ -5,6 +5,12 @@ export interface WindowInboxQuery {
     peer?: string;
     direction?: WindowThreadDirection;
     status?: WindowThreadStatus;
+    /**
+     * Time window cutoff: ISO 8601 timestamp, a relative duration like "24h"
+     * or "7d" (units ms/s/m/h/d/w), or "all" to disable time filtering.
+     * Defaults to the last 24 hours.
+     */
+    since?: string;
     limit?: number;
 }
 export interface WindowInboxEntry {
@@ -35,6 +41,10 @@ export interface WindowInboxResult {
     skippedSessionFileCount: number;
     archiveTruncated: boolean;
     selector?: string;
+    /** Applied time cutoff (epoch ms) when a time window is active. */
+    since?: number;
+    /** True when the cutoff came from the default window rather than an explicit since. */
+    sinceWasDefault?: boolean;
 }
 export declare function resolveWindowInboxAnchor(mainSessionFile: string | null | undefined, contextSessionFile: string | null | undefined): string | undefined;
 export declare function loadWorkspaceWindowInbox(currentSessionFile: string | null | undefined, query?: WindowInboxQuery): Promise<WindowInboxResult>;

@@ -132,7 +132,7 @@ test("window inbox rebuilds persisted revisions and infers injected messages", a
       injectedMessageIds: ["message-1"],
     });
 
-    const result = await loadWorkspaceWindowInbox(current, { session: "monitor" });
+    const result = await loadWorkspaceWindowInbox(current, { session: "monitor", since: "all" });
     assert.equal(result.matchedSessionCount, 1);
     assert.equal(result.entries.length, 2);
     assert.equal(result.entries.find((entry) => entry.messageId === "message-1")?.status, "injected");
@@ -176,6 +176,7 @@ test("window inbox filters archived sessions without treating them as live peers
       peer: `owner:${OWNER_B}`,
       direction: "incoming",
       status: "rejected",
+      since: "all",
       limit: 1,
     });
     assert.equal(filtered.entries.length, 1);
@@ -201,7 +202,7 @@ test("window inbox rejects ambiguous archived session aliases and skips malforme
       loadWorkspaceWindowInbox(current, { session: "worker" }),
       /ambiguous/,
     );
-    assert.equal((await loadWorkspaceWindowInbox(current, { session: "one" })).entries.length, 1);
+    assert.equal((await loadWorkspaceWindowInbox(current, { session: "one", since: "all" })).entries.length, 1);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -273,7 +274,7 @@ test("window inbox merges bounded remote messages, receipts, lifecycle, and resu
       remoteHistory,
     });
 
-    const result = await loadWorkspaceWindowInbox(current, { session: "current", peer: "remote:run-1234" });
+    const result = await loadWorkspaceWindowInbox(current, { session: "current", peer: "remote:run-1234", since: "all" });
     assert.equal(result.entries.length, 3);
     assert.equal(result.entries.find((entry) => entry.messageId === "send-1")?.status, "queued");
     assert.deepEqual(new Set(result.entries.map((entry) => entry.remoteKind)), new Set(["receipt", "lifecycle", "result"]));
@@ -308,7 +309,7 @@ test("window inbox bounds aggregate archive bytes and reports partial scans", as
       fs.closeSync(fd);
     }
 
-    const result = await loadWorkspaceWindowInbox(current);
+    const result = await loadWorkspaceWindowInbox(current, { since: "all" });
     assert.equal(result.entries.length, 1);
     assert.equal(result.archiveTruncated, true);
     assert.ok(result.skippedSessionFileCount >= 1);
@@ -330,7 +331,7 @@ test("window inbox enforces the admitted byte snapshot while a session grows", a
       updatedAt: 2_000,
     })))[0]!;
 
-    const pending = loadWorkspaceWindowInbox(current, { session: "current" });
+    const pending = loadWorkspaceWindowInbox(current, { session: "current", since: "all" });
     fs.appendFileSync(current, `${JSON.stringify({
       type: "custom",
       customType: "teammate-window-thread",
@@ -342,7 +343,7 @@ test("window inbox enforces the admitted byte snapshot while a session grows", a
 
     const snapshot = await pending;
     assert.deepEqual(snapshot.entries.map((entry) => entry.messageId), ["initial"]);
-    const refreshed = await loadWorkspaceWindowInbox(current, { session: "current" });
+    const refreshed = await loadWorkspaceWindowInbox(current, { session: "current", since: "all" });
     assert.deepEqual(refreshed.entries.map((entry) => entry.messageId), ["appended", "initial"]);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -372,7 +373,7 @@ test("child proxy exposes the same persisted inbox view as the root tool", async
     await handleProxyRequest(
       pi,
       state,
-      { tool: "teammate-list", requestId: "inbox-proxy", params: { view: "inbox", session: "monitor" } },
+      { tool: "teammate-list", requestId: "inbox-proxy", params: { view: "inbox", session: "monitor", since: "all" } },
       (message) => { response = message as Record<string, unknown>; },
       undefined,
       [],
@@ -395,6 +396,62 @@ test("child proxy exposes the same persisted inbox view as the root tool", async
     assert.equal(result.isError, false);
     assert.match(result.content?.[0]?.text ?? "", /proxy-visible reply/);
     assert.equal(result.details?.agents?.[0]?.kind, "window-message");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("window inbox applies a default 24h window and honors explicit since overrides", async () => {
+  const dir = tmpDir();
+  try {
+    const now = Date.now();
+    const current = writeSession(dir, "current.jsonl", { id: "current-session" });
+    const threads = persistedThreadEntries((store) => {
+      store.record(threadInput({
+        messageId: "fresh",
+        body: "recent reply",
+        createdAt: now - 60_000,
+        updatedAt: now - 60_000,
+      }));
+      store.record(threadInput({
+        messageId: "stale",
+        body: "old reply",
+        createdAt: now - 3 * 24 * 3_600_000,
+        updatedAt: now - 3 * 24 * 3_600_000,
+      }));
+    });
+    writeSession(dir, "monitor.jsonl", { id: "monitor-session", name: "mw-token-monitor", threads });
+
+    const byDefault = await loadWorkspaceWindowInbox(current, { session: "monitor" });
+    assert.deepEqual(byDefault.entries.map((entry) => entry.messageId), ["fresh"]);
+    assert.equal(byDefault.sinceWasDefault, true);
+    assert.ok(byDefault.since !== undefined && byDefault.since <= now && byDefault.since > now - 24 * 3_600_000);
+
+    const widened = await loadWorkspaceWindowInbox(current, { session: "monitor", since: "7d" });
+    assert.deepEqual(widened.entries.map((entry) => entry.messageId), ["fresh", "stale"]);
+    assert.equal(widened.sinceWasDefault, false);
+    assert.ok(widened.since !== undefined && widened.since > now - 8 * 24 * 3_600_000 && widened.since <= now - 6 * 24 * 3_600_000);
+
+    const byIso = await loadWorkspaceWindowInbox(current, {
+      session: "monitor",
+      since: new Date(now - 7 * 24 * 3_600_000).toISOString(),
+    });
+    assert.deepEqual(byIso.entries.map((entry) => entry.messageId), ["fresh", "stale"]);
+
+    const everything = await loadWorkspaceWindowInbox(current, { session: "monitor", since: "all" });
+    assert.deepEqual(everything.entries.map((entry) => entry.messageId), ["fresh", "stale"]);
+    assert.equal(everything.since, undefined);
+
+    const formatted = formatWorkspaceWindowInbox(byDefault);
+    assert.match(formatted, /default 24h/);
+    assert.match(formatted, /time window: since /);
+    const emptyFormatted = formatWorkspaceWindowInbox({ ...byDefault, entries: [] });
+    assert.match(emptyFormatted, /No persisted Monitor messages matched session "monitor"\. \(time window: since .*, default 24h\)\./);
+
+    await assert.rejects(
+      loadWorkspaceWindowInbox(current, { session: "monitor", since: "not-a-time" }),
+      /Inbox since must be/,
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

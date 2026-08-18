@@ -80,6 +80,7 @@ export declare const TeammateListParams: Type.TObject<{
     peer: Type.TOptional<Type.TString>;
     direction: Type.TOptional<Type.TUnsafe<"outgoing" | "incoming">>;
     status: Type.TOptional<Type.TUnsafe<"queued" | "accepted" | "injected" | "pending" | "rejected" | "timeout">>;
+    since: Type.TOptional<Type.TString>;
     limit: Type.TOptional<Type.TInteger>;
 }>;
 export declare const TeammateWatchParams: Type.TObject<{

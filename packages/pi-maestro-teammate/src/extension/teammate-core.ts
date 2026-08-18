@@ -624,7 +624,7 @@ export const TEAMMATE_LIST_DESCRIPTION = `List available roles, teammate agents,
 - "all": all tracked live entries
 - "roles": builtin, project, and user-defined role definitions
 - "windows": available peer Pi windows and their addressable targets
-- "inbox": persisted cross-window messages from current and reclaimed sessions; supports session, peer, direction, status, and limit filters. Queued or accepted entries confirm persistence/enqueueing, not target-model consumption`;
+- "inbox": persisted cross-window messages from current and reclaimed sessions; supports session, peer, direction, status, since, and limit filters. Messages are time-filtered to the last 24h by default; pass since as an ISO timestamp, a relative duration like "7d", or "all" to widen or disable the window. Queued or accepted entries confirm persistence/enqueueing, not target-model consumption`;
 export const TEAMMATE_LIST_SNIPPET = "List teammate roles, agent status, cross-session windows, or persisted window messages.";
 export const TEAMMATE_LIST_GUIDELINES = [
   'Use teammate-list with view="roles" when an available builtin, project, or user-defined agent name is needed; use active/named/all for running work.',

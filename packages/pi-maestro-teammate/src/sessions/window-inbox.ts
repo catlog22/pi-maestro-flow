@@ -19,11 +19,30 @@ const MAX_ARCHIVE_TOTAL_BYTES = 64 * 1024 * 1024;
 const MAX_INBOX_ENTRIES = 100;
 const MAX_INBOX_BODY_CHARS = 2_000;
 
+/** Time window applied when the caller does not pass an explicit since. */
+const DEFAULT_INBOX_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Sentinel value that disables the time window entirely. */
+const SINCE_ALL = "all";
+const SINCE_DURATION_UNITS: Record<string, number> = {
+  ms: 1,
+  s: 1_000,
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+  w: 604_800_000,
+};
+
 export interface WindowInboxQuery {
   session?: string;
   peer?: string;
   direction?: WindowThreadDirection;
   status?: WindowThreadStatus;
+  /**
+   * Time window cutoff: ISO 8601 timestamp, a relative duration like "24h"
+   * or "7d" (units ms/s/m/h/d/w), or "all" to disable time filtering.
+   * Defaults to the last 24 hours.
+   */
+  since?: string;
   limit?: number;
 }
 
@@ -56,6 +75,10 @@ export interface WindowInboxResult {
   skippedSessionFileCount: number;
   archiveTruncated: boolean;
   selector?: string;
+  /** Applied time cutoff (epoch ms) when a time window is active. */
+  since?: number;
+  /** True when the cutoff came from the default window rather than an explicit since. */
+  sinceWasDefault?: boolean;
 }
 
 interface ArchivedWindowThreadSession {
@@ -320,6 +343,27 @@ function projectRemoteInboxEntry(session: ArchivedWindowThreadSession, entry: Re
   };
 }
 
+function resolveSinceCutoff(
+  since: string | undefined,
+  now = Date.now(),
+): { sinceMs: number | undefined; sinceWasDefault: boolean } {
+  if (since === undefined) {
+    return { sinceMs: now - DEFAULT_INBOX_WINDOW_MS, sinceWasDefault: true };
+  }
+  const trimmed = since.trim();
+  if (trimmed.toLowerCase() === SINCE_ALL) return { sinceMs: undefined, sinceWasDefault: false };
+  const duration = /^(\d+)\s*(ms|s|m|h|d|w)$/i.exec(trimmed);
+  if (duration) {
+    const unit = duration[2]!.toLowerCase();
+    return { sinceMs: now - Number(duration[1]) * SINCE_DURATION_UNITS[unit]!, sinceWasDefault: false };
+  }
+  const parsed = Date.parse(trimmed);
+  if (Number.isNaN(parsed)) {
+    throw new Error('Inbox since must be an ISO 8601 timestamp, a relative duration like "24h" or "7d", or "all".');
+  }
+  return { sinceMs: parsed, sinceWasDefault: false };
+}
+
 export function resolveWindowInboxAnchor(
   mainSessionFile: string | null | undefined,
   contextSessionFile: string | null | undefined,
@@ -341,6 +385,7 @@ export async function loadWorkspaceWindowInbox(
 
   const archive = await archivedSessions(currentSessionFile, query.session);
   const selected = selectSessions(archive.sessions, query.session);
+  const { sinceMs, sinceWasDefault } = resolveSinceCutoff(query.since);
   const entries = selected.flatMap((session) => [
     ...session.windowEntries
       .filter((entry) => query.direction === undefined || entry.direction === query.direction)
@@ -353,6 +398,7 @@ export async function loadWorkspaceWindowInbox(
       .filter((entry) => peer === undefined || entry.target === peer || entry.target.startsWith(peer))
       .map((entry) => projectRemoteInboxEntry(session, entry)),
   ])
+    .filter((entry) => sinceMs === undefined || entry.updatedAt >= sinceMs)
     .sort((left, right) =>
       right.updatedAt - left.updatedAt
       || right.createdAt - left.createdAt
@@ -367,11 +413,20 @@ export async function loadWorkspaceWindowInbox(
     skippedSessionFileCount: archive.skippedSessionFileCount,
     archiveTruncated: archive.truncated,
     ...(query.session ? { selector: query.session } : {}),
+    ...(sinceMs !== undefined ? { since: sinceMs, sinceWasDefault } : {}),
   };
 }
 
 function indentBody(body: string): string {
   return body.split(/\r?\n/).map((line) => `  ${line}`).join("\n");
+}
+
+function windowClause(result: WindowInboxResult): string {
+  if (result.since === undefined) return "";
+  const iso = new Date(result.since).toISOString();
+  return result.sinceWasDefault
+    ? ` (time window: since ${iso}, default ${DEFAULT_INBOX_WINDOW_MS / 3_600_000}h)`
+    : ` (time window: since ${iso})`;
 }
 
 export function formatWorkspaceWindowInbox(result: WindowInboxResult): string {
@@ -382,9 +437,9 @@ export function formatWorkspaceWindowInbox(result: WindowInboxResult): string {
     const empty = result.selector
       ? `No persisted Monitor messages matched session ${JSON.stringify(result.selector)}.`
       : "No persisted Monitor messages matched the inbox filters.";
-    return `${empty}${warning}`;
+    return `${empty}${windowClause(result)}.${warning}`;
   }
-  const header = `Monitor inbox: ${result.entries.length} message${result.entries.length === 1 ? "" : "s"} across ${result.matchedSessionCount} session${result.matchedSessionCount === 1 ? "" : "s"}.${warning}`;
+  const header = `Monitor inbox: ${result.entries.length} message${result.entries.length === 1 ? "" : "s"} across ${result.matchedSessionCount} session${result.matchedSessionCount === 1 ? "" : "s"}${windowClause(result)}.${warning}`;
   const rows = result.entries.map((entry) => {
     const session = entry.sessionName ?? entry.sessionId.slice(0, 8);
     const time = new Date(entry.updatedAt).toISOString();
