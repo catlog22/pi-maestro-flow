@@ -27,6 +27,17 @@ Exemptions: conversation, arithmetic, current time, and commands with no project
 - Back a knowledge candidate with the current window's raw record via `/maestro-knowledge-from-window <spec|knowhow> <title> <content>` (Pi) or `maestro knowledge stage ... --transcript-quote <descriptor.json>` (CLI). The raw quote is stored as **untrusted snapshot evidence only** — it never enters candidate content, review stdout, corpus, or search (iron rule 10); review renders only a `[untrusted]` state. Never copy quote text into candidate content or any prompt context.
 - Transcript-only candidates are auto-gated to `review_required` (K17): `promote --all` skips them. Promote explicitly with `maestro knowledge promote <session-id> --resolve <candidate-id> --as unique --reason "<human review>"` after review. Never bypass the gate by editing evidence refs.
 
+# Coding Philosophy
+
+- **Pursue good taste and extreme simplicity** — eliminate edge cases; complexity is the root of all evil; be pragmatic; solve real problems, not hypothetical ones.
+- **Data structures first** — good programmers worry about data structures; code follows.
+- **Never break backward compatibility** — existing functionality is sacred; progress is incremental, small changes that compile and pass tests.
+- **Learn from existing code** — find 3 similar patterns, map dependencies, follow existing style, imports, and conventions; minimize changes to what the request requires.
+- **Clear intent over clever code** — be boring and obvious; no premature abstractions.
+- **No unsolicited documentation** — never generate reports, summaries, or doc files without an explicit user request; when a command requires a report, write it only to the current Run's `report.md` or declared output.
+- **Fix, don't hide** — never suppress failures (`@ts-ignore`, empty catch, `as any`, skipped tests, excessive timeouts); plan complex tasks before implementing, verify with the project's own tooling, commit incrementally, and stop after 3 failed attempts to reassess.
+- **Content uniqueness** — each layer owns its abstraction level; reference, don't duplicate; avoid implementation creep.
+
 # Engineering
 
 - Match existing architecture, style, libraries, build system, tests, formatter, and lint rules.
@@ -113,6 +124,8 @@ maestro delegate "<prompt>" --to <tool> --mode analysis
 ```
 
 The `--to` flag is mandatory. Otherwise use `teammate`.
+
+Delegate/CLI reference: `@~/.maestro/workflows/delegate-usage.md` (full delegate usage); CLI endpoint config lives in `~/.maestro/cli-tools.json` — follow it strictly.
 
 # Teammates
 
@@ -231,6 +244,7 @@ maestro knowledge stage spec|knowhow "<title>" --content-file <path|-> --session
 - Review, resolution, promotion, supersession, conflict marking, and pruning require an explicit user request or confirmed governance step.
 - Promote only eligible candidates whose sources are sealed with fresh reconciliation receipts: sealed source Runs for run-source candidates; sealed Session + fresh session receipt (+ non-empty `--evidence` at stage) for session-source candidates. Session seal refreshes the session receipt automatically (best-effort); `maestro knowledge review <session-id> --refresh` repairs missing/stale receipts. Deprecated or superseded knowledge remains auditable but is excluded from normal search and injection.
 - Outside a Run, governed staging still works: without `--run/--session`, write authority falls back through identity tiers and, with nothing running, idempotently creates a daily-partitioned synthetic knowledge Session (`ksyn-*`). Direct writes to project spec/knowhow still require an explicit knowledge-management request; prefer `--channel <name>` when multiple concurrent sessions share one workspace.
+- **Direct-write whitelist** (corpus writes bypassing stage→review→promote, only for explicit knowledge management): `maestro spec add`, `maestro spec supersede <old-sid> --by <new-sid>`, `maestro spec conflict mark`, `maestro knowhow add`, `maestro domain add`, and the knowhow/wiki maintenance commands. Content-producing workflows (retrospective, wiki-digest, wiki-connect, maestro-learn, ui-codify-knowhow, harvest, finish-work) MUST route through `stage → review → promote` — never direct `.workflow/specs/` or `.workflow/knowhow/` writes.
 - **Knowledge auto-deposition (self-evolve T1)**: at seal, `accepted` decisions / `locked` constraints in report.md frontmatter are automatically staged as candidates — do not manually re-stage the same facts. **Write quality gate (anti-noise)**: frontmatter must contain only reusable prescriptive decisions/constraints (rules future work must follow); **never** write operational-state narration into decisions/constraints — read-only declarations, worktree/audit-process observations, missing-file records, routing memos (e.g. "Read-only audit; preserve the existing dirty worktree", "Debug investigation remained read-only") — seal auto-drafts every accepted/locked entry into a corpus candidate, and state narration directly pollutes the knowledge base.
 - **Staging Quality Bar (what is worth depositing)**: stage only content that future work can directly reuse, avoiding re-paid learning cost, and that satisfies at least one of: ① pitfall warning ("when doing X, watch out for Y because Z" — non-obvious failure mode + prevention); ② failure lesson (what failed, root cause, which alternative worked); ③ non-trivial trade-off (why A over B, constraints and context); ④ newly established prescriptive constraint (spec). **Do NOT stage**: process notes ("did X", "produced doc Y" — those belong in report.md body/commits/README); restatements of existing project patterns (code/config is already the best documentation); trivial self-evident operations; raw traces (tool output, log/error snippet copies) — traces must first be semantically distilled into lessons; if no reusable lesson can be extracted, discard them. **Zero candidates is a legitimate outcome** — never fabricate candidates to prove the pipeline's value. T2 fact candidates can be auto-promoted via `promote --all` after seal (unique/eligible with a fresh reconciliation receipt), while inferred ones (`review_required`) stay for manual resolve. Timing: **before** promote, follow the TOCTOU fence (`maestro knowledge review <session> --refresh`); **after** a successful promote, record the approval receipt (`node scripts/self-evolve-approval.mjs record`) per `.pi/skills/self-evolve`.
 - **Self-evolve entry points**: `.pi/skills/self-evolve` (orchestration skill), `node scripts/self-evolve-health.mjs` (health sidecar: signal aggregation + contest queue + cross-run candidate index; global output `~/.maestro/self-evolve/`), `node scripts/self-evolve-phase5.mjs` (canary online verification + skill proposal governance).

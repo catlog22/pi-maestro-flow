@@ -68,7 +68,6 @@
     "!.pi/settings.local.json",
     "!.pi/model-failover.json",
     "!.pi/scratch/**",
-    "AGENTS.md",
     "README.md",
     "optional/"
   ],
