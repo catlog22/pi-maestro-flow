@@ -1246,6 +1246,7 @@ export function actionFromArg(value: string): ApiProviderAction | undefined {
   if (value === "cache-agent" || value === "agent-cache") return "cache-agent";
   if (value === "vision") return "vision";
   if (value === "effort") return "effort";
+  if (value === "nextsuggest" || value === "next-suggest" || value === "suggest") return "nextsuggest";
   if (value === "price" || value === "pricing" || value === "cost") return "price";
   if (value === "reset") return "reset";
   return undefined;

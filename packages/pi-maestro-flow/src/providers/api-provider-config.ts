@@ -22,6 +22,11 @@ import { getSupportedThinkingLevels, type ModelCost } from "@earendil-works/pi-a
 import { NETWORK_RETRY_POLICY, RESOLVED_NETWORK_RETRY_POLICY } from "pi-maestro-teammate/v1/retry";
 import { getTuiLocale } from "../tui/locale.ts";
 import {
+  DEFAULT_NEXT_SUGGEST_CONFIG,
+  loadNextSuggestConfig,
+  saveNextSuggestConfig,
+} from "../next-suggest/config.ts";
+import {
   EFFORT_LEVELS,
   EFFORT_STATUS_KEY,
   isThinkingLevel as isCanonicalThinkingLevel,
@@ -361,7 +366,7 @@ export interface ApiRetrySettings {
   maxDelayMs?: number;
 }
 
-export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "effort" | "enable" | "export" | "import" | "list" | "logout" | "price" | "reset" | "retry" | "show" | "toggle" | "vision";
+export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "effort" | "enable" | "export" | "import" | "list" | "logout" | "nextsuggest" | "price" | "reset" | "retry" | "show" | "toggle" | "vision";
 export type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
@@ -888,6 +893,136 @@ export async function managePromptCacheSettings(
   notifyPromptCacheSettings(ctx, policy, settingsPath);
 }
 
+const NEXT_SUGGEST_THINKING_LEVELS = ["default", "low", "medium", "high", "xhigh", "max"] as const;
+const NEXT_SUGGEST_ACCEPT_KEYS = ["f2", "alt+shift+n"] as const;
+
+/**
+ * Next-step suggestion settings panel inside the API manager.
+ *
+ * The feature switch, generation model, thinking level, length cap and accept
+ * key are independent from the session model and persisted in the
+ * api-manager.json `nextSuggest` section.
+ */
+export async function manageNextSuggestSettings(
+  ctx: ExtensionCommandContext,
+  defaultsPath: string,
+  modelsPath: string,
+): Promise<void> {
+  if (!ctx.hasUI) {
+    const current = await loadNextSuggestConfig(defaultsPath);
+    ctx.ui.notify(
+      `下一步建议：${current.enabled ? "已启用" : "已停用"} · 模型：${current.modelRef} · 思考：${current.thinking} · 长度上限：${current.maxSuggestionChars} · 接受键：${current.acceptKey}`,
+      "info",
+    );
+    return;
+  }
+
+  let config = await loadNextSuggestConfig(defaultsPath);
+  const modelLabel = (value: string): string => value === "session" ? "跟随会话模型" : value;
+  const options = () => [
+    `${config.enabled ? "✓" : "○"} 启用下一步建议（当前：${config.enabled ? "开" : "关"}）`,
+    `生成模型：${modelLabel(config.modelRef)}（点击选择）`,
+    `思考级别：${config.thinking}（点击调整）`,
+    `建议长度上限：${config.maxSuggestionChars} 字符（点击修改）`,
+    `接受键：${config.acceptKey}（修改后需重载插件生效）`,
+    "重置为默认设置",
+  ];
+
+  for (;;) {
+    const choice = await ctx.ui.select("下一步建议设置（/api-manager nextsuggest）", options());
+    if (choice === undefined) return;
+
+    if (choice.startsWith("✓") || choice.startsWith("○")) {
+      config.enabled = !config.enabled;
+      await saveNextSuggestConfig(config, defaultsPath);
+      ctx.ui.notify(`下一步建议已${config.enabled ? "启用" : "停用"}。`, "info");
+      continue;
+    }
+
+    if (choice.startsWith("生成模型")) {
+      const models = await buildGlobalModelOptions("configure", modelsPath, defaultsPath);
+      const labels = [
+        `跟随会话模型${config.modelRef === "session" ? "（当前）" : ""}`,
+        ...models.map((entry) => `${entry.label}${entry.pick.kind === "model" && config.modelRef === `${entry.pick.providerId}/${entry.pick.modelId}` ? "（当前）" : ""}`),
+      ];
+      const pick = await ctx.ui.select("选择建议生成模型（独立于会话模型）", labels);
+      if (pick === undefined) continue;
+      if (pick === labels[0]) {
+        config.modelRef = "session";
+      } else {
+        const entry = models.find((item) => `${item.label}${item.pick.kind === "model" && config.modelRef === `${item.pick.providerId}/${item.pick.modelId}` ? "（当前）" : ""}` === pick);
+        if (entry && entry.pick.kind === "model") {
+          config.modelRef = `${entry.pick.providerId}/${entry.pick.modelId}`;
+        }
+      }
+      await saveNextSuggestConfig(config, defaultsPath);
+      ctx.ui.notify(`建议生成模型已设为：${modelLabel(config.modelRef)}。`, "info");
+      continue;
+    }
+
+    if (choice.startsWith("思考级别")) {
+      const levels = NEXT_SUGGEST_THINKING_LEVELS.map((level) =>
+        `${level}${level === config.thinking ? "（当前）" : ""}`,
+      );
+      const pick = await ctx.ui.select("选择建议生成思考级别（default 跟随会话）", levels);
+      if (pick === undefined) continue;
+      const level = NEXT_SUGGEST_THINKING_LEVELS.find((value) => `${value}${value === config.thinking ? "（当前）" : ""}` === pick);
+      if (level) {
+        config.thinking = level;
+        await saveNextSuggestConfig(config, defaultsPath);
+        ctx.ui.notify(`建议思考级别已设为：${level}。`, "info");
+      }
+      continue;
+    }
+
+    if (choice.startsWith("建议长度上限")) {
+      const input = await ctx.ui.input(
+        "建议长度上限（字符，20–2000）",
+        String(config.maxSuggestionChars),
+      );
+      if (input === undefined) continue;
+      const parsed = Number.parseInt(input.trim(), 10);
+      if (Number.isNaN(parsed) || parsed < 20 || parsed > 2000) {
+        ctx.ui.notify("长度上限必须是 20–2000 之间的数字。", "warning");
+        continue;
+      }
+      config.maxSuggestionChars = parsed;
+      await saveNextSuggestConfig(config, defaultsPath);
+      ctx.ui.notify(`建议长度上限已设为：${parsed} 字符。`, "info");
+      continue;
+    }
+
+    if (choice.startsWith("接受键")) {
+      const keys = NEXT_SUGGEST_ACCEPT_KEYS.map((key) =>
+        `${key}${key === config.acceptKey ? "（当前）" : ""}`,
+      );
+      const pick = await ctx.ui.select("选择接受建议的快捷键（修改后需重载插件生效）", keys);
+      if (pick === undefined) continue;
+      const key = NEXT_SUGGEST_ACCEPT_KEYS.find((value) => `${value}${value === config.acceptKey ? "（当前）" : ""}` === pick);
+      if (key) {
+        config.acceptKey = key;
+        await saveNextSuggestConfig(config, defaultsPath);
+        ctx.ui.notify(`接受键已设为：${key}（重启或 /reload 后生效）。`, "info");
+      }
+      continue;
+    }
+
+    if (choice.startsWith("重置")) {
+      const confirmed = await ctx.ui.confirm(
+        "确认重置下一步建议设置为默认值？",
+        [
+          `将恢复为：${DEFAULT_NEXT_SUGGEST_CONFIG.enabled ? "启用" : "停用"} · 跟随会话模型 · 接受键 ${DEFAULT_NEXT_SUGGEST_CONFIG.acceptKey}`,
+        ].join("\n"),
+      );
+      if (!confirmed) continue;
+      config = { ...DEFAULT_NEXT_SUGGEST_CONFIG };
+      await saveNextSuggestConfig(config, defaultsPath);
+      ctx.ui.notify("下一步建议设置已重置为默认。", "info");
+      continue;
+    }
+  }
+}
+
 export async function manageAgentCacheRetention(
   ctx: ExtensionCommandContext,
   settingsPath: string,
@@ -1124,6 +1259,10 @@ async function showApiProviderManager(
   }
   if (action === "cache-agent") {
     await manageAgentCacheRetention(ctx, settingsPath, parsed.cacheAgent);
+    return;
+  }
+  if (action === "nextsuggest") {
+    await manageNextSuggestSettings(ctx, defaultsPath, modelsPath);
     return;
   }
   if (action === "export" || action === "import") {
@@ -2256,6 +2395,7 @@ import {
   channelDisplayName,
   chooseAction,
   chooseDefaultThinkingLevel,
+  buildGlobalModelOptions,
   chooseModelGlobally,
   chooseModelToConfigure,
   chooseProvider,

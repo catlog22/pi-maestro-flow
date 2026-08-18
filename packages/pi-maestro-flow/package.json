@@ -21,6 +21,7 @@
     "test:hooks": "node --experimental-transform-types --test test/hooks.test.ts",
     "test:permissions": "node --experimental-transform-types --test test/permissions.test.ts test/ask.test.ts test/ask-sessionbar-integration.test.ts test/approval-mode.test.ts test/teammate-relay-ipc.test.ts test/direct-teammate-runtime.test.ts",
     "test:providers": "node --experimental-transform-types --test test/api-provider-config.test.ts test/api-model-editor.test.ts test/explore-config-manager.test.ts test/cost-backfill.test.ts",
+    "test:next-suggest": "node --experimental-transform-types --test test/next-suggest.test.ts",
     "test:mcp": "node --experimental-transform-types --test test/mcp-config.test.ts test/mcp-manager.test.ts test/mcp-server-manager.test.ts test/mcp-lifecycle-leases.test.ts test/mcp-ui-server.test.ts",
     "test:goal": "node --experimental-transform-types --test test/goal.test.ts test/goal-verification-timeout.test.ts",
     "test:bash-bg": "node --experimental-transform-types --test test/bash-bg.test.ts",

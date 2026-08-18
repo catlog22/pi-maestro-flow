@@ -31,7 +31,7 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { buildSessionContext, copyToClipboard } from "@earendil-works/pi-coding-agent";
+import { buildSessionContext, copyToClipboard, getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { COCKPIT_TODO_TOGGLE_EVENT, type CockpitUiOwnershipV1 } from "pi-cockpit/v1/events";
 import type { FlowToolResult } from "../tools/tool-result.ts";
@@ -53,6 +53,7 @@ import { registerSwarmDisplay } from "../tools/swarm.ts";
 import { MaestroUiPublisher, registerMaestroUiQuery } from "../ui-projection.ts";
 import { registerMaestroProviders } from "../providers/provider-registry.ts";
 import { registerApiProviderConfigs } from "../providers/api-provider-config.ts";
+import { registerNextSuggest } from "../next-suggest/index.ts";
 import { registerExploreConfigManager } from "../providers/explore-config-manager.ts";
 import { registerModelFailover } from "../providers/model-failover.ts";
 import { showModelFailoverOverlay } from "../tui/model-failover-settings.ts";
@@ -1101,6 +1102,19 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     // Provider registration failures should not block extension load
     console.error(
       `[maestro] Provider registration warning: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  // Next-step suggestion: independent switch/model/thinking settings live in
+  // the API manager (api-manager.json nextSuggest section); model selection is
+  // exposed through /api-manager nextsuggest and the api.nextsuggest shell action.
+  try {
+    registerNextSuggest(pi, {
+      defaultsPath: join(getAgentDir(), "api-manager.json"),
+    });
+  } catch (error) {
+    console.error(
+      `[maestro] Next-suggest registration warning: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 
@@ -3307,6 +3321,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
       "api.configure": () => openApiManager("configure", "API provider editor"),
       "api.retry": () => openApiManager("retry", "API retry settings"),
       "api.cache": () => openApiManager("cache", "Prompt cache policy"),
+      "api.nextsuggest": () => openApiManager("nextsuggest", "Next-step suggestion settings"),
       "api.list": () => openApiManager("list", "API provider overview"),
     },
   });
