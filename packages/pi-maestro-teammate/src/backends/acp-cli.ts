@@ -161,11 +161,13 @@ const CONFIG_FIELDS: readonly BackendConfigField[] = [
   },
   {
     // How long the ACP handshake may take, separate from `runTimeoutMs`, which
-    // bounds the run once it is talking. The driver's default assumes an
-    // already-installed binary; a `command` that fetches before it answers —
-    // `npx`, a wrapper that resolves a version — outlasts it on a cold cache
-    // and fails as a startup timeout rather than as anything diagnosable. The
-    // operator who chose the launch command is the one who knows.
+    // bounds the run once it is talking. Raising it is the point; lowering it
+    // is a mistake the default already guards against. The bound covers
+    // `initialize` and `session/new`, and installing the adapter locally only
+    // removes the download in front of the first — measured against Claude
+    // Code, an installed adapter still fails at `session/new` under 5s and
+    // needs the 15s default. Raise it when `command` resolves or downloads
+    // before answering, or when the agent is slow to open a session.
     key: "startupTimeoutMs",
     kind: "integer",
     labelKey: "acpCli.startupTimeoutMs",

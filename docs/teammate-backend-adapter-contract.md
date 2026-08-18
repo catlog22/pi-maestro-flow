@@ -257,7 +257,19 @@ Its capability table declares `modelSelection: "native"` and `abort: "native"`, 
 
 `runTimeoutMs` is the worked instance of the timeout rule stated under `start`: per registration rather than per task, because `TeammateRunSpec` carries no timeout field and nothing else on this path enforces one. Two `cli/<tool>` workloads needing different bounds are two registrations.
 
-`startupTimeoutMs` bounds a different thing — how long the ACP handshake may take before the launch is called failed — and it defaults to the driver's 15s. That default assumes `command` names an already-installed binary. A command that fetches before it answers does not: `npx -y @agentclientprotocol/claude-agent-acp` on a cold cache spends most of a first run downloading, blows the default, and reports `ACP initialize timed out after 15000ms`, which says nothing about the cause. Raise it for any launch command that resolves or downloads, and note that a warm cache hides the problem — the first run on a new machine is the one that fails.
+`startupTimeoutMs` bounds a different thing — how long the ACP handshake may take before the launch is called failed — and it defaults to 15s. **The field exists to raise that bound, not to lower it.** It covers `initialize` *and* `session/new`, and the second is usually the expensive one: installing the adapter removes the download but not the session setup behind it.
+
+Measured against `@agentclientprotocol/claude-agent-acp` driving Claude Code, which is the shape most operators will hit:
+
+| `command` | `startupTimeoutMs` | Outcome |
+|---|---|---|
+| `npx -y …`, cold cache | 15000 (default) | fails — `ACP initialize timed out`, spent downloading |
+| installed binary | 1500 | fails — `ACP session/new timed out` |
+| installed binary | 3000 | fails |
+| installed binary | 5000 | fails |
+| installed binary | 15000 (default) | succeeds |
+
+So the default is not slack, and a locally installed adapter is not a reason to shrink it. Raise it when `command` resolves or downloads before it answers, or when the agent behind the adapter is slow to open a session. A warm cache hides the download half — the first run on a new machine is the one that fails.
 
 Its recovery facts come from what the run observed. `settleAcpRun` counts ACP `tool_call` and `tool_call_update` events, and `recoveryFactsOf` folds that into `completedToolCount` and `inFlightToolCount` — the latter paired by tool call id, so an update whose call was never announced cannot cancel out a call that is genuinely outstanding.
 
