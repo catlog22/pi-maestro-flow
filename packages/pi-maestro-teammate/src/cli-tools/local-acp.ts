@@ -57,7 +57,17 @@ export interface AcpToolObservation {
   completedTools: readonly string[];
   /** Tool calls that started and never ended; their effects are unknown. */
   inFlightToolCount: number;
-  /** At least one run event arrived, so the run got further than launching. */
+  /**
+   * The model or one of its tools did something: at least one `run/event`
+   * arrived.
+   *
+   * Lifecycle transitions (`run/state`) are deliberately excluded. The driver
+   * emits one the moment the ACP handshake succeeds, so counting them would
+   * make this true for every run whose CLI launched at all — including the CLI
+   * that answered `initialize`, answered `session/new`, and then died on a bad
+   * flag or a missing config. The host reads this to decide whether a fresh
+   * attempt would repeat work, and a completed handshake is not work.
+   */
   sawActivity: boolean;
   /**
    * How the run established that the turn ended.
@@ -358,7 +368,7 @@ export async function settleAcpRun(
   let settled: RemoteRunResultEvent | undefined;
 
   for await (const event of handle.events()) {
-    sawActivity = true;
+    if (event.type === "run/event") sawActivity = true;
     if (params.signal.aborted) {
       await handle.cancel({
         commandId: `timeout-${randomUUID()}`,
@@ -394,7 +404,12 @@ export async function settleAcpRun(
 
   const observed = {
     completedTools,
-    inFlightToolCount: Math.max(0, startedToolIds.size - endedToolIds.size),
+    // Paired per call id, not `started.size - ended.size`: the driver falls back
+    // to an "unknown" tool name for a `tool_call_update` whose `tool_call` it
+    // never saw (acp-driver.ts), so an end can arrive without its start. The
+    // sizes then cancel out and an unrelated tool that is genuinely outstanding
+    // is reported as finished.
+    inFlightToolCount: [...startedToolIds].filter((id) => !endedToolIds.has(id)).length,
     sawActivity,
   };
   if (settled) {
@@ -456,8 +471,12 @@ function failedResult(
 /**
  * Local ACP policy: like remote targets, permission requests are denied by
  * default and filesystem/terminal operations are off unless the tool config
- * declares them. Local CLIs run with the parent's identity, so the conservative
- * default protects against unexpected tool-driven writes.
+ * declares them.
+ *
+ * The scope is exactly the operations the CLI routes back to the host over ACP.
+ * A CLI that owns its own file and shell tools writes directly, with the parent
+ * process's identity, and nothing here sees it — launching an untrusted CLI is
+ * not gated by this policy.
  */
 function localAcpPolicy(): RemoteAcpPolicy {
   return { permissionMode: "deny" };

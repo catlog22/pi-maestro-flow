@@ -4,10 +4,20 @@
  *
  * Generic by construction. Nothing here names a particular CLI: the executable,
  * its argv, its working directory, and its ssh connection are configuration
- * fields, so adding a CLI that speaks ACP is a registration in
- * `.pi/teammate-backends.json` plus an entry in `teammate-cli-tools.json`, with
- * no host source change. One registration serves one CLI, which is what lets two
- * of them declare different routes and different timeouts.
+ * fields, so adding a CLI that speaks ACP needs no host source change. One
+ * registration serves one CLI, which is what lets two of them declare different
+ * routes and different timeouts.
+ *
+ * Two documents, each sufficient for one thing and neither for both. A
+ * registration in `.pi/teammate-backends.json` is necessary and sufficient to
+ * *run* `cli/<tool>`: the launch takes its configuration from the registration
+ * and reads no file. An entry in `teammate-cli-tools.json` is necessary and
+ * sufficient for `cli/<tool>` to *appear* in the model catalog, which is all the
+ * host still derives from that file. So a registered tool missing from the tools
+ * file runs when a task names it and is never offered, and a tool present only
+ * in the tools file is offered and then refused by name — including one the
+ * tools file marks `enabled: false`, because the registration is the enablement
+ * decision.
  *
  * It ships in this package because its implementation reuses this package's ACP
  * driver and CLI launch helpers, and it is registered by module specifier like
@@ -236,9 +246,12 @@ export function recoveryFactsOf(run: CliToolRunResult): AttemptRecoveryFacts {
     // Read off observed activity, never off the exit code: a CLI that edited
     // files and then exited non-zero has plenty to replay, and calling that a
     // pre-activity exit is what cleared the fence on the path this replaces.
-    preActivityInfrastructureExit: !run.sawActivity
-      && run.completedTools.length === 0
-      && run.inFlightToolCount === 0,
+    //
+    // The tool counts are not repeated here. Both are written only from a
+    // `run/event`, which is the same event that sets `sawActivity`, so
+    // `!sawActivity` already implies both are zero; naming them would read as a
+    // three-part safety check in which two parts can never change the answer.
+    preActivityInfrastructureExit: !run.sawActivity,
     // The stream ended with no protocol result, so what the CLI did before it
     // went silent is outside this attempt's own accounting.
     externalReplayRisk: run.terminalStatus === "lost",
@@ -258,20 +271,36 @@ export type CliToolRunner = (params: RunLocalCliToolParams) => Promise<CliToolRu
 /**
  * Forward several abort sources into one signal.
  *
+ * `release` must be called once the run settles. `once: true` removes a listener
+ * only when it fires, and the dispatch signal outlives any single run, so
+ * without the teardown a session that dispatches many CLI tasks on one signal
+ * accumulates one listener per task until Node warns past ten.
+ *
  * @param sources - the signals to follow; undefined entries are ignored.
- * @returns a signal aborted as soon as any source aborts.
+ * @returns a signal aborted as soon as any source aborts, and the teardown that
+ *   detaches it from every source it is still attached to.
  */
-function combineSignals(...sources: readonly (AbortSignal | undefined)[]): AbortSignal {
+function combineSignals(
+  ...sources: readonly (AbortSignal | undefined)[]
+): { signal: AbortSignal; release: () => void } {
   const controller = new AbortController();
+  const attached: Array<{ source: AbortSignal; listener: () => void }> = [];
   for (const source of sources) {
     if (source === undefined) continue;
     if (source.aborted) {
       controller.abort(source.reason);
       break;
     }
-    source.addEventListener("abort", () => controller.abort(source.reason), { once: true });
+    const listener = (): void => controller.abort(source.reason);
+    source.addEventListener("abort", listener, { once: true });
+    attached.push({ source, listener });
   }
-  return controller.signal;
+  const release = (): void => {
+    for (const { source, listener } of attached.splice(0)) {
+      source.removeEventListener("abort", listener);
+    }
+  };
+  return { signal: controller.signal, release };
 }
 
 /**
@@ -331,7 +360,6 @@ export function createAcpCliBackend(run: CliToolRunner = runCliTool): TeammateBa
     },
 
     async start(spec: TeammateRunSpec, options: BackendRunOptions): Promise<BackendRun> {
-      const startedAt = Date.now();
       const route = routeOf(options.config, spec.backend);
       // One registration serves one CLI. A spec asking for another model is
       // refused by name rather than answered by this CLI under that name —
@@ -346,6 +374,7 @@ export function createAcpCliBackend(run: CliToolRunner = runCliTool): TeammateBa
       const tool = isCliToolModel(route) ? cliToolNameFromModel(route) : route;
       const aborter = new AbortController();
       const timeoutMs = count(options.config, "runTimeoutMs");
+      const cancellation = combineSignals(options.signal, aborter.signal);
 
       const outcome = (async (): Promise<AttemptOutcome> => {
         const settled = await run({
@@ -353,9 +382,9 @@ export function createAcpCliBackend(run: CliToolRunner = runCliTool): TeammateBa
           config: launchConfigOf(options.config),
           prompt: spec.task,
           cwd: spec.cwd ?? options.baseCwd,
-          signal: combineSignals(options.signal, aborter.signal),
+          signal: cancellation.signal,
           ...(timeoutMs === undefined ? {} : { timeoutMs }),
-        });
+        }).finally(cancellation.release);
         const terminalStatus = terminalStatusOf(settled);
         const result: SingleResult = {
           agent: spec.agent,
@@ -409,8 +438,10 @@ export function createAcpCliBackend(run: CliToolRunner = runCliTool): TeammateBa
 /**
  * The registered instance.
  *
- * The registry narrows a loaded module's `default` before its own members, so a
- * module reached through a real `import(module)` must export one — without it,
- * registration fails with "exports no backend" for a module that has one.
+ * `asBackend` takes a loaded module's `.default` when it has one and narrows the
+ * module namespace itself otherwise, so a default export is not required of
+ * every adapter — it is required of this one. The named exports here are a
+ * factory and a fold, neither of which is `name`, `capabilities`, or `start`, so
+ * a namespace without the default carries no backend to find.
  */
 export default createAcpCliBackend();

@@ -32,6 +32,8 @@ A function from this registration's resolved configuration to a `BackendCapabili
 
 The registry calls it exactly once per registration, after `resolveConfig` has applied defaults, and carries the result on `ResolvedBackend`. It must be a pure function of its argument — no `process.env`, no I/O. The result is memoized for the registration's lifetime, so anything read here that later changes leaves the host adjudicating against a table that is no longer true.
 
+A registration's lifetime is its registry instance's, and that is shorter than it sounds. `TeammateBackendRegistry`'s own documentation states why: the teammate host builds one registry per dispatch, because the Pi backend it registers closes over that dispatch's run wiring. In the deployment that ships, "once per registration" therefore means **once per task**. Budget `capabilities` and `resolveConfig` accordingly — a probe, a file read, or a network check placed in either is paid on every task, not once at startup.
+
 The table records what your backend **does**, not what its underlying runtime could theoretically be made to do. Declaring a capability you have not implemented routes tasks to you that you will then fail.
 
 ### `recoveryShape`
@@ -44,7 +46,7 @@ The settings your backend accepts, as `BackendConfigField` entries. Omit it if y
 
 ### `resolveConfig`
 
-Validate a registration's configuration and apply defaults. Called once at registration, never per run. A backend that declares `configFields` must implement it: the registry treats declared fields plus a missing implementation as a registration error rather than skipping validation.
+Validate a registration's configuration and apply defaults. Called once at registration, never per run — with the same caveat `capabilities` carries: the shipping host builds one registry per dispatch, so once at registration is once per task. A backend that declares `configFields` must implement it: the registry treats declared fields plus a missing implementation as a registration error rather than skipping validation.
 
 Generic validation runs first, in `resolveBackendConfig`: unknown keys, wrong types, enum values outside `options`, missing values for a field marked `required`. Only a configuration that survives all of that reaches your `resolveConfig`, so you never defend against shapes the declaration already rejects. What is left for you is cross-field and semantic validation — an ssh mode that needs a host, a numeric bound, a field that must hold a name rather than a value.
 
@@ -56,7 +58,11 @@ Resolution is a distinct step rather than a `?? default` inside `start`, so an `
 
 Called per task with the `TeammateRunSpec` and `BackendRunOptions`. It resolves once the run is **live**, not once it finishes, because teammate-send addresses running tasks by name and needs the control channel while the outcome is still pending.
 
-`TeammateRunSpec` carries only orchestrator-visible fields: `agent`, `task`, `name`, `backend`, `context`, `model`, `thinking`, `cwd`, `outputSchema`, `todos`. Host-enforced fields are absent by construction — `fallbackModels` is sequenced by the host across attempts, `maxNestingDepth` is checked before a child starts, and `cwd` arrives already resolved.
+`TeammateRunSpec` carries only orchestrator-visible fields: `agent`, `task`, `name`, `backend`, `context`, `model`, `thinking`, `cwd`, `outputSchema`, `todos`. Most of what is absent is absent because the host enforces it — `fallbackModels` is sequenced by the host across attempts, `maxNestingDepth` is checked before a child starts, and `cwd` arrives already resolved.
+
+**`timeoutMs` is the exception, and it is the one you are most likely to want.** It is absent from `TeammateRunSpec` and enforced by nobody on the registry path: `RunSingleTeammateParams` carries a `timeoutMs`, `backendSpecOf` does not forward it, and the word does not appear in `execution.ts` at all. Two host call sites pass one today — the advisor and the delegation planner — and under `mode: "backend-registry"` both are dropped, for every backend rather than only for CLI ones. So a task-level timeout does not reach you, and no host watchdog is standing behind you.
+
+An adapter that needs a time bound declares one as a `configFields` entry and applies it itself. That makes the bound **per registration, not per task**: two tasks routed to the same registration get the same bound, and a caller cannot ask for a shorter one. `acp-cli`'s `runTimeoutMs` is that shape, and it is a deliberate accepted limit rather than an oversight — closing it means adding a field to `TeammateRunSpec`, which is a change to the published `v1` interface. Register the same module twice with different `config` when two workloads need different bounds.
 
 `BackendRunOptions` carries what the spec does not: `correlationId`, `baseCwd`, `signal`, the observer callbacks `onProgress`, `onChildEvent`, and `onTurnComplete`, the borrowed host abilities in `host`, the assembled `systemPrompt` when the host built one, and this registration's resolved `config`.
 
@@ -87,7 +93,7 @@ The `recovery` member of `AttemptOutcome` is an `AttemptRecoveryFacts` with five
 | Field | Meaning |
 |---|---|
 | `settlementAuthority` | `authoritative`, `inferred`, or `unknown` — how firmly you established that the turn ended |
-| `completedToolCount` | Tool calls that ran to completion, whose effects a replay would repeat |
+| `completedToolCount` | Tool calls that reached a terminal state, successful **or** failed, whose effects a replay would repeat |
 | `inFlightToolCount` | Tool calls still outstanding at failure, whose effects are unknown |
 | `preActivityInfrastructureExit` | The attempt died before any model or tool activity, so there is nothing to replay |
 | `externalReplayRisk` | Effects were observed outside this attempt's own tool accounting |
@@ -97,6 +103,10 @@ Every field describes observed side-effect risk, not backend preference: the hos
 These facts must travel on the returned value. A process-internal side channel is not an acceptable substitute, because a backend that forgets to populate one silently loses failover for every task it serves — no error, no warning, nothing in the transcript. The same rule is why they are members of `AttemptOutcome` rather than an out-of-band channel in the first place.
 
 `completedToolCount` in particular is load-bearing. `buildReplayFence` blocks a fresh replay when any tool completed or any effect is unknown, so reporting a constant zero tells the host that a run which edited files and then failed had touched nothing.
+
+Count a failed tool call too. The field's own name says completion and the declaration in `pi-maestro-backend-core` still reads "ran to completion", but the number the fence needs is terminal calls: an edit that reported failure may have written the file before it failed, and a replay would write it again. Excluding failures under-reports replay risk, which is the one direction this fence must never err in.
+
+`preActivityInfrastructureExit` is the mirror of that rule and the easier one to get wrong. It means no model or tool activity was ever observed — not that no protocol traffic arrived. A handshake that succeeded and a runtime that then died on a bad flag is still a pre-activity exit, and reporting it as activity costs the task its only failover.
 
 `reclamation` is a promise of `AttemptReclamation`: `{ status: "reclaimed" }` or `{ status: "unreaped", reason }`. The host awaits it only on the failover path, and that await serialises attempts — the replacement must not start while your failed runtime may still be alive. Report `unreaped` when you could not confirm the runtime is gone.
 
@@ -183,6 +193,24 @@ The registration document is `.pi/teammate-backends.json` in the workspace root,
 - `backends` maps a registration name to a `BackendRegistration`, which is a `module` specifier plus an optional `config`.
 - The `pi-subprocess` registration is merged in automatically, so a document that only adds a backend does not lose Pi.
 
+### `cli/<tool>` routes and `teammate-cli-tools.json`
+
+A `cli/<tool>` model reaches a registration named after the tool, and two files decide two different things about it. Each is sufficient for its own half and neither is sufficient for both:
+
+| Question | Decided by |
+|---|---|
+| Can `cli/<tool>` **run**? | the registration in `.pi/teammate-backends.json`, alone |
+| Does `cli/<tool>` **appear** in the model catalog? | the entry in `teammate-cli-tools.json`, alone |
+
+The launch path reads no file: `cliToolArgv` and `probeCliToolCommand` take the configuration as an argument, and it comes from the registration. The catalog path reads only `teammate-cli-tools.json`, through `toCliToolModelEntries`.
+
+Two consequences worth stating outright, because both look like bugs from the other side:
+
+- A registered tool with no entry in `teammate-cli-tools.json` runs when a task names it and is never offered in the picker.
+- A tool with an entry but no registration is offered and then refused by name. So is one whose entry says `enabled: false` but which *is* registered — it runs. The registration is the enablement decision, and `enabled` in the tools file governs catalog visibility only.
+
+Whether the catalog should be derived from the registration document instead is an open design question, not the behaviour described here.
+
 A task selects a registration through the `backend` field of its `TeammateRunSpec`. A name that is not registered fails the dispatch by name rather than falling back, so a typo cannot silently route elsewhere:
 
 ```
@@ -191,13 +219,15 @@ teammate backend "<name>" is not registered (registered: <known names>)
 
 ### The default export
 
-The loader resolves your `module` through a real dynamic import, and `asBackend` reads `.default` off the loaded module before checking any member. A module that exports only named bindings is therefore rejected with:
+The loader resolves your `module` through a real dynamic import, and `asBackend` takes the loaded module's `.default` when it has one, falling back to the loaded value itself when it does not. That fallback is deliberate: the built-in loaders hand the registry a backend object rather than a module namespace.
+
+So a default export is not strictly required — what is required is that whichever of the two the registry lands on carries `name`, `capabilities`, and `start`. A module exporting those three as named bindings is accepted. A module whose named exports are anything else, which is the usual case, is rejected with:
 
 ```
 teammate backend "<name>" loaded from "<module>" but exports no backend (expected an object with name, capabilities, and start)
 ```
 
-Export a named factory for tests and a default instance for the registry.
+Export a named factory for tests and a default instance for the registry. Relying on the namespace fallback is legal and not worth it: the moment you add one unrelated named export the layout still works, but nothing about the module says which shape the registry is reading.
 
 ## Worked example: `acp-cli`
 
@@ -225,9 +255,11 @@ Its configuration fields are `command`, `args`, `cwd`, `env`, `mode`, `host`, `u
 
 Its capability table declares `modelSelection: "native"` and `abort: "native"`, and everything else `unsupported`. The `native` model selection is honoured rather than assumed: one registration serves one route, and `start` refuses a spec naming any other model instead of running the wrong CLI under the requested model's name.
 
-`runTimeoutMs` is per registration rather than per task, because `TeammateRunSpec` carries no timeout field. That is the finest granularity the contract expresses today, and it is stated here rather than hidden: a task-level timeout does not reach this backend.
+`runTimeoutMs` is the worked instance of the timeout rule stated under `start`: per registration rather than per task, because `TeammateRunSpec` carries no timeout field and nothing else on this path enforces one. Two `cli/<tool>` workloads needing different bounds are two registrations.
 
-Its recovery facts come from what the run observed. `settleAcpRun` counts ACP `tool_call` and `tool_call_update` events, and `recoveryFactsOf` folds that into `completedToolCount`, `inFlightToolCount`, and a `preActivityInfrastructureExit` computed from observed activity rather than from an exit code.
+Its recovery facts come from what the run observed. `settleAcpRun` counts ACP `tool_call` and `tool_call_update` events, and `recoveryFactsOf` folds that into `completedToolCount` and `inFlightToolCount` — the latter paired by tool call id, so an update whose call was never announced cannot cancel out a call that is genuinely outstanding.
+
+`preActivityInfrastructureExit` is read off observed activity, never off the exit code, and `settleAcpRun` counts only progress events as activity. The lifecycle transition the driver emits when the ACP handshake lands does not count, which is the whole point of the field here: a CLI that answers `initialize`, answers `session/new`, and then dies on a bad flag or a missing config has done nothing a replay would repeat, and this backend's failure text never matches the host's fallback-provider predicate, so this flag is the only thing that can hand such a task to the next model candidate.
 
 ## Second example: `dsh`
 

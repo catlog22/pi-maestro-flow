@@ -201,6 +201,30 @@ const probeCache = new Map<string, { result: CliToolProbeResult; at: number }>()
 const sshProbeInflight = new Map<string, Promise<void>>();
 
 /**
+ * Cache key for one probe: what the probe actually validates.
+ *
+ * Never the tool name. `command` is a per-registration field now that a CLI is
+ * configured by a `.pi/teammate-backends.json` registration, so two
+ * registrations can serve the same `cli/<tool>` route with different
+ * executables on different hosts. Keying by name would validate the second
+ * against the first's executable for the whole TTL and report a launchable
+ * command unlaunchable, or the reverse.
+ *
+ * @param command - the resolved executable.
+ * @param config - the tool configuration the command was resolved from.
+ * @returns a key distinguishing every launch target the probe can be asked about.
+ */
+function probeCacheKey(command: string, config: CliToolConfig): string {
+  if ((config.mode ?? "local") !== "ssh") return JSON.stringify(["local", command]);
+  const hostConfig = sshHostConfigOf(config);
+  // An incomplete ssh config has no target to name; the verdict is the same
+  // refusal for every such registration, so they share one entry.
+  if (!hostConfig) return JSON.stringify(["ssh", null, command]);
+  const target = `${hostConfig.user}@${hostConfig.host}:${hostConfig.port}`;
+  return JSON.stringify(["ssh", target, command]);
+}
+
+/**
  * Probe whether a CLI tool is reachable. Local tools are checked with
  * which/where; ssh tools first validate config completeness (fail-closed) and
  * then optimistically report ok while an async SSH probe warms the cache, so
@@ -212,14 +236,15 @@ export function probeCliToolCommand(
   config: CliToolConfig,
 ): CliToolProbeResult {
   const command = cliToolCommand(name, config);
-  const cached = probeCache.get(name);
+  const key = probeCacheKey(command, config);
+  const cached = probeCache.get(key);
   if (cached && Date.now() - cached.at < PROBE_CACHE_TTL_MS) return cached.result;
 
-  if ((config.mode ?? "local") === "ssh") return probeSshTool(name, command, config);
-  return probeLocalExecutable(name, command);
+  if ((config.mode ?? "local") === "ssh") return probeSshTool(key, command, config);
+  return probeLocalExecutable(key, command);
 }
 
-function probeLocalExecutable(name: string, command: string): CliToolProbeResult {
+function probeLocalExecutable(key: string, command: string): CliToolProbeResult {
   let result: CliToolProbeResult;
   try {
     const lookup = process.platform === "win32" ? "where" : "which";
@@ -242,11 +267,11 @@ function probeLocalExecutable(name: string, command: string): CliToolProbeResult
         : `executable "${command}" unreachable${code ? ` (${code})` : ""}`,
     };
   }
-  probeCache.set(name, { result, at: Date.now() });
+  probeCache.set(key, { result, at: Date.now() });
   return result;
 }
 
-function probeSshTool(name: string, command: string, config: CliToolConfig): CliToolProbeResult {
+function probeSshTool(key: string, command: string, config: CliToolConfig): CliToolProbeResult {
   const hostConfig = sshHostConfigOf(config);
   if (!hostConfig) {
     const result: CliToolProbeResult = {
@@ -254,17 +279,17 @@ function probeSshTool(name: string, command: string, config: CliToolConfig): Cli
       command,
       error: "ssh mode requires host, user and hostKeySha256 in teammate-cli-tools.json",
     };
-    probeCache.set(name, { result, at: Date.now() });
+    probeCache.set(key, { result, at: Date.now() });
     return result;
   }
   // Optimistically list a complete configuration; warm the cache asynchronously
   // so the next refresh filters unreachable hosts. Deduplicate concurrent probes.
   const result: CliToolProbeResult = { ok: true, command };
-  probeCache.set(name, { result, at: Date.now() });
-  if (!sshProbeInflight.has(name)) {
+  probeCache.set(key, { result, at: Date.now() });
+  if (!sshProbeInflight.has(key)) {
     const probe = probeSshCliExecutable(hostConfig, command)
       .then((outcome) => {
-        probeCache.set(name, {
+        probeCache.set(key, {
           result: outcome.ok
             ? { ok: true, command }
             : { ok: false, command, error: outcome.error ?? `remote executable "${command}" unreachable` },
@@ -272,13 +297,13 @@ function probeSshTool(name: string, command: string, config: CliToolConfig): Cli
         });
       })
       .catch(() => {
-        probeCache.set(name, {
+        probeCache.set(key, {
           result: { ok: false, command, error: `remote executable "${command}" probe failed` },
           at: Date.now(),
         });
       })
-      .finally(() => sshProbeInflight.delete(name));
-    sshProbeInflight.set(name, probe);
+      .finally(() => sshProbeInflight.delete(key));
+    sshProbeInflight.set(key, probe);
   }
   return result;
 }

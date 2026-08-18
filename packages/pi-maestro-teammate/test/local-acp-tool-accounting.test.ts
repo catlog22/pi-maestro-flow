@@ -61,6 +61,11 @@ function tool(toolCallId: string, toolName: string, phase: "start" | "end"): Rem
   return progress({ type: "tool", tool: { toolCallId, toolName, phase } });
 }
 
+/** A lifecycle transition: what the driver emits once the ACP handshake lands. */
+function state(status: RemoteRunSnapshot["status"]): RemoteRunEvent {
+  return { ...CAPTURE, type: "run/state", sequence: ++sequence, status, updatedAt: Date.now() };
+}
+
 function settledEvent(status: RemoteRunResultEvent["status"], result?: string): RemoteRunEvent {
   return {
     ...CAPTURE,
@@ -134,4 +139,28 @@ test("settleAcpRun reports no activity for an empty stream", async () => {
   assert.equal(run.sawActivity, false);
   assert.deepEqual([...run.completedTools], []);
   assert.equal(run.inFlightToolCount, 0);
+});
+
+test("settleAcpRun does not count a lifecycle state event as activity", async () => {
+  // What a CLI that answered `initialize` and `session/new` and then died on a
+  // bad flag produces: the handshake's state transition, then a failure. The
+  // host reads `sawActivity` to decide whether a fresh attempt would repeat
+  // work, so a completed handshake must not count as work.
+  const run = await settle([state("running"), settledEvent("failed")]);
+  assert.equal(run.sawActivity, false);
+  assert.deepEqual([...run.completedTools], []);
+  assert.equal(run.inFlightToolCount, 0);
+});
+
+test("settleAcpRun pairs tool ids so an end without a start leaves the other tool in flight", async () => {
+  // The driver names a `tool_call_update` whose `tool_call` it never saw, so an
+  // end can arrive alone. Subtracting set sizes cancels it against the genuinely
+  // outstanding call-1 and reports nothing in flight.
+  const run = await settle([
+    tool("call-1", "edit_file", "start"),
+    tool("call-2", "run_command", "end"),
+    settledEvent("failed"),
+  ]);
+  assert.deepEqual([...run.completedTools], ["run_command"]);
+  assert.equal(run.inFlightToolCount, 1);
 });

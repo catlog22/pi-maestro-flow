@@ -98,6 +98,21 @@ test("probeCliToolCommand reports reachable and missing local executables", () =
   assert.match(missing.error ?? "", /not found|unreachable/);
 });
 
+test("probeCliToolCommand caches by the resolved command, not by the tool name", () => {
+  // Two registrations may serve the same `cli/<tool>` route with different
+  // executables, so a verdict cached under the route name would validate the
+  // second registration against the first one's binary for the whole TTL.
+  const first = probeCliToolCommand("shared-route", { enabled: true, command: "node" });
+  assert.equal(first.ok, true);
+
+  const second = probeCliToolCommand("shared-route", {
+    enabled: true,
+    command: "definitely-not-a-real-executable-xyz",
+  });
+  assert.equal(second.command, "definitely-not-a-real-executable-xyz");
+  assert.equal(second.ok, false);
+});
+
 test("ssh probe fails closed on incomplete config; optimistic pass on complete config", () => {
   const incomplete = probeCliToolCommand("ssh-incomplete", {
     enabled: true,

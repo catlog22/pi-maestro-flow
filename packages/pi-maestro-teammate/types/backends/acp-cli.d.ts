@@ -4,10 +4,20 @@
  *
  * Generic by construction. Nothing here names a particular CLI: the executable,
  * its argv, its working directory, and its ssh connection are configuration
- * fields, so adding a CLI that speaks ACP is a registration in
- * `.pi/teammate-backends.json` plus an entry in `teammate-cli-tools.json`, with
- * no host source change. One registration serves one CLI, which is what lets two
- * of them declare different routes and different timeouts.
+ * fields, so adding a CLI that speaks ACP needs no host source change. One
+ * registration serves one CLI, which is what lets two of them declare different
+ * routes and different timeouts.
+ *
+ * Two documents, each sufficient for one thing and neither for both. A
+ * registration in `.pi/teammate-backends.json` is necessary and sufficient to
+ * *run* `cli/<tool>`: the launch takes its configuration from the registration
+ * and reads no file. An entry in `teammate-cli-tools.json` is necessary and
+ * sufficient for `cli/<tool>` to *appear* in the model catalog, which is all the
+ * host still derives from that file. So a registered tool missing from the tools
+ * file runs when a task names it and is never offered, and a tool present only
+ * in the tools file is offered and then refused by name — including one the
+ * tools file marks `enabled: false`, because the registration is the enablement
+ * decision.
  *
  * It ships in this package because its implementation reuses this package's ACP
  * driver and CLI launch helpers, and it is registered by module specifier like
@@ -44,9 +54,11 @@ export declare function createAcpCliBackend(run?: CliToolRunner): TeammateBacken
 /**
  * The registered instance.
  *
- * The registry narrows a loaded module's `default` before its own members, so a
- * module reached through a real `import(module)` must export one — without it,
- * registration fails with "exports no backend" for a module that has one.
+ * `asBackend` takes a loaded module's `.default` when it has one and narrows the
+ * module namespace itself otherwise, so a default export is not required of
+ * every adapter — it is required of this one. The named exports here are a
+ * factory and a fold, neither of which is `name`, `capabilities`, or `start`, so
+ * a namespace without the default carries no backend to find.
  */
 declare const _default: TeammateBackend;
 export default _default;

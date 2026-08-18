@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import test from "node:test";
 import { TeammateBackendRegistry, resolveBackendConfig, validateBackendCapabilities } from "pi-maestro-backends";
 import type { BackendRunOptions, ConfigValue } from "pi-maestro-backend-core/v1";
@@ -204,16 +205,37 @@ test("acp-cli defaults its route to the registration name", async () => {
 
 test("acp-cli aborts the run signal it handed the launcher", async () => {
   let seen: AbortSignal | undefined;
+  let finish!: () => void;
+  const launched = new Promise<void>((resolve) => { finish = resolve; });
   const backend = createAcpCliBackend(async (params) => {
     seen = params.signal;
+    await launched;
     return CLEAN_RUN;
   });
   const run = await backend.start(specOf(), runOptionsOf(LOCAL_CONFIG));
-  await run.outcome;
+  // Aborted while the launcher is still running, which is the only moment the
+  // host calls it: the combined signal is detached once the run settles.
   assert.equal(seen?.aborted, false);
   run.abort();
   assert.equal(seen?.aborted, true);
+  finish();
+  await run.outcome;
   assert.equal(run.send("hello", "follow_up"), false);
+});
+
+test("acp-cli detaches from the dispatch signal once a run settles", async () => {
+  // `options.signal` is the dispatch signal and outlives any single run, so a
+  // listener left behind accumulates one per task until Node warns past ten.
+  const dispatch = new AbortController();
+  const backend = createAcpCliBackend(async () => CLEAN_RUN);
+  for (let index = 0; index < 12; index += 1) {
+    const run = await backend.start(specOf(), {
+      ...runOptionsOf(LOCAL_CONFIG),
+      signal: dispatch.signal,
+    });
+    await run.outcome;
+  }
+  assert.equal(getEventListeners(dispatch.signal, "abort").length, 0);
 });
 
 test("acp-cli is loadable through the registry as a default export", async () => {

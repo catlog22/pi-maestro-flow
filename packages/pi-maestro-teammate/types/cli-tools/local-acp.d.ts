@@ -29,7 +29,17 @@ export interface AcpToolObservation {
     completedTools: readonly string[];
     /** Tool calls that started and never ended; their effects are unknown. */
     inFlightToolCount: number;
-    /** At least one run event arrived, so the run got further than launching. */
+    /**
+     * The model or one of its tools did something: at least one `run/event`
+     * arrived.
+     *
+     * Lifecycle transitions (`run/state`) are deliberately excluded. The driver
+     * emits one the moment the ACP handshake succeeds, so counting them would
+     * make this true for every run whose CLI launched at all — including the CLI
+     * that answered `initialize`, answered `session/new`, and then died on a bad
+     * flag or a missing config. The host reads this to decide whether a fresh
+     * attempt would repeat work, and a completed handshake is not work.
+     */
     sawActivity: boolean;
     /**
      * How the run established that the turn ended.

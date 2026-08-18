@@ -4,9 +4,31 @@
 
 ### 行为变化（Breaking）
 
+- **`cli/<tool>` 只能由 `.pi/teammate-backends.json` 里的注册项派发，不再从 `teammate-cli-tools.json` 单独起跑。** 该文件缺失或仍是 legacy 模式时，任何 `cli/<tool>` 任务被当场拒绝而不再回落到 pi 子进程；模型 id 里的工具名即注册名，注册表按名字找不到就按名字报错。升级前只靠 `teammate-cli-tools.json` 跑 `cli/gemini` 的部署会在升级后停止派发。
+
+  迁移两步：
+
+  1. 把 `.pi/teammate-backends.json` 改成 `"mode": "backend-registry"`（缺省仍是 `legacy`，写了注册项本身不改变任何行为，开关是这一处显式编辑）。
+  2. 每个要跑的 CLI 工具加一条注册项，`module` 指向通用 ACP-CLI 后端，`command` 等启动字段从 `teammate-cli-tools.json` 搬进 `config`：
+
+  ```json
+  {
+    "mode": "backend-registry",
+    "default": "pi-subprocess",
+    "backends": {
+      "gemini": {
+        "module": "pi-maestro-teammate/v1/acp-cli",
+        "config": { "command": "gemini", "args": ["--acp"], "modelId": "cli/gemini" }
+      }
+    }
+  }
+  ```
+
+  两个文件的分工从此是：注册项决定 `cli/<tool>` **能不能跑**，`teammate-cli-tools.json` 决定它 **出不出现在模型选择器里**，各自充要、互不代替。因此 `teammate-cli-tools.json` 里的 `enabled: false` 不再阻止一个已注册工具执行——它只把工具从目录里摘掉。完整契约见 [docs/teammate-backend-adapter-contract.md](../../docs/teammate-backend-adapter-contract.md)。
+
 - **远端 journal 格式 `REMOTE_JOURNAL_VERSION` 1 → 2，不提供迁移代码。** worker 标识、run 记录、command 记录三处版本硬拒同时指名记录版本与本守护进程版本；持久化的 `capabilities` 字段一并移除。守护进程读到 v1 的 `worker.json` 时在构造函数里直接抛错，`markInterruptedRunsLost` 尚未执行，旧数据一个字节都不会被改写。
 
-### 操作员补救步骤
+### 操作员补救步骤（远端 journal）
 
 守护进程报 `Unsupported remote worker identity version 1` 时：
 
