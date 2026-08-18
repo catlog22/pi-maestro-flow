@@ -254,3 +254,33 @@ test("acp-cli is loadable through the registry as a default export", async () =>
   assert.equal(backend.name, "acp-cli");
   assert.equal(backend.protocolVersion, 1);
 });
+
+test("acp-cli refuses a non-positive startup timeout and carries a valid one to the launcher", async () => {
+  const bad = resolved({ ...LOCAL_CONFIG, startupTimeoutMs: 0 });
+  assert.equal(bad.errors.length, 1);
+  assert.match(bad.errors[0]!, /"startupTimeoutMs" must be a positive number of milliseconds/);
+  assert.deepEqual(resolved({ ...LOCAL_CONFIG, startupTimeoutMs: 60_000 }).errors, []);
+
+  // Validation alone proves nothing about the gap this field exists to close:
+  // the value has to reach the launcher, which is where the plumbing stopped.
+  // `local-acp.test.ts` pins the launcher-to-driver half.
+  const launches: RunLocalCliToolParams[] = [];
+  const backend = createAcpCliBackend(async (params) => {
+    launches.push(params);
+    return CLEAN_RUN;
+  });
+  await (await backend.start(
+    specOf({ model: "cli/mock" }),
+    runOptionsOf({ ...LOCAL_CONFIG, startupTimeoutMs: 60_000 }),
+  )).outcome;
+  assert.equal(launches[0]?.startupTimeoutMs, 60_000);
+
+  // Unset stays unset rather than becoming a literal the backend invented.
+  const defaults: RunLocalCliToolParams[] = [];
+  const plain = createAcpCliBackend(async (params) => {
+    defaults.push(params);
+    return CLEAN_RUN;
+  });
+  await (await plain.start(specOf({ model: "cli/mock" }), runOptionsOf(LOCAL_CONFIG))).outcome;
+  assert.equal(defaults[0]?.startupTimeoutMs, undefined);
+});

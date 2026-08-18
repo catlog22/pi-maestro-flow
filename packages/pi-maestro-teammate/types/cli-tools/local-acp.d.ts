@@ -73,6 +73,15 @@ export interface RunLocalCliToolParams {
     signal: AbortSignal;
     /** Optional overall execution timeout applied on top of the caller's signal. */
     timeoutMs?: number;
+    /**
+     * How long the ACP handshake may take before the launch is declared failed.
+     *
+     * Separate from `timeoutMs`, which bounds the run once it is talking. A CLI
+     * launched through a package runner downloads before it answers, and a cold
+     * cache routinely outlasts the driver's default; the operator who chose that
+     * launch command is the one who can say how long it needs.
+     */
+    startupTimeoutMs?: number;
     /** Injectable ssh2 connection factory (tests only; defaults to real clients). */
     sshOptions?: SshDirectExecOptions;
 }

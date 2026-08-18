@@ -159,6 +159,18 @@ const CONFIG_FIELDS: readonly BackendConfigField[] = [
     labelKey: "acpCli.runTimeoutMs",
     descriptionKey: "acpCli.runTimeoutMs.description",
   },
+  {
+    // How long the ACP handshake may take, separate from `runTimeoutMs`, which
+    // bounds the run once it is talking. The driver's default assumes an
+    // already-installed binary; a `command` that fetches before it answers —
+    // `npx`, a wrapper that resolves a version — outlasts it on a cold cache
+    // and fails as a startup timeout rather than as anything diagnosable. The
+    // operator who chose the launch command is the one who knows.
+    key: "startupTimeoutMs",
+    kind: "integer",
+    labelKey: "acpCli.startupTimeoutMs",
+    descriptionKey: "acpCli.startupTimeoutMs.description",
+  },
 ];
 
 /** Read a string setting, or undefined when unset. */
@@ -336,6 +348,12 @@ export function createAcpCliBackend(run: CliToolRunner = runCliTool): TeammateBa
       if (runTimeoutMs !== undefined && runTimeoutMs <= 0) {
         errors.push(`"runTimeoutMs" must be a positive number of milliseconds, got ${runTimeoutMs}`);
       }
+      const startupTimeoutMs = count(config, "startupTimeoutMs");
+      if (startupTimeoutMs !== undefined && startupTimeoutMs <= 0) {
+        errors.push(
+          `"startupTimeoutMs" must be a positive number of milliseconds, got ${startupTimeoutMs}`,
+        );
+      }
       // The field holds variable names the parent may forward, so an entry
       // shaped like NAME=value is a secret written into a committed
       // registration document. Only the offending name is quoted back — the
@@ -374,6 +392,7 @@ export function createAcpCliBackend(run: CliToolRunner = runCliTool): TeammateBa
       const tool = isCliToolModel(route) ? cliToolNameFromModel(route) : route;
       const aborter = new AbortController();
       const timeoutMs = count(options.config, "runTimeoutMs");
+      const startupTimeoutMs = count(options.config, "startupTimeoutMs");
       const cancellation = combineSignals(options.signal, aborter.signal);
 
       const outcome = (async (): Promise<AttemptOutcome> => {
@@ -384,6 +403,7 @@ export function createAcpCliBackend(run: CliToolRunner = runCliTool): TeammateBa
           cwd: spec.cwd ?? options.baseCwd,
           signal: cancellation.signal,
           ...(timeoutMs === undefined ? {} : { timeoutMs }),
+          ...(startupTimeoutMs === undefined ? {} : { startupTimeoutMs }),
         }).finally(cancellation.release);
         const terminalStatus = terminalStatusOf(settled);
         const result: SingleResult = {

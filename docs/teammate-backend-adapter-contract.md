@@ -251,11 +251,13 @@ export function createAcpCliBackend(run: CliToolRunner = runCliTool): TeammateBa
 export default createAcpCliBackend();
 ```
 
-Its configuration fields are `command`, `args`, `cwd`, `env`, `mode`, `host`, `user`, `port`, `hostKeySha256`, `identityFile`, `modelId`, and `runTimeoutMs`. None of them is a `credential-ref`: an ACP CLI resolves its own provider credentials from its own configuration, so there is no secret for the host to hold. `env` holds variable **names** the parent process may forward, and `resolveConfig` refuses an entry containing `=`, because a name-and-value entry writes a secret into a committed document.
+Its configuration fields are `command`, `args`, `cwd`, `env`, `mode`, `host`, `user`, `port`, `hostKeySha256`, `identityFile`, `modelId`, `runTimeoutMs`, and `startupTimeoutMs`. None of them is a `credential-ref`: an ACP CLI resolves its own provider credentials from its own configuration, so there is no secret for the host to hold. `env` holds variable **names** the parent process may forward, and `resolveConfig` refuses an entry containing `=`, because a name-and-value entry writes a secret into a committed document.
 
 Its capability table declares `modelSelection: "native"` and `abort: "native"`, and everything else `unsupported`. The `native` model selection is honoured rather than assumed: one registration serves one route, and `start` refuses a spec naming any other model instead of running the wrong CLI under the requested model's name.
 
 `runTimeoutMs` is the worked instance of the timeout rule stated under `start`: per registration rather than per task, because `TeammateRunSpec` carries no timeout field and nothing else on this path enforces one. Two `cli/<tool>` workloads needing different bounds are two registrations.
+
+`startupTimeoutMs` bounds a different thing — how long the ACP handshake may take before the launch is called failed — and it defaults to the driver's 15s. That default assumes `command` names an already-installed binary. A command that fetches before it answers does not: `npx -y @agentclientprotocol/claude-agent-acp` on a cold cache spends most of a first run downloading, blows the default, and reports `ACP initialize timed out after 15000ms`, which says nothing about the cause. Raise it for any launch command that resolves or downloads, and note that a warm cache hides the problem — the first run on a new machine is the one that fails.
 
 Its recovery facts come from what the run observed. `settleAcpRun` counts ACP `tool_call` and `tool_call_update` events, and `recoveryFactsOf` folds that into `completedToolCount` and `inFlightToolCount` — the latter paired by tool call id, so an update whose call was never announced cannot cancel out a call that is genuinely outstanding.
 
