@@ -1,6 +1,5 @@
 /** Narrow public v1 remote worker protocol, configuration, bridge, journal, and adapter contracts. */
 export * from "../../remote/acp-driver.ts";
-export * from "../../remote/capabilities.ts";
 export * from "../../remote/config.ts";
 export * from "../../remote/driver.ts";
 export * from "../../remote/journal.ts";

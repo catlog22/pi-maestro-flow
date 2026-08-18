@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { REMOTE_CAPABILITIES, type RemoteCapability } from "../src/remote/capabilities.ts";
 import type { RemoteConnection, RemoteConnectionFactory } from "../src/remote/driver.ts";
 import {
   REMOTE_JSONRPC_VERSION,
@@ -28,6 +27,7 @@ import {
 import {
   REMOTE_CONFIG_VERSION,
   REMOTE_PROTOCOL_VERSION,
+  type RemoteDriverEvent,
   type RemoteRunCapture,
   type RemoteRunEvent,
   type RemoteRunSnapshot,
@@ -36,6 +36,11 @@ import {
   type ResolvedRemoteTarget,
 } from "../src/remote/types.ts";
 import type { RemoteConfig } from "../src/remote/config.ts";
+import { createRemoteBackend } from "pi-maestro-backends/remote";
+import {
+  createRemoteManagerPort,
+  type RemoteManagerPortBinding,
+} from "../src/backends/remote-workers.ts";
 
 const HOST_KEY = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
@@ -102,7 +107,6 @@ class NotificationQueue implements AsyncIterable<RemoteProtocolNotification> {
 class FakeConnection implements RemoteConnection {
   status: RemoteStatus = "connecting";
   identity?: RemoteWorkerIdentity;
-  capabilities: readonly RemoteCapability[] = [];
   readonly queue = new NotificationQueue();
   readonly initializeCalls: RemoteInitializeParams[] = [];
   readonly starts: RemoteRunStartParams[] = [];
@@ -113,6 +117,7 @@ class FakeConnection implements RemoteConnection {
   hello: RemoteInitializeResult;
   listResult: RemoteRunListResult = { runs: [] };
   nextStart?: RemoteRunStartResult;
+  onInitialize?: (params: RemoteInitializeParams) => Promise<void> | void;
   onStart?: (params: RemoteRunStartParams) => Promise<void> | void;
   onAttach?: (params: RemoteRunAttachParams) => Promise<void> | void;
   onList?: () => Promise<void> | void;
@@ -122,7 +127,6 @@ class FakeConnection implements RemoteConnection {
     this.hello = {
       ...identity,
       protocolVersion: REMOTE_PROTOCOL_VERSION,
-      capabilities: [...REMOTE_CAPABILITIES],
       concurrency,
       activeRuns: 0,
       status: "ready",
@@ -131,8 +135,8 @@ class FakeConnection implements RemoteConnection {
 
   async initialize(params: RemoteInitializeParams): Promise<RemoteInitializeResult> {
     this.initializeCalls.push(params);
+    await this.onInitialize?.(params);
     this.identity = { workerId: this.hello.workerId, instanceNonce: this.hello.instanceNonce };
-    this.capabilities = [...this.hello.capabilities];
     this.status = this.hello.status;
     return this.hello;
   }
@@ -164,7 +168,6 @@ class FakeConnection implements RemoteConnection {
       runId: `run-${this.starts.length}`,
       generation: 1,
       status: "running",
-      capabilities: [...REMOTE_CAPABILITIES],
       firstSequence: 1,
     };
   }
@@ -500,7 +503,6 @@ test("close joins an in-flight start and rolls back its late remote run before t
     runId: "late-run",
     generation: 7,
     status: "running",
-    capabilities: [...REMOTE_CAPABILITIES],
     firstSequence: 1,
   };
   const manager = managerFor(new FakeConnectionFactory(connection));
@@ -528,7 +530,6 @@ test("failed local admission rolls back the exact remote run once", async () => 
     runId: "rollback-run",
     generation: 4,
     status: "running",
-    capabilities: [...REMOTE_CAPABILITIES],
     firstSequence: 1,
   };
   const manager = managerFor(new FakeConnectionFactory(connection));
@@ -541,4 +542,174 @@ test("failed local admission rolls back the exact remote run once", async () => 
   assert.equal(connection.cancels[0].generation, 4);
   assert.equal(manager.snapshots().length, 0);
   await manager.close();
+});
+
+test("a run whose events shared a chunk with the start reply still folds into the backend outcome", async () => {
+  const connection = new FakeConnection();
+  const capture: RemoteRunCapture = {
+    workerId: "worker-a",
+    instanceNonce: "instance-a",
+    runId: "run-1",
+    generation: 1,
+    monitorOwnerNonce: "monitor-owner",
+    targetId: "linux-a/pi",
+  };
+  const driverEvent = (sequence: number, event: RemoteDriverEvent): RemoteRunEvent => ({
+    type: "run/event",
+    workerId: capture.workerId,
+    instanceNonce: capture.instanceNonce,
+    runId: capture.runId,
+    generation: capture.generation,
+    sequence,
+    event,
+    updatedAt: sequence * 10,
+  });
+  // The whole run arrives before its own start reply does. A gateway writes the
+  // reply and the notifications that follow it into the same SSH chunk, and the
+  // line decoder dispatches every record in that chunk synchronously, so the
+  // pump has already buffered these as orphans by the time `run/start` settles
+  // — and the manager replays them while admitting the run, inside `start`.
+  connection.onStart = async () => {
+    connection.emit(driverEvent(1, { type: "tool", tool: { toolCallId: "a", toolName: "read", phase: "start" } }));
+    connection.emit(driverEvent(2, { type: "tool", tool: { toolCallId: "a", toolName: "read", phase: "end" } }));
+    connection.emit({
+      type: "run/result",
+      workerId: capture.workerId,
+      instanceNonce: capture.instanceNonce,
+      runId: capture.runId,
+      generation: capture.generation,
+      sequence: 3,
+      status: "completed",
+      updatedAt: 30,
+      result: "the deploy is clean",
+    });
+    await eventually(() => connection.queue.items.length === 0);
+  };
+
+  let binding: RemoteManagerPortBinding;
+  const manager = managerFor(new FakeConnectionFactory(connection), {
+    onEvent: (published, event) => binding.publish(published, event),
+  });
+  binding = createRemoteManagerPort(manager);
+  const backend = createRemoteBackend(() => binding.port);
+  const seen: Record<string, unknown>[] = [];
+
+  const run = await backend.start(
+    { agent: "prober", task: "audit the deploy" },
+    {
+      correlationId: "corr-1",
+      baseCwd: process.cwd(),
+      host: {},
+      config: { targetId: "linux-a/pi", driver: "pi-rpc" },
+      onChildEvent: (event) => seen.push(event),
+    },
+  );
+  const outcome = await run.outcome;
+
+  assert.equal(outcome.result.messages[0]?.content, "the deploy is clean");
+  assert.equal(outcome.result.toolCount, 1);
+  assert.equal(outcome.recovery.completedToolCount, 1);
+  assert.equal(outcome.recovery.settlementAuthority, "authoritative");
+  assert.equal(outcome.result.terminalStatus, "completed");
+  assert.equal(outcome.result.exitCode, 0);
+  assert.deepEqual(await outcome.reclamation, { status: "reclaimed" });
+  assert.equal(seen.length, 3, "the host never saw the events replayed during admission");
+  await manager.close();
+});
+
+test("a v1 daemon handshake failure names both protocol versions and the target host", async () => {
+  const connection = new FakeConnection();
+  // Exactly what a remote/1 daemon answers a remote/2 host: its parameter
+  // validation rejects the absent `capabilities` array before the version check
+  // that would have named remote/1 ever runs, so -32602 is all the operator gets.
+  connection.onInitialize = () => {
+    const refusal: Error & { code?: number } = new Error("Invalid capabilities");
+    refusal.name = "RemoteRpcResponseError";
+    refusal.code = -32602;
+    throw refusal;
+  };
+  const manager = managerFor(new FakeConnectionFactory(connection));
+
+  await assert.rejects(manager.connect("linux-a/pi"), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    const { message } = error;
+    assert.ok(message.includes("linux-a"), `the target host is missing from: ${message}`);
+    assert.ok(message.includes("remote/2"), `the local monitor's version is missing from: ${message}`);
+    assert.ok(message.includes("remote/1"), `the daemon's suspected version is missing from: ${message}`);
+    assert.ok(
+      message.includes("Upgrade pi-teammate-remote on linux-a and restart serve"),
+      `the remediation is missing from: ${message}`,
+    );
+    assert.equal((error.cause as Error | undefined)?.message, "Invalid capabilities");
+    return true;
+  });
+  assert.equal(connection.closed, true, "the refused connection is still closed");
+  await manager.close();
+});
+
+test("a hello whose protocol version differs is refused by validateHello", async () => {
+  const connection = new FakeConnection();
+  // Every other field stays valid, so the version disjunct is the only thing in
+  // validateHello that can refuse this hello.
+  connection.hello = {
+    ...connection.hello,
+    protocolVersion: "remote/1" as unknown as typeof REMOTE_PROTOCOL_VERSION,
+  };
+  const manager = managerFor(new FakeConnectionFactory(connection));
+
+  await assert.rejects(manager.connect("linux-a/pi"), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    // Equality, not a substring match: the skew diagnostic appends the original
+    // text as `Remote reply: ...`, so a wrapped message satisfies any regex
+    // written against the original and this case would pass for the wrong
+    // reason.
+    assert.equal(error.message, "Invalid remote worker hello");
+    return true;
+  });
+  assert.equal(connection.closed, true, "the refused connection is still closed");
+  await manager.close();
+});
+
+/**
+ * Assert one handshake failure reaches `connect`'s caller exactly as thrown.
+ *
+ * Object identity is the only assertion a wrapper cannot satisfy: the skew
+ * diagnostic constructs a new Error, appends the original message as `Remote
+ * reply: ...` and carries the original as `cause`, so a substring regex, a
+ * `cause` check and an `instanceof` check all still pass under a wrap.
+ *
+ * @param original - the error `remote/initialize` throws.
+ */
+async function assertHandshakeFailurePassesThrough(original: Error): Promise<void> {
+  const connection = new FakeConnection();
+  connection.onInitialize = () => { throw original; };
+  const manager = managerFor(new FakeConnectionFactory(connection));
+
+  await assert.rejects(manager.connect("linux-a/pi"), (error: unknown) => {
+    assert.equal(error, original, "the handshake failure was rewritten on its way to the caller");
+    assert.doesNotMatch(
+      (error as Error).message,
+      /Upgrade pi-teammate-remote/,
+      "a failure that is not version skew was diagnosed as one",
+    );
+    return true;
+  });
+  assert.equal(connection.closed, true, "the refused connection is still closed");
+  await manager.close();
+}
+
+// The two counter-examples for the diagnostic's selectivity. Its existence is
+// already pinned by the v1 case above; without these, widening the predicate to
+// anything the handshake catch sees — up to an unconditional wrap — passes every
+// gate, and every operator whose handshake failed for any other reason is told
+// to upgrade a daemon that was never the problem.
+test("a transport fault with no JSON-RPC code reaches the caller undiagnosed", async () => {
+  await assertHandshakeFailurePassesThrough(new Error("connect ETIMEDOUT 10.0.0.4:22"));
+});
+
+test("an invalid-parameter refusal about another field reaches the caller undiagnosed", async () => {
+  const refusal: Error & { code?: number } = new Error("Invalid monitorOwnerNonce");
+  refusal.name = "RemoteRpcResponseError";
+  refusal.code = -32602;
+  await assertHandshakeFailurePassesThrough(refusal);
 });

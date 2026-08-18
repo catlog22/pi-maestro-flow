@@ -1,6 +1,5 @@
-/** remote/1 JSON-RPC 2.0 envelopes carried as bounded NDJSON records. */
+/** remote/2 JSON-RPC 2.0 envelopes carried as bounded NDJSON records. */
 
-import type { RemoteCapability } from "./capabilities.ts";
 import type {
   RemoteCommandArgv,
   RemoteDriverId,
@@ -71,13 +70,11 @@ export type RemoteJsonRpcEnvelope =
 export interface RemoteInitializeParams {
   commandId: string;
   protocolVersions: readonly RemoteProtocolVersion[];
-  capabilities: readonly RemoteCapability[];
   monitorOwnerNonce: string;
 }
 
 export interface RemoteInitializeResult extends RemoteWorkerIdentity {
   protocolVersion: typeof REMOTE_PROTOCOL_VERSION;
-  capabilities: readonly RemoteCapability[];
   concurrency: number;
   activeRuns: number;
   status: Extract<RemoteStatus, "ready" | "running" | "waiting">;
@@ -92,13 +89,11 @@ export interface RemoteRunStartParams {
   cwd: string;
   driver: RemoteDriverId;
   command: RemoteCommandArgv;
-  requiredCapabilities?: readonly RemoteCapability[];
   outputSchema?: unknown;
 }
 
 export interface RemoteRunStartResult extends RemoteRunIdentity {
   status: Extract<RemoteStatus, "running" | "waiting">;
-  capabilities: readonly RemoteCapability[];
   firstSequence: number;
 }
 

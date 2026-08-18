@@ -19,6 +19,15 @@ import {
 } from "../src/remote/config.ts";
 import { REMOTE_CONFIG_VERSION } from "../src/remote/types.ts";
 
+/**
+ * macOS resolves `os.tmpdir()` through the `/var` -> `/private/var` symlink, while the remote
+ * surfaces reject non-canonical roots and compare a child's `process.cwd()` against the configured
+ * root. Tests must hand them the canonical path production callers already receive.
+ */
+function canonicalTempRoot(prefix: string): string {
+  return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+}
+
 const HOST_KEY = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 function errorOf(validation: RemoteDraftValidation): string {
@@ -57,7 +66,7 @@ test("remote config paths use the approved global and project locations", () => 
 });
 
 test("project remote config overrides global targets and can hide entries", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-remote-config-"));
+  const root = canonicalTempRoot("pi-remote-config-");
   const cwd = path.join(root, "project");
   const globalPath = path.join(root, "home", ".pi", "agent", "teammate-remotes.json");
   fs.mkdirSync(cwd, { recursive: true });
@@ -97,7 +106,7 @@ test("project remote config overrides global targets and can hide entries", () =
 });
 
 test("remote config rejects unsafe cwd, argv, fingerprints, and dangling hosts", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-remote-invalid-"));
+  const root = canonicalTempRoot("pi-remote-invalid-");
   const cwd = path.join(root, "project");
   const globalPath = path.join(root, "global.json");
   fs.mkdirSync(cwd, { recursive: true });
@@ -132,7 +141,7 @@ test("remote config rejects unsafe cwd, argv, fingerprints, and dangling hosts",
 });
 
 test("ACP target policy requires exact canonical command profiles", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-remote-acp-policy-"));
+  const root = canonicalTempRoot("pi-remote-acp-policy-");
   const cwd = path.join(root, "project");
   const globalPath = path.join(root, "global.json");
   fs.mkdirSync(cwd, { recursive: true });
@@ -238,7 +247,7 @@ test("ACP target policy requires exact canonical command profiles", () => {
 });
 
 test("collect-validate-commit replaces global and project stores with CAS", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-remote-transaction-"));
+  const root = canonicalTempRoot("pi-remote-transaction-");
   const cwd = path.join(root, "project");
   const globalPath = path.join(root, "home", "teammate-remotes.json");
   fs.mkdirSync(cwd, { recursive: true });
@@ -281,7 +290,7 @@ test("collect-validate-commit replaces global and project stores with CAS", () =
 });
 
 test("project config rejects symlinked .pi containers and config files", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-remote-symlink-"));
+  const root = canonicalTempRoot("pi-remote-symlink-");
   const projectRoot = path.join(root, "project");
   const outside = path.join(root, "outside");
   fs.mkdirSync(outside, { recursive: true });
@@ -304,8 +313,27 @@ test("project config rejects symlinked .pi containers and config files", () => {
   }
 });
 
+test("project config rejects a project cwd reached through a symlinked ancestor", () => {
+  const root = canonicalTempRoot("pi-remote-symlinked-cwd-");
+  const real = path.join(root, "real");
+  const projectRoot = path.join(real, "project");
+  const aliased = path.join(root, "aliased", "project");
+  const globalPath = path.join(root, "teammate-remotes.json");
+  try {
+    fs.mkdirSync(projectRoot, { recursive: true });
+    fs.symlinkSync(real, path.join(root, "aliased"), process.platform === "win32" ? "junction" : "dir");
+    // The leaf is a real directory, so only the realpath comparison can reject the aliased ancestor.
+    assert.equal(fs.lstatSync(aliased).isDirectory(), true);
+    assert.throws(() => loadRemoteConfigState(aliased, globalPath), /canonical real directory/);
+    assert.throws(() => saveProjectRemoteConfig(aliased, emptyProject(), globalPath), /canonical real directory/);
+    assert.equal(fs.existsSync(path.join(projectRoot, ".pi")), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("version 1 stores migrate to strict version 2 command profiles", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-remote-migration-"));
+  const root = canonicalTempRoot("pi-remote-migration-");
   const cwd = path.join(root, "project");
   const globalPath = path.join(root, "teammate-remotes.json");
   fs.mkdirSync(cwd, { recursive: true });
@@ -355,7 +383,7 @@ test("version 1 stores migrate to strict version 2 command profiles", () => {
 });
 
 test("malformed and unknown-version remote stores fail closed", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-remote-malformed-"));
+  const root = canonicalTempRoot("pi-remote-malformed-");
   const cwd = path.join(root, "project");
   const globalPath = path.join(root, "teammate-remotes.json");
   fs.mkdirSync(cwd, { recursive: true });

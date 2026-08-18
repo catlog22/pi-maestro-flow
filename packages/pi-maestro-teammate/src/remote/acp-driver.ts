@@ -14,7 +14,6 @@ import {
   type SessionUpdate,
   type Stream,
 } from "@agentclientprotocol/sdk";
-import type { RemoteCapability } from "./capabilities.ts";
 import {
   captureProcessTree,
   redactRemoteError,
@@ -23,13 +22,11 @@ import {
   targetChildEnvironment,
   type ProcessTreeIdentity,
 } from "./child-security.ts";
-import { requireRemoteCapabilities } from "./capabilities.ts";
 import { AcpClientOperations } from "./acp-client-operations.ts";
 import type { RemoteDriver, RemoteDriverContext, RemoteRunHandle } from "./driver.ts";
 import {
   REMOTE_MAX_LINE_BYTES,
   REMOTE_MAX_OBJECTIVE_BYTES,
-  type RemoteRunAttachParams,
   type RemoteRunCancelParams,
   type RemoteRunCancelResult,
   type RemoteRunInputParams,
@@ -54,13 +51,6 @@ export const ACP_STARTUP_TIMEOUT_MS = 15_000;
 export const ACP_PENDING_INPUT_LIMIT = 64;
 export const ACP_PENDING_INPUT_BYTES = 1024 * 1024;
 export const ACP_EVENT_QUEUE_BYTES = 4 * 1024 * 1024;
-
-export const ACP_CAPABILITIES = Object.freeze([
-  "streaming",
-  "follow-up",
-  "cancel",
-  "tool-events",
-] satisfies readonly RemoteCapability[]);
 
 type SpawnChild = (
   command: string,
@@ -322,7 +312,6 @@ function withTimeout<T>(promise: Promise<T>, milliseconds: number, label: string
 
 class AcpRunHandle implements RemoteRunHandle {
   readonly capture: RemoteRunCapture;
-  capabilities: readonly RemoteCapability[] = ACP_CAPABILITIES;
   readonly #child: ChildProcessWithoutNullStreams;
   readonly #cancelGraceMs: number;
   readonly #startupTimeoutMs: number;
@@ -483,8 +472,6 @@ class AcpRunHandle implements RemoteRunHandle {
     if (response.protocolVersion !== PROTOCOL_VERSION) {
       throw new Error(`ACP protocol version mismatch: expected ${PROTOCOL_VERSION}, received ${response.protocolVersion}`);
     }
-    this.capabilities = this.#negotiatedCapabilities(response);
-    requireRemoteCapabilities(this.capabilities, request.requiredCapabilities ?? []);
     this.#session = await withTimeout(
       this.#connection.agent.buildSession(request.cwd).start(),
       this.#startupTimeoutMs,
@@ -492,12 +479,6 @@ class AcpRunHandle implements RemoteRunHandle {
     );
     this.#emitState("running", "session/prompt");
     void this.#promptLoop(request.objective);
-  }
-
-  #negotiatedCapabilities(response: InitializeResponse): readonly RemoteCapability[] {
-    const session = response.agentCapabilities?.sessionCapabilities;
-    const resume = response.agentCapabilities?.loadSession === true || (session?.resume !== undefined && session.resume !== null);
-    return Object.freeze([...ACP_CAPABILITIES, ...(resume ? ["session-resume" as const] : [])]);
   }
 
   async #promptLoop(initial: string): Promise<void> {
@@ -798,7 +779,6 @@ class AcpRunHandle implements RemoteRunHandle {
 
 export class AcpDriver implements RemoteDriver {
   readonly id = "acp" as const;
-  readonly capabilities = ACP_CAPABILITIES;
   readonly #cancelGraceMs: number;
   readonly #startupTimeoutMs: number;
   readonly #eventQueueBytes: number;
@@ -856,24 +836,6 @@ export class AcpDriver implements RemoteDriver {
     if (context.signal.aborted) cancel();
     else context.signal.addEventListener("abort", cancel, { once: true });
     return handle;
-  }
-
-  async attach(request: RemoteRunAttachParams, context: RemoteDriverContext): Promise<RemoteRunHandle> {
-    const handle = this.#handles.get(request.runId);
-    if (!handle
-      || handle.capture.generation !== request.generation
-      || handle.capture.monitorOwnerNonce !== request.monitorOwnerNonce
-      || handle.capture.workerId !== context.workerId
-      || handle.capture.instanceNonce !== context.instanceNonce) {
-      throw new Error("ACP run is not owned by this driver instance");
-    }
-    return handle;
-  }
-
-  async list(context: RemoteDriverContext): Promise<readonly RemoteRunSnapshot[]> {
-    return [...this.#handles.values()]
-      .filter((handle) => handle.capture.workerId === context.workerId && handle.capture.instanceNonce === context.instanceNonce)
-      .map((handle) => handle.snapshot());
   }
 
   async close(): Promise<void> {

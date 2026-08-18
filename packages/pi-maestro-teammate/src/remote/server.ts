@@ -2,12 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as path from "node:path";
-import {
-  REMOTE_CAPABILITIES,
-  isRemoteCapability,
-  requireRemoteCapabilities,
-  type RemoteCapability,
-} from "./capabilities.ts";
 import type { RemoteDriver, RemoteRunHandle } from "./driver.ts";
 import {
   ensurePrivateRemoteDirectory,
@@ -80,6 +74,32 @@ export interface RemoteBridgeServerOptions {
   concurrency?: number;
   heartbeatMs?: number;
   clientEgressBytes?: number;
+  /**
+   * Where a quarantined run is reported, for a journal this server constructs itself.
+   * Defaults to one line on the daemon's stderr; ignored when `journal` is supplied, since that
+   * journal already carries whatever observer its owner gave it.
+   */
+  onQuarantine?: (directory: string, error: unknown) => void;
+}
+
+/**
+ * Report one quarantined run directory on the daemon's stderr.
+ *
+ * The daemon is the only process that watches a run directory move into `corrupt-runs/`. Without a
+ * line here the move is silent and the host meets it later as an unrelated ownership mismatch on the
+ * next run/attach, so the operator debugs the wrong failure.
+ *
+ * @param directory Absolute path the run occupied under `runs/` before the move.
+ * @param error Parse or reconciliation failure that condemned the run.
+ */
+function reportQuarantineToStderr(directory: string, error: unknown): void {
+  // The cause, not just the message: every condemnation arrives wrapped as `Corrupt remote run
+  // journal`, and only the cause separates a stale record version from a truncated write.
+  const cause = error instanceof Error ? error.cause : undefined;
+  const reason = error instanceof Error
+    ? (cause instanceof Error ? `${error.message}: ${cause.message}` : error.message)
+    : String(error);
+  process.stderr.write(`pi-teammate-remote: quarantined corrupt run ${directory}: ${redactRemoteError(reason)}\n`);
 }
 
 function plainObject(value: unknown): value is Record<string, unknown> {
@@ -117,16 +137,6 @@ function validateCommandId(value: unknown): string {
 
 function validateOwner(value: unknown): string {
   return boundedString(value, "monitorOwnerNonce", REMOTE_MAX_ID_LENGTH);
-}
-
-function normalizeCapabilities(value: unknown, label: string): RemoteCapability[] {
-  if (!Array.isArray(value) || value.length > REMOTE_CAPABILITIES.length) throw new RemoteRpcError(-32602, `Invalid ${label}`);
-  const capabilities: RemoteCapability[] = [];
-  for (const entry of value) {
-    if (!isRemoteCapability(entry)) throw new RemoteRpcError(-32602, `Invalid ${label}`);
-    if (!capabilities.includes(entry)) capabilities.push(entry);
-  }
-  return capabilities;
 }
 
 function sameArgv(left: readonly string[], right: readonly string[]): boolean {
@@ -192,7 +202,8 @@ export class RemoteBridgeServer {
   #socketIdentity?: { dev: number; ino: number };
 
   constructor(options: RemoteBridgeServerOptions) {
-    this.journal = options.journal ?? new RemoteRunJournal(options.stateDirectory);
+    this.journal = options.journal
+      ?? new RemoteRunJournal(options.stateDirectory, { onQuarantine: options.onQuarantine ?? reportQuarantineToStderr });
     this.socketPath = getRemoteSocketPath(this.journal.stateDirectory);
     this.#targets = new Map(options.targets.map((target) => [target.id, target]));
     const drivers = options.drivers ?? [
@@ -341,14 +352,16 @@ export class RemoteBridgeServer {
 
   #initialize(params: RemoteInitializeParams): RemoteResultByMethod["remote/initialize"] {
     if (!params.protocolVersions.includes(REMOTE_PROTOCOL_VERSION)) {
-      throw new RemoteRpcError(-32002, `Unsupported remote protocol; expected ${REMOTE_PROTOCOL_VERSION}`);
+      throw new RemoteRpcError(
+        -32002,
+        `Unsupported remote protocol; this daemon speaks ${REMOTE_PROTOCOL_VERSION} `
+        + `and the client offered ${params.protocolVersions.join(", ")}`,
+      );
     }
     const activeRuns = this.#handles.size;
-    const requested = new Set(params.capabilities);
     return {
       ...this.journal.identity,
       protocolVersion: REMOTE_PROTOCOL_VERSION,
-      capabilities: REMOTE_CAPABILITIES.filter((capability) => requested.has(capability)),
       concurrency: this.#concurrency,
       activeRuns,
       status: statusForRuns(activeRuns),
@@ -366,14 +379,11 @@ export class RemoteBridgeServer {
     }
     const driver = this.#drivers.get(target.driver);
     if (!driver) throw new RemoteRpcError(-32004, `Remote driver is not available: ${target.driver}`);
-    const requiredCapabilities = params.requiredCapabilities ?? [];
-    requireRemoteCapabilities(driver.capabilities, requiredCapabilities.filter((capability) => capability !== "session-resume"));
     const controller = new AbortController();
     this.#startingRuns += 1;
     let handle: RemoteRunHandle | undefined;
     try {
       handle = await driver.start(params, { ...this.journal.identity, target, signal: controller.signal });
-      requireRemoteCapabilities(handle.capabilities, requiredCapabilities);
     } catch (error) {
       controller.abort();
       if (handle) await handle.close();
@@ -382,7 +392,7 @@ export class RemoteBridgeServer {
       this.#startingRuns -= 1;
     }
     try {
-      this.journal.createRun(handle.capture, params, handle.capabilities);
+      this.journal.createRun(handle.capture, params);
     } catch (error) {
       controller.abort();
       await handle.close();
@@ -398,7 +408,6 @@ export class RemoteBridgeServer {
       runId: handle.capture.runId,
       generation: handle.capture.generation,
       status: "running",
-      capabilities: handle.capabilities,
       firstSequence: 1,
     };
   }
@@ -519,7 +528,6 @@ export class RemoteBridgeServer {
         return {
           commandId: validateCommandId(raw.commandId),
           protocolVersions: [...raw.protocolVersions],
-          capabilities: normalizeCapabilities(raw.capabilities, "capabilities"),
           monitorOwnerNonce: validateOwner(raw.monitorOwnerNonce),
         };
       }
@@ -541,7 +549,6 @@ export class RemoteBridgeServer {
           cwd: boundedString(raw.cwd, "cwd", 4096),
           driver: raw.driver === "pi-rpc" || raw.driver === "acp" ? raw.driver : (() => { throw new RemoteRpcError(-32602, "Invalid driver"); })(),
           command: [...raw.command] as [string, ...string[]],
-          ...(raw.requiredCapabilities === undefined ? {} : { requiredCapabilities: normalizeCapabilities(raw.requiredCapabilities, "requiredCapabilities") }),
           ...(outputSchema === undefined ? {} : { outputSchema }),
         };
       }

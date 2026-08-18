@@ -2,7 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isRemoteCapability, type RemoteCapability } from "./capabilities.ts";
 import { redactRemoteError } from "./child-security.ts";
 import type { RemoteRunStartParams } from "./protocol.ts";
 import { captureMatches, REMOTE_MAX_LINE_BYTES } from "./protocol.ts";
@@ -17,7 +16,7 @@ import {
   type RemoteWorkerIdentity,
 } from "./types.ts";
 
-export const REMOTE_JOURNAL_VERSION = 1 as const;
+export const REMOTE_JOURNAL_VERSION = 2 as const;
 export const REMOTE_MAX_JOURNAL_EVENTS = 50_000;
 export const REMOTE_MAX_JOURNAL_BYTES = 64 * 1024 * 1024;
 export const REMOTE_MAX_COMMAND_RECORDS = 4096;
@@ -33,7 +32,6 @@ export interface RemoteJournalRunRecord {
   version: typeof REMOTE_JOURNAL_VERSION;
   capture: RemoteRunCapture;
   request: RemoteRunStartParams;
-  capabilities: readonly RemoteCapability[];
   snapshot: RemoteRunSnapshot;
   createdAt: number;
   updatedAt: number;
@@ -47,6 +45,18 @@ export interface RemoteStoredCommand {
   createdAt: number;
   completedAt?: number;
   outcome?: { ok: true; result: unknown } | { ok: false; code: number; message: string; data?: unknown };
+}
+
+/** Optional wiring handed to a {@link RemoteRunJournal} on top of its state directory. */
+export interface RemoteJournalOptions {
+  /**
+   * Called after a run directory has been moved into `corrupt-runs/`, with the run directory that was
+   * quarantined and the error that condemned it. Without it quarantine is silent, and the host only sees
+   * the unrelated ownership mismatch that a missing run produces on the next run/attach.
+   * @param directory Absolute path the run occupied under `runs/` before the move.
+   * @param error Parse or reconciliation failure that condemned the run.
+   */
+  onQuarantine?: (directory: string, error: unknown) => void;
 }
 
 class CorruptRunJournalError extends Error {
@@ -166,16 +176,6 @@ function parseCapture(value: unknown): RemoteRunCapture {
   };
 }
 
-function parseCapabilities(value: unknown): RemoteCapability[] {
-  if (!Array.isArray(value) || value.length > 32) throw new Error("Invalid remote run capabilities");
-  const capabilities: RemoteCapability[] = [];
-  for (const entry of value) {
-    if (!isRemoteCapability(entry)) throw new Error("Invalid remote run capability");
-    if (!capabilities.includes(entry)) capabilities.push(entry);
-  }
-  return capabilities;
-}
-
 function parseStartRequest(value: unknown): RemoteRunStartParams {
   const record = objectRecord(value, "remote start request");
   if (!Array.isArray(record.command) || record.command.length === 0 || record.command.length > 64) {
@@ -186,9 +186,6 @@ function parseStartRequest(value: unknown): RemoteRunStartParams {
   if (!executable) throw new Error("Invalid remote start executable");
   const driver = record.driver;
   if (driver !== "pi-rpc" && driver !== "acp") throw new Error("Invalid remote start driver");
-  const requiredCapabilities = record.requiredCapabilities === undefined
-    ? undefined
-    : parseCapabilities(record.requiredCapabilities);
   return {
     commandId: requiredString(record.commandId, "remote start commandId", 128),
     targetId: requiredString(record.targetId, "remote start targetId", 128),
@@ -198,7 +195,6 @@ function parseStartRequest(value: unknown): RemoteRunStartParams {
     cwd: requiredString(record.cwd, "remote start cwd", 4096),
     driver,
     command: [executable, ...command.slice(1)],
-    ...(requiredCapabilities === undefined ? {} : { requiredCapabilities }),
     ...(record.outputSchema === undefined ? {} : { outputSchema: record.outputSchema }),
   };
 }
@@ -372,7 +368,12 @@ function sanitizeEvent(event: RemoteRunEvent): RemoteRunEvent {
 
 function parseRunRecord(value: unknown): RemoteJournalRunRecord {
   const record = objectRecord(value, "remote run metadata");
-  if (record.version !== REMOTE_JOURNAL_VERSION) throw new Error("Invalid remote run metadata version");
+  if (record.version !== REMOTE_JOURNAL_VERSION) {
+    throw new Error(
+      `Unsupported remote run metadata version ${String(record.version)}; `
+      + `this daemon writes remote journal version ${REMOTE_JOURNAL_VERSION}`,
+    );
+  }
   const capture = parseCapture(record.capture);
   const request = parseStartRequest(record.request);
   const snapshot = parseSnapshot(record.snapshot);
@@ -385,7 +386,6 @@ function parseRunRecord(value: unknown): RemoteJournalRunRecord {
     version: REMOTE_JOURNAL_VERSION,
     capture,
     request,
-    capabilities: parseCapabilities(record.capabilities),
     snapshot,
     createdAt: safeInteger(record.createdAt, "run createdAt"),
     updatedAt: safeInteger(record.updatedAt, "run updatedAt"),
@@ -394,7 +394,12 @@ function parseRunRecord(value: unknown): RemoteJournalRunRecord {
 
 function parseCommandRecord(value: unknown): RemoteStoredCommand {
   const record = objectRecord(value, "remote command record");
-  if (record.version !== REMOTE_JOURNAL_VERSION) throw new Error("Invalid remote command version");
+  if (record.version !== REMOTE_JOURNAL_VERSION) {
+    throw new Error(
+      `Unsupported remote command version ${String(record.version)}; `
+      + `this daemon writes remote journal version ${REMOTE_JOURNAL_VERSION}`,
+    );
+  }
   if (record.state !== "pending" && record.state !== "completed") throw new Error("Invalid remote command state");
   const base = {
     version: REMOTE_JOURNAL_VERSION,
@@ -429,9 +434,11 @@ export class RemoteRunJournal {
   readonly #runsDirectory: string;
   readonly #commandsDirectory: string;
   readonly #corruptRunsDirectory: string;
+  readonly #onQuarantine: ((directory: string, error: unknown) => void) | undefined;
 
-  constructor(stateDirectory = getRemoteStateDirectory()) {
+  constructor(stateDirectory = getRemoteStateDirectory(), options: RemoteJournalOptions = {}) {
     this.stateDirectory = path.resolve(stateDirectory);
+    this.#onQuarantine = options.onQuarantine;
     ensurePrivateRemoteDirectory(this.stateDirectory);
     this.#runsDirectory = path.join(this.stateDirectory, "runs");
     this.#commandsDirectory = path.join(this.stateDirectory, "commands");
@@ -444,7 +451,16 @@ export class RemoteRunJournal {
     let workerId: string;
     try {
       const value = objectRecord(readBoundedJson(workerFile), "remote worker identity");
-      if (value.version !== REMOTE_JOURNAL_VERSION) throw new Error("Invalid remote worker identity version");
+      if (value.version !== REMOTE_JOURNAL_VERSION) {
+        throw new Error(
+          `Unsupported remote worker identity version ${String(value.version)}; `
+          + `this daemon writes remote journal version ${REMOTE_JOURNAL_VERSION}. `
+          + `The whole state directory ${this.stateDirectory} is in the older format and there is no migration. `
+          + "Deleting worker.json only lets the daemon start on top of it: every remaining run record is then "
+          + "moved into corrupt-runs/ and hosts see an unrelated ownership mismatch instead of this error. "
+          + `Move or back up ${this.stateDirectory} as a whole, then start the daemon again.`,
+        );
+      }
       workerId = requiredString(value.workerId, "remote worker id", 128);
     } catch (error) {
       if (!isMissing(error)) throw error;
@@ -462,7 +478,6 @@ export class RemoteRunJournal {
   createRun(
     capture: RemoteRunCapture,
     request: RemoteRunStartParams,
-    capabilities: readonly RemoteCapability[],
     now = Date.now(),
   ): RemoteJournalRunRecord {
     if (capture.workerId !== this.identity.workerId || capture.instanceNonce !== this.identity.instanceNonce) {
@@ -477,7 +492,6 @@ export class RemoteRunJournal {
       version: REMOTE_JOURNAL_VERSION,
       capture: { ...capture },
       request: { ...request, command: [...request.command] as [string, ...string[]] },
-      capabilities: [...capabilities],
       snapshot: createRemoteRunSnapshot(capture, "connecting", now),
       createdAt: now,
       updatedAt: now,
@@ -711,6 +725,14 @@ export class RemoteRunJournal {
     fs.renameSync(directory, destination);
     fsyncDirectory(this.#runsDirectory);
     fsyncDirectory(this.#corruptRunsDirectory);
+    try {
+      this.#onQuarantine?.(directory, error);
+    } catch {
+      // Swallows whatever the observer throws. Both callers reach here while recovering from a corrupt
+      // run — getRun and listRuns turn the failure into "no such run" — so a throwing observer would
+      // convert recovery into a crash. The rename and both fsyncs are already durable at this point, so
+      // the quarantine cannot be rolled back to match an observer that failed to record it either.
+    }
   }
 
   #pruneCommands(): void {

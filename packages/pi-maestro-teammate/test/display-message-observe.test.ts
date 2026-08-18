@@ -210,6 +210,29 @@ test("displayMessageForResult keeps failure diagnostics authoritative", () => {
   assert.match(out, /Teammate child process exited abnormally/);
 });
 
+test("a diagnostic written to both sinks is rendered once, and other warnings survive", () => {
+  // The dsh backend writes a provider failure to the `system` message and to
+  // the warnings: the first is where the host reads the failure class from, the
+  // second is what an orchestrator scans, and neither may be dropped at the
+  // source. The reader still gets one copy.
+  const failure = "dsh provider failure: Insufficient Balance (code=invalid_request_error, status=402)";
+  const out = displayMessageForResult(result({
+    exitCode: 1,
+    messages: [{ role: "system", content: failure }],
+    warnings: [failure, "structured output was requested but the runtime returned none"],
+  }));
+  assert.equal(out.split(failure).length - 1, 1);
+  assert.match(out, /\[warn\] structured output was requested but/);
+});
+
+test("a warning with no counterpart in the body is still rendered on a success", () => {
+  const out = displayMessageForResult(result({
+    messages: [{ role: "assistant", content: "done" }],
+    warnings: ["structured output was requested but the runtime returned none"],
+  }));
+  assert.match(out, /^\[warn\] structured output was requested but/);
+});
+
 test("structured result snapshots are cloned and retain their origin cwd", () => {
   const value = { nested: { verdict: "ok" } };
   const projected = toStructuredResults([result({

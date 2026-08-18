@@ -8,15 +8,22 @@ import test from "node:test";
 import { RequestError } from "@agentclientprotocol/sdk";
 import { AcpClientOperations } from "../src/remote/acp-client-operations.ts";
 import {
-  ACP_CAPABILITIES,
   ACP_PENDING_INPUT_LIMIT,
   AcpDriver,
 } from "../src/remote/acp-driver.ts";
-import { REMOTE_CAPABILITIES, requireRemoteCapabilities } from "../src/remote/capabilities.ts";
 import type { RemoteRunHandle } from "../src/remote/driver.ts";
 import { createRemoteRequest, parseRemoteEnvelopeLine, type RemoteJsonRpcEnvelope } from "../src/remote/protocol.ts";
 import { connectRemoteSocket, RemoteBridgeServer } from "../src/remote/server.ts";
 import { REMOTE_PROTOCOL_VERSION, type ResolvedRemoteTarget } from "../src/remote/types.ts";
+
+/**
+ * macOS resolves `os.tmpdir()` through the `/var` -> `/private/var` symlink, while the remote
+ * surfaces reject non-canonical roots and compare a child's `process.cwd()` against the configured
+ * root. Tests must hand them the canonical path production callers already receive.
+ */
+function canonicalTempRoot(prefix: string): string {
+  return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+}
 
 const HOST_KEY = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
@@ -261,7 +268,7 @@ class BridgePeer {
 }
 
 test("bridge defaults register the ACP driver", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-bridge-"));
+  const root = canonicalTempRoot("pi-acp-bridge-");
   const script = writeFakeAgent(root);
   const configured = target(root, script, "normal");
   const server = new RemoteBridgeServer({ stateDirectory: path.join(root, "state"), targets: [configured], heartbeatMs: 60_000 });
@@ -273,22 +280,13 @@ test("bridge defaults register the ACP driver", async () => {
     const initialized = await peer.request("init", "remote/initialize", {
       commandId: "init-command",
       protocolVersions: [REMOTE_PROTOCOL_VERSION],
-      capabilities: REMOTE_CAPABILITIES,
       monitorOwnerNonce: owner,
     });
     assert.equal("result" in initialized, true);
-    const unsupported = await peer.request("steer", "run/start", {
-      ...startRequest(configured),
-      commandId: "steer-command",
-      monitorOwnerNonce: owner,
-      requiredCapabilities: ["steer"],
-    });
-    assert.equal("error" in unsupported, true);
     const started = await peer.request("start", "run/start", {
       ...startRequest(configured),
       commandId: "start-command",
       monitorOwnerNonce: owner,
-      requiredCapabilities: ["session-resume"],
     });
     assert.equal("result" in started, true);
     const result = await peer.notification("run/result");
@@ -301,7 +299,7 @@ test("bridge defaults register the ACP driver", async () => {
 });
 
 test("ACP driver forwards declared target env names from the daemon environment", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-env-"));
+  const root = canonicalTempRoot("pi-acp-env-");
   const script = writeFakeAgent(root);
   const previous = process.env.PROBE_FORWARDED_KEY;
   process.env.PROBE_FORWARDED_KEY = "forwarded-value";
@@ -323,22 +321,15 @@ test("ACP driver forwards declared target env names from the daemon environment"
   }
 });
 
-test("ACP driver uses stable v1 init/new/prompt, streams normalized events, and cleans up", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-normal-"));
+test("ACP driver uses stable v1 init/new/prompt and streams normalized events", async () => {
+  const root = canonicalTempRoot("pi-acp-normal-");
   const script = writeFakeAgent(root);
   const configured = target(root, script, "normal");
   const driver = new AcpDriver({ cancelGraceMs: 50, startupTimeoutMs: 1_000 });
   try {
     const handle = await start(driver, configured);
-    assert.deepEqual(handle.capabilities, [...ACP_CAPABILITIES, "session-resume"]);
     const events = await collectEvents(handle);
     await handle.close();
-    assert.equal((await driver.list({
-      workerId: "worker-1",
-      instanceNonce: "instance-1",
-      target: configured,
-      signal: new AbortController().signal,
-    })).length, 0);
     assert.equal(events.at(-1).status, "completed");
     assert.equal(events.at(-1).result, "hello done");
     assert.equal(events.at(-1).nativeStatus, "end_turn");
@@ -359,7 +350,7 @@ test("ACP driver uses stable v1 init/new/prompt, streams normalized events, and 
 });
 
 test("ACP client operations enforce permissions, root containment, and terminal allowlists", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-ops-"));
+  const root = canonicalTempRoot("pi-acp-ops-");
   const outside = path.join(path.dirname(root), "outside.txt");
   fs.writeFileSync(path.join(root, "input.txt"), "inside");
   fs.writeFileSync(outside, "outside");
@@ -410,7 +401,7 @@ test("ACP client operations enforce permissions, root containment, and terminal 
 });
 
 test("ACP follow-up prompts are queued on the same session", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-followup-"));
+  const root = canonicalTempRoot("pi-acp-followup-");
   const script = writeFakeAgent(root);
   const configured = target(root, script, "followup");
   const driver = new AcpDriver({ cancelGraceMs: 50, startupTimeoutMs: 1_000 });
@@ -447,7 +438,7 @@ test("ACP follow-up prompts are queued on the same session", async () => {
 });
 
 test("ACP follow-up queue is count-bounded and rejects input as soon as cancellation starts", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-input-bound-"));
+  const root = canonicalTempRoot("pi-acp-input-bound-");
   const script = writeFakeAgent(root);
   const configured = target(root, script, "cancel");
   const driver = new AcpDriver({ cancelGraceMs: 50, startupTimeoutMs: 1_000 });
@@ -498,7 +489,7 @@ test("ACP follow-up queue is count-bounded and rejects input as soon as cancella
 });
 
 test("ACP event floods exceed a byte bound and terminate with one bounded failure", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-event-bound-"));
+  const root = canonicalTempRoot("pi-acp-event-bound-");
   const script = writeFakeAgent(root);
   const configured = target(root, script, "flood");
   const driver = new AcpDriver({ cancelGraceMs: 50, startupTimeoutMs: 1_000, eventQueueBytes: 4_096 });
@@ -516,16 +507,15 @@ test("ACP event floods exceed a byte bound and terminate with one bounded failur
   }
 });
 
-test("ACP refusal fails and session-resume is omitted when the agent does not advertise it", async (t) => {
+test("ACP refusal fails and a non-resuming agent still completes", async (t) => {
   for (const mode of ["refusal", "noresume"] as const) {
     await t.test(mode, async () => {
-      const root = fs.mkdtempSync(path.join(os.tmpdir(), `pi-acp-${mode}-`));
+      const root = canonicalTempRoot(`pi-acp-${mode}-`);
       const script = writeFakeAgent(root);
       const configured = target(root, script, mode);
       const driver = new AcpDriver({ cancelGraceMs: 50, startupTimeoutMs: 1_000 });
       try {
         const handle = await start(driver, configured);
-        if (mode === "noresume") assert.deepEqual(handle.capabilities, ACP_CAPABILITIES);
         const events = await collectEvents(handle);
         await handle.close();
         assert.equal(events.at(-1).status, mode === "refusal" ? "failed" : "completed");
@@ -539,7 +529,7 @@ test("ACP refusal fails and session-resume is omitted when the agent does not ad
 });
 
 test("ACP permission response is cancelled during run cancellation", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-cancel-"));
+  const root = canonicalTempRoot("pi-acp-cancel-");
   const script = writeFakeAgent(root);
   const configured = target(root, script, "cancel", { permissionMode: "allow-once" });
   const driver = new AcpDriver({ cancelGraceMs: 200, startupTimeoutMs: 1_000 });
@@ -566,7 +556,7 @@ test("ACP permission response is cancelled during run cancellation", async () =>
 test("ACP driver fails closed on mismatch, malformed, oversize, hanging, and nonzero agents", async (t) => {
   for (const mode of ["mismatch", "malformed", "oversize", "hang", "nonzero"] as const) {
     await t.test(mode, async () => {
-      const root = fs.mkdtempSync(path.join(os.tmpdir(), `pi-acp-${mode}-`));
+      const root = canonicalTempRoot(`pi-acp-${mode}-`);
       const script = writeFakeAgent(root);
       const configured = target(root, script, mode);
       const driver = new AcpDriver({ cancelGraceMs: 30, startupTimeoutMs: 80 });
@@ -588,14 +578,8 @@ test("ACP driver fails closed on mismatch, malformed, oversize, hanging, and non
   }
 });
 
-test("ACP refuses steer and structured-output capabilities", async () => {
-  assert.deepEqual(ACP_CAPABILITIES, ["streaming", "follow-up", "cancel", "tool-events"]);
-  assert.throws(() => requireRemoteCapabilities(ACP_CAPABILITIES, ["steer"]), /does not support/);
-  assert.throws(() => requireRemoteCapabilities(ACP_CAPABILITIES, ["structured-output"]), /does not support/);
-});
-
 test("in-process ACP operations default deny and honor AbortSignal", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-policy-"));
+  const root = canonicalTempRoot("pi-acp-policy-");
   const controller = new AbortController();
   const operations = new AcpClientOperations({
     targetRoot: root,

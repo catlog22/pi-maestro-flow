@@ -1,4 +1,4 @@
-/** Sequence, idempotency, and lifecycle helpers for remote/1 state. */
+/** Sequence, idempotency, and lifecycle helpers for remote run state. */
 
 import type { RemoteRunCapture, RemoteRunEvent, RemoteRunSnapshot, RemoteStatus } from "./types.ts";
 

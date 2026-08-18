@@ -26,13 +26,14 @@ import {
   type AgentConfig,
 } from "../agents/agents.ts";
 import { resolveReplyTo, type ReplyTarget } from "../shared/routing.ts";
-import { previewToolCallArgs } from "./shared/tool-preview.ts";
 import type {
   SingleResult,
   Usage,
   AgentProgress,
+  AgentProgressStatus,
   AgentTerminalStatus,
   AgentRunPhase,
+  RecentToolInfo,
 } from "../shared/types.ts";
 import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
 import { applyModelRouting, syncModelCircuitPolicies, type TeammateTaskType } from "../models/model-routing.ts";
@@ -42,7 +43,7 @@ import {
   sharedModelCircuitBreaker,
   type ModelCircuitBreaker,
 } from "../models/model-circuit-breaker.ts";
-import { getTeammateChildExtensions } from "./child-extensions.ts";
+import { getTeammateChildExtensions, getTeammateChildToolBroker } from "./child-extensions.ts";
 import {
   parseTeammateThinkingLevel,
   type TeammateThinkingInput,
@@ -55,12 +56,7 @@ import {
   retryDelayMs,
 } from "./retry.ts";
 import { buildReplayFence } from "./recovery-protocol.ts";
-import {
-  isCliToolModel,
-  cliToolNameFromModel,
-  runCliTool,
-} from "../cli-tools/local-acp.ts";
-import { loadCliToolsConfig } from "../cli-tools/cli-tools-config.ts";
+import { cliToolNameFromModel, isCliToolModel } from "../cli-tools/local-acp.ts";
 
 export * from "./execution-infra.ts";
 import {
@@ -92,7 +88,6 @@ import {
   extractStructuredOutputCandidate,
   extractTextContent,
   findStructuredOutputSchemaHazard,
-  getPiSpawnCommand,
   getTeammateDepth,
   getTeammateSessionRoot,
   hasCycle,
@@ -102,6 +97,7 @@ import {
   readRegularTextFile,
   releasePublishedTurnHistory,
   resetUsage,
+  remoteLocationRouting,
   resolveContainedCwd,
   resolveModelSpecifier,
   resolveVariables,
@@ -118,6 +114,7 @@ import {
 import type {
   JsonLineEvent,
   NormalizedTask,
+  RemoteLocationRouting,
   RunSingleTeammateParams,
   RunTeammateOptions,
   RunTeammateParams,
@@ -125,24 +122,31 @@ import type {
   TaskOutput,
 } from "./execution-infra.ts";
 
-// Failed candidate processes must be physically reclaimed before a fallback
-// reuses their correlation identity for a replacement child.
-const attemptReclamations = new WeakMap<SingleResult, Promise<unknown>>();
 
-type AttemptSettlementCapability = "agent_settled" | "legacy" | "unknown";
+// The Pi subprocess backend implementation. Orchestration here decides *which*
+// model runs; the module below decides how a Pi child runs it. Its previously
+// public surface is re-exported unchanged so no consumer import path moves.
+import { adjudicateTask, validateBackendCapabilities } from "pi-maestro-backends";
+import { outcomeOf } from "../backends/pi-subprocess.ts";
+import { closeBackendControlStdin, createBackendControlStdin } from "../backends/control-shim.ts";
+import { backendRegistryConfigSync, dispatchRegistrySync } from "../backends/registry-host.ts";
+import { runSingleAttempt } from "./pi-subprocess-attempt.ts";
+import type {
+  AttemptOutcome,
+  BackendCapabilities,
+  BackendRunOptions,
+  ConfigValue,
+} from "pi-maestro-backend-core/v1/backend";
+import type { TeammateRunSpec } from "pi-maestro-backend-core/v1/spec";
 
-interface AttemptRecoveryFacts {
-  settlementCapability: AttemptSettlementCapability;
-  completedToolCount: number;
-  inFlightToolCount: number;
-  /** A non-zero close before any child event, stderr, or possible side effect. */
-  preActivityInfrastructureExit: boolean;
-  /** IPC or non-protocol output that may represent untracked external work. */
-  externalReplayRisk: boolean;
-}
-
-const attemptRecoveryFacts = new WeakMap<SingleResult, AttemptRecoveryFacts>();
-const INTERRUPTING_STEER_TIMEOUT_MS = 10_000;
+export {
+  TOOL_EXECUTION_HEARTBEAT_MS,
+  resolveAgentCacheRetention,
+  sendRpcMessage,
+  sendChildIpcMessage,
+  dispatchChildIpcMessage,
+} from "./pi-subprocess-attempt.ts";
+export type { RpcMessageMode } from "./pi-subprocess-attempt.ts";
 
 /** Provider identity of a `provider/model` selector, or undefined when unparsable. */
 function providerOf(model: string): string | undefined {
@@ -153,6 +157,210 @@ function providerOf(model: string): string | undefined {
 // ---------------------------------------------------------------------------
 // Core: run a single teammate agent
 // ---------------------------------------------------------------------------
+
+/**
+ * Decide which registration serves this attempt.
+ *
+ * A remote location already selected its backend and a task that named one
+ * meant it, so the model-derived mapping is the last word rather than the first.
+ *
+ * @param params - the teammate request.
+ * @param model - the single model this attempt runs.
+ * @param remote - the remote target this task was located at, when it named one.
+ * @returns the registered backend name, or undefined to take the registry default.
+ */
+function backendNameOf(
+  params: RunSingleTeammateParams,
+  model: string | undefined,
+  remote?: RemoteLocationRouting,
+): string | undefined {
+  if (remote !== undefined) return remote.backend;
+  if (params.backend !== undefined) return params.backend;
+  // A `cli/<tool>` model names its own registration: the tool is the registered
+  // backend, so a deployment adds a CLI by registering one and changes no host
+  // source. An unregistered tool is refused by name by the registry, which is
+  // the same outcome the inline dispatch produced for an unconfigured tool.
+  if (model !== undefined && isCliToolModel(model)) return cliToolNameFromModel(model);
+  return undefined;
+}
+
+/**
+ * Project the orchestrator request into the backend contract.
+ *
+ * Host-resolved fields stay behind: `taskType` has already become a model,
+ * `fallbackModels` is sequenced across attempts by the sweep below, and
+ * `background` is host scheduling.
+ *
+ * @param params - the teammate request.
+ * @param cwd - resolved task cwd.
+ * @param model - the single model this attempt runs.
+ * @param remote - the remote target this task was located at, when it named one.
+ * @returns the contract-shaped run spec.
+ */
+function backendSpecOf(
+  params: RunSingleTeammateParams,
+  cwd: string,
+  model: string | undefined,
+  remote?: RemoteLocationRouting,
+): TeammateRunSpec {
+  const backend = backendNameOf(params, model, remote);
+  return {
+    agent: params.agent,
+    task: params.task ?? "",
+    ...(params.name === undefined ? {} : { name: params.name }),
+    ...(backend === undefined ? {} : { backend }),
+    ...(params.context === undefined ? {} : { context: params.context }),
+    ...(model === undefined ? {} : { model }),
+    ...(params.thinking === undefined ? {} : { thinking: params.thinking as TeammateRunSpec["thinking"] }),
+    ...(params.outputSchema === undefined ? {} : { outputSchema: params.outputSchema }),
+    ...(params.todos === undefined ? {} : { todos: params.todos }),
+    // A remote location is a target, not a directory: the working directory a
+    // remote run uses comes from that target's own configuration, and passing
+    // the literal `remote:beta` down as a path is what made the old bypass
+    // resolve it against the local base.
+    ...(remote === undefined ? { cwd } : {}),
+  };
+}
+
+/**
+ * Build the run options a backend receives.
+ *
+ * @param correlationId - identity of this attempt.
+ * @param baseCwd - the host's base cwd; the task's own cwd travels on the spec.
+ * @param options - host run options supplying the observer callbacks.
+ * @param agent - the agent this attempt runs, for progress projection.
+ * @param startedAt - attempt start, for progress projection.
+ * @returns the contract-shaped run options.
+ */
+const PROGRESS_STATUSES: readonly AgentProgressStatus[] = [
+  "pending", "running", "retrying", "completed", "failed", "terminated",
+];
+
+/**
+ * Read one number out of an untyped backend payload.
+ *
+ * @param value - the raw field.
+ * @param fallback - used when the backend reported nothing usable.
+ * @returns a finite non-negative number.
+ */
+function progressNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+/**
+ * Read the recent-tool list out of an untyped backend payload.
+ *
+ * @param value - the raw field.
+ * @returns the entries that carry both a name and a status.
+ */
+function progressTools(value: unknown): RecentToolInfo[] {
+  if (!Array.isArray(value)) return [];
+  const tools: RecentToolInfo[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { name, status, argsPreview } = entry as Record<string, unknown>;
+    if (typeof name !== "string" || typeof status !== "string") continue;
+    tools.push({ name, status, ...(typeof argsPreview === "string" ? { argsPreview } : {}) });
+  }
+  return tools;
+}
+
+/**
+ * Convert a backend's progress payload into the host's progress record.
+ *
+ * A backend reports whatever its runtime knows, so this is a real conversion
+ * rather than a cast: the host supplies the identity and timing it owns, the
+ * payload supplies what the runtime observed, and anything the backend cannot
+ * report falls back to a value that reads as "not observed" instead of as a
+ * measurement. Validation belongs here because the payload crosses a module
+ * boundary untyped.
+ *
+ * @param data - the backend's payload.
+ * @param agent - the agent this attempt runs, known to the host.
+ * @param startedAt - attempt start, known to the host.
+ * @returns the host-shaped progress record.
+ *
+ * @internal Exported for backend-seam regression tests.
+ */
+export function projectBackendProgress(
+  data: Record<string, unknown>,
+  agent: string,
+  startedAt: number,
+): AgentProgress {
+  const now = Date.now();
+  const status = PROGRESS_STATUSES.find((candidate) => candidate === data.status) ?? "running";
+  return {
+    agent,
+    status,
+    recentTools: progressTools(data.recentTools),
+    toolCount: progressNumber(data.toolCount, 0),
+    tokens: progressNumber(data.tokens, 0),
+    startedAt: progressNumber(data.startedAt, startedAt),
+    durationMs: progressNumber(data.durationMs, now - startedAt),
+    lastActivityAt: progressNumber(data.lastActivityAt, now),
+    ...(typeof data.name === "string" ? { name: data.name } : {}),
+    ...(typeof data.correlationId === "string" ? { correlationId: data.correlationId } : {}),
+    ...(typeof data.lastMessage === "string" ? { lastMessage: data.lastMessage } : {}),
+    ...(typeof data.resolvedModel === "string" ? { resolvedModel: data.resolvedModel } : {}),
+    ...(typeof data.requestedModel === "string" ? { requestedModel: data.requestedModel } : {}),
+  };
+}
+
+function backendOptionsOf(
+  correlationId: string,
+  baseCwd: string,
+  options: RunTeammateOptions,
+  agent: string,
+  startedAt: number,
+  config: Record<string, ConfigValue>,
+): BackendRunOptions {
+  return {
+    correlationId,
+    baseCwd,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+    ...(options.onProgress === undefined ? {} : {
+      onProgress: (data: Record<string, unknown>): void => {
+        options.onProgress?.(projectBackendProgress(data, agent, startedAt));
+      },
+    }),
+    ...(options.onChildEvent === undefined ? {} : { onChildEvent: options.onChildEvent }),
+    ...(options.onTurnComplete === undefined ? {} : { onTurnComplete: options.onTurnComplete }),
+    // The broker registry is in-process and Promise-shaped: it lives on a
+    // globalThis symbol the child cannot see, and a backend is only ever
+    // dispatched from the root session, so this closure resolves against the
+    // same registry `dispatchRegisteredChildTool` already awaits directly. The
+    // callback-shaped relay this used to warn about is
+    // `onChildRequest(event, reply)`, a different mechanism that no backend
+    // reaches. An absent broker is a configuration failure, not a hang, so it
+    // is reported by name rather than waited on.
+    host: {
+      async proxyToolCall(request: {
+        toolName: string;
+        args: unknown;
+        correlationId: string;
+      }): Promise<unknown> {
+        const broker = getTeammateChildToolBroker(request.toolName);
+        if (broker === undefined) {
+          throw new Error(
+            `no host tool broker is registered for "${request.toolName}"; the backend `
+            + "declares a host-tool binding this root session cannot serve",
+          );
+        }
+        return broker({
+          toolName: request.toolName,
+          input: request.args as Record<string, unknown>,
+          // This attempt's own identity, taken from the parameters rather than
+          // from anything the call carried: together with the endpoint's
+          // per-run token binding, it is what makes a backend unable to act as
+          // a teammate other than itself.
+          actor: { correlationId, agent },
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+        });
+      },
+    },
+    config,
+  };
+}
 
 export async function runSingleTeammate(
   params: RunSingleTeammateParams,
@@ -237,7 +445,36 @@ export async function runSingleTeammate(
     return rejectAndPublish("Teammate run aborted before launch.", "terminated");
   }
 
-  const containedCwd = resolveContainedCwd(params.cwd, options.baseCwd);
+  const remoteRouting = remoteLocationRouting(params.cwd);
+  if (remoteRouting !== undefined) {
+    if (params.backend !== undefined && params.backend !== remoteRouting.backend) {
+      return rejectAndPublish(
+        `Teammate task names backend "${params.backend}" and remote location "${params.cwd}"; `
+        + "a remote location already selects its backend, so these two cannot both be set",
+      );
+    }
+    // Legacy mode resolves no registry at all, so there is no registration to
+    // route this to. Falling through would run on this machine a task that
+    // named another one, so it is refused by name instead. `rejectAndPublish`
+    // rather than a throw: the dispatch below has no catch, and the caller must
+    // receive a settled result rather than an exception.
+    if (options.backendRegistry === undefined
+      && (backendRegistryConfigSync(options.baseCwd).mode ?? "legacy") === "legacy") {
+      return rejectAndPublish(
+        `Teammate task requests remote location "${params.cwd}", but .pi/teammate-backends.json is in `
+        + `legacy execution mode; set mode "backend-registry" and register "${remoteRouting.backend}" — `
+        + "refusing to run a remote task on this machine",
+      );
+    }
+  }
+
+  // A remote task still needs a real local directory: agent discovery and
+  // result publication both read one. The remote location itself is a target
+  // name, so it never reaches the path resolver.
+  const containedCwd = resolveContainedCwd(
+    remoteRouting === undefined ? params.cwd : undefined,
+    options.baseCwd,
+  );
   if ("error" in containedCwd) return rejectAndPublish(containedCwd.error);
   const cwd = containedCwd.cwd;
   resolvedRunCwd = cwd;
@@ -411,15 +648,152 @@ export async function runSingleTeammate(
     };
 
     try {
-      let candidateResult: SingleResult;
+      let attempt: AttemptOutcome;
+      // Hoisted out of the registry branch below because the failover decision
+      // at the end of this iteration reads it, and the branch's own binding
+      // dies with the `try` that resolves it. Left `undefined` by the legacy
+      // path and by a resolution that throws before reaching the assignment,
+      // which is what keeps both of those decisions exactly as they were.
+      let resolvedCapabilities: BackendCapabilities | undefined;
       try {
-        candidateResult = await runSingleAttempt(
-          params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, attemptOptions,
-        );
+        // An injected registry wins (tests and embedders supply one); otherwise
+        // the workspace document decides, which is what makes `mode:
+        // "backend-registry"` in `.pi/teammate-backends.json` actually switch
+        // the dispatch path rather than only describe an intent.
+        const registry = options.backendRegistry
+          ?? dispatchRegistrySync(
+            options.baseCwd,
+            () => ({ hostOptions: attemptOptions, cwd, replyTo }),
+            options.remoteManagerOf,
+          );
+        if (registry === undefined) {
+          // A `cli/<tool>` model is served by a registered backend and by
+          // nothing else. Legacy mode resolves no registry, so falling through
+          // would hand the model id to a pi subprocess, which would ask a
+          // provider for a model literally named `cli/<tool>` and fail with a
+          // message about an unknown model rather than about the mode.
+          if (modelToUse !== undefined && isCliToolModel(modelToUse)) {
+            return rejectAndPublish(
+              `Teammate task requests model "${modelToUse}", but .pi/teammate-backends.json is in legacy `
+              + `execution mode; set mode "backend-registry" and register "${cliToolNameFromModel(modelToUse)}" `
+              + "— refusing to run a CLI tool model on the pi subprocess path",
+            );
+          }
+          attempt = outcomeOf(await runSingleAttempt(
+            params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, attemptOptions,
+          ));
+        } else {
+          const spec = backendSpecOf(params, cwd, modelToUse, remoteRouting);
+          const { backend, config, capabilities } = await registry.resolve(spec, spec.backend);
+          resolvedCapabilities = capabilities;
+          // Adjudicate here too, not only in `runGraph`. Five production call
+          // sites dispatch a single teammate directly, and a task whose backend
+          // cannot serve a required capability was reaching the model anyway:
+          // the field was dropped in silence, so the transcript looked like a
+          // successful run that simply never used the queue. Rejecting before
+          // `backend.start` keeps the promise adjudication makes — the missing
+          // capability surfaces without burning a model turn.
+          const capabilityErrors = validateBackendCapabilities(
+            [{ spec, ...(spec.name === undefined ? {} : { name: spec.name }) }],
+            () => ({ name: backend.name, capabilities }),
+          ).errors;
+          if (capabilityErrors.length > 0) {
+            // The resolved backend does not vary with the model candidate, so
+            // no later candidate can serve this task either. Settling the trial
+            // permit is left to the `finally` below, which is reached with
+            // `settled` still false and releases a HALF_OPEN acquisition
+            // exactly once. Releasing here as well called `releaseCandidate`
+            // twice, and that method re-opens the circuit rather than handing
+            // an unspent permit back — a backend whose capabilities do not
+            // match the task was charging a model's health for it.
+            return rejectAndPublish(capabilityErrors.join("\n"));
+          }
+          // Whether the backend published a channel of its own. Tracked rather
+          // than decided by backend name: a backend that spawns a child hands
+          // the host a real pipe carrying lease control and a session dir, and
+          // replacing that with a translation would lose both.
+          let publishedOwnChannel = false;
+          const hostOnChildSpawned = attemptOptions.onChildSpawned;
+          const backendOptions = backendOptionsOf(
+            correlationId,
+            // The host base, not `cwd`: the resolved task directory is on the
+            // spec, and sending it twice leaves a backend unable to tell which
+            // channel a task-level cwd actually arrived on.
+            options.baseCwd,
+            {
+              ...attemptOptions,
+              onChildSpawned: (stdin, sendControl, sessionDir, childId, generation) => {
+                publishedOwnChannel = true;
+                hostOnChildSpawned?.(stdin, sendControl, sessionDir, childId, generation);
+              },
+            },
+            params.agent,
+            startTime,
+            config,
+          );
+          const run = await backend.start(spec, backendOptions);
+          // Cancellation reaches the seam only through the control channel; a
+          // host that merely stops awaiting leaves the runtime alive.
+          const abortRun = (): void => { run.abort(); };
+          options.signal?.addEventListener("abort", abortRun, { once: true });
+          // Give the host a pipe it can address when the backend has none, so
+          // teammate-send reaches a live runtime instead of reporting that it
+          // cannot be restored. A backend that publishes its own later simply
+          // replaces this one.
+          const shim = publishedOwnChannel ? undefined : createBackendControlStdin(run);
+          if (shim !== undefined) {
+            hostOnChildSpawned?.(
+              shim,
+              // No IPC control channel exists for a backend addressed this way;
+              // reporting that honestly beats accepting a lease update nothing
+              // will ever deliver.
+              () => false,
+              undefined,
+              correlationId,
+              attemptOptions.runtimeGeneration,
+            );
+          }
+          try {
+            attempt = await run.outcome;
+          } finally {
+            options.signal?.removeEventListener("abort", abortRun);
+            // A settled run can no longer deliver, and the host checks
+            // `writable` before writing.
+            if (shim !== undefined) closeBackendControlStdin(shim);
+          }
+          // Recorded by the dispatch rather than by the backend: a backend that
+          // forgot to name itself would otherwise be indistinguishable from the
+          // legacy path, which names nothing because no backend served it.
+          attempt.result.backend = backend.name;
+          // Emulation is recorded per run, so a consumer reading a structured
+          // value can tell whether it came from a native contract or from
+          // host-side extraction. Derived from the same adjudication the graph
+          // ran, against the backend that actually served this attempt.
+          const emulated = adjudicateTask(
+            { spec, ...(spec.name === undefined ? {} : { name: spec.name }) },
+            0,
+            backend.name,
+            capabilities,
+          ).emulated;
+          if (emulated.length > 0) {
+            // Appended, not assigned: a backend records its own emulations on
+            // the result it returns, and overwriting the list here would erase
+            // them without a trace. The withheld branch below already appends.
+            attempt.result.capabilityDeliveries = [
+              ...(attempt.result.capabilityDeliveries ?? []),
+              ...emulated.map((capability) => ({
+                capability,
+                support: "emulated" as const,
+                note: `served by host-side compensation in backend "${backend.name}"`,
+              })),
+            ];
+          }
+        }
       } catch (error) {
         discardCompletion();
         throw error;
       }
+      const candidateResult = attempt.result;
       attachDiscoveryWarning(candidateResult);
       lastResult = candidateResult;
       candidateResult.originCwd ??= cwd;
@@ -457,9 +831,9 @@ export async function runSingleTeammate(
 
       const error = resultFailureMessage(candidateResult.messages);
       const fallbackFailure = isFallbackProviderError(error);
-      const recoveryFacts = attemptRecoveryFacts.get(candidateResult);
-      const authoritativeFailure = recoveryFacts?.settlementCapability === "agent_settled";
-      const preActivityInfrastructureExit = recoveryFacts?.preActivityInfrastructureExit === true;
+      const recoveryFacts = attempt.recovery;
+      const authoritativeFailure = recoveryFacts.settlementAuthority === "authoritative";
+      const preActivityInfrastructureExit = recoveryFacts.preActivityInfrastructureExit;
       // ⑤ Shared replay-fence semantics: blocked when any tool completed or
       // its effect is unknown. The executor tracks counts (not names), so the
       // reason string carries the counts explicitly.
@@ -471,21 +845,48 @@ export async function runSingleTeammate(
             `Fresh replay blocked after completedTools=${recoveryFacts.completedToolCount}, `
             + `inFlightTools=${recoveryFacts.inFlightToolCount}, externalReplayRisk=${recoveryFacts.externalReplayRisk}.`,
         }).blocked;
-      let fallbackEligible = replayFenceClear
+      // Failover here would cost the run its diagnosis and buy nothing. Every
+      // candidate after the first carries an explicit model, so the capability
+      // gate above refuses the task before any of them starts — no remote
+      // process and no tokens are saved, because none would have been spent.
+      // What is saved is the diagnosis: without this, a capability refusal
+      // about a candidate that never ran replaces the failure this run actually
+      // observed.
+      //
+      // Only reachable when the caller named no model. A caller-named model
+      // puts `spec.model` on the first candidate, so the gate refuses the whole
+      // task outright and this path is never entered — which leaves exactly the
+      // runs that produced a real provider diagnosis worth keeping.
+      const modelSelectionUnsupported = resolvedCapabilities?.modelSelection === "unsupported";
+      const failoverConditionsMet = replayFenceClear
         && ((fallbackFailure && authoritativeFailure) || preActivityInfrastructureExit);
+      let fallbackEligible = failoverConditionsMet && !modelSelectionUnsupported;
 
       if (fallbackFailure && !authoritativeFailure && !preActivityInfrastructureExit) {
         candidateResult.messages.push({
           role: "system",
           content:
-            `Model fallback blocked because the child did not provide an authoritative agent_settled failure `
-            + `(capability=${recoveryFacts?.settlementCapability ?? "unknown"}). `
+            `Model fallback blocked because the child did not provide an authoritative settlement `
+            + `(settlementAuthority=${recoveryFacts.settlementAuthority}). `
             + `Legacy or interrupted child streams have degraded recovery capability and cannot be fresh-replayed safely.`,
         });
       } else if ((fallbackFailure || preActivityInfrastructureExit) && !replayFenceClear) {
-        const completedTools = recoveryFacts?.completedToolCount ?? 0;
-        const inFlightTools = recoveryFacts?.inFlightToolCount ?? 0;
-        const externalReplayRisk = recoveryFacts?.externalReplayRisk ?? false;
+        const completedTools = recoveryFacts.completedToolCount;
+        const inFlightTools = recoveryFacts.inFlightToolCount;
+        const externalReplayRisk = recoveryFacts.externalReplayRisk;
+        // The remaining candidates were never tried, and not because no backend
+        // could serve them. Without this a fenced run is indistinguishable from
+        // one that simply had nothing left to fall back to.
+        candidateResult.capabilityDeliveries = [
+          ...(candidateResult.capabilityDeliveries ?? []),
+          {
+            capability: "modelSelection",
+            support: "withheld",
+            note:
+              `the side-effect replay fence stopped failover after completedTools=${completedTools}, `
+              + `inFlightTools=${inFlightTools}, externalReplayRisk=${externalReplayRisk}`,
+          },
+        ];
         candidateResult.messages.push({
           role: "system",
           content:
@@ -495,15 +896,35 @@ export async function runSingleTeammate(
             + `A fresh model process could repeat a completed tool, a tool whose effect is unknown, `
             + `or external work observed through child IPC/runtime diagnostics.`,
         });
+      } else if (modelSelectionUnsupported && failoverConditionsMet) {
+        // Every other condition for failover held, so without this record the
+        // result is indistinguishable from one that had no candidate left.
+        candidateResult.capabilityDeliveries = [
+          ...(candidateResult.capabilityDeliveries ?? []),
+          {
+            capability: "modelSelection",
+            support: "withheld",
+            note:
+              `backend "${candidateResult.backend}" declares modelSelection is unsupported, `
+              + `so capability adjudication would refuse every remaining model candidate before it started `
+              + `and that refusal would replace this run's own failure`,
+          },
+        ];
+        candidateResult.messages.push({
+          role: "system",
+          content:
+            `Model fallback blocked because backend "${candidateResult.backend}" declares `
+            + `modelSelection is unsupported. Each remaining candidate names a model this backend `
+            + `cannot select, so capability adjudication would refuse it before it started and you `
+            + `would be shown that refusal instead of the failure reported above.`,
+        });
       }
 
       if (fallbackEligible) {
-        const reclamation = await attemptReclamations.get(candidateResult);
-        if (
-          reclamation
-          && typeof reclamation === "object"
-          && (reclamation as { status?: string }).status === "unreaped"
-        ) {
+        // Awaiting here serialises attempts: the replacement must not start
+        // while the failed runtime may still deliver callbacks.
+        const reclamation = await attempt.reclamation;
+        if (reclamation.status === "unreaped") {
           candidateResult.messages.push({
             role: "system",
             content:
@@ -567,1776 +988,6 @@ export async function runSingleTeammate(
   return rejectAndPublish(
     `Teammate skipped every model candidate because their circuit breakers are open (agent=${params.agent}).`,
   );
-}
-
-/** AC5: session directory + fork context resolved once per attempt. */
-interface AttemptSessionContext {
-  /** Private per-correlation session directory, when the parent exposes one. */
-  sessionDir?: string;
-  /** Existing child session loaded after a cold runtime restart. */
-  resumeSessionFile?: string;
-  /** Parent session file the child forks from. */
-  forkSessionFile?: string;
-  /** Transcript note emitted when an explicit fork could not be honoured. */
-  forkWarning?: string;
-}
-
-function resolveAttemptSessionContext(
-  params: RunSingleTeammateParams,
-  agentConfig: AgentConfig,
-  correlationId: string,
-  options: RunTeammateOptions,
-): AttemptSessionContext {
-  const effectiveContext = params.context ?? agentConfig.defaultContext;
-  const parentSession = options.parentSessionFile ?? process.env.PI_TEAMMATE_PARENT_SESSION ?? null;
-  const hasParentSession = Boolean(parentSession) && fs.existsSync(parentSession as string);
-  const context: AttemptSessionContext = {};
-  if (options.resumeSessionFile && fs.existsSync(options.resumeSessionFile)) {
-    context.resumeSessionFile = options.resumeSessionFile;
-    context.sessionDir = path.dirname(options.resumeSessionFile);
-  }
-  if (!context.sessionDir && options.sessionDir) {
-    ensurePrivateDirectory(options.sessionDir);
-    context.sessionDir = path.resolve(options.sessionDir);
-  }
-  if (hasParentSession && !context.sessionDir) {
-    const sessionRoot = getTeammateSessionRoot(parentSession as string);
-    if (sessionRoot) {
-      context.sessionDir = path.join(sessionRoot, correlationSessionDirectoryName(correlationId));
-      ensurePrivateDirectory(context.sessionDir);
-    }
-  }
-  if (effectiveContext === "fork" && !context.resumeSessionFile) {
-    if (hasParentSession) {
-      context.forkSessionFile = parentSession as string;
-    } else if (params.context === "fork") {
-      context.forkWarning = "Fork requested but parent session file not available. Starting with fresh context.";
-    }
-  }
-  return context;
-}
-
-/**
- * Every value a running attempt mutates after setup. Collecting them here keeps
- * the settlement invariants readable as one state machine instead of a dozen
- * independent closure flags, and lets the per-event handlers below be named,
- * self-contained functions.
- */
-interface AttemptState {
-  // --- Turn-scoped: cleared by completeTurn() once a result is published. ---
-  lastContent: string;
-  streamingText: string;
-  stderrBuffer: string;
-  pendingStructuredOutput?: StructuredOutputCandidate;
-  capturedStructuredOutput: unknown;
-  structuredOutputValidationFailure?: string;
-  /** Set when the child's structured_output tool execution itself failed. */
-  structuredOutputAttemptFailed: boolean;
-  reportedRuntimeErrors: Set<string>;
-  runtimeFailure?: string;
-  /**
-   * progress.toolCount stays cumulative for the lifetime of a wakeable agent so
-   * it reads on the same scale as the cumulative token counters. This per-turn
-   * count only feeds diagnostics.
-   */
-  turnToolCount: number;
-  /**
-   * Re-opened at every turn boundary, set by completeTurn(). Guards against a
-   * second settlement for the same turn.
-   */
-  turnLifecycleSettled: boolean;
-  /** Last assistant stop reason observed for this turn. */
-  lastAssistantStopReason?: string;
-  /** A length-truncated turn is waiting for child-local compaction and continuation. */
-  outputLimitRecoveryPending: boolean;
-
-  // --- Attempt-scoped: survive turns for the lifetime of a wakeable child. ---
-  resolvedModel: string;
-  /**
-   * Result usage remains turn-scoped, while status usage stays cumulative for
-   * the lifetime of a wakeable agent.
-   */
-  completedInputTokens: number;
-  completedOutputTokens: number;
-  completedCacheReadTokens: number;
-  completedCacheWriteTokens: number;
-  /** One-way latches; never reset. */
-  receivedFirstActivity: boolean;
-  /** True only for a silent non-zero close before any child event or possible effect. */
-  preActivityInfrastructureExit: boolean;
-  /** IPC or non-protocol output makes cross-process replay unsafe. */
-  externalReplayRisk: boolean;
-  initialResultPublished: boolean;
-  /** Recovery evidence used to fence any fresh-process model fallback. */
-  settlementCapability: AttemptSettlementCapability;
-  completedToolCount: number;
-  inFlightToolCount: number;
-  /** Absorbing state: once terminal, queued child lines must not reopen a turn. */
-  terminal: boolean;
-}
-
-/**
- * While a tool is in flight (e.g. a long bash script), the pi child emits no
- * further events until the tool completes. Without a heartbeat the parent's
- * 30s stall clock (`TEAMMATE_STALL_TIMEOUT_MS`) would mark a busy agent as
- * stalled. This interval refreshes progress activity until the tool ends; it
- * stays well under the stall threshold so dropped ticks cannot false-flag.
- */
-export const TOOL_EXECUTION_HEARTBEAT_MS = 10_000;
-
-/**
- * The lifecycle deadlines an attempt can arm. Every settlement path clears
- * both; cleared handles are deliberately left in place so
- * `armResultReadyGrace` still recognises a grace window that was already used.
- */
-interface AttemptTimers {
-  firstActivity?: ReturnType<typeof setTimeout>;
-  resultReadyGrace?: ReturnType<typeof setTimeout>;
-  outputLimitRecovery?: ReturnType<typeof setTimeout>;
-  interruptingSteer?: ReturnType<typeof setTimeout>;
-  structuredOutputRecovery?: ReturnType<typeof setTimeout>;
-  toolHeartbeat?: ReturnType<typeof setInterval>;
-}
-
-interface PendingInterruptingSteer {
-  abortRequestId: string;
-  promptRequestId: string;
-  message: string;
-  token?: LeaseToken;
-  phase: "aborting" | "prompting";
-  /** Set when the interrupted turn settles; a later turn_start means the steer missed its window. */
-  turnSettledDuringAbort?: boolean;
-}
-
-/**
- * Cache tier for agent subprocesses.
- *
- * Agents stay on the short tier (5m on Anthropic, implicit 30m on OpenAI) even
- * when the main process runs with PI_CACHE_RETENTION=long, so a long-lived main
- * session does not leak its expensive 1h/24h cache tier into short-lived agents.
- * PI_TEAMMATE_CACHE_RETENTION overrides the pin (valid values: short | long | none).
- */
-export function resolveAgentCacheRetention(env: NodeJS.ProcessEnv = process.env): string {
-  const override = env.PI_TEAMMATE_CACHE_RETENTION;
-  return override === "long" || override === "none" || override === "short" ? override : "short";
-}
-
-/** Environment handed to the pi child: identity, depth diagnostics and file seams. */
-function buildChildSpawnEnv(
-  correlationId: string,
-  replyTo: ReplyTarget,
-  options: RunTeammateOptions,
-  schemaFile: string | undefined,
-  outputFile: string | undefined,
-): Record<string, string | undefined> {
-  const spawnEnv: Record<string, string | undefined> = {
-    ...process.env,
-    PI_TEAMMATE_CHILD: "1",
-    // Diagnostic only. The child never spawns grandchildren itself — it
-    // proxies nested dispatches back to this process — so the guard reads
-    // RunTeammateOptions.depth rather than this variable.
-    PI_TEAMMATE_DEPTH: String((options.depth ?? getTeammateDepth()) + 1),
-    PI_TEAMMATE_CORRELATION_ID: correlationId,
-    PI_TEAMMATE_REPLY_TO: replyTo,
-    // Cache-tier pin (see resolveAgentCacheRetention): the child inherits the
-    // parent env via the spread above, so an explicit short-tier override keeps
-    // agents from inheriting the main process's long retention.
-    PI_CACHE_RETENTION: resolveAgentCacheRetention(process.env),
-    ...options.childEnvironment,
-  };
-  if (options.maxDispatchDepth !== undefined) {
-    spawnEnv.PI_TEAMMATE_MAX_DISPATCH_DEPTH = String(options.maxDispatchDepth);
-  }
-  if (outputFile) {
-    spawnEnv.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH = outputFile;
-    spawnEnv.PI_TEAMMATE_STRUCTURED_SCHEMA_PATH = schemaFile;
-  }
-  if (options.parentSessionFile) {
-    spawnEnv.PI_TEAMMATE_PARENT_SESSION = options.parentSessionFile;
-  }
-  return spawnEnv;
-}
-
-/** Child IPC events that only publish identity and cannot cause external work. */
-function isReplayNeutralChildIpcMessage(message: Record<string, unknown>): boolean {
-  return message.type === "teammate_session_ready";
-}
-
-/** Proxy requests and lifecycle events raised by extensions inside the child. */
-function bindChildIpcRelay(
-  child: ChildProcess,
-  correlationId: string,
-  options: RunTeammateOptions,
-  onActivity?: (message: Record<string, unknown>) => void,
-): void {
-  child.on("message", (msg: unknown) => {
-    // PERFSEC-001: process.send(null) or malformed envelopes must not crash
-    // the parent — an unguarded property access in an EventEmitter callback is
-    // an uncaught exception.
-    if (msg === null || msg === undefined || typeof msg !== "object") return;
-    // GEN-001: After teardown aborts the signal, a dying child's in-flight
-    // IPC messages must not re-enter the parent and spawn new nested agents.
-    if (options.signal?.aborted) return;
-    const m = msg as Record<string, unknown>;
-    onActivity?.(m);
-    dispatchChildIpcMessage(
-      m,
-      options.onChildRequest
-        ? (request, reply) => options.onChildRequest?.({
-            ...request,
-            // The parent process owns this identity; never trust a child-supplied actor id.
-            correlationId,
-          }, reply)
-        : undefined,
-      options.onChildEvent
-        ? (event) => options.onChildEvent?.({
-            ...event,
-            // Lifecycle ownership is assigned by the spawning parent.
-            correlationId,
-          })
-        : undefined,
-      (reply) => {
-        if (!sendChildIpcMessage(child, reply as Record<string, unknown>)) {
-          throw new Error("Child IPC channel rejected the reply envelope.");
-        }
-      },
-    );
-  });
-}
-
-async function runSingleAttempt(
-  params: RunSingleTeammateParams,
-  agentConfig: AgentConfig,
-  cwd: string,
-  correlationId: string,
-  replyTo: ReplyTarget,
-  startTime: number,
-  modelOverride: string | undefined,
-  options: RunTeammateOptions,
-): Promise<SingleResult> {
-  const effectiveContext = params.context ?? agentConfig.defaultContext;
-  const wakeable = effectiveContext !== "fork";
-  const systemPromptFile = writeSystemPromptFile(agentConfig, correlationId, params.outputSchema, params.todos);
-  const { sessionDir, resumeSessionFile, forkSessionFile, forkWarning } =
-    resolveAttemptSessionContext(params, agentConfig, correlationId, options);
-
-  // AC6: Structured output
-  const { schemaFile, outputFile } = params.outputSchema
-    ? writeSchemaFile(params.outputSchema, correlationId)
-    : { schemaFile: undefined, outputFile: undefined };
-
-  const piArgs = buildPiArgs(
-    agentConfig,
-    params,
-    systemPromptFile,
-    modelOverride,
-    sessionDir,
-    forkSessionFile,
-    schemaFile,
-    options.modelCapabilities,
-    resumeSessionFile,
-  );
-
-  const usage = emptyUsage();
-  const pendingMessageUsage = emptyUsage();
-  const messages: Array<{ role: string; content: string }> = [];
-  if (forkWarning) {
-    appendBoundedTranscriptMessage(messages, { role: "system", content: forkWarning });
-  }
-  const state: AttemptState = {
-    lastContent: "",
-    streamingText: "",
-    stderrBuffer: "",
-    pendingStructuredOutput: undefined,
-    capturedStructuredOutput: undefined,
-    structuredOutputValidationFailure: undefined,
-    reportedRuntimeErrors: new Set(),
-    runtimeFailure: undefined,
-    turnToolCount: 0,
-    turnLifecycleSettled: false,
-    lastAssistantStopReason: undefined,
-    outputLimitRecoveryPending: false,
-    structuredOutputAttemptFailed: false,
-    resolvedModel: modelOverride ?? params.model ?? agentConfig.model ?? "unknown",
-    completedInputTokens: 0,
-    completedOutputTokens: 0,
-    completedCacheReadTokens: 0,
-    completedCacheWriteTokens: 0,
-    receivedFirstActivity: false,
-    preActivityInfrastructureExit: false,
-    externalReplayRisk: false,
-    initialResultPublished: false,
-    settlementCapability: "unknown",
-    completedToolCount: 0,
-    inFlightToolCount: 0,
-    terminal: false,
-  };
-
-  // AC8: Rich progress tracking
-  const progress = createProgress(params.agent, startTime);
-  progress.requestedModel = modelOverride ?? params.model ?? agentConfig.model;
-
-  const recordAttemptRecovery = (result: SingleResult): SingleResult => {
-    attemptRecoveryFacts.set(result, {
-      settlementCapability: state.settlementCapability,
-      completedToolCount: state.completedToolCount,
-      inFlightToolCount: state.inFlightToolCount,
-      preActivityInfrastructureExit: state.preActivityInfrastructureExit,
-      externalReplayRisk: state.externalReplayRisk,
-    });
-    return result;
-  };
-
-  const updateProgressUsage = (): void => {
-    const inputTokens = state.completedInputTokens + usage.inputTokens + pendingMessageUsage.inputTokens;
-    const outputTokens = state.completedOutputTokens + usage.outputTokens + pendingMessageUsage.outputTokens;
-    const cacheReadTokens = state.completedCacheReadTokens + usage.cacheReadTokens + pendingMessageUsage.cacheReadTokens;
-    const cacheWriteTokens = state.completedCacheWriteTokens + usage.cacheWriteTokens + pendingMessageUsage.cacheWriteTokens;
-    progress.inputTokens = Math.max(progress.inputTokens ?? 0, inputTokens);
-    progress.outputTokens = Math.max(progress.outputTokens ?? 0, outputTokens);
-    progress.cacheReadTokens = Math.max(progress.cacheReadTokens ?? 0, cacheReadTokens);
-    progress.cacheWriteTokens = Math.max(progress.cacheWriteTokens ?? 0, cacheWriteTokens);
-    progress.tokens = progress.inputTokens + progress.outputTokens;
-  };
-
-  // `cli/<tool>` models run through the local ACP backend instead of a pi
-  // subprocess: the external CLI is spawned directly and driven over the
-  // Agent Client Protocol. Failures before any side effect are marked as
-  // pre-activity infrastructure exits so the candidate sweep can fall back.
-  const resolvedModel = modelOverride ?? params.model ?? agentConfig.model;
-  if (resolvedModel && isCliToolModel(resolvedModel)) {
-    const tool = cliToolNameFromModel(resolvedModel);
-    const cliFailure = (message: string, terminalStatus: SingleResult["terminalStatus"] = "failed"): SingleResult => {
-      const result: SingleResult = {
-        agent: params.agent,
-        name: params.name,
-        task: params.task ?? "",
-        exitCode: 1,
-        messages: [{ role: "system", content: message }],
-        usage: emptyUsage(),
-        model: resolvedModel!,
-        correlationId,
-        originCwd: cwd,
-        durationMs: Date.now() - startTime,
-        terminalStatus,
-      };
-      attemptRecoveryFacts.set(result, {
-        settlementCapability: "legacy",
-        completedToolCount: 0,
-        inFlightToolCount: 0,
-        preActivityInfrastructureExit: true,
-        externalReplayRisk: false,
-      });
-      return result;
-    };
-
-    const cliConfig = loadCliToolsConfig();
-    const toolConfig = cliConfig?.tools?.[tool];
-    if (!toolConfig || !toolConfig.enabled) {
-      return cliFailure(`Unknown CLI tool model ${JSON.stringify(resolvedModel)}: tool "${tool}" is not enabled in teammate-cli-tools.json`);
-    }
-    if (params.outputSchema) {
-      return cliFailure(`CLI tool model ${JSON.stringify(resolvedModel)} does not support structured output`);
-    }
-
-    try {
-      const run = await runCliTool({
-        tool,
-        config: toolConfig,
-        prompt: params.task ?? "",
-        cwd,
-        signal: options.signal ?? new AbortController().signal,
-        timeoutMs: params.timeoutMs,
-      });
-      const result: SingleResult = {
-        agent: params.agent,
-        name: params.name,
-        task: params.task ?? "",
-        exitCode: run.exitCode,
-        messages: run.messages,
-        usage: {
-          inputTokens: run.usage.inputTokens ?? 0,
-          outputTokens: run.usage.outputTokens ?? 0,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-          cost: run.usage.costUsd ?? 0,
-          turns: 1,
-        },
-        model: resolvedModel,
-        correlationId,
-        originCwd: cwd,
-        durationMs: run.durationMs,
-        terminalStatus: run.terminalStatus === "completed"
-          ? "completed"
-          : run.terminalStatus === "cancelled"
-            ? "terminated"
-            : "failed",
-      };
-      attemptRecoveryFacts.set(result, {
-        settlementCapability: "legacy",
-        completedToolCount: 0,
-        inFlightToolCount: 0,
-        preActivityInfrastructureExit: run.exitCode !== 0,
-        externalReplayRisk: false,
-      });
-      return result;
-    } catch (error) {
-      return cliFailure(`CLI tool model ${JSON.stringify(resolvedModel)} failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  return new Promise<SingleResult>((resolve) => {
-    let child: ChildProcess;
-    let releaseRetryPersistenceGuard = () => {};
-    let pendingInterruptingSteer: PendingInterruptingSteer | undefined;
-    /**
-     * True when a settlement boundary (agent_settled, legacy agent_end) was
-     * swallowed while the interrupt transaction owned settlement. A degraded
-     * steer must converge the turn the swallowed boundary would have, or the
-     * turn strands with no deadline armed.
-     */
-    let steerSettlementSwallowed = false;
-    const interruptingSteerTimeoutMs = options.interruptingSteerTimeoutMs ?? INTERRUPTING_STEER_TIMEOUT_MS;
-
-    const spawnEnv = buildChildSpawnEnv(correlationId, replyTo, options, schemaFile, outputFile);
-
-    let useIpc = false;
-    try {
-      const spawnSpec = getPiSpawnCommand(piArgs);
-      useIpc = !spawnSpec.shell;
-      const spawnOpts: Parameters<typeof crossSpawn>[2] = {
-        cwd,
-        stdio: useIpc ? ["pipe", "pipe", "pipe", "ipc"] : ["pipe", "pipe", "pipe"],
-        env: spawnEnv,
-        shell: spawnSpec.shell,
-        windowsHide: true,
-      };
-      child = (options.spawnChildProcess ?? crossSpawn)(spawnSpec.command, spawnSpec.args, spawnOpts);
-    } catch (error) {
-      cleanupFile(systemPromptFile);
-      if (schemaFile) cleanupFile(schemaFile);
-      if (outputFile) cleanupFile(outputFile);
-
-      const result: SingleResult = {
-        agent: params.agent,
-        name: params.name,
-        task: params.task ?? "",
-        exitCode: 1,
-        messages: [{
-          role: "system",
-          content:
-            `Failed to spawn pi subprocess (agent=${params.agent}, model=${state.resolvedModel || "unknown"}, `
-            + `correlationId=${correlationId}, phase=spawn): ${error instanceof Error ? error.message : String(error)}`,
-        }],
-        usage: emptyUsage(),
-        model: state.resolvedModel,
-        correlationId,
-        durationMs: Date.now() - startTime,
-      };
-      recordAttemptRecovery(result);
-      state.initialResultPublished = true;
-      state.turnLifecycleSettled = true;
-      resolve(result);
-      try {
-        options.onTurnComplete?.(result);
-      } catch {
-        // Completion observers cannot prevent a terminal spawn failure from settling.
-      }
-      return;
-    }
-
-    if (child.stdin) guardChildStdin(child.stdin);
-
-    // Pi core keeps its in-process provider retry enabled. It handles
-    // transient network/provider errors without restarting the child, so
-    // tool calls already executed are never repeated. Teammate owns model
-    // fallback across candidates at the process level.
-
-    // RPC mode: stdin stays open for bidirectional messaging.
-    // Send initial prompt via RPC command.
-    if (child.stdin && params.task) {
-      const initialLeaseToken = typeof options.initialLeaseToken === "function"
-        ? options.initialLeaseToken(correlationId)
-        : options.initialLeaseToken;
-      sendRpcMessage(child.stdin, params.task, "prompt", initialLeaseToken);
-    }
-
-    // Identity publication is observational only. Request/control envelopes
-    // and unknown lifecycle events remain replay-risking until explicitly
-    // proven side-effect free.
-    if (useIpc) {
-      bindChildIpcRelay(child, correlationId, options, (message) => {
-        state.receivedFirstActivity = true;
-        if (!isReplayNeutralChildIpcMessage(message)) state.externalReplayRisk = true;
-      });
-    }
-
-    // Report initial progress
-    options.onProgress?.(progress);
-
-    const termination = createChildTerminationController(child);
-    void termination.outcome.then((outcome) => {
-      options.onReclamationOutcome?.(correlationId, outcome);
-    });
-
-    // Handle abort signal
-    const unbindTerminationSignal = bindChildTerminationSignal(termination, options.signal);
-
-    // Timeout handling
-    const timers: AttemptTimers = {};
-    // Cleared handles are deliberately left assigned: armResultReadyGrace()
-    // treats a non-empty handle as "this window was already used".
-    const clearAllTimers = (): void => {
-      if (timers.firstActivity) clearTimeout(timers.firstActivity);
-      if (timers.resultReadyGrace) clearTimeout(timers.resultReadyGrace);
-      if (timers.outputLimitRecovery) clearTimeout(timers.outputLimitRecovery);
-      if (timers.interruptingSteer) clearTimeout(timers.interruptingSteer);
-      if (timers.structuredOutputRecovery) clearTimeout(timers.structuredOutputRecovery);
-      if (timers.toolHeartbeat) clearInterval(timers.toolHeartbeat);
-    };
-
-    /**
-     * Start or stop the in-flight tool heartbeat. A long-running tool call
-     * (bash script, observe wait, …) emits no further child events until it
-     * completes; the heartbeat republishes progress so the parent's stall
-     * clock keeps seeing activity. Idempotent — call after every tool
-     * start/completion event and on any boundary that ends tool execution.
-     */
-    const syncToolHeartbeat = (): void => {
-      const inFlight = !state.terminal && !state.turnLifecycleSettled && state.inFlightToolCount > 0;
-      if (inFlight) {
-        if (!timers.toolHeartbeat) {
-          timers.toolHeartbeat = setInterval(() => {
-            if (state.terminal || state.turnLifecycleSettled || state.inFlightToolCount === 0) {
-              syncToolHeartbeat();
-              return;
-            }
-            progress.lastActivityAt = Date.now();
-            options.onProgress?.(progress);
-          }, options.toolExecutionHeartbeatMs ?? TOOL_EXECUTION_HEARTBEAT_MS);
-          timers.toolHeartbeat.unref?.();
-        }
-        return;
-      }
-      if (timers.toolHeartbeat) {
-        clearInterval(timers.toolHeartbeat);
-        timers.toolHeartbeat = undefined;
-      }
-    };
-    timers.firstActivity = setTimeout(() => {
-      if (state.initialResultPublished || state.receivedFirstActivity) return;
-      const message =
-        `Timed out waiting for the first child agent event `
-        + `(agent=${params.agent}, model=${state.resolvedModel || "unknown"}, correlationId=${correlationId}, `
-        + `phase=first-activity); the child process started but did not report model activity.`;
-      state.lastContent = message;
-      state.runtimeFailure = message;
-      appendBoundedTranscriptMessage(messages, { role: "system", content: message });
-      progress.status = "failed";
-      progress.durationMs = Date.now() - startTime;
-      progress.lastMessage = message;
-      options.onProgress?.(progress);
-      termination.terminate();
-    }, options.firstActivityTimeoutMs ?? FIRST_ACTIVITY_TIMEOUT_MS);
-
-    // Parse JSON lines from stdout
-    const stdoutLines = createUtf8LineDecoder();
-    const processStdoutLine = (line: string) => {
-      const trimmed = line.trim();
-      if (!trimmed) {
-        state.receivedFirstActivity = true;
-        state.externalReplayRisk = true;
-        if (timers.firstActivity) clearTimeout(timers.firstActivity);
-        return;
-      }
-      try {
-        const event = JSON.parse(trimmed) as JsonLineEvent;
-        processEvent(event);
-      } catch {
-        state.receivedFirstActivity = true;
-        state.externalReplayRisk = true;
-        if (timers.firstActivity) clearTimeout(timers.firstActivity);
-        state.lastContent = appendUtf8Tail(
-          state.lastContent,
-          trimmed + "\n",
-          EXECUTION_BUFFER_LIMITS.streamBytes,
-        );
-      }
-    };
-    child.stdout?.on("data", (chunk: Buffer) => {
-      pokeLifecycleDeadline();
-      for (const line of stdoutLines.write(chunk)) processStdoutLine(line);
-    });
-
-    const clearInterruptingSteer = (): PendingInterruptingSteer | undefined => {
-      const pending = pendingInterruptingSteer;
-      pendingInterruptingSteer = undefined;
-      if (timers.interruptingSteer) {
-        clearTimeout(timers.interruptingSteer);
-        timers.interruptingSteer = undefined;
-      }
-      return pending;
-    };
-
-    const markSteerTurnSettledDuringAbort = (): void => {
-      if (pendingInterruptingSteer?.phase === "aborting") {
-        pendingInterruptingSteer.turnSettledDuringAbort = true;
-      }
-    };
-
-    /**
-     * Settle the steer transaction as a task failure. Reserved for outcomes
-     * where the turn was already interrupted (acknowledged abort) or the
-     * child is gone, so the original work cannot continue either way.
-     */
-    const failInterruptingSteer = (reason: string): void => {
-      if (!pendingInterruptingSteer || state.terminal || state.turnLifecycleSettled) return;
-      clearInterruptingSteer();
-      const diagnostic =
-        `Failed to interrupt and steer teammate (agent=${params.agent}, correlationId=${correlationId}): ${reason}`;
-      state.runtimeFailure = diagnostic;
-      appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
-      completeTurn(readStructuredOutput(true), true, 1);
-    };
-
-    /**
-     * A control-plane failure must not masquerade as a task failure. When the
-     * abort was never acknowledged (timeout) or Pi rejected it, the running
-     * turn is untouched: killing the child and settling exitCode=1 turned one
-     * undelivered interruption into a failed task and — through graph
-     * dependencies — into a cascading failure of every downstream dependent.
-     * Requeue the correction as a non-interrupting follow_up, surface the
-     * control error in the transcript and progress, and let the task run on.
-     */
-    const degradeInterruptingSteerToFollowUp = (reason: string): void => {
-      if (!pendingInterruptingSteer || state.terminal || state.turnLifecycleSettled) return;
-      const pending = clearInterruptingSteer();
-      if (!pending) return;
-      const diagnostic =
-        `Steer degraded to follow_up (agent=${params.agent}, correlationId=${correlationId}): ${reason}. `
-        + "The turn was not interrupted; the correction message was queued and the task continues.";
-      appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
-      progress.lastMessage = diagnostic;
-      options.onProgress?.(progress);
-      if (!child.stdin || !writeChildStdinLine(child.stdin, JSON.stringify({
-        type: "follow_up",
-        message: wrapLeasedMessage(pending.message, pending.token),
-      }))) {
-        const undelivered =
-          `Steer follow_up could not be delivered (agent=${params.agent}, correlationId=${correlationId}): `
-          + "the correction message was dropped; the task continues.";
-        appendBoundedTranscriptMessage(messages, { role: "system", content: undelivered });
-        progress.lastMessage = undelivered;
-        options.onProgress?.(progress);
-      }
-      // A settlement boundary swallowed while the interrupt owned settlement
-      // would strand the turn now that the pending state is gone; converge it
-      // the way the swallowed boundary would have.
-      if (steerSettlementSwallowed) settleAgentSession();
-    };
-
-    const armInterruptingSteerTimeout = (): void => {
-      if (timers.interruptingSteer) clearTimeout(timers.interruptingSteer);
-      if (!pendingInterruptingSteer) {
-        timers.interruptingSteer = undefined;
-        return;
-      }
-      timers.interruptingSteer = setTimeout(() => {
-        const phase = pendingInterruptingSteer?.phase;
-        if (phase === "prompting") {
-          failInterruptingSteer(
-            `Pi did not start the correction prompt within ${interruptingSteerTimeoutMs}ms`,
-          );
-        } else {
-          degradeInterruptingSteerToFollowUp(
-            `Pi did not acknowledge the turn abort within ${interruptingSteerTimeoutMs}ms`,
-          );
-        }
-      }, interruptingSteerTimeoutMs);
-      timers.interruptingSteer.unref?.();
-    };
-
-    const requestInterruptingSteer = (message: string, token?: LeaseToken): boolean => {
-      if (!child.stdin || pendingInterruptingSteer || state.terminal || state.turnLifecycleSettled) return false;
-      const nonce = randomUUID();
-      steerSettlementSwallowed = false;
-      pendingInterruptingSteer = {
-        abortRequestId: `teammate-steer-abort-${nonce}`,
-        promptRequestId: `teammate-steer-prompt-${nonce}`,
-        message,
-        token,
-        phase: "aborting",
-      };
-      const sent = writeChildStdinLine(child.stdin, JSON.stringify({
-        id: pendingInterruptingSteer.abortRequestId,
-        type: "abort",
-      }));
-      if (!sent) {
-        pendingInterruptingSteer = undefined;
-        return false;
-      }
-      progress.phase = "continuing";
-      progress.resultReadyAt = undefined;
-      options.onProgress?.(progress);
-      armInterruptingSteerTimeout();
-      return true;
-    };
-
-    if (child.stdin) {
-      interruptingSteerHandlers.set(child.stdin, requestInterruptingSteer);
-      options.onChildSpawned?.(child.stdin, (message) => {
-        return sendChildIpcMessage(child, message);
-      }, sessionDir, correlationId, options.runtimeGeneration);
-    }
-
-    function readStructuredOutput(cleanup: boolean): unknown | undefined {
-      let structuredOutput: unknown;
-      if (outputFile) {
-        try {
-          const serialized = readRegularTextFile(outputFile);
-          if (serialized.trim().length > 0) {
-            try {
-              const candidate = JSON.parse(serialized);
-              const validationFailure = params.outputSchema
-                ? describeStructuredOutputValueValidationFailure(candidate, params.outputSchema)
-                : undefined;
-              if (validationFailure) {
-                state.structuredOutputValidationFailure = validationFailure;
-              } else {
-                structuredOutput = candidate;
-              }
-            } catch (error) {
-              state.structuredOutputValidationFailure =
-                `structured_output validation failed: output file is not valid JSON (${error instanceof Error ? error.message : String(error)}).`;
-            }
-          }
-        } catch {
-          // The structured_output tool has not persisted a result yet.
-        }
-        if (cleanup) cleanupFile(outputFile);
-      }
-      return structuredOutput ?? state.capturedStructuredOutput;
-    }
-
-    function completeTurn(
-      structuredOutput: unknown,
-      terminateChild: boolean,
-      exitCode = 0,
-      terminalStatus: AgentTerminalStatus = exitCode === 0 ? "completed" : "failed",
-    ): void {
-      if (state.terminal || state.turnLifecycleSettled) return;
-      releaseRetryPersistenceGuard();
-      state.turnLifecycleSettled = true;
-      progress.status = terminalStatus;
-      progress.phase = undefined;
-      progress.resultReadyAt = undefined;
-      progress.durationMs = Date.now() - startTime;
-      if (messages.length === 0 && state.lastContent) {
-        appendBoundedTranscriptMessage(messages, { role: "assistant", content: state.lastContent });
-      }
-      options.onProgress?.(progress);
-      clearAllTimers();
-      cleanupFile(systemPromptFile);
-      if (schemaFile) cleanupFile(schemaFile);
-      if (outputFile) cleanupFile(outputFile);
-
-      const turnResult: SingleResult = {
-        agent: params.agent,
-        name: params.name,
-        task: params.task ?? "",
-        exitCode,
-        messages: [...messages],
-        usage: { ...usage },
-        model: state.resolvedModel,
-        correlationId,
-        durationMs: Date.now() - startTime,
-        toolCount: progress.toolCount,
-        wakeable: !terminateChild,
-        structuredOutput,
-        attemptedModels: undefined,
-        terminalStatus,
-      };
-      recordAttemptRecovery(turnResult);
-      if (terminateChild) attemptReclamations.set(turnResult, termination.outcome);
-      if (!state.initialResultPublished) {
-        state.initialResultPublished = true;
-        resolve(turnResult);
-      }
-      try {
-        options.onTurnComplete?.(turnResult, terminalStatus);
-      } catch {
-        // Completion observers must not strand a child after the result has
-        // already been published to the caller.
-      } finally {
-        state.completedInputTokens = Math.max(state.completedInputTokens, progress.inputTokens ?? 0);
-        state.completedOutputTokens = Math.max(state.completedOutputTokens, progress.outputTokens ?? 0);
-        state.completedCacheReadTokens = Math.max(state.completedCacheReadTokens, progress.cacheReadTokens ?? 0);
-        state.completedCacheWriteTokens = Math.max(state.completedCacheWriteTokens, progress.cacheWriteTokens ?? 0);
-        releasePublishedTurnHistory(messages, progress, usage);
-        state.lastContent = "";
-        state.streamingText = "";
-        state.stderrBuffer = "";
-        state.pendingStructuredOutput = undefined;
-        state.capturedStructuredOutput = undefined;
-        state.structuredOutputValidationFailure = undefined;
-        state.structuredOutputAttemptFailed = false;
-        state.reportedRuntimeErrors.clear();
-        state.runtimeFailure = undefined;
-        state.lastAssistantStopReason = undefined;
-        state.outputLimitRecoveryPending = false;
-        resetUsage(pendingMessageUsage);
-        if (terminateChild) {
-          state.terminal = true;
-          termination.terminate();
-        }
-      }
-    }
-
-    function publishResultReady(): void {
-      if (state.initialResultPublished) return;
-      if (messages.length === 0 && state.lastContent) {
-        appendBoundedTranscriptMessage(messages, { role: "assistant", content: state.lastContent });
-      }
-      clearAllTimers();
-      progress.phase = "result-ready";
-      state.initialResultPublished = true;
-      const result = recordAttemptRecovery({
-        agent: params.agent,
-        name: params.name,
-        task: params.task ?? "",
-        exitCode: 0,
-        messages: [...messages],
-        usage: { ...usage },
-        model: state.resolvedModel,
-        correlationId,
-        durationMs: Date.now() - startTime,
-        toolCount: progress.toolCount,
-        wakeable,
-        lifecyclePending: true,
-      });
-      resolve(result);
-    }
-
-    /**
-     * A published result never confirms its own lifecycle. Without this
-     * deadline, a child that goes silent after its final tool-free turn keeps
-     * the agent `running` forever: publishResultReady() has already cleared the
-     * absolute run ceiling, and no later event can settle the turn.
-     *
-     * Publication semantics stay untouched — the result was already handed to
-     * the caller; this only bounds how long we wait for agent_settled/close.
-     *
-     * LC-001: The deadline is activity-aware — stdout/stderr activity resets
-     * the window so a child in a legitimate continuation (retry, compaction,
-     * streaming) is not killed while still producing output.
-     */
-    let lifecycleDeadlineActive = false;
-    const lifecycleDeadlineMs = (): number => options.resultReadyGraceMs ?? RESULT_READY_GRACE_MS;
-    const lifecycleDeadlineCallback = (): void => {
-      timers.resultReadyGrace = undefined;
-      lifecycleDeadlineActive = false;
-      if (state.terminal || state.turnLifecycleSettled || pendingInterruptingSteer) return;
-      appendBoundedTranscriptMessage(messages, {
-        role: "system",
-        content:
-          `Teammate published a result but never confirmed its lifecycle within ${lifecycleDeadlineMs()}ms `
-          + `(agent=${params.agent}, correlationId=${correlationId}, expected=agent_settled, `
-          + `tools=${progress.toolCount}, turnTools=${state.turnToolCount}); the child process was terminated.`,
-      });
-      completeTurn(readStructuredOutput(true), true, 0, "terminated");
-    };
-    function armLifecycleConfirmationDeadline(): void {
-      if (state.terminal || state.turnLifecycleSettled || pendingInterruptingSteer || timers.resultReadyGrace) return;
-      lifecycleDeadlineActive = true;
-      timers.resultReadyGrace = setTimeout(lifecycleDeadlineCallback, lifecycleDeadlineMs());
-      timers.resultReadyGrace.unref?.();
-    }
-    /** Reset the lifecycle deadline window on observed child activity. */
-    function pokeLifecycleDeadline(): void {
-      if (!lifecycleDeadlineActive || state.terminal || state.turnLifecycleSettled || pendingInterruptingSteer) return;
-      if (timers.resultReadyGrace) clearTimeout(timers.resultReadyGrace);
-      timers.resultReadyGrace = setTimeout(lifecycleDeadlineCallback, lifecycleDeadlineMs());
-      timers.resultReadyGrace.unref?.();
-    }
-
-    function armResultReadyGrace(): void {
-      if (pendingInterruptingSteer || timers.resultReadyGrace) return;
-      timers.resultReadyGrace = setTimeout(() => {
-        timers.resultReadyGrace = undefined;
-        if (state.terminal || state.turnLifecycleSettled || pendingInterruptingSteer) return;
-        // The result is already consumable; settle with whatever structured
-        // output was captured instead of blocking on a missing agent_settled/close.
-        const structuredOutput = readStructuredOutput(true);
-        if (structuredOutput === undefined) {
-          // A corrective continuation is already in flight; the resumed turn
-          // has not produced a value yet, so keep waiting for its settlement.
-          if (structuredOutputRecoveryActive) return;
-          if (startStructuredOutputRecovery()) return;
-          appendStructuredOutputFailure();
-          appendBoundedTranscriptMessage(messages, {
-            role: "system",
-            content: STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS.resultReadyGrace,
-          });
-        }
-        completeTurn(structuredOutput, true, structuredOutput === undefined ? 1 : 0);
-      }, options.resultReadyGraceMs ?? RESULT_READY_GRACE_MS);
-      timers.resultReadyGrace.unref?.();
-    }
-
-    function armOutputLimitRecoveryDeadline(): void {
-      if (state.terminal || state.turnLifecycleSettled || pendingInterruptingSteer || timers.outputLimitRecovery) return;
-      const deadlineMs = options.outputLimitRecoveryTimeoutMs ?? OUTPUT_LIMIT_RECOVERY_TIMEOUT_MS;
-      timers.outputLimitRecovery = setTimeout(() => {
-        timers.outputLimitRecovery = undefined;
-        if (
-          state.terminal
-          || state.turnLifecycleSettled
-          || pendingInterruptingSteer
-          || !state.outputLimitRecoveryPending
-        ) return;
-        state.outputLimitRecoveryPending = false;
-        appendBoundedTranscriptMessage(messages, {
-          role: "system",
-          content:
-            `Teammate output-limit recovery did not continue within ${deadlineMs}ms `
-            + `(agent=${params.agent}, correlationId=${correlationId}); the partial response was not accepted as success.`,
-        });
-        completeTurn(readStructuredOutput(true), true, 1);
-      }, deadlineMs);
-    }
-
-    /**
-     * Bounded corrective continuation for a wakeable child that ended its run
-     * without schema-valid structured_output. The child process is still alive
-     * at agent_end/agent_settled, so resume it with one RPC prompt and wait for
-     * a fresh turn that must submit the value through the structured_output
-     * tool. This continues the same process — never a fresh replay — so the
-     * side-effect replay fence does not apply. Provider/runtime failures and
-     * non-wakeable (fork) children keep the existing immediate-failure
-     * settlement. At most one continuation per run; the recovery timer bounds
-     * a child that never responds.
-     */
-    let structuredOutputRecoveryActive = false;
-    let structuredOutputRecoveryRequestId: string | undefined;
-
-    function startStructuredOutputRecovery(): boolean {
-      if (
-        !params.outputSchema
-        || !wakeable
-        || state.terminal
-        || state.turnLifecycleSettled
-        || pendingInterruptingSteer
-        || structuredOutputRecoveryActive
-        || state.runtimeFailure
-        // An invalid submission already failed the documented reject-and-correct
-        // contract inside the turn; report it instead of prompting a resubmission.
-        || state.structuredOutputValidationFailure !== undefined
-        // A structured_output tool execution that failed is likewise a rejected
-        // attempt the child chose not to correct; never retry it blindly.
-        || state.structuredOutputAttemptFailed
-        || !child.stdin
-      ) return false;
-      const nonce = randomUUID();
-      structuredOutputRecoveryActive = true;
-      structuredOutputRecoveryRequestId = `teammate-structured-output-recovery-${nonce}`;
-      const deadlineMs = options.structuredOutputRecoveryTimeoutMs ?? STRUCTURED_OUTPUT_RECOVERY_TIMEOUT_MS;
-      const diagnostic =
-        `Teammate completed without schema-valid structured_output; issued a bounded corrective prompt `
-        + `(agent=${params.agent}, correlationId=${correlationId}, timeoutMs=${deadlineMs}).`;
-      appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
-      progress.lastMessage = diagnostic;
-      progress.status = "running";
-      progress.phase = "continuing";
-      progress.resultReadyAt = undefined;
-      options.onProgress?.(progress);
-      timers.structuredOutputRecovery = setTimeout(() => {
-        timers.structuredOutputRecovery = undefined;
-        if (!structuredOutputRecoveryActive || state.terminal || state.turnLifecycleSettled) return;
-        structuredOutputRecoveryActive = false;
-        structuredOutputRecoveryRequestId = undefined;
-        appendStructuredOutputFailure();
-        appendBoundedTranscriptMessage(messages, {
-          role: "system",
-          content:
-            "The teammate did not submit schema-valid structured_output after the corrective prompt.",
-        });
-        completeTurn(readStructuredOutput(true), true, 1);
-      }, deadlineMs);
-      // Settlement-critical deadline: like outputLimitRecovery, it must keep
-      // the event loop alive even when no child handle remains (fake-child
-      // tests, detached streams).
-      const sent = writeChildStdinLine(child.stdin, JSON.stringify({
-        id: structuredOutputRecoveryRequestId,
-        type: "prompt",
-        message: STRUCTURED_OUTPUT_RECOVERY_PROMPT,
-      }));
-      if (!sent) {
-        structuredOutputRecoveryActive = false;
-        structuredOutputRecoveryRequestId = undefined;
-        if (timers.structuredOutputRecovery) clearTimeout(timers.structuredOutputRecovery);
-        timers.structuredOutputRecovery = undefined;
-        return false;
-      }
-      return true;
-    }
-
-    /** Settle the corrective continuation as a failure when Pi rejects the prompt. */
-    function failStructuredOutputRecovery(): void {
-      if (!structuredOutputRecoveryActive || state.terminal || state.turnLifecycleSettled) return;
-      structuredOutputRecoveryActive = false;
-      structuredOutputRecoveryRequestId = undefined;
-      if (timers.structuredOutputRecovery) clearTimeout(timers.structuredOutputRecovery);
-      timers.structuredOutputRecovery = undefined;
-      appendStructuredOutputFailure();
-      appendBoundedTranscriptMessage(messages, {
-        role: "system",
-        content: STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS.agentEnd,
-      });
-      completeTurn(readStructuredOutput(true), true, 1);
-    }
-
-    function appendStructuredOutputFailure(): void {
-      if (!state.structuredOutputValidationFailure) return;
-      if (!messages.some((message) => message.content === state.structuredOutputValidationFailure)) {
-        appendBoundedTranscriptMessage(messages, {
-          role: "system",
-          content: state.structuredOutputValidationFailure,
-        });
-      }
-    }
-
-    function recordRuntimeEventError(event: JsonLineEvent, phase: string): void {
-      const error = extractPiEventError(event);
-      if (!error || state.reportedRuntimeErrors.has(error)) return;
-      if (pendingInterruptingSteer && /\babort(?:ed)?\b/i.test(error)) return;
-      state.reportedRuntimeErrors.add(error);
-      const message = event.message as Record<string, unknown> | undefined;
-      const model = typeof message?.model === "string"
-        ? message.model
-        : typeof event.model === "string"
-          ? event.model
-          : state.resolvedModel;
-      const diagnostic =
-        `Teammate runtime error (phase=${phase}, agent=${params.agent}, model=${model || "unknown"}, `
-        + `correlationId=${correlationId}): ${error}`;
-      appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
-      state.runtimeFailure = diagnostic;
-      progress.lastMessage = diagnostic;
-      options.onProgress?.(progress);
-    }
-
-    // --- Per-event handlers -------------------------------------------------
-    // Each handler owns exactly one event family and only mutates `state`,
-    // `progress`, `messages` and `usage`. processEvent() below routes to them
-    // through EVENT_HANDLERS after applying the shared pre-dispatch bookkeeping.
-
-    /** A new agent loop starts: the previous turn's settlement no longer applies. */
-    function onTurnBoundary(): void {
-      if (pendingInterruptingSteer?.phase === "aborting" && pendingInterruptingSteer.turnSettledDuringAbort) {
-        degradeInterruptingSteerToFollowUp("turn advanced before abort was acknowledged");
-      }
-      if (pendingInterruptingSteer?.phase === "prompting") {
-        pendingInterruptingSteer = undefined;
-        if (timers.interruptingSteer) {
-          clearTimeout(timers.interruptingSteer);
-          timers.interruptingSteer = undefined;
-        }
-      }
-      if (state.outputLimitRecoveryPending) {
-        state.outputLimitRecoveryPending = false;
-        if (timers.outputLimitRecovery) {
-          clearTimeout(timers.outputLimitRecovery);
-          timers.outputLimitRecovery = undefined;
-        }
-      }
-      if (timers.resultReadyGrace) {
-        clearTimeout(timers.resultReadyGrace);
-        timers.resultReadyGrace = undefined;
-      }
-      if (timers.outputLimitRecovery) {
-        clearTimeout(timers.outputLimitRecovery);
-        timers.outputLimitRecovery = undefined;
-      }
-      state.turnLifecycleSettled = false;
-      state.lastAssistantStopReason = undefined;
-      state.runtimeFailure = undefined;
-      progress.status = "running";
-      progress.phase = "prompting";
-      progress.resultReadyAt = undefined;
-      progress.recentTools = [];
-      state.turnToolCount = 0;
-      // A new turn means the previous turn's tools all completed; drop any
-      // stale counter so the in-flight heartbeat cannot leak across turns.
-      state.inFlightToolCount = 0;
-      state.pendingStructuredOutput = undefined;
-      state.capturedStructuredOutput = undefined;
-      state.structuredOutputValidationFailure = undefined;
-      state.structuredOutputAttemptFailed = false;
-      options.onProgress?.(progress);
-    }
-
-    /** Relay a child extension's UI request, or decline it when nobody listens. */
-    function onExtensionUiRequest(event: JsonLineEvent): void {
-      const request = {
-        ...event,
-        type: "teammate_rpc_ui_request",
-        correlationId,
-      };
-      const respond = (response: unknown) => {
-        if (!child.stdin) return;
-        writeChildStdinLine(child.stdin, JSON.stringify(response));
-      };
-      if (options.onChildRequest) options.onChildRequest(request, respond);
-      else if (typeof event.id === "string") {
-        respond({ type: "extension_ui_response", id: event.id, cancelled: true });
-      }
-    }
-
-    function recordResolvedModel(event: JsonLineEvent, msg: Record<string, unknown> | undefined): void {
-      const modelId = typeof msg?.model === "string" ? msg.model : event.model;
-      const provider = typeof msg?.provider === "string" ? msg.provider : event.provider;
-      const capabilities = options.modelCapabilities ?? [];
-      let reference = modelId;
-      if (typeof modelId === "string" && typeof provider === "string") {
-        const qualified = `${provider}/${modelId}`;
-        reference = capabilities.some((candidate) => candidate.id === qualified)
-          || !capabilities.some((candidate) => candidate.id === modelId)
-          ? qualified
-          : modelId;
-      }
-      // Runtime events usually report a bare model id without a provider. Upgrade
-      // it to the canonical provider/model id when exactly one capability matches,
-      // so status comparisons are not fooled by id formatting. Ambiguous or
-      // unknown ids are left untouched (this never throws).
-      if (typeof reference === "string" && !reference.includes("/")) {
-        const matches = capabilities
-          .map((candidate) => candidate.id)
-          .filter((candidate) => candidate.endsWith(`/${reference}`));
-        if (matches.length === 1) reference = matches[0];
-      }
-      if (!reference) return;
-      state.resolvedModel = reference;
-      progress.resolvedModel = reference;
-    }
-
-    /** A completed assistant message: transcript, usage and resolved model. */
-    function onAssistantMessage(event: JsonLineEvent): void {
-      const msg = event.message as Record<string, unknown> | undefined;
-      if (event.type === "message_end" && msg?.role !== "assistant") return;
-      const text = extractTextContent(event) || state.streamingText || undefined;
-      if (text) {
-        state.lastContent = text;
-        state.streamingText = "";
-        appendDistinctAssistantMessage(messages, text);
-        progress.lastMessage = text;
-      }
-      const messageUsage = (msg?.usage as Record<string, unknown> | undefined)
-        ?? (event.usage as Record<string, unknown> | undefined);
-      if (messageUsage) {
-        addUsageSnapshot(usage, messageUsage);
-        resetUsage(pendingMessageUsage);
-        usage.turns += 1;
-        updateProgressUsage();
-      }
-      recordResolvedModel(event, msg);
-      recordRuntimeEventError(event, event.type);
-      options.onProgress?.(progress);
-    }
-
-    /** Streaming deltas and in-flight usage snapshots. */
-    function onMessageUpdate(event: JsonLineEvent): void {
-      const ame = event.assistantMessageEvent as Record<string, unknown> | undefined;
-      const deltaType = ame?.type as string | undefined;
-      let progressChanged = false;
-
-      if (deltaType === "text_delta") {
-        const delta = ame?.delta as string | undefined;
-        if (delta) {
-          state.streamingText = appendUtf8Tail(
-            state.streamingText,
-            delta,
-            EXECUTION_BUFFER_LIMITS.streamBytes,
-          );
-          progress.lastMessage = state.streamingText;
-          progressChanged = true;
-        }
-      } else if (deltaType === "text_start") {
-        state.streamingText = "";
-      }
-      // Ignore thinking_delta, thinking_start, etc.
-
-      // Pi 0.84 dropped the cumulative `message` (and `assistantMessageEvent.partial`)
-      // fields from JSON/RPC message_update events — only assistantMessageEvent
-      // deltas remain. Reading `event.message.usage` is kept defensively for 0.83
-      // hosts (it is undefined on 0.84); in-flight usage on 0.84 arrives via the
-      // dedicated `usage` event (onUsageSnapshot) and settles at `message_end`
-      // (onAssistantMessage), so usage totals are unaffected.
-      const msg = event.message as Record<string, unknown> | undefined;
-      const msgUsage = msg?.usage as Record<string, unknown> | undefined;
-      if (msgUsage) {
-        setUsageSnapshot(pendingMessageUsage, msgUsage);
-        updateProgressUsage();
-        progressChanged = true;
-      }
-      if (progressChanged) options.onProgress?.(progress);
-    }
-
-    function onToolStart(event: JsonLineEvent): void {
-      const toolName = truncateUtf8Tail(
-        (event.toolName as string) ?? (event.name as string) ?? "unknown",
-        EXECUTION_BUFFER_LIMITS.toolNameBytes,
-      );
-      const argsPreview = previewToolCallArgs(event.args, toolName);
-      progress.recentTools.push(argsPreview === undefined
-        ? { name: toolName, status: "running" }
-        : { name: toolName, status: "running", argsPreview });
-      state.inFlightToolCount += 1;
-      progress.phase = "tool-execution";
-      if (progress.recentTools.length > EXECUTION_BUFFER_LIMITS.toolItems) {
-        progress.recentTools.splice(
-          0,
-          progress.recentTools.length - EXECUTION_BUFFER_LIMITS.toolItems,
-        );
-      }
-      options.onProgress?.(progress);
-      syncToolHeartbeat();
-    }
-
-    /**
-     * A finished tool call. A successful `structured_output` call is itself a
-     * terminal result — settle the turn without waiting for agent_end.
-     */
-    function onToolCompleted(event: JsonLineEvent): void {
-      if (event.content) {
-        appendBoundedTranscriptMessage(messages, { role: "tool", content: event.content });
-      }
-      progress.toolCount += 1;
-      state.turnToolCount += 1;
-      state.completedToolCount += 1;
-      state.inFlightToolCount = Math.max(0, state.inFlightToolCount - 1);
-      if (state.inFlightToolCount === 0 && progress.phase === "tool-execution") {
-        // The next silent interval belongs to model continuation, not to the
-        // completed tool. This selects the model-phase stall window while the
-        // child waits for its next provider event.
-        progress.phase = "continuing";
-      }
-      const lastTool = progress.recentTools[progress.recentTools.length - 1];
-      if (lastTool && lastTool.status === "running") {
-        lastTool.status = "completed";
-      }
-      syncToolHeartbeat();
-      if (pendingInterruptingSteer) {
-        state.pendingStructuredOutput = undefined;
-        progress.phase = "continuing";
-        progress.resultReadyAt = undefined;
-        options.onProgress?.(progress);
-        return;
-      }
-      options.onProgress?.(progress);
-      const completedTool = (event.toolName as string | undefined)
-        ?? (event.name as string | undefined)
-        ?? lastTool?.name;
-      if (
-        event.type === "tool_execution_end"
-        && completedTool === "structured_output"
-      ) {
-        const pending = state.pendingStructuredOutput;
-        const completedToolCallId = typeof event.toolCallId === "string"
-          ? event.toolCallId
-          : typeof event.id === "string"
-            ? event.id
-            : undefined;
-        const idsMatch = !pending?.toolCallId
-          || !completedToolCallId
-          || pending.toolCallId === completedToolCallId;
-        if (event.isError !== true && pending && idsMatch) {
-          state.capturedStructuredOutput = pending.value;
-        } else if (event.isError === true && idsMatch) {
-          state.pendingStructuredOutput = undefined;
-          state.structuredOutputAttemptFailed = true;
-        }
-        const structuredOutput = readStructuredOutput(false);
-        if (event.isError !== true && structuredOutput !== undefined) {
-          completeTurn(structuredOutput, true);
-        }
-      }
-    }
-
-    function onUsageSnapshot(event: JsonLineEvent): void {
-      if (event.usage) {
-        setUsageSnapshot(pendingMessageUsage, event.usage as Record<string, unknown>);
-        updateProgressUsage();
-        options.onProgress?.(progress);
-      }
-    }
-
-    /**
-     * A result-ready turn publishes a consumable result but never settles the
-     * lifecycle here: the child is neither killed nor parked. Only agent_end,
-     * close, error or the armed deadline may converge the lifecycle.
-     */
-    function onTurnEnd(event: JsonLineEvent): void {
-      if (pendingInterruptingSteer) {
-        progress.phase = "continuing";
-        progress.resultReadyAt = undefined;
-        options.onProgress?.(progress);
-        return;
-      }
-      const msg = event.message as Record<string, unknown> | undefined;
-      if (msg?.role === "assistant") {
-        if (typeof msg.stopReason === "string") state.lastAssistantStopReason = msg.stopReason;
-        const text = extractTextContent({ type: "turn_end", message: msg });
-        if (text && appendDistinctAssistantMessage(messages, text)) {
-          state.lastContent = text;
-          progress.lastMessage = text;
-        }
-      }
-      recordResolvedModel(event, msg);
-      recordRuntimeEventError(event, "turn_end");
-      if (isPiResultReadyTurn(event)) {
-        progress.resultReadyAt = Date.now();
-        options.onProgress?.(progress);
-        if (!params.outputSchema) {
-          publishResultReady();
-          // Symmetric with the schema lane: the result is consumable, but
-          // the lifecycle still needs a bounded confirmation window.
-          armLifecycleConfirmationDeadline();
-        } else armResultReadyGrace();
-      }
-    }
-
-    /** Finalize the current run after Pi confirms no retry, compaction, or queued continuation remains. */
-    function settleAgentSession(): void {
-      const structuredOutput = readStructuredOutput(false);
-      if (params.outputSchema && structuredOutput === undefined) {
-        // A corrective continuation is already in flight; wait for the resumed
-        // turn instead of settling the run while it is still pending.
-        if (structuredOutputRecoveryActive) return;
-        if (startStructuredOutputRecovery()) return;
-        appendStructuredOutputFailure();
-        appendBoundedTranscriptMessage(messages, {
-          role: "system",
-          content: STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS.agentEnd,
-        });
-        completeTurn(undefined, true, 1);
-        return;
-      }
-      const exitCode = state.runtimeFailure ? 1 : 0;
-      completeTurn(structuredOutput, !wakeable || exitCode !== 0, exitCode);
-      // Process stays alive. Idle agents must be resumed with an RPC prompt;
-      // steer/follow_up only queue while an agent loop is already running.
-    }
-
-    /**
-     * `agent_end` closes one low-level loop. AgentSession may still retry,
-     * compact, or drain a queued continuation, so current RPC streams settle
-     * only on `agent_settled`. Streams without `willRetry` are legacy Pi
-     * versions and retain the former agent_end settlement behavior.
-     */
-    function onAgentEnd(event: JsonLineEvent): void {
-      recordRuntimeEventError(event, "agent_end");
-      if (pendingInterruptingSteer) {
-        // Legacy streams without willRetry settle here; remember the boundary
-        // so a degraded steer can converge the turn it would have settled.
-        if (typeof event.willRetry !== "boolean") steerSettlementSwallowed = true;
-        progress.status = "running";
-        progress.phase = "continuing";
-        progress.resultReadyAt = undefined;
-        options.onProgress?.(progress);
-        return;
-      }
-      const eventMessages = Array.isArray(event.messages) ? event.messages : [];
-      let stopReason = state.lastAssistantStopReason;
-      for (let index = eventMessages.length - 1; index >= 0; index -= 1) {
-        const message = eventMessages[index];
-        if (!message || typeof message !== "object" || (message as Record<string, unknown>).role !== "assistant") continue;
-        const candidate = (message as Record<string, unknown>).stopReason;
-        if (typeof candidate === "string") stopReason = candidate;
-        break;
-      }
-      state.lastAssistantStopReason = stopReason;
-      if (stopReason === "length") {
-        state.outputLimitRecoveryPending = true;
-        progress.status = "running";
-        progress.phase = "continuing";
-        progress.resultReadyAt = undefined;
-        options.onProgress?.(progress);
-        armOutputLimitRecoveryDeadline();
-        return;
-      }
-      progress.phase = "settling";
-      options.onProgress?.(progress);
-      if (typeof event.willRetry !== "boolean") {
-        state.settlementCapability = "legacy";
-        settleAgentSession();
-      }
-    }
-
-    /** Pi's authoritative AgentSession idle boundary. */
-    function onAgentSettled(): void {
-      state.settlementCapability = "agent_settled";
-      if (pendingInterruptingSteer) {
-        markSteerTurnSettledDuringAbort();
-        steerSettlementSwallowed = true;
-        progress.status = "running";
-        progress.phase = "continuing";
-        progress.resultReadyAt = undefined;
-        options.onProgress?.(progress);
-        return;
-      }
-      if (state.outputLimitRecoveryPending) {
-        state.outputLimitRecoveryPending = false;
-        appendBoundedTranscriptMessage(messages, {
-          role: "system",
-          content:
-            `Teammate output-limit recovery settled without a continuation `
-            + `(agent=${params.agent}, correlationId=${correlationId}); the partial response was not accepted as success.`,
-        });
-        state.runtimeFailure = "output-limit recovery settled without continuation";
-        completeTurn(readStructuredOutput(true), true, 1);
-        return;
-      }
-      settleAgentSession();
-    }
-
-    function onAutoRetryStart(event: JsonLineEvent): void {
-      progress.status = "retrying";
-      progress.phase = "retrying";
-      const attempt = typeof event.attempt === "number" ? event.attempt : undefined;
-      const maxAttempts = typeof event.maxAttempts === "number" ? event.maxAttempts : undefined;
-      const errorMessage = typeof event.errorMessage === "string" ? event.errorMessage : undefined;
-      progress.lastMessage = [
-        attempt === undefined ? "Pi is retrying the provider request" : `Pi retry ${attempt}${maxAttempts ? `/${maxAttempts}` : ""}`,
-        errorMessage,
-      ].filter(Boolean).join(": ");
-      options.onProgress?.(progress);
-    }
-
-    function onAutoRetryEnd(event: JsonLineEvent): void {
-      progress.status = "running";
-      progress.phase = event.success === true ? "continuing" : "settling";
-      options.onProgress?.(progress);
-    }
-
-    function onCompactionStart(): void {
-      progress.status = "running";
-      progress.phase = "compacting";
-      options.onProgress?.(progress);
-    }
-
-    function onCompactionEnd(event: JsonLineEvent): void {
-      progress.status = "running";
-      progress.phase = event.willRetry === true ? "continuing" : "settling";
-      options.onProgress?.(progress);
-    }
-
-    function onErrorEvent(event: JsonLineEvent): void {
-      recordRuntimeEventError(event, "error");
-    }
-
-    function onResponse(event: JsonLineEvent): void {
-      if (structuredOutputRecoveryActive && typeof event.id === "string" && event.id === structuredOutputRecoveryRequestId) {
-        if (event.success !== true) failStructuredOutputRecovery();
-        return;
-      }
-      const pending = pendingInterruptingSteer;
-      if (!pending || typeof event.id !== "string") return;
-      if (pending.phase === "aborting" && event.id === pending.abortRequestId) {
-        if (event.success !== true || event.command !== "abort") {
-          // A rejected abort leaves the turn intact; never fail the task for
-          // an interruption Pi declined to perform.
-          degradeInterruptingSteerToFollowUp("Pi rejected the turn abort command");
-          return;
-        }
-        pending.phase = "prompting";
-        armInterruptingSteerTimeout();
-        if (!child.stdin || !writeChildStdinLine(child.stdin, JSON.stringify({
-          id: pending.promptRequestId,
-          type: "prompt",
-          message: wrapLeasedMessage(pending.message, pending.token),
-        }))) {
-          failInterruptingSteer("the correction prompt could not be written");
-        }
-        return;
-      }
-      if (pending.phase === "prompting" && event.id === pending.promptRequestId && event.success !== true) {
-        failInterruptingSteer("Pi rejected the correction prompt");
-      }
-    }
-
-    /**
-     * Event type -> handler. Unlisted types are intentionally inert; keeping the
-     * mapping as data makes the full set of recognised events readable at once.
-     *
-     * A Map, not an object literal: `event.type` is child-supplied, and a plain
-     * object would resolve `"toString"` or `"__proto__"` through the prototype
-     * chain instead of staying inert.
-     */
-    const eventHandlers = new Map<string, (event: JsonLineEvent) => void>([
-      ["agent_start", onTurnBoundary],
-      ["turn_start", onTurnBoundary],
-      ["extension_ui_request", onExtensionUiRequest],
-      ["message_end", onAssistantMessage],
-      ["assistant", onAssistantMessage],
-      ["message_update", onMessageUpdate],
-      ["response", onResponse],
-      ["auto_retry_start", onAutoRetryStart],
-      ["auto_retry_end", onAutoRetryEnd],
-      ["compaction_start", onCompactionStart],
-      ["compaction_end", onCompactionEnd],
-      ["tool_execution_start", onToolStart],
-      ["tool_execution_end", onToolCompleted],
-      ["tool_result_end", onToolCompleted],
-      ["tool_result", onToolCompleted],
-      ["usage", onUsageSnapshot],
-      ["turn_end", onTurnEnd],
-      ["agent_end", onAgentEnd],
-      ["agent_settled", onAgentSettled],
-      ["error", onErrorEvent],
-    ]);
-
-    function processEvent(event: JsonLineEvent): void {
-      if (!state.receivedFirstActivity) {
-        state.receivedFirstActivity = true;
-        if (timers.firstActivity) clearTimeout(timers.firstActivity);
-      }
-      // completeTurn() is the authoritative settlement boundary. A child may
-      // already have queued tool_result, turn_start, or agent_end lines when
-      // termination begins; treating the terminal state as absorbing prevents
-      // those buffered lines from reawakening the published agent loop.
-      if (state.terminal) return;
-      if (state.capturedStructuredOutput === undefined && params.outputSchema) {
-        const candidate = extractStructuredOutputCandidate(event, params.outputSchema);
-        if (candidate) state.pendingStructuredOutput = candidate;
-        state.structuredOutputValidationFailure = describeStructuredOutputValidationFailure(event, params.outputSchema)
-          ?? state.structuredOutputValidationFailure;
-      }
-      // AC8: Update lastActivityAt on every event
-      progress.lastActivityAt = Date.now();
-      progress.durationMs = Date.now() - startTime;
-
-      eventHandlers.get(event.type)?.(event);
-    }
-
-    const stderrDecoder = new StringDecoder("utf8");
-    child.stderr?.on("data", (chunk: Buffer) => {
-      pokeLifecycleDeadline();
-      if (chunk.length > 0) state.externalReplayRisk = true;
-      state.stderrBuffer = appendUtf8Tail(
-        state.stderrBuffer,
-        stderrDecoder.write(chunk),
-        EXECUTION_BUFFER_LIMITS.stderrBytes,
-      );
-    });
-
-    const notifyChildClosed = (code: number | null, signal: NodeJS.Signals | null): void => {
-      options.onChildClosed?.(correlationId, options.runtimeGeneration, {
-        code,
-        signal,
-        settled: state.turnLifecycleSettled,
-      });
-    };
-
-    child.on("close", (code, signal) => {
-      releaseRetryPersistenceGuard();
-      clearAllTimers();
-      termination.cleanup();
-      unbindTerminationSignal();
-
-      cleanupFile(systemPromptFile);
-
-      for (const line of stdoutLines.end()) processStdoutLine(line);
-      state.stderrBuffer = appendUtf8Tail(
-        state.stderrBuffer,
-        stderrDecoder.end(),
-        EXECUTION_BUFFER_LIMITS.stderrBytes,
-      );
-
-      // A lifecycle event may have been present in the final decoded stdout
-      // chunk, or terminal structured output may have initiated this close.
-      if (state.turnLifecycleSettled) {
-        notifyChildClosed(code, signal);
-        return;
-      }
-
-      if (pendingInterruptingSteer) {
-        const phase = pendingInterruptingSteer.phase;
-        pendingInterruptingSteer = undefined;
-        const diagnostic =
-          `Failed to interrupt and steer teammate (agent=${params.agent}, correlationId=${correlationId}): `
-          + (phase === "prompting"
-            ? "the child exited before the correction prompt started"
-            : "the child exited before acknowledging the turn abort");
-        state.runtimeFailure = diagnostic;
-        appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
-      }
-
-      // A length-truncated turn is waiting for child-local continuation; if
-      // the child exits instead, the partial response must not settle as
-      // success. This also covers a child that closes before the recovery
-      // deadline could fire — close already cleared that timer above.
-      if (state.outputLimitRecoveryPending) {
-        state.outputLimitRecoveryPending = false;
-        appendBoundedTranscriptMessage(messages, {
-          role: "system",
-          content:
-            `Teammate child exited before output-limit recovery could continue `
-            + `(agent=${params.agent}, correlationId=${correlationId}); the partial response was not accepted as success.`,
-        });
-        state.runtimeFailure = "output-limit recovery interrupted by child exit";
-      }
-
-      const stderrTail = state.stderrBuffer.trim();
-      state.preActivityInfrastructureExit = code !== null
-        && code !== 0
-        && signal === null
-        && !state.receivedFirstActivity
-        && !state.runtimeFailure
-        && stderrTail.length === 0
-        && state.lastContent.trim().length === 0;
-      const finalContent = state.lastContent.trim();
-      if (finalContent && !messages.some((message) => message.content === finalContent)) {
-        appendDistinctAssistantMessage(messages, finalContent);
-      }
-      let stderrAlreadyReported = false;
-      if (messages.length === 0) {
-        const content = state.lastContent.trim() || stderrTail || "(no output)";
-        stderrAlreadyReported = stderrTail.length > 0 && content === stderrTail;
-        appendBoundedTranscriptMessage(messages, { role: "assistant", content });
-      }
-
-      // An abnormal exit used to be a bare number: stderr was dropped whenever
-      // the child had produced any assistant text, and the signal was ignored.
-      if ((code ?? 1) !== 0) {
-        const detail = stderrAlreadyReported ? "" : stderrTail;
-        appendBoundedTranscriptMessage(messages, {
-          role: "system",
-          content:
-            `Teammate child process exited abnormally (agent=${params.agent}, `
-            + `correlationId=${correlationId}, exit=${code ?? "null"}, signal=${signal ?? "none"}, `
-            + `elapsed=${Date.now() - startTime}ms, tools=${progress.toolCount}).`
-            + (detail ? `\nstderr tail:\n${truncateUtf8Tail(detail, EXECUTION_BUFFER_LIMITS.stderrBytes)}` : ""),
-        });
-      }
-
-      const status = code === 0 && !state.runtimeFailure ? "completed" : "failed";
-      progress.status = status;
-      progress.durationMs = Date.now() - startTime;
-      const lastMsg = messages[messages.length - 1]?.content;
-      if (lastMsg) progress.lastMessage = lastMsg;
-      options.onProgress?.(progress);
-
-      // AC6: Read structured output if available
-      const structuredOutput = readStructuredOutput(true);
-      if (schemaFile) cleanupFile(schemaFile);
-
-      const processExitCode = state.runtimeFailure ? 1 : code ?? 1;
-      const exitCode = processExitCode === 0 && params.outputSchema && structuredOutput === undefined
-        ? 1
-        : processExitCode;
-      if (exitCode !== 0 && params.outputSchema && structuredOutput === undefined) {
-        appendStructuredOutputFailure();
-        appendBoundedTranscriptMessage(messages, {
-          role: "system",
-          content: STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS.close,
-        });
-      }
-
-      if (state.initialResultPublished) {
-        completeTurn(structuredOutput, true, exitCode);
-        notifyChildClosed(code, signal);
-        return;
-      }
-
-      if (!state.initialResultPublished) {
-        const result: SingleResult = {
-          agent: params.agent,
-          name: params.name,
-          task: params.task ?? "",
-          exitCode,
-          messages,
-          usage,
-          model: state.resolvedModel,
-          correlationId,
-          durationMs: Date.now() - startTime,
-          toolCount: progress.toolCount,
-          wakeable: false,
-          structuredOutput,
-        };
-        recordAttemptRecovery(result);
-        state.initialResultPublished = true;
-        state.turnLifecycleSettled = true;
-        state.terminal = true;
-        resolve(result);
-        try {
-          options.onTurnComplete?.(result);
-        } catch {
-          // Completion observers cannot prevent process-close settlement.
-        }
-      }
-      notifyChildClosed(code, signal);
-    });
-
-    child.on("error", (error) => {
-      releaseRetryPersistenceGuard();
-      clearAllTimers();
-      unbindTerminationSignal();
-
-      cleanupFile(systemPromptFile);
-      if (schemaFile) cleanupFile(schemaFile);
-      if (outputFile) cleanupFile(outputFile);
-
-      progress.status = "failed";
-      progress.durationMs = Date.now() - startTime;
-      options.onProgress?.(progress);
-
-      const processError =
-        `Teammate child process error (agent=${params.agent}, model=${state.resolvedModel || "unknown"}, `
-        + `correlationId=${correlationId}, phase=child-error): ${error.message}`;
-      if (state.initialResultPublished) {
-        appendBoundedTranscriptMessage(messages, {
-          role: "system",
-          content: processError,
-        });
-        completeTurn(undefined, true, 1);
-        return;
-      }
-
-      if (!state.initialResultPublished) {
-        const result: SingleResult = {
-          agent: params.agent,
-          name: params.name,
-          task: params.task ?? "",
-          exitCode: 1,
-          messages: [{
-            role: "system",
-            content: processError,
-          }],
-          usage: emptyUsage(),
-          model: state.resolvedModel,
-          correlationId,
-          durationMs: Date.now() - startTime,
-          toolCount: progress.toolCount,
-          wakeable: false,
-        };
-        recordAttemptRecovery(result);
-        state.initialResultPublished = true;
-        state.turnLifecycleSettled = true;
-        state.terminal = true;
-        resolve(result);
-        try {
-          options.onTurnComplete?.(result);
-        } catch {
-          // Completion observers cannot prevent child-error settlement.
-        } finally {
-          // A logical child-process error is not proof that the OS process has
-          // exited. Retain reclamation ownership through the termination
-          // controller and publish its bounded outcome separately.
-          termination.terminate();
-        }
-      }
-    });
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -2424,6 +1075,75 @@ export async function runGraph(
 
   if (hasCycle(deps)) {
     return publishGraphRejection("Circular dependency detected in task graph", deps);
+  }
+
+  // Capability adjudication sits beside the structural checks, not at dispatch.
+  // A task whose backend cannot produce structured output would otherwise burn
+  // a full model turn before its downstream sibling's {name.field} read failed.
+  let graphRegistry;
+  try {
+    graphRegistry = options.backendRegistry
+      ?? dispatchRegistrySync(
+        options.baseCwd,
+        () => {
+          throw new Error("capability adjudication never starts a run");
+        },
+        options.remoteManagerOf,
+      );
+  } catch (cause) {
+    // A malformed or unloadable registration is a graph-level rejection, not a
+    // throw out of runGraph: every other validation failure settles each task
+    // so the caller and the UI see a result rather than a pending row.
+    return publishGraphRejection(
+      `Teammate backend registry could not be loaded: ${String(cause)}`,
+      deps,
+    );
+  }
+  if (graphRegistry !== undefined) {
+    const registry = graphRegistry;
+    const adjudicated = tasks.map((task) => ({
+      // NormalizedTask holds the prompt in `prompt`; without this the
+      // adjudicated spec would carry an empty task while dispatch sends the
+      // real one, and any routing rule reading it would disagree with dispatch.
+      spec: backendSpecOf(
+        { ...task, task: task.prompt },
+        task.cwd ?? options.baseCwd,
+        task.model,
+        remoteLocationRouting(task.cwd),
+      ),
+      ...(task.name === undefined ? {} : { name: task.name }),
+    }));
+    let backends;
+    try {
+      backends = await Promise.all(adjudicated.map(async ({ spec }) => {
+        // Same selector dispatch will use; adjudicating the default while
+        // dispatch runs a task-named backend would check the wrong table.
+        const { backend, capabilities } = await registry.resolve(spec, spec.backend);
+        return { name: backend.name, capabilities };
+      }));
+    } catch (cause) {
+      return publishGraphRejection(
+        `Teammate backend could not be resolved for this graph: ${String(cause)}`,
+        deps,
+      );
+    }
+    const verdict = validateBackendCapabilities(adjudicated, (_task, index) => backends[index]!);
+    if (verdict.errors.length > 0) {
+      return publishGraphRejection(verdict.errors.join("\n"), deps);
+    }
+    for (const warning of verdict.warnings) {
+      options.onProgress?.({
+        agent: "teammate",
+        status: "running",
+        recentTools: [],
+        toolCount: 0,
+        tokens: 0,
+        durationMs: 0,
+        lastActivityAt: Date.now(),
+        startedAt: Date.now(),
+        lastMessage: warning,
+      });
+    }
   }
 
   // Validate unique names
@@ -2645,6 +1365,7 @@ export async function runGraph(
         {
           agent: task.agent,
           name: task.name,
+          backend: task.backend,
           task: resolvedTask,
           context: task.context,
           model: task.model,
@@ -2736,155 +1457,6 @@ export async function runTeammate(
 // RPC: Send message to running agent via stdin
 // ---------------------------------------------------------------------------
 
-export type RpcMessageMode = "prompt" | "steer" | "follow_up" | "abort";
 
-type InterruptingSteerHandler = (message: string, token?: LeaseToken) => boolean;
-
-const guardedChildStdinStreams = new WeakSet<Writable>();
-const interruptingSteerHandlers = new WeakMap<Writable, InterruptingSteerHandler>();
-
-function guardChildStdin(stdin: Writable): void {
-  if (guardedChildStdinStreams.has(stdin)) return;
-  guardedChildStdinStreams.add(stdin);
-  // Child termination is reported by the process lifecycle. Stdin delivery is
-  // best-effort, so a concurrent pipe close must not crash the parent process.
-  stdin.on("error", () => {});
-}
-
-function writeChildStdinLine(stdin: Writable, line: string): boolean {
-  guardChildStdin(stdin);
-  if (!stdin.writable || stdin.writableEnded || stdin.destroyed) return false;
-  try {
-    stdin.write(`${line}\n`);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function sendRpcMessage(
-  stdin: Writable,
-  message: string,
-  mode: RpcMessageMode = "follow_up",
-  token?: LeaseToken,
-): boolean {
-  if (mode === "abort") {
-    return writeChildStdinLine(stdin, JSON.stringify({ type: "abort" }));
-  }
-  const leasedMessage = wrapLeasedMessage(message, token);
-  if (mode === "prompt") {
-    return writeChildStdinLine(stdin, JSON.stringify({ type: "prompt", message: leasedMessage }));
-  }
-  if (mode === "steer") {
-    const interrupt = interruptingSteerHandlers.get(stdin);
-    if (interrupt) return interrupt(message, token);
-  }
-  return writeChildStdinLine(stdin, JSON.stringify({ type: mode, message: leasedMessage }));
-}
-
-export function sendChildIpcMessage(
-  child: ChildProcess,
-  message: Record<string, unknown>,
-): boolean {
-  if (!child.connected) return false;
-  try {
-    child.send(message as never, (error) => {
-      if (!error) return;
-      console.error(
-        "[pi-maestro-teammate] child IPC send failed asynchronously",
-        error,
-        "type", (message as { type?: string }).type,
-      );
-      try {
-        if (child.connected) child.disconnect();
-      } catch {
-        // Process lifecycle remains the final settlement signal.
-      }
-    });
-    // false means backpressure, not rejection; callback confirms delivery.
-    return true;
-  } catch {
-    try {
-      if (child.connected) child.disconnect();
-    } catch {
-      // Best effort.
-    }
-    return false;
-  }
-}
-
-export function dispatchChildIpcMessage(
-  message: Record<string, unknown>,
-  onRequest: RunTeammateOptions["onChildRequest"],
-  onEvent: RunTeammateOptions["onChildEvent"],
-  reply: (message: unknown) => void,
-): "request" | "event" {
-  const requestType = message.type === "teammate_proxy_request"
-    || message.type === "teammate_interaction_request"
-    || message.type === "teammate_rpc_ui_request";
-  if (requestType || message.type === "teammate_proxy_cancel") {
-    if (onRequest) {
-      try {
-        onRequest(message, reply);
-      } catch (error) {
-        try {
-          onEvent?.({
-            type: "teammate_reply_delivery_failed",
-            requestId: message.requestId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        } catch {
-          // Child input cannot escape the parent event loop.
-        }
-      }
-    } else {
-      onEvent?.(message);
-      if (message.type !== "teammate_proxy_cancel") {
-        try {
-          replyUnhandledChildRequest(message, reply);
-        } catch (error) {
-          try {
-            onEvent?.({
-              type: "teammate_reply_delivery_failed",
-              requestId: message.requestId,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          } catch {
-            // Failed reply remains contained in the child IPC callback.
-          }
-        }
-      }
-    }
-    return "request";
-  }
-  onEvent?.(message);
-  return "event";
-}
-
-function replyUnhandledChildRequest(
-  message: Record<string, unknown>,
-  reply: (message: unknown) => void,
-): void {
-  const requestId = typeof message.requestId === "string" ? message.requestId : randomUUID();
-  if (message.type === "teammate_interaction_request") {
-    const permission = message.interaction === "permission";
-    reply({
-      type: "teammate_interaction_response",
-      requestId,
-      result: permission
-        ? { action: "deny", reason: "No parent child-request handler is available." }
-        : { action: "cancel", reason: "No parent child-request handler is available." },
-    });
-    return;
-  }
-  reply({
-    type: "teammate_proxy_result",
-    requestId,
-    result: {
-      content: [{ type: "text", text: "No parent child-request handler is available." }],
-      isError: true,
-    },
-  });
-}
 
 

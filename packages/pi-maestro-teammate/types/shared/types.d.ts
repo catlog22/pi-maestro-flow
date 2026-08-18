@@ -42,6 +42,30 @@ export interface SingleResult {
     attemptedModels?: string[];
     /** Advisory dispatch diagnostics that do not change the terminal outcome. */
     warnings?: string[];
+    /**
+     * Which backend served this run, and every capability it satisfied by
+     * emulation or withheld under a host fence rather than natively.
+     *
+     * Written by the backend dispatch. Absent on the legacy path, which names no
+     * backend because none served the run. Kept in step with the same members on
+     * `pi-maestro-backend-core/v1/spec`: the dispatch writes through that type, so
+     * a member missing here is populated at run time and invisible to every typed
+     * consumer of this one.
+     */
+    backend?: string;
+    capabilityDeliveries?: CapabilityDelivery[];
+}
+/**
+ * How a backend delivered a capability it was asked for.
+ *
+ * Mirrors the member of the same name on the backend contract; see that
+ * declaration for what each support value means.
+ */
+export interface CapabilityDelivery {
+    capability: string;
+    support: "native" | "emulated" | "withheld";
+    /** Why the emulated or withheld path was taken. */
+    note?: string;
 }
 export type AgentProgressStatus = "pending" | "running" | "retrying" | "completed" | "failed" | "terminated";
 export type AgentActivity = "running" | "sleeping";

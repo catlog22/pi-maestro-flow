@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../src/agents/agents.ts";
@@ -104,9 +107,22 @@ test("session start snapshots models and before_agent_start refreshes changed re
 
   const previousChild = process.env.PI_TEAMMATE_CHILD;
   delete process.env.PI_TEAMMATE_CHILD;
+  // The injected system prompt also carries the agent catalog and the task-type
+  // routing table, both read from the home directory and the session cwd. An
+  // empty temporary home and project keep the model-catalog assertions free of
+  // whatever the running machine has configured under ~/.pi.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-model-catalog-"));
+  const home = path.join(root, "home");
+  const project = path.join(root, "project");
+  fs.mkdirSync(home, { recursive: true });
+  fs.mkdirSync(project, { recursive: true });
+  const previousHome = process.env.HOME;
+  const previousUserProfile = process.env.USERPROFILE;
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
   let models: AvailableModelEntry[] = [{ provider: "openai", id: "gpt-5" }];
   const ctx = {
-    cwd: process.cwd(),
+    cwd: project,
     hasUI: true,
     ui: {
       notify() {},
@@ -163,6 +179,11 @@ test("session start snapshots models and before_agent_start refreshes changed re
   } finally {
     if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
     else process.env.PI_TEAMMATE_CHILD = previousChild;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = previousUserProfile;
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 

@@ -65,6 +65,28 @@ test("target child environments forward only declared names and allow explicit s
   }
 });
 
+test("a caller may narrow the base allowlist for its own child", () => {
+  const previous = process.env.TERM;
+  process.env.TERM = "xterm-lock";
+  try {
+    assert.equal(Object.keys(targetChildEnvironment([], {}, ["PATH"])).includes("TERM"), false);
+  } finally {
+    if (previous === undefined) delete process.env.TERM;
+    else process.env.TERM = previous;
+  }
+});
+
+test("the remote drivers keep the default allowlist when they name no allow list", () => {
+  const previous = process.env.TERM;
+  process.env.TERM = "xterm-lock";
+  try {
+    assert.equal(Object.keys(targetChildEnvironment(undefined)).includes("TERM"), true);
+  } finally {
+    if (previous === undefined) delete process.env.TERM;
+    else process.env.TERM = previous;
+  }
+});
+
 test("remote errors redact secret markers and inline credentials", () => {
   const marker = "todo-five-secret-marker";
   const redacted = redactRemoteError(

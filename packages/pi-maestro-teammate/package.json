@@ -1,6 +1,6 @@
 {
   "name": "pi-maestro-teammate",
-  "version": "1.14.0",
+  "version": "2.0.0",
   "description": "Pi extension — teammate agent dispatch with DAG task graphs, RPC messaging, and compact TUI",
   "type": "module",
   "bin": {
@@ -19,7 +19,8 @@
     "build:declarations": "tsc -p tsconfig.declarations.json",
     "check:declarations": "node scripts/check-declarations.mjs",
     "prepack": "npm run build:declarations && node ../../scripts/bundle-settings-core.mjs",
-    "postpack": "node ../../scripts/bundle-settings-core.mjs --clean"
+    "postpack": "node ../../scripts/bundle-settings-core.mjs --clean",
+    "test:e2e": "node --experimental-transform-types --import ./test/setup.ts --test --test-timeout=300000 test/backend-registry-dsh.e2e.test.ts"
   },
   "main": "./src/index.ts",
   "types": "./types/index.d.ts",
@@ -32,9 +33,17 @@
       "types": "./types/public/v1/index.d.ts",
       "default": "./src/public/v1/index.ts"
     },
+    "./v1/acp-cli": {
+      "types": "./types/backends/acp-cli.d.ts",
+      "default": "./src/backends/acp-cli.ts"
+    },
     "./v1/agents": {
       "types": "./types/public/v1/agents.d.ts",
       "default": "./src/public/v1/agents.ts"
+    },
+    "./v1/backends": {
+      "types": "./types/public/v1/backends.d.ts",
+      "default": "./src/public/v1/backends.ts"
     },
     "./v1/child-extensions": {
       "types": "./types/public/v1/child-extensions.d.ts",
@@ -142,6 +151,8 @@
     "cross-spawn": "7.0.6",
     "jiti": "2.7.0",
     "pi-maestro-settings-core": "0.1.3",
+    "pi-maestro-backend-core": "*",
+    "pi-maestro-backends": "*",
     "proper-lockfile": "4.1.2",
     "ssh2": "1.17.0",
     "zod": "4.4.3"

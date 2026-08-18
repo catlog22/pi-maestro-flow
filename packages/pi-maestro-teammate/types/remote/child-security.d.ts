@@ -1,24 +1,4 @@
-export declare const IMMUTABLE_ENV_NAMES: Set<string>;
-export interface SanitizedChildEnvironmentOptions {
-    source?: NodeJS.ProcessEnv;
-    allow?: readonly string[];
-    additions?: Readonly<Record<string, string | undefined>>;
-    /**
-     * Permit secret-bearing names (e.g. CODEX_API_KEY) in `additions`.
-     * Only for values sourced from an explicitly trusted target configuration;
-     * launch-policy variables stay rejected regardless.
-     */
-    allowSecretAdditions?: boolean;
-}
-/**
- * Build the child environment for a trusted target's CLI: the standard
- * allowlist plus the target-declared `env` names forwarded from the daemon
- * process environment (explicit opt-in; secret names allowed here because the
- * declaration itself lives in the trusted, private remote config).
- */
-export declare function targetChildEnvironment(envNames: readonly string[] | undefined, additions?: Readonly<Record<string, string | undefined>>): NodeJS.ProcessEnv;
-/** Build a minimal child environment without allowing launch policy overrides. */
-export declare function sanitizedChildEnvironment(options?: SanitizedChildEnvironmentOptions): NodeJS.ProcessEnv;
+export { IMMUTABLE_ENV_NAMES, SECRET_ENV_NAME, sanitizedChildEnvironment, targetChildEnvironment, type SanitizedChildEnvironmentOptions, } from "pi-maestro-backends/child-env";
 export declare function utf8ByteLength(value: string): number;
 /** Truncate at a UTF-8 boundary and append a deterministic marker. */
 export declare function truncateUtf8(value: string, maximumBytes: number, marker?: string): string;

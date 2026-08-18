@@ -1904,7 +1904,13 @@ test("Alt+R delegates the active Agent or Window session list to Cockpit ownersh
 
 test("root and proxy graph normalization share one implementation that preserves thinking", () => {
   const indexSource = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-core.ts", import.meta.url), "utf-8");
-  const executionSource = fs.readFileSync(new URL("../src/runs/execution.ts", import.meta.url), "utf-8");
+  // Orchestration and the Pi subprocess attempt live in sibling modules. A
+  // positive assertion names the module that owns the behaviour, so it cannot
+  // be satisfied by the other one; a negative assertion reads both, because
+  // the pattern must be absent from the whole dispatch path.
+  const attemptSource = fs.readFileSync(new URL("../src/runs/pi-subprocess-attempt.ts", import.meta.url), "utf-8");
+  const executionSource = fs.readFileSync(new URL("../src/runs/execution.ts", import.meta.url), "utf-8")
+    + attemptSource;
   const executionInfraSource = fs.readFileSync(new URL("../src/runs/execution-infra.ts", import.meta.url), "utf-8");
 
   // The shared normalizer parses task thinking after applying the top-level default.
@@ -1916,7 +1922,7 @@ test("root and proxy graph normalization share one implementation that preserves
   assert.match(indexSource, /const normalization = normalizeTeammateParams\(params\)/);
   assert.match(indexSource, /const routedParams = applyModelRouting\([\s\S]*?const normalization = normalizeTeammateParams\(routedParams\)/);
   assert.doesNotMatch(indexSource, /thinking:\s*parseTeammateThinkingLevel\(/);
-  assert.match(executionSource, /options\.onChildEvent[\s\S]*?\.\.\.event,\s*\/\/ Lifecycle ownership is assigned by the spawning parent\.\s*correlationId,/);
+  assert.match(attemptSource, /options\.onChildEvent[\s\S]*?\.\.\.event,\s*\/\/ Lifecycle ownership is assigned by the spawning parent\.\s*correlationId,/);
   assert.doesNotMatch(executionSource, /correlationId: event\.correlationId \?\? correlationId/);
 
   assert.equal(indexSource.match(/applyModelRouting\(/g)?.length, 2);

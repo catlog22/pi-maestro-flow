@@ -19,7 +19,6 @@ import {
 } from "../src/remote/protocol.ts";
 import { connectRemoteSocket, RemoteBridgeServer } from "../src/remote/server.ts";
 import { RemoteRunJournal } from "../src/remote/journal.ts";
-import { REMOTE_CAPABILITIES } from "../src/remote/capabilities.ts";
 import { REMOTE_PROTOCOL_VERSION, type ResolvedRemoteTarget } from "../src/remote/types.ts";
 
 const HOST_KEY = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -425,7 +424,6 @@ test("remote daemon survives gateway disconnect, replays durable events, and ded
     const initialized = await first.request("rpc-init-1", "remote/initialize", {
       commandId: "initialize-command",
       protocolVersions: [REMOTE_PROTOCOL_VERSION],
-      capabilities: REMOTE_CAPABILITIES,
       monitorOwnerNonce: owner,
     });
     assert.equal("result" in initialized && initialized.result.protocolVersion, REMOTE_PROTOCOL_VERSION);
@@ -449,7 +447,6 @@ test("remote daemon survives gateway disconnect, replays durable events, and ded
     await second.request("rpc-init-2", "remote/initialize", {
       commandId: "initialize-command-2",
       protocolVersions: [REMOTE_PROTOCOL_VERSION],
-      capabilities: REMOTE_CAPABILITIES,
       monitorOwnerNonce: owner,
     });
     const attached = await second.request("rpc-attach", "run/attach", {
@@ -503,7 +500,7 @@ test("journal keeps a stable worker id, rotates instance nonce, and marks interr
       cwd: "/tmp",
       driver: "pi-rpc",
       command: ["pi"],
-    }, REMOTE_CAPABILITIES);
+    });
     first.appendEvent(capture, {
       type: "run/state",
       ...first.identity,

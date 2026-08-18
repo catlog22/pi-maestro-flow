@@ -11,9 +11,6 @@ import {
   REMOTE_PRIVATE_FILE_MODE,
 } from "./journal.ts";
 import {
-  REMOTE_CAPABILITIES,
-} from "./capabilities.ts";
-import {
   createRemoteRequest,
   parseRemoteEnvelopeLine,
   type RemoteJsonRpcEnvelope,
@@ -199,7 +196,6 @@ async function doctor(options: ParsedOptions): Promise<boolean> {
     const request = createRemoteRequest(id, "remote/initialize", {
       commandId: id,
       protocolVersions: [REMOTE_PROTOCOL_VERSION],
-      capabilities: REMOTE_CAPABILITIES,
       monitorOwnerNonce: `doctor-${randomUUID()}`,
     });
     const response = await readOneResponse(socket, `${JSON.stringify(request)}\n`, id);

@@ -372,9 +372,22 @@ function isStructuredOutputConfirmation(text: string): boolean {
 }
 
 export function displayMessageForResult(result: SingleResult): string {
-  const warningPrefix = result.warnings?.length
-    ? `${result.warnings.map((warning) => `[warn] ${warning}`).join("\n")}\n\n`
-    : "";
+  const warnings = result.warnings ?? [];
+  /**
+   * The `[warn]` block, minus any line the body below already carries verbatim.
+   *
+   * A dsh provider failure is written to both sinks deliberately: the `system`
+   * message is the only place the host reads a failure's class from, and the
+   * warning list is what an orchestrator scans. Rendering both unchanged showed
+   * the reader the same sentence twice, once prefixed and once as the body.
+   *
+   * @param carriedBelow - the diagnostic this render already prints as the body.
+   * @returns the prefix block, empty when nothing is left to warn about.
+   */
+  const warningPrefixExcept = (carriedBelow?: string): string => {
+    const kept = warnings.filter((warning) => warning !== carriedBelow);
+    return kept.length ? `${kept.map((warning) => `[warn] ${warning}`).join("\n")}\n\n` : "";
+  };
   const structured = formatStructuredOutputForDisplay(result);
   const lastMessage = result.messages.at(-1)?.content ?? structured ?? "(no output)";
   // A structured_output completion ends with the tool's generic confirmation,
@@ -388,7 +401,7 @@ export function displayMessageForResult(result: SingleResult): string {
     : lastMessage;
   const reference = acknowledgedResultReference(result);
   if (result.exitCode === 0) {
-    return warningPrefix + (reference
+    return warningPrefixExcept() + (reference
       ? formatPersistedSuccess(result, effective, structured, reference)
       : capUnpersistedResult(effective));
   }
@@ -406,7 +419,8 @@ export function displayMessageForResult(result: SingleResult): string {
   const diagnostic = primaryDiagnostic && schemaDiagnostic && primaryDiagnostic !== schemaDiagnostic
     ? `${primaryDiagnostic}\n\nStructured output: ${schemaDiagnostic}`
     : primaryDiagnostic ?? schemaDiagnostic ?? (reference ? effective : capUnpersistedResult(effective));
-  return warningPrefix + diagnostic + (reference ? `\n\nCaptured result: ${reference}` : "");
+  return warningPrefixExcept(primaryDiagnostic) + diagnostic
+    + (reference ? `\n\nCaptured result: ${reference}` : "");
 }
 
 export function summarizeGraphResults(results: readonly SingleResult[], tasks: readonly NormalizedTask[]): string {

@@ -115,6 +115,7 @@ Maestro Flow 自动分类意图并路由：**简单任务**直接执行 · **多
 | **[使用指南](docs/USAGE.md)** / **[English](docs/USAGE_EN.md)** | 完整功能文档 — 全部工具、MCP、权限、思考深度、Agent、工作流 |
 | **[用户手册](GUIDE.md)** | 深入教程，每个子系统附示例 |
 | **[Smart Search Provider 配置指南](docs/smart-search-provider-config.md)** | 搜索引擎配置 — 双路径架构、Provider API Key、凭证源语法、TUI 操作、配置同步 |
+| **[Teammate Backend 适配器契约](docs/teammate-backend-adapter-contract.md)** | 第三方执行后端接入 — `TeammateBackend` 接口、`.pi/teammate-backends.json` 注册、能力裁决、recovery facts、完整示例 |
 | **[发布说明](RELEASE.md)** | 版本历史与变更日志 |
 | **[更新说明](docs/UPDATES.md)** | 历史提交变更记录 |
 | **[新特性使用说明](docs/new-features-usage.md)** | Vision 委托 · 终端标题 · Mailbox · observe watch · self-evolve 快速上手 |

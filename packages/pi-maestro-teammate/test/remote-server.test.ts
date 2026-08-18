@@ -17,7 +17,12 @@ import {
 } from "../src/remote/protocol.ts";
 import { connectRemoteSocket, RemoteBridgeServer } from "../src/remote/server.ts";
 import { createRemoteRunSnapshot } from "../src/remote/state.ts";
-import { REMOTE_PROTOCOL_VERSION, type RemoteRunEvent, type ResolvedRemoteTarget } from "../src/remote/types.ts";
+import {
+  REMOTE_PROTOCOL_VERSION,
+  type RemoteRunCapture,
+  type RemoteRunEvent,
+  type ResolvedRemoteTarget,
+} from "../src/remote/types.ts";
 
 const HOST_KEY = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
@@ -66,7 +71,6 @@ class EventFeed implements AsyncIterable<RemoteRunEvent> {
 }
 
 class TestHandle implements RemoteRunHandle {
-  readonly capabilities = ["cancel", "follow-up"] as const;
   readonly feed = new EventFeed();
   readonly capture;
   cancelled = false;
@@ -112,7 +116,6 @@ class TestHandle implements RemoteRunHandle {
 
 class TestDriver implements RemoteDriver {
   readonly id = "pi-rpc" as const;
-  readonly capabilities = ["cancel", "follow-up"] as const;
   readonly handles: TestHandle[] = [];
   failure?: string;
 
@@ -121,14 +124,6 @@ class TestDriver implements RemoteDriver {
     const handle = new TestHandle(request, context);
     this.handles.push(handle);
     return handle;
-  }
-
-  async attach(): Promise<RemoteRunHandle> {
-    throw new Error("Attach is not used by this test driver");
-  }
-
-  async list() {
-    return [];
   }
 
   async close(): Promise<void> {
@@ -140,7 +135,6 @@ function initialize(owner: string, id = "initialize") {
   return createRemoteRequest(id, "remote/initialize", {
     commandId: id,
     protocolVersions: [REMOTE_PROTOCOL_VERSION],
-    capabilities: ["cancel", "follow-up"],
     monitorOwnerNonce: owner,
   });
 }
@@ -279,6 +273,10 @@ test("bridge disconnects a non-reading client when queued egress exceeds the byt
         event: { type: "text", text: `${sequence}:${"x".repeat(600 * 1024)}` },
       });
     }
+    // The bridge charges every queued envelope before any write drains, so the budget is already
+    // blown by the time the loop above returns. Resume only to observe the teardown: a paused
+    // socket never reads the peer's EOF, so it would stay open no matter how long the wait is.
+    socket.resume();
     await Promise.race([
       closed,
       new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Slow client was not disconnected")), 2_000)),
@@ -320,6 +318,127 @@ test("bridge redacts remote failures before transmission and command journaling"
     await server.close();
     if (previous === undefined) delete process.env[name];
     else process.env[name] = previous;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a remote/1 client is refused and the error names both protocol versions", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-server-version-"));
+  const driver = new TestDriver();
+  const { server, socket } = await openServer(root, driver);
+  const owner = "owner-version";
+  try {
+    const responses = readEnvelopes(socket, 1);
+    socket.write(encodeRemoteEnvelope(createRemoteRequest("stale", "remote/initialize", {
+      commandId: "stale",
+      protocolVersions: ["remote/1" as unknown as typeof REMOTE_PROTOCOL_VERSION],
+      monitorOwnerNonce: owner,
+    })));
+    const [refusal] = await responses;
+
+    assert.equal("error" in refusal, true);
+    // Read back off the socket rather than from the throw site: the message
+    // passes through redaction on its way out, and an operator only ever sees
+    // what survives that.
+    assert.equal("error" in refusal ? refusal.error.code : 0, -32002);
+    const message = "error" in refusal ? refusal.error.message : "";
+    assert.ok(message.includes("remote/2"), `the daemon's own version is missing from: ${message}`);
+    assert.ok(message.includes("remote/1"), `the client's offer is missing from: ${message}`);
+  } finally {
+    socket.destroy();
+    await server.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Create one run through a server's own journal, then corrupt it so the next read condemns it.
+ *
+ * @param server - the server whose journal owns the run.
+ * @param runId - the run to create and condemn.
+ * @returns the absolute run directory the journal will quarantine.
+ */
+function condemnRun(server: RemoteBridgeServer, runId: string): string {
+  const capture: RemoteRunCapture = {
+    ...server.journal.identity,
+    runId,
+    generation: 1,
+    monitorOwnerNonce: "owner-quarantine",
+    targetId: "linux-a/pi",
+  };
+  server.journal.createRun(capture, {
+    commandId: `start-${runId}`,
+    targetId: "linux-a/pi",
+    monitorOwnerNonce: capture.monitorOwnerNonce,
+    name: runId,
+    objective: "exercise daemon quarantine reporting",
+    cwd: "/srv/project",
+    driver: "pi-rpc",
+    command: ["/usr/bin/pi", "--mode", "rpc"],
+  });
+  const runs = path.join(server.journal.stateDirectory, "runs");
+  const entry = fs.readdirSync(runs).find((name) => {
+    const metadata = path.join(runs, name, "metadata.json");
+    return fs.existsSync(metadata)
+      && (JSON.parse(fs.readFileSync(metadata, "utf8")) as { capture?: { runId?: string } }).capture?.runId === runId;
+  });
+  assert.ok(entry, `the journal never stored a directory for ${runId}`);
+  const directory = path.join(runs, entry);
+  const metadataPath = path.join(directory, "metadata.json");
+  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as { version: number };
+  // A record version the current journal refuses, so loading it throws where quarantine catches.
+  metadata.version = 1;
+  fs.writeFileSync(metadataPath, JSON.stringify(metadata), "utf8");
+  return directory;
+}
+
+test("a journal the server builds itself reports quarantine to the server's observer", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-srv-qobs-"));
+  try {
+    const observed: { directory: string; error: unknown }[] = [];
+    // No `journal` option: this is the shape `pi-teammate-remote serve` constructs, so the wiring
+    // under test is the server's own, not one a caller supplied along with a ready-made journal.
+    const server = new RemoteBridgeServer({
+      stateDirectory: path.join(root, "state"),
+      targets: [target()],
+      onQuarantine: (directory, error) => observed.push({ directory, error }),
+    });
+    const directory = condemnRun(server, "observed-run");
+
+    assert.deepEqual(server.journal.listRuns(), []);
+
+    assert.equal(observed.length, 1, "the run was quarantined without the server's observer hearing about it");
+    assert.equal(observed[0]?.directory, directory);
+    assert.ok(observed[0]?.error instanceof Error, "the observer was told which run but not what condemned it");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a daemon given no observer still reports a quarantined run on stderr", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-srv-qerr-"));
+  const write = process.stderr.write;
+  try {
+    // Exactly what cli.ts serve constructs. This is the only configuration that ships, so a default
+    // that reports nowhere leaves the released daemon's quarantine as silent as it was before.
+    const server = new RemoteBridgeServer({ stateDirectory: path.join(root, "state"), targets: [target()] });
+    const directory = condemnRun(server, "unwatched-run");
+    const written: string[] = [];
+    process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+      written.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      assert.deepEqual(server.journal.listRuns(), []);
+    } finally {
+      process.stderr.write = write;
+    }
+
+    const reported = written.join("");
+    assert.ok(reported.includes(directory), `the quarantined run directory is missing from: ${reported || "(nothing)"}`);
+    assert.match(reported, /Unsupported remote run metadata version 1/);
+  } finally {
+    process.stderr.write = write;
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

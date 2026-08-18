@@ -236,6 +236,7 @@ import {
   createChildTerminationController,
   getInteractiveTerminalLaunchSpec,
   getPiSpawnCommand,
+  singleRunParamsOf,
   terminateProcessTreeByPid,
   type ChildTerminationController,
 } from "../runs/execution-infra.ts";
@@ -243,6 +244,11 @@ import { showMonitorOverlay, type MonitorSessionRow } from "../tui/monitor-overl
 import { loadRemoteConfig, loadRemoteConfigState } from "../remote/config.ts";
 import { SshRemoteConnectionFactory } from "../remote/ssh.ts";
 import { RemoteWorkerManager } from "../remote/worker-manager.ts";
+import {
+  createRemoteManagerPort,
+  remoteMonitorEventSink,
+  type RemoteManagerPortBinding,
+} from "../backends/remote-workers.ts";
 import {
   RemoteMonitorSession,
   sanitizeRemoteMonitorError,
@@ -1056,6 +1062,8 @@ export default function registerTeammateExtension(
     fence: RootSessionFence;
     monitorCapture: MonitorCommunicationCapture;
     session: RemoteMonitorSession;
+    /** Feeds the same event stream to the remote backend's subscribers. */
+    port: RemoteManagerPortBinding;
   }
 
   let remoteMonitorBinding: RootRemoteMonitorBinding | undefined;
@@ -1083,12 +1091,26 @@ export default function registerTeammateExtension(
     const config = loadRemoteConfig(state.baseCwd || process.cwd());
     let session: RemoteMonitorSession | undefined;
     let binding: RootRemoteMonitorBinding | undefined;
+    // Assigned on the statement after the manager is constructed, so it holds a
+    // value long before any run starts. The optional chaining below exists for
+    // the temporal dead zone the constructor argument sits in, not because the
+    // port may legitimately be absent.
+    let port: RemoteManagerPortBinding | undefined;
     const manager = new RemoteWorkerManager({
       config,
       connectionFactory: new SshRemoteConnectionFactory(),
-      onEvent: (capture, event) => session?.recordEvent(capture, event),
+      // Both consumers, one stream: the Monitor session records what
+      // `observe kind=remote` and `teammate-list view=remote` show, and the
+      // backend's subscribers are what a dispatched run folds into its outcome.
+      // They share one connection and one ownership nonce because they read the
+      // same runs.
+      onEvent: remoteMonitorEventSink(
+        (capture, event) => port?.publish(capture, event),
+        (capture, event) => session?.recordEvent(capture, event),
+      ),
       onSnapshot: (capture, snapshot) => session?.recordSnapshot(capture, snapshot),
     });
+    port = createRemoteManagerPort(manager);
     session = new RemoteMonitorSession({
       config,
       manager,
@@ -1102,7 +1124,7 @@ export default function registerTeammateExtension(
         }
       },
     });
-    const createdBinding: RootRemoteMonitorBinding = { fence, monitorCapture, session };
+    const createdBinding: RootRemoteMonitorBinding = { fence, monitorCapture, session, port };
     binding = createdBinding;
     remoteMonitorBinding = createdBinding;
     return createdBinding;
@@ -2456,6 +2478,10 @@ export default function registerTeammateExtension(
           if (override.cwd !== undefined) task.cwd = override.cwd ?? undefined;
         }
       }
+      // A remote working location is a backend selector, not a dispatch of its
+      // own: the checks below are the ones that can only be made here, and the
+      // task then travels the ordinary path, where the registry resolves
+      // `remote:<targetId>` and the backend produces a real settled outcome.
       const remoteLocatedTasks = normalizedTasks.filter((task) =>
         typeof task.cwd === "string" && task.cwd.startsWith("remote:"),
       );
@@ -2467,62 +2493,22 @@ export default function registerTeammateExtension(
             details: { mode: isMultiTask ? inferGraphMode(normalizedTasks) : "single", results: [] },
           };
         }
-        const targetId = remoteLocatedTasks[0]!.cwd!.slice("remote:".length);
-        const remoteSingleTask = normalizedTasks[0]!;
-        const monitorCapture = captureMonitorCommunication();
-        if (!ownsMonitorCommunication(monitorCapture)) {
+        if (!ownsMonitorCommunication(captureMonitorCommunication())) {
           return {
             content: [{ type: "text", text: "Remote working locations require active Monitor mode." }],
             isError: true,
             details: { mode: "single", results: [] },
           };
         }
-        let binding: RootRemoteMonitorBinding;
+        // Established here rather than at first use so a Monitor term that
+        // cannot be taken is reported with its own sanitized message, before the
+        // dispatch reaches a registry that would only say the module failed to
+        // load.
         try {
-          binding = ensureRemoteMonitorBinding();
+          ensureRemoteMonitorBinding();
         } catch (error) {
           return {
             content: [{ type: "text", text: sanitizeRemoteMonitorError(error, "remote binding") }],
-            isError: true,
-            details: { mode: "single", results: [] },
-          };
-        }
-        try {
-          const run = await binding.session.create({
-            targetId,
-            name: remoteSingleTask.name ?? remoteSingleTask.agent,
-            objective: remoteSingleTask.prompt,
-            signal,
-          });
-          if (!ownsMonitorCommunication(monitorCapture)) {
-            return {
-              content: [{ type: "text", text: "Monitor mode ended before the remote dispatch could be admitted." }],
-              isError: true,
-              details: { mode: "single", results: [] },
-            };
-          }
-          syncMonitorInteractionStatus();
-          return {
-            content: [{
-              type: "text",
-              text: `Dispatched remote worker ${run.target} on ${run.targetId}. Track it with observe kind=remote id ${run.target}; use teammate-list view=remote or remote-worker close to manage it.`,
-            }],
-            isError: false,
-            details: {
-              mode: "single",
-              results: [{
-                agent: "remote",
-                name: remoteSingleTask.name ?? "remote",
-                task: remoteSingleTask.prompt,
-                correlationId: run.target,
-                exitCode: 0,
-                messages: [],
-              } as unknown as SingleResult],
-            },
-          };
-        } catch (error) {
-          return {
-            content: [{ type: "text", text: sanitizeRemoteMonitorError(error, "remote dispatch") }],
             isError: true,
             details: { mode: "single", results: [] },
           };
@@ -2549,19 +2535,10 @@ export default function registerTeammateExtension(
       const childMaxDispatchDepth = isMultiTask
         ? Math.min(...normalizedTasks.map((task) => rootChildMaxDispatchDepth(task.maxNestingDepth)))
         : rootChildMaxDispatchDepth(singleTask.maxNestingDepth);
-      const singleRunParams = {
-        agent: singleTask.agent,
+      const singleRunParams = singleRunParamsOf(singleTask, {
         task: singleTask.prompt,
-        taskType: singleTask.taskType,
-        name: singleTask.name,
         reply_to: params.reply_to,
-        context: singleTask.context,
-        model: singleTask.model,
-        fallbackModels: singleTask.fallbackModels,
-        thinking: singleTask.thinking,
-        cwd: singleTask.cwd,
-        outputSchema: singleTask.outputSchema,
-      };
+      });
       let foregroundUpdateOpen = params.background === false;
       const warningPrefix = normalization.warnings.length
         ? normalization.warnings.map((w) => `[warn] ${w}`).join("\n") + "\n\n"
@@ -2960,6 +2937,10 @@ export default function registerTeammateExtension(
       const makeOptions = (): RunTeammateOptions => {
         const options: RunTeammateOptions = {
           baseCwd: state.baseCwd || ctx.cwd,
+          // Lazy: taking the Monitor term throws when there is none, and a
+          // purely local dispatch must not pay for that. Only loading a remote
+          // registration reaches this.
+          remoteManagerOf: () => ensureRemoteMonitorBinding().port.port,
           modelCapabilities: refreshModelCatalog(ctx).models,
           ...(isSingle ? { correlationId } : {}),
           ...(isMultiTask ? { taskCorrelationIds } : {}),
@@ -3517,20 +3498,12 @@ export default function registerTeammateExtension(
             deliverRestartCompletion();
           };
 
-          const restartParams = {
-            agent: task.agent,
-            name: task.name,
+          const restartParams = singleRunParamsOf(task, {
             task: message,
-            taskType: task.taskType,
-            context: "fresh" as const,
-            model: task.model,
-            fallbackModels: task.fallbackModels,
-            thinking: task.thinking,
-            cwd: task.cwd,
-            outputSchema: task.outputSchema,
+            context: "fresh",
             timeoutMs: task.timeoutMs,
             reply_to: params.reply_to,
-          };
+          });
           target.restartPending = runWithProgressFlushCleanup(
             () => runSingleTeammate(restartParams, options),
             progressFlushGate,
@@ -7323,7 +7296,7 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       const config = loadRemoteConfig(state.baseCwd || process.cwd());
       manager = new RemoteWorkerManager({ config, connectionFactory: new SshRemoteConnectionFactory() });
       const view = await manager.connect(targetId, signal);
-      return `hello ${view.workerId} (${[...view.capabilities].join(", ")})`;
+      return `hello ${view.workerId} (${view.status}, ${view.activeRuns}/${view.concurrency} runs)`;
     } catch (error) {
       if (signal.aborted) return "timed out after the configured probe window";
       return sanitizeRemoteMonitorError(error, "connection test");

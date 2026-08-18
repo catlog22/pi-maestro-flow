@@ -14,6 +14,12 @@ export interface RemoteBridgeServerOptions {
     concurrency?: number;
     heartbeatMs?: number;
     clientEgressBytes?: number;
+    /**
+     * Where a quarantined run is reported, for a journal this server constructs itself.
+     * Defaults to one line on the daemon's stderr; ignored when `journal` is supplied, since that
+     * journal already carries whatever observer its owner gave it.
+     */
+    onQuarantine?: (directory: string, error: unknown) => void;
 }
 export declare function getRemoteSocketPath(stateDirectory?: string): string;
 export declare class RemoteBridgeServer {

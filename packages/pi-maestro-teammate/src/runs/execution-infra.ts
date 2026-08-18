@@ -54,6 +54,16 @@ export interface TeammateTaskSpec {
   agent?: string;
   taskType?: TeammateTaskType;
   name?: string;
+  /**
+   * Registered backend serving this task; the registry's default when absent.
+   *
+   * Deliberately absent from the model-facing tool schema. Which backends exist
+   * is per-workspace registration, and a static schema cannot enumerate them,
+   * so a model setting this field would be guessing at names it has never been
+   * shown. Deployment-authored task specs — expert-mode rules and programmatic
+   * callers — know the registration document and may set it.
+   */
+  backend?: string;
   dependsOn?: string[];
   context?: "fresh" | "fork";
   model?: string;
@@ -95,6 +105,8 @@ export interface RunTeammateParams {
   mode?: TeammateMode;
   agent?: string;
   taskType?: TeammateTaskType;
+  /** Default registered backend for tasks that name none; see TeammateTaskSpec.backend. */
+  backend?: string;
   reply_to?: "caller" | "main";
   background?: boolean;
   context?: "fresh" | "fork";
@@ -126,6 +138,8 @@ export interface RunSingleTeammateParams {
   task?: string;
   taskType?: TeammateTaskType;
   name?: string;
+  /** Registered backend serving this task; the registry's default when absent. */
+  backend?: string;
   reply_to?: "caller" | "main";
   protocol_version?: number;
   background?: boolean;
@@ -142,6 +156,24 @@ export interface RunSingleTeammateParams {
 
 export interface RunTeammateOptions {
   baseCwd: string;
+  /**
+   * Registry resolving each task's backend.
+   *
+   * Omitted keeps the legacy path: the orchestrator calls the Pi attempt
+   * directly. Supplying one routes every task through the backend contract,
+   * which is what the `backend-registry` execution mode does — including Pi,
+   * which registers under its ordinary name. Both paths settle into the same
+   * outcome, so nothing downstream branches on which ran.
+   */
+  backendRegistry?: import("pi-maestro-backend-core/v1/registry").BackendRegistry;
+  /**
+   * The host's remote Monitor wiring.
+   *
+   * Omitted by a dispatch that owns no Monitor term, which makes a remote
+   * registration fail to load and the dispatch refuse the task by name rather
+   * than run it on this machine.
+   */
+  remoteManagerOf?: () => import("pi-maestro-backends/remote").RemoteWorkerManagerLike;
   modelCapabilities?: readonly TeammateModelCapability[];
   modelCircuitBreaker?: ModelCircuitBreaker;
   /**
@@ -251,6 +283,8 @@ export interface NormalizedTask {
   description?: string;
   taskType?: TeammateTaskType;
   name?: string;
+  /** Registered backend serving this task; the registry's default when absent. */
+  backend?: string;
   dependsOn?: string[];
   context?: "fresh" | "fork";
   model?: string;
@@ -263,6 +297,55 @@ export interface NormalizedTask {
   maxNestingDepth?: number;
   /** Optional Todo task ids bound to this agent (see TeammateTaskSpec.todo). */
   todos?: string[];
+}
+
+/**
+ * Project one normalized task into the params `runSingleTeammate` takes.
+ *
+ * The single home for that projection. Four call sites across the two extension
+ * modules built this object inline — root dispatch, nested dispatch, and their
+ * two cold-restart paths — and a field left out of one of them does not fail:
+ * the run simply proceeds without it. `todos` reached only the graph builder
+ * for exactly that reason, so `spec.todos` was undefined on every single
+ * dispatch, and both the capability gate and the dsh bridge assertion that key
+ * off it could never fire. One builder is what gives that projection an owner.
+ *
+ * The prompt is an argument rather than `source.prompt` because a cold restart
+ * replays the message that woke the agent, not the prompt it was dispatched
+ * with; `context` and `timeoutMs` are arguments for the same reason.
+ *
+ * @param source - the normalized task carrying what the request declared.
+ * @param overrides - what the call site owns: the prompt text, the reply
+ *   target, and, on a restart, the fixed context and the task's timeout.
+ * @returns the params object for one `runSingleTeammate` call.
+ */
+export function singleRunParamsOf(
+  source: NormalizedTask,
+  overrides: {
+    task: string;
+    reply_to?: "caller" | "main";
+    context?: "fresh" | "fork";
+    timeoutMs?: number;
+  },
+): RunSingleTeammateParams {
+  return {
+    agent: source.agent,
+    task: overrides.task,
+    taskType: source.taskType,
+    name: source.name,
+    backend: source.backend,
+    reply_to: overrides.reply_to,
+    context: overrides.context ?? source.context,
+    model: source.model,
+    fallbackModels: source.fallbackModels,
+    thinking: source.thinking,
+    cwd: source.cwd,
+    outputSchema: source.outputSchema,
+    // Copied rather than aliased: the roster record keeps its own array of the
+    // same ids, and a run must not be able to reorder what the roster shows.
+    ...(source.todos === undefined ? {} : { todos: [...source.todos] }),
+    ...(overrides.timeoutMs === undefined ? {} : { timeoutMs: overrides.timeoutMs }),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1120,6 +1203,7 @@ export function normalizeTeammateParams(
     description: task.description,
     taskType: task.taskType ?? params.taskType,
     name: task.name,
+    backend: task.backend ?? params.backend,
     dependsOn: task.dependsOn,
     context: task.context ?? params.context,
     model: task.model ?? params.model,
@@ -2035,6 +2119,35 @@ export function resolveContainedCwd(
 ): { cwd: string } | { error: string } {
   if (requested === undefined) return { cwd: baseCwd };
   return { cwd: canonicalDirectoryPath(path.resolve(baseCwd, requested)) };
+}
+
+/** Prefix marking a working location as a configured remote target. */
+export const REMOTE_LOCATION_PREFIX = "remote:";
+
+/** A remote working location, read as a backend selection. */
+export interface RemoteLocationRouting {
+  readonly backend: string;
+  readonly targetId: string;
+}
+
+/**
+ * Read a working location as a backend selector.
+ *
+ * The whole string, prefix included, is the registration name, so a bare
+ * `remote:` with no target still names one — and the registry rejects it as
+ * unregistered, which is the failure this should have.
+ *
+ * This is the single projection point for the rule. Every dispatch path resolves
+ * its location through it, so a nested or proxied dispatch is routed by the same
+ * rule rather than falling through to `resolveContainedCwd`, which would read
+ * `remote:beta` as a directory named `remote:beta` under the base.
+ *
+ * @param cwd - the task's requested working location.
+ * @returns the routing, or undefined when the location is an ordinary directory.
+ */
+export function remoteLocationRouting(cwd: string | undefined): RemoteLocationRouting | undefined {
+  if (cwd === undefined || !cwd.startsWith(REMOTE_LOCATION_PREFIX)) return undefined;
+  return { backend: cwd, targetId: cwd.slice(REMOTE_LOCATION_PREFIX.length) };
 }
 
 // ---------------------------------------------------------------------------

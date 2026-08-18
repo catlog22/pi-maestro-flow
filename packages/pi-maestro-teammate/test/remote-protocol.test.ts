@@ -1,12 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  REMOTE_CAPABILITIES,
-  RemoteCapabilityError,
-  negotiateRemoteCapabilities,
-  requireRemoteCapabilities,
-} from "../src/remote/capabilities.ts";
-import {
   REMOTE_JSONRPC_VERSION,
   REMOTE_MAX_LINE_BYTES,
   createRemoteRequest,
@@ -26,19 +20,16 @@ import {
   type RemoteRunCapture,
 } from "../src/remote/types.ts";
 
-test("remote/1 exposes the approved status and capability contracts", () => {
-  assert.equal(REMOTE_PROTOCOL_VERSION, "remote/1");
+test("remote/2 exposes the approved status contract", () => {
+  assert.equal(REMOTE_PROTOCOL_VERSION, "remote/2");
   assert.deepEqual(REMOTE_STATUSES, [
     "connecting", "ready", "running", "waiting", "completed", "failed", "cancelled", "disconnected", "lost",
-  ]);
-  assert.deepEqual(REMOTE_CAPABILITIES, [
-    "streaming", "follow-up", "steer", "cancel", "usage", "tool-events", "structured-output", "session-resume",
   ]);
   assert.equal(isRemoteTerminalStatus("completed"), true);
   assert.equal(isRemoteTerminalStatus("disconnected"), false);
 });
 
-test("remote/1 JSON-RPC requests round-trip as one NDJSON record", () => {
+test("remote/2 JSON-RPC requests round-trip as one NDJSON record", () => {
   const request = createRemoteRequest("command-1", "run/input", {
     commandId: "input-1",
     runId: "run-1",
@@ -54,7 +45,7 @@ test("remote/1 JSON-RPC requests round-trip as one NDJSON record", () => {
   assert.equal(request.jsonrpc, REMOTE_JSONRPC_VERSION);
 });
 
-test("remote/1 rejects malformed, multiline, and oversized records", () => {
+test("remote/2 rejects malformed, multiline, and oversized records", () => {
   assert.throws(
     () => parseRemoteEnvelopeLine('{"jsonrpc":"1.0","id":1,"result":{}}'),
     /JSON-RPC 2\.0/,
@@ -74,20 +65,6 @@ test("remote/1 rejects malformed, multiline, and oversized records", () => {
   assert.throws(
     () => parseRemoteEnvelopeLine('{"jsonrpc":"2.0","id":1,"result":{},"error":{"code":-1,"message":"bad"}}'),
     /exactly one/,
-  );
-});
-
-test("capability negotiation is ordered and rejects unmet admission requirements", () => {
-  const negotiated = negotiateRemoteCapabilities(
-    ["cancel", "streaming", "steer", "usage"],
-    ["streaming", "cancel", "tool-events"],
-    ["streaming", "steer"],
-  );
-  assert.deepEqual(negotiated.capabilities, ["streaming", "cancel"]);
-  assert.deepEqual(negotiated.missing, ["steer"]);
-  assert.throws(
-    () => requireRemoteCapabilities(negotiated.capabilities, ["streaming", "steer"]),
-    (error: unknown) => error instanceof RemoteCapabilityError && error.missing[0] === "steer",
   );
 });
 

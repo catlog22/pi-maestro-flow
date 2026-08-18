@@ -1,4 +1,3 @@
-import { type RemoteCapability } from "./capabilities.ts";
 import { type RemoteConfig } from "./config.ts";
 import type { RemoteConnectionFactory } from "./driver.ts";
 import { type RemoteRunInputResult, type RemoteRunCancelResult } from "./protocol.ts";
@@ -19,8 +18,6 @@ export interface RemoteWorkerManagerOptions {
     config: RemoteConfig;
     connectionFactory: RemoteConnectionFactory;
     monitorOwnerNonce?: string;
-    capabilities?: readonly RemoteCapability[];
-    requiredWorkerCapabilities?: readonly RemoteCapability[];
     maxRunsPerHost?: number;
     maxOwnedRuns?: number;
     maxStartCommands?: number;
@@ -35,7 +32,6 @@ export interface RemoteWorkerStartRequest {
     name: string;
     objective: string;
     commandId?: string;
-    requiredCapabilities?: readonly RemoteCapability[];
     outputSchema?: unknown;
     signal?: AbortSignal;
 }
@@ -54,7 +50,6 @@ export interface RemoteWorkerView {
     targetHostId: string;
     workerId: string;
     instanceNonce: string;
-    capabilities: readonly RemoteCapability[];
     concurrency: number;
     activeRuns: number;
     status: RemoteStatus;

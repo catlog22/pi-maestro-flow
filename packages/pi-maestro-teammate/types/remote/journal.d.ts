@@ -1,7 +1,6 @@
-import { type RemoteCapability } from "./capabilities.ts";
 import type { RemoteRunStartParams } from "./protocol.ts";
 import { type RemoteRunCapture, type RemoteRunEvent, type RemoteRunSnapshot, type RemoteWorkerIdentity } from "./types.ts";
-export declare const REMOTE_JOURNAL_VERSION: 1;
+export declare const REMOTE_JOURNAL_VERSION: 2;
 export declare const REMOTE_MAX_JOURNAL_EVENTS = 50000;
 export declare const REMOTE_MAX_JOURNAL_BYTES: number;
 export declare const REMOTE_MAX_COMMAND_RECORDS = 4096;
@@ -11,7 +10,6 @@ export interface RemoteJournalRunRecord {
     version: typeof REMOTE_JOURNAL_VERSION;
     capture: RemoteRunCapture;
     request: RemoteRunStartParams;
-    capabilities: readonly RemoteCapability[];
     snapshot: RemoteRunSnapshot;
     createdAt: number;
     updatedAt: number;
@@ -33,15 +31,26 @@ export interface RemoteStoredCommand {
         data?: unknown;
     };
 }
+/** Optional wiring handed to a {@link RemoteRunJournal} on top of its state directory. */
+export interface RemoteJournalOptions {
+    /**
+     * Called after a run directory has been moved into `corrupt-runs/`, with the run directory that was
+     * quarantined and the error that condemned it. Without it quarantine is silent, and the host only sees
+     * the unrelated ownership mismatch that a missing run produces on the next run/attach.
+     * @param directory Absolute path the run occupied under `runs/` before the move.
+     * @param error Parse or reconciliation failure that condemned the run.
+     */
+    onQuarantine?: (directory: string, error: unknown) => void;
+}
 export declare function getRemoteStateDirectory(): string;
 export declare function ensurePrivateRemoteDirectory(directoryPath: string): void;
 export declare class RemoteRunJournal {
     #private;
     readonly stateDirectory: string;
     readonly identity: RemoteWorkerIdentity;
-    constructor(stateDirectory?: string);
+    constructor(stateDirectory?: string, options?: RemoteJournalOptions);
     static fingerprint(method: string, params: unknown): string;
-    createRun(capture: RemoteRunCapture, request: RemoteRunStartParams, capabilities: readonly RemoteCapability[], now?: number): RemoteJournalRunRecord;
+    createRun(capture: RemoteRunCapture, request: RemoteRunStartParams, now?: number): RemoteJournalRunRecord;
     getRun(runId: string): RemoteJournalRunRecord | undefined;
     listRuns(monitorOwnerNonce?: string): RemoteJournalRunRecord[];
     appendEvent(capture: RemoteRunCapture, event: RemoteRunEvent): RemoteJournalRunRecord;

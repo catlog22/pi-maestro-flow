@@ -1,0 +1,30 @@
+{
+  "name": "pi-maestro-backend-core",
+  "version": "0.1.0",
+  "description": "Versioned teammate execution-backend contracts shared by Pi Maestro plugins.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./v1": "./src/public/v1/index.ts",
+    "./v1/spec": "./src/public/v1/spec.ts",
+    "./v1/backend": "./src/public/v1/backend.ts",
+    "./v1/registry": "./src/public/v1/registry.ts"
+  },
+  "files": [
+    "src/**/*.ts"
+  ],
+  "keywords": [
+    "pi",
+    "maestro",
+    "teammate",
+    "backend"
+  ],
+  "license": "ISC"
+}

@@ -236,3 +236,28 @@ test("runSshCliTool rejects an incomplete ssh config without connecting", async 
   assert.equal(run.terminalStatus, "failed");
   assert.match(run.messages[0]?.content ?? "", /host, user and hostKeySha256/);
 });
+
+test("runLocalCliTool honours a configured ACP startup timeout", async () => {
+  // A launch command that fetches before it answers — `npx` on a cold cache is
+  // the real instance — outlasts the driver's 15s default and fails as an
+  // undiagnosable startup timeout. This pins that the operator's value reaches
+  // the driver: a CLI that never answers `initialize` must fail at the
+  // configured bound, not at the default one.
+  const controller = new AbortController();
+  const started = Date.now();
+  const run = await runLocalCliTool({
+    tool: "mock-silent",
+    config: { enabled: true, command: "node", args: ["-e", "setTimeout(() => {}, 60_000);"] },
+    prompt: "say hi",
+    cwd: path.dirname(fixturePath),
+    signal: controller.signal,
+    startupTimeoutMs: 300,
+  });
+  const elapsed = Date.now() - started;
+  assert.equal(run.terminalStatus, "failed");
+  assert.match(run.messages[0]?.content ?? "", /timed out after 300ms/);
+  // The default is 15_000ms. Anything near it means the configured value was
+  // dropped somewhere between the registration and the driver, which is exactly
+  // the gap a real `npx`-launched CLI fell into.
+  assert.ok(elapsed < 5_000, `startup bound was ignored: settled after ${elapsed}ms`);
+});

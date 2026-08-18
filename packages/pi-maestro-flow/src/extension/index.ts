@@ -287,6 +287,13 @@ import {
   createHooksSettingsProvider,
   registerHooksSettingsProvider,
 } from "../settings/hooks-settings-provider.ts";
+import {
+  createTeammateBackendsSettingsProvider,
+  registerTeammateBackendsSettingsProvider,
+  type BackendDescriptor,
+} from "../settings/teammate-backends-settings-provider.ts";
+import dshBackend from "pi-maestro-backends/dsh";
+import { PI_SUBPROCESS, PI_SUBPROCESS_CONFIG_FIELDS } from "pi-maestro-teammate/v1/backends";
 
 export const MAESTRO_CHILD_TOOL_NAMES = [
   "ask-user-question",
@@ -3377,6 +3384,30 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
     hooksSettingsDisposer?.();
     hooksSettingsDisposer = undefined;
   };
+
+  // The backends this build ships. Each descriptor carries the module specifier
+  // the registry loader resolves, so a document written from the shell names
+  // something importable rather than the registration's own name.
+  const teammateBackendDescriptors: readonly BackendDescriptor[] = [
+    { name: PI_SUBPROCESS, module: PI_SUBPROCESS, configFields: PI_SUBPROCESS_CONFIG_FIELDS },
+    { name: dshBackend.name, module: "pi-maestro-backends/dsh", configFields: dshBackend.configFields },
+  ];
+  const teammateBackendsSettingsProvider = createTeammateBackendsSettingsProvider({
+    workspaceRoot: process.cwd(),
+    backends: teammateBackendDescriptors,
+  });
+  let teammateBackendsSettingsDisposer: (() => void) | undefined;
+  const registerTeammateBackendsSettings = (): void => {
+    if (teammateBackendsSettingsDisposer) return;
+    teammateBackendsSettingsDisposer = registerTeammateBackendsSettingsProvider(
+      pi.events,
+      teammateBackendsSettingsProvider,
+    );
+  };
+  const disposeTeammateBackendsSettings = (): void => {
+    teammateBackendsSettingsDisposer?.();
+    teammateBackendsSettingsDisposer = undefined;
+  };
   pi.on("session_start", (_event, ctx) => {
     flowSettingsContext = ctx;
     registerFlowSettings();
@@ -3387,6 +3418,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
     registerVisionDelegationSettings();
     registerExploreSettings();
     registerHooksSettings();
+    registerTeammateBackendsSettings();
   });
   pi.on("session_shutdown", (_event, ctx) => {
     if (flowSettingsContext === ctx) flowSettingsContext = undefined;
@@ -3398,6 +3430,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
     disposeVisionDelegationSettings();
     disposeExploreSettings();
     disposeHooksSettings();
+    disposeTeammateBackendsSettings();
   });
 
   const teammatePermissionBroker: TeammatePermissionBroker = async (call, ctx) => {
