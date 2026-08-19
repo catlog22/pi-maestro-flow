@@ -6,8 +6,8 @@
  * Keys: ↑↓/jk select history · Enter details · r refresh · e register cwd · Esc close
  */
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
-import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { readdirSync, readFileSync, existsSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
@@ -79,6 +79,8 @@ export interface McpxOverlayParams {
   close: () => void;
   onRegisterWorkspace?: (path: string) => Promise<string>;
   onOpenWizard?: () => void;
+  /** Endpoint readiness wait for startMcpx (ms); tests shorten this. */
+  endpointWaitMs?: number;
 }
 
 type OverlayMode = "list" | "detail";
@@ -372,6 +374,7 @@ export class McpxOverlay implements Component, Focusable {
     refreshing: true, endpoint: "unknown", workspaces: [], cwdRegistered: false, windows: [], thread: [], mcpServers: [],
   };
   private status = "";
+  private mcpxProcess: ReturnType<typeof spawn> | undefined;
 
   constructor(private readonly params: McpxOverlayParams) {
     void this.refresh();
@@ -380,6 +383,94 @@ export class McpxOverlay implements Component, Focusable {
   invalidate(): void {}
   dispose(): void {}
 
+  private pidPath(): string {
+    return join(homedir(), ".mcpx", "mcpx-server.pid");
+  }
+
+  private configPath(): string {
+    return join(homedir(), ".mcpx", "config.yaml");
+  }
+
+  /** Start the mcpx server detached, persist its PID, and wait for the endpoint. */
+  private async startMcpx(): Promise<void> {
+    const binary = locateMcpx();
+    if (!binary) {
+      this.status = "未找到 mcpx — 设置 MCPX_BIN 或将其加入 PATH";
+      this.params.requestRender();
+      return;
+    }
+    if (this.snapshot.endpoint === "online") {
+      this.status = "mcpx 已在运行";
+      this.params.requestRender();
+      return;
+    }
+    this.status = "正在启动 mcpx…";
+    this.params.requestRender();
+    try {
+      const child = spawn(binary, [], { detached: true, stdio: "ignore", shell: process.platform === "win32" });
+      child.unref();
+      this.mcpxProcess = child;
+      try {
+        writeFileSync(this.pidPath(), String(child.pid ?? ""), "utf8");
+      } catch {
+        // PID persistence is best-effort
+      }
+      const deadline = Date.now() + (this.params.endpointWaitMs ?? 15_000);
+      let online = false;
+      while (Date.now() < deadline) {
+        const { endpointVersion } = await probeEndpoint(this.configPath());
+        if (endpointVersion) {
+          online = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      this.status = online ? "mcpx 已启动并监听" : "mcpx 进程已拉起但端点未就绪（检查启动日志）";
+    } catch (error) {
+      this.status = `启动失败: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    await this.refresh();
+  }
+
+  /** Stop the mcpx server (kills the process tree on Windows) and clear the PID file. */
+  private async stopMcpx(): Promise<void> {
+    let pid: number | undefined = this.mcpxProcess?.pid;
+    if (!pid) {
+      try {
+        const raw = readFileSync(this.pidPath(), "utf8").trim();
+        const parsed = Number(raw);
+        if (Number.isInteger(parsed) && parsed > 0) pid = parsed;
+      } catch {
+        // no pid file
+      }
+    }
+    if (!pid) {
+      this.status = "未找到 mcpx 进程（PID 文件缺失）";
+      this.params.requestRender();
+      return;
+    }
+    this.status = "正在停止 mcpx…";
+    this.params.requestRender();
+    try {
+      if (process.platform === "win32") {
+        spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+      } else if (this.mcpxProcess && !this.mcpxProcess.killed) {
+        this.mcpxProcess.kill();
+      } else {
+        process.kill(pid, "SIGTERM");
+      }
+      this.status = "已发送停止信号";
+    } catch (error) {
+      this.status = `停止失败: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    this.mcpxProcess = undefined;
+    try {
+      rmSync(this.pidPath(), { force: true });
+    } catch {
+      // best-effort
+    }
+    await this.refresh();
+  }
   async refresh(): Promise<void> {
     this.snapshot = { ...this.snapshot, refreshing: true, error: undefined };
     this.params.requestRender();
@@ -470,6 +561,14 @@ export class McpxOverlay implements Component, Focusable {
       if (this.params.onOpenWizard) this.params.onOpenWizard();
       return;
     }
+    if (data === "s" || data === "S") {
+      void this.startMcpx();
+      return;
+    }
+    if (data === "x" || data === "X") {
+      void this.stopMcpx();
+      return;
+    }
   }
 
   private async registerWorkspace(): Promise<void> {
@@ -523,9 +622,9 @@ export class McpxOverlay implements Component, Focusable {
     rows.push(rule(inner));
     rows.push(fitLine(`客户端连接（${this.snapshot.connections?.length ?? "—"}）`, inner));
     if (this.snapshot.endpoint === "offline" || this.snapshot.endpoint === "unknown") {
-      rows.push(fitLine("  ○ mcpx 未运行 — 启动后显示 Remote Session 连接", inner));
+      rows.push(fitLine("  ○ mcpx 未运行 — 按 s 启动，启动后显示 Remote Session 连接", inner));
     } else if (!this.snapshot.connections || this.snapshot.connections.length === 0) {
-      rows.push(fitLine("  ○ 无活跃 Remote Session 连接", inner));
+      rows.push(fitLine("  ○ 无活跃 Remote Session 连接（按 x 停止 mcpx）", inner));
     } else {
       for (const connection of this.snapshot.connections.slice(0, 3)) {
         rows.push(fitLine(`  ${connection.workspace || "?"} · ${connection.status}${connection.label ? ` · ${connection.label}` : ""} · ${connection.sessionId.slice(0, 8)}`, inner));
@@ -553,7 +652,7 @@ export class McpxOverlay implements Component, Focusable {
     }
     if (this.status) rows.push(fitLine(this.status, inner));
     if (this.snapshot.error) rows.push(fitLine(fg("31", `! ${this.snapshot.error}`), inner));
-    rows.push(fitSegments(inner, ["Enter detail", "r refresh", "e register cwd", "c wizard", "Esc close"]));
+    rows.push(fitSegments(inner, ["Enter detail", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "e register cwd", "c wizard", "Esc close"]));
     return frame(rows, width);
   }
 
