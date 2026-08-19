@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ import {
   type McpxThreadEntry,
   type McpxWindowInfo,
 } from "../src/tui/mcpx-overlay.ts";
+import { collectMcpServers, collectConnections } from "../src/tui/mcpx-overlay.ts";
 
 const { normalizeWorkspacePath, workspaceIdForCwd, collectWorkspaces, collectWindows, collectThread, displayNameOf } = _mcpxTuiInternals;
 
@@ -140,4 +142,66 @@ test("collectThread aggregates commands and receipts newest first", async (t) =>
   assert.equal(entries[0].kind, "response"); // newest first
   assert.equal(entries[0].status, "accepted");
   assert.equal(collectThread("D:/nowhere").length, 0);
+});
+
+test("collectMcpServers merges .mcp.json files with later-wins precedence", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "mcpx-mcp-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, ".mcp.json"), JSON.stringify({
+    mcpServers: { github: { type: "stdio", command: "npx", description: "github mcp" } },
+  }), "utf8");
+  await mkdir(join(dir, ".agents"));
+  await writeFile(join(dir, ".agents", "mcp.json"), JSON.stringify({
+    mcpServers: { github: { command: "custom-github" }, local: { command: "node" } },
+  }), "utf8");
+  const servers = collectMcpServers(dir);
+  const byName = Object.fromEntries(servers.map((s) => [s.name, s]));
+  assert.equal(servers.length, 2);
+  assert.equal(byName.github.source, "agents"); // later file wins
+  assert.equal(byName.github.command, "custom-github");
+  assert.equal(byName.local.type, "stdio");
+  assert.equal(byName.local.command, "node");
+  assert.equal(typeof byName.local.executable, "boolean");
+});
+
+test("collectConnections parses session list from a live endpoint", async (t) => {
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => {
+      const payload = JSON.parse(body);
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({
+        jsonrpc: "2.0",
+        id: payload.id,
+        result: {
+          structuredContent: {
+            status: "ok",
+            data: {
+              sessions: [
+                { remote_session_id: "abc123", workspace_name: "demo", label: "chat", status: "running" },
+                { remote_session_id: "def456", workspace_name: "proj", status: "completed" },
+              ],
+            },
+          },
+        },
+      }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const address = server.address();
+  const endpoint = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}/mcp`;
+  const connections = await collectConnections(endpoint);
+  assert.ok(connections);
+  assert.equal(connections.length, 2);
+  assert.equal(connections[0].sessionId, "abc123");
+  assert.equal(connections[0].workspace, "demo");
+  assert.equal(connections[0].label, "chat");
+  assert.equal(connections[0].status, "running");
+});
+
+test("collectConnections returns undefined when the endpoint is unreachable", async () => {
+  const connections = await collectConnections("http://127.0.0.1:1/mcp");
+  assert.equal(connections, undefined);
 });

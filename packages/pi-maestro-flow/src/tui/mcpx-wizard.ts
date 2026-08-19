@@ -178,16 +178,27 @@ function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: str
 
   // 3. security.commands default + pi allow rule
   if (changes.commandsDefault || changes.allowPi) {
-    const securityRaw = get("security")?.raw ?? "security:";
-    const commandsBlock = extractCommandsBlock(securityRaw);
+    const securityLines = (get("security")?.raw ?? "security:").split(/\r?\n/);
+    const commandsStart = securityLines.findIndex((line) => /^    commands:\s*$/.test(line));
+    let commandsBlockLines: string[] = [];
+    if (commandsStart >= 0) {
+      let end = commandsStart + 1;
+      while (end < securityLines.length
+        && !/^    [A-Za-z_]/.test(securityLines[end])
+        && !/^[A-Za-z_]/.test(securityLines[end])) {
+        end++;
+      }
+      commandsBlockLines = securityLines.slice(commandsStart, end);
+    }
     const defaultLine = changes.commandsDefault
-      ?? (commandsBlock.match(/^\s{8}default:\s*(.+)$/m)?.[1]?.trim() ?? "allow");
+      ?? (commandsBlockLines.find((line) => /^\s{8}default:/.test(line))?.match(/default:\s*(.+)/)?.[1]?.trim() ?? "allow");
     const allow = changes.allowPi
       ? mergeList("security", "allow", ["^pi\\b"])
       : parseListItems(get("security"), "allow");
     const confirm = parseListItems(get("security"), "confirm");
     const deny = parseListItems(get("security"), "deny");
-    const autoReadonly = commandsBlock.match(/^\s{8}auto_allow_readonly:\s*(.+)$/m)?.[1]?.trim();
+    const autoReadonly = commandsBlockLines.find((line) => /^\s{8}auto_allow_readonly:/.test(line))
+      ?.match(/auto_allow_readonly:\s*(.+)/)?.[1]?.trim();
     const commands = [
       "    commands:",
       `        default: ${defaultLine}`,
@@ -196,10 +207,10 @@ function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: str
       deny.length > 0 ? `        deny:\n${listBlock(deny, "            ")}` : "        deny: []",
       autoReadonly !== undefined ? `        auto_allow_readonly: ${autoReadonly}` : "",
     ].filter(Boolean).join("\n");
-    const rest = commandsBlock
-      ? securityRaw.replace(commandsBlock, "").replace(/\n{3,}/g, "\n\n").trim()
-      : securityRaw.trim();
-    set("security", rest ? `${rest}\n${commands}` : commands);
+    const restLines = commandsStart >= 0
+      ? [...securityLines.slice(0, commandsStart), ...securityLines.slice(commandsStart + commandsBlockLines.length)]
+      : securityLines;
+    set("security", [...restLines.filter((line) => line.trim() !== ""), commands].join("\n"));
     if (changes.commandsDefault) summary.push(`命令默认策略: ${changes.commandsDefault}`);
     if (changes.allowPi) summary.push("已添加 Pi 白名单 ^pi\\b");
   }
@@ -228,11 +239,6 @@ function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: str
 
   const yaml = sections.map((section) => section.raw.trimEnd()).join("\n").trim() + "\n";
   return { yaml, summary };
-}
-
-function extractCommandsBlock(securityRaw: string): string {
-  const match = securityRaw.match(/^\s{4}commands:[\s\S]*?(?=^\s{4}\w|\s*$)/m);
-  return match?.[0] ?? "";
 }
 
 export class McpxWizardOverlay implements Component, Focusable {

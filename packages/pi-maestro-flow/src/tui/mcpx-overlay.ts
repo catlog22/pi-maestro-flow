@@ -41,6 +41,22 @@ export interface McpxThreadEntry {
   status?: string;
 }
 
+export interface McpxMcpServerInfo {
+  name: string;
+  type: string;
+  command: string;
+  source: "global" | "project" | "agents" | "mcpx";
+  executable: boolean;
+  description?: string;
+}
+
+export interface McpxConnectionInfo {
+  sessionId: string;
+  workspace: string;
+  label?: string;
+  status: string;
+}
+
 export interface McpxSnapshot {
   refreshing: boolean;
   binary?: string;
@@ -52,6 +68,8 @@ export interface McpxSnapshot {
   cwdRegistered: boolean;
   windows: McpxWindowInfo[];
   thread: McpxThreadEntry[];
+  mcpServers: McpxMcpServerInfo[];
+  connections?: McpxConnectionInfo[];
   error?: string;
 }
 
@@ -214,6 +232,95 @@ function collectWorkspaces(configPath: string): McpxWorkspaceInfo[] {
   return workspaces;
 }
 
+interface McpJsonServer {
+  type?: string;
+  command?: string;
+  description?: string;
+}
+
+// collectMcpServers mirrors the mcpx merge order for .mcp.json:
+// global → project → .agents/mcp.json → .mcpx/.mcp.json (later wins).
+export function collectMcpServers(cwd: string): McpxMcpServerInfo[] {
+  const files: Array<{ path: string; source: McpxMcpServerInfo["source"] }> = [
+    { path: join(homedir(), ".mcpx", ".mcp.json"), source: "global" },
+    { path: join(cwd, ".mcp.json"), source: "project" },
+    { path: join(cwd, ".agents", "mcp.json"), source: "agents" },
+    { path: join(cwd, ".mcpx", ".mcp.json"), source: "mcpx" },
+  ];
+  const merged = new Map<string, McpxMcpServerInfo>();
+  for (const { path, source } of files) {
+    let parsed: { mcpServers?: Record<string, McpJsonServer> };
+    try {
+      parsed = JSON.parse(readFileSync(path, "utf8"));
+    } catch {
+      continue;
+    }
+    for (const [name, server] of Object.entries(parsed.mcpServers ?? {})) {
+      const command = server.command ?? "";
+      merged.set(name, {
+        name,
+        type: server.type ?? "stdio",
+        command,
+        source,
+        executable: command ? isExecutableOnPath(command) : false,
+        description: server.description,
+      });
+    }
+  }
+  return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function isExecutableOnPath(command: string): boolean {
+  if (command.includes("/") || command.includes("\\")) {
+    return existsSync(command);
+  }
+  const probe = spawnSync(process.platform === "win32" ? "where" : "which", [command], {
+    encoding: "utf8",
+    timeout: 5_000,
+    shell: process.platform === "win32",
+  });
+  return probe.status === 0;
+}
+
+// collectConnections probes the running mcpx endpoint for Remote Sessions.
+// Returns undefined when the endpoint is unreachable or unauthenticated.
+export async function collectConnections(endpoint: string): Promise<McpxConnectionInfo[] | undefined> {
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "session", arguments: { action: "list", limit: 20 } } }),
+      signal: AbortSignal.timeout(3_000),
+    });
+    const contentType = response.headers.get("content-type") ?? "";
+    const raw = await response.text();
+    let payload: { result?: { structuredContent?: unknown; content?: Array<{ type?: string; text?: string }> } };
+    if (contentType.includes("text/event-stream")) {
+      let dataText: string | undefined;
+      for (const line of raw.split(/\r?\n/)) {
+        if (line.startsWith("data:")) dataText = line.slice(5).trim();
+      }
+      if (!dataText) return undefined;
+      payload = JSON.parse(dataText);
+    } else {
+      payload = JSON.parse(raw);
+    }
+    const sc = payload?.result?.structuredContent as
+      | { data?: { sessions?: Array<{ remote_session_id?: string; workspace_name?: string; workspace?: string; label?: string; status?: string }> } }
+      | undefined;
+    const sessions = sc?.data?.sessions;
+    if (!sessions) return undefined;
+    return sessions.map((session) => ({
+      sessionId: session.remote_session_id ?? "",
+      workspace: session.workspace_name ?? session.workspace ?? "",
+      label: session.label,
+      status: session.status ?? "",
+    })).filter((session) => session.sessionId);
+  } catch {
+    return undefined;
+  }
+}
+
 async function probeEndpoint(configPath: string): Promise<{ endpoint: string; endpointVersion?: string }> {
   let endpoint = MCPX_DEFAULT_ENDPOINT;
   try {
@@ -262,7 +369,7 @@ export class McpxOverlay implements Component, Focusable {
   private mode: OverlayMode = "list";
   private selected = 0;
   private snapshot: McpxSnapshot = {
-    refreshing: true, endpoint: "unknown", workspaces: [], cwdRegistered: false, windows: [], thread: [],
+    refreshing: true, endpoint: "unknown", workspaces: [], cwdRegistered: false, windows: [], thread: [], mcpServers: [],
   };
   private status = "";
 
@@ -288,17 +395,20 @@ export class McpxOverlay implements Component, Focusable {
       const configPath = join(homedir(), ".mcpx", "config.yaml");
       const workspaces = collectWorkspaces(configPath);
       const { endpoint, endpointVersion } = await probeEndpoint(configPath);
+      const online = Boolean(endpointVersion);
       this.snapshot = {
         refreshing: false,
         binary: binary ?? undefined,
         version,
-        endpoint: endpointVersion ? "online" : "offline",
+        endpoint: online ? "online" : "offline",
         endpointVersion,
         configPath: existsSync(configPath) ? configPath : undefined,
         workspaces,
         cwdRegistered: workspaces.some((workspace) => workspace.path.replace(/\\/g, "/").toLowerCase() === cwd.replace(/\\/g, "/").toLowerCase()),
         windows: collectWindows(cwd, now),
         thread: collectThread(cwd),
+        mcpServers: collectMcpServers(cwd),
+        connections: online ? await collectConnections(endpoint) : undefined,
       };
     } catch (error) {
       this.snapshot = { ...this.snapshot, refreshing: false, error: error instanceof Error ? error.message : String(error) };
@@ -399,6 +509,28 @@ export class McpxOverlay implements Component, Focusable {
     const inner = width - 2;
     const rows = [fitLine("MCPX 连接监控 · mcpx for pmf", inner), rule(inner)];
     rows.push(this.renderConnectionRow(inner));
+    rows.push(rule(inner));
+    rows.push(fitLine(`MCP 服务器（${this.snapshot.mcpServers.length}）`, inner));
+    if (this.snapshot.mcpServers.length === 0) {
+      rows.push(fitLine("  ○ 未配置上游 MCP 服务器（.mcp.json）", inner));
+    } else {
+      for (const server of this.snapshot.mcpServers.slice(0, 4)) {
+        const mark = server.executable ? fg("32", "✓") : fg("31", "✗");
+        const extra = this.snapshot.mcpServers.length > 4 ? "…" : "";
+        rows.push(fitLine(`  ${mark} ${server.name} · ${server.type} · ${server.command}${server.description ? ` · ${server.description}` : ""}${extra}`, inner));
+      }
+    }
+    rows.push(rule(inner));
+    rows.push(fitLine(`客户端连接（${this.snapshot.connections?.length ?? "—"}）`, inner));
+    if (this.snapshot.endpoint === "offline" || this.snapshot.endpoint === "unknown") {
+      rows.push(fitLine("  ○ mcpx 未运行 — 启动后显示 Remote Session 连接", inner));
+    } else if (!this.snapshot.connections || this.snapshot.connections.length === 0) {
+      rows.push(fitLine("  ○ 无活跃 Remote Session 连接", inner));
+    } else {
+      for (const connection of this.snapshot.connections.slice(0, 3)) {
+        rows.push(fitLine(`  ${connection.workspace || "?"} · ${connection.status}${connection.label ? ` · ${connection.label}` : ""} · ${connection.sessionId.slice(0, 8)}`, inner));
+      }
+    }
     rows.push(rule(inner));
     rows.push(fitLine(`Pi 窗口（${this.snapshot.windows.length} fresh）`, inner));
     if (this.snapshot.windows.length === 0) {

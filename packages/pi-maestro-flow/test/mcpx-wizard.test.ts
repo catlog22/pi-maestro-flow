@@ -107,3 +107,18 @@ test("buildChangesYaml works on an empty (first-run) config", () => {
   assert.match(yaml, /default: confirm/);
   assert.match(yaml, /\^pi\\b/);
 });
+
+test("buildChangesYaml is idempotent on a clean config and keeps the commands header", () => {
+  const changes: McpxConfigChanges = { commandsDefault: "confirm", allowPi: true };
+  const first = buildChangesYaml(SAMPLE_CONFIG, changes, "D:/demo").yaml;
+  // no headless residue: content lines must stay inside the commands block
+  assert.match(first, /^\s{4}commands:\s*$/m);
+  // security must not be followed by an empty line then content
+  assert.doesNotMatch(first, /^security:\s*\n\s*\n/m);
+  assert.equal((first.match(/^\s{4}commands:/gm) || []).length, 1);
+  const second = buildChangesYaml(first, changes, "D:/demo").yaml;
+  assert.equal(second, first);
+  assert.equal((second.match(/default: confirm/g) || []).length, 1);
+  assert.match(second, /^state:\s*$/m);
+  assert.match(second, /\^pi\b/);
+});
