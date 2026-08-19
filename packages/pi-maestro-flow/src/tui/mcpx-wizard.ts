@@ -13,9 +13,9 @@
  *
  * Keys: ↑↓/jk select · ←→/1-3 pick · Enter confirm · Esc back/close · g regenerate token
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
@@ -268,6 +268,12 @@ export class McpxWizardOverlay implements Component, Focusable {
   private editing = false;
   private draft = "";
   private status = "";
+  private tunnelProcess: ReturnType<typeof spawn> | undefined;
+  private tunnelOutput = "";
+
+  private tunnelPidPath(): string {
+    return join(homedir(), ".mcpx", "cloudflared.pid");
+  }
   private changes: McpxConfigChanges = {};
   private generatedToken = "";
   private readonly existingConfig: string;
@@ -308,6 +314,7 @@ export class McpxWizardOverlay implements Component, Focusable {
     if (this.editing) return ["Enter 确认输入", "Esc 取消输入"];
     const base = ["↑↓/jk 选择", "Enter 确认", "Esc 返回"];
     if (this.step === "bearer") base.push("g 重新生成 token");
+    if (this.step === "tunnel") base.push("g 启动隧道", "x 停止隧道");
     if (this.step === "write") base.push("w 写入配置");
     return base;
   }
@@ -375,27 +382,59 @@ export class McpxWizardOverlay implements Component, Focusable {
       case "tunnel": {
         const hasCloudflared = isExecutableOnPath("cloudflared");
         const cloudflared = hasCloudflared ? fg("32", "✓ 已安装") : fg("31", "✗ 未安装");
+        const running = this.tunnelProcess
+          ? fg("32", `运行中${this.changes.tunnelUrl ? ` · ${this.changes.tunnelUrl}` : "（等待 URL…）"}`)
+          : fg("2", "未运行");
         return [
-          fitLine(`公网隧道（Cloudflare）— cloudflared ${cloudflared}`, inner),
-          option(0, "不暴露（保持本机 127.0.0.1）"),
-          option(1, "Cloudflare Quick Tunnel", "临时公网 URL（trycloudflare.com）"),
-          option(2, "Cloudflare 命名隧道 / 自定义 URL", "自有域名（推荐）"),
-          option(3, this.editing && this.selected === 3 ? `URL: ${this.draft}▌` : `URL: ${this.changes.tunnelUrl ?? "（留空稍后填）"}`),
+          fitLine(`公网隧道（Cloudflare）— cloudflared ${cloudflared} · 状态: ${running}`, inner),
+          option(0, "Cloudflare Quick Tunnel（默认）", "g 启动并自动获取 URL"),
+          option(1, "Cloudflare 命名隧道", "自有域名（推荐持久）"),
+          option(2, "自定义 URL", "其他隧道（ngrok 等）"),
+          option(3, this.editing && this.selected === 3 ? `URL: ${this.draft}▌` : `URL: ${this.changes.tunnelUrl ?? "（启动隧道后自动填入）"}`),
           option(4, "→ 下一步（写入确认）"),
-          fitLine("quick tunnel 命令: cloudflared tunnel --url http://127.0.0.1:9090", inner),
+          fitLine("quick tunnel 命令（自动）: cloudflared tunnel --url http://127.0.0.1:9090", inner),
           fitLine("命名隧道: cloudflared tunnel create mcpx && cloudflared tunnel route dns mcpx <域名> && cloudflared tunnel run mcpx", inner),
         ];
       }
       case "write": {
         const { summary } = this.build();
-        return [
+        const rows = [
           fitLine("将写入 ~/.mcpx/config.yaml（保留未修改的 section）：", inner),
           ...summary.map((line) => fitLine(`  · ${line}`, inner)),
-          fitLine("", inner),
-          fitLine("Enter 回到步骤 · w 写入并保存", inner),
         ];
+        rows.push(rule(inner));
+        rows.push(...this.renderConnectPreview(inner));
+        rows.push(rule(inner));
+        rows.push(fitLine("Enter 回到步骤 · w 写入并保存", inner));
+        return rows;
       }
     }
+  }
+
+  /** Cloud/MCP client connection card (ChatGPT 'new plugin' style fields). */
+  private renderConnectPreview(inner: number): string[] {
+    const port = this.changes.port ?? 9090;
+    const tunnelUrl = this.changes.tunnelUrl?.trim();
+    const baseUrl = tunnelUrl ?? `http://127.0.0.1:${port}`;
+    const auth = tunnelUrl
+      ? (this.changes.authMode === "bearer" ? "Bearer" : "OAuth（自动升级）")
+      : (this.changes.authMode === "bearer" ? "Bearer" : (this.changes.authMode === "oauth" ? "OAuth" : "open（仅本机）"));
+    const rows = [fitLine("云端 MCP 连接信息（照此填入 ChatGPT / Claude 新建连接）：", inner)];
+    rows.push(fitLine(`  名称: mcpx for pmf`, inner));
+    rows.push(fitLine(`  连接: ${tunnelUrl ? "服务器 URL" : "服务器 URL（本机调试）"}`, inner));
+    rows.push(fitLine(`  服务器 URL: ${baseUrl}/mcp`, inner));
+    rows.push(fitLine(`  身份验证: ${auth}`, inner));
+    if (tunnelUrl) {
+      if (auth === "OAuth（自动升级）") {
+        rows.push(fitLine("  → 填 URL 后 ChatGPT 会自动发现 OAuth（.well-known 端点已就绪），无需手动配置", inner));
+      } else if (auth === "Bearer") {
+        rows.push(fitLine("  → 需在客户端 Header 添加 Authorization: Bearer <token>", inner));
+      }
+      rows.push(fitLine("  → 名称/描述可自定义；风险提示确认后即可连接", inner));
+    } else {
+      rows.push(fitLine("  → 公网客户端不可达本机地址；启动隧道后 URL 自动变为 https://…/mcp", inner));
+    }
+    return rows;
   }
 
   private detectPiSkillsDir(): string | undefined {
@@ -446,6 +485,14 @@ export class McpxWizardOverlay implements Component, Focusable {
       this.params.requestRender();
       return;
     }
+    if (data === "g" && this.step === "tunnel") {
+      void this.startQuickTunnel();
+      return;
+    }
+    if (data === "x" && this.step === "tunnel") {
+      void this.stopTunnel();
+      return;
+    }
     if (isEnter(data)) {
       this.confirm();
       return;
@@ -479,9 +526,9 @@ export class McpxWizardOverlay implements Component, Focusable {
         }
       } else if (this.step === "oauth") {
         if (this.selected === 0) this.changes.oauthPassword = this.draft;
-        else this.changes.oauthServerURL = this.draft;
+        else this.changes.oauthServerURL = normalizeUrl(this.draft) || undefined;
       } else if (this.step === "tunnel") {
-        this.changes.tunnelUrl = this.draft.trim() || undefined;
+        this.changes.tunnelUrl = normalizeUrl(this.draft) || undefined;
       }
       this.editing = false;
       this.draft = "";
@@ -535,7 +582,7 @@ export class McpxWizardOverlay implements Component, Focusable {
           this.draft = this.changes.oauthPassword ?? "";
         } else {
           this.editing = true;
-          this.draft = this.changes.oauthServerURL ?? "https://";
+          this.draft = this.changes.oauthServerURL ?? "";
         }
         break;
       case "policy":
@@ -556,28 +603,124 @@ export class McpxWizardOverlay implements Component, Focusable {
         break;
       case "tunnel":
         if (this.selected === 4) {
+          const url = this.changes.tunnelUrl?.trim() ?? "";
+          if (!/^https?:\/\//.test(url)) {
+            this.status = "请先启动隧道获取公网 URL（Enter/g），或手动填写第 3 项 URL";
+            this.params.requestRender();
+            break;
+          }
           this.step = "write";
           break;
         }
-        if (this.selected === 3) {
-          this.editing = true;
-          this.draft = this.changes.tunnelUrl ?? "https://";
+        if (this.selected === 0) {
+          // Quick Tunnel: Enter starts cloudflared and auto-parses the URL.
+          void this.startQuickTunnel();
           break;
         }
-        if (this.selected === 0) {
-          this.changes.tunnelUrl = undefined;
-        } else {
-          this.changes.tunnelUrl = this.changes.tunnelUrl ?? "https://";
+        if (this.selected === 1 || this.selected === 2 || this.selected === 3) {
           this.editing = true;
-          this.draft = this.changes.tunnelUrl ?? "https://";
+          this.draft = this.changes.tunnelUrl ?? "";
         }
         break;
       case "write":
         this.step = "workspace";
         break;
     }
-    this.selected = 0;
+    // Editing branches keep the selected row so the draft cursor stays visible.
+    if (!this.editing) this.selected = 0;
     this.status = "";
+    this.params.requestRender();
+  }
+
+  /** Start a Cloudflare quick tunnel bound to the local mcpx port and parse the generated URL. */
+  private async startQuickTunnel(): Promise<void> {
+    if (this.tunnelProcess) {
+      this.status = this.changes.tunnelUrl ? `隧道运行中: ${this.changes.tunnelUrl}` : "隧道正在启动…";
+      this.params.requestRender();
+      return;
+    }
+    if (!isExecutableOnPath("cloudflared")) {
+      this.status = "未找到 cloudflared — 安装: winget install --id Cloudflare.cloudflared（Windows）/ brew install cloudflared（macOS）/ 官网安装包（Linux）";
+      this.params.requestRender();
+      return;
+    }
+    this.status = "正在启动 cloudflared 隧道…";
+    this.tunnelOutput = "";
+    this.params.requestRender();
+    try {
+      const child = spawn("cloudflared", ["tunnel", "--url", `http://127.0.0.1:${this.changes.port ?? 9090}`], {
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        shell: process.platform === "win32",
+      });
+      child.unref();
+      this.tunnelProcess = child;
+      child.stdout?.on("data", (chunk: Buffer) => this.onTunnelOutput(chunk.toString()));
+      child.stderr?.on("data", (chunk: Buffer) => this.onTunnelOutput(chunk.toString()));
+      try {
+        writeFileSync(this.tunnelPidPath(), String(child.pid ?? ""), "utf8");
+      } catch {
+        // best-effort
+      }
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline && !this.changes.tunnelUrl && this.tunnelProcess) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      if (this.changes.tunnelUrl) {
+        this.status = `隧道已就绪: ${this.changes.tunnelUrl}`;
+      } else {
+        this.status = "隧道已启动但未取得 URL（检查 cloudflared 输出；可稍后在 URL 项手动填写）";
+      }
+    } catch (error) {
+      this.status = `隧道启动失败: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    this.params.requestRender();
+  }
+
+  private onTunnelOutput(chunk: string): void {
+    this.tunnelOutput = (this.tunnelOutput + chunk).slice(-16_384);
+    const match = this.tunnelOutput.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+    if (match && !this.changes.tunnelUrl) {
+      this.changes.tunnelUrl = match[0];
+      this.params.requestRender();
+    }
+  }
+
+  /** Stop the cloudflared tunnel and clear its PID file. */
+  private async stopTunnel(): Promise<void> {
+    let pid: number | undefined = this.tunnelProcess?.pid;
+    if (!pid) {
+      try {
+        const raw = readFileSync(this.tunnelPidPath(), "utf8").trim();
+        const parsed = Number(raw);
+        if (Number.isInteger(parsed) && parsed > 0) pid = parsed;
+      } catch {
+        // no pid file
+      }
+    }
+    if (!pid) {
+      this.status = "未找到 cloudflared 进程";
+      this.params.requestRender();
+      return;
+    }
+    try {
+      if (process.platform === "win32") {
+        spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+      } else if (this.tunnelProcess && !this.tunnelProcess.killed) {
+        this.tunnelProcess.kill();
+      } else {
+        process.kill(pid, "SIGTERM");
+      }
+      this.status = "已停止 cloudflared 隧道";
+    } catch (error) {
+      this.status = `停止隧道失败: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    this.tunnelProcess = undefined;
+    try {
+      rmSync(this.tunnelPidPath(), { force: true });
+    } catch {
+      // best-effort
+    }
     this.params.requestRender();
   }
 
@@ -636,6 +779,14 @@ function fg(code: string, text: string): string {
 
 function isEnter(data: string): boolean {
   return matchesKey(data, Key.enter);
+}
+
+/** Fold duplicated URL schemes (https://https://…) and trim. */
+function normalizeUrl(value: string): string {
+  const trimmed = value.trim();
+  const scheme = trimmed.match(/^(https?:\/\/)/)?.[1] ?? "";
+  const rest = trimmed.replace(/^(https?:\/\/)+/, "");
+  return rest ? `${scheme}${rest}` : "";
 }
 
 function isExecutableOnPath(command: string): boolean {
