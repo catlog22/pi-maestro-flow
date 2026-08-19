@@ -1767,8 +1767,11 @@ async function configureCustomModelWithSteps(
   if (baseUrlInput === undefined) return;
   const baseUrl = normalizeBaseUrl(baseUrlInput);
   // On the add path, offer to discover models from the server instead of
-  // typing each Model ID by hand. Falls through to manual entry on cancel.
-  if (target.adding) {
+  // typing each Model ID by hand — but only when the Provider already has a
+  // saved API key, since discovery needs a working credential to authenticate
+  // against /models. A brand-new Provider with no saved key keeps the manual
+  // entry flow unchanged. Falls through to manual entry on cancel/failure.
+  if (target.adding && current.apiKey) {
     const outcome = await discoverAndInjectModels(
       pi,
       ctx,
