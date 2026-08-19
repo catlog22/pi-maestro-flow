@@ -258,3 +258,99 @@ test("pressing g again while the tunnel is ready reports it running (no duplicat
   assert.equal(s["tunnelProcess"]?.pid, firstPid, "no duplicate spawn");
   assert.match(s["status"] ?? "", /隧道运行中/);
 });
+
+test("a cloudflared child that exits before yielding a URL fails fast with exit code in status", async (t) => {
+  const { mkdtemp, mkdir, rm, writeFile, chmod } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = await mkdtemp(join(tmpdir(), "mcpx-die-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const binDir = join(dir, "bin");
+  await mkdir(binDir);
+  const isWin = process.platform === "win32";
+  const shim = join(binDir, isWin ? "cloudflared.cmd" : "cloudflared");
+  // Print an error line then exit non-zero — emulates a real cloudflared failure
+  // (e.g. port conflict / QUIC handshake) without ever emitting a trycloudflare URL.
+  await writeFile(shim, isWin
+    ? '@echo off\r\necho context deadline exceeded: no edge server available\r\nexit /b 7\r\n'
+    : '#!/bin/sh\necho "context deadline exceeded: no edge server available"\r\nexit 7\r\n', "utf8");
+  if (!isWin) await chmod(shim, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${binDir}${isWin ? ";" : ":"}${previousPath ?? ""}`;
+  const pidPath = join(dir, "cloudflared.pid");
+  const previousPidFile = process.env.MCPX_TUNNEL_PID_FILE;
+  process.env.MCPX_TUNNEL_PID_FILE = pidPath;
+  t.after(() => {
+    process.env.PATH = previousPath;
+    if (previousPidFile === undefined) delete process.env.MCPX_TUNNEL_PID_FILE;
+    else process.env.MCPX_TUNNEL_PID_FILE = previousPidFile;
+  });
+
+  const { overlay } = makeWizard();
+  const s = overlay;
+  // Navigate to the tunnel step and start it.
+  ["\x1b[B", "\x1b[B", "\r", "\x1b[B", "\r", "\r", "\x1b[B", "\r", "\r"].forEach((k) => overlay.handleInput(k));
+  overlay.handleInput("\r"); // start
+  // The child exits immediately; the wizard should fail fast — well under the old 30s.
+  const failDeadline = Date.now() + 8_000;
+  while (Date.now() < failDeadline && s["tunnelProcess"] !== undefined) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal(s["tunnelProcess"], undefined, "dead child must clear tunnelProcess promptly");
+  assert.equal(s["changes"]?.tunnelUrl, undefined, "no URL should be parsed");
+  assert.ok(s["tunnelExit"], "tunnelExit must be recorded");
+  // Exit code 7 surfaces (Windows shim uses exit /b 7 → code 7).
+  assert.match(s["status"] ?? "", /退出代码 7/, "status must show the exit code");
+  assert.match(s["status"] ?? "", /context deadline exceeded/, "status must surface cloudflared output tail");
+  assert.match(s["status"] ?? "", /按 g 重试/, "status must offer the retry affordance");
+});
+
+test("a live cloudflared that never prints a URL times out with output tail in status", async (t) => {
+  const { mkdtemp, mkdir, rm, writeFile, chmod } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = await mkdtemp(join(tmpdir(), "mcpx-silent-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const binDir = join(dir, "bin");
+  await mkdir(binDir);
+  const isWin = process.platform === "win32";
+  const shim = join(binDir, isWin ? "cloudflared.cmd" : "cloudflared");
+  // Emit a non-URL progress line and stay alive — emulates a slow / stalled tunnel.
+  await writeFile(shim, isWin
+    ? '@echo off\r\necho Connection registered, waiting for edge...\r\nping -n 60 127.0.0.1 >nul\r\n'
+    : '#!/bin/sh\necho "Connection registered, waiting for edge..."\r\nsleep 60\r\n', "utf8");
+  if (!isWin) await chmod(shim, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${binDir}${isWin ? ";" : ":"}${previousPath ?? ""}`;
+  const pidPath = join(dir, "cloudflared.pid");
+  const previousPidFile = process.env.MCPX_TUNNEL_PID_FILE;
+  process.env.MCPX_TUNNEL_PID_FILE = pidPath;
+  t.after(async () => {
+    process.env.PATH = previousPath;
+    if (previousPidFile === undefined) delete process.env.MCPX_TUNNEL_PID_FILE;
+    else process.env.MCPX_TUNNEL_PID_FILE = previousPidFile;
+    try {
+      const pid = Number(require("node:fs").readFileSync(pidPath, "utf8"));
+      if (Number.isInteger(pid) && pid > 0) {
+        if (isWin) require("node:child_process").spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+        else process.kill(pid, "SIGKILL");
+      }
+    } catch { /* best-effort */ }
+  });
+
+  const { overlay } = makeWizard();
+  const s = overlay;
+  ["\x1b[B", "\x1b[B", "\r", "\x1b[B", "\r", "\r", "\x1b[B", "\r", "\r"].forEach((k) => overlay.handleInput(k));
+  overlay.handleInput("\r"); // start
+  // The 30s poll must elapse; then status shows the timeout + captured output tail.
+  const timeoutDeadline = Date.now() + 35_000;
+  while (Date.now() < timeoutDeadline && !/未取得 URL/.test(s["status"] ?? "")) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  assert.match(s["status"] ?? "", /隧道已启动但未取得 URL/);
+  assert.match(s["status"] ?? "", /Connection registered/, "timeout status must surface the output tail");
+  assert.equal(s["changes"]?.tunnelUrl, undefined);
+  assert.ok(s["tunnelProcess"], "child still alive at timeout (not killed)");
+  // Stop the lingering child to clean up.
+  overlay.handleInput("x");
+});

@@ -263,6 +263,8 @@ export class McpxWizardOverlay implements Component, Focusable {
   private status = "";
   private tunnelProcess: ReturnType<typeof spawn> | undefined;
   private tunnelOutput = "";
+  /** Exit code / signal captured when the cloudflared child died on its own (undefined while alive). */
+  private tunnelExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
 
   private tunnelPidPath(): string {
     return process.env.MCPX_TUNNEL_PID_FILE ?? join(homedir(), ".mcpx", "cloudflared.pid");
@@ -580,6 +582,7 @@ export class McpxWizardOverlay implements Component, Focusable {
     }
     this.status = "正在启动 cloudflared 隧道…";
     this.tunnelOutput = "";
+    this.tunnelExit = undefined;
     this.params.requestRender();
     try {
       const child = spawn("cloudflared", ["tunnel", "--url", `http://127.0.0.1:${this.changes.port ?? 9090}`], {
@@ -591,6 +594,33 @@ export class McpxWizardOverlay implements Component, Focusable {
       this.tunnelProcess = child;
       child.stdout?.on("data", (chunk: Buffer) => this.onTunnelOutput(chunk.toString()));
       child.stderr?.on("data", (chunk: Buffer) => this.onTunnelOutput(chunk.toString()));
+      // Lifecycle: if cloudflared dies before yielding a URL, surface the exit cause
+      // immediately instead of leaving the poll loop to time out 30s in the dark.
+      child.on("error", (err: Error) => {
+        this.tunnelExit = { code: null, signal: null };
+        if (this.tunnelProcess === child) {
+          this.tunnelProcess = undefined;
+          this.appendTunnelLine(`cloudflared 启动错误: ${err.message}`);
+          this.status = this.tunnelFailStatus();
+          this.params.requestRender();
+        }
+      });
+      child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+        this.tunnelExit = { code, signal };
+        if (this.tunnelProcess === child) {
+          this.tunnelProcess = undefined;
+          // Preserve any error text already captured from stdout/stderr.
+          if (code !== 0 && code !== null) {
+            this.appendTunnelLine(`cloudflared 退出（代码 ${code}）`);
+          } else if (signal) {
+            this.appendTunnelLine(`cloudflared 被信号终止（${signal}）`);
+          }
+          // Only override the URL status: a tunnel that died no longer serves it.
+          if (!this.changes.tunnelUrl) this.status = this.tunnelFailStatus();
+          else this.changes.tunnelUrl = undefined; // dead URL must not reach the write step
+          this.params.requestRender();
+        }
+      });
       try {
         writeFileSync(this.tunnelPidPath(), String(child.pid ?? ""), "utf8");
       } catch {
@@ -614,11 +644,14 @@ export class McpxWizardOverlay implements Component, Focusable {
     while (Date.now() < deadline && !this.changes.tunnelUrl && this.tunnelProcess) {
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    if (!this.tunnelProcess) return; // stopped while waiting — stopTunnel owns the status
+    // The child died on its own (exit/error handler already set tunnelProcess=undefined
+    // and composed the failure status). Do not clobber it with a timeout message.
+    if (this.tunnelExit) return;
+    if (!this.tunnelProcess) return; // stopped via stopTunnel — stopTunnel owns the status
     if (this.changes.tunnelUrl) {
       this.status = `隧道运行中: ${this.changes.tunnelUrl}`;
     } else {
-      this.status = "隧道已启动但未取得 URL — 按 Enter/g 继续等待，x 停止后重试";
+      this.status = this.tunnelTimeoutStatus();
     }
     this.params.requestRender();
   }
@@ -630,6 +663,40 @@ export class McpxWizardOverlay implements Component, Focusable {
       this.changes.tunnelUrl = match[0];
       this.params.requestRender();
     }
+  }
+
+  /** Append a synthetic diagnostic line into the captured output so the tail is visible. */
+  private appendTunnelLine(line: string): void {
+    this.tunnelOutput = (this.tunnelOutput + "\n" + line).slice(-16_384);
+  }
+
+  /** Last few non-empty cloudflared output lines, for surfacing diagnostics in the status. */
+  private tunnelOutputTail(max = 3): string {
+    const lines = this.tunnelOutput.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+    return lines.slice(-max).join(" ⏐ ");
+  }
+
+  /** Status string when the cloudflared child died before yielding a URL. */
+  private tunnelFailStatus(): string {
+    const cause = this.tunnelExit
+      ? this.tunnelExit.signal
+        ? `被信号 ${this.tunnelExit.signal} 终止`
+        : this.tunnelExit.code === null
+          ? "启动错误"
+          : `退出代码 ${this.tunnelExit.code}`
+      : "已退出";
+    const tail = this.tunnelOutputTail();
+    return tail
+      ? `cloudflared ${cause} — ${tail}（按 g 重试 / 检查端口或 cloudflared 版本）`
+      : `cloudflared ${cause} — 按 g 重试（检查端口或 cloudflared 版本）`;
+  }
+
+  /** Status string when the 30s poll deadline elapsed with the child still alive. */
+  private tunnelTimeoutStatus(): string {
+    const tail = this.tunnelOutputTail();
+    return tail
+      ? `隧道已启动但未取得 URL — ${tail}（Enter/g 继续等待，x 停止后重试）`
+      : "隧道已启动但未取得 URL — 按 Enter/g 继续等待，x 停止后重试";
   }
 
   /** Stop the cloudflared tunnel, clear its PID file and the parsed URL. */
@@ -657,6 +724,7 @@ export class McpxWizardOverlay implements Component, Focusable {
       this.status = `停止隧道失败: ${error instanceof Error ? error.message : String(error)}`;
     }
     this.tunnelProcess = undefined;
+    this.tunnelExit = undefined;
     // A stopped tunnel's URL is dead — never let it reach the write step.
     this.changes.tunnelUrl = undefined;
     this.tunnelOutput = "";
