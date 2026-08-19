@@ -866,12 +866,7 @@ function isProcessAlive(pid: number): boolean {
 }
 
 function isExecutableOnPath(command: string): boolean {
-  const probe = spawnSync(process.platform === "win32" ? "where" : "which", [command], {
-    encoding: "utf8",
-    timeout: 5_000,
-    shell: process.platform === "win32",
-  });
-  return probe.status === 0;
+  return resolveExecutable(command) !== undefined;
 }
 
 /**
@@ -906,4 +901,5 @@ export const _mcpxWizardInternals = {
   splitSections,
   parseListItems,
   buildChangesYaml,
+  resolveExecutable,
 };

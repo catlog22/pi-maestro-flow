@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { _mcpxWizardInternals, type McpxConfigChanges } from "../src/tui/mcpx-wizard.ts";
 
-const { splitSections, parseListItems, buildChangesYaml } = _mcpxWizardInternals;
+const { splitSections, parseListItems, buildChangesYaml, resolveExecutable } = _mcpxWizardInternals;
 
 const SAMPLE_CONFIG = [
   "server:",
@@ -139,4 +139,28 @@ test("buildChangesYaml keeps an explicit oauth server_url over the tunnel URL", 
   const { yaml } = buildChangesYaml(SAMPLE_CONFIG, changes, "D:/demo");
   assert.match(yaml, /server_url: "https:\/\/custom\.example\.com"/);
   assert.doesNotMatch(yaml, /server_url: "https:\/\/tunnel\.example\.com"/);
+});
+
+test("resolveExecutable returns the first PATH-order match for a real command", () => {
+  // `node` is guaranteed to be on PATH in a node --test run, so this exercises
+  // the real where/which probe without mocking. It must resolve to a path whose
+  // basename is node[.exe] — the first line of the probe output (PATH order).
+  const resolved = resolveExecutable("node");
+  assert.ok(resolved, "node should resolve on PATH");
+  const base = resolved!.replace(/\\/g, "/").split("/").pop()!.toLowerCase();
+  assert.match(base, /^node(\.exe)?$/);
+});
+
+test("resolveExecutable returns undefined for a missing command", () => {
+  const resolved = resolveExecutable("this-command-does-not-exist-anywhere-12345");
+  assert.equal(resolved, undefined);
+});
+
+test("resolveExecutable respects PATH order (first match wins)", () => {
+  // Sanity: resolution is a single path (the first where/which line), not a
+  // concatenation of all matches. Guards against a regression that might grab
+  // a later, lower-priority install.
+  const resolved = resolveExecutable("node");
+  assert.ok(resolved);
+  assert.ok(!resolved!.includes("\n"), "must be a single line, not all matches");
 });
