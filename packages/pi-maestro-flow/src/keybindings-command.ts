@@ -28,6 +28,7 @@ export const MAESTRO_GLOBAL_SHORTCUTS = [
   { key: "alt+m", owner: "Teammate control center" },
   { key: "alt+j", owner: "Cockpit background jobs" },
   { key: "alt+shift+t", owner: "Cockpit Todo center" },
+  { key: "alt+shift+e", owner: "Prompt enhance" },
 ] as const;
 
 type KeybindingAction = "check" | "fix" | "restore";
