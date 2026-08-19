@@ -62,15 +62,15 @@ const baseAgentConfig: AgentConfig = {
   filePath: "general.md",
 };
 
-type SpawnChildProcess = NonNullable<Parameters<typeof runSingleTeammate>[1]["spawnChildProcess"]>;
-type MutableFakeProcess = Omit<ChildProcess, "exitCode"> & { exitCode: number | null };
-type FakeSpawn = (command: string, args: readonly string[], options: SpawnOptions) => MutableFakeProcess;
+export type SpawnChildProcess = NonNullable<Parameters<typeof runSingleTeammate>[1]["spawnChildProcess"]>;
+export type MutableFakeProcess = Omit<ChildProcess, "exitCode"> & { exitCode: number | null };
+export type FakeSpawn = (command: string, args: readonly string[], options: SpawnOptions) => MutableFakeProcess;
 
-function createFakeProcess(): MutableFakeProcess {
+export function createFakeProcess(): MutableFakeProcess {
   return new EventEmitter() as MutableFakeProcess;
 }
 
-function reclaimFakeProcess(child: MutableFakeProcess): boolean {
+export function reclaimFakeProcess(child: MutableFakeProcess): boolean {
   if (child.exitCode !== null) return true;
   child.exitCode = 0;
   child.emit("exit", 0, null);
@@ -82,7 +82,7 @@ function isArgumentList(value: readonly string[] | SpawnOptions): value is reado
   return Array.isArray(value);
 }
 
-function adaptFakeSpawn(factory: FakeSpawn): SpawnChildProcess {
+export function adaptFakeSpawn(factory: FakeSpawn): SpawnChildProcess {
   function spawn(command: string, options: SpawnOptions): ChildProcess;
   function spawn(command: string, args?: readonly string[], options?: SpawnOptions): ChildProcess;
   function spawn(

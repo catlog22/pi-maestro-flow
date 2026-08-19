@@ -5966,6 +5966,33 @@ test("relevance ranking prunes low-signal candidates before a matching result", 
   assert.ok(keywordManifest.has("newest"));
   assert.ok(keywordManifest.has("old"));
   assert.ok(!keywordManifest.has("important"), "keyword mode also spares the matching output");
+
+  // DEF-003: a non-empty but un-tokenizable relevance query (punctuation/
+  // symbol/emoji only) must NOT be scored as a uniform-zero tie that silently
+  // sorts newest-first (inverting the feature's intent). It must behave like
+  // relevance ranking disabled — the default newest-first walk — which prunes
+  // the oldest candidate just like relevance OFF.
+  const untokenizableMessages = messages.map((message, index) =>
+    index === messages.length - 1
+      ? { ...message, content: [{ type: "text" as const, text: "???...." }] }
+      : message,
+  ) as typeof messages;
+  const untokenizableManifest = new Map();
+  applyContextPressurePolicy(untokenizableMessages, 120_000, {
+    ...base,
+    soft: {
+      ...DEFAULT_SOFT_COMPACTION,
+      pruneTargetRatio: 0.79,
+      cache: { enabled: false },
+      lossless: { enabled: false },
+      relevance: { enabled: true, mode: "bm25" },
+    },
+  }, untokenizableManifest);
+  // The untokenizable query must behave like relevance OFF (newest-first):
+  // the matching "important" output is NOT specially protected by relevance,
+  // so it is a prune candidate just like the OFF case above.
+  assert.ok(untokenizableManifest.has("important"),
+    "untokenizable query must not protect the matching output (ranking disabled, not uniform-zero tie)");
 });
 
 test("relevance survives the cache gate: qualified low-signal prefix still prunes", () => {

@@ -1951,10 +1951,12 @@ export async function runSingleAttempt(
       // Non-JSON stdout attributed as assistant content is a protocol violation;
       // a child that emits it must not settle as a clean success (exitCode 0)
       // even if it exits 0 with no runtimeFailure. Otherwise malformed output is
-      // attributed as the valid answer (DEF-002 false-success).
+      // attributed as the valid answer (DEF-002 false-success). The violation
+      // flag is the authoritative signal — by this point the malformed text has
+      // already been appended to messages as assistant content, so checking
+      // messages.length would miss the case.
       const protocolViolationExit = state.stdoutProtocolViolation
         && state.runtimeFailure === undefined
-        && messages.length === 0
         ? 1
         : 0;
       const exitCode = (processExitCode === 0 && params.outputSchema && structuredOutput === undefined)
