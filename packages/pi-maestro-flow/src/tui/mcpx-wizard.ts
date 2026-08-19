@@ -3,18 +3,18 @@
  * (configuration overview / security recommendations / client setup):
  *
  *   1. listen address (host + port)
- *   2. auth mode (open | bearer | oauth) — README: never `open` on public nets
- *   3. command policy default (allow | confirm | deny) — README recommends
+ *   2. command policy default (allow | confirm | deny) — README recommends
  *      tightening to confirm/deny for shared or public deployments
- *   4. pi allow-rule (`^pi\b`) so pi_window/pi_execute work under strict policies
- *   5. skill discovery dirs (append the pi plugin skills dir when present)
- *   6. register the current workspace
+ *   3. pi allow-rule (`^pi\b`) so pi_window/pi_execute work under strict policies
+ *   4. skill discovery dirs (append the pi plugin skills dir when present)
+ *   5. register the current workspace (lease-based via the /mcpx panel; here
+ *      the write step just merges config sections)
+ *   6. public tunnel (Cloudflare Quick Tunnel only — the unique mode)
  *   7. write confirmation (section-preserving merge into ~/.mcpx/config.yaml)
  *
- * Keys: ↑↓/jk select · ←→/1-3 pick · Enter confirm · Esc back/close · g regenerate token
+ * Keys: ↑↓/jk select · Enter confirm · Esc back/close · g start tunnel · x stop tunnel
  */
 import { spawn, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -51,7 +51,6 @@ type WizardStep =
   | "tunnel"
   | "write";
 
-const STEP_ORDER: WizardStep[] = ["listen", "policy", "pi", "skills", "workspace", "tunnel", "write"];
 const STEP_LABEL: Record<WizardStep, string> = {
   listen: "1/7 监听地址",
   policy: "2/7 命令策略",
@@ -266,10 +265,9 @@ export class McpxWizardOverlay implements Component, Focusable {
   private tunnelOutput = "";
 
   private tunnelPidPath(): string {
-    return join(homedir(), ".mcpx", "cloudflared.pid");
+    return process.env.MCPX_TUNNEL_PID_FILE ?? join(homedir(), ".mcpx", "cloudflared.pid");
   }
   private changes: McpxConfigChanges = {};
-  private generatedToken = "";
   private readonly existingConfig: string;
 
   constructor(private readonly params: McpxWizardParams) {
@@ -280,15 +278,10 @@ export class McpxWizardOverlay implements Component, Focusable {
       // first-run: no config yet
     }
     this.existingConfig = existing;
-    this.generatedToken = this.newToken();
   }
 
   private configPath(): string {
     return join(homedir(), ".mcpx", "config.yaml");
-  }
-
-  private newToken(): string {
-    return `mcpx_${randomBytes(18).toString("hex")}`;
   }
 
   invalidate(): void {}
@@ -541,7 +534,7 @@ export class McpxWizardOverlay implements Component, Focusable {
           if (!/^https?:\/\//.test(url)) {
             this.status = "请先启动隧道获取公网 URL（Enter/g）";
             this.params.requestRender();
-            break;
+            return; // keep the message visible (confirm() tail would clear it)
           }
           this.step = "write";
           break;
@@ -562,7 +555,21 @@ export class McpxWizardOverlay implements Component, Focusable {
   /** Start a Cloudflare quick tunnel bound to the local mcpx port and parse the generated URL. */
   private async startQuickTunnel(): Promise<void> {
     if (this.tunnelProcess) {
-      this.status = this.changes.tunnelUrl ? `隧道运行中: ${this.changes.tunnelUrl}` : "隧道正在启动…";
+      if (this.changes.tunnelUrl) {
+        this.status = `隧道运行中: ${this.changes.tunnelUrl}`;
+        this.params.requestRender();
+        return;
+      }
+      // Process up but URL not parsed yet: resume waiting instead of a dead end.
+      this.status = "隧道正在启动，继续等待 URL…";
+      this.params.requestRender();
+      await this.waitForTunnelUrl();
+      return;
+    }
+    // Adopt a tunnel left behind by a previous wizard session (PID file).
+    const existing = this.pidFromFile();
+    if (existing && isProcessAlive(existing)) {
+      this.status = `隧道已在运行（PID ${existing}）— 按 x 停止后重新启动`;
       this.params.requestRender();
       return;
     }
@@ -589,17 +596,29 @@ export class McpxWizardOverlay implements Component, Focusable {
       } catch {
         // best-effort
       }
-      const deadline = Date.now() + 30_000;
-      while (Date.now() < deadline && !this.changes.tunnelUrl && this.tunnelProcess) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
-      if (this.changes.tunnelUrl) {
-        this.status = `隧道已就绪: ${this.changes.tunnelUrl}`;
-      } else {
-        this.status = "隧道已启动但未取得 URL（检查 cloudflared 输出；可稍后在 URL 项手动填写）";
-      }
+      await this.waitForTunnelUrl();
     } catch (error) {
       this.status = `隧道启动失败: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    this.params.requestRender();
+  }
+
+  /** Poll cloudflared output up to 30s for the generated URL; keeps status consistent with stop. */
+  private async waitForTunnelUrl(): Promise<void> {
+    if (this.changes.tunnelUrl) {
+      this.status = `隧道运行中: ${this.changes.tunnelUrl}`;
+      this.params.requestRender();
+      return;
+    }
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline && !this.changes.tunnelUrl && this.tunnelProcess) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    if (!this.tunnelProcess) return; // stopped while waiting — stopTunnel owns the status
+    if (this.changes.tunnelUrl) {
+      this.status = `隧道运行中: ${this.changes.tunnelUrl}`;
+    } else {
+      this.status = "隧道已启动但未取得 URL — 按 Enter/g 继续等待，x 停止后重试";
     }
     this.params.requestRender();
   }
@@ -613,18 +632,9 @@ export class McpxWizardOverlay implements Component, Focusable {
     }
   }
 
-  /** Stop the cloudflared tunnel and clear its PID file. */
+  /** Stop the cloudflared tunnel, clear its PID file and the parsed URL. */
   private async stopTunnel(): Promise<void> {
-    let pid: number | undefined = this.tunnelProcess?.pid;
-    if (!pid) {
-      try {
-        const raw = readFileSync(this.tunnelPidPath(), "utf8").trim();
-        const parsed = Number(raw);
-        if (Number.isInteger(parsed) && parsed > 0) pid = parsed;
-      } catch {
-        // no pid file
-      }
-    }
+    let pid: number | undefined = this.tunnelProcess?.pid ?? this.pidFromFile();
     if (!pid) {
       this.status = "未找到 cloudflared 进程";
       this.params.requestRender();
@@ -636,19 +646,36 @@ export class McpxWizardOverlay implements Component, Focusable {
       } else if (this.tunnelProcess && !this.tunnelProcess.killed) {
         this.tunnelProcess.kill();
       } else {
-        process.kill(pid, "SIGTERM");
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch {
+          // ESRCH: already gone — treat as stopped
+        }
       }
       this.status = "已停止 cloudflared 隧道";
     } catch (error) {
       this.status = `停止隧道失败: ${error instanceof Error ? error.message : String(error)}`;
     }
     this.tunnelProcess = undefined;
+    // A stopped tunnel's URL is dead — never let it reach the write step.
+    this.changes.tunnelUrl = undefined;
+    this.tunnelOutput = "";
     try {
       rmSync(this.tunnelPidPath(), { force: true });
     } catch {
       // best-effort
     }
     this.params.requestRender();
+  }
+
+  private pidFromFile(): number | undefined {
+    try {
+      const raw = readFileSync(this.tunnelPidPath(), "utf8").trim();
+      const parsed = Number(raw);
+      return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private build(): { yaml: string; summary: string[] } {
@@ -709,11 +736,19 @@ function isEnter(data: string): boolean {
 }
 
 /** Fold duplicated URL schemes (https://https://…) and trim. */
-function normalizeUrl(value: string): string {
-  const trimmed = value.trim();
-  const scheme = trimmed.match(/^(https?:\/\/)/)?.[1] ?? "";
-  const rest = trimmed.replace(/^(https?:\/\/)+/, "");
-  return rest ? `${scheme}${rest}` : "";
+function isProcessAlive(pid: number): boolean {
+  try {
+    if (process.platform === "win32") {
+      const result = spawnSync("tasklist", ["/FI", `PID eq ${pid}`], { encoding: "utf8", timeout: 10_000 });
+      if (result.status !== 0) return false;
+      const out = String(result.stdout || "");
+      return out.includes(String(pid)) && !/No tasks/i.test(out);
+    }
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isExecutableOnPath(command: string): boolean {

@@ -205,3 +205,63 @@ test("collectConnections returns undefined when the endpoint is unreachable", as
   const connections = await collectConnections("http://127.0.0.1:1/mcp");
   assert.equal(connections, undefined);
 });
+
+test("e key routes register to onRegisterWorkspace (lease) and unregister to onUnregisterWorkspace", async (t) => {
+  const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
+  const dir = await mkdtemp(join(tmpdir(), "mcpx-toggle-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const binDir = join(dir, "bin");
+  await mkdir(binDir);
+  const isWin = process.platform === "win32";
+  const shim = join(binDir, isWin ? "mcpx.cmd" : "mcpx");
+  await writeFile(
+    shim,
+    isWin
+      ? `@echo off\r\nif "%1"=="workspace" if "%2"=="list" echo workspaces:\r\nexit /b 0\r\n`
+      : `#!/bin/sh\nif [ "$1" = "workspace" ] && [ "$2" = "list" ]; then echo workspaces:; fi\nexit 0\n`,
+  );
+  if (!isWin) await (await import("node:fs/promises")).chmod(shim, 0o755);
+  const previousBin = process.env.MCPX_BIN;
+  const previousPath = process.env.PATH;
+  process.env.MCPX_BIN = shim;
+  process.env.PATH = `${binDir}${isWin ? ";" : ":"}${previousPath ?? ""}`;
+  t.after(() => {
+    if (previousBin === undefined) delete process.env.MCPX_BIN;
+    else process.env.MCPX_BIN = previousBin;
+    process.env.PATH = previousPath;
+  });
+
+  const registerCalls: string[] = [];
+  const unregisterCalls: string[] = [];
+  const overlay = new McpxOverlay({
+    cwd: "D:/toggle-demo",
+    requestRender: () => undefined,
+    close: () => undefined,
+    onRegisterWorkspace: async (path) => { registerCalls.push(path); return "registered-leased"; },
+    onUnregisterWorkspace: async (path) => { unregisterCalls.push(path); return "unregistered"; },
+  });
+  const s = overlay;
+  await overlay.refresh();
+  // unregistered snapshot -> e must invoke the lease callback, not spawnSync
+  overlay.handleInput("e");
+  let status = "";
+  for (let i = 0; i < 50; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    status = s["status"] ?? "";
+    if (status === "registered-leased" || status.startsWith("register failed")) break;
+  }
+  assert.deepEqual(registerCalls, ["D:/toggle-demo"], "register must go through onRegisterWorkspace");
+  assert.equal(status, "registered-leased");
+
+  // registered snapshot -> e must invoke the unregister callback
+  s["snapshot"].cwdRegistered = true;
+  overlay.handleInput("e");
+  status = "";
+  for (let i = 0; i < 50; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    status = s["status"] ?? "";
+    if (status === "unregistered" || status.startsWith("remove failed")) break;
+  }
+  assert.deepEqual(unregisterCalls, ["D:/toggle-demo"], "unregister must go through onUnregisterWorkspace");
+  assert.equal(status, "unregistered");
+});

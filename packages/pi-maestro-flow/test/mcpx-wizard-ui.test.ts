@@ -87,7 +87,22 @@ test("full flow reaches the write step and renders a summary", async (t) => {
   if (!isWin) await chmod(shim, 0o755);
   const previousPath = process.env.PATH;
   process.env.PATH = `${binDir}${isWin ? ";" : ":"}${previousPath ?? ""}`;
-  t.after(() => { process.env.PATH = previousPath; });
+  const pidPath = join(dir, "cloudflared.pid");
+  const previousPidFile = process.env.MCPX_TUNNEL_PID_FILE;
+  process.env.MCPX_TUNNEL_PID_FILE = pidPath;
+  t.after(async () => {
+    process.env.PATH = previousPath;
+    if (previousPidFile === undefined) delete process.env.MCPX_TUNNEL_PID_FILE;
+    else process.env.MCPX_TUNNEL_PID_FILE = previousPidFile;
+    // kill any lingering fake tunnel child (spawned detached+unref'd)
+    try {
+      const pid = Number(await (await import("node:fs/promises")).readFile(pidPath, "utf8").catch(() => ""));
+      if (Number.isInteger(pid) && pid > 0) {
+        if (isWin) (await import("node:child_process")).spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+        else process.kill(pid, "SIGKILL");
+      }
+    } catch { /* best-effort */ }
+  });
 
   const { overlay } = makeWizard();
   const s = overlay;
@@ -112,9 +127,7 @@ test("full flow reaches the write step and renders a summary", async (t) => {
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   assert.equal(s["changes"]?.tunnelUrl, "https://abc-123.trycloudflare.com", "URL should be parsed from cloudflared output");
-  // stop the fake tunnel while still on the tunnel step (x is ignored elsewhere)
-  overlay.handleInput("x");
-  await new Promise((resolve) => setTimeout(resolve, 1500));
+  // the tunnel is live: advance straight to write (stopping it would clear the URL)
   overlay.handleInput("\x1b[B"); // -> next
   overlay.handleInput("\r");
   const text = renderText(overlay);
@@ -139,4 +152,109 @@ test("escape closes from the first step and backs out of later steps", () => {
   second.overlay.handleInput("\r"); // -> policy
   second.overlay.handleInput("\x1b"); // back to listen
   assert.match(renderText(second.overlay), /1\/7 监听地址/);
+});
+
+test("next without a tunnel URL shows the guard message and stays on the tunnel step", () => {
+  const { overlay } = makeWizard();
+  const s = overlay;
+  ["\x1b[B", "\x1b[B", "\r", "\x1b[B", "\r", "\r", "\x1b[B", "\r", "\r"].forEach((k) => overlay.handleInput(k));
+  assert.equal(s["step"], "tunnel");
+  overlay.handleInput("\x1b[B"); // -> next (selected 1)
+  overlay.handleInput("\r");
+  assert.equal(s["step"], "tunnel", "guard must keep the step on tunnel");
+  assert.match(renderText(overlay), /请先启动隧道获取公网 URL/);
+});
+
+test("stopping the tunnel clears the URL and blocks the write step", async (t) => {
+  const { mkdtemp, mkdir, rm, writeFile, chmod } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = await mkdtemp(join(tmpdir(), "mcpx-stop-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const binDir = join(dir, "bin");
+  await mkdir(binDir);
+  const isWin = process.platform === "win32";
+  const shim = join(binDir, isWin ? "cloudflared.cmd" : "cloudflared");
+  await writeFile(shim, isWin
+    ? '@echo off\r\necho Your quick Tunnel has been created! Visit it at https://stop-me.trycloudflare.com\r\nping -n 30 127.0.0.1 >nul\r\n'
+    : '#!/bin/sh\necho "Your quick Tunnel has been created! Visit it at https://stop-me.trycloudflare.com"\nsleep 30\n', "utf8");
+  if (!isWin) await chmod(shim, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${binDir}${isWin ? ";" : ":"}${previousPath ?? ""}`;
+  const pidPath = join(dir, "cloudflared.pid");
+  const previousPidFile = process.env.MCPX_TUNNEL_PID_FILE;
+  process.env.MCPX_TUNNEL_PID_FILE = pidPath;
+  t.after(() => {
+    process.env.PATH = previousPath;
+    if (previousPidFile === undefined) delete process.env.MCPX_TUNNEL_PID_FILE;
+    else process.env.MCPX_TUNNEL_PID_FILE = previousPidFile;
+  });
+
+  const { overlay } = makeWizard();
+  const s = overlay;
+  ["\x1b[B", "\x1b[B", "\r", "\x1b[B", "\r", "\r", "\x1b[B", "\r", "\r"].forEach((k) => overlay.handleInput(k));
+  overlay.handleInput("\r"); // start the tunnel
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline && s["changes"]?.tunnelUrl !== "https://stop-me.trycloudflare.com") {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  assert.equal(s["changes"]?.tunnelUrl, "https://stop-me.trycloudflare.com");
+  overlay.handleInput("x"); // stop it
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  assert.equal(s["changes"]?.tunnelUrl, undefined, "stopping must clear the URL");
+  overlay.handleInput("\x1b[B"); // -> next
+  overlay.handleInput("\r");
+  assert.equal(s["step"], "tunnel", "write step must be blocked after the tunnel stopped");
+  assert.match(renderText(overlay), /请先启动隧道获取公网 URL/);
+});
+
+test("pressing g again while the tunnel is ready reports it running (no duplicate spawn)", async (t) => {
+  const { mkdtemp, mkdir, rm, writeFile, chmod } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = await mkdtemp(join(tmpdir(), "mcpx-again-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const binDir = join(dir, "bin");
+  await mkdir(binDir);
+  const isWin = process.platform === "win32";
+  const shim = join(binDir, isWin ? "cloudflared.cmd" : "cloudflared");
+  await writeFile(shim, isWin
+    ? '@echo off\r\necho Your quick Tunnel has been created! Visit it at https://again-1.trycloudflare.com\r\nping -n 30 127.0.0.1 >nul\r\n'
+    : '#!/bin/sh\necho "Your quick Tunnel has been created! Visit it at https://again-1.trycloudflare.com"\nsleep 30\n', "utf8");
+  if (!isWin) await chmod(shim, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${binDir}${isWin ? ";" : ":"}${previousPath ?? ""}`;
+  const pidPath = join(dir, "cloudflared.pid");
+  const previousPidFile = process.env.MCPX_TUNNEL_PID_FILE;
+  process.env.MCPX_TUNNEL_PID_FILE = pidPath;
+  t.after(() => {
+    process.env.PATH = previousPath;
+    if (previousPidFile === undefined) delete process.env.MCPX_TUNNEL_PID_FILE;
+    else process.env.MCPX_TUNNEL_PID_FILE = previousPidFile;
+    try {
+      const pid = Number(require("node:fs").readFileSync(pidPath, "utf8"));
+      if (Number.isInteger(pid) && pid > 0) {
+        if (isWin) require("node:child_process").spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+        else process.kill(pid, "SIGKILL");
+      }
+    } catch { /* best-effort */ }
+  });
+
+  const { overlay } = makeWizard();
+  const s = overlay;
+  ["\x1b[B", "\x1b[B", "\r", "\x1b[B", "\r", "\r", "\x1b[B", "\r", "\r"].forEach((k) => overlay.handleInput(k));
+  overlay.handleInput("\r"); // start
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline && s["changes"]?.tunnelUrl !== "https://again-1.trycloudflare.com") {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  const firstPid = s["tunnelProcess"]?.pid;
+  assert.ok(firstPid, "tunnel process should exist");
+  overlay.handleInput("g"); // again — must not spawn a second tunnel
+  const statusDeadline = Date.now() + 4_000;
+  while (Date.now() < statusDeadline && !/隧道运行中/.test(s["status"] ?? "")) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal(s["tunnelProcess"]?.pid, firstPid, "no duplicate spawn");
+  assert.match(s["status"] ?? "", /隧道运行中/);
 });

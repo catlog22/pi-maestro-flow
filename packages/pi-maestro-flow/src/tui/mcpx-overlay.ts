@@ -376,6 +376,7 @@ export class McpxOverlay implements Component, Focusable {
   };
   private status = "";
   private mcpxProcess: ReturnType<typeof spawn> | undefined;
+  private starting = false; // guards startMcpx against re-entry (orphan spawns)
 
   constructor(private readonly params: McpxOverlayParams) {
     void this.refresh();
@@ -394,6 +395,7 @@ export class McpxOverlay implements Component, Focusable {
 
   /** Start the mcpx server detached, persist its PID, and wait for the endpoint. */
   private async startMcpx(): Promise<void> {
+    if (this.starting) return; // a second "s" while starting would orphan the first spawn
     const binary = locateMcpx();
     if (!binary) {
       this.status = "未找到 mcpx — 设置 MCPX_BIN 或将其加入 PATH";
@@ -405,6 +407,7 @@ export class McpxOverlay implements Component, Focusable {
       this.params.requestRender();
       return;
     }
+    this.starting = true;
     this.status = "正在启动 mcpx…";
     this.params.requestRender();
     try {
@@ -429,6 +432,8 @@ export class McpxOverlay implements Component, Focusable {
       this.status = online ? "mcpx 已启动并监听" : "mcpx 进程已拉起但端点未就绪（检查启动日志）";
     } catch (error) {
       this.status = `启动失败: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      this.starting = false;
     }
     await this.refresh();
   }
@@ -584,11 +589,16 @@ export class McpxOverlay implements Component, Focusable {
       return;
     }
     try {
-      const command = registered ? "remove" : "register";
       if (registered && this.params.onUnregisterWorkspace) {
         const message = await this.params.onUnregisterWorkspace(this.params.cwd);
         this.status = message;
+      } else if (!registered && this.params.onRegisterWorkspace) {
+        // Lease-based registration (TTL + heartbeat) — never fall back to a
+        // static `workspace register` while the extension provides a lease.
+        const message = await this.params.onRegisterWorkspace(this.params.cwd);
+        this.status = message;
       } else {
+        const command = registered ? "remove" : "register";
         const result = spawnSync(binary, ["workspace", command, this.params.cwd], {
           encoding: "utf8", timeout: 15_000, shell: process.platform === "win32",
         });

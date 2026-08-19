@@ -25,6 +25,7 @@ const HEARTBEAT_MS = 60_000;
 
 let leaseTimer: NodeJS.Timeout | undefined;
 let leaseCwd: string | undefined;
+let leaseGeneration = 0;
 
 export function locateMcpx(): string | undefined {
   const configured = process.env.MCPX_BIN;
@@ -64,14 +65,27 @@ function runMcpx(args: string[]): { status: number | null; stderr: string } {
 /**
  * Register `root` (defaults to process.cwd()) with the local MCPX runtime
  * under a lease. Fire-and-forget: never throws, never blocks startup.
+ * Deduplicated per path so bursty callers only spawn one registration.
  */
 export function ensureMcpxWorkspace(root?: string, ttlSeconds: number = LEASE_TTL_SECONDS): void {
   if (bridgeDisabled()) return;
   const absRoot = absoluteRoot(root);
   if (registeredPaths.has(absRoot)) return;
   registeredPaths.add(absRoot);
+  renewWorkspaceLease(absRoot, ttlSeconds);
+}
 
+/**
+ * Renew the lease for an already-registered root. This bypasses the
+ * per-path dedupe set: the heartbeat must actually re-register so the
+ * TTL is extended while the window stays alive.
+ */
+function renewWorkspaceLease(absRoot: string, ttlSeconds: number, generation?: number): void {
   setImmediate(() => {
+    // A heartbeat renewal enqueued before stop() must not fire after stop.
+    // generation is only supplied by the lease heartbeat; an explicit
+    // ensureMcpxWorkspace call (no generation) always runs.
+    if (generation !== undefined && generation !== leaseGeneration) return;
     try {
       const args = ttlSeconds > 0
         ? ["workspace", "register", "--ttl", `${ttlSeconds}s`, absRoot]
@@ -111,14 +125,17 @@ export function removeMcpxWorkspace(root?: string): void {
 export function startWorkspaceLease(cwd: string, ttlSeconds: number = LEASE_TTL_SECONDS): void {
   stopWorkspaceLease();
   leaseCwd = cwd;
+  leaseGeneration++;
+  const generation = leaseGeneration;
   ensureMcpxWorkspace(cwd, ttlSeconds);
-  leaseTimer = setInterval(() => ensureMcpxWorkspace(cwd, ttlSeconds), HEARTBEAT_MS);
+  leaseTimer = setInterval(() => renewWorkspaceLease(absoluteRoot(cwd), ttlSeconds, generation), HEARTBEAT_MS);
   leaseTimer.unref?.(); // never keep the process alive on shutdown
   console.log(`[pi-maestro-flow] MCPX workspace lease started (ttl ${ttlSeconds}s, heartbeat ${HEARTBEAT_MS / 1000}s): ${cwd}`);
 }
 
 /** Stop the lease heartbeat (used when the window is unregistered or closed). */
 export function stopWorkspaceLease(): void {
+  leaseGeneration++; // invalidate any heartbeat renewal already enqueued via setImmediate
   if (leaseTimer) {
     clearInterval(leaseTimer);
     leaseTimer = undefined;
