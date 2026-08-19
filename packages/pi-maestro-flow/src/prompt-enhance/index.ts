@@ -1,11 +1,10 @@
 /**
  * Prompt-enhance wiring.
  *
- * On demand (/enhance command or Ctrl+Shift+E), the editor's draft prompt
- * is rewritten in the background with the configured model plus gathered
- * codebase + knowledge context, then written back into the editor for the
- * user to review. Nothing is submitted automatically; /enhance revert
- * restores the pre-enhance text.
+ * On demand (/enhance command), the editor's draft prompt is rewritten in
+ * the background with the configured model plus gathered codebase + knowledge
+ * context, then written back into the editor for the user to review. Nothing
+ * is submitted automatically; /enhance revert restores the pre-enhance text.
  *
  * Feature switch, model, thinking level, length cap and context depth are
  * configured independently through the API manager (`/api-manager enhance`
@@ -68,13 +67,6 @@ export function registerPromptEnhance(
     ctx.ui.setEditorText(result.text);
     ctx.ui.notify("提示词已增强（/enhance revert 回退）。", "info");
   };
-
-  pi.registerShortcut("ctrl+shift+e" as Parameters<ExtensionAPI["registerShortcut"]>[0], {
-    description: "Enhance the current editor prompt with codebase + knowledge context",
-    handler: async (ctx) => {
-      await runEnhance(ctx, undefined);
-    },
-  });
 
   pi.registerCommand("enhance", {
     description: "Enhance the prompt in the editor (or supplied text). Subcommands: revert | status | on | off",
