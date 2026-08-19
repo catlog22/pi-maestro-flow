@@ -35,6 +35,7 @@ import type {
   AttemptRecoveryFacts,
   BackendCapabilities,
   BackendConfigField,
+  BackendConfigOption,
   BackendRun,
   BackendRunOptions,
   ConfigValue,
@@ -48,7 +49,13 @@ import type {
   SingleResult,
   TeammateRunSpec,
 } from "pi-maestro-backend-core/v1/spec";
-import type { CliToolConfig } from "../cli-tools/cli-tools-config.ts";
+import {
+  cliToolArgv,
+  probeCliToolCommand,
+  type CliToolConfig,
+} from "../cli-tools/cli-tools-config.ts";
+import { advertisedModels } from "../remote/acp-config-options.ts";
+import { probeAcpConfigOptions } from "../remote/acp-driver.ts";
 import {
   CLI_TOOL_MODEL_PREFIX,
   cliToolNameFromModel,
@@ -150,6 +157,19 @@ const CONFIG_FIELDS: readonly BackendConfigField[] = [
     kind: "text",
     labelKey: "acpCli.modelId",
     descriptionKey: "acpCli.modelId.description",
+  },
+  {
+    // The registration's default model, applied when a task names only the
+    // route. A task naming a model overrides it, so one registration serves a
+    // whole CLI rather than one model of it.
+    //
+    // The value belongs to the CLI's own catalogue, which is only knowable once
+    // a session is open: validation happens there, against what the agent
+    // advertises, and names every accepted value when it rejects one.
+    key: "acpModel",
+    kind: "dynamic-enum",
+    labelKey: "acpCli.acpModel",
+    descriptionKey: "acpCli.acpModel.description",
   },
   {
     // Per registration, not per task: `TeammateRunSpec` carries no timeout, so
@@ -317,13 +337,20 @@ function combineSignals(
   return { signal: controller.signal, release };
 }
 
+/** Reads the configuration options an agent advertises, without running a task. */
+export type AcpConfigOptionProbe = typeof probeAcpConfigOptions;
+
 /**
  * Create the ACP-CLI backend.
  *
  * @param run - launches one CLI run; the default drives a real subprocess.
+ * @param probe - reads an agent's advertised options; the default launches it.
  * @returns the backend, ready for registration.
  */
-export function createAcpCliBackend(run: CliToolRunner = runCliTool): TeammateBackend {
+export function createAcpCliBackend(
+  run: CliToolRunner = runCliTool,
+  probe: AcpConfigOptionProbe = probeAcpConfigOptions,
+): TeammateBackend {
   return {
     name: "acp-cli",
     protocolVersion: 1,
@@ -379,18 +406,58 @@ export function createAcpCliBackend(run: CliToolRunner = runCliTool): TeammateBa
       return { values: config, errors };
     },
 
-    async start(spec: TeammateRunSpec, options: BackendRunOptions): Promise<BackendRun> {
-      const route = routeOf(options.config, spec.backend);
-      // One registration serves one CLI. A spec asking for another model is
-      // refused by name rather than answered by this CLI under that name —
-      // silently ignoring it is exactly the failure the capability table exists
-      // to prevent, and `modelSelection: "native"` is only true because of this.
-      if (spec.model !== undefined && spec.model !== route) {
+    async listConfigOptions(
+      field: string,
+      config: Record<string, ConfigValue>,
+      signal: AbortSignal,
+    ): Promise<readonly BackendConfigOption[]> {
+      if (field !== "acpModel") {
+        throw new Error(`teammate backend "acp-cli" publishes no options for setting "${field}"`);
+      }
+      const launch = launchConfigOf(config);
+      if (launch.mode === "ssh") {
+        // The probe launches the agent from this process. An ssh registration's
+        // catalogue lives on the far host, and reaching it would need the run
+        // path's ssh transport, which this operation does not build. Saying so
+        // beats returning the local machine's answer for a remote target.
         throw new Error(
-          `teammate backend "acp-cli" registration serves model "${route}", `
-          + `but this task requested "${spec.model}"`,
+          'teammate backend "acp-cli" cannot list models for an "ssh" registration: '
+          + "the probe launches the agent locally, so the target host's catalogue is not reachable here",
         );
       }
+      const route = routeOf(config);
+      const tool = isCliToolModel(route) ? cliToolNameFromModel(route) : route;
+      const launchable = probeCliToolCommand(tool, launch);
+      if (!launchable.ok) {
+        throw new Error(`CLI tool "${tool}" is not launchable: ${launchable.error}`);
+      }
+      const startupTimeoutMs = count(config, "startupTimeoutMs");
+      const advertised = await probe(
+        {
+          command: cliToolArgv(tool, launch),
+          cwd: launch.cwd?.trim() || process.cwd(),
+          env: launch.env ?? [],
+        },
+        {
+          signal,
+          ...(startupTimeoutMs === undefined ? {} : { startupTimeoutMs }),
+        },
+      );
+      return advertisedModels(advertised);
+    },
+
+    async start(spec: TeammateRunSpec, options: BackendRunOptions): Promise<BackendRun> {
+      const route = routeOf(options.config, spec.backend);
+      // Two axes share one field. The route names the CLI this registration
+      // launches; anything else names a model inside that CLI's own catalogue,
+      // which is a space the host does not know. A task naming the route asks
+      // for the CLI and nothing more, so the registration's own default (if
+      // any) applies. Selecting nothing when a model was named is the silent
+      // failure the capability table exists to prevent, so an unadvertised
+      // value fails the session rather than running the agent's default.
+      const acpModel = spec.model === undefined || spec.model === route
+        ? text(options.config, "acpModel")
+        : spec.model;
       const tool = isCliToolModel(route) ? cliToolNameFromModel(route) : route;
       const aborter = new AbortController();
       const timeoutMs = count(options.config, "runTimeoutMs");
@@ -406,6 +473,7 @@ export function createAcpCliBackend(run: CliToolRunner = runCliTool): TeammateBa
           signal: cancellation.signal,
           ...(timeoutMs === undefined ? {} : { timeoutMs }),
           ...(startupTimeoutMs === undefined ? {} : { startupTimeoutMs }),
+          ...(acpModel === undefined ? {} : { acpModel }),
         }).finally(cancellation.release);
         const terminalStatus = terminalStatusOf(settled);
         const result: SingleResult = {

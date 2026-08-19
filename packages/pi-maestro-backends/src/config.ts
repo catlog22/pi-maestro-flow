@@ -27,6 +27,12 @@ function validateField(field: BackendConfigField, value: ConfigValue): string | 
     case "text":
     case "path":
     case "credential-ref":
+    // A dynamic field's valid set lives in the executing system and costs a
+    // probe to read, so registration checks the type and leaves membership to
+    // the backend that can actually answer it. Validating harder here would
+    // make a hand-written registration depend on reaching that system, and
+    // would reject a value the system added since the last probe.
+    case "dynamic-enum":
       return typeof value === "string" ? undefined : `expected a string, got ${typeof value}`;
     case "integer":
       if (typeof value !== "number") return `expected a number, got ${typeof value}`;
@@ -82,6 +88,23 @@ export function resolveBackendConfig(
       errors: [
         `backend "${backend.name}" declares ${fields.length} configuration field(s) `
         + "but implements no resolveConfig, so its values cannot be validated",
+      ],
+    };
+  }
+
+  // A dynamic field's values come from the executing system, so the declaration
+  // alone cannot describe it. Declaring one without the lister leaves a
+  // configuration surface with a choice it can never populate — a field that
+  // renders as empty rather than as broken, which is the failure the pairing
+  // check exists to prevent.
+  const dynamic = fields.filter((field) => field.kind === "dynamic-enum");
+  if (dynamic.length > 0 && backend.listConfigOptions === undefined) {
+    return {
+      values: {},
+      errors: [
+        `backend "${backend.name}" declares dynamic-enum field(s) `
+        + `${dynamic.map((field) => `"${field.key}"`).join(", ")} `
+        + "but implements no listConfigOptions, so their values can never be listed",
       ],
     };
   }

@@ -82,6 +82,15 @@ export interface RunLocalCliToolParams {
      * launch command is the one who can say how long it needs.
      */
     startupTimeoutMs?: number;
+    /**
+     * The model to select on the session the CLI opens.
+     *
+     * Names one of the values the agent advertises on `session/new`, which is a
+     * different space from the `cli/<tool>` route that chose this CLI: the route
+     * picks the process, this picks what that process runs. Absent leaves the
+     * agent on its own current model.
+     */
+    acpModel?: string;
     /** Injectable ssh2 connection factory (tests only; defaults to real clients). */
     sshOptions?: SshDirectExecOptions;
 }

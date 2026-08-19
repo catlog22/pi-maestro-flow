@@ -11,9 +11,13 @@ import {
   type InitializeRequest,
   type InitializeResponse,
   type PromptResponse,
+  type SessionConfigOption,
   type SessionUpdate,
+  type SetSessionConfigOptionRequest,
+  type SetSessionConfigOptionResponse,
   type Stream,
 } from "@agentclientprotocol/sdk";
+import { resolveModelSelection } from "./acp-config-options.ts";
 import {
   captureProcessTree,
   redactRemoteError,
@@ -63,6 +67,16 @@ export interface AcpDriverOptions {
   startupTimeoutMs?: number;
   eventQueueBytes?: number;
   spawnChild?: SpawnChild;
+  /**
+   * The model to select on the session the agent opens.
+   *
+   * Absent leaves the agent on whatever it advertises as current, which is the
+   * only behaviour available from an agent that offers no model selector. A
+   * value the agent does not advertise fails the run rather than falling back
+   * to that current model, so a stale registration cannot silently bill a
+   * different model than the one it names.
+   */
+  model?: string;
 }
 
 class AsyncEventQueue<T> implements AsyncIterable<T> {
@@ -324,6 +338,7 @@ class AcpRunHandle implements RemoteRunHandle {
   readonly #closePromise: Promise<void>;
   readonly #toolNames = new Map<string, string>();
   readonly #endedTools = new Set<string>();
+  readonly #model: string | undefined;
   #resolveClosed!: () => void;
   #session?: ActiveSession;
   #snapshot: RemoteRunSnapshot;
@@ -347,12 +362,14 @@ class AcpRunHandle implements RemoteRunHandle {
     cancelGraceMs: number,
     startupTimeoutMs: number,
     eventQueueBytes: number,
+    model: string | undefined,
   ) {
     this.capture = Object.freeze({ ...capture });
     this.#child = child;
     this.#cancelGraceMs = cancelGraceMs;
     this.#startupTimeoutMs = startupTimeoutMs;
     this.#eventQueueBytes = eventQueueBytes;
+    this.#model = model;
     this.#processTree = captureProcessTree(child.pid);
     this.#queue = new AsyncEventQueue<RemoteRunEvent>(eventQueueBytes, serializedBytes, () => undefined);
     this.#snapshot = createRemoteRunSnapshot(capture, "connecting");
@@ -395,8 +412,17 @@ class AcpRunHandle implements RemoteRunHandle {
     cancelGraceMs: number,
     startupTimeoutMs: number,
     eventQueueBytes: number,
+    model: string | undefined,
   ): Promise<AcpRunHandle> {
-    const handle = new AcpRunHandle(capture, child, context, cancelGraceMs, startupTimeoutMs, eventQueueBytes);
+    const handle = new AcpRunHandle(
+      capture,
+      child,
+      context,
+      cancelGraceMs,
+      startupTimeoutMs,
+      eventQueueBytes,
+      model,
+    );
     try {
       await handle.#initialize(request);
       return handle;
@@ -477,8 +503,39 @@ class AcpRunHandle implements RemoteRunHandle {
       this.#startupTimeoutMs,
       "ACP session/new",
     );
+    await this.#selectModel(this.#session);
     this.#emitState("running", "session/prompt");
     void this.#promptLoop(request.objective);
+  }
+
+  /**
+   * Set the requested model on a freshly opened session.
+   *
+   * Runs inside the startup bound rather than the run bound: a session that
+   * cannot be put on the requested model has not started, so failing here
+   * surfaces through `create` as a start failure instead of a run that quietly
+   * billed the agent's default.
+   *
+   * @param session - the session `session/new` returned.
+   */
+  async #selectModel(session: ActiveSession): Promise<void> {
+    if (this.#model === undefined) return;
+    const selection = resolveModelSelection(
+      session.newSessionResponse.configOptions,
+      this.#model,
+    );
+    await withTimeout(
+      this.#connection.agent.request<SetSessionConfigOptionResponse, SetSessionConfigOptionRequest>(
+        methods.agent.session.setConfigOption,
+        {
+          sessionId: session.sessionId,
+          configId: selection.configId,
+          value: selection.value,
+        },
+      ),
+      this.#startupTimeoutMs,
+      "ACP session/set_config_option",
+    );
   }
 
   async #promptLoop(initial: string): Promise<void> {
@@ -777,18 +834,108 @@ class AcpRunHandle implements RemoteRunHandle {
   }
 }
 
+/** What a configuration probe needs in order to launch the agent it asks. */
+export interface AcpProbeTarget {
+  /** Executable and arguments, already resolved from the registration. */
+  command: readonly string[];
+  /** Working directory the session is opened against. */
+  cwd: string;
+  /** Environment variable names passed through to the child. */
+  env: readonly string[];
+}
+
+/**
+ * Read the configuration options an ACP agent advertises, without running a
+ * task.
+ *
+ * Launches the agent, completes `initialize` and `session/new`, and returns
+ * what that response advertised. No prompt is sent, so the probe costs a
+ * process and a handshake rather than model usage. The child is always killed
+ * before returning, including on failure.
+ *
+ * Failure throws rather than yielding an empty list: an agent that cannot be
+ * launched, or that refuses without credentials, is a state the operator has to
+ * act on, and an empty list would read as "this agent offers no choices".
+ *
+ * @param target - launch command, directory, and env passthrough.
+ * @param options - startup bound, abort signal, and spawn injection for tests.
+ * @returns the advertised configuration options, empty when the agent sends none.
+ * @throws when the agent cannot be launched, times out, or rejects the handshake.
+ */
+export async function probeAcpConfigOptions(
+  target: AcpProbeTarget,
+  options: {
+    startupTimeoutMs?: number;
+    signal?: AbortSignal;
+    spawnChild?: SpawnChild;
+  } = {},
+): Promise<readonly SessionConfigOption[]> {
+  const startupTimeoutMs = options.startupTimeoutMs ?? ACP_STARTUP_TIMEOUT_MS;
+  const spawnChild = options.spawnChild ?? ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
+  const child = spawnChild(target.command[0]!, target.command.slice(1), {
+    cwd: target.cwd,
+    detached: true,
+    env: targetChildEnvironment(target.env),
+    windowsHide: true,
+    shell: false,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  // A probe answers no agent requests: it never prompts, so nothing it does can
+  // make the agent ask for permission, a file, or a terminal.
+  const app = client({ name: "pi-maestro-teammate-probe" });
+  const connection = app.connect(boundedAcpStream(child, () => undefined));
+  const abort = (): void => signalProcessTree(captureProcessTree(child.pid), "SIGKILL");
+  options.signal?.addEventListener("abort", abort, { once: true });
+  try {
+    const initialized = await withTimeout(
+      connection.agent.request<InitializeResponse, InitializeRequest>(methods.agent.initialize, {
+        protocolVersion: PROTOCOL_VERSION,
+        // Declared explicitly rather than left empty: a probe answers no agent
+        // requests, and an agent that reads an absent capability map as "unknown"
+        // rather than "none" may open a session expecting callbacks this
+        // connection will never serve.
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          terminal: false,
+        },
+        clientInfo: { name: "pi-maestro-teammate-probe", version: "1" },
+      }),
+      startupTimeoutMs,
+      "ACP initialize",
+    );
+    if (initialized.protocolVersion !== PROTOCOL_VERSION) {
+      throw new Error(
+        `ACP protocol version mismatch: expected ${PROTOCOL_VERSION}, received ${initialized.protocolVersion}`,
+      );
+    }
+    const session = await withTimeout(
+      connection.agent.buildSession(target.cwd).start(),
+      startupTimeoutMs,
+      "ACP session/new",
+    );
+    const advertised = session.newSessionResponse.configOptions ?? [];
+    session.dispose();
+    return advertised;
+  } finally {
+    options.signal?.removeEventListener("abort", abort);
+    signalProcessTree(captureProcessTree(child.pid), "SIGKILL");
+  }
+}
+
 export class AcpDriver implements RemoteDriver {
   readonly id = "acp" as const;
   readonly #cancelGraceMs: number;
   readonly #startupTimeoutMs: number;
   readonly #eventQueueBytes: number;
   readonly #spawnChild: SpawnChild;
+  readonly #model: string | undefined;
   readonly #handles = new Map<string, AcpRunHandle>();
 
   constructor(options: AcpDriverOptions = {}) {
     this.#cancelGraceMs = options.cancelGraceMs ?? ACP_CANCEL_GRACE_MS;
     this.#startupTimeoutMs = options.startupTimeoutMs ?? ACP_STARTUP_TIMEOUT_MS;
     this.#eventQueueBytes = options.eventQueueBytes ?? ACP_EVENT_QUEUE_BYTES;
+    this.#model = options.model;
     if (!Number.isSafeInteger(this.#eventQueueBytes) || this.#eventQueueBytes < 1024) {
       throw new Error("ACP event queue byte limit must be a safe integer of at least 1024");
     }
@@ -821,6 +968,7 @@ export class AcpDriver implements RemoteDriver {
       this.#cancelGraceMs,
       this.#startupTimeoutMs,
       this.#eventQueueBytes,
+      this.#model,
     );
     this.#handles.set(capture.runId, handle);
     void handle.whenClosed().finally(() => {

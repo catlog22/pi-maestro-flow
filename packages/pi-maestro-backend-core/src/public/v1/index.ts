@@ -23,6 +23,7 @@ export type {
   AttemptRecoveryFacts,
   BackendCapabilities,
   BackendConfigField,
+  BackendConfigOption,
   BackendHostCapabilities,
   BackendRun,
   BackendRunOptions,

@@ -297,6 +297,7 @@ import {
   type BackendDescriptor,
 } from "../settings/teammate-backends-settings-provider.ts";
 import dshBackend from "pi-maestro-backends/dsh";
+import acpCliBackend from "pi-maestro-teammate/v1/acp-cli";
 import { PI_SUBPROCESS, PI_SUBPROCESS_CONFIG_FIELDS } from "pi-maestro-teammate/v1/backends";
 
 export const MAESTRO_CHILD_TOOL_NAMES = [
@@ -3459,6 +3460,18 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
   const teammateBackendDescriptors: readonly BackendDescriptor[] = [
     { name: PI_SUBPROCESS, module: PI_SUBPROCESS, configFields: PI_SUBPROCESS_CONFIG_FIELDS },
     { name: dshBackend.name, module: "pi-maestro-backends/dsh", configFields: dshBackend.configFields },
+    // One descriptor serves every ACP CLI: a deployment registers the module
+    // once per tool with its own command, so the shell renders each
+    // registration's fields — including the model picker, whose values come
+    // from that registration's own agent rather than from this build.
+    {
+      name: acpCliBackend.name,
+      module: "pi-maestro-teammate/v1/acp-cli",
+      configFields: acpCliBackend.configFields,
+      ...(acpCliBackend.listConfigOptions === undefined
+        ? {}
+        : { listConfigOptions: acpCliBackend.listConfigOptions.bind(acpCliBackend) }),
+    },
   ];
   const teammateBackendsSettingsProvider = createTeammateBackendsSettingsProvider({
     workspaceRoot: process.cwd(),

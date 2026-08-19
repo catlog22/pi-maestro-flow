@@ -104,6 +104,7 @@ import {
   remoteLocationRouting,
   resolveContainedCwd,
   resolveModelSpecifier,
+  validateBackendModelSpecifier,
   resolveVariables,
   resultFailureMessage,
   setUsageSnapshot,
@@ -522,7 +523,19 @@ export async function runSingleTeammate(
   );
   try {
     for (let index = 0; index < candidates.length; index += 1) {
-      candidates[index] = resolveModelSpecifier(candidates[index], options.modelCapabilities);
+      const candidate = candidates[index]!;
+      // Whoever executes the task owns the model namespace. A candidate routed
+      // to a registered backend names a model in that backend's catalogue, so
+      // the host neither validates its format nor resolves its bare names —
+      // the backend does both, against what it can actually reach. Deciding per
+      // candidate rather than once keeps a mixed fallback list honest: an
+      // explicit `backend` claims every candidate, while a `cli/<tool>` entry
+      // beside a `provider/model` entry claims only itself.
+      if (backendNameOf(params, candidate, remoteRouting) !== undefined) {
+        validateBackendModelSpecifier(candidate);
+        continue;
+      }
+      candidates[index] = resolveModelSpecifier(candidate, options.modelCapabilities);
     }
     candidates.splice(0, candidates.length, ...new Set(candidates));
   } catch (error) {
@@ -791,6 +804,19 @@ export async function runSingleTeammate(
               `Teammate task requests model "${modelToUse}", but .pi/teammate-backends.json is in legacy `
               + `execution mode; set mode "backend-registry" and register "${cliToolNameFromModel(modelToUse)}" `
               + "— refusing to run a CLI tool model on the pi subprocess path",
+            );
+          }
+          // An explicit backend selector is the same kind of routing decision,
+          // and legacy mode can serve neither. Falling through would run the pi
+          // subprocess under a name the task did not ask for, which is the one
+          // outcome a routing decision must not have; it would also hand pi a
+          // model specifier written in the named backend's namespace, since the
+          // host stopped validating those the moment a backend claimed them.
+          if (params.backend !== undefined) {
+            return rejectAndPublish(
+              `Teammate task selects backend "${params.backend}", but .pi/teammate-backends.json is in `
+              + `legacy execution mode; set mode "backend-registry" and register "${params.backend}" `
+              + "— refusing to run a backend-selected task on the pi subprocess path",
             );
           }
           attempt = outcomeOf(await runSingleAttempt(

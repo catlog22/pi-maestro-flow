@@ -30,6 +30,7 @@
  * replay that would repeat those edits.
  */
 import type { AttemptRecoveryFacts, TeammateBackend } from "pi-maestro-backend-core/v1";
+import { probeAcpConfigOptions } from "../remote/acp-driver.ts";
 import { type CliToolRunResult, type RunLocalCliToolParams } from "../cli-tools/local-acp.ts";
 /**
  * Translate one settled CLI run into the facts the host's failover reads.
@@ -44,13 +45,16 @@ import { type CliToolRunResult, type RunLocalCliToolParams } from "../cli-tools/
 export declare function recoveryFactsOf(run: CliToolRunResult): AttemptRecoveryFacts;
 /** The CLI launcher this backend drives; injected so tests need no subprocess. */
 export type CliToolRunner = (params: RunLocalCliToolParams) => Promise<CliToolRunResult>;
+/** Reads the configuration options an agent advertises, without running a task. */
+export type AcpConfigOptionProbe = typeof probeAcpConfigOptions;
 /**
  * Create the ACP-CLI backend.
  *
  * @param run - launches one CLI run; the default drives a real subprocess.
+ * @param probe - reads an agent's advertised options; the default launches it.
  * @returns the backend, ready for registration.
  */
-export declare function createAcpCliBackend(run?: CliToolRunner): TeammateBackend;
+export declare function createAcpCliBackend(run?: CliToolRunner, probe?: AcpConfigOptionProbe): TeammateBackend;
 /**
  * The registered instance.
  *

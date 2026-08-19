@@ -169,22 +169,51 @@ test("acp-cli refuses a config without a command", () => {
   assert.ok(bad.errors.some((error) => error.includes("command")), bad.errors.join("; "));
 });
 
-test("acp-cli refuses a model that is not the route this registration serves", async () => {
+test("acp-cli separates the route axis from the CLI's own model catalogue", async () => {
   const launches: RunLocalCliToolParams[] = [];
   const backend = createAcpCliBackend(async (params) => {
     launches.push(params);
     return CLEAN_RUN;
   });
-  await assert.rejects(
-    () => backend.start(specOf({ model: "cli/other" }), runOptionsOf(LOCAL_CONFIG)),
-    (error: Error) => error.message.includes("cli/mock") && error.message.includes("cli/other"),
-  );
-  assert.equal(launches.length, 0);
-  // The route it does serve reaches the CLI under that tool name.
-  const run = await backend.start(specOf({ model: "cli/mock" }), runOptionsOf(LOCAL_CONFIG));
-  await run.outcome;
+
+  // The route names the CLI and nothing further, so no model is selected on the
+  // session the CLI opens.
+  await (await backend.start(specOf({ model: "cli/mock" }), runOptionsOf(LOCAL_CONFIG))).outcome;
   assert.equal(launches.length, 1);
   assert.equal(launches[0]?.tool, "mock");
+  assert.equal(launches[0]?.acpModel, undefined);
+
+  // Any other value names a model inside that CLI. It reaches the launch rather
+  // than being refused, and it does not change which CLI is launched.
+  await (await backend.start(
+    specOf({ model: "claude-opus-5[thinking=true]" }),
+    runOptionsOf(LOCAL_CONFIG),
+  )).outcome;
+  assert.equal(launches.length, 2);
+  assert.equal(launches[1]?.tool, "mock");
+  assert.equal(launches[1]?.acpModel, "claude-opus-5[thinking=true]");
+});
+
+test("acp-cli applies the registration's model only when the task names the route", async () => {
+  const launches: RunLocalCliToolParams[] = [];
+  const backend = createAcpCliBackend(async (params) => {
+    launches.push(params);
+    return CLEAN_RUN;
+  });
+  const config: Record<string, ConfigValue> = { ...LOCAL_CONFIG, acpModel: "composer-2.5[fast=true]" };
+
+  // Naming only the route leaves the registration's own default in force.
+  await (await backend.start(specOf({ model: "cli/mock" }), runOptionsOf(config))).outcome;
+  assert.equal(launches[0]?.acpModel, "composer-2.5[fast=true]");
+
+  // A task naming a model overrides that default, so one registration serves a
+  // whole CLI rather than one model of it.
+  await (await backend.start(specOf({ model: "grok-4.6[effort=high]" }), runOptionsOf(config))).outcome;
+  assert.equal(launches[1]?.acpModel, "grok-4.6[effort=high]");
+
+  // A task naming no model at all still gets the registration's default.
+  await (await backend.start(specOf(), runOptionsOf(config))).outcome;
+  assert.equal(launches[2]?.acpModel, "composer-2.5[fast=true]");
 });
 
 test("acp-cli defaults its route to the registration name", async () => {
@@ -283,4 +312,79 @@ test("acp-cli refuses a non-positive startup timeout and carries a valid one to 
   });
   await (await plain.start(specOf({ model: "cli/mock" }), runOptionsOf(LOCAL_CONFIG))).outcome;
   assert.equal(defaults[0]?.startupTimeoutMs, undefined);
+});
+
+test("acp-cli lists the models the agent itself advertises", async () => {
+  // A real executable: listing checks the configured command is launchable
+  // before reaching the agent, so an unreachable one never gets that far.
+  const probeConfig: Record<string, ConfigValue> = {
+    command: process.execPath,
+    args: ["--version"],
+    modelId: "cli/mock",
+  };
+  const launched: { command: readonly string[]; cwd: string }[] = [];
+  const backend = createAcpCliBackend(
+    async () => CLEAN_RUN,
+    async (target) => {
+      launched.push({ command: target.command, cwd: target.cwd });
+      return [{
+        type: "select",
+        id: "model",
+        name: "Model",
+        category: "model",
+        currentValue: "default[]",
+        options: [
+          { value: "default[]", name: "Auto" },
+          { value: "composer-2.5[fast=true]", name: "composer-2.5" },
+        ],
+      }] as never;
+    },
+  );
+
+  const options = await backend.listConfigOptions!("acpModel", probeConfig, AbortSignal.timeout(1_000));
+  assert.deepEqual(options, [
+    { value: "default[]", label: "Auto" },
+    { value: "composer-2.5[fast=true]", label: "composer-2.5" },
+  ]);
+  // The probe launches the same command the run path would, so what an operator
+  // picks from is what the configured CLI actually offers.
+  assert.deepEqual(launched[0]?.command, [process.execPath, "--version"]);
+});
+
+test("acp-cli refuses to list options it does not publish, and remote catalogues it cannot reach", async () => {
+  let probes = 0;
+  const backend = createAcpCliBackend(
+    async () => CLEAN_RUN,
+    async () => {
+      probes += 1;
+      return [];
+    },
+  );
+
+  await assert.rejects(
+    () => backend.listConfigOptions!("runTimeoutMs", LOCAL_CONFIG, AbortSignal.timeout(1_000)),
+    (error: Error) => error.message.includes("runTimeoutMs"),
+  );
+
+  // An ssh registration's catalogue lives on the far host; answering with the
+  // local machine's would be a plausible wrong answer, so it refuses instead.
+  await assert.rejects(
+    () => backend.listConfigOptions!(
+      "acpModel",
+      { ...LOCAL_CONFIG, mode: "ssh", host: "build-01", user: "agent", hostKeySha256: "abc" },
+      AbortSignal.timeout(1_000),
+    ),
+    (error: Error) => error.message.includes("ssh"),
+  );
+
+  // Neither refusal reached the agent.
+  assert.equal(probes, 0);
+});
+
+test("acp-cli declaring a dynamic field is a registration error without its lister", () => {
+  // The pairing the registry enforces, asserted from this backend's own
+  // declaration so a field added later cannot quietly become unlistable.
+  const dynamic = (acpCliBackend.configFields ?? []).filter((field) => field.kind === "dynamic-enum");
+  assert.ok(dynamic.length > 0, "expected acp-cli to declare at least one dynamic field");
+  assert.equal(typeof acpCliBackend.listConfigOptions, "function");
 });

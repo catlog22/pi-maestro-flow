@@ -590,6 +590,25 @@ export declare function childSettingsPath(env: NodeJS.ProcessEnv): string;
 export declare const MODEL_SPECIFIER_PATTERN: RegExp;
 export declare const MAX_MODEL_SPECIFIER_BYTES = 256;
 export declare function validateModelSpecifier(model: string): string;
+/**
+ * Check a specifier the host does not own the format of.
+ *
+ * A dispatch bound for a registered backend names a model in that backend's
+ * catalogue — an ACP agent's bracketed variant, a dsh route, a remote target's
+ * own identifier. The host neither defines those namespaces nor can resolve
+ * them, so `MODEL_SPECIFIER_PATTERN`, which encodes the host's own
+ * `provider/model` convention, is the wrong authority.
+ *
+ * What survives is not a format claim but protection for the host's own
+ * machinery: these strings become circuit-breaker keys, log lines, and, for
+ * some backends, process arguments. A bound and a control-character refusal
+ * keep those safe without deciding what a foreign namespace may look like.
+ *
+ * @param model - the specifier a backend will resolve for itself.
+ * @returns the specifier unchanged.
+ * @throws when it is empty, oversized, or carries control characters.
+ */
+export declare function validateBackendModelSpecifier(model: string): string;
 export declare function resolveModelSpecifier(model: string, modelCapabilities?: readonly TeammateModelCapability[]): string;
 export declare function buildPiArgs(agentConfig: AgentConfig, params: RunSingleTeammateParams, systemPromptFile: string, modelOverride?: string, sessionDir?: string, forkSessionFile?: string, schemaFile?: string, modelCapabilities?: readonly TeammateModelCapability[], resumeSessionFile?: string): string[];
 export declare const PRIVATE_DIRECTORY_MODE = 448;
