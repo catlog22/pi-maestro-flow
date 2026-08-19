@@ -31,6 +31,8 @@ interface AttemptRecoveryFacts {
     preActivityInfrastructureExit: boolean;
     /** IPC or non-protocol output that may represent untracked external work. */
     externalReplayRisk: boolean;
+    /** Non-JSON stdout was attributed as assistant content (protocol violation). Optional: not all settlement paths populate it. */
+    stdoutProtocolViolation?: boolean;
 }
 export declare const attemptRecoveryFacts: WeakMap<SingleResult, AttemptRecoveryFacts>;
 /**

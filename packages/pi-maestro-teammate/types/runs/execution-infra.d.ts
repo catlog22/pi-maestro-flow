@@ -194,6 +194,29 @@ export interface RunTeammateOptions {
     generation?: number) => void;
     /** Existing persisted Pi session to load for a cold logical-agent restart. */
     resumeSessionFile?: string;
+    /**
+     * Initial prompt issued to a resumed child instead of the original task
+     * text. The task prompt already lives inside the loaded session history, so
+     * re-sending it would make the model re-read (and possibly re-execute) the
+     * original request; a resume prompt directs the model to continue from the
+     * recorded state instead.
+     */
+    resumePrompt?: string;
+    /**
+     * In-process model failover: called when the child settles a turn with a
+     * retryable provider error while its runtime is still alive. Return the
+     * next model id (`provider/model`) to hot-swap via the child's `set_model`
+     * RPC and continue the same session, or `undefined` to settle the failure.
+     * `setModel` is the physical switch used by the pi subprocess; this is the
+     * teammate-side decision hook that drives it.
+     *
+     * `previousModel` is the model the child is currently running under after
+     * an earlier in-process switch (undefined on the first failure). A hook
+     * that accepts it should settle that model's trial outcome (it just failed
+     * again); the default teammate hook does this and never re-selects a model
+     * already tried in this run.
+     */
+    onModelFailover?: (error: string, previousModel?: string) => string | undefined | Promise<string | undefined>;
     /** Runtime generation used to fence callbacks from a replaced child process. */
     runtimeGeneration?: number;
     onChildClosed?: (correlationId: string, generation: number | undefined, details: {
@@ -298,6 +321,14 @@ export declare const STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTIC_SET: Set<string>;
  */
 export declare const STRUCTURED_OUTPUT_RECOVERY_PROMPT: string;
 export declare function isStructuredOutputSettlementDiagnostic(content: string): boolean;
+/**
+ * Initial prompt for a resume-based model fallback (cold restart with a
+ * session checkpoint, or an in-process `set_model` switch). The original task
+ * text already lives inside the loaded session history, so this directive
+ * replaces it: the new model continues from the recorded state instead of
+ * re-reading (and possibly re-executing) the original request.
+ */
+export declare const MODEL_FALLBACK_RESUME_PROMPT: string;
 /**
  * Correlation ids are protocol identities, not filesystem-safe names.
  * Keep the original id for IPC while deriving a deterministic portable

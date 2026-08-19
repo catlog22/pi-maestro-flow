@@ -833,6 +833,30 @@ test("modern fallback reclaims a settled failed child before reusing its correla
       pid: undefined,
       kill() { close(); return true; },
     });
+    // A wakeable child with a retryable error first attempts the in-process
+    // model switch; this child declines it, so the host must fall back to the
+    // process-level sweep (which is what reclaims the failed child first).
+    child.stdin!.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      for (const raw of text.split("\n")) {
+        if (!raw.trim()) continue;
+        try {
+          const command = JSON.parse(raw) as Record<string, unknown>;
+          if (command.type === "set_model") {
+            queueMicrotask(() => {
+              stdout.write(line({
+                type: "response",
+                id: command.id,
+                command: "set_model",
+                success: false,
+              }));
+            });
+          }
+        } catch {
+          // Ignore malformed test lines.
+        }
+      }
+    });
     queueMicrotask(() => {
       if (attempt === 0) {
         stdout.write(line({

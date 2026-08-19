@@ -41,6 +41,7 @@ import type { TeammateModelCapability } from "../models/model-catalog.ts";
 import {
   rankModelsByHealth,
   sharedModelCircuitBreaker,
+  type AcquiredModelCandidate,
   type ModelCircuitBreaker,
 } from "../models/model-circuit-breaker.ts";
 import { getTeammateChildExtensions, getTeammateChildToolBroker } from "./child-extensions.ts";
@@ -55,6 +56,9 @@ import {
   isFallbackProviderError,
   retryDelayMs,
 } from "./retry.ts";
+import {
+  MODEL_FALLBACK_RESUME_PROMPT,
+} from "./execution-infra.ts";
 import { buildReplayFence } from "./recovery-protocol.ts";
 import { cliToolNameFromModel, isCliToolModel } from "../cli-tools/local-acp.ts";
 
@@ -597,6 +601,34 @@ export async function runSingleTeammate(
   // Providers whose credential just failed auth: their remaining candidates
   // are doomed launches and are skipped (D1-A).
   const authSkippedProviders = new Set<string>();
+  // Acquisitions taken by in-process model switches (A path). Settled when the
+  // run that owns them settles: success records success, failure records a
+  // retryable failure. Keyed by model id.
+  const pendingModelAcquisitions = new Map<string, AcquiredModelCandidate>();
+  // True once an in-process switch moved away from the loop's original model.
+  // The original model's own trial then failed (that is why the switch
+  // happened) and must be charged accordingly at the terminal settlement,
+  // mirroring the B path's recordRetryableFailure for the failed candidate.
+  let switchedAwayFromOriginal = false;
+  // Every model switched to within this run. A failed switch settles its
+  // acquisition immediately but stays in this set, so the chain can never
+  // re-select a model that already ran and failed (bounded failover).
+  const switchedModels = new Set<string>();
+  const settlePendingModelAcquisitions = (success: boolean): void => {
+    for (const [model, acquisition] of pendingModelAcquisitions) {
+      if (success) breaker.recordSuccess(acquisition);
+      else breaker.recordRetryableFailure(acquisition);
+    }
+    pendingModelAcquisitions.clear();
+  };
+  // Session checkpoint of the most recent candidate that published one
+  // (via the child's `teammate_session_ready` IPC). A later candidate that
+  // fails mid-run can resume this checkpoint under a new model instead of
+  // replaying the whole task (cold restart + model override).
+  let lastSessionFile: string | undefined;
+  // Checkpoint handed to the next candidate after a resume-based failover;
+  // consumed when the next attemptOptions is built, then cleared.
+  let resumeHandoff: string | undefined;
 
   for (const modelToUse of modelCandidates) {
     if (options.signal?.aborted) return cancelAtBoundary("before a model candidate launched");
@@ -614,9 +646,91 @@ export async function runSingleTeammate(
       result: SingleResult;
       terminalStatus?: AgentTerminalStatus;
     }> = [];
+    // Capture the child's published session file so a mid-run failure under
+    // this candidate can resume that checkpoint under the next model.
+    const hostOnChildEvent = options.onChildEvent;
+    // A resume handoff from a failed predecessor loads that recorded session
+    // under this candidate's model (`--session <checkpoint> --model <model>`)   
+    // and replaces the original task text with a resume directive. Spread
+    // unconditionally so the handoff and the session-file capture never
+    // mutate the caller's own options object.
+    const handoff = resumeHandoff;
+    resumeHandoff = undefined;
+    // In-process model failover: when the child settles a retryable provider
+    // failure while still alive, pick the next healthy candidate from the
+    // remaining chain and hand it to the child's `set_model` RPC. The same
+    // session continues in place, so nothing is replayed. Models already
+    // switched to within this run are excluded, and a model that actually ran
+    // (acknowledged switch) but failed again is settled immediately instead
+    // of waiting for the run's terminal result.
+    const nextCandidateModel = (previousModel?: string): string | undefined => {
+      // A previous switch that ran and failed again is settled now: it has
+      // its own failure signal and must not wait for the run's terminal
+      // outcome (which would credit it with success if a later candidate
+      // recovers, or double-charge it if the run fails overall).
+      if (previousModel !== undefined) {
+        const previousAcquisition = pendingModelAcquisitions.get(previousModel);
+        if (previousAcquisition !== undefined) {
+          breaker.recordRetryableFailure(previousAcquisition);
+          pendingModelAcquisitions.delete(previousModel);
+        }
+      }
+      const tail = modelCandidates.slice(candidateIndex).filter((candidate) => (
+        candidate !== undefined
+        && candidate !== modelToUse
+        && candidate !== resolvedDefaultModel
+        && !switchedModels.has(candidate)
+      ));
+      const ranked = rankModelsByHealth(tail as string[], breaker);
+      for (const candidate of ranked) {
+        const candidateProvider = providerOf(candidate);
+        if (candidateProvider !== undefined && authSkippedProviders.has(candidateProvider)) continue;
+        const acquisition = breaker.acquireCandidate(candidate);
+        if (!acquisition.allowed) continue;
+        // The switch itself is the trial; keep the acquisition owned by the
+        // in-process run so a later terminal result settles it. The model is
+        // remembered for the whole run so a failed switch cannot re-select
+        // it.
+        pendingModelAcquisitions.set(candidate, acquisition);
+        switchedModels.add(candidate);
+        recordAttemptedModel(candidate);
+        if (previousModel === undefined) switchedAwayFromOriginal = true;
+        return candidate;
+      }
+      return undefined;
+    };
+    const baseAttemptOptions: RunTeammateOptions = {
+      ...options,
+      ...(handoff === undefined ? {} : {
+        resumeSessionFile: handoff,
+        resumePrompt: MODEL_FALLBACK_RESUME_PROMPT,
+      }),
+      // Only arm the in-process switch when the candidate chain actually has
+      // a successor; with nothing left the failure settles through the
+      // standard path without an extra async hop. `candidateIndex` already
+      // counts this candidate, so the slice starts after it.
+      ...(modelCandidates.slice(candidateIndex).some((candidate) => candidate !== undefined)
+        ? { onModelFailover: (error, previousModel) => nextCandidateModel(previousModel) }
+        : {}),
+      onChildEvent: (event) => {
+        if (event.type === "teammate_session_ready" && typeof event.sessionFile === "string") {
+          lastSessionFile = event.sessionFile;
+        } else if (event.type === "teammate_model_switch_abandoned" && typeof event.model === "string") {
+          // The switch never reached Pi's ack, so the target model never ran.
+          // Release its trial acquisition instead of charging a phantom
+          // failure at the terminal settlement.
+          const abandoned = pendingModelAcquisitions.get(event.model);
+          if (abandoned !== undefined) {
+            breaker.releaseCandidate(abandoned);
+            pendingModelAcquisitions.delete(event.model);
+          }
+        }
+        hostOnChildEvent?.(event);
+      },
+    };
     const attemptOptions: RunTeammateOptions = options.onTurnComplete || options.onResultPublished
       ? {
-          ...options,
+          ...baseAttemptOptions,
           onTurnComplete(result, terminalStatus) {
             const effectiveStatus = terminalStatus
               ?? (options.signal?.aborted ? "terminated" : undefined);
@@ -635,7 +749,7 @@ export async function runSingleTeammate(
             }
           },
         }
-      : options;
+      : baseAttemptOptions;
     const commitCompletion = (): void => {
       completionState = "forwarding";
       for (const completion of pendingCompletions.splice(0)) {
@@ -811,9 +925,14 @@ export async function runSingleTeammate(
 
       if (candidateResult.exitCode === 0) {
         if (acquisition?.allowed) {
-          breaker.recordSuccess(acquisition);
+          // The original model failed (that is why a switch happened); only
+          // the in-process successor models succeeded. Charge the original
+          // like the B path would, so the breaker learns which model fails.
+          if (switchedAwayFromOriginal) breaker.recordRetryableFailure(acquisition);
+          else breaker.recordSuccess(acquisition);
           settled = true;
         }
+        settlePendingModelAcquisitions(true);
         candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
         await publishResult(candidateResult, cwd);
         commitCompletion();
@@ -825,6 +944,12 @@ export async function runSingleTeammate(
           breaker.releaseCandidate(acquisition);
           settled = true;
         }
+        // A caller cancellation is not a model failure: release every
+        // in-process switch trial instead of charging the models.
+        for (const [, pendingAcquisition] of pendingModelAcquisitions) {
+          breaker.releaseCandidate(pendingAcquisition);
+        }
+        pendingModelAcquisitions.clear();
         discardCompletion();
         return cancelAtBoundary("while a model candidate was running");
       }
@@ -858,11 +983,30 @@ export async function runSingleTeammate(
       // task outright and this path is never entered — which leaves exactly the
       // runs that produced a real provider diagnosis worth keeping.
       const modelSelectionUnsupported = resolvedCapabilities?.modelSelection === "unsupported";
-      const failoverConditionsMet = replayFenceClear
-        && ((fallbackFailure && authoritativeFailure) || preActivityInfrastructureExit);
+      // A checkpoint published by this attempt (or a predecessor) enables the
+      // resume path: the next candidate loads the recorded session under its
+      // own model (`--session <checkpoint> --model <candidate>`), so tools
+      // already executed stay in history instead of being replayed. The
+      // side-effect fence therefore does not apply to resume-based failover —
+      // the failed run's own session is preserved, not re-run from scratch.
+      // The unknown-effect arm of the fence still applies: a tool that was
+      // in flight when the run died may have produced external side effects
+      // that are not yet recorded in the session, and a resumed model cannot
+      // be trusted to skip them (the resume prompt only forbids repeating
+      // calls whose results are already in history).
+      const resumableCheckpoint = lastSessionFile !== undefined && fs.existsSync(lastSessionFile);
+      const resumeUnknownEffect = recoveryFacts !== undefined
+        && (recoveryFacts.inFlightToolCount > 0 || recoveryFacts.externalReplayRisk);
+      const failoverConditionsMet = resumableCheckpoint && !resumeUnknownEffect
+        ? fallbackFailure
+        : replayFenceClear
+          && ((fallbackFailure && authoritativeFailure) || preActivityInfrastructureExit);
       let fallbackEligible = failoverConditionsMet && !modelSelectionUnsupported;
 
-      if (fallbackFailure && !authoritativeFailure && !preActivityInfrastructureExit) {
+      // Resume-based failover publishes the checkpoint handoff itself and is
+      // not a blocked decision; only the fresh-replay paths below append
+      // diagnostics.
+      if (!resumableCheckpoint && fallbackFailure && !authoritativeFailure && !preActivityInfrastructureExit) {
         candidateResult.messages.push({
           role: "system",
           content:
@@ -870,7 +1014,22 @@ export async function runSingleTeammate(
             + `(settlementAuthority=${recoveryFacts.settlementAuthority}). `
             + `Legacy or interrupted child streams have degraded recovery capability and cannot be fresh-replayed safely.`,
         });
-      } else if ((fallbackFailure || preActivityInfrastructureExit) && !replayFenceClear) {
+      } else if (resumableCheckpoint && resumeUnknownEffect && fallbackFailure) {
+        // A checkpoint exists but the failed run left a tool in flight or
+        // external replay risk: resuming the session could repeat side
+        // effects the history does not record. Block the resume path and
+        // say why, so the run is not indistinguishable from a no-candidate
+        // failure.
+        candidateResult.messages.push({
+          role: "system",
+          content:
+            `Model fallback blocked by the side-effect replay fence `
+            + `(checkpoint present but inFlightTools=${recoveryFacts.inFlightToolCount}, `
+            + `externalReplayRisk=${recoveryFacts.externalReplayRisk}). `
+            + `A resumed model could repeat a tool whose effect is unknown; `
+            + `the run settles as failed instead.`,
+        });
+      } else if (!resumableCheckpoint && (fallbackFailure || preActivityInfrastructureExit) && !replayFenceClear) {
         const completedTools = recoveryFacts.completedToolCount;
         const inFlightTools = recoveryFacts.inFlightToolCount;
         const externalReplayRisk = recoveryFacts.externalReplayRisk;
@@ -941,6 +1100,7 @@ export async function runSingleTeammate(
           else breaker.recordRetryableFailure(acquisition);
           settled = true;
         }
+        settlePendingModelAcquisitions(false);
         discardCompletion();
         const kind = preActivityInfrastructureExit ? "non-retryable" : classifyRetryError(error);
         // D1-A: an auth failure marks this provider's credential as bad —
@@ -949,6 +1109,14 @@ export async function runSingleTeammate(
         if (kind === "auth" && modelToUse !== undefined) {
           const failedProvider = providerOf(modelToUse);
           if (failedProvider !== undefined) authSkippedProviders.add(failedProvider);
+        }
+        // Resume handoff: the next candidate loads this attempt's recorded
+        // session under its own model instead of replaying the task from the
+        // start. `resumePrompt` replaces the original task text as the initial
+        // prompt (the task already lives inside the loaded session history),
+        // directing the model to continue from the recorded state.
+        if (resumableCheckpoint) {
+          resumeHandoff = lastSessionFile;
         }
         // D2: bounded kind-aware backoff before the next candidate. Only
         // transient network/provider failures wait (a degraded provider gets
@@ -967,6 +1135,7 @@ export async function runSingleTeammate(
         breaker.releaseCandidate(acquisition);
         settled = true;
       }
+      settlePendingModelAcquisitions(false);
       candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
       commitCompletion();
       return candidateResult;
