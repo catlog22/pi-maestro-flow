@@ -293,8 +293,9 @@ export class McpxWizardOverlay implements Component, Focusable {
       case "listen":
         return [
           fitLine("监听地址（默认 127.0.0.1:9090；公网部署勿直接暴露）", inner),
-          option(0, `host: ${this.changes.host ?? "127.0.0.1"}`),
-          option(1, `port: ${this.changes.port ?? 9090}`),
+          option(0, `host: ${this.editing && this.selected === 0 ? this.draft + "▌" : (this.changes.host ?? "127.0.0.1")}`),
+          option(1, `port: ${this.editing && this.selected === 1 ? this.draft + "▌" : (this.changes.port ?? 9090)}`),
+          option(2, "→ 下一步（认证模式）"),
         ];
       case "auth":
         return [
@@ -315,6 +316,7 @@ export class McpxWizardOverlay implements Component, Focusable {
           fitLine("OAuth：password 与 server_url（反向代理 HTTPS）", inner),
           option(0, `password: ${this.editing && this.selected === 0 ? this.draft + "▌" : "********"}`),
           option(1, `server_url: ${this.editing && this.selected === 1 ? this.draft + "▌" : this.changes.oauthServerURL ?? "https://mcp.example.com"}`),
+          option(2, "→ 下一步（命令策略）"),
           fitLine("将自动启用 disable_localhost_protection + trust_proxy_headers", inner),
         ];
       case "policy":
@@ -373,8 +375,10 @@ export class McpxWizardOverlay implements Component, Focusable {
         this.draft = "";
       } else if (this.step === "write") {
         this.step = "workspace";
-      } else if (this.step === "listen" || this.step === "auth") {
+      } else if (this.step === "listen") {
         this.params.close();
+      } else if (this.step === "auth") {
+        this.step = "listen";
       } else {
         this.step = "auth";
       }
@@ -411,13 +415,13 @@ export class McpxWizardOverlay implements Component, Focusable {
 
   private stepOptions(): number {
     switch (this.step) {
-      case "listen": return 2;
+      case "listen": return 3;
       case "auth": return 3;
       case "policy": return 3;
       case "pi": return 2;
       case "skills": return 2;
       case "workspace": return 2;
-      case "oauth": return 2;
+      case "oauth": return 3;
       default: return 1;
     }
   }
@@ -450,6 +454,10 @@ export class McpxWizardOverlay implements Component, Focusable {
   private confirm(): void {
     switch (this.step) {
       case "listen":
+        if (this.selected === 2) {
+          this.step = "auth";
+          break;
+        }
         if (this.selected === 0) {
           this.editing = true;
           this.draft = this.changes.host ?? "127.0.0.1";
@@ -473,6 +481,10 @@ export class McpxWizardOverlay implements Component, Focusable {
         this.step = "policy";
         break;
       case "oauth":
+        if (this.selected === 2) {
+          this.step = "policy";
+          break;
+        }
         if (this.selected === 0) {
           this.editing = true;
           this.draft = this.changes.oauthPassword ?? "";
@@ -560,7 +572,7 @@ function fg(code: string, text: string): string {
 }
 
 function isEnter(data: string): boolean {
-  return data === "\r" || data === "\n";
+  return matchesKey(data, Key.enter);
 }
 
 export const _mcpxWizardInternals = {
