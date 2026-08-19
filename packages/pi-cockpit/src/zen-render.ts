@@ -43,12 +43,12 @@ export interface ZenRenderInput {
 	browse?: ZenBrowseState;
 }
 
-/** Collapsed WORK shows at most this many task rows (in_progress > blocked > pending). */
+/** Collapsed WORK shows at most this many task rows (in_progress > pending > blocked). */
 const COLLAPSED_TASK_ROWS = 3;
 /** ACTORS shows at most this many participant rows before folding. */
 const MAX_ACTOR_ROWS = 4;
 /** Expanded WORK still caps its rows so Alt+T cannot push the editor off-screen. */
-const EXPANDED_TASK_ROWS = 12;
+const EXPANDED_TASK_ROWS = 15;
 /** L2 in-place expansion budget: fixed window so Enter cannot grow unbounded. */
 const EXPANSION_ROWS = 6;
 
@@ -202,10 +202,13 @@ function missionRows(input: ZenRenderInput, glyphs: IconGlyphs): ZenRow[] {
 
 // ── WORK ─────────────────────────────────────────────────────────────────
 
+// in_progress > pending > blocked > completed: blocked waits on an external
+// dependency, so it must not crowd actionable pending rows out of the stack
+// when a long plan accumulates many blocked items.
 const TODO_RANK: Record<TodoItem["status"], number> = {
 	in_progress: 0,
-	blocked: 1,
-	pending: 2,
+	pending: 1,
+	blocked: 2,
 	completed: 3,
 };
 

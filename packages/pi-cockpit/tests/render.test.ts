@@ -349,10 +349,11 @@ test("renderTodos list: summary first + sorted rows + glyphs", () => {
 	assert.ok(summary.includes("Todo"));
 	assert.ok(summary.includes("»"));
 	// ordered by status priority (active first), then creation order
+	// blocked now ranks below pending: it waits on a dependency, so pending wins
 	assert.doesNotMatch(lines[1], /□/, "#1 in_progress carries no box marker");
 	assert.ok(lines[1].includes("task 1"), "#1 in_progress still renders its subject");
-	assert.ok(lines[2].includes("!"));  // #2 blocked
-	assert.ok(lines[3].includes("○"));  // #3 pending
+	assert.ok(lines[2].includes("○"));  // #3 pending now second
+	assert.ok(lines[3].includes("!"));  // #2 blocked now third
 	assert.ok(lines[4].includes("✓"));  // #0 completed
 	for (const l of lines) assert.ok(utils.measure(l) <= 80);
 });
@@ -372,15 +373,14 @@ test("renderTodos paints status on hue, weight and strikethrough", () => {
 		wide,
 		opts,
 	);
-	// Rows follow status priority: in_progress, blocked, pending, completed.
-	// The running row is the only one carrying weight, and it owns warning — accent
-	// stays reserved for role identity.
+	// Rows follow status priority: in_progress, pending, blocked, completed
+	// (blocked waits on a dependency, so pending wins the earlier slot).
 	assert.ok(lines[1].includes("<b>[text]task 1[/]</b>"));
 	assert.ok(lines[1].includes("[warning] [/]"), "in-progress leading glyph is a coloured space, not a box");
 	assert.ok(!lines[1].includes("[accent]"));
-	assert.ok(lines[2].includes("[error]!"));
-	assert.ok(lines[3].includes("[accent]○[/]"));
-	assert.ok(lines[3].includes("[text]task 3[/]"));
+	assert.ok(lines[2].includes("[accent]○[/]"), "pending row is now second");
+	assert.ok(lines[2].includes("[text]task 3[/]"));
+	assert.ok(lines[3].includes("[error]!"), "blocked row is now third");
 	// A completed subject is struck through and dimmed; the check glyph stays green.
 	assert.ok(lines[4].includes("<s>[dim]task 0[/]</s>"));
 	assert.ok(lines[4].includes("[success]✓[/]"));
@@ -448,11 +448,11 @@ test("renderTodos collapsed next task skips pending items with dependencies", ()
 	assert.ok(!line.includes("waiting"));
 });
 
-test("renderTodos list caps at 8 visible + overflow", () => {
-	const items = Array.from({ length: 12 }, (_, i) => todo(String(i), "pending" as const));
+test("renderTodos list caps at 11 visible + overflow", () => {
+	const items = Array.from({ length: 15 }, (_, i) => todo(String(i), "pending" as const));
 	const lines = renderTodos(items, "list", 80, theme, utils, opts);
-	assert.equal(lines.length, 10); // 1 summary + 8 visible + 1 overflow
-	assert.ok(lines[9].includes("4 more"));
+	assert.equal(lines.length, 13); // 1 summary + 11 visible + 1 overflow
+	assert.ok(lines[12].includes("4 more"));
 });
 
 test("renderTodos compact: bar + percent, width bounded", () => {

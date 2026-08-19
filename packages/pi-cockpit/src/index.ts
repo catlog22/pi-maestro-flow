@@ -31,6 +31,7 @@ import {
 	type FullscreenController,
 } from "./fullscreen-controller.ts";
 import { BashBgOverlay } from "./bash-bg-overlay.ts";
+import { TodoOverlay } from "./todo-overlay.ts";
 import { AgentOverlay } from "./agent-overlay.ts";
 import { renderBashBgSummary } from "./bash-bg-widget.ts";
 import { registerQuietTools } from "./quiet-tools.ts";
@@ -133,6 +134,7 @@ const MAILBOX_REGISTRY_KEY = Symbol.for("pi-maestro-teammate.mailbox-registry");
 
 const FOOTER_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 const BASH_BG_OVERLAY_KEY = "alt+j";
+const TODO_OVERLAY_KEY = "alt+shift+t";
 const SIDEBAR_RESIZE_KEY = "ctrl+shift+r";
 const WINDOW_MONITOR_TOGGLE_KEY = "alt+w";
 const SIDEBAR_FOCUS_KEY = "alt+l";
@@ -349,6 +351,7 @@ export default function (pi: ExtensionAPI): void {
 	let activeAgentOverlay: { finalize(): void } | undefined;
 	let activeZenSheet: { finalize(): void } | undefined;
 	let activeBashBgOverlay: BashBgOverlay | undefined;
+	let activeTodoOverlay: TodoOverlay | undefined;
 	/** Agent activity temporarily wins vertical space without rewriting Todo preference. */
 	let agentPriorityActive = false;
 	let todoExpandedOverAgents = false;
@@ -2173,6 +2176,33 @@ export default function (pi: ExtensionAPI): void {
 		}
 	};
 
+	const openTodoOverlay = async (ctx: ExtensionContext, initialTodoId?: string): Promise<void> => {
+		if (!ctx.hasUI) return;
+		let ownedOverlay: TodoOverlay | undefined;
+		enterCapturingOverlay();
+		try {
+			await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+				ownedOverlay = new TodoOverlay({
+					getTodos: () => todos.snapshot(),
+					requestRender: () => tui.requestRender(),
+					close: () => done(undefined),
+					theme,
+					glyphs: resolveGlyphs(config.icons.mode),
+					...(initialTodoId ? { initialTodoId } : {}),
+					getTerminalRows: () => terminalRows(tui),
+				});
+				activeTodoOverlay = ownedOverlay;
+				return ownedOverlay;
+			}, {
+				overlay: true,
+				overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%" },
+			});
+		} finally {
+			if (activeTodoOverlay === ownedOverlay) activeTodoOverlay = undefined;
+			exitCapturingOverlay();
+		}
+	};
+
 	// --- /theme: pi ships no command for this; themes live under /settings ---
 	const makeThemePicker = (
 		ctx: ExtensionContext,
@@ -2390,6 +2420,17 @@ export default function (pi: ExtensionAPI): void {
 		description: "Open background Bash jobs — live status, command, cwd, duration and output tail",
 		async handler(ctx) {
 			await openBashBgOverlay(ctx);
+		},
+	});
+
+	pi.registerShortcut(TODO_OVERLAY_KEY, {
+		description: "Open the Todo center — scrollable full list with status, assignee, skills and blocked-by dependencies",
+		async handler(ctx) {
+			if (!config.enabled) {
+				ctx.ui.notify(tuiT("notice.cockpitDisabled"), "warning");
+				return;
+			}
+			await openTodoOverlay(ctx);
 		},
 	});
 

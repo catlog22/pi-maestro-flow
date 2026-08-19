@@ -375,17 +375,20 @@ export function renderAgents(
 	return lines;
 }
 
-const TODO_MAX_VISIBLE = 8;
+const TODO_MAX_VISIBLE = 11;
 
-const TODO_STATUS_RANK: Record<string, number> = { in_progress: 0, blocked: 1, pending: 2, completed: 3 };
+// blocked sits below pending: a blocked task waits on an external dependency the
+// user cannot act on directly, so it must not crowd actionable pending rows out
+// of the panel when a long plan accumulates many blocked items.
+const TODO_STATUS_RANK: Record<string, number> = { in_progress: 0, pending: 1, blocked: 2, completed: 3 };
 
-function todoStatusRank(status: string): number {
+export function todoStatusRank(status: string): number {
 	return TODO_STATUS_RANK[status] ?? 4;
 }
 
 // Tasks keep their creation order (the numeric id assigned at allocateTaskId).
 // Non-numeric ids (workflow mirrors) sort after numeric ones, then lexicographically.
-function todoIdOrder(id: string): number {
+export function todoIdOrder(id: string): number {
 	const n = Number(id);
 	return Number.isInteger(n) ? n : Number.POSITIVE_INFINITY;
 }
@@ -406,7 +409,7 @@ function todoActorLabel(actor: NonNullable<TodoItem["assignee"]>, items: readonl
 	return `${actor.label}#${actor.id}`;
 }
 
-function todoActor(item: TodoItem, items: readonly TodoItem[], transferArrow: string): string {
+export function todoActor(item: TodoItem, items: readonly TodoItem[], transferArrow: string): string {
 	if (!item.assignee) return "";
 	const assigned = `@${todoActorLabel(item.assignee, items)}`;
 	if (!item.createdBy || item.createdBy.id === item.assignee.id) return assigned;
@@ -417,7 +420,7 @@ function todoActor(item: TodoItem, items: readonly TodoItem[], transferArrow: st
 // expanded rows must not drift apart, and every status has to differ from its
 // neighbours by glyph *and* hue *and* weight — hue alone is not a channel a
 // colour-blind or monochrome terminal can read.
-interface TodoPaint {
+export interface TodoPaint {
 	glyph: string;
 	glyphColor: ThemeColor;
 	subjectColor: ThemeColor;
@@ -425,7 +428,7 @@ interface TodoPaint {
 	struck?: boolean;
 }
 
-function todoPaint(status: TodoItem["status"], glyphs: IconGlyphs): TodoPaint {
+export function todoPaint(status: TodoItem["status"], glyphs: IconGlyphs): TodoPaint {
 	if (status === "completed") {
 		return { glyph: glyphs.check, glyphColor: "success", subjectColor: "dim", struck: true };
 	}
@@ -438,7 +441,7 @@ function todoPaint(status: TodoItem["status"], glyphs: IconGlyphs): TodoPaint {
 	return { glyph: glyphs.pending, glyphColor: "accent", subjectColor: "text" };
 }
 
-function todoSubject(paint: TodoPaint, subject: string, theme: PaintTheme): string {
+export function todoSubject(paint: TodoPaint, subject: string, theme: PaintTheme): string {
 	const text = theme.fg(paint.subjectColor, subject);
 	if (paint.struck) return struck(theme, text);
 	return paint.bold ? bold(theme, text) : text;
@@ -527,8 +530,8 @@ export function renderTodos(
 	);
 	const todoDropRank = (status: string): number => {
 		if (status === "in_progress") return 60;
-		if (status === "blocked") return 50;
-		if (status === "pending") return 30;
+		if (status === "pending") return 50;
+		if (status === "blocked") return 40;
 		return 10; // completed
 	};
 	const todoGroups: PriorityGroup[] = ordered.map((item, i) => ({
