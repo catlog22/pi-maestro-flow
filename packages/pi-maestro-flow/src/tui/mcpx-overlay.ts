@@ -3,7 +3,7 @@
  * binary/endpoint status, registered workspaces, discoverable Pi windows and
  * cross-window message history (workspace-peer file protocol).
  *
- * Keys: ↑↓/jk select history · Enter details · r refresh · e register cwd · Esc close
+ * Keys: ↑↓/jk select history · Enter details · r refresh · e register/unregister cwd · Esc close
  */
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -78,6 +78,7 @@ export interface McpxOverlayParams {
   requestRender: () => void;
   close: () => void;
   onRegisterWorkspace?: (path: string) => Promise<string>;
+  onUnregisterWorkspace?: (path: string) => Promise<string>;
   onOpenWizard?: () => void;
   /** Endpoint readiness wait for startMcpx (ms); tests shorten this. */
   endpointWaitMs?: number;
@@ -554,7 +555,7 @@ export class McpxOverlay implements Component, Focusable {
       return;
     }
     if (data === "e" || data === "E") {
-      void this.registerWorkspace();
+      void this.toggleWorkspaceRegistration();
       return;
     }
     if (data === "c" || data === "C") {
@@ -571,29 +572,32 @@ export class McpxOverlay implements Component, Focusable {
     }
   }
 
-  private async registerWorkspace(): Promise<void> {
+  /** e toggles registration of the current window: expose it to MCPX, or close it again. */
+  private async toggleWorkspaceRegistration(): Promise<void> {
     if (this.snapshot.refreshing) return;
-    this.status = "registering…";
+    const registered = this.snapshot.cwdRegistered;
+    this.status = registered ? "unregistering…" : "registering…";
     this.params.requestRender();
+    const binary = locateMcpx();
+    if (!binary) {
+      this.status = "mcpx binary not found — set MCPX_BIN or add mcpx to PATH";
+      return;
+    }
     try {
-      if (this.params.onRegisterWorkspace) {
-        const message = await this.params.onRegisterWorkspace(this.params.cwd);
+      const command = registered ? "remove" : "register";
+      if (registered && this.params.onUnregisterWorkspace) {
+        const message = await this.params.onUnregisterWorkspace(this.params.cwd);
         this.status = message;
       } else {
-        const binary = locateMcpx();
-        if (!binary) {
-          this.status = "mcpx binary not found — set MCPX_BIN or add mcpx to PATH";
-        } else {
-          const result = spawnSync(binary, ["workspace", "register", this.params.cwd], {
-            encoding: "utf8", timeout: 15_000, shell: process.platform === "win32",
-          });
-          this.status = result.status === 0
-            ? `registered: ${this.params.cwd}`
-            : `register failed (${result.status ?? "spawn error"}): ${String(result.stderr || result.stdout || "").trim()}`;
-        }
+        const result = spawnSync(binary, ["workspace", command, this.params.cwd], {
+          encoding: "utf8", timeout: 15_000, shell: process.platform === "win32",
+        });
+        this.status = result.status === 0
+          ? (registered ? `unregistered: ${this.params.cwd}` : `registered: ${this.params.cwd}`)
+          : `${registered ? "remove" : "register"} failed (${result.status ?? "spawn error"}): ${String(result.stderr || result.stdout || "").trim()}`;
       }
     } catch (error) {
-      this.status = `register failed: ${error instanceof Error ? error.message : String(error)}`;
+      this.status = `${registered ? "remove" : "register"} failed: ${error instanceof Error ? error.message : String(error)}`;
     }
     await this.refresh();
   }
@@ -633,7 +637,7 @@ export class McpxOverlay implements Component, Focusable {
     rows.push(rule(inner));
     rows.push(fitLine(`Pi 窗口（${this.snapshot.windows.length} fresh）`, inner));
     if (this.snapshot.windows.length === 0) {
-      rows.push(fitLine("  ○ 无活跃窗口 — 在对应工作区启动 pi 后自动注册", inner));
+      rows.push(fitLine("  ○ 无活跃窗口 — 在对应工作区启动 pi 后可见（e 键注册当前窗口）", inner));
     } else {
       for (const window of this.snapshot.windows.slice(0, 6)) {
         const pressure = window.contextPressure === undefined ? "" : ` ctx:${window.contextPressure}%`;

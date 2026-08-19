@@ -12,7 +12,8 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 
 const bridgeDisabled = () => process.env.PI_MCPX_BRIDGE === "0";
 const registeredPaths = new Set<string>();
@@ -20,6 +21,10 @@ const registeredPaths = new Set<string>();
 export function locateMcpx(): string | undefined {
   const configured = process.env.MCPX_BIN;
   if (configured && existsSync(configured)) return configured;
+  // Default install location: ~/.mcpx/bin/mcpx(.exe) — the panel's s/x
+  // controls and the startup bridge find it here without PATH changes.
+  const homeBin = join(homedir(), ".mcpx", "bin", process.platform === "win32" ? "mcpx.exe" : "mcpx");
+  if (existsSync(homeBin)) return homeBin;
   const probe = spawnSync(process.platform === "win32" ? "where" : "which", ["mcpx"], {
     encoding: "utf8",
     shell: process.platform === "win32",

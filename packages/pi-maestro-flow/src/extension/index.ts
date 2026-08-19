@@ -46,7 +46,6 @@ import { altKey } from "../key-labels.ts";
 import { setQuietMode } from "../quiet-state.ts";
 import { toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts";
 import { registerKeybindingsCommand } from "../keybindings-command.ts";
-import { ensureMcpxWorkspace } from "../mcpx-bridge.ts";
 import { executeExplore, type ExploreParams } from "../tools/explore.ts";
 import { executeDelegate, type DelegateParams } from "../tools/delegate.ts";
 import { executeMoa, type MoaParams } from "../tools/moa.ts";
@@ -853,14 +852,9 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     console.warn(`[pi-maestro-flow] Companion package registration skipped: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  // MCPX workspace auto-registration: register the current project with the
-  // local MCPX runtime on startup so remote MCP clients can bind sessions to
-  // it. Fire-and-forget; failures are logged and never break activation.
-  try {
-    ensureMcpxWorkspace();
-  } catch {
-    // Bridge must never break extension activation.
-  }
+  // MCPX workspace auto-registration is deliberately opt-in: the /mcpx panel's
+  // e key registers/unregisters the current window with the local MCPX runtime
+  // (default: not registered), so startup never writes to ~/.mcpx/config.yaml.
 
   // UCL: capture only the locked extension-tool surface. pi.getAllTools() exposes
   // schemas but not execute(), so the registry is the invocation source for the

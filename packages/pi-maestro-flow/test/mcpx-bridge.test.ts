@@ -24,15 +24,20 @@ async function withFakeMcpx(run: (logPath: string, binDir: string) => Promise<vo
   if (!isWin) await chmod(shim, 0o755);
   const previousPath = process.env.PATH;
   process.env.PATH = `${binDir}${isWin ? ";" : ":"}${previousPath ?? ""}`;
+  // MCPX_BIN wins over PATH and the real ~/.mcpx/bin install; pin the shim.
+  const previousBin = process.env.MCPX_BIN;
+  process.env.MCPX_BIN = shim;
   try {
     await run(logPath, binDir);
   } finally {
     process.env.PATH = previousPath;
+    if (previousBin === undefined) delete process.env.MCPX_BIN;
+    else process.env.MCPX_BIN = previousBin;
     await rm(dir, { recursive: true, force: true });
   }
 }
 
-test("registers the project root with mcpx on startup", async (t) => {
+test("registers a workspace when invoked (opt-in, e key / bridge API)", async (t) => {
   t.after(_resetMcpxBridgeState);
   await withFakeMcpx(async (logPath) => {
     const root = join(process.cwd(), "fixtures");

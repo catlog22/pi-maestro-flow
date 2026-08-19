@@ -44,9 +44,6 @@ export interface McpxConfigChanges {
 
 type WizardStep =
   | "listen"
-  | "auth"
-  | "bearer"
-  | "oauth"
   | "policy"
   | "pi"
   | "skills"
@@ -54,18 +51,15 @@ type WizardStep =
   | "tunnel"
   | "write";
 
-const STEP_ORDER: WizardStep[] = ["listen", "auth", "bearer", "oauth", "policy", "pi", "skills", "workspace", "tunnel", "write"];
+const STEP_ORDER: WizardStep[] = ["listen", "policy", "pi", "skills", "workspace", "tunnel", "write"];
 const STEP_LABEL: Record<WizardStep, string> = {
-  listen: "1/10 监听地址",
-  auth: "2/10 认证模式",
-  bearer: "3/10 Bearer Token",
-  oauth: "3/10 OAuth 配置",
-  policy: "4/10 命令策略",
-  pi: "5/10 Pi 白名单",
-  skills: "6/10 Skill 发现目录",
-  workspace: "7/10 工作区注册",
-  tunnel: "8/10 公网隧道（Cloudflare）",
-  write: "9/10 写入确认",
+  listen: "1/7 监听地址",
+  policy: "2/7 命令策略",
+  pi: "3/7 Pi 白名单",
+  skills: "4/7 Skill 发现目录",
+  workspace: "5/7 工作区注册",
+  tunnel: "6/7 公网隧道（Cloudflare）",
+  write: "7/7 写入确认",
 };
 
 interface Section {
@@ -313,7 +307,6 @@ export class McpxWizardOverlay implements Component, Focusable {
   private controls(): string[] {
     if (this.editing) return ["Enter 确认输入", "Esc 取消输入"];
     const base = ["↑↓/jk 选择", "Enter 确认", "Esc 返回"];
-    if (this.step === "bearer") base.push("g 重新生成 token");
     if (this.step === "tunnel") base.push("g 启动隧道", "x 停止隧道");
     if (this.step === "write") base.push("w 写入配置");
     return base;
@@ -328,29 +321,7 @@ export class McpxWizardOverlay implements Component, Focusable {
           fitLine("监听地址（默认 127.0.0.1:9090；公网部署勿直接暴露）", inner),
           option(0, `host: ${this.editing && this.selected === 0 ? this.draft + "▌" : (this.changes.host ?? "127.0.0.1")}`),
           option(1, `port: ${this.editing && this.selected === 1 ? this.draft + "▌" : (this.changes.port ?? 9090)}`),
-          option(2, "→ 下一步（认证模式）"),
-        ];
-      case "auth":
-        return [
-          fitLine("认证模式 — README：公网部署禁止 open，应使用 oauth/bearer/dual", inner),
-          option(0, "open", "仅本机调试"),
-          option(1, "bearer", "本地客户端 + Token"),
-          option(2, "oauth", "网页端 Remote MCP（ChatGPT 等）"),
-        ];
-      case "bearer":
-        return [
-          fitLine(`Token（g 重新生成）:`, inner),
-          fitLine(`  ${this.generatedToken || (this.changes.authToken ?? "（未生成）")}`, inner),
-          fitLine("客户端配置示例（.mcp.json）:", inner),
-          fitLine(`  { "mcpServers": { "mcpx": { "url": "http://127.0.0.1:${this.changes.port ?? 9090}/mcp", "headers": { "Authorization": "Bearer ${(this.generatedToken || (this.changes.authToken ?? "")).slice(0, 12)}…" } } } }`, inner),
-        ];
-      case "oauth":
-        return [
-          fitLine("OAuth：password 与 server_url（反向代理 HTTPS）", inner),
-          option(0, `password: ${this.editing && this.selected === 0 ? this.draft + "▌" : "********"}`),
-          option(1, `server_url: ${this.editing && this.selected === 1 ? this.draft + "▌" : this.changes.oauthServerURL ?? "https://mcp.example.com"}`),
           option(2, "→ 下一步（命令策略）"),
-          fitLine("将自动启用 disable_localhost_protection + trust_proxy_headers", inner),
         ];
       case "policy":
         return [
@@ -386,14 +357,12 @@ export class McpxWizardOverlay implements Component, Focusable {
           ? fg("32", `运行中${this.changes.tunnelUrl ? ` · ${this.changes.tunnelUrl}` : "（等待 URL…）"}`)
           : fg("2", "未运行");
         return [
-          fitLine(`公网隧道（Cloudflare）— cloudflared ${cloudflared} · 状态: ${running}`, inner),
-          option(0, "Cloudflare Quick Tunnel（默认）", "g 启动并自动获取 URL"),
-          option(1, "Cloudflare 命名隧道", "自有域名（推荐持久）"),
-          option(2, "自定义 URL", "其他隧道（ngrok 等）"),
-          option(3, this.editing && this.selected === 3 ? `URL: ${this.draft}▌` : `URL: ${this.changes.tunnelUrl ?? "（启动隧道后自动填入）"}`),
-          option(4, "→ 下一步（写入确认）"),
-          fitLine("quick tunnel 命令（自动）: cloudflared tunnel --url http://127.0.0.1:9090", inner),
-          fitLine("命名隧道: cloudflared tunnel create mcpx && cloudflared tunnel route dns mcpx <域名> && cloudflared tunnel run mcpx", inner),
+          fitLine(`公网隧道（Cloudflare Quick Tunnel）— cloudflared ${cloudflared}`, inner),
+          fitLine(`  唯一模式：启动后自动绑定本地端口并生成公网 URL，无需手动填写`, inner),
+          fitLine(`  状态: ${running}`, inner),
+          option(0, this.tunnelProcess ? "重启隧道" : "启动隧道", "Enter/g 自动获取 URL"),
+          option(1, "→ 下一步（写入确认）", "需隧道已启动"),
+          fitLine("  提示: Enter/g 启动 · x 停止 · Esc 返回", inner),
         ];
       }
       case "write": {
@@ -456,12 +425,16 @@ export class McpxWizardOverlay implements Component, Focusable {
         this.step = "workspace";
       } else if (this.step === "listen") {
         this.params.close();
-      } else if (this.step === "auth") {
-        this.step = "listen";
       } else if (this.step === "tunnel") {
         this.step = "workspace";
+      } else if (this.step === "workspace") {
+        this.step = "skills";
+      } else if (this.step === "skills") {
+        this.step = "pi";
+      } else if (this.step === "pi") {
+        this.step = "policy";
       } else {
-        this.step = "auth";
+        this.step = "listen";
       }
       this.params.requestRender();
       return;
@@ -477,11 +450,6 @@ export class McpxWizardOverlay implements Component, Focusable {
     }
     if (matchesKey(data, Key.down) || matchesKey(data, "j")) {
       this.selected = Math.min(this.stepOptions() - 1, this.selected + 1);
-      this.params.requestRender();
-      return;
-    }
-    if (data === "g" && this.step === "bearer") {
-      this.generatedToken = this.newToken();
       this.params.requestRender();
       return;
     }
@@ -505,13 +473,11 @@ export class McpxWizardOverlay implements Component, Focusable {
   private stepOptions(): number {
     switch (this.step) {
       case "listen": return 3;
-      case "auth": return 3;
       case "policy": return 3;
       case "pi": return 2;
       case "skills": return 2;
       case "workspace": return 2;
-      case "tunnel": return 5;
-      case "oauth": return 3;
+      case "tunnel": return 2;
       default: return 1;
     }
   }
@@ -524,11 +490,6 @@ export class McpxWizardOverlay implements Component, Focusable {
           const port = Number(this.draft);
           this.changes.port = Number.isInteger(port) && port > 0 && port < 65536 ? port : 9090;
         }
-      } else if (this.step === "oauth") {
-        if (this.selected === 0) this.changes.oauthPassword = this.draft;
-        else this.changes.oauthServerURL = normalizeUrl(this.draft) || undefined;
-      } else if (this.step === "tunnel") {
-        this.changes.tunnelUrl = normalizeUrl(this.draft) || undefined;
       }
       this.editing = false;
       this.draft = "";
@@ -547,7 +508,7 @@ export class McpxWizardOverlay implements Component, Focusable {
     switch (this.step) {
       case "listen":
         if (this.selected === 2) {
-          this.step = "auth";
+          this.step = "policy";
           break;
         }
         if (this.selected === 0) {
@@ -556,33 +517,6 @@ export class McpxWizardOverlay implements Component, Focusable {
         } else {
           this.editing = true;
           this.draft = String(this.changes.port ?? 9090);
-        }
-        break;
-      case "auth":
-        this.changes.authMode = (["open", "bearer", "oauth"] as const)[this.selected];
-        if (this.changes.authMode === "bearer") {
-          this.changes.authToken = this.generatedToken;
-          this.step = "bearer";
-        } else if (this.changes.authMode === "oauth") {
-          this.step = "oauth";
-        } else {
-          this.step = "policy";
-        }
-        break;
-      case "bearer":
-        this.step = "policy";
-        break;
-      case "oauth":
-        if (this.selected === 2) {
-          this.step = "policy";
-          break;
-        }
-        if (this.selected === 0) {
-          this.editing = true;
-          this.draft = this.changes.oauthPassword ?? "";
-        } else {
-          this.editing = true;
-          this.draft = this.changes.oauthServerURL ?? "";
         }
         break;
       case "policy":
@@ -602,25 +536,18 @@ export class McpxWizardOverlay implements Component, Focusable {
         this.step = "tunnel";
         break;
       case "tunnel":
-        if (this.selected === 4) {
+        if (this.selected === 1) {
           const url = this.changes.tunnelUrl?.trim() ?? "";
           if (!/^https?:\/\//.test(url)) {
-            this.status = "请先启动隧道获取公网 URL（Enter/g），或手动填写第 3 项 URL";
+            this.status = "请先启动隧道获取公网 URL（Enter/g）";
             this.params.requestRender();
             break;
           }
           this.step = "write";
           break;
         }
-        if (this.selected === 0) {
-          // Quick Tunnel: Enter starts cloudflared and auto-parses the URL.
-          void this.startQuickTunnel();
-          break;
-        }
-        if (this.selected === 1 || this.selected === 2 || this.selected === 3) {
-          this.editing = true;
-          this.draft = this.changes.tunnelUrl ?? "";
-        }
+        // Quick Tunnel (selected 0): Enter starts cloudflared, parses the URL.
+        void this.startQuickTunnel();
         break;
       case "write":
         this.step = "workspace";
