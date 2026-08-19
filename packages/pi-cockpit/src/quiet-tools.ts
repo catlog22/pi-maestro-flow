@@ -282,6 +282,7 @@ export function registerQuietTools(pi: ExtensionAPI, getConfig: () => CockpitCon
 			description: guardedEdit ? GUARDED_EDIT_DESCRIPTION : original.description,
 			parameters: guardedEdit ? GUARDED_EDIT_PARAMETERS : original.parameters,
 			prepareArguments: guardedEdit ? prepareGuardedEditArguments : original.prepareArguments,
+			executionMode: guardedEdit ? "sequential" : undefined,
 			renderShell: "self",
 
 			async execute(toolCallId: string, params: any, signal: any, onUpdate: any, ctx: ExtensionContext) {

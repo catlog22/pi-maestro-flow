@@ -36,7 +36,9 @@ test("guarded edit registers under the built-in name with the stricter descripti
 	assert.ok(edit, "edit tool must be registered");
 	assert.match(edit.description, /verbatim/i);
 	assert.match(edit.description, /merge them into one edit/);
+	assert.match(edit.description, /never emit two edit calls for the same file/);
 	assert.match(edit.description, /not valid UTF-8/);
+	assert.equal(edit.executionMode, "sequential");
 	assert.equal(edit.parameters.additionalProperties, false);
 	assert.equal(edit.parameters.properties.edits.minItems, 1);
 	assert.equal(edit.parameters.properties.edits.items.additionalProperties, false);
@@ -268,7 +270,11 @@ test("an identical replacement rejects the whole edit pack", async () => {
 			undefined,
 			{ cwd: dir },
 		),
-		/edits\[1\]\.oldText and edits\[1\]\.newText are identical after line-ending normalization/,
+		(error: Error) => {
+			assert.match(error.message, /edits\[1\]\.oldText and edits\[1\]\.newText are identical after line-ending normalization/);
+			assert.match(error.message, /no edits in this call were applied, including otherwise valid ones/);
+			return true;
+		},
 	);
 	assert.equal(readFileSync(file, "utf8"), original);
 });

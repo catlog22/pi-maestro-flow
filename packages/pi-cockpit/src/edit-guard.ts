@@ -419,7 +419,8 @@ function prepareSnapshotEdits(rawContent: string, path: string, edits: GuardedRe
 		if (oldText !== "" && oldText === newText) {
 			throw new Error(
 				`edits[${editIndex}].oldText and edits[${editIndex}].newText are identical after line-ending normalization. ` +
-				`Provide the intended replacement; no changes were written.`,
+				`The call is rejected atomically: no edits in this call were applied, including otherwise valid ones. ` +
+				`Remove the identical entry or provide the intended replacement, then resubmit.`,
 			);
 		}
 		const fuzzyOldText = normalizeForFuzzyMatch(oldText);
@@ -566,8 +567,10 @@ must be unique unless occurrence explicitly selects one of several exact
 matches using a 1-based candidate number. Matching is exact-first, then fuzzy
 (trailing whitespace and Unicode quotes/dashes are ignored). If two changes
 affect the same block or nearby lines, merge them into one edit instead of
-emitting overlapping edits. Do not include large unchanged regions just to
-connect distant changes.
+emitting overlapping edits. Batch every change to the same file into a single
+call's edits[] array — never emit two edit calls for the same file in one
+turn; they race each other and the later one fails. Do not include large
+unchanged regions just to connect distant changes.
 
 On failure ("Could not find edits[N]" or "Found N occurrences of the text"),
 re-read the reported candidate lines and either add enough surrounding context
@@ -682,8 +685,13 @@ export function registerGuardedEditTool(pi: ExtensionAPI): void {
 		description: GUARDED_EDIT_DESCRIPTION,
 		parameters: GUARDED_EDIT_PARAMETERS,
 		prepareArguments: prepareGuardedEditArguments,
+		// Same-turn edit calls targeting one file would otherwise race the frozen
+		// snapshot: the first write invalidates the sibling's snapshot. Sequential
+		// mode gives each call a fresh snapshot of the previous call's result.
+		executionMode: "sequential",
 		promptGuidelines: [
 			"Before calling edit, read the target file and copy oldText verbatim; all edits match the same frozen original. If oldText has multiple exact matches, add context or set the 1-based occurrence selector instead of guessing.",
+			"Batch all same-file changes into one edit call's edits[] array; never emit two edit calls for the same file in a single turn.",
 		],
 		execute: executeGuardedEdit,
 	} satisfies ToolDefinition<typeof GUARDED_EDIT_PARAMETERS, EditToolDetails | undefined>);
