@@ -152,6 +152,19 @@ const CONFIG_FIELDS: readonly BackendConfigField[] = [
     descriptionKey: "acpCli.modelId.description",
   },
   {
+    // The registration's default model, applied when a task names only the
+    // route. A task naming a model overrides it, so one registration serves a
+    // whole CLI rather than one model of it.
+    //
+    // The value belongs to the CLI's own catalogue, which is only knowable once
+    // a session is open: validation happens there, against what the agent
+    // advertises, and names every accepted value when it rejects one.
+    key: "acpModel",
+    kind: "text",
+    labelKey: "acpCli.acpModel",
+    descriptionKey: "acpCli.acpModel.description",
+  },
+  {
     // Per registration, not per task: `TeammateRunSpec` carries no timeout, so
     // this is the finest granularity the contract can express today.
     key: "runTimeoutMs",
@@ -381,16 +394,16 @@ export function createAcpCliBackend(run: CliToolRunner = runCliTool): TeammateBa
 
     async start(spec: TeammateRunSpec, options: BackendRunOptions): Promise<BackendRun> {
       const route = routeOf(options.config, spec.backend);
-      // One registration serves one CLI. A spec asking for another model is
-      // refused by name rather than answered by this CLI under that name —
-      // silently ignoring it is exactly the failure the capability table exists
-      // to prevent, and `modelSelection: "native"` is only true because of this.
-      if (spec.model !== undefined && spec.model !== route) {
-        throw new Error(
-          `teammate backend "acp-cli" registration serves model "${route}", `
-          + `but this task requested "${spec.model}"`,
-        );
-      }
+      // Two axes share one field. The route names the CLI this registration
+      // launches; anything else names a model inside that CLI's own catalogue,
+      // which is a space the host does not know. A task naming the route asks
+      // for the CLI and nothing more, so the registration's own default (if
+      // any) applies. Selecting nothing when a model was named is the silent
+      // failure the capability table exists to prevent, so an unadvertised
+      // value fails the session rather than running the agent's default.
+      const acpModel = spec.model === undefined || spec.model === route
+        ? text(options.config, "acpModel")
+        : spec.model;
       const tool = isCliToolModel(route) ? cliToolNameFromModel(route) : route;
       const aborter = new AbortController();
       const timeoutMs = count(options.config, "runTimeoutMs");
@@ -406,6 +419,7 @@ export function createAcpCliBackend(run: CliToolRunner = runCliTool): TeammateBa
           signal: cancellation.signal,
           ...(timeoutMs === undefined ? {} : { timeoutMs }),
           ...(startupTimeoutMs === undefined ? {} : { startupTimeoutMs }),
+          ...(acpModel === undefined ? {} : { acpModel }),
         }).finally(cancellation.release);
         const terminalStatus = terminalStatusOf(settled);
         const result: SingleResult = {

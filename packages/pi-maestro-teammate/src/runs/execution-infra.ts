@@ -1786,6 +1786,44 @@ export function validateModelSpecifier(model: string): string {
   return model;
 }
 
+/** Control and formatting characters no specifier may carry, in any namespace. */
+const MODEL_SPECIFIER_CONTROL_CHARACTERS = /[\p{Cc}\p{Cf}]/u;
+
+/**
+ * Check a specifier the host does not own the format of.
+ *
+ * A dispatch bound for a registered backend names a model in that backend's
+ * catalogue — an ACP agent's bracketed variant, a dsh route, a remote target's
+ * own identifier. The host neither defines those namespaces nor can resolve
+ * them, so `MODEL_SPECIFIER_PATTERN`, which encodes the host's own
+ * `provider/model` convention, is the wrong authority.
+ *
+ * What survives is not a format claim but protection for the host's own
+ * machinery: these strings become circuit-breaker keys, log lines, and, for
+ * some backends, process arguments. A bound and a control-character refusal
+ * keep those safe without deciding what a foreign namespace may look like.
+ *
+ * @param model - the specifier a backend will resolve for itself.
+ * @returns the specifier unchanged.
+ * @throws when it is empty, oversized, or carries control characters.
+ */
+export function validateBackendModelSpecifier(model: string): string {
+  if (model.trim().length === 0) {
+    throw new TypeError("Teammate model specifier for a backend dispatch must not be empty");
+  }
+  if (Buffer.byteLength(model, "utf8") > MAX_MODEL_SPECIFIER_BYTES) {
+    throw new TypeError(
+      `Teammate model specifier exceeds ${MAX_MODEL_SPECIFIER_BYTES} bytes: ${JSON.stringify(model.slice(0, 64))}…`,
+    );
+  }
+  if (MODEL_SPECIFIER_CONTROL_CHARACTERS.test(model)) {
+    throw new TypeError(
+      `Teammate model specifier must not carry control characters: ${JSON.stringify(model)}`,
+    );
+  }
+  return model;
+}
+
 export function resolveModelSpecifier(
   model: string,
   modelCapabilities: readonly TeammateModelCapability[] = [],

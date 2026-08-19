@@ -651,6 +651,50 @@ test("invalid model input is rejected before a child process is spawned", async 
   assert.match(result.messages[0]?.content ?? "", /Invalid teammate model specifier/);
 });
 
+test("a backend dispatch carries its own model namespace past host validation", async () => {
+  // The host's `provider/model` pattern refuses brackets, but an ACP agent's
+  // catalogue is made of them. Whoever executes the task owns the namespace, so
+  // a dispatch named for a backend must reach that backend rather than being
+  // refused for a shape the host does not define.
+  const routed = await runSingleTeammate(
+    { agent: "general", task: "Do work", backend: "not-registered", model: "composer-2.5[fast=true]" },
+    { baseCwd: process.cwd() },
+  );
+  assert.equal(routed.exitCode, 1);
+  const routedMessage = routed.messages[0]?.content ?? "";
+  assert.doesNotMatch(routedMessage, /Invalid teammate model specifier/, routedMessage);
+  // It reached routing, which is the next authority, and legacy mode refused it
+  // there by name rather than running the pi subprocess under another name.
+  assert.match(routedMessage, /backend "not-registered"/, routedMessage);
+
+  // The same specifier with no backend still belongs to the host, and the host
+  // still refuses it. The exemption is the backend's, not the bracket's.
+  const hostOwned = await runSingleTeammate(
+    { agent: "general", task: "Do work", model: "composer-2.5[fast=true]" },
+    { baseCwd: process.cwd() },
+  );
+  assert.equal(hostOwned.exitCode, 1);
+  assert.match(hostOwned.messages[0]?.content ?? "", /Invalid teammate model specifier/);
+});
+
+test("a backend dispatch still refuses a specifier that would corrupt host machinery", async () => {
+  // Format is the backend's to define; these strings become breaker keys, log
+  // lines, and some backends' process arguments, which stays the host's problem.
+  const injected = await runSingleTeammate(
+    { agent: "general", task: "Do work", backend: "not-registered", model: "composer\n--tools" },
+    { baseCwd: process.cwd() },
+  );
+  assert.equal(injected.exitCode, 1);
+  assert.match(injected.messages[0]?.content ?? "", /control characters/);
+
+  const oversized = await runSingleTeammate(
+    { agent: "general", task: "Do work", backend: "not-registered", model: "m".repeat(300) },
+    { baseCwd: process.cwd() },
+  );
+  assert.equal(oversized.exitCode, 1);
+  assert.match(oversized.messages[0]?.content ?? "", /exceeds 256 bytes/);
+});
+
 test("model specifiers resolve provider shorthand and reject unavailable exact routes", () => {
   const models = [
     { id: "maestro-qwen/qwen3.8-max" },
