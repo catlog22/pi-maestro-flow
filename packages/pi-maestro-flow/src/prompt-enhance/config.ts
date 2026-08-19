@@ -16,6 +16,11 @@ import {
 
 export const ENHANCE_SECTION = "enhance";
 
+/** Thinking levels the enhancer accepts; "default" follows the session. */
+const ENHANCE_THINKING_LEVELS: readonly (ThinkingLevel | "default")[] = [
+  "default", "minimal", "low", "medium", "high", "xhigh", "max",
+];
+
 /** How much surrounding context the enhancer may gather. */
 export type EnhanceContextDepth = "none" | "session" | "codebase";
 
@@ -64,10 +69,11 @@ function normalizeConfig(value: unknown): EnhanceConfig {
   const modelRef = typeof record.modelRef === "string" && record.modelRef.trim().length > 0
     ? record.modelRef.trim()
     : DEFAULT_ENHANCE_CONFIG.modelRef;
-  const thinking = typeof record.thinking === "string" && record.thinking !== "default"
-    ? (record.thinking as ThinkingLevel)
+  const thinking = typeof record.thinking === "string" &&
+    (ENHANCE_THINKING_LEVELS as readonly string[]).includes(record.thinking)
+    ? (record.thinking as ThinkingLevel | "default")
     : DEFAULT_ENHANCE_CONFIG.thinking;
-  const maxChars = typeof record.maxChars === "number" && record.maxChars > 0
+  const maxChars = typeof record.maxChars === "number" && record.maxChars >= 1
     ? Math.min(Math.floor(record.maxChars), 8000)
     : DEFAULT_ENHANCE_CONFIG.maxChars;
   const contextDepth = typeof record.contextDepth === "string" &&

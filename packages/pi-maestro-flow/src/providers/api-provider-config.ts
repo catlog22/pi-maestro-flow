@@ -1052,7 +1052,7 @@ export async function manageNextSuggestSettings(
   }
 }
 
-const ENHANCE_THINKING_LEVELS = ["default", "off", "low", "medium", "high", "xhigh", "max"] as const;
+const ENHANCE_THINKING_LEVELS = ["default", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const ENHANCE_CONTEXT_DEPTHS: readonly EnhanceContextDepth[] = ["none", "session", "codebase"];
 
 /**

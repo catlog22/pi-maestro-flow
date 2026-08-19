@@ -13,27 +13,22 @@
  * `api-manager.json` under the `enhance` section.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { loadEnhanceConfig, saveEnhanceConfig, type EnhanceConfig } from "./config.ts";
+import { loadEnhanceConfig, saveEnhanceConfig } from "./config.ts";
 import { gatherEnhancerContext } from "./context.ts";
 import { generateEnhancedPrompt } from "./engine.ts";
-
-const WIDGET_KEY = "prompt-enhance";
 
 export interface PromptEnhanceOptions {
   /** api-manager.json path; the `enhance` section holds the config. */
   defaultsPath: string;
 }
 
-export interface PromptEnhanceStatus {
-  enabled: boolean;
-  modelRef: string;
-  contextDepth: string;
-}
-
 export function registerPromptEnhance(
   pi: ExtensionAPI,
   options: PromptEnhanceOptions,
-): () => PromptEnhanceStatus {
+): () => void {
+  // lastOriginal = the editor snapshot captured right before enhancement.
+  // The empty-string sentinel distinguishes "enhanced from inline arg, editor
+  // was empty" from "nothing to revert" (undefined).
   let lastOriginal: string | undefined;
 
   const modelLabel = (ref: string): string => (ref === "session" || !ref ? "会话模型" : ref);
@@ -56,7 +51,14 @@ export function registerPromptEnhance(
       return;
     }
 
-    ctx.ui.notify(`正在用 ${modelLabel(config.modelRef)} 增强提示词…`, "info");
+    // RV-013: surface a pinned-model fallback so billing/quality expectations
+    // are not silently swapped to the session model.
+    const resolved = resolveEnhanceModelForNotify(config, ctx);
+    const usingFallback = config.modelRef !== "session" && resolved !== config.modelRef;
+    ctx.ui.notify(
+      `正在用 ${modelLabel(resolved)} 增强提示词${usingFallback ? "（钉选模型未找到，已回退会话模型）" : ""}…`,
+      "info",
+    );
     const context = await gatherEnhancerContext(original, ctx.cwd, config, ctx.sessionManager);
     const result = await generateEnhancedPrompt(pi, ctx, config, original, context);
     if (result.kind !== "enhanced") {
@@ -64,7 +66,18 @@ export function registerPromptEnhance(
       return;
     }
 
-    lastOriginal = editorText || undefined;
+    // RV-002: if the user typed while the LLM was working, the editor no
+    // longer holds the snapshot we enhanced from — abort the write rather
+    // than clobber their new input (which revert could not restore).
+    const nowEditor = ctx.ui.getEditorText();
+    if (nowEditor !== editorText) {
+      ctx.ui.notify("编辑器内容已变更，已放弃写入增强结果（未覆盖你的输入）。", "warning");
+      return;
+    }
+
+    // RV-005: keep the pre-enhance editor text verbatim (incl. empty string)
+    // so /enhance revert can restore it even when enhancing from inline args.
+    lastOriginal = editorText;
     ctx.ui.setEditorText(result.text);
     ctx.ui.notify("提示词已增强（/enhance revert 回退）。", "info");
   };
@@ -117,9 +130,16 @@ export function registerPromptEnhance(
     lastOriginal = undefined;
   });
 
-  return () => ({
-    enabled: false,
-    modelRef: "",
-    contextDepth: "none",
-  });
+  return () => undefined;
+}
+
+/** Resolve the modelRef that will actually be used, for notify purposes. */
+function resolveEnhanceModelForNotify(config: { modelRef: string }, ctx: ExtensionContext): string {
+  const modelRef = (config.modelRef ?? "session").trim();
+  if (!modelRef || modelRef === "session") return "session";
+  const allModels = typeof ctx.modelRegistry?.getAll === "function" ? ctx.modelRegistry.getAll() : [];
+  const [provider, ...rest] = modelRef.split("/");
+  const modelId = rest.join("/");
+  const exact = allModels.find((entry) => entry.provider === provider && entry.id === modelId);
+  return exact ? modelRef : "session";
 }

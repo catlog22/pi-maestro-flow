@@ -1389,6 +1389,7 @@ export function actionFromArg(value: string): ApiProviderAction | undefined {
   if (value === "vision") return "vision";
   if (value === "effort") return "effort";
   if (value === "nextsuggest" || value === "next-suggest" || value === "suggest") return "nextsuggest";
+  if (value === "enhance" || value === "prompt-enhance") return "enhance";
   if (value === "price" || value === "pricing" || value === "cost") return "price";
   if (value === "reset") return "reset";
   return undefined;

@@ -9,9 +9,9 @@
  * the enhancement.
  */
 import { execFile } from "node:child_process";
-import { readdir } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import type { Dirent } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { defaultRunner, type RunCliResult } from "../session/cli-adapter.ts";
@@ -147,10 +147,14 @@ async function buildGitLog(cwd: string): Promise<string | undefined> {
 }
 
 async function readMentionedFile(cwd: string, path: string): Promise<string | undefined> {
-  const { readFile, stat } = await import("node:fs/promises");
-  let abs: string;
+  // RV-008: only read relative paths that stay within the project root, to
+  // avoid sending out-of-tree file contents (e.g. ../../secrets or absolute
+  // paths pasted into a draft) to the enhancer model.
+  if (path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path)) return undefined;
+  const abs = resolve(cwd, path);
+  const rel = relative(cwd, abs);
+  if (rel.startsWith(`..${sep}`) || rel === "..") return undefined;
   try {
-    abs = path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) ? path : join(cwd, path);
     const s = await stat(abs);
     if (!s.isFile()) return undefined;
   } catch {
@@ -189,10 +193,14 @@ export async function gatherEnhancerContext(
   const depth = config.contextDepth;
   const recentMessages: string[] = [];
   if (depth !== "none") {
-    const branch = (sessionManager.getBranch?.() ?? []) as Array<{ role?: string; content?: unknown }>;
-    const turn = extractTurnContext(branch as Parameters<typeof extractTurnContext>[0]);
-    if (turn.latestAssistantText) recentMessages.push(`assistant: ${turn.latestAssistantText}`);
-    for (const p of turn.recentUserPrompts) recentMessages.push(`user: ${p}`);
+    try {
+      const branch = (sessionManager.getBranch?.() ?? []) as Array<{ role?: string; content?: unknown }>;
+      const turn = extractTurnContext(branch as Parameters<typeof extractTurnContext>[0]);
+      if (turn.latestAssistantText) recentMessages.push(`assistant: ${turn.latestAssistantText}`);
+      for (const p of turn.recentUserPrompts) recentMessages.push(`user: ${p}`);
+    } catch {
+      // RV-007: session branch read must fail soft like the other gatherers.
+    }
   }
 
   let projectTree: string | undefined;

@@ -1129,7 +1129,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     );
   }
 
-  // Prompt enhance: on-demand prompt rewriting (/enhance or Ctrl+Shift+E) with
+  // Prompt enhance: on-demand prompt rewriting (/enhance or Alt+Shift+E) with
   // codebase + Maestro knowledge context; settings live in the API manager
   // (api-manager.json enhance section); exposed through /api-manager enhance
   // and the api.enhance shell action.

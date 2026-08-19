@@ -64,8 +64,11 @@ export function cleanEnhancedText(value: string): string {
   if (fenced) out = fenced[1].trim();
   // Drop leading markdown headings ("# ...") — a rewritten prompt is prose, not a doc.
   out = out.split("\n").filter((line) => !/^#{1,6}\s/.test(line.trimStart())).join("\n").trim();
-  // Strip surrounding quotes if the entire body is wrapped in one pair.
-  const quoted = out.match(/^["'“”『「]([\s\S]*)["'””』」]$/);
-  if (quoted) out = quoted[1].trim();
+  // Strip surrounding quotes only when the same quote char wraps both ends.
+  const first = out[0];
+  const last = out[out.length - 1];
+  if (out.length >= 2 && first === last && /["'“”『「]/.test(first)) {
+    out = out.slice(1, -1).trim();
+  }
   return out;
 }
