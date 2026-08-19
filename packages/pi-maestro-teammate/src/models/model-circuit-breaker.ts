@@ -206,6 +206,24 @@ export class ModelCircuitBreaker {
     this.open(circuit, acquisition.model);
   }
 
+  /**
+   * Force a model back to a healthy, never-tried circuit by dropping its
+   * recorded state. Use when a human explicitly selects the model (model
+   * selector, /model, or Ctrl+P cycling): the manual choice is treated as an
+   * override of the automatic breaker, so the next turn attempts it directly
+   * instead of skipping it or auto-switching away. Returns true when a
+   * non-CLOSED circuit was actually reset.
+   */
+  reset(model: string): boolean {
+    if (model.length === 0) throw new TypeError("Model circuit breaker key must not be empty");
+    const circuit = this.circuits.get(model);
+    if (!circuit || circuit.state === "CLOSED") return false;
+    const from = circuit.state;
+    this.circuits.delete(model);
+    this.emitTransition(model, from, "CLOSED");
+    return true;
+  }
+
   snapshot(): readonly ModelCircuitSnapshot[] {
     const snapshots = [...this.circuits.entries()]
       .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)

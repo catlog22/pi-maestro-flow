@@ -106,10 +106,12 @@ const FAILOVER_UI = {
   en: {
     description: "Configure main-agent model circuit breaking and ordered fallback chains; /model-failover status shows health",
     needTui: "Model failover settings require interactive TUI mode.",
+    circuitReset: "Manual model switch reset the circuit for {model}; automatic failover will retry it.",
   },
   "zh-CN": {
     description: "配置主 Agent 模型熔断与有序故障转移链；/model-failover status 查看健康状态",
     needTui: "模型故障转移设置需要交互式 TUI。",
+    circuitReset: "手动切换模型已重置 {model} 的熔断状态，自动故障转移将重新尝试该模型。",
   },
 } as const;
 
@@ -394,12 +396,31 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
   const completedTools: string[] = [];
   const startedTools = new Map<string, string>();
   let config = emptyConfig();
+  // Guarded model switches performed by this extension (automatic failover or
+  // image-triggered restore) raise this flag so the model_select handler does
+  // not mistake them for a human choice and reset the target model's circuit.
+  // A bare boolean would lose a suppressed event that lands on a later tick,
+  // so it carries a count of in-flight guarded switches instead.
+  let guardedModelSwitches = 0;
 
   const resetRunEvidence = (): void => {
     finalObservation = undefined;
     observedGeneration = undefined;
     completedTools.length = 0;
     startedTools.clear();
+  };
+
+  // Wrap an extension-driven model switch so the model_select handler treats
+  // it as automatic (not a human choice) and skips the circuit reset.
+  const guardedSetModel = async (
+    model: NonNullable<Parameters<typeof pi.setModel>[0]>,
+  ): Promise<boolean> => {
+    guardedModelSwitches += 1;
+    try {
+      return await pi.setModel(model);
+    } finally {
+      guardedModelSwitches = Math.max(0, guardedModelSwitches - 1);
+    }
   };
 
   pi.registerCommand("model-failover", {
@@ -448,7 +469,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
       const acquisition = breaker.acquireCandidate(candidate);
       if (!acquisition.allowed) continue;
       try {
-        const selected = await pi.setModel(model);
+        const selected = await guardedSetModel(model);
         if (!selected) {
           breaker.releaseCandidate(acquisition);
           continue;
@@ -469,6 +490,22 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     }
     return undefined;
   };
+
+  pi.on("model_select", (event, ctx) => {
+    // A model switch performed by this extension (automatic failover or an
+    // image-triggered restore) is not a human choice: it must not reset the
+    // target model's circuit, otherwise the breaker the user just observed
+    // would be silently cleared and the next turn could loop back to the
+    // failed model. Only explicit selection from the model selector, /model,
+    // or Ctrl+P cycling counts as a manual override.
+    if (guardedModelSwitches > 0) return;
+    if (event.source === "restore") return;
+    const next = modelKey(event.model);
+    if (!next) return;
+    if (breaker.reset(next)) {
+      ctx.ui.notify(failoverUiText("circuitReset", options.locale).replace("{model}", next), "info");
+    }
+  });
 
   pi.on("session_start", () => {
     // No config load here: nothing consumes `config` before the next
@@ -717,7 +754,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
       if (!activeRun.imageTriggered || !activeRun.originalModel) return;
       const original = availableModels(ctx).get(activeRun.originalModel);
       if (!original) return;
-      const restored = await pi.setModel(original);
+      const restored = await guardedSetModel(original);
       if (restored) ctx.ui.notify(`Restored text-only model ${activeRun.originalModel} after image analysis.`, "info");
     };
 

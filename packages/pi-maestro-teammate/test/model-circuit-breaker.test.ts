@@ -389,3 +389,55 @@ test("setPolicy rejects invalid thresholds, cooldowns, and empty model keys", ()
   breaker.setPolicy("provider/model", {});
   assert.doesNotThrow(() => breaker.acquireCandidate("provider/model"));
 });
+
+test("reset drops a non-CLOSED circuit back to a healthy never-tried state", () => {
+  let now = 0;
+  const transitions: Array<{ from: string; to: string }> = [];
+  const breaker = new ModelCircuitBreaker({
+    threshold: 1,
+    cooldownMs: 10,
+    now: () => now,
+    onTransition: (transition) => transitions.push({ from: transition.from, to: transition.to }),
+  });
+  const model = "provider/model";
+
+  breaker.recordRetryableFailure(acquire(breaker, model));
+  assert.equal(breaker.snapshot()[0]?.state, "OPEN");
+
+  assert.equal(breaker.reset(model), true);
+  assert.deepEqual(breaker.snapshot(), []);
+  assert.deepEqual(transitions.at(-1), { from: "OPEN", to: "CLOSED" });
+  // The reset model is immediately acquireable as a fresh CLOSED circuit.
+  assert.equal(breaker.acquireCandidate(model).allowed, true);
+});
+
+test("reset is a no-op on CLOSED or unknown circuits and reports false", () => {
+  const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 10 });
+  const model = "provider/model";
+
+  assert.equal(breaker.reset(model), false); // never observed -> nothing to reset
+  assert.throws(() => breaker.reset(""), /must not be empty/);
+
+  // A CLOSED circuit (only ever acquired, never failed) reports false too.
+  acquire(breaker, model);
+  assert.equal(breaker.snapshot()[0]?.state, "CLOSED");
+  assert.equal(breaker.reset(model), false);
+});
+
+test("reset on a HALF_OPEN circuit clears the in-flight trial", () => {
+  let now = 0;
+  const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 10, now: () => now });
+  const model = "provider/model";
+
+  breaker.recordRetryableFailure(acquire(breaker, model));
+  now = 10;
+  const trial = breaker.acquireCandidate(model);
+  assert.equal(trial.state, "HALF_OPEN");
+
+  assert.equal(breaker.reset(model), true);
+  assert.deepEqual(breaker.snapshot(), []);
+  // A fresh acquire after reset is a plain CLOSED candidate, not a HALF_OPEN trial.
+  const reAcquired = breaker.acquireCandidate(model);
+  assert.equal(reAcquired.allowed, true);
+  assert.equal(reAcquired.state, "CLOSED");
+});

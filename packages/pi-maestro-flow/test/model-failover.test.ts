@@ -36,6 +36,10 @@ function harness(
     hasPendingMessages?: boolean;
     signal?: AbortSignal;
     sendMessageError?: Error;
+    /** When set, pi.setModel emits a model_select event synchronously, mirroring pi-core. */
+    emitModelSelectOnSet?: boolean;
+    /** Overrides the source of the synthesized model_select event (defaults to "set"). */
+    modelSelectSource?: "set" | "cycle" | "restore";
   } = {},
 ) {
   const handlers = new Map<string, Handler[]>();
@@ -90,7 +94,15 @@ function harness(
     },
     async setModel(model: { provider: string; id: string }) {
       selected.push(`${model.provider}/${model.id}`);
+      const previous = (ctx as unknown as { model: { provider: string; id: string } }).model;
       (ctx as unknown as { model: typeof model }).model = model;
+      if (options.emitModelSelectOnSet) {
+        // Emulate pi-core's _emitModelSelect firing inside setModel: the
+        // model_select handler runs while the extension's guardedSetModel
+        // wrapper is still on the stack, so the manual-reset guard is active.
+        const event = { type: "model_select", model, previousModel: previous, source: options.modelSelectSource ?? "set" };
+        for (const handler of handlers.get("model_select") ?? []) await handler(event, ctx);
+      }
       return true;
     },
     sendUserMessage(content: string, messageOptions?: { deliverAs?: string }) {
@@ -1048,6 +1060,144 @@ test("image-triggered fallback preserves provenance and restores the original mo
     await runtime.emit("agent_settled");
     assert.equal(snapshotModelFailoverSettlement()?.outcome, "success");
     assert.deepEqual(runtime.selected, ["provider/last", "provider/backup", "provider/primary"], "original text-only model restored after image fallback");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("manual model_select resets the newly selected model's open circuit", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-manual-reset-"));
+  try {
+    writeProjectConfig(cwd, { enabled: true, fallbackModels: { "provider/primary": ["provider/backup"] } });
+    const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
+    // Both models have tripped their breakers: the user manually switches to
+    // `backup` to force a retry, which must reset `backup`'s circuit.
+    for (const model of ["provider/primary", "provider/backup"]) {
+      const trialed = breaker.acquireCandidate(model);
+      assert.equal(trialed.allowed, true);
+      breaker.recordRetryableFailure(trialed);
+    }
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "OPEN");
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/backup")?.state, "OPEN");
+
+    const runtime = harness(cwd, breaker);
+    await runtime.emit("session_start");
+
+    // The user manually selects `backup` via the model selector (/model).
+    await runtime.emit("model_select", {
+      model: { provider: "provider", id: "backup" },
+      previousModel: { provider: "provider", id: "primary" },
+      source: "set",
+    });
+
+    assert.match(
+      runtime.notifications[0] ?? "",
+      /reset|重置/,
+      "a reset notification is shown",
+    );
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/backup")?.state, undefined, "backup circuit cleared");
+    // The OPEN `primary` circuit is untouched: only the selected model is reset.
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "OPEN");
+
+    // The next turn acquires the freshly reset `backup` directly, no auto-switch.
+    (runtime.ctx as unknown as { model: { provider: string; id: string } }).model = { provider: "provider", id: "backup" };
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    assert.deepEqual(runtime.selected, [], "current model is acquired directly, no auto-switch");
+    assert.equal(
+      breaker.snapshot().find((entry) => entry.model === "provider/backup")?.state,
+      "CLOSED",
+      "backup is healthy and active",
+    );
+    await runtime.emit("session_shutdown");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("model_select with source restore does not reset the circuit", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-restore-"));
+  try {
+    writeProjectConfig(cwd, { enabled: true, fallbackModels: { "provider/primary": ["provider/backup"] } });
+    const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
+    const trialed = breaker.acquireCandidate("provider/backup");
+    breaker.recordRetryableFailure(trialed);
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/backup")?.state, "OPEN");
+
+    const runtime = harness(cwd, breaker);
+    await runtime.emit("session_start");
+    await runtime.emit("model_select", {
+      model: { provider: "provider", id: "backup" },
+      previousModel: { provider: "provider", id: "primary" },
+      source: "restore",
+    });
+
+    assert.equal(runtime.notifications.length, 0, "session restore is not a manual override");
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/backup")?.state, "OPEN");
+    await runtime.emit("session_shutdown");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("Ctrl+P cycling (source cycle) resets the selected model and stays quiet on a healthy model", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-cycle-reset-"));
+  try {
+    writeProjectConfig(cwd, { enabled: true, fallbackModels: { "provider/primary": ["provider/backup"] } });
+    const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
+    const trialed = breaker.acquireCandidate("provider/backup");
+    breaker.recordRetryableFailure(trialed);
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/backup")?.state, "OPEN");
+
+    const runtime = harness(cwd, breaker);
+    await runtime.emit("session_start");
+
+    // Cycling onto a tripped model resets it and notifies.
+    await runtime.emit("model_select", {
+      model: { provider: "provider", id: "backup" },
+      previousModel: { provider: "provider", id: "primary" },
+      source: "cycle",
+    });
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/backup")?.state, undefined);
+    assert.match(runtime.notifications[0] ?? "", /reset|重置/);
+
+    // Cycling onto a model that was never tripped is a no-op: no notification.
+    runtime.notifications.length = 0;
+    await runtime.emit("model_select", {
+      model: { provider: "provider", id: "last" },
+      previousModel: { provider: "provider", id: "backup" },
+      source: "cycle",
+    });
+    assert.equal(runtime.notifications.length, 0, "a healthy model has nothing to reset");
+    await runtime.emit("session_shutdown");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("automatic failover setModel does not reset the target model's circuit", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-auto-no-reset-"));
+  try {
+    writeProjectConfig(cwd, { enabled: true, fallbackModels: { "provider/primary": ["provider/backup"] } });
+    const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
+    const runtime = harness(cwd, breaker, { emitModelSelectOnSet: true });
+    await runtime.emit("session_start");
+
+    // Trip `primary`; the next turn must auto-switch to `backup`. The harness
+    // emits model_select synchronously inside setModel, exactly when the
+    // guardedSetModel guard is active, so the handler must NOT reset `backup`.
+    (runtime.ctx as unknown as { model: { provider: string; id: string } }).model = { provider: "provider", id: "primary" };
+    const trialed = breaker.acquireCandidate("provider/primary");
+    breaker.recordRetryableFailure(trialed);
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    assert.deepEqual(runtime.selected, ["provider/backup"], "auto-switched to backup");
+    assert.equal(
+      runtime.notifications.some((message) => /reset|重置/.test(message) && message.includes("provider/backup")),
+      false,
+      "the automatic switch must not emit a reset notification",
+    );
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/backup")?.state, "CLOSED", "backup was acquired, never reset");
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "OPEN");
+    await runtime.emit("session_shutdown");
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }

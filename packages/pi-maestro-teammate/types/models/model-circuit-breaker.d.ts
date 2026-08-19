@@ -64,6 +64,15 @@ export declare class ModelCircuitBreaker {
     recordSuccess(acquisition: AcquiredModelCandidate): void;
     recordRetryableFailure(acquisition: AcquiredModelCandidate): void;
     releaseCandidate(acquisition: AcquiredModelCandidate): void;
+    /**
+     * Force a model back to a healthy, never-tried circuit by dropping its
+     * recorded state. Use when a human explicitly selects the model (model
+     * selector, /model, or Ctrl+P cycling): the manual choice is treated as an
+     * override of the automatic breaker, so the next turn attempts it directly
+     * instead of skipping it or auto-switching away. Returns true when a
+     * non-CLOSED circuit was actually reset.
+     */
+    reset(model: string): boolean;
     snapshot(): readonly ModelCircuitSnapshot[];
     private getOrCreateCircuit;
     private open;
