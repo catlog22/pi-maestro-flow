@@ -122,3 +122,21 @@ test("buildChangesYaml is idempotent on a clean config and keeps the commands he
   assert.match(second, /^state:\s*$/m);
   assert.match(second, /\^pi\b/);
 });
+
+test("buildChangesYaml enables proxy flags and upgrades open auth for a tunnel URL", () => {
+  const changes: McpxConfigChanges = { tunnelUrl: "https://mcpx.example.com" };
+  const { yaml, summary } = buildChangesYaml(SAMPLE_CONFIG, changes, "D:/demo");
+  assert.match(yaml, /disable_localhost_protection: true/);
+  assert.match(yaml, /trust_proxy_headers: true/);
+  assert.match(yaml, /mode: oauth/);
+  assert.match(yaml, /server_url: "https:\/\/mcpx\.example\.com"/);
+  assert.ok(summary.some((line) => line.includes("oauth")));
+  assert.ok(summary.some((line) => line.includes("隧道代理标志")));
+});
+
+test("buildChangesYaml keeps an explicit oauth server_url over the tunnel URL", () => {
+  const changes: McpxConfigChanges = { authMode: "oauth", oauthServerURL: "https://custom.example.com", tunnelUrl: "https://tunnel.example.com" };
+  const { yaml } = buildChangesYaml(SAMPLE_CONFIG, changes, "D:/demo");
+  assert.match(yaml, /server_url: "https:\/\/custom\.example\.com"/);
+  assert.doesNotMatch(yaml, /server_url: "https:\/\/tunnel\.example\.com"/);
+});

@@ -38,6 +38,8 @@ export interface McpxConfigChanges {
   allowPi?: boolean;
   skillDirs?: string[];
   registerWorkspace?: boolean;
+  /** Public tunnel URL (Cloudflare or any reverse tunnel); enables the proxy flags. */
+  tunnelUrl?: string;
 }
 
 type WizardStep =
@@ -49,19 +51,21 @@ type WizardStep =
   | "pi"
   | "skills"
   | "workspace"
+  | "tunnel"
   | "write";
 
-const STEP_ORDER: WizardStep[] = ["listen", "auth", "bearer", "oauth", "policy", "pi", "skills", "workspace", "write"];
+const STEP_ORDER: WizardStep[] = ["listen", "auth", "bearer", "oauth", "policy", "pi", "skills", "workspace", "tunnel", "write"];
 const STEP_LABEL: Record<WizardStep, string> = {
-  listen: "1/9 监听地址",
-  auth: "2/9 认证模式",
-  bearer: "3/9 Bearer Token",
-  oauth: "3/9 OAuth 配置",
-  policy: "4/9 命令策略",
-  pi: "5/9 Pi 白名单",
-  skills: "6/9 Skill 发现目录",
-  workspace: "7/9 工作区注册",
-  write: "8/9 写入确认",
+  listen: "1/10 监听地址",
+  auth: "2/10 认证模式",
+  bearer: "3/10 Bearer Token",
+  oauth: "3/10 OAuth 配置",
+  policy: "4/10 命令策略",
+  pi: "5/10 Pi 白名单",
+  skills: "6/10 Skill 发现目录",
+  workspace: "7/10 工作区注册",
+  tunnel: "8/10 公网隧道（Cloudflare）",
+  write: "9/10 写入确认",
 };
 
 interface Section {
@@ -164,8 +168,8 @@ function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: str
     summary.push(`认证: ${changes.authMode}${changes.authMode === "bearer" ? `（token 已生成）` : changes.authMode === "oauth" ? "（password + server_url）" : ""}`);
   }
 
-  // server flags for remote deployments (oauth)
-  if (changes.authMode === "oauth") {
+  // server flags for remote deployments (oauth or any public tunnel)
+  if (changes.authMode === "oauth" || changes.tunnelUrl) {
     const patch = (flag: string, value: string) => {
       const current = get("server")?.raw ?? "server:";
       const pattern = new RegExp(`^\\s{4}${flag}:.*$`, "m");
@@ -174,6 +178,22 @@ function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: str
     };
     patch("disable_localhost_protection", "true");
     patch("trust_proxy_headers", "true");
+    summary.push("已启用隧道代理标志（disable_localhost_protection + trust_proxy_headers）");
+  }
+
+  // A public tunnel with open auth would be exposed unauthenticated: upgrade to
+  // oauth with the tunnel URL as server_url (password stays editable later).
+  if (changes.tunnelUrl && (!changes.authMode || changes.authMode === "open")) {
+    set("auth", [
+      "auth:",
+      "    mode: oauth",
+      `    token: ""`,
+      "    oauth:",
+      `        password: "${changes.oauthPassword ?? ""}"`,
+      `        server_url: "${changes.tunnelUrl}"`,
+      `        token_ttl: 86400`,
+    ].join("\n"));
+    summary.push(`公网暴露下认证已升级为 oauth（server_url: ${changes.tunnelUrl}）`);
   }
 
   // 3. security.commands default + pi allow rule
@@ -352,6 +372,20 @@ export class McpxWizardOverlay implements Component, Focusable {
           option(0, "注册", "推荐"),
           option(1, "跳过"),
         ];
+      case "tunnel": {
+        const hasCloudflared = isExecutableOnPath("cloudflared");
+        const cloudflared = hasCloudflared ? fg("32", "✓ 已安装") : fg("31", "✗ 未安装");
+        return [
+          fitLine(`公网隧道（Cloudflare）— cloudflared ${cloudflared}`, inner),
+          option(0, "不暴露（保持本机 127.0.0.1）"),
+          option(1, "Cloudflare Quick Tunnel", "临时公网 URL（trycloudflare.com）"),
+          option(2, "Cloudflare 命名隧道 / 自定义 URL", "自有域名（推荐）"),
+          option(3, this.editing && this.selected === 3 ? `URL: ${this.draft}▌` : `URL: ${this.changes.tunnelUrl ?? "（留空稍后填）"}`),
+          option(4, "→ 下一步（写入确认）"),
+          fitLine("quick tunnel 命令: cloudflared tunnel --url http://127.0.0.1:9090", inner),
+          fitLine("命名隧道: cloudflared tunnel create mcpx && cloudflared tunnel route dns mcpx <域名> && cloudflared tunnel run mcpx", inner),
+        ];
+      }
       case "write": {
         const { summary } = this.build();
         return [
@@ -385,6 +419,8 @@ export class McpxWizardOverlay implements Component, Focusable {
         this.params.close();
       } else if (this.step === "auth") {
         this.step = "listen";
+      } else if (this.step === "tunnel") {
+        this.step = "workspace";
       } else {
         this.step = "auth";
       }
@@ -427,6 +463,7 @@ export class McpxWizardOverlay implements Component, Focusable {
       case "pi": return 2;
       case "skills": return 2;
       case "workspace": return 2;
+      case "tunnel": return 5;
       case "oauth": return 3;
       default: return 1;
     }
@@ -443,6 +480,8 @@ export class McpxWizardOverlay implements Component, Focusable {
       } else if (this.step === "oauth") {
         if (this.selected === 0) this.changes.oauthPassword = this.draft;
         else this.changes.oauthServerURL = this.draft;
+      } else if (this.step === "tunnel") {
+        this.changes.tunnelUrl = this.draft.trim() || undefined;
       }
       this.editing = false;
       this.draft = "";
@@ -513,7 +552,25 @@ export class McpxWizardOverlay implements Component, Focusable {
         break;
       case "workspace":
         this.changes.registerWorkspace = this.selected === 0;
-        this.step = "write";
+        this.step = "tunnel";
+        break;
+      case "tunnel":
+        if (this.selected === 4) {
+          this.step = "write";
+          break;
+        }
+        if (this.selected === 3) {
+          this.editing = true;
+          this.draft = this.changes.tunnelUrl ?? "https://";
+          break;
+        }
+        if (this.selected === 0) {
+          this.changes.tunnelUrl = undefined;
+        } else {
+          this.changes.tunnelUrl = this.changes.tunnelUrl ?? "https://";
+          this.editing = true;
+          this.draft = this.changes.tunnelUrl ?? "https://";
+        }
         break;
       case "write":
         this.step = "workspace";
@@ -579,6 +636,15 @@ function fg(code: string, text: string): string {
 
 function isEnter(data: string): boolean {
   return matchesKey(data, Key.enter);
+}
+
+function isExecutableOnPath(command: string): boolean {
+  const probe = spawnSync(process.platform === "win32" ? "where" : "which", [command], {
+    encoding: "utf8",
+    timeout: 5_000,
+    shell: process.platform === "win32",
+  });
+  return probe.status === 0;
 }
 
 export const _mcpxWizardInternals = {
