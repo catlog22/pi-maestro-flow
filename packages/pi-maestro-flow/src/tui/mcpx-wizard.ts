@@ -181,8 +181,7 @@ function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: str
     const securityRaw = get("security")?.raw ?? "security:";
     const commandsBlock = extractCommandsBlock(securityRaw);
     const defaultLine = changes.commandsDefault
-      ? `        default: ${changes.commandsDefault}`
-      : (commandsBlock.match(/^\s{8}default:\s*(.+)$/m)?.[1]?.trim() ?? "allow");
+      ?? (commandsBlock.match(/^\s{8}default:\s*(.+)$/m)?.[1]?.trim() ?? "allow");
     const allow = changes.allowPi
       ? mergeList("security", "allow", ["^pi\\b"])
       : parseListItems(get("security"), "allow");

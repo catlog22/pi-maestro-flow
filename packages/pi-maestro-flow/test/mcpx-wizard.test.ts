@@ -63,6 +63,7 @@ test("buildChangesYaml adds pi allow rule while keeping existing rules", () => {
   const changes: McpxConfigChanges = { allowPi: true, commandsDefault: "confirm" };
   const { yaml } = buildChangesYaml(SAMPLE_CONFIG, changes, "D:/demo");
   assert.match(yaml, /default: confirm/);
+  assert.doesNotMatch(yaml, /default:\s+default/); // no duplicated key prefix
   assert.match(yaml, /\^pi\\b/);
   assert.match(yaml, /\^ls\\b/);
   assert.match(yaml, /\^git push/);
