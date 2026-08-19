@@ -48,9 +48,11 @@ import {
   wrapLeasedMessage,
   type LeaseToken,
 } from "./session-handoff.ts";
+import { isFallbackProviderError } from "./retry.ts";
 import {
   EXECUTION_BUFFER_LIMITS,
   FIRST_ACTIVITY_TIMEOUT_MS,
+  MODEL_FALLBACK_RESUME_PROMPT,
   OUTPUT_LIMIT_RECOVERY_TIMEOUT_MS,
   RESULT_READY_GRACE_MS,
   STRUCTURED_OUTPUT_RECOVERY_PROMPT,
@@ -107,10 +109,19 @@ interface AttemptRecoveryFacts {
   preActivityInfrastructureExit: boolean;
   /** IPC or non-protocol output that may represent untracked external work. */
   externalReplayRisk: boolean;
-}
+  /** Non-JSON stdout was attributed as assistant content (protocol violation). Optional: not all settlement paths populate it. */
+  stdoutProtocolViolation?: boolean; }
 
 export const attemptRecoveryFacts = new WeakMap<SingleResult, AttemptRecoveryFacts>();
 const INTERRUPTING_STEER_TIMEOUT_MS = 10_000;
+
+/**
+ * Deadline for Pi to acknowledge an in-process model switch (`set_model`).
+ * Independent of the steer timeout: a slow provider handshake on a cold
+ * account can legitimately exceed a steer's interactive budget, while a
+ * stalled switch must still settle the turn instead of hanging.
+ */
+const MODEL_SWITCH_ACK_TIMEOUT_MS = 15_000;
 
 
 
@@ -211,6 +222,8 @@ interface AttemptState {
   preActivityInfrastructureExit: boolean;
   /** IPC or non-protocol output makes cross-process replay unsafe. */
   externalReplayRisk: boolean;
+  /** Non-JSON stdout was attributed as assistant content (protocol violation). */
+  stdoutProtocolViolation: boolean;
   initialResultPublished: boolean;
   /** Recovery evidence used to fence any fresh-process model fallback. */
   settlementCapability: AttemptSettlementCapability;
@@ -218,6 +231,26 @@ interface AttemptState {
   inFlightToolCount: number;
   /** Absorbing state: once terminal, queued child lines must not reopen a turn. */
   terminal: boolean;
+  /** In-process model switch transaction, when one is awaiting Pi's ack. */
+  modelSwitch?: {
+    requestId: string;
+    targetModel: string;
+    /** False until Pi confirms the `set_model` command. */
+    acknowledged: boolean;
+  };
+  /**
+   * Model currently active after an in-process switch (undefined until the
+   * first switch is acknowledged). Passed back to `onModelFailover` so the
+   * decision hook can settle the previous trial and avoid re-selecting it.
+   */
+  switchedModel?: string;
+  /**
+   * Request id of the resume prompt issued after a successful in-process
+   * model switch. A rejected response for this id must settle the turn (the
+   * child is alive but refuses to continue, so no other settlement path
+   * exists).
+   */
+  modelSwitchResumeRequestId?: string;
 }
 
 /**
@@ -241,6 +274,7 @@ interface AttemptTimers {
   interruptingSteer?: ReturnType<typeof setTimeout>;
   structuredOutputRecovery?: ReturnType<typeof setTimeout>;
   toolHeartbeat?: ReturnType<typeof setInterval>;
+  modelSwitch?: ReturnType<typeof setTimeout>;
 }
 
 interface PendingInterruptingSteer {
@@ -410,6 +444,7 @@ export async function runSingleAttempt(
     receivedFirstActivity: false,
     preActivityInfrastructureExit: false,
     externalReplayRisk: false,
+    stdoutProtocolViolation: false,
     initialResultPublished: false,
     settlementCapability: "unknown",
     completedToolCount: 0,
@@ -512,12 +547,19 @@ export async function runSingleAttempt(
     // fallback across candidates at the process level.
 
     // RPC mode: stdin stays open for bidirectional messaging.
-    // Send initial prompt via RPC command.
+    // Send initial prompt via RPC command. A resumed child already carries the
+    // original task inside its loaded session history, so the initial prompt
+    // becomes the resume directive instead of a re-send of the task text.
     if (child.stdin && params.task) {
       const initialLeaseToken = typeof options.initialLeaseToken === "function"
         ? options.initialLeaseToken(correlationId)
         : options.initialLeaseToken;
-      sendRpcMessage(child.stdin, params.task, "prompt", initialLeaseToken);
+      sendRpcMessage(
+        child.stdin,
+        options.resumePrompt ?? params.task,
+        "prompt",
+        initialLeaseToken,
+      );
     }
 
     // Identity publication is observational only. Request/control envelopes
@@ -551,6 +593,7 @@ export async function runSingleAttempt(
       if (timers.outputLimitRecovery) clearTimeout(timers.outputLimitRecovery);
       if (timers.interruptingSteer) clearTimeout(timers.interruptingSteer);
       if (timers.structuredOutputRecovery) clearTimeout(timers.structuredOutputRecovery);
+      if (timers.modelSwitch) clearTimeout(timers.modelSwitch);
       if (timers.toolHeartbeat) clearInterval(timers.toolHeartbeat);
     };
 
@@ -614,6 +657,7 @@ export async function runSingleAttempt(
       } catch {
         state.receivedFirstActivity = true;
         state.externalReplayRisk = true;
+        state.stdoutProtocolViolation = true;
         if (timers.firstActivity) clearTimeout(timers.firstActivity);
         state.lastContent = appendUtf8Tail(
           state.lastContent,
@@ -716,7 +760,7 @@ export async function runSingleAttempt(
     };
 
     const requestInterruptingSteer = (message: string, token?: LeaseToken): boolean => {
-      if (!child.stdin || pendingInterruptingSteer || state.terminal || state.turnLifecycleSettled) return false;
+      if (!child.stdin || pendingInterruptingSteer || state.modelSwitch || state.terminal || state.turnLifecycleSettled) return false;
       const nonce = randomUUID();
       steerSettlementSwallowed = false;
       pendingInterruptingSteer = {
@@ -1066,8 +1110,30 @@ export async function runSingleAttempt(
 
     function recordRuntimeEventError(event: JsonLineEvent, phase: string): void {
       const error = extractPiEventError(event);
-      if (!error || state.reportedRuntimeErrors.has(error)) return;
+      if (!error) return;
       if (pendingInterruptingSteer && /\babort(?:ed)?\b/i.test(error)) return;
+      // A recurring runtime error that survived a turn boundary (runtimeFailure
+      // was cleared by onTurnBoundary but the error text persists in
+      // reportedRuntimeErrors across the settled turn) must re-set the failure —
+      // otherwise the turn settles as a false success. completeTurn clears the
+      // dedup set on settlement, so a surviving entry means the boundary was
+      // crossed without a settlement that consumed the prior failure.
+      if (state.reportedRuntimeErrors.has(error) && state.runtimeFailure === undefined) {
+        const model = typeof (event.message as Record<string, unknown> | undefined)?.model === "string"
+          ? (event.message as Record<string, unknown>).model as string
+          : typeof event.model === "string"
+            ? event.model
+            : state.resolvedModel;
+        const recurring =
+          `Teammate runtime error (phase=${phase}, agent=${params.agent}, model=${model || "unknown"}, `
+          + `correlationId=${correlationId}): ${error} [recurred across turn boundary]`;
+        appendBoundedTranscriptMessage(messages, { role: "system", content: recurring });
+        state.runtimeFailure = recurring;
+        progress.lastMessage = recurring;
+        options.onProgress?.(progress);
+        return;
+      }
+      if (state.reportedRuntimeErrors.has(error)) return;
       state.reportedRuntimeErrors.add(error);
       const message = event.message as Record<string, unknown> | undefined;
       const model = typeof message?.model === "string"
@@ -1117,6 +1183,9 @@ export async function runSingleAttempt(
         timers.outputLimitRecovery = undefined;
       }
       state.turnLifecycleSettled = false;
+      // The new turn acknowledges the resume prompt after a model switch;
+      // a stale id must not match a later response.
+      state.modelSwitchResumeRequestId = undefined;
       state.lastAssistantStopReason = undefined;
       state.runtimeFailure = undefined;
       progress.status = "running";
@@ -1364,6 +1433,95 @@ export async function runSingleAttempt(
       }
     }
 
+    /**
+     * Start an in-process model switch transaction. Asks the decision hook for
+     * the next model, then sends the child's `set_model` RPC command and waits
+     * for Pi's acknowledgement. On success the model is swapped in place and
+     * the same session continues; the ack response also carries the switch
+     * outcome so a rejected command settles the original failure.
+     */
+    function startModelSwitch(failure: string, previousModel?: string): void {
+      const stdin = child.stdin;
+      void Promise.resolve(options.onModelFailover!(failure, previousModel)).then((targetModel) => {
+        if (targetModel === undefined || state.terminal || state.turnLifecycleSettled) {
+          settleAsFailed();
+          return;
+        }
+        const slash = targetModel.indexOf("/");
+        if (slash <= 0) {
+          appendBoundedTranscriptMessage(messages, {
+            role: "system",
+            content:
+              `Model failover hook returned an invalid model id "${targetModel}"; `
+              + "settling the original failure instead of hot-swapping.",
+          });
+          settleAsFailed();
+          return;
+        }
+        const requestId = `teammate-model-switch-${randomUUID()}`;
+        state.modelSwitch = { requestId, targetModel, acknowledged: false };
+        progress.phase = "continuing";
+        progress.lastMessage = `Model failover: switching ${state.resolvedModel} -> ${targetModel}`;
+        options.onProgress?.(progress);
+        const sent = stdin !== null
+          && writeChildStdinLine(stdin, JSON.stringify({
+            id: requestId,
+            type: "set_model",
+            provider: targetModel.slice(0, slash),
+            modelId: targetModel.slice(slash + 1),
+          }));
+        if (!sent) {
+          state.modelSwitch = undefined;
+          settleAsFailed();
+          return;
+        }
+        timers.modelSwitch = setTimeout(() => {
+          timers.modelSwitch = undefined;
+          const pending = state.modelSwitch;
+          if (!pending || pending.requestId !== requestId || state.terminal) return;
+          state.modelSwitch = undefined;
+          appendBoundedTranscriptMessage(messages, {
+            role: "system",
+            content:
+              `Pi did not acknowledge the in-process model switch to ${targetModel} `
+              + "within the failover deadline; settling the original failure.",
+          });
+          settleAsFailed();
+        }, MODEL_SWITCH_ACK_TIMEOUT_MS);
+        timers.modelSwitch.unref?.();
+      }).catch((error) => {
+        // The decision hook rejected or threw: settle the original failure
+        // instead of leaving the turn stranded with no settlement path.
+        if (state.terminal || state.turnLifecycleSettled) return;
+        appendBoundedTranscriptMessage(messages, {
+          role: "system",
+          content:
+            `Model failover hook failed: ${error instanceof Error ? error.message : String(error)}; `
+            + "settling the original failure.",
+        });
+        settleAsFailed();
+      });
+    }
+
+    /** Settle the turn as a failure after an aborted or rejected model switch. */
+    function settleAsFailed(): void {
+      if (state.turnLifecycleSettled || state.terminal) return;
+      // A switch that never reached its ack (rejected set_model, timeout,
+      // dead stdin) never ran under the target model. Tell the host so it can
+      // release the trial acquisition instead of charging a phantom failure.
+      const pendingSwitch = state.modelSwitch;
+      if (pendingSwitch !== undefined && !pendingSwitch.acknowledged) {
+        state.modelSwitch = undefined;
+        options.onChildEvent?.({
+          type: "teammate_model_switch_abandoned",
+          correlationId,
+          model: pendingSwitch.targetModel,
+        });
+      }
+      const structuredOutput = readStructuredOutput(true);
+      completeTurn(structuredOutput, true, 1);
+    }
+
     /** Finalize the current run after Pi confirms no retry, compaction, or queued continuation remains. */
     function settleAgentSession(): void {
       const structuredOutput = readStructuredOutput(false);
@@ -1381,6 +1539,26 @@ export async function runSingleAttempt(
         return;
       }
       const exitCode = state.runtimeFailure ? 1 : 0;
+      // In-process model failover: when the turn failed with a retryable
+      // provider error, the child runtime is still alive (wakeable), and a
+      // model-switch decision is available, hot-swap the model over the live
+      // RPC channel instead of settling the failure. The same session
+      // continues under the new model, so completed tools are never replayed.
+      if (
+        exitCode !== 0
+        && wakeable
+        && state.runtimeFailure !== undefined
+        && !state.terminal
+        && !state.modelSwitch
+        && !pendingInterruptingSteer
+        && child.stdin !== null
+        && child.stdin.writable
+        && options.onModelFailover !== undefined
+        && isFallbackProviderError(state.runtimeFailure)
+      ) {
+        void startModelSwitch(state.runtimeFailure, state.switchedModel);
+        return;
+      }
       completeTurn(structuredOutput, !wakeable || exitCode !== 0, exitCode);
       // Process stays alive. Idle agents must be resumed with an RPC prompt;
       // steer/follow_up only queue while an agent loop is already running.
@@ -1496,6 +1674,86 @@ export async function runSingleAttempt(
     function onResponse(event: JsonLineEvent): void {
       if (structuredOutputRecoveryActive && typeof event.id === "string" && event.id === structuredOutputRecoveryRequestId) {
         if (event.success !== true) failStructuredOutputRecovery();
+        return;
+      }
+      const modelSwitch = state.modelSwitch;
+      if (modelSwitch && typeof event.id === "string" && event.id === modelSwitch.requestId) {
+        if (timers.modelSwitch) {
+          clearTimeout(timers.modelSwitch);
+          timers.modelSwitch = undefined;
+        }
+        if (event.success !== true || event.command !== "set_model") {
+          state.modelSwitch = undefined;
+          appendBoundedTranscriptMessage(messages, {
+            role: "system",
+            content:
+              `Pi rejected the in-process model switch to ${modelSwitch.targetModel}; `
+              + "settling the original failure.",
+          });
+          settleAsFailed();
+          return;
+        }
+        // Model swapped in place. Resume the same session: send the resume
+        // directive over the live channel so Pi starts a fresh turn under the
+        // new model, then re-arm settlement for that turn.
+        modelSwitch.acknowledged = true;
+        state.modelSwitch = undefined;
+        state.switchedModel = modelSwitch.targetModel;
+        state.resolvedModel = modelSwitch.targetModel;
+        progress.requestedModel = modelSwitch.targetModel;
+        state.turnLifecycleSettled = false;
+        state.runtimeFailure = undefined;
+        // The deduplication set is turn-scoped in normal flow (cleared by
+        // completeTurn's finally) but this failover path never calls
+        // completeTurn before resuming. Without clearing it here, the new
+        // model reporting the same provider error text (a fleet-wide outage
+        // is the common case) would be deduplicated away and the turn would
+        // settle as a false success.
+        state.reportedRuntimeErrors.clear();
+        state.lastAssistantStopReason = undefined;
+        state.lastContent = "";
+        state.streamingText = "";
+        state.outputLimitRecoveryPending = false;
+        state.structuredOutputAttemptFailed = false;
+        progress.status = "running";
+        progress.phase = "continuing";
+        progress.resultReadyAt = undefined;
+        progress.lastMessage = `Model failover: switched to ${modelSwitch.targetModel}`;
+        options.onProgress?.(progress);
+        const prompt = options.resumePrompt ?? MODEL_FALLBACK_RESUME_PROMPT;
+        const resumeRequestId = `teammate-model-switch-resume-${randomUUID()}`;
+        state.modelSwitchResumeRequestId = resumeRequestId;
+        const sent = child.stdin !== null && child.stdin.writable
+          && writeChildStdinLine(child.stdin, JSON.stringify({
+            id: resumeRequestId,
+            type: "prompt",
+            message: wrapLeasedMessage(prompt, typeof options.initialLeaseToken === "function"
+              ? options.initialLeaseToken(correlationId)
+              : options.initialLeaseToken),
+          }));
+        if (!sent) {
+          settleAsFailed();
+        }
+        return;
+      }
+      // The resume prompt after a successful in-process switch was rejected:
+      // the child is alive but refuses the continuation, and no other
+      // settlement path exists (modelSwitch was cleared, no steer pending).
+      // Settle the turn as a failure instead of stranding it.
+      if (
+        state.modelSwitchResumeRequestId !== undefined
+        && typeof event.id === "string"
+        && event.id === state.modelSwitchResumeRequestId
+        && event.success !== true
+      ) {
+        state.modelSwitchResumeRequestId = undefined;
+        appendBoundedTranscriptMessage(messages, {
+          role: "system",
+          content:
+            "Pi rejected the resume prompt after the in-process model switch; "
+            + "settling the failed turn.",
+        });
+        settleAsFailed();
         return;
       }
       const pending = pendingInterruptingSteer;
@@ -1690,7 +1948,17 @@ export async function runSingleAttempt(
       if (schemaFile) cleanupFile(schemaFile);
 
       const processExitCode = state.runtimeFailure ? 1 : code ?? 1;
-      const exitCode = processExitCode === 0 && params.outputSchema && structuredOutput === undefined
+      // Non-JSON stdout attributed as assistant content is a protocol violation;
+      // a child that emits it must not settle as a clean success (exitCode 0)
+      // even if it exits 0 with no runtimeFailure. Otherwise malformed output is
+      // attributed as the valid answer (DEF-002 false-success).
+      const protocolViolationExit = state.stdoutProtocolViolation
+        && state.runtimeFailure === undefined
+        && messages.length === 0
+        ? 1
+        : 0;
+      const exitCode = (processExitCode === 0 && params.outputSchema && structuredOutput === undefined)
+        || protocolViolationExit === 1
         ? 1
         : processExitCode;
       if (exitCode !== 0 && params.outputSchema && structuredOutput === undefined) {
