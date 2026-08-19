@@ -222,6 +222,8 @@ import {
 import { registerCompactionSettingsCommand, showCompactionSettingsOverlay } from "../tui/compaction-settings.ts";
 import { flowTuiText, registerTuiLocaleEvents } from "../tui/locale.ts";
 import { registerMaestroPackageResources } from "../resources/maestro-package.ts";
+import { registerNotifyMode } from "../notify/notify-mode.ts";
+import { registerNotifyListeners } from "../notify/notify-listeners.ts";
 import { registerSkillManager, runSkillManager } from "../skills/skill-manager.ts";
 import { SkillManagerStore } from "../skills/skill-manager-store.ts";
 import { registerIntelligenceTools, shutdownIntelligenceTools } from "../tools/intelligence.ts";
@@ -1148,6 +1150,9 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
 
   registerMaestroPackageResources(pi);
   const chineseResponseMode = registerChineseResponseMode(pi);
+  // Model turn notification: `/notify` toggles a toast on model error/completion.
+  const notifyMode = registerNotifyMode(pi);
+  const notifyController = registerNotifyListeners(pi, notifyMode);
   registerSkillManager(pi);
   registerCompactionSettingsCommand(pi);
   pi.registerCommand("compaction-status", {
@@ -3149,6 +3154,8 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
   pi.on("before_agent_start", async (event) => {
     // Pick up compaction settings edited while idle; cached again within the turn.
     midTurnAutoCompaction.refreshSettings();
+    // Reset per-turn notify error latch so each turn starts clean.
+    notifyController.reset();
     // Plan owns the stable mode prompt; Goal only acknowledges continuation markers.
     const planResult = onBeforeAgentStartPlan(event);
     goalBeforeAgentStart(event);
