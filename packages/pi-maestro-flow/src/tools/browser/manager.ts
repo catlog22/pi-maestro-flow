@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Browser, ElementHandle, HTTPResponse, KeyInput, Page, WaitForOptions } from "puppeteer-core";
 import puppeteer from "puppeteer-core";
+import { PROBE_JS, FIND_LISTS_JS, foldListsJs, monitorStartJs, MONITOR_STOP_JS, optimizeHtmlForTokens, smartTruncate, diffHtml, type HtmlDiff } from "./simplify.ts";
 
 export type WaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 
@@ -38,6 +39,8 @@ export interface BrowserRunOutput {
   returnValue: unknown;
   screenshots: Array<{ path?: string; mimeType: string; bytes: number }>;
   url: string;
+  navigated?: boolean;
+  newTabs?: Array<{ url: string }>;
 }
 
 export interface BrowserManagerLike {
@@ -163,6 +166,9 @@ export class BrowserManager implements BrowserManagerLike {
     entry.busy = true;
     const displays: BrowserRunOutput["displays"] = [];
     const screenshots: BrowserRunOutput["screenshots"] = [];
+    const beforeUrl = entry.page.isClosed() ? "" : entry.page.url();
+    let beforePages: Page[] = [];
+    try { beforePages = await raceAbort(entry.browser.pages(), signal, Math.min(2_000, timeoutMs)); } catch { /* best-effort */ }
     try {
       const tab = createTabApi(entry, cwd, displays, screenshots, signal, timeoutMs);
       const assert = (condition: unknown, message = "Browser assertion failed") => { if (!condition) throw new Error(message); };
@@ -172,7 +178,16 @@ export class BrowserManager implements BrowserManagerLike {
       const capturedConsole = { log: print, info: print, warn: print, error: print, debug: print };
       const execute = compileRunCode(code);
       const returnValue = await raceAbort(execute(entry.page, entry.browser, tab, assert, wait, display, print, signal, capturedConsole), signal, timeoutMs);
-      return { displays, returnValue, screenshots, url: entry.page.isClosed() ? "" : entry.page.url() };
+      const afterUrl = entry.page.isClosed() ? "" : entry.page.url();
+      const navigated = Boolean(beforeUrl && afterUrl && beforeUrl !== afterUrl);
+      let newTabs: Array<{ url: string }> | undefined;
+      try {
+        const afterPages = await raceAbort(entry.browser.pages(), signal, Math.min(2_000, timeoutMs));
+        const beforeUrls = new Set(beforePages.map((p) => p.url()));
+        const added = afterPages.filter((p) => !beforeUrls.has(p.url())).map((p) => ({ url: p.url() }));
+        if (added.length > 0) newTabs = added;
+      } catch { /* best-effort */ }
+      return { displays, returnValue, screenshots, url: afterUrl, navigated: navigated || undefined, newTabs };
     } catch (error) {
       if (isInterruptError(error)) await this.close(name);
       throw browserRunErrorHint(error);
@@ -358,9 +373,45 @@ function createTabApi(
       }
       return metadata;
     },
-    async extract(format: "text" | "html" | "markdown" = "markdown") {
+    async extract(format: "text" | "html" | "markdown" | "probe" | "list" = "markdown", options?: { fold?: string }) {
       if (format === "html") return page.content();
-      return page.evaluate(() => document.body?.innerText ?? "");
+      if (format === "text" || format === "markdown") return page.evaluate(() => document.body?.innerText ?? "");
+      if (format === "list") return page.evaluate(FIND_LISTS_JS) as Promise<Array<Record<string, unknown>>>;
+      // "probe": simplified, token-optimized structural HTML.
+      const raw = (await page.evaluate(PROBE_JS)) as string;
+      let optimized = optimizeHtmlForTokens(raw);
+      if (options?.fold !== undefined) {
+        const lists = await page.evaluate(FIND_LISTS_JS) as Array<Record<string, unknown>>;
+        if (lists.length > 0) {
+          const folded = await page.evaluate(foldListsJs({ html: optimized, lists, instruction: options.fold })) as string;
+          optimized = folded || optimized;
+        }
+      }
+      return smartTruncate(optimized, 35_000);
+    },
+    async snapshot() {
+      const [html, lists] = await Promise.all([
+        page.evaluate(PROBE_JS) as Promise<string>,
+        page.evaluate(FIND_LISTS_JS) as Promise<Array<Record<string, unknown>>>,
+      ]);
+      return { html: optimizeHtmlForTokens(html), lists };
+    },
+    async diff(before: string | { html: string }, after?: string | { html: string }): Promise<HtmlDiff> {
+      const beforeHtml = typeof before === "string" ? before : before.html;
+      const afterHtml = after === undefined
+        ? optimizeHtmlForTokens((await page.evaluate(PROBE_JS)) as string)
+        : typeof after === "string" ? after : after.html;
+      return diffHtml(beforeHtml, afterHtml);
+    },
+    async monitorStart(intervalMs?: number): Promise<boolean> {
+      return page.evaluate(monitorStartJs(intervalMs)) as Promise<boolean>;
+    },
+    async monitorStop(): Promise<string[]> {
+      return page.evaluate(MONITOR_STOP_JS) as Promise<string[]>;
+    },
+    async tabs(): Promise<Array<{ url: string; title?: string }>> {
+      const pages = await raceAbort(entry.browser.pages(), signal, Math.min(2_000, deadline()));
+      return Promise.all(pages.map(async (p) => ({ url: p.url(), title: p.isClosed() ? undefined : await raceAbort(p.title(), signal, Math.min(1_000, deadline())).catch(() => undefined) })));
     },
     async click(selector: string | number) { await (await resolve(selector)).click(); },
     async type(selector: string | number, text: string) { await (await resolve(selector)).type(text); },

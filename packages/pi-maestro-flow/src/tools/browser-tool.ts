@@ -55,14 +55,16 @@ export interface BrowserToolDetails {
   viewport?: { width: number; height: number; deviceScaleFactor?: number };
   screenshots?: Array<{ path?: string; mimeType: string; bytes: number }>;
   result?: string;
+  navigated?: boolean;
+  newTabs?: Array<{ url: string }>;
 }
 
 export function createBrowserTool(manager: BrowserManagerLike = browserManager): ToolDefinition<typeof BrowserParams, BrowserToolDetails> {
   return {
     name: "browser",
     label: "Browser",
-    description: "Control Chromium through named tabs. Open or attach a browser, run trusted host-level JavaScript with page/browser/tab helpers, capture screenshots, and close one or all tabs. The run action requires non-empty code, is shell-equivalent, and is blocked in Plan mode. In run code, page is a puppeteer-core Page (page.setViewport({width,height}), page.goto, page.evaluate, page.screenshot — Puppeteer, not Playwright, so there is no page.setViewportSize), browser is a puppeteer Browser, and tab is a high-level helper (tab.setViewport, tab.observe, tab.click, tab.screenshot). Pass visible: true to open a headed (visible) browser window; the default is headless.",
-    promptSnippet: "Use browser for interactive web navigation, DOM observation, form input, and screenshots. In run code page is a puppeteer-core Page (page.setViewport/page.goto/page.evaluate); tab offers tab.setViewport/tab.observe/tab.click/tab.screenshot. Pass visible:true on open for a headed (visible) window.",
+    description: "Control Chromium through named tabs. Open or attach a browser, run trusted host-level JavaScript with page/browser/tab helpers, capture screenshots, and close one or all tabs. The run action requires non-empty code, is shell-equivalent, and is blocked in Plan mode. In run code, page is a puppeteer-core Page (page.setViewport({width,height}), page.goto, page.evaluate, page.screenshot — Puppeteer, not Playwright, so there is no page.setViewportSize), browser is a puppeteer Browser, and tab is a high-level helper (tab.setViewport, tab.observe, tab.click, tab.screenshot, tab.extract, tab.snapshot, tab.diff, tab.monitorStart/Stop, tab.tabs). Pass visible: true to open a headed (visible) browser window; the default is headless.",
+    promptSnippet: "Use browser for interactive web navigation, DOM observation, form input, and screenshots. In run code page is a puppeteer-core Page (page.setViewport/page.goto/page.evaluate); tab offers tab.setViewport/tab.observe/tab.click/tab.screenshot/tab.extract('probe')/tab.snapshot()/tab.diff()/tab.monitorStart(). Pass visible:true on open for a headed (visible) window.",
     promptGuidelines: [
       "Call browser open before run, and reuse a stable tab name across related steps.",
       "run code receives page (puppeteer-core Page), browser (puppeteer Browser), and tab (high-level helper). This is Puppeteer, not Playwright.",
@@ -72,6 +74,11 @@ export function createBrowserTool(manager: BrowserManagerLike = browserManager):
       "Pass visible: true on open to launch a headed (visible) browser window for debugging or interaction; omit it for the default headless mode.",
       "Prefer tab.observe() and numeric element ids before clicking or typing; use tab.click/type/fill with those ids.",
       "Capture screenshots with tab.screenshot({ save? }) — it saves the PNG and displays it inline; page.screenshot works too but does not surface the image.",
+      "Prefer tab.extract('probe') over tab.extract('html') for page structure: it returns simplified, token-optimized HTML (invisible nodes dropped, overlays/partitions collapsed, iframes/shadow pierced, form values preserved). Use tab.extract('list') to discover repetitive list containers and tab.snapshot() to capture { html, lists } before a change.",
+      "For repetitive lists (search results, product grids), pass tab.extract('probe', { fold: 'keyword' }) — it keeps the first 3 items (or the first 6 mentioning the keyword) and replaces the rest with a [FAKE ELEMENT] hint, saving most of the token cost while keeping the list visible.",
+      "After click/fill/submit, detect what changed with tab.diff(before) where before is a prior tab.snapshot() result (or its .html); omit the after arg to diff against the current page. It returns { changed, topChange? } where changed is the count of changed elements and topChange is the largest changed subtree (omitted when nothing changed).",
+      "To catch transient text (toasts/popups) during an action, await tab.monitorStart() before it and tab.monitorStop() after; monitorStop returns the strings that appeared and vanished.",
+      "To list every page in the browser (including ones the agent did not open), use tab.tabs() or browser.pages(); each entry has { url, title }. The run output also reports navigated and newTabs when the page URL changed or a new tab appeared during the run.",
       "Close tabs when browser work is complete.",
       "Treat run code as trusted host code: it executes with the Pi process permissions, not in a security sandbox.",
     ],
@@ -114,11 +121,13 @@ export function createBrowserTool(manager: BrowserManagerLike = browserManager):
         const output = await manager.run(name, params.code, ctx.cwd, signal, timeoutMs);
         const content = [...output.displays];
         if (output.returnValue !== undefined) content.push({ type: "text" as const, text: formatValue(output.returnValue) });
+        if (output.navigated) content.push({ type: "text" as const, text: `Page navigated: ${output.url}` });
+        if (output.newTabs && output.newTabs.length > 0) content.push({ type: "text" as const, text: `New tab(s) opened during run: ${output.newTabs.map((t) => t.url).join(", ")}` });
         if (content.length === 0) content.push({ type: "text" as const, text: `Ran code on tab ${JSON.stringify(name)}.` });
         const text = content.filter((item) => item.type === "text").map((item) => item.text).join("\n");
         return {
           content,
-          details: { action: "run", name, url: output.url, screenshots: output.screenshots, result: text },
+          details: { action: "run", name, url: output.url, screenshots: output.screenshots, result: text, navigated: output.navigated, newTabs: output.newTabs },
         } as AgentToolResult<BrowserToolDetails>;
       } catch (error) {
         if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw abortError();

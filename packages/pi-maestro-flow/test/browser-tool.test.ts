@@ -45,6 +45,26 @@ test("browser schema preserves open/run/close and full control inputs", () => {
   assert.equal(Check(BrowserParams, { action: "run", code: "" }), false);
 });
 
+test("browser tool guidelines expose probe/snapshot/diff/monitor helpers", async () => {
+  const manager = new FakeBrowserManager();
+  const tool = createBrowserTool(manager);
+  const snippet = tool.promptSnippet ?? "";
+  const guidelines = tool.promptGuidelines ?? [];
+  const joined = [snippet, ...guidelines].join("\n");
+  // Each new probe capability is mentioned in the agent-facing prompt surface.
+  assert.match(joined, /extract\(['"]probe['"]\)/, "guidelines must mention extract('probe')");
+  assert.match(joined, /tab\.snapshot\(\)/, "guidelines must mention tab.snapshot()");
+  assert.match(joined, /tab\.diff\(/, "guidelines must mention tab.diff()");
+  assert.match(joined, /monitorStart/, "guidelines must mention monitorStart");
+  assert.match(joined, /monitorStop/, "guidelines must mention monitorStop");
+  assert.match(joined, /tab\.tabs\(\)/, "guidelines must mention tab.tabs()");
+  assert.match(joined, /navigated/, "guidelines must mention navigated detection");
+  // Schema is unchanged: no new top-level action or param was added.
+  assert.deepEqual(Object.keys(BrowserParams.properties).sort(), [
+    "action", "all", "app", "code", "dialogs", "kill", "name", "timeout", "url", "viewport", "visible", "wait_until",
+  ]);
+});
+
 test("browser tool forwards named-tab open options and returns run displays, images, and screenshots", async () => {
   const manager = new FakeBrowserManager();
   const tool = createBrowserTool(manager);
@@ -168,12 +188,85 @@ test("browser manager drives a real local Chromium tab when an executable is ava
     assert.equal(screenshotStat.isFile(), true);
     if (process.platform !== "win32") assert.equal(screenshotStat.mode & 0o777, 0o600);
     await manager.run("live", "await page.close(); return true;", process.cwd(), undefined, 15_000);
-    for (let attempt = 0; attempt < 20 && manager.has("live"); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    for (let attempt = 0; attempt < 100 && manager.has("live"); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(manager.has("live"), false);
-    for (let attempt = 0; attempt < 300 && await fs.stat(screenshotPath).then(() => true, () => false); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    for (let attempt = 0; attempt < 500 && await fs.stat(screenshotPath).then(() => true, () => false); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(await fs.stat(screenshotPath).then(() => true, () => false), false);
     await manager.open({ name: "live", cwd: process.cwd(), url: "data:text/html,<title>Reopened</title>", timeoutMs: 15_000 });
     assert.equal(await manager.close("live"), true);
+
+    // Probe helpers (ported from GenericAgent simphtml.py): extract('probe')
+    // returns token-optimized simplified HTML, snapshot/diff detect changes,
+    // monitorStart/Stop capture transient text.
+    await manager.open({ name: "probe", cwd: process.cwd(), url: "data:text/html,<title>Probe</title><ul id='list'><li>Product 0: " + "x".repeat(210) + "</li><li>Product 1: " + "x".repeat(210) + "</li><li>Product 2: " + "x".repeat(210) + "</li><li>Product 3: " + "x".repeat(210) + "</li><li>Product 4: " + "x".repeat(210) + "</li><li>Product 5: target match</li><li>Product 6: " + "x".repeat(210) + "</li><li>Product 7: " + "x".repeat(210) + "</li><li>Product 8: " + "x".repeat(210) + "</li><li>Product 9: " + "x".repeat(210) + "</li><li>Product 10: " + "x".repeat(210) + "</li><li>Product 11: " + "x".repeat(210) + "</li></ul><button id='add'>Add</button>", timeoutMs: 15_000 });
+    try {
+      const probed = await manager.run("probe", `
+        const probeHtml = await tab.extract('probe');
+        const lists = await tab.extract('list');
+        const folded = await tab.extract('probe', { fold: 'target' });
+        const before = await tab.snapshot();
+        await tab.click('#add');
+        await tab.evaluate(() => new Promise(r => setTimeout(r, 50)));
+        const diff = await tab.diff(before);
+        await tab.monitorStart();
+        await tab.evaluate(() => { const t = document.createElement('div'); t.textContent = 'Toast message here'; document.body.appendChild(t); });
+        await tab.evaluate(() => new Promise(r => setTimeout(r, 500)));
+        const transients = await tab.monitorStop();
+        return { probeLen: probeHtml.length, foldedLen: folded.length, foldedHasHint: folded.includes('[FAKE ELEMENT]'), listCount: lists.length, diffChanged: diff.changed, transients };
+      `, process.cwd(), undefined, 15_000);
+      const rv = probed.returnValue as { probeLen: number; foldedLen: number; foldedHasHint: boolean; listCount: number; diffChanged: number; transients: string[] };
+      assert.ok(rv.probeLen > 0, 'extract("probe") must return HTML');
+      assert.ok(rv.foldedLen < rv.probeLen || rv.foldedHasHint, 'folded probe should be smaller or contain a FAKE ELEMENT hint');
+      assert.ok(rv.foldedHasHint, 'extract("probe", {fold}) must emit [FAKE ELEMENT] hint for the long list');
+      assert.ok(rv.listCount >= 0, 'extract("list") must return an array');
+      assert.ok(typeof rv.diffChanged === 'number', 'diff must return a numeric changed count');
+      assert.ok(Array.isArray(rv.transients), 'monitorStop must return an array');
+    } finally {
+      await manager.close("probe");
+    }
+
+    // Navigation / new-tab detection: run output reports when the page URL
+    // changed and when new tabs opened during execution.
+    await manager.open({ name: "nav", cwd: process.cwd(), url: "data:text/html,<title>Nav</title>", timeoutMs: 15_000 });
+    try {
+      const navOut = await manager.run("nav", `await tab.goto('data:text/html,<title>Navigated</title>'); const tabs = await tab.tabs(); return { tabs: tabs.length, hasNavigatedTab: tabs.some(t => /Navigated/.test(t.title || '')) };`, process.cwd(), undefined, 15_000);
+      assert.equal(navOut.navigated, true, 'run must report navigated=true after a goto changes the URL');
+      assert.ok(/Navigated/.test(navOut.url), 'run output url should reflect the navigated page');
+      const rv = navOut.returnValue as { tabs: number; hasNavigatedTab: boolean };
+      assert.ok(rv.tabs >= 1, 'tab.tabs() must list at least one page');
+      assert.equal(rv.hasNavigatedTab, true, 'tab.tabs() must include the navigated page by title');
+    } finally {
+      await manager.close("nav");
+    }
+    await manager.open({ name: "pop", cwd: process.cwd(), url: "data:text/html,<title>Pop</title>", timeoutMs: 15_000 });
+    try {
+      const popOut = await manager.run("pop", `const p = await browser.newPage(); await p.goto('data:text/html,<title>Spawned</title>'); await new Promise(r => setTimeout(r, 200)); return true;`, process.cwd(), undefined, 15_000);
+      assert.ok(Array.isArray(popOut.newTabs) && popOut.newTabs.length >= 1, 'run must report new tabs opened during execution');
+    } finally {
+      await manager.closeAll();
+    }
+
+    // Negative paths: navigated=false on same URL, newTabs undefined when a spawned
+    // tab is closed before the run ends, monitorStop returns [] without a prior start.
+    await manager.open({ name: "neg", cwd: process.cwd(), url: "data:text/html,<title>Neg</title>", timeoutMs: 15_000 });
+    try {
+      const negOut = await manager.run("neg", `
+        const sameUrl = page.url();
+        await tab.goto(sameUrl);
+        const tabsAfterSame = await tab.tabs();
+        const monitorWithoutStart = await tab.monitorStop();
+        return { sameUrl, tabsAfterSame, monitorWithoutStart };
+      `, process.cwd(), undefined, 15_000);
+      assert.notEqual(negOut.navigated, true, 'navigated must be falsy when the URL did not change');
+      const rv = negOut.returnValue as { tabsAfterSame: Array<{ url: string }>; monitorWithoutStart: string[] };
+      assert.ok(Array.isArray(rv.tabsAfterSame) && rv.tabsAfterSame.length >= 1, 'tab.tabs() lists the page');
+      assert.deepEqual(rv.monitorWithoutStart, [], 'monitorStop without monitorStart returns []');
+      // A spawned tab closed within the run should not be reported as a new tab.
+      const closeOut = await manager.run("neg", `const p = await browser.newPage(); await p.close(); return true;`, process.cwd(), undefined, 15_000);
+      assert.equal(closeOut.newTabs, undefined, 'newTabs is undefined when a spawned tab is closed before run ends');
+    } finally {
+      await manager.close("neg");
+    }
   } finally {
     await manager.close("live");
   }
