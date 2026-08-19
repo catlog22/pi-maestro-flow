@@ -152,6 +152,7 @@ import {
 import { SessionOverlay, type SessionOverlayAction } from "../tui/session-overlay.ts";
 import { McpxOverlay } from "../tui/mcpx-overlay.ts";
 import { McpxWizardOverlay } from "../tui/mcpx-wizard.ts";
+import { startWorkspaceLease, stopWorkspaceLease, removeMcpxWorkspace } from "../mcpx-bridge.ts";
 import { TodoOverlay } from "../tui/todo-overlay.ts";
 import { GoalOverlay, type GoalOverlayAction } from "../tui/goal-overlay.ts";
 import { KnowledgeOverlay, type KnowledgeOverlayAction } from "../tui/knowledge-overlay.ts";
@@ -2169,6 +2170,15 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
         cwd: ctx.cwd,
         requestRender: () => tui.requestRender(),
         close: () => done(undefined),
+        onRegisterWorkspace: async (path) => {
+          startWorkspaceLease(path);
+          return `registered（动态租约，窗口存活期间自动续租）: ${path}`;
+        },
+        onUnregisterWorkspace: async (path) => {
+          stopWorkspaceLease();
+          removeMcpxWorkspace(path);
+          return `unregistered: ${path}`;
+        },
         onOpenWizard: () => {
           reopenWizard = true;
           done(undefined);

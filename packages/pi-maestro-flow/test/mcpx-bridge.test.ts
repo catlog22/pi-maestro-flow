@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ensureMcpxWorkspace, _resetMcpxBridgeState } from "../src/mcpx-bridge.ts";
+import { ensureMcpxWorkspace, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState } from "../src/mcpx-bridge.ts";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -71,5 +71,35 @@ test("skips registration when PI_MCPX_BRIDGE=0", async (t) => {
     await wait(500);
     const calls = await readFile(logPath, "utf8").catch(() => "");
     assert.equal(calls.trim(), "");
+  });
+});
+
+test("registers with a TTL lease and removes it", async (t) => {
+  t.after(_resetMcpxBridgeState);
+  await withFakeMcpx(async (logPath) => {
+    const root = join(process.cwd(), "fixtures");
+    ensureMcpxWorkspace(root, 300);
+    await wait(500);
+    const calls = await readFile(logPath, "utf8");
+    assert.match(calls, /workspace register --ttl 300s "?.*fixtures"?/);
+    removeMcpxWorkspace(root);
+    await wait(500);
+    const calls2 = await readFile(logPath, "utf8");
+    assert.match(calls2, /workspace remove "?.*fixtures"?/);
+  });
+});
+
+test("lease heartbeat registers and renews; stop clears the timer", async (t) => {
+  t.after(_resetMcpxBridgeState);
+  await withFakeMcpx(async (logPath) => {
+    const root = join(process.cwd(), "fixtures");
+    startWorkspaceLease(root, 300);
+    await wait(500);
+    const calls = await readFile(logPath, "utf8");
+    assert.match(calls, /workspace register --ttl 300s "?.*fixtures"?/);
+    stopWorkspaceLease();
+    // no further renewals after stop (registeredPaths dedup also guards)
+    const calls2 = await readFile(logPath, "utf8");
+    assert.equal(calls2.trim().split(/\r?\n/).filter(Boolean).length, 1);
   });
 });
