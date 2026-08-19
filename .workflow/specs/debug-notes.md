@@ -113,3 +113,11 @@ bash_bg MUST 对齐 teammate 的 foreground/background 契约：前台完成直�
 当上下文已达 critical 且 prepareCompaction 返回空时，插件 MUST NOT 仅告警后把原消息原样交回 provider。必须区分 already-compacted、missing-id、recent-window empty-summary 与 static prompt overhead；若无法生成更小上下文，应在本地停止请求并给出 context-exhausted 诊断。对启用 Anthropic budget thinking 的请求，发送前必须保证 budget_tokens >= 1024 且严格小于 max_tokens；容量不足时禁用 thinking 或本地失败，禁止用 falsy fallback 把 0 恢复为 1024。
 
 </spec-entry>
+
+<spec-entry category="debug" keywords="session-knowledge,manual" date="2026-08-19" sid="S-20260819-b957651a0645dcb9" title="False-success completion via cleared failure-state + dedup / protocol-violation (DEF-001/002)" description="Promoted from run:run-e9d93dd7c02d" source="session:20260819-debug-fix-defensive-critical:KDC-b957651a0645dcb9">
+
+### False-success completion via cleared failure-state + dedup / protocol-violation (DEF-001/002)
+
+When a failure-verdict state field (e.g. `runtimeFailure`) is cleared on an event boundary (turn start, model-switch ack) and a deduplication set suppresses recurring identical errors, a real failure can settle as a false success (`exitCode 0`). Rule: the dedup guard must re-set the failure when the error recurs AND the failure state is currently undefined after a boundary clear — mirroring the recovery path's own guard. Separately, a protocol-violation in child stdout (non-JSON line) must surface into the exit-code verdict, not just a replay-risk flag; attributing malformed stdout as assistant content without forcing `exitCode 1` when there is no runtimeFailure creates a false-success completion path. Applies to any subprocess-attempt lifecycle where a cleared failure state plus a recurring error or a malformed-input attribution can reach the completion verdict.
+
+</spec-entry>

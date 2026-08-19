@@ -587,3 +587,11 @@ stop() 采用 drain 语义——排空已在途 dispatch 但不再发起新 clai
 accepted 状态机由 IPC ack 改为 dispatch 成功自动 apply（生产接线无 ack 通道，auto-apply 是唯一收敛路径；外部 IPC-ack 保留为幂等 API）
 
 </spec-entry>
+
+<spec-entry category="arch" keywords="session-knowledge,decision" date="2026-08-19" sid="S-20260819-2fe4c3acd9db7939" title="Adopt business-anchor driven local slicing per the defensive-programming audit spec; no full-repo propagation graph (spe" description="Promoted from run:run-e9d93dd7c02d, report.md#decision:0" source="session:20260819-review-defensive-audit:KDC-2fe4c3acd9db7939">
+
+### Adopt business-anchor driven local slicing per the defensive-programming audit spec; no full-repo propagation graph (spe
+
+Adopt business-anchor driven local slicing per the defensive-programming audit spec; no full-repo propagation graph (spec §2 forbids it)
+
+</spec-entry>

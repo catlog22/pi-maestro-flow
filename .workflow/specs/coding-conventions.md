@@ -249,3 +249,11 @@ Plan 模式下 bash 工具保持启用且默认放行:常规只读研究命令(f
 - 拦截消息带 (the command modifies files or system state) 细节,与 tool-call 层其他只读拦截消息区分。
 
 </spec-entry>
+
+<spec-entry category="coding" keywords="session-knowledge,manual" date="2026-08-19" sid="S-20260819-216eeb1a907b5abc" title="Feature-enabled-input-un-derivable must not masquerade as uniform-zero / silent disable (DEF-003/004)" description="Promoted from run:run-e9d93dd7c02d" source="session:20260819-debug-fix-defensive-critical:KDC-216eeb1a907b5abc">
+
+### Feature-enabled-input-un-derivable must not masquerade as uniform-zero / silent disable (DEF-003/004)
+
+A ranking/selection feature enabled by config must distinguish two disabled-input cases that produce the same silent fallback: (a) input truly empty (preserve stable-tie / default-walk semantics) and (b) input non-empty but un-derivable/un-tokenizable (must NOT masquerade as a uniform-zero valid tie that silently reorders results). Rule: guard non-empty-but-un-tokenizable input separately and treat it as ranking disabled (return candidates unsorted), not as a uniform score. Additionally, when the feature is enabled but its input cannot be derived (no source message, or un-tokenizable query), surface an observable disablement reason in the result so it is not indistinguishable from the feature being off by configuration. Applies to relevance ranking, dedup, and any feature whose disabled-state silently produces the same output as feature-off.
+
+</spec-entry>
