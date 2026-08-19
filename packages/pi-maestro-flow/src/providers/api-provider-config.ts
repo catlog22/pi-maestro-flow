@@ -44,6 +44,7 @@ import {
   lookupBuiltinPricing,
   matchOpenRouterPricing,
 } from "./cost-backfill.ts";
+import { discoverModels, type DiscoveredModel } from "./model-discovery.ts";
 
 export type ApiProviderId = "maestro-openai" | "maestro-qwen" | "maestro-anthropic";
 
@@ -165,6 +166,17 @@ const CATALOGS = {
     "validation.thinkingInvalid": "Thinking effort {level} is invalid",
     "validation.headersJson": "Request headers JSON is invalid",
     "validation.headersObject": "Request headers must be a JSON object with string keys and values",
+    "discovery.prompt": "Discover available models from the server's /models endpoint?",
+    "discovery.discovering": "Discovering models from {url} …",
+    "discovery.failed": "Could not discover models: {message}",
+    "discovery.empty": "The server returned no models.",
+    "discovery.selectTitle": "Select models to inject (pick one at a time; repeat)",
+    "discovery.done": "✅ Done — inject {count} selected model(s)",
+    "discovery.selected": "（selected）",
+    "discovery.alreadyConfigured": "（configured）",
+    "discovery.injected": "Injected {count} model(s): {models}",
+    "discovery.injectedNone": "No new models selected.",
+    "discovery.keepManual": "Continuing with manual Model ID entry.",
   },
   "zh-CN": {
     "effort.noModel": "当前没有模型，无法调整思考强度。",
@@ -253,6 +265,17 @@ const CATALOGS = {
     "validation.thinkingInvalid": "思考强度 {level} 无效",
     "validation.headersJson": "请求头 JSON 格式无效",
     "validation.headersObject": "请求头必须是字符串键值的 JSON 对象",
+    "discovery.prompt": "从服务端 /models 接口识别可用模型？",
+    "discovery.discovering": "正在从 {url} 识别模型 …",
+    "discovery.failed": "未能识别模型：{message}",
+    "discovery.empty": "服务端未返回任何模型。",
+    "discovery.selectTitle": "选择要注入的模型（每次选一个，可重复）",
+    "discovery.done": "✅ 完成 — 注入已选的 {count} 个模型",
+    "discovery.selected": "（已选）",
+    "discovery.alreadyConfigured": "（已配置）",
+    "discovery.injected": "已注入 {count} 个模型：{models}",
+    "discovery.injectedNone": "未选择新模型。",
+    "discovery.keepManual": "继续手动填写 Model ID。",
   },
 } as const;
 
@@ -366,7 +389,7 @@ export interface ApiRetrySettings {
   maxDelayMs?: number;
 }
 
-export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "effort" | "enable" | "export" | "import" | "list" | "logout" | "nextsuggest" | "price" | "reset" | "retry" | "show" | "toggle" | "vision";
+export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "effort" | "enable" | "export" | "import" | "list" | "logout" | "nextsuggest" | "price" | "provider" | "reset" | "retry" | "show" | "toggle" | "vision";
 export type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
@@ -1249,6 +1272,18 @@ async function showApiProviderManager(
     await listProviders(ctx, modelsPath, defaultsPath, settingsPath);
     return;
   }
+  if (action === "provider") {
+    if (!ctx.hasUI) {
+      ctx.ui.notify(t("manager.actionNeedTui", { action }), "warning");
+      return;
+    }
+    const target = parsed.target ?? await chooseProvider(ctx, modelsPath, defaultsPath);
+    if (!target) return;
+    const ref = await resolveChannelRef(target, ctx, modelsPath);
+    if (!ref) return;
+    await configureProviderConnection(ctx, ref.id, ref.name, modelsPath, defaultsPath);
+    return;
+  }
   if (action === "retry") {
     await manageRetrySettings(ctx, settingsPath, parsed.retry);
     return;
@@ -1604,6 +1639,107 @@ export async function configureCustomModelTarget(
   await configureCustomModelWithSteps(pi, providerId, target, ctx, modelsPath, defaultsPath);
 }
 
+/** Dynamic model discovery + selective injection into Pi. */
+type DiscoverOutcome = "injected" | "manual" | "cancel";
+
+async function discoverAndInjectModels(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  providerId: string,
+  displayName: string,
+  api: string,
+  baseUrl: string,
+  savedApiKey: string,
+  modelsPath: string,
+  defaultsPath: string,
+): Promise<DiscoverOutcome> {
+  const discover = await ctx.ui.confirm(
+    t("discovery.prompt"),
+    `${displayName} · ${baseUrl}`,
+  );
+  if (!discover) return "manual";
+
+  // Discovery needs a key to authenticate against /models; fall back to a
+  // freshly entered one when the Provider has none saved yet.
+  let apiKey = savedApiKey;
+  if (!apiKey) {
+    const keyInput = await ctx.ui.input(`${displayName} API key`, "");
+    if (keyInput === undefined) return "cancel";
+    apiKey = required(keyInput, "API key");
+  }
+
+  const modelsUrl = `${baseUrl}/models`;
+  ctx.ui.notify(t("discovery.discovering", { url: modelsUrl }), "info");
+  let discovered: DiscoveredModel[];
+  try {
+    discovered = await discoverModels({ baseUrl, apiKey, timeoutMs: 8000 });
+  } catch (error) {
+    ctx.ui.notify(t("discovery.failed", { message: errorMessage(error) }), "warning");
+    ctx.ui.notify(t("discovery.keepManual"), "info");
+    return "manual";
+  }
+  if (discovered.length === 0) {
+    ctx.ui.notify(t("discovery.empty"), "warning");
+    ctx.ui.notify(t("discovery.keepManual"), "info");
+    return "manual";
+  }
+
+  const configured = new Set(await configuredModelIds(providerId, modelsPath));
+  const selected = new Set<string>();
+  const selectable = discovered.filter((model) => !configured.has(model.id));
+  if (selectable.length === 0) {
+    ctx.ui.notify(t("discovery.injectedNone"), "info");
+    return "manual";
+  }
+
+  // Loop: pick one model at a time; repeats allowed until “Done”. Already-picked
+  // ids are tagged so the user can see progress; already-configured ones are
+  // listed but skipped on selection.
+  while (true) {
+    const options = selectable.map((model) => {
+      const tag = selected.has(model.id) ? t("discovery.selected") : "";
+      return `${model.id}${tag}`;
+    });
+    options.push(t("discovery.done", { count: selected.size }));
+    const choice = await ctx.ui.select(t("discovery.selectTitle"), options);
+    if (choice === undefined) return "cancel";
+    const doneLabel = options[options.length - 1];
+    if (choice === doneLabel) break;
+    const picked = selectable.find((model) => `${model.id}${selected.has(model.id) ? t("discovery.selected") : ""}` === choice);
+    if (picked) selected.add(picked.id);
+  }
+
+  if (selected.size === 0) {
+    ctx.ui.notify(t("discovery.injectedNone"), "info");
+    return "manual";
+  }
+
+  let result: SaveApiProviderResult | undefined;
+  for (const modelId of selected) {
+    const next: ApiProviderSettings = {
+      provider: providerId,
+      baseUrl,
+      modelId,
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      reasoning: true,
+      apiKey,
+      api,
+      name: displayName,
+    };
+    result = await saveApiProviderSettings(next, modelsPath);
+    if (!findPreset(providerId)) await addManagedProvider(defaultsPath, providerId);
+  }
+  reloadProviderRegistration(pi, ctx, providerId, modelsPath);
+  const ids = [...selected];
+  ctx.ui.notify(
+    t("discovery.injected", { count: ids.length, models: ids.map((id) => `${providerId}/${id}`).join(", ") }),
+    "info",
+  );
+  if (!result) throw new Error("Discovered models were not written");
+  return "injected";
+}
+
 /** Legacy step-by-step fallback for hosts without the custom form overlay. */
 async function configureCustomModelWithSteps(
   pi: ExtensionAPI,
@@ -1630,6 +1766,22 @@ async function configureCustomModelWithSteps(
   const baseUrlInput = await ctx.ui.input(`${displayName} Base URL`, current.configured ? current.baseUrl : "");
   if (baseUrlInput === undefined) return;
   const baseUrl = normalizeBaseUrl(baseUrlInput);
+  // On the add path, offer to discover models from the server instead of
+  // typing each Model ID by hand. Falls through to manual entry on cancel.
+  if (target.adding) {
+    const outcome = await discoverAndInjectModels(
+      pi,
+      ctx,
+      providerId,
+      displayName,
+      api,
+      baseUrl,
+      current.apiKey,
+      modelsPath,
+      defaultsPath,
+    );
+    if (outcome === "injected" || outcome === "cancel") return;
+  }
   const modelInput = await ctx.ui.input(
     `${displayName} model ID`,
     target.adding ? "" : current.configured ? current.modelId : "",
@@ -2403,6 +2555,7 @@ import {
   configuredModelIds,
   configuredProviderIds,
   configuredProviderRegistration,
+  configureProviderConnection,
   currentDefaultThinkingLevel,
   defaultApiManagerExportPath,
   deleteProvider,

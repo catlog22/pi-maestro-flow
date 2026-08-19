@@ -41,6 +41,8 @@ import {
   DEFAULT_THINKING_LEVEL,
   deleteApiProviderModelSettings,
   deleteApiProviderSettings,
+  KNOWN_APIS,
+  loadApiProviderSettings,
   loadApiRetrySettings,
   mutationQueues,
   normalizeBaseUrl,
@@ -72,6 +74,7 @@ const OPS_CATALOGS = {
     "menu.title": "Choose an action",
     "menu.list": "View all models",
     "menu.configure": "Add or edit a model",
+    "menu.provider": "Manage Provider connection (URL / key / headers)",
     "menu.show": "View model details",
     "menu.vision": "Vision multimodal policy (current: {state})",
     "menu.effort": "Adjust thinking effort",
@@ -85,6 +88,17 @@ const OPS_CATALOGS = {
     "menu.reset": "Reset a Provider",
     "menu.export": "Export API configuration to a file",
     "menu.import": "Import API configuration from a file",
+    "discovery.prompt": "Discover available models from the server's /models endpoint?",
+    "discovery.discovering": "Discovering models from {url} …",
+    "discovery.failed": "Could not discover models: {message}",
+    "discovery.empty": "The server returned no models.",
+    "discovery.selectTitle": "Select models to inject (pick one at a time; repeat)",
+    "discovery.done": "✅ Done — inject {count} selected model(s)",
+    "discovery.selected": "（selected）",
+    "discovery.alreadyConfigured": "（configured）",
+    "discovery.injected": "Injected {count} model(s): {models}",
+    "discovery.injectedNone": "No new models selected.",
+    "discovery.keepManual": "Continuing with manual Model ID entry.",
     "export.empty": "No API Manager managed Provider is configured; nothing to export.",
     "export.done": "Exported {providers} Providers ({models} models)",
     "export.saved": "Export file: {path}",
@@ -113,6 +127,7 @@ const OPS_CATALOGS = {
     "menu.title": "选择操作",
     "menu.list": "查看全部模型",
     "menu.configure": "新增或修改模型",
+    "menu.provider": "管理 Provider 连接（URL / key / headers）",
     "menu.show": "查看模型详情",
     "menu.vision": "Vision 多模态策略（当前：{state}）",
     "menu.effort": "调整思考强度",
@@ -126,6 +141,17 @@ const OPS_CATALOGS = {
     "menu.reset": "重置 Provider",
     "menu.export": "导出 API 配置到文件",
     "menu.import": "从文件导入 API 配置",
+    "discovery.prompt": "从服务端 /models 接口识别可用模型？",
+    "discovery.discovering": "正在从 {url} 识别模型 …",
+    "discovery.failed": "未能识别模型：{message}",
+    "discovery.empty": "服务端未返回任何模型。",
+    "discovery.selectTitle": "选择要注入的模型（每次选一个，可重复）",
+    "discovery.done": "✅ 完成 — 注入已选的 {count} 个模型",
+    "discovery.selected": "（已选）",
+    "discovery.alreadyConfigured": "（已配置）",
+    "discovery.injected": "已注入 {count} 个模型：{models}",
+    "discovery.injectedNone": "未选择新模型。",
+    "discovery.keepManual": "继续手动填写 Model ID。",
     "export.empty": "尚未配置 API Manager 管理的 Provider，无可导出内容。",
     "export.done": "已导出 {providers} 个 Provider（{models} 个模型）",
     "export.saved": "导出文件：{path}",
@@ -588,6 +614,120 @@ export async function writeApiProviderSettings(
   else if (!preset && settings.replaceProviderOptions) delete nextProvider.authHeader;
   providers[settings.provider] = nextProvider;
   return writeModelsRoot({ ...root, providers }, modelsPath, exists);
+}
+
+/** Pick an API format from the given ordered options; returns undefined on cancel. */
+async function chooseApi(
+  ctx: ExtensionCommandContext,
+  apiOptions: readonly string[],
+): Promise<string | undefined> {
+  const labels = apiOptions.map(apiFormatLabel);
+  const choice = await ctx.ui.select("API format", labels);
+  if (!choice) return undefined;
+  return apiOptions.find((candidate) => apiFormatLabel(candidate) === choice)
+    ?? (apiOptions.includes(choice) ? choice : undefined);
+}
+
+/**
+ * Manage a Provider's connection-level fields only — Base URL, API format, API
+ * key, headers, auth header, compat and display name — without touching its
+ * models. Lets a user set up a Provider's connection once and then add models
+ * (manually or via discovery) repeatedly, instead of re-entering the URL/key
+ * on every model. Presets use their fixed API; customs pick from KNOWN_APIS.
+ */
+export async function configureProviderConnection(
+  ctx: ExtensionCommandContext,
+  providerId: string,
+  displayName: string,
+  modelsPath: string,
+  defaultsPath: string,
+): Promise<void> {
+  const preset = findPreset(providerId);
+  const current = await loadApiProviderSettings(providerId, modelsPath, null);
+  const apiOptions = preset
+    ? [preset.api]
+    : (current.api && KNOWN_APIS.includes(current.api)
+      ? [current.api, ...KNOWN_APIS.filter((api) => api !== current.api)]
+      : [...KNOWN_APIS]);
+  const api = apiOptions.length === 1
+    ? preset!.api
+    : await chooseApi(ctx, apiOptions);
+  if (!api) return;
+
+  const nameInput = await ctx.ui.input("Provider 显示名称", current.name ?? displayName);
+  if (nameInput === undefined) return;
+  const nextName = nameInput.trim() || providerId;
+
+  const baseUrlInput = await ctx.ui.input(`${nextName} Base URL`, current.baseUrl);
+  if (baseUrlInput === undefined) return;
+  const baseUrl = normalizeBaseUrl(baseUrlInput);
+
+  const apiKeyInput = await ctx.ui.input(
+    `${nextName} API key`,
+    current.apiKey ? current.apiKey : "",
+  );
+  if (apiKeyInput === undefined) return;
+  const apiKey = required(apiKeyInput, "API key");
+
+  // Headers: collected as a JSON object string, mirroring the custom-model step flow.
+  const addHeaders = await ctx.ui.confirm(
+    "配置自定义请求头？",
+    "例如 OpenRouter 的 HTTP-Referer / X-Title，或 anthropic-version。留空 name 结束。",
+  );
+  const headers: Record<string, string> = {};
+  if (addHeaders) {
+    while (true) {
+      const headerNameInput = await ctx.ui.input("请求头 name（留空结束）", "");
+      if (headerNameInput === undefined) return;
+      const headerName = headerNameInput.trim();
+      if (!headerName) break;
+      const headerValueInput = await ctx.ui.input(`请求头 "${headerName}" 的值`, "");
+      if (headerValueInput === undefined) return;
+      headers[headerName] = headerValueInput;
+    }
+  }
+  if (Object.keys(headers).length === 0 && isStringRecord(current.headers)) {
+    Object.assign(headers, current.headers);
+  }
+
+  const authChoice = await ctx.ui.select(
+    "Authorization 头",
+    ["自动", "强制 Bearer（authHeader=true）", "不发 Bearer（authHeader=false）"],
+  );
+  if (!authChoice) return;
+  const authHeader = authChoice === "自动" ? undefined : authChoice.startsWith("强制");
+
+  const confirmed = await ctx.ui.confirm(
+    `保存 Provider ${nextName} 连接？`,
+    [
+      `Provider ID：${providerId}`,
+      `API format：${apiFormatLabel(api)}`,
+      `Base URL：${baseUrl}`,
+      `请求头：${Object.keys(headers).length > 0 ? Object.keys(headers).join(", ") : "无"}`,
+      `Authorization：${authHeader === undefined ? "自动" : authHeader ? "Bearer" : "关闭"}`,
+      "Auth：stored API key",
+      "（模型配置不变）",
+    ].join("\n"),
+  );
+  if (!confirmed) return;
+
+  let result: SaveApiProviderResult | undefined;
+  await serializeMutation(modelsPath, async () => {
+    const exists = await fileExists(modelsPath);
+    const root = await readModelsRoot(modelsPath);
+    const providers = isRecord(root.providers) ? { ...root.providers } : {};
+    const entry = isRecord(providers[providerId]) ? { ...providers[providerId] } : {};
+    // Preserve models[] and enabled; overwrite only connection-level fields.
+    const nextProvider: Record<string, unknown> = { ...entry, baseUrl, api, apiKey };
+    nextProvider.name = nextName;
+    if (Object.keys(headers).length > 0) nextProvider.headers = { ...headers };
+    else delete nextProvider.headers;
+    if (authHeader !== undefined) nextProvider.authHeader = authHeader;
+    providers[providerId] = nextProvider;
+    result = await writeModelsRoot({ ...root, providers }, modelsPath, exists);
+  });
+  if (!result) throw new Error("API Provider connection was not written");
+  notifySaved(ctx, nextName, result, "已更新 Provider 连接配置（模型未改动）");
 }
 
 export async function writeModelsRoot(
@@ -1212,6 +1352,7 @@ export async function chooseAction(
   const vision = loadVisionDelegationConfig(visionAgentDir);
   const choices: Array<{ action: ApiProviderAction; label: string }> = [
     { action: "list", label: opsText("menu.list") },
+    { action: "provider", label: opsText("menu.provider") },
     { action: "configure", label: opsText("menu.configure") },
     { action: "show", label: opsText("menu.show") },
     { action: "vision", label: opsText("menu.vision", { state: opsText(vision.enabled ? "value.on" : "value.off") }) },
@@ -1235,6 +1376,7 @@ export function actionFromArg(value: string): ApiProviderAction | undefined {
   if (value === "configure" || value === "config" || value === "set" || value === "add" || value === "update") {
     return "configure";
   }
+  if (value === "provider" || value === "connection" || value === "conn") return "provider";
   if (value === "delete" || value === "remove") return "delete";
   if (value === "enable" || value === "on") return "enable";
   if (value === "disable" || value === "off") return "disable";
