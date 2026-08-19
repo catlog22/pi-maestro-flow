@@ -8263,7 +8263,12 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     if (workspaceReceiptReconcileTimer) clearInterval(workspaceReceiptReconcileTimer);
     workspaceReceiptReconcileTimer = setInterval(() => {
       void reconcileWorkspacePeerReceipts();
-      redriveStaleIncomingRootMessages();
+      try {
+        redriveStaleIncomingRootMessages();
+      } catch (error) {
+        // A sweep failure must not crash the window via uncaughtException.
+        console.error("[pi-maestro-teammate] workspace message re-drive failed:", error);
+      }
     }, RECONCILE_RECEIPT_INTERVAL_MS);
     workspaceReceiptReconcileTimer.unref?.();
     void workspacePeerLifecycle.then(() => reconcileMonitorLedgerAtStart(ctx));
