@@ -54,6 +54,7 @@ import { MaestroUiPublisher, registerMaestroUiQuery } from "../ui-projection.ts"
 import { registerMaestroProviders } from "../providers/provider-registry.ts";
 import { registerApiProviderConfigs } from "../providers/api-provider-config.ts";
 import { registerNextSuggest } from "../next-suggest/index.ts";
+import { registerPromptEnhance } from "../prompt-enhance/index.ts";
 import { registerExploreConfigManager } from "../providers/explore-config-manager.ts";
 import { registerModelFailover } from "../providers/model-failover.ts";
 import { showModelFailoverOverlay } from "../tui/model-failover-settings.ts";
@@ -1125,6 +1126,20 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   } catch (error) {
     console.error(
       `[maestro] Next-suggest registration warning: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  // Prompt enhance: on-demand prompt rewriting (/enhance or Ctrl+Shift+E) with
+  // codebase + Maestro knowledge context; settings live in the API manager
+  // (api-manager.json enhance section); exposed through /api-manager enhance
+  // and the api.enhance shell action.
+  try {
+    registerPromptEnhance(pi, {
+      defaultsPath: join(getAgentDir(), "api-manager.json"),
+    });
+  } catch (error) {
+    console.error(
+      `[maestro] Prompt-enhance registration warning: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 
@@ -3383,6 +3398,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
       "api.retry": () => openApiManager("retry", "API retry settings"),
       "api.cache": () => openApiManager("cache", "Prompt cache policy"),
       "api.nextsuggest": () => openApiManager("nextsuggest", "Next-step suggestion settings"),
+      "api.enhance": () => openApiManager("enhance", "Prompt enhance settings"),
       "api.list": () => openApiManager("list", "API provider overview"),
     },
   });

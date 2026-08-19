@@ -27,6 +27,12 @@ import {
   saveNextSuggestConfig,
 } from "../next-suggest/config.ts";
 import {
+  DEFAULT_ENHANCE_CONFIG,
+  loadEnhanceConfig,
+  saveEnhanceConfig,
+  type EnhanceContextDepth,
+} from "../prompt-enhance/config.ts";
+import {
   EFFORT_LEVELS,
   EFFORT_STATUS_KEY,
   isThinkingLevel as isCanonicalThinkingLevel,
@@ -389,7 +395,7 @@ export interface ApiRetrySettings {
   maxDelayMs?: number;
 }
 
-export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "effort" | "enable" | "export" | "import" | "list" | "logout" | "nextsuggest" | "price" | "provider" | "reset" | "retry" | "show" | "toggle" | "vision";
+export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "effort" | "enable" | "enhance" | "export" | "import" | "list" | "logout" | "nextsuggest" | "price" | "provider" | "reset" | "retry" | "show" | "toggle" | "vision";
 export type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
@@ -1046,6 +1052,178 @@ export async function manageNextSuggestSettings(
   }
 }
 
+const ENHANCE_THINKING_LEVELS = ["default", "off", "low", "medium", "high", "xhigh", "max"] as const;
+const ENHANCE_CONTEXT_DEPTHS: readonly EnhanceContextDepth[] = ["none", "session", "codebase"];
+
+/**
+ * Prompt-enhance settings panel inside the API manager.
+ *
+ * The feature switch, generation model, thinking level, length cap, context
+ * depth, git/file/knowledge toggles are independent from the session model
+ * and persisted in the api-manager.json `enhance` section.
+ */
+export async function manageEnhanceSettings(
+  ctx: ExtensionCommandContext,
+  defaultsPath: string,
+  modelsPath: string,
+): Promise<void> {
+  if (!ctx.hasUI) {
+    const current = await loadEnhanceConfig(defaultsPath);
+    ctx.ui.notify(
+      `提示词增强：${current.enabled ? "已启用" : "已停用"} · 模型：${current.modelRef} · 思考：${current.thinking} · 上下文：${current.contextDepth} · 长度上限：${current.maxChars}`,
+      "info",
+    );
+    return;
+  }
+
+  let config = await loadEnhanceConfig(defaultsPath);
+  const modelLabel = (value: string): string => value === "session" ? "跟随会话模型" : value;
+  const options = () => [
+    `${config.enabled ? "✓" : "○"} 启用提示词增强（当前：${config.enabled ? "开" : "关"}）`,
+    `生成模型：${modelLabel(config.modelRef)}（点击选择）`,
+    `思考级别：${config.thinking}（点击调整）`,
+    `增强结果长度上限：${config.maxChars} 字符（点击修改）`,
+    `上下文深度：${config.contextDepth}（none/session/codebase，点击切换）`,
+    `git log：${config.includeGit ? "✓" : "○"}（点击切换）`,
+    `提及文件上限：${config.maxFiles}（点击修改）`,
+    `Maestro 知识库搜索：${config.knowledgeSearch ? "✓" : "○"}（点击切换）`,
+    `知识库命中条数：${config.knowledgeTopN}（点击修改）`,
+    "重置为默认设置",
+  ];
+
+  for (;;) {
+    const choice = await ctx.ui.select("提示词增强设置（/api-manager enhance）", options());
+    if (choice === undefined) return;
+
+    if (choice.startsWith("✓") || choice.startsWith("○")) {
+      config.enabled = !config.enabled;
+      await saveEnhanceConfig(config, defaultsPath);
+      ctx.ui.notify(`提示词增强已${config.enabled ? "启用" : "停用"}。`, "info");
+      continue;
+    }
+
+    if (choice.startsWith("生成模型")) {
+      const models = await buildGlobalModelOptions("configure", modelsPath, defaultsPath);
+      const labels = [
+        `跟随会话模型${config.modelRef === "session" ? "（当前）" : ""}`,
+        ...models.map((entry) => `${entry.label}${entry.pick.kind === "model" && config.modelRef === `${entry.pick.providerId}/${entry.pick.modelId}` ? "（当前）" : ""}`),
+      ];
+      const pick = await ctx.ui.select("选择增强生成模型（独立于会话模型）", labels);
+      if (pick === undefined) continue;
+      if (pick === labels[0]) {
+        config.modelRef = "session";
+      } else {
+        const entry = models.find((item) => `${item.label}${item.pick.kind === "model" && config.modelRef === `${item.pick.providerId}/${item.pick.modelId}` ? "（当前）" : ""}` === pick);
+        if (entry && entry.pick.kind === "model") {
+          config.modelRef = `${entry.pick.providerId}/${entry.pick.modelId}`;
+        }
+      }
+      await saveEnhanceConfig(config, defaultsPath);
+      ctx.ui.notify(`增强生成模型已设为：${modelLabel(config.modelRef)}。`, "info");
+      continue;
+    }
+
+    if (choice.startsWith("思考级别")) {
+      const levels = ENHANCE_THINKING_LEVELS.map((level) =>
+        `${level}${level === config.thinking ? "（当前）" : ""}`,
+      );
+      const pick = await ctx.ui.select("选择增强思考级别（default 跟随会话）", levels);
+      if (pick === undefined) continue;
+      const level = ENHANCE_THINKING_LEVELS.find((value) => `${value}${value === config.thinking ? "（当前）" : ""}` === pick);
+      if (level) {
+        config.thinking = level;
+        await saveEnhanceConfig(config, defaultsPath);
+        ctx.ui.notify(`增强思考级别已设为：${level}。`, "info");
+      }
+      continue;
+    }
+
+    if (choice.startsWith("增强结果长度上限")) {
+      const input = await ctx.ui.input(
+        "增强结果长度上限（字符，50–8000）",
+        String(config.maxChars),
+      );
+      if (input === undefined) continue;
+      const parsed = Number.parseInt(input.trim(), 10);
+      if (Number.isNaN(parsed) || parsed < 50 || parsed > 8000) {
+        ctx.ui.notify("长度上限必须是 50–8000 之间的数字。", "warning");
+        continue;
+      }
+      config.maxChars = parsed;
+      await saveEnhanceConfig(config, defaultsPath);
+      ctx.ui.notify(`增强结果长度上限已设为：${parsed} 字符。`, "info");
+      continue;
+    }
+
+    if (choice.startsWith("上下文深度")) {
+      const depths = ENHANCE_CONTEXT_DEPTHS.map((d) => `${d}${d === config.contextDepth ? "（当前）" : ""}`);
+      const pick = await ctx.ui.select("选择上下文深度（none=仅改写 / session=会话 / codebase=会话+代码库+知识库）", depths);
+      if (pick === undefined) continue;
+      const d = ENHANCE_CONTEXT_DEPTHS.find((value) => `${value}${value === config.contextDepth ? "（当前）" : ""}` === pick);
+      if (d) {
+        config.contextDepth = d;
+        await saveEnhanceConfig(config, defaultsPath);
+        ctx.ui.notify(`上下文深度已设为：${d}。`, "info");
+      }
+      continue;
+    }
+
+    if (choice.startsWith("git log")) {
+      config.includeGit = !config.includeGit;
+      await saveEnhanceConfig(config, defaultsPath);
+      ctx.ui.notify(`git log 已${config.includeGit ? "开启" : "关闭"}。`, "info");
+      continue;
+    }
+
+    if (choice.startsWith("提及文件上限")) {
+      const input = await ctx.ui.input("提及文件上限（0–10）", String(config.maxFiles));
+      if (input === undefined) continue;
+      const parsed = Number.parseInt(input.trim(), 10);
+      if (Number.isNaN(parsed) || parsed < 0 || parsed > 10) {
+        ctx.ui.notify("提及文件上限必须是 0–10 之间的数字。", "warning");
+        continue;
+      }
+      config.maxFiles = parsed;
+      await saveEnhanceConfig(config, defaultsPath);
+      ctx.ui.notify(`提及文件上限已设为：${parsed}。`, "info");
+      continue;
+    }
+
+    if (choice.startsWith("Maestro 知识库搜索")) {
+      config.knowledgeSearch = !config.knowledgeSearch;
+      await saveEnhanceConfig(config, defaultsPath);
+      ctx.ui.notify(`Maestro 知识库搜索已${config.knowledgeSearch ? "开启" : "关闭"}。`, "info");
+      continue;
+    }
+
+    if (choice.startsWith("知识库命中条数")) {
+      const input = await ctx.ui.input("知识库命中条数（1–20）", String(config.knowledgeTopN));
+      if (input === undefined) continue;
+      const parsed = Number.parseInt(input.trim(), 10);
+      if (Number.isNaN(parsed) || parsed < 1 || parsed > 20) {
+        ctx.ui.notify("知识库命中条数必须是 1–20 之间的数字。", "warning");
+        continue;
+      }
+      config.knowledgeTopN = parsed;
+      await saveEnhanceConfig(config, defaultsPath);
+      ctx.ui.notify(`知识库命中条数已设为：${parsed}。`, "info");
+      continue;
+    }
+
+    if (choice.startsWith("重置")) {
+      const confirmed = await ctx.ui.confirm(
+        "确认重置提示词增强设置为默认值？",
+        `将恢复为：${DEFAULT_ENHANCE_CONFIG.enabled ? "启用" : "停用"} · ${DEFAULT_ENHANCE_CONFIG.contextDepth} 上下文 · 长度上限 ${DEFAULT_ENHANCE_CONFIG.maxChars}`,
+      );
+      if (!confirmed) continue;
+      config = { ...DEFAULT_ENHANCE_CONFIG };
+      await saveEnhanceConfig(config, defaultsPath);
+      ctx.ui.notify("提示词增强设置已重置为默认。", "info");
+      continue;
+    }
+  }
+}
+
 export async function manageAgentCacheRetention(
   ctx: ExtensionCommandContext,
   settingsPath: string,
@@ -1298,6 +1476,10 @@ async function showApiProviderManager(
   }
   if (action === "nextsuggest") {
     await manageNextSuggestSettings(ctx, defaultsPath, modelsPath);
+    return;
+  }
+  if (action === "enhance") {
+    await manageEnhanceSettings(ctx, defaultsPath, modelsPath);
     return;
   }
   if (action === "export" || action === "import") {

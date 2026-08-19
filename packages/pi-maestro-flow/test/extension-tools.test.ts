@@ -434,8 +434,9 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.match(runControl?.description ?? "", /Transparent shell over the canonical Maestro CLI/);
   assert.match(runControl?.description ?? "", /single LLM surface for the lifecycle/);
   assert.match(runControl?.description ?? "", /do not hand-write/);
-  assert.match(runControl?.description ?? "", /mutation lease and are blocked in Plan mode/);
-  assert.match(runControl?.description ?? "", /session\/run create\|start/);
+  assert.match(runControl?.description ?? "", /need no workflow mutation lease/);
+  assert.match(runControl?.description ?? "", /blocked in Plan mode/);
+  assert.match(runControl?.description ?? "", /session open\|create, run next/);
   assert.match(runControl?.description ?? "", /artifact inspect/);
   assert.match(runControl?.description ?? "", /Artifact republish is a capability-gated registry mutation/);
   assert.match(runControl?.description ?? "", /fresh inspect-derived CAS fence/);
