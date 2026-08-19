@@ -11,6 +11,7 @@ import {
   type InitializeRequest,
   type InitializeResponse,
   type PromptResponse,
+  type SessionConfigOption,
   type SessionUpdate,
   type SetSessionConfigOptionRequest,
   type SetSessionConfigOptionResponse,
@@ -830,6 +831,94 @@ class AcpRunHandle implements RemoteRunHandle {
       || monitorOwnerNonce !== this.capture.monitorOwnerNonce) {
       throw new Error("Remote run ownership capture mismatch");
     }
+  }
+}
+
+/** What a configuration probe needs in order to launch the agent it asks. */
+export interface AcpProbeTarget {
+  /** Executable and arguments, already resolved from the registration. */
+  command: readonly string[];
+  /** Working directory the session is opened against. */
+  cwd: string;
+  /** Environment variable names passed through to the child. */
+  env: readonly string[];
+}
+
+/**
+ * Read the configuration options an ACP agent advertises, without running a
+ * task.
+ *
+ * Launches the agent, completes `initialize` and `session/new`, and returns
+ * what that response advertised. No prompt is sent, so the probe costs a
+ * process and a handshake rather than model usage. The child is always killed
+ * before returning, including on failure.
+ *
+ * Failure throws rather than yielding an empty list: an agent that cannot be
+ * launched, or that refuses without credentials, is a state the operator has to
+ * act on, and an empty list would read as "this agent offers no choices".
+ *
+ * @param target - launch command, directory, and env passthrough.
+ * @param options - startup bound, abort signal, and spawn injection for tests.
+ * @returns the advertised configuration options, empty when the agent sends none.
+ * @throws when the agent cannot be launched, times out, or rejects the handshake.
+ */
+export async function probeAcpConfigOptions(
+  target: AcpProbeTarget,
+  options: {
+    startupTimeoutMs?: number;
+    signal?: AbortSignal;
+    spawnChild?: SpawnChild;
+  } = {},
+): Promise<readonly SessionConfigOption[]> {
+  const startupTimeoutMs = options.startupTimeoutMs ?? ACP_STARTUP_TIMEOUT_MS;
+  const spawnChild = options.spawnChild ?? ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
+  const child = spawnChild(target.command[0]!, target.command.slice(1), {
+    cwd: target.cwd,
+    detached: true,
+    env: targetChildEnvironment(target.env),
+    windowsHide: true,
+    shell: false,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  // A probe answers no agent requests: it never prompts, so nothing it does can
+  // make the agent ask for permission, a file, or a terminal.
+  const app = client({ name: "pi-maestro-teammate-probe" });
+  const connection = app.connect(boundedAcpStream(child, () => undefined));
+  const abort = (): void => signalProcessTree(captureProcessTree(child.pid), "SIGKILL");
+  options.signal?.addEventListener("abort", abort, { once: true });
+  try {
+    const initialized = await withTimeout(
+      connection.agent.request<InitializeResponse, InitializeRequest>(methods.agent.initialize, {
+        protocolVersion: PROTOCOL_VERSION,
+        // Declared explicitly rather than left empty: a probe answers no agent
+        // requests, and an agent that reads an absent capability map as "unknown"
+        // rather than "none" may open a session expecting callbacks this
+        // connection will never serve.
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          terminal: false,
+        },
+        clientInfo: { name: "pi-maestro-teammate-probe", version: "1" },
+      }),
+      startupTimeoutMs,
+      "ACP initialize",
+    );
+    if (initialized.protocolVersion !== PROTOCOL_VERSION) {
+      throw new Error(
+        `ACP protocol version mismatch: expected ${PROTOCOL_VERSION}, received ${initialized.protocolVersion}`,
+      );
+    }
+    const session = await withTimeout(
+      connection.agent.buildSession(target.cwd).start(),
+      startupTimeoutMs,
+      "ACP session/new",
+    );
+    const advertised = session.newSessionResponse.configOptions ?? [];
+    session.dispose();
+    return advertised;
+  } finally {
+    options.signal?.removeEventListener("abort", abort);
+    signalProcessTree(captureProcessTree(child.pid), "SIGKILL");
   }
 }
 

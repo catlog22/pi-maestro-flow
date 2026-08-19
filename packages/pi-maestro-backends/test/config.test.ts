@@ -133,3 +133,46 @@ test("type mismatches are reported per field", () => {
   assert.match(resolved.errors[1]!, /expected a boolean, got string/);
   assert.match(resolved.errors[2]!, /expected every item to be a string/);
 });
+
+test("a dynamic-enum field without listConfigOptions is a registration error", () => {
+  // The values live in the executing system, so the declaration alone cannot
+  // describe them. Without the lister a configuration surface would render the
+  // field as an empty choice — broken, but indistinguishable from "no values
+  // available", which is why this is refused at registration instead.
+  const fields = [
+    { key: "acpModel", kind: "dynamic-enum" as const, labelKey: "x.acpModel" },
+  ];
+  const missing = resolveBackendConfig(
+    backend({ configFields: fields, resolveConfig: (values) => ({ values, errors: [] }) }),
+    { acpModel: "composer-2.5[fast=true]" },
+  );
+  assert.equal(missing.errors.length, 1);
+  assert.match(missing.errors[0]!, /listConfigOptions/);
+  assert.match(missing.errors[0]!, /acpModel/);
+
+  // The same declaration with a lister validates the value as text: membership
+  // belongs to the system that publishes it, and a registration written by hand
+  // must stay valid without reaching that system.
+  const paired = resolveBackendConfig(
+    backend({
+      configFields: fields,
+      resolveConfig: (values) => ({ values, errors: [] }),
+      listConfigOptions: async () => [{ value: "composer-2.5[fast=true]", label: "composer-2.5" }],
+    }),
+    { acpModel: "a-value-no-probe-has-seen" },
+  );
+  assert.deepEqual(paired.errors, []);
+  assert.equal(paired.values.acpModel, "a-value-no-probe-has-seen");
+
+  // Type is still the declaration's business.
+  const wrongType = resolveBackendConfig(
+    backend({
+      configFields: fields,
+      resolveConfig: (values) => ({ values, errors: [] }),
+      listConfigOptions: async () => [],
+    }),
+    { acpModel: 7 },
+  );
+  assert.equal(wrongType.errors.length, 1);
+  assert.match(wrongType.errors[0]!, /expected a string/);
+});

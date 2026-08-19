@@ -35,6 +35,7 @@ import type {
   AttemptRecoveryFacts,
   BackendCapabilities,
   BackendConfigField,
+  BackendConfigOption,
   BackendRun,
   BackendRunOptions,
   ConfigValue,
@@ -48,7 +49,13 @@ import type {
   SingleResult,
   TeammateRunSpec,
 } from "pi-maestro-backend-core/v1/spec";
-import type { CliToolConfig } from "../cli-tools/cli-tools-config.ts";
+import {
+  cliToolArgv,
+  probeCliToolCommand,
+  type CliToolConfig,
+} from "../cli-tools/cli-tools-config.ts";
+import { advertisedModels } from "../remote/acp-config-options.ts";
+import { probeAcpConfigOptions } from "../remote/acp-driver.ts";
 import {
   CLI_TOOL_MODEL_PREFIX,
   cliToolNameFromModel,
@@ -160,7 +167,7 @@ const CONFIG_FIELDS: readonly BackendConfigField[] = [
     // a session is open: validation happens there, against what the agent
     // advertises, and names every accepted value when it rejects one.
     key: "acpModel",
-    kind: "text",
+    kind: "dynamic-enum",
     labelKey: "acpCli.acpModel",
     descriptionKey: "acpCli.acpModel.description",
   },
@@ -330,13 +337,20 @@ function combineSignals(
   return { signal: controller.signal, release };
 }
 
+/** Reads the configuration options an agent advertises, without running a task. */
+export type AcpConfigOptionProbe = typeof probeAcpConfigOptions;
+
 /**
  * Create the ACP-CLI backend.
  *
  * @param run - launches one CLI run; the default drives a real subprocess.
+ * @param probe - reads an agent's advertised options; the default launches it.
  * @returns the backend, ready for registration.
  */
-export function createAcpCliBackend(run: CliToolRunner = runCliTool): TeammateBackend {
+export function createAcpCliBackend(
+  run: CliToolRunner = runCliTool,
+  probe: AcpConfigOptionProbe = probeAcpConfigOptions,
+): TeammateBackend {
   return {
     name: "acp-cli",
     protocolVersion: 1,
@@ -390,6 +404,46 @@ export function createAcpCliBackend(run: CliToolRunner = runCliTool): TeammateBa
         }
       }
       return { values: config, errors };
+    },
+
+    async listConfigOptions(
+      field: string,
+      config: Record<string, ConfigValue>,
+      signal: AbortSignal,
+    ): Promise<readonly BackendConfigOption[]> {
+      if (field !== "acpModel") {
+        throw new Error(`teammate backend "acp-cli" publishes no options for setting "${field}"`);
+      }
+      const launch = launchConfigOf(config);
+      if (launch.mode === "ssh") {
+        // The probe launches the agent from this process. An ssh registration's
+        // catalogue lives on the far host, and reaching it would need the run
+        // path's ssh transport, which this operation does not build. Saying so
+        // beats returning the local machine's answer for a remote target.
+        throw new Error(
+          'teammate backend "acp-cli" cannot list models for an "ssh" registration: '
+          + "the probe launches the agent locally, so the target host's catalogue is not reachable here",
+        );
+      }
+      const route = routeOf(config);
+      const tool = isCliToolModel(route) ? cliToolNameFromModel(route) : route;
+      const launchable = probeCliToolCommand(tool, launch);
+      if (!launchable.ok) {
+        throw new Error(`CLI tool "${tool}" is not launchable: ${launchable.error}`);
+      }
+      const startupTimeoutMs = count(config, "startupTimeoutMs");
+      const advertised = await probe(
+        {
+          command: cliToolArgv(tool, launch),
+          cwd: launch.cwd?.trim() || process.cwd(),
+          env: launch.env ?? [],
+        },
+        {
+          signal,
+          ...(startupTimeoutMs === undefined ? {} : { startupTimeoutMs }),
+        },
+      );
+      return advertisedModels(advertised);
     },
 
     async start(spec: TeammateRunSpec, options: BackendRunOptions): Promise<BackendRun> {

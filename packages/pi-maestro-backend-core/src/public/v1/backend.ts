@@ -211,6 +211,12 @@ export interface BackendConfigField {
     | "number"
     | "boolean"
     | "enum"
+    /**
+     * A choice whose values only the executing system knows, listed by
+     * `listConfigOptions` on demand. Stored and validated as text, so a
+     * registration written by hand stays valid without a probe.
+     */
+    | "dynamic-enum"
     | "string-list"
     | "path"
     | "credential-ref";
@@ -407,5 +413,51 @@ export interface TeammateBackend {
    * than skipping validation.
    */
   resolveConfig?(config: Record<string, ConfigValue>): ResolvedBackendConfig;
+  /**
+   * List the values a `dynamic-enum` field can take, by asking the system that
+   * owns them.
+   *
+   * Declared fields carry their options statically, which only works for a set
+   * the backend knows at build time. The values an external executor offers —
+   * an ACP agent's model catalogue, a remote target's roster — are the
+   * executor's to publish, vary by account and version, and are unknowable
+   * without reaching it. A backend that declares a `dynamic-enum` field must
+   * implement this; the registry treats the pair as a registration error
+   * otherwise, the same way it does for `configFields` without `resolveConfig`.
+   *
+   * Unlike `capabilities`, this performs I/O and may be slow: reaching the
+   * executor can mean launching a process and completing a handshake. Callers
+   * invoke it from a configuration surface on demand, never on a dispatch path,
+   * and pass a signal so an operator can abandon a slow probe.
+   *
+   * Failure is reported by throwing. An executor that cannot be reached, or
+   * that refuses without credentials, is a state the operator must see and act
+   * on; an empty list would render as "this field has no valid values", which
+   * is a different and false claim.
+   *
+   * @param field - the `key` of the declared field being listed.
+   * @param config - this registration's validated, defaults-applied config.
+   * @param signal - abandons the probe when the caller stops waiting.
+   * @returns the selectable values, each with a label to display.
+   * @throws when the owning system cannot be reached or refuses the request.
+   */
+  listConfigOptions?(
+    field: string,
+    config: Record<string, ConfigValue>,
+    signal: AbortSignal,
+  ): Promise<readonly BackendConfigOption[]>;
   start(spec: TeammateRunSpec, options: BackendRunOptions): Promise<BackendRun>;
+}
+
+/**
+ * One value a `dynamic-enum` field may take, as published by the system that
+ * owns it.
+ *
+ * `label` is raw text rather than a catalogue key: these strings come from an
+ * external executor at runtime, so no translation catalogue can carry them.
+ */
+export interface BackendConfigOption {
+  value: string;
+  label: string;
+  description?: string;
 }

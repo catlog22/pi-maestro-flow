@@ -313,3 +313,78 @@ test("acp-cli refuses a non-positive startup timeout and carries a valid one to 
   await (await plain.start(specOf({ model: "cli/mock" }), runOptionsOf(LOCAL_CONFIG))).outcome;
   assert.equal(defaults[0]?.startupTimeoutMs, undefined);
 });
+
+test("acp-cli lists the models the agent itself advertises", async () => {
+  // A real executable: listing checks the configured command is launchable
+  // before reaching the agent, so an unreachable one never gets that far.
+  const probeConfig: Record<string, ConfigValue> = {
+    command: process.execPath,
+    args: ["--version"],
+    modelId: "cli/mock",
+  };
+  const launched: { command: readonly string[]; cwd: string }[] = [];
+  const backend = createAcpCliBackend(
+    async () => CLEAN_RUN,
+    async (target) => {
+      launched.push({ command: target.command, cwd: target.cwd });
+      return [{
+        type: "select",
+        id: "model",
+        name: "Model",
+        category: "model",
+        currentValue: "default[]",
+        options: [
+          { value: "default[]", name: "Auto" },
+          { value: "composer-2.5[fast=true]", name: "composer-2.5" },
+        ],
+      }] as never;
+    },
+  );
+
+  const options = await backend.listConfigOptions!("acpModel", probeConfig, AbortSignal.timeout(1_000));
+  assert.deepEqual(options, [
+    { value: "default[]", label: "Auto" },
+    { value: "composer-2.5[fast=true]", label: "composer-2.5" },
+  ]);
+  // The probe launches the same command the run path would, so what an operator
+  // picks from is what the configured CLI actually offers.
+  assert.deepEqual(launched[0]?.command, [process.execPath, "--version"]);
+});
+
+test("acp-cli refuses to list options it does not publish, and remote catalogues it cannot reach", async () => {
+  let probes = 0;
+  const backend = createAcpCliBackend(
+    async () => CLEAN_RUN,
+    async () => {
+      probes += 1;
+      return [];
+    },
+  );
+
+  await assert.rejects(
+    () => backend.listConfigOptions!("runTimeoutMs", LOCAL_CONFIG, AbortSignal.timeout(1_000)),
+    (error: Error) => error.message.includes("runTimeoutMs"),
+  );
+
+  // An ssh registration's catalogue lives on the far host; answering with the
+  // local machine's would be a plausible wrong answer, so it refuses instead.
+  await assert.rejects(
+    () => backend.listConfigOptions!(
+      "acpModel",
+      { ...LOCAL_CONFIG, mode: "ssh", host: "build-01", user: "agent", hostKeySha256: "abc" },
+      AbortSignal.timeout(1_000),
+    ),
+    (error: Error) => error.message.includes("ssh"),
+  );
+
+  // Neither refusal reached the agent.
+  assert.equal(probes, 0);
+});
+
+test("acp-cli declaring a dynamic field is a registration error without its lister", () => {
+  // The pairing the registry enforces, asserted from this backend's own
+  // declaration so a field added later cannot quietly become unlistable.
+  const dynamic = (acpCliBackend.configFields ?? []).filter((field) => field.kind === "dynamic-enum");
+  assert.ok(dynamic.length > 0, "expected acp-cli to declare at least one dynamic field");
+  assert.equal(typeof acpCliBackend.listConfigOptions, "function");
+});
