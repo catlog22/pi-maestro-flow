@@ -19,6 +19,7 @@ import {
 	type SettingsActivationPlan,
 	type SettingsChange,
 	type SettingsContextV1,
+	type SettingsListOptionsResultV1,
 	type SettingsOverviewRow,
 	type SettingsResourceConflict,
 	type SettingsScope,
@@ -690,6 +691,12 @@ export class MaestroSettingsShell implements Component, Focusable {
 			return;
 		}
 		if (definition.editor.kind === "enum") {
+			// A declared source owns the values; the declaration carries none.
+			const optionsSource = definition.editor.optionsSource;
+			if (optionsSource !== undefined) {
+				await this.beginSourcedOptionEditor(provider, definition, optionsSource);
+				return;
+			}
 			const options = (definition.editor.options ?? []).map((option) => ({
 				value: option.value as JsonValue,
 				label: this.t(option.labelKey),
@@ -737,6 +744,60 @@ export class MaestroSettingsShell implements Component, Focusable {
 		// Entering a modal editor disarms the pending Esc-discard confirmation.
 		this.discardArmed = false;
 		this.requestRender();
+	}
+
+	/**
+	 * Fill an option editor from the system that owns the values.
+	 *
+	 * Reading them can mean launching a process and completing a handshake, so
+	 * it happens when the operator opens the editor rather than while listing
+	 * settings. A source that cannot answer says so: an empty picker would read
+	 * as "no values exist", which is a different claim from "not reachable".
+	 */
+	private async beginSourcedOptionEditor(
+		provider: DescribedSettingsProvider,
+		definition: SettingDefinition,
+		optionsSource: string,
+	): Promise<void> {
+		const registration = this.params.registry.get(provider.providerId);
+		if (!registration?.provider.listOptions) {
+			this.setNotice(this.t("settings.optionsUnavailable"), "warning");
+			return;
+		}
+		this.setNotice(this.t("settings.optionsLoading"), "dim");
+		let result: SettingsListOptionsResultV1;
+		try {
+			result = await registration.provider.listOptions({
+				context: this.context,
+				key: definition.key,
+				optionsSource,
+			});
+		} catch (error) {
+			this.setNotice(error instanceof Error ? error.message : String(error), "error");
+			return;
+		}
+		if (result.failure !== undefined) {
+			this.setNotice(result.failure, "error");
+			return;
+		}
+		if (result.options.length === 0) {
+			this.setNotice(this.t("settings.optionsEmpty"), "warning");
+			return;
+		}
+		// The value already configured stays selectable even when the source no
+		// longer publishes it, so opening the picker cannot silently drop it.
+		const current = this.currentValue(provider.providerId, definition);
+		const published = result.options.map((option: { value: string; label: string }) => ({
+			value: option.value as JsonValue,
+			label: option.label,
+		}));
+		const options = typeof current === "string"
+			&& current.length > 0
+			&& !result.options.some((option: { value: string }) => option.value === current)
+			? [{ value: current as JsonValue, label: current }, ...published]
+			: published;
+		this.notice = "";
+		this.beginOptionEditor(provider.providerId, definition, options);
 	}
 
 	private async invokeAction(provider: DescribedSettingsProvider, definition: SettingDefinition): Promise<void> {

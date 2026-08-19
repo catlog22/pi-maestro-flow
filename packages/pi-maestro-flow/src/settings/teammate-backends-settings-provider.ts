@@ -28,6 +28,8 @@ import {
   type JsonValue,
   type SettingDefinition,
   type SettingsAnnounceEventV1,
+  type SettingsListOptionsRequestV1,
+  type SettingsListOptionsResultV1,
   type SettingsChange,
   type SettingsContextV1,
   type SettingsDiscoverEventV1,
@@ -38,7 +40,11 @@ import {
   type SettingsValidationIssue,
   type SettingsValidationResult,
 } from "pi-maestro-settings-core/v1";
-import type { BackendConfigField } from "pi-maestro-backend-core/v1/backend";
+import type {
+  BackendConfigField,
+  BackendConfigOption,
+  ConfigValue,
+} from "pi-maestro-backend-core/v1/backend";
 import type { TeammateExecutionMode } from "pi-maestro-backend-core/v1/registry";
 
 const PROVIDER_ID = "pi-maestro-teammate-backends";
@@ -66,6 +72,16 @@ const DEFAULT_BACKEND = "pi-subprocess";
  * that a slow operator loses their edit.
  */
 const STAGED_TRANSACTION_TTL_MS = 10 * 60 * 1000;
+/** Editor `optionsSource` for every backend field whose values a probe reads. */
+const DYNAMIC_OPTIONS_SOURCE = "teammateBackends.backend-options";
+/**
+ * How long a probe may take before the shell is told the source did not answer.
+ *
+ * The protocol carries no abort signal, so the bound lives here. Generous
+ * because a probe launches a process and completes a protocol handshake, and an
+ * operator who opened the picker is waiting on purpose.
+ */
+const DYNAMIC_OPTIONS_TIMEOUT_MS = 90_000;
 
 /** What the provider needs to know about a backend; not the backend itself. */
 export interface BackendDescriptor {
@@ -80,6 +96,17 @@ export interface BackendDescriptor {
    */
   module: string;
   configFields?: readonly BackendConfigField[];
+  /**
+   * Reads the values a `dynamic-enum` field can take, by asking the system that
+   * owns them. Carried on the descriptor because the shell renders from
+   * descriptors, not from loaded backends: a registration's picker must fill
+   * even before the registry has resolved that registration.
+   */
+  listConfigOptions?: (
+    field: string,
+    config: Record<string, ConfigValue>,
+    signal: AbortSignal,
+  ) => Promise<readonly BackendConfigOption[]>;
 }
 
 /** Everything the provider needs from its host. */
@@ -146,6 +173,11 @@ function editorFor(field: BackendConfigField): SettingDefinition["editor"] {
           labelKey: option.labelKey,
         })),
       };
+    // The values are the executing system's to publish, so the editor names a
+    // source the shell resolves when the operator opens it rather than a list
+    // this description could carry.
+    case "dynamic-enum":
+      return { kind: "enum", optionsSource: DYNAMIC_OPTIONS_SOURCE };
     case "text":
     case "path":
     case "credential-ref":
@@ -652,6 +684,49 @@ export function createTeammateBackendsSettingsProvider(
     },
 
     read,
+
+    async listOptions(request: SettingsListOptionsRequestV1): Promise<SettingsListOptionsResultV1> {
+      if (request.optionsSource !== DYNAMIC_OPTIONS_SOURCE) {
+        return { options: [], failure: `Unknown options source "${request.optionsSource}"` };
+      }
+      // `teammateBackends.<backend>.<field>` — the same composition `fieldKey`
+      // writes, read back so the probe reaches the registration being edited
+      // rather than some default one.
+      const parts = request.key.split(".");
+      const backendName = parts[1];
+      const fieldName = parts.slice(2).join(".");
+      const descriptor = backendName === undefined
+        ? undefined
+        : options.backends.find((candidate) => candidate.name === backendName);
+      if (descriptor?.listConfigOptions === undefined) {
+        return { options: [], failure: `Backend "${backendName ?? request.key}" publishes no dynamic settings` };
+      }
+
+      // The probe launches whatever the document currently configures, so an
+      // operator editing an unsaved command still probes the saved one. Saying
+      // which values were used beats silently probing a different launch.
+      const { document } = readDocument(documentPath);
+      const config = (document.backends?.[backendName!]?.config ?? {}) as Record<string, ConfigValue>;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), DYNAMIC_OPTIONS_TIMEOUT_MS);
+      try {
+        const published = await descriptor.listConfigOptions(fieldName, config, controller.signal);
+        return {
+          options: published.map((option) => ({
+            value: option.value,
+            label: option.label,
+            ...(option.description === undefined ? {} : { description: option.description }),
+          })),
+        };
+      } catch (error) {
+        // Surfaced rather than swallowed: an unreachable or unauthenticated
+        // executor is a state the operator must act on, and an empty picker
+        // would read as "this backend offers no models".
+        return { options: [], failure: error instanceof Error ? error.message : String(error) };
+      } finally {
+        clearTimeout(timer);
+      }
+    },
 
     validate(request): SettingsValidationResult {
       const { issues } = apply(request.changes);

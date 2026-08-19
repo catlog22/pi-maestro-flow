@@ -363,3 +363,80 @@ test("a document edited after prepare is refused rather than overwritten", async
   );
   assert.equal(JSON.parse(readFileSync(p.documentPath, "utf-8")).default, "dsh");
 });
+
+test("a dynamic field is described as a sourced picker and filled from the backend", async () => {
+  const probes: { field: string; config: Record<string, unknown> }[] = [];
+  const workspaceRoot = mkdtempSync(join(tmpdir(), "tb-dyn-"));
+  mkdirSync(join(workspaceRoot, ".pi"), { recursive: true });
+  writeFileSync(
+    join(workspaceRoot, ".pi", "teammate-backends.json"),
+    JSON.stringify({
+      mode: "backend-registry",
+      default: "cursor",
+      backends: { cursor: { module: "m", config: { command: "agent", args: ["acp"] } } },
+    }),
+  );
+  const instance = createTeammateBackendsSettingsProvider({
+    workspaceRoot,
+    backends: [{
+      name: "cursor",
+      module: "m",
+      configFields: [{ key: "acpModel", kind: "dynamic-enum" as const, labelKey: "x.acpModel" }],
+      listConfigOptions: async (field, config) => {
+        probes.push({ field, config });
+        return [{ value: "composer-2.5[fast=true]", label: "composer-2.5" }];
+      },
+    }],
+  });
+
+  // The description names a source rather than carrying values it cannot know.
+  const described = await instance.describe({ context });
+  const definition = described.settings.find((setting) => setting.key === "teammateBackends.cursor.acpModel");
+  assert.ok(definition, "expected the dynamic field to be described");
+  assert.equal(definition!.editor.kind, "enum");
+  assert.equal(typeof definition!.editor.optionsSource, "string");
+  assert.equal(definition!.editor.options, undefined);
+
+  const listed = await instance.listOptions!({
+    context,
+    key: "teammateBackends.cursor.acpModel",
+    optionsSource: definition!.editor.optionsSource!,
+  });
+  assert.equal(listed.failure, undefined);
+  assert.deepEqual(listed.options, [{ value: "composer-2.5[fast=true]", label: "composer-2.5" }]);
+  // The probe was handed the registration being edited, not an empty config, so
+  // it launches what that registration actually configures.
+  assert.equal(probes[0]?.field, "acpModel");
+  assert.deepEqual(probes[0]?.config, { command: "agent", args: ["acp"] });
+});
+
+test("an options source that cannot answer is reported as a failure, not an empty list", async () => {
+  const workspaceRoot = mkdtempSync(join(tmpdir(), "tb-dyn-fail-"));
+  const instance = createTeammateBackendsSettingsProvider({
+    workspaceRoot,
+    backends: [{
+      name: "cursor",
+      module: "m",
+      configFields: [{ key: "acpModel", kind: "dynamic-enum" as const, labelKey: "x.acpModel" }],
+      listConfigOptions: async () => {
+        throw new Error("CLI tool \"cursor\" is not launchable: executable \"agent\" unreachable");
+      },
+    }],
+  });
+  const listed = await instance.listOptions!({
+    context,
+    key: "teammateBackends.cursor.acpModel",
+    optionsSource: "teammateBackends.backend-options",
+  });
+  // Empty would read as "this backend offers no models"; the operator needs the
+  // reason instead, because it is something they can act on.
+  assert.deepEqual(listed.options, []);
+  assert.match(listed.failure ?? "", /not launchable/);
+
+  const unknown = await instance.listOptions!({
+    context,
+    key: "teammateBackends.cursor.acpModel",
+    optionsSource: "some.other.source",
+  });
+  assert.match(unknown.failure ?? "", /Unknown options source/);
+});

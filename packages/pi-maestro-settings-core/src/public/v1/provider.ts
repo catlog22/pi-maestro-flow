@@ -127,6 +127,48 @@ export interface SettingsInvokeActionResultV1 {
   message?: string;
 }
 
+/**
+ * Ask a provider for the values an editor's `optionsSource` names.
+ *
+ * Carries no abort signal: the protocol travels by event and must stay
+ * serializable, so a provider that reaches a slow system bounds the wait
+ * itself and reports exhaustion as a failed result.
+ */
+export interface SettingsListOptionsRequestV1 {
+  context: SettingsContextV1;
+  /** The setting being edited. */
+  key: string;
+  /** The `optionsSource` its editor declared, so one provider can serve several. */
+  optionsSource: string;
+}
+
+/**
+ * The values an options source published, or why it could not answer.
+ *
+ * A failure is distinct from an empty list. Empty means the source answered and
+ * offers nothing; `failure` means it never answered, which the shell shows to
+ * the operator instead of an empty picker they would read as "no choices".
+ */
+export interface SettingsListOptionsResultV1 {
+  options: readonly SettingsSourcedOption[];
+  /** Already-localized reason the source could not be read. */
+  failure?: string;
+}
+
+/**
+ * One value an options source published.
+ *
+ * `label` is raw display text, not a catalogue key: these values come from a
+ * system outside this build at runtime, so no translation catalogue can carry
+ * them. That is the difference from `SettingsSelectOption`, whose values are
+ * declared here and therefore translatable.
+ */
+export interface SettingsSourcedOption {
+  value: string;
+  label: string;
+  description?: string;
+}
+
 export interface SettingsRuntimeFailureV1 {
   key: string;
   messageKey: string;
@@ -154,4 +196,13 @@ export interface SettingsProviderV1 {
   rollback?(request: SettingsRollbackRequestV1): MaybePromise<SettingsRollbackResultV1>;
   applyRuntime?(request: SettingsApplyRuntimeRequestV1): MaybePromise<SettingsApplyRuntimeResultV1>;
   invokeAction?(request: SettingsInvokeActionRequestV1): MaybePromise<SettingsInvokeActionResultV1>;
+  /**
+   * Resolve the values an editor's `optionsSource` names.
+   *
+   * A provider declaring `optionsSource` on any editor must implement this;
+   * without it the shell has a picker it can never fill. Unlike `describe`,
+   * this may perform I/O and may be slow, so the shell calls it when an
+   * operator opens that editor rather than while listing settings.
+   */
+  listOptions?(request: SettingsListOptionsRequestV1): MaybePromise<SettingsListOptionsResultV1>;
 }
