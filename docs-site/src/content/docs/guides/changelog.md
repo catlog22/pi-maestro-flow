@@ -5,7 +5,30 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.21.5（2026-08-15）。** Flow 0.21.5 同步引擎 `maestro-flow@0.5.74`（v3 加固：迁移死锁消除、knowledge stage 支持 session/3.0、目标感知 CAS、skill/agent 源全面 v3）；搭配 Teammate 1.13.0、Cockpit 0.16.0 与 Settings-Core 0.1.3。
+> **当前稳定版本：v0.21.6（2026-08-16）。** Flow 0.21.6 新增 plan Knowledge Gate，同步引擎 `maestro-flow@0.5.75`；搭配 Teammate 1.14.0（远程工作器 `pi-teammate-remote`）、Cockpit 0.16.0 与 Settings-Core 0.1.3。
+>
+> **未发布（开发中，版本号待定）**：Teammate 2.0.0 破坏性大版本、MCPX 配置向导与连接监视器、动态模型发现与进程内 failover、`/notify` 提醒、下一步建议、`.pi/SYSTEM.md` 单一权威迁移等。详见下方「未发布」段。
+
+## 未发布（开发中）
+
+> 以下为 `v0.21.6` 之后、尚未发版的开发中工作。版本号与日期将在发版时确定；`pi-maestro-teammate` 已升到 2.0.0（破坏性），`pi-maestro-flow` 仍为 0.21.6。
+
+- **Teammate 2.0.0（破坏性大版本）**：远端 journal 格式 `REMOTE_JOURNAL_VERSION` 1 → 2，**无迁移路径**——旧 v1 journal 在解析时硬失败，需删除重建；远端协议词汇 `RemoteCapability` 移除、协议升至 `remote/2`；删除内联 `cli/<tool>` 派发，路由统一改走 backend registry，第三方适配器须实现 backend 契约。新增通用 ACP-CLI TeammateBackend（事实经 `outcome.recovery` 返回、`settleAcpRun` 观测工具事件并带出已完成/在飞计数、ACP 握手超时改为可配不再写死 15 秒、failover 门按观测活动判定）；`optionsSource` 从声明字段变为可用机制、模型命名空间归执行者所有、`backendOptionsOf` 下发真实 `host.proxyToolCall`。新增纯契约包 `pi-maestro-backend-core`（能力表穷举至 12 项、凭据以引用建模而非遮罩值）+ registry 路由 + Pi subprocess backend 适配器 + dsh backend（每 run 托管 loopback MCP todo endpoint、`outputSchema` 宿主侧补偿由 unsupported 升为 emulated）。多个 remote/teammate 鲁棒性修复（订阅随 start 建立、单派发能力裁决、失败诊断不再渲染两遍等）。**升级注意：旧 v1 远端 journal 不可读、需重建；第三方后端须实现 backend 契约而非内联 `cli/<tool>` 派发。**
+- **MCPX 配置向导与连接监视器**：新增 `/mcpx` 配置向导（README 引导式 setup），含 Cloudflare quick tunnel 步骤（仅保留 quick tunnel、auto-start、cloud MCP 连接预览、surface cloudflared 退出/超时原因）、动态工作区注册与心跳租约、向导步骤导航（Enter 前进 / Esc 返回 / `c` 快捷进监视器）。新增 MCPX 连接监视器 TUI（展示 MCP 服务器与客户端连接、start/stop 控制）。
+- **动态模型发现与进程内 failover**：API Manager 支持动态模型发现（查询 provider 拉取实时模型列表），**仅在已保存 API key 时提供**；进程内模型 failover 经 `set_model` RPC 热切换模型而非重启 run；手动切换模型时重置该模型的熔断器以便自动 failover 重试。
+- **`/notify` 提醒开关**：新增 `/notify [on|off|error|complete|status]` 切换 toast 提醒（模型出错 / 回合完成）；出错回合抑制完成提醒，每回合至多一条 toast；状态持久化。
+- **下一步建议（next-suggest）**：每回合结束后在编辑器下方渲染下一步提示 widget，F2（可配）填充编辑器、任意输入即消失；经 API Manager（`/api-manager nextsuggest`）配置，持久化于 `api-manager.json` 的 `nextSuggest` 段。
+- **API Manager 配置导入/导出 + 暴露 teammate CLI 工具可用性 + 显示被阻塞的知识候选**。
+- **`.pi/SYSTEM.md` 单一权威迁移**：项目系统指令仅来自 `.pi/SYSTEM.md`，内联打包 `AGENTS.md` 注入退役；依赖旧注入的用户须迁移内容到 `.pi/SYSTEM.md`。
+- **防御性编程修复（DEF-001..004）**：修正 false-success 上报（DEF-001/002）与 silent eviction 重排（DEF-003/004），补回归测试。
+- 其他：cockpit 同文件批量编辑并原子拒绝相同编辑；知识 promote 3 条防御性编程 spec。
+
+## v0.21.6（2026-08-16）
+
+- **Teammate 1.14.0 — 远程工作器（`pi-teammate-remote`）**：新增 `pi-teammate-remote` CLI 与公开 `./v1/remote` API 面（worker 协议、配置、bridge、journal、adapter 契约；`src/remote/` 下含 ACP driver、Pi RPC driver、SSH transport、child security 与进程树管理、worker-manager、remote state）。新增运行时依赖 `@agentclientprotocol/sdk@1.3.0`、`jiti@2.7.0`、`ssh2@1.17.0`、`zod@4.4.3`（settings-core 不变）。Monitor 控制窗口经 `MonitorToolExposureController` 在本地与 Monitor 工具变体间切换（`workspace-window`、`remote-worker` 独占工具，admission 前不授予跨窗口权限）；`teammate-list` 合并本地 workspace peers 与远程 runs；monitor 模式覆盖 SSH 远程 worker 监督。**Ask-before-dispatch 门禁**：模型路由配置（`~/.pi/agent/teammate-models.json` → `askBeforeDispatch: true`，经 `/teammate-models` 切换）下，root dispatch 在 spawn 前于 model-ask overlay 暂停确认每任务 model/thinking/location；嵌套/代理 dispatch 从不询问。投递加固：monitor 干预经进程内 `authorize` fence 后才外部发布；`ActiveAgent` 获得已解析 `cwd`（本地路径或 `remote:<targetId>`）。
+- **Flow 0.21.6 — plan Knowledge Gate + 引擎同步**：已批准 plan 的执行契约以 Knowledge Gate 开启——指导执行 agent 在任何项目工作前运行 `maestro search "<1-3 task keywords>"`，并对每个命中的治理结果执行 `maestro load`（search 为 exposure、load 记录 consumption），随后在子系统/架构边界重新 search。核心引擎 pin `maestro-flow@0.5.74 → 0.5.75`（上游 v3 运行时更新；v2 分支不动）。
+- **升级注意**：Teammate 需新运行时依赖（`ssh2`、`jiti`、`@agentclientprotocol/sdk`），请重装（`pi install npm:pi-maestro-teammate@1.14.0` 或干净 `npm install`）而非复制旧 node_modules。`askBeforeDispatch` 默认关闭，在 `/teammate-models`（Ctrl+A）启用；不支持 overlay UI 的上下文跳过门禁而非失败。`maestro-flow` 为精确 pin，升至 0.5.75。
+- 安装：`pi install npm:pi-maestro-flow@0.21.6`。
 
 ## v0.21.5（2026-08-15）
 

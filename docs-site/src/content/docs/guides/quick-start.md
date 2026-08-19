@@ -5,7 +5,7 @@ icon: "🚀"
 
 10 分钟了解 Maestro Flow 的核心功能和使用方法。完整安装步骤见[安装与初始化](/guides/install)。
 
-> v0.18.0 已发布（修复 v0.17.0 撤回的 Skill 发现回归）；当前稳定安装版本为 `0.18.0`。
+> 当前稳定安装版本为 `0.21.6`（远程 teammate 工作器 + plan Knowledge Gate）。
 
 ---
 

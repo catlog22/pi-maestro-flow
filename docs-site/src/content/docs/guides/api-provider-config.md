@@ -48,6 +48,13 @@ icon: "🔑"
 
 留空并确认 = 保留当前值；输入后确认会清空旧值。
 
+### 动态模型发现
+
+API Manager 支持动态模型发现：查询 provider 并拉取其实时模型列表（按 provider 的 `baseUrl` + 协议调用模型列表接口），无需手动逐一登记。
+
+- **仅在已保存 API key 时提供**：发现需要可用凭据，未保存 API key 的 provider 不展示发现选项，避免凭据缺失下的空失败调用。
+- 拉取的模型列表可经 `/api-manager` 勾选启用或绑定到 `provider/model` 引用。
+
 > `/api-manager` 与故障转移 TUI 的完整按键映射见 [TUI 操作指南](/guides/tui-guide)。
 
 ## 2. 模型故障转移
@@ -81,6 +88,8 @@ icon: "🔑"
 
 - **电路断路器**：连续失败触发熔断，避免打爆配额；
 - **自动故障转移**：熔断后按 `fallbackModels` 链切换；
+- **进程内热切换（`set_model` RPC）**：失败时可不重启 run，经子进程的 `set_model` RPC 在进程内热切换模型，Pi 在限期内 ACK 该切换；
+- **手动切换重置熔断**：当手动切换某模型时，该模型的熔断器被重置，以便后续自动故障转移重新尝试该模型；
 - **图片触发切换**：附加图片时可按路由切到 Vision 模型，完成后恢复原模型（`imageTriggered` / `originalModel`）；
 - **事件记录**：切换与结算事件写入 `model-failover-events.jsonl`，可用 `/model-failover status` 查看；
 - **终态广播**：计划内回退交接彻底失败时发布 `maestro-failover-terminal` 事件。

@@ -106,6 +106,7 @@ MCP 服务器在 Pi 配置文件中定义（用户级或项目级）：
 
 ## 下一步
 
+- [MCPX 配置向导与连接监视器](/guides/mcpx) — 把 MCP 服务经 Cloudflare quick tunnel 安全暴露给公网
 - [LSP 语言服务器与浏览器控制](/guides/lsp-browser) — 其他协议连接
 - [设置系统总览](/guides/settings-overview) — 配置文件结构
 - [环境变量速查](/guides/env-vars) — MCP 相关环境变量

@@ -257,6 +257,16 @@ export const guideRegistry: Array<{
     category: 'connectivity',
   },
   {
+    slug: 'mcpx',
+    file: 'mcpx.md',
+    title: 'MCPX Wizard & Monitor',
+    description: 'Guided /mcpx config wizard, Cloudflare quick tunnel, connection monitor TUI',
+    title_zh: 'MCPX 配置向导与连接监视器',
+    description_zh: '/mcpx 引导式配置向导、Cloudflare quick tunnel、连接监视器 TUI',
+    icon: 'compass',
+    category: 'connectivity',
+  },
+  {
     slug: 'lsp-browser',
     file: 'lsp-browser.md',
     title: 'LSP & Browser Control',

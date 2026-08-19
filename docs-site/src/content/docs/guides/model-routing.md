@@ -86,7 +86,7 @@ teammate({
 })
 ```
 
-配置了[模型故障转移](/guides/api-provider-config)时，熔断触发后自动按 fallback 链切换。
+配置了[模型故障转移](/guides/api-provider-config)时，熔断触发后自动按 fallback 链切换；切换可不重启 run，经 `set_model` RPC 在进程内热切换，手动切换模型会重置该模型的熔断器。
 
 ## 下一步
 

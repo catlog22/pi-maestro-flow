@@ -23,6 +23,10 @@ maestro load --type <type> [--list] [--category <cat>] [--keyword <word>] [--id 
 
 知识门是暴露而非消费：搜索响应被检视、相关条目完整可用后，门才算通过。只有 ID 或摘要（如压缩后）存活时，需要重新加载。
 
+### Plan 执行阶段的 Knowledge Gate
+
+从 v0.21.6 起，已批准 plan 的执行契约以 Knowledge Gate 开启：执行 agent 在任何项目工作前须先运行 `maestro search "<1-3 个任务关键词>"`，并对每个命中的治理结果执行 `maestro load`（search 为暴露、load 记录消费），随后在进入新子系统或架构边界时重新 search。`search` 是检索归因拼写，`load` 才是消费记录——两者都不可省略。详见 `RELEASE.md` 与引擎 `agy-instructions.md`。
+
 ## 查询最佳实践
 
 ```bash

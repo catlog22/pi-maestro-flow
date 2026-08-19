@@ -5,7 +5,7 @@ icon: "📦"
 
 pi-maestro-flow 是 **Pi 插件**，用 `pi install` 安装（不是普通 npm 依赖）。装一个即得全部三个插件：flow、teammate、cockpit。
 
-> **v0.18.0 已发布：** 修复 v0.17.0 的 Skill 发现回归（v0.17.0 已撤回）。npm `latest` 与下方固定版本均为 `0.18.0`；已安装 0.17.0 的用户直接覆盖安装即可，不要先运行 `pi remove`。
+> **当前稳定版本 v0.21.6：** 远程 teammate 工作器 + plan Knowledge Gate（引擎同步 `maestro-flow@0.5.75`）。下方安装命令已是最新版本；已安装旧版的用户直接覆盖安装即可升级，不要先运行 `pi remove`。
 
 ---
 

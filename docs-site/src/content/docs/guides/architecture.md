@@ -72,6 +72,11 @@ maestro load --type <type> [--id <id>]
 | **self-evolve 自进化层** | 运行轨迹 → 知识沉淀闭环（M1-M5：候选信号、评审门、健康侧车、提案治理、canary 验证），默认禁用（见 [Self-Evolve 自进化](/guides/self-evolve)） |
 | **权限系统** | 5 种模式 + 细粒度 allow/ask/deny + 子进程 IPC 中继 |
 
+### 后端注册表与系统指令
+
+- **`.pi/SYSTEM.md` 单一权威**：项目系统指令仅来自 `.pi/SYSTEM.md`；此前内联打包的 `AGENTS.md` 注入已退役。依赖旧注入的项目须把相关内容迁移到 `.pi/SYSTEM.md`。
+- **后端注册表路由**：teammate 派发不再走内联 `cli/<tool>` 派发，而是统一经 backend registry 路由（`cwd:remote:` 等位置感知派发同样经 registry）。`pi-maestro-backend-core` 提供纯契约包（能力表、凭据引用模型），具体后端（Pi subprocess、ACP-CLI、dsh）实现该契约。第三方适配器须实现 backend 契约而非依赖内联 `cli/<tool>` 派发。`outputSchema` 在宿主侧补偿，能力可由 `unsupported` 升为 `emulated`。
+
 ## 数据与配置文件位置
 
 | 路径 | 内容 |
@@ -81,6 +86,7 @@ maestro load --type <type> [--id <id>]
 | `~/.pi/agent/cockpit.json` | Cockpit 界面配置 |
 | `~/.pi/agent/vision-delegation.json` | Vision 委托配置 |
 | `~/.pi/agent/model-failover.json` | 模型故障转移配置 |
+| `<项目>/.pi/SYSTEM.md` | 项目系统指令（单一权威；替代旧内联 `AGENTS.md` 注入） |
 | `~/.pi/web-search.json` | Smart Search 原生路径配置 |
 | `%LOCALAPPDATA%/smart-search/config.json` | Smart Search Python CLI 路径配置 |
 
