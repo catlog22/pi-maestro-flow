@@ -54,7 +54,7 @@ import {
   type LosslessKind,
 } from "./lossless.ts";
 import { detectContentType } from "./content-detector.ts";
-import { scoreRelevanceBatch, type RelevanceMode } from "./relevance.ts";
+import { scoreRelevanceBatch, tokenizeRelevance, RELEVANCE_MAX_QUERY_TOKENS, type RelevanceMode } from "./relevance.ts";
 import { dedupBlocks, type DedupBlock } from "./dedup.ts";
 
 const PROTECTED_THRESHOLD_CHARS = 500;
@@ -2168,6 +2168,10 @@ export function applyContextPressurePolicy(
   // see the prefix-stability tests before weakening it.
   let newlySavedTokens = 0;
   let cacheGateActive = false;
+  // DEF-004: declared outside the `soft.enabled` block so the final return can
+  // surface the reason. Set inside the block when relevance is enabled but
+  // no usable query can be derived (no user message, or un-tokenizable query).
+  let relevanceDisabledReason: string | undefined = undefined;
   if (soft.enabled) {
     if (transformed === messages) transformed = [...messages];
     const frontierStart = protectedFrontierStart(transformed, settings.keepRecentTokens);
@@ -2209,6 +2213,16 @@ export function applyContextPressurePolicy(
     const relevanceQuery = soft.relevance?.enabled === true
       ? latestRelevanceQuery(messages)
       : "";
+    // DEF-004: when relevance is enabled but no usable query can be derived
+    // (no user message in the tail, or the query is non-empty but un-tokenizable),
+    // ranking is disabled and eviction falls back to the default newest-first walk.
+    // Surface this as a compaction reason so the disablement is observable and not
+    // indistinguishable from relevance being off by configuration.
+    relevanceDisabledReason = soft.relevance?.enabled === true && !relevanceQuery.trim()
+      ? "relevance-enabled-no-query"
+      : (soft.relevance?.enabled === true && tokenizeRelevance(relevanceQuery, RELEVANCE_MAX_QUERY_TOKENS).length === 0
+        ? "relevance-enabled-untokenizable-query"
+        : undefined);
     const rankCandidates = relevanceQuery
       ? (candidates: PruneCandidate[]) => rankPruneCandidates(
         candidates,
@@ -2327,10 +2341,13 @@ export function applyContextPressurePolicy(
       : undefined,
   });
   const result = pressureResult({ messages: transformed, band, estimatedTokens, contextWindow, thresholdTokens, prunedToolResults, savedTokens, velocityTracker: nextTracker, velocity });
+  const withRelevanceReason = relevanceDisabledReason !== undefined
+    ? { ...result, reasons: [...result.reasons, relevanceDisabledReason] }
+    : result;
   if (cacheGateActive && newlySavedTokens === 0 && !initiallyCritical) {
-    return { ...result, action: "none", reasons: [...result.reasons, "cache-veto"] };
+    return { ...withRelevanceReason, action: "none", reasons: [...withRelevanceReason.reasons, "cache-veto"] };
   }
-  return result;
+  return withRelevanceReason;
 }
 
 function applyRecordedPrunes(messages: AgentMessage[], pruneManifest: PruneManifest): AppliedPrunes {
@@ -3391,6 +3408,15 @@ function rankPruneCandidates(
   mode: RelevanceMode,
 ): PruneCandidate[] {
   if (candidates.length < 2 || !query.trim()) return candidates;
+  // DEF-003: a non-empty query that tokenizes to zero terms (punctuation,
+  // symbol, or emoji only — e.g. "???" or "....") must NOT be scored as a
+  // uniform-zero result. That masquerades as a valid tie and sorts newest-first,
+  // silently inverting the relevance feature's intent. Treat it as ranking
+  // disabled (same as an empty query) so eviction falls back to the default
+  // newest-first walk explicitly, not via a fabricated uniform-zero score.
+  if (tokenizeRelevance(query, RELEVANCE_MAX_QUERY_TOKENS).length === 0) {
+    return candidates;
+  }
   const documents = candidates.map((candidate) =>
     `${candidate.toolName}\n${candidate.relevanceText}`);
   const scores = scoreRelevanceBatch(documents, query, mode);
