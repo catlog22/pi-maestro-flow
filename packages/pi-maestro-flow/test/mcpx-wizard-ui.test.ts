@@ -325,6 +325,73 @@ test("a live cloudflared that never prints a URL times out with output tail in s
   const pidPath = join(dir, "cloudflared.pid");
   const previousPidFile = process.env.MCPX_TUNNEL_PID_FILE;
   process.env.MCPX_TUNNEL_PID_FILE = pidPath;
+  // Shorten the URL-wait window so this timeout case runs in ~1.5s, not the 30s default.
+  const previousTimeout = process.env.MCPX_TUNNEL_URL_TIMEOUT_MS;
+  process.env.MCPX_TUNNEL_URL_TIMEOUT_MS = "1500";
+  t.after(async () => {
+    process.env.PATH = previousPath;
+    if (previousPidFile === undefined) delete process.env.MCPX_TUNNEL_PID_FILE;
+    else process.env.MCPX_TUNNEL_PID_FILE = previousPidFile;
+    if (previousTimeout === undefined) delete process.env.MCPX_TUNNEL_URL_TIMEOUT_MS;
+    else process.env.MCPX_TUNNEL_URL_TIMEOUT_MS = previousTimeout;
+    try {
+      const pid = Number(require("node:fs").readFileSync(pidPath, "utf8"));
+      if (Number.isInteger(pid) && pid > 0) {
+        if (isWin) require("node:child_process").spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+        else process.kill(pid, "SIGKILL");
+      }
+    } catch { /* best-effort */ }
+  });
+
+  const { overlay } = makeWizard();
+  const s = overlay;
+  ["\x1b[B", "\x1b[B", "\r", "\x1b[B", "\r", "\r", "\x1b[B", "\r", "\r"].forEach((k) => overlay.handleInput(k));
+  overlay.handleInput("\r"); // start
+  // The shortened poll must elapse; then status shows the timeout + captured output tail.
+  const timeoutDeadline = Date.now() + 8_000;
+  while (Date.now() < timeoutDeadline && !/未取得 URL|尚未打印 URL/.test(s["status"] ?? "")) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  assert.match(s["status"] ?? "", /未取得 URL/);
+  assert.match(s["status"] ?? "", /Connection registered/, "timeout status must surface the output tail");
+  assert.equal(s["changes"]?.tunnelUrl, undefined);
+  assert.ok(s["tunnelProcess"], "child still alive at timeout (not killed)");
+  // Stop the lingering child to clean up.
+  overlay.handleInput("x");
+});
+
+test("a .cmd shim delegating to an external exe still delivers the URL (not just builtins)", async (t) => {
+  // Regression guard for the shim branch: real cloudflared.cmd wrappers invoke
+  // the external cloudflared.exe, and shell:true+detached:true drops that exe's
+  // pipe output (0 bytes). The shim branch now uses detached:false so the URL
+  // banner reaches Node. The existing echo-based shims can't detect this because
+  // cmd builtins' output is never lost — only external-exe grandchildren are.
+  const { mkdtemp, mkdir, rm, writeFile, chmod } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = await mkdtemp(join(tmpdir(), "mcpx-shim-delegate-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const binDir = join(dir, "bin");
+  await mkdir(binDir);
+  const isWin = process.platform === "win32";
+  // A helper script the shim invokes via node (an external exe). It prints the
+  // URL banner to stderr — where real cloudflared emits its INF lines — then
+  // stays alive briefly so the wizard's poll can observe it.
+  const helper = join(binDir, "printer.js");
+  await writeFile(helper, [
+    "process.stderr.write('Your quick Tunnel at https://shim-delegate.trycloudflare.com\\n');",
+    "setTimeout(() => {}, 30000);",
+  ].join("\n"), "utf8");
+  const shim = join(binDir, isWin ? "cloudflared.cmd" : "cloudflared");
+  await writeFile(shim, isWin
+    ? `@echo off\r\nnode "${helper}"\r\n`
+    : `#!/bin/sh\nnode "${helper}"\n`, "utf8");
+  if (!isWin) await chmod(shim, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${binDir}${isWin ? ";" : ":"}${previousPath ?? ""}`;
+  const pidPath = join(dir, "cloudflared.pid");
+  const previousPidFile = process.env.MCPX_TUNNEL_PID_FILE;
+  process.env.MCPX_TUNNEL_PID_FILE = pidPath;
   t.after(async () => {
     process.env.PATH = previousPath;
     if (previousPidFile === undefined) delete process.env.MCPX_TUNNEL_PID_FILE;
@@ -341,16 +408,13 @@ test("a live cloudflared that never prints a URL times out with output tail in s
   const { overlay } = makeWizard();
   const s = overlay;
   ["\x1b[B", "\x1b[B", "\r", "\x1b[B", "\r", "\r", "\x1b[B", "\r", "\r"].forEach((k) => overlay.handleInput(k));
-  overlay.handleInput("\r"); // start
-  // The 30s poll must elapse; then status shows the timeout + captured output tail.
-  const timeoutDeadline = Date.now() + 35_000;
-  while (Date.now() < timeoutDeadline && !/未取得 URL/.test(s["status"] ?? "")) {
+  overlay.handleInput("\r"); // start the shim-delegating tunnel
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline && s["changes"]?.tunnelUrl !== "https://shim-delegate.trycloudflare.com") {
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  assert.match(s["status"] ?? "", /隧道已启动但未取得 URL/);
-  assert.match(s["status"] ?? "", /Connection registered/, "timeout status must surface the output tail");
-  assert.equal(s["changes"]?.tunnelUrl, undefined);
-  assert.ok(s["tunnelProcess"], "child still alive at timeout (not killed)");
-  // Stop the lingering child to clean up.
-  overlay.handleInput("x");
+  // On win32 this is the production-critical path (shim wrapping an exe); on
+  // posix the shim runs node directly. Either way the URL must arrive.
+  assert.equal(s["changes"]?.tunnelUrl, "https://shim-delegate.trycloudflare.com",
+    "external-exe output via a shim must reach Node (not lost to detached+shell)");
 });

@@ -265,6 +265,8 @@ export class McpxWizardOverlay implements Component, Focusable {
   private tunnelOutput = "";
   /** Exit code / signal captured when the cloudflared child died on its own (undefined while alive). */
   private tunnelExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+  /** Metrics server URL cloudflared prints once it is up — proof of life when the URL is late. */
+  private metricsUrl: string | undefined;
 
   private tunnelPidPath(): string {
     return process.env.MCPX_TUNNEL_PID_FILE ?? join(homedir(), ".mcpx", "cloudflared.pid");
@@ -575,7 +577,15 @@ export class McpxWizardOverlay implements Component, Focusable {
       this.params.requestRender();
       return;
     }
-    if (!isExecutableOnPath("cloudflared")) {
+    // Resolve the real executable path. Spawning the bare name with shell:true on
+    // Windows interposes cmd.exe between cloudflared and Node; with detached:true
+    // that shell interposition can drop the stdout/stderr pipe events carrying
+    // the quick-tunnel URL, so the wizard never sees it even though cloudflared
+    // is alive and printing it (metrics server up, edge registered). Spawn the
+    // resolved binary directly — only fall back to shell:true for .cmd/.bat shims
+    // (which genuinely need a shell to execute) so the URL output still reaches us.
+    const resolved = resolveExecutable("cloudflared");
+    if (!resolved) {
       this.status = "未找到 cloudflared — 安装: winget install --id Cloudflare.cloudflared（Windows）/ brew install cloudflared（macOS）/ 官网安装包（Linux）";
       this.params.requestRender();
       return;
@@ -583,12 +593,23 @@ export class McpxWizardOverlay implements Component, Focusable {
     this.status = "正在启动 cloudflared 隧道…";
     this.tunnelOutput = "";
     this.tunnelExit = undefined;
+    this.metricsUrl = undefined;
     this.params.requestRender();
     try {
-      const child = spawn("cloudflared", ["tunnel", "--url", `http://127.0.0.1:${this.changes.port ?? 9090}`], {
-        detached: true,
+      const isShim = process.platform === "win32" && /\.(cmd|bat)$/i.test(resolved);
+      const child = spawn(resolved, ["tunnel", "--url", `http://127.0.0.1:${this.changes.port ?? 9090}`], {
+        // .exe: spawn directly (shell:false) so the URL pipe reaches Node, and
+        // detached so the tunnel survives the pi terminal closing.
+        // .cmd/.bat shims need a shell to run, but shell:true + detached:true
+        // empirically drops the output of any external exe the shim invokes (0
+        // bytes vs. arrives with detached:false). On Windows the shim's child
+        // stays alive across terminal close even without detached (new process
+        // group via the shell), and PID-file adoption + taskkill /T still stop
+        // it — so prefer delivering the URL over cross-session survival here.
+        detached: !isShim,
         stdio: ["ignore", "pipe", "pipe"],
-        shell: process.platform === "win32",
+        shell: isShim,
+        windowsHide: true,
       });
       child.unref();
       this.tunnelProcess = child;
@@ -609,15 +630,22 @@ export class McpxWizardOverlay implements Component, Focusable {
         this.tunnelExit = { code, signal };
         if (this.tunnelProcess === child) {
           this.tunnelProcess = undefined;
+          this.metricsUrl = undefined; // dead child no longer serves metrics
           // Preserve any error text already captured from stdout/stderr.
           if (code !== 0 && code !== null) {
             this.appendTunnelLine(`cloudflared 退出（代码 ${code}）`);
           } else if (signal) {
             this.appendTunnelLine(`cloudflared 被信号终止（${signal}）`);
           }
-          // Only override the URL status: a tunnel that died no longer serves it.
-          if (!this.changes.tunnelUrl) this.status = this.tunnelFailStatus();
-          else this.changes.tunnelUrl = undefined; // dead URL must not reach the write step
+          // A tunnel that died no longer serves its URL. If we never had one,
+          // surface the failure; if we did, clear it AND flip the status so the
+          // write step can't proceed on a stale "运行中" line.
+          if (!this.changes.tunnelUrl) {
+            this.status = this.tunnelFailStatus();
+          } else {
+            this.changes.tunnelUrl = undefined; // dead URL must not reach the write step
+            this.status = this.tunnelFailStatus();
+          }
           this.params.requestRender();
         }
       });
@@ -633,14 +661,16 @@ export class McpxWizardOverlay implements Component, Focusable {
     this.params.requestRender();
   }
 
-  /** Poll cloudflared output up to 30s for the generated URL; keeps status consistent with stop. */
+  /** Poll cloudflared output for the generated URL; keeps status consistent with stop. */
   private async waitForTunnelUrl(): Promise<void> {
     if (this.changes.tunnelUrl) {
       this.status = `隧道运行中: ${this.changes.tunnelUrl}`;
       this.params.requestRender();
       return;
     }
-    const deadline = Date.now() + 30_000;
+    // Default 30s, but let tests (and slow networks) override via the env.
+    const waitMs = Number(process.env.MCPX_TUNNEL_URL_TIMEOUT_MS ?? 30_000);
+    const deadline = Date.now() + (Number.isFinite(waitMs) && waitMs > 0 ? waitMs : 30_000);
     while (Date.now() < deadline && !this.changes.tunnelUrl && this.tunnelProcess) {
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
@@ -657,7 +687,20 @@ export class McpxWizardOverlay implements Component, Focusable {
   }
 
   private onTunnelOutput(chunk: string): void {
+    // Ignore pipe chunks that arrive after stop/exit: a chunk already queued
+    // when `x` was pressed could otherwise re-populate changes.tunnelUrl and
+    // unblock the write step with a dead URL. Exit-time error text is appended
+    // directly via appendTunnelLine (bypassing this guard), so diagnostics survive.
+    if (!this.tunnelProcess) return;
     this.tunnelOutput = (this.tunnelOutput + chunk).slice(-16_384);
+    // cloudflared prints its metrics server once the connector is up
+    // (e.g. "Starting metrics server on 127.0.0.1:20242/metrics"). Capture it as
+    // proof of life so a late URL surfaces a meaningful "already connected" status
+    // instead of a bare "未取得 URL".
+    if (!this.metricsUrl) {
+      const metricsMatch = this.tunnelOutput.match(/Starting metrics server on (\S+\/?\S*)/);
+      if (metricsMatch) this.metricsUrl = metricsMatch[1];
+    }
     const match = this.tunnelOutput.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
     if (match && !this.changes.tunnelUrl) {
       this.changes.tunnelUrl = match[0];
@@ -691,12 +734,14 @@ export class McpxWizardOverlay implements Component, Focusable {
       : `cloudflared ${cause} — 按 g 重试（检查端口或 cloudflared 版本）`;
   }
 
-  /** Status string when the 30s poll deadline elapsed with the child still alive. */
+  /** Status string when the poll deadline elapsed with the child still alive. */
   private tunnelTimeoutStatus(): string {
     const tail = this.tunnelOutputTail();
+    const alive = this.metricsUrl ? `cloudflared 已就绪（metrics ${this.metricsUrl}）但尚未打印 URL` : "隧道已启动但未取得 URL";
+    const hint = this.metricsUrl ? "Enter/g 继续等待，x 停止后重试" : "按 Enter/g 继续等待，x 停止后重试";
     return tail
-      ? `隧道已启动但未取得 URL — ${tail}（Enter/g 继续等待，x 停止后重试）`
-      : "隧道已启动但未取得 URL — 按 Enter/g 继续等待，x 停止后重试";
+      ? `${alive} — ${tail}（${hint}）`
+      : `${alive} — ${hint}`;
   }
 
   /** Stop the cloudflared tunnel, clear its PID file and the parsed URL. */
@@ -725,6 +770,7 @@ export class McpxWizardOverlay implements Component, Focusable {
     }
     this.tunnelProcess = undefined;
     this.tunnelExit = undefined;
+    this.metricsUrl = undefined;
     // A stopped tunnel's URL is dead — never let it reach the write step.
     this.changes.tunnelUrl = undefined;
     this.tunnelOutput = "";
@@ -826,6 +872,34 @@ function isExecutableOnPath(command: string): boolean {
     shell: process.platform === "win32",
   });
   return probe.status === 0;
+}
+
+/**
+ * Resolve `command` to the concrete executable path to spawn directly.
+ *
+ * Spawning the bare name with shell:true on Windows interposes cmd.exe between
+ * cloudflared and Node; under detached:true that shell interposition can drop
+ * the stdout/stderr pipe events carrying the quick-tunnel URL, so the wizard
+ * never sees it even though cloudflared is alive and printing it (metrics server
+ * up, edge registered). `where`/`which` returns matches in PATH order; the first
+ * match is the one to spawn. The caller spawns .exe directly (shell:false) and
+ * .cmd/.bat shims with shell:true (they need a shell to execute) — in both cases
+ * the URL output reaches Node's pipe listeners.
+ */
+function resolveExecutable(command: string): string | undefined {
+  const probe = spawnSync(process.platform === "win32" ? "where" : "which", [command], {
+    encoding: "utf8",
+    timeout: 5_000,
+    shell: process.platform === "win32",
+  });
+  if (probe.status !== 0) return undefined;
+  const lines = String(probe.stdout || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return undefined;
+  // `where`/`which` returns matches in PATH order. Respect that order so a
+  // test-shim prepended to PATH (or a user's intended install) wins over a
+  // later system install. We only need the *first* match; the caller decides
+  // whether to use a shell based on that path's extension.
+  return lines[0];
 }
 
 export const _mcpxWizardInternals = {
