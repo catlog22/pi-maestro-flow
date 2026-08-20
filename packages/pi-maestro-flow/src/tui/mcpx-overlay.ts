@@ -457,6 +457,8 @@ export class McpxOverlay implements Component, Focusable {
   private selected = 0;
   /** Selection index inside the workspace-management sub-mode. */
   private wsSelected = 0;
+  /** SEC-RV-001: ops password reveal state — masked by default, toggled by P. */
+  private revealOpsPassword = false;
   private snapshot: McpxSnapshot = {
     refreshing: true, endpoint: "unknown", workspaces: [], cwdRegistered: false, windows: [], thread: [], mcpServers: [],
   };
@@ -867,6 +869,11 @@ export class McpxOverlay implements Component, Focusable {
       this.params.requestRender();
       return;
     }
+    if (data === "p" || data === "P") {
+      this.revealOpsPassword = !this.revealOpsPassword;
+      this.params.requestRender();
+      return;
+    }
     if (data === "r" || data === "R") {
       void this.refresh();
       return;
@@ -996,7 +1003,7 @@ export class McpxOverlay implements Component, Focusable {
     }
     if (this.status) rows.push(fitLine(this.status, inner));
     if (this.snapshot.error) rows.push(fitLine(fg("31", `! ${this.snapshot.error}`), inner));
-    rows.push(fitSegments(inner, ["Enter detail", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "T tunnel", "W workspaces", "e register cwd", "c wizard", "Esc close"]));
+    rows.push(fitSegments(inner, ["Enter detail", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "T tunnel", "W workspaces", "e register cwd", "c wizard", "P password", "Esc close"]));
     return frame(rows, width);
   }
 
@@ -1085,13 +1092,22 @@ export class McpxOverlay implements Component, Focusable {
   private renderOpsPasswordRows(width: number): string[] {
     // PERF-RV-006: read from the snapshot (populated once during refresh)
     // instead of calling readOpsPassword() on every render.
+    // SEC-RV-001: mask the password by default (last 4 chars only); the full
+    // value is revealed only when the user presses P (revealOpsPassword).
+    // Full reveal is also available directly from ~/.mcpx/config.yaml.
     const pw = this.snapshot.opsPassword;
     if (!pw) {
       // config.yaml 未设 password — mcpx 启动时会在内存生成一个并打印到启动日志。
       return [fitLine(fg("33", "运维口令：未在 config 持久化（mcpx 启动时自动生成，见启动日志 oauth_password）"), width)];
     }
+    const shown = this.revealOpsPassword
+      ? pw
+      : pw.length > 4
+        ? `●●●●${pw.slice(-4)}`
+        : "●●●●";
     return [
-      fitLine(`运维口令（OAuth 授权页填写）: ${fg("36", pw)}`, width),
+      fitLine(`运维口令（OAuth 授权页填写）: ${fg("36", shown)}`, width),
+      fitLine(fg("2", `  按 P 显明/隐藏口令（完整值见 ~/.mcpx/config.yaml）`), width),
     ];
   }
 

@@ -409,8 +409,56 @@ function resolveCloudflared(): string | undefined {
   return undefined;
 }
 
+/**
+ * SEC-RV-006: verify the process at `pid` matches `expectedName` before
+ * killing it, so a stale PID file cannot point at an unrelated process that
+ * was later reused. `expectedName` is a lowercase substring to match against
+ * the process command line / image name (e.g. "cloudflared", "mcpx").
+ *
+ * - POSIX: read `/proc/<pid>/cmdline` and check it contains `expectedName`
+ *   (case-insensitive). ENOENT or any read error → false (process gone or not
+ *   ours).
+ * - Windows: `tasklist /FI "PID eq <pid>"` and compare the image name column;
+ *   match if it ends with `<expectedName>.exe`. If tasklist is unavailable or
+ *   returns nothing parseable, fall back to true so a missing wmic/tasklist
+ *   does not block the kill, but still return false when a name is present and
+ *   does not match.
+ */
+function processMatches(pid: number, expectedName: string): boolean {
+  const needle = expectedName.toLowerCase();
+  try {
+    if (process.platform !== "win32") {
+      const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+      return cmdline.toLowerCase().includes(needle);
+    }
+    // Windows: tasklist CSV, image name is the first column.
+    const result = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/NH", "/FO", "CSV"], {
+      encoding: "utf8",
+      timeout: 3_000,
+    });
+    const stdout = String(result.stdout || "");
+    if (result.status !== 0 || !stdout.trim()) return true; // tasklist missing → don't block
+    const expected = `${needle}.exe`;
+    for (const line of stdout.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const first = (line.split(",")[0] ?? "").trim().replace(/^["']|["']$/g, "").toLowerCase();
+      if (!first) continue;
+      return first.endsWith(expected);
+    }
+    return true; // no parseable image name → don't block the kill
+  } catch {
+    return false; // POSIX /proc unreadable (ENOENT) — process gone or not ours
+  }
+}
+
 /** Kill a cloudflared tunnel process by PID (process tree on Windows). */
 function killTunnel(pid: number): void {
+  // SEC-RV-006: verify identity before killing so a reused PID cannot target an
+  // unrelated process. On mismatch, just clean the stale PID file and return.
+  if (pid && !processMatches(pid, "cloudflared")) {
+    try { rmSync(MCPX_TUNNEL_PID_FILE(), { force: true }); } catch { /* best-effort */ }
+    return;
+  }
   try {
     if (process.platform === "win32") {
       spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
@@ -493,12 +541,19 @@ export function updateConfigServerURL(url: string): void {
 /** Stop the mcpx process tracked by ~/.mcpx/mcpx-server.pid (best-effort). */
 export function stopMcpx(): void {
   let pid: number | undefined;
+  const pidFile = join(homedir(), ".mcpx", "mcpx-server.pid");
   try {
-    const raw = readFileSync(join(homedir(), ".mcpx", "mcpx-server.pid"), "utf8").trim();
+    const raw = readFileSync(pidFile, "utf8").trim();
     const parsed = Number(raw);
     if (Number.isInteger(parsed) && parsed > 0) pid = parsed;
   } catch { /* no pid file */ }
   if (!pid) return;
+  // SEC-RV-006: verify identity before killing so a reused PID cannot target an
+  // unrelated process. On mismatch, just clean the stale PID file and return.
+  if (pid && !processMatches(pid, "mcpx")) {
+    try { rmSync(pidFile, { force: true }); } catch { /* best-effort */ }
+    return;
+  }
   try {
     if (process.platform === "win32") {
       spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
@@ -506,6 +561,6 @@ export function stopMcpx(): void {
       process.kill(pid, "SIGTERM");
     }
   } catch { /* already dead */ }
-  try { rmSync(join(homedir(), ".mcpx", "mcpx-server.pid"), { force: true }); } catch { /* best-effort */ }
+  try { rmSync(pidFile, { force: true }); } catch { /* best-effort */ }
 }
 

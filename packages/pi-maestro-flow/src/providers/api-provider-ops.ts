@@ -1,14 +1,16 @@
 import { randomUUID } from "node:crypto";
 import {
+  chmod,
   copyFile,
   mkdir,
   open,
+  readdir,
   readFile,
   rename,
   unlink,
 } from "node:fs/promises";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fsyncDirectory } from "../settings/durable-write.ts";
 import {
   getAgentDir,
@@ -88,17 +90,6 @@ const OPS_CATALOGS = {
     "menu.reset": "Reset a Provider",
     "menu.export": "Export API configuration to a file",
     "menu.import": "Import API configuration from a file",
-    "discovery.prompt": "Discover available models from the server's /models endpoint?",
-    "discovery.discovering": "Discovering models from {url} …",
-    "discovery.failed": "Could not discover models: {message}",
-    "discovery.empty": "The server returned no models.",
-    "discovery.selectTitle": "Select models to inject (pick one at a time; repeat)",
-    "discovery.done": "✅ Done — inject {count} selected model(s)",
-    "discovery.selected": "（selected）",
-    "discovery.alreadyConfigured": "（configured）",
-    "discovery.injected": "Injected {count} model(s): {models}",
-    "discovery.injectedNone": "No new models selected.",
-    "discovery.keepManual": "Continuing with manual Model ID entry.",
     "export.empty": "No API Manager managed Provider is configured; nothing to export.",
     "export.done": "Exported {providers} Providers ({models} models)",
     "export.saved": "Export file: {path}",
@@ -141,17 +132,6 @@ const OPS_CATALOGS = {
     "menu.reset": "重置 Provider",
     "menu.export": "导出 API 配置到文件",
     "menu.import": "从文件导入 API 配置",
-    "discovery.prompt": "从服务端 /models 接口识别可用模型？",
-    "discovery.discovering": "正在从 {url} 识别模型 …",
-    "discovery.failed": "未能识别模型：{message}",
-    "discovery.empty": "服务端未返回任何模型。",
-    "discovery.selectTitle": "选择要注入的模型（每次选一个，可重复）",
-    "discovery.done": "✅ 完成 — 注入已选的 {count} 个模型",
-    "discovery.selected": "（已选）",
-    "discovery.alreadyConfigured": "（已配置）",
-    "discovery.injected": "已注入 {count} 个模型：{models}",
-    "discovery.injectedNone": "未选择新模型。",
-    "discovery.keepManual": "继续手动填写 Model ID。",
     "export.empty": "尚未配置 API Manager 管理的 Provider，无可导出内容。",
     "export.done": "已导出 {providers} 个 Provider（{models} 个模型）",
     "export.saved": "导出文件：{path}",
@@ -737,7 +717,17 @@ export async function writeModelsRoot(
 ): Promise<SaveApiProviderResult> {
   await mkdir(dirname(modelsPath), { recursive: true, mode: 0o700 });
   const backupPath = exists ? `${modelsPath}.bak-${Date.now()}-${randomUUID().slice(0, 8)}` : undefined;
-  if (backupPath) await copyFile(modelsPath, backupPath);
+  if (backupPath) {
+    await copyFile(modelsPath, backupPath);
+    // SEC-RV-005(a): backups contain API keys in plaintext — restrict mode.
+    try { await chmod(backupPath, 0o600); } catch { /* best-effort */ }
+  }
+  // SEC-RV-005(b): cap retained backups to the 3 most recent .bak-* files so
+  // plaintext-key backups do not accumulate indefinitely. Best-effort: a
+  // prune error never fails the write.
+  if (backupPath) {
+    try { await pruneOldBackups(modelsPath); } catch { /* best-effort */ }
+  }
   const temporaryPath = `${modelsPath}.${process.pid}.${randomUUID()}.tmp`;
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
@@ -757,6 +747,39 @@ export async function writeModelsRoot(
     }
   }
   return { path: modelsPath, backupPath };
+}
+
+/**
+ * SEC-RV-005(b): prune old `.bak-*` backups of `modelsPath` so at most the 3
+ * most recent are retained. Backup names embed a timestamp:
+ * `${basename}.bak-${Date.now()}-${rand}`, so sorting by the embedded timestamp
+ * descending keeps the newest. Best-effort — caller wraps in try/catch.
+ */
+async function pruneOldBackups(modelsPath: string): Promise<void> {
+  const dir = dirname(modelsPath);
+  const base = basename(modelsPath);
+  const prefix = `${base}.bak-`;
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return;
+  }
+  const backups = entries
+    .filter((name) => name.startsWith(prefix))
+    .map((name) => {
+      // name = `${base}.bak-${timestamp}-${rand}` — timestamp is the first
+      // numeric segment after the prefix. Parse it for descending sort.
+      const rest = name.slice(prefix.length);
+      const dash = rest.indexOf("-");
+      const ts = dash >= 0 ? Number(rest.slice(0, dash)) : Number(rest);
+      return { name, ts: Number.isFinite(ts) ? ts : 0 };
+    })
+    .sort((a, b) => b.ts - a.ts);
+  const keep = 3;
+  for (const item of backups.slice(keep)) {
+    try { await unlink(join(dir, item.name)); } catch { /* best-effort */ }
+  }
 }
 
 export async function readModelsRoot(modelsPath: string): Promise<Record<string, unknown>> {
@@ -1019,6 +1042,14 @@ export interface ParsedManagerArgs {
   retry?: RetryManagerArgs;
   cache?: CacheManagerArgs;
   cacheAgent?: CacheAgentManagerArgs;
+  stats?: StatsManagerArgs;
+}
+
+export interface StatsManagerArgs {
+  /** `off` is a legacy no-op; the overlay closes via q/Esc. */
+  off?: boolean;
+  /** `footer on|off|show` sub-command. */
+  footer?: "on" | "off" | "show";
 }
 
 export function parseManagerArgs(args: string): ParsedManagerArgs {
@@ -1073,6 +1104,9 @@ export function parseManagerArgs(args: string): ParsedManagerArgs {
     if (values.length === 2) return { action: normalized[0], filePath: values[1] };
     throw usageError();
   }
+  if (normalized[0] === "stats" || normalized[0] === "usage" || normalized[0] === "statistics") {
+    return parseStatsArgs(values, normalized);
+  }
   if (values.length === 1) {
     const action = actionFromArg(normalized[0]);
     if (action) return { action };
@@ -1098,7 +1132,7 @@ export function resolveTargetToken(value: string): ChannelTarget | undefined {
 
 export function usageError(): Error {
   return new Error(
-    `用法：/api-manager list | retry [show|on [1-${API_RETRY_MAX_RETRIES}]|off] | cache [show|auto|off|on] | cache agent [show|short|long|none] | price [openai|qwen|anthropic|<Provider ID>] | show|set|delete|enable|disable|logout|reset [openai|qwen|anthropic|<Provider ID>|new] | export [path] | import [path]`,
+    `用法：/api-manager list | retry [show|on [1-${API_RETRY_MAX_RETRIES}]|off] | cache [show|auto|off|on] | cache agent [show|short|long|none] | price [openai|qwen|anthropic|<Provider ID>] | stats | stats footer [on|off|show] | show|set|delete|enable|disable|logout|reset [openai|qwen|anthropic|<Provider ID>|new] | export [path] | import [path]`,
   );
 }
 
@@ -1363,6 +1397,7 @@ export async function chooseAction(
     { action: "cache", label: opsText("menu.cache", { value: await loadPromptCachePolicy(settingsPath) }) },
     { action: "cache-agent", label: opsText("menu.cacheAgent", { value: await loadAgentCacheRetention(settingsPath) }) },
     { action: "price", label: opsText("menu.price") },
+    { action: "stats", label: "📊 用量统计 (热图 / 折线图 · token / 成本 / cache)" },
     { action: "export", label: opsText("menu.export") },
     { action: "import", label: opsText("menu.import") },
     { action: "logout", label: opsText("menu.logout") },
@@ -1370,6 +1405,23 @@ export async function chooseAction(
   ];
   const choice = await ctx.ui.select(opsText("menu.title"), choices.map((entry) => entry.label));
   return choices.find((entry) => entry.label === choice)?.action;
+}
+
+function parseStatsArgs(values: string[], normalized: string[]): ParsedManagerArgs {
+  // forms:
+  //   stats                       → open panel overlay
+  //   stats off                   → (legacy) no-op hint; overlay closes via q/Esc
+  //   stats footer on|off|show    → toggle/query footer sparkline
+  if (values.length === 1) return { action: "stats" };
+  if (normalized[1] === "off") return { action: "stats", stats: { off: true } };
+  if (normalized[1] === "footer") {
+    if (values.length === 2) return { action: "stats", stats: { footer: "show" } };
+    if (values.length === 3 && (normalized[2] === "on" || normalized[2] === "off" || normalized[2] === "show")) {
+      return { action: "stats", stats: { footer: normalized[2] as "on" | "off" | "show" } };
+    }
+    throw usageError();
+  }
+  throw usageError();
 }
 
 export function actionFromArg(value: string): ApiProviderAction | undefined {
@@ -1391,6 +1443,7 @@ export function actionFromArg(value: string): ApiProviderAction | undefined {
   if (value === "nextsuggest" || value === "next-suggest" || value === "suggest") return "nextsuggest";
   if (value === "enhance" || value === "prompt-enhance") return "enhance";
   if (value === "price" || value === "pricing" || value === "cost") return "price";
+  if (value === "stats" || value === "usage" || value === "statistics") return "stats";
   if (value === "reset") return "reset";
   return undefined;
 }
