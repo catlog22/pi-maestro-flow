@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ensureMcpxWorkspace, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, probeTunnelHealth } from "../src/mcpx-bridge.ts";
+import { ensureMcpxWorkspace, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, probeTunnelHealth, detectMcpxForPmf } from "../src/mcpx-bridge.ts";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -324,4 +324,12 @@ test("readOpsPassword returns undefined when password is empty", async (t) => {
     await writeFile(join(home, ".mcpx", "config.yaml"), 'auth:\n  mode: oauth\n  oauth:\n    password: ""\n    server_url: "https://t.example.com"\n');
     assert.equal(readOpsPassword(), undefined);
   });
+});
+
+test("detectMcpxForPmf returns an installed boolean shape", async (t) => {
+  t.after(_resetMcpxBridgeState);
+  const r = detectMcpxForPmf();
+  assert.equal(typeof r.installed, "boolean");
+  // version 只在 installed=true 时有意义
+  if (r.installed) assert.equal(typeof r.version, "string");
 });

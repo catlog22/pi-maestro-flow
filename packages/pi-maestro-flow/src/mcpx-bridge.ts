@@ -307,6 +307,33 @@ export function readOpsPassword(): string | undefined {
   }
 }
 
+/**
+ * Detect whether the `mcpx-for-pmf` fork is installed as a global npm package.
+ * The fork's postinstall drops the platform binary at ~/.mcpx/bin; the npm
+ * package name is the reliable signal that distinguishes the fork from the
+ * upstream `mcpx` package. Returns { installed, version }.
+ */
+export function detectMcpxForPmf(): { installed: boolean; version?: string } {
+  try {
+    // Resolve the global node_modules root: `npm root -g` prints the path.
+    const probe = spawnSync("npm", ["root", "-g"], {
+      encoding: "utf8",
+      timeout: 8_000,
+      shell: process.platform === "win32",
+    });
+    if (probe.status !== 0) return { installed: false };
+    const root = String(probe.stdout || "").split(/\r?\n/).find((l) => l.trim());
+    if (!root) return { installed: false };
+    const pkgPath = join(root.trim(), "mcpx-for-pmf", "package.json");
+    const raw = readFileSync(pkgPath, "utf8");
+    const pkg = JSON.parse(raw) as { name?: string; version?: string };
+    if (pkg.name === "mcpx-for-pmf") return { installed: true, version: pkg.version };
+    return { installed: false };
+  } catch {
+    return { installed: false };
+  }
+}
+
 // --- Quick tunnel restart + config sync (one-click URL refresh) ---
 
 /** Resolve the cloudflared executable path (mirrors the wizard's logic). */

@@ -11,7 +11,7 @@ import { readdirSync, readFileSync, existsSync, statSync, writeFileSync, rmSync 
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { locateMcpx, readTunnelState, probeTunnelHealth, restartQuickTunnel, updateConfigServerURL, stopMcpx, readOpsPassword, type TunnelState } from "../mcpx-bridge.ts";
+import { locateMcpx, readTunnelState, probeTunnelHealth, restartQuickTunnel, updateConfigServerURL, stopMcpx, readOpsPassword, detectMcpxForPmf, type TunnelState } from "../mcpx-bridge.ts";
 
 const MCPX_DEFAULT_ENDPOINT = "http://127.0.0.1:9090/mcp";
 const PEER_STALE_MS = 20_000;
@@ -75,6 +75,9 @@ export interface McpxSnapshot {
   mcpServers: McpxMcpServerInfo[];
   connections?: McpxConnectionInfo[];
   tunnel?: TunnelState;
+  /** mcpx-for-pmf fork installed as a global npm package? */
+  forkInstalled?: boolean;
+  forkVersion?: string;
   error?: string;
 }
 
@@ -663,6 +666,7 @@ export class McpxOverlay implements Component, Focusable {
       const tunnel = readTunnelState();
       const { endpoint, reachable, endpointVersion } = await probeEndpoint(configPath);
       const online = reachable;
+      const fork = detectMcpxForPmf();
       this.snapshot = {
         refreshing: false,
         binary: binary ?? undefined,
@@ -677,6 +681,8 @@ export class McpxOverlay implements Component, Focusable {
         mcpServers: collectMcpServers(cwd),
         connections: online ? await collectConnections(endpoint) : undefined,
         tunnel,
+        forkInstalled: fork.installed,
+        forkVersion: fork.version,
       };
       // Backfill tunnel health without blocking the board: a public probe can
       // take up to the fetch timeout when the tunnel is down. Fire-and-forget;
@@ -823,6 +829,7 @@ export class McpxOverlay implements Component, Focusable {
   private renderList(width: number): string[] {
     const inner = width - 2;
     const rows = [fitLine("MCPX 连接监控 · mcpx for pmf", inner), rule(inner)];
+    rows.push(...this.renderForkRows(inner));
     rows.push(this.renderConnectionRow(inner));
     rows.push(rule(inner));
     rows.push(fitLine(`MCP 服务器（${this.snapshot.mcpServers.length}）`, inner));
@@ -885,6 +892,20 @@ export class McpxOverlay implements Component, Focusable {
     // expires_at has passed is stale until mcpx's lease sweeper reclaims it.
     const stale = match.expiresAt !== undefined && match.expiresAt <= Date.now();
     return { cwdRegistered: true, cwdLeaseStale: stale };
+  }
+
+  /** mcpx-for-pmf fork 安装提醒 — 标题行下方。fork 未以 npm 全局包安装时提示
+   *  用户安装(若 mcpx 二进制也缺失,提示是上游/未装)。 */
+  private renderForkRows(width: number): string[] {
+    if (this.snapshot.forkInstalled) {
+      return [fitLine(fg("32", `mcpx-for-pmf 已安装${this.snapshot.forkVersion ? ` · v${this.snapshot.forkVersion}` : ""}`), width)];
+    }
+    if (!this.snapshot.binary) {
+      // mcpx 二进制本身都没找到 — 看板的 s/R/T 都会报错;这里给出安装指引。
+      return [fitLine(fg("31", "未安装 mcpx — 运行 `npm i -g mcpx-for-pmf` 后按 s 启动"), width)];
+    }
+    // 二进制在(可能从源码编译或上游 mcpx),但 mcpx-for-pmf npm 包未装。
+    return [fitLine(fg("33", "未检测到 mcpx-for-pmf 包 — 建议运行 `npm i -g mcpx-for-pmf` 获取 pmf 专属工具（pi_window 等）"), width)];
   }
 
   private renderConnectionRow(width: number): string {
