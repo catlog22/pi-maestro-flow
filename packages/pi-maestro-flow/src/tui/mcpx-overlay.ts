@@ -3,7 +3,7 @@
  * binary/endpoint status, registered workspaces, discoverable Pi windows and
  * cross-window message history (workspace-peer file protocol).
  *
- * Keys: ↑↓/jk select history · Enter details · r refresh · e register/unregister cwd · s start · x stop · R restart · Esc close
+ * Keys: ↑↓/jk select history · Enter details · r refresh · e register/unregister cwd · s start · x stop · R restart · T tunnel · Esc close
  */
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -11,7 +11,7 @@ import { readdirSync, readFileSync, existsSync, statSync, writeFileSync, rmSync 
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { locateMcpx, readTunnelState, probeTunnelHealth, type TunnelState } from "../mcpx-bridge.ts";
+import { locateMcpx, readTunnelState, probeTunnelHealth, restartQuickTunnel, updateConfigServerURL, stopMcpx, type TunnelState } from "../mcpx-bridge.ts";
 
 const MCPX_DEFAULT_ENDPOINT = "http://127.0.0.1:9090/mcp";
 const PEER_STALE_MS = 20_000;
@@ -556,6 +556,78 @@ export class McpxOverlay implements Component, Focusable {
     }
     await this.refresh();
   }
+
+  /** Kill the process listening on 127.0.0.1:9090 (fallback when the PID file
+   *  is stale — e.g. mcpx was started by a prior board session or externally). */
+  private killMcpxByPort(): void {
+    try {
+      if (process.platform === "win32") {
+        const result = spawnSync("netstat", ["-ano", "-p", "tcp"], {
+          encoding: "utf8", timeout: 5_000, shell: true,
+        });
+        for (const line of String(result.stdout || "").split(/\r?\n/)) {
+          if (line.includes(":9090") && line.includes("LISTENING")) {
+            const m = line.match(/\s(\d+)\s*$/);
+            if (m) spawnSync("taskkill", ["/pid", String(m[1]), "/T", "/F"], { stdio: "ignore" });
+          }
+        }
+      } else {
+        // POSIX: lsof preferred, ss fallback; output is one pid per line.
+        const result = spawnSync("sh", ["-c", "lsof -ti tcp:9090 2>/dev/null || ss -ltnp 'sport = :9090' 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2"], {
+          encoding: "utf8", timeout: 5_000,
+        });
+        for (const line of String(result.stdout || "").split(/\r?\n/)) {
+          const n = Number(line.trim());
+          if (Number.isInteger(n) && n > 0) {
+            try { process.kill(n, "SIGTERM"); } catch { /* dead */ }
+          }
+        }
+      }
+    } catch { /* best-effort */ }
+  }
+
+  /** T restarts the Cloudflare quick tunnel, syncs its new URL into config.yaml's
+   *  server_url, and restarts mcpx so the OAuth issuer matches the new URL.
+   *  One-click refresh for the quick-tunnel-URL-changed scenario. */
+  private async refreshTunnelAndMcpx(): Promise<void> {
+    if (this.starting) return;
+    this.starting = true;
+    this.status = "正在重启隧道并同步 mcpx…";
+    this.safeRequestRender();
+    try {
+      // 1. Restart the quick tunnel — stops the old one, parses the new URL.
+      const newUrl = await restartQuickTunnel(9090);
+      // 2. Write the new URL into config.yaml so mcpx's OAuth issuer matches.
+      updateConfigServerURL(newUrl);
+      // 3. Restart mcpx to load the new server_url. Kill by PID file first, then
+      //    by port as a fallback (the PID file may point at a stale/external pid).
+      stopMcpx();
+      this.killMcpxByPort();
+      await new Promise((resolve) => setTimeout(resolve, 800)); // port release
+      const binary = locateMcpx();
+      if (!binary) throw new Error("未找到 mcpx 二进制");
+      const child = spawn(binary, [], { detached: true, stdio: "ignore", shell: process.platform === "win32" });
+      child.unref();
+      this.mcpxProcess = child;
+      try { writeFileSync(this.pidPath(), String(child.pid ?? ""), "utf8"); } catch { /* best-effort */ }
+      // 4. Wait for the endpoint to come back (new issuer).
+      const deadline = Date.now() + (this.params.endpointWaitMs ?? 15_000);
+      let online = false;
+      while (Date.now() < deadline) {
+        const { endpointVersion } = await probeEndpoint(this.configPath());
+        if (endpointVersion) { online = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      this.status = online
+        ? `隧道已更新: ${newUrl} · mcpx 已重启`
+        : `隧道已更新: ${newUrl} · mcpx 端点未就绪（检查启动日志）`;
+    } catch (error) {
+      this.status = `隧道刷新失败: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      this.starting = false;
+    }
+    await this.refresh();
+  }
   async refresh(): Promise<void> {
     if (this.closed) return;
     this.refreshGeneration++;
@@ -690,6 +762,10 @@ export class McpxOverlay implements Component, Focusable {
       void this.restartMcpx();
       return;
     }
+    if (data === "T") {
+      void this.refreshTunnelAndMcpx();
+      return;
+    }
   }
 
   /** e toggles registration of the current window: expose it to MCPX, or close it again. */
@@ -783,7 +859,7 @@ export class McpxOverlay implements Component, Focusable {
     }
     if (this.status) rows.push(fitLine(this.status, inner));
     if (this.snapshot.error) rows.push(fitLine(fg("31", `! ${this.snapshot.error}`), inner));
-    rows.push(fitSegments(inner, ["Enter detail", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "e register cwd", "c wizard", "Esc close"]));
+    rows.push(fitSegments(inner, ["Enter detail", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "T tunnel", "e register cwd", "c wizard", "Esc close"]));
     return frame(rows, width);
   }
 
@@ -843,9 +919,12 @@ export class McpxOverlay implements Component, Focusable {
       // load disable_localhost_protection, a real client gets 403 *after* auth.
       rows.push(fitLine(fg("2", "  i 若客户端鉴权后仍 403：检查 server.disable_localhost_protection 并重启 mcpx"), width));
     } else if (tunnel.health === "dead") {
+      // quick-tunnel URL is ephemeral: a dead tunnel usually means the edge
+      // connection dropped and the URL can no longer be reached at all. T
+      // restarts the tunnel, writes the new URL into config, and restarts mcpx.
       const hint = this.snapshot.endpoint === "online"
-        ? "按 R 重启 mcpx 加载新配置"
-        : "按 s 启动 mcpx";
+        ? "按 R 重启 mcpx 加载新配置，或按 T 重启隧道并自动同步新 URL"
+        : "按 s 启动 mcpx，或按 T 重启隧道并自动同步新 URL";
       rows.push(fitLine(fg("31", `  ! 隧道异常：mcpx 可能未重启加载新配置（403 Host/404 OAuth 路由）或隧道已断 — ${hint}`), width));
     }
     return rows;

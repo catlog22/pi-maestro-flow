@@ -12,8 +12,8 @@
  * Opt out with PI_MCPX_BRIDGE=0. Override the binary with MCPX_BIN.
  */
 
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
@@ -288,3 +288,108 @@ export function isMcpxConfigured(): boolean {
   const token = tokenMatch?.[1]?.trim();
   return Boolean(token);
 }
+
+// --- Quick tunnel restart + config sync (one-click URL refresh) ---
+
+/** Resolve the cloudflared executable path (mirrors the wizard's logic). */
+function resolveCloudflared(): string | undefined {
+  const probe = spawnSync(process.platform === "win32" ? "where" : "which", ["cloudflared"], {
+    encoding: "utf8",
+    timeout: 10_000,
+    shell: process.platform === "win32",
+  });
+  if (probe.status === 0) {
+    const line = String(probe.stdout || "").split(/\r?\n/).find(Boolean);
+    if (line) return line.trim();
+  }
+  return undefined;
+}
+
+/** Kill a cloudflared tunnel process by PID (process tree on Windows). */
+function killTunnel(pid: number): void {
+  try {
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+    } else {
+      process.kill(pid, "SIGTERM");
+    }
+  } catch {
+    // already dead
+  }
+}
+
+/**
+ * Restart the Cloudflare quick tunnel bound to 127.0.0.1:<port> and parse the
+ * freshly generated trycloudflare.com URL. Stops any tunnel tracked by the PID
+ * file first. Returns the new URL, or throws if cloudflared is missing / the
+ * URL does not arrive within the timeout.
+ */
+export async function restartQuickTunnel(localPort: number, timeoutMs = 30_000): Promise<string> {
+  const binary = resolveCloudflared();
+  if (!binary) throw new Error("未找到 cloudflared — 安装后重试");
+  // Stop any existing tunnel tracked by the PID file.
+  let oldPid: number | undefined;
+  try {
+    const raw = readFileSync(MCPX_TUNNEL_PID_FILE(), "utf8").trim();
+    const parsed = Number(raw);
+    if (Number.isInteger(parsed) && parsed > 0) oldPid = parsed;
+  } catch { /* no pid file */ }
+  if (oldPid) {
+    killTunnel(oldPid);
+    try { rmSync(MCPX_TUNNEL_PID_FILE(), { force: true }); } catch { /* best-effort */ }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  const isShim = process.platform === "win32" && /\.(cmd|bat)$/i.test(binary);
+  const child = spawn(binary, ["tunnel", "--url", `http://127.0.0.1:${localPort}`], {
+    detached: !isShim,
+    stdio: ["ignore", "pipe", "pipe"],
+    shell: isShim,
+    windowsHide: true,
+  });
+  child.unref();
+  let output = "";
+  const capture = (chunk: Buffer) => { output += chunk.toString(); };
+  child.stdout?.on("data", capture);
+  child.stderr?.on("data", capture);
+  try { writeFileSync(MCPX_TUNNEL_PID_FILE(), String(child.pid ?? ""), "utf8"); } catch { /* best-effort */ }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+    if (match) return match[0];
+    if (child.exitCode !== null && child.exitCode !== 0) {
+      throw new Error(`cloudflared 退出（代码 ${child.exitCode}）: ${output.slice(-400)}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  throw new Error(`cloudflared 启动超时未取得 URL: ${output.slice(-400)}`);
+}
+
+/** Update auth.oauth.server_url in ~/.mcpx/config.yaml (in place, section-preserving). */
+export function updateConfigServerURL(url: string): void {
+  const path = MCPX_CONFIG_PATH();
+  const raw = readFileSync(path, "utf8");
+  const pattern = /^(\s{2,}server_url:\s*).*/m;
+  if (!pattern.test(raw)) throw new Error("config.yaml 无 server_url 字段");
+  const next = raw.replace(pattern, `$1${url}`);
+  writeFileSync(path, next, "utf8");
+}
+
+/** Stop the mcpx process tracked by ~/.mcpx/mcpx-server.pid (best-effort). */
+export function stopMcpx(): void {
+  let pid: number | undefined;
+  try {
+    const raw = readFileSync(join(homedir(), ".mcpx", "mcpx-server.pid"), "utf8").trim();
+    const parsed = Number(raw);
+    if (Number.isInteger(parsed) && parsed > 0) pid = parsed;
+  } catch { /* no pid file */ }
+  if (!pid) return;
+  try {
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+    } else {
+      process.kill(pid, "SIGTERM");
+    }
+  } catch { /* already dead */ }
+  try { rmSync(join(homedir(), ".mcpx", "mcpx-server.pid"), { force: true }); } catch { /* best-effort */ }
+}
+
