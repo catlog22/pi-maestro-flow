@@ -78,6 +78,8 @@ export interface McpxSnapshot {
   /** mcpx-for-pmf fork installed as a global npm package? */
   forkInstalled?: boolean;
   forkVersion?: string;
+  /** PERF-RV-006: ops password read once during refresh, cached for renders. */
+  opsPassword?: string;
   error?: string;
 }
 
@@ -145,7 +147,18 @@ function collectWindows(cwd: string, now: number): McpxWindowInfo[] {
   const windows: McpxWindowInfo[] = [];
   for (const entry of entries) {
     if (!entry.endsWith(".json")) continue;
-    const snapshot = readJson<OwnerSnapshotFile>(join(ownersDir, entry));
+    const fullPath = join(ownersDir, entry);
+    // PERF-RV-013: stat the file and skip stale ones BEFORE reading/parsing.
+    // Owner snapshots are written periodically; a file whose mtime is older
+    // than PEER_STALE_MS (20s) belongs to a window that already went offline
+    // and cannot be fresh, so skip the readFileSync+JSON.parse entirely.
+    try {
+      const stat = statSync(fullPath);
+      if (now - stat.mtimeMs > PEER_STALE_MS) continue;
+    } catch {
+      continue; // file vanished between readdir and stat — skip
+    }
+    const snapshot = readJson<OwnerSnapshotFile>(fullPath);
     if (!snapshot || snapshot.kind !== "owner" || !snapshot.ownerId) continue;
     if (now - (snapshot.publishedAt ?? 0) > PEER_STALE_MS) continue;
     windows.push({
@@ -164,56 +177,82 @@ function collectWindows(cwd: string, now: number): McpxWindowInfo[] {
 function collectThread(cwd: string): McpxThreadEntry[] {
   const root = peerRuntimeRoot(cwd);
   const entries: McpxThreadEntry[] = [];
-  const commandsDir = join(root, "commands");
-  try {
-    for (const ownerDir of readdirSync(commandsDir)) {
-      const dir = join(commandsDir, ownerDir);
-      if (!statSync(dir).isDirectory()) continue;
-      for (const file of readdirSync(dir)) {
-        if (!file.endsWith(".json") || file.includes(".processing")) continue;
-        const command = readJson<{
-          kind?: string; commandId?: string; createdAt?: number;
-          fromOwnerId?: string; toOwnerId?: string; action?: string; message?: string;
-        }>(join(dir, file));
-        if (!command || command.kind !== "command" || !command.commandId) continue;
-        entries.push({
-          commandId: command.commandId,
-          kind: "command",
-          createdAt: command.createdAt ?? 0,
-          fromOwnerId: command.fromOwnerId ?? "",
-          toOwnerId: command.toOwnerId ?? "",
-          action: command.action,
-          message: command.message,
-        });
-      }
+  // PERF-RV-005: Instead of reading and parsing every JSON file (which grows
+  // linearly with history), we stat each file's mtime, sort by mtime desc, and
+  // only read+parse the most recent ~60 files. We then slice to 30 as before.
+  // This bounds the cost as the commands/responses directories grow large.
+  const MAX_READ = 60;
+
+  /** Collect file paths and mtimes from a two-level directory tree. */
+  function collectFileMeta(dir: string): Array<{ path: string; mtime: number }> {
+    const files: Array<{ path: string; mtime: number }> = [];
+    let owners: string[];
+    try {
+      owners = readdirSync(dir);
+    } catch {
+      return files;
     }
-  } catch {
-    // history is best-effort
-  }
-  const responsesDir = join(root, "responses");
-  try {
-    for (const ownerDir of readdirSync(responsesDir)) {
-      const dir = join(responsesDir, ownerDir);
-      if (!statSync(dir).isDirectory()) continue;
-      for (const file of readdirSync(dir)) {
+    for (const owner of owners) {
+      const ownerDir = join(dir, owner);
+      try {
+        if (!statSync(ownerDir).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      for (const file of readdirSync(ownerDir)) {
         if (!file.endsWith(".json")) continue;
-        const response = readJson<{
-          kind?: string; commandId?: string; respondedAt?: number;
-          fromOwnerId?: string; toOwnerId?: string; status?: string;
-        }>(join(dir, file));
-        if (!response || response.kind !== "response" || !response.commandId) continue;
-        entries.push({
-          commandId: response.commandId,
-          kind: "response",
-          createdAt: response.respondedAt ?? 0,
-          fromOwnerId: response.fromOwnerId ?? "",
-          toOwnerId: response.toOwnerId ?? "",
-          status: response.status,
-        });
+        if (file.includes(".processing")) continue;
+        const fullPath = join(ownerDir, file);
+        try {
+          files.push({ path: fullPath, mtime: statSync(fullPath).mtimeMs });
+        } catch {
+          // file vanished — skip
+        }
       }
     }
-  } catch {
-    // history is best-effort
+    return files;
+  }
+
+  const commandFiles = collectFileMeta(join(root, "commands"));
+  const responseFiles = collectFileMeta(join(root, "responses"));
+  const allFiles = [...commandFiles, ...responseFiles];
+  allFiles.sort((a, b) => b.mtime - a.mtime);
+  const toRead = allFiles.slice(0, MAX_READ);
+
+  for (const { path } of toRead) {
+    // Distinguish commands from responses by the directory path: commands live
+    // under root/commands/, responses under root/responses/.
+    const normalizedPath = path.replace(/\\/g, "/");
+    if (normalizedPath.includes("/commands/")) {
+      const command = readJson<{
+        kind?: string; commandId?: string; createdAt?: number;
+        fromOwnerId?: string; toOwnerId?: string; action?: string; message?: string;
+      }>(path);
+      if (!command || command.kind !== "command" || !command.commandId) continue;
+      entries.push({
+        commandId: command.commandId,
+        kind: "command",
+        createdAt: command.createdAt ?? 0,
+        fromOwnerId: command.fromOwnerId ?? "",
+        toOwnerId: command.toOwnerId ?? "",
+        action: command.action,
+        message: command.message,
+      });
+    } else if (normalizedPath.includes("/responses/")) {
+      const response = readJson<{
+        kind?: string; commandId?: string; respondedAt?: number;
+        fromOwnerId?: string; toOwnerId?: string; status?: string;
+      }>(path);
+      if (!response || response.kind !== "response" || !response.commandId) continue;
+      entries.push({
+        commandId: response.commandId,
+        kind: "response",
+        createdAt: response.respondedAt ?? 0,
+        fromOwnerId: response.fromOwnerId ?? "",
+        toOwnerId: response.toOwnerId ?? "",
+        status: response.status,
+      });
+    }
   }
   entries.sort((a, b) => b.createdAt - a.createdAt);
   return entries.slice(0, 30);
@@ -255,6 +294,11 @@ interface McpJsonServer {
   description?: string;
 }
 
+// PERF-RV-004: cache isExecutableOnPath results within a single refresh cycle.
+// The map is cleared at the start of each refresh() so a manual re-probe (r key)
+// re-checks, but repeated renders within the same refresh reuse results.
+const executablePathCache = new Map<string, boolean>();
+
 // collectMcpServers mirrors the mcpx merge order for .mcp.json:
 // global → project → .agents/mcp.json → .mcpx/.mcp.json (later wins).
 export function collectMcpServers(cwd: string): McpxMcpServerInfo[] {
@@ -288,15 +332,21 @@ export function collectMcpServers(cwd: string): McpxMcpServerInfo[] {
 }
 
 function isExecutableOnPath(command: string): boolean {
+  // PERF-RV-004: reuse cached result within a refresh cycle.
+  if (executablePathCache.has(command)) return executablePathCache.get(command)!;
+  let result: boolean;
   if (command.includes("/") || command.includes("\\")) {
-    return existsSync(command);
+    result = existsSync(command);
+  } else {
+    const probe = spawnSync(process.platform === "win32" ? "where" : "which", [command], {
+      encoding: "utf8",
+      timeout: 5_000,
+      shell: process.platform === "win32",
+    });
+    result = probe.status === 0;
   }
-  const probe = spawnSync(process.platform === "win32" ? "where" : "which", [command], {
-    encoding: "utf8",
-    timeout: 5_000,
-    shell: process.platform === "win32",
-  });
-  return probe.status === 0;
+  executablePathCache.set(command, result);
+  return result;
 }
 
 // collectConnections probes the running mcpx endpoint for Remote Sessions.
@@ -313,12 +363,21 @@ export async function collectConnections(endpoint: string): Promise<McpxConnecti
     const raw = await response.text();
     let payload: { result?: { structuredContent?: unknown; content?: Array<{ type?: string; text?: string }> } };
     if (contentType.includes("text/event-stream")) {
-      let dataText: string | undefined;
+      // COR-RV-009: mirror probeEndpoint's approach — try parsing each data:
+      // line and keep the last SUCCESSFUL parse, discarding malformed frames
+      // instead of taking the raw last line and parsing once.
+      let parsed: typeof payload | undefined;
       for (const line of raw.split(/\r?\n/)) {
-        if (line.startsWith("data:")) dataText = line.slice(5).trim();
+        if (line.startsWith("data:")) {
+          try {
+            parsed = JSON.parse(line.slice(5).trim());
+          } catch {
+            // skip malformed frames — keep the last successful parse
+          }
+        }
       }
-      if (!dataText) return undefined;
-      payload = JSON.parse(dataText);
+      if (!parsed) return undefined;
+      payload = parsed;
     } else {
       payload = JSON.parse(raw);
     }
@@ -673,6 +732,9 @@ export class McpxOverlay implements Component, Focusable {
     if (this.closed) return;
     this.refreshGeneration++;
     const generation = this.refreshGeneration;
+    // PERF-RV-004: clear the executable path cache so a manual refresh re-probes,
+    // but repeated renders within this refresh reuse cached results.
+    executablePathCache.clear();
     this.snapshot = { ...this.snapshot, refreshing: true, error: undefined };
     this.safeRequestRender();
     try {
@@ -694,6 +756,13 @@ export class McpxOverlay implements Component, Focusable {
       const { endpoint, reachable, endpointVersion } = await probeEndpoint(configPath);
       const online = reachable;
       const fork = detectMcpxForPmf();
+      // PERF-RV-006: read the ops password ONCE during refresh instead of on
+      // every renderList render.
+      const opsPassword = readOpsPassword();
+      // COR-RV-005: only apply this snapshot if no newer refresh has started.
+      // A newer refresh (incremented refreshGeneration) means this result is
+      // stale and must be discarded to avoid overwriting fresh data with old.
+      if (generation === this.refreshGeneration && !this.closed) {
       this.snapshot = {
         refreshing: false,
         binary: binary ?? undefined,
@@ -710,7 +779,9 @@ export class McpxOverlay implements Component, Focusable {
         tunnel,
         forkInstalled: fork.installed,
         forkVersion: fork.version,
+        opsPassword,
       };
+      }
       // Backfill tunnel health without blocking the board: a public probe can
       // take up to the fetch timeout when the tunnel is down. Fire-and-forget;
       // only apply if this refresh is still the latest (no newer refresh raced).
@@ -1012,7 +1083,9 @@ export class McpxOverlay implements Component, Focusable {
 
   /** 运维口令 (OAuth authorize 页面所需) — 展示在隧道区块下方。 */
   private renderOpsPasswordRows(width: number): string[] {
-    const pw = readOpsPassword();
+    // PERF-RV-006: read from the snapshot (populated once during refresh)
+    // instead of calling readOpsPassword() on every render.
+    const pw = this.snapshot.opsPassword;
     if (!pw) {
       // config.yaml 未设 password — mcpx 启动时会在内存生成一个并打印到启动日志。
       return [fitLine(fg("33", "运维口令：未在 config 持久化（mcpx 启动时自动生成，见启动日志 oauth_password）"), width)];

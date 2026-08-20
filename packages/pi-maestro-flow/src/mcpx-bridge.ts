@@ -27,13 +27,22 @@ let leaseTimer: NodeJS.Timeout | undefined;
 let leaseCwd: string | undefined;
 let leaseGeneration = 0;
 
+// PERF-RV-003: cache locateMcpx() result across calls within a process. null =
+// not-yet-probed; string = resolved path; undefined = probed-but-not-found.
+let cachedMcpx: string | undefined | null = null;
+// PERF-RV-003: cache detectMcpxForPmf() result across calls within a process.
+// null = not-yet-probed.
+let cachedMcpxForPmf: { installed: boolean; version?: string } | null = null;
+
 export function locateMcpx(): string | undefined {
+  // PERF-RV-003: return the cached result if we have already probed.
+  if (cachedMcpx !== null) return cachedMcpx ?? undefined;
   const configured = process.env.MCPX_BIN;
-  if (configured && existsSync(configured)) return configured;
+  if (configured && existsSync(configured)) { cachedMcpx = configured; return configured; }
   // Default install location: ~/.mcpx/bin/mcpx(.exe) — the panel's s/x
   // controls and the startup bridge find it here without PATH changes.
   const homeBin = join(homedir(), ".mcpx", "bin", process.platform === "win32" ? "mcpx.exe" : "mcpx");
-  if (existsSync(homeBin)) return homeBin;
+  if (existsSync(homeBin)) { cachedMcpx = homeBin; return homeBin; }
   const probe = spawnSync(process.platform === "win32" ? "where" : "which", ["mcpx"], {
     encoding: "utf8",
     shell: process.platform === "win32",
@@ -41,8 +50,9 @@ export function locateMcpx(): string | undefined {
   });
   if (probe.status === 0) {
     const line = String(probe.stdout || "").split(/\r?\n/).find(Boolean);
-    if (line) return line;
+    if (line) { cachedMcpx = line; return line; }
   }
+  cachedMcpx = undefined;
   return undefined;
 }
 
@@ -147,6 +157,20 @@ export function stopWorkspaceLease(): void {
 export function _resetMcpxBridgeState(): void {
   registeredPaths.clear();
   stopWorkspaceLease();
+  // Also reset the caches so tests that set up a fresh MCPX_BIN in a temp dir
+  // re-probe instead of reusing a stale cached path from a prior test.
+  cachedMcpx = null;
+  cachedMcpxForPmf = null;
+}
+
+/** Test hook: reset the locateMcpx cache (PERF-RV-003). */
+export function _resetMcpxCache(): void {
+  cachedMcpx = null;
+}
+
+/** Test hook: reset the detectMcpxForPmf cache (PERF-RV-003). */
+export function _resetMcpxForPmfCache(): void {
+  cachedMcpxForPmf = null;
 }
 
 // --- Tunnel health & config detection (shared by overlay + wizard + extension) ---
@@ -170,7 +194,20 @@ function isProcessAlive(pid: number): boolean {
         encoding: "utf8",
         timeout: 5_000,
       });
-      return result.status === 0 && String(result.stdout || "").includes(String(pid));
+      if (result.status !== 0) return false;
+      // SEC-RV-008: parse the CSV output and compare the PID column exactly,
+      // avoiding substring matches (PID 5 matching PID 50). The CSV format is
+      // "Image Name","PID","Session Name","Session#","Mem Usage" — the PID is
+      // the last column on a single-line /NH row. If parsing yields nothing,
+      // return false (do NOT fall back to a substring match).
+      const pidStr = String(pid);
+      for (const line of String(result.stdout || "").split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        const cols = line.split(",");
+        const last = (cols[cols.length - 1] ?? "").trim().replace(/^["']|["']$/g, "");
+        if (last === pidStr) return true;
+      }
+      return false;
     }
     process.kill(pid, 0);
     return true;
@@ -314,6 +351,8 @@ export function readOpsPassword(): string | undefined {
  * upstream `mcpx` package. Returns { installed, version }.
  */
 export function detectMcpxForPmf(): { installed: boolean; version?: string } {
+  // PERF-RV-003: return the cached result if we have already probed.
+  if (cachedMcpxForPmf !== null) return cachedMcpxForPmf;
   try {
     // Resolve the global node_modules root: `npm root -g` prints the path.
     const probe = spawnSync("npm", ["root", "-g"], {
@@ -321,16 +360,18 @@ export function detectMcpxForPmf(): { installed: boolean; version?: string } {
       timeout: 8_000,
       shell: process.platform === "win32",
     });
-    if (probe.status !== 0) return { installed: false };
+    if (probe.status !== 0) { cachedMcpxForPmf = { installed: false }; return cachedMcpxForPmf; }
     const root = String(probe.stdout || "").split(/\r?\n/).find((l) => l.trim());
-    if (!root) return { installed: false };
+    if (!root) { cachedMcpxForPmf = { installed: false }; return cachedMcpxForPmf; }
     const pkgPath = join(root.trim(), "mcpx-for-pmf", "package.json");
     const raw = readFileSync(pkgPath, "utf8");
     const pkg = JSON.parse(raw) as { name?: string; version?: string };
-    if (pkg.name === "mcpx-for-pmf") return { installed: true, version: pkg.version };
-    return { installed: false };
+    if (pkg.name === "mcpx-for-pmf") { cachedMcpxForPmf = { installed: true, version: pkg.version }; return cachedMcpxForPmf; }
+    cachedMcpxForPmf = { installed: false };
+    return cachedMcpxForPmf;
   } catch {
-    return { installed: false };
+    cachedMcpxForPmf = { installed: false };
+    return cachedMcpxForPmf;
   }
 }
 

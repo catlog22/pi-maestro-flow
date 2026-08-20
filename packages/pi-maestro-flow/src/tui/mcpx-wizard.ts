@@ -808,15 +808,17 @@ export class McpxWizardOverlay implements Component, Focusable {
     if (this.status === "写入中…") return;
     this.status = "写入中…";
     this.params.requestRender();
+    const temp = `${this.configPath()}.wizard.tmp`;
     try {
       const { yaml } = this.build();
       const path = this.configPath();
-      const temp = `${path}.wizard.tmp`;
       writeFileSync(temp, yaml, "utf8");
       renameSync(temp, path);
       this.status = "已写入 " + path + " — 重启 mcpx 后生效（窗口/wizard 亦可用 /mcpx 查看）";
       this.params.requestRender();
     } catch (error) {
+      // COR-RV-001: clean up the orphaned .wizard.tmp file on renameSync failure.
+      try { rmSync(temp, { force: true }); } catch { /* best-effort */ }
       this.status = `写入失败: ${error instanceof Error ? error.message : String(error)}`;
       this.params.requestRender();
     }
