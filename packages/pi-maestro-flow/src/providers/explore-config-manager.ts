@@ -8,9 +8,9 @@ import {
   rename,
   unlink,
 } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { lockSettingsResource } from "../settings/resource-lock.ts";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -63,16 +63,7 @@ const FORMATS: readonly ApiModelFormChoice[] = [
   { label: "OpenAI Responses", value: "openai-responses" },
 ];
 
-const LOCK_STALE_MS = 5_000;
 const mutationQueues = new Map<string, Promise<void>>();
-const properLockfile = createRequire(import.meta.url)("proper-lockfile") as {
-  lock(filePath: string, options: {
-    realpath: boolean;
-    stale: number;
-    update: number;
-    retries: { retries: number; factor: number; minTimeout: number; maxTimeout: number; randomize: boolean };
-  }): Promise<() => Promise<void>>;
-};
 
 export function registerExploreConfigManager(
   pi: ExtensionAPI,
@@ -578,33 +569,19 @@ async function writeCanonicalConfig(path: string, root: ExploreConfigRoot): Prom
 function serializeMutation(filePath: string, mutate: () => Promise<void>): Promise<void> {
   const key = mutationPath(filePath);
   const previous = mutationQueues.get(key) ?? Promise.resolve();
-  const mutation = previous.catch(() => undefined).then(() => withMutationLock(key, mutate));
+  const mutation = previous.catch(() => undefined).then(async () => {
+    const release = await lockSettingsResource(filePath);
+    try {
+      await mutate();
+    } finally {
+      await release();
+    }
+  });
   const settled = mutation.then(() => undefined, () => undefined);
   mutationQueues.set(key, settled);
   return mutation.finally(() => {
     if (mutationQueues.get(key) === settled) mutationQueues.delete(key);
   });
-}
-
-async function withMutationLock(filePath: string, mutate: () => Promise<void>): Promise<void> {
-  await mkdir(dirname(filePath), { recursive: true, mode: 0o700 });
-  const release = await properLockfile.lock(filePath, {
-    realpath: false,
-    stale: LOCK_STALE_MS,
-    update: 1_000,
-    retries: {
-      retries: 200,
-      factor: 1,
-      minTimeout: 15,
-      maxTimeout: 50,
-      randomize: true,
-    },
-  });
-  try {
-    await mutate();
-  } finally {
-    await release();
-  }
 }
 
 function mutationPath(filePath: string): string {

@@ -8,6 +8,7 @@ import {
   writeMcpConfigDocument,
   writeManagedServerEntry,
 } from "./config.ts";
+import { lockSettingsResource } from "../settings/resource-lock.ts";
 import type { McpConfig, ServerEntry } from "./types.ts";
 
 export type McpConfigScope = "user" | "project";
@@ -125,11 +126,19 @@ export function validateServerName(value: string): string {
 
 async function serializeMutation(path: string, mutation: () => Promise<void> | void): Promise<void> {
   const previous = mutationQueues.get(path) ?? Promise.resolve();
-  const current = previous.catch(() => undefined).then(mutation);
-  mutationQueues.set(path, current);
+  const current = previous.catch(() => undefined).then(async () => {
+    const release = await lockSettingsResource(path);
+    try {
+      await mutation();
+    } finally {
+      await release();
+    }
+  });
+  const settled = current.then(() => undefined, () => undefined);
+  mutationQueues.set(path, settled);
   try {
     await current;
   } finally {
-    if (mutationQueues.get(path) === current) mutationQueues.delete(path);
+    if (mutationQueues.get(path) === settled) mutationQueues.delete(path);
   }
 }

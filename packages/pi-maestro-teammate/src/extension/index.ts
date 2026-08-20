@@ -118,6 +118,7 @@ import {
   updateDelegationRecord,
   type DelegationRecord,
   type DelegationSourceContext,
+  type DelegationTaskDraft,
   type DelegationWorkerContext,
 } from "./task-delegation.ts";
 import {
@@ -1250,6 +1251,11 @@ export default function registerTeammateExtension(
         || entry.workspaceId !== workspaceId
         || entry.targetCorrelationId !== WORKSPACE_MAIN_SESSION_MARKER
         || !shouldReplayWorkspaceRootQueue(reason, entry.targetSessionId, currentSessionId)) continue;
+      // Replay now matches redrive's per-message cap (QUEUED_ROOT_REDRIVE_MAX)
+      // to prevent unbounded replay on repeated restart.
+      const replayCount = replayedIncoming.get(entry.messageId) ?? 0;
+      if (replayCount >= QUEUED_ROOT_REDRIVE_MAX) continue;
+      replayedIncoming.set(entry.messageId, replayCount + 1);
       const { envelope, effectiveAction } = workspaceRootMessageEnvelope(entry, { replayed: true });
       const delivered = safeSendMessage(pi, envelope, {
         triggerTurn: true,
@@ -1263,6 +1269,7 @@ export default function registerTeammateExtension(
   const QUEUED_ROOT_REDRIVE_COOLDOWN_MS = 60_000;
   const QUEUED_ROOT_REDRIVE_MAX = 2;
   const redrivenIncoming = new Map<string, { count: number; at: number }>();
+  const replayedIncoming = new Map<string, number>();
 
   /**
    * Delivery recovery for accepted-but-never-injected root messages. The pi
@@ -5363,16 +5370,18 @@ export default function registerTeammateExtension(
 
   async function selectDelegationWorkerContext(
     ctx: ExtensionCommandContext,
-  ): Promise<DelegationWorkerContext | undefined> {
+  ): Promise<{ context: DelegationWorkerContext; direct: boolean } | undefined> {
     const freshOption = "New session (fresh) - task document supplies context";
     const forkOption = "Fork current session - worker inherits the source conversation";
+    const directOption = "Direct run (fresh, skip planner) - instruction runs as-is";
     preemptCockpitResize();
     const selected = await ctx.ui.select(
       "Delegation worker context",
-      [freshOption, forkOption],
+      [freshOption, forkOption, directOption],
     );
-    if (selected === freshOption) return "fresh";
-    if (selected === forkOption) return "fork";
+    if (selected === freshOption) return { context: "fresh", direct: false };
+    if (selected === forkOption) return { context: "fork", direct: false };
+    if (selected === directOption) return { context: "fresh", direct: true };
     return undefined;
   }
 
@@ -5440,6 +5449,33 @@ export default function registerTeammateExtension(
     } finally {
       ctx.ui.setStatus(progressKey, undefined);
     }
+  }
+
+  async function createDirectDelegationDraft(
+    request: string,
+    workerContext: DelegationWorkerContext,
+    ctx: ExtensionCommandContext,
+  ): Promise<DelegationRecord> {
+    const root = delegationWorkspaceRoot(ctx);
+    const source = delegationSourceContext(ctx);
+    const task: DelegationTaskDraft = {
+      title: request.slice(0, 80) || "Direct delegation",
+      objective: request,
+      context: "Direct-run delegation: the user instruction is executed as-is without a planner-produced document.",
+      deliverables: ["Execute the instruction and report the outcome."],
+      acceptanceCriteria: ["The instruction was carried out and the result reported back via teammate-send."],
+      constraints: ["Preserve unrelated worktree changes and existing architecture."],
+      suggestedFiles: [],
+      verification: ["Confirm the instruction's requested behavior and report it."],
+    };
+    return createDelegationDraft(root, {
+      request,
+      workerContext,
+      source,
+      task,
+      planner: { agent: "planner", correlationId: "direct" },
+      skipDocument: true,
+    });
   }
 
   async function confirmDelegationSend(record: DelegationRecord, ctx: ExtensionCommandContext): Promise<string | undefined> {
@@ -7703,12 +7739,25 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
 
         let record: DelegationRecord;
         if (command.action === "create") {
-          const workerContext = command.workerContext ?? await selectDelegationWorkerContext(ctx);
-          if (!workerContext) {
+          const choice = command.workerContext
+            ? { context: command.workerContext, direct: false }
+            : await selectDelegationWorkerContext(ctx);
+          if (!choice) {
             ctx.ui.notify("Delegation cancelled before drafting.", "info");
             return;
           }
-          record = await draftDelegation(command.request, workerContext, ctx);
+          if (choice.direct) {
+            // Direct mode: skip planner, persist a minimal record (no task.md),
+            // then dispatch the instruction itself as the worker task.
+            record = await createDirectDelegationDraft(command.request, choice.context, ctx);
+            const dispatched = await dispatchDelegation(record, command.request, ctx);
+            ctx.ui.notify(
+              `Delegation ${record.id} (direct) sent to owner:${dispatched.owner.ownerId}${dispatched.deliveryStage ? ` (${dispatched.deliveryStage})` : ""}. Manage it with /delegate list or /delegate stop ${record.id}.`,
+              "info",
+            );
+            return;
+          }
+          record = await draftDelegation(command.request, choice.context, ctx);
           ctx.ui.notify(`Delegation draft ${record.id} (${record.workerContext}) saved to ${delegationDocumentPath(root, record.id)}.`, "info");
         } else {
           const loaded = await loadDelegationRecord(root, command.id);
@@ -8177,16 +8226,18 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
   }
 
   if (!isChild) {
+  // Dispose EventBus subscriptions on shutdown (defensive; framework may auto-dispose).
+  const disposers: Array<() => void> = [];
   const disposeTuiLocaleEvents = pi.events.on(SETTINGS_LOCALE_EVENT, (payload) => {
     if (!applySettingsLocaleEvent(payload)) return;
     updateAgentWidget();
     syncMonitorInteractionStatus();
   });
 
-  pi.events.on("bash-bg:update", applyBashBgSnapshot);
-  pi.events.on("loop:update", applyLoopSnapshot);
+  disposers.push(pi.events.on("bash-bg:update", applyBashBgSnapshot));
+  disposers.push(pi.events.on("loop:update", applyLoopSnapshot));
 
-  pi.events.on(COCKPIT_UI_OWNERSHIP_EVENT, (payload) => {
+  disposers.push(pi.events.on(COCKPIT_UI_OWNERSHIP_EVENT, (payload) => {
     if (!payload || typeof payload !== "object") return;
     const ownership = payload as {
       agents?: unknown;
@@ -8198,13 +8249,13 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     cockpitOwnsSessionList = ownership.sessionList === true;
     setQuietMode(ownership.quiet === true, ownership.quietSymbols);
     updateAgentWidget();
-  });
+  }));
 
   // Cockpit agent list commands: interrupt (打断) aborts the current turn with
   // a canned continue notice; steer (引导) interrupts and injects the user's
   // message. Both reuse the steer RPC (Pi abort → prompt), so a stalled agent
   // stuck in a tool is woken instead of left showing a hung tool forever.
-  pi.events.on(TEAMMATE_AGENT_COMMAND_EVENT, (payload) => {
+  disposers.push(pi.events.on(TEAMMATE_AGENT_COMMAND_EVENT, (payload) => {
     void applyTeammateAgentCommand(
       state,
       pi,
@@ -8212,13 +8263,13 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
         deliverLocalAgentMessage(correlationId, label, message, "steer"),
       payload,
     );
-  });
-  pi.events.on(TEAMMATE_STARTED_EVENT, () => {
+  }));
+  disposers.push(pi.events.on(TEAMMATE_STARTED_EVENT, () => {
     markWorkspacePeerDirty();
     updateAgentWidget();
     startWidgetTimer();
-  });
-  pi.events.on(TEAMMATE_COMPLETE_EVENT, () => {
+  }));
+  disposers.push(pi.events.on(TEAMMATE_COMPLETE_EVENT, () => {
     markWorkspacePeerDirty();
     setTimeout(() => {
       enforceWakeableAgentBudget(state);
@@ -8228,8 +8279,8 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
         scheduleWakeableEvictionTimer();
       }
     }, 100);
-  });
-  pi.events.on(TEAMMATE_MESSAGE_EVENT, markWorkspacePeerDirty);
+  }));
+  disposers.push(pi.events.on(TEAMMATE_MESSAGE_EVENT, markWorkspacePeerDirty));
 
   // =========================================================================
   // Session lifecycle — agents live until session ends
@@ -8370,6 +8421,11 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
       workspaceReceiptReconcileTimer = undefined;
     }
     redrivenIncoming.clear();
+    replayedIncoming.clear();
+    // Dispose EventBus subscriptions on shutdown (defensive; framework may auto-dispose).
+    for (const d of disposers) {
+      try { d(); } catch {}
+    }
     // Stop the mailbox consumer BEFORE killing agents so no in-flight poll can
     // inject into a dying session (previously never stopped at all).
     const stoppedMailbox = mailboxHost;

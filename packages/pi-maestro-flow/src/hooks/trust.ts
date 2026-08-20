@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
+import { lockSettingsResource } from "../settings/resource-lock.ts";
 
 interface HookTrustFile {
   version: 1;
@@ -10,16 +10,7 @@ interface HookTrustFile {
 }
 
 const EMPTY_TRUST: HookTrustFile = { version: 1, trusted: {}, toggles: {} };
-const LOCK_STALE_MS = 5_000;
 const mutationQueues = new Map<string, Promise<void>>();
-const properLockfile = createRequire(import.meta.url)("proper-lockfile") as {
-  lock(filePath: string, options: {
-    realpath: boolean;
-    stale: number;
-    update: number;
-    retries: { retries: number; factor: number; minTimeout: number; maxTimeout: number; randomize: boolean };
-  }): Promise<() => Promise<void>>;
-};
 
 export async function isHookConfigTrusted(
   trustFilePath: string,
@@ -140,34 +131,20 @@ async function writeTrustFile(filePath: string, trust: HookTrustFile): Promise<v
 async function serializeMutation(filePath: string, mutate: () => Promise<void>): Promise<void> {
   const key = trustKey(filePath);
   const previous = mutationQueues.get(key) ?? Promise.resolve();
-  const mutation = previous.catch(() => undefined).then(() => withMutationLock(filePath, mutate));
+  const mutation = previous.catch(() => undefined).then(async () => {
+    const release = await lockSettingsResource(filePath);
+    try {
+      await mutate();
+    } finally {
+      await release();
+    }
+  });
   const settled = mutation.then(() => undefined, () => undefined);
   mutationQueues.set(key, settled);
   try {
     await mutation;
   } finally {
     if (mutationQueues.get(key) === settled) mutationQueues.delete(key);
-  }
-}
-
-async function withMutationLock(filePath: string, mutate: () => Promise<void>): Promise<void> {
-  await mkdir(dirname(filePath), { recursive: true });
-  const release = await properLockfile.lock(filePath, {
-    realpath: false,
-    stale: LOCK_STALE_MS,
-    update: 1_000,
-    retries: {
-      retries: 200,
-      factor: 1,
-      minTimeout: 15,
-      maxTimeout: 50,
-      randomize: true,
-    },
-  });
-  try {
-    await mutate();
-  } finally {
-    await release();
   }
 }
 

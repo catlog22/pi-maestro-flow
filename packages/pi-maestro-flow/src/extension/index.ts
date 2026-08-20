@@ -841,6 +841,8 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   }
 
   const disposeTuiLocaleEvents = registerTuiLocaleEvents(pi.events);
+  // Dispose EventBus subscriptions on shutdown (defensive; framework may auto-dispose).
+  const disposers: Array<() => void> = [];
 
   // pi install's SettingsManager overwrites postinstall's settings.json writes
   // with its stale in-memory cache. Re-register companion packages at load time
@@ -908,22 +910,22 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   const compatibilityResults = (results: unknown): unknown =>
     filterUnacknowledgedResults(results, acknowledgedPublications);
   // Forward teammate lifecycle events (shared EventBus) to the GUI SSE stream.
-  pi.events.on(TEAMMATE_STARTED_EVENT, (payload) => {
+  disposers.push(pi.events.on(TEAMMATE_STARTED_EVENT, (payload) => {
     guiEvents.emit(GUI_EVENTS.teammateStarted, payload as TeammateStartedEvent);
-  });
-  pi.events.on(TEAMMATE_MESSAGE_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateProgress, event));
-  pi.events.on(TEAMMATE_COMPLETE_EVENT, (payload) => {
+  }));
+  disposers.push(pi.events.on(TEAMMATE_MESSAGE_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateProgress, event)));
+  disposers.push(pi.events.on(TEAMMATE_COMPLETE_EVENT, (payload) => {
     guiEvents.emit(GUI_EVENTS.teammateComplete, payload as TeammateCompleteEvent);
-  });
+  }));
   // Persist each published node before runGraph releases its dependents. The
   // completion/tool-result hooks below remain compatibility fallbacks.
-  pi.events.on(TEAMMATE_RESULT_PUBLISHED_EVENT, (event) => {
+  disposers.push(pi.events.on(TEAMMATE_RESULT_PUBLISHED_EVENT, (event) => {
     capturePublishedAgentResult(event, rememberPublishedResult);
-  });
+  }));
   // agent:// data source for background/detached runs: the root tool_result of
   // a background dispatch carries empty results, so the authoritative completion
   // event is the persistence channel for its structured outputs.
-  pi.events.on(TEAMMATE_COMPLETE_EVENT, (event) => {
+  disposers.push(pi.events.on(TEAMMATE_COMPLETE_EVENT, (event) => {
     try {
       const payload = event as { structuredResults?: unknown };
       const remaining = compatibilityResults(payload.structuredResults);
@@ -934,9 +936,9 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     } catch (err) {
       console.warn(`[pi-maestro-flow] agent output capture failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  });
+  }));
   // Auto-seal delegated Todo work and reclaim browser tabs owned by the agent.
-  pi.events.on(TEAMMATE_COMPLETE_EVENT, (event) => {
+  disposers.push(pi.events.on(TEAMMATE_COMPLETE_EVENT, (event) => {
     const record = event as { correlationId?: unknown; agent?: unknown; exitCode?: unknown; cancelled?: unknown };
     const cid = typeof record.correlationId === "string" ? record.correlationId.trim() : "";
     if (!cid || cid === "unknown") return;
@@ -964,7 +966,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
           rootCtx.ui?.notify?.(`Todo: task #${failure.id} for @${actor.label} was not auto-sealed: ${failure.reason}`, "warning");
         }
       });
-  });
+  }));
   const emitGoalChanged = (): void => {
     if (!guiEvents.isActive()) return;
     const goal = getActiveGoal();
@@ -1414,7 +1416,7 @@ Only request completion after all work is done; the extension verifies it indepe
 
   // === Todo Tool ===
   initTodo(pi);
-  pi.events.on(TEAMMATE_STARTED_EVENT, (event) => {
+  disposers.push(pi.events.on(TEAMMATE_STARTED_EVENT, (event) => {
     if (!todoRootContext) return;
     const rootCtx = todoRootContext;
     const actor = todoActorFromTeammateStarted(event);
@@ -1440,7 +1442,7 @@ Only request completion after all work is done; the extension verifies it indepe
           }
         });
     }
-  });
+  }));
 
   const todoTool: ToolDefinition<typeof TodoToolParams> = {
     name: "todo",
@@ -2763,7 +2765,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
     }), { placement: "aboveEditor" });
   }
 
-  pi.events.on(COCKPIT_UI_OWNERSHIP_EVENT, (payload) => {
+  disposers.push(pi.events.on(COCKPIT_UI_OWNERSHIP_EVENT, (payload) => {
     if (!payload || typeof payload !== "object") return;
     const ownership = payload as Partial<CockpitUiOwnershipV1>;
     cockpitOwnsTodo = ownership.todo === true;
@@ -2774,7 +2776,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
       panelMode = ownership.todoExpanded ? "expanded" : "collapsed";
     }
     updateTodoWidget();
-  });
+  }));
 
 
   pi.registerShortcut(TODO_TOGGLE_KEY, {
@@ -2928,6 +2930,10 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
 
   pi.on("session_shutdown", async (event, ctx) => {
     if (event.reason === "quit" || event.reason === "reload") disposeTuiLocaleEvents();
+    // Dispose EventBus subscriptions on shutdown (defensive; framework may auto-dispose).
+    for (const d of disposers) {
+      try { d(); } catch {}
+    }
     guiLifecycleGeneration += 1;
     const closingGuiServer = guiServer;
     guiServer = null;
