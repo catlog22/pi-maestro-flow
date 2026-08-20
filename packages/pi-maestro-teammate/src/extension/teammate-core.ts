@@ -225,7 +225,7 @@ export const TEAMMATE_PROMPT_GUIDELINES = [
   "Do not poll observe or teammate-list after starting background work; use observe action=status only for a one-off inspection explicitly needed for debugging or requested by the user.",
   "If the current turn must wait for an already-backgrounded result, call observe exactly once with action=wait, a teammate target, and a bounded timeout.",
   "Use teammate-send only when it carries new information, a correction, an explicitly requested response, a safety/lifecycle constraint, or a termination request; do not send routine acknowledgements or status pings, and never resend a queued or accepted message.",
-  "Omit model to use teammate task-type model routing; an exact task-level provider/model overrides the top-level model, and the top-level model overrides automatic routing.",
+  "Do not set `model` unless the user explicitly names a provider/model. Omitting `model` inherits the main session's current model, then configured task-type/role routing, then the child's own default — set `model` only as an explicit user request (top-level default or per-task override; per-task wins). An explicit id outside the current model catalog fails fast at dispatch with 'Unknown teammate model specifier'.",
   "Always wrap every teammate call in a non-empty tasks array: prompt, name, and dependsOn belong inside tasks[]; only shared defaults (agent/taskType/model/fallbackModels/thinking/context/cwd/outputSchema/timeoutMs/maxNestingDepth) may be set at the top level. A top-level prompt is rejected as an unexpected property.",
   "An explicit model that is not in the current model catalog fails fast with 'Unknown teammate model specifier' — pick an id from the injected available model catalog.",
 ];
@@ -569,8 +569,8 @@ export function buildTeammateToolDescription(
   // Nested contexts (child agents) do not need the per-cwd routing table —
   // execution is proxied to the parent root process, which owns routing.
   const modelRoutingSection = nested
-    ? "Model routing inherits the parent session's configuration; pass an explicit model id to override (an id outside the catalog fails fast at dispatch with \"Unknown teammate model specifier\")."
-    : `When neither the top-level model nor a task-level model is set, teammates inherit the main session's current model by default. Configured task-type/role mappings take precedence when present; with no mapping and no session model, the agent's default model is used. An explicit model id that is not in the current catalog fails fast at dispatch with "Unknown teammate model specifier".
+    ? "Model routing inherits the parent agent's resolved model; pass an explicit model id only when the user requests a specific provider. An id outside the catalog fails fast at dispatch with \"Unknown teammate model specifier\"."
+    : `When neither the top-level model nor a task-level model is set, teammates inherit the main session's current model by default — but only if that model is present in this catalog (otherwise inheritance is skipped and the child uses its own default). Configured task-type/role mappings, then the agent frontmatter model, take precedence over main-session inheritance when present; with none set, the child uses its own default plus the authenticated catalog as implicit fallback. An explicit model id that is not in the current catalog fails fast at dispatch with "Unknown teammate model specifier".
 
 Configured task-type model routing for ${cwd}:
 ${formatModelRoutingConfig(cwd, discoverAgents(cwd))}`;

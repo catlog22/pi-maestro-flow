@@ -89,7 +89,7 @@ export const TaskSpec = Type.Object({
   ),
   model: Type.Optional(
     Type.String({
-      description: "Exact provider/model override for this task; overrides the top-level model default",
+      description: "Exact provider/model override for this task; overrides the top-level model default. Omit unless the user explicitly requests this model — an omitted model inherits the main session's current model, then configured task-type/role routing, then the child's own default. An id outside the current model catalog fails fast at dispatch with 'Unknown teammate model specifier'.",
     }),
   ),
   fallbackModels: Type.Optional(
@@ -244,7 +244,7 @@ export const TeammateParams = Type.Object({
   model: Type.Optional(
     Type.String({
       description:
-        "Exact provider/model default from the injected available model catalog. Per-task model takes precedence.",
+        "Exact provider/model default from the injected available model catalog. Per-task model takes precedence. Omit unless the user explicitly requests this model — an omitted model inherits the main session's current model, then configured task-type/role routing, then the child's own default. An id outside the current model catalog fails fast at dispatch with 'Unknown teammate model specifier'.",
     }),
   ),
   fallbackModels: Type.Optional(

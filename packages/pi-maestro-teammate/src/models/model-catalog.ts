@@ -91,7 +91,7 @@ export function createModelCatalogSnapshot(models: AvailableModelEntry[]): Model
       .join("\n"),
     modelIds,
     models: capabilities,
-    systemPrompt: `${START_MARKER}\nAvailable authenticated models for the teammate tool:\n${lines.join("\n")}\n\nUse an exact provider/model identifier in the top-level model field or a task-level model field. Task-level model overrides the top-level default.\n${END_MARKER}`,
+    systemPrompt: `${START_MARKER}\nAvailable authenticated models for the teammate tool:\n${lines.join("\n")}\n\nOmit \`model\` unless the user explicitly names a provider/model. An omitted model inherits the main session's current model, then falls back to configured task-type/role routing, then the child's own default. Set \`model\` only when the user explicitly requests a specific provider/model (top-level default or per-task override; per-task wins). An explicit id outside this catalog fails fast at dispatch with "Unknown teammate model specifier".\n${END_MARKER}`,
   };
 }
 
