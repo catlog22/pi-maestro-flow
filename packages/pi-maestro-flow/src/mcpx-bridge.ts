@@ -13,7 +13,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
@@ -147,4 +147,144 @@ export function stopWorkspaceLease(): void {
 export function _resetMcpxBridgeState(): void {
   registeredPaths.clear();
   stopWorkspaceLease();
+}
+
+// --- Tunnel health & config detection (shared by overlay + wizard + extension) ---
+
+const MCPX_TUNNEL_PID_FILE = () => join(homedir(), ".mcpx", "cloudflared.pid");
+const MCPX_CONFIG_PATH = () => join(homedir(), ".mcpx", "config.yaml");
+
+export type TunnelHealth = "ok" | "auth" | "dead" | "unknown";
+
+export interface TunnelState {
+  pid?: number;
+  url?: string;
+  alive: boolean;
+  health: TunnelHealth;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    if (process.platform === "win32") {
+      const result = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/NH", "/FO", "CSV"], {
+        encoding: "utf8",
+        timeout: 5_000,
+      });
+      return result.status === 0 && String(result.stdout || "").includes(String(pid));
+    }
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Parse the public tunnel URL (auth.oauth.server_url) from ~/.mcpx/config.yaml. */
+function readConfigServerURL(): string | undefined {
+  try {
+    const raw = readFileSync(MCPX_CONFIG_PATH(), "utf8");
+    // Match `server_url:` under auth.oauth. mcpx's yaml.v3 output and the wizard
+    // both indent it at 8 spaces, but a hand-edited file may use 2+; accept any
+    // indentation. Tolerate an optional trailing comment by excluding `#` from
+    // the value capture (a URL never contains a bare `#`).
+    const match = raw.match(/^\s{2,}server_url:\s*"?([^"\n#]+)"?/m);
+    const url = match?.[1]?.trim();
+    return url && /^https?:\/\//.test(url) ? url : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Read the tunnel state from the PID file (written by the wizard) + config.
+ * `health` is "unknown" until {@link probeTunnelHealth} fills it in; the
+ * overlay calls them together so the board shows a complete row per refresh.
+ */
+export function readTunnelState(): TunnelState {
+  let pid: number | undefined;
+  try {
+    const raw = readFileSync(MCPX_TUNNEL_PID_FILE(), "utf8").trim();
+    const parsed = Number(raw);
+    if (Number.isInteger(parsed) && parsed > 0) pid = parsed;
+  } catch {
+    // no PID file — tunnel was never started via the wizard in this profile
+  }
+  const url = readConfigServerURL();
+  const alive = pid !== undefined && isProcessAlive(pid);
+  return { pid, url, alive, health: "unknown" };
+}
+
+/**
+ * Probe the public tunnel URL end-to-end via an MCP `initialize` over HTTPS.
+ * Mirrors the overlay's probeEndpoint judgment:
+ *   200            → "ok"    (open mode; public exposure should not use this)
+ *   401 + WWW-Authenticate → "auth" (OAuth handshake reachable — healthy)
+ *   403 / 404       → "dead"  (tunnel up but mcpx config not reloaded, e.g. the
+ *                            "invalid Host header" / missing OAuth routes case)
+ *   timeout/refuse → "dead"  (tunnel broken or mcpx down)
+ */
+export async function probeTunnelHealth(url: string): Promise<TunnelHealth> {
+  const endpoint = url.replace(/\/$/, "") + "/mcp";
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        "MCP-Protocol-Version": "2025-06-18",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "mcpx-tui", version: "1.0.0" },
+        },
+      }),
+      signal: AbortSignal.timeout(4_000),
+    });
+    if (response.status === 200) return "ok";
+    if (response.status === 401) {
+      // mcpx's wrapMCP always sets WWW-Authenticate with resource_metadata on 401
+      // (http_gateway.go). A 401 without it is not mcpx's OAuth handshake start —
+      // treat as dead (e.g. an upstream proxy's own 401, not the tunnel to mcpx).
+      const wwwAuth = response.headers.get("WWW-Authenticate") ?? "";
+      return wwwAuth.toLowerCase().includes("resource_metadata") ? "auth" : "dead";
+    }
+    return "dead";
+  } catch {
+    return "dead";
+  }
+}
+
+/**
+ * Whether the initial wizard configuration has been completed: ~/.mcpx/config.yaml
+ * exists with a concrete auth.mode (bearer/oauth/dual). Used by the overlay's
+ * register-window action to decide whether to auto-open the wizard.
+ *
+ * Mirrors mcpx's EffectiveAuthMode: an empty mode with a non-empty token is
+ * bearer (a valid, usable configuration), so accept that as configured too.
+ * `open` is intentionally excluded — it is not safe for window registration on
+ * a runtime that may be exposed, so an open-mode user is still routed to the
+ * wizard to pick bearer/oauth.
+ */
+export function isMcpxConfigured(): boolean {
+  let raw: string;
+  try {
+    raw = readFileSync(MCPX_CONFIG_PATH(), "utf8");
+  } catch {
+    return false;
+  }
+  // Accept 2+ spaces of indentation for hand-edited YAML (mcpx/wizard use 4).
+  const modeMatch = raw.match(/^\s{2,}mode:\s*([A-Za-z]+)/m);
+  const mode = modeMatch?.[1]?.trim().toLowerCase();
+  if (mode === "bearer" || mode === "dual") return true;
+  if (mode === "oauth") return Boolean(readConfigServerURL());
+  if (mode === "open") return false;
+  // No explicit mode: mcpx treats a non-empty token as bearer (EffectiveAuthMode).
+  const tokenMatch = raw.match(/^\s{2,}token:\s*"?([^"\n#]+)"?/m);
+  const token = tokenMatch?.[1]?.trim();
+  return Boolean(token);
 }

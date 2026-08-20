@@ -343,9 +343,11 @@ export class McpxWizardOverlay implements Component, Focusable {
       }
       case "workspace":
         return [
-          fitLine(`注册当前工作区到 mcpx（${this.params.cwd}）`, inner),
-          option(0, "注册", "推荐"),
-          option(1, "跳过"),
+          fitLine("窗口注册独立于本向导", inner),
+          fitLine("  本向导只写 ~/.mcpx/config.yaml（监听/认证/策略/隧道）。", inner),
+          fitLine("  注册当前工作区到 mcpx（绑定 lease）请在 /mcpx 看板按 e。", inner),
+          fitLine("  未完成初始配置时按 e 会自动回到本向导。", inner),
+          option(0, "继续"),
         ];
       case "tunnel": {
         const hasCloudflared = isExecutableOnPath("cloudflared");
@@ -473,7 +475,7 @@ export class McpxWizardOverlay implements Component, Focusable {
       case "policy": return 3;
       case "pi": return 2;
       case "skills": return 2;
-      case "workspace": return 2;
+      case "workspace": return 1;
       case "tunnel": return 2;
       default: return 1;
     }
@@ -529,7 +531,8 @@ export class McpxWizardOverlay implements Component, Focusable {
         this.step = "workspace";
         break;
       case "workspace":
-        this.changes.registerWorkspace = this.selected === 0;
+        // The wizard is one-time initial config; window registration is an
+        // independent per-window action done from the /mcpx board (e key).
         this.step = "tunnel";
         break;
       case "tunnel":
@@ -806,14 +809,6 @@ export class McpxWizardOverlay implements Component, Focusable {
       const temp = `${path}.wizard.tmp`;
       writeFileSync(temp, yaml, "utf8");
       renameSync(temp, path);
-      if (this.changes.registerWorkspace) {
-        const binary = locateMcpx();
-        if (binary) {
-          spawnSync(binary, ["workspace", "register", this.params.cwd], {
-            encoding: "utf8", timeout: 15_000, shell: process.platform === "win32",
-          });
-        }
-      }
       this.status = "已写入 " + path + " — 重启 mcpx 后生效（窗口/wizard 亦可用 /mcpx 查看）";
       this.params.requestRender();
     } catch (error) {

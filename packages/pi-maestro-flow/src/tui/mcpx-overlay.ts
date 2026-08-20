@@ -11,7 +11,7 @@ import { readdirSync, readFileSync, existsSync, statSync, writeFileSync, rmSync 
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { locateMcpx } from "../mcpx-bridge.ts";
+import { locateMcpx, readTunnelState, probeTunnelHealth, type TunnelState } from "../mcpx-bridge.ts";
 
 const MCPX_DEFAULT_ENDPOINT = "http://127.0.0.1:9090/mcp";
 const PEER_STALE_MS = 20_000;
@@ -19,6 +19,8 @@ const PEER_STALE_MS = 20_000;
 export interface McpxWorkspaceInfo {
   name: string;
   path: string;
+  /** Lease expiry (ms epoch) for TTL-registered windows; undefined = permanent. */
+  expiresAt?: number;
 }
 
 export interface McpxWindowInfo {
@@ -66,10 +68,13 @@ export interface McpxSnapshot {
   configPath?: string;
   workspaces: McpxWorkspaceInfo[];
   cwdRegistered: boolean;
+  /** cwd is in config.yaml but its lease already expired and is waiting for mcpx's sweep. */
+  cwdLeaseStale?: boolean;
   windows: McpxWindowInfo[];
   thread: McpxThreadEntry[];
   mcpServers: McpxMcpServerInfo[];
   connections?: McpxConnectionInfo[];
+  tunnel?: TunnelState;
   error?: string;
 }
 
@@ -230,6 +235,12 @@ function collectWorkspaces(configPath: string): McpxWorkspaceInfo[] {
     const pathMatch = line.match(/^\s{6}path:\s*(.+)$/);
     if (pathMatch && current) {
       current.path = pathMatch[1].trim().replace(/^"|"$/g, "");
+      continue;
+    }
+    const expMatch = line.match(/^\s{6}expires_at:\s*(.+)$/);
+    if (expMatch && current) {
+      const parsed = Date.parse(expMatch[1].trim().replace(/^"|"$/g, ""));
+      if (Number.isFinite(parsed)) current.expiresAt = parsed;
     }
   }
   return workspaces;
@@ -377,6 +388,13 @@ export class McpxOverlay implements Component, Focusable {
   private status = "";
   private mcpxProcess: ReturnType<typeof spawn> | undefined;
   private starting = false; // guards startMcpx against re-entry (orphan spawns)
+  private refreshGeneration = 0;
+  private closed = false; // set on close() so async refresh/render skip work after close
+
+  private safeRequestRender(): void {
+    if (this.closed) return;
+    this.params.requestRender();
+  }
 
   constructor(private readonly params: McpxOverlayParams) {
     void this.refresh();
@@ -478,8 +496,11 @@ export class McpxOverlay implements Component, Focusable {
     await this.refresh();
   }
   async refresh(): Promise<void> {
+    if (this.closed) return;
+    this.refreshGeneration++;
+    const generation = this.refreshGeneration;
     this.snapshot = { ...this.snapshot, refreshing: true, error: undefined };
-    this.params.requestRender();
+    this.safeRequestRender();
     try {
       const cwd = this.params.cwd;
       const now = Date.now();
@@ -491,6 +512,11 @@ export class McpxOverlay implements Component, Focusable {
       }
       const configPath = join(homedir(), ".mcpx", "config.yaml");
       const workspaces = collectWorkspaces(configPath);
+      // Local endpoint probe gates the online/offline badge; the public tunnel
+      // health probe is decoupled so a slow/unreachable tunnel never blocks the
+      // board or the e/x actions. Seed the tunnel field synchronously (PID + URL
+      // from config, health=unknown) and backfill health async.
+      const tunnel = readTunnelState();
       const { endpoint, endpointVersion } = await probeEndpoint(configPath);
       const online = Boolean(endpointVersion);
       this.snapshot = {
@@ -501,16 +527,40 @@ export class McpxOverlay implements Component, Focusable {
         endpointVersion,
         configPath: existsSync(configPath) ? configPath : undefined,
         workspaces,
-        cwdRegistered: workspaces.some((workspace) => workspace.path.replace(/\\/g, "/").toLowerCase() === cwd.replace(/\\/g, "/").toLowerCase()),
+        ...this.cwdRegistrationState(workspaces, cwd),
         windows: collectWindows(cwd, now),
         thread: collectThread(cwd),
         mcpServers: collectMcpServers(cwd),
         connections: online ? await collectConnections(endpoint) : undefined,
+        tunnel,
       };
+      // Backfill tunnel health without blocking the board: a public probe can
+      // take up to the fetch timeout when the tunnel is down. Fire-and-forget;
+      // only apply if this refresh is still the latest (no newer refresh raced).
+      // Probe whenever there is a URL — the tunnel may be provided by another
+      // host/process than the wizard's cloudflared, so a dead PID does not by
+      // itself prove the tunnel is down.
+      if (tunnel.url) {
+        void probeTunnelHealth(tunnel.url).then((health) => {
+          if (generation === this.refreshGeneration && this.snapshot.tunnel === tunnel && !this.closed) {
+            this.snapshot.tunnel = { ...tunnel, health };
+            this.safeRequestRender();
+          }
+        }).catch(() => { /* probeTunnelHealth never rejects; defensive */ });
+      } else if (!tunnel.alive) {
+        // No URL and no live process: nothing to probe, mark dead immediately
+        // so the board never shows a contradictory "进程已退出" + "探测中" pair.
+        tunnel.health = "dead";
+      }
     } catch (error) {
       this.snapshot = { ...this.snapshot, refreshing: false, error: error instanceof Error ? error.message : String(error) };
     }
-    this.params.requestRender();
+    this.safeRequestRender();
+  }
+
+  /** Mark the overlay closed so async refresh/render callbacks skip work. */
+  markClosed(): void {
+    this.closed = true;
   }
 
   render(width: number): string[] {
@@ -645,6 +695,8 @@ export class McpxOverlay implements Component, Focusable {
       }
     }
     rows.push(rule(inner));
+    rows.push(...this.renderTunnelRows(inner));
+    rows.push(rule(inner));
     rows.push(fitLine(`Pi 窗口（${this.snapshot.windows.length} fresh）`, inner));
     if (this.snapshot.windows.length === 0) {
       rows.push(fitLine("  ○ 无活跃窗口 — 在对应工作区启动 pi 后可见（e 键注册当前窗口）", inner));
@@ -670,6 +722,18 @@ export class McpxOverlay implements Component, Focusable {
     return frame(rows, width);
   }
 
+  /** Classify the cwd's registration: present in config.yaml, and if so whether
+   *  its lease is still live or already expired (waiting for mcpx's sweep). */
+  private cwdRegistrationState(workspaces: McpxWorkspaceInfo[], cwd: string): { cwdRegistered: boolean; cwdLeaseStale?: boolean } {
+    const normalized = cwd.replace(/\\/g, "/").toLowerCase();
+    const match = workspaces.find((workspace) => workspace.path.replace(/\\/g, "/").toLowerCase() === normalized);
+    if (!match) return { cwdRegistered: false };
+    // A permanent entry (no expires_at) is always live; a TTL entry whose
+    // expires_at has passed is stale until mcpx's lease sweeper reclaims it.
+    const stale = match.expiresAt !== undefined && match.expiresAt <= Date.now();
+    return { cwdRegistered: true, cwdLeaseStale: stale };
+  }
+
   private renderConnectionRow(width: number): string {
     const binary = this.snapshot.binary ?? "未找到 mcpx";
     const version = this.snapshot.version ? ` · ${this.snapshot.version}` : "";
@@ -678,8 +742,45 @@ export class McpxOverlay implements Component, Focusable {
       : this.snapshot.endpoint === "offline"
         ? fg("31", "● offline")
         : fg("33", "● …");
-    const registered = this.snapshot.cwdRegistered ? fg("32", "已注册") : fg("33", "未注册");
-    return fitLine(`binary: ${binary}${version} · endpoint: ${endpoint} · 工作区 ${this.snapshot.workspaces.length} · 当前目录 ${registered}`, width);
+    // "已注册" is green only when the lease is live; a stale-but-unswept entry
+    // is yellow so the user knows mcpx will reclaim it (config.yaml still lists
+    // it until the next ~5min sweep).
+    const registered = this.snapshot.cwdRegistered
+      ? (this.snapshot.cwdLeaseStale ? fg("33", "租约过期·待清理") : fg("32", "已注册"))
+      : fg("33", "未注册");
+    // mcpx's registry is rebuilt only at startup and every ~5min (lease sweep);
+    // a freshly-registered window is recognized by the runtime after that delay.
+    const sweepHint = this.snapshot.cwdRegistered && !this.snapshot.cwdLeaseStale ? " · mcpx ≤5min 内加载" : "";
+    return fitLine(`binary: ${binary}${version} · endpoint: ${endpoint} · 工作区 ${this.snapshot.workspaces.length} · 当前目录 ${registered}${sweepHint}`, width);
+  }
+
+  private renderTunnelRows(width: number): string[] {
+    const tunnel = this.snapshot.tunnel;
+    const header = "公网隧道（Cloudflare）";
+    if (!tunnel || (!tunnel.pid && !tunnel.url)) {
+      return [fitLine(`${header}：未配置 — 在向导（c）启动快速隧道获取公网 URL`, width)];
+    }
+    const healthLabel: Record<TunnelState["health"], string> = {
+      ok: fg("33", "健康·无鉴权"),
+      auth: fg("32", "健康·鉴权正常"),
+      dead: fg("31", "异常"),
+      unknown: fg("33", "探测中"),
+    };
+    const proc = tunnel.alive ? fg("32", `进程存活·pid ${tunnel.pid}`) : fg("31", "进程已退出");
+    const rows = [fitLine(`${header} · ${proc} · ${healthLabel[tunnel.health]}`, width)];
+    if (tunnel.url) rows.push(fitLine(`  URL: ${tunnel.url}`, width));
+    if (tunnel.health === "ok") {
+      rows.push(fitLine(fg("33", "  ! 200 无鉴权 — 仅限本机 open 模式；公网暴露请用向导升级为 oauth"), width));
+    } else if (tunnel.health === "auth") {
+      // auth (401 + WWW-Authenticate) proves the tunnel and OAuth discovery are
+      // reachable, but a probe carries no credentials so it cannot reach the
+      // go-sdk Host guard that sits *after* auth. If mcpx was not restarted to
+      // load disable_localhost_protection, a real client gets 403 *after* auth.
+      rows.push(fitLine(fg("2", "  i 若客户端鉴权后仍 403：检查 server.disable_localhost_protection 并重启 mcpx"), width));
+    } else if (tunnel.health === "dead") {
+      rows.push(fitLine(fg("31", "  ! 隧道异常：mcpx 可能未重启加载新配置（403 Host/404 OAuth 路由）或隧道已断"), width));
+    }
+    return rows;
   }
 
   private renderThreadRow(entry: McpxThreadEntry, selected: boolean, width: number): string {

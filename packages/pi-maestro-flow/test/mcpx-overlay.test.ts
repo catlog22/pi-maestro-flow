@@ -253,6 +253,11 @@ test("e key routes register to onRegisterWorkspace (lease) and unregister to onU
   assert.deepEqual(registerCalls, ["D:/toggle-demo"], "register must go through onRegisterWorkspace");
   assert.equal(status, "registered-leased");
 
+  // The register handler triggers a background refresh; let it settle before
+  // the next toggle so the refreshing guard does not swallow the e key.
+  for (let i = 0; i < 30 && s["snapshot"].refreshing; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
   // registered snapshot -> e must invoke the unregister callback
   s["snapshot"].cwdRegistered = true;
   overlay.handleInput("e");
@@ -264,4 +269,29 @@ test("e key routes register to onRegisterWorkspace (lease) and unregister to onU
   }
   assert.deepEqual(unregisterCalls, ["D:/toggle-demo"], "unregister must go through onUnregisterWorkspace");
   assert.equal(status, "unregistered");
+});
+
+test("collectWorkspaces parses expires_at and distinguishes lease types", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "mcpx-tui-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const config = join(dir, "config.yaml");
+  const future = new Date(Date.now() + 300_000).toISOString();
+  const past = new Date(Date.now() - 60_000).toISOString();
+  await writeFile(config, [
+    "workspaces:",
+    "    - name: permanent",
+    "      path: D:\perm",
+    "    - name: live-lease",
+    "      path: D:\live",
+    `      expires_at: "${future}"`,
+    "    - name: stale-lease",
+    "      path: D:\stale",
+    `      expires_at: "${past}"`,
+    "",
+  ].join("\n"), "utf8");
+  const workspaces = collectWorkspaces(config);
+  assert.equal(workspaces.length, 3);
+  assert.equal(workspaces[0].expiresAt, undefined, "permanent entry has no expires_at");
+  assert.ok(workspaces[1].expiresAt! > Date.now(), "live lease expires in the future");
+  assert.ok(workspaces[2].expiresAt! <= Date.now(), "stale lease expired in the past");
 });

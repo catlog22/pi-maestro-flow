@@ -153,7 +153,7 @@ import {
 import { SessionOverlay, type SessionOverlayAction } from "../tui/session-overlay.ts";
 import { McpxOverlay } from "../tui/mcpx-overlay.ts";
 import { McpxWizardOverlay } from "../tui/mcpx-wizard.ts";
-import { startWorkspaceLease, stopWorkspaceLease, removeMcpxWorkspace } from "../mcpx-bridge.ts";
+import { startWorkspaceLease, stopWorkspaceLease, removeMcpxWorkspace, isMcpxConfigured } from "../mcpx-bridge.ts";
 import { TodoOverlay } from "../tui/todo-overlay.ts";
 import { GoalOverlay, type GoalOverlayAction } from "../tui/goal-overlay.ts";
 import { KnowledgeOverlay, type KnowledgeOverlayAction } from "../tui/knowledge-overlay.ts";
@@ -2186,12 +2186,25 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
 
   async function openMcpxOverlay(ctx: ExtensionContext): Promise<void> {
     let reopenWizard = false;
-    await ctx.ui.custom<void>((tui, _theme, _keybindings, done) =>
-      new McpxOverlay({
+    await ctx.ui.custom<void>((tui, _theme, _keybindings, done) => {
+      const overlay = new McpxOverlay({
         cwd: ctx.cwd,
         requestRender: () => tui.requestRender(),
         close: () => done(undefined),
         onRegisterWorkspace: async (path) => {
+          // Window registration is an independent action, but the wizard is the
+          // one-time initial config. If it has not been completed yet, surface it
+          // instead of registering against an unconfigured runtime.
+          if (!isMcpxConfigured()) {
+            // Mark the overlay closed first so the in-flight toggleWorkspaceRegistration
+            // (which runs refresh() after this callback returns) stops touching the
+            // renderer — the wizard is about to replace this overlay.
+            overlay.markClosed();
+            reopenWizard = true;
+            ctx.ui.notify("未完成初始配置，已打开配置向导；完成后再按 e 注册窗口", "info");
+            done(undefined);
+            return "未完成初始配置，已打开配置向导（完成后再按 e 注册窗口）";
+          }
           startWorkspaceLease(path);
           return `registered（动态租约，窗口存活期间自动续租）: ${path}`;
         },
@@ -2204,7 +2217,9 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
           reopenWizard = true;
           done(undefined);
         },
-      }), {
+      });
+      return overlay;
+    }, {
       overlay: true,
       overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%" },
     });
