@@ -336,6 +336,47 @@ test("record revision and cross-process lock reject concurrent transitions", asy
   assert.ok(settled.status === "spawning" || settled.status === "cancelled");
 });
 
+test("createDelegationDraft with skipDocument writes record.json but no task.md", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-delegation-skip-doc-"));
+  await writeFile(source(root).sessionFile, "{}\n", "utf8");
+  const draft = await createDelegationDraft(root, {
+    request: "Run a direct delegation instruction.",
+    workerContext: "fresh",
+    source: source(root),
+    task: task({ title: "Direct run" }),
+    planner: { agent: "planner", correlationId: "direct" },
+    now: 1_000,
+    skipDocument: true,
+  });
+  assert.equal(draft.status, "draft");
+  assert.equal(draft.planner.correlationId, "direct");
+  // record.json present and loadable
+  const loaded = await loadDelegationRecord(root, draft.id);
+  assert.equal(loaded.task.title, "Direct run");
+  // task.md absent
+  const { access } = await import("node:fs/promises");
+  await assert.rejects(access(delegationDocumentPath(root, draft.id)), /ENOENT/);
+});
+
+test("readDelegationDocument falls back to record when task.md is absent (direct mode)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-delegation-fallback-"));
+  await writeFile(source(root).sessionFile, "{}\n", "utf8");
+  const draft = await createDelegationDraft(root, {
+    request: "Do the thing now.",
+    workerContext: "fresh",
+    source: source(root),
+    task: task({ title: "Direct thing", objective: "Execute the thing directly." }),
+    planner: { agent: "planner", correlationId: "direct" },
+    now: 1_000,
+    skipDocument: true,
+  });
+  const document = await readDelegationDocument(root, draft.id);
+  assert.match(document, /Direct thing/);
+  assert.match(document, /Mode: direct \(no planner document\)/);
+  assert.match(document, /Do the thing now\./);
+  assert.match(document, /Execute the thing directly\./);
+});
+
 test("loaded record id must match its delegation directory", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-delegation-id-mismatch-"));
   const first = await createDraft(root, 1_000);
@@ -368,7 +409,7 @@ test("delegate command wiring keeps fork, confirmation, additive injection, and 
   assert.match(sourceText, /workerForkSessionFile = canonicalDelegationForkSource/);
   assert.match(sourceText, /sessionName,[\s\S]*?workerForkSessionFile,[\s\S]*?"delegation"/);
   assert.match(sourceText, /ctx\.ui\.select\([\s\S]*?Delegation worker context/);
-  assert.match(sourceText, /command\.workerContext \?\? await selectDelegationWorkerContext\(ctx\)/);
+  assert.match(sourceText, /command\.workerContext[\s\S]*?\? \{ context: command\.workerContext, direct: false \}[\s\S]*?: await selectDelegationWorkerContext\(ctx\)/);
   assert.match(sourceText, /Delegation cancelled before drafting/);
   assert.match(sourceText, /onProgress\(progress\)/);
   assert.match(sourceText, /delegationPlannerProgressText\(progress, workerContext\)/);

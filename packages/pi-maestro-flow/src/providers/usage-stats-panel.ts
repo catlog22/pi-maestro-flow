@@ -258,7 +258,9 @@ export class UsageStatsOverlay implements Component {
 		for (const line of renderMultiLineChart(series, { width: inner, height: 12, yTitle: "Tokens per Day", xFormat: "day", stacked: true })) {
 			lines.push(truncateToWidth(line, inner, "…"));
 		}
-		lines.push(renderLineLegend(series));
+		for (const line of renderLineLegend(series, { width: inner })) {
+			lines.push(truncateToWidth(line, inner, "…"));
+		}
 		lines.push(rule(inner));
 		const totalTokens = byModel.reduce((acc, m) => acc + m.totalTokens, 0) || 1;
 		const modelStats: Array<[string, string]> = byModel.map((m) => [

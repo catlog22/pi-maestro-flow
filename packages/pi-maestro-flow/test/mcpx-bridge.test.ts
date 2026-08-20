@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ensureMcpxWorkspace, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, probeTunnelHealth, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks } from "../src/mcpx-bridge.ts";
+import { ensureMcpxWorkspace, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, readMcpxBearerToken, probeTunnelHealth, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks } from "../src/mcpx-bridge.ts";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -93,8 +93,8 @@ test("lease heartbeat registers and renews; stop clears the timer", async (t) =>
   t.after(_resetMcpxBridgeState);
   await withFakeMcpx(async (logPath) => {
     const root = join(process.cwd(), "fixtures");
-    startWorkspaceLease(root, 300);
-    await wait(500);
+    const registered = await startWorkspaceLease(root, 300);
+    assert.equal(registered, true);
     const calls = await readFile(logPath, "utf8");
     assert.match(calls, /workspace register --ttl 300s "?.*fixtures"?/);
     stopWorkspaceLease();
@@ -126,6 +126,17 @@ async function withIsolatedHome(run: (home: string) => Promise<void>): Promise<v
     await rm(home, { recursive: true, force: true });
   }
 }
+
+test("readMcpxBearerToken only returns bearer or dual mode tokens", async (t) => {
+  t.after(_resetMcpxBridgeState);
+  await withIsolatedHome(async (home) => {
+    await mkdir(join(home, ".mcpx"), { recursive: true });
+    await writeFile(join(home, ".mcpx", "config.yaml"), 'auth:\n  mode: bearer\n  token: "abc"\n');
+    assert.equal(readMcpxBearerToken(), "abc");
+    await writeFile(join(home, ".mcpx", "config.yaml"), 'auth:\n  mode: oauth\n  token: "ignored"\n');
+    assert.equal(readMcpxBearerToken(), undefined);
+  });
+});
 
 test("isMcpxConfigured is false when no config exists", async (t) => {
   t.after(_resetMcpxBridgeState);
@@ -232,6 +243,49 @@ test("probeTunnelHealth returns auth for a 401 with WWW-Authenticate", async () 
   }
 });
 
+test("probeTunnelHealth retries Cloudflare Error 1033 until the edge is ready", async () => {
+  const { createServer } = await import("node:http");
+  let attempts = 0;
+  const server = createServer((_req, res) => {
+    attempts++;
+    if (attempts < 3) {
+      res.writeHead(530, { "Content-Type": "text/html" });
+      res.end("<title>Cloudflare Tunnel error</title><p>Error 1033</p>");
+      return;
+    }
+    res.writeHead(401, { "WWW-Authenticate": 'Bearer realm="mcpx", resource_metadata="https://x/.well-known/oauth-protected-resource/mcp"' });
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const health = await probeTunnelHealth(`http://127.0.0.1:${port}`);
+    assert.equal(health, "auth");
+    assert.equal(attempts, 3);
+  } finally {
+    server.close();
+  }
+});
+
+test("probeTunnelHealth keeps persistent Cloudflare Error 1033 dead", async () => {
+  const { createServer } = await import("node:http");
+  let attempts = 0;
+  const server = createServer((_req, res) => {
+    attempts++;
+    res.writeHead(530, { "Content-Type": "text/html" });
+    res.end("<title>Cloudflare Tunnel error</title><p>Error 1033</p>");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const health = await probeTunnelHealth(`http://127.0.0.1:${port}`);
+    assert.equal(health, "dead");
+    assert.equal(attempts, 3);
+  } finally {
+    server.close();
+  }
+});
+
 test("probeTunnelHealth returns dead for a 403 (mcpx host guard / misconfig)", async () => {
   const { createServer } = await import("node:http");
   const server = createServer((req, res) => {
@@ -243,6 +297,29 @@ test("probeTunnelHealth returns dead for a 403 (mcpx host guard / misconfig)", a
   try {
     const health = await probeTunnelHealth(`http://127.0.0.1:${port}`);
     assert.equal(health, "dead");
+  } finally {
+    server.close();
+  }
+});
+
+test("probeTunnelHealth rejects public HTTP and does not follow redirects", async (t) => {
+  const { createServer } = await import("node:http");
+  let redirectedHits = 0;
+  const server = createServer((req, res) => {
+    if (req.url === "/mcp") {
+      res.writeHead(302, { Location: "http://127.0.0.1:1/mcp" });
+      res.end();
+      return;
+    }
+    redirectedHits++;
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  try {
+    assert.equal(await probeTunnelHealth(`http://127.0.0.1:${port}`), "dead");
+    assert.equal(redirectedHits, 0);
+    assert.equal(await probeTunnelHealth("http://example.com"), "dead");
   } finally {
     server.close();
   }

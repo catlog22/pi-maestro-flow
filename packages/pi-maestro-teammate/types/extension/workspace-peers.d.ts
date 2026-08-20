@@ -12,6 +12,8 @@ export declare const DEFAULT_COMMAND_TIMEOUT_MS = 5000;
 export declare const MAX_OWNER_AGENTS = 256;
 export declare const MAX_OWNER_SETTLED = 256;
 export declare const MAX_OWNER_BACKGROUND_JOBS = 32;
+export declare const MAX_MAIN_SESSION_PROGRESS_EVENTS = 16;
+export declare const MAIN_SESSION_PROGRESS_TEXT_BYTES: number;
 export declare const MAX_OWNER_FILE_BYTES: number;
 export declare const MAX_COMMAND_FILE_BYTES: number;
 export declare const MAX_RESPONSE_FILE_BYTES: number;
@@ -95,6 +97,30 @@ export interface WorkspaceBackgroundJobSnapshot {
     startedAt: number;
     updatedAt: number;
 }
+export type WorkspaceMainSessionProgressEvent = {
+    kind: "assistant";
+    at: number;
+    text: string;
+} | {
+    kind: "tool";
+    at: number;
+    toolCallId: string;
+    toolName: string;
+    status: "running" | "completed" | "failed";
+} | {
+    kind: "lifecycle";
+    at: number;
+    phase: "agent_start" | "turn_start" | "turn_end" | "agent_end" | "agent_settled";
+};
+/** Bounded, content-safe projection of the window's root Pi session. */
+export interface WorkspaceMainSessionProgress {
+    updatedAt: number;
+    /** Absolute cursor of the newest event ever appended by this window. */
+    sequence: number;
+    /** Absolute cursor immediately before events[0]; equals sequence when empty. */
+    baseCursor: number;
+    events: WorkspaceMainSessionProgressEvent[];
+}
 export interface WorkspaceOwnerState {
     agents: readonly WorkspaceAgentSnapshot[];
     settled?: readonly WorkspaceSettledSnapshot[];
@@ -105,6 +131,8 @@ export interface WorkspaceOwnerState {
     contextPressure?: number;
     /** Last main-session activity timestamp — liveness signal when no sub-agents are running. */
     mainActivityAt?: number;
+    /** Optional assistant/tool/lifecycle projection for cross-process observers. */
+    mainProgress?: WorkspaceMainSessionProgress;
 }
 export interface WorkspaceOwnerSnapshot {
     version: typeof WORKSPACE_PEER_PROTOCOL_VERSION;
@@ -121,6 +149,8 @@ export interface WorkspaceOwnerSnapshot {
     contextPressure?: number;
     /** Last main-session activity timestamp — liveness signal when no sub-agents are running. */
     mainActivityAt?: number;
+    /** Optional assistant/tool/lifecycle projection for cross-process observers. */
+    mainProgress?: WorkspaceMainSessionProgress;
     agents: WorkspaceAgentSnapshot[];
     settled: WorkspaceSettledSnapshot[];
     backgroundJobs?: WorkspaceBackgroundJobSnapshot[];
@@ -326,6 +356,7 @@ export interface WorkspaceRemoteRootMessage {
 /** Canonical model-visible envelope for all remote root messages. */
 export declare function formatWorkspaceRemoteRootMessage(input: WorkspaceRemoteRootMessage): string;
 export declare function validateWorkspaceBackgroundJobSnapshot(value: unknown): WorkspaceBackgroundJobSnapshot | undefined;
+export declare function validateWorkspaceMainSessionProgress(value: unknown): WorkspaceMainSessionProgress | undefined;
 export declare function validateWorkspaceOwnerSnapshot(value: unknown, expected?: {
     workspaceId?: string;
     ownerId?: string;

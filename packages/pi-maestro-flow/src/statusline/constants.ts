@@ -9,9 +9,14 @@ export function ansiFg(rgb: RGB): string {
 	return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m`;
 }
 
+export function ansiBg(rgb: RGB): string {
+	return `\x1b[48;2;${rgb[0]};${rgb[1]};${rgb[2]}m`;
+}
+
 export const ANSI_RESET = "\x1b[0m";
 export const ANSI_BOLD = "\x1b[1m";
 export const ANSI_DIM = "\x1b[2m";
+export const ANSI_REVERSE = "\x1b[7m";
 
 // ---------------------------------------------------------------------------
 // Icons

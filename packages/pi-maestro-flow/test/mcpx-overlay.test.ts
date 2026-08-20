@@ -6,9 +6,15 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   _mcpxTuiInternals,
+  type McpxSnapshot,
   type McpxThreadEntry,
   type McpxWindowInfo,
 } from "../src/tui/mcpx-overlay.ts";
+import type {
+  McpxRemoteSession,
+  McpxRuntimeWindow,
+  McpxWindowObservation,
+} from "../src/tui/mcpx-client.ts";
 import { collectMcpServers, collectConnections } from "../src/tui/mcpx-overlay.ts";
 
 const { normalizeWorkspacePath, workspaceIdForCwd, collectWorkspaces, collectWindows, collectThread, displayNameOf } = _mcpxTuiInternals;
@@ -41,13 +47,17 @@ test("collectWorkspaces parses the mcpx global config", async (t) => {
     "      path: D:\\demo",
     "    - name: other",
     '      path: "C:\\other dir"',
+    "  - name: compact",
+    "    path: D:\\compact",
     "",
   ].join("\n"), "utf8");
   const workspaces = collectWorkspaces(config);
-  assert.equal(workspaces.length, 2);
+  assert.equal(workspaces.length, 3);
   assert.equal(workspaces[0].name, "demo");
   assert.equal(workspaces[0].path, "D:\\demo");
   assert.equal(workspaces[1].path, "C:\\other dir");
+  assert.equal(workspaces[2].name, "compact");
+  assert.equal(workspaces[2].path, "D:\\compact");
 });
 
 test("collectWindows keeps only fresh valid owner snapshots", async (t) => {
@@ -242,8 +252,13 @@ test("e key routes register to onRegisterWorkspace (lease) and unregister to onU
   });
   const s = overlay;
   await overlay.refresh();
-  // unregistered snapshot -> e must invoke the lease callback, not spawnSync
+  // An e key received during the initial/manual refresh must be queued rather
+  // than dropped silently.
+  s["snapshot"].refreshing = true;
   overlay.handleInput("e");
+  assert.match(s["status"], /刷新/);
+  s["snapshot"].refreshing = false;
+  await overlay.refresh();
   let status = "";
   for (let i = 0; i < 50; i++) {
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -258,8 +273,9 @@ test("e key routes register to onRegisterWorkspace (lease) and unregister to onU
   for (let i = 0; i < 30 && s["snapshot"].refreshing; i++) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  // registered snapshot -> e must invoke the unregister callback
+  // Workspace-management mode must expose the same e action as the main list.
   s["snapshot"].cwdRegistered = true;
+  s["mode"] = "workspace";
   overlay.handleInput("e");
   status = "";
   for (let i = 0; i < 50; i++) {
@@ -345,4 +361,122 @@ test("key dispatch: r=refresh, R=restart, w=workspaces (no r/R overlap)", async 
   overlay.handleInput("R");
   assert.equal(s["snapshot"].refreshing, false, "R must not refresh");
   assert.ok(String(s["status"]).startsWith("正在重启"), `R must restart, got: ${s["status"]}`);
+});
+
+test("window view renders unified sources and incrementally merges observe events", async (t) => {
+  const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
+  const session: McpxRemoteSession = { sessionId: "rs_1", workspace: "demo", label: "primary", status: "running" };
+  const window: McpxRuntimeWindow = {
+    id: "piw_1", kind: "managed", managed: true, displayName: "worker", target: "piw_1", ownerId: "piw_1",
+    pid: 42, publishedAt: Date.now(), agentCount: 0, status: "running", cursor: 1,
+    remoteSessionId: session.sessionId, remoteSessionLabel: "primary", workspace: "demo",
+  };
+  let observeCalls = 0;
+  const sent: Array<Record<string, unknown>> = [];
+  const fakeClient = {
+    observeWindow: async (): Promise<McpxWindowObservation> => {
+      observeCalls++;
+      return observeCalls === 1
+        ? {
+          source: "managed", window, status: "running", cursor: 2, nextCursor: 2, oldestCursor: 1, hasMore: false,
+          events: [{ cursor: 2, kind: "assistant", at: 100, text: "first output" }],
+        }
+        : {
+          source: "managed", window, status: "settled", cursor: 3, nextCursor: 3, oldestCursor: 1, hasMore: false,
+          events: [{ cursor: 3, kind: "tool", at: 200, toolName: "bash", status: "completed" }],
+        };
+    },
+    sendWindow: async (input: Record<string, unknown>) => {
+      sent.push(input);
+      return { windowId: input.targetMode === "new" ? "piw_new" : undefined, action: "prompt", raw: {} };
+    },
+  };
+  const composed: string[] = [];
+  const overlay = new McpxOverlay({
+    cwd: "D:/window-view",
+    requestRender: () => undefined,
+    initialRefresh: false,
+    close: () => undefined,
+    onComposeWindowMessage: async (_target, _session, mode) => {
+      composed.push(mode);
+      return { purpose: `${mode} work`, message: `${mode} message`, name: mode === "new" ? "new-worker" : undefined };
+    },
+  });
+  t.after(() => overlay.dispose());
+  overlay["refreshGeneration"]++;
+  overlay["snapshot"] = {
+    refreshing: false, endpoint: "online", workspaces: [], cwdRegistered: false, windows: [], thread: [], mcpServers: [],
+    connections: [session], runtimeWindows: [window],
+  } satisfies McpxSnapshot;
+  overlay["client"] = fakeClient as never;
+
+  overlay.handleInput("v");
+  assert.match(overlay.render(100).join("\n"), /managed · worker · running/);
+  overlay.handleInput("\r");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  let detail = overlay.render(100).join("\n");
+  assert.match(detail, /source managed · status running · cursor 2/);
+  assert.match(detail, /assistant · first output/);
+
+  await overlay["observeSelectedWindow"](overlay["observeGeneration"]);
+  detail = overlay.render(100).join("\n");
+  assert.match(detail, /status settled · cursor 3/);
+  assert.match(detail, /assistant · first output/);
+  assert.match(detail, /tool · bash · completed/);
+
+  overlay.handleInput("\x1b");
+  overlay["closed"] = true; // keep send assertions isolated from the post-send refresh probe
+  overlay["client"] = fakeClient as never;
+  overlay.handleInput("m");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  overlay["client"] = fakeClient as never;
+  overlay.handleInput("n");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(composed, ["existing", "new"]);
+  assert.equal(sent[0].window, "piw_1");
+  assert.equal(sent[0].confirmed, true);
+  assert.equal(sent[1].targetMode, "new");
+  assert.equal(typeof sent[1].idempotencyKey, "string");
+});
+
+test("window view keeps the local registry fallback when Runtime calls are auth-blocked", async (t) => {
+  const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
+  const overlay = new McpxOverlay({ cwd: "D:/fallback-view", requestRender: () => undefined, getTerminalRows: () => 12, initialRefresh: false, close: () => undefined });
+  t.after(() => overlay.dispose());
+  overlay["refreshGeneration"]++;
+  overlay["snapshot"] = {
+    refreshing: false, endpoint: "online", workspaces: [], cwdRegistered: true, mcpServers: [], thread: [],
+    connections: [{ sessionId: "rs_1", workspace: "demo", status: "running" }],
+    runtimeWindowFallback: "auth",
+    windows: Array.from({ length: 20 }, (_, index) => ({
+      displayName: index === 0 ? "local-editor" : `local-${index}`,
+      ownerId: String(index + 1).padStart(32, "0"), pid: 99 + index, publishedAt: Date.now(), agentCount: 1,
+    })),
+    tasks: [{ task_id: "task-1", remote_session_id: "rs_1", workspace: "demo", action: "delegate", message: "work", purpose: "work", status: "executing", created_at: new Date().toISOString() }],
+  } satisfies McpxSnapshot;
+  overlay.handleInput("v");
+  const rendered = overlay.render(100).join("\n");
+  assert.match(rendered, /鉴权阻止 Runtime 调用 · 使用 local registry fallback/);
+  assert.match(rendered, /local · local-editor/);
+  assert.match(rendered, /… 17 more/);
+  assert.ok(rendered.split("\n").length <= 12, "fallback rows must honor the terminal-height budget");
+});
+
+test("window rendering strips terminal control sequences from remote data", async (t) => {
+  const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
+  const overlay = new McpxOverlay({ cwd: "D:/sanitize-view", requestRender: () => undefined, initialRefresh: false, close: () => undefined });
+  t.after(() => overlay.dispose());
+  overlay["snapshot"] = {
+    refreshing: false, endpoint: "online", workspaces: [], cwdRegistered: false, thread: [], mcpServers: [], windows: [],
+    connections: [{ sessionId: "rs_1", workspace: "demo\x1b]52;c;bad\x07", status: "running", label: "label" }],
+    runtimeWindows: [{
+      id: "piw_1", kind: "managed", managed: true, displayName: "worker\x1b[2J", target: "piw_1", ownerId: "piw_1",
+      pid: 1, publishedAt: Date.now(), agentCount: 0, status: "running", cursor: 1,
+      remoteSessionId: "rs_1", remoteSessionLabel: "label", workspace: "demo",
+    }],
+  } satisfies McpxSnapshot;
+  overlay.handleInput("v");
+  const rendered = overlay.render(100).join("\n");
+  assert.doesNotMatch(rendered, /\x1b\]52/);
+  assert.doesNotMatch(rendered, /\x1b\[2J/);
 });

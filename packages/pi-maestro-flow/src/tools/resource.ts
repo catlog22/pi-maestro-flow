@@ -6,10 +6,10 @@
  * - issue://owner/repo/N — GitHub issue（gh CLI）
  * - skill://name — 已安装 skill 的 SKILL.md
  * - rule://name — 项目规则文件（AGENTS.md / RULES.md / .pi/rules/* / docs/*）
- * - agent://<publicationId-or-correlationId-or-name>[/key[/index[/field]]] — 已完成 teammate 子代理的输出
- *   （publicationId 是不可变 canonical 结果；correlationId 解析到最新结果；
- *   任务名重名时返回匹配列表（id + 时间 + 内容预览），按 id 精确查询；
- *   带 outputSchema 的任务记录其校验后的结构化输出，普通任务记录最终答案文本；裸 agent://<id> 返回完整输出）
+ * - agent://<correlationId>[/key[/index[/field]]] — 已完成 teammate 子代理的输出
+ *   （correlationId 是统一查询 ID，解析到该 agent 的最新结果；publicationId 仅作为兼容入口；
+ *   任务名重名时返回匹配列表（correlationId + 时间 + 内容预览），按 correlationId 精确查询；
+ *   带 outputSchema 的任务记录其校验后的结构化输出，普通任务记录最终答案文本；裸 agent://<correlationId> 返回完整输出）
  * - memory://… — 预留（返回明确的未实现提示，避免模型猜测）
  *
  * 只读工具：plan 白名单 + 权限 ALWAYS_ALLOWED + 系统提示引导同步注册
@@ -31,7 +31,7 @@ import { getAgentOutputPath, formatAgentMatchListing, resolveAgentOutput } from 
 export const ResourceParams = Type.Object({
   uri: Type.String({
     description:
-      "Protocol resource URI: pr://owner/repo/N (or pr://N, optional /diff or /files), issue://owner/repo/N (or issue://N), skill://name, rule://name, agent://<id>[/key[/index]]. See the tool description for scheme semantics.",
+      "Protocol resource URI: pr://owner/repo/N (or pr://N, optional /diff or /files), issue://owner/repo/N (or issue://N), skill://name, rule://name, agent://<correlationId>[/key[/index]]. See the tool description for scheme semantics.",
   }),
 });
 
@@ -399,7 +399,7 @@ export async function resolveResource(uri: string, cwd: string, signal?: AbortSi
     }
     case "agent": {
       const [id, ...pathSegments] = segments;
-      if (!id) throw new Error('Invalid agent:// URI. Expected agent://<correlationId-or-name>[/key[/index[/field]]].');
+      if (!id) throw new Error('Invalid agent:// URI. Expected agent://<correlationId>[/key[/index[/field]]].');
       const resolved = await resolveAgentOutput(id, cwd);
       if (resolved.kind === "ambiguous") {
         return {
@@ -444,14 +444,14 @@ export function createResourceTool(): ToolDefinition<typeof ResourceParams, Reso
 - \`issue://owner/repo/N\` — GitHub issue (body + comments). \`issue://N\` uses the current repository.
 - \`skill://name\` — installed skill's SKILL.md (project .pi/skills, .agents/skills, then home).
 - \`rule://name\` — project rule files (agents → AGENTS.md, rules → RULES.md, cursor → .cursorrules, cline → .clinerules, plus .pi/rules/ and docs/).
-- \`agent://<publicationId-or-correlationId-or-name>[/key[/index[/field]]]\` — output of a completed teammate subagent. A publicationId is an immutable canonical result; correlationId is a latest-result alias. A task name matching multiple outputs returns a disambiguation list of ids, timestamps and previews — query by id to select one. Bare \`agent://<id>\` returns the whole output; optional path segments pull one nested field by object key / array index, e.g. \`agent://reviewer-1/findings/0/path\`. Do NOT append \`/json\` — the bare URI already returns the output.
+- \`agent://<correlationId>[/key[/index[/field]]]\` — output of a completed teammate subagent. Use the correlation ID returned by teammate-list or teammate results as the common query path; publicationId remains a compatibility alias. A task name matching multiple outputs returns a disambiguation list of correlation IDs, timestamps and previews — query by correlation ID to select one. Bare \`agent://<correlationId>\` returns the whole output; optional path segments pull one nested field by object key / array index, e.g. \`agent://catalog-audit-correlation/findings/0/path\`. Do NOT append \`/json\` — the bare URI already returns the output.
 
 pr:// and issue:// require the gh CLI (https://cli.github.com). Results are cached in memory for 5 minutes — re-reads within the window return the cached copy, so refetch after state changes only when the window has expired.
 Read local files with the built-in read tool — resource is for protocol resources only.`,
     promptSnippet: "Use resource for pr://, issue://, skill://, rule://, agent:// protocol resources; use read for local files.",
     promptGuidelines: [
       "pr://, issue://, skill://, rule://, agent:// protocol resources are read via the resource tool — do not pass them to the built-in read tool (read is for local files).",
-      "After a teammate task finishes, read its output via the returned canonical agent://<publicationId> URI (semantics in the resource tool description).",
+      "After a teammate task finishes, read its output via the returned correlation ID using agent://<correlationId>; use publicationId only when replaying a specific immutable publication.",
     ],
     parameters: ResourceParams,
     async execute(_id, params, signal, _onUpdate, ctx): Promise<AgentToolResult<ResourceDetails>> {

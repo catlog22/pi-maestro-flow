@@ -58,7 +58,7 @@ interface AgentOutputAlias {
 }
 
 export interface AgentOutputMatch {
-  /** 查询用稳定 id（publicationId ?? correlationId），可直接 agent://<id>。 */
+  /** 查询用统一 correlationId，可直接 agent://<correlationId>。 */
   id: string;
   correlationId: string;
   publicationId?: string;
@@ -66,11 +66,12 @@ export interface AgentOutputMatch {
   /** 单行内容预览。 */
   preview: string;
 }
-
 export interface AgentOutputStoreEntry {
   id: string;
   correlationId: string;
   publicationId?: string;
+  /** Internal canonical filename; the public id remains correlationId. */
+  canonicalId: string;
   name?: string;
   agent?: string;
   capturedAt: string;
@@ -291,20 +292,20 @@ async function evictOldestRecords(dir: string, count: number): Promise<void> {
   const referenced = await aliasReferencedPublicationIds(dir);
   const candidates: AgentOutputStoreEntry[] = [];
   const chosen = new Set<string>();
-  for (const pool of [entries.filter((entry) => !referenced.has(entry.id)), entries]) {
+  for (const pool of [entries.filter((entry) => !referenced.has(entry.canonicalId)), entries]) {
     for (let index = pool.length - 1; index >= 0 && candidates.length < count; index -= 1) {
       const entry = pool[index]!;
-      if (!chosen.has(entry.id)) {
-        chosen.add(entry.id);
+      if (!chosen.has(entry.canonicalId)) {
+        chosen.add(entry.canonicalId);
         candidates.push(entry);
       }
     }
   }
   for (const entry of candidates) {
-    await unlink(recordFile(dir, entry.id)).catch((error) => {
+    await unlink(recordFile(dir, entry.canonicalId)).catch((error) => {
       if (fileErrorCode(error) !== "ENOENT") throw error;
     });
-    await repairAliasesAfterDeletion(dir, entry.id);
+    await repairAliasesAfterDeletion(dir, entry.canonicalId);
   }
 }
 
@@ -318,9 +319,10 @@ async function listCanonicalRecords(dir: string): Promise<AgentOutputStoreEntry[
     const [record, info] = await Promise.all([loadRecord(filePath), lstat(filePath)]);
     if (!record || info.isSymbolicLink() || !info.isFile()) continue;
     entries.push({
-      id: record.publicationId ?? record.correlationId,
+      id: record.correlationId,
       correlationId: record.correlationId,
       ...(record.publicationId ? { publicationId: record.publicationId } : {}),
+      canonicalId: record.publicationId ?? record.correlationId,
       ...(record.name ? { name: record.name } : {}),
       ...(record.agent ? { agent: record.agent } : {}),
       capturedAt: record.capturedAt,
@@ -504,9 +506,25 @@ export async function getAgentOutputStoreUsage(cwd: string): Promise<AgentOutput
 export async function deleteAgentOutput(id: string, cwd: string): Promise<boolean> {
   if (!isRecordId(id)) return false;
   const dir = await prepareBucketDir(cwd);
+  let recordId = id;
+  let initialInfo = await lstat(recordFile(dir, recordId)).catch((error) => {
+    if (fileErrorCode(error) === "ENOENT") return undefined;
+    throw error;
+  });
+  if (!initialInfo) {
+    const alias = await loadAlias(aliasFile(dir, id), id);
+    const target = alias ? await resolveAliasedRecord(dir, id, alias) : null;
+    if (!target?.publicationId) return false;
+    recordId = target.publicationId;
+    initialInfo = await lstat(recordFile(dir, recordId)).catch((error) => {
+      if (fileErrorCode(error) === "ENOENT") return undefined;
+      throw error;
+    });
+  }
+  if (!initialInfo) return false;
   const release = await lockSettingsResource(join(dir, ".agent-output-store"));
   try {
-    const filePath = recordFile(dir, id);
+    const filePath = recordFile(dir, recordId);
     const info = await lstat(filePath).catch((error) => {
       if (fileErrorCode(error) === "ENOENT") return undefined;
       throw error;
@@ -517,11 +535,11 @@ export async function deleteAgentOutput(id: string, cwd: string): Promise<boolea
     }
     const record = await loadRecord(filePath);
     if (!record) return false;
-    if (record.publicationId !== undefined ? record.publicationId !== id : record.correlationId !== id) {
+    if (record.publicationId !== undefined ? record.publicationId !== recordId : record.correlationId !== recordId) {
       return false;
     }
     await unlink(filePath);
-    await repairAliasesAfterDeletion(dir, id);
+    await repairAliasesAfterDeletion(dir, recordId);
     return true;
   } finally {
     await release();
@@ -640,11 +658,11 @@ function outputPreview(output: unknown, maxChars = 140): string {
 /** 重名匹配列表：id（可 agent://<id> 直接查询）+ 捕获时间 + 内容预览，新在前。 */
 export function formatAgentMatchListing(name: string, matches: AgentOutputMatch[]): string {
   return [
-    `Multiple outputs match agent name "${name}" (${matches.length}) — query by id to select one:`,
+    `Multiple outputs match agent name "${name}" (${matches.length}) — query by correlationId to select one:`,
     "",
-    ...matches.map((match) => `- agent://${match.id} — ${match.capturedAt} — ${match.preview}`),
+    ...matches.map((match) => `- agent://${match.correlationId} — ${match.capturedAt} — ${match.preview}`),
     "",
-    "Newest first. A publicationId is immutable; a correlationId always resolves to the latest result of that task.",
+    "Newest first. A correlationId resolves to the latest result of that task; publicationId remains available for immutable replay.",
   ].join("\n");
 }
 
@@ -663,8 +681,8 @@ async function scanByName(
       continue;
     }
     for (const name of names.filter(isCanonicalRecordName)) {
-      available.push(name.replace(/\.json$/, ""));
       const record = await loadRecord(join(entry.path, name));
+      available.push(record?.correlationId ?? name.replace(/\.json$/, ""));
       if (record?.name === id) records.push(record);
     }
   }
@@ -674,8 +692,8 @@ async function scanByName(
 }
 
 /**
- * 按 publicationId、correlationId latest alias 或任务 name 解析持久化输出。
- * 任务 name 命中多条记录时返回歧义列表（id + 时间 + 预览），不静默取最新。
+ * 按 correlationId latest alias 或任务 name 解析持久化输出。
+ * 任务 name 命中多条记录时返回歧义列表（correlationId + 时间 + 预览），不静默取最新。
  * 仅受控全局桶解析 alias；旧工作区目录只支持精确 legacy 记录和 name 扫描。
  */
 export async function resolveAgentOutput(id: string, cwd: string): Promise<AgentOutputResolution> {
@@ -714,7 +732,7 @@ export async function resolveAgentOutput(id: string, cwd: string): Promise<Agent
       kind: "ambiguous",
       name: id,
       matches: records.map((record) => ({
-        id: record.publicationId ?? record.correlationId,
+        id: record.correlationId,
         correlationId: record.correlationId,
         ...(record.publicationId ? { publicationId: record.publicationId } : {}),
         capturedAt: record.capturedAt,
@@ -725,14 +743,14 @@ export async function resolveAgentOutput(id: string, cwd: string): Promise<Agent
 
   throw new Error(
     `No persisted teammate output for "${id}". ` +
-    `Available agent ids: ${available.slice(0, 20).join(", ") || "(none)"}. ` +
+    `Available correlation IDs: ${available.slice(0, 20).join(", ") || "(none)"}. ` +
     "Outputs are captured when a teammate task finishes (its final answer, or the validated outputSchema value).",
   );
 }
 
 /**
- * 按 publicationId、correlationId latest alias 或任务 name 读取持久化输出。
- * 任务 name 命中多条记录时抛出含匹配列表（id + 时间 + 预览）的歧义错误；
+ * 按 correlationId latest alias 或任务 name 读取持久化输出。
+ * 任务 name 命中多条记录时抛出含匹配列表（correlationId + 时间 + 预览）的歧义错误；
  * 需要区分处理时使用 resolveAgentOutput。
  */
 export async function readAgentOutput(id: string, cwd: string): Promise<AgentOutputRecord> {

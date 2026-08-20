@@ -395,7 +395,7 @@ export interface ApiRetrySettings {
   maxDelayMs?: number;
 }
 
-export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "effort" | "enable" | "enhance" | "export" | "import" | "list" | "logout" | "nextsuggest" | "price" | "provider" | "reset" | "retry" | "show" | "toggle" | "vision";
+export type ApiProviderAction = "cache" | "cache-agent" | "configure" | "delete" | "disable" | "effort" | "enable" | "enhance" | "export" | "import" | "list" | "logout" | "nextsuggest" | "price" | "provider" | "reset" | "retry" | "show" | "stats" | "toggle" | "vision";
 export type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
@@ -1526,6 +1526,23 @@ async function showApiProviderManager(
     await backfillProviderCosts(ctx, providerId, displayName ?? providerId, modelsPath);
     return;
   }
+  if (action === "stats") {
+    const stats = parsed.stats ?? {};
+    if (stats.footer) {
+      await manageStatsFooter(ctx, defaultsPath, stats.footer);
+      return;
+    }
+    if (stats.off) {
+      ctx.ui.notify("用量统计面板为 overlay 模式，按 q/Esc 关闭。", "info");
+      return;
+    }
+    if (!ctx.hasUI) {
+      ctx.ui.notify("/api-manager stats 需要交互式 Pi 会话。", "warning");
+      return;
+    }
+    await showUsageStatsPanel(ctx);
+    return;
+  }
   if (action === "enable" || action === "disable" || action === "toggle") {
     if (!ctx.hasUI && !parsed.target) {
       ctx.ui.notify(t("manager.needProviderId", { action }), "warning");
@@ -1841,8 +1858,8 @@ async function discoverAndInjectModels(
   );
   if (!discover) return "manual";
 
-  // Discovery needs a key to authenticate against /models; fall back to a
-  // freshly entered one when the Provider has none saved yet.
+  // The caller gates discovery on a saved key, but guard defensively in case
+  // a configured Provider's key was cleared between the gate and this probe.
   let apiKey = savedApiKey;
   if (!apiKey) {
     const keyInput = await ctx.ui.input(`${displayName} API key`, "");
@@ -2789,6 +2806,7 @@ import {
   writeModelsRoot,
 } from "./api-provider-ops.ts";
 import type { CacheAgentManagerArgs, CacheManagerArgs, ConfigureModelTarget, RetryManagerArgs } from "./api-provider-ops.ts";
+import { showUsageStatsPanel } from "./usage-stats-panel.ts";
 import {
   applyCacheRetentionEnv,
   isAgentCacheRetention,
@@ -2801,4 +2819,59 @@ import {
   type CacheRetention,
   type PromptCachePolicy,
 } from "./prompt-cache-policy.ts";
+
+// ---------------------------------------------------------------------------
+// statsFooter section (api-manager.json) — toggles the statusline usage sparkline
+// ---------------------------------------------------------------------------
+
+interface StatsFooterConfig {
+  enabled: boolean;
+  metric: "tokens" | "cost" | "cache";
+  points: number;
+}
+
+const DEFAULT_STATS_FOOTER: StatsFooterConfig = { enabled: false, metric: "tokens", points: 12 };
+
+async function loadStatsFooterConfig(defaultsPath: string): Promise<StatsFooterConfig> {
+  if (!await fileExists(defaultsPath)) return { ...DEFAULT_STATS_FOOTER };
+  const root = await readModelsRoot(defaultsPath);
+  const section = root.statsFooter;
+  if (!section || typeof section !== "object") return { ...DEFAULT_STATS_FOOTER };
+  const s = section as Record<string, unknown>;
+  return {
+    enabled: s.enabled === true,
+    metric: s.metric === "cost" || s.metric === "cache" ? s.metric : "tokens",
+    points: typeof s.points === "number" && s.points >= 4 && s.points <= 64 ? Math.floor(s.points) : 12,
+  };
+}
+
+async function saveStatsFooterConfig(config: StatsFooterConfig, defaultsPath: string): Promise<void> {
+  await serializeMutation(defaultsPath, async () => {
+    const exists = await fileExists(defaultsPath);
+    const root = await readModelsRoot(defaultsPath);
+    await writeModelsRoot({ ...root, statsFooter: { ...config } }, defaultsPath, exists);
+  });
+}
+
+async function manageStatsFooter(
+  ctx: ExtensionCommandContext,
+  defaultsPath: string,
+  mode: "on" | "off" | "show",
+): Promise<void> {
+  const current = await loadStatsFooterConfig(defaultsPath);
+  if (mode === "show") {
+    ctx.ui.notify(
+      `Footer 用量 sparkline：${current.enabled ? "开启" : "关闭"} · 维度 ${current.metric} · ${current.points} 点`,
+      "info",
+    );
+    return;
+  }
+  const next: StatsFooterConfig = { ...current, enabled: mode === "on" };
+  await saveStatsFooterConfig(next, defaultsPath);
+  ctx.ui.notify(
+    `Footer 用量 sparkline 已${mode === "on" ? "开启" : "关闭"}。${mode === "on" ? "下个会话起生效，宽度≥100 列时显示。" : ""}`,
+    "info",
+  );
+}
+
 

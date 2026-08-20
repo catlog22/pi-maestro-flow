@@ -180,6 +180,8 @@ export declare function createDelegationDraft(root: string, input: {
     task: DelegationTaskDraft;
     planner: DelegationPlannerReceipt;
     now?: number;
+    /** Skip writing task.md; only persist record.json. Used by direct-run mode. */
+    skipDocument?: boolean;
 }): Promise<DelegationRecord>;
 export declare function loadDelegationRecord(root: string, id: string): Promise<DelegationRecord>;
 export declare function listDelegationRecords(root: string): Promise<DelegationRecord[]>;

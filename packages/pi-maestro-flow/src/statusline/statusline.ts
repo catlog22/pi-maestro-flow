@@ -10,8 +10,10 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { basename } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
 import {
 	deriveWorkflowViewModel,
 	type WorkflowSnapshotLike,
@@ -29,6 +31,7 @@ import {
 	getCtxLevel,
 	getCtxColor,
 } from "./constants.ts";
+import { renderSparkline } from "./usage-chart.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -69,6 +72,66 @@ interface RuntimeState {
 type PlanModeStatus = "ACT" | "PLAN" | "READY";
 
 // ---------------------------------------------------------------------------
+// Usage sparkline config (api-manager.json `statsFooter` section)
+// ---------------------------------------------------------------------------
+
+interface StatsFooterConfig {
+	enabled: boolean;
+	metric: "tokens" | "cost" | "cache";
+	points: number;
+}
+
+const DEFAULT_STATS_FOOTER: StatsFooterConfig = { enabled: false, metric: "tokens", points: 12 };
+
+async function loadStatsFooterConfig(): Promise<StatsFooterConfig> {
+	const path = join(getAgentDir(), "api-manager.json");
+	try {
+		const raw = await readFile(path, "utf8");
+		const root = JSON.parse(raw) as Record<string, unknown>;
+		const section = root.statsFooter;
+		if (!section || typeof section !== "object") return { ...DEFAULT_STATS_FOOTER };
+		const s = section as Record<string, unknown>;
+		return {
+			enabled: s.enabled === true,
+			metric: s.metric === "cost" || s.metric === "cache" ? s.metric : "tokens",
+			points: typeof s.points === "number" && s.points >= 4 && s.points <= 64 ? Math.floor(s.points) : 12,
+		};
+	} catch {
+		return { ...DEFAULT_STATS_FOOTER };
+	}
+}
+
+/**
+ * Persist an assistant message's usage to the JSONL store. The provider-layer
+ * `usage-history` module is imported lazily so the statusline stays decoupled
+ * from provider config code; failures are best-effort.
+ */
+async function recordAssistantUsage(message: MessageWithUsage, sessionId: string, cwd: string): Promise<void> {
+	try {
+		const { recordUsage } = await import("../providers/usage-history.ts");
+		// MessageWithUsage carries the usage fields; cast to the AssistantMessage
+		// shape recordUsage expects (it reads model/provider/timestamp/cost too).
+		await recordUsage(message as never, sessionId, cwd);
+	} catch {
+		// Best-effort: never break the turn.
+	}
+}
+
+/**
+ * Fire-and-forget incremental backfill of usage history from Pi session files.
+ * Runs once per session start; the cache makes subsequent runs cheap. Failures
+ * are swallowed so the agent turn never blocks on history seeding.
+ */
+async function backfillSessionsBestEffort(): Promise<void> {
+	try {
+		const { backfillFromSessions } = await import("../providers/usage-history.ts");
+		await backfillFromSessions();
+	} catch {
+		// Best-effort: history seeding must never break the session.
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Formatters
 // ---------------------------------------------------------------------------
 
@@ -94,6 +157,24 @@ function buildContextBar(usedPct: number, compact = false): string {
 	const color = getCtxColor(level);
 	const value = `${ICONS.ctx} ${bar} ${usedPct}%`;
 	return `${ansiFg(color)}${value}${ANSI_RESET}`;
+}
+
+/**
+ * Footer sparkline segment for recent per-turn usage. Returns "" when the
+ * feature is disabled or there is no data yet. The segment trails the token
+ * totals and is dropped before them under the narrow-width degradation rules
+ * (review-standards-004): it never displaces Context/input/output/cache groups.
+ */
+function renderUsageSparklineSegment(
+	series: readonly number[],
+	config: StatsFooterConfig,
+	width: number,
+): string {
+	if (!config.enabled || series.length < 2 || width < 100) return "";
+	const sparkWidth = Math.min(config.points, Math.max(4, Math.floor((width - 80) / 4)));
+	if (sparkWidth < 4) return "";
+	const color = COLORS.tokens;
+	return ` ${renderSparkline(series, { width: sparkWidth, color })}`;
 }
 
 function formatGit(git: GitInfo): string {
@@ -325,6 +406,7 @@ function renderLine1(
 	effortStatus: string | undefined,
 	evolStatus: string | undefined,
 	knowledgeStatus: string | undefined,
+	usageSparkline: string,
 ): string {
 	const safeWidth = Math.max(1, width);
 	const modeFull = renderPlanModeStatus(modeStatus, approvalStatus, 80);
@@ -345,7 +427,7 @@ function renderLine1(
 	let tokenText = "";
 	if (rs.tokens.input > 0 || rs.tokens.output > 0 || rs.tokens.cacheRead > 0 || rs.tokens.cacheWrite > 0) {
 		const value = `↑${formatTokens(rs.tokens.input)} ↓${formatTokens(rs.tokens.output)} ${ICONS.tokens}${formatTokens(rs.tokens.input + rs.tokens.output)}${cacheSegment(rs.tokens)}`;
-		tokenText = colored("tokens", value);
+		tokenText = colored("tokens", value) + usageSparkline;
 	}
 	let contextFull = "";
 	let contextCompact = "";
@@ -438,6 +520,16 @@ export function installStatusline(
 		contextPercent: null,
 		tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	};
+
+	// In-memory sparkline buffer (current session only). Avoids reading the
+	// JSONL store on every footer render; the stats panel reads the store
+	// directly when opened.
+	let usageSeries: number[] = [];
+	let statsFooterConfig: StatsFooterConfig = { ...DEFAULT_STATS_FOOTER };
+	let currentSessionId = "";
+	void loadStatsFooterConfig().then((cfg) => {
+		statsFooterConfig = cfg;
+	});
 
 	let cwd = "";
 	let invalidateFn: (() => void) | null = null;
@@ -581,7 +673,8 @@ export function installStatusline(
 					const swarmStatus = footerData.getExtensionStatuses().get("maestro-swarm");
 					const evolStatus = footerData.getExtensionStatuses().get("self-evolve");
 					const knowledgeStatus = footerData.getExtensionStatuses().get("maestro-knowledge-pending");
-					lines.push(renderLine1(rs, activeToolCalls, cwd, width, modeStatus, approvalStatus, compactionModeStatus, effortStatus, evolStatus, knowledgeStatus));
+					const usageSparkline = renderUsageSparklineSegment(usageSeries, statsFooterConfig, width);
+					lines.push(renderLine1(rs, activeToolCalls, cwd, width, modeStatus, approvalStatus, compactionModeStatus, effortStatus, evolStatus, knowledgeStatus, usageSparkline));
 
 					const pressureLine = renderPressureLine(pressureStatus, width);
 					if (pressureLine) lines.push(pressureLine);
@@ -623,6 +716,19 @@ export function installStatusline(
 		const sessionCwd = ctx.cwd;
 		cwd = sessionCwd;
 		disposed = false;
+
+		// Per-session usage sparkline: reset buffer and reload the footer config
+		// so a config change made between sessions takes effect immediately.
+		currentSessionId = ctx.sessionManager?.getSessionId?.() ?? "";
+		usageSeries = [];
+		void loadStatsFooterConfig().then((cfg) => {
+			statsFooterConfig = cfg;
+		});
+
+		// Incremental backfill from Pi session files (fire-and-forget, off the
+		// hot path). Seeds usage-history with full history so the stats panel
+		// and footer sparkline have data from before this extension loaded.
+		void backfillSessionsBestEffort();
 
 		if (ctx.model?.id) rs.model = ctx.model.id;
 
@@ -710,6 +816,33 @@ export function installStatusline(
 	// reserved for lifecycle boundaries above, avoiding quadratic session work.
 	pi.on("message_end", (event, ctx) => {
 		addTokenUsage(event.message as MessageWithUsage | undefined);
+
+		// Resolve sessionId from the live ctx (authoritative) with the cached
+		// value as fallback. Relying solely on the session_start cache missed
+		// recordings when the cache was empty (e.g. handler order races or
+		// non-interactive contexts), leaving usage-history empty.
+		const sessionId = ctx.sessionManager?.getSessionId?.() ?? currentSessionId;
+
+		// Per-turn sparkline point + persistent history (best-effort).
+		const message = event.message as MessageWithUsage | undefined;
+		if (message?.role === "assistant") {
+			// MessageWithUsage carries input/output/cacheRead/cacheWrite but not
+			// cost, so the sparkline shows token count or cache-hit ratio; the
+			// full cost breakdown is available in the /api-manager stats panel.
+			const input = message.usage?.input ?? 0;
+			const cacheRead = message.usage?.cacheRead ?? 0;
+			const point = statsFooterConfig.metric === "cache"
+				? (input + cacheRead > 0 ? cacheRead / (input + cacheRead) : 0)
+				: input + (message.usage?.output ?? 0);
+			usageSeries.push(point);
+			if (usageSeries.length > statsFooterConfig.points * 2) usageSeries = usageSeries.slice(-statsFooterConfig.points * 2);
+		}
+		// Persist full record (async, best-effort). The full AssistantMessage
+		// object (model/provider/timestamp/usage.cost) survives the type
+		// narrowing — TS only trims the visible shape, not runtime fields.
+		if (message?.role === "assistant" && sessionId) {
+			void recordAssistantUsage(message, sessionId, ctx.cwd);
+		}
 
 		const usage = ctx.getContextUsage?.();
 		if (usage) rs.contextPercent = usage.percent ?? null;

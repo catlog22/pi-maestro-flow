@@ -184,10 +184,10 @@ test("resolveResource agent:// name with duplicates lists ids, times and preview
 
   const listed = await resolveResource("agent://res-dup-agent", root);
   assert.match(listed.content, /Multiple outputs match agent name "res-dup-agent" \(2\)/);
-  assert.match(listed.content, /agent:\/\/res-dup-pub-2/);
-  assert.match(listed.content, /agent:\/\/res-dup-pub-1/);
+  assert.match(listed.content, /agent:\/\/res-dup-cid-2/);
+  assert.match(listed.content, /agent:\/\/res-dup-cid-1/);
   assert.match(listed.content, /\{"turn":2\}/);
-  assert.match(listed.content, /query by id/);
+  assert.match(listed.content, /query by correlationId/);
 
   // 按 publicationId 精确查询得到对应记录
   assert.match((await resolveResource("agent://res-dup-pub-1", root)).content, /"turn": 1/);

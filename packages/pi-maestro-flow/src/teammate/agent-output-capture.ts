@@ -150,7 +150,7 @@ export function capturePublishedAgentResult(
   const result = payload.result as { correlationId?: unknown; publicationId?: unknown };
   const correlationId = typeof result.correlationId === "string" ? result.correlationId : "unknown";
   const publicationId = typeof result.publicationId === "string" ? result.publicationId : undefined;
-  const resourceId = publicationId ?? correlationId;
+  const resourceId = correlationId;
   const persistence = persistStructuredResults([payload.result], undefined).then((summary) => {
     if (summary.stored !== 1) {
       throw new Error(

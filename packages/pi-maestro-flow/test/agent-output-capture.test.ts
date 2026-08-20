@@ -218,7 +218,7 @@ test("capturePublishedAgentResult acknowledges persistence before release", asyn
   assert.ok(persistence);
   await persistence;
   assert.equal(acknowledged, "publication-1");
-  assert.equal(resource, "agent://publication-1");
+  assert.equal(resource, "agent://published-cid-1");
   assert.deepEqual((await readAgentOutput("publication-1", root)).output, { ready: true });
   assert.deepEqual((await readAgentOutput("published-cid-1", root)).output, { ready: true });
 });
@@ -300,7 +300,7 @@ test("capturePublishedAgentResult stores an overflow publication by rolling out 
   assert.ok(persistence);
   await persistence;
   assert.equal(storedPublication, "capacity-overflow-publication", "overflow publication is stored");
-  assert.equal(resource, "agent://capacity-overflow-publication", "the stored resource is acknowledged");
+  assert.equal(resource, "agent://capacity-overflow-cid", "the stored resource is acknowledged");
   assert.deepEqual((await readAgentOutput("capacity-overflow-publication", workspace)).output, { overflow: true });
   await assert.rejects(() => readAgentOutput("capture-capacity-0", workspace), /No persisted teammate output/);
   assert.equal((await getAgentOutputStoreUsage(workspace)).records, MAX_AGENT_FILES);
@@ -338,7 +338,7 @@ test("published large result is summarized only after its canonical resource is 
   await emitTeammateResultPublished(pi as never, result, root);
   const displayed = displayMessageForResult(result);
   assert.equal(displayed.includes(output), false);
-  assert.match(displayed, /Full result: agent:\/\/integration-publication$/);
+  assert.match(displayed, /Full result: agent:\/\/integration-correlation$/);
   assert.equal((await readAgentOutput("integration-publication", root)).output, output);
   assert.equal((await readAgentOutput("integration-correlation", root)).output, output);
 });

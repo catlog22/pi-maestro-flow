@@ -14,12 +14,13 @@
  *
  * Keys: ↑↓/jk select · Enter confirm · Esc back/close · g start tunnel · x stop tunnel
  */
+import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { locateMcpx } from "../mcpx-bridge.ts";
+import { locateMcpx, isProcessOwnedBy } from "../mcpx-bridge.ts";
 
 export interface McpxWizardParams {
   cwd: string;
@@ -119,10 +120,36 @@ function yamlDoubleQuote(value: string): string {
   return '"' + String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, '\\n') + '"';
 }
 
+function readYamlScalar(section: string, key: string, indent: number): string | undefined {
+  const patterns = [
+    new RegExp(`^[ \\t]{${indent}}${key}:\\s*(.*)$`, "m"),
+    new RegExp(`^[ \\t]{2,}${key}:\\s*(.*)$`, "m"),
+  ];
+  const match = patterns.map((pattern) => section.match(pattern)).find(Boolean);
+  if (!match) return undefined;
+  const raw = match[1]!.trim();
+  if (raw.startsWith("\"") && raw.endsWith("\"")) {
+    try { return JSON.parse(raw); } catch { return raw.slice(1, -1); }
+  }
+  return raw.replace(/\s+#.*$/, "").trim();
+}
+
+function patchYamlScalar(section: string, key: string, value: string, fallbackIndent = "    "): string {
+  const pattern = new RegExp(`^([ \\t]{2,})${key}:.*$`, "m");
+  const match = section.match(pattern);
+  if (match) return section.replace(pattern, `${match[1]}${key}: ${value}`);
+  const childLine = section.split(/\r?\n/).find((line) => /^[ \t]{2,}\S/.test(line));
+  const childIndent = childLine?.match(/^[ \t]+/)?.[0] ?? fallbackIndent;
+  return `${section}\n${childIndent}${key}: ${value}`;
+}
+
 function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: string): { yaml: string; summary: string[] } {
   const sections = splitSections(existing);
   const summary: string[] = [];
   const get = (key: string) => sections.find((section) => section.key === key);
+  const existingAuth = get("auth")?.raw ?? "";
+  const existingAuthToken = readYamlScalar(existingAuth, "token", 4) ?? "";
+  const existingOauthPassword = readYamlScalar(existingAuth, "password", 8) ?? "";
   const set = (key: string, raw: string) => {
     const found = get(key);
     if (found) found.raw = raw;
@@ -138,13 +165,12 @@ function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: str
 
   // 1. server
   if (changes.host !== undefined || changes.port !== undefined) {
-    const host = changes.host ?? (/^\s{4}host:\s*(.+)$/m.exec(get("server")?.raw ?? "")?.[1]?.trim() ?? "127.0.0.1");
-    const port = changes.port ?? (Number(/^\s{4}port:\s*(\d+)/m.exec(get("server")?.raw ?? "")?.[1]) || 9090);
-    set("server", [
-      "server:",
-      `    host: ${host}`,
-      `    port: ${port}`,
-    ].join("\n"));
+    const current = get("server")?.raw ?? "server:";
+    const host = changes.host ?? readYamlScalar(current, "host", 4) ?? "127.0.0.1";
+    const port = changes.port ?? (Number(readYamlScalar(current, "port", 4)) || 9090);
+    let next = patchYamlScalar(current, "host", yamlDoubleQuote(host));
+    next = patchYamlScalar(next, "port", String(port));
+    set("server", next);
     summary.push(`监听: ${host}:${port}`);
   }
 
@@ -152,11 +178,11 @@ function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: str
   if (changes.authMode) {
     const lines = ["auth:", `    mode: ${changes.authMode}`];
     if (changes.authMode === "bearer") {
-      lines.push(`    token: ${yamlDoubleQuote(changes.authToken ?? "")}`);
+      lines.push(`    token: ${yamlDoubleQuote(changes.authToken ?? existingAuthToken)}`);
     } else if (changes.authMode === "oauth") {
       lines.push(`    token: ""`);
       lines.push("    oauth:");
-      lines.push(`        password: ${yamlDoubleQuote(changes.oauthPassword ?? "")}`);
+      lines.push(`        password: ${yamlDoubleQuote(changes.oauthPassword ?? existingOauthPassword)}`);
       lines.push(`        server_url: ${yamlDoubleQuote(changes.oauthServerURL ?? "")}`);
       lines.push(`        token_ttl: 86400`);
     } else {
@@ -170,9 +196,7 @@ function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: str
   if (changes.authMode === "oauth" || changes.tunnelUrl) {
     const patch = (flag: string, value: string) => {
       const current = get("server")?.raw ?? "server:";
-      const pattern = new RegExp(`^\\s{4}${flag}:.*$`, "m");
-      const next = pattern.test(current) ? current.replace(pattern, `    ${flag}: ${value}`) : `${current}\n    ${flag}: ${value}`;
-      set("server", next);
+      set("server", patchYamlScalar(current, flag, value));
     };
     patch("disable_localhost_protection", "true");
     patch("trust_proxy_headers", "true");
@@ -187,7 +211,7 @@ function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: str
       "    mode: oauth",
       `    token: ""`,
       "    oauth:",
-      `        password: ${yamlDoubleQuote(changes.oauthPassword ?? "")}`,
+      `        password: ${yamlDoubleQuote(changes.oauthPassword ?? existingOauthPassword)}`,
       `        server_url: ${yamlDoubleQuote(changes.tunnelUrl)}`,
       `        token_ttl: 86400`,
     ].join("\n"));
@@ -272,6 +296,8 @@ export class McpxWizardOverlay implements Component, Focusable {
   private tunnelExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
   /** Metrics server URL cloudflared prints once it is up — proof of life when the URL is late. */
   private metricsUrl: string | undefined;
+  private tunnelOwnedHere = false;
+  private configCommitted = false;
 
   private tunnelPidPath(): string {
     return process.env.MCPX_TUNNEL_PID_FILE ?? join(homedir(), ".mcpx", "cloudflared.pid");
@@ -294,7 +320,25 @@ export class McpxWizardOverlay implements Component, Focusable {
   }
 
   invalidate(): void {}
-  dispose(): void {}
+
+  dispose(): void {
+    if (this.configCommitted || !this.tunnelOwnedHere) return;
+    const child = this.tunnelProcess;
+    const pid = child?.pid ?? this.pidFromFile();
+    this.tunnelProcess = undefined;
+    this.tunnelOwnedHere = false;
+    this.metricsUrl = undefined;
+    try {
+      if (pid && child) {
+        if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+        else child.kill();
+      } else if (pid && isProcessOwnedBy(pid, "cloudflared")) {
+        if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+        else process.kill(pid, "SIGTERM");
+      }
+    } catch { /* best-effort cleanup on overlay close */ }
+    try { rmSync(this.tunnelPidPath(), { force: true }); } catch { /* best-effort */ }
+  }
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.min(width, 120));
@@ -580,7 +624,7 @@ export class McpxWizardOverlay implements Component, Focusable {
     }
     // Adopt a tunnel left behind by a previous wizard session (PID file).
     const existing = this.pidFromFile();
-    if (existing && isProcessAlive(existing)) {
+    if (existing && isProcessOwnedBy(existing, "cloudflared")) {
       this.status = `隧道已在运行（PID ${existing}）— 按 x 停止后重新启动`;
       this.params.requestRender();
       return;
@@ -621,6 +665,7 @@ export class McpxWizardOverlay implements Component, Focusable {
       });
       child.unref();
       this.tunnelProcess = child;
+      this.tunnelOwnedHere = true;
       child.stdout?.on("data", (chunk: Buffer) => this.onTunnelOutput(chunk.toString()));
       child.stderr?.on("data", (chunk: Buffer) => this.onTunnelOutput(chunk.toString()));
       // Lifecycle: if cloudflared dies before yielding a URL, surface the exit cause
@@ -629,6 +674,7 @@ export class McpxWizardOverlay implements Component, Focusable {
         this.tunnelExit = { code: null, signal: null };
         if (this.tunnelProcess === child) {
           this.tunnelProcess = undefined;
+          this.tunnelOwnedHere = false;
           this.appendTunnelLine(`cloudflared 启动错误: ${err.message}`);
           this.status = this.tunnelFailStatus();
           this.params.requestRender();
@@ -638,7 +684,9 @@ export class McpxWizardOverlay implements Component, Focusable {
         this.tunnelExit = { code, signal };
         if (this.tunnelProcess === child) {
           this.tunnelProcess = undefined;
+          this.tunnelOwnedHere = false;
           this.metricsUrl = undefined; // dead child no longer serves metrics
+          try { rmSync(this.tunnelPidPath(), { force: true }); } catch { /* best-effort */ }
           // Preserve any error text already captured from stdout/stderr.
           if (code !== 0 && code !== null) {
             this.appendTunnelLine(`cloudflared 退出（代码 ${code}）`);
@@ -760,6 +808,12 @@ export class McpxWizardOverlay implements Component, Focusable {
       this.params.requestRender();
       return;
     }
+    if (!this.tunnelProcess && !isProcessOwnedBy(pid, "cloudflared")) {
+      try { rmSync(this.tunnelPidPath(), { force: true }); } catch { /* best-effort */ }
+      this.status = "未找到 cloudflared 进程";
+      this.params.requestRender();
+      return;
+    }
     try {
       if (process.platform === "win32") {
         spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
@@ -777,6 +831,7 @@ export class McpxWizardOverlay implements Component, Focusable {
       this.status = `停止隧道失败: ${error instanceof Error ? error.message : String(error)}`;
     }
     this.tunnelProcess = undefined;
+    this.tunnelOwnedHere = false;
     this.tunnelExit = undefined;
     this.metricsUrl = undefined;
     // A stopped tunnel's URL is dead — never let it reach the write step.
@@ -808,12 +863,13 @@ export class McpxWizardOverlay implements Component, Focusable {
     if (this.status === "写入中…") return;
     this.status = "写入中…";
     this.params.requestRender();
-    const temp = `${this.configPath()}.wizard.tmp`;
+    const temp = `${this.configPath()}.wizard-${process.pid}-${randomUUID()}.tmp`;
     try {
       const { yaml } = this.build();
       const path = this.configPath();
-      writeFileSync(temp, yaml, "utf8");
+      writeFileSync(temp, yaml, { encoding: "utf8", flag: "wx", mode: 0o600 });
       renameSync(temp, path);
+      this.configCommitted = true;
       this.status = "已写入 " + path + " — 重启 mcpx 后生效（窗口/wizard 亦可用 /mcpx 查看）";
       this.params.requestRender();
     } catch (error) {
@@ -851,22 +907,6 @@ function isEnter(data: string): boolean {
   return matchesKey(data, Key.enter);
 }
 
-/** Fold duplicated URL schemes (https://https://…) and trim. */
-function isProcessAlive(pid: number): boolean {
-  try {
-    if (process.platform === "win32") {
-      const result = spawnSync("tasklist", ["/FI", `PID eq ${pid}`], { encoding: "utf8", timeout: 10_000 });
-      if (result.status !== 0) return false;
-      const out = String(result.stdout || "");
-      return out.includes(String(pid)) && !/No tasks/i.test(out);
-    }
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function isExecutableOnPath(command: string): boolean {
   return resolveExecutable(command) !== undefined;
 }
@@ -884,10 +924,10 @@ function isExecutableOnPath(command: string): boolean {
  * the URL output reaches Node's pipe listeners.
  */
 function resolveExecutable(command: string): string | undefined {
-  const probe = spawnSync(process.platform === "win32" ? "where" : "which", [command], {
+  const probe = spawnSync(process.platform === "win32" ? "where.exe" : "which", [command], {
     encoding: "utf8",
     timeout: 5_000,
-    shell: process.platform === "win32",
+    shell: false,
   });
   if (probe.status !== 0) return undefined;
   const lines = String(probe.stdout || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);

@@ -481,6 +481,8 @@ export async function createDelegationDraft(
     task: DelegationTaskDraft;
     planner: DelegationPlannerReceipt;
     now?: number;
+    /** Skip writing task.md; only persist record.json. Used by direct-run mode. */
+    skipDocument?: boolean;
   },
 ): Promise<DelegationRecord> {
   const task = parseDelegationTaskDraft(input.task);
@@ -504,7 +506,9 @@ export async function createDelegationDraft(
   await mkdir(directory, { recursive: false, mode: 0o700 });
   const canonicalDirectory = await validateRuntimeDirectory(directory, storage, `delegation ${id}`);
   try {
-    await atomicWrite(join(canonicalDirectory, "task.md"), formatDelegationDocument(record));
+    if (!input.skipDocument) {
+      await atomicWrite(join(canonicalDirectory, "task.md"), formatDelegationDocument(record));
+    }
     await atomicWrite(join(canonicalDirectory, "record.json"), `${JSON.stringify(record, null, 2)}\n`);
     return record;
   } catch (error) {
@@ -703,11 +707,37 @@ export async function listDelegationRecords(root: string): Promise<DelegationRec
 
 export async function readDelegationDocument(root: string, id: string): Promise<string> {
   const directory = await validatedDelegationDirectory(root, id);
-  const document = await readRegularFileBounded(
-    join(directory, "task.md"),
-    MAX_DELEGATION_DOCUMENT_BYTES,
-    "delegation document",
-  );
+  const documentPath = join(directory, "task.md");
+  let exists = false;
+  try {
+    await lstat(documentPath);
+    exists = true;
+  } catch (error) {
+    // Only ENOENT (file absent) is a valid direct-run fallback; other errors propagate.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    exists = false;
+  }
+  if (!exists) {
+    // Direct-run delegations skip task.md; fall back to the request/objective in record.json.
+    const record = await loadDelegationRecord(root, id);
+    const fallback = [
+      `# ${record.task.title}`,
+      "",
+      `Delegation ID: \`${record.id}\``,
+      `Mode: direct (no planner document)`,
+      "",
+      "## Instruction",
+      "",
+      record.request,
+      "",
+      "## Objective",
+      "",
+      record.task.objective,
+      "",
+    ].join("\n");
+    return `${fallback}\n`;
+  }
+  const document = await readRegularFileBounded(documentPath, MAX_DELEGATION_DOCUMENT_BYTES, "delegation document");
   const text = document.toString("utf8").trim();
   if (!text) throw new Error("Delegation document is empty.");
   return `${text}\n`;

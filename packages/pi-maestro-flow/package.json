@@ -83,7 +83,8 @@
     "extensions": [
       "./src/extension/index.ts",
       "./src/advisor/extension.ts",
-      "./src/self-evolve/extension.ts"
+      "./src/self-evolve/extension.ts",
+      "./src/submit-gate/extension.ts"
     ],
     "skills": [
       "./.pi/skills"

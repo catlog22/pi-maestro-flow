@@ -12,13 +12,16 @@
  * Opt out with PI_MCPX_BRIDGE=0. Override the binary with MCPX_BIN.
  */
 
+import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
 const bridgeDisabled = () => process.env.PI_MCPX_BRIDGE === "0";
 const registeredPaths = new Set<string>();
+const workspaceRegistrationPromises = new Map<string, Promise<boolean>>();
 
 export const LEASE_TTL_SECONDS = 300; // lease length; heartbeat renews every minute
 const HEARTBEAT_MS = 60_000;
@@ -43,9 +46,9 @@ export function locateMcpx(): string | undefined {
   // controls and the startup bridge find it here without PATH changes.
   const homeBin = join(homedir(), ".mcpx", "bin", process.platform === "win32" ? "mcpx.exe" : "mcpx");
   if (existsSync(homeBin)) { cachedMcpx = homeBin; return homeBin; }
-  const probe = spawnSync(process.platform === "win32" ? "where" : "which", ["mcpx"], {
+  const probe = spawnSync(process.platform === "win32" ? "where.exe" : "which", ["mcpx"], {
     encoding: "utf8",
-    shell: process.platform === "win32",
+    shell: false,
     timeout: 10_000,
   });
   if (probe.status === 0) {
@@ -64,25 +67,52 @@ function absoluteRoot(root: string | undefined): string {
 function runMcpx(args: string[]): { status: number | null; stderr: string } {
   const mcpx = locateMcpx();
   if (!mcpx) return { status: null, stderr: "mcpx binary not found" };
+  const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(mcpx);
+  // npm shims require cmd.exe, but never pass shell metacharacters through a
+  // shim. The normal installed mcpx.exe path uses shell:false and accepts all
+  // valid Windows paths.
+  if (useShell && args.some((arg) => /[\u0000\r\n&|<>^%!()]/.test(arg))) {
+    return { status: null, stderr: "unsafe Windows command argument" };
+  }
   const result = spawnSync(mcpx, args, {
     encoding: "utf8",
     timeout: 15_000,
-    shell: process.platform === "win32", // npm shims are .cmd wrappers
+    shell: useShell,
   });
   return { status: result.status, stderr: String(result.stderr || result.stdout || "").trim() };
 }
 
 /**
  * Register `root` (defaults to process.cwd()) with the local MCPX runtime
- * under a lease. Fire-and-forget: never throws, never blocks startup.
- * Deduplicated per path so bursty callers only spawn one registration.
+ * under a lease. The CLI call is deferred by one event-loop turn, but the
+ * returned promise settles after the config write completes. Deduplicated per
+ * path so bursty callers only spawn one registration.
  */
-export function ensureMcpxWorkspace(root?: string, ttlSeconds: number = LEASE_TTL_SECONDS): void {
-  if (bridgeDisabled()) return;
+export async function ensureMcpxWorkspace(
+  root?: string,
+  ttlSeconds: number = LEASE_TTL_SECONDS,
+  generation?: number,
+): Promise<boolean> {
+  if (bridgeDisabled()) return false;
   const absRoot = absoluteRoot(root);
-  if (registeredPaths.has(absRoot)) return;
-  registeredPaths.add(absRoot);
-  renewWorkspaceLease(absRoot, ttlSeconds);
+  if (generation !== undefined && generation !== leaseGeneration) return false;
+  if (registeredPaths.has(absRoot)) return true;
+  const existing = workspaceRegistrationPromises.get(absRoot);
+  if (existing) return existing;
+  const registration = (async () => {
+    registeredPaths.add(absRoot);
+    const registered = await renewWorkspaceLease(absRoot, ttlSeconds, generation);
+    if (!registered) registeredPaths.delete(absRoot);
+    return registered;
+  })();
+  workspaceRegistrationPromises.set(absRoot, registration);
+  try {
+    return await registration;
+  } finally {
+    if (workspaceRegistrationPromises.get(absRoot) === registration) {
+      workspaceRegistrationPromises.delete(absRoot);
+    }
+  }
 }
 
 /**
@@ -90,23 +120,31 @@ export function ensureMcpxWorkspace(root?: string, ttlSeconds: number = LEASE_TT
  * per-path dedupe set: the heartbeat must actually re-register so the
  * TTL is extended while the window stays alive.
  */
-function renewWorkspaceLease(absRoot: string, ttlSeconds: number, generation?: number): void {
-  setImmediate(() => {
-    // A heartbeat renewal enqueued before stop() must not fire after stop.
-    // generation is only supplied by the lease heartbeat; an explicit
-    // ensureMcpxWorkspace call (no generation) always runs.
-    if (generation !== undefined && generation !== leaseGeneration) return;
-    try {
-      const args = ttlSeconds > 0
-        ? ["workspace", "register", "--ttl", `${ttlSeconds}s`, absRoot]
-        : ["workspace", "register", absRoot];
-      const { status, stderr } = runMcpx(args);
-      if (status !== 0) {
-        console.warn(`[pi-maestro-flow] MCPX workspace registration failed (${status ?? "spawn error"}): ${stderr}`);
+function renewWorkspaceLease(absRoot: string, ttlSeconds: number, generation?: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    setImmediate(() => {
+      // A heartbeat renewal enqueued before stop() must not fire after stop.
+      // generation is only supplied by the lease heartbeat; an explicit
+      // ensureMcpxWorkspace call (no generation) always runs.
+      if (generation !== undefined && generation !== leaseGeneration) {
+        resolve(false);
+        return;
       }
-    } catch (error) {
-      console.warn(`[pi-maestro-flow] MCPX workspace registration skipped: ${error instanceof Error ? error.message : String(error)}`);
-    }
+      try {
+        const args = ttlSeconds > 0
+          ? ["workspace", "register", "--ttl", `${ttlSeconds}s`, absRoot]
+          : ["workspace", "register", absRoot];
+        const { status, stderr } = runMcpx(args);
+        const registered = status === 0;
+        if (!registered) {
+          console.warn(`[pi-maestro-flow] MCPX workspace registration failed (${status ?? "spawn error"}): ${stderr}`);
+        }
+        resolve(registered);
+      } catch (error) {
+        console.warn(`[pi-maestro-flow] MCPX workspace registration skipped: ${error instanceof Error ? error.message : String(error)}`);
+        resolve(false);
+      }
+    });
   });
 }
 
@@ -129,16 +167,22 @@ export function removeMcpxWorkspace(root?: string): void {
  * Start a lease for `cwd`: register immediately, then renew every minute so
  * the workspace stays alive while this window is running. When the window
  * goes offline the heartbeat stops and MCPX drops the workspace at expiry.
+ * Resolves after the initial registration command has completed.
  */
-export function startWorkspaceLease(cwd: string, ttlSeconds: number = LEASE_TTL_SECONDS): void {
+export async function startWorkspaceLease(cwd: string, ttlSeconds: number = LEASE_TTL_SECONDS): Promise<boolean> {
   stopWorkspaceLease();
   leaseCwd = cwd;
   leaseGeneration++;
   const generation = leaseGeneration;
-  ensureMcpxWorkspace(cwd, ttlSeconds);
-  leaseTimer = setInterval(() => renewWorkspaceLease(absoluteRoot(cwd), ttlSeconds, generation), HEARTBEAT_MS);
-  leaseTimer.unref?.(); // never keep the process alive on shutdown
-  console.log(`[pi-maestro-flow] MCPX workspace lease started (ttl ${ttlSeconds}s, heartbeat ${HEARTBEAT_MS / 1000}s): ${cwd}`);
+  const absRoot = absoluteRoot(cwd);
+  registeredPaths.delete(absRoot);
+  const registered = await ensureMcpxWorkspace(cwd, ttlSeconds, generation);
+  if (generation === leaseGeneration && !bridgeDisabled()) {
+    leaseTimer = setInterval(() => { void renewWorkspaceLease(absoluteRoot(cwd), ttlSeconds, generation); }, HEARTBEAT_MS);
+    leaseTimer.unref?.(); // never keep the process alive on shutdown
+    console.log(`[pi-maestro-flow] MCPX workspace lease started (ttl ${ttlSeconds}s, heartbeat ${HEARTBEAT_MS / 1000}s): ${cwd}`);
+  }
+  return registered;
 }
 
 /** Stop the lease heartbeat (used when the window is unregistered or closed). */
@@ -154,6 +198,7 @@ export function stopWorkspaceLease(): void {
 /** Test hook: reset the in-process deduplication state. */
 export function _resetMcpxBridgeState(): void {
   registeredPaths.clear();
+  workspaceRegistrationPromises.clear();
   stopWorkspaceLease();
   // Also reset the caches so tests that set up a fresh MCPX_BIN in a temp dir
   // re-probe instead of reusing a stale cached path from a prior test.
@@ -173,10 +218,45 @@ export function _resetMcpxForPmfCache(): void {
 
 // --- Tunnel health & config detection (shared by overlay + wizard + extension) ---
 
+const MCPX_PID_FILE = () => process.env.MCPX_PID_FILE ?? join(homedir(), ".mcpx", "mcpx-server.pid");
 const MCPX_TUNNEL_PID_FILE = () => process.env.MCPX_TUNNEL_PID_FILE ?? join(homedir(), ".mcpx", "cloudflared.pid");
 const MCPX_CONFIG_PATH = () => join(homedir(), ".mcpx", "config.yaml");
 
 export type TunnelHealth = "ok" | "auth" | "dead" | "unknown";
+
+const CLOUDFLARE_1033_ATTEMPTS = 3;
+const CLOUDFLARE_1033_RETRY_MS = 1_000;
+
+function parseProbeURL(raw: string): URL | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return undefined;
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) return undefined;
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!hostname || hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local") || hostname === "metadata.google.internal") {
+    return undefined;
+  }
+  // Plain HTTP is only accepted for the loopback development endpoint used by
+  // local MCPX instances. Public tunnel URLs must use HTTPS.
+  if (parsed.protocol === "http:" && hostname !== "127.0.0.1") return undefined;
+  const addressType = isIP(hostname);
+  if (addressType === 4) {
+    const octets = hostname.split(".").map(Number);
+    const privateAddress = octets[0] === 10
+      || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)
+      || (octets[0] === 192 && octets[1] === 168)
+      || octets[0] === 169 && octets[1] === 254;
+    const loopbackAddress = octets[0] === 127;
+    if ((privateAddress || loopbackAddress) && hostname !== "127.0.0.1") return undefined;
+  } else if (addressType === 6 && (/^(::1|fc|fd|fe8|fe9|fea|feb)/i.test(hostname))) {
+    return undefined;
+  }
+  return parsed;
+}
 
 export interface TunnelState {
   pid?: number;
@@ -257,42 +337,59 @@ export function readTunnelState(): TunnelState {
  *   401 + WWW-Authenticate → "auth" (OAuth handshake reachable — healthy)
  *   403 / 404       → "dead"  (tunnel up but mcpx config not reloaded, e.g. the
  *                            "invalid Host header" / missing OAuth routes case)
+ *   530 + Cloudflare Error 1033 → retry while the edge connector registers,
+ *                                  then "dead" if the outage persists
  *   timeout/refuse → "dead"  (tunnel broken or mcpx down)
  */
 export async function probeTunnelHealth(url: string): Promise<TunnelHealth> {
-  const endpoint = url.replace(/\/$/, "") + "/mcp";
-  try {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json, text/event-stream",
-        "MCP-Protocol-Version": "2025-06-18",
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-06-18",
-          capabilities: {},
-          clientInfo: { name: "mcpx-tui", version: "1.0.0" },
+  const parsed = parseProbeURL(url);
+  if (!parsed) return "dead";
+  parsed.pathname = `${parsed.pathname.replace(/\/$/, "")}/mcp`;
+  const endpoint = parsed.href;
+  for (let attempt = 0; attempt < CLOUDFLARE_1033_ATTEMPTS; attempt++) {
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "MCP-Protocol-Version": "2025-06-18",
         },
-      }),
-      signal: AbortSignal.timeout(4_000),
-    });
-    if (response.status === 200) return "ok";
-    if (response.status === 401) {
-      // mcpx's wrapMCP always sets WWW-Authenticate with resource_metadata on 401
-      // (http_gateway.go). A 401 without it is not mcpx's OAuth handshake start —
-      // treat as dead (e.g. an upstream proxy's own 401, not the tunnel to mcpx).
-      const wwwAuth = response.headers.get("WWW-Authenticate") ?? "";
-      return wwwAuth.toLowerCase().includes("resource_metadata") ? "auth" : "dead";
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "mcpx-tui", version: "1.0.0" },
+          },
+        }),
+        signal: AbortSignal.timeout(4_000),
+        redirect: "manual",
+      });
+      if (response.status === 200) return "ok";
+      if (response.status === 401) {
+        // mcpx's wrapMCP always sets WWW-Authenticate with resource_metadata on 401
+        // (http_gateway.go). A 401 without it is not mcpx's OAuth handshake start —
+        // treat as dead (e.g. an upstream proxy's own 401, not the tunnel to mcpx).
+        const wwwAuth = response.headers.get("WWW-Authenticate") ?? "";
+        return wwwAuth.toLowerCase().includes("resource_metadata") ? "auth" : "dead";
+      }
+      if (response.status === 530) {
+        const body = (await response.text().catch(() => "")).slice(0, 32_768);
+        const edgeConnectorPending = /\b1033\b/.test(body);
+        if (edgeConnectorPending && attempt + 1 < CLOUDFLARE_1033_ATTEMPTS) {
+          await new Promise((resolve) => setTimeout(resolve, CLOUDFLARE_1033_RETRY_MS));
+          continue;
+        }
+      }
+      return "dead";
+    } catch {
+      return "dead";
     }
-    return "dead";
-  } catch {
-    return "dead";
   }
+  return "dead";
 }
 
 /**
@@ -343,6 +440,19 @@ export function readOpsPassword(): string | undefined {
   }
 }
 
+/** Read a configured bearer token for local Runtime calls. OAuth passwords are not tokens. */
+export function readMcpxBearerToken(): string | undefined {
+  try {
+    const raw = readFileSync(MCPX_CONFIG_PATH(), "utf8");
+    const mode = raw.match(/^\s{2,}mode:\s*([A-Za-z]+)/m)?.[1]?.toLowerCase();
+    if (mode && mode !== "bearer" && mode !== "dual") return undefined;
+    const token = raw.match(/^\s{2,}token:\s*"?([^"\n#]+)"?/m)?.[1]?.trim();
+    return token || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Detect whether the `mcpx-for-pmf` fork is installed as a global npm package.
  * The fork's postinstall drops the platform binary at ~/.mcpx/bin; the npm
@@ -383,13 +493,9 @@ export function detectMcpxForPmf(): { installed: boolean; version?: string } {
 export function removeWorkspaceByPath(path: string): { ok: boolean; message: string } {
   const mcpx = locateMcpx();
   if (!mcpx) return { ok: false, message: "未找到 mcpx 二进制" };
-  const result = spawnSync(mcpx, ["workspace", "remove", path], {
-    encoding: "utf8",
-    timeout: 15_000,
-    shell: process.platform === "win32",
-  });
-  if (result.status === 0) return { ok: true, message: "已移除（mcpx ≤5min 内清理）" };
-  return { ok: false, message: String(result.stderr || result.stdout || "workspace remove 失败").trim() };
+  const { status, stderr } = runMcpx(["workspace", "remove", path]);
+  if (status === 0) return { ok: true, message: "已移除（mcpx ≤5min 内清理）" };
+  return { ok: false, message: stderr || "workspace remove 失败" };
 }
 
 // --- Delegated task registry (Phase 4: board display) ---
@@ -491,10 +597,10 @@ export function readDelegatedTasks(sessionId?: string): DelegatedTask[] | undefi
 
 /** Resolve the cloudflared executable path (mirrors the wizard's logic). */
 function resolveCloudflared(): string | undefined {
-  const probe = spawnSync(process.platform === "win32" ? "where" : "which", ["cloudflared"], {
+  const probe = spawnSync(process.platform === "win32" ? "where.exe" : "which", ["cloudflared"], {
     encoding: "utf8",
     timeout: 10_000,
-    shell: process.platform === "win32",
+    shell: false,
   });
   if (probe.status === 0) {
     const line = String(probe.stdout || "").split(/\r?\n/).find(Boolean);
@@ -514,10 +620,12 @@ function resolveCloudflared(): string | undefined {
  *   ours).
  * - Windows: `tasklist /FI "PID eq <pid>"` and compare the image name column;
  *   match if it ends with `<expectedName>.exe`. If tasklist is unavailable or
- *   returns nothing parseable, fall back to true so a missing wmic/tasklist
- *   does not block the kill, but still return false when a name is present and
- *   does not match.
+ *   returns nothing parseable, fail closed and refuse the kill.
  */
+export function isProcessOwnedBy(pid: number, expectedName: string): boolean {
+  return processMatches(pid, expectedName);
+}
+
 function processMatches(pid: number, expectedName: string): boolean {
   const needle = expectedName.toLowerCase();
   try {
@@ -531,7 +639,8 @@ function processMatches(pid: number, expectedName: string): boolean {
       timeout: 3_000,
     });
     const stdout = String(result.stdout || "");
-    if (result.status !== 0 || !stdout.trim()) return true; // tasklist missing → don't block
+    if (result.status !== 0 || !stdout.trim()) return false;
+
     const expected = `${needle}.exe`;
     for (const line of stdout.split(/\r?\n/)) {
       if (!line.trim()) continue;
@@ -539,7 +648,8 @@ function processMatches(pid: number, expectedName: string): boolean {
       if (!first) continue;
       return first.endsWith(expected);
     }
-    return true; // no parseable image name → don't block the kill
+    return false; // no parseable image name — fail closed
+
   } catch {
     return false; // POSIX /proc unreadable (ENOENT) — process gone or not ours
   }
@@ -562,6 +672,18 @@ function killTunnel(pid: number): void {
   } catch {
     // already dead
   }
+}
+
+/** Stop a Cloudflare quick tunnel tracked by the PID file (best-effort). */
+export function stopQuickTunnel(): void {
+  let pid: number | undefined;
+  try {
+    const raw = readFileSync(MCPX_TUNNEL_PID_FILE(), "utf8").trim();
+    const parsed = Number(raw);
+    if (Number.isInteger(parsed) && parsed > 0) pid = parsed;
+  } catch { /* no PID file */ }
+  if (pid) killTunnel(pid);
+  try { rmSync(MCPX_TUNNEL_PID_FILE(), { force: true }); } catch { /* best-effort */ }
 }
 
 /**
@@ -619,6 +741,23 @@ export async function restartQuickTunnel(localPort: number, timeoutMs = 30_000):
   throw new Error(`cloudflared 启动超时未取得 URL: ${output.slice(-400)}`);
 }
 
+function replaceConfigAtomically(next: string): void {
+  const path = MCPX_CONFIG_PATH();
+  const temp = `${path}.mcpx-${process.pid}-${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temp, next, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    renameSync(temp, path);
+  } finally {
+    try { rmSync(temp, { force: true }); } catch { /* best-effort */ }
+  }
+}
+
+/** Restore a previously-read config snapshot after a failed tunnel transaction. */
+export function restoreMcpxConfig(raw: string): void {
+  if (!raw) throw new Error("config.yaml 快照为空");
+  replaceConfigAtomically(raw);
+}
+
 /** Update auth.oauth.server_url in ~/.mcpx/config.yaml (in place, section-preserving). */
 export function updateConfigServerURL(url: string): void {
   let parsed: URL;
@@ -628,14 +767,14 @@ export function updateConfigServerURL(url: string): void {
   const raw = readFileSync(path, "utf8");
   const pattern = /^(\s{2,}server_url:\s*).*/m;
   if (!pattern.test(raw)) throw new Error("config.yaml 无 server_url 字段");
-  const next = raw.replace(pattern, `$1${parsed.href.replace(/\/$/, "")}`);
-  writeFileSync(path, next, "utf8");
+  const next = raw.replace(pattern, (_match, prefix: string) => `${prefix}${parsed.href.replace(/\/$/, "")}`);
+  replaceConfigAtomically(next);
 }
 
 /** Stop the mcpx process tracked by ~/.mcpx/mcpx-server.pid (best-effort). */
 export function stopMcpx(): void {
   let pid: number | undefined;
-  const pidFile = join(homedir(), ".mcpx", "mcpx-server.pid");
+  const pidFile = MCPX_PID_FILE();
   try {
     const raw = readFileSync(pidFile, "utf8").trim();
     const parsed = Number(raw);

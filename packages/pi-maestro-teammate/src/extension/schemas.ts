@@ -294,7 +294,7 @@ export const LocalTeammateListParams = Type.Object({
 export const TeammateSendParams = Type.Object({
   to: Type.String({
     description:
-      "Target agent or peer session — name, @name, displayed name#id-prefix, correlation ID (or prefix), owner:<ownerId> for a window, or owner:<ownerId>:<correlationId> for a remote agent",
+      "Target agent or peer session — name, @name, displayed name#correlation-id-prefix, correlation ID (or prefix), owner:<ownerId> for a window, or owner:<ownerId>:<correlationId> for a remote agent",
   }),
   message: Type.Optional(
     Type.String({
@@ -376,7 +376,7 @@ export const TeammateListParams = Type.Object({
 
 export const TeammateWatchParams = Type.Object({
   name: Type.String({
-    description: "Agent name, @name, displayed name#id-prefix, or correlation ID/prefix from teammate-list",
+    description: "Agent name, @name, displayed name#correlation-id-prefix, or correlation ID/prefix from teammate-list",
   }),
   lines: Type.Optional(
     Type.Integer({
@@ -390,7 +390,7 @@ export const TeammateWatchParams = Type.Object({
 export const TeammateWaitParams = Type.Object({
   name: Type.Optional(
     Type.String({
-      description: "Agent selector to wait for. Omit only when waitMs is provided",
+      description: "Correlation ID from teammate-list, or a task-name alias. Omit only when waitMs is provided",
     }),
   ),
   timeoutMs: Type.Optional(
@@ -432,7 +432,7 @@ export const ObserveParams = Type.Object({
   targets: Type.Array(
     Type.Object({
       kind: Type.String({ minLength: 1, description: 'Observation provider kind, such as "teammate" or "bash_bg".' }),
-      id: Type.String({ minLength: 1, description: "Provider-specific target name or id." }),
+      id: Type.String({ minLength: 1, description: "Teammate targets use the correlation ID shown by teammate-list; full provider ids remain compatible." }),
     }, { additionalProperties: false }),
     { minItems: 1, maxItems: 15, description: "Mixed targets to observe in the requested order." },
   ),
@@ -525,7 +525,7 @@ export const LocalObserveParams = Type.Unsafe<Static<typeof ObserveParams>>({
           enum: ["teammate", "bash_bg"],
           description: "Local observation provider kind.",
         }),
-        id: Type.String({ minLength: 1, description: "Provider-specific target name or id." }),
+        id: Type.String({ minLength: 1, description: "Teammate targets use the correlation ID shown by teammate-list; full provider ids remain compatible." }),
       }, { additionalProperties: false }),
       { minItems: 1, maxItems: 15, description: "Local teammate or background Bash targets." },
     ),
@@ -549,7 +549,7 @@ export const TeammateMonitorParams = Type.Object({
       minItems: 1,
       maxItems: 15,
       description:
-        "Agent names, @name, name#id-prefix, or correlation ID prefixes to monitor.",
+        "Agent names, @name, name#correlation-id-prefix, or correlation ID prefixes to monitor.",
     },
   ),
   waitMode: Type.Optional(

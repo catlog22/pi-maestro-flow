@@ -156,8 +156,12 @@ import {
   workspaceMainSessionDeliveryDecision,
   workspaceWindowLifecycle,
   WORKSPACE_MAIN_SESSION_MARKER,
+  MAIN_SESSION_PROGRESS_TEXT_BYTES,
+  MAX_MAIN_SESSION_PROGRESS_EVENTS,
   type WorkspaceAgentSnapshot,
   type WorkspaceBackgroundJobSnapshot,
+  type WorkspaceMainSessionProgress,
+  type WorkspaceMainSessionProgressEvent,
   type WorkspaceOwnerSnapshot,
   type WorkspaceOwnerState,
   type WorkspacePeerCommandConsumer,
@@ -1188,6 +1192,10 @@ export default function registerTeammateExtension(
   let workspaceBackgroundJobs: WorkspaceBackgroundJobSnapshot[] = [];
   let activePromptLoopIds: string[] = [];
   let workspaceMainSessionActivityAt: number | undefined;
+  let workspaceMainSessionProgress: WorkspaceMainSessionProgress | undefined;
+  let workspaceMainSessionProgressSequence = 0;
+  let workspaceMainAssistantText = "";
+  let workspaceMainAssistantEventOpen = false;
   let workspaceReceiptReconcileTimer: ReturnType<typeof setInterval> | undefined;
   let workspacePeerRefresh: {
     publisher: WorkspacePeerPublisher;
@@ -1331,6 +1339,58 @@ export default function registerTeammateExtension(
   const markWorkspacePeerDirty = (): void => {
     workspacePeerPublisher?.markDirty();
     refreshSessionEndpointDirectory();
+  };
+
+  const appendWorkspaceMainProgressEvent = (event: WorkspaceMainSessionProgressEvent): void => {
+    workspaceMainSessionProgressSequence += 1;
+    const events = [...(workspaceMainSessionProgress?.events ?? []), event]
+      .slice(-MAX_MAIN_SESSION_PROGRESS_EVENTS);
+    workspaceMainSessionProgress = {
+      updatedAt: event.at,
+      sequence: workspaceMainSessionProgressSequence,
+      baseCursor: workspaceMainSessionProgressSequence - events.length,
+      events,
+    };
+    workspaceMainAssistantEventOpen = false;
+    workspaceMainSessionActivityAt = event.at;
+    markWorkspacePeerDirty();
+  };
+
+  const updateWorkspaceMainAssistantText = (text: string, at = Date.now()): void => {
+    const bounded = truncateUtf8Tail(text, MAIN_SESSION_PROGRESS_TEXT_BYTES);
+    if (!bounded) return;
+    const events = [...(workspaceMainSessionProgress?.events ?? [])];
+    const event: WorkspaceMainSessionProgressEvent = { kind: "assistant", at, text: bounded };
+    if (workspaceMainAssistantEventOpen && events.at(-1)?.kind === "assistant") {
+      events[events.length - 1] = event;
+    } else {
+      events.push(event);
+      workspaceMainSessionProgressSequence += 1;
+    }
+    const retainedEvents = events.slice(-MAX_MAIN_SESSION_PROGRESS_EVENTS);
+    workspaceMainSessionProgress = {
+      updatedAt: at,
+      sequence: workspaceMainSessionProgressSequence,
+      baseCursor: workspaceMainSessionProgressSequence - retainedEvents.length,
+      events: retainedEvents,
+    };
+    workspaceMainAssistantEventOpen = true;
+    workspaceMainSessionActivityAt = at;
+    markWorkspacePeerDirty();
+  };
+
+  const workspaceAssistantMessageText = (message: unknown): string | undefined => {
+    if (!message || typeof message !== "object" || Array.isArray(message)) return undefined;
+    const record = message as Record<string, unknown>;
+    if (record.role !== "assistant") return undefined;
+    if (typeof record.content === "string") return record.content;
+    if (!Array.isArray(record.content)) return undefined;
+    const text = record.content
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+      .filter((item) => item.type === "text" && typeof item.text === "string")
+      .map((item) => item.text as string)
+      .join("\n");
+    return text || undefined;
   };
 
   const applyBashBgSnapshot = (payload: unknown): void => {
@@ -2229,13 +2289,16 @@ export default function registerTeammateExtension(
         const publisher = createWorkspacePeerRuntime({
           cwd,
           ownerId,
-          getState: () => buildWorkspaceOwnerState(
-            state,
-            sessionName,
-            currentContextPressure(),
-            workspaceBackgroundJobs,
-            workspaceMainSessionActivityAt,
-          ),
+          getState: () => ({
+            ...buildWorkspaceOwnerState(
+              state,
+              sessionName,
+              currentContextPressure(),
+              workspaceBackgroundJobs,
+              workspaceMainSessionActivityAt,
+            ),
+            ...(workspaceMainSessionProgress === undefined ? {} : { mainProgress: workspaceMainSessionProgress }),
+          }),
         });
         await publisher.start();
         if (!ownsRootSessionFence(fence)) {
@@ -8310,6 +8373,9 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
     const isAgentSession = Array.from(state.activeRuns.values()).some((agent) => agent.sessionFile === sessionFile);
     if (sessionFile && !isAgentSession) state.mainSessionFile = sessionFile;
     workspaceMainSessionActivityAt = undefined;
+    workspaceMainSessionProgress = undefined;
+    workspaceMainAssistantText = "";
+    workspaceMainAssistantEventOpen = false;
     startWorkspacePeers(ctx);
     if (workspaceReceiptReconcileTimer) clearInterval(workspaceReceiptReconcileTimer);
     workspaceReceiptReconcileTimer = setInterval(() => {
@@ -8332,6 +8398,12 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
 
   pi.on("message_end", (event) => {
     workspaceMainSessionActivityAt = Date.now();
+    const assistantText = workspaceAssistantMessageText(event.message);
+    if (assistantText !== undefined) {
+      workspaceMainAssistantText = truncateUtf8Tail(assistantText, MAIN_SESSION_PROGRESS_TEXT_BYTES);
+      updateWorkspaceMainAssistantText(workspaceMainAssistantText);
+      workspaceMainAssistantEventOpen = false;
+    }
     if (event.message.role !== "custom" || event.message.customType !== "teammate-message") return;
     const details = event.message.details as Record<string, unknown> | undefined;
     if (details?.source !== "workspace-peer" || typeof details.messageId !== "string") return;
@@ -8370,10 +8442,61 @@ This Monitor-only lifecycle tool loads configured target ids without exposing SS
 
   pi.on("before_agent_start", injectTeammateContext);
 
+  pi.on("agent_start", () => {
+    appendWorkspaceMainProgressEvent({ kind: "lifecycle", at: Date.now(), phase: "agent_start" });
+  });
+
+  pi.on("turn_start", () => {
+    workspaceMainAssistantText = "";
+    appendWorkspaceMainProgressEvent({ kind: "lifecycle", at: Date.now(), phase: "turn_start" });
+  });
+
+  pi.on("message_update", (event) => {
+    if (event.assistantMessageEvent.type === "text_start") {
+      workspaceMainAssistantText = "";
+      workspaceMainAssistantEventOpen = false;
+      return;
+    }
+    if (event.assistantMessageEvent.type !== "text_delta") return;
+    workspaceMainAssistantText = truncateUtf8Tail(
+      workspaceMainAssistantText + event.assistantMessageEvent.delta,
+      MAIN_SESSION_PROGRESS_TEXT_BYTES,
+    );
+    updateWorkspaceMainAssistantText(workspaceMainAssistantText);
+  });
+
+  pi.on("tool_execution_start", (event) => {
+    appendWorkspaceMainProgressEvent({
+      kind: "tool",
+      at: Date.now(),
+      toolCallId: truncateUtf8Tail(event.toolCallId, 256),
+      toolName: truncateUtf8Tail(event.toolName, 256),
+      status: "running",
+    });
+  });
+
+  pi.on("tool_execution_end", (event) => {
+    appendWorkspaceMainProgressEvent({
+      kind: "tool",
+      at: Date.now(),
+      toolCallId: truncateUtf8Tail(event.toolCallId, 256),
+      toolName: truncateUtf8Tail(event.toolName, 256),
+      status: event.isError ? "failed" : "completed",
+    });
+  });
+
+  pi.on("turn_end", () => {
+    appendWorkspaceMainProgressEvent({ kind: "lifecycle", at: Date.now(), phase: "turn_end" });
+  });
+
   // Turn-level advisor: low-frequency quality review of this session's turns.
   pi.on("agent_end", (event, ctx) => {
-    workspaceMainSessionActivityAt = Date.now();
+    appendWorkspaceMainProgressEvent({ kind: "lifecycle", at: Date.now(), phase: "agent_end" });
     void runAdvisorReview(event, ctx);
+  });
+
+  pi.on("agent_settled", () => {
+    appendWorkspaceMainProgressEvent({ kind: "lifecycle", at: Date.now(), phase: "agent_settled" });
   });
 
   pi.on("session_compact", (_event, ctx) => {

@@ -63,7 +63,11 @@ Linear: resolve Session identity -> dispatch Run -> explore -> confirm -> do -> 
 
 ### 1. Create
 
-Follow the self-start flow in `run-mode.md`: negotiate capabilities, open or resolve the explicit Session identity (`maestro session open "<objective>" --id <slug> ... --json` / `maestro session status --session {session_id} --json`), then invoke the complete fenced `maestro run create companion` option set with `--intent "<intent>"` and `--arg "<intent>"`. Intent is Session metadata only; `--arg` supplies the required command arguments. Do not use a Session lifecycle alias or omit the Session locator, the `orchestration_revision`/Run `revision` fence, or the `--participant`/`--actor` identity.
+Follow the self-start flow in `run-mode.md`: negotiate capabilities, then open a new Session identity and seed its chain in one step with `maestro session open "<objective>" --id <slug> --chain companion --json` (the `--chain companion` flag pre-creates a pending companion step so a Run can be dispatched without `session chain insert`). To attach an existing Session instead, run `maestro session status --session {session_id} --json` and reuse its `orchestration_revision` and pending chain step. Then dispatch the pending chain step as a Run with the complete fenced `maestro run next --session {session_id} --expected-orchestration-revision {orchestration_revision} --json` (do not pass `--step`; `run next` takes the next pending step implicitly). The `<objective>` text is Session metadata only and does not satisfy the command contract.
+
+Identity (`--participant`/`--actor`), `--request-id`, and `--json` are injected by the Pi coordinator on every mutation — **never pass them manually** through the `run-control` tool; a manually-supplied `--participant` whose value differs from the coordinator-injected host identity is rejected as `conflicts with coordinator authority`. When calling the `maestro` CLI directly through `bash` (no coordinator), supply `--participant`/`--actor`/`--request-id`/`--reason`/`--json` yourself. Do not use a Session lifecycle alias or omit the Session locator or the `orchestration_revision`/Run `revision` fence.
+
+Note: `maestro run create companion --arg ...`/`--intent ...` is a deprecated legacy spelling; the `--arg` option no longer exists in the current CLI. Use `session open --chain companion` + `run next` instead.
 
 Init `{run_dir}/evidence/companion-log.md`:
 ```markdown
@@ -140,7 +144,7 @@ If execution revealed the task requires multi-phase audit/diagnosis (e.g., root 
 <error_codes>
 | Code | Severity | Condition | Recovery |
 |------|----------|-----------|----------|
-| E001 | error | `session open` failed (CLI unavailable, invalid args) | Check maestro CLI installation |
+| E001 | error | `session open`/`run next` failed (CLI unavailable, invalid args, or manual `--participant`/`--arg` rejected by the coordinator) | Check maestro CLI install; use `session open --chain companion` + `run next`; let the coordinator inject identity |
 | E003 | error | Evidence log creation failed | Check run_dir permissions |
 | W001 | warning | Explore tools unavailable (teammate({ agent: "explorer" })/search) | Degrade to direct Read/Grep |
 </error_codes>

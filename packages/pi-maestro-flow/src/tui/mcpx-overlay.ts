@@ -5,13 +5,21 @@
  *
  * Keys: ↑↓/jk select history · Enter details · r refresh · R restart · e register/unregister cwd · s start · x stop · t tunnel refresh · w workspaces · c wizard · p password · Esc close
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, existsSync, statSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { locateMcpx, readTunnelState, probeTunnelHealth, restartQuickTunnel, updateConfigServerURL, stopMcpx, readOpsPassword, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks, type TunnelState, type DelegatedTask } from "../mcpx-bridge.ts";
+import { locateMcpx, isProcessOwnedBy, readMcpxBearerToken, readTunnelState, probeTunnelHealth, restartQuickTunnel, stopQuickTunnel, updateConfigServerURL, restoreMcpxConfig, stopMcpx, readOpsPassword, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks, type TunnelState, type DelegatedTask } from "../mcpx-bridge.ts";
+import {
+  McpxClientError,
+  McpxStreamableHttpClient,
+  type McpxRemoteSession,
+  type McpxRuntimeWindow,
+  type McpxWindowEvent,
+  type McpxWindowObservation,
+} from "./mcpx-client.ts";
 
 const MCPX_DEFAULT_ENDPOINT = "http://127.0.0.1:9090/mcp";
 const PEER_STALE_MS = 20_000;
@@ -52,12 +60,7 @@ export interface McpxMcpServerInfo {
   description?: string;
 }
 
-export interface McpxConnectionInfo {
-  sessionId: string;
-  workspace: string;
-  label?: string;
-  status: string;
-}
+export interface McpxConnectionInfo extends McpxRemoteSession {}
 
 export interface McpxSnapshot {
   refreshing: boolean;
@@ -74,6 +77,9 @@ export interface McpxSnapshot {
   thread: McpxThreadEntry[];
   mcpServers: McpxMcpServerInfo[];
   connections?: McpxConnectionInfo[];
+  /** Unified pi_window entries. Undefined means the Runtime is unavailable, auth-blocked, or too old. */
+  runtimeWindows?: McpxRuntimeWindow[];
+  runtimeWindowFallback?: "auth" | "unsupported" | "unavailable";
   tunnel?: TunnelState;
   /** Delegated tasks from the mcpx file registry (all sessions). */
   tasks?: DelegatedTask[];
@@ -85,6 +91,14 @@ export interface McpxSnapshot {
   error?: string;
 }
 
+export interface McpxWindowComposeResult {
+  purpose: string;
+  message: string;
+  name?: string;
+  model?: string;
+  mode?: "steer" | "follow_up";
+}
+
 export interface McpxOverlayParams {
   cwd: string;
   requestRender: () => void;
@@ -92,11 +106,23 @@ export interface McpxOverlayParams {
   onRegisterWorkspace?: (path: string) => Promise<string>;
   onUnregisterWorkspace?: (path: string) => Promise<string>;
   onOpenWizard?: () => void;
+  /** Host-native text prompts used by m/n window actions. */
+  onComposeWindowMessage?: (
+    target: McpxRuntimeWindow | undefined,
+    session: McpxConnectionInfo,
+    targetMode: "existing" | "new",
+  ) => Promise<McpxWindowComposeResult | undefined>;
+  /** Test hook and transport injection point. */
+  createClient?: (endpoint: string) => McpxStreamableHttpClient;
+  /** Skip constructor refresh in deterministic overlay tests. */
+  initialRefresh?: boolean;
+  /** Runtime height for bounded window/event views. */
+  getTerminalRows?: () => number;
   /** Endpoint readiness wait for startMcpx (ms); tests shorten this. */
   endpointWaitMs?: number;
 }
 
-type OverlayMode = "list" | "detail" | "workspace";
+type OverlayMode = "list" | "detail" | "workspace" | "window-list" | "window-detail";
 
 function normalizeWorkspacePath(value: string): string {
   let normalized = value.replace(/\\/g, "/");
@@ -270,18 +296,18 @@ function collectWorkspaces(configPath: string): McpxWorkspaceInfo[] {
   const workspaces: McpxWorkspaceInfo[] = [];
   let current: McpxWorkspaceInfo | undefined;
   for (const line of raw.split(/\r?\n/)) {
-    const nameMatch = line.match(/^\s{4}-\s+name:\s*(.+)$/);
+    const nameMatch = line.match(/^\s{2,}-\s+name:\s*(.+)$/);
     if (nameMatch) {
       current = { name: nameMatch[1].trim(), path: "" };
       workspaces.push(current);
       continue;
     }
-    const pathMatch = line.match(/^\s{6}path:\s*(.+)$/);
+    const pathMatch = line.match(/^\s{4,}path:\s*(.+)$/);
     if (pathMatch && current) {
       current.path = pathMatch[1].trim().replace(/^"|"$/g, "");
       continue;
     }
-    const expMatch = line.match(/^\s{6}expires_at:\s*(.+)$/);
+    const expMatch = line.match(/^\s{4,}expires_at:\s*(.+)$/);
     if (expMatch && current) {
       const parsed = Date.parse(expMatch[1].trim().replace(/^"|"$/g, ""));
       if (Number.isFinite(parsed)) current.expiresAt = parsed;
@@ -340,10 +366,10 @@ function isExecutableOnPath(command: string): boolean {
   if (command.includes("/") || command.includes("\\")) {
     result = existsSync(command);
   } else {
-    const probe = spawnSync(process.platform === "win32" ? "where" : "which", [command], {
+    const probe = spawnSync(process.platform === "win32" ? "where.exe" : "which", [command], {
       encoding: "utf8",
       timeout: 5_000,
-      shell: process.platform === "win32",
+      shell: false,
     });
     result = probe.status === 0;
   }
@@ -351,49 +377,14 @@ function isExecutableOnPath(command: string): boolean {
   return result;
 }
 
-// collectConnections probes the running mcpx endpoint for Remote Sessions.
-// Returns undefined when the endpoint is unreachable or unauthenticated.
-export async function collectConnections(endpoint: string): Promise<McpxConnectionInfo[] | undefined> {
+// collectConnections uses a fully initialized Streamable-HTTP session. It stays
+// exported for focused transport tests and callers that only need Remote Sessions.
+export async function collectConnections(
+  endpoint: string,
+  client = new McpxStreamableHttpClient(endpoint, 3_000),
+): Promise<McpxConnectionInfo[] | undefined> {
   try {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "session", arguments: { action: "list", limit: 20 } } }),
-      signal: AbortSignal.timeout(3_000),
-    });
-    const contentType = response.headers.get("content-type") ?? "";
-    const raw = await response.text();
-    let payload: { result?: { structuredContent?: unknown; content?: Array<{ type?: string; text?: string }> } };
-    if (contentType.includes("text/event-stream")) {
-      // COR-RV-009: mirror probeEndpoint's approach — try parsing each data:
-      // line and keep the last SUCCESSFUL parse, discarding malformed frames
-      // instead of taking the raw last line and parsing once.
-      let parsed: typeof payload | undefined;
-      for (const line of raw.split(/\r?\n/)) {
-        if (line.startsWith("data:")) {
-          try {
-            parsed = JSON.parse(line.slice(5).trim());
-          } catch {
-            // skip malformed frames — keep the last successful parse
-          }
-        }
-      }
-      if (!parsed) return undefined;
-      payload = parsed;
-    } else {
-      payload = JSON.parse(raw);
-    }
-    const sc = payload?.result?.structuredContent as
-      | { data?: { sessions?: Array<{ remote_session_id?: string; workspace_name?: string; workspace?: string; label?: string; status?: string }> } }
-      | undefined;
-    const sessions = sc?.data?.sessions;
-    if (!sessions) return undefined;
-    return sessions.map((session) => ({
-      sessionId: session.remote_session_id ?? "",
-      workspace: session.workspace_name ?? session.workspace ?? "",
-      label: session.label,
-      status: session.status ?? "",
-    })).filter((session) => session.sessionId);
+    return await client.listRemoteSessions();
   } catch {
     return undefined;
   }
@@ -403,8 +394,9 @@ async function probeEndpoint(configPath: string): Promise<{ endpoint: string; re
   let endpoint = MCPX_DEFAULT_ENDPOINT;
   try {
     const raw = readFileSync(configPath, "utf8");
-    const portMatch = raw.match(/^\s{4}port:\s*(\d+)/m);
-    if (portMatch) endpoint = `http://127.0.0.1:${portMatch[1]}/mcp`;
+    const portMatch = raw.match(/^\s{2,}port:\s*(\d+)/m);
+    const port = portMatch ? Number(portMatch[1]) : 0;
+    if (port >= 1 && port <= 65_535) endpoint = `http://127.0.0.1:${port}/mcp`;
   } catch {
     // default endpoint
   }
@@ -465,9 +457,31 @@ export class McpxOverlay implements Component, Focusable {
     refreshing: true, endpoint: "unknown", workspaces: [], cwdRegistered: false, windows: [], thread: [], mcpServers: [],
   };
   private status = "";
+  private workspaceToggleBusy = false;
+  private workspaceToggleQueued = false;
   private starting = false; // guards startMcpx against re-entry (orphan spawns)
   private refreshGeneration = 0;
   private closed = false; // set on close() so async refresh/render skip work after close
+  private windowSelected = 0;
+  private windowSessionSelected = 0;
+  private windowObservation?: McpxWindowObservation;
+  private observeTimer?: ReturnType<typeof setInterval>;
+  private observeGeneration = 0;
+  private observing = false;
+  private windowActionBusy = false;
+  private client?: McpxStreamableHttpClient;
+  private clientEndpoint?: string;
+  private clientBearerToken?: string;
+
+  private clientForEndpoint(endpoint: string): McpxStreamableHttpClient {
+    const bearerToken = readMcpxBearerToken();
+    if (!this.client || this.clientEndpoint !== endpoint || this.clientBearerToken !== bearerToken) {
+      this.client = this.params.createClient?.(endpoint) ?? new McpxStreamableHttpClient(endpoint, 4_000, fetch, bearerToken);
+      this.clientEndpoint = endpoint;
+      this.clientBearerToken = bearerToken;
+    }
+    return this.client;
+  }
 
   private safeRequestRender(): void {
     if (this.closed) return;
@@ -475,11 +489,14 @@ export class McpxOverlay implements Component, Focusable {
   }
 
   constructor(private readonly params: McpxOverlayParams) {
-    void this.refresh();
+    if (params.initialRefresh !== false) void this.refresh();
   }
 
   invalidate(): void {}
-  dispose(): void {}
+  dispose(): void {
+    this.closed = true;
+    this.stopWindowObserve();
+  }
 
   private pidPath(): string {
     return process.env.MCPX_PID_FILE ?? join(homedir(), ".mcpx", "mcpx-server.pid");
@@ -499,20 +516,34 @@ export class McpxOverlay implements Component, Focusable {
     return undefined;
   }
 
-  private killPid(pid: number): void {
-    if (process.platform === "win32") {
-      spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
-    } else {
-      try {
+  private killPid(pid: number): boolean {
+    if (!isProcessOwnedBy(pid, "mcpx")) return false;
+    try {
+      if (process.platform === "win32") {
+        spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+      } else {
         process.kill(pid, "SIGTERM");
-      } catch {
-        // already dead
       }
+      return true;
+    } catch {
+      return false;
     }
   }
 
   private configPath(): string {
     return join(homedir(), ".mcpx", "config.yaml");
+  }
+
+  private listenPort(): number {
+    try {
+      const raw = readFileSync(this.configPath(), "utf8");
+      const match = raw.match(/^\s{2,}port:\s*(\d+)/m);
+      const port = Number(match?.[1]);
+      if (Number.isInteger(port) && port >= 1 && port <= 65_535) return port;
+    } catch {
+      // default listener
+    }
+    return 9090;
   }
 
   /** Start the mcpx server detached, persist its PID, and wait for the endpoint. */
@@ -533,7 +564,8 @@ export class McpxOverlay implements Component, Focusable {
     this.status = "正在启动 mcpx…";
     this.params.requestRender();
     try {
-      const child = spawn(binary, [], { detached: true, stdio: "ignore", shell: process.platform === "win32" });
+      const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(binary);
+      const child = spawn(binary, [], { detached: true, stdio: "ignore", shell: useShell });
       child.unref();
       // The Go server owns the PID file (writes at start, removes on shutdown);
       // the TUI never writes it — a shell-wrapped spawn would persist the
@@ -559,12 +591,16 @@ export class McpxOverlay implements Component, Focusable {
 
   /** Stop the mcpx server (kills the process tree on Windows). */
   private async stopMcpx(): Promise<void> {
+    if (this.starting) {
+      this.status = "已有 mcpx 操作进行中，请等待完成";
+      this.safeRequestRender();
+      return;
+    }
     const pid = this.readPidFile();
     this.status = "正在停止 mcpx…";
     this.params.requestRender();
     try {
-      if (pid) {
-        this.killPid(pid);
+      if (pid && this.killPid(pid)) {
         // /F kill skips the Go server's graceful PID-file cleanup — remove it.
         try {
           rmSync(this.pidPath(), { force: true });
@@ -572,9 +608,10 @@ export class McpxOverlay implements Component, Focusable {
           // best-effort
         }
       } else {
-        // PID file missing/stale (mcpx started externally) — fall back to
-        // killing whatever listens on the mcpx port.
+        // PID file missing, stale, or owned by another process — only terminate
+        // a listener after killMcpxByPort verifies its command identity.
         this.killMcpxByPort();
+        try { rmSync(this.pidPath(), { force: true }); } catch { /* best-effort */ }
       }
       this.status = "已发送停止信号";
     } catch (error) {
@@ -600,16 +637,17 @@ export class McpxOverlay implements Component, Focusable {
     // Stop any existing process. Tolerate a missing PID file — the process may
     // have been started externally or died; then fall back to the port listener.
     const pid = this.readPidFile();
-    if (pid) {
-      this.killPid(pid);
-    } else {
+    if (pid && !this.killPid(pid)) {
+      this.killMcpxByPort();
+    } else if (!pid) {
       this.killMcpxByPort();
     }
     // Give the port a moment to release after kill.
     await new Promise((resolve) => setTimeout(resolve, 500));
     // Start fresh — bypass the online guard (we just stopped it on purpose).
     try {
-      const child = spawn(binary, [], { detached: true, stdio: "ignore", shell: process.platform === "win32" });
+      const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(binary);
+      const child = spawn(binary, [], { detached: true, stdio: "ignore", shell: useShell });
       child.unref();
       const deadline = Date.now() + (this.params.endpointWaitMs ?? 15_000);
       let online = false;
@@ -627,33 +665,35 @@ export class McpxOverlay implements Component, Focusable {
     await this.refresh();
   }
 
-  /** Kill the process listening on 127.0.0.1:9090 (fallback when the PID file
+  /** Kill the process listening on the configured MCPX port (fallback when the PID file
    *  is stale — e.g. mcpx was started by a prior board session or externally). */
-  private killMcpxByPort(): void {
+  private killMcpxByPort(port = this.listenPort()): void {
     try {
       if (process.platform === "win32") {
         const result = spawnSync("netstat", ["-ano", "-p", "tcp"], {
-          encoding: "utf8", timeout: 5_000, shell: true,
+          encoding: "utf8", timeout: 5_000, shell: false,
         });
         // Strict port match: only LISTENING rows whose local-address column
-        // ends in :9090 followed by whitespace. Avoids matching :19090 /
-        // :90900 / a foreign-address :9090 on a different row.
-        const PORT = 9090;
+        // ends in the configured port followed by whitespace. Avoids matching
+        // a port with the same digits as a suffix on a different listener.
+        const PORT = port;
         const portRe = new RegExp("\\s\\d+\\.\\d+\\.\\d+\\.\\d+:" + PORT + "\\s|\\[::\\]?:" + PORT + "\\s");
         for (const line of String(result.stdout || "").split(/\r?\n/)) {
           if (line.includes("LISTENING") && portRe.test(line)) {
             const m = line.match(/\s(\d+)\s*$/);
-            if (m) spawnSync("taskkill", ["/pid", String(m[1]), "/T", "/F"], { stdio: "ignore" });
+            if (m && isProcessOwnedBy(Number(m[1]), "mcpx")) {
+              spawnSync("taskkill", ["/pid", m[1], "/T", "/F"], { stdio: "ignore" });
+            }
           }
         }
       } else {
         // POSIX: lsof preferred, ss fallback; output is one pid per line.
-        const result = spawnSync("sh", ["-c", "lsof -ti tcp:9090 2>/dev/null || ss -ltnp 'sport = :9090' 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2"], {
+        const result = spawnSync("sh", ["-c", `lsof -ti tcp:${port} 2>/dev/null || ss -ltnp 'sport = :${port}' 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2`], {
           encoding: "utf8", timeout: 5_000,
         });
         for (const line of String(result.stdout || "").split(/\r?\n/)) {
           const n = Number(line.trim());
-          if (Number.isInteger(n) && n > 0) {
+          if (Number.isInteger(n) && n > 0 && isProcessOwnedBy(n, "mcpx")) {
             try { process.kill(n, "SIGTERM"); } catch { /* dead */ }
           }
         }
@@ -670,19 +710,39 @@ export class McpxOverlay implements Component, Focusable {
     this.status = "正在重启隧道并同步 mcpx…";
     this.safeRequestRender();
     let newUrl: string | undefined;
+    let configUpdated = false;
+    let previousConfig: string | undefined;
     try {
+      // Snapshot the complete config before replacing server_url. If the local
+      // restart fails, restoring the snapshot avoids leaving an old process
+      // paired with the new issuer.
+      previousConfig = readFileSync(this.configPath(), "utf8");
       // 1. Restart the quick tunnel — stops the old one, parses the new URL.
-      newUrl = await restartQuickTunnel(9090);
+      newUrl = await restartQuickTunnel(this.listenPort());
       // 2. Write the new URL into config.yaml so mcpx's OAuth issuer matches.
       updateConfigServerURL(newUrl);
+      configUpdated = true;
       // 3. Restart mcpx to load the new server_url. Kill by PID file first, then
       //    by port as a fallback (the PID file may point at a stale/external pid).
       stopMcpx();
       this.killMcpxByPort();
       await new Promise((resolve) => setTimeout(resolve, 800)); // port release
+      const stopDeadline = Date.now() + 2_000;
+      let oldProcessStillOnline = false;
+      while (Date.now() < stopDeadline) {
+        const { reachable } = await probeEndpoint(this.configPath());
+        if (!reachable) {
+          oldProcessStillOnline = false;
+          break;
+        }
+        oldProcessStillOnline = true;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      if (oldProcessStillOnline) throw new Error("旧 mcpx 进程未停止，已取消配置切换");
       const binary = locateMcpx();
       if (!binary) throw new Error("未找到 mcpx 二进制");
-      const child = spawn(binary, [], { detached: true, stdio: "ignore", shell: process.platform === "win32" });
+      const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(binary);
+      const child = spawn(binary, [], { detached: true, stdio: "ignore", shell: useShell });
       child.unref();
       // 4. Wait for the endpoint to come back (new issuer).
       const deadline = Date.now() + (this.params.endpointWaitMs ?? 15_000);
@@ -692,30 +752,35 @@ export class McpxOverlay implements Component, Focusable {
         if (reachable) { online = true; break; }
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
-      this.status = online
-        ? `隧道已更新: ${newUrl}/mcp · mcpx 已重启`
-        : `隧道已更新: ${newUrl}/mcp · mcpx 端点未就绪（检查启动日志）`;
+      if (!online) throw new Error("mcpx 端点未就绪（检查启动日志）");
+      const publicHealth = await probeTunnelHealth(newUrl);
+      const publicReady = publicHealth === "ok" || publicHealth === "auth";
+      this.status = publicReady
+        ? `隧道已更新: ${newUrl}/mcp · mcpx 已重启 · 公网端点已就绪`
+        : `隧道已更新: ${newUrl}/mcp · mcpx 已重启，但公网端点仍未就绪（按 r 重试或 T 重启隧道）`;
     } catch (error) {
-      // If a new tunnel was started but a later step (config sync / mcpx
-      // restart) failed, kill the newly-started tunnel via its PID file to
-      // restore pre-operation state — otherwise an orphaned cloudflared keeps
-      // holding port 9090 while config.yaml still has the old URL.
-      if (newUrl) {
-        try {
-          const pidFile = process.env.MCPX_TUNNEL_PID_FILE ?? join(homedir(), ".mcpx", "cloudflared.pid");
-          const raw = readFileSync(pidFile, "utf8").trim();
-          const pid = Number(raw);
-          if (Number.isInteger(pid) && pid > 0) {
-            if (process.platform === "win32") {
-              spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
-            } else {
-              process.kill(pid, "SIGTERM");
-            }
-            rmSync(pidFile, { force: true });
-          }
-        } catch { /* best-effort cleanup */ }
+      let rolledBack = false;
+      if (configUpdated) {
+        // Stop both sides before restoring the old snapshot. The old tunnel URL
+        // cannot be resumed after a Quick Tunnel rotation, so the consistent
+        // fallback is the old local config with no tunnel process.
+        try { stopMcpx(); } catch { /* best-effort */ }
+        try { this.killMcpxByPort(); } catch { /* best-effort */ }
       }
-      this.status = `隧道刷新失败: ${error instanceof Error ? error.message : String(error)}`;
+      if (newUrl) {
+        try { stopQuickTunnel(); } catch { /* best-effort */ }
+      }
+      if (configUpdated && previousConfig) {
+        try {
+          restoreMcpxConfig(previousConfig);
+          rolledBack = true;
+        } catch {
+          // Keep the failure visible; do not claim a rollback that did not land.
+        }
+      }
+      this.status = rolledBack
+        ? `隧道刷新失败，已回滚到旧配置: ${error instanceof Error ? error.message : String(error)}`
+        : `隧道刷新失败: ${error instanceof Error ? error.message : String(error)}`;
     } finally {
       this.starting = false;
     }
@@ -725,8 +790,6 @@ export class McpxOverlay implements Component, Focusable {
     if (this.closed) return;
     this.refreshGeneration++;
     const generation = this.refreshGeneration;
-    // PERF-RV-004: clear the executable path cache so a manual refresh re-probes,
-    // but repeated renders within this refresh reuse cached results.
     executablePathCache.clear();
     this.snapshot = { ...this.snapshot, refreshing: true, error: undefined };
     this.safeRequestRender();
@@ -736,52 +799,70 @@ export class McpxOverlay implements Component, Focusable {
       const binary = locateMcpx();
       let version: string | undefined;
       if (binary) {
-        const result = spawnSync(binary, ["-version"], { encoding: "utf8", timeout: 10_000, shell: process.platform === "win32" });
+        const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(binary);
+        const result = spawnSync(binary, ["-version"], { encoding: "utf8", timeout: 10_000, shell: useShell });
         version = result.status === 0 ? String(result.stdout || "").trim() || undefined : undefined;
       }
       const configPath = join(homedir(), ".mcpx", "config.yaml");
       const workspaces = collectWorkspaces(configPath);
-      // Local endpoint probe gates the online/offline badge; the public tunnel
-      // health probe is decoupled so a slow/unreachable tunnel never blocks the
-      // board or the e/x actions. Seed the tunnel field synchronously (PID + URL
-      // from config, health=unknown) and backfill health async.
       const tunnel = readTunnelState();
       const { endpoint, reachable, endpointVersion } = await probeEndpoint(configPath);
       const online = reachable;
       const fork = detectMcpxForPmf();
-      // PERF-RV-006: read the ops password ONCE during refresh instead of on
-      // every renderList render.
       const opsPassword = readOpsPassword();
-      // COR-RV-005: only apply this snapshot if no newer refresh has started.
-      // A newer refresh (incremented refreshGeneration) means this result is
-      // stale and must be discarded to avoid overwriting fresh data with old.
-      if (generation === this.refreshGeneration && !this.closed) {
-      this.snapshot = {
-        refreshing: false,
-        binary: binary ?? undefined,
-        version,
-        endpoint: online ? "online" : "offline",
-        endpointVersion,
-        configPath: existsSync(configPath) ? configPath : undefined,
-        workspaces,
-        ...this.cwdRegistrationState(workspaces, cwd),
-        windows: collectWindows(cwd, now),
-        thread: collectThread(cwd),
-        mcpServers: collectMcpServers(cwd),
-        connections: online ? await collectConnections(endpoint) : undefined,
-        tunnel,
-        tasks: readDelegatedTasks(),
-        forkInstalled: fork.installed,
-        forkVersion: fork.version,
-        opsPassword,
-      };
+
+      let connections: McpxConnectionInfo[] | undefined;
+      let runtimeWindows: McpxRuntimeWindow[] | undefined;
+      let runtimeWindowFallback: McpxSnapshot["runtimeWindowFallback"];
+      if (online) {
+        const client = this.clientForEndpoint(endpoint);
+        try {
+          connections = await client.listRemoteSessions();
+          const windowGroups = await Promise.all(connections.map((session) => client.listWindows(session)));
+          runtimeWindows = windowGroups.flat();
+        } catch (error) {
+          runtimeWindowFallback = error instanceof McpxClientError && error.kind === "auth"
+            ? "auth"
+            : error instanceof McpxClientError && error.kind === "unsupported"
+              ? "unsupported"
+              : "unavailable";
+          // A manual refresh must be able to recover after auth/config/runtime changes.
+          if (this.client === client) {
+            this.client = undefined;
+            this.clientEndpoint = undefined;
+            this.clientBearerToken = undefined;
+          }
+        }
       }
-      // Backfill tunnel health without blocking the board: a public probe can
-      // take up to the fetch timeout when the tunnel is down. Fire-and-forget;
-      // only apply if this refresh is still the latest (no newer refresh raced).
-      // Probe whenever there is a URL — the tunnel may be provided by another
-      // host/process than the wizard's cloudflared, so a dead PID does not by
-      // itself prove the tunnel is down.
+
+      if (generation === this.refreshGeneration && !this.closed) {
+        this.snapshot = {
+          refreshing: false,
+          binary: binary ?? undefined,
+          version,
+          endpoint: online ? "online" : "offline",
+          endpointVersion,
+          configPath: existsSync(configPath) ? configPath : undefined,
+          workspaces,
+          ...this.cwdRegistrationState(workspaces, cwd),
+          windows: collectWindows(cwd, now),
+          thread: collectThread(cwd),
+          mcpServers: collectMcpServers(cwd),
+          connections,
+          runtimeWindows,
+          runtimeWindowFallback,
+          tunnel,
+          tasks: readDelegatedTasks(),
+          forkInstalled: fork.installed,
+          forkVersion: fork.version,
+          opsPassword,
+        };
+        this.windowSessionSelected = Math.min(
+          this.windowSessionSelected,
+          Math.max(0, (connections?.length ?? 1) - 1),
+        );
+        this.windowSelected = Math.min(this.windowSelected, Math.max(0, this.windowEntries().length - 1));
+      }
       if (tunnel.url) {
         void probeTunnelHealth(tunnel.url).then((health) => {
           if (generation === this.refreshGeneration && this.snapshot.tunnel === tunnel && !this.closed) {
@@ -790,19 +871,127 @@ export class McpxOverlay implements Component, Focusable {
           }
         }).catch(() => { /* probeTunnelHealth never rejects; defensive */ });
       } else if (!tunnel.alive) {
-        // No URL and no live process: nothing to probe, mark dead immediately
-        // so the board never shows a contradictory "进程已退出" + "探测中" pair.
         tunnel.health = "dead";
       }
     } catch (error) {
-      this.snapshot = { ...this.snapshot, refreshing: false, error: error instanceof Error ? error.message : String(error) };
+      if (generation === this.refreshGeneration && !this.closed) {
+        this.snapshot = { ...this.snapshot, refreshing: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    if (this.workspaceToggleQueued && !this.workspaceToggleBusy && generation === this.refreshGeneration && !this.closed) {
+      this.workspaceToggleQueued = false;
+      void this.toggleWorkspaceRegistration();
     }
     this.safeRequestRender();
+  }
+
+  private currentWindowSession(): McpxConnectionInfo | undefined {
+    return this.snapshot.connections?.[this.windowSessionSelected];
+  }
+
+  private windowEntries(): McpxRuntimeWindow[] {
+    const session = this.currentWindowSession();
+    if (!session) return [];
+    return (this.snapshot.runtimeWindows ?? []).filter((window) => window.remoteSessionId === session.sessionId);
+  }
+
+  private selectedRuntimeWindow(): McpxRuntimeWindow | undefined {
+    return this.windowEntries()[this.windowSelected];
+  }
+
+  private stopWindowObserve(): void {
+    this.observeGeneration++;
+    if (this.observeTimer) clearInterval(this.observeTimer);
+    this.observeTimer = undefined;
+  }
+
+  private startWindowObserve(): void {
+    this.stopWindowObserve();
+    this.windowObservation = undefined;
+    const generation = this.observeGeneration;
+    void this.observeSelectedWindow(generation);
+    this.observeTimer = setInterval(() => void this.observeSelectedWindow(generation), 1_500);
+    this.observeTimer.unref?.();
+  }
+
+  private async observeSelectedWindow(generation: number): Promise<void> {
+    const window = this.selectedRuntimeWindow();
+    const session = this.currentWindowSession();
+    const client = this.client;
+    if (!window || !session || !client || this.mode !== "window-detail" || this.observing) return;
+    this.observing = true;
+    const cursor = window.kind === "registered" ? 0 : (this.windowObservation?.nextCursor ?? 0);
+    try {
+      const next = await client.observeWindow(session, window, cursor, 20);
+      if (generation !== this.observeGeneration || this.mode !== "window-detail" || this.selectedRuntimeWindow()?.id !== window.id) return;
+      const merged = new Map<string, McpxWindowEvent>();
+      for (const event of [...(this.windowObservation?.events ?? []), ...next.events]) {
+        merged.set(windowEventKey(event), event);
+      }
+      this.windowObservation = { ...next, events: [...merged.values()].slice(-20) };
+      this.safeRequestRender();
+    } catch (error) {
+      if (generation !== this.observeGeneration) return;
+      this.status = `observe: ${error instanceof Error ? error.message : String(error)}`;
+      if (error instanceof McpxClientError && (error.kind === "auth" || error.kind === "unsupported")) {
+        this.stopWindowObserve();
+      }
+      this.safeRequestRender();
+    } finally {
+      this.observing = false;
+    }
+  }
+
+  private rowBudget(reserved: number, fallback: number): number {
+    const terminalRows = this.params.getTerminalRows?.();
+    if (!Number.isFinite(terminalRows) || !terminalRows || terminalRows <= 0) return fallback;
+    return Math.max(3, Math.floor(terminalRows * 0.9) - reserved);
+  }
+
+  private async sendWindow(targetMode: "existing" | "new"): Promise<void> {
+    if (this.windowActionBusy) return;
+    const session = this.currentWindowSession();
+    const target = targetMode === "existing" ? this.selectedRuntimeWindow() : undefined;
+    const client = this.client;
+    if (!session || !client || !this.params.onComposeWindowMessage || (targetMode === "existing" && !target)) {
+      this.status = "Runtime window send unavailable";
+      this.safeRequestRender();
+      return;
+    }
+    this.windowActionBusy = true;
+    try {
+      const composed = await this.params.onComposeWindowMessage(target, session, targetMode);
+      if (!composed?.message.trim()) return;
+      this.status = targetMode === "new" ? "creating managed window…" : `sending to ${target!.displayName}…`;
+      this.safeRequestRender();
+      const result = await client.sendWindow({
+        remoteSessionId: session.sessionId,
+        purpose: composed.purpose.trim() || composed.message.trim(),
+        message: composed.message.trim(),
+        targetMode,
+        window: target?.id,
+        mode: composed.mode,
+        name: composed.name,
+        model: composed.model,
+        idempotencyKey: targetMode === "new" ? randomUUID() : undefined,
+        confirmed: true,
+      });
+      this.status = targetMode === "new"
+        ? `created ${result.windowId?.slice(0, 12) ?? "managed window"}`
+        : `sent · ${result.action ?? "accepted"}`;
+      await this.refresh();
+    } catch (error) {
+      this.status = `send: ${error instanceof Error ? error.message : String(error)}`;
+      this.safeRequestRender();
+    } finally {
+      this.windowActionBusy = false;
+    }
   }
 
   /** Mark the overlay closed so async refresh/render callbacks skip work. */
   markClosed(): void {
     this.closed = true;
+    this.stopWindowObserve();
   }
 
   render(width: number): string[] {
@@ -810,15 +999,52 @@ export class McpxOverlay implements Component, Focusable {
     if (safeWidth < 20) return [this.renderCompact(safeWidth)];
     if (this.mode === "detail") return this.renderDetail(safeWidth);
     if (this.mode === "workspace") return this.renderWorkspace(safeWidth);
+    if (this.mode === "window-list") return this.renderWindowList(safeWidth);
+    if (this.mode === "window-detail") return this.renderWindowDetail(safeWidth);
     return this.renderList(safeWidth);
   }
 
   handleInput(data: string): void {
     if (matchesKey(data, Key.escape)) {
-      if (this.mode === "detail" || this.mode === "workspace") {
+      if (this.mode === "window-detail") {
+        this.stopWindowObserve();
+        this.mode = "window-list";
+      } else if (this.mode === "detail" || this.mode === "workspace" || this.mode === "window-list") {
         this.mode = "list";
       } else {
+        this.markClosed();
         this.params.close();
+      }
+      this.params.requestRender();
+      return;
+    }
+    if (this.mode === "window-detail") {
+      if (data === "m" || data === "M") void this.sendWindow("existing");
+      else if (data === "n" || data === "N") void this.sendWindow("new");
+      else if (data === "r") void this.observeSelectedWindow(this.observeGeneration);
+      return;
+    }
+    if (this.mode === "window-list") {
+      const sessions = this.snapshot.connections ?? [];
+      if (matchesKey(data, Key.left) || matchesKey(data, "h")) {
+        this.windowSessionSelected = Math.max(0, this.windowSessionSelected - 1);
+        this.windowSelected = 0;
+      } else if (matchesKey(data, Key.right) || matchesKey(data, "l")) {
+        this.windowSessionSelected = Math.min(Math.max(0, sessions.length - 1), this.windowSessionSelected + 1);
+        this.windowSelected = 0;
+      } else if (matchesKey(data, Key.up) || matchesKey(data, "k")) {
+        this.windowSelected = Math.max(0, this.windowSelected - 1);
+      } else if (matchesKey(data, Key.down) || matchesKey(data, "j")) {
+        this.windowSelected = Math.min(Math.max(0, this.windowEntries().length - 1), this.windowSelected + 1);
+      } else if (isEnter(data) && this.selectedRuntimeWindow()) {
+        this.mode = "window-detail";
+        this.startWindowObserve();
+      } else if (data === "m" || data === "M") {
+        void this.sendWindow("existing");
+      } else if (data === "n" || data === "N") {
+        void this.sendWindow("new");
+      } else if (data === "r") {
+        void this.refresh();
       }
       this.params.requestRender();
       return;
@@ -843,6 +1069,8 @@ export class McpxOverlay implements Component, Focusable {
         this.params.requestRender();
       } else if (data === "d" || data === "D") {
         void this.removeSelectedWorkspace();
+      } else if (data === "e" || data === "E") {
+        void this.toggleWorkspaceRegistration();
       }
       return;
     }
@@ -858,6 +1086,13 @@ export class McpxOverlay implements Component, Focusable {
     }
     if (isEnter(data) && this.snapshot.thread.length > 0) {
       this.mode = "detail";
+      this.params.requestRender();
+      return;
+    }
+    if (data === "v" || data === "V") {
+      this.windowSessionSelected = Math.min(this.windowSessionSelected, Math.max(0, (this.snapshot.connections?.length ?? 1) - 1));
+      this.windowSelected = 0;
+      this.mode = "window-list";
       this.params.requestRender();
       return;
     }
@@ -898,21 +1133,22 @@ export class McpxOverlay implements Component, Focusable {
       this.wsSelected = 0;
       this.mode = "workspace";
       this.params.requestRender();
-      return;
     }
   }
 
   /** e toggles registration of the current window: expose it to MCPX, or close it again. */
   private async toggleWorkspaceRegistration(): Promise<void> {
-    if (this.snapshot.refreshing) return;
-    const registered = this.snapshot.cwdRegistered;
-    this.status = registered ? "unregistering…" : "registering…";
-    this.params.requestRender();
-    const binary = locateMcpx();
-    if (!binary) {
-      this.status = "mcpx binary not found — set MCPX_BIN or add mcpx to PATH";
+    if (this.workspaceToggleBusy) return;
+    if (this.snapshot.refreshing) {
+      this.workspaceToggleQueued = true;
+      this.status = "正在刷新 workspace，e 将在刷新后执行…";
+      this.safeRequestRender();
       return;
     }
+    this.workspaceToggleBusy = true;
+    const registered = this.snapshot.cwdRegistered;
+    this.status = registered ? "unregistering…" : "registering…";
+    this.safeRequestRender();
     try {
       if (registered && this.params.onUnregisterWorkspace) {
         const message = await this.params.onUnregisterWorkspace(this.params.cwd);
@@ -923,9 +1159,19 @@ export class McpxOverlay implements Component, Focusable {
         const message = await this.params.onRegisterWorkspace(this.params.cwd);
         this.status = message;
       } else {
+        const binary = locateMcpx();
+        if (!binary) {
+          this.status = "mcpx binary not found — set MCPX_BIN or add mcpx to PATH";
+          return;
+        }
         const command = registered ? "remove" : "register";
+        const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(binary);
+        if (useShell && /[\u0000\r\n&|<>^%!()]/.test(this.params.cwd)) {
+          this.status = "workspace path contains unsafe Windows shell characters";
+          return;
+        }
         const result = spawnSync(binary, ["workspace", command, this.params.cwd], {
-          encoding: "utf8", timeout: 15_000, shell: process.platform === "win32",
+          encoding: "utf8", timeout: 15_000, shell: useShell,
         });
         this.status = result.status === 0
           ? (registered ? `unregistered: ${this.params.cwd}` : `registered: ${this.params.cwd}`)
@@ -933,13 +1179,16 @@ export class McpxOverlay implements Component, Focusable {
       }
     } catch (error) {
       this.status = `${registered ? "remove" : "register"} failed: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      this.workspaceToggleBusy = false;
     }
     await this.refresh();
   }
 
   private renderCompact(width: number): string {
     const endpoint = this.snapshot.endpoint === "online" ? "mcpx online" : this.snapshot.endpoint === "offline" ? "mcpx offline" : "mcpx …";
-    const content = `${endpoint} · ${this.snapshot.windows.length} windows · Esc close`;
+    const windowCount = this.snapshot.runtimeWindows?.length ?? this.snapshot.windows.length;
+    const content = `${endpoint} · ${windowCount} windows · Esc close`;
     return truncateToWidth(content, width, "…");
   }
 
@@ -975,13 +1224,31 @@ export class McpxOverlay implements Component, Focusable {
     rows.push(...this.renderOpsPasswordRows(inner));
     rows.push(...this.renderDelegatedTaskRows(inner));
     rows.push(rule(inner));
-    rows.push(fitLine(`Pi 窗口（${this.snapshot.windows.length} fresh）`, inner));
-    if (this.snapshot.windows.length === 0) {
-      rows.push(fitLine("  ○ 无活跃窗口 — 在对应工作区启动 pi 后可见（e 键注册当前窗口）", inner));
+    const runtimeWindows = this.snapshot.runtimeWindows;
+    rows.push(fitLine(`Pi 窗口（${runtimeWindows?.length ?? this.snapshot.windows.length}） · V 查看`, inner));
+    if (runtimeWindows !== undefined) {
+      if (runtimeWindows.length === 0) {
+        rows.push(fitLine("  ○ Remote Sessions 当前无 registered/managed 窗口", inner));
+      } else {
+        for (const window of runtimeWindows.slice(0, 6)) {
+          const source = window.kind === "managed" ? "managed" : "registered";
+          rows.push(fitLine(`  ${source} · ${window.displayName} · ${window.status} · ${window.workspace || window.remoteSessionId.slice(0, 8)}`, inner));
+        }
+      }
     } else {
-      for (const window of this.snapshot.windows.slice(0, 6)) {
-        const pressure = window.contextPressure === undefined ? "" : ` ctx:${window.contextPressure}%`;
-        rows.push(fitLine(`  ${window.displayName} · ${window.ownerId.slice(0, 8)} · pid ${window.pid} · agents ${window.agentCount}${pressure}`, inner));
+      const reason = this.snapshot.runtimeWindowFallback === "auth"
+        ? "Runtime 鉴权阻止 pi_window"
+        : this.snapshot.runtimeWindowFallback === "unsupported"
+          ? "Runtime 不支持统一 pi_window"
+          : "Runtime pi_window 不可用";
+      rows.push(fitLine(fg("33", `  ${reason} · local owner/task registry fallback`), inner));
+      if (this.snapshot.windows.length === 0) {
+        rows.push(fitLine("  ○ 无本地 fresh owner（e 注册当前窗口）", inner));
+      } else {
+        for (const window of this.snapshot.windows.slice(0, 6)) {
+          const pressure = window.contextPressure === undefined ? "" : ` ctx:${window.contextPressure}%`;
+          rows.push(fitLine(`  local · ${window.displayName} · ${window.ownerId.slice(0, 8)} · pid ${window.pid} · agents ${window.agentCount}${pressure}`, inner));
+        }
       }
     }
     rows.push(rule(inner));
@@ -996,7 +1263,7 @@ export class McpxOverlay implements Component, Focusable {
     }
     if (this.status) rows.push(fitLine(this.status, inner));
     if (this.snapshot.error) rows.push(fitLine(fg("31", `! ${this.snapshot.error}`), inner));
-    rows.push(...fitSegments(inner, ["Enter detail", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "T tunnel", "W workspaces", "e register cwd", "c wizard", "P password", "Esc close"]));
+    rows.push(...fitSegments(inner, ["Enter message detail", "V windows", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "T tunnel", "W workspaces", "e register cwd", "c wizard", "P password", "Esc close"]));
     return frame(rows, width);
   }
 
@@ -1168,12 +1435,96 @@ export class McpxOverlay implements Component, Focusable {
     return frame(rows, width);
   }
 
+  private renderWindowList(width: number): string[] {
+    const inner = width - 2;
+    const sessions = this.snapshot.connections ?? [];
+    const session = this.currentWindowSession();
+    const windows = this.windowEntries();
+    const rows = [fitLine("Pi 窗口 · Remote Session ←→ · ↑↓ 选择", inner), rule(inner)];
+    if (this.snapshot.runtimeWindows === undefined) {
+      const reason = this.snapshot.runtimeWindowFallback === "auth" ? "鉴权阻止 Runtime 调用" : "Runtime 缺少统一 pi_window actions";
+      rows.push(fitLine(fg("33", `${reason} · 使用 local registry fallback`), inner));
+      const fallbackBudget = this.rowBudget(6, 10);
+      const visibleFallback = this.snapshot.windows.length > fallbackBudget
+        ? this.snapshot.windows.slice(0, Math.max(1, fallbackBudget - 1))
+        : this.snapshot.windows;
+      for (const window of visibleFallback) {
+        rows.push(fitLine(`  local · ${window.displayName} · ${window.ownerId.slice(0, 8)} · pid ${window.pid}`, inner));
+      }
+      if (this.snapshot.windows.length > visibleFallback.length) {
+        rows.push(fitLine(`  … ${this.snapshot.windows.length - visibleFallback.length} more`, inner));
+      }
+      if (this.snapshot.windows.length === 0) rows.push(fitLine("  ○ 无本地 fresh owner", inner));
+      rows.push(...fitSegments(inner, ["r refresh", "Esc back"]));
+      return frame(rows, width);
+    }
+    if (!session || sessions.length === 0) {
+      rows.push(fitLine("○ 无可用 Remote Session", inner));
+    } else {
+      rows.push(fitLine(`Remote ${this.windowSessionSelected + 1}/${sessions.length} · ${session.workspace || "?"} · ${session.status} · ${session.label || session.sessionId.slice(0, 8)}`, inner));
+      rows.push(rule(inner));
+      if (windows.length === 0) {
+        rows.push(fitLine("  ○ 此 Session 无窗口 · n 新建 managed window", inner));
+      } else {
+        const budget = this.rowBudget(8, 12);
+        const entryBudget = windows.length > budget ? Math.max(1, budget - 1) : budget;
+        const start = Math.max(0, Math.min(
+          this.windowSelected - Math.floor(entryBudget / 2),
+          windows.length - entryBudget,
+        ));
+        const end = Math.min(windows.length, start + entryBudget);
+        for (let index = start; index < end; index++) {
+          const window = windows[index];
+          const marker = index === this.windowSelected ? fg("36", "▶") : " ";
+          const cursor = window.cursor ? ` · cursor ${window.cursor}` : "";
+          rows.push(fitLine(`${marker} ${window.kind} · ${window.displayName} · ${window.status}${cursor}`, inner));
+        }
+        if (windows.length > entryBudget) {
+          rows.push(fitLine(`  … ${start} above · ${windows.length - end} below`, inner));
+        }
+      }
+    }
+    if (this.status) rows.push(fitLine(this.status, inner));
+    rows.push(...fitSegments(inner, ["Enter observe", "m send", "n new", "r refresh", "Esc back"]));
+    return frame(rows, width);
+  }
+
+  private renderWindowDetail(width: number): string[] {
+    const inner = width - 2;
+    const target = this.selectedRuntimeWindow();
+    const session = this.currentWindowSession();
+    const observation = this.windowObservation;
+    const rows = [fitLine("Pi 窗口详情 · incremental observe", inner), rule(inner)];
+    if (!target || !session) {
+      rows.push(fitLine("○ 窗口已不可用", inner));
+    } else {
+      const status = observation?.status ?? target.status;
+      const cursor = observation?.cursor ?? target.cursor;
+      rows.push(fitLine(`${target.displayName} · source ${observation?.source ?? target.kind} · status ${status} · cursor ${cursor}`, inner));
+      rows.push(fitLine(`Remote ${session.workspace || "?"} · ${session.label || session.sessionId.slice(0, 8)} · pid ${target.pid || "—"}`, inner));
+      rows.push(rule(inner));
+      if (!observation) {
+        rows.push(fitLine("  observing…", inner));
+      } else if (observation.events.length === 0) {
+        rows.push(fitLine("  ○ 暂无新 assistant/tool/lifecycle event", inner));
+      } else {
+        const eventBudget = this.rowBudget(9, 14);
+        for (const event of observation.events.slice(-eventBudget)) {
+          rows.push(renderWindowEvent(event, inner));
+        }
+      }
+    }
+    if (this.status) rows.push(fitLine(this.status, inner));
+    rows.push(...fitSegments(inner, ["m send", "n new", "r observe", "Esc back"]));
+    return frame(rows, width);
+  }
+
   /** W 子模式：列出所有已注册 workspace，↑↓ 选中，d 删除选中。删除调
    *  `mcpx workspace remove`（只写 config，运行时 ≤5min lease sweep 后清理）。 */
   private renderWorkspace(width: number): string[] {
     const inner = width - 2;
     const ws = this.snapshot.workspaces;
-    const rows = [fitLine("Workspace 管理 · ↑↓ 选中 · d 删除 · Esc 返回", inner), rule(inner)];
+    const rows = [fitLine("Workspace 管理 · ↑↓ 选中 · d 删除 · e 注册当前目录 · Esc 返回", inner), rule(inner)];
     if (ws.length === 0) {
       rows.push(fitLine("○ 无已注册 workspace（按 e 注册当前目录）", inner));
     } else {
@@ -1186,13 +1537,20 @@ export class McpxOverlay implements Component, Focusable {
       rows.push(rule(inner));
       rows.push(fitLine(fg("31", "  d 删除选中 workspace（mcpx ≤5min 内从运行时清理）"), inner));
     }
-    rows.push(...fitSegments(inner, ["d delete", "Esc back"]));
+    rows.push(...fitSegments(inner, ["d delete", "e register cwd", "Esc back"]));
     return frame(rows, width);
   }
 
   private async removeSelectedWorkspace(): Promise<void> {
     const ws = this.snapshot.workspaces[this.wsSelected];
     if (!ws) return;
+    if (this.params.onUnregisterWorkspace && normalizeWorkspacePath(ws.path) === normalizeWorkspacePath(this.params.cwd)) {
+      const message = await this.params.onUnregisterWorkspace(ws.path);
+      this.status = message;
+      this.safeRequestRender();
+      await this.refresh();
+      return;
+    }
     const { ok, message } = removeWorkspaceByPath(ws.path);
     this.status = ok ? `已移除 ${ws.name} — ${message}` : `移除失败: ${message}`;
     this.safeRequestRender();
@@ -1202,10 +1560,45 @@ export class McpxOverlay implements Component, Focusable {
 
 // --- private TUI helpers (same pattern as sibling overlays) ---
 
+function sanitizeTerminalText(value: string): string {
+  return value
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b\[(?![0-9;]*m)[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "");
+}
+
+function windowEventKey(event: McpxWindowEvent): string {
+  if (event.kind === "assistant") return `assistant:${event.at}:${event.text}`;
+  if (event.kind === "tool") return `tool:${event.at}:${event.toolCallId ?? ""}:${event.toolName}:${event.status ?? ""}`;
+  if (event.kind === "lifecycle") return `lifecycle:${event.at}:${event.phase}`;
+  return `rpc:${event.cursor}:${event.type}:${event.summary ?? ""}`;
+}
+
+function renderWindowEvent(event: McpxWindowEvent, width: number): string {
+  const time = Number.isFinite(event.at) && event.at > 0
+    ? new Date(event.at).toLocaleTimeString("zh-CN", { hour12: false })
+    : "--:--:--";
+  if (event.kind === "assistant") {
+    return fitLine(`  ${time} assistant · ${event.text.replace(/\s+/g, " ")}`, width);
+  }
+  if (event.kind === "tool") {
+    return fitLine(`  ${time} tool · ${event.toolName || "?"}${event.status ? ` · ${event.status}` : ""}`, width);
+  }
+  if (event.kind === "lifecycle") {
+    return fitLine(`  ${time} lifecycle · ${event.phase}`, width);
+  }
+  const label = event.type.startsWith("tool_execution_")
+    ? "tool"
+    : event.type === "message_update"
+      ? "assistant"
+      : "lifecycle";
+  return fitLine(`  ${time} ${label} · ${event.type}${event.summary ? ` · ${event.summary.replace(/\s+/g, " ")}` : ""}`, width);
+}
+
 function fitLine(value: string, width: number): string {
   // pad=true pads by *visible* width (CJK chars count 2), keeping the right
   // border aligned — padEnd() padded by code units and jagged CJK rows.
-  return truncateToWidth(value, width, "…", true);
+  return truncateToWidth(sanitizeTerminalText(value), width, "…", true);
 }
 
 function rule(width: number): string {

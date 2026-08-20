@@ -58,7 +58,7 @@ async function acknowledgePersistence(value: SingleResult): Promise<void> {
         event: { waitUntil(promise: Promise<unknown>): void; acknowledgeResource?(uri: string): void },
       ) {
         event.waitUntil(Promise.resolve().then(() => {
-          event.acknowledgeResource?.(`agent://${value.publicationId}`);
+          event.acknowledgeResource?.(`agent://${value.correlationId}`);
         }));
       },
     },
@@ -99,7 +99,7 @@ test("displayMessageForResult keeps small persisted results inline and adds the 
     messages: [{ role: "assistant", content: "Plain answer" }],
   });
   await acknowledgePersistence(persisted);
-  assert.equal(displayMessageForResult(persisted), "Plain answer\n\nFull result: agent://publication-small");
+  assert.equal(displayMessageForResult(persisted), "Plain answer\n\nFull result: agent://run-abc");
 });
 
 test("displayMessageForResult delivers large structured outputs in full without persistence acknowledgement", () => {
@@ -123,7 +123,7 @@ test("displayMessageForResult replaces large persisted structured outputs with a
   await acknowledgePersistence(persisted);
   const out = displayMessageForResult(persisted);
   assert.match(out, /^Structured result saved \(19\.6K chars; fields: data\)\./);
-  assert.match(out, /Full result: agent:\/\/publication-large$/);
+  assert.match(out, /Full result: agent:\/\/run-abc$/);
   assert.equal(out.includes(data), false);
 });
 
@@ -140,7 +140,7 @@ test("displayMessageForResult keeps the full result when durable persistence is 
         _name: string,
         event: { waitUntil(promise: Promise<unknown>): void; acknowledgeResource?(uri: string): void },
       ) {
-        event.acknowledgeResource?.("agent://publication-rejected");
+        event.acknowledgeResource?.("agent://run-abc");
         event.waitUntil(Promise.reject(new Error("store unavailable")));
       },
     },

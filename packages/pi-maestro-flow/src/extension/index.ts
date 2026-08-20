@@ -2192,6 +2192,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
       const overlay = new McpxOverlay({
         cwd: ctx.cwd,
         requestRender: () => tui.requestRender(),
+        getTerminalRows: () => tui.terminal.rows,
         close: () => done(undefined),
         onRegisterWorkspace: async (path) => {
           // Window registration is an independent action, but the wizard is the
@@ -2207,8 +2208,10 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
             done(undefined);
             return "未完成初始配置，已打开配置向导（完成后再按 e 注册窗口）";
           }
-          startWorkspaceLease(path);
-          return `registered（动态租约，窗口存活期间自动续租）: ${path}`;
+          const registered = await startWorkspaceLease(path);
+          return registered
+            ? `registered（动态租约，窗口存活期间自动续租）: ${path}`
+            : `register failed（mcpx workspace register 未成功）: ${path}`;
         },
         onUnregisterWorkspace: async (path) => {
           stopWorkspaceLease();
@@ -2218,6 +2221,20 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
         onOpenWizard: () => {
           reopenWizard = true;
           done(undefined);
+        },
+        onComposeWindowMessage: async (target, session, targetMode) => {
+          const title = targetMode === "new"
+            ? `新建 managed Pi 窗口 · ${session.workspace || session.sessionId.slice(0, 8)}`
+            : `发送到 ${target?.displayName ?? "Pi 窗口"}`;
+          const message = await ctx.ui.input(title, "任务消息");
+          if (!message?.trim()) return undefined;
+          let name: string | undefined;
+          if (targetMode === "new") {
+            const entered = await ctx.ui.input("窗口名称（可选）", "");
+            if (entered === undefined) return undefined;
+            name = entered.trim() || undefined;
+          }
+          return { purpose: message.trim(), message: message.trim(), name };
         },
       });
       return overlay;
@@ -2934,6 +2951,7 @@ Examples: { argv: ["session","status"] }, { argv: ["run","complete","run-abc","-
     for (const d of disposers) {
       try { d(); } catch {}
     }
+    stopWorkspaceLease();
     guiLifecycleGeneration += 1;
     const closingGuiServer = guiServer;
     guiServer = null;

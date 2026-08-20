@@ -26,6 +26,8 @@ export const DEFAULT_COMMAND_TIMEOUT_MS = 5_000;
 export const MAX_OWNER_AGENTS = 256;
 export const MAX_OWNER_SETTLED = 256;
 export const MAX_OWNER_BACKGROUND_JOBS = 32;
+export const MAX_MAIN_SESSION_PROGRESS_EVENTS = 16;
+export const MAIN_SESSION_PROGRESS_TEXT_BYTES = 4 * 1024;
 export const MAX_OWNER_FILE_BYTES = 256 * 1024;
 export const MAX_COMMAND_FILE_BYTES = 96 * 1024;
 export const MAX_RESPONSE_FILE_BYTES = 32 * 1024;
@@ -134,6 +136,31 @@ export interface WorkspaceBackgroundJobSnapshot {
   updatedAt: number;
 }
 
+export type WorkspaceMainSessionProgressEvent =
+  | { kind: "assistant"; at: number; text: string }
+  | {
+    kind: "tool";
+    at: number;
+    toolCallId: string;
+    toolName: string;
+    status: "running" | "completed" | "failed";
+  }
+  | {
+    kind: "lifecycle";
+    at: number;
+    phase: "agent_start" | "turn_start" | "turn_end" | "agent_end" | "agent_settled";
+  };
+
+/** Bounded, content-safe projection of the window's root Pi session. */
+export interface WorkspaceMainSessionProgress {
+  updatedAt: number;
+  /** Absolute cursor of the newest event ever appended by this window. */
+  sequence: number;
+  /** Absolute cursor immediately before events[0]; equals sequence when empty. */
+  baseCursor: number;
+  events: WorkspaceMainSessionProgressEvent[];
+}
+
 export interface WorkspaceOwnerState {
   agents: readonly WorkspaceAgentSnapshot[];
   settled?: readonly WorkspaceSettledSnapshot[];
@@ -144,6 +171,8 @@ export interface WorkspaceOwnerState {
   contextPressure?: number;
   /** Last main-session activity timestamp — liveness signal when no sub-agents are running. */
   mainActivityAt?: number;
+  /** Optional assistant/tool/lifecycle projection for cross-process observers. */
+  mainProgress?: WorkspaceMainSessionProgress;
 }
 
 export interface WorkspaceOwnerSnapshot {
@@ -161,6 +190,8 @@ export interface WorkspaceOwnerSnapshot {
   contextPressure?: number;
   /** Last main-session activity timestamp — liveness signal when no sub-agents are running. */
   mainActivityAt?: number;
+  /** Optional assistant/tool/lifecycle projection for cross-process observers. */
+  mainProgress?: WorkspaceMainSessionProgress;
   agents: WorkspaceAgentSnapshot[];
   settled: WorkspaceSettledSnapshot[];
   backgroundJobs?: WorkspaceBackgroundJobSnapshot[];
@@ -924,6 +955,56 @@ export function validateWorkspaceBackgroundJobSnapshot(value: unknown): Workspac
   };
 }
 
+export function validateWorkspaceMainSessionProgress(value: unknown): WorkspaceMainSessionProgress | undefined {
+  if (!isRecord(value)
+    || !boundedInteger(value.updatedAt)
+    || !boundedInteger(value.sequence)
+    || !boundedInteger(value.baseCursor)
+    || value.baseCursor > value.sequence
+    || !Array.isArray(value.events)
+    || value.events.length > MAX_MAIN_SESSION_PROGRESS_EVENTS
+    || value.sequence - value.baseCursor !== value.events.length) return undefined;
+  const events: WorkspaceMainSessionProgressEvent[] = [];
+  for (const candidate of value.events) {
+    if (!isRecord(candidate) || !boundedInteger(candidate.at)) return undefined;
+    if (candidate.kind === "assistant") {
+      if (!boundedString(candidate.text, MAIN_SESSION_PROGRESS_TEXT_BYTES)
+        || Buffer.byteLength(candidate.text, "utf8") > MAIN_SESSION_PROGRESS_TEXT_BYTES) return undefined;
+      events.push({ kind: "assistant", at: candidate.at, text: candidate.text });
+      continue;
+    }
+    if (candidate.kind === "tool") {
+      if (!boundedString(candidate.toolCallId, 256)
+        || !boundedString(candidate.toolName, 256)
+        || (candidate.status !== "running" && candidate.status !== "completed" && candidate.status !== "failed")) return undefined;
+      events.push({
+        kind: "tool",
+        at: candidate.at,
+        toolCallId: candidate.toolCallId,
+        toolName: candidate.toolName,
+        status: candidate.status,
+      });
+      continue;
+    }
+    if (candidate.kind === "lifecycle") {
+      if (candidate.phase !== "agent_start"
+        && candidate.phase !== "turn_start"
+        && candidate.phase !== "turn_end"
+        && candidate.phase !== "agent_end"
+        && candidate.phase !== "agent_settled") return undefined;
+      events.push({ kind: "lifecycle", at: candidate.at, phase: candidate.phase });
+      continue;
+    }
+    return undefined;
+  }
+  return {
+    updatedAt: value.updatedAt,
+    sequence: value.sequence,
+    baseCursor: value.baseCursor,
+    events,
+  };
+}
+
 export function validateWorkspaceOwnerSnapshot(
   value: unknown,
   expected?: { workspaceId?: string; ownerId?: string },
@@ -945,6 +1026,7 @@ export function validateWorkspaceOwnerSnapshot(
     || !optional(value.sessionName, (candidate): candidate is string => boundedString(candidate, 256))
     || !optional(value.contextPressure, (candidate): candidate is number => boundedInteger(candidate) && candidate >= 0 && candidate <= 100)
     || !optional(value.mainActivityAt, boundedInteger)
+    || !optional(value.mainProgress, (candidate): candidate is WorkspaceMainSessionProgress => validateWorkspaceMainSessionProgress(candidate) !== undefined)
     || !Array.isArray(value.agents)
     || value.agents.length > MAX_OWNER_AGENTS
     || !Array.isArray(value.settled)
@@ -953,6 +1035,9 @@ export function validateWorkspaceOwnerSnapshot(
       && (!Array.isArray(value.backgroundJobs) || value.backgroundJobs.length > MAX_OWNER_BACKGROUND_JOBS))
     || (expected?.workspaceId !== undefined && value.workspaceId !== expected.workspaceId)
     || (expected?.ownerId !== undefined && value.ownerId !== expected.ownerId)) return undefined;
+  const mainProgress = value.mainProgress === undefined
+    ? undefined
+    : validateWorkspaceMainSessionProgress(value.mainProgress);
   const agents = value.agents.map(validateAgent);
   const settled = value.settled.map(validateSettled);
   const backgroundJobs = value.backgroundJobs === undefined
@@ -976,6 +1061,7 @@ export function validateWorkspaceOwnerSnapshot(
     ...(value.sessionName === undefined ? {} : { sessionName: value.sessionName }),
     ...(value.contextPressure === undefined ? {} : { contextPressure: value.contextPressure }),
     ...(value.mainActivityAt === undefined ? {} : { mainActivityAt: value.mainActivityAt }),
+    ...(mainProgress === undefined ? {} : { mainProgress }),
     agents: agents as WorkspaceAgentSnapshot[],
     settled: settled as WorkspaceSettledSnapshot[],
     ...(backgroundJobs === undefined ? {} : { backgroundJobs: backgroundJobs as WorkspaceBackgroundJobSnapshot[] }),
@@ -1001,6 +1087,12 @@ export function buildWorkspaceOwnerSnapshot(
     // Protocol boundary: clamp/round pressure so publish never rejects.
     ...(state.contextPressure === undefined ? {} : { contextPressure: Math.max(0, Math.min(100, Math.round(state.contextPressure))) }),
     ...(state.mainActivityAt === undefined ? {} : { mainActivityAt: state.mainActivityAt }),
+    ...(state.mainProgress === undefined ? {} : {
+      mainProgress: {
+        ...state.mainProgress,
+        events: [...state.mainProgress.events],
+      },
+    }),
     agents: [...state.agents],
     settled: [...(state.settled ?? [])],
     ...(state.backgroundJobs === undefined ? {} : { backgroundJobs: [...state.backgroundJobs] }),

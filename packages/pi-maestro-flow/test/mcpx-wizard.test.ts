@@ -123,6 +123,51 @@ test("buildChangesYaml is idempotent on a clean config and keeps the commands he
   assert.match(second, /\^pi\b/);
 });
 
+test("buildChangesYaml preserves proxy flags and OAuth password when only the listener changes", () => {
+  const existing = SAMPLE_CONFIG
+    .replace("    port: 9090", [
+      "    port: 9090",
+      "    disable_localhost_protection: true",
+      "    trust_proxy_headers: true",
+    ].join("\n"))
+    .replace("    mode: open", "    mode: oauth")
+    .replace("    token: \"\"", [
+      "    token: \"\"",
+      "    oauth:",
+      "        password: \"keep-me\"",
+    ].join("\n"));
+  const { yaml } = buildChangesYaml(existing, { port: 9091, tunnelUrl: "https://new.example.com" }, "D:/demo");
+  assert.match(yaml, /port: 9091/);
+  assert.match(yaml, /disable_localhost_protection: true/);
+  assert.match(yaml, /trust_proxy_headers: true/);
+  assert.match(yaml, /password: "keep-me"/);
+});
+
+test("buildChangesYaml preserves two-space YAML indentation and OAuth password", () => {
+  const existing = [
+    "server:",
+    "  host: 127.0.0.1",
+    "  port: 9090",
+    "  disable_localhost_protection: false",
+    "auth:",
+    "  mode: oauth",
+    "  oauth:",
+    "    password: \"keep-two-space\"",
+    "    server_url: \"https://old.example.com\"",
+    "",
+  ].join("\n");
+  const { yaml } = buildChangesYaml(existing, { host: "127.0.0.2", port: 9091, tunnelUrl: "https://new.example.com" }, "D:/demo");
+  assert.equal((yaml.match(/^  port:/gm) || []).length, 1);
+  assert.match(yaml, /  port: 9091/);
+  assert.match(yaml, /  disable_localhost_protection: true/);
+  assert.match(yaml, /password: "keep-two-space"/);
+});
+
+test("buildChangesYaml quotes a custom listen host", () => {
+  const { yaml } = buildChangesYaml(SAMPLE_CONFIG, { host: "127.0.0.1:9090 & invalid" }, "D:/demo");
+  assert.match(yaml, /host: "127\.0\.0\.1:9090 & invalid"/);
+});
+
 test("buildChangesYaml enables proxy flags and upgrades open auth for a tunnel URL", () => {
   const changes: McpxConfigChanges = { tunnelUrl: "https://mcpx.example.com" };
   const { yaml, summary } = buildChangesYaml(SAMPLE_CONFIG, changes, "D:/demo");

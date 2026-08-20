@@ -192,6 +192,123 @@ test("immediate reload waits for workspace peer startup before shutdown cleanup"
   }
 });
 
+test("root session publishes bounded assistant, tool, and lifecycle progress", async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-root-progress-"));
+  const { hooks } = createHarness();
+  const sessionStart = hooks.get("session_start")?.[0];
+  const sessionShutdown = hooks.get("session_shutdown")?.[0];
+  assert.ok(sessionStart);
+  assert.ok(sessionShutdown);
+  const ctx = {
+    cwd: project,
+    hasUI: false,
+    ui: { setWidget() {} },
+    modelRegistry: { getAvailable: () => [] },
+    sessionManager: {
+      getEntries: () => [],
+      getSessionFile: () => undefined,
+      getSessionId: () => "root-progress-session",
+      getSessionName: () => "root-progress",
+    },
+  };
+  let started = false;
+
+  try {
+    sessionStart({ reason: "new" }, ctx);
+    started = true;
+    const ownersDir = createWorkspacePeerPaths(project).ownersDir;
+    let ownerFile: string | undefined;
+    await waitFor(() => {
+      const entries = fs.existsSync(ownersDir)
+        ? fs.readdirSync(ownersDir).filter((entry) => entry.endsWith(".json"))
+        : [];
+      ownerFile = entries[0] ? path.join(ownersDir, entries[0]) : undefined;
+      return ownerFile !== undefined;
+    });
+    assert.ok(ownerFile);
+
+    hooks.get("agent_start")?.[0]?.({ type: "agent_start" }, ctx);
+    hooks.get("turn_start")?.[0]?.({ type: "turn_start", turnIndex: 0, timestamp: Date.now() }, ctx);
+    hooks.get("message_update")?.[0]?.({
+      type: "message_update",
+      message: { role: "assistant", content: [] },
+      assistantMessageEvent: { type: "thinking_delta", delta: "private thinking" },
+    }, ctx);
+    hooks.get("message_update")?.[0]?.({
+      type: "message_update",
+      message: { role: "assistant", content: [] },
+      assistantMessageEvent: { type: "text_start" },
+    }, ctx);
+    hooks.get("message_update")?.[0]?.({
+      type: "message_update",
+      message: { role: "assistant", content: [] },
+      assistantMessageEvent: { type: "text_delta", delta: "working on the peer snapshot" },
+    }, ctx);
+    hooks.get("tool_execution_start")?.[0]?.({
+      type: "tool_execution_start",
+      toolCallId: "tool-progress-1",
+      toolName: "read",
+      args: { secret: "raw args must not publish" },
+    }, ctx);
+    hooks.get("tool_execution_end")?.[0]?.({
+      type: "tool_execution_end",
+      toolCallId: "tool-progress-1",
+      toolName: "read",
+      isError: false,
+      result: { content: "raw result must not publish" },
+    }, ctx);
+    hooks.get("turn_end")?.[0]?.({ type: "turn_end", turnIndex: 0, message: {}, toolResults: [] }, ctx);
+    hooks.get("agent_end")?.[0]?.({ type: "agent_end", messages: [] }, ctx);
+    hooks.get("agent_settled")?.[0]?.({ type: "agent_settled" }, ctx);
+
+    let snapshot: Record<string, any> | undefined;
+    await waitFor(() => {
+      try {
+        snapshot = JSON.parse(fs.readFileSync(ownerFile!, "utf8")) as Record<string, any>;
+        return snapshot.mainProgress?.events?.at(-1)?.phase === "agent_settled";
+      } catch {
+        return false;
+      }
+    });
+    const serialized = JSON.stringify(snapshot?.mainProgress);
+    assert.match(serialized, /working on the peer snapshot/);
+    assert.doesNotMatch(serialized, /private thinking|raw args must not publish|raw result must not publish/);
+    assert.deepEqual(
+      snapshot?.mainProgress.events.filter((event: Record<string, unknown>) => event.kind === "tool"),
+      [
+        { kind: "tool", at: snapshot?.mainProgress.events[3].at, toolCallId: "tool-progress-1", toolName: "read", status: "running" },
+        { kind: "tool", at: snapshot?.mainProgress.events[4].at, toolCallId: "tool-progress-1", toolName: "read", status: "completed" },
+      ],
+    );
+    assert.ok(snapshot?.mainProgress.events.length <= 16);
+    assert.equal(
+      snapshot?.mainProgress.sequence - snapshot?.mainProgress.baseCursor,
+      snapshot?.mainProgress.events.length,
+      "main progress publishes absolute cursor metadata for the retained ring",
+    );
+    assert.ok(snapshot?.mainProgress.sequence >= snapshot?.mainProgress.events.length);
+
+    const sequenceBeforeRollover = snapshot?.mainProgress.sequence as number;
+    for (let index = 0; index < 20; index += 1) {
+      hooks.get("turn_start")?.[0]?.({ type: "turn_start", turnIndex: index + 1, timestamp: Date.now() }, ctx);
+    }
+    await waitFor(() => {
+      try {
+        snapshot = JSON.parse(fs.readFileSync(ownerFile!, "utf8")) as Record<string, any>;
+        return snapshot.mainProgress?.sequence >= sequenceBeforeRollover + 20;
+      } catch {
+        return false;
+      }
+    });
+    assert.equal(snapshot?.mainProgress.events.length, 16);
+    assert.equal(snapshot?.mainProgress.baseCursor, snapshot?.mainProgress.sequence - 16);
+    assert.ok(snapshot?.mainProgress.baseCursor > 0, "ring rollover advances the absolute base cursor");
+  } finally {
+    if (started) await sessionShutdown({ reason: "quit" }, ctx);
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
 test("workspace observation wait honors result-ready, completion, timeout, abort, and root fences", async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-workspace-observe-"));
   const { hooks, commands } = createHarness();

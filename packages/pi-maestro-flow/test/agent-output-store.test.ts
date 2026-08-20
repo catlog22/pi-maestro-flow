@@ -101,11 +101,11 @@ test("resolveAgentOutput with duplicate names returns newest-first matches with 
   if (resolved.kind !== "ambiguous") return;
   assert.equal(resolved.name, "shared-pub");
   assert.equal(resolved.matches.length, 2);
-  assert.equal(resolved.matches[0]!.id, "dup-pub-2");
-  assert.equal(resolved.matches[1]!.id, "dup-pub-1");
+  assert.equal(resolved.matches[0]!.id, "dup-c2");
+  assert.equal(resolved.matches[1]!.id, "dup-c1");
   assert.match(resolved.matches[0]!.capturedAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(resolved.matches[0]!.preview, '{"v":2}');
-  // 精确 publicationId / correlationId 仍解析为单条记录
+  // correlationId is the common query path; publicationId remains a compatibility alias.
   const exact = await resolveAgentOutput("dup-pub-1", root);
   assert.equal(exact.kind, "record");
   if (exact.kind === "record") assert.deepEqual(exact.record.output, { v: 1 });
@@ -350,16 +350,16 @@ test("usage lists current-workspace records and deletion repairs the latest alia
   assert.equal(usage.maxRecords, MAX_AGENT_FILES);
   assert.ok(usage.totalBytes > 0);
   assert.deepEqual(usage.entries.map((entry) => entry.id), [
-    "managed-publication-2",
-    "managed-publication-1",
+    "managed-agent",
+    "managed-agent",
   ]);
   assert.equal(usage.entries[0]?.name, "managed-task");
   assert.equal(usage.entries[0]?.preview, '{"turn":2}');
 
-  assert.equal(await deleteAgentOutput("managed-publication-2", workspace), true);
+  assert.equal(await deleteAgentOutput("managed-agent", workspace), true);
   assert.deepEqual((await readAgentOutput("managed-agent", workspace)).output, { turn: 1 });
   assert.equal((await getAgentOutputStoreUsage(workspace)).records, 1);
-  assert.equal(await deleteAgentOutput("managed-publication-2", workspace), false);
+  assert.equal(await deleteAgentOutput("managed-agent", workspace), true);
   assert.equal(await deleteAgentOutput("../outside", workspace), false);
 });
 

@@ -6,6 +6,8 @@ import test, { afterEach } from "node:test";
 import {
   MAX_OWNER_AGENTS,
   MAX_OWNER_FILE_BYTES,
+  MAX_MAIN_SESSION_PROGRESS_EVENTS,
+  MAIN_SESSION_PROGRESS_TEXT_BYTES,
   WORKSPACE_MAIN_SESSION_MARKER,
   WORKSPACE_PEER_PROTOCOL_VERSION,
   WorkspaceTargetResolutionError,
@@ -40,6 +42,7 @@ import {
   shouldReplayWorkspaceRootQueue,
   validateWorkspaceOwnerSnapshot,
   validateWorkspaceBackgroundJobSnapshot,
+  validateWorkspaceMainSessionProgress,
   validateWorkspacePeerCommand,
   validateWorkspacePeerCommandResponse,
   waitForWorkspacePeerCommandResponse,
@@ -1266,6 +1269,84 @@ test("owner snapshots validate mainActivityAt and settled results", async () => 
     settled: [{ ...published.settled[0]!, result: "x".repeat(SETTLED_RESULT_BYTES + 1) }],
   };
   assert.equal(validateWorkspaceOwnerSnapshot(oversized), undefined, "oversized results are rejected");
+});
+
+test("owner snapshots add optional bounded main-session progress without changing v1", async () => {
+  const { rootDir } = await temporaryWorkspace();
+  const identity = createWorkspacePeerIdentity(join(rootDir, "project"), {
+    rootDir: join(rootDir, "runtime"),
+    ownerId: OWNER_A,
+    ownerNonce: NONCE_A,
+  });
+  const legacy = buildWorkspaceOwnerSnapshot(identity, { agents: [], settled: [] }, 1_000);
+  assert.equal(legacy.version, 1);
+  assert.equal(legacy.mainProgress, undefined);
+
+  const projected = validateWorkspaceOwnerSnapshot({
+    ...legacy,
+    mainProgress: {
+      updatedAt: 1_003,
+      sequence: 3,
+      baseCursor: 0,
+      events: [
+        { kind: "assistant", at: 1_001, text: "inspecting owner snapshots", thinking: "private chain" },
+        {
+          kind: "tool",
+          at: 1_002,
+          toolCallId: "tool-1",
+          toolName: "read",
+          status: "completed",
+          args: { path: "secret" },
+          result: "raw tool result",
+        },
+        { kind: "lifecycle", at: 1_003, phase: "turn_end" },
+      ],
+    },
+  });
+  assert.deepEqual(projected?.mainProgress, {
+    updatedAt: 1_003,
+    sequence: 3,
+    baseCursor: 0,
+    events: [
+      { kind: "assistant", at: 1_001, text: "inspecting owner snapshots" },
+      { kind: "tool", at: 1_002, toolCallId: "tool-1", toolName: "read", status: "completed" },
+      { kind: "lifecycle", at: 1_003, phase: "turn_end" },
+    ],
+  });
+
+  const empty = validateWorkspaceMainSessionProgress({
+    updatedAt: 1_004,
+    sequence: 9,
+    baseCursor: 9,
+    events: [],
+  });
+  assert.deepEqual(empty, { updatedAt: 1_004, sequence: 9, baseCursor: 9, events: [] });
+
+  const event = { kind: "lifecycle", at: 1_000, phase: "turn_start" };
+  assert.equal(validateWorkspaceMainSessionProgress({
+    updatedAt: 1_000,
+    sequence: MAX_MAIN_SESSION_PROGRESS_EVENTS + 1,
+    baseCursor: 0,
+    events: Array.from({ length: MAX_MAIN_SESSION_PROGRESS_EVENTS + 1 }, () => event),
+  }), undefined);
+  assert.equal(validateWorkspaceMainSessionProgress({
+    updatedAt: 1_000,
+    sequence: 17,
+    baseCursor: 1,
+    events: Array.from({ length: MAX_MAIN_SESSION_PROGRESS_EVENTS }, () => event),
+  })?.baseCursor, 1, "rolled rings retain their absolute cursor base");
+  assert.equal(validateWorkspaceMainSessionProgress({
+    updatedAt: 1_000,
+    sequence: 17,
+    baseCursor: 0,
+    events: Array.from({ length: MAX_MAIN_SESSION_PROGRESS_EVENTS }, () => event),
+  }), undefined, "cursor metadata must match the retained ring");
+  assert.equal(validateWorkspaceMainSessionProgress({
+    updatedAt: 1_000,
+    sequence: 1,
+    baseCursor: 0,
+    events: [{ kind: "assistant", at: 1_000, text: "好".repeat(MAIN_SESSION_PROGRESS_TEXT_BYTES) }],
+  }), undefined, "assistant text is bounded by UTF-8 bytes");
 });
 
 // ===========================================================================
