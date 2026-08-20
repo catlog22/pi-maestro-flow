@@ -1,76 +1,114 @@
-# v0.21.6 — Remote Teammate Workers, Monitor Control, and Plan Knowledge Gate
+# v0.22.0 — Teammate 2.0 Backend Registry, MCPX Dashboard, Prompt Enhance & Usage Insights
 
 ## Overview
 
-Teammate `1.14.0` ships the remote worker system: a `pi-teammate-remote` CLI
-with an ACP (Agent Client Protocol) driver, SSH transport, Pi RPC driver, and
-remote journaling — plus Monitor integration (tool-exposure switching,
-remote-aware `teammate-list`, remote worker supervision) and an interactive
-ask-before-dispatch gate. Flow `0.21.6` opens the plan execution contract with
-the Knowledge Gate and syncs the core engine pin to `maestro-flow@0.5.75`.
+This release publishes **Teammate 2.0.0** (the committed breaking major, previously
+unpublished), **Flow 0.22.0**, **Cockpit 0.17.0**, and **Settings-Core 0.2.0**,
+built on 138 commits since v0.21.6 (288 files, +40,490/−3,520). Core engine pin
+synced `maestro-flow@0.5.75 → 0.5.79` (upstream latest).
 
 ## Highlights
 
-### Teammate 1.14.0 — Remote Workers (`pi-teammate-remote`)
+### Teammate 2.0.0 — Backend Registry (breaking major)
 
-- New CLI binary `pi-teammate-remote` and public `./v1/remote` API surface with
-  worker protocol, configuration, bridge, journal, and adapter contracts
-  (`src/remote/`): ACP driver, Pi RPC driver, SSH transport, child security and
-  process-tree management, worker-manager, and remote state.
-- New runtime dependencies: `@agentclientprotocol/sdk@1.3.0`, `jiti@2.7.0`,
-  `ssh2@1.17.0`, `zod@4.4.3` (bundled settings core unchanged).
-- Monitor control window: `MonitorToolExposureController` switches local vs
-  Monitor tool variants with exclusive tools (`workspace-window`,
-  `remote-worker`) without granting cross-window authority before admission;
-  `teammate-list` merges local workspace peers with remote runs; monitor mode
-  context now covers SSH-backed remote worker supervision.
-- Ask-before-dispatch gate: when enabled in the model routing config
-  (`~/.pi/agent/teammate-models.json` → `askBeforeDispatch: true`,
-  toggleable via `/teammate-models`), root dispatches pause for per-task model /
-  thinking / location confirmation in a model-ask overlay before any agent is
-  spawned; nested/proxied dispatches never ask.
-- Delivery hardening: monitor runtime interventions carry an in-process
-  `authorize` fence checked before external publication; `ActiveAgent` gains a
-  resolved `cwd` (local path or `remote:<targetId>`).
+- **Breaking**: remote journal format `REMOTE_JOURNAL_VERSION` 1 → 2 with **no
+  migration path** — old v1 journals hard-fail at parse time and must be deleted
+  and rebuilt; remote protocol vocabulary `RemoteCapability` removed, protocol
+  bumped to `remote/2`.
+- Inline `cli/<tool>` dispatch removed — routing now goes through the **backend
+  registry**; third-party adapters must implement the backend contract.
+- New pure-contract package `pi-maestro-backend-core` (capability table expanded
+  to 12 entries; credentials modeled as references, not masked values) plus the
+  Pi subprocess backend adapter and the dsh backend (per-run hosted loopback MCP
+  todo endpoint; `outputSchema` host-side compensation upgraded from unsupported
+  to emulated).
+- Generic **ACP-CLI TeammateBackend**: facts returned via `outcome.recovery`,
+  `settleAcpRun` observes tool events with done/in-flight counts, ACP handshake
+  timeout configurable (no longer hardcoded 15s), failover gate driven by
+  observed activity.
+- **In-process model failover** via `set_model` RPC — hot-swap models without
+  restarting the run; manual model switch resets that model's circuit breaker.
+- Cross-window workspace peers and cross-window replies; lifecycle-boundary
+  regression hardening; task-delegation refinements.
 
-### Flow 0.21.6 — Plan Knowledge Gate + Engine Sync
+### Flow 0.22.0
 
-- The approved-plan execution contract now opens with the Knowledge Gate: it
-  instructs executing agents to run `maestro search "<1-3 task keywords>"`
-  before any project work and to `maestro load` every governing hit (search is
-  exposure, load records consumption), then re-search at subsystem or
-  architecture boundaries.
-- Core engine pin synced `maestro-flow@0.5.74 → 0.5.75` (upstream v3 runtime
-  updates; v2 branch untouched).
+- **MCPX dashboard (看板)** — full dashboard on top of the config wizard and
+  connection monitor: tunnel health monitoring with anomaly key guidance,
+  one-key tunnel restart (T) with automatic URL sync to config + mcpx restart,
+  OAuth ops-password display + persistence, workspace management sub-mode (W —
+  list/select/remove any workspace), delegated-task status and result display
+  (task-orchestration Phase 4), mcpx-for-pmf fork detection, auth-mode 401
+  online-detection fix, tunnel URL shown with `/mcp` suffix + client hints, and
+  dashboard client-ification (`mcpx-client.ts`).
+- **prompt-enhance** — new prompt-enhancement feature on `Alt+Shift+E`
+  (Ctrl+Shift+E removed to avoid conflict with Pi `app.thinking.cycle`).
+- **`/notify` toast toggle** — `/notify [on|off|error|complete|status]` for
+  model-error / turn-complete toasts; error turns suppress the complete toast,
+  at most one toast per turn; state persisted.
+- **next-suggest** — next-step suggestion widget under the editor after each
+  turn; F2 (configurable) fills the editor; configured via API Manager
+  (`/api-manager nextsuggest`), persisted under `nextSuggest` in
+  `api-manager.json`.
+- **Dynamic model discovery** — API Manager queries the provider for a live
+  model list, gated behind a saved API key.
+- **API Manager config import/export**; teammate CLI tool availability surfaced;
+  blocked knowledge candidates shown.
+- **submit-gate** — new submit-gate extension (pre-submit gate).
+- **Usage insights** — statusline usage history, usage chart, and history
+  backfill.
+- **`.pi/SYSTEM.md` single-authority migration** — project system instructions
+  come only from `.pi/SYSTEM.md`; inline packaged `AGENTS.md` injection retired.
+- **Browser** — GenericAgent DOM probe, list folding, navigation detection.
+- **Hardening waves** (odyssey-review): lock retries raised to 64 for
+  high-contention trust, unified `serializeMutation` lock, event-bus cleanup,
+  replay cap, usage-history perf + index atomicity, mcpx tunnel/pid/yaml
+  hardening, ops-password masking, backup mode/cap, PID identity verify.
+
+### Cockpit 0.17.0
+
+- **Alt+Shift+T Todo overlay**; blocked-todo priority demoted; visible cap
+  raised.
+- Same-file edits batched; identical edits rejected atomically.
+- `optionsSource` adopted for the model selector (filled by the executor).
+
+### Settings-Core 0.2.0
+
+- `optionsSource` upgraded from a declared field to a working mechanism; the
+  model namespace is owned by the executor; `backendOptionsOf` delivers the real
+  `host.proxyToolCall`.
 
 ## Package Versions
 
 | Package | Version | Change |
 |---------|---------|--------|
-| pi-maestro-teammate | 2.0.0 | major — 破坏性远端 journal 格式（REMOTE_JOURNAL_VERSION 1 → 2，无迁移） |
-| pi-maestro-flow | 0.21.6 | patch — plan Knowledge Gate, engine sync |
-| pi-cockpit | 0.16.0 | unchanged |
-| pi-maestro-settings-core | 0.1.3 | unchanged |
+| pi-maestro-flow | 0.22.0 | minor — MCPX dashboard, prompt-enhance, /notify, model discovery, submit-gate, usage insights |
+| pi-maestro-teammate | 2.0.0 | major — backend registry, remote journal v2 (breaking, no migration) |
+| pi-cockpit | 0.17.0 | minor — Todo overlay, atomic edit batching, optionsSource |
+| pi-maestro-settings-core | 0.2.0 | minor — optionsSource mechanism |
+| maestro-flow (engine pin) | 0.5.79 | sync 0.5.75 → 0.5.79 (upstream latest) |
 
 ## Upgrade Notes
 
-- Teammate requires the new runtime deps (`ssh2`, `jiti`,
-  `@agentclientprotocol/sdk`); reinstall (`pi install npm:pi-maestro-teammate@1.14.0`
-  or clean `npm install`) rather than copying an old node_modules.
-- Ask-before-dispatch defaults to off; enable it in `/teammate-models`
-  (Ctrl+A). When enabled, dispatches from contexts without overlay UI support
-  skip the gate instead of failing.
-- `maestro-flow` is exact-pinned; the pin is bumped to 0.5.75 to match this
-  release (upstream latest).
+- **Teammate 2.0.0 is breaking**: old v1 remote journals are unreadable and must
+  be deleted and rebuilt; third-party backends must implement the backend
+  contract instead of inline `cli/<tool>` dispatch.
+- Cockpit's peer range for `pi-maestro-teammate` is now `^2.0.0` — upgrade the
+  two together.
+- `maestro-flow` is exact-pinned and bumped to 0.5.79 for this release.
+- Users relying on the retired inline `AGENTS.md` injection must migrate content
+  to `.pi/SYSTEM.md`.
 
 ## Install
 
 ```bash
-pi install npm:pi-maestro-flow@0.21.6
+pi install npm:pi-maestro-flow@0.22.0
 ```
 
 ## Verification
 
-- `packages/pi-maestro-teammate`: 1453 tests pass (full suite), typecheck clean.
-- `packages/pi-maestro-flow`: `test:plan` 122 pass, typecheck clean.
+- All four packages typecheck clean; teammate `build:declarations` +
+  `check:declarations` pass.
+- Focused tests for changed areas: flow 164 pass, teammate 113 pass / 2 skipped
+  / 0 fail.
 - Published artifacts verified by registry install + smoke after release.
