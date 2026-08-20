@@ -11,7 +11,7 @@ import { readdirSync, readFileSync, existsSync, statSync, writeFileSync, rmSync 
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { locateMcpx, readTunnelState, probeTunnelHealth, restartQuickTunnel, updateConfigServerURL, stopMcpx, readOpsPassword, detectMcpxForPmf, removeWorkspaceByPath, type TunnelState } from "../mcpx-bridge.ts";
+import { locateMcpx, readTunnelState, probeTunnelHealth, restartQuickTunnel, updateConfigServerURL, stopMcpx, readOpsPassword, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks, type TunnelState, type DelegatedTask } from "../mcpx-bridge.ts";
 
 const MCPX_DEFAULT_ENDPOINT = "http://127.0.0.1:9090/mcp";
 const PEER_STALE_MS = 20_000;
@@ -75,6 +75,8 @@ export interface McpxSnapshot {
   mcpServers: McpxMcpServerInfo[];
   connections?: McpxConnectionInfo[];
   tunnel?: TunnelState;
+  /** Delegated tasks from the mcpx file registry (all sessions). */
+  tasks?: DelegatedTask[];
   /** mcpx-for-pmf fork installed as a global npm package? */
   forkInstalled?: boolean;
   forkVersion?: string;
@@ -779,6 +781,7 @@ export class McpxOverlay implements Component, Focusable {
         mcpServers: collectMcpServers(cwd),
         connections: online ? await collectConnections(endpoint) : undefined,
         tunnel,
+        tasks: readDelegatedTasks(),
         forkInstalled: fork.installed,
         forkVersion: fork.version,
         opsPassword,
@@ -981,6 +984,7 @@ export class McpxOverlay implements Component, Focusable {
     rows.push(rule(inner));
     rows.push(...this.renderTunnelRows(inner));
     rows.push(...this.renderOpsPasswordRows(inner));
+    rows.push(...this.renderDelegatedTaskRows(inner));
     rows.push(rule(inner));
     rows.push(fitLine(`Pi 窗口（${this.snapshot.windows.length} fresh）`, inner));
     if (this.snapshot.windows.length === 0) {
@@ -1109,6 +1113,33 @@ export class McpxOverlay implements Component, Focusable {
       fitLine(`运维口令（OAuth 授权页填写）: ${fg("36", shown)}`, width),
       fitLine(fg("2", `  按 P 显明/隐藏口令（完整值见 ~/.mcpx/config.yaml）`), width),
     ];
+  }
+
+  /** 委派任务区块 — 显示 mcpx 任务注册表里的委派任务及状态/结果。 */
+  private renderDelegatedTaskRows(width: number): string[] {
+    const tasks = this.snapshot.tasks;
+    if (!tasks || tasks.length === 0) return [];
+    const rows = [fitLine(`委派任务（${tasks.length}）`, width)];
+    const statusColor: Record<string, string> = {
+      pending: "33",
+      delivered: "36",
+      executing: "34",
+      completed: "32",
+      failed: "31",
+    };
+    for (const task of tasks.slice(0, 6)) {
+      const color = statusColor[task.status] ?? "33";
+      const action = task.action === "spawn" ? "spawn" : "delegate";
+      const tid = task.task_id.slice(0, 8);
+      const purpose = (task.purpose || task.message || "").replace(/\s+/g, " ").slice(0, 32);
+      rows.push(fitLine(`  ${fg(color, task.status)} · ${tid} · ${action} · ${task.workspace || "?"} · ${purpose}`, width));
+      if (task.status === "completed" && task.result_summary?.length) {
+        rows.push(fitLine(fg("2", `      结果: ${task.result_summary.slice(0, 2).join(" · ").slice(0, 60)}`), width));
+      } else if (task.status === "failed" && task.error) {
+        rows.push(fitLine(fg("31", `      错误: ${task.error.slice(0, 60)}`), width));
+      }
+    }
+    return rows;
   }
 
   private renderThreadRow(entry: McpxThreadEntry, selected: boolean, width: number): string {

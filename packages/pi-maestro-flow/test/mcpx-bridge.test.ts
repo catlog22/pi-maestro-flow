@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ensureMcpxWorkspace, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, probeTunnelHealth, detectMcpxForPmf, removeWorkspaceByPath } from "../src/mcpx-bridge.ts";
+import { ensureMcpxWorkspace, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, probeTunnelHealth, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks } from "../src/mcpx-bridge.ts";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -359,4 +359,55 @@ test("removeWorkspaceByPath calls `mcpx workspace remove <path>` and reports ok"
   const args = await readFile(log, "utf8");
   assert.match(args, /workspace remove/, "must call `workspace remove`");
   assert.match(args, /D:\/to-remove/, "must pass the path through");
+});
+
+test("readDelegatedTasks merges registry entry with result file", async (t) => {
+  t.after(_resetMcpxBridgeState);
+  await withIsolatedHome(async (home) => {
+    const dir = join(home, ".mcpx", "tasks", "delegated", "sess-1");
+    await mkdir(dir, { recursive: true });
+    // registry entry: status delivered (task in flight)
+    await writeFile(join(dir, "task-1.json"), JSON.stringify({
+      task_id: "task-1", remote_session_id: "sess-1", workspace: "demo",
+      action: "delegate", message: "do thing", purpose: "test", status: "delivered",
+      created_at: "2026-08-20T10:00:00Z",
+    }));
+    // companion result file: pi wrote completed + summary
+    await writeFile(join(dir, "task-1.result.json"), JSON.stringify({
+      task_id: "task-1", status: "completed", result: "done", result_summary: ["a", "b"],
+      completed_at: "2026-08-20T10:05:00Z",
+    }));
+    const tasks = readDelegatedTasks();
+    assert.ok(tasks && tasks.length === 1);
+    assert.equal(tasks[0].task_id, "task-1");
+    assert.equal(tasks[0].status, "completed", "result file promotes status");
+    assert.deepEqual(tasks[0].result_summary, ["a", "b"]);
+  });
+});
+
+test("readDelegatedTasks returns undefined when registry absent", async (t) => {
+  t.after(_resetMcpxBridgeState);
+  await withIsolatedHome(async () => {
+    assert.equal(readDelegatedTasks(), undefined);
+  });
+});
+
+test("readDelegatedTasks scopes to a session id", async (t) => {
+  t.after(_resetMcpxBridgeState);
+  await withIsolatedHome(async (home) => {
+    for (const sess of ["sess-a", "sess-b"]) {
+      const dir = join(home, ".mcpx", "tasks", "delegated", sess);
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, `t-${sess}.json`), JSON.stringify({
+        task_id: `t-${sess}`, remote_session_id: sess, workspace: "w",
+        action: "spawn", message: "x", purpose: "x", status: "executing",
+        created_at: "2026-08-20T10:00:00Z",
+      }));
+    }
+    const all = readDelegatedTasks();
+    assert.equal(all?.length, 2, "no scope = all sessions");
+    const a = readDelegatedTasks("sess-a");
+    assert.equal(a?.length, 1);
+    assert.equal(a![0].task_id, "t-sess-a");
+  });
 });

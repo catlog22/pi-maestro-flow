@@ -13,7 +13,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
@@ -391,6 +391,101 @@ export function removeWorkspaceByPath(path: string): { ok: boolean; message: str
   });
   if (result.status === 0) return { ok: true, message: "已移除（mcpx ≤5min 内清理）" };
   return { ok: false, message: String(result.stderr || result.stdout || "workspace remove 失败").trim() };
+}
+
+// --- Delegated task registry (Phase 4: board display) ---
+
+/** Mirrors mcpx internal/tasks DelegatedTask JSON ({taskID}.json registry entry). */
+export interface DelegatedTask {
+  task_id: string;
+  remote_session_id: string;
+  workspace: string;
+  target_owner_id?: string;
+  spawn_pid?: number;
+  action: string;
+  message: string;
+  purpose: string;
+  status: string;
+  result?: string;
+  result_summary?: string[];
+  created_at: string;
+  delivered_at?: string;
+  completed_at?: string;
+  error?: string;
+}
+
+/** Shape of the {taskID}.result.json companion file pi writes on completion. */
+interface DelegatedTaskResult {
+  task_id: string;
+  status?: string;
+  result?: string;
+  result_summary?: string[];
+  completed_at?: string;
+  error?: string;
+}
+
+/** Root of the delegated-task registry: {home}/.mcpx/tasks/delegated/{sessionID}/. */
+function delegatedTaskDir(sessionId: string): string {
+  return join(homedir(), ".mcpx", "tasks", "delegated", sessionId);
+}/**
+ * Read delegated tasks from the mcpx file registry.
+ * Each {taskID}.json is a registry entry; a {taskID}.result.json companion (written
+ * by the pi agent after the task settles) is merged in, promoting status to
+ * the result's status and folding in result/result_summary.
+ * Pass sessionId to scope to one Remote Session; omit to scan all sessions.
+ * Returns undefined when no registry dir exists.
+ */
+export function readDelegatedTasks(sessionId?: string): DelegatedTask[] | undefined {
+  const root = join(homedir(), ".mcpx", "tasks", "delegated");
+  let sessionDirs: string[];
+  try {
+    if (sessionId) {
+      sessionDirs = [join(root, sessionId)];
+    } else {
+      // scan all session subdirs
+      sessionDirs = readdirSync(root, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => join(root, e.name));
+    }
+  } catch {
+    return undefined;
+  }
+  const tasks: DelegatedTask[] = [];
+  for (const dir of sessionDirs) {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const name of entries) {
+      // registry entries are {taskID}.json; skip companion result files.
+      if (!name.endsWith(".json") || name.endsWith(".result.json")) continue;
+      try {
+        const task = JSON.parse(readFileSync(join(dir, name), "utf8")) as DelegatedTask;
+        // merge companion result file if present
+        const resultPath = join(dir, task.task_id + ".result.json");
+        if (existsSync(resultPath)) {
+          try {
+            const res = JSON.parse(readFileSync(resultPath, "utf8")) as DelegatedTaskResult;
+            if (res.status) task.status = res.status;
+            if (typeof res.result === "string") task.result = res.result;
+            if (Array.isArray(res.result_summary)) task.result_summary = res.result_summary;
+            if (res.completed_at) task.completed_at = res.completed_at;
+            if (res.error) task.error = res.error;
+          } catch {
+            // malformed result file — keep registry entry as-is
+          }
+        }
+        tasks.push(task);
+      } catch {
+        // malformed registry entry — skip
+      }
+    }
+  }
+  // newest first
+  tasks.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+  return tasks;
 }
 
 // --- Quick tunnel restart + config sync (one-click URL refresh) ---
