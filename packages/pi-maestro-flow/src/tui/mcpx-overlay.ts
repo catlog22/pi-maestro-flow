@@ -10,7 +10,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, existsSync, statSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
-import { Key, type Component, type Focusable, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { Key, type Component, type Focusable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { locateMcpx, readTunnelState, probeTunnelHealth, restartQuickTunnel, updateConfigServerURL, stopMcpx, readOpsPassword, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks, type TunnelState, type DelegatedTask } from "../mcpx-bridge.ts";
 
 const MCPX_DEFAULT_ENDPOINT = "http://127.0.0.1:9090/mcp";
@@ -996,7 +996,7 @@ export class McpxOverlay implements Component, Focusable {
     }
     if (this.status) rows.push(fitLine(this.status, inner));
     if (this.snapshot.error) rows.push(fitLine(fg("31", `! ${this.snapshot.error}`), inner));
-    rows.push(fitSegments(inner, ["Enter detail", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "T tunnel", "W workspaces", "e register cwd", "c wizard", "P password", "Esc close"]));
+    rows.push(...fitSegments(inner, ["Enter detail", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "T tunnel", "W workspaces", "e register cwd", "c wizard", "P password", "Esc close"]));
     return frame(rows, width);
   }
 
@@ -1164,7 +1164,7 @@ export class McpxOverlay implements Component, Focusable {
         }
       }
     }
-    rows.push(fitSegments(inner, ["Esc back"]));
+    rows.push(...fitSegments(inner, ["Esc back"]));
     return frame(rows, width);
   }
 
@@ -1186,7 +1186,7 @@ export class McpxOverlay implements Component, Focusable {
       rows.push(rule(inner));
       rows.push(fitLine(fg("31", "  d 删除选中 workspace（mcpx ≤5min 内从运行时清理）"), inner));
     }
-    rows.push(fitSegments(inner, ["d delete", "Esc back"]));
+    rows.push(...fitSegments(inner, ["d delete", "Esc back"]));
     return frame(rows, width);
   }
 
@@ -1203,7 +1203,9 @@ export class McpxOverlay implements Component, Focusable {
 // --- private TUI helpers (same pattern as sibling overlays) ---
 
 function fitLine(value: string, width: number): string {
-  return truncateToWidth(value, width, "…").padEnd(width, " ");
+  // pad=true pads by *visible* width (CJK chars count 2), keeping the right
+  // border aligned — padEnd() padded by code units and jagged CJK rows.
+  return truncateToWidth(value, width, "…", true);
 }
 
 function rule(width: number): string {
@@ -1211,12 +1213,28 @@ function rule(width: number): string {
 }
 
 function frame(rows: readonly string[], width: number): string[] {
-  return [`┌${"─".repeat(Math.max(0, width))}┐`, ...rows.map((row) => `│${row}│`), `└${"─".repeat(Math.max(0, width))}┘`];
+  // width is the OUTER width; content rows are │+inner+│, so the horizontal
+  // rules must span inner = width-2 to keep all rows the same width.
+  const inner = Math.max(0, width - 2);
+  return [`┌${"─".repeat(inner)}┐`, ...rows.map((row) => `│${row}│`), `└${"─".repeat(inner)}┘`];
 }
 
-function fitSegments(width: number, segments: readonly string[]): string {
-  const joined = segments.join("  ·  ");
-  return fitLine(joined, width);
+function fitSegments(width: number, segments: readonly string[]): string[] {
+  // Greedy-wrap the hint segments so no shortcut is hidden by truncation on
+  // narrow terminals.
+  const lines: string[] = [];
+  let current = "";
+  for (const segment of segments) {
+    const candidate = current ? `${current} · ${segment}` : segment;
+    if (current && visibleWidth(candidate) > width) {
+      lines.push(fitLine(current, width));
+      current = segment;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) lines.push(fitLine(current, width));
+  return lines;
 }
 
 function fg(code: string, text: string): string {

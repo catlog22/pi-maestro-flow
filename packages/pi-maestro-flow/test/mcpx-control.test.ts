@@ -26,25 +26,34 @@ async function withFakeMcpx(run: (binPath: string, markerPath: string) => Promis
   const jsPath = join(dir, "fake-mcpx.js");
   await writeFile(jsPath, [
     "const fs = require('node:fs');",
+    // Mirror the real binary's contract: -version prints and exits without
+    // starting a server (the overlay's refresh probes `mcpx -version`).
+    "if (process.argv[2] === '-version') { console.log('mcpx 0.0.0-fake'); process.exit(0); }",
     `fs.writeFileSync(${JSON.stringify(markerPath)}, 'started');`,
-    `fs.writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));`,
+    // The Go server owns the PID file; the fake mirrors that contract by
+    // writing the path the TUI reads (MCPX_PID_FILE override).
+    "if (process.env.MCPX_PID_FILE) fs.writeFileSync(process.env.MCPX_PID_FILE, String(process.pid));",
     "setInterval(() => {}, 1000);",
   ].join("\n"), "utf8");
   const binPath = isWin ? join(dir, "fake-mcpx.cmd") : join(dir, "fake-mcpx");
   if (isWin) {
-    await writeFile(binPath, `@echo off\r\nnode "${jsPath}"\r\n`, "utf8");
+    await writeFile(binPath, `@echo off\r\nnode "${jsPath}" %*\r\n`, "utf8");
   } else {
-    await writeFile(binPath, `#!/bin/sh\nnode "${jsPath}"\n`, "utf8");
+    await writeFile(binPath, `#!/bin/sh\nnode "${jsPath}" "$@"\n`, "utf8");
     const { chmod } = await import("node:fs/promises");
     await chmod(binPath, 0o755);
   }
   const previous = process.env.MCPX_BIN;
+  const previousPidFile = process.env.MCPX_PID_FILE;
   process.env.MCPX_BIN = binPath;
+  process.env.MCPX_PID_FILE = pidPath;
   try {
     await run(binPath, markerPath);
   } finally {
     if (previous === undefined) delete process.env.MCPX_BIN;
     else process.env.MCPX_BIN = previous;
+    if (previousPidFile === undefined) delete process.env.MCPX_PID_FILE;
+    else process.env.MCPX_PID_FILE = previousPidFile;
     // clean up any leftover process tree from the fake server
     const pidFile = join(dir, "server.pid");
     if (existsSync(pidFile)) {
@@ -60,7 +69,9 @@ async function withFakeMcpx(run: (binPath: string, markerPath: string) => Promis
 
 test("s starts the mcpx server and x stops it", async (t) => {
   await withFakeMcpx(async (_binPath, markerPath) => {
-    const pidFile = join(homedir(), ".mcpx", "mcpx-server.pid");
+    // MCPX_PID_FILE is set by withFakeMcpx to the isolated dir — capture now
+    // (the env is restored after run returns).
+    const pidFile = process.env.MCPX_PID_FILE as string;
     t.after(async () => {
       // leave no trace: kill a leftover fake process and remove the pid file
       if (existsSync(pidFile)) {
