@@ -633,8 +633,8 @@ export class McpxOverlay implements Component, Focusable {
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
       this.status = online
-        ? `隧道已更新: ${newUrl} · mcpx 已重启`
-        : `隧道已更新: ${newUrl} · mcpx 端点未就绪（检查启动日志）`;
+        ? `隧道已更新: ${newUrl}/mcp · mcpx 已重启`
+        : `隧道已更新: ${newUrl}/mcp · mcpx 端点未就绪（检查启动日志）`;
     } catch (error) {
       this.status = `隧道刷新失败: ${error instanceof Error ? error.message : String(error)}`;
     } finally {
@@ -942,7 +942,7 @@ export class McpxOverlay implements Component, Focusable {
     };
     const proc = tunnel.alive ? fg("32", `进程存活·pid ${tunnel.pid}`) : fg("31", "进程已退出");
     const rows = [fitLine(`${header} · ${proc} · ${healthLabel[tunnel.health]}`, width)];
-    if (tunnel.url) rows.push(fitLine(`  URL: ${tunnel.url}`, width));
+    if (tunnel.url) rows.push(fitLine(`  URL: ${tunnel.url}/mcp  ${fg("2", "← MCP 客户端填这个")}`, width));
     if (tunnel.health === "ok") {
       rows.push(fitLine(fg("33", "  ! 200 无鉴权 — 仅限本机 open 模式；公网暴露请用向导升级为 oauth"), width));
     } else if (tunnel.health === "auth") {
