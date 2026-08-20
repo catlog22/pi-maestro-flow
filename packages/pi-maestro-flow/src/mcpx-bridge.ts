@@ -101,9 +101,7 @@ function renewWorkspaceLease(absRoot: string, ttlSeconds: number, generation?: n
         ? ["workspace", "register", "--ttl", `${ttlSeconds}s`, absRoot]
         : ["workspace", "register", absRoot];
       const { status, stderr } = runMcpx(args);
-      if (status === 0) {
-        console.log(`[pi-maestro-flow] MCPX workspace registered (lease ${ttlSeconds}s): ${absRoot}`);
-      } else {
+      if (status !== 0) {
         console.warn(`[pi-maestro-flow] MCPX workspace registration failed (${status ?? "spawn error"}): ${stderr}`);
       }
     } catch (error) {
