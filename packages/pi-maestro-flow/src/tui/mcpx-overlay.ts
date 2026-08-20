@@ -335,7 +335,7 @@ export async function collectConnections(endpoint: string): Promise<McpxConnecti
   }
 }
 
-async function probeEndpoint(configPath: string): Promise<{ endpoint: string; endpointVersion?: string }> {
+async function probeEndpoint(configPath: string): Promise<{ endpoint: string; reachable: boolean; endpointVersion?: string }> {
   let endpoint = MCPX_DEFAULT_ENDPOINT;
   try {
     const raw = readFileSync(configPath, "utf8");
@@ -351,6 +351,10 @@ async function probeEndpoint(configPath: string): Promise<{ endpoint: string; en
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "mcpx-tui", version: "1.0.0" } } }),
       signal: AbortSignal.timeout(2_000),
     });
+    // Any HTTP response (even 401/403) proves mcpx is up and listening — only a
+    // network failure (thrown) means offline. auth-mode servers reject an
+    // unauthenticated initialize with 401, which must NOT read as "未运行".
+    const reachable = true;
     const contentType = response.headers.get("content-type") ?? "";
     const raw = await response.text();
     let payload: { result?: { serverInfo?: { name?: string; version?: string } } } | undefined;
@@ -372,9 +376,16 @@ async function probeEndpoint(configPath: string): Promise<{ endpoint: string; en
       }
     }
     const info = payload?.result?.serverInfo;
-    return { endpoint, endpointVersion: info ? `${info.name} ${info.version}` : undefined };
+    // 200 → real serverInfo; 401/403 → still reachable, surface an auth hint so
+    // the board shows "mcpx (需鉴权)" instead of bare "online" with no version.
+    let endpointVersion: string | undefined;
+    if (info) endpointVersion = `${info.name} ${info.version}`;
+    else if (response.status === 401) endpointVersion = "mcpx 需鉴权（401）";
+    else if (response.status === 403) endpointVersion = "mcpx 拒绝（403 Host）";
+    else endpointVersion = `mcpx · HTTP ${response.status}`;
+    return { endpoint, reachable, endpointVersion };
   } catch {
-    return { endpoint };
+    return { endpoint, reachable: false };
   }
 }
 
@@ -440,8 +451,8 @@ export class McpxOverlay implements Component, Focusable {
       const deadline = Date.now() + (this.params.endpointWaitMs ?? 15_000);
       let online = false;
       while (Date.now() < deadline) {
-        const { endpointVersion } = await probeEndpoint(this.configPath());
-        if (endpointVersion) {
+        const { reachable } = await probeEndpoint(this.configPath());
+        if (reachable) {
           online = true;
           break;
         }
@@ -544,8 +555,8 @@ export class McpxOverlay implements Component, Focusable {
       const deadline = Date.now() + (this.params.endpointWaitMs ?? 15_000);
       let online = false;
       while (Date.now() < deadline) {
-        const { endpointVersion } = await probeEndpoint(this.configPath());
-        if (endpointVersion) { online = true; break; }
+        const { reachable } = await probeEndpoint(this.configPath());
+        if (reachable) { online = true; break; }
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
       this.status = online ? "mcpx 已重启并监听" : "mcpx 进程已拉起但端点未就绪（检查启动日志）";
@@ -614,8 +625,8 @@ export class McpxOverlay implements Component, Focusable {
       const deadline = Date.now() + (this.params.endpointWaitMs ?? 15_000);
       let online = false;
       while (Date.now() < deadline) {
-        const { endpointVersion } = await probeEndpoint(this.configPath());
-        if (endpointVersion) { online = true; break; }
+        const { reachable } = await probeEndpoint(this.configPath());
+        if (reachable) { online = true; break; }
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
       this.status = online
@@ -650,8 +661,8 @@ export class McpxOverlay implements Component, Focusable {
       // board or the e/x actions. Seed the tunnel field synchronously (PID + URL
       // from config, health=unknown) and backfill health async.
       const tunnel = readTunnelState();
-      const { endpoint, endpointVersion } = await probeEndpoint(configPath);
-      const online = Boolean(endpointVersion);
+      const { endpoint, reachable, endpointVersion } = await probeEndpoint(configPath);
+      const online = reachable;
       this.snapshot = {
         refreshing: false,
         binary: binary ?? undefined,
