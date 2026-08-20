@@ -3,7 +3,7 @@
  * binary/endpoint status, registered workspaces, discoverable Pi windows and
  * cross-window message history (workspace-peer file protocol).
  *
- * Keys: ↑↓/jk select history · Enter details · r refresh · e register/unregister cwd · Esc close
+ * Keys: ↑↓/jk select history · Enter details · r refresh · e register/unregister cwd · s start · x stop · R restart · Esc close
  */
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -495,6 +495,67 @@ export class McpxOverlay implements Component, Focusable {
     }
     await this.refresh();
   }
+
+  /** R restarts mcpx: stop (tolerant of an already-dead/external process) then
+   *  start. Unlike `s`, this bypasses the online guard so a config-reload
+   *  restart works even when the endpoint is already up. */
+  private async restartMcpx(): Promise<void> {
+    if (this.starting) return;
+    const binary = locateMcpx();
+    if (!binary) {
+      this.status = "未找到 mcpx — 设置 MCPX_BIN 或将其加入 PATH";
+      this.safeRequestRender();
+      return;
+    }
+    this.starting = true;
+    this.status = "正在重启 mcpx…";
+    this.safeRequestRender();
+    // Stop any existing process (PID file, or a process we spawned). Tolerate a
+    // missing PID file — the process may have been started externally or died.
+    let pid: number | undefined = this.mcpxProcess?.pid;
+    if (!pid) {
+      try {
+        const raw = readFileSync(this.pidPath(), "utf8").trim();
+        const parsed = Number(raw);
+        if (Number.isInteger(parsed) && parsed > 0) pid = parsed;
+      } catch { /* no pid file — nothing to stop */ }
+    }
+    if (pid) {
+      try {
+        if (process.platform === "win32") {
+          spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+        } else if (this.mcpxProcess && !this.mcpxProcess.killed) {
+          this.mcpxProcess.kill();
+        } else {
+          process.kill(pid, "SIGTERM");
+        }
+      } catch { /* already dead — proceed to start */ }
+      this.mcpxProcess = undefined;
+      try { rmSync(this.pidPath(), { force: true }); } catch { /* best-effort */ }
+      // Give the port a moment to release after kill.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    // Start fresh — bypass the online guard (we just stopped it on purpose).
+    try {
+      const child = spawn(binary, [], { detached: true, stdio: "ignore", shell: process.platform === "win32" });
+      child.unref();
+      this.mcpxProcess = child;
+      try { writeFileSync(this.pidPath(), String(child.pid ?? ""), "utf8"); } catch { /* best-effort */ }
+      const deadline = Date.now() + (this.params.endpointWaitMs ?? 15_000);
+      let online = false;
+      while (Date.now() < deadline) {
+        const { endpointVersion } = await probeEndpoint(this.configPath());
+        if (endpointVersion) { online = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      this.status = online ? "mcpx 已重启并监听" : "mcpx 进程已拉起但端点未就绪（检查启动日志）";
+    } catch (error) {
+      this.status = `重启失败: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      this.starting = false;
+    }
+    await this.refresh();
+  }
   async refresh(): Promise<void> {
     if (this.closed) return;
     this.refreshGeneration++;
@@ -625,6 +686,10 @@ export class McpxOverlay implements Component, Focusable {
       void this.stopMcpx();
       return;
     }
+    if (data === "R") {
+      void this.restartMcpx();
+      return;
+    }
   }
 
   /** e toggles registration of the current window: expose it to MCPX, or close it again. */
@@ -718,7 +783,7 @@ export class McpxOverlay implements Component, Focusable {
     }
     if (this.status) rows.push(fitLine(this.status, inner));
     if (this.snapshot.error) rows.push(fitLine(fg("31", `! ${this.snapshot.error}`), inner));
-    rows.push(fitSegments(inner, ["Enter detail", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "e register cwd", "c wizard", "Esc close"]));
+    rows.push(fitSegments(inner, ["Enter detail", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "e register cwd", "c wizard", "Esc close"]));
     return frame(rows, width);
   }
 
@@ -778,7 +843,10 @@ export class McpxOverlay implements Component, Focusable {
       // load disable_localhost_protection, a real client gets 403 *after* auth.
       rows.push(fitLine(fg("2", "  i 若客户端鉴权后仍 403：检查 server.disable_localhost_protection 并重启 mcpx"), width));
     } else if (tunnel.health === "dead") {
-      rows.push(fitLine(fg("31", "  ! 隧道异常：mcpx 可能未重启加载新配置（403 Host/404 OAuth 路由）或隧道已断"), width));
+      const hint = this.snapshot.endpoint === "online"
+        ? "按 R 重启 mcpx 加载新配置"
+        : "按 s 启动 mcpx";
+      rows.push(fitLine(fg("31", `  ! 隧道异常：mcpx 可能未重启加载新配置（403 Host/404 OAuth 路由）或隧道已断 — ${hint}`), width));
     }
     return rows;
   }
