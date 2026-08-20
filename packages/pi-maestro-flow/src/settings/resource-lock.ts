@@ -19,7 +19,13 @@ const OPTIONS: LockOptions = {
   realpath: false,
   stale: 10_000,
   update: 2_000,
-  retries: { retries: 8, factor: 2, minTimeout: 25, maxTimeout: 500 },
+  // Higher retry capacity than a typical settings-file lock needs, so that
+  // high-contention mutations (e.g. 12 concurrent fresh-process hook-trust
+  // workers locking the same hook-trust.json) do not exhaust retries before
+  // the lock frees. Backoff is capped at maxTimeout=500ms, so 64 retries
+  // still bounds worst-case wait time to ~30s; settings mutations never
+  // approach this, and trust mutations only reach it under heavy contention.
+  retries: { retries: 64, factor: 2, minTimeout: 25, maxTimeout: 500 },
 };
 
 function lockTarget(filePath: string): string {
