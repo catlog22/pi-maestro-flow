@@ -411,3 +411,22 @@ test("readDelegatedTasks scopes to a session id", async (t) => {
     assert.equal(a![0].task_id, "t-sess-a");
   });
 });
+
+test("readTunnelState alive matches the real process table (tasklist CSV fix)", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "tunnel-alive-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const prev = process.env.MCPX_TUNNEL_PID_FILE;
+  const file = join(dir, "cloudflared.pid");
+  process.env.MCPX_TUNNEL_PID_FILE = file;
+  t.after(() => {
+    if (prev === undefined) delete process.env.MCPX_TUNNEL_PID_FILE;
+    else process.env.MCPX_TUNNEL_PID_FILE = prev;
+  });
+  // own pid is alive — the old last-column CSV parse always read Mem Usage and
+  // reported every live process as dead.
+  await writeFile(file, String(process.pid), "utf8");
+  assert.equal(readTunnelState().alive, true, "own pid must be detected alive");
+  // impossible pid is dead
+  await writeFile(file, "4194304", "utf8");
+  assert.equal(readTunnelState().alive, false, "impossible pid must be dead");
+});

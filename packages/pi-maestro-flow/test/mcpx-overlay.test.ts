@@ -295,3 +295,54 @@ test("collectWorkspaces parses expires_at and distinguishes lease types", async 
   assert.ok(workspaces[1].expiresAt! > Date.now(), "live lease expires in the future");
   assert.ok(workspaces[2].expiresAt! <= Date.now(), "stale lease expired in the past");
 });
+
+test("key dispatch: r=refresh, R=restart, w=workspaces (no r/R overlap)", async (t) => {
+  const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
+  const dir = await mkdtemp(join(tmpdir(), "mcpx-keys-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const binDir = join(dir, "bin");
+  await mkdir(binDir);
+  const isWin = process.platform === "win32";
+  const shim = join(binDir, isWin ? "mcpx.cmd" : "mcpx");
+  await writeFile(shim, isWin ? "@echo off\r\nexit /b 0\r\n" : "#!/bin/sh\nexit 0\n");
+  if (!isWin) await (await import("node:fs/promises")).chmod(shim, 0o755);
+  const prevBin = process.env.MCPX_BIN;
+  const prevPath = process.env.PATH;
+  const prevPidFile = process.env.MCPX_PID_FILE;
+  // PID file points at pid 4 (unkillable system process) so R's stop phase is a
+  // harmless no-op and never falls into the port-kill fallback (which would
+  // target a real mcpx on this machine).
+  const pidFile = join(dir, "mcpx-server.pid");
+  await writeFile(pidFile, "4", "utf8");
+  process.env.MCPX_BIN = shim;
+  process.env.MCPX_PID_FILE = pidFile;
+  process.env.PATH = `${binDir}${isWin ? ";" : ":"}${prevPath ?? ""}`;
+  t.after(() => {
+    if (prevBin === undefined) delete process.env.MCPX_BIN;
+    else process.env.MCPX_BIN = prevBin;
+    process.env.PATH = prevPath;
+    if (prevPidFile === undefined) delete process.env.MCPX_PID_FILE;
+    else process.env.MCPX_PID_FILE = prevPidFile;
+  });
+  const overlay = new McpxOverlay({ cwd: "D:/key-demo", requestRender: () => undefined, close: () => undefined, endpointWaitMs: 150 });
+  const s = overlay;
+  await overlay.refresh();
+
+  // lowercase w enters workspace mode (previously only uppercase W worked)
+  overlay.handleInput("w");
+  assert.equal(s["mode"], "workspace", "w must open workspace mode");
+  s["mode"] = "list";
+
+  // r triggers a refresh (refreshing set synchronously)
+  overlay.handleInput("r");
+  assert.equal(s["snapshot"].refreshing, true, "r must refresh");
+  for (let i = 0; i < 50 && s["snapshot"].refreshing; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  // R must NOT refresh (old code mapped r/R both to refresh, making R restart
+  // unreachable); it must take the restart path.
+  overlay.handleInput("R");
+  assert.equal(s["snapshot"].refreshing, false, "R must not refresh");
+  assert.ok(String(s["status"]).startsWith("正在重启"), `R must restart, got: ${s["status"]}`);
+});

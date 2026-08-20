@@ -198,14 +198,15 @@ function isProcessAlive(pid: number): boolean {
       // SEC-RV-008: parse the CSV output and compare the PID column exactly,
       // avoiding substring matches (PID 5 matching PID 50). The CSV format is
       // "Image Name","PID","Session Name","Session#","Mem Usage" — the PID is
-      // the last column on a single-line /NH row. If parsing yields nothing,
-      // return false (do NOT fall back to a substring match).
+      // column 1, but compare every column for exact equality so a locale or
+      // column-order change cannot silently break liveness detection. If no
+      // column matches, return false (do NOT fall back to a substring match).
       const pidStr = String(pid);
       for (const line of String(result.stdout || "").split(/\r?\n/)) {
         if (!line.trim()) continue;
-        const cols = line.split(",");
-        const last = (cols[cols.length - 1] ?? "").trim().replace(/^["']|["']$/g, "");
-        if (last === pidStr) return true;
+        for (const col of line.split(",")) {
+          if (col.trim().replace(/^["']|["']$/g, "") === pidStr) return true;
+        }
       }
       return false;
     }

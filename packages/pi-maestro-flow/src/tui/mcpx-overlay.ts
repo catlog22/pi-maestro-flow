@@ -3,11 +3,11 @@
  * binary/endpoint status, registered workspaces, discoverable Pi windows and
  * cross-window message history (workspace-peer file protocol).
  *
- * Keys: ↑↓/jk select history · Enter details · r refresh · e register/unregister cwd · s start · x stop · R restart · T tunnel · Esc close
+ * Keys: ↑↓/jk select history · Enter details · r refresh · R restart · e register/unregister cwd · s start · x stop · t tunnel refresh · w workspaces · c wizard · p password · Esc close
  */
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { readdirSync, readFileSync, existsSync, statSync, writeFileSync, rmSync } from "node:fs";
+import { readdirSync, readFileSync, existsSync, statSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
@@ -465,7 +465,6 @@ export class McpxOverlay implements Component, Focusable {
     refreshing: true, endpoint: "unknown", workspaces: [], cwdRegistered: false, windows: [], thread: [], mcpServers: [],
   };
   private status = "";
-  private mcpxProcess: ReturnType<typeof spawn> | undefined;
   private starting = false; // guards startMcpx against re-entry (orphan spawns)
   private refreshGeneration = 0;
   private closed = false; // set on close() so async refresh/render skip work after close
@@ -483,7 +482,33 @@ export class McpxOverlay implements Component, Focusable {
   dispose(): void {}
 
   private pidPath(): string {
-    return join(homedir(), ".mcpx", "mcpx-server.pid");
+    return process.env.MCPX_PID_FILE ?? join(homedir(), ".mcpx", "mcpx-server.pid");
+  }
+
+  /** Read the server-written PID file ({home}/mcpx-server.pid). The Go server
+   *  owns this file (writes at start, removes on graceful shutdown), so it is
+   *  accurate no matter how mcpx was launched. */
+  private readPidFile(): number | undefined {
+    try {
+      const raw = readFileSync(this.pidPath(), "utf8").trim();
+      const parsed = Number(raw);
+      if (Number.isInteger(parsed) && parsed > 0) return parsed;
+    } catch {
+      // no pid file
+    }
+    return undefined;
+  }
+
+  private killPid(pid: number): void {
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+    } else {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // already dead
+      }
+    }
   }
 
   private configPath(): string {
@@ -510,12 +535,9 @@ export class McpxOverlay implements Component, Focusable {
     try {
       const child = spawn(binary, [], { detached: true, stdio: "ignore", shell: process.platform === "win32" });
       child.unref();
-      this.mcpxProcess = child;
-      try {
-        writeFileSync(this.pidPath(), String(child.pid ?? ""), "utf8");
-      } catch {
-        // PID persistence is best-effort
-      }
+      // The Go server owns the PID file (writes at start, removes on shutdown);
+      // the TUI never writes it — a shell-wrapped spawn would persist the
+      // wrapper's pid, not mcpx's.
       const deadline = Date.now() + (this.params.endpointWaitMs ?? 15_000);
       let online = false;
       while (Date.now() < deadline) {
@@ -535,42 +557,28 @@ export class McpxOverlay implements Component, Focusable {
     await this.refresh();
   }
 
-  /** Stop the mcpx server (kills the process tree on Windows) and clear the PID file. */
+  /** Stop the mcpx server (kills the process tree on Windows). */
   private async stopMcpx(): Promise<void> {
-    let pid: number | undefined = this.mcpxProcess?.pid;
-    if (!pid) {
-      try {
-        const raw = readFileSync(this.pidPath(), "utf8").trim();
-        const parsed = Number(raw);
-        if (Number.isInteger(parsed) && parsed > 0) pid = parsed;
-      } catch {
-        // no pid file
-      }
-    }
-    if (!pid) {
-      this.status = "未找到 mcpx 进程（PID 文件缺失）";
-      this.params.requestRender();
-      return;
-    }
+    const pid = this.readPidFile();
     this.status = "正在停止 mcpx…";
     this.params.requestRender();
     try {
-      if (process.platform === "win32") {
-        spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
-      } else if (this.mcpxProcess && !this.mcpxProcess.killed) {
-        this.mcpxProcess.kill();
+      if (pid) {
+        this.killPid(pid);
+        // /F kill skips the Go server's graceful PID-file cleanup — remove it.
+        try {
+          rmSync(this.pidPath(), { force: true });
+        } catch {
+          // best-effort
+        }
       } else {
-        process.kill(pid, "SIGTERM");
+        // PID file missing/stale (mcpx started externally) — fall back to
+        // killing whatever listens on the mcpx port.
+        this.killMcpxByPort();
       }
       this.status = "已发送停止信号";
     } catch (error) {
       this.status = `停止失败: ${error instanceof Error ? error.message : String(error)}`;
-    }
-    this.mcpxProcess = undefined;
-    try {
-      rmSync(this.pidPath(), { force: true });
-    } catch {
-      // best-effort
     }
     await this.refresh();
   }
@@ -589,37 +597,20 @@ export class McpxOverlay implements Component, Focusable {
     this.starting = true;
     this.status = "正在重启 mcpx…";
     this.safeRequestRender();
-    // Stop any existing process (PID file, or a process we spawned). Tolerate a
-    // missing PID file — the process may have been started externally or died.
-    let pid: number | undefined = this.mcpxProcess?.pid;
-    if (!pid) {
-      try {
-        const raw = readFileSync(this.pidPath(), "utf8").trim();
-        const parsed = Number(raw);
-        if (Number.isInteger(parsed) && parsed > 0) pid = parsed;
-      } catch { /* no pid file — nothing to stop */ }
-    }
+    // Stop any existing process. Tolerate a missing PID file — the process may
+    // have been started externally or died; then fall back to the port listener.
+    const pid = this.readPidFile();
     if (pid) {
-      try {
-        if (process.platform === "win32") {
-          spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
-        } else if (this.mcpxProcess && !this.mcpxProcess.killed) {
-          this.mcpxProcess.kill();
-        } else {
-          process.kill(pid, "SIGTERM");
-        }
-      } catch { /* already dead — proceed to start */ }
-      this.mcpxProcess = undefined;
-      try { rmSync(this.pidPath(), { force: true }); } catch { /* best-effort */ }
-      // Give the port a moment to release after kill.
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      this.killPid(pid);
+    } else {
+      this.killMcpxByPort();
     }
+    // Give the port a moment to release after kill.
+    await new Promise((resolve) => setTimeout(resolve, 500));
     // Start fresh — bypass the online guard (we just stopped it on purpose).
     try {
       const child = spawn(binary, [], { detached: true, stdio: "ignore", shell: process.platform === "win32" });
       child.unref();
-      this.mcpxProcess = child;
-      try { writeFileSync(this.pidPath(), String(child.pid ?? ""), "utf8"); } catch { /* best-effort */ }
       const deadline = Date.now() + (this.params.endpointWaitMs ?? 15_000);
       let online = false;
       while (Date.now() < deadline) {
@@ -693,8 +684,6 @@ export class McpxOverlay implements Component, Focusable {
       if (!binary) throw new Error("未找到 mcpx 二进制");
       const child = spawn(binary, [], { detached: true, stdio: "ignore", shell: process.platform === "win32" });
       child.unref();
-      this.mcpxProcess = child;
-      try { writeFileSync(this.pidPath(), String(child.pid ?? ""), "utf8"); } catch { /* best-effort */ }
       // 4. Wait for the endpoint to come back (new issuer).
       const deadline = Date.now() + (this.params.endpointWaitMs ?? 15_000);
       let online = false;
@@ -877,7 +866,7 @@ export class McpxOverlay implements Component, Focusable {
       this.params.requestRender();
       return;
     }
-    if (data === "r" || data === "R") {
+    if (data === "r") {
       void this.refresh();
       return;
     }
@@ -901,11 +890,11 @@ export class McpxOverlay implements Component, Focusable {
       void this.restartMcpx();
       return;
     }
-    if (data === "T") {
+    if (data === "t" || data === "T") {
       void this.refreshTunnelAndMcpx();
       return;
     }
-    if (data === "W") {
+    if (data === "w" || data === "W") {
       this.wsSelected = 0;
       this.mode = "workspace";
       this.params.requestRender();
