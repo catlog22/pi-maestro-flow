@@ -11,7 +11,7 @@ import { readdirSync, readFileSync, existsSync, statSync, writeFileSync, rmSync 
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { locateMcpx, readTunnelState, probeTunnelHealth, restartQuickTunnel, updateConfigServerURL, stopMcpx, readOpsPassword, detectMcpxForPmf, type TunnelState } from "../mcpx-bridge.ts";
+import { locateMcpx, readTunnelState, probeTunnelHealth, restartQuickTunnel, updateConfigServerURL, stopMcpx, readOpsPassword, detectMcpxForPmf, removeWorkspaceByPath, type TunnelState } from "../mcpx-bridge.ts";
 
 const MCPX_DEFAULT_ENDPOINT = "http://127.0.0.1:9090/mcp";
 const PEER_STALE_MS = 20_000;
@@ -92,7 +92,7 @@ export interface McpxOverlayParams {
   endpointWaitMs?: number;
 }
 
-type OverlayMode = "list" | "detail";
+type OverlayMode = "list" | "detail" | "workspace";
 
 function normalizeWorkspacePath(value: string): string {
   let normalized = value.replace(/\\/g, "/");
@@ -396,6 +396,8 @@ export class McpxOverlay implements Component, Focusable {
   focused = false;
   private mode: OverlayMode = "list";
   private selected = 0;
+  /** Selection index inside the workspace-management sub-mode. */
+  private wsSelected = 0;
   private snapshot: McpxSnapshot = {
     refreshing: true, endpoint: "unknown", workspaces: [], cwdRegistered: false, windows: [], thread: [], mcpServers: [],
   };
@@ -717,12 +719,13 @@ export class McpxOverlay implements Component, Focusable {
     const safeWidth = Math.max(1, Math.min(width, 120));
     if (safeWidth < 20) return [this.renderCompact(safeWidth)];
     if (this.mode === "detail") return this.renderDetail(safeWidth);
+    if (this.mode === "workspace") return this.renderWorkspace(safeWidth);
     return this.renderList(safeWidth);
   }
 
   handleInput(data: string): void {
     if (matchesKey(data, Key.escape)) {
-      if (this.mode === "detail") {
+      if (this.mode === "detail" || this.mode === "workspace") {
         this.mode = "list";
       } else {
         this.params.close();
@@ -737,6 +740,19 @@ export class McpxOverlay implements Component, Focusable {
       } else if (matchesKey(data, Key.down) || matchesKey(data, "j")) {
         this.selected = Math.min(this.snapshot.thread.length - 1, this.selected + 1);
         this.params.requestRender();
+      }
+      return;
+    }
+    if (this.mode === "workspace") {
+      const ws = this.snapshot.workspaces;
+      if (matchesKey(data, Key.up) || matchesKey(data, "k")) {
+        this.wsSelected = Math.max(0, this.wsSelected - 1);
+        this.params.requestRender();
+      } else if (matchesKey(data, Key.down) || matchesKey(data, "j")) {
+        this.wsSelected = Math.min(Math.max(0, ws.length - 1), this.wsSelected + 1);
+        this.params.requestRender();
+      } else if (data === "d" || data === "D") {
+        void this.removeSelectedWorkspace();
       }
       return;
     }
@@ -781,6 +797,12 @@ export class McpxOverlay implements Component, Focusable {
     }
     if (data === "T") {
       void this.refreshTunnelAndMcpx();
+      return;
+    }
+    if (data === "W") {
+      this.wsSelected = 0;
+      this.mode = "workspace";
+      this.params.requestRender();
       return;
     }
   }
@@ -878,7 +900,7 @@ export class McpxOverlay implements Component, Focusable {
     }
     if (this.status) rows.push(fitLine(this.status, inner));
     if (this.snapshot.error) rows.push(fitLine(fg("31", `! ${this.snapshot.error}`), inner));
-    rows.push(fitSegments(inner, ["Enter detail", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "T tunnel", "e register cwd", "c wizard", "Esc close"]));
+    rows.push(fitSegments(inner, ["Enter detail", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "T tunnel", "W workspaces", "e register cwd", "c wizard", "Esc close"]));
     return frame(rows, width);
   }
 
@@ -1010,6 +1032,37 @@ export class McpxOverlay implements Component, Focusable {
     }
     rows.push(fitSegments(inner, ["Esc back"]));
     return frame(rows, width);
+  }
+
+  /** W 子模式：列出所有已注册 workspace，↑↓ 选中，d 删除选中。删除调
+   *  `mcpx workspace remove`（只写 config，运行时 ≤5min lease sweep 后清理）。 */
+  private renderWorkspace(width: number): string[] {
+    const inner = width - 2;
+    const ws = this.snapshot.workspaces;
+    const rows = [fitLine("Workspace 管理 · ↑↓ 选中 · d 删除 · Esc 返回", inner), rule(inner)];
+    if (ws.length === 0) {
+      rows.push(fitLine("○ 无已注册 workspace（按 e 注册当前目录）", inner));
+    } else {
+      for (let i = 0; i < ws.length; i++) {
+        const w = ws[i];
+        const marker = i === this.wsSelected ? fg("36", "▶") : " ";
+        const lease = w.expiresAt ? fg("33", "租约·待清理") : fg("32", "永久");
+        rows.push(fitLine(`${marker} ${w.name} · ${w.path} · ${lease}`, inner));
+      }
+      rows.push(rule(inner));
+      rows.push(fitLine(fg("31", "  d 删除选中 workspace（mcpx ≤5min 内从运行时清理）"), inner));
+    }
+    rows.push(fitSegments(inner, ["d delete", "Esc back"]));
+    return frame(rows, width);
+  }
+
+  private async removeSelectedWorkspace(): Promise<void> {
+    const ws = this.snapshot.workspaces[this.wsSelected];
+    if (!ws) return;
+    const { ok, message } = removeWorkspaceByPath(ws.path);
+    this.status = ok ? `已移除 ${ws.name} — ${message}` : `移除失败: ${message}`;
+    this.safeRequestRender();
+    await this.refresh();
   }
 }
 

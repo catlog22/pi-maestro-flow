@@ -334,6 +334,24 @@ export function detectMcpxForPmf(): { installed: boolean; version?: string } {
   }
 }
 
+/**
+ * Remove a registered workspace via `mcpx workspace remove <path>`.
+ * Writes config.yaml only — the running mcpx rebuilds its in-memory registry
+ * at the next ~5min lease sweep, so the removed workspace stays live until
+ * then. Returns { ok, message }.
+ */
+export function removeWorkspaceByPath(path: string): { ok: boolean; message: string } {
+  const mcpx = locateMcpx();
+  if (!mcpx) return { ok: false, message: "未找到 mcpx 二进制" };
+  const result = spawnSync(mcpx, ["workspace", "remove", path], {
+    encoding: "utf8",
+    timeout: 15_000,
+    shell: process.platform === "win32",
+  });
+  if (result.status === 0) return { ok: true, message: "已移除（mcpx ≤5min 内清理）" };
+  return { ok: false, message: String(result.stderr || result.stdout || "workspace remove 失败").trim() };
+}
+
 // --- Quick tunnel restart + config sync (one-click URL refresh) ---
 
 /** Resolve the cloudflared executable path (mirrors the wizard's logic). */

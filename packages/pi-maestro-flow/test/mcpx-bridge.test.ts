@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ensureMcpxWorkspace, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, probeTunnelHealth, detectMcpxForPmf } from "../src/mcpx-bridge.ts";
+import { ensureMcpxWorkspace, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, probeTunnelHealth, detectMcpxForPmf, removeWorkspaceByPath } from "../src/mcpx-bridge.ts";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -332,4 +332,31 @@ test("detectMcpxForPmf returns an installed boolean shape", async (t) => {
   assert.equal(typeof r.installed, "boolean");
   // version 只在 installed=true 时有意义
   if (r.installed) assert.equal(typeof r.version, "string");
+});
+
+test("removeWorkspaceByPath calls `mcpx workspace remove <path>` and reports ok", async (t) => {
+  t.after(_resetMcpxBridgeState);
+  const dir = await mkdtemp(join(tmpdir(), "mcpx-rm-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const binDir = join(dir, "bin");
+  await mkdir(binDir);
+  const isWin = process.platform === "win32";
+  const shim = join(binDir, isWin ? "mcpx.cmd" : "mcpx");
+  // 记录被调用的参数，workspace remove 成功退出
+  const log = join(dir, "args.txt");
+  // Windows echo 重定向用正斜杠路径避免转义问题
+  const logPath = log.replace(/\\/g, "/");
+  await writeFile(shim, isWin
+    ? `@echo off\r\necho %* > "${logPath}"\r\nexit /b 0\r\n`
+    : `#!/bin/sh\nprintf '%s\\n' "$*" > "${log}"\nexit 0\n`);
+  if (!isWin) await (await import("node:fs/promises")).chmod(shim, 0o755);
+  const prev = process.env.MCPX_BIN;
+  process.env.MCPX_BIN = shim;
+  t.after(() => { if (prev === undefined) delete process.env.MCPX_BIN; else process.env.MCPX_BIN = prev; });
+
+  const r = removeWorkspaceByPath("D:/to-remove");
+  assert.equal(r.ok, true);
+  const args = await readFile(log, "utf8");
+  assert.match(args, /workspace remove/, "must call `workspace remove`");
+  assert.match(args, /D:\/to-remove/, "must pass the path through");
 });
