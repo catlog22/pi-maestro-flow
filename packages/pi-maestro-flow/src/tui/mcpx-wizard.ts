@@ -114,6 +114,11 @@ function indentLines(text: string, indent: string): string {
   return text.split("\n").map((line) => (line === "" ? line : indent + line)).join("\n");
 }
 
+/** Escape a string for a YAML double-quoted scalar (backslash, quote, newline). */
+function yamlDoubleQuote(value: string): string {
+  return '"' + String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, '\\n') + '"';
+}
+
 function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: string): { yaml: string; summary: string[] } {
   const sections = splitSections(existing);
   const summary: string[] = [];
@@ -147,12 +152,12 @@ function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: str
   if (changes.authMode) {
     const lines = ["auth:", `    mode: ${changes.authMode}`];
     if (changes.authMode === "bearer") {
-      lines.push(`    token: "${changes.authToken ?? ""}"`);
+      lines.push(`    token: ${yamlDoubleQuote(changes.authToken ?? "")}`);
     } else if (changes.authMode === "oauth") {
       lines.push(`    token: ""`);
       lines.push("    oauth:");
-      lines.push(`        password: "${changes.oauthPassword ?? ""}"`);
-      lines.push(`        server_url: "${changes.oauthServerURL ?? ""}"`);
+      lines.push(`        password: ${yamlDoubleQuote(changes.oauthPassword ?? "")}`);
+      lines.push(`        server_url: ${yamlDoubleQuote(changes.oauthServerURL ?? "")}`);
       lines.push(`        token_ttl: 86400`);
     } else {
       lines.push(`    token: ""`);
@@ -182,8 +187,8 @@ function buildChangesYaml(existing: string, changes: McpxConfigChanges, cwd: str
       "    mode: oauth",
       `    token: ""`,
       "    oauth:",
-      `        password: "${changes.oauthPassword ?? ""}"`,
-      `        server_url: "${changes.tunnelUrl}"`,
+      `        password: ${yamlDoubleQuote(changes.oauthPassword ?? "")}`,
+      `        server_url: ${yamlDoubleQuote(changes.tunnelUrl)}`,
       `        token_ttl: 86400`,
     ].join("\n"));
     summary.push(`公网暴露下认证已升级为 oauth（server_url: ${changes.tunnelUrl}）`);

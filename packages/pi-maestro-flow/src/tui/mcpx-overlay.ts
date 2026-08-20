@@ -581,8 +581,13 @@ export class McpxOverlay implements Component, Focusable {
         const result = spawnSync("netstat", ["-ano", "-p", "tcp"], {
           encoding: "utf8", timeout: 5_000, shell: true,
         });
+        // Strict port match: only LISTENING rows whose local-address column
+        // ends in :9090 followed by whitespace. Avoids matching :19090 /
+        // :90900 / a foreign-address :9090 on a different row.
+        const PORT = 9090;
+        const portRe = new RegExp("\\s\\d+\\.\\d+\\.\\d+\\.\\d+:" + PORT + "\\s|\\[::\\]?:" + PORT + "\\s");
         for (const line of String(result.stdout || "").split(/\r?\n/)) {
-          if (line.includes(":9090") && line.includes("LISTENING")) {
+          if (line.includes("LISTENING") && portRe.test(line)) {
             const m = line.match(/\s(\d+)\s*$/);
             if (m) spawnSync("taskkill", ["/pid", String(m[1]), "/T", "/F"], { stdio: "ignore" });
           }
@@ -610,9 +615,10 @@ export class McpxOverlay implements Component, Focusable {
     this.starting = true;
     this.status = "正在重启隧道并同步 mcpx…";
     this.safeRequestRender();
+    let newUrl: string | undefined;
     try {
       // 1. Restart the quick tunnel — stops the old one, parses the new URL.
-      const newUrl = await restartQuickTunnel(9090);
+      newUrl = await restartQuickTunnel(9090);
       // 2. Write the new URL into config.yaml so mcpx's OAuth issuer matches.
       updateConfigServerURL(newUrl);
       // 3. Restart mcpx to load the new server_url. Kill by PID file first, then
@@ -638,6 +644,25 @@ export class McpxOverlay implements Component, Focusable {
         ? `隧道已更新: ${newUrl}/mcp · mcpx 已重启`
         : `隧道已更新: ${newUrl}/mcp · mcpx 端点未就绪（检查启动日志）`;
     } catch (error) {
+      // If a new tunnel was started but a later step (config sync / mcpx
+      // restart) failed, kill the newly-started tunnel via its PID file to
+      // restore pre-operation state — otherwise an orphaned cloudflared keeps
+      // holding port 9090 while config.yaml still has the old URL.
+      if (newUrl) {
+        try {
+          const pidFile = process.env.MCPX_TUNNEL_PID_FILE ?? join(homedir(), ".mcpx", "cloudflared.pid");
+          const raw = readFileSync(pidFile, "utf8").trim();
+          const pid = Number(raw);
+          if (Number.isInteger(pid) && pid > 0) {
+            if (process.platform === "win32") {
+              spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+            } else {
+              process.kill(pid, "SIGTERM");
+            }
+            rmSync(pidFile, { force: true });
+          }
+        } catch { /* best-effort cleanup */ }
+      }
       this.status = `隧道刷新失败: ${error instanceof Error ? error.message : String(error)}`;
     } finally {
       this.starting = false;

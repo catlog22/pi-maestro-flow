@@ -151,7 +151,7 @@ export function _resetMcpxBridgeState(): void {
 
 // --- Tunnel health & config detection (shared by overlay + wizard + extension) ---
 
-const MCPX_TUNNEL_PID_FILE = () => join(homedir(), ".mcpx", "cloudflared.pid");
+const MCPX_TUNNEL_PID_FILE = () => process.env.MCPX_TUNNEL_PID_FILE ?? join(homedir(), ".mcpx", "cloudflared.pid");
 const MCPX_CONFIG_PATH = () => join(homedir(), ".mcpx", "config.yaml");
 
 export type TunnelHealth = "ok" | "auth" | "dead" | "unknown";
@@ -419,21 +419,33 @@ export async function restartQuickTunnel(localPort: number, timeoutMs = 30_000):
   while (Date.now() < deadline) {
     const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
     if (match) return match[0];
-    if (child.exitCode !== null && child.exitCode !== 0) {
-      throw new Error(`cloudflared 退出（代码 ${child.exitCode}）: ${output.slice(-400)}`);
+    // Any child exit without a URL match is a hard failure — a clean exit
+    // (code 0) without a URL also means cloudflared is gone and the loop must
+    // not keep polling the dead pipe for the full timeout. Kill the child and
+    // clean the PID file to avoid an orphaned cloudflared holding port 9090.
+    if (child.exitCode !== null) {
+      try { child.kill(); } catch { /* already dead */ }
+      try { rmSync(MCPX_TUNNEL_PID_FILE(), { force: true }); } catch { /* best-effort */ }
+      throw new Error(`cloudflared 退出未取得 URL (exit=${child.exitCode}): ${output.slice(-400)}`);
     }
     await new Promise((resolve) => setTimeout(resolve, 400));
   }
+  // Timeout: kill the orphaned child and clean the PID file before throwing.
+  try { child.kill(); } catch { /* already dead */ }
+  try { rmSync(MCPX_TUNNEL_PID_FILE(), { force: true }); } catch { /* best-effort */ }
   throw new Error(`cloudflared 启动超时未取得 URL: ${output.slice(-400)}`);
 }
 
 /** Update auth.oauth.server_url in ~/.mcpx/config.yaml (in place, section-preserving). */
 export function updateConfigServerURL(url: string): void {
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { throw new Error("无效的隧道 URL: " + url); }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("隧道 URL 必须是 http/https: " + url);
   const path = MCPX_CONFIG_PATH();
   const raw = readFileSync(path, "utf8");
   const pattern = /^(\s{2,}server_url:\s*).*/m;
   if (!pattern.test(raw)) throw new Error("config.yaml 无 server_url 字段");
-  const next = raw.replace(pattern, `$1${url}`);
+  const next = raw.replace(pattern, `$1${parsed.href.replace(/\/$/, "")}`);
   writeFileSync(path, next, "utf8");
 }
 
