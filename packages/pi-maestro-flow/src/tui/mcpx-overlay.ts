@@ -11,7 +11,7 @@ import { readdirSync, readFileSync, existsSync, statSync, writeFileSync, rmSync 
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { locateMcpx, readTunnelState, probeTunnelHealth, restartQuickTunnel, updateConfigServerURL, stopMcpx, type TunnelState } from "../mcpx-bridge.ts";
+import { locateMcpx, readTunnelState, probeTunnelHealth, restartQuickTunnel, updateConfigServerURL, stopMcpx, readOpsPassword, type TunnelState } from "../mcpx-bridge.ts";
 
 const MCPX_DEFAULT_ENDPOINT = "http://127.0.0.1:9090/mcp";
 const PEER_STALE_MS = 20_000;
@@ -837,6 +837,7 @@ export class McpxOverlay implements Component, Focusable {
     }
     rows.push(rule(inner));
     rows.push(...this.renderTunnelRows(inner));
+    rows.push(...this.renderOpsPasswordRows(inner));
     rows.push(rule(inner));
     rows.push(fitLine(`Pi 窗口（${this.snapshot.windows.length} fresh）`, inner));
     if (this.snapshot.windows.length === 0) {
@@ -928,6 +929,18 @@ export class McpxOverlay implements Component, Focusable {
       rows.push(fitLine(fg("31", `  ! 隧道异常：mcpx 可能未重启加载新配置（403 Host/404 OAuth 路由）或隧道已断 — ${hint}`), width));
     }
     return rows;
+  }
+
+  /** 运维口令 (OAuth authorize 页面所需) — 展示在隧道区块下方。 */
+  private renderOpsPasswordRows(width: number): string[] {
+    const pw = readOpsPassword();
+    if (!pw) {
+      // config.yaml 未设 password — mcpx 启动时会在内存生成一个并打印到启动日志。
+      return [fitLine(fg("33", "运维口令：未在 config 持久化（mcpx 启动时自动生成，见启动日志 oauth_password）"), width)];
+    }
+    return [
+      fitLine(`运维口令（OAuth 授权页填写）: ${fg("36", pw)}`, width),
+    ];
   }
 
   private renderThreadRow(entry: McpxThreadEntry, selected: boolean, width: number): string {

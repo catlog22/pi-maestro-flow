@@ -289,6 +289,24 @@ export function isMcpxConfigured(): boolean {
   return Boolean(token);
 }
 
+/**
+ * Read the OAuth ops password (运维口令) from ~/.mcpx/config.yaml.
+ * mcpx auto-generates one at startup when this is empty (kept in memory + the
+ * startup log only). Persisting it here makes it stable across restarts and
+ * lets the board show it for the authorize page.
+ * Returns undefined when not set in config (the runtime still has an in-memory one).
+ */
+export function readOpsPassword(): string | undefined {
+  try {
+    const raw = readFileSync(MCPX_CONFIG_PATH(), "utf8");
+    const match = raw.match(/^\s{2,}password:\s*"?([^"\n#]+)"?/m);
+    const pw = match?.[1]?.trim();
+    return pw || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // --- Quick tunnel restart + config sync (one-click URL refresh) ---
 
 /** Resolve the cloudflared executable path (mirrors the wizard's logic). */

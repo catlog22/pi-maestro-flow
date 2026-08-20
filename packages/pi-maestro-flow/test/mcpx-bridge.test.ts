@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ensureMcpxWorkspace, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, probeTunnelHealth } from "../src/mcpx-bridge.ts";
+import { ensureMcpxWorkspace, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, probeTunnelHealth } from "../src/mcpx-bridge.ts";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -305,5 +305,23 @@ test("readConfigServerURL tolerates a trailing comment on the server_url line", 
     await writeFile(join(home, ".mcpx", "config.yaml"), 'auth:\n  mode: oauth\n  oauth:\n    server_url: "https://tun.example.com" # production\n');
     const state = readTunnelState();
     assert.equal(state.url, "https://tun.example.com");
+  });
+});
+
+test("readOpsPassword returns the persisted oauth password", async (t) => {
+  t.after(_resetMcpxBridgeState);
+  await withIsolatedHome(async (home) => {
+    await mkdir(join(home, ".mcpx"), { recursive: true });
+    await writeFile(join(home, ".mcpx", "config.yaml"), 'auth:\n  mode: oauth\n  oauth:\n    password: "my-secret-pw"\n    server_url: "https://t.example.com"\n');
+    assert.equal(readOpsPassword(), "my-secret-pw");
+  });
+});
+
+test("readOpsPassword returns undefined when password is empty", async (t) => {
+  t.after(_resetMcpxBridgeState);
+  await withIsolatedHome(async (home) => {
+    await mkdir(join(home, ".mcpx"), { recursive: true });
+    await writeFile(join(home, ".mcpx", "config.yaml"), 'auth:\n  mode: oauth\n  oauth:\n    password: ""\n    server_url: "https://t.example.com"\n');
+    assert.equal(readOpsPassword(), undefined);
   });
 });
