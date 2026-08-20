@@ -5,13 +5,11 @@ icon: "🔄"
 
 这里记录 pi maestro flow 套件从上一稳定版本到当前版本的用户可见变化、行为调整、问题修复和升级要求。
 
-> **当前稳定版本：v0.21.6（2026-08-16）。** Flow 0.21.6 新增 plan Knowledge Gate，同步引擎 `maestro-flow@0.5.75`；搭配 Teammate 1.14.0（远程工作器 `pi-teammate-remote`）、Cockpit 0.16.0 与 Settings-Core 0.1.3。
->
-> **未发布（开发中，版本号待定）**：Teammate 2.0.0 破坏性大版本、MCPX 配置向导与连接监视器、动态模型发现与进程内 failover、`/notify` 提醒、下一步建议、`.pi/SYSTEM.md` 单一权威迁移等。详见下方「未发布」段。
+> **当前稳定版本：v0.22.0（2026-08-20）。** Teammate 2.0.0 后端注册表（破坏性大版本，首个 2.x 公开发布）、MCPX 看板、提示词增强、`/notify` 提醒、用量洞察；引擎同步 `maestro-flow@0.5.79`；搭配 Cockpit 0.17.0 与 Settings-Core 0.2.0。
 
-## 未发布（开发中）
+## v0.22.0（2026-08-20）
 
-> 以下为 `v0.21.6` 之后、尚未发版的开发中工作。版本号与日期将在发版时确定；`pi-maestro-teammate` 已升到 2.0.0（破坏性），`pi-maestro-flow` 仍为 0.21.6。
+> 本版发布 Flow 0.22.0、Teammate 2.0.0（破坏性）、Cockpit 0.17.0、Settings-Core 0.2.0，并首次公开发布契约包 `pi-maestro-backend-core@0.1.0` 与 `pi-maestro-backends@0.1.0`；引擎 pin `maestro-flow` 0.5.75 → 0.5.79。
 
 - **Teammate 2.0.0（破坏性大版本）**：远端 journal 格式 `REMOTE_JOURNAL_VERSION` 1 → 2，**无迁移路径**——旧 v1 journal 在解析时硬失败，需删除重建；远端协议词汇 `RemoteCapability` 移除、协议升至 `remote/2`；删除内联 `cli/<tool>` 派发，路由统一改走 backend registry，第三方适配器须实现 backend 契约。新增通用 ACP-CLI TeammateBackend（事实经 `outcome.recovery` 返回、`settleAcpRun` 观测工具事件并带出已完成/在飞计数、ACP 握手超时改为可配不再写死 15 秒、failover 门按观测活动判定）；`optionsSource` 从声明字段变为可用机制、模型命名空间归执行者所有、`backendOptionsOf` 下发真实 `host.proxyToolCall`。新增纯契约包 `pi-maestro-backend-core`（能力表穷举至 12 项、凭据以引用建模而非遮罩值）+ registry 路由 + Pi subprocess backend 适配器 + dsh backend（每 run 托管 loopback MCP todo endpoint、`outputSchema` 宿主侧补偿由 unsupported 升为 emulated）。多个 remote/teammate 鲁棒性修复（订阅随 start 建立、单派发能力裁决、失败诊断不再渲染两遍等）。**升级注意：旧 v1 远端 journal 不可读、需重建；第三方后端须实现 backend 契约而非内联 `cli/<tool>` 派发。**
 - **MCPX 配置向导与连接监视器**：新增 `/mcpx` 配置向导（README 引导式 setup），含 Cloudflare quick tunnel 步骤（仅保留 quick tunnel、auto-start、cloud MCP 连接预览、surface cloudflared 退出/超时原因）、动态工作区注册与心跳租约、向导步骤导航（Enter 前进 / Esc 返回 / `c` 快捷进监视器）。新增 MCPX 连接监视器 TUI（展示 MCP 服务器与客户端连接、start/stop 控制）。
@@ -21,6 +19,13 @@ icon: "🔄"
 - **API Manager 配置导入/导出 + 暴露 teammate CLI 工具可用性 + 显示被阻塞的知识候选**。
 - **`.pi/SYSTEM.md` 单一权威迁移**：项目系统指令仅来自 `.pi/SYSTEM.md`，内联打包 `AGENTS.md` 注入退役；依赖旧注入的用户须迁移内容到 `.pi/SYSTEM.md`。
 - **防御性编程修复（DEF-001..004）**：修正 false-success 上报（DEF-001/002）与 silent eviction 重排（DEF-003/004），补回归测试。
+- **MCPX 看板增强（任务编排闭环 Phase 4）**：隧道健康监控与异常按键指引、T 键一键重启隧道并自动同步新 URL 到 config + 重启 mcpx、OAuth 运维口令显示并持久化、W 键 Workspace 管理子模式（列出/选中/移除任意 workspace）、看板展示委派任务状态与结果、检测 mcpx-for-pmf fork 并提醒、auth 模式 401 不再误判为离线、隧道 URL 带 `/mcp` 后缀并给出客户端填写提示、看板客户端化（`mcpx-client.ts`）。
+- **提示词增强（prompt-enhance）**：新增提示词增强功能，快捷键 `Alt+Shift+E`（已移除 Ctrl+Shift+E，避免与 Pi `app.thinking.cycle` 冲突）。
+- **submit-gate 提交闸门**：新增 submit-gate 扩展。
+- **用量洞察**：statusline 用量历史、用量图表（usage-chart）与历史回填。
+- **Cockpit Todo 覆层**：`Alt+Shift+T` Todo overlay；blocked todo 优先级降级、可见上限提高。
+- **Browser**：移植 GenericAgent DOM 探针、列表折叠与导航检测。
+- **加固波次（odyssey-review）**：高竞争信任场景锁重试提升至 64、统一 `serializeMutation` 锁、event-bus 清理与回放上限、usage-history 性能与索引原子性、mcpx tunnel/pid/yaml 加固、运维口令遮罩、备份模式/上限、PID 身份校验。
 - 其他：cockpit 同文件批量编辑并原子拒绝相同编辑；知识 promote 3 条防御性编程 spec。
 
 ## v0.21.6（2026-08-16）

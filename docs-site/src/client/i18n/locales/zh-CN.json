@@ -21,8 +21,8 @@
     "logo_alt": "Maestro Flow 标志"
   },
   "announcement": {
-    "title": "v0.21.6 已发布 — 远程 teammate 工作器 + plan Knowledge Gate（引擎同步 maestro-flow 0.5.75）。升级：",
-    "install": "pi install npm:pi-maestro-flow@0.21.6",
+    "title": "v0.22.0 已发布 — Teammate 2.0 后端注册表（破坏性）+ MCPX 看板 + 提示词增强 + 用量洞察（引擎同步 maestro-flow 0.5.79）。升级：",
+    "install": "pi install npm:pi-maestro-flow@0.22.0",
     "close": "关闭提示"
   },
   "accessibility": {

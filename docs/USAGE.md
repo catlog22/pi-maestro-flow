@@ -60,7 +60,7 @@
 
 ```bash
 # 安装或升级（pi-maestro-teammate 作为依赖自动安装）
-pi install npm:pi-maestro-flow@0.21.6
+pi install npm:pi-maestro-flow@0.22.0
 
 # 验证 Flow、Teammate 和 Cockpit 均已列出，然后重启 Pi 或 reload extensions
 pi list
@@ -1106,7 +1106,7 @@ teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: 读�
 
 ```bash
 # ─── 安装 ───
-pi install npm:pi-maestro-flow@0.21.6
+pi install npm:pi-maestro-flow@0.22.0
 
 # ─── 知识 ───
 maestro search "查询" --code

@@ -5,13 +5,11 @@ icon: "🔄"
 
 This page records user-visible features, behavior changes, fixes, and upgrade requirements from the previous stable release to the current version of the pi maestro flow suite.
 
-> **Current stable release: v0.21.6 (2026-08-16).** Flow 0.21.6 adds the plan Knowledge Gate and syncs the engine to `maestro-flow@0.5.75`; bundles Teammate 1.14.0 (remote workers via `pi-teammate-remote`), Cockpit 0.16.0, and Settings-Core 0.1.3.
->
-> **Unreleased (in development; version TBD)**: Teammate 2.0.0 breaking major, MCPX config wizard & connection monitor, dynamic model discovery & in-process failover, `/notify` toast, next-suggest, `.pi/SYSTEM.md` single-authority migration, and more. See the Unreleased section below.
+> **Current stable release: v0.22.0 (2026-08-20).** Teammate 2.0.0 backend registry (breaking major, first public 2.x), MCPX dashboard, prompt enhance, `/notify` toasts, usage insights; engine synced to `maestro-flow@0.5.79`; bundles Cockpit 0.17.0 and Settings-Core 0.2.0.
 
-## Unreleased (in development)
+## v0.22.0 (2026-08-20)
 
-> The following covers work after `v0.21.6` that has not yet been released. Version numbers and dates will be fixed at release; `pi-maestro-teammate` is already at 2.0.0 (breaking), `pi-maestro-flow` remains 0.21.6.
+> This release ships Flow 0.22.0, Teammate 2.0.0 (breaking), Cockpit 0.17.0, and Settings-Core 0.2.0, plus the first public releases of the contract packages `pi-maestro-backend-core@0.1.0` and `pi-maestro-backends@0.1.0`; engine pin `maestro-flow` 0.5.75 → 0.5.79.
 
 - **Teammate 2.0.0 (breaking major)**: remote journal format `REMOTE_JOURNAL_VERSION` 1 → 2 with **no migration path** — old v1 journals hard-fail on parse and must be deleted/rebuilt; the `RemoteCapability` vocabulary is removed and the protocol bumps to `remote/2`; inline `cli/<tool>` dispatch is removed and routing goes through the backend registry, so third-party adapters must implement the backend contract. New generic ACP-CLI TeammateBackend (facts returned via `outcome.recovery`; `settleAcpRun` observes ACP tool events and carries completed/in-flight counts; ACP handshake timeout is now configurable instead of hardcoded 15s; the failover gate is judged by observed activity). `optionsSource` becomes a usable mechanism, the model namespace is owned by the executor, and `backendOptionsOf` delivers real `host.proxyToolCall`. New pure-contract package `pi-maestro-backend-core` (capability table exhaustive to 12 items; credentials modeled as references, not masked values) + registry routing + Pi subprocess backend adapter + dsh backend (per-run hosted loopback MCP todo endpoint; `outputSchema` host-side compensation upgrades unsupported → emulated). Numerous remote/teammate robustness fixes (subscription established with start, single-dispatch capability adjudication, failed diagnosis no longer rendered twice, etc.). **Upgrade note: old v1 remote journals are unreadable and must be rebuilt; third-party backends must implement the backend contract instead of inline `cli/<tool>` dispatch.**
 - **MCPX config wizard & connection monitor**: new `/mcpx` config wizard (README-driven guided setup) with a Cloudflare quick-tunnel step (keeps only the quick tunnel, auto-start, cloud MCP connection preview, surfaces cloudflared exit/timeout cause), dynamic workspace registration with heartbeat lease, and step navigation (Enter advances / Esc back / `c` shortcut to the monitor). New MCPX connection monitor TUI showing MCP servers and client connections with start/stop controls.
@@ -21,6 +19,13 @@ This page records user-visible features, behavior changes, fixes, and upgrade re
 - **API Manager config import/export + expose teammate CLI tool availability + show blocked knowledge candidates**.
 - **`.pi/SYSTEM.md` single-authority migration**: project system instructions come only from `.pi/SYSTEM.md`; the bundled `AGENTS.md` injection is retired — users relying on the old injection must migrate content to `.pi/SYSTEM.md`.
 - **Defensive-programming fixes (DEF-001..004)**: corrected false-success reporting (DEF-001/002) and silent-eviction reorder (DEF-003/004), with regression tests added.
+- **MCPX dashboard enhancements (task-orchestration Phase 4)**: tunnel health monitoring with anomaly key guidance, one-key tunnel restart (T) with automatic URL sync to config + mcpx restart, OAuth ops-password display + persistence, W-key workspace management sub-mode (list/select/remove any workspace), delegated-task status and result display, mcpx-for-pmf fork detection, auth-mode 401 no longer misread as offline, tunnel URL shown with `/mcp` suffix + client hints, and dashboard client-ification (`mcpx-client.ts`).
+- **Prompt enhance**: new prompt-enhancement feature on `Alt+Shift+E` (Ctrl+Shift+E removed to avoid conflict with Pi `app.thinking.cycle`).
+- **submit-gate**: new submit-gate extension (pre-submit gate).
+- **Usage insights**: statusline usage history, usage chart, and history backfill.
+- **Cockpit Todo overlay**: `Alt+Shift+T` Todo overlay; blocked-todo priority demoted; visible cap raised.
+- **Browser**: GenericAgent DOM probe, list folding, navigation detection.
+- **Hardening waves (odyssey-review)**: lock retries raised to 64 for high-contention trust, unified `serializeMutation` lock, event-bus cleanup + replay cap, usage-history perf + index atomicity, mcpx tunnel/pid/yaml hardening, ops-password masking, backup mode/cap, PID identity verify.
 - Other: cockpit batches same-file edits and rejects identical edits atomically; 3 defensive-programming spec candidates promoted.
 
 ## v0.21.6 (2026-08-16)
