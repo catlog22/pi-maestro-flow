@@ -71,7 +71,7 @@
 | `command` | 是 | 可执行文件。指向包装脚本或符号链接，不要绕到内层二进制 |
 | `args` | 否 | 进入 ACP 模式的参数，例如 Cursor 是 `["acp"]`、Gemini 是 `["--acp"]` |
 | `modelId` | 否 | 该注册项服务的 `cli/<tool>` 路由；缺省由注册名派生 |
-| `acpModel` | 否 | 该注册项的默认内层模型，取值属于 CLI 自己的目录 |
+| `acpModel` | 否 | 该注册项的默认内层模型，**可以只写模型名**，见下 |
 | `runTimeoutMs` | 否 | 运行起来之后的上限 |
 | `startupTimeoutMs` | 否 | 握手上限，默认 15000。**只该往上调** |
 | `cwd` / `env` | 否 | `env` 装的是**变量名**，含等号的条目会被拒 |
@@ -82,6 +82,29 @@
 **模型是两个轴，不是一个。** `modelId` 选的是哪个 CLI，`acpModel` 选的是那个 CLI 里的哪个模型。任务里 `model` 等于路由 id 时用注册项的 `acpModel`，不等于时该值本身就是内层模型。
 
 内层模型的合法取值只有 CLI 自己知道，配错了会在**发出 prompt 之前**失败，错误消息列出全部可用值——**报错本身就是目录**，不必先去别处查。
+
+### 不用抄那串方括号
+
+有些 CLI 的目录 id 是复合串。Cursor 的模型选择器实测长这样：
+
+| 显示名 | 目录 id |
+|---|---|
+| `composer-2.5` | `composer-2.5[fast=true]` |
+| `grok-4.6` | `grok-4.6[effort=high,fast=true]` |
+| `gpt-5.6-sol` | `gpt-5.6-sol[context=272k,reasoning=medium,fast=false]` |
+| `Auto` | `default[]` |
+
+**`acpModel` 写显示名即可**，只要该名字在目录里唯一就会解析到对应 id：写 `"composer-2.5"` 等同于写 `"composer-2.5[fast=true]"`。同名多个变体时会被拒绝并列出全部候选，让你指定完整 id——绝不替你挑一个。设置界面的模型选择器显示的也是这一列显示名。
+
+结果里的 `executorModel` 回报的是**解析之后**的完整 id，所以按名字配置不会让你失去"到底跑了哪个变体"的信息。
+
+### 思考等级与上下文对不齐，这是没法配的
+
+宿主有独立的 `thinking` 轴（`off`…`max`），Cursor **没有**：实测它只公布 `mode` 和 `model` 两个选项，没有 ACP 规范里的 `thought_level` 类别。推理深度和上下文长度被**焊死在模型 id 里**（`effort=high`、`reasoning=medium`、`context=272k`），只能整体选，不能单独调。
+
+因此 acp-cli 声明 `thinkingLevel: "unsupported"` 是对的，给这类任务设 `thinking: "off"` 也是对的。**不要指望宿主能把 `thinking: high` 翻译成某个变体**：那需要猜 `effort=` / `reasoning=` / `thinking=` 这些键在各家 CLI 里分别是什么意思，而它们是厂商私有编码，改一次我们就会静默选错模型。要不同的推理深度，就注册多条，各配各的 `acpModel`。
+
+公布了 `thought_level` 的 CLI 未来可以正经支持；Cursor 目前不在此列。
 
 `startupTimeoutMs` 的默认值 15000 是量过的：ACP 握手包含 `initialize` 与 `session/new` 两步，实测装好的 Claude Code 适配器在 5000 下仍会在 `session/new` 超时。`command` 走 `npx` 之类会先下载的启动方式要调更高。
 

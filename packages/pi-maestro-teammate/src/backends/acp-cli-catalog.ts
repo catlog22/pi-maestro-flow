@@ -42,7 +42,7 @@ export const ACP_CLI_SETTINGS_CATALOGS: TranslationCatalogs = {
       "The `cli/<tool>` route this registration serves. Derived from the registration name when unset, which is the usual case.",
     "acpCli.acpModel": "Model",
     "acpCli.acpModel.description":
-      "Default model inside this CLI's own catalogue, used when a task names only the route. A task naming a model overrides it. Values come from the CLI, so opening this list launches it.",
+      "Default model inside this CLI's own catalogue, used when a task names only the route. A task naming a model overrides it. A displayed name is enough when the catalogue carries it once — `composer-2.5` reaches `composer-2.5[fast=true]` — and an ambiguous name is refused rather than assigned a variant. Values come from the CLI, so opening this list launches it.",
     "acpCli.runTimeoutMs": "Run timeout (ms)",
     "acpCli.runTimeoutMs.description":
       "Bounds the run once the CLI is talking. Applies per registration, not per task.",
@@ -74,7 +74,7 @@ export const ACP_CLI_SETTINGS_CATALOGS: TranslationCatalogs = {
       "该注册项服务的 `cli/<tool>` 路由。留空则由注册名派生，这是常见情形。",
     "acpCli.acpModel": "模型",
     "acpCli.acpModel.description":
-      "该 CLI 自己目录里的默认模型，任务只点名路由时生效；任务点名模型则覆盖它。取值来自 CLI 本身，所以打开这个列表会拉起它。",
+      "该 CLI 自己目录里的默认模型，任务只点名路由时生效；任务点名模型则覆盖它。名字在目录里唯一时写显示名就够——`composer-2.5` 会解析到 `composer-2.5[fast=true]`；同名多个变体会被拒绝而不是替你挑一个。取值来自 CLI 本身，所以打开这个列表会拉起它。",
     "acpCli.runTimeoutMs": "运行超时（毫秒）",
     "acpCli.runTimeoutMs.description": "CLI 开始应答之后的上限。作用于每条注册项，不是每个任务。",
     "acpCli.startupTimeoutMs": "握手超时（毫秒）",
