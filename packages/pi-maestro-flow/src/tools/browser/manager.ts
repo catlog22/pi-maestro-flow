@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Browser, ElementHandle, HTTPResponse, KeyInput, Page, WaitForOptions } from "puppeteer-core";
+import type { Browser, ElementHandle, HTTPRequest, HTTPResponse, KeyInput, Page, WaitForOptions } from "puppeteer-core";
 import puppeteer from "puppeteer-core";
 import { PROBE_JS, FIND_LISTS_JS, foldListsJs, monitorStartJs, MONITOR_STOP_JS, optimizeHtmlForTokens, smartTruncate, diffHtml, type HtmlDiff } from "./simplify.ts";
 
@@ -50,6 +50,13 @@ export interface BrowserManagerLike {
   closeAll(): Promise<number>;
 }
 
+type GenericPageHandler = (...args: never[]) => unknown;
+type PageEventType = string | symbol;
+
+interface RequestListenerScope {
+  cleanup(): void;
+}
+
 interface TabEntry {
   name: string;
   key: string;
@@ -60,6 +67,7 @@ interface TabEntry {
   ownedPage: boolean;
   profileDir?: string;
   dialogHandler?: (dialog: import("puppeteer-core").Dialog) => Promise<void>;
+  requestScope?: RequestListenerScope;
   elementSelectors: Map<number, string>;
   ownedTempFiles: Set<string>;
   busy: boolean;
@@ -169,7 +177,22 @@ export class BrowserManager implements BrowserManagerLike {
     const beforeUrl = entry.page.isClosed() ? "" : entry.page.url();
     let beforePages: Page[] = [];
     try { beforePages = await raceAbort(entry.browser.pages(), signal, Math.min(2_000, timeoutMs)); } catch { /* best-effort */ }
+    let requestScope: RequestListenerScope | undefined;
+    let runFailed = false;
+    let cleanupFailed = false;
     try {
+      if (entry.requestScope) {
+        try {
+          entry.requestScope.cleanup();
+        } catch (error) {
+          cleanupFailed = true;
+          throw error;
+        }
+        entry.requestScope = undefined;
+      }
+      await disablePageRequestInterception(entry.page);
+      requestScope = installRequestListenerScope(entry.page);
+      entry.requestScope = requestScope;
       const tab = createTabApi(entry, cwd, displays, screenshots, signal, timeoutMs);
       const assert = (condition: unknown, message = "Browser assertion failed") => { if (!condition) throw new Error(message); };
       const wait = (ms: number) => abortableDelay(ms, signal);
@@ -189,10 +212,24 @@ export class BrowserManager implements BrowserManagerLike {
       } catch { /* best-effort */ }
       return { displays, returnValue, screenshots, url: afterUrl, navigated: navigated || undefined, newTabs };
     } catch (error) {
+      runFailed = true;
       if (isInterruptError(error)) await this.close(name);
       throw browserRunErrorHint(error);
     } finally {
+      let cleanupError: unknown;
+      try {
+        requestScope?.cleanup();
+        if (entry.requestScope === requestScope) entry.requestScope = undefined;
+        await disablePageRequestInterception(entry.page);
+      } catch (error) {
+        cleanupFailed = true;
+        cleanupError = error;
+      }
+      if (cleanupFailed && this.#tabs.get(name) === entry) {
+        await this.close(name).catch(() => {});
+      }
       entry.busy = false;
+      if (cleanupError && !runFailed) throw cleanupError;
     }
   }
 
@@ -612,6 +649,65 @@ async function pickPage(browser: Browser, target?: string): Promise<Page | undef
     return undefined;
   }
   return pages.find((page) => page.url() !== "about:blank") ?? pages[0];
+}
+
+function installRequestListenerScope(page: Page): RequestListenerScope {
+  const mutablePage = page as Page & { on: Page["on"]; off: Page["off"] };
+  const originalOn = page.on;
+  const originalOff = page.off;
+  const callOn = originalOn.bind(page) as unknown as (type: PageEventType, handler: GenericPageHandler) => Page;
+  const callOff = originalOff.bind(page) as unknown as (type: PageEventType, handler?: GenericPageHandler) => Page;
+  const ownedHandlers: GenericPageHandler[] = [];
+  let active = true;
+  const scopedOn = (type: PageEventType, handler: GenericPageHandler): Page => {
+    const result = callOn(type, handler);
+    if (type === "request") ownedHandlers.push(handler);
+    return result;
+  };
+  const scopedOff = (type: PageEventType, handler?: GenericPageHandler): Page => {
+    const result = callOff(type, handler);
+    if (type === "request") {
+      if (handler === undefined) {
+        ownedHandlers.length = 0;
+      } else {
+        const index = ownedHandlers.lastIndexOf(handler);
+        if (index >= 0) ownedHandlers.splice(index, 1);
+      }
+    }
+    return result;
+  };
+  mutablePage.on = scopedOn as unknown as Page["on"];
+  mutablePage.off = scopedOff as unknown as Page["off"];
+  return {
+    cleanup() {
+      if (!active) return;
+      active = false;
+      let firstError: unknown;
+      try {
+        for (let index = ownedHandlers.length - 1; index >= 0; index -= 1) {
+          try {
+            callOff("request", ownedHandlers[index]!);
+          } catch (error) {
+            firstError ??= error;
+          }
+        }
+      } finally {
+        ownedHandlers.length = 0;
+        mutablePage.on = originalOn;
+        mutablePage.off = originalOff;
+      }
+      if (firstError) throw firstError;
+    },
+  };
+}
+
+async function disablePageRequestInterception(page: Page): Promise<void> {
+  if (page.isClosed()) return;
+  try {
+    await page.setRequestInterception(false);
+  } catch (error) {
+    if (!page.isClosed()) throw error;
+  }
 }
 
 async function disposeEntry(entry: TabEntry): Promise<void> {

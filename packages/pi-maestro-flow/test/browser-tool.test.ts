@@ -272,6 +272,62 @@ test("browser manager drives a real local Chromium tab when an executable is ava
   }
 });
 
+test("browser manager scopes request interception listeners to one run", async (t) => {
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/html" });
+    response.end("<!doctype html><title>Interception</title>");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const manager = new BrowserManager();
+  const baseUrl = `http://127.0.0.1:${address.port}/`;
+  try {
+    try {
+      await manager.open({ name: "interception", cwd: process.cwd(), url: `${baseUrl}initial`, timeoutMs: 15_000 });
+    } catch (error) {
+      if (error instanceof Error && /No Chromium browser found/.test(error.message)) {
+        t.skip("No local Chromium executable is available.");
+        return;
+      }
+      throw error;
+    }
+    await assert.rejects(
+      () => manager.run("interception", `
+        await page.setRequestInterception(true);
+        page.on("request", () => {});
+        throw new Error("expected run failure");
+      `, process.cwd(), undefined, 15_000),
+      /expected run failure/,
+    );
+    const first = await manager.run("interception", `
+      const baseline = page.listenerCount("request");
+      const requestHandler = (request) => { request.continue(); };
+      await page.setRequestInterception(true);
+      page.on("request", requestHandler);
+      page.on("request", requestHandler);
+      page.off("request", requestHandler);
+      page.once("request", () => {});
+      await page.goto(${JSON.stringify(`${baseUrl}intercepted`)});
+      return { baseline, listenersDuringRun: page.listenerCount("request") };
+    `, process.cwd(), undefined, 15_000);
+    const firstResult = first.returnValue as { baseline: number; listenersDuringRun: number };
+    assert.ok(firstResult.baseline > 0, "Puppeteer internal request listener should remain installed");
+    assert.equal(firstResult.listenersDuringRun, firstResult.baseline + 1);
+    const second = await manager.run("interception", `
+      await page.setRequestInterception(false);
+      await page.goto(${JSON.stringify(`${baseUrl}normal`)});
+      await page.waitForNetworkIdle({ idleTime: 50, timeout: 2_000 });
+      return { title: await page.title(), requestListeners: page.listenerCount("request") };
+    `, process.cwd(), undefined, 15_000);
+    assert.deepEqual(second.returnValue, { title: "Interception", requestListeners: firstResult.baseline });
+  } finally {
+    await manager.closeAll();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test("browser manager aborts a live run and tears down the named tab", async (t) => {
   const manager = new BrowserManager();
   try {
