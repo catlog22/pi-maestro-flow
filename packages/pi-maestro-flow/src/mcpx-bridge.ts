@@ -226,6 +226,19 @@ export function stopWorkspaceLease(): void {
   leaseCwd = undefined;
 }
 
+/**
+ * Register `cwd` permanently (no TTL lease): the entry has no expires_at and
+ * survives window close until explicitly removed. Any active lease heartbeat
+ * for the previous registration is stopped first. Resolves after the register
+ * command completes.
+ */
+export async function registerMcpxWorkspacePermanent(cwd: string): Promise<boolean> {
+  stopWorkspaceLease();
+  const absRoot = absoluteRoot(cwd);
+  registeredPaths.delete(absRoot); // force a real re-register even if a lease entry exists
+  return ensureMcpxWorkspace(cwd, 0);
+}
+
 /** Test hook: reset the in-process deduplication state. */
 export function _resetMcpxBridgeState(): void {
   registeredPaths.clear();

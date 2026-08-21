@@ -60,98 +60,102 @@ test("collectWorkspaces parses the mcpx global config", async (t) => {
   assert.equal(workspaces[2].path, "D:\\compact");
 });
 
-test("collectWindows keeps only fresh valid owner snapshots", async (t) => {
+test("collectWindows aggregates fresh owner snapshots across all workspaces", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "mcpx-tui-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const ownersDir = join(dir, "owners");
-  await mkdir(ownersDir, { recursive: true });
+  const previousRoot = process.env.PI_PEER_WORKSPACES_ROOT;
+  process.env.PI_PEER_WORKSPACES_ROOT = dir;
+  t.after(() => {
+    if (previousRoot === undefined) delete process.env.PI_PEER_WORKSPACES_ROOT;
+    else process.env.PI_PEER_WORKSPACES_ROOT = previousRoot;
+  });
   const now = Date.now();
-  const snapshot = (ownerId: string, publishedAt: number) => ({
-    version: 1, kind: "owner", workspaceId: "a".repeat(64), normalizedCwd: "d:/fake",
+  const snapshot = (ownerId: string, publishedAt: number, cwd: string) => ({
+    version: 1, kind: "owner", workspaceId: "a".repeat(64), normalizedCwd: cwd,
     ownerId, ownerNonce: "b".repeat(32), pid: 100, publishedAt,
     agents: [], settled: [],
   });
-  await writeFile(join(ownersDir, `${"1".repeat(32)}.json`), JSON.stringify(snapshot("1".repeat(32), now)), "utf8");
-  await writeFile(join(ownersDir, `${"2".repeat(32)}.json`), JSON.stringify(snapshot("2".repeat(32), now - 60_000)), "utf8");
-  await writeFile(join(ownersDir, "junk.json"), "{broken", "utf8");
+  const ownersA = join(dir, "a".repeat(64), "runtime", "owners");
+  const ownersB = join(dir, "c".repeat(64), "runtime", "owners");
+  await mkdir(ownersA, { recursive: true });
+  await mkdir(ownersB, { recursive: true });
+  await writeFile(join(ownersA, `${"1".repeat(32)}.json`), JSON.stringify(snapshot("1".repeat(32), now, "d:/ws-a")), "utf8");
+  // stale snapshot in the same workspace is dropped
+  await writeFile(join(ownersA, `${"2".repeat(32)}.json`), JSON.stringify(snapshot("2".repeat(32), now - 60_000, "d:/ws-a")), "utf8");
+  await writeFile(join(ownersA, "junk.json"), "{broken", "utf8");
+  // a second workspace contributes its own fresh window
+  await writeFile(join(ownersB, `${"3".repeat(32)}.json`), JSON.stringify(snapshot("3".repeat(32), now - 1_000, "d:/ws-b")), "utf8");
 
-  // Fake the peer root by pointing the helper at the temp dir structure.
-  const windows: McpxWindowInfo[] = [];
-  // Directly exercise the same filtering by re-implementing the read against the fixture root.
-  const { readdirSync, readFileSync } = await import("node:fs");
-  for (const entry of readdirSync(ownersDir)) {
-    if (!entry.endsWith(".json")) continue;
-    let snapshotData;
-    try {
-      snapshotData = JSON.parse(readFileSync(join(ownersDir, entry), "utf8"));
-    } catch {
-      continue; // invalid snapshot files are skipped like the real collector
-    }
-    if (now - snapshotData.publishedAt > 20_000) continue;
-    windows.push({ displayName: displayNameOf(undefined, snapshotData.ownerId), ownerId: snapshotData.ownerId, pid: snapshotData.pid, publishedAt: snapshotData.publishedAt, agentCount: 0 });
-  }
-  assert.equal(windows.length, 1);
-  assert.equal(windows[0].ownerId, "1".repeat(32));
-  assert.equal(collectWindows("D:/nowhere", now).length, 0); // missing peer root -> empty
+  const windows = collectWindows(now);
+  assert.equal(windows.length, 2);
+  assert.equal(windows[0].ownerId, "1".repeat(32)); // newest first
+  assert.equal(windows[0].workspace, "d:/ws-a");
+  assert.equal(windows[1].workspace, "d:/ws-b");
+
+  // Missing peer root -> empty.
+  process.env.PI_PEER_WORKSPACES_ROOT = join(dir, "missing");
+  assert.equal(collectWindows(now).length, 0);
 });
 
-test("collectThread aggregates commands and receipts newest first", async (t) => {
+test("collectThread aggregates commands and receipts newest first across workspaces", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "mcpx-tui-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const commandsDir = join(dir, "commands", "a".repeat(32));
-  const responsesDir = join(dir, "responses", "f".repeat(32));
-  await mkdir(commandsDir, { recursive: true });
-  await mkdir(responsesDir, { recursive: true });
+  const previousRoot = process.env.PI_PEER_WORKSPACES_ROOT;
+  process.env.PI_PEER_WORKSPACES_ROOT = dir;
+  t.after(() => {
+    if (previousRoot === undefined) delete process.env.PI_PEER_WORKSPACES_ROOT;
+    else process.env.PI_PEER_WORKSPACES_ROOT = previousRoot;
+  });
   const now = Date.now();
-  await writeFile(join(commandsDir, "c1.json"), JSON.stringify({
+  const runtimeA = join(dir, "a".repeat(64), "runtime");
+  const runtimeB = join(dir, "c".repeat(64), "runtime");
+  const commandsA = join(runtimeA, "commands", "f".repeat(32));
+  const responsesA = join(runtimeA, "responses", "f".repeat(32));
+  const commandsB = join(runtimeB, "commands", "e".repeat(32));
+  await mkdir(commandsA, { recursive: true });
+  await mkdir(responsesA, { recursive: true });
+  await mkdir(commandsB, { recursive: true });
+  await mkdir(join(runtimeA, "owners"), { recursive: true });
+  await mkdir(join(runtimeB, "owners"), { recursive: true });
+  // owner snapshots give each runtime its workspace label
+  const ownerSnapshot = (ownerId: string, cwd: string) => JSON.stringify({
+    version: 1, kind: "owner", workspaceId: "a".repeat(64), normalizedCwd: cwd,
+    ownerId, ownerNonce: "b".repeat(32), pid: 100, publishedAt: now, agents: [], settled: [],
+  });
+  await writeFile(join(runtimeA, "owners", `${"f".repeat(32)}.json`), ownerSnapshot("f".repeat(32), "d:/ws-a"), "utf8");
+  await writeFile(join(runtimeB, "owners", `${"e".repeat(32)}.json`), ownerSnapshot("e".repeat(32), "d:/ws-b"), "utf8");
+  await writeFile(join(commandsA, "c1.json"), JSON.stringify({
     version: 1, kind: "command", commandId: "c1", createdAt: now - 1_000,
     fromOwnerId: "f".repeat(32), toOwnerId: "a".repeat(32), action: "steer",
     message: "do the thing",
   }), "utf8");
-  await writeFile(join(commandsDir, "c2.json"), JSON.stringify({
+  await writeFile(join(commandsA, "c2.json"), JSON.stringify({
     version: 1, kind: "command", commandId: "c2", createdAt: now - 2_000,
     fromOwnerId: "f".repeat(32), toOwnerId: "a".repeat(32), action: "follow_up",
     message: "later task",
   }), "utf8");
-  await writeFile(join(responsesDir, "c1.json"), JSON.stringify({
+  await writeFile(join(responsesA, "c1.json"), JSON.stringify({
     version: 1, kind: "response", commandId: "c1", respondedAt: now,
     fromOwnerId: "a".repeat(32), toOwnerId: "f".repeat(32), status: "accepted",
   }), "utf8");
+  // a second workspace contributes its own command
+  await writeFile(join(commandsB, "c3.json"), JSON.stringify({
+    version: 1, kind: "command", commandId: "c3", createdAt: now - 500,
+    fromOwnerId: "e".repeat(32), toOwnerId: "a".repeat(32), action: "steer",
+    message: "other workspace",
+  }), "utf8");
 
-  // Point the collector at the fixture by faking the runtime root layout: the
-  // helper derives the root from cwd, so exercise the parsing inline instead.
-  const entries: McpxThreadEntry[] = [];
-  const { readdirSync, readFileSync, statSync } = await import("node:fs");
-  const collectDir = (root: string, kind: "command" | "response", statusKey: string) => {
-    let owners: string[];
-    try { owners = readdirSync(root); } catch { return; }
-    for (const owner of owners) {
-      const ownerDir = join(root, owner);
-      if (!statSync(ownerDir).isDirectory()) continue;
-      for (const file of readdirSync(ownerDir)) {
-        if (!file.endsWith(".json")) continue;
-        const data = JSON.parse(readFileSync(join(ownerDir, file), "utf8"));
-        if (data.kind !== kind) continue;
-        entries.push({
-          commandId: data.commandId,
-          kind,
-          createdAt: kind === "command" ? data.createdAt : data.respondedAt,
-          fromOwnerId: data.fromOwnerId,
-          toOwnerId: data.toOwnerId,
-          action: data.action,
-          message: data.message,
-          status: data[statusKey],
-        });
-      }
-    }
-  };
-  collectDir(join(dir, "commands"), "command", "status");
-  collectDir(join(dir, "responses"), "response", "status");
-  entries.sort((a, b) => b.createdAt - a.createdAt);
-  assert.equal(entries.length, 3);
+  const entries = collectThread();
+  assert.equal(entries.length, 4);
   assert.equal(entries[0].kind, "response"); // newest first
   assert.equal(entries[0].status, "accepted");
-  assert.equal(collectThread("D:/nowhere").length, 0);
+  assert.equal(entries[0].workspace, "d:/ws-a");
+  assert.equal(entries[1].commandId, "c3");
+  assert.equal(entries[1].workspace, "d:/ws-b");
+
+  // Missing peer root -> empty.
+  process.env.PI_PEER_WORKSPACES_ROOT = join(dir, "missing");
+  assert.equal(collectThread().length, 0);
 });
 
 test("collectMcpServers merges .mcp.json files with later-wins precedence", async (t) => {
@@ -284,6 +288,70 @@ test("e key routes register to onRegisterWorkspace (lease) and unregister to onU
     if (status === "unregistered" || status.startsWith("remove failed")) break;
   }
   assert.deepEqual(unregisterCalls, ["D:/toggle-demo"], "unregister must go through onUnregisterWorkspace");
+  assert.equal(status, "unregistered");
+});
+
+test("E key routes register to onRegisterWorkspacePermanent and unregister to onUnregisterWorkspace", async (t) => {
+  const { McpxOverlay } = await import("../src/tui/mcpx-overlay.ts");
+  const dir = await mkdtemp(join(tmpdir(), "mcpx-toggle-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const binDir = join(dir, "bin");
+  await mkdir(binDir);
+  const isWin = process.platform === "win32";
+  const shim = join(binDir, isWin ? "mcpx.cmd" : "mcpx");
+  await writeFile(
+    shim,
+    isWin
+      ? `@echo off\r\nif "%1"=="workspace" if "%2"=="list" echo workspaces:\r\nexit /b 0\r\n`
+      : `#!/bin/sh\nif [ "$1" = "workspace" ] && [ "$2" = "list" ]; then echo workspaces:; fi\nexit 0\n`,
+  );
+  if (!isWin) await (await import("node:fs/promises")).chmod(shim, 0o755);
+  const previousBin = process.env.MCPX_BIN;
+  process.env.MCPX_BIN = shim;
+  t.after(() => {
+    if (previousBin === undefined) delete process.env.MCPX_BIN;
+    else process.env.MCPX_BIN = previousBin;
+  });
+
+  const permanentCalls: string[] = [];
+  const leaseCalls: string[] = [];
+  const unregisterCalls: string[] = [];
+  const overlay = new McpxOverlay({
+    cwd: "D:/toggle-demo",
+    requestRender: () => undefined,
+    close: () => undefined,
+    onRegisterWorkspace: async (path) => { leaseCalls.push(path); return "registered-leased"; },
+    onRegisterWorkspacePermanent: async (path) => { permanentCalls.push(path); return "registered-permanent"; },
+    onUnregisterWorkspace: async (path) => { unregisterCalls.push(path); return "unregistered"; },
+  });
+  const s = overlay;
+  await overlay.refresh();
+  s["snapshot"].refreshing = false;
+  overlay.handleInput("E");
+  let status = "";
+  for (let i = 0; i < 50; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    status = s["status"] ?? "";
+    if (status === "registered-permanent" || status.startsWith("register failed")) break;
+  }
+  assert.deepEqual(permanentCalls, ["D:/toggle-demo"], "E must go through onRegisterWorkspacePermanent");
+  assert.deepEqual(leaseCalls, [], "E must not use the lease register path");
+  assert.equal(status, "registered-permanent");
+
+  // Unregistering is shared between e and E.
+  for (let i = 0; i < 30 && s["snapshot"].refreshing; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  s["snapshot"].cwdRegistered = true;
+  s["mode"] = "workspace";
+  overlay.handleInput("E");
+  status = "";
+  for (let i = 0; i < 50; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    status = s["status"] ?? "";
+    if (status === "unregistered" || status.startsWith("remove failed")) break;
+  }
+  assert.deepEqual(unregisterCalls, ["D:/toggle-demo"], "E unregister must go through onUnregisterWorkspace");
   assert.equal(status, "unregistered");
 });
 

@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ensureMcpxWorkspace, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, readMcpxBearerToken, probeTunnelHealth, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks, isQuickTunnelCommandLine, isValidTunnelPort, setQuickTunnelDiscoveryForTest } from "../src/mcpx-bridge.ts";
+import { ensureMcpxWorkspace, registerMcpxWorkspacePermanent, removeMcpxWorkspace, startWorkspaceLease, stopWorkspaceLease, _resetMcpxBridgeState, isMcpxConfigured, readTunnelState, readOpsPassword, readMcpxBearerToken, probeTunnelHealth, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks, isQuickTunnelCommandLine, isValidTunnelPort, setQuickTunnelDiscoveryForTest } from "../src/mcpx-bridge.ts";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -101,6 +101,20 @@ test("lease heartbeat registers and renews; stop clears the timer", async (t) =>
     // no further renewals after stop (registeredPaths dedup also guards)
     const calls2 = await readFile(logPath, "utf8");
     assert.equal(calls2.trim().split(/\r?\n/).filter(Boolean).length, 1);
+  });
+});
+
+test("permanent registration registers without a TTL flag", async (t) => {
+  t.after(_resetMcpxBridgeState);
+  await withFakeMcpx(async (logPath) => {
+    const root = join(process.cwd(), "fixtures");
+    const registered = await registerMcpxWorkspacePermanent(root);
+    assert.equal(registered, true);
+    const calls = await readFile(logPath, "utf8");
+    assert.match(calls, /workspace register "?.*fixtures"?/);
+    assert.doesNotMatch(calls, /--ttl/);
+    // a single register call: no heartbeat is started for permanent entries
+    assert.equal(calls.trim().split(/\r?\n/).filter(Boolean).length, 1);
   });
 });
 

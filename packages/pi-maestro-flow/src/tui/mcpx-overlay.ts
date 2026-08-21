@@ -3,15 +3,15 @@
  * binary/endpoint status, registered workspaces, discoverable Pi windows and
  * cross-window message history (workspace-peer file protocol).
  *
- * Keys: ↑↓/jk select history · Enter details · r refresh · R restart · e register/unregister cwd · s start · x stop · t tunnel refresh · w workspaces · c wizard · p password · Esc close
+ * Keys: ↑↓/jk select history · Enter details · r refresh · R restart · e register/unregister cwd (lease) · E register/unregister cwd (permanent) · s start · x stop · t tunnel refresh · w workspaces · c wizard · p password · Esc close
  */
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { readdirSync, readFileSync, existsSync, statSync, rmSync } from "node:fs";
+import { readdirSync, readFileSync, existsSync, statSync, rmSync, type Dirent } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { Key, type Component, type Focusable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { locateMcpx, isProcessOwnedBy, readMcpxBearerToken, readTunnelState, probeTunnelHealth, restartQuickTunnel, stopQuickTunnel, updateConfigServerURL, restoreMcpxConfig, stopMcpx, readOpsPassword, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks, type TunnelState, type DelegatedTask } from "../mcpx-bridge.ts";
+import { locateMcpx, isProcessOwnedBy, killProcessWithEscalation, readMcpxBearerToken, readTunnelState, probeTunnelHealth, restartQuickTunnel, stopQuickTunnel, updateConfigServerURL, restoreMcpxConfig, stopMcpx, readOpsPassword, detectMcpxForPmf, removeWorkspaceByPath, readDelegatedTasks, type TunnelState, type DelegatedTask } from "../mcpx-bridge.ts";
 import {
   McpxClientError,
   McpxStreamableHttpClient,
@@ -38,6 +38,8 @@ export interface McpxWindowInfo {
   publishedAt: number;
   agentCount: number;
   contextPressure?: number;
+  /** normalizedCwd of the owning workspace (multi-workspace discovery). */
+  workspace?: string;
 }
 
 export interface McpxThreadEntry {
@@ -49,6 +51,8 @@ export interface McpxThreadEntry {
   action?: string;
   message?: string;
   status?: string;
+  /** normalizedCwd of the workspace this entry belongs to. */
+  workspace?: string;
 }
 
 export interface McpxMcpServerInfo {
@@ -104,6 +108,8 @@ export interface McpxOverlayParams {
   requestRender: () => void;
   close: () => void;
   onRegisterWorkspace?: (path: string) => Promise<string>;
+  /** E key: register cwd without a TTL lease (survives window close). */
+  onRegisterWorkspacePermanent?: (path: string) => Promise<string>;
   onUnregisterWorkspace?: (path: string) => Promise<string>;
   onOpenWizard?: () => void;
   /** Host-native text prompts used by m/n window actions. */
@@ -131,12 +137,41 @@ function normalizeWorkspacePath(value: string): string {
   return normalized;
 }
 
+/** Root of all peer workspaces (test seam: PI_PEER_WORKSPACES_ROOT). */
+function peerWorkspacesRoot(): string {
+  return process.env.PI_PEER_WORKSPACES_ROOT ?? join(homedir(), ".pi", "teammate", "workspaces");
+}
+
 function workspaceIdForCwd(cwd: string): string {
   return createHash("sha256").update(normalizeWorkspacePath(cwd), "utf8").digest("hex");
 }
 
-function peerRuntimeRoot(cwd: string): string {
-  return join(homedir(), ".pi", "teammate", "workspaces", workspaceIdForCwd(cwd), "runtime");
+/** Runtime dirs of every known workspace (multi-workspace discovery). */
+function peerRuntimeRoots(): string[] {
+  const root = peerWorkspacesRoot();
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries.filter((entry) => entry.isDirectory()).map((entry) => join(root, entry.name, "runtime"));
+}
+
+/** Best-effort workspace label (normalizedCwd) from any owner snapshot. */
+function peerWorkspaceLabel(runtime: string): string | undefined {
+  let entries: string[];
+  try {
+    entries = readdirSync(join(runtime, "owners"));
+  } catch {
+    return undefined;
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith(".json")) continue;
+    const snapshot = readJson<OwnerSnapshotFile>(join(runtime, "owners", entry));
+    if (snapshot?.normalizedCwd) return snapshot.normalizedCwd;
+  }
+  return undefined;
 }
 
 function readJson<T>(path: string): T | undefined {
@@ -150,6 +185,8 @@ function readJson<T>(path: string): T | undefined {
 interface OwnerSnapshotFile {
   version?: number;
   kind?: string;
+  workspaceId?: string;
+  normalizedCwd?: string;
   ownerId?: string;
   ownerNonce?: string;
   pid?: number;
@@ -164,46 +201,47 @@ function displayNameOf(sessionName: string | undefined, ownerId: string): string
   return label.length > 64 ? `${label.slice(0, 61)}...` : label;
 }
 
-function collectWindows(cwd: string, now: number): McpxWindowInfo[] {
-  const ownersDir = join(peerRuntimeRoot(cwd), "owners");
-  let entries: string[];
-  try {
-    entries = readdirSync(ownersDir);
-  } catch {
-    return [];
-  }
+function collectWindows(now: number): McpxWindowInfo[] {
   const windows: McpxWindowInfo[] = [];
-  for (const entry of entries) {
-    if (!entry.endsWith(".json")) continue;
-    const fullPath = join(ownersDir, entry);
-    // PERF-RV-013: stat the file and skip stale ones BEFORE reading/parsing.
-    // Owner snapshots are written periodically; a file whose mtime is older
-    // than PEER_STALE_MS (20s) belongs to a window that already went offline
-    // and cannot be fresh, so skip the readFileSync+JSON.parse entirely.
+  for (const runtime of peerRuntimeRoots()) {
+    let entries: string[];
     try {
-      const stat = statSync(fullPath);
-      if (now - stat.mtimeMs > PEER_STALE_MS) continue;
+      entries = readdirSync(join(runtime, "owners"));
     } catch {
-      continue; // file vanished between readdir and stat — skip
+      continue;
     }
-    const snapshot = readJson<OwnerSnapshotFile>(fullPath);
-    if (!snapshot || snapshot.kind !== "owner" || !snapshot.ownerId) continue;
-    if (now - (snapshot.publishedAt ?? 0) > PEER_STALE_MS) continue;
-    windows.push({
-      displayName: displayNameOf(snapshot.sessionName, snapshot.ownerId),
-      ownerId: snapshot.ownerId,
-      pid: snapshot.pid ?? 0,
-      publishedAt: snapshot.publishedAt ?? 0,
-      agentCount: snapshot.agents?.length ?? 0,
-      contextPressure: snapshot.contextPressure,
-    });
+    for (const entry of entries) {
+      if (!entry.endsWith(".json")) continue;
+      const fullPath = join(runtime, "owners", entry);
+      // PERF-RV-013: stat the file and skip stale ones BEFORE reading/parsing.
+      // Owner snapshots are written periodically; a file whose mtime is older
+      // than PEER_STALE_MS (20s) belongs to a window that already went offline
+      // and cannot be fresh, so skip the readFileSync+JSON.parse entirely.
+      try {
+        const stat = statSync(fullPath);
+        if (now - stat.mtimeMs > PEER_STALE_MS) continue;
+      } catch {
+        continue; // file vanished between readdir and stat — skip
+      }
+      const snapshot = readJson<OwnerSnapshotFile>(fullPath);
+      if (!snapshot || snapshot.kind !== "owner" || !snapshot.ownerId) continue;
+      if (now - (snapshot.publishedAt ?? 0) > PEER_STALE_MS) continue;
+      windows.push({
+        displayName: displayNameOf(snapshot.sessionName, snapshot.ownerId),
+        ownerId: snapshot.ownerId,
+        pid: snapshot.pid ?? 0,
+        publishedAt: snapshot.publishedAt ?? 0,
+        agentCount: snapshot.agents?.length ?? 0,
+        contextPressure: snapshot.contextPressure,
+        workspace: snapshot.normalizedCwd,
+      });
+    }
   }
   windows.sort((a, b) => b.publishedAt - a.publishedAt);
   return windows;
 }
 
-function collectThread(cwd: string): McpxThreadEntry[] {
-  const root = peerRuntimeRoot(cwd);
+function collectThread(): McpxThreadEntry[] {
   const entries: McpxThreadEntry[] = [];
   // PERF-RV-005: Instead of reading and parsing every JSON file (which grows
   // linearly with history), we stat each file's mtime, sort by mtime desc, and
@@ -241,13 +279,17 @@ function collectThread(cwd: string): McpxThreadEntry[] {
     return files;
   }
 
-  const commandFiles = collectFileMeta(join(root, "commands"));
-  const responseFiles = collectFileMeta(join(root, "responses"));
-  const allFiles = [...commandFiles, ...responseFiles];
+  const allFiles: Array<{ path: string; mtime: number; workspace?: string }> = [];
+  for (const runtime of peerRuntimeRoots()) {
+    const workspace = peerWorkspaceLabel(runtime);
+    for (const file of [...collectFileMeta(join(runtime, "commands")), ...collectFileMeta(join(runtime, "responses"))]) {
+      allFiles.push({ ...file, workspace });
+    }
+  }
   allFiles.sort((a, b) => b.mtime - a.mtime);
   const toRead = allFiles.slice(0, MAX_READ);
 
-  for (const { path } of toRead) {
+  for (const { path, workspace } of toRead) {
     // Distinguish commands from responses by the directory path: commands live
     // under root/commands/, responses under root/responses/.
     const normalizedPath = path.replace(/\\/g, "/");
@@ -265,6 +307,7 @@ function collectThread(cwd: string): McpxThreadEntry[] {
         toOwnerId: command.toOwnerId ?? "",
         action: command.action,
         message: command.message,
+        workspace,
       });
     } else if (normalizedPath.includes("/responses/")) {
       const response = readJson<{
@@ -279,6 +322,7 @@ function collectThread(cwd: string): McpxThreadEntry[] {
         fromOwnerId: response.fromOwnerId ?? "",
         toOwnerId: response.toOwnerId ?? "",
         status: response.status,
+        workspace,
       });
     }
   }
@@ -459,7 +503,13 @@ export class McpxOverlay implements Component, Focusable {
   private status = "";
   private workspaceToggleBusy = false;
   private workspaceToggleQueued = false;
+  private workspaceToggleQueuedPermanent = false;
   private starting = false; // guards startMcpx against re-entry (orphan spawns)
+  /** Set by stopMcpx to interrupt an in-flight startMcpx wait loop. */
+  private abortStart = false;
+  /** Last mcpx child this overlay spawned; used to refuse pile-up spawns while
+   *  a previous one is still alive but its endpoint never became reachable. */
+  private spawnedChild?: ReturnType<typeof spawn>;
   private refreshGeneration = 0;
   private closed = false; // set on close() so async refresh/render skip work after close
   private windowSelected = 0;
@@ -516,13 +566,13 @@ export class McpxOverlay implements Component, Focusable {
     return undefined;
   }
 
-  private killPid(pid: number): boolean {
+  private async killPid(pid: number): Promise<boolean> {
     if (!isProcessOwnedBy(pid, "mcpx")) return false;
     try {
       if (process.platform === "win32") {
         spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
       } else {
-        process.kill(pid, "SIGTERM");
+        await killProcessWithEscalation(pid);
       }
       return true;
     } catch {
@@ -560,19 +610,29 @@ export class McpxOverlay implements Component, Focusable {
       this.params.requestRender();
       return;
     }
+    // A previous spawn that never became reachable may still be alive; spawning
+    // again would pile up mcpx processes (stdio is ignored, so nothing would
+    // surface the duplication).
+    if (this.spawnedChild?.exitCode === null) {
+      this.status = "上次拉起的 mcpx 仍在启动中（端点未就绪），请稍后按 r 刷新或用 R 重启";
+      this.params.requestRender();
+      return;
+    }
     this.starting = true;
+    this.abortStart = false;
     this.status = "正在启动 mcpx…";
     this.params.requestRender();
     try {
       const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(binary);
       const child = spawn(binary, [], { detached: true, stdio: "ignore", shell: useShell });
       child.unref();
+      this.spawnedChild = child;
       // The Go server owns the PID file (writes at start, removes on shutdown);
       // the TUI never writes it — a shell-wrapped spawn would persist the
       // wrapper's pid, not mcpx's.
       const deadline = Date.now() + (this.params.endpointWaitMs ?? 15_000);
       let online = false;
-      while (Date.now() < deadline) {
+      while (Date.now() < deadline && !this.abortStart) {
         const { reachable } = await probeEndpoint(this.configPath());
         if (reachable) {
           online = true;
@@ -580,7 +640,13 @@ export class McpxOverlay implements Component, Focusable {
         }
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
-      this.status = online ? "mcpx 已启动并监听" : "mcpx 进程已拉起但端点未就绪（检查启动日志）";
+      if (this.abortStart) {
+        // stopMcpx requested cancellation during the wait — kill the child we
+        // just spawned and let stopMcpx own the status + PID-file cleanup.
+        try { child.kill(); } catch { /* already dead */ }
+        return;
+      }
+      this.status = online ? "mcpx 已启动并监听" : "mcpx 进程已拉起但端点未就绪（可能端口被占用或配置有误，稍后按 r 刷新）";
     } catch (error) {
       this.status = `启动失败: ${error instanceof Error ? error.message : String(error)}`;
     } finally {
@@ -591,16 +657,16 @@ export class McpxOverlay implements Component, Focusable {
 
   /** Stop the mcpx server (kills the process tree on Windows). */
   private async stopMcpx(): Promise<void> {
-    if (this.starting) {
-      this.status = "已有 mcpx 操作进行中，请等待完成";
-      this.safeRequestRender();
-      return;
-    }
+    // A stop request during startMcpx's endpoint wait must be honored: signal
+    // abort so the wait loop kills the child it just spawned, then fall through
+    // to clean up any PID file / port listener. Refusing here would leave a
+    // half-started process untracked.
+    if (this.starting) this.abortStart = true;
     const pid = this.readPidFile();
     this.status = "正在停止 mcpx…";
     this.params.requestRender();
     try {
-      if (pid && this.killPid(pid)) {
+      if (pid && await this.killPid(pid)) {
         // /F kill skips the Go server's graceful PID-file cleanup — remove it.
         try {
           rmSync(this.pidPath(), { force: true });
@@ -637,9 +703,7 @@ export class McpxOverlay implements Component, Focusable {
     // Stop any existing process. Tolerate a missing PID file — the process may
     // have been started externally or died; then fall back to the port listener.
     const pid = this.readPidFile();
-    if (pid && !this.killPid(pid)) {
-      this.killMcpxByPort();
-    } else if (!pid) {
+    if (!pid || !(await this.killPid(pid))) {
       this.killMcpxByPort();
     }
     // Give the port a moment to release after kill.
@@ -649,6 +713,7 @@ export class McpxOverlay implements Component, Focusable {
       const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(binary);
       const child = spawn(binary, [], { detached: true, stdio: "ignore", shell: useShell });
       child.unref();
+      this.spawnedChild = child;
       const deadline = Date.now() + (this.params.endpointWaitMs ?? 15_000);
       let online = false;
       while (Date.now() < deadline) {
@@ -656,7 +721,7 @@ export class McpxOverlay implements Component, Focusable {
         if (reachable) { online = true; break; }
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
-      this.status = online ? "mcpx 已重启并监听" : "mcpx 进程已拉起但端点未就绪（检查启动日志）";
+      this.status = online ? "mcpx 已重启并监听" : "mcpx 进程已拉起但端点未就绪（可能端口被占用或配置有误，稍后按 r 刷新）";
     } catch (error) {
       this.status = `重启失败: ${error instanceof Error ? error.message : String(error)}`;
     } finally {
@@ -724,7 +789,7 @@ export class McpxOverlay implements Component, Focusable {
       configUpdated = true;
       // 3. Restart mcpx to load the new server_url. Kill by PID file first, then
       //    by port as a fallback (the PID file may point at a stale/external pid).
-      stopMcpx();
+      await stopMcpx();
       this.killMcpxByPort();
       await new Promise((resolve) => setTimeout(resolve, 800)); // port release
       const stopDeadline = Date.now() + 2_000;
@@ -744,6 +809,7 @@ export class McpxOverlay implements Component, Focusable {
       const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(binary);
       const child = spawn(binary, [], { detached: true, stdio: "ignore", shell: useShell });
       child.unref();
+      this.spawnedChild = child;
       // 4. Wait for the endpoint to come back (new issuer).
       const deadline = Date.now() + (this.params.endpointWaitMs ?? 15_000);
       let online = false;
@@ -752,7 +818,7 @@ export class McpxOverlay implements Component, Focusable {
         if (reachable) { online = true; break; }
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
-      if (!online) throw new Error("mcpx 端点未就绪（检查启动日志）");
+      if (!online) throw new Error("mcpx 端点未就绪（可能端口被占用或配置有误）");
       const publicHealth = await probeTunnelHealth(newUrl);
       const publicReady = publicHealth === "ok" || publicHealth === "auth";
       this.status = publicReady
@@ -764,11 +830,11 @@ export class McpxOverlay implements Component, Focusable {
         // Stop both sides before restoring the old snapshot. The old tunnel URL
         // cannot be resumed after a Quick Tunnel rotation, so the consistent
         // fallback is the old local config with no tunnel process.
-        try { stopMcpx(); } catch { /* best-effort */ }
+        try { await stopMcpx(); } catch { /* best-effort */ }
         try { this.killMcpxByPort(); } catch { /* best-effort */ }
       }
       if (newUrl) {
-        try { stopQuickTunnel(); } catch { /* best-effort */ }
+        try { await stopQuickTunnel(); } catch { /* best-effort */ }
       }
       if (configUpdated && previousConfig) {
         try {
@@ -845,8 +911,8 @@ export class McpxOverlay implements Component, Focusable {
           configPath: existsSync(configPath) ? configPath : undefined,
           workspaces,
           ...this.cwdRegistrationState(workspaces, cwd),
-          windows: collectWindows(cwd, now),
-          thread: collectThread(cwd),
+          windows: collectWindows(now),
+          thread: collectThread(),
           mcpServers: collectMcpServers(cwd),
           connections,
           runtimeWindows,
@@ -880,7 +946,7 @@ export class McpxOverlay implements Component, Focusable {
     }
     if (this.workspaceToggleQueued && !this.workspaceToggleBusy && generation === this.refreshGeneration && !this.closed) {
       this.workspaceToggleQueued = false;
-      void this.toggleWorkspaceRegistration();
+      void this.toggleWorkspaceRegistration(this.workspaceToggleQueuedPermanent);
     }
     this.safeRequestRender();
   }
@@ -1069,8 +1135,10 @@ export class McpxOverlay implements Component, Focusable {
         this.params.requestRender();
       } else if (data === "d" || data === "D") {
         void this.removeSelectedWorkspace();
-      } else if (data === "e" || data === "E") {
-        void this.toggleWorkspaceRegistration();
+      } else if (data === "e") {
+        void this.toggleWorkspaceRegistration(false);
+      } else if (data === "E") {
+        void this.toggleWorkspaceRegistration(true);
       }
       return;
     }
@@ -1105,8 +1173,12 @@ export class McpxOverlay implements Component, Focusable {
       void this.refresh();
       return;
     }
-    if (data === "e" || data === "E") {
-      void this.toggleWorkspaceRegistration();
+    if (data === "e") {
+      void this.toggleWorkspaceRegistration(false);
+      return;
+    }
+    if (data === "E") {
+      void this.toggleWorkspaceRegistration(true);
       return;
     }
     if (data === "c" || data === "C") {
@@ -1136,12 +1208,14 @@ export class McpxOverlay implements Component, Focusable {
     }
   }
 
-  /** e toggles registration of the current window: expose it to MCPX, or close it again. */
-  private async toggleWorkspaceRegistration(): Promise<void> {
+  /** e/E toggles registration of the current window: lease (e) or permanent (E).
+   *  Unregistering is shared — it removes the entry regardless of lease mode. */
+  private async toggleWorkspaceRegistration(permanent = false): Promise<void> {
     if (this.workspaceToggleBusy) return;
     if (this.snapshot.refreshing) {
       this.workspaceToggleQueued = true;
-      this.status = "正在刷新 workspace，e 将在刷新后执行…";
+      this.workspaceToggleQueuedPermanent = permanent;
+      this.status = "正在刷新 workspace，注册操作将在刷新后执行…";
       this.safeRequestRender();
       return;
     }
@@ -1153,7 +1227,10 @@ export class McpxOverlay implements Component, Focusable {
       if (registered && this.params.onUnregisterWorkspace) {
         const message = await this.params.onUnregisterWorkspace(this.params.cwd);
         this.status = message;
-      } else if (!registered && this.params.onRegisterWorkspace) {
+      } else if (!registered && permanent && this.params.onRegisterWorkspacePermanent) {
+        const message = await this.params.onRegisterWorkspacePermanent(this.params.cwd);
+        this.status = message;
+      } else if (!registered && !permanent && this.params.onRegisterWorkspace) {
         // Lease-based registration (TTL + heartbeat) — never fall back to a
         // static `workspace register` while the extension provides a lease.
         const message = await this.params.onRegisterWorkspace(this.params.cwd);
@@ -1247,7 +1324,8 @@ export class McpxOverlay implements Component, Focusable {
       } else {
         for (const window of this.snapshot.windows.slice(0, 6)) {
           const pressure = window.contextPressure === undefined ? "" : ` ctx:${window.contextPressure}%`;
-          rows.push(fitLine(`  local · ${window.displayName} · ${window.ownerId.slice(0, 8)} · pid ${window.pid} · agents ${window.agentCount}${pressure}`, inner));
+          const ws = window.workspace ? `${basename(window.workspace)} · ` : "";
+          rows.push(fitLine(`  local · ${ws}${window.displayName} · ${window.ownerId.slice(0, 8)} · pid ${window.pid} · agents ${window.agentCount}${pressure}`, inner));
         }
       }
     }
@@ -1263,7 +1341,7 @@ export class McpxOverlay implements Component, Focusable {
     }
     if (this.status) rows.push(fitLine(this.status, inner));
     if (this.snapshot.error) rows.push(fitLine(fg("31", `! ${this.snapshot.error}`), inner));
-    rows.push(...fitSegments(inner, ["Enter message detail", "V windows", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "T tunnel", "W workspaces", "e register cwd", "c wizard", "P password", "Esc close"]));
+    rows.push(...fitSegments(inner, ["Enter message detail", "V windows", "r refresh", this.snapshot.endpoint === "online" ? "x stop" : "s start", "R restart", "T tunnel", "W workspaces", "e 注册(租约)", "E 注册(永久)", "c wizard", "P password", "Esc close"]));
     return frame(rows, width);
   }
 
@@ -1401,15 +1479,16 @@ export class McpxOverlay implements Component, Focusable {
   private renderThreadRow(entry: McpxThreadEntry, selected: boolean, width: number): string {
     const marker = selected ? "›" : " ";
     const time = new Date(entry.createdAt).toLocaleTimeString("zh-CN", { hour12: false });
+    const ws = entry.workspace ? `${basename(entry.workspace)} · ` : "";
     if (entry.kind === "command") {
       const from = entry.fromOwnerId.slice(0, 8);
       const to = entry.toOwnerId.slice(0, 8);
       const body = entry.message ? entry.message.replace(/\s+/g, " ").slice(0, 40) : "";
-      return fitLine(`${marker} ${time} cmd ${entry.action ?? "?"} ${from}→${to} · ${body}`, width);
+      return fitLine(`${marker} ${time} ${ws}cmd ${entry.action ?? "?"} ${from}→${to} · ${body}`, width);
     }
     const from = entry.fromOwnerId.slice(0, 8);
     const to = entry.toOwnerId.slice(0, 8);
-    return fitLine(`${marker} ${time} rsp ${entry.status ?? "?"} ${from}→${to} · ${entry.commandId.slice(0, 8)}`, width);
+    return fitLine(`${marker} ${time} ${ws}rsp ${entry.status ?? "?"} ${from}→${to} · ${entry.commandId.slice(0, 8)}`, width);
   }
 
   private renderDetail(width: number): string[] {
@@ -1537,7 +1616,7 @@ export class McpxOverlay implements Component, Focusable {
       rows.push(rule(inner));
       rows.push(fitLine(fg("31", "  d 删除选中 workspace（mcpx ≤5min 内从运行时清理）"), inner));
     }
-    rows.push(...fitSegments(inner, ["d delete", "e register cwd", "Esc back"]));
+    rows.push(...fitSegments(inner, ["d delete", "e 注册(租约)", "E 注册(永久)", "Esc back"]));
     return frame(rows, width);
   }
 
